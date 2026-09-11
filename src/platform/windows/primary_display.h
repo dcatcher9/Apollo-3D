@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -54,6 +55,22 @@ namespace platf::primary_display {
    * False leaves the journal intact and callers must defer removal of the virtual display.
    */
   bool restore(std::wstring_view expected_device_path = {});
+
+  struct retained_display_t;
+  using retained_display_ptr = std::shared_ptr<retained_display_t>;
+
+  /** Restore a retained desktop and detach its virtual target without removing its device.
+   * Capture the target's exact mode/color once; keep the pointer across retries and failures.
+   * A sole virtual output stays active when no physical desktop can be restored.
+   * Local exclusive sessions retain their recorded sink; extended local callers supply it.
+   */
+  bool pause(std::wstring_view device_path, retained_display_ptr &retained, std::wstring_view local_sink = {});
+
+  /** Reactivate the retained target beside the current physical desktop, before GDI/HDR use.
+   * Durable recovery precedes every mutation. The caller still promotes before capture and
+   * resets retained only after success; failures remain recoverable through pause/restore.
+   */
+  bool reactivate(const retained_display_ptr &retained, bool exclusive);
 
   /** Recover an interrupted transaction on startup, before creating another virtual display. */
   bool recover();
@@ -203,6 +220,8 @@ namespace platf::primary_display {
       bool bind_pending(std::wstring_view device_path);
       bool promote(std::wstring_view device_path, bool exclusive = false);
       bool restore(std::wstring_view expected_device_path = {});
+      bool pause(std::wstring_view device_path, retained_display_ptr &retained, std::wstring_view local_sink = {});
+      bool reactivate(const retained_display_ptr &retained, bool exclusive);
       bool reconcile_active_exclusive(std::wstring_view device_path);
       bool recover_inactive_exclusive();
 
@@ -212,7 +231,7 @@ namespace platf::primary_display {
       bool promote_exclusive(std::wstring_view device_path);
       bool refresh_exclusive_cursor_clip(std::wstring_view device_path);
       bool clip_cursor_to_display(const snapshot_t &snapshot, std::wstring_view device_path);
-      bool restore_exclusive(journal_t journal);
+      bool restore_exclusive(journal_t journal, bool keep_virtual_active = true);
       bool recover_prepared_outputs(journal_t journal);
     };
   }  // namespace detail

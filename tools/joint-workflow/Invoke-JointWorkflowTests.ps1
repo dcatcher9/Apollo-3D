@@ -84,7 +84,7 @@ try {
   if (-not (Test-Path -LiteralPath $testExecutable -PathType Leaf)) { throw "Build the host test binary first: $testExecutable" }
   $nativeFilter = @(
     'Offline*', 'GpuWorkloadArbiter.*', 'Rtsp*', 'Input*', 'ProcessTest.*',
-    'IdleProcessLifecycleTest.*', 'PlatformLaunchGuardTest.*', 'PrimaryDisplayRestoreRetryTest.*',
+    'IdleProcessLifecycleTest.*', 'PlatformLaunchGuardTest.*', 'PrimaryDisplay*', 'VirtualDisplay*', 'SessionResumeLifecycle.*',
     'SessionWorkerStartTest.*', 'AtomicPresentation*', 'WindowsQpc*', 'WindowsDdup*',
     'WindowsLocalPresenter*', 'PresentationScheduling*', 'ArGlasses*', 'RemoteEncode*Test.*',
     'HostSbsChromaGpuTest.*', 'WebUiDesign.*', 'TestEventListenerTest.*'

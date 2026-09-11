@@ -205,6 +205,81 @@ TEST(ArGlassesOwnership, RenewedRemoteConnectWindowBlocksLocalPresentation) {
   EXPECT_FALSE(ar_glasses::remote_virtual_display_blocks_local());
 }
 
+TEST(ArGlassesSessionRequest, ARequestBlockedByAnActiveRemoteCannotLaterStealItsReconnectGrace) {
+  ar_glasses::detail::local_session_request_t request;
+  request.observe(true);
+  ASSERT_TRUE(request.fresh());
+  request.consume();
+  for (int poll = 0; poll < 100; ++poll) {
+    request.observe(true);
+    EXPECT_FALSE(request.fresh());
+  }
+  request.observe(false);
+  request.observe(true);
+  EXPECT_TRUE(request.fresh());
+}
+
+TEST(ArGlassesSessionRequest, ANewPhysicalConnectionGetsOneReplacementRequest) {
+  ar_glasses::detail::local_session_request_t request;
+  request.observe(true);
+  request.consume();
+  request.reset();
+  request.observe(true);
+  EXPECT_TRUE(request.fresh());
+  request.observe(false);
+  EXPECT_FALSE(request.fresh());
+}
+
+TEST(ArGlassesSessionRequest, TransientAdmissionRetriesPreserveTheSameFreshRequest) {
+  ar_glasses::detail::local_session_request_t request;
+  request.observe(true);
+  request.observe(true);
+  EXPECT_TRUE(request.fresh());
+  request.consume();
+  EXPECT_FALSE(request.fresh());
+}
+
+TEST(ArGlassesSessionRequest, AShortSamePathUsbReconnectCreatesOnlyOneFreshRequest) {
+  ar_glasses::detail::local_session_request_t request;
+  request.observe_connection(true, true);
+  request.observe(true);
+  request.consume();
+  for (int poll = 0; poll < 3; ++poll) {
+    request.observe_connection(false, false);
+    request.observe(true);  // Last confirmed worn state survives the brief sensor gap.
+    EXPECT_FALSE(request.fresh());
+  }
+  request.observe_connection(true, false);
+  request.observe(true);
+  ASSERT_TRUE(request.fresh());
+  request.consume();
+  request.observe_connection(true, true);
+  request.observe(true);
+  EXPECT_FALSE(request.fresh());
+}
+
+TEST(ArGlassesSessionRequest, ALiveUsbSubscriptionKeepsADpModeGapFromBecomingANewConnection) {
+  ar_glasses::detail::local_session_request_t request;
+  request.observe(true);
+  request.consume();
+  request.observe_connection(false, true);
+  request.observe(true);
+  request.observe_connection(true, true);
+  request.observe(true);
+  EXPECT_FALSE(request.fresh());
+}
+
+TEST(ArGlassesSessionRequest, SensorRecoveryWithoutDisplayDisconnectDoesNotCreateAFreshConnection) {
+  ar_glasses::detail::local_session_request_t request;
+  request.observe(true);
+  request.consume();
+  request.observe_connection(true, false);
+  request.observe(true);
+  request.observe_connection(true, true);
+  request.observe(true);
+  EXPECT_FALSE(request.fresh());
+}
+
 class ArGlassesWearActivation: public testing::Test {
 protected:
   using policy_t = ar_glasses::detail::local_session_activation_t;

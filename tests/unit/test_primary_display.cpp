@@ -716,6 +716,397 @@ TEST(PrimaryDisplayExclusive, ReactivatesInactivePhysicalOutputsAndRetainsVirtua
   expect_positions(fake.current, baseline);
 }
 
+TEST(PrimaryDisplayExclusive, PauseDetachesVirtualTargetAndReconnectRestoresItsExactMode) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.current.modes[0].sourceMode.width = 2560;
+  fake.current.modes[0].sourceMode.height = 1440;
+  fake.current.paths[0].targetInfo.refreshRate = {59941, 1000};
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(retained);
+  expect_positions(fake.current, {{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+  const auto paused = retained;
+  const auto applies = std::ranges::count(fake.events, "apply");
+  EXPECT_TRUE(manager.pause(L"virtual", retained));
+  EXPECT_EQ(retained, paused);
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive && fake.journal->exclusive_started);
+  EXPECT_EQ(fake.journal->original_topology->paths.size(), 2u);
+  const auto index = named_index(fake.current, L"virtual");
+  const auto &mode = fake.current.modes[fake.current.paths[index].sourceInfo.sourceModeInfoIdx].sourceMode;
+  EXPECT_EQ(mode.width, 2560u);
+  EXPECT_EQ(mode.height, 1440u);
+  EXPECT_EQ(fake.current.paths[index].targetInfo.refreshRate.Numerator, 59941u);
+  EXPECT_EQ(fake.current.paths[index].targetInfo.refreshRate.Denominator, 1000u);
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+  retained.reset();
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}});
+}
+
+TEST(PrimaryDisplayExclusive, PausedReconnectCanSwitchToPrimaryOnlyAndRollback) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, false));
+  EXPECT_FALSE(fake.journal);
+  ASSERT_TRUE(manager.promote(L"virtual", false));
+  ASSERT_TRUE(fake.journal && !fake.journal->exclusive);
+
+  // A failed policy-toggle resume can leave its ordinary primary-only journal pending.
+  // Pause first completes that exact recovery before detaching with full color protection.
+  retained.reset();
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}});
+}
+
+TEST(PrimaryDisplayExclusive, PausedReconnectPreservesPhysicalEditsMadeWhileDisconnected) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  const auto physical = named_index(fake.current, L"physical-left");
+  fake.current.modes[fake.current.paths[physical].sourceInfo.sourceModeInfoIdx].sourceMode.position.y = 240;
+  fake.current.colors[physical]->hdr_user_enabled = true;
+  fake.current.colors[physical]->advanced_color_active = true;
+  fake.current.colors[physical]->active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  const auto expected = fake.current;
+  fake.reset_colors_on_apply = true;
+
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  retained.reset();
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, *inspect(expected));
+  const auto restored = named_index(fake.current, L"physical-left");
+  EXPECT_TRUE(fake.current.colors[restored]->hdr_user_enabled);
+  EXPECT_EQ(fake.current.colors[restored]->active_mode, DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR);
+}
+
+TEST(PrimaryDisplayExclusive, PausePreservesApprovedArOutputWhileDetachingVirtual) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}});
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -1920, 0}});
+}
+
+TEST(PrimaryDisplayExclusive, PauseNeverDetachesTheOnlyAvailableOutput) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.available_override = fake.current;
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  EXPECT_FALSE(manager.pause(L"virtual", retained));
+  EXPECT_TRUE(retained);
+  EXPECT_TRUE(fake.journal);
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+
+  fake.journal.reset();
+  EXPECT_TRUE(manager.pause(L"virtual", retained));
+  EXPECT_TRUE(manager.reactivate(retained, true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+}
+
+TEST(PrimaryDisplayExclusive, PauseRestoresAvailableSurvivorsAndKeepsMissingOutputJournal) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  auto available = fake.io().query_all();
+  ASSERT_TRUE(available);
+  available->paths[named_index(*available, L"physical-left")].targetInfo.targetAvailable = FALSE;
+  fake.available_override = *available;
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  EXPECT_FALSE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+  ASSERT_TRUE(fake.journal && fake.journal->pending_restore);
+  EXPECT_EQ(fake.journal->pending_restore->paths.size(), 1u);
+
+  fake.available_override.reset();
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, FailedPauseColorRestoreKeepsSnapshotAndRecoveryUntilRetry) {
+  fake_io_t fake;
+  fake.current.colors[0]->hdr_user_enabled = true;
+  fake.current.colors[0]->advanced_color_active = true;
+  fake.current.colors[0]->active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  start_exclusive(fake);
+  fake.reset_colors_on_apply = true;
+  fake.color_set_ok = false;
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  EXPECT_FALSE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(retained);
+  const auto saved = retained;
+  ASSERT_TRUE(fake.journal);
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"virtual"), 0);
+  fake.color_set_ok = true;
+  EXPECT_TRUE(manager.pause(L"virtual", retained));
+  EXPECT_EQ(retained, saved);
+  EXPECT_FALSE(fake.journal);
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-left")]->hdr_user_enabled);
+}
+
+TEST(PrimaryDisplayExclusive, ReactivationRefusesMissingAmbiguousOrUnjournaledTarget) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  const auto applies = std::ranges::count(fake.events, "apply");
+  fake.available_override = fake.current;
+  EXPECT_FALSE(manager.reactivate(retained, true));
+  EXPECT_FALSE(fake.journal);
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+
+  fake.available_override.reset();
+  auto available = fake.io().query_all();
+  ASSERT_TRUE(available);
+  const auto index = named_index(*available, L"virtual");
+  auto duplicate = available->paths[index];
+  ++duplicate.targetInfo.id;
+  available->paths.push_back(duplicate);
+  available->device_paths.push_back(L"virtual");
+  fake.available_override = *available;
+  EXPECT_FALSE(manager.reactivate(retained, true));
+  EXPECT_FALSE(fake.journal);
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+
+  fake.available_override.reset();
+  fake.save_ok = false;
+  EXPECT_FALSE(manager.reactivate(retained, true));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+}
+
+TEST(PrimaryDisplayExclusive, FailedReactivationRetainsColorRecoveryAndCanPauseAgain) {
+  fake_io_t fake;
+  fake.current.colors[1]->hdr_user_enabled = true;
+  fake.current.colors[1]->advanced_color_active = true;
+  fake.current.colors[1]->active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  start_exclusive(fake);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  fake.reset_colors_on_apply = true;
+  fake.color_set_ok = false;
+  EXPECT_FALSE(manager.reactivate(retained, true));
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_started);
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"virtual"), 1);
+  fake.color_set_ok = true;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"virtual"), 0);
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-primary")]->hdr_user_enabled);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, ReactivationRetriesColorVerificationAfterAnAcceptedApply) {
+  fake_io_t fake;
+  fake.current.colors[1]->hdr_user_enabled = true;
+  fake.current.colors[1]->advanced_color_active = true;
+  fake.current.colors[1]->active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  start_exclusive(fake);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  fake.reset_colors_on_apply = true;
+  fake.color_set_ok = false;
+  EXPECT_FALSE(manager.reactivate(retained, true));
+  const auto applies = std::ranges::count(fake.events, "apply");
+  fake.color_set_ok = true;
+  EXPECT_TRUE(manager.reactivate(retained, true));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-primary")]->hdr_user_enabled);
+  EXPECT_TRUE(manager.promote(L"virtual", true));
+}
+
+TEST(PrimaryDisplayExclusive, PauseRefusesDifferentRetainedIdentity) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  const auto applies = std::ranges::count(fake.events, "apply");
+  EXPECT_FALSE(manager.pause(L"physical-primary", retained));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+}
+
+TEST(PrimaryDisplayExclusive, PausedTargetCanResumeAfterAllPhysicalOutputsDisappear) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  fake.current = {};
+  for (auto &path : fake.catalog.paths) {
+    path.targetInfo.targetAvailable = FALSE;
+  }
+  fake.catalog.paths[named_index(fake.catalog, L"virtual")].targetInfo.targetAvailable = TRUE;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+  ASSERT_TRUE(fake.journal);
+  EXPECT_TRUE(fake.journal->original_topology->paths.empty());
+  EXPECT_TRUE(fake.journal->before_exclusive->paths.empty());
+  fake.journal = deserialize(serialize(*fake.journal));
+  ASSERT_TRUE(fake.journal) << "An empty physical baseline must survive crash recovery serialization";
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, HeadlessResumeJournalRestoresPhysicalOutputThatReturns) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  fake.current = {};
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"physical-primary", 1920, 0}});
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}, {L"virtual", -1920, 0}});
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, FailedReactivationModeReadbackCanStillDetachItsExactTarget) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  fake.applied_mutation = [](snapshot_t &snapshot) {
+    const auto index = named_index(snapshot, L"virtual");
+    snapshot.modes[snapshot.paths[index].sourceInfo.sourceModeInfoIdx].sourceMode.width = 1280;
+  };
+  EXPECT_FALSE(manager.reactivate(retained, true));
+  ASSERT_TRUE(fake.journal);
+  fake.applied_mutation = {};
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}});
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  const auto index = named_index(fake.current, L"virtual");
+  EXPECT_EQ(fake.current.modes[fake.current.paths[index].sourceInfo.sourceModeInfoIdx].sourceMode.width, 1920u);
+}
+
+TEST(PrimaryDisplayLocalExclusive, PauseRetainsSelectedSinkAndItsCurrentHardwareMode) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  const auto sink = named_index(fake.current, L"physical-left");
+  fake.current.modes[fake.current.paths[sink].sourceInfo.sourceModeInfoIdx].sourceMode.width = 2560;
+  fake.current.colors[sink]->hdr_user_enabled = true;
+  fake.current.colors[sink]->advanced_color_active = true;
+  fake.current.colors[sink]->active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-left", -2560, 120}, {L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(manager.is_local_exclusive(L"virtual"));
+  ASSERT_TRUE(fake.journal);
+  EXPECT_EQ(fake.journal->local_sink, L"physical-left");
+  EXPECT_EQ(fake.journal->exclusive_preserved, (std::vector<std::wstring> {L"physical-left"}));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -2560, 0}});
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-left")]->hdr_user_enabled);
+}
+
+TEST(PrimaryDisplayLocalExclusive, ExtendedLocalPauseUsesCurrentPhysicalLayoutAndExplicitSink) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained, L"physical-left"));
+  EXPECT_FALSE(fake.journal);
+  expect_positions(fake.current, {{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}});
+  // The separate extended-local rectangle owner can finish its restoration after detach.
+  const auto sink = named_index(fake.current, L"physical-left");
+  fake.current.modes[fake.current.paths[sink].sourceInfo.sourceModeInfoIdx].sourceMode.position.y = 300;
+  ASSERT_TRUE(manager.reactivate(retained, false));
+  EXPECT_FALSE(fake.journal);
+  expect_positions(fake.current, {{L"physical-left", -1920, 300}, {L"physical-primary", 0, 0}, {L"virtual", 1920, 0}});
+  EXPECT_FALSE(manager.pause(L"virtual", retained, L"physical-primary"));
+}
+
+TEST(PrimaryDisplayLocalExclusive, MissingSinkPauseRestoresOrdinaryOutputsAndDefersLocalResume) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  fake.catalog.paths[named_index(fake.catalog, L"physical-left")].targetInfo.targetAvailable = FALSE;
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+  EXPECT_FALSE(manager.reactivate(retained, true));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+}
+
+TEST(PrimaryDisplayLocalExclusive, ExtendedPauseDetachesSourceAfterItsPhysicalSinkDisappears) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", 1920, 0}});
+  fake.catalog.paths[named_index(fake.catalog, L"physical-left")].targetInfo.targetAvailable = FALSE;
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained, L"physical-left"));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+  EXPECT_FALSE(manager.reactivate(retained, false));
+}
+
+TEST(PrimaryDisplayLocalExclusive, SoleVirtualOutputDoesNotResumeWithoutItsRetainedSink) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  fake.current = make_snapshot({{L"physical-left", 0, 0}, {L"virtual", 1920, 0}});
+  fake.catalog = fake.current;
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  fake.catalog.paths[0].targetInfo.targetAvailable = FALSE;
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  EXPECT_FALSE(fake.journal);
+  EXPECT_FALSE(manager.reactivate(retained, true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"physical-left", 1920, 0}});
+  fake.catalog.paths[0].targetInfo.targetAvailable = TRUE;
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  EXPECT_TRUE(manager.is_local_exclusive(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -1920, 0}});
+}
+
 TEST(PrimaryDisplayExclusive, KeepsApprovedArOutputActiveAndDisablesOrdinaryMonitors) {
   fake_io_t fake;
   fake.preserved_exclusive.insert(L"physical-left");

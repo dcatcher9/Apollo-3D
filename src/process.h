@@ -38,6 +38,10 @@
 
 #ifdef _WIN32
   #include "platform/windows/virtual_display.h"
+
+namespace platf::primary_display {
+  struct retained_display_t;
+}
 #endif
 
 #define VIRTUAL_DISPLAY_UUID "8902CB19-674A-403D-A587-41B092E900BA"
@@ -63,6 +67,8 @@ namespace proc {
     request_hdr,
     promote,
     restore,
+    pause,
+    reactivate,
     retire,
   };
 
@@ -247,6 +253,8 @@ namespace proc {
     bool activate_remote_virtual_display_lease(std::uint64_t lease);
     /** Restore the original primary on disconnect, retaining apps/display for a warm reconnect. */
     bool restore_primary_display();
+    /** Restore an inactive remote session's physical desktop without keeping its VD active. */
+    bool pause_display_for_resume();
     void terminate(bool immediate = false, bool needs_refresh = true);
 
     /** Thread-safe snapshot/update of the display selected by the capture pipeline. */
@@ -295,6 +303,9 @@ namespace proc {
     bool _virtual_display_retirement_handed_off = false;
     // Client-owned policy for the active launch or resume.
     bool _virtual_display_only = false;
+    std::shared_ptr<platf::primary_display::retained_display_t> _paused_virtual_display;
+    // Includes an incomplete pause: resume must finish restoring the desktop before activation.
+    bool _remote_display_pause_pending = false;
   #ifdef SUNSHINE_TESTS
     // Process tests replace display/HDR side effects while preserving resume/teardown control flow.
     display_topology_test_hook_t _display_topology_test_hook;
@@ -323,6 +334,7 @@ namespace proc {
     static bool has_retired_virtual_display();
     void clear_virtual_display_binding();
     bool refresh_virtual_display_binding();
+    bool prepare_retained_display_for_resume();
     bool prepare_virtual_display_topology();
     bool promote_virtual_display(
       bool enable_hdr,

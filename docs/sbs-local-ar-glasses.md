@@ -49,9 +49,11 @@ cannot activate for an HDR sink, Sunshine 3D retains the same color-managed SDR 
 Moving the glasses to another GPU/adapter also forces a complete rebuild: the adapter LUID is part
 of both the detected target contract and the presenter's expected output identity.
 
-Physical-display absence gets a five-second grace period before the controller treats it as a
-disconnect, preserving the sensor subscription and its last confirmed state across brief hardware
-mode-switch gaps. Failed Windows topology queries do not count as disconnect evidence.
+If RayNeo's USB sensor remains available while its DisplayPort output briefly disappears, the
+controller preserves the source for up to five seconds across that hardware mode-switch gap.
+USB removal invalidates this evidence and restores the desktop immediately. Displays without
+usable USB evidence use authoritative Windows display absence as the disconnect signal. Sensor
+identity is retained briefly across display gaps; failed topology queries are not disconnect evidence.
 
 In exclusive mode, switching the glasses' hardware mode can make Windows restore a remembered
 extended layout, including the ordinary physical monitor as primary. Sunshine 3D reconciles the
@@ -112,11 +114,12 @@ keeps the last confirmed wear decision, or the initial connection fallback if no
 been confirmed, and recovers automatically if that interface later appears.
 
 Confirmed off-head state stops and joins the local presenter, including capture and Host SBS 3D
-conversion, restores the physical-display topology, releases cursor confinement, removes the
-private SudoVDA source, and releases the live GPU-ownership lease. This follows the same verified
-teardown order as a display disconnect. Confirmed worn state starts a new local virtual desktop
-after the connected display topology is stable and display/GPU ownership is available. The
-controller keeps the sensor monitor alive across off-head teardown and remote handoff, so putting
+conversion, restores the physical-display topology, releases cursor confinement, detaches the
+private SudoVDA source from the desktop, and releases the live GPU-ownership lease. The source device
+and session remain available during the same `session_resume_grace` used by remote streaming.
+Confirmed worn state reactivates that retained source and reapplies the display policy, or starts a
+new source after grace expiry, once display/GPU ownership is available. The controller keeps the
+sensor monitor alive across off-head suspension and remote handoff, so putting
 the glasses on can start the next session without unplugging them. The sensor gate adds no Host
 SBS inference, reuse, scene-cut, geometry, or temporal rule.
 
@@ -129,11 +132,14 @@ remote session.
 Only one presentation path owns an interactive virtual desktop at a time. A connecting or active
 remote virtual-display stream takes priority without being terminated: Sunshine 3D synchronously stops
 local AR before the remote display is created. Sunshine 3D admits only one remote stream. When it
-disconnects, Sunshine 3D retains its app and virtual display for `session_resume_grace`; local AR waits for that reconnect
-window to expire. After expiry, local AR waits for the remote SudoVDA identity to leave the Windows
-topology and only then creates its own source. Resuming the remote client performs the inverse handoff. This arbitration
-does not depend on transient `DISPLAYn` names and does not affect a remote session that captures a
-physical display without creating a virtual desktop.
+disconnects, Sunshine 3D restores the desktop and retains its app and virtual-display device for
+`session_resume_grace`. A new local wear/connection request can end that retained remote session
+immediately; glasses continuously worn through the remote session wait for its grace to expire.
+Local AR waits for the retired remote SudoVDA identity to leave Windows topology before creating
+its own source. A fresh remote launch likewise ends any retained local session first. Both adapters
+use `session_resume_lifecycle.h` for retention deadlines and the shared primary-display manager for
+pause/reactivation. The [shared display lifecycle](virtual-desktop.md#display-restoration) defines
+resume, replacement, expiry, and headless recovery behavior.
 Both handoff directions retain ownership until the retired SudoVDA adapter/target identity has
 disappeared from Windows topology; driver acknowledgement alone is not treated as completed removal.
 The remote ownership reservation uses the configured `ping_timeout` connection window (with a
@@ -165,9 +171,10 @@ When connection or wear state permits a new local session, Sunshine 3D:
 7. Presents a non-activating, borderless, topmost swapchain restricted to that physical output.
 8. Uses passthrough in 1920x1080 or the production matched-frame depth and warp in 3840x1080.
 
-Confirmed off-head, disconnect, an unsupported resolution, a graphics-adapter change, or Sunshine 3D
-shutdown stops capture before removing the private virtual display. A supported 2D/SBS resolution
-change and ordinary swapchain/capture reinitialization retain it. Unexpected presenter failures retry
+Confirmed off-head and disconnect stop capture and restore displays while retaining the source for
+resume. Grace expiry, an unsupported resolution, a graphics-adapter change, or Sunshine 3D shutdown
+stops capture before removing the private virtual display. A supported 2D/SBS resolution change and
+ordinary swapchain/capture reinitialization retain it. Unexpected presenter failures retry
 after a delay; repeated setup failures use bounded exponential backoff while the same stable glasses
 mode remains active.
 

@@ -12,6 +12,7 @@ add_executable(joint_workflow_portable
   "${HOST_ROOT}/tests/unit/platform/test_windows_capture_timing.cpp"
   "${HOST_ROOT}/tests/unit/test_offline_frame_transport.cpp"
   "${HOST_ROOT}/tests/unit/test_video_encode_pacing.cpp"
+  "${HOST_ROOT}/tests/unit/test_session_resume_lifecycle.cpp"
 )
 target_compile_features(joint_workflow_portable PRIVATE cxx_std_20)
 target_include_directories(joint_workflow_portable PRIVATE "${HOST_ROOT}")

@@ -32,7 +32,8 @@ Each run writes logs, native XML, both checkout commits, runtime identity and st
 in a local run, so commit identities alone are not a source-integrity attestation.
 
 The `Portable workflow boundaries` GitHub Actions workflow compiles the same clock, shared
-presentation-runtime ownership, retained presentation scheduling, and raw-frame transport tests
+presentation-runtime ownership, retained presentation scheduling, shared session grace lifecycle,
+and raw-frame transport tests
 against the pinned GoogleTest submodule, and checks generated source contracts using the Python
 standard library. It can also be run
 without the complete host build:

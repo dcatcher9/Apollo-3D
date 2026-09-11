@@ -70,18 +70,31 @@ disconnect or teardown.
 
 ## Display restoration
 
-The host records the original display setup before changing it. On disconnect it restores the
-previous primary and, when virtual-display-only mode was used, the other active displays. This also
-applies during the reconnect grace period while the application and virtual monitor remain
-available. Reconnecting applies the selected mode again before capture resumes. Full session
-teardown restores the display setup before the virtual monitor is removed.
+The host records the original display setup before changing it. Remote disconnect, local glasses
+off-head, and glasses USB disconnect share the same lifecycle: stop presentation, restore the
+previous monitor setup, and detach the virtual source from the Windows desktop. The session and
+virtual-display device remain available for `session_resume_grace` (60 seconds by default), but the
+inactive source no longer holds application windows. If there is no usable physical output, the
+host keeps the virtual source active rather than leaving Windows without a display.
+
+Resuming within that window reactivates the exact retained device and reapplies the selected mode,
+primary display, and exclusive-display policy before capture resumes. A remote `/resume` must match
+the retained application and host-session token; wearing or reconnecting the same local glasses
+resumes their retained session. Expiry retires the device and ends the retained session.
+
+An authorized fresh `/launch`, or a new local glasses connection during remote grace, ends the old
+session before starting the new one. An active stream or pending remote handshake cannot be replaced
+this way. Glasses that remain worn throughout a remote session wait for its grace to expire unless
+a new wear or connection event occurs. Both paths share the grace deadline rules and Windows display
+pause/reactivation implementation; their network and hardware event adapters remain separate.
 
 Recovery information is written to disk before the display change. Virtual-display-only mode also
 records the original active displays, their modes, and their advanced-color settings. A failed
 restore keeps that record and prevents the host from removing the virtual monitor before the
 pending restoration is reconciled. If an original physical monitor is unplugged, recovery lights
 the available original monitors and retains the record until the missing monitor returns and the
-remaining settings can be restored. The virtual monitor stays active during that partial recovery.
+remaining settings can be restored. Where a usable physical desktop can be restored, the virtual
+source is detached even while that incomplete recovery record is retained.
 
 The host restores unfinished display transactions early during normal startup, before GPU and
 platform initialization. The existing packaged Windows service restarts the host after an

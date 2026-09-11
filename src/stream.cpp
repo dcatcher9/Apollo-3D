@@ -39,6 +39,7 @@ extern "C" {
 #include "platform/common.h"
 #include "process.h"
 #include "rtsp.h"
+#include "session_resume_lifecycle.h"
 #include "stream.h"
 #include "sync.h"
 #include "system_tray.h"
@@ -3630,14 +3631,14 @@ namespace stream {
       bool remote_session_active {};
       std::uint64_t platform_lifecycle_generation {};
       task_pool_util::TaskPool::task_id_t pending_platform_stop {};
-      std::optional<std::chrono::steady_clock::time_point> platform_stop_deadline;
+      session_lifecycle::resume_state_t platform_resume_state;
       task_pool_util::TaskPool::task_id_t pending_primary_restore {};
       bool platform_streaming_warm {};
       std::optional<std::uint64_t> warm_process_instance;
 
       void invalidate_pending_platform_stop_locked() {
         ++platform_lifecycle_generation;
-        platform_stop_deadline.reset();
+        platform_resume_state.clear();
         if (pending_platform_stop) {
           task_pool.cancel(pending_platform_stop);
           pending_platform_stop = nullptr;
@@ -3669,7 +3670,7 @@ namespace stream {
                                                if (action == detail::primary_display_restore_retry_t::action_e::stop) {
                                                  return;
                                                }
-                                               if (action == detail::primary_display_restore_retry_t::action_e::wait || !proc::proc.restore_primary_display()) {
+                                               if (action == detail::primary_display_restore_retry_t::action_e::wait || !proc::proc.pause_display_for_resume()) {
                                                  // The existing grace timer remains authoritative; retries never extend it.
                                                  schedule_primary_restore_locked(retry);
                                                }
@@ -3705,14 +3706,14 @@ namespace stream {
       void schedule_platform_stop_check_locked();
 
       void check_platform_stop_locked(std::uint64_t generation) {
-        if (generation != platform_lifecycle_generation || remote_session_active || !platform_stop_deadline) {
+        if (generation != platform_lifecycle_generation || remote_session_active || !platform_resume_state.deadline()) {
           return;
         }
         pending_platform_stop = nullptr;
         if (cleanup_exited_idle_session_locked()) {
           return;
         }
-        if (std::chrono::steady_clock::now() < *platform_stop_deadline) {
+        if (!platform_resume_state.expired(std::chrono::steady_clock::now())) {
           // Reuse the grace task to observe command exit while disconnected. Polling preserves
           // both the absolute deadline and the generation that owns primary-display retries.
           schedule_platform_stop_check_locked();
@@ -3743,7 +3744,7 @@ namespace stream {
 
       void schedule_platform_stop_check_locked() {
         const auto generation = platform_lifecycle_generation;
-        const auto remaining = *platform_stop_deadline - std::chrono::steady_clock::now();
+        const auto remaining = *platform_resume_state.deadline() - std::chrono::steady_clock::now();
         const auto delay = std::clamp<std::chrono::steady_clock::duration>(remaining, 0s, 1s);
         pending_platform_stop = task_pool.pushDelayed([generation]() {
                                            std::lock_guard delayed_lock(platform_lifecycle_mutex);
@@ -3755,7 +3756,7 @@ namespace stream {
 
       void schedule_platform_stop_locked(std::chrono::steady_clock::duration delay) {
         invalidate_pending_platform_stop_locked();
-        platform_stop_deadline = std::chrono::steady_clock::now() + delay;
+        platform_resume_state.await_connection(std::chrono::steady_clock::now(), delay);
         schedule_platform_stop_check_locked();
       }
 
@@ -3770,6 +3771,7 @@ namespace stream {
         }
 
         invalidate_pending_platform_stop_locked();
+        platform_resume_state.activate();
         if (platform_streaming_warm) {
           BOOST_LOG(info) << "Reusing warm streaming platform state after a short disconnect."sv;
         } else {
@@ -3785,12 +3787,12 @@ namespace stream {
         if (remote_session_active || cleanup_exited_idle_session_locked()) {
           return;
         }
+        const auto disconnected_at = std::chrono::steady_clock::now();
 
-        // Return the PC's primary display on disconnect, even while the app and
-        // virtual monitor remain warm for a reconnect.
+        // Restore the physical desktop and detach the virtual source immediately. Retain the
+        // app and driver device for reconnect, without leaving their desktop region active.
         BOOST_LOG(info) << "Remote streaming session is inactive; restoring the original display topology."sv;
-        const bool primary_restored = proc::proc.restore_primary_display();
-        invalidate_pending_platform_stop_locked();
+        const bool primary_restored = proc::proc.pause_display_for_resume();
         const auto process_status = proc::proc.get_status();
         if (process_status.app_id == 0) {
           // There is no app/session state worth retaining. Match the historical cleanup path.
@@ -3809,7 +3811,8 @@ namespace stream {
         // Keep the app and remote virtual-display ownership active during the grace. Capture,
         // encoding, transport, and input are already stopped with the session; retaining process
         // ownership prevents another presentation path from claiming the display. The next
-        // accepted reconnect makes the virtual display primary again before capture.
+        // accepted reconnect reactivates that exact device and reapplies its display policy
+        // before capture. A fresh launch can replace this retained ownership immediately.
         const auto host_session_id = proc::proc.get_host_session_id();
         warm_process_instance = host_session_id == 0 ? std::nullopt : std::optional<std::uint64_t> {host_session_id};
         // The current launch reservation may still be waiting for its control connection.
@@ -3819,18 +3822,36 @@ namespace stream {
         if (config::stream.session_resume_grace <= 0ms && !validated_launch_pending) {
           BOOST_LOG(info) << "Session resume grace is disabled; terminating the retained app."sv;
           proc::proc.terminate();
-          warm_process_instance.reset();
-          platf::streaming_will_stop();
-          platform_streaming_warm = false;
+          stop_warm_platform_locked();
           return;
         }
         const auto retention = validated_launch_pending ?
                                  std::max(config::stream.session_resume_grace, config::stream.ping_timeout) :
                                  config::stream.session_resume_grace;
-        schedule_platform_stop_locked(retention);
-        if (!primary_restored && host_session_id != 0) {
+        if (!platform_resume_state.retained()) {
+          invalidate_pending_platform_stop_locked();
+          platform_resume_state.disconnect(disconnected_at, retention);
+          schedule_platform_stop_check_locked();
+        }
+        if (!primary_restored && host_session_id != 0 && !pending_primary_restore) {
           schedule_primary_restore_locked({platform_lifecycle_generation, host_session_id});
         }
+      }
+
+      bool prepare_new_session_locked() {
+        if (remote_session_active || !rtsp_stream::launch_session_available() ||
+            platform_resume_state.phase() == session_lifecycle::phase_e::connecting) {
+          return false;
+        }
+        if (proc::proc.get_status().app_id > 0) {
+          if (!platform_resume_state.retained()) {
+            return false;
+          }
+          BOOST_LOG(info) << "A fresh connection is replacing the retained streaming session."sv;
+          proc::proc.terminate(false, false);
+        }
+        stop_warm_platform_locked();
+        return true;
       }
     }  // namespace
 
@@ -3885,7 +3906,7 @@ namespace stream {
         return false;
       }
       const bool launch_pending = !rtsp_stream::launch_session_available();
-      if (!launch_pending && proc::proc.restore_primary_display()) {
+      if (!launch_pending && proc::proc.pause_display_for_resume()) {
         return true;
       }
       const auto host_session_id = proc::proc.get_host_session_id();
@@ -3894,6 +3915,25 @@ namespace stream {
         schedule_primary_restore_locked(retry);
       }
       return false;
+    }
+
+    bool platform_launch_guard_t::prepare_new_session() {
+      return _impl && _impl->idle && !_impl->committed && _impl->lock.owns_lock() &&
+             prepare_new_session_locked();
+    }
+
+    local_session_admission_e prepare_local_ar_session(bool replace_retained) {
+      // Remote launch holds this lock while asking the local controller to stop. The controller
+      // must remain able to service that request instead of waiting behind the remote caller.
+      std::unique_lock lock(platform_lifecycle_mutex, std::try_to_lock);
+      if (!lock.owns_lock()) {
+        return local_session_admission_e::retry;
+      }
+      cleanup_exited_idle_session_locked();
+      if (!replace_retained && platform_resume_state.retained() && proc::proc.get_status().app_id > 0) {
+        return local_session_admission_e::remote_busy;
+      }
+      return prepare_new_session_locked() ? local_session_admission_e::ready : local_session_admission_e::remote_busy;
     }
 
     platform_launch_guard_t guard_platform_launch() {
@@ -3937,7 +3977,7 @@ namespace stream {
 
     std::optional<std::chrono::steady_clock::time_point> platform_stop_deadline_for_test() {
       std::lock_guard lock(platform_lifecycle_mutex);
-      return platform_stop_deadline;
+      return platform_resume_state.deadline();
     }
 
     void check_platform_stop_for_test() {

@@ -70,8 +70,9 @@ Android XR experience; directly attached AR glasses stay on the PC path.
 | **A saved 3D video** | Sunshine 3D + the approved FFmpeg tools | Converts a local file to SBS for later playback |
 
 Direct AR output is currently video-only and supports 1920×1080 2D or 3840×1080 host-generated
-full SBS on an approved, non-primary, non-cloned display. A remote XR virtual-display session that
-is connecting, active, or retained for resume takes priority over the local glasses presenter.
+full SBS on an approved, non-primary, non-cloned display. A connecting or active remote XR session
+takes priority over the local glasses presenter. Both paths restore displays immediately on
+disconnect and retain their session for resume; a fresh connection can replace a retained session.
 Windows audio remains on its current default endpoint.
 
 ## Conversion and passthrough modes
@@ -219,8 +220,8 @@ views are available.
   maps to the selected D3D capture adapter.
 - **Client:** Moonlight 3D using the modern encrypted protocol on Android XR. Samsung Galaxy XR is
   the validated headset.
-- **Session model:** One active remote XR session. A second launch is rejected until the current
-  session exits or its reconnect grace period expires.
+- **Session model:** One active presentation session. A fresh launch can replace a disconnected
+  session during its reconnect grace; active remote streams and pending handshakes remain protected.
 - **HDR:** Requires compatible content, Windows display state, codec, NVIDIA encode capability,
   and client decoder/display support. H.264 is SDR in this host.
 

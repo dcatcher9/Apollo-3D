@@ -679,6 +679,9 @@ namespace stream {
       /** Roll back primary-display promotion, retrying within the existing grace deadline. */
       bool restore_primary_display();
 
+      /** End an idle retained session before an authorized fresh launch; never replace active/pending work. */
+      bool prepare_new_session();
+
     private:
       struct impl_t;
       explicit platform_launch_guard_t(std::unique_ptr<impl_t> impl);
@@ -693,6 +696,15 @@ namespace stream {
      * Reaps an exited app only while idle. Otherwise an uncommitted guard preserves its grace.
      */
     platform_launch_guard_t guard_platform_launch();
+
+    enum class local_session_admission_e {
+      ready,
+      remote_busy,
+      retry,
+    };
+
+    /** Only a fresh wear/USB request may replace remote grace; polling never steals it. */
+    local_session_admission_e prepare_local_ar_session(bool replace_retained = false);
 
     enum class state_e : int {
       STOPPED,  ///< The session is stopped

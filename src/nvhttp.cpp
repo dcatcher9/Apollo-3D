@@ -838,6 +838,11 @@ namespace nvhttp {
     launch_session->scale_factor = display_options->scale_factor;
     launch_session->sbs_mode = display_options->sbs_mode;
 
+    if (!proc::calculate_render_size(launch_session->width, launch_session->height, launch_session->scale_factor)) {
+      BOOST_LOG(warning) << "Rejecting a launch whose scaled display dimensions are invalid."sv;
+      return nullptr;
+    }
+
     return launch_session;
   }
 
@@ -1581,37 +1586,12 @@ namespace nvhttp {
     // serialized with process/display mutation. Rejected paths release the guard without
     // changing the existing grace deadline.
     auto platform_launch = stream::session::guard_platform_launch();
-    const auto process_status = proc::proc.get_status();
-    auto current_appid = process_status.app_id;
-    const auto &current_app_uuid = process_status.app_uuid;
-
-    const auto canonical_appid = util::from_view(app_iter->id);
-    const bool requested_current_app = current_appid > 0 && detail::app_identity_matches(
-      canonical_appid,
-      app_iter->uuid,
-      current_appid,
-      current_app_uuid
-    );
 
     if (!(named_cert_p->perm & PERM::launch)) {
       BOOST_LOG(debug) << "Permission LaunchApp denied for [" << named_cert_p->name << "] (" << (uint32_t) named_cert_p->perm << ")";
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 403);
       tree.put("root.<xmlattr>.status_message", "Permission denied");
-      return;
-    }
-
-    if (requested_current_app) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 409);
-      tree.put("root.<xmlattr>.status_message", "The retained app must be resumed with a matching host session ID");
-      return;
-    }
-
-    if (current_appid > 0) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 400);
-      tree.put("root.<xmlattr>.status_message", "An app is already running on this host");
       return;
     }
 
@@ -1643,6 +1623,15 @@ namespace nvhttp {
     auto unpublished_gpu_guard = util::fail_guard([&]() {
       launch_session->release_unpublished_live_gpu();
     });
+
+    // /launch is an explicit new session; /resume alone preserves an exact retained token.
+    // Validate permissions, app, parameters and resource availability before ending the old app.
+    if (!platform_launch.prepare_new_session()) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Another streaming session is active or connecting");
+      return;
+    }
 
     auto err = proc::proc.execute(*app_iter, launch_session, true);
     if (err) {

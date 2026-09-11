@@ -147,6 +147,31 @@ TEST(PlatformLaunchGuardTest, ActiveSlotRejectsSecondSessionAndMakesHostNonIdle)
 
   auto guard = stream::session::guard_platform_launch();
   EXPECT_FALSE(guard.idle());
+  EXPECT_FALSE(guard.prepare_new_session());
+}
+
+TEST(PlatformLaunchGuardTest, LocalAdmissionDoesNotWaitBehindRemoteLaunchPreparation) {
+  using admission_e = stream::session::local_session_admission_e;
+  std::future<admission_e> local;
+  {
+    auto remote = stream::session::guard_platform_launch();
+    local = std::async(std::launch::async, []() {
+      return stream::session::prepare_local_ar_session(true);
+    });
+    // Release the remote guard before future destruction even if a regression blocks admission.
+    EXPECT_EQ(local.wait_for(1s), std::future_status::ready);
+  }
+  ASSERT_EQ(local.wait_for(1s), std::future_status::ready);
+  EXPECT_EQ(local.get(), admission_e::retry);
+}
+
+TEST(PlatformLaunchGuardTest, ActiveRemoteSessionRejectsFreshLocalAdmission) {
+  using admission_e = stream::session::local_session_admission_e;
+  ASSERT_TRUE(stream::session::claim_active_slot_for_test());
+  auto cleanup = util::fail_guard([]() {
+    stream::session::release_active_slot_for_test();
+  });
+  EXPECT_EQ(stream::session::prepare_local_ar_session(true), admission_e::remote_busy);
 }
 
 TEST(SessionWorkerStartTest, RollsBackWhenSecondThreadCannotStart) {

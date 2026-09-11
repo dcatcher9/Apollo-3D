@@ -112,6 +112,52 @@ namespace ar_glasses {
              activation == local_session_activation_e::worn;
     }
 
+    /** A fresh wearable/connection edge may replace retention; polling an old request may not. */
+    class local_session_request_t {
+    public:
+      /** Call only for authoritative display observations. A live USB subscription identifies
+       * a DP-only mode gap; an actual disconnect produces one fresh request on reappearance.
+       */
+      void observe_connection(bool display_present, bool transport_available) {
+        if (!display_present && !transport_available) {
+          reconnect_pending_ = true;
+        } else if (display_present && reconnect_pending_) {
+          reconnect_pending_ = false;
+          requested_ = false;
+          fresh_ = false;
+        }
+      }
+
+      void observe(bool requested) {
+        if (requested && !requested_) {
+          fresh_ = true;
+        }
+        requested_ = requested;
+        if (!requested) {
+          fresh_ = false;
+        }
+      }
+
+      void reset() {
+        requested_ = false;
+        fresh_ = false;
+        reconnect_pending_ = false;
+      }
+
+      void consume() {
+        fresh_ = false;
+      }
+
+      [[nodiscard]] bool fresh() const {
+        return fresh_;
+      }
+
+    private:
+      bool requested_ = false;
+      bool fresh_ = false;
+      bool reconnect_pending_ = false;
+    };
+
     /** Remote ownership lasts for the configured client-connect window plus scheduling grace. */
     constexpr std::chrono::milliseconds remote_pending_duration(
       std::chrono::milliseconds connect_timeout

@@ -927,6 +927,8 @@ namespace proc {
     _virtual_display_device_path.clear();
     _virtual_display_gdi_name.clear();
     _virtual_display_published = false;
+    _paused_virtual_display.reset();
+    _remote_display_pause_pending = false;
     set_display_name_locked({});
   }
 
@@ -968,6 +970,31 @@ namespace proc {
     // AddVirtualDisplay can restore remembered topology before explicit promotion, so persist
     // the original configuration before creating the monitor.
     return platf::primary_display::prepare(_virtual_display_only);
+  }
+
+  bool proc_t::prepare_retained_display_for_resume() {
+    if (!_remote_display_pause_pending) {
+      return refresh_virtual_display_binding();
+    }
+    // A failed pause can leave a physical recovery transaction pending. Finish it first, using
+    // the same retained mode/identity, before enabling the display or touching HDR/capture.
+    if (!pause_display_for_resume()) {
+      return false;
+    }
+    const bool active =
+  #ifdef SUNSHINE_TESTS
+      _display_topology_test_hook ?
+        _display_topology_test_hook(display_topology_test_operation_e::reactivate, _virtual_display_only) :
+  #endif
+        platf::primary_display::reactivate(_paused_virtual_display, _virtual_display_only);
+    if (!active || !refresh_virtual_display_binding()) {
+      BOOST_LOG(warning) << "Could not reactivate the retained virtual display; the remote session remains paused."sv;
+      return false;
+    }
+    _remote_display_pause_pending = false;
+    _paused_virtual_display.reset();
+    BOOST_LOG(info) << "Retained virtual display reactivated before remote resume: " << display_name;
+    return true;
   }
 
   bool proc_t::promote_virtual_display(
@@ -1487,7 +1514,10 @@ namespace proc {
     }
 
     auto primary_rollback = util::fail_guard([&]() {
-      restore_primary_display();
+#ifdef _WIN32
+      _virtual_display_only = previous_virtual_display_only;
+#endif
+      pause_display_for_resume();
     });
 
     const auto old_width = static_cast<std::uint32_t>(_launch_session->width);
@@ -1500,8 +1530,8 @@ namespace proc {
 #ifdef _WIN32
     bool hdr_configured_by_recreation = false;
     if (_virtual_display) {
-      if (!refresh_virtual_display_binding()) {
-        BOOST_LOG(error) << "The retained virtual display no longer has a published Windows display name."sv;
+      if (!prepare_retained_display_for_resume()) {
+        BOOST_LOG(error) << "Could not restore, reactivate, and bind the retained virtual display for resume."sv;
         return 503;
       }
 
@@ -1734,8 +1764,22 @@ namespace proc {
     // Windows can briefly publish incomplete CCD readback after restore; the durable display
     // journal makes this bounded promotion replay safe.
     if (_virtual_display && !promote_virtual_display(launch_session->enable_hdr, 1500ms)) {
-      BOOST_LOG(error) << "Could not make the retained virtual display primary; terminating its unproven display contract."sv;
-      terminate();
+      // An unchanged source can be paused and retried even if Windows has not published its
+      // promoted GDI binding yet. Changed modes must first restore the retained contract.
+      bool rollback_succeeded = true;
+      if (display_mode_changed || old_hdr != launch_session->enable_hdr) {
+        rollback_succeeded = refresh_virtual_display_binding();
+        if (rollback_succeeded && display_mode_changed) {
+          rollback_succeeded = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps, false) == DISP_CHANGE_SUCCESSFUL;
+        }
+        rollback_succeeded = rollback_succeeded && request_hdr_state(old_hdr, 6s);
+      }
+      if (!rollback_succeeded) {
+        BOOST_LOG(error) << "Could not restore the retained mode after failed topology promotion; terminating the session."sv;
+        terminate();
+      } else {
+        BOOST_LOG(warning) << "Retained display promotion is incomplete; restoring the desktop while keeping the session available for retry."sv;
+      }
       return 503;
     }
 #endif
@@ -1956,9 +2000,9 @@ namespace proc {
         return false;
       }
       _remote_virtual_display_lease = lease;
-      if (!promote_virtual_display(_launch_session->enable_hdr)) {
+      if ((_remote_display_pause_pending && !prepare_retained_display_for_resume()) || !promote_virtual_display(_launch_session->enable_hdr)) {
         BOOST_LOG(error) << "Remote virtual display does not match its required Windows display topology."sv;
-        platf::primary_display::restore(_virtual_display_device_path);
+        pause_display_for_resume();
         ar_glasses::remote_virtual_display_ended(lease);
         _remote_virtual_display_lease.reset();
         return false;
@@ -1988,6 +2032,35 @@ namespace proc {
     }
 #endif
     return true;
+  }
+
+  bool proc_t::pause_display_for_resume() {
+    std::lock_guard lock(process_state_mutex);
+#ifdef _WIN32
+    if (_virtual_display && !_virtual_display_device_path.empty()) {
+      stop_hdr_worker();
+      _hdr_worker_state.reset();
+      _remote_display_pause_pending = true;
+      const bool paused =
+  #ifdef SUNSHINE_TESTS
+        _display_topology_test_hook ?
+          _display_topology_test_hook(display_topology_test_operation_e::pause, _virtual_display_only) :
+  #endif
+          platf::primary_display::pause(_virtual_display_device_path, _paused_virtual_display);
+      // A detached target has no current GDI binding. Preserve its driver identity and mode,
+      // never a DISPLAYn alias that Windows can recycle while the physical desktop is active.
+      _virtual_display_gdi_name.clear();
+      set_display_name_locked({});
+      config::video.output_name = initial_display;
+      if (paused) {
+        BOOST_LOG(info) << "Remote desktop paused; physical displays restored and the virtual-display device retained for resume."sv;
+      } else {
+        BOOST_LOG(warning) << "Remote desktop pause is awaiting verified physical-display recovery; retaining its restore state."sv;
+      }
+      return paused;
+    }
+#endif
+    return restore_primary_display();
   }
 
   void proc_t::terminate(bool immediate, bool needs_refresh) {
@@ -2190,6 +2263,8 @@ namespace proc {
     _virtual_display_retirement_handed_off = false;
     _remote_virtual_display_lease.reset();
     _virtual_display_only = false;
+    _paused_virtual_display.reset();
+    _remote_display_pause_pending = false;
     _hdr_worker_state.reset();
 #endif
     _virtual_display = false;

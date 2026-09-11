@@ -1109,7 +1109,7 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
     <tr>
         <td>Description</td>
         <td colspan="2">
-            How long, in milliseconds, to retain a launched app, virtual display, and host streaming setup after the remote client disconnects. Sunshine 3D permits one active remote stream; another launch is rejected until the current stream has fully stopped. A reconnect during this window resumes the same desktop without rebuilding it or losing its windows. When the grace expires, Sunshine 3D terminates the retained remote app. Set to 0 to terminate immediately unless the accepted session is still completing its RTSP/control handshake; Sunshine 3D preserves that handoff for at least @code{ping_timeout}. Valid range: 0 to 600000 (10 minutes).
+            How long, in milliseconds, to retain a session and its virtual-display device after a remote disconnect or local glasses off-head/USB disconnect. The monitor setup is restored immediately; retaining the device does not keep its Windows desktop region active. Resume reapplies the display settings before presentation restarts. A fresh connection can replace a retained session, but cannot replace an active stream or pending remote handshake. Expiry ends the retained session (and its launched remote app). See <a href="virtual-desktop.md">Display restoration</a> for the shared lifecycle. Set to 0 to terminate immediately unless an accepted remote session is still completing its RTSP/control handshake; that handoff lasts at least @code{ping_timeout}. Valid range: 0 to 600000 (10 minutes).
         </td>
     </tr>
     <tr>
