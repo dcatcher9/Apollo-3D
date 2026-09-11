@@ -2504,7 +2504,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("_virtual_display,", status_implementation)
         self.assertNotIn("running_locked()", status_implementation)
         self.assertIn(
-            "set_display_name_locked(platf::to_utf8(_virtual_display_gdi_name));",
+            "set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));",
             implementation,
         )
         self.assertNotIn("proc::proc.virtual_display", nvhttp)

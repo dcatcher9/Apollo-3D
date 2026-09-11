@@ -91,10 +91,19 @@ this way. Glasses that remain worn throughout a remote session wait for its grac
 a new wear or connection event occurs. Both paths share the grace deadline rules and Windows display
 pause/reactivation implementation; their network and hardware event adapters remain separate.
 
-Local AR and remote streaming also share the bounded retirement proof in
-`platform/windows/virtual_display_retirement.h`. Each adapter retains its exact device identity,
-serialization lock, safe removal preparation, and topology cleanup; the primary-display manager
-remains the topology owner. A driver removal acknowledgment alone never releases that ownership.
+Local AR and remote streaming use the same `VDISPLAY::session_t` resource owner in
+`platform/windows/virtual_display_session.h`. It saves the baseline before creation, records the
+driver identity even if Windows delays publication, and owns binding, pause, reactivation, and
+retirement. A failed resume retains its recovery snapshot until mode, HDR, and topology checks all
+succeed. Deferred cleanup receives the same owner by move; it cannot reconstruct a second owner
+from a stale display name or reused GUID. The primary-display manager remains the sole Windows
+topology and recovery-journal owner.
+
+The event adapters keep their admission locks and hardware-specific work: remote app/Explorer
+cleanup and local glasses presentation/row cleanup. The shared owner handles removal retries,
+publication quarantine, settled absence, and one-time cleanup through the existing bounded proof
+in `platform/windows/virtual_display_retirement.h`. Driver removal acknowledgment alone never
+releases ownership.
 
 Recovery information is written to disk before the display change. Virtual-display-only mode also
 records the original active displays, their modes, and their advanced-color settings. A failed

@@ -40,19 +40,59 @@ namespace proc {
       process._active_launch_session_id = launch->id;
 #ifdef _WIN32
       process._virtual_display_only = launch->virtual_display_only;
-      process._paused_virtual_display.reset();
-      process._remote_display_pause_pending = false;
+      process._display_session.commit_resume();
+      process._display_session.set_exclusive(launch->virtual_display_only);
 #endif
     }
 #ifdef _WIN32
     static void mark_virtual(proc_t &process, bool enabled, bool with_identity = false) {
+      // These owners contain only injected effects; consuming a fixture never removes a monitor.
+      auto discarded = std::move(process._display_session);
+      VDISPLAY::session_io_t io;
+      io.pause = [&process](std::wstring_view, auto &retained, std::wstring_view) {
+        const auto storage = std::make_shared<int>(0);
+        retained = platf::primary_display::retained_display_ptr(
+          storage,
+          reinterpret_cast<platf::primary_display::retained_display_t *>(storage.get())
+        );
+        return !process._display_topology_test_hook || process._display_topology_test_hook(
+                                                         display_topology_test_operation_e::pause,
+                                                         process._virtual_display_only
+                                                       );
+      };
+      io.reactivate = [&process](const auto &, bool exclusive) {
+        return !process._display_topology_test_hook || process._display_topology_test_hook(
+                                                         display_topology_test_operation_e::reactivate,
+                                                         exclusive
+                                                       );
+      };
+      io.query = [&process](const auto &) {
+        const bool present = !process._display_topology_test_hook || process._display_topology_test_hook(
+                                                                       display_topology_test_operation_e::refresh_binding,
+                                                                       process._virtual_display_only
+                                                                     );
+        VDISPLAY::display_identity_query_t query;
+        query.state = present ? VDISPLAY::display_identity_state_e::present : VDISPLAY::display_identity_state_e::indeterminate;
+        if (present) {
+          query.display_name = L"test-only-display";
+          query.device_path = L"test-only-monitor-path";
+        }
+        return query;
+      };
+      process._display_session = VDISPLAY::session_t {std::move(io)};
       process._virtual_display = enabled;
-      process._virtual_display_gdi_name = enabled ? L"test-only-display" : L"";
-      process._virtual_display_device_path = enabled ? L"test-only-monitor-path" : L"";
-      if (enabled && with_identity) {
-        process._virtual_display_identity.emplace();
-      } else {
-        process._virtual_display_identity.reset();
+      if (enabled) {
+        VDISPLAY::creation_result_t binding;
+        binding.display_name = L"test-only-display";
+        binding.device_path = L"test-only-monitor-path";
+        // Stable identity is required by the common owner even for same-mode test fixtures.
+        binding.identity.emplace();
+        VDISPLAY::display_spec_t spec;
+        spec.exclusive = process._virtual_display_only;
+        if (process._launch_session) {
+          spec.guid = process._launch_session->display_guid;
+        }
+        process._display_session.adopt(std::move(spec), std::move(binding));
       }
     }
 
@@ -61,15 +101,19 @@ namespace proc {
     }
 
     static bool display_pause_pending(const proc_t &process) {
-      return process._remote_display_pause_pending;
+      return process._display_session.pause_requested();
+    }
+
+    static bool has_retained_display(const proc_t &process) {
+      return process._display_session.has_retained();
     }
 
     static std::wstring virtual_device_path(const proc_t &process) {
-      return process._virtual_display_device_path;
+      return process._display_session.binding().device_path;
     }
 
     static bool has_virtual_identity(const proc_t &process) {
-      return process._virtual_display_identity.has_value();
+      return process._display_session.owns_display();
     }
 
     static std::uint32_t active_transport(const proc_t &process) {
@@ -125,8 +169,7 @@ namespace proc {
       process._display_topology_test_hook = {};
       mark_virtual(process, false);
       process._virtual_display_only = false;
-      process._paused_virtual_display.reset();
-      process._remote_display_pause_pending = false;
+      process._display_session.commit_resume();
 #endif
     }
   };
@@ -312,7 +355,6 @@ TEST_F(RetainedDisplayPauseTest, RestoresAndDetachesEveryVirtualPolicyBeforeReac
     resumed->virtual_display_only = exclusive;
     ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
     EXPECT_EQ(operations_, (std::vector<operation_e> {
-                             operation_e::pause,
                              operation_e::reactivate,
                              operation_e::refresh_binding,
                              operation_e::request_hdr,
@@ -320,6 +362,7 @@ TEST_F(RetainedDisplayPauseTest, RestoresAndDetachesEveryVirtualPolicyBeforeReac
                              operation_e::refresh_binding,
                            }));
     EXPECT_FALSE(proc::process_test_access::display_pause_pending(process_));
+    EXPECT_FALSE(proc::process_test_access::has_retained_display(process_));
     EXPECT_EQ(process_.get_host_session_id(), 1234U);
     EXPECT_EQ(process_.get_status().app_id, 1);
     EXPECT_EQ(original_->id, 11U);
@@ -349,7 +392,6 @@ TEST_F(RetainedDisplayPauseTest, FailedReactivationLeavesExactSessionRetryable) 
   auto resumed = make_launch(22);
   EXPECT_EQ(process_.reconfigure_retained_session(resumed), 503);
   EXPECT_EQ(operations_, (std::vector<operation_e> {
-                           operation_e::pause,
                            operation_e::reactivate,
                            operation_e::pause,
                          }));
@@ -362,11 +404,34 @@ TEST_F(RetainedDisplayPauseTest, FailedReactivationLeavesExactSessionRetryable) 
   failed_operation_.reset();
   operations_.clear();
   ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
-  EXPECT_EQ(operations_.front(), operation_e::pause);
-  EXPECT_EQ(operations_[1], operation_e::reactivate);
+  EXPECT_EQ(operations_.front(), operation_e::reactivate);
+  EXPECT_EQ(operations_[1], operation_e::refresh_binding);
   EXPECT_EQ(process_.get_host_session_id(), 1234U);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
   EXPECT_EQ(original_->sbs_mode, 0);
+}
+
+TEST_F(RetainedDisplayPauseTest, FailedHdrAfterReactivationKeepsRecoveryUntilSuccessfulRetry) {
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  bool fail_hdr = true;
+  proc::process_test_access::set_display_topology_hook(process_, [&](operation_e operation, bool) {
+    if (operation == operation_e::request_hdr || operation == operation_e::promote) {
+      EXPECT_TRUE(proc::process_test_access::has_retained_display(process_));
+    }
+    if (operation == operation_e::request_hdr && fail_hdr) {
+      fail_hdr = false;  // The requested HDR fails; restoring the prior HDR still succeeds.
+      return false;
+    }
+    return true;
+  });
+  auto resumed = make_launch(22);
+  EXPECT_EQ(process_.reconfigure_retained_session(resumed), 503);
+  EXPECT_TRUE(proc::process_test_access::display_pause_pending(process_));
+  EXPECT_TRUE(proc::process_test_access::has_retained_display(process_));
+  EXPECT_EQ(proc::process_test_access::active_transport(process_), 11U);
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  EXPECT_FALSE(proc::process_test_access::has_retained_display(process_));
+  EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
 }
 
 TEST_F(IdleProcessLifecycleTest, ExitedAppIsCleanedAfterMediaStopsBeforeWarmRetention) {
@@ -385,6 +450,45 @@ TEST_F(IdleProcessLifecycleTest, ExitedAppIsCleanedAfterMediaStopsBeforeWarmRete
   stream::session::retain_or_stop_session_for_test(true);
   EXPECT_EQ(proc::proc.get_status().app_id, 0);
   EXPECT_EQ(proc::proc.get_host_session_id(), 0U);
+}
+
+TEST_F(IdleProcessLifecycleTest, FailedRetirementPreservesOwnerAcrossRefreshAndNewLaunch) {
+  using operation_e = proc::display_topology_test_operation_e;
+  original_->virtual_display = true;
+  proc::process_test_access::mark_virtual(proc::proc, true, true);
+  bool allow_retirement = false;
+  proc::process_test_access::set_display_topology_hook(proc::proc, [&](operation_e operation, bool) {
+    return operation != operation_e::retire || allow_retirement;
+  });
+  auto cleanup = util::fail_guard([&]() {
+    // The injected binding must never escape this fixture, including on an assertion failure.
+    proc::process_test_access::clear(proc::proc);
+  });
+  const auto device_path = proc::process_test_access::virtual_device_path(proc::proc);
+
+  proc::proc.terminate(false, false);
+  ASSERT_TRUE(proc::process_test_access::has_virtual_identity(proc::proc));
+  EXPECT_EQ(proc::proc.get_status().app_id, 0);
+
+  EXPECT_NO_THROW(proc::refresh(apps_path_.string(), false));
+  EXPECT_TRUE(proc::process_test_access::has_virtual_identity(proc::proc));
+  EXPECT_EQ(proc::process_test_access::virtual_device_path(proc::proc), device_path);
+
+  proc::ctx_t next_app;
+  auto next_launch = std::make_shared<rtsp_stream::launch_session_t>();
+  // Cleanup admission precedes even input validation. Invalid geometry also keeps this negative
+  // test away from platform acquisition if the guard regresses.
+  next_launch->width = next_launch->height = 1;
+  next_launch->scale_factor = 20;
+  EXPECT_EQ(proc::proc.execute(next_app, next_launch, false), 503);
+  EXPECT_TRUE(proc::process_test_access::has_virtual_identity(proc::proc));
+  EXPECT_EQ(proc::process_test_access::virtual_device_path(proc::proc), device_path);
+
+  allow_retirement = true;
+  proc::proc.terminate(false, false);
+  EXPECT_FALSE(proc::process_test_access::has_virtual_identity(proc::proc));
+  EXPECT_NO_THROW(proc::refresh(apps_path_.string(), false));
+  EXPECT_FALSE(proc::process_test_access::has_virtual_identity(proc::proc));
 }
 
 TEST_F(IdleProcessLifecycleTest, PhysicalDesktopRestoresBeforeBoundedUndoCleanup) {
@@ -996,8 +1100,8 @@ TEST(ProcessTest, FailedPostPromotionRebindPausesAndPreservesExactSessionForRetr
   operations.clear();
   ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
   ASSERT_GE(operations.size(), 2U);
-  EXPECT_EQ(operations[0].first, operation_e::pause);
-  EXPECT_EQ(operations[1].first, operation_e::reactivate);
+  EXPECT_EQ(operations[0].first, operation_e::reactivate);
+  EXPECT_EQ(operations[1].first, operation_e::refresh_binding);
   EXPECT_EQ(process.get_host_session_id(), 1234U);
   EXPECT_EQ(proc::process_test_access::active_transport(process), 22U);
   EXPECT_TRUE(proc::process_test_access::virtual_display_only(process));

@@ -37,7 +37,7 @@
 #include "utility.h"
 
 #ifdef _WIN32
-  #include "platform/windows/virtual_display.h"
+  #include "platform/windows/virtual_display_session.h"
 
 namespace platf::primary_display {
   struct retained_display_t;
@@ -277,6 +277,7 @@ namespace proc {
 #endif
 
   private:
+    friend void refresh(const std::string &file_name, bool needs_terminate);
 #ifdef SUNSHINE_TESTS
     friend struct process_test_access;
 #endif
@@ -295,23 +296,16 @@ namespace proc {
 
     std::shared_ptr<rtsp_stream::launch_session_t> _launch_session;
 #ifdef _WIN32
-    std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> _virtual_display_identity;
-    std::optional<LUID> _virtual_display_render_adapter;
-    std::wstring _virtual_display_device_path;
-    std::wstring _virtual_display_gdi_name;
-    bool _virtual_display_published = false;
+    VDISPLAY::session_t _display_session;
     bool _virtual_display_retirement_handed_off = false;
     // Client-owned policy for the active launch or resume.
     bool _virtual_display_only = false;
-    std::shared_ptr<platf::primary_display::retained_display_t> _paused_virtual_display;
-    // Includes an incomplete pause: resume must finish restoring the desktop before activation.
-    bool _remote_display_pause_pending = false;
   #ifdef SUNSHINE_TESTS
     // Process tests replace display/HDR side effects while preserving resume/teardown control flow.
     display_topology_test_hook_t _display_topology_test_hook;
   #endif
     std::optional<std::uint64_t> _remote_virtual_display_lease;
-    VDISPLAY::creation_result_t create_retained_virtual_display(
+    VDISPLAY::session_t create_retained_virtual_display(
       std::uint32_t width,
       std::uint32_t height,
       std::uint32_t fps,
@@ -319,11 +313,7 @@ namespace proc {
       const std::optional<LUID> &render_adapter
     );
     bool retire_virtual_display(
-      const std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> &identity,
-      const GUID &guid,
-      const std::wstring &device_path,
-      const std::wstring &gdi_name,
-      bool was_published,
+      VDISPLAY::session_t &owner,
       std::chrono::milliseconds timeout,
       bool deactivate_desktop,
       bool final_teardown,
@@ -335,13 +325,12 @@ namespace proc {
     void clear_virtual_display_binding();
     bool refresh_virtual_display_binding();
     bool prepare_retained_display_for_resume();
-    bool prepare_virtual_display_topology();
     bool promote_virtual_display(
       bool enable_hdr,
       std::chrono::milliseconds topology_retry_window = std::chrono::milliseconds::zero()
     );
     void adopt_virtual_display(
-      VDISPLAY::creation_result_t created_display,
+      VDISPLAY::session_t created_display,
       bool enable_hdr
     );
     static bool wait_for_retired_virtual_display(

@@ -20,6 +20,7 @@
 #include "src/utility.h"
 #include "src/uuid.h"
 #include "virtual_display.h"
+#include "virtual_display_session.h"
 
 #include <algorithm>
 #include <atomic>
@@ -41,6 +42,7 @@
 #include <string>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace ar_glasses {
@@ -77,17 +79,7 @@ namespace ar_glasses {
     std::optional<pending_remote_session_t> remote_session_pending;
     std::optional<std::stop_source> local_session_construction_stop;
 
-    struct retired_local_virtual_display_t {
-      GUID guid {};
-      SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT identity {};
-      std::wstring device_path;
-      std::wstring gdi_name;
-      VDISPLAY::retirement_record_t retirement;
-      std::function<bool()> prepare_removal;
-      std::function<bool()> finish_topology_cleanup;
-    };
-
-    std::optional<retired_local_virtual_display_t> retired_local_virtual_display;
+    std::optional<VDISPLAY::session_t> retired_local_virtual_display;
     // Serialize the complete retirement operation, including its callbacks. A later waiter must
     // take a fresh record after an earlier waiter has certified cleanup and released ownership.
     std::timed_mutex local_virtual_display_retirement_mutex;
@@ -144,7 +136,7 @@ namespace ar_glasses {
     bool contains_case_insensitive(std::wstring_view haystack, std::wstring_view needle);
 
     bool matches_retiring_local_virtual_display(
-      const retired_local_virtual_display_t &retiring,
+      const VDISPLAY::creation_result_t &retiring,
       const LUID &adapter_id,
       UINT32 target_id,
       std::wstring_view device_path,
@@ -154,8 +146,8 @@ namespace ar_glasses {
       const bool sudo_hardware_path = contains_case_insensitive(device_path, L"SMKD1CE") ||
                                       contains_case_insensitive(device_path, L"SUDOVDA");
       const bool learned_path = !retiring.device_path.empty() && retiring.device_path == device_path;
-      const bool exact_local_identity = same_luid(retiring.identity.AdapterLuid, adapter_id) &&
-                                        retiring.identity.TargetId == target_id &&
+      const bool exact_local_identity = retiring.identity && same_luid(retiring.identity->AdapterLuid, adapter_id) &&
+                                        retiring.identity->TargetId == target_id &&
                                         (local_friendly_name || sudo_hardware_path);
       // DISPLAY numbers and friendly names are recyclable. Only the exact learned device path, or
       // the driver's exact adapter/target identity plus Apollo/Sudo evidence, can keep this
@@ -171,38 +163,34 @@ namespace ar_glasses {
     }
 
     bool begin_local_virtual_display_retirement(
-      const GUID &guid,
-      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
-      std::wstring device_path,
-      std::wstring gdi_name,
-      bool was_published,
-      std::function<bool()> prepare_removal,
-      std::function<bool()> finish_topology_cleanup
+      VDISPLAY::session_t &&session,
+      VDISPLAY::session_retirement_callbacks_t callbacks
     ) {
       std::lock_guard lock(ownership_mutex);
       if (retired_local_virtual_display) {
-        if (same_virtual_display_identity(retired_local_virtual_display->identity, identity)) {
+        if (retired_local_virtual_display->generation() == session.generation()) {
           return true;
         }
         BOOST_LOG(error) << "Refusing to overwrite a different local AR virtual-display retirement record."sv;
         return false;
       }
-      retired_local_virtual_display = retired_local_virtual_display_t {
-        guid,
-        identity,
-        std::move(device_path),
-        std::move(gdi_name),
-        {was_published, std::chrono::steady_clock::now()},
-        std::move(prepare_removal),
-        std::move(finish_topology_cleanup),
-      };
+      session.begin_retirement(std::move(callbacks), {
+                                                       .timing = {50ms, 100ms},
+                                                       .retry_prepare_within_slice = true,
+                                                       .retry_acknowledged_removal_each_slice = true,
+                                                     });
+      retired_local_virtual_display.emplace(std::move(session));
       ownership_changed.notify_all();
       return true;
     }
 
     VDISPLAY::display_identity_state_e query_retiring_local_virtual_display(
-      const retired_local_virtual_display_t &retiring
+      const VDISPLAY::session_t &session
     ) {
+      const auto &retiring = session.binding();
+      if (!retiring.identity) {
+        return VDISPLAY::display_identity_state_e::absent;
+      }
       std::vector<DISPLAYCONFIG_PATH_INFO> paths;
       std::vector<DISPLAYCONFIG_MODE_INFO> modes;
       if (!VDISPLAY::queryActiveDisplayConfig(paths, modes)) {
@@ -226,15 +214,14 @@ namespace ar_glasses {
       // A retained source is deliberately absent from the active desktop before Remove runs.
       // Keep the shared identity barrier until Windows also retires its available driver target.
       return VDISPLAY::queryVirtualDisplayRetirementState(
-        retiring.identity,
+        *retiring.identity,
         retiring.device_path,
-        retiring.gdi_name
+        retiring.display_name
       );
     }
 
     bool wait_for_local_virtual_display_retirement_impl(
-      std::chrono::milliseconds timeout,
-      bool retry_remove
+      std::chrono::milliseconds timeout
     ) {
       const auto deadline = std::chrono::steady_clock::now() + std::max(timeout, 0ms);
       {
@@ -249,65 +236,26 @@ namespace ar_glasses {
       if (timeout <= 0ms ? !retirement_lock.try_lock() : !retirement_lock.try_lock_until(deadline)) {
         return false;
       }
-      std::optional<retired_local_virtual_display_t> retiring;
+      VDISPLAY::session_t *retiring = nullptr;
       {
         std::lock_guard lock(ownership_mutex);
-        retiring = retired_local_virtual_display;
+        if (retired_local_virtual_display) {
+          retiring = &*retired_local_virtual_display;
+        }
       }
       if (!retiring) {
         return true;
       }
 
-      bool removal_requested = !retry_remove;
-      const VDISPLAY::retirement_callbacks_t callbacks {
-        .before_observation = [&]() {
-          if (!removal_requested && (!retiring->prepare_removal || retiring->prepare_removal())) {
-            if (VDISPLAY::removeVirtualDisplay(retiring->guid)) {
-              removal_requested = true;
-            } else {
-              BOOST_LOG(warning) << "Failed to request removal of the retiring local AR virtual desktop; retrying while its ownership barrier remains active."sv;
-            }
-          }
-          return VDISPLAY::retirement_step_e::observe;
-        },
-        .query = [&]() {
-          return query_retiring_local_virtual_display(*retiring);
-        },
-        .finish = [&]() {
-          // Retirement and topology restoration remain one ownership barrier. A blocked cleanup
-          // retains its exact pre-removal decision for a later local/remote handoff.
-          if (retiring->finish_topology_cleanup) {
-            if (!retiring->finish_topology_cleanup()) {
-              return false;
-            }
-            // Restoration itself emits notifications. Latch success before rechecking absence,
-            // so a later waiter cannot replay the old rectangle over a newer user move.
-            std::lock_guard lock(ownership_mutex);
-            if (!retired_local_virtual_display) {
-              return true;
-            }
-            if (!same_virtual_display_identity(retired_local_virtual_display->identity, retiring->identity)) {
-              return false;
-            }
-            retired_local_virtual_display->finish_topology_cleanup = {};
-          }
-          if (query_retiring_local_virtual_display(*retiring) != VDISPLAY::display_identity_state_e::absent) {
-            return false;
-          }
-          std::lock_guard lock(ownership_mutex);
-          if (!retired_local_virtual_display) {
-            return true;
-          }
-          if (same_virtual_display_identity(retired_local_virtual_display->identity, retiring->identity)) {
-            retired_local_virtual_display.reset();
-            ownership_changed.notify_all();
-            return true;
-          }
-          BOOST_LOG(error) << "A different local AR retirement record appeared while waiting; refusing to certify cleanup."sv;
-          return false;
-        },
-      };
-      return retiring->retirement.wait_until(deadline, {50ms, 100ms}, callbacks);
+      // The retirement lock pins this move-only owner across callbacks. The shared owner latches
+      // successful topology cleanup before its final absence query, including across wait slices.
+      if (!retiring->retire_until(deadline)) {
+        return false;
+      }
+      std::lock_guard lock(ownership_mutex);
+      retired_local_virtual_display.reset();
+      ownership_changed.notify_all();
+      return true;
     }
 
     bool physical_adapter_contract_valid(const LUID &before, const LUID &after) {
@@ -2742,21 +2690,31 @@ namespace ar_glasses {
                           << "the updated capability."sv;
         }
 
-        // Adding an IddCx output can itself normalize the desktop. Save recovery evidence before
-        // the first mutation, using exactly one topology owner for the selected layout policy.
-        if (exclusive_) {
-          if (!platf::primary_display::prepare_local_exclusive(target_device_path_)) {
-            BOOST_LOG(error) << "Could not save the physical desktop before local AR exclusive presentation."sv;
-            return;
-          }
-          exclusive_prepared_ = true;
-        }
-        const auto pre_add_plan = exclusive_ ? std::nullopt : build_pre_add_isolation_plan(target_device_path_);
-        if (!exclusive_) {
+        std::string uuid_string = virtual_display_uuid;
+        auto uuid = uuid_util::uuid_t::parse(uuid_string);
+        VDISPLAY::display_spec_t display_spec {
+          .client_uid = virtual_display_uuid,
+          .client_name = virtual_display_name,
+          .width = source_width,
+          .height = source_height,
+          .refresh_millihz = static_cast<std::uint32_t>(active_target.refresh_millihz),
+          .render_adapter_luid = active_target.adapter_id,
+          .exclusive = exclusive_,
+          .local_sink = target_device_path_,
+          .primary_binding = exclusive_,
+        };
+        static_assert(sizeof(display_spec.guid) == sizeof(uuid));
+        std::memcpy(&display_spec.guid, &uuid, sizeof(display_spec.guid));
+
+        // Extended AR retains its row journal. Exclusive AR uses the shared owner's normal
+        // durable preparation, including preserving this local presentation sink.
+        decltype(build_pre_add_isolation_plan(target_device_path_)) pre_add_plan;
+        const std::function<bool()> prepare_extended = exclusive_ ? std::function<bool()> {} : [&]() {
+          pre_add_plan = build_pre_add_isolation_plan(target_device_path_);
           if (!pre_add_plan || !same_rect(pre_add_plan->physical_rect, original_target_rect_)) {
             BOOST_LOG(info) << "AR topology changed before virtual-display creation, or no safe "sv
                                "non-primary/non-cloned isolation row exists; preserving the current layout."sv;
-            return;
+            return false;
           }
           if (!begin_topology_recovery_move(
                 target_device_path_,
@@ -2764,7 +2722,7 @@ namespace ar_glasses {
                 pre_add_plan->layout.physical_rect
               )) {
             BOOST_LOG(error) << "Refusing to attach the local AR virtual desktop without a durable pre-add topology transaction."sv;
-            return;
+            return false;
           }
           const auto confirmed_pre_add_plan = build_pre_add_isolation_plan(target_device_path_);
           if (!confirmed_pre_add_plan || !same_rect(confirmed_pre_add_plan->physical_rect, original_target_rect_) || !same_rect(confirmed_pre_add_plan->layout.virtual_rect, pre_add_plan->layout.virtual_rect) || !same_rect(confirmed_pre_add_plan->layout.physical_rect, pre_add_plan->layout.physical_rect)) {
@@ -2773,45 +2731,28 @@ namespace ar_glasses {
             if (!cancel_topology_recovery_move(target_device_path_)) {
               BOOST_LOG(error) << "Could not cancel the stale pre-add AR topology transaction."sv;
             }
+            return false;
+          }
+          return true;
+        };
+        const bool acquired = virtual_display_.acquire(std::move(display_spec), prepare_extended, cancelled);
+        const auto created_display = virtual_display_binding();
+        if (created_display.identity) {
+          BOOST_LOG(debug) << "Local AR virtual desktop identity: adapter="sv
+                           << created_display.identity->AdapterLuid.HighPart << ':'
+                           << created_display.identity->AdapterLuid.LowPart
+                           << " target="sv << created_display.identity->TargetId << '.';
+        }
+        if (!acquired || created_display.display_name.empty()) {
+          if (cancelled()) {
             return;
           }
-        }
-
-        std::string uuid_string = virtual_display_uuid;
-        auto uuid = uuid_util::uuid_t::parse(uuid_string);
-        static_assert(sizeof(display_guid_) == sizeof(uuid));
-        std::memcpy(&display_guid_, &uuid, sizeof(display_guid_));
-
-        if (cancelled()) {
-          return;
-        }
-        const auto created_display = VDISPLAY::createVirtualDisplayOnAdapter(
-          virtual_display_uuid,
-          virtual_display_name,
-          source_width,
-          source_height,
-          active_target.refresh_millihz,
-          display_guid_,
-          active_target.adapter_id
-        );
-        virtual_display_added_ = created_display.added();
-        virtual_display_published_ = !created_display.display_name.empty();
-        if (created_display.identity) {
-          virtual_display_identity_ = *created_display.identity;
-          BOOST_LOG(debug) << "Local AR virtual desktop identity: adapter="sv
-                           << virtual_display_identity_.AdapterLuid.HighPart << ':'
-                           << virtual_display_identity_.AdapterLuid.LowPart
-                           << " target="sv << virtual_display_identity_.TargetId << '.';
-        }
-        virtual_display_name_ = created_display.display_name;
-        virtual_display_device_path_ = created_display.device_path;
-        if (virtual_display_name_.empty()) {
-          BOOST_LOG(error) << (virtual_display_added_ ? "The local AR virtual desktop was added, but Windows did not publish its display name."sv : "Failed to create the local AR virtual desktop."sv);
+          BOOST_LOG(error) << (virtual_display_.owns_display() ? "The local AR virtual desktop was added, but its published identity could not be bound."sv : "Failed to prepare or create the local AR virtual desktop."sv);
           return;
         }
 
         if (exclusive_) {
-          if (!refresh_virtual_display_reference() || !platf::primary_display::bind_pending(virtual_display_device_path_) || !platf::primary_display::promote(virtual_display_device_path_, true)) {
+          if (!refresh_virtual_display_reference() || !virtual_display_.bind() || !virtual_display_.promote()) {
             BOOST_LOG(error) << "Could not establish the local AR virtual desktop as the exclusive primary display."sv;
             return;
           }
@@ -2857,11 +2798,7 @@ namespace ar_glasses {
           if (cancelled()) {
             return false;
           }
-          if (const auto resolved = resolve_virtual_display(virtual_display_identity_, {}, virtual_display_name_)) {
-            virtual_display_identity_ = resolved->identity;
-            virtual_display_name_ = resolved->gdi_name;
-            virtual_display_device_path_ = resolved->device_path;
-          } else {
+          if (!refresh_virtual_display_reference()) {
             BOOST_LOG(error) << "Could not resolve the newly created local AR virtual display by its driver identity."sv;
             return false;
           }
@@ -2921,9 +2858,10 @@ namespace ar_glasses {
           }
 
           bool virtual_hdr_active = false;
+          auto source_binding = virtual_display_binding();
           if (!configure_virtual_display_hdr(
-                virtual_display_name_,
-                virtual_display_identity_,
+                source_binding.display_name,
+                *source_binding.identity,
                 target_device_path_,
                 requested_target_hdr,
                 virtual_hdr_active,
@@ -2937,10 +2875,14 @@ namespace ar_glasses {
           }
           BOOST_LOG(info) << "Local AR source color mode: "sv
                           << (virtual_hdr_active ? "HDR linear scRGB"sv : "SDR Rec.709"sv) << '.';
+          if (!virtual_display_.update_binding(std::move(source_binding))) {
+            return false;
+          }
           if (virtual_hdr_active) {
+            const auto source = virtual_display_binding();
             const auto source_white = query_sdr_white_nits(
-              virtual_display_identity_.AdapterLuid,
-              virtual_display_identity_.TargetId
+              source.identity->AdapterLuid,
+              source.identity->TargetId
             );
             const auto target_white = query_sdr_white_nits(active_target.adapter_id, active_target.target_id);
             BOOST_LOG(info) << "Local AR HDR SDR-reference white: source="sv
@@ -3068,17 +3010,17 @@ namespace ar_glasses {
             target_device_path_
           );
         }
-        if (!display_paused_) {
+        if (!virtual_display_.paused()) {
           if (resume_topology_cleanup_) {
-            const auto probe = probe_virtual_display(virtual_display_identity_, virtual_display_device_path_, virtual_display_name_);
+            const auto source = virtual_display_binding();
+            const auto probe = source.identity ? probe_virtual_display(*source.identity, source.device_path, source.display_name) : virtual_display_probe_t {};
             if (probe.presence == virtual_display_presence_e::indeterminate || (probe.presence == virtual_display_presence_e::present && !resume_topology_cleanup_->prepare_removal())) {
               return false;
             }
           }
-          if (!platf::primary_display::pause(virtual_display_device_path_, retained_display_, target_device_path_)) {
+          if (!virtual_display_.pause(target_device_path_)) {
             return false;
           }
-          display_paused_ = true;
         }
         // In extended mode the source occupied the original sink position. Only restore that
         // rectangle after the shared transaction has detached the source and cleared its journal.
@@ -3096,8 +3038,7 @@ namespace ar_glasses {
         live_gpu_lease_ = std::move(*lease);
         // Reactivation may partially apply before verification fails. Every failure must run
         // pause again; the previous successful detachment no longer certifies the live topology.
-        display_paused_ = false;
-        if (!platf::primary_display::reactivate(retained_display_, exclusive_)) {
+        if (!virtual_display_.begin_resume()) {
           live_gpu_lease_.reset();
           return std::nullopt;
         }
@@ -3114,7 +3055,7 @@ namespace ar_glasses {
           (void) suspend_for_resume();
           return std::nullopt;
         }
-        retained_display_.reset();
+        virtual_display_.commit_resume();
         return resumed;
       }
 
@@ -3123,11 +3064,7 @@ namespace ar_glasses {
           platf::primary_display::refresh_exclusive_cursor_clip();
           return;
         }
-        std::wstring source_name;
-        {
-          std::lock_guard lock(virtual_display_mutex_);
-          source_name = virtual_display_name_;
-        }
+        const auto source_name = virtual_display_binding().display_name;
         if (!source_name.empty()) {
           platf::dxgi::refresh_local_presenter_pointer_isolation(
             platf::to_utf8(source_name),
@@ -3151,18 +3088,24 @@ namespace ar_glasses {
 
       bool virtual_display_authoritatively_absent() {
         std::lock_guard lock(virtual_display_mutex_);
+        const auto source = virtual_display_.binding();
+        if (!source.identity) {
+          return false;
+        }
         const auto probe = probe_virtual_display(
-          virtual_display_identity_,
-          virtual_display_device_path_,
-          virtual_display_name_
+          *source.identity,
+          source.device_path,
+          source.display_name
         );
         if (probe.presence != virtual_display_presence_e::absent) {
           virtual_display_absence_started_.reset();
           virtual_display_absence_observations_ = 0;
           if (probe.resolved) {
-            virtual_display_identity_ = probe.resolved->identity;
-            virtual_display_name_ = probe.resolved->gdi_name;
-            virtual_display_device_path_ = probe.resolved->device_path;
+            auto refreshed = source;
+            refreshed.identity = probe.resolved->identity;
+            refreshed.display_name = probe.resolved->gdi_name;
+            refreshed.device_path = probe.resolved->device_path;
+            virtual_display_.update_binding(std::move(refreshed));
           }
           return false;
         }
@@ -3225,7 +3168,7 @@ namespace ar_glasses {
           // actually SDR, that mismatch makes the presenter reject every target generation. SDR is
           // the safe common contract and remains color-managed when the sink later proves to be HDR.
           const bool desired_virtual_hdr = target.hdr.known && target.hdr.active;
-          const auto current_virtual_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_name_.c_str());
+          const auto current_virtual_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
           if (!current_virtual_hdr) {
             return false;
           }
@@ -3235,7 +3178,7 @@ namespace ar_glasses {
               if (!refresh_virtual_display_reference()) {
                 continue;
               }
-              const auto observed_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_name_.c_str());
+              const auto observed_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
               if (observed_hdr && *observed_hdr == expected_hdr) {
                 return true;
               }
@@ -3246,7 +3189,7 @@ namespace ar_glasses {
           bool configured_virtual_hdr = *current_virtual_hdr;
           if (configured_virtual_hdr != desired_virtual_hdr) {
             const bool setting_accepted = VDISPLAY::setDisplayHDRByName(
-              virtual_display_name_.c_str(),
+              virtual_display_binding().display_name.c_str(),
               desired_virtual_hdr
             );
             if (setting_accepted && wait_for_source_color(desired_virtual_hdr)) {
@@ -3256,18 +3199,18 @@ namespace ar_glasses {
               // swapchain when Windows/SudoVDA rejects source HDR. Never remove the desktop merely
               // because its virtual output cannot activate Advanced Color in this mode.
               BOOST_LOG(warning) << "Persistent local AR source HDR was unavailable after the mode switch; using color-managed SDR presentation."sv;
-              const auto fallback_state = VDISPLAY::queryDisplayHDRByName(virtual_display_name_.c_str());
+              const auto fallback_state = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
               bool fallback_ready = fallback_state && !*fallback_state;
               if (!fallback_ready) {
                 const bool fallback_accepted = VDISPLAY::setDisplayHDRByName(
-                  virtual_display_name_.c_str(),
+                  virtual_display_binding().display_name.c_str(),
                   false
                 );
                 if (fallback_accepted) {
                   fallback_ready = wait_for_source_color(false);
                 } else {
                   const auto observed_fallback = VDISPLAY::queryDisplayHDRByName(
-                    virtual_display_name_.c_str()
+                    virtual_display_binding().display_name.c_str()
                   );
                   fallback_ready = observed_fallback && !*observed_fallback;
                 }
@@ -3290,7 +3233,7 @@ namespace ar_glasses {
             BOOST_LOG(warning) << "The new AR physical mode could not be safely re-isolated; preserving the virtual desktop for retry."sv;
             return false;
           }
-          const auto final_virtual_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_name_.c_str());
+          const auto final_virtual_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
           if (!final_virtual_hdr || *final_virtual_hdr != virtual_hdr_active_) {
             BOOST_LOG(warning) << "The persistent local AR source color state changed during final isolation; retaining the desktop for a coherent retry."sv;
             return false;
@@ -3360,37 +3303,45 @@ namespace ar_glasses {
                                             classify_pre_removal_topology(target_device_path_);
         const auto topology_cleanup = resume_topology_cleanup_ ? resume_topology_cleanup_ : target_device_path_.empty() ? std::shared_ptr<pre_removal_topology_cleanup_t> {} :
                                                                                                                           std::make_shared<pre_removal_topology_cleanup_t>(pre_removal_topology, target_device_path_);
-        bool virtual_display_retired = !virtual_display_added_;
-        if (virtual_display_added_) {
-          const auto prepare_removal = [topology_cleanup, paused = display_paused_, identity = virtual_display_device_path_, retained = retained_display_]() {
-            if (retained && !platf::primary_display::restore(identity)) {
-              return false;
-            }
-            return paused || topology_cleanup->prepare_removal();
-          };
-          const auto finish_topology_cleanup = [topology_cleanup]() {
-            return topology_cleanup->finish();
-          };
+        const bool had_virtual_display = virtual_display_.owns_display();
+        bool virtual_display_retired = !had_virtual_display;
+        const auto finish_topology_cleanup = [topology_cleanup](VDISPLAY::session_t &) {
+          return topology_cleanup->finish();
+        };
+        if (had_virtual_display) {
           const bool retirement_tracked = begin_local_virtual_display_retirement(
-            display_guid_,
-            virtual_display_identity_,
-            virtual_display_device_path_,
-            virtual_display_name_,
-            virtual_display_published_,
-            prepare_removal,
-            finish_topology_cleanup
+            std::move(virtual_display_),
+            {
+              .prepare = [topology_cleanup](VDISPLAY::session_t &session) {
+                const bool paused = session.paused();
+                if (session.has_retained() && !session.restore()) {
+                  return false;
+                }
+                return paused || topology_cleanup->prepare_removal();
+              },
+              .query = query_retiring_local_virtual_display,
+              .finish = finish_topology_cleanup,
+            }
           );
           if (!retirement_tracked) {
             BOOST_LOG(error) << "Local AR teardown could not register its virtual-display retirement; retaining the existing cleanup barrier."sv;
           } else {
             virtual_display_retired = wait_for_local_virtual_display_retirement_impl(
-              3s,
-              true
+              3s
             );
             if (!virtual_display_retired) {
               BOOST_LOG(warning) << "The local AR virtual desktop is still retiring; subsequent local or remote display creation will wait for its stable identity to disappear."sv;
             }
           }
+        } else {
+          // No driver identity was acquired, but the row journal may already need recovery.
+          // Complete that obligation through the same owner without a driver-absence wait.
+          virtual_display_.begin_retirement({
+            .prepare = [](VDISPLAY::session_t &) {
+              return true;
+            },
+            .finish = finish_topology_cleanup,
+          });
         }
         if (!target_device_path_.empty()) {
           if (!virtual_display_retired) {
@@ -3405,9 +3356,9 @@ namespace ar_glasses {
           // A retired virtual display completed this callback as part of the authoritative
           // retirement barrier. Do not apply it a second time: the user may move the monitor as
           // soon as SudoVDA disappears. A failed Add has no retirement callback, so clean it here.
-          bool recovery_complete = virtual_display_added_;
+          bool recovery_complete = had_virtual_display;
           while (!recovery_complete) {
-            recovery_complete = topology_cleanup->finish();
+            recovery_complete = virtual_display_.retire_until(deadline);
             if (recovery_complete || std::chrono::steady_clock::now() >= deadline) {
               break;
             }
@@ -3455,8 +3406,9 @@ namespace ar_glasses {
         }
         if (exclusive_) {
           // The presenter may be reinitializing concurrently. Keep an owned identity/name pair,
-          // never a view into the members that it refreshes under virtual_display_mutex_.
-          if (!platf::primary_display::promote(source->device_path, true)) {
+          // and serialize the owner's promotion read with its binding refresh.
+          std::lock_guard lock(virtual_display_mutex_);
+          if (!virtual_display_.promote()) {
             return std::nullopt;
           }
         }
@@ -3513,6 +3465,7 @@ namespace ar_glasses {
           BOOST_LOG(warning) << "The local AR source mode could not be verified; retaining the desktop for a later topology retry."sv;
           return false;
         }
+        virtual_display_.update_mode(source_width, source_height, static_cast<std::uint32_t>(*verified_millihz));
         if (source_refresh_matches(*verified_millihz, requested_millihz)) {
           return true;
         }
@@ -3531,7 +3484,8 @@ namespace ar_glasses {
         if (!presentation_target_contract_matches(expected, actual)) {
           return false;
         }
-        const auto source = resolve_virtual_display(virtual_display_identity_, virtual_display_device_path_, virtual_display_name_);
+        const auto binding = virtual_display_binding();
+        const auto source = binding.identity ? resolve_virtual_display(*binding.identity, binding.device_path, binding.display_name) : std::nullopt;
         if (!source || source->refresh_millihz <= 0) {
           return false;
         }
@@ -3543,7 +3497,7 @@ namespace ar_glasses {
 
       bool update_display_topology(const std::function<bool()> &update) {
         return exclusive_ ?
-                 platf::primary_display::run_local_exclusive_update(virtual_display_device_path_, update) :
+                 platf::primary_display::run_local_exclusive_update(virtual_display_binding().device_path, update) :
                  update();
       }
 
@@ -3551,34 +3505,31 @@ namespace ar_glasses {
         // Exclusive mode has one topology/clip owner. The transaction wrapper verifies its final
         // topology after mode and color setters finish; it must not enter the row-isolation journal.
         return exclusive_ ? find_target(target_device_path_) :
-                            isolate_physical_output(virtual_display_name_, target_device_path_, original_target_rect_);
+                            isolate_physical_output(virtual_display_binding().display_name, target_device_path_, original_target_rect_);
       }
 
       void retire_exclusive_display() {
-        if (!exclusive_prepared_) {
+        if (!virtual_display_.prepared() && !virtual_display_.owns_display()) {
           return;
         }
-        auto restore = [identity = virtual_display_identity_, device_path = virtual_display_device_path_, display_name = virtual_display_name_, added = virtual_display_added_]() mutable {
-          // An Add may publish its exact device path only after initialization has failed.
-          // Learn it from the retained driver identity on each cleanup attempt, never a DISPLAYn.
-          if (added && device_path.empty()) {
-            const auto observed = VDISPLAY::queryVirtualDisplayIdentity(identity, device_path, display_name);
-            if (observed.state == VDISPLAY::display_identity_state_e::indeterminate || (observed.state == VDISPLAY::display_identity_state_e::present && observed.device_path.empty())) {
-              return false;
-            }
-            device_path = observed.device_path;
-          }
-          return platf::primary_display::restore(device_path);
-        };
-        if (!virtual_display_added_) {
-          if (!restore()) {
+        if (!virtual_display_.owns_display()) {
+          if (!virtual_display_.restore()) {
             BOOST_LOG(warning) << "Local AR startup recovery is pending; retaining the physical desktop journal."sv;
           }
           return;
         }
         // Restore ordinary monitors before the source is removed. Both callbacks survive this
         // session object, including an unpublished Add or teardown deferred to a later handoff.
-        if (!begin_local_virtual_display_retirement(display_guid_, virtual_display_identity_, virtual_display_device_path_, virtual_display_name_, virtual_display_published_, restore, restore) || !wait_for_local_virtual_display_retirement_impl(3s, true)) {
+        if (!begin_local_virtual_display_retirement(std::move(virtual_display_), {
+                                                                                   .prepare = [](VDISPLAY::session_t &session) {
+                                                                                     return session.restore();
+                                                                                   },
+                                                                                   .query = query_retiring_local_virtual_display,
+                                                                                   .finish = [](VDISPLAY::session_t &session) {
+                                                                                     return session.restore();
+                                                                                   },
+                                                                                 }) ||
+            !wait_for_local_virtual_display_retirement_impl(3s)) {
           BOOST_LOG(warning) << "Local AR exclusive display restoration/removal is pending; retaining the cleanup barrier."sv;
         }
       }
@@ -3593,27 +3544,39 @@ namespace ar_glasses {
 
       std::optional<resolved_virtual_display_t> refresh_virtual_display_reference() {
         std::lock_guard lock(virtual_display_mutex_);
+        auto binding = virtual_display_.binding();
+        if (!binding.identity) {
+          return std::nullopt;
+        }
         const auto resolved = resolve_virtual_display(
-          virtual_display_identity_,
-          virtual_display_device_path_,
-          virtual_display_name_
+          *binding.identity,
+          binding.device_path,
+          binding.display_name
         );
         if (!resolved) {
           return std::nullopt;
         }
-        if (!same_virtual_display_identity(virtual_display_identity_, resolved->identity) || virtual_display_name_ != resolved->gdi_name) {
+        if (!same_virtual_display_identity(*binding.identity, resolved->identity) || binding.display_name != resolved->gdi_name) {
           BOOST_LOG(info) << "Local AR virtual desktop was renumbered ["sv
-                          << platf::to_utf8(virtual_display_name_) << " -> "sv
+                          << platf::to_utf8(binding.display_name) << " -> "sv
                           << platf::to_utf8(resolved->gdi_name) << ", target "sv
-                          << virtual_display_identity_.TargetId << " -> "sv
+                          << binding.identity->TargetId << " -> "sv
                           << resolved->identity.TargetId << "]."sv;
         }
-        virtual_display_identity_ = resolved->identity;
-        virtual_display_name_ = resolved->gdi_name;
-        virtual_display_device_path_ = resolved->device_path;
+        binding.identity = resolved->identity;
+        binding.display_name = resolved->gdi_name;
+        binding.device_path = resolved->device_path;
+        if (!virtual_display_.update_binding(std::move(binding))) {
+          return std::nullopt;
+        }
         virtual_display_absence_started_.reset();
         virtual_display_absence_observations_ = 0;
         return resolved;
+      }
+
+      VDISPLAY::creation_result_t virtual_display_binding() const {
+        std::lock_guard lock(virtual_display_mutex_);
+        return virtual_display_.binding();
       }
 
       void start_presenter(const target_state_t &presentation_target) {
@@ -3621,13 +3584,9 @@ namespace ar_glasses {
         if (!live_target_) {
           live_target_ = std::make_shared<platf::dxgi::local_presenter_config_t::target_t>();
         }
-        std::string source_display_name;
-        std::wstring source_device_path;
-        {
-          std::lock_guard lock(virtual_display_mutex_);
-          source_display_name = platf::to_utf8(virtual_display_name_);
-          source_device_path = virtual_display_device_path_;
-        }
+        const auto source_binding = virtual_display_binding();
+        auto source_display_name = platf::to_utf8(source_binding.display_name);
+        const auto source_device_path = source_binding.device_path;
         if (source_display_name.empty() || source_device_path.empty() || presentation_target.device_path.empty()) {
           BOOST_LOG(error) << "Local AR presenter refused to open without stable source/sink identities."sv;
           failed_.store(true);
@@ -3719,26 +3678,18 @@ namespace ar_glasses {
         });
       }
 
-      GUID display_guid_ {};
+      VDISPLAY::session_t virtual_display_;
       // Hold the live reservation across presenter restarts. Reconnect retention releases it.
       gpu_workload::lease_t live_gpu_lease_;
-      platf::primary_display::retained_display_ptr retained_display_;
       std::shared_ptr<pre_removal_topology_cleanup_t> resume_topology_cleanup_;
-      bool display_paused_ = false;
       const bool exclusive_;
-      bool exclusive_prepared_ = false;
       std::function<bool()> session_requested_;
-      SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT virtual_display_identity_ {};
       RECT original_target_rect_ {};
       LUID target_adapter_id_ {};
       std::wstring target_device_path_;
-      std::wstring virtual_display_name_;
-      std::wstring virtual_display_device_path_;
-      bool virtual_display_added_ = false;
-      bool virtual_display_published_ = false;
       bool virtual_hdr_active_ = false;
       bool ready_ = false;
-      std::mutex virtual_display_mutex_;
+      mutable std::mutex virtual_display_mutex_;
       std::optional<std::chrono::steady_clock::time_point> virtual_display_absence_started_;
       unsigned virtual_display_absence_observations_ = 0;
       std::shared_ptr<platf::dxgi::local_presenter_config_t::target_t> live_target_;
@@ -3856,7 +3807,7 @@ namespace ar_glasses {
         }
         // Leave enough time for three absent observations and the final topology-settle check.
         // Failed work remains owned by the barrier and is retried on the next bounded interval.
-        const bool completed = wait_for_local_virtual_display_retirement_impl(500ms, true);
+        const bool completed = wait_for_local_virtual_display_retirement_impl(500ms);
         retirement_retry_after_ = std::chrono::steady_clock::now() + failed_session_retry;
         if (completed) {
           BOOST_LOG(info) << "Completed pending local AR display cleanup while presentation is inactive."sv;
@@ -4643,10 +4594,10 @@ namespace ar_glasses {
     const virtual_display_identity_contract_t &retiring,
     const virtual_display_identity_contract_t &observed
   ) {
-    retired_local_virtual_display_t record;
-    record.identity = {retiring.adapter_id, retiring.target_id};
+    VDISPLAY::creation_result_t record;
+    record.identity = SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT {retiring.adapter_id, retiring.target_id};
     record.device_path = retiring.device_path;
-    record.gdi_name = retiring.gdi_name;
+    record.display_name = retiring.gdi_name;
     return matches_retiring_local_virtual_display(
       record,
       observed.adapter_id,
@@ -4654,6 +4605,74 @@ namespace ar_glasses {
       observed.device_path,
       observed.friendly_name
     );
+  }
+
+  detail::local_retirement_transfer_result_t detail::local_retirement_transfer_for_test() {
+    local_retirement_transfer_result_t result;
+    {
+      std::lock_guard lock(ownership_mutex);
+      if (retired_local_virtual_display || local_session_present) {
+        return result;
+      }
+    }
+    auto now = std::chrono::steady_clock::now();
+    bool final_query_indeterminate = false;
+    VDISPLAY::session_t session({
+      .remove = [&](const GUID &) {
+        ++result.remove_calls;
+        return true;
+      },
+      .now = [&]() {
+        return now;
+      },
+      .sleep = [&](std::chrono::milliseconds delay) {
+        now += delay;
+      },
+    });
+    VDISPLAY::creation_result_t binding {
+      .display_name = L"test-local-display",
+      .device_path = L"test-local-device",
+      .identity = SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT {{42, 0}, 7},
+    };
+    session.adopt({}, std::move(binding));
+    const auto generation = session.generation();
+    result.transferred = begin_local_virtual_display_retirement(std::move(session), {
+                                                                                      .prepare = [&](VDISPLAY::session_t &) {
+                                                                                        ++result.prepare_calls;
+                                                                                        return true;
+                                                                                      },
+                                                                                      .query = [&](const VDISPLAY::session_t &) {
+                                                                                        if (std::exchange(final_query_indeterminate, false)) {
+                                                                                          return VDISPLAY::display_identity_state_e::indeterminate;
+                                                                                        }
+                                                                                        return VDISPLAY::display_identity_state_e::absent;
+                                                                                      },
+                                                                                      .finish = [&](VDISPLAY::session_t &) {
+                                                                                        ++result.finish_calls;
+                                                                                        final_query_indeterminate = true;
+                                                                                        return true;
+                                                                                      },
+                                                                                    });
+    if (!result.transferred) {
+      return result;
+    }
+    auto cleanup = util::fail_guard([]() {
+      std::lock_guard lock(ownership_mutex);
+      retired_local_virtual_display.reset();
+      ownership_changed.notify_all();
+    });
+    result.source_released = !session.owns_display() && !session.prepared() && session.generation() == 0;
+    result.first_wait_completed = wait_for_local_virtual_display_retirement_impl(1s);
+    {
+      std::lock_guard lock(ownership_mutex);
+      result.barrier_retained = retired_local_virtual_display && retired_local_virtual_display->generation() == generation;
+    }
+    result.second_wait_completed = wait_for_local_virtual_display_retirement_impl(1s);
+    {
+      std::lock_guard lock(ownership_mutex);
+      result.barrier_released = !retired_local_virtual_display;
+    }
+    return result;
   }
 
   std::optional<std::string> detail::rebase_topology_recovery_json_for_test(
@@ -4784,7 +4803,7 @@ namespace ar_glasses {
   }
 
   bool wait_for_local_virtual_display_retirement(std::chrono::milliseconds timeout) {
-    return wait_for_local_virtual_display_retirement_impl(timeout, true);
+    return wait_for_local_virtual_display_retirement_impl(timeout);
   }
 
   bool remote_virtual_display_starting(

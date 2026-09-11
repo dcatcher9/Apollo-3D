@@ -70,15 +70,10 @@ namespace proc {
     std::recursive_mutex process_state_mutex;
 #ifdef _WIN32
     // Topology removal outlives the proc_t configuration object that initiated it. Keep the
-    // stable driver identity here so refresh() cannot discard it while replacing proc.
+    // display owner here so refresh() cannot discard it while replacing proc.
     std::recursive_mutex retired_virtual_display_mutex;
     std::condition_variable_any retired_virtual_display_changed;
-    std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> retired_virtual_display_identity;
-    std::optional<GUID> retired_virtual_display_guid;
-    std::wstring retired_virtual_display_device_path;
-    std::wstring retired_virtual_display_gdi_name;
-    VDISPLAY::retirement_record_t retired_virtual_display_retirement;
-    bool retired_virtual_display_remove_accepted = false;
+    std::optional<VDISPLAY::session_t> retired_virtual_display_session;
     bool retired_virtual_display_remove_ready = false;
     bool retired_virtual_display_deactivate_desktop = false;
     bool retired_virtual_display_requires_device_absence = false;
@@ -87,7 +82,6 @@ namespace proc {
     bool retired_virtual_display_restart_explorer_after_removal = false;
     bool retired_virtual_display_explorer_repair_debt = false;
     bool retired_virtual_display_explorer_repair_in_progress = false;
-    std::chrono::steady_clock::time_point retired_virtual_display_remove_not_before {};
     std::uint64_t retired_virtual_display_generation = 0;
     bool retired_virtual_display_cleanup_scheduled = false;
     bool retired_virtual_display_workers_stopping = false;
@@ -95,15 +89,6 @@ namespace proc {
       retired_virtual_display_detach_context;
     std::jthread retired_virtual_display_cleanup_worker;
     std::jthread retired_virtual_display_explorer_repair_worker;
-
-    bool sameVirtualDisplayIdentity(
-      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &left,
-      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &right
-    ) {
-      return left.AdapterLuid.HighPart == right.AdapterLuid.HighPart &&
-             left.AdapterLuid.LowPart == right.AdapterLuid.LowPart &&
-             left.TargetId == right.TargetId;
-    }
 
     bool retiredVirtualDisplayRemovalAllowed(
       bool desktop_deactivation_requested,
@@ -399,7 +384,7 @@ namespace proc {
         std::lock_guard state_lock(_hdr_worker_state->mutex);
         if (_hdr_worker_state->display_name != display_name) {
           _hdr_worker_state->display_name = display_name;
-          _hdr_worker_state->device_path = _virtual_display_device_path;
+          _hdr_worker_state->device_path = _display_session.binding().device_path;
           ++_hdr_worker_state->requested_revision;
           changed = true;
         }
@@ -444,7 +429,7 @@ namespace proc {
 
     auto state = std::make_shared<hdr_worker_state_t>();
     state->display_name = display_name;
-    state->device_path = _virtual_display_device_path;
+    state->device_path = _display_session.binding().device_path;
     state->desired_hdr = enable_hdr;
     state->requested_revision = 1;
     _hdr_worker_state = state;
@@ -606,70 +591,54 @@ namespace proc {
     return completed && _hdr_worker_state->completed_revision == revision && _hdr_worker_state->completion_succeeded;
   }
 
-  VDISPLAY::creation_result_t proc_t::create_retained_virtual_display(
+  VDISPLAY::session_t proc_t::create_retained_virtual_display(
     std::uint32_t width,
     std::uint32_t height,
     std::uint32_t fps,
     const GUID &guid,
     const std::optional<LUID> &render_adapter
   ) {
-    if (!_launch_session) {
-      return {};
+    VDISPLAY::session_t owner;
+    if (_launch_session) {
+      VDISPLAY::display_spec_t spec;
+      spec.client_uid = _launch_session->unique_id;
+      spec.client_name = _launch_session->device_name;
+      spec.guid = guid;
+      spec.width = width;
+      spec.height = height;
+      spec.refresh_millihz = fps;
+      spec.render_adapter_luid = render_adapter;
+      spec.exclusive = _virtual_display_only;
+      owner.acquire(std::move(spec));
     }
-
-    if (!prepare_virtual_display_topology()) {
-      BOOST_LOG(error) << "Could not save the original display configuration before virtual-display recreation."sv;
-      return {};
-    }
-
-    return VDISPLAY::createVirtualDisplayWithRenderAdapter(
-      _launch_session->unique_id.c_str(),
-      _launch_session->device_name.c_str(),
-      width,
-      height,
-      fps,
-      guid,
-      render_adapter
-    );
+    return owner;
   }
 
   bool proc_t::prepare_retired_virtual_display_for_removal(
     std::chrono::milliseconds timeout
   ) {
     std::lock_guard retirement_lock(retired_virtual_display_mutex);
-    if (!retired_virtual_display_identity) {
+    if (!retired_virtual_display_session) {
       return true;
     }
-    // Add may succeed before Windows publishes its device path. Resolve only the exact returned
-    // driver identity so a prepared journal can be bound even on the delayed cleanup path.
-    if (retired_virtual_display_device_path.empty()) {
-      const auto current = VDISPLAY::queryVirtualDisplayIdentity(
-        *retired_virtual_display_identity,
-        {},
-        retired_virtual_display_gdi_name
-      );
-      if (current.state == VDISPLAY::display_identity_state_e::present) {
-        retired_virtual_display_device_path = current.device_path;
-        retired_virtual_display_gdi_name = current.display_name;
-      }
-    }
     // Restore the original displays before detach captures its survivor topology. The retirement
-    // record and its autonomous worker retain ownership if Windows cannot restore it yet.
-    if (!platf::primary_display::restore(retired_virtual_display_device_path)) {
+    // owner also resolves an unpublished Add's path without relying on a stale DISPLAY name.
+    auto &owner = *retired_virtual_display_session;
+    if (!owner.restore()) {
       BOOST_LOG(warning) << "Deferring virtual-display removal until the original display configuration is restored."sv;
       return false;
     }
     if (retired_virtual_display_remove_ready) {
       return true;
     }
-    if (!retired_virtual_display_deactivate_desktop) {
+    if (!retired_virtual_display_deactivate_desktop || !owner.binding().identity) {
       retired_virtual_display_remove_ready = true;
       return true;
     }
 
     const auto detach = VDISPLAY::deactivateVirtualDisplay(
-      *retired_virtual_display_identity,
-      retired_virtual_display_device_path,
+      *owner.binding().identity,
+      owner.binding().device_path,
       timeout,
       retired_virtual_display_detach_context
     );
@@ -743,7 +712,7 @@ namespace proc {
 
   void proc_t::schedule_retired_virtual_display_cleanup() {
     std::lock_guard retirement_lock(retired_virtual_display_mutex);
-    if (retired_virtual_display_workers_stopping || !retired_virtual_display_identity) {
+    if (retired_virtual_display_workers_stopping || !retired_virtual_display_session) {
       return;
     }
 
@@ -771,7 +740,7 @@ namespace proc {
               1s,
               [generation]() {
                 return generation != retired_virtual_display_generation ||
-                       !retired_virtual_display_identity ||
+                       !retired_virtual_display_session ||
                        !retired_virtual_display_cleanup_scheduled;
               }
             );
@@ -789,7 +758,7 @@ namespace proc {
             // one slice.
             const bool completed = proc_t::wait_for_retired_virtual_display(900ms, false);
             lock.lock();
-            if (generation == retired_virtual_display_generation && (completed || !retired_virtual_display_identity)) {
+            if (generation == retired_virtual_display_generation && (completed || !retired_virtual_display_session)) {
               retired_virtual_display_cleanup_scheduled = false;
             }
           }
@@ -805,11 +774,7 @@ namespace proc {
   }
 
   bool proc_t::retire_virtual_display(
-    const std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> &identity,
-    const GUID &guid,
-    const std::wstring &device_path,
-    const std::wstring &gdi_name,
-    bool was_published,
+    VDISPLAY::session_t &owner,
     std::chrono::milliseconds timeout,
     bool deactivate_desktop,
     bool final_teardown,
@@ -817,118 +782,126 @@ namespace proc {
   ) {
   #ifdef SUNSHINE_TESTS
     if (_display_topology_test_hook) {
-      return _display_topology_test_hook(
+      const bool completed = _display_topology_test_hook(
         display_topology_test_operation_e::retire,
         final_teardown
       );
+      if (completed) {
+        // The hook proves cleanup of the fake binding; consume its ownership as production does.
+        (void) VDISPLAY::session_t(std::move(owner));
+      }
+      return completed;
     }
   #endif
-    if (!identity) {
-      BOOST_LOG(error) << "Cannot retire a virtual display without its stable driver identity."sv;
-      return false;
+    if (!owner.owns_display() && !owner.prepared()) {
+      return true;
     }
 
-    {
-      std::lock_guard retirement_lock(retired_virtual_display_mutex);
-      if (retired_virtual_display_identity) {
-        const bool same_pending_identity =
-          sameVirtualDisplayIdentity(*retired_virtual_display_identity, *identity) &&
-          retired_virtual_display_guid &&
-          IsEqualGUID(*retired_virtual_display_guid, guid);
-        if (same_pending_identity) {
-          // Final teardown may join an autonomous retirement that a failed warm replacement
-          // started. Preserve the stronger one-shot intent without weakening its later evidence
-          // gates.
-          retired_virtual_display_restart_explorer_after_removal =
-            retired_virtual_display_restart_explorer_after_removal ||
-            restart_explorer_after_removal;
-          retired_virtual_display_final_teardown =
-            retired_virtual_display_final_teardown ||
-            final_teardown;
-          const bool retiring_bound_display =
-            _virtual_display_identity &&
-            sameVirtualDisplayIdentity(*_virtual_display_identity, *identity);
-          if (virtualDisplayRetirementHandoffMarksSession(_virtual_display_identity.has_value(), retiring_bound_display)) {
-            _virtual_display_retirement_handed_off = true;
-          }
-          // Recursive terminate()/rollback paths can encounter the record they just created.
-          // Continue that retirement instead of attempting to overwrite or remove it twice.
-          const bool completed = wait_for_retired_virtual_display(timeout, false);
-          if (!completed) {
-            schedule_retired_virtual_display_cleanup();
-          }
-          return completed;
-        }
-      }
-      if (!retired_virtual_display_identity && _virtual_display_retirement_handed_off && _virtual_display_identity && sameVirtualDisplayIdentity(*_virtual_display_identity, *identity)) {
-        // The autonomous owner already finished this exact binding between two recursive teardown
-        // calls. Do not enqueue the removed identity or issue Remove for its reused GUID again.
-        if (final_teardown) {
-          const bool restart_explorer = explorerRepairAllowedForRetirement(
-            true,
-            restart_explorer_after_removal,
-            retired_virtual_display_explorer_repair_debt
-          );
-          retired_virtual_display_explorer_repair_debt = false;
-          if (restart_explorer) {
-            scheduleExplorerRepairLocked();
-          }
-        }
-        return true;
-      }
-    }
-
-    // Never overwrite an unresolved retirement record. It is the only stable proof that an old
-    // target is gone before SudoVDA is asked to reuse the same GUID.
+    // Never overwrite an unresolved owner. GUID reuse waits for its exact absence proof and
+    // any Explorer repair that followed it.
     if (!wait_for_retired_virtual_display(3s)) {
       BOOST_LOG(error) << "A previous virtual-display retirement is still unresolved."sv;
       return false;
     }
 
-    const auto retirement_deadline =
-      std::chrono::steady_clock::now() + std::max(timeout, std::chrono::milliseconds::zero());
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::max(timeout, std::chrono::milliseconds::zero());
     const auto remaining_time = [&]() {
       const auto now = std::chrono::steady_clock::now();
-      if (now >= retirement_deadline) {
-        return std::chrono::milliseconds::zero();
-      }
-      return std::chrono::duration_cast<std::chrono::milliseconds>(retirement_deadline - now);
+      return now >= deadline ? 0ms :
+                               std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
     };
 
     {
       std::lock_guard retirement_lock(retired_virtual_display_mutex);
-      retired_virtual_display_identity = identity;
-      retired_virtual_display_guid = guid;
-      retired_virtual_display_device_path = device_path;
-      retired_virtual_display_gdi_name = gdi_name;
-      retired_virtual_display_retirement = {was_published, std::chrono::steady_clock::now()};
-      retired_virtual_display_remove_accepted = false;
-      retired_virtual_display_remove_ready = !deactivate_desktop;
+      if (retired_virtual_display_session) {
+        return false;
+      }
+      const bool marks_session = virtualDisplayRetirementHandoffMarksSession(
+        _display_session.owns_display(),
+        &owner == &_display_session
+      );
+      retired_virtual_display_session.emplace(std::move(owner));
+      retired_virtual_display_remove_ready = false;
       retired_virtual_display_deactivate_desktop = deactivate_desktop;
       retired_virtual_display_requires_device_absence = false;
       retired_virtual_display_was_active_desktop_path = false;
       retired_virtual_display_final_teardown = final_teardown;
-      retired_virtual_display_restart_explorer_after_removal =
-        restart_explorer_after_removal;
-      retired_virtual_display_remove_not_before = retired_virtual_display_retirement.started;
+      retired_virtual_display_restart_explorer_after_removal = restart_explorer_after_removal;
+      retired_virtual_display_detach_context.reset();
       ++retired_virtual_display_generation;
       retired_virtual_display_cleanup_scheduled = false;
-      retired_virtual_display_detach_context.reset();
-      const bool retiring_bound_display =
-        _virtual_display_identity &&
-        sameVirtualDisplayIdentity(*_virtual_display_identity, *identity);
-      if (virtualDisplayRetirementHandoffMarksSession(_virtual_display_identity.has_value(), retiring_bound_display)) {
+      if (marks_session) {
         _virtual_display_retirement_handed_off = true;
       }
+
+      // The adapter prepares detach within each waiter's budget. The owner retains the resulting
+      // preparation latch, Remove acknowledgement/retry time, and exact-absence proof.
+      const VDISPLAY::session_retirement_callbacks_t callbacks {
+        .prepare = [](VDISPLAY::session_t &) {
+          return retired_virtual_display_remove_ready;
+        },
+        .before_remove = [](VDISPLAY::session_t &retired) {
+          if (!retiredVirtualDisplayRemovalAllowed(
+                retired_virtual_display_deactivate_desktop,
+                retired_virtual_display_remove_ready
+              )) {
+            return false;
+          }
+          if (retired_virtual_display_deactivate_desktop && retired_virtual_display_requires_device_absence) {
+            // Windows can reattach the exact target between bounded worker slices. A sole
+            // remaining desktop intentionally bypasses this two-phase detach check.
+            const auto &binding = retired.binding();
+            const auto active_state = VDISPLAY::queryVirtualDisplayIdentity(
+                                        *binding.identity,
+                                        binding.device_path,
+                                        binding.display_name
+            )
+                                        .state;
+            if (!VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(true, active_state)) {
+              retired_virtual_display_remove_ready = false;
+              retired_virtual_display_requires_device_absence = false;
+              retired_virtual_display_detach_context.reset();
+              BOOST_LOG(warning) << "Virtual-display active-path absence could not be revalidated "
+                                    "immediately before driver removal; restarting safe detach."sv;
+              return false;
+            }
+          }
+          return true;
+        },
+        .query = [](const VDISPLAY::session_t &retired) {
+          const auto &binding = retired.binding();
+          if (!binding.identity) {
+            return VDISPLAY::display_identity_state_e::absent;
+          }
+          if (retired_virtual_display_requires_device_absence) {
+            // Desktop detach removes the active path before the driver monitor disappears.
+            return VDISPLAY::queryVirtualDisplayRetirementState(
+              *binding.identity,
+              binding.device_path,
+              binding.display_name
+            );
+          }
+          return VDISPLAY::queryVirtualDisplayIdentity(
+                   *binding.identity,
+                   binding.device_path,
+                   binding.display_name
+          )
+            .state;
+        },
+      };
+      retired_virtual_display_session->begin_retirement(
+        callbacks,
+        {{deactivate_desktop ? 250ms : 50ms, 250ms}, 250ms}
+      );
     }
 
-    if (!prepare_retired_virtual_display_for_removal(
-          std::min(remaining_time(), 5000ms)
-        )) {
+    // Foreground teardown retains its longer initial detach budget; autonomous slices remain
+    // bounded by wait_for_retired_virtual_display()'s smaller preparation budget.
+    if (!prepare_retired_virtual_display_for_removal(std::min(remaining_time(), 5000ms))) {
       schedule_retired_virtual_display_cleanup();
       return false;
     }
-
     const bool completed = wait_for_retired_virtual_display(remaining_time(), false);
     if (!completed) {
       schedule_retired_virtual_display_cleanup();
@@ -939,76 +912,50 @@ namespace proc {
   void proc_t::clear_virtual_display_binding() {
     stop_hdr_worker();
     _hdr_worker_state.reset();
-    _virtual_display_identity.reset();
-    _virtual_display_device_path.clear();
-    _virtual_display_gdi_name.clear();
-    _virtual_display_published = false;
-    _paused_virtual_display.reset();
-    _remote_display_pause_pending = false;
+    // Resource ownership has already moved to retirement. Never discard a live driver identity.
+    if (!_display_session.owns_display() && !_display_session.prepared()) {
+      _display_session = VDISPLAY::session_t {};
+    }
     set_display_name_locked({});
   }
 
   bool proc_t::refresh_virtual_display_binding() {
-  #ifdef SUNSHINE_TESTS
-    if (_display_topology_test_hook) {
-      return _display_topology_test_hook(
-        display_topology_test_operation_e::refresh_binding,
-        _virtual_display_only
-      );
-    }
-  #endif
-    if (!_virtual_display_identity) {
+    if (!_display_session.owns_display()) {
       return false;
     }
     for (int attempt = 0; attempt < 20; ++attempt) {
-      const auto current = VDISPLAY::queryVirtualDisplayIdentity(
-        *_virtual_display_identity,
-        _virtual_display_device_path,
-        _virtual_display_gdi_name
-      );
-      if (current.state == VDISPLAY::display_identity_state_e::present && !current.display_name.empty()) {
-        _virtual_display_device_path = current.device_path;
-        _virtual_display_gdi_name = current.display_name;
-        _virtual_display_published = true;
-        set_display_name_locked(platf::to_utf8(current.display_name));
+      if (_display_session.refresh() && !_display_session.binding().display_name.empty()) {
+  #ifdef SUNSHINE_TESTS
+        if (_display_topology_test_hook) {
+          return true;
+        }
+  #endif
+        set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
         config::video.output_name = display_device::map_display_name(display_name);
         return !config::video.output_name.empty();
       }
+  #ifdef SUNSHINE_TESTS
+      if (_display_topology_test_hook) {
+        break;
+      }
+  #endif
       std::this_thread::sleep_for(50ms);
     }
-    // Never let a later HDR/mode operation address a recycled DISPLAYn name.
-    _virtual_display_gdi_name.clear();
+    _display_session.invalidate_gdi();
     set_display_name_locked({});
     return false;
   }
 
-  bool proc_t::prepare_virtual_display_topology() {
-    // AddVirtualDisplay can restore remembered topology before explicit promotion, so persist
-    // the original configuration before creating the monitor.
-    return platf::primary_display::prepare(_virtual_display_only);
-  }
-
   bool proc_t::prepare_retained_display_for_resume() {
-    if (!_remote_display_pause_pending) {
+    if (!_display_session.pause_requested()) {
       return refresh_virtual_display_binding();
     }
-    // A failed pause can leave a physical recovery transaction pending. Finish it first, using
-    // the same retained mode/identity, before enabling the display or touching HDR/capture.
-    if (!pause_display_for_resume()) {
-      return false;
-    }
-    const bool active =
-  #ifdef SUNSHINE_TESTS
-      _display_topology_test_hook ?
-        _display_topology_test_hook(display_topology_test_operation_e::reactivate, _virtual_display_only) :
-  #endif
-        platf::primary_display::reactivate(_paused_virtual_display, _virtual_display_only);
-    if (!active || !refresh_virtual_display_binding()) {
+    _display_session.set_exclusive(_virtual_display_only);
+    if (!_display_session.begin_resume() || !refresh_virtual_display_binding()) {
       BOOST_LOG(warning) << "Could not reactivate the retained virtual display; the remote session remains paused."sv;
       return false;
     }
-    _remote_display_pause_pending = false;
-    _paused_virtual_display.reset();
+    // Keep the recovery snapshot until mode, HDR and final topology promotion also succeed.
     BOOST_LOG(info) << "Retained virtual display reactivated before remote resume: " << display_name;
     return true;
   }
@@ -1029,7 +976,8 @@ namespace proc {
         );
       }
   #endif
-      return platf::primary_display::promote(_virtual_display_device_path, _virtual_display_only);
+      _display_session.set_exclusive(_virtual_display_only);
+      return _display_session.promote();
     };
 
     bool promoted = promote_once();
@@ -1062,18 +1010,13 @@ namespace proc {
   }
 
   void proc_t::adopt_virtual_display(
-    VDISPLAY::creation_result_t created_display,
+    VDISPLAY::session_t created_display,
     bool enable_hdr
   ) {
-    _virtual_display_identity = std::move(created_display.identity);
-    _virtual_display_render_adapter = created_display.render_adapter_luid;
-    _virtual_display_device_path = std::move(created_display.device_path);
-    _virtual_display_gdi_name = std::move(created_display.display_name);
-    _virtual_display_published = !_virtual_display_gdi_name.empty();
+    _display_session = std::move(created_display);
     _virtual_display_retirement_handed_off = false;
     _virtual_display = true;
-
-    set_display_name_locked(platf::to_utf8(_virtual_display_gdi_name));
+    set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
     config::video.output_name = display_device::map_display_name(display_name);
     start_hdr_worker(enable_hdr);
   }
@@ -1087,6 +1030,12 @@ namespace proc {
     std::lock_guard lock(process_state_mutex);
     // Ensure starting from a clean slate.
     terminate(false, false);
+#ifdef _WIN32
+    if (_display_session.owns_display() || _display_session.prepared()) {
+      BOOST_LOG(error) << "The previous virtual display still owns unresolved cleanup; deferring a new launch."sv;
+      return 503;
+    }
+#endif
 
     const uint32_t client_width = launch_session->width ? launch_session->width : 1920;
     const uint32_t client_height = launch_session->height ? launch_session->height : 1080;
@@ -1158,63 +1107,28 @@ namespace proc {
       }
 
       if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
-        // Windows can remember that this virtual monitor used to be primary. Capture the
-        // physical baseline before Add itself has a chance to restore that remembered state.
-        if (!prepare_virtual_display_topology()) {
-          BOOST_LOG(error) << "Could not save the original display configuration before virtual-display creation."sv;
-          return 503;
-        }
-        std::string device_name;
-        std::string device_uuid_str;
-        uuid_util::uuid_t device_uuid;
-
-        device_name = launch_session->device_name;
-        device_uuid_str = launch_session->unique_id;
-        device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
-
+        auto device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
         memcpy(&launch_session->display_guid, &device_uuid, sizeof(GUID));
-
         int target_fps = launch_session->fps ? launch_session->fps : 60000;
-
         if (target_fps < 1000) {
           target_fps *= 1000;
         }
-
-        VDISPLAY::creation_result_t created_display;
-        if (!config::video.adapter_name.empty()) {
-          created_display = VDISPLAY::createVirtualDisplayOnAdapter(
-            device_uuid_str.c_str(),
-            device_name.c_str(),
-            render_width,
-            render_height,
-            target_fps,
-            launch_session->display_guid,
-            platf::from_utf8(config::video.adapter_name)
-          );
-        } else {
-          created_display = VDISPLAY::createVirtualDisplay(
-            device_uuid_str.c_str(),
-            device_name.c_str(),
-            render_width,
-            render_height,
-            target_fps,
-            launch_session->display_guid
-          );
-        }
-
-        // Add success and GDI-name publication are separate. Track the exact driver identity only
-        // when AddVirtualDisplay succeeded so a failed launch cannot remove a display it did not
-        // create, while a name-timeout still receives deterministic teardown.
-        launch_session->virtual_display = created_display.added();
-        _virtual_display_identity = created_display.identity;
-        _virtual_display_render_adapter = created_display.render_adapter_luid;
-        _virtual_display_device_path = created_display.device_path;
-        _virtual_display_gdi_name = created_display.display_name;
-        _virtual_display_published = !created_display.display_name.empty();
+        VDISPLAY::display_spec_t spec;
+        spec.client_uid = launch_session->unique_id;
+        spec.client_name = launch_session->device_name;
+        spec.guid = launch_session->display_guid;
+        spec.width = render_width;
+        spec.height = render_height;
+        spec.refresh_millihz = target_fps;
+        spec.adapter_name = platf::from_utf8(config::video.adapter_name);
+        spec.exclusive = _virtual_display_only;
+        // The owner saves the baseline before Add, and records Add identity before binding.
+        const bool acquired = _display_session.acquire(std::move(spec));
+        const auto &created_display = _display_session.binding();
+        launch_session->virtual_display = _display_session.owns_display();
         _virtual_display_retirement_handed_off = false;
-
-        if (!created_display.device_path.empty() && !platf::primary_display::bind_pending(created_display.device_path)) {
-          BOOST_LOG(error) << "Could not bind primary-display recovery to the created virtual monitor."sv;
+        if (!acquired) {
+          BOOST_LOG(error) << "Could not acquire and bind the virtual display; retaining any created device for cleanup."sv;
           return 503;
         }
 
@@ -1514,6 +1428,7 @@ namespace proc {
     auto virtual_display_policy_rollback = util::fail_guard([&]() {
       if (_app_id > 0 && _launch_session) {
         _virtual_display_only = previous_virtual_display_only;
+        _display_session.set_exclusive(previous_virtual_display_only);
       }
     });
 #endif
@@ -1529,6 +1444,7 @@ namespace proc {
     auto primary_rollback = util::fail_guard([&]() {
 #ifdef _WIN32
       _virtual_display_only = previous_virtual_display_only;
+      _display_session.set_exclusive(previous_virtual_display_only);
 #endif
       pause_display_for_resume();
     });
@@ -1550,7 +1466,7 @@ namespace proc {
 
       if (display_mode_changed) {
         const auto requested_mode_test = VDISPLAY::testDisplaySettings(
-          _virtual_display_gdi_name.c_str(),
+          _display_session.binding().display_name.c_str(),
           render_size->width,
           render_size->height,
           launch_session->fps
@@ -1559,7 +1475,7 @@ namespace proc {
         const bool fast_path_succeeded =
           fast_path_attempted &&
           VDISPLAY::changeDisplaySettings(
-            _virtual_display_gdi_name.c_str(),
+            _display_session.binding().display_name.c_str(),
             render_size->width,
             render_size->height,
             launch_session->fps,
@@ -1579,7 +1495,7 @@ namespace proc {
             }
 
             const bool mode_restored =
-              VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps, false) == DISP_CHANGE_SUCCESSFUL;
+              VDISPLAY::changeDisplaySettings(_display_session.binding().display_name.c_str(), old_width, old_height, old_fps, false) == DISP_CHANGE_SUCCESSFUL;
             const bool hdr_restored = request_hdr_state(old_hdr, 6s);
             if (!mode_restored) {
               BOOST_LOG(error) << "Failed to restore the retained display's prior mode after its in-place update failed."sv;
@@ -1592,7 +1508,7 @@ namespace proc {
 
           // Replacement requires the exact driver identity. If the in-place attempt may have
           // changed a baseline mode, restore it before leaving the retained session available.
-          if (!_virtual_display_identity) {
+          if (!_display_session.binding().identity) {
             BOOST_LOG(error) << "Cannot replace the retained virtual display without its stable driver identity."sv;
             if (!restore_failed_fast_path()) {
               BOOST_LOG(error) << "The retained display could not be restored; terminating the incoherent retained session."sv;
@@ -1609,22 +1525,14 @@ namespace proc {
             return 503;
           }
 
-          const auto old_identity = _virtual_display_identity;
-          const auto old_render_adapter = _virtual_display_render_adapter;
-          const auto old_device_path = _virtual_display_device_path;
-          const auto old_gdi_name = _virtual_display_gdi_name;
-          const bool old_was_published = _virtual_display_published;
-          const GUID display_guid = _launch_session->display_guid;
+          const auto old_render_adapter = _display_session.binding().render_adapter_luid;
+          const GUID display_guid = _display_session.spec().guid;
 
           // The worker must not query or mutate a DISPLAY name while Windows is retiring it.
           stop_hdr_worker();
           _hdr_worker_state.reset();
           if (!retire_virtual_display(
-                old_identity,
-                display_guid,
-                old_device_path,
-                old_gdi_name,
-                old_was_published,
+                _display_session,
                 4s,
                 true,
                 false,
@@ -1642,18 +1550,8 @@ namespace proc {
             fatal_failure,
           };
 
-          auto retire_candidate = [&](const VDISPLAY::creation_result_t &candidate) {
-            return retire_virtual_display(
-              candidate.identity,
-              display_guid,
-              candidate.device_path,
-              candidate.display_name,
-              !candidate.display_name.empty(),
-              4s,
-              true,
-              false,
-              false
-            );
+          auto retire_candidate = [&](VDISPLAY::session_t &candidate) {
+            return retire_virtual_display(candidate, 4s, true, false, false);
           };
 
           auto recreate_mode = [&](std::uint32_t width, std::uint32_t height, std::uint32_t fps, bool enable_hdr) {
@@ -1664,25 +1562,24 @@ namespace proc {
               display_guid,
               old_render_adapter
             );
-            if (!candidate.added()) {
+            if (!candidate.owns_display()) {
               BOOST_LOG(error) << "SudoVDA rejected the retained virtual-display recreation."sv;
-              platf::primary_display::recover();
-              return recreation_result_e::clean_failure;
+              return retire_candidate(candidate) ? recreation_result_e::clean_failure : recreation_result_e::fatal_failure;
             }
-            if (!candidate.device_path.empty() && !platf::primary_display::bind_pending(candidate.device_path)) {
+            if (!candidate.bind()) {
               BOOST_LOG(error) << "Could not bind primary-display recovery to the recreated virtual monitor."sv;
               return retire_candidate(candidate) ? recreation_result_e::clean_failure : recreation_result_e::fatal_failure;
             }
-            if (candidate.display_name.empty()) {
+            if (candidate.binding().display_name.empty()) {
               BOOST_LOG(error) << "The recreated virtual display was added, but Windows did not publish it in time."sv;
               return retire_candidate(candidate) ? recreation_result_e::clean_failure : recreation_result_e::fatal_failure;
             }
-            if (VDISPLAY::changeDisplaySettings(candidate.display_name.c_str(), width, height, fps, false) != DISP_CHANGE_SUCCESSFUL) {
+            if (VDISPLAY::changeDisplaySettings(candidate.binding().display_name.c_str(), width, height, fps, false) != DISP_CHANGE_SUCCESSFUL) {
               BOOST_LOG(error) << "Windows did not accept the recreated virtual display's requested mode."sv;
               return retire_candidate(candidate) ? recreation_result_e::clean_failure : recreation_result_e::fatal_failure;
             }
 
-            const auto candidate_display_name = platf::to_utf8(candidate.display_name);
+            const auto candidate_display_name = platf::to_utf8(candidate.binding().display_name);
             bool capture_ready = false;
             for (int attempt = 0; attempt < 3 && !capture_ready; ++attempt) {
               const auto capturable_displays = platf::display_names();
@@ -1705,11 +1602,7 @@ namespace proc {
               BOOST_LOG(error) << "The recreated virtual display did not reach its requested HDR state."sv;
               stop_hdr_worker();
               const bool retired = retire_virtual_display(
-                _virtual_display_identity,
-                display_guid,
-                _virtual_display_device_path,
-                _virtual_display_gdi_name,
-                _virtual_display_published,
+                _display_session,
                 4s,
                 true,
                 false,
@@ -1758,7 +1651,7 @@ namespace proc {
                                    (_virtual_display || old_hdr != launch_session->enable_hdr);
     if (needs_hdr_request && !request_hdr_state(launch_session->enable_hdr, 6s)) {
       bool rollback_succeeded = true;
-      if (display_mode_changed && VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps, false) != DISP_CHANGE_SUCCESSFUL) {
+      if (display_mode_changed && VDISPLAY::changeDisplaySettings(_display_session.binding().display_name.c_str(), old_width, old_height, old_fps, false) != DISP_CHANGE_SUCCESSFUL) {
         BOOST_LOG(error) << "Failed to roll back the retained virtual-display mode after HDR reconfiguration failed."sv;
         rollback_succeeded = false;
       }
@@ -1783,7 +1676,7 @@ namespace proc {
       if (display_mode_changed || old_hdr != launch_session->enable_hdr) {
         rollback_succeeded = refresh_virtual_display_binding();
         if (rollback_succeeded && display_mode_changed) {
-          rollback_succeeded = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps, false) == DISP_CHANGE_SUCCESSFUL;
+          rollback_succeeded = VDISPLAY::changeDisplaySettings(_display_session.binding().display_name.c_str(), old_width, old_height, old_fps, false) == DISP_CHANGE_SUCCESSFUL;
         }
         rollback_succeeded = rollback_succeeded && request_hdr_state(old_hdr, 6s);
       }
@@ -1815,6 +1708,10 @@ namespace proc {
     _launch_session->sbs_mode = launch_session->sbs_mode;
     _active_launch_session_id = launch_session->id;
 #ifdef _WIN32
+    if (_virtual_display) {
+      _display_session.update_mode(launch_session->width, launch_session->height, launch_session->fps);
+      _display_session.commit_resume();
+    }
     virtual_display_policy_rollback.disable();
 #endif
     primary_rollback.disable();
@@ -1830,7 +1727,7 @@ namespace proc {
     }
 
 #ifdef _WIN32
-    if (!_virtual_display || !_launch_session || _virtual_display_gdi_name.empty()) {
+    if (!_virtual_display || !_launch_session || _display_session.binding().display_name.empty()) {
       return false;
     }
     return _launch_session->width != width || _launch_session->height != height ||
@@ -1857,7 +1754,7 @@ namespace proc {
 #ifdef _WIN32
     // Only a display this host created can be resized under the user's feet. A physical desktop
     // belongs to the person sitting at it.
-    if (!_virtual_display || _virtual_display_gdi_name.empty()) {
+    if (!_virtual_display || _display_session.binding().display_name.empty()) {
       return live_video_mode_result_e::needs_reconnect;
     }
 
@@ -1884,7 +1781,7 @@ namespace proc {
     // Probe before touching anything. If the mode is not advertised, the only way to obtain it is
     // to recreate the monitor, and recreation retires the display from the Windows topology, which
     // destroys the running capture session. Refuse and let the client decide to reconnect.
-    if (VDISPLAY::testDisplaySettings(_virtual_display_gdi_name.c_str(), width, height, fps_millihz) != DISP_CHANGE_SUCCESSFUL) {
+    if (VDISPLAY::testDisplaySettings(_display_session.binding().display_name.c_str(), width, height, fps_millihz) != DISP_CHANGE_SUCCESSFUL) {
       BOOST_LOG(info) << "The virtual display does not advertise "sv << width << 'x' << height
                       << " @ "sv << (static_cast<double>(fps_millihz) / 1000.0)
                       << " Hz; the client must reconnect to obtain it."sv;
@@ -1901,21 +1798,22 @@ namespace proc {
       const auto deadline = std::chrono::steady_clock::now() + 3s;
       int stable_observations = 0;
       while (std::chrono::steady_clock::now() < deadline) {
-        if (_virtual_display_identity) {
+        if (_display_session.binding().identity) {
           const auto identity = VDISPLAY::queryVirtualDisplayIdentity(
-            *_virtual_display_identity,
-            _virtual_display_device_path,
-            _virtual_display_gdi_name
+            *_display_session.binding().identity,
+            _display_session.binding().device_path,
+            _display_session.binding().display_name
           );
           if (identity.state == VDISPLAY::display_identity_state_e::present && !identity.display_name.empty()) {
-            _virtual_display_gdi_name = identity.display_name;
-            _virtual_display_device_path = identity.device_path;
-            _virtual_display_published = true;
+            auto binding = _display_session.binding();
+            binding.display_name = identity.display_name;
+            binding.device_path = identity.device_path;
+            _display_session.update_binding(std::move(binding));
           }
         }
 
         DEVMODEW mode {};
-        const bool geometry_ready = VDISPLAY::getDeviceSettings(_virtual_display_gdi_name.c_str(), mode) &&
+        const bool geometry_ready = VDISPLAY::getDeviceSettings(_display_session.binding().display_name.c_str(), mode) &&
                                     mode.dmPelsWidth == target_width &&
                                     mode.dmPelsHeight == target_height &&
                                     std::abs(static_cast<std::int64_t>(mode.dmDisplayFrequency) * 1000 - target_fps_millihz) < 1000;
@@ -1934,7 +1832,7 @@ namespace proc {
     // Republish the (possibly renumbered) display name so captureThread targets the display that
     // actually carries the mode, then bring the HDR worker back up on that name.
     auto republish_display = [&]() {
-      set_display_name_locked(platf::to_utf8(_virtual_display_gdi_name));
+      set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
       config::video.output_name = display_device::map_display_name(display_name);
       start_hdr_worker(enable_hdr);
     };
@@ -1942,7 +1840,7 @@ namespace proc {
     auto roll_back = [&]() {
       // changeDisplaySettings() reports the DisplayConfig status, so verify the applied geometry
       // rather than trusting the return code on its own.
-      bool restored = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps, false) == ERROR_SUCCESS &&
+      bool restored = VDISPLAY::changeDisplaySettings(_display_session.binding().display_name.c_str(), old_width, old_height, old_fps, false) == ERROR_SUCCESS &&
                       settle_at(old_width, old_height, old_fps);
       republish_display();
       if (!request_hdr_state(enable_hdr, 6s)) {
@@ -1956,7 +1854,7 @@ namespace proc {
       return restored;
     };
 
-    const auto change_status = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), width, height, fps_millihz, false);
+    const auto change_status = VDISPLAY::changeDisplaySettings(_display_session.binding().display_name.c_str(), width, height, fps_millihz, false);
     if (change_status != ERROR_SUCCESS || !settle_at(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), fps_millihz)) {
       BOOST_LOG(error) << "The virtual display did not settle at the requested live mode "sv
                        << width << 'x' << height << "; rolling back."sv;
@@ -1995,6 +1893,7 @@ namespace proc {
     _launch_session->width = width;
     _launch_session->height = height;
     _launch_session->fps = fps_millihz;
+    _display_session.update_mode(width, height, fps_millihz);
     BOOST_LOG(info) << "Virtual display resized live to "sv << width << 'x' << height
                     << " @ "sv << (static_cast<double>(fps_millihz) / 1000.0) << " Hz."sv;
     return live_video_mode_result_e::applied;
@@ -2012,13 +1911,14 @@ namespace proc {
         return false;
       }
       _remote_virtual_display_lease = lease;
-      if ((_remote_display_pause_pending && !prepare_retained_display_for_resume()) || !promote_virtual_display(_launch_session->enable_hdr)) {
+      if ((_display_session.pause_requested() && !prepare_retained_display_for_resume()) || !promote_virtual_display(_launch_session->enable_hdr)) {
         BOOST_LOG(error) << "Remote virtual display does not match its required Windows display topology."sv;
         pause_display_for_resume();
         ar_glasses::remote_virtual_display_ended(lease);
         _remote_virtual_display_lease.reset();
         return false;
       }
+      _display_session.commit_resume();
     }
 #endif
     return true;
@@ -2027,7 +1927,7 @@ namespace proc {
   bool proc_t::restore_primary_display() {
     std::lock_guard lock(process_state_mutex);
 #ifdef _WIN32
-    if (!_virtual_display_device_path.empty()) {
+    if (!_display_session.binding().device_path.empty()) {
       stop_hdr_worker();
       _hdr_worker_state.reset();
       const bool restored =
@@ -2038,7 +1938,7 @@ namespace proc {
             _virtual_display_only
           ) :
   #endif
-          platf::primary_display::restore(_virtual_display_device_path);
+          _display_session.restore();
       refresh_virtual_display_binding();
       return restored;
     }
@@ -2049,19 +1949,10 @@ namespace proc {
   bool proc_t::pause_display_for_resume() {
     std::lock_guard lock(process_state_mutex);
 #ifdef _WIN32
-    if (_virtual_display && !_virtual_display_device_path.empty()) {
+    if (_virtual_display && _display_session.owns_display()) {
       stop_hdr_worker();
       _hdr_worker_state.reset();
-      _remote_display_pause_pending = true;
-      const bool paused =
-  #ifdef SUNSHINE_TESTS
-        _display_topology_test_hook ?
-          _display_topology_test_hook(display_topology_test_operation_e::pause, _virtual_display_only) :
-  #endif
-          platf::primary_display::pause(_virtual_display_device_path, _paused_virtual_display);
-      // A detached target has no current GDI binding. Preserve its driver identity and mode,
-      // never a DISPLAYn alias that Windows can recycle while the physical desktop is active.
-      _virtual_display_gdi_name.clear();
+      const bool paused = _display_session.pause();
       set_display_name_locked({});
       config::video.output_name = initial_display;
       if (paused) {
@@ -2086,7 +1977,7 @@ namespace proc {
       std::lock_guard state_lock(_hdr_worker_state->mutex);
       original_hdr_states = _hdr_worker_state->original_hdr_states;
     }
-    const auto retiring_virtual_device = _virtual_display_device_path;
+    const auto retiring_virtual_device = _display_session.binding().device_path;
     // All callers have released media before teardown. Restore the user's desktop before
     // graceful app exit or arbitrary undo commands can delay this thread.
     if (_app_id > 0) {
@@ -2230,9 +2121,9 @@ namespace proc {
     // CCD detachment remains available even if the SudoVDA watchdog/IOCTL handle failed. Preserve
     // shell state first and let autonomous retirement observe the driver's eventual lease cleanup.
     bool used_virtual_display = _launch_session && _launch_session->virtual_display;
-    if (used_virtual_display) {
-      if (_virtual_display_identity) {
-        if (retire_virtual_display(_virtual_display_identity, _launch_session->display_guid, _virtual_display_device_path, _virtual_display_gdi_name, _virtual_display_published, 6s, true, true, config::sunshine.virtual_display_restart_explorer)) {
+    if (used_virtual_display || _display_session.prepared()) {
+      if (_display_session.owns_display() || _display_session.prepared()) {
+        if (retire_virtual_display(_display_session, 6s, true, true, config::sunshine.virtual_display_restart_explorer)) {
           BOOST_LOG(info) << "Virtual Display removed successfully";
         } else {
           BOOST_LOG(warning) << "Virtual Display removal did not settle before teardown completed";
@@ -2243,7 +2134,7 @@ namespace proc {
         // its stable identity.
         {
           std::lock_guard retirement_lock(retired_virtual_display_mutex);
-          if (retired_virtual_display_identity) {
+          if (retired_virtual_display_session) {
             retired_virtual_display_final_teardown = true;
             retired_virtual_display_restart_explorer_after_removal =
               retired_virtual_display_restart_explorer_after_removal ||
@@ -2262,12 +2153,6 @@ namespace proc {
         }
         schedule_retired_virtual_display_cleanup();
         BOOST_LOG(info) << "Virtual Display removal is already owned by deferred cleanup."sv;
-      } else if (VDISPLAY::removeVirtualDisplay(_launch_session->display_guid)) {
-        BOOST_LOG(info) << "Virtual Display removed successfully without a published driver identity";
-      } else if (_virtual_display) {
-        BOOST_LOG(warning) << "Virtual Display remove failed";
-      } else {
-        BOOST_LOG(warning) << "Virtual Display remove failed, but it seems it was not created correctly either.";
       }
     }
 #endif
@@ -2299,16 +2184,13 @@ namespace proc {
     initial_display.clear();
     _launch_session.reset();
 #ifdef _WIN32
-    _virtual_display_identity.reset();
-    _virtual_display_render_adapter.reset();
-    _virtual_display_device_path.clear();
-    _virtual_display_gdi_name.clear();
-    _virtual_display_published = false;
+    // An unresolved owner stays in its deferred retirement slot across process refresh.
+    if (!_display_session.owns_display() && !_display_session.prepared()) {
+      _display_session = VDISPLAY::session_t {};
+    }
     _virtual_display_retirement_handed_off = false;
     _remote_virtual_display_lease.reset();
     _virtual_display_only = false;
-    _paused_virtual_display.reset();
-    _remote_display_pause_pending = false;
     _hdr_worker_state.reset();
 #endif
     _virtual_display = false;
@@ -2350,7 +2232,7 @@ namespace proc {
         std::min(100ms, remaining),
         [generation]() {
           return generation != retired_virtual_display_generation ||
-                 (!retired_virtual_display_identity &&
+                 (!retired_virtual_display_session &&
                   !retired_virtual_display_explorer_repair_in_progress);
         }
       );
@@ -2365,178 +2247,74 @@ namespace proc {
     const auto deadline =
       std::chrono::steady_clock::now() +
       std::max(timeout, std::chrono::milliseconds::zero());
-    if (!retired_virtual_display_identity) {
-      if (wait_for_explorer_repair && retired_virtual_display_explorer_repair_in_progress) {
-        const bool repair_finished = retired_virtual_display_changed.wait_until(
-          retirement_lock,
-          deadline,
-          []() {
-            return !retired_virtual_display_explorer_repair_in_progress;
-          }
-        );
-        return repair_finished &&
-               !retired_virtual_display_identity;
-      }
-      return true;
-    }
-
-    const auto identity = *retired_virtual_display_identity;
-    if (!retired_virtual_display_remove_ready) {
-      const auto now = std::chrono::steady_clock::now();
-      const auto prepare_budget = now >= deadline ?
-                                    0ms :
-                                    std::min(
-                                      1500ms,
-                                      std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        deadline - now
-                                      )
-                                    );
-      if (!prepare_retired_virtual_display_for_removal(prepare_budget)) {
-        return false;
-      }
-    }
-
-    auto next_remove_retry = std::max(
-      std::chrono::steady_clock::now(),
-      retired_virtual_display_remove_not_before
-    );
-    const auto poll_interval =
-      retired_virtual_display_requires_device_absence ? 250ms : 50ms;
-
-    auto is_same_identity = [&](const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &candidate) {
-      return candidate.AdapterLuid.HighPart == identity.AdapterLuid.HighPart &&
-             candidate.AdapterLuid.LowPart == identity.AdapterLuid.LowPart &&
-             candidate.TargetId == identity.TargetId;
-    };
-
-    const VDISPLAY::retirement_callbacks_t callbacks {
-      .before_observation = [&]() {
-        if (!retired_virtual_display_identity) {
-          return VDISPLAY::retirement_step_e::complete;
-        }
-        if (!is_same_identity(*retired_virtual_display_identity)) {
-          return VDISPLAY::retirement_step_e::blocked;
-        }
-
-        const auto observation_time = std::chrono::steady_clock::now();
-        if (retired_virtual_display_deactivate_desktop && retired_virtual_display_requires_device_absence && retired_virtual_display_remove_ready && !retired_virtual_display_remove_accepted && observation_time >= next_remove_retry) {
-          // Detach readiness is not a permanent fact: Windows can reattach a target between the
-          // settle confirmation and a later autonomous worker slice. Prove exact active-path absence
-          // immediately before every Remove attempt. The sole-output exception intentionally has
-          // requires_device_absence=false and bypasses this check.
-          const auto active_state = VDISPLAY::queryVirtualDisplayIdentity(
-                                      identity,
-                                      retired_virtual_display_device_path,
-                                      retired_virtual_display_gdi_name
-          )
-                                      .state;
-          if (!VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
-                true,
-                active_state
-              )) {
-            retired_virtual_display_remove_ready = false;
-            retired_virtual_display_requires_device_absence = false;
-            retired_virtual_display_detach_context.reset();
-            BOOST_LOG(warning) << "Virtual-display active-path absence could not be revalidated "
-                                  "immediately before driver removal; restarting safe detach."sv;
-            return VDISPLAY::retirement_step_e::blocked;
-          }
-        }
-        if (retiredVirtualDisplayRemovalAllowed(retired_virtual_display_deactivate_desktop, retired_virtual_display_remove_ready) && !retired_virtual_display_remove_accepted && retired_virtual_display_guid && observation_time >= next_remove_retry) {
-          // Driver removal can fail transiently during an IddCx/topology transition. Retain the GUID
-          // with the stable identity and retry; otherwise one failed IOCTL blocks all later virtual
-          // displays until Apollo restarts.
-          if (VDISPLAY::removeVirtualDisplay(*retired_virtual_display_guid)) {
-            retired_virtual_display_remove_accepted = true;
-          }
-          next_remove_retry = observation_time + 250ms;
-          retired_virtual_display_remove_not_before = next_remove_retry;
-        }
-
-        return VDISPLAY::retirement_step_e::observe;
-      },
-      .query = [&]() {
-        if (retired_virtual_display_requires_device_absence) {
-          // A deliberate desktop detach removes the active path before the driver monitor
-          // disappears, so active-path absence alone is not proof of driver retirement.
-          return VDISPLAY::queryVirtualDisplayRetirementState(
-            identity,
-            retired_virtual_display_device_path,
-            retired_virtual_display_gdi_name
-          );
-        }
-        return VDISPLAY::queryVirtualDisplayIdentity(
-                 identity,
-                 retired_virtual_display_device_path,
-                 retired_virtual_display_gdi_name
-        )
-          .state;
-      },
-      .finish = [&]() {
-        // Never clear a newer retirement record that replaced the one this wait observed.
-        if (!retired_virtual_display_identity || !is_same_identity(*retired_virtual_display_identity)) {
+    if (retired_virtual_display_session) {
+      if (!retired_virtual_display_remove_ready) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto prepare_budget = now >= deadline ?
+                                      0ms :
+                                      std::min(
+                                        1500ms,
+                                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          deadline - now
+                                        )
+                                      );
+        if (!prepare_retired_virtual_display_for_removal(prepare_budget)) {
           return false;
         }
-        retired_virtual_display_explorer_repair_debt =
-          retired_virtual_display_explorer_repair_debt ||
-          retired_virtual_display_was_active_desktop_path;
-        const bool restart_explorer = explorerRepairAllowedForRetirement(
-          retired_virtual_display_final_teardown,
-          retired_virtual_display_restart_explorer_after_removal,
-          retired_virtual_display_explorer_repair_debt
-        );
-        // Consume the one-shot request before scheduling platform work. Driver retirement can
-        // now honor its caller's timeout; a separate repair-in-progress barrier keeps reconnect
-        // and local AR ownership from adding a display while Explorer is restarting.
-        retired_virtual_display_restart_explorer_after_removal = false;
-        if (retired_virtual_display_final_teardown) {
-          // Final teardown consumes the session debt even when the user disabled repair or the
-          // platform helper cannot complete. Never surprise a later session with a stale shell
-          // restart.
-          retired_virtual_display_explorer_repair_debt = false;
+      }
+
+      if (!retired_virtual_display_session->retire_until(deadline)) {
+        return false;
+      }
+
+      // Run adapter-only completion after the owner proves final absence. In particular, a
+      // failed final query must not consume a later final-teardown Explorer request.
+      retired_virtual_display_explorer_repair_debt =
+        retired_virtual_display_explorer_repair_debt ||
+        retired_virtual_display_was_active_desktop_path;
+      const bool restart_explorer = explorerRepairAllowedForRetirement(
+        retired_virtual_display_final_teardown,
+        retired_virtual_display_restart_explorer_after_removal,
+        retired_virtual_display_explorer_repair_debt
+      );
+      if (retired_virtual_display_final_teardown) {
+        // Final teardown consumes the debt even if the user disabled shell repair.
+        retired_virtual_display_explorer_repair_debt = false;
+      }
+      retired_virtual_display_session.reset();
+      retired_virtual_display_remove_ready = false;
+      retired_virtual_display_deactivate_desktop = false;
+      retired_virtual_display_requires_device_absence = false;
+      retired_virtual_display_was_active_desktop_path = false;
+      retired_virtual_display_final_teardown = false;
+      retired_virtual_display_restart_explorer_after_removal = false;
+      retired_virtual_display_detach_context.reset();
+      ++retired_virtual_display_generation;
+      retired_virtual_display_cleanup_scheduled = false;
+      if (restart_explorer) {
+        scheduleExplorerRepairLocked();
+      }
+      retired_virtual_display_changed.notify_all();
+    }
+
+    // Driver retirement honors the caller's timeout independently of the Explorer worker.
+    // New display owners may request this barrier before reusing the desktop topology.
+    if (wait_for_explorer_repair && retired_virtual_display_explorer_repair_in_progress) {
+      const bool repair_finished = retired_virtual_display_changed.wait_until(
+        retirement_lock,
+        deadline,
+        []() {
+          return !retired_virtual_display_explorer_repair_in_progress;
         }
-        if (restart_explorer) {
-          scheduleExplorerRepairLocked();
-        }
-        retired_virtual_display_identity.reset();
-        retired_virtual_display_guid.reset();
-        retired_virtual_display_device_path.clear();
-        retired_virtual_display_gdi_name.clear();
-        retired_virtual_display_retirement = {};
-        retired_virtual_display_remove_accepted = false;
-        retired_virtual_display_remove_ready = false;
-        retired_virtual_display_deactivate_desktop = false;
-        retired_virtual_display_requires_device_absence = false;
-        retired_virtual_display_was_active_desktop_path = false;
-        retired_virtual_display_final_teardown = false;
-        retired_virtual_display_restart_explorer_after_removal = false;
-        retired_virtual_display_remove_not_before = {};
-        retired_virtual_display_detach_context.reset();
-        ++retired_virtual_display_generation;
-        retired_virtual_display_cleanup_scheduled = false;
-        retired_virtual_display_changed.notify_all();
-        if (wait_for_explorer_repair && retired_virtual_display_explorer_repair_in_progress) {
-          const bool repair_finished = retired_virtual_display_changed.wait_until(
-            retirement_lock,
-            deadline,
-            []() {
-              return !retired_virtual_display_explorer_repair_in_progress;
-            }
-          );
-          return repair_finished &&
-                 !retired_virtual_display_identity;
-        }
-        return !retired_virtual_display_identity.has_value();
-      },
-    };
-    // The adapter retains ownership; cleanup may reset the shared global record.
-    const auto retirement = retired_virtual_display_retirement;
-    return retirement.wait_until(deadline, {poll_interval, 250ms}, callbacks);
+      );
+      return repair_finished && !retired_virtual_display_session;
+    }
+    return !retired_virtual_display_session;
   }
 
   bool proc_t::has_retired_virtual_display() {
     std::lock_guard retirement_lock(retired_virtual_display_mutex);
-    return retired_virtual_display_identity.has_value() ||
+    return retired_virtual_display_session.has_value() ||
            retired_virtual_display_explorer_repair_in_progress;
   }
 
@@ -3078,6 +2856,12 @@ namespace proc {
     }
 
 #ifdef _WIN32
+    // A failed handoff must retain its resource even if the deferred slot is occupied.
+    // Replacing proc here would otherwise discard the only owner of that display.
+    if (proc._display_session.owns_display() || proc._display_session.prepared()) {
+      BOOST_LOG(warning) << "Deferring app configuration refresh while virtual-display cleanup remains owned by the process."sv;
+      return;
+    }
     size_t fail_count = 0;
     while (fail_count < 5 && vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
       initVDisplayDriver();

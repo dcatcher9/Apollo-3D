@@ -140,6 +140,11 @@ its own source. A fresh remote launch likewise ends any retained local session f
 use `session_resume_lifecycle.h` for retention deadlines and the shared primary-display manager for
 pause/reactivation. The [shared display lifecycle](virtual-desktop.md#display-restoration) defines
 resume, replacement, expiry, and headless recovery behavior.
+Both adapters keep their virtual device in the same move-only `VDISPLAY::session_t` owner. It owns
+creation, exact identity and current binding, retained pause/resume state, and retirement proof. Local
+AR keeps glasses layout, source refresh/HDR, and presenter resources in its adapter. Teardown joins
+the presenter before moving that same display owner into the local retirement slot; row cleanup
+survives the session as a value-owned callback and is not replayed after a successful restoration.
 Both handoff directions retain ownership until the retired SudoVDA adapter/target identity has
 disappeared from Windows topology; driver acknowledgement alone is not treated as completed removal.
 The remote ownership reservation uses the configured `ping_timeout` connection window (with a

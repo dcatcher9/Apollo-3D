@@ -309,6 +309,21 @@ namespace ar_glasses {
       const virtual_display_identity_contract_t &observed
     );
 
+    struct local_retirement_transfer_result_t {
+      bool transferred = false;
+      bool source_released = false;
+      bool first_wait_completed = false;
+      bool barrier_retained = false;
+      bool second_wait_completed = false;
+      bool barrier_released = false;
+      int prepare_calls = 0;
+      int remove_calls = 0;
+      int finish_calls = 0;
+    };
+
+    /** Exercise the local admission slot with fake display I/O and a deferred final query. */
+    local_retirement_transfer_result_t local_retirement_transfer_for_test();
+
     /** Rebase one recovery record to a new physical mode without touching persistent state. */
     std::optional<std::string> rebase_topology_recovery_json_for_test(
       std::string_view contents,

@@ -1336,6 +1336,19 @@ TEST(ArGlassesModeTransition, RetirementDoesNotFollowAReusedPhysicalTargetId) {
   EXPECT_TRUE(ar_glasses::detail::retirement_identity_matches_for_test(retiring, learned_path));
 }
 
+TEST(ArGlassesModeTransition, RetirementMovesTheOwnerAndLatchesCleanupAcrossWaiters) {
+  const auto result = ar_glasses::detail::local_retirement_transfer_for_test();
+  EXPECT_TRUE(result.transferred);
+  EXPECT_TRUE(result.source_released);
+  EXPECT_FALSE(result.first_wait_completed);
+  EXPECT_TRUE(result.barrier_retained);
+  EXPECT_TRUE(result.second_wait_completed);
+  EXPECT_TRUE(result.barrier_released);
+  EXPECT_EQ(result.prepare_calls, 1);
+  EXPECT_EQ(result.remove_calls, 2);
+  EXPECT_EQ(result.finish_calls, 1);
+}
+
 TEST(ArGlassesModeTransition, RecognizesTheProductionSudoVirtualDisplayHardwarePath) {
   EXPECT_TRUE(VDISPLAY::isSudoVirtualDisplayPathForTest(
     LR"(\\?\DISPLAY#SMKD1CE#5&production&0&UID4352)"
