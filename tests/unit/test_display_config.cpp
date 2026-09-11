@@ -3,12 +3,50 @@
  * @brief Tests for shared Windows CCD and Advanced Color adapters.
  */
 #include "../tests_common.h"
-
 #include "src/platform/windows/display_config.h"
 
+#include <cwchar>
 #include <vector>
 
 namespace {
+  struct target_name_t {
+    UINT32 id;
+    std::wstring device_path;
+    std::wstring display_name;
+  };
+
+  std::vector<target_name_t> target_names;
+
+  LONG WINAPI get_target_name(DISPLAYCONFIG_DEVICE_INFO_HEADER *header) {
+    for (const auto &target : target_names) {
+      if (target.id != header->id) {
+        continue;
+      }
+      if (header->type == DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME) {
+        auto *name = reinterpret_cast<DISPLAYCONFIG_TARGET_DEVICE_NAME *>(header);
+        std::wcsncpy(name->monitorDevicePath, target.device_path.c_str(), std::size(name->monitorDevicePath) - 1);
+        return ERROR_SUCCESS;
+      }
+      if (header->type == DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME) {
+        auto *name = reinterpret_cast<DISPLAYCONFIG_SOURCE_DEVICE_NAME *>(header);
+        std::wcsncpy(name->viewGdiDeviceName, target.display_name.c_str(), std::size(name->viewGdiDeviceName) - 1);
+        return ERROR_SUCCESS;
+      }
+    }
+    return ERROR_NOT_FOUND;
+  }
+
+  std::vector<DISPLAYCONFIG_PATH_INFO> target_paths() {
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    for (const auto &target : target_names) {
+      DISPLAYCONFIG_PATH_INFO path {};
+      path.flags = DISPLAYCONFIG_PATH_ACTIVE;
+      path.sourceInfo.id = path.targetInfo.id = target.id;
+      paths.push_back(path);
+    }
+    return paths;
+  }
+
   struct fake_query_state_t {
     unsigned int size_calls = 0;
     unsigned int query_calls = 0;
@@ -95,8 +133,7 @@ namespace {
 
   LONG WINAPI fake_set_device_info(DISPLAYCONFIG_DEVICE_INFO_HEADER *header) {
     fake_color_state.set_types.push_back(header->type);
-    if (header->type == DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE ||
-        header->type == DISPLAYCONFIG_DEVICE_INFO_SET_WCG_STATE) {
+    if (header->type == DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE || header->type == DISPLAYCONFIG_DEVICE_INFO_SET_WCG_STATE) {
       return fake_color_state.modern_set_status;
     }
     if (header->type == DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE) {
@@ -113,6 +150,35 @@ namespace {
     return {fake_get_device_info, fake_set_device_info};
   }
 }  // namespace
+
+TEST(DisplayConfigTarget, LearnedIdentitySurvivesGdiNameAndTargetRenumbering) {
+  using namespace platf::display_config;
+  const device_info_api_t api {get_target_name, nullptr};
+  target_names = {{1, L"monitor-a", L"DISPLAY1"}, {2, L"monitor-b", L"DISPLAY2"}};
+  const auto original = find_display_target(target_paths(), {}, L"DISPLAY1", api);
+  ASSERT_TRUE(original);
+  ASSERT_EQ(original->device_path, L"monitor-a");
+
+  target_names = {{3, L"MONITOR-A", L"DISPLAY2"}, {4, L"monitor-b", L"DISPLAY1"}};
+  const auto restored = find_display_target(target_paths(), original->device_path, L"DISPLAY1", api);
+  ASSERT_TRUE(restored);
+  EXPECT_EQ(restored->target_id, 3u);
+  EXPECT_EQ(restored->display_name, L"DISPLAY2");
+}
+
+TEST(DisplayConfigTarget, AbsentOriginalNeverFallsBackToARecycledName) {
+  using namespace platf::display_config;
+  target_names = {{4, L"replacement", L"DISPLAY1"}};
+  EXPECT_FALSE(find_display_target(target_paths(), L"original", L"DISPLAY1", {get_target_name, nullptr}));
+}
+
+TEST(DisplayConfigTarget, AmbiguousInitialNameOrLearnedIdentityIsRejected) {
+  using namespace platf::display_config;
+  target_names = {{1, L"monitor-a", L"DISPLAY1"}, {2, L"monitor-b", L"DISPLAY1"}};
+  EXPECT_FALSE(find_display_target(target_paths(), {}, L"DISPLAY1", {get_target_name, nullptr}));
+  target_names[1].device_path = L"monitor-a";
+  EXPECT_FALSE(find_display_target(target_paths(), L"monitor-a", {}, {get_target_name, nullptr}));
+}
 
 TEST(DisplayConfigQueryTest, RetriesSizeAndDataRacesWithBoundedBackoff) {
   fake_query_state = {};
@@ -179,12 +245,7 @@ TEST(DisplayConfigColorTest, FallsBackToLegacyOnlyForTheSelectedFailurePolicy) {
   fake_color_state.modern_get_status = ERROR_GEN_FAILURE;
   const LUID adapter {};
 
-  EXPECT_FALSE(platf::display_config::query_advanced_color(
-    adapter,
-    7,
-    platf::display_config::legacy_fallback_e::unsupported_modern_api,
-    fake_device_info_api()
-  ));
+  EXPECT_FALSE(platf::display_config::query_advanced_color(adapter, 7, platf::display_config::legacy_fallback_e::unsupported_modern_api, fake_device_info_api()));
   EXPECT_EQ(fake_color_state.legacy_get_calls, 0u);
 
   const auto state = platf::display_config::query_advanced_color(
@@ -222,12 +283,7 @@ TEST(DisplayConfigColorTest, HdrSetterFallsBackToLegacyAfterModernFailure) {
   fake_color_state = {};
   fake_color_state.modern_set_status = ERROR_NOT_SUPPORTED;
 
-  EXPECT_TRUE(platf::display_config::set_hdr_state_with_legacy_fallback(
-    LUID {},
-    11,
-    true,
-    fake_device_info_api()
-  ));
+  EXPECT_TRUE(platf::display_config::set_hdr_state_with_legacy_fallback(LUID {}, 11, true, fake_device_info_api()));
   ASSERT_EQ(fake_color_state.set_types.size(), 2u);
   EXPECT_EQ(fake_color_state.set_types[0], DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE);
   EXPECT_EQ(

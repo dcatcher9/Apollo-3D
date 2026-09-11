@@ -20,7 +20,7 @@ The **Use only the virtual desktop with local AR glasses** setting is enabled by
 local AR session is active, Sunshine 3D makes the private virtual source primary, disables ordinary
 desktop outputs, and leaves only that source and the glasses output active. The glasses must remain
 active for video scanout, so Sunshine 3D confines the shared Windows cursor to the virtual source.
-Disable the setting to retain the extended desktop layout used by earlier releases. Save the setting
+Disable the setting to retain the ordinary extended desktop layout. Save the setting
 and restart Sunshine 3D before starting a new local AR session.
 
 ## Mode contract
@@ -192,6 +192,11 @@ Windows normalization cannot strand the ordinary monitors. If the glasses have d
 3D skips that absent path, verifies the remaining ordinary-display restore, and clears the completed
 recovery record; a later glasses reconnect starts from a fresh baseline.
 
+An absent ordinary monitor likewise does not block completion once the available desktop has been
+verified. Explicit user changes to active physical displays become the recovery baseline, and
+available outputs that Sunshine disabled return beside them. Failed queries, applies, color checks,
+or journal updates retain recovery ownership. This is the same recovery policy used by streaming.
+
 The exclusive layout has one owner and uses Windows' native temporary
 [`SetDisplayConfig`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setdisplayconfig)
 operation to activate the exact source/sink paths. The recovery journal records the pre-session
@@ -231,6 +236,10 @@ after a timeout. It then retries the retained work even if the desktop never cha
 An early successful capture starts a fresh capture pacing group instead of advancing a full nominal
 frame interval, so cursor updates cannot accumulate a long sleep when pending work clears. Once the
 work is presented, ordinary idle capture resumes. Remote capture keeps its existing idle timeout.
+Global model preparation uses that idle boundary too: a ready or failed outcome is observed on the
+next capture timeout (up to 200 ms plus the 10 ms idle yield), so a static desktop can initialize
+3D or retire its loading status without new pixels. Waiting for global preparation and retaining
+an already-completed opaque depth transaction do not themselves enable the 5 ms retry loop.
 
 Local presentation and remote streaming share ownership of Windows' fine timer resolution, DWM
 multimedia scheduling, and elevated process priority. These settings stay active until the last
@@ -245,6 +254,10 @@ the rate through the network's hundredths-of-a-frame representation. A successfu
 fallback also survives supported 2D/SBS mode switches and presenter restarts for the retained virtual
 source, so those transitions do not retry a backend already rejected in that session.
 Source mode changes use active Windows display-configuration readback and bounded in-place retries.
+Source repair accepts a positive measured rate within 0.02% of the requested rate before setting a
+mode or after a setting takes effect. This avoids repeated mode changes for small clock differences
+such as 120 versus 120.013 Hz; 59.94/60 and 119.88/120 Hz still request a real change. Capture and
+diagnostics retain the actual CCD cadence, without rounding it to the requested value.
 If the requested refresh remains unsupported, a verified usable source stays attached at its actual
 rate, which is logged alongside the glasses rate. This preserves the desktop without concealing a
 source that runs more slowly than the output.

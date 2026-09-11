@@ -91,6 +91,12 @@ Preparation commands run before the application, and their paired undo commands 
 teardown. Keep them idempotent: reconnect, cancellation, or a failed launch must not leave Windows
 in a different state.
 
+The managed desktop is restored before waiting for app shutdown or undo commands. Undo commands
+share one cleanup budget equal to the app's exit timeout, with a one-second minimum. At expiry the
+current command's process group is terminated and remaining undo commands are skipped. Cleanup
+finishes before another session starts, so an old command cannot run later against its display
+configuration. Undo commands should complete promptly and should not launch detached background work.
+
 When a command-backed application exits, teardown runs after its stream workers stop; reconnect
 grace does not keep the exited application resumable. The existing grace timer also checks for exit
 while disconnected, without extending the reconnect deadline; launch and resume check once more

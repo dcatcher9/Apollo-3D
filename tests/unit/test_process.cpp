@@ -95,6 +95,12 @@ namespace proc {
       process.placebo = enabled;
     }
 
+    static void add_undo(proc_t &process, std::string command) {
+      process._app.prep_cmds.emplace_back(std::string {}, std::move(command), false);
+      process._completed_prep_commands = process._app.prep_cmds.size();
+      process._app.exit_timeout = std::chrono::seconds {1};
+    }
+
     static void wait_for_group(proc_t &process, boost::process::v1::group group) {
       process._process_group = std::move(group);
       process._app.wait_all = true;
@@ -379,6 +385,33 @@ TEST_F(IdleProcessLifecycleTest, ExitedAppIsCleanedAfterMediaStopsBeforeWarmRete
   stream::session::retain_or_stop_session_for_test(true);
   EXPECT_EQ(proc::proc.get_status().app_id, 0);
   EXPECT_EQ(proc::proc.get_host_session_id(), 0U);
+}
+
+TEST_F(IdleProcessLifecycleTest, PhysicalDesktopRestoresBeforeBoundedUndoCleanup) {
+  const auto marker = std::filesystem::temp_directory_path() /
+                      ("apollo_undo_order_" + std::to_string(GetCurrentProcessId()) + ".txt");
+  std::filesystem::remove(marker);
+  auto remove_marker = util::fail_guard([&]() {
+    std::filesystem::remove(marker);
+  });
+  proc::process_test_access::set_child(proc::proc, exited_test_child());
+  proc::process_test_access::mark_virtual(proc::proc, true, true);
+  original_->virtual_display = true;
+  bool paused = false;
+  proc::process_test_access::set_display_topology_hook(proc::proc, [&](auto operation, bool) {
+    if (operation == proc::display_topology_test_operation_e::pause) {
+      EXPECT_FALSE(std::filesystem::exists(marker)) << "Display recovery must precede undo commands";
+      paused = true;
+    }
+    return true;
+  });
+  proc::process_test_access::add_undo(proc::proc, "\"" + test_command_interpreter() + "\" /d /c echo started>\"" + marker.string() + "\" & ping -n 30 127.0.0.1 >nul");
+  const auto started = std::chrono::steady_clock::now();
+  stream::session::retain_or_stop_session_for_test(true);
+  EXPECT_TRUE(paused);
+  EXPECT_TRUE(std::filesystem::exists(marker)) << "The test must actually execute the slow undo command";
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds {8});
+  EXPECT_EQ(proc::proc.get_status().app_id, 0);
 }
 
 TEST_F(IdleProcessLifecycleTest, IdleAdmissionReapsAnAppThatExitedDuringReconnectGrace) {

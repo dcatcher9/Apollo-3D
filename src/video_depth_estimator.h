@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "host_sbs_adaptive_submission.h"
+#include "host_sbs_conversion_work.h"
 #include "host_sbs_resolution.h"
 #include "host_sbs_telemetry_perf.h"
 
@@ -80,13 +81,6 @@ namespace models {
            identity.source_closure_sha256 ==
              depth_coordinate_v2::shader_source_closure_sha256;
   }
-
-  enum class engine_build_status {
-    unknown,
-    building,
-    ready,
-    failed,
-  };
 
   namespace detail {
 

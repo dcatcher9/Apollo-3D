@@ -83,11 +83,11 @@ try {
   }
   if (-not (Test-Path -LiteralPath $testExecutable -PathType Leaf)) { throw "Build the host test binary first: $testExecutable" }
   $nativeFilter = @(
-    'Offline*', 'GpuWorkloadArbiter.*', 'Rtsp*', 'Input*', 'ProcessTest.*',
-    'IdleProcessLifecycleTest.*', 'PlatformLaunchGuardTest.*', 'PrimaryDisplay*', 'VirtualDisplay*', 'SessionResumeLifecycle.*',
+    'Offline*', 'GpuWorkloadArbiter.*', 'Rtsp*', 'NvHttpLaunchParsingTest.*', 'Input*', 'ProcessTest.*',
+    'IdleProcessLifecycleTest.*', 'RetainedDisplayPauseTest.*', 'PlatformLaunchGuardTest.*', 'PrimaryDisplay*', 'VirtualDisplay*', 'DisplayConfigTarget.*', 'SessionResumeLifecycle.*',
     'SessionWorkerStartTest.*', 'AtomicPresentation*', 'WindowsQpc*', 'WindowsDdup*',
     'WindowsLocalPresenter*', 'PresentationScheduling*', 'ArGlasses*', 'RemoteEncode*Test.*',
-    'HostSbsChromaGpuTest.*', 'WebUiDesign.*', 'TestEventListenerTest.*'
+    'HostSbsChromaGpuTest.*', 'HostSbsConversionWorkTest.*', 'WebUiDesign.*', 'TestEventListenerTest.*'
   ) -join ':'
   $nativeXml = Join-Path $resultsDirectory 'host.xml'
   Invoke-GateStage 'host' $testExecutable @("--gtest_filter=$nativeFilter", "--gtest_output=xml:$nativeXml") $BuildDirectory
@@ -118,13 +118,20 @@ try {
     'com.limelight.nvstream.http.NvHTTP*Test',
     'com.limelight.nvstream.NvConnection*Test',
     'com.limelight.GameReconnectLifecycleTest',
+    'com.limelight.GameXrDisconnectTest',
     'com.limelight.utils.ClientSbs*Test',
     'com.limelight.sbs.*Test',
     'com.limelight.utils.Stereo3DRendererSchedulingTest',
+    'com.limelight.utils.Stereo3DRendererAsyncLifecycleTest',
     'com.limelight.ui.XrStreamPresenterTransitionTest',
     'com.limelight.ui.XrStreamPresenterVideoModeAckTest',
+    'com.limelight.ui.XrStreamPresenterControlTransportTeardownTest',
+    'com.limelight.ui.XrClientPanelRefreshRateIntegrationTest',
     'com.limelight.ui.XrModeReconnectPolicyTest',
     'com.limelight.ui.StreamContainerSurfaceHandoffContractTest',
+    'com.limelight.ui.StreamContainerAsyncEglLifecycleTest',
+    'com.limelight.ui.AsyncEglRenderLoopTest',
+    'com.limelight.ui.ClientSbsEglBackendTest',
     'com.limelight.binding.video.*Test',
     'com.limelight.preferences.XrSessionSettingsControllerTest',
     'com.limelight.preferences.session.SessionSettingsStoreTest',

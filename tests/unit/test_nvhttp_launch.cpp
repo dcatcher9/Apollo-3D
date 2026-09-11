@@ -7,7 +7,6 @@
 
 #include <cstdint>
 #include <limits>
-
 #include <src/nvhttp.h>
 
 TEST(NvHttpLaunchParsingTest, AcceptsDeploymentModesAndFractionalRates) {
@@ -82,24 +81,20 @@ TEST(NvHttpLaunchParsingTest, ValidatesRetainedHostSessionTokensExactly) {
 }
 
 TEST(NvHttpLaunchParsingTest, AdmitsCancelByExactHostSessionToken) {
-  using admission = nvhttp::detail::cancel_admission_e;
   using nvhttp::detail::cancel_admission;
 
-  EXPECT_EQ(cancel_admission("42", 42, "owner", "other-client"), admission::allowed_by_host_session_id);
-  EXPECT_EQ(cancel_admission("41", 42, "owner", "owner"), admission::rejected);
-  EXPECT_EQ(cancel_admission("", 42, "owner", "owner"), admission::rejected);
-  EXPECT_EQ(cancel_admission("invalid", 42, "owner", "owner"), admission::rejected);
-  EXPECT_EQ(cancel_admission("0", 42, "owner", "owner"), admission::rejected);
+  EXPECT_TRUE(cancel_admission("42", 42));
+  EXPECT_FALSE(cancel_admission("41", 42));
+  EXPECT_FALSE(cancel_admission("", 42));
+  EXPECT_FALSE(cancel_admission("invalid", 42));
+  EXPECT_FALSE(cancel_admission("0", 42));
 }
 
-TEST(NvHttpLaunchParsingTest, AdmitsTokenlessCancelOnlyForRetainedSessionOwner) {
-  using admission = nvhttp::detail::cancel_admission_e;
+TEST(NvHttpLaunchParsingTest, RejectsTokenlessCancelEvenForTheSamePairedClient) {
   using nvhttp::detail::cancel_admission;
 
-  EXPECT_EQ(cancel_admission(std::nullopt, 42, "owner", "owner"), admission::allowed_by_session_owner);
-  EXPECT_EQ(cancel_admission(std::nullopt, 42, "owner", "other-client"), admission::rejected);
-  EXPECT_EQ(cancel_admission(std::nullopt, 42, "", "owner"), admission::rejected);
-  EXPECT_EQ(cancel_admission(std::nullopt, 0, "owner", "owner"), admission::rejected);
+  EXPECT_FALSE(cancel_admission(std::nullopt, 42));
+  EXPECT_FALSE(cancel_admission(std::nullopt, 0));
 }
 
 TEST(NvHttpLaunchParsingTest, ViewOnlyResumeInheritsRetainedVirtualDisplayPolicy) {
@@ -201,11 +196,6 @@ TEST(NvHttpLaunchParsingTest, VirtualDisplayOnlyDefaultsOffAndAcceptsExactClient
     EXPECT_EQ(requested->virtual_display_only, std::string_view(value) == "1");
   }
   for (const auto value : {"", "2", "-1", "-0", "+1", "01", "00", " 1", "true", "false", "1x", "0&virtualDisplay=1"}) {
-    EXPECT_FALSE(nvhttp::parse_launch_display_options(
-      "1",
-      std::nullopt,
-      std::nullopt,
-      value
-    )) << value;
+    EXPECT_FALSE(nvhttp::parse_launch_display_options("1", std::nullopt, std::nullopt, value)) << value;
   }
 }

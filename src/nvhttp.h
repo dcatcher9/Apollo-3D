@@ -77,12 +77,6 @@ namespace nvhttp {
       manual_pin_conflict,
     };
 
-    enum class cancel_admission_e {
-      allowed_by_host_session_id,
-      allowed_by_session_owner,
-      rejected,
-    };
-
     pairing_admission_e pairing_admission(
       std::size_t active_sessions,
       std::size_t maximum_sessions,
@@ -96,17 +90,10 @@ namespace nvhttp {
       return retained != 0 && presented != 0 && retained == presented;
     }
 
-    /**
-     * Admit an exact host-session capability, or a tokenless cancel from the TLS-authenticated
-     * owner of the retained session. A supplied invalid/stale capability never falls back.
-     * Capable clients should still send the capability: a tokenless request cannot distinguish
-     * an older session generation created by the same paired client.
-     */
-    cancel_admission_e cancel_admission(
+    /** Cancel requires the exact current session, including requests from its paired owner. */
+    bool cancel_admission(
       std::optional<std::string_view> presented_host_session_id,
-      std::uint64_t retained_host_session_id,
-      std::string_view retained_client_uuid,
-      std::string_view requesting_client_uuid
+      std::uint64_t retained_host_session_id
     );
 
     /**

@@ -82,8 +82,7 @@ namespace ar_glasses {
       SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT identity {};
       std::wstring device_path;
       std::wstring gdi_name;
-      bool was_published = false;
-      std::chrono::steady_clock::time_point retirement_started {};
+      VDISPLAY::retirement_record_t retirement;
       std::function<bool()> prepare_removal;
       std::function<bool()> finish_topology_cleanup;
     };
@@ -193,8 +192,7 @@ namespace ar_glasses {
         identity,
         std::move(device_path),
         std::move(gdi_name),
-        was_published,
-        std::chrono::steady_clock::now(),
+        {was_published, std::chrono::steady_clock::now()},
         std::move(prepare_removal),
         std::move(finish_topology_cleanup),
       };
@@ -260,85 +258,56 @@ namespace ar_glasses {
         return true;
       }
 
-      int consecutive_absent_observations = 0;
       bool removal_requested = !retry_remove;
-      bool first_observation = true;
-      while (first_observation || std::chrono::steady_clock::now() < deadline) {
-        first_observation = false;
-        if (!removal_requested && (!retiring->prepare_removal || retiring->prepare_removal())) {
-          if (VDISPLAY::removeVirtualDisplay(retiring->guid)) {
-            removal_requested = true;
-          } else {
-            BOOST_LOG(warning) << "Failed to request removal of the retiring local AR virtual desktop; retrying while its ownership barrier remains active."sv;
+      const VDISPLAY::retirement_callbacks_t callbacks {
+        .before_observation = [&]() {
+          if (!removal_requested && (!retiring->prepare_removal || retiring->prepare_removal())) {
+            if (VDISPLAY::removeVirtualDisplay(retiring->guid)) {
+              removal_requested = true;
+            } else {
+              BOOST_LOG(warning) << "Failed to request removal of the retiring local AR virtual desktop; retrying while its ownership barrier remains active."sv;
+            }
           }
-        }
-        const auto identity_state = query_retiring_local_virtual_display(*retiring);
-        if (identity_state == VDISPLAY::display_identity_state_e::absent) {
-          ++consecutive_absent_observations;
-          const bool quarantine_complete = retiring->was_published ||
-                                           std::chrono::steady_clock::now() - retiring->retirement_started >= topology_debounce;
-          if (consecutive_absent_observations >= 3 && quarantine_complete) {
-            // Give Windows one additional topology notification interval after stable absence so a
-            // late removal event cannot renumber the replacement display created immediately next.
-            if (std::chrono::steady_clock::now() + 100ms > deadline) {
+          return VDISPLAY::retirement_step_e::observe;
+        },
+        .query = [&]() {
+          return query_retiring_local_virtual_display(*retiring);
+        },
+        .finish = [&]() {
+          // Retirement and topology restoration remain one ownership barrier. A blocked cleanup
+          // retains its exact pre-removal decision for a later local/remote handoff.
+          if (retiring->finish_topology_cleanup) {
+            if (!retiring->finish_topology_cleanup()) {
               return false;
             }
-            std::this_thread::sleep_for(100ms);
-            const auto settled_state = query_retiring_local_virtual_display(*retiring);
-            if (settled_state != VDISPLAY::display_identity_state_e::absent) {
-              consecutive_absent_observations = 0;
-              continue;
-            }
-            // Retirement and topology restoration are one ownership barrier. Keep this record
-            // alive if cleanup is transiently blocked so a later local/remote handoff retries the
-            // exact pre-removal decision instead of forgetting a user-owned rectangle.
-            if (retiring->finish_topology_cleanup) {
-              if (!retiring->finish_topology_cleanup()) {
-                return false;
-              }
-              // Latch successful cleanup before another topology query. That query can be
-              // transiently indeterminate because restoring the physical rectangle itself emits
-              // display notifications; a later waiter must certify absence without replaying the
-              // old rectangle over a newer user move.
-              std::lock_guard lock(ownership_mutex);
-              if (!retired_local_virtual_display) {
-                return true;
-              }
-              if (!same_virtual_display_identity(
-                    retired_local_virtual_display->identity,
-                    retiring->identity
-                  )) {
-                return false;
-              }
-              retired_local_virtual_display->finish_topology_cleanup = {};
-            }
-            const auto cleaned_state = query_retiring_local_virtual_display(*retiring);
-            if (cleaned_state != VDISPLAY::display_identity_state_e::absent) {
-              return false;
-            }
+            // Restoration itself emits notifications. Latch success before rechecking absence,
+            // so a later waiter cannot replay the old rectangle over a newer user move.
             std::lock_guard lock(ownership_mutex);
             if (!retired_local_virtual_display) {
               return true;
             }
-            if (same_virtual_display_identity(retired_local_virtual_display->identity, retiring->identity)) {
-              retired_local_virtual_display.reset();
-              ownership_changed.notify_all();
-              return true;
+            if (!same_virtual_display_identity(retired_local_virtual_display->identity, retiring->identity)) {
+              return false;
             }
-            BOOST_LOG(error) << "A different local AR retirement record appeared while waiting; refusing to certify cleanup."sv;
+            retired_local_virtual_display->finish_topology_cleanup = {};
+          }
+          if (query_retiring_local_virtual_display(*retiring) != VDISPLAY::display_identity_state_e::absent) {
             return false;
           }
-        } else {
-          // Both a confirmed presence and an indeterminate Windows topology query break the
-          // authoritative-absence sequence. Query failure must never be treated as removal.
-          consecutive_absent_observations = 0;
-        }
-        if (std::chrono::steady_clock::now() >= deadline) {
-          break;
-        }
-        std::this_thread::sleep_for(std::min(50ms, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())));
-      }
-      return false;
+          std::lock_guard lock(ownership_mutex);
+          if (!retired_local_virtual_display) {
+            return true;
+          }
+          if (same_virtual_display_identity(retired_local_virtual_display->identity, retiring->identity)) {
+            retired_local_virtual_display.reset();
+            ownership_changed.notify_all();
+            return true;
+          }
+          BOOST_LOG(error) << "A different local AR retirement record appeared while waiting; refusing to certify cleanup."sv;
+          return false;
+        },
+      };
+      return retiring->retirement.wait_until(deadline, {50ms, 100ms}, callbacks);
     }
 
     bool physical_adapter_contract_valid(const LUID &before, const LUID &after) {
@@ -1598,6 +1567,50 @@ namespace ar_glasses {
       }
       const auto rounded = (static_cast<std::uint64_t>(numerator) * 1000 + denominator / 2) / denominator;
       return rounded <= std::numeric_limits<int>::max() ? static_cast<int>(rounded) : 0;
+    }
+
+    bool source_refresh_matches(int actual_millihz, int requested_millihz) {
+      if (actual_millihz <= 0 || requested_millihz <= 0) {
+        return false;
+      }
+      const auto slower = std::min(actual_millihz, requested_millihz);
+      const auto difference = static_cast<std::int64_t>(std::max(actual_millihz, requested_millihz)) - slower;
+      // Accept at most 0.02% clock variation without rounding either CCD measurement. This
+      // includes 120 vs 120.013 Hz while keeping 59.94/60 and 119.88/120 Hz distinct.
+      return difference * 5000 <= slower;
+    }
+
+    template<class Query, class Apply, class Wait>
+    std::optional<int> configure_source_refresh_with_io(
+      int requested_millihz,
+      Query query,
+      Apply apply,
+      Wait wait,
+      const std::function<bool()> &cancelled
+    ) {
+      for (int attempt = 0; attempt < 3 && !cancelled(); ++attempt) {
+        const auto source = query();
+        if (source && source_refresh_matches(source->refresh_millihz, requested_millihz)) {
+          return cancelled() ? std::nullopt : std::make_optional(source->refresh_millihz);
+        }
+        if (source) {
+          apply(*source);
+        }
+        for (int poll = 0; poll < 4 && !cancelled(); ++poll) {
+          wait(50ms);
+          const auto observed = query();
+          if (observed && source_refresh_matches(observed->refresh_millihz, requested_millihz)) {
+            return cancelled() ? std::nullopt : std::make_optional(observed->refresh_millihz);
+          }
+        }
+      }
+      if (cancelled()) {
+        return std::nullopt;
+      }
+      const auto source = query();
+      return !cancelled() && source && source->refresh_millihz > 0 ?
+               std::make_optional(source->refresh_millihz) :
+               std::nullopt;
     }
 
     struct resolved_virtual_display_t {
@@ -3474,40 +3487,39 @@ namespace ar_glasses {
         // A successful mode setter is not proof of the active cadence. Conversely, a rejected
         // setter may have applied its baseline mode. Re-resolve the stable source for every
         // attempt and accept only CCD readback, without recreating the user's retained desktop.
-        for (int attempt = 0; attempt < 3 && !cancelled(); ++attempt) {
-          const auto source = refresh_virtual_display_reference();
-          if (source && source->refresh_millihz == requested_millihz) {
-            return true;
-          }
-          if (source) {
+        const auto verified_millihz = configure_source_refresh_with_io(
+          requested_millihz,
+          [&]() {
+            return refresh_virtual_display_reference();
+          },
+          [&](const resolved_virtual_display_t &source) {
             VDISPLAY::changeDisplaySettings(
-              source->gdi_name.c_str(),
+              source.gdi_name.c_str(),
               source_width,
               source_height,
               requested_millihz,
               !exclusive_
             );
-          }
-          for (int poll = 0; poll < 4 && !cancelled(); ++poll) {
-            std::this_thread::sleep_for(50ms);
-            const auto observed = refresh_virtual_display_reference();
-            if (observed && observed->refresh_millihz == requested_millihz) {
-              return true;
-            }
-          }
-        }
+          },
+          [](std::chrono::milliseconds delay) {
+            std::this_thread::sleep_for(delay);
+          },
+          cancelled
+        );
         if (cancelled()) {
           return false;
         }
-        const auto source = refresh_virtual_display_reference();
-        if (!source || source->refresh_millihz <= 0) {
+        if (!verified_millihz) {
           BOOST_LOG(warning) << "The local AR source mode could not be verified; retaining the desktop for a later topology retry."sv;
           return false;
+        }
+        if (source_refresh_matches(*verified_millihz, requested_millihz)) {
+          return true;
         }
         // Some drivers cannot apply a new fractional rate in place. Keep the usable desktop
         // after this bounded repair attempt; a permanent mismatch must not cause a blank retry
         // loop or migrate its windows. A later real mode change can try again.
-        BOOST_LOG(warning) << "Local AR source refresh remains "sv << (source->refresh_millihz / 1000.0)
+        BOOST_LOG(warning) << "Local AR source refresh remains "sv << (*verified_millihz / 1000.0)
                            << " Hz after requesting "sv << (requested_millihz / 1000.0)
                            << " Hz; preserving the desktop with its verified source cadence."sv;
         return true;
@@ -4441,6 +4453,30 @@ namespace ar_glasses {
 #ifdef SUNSHINE_TESTS
   int detail::local_source_refresh_millihz_for_test(std::uint32_t numerator, std::uint32_t denominator) {
     return source_refresh_millihz(numerator, denominator);
+  }
+
+  std::optional<int> detail::configure_local_source_refresh_for_test(
+    int requested_millihz,
+    const std::function<std::optional<int>()> &query,
+    const std::function<void()> &apply,
+    const std::function<void(std::chrono::milliseconds)> &wait,
+    const std::function<bool()> &cancelled
+  ) {
+    return configure_source_refresh_with_io(
+      requested_millihz,
+      [&]() -> std::optional<resolved_virtual_display_t> {
+        const auto measured = query();
+        if (!measured) {
+          return std::nullopt;
+        }
+        return resolved_virtual_display_t {.refresh_millihz = *measured};
+      },
+      [&](const resolved_virtual_display_t &) {
+        apply();
+      },
+      wait,
+      cancelled
+    );
   }
 
   bool detail::primary_source_is_authoritative_for_test(

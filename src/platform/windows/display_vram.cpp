@@ -631,9 +631,18 @@ namespace platf::dxgi {
       if (diagnostics_enabled && depth_estimator) {
         depth_estimator->poll_gpu_outcome_diagnostics();
       }
-      return depth_completion_poll_pending || depth_authority_reprocess_pending ||
-             gpu_observation_barrier.active() ||
-             sbs_dumper.needs_conversion_poll();
+      const models::host_sbs_conversion_work_t work {
+        .pipeline_enabled = sbs_mode != ::video::SBS_OFF &&
+                            models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer),
+        .estimator_present = static_cast<bool>(depth_estimator),
+        .pipeline_build_pending = depth_estimator_build.valid(),
+        .depth_completion_pending = depth_completion_poll_pending,
+        .authority_reprocess_pending = depth_authority_reprocess_pending,
+        .dump_pending = sbs_dumper.needs_conversion_poll(),
+      };
+      return work.needs_service([]() {
+        return models::tensorrt_model_prepare_status(::video::host_sbs_v2_depth_model());
+      });
     }
 
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const {

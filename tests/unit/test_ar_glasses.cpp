@@ -90,6 +90,41 @@ namespace {
       {"recoveries", std::move(recoveries)},
     };
   }
+
+  struct source_refresh_probe_t {
+    std::optional<int> measured = 120000;
+    std::optional<int> after_set;
+    unsigned queries = 0;
+    unsigned setters = 0;
+    unsigned waits = 0;
+    std::chrono::milliseconds elapsed {};
+    bool cancelled = false;
+    bool cancel_on_wait = false;
+
+    std::optional<int> configure(int requested) {
+      return ar_glasses::detail::configure_local_source_refresh_for_test(
+        requested,
+        [&]() {
+          ++queries;
+          return measured;
+        },
+        [&]() {
+          ++setters;
+          if (after_set) {
+            measured = after_set;
+          }
+        },
+        [&](std::chrono::milliseconds delay) {
+          ++waits;
+          elapsed += delay;
+          cancelled = cancelled || cancel_on_wait;
+        },
+        [&]() {
+          return cancelled;
+        }
+      );
+    }
+  };
 }  // namespace
 
 TEST(ArGlassesMode, SelectsNormalForNativeTwoDimensionalMode) {
@@ -131,6 +166,90 @@ TEST(ArGlassesSourceRefresh, RejectsUnknownAndOverflowingRefreshEvidence) {
   EXPECT_EQ(ar_glasses::detail::local_source_refresh_millihz_for_test(120000000, 1000000), 120000);
 }
 
+TEST(ArGlassesSourceRefresh, TinyClockDifferenceBypassesModeSettersAndPollingWithoutRounding) {
+  for (const auto rates : std::array {
+         std::array {120000, 120013},
+         std::array {120013, 120000},
+         std::array {120000, 120024},
+         std::array {std::numeric_limits<int>::max(), std::numeric_limits<int>::max() - 1},
+       }) {
+    source_refresh_probe_t probe;
+    probe.measured = rates[0];
+    EXPECT_EQ(probe.configure(rates[1]), rates[0]);
+    EXPECT_EQ(probe.measured, rates[0]);
+    EXPECT_EQ(probe.queries, 1u);
+    EXPECT_EQ(probe.setters, 0u);
+    EXPECT_EQ(probe.waits, 0u);
+  }
+}
+
+TEST(ArGlassesSourceRefresh, MaterialCadenceChangeStillSetsAndVerifiesTheRequestedMode) {
+  for (const auto rates : std::array {
+         std::array {59940, 60000},
+         std::array {60000, 59940},
+         std::array {119880, 120000},
+         std::array {120000, 119880},
+         std::array {60000, 120000},
+         std::array {120000, 120025},
+       }) {
+    source_refresh_probe_t probe;
+    probe.measured = rates[0];
+    probe.after_set = rates[1];
+    EXPECT_EQ(probe.configure(rates[1]), rates[1]);
+    EXPECT_EQ(probe.setters, 1u);
+    EXPECT_EQ(probe.queries, 2u);
+    EXPECT_EQ(probe.waits, 1u);
+    EXPECT_EQ(probe.elapsed, 50ms);
+  }
+}
+
+TEST(ArGlassesSourceRefresh, PostSetClockDifferenceCompletesOnTheFirstVerifiedReadback) {
+  source_refresh_probe_t probe;
+  probe.measured = 60000;
+  probe.after_set = 120000;
+  EXPECT_EQ(probe.configure(120013), 120000);
+  EXPECT_EQ(probe.setters, 1u);
+  EXPECT_EQ(probe.waits, 1u);
+  EXPECT_EQ(probe.elapsed, 50ms);
+}
+
+TEST(ArGlassesSourceRefresh, UnsupportedRateRetainsMeasuredCadenceAfterBoundedRetries) {
+  source_refresh_probe_t probe;
+  probe.measured = 60000;
+  EXPECT_EQ(probe.configure(120000), 60000);
+  EXPECT_EQ(probe.measured, 60000);
+  EXPECT_EQ(probe.setters, 3u);
+  EXPECT_EQ(probe.waits, 12u);
+  EXPECT_EQ(probe.elapsed, 600ms);
+}
+
+TEST(ArGlassesSourceRefresh, MissingOrNonpositiveReadbackCannotCertifyAUsableSource) {
+  for (const auto measured : {std::optional<int> {}, std::optional<int> {0}, std::optional<int> {-1}}) {
+    source_refresh_probe_t probe;
+    probe.measured = measured;
+    EXPECT_FALSE(probe.configure(120013));
+    EXPECT_EQ(probe.waits, 12u);
+    EXPECT_EQ(probe.setters, measured ? 3u : 0u);
+  }
+}
+
+TEST(ArGlassesSourceRefresh, CancellationCannotReportSuccessEvenWhenTheSetterReachedTolerance) {
+  source_refresh_probe_t probe;
+  probe.cancelled = true;
+  EXPECT_FALSE(probe.configure(120013));
+  EXPECT_EQ(probe.queries, 0u);
+  EXPECT_EQ(probe.setters, 0u);
+  EXPECT_EQ(probe.waits, 0u);
+
+  probe.cancelled = false;
+  probe.cancel_on_wait = true;
+  probe.measured = 60000;
+  probe.after_set = 120000;
+  EXPECT_FALSE(probe.configure(120013));
+  EXPECT_EQ(probe.setters, 1u);
+  EXPECT_EQ(probe.waits, 1u);
+}
+
 TEST(ArGlassesDiscovery, RecognizesSpecificModelsAndNames) {
   EXPECT_TRUE(ar_glasses::is_recognized_ar_display("DISPLAY:TCL03D4", "Generic Monitor"));
   EXPECT_TRUE(ar_glasses::is_recognized_ar_display("DISPLAY:ABC1234", "XREAL Air 2 Pro"));
@@ -149,11 +268,7 @@ TEST(ArGlassesRemotePreservation, PreservesApprovedAndRecognizedArDisplays) {
     {.id = "DISPLAY:USR1234", .name = "User selected display", .decision = ar_glasses::device_decision_e::approved},
   };
 
-  EXPECT_TRUE(ar_glasses::detail::preserve_during_remote_virtual_display_for_test(
-    "DISPLAY:USR1234",
-    "Generic Monitor",
-    decisions
-  ));
+  EXPECT_TRUE(ar_glasses::detail::preserve_during_remote_virtual_display_for_test("DISPLAY:USR1234", "Generic Monitor", decisions));
   EXPECT_TRUE(ar_glasses::detail::preserve_during_remote_virtual_display_for_test(
     "DISPLAY:TCL03D4",
     "Generic Monitor",

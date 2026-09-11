@@ -1099,6 +1099,13 @@ a final update from waiting for the default one-fifth-rate heartbeat without spi
 repeated frames faster than the requested cadence. Pipeline initialization readiness may bypass
 the wait entirely, but only after a real captured source has been retained.
 
+Global model preparation is checked at that ordinary idle boundary. When it becomes ready or
+fails, the retained static source services initialization or publishes the terminal flat status
+without waiting for desktop motion. Preparation itself does not request frame-rate conversion;
+the next idle wake observes its outcome, while per-device construction retains its existing
+completion notification. A completed opaque transaction keeps its attribution barrier without
+requesting further conversion. Only unfinished work or new input can keep the faster retry active.
+
 ### Client exact-repeat transport
 
 The optional `SOURCE_FRAME_ID_V1` capability carries a conservative encoder-input identity to

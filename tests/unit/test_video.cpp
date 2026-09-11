@@ -6385,10 +6385,14 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
   const auto needs_poll_end = display.find("rendered_content_timestamp() const", needs_poll);
   ASSERT_NE(needs_poll, std::string::npos);
   ASSERT_NE(needs_poll_end, std::string::npos);
-  EXPECT_NE(
+  EXPECT_EQ(
     display.substr(needs_poll, needs_poll_end - needs_poll).find(
       "gpu_observation_barrier.active()"
     ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.substr(needs_poll, needs_poll_end - needs_poll).find("work.needs_service("),
     std::string::npos
   );
 

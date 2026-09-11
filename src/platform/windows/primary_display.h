@@ -48,9 +48,9 @@ namespace platf::primary_display {
   /** Restore recorded positions in primary-only mode, preserving current display modes.
    * Exclusive mode reactivates original physical outputs with saved modes/color and keeps
    * an existing virtual output active at its current mode for retirement or reconnect.
-   * If an original monitor is missing, available physical outputs are restored first.
-   * Local AR preserves the selected sink's current mode/color; its absence alone does not
-   * block completion once all ordinary original outputs have been restored and verified.
+   * Missing original monitors do not block completion once available outputs are verified.
+   * Explicit user layout changes become the recovery baseline for active physical outputs.
+   * Local AR preserves the selected sink's current mode/color.
    * A supplied identity prevents retiring an old display from restoring a newer session.
    * False leaves the journal intact and callers must defer removal of the virtual display.
    */

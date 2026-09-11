@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stop_token>
@@ -175,6 +176,17 @@ namespace ar_glasses {
 
     /** Decode active source refresh without discarding fractional-Hz CCD evidence. */
     int local_source_refresh_millihz_for_test(std::uint32_t numerator, std::uint32_t denominator);
+
+    /** Run the production bounded refresh repair against fake display I/O. The result retains
+     * measured cadence, including terminal fallback; unavailable/cancelled work returns nullopt.
+     */
+    std::optional<int> configure_local_source_refresh_for_test(
+      int requested_millihz,
+      const std::function<std::optional<int>()> &query,
+      const std::function<void()> &apply,
+      const std::function<void(std::chrono::milliseconds)> &wait,
+      const std::function<bool()> &cancelled
+    );
 
     struct linear_layout_t {
       RECT virtual_rect {};

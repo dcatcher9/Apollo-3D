@@ -3784,7 +3784,7 @@ namespace stream {
       }
 
       void retain_or_stop_session_locked() {
-        if (remote_session_active || cleanup_exited_idle_session_locked()) {
+        if (remote_session_active) {
           return;
         }
         const auto disconnected_at = std::chrono::steady_clock::now();
@@ -3793,6 +3793,9 @@ namespace stream {
         // app and driver device for reconnect, without leaving their desktop region active.
         BOOST_LOG(info) << "Remote streaming session is inactive; restoring the original display topology."sv;
         const bool primary_restored = proc::proc.pause_display_for_resume();
+        if (cleanup_exited_idle_session_locked()) {
+          return;
+        }
         const auto process_status = proc::proc.get_status();
         if (process_status.app_id == 0) {
           // There is no app/session state worth retaining. Match the historical cleanup path.

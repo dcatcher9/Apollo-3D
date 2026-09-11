@@ -260,6 +260,23 @@ namespace platf::primary_display {
       return al && bl && same_layout(*al, *bl) && same_modes(a, b);
     }
 
+    // Reactivation owns the recorded VD even if a negotiated mode change follows it. Both
+    // promotion and rollback require every identity/position and every physical mode unchanged.
+    bool same_layout_and_physical_modes(const detail::snapshot_t &current, const detail::snapshot_t &reference, std::wstring_view virtual_identity) {
+      const auto live_layout = detail::inspect(current);
+      const auto pending_layout = detail::inspect(reference);
+      if (!live_layout || !pending_layout || !same_layout(*live_layout, *pending_layout) || !find_path(current, virtual_identity)) {
+        return false;
+      }
+      auto physical_only = [&](detail::snapshot_t snapshot) {
+        const auto index = *find_path(snapshot, virtual_identity);
+        snapshot.paths.erase(snapshot.paths.begin() + static_cast<std::ptrdiff_t>(index));
+        snapshot.device_paths.erase(snapshot.device_paths.begin() + static_cast<std::ptrdiff_t>(index));
+        return snapshot;
+      };
+      return same_modes(physical_only(current), physical_only(reference));
+    }
+
     struct display_spec_t {
       std::wstring identity;
       DISPLAYCONFIG_PATH_INFO path {};
@@ -325,6 +342,58 @@ namespace platf::primary_display {
         x += spec.source.width;
       }
       return x <= std::numeric_limits<LONG>::max();
+    }
+
+    // Preserve the active physical arrangement, including user-selected modes/color. Append
+    // outputs that Sunshine disabled beside it, instead of overwriting the user's new layout.
+    bool preserve_current_desktop(
+      const detail::snapshot_t &current,
+      std::vector<display_spec_t> &wanted,
+      std::wstring_view virtual_identity,
+      bool keep_virtual_active
+    ) {
+      std::vector<display_spec_t> preserved;
+      for (size_t i = 0; i < current.paths.size(); ++i) {
+        if (!same_device(current.device_paths[i], virtual_identity)) {
+          preserved.push_back(display_spec(current, i));
+        }
+      }
+      if (preserved.empty()) {
+        return false;
+      }
+      auto primary = std::ranges::find_if(preserved, [](const auto &spec) {
+        return spec.source.position.x == 0 && spec.source.position.y == 0;
+      });
+      if (primary == preserved.end()) {
+        primary = preserved.begin();
+      }
+      const auto origin = primary->source.position;
+      for (auto &spec : preserved) {
+        const auto x = subtract(spec.source.position.x, origin.x);
+        const auto y = subtract(spec.source.position.y, origin.y);
+        if (!x || !y) {
+          return false;
+        }
+        spec.source.position = {*x, *y};
+      }
+      for (auto spec : wanted) {
+        if ((!keep_virtual_active && same_device(spec.identity, virtual_identity)) || std::ranges::any_of(preserved, [&](const auto &entry) {
+              return same_device(entry.identity, spec.identity);
+            })) {
+          continue;
+        }
+        const auto rightmost = std::ranges::max_element(preserved, {}, [](const auto &entry) {
+          return static_cast<std::int64_t>(entry.source.position.x) + entry.source.width;
+        });
+        const auto right = static_cast<std::int64_t>(rightmost->source.position.x) + rightmost->source.width;
+        if (right > std::numeric_limits<LONG>::max() || right + spec.source.width > std::numeric_limits<LONG>::max()) {
+          return false;
+        }
+        spec.source.position = {static_cast<LONG>(right), rightmost->source.position.y};
+        preserved.push_back(std::move(spec));
+      }
+      wanted = std::move(preserved);
+      return true;
     }
 
     std::optional<detail::snapshot_t> build_topology(const detail::snapshot_t &available, const std::vector<display_spec_t> &wanted) {
@@ -431,6 +500,64 @@ namespace platf::primary_display {
         result.colors.push_back(spec.color);
       }
       return detail::inspect(result) ? std::make_optional(std::move(result)) : std::nullopt;
+    }
+
+    // A verified user arrangement becomes the existing recovery baseline, not another journal
+    // mode. Keep the exact pending apply separately so color failures and new hotplugs can retry
+    // without rediscovering the superseded launch positions. Missing outputs start fresh later.
+    bool rebase_recovery(detail::journal_t &journal, const detail::snapshot_t &current, const detail::snapshot_t &desired) {
+      auto layout = detail::inspect(desired);
+      if (!layout) {
+        return false;
+      }
+      auto physical = desired;
+      if (const auto index = find_path(physical, journal.promoted_primary)) {
+        physical.paths.erase(physical.paths.begin() + static_cast<std::ptrdiff_t>(*index));
+        physical.device_paths.erase(physical.device_paths.begin() + static_cast<std::ptrdiff_t>(*index));
+        physical.colors.erase(physical.colors.begin() + static_cast<std::ptrdiff_t>(*index));
+      }
+      if (!detail::inspect(physical)) {
+        return false;
+      }
+      if (!find_position(*layout, journal.promoted_primary)) {
+        // A pause detaches the VD, but the existing journal still records its identity and a
+        // secondary position for a retry that keeps it active. This does not activate anything.
+        std::int64_t right = std::numeric_limits<LONG>::min();
+        LONG top = 0;
+        for (size_t i = 0; i < physical.paths.size(); ++i) {
+          const auto spec = display_spec(physical, i);
+          const auto edge = static_cast<std::int64_t>(spec.source.position.x) + spec.source.width;
+          if (edge > right) {
+            right = edge;
+            top = spec.source.position.y;
+          }
+        }
+        if (right > std::numeric_limits<LONG>::max()) {
+          return false;
+        }
+        layout->push_back({journal.promoted_primary, static_cast<LONG>(right), top});
+      }
+      const auto *virtual_position = find_position(*layout, journal.promoted_primary);
+      const auto promoted = translated(*layout, virtual_position->x, virtual_position->y);
+      const auto primary = std::ranges::find_if(*layout, [](const auto &position) {
+        return position.x == 0 && position.y == 0;
+      });
+      if (!promoted || primary == layout->end()) {
+        return false;
+      }
+      journal.original_primary = primary->device_path;
+      journal.original = std::move(*layout);
+      journal.promoted = *promoted;
+      journal.original_topology = std::move(physical);
+      journal.before_exclusive = current;
+      journal.exclusive_topology.reset();
+      std::erase_if(journal.exclusive_preserved, [&](const auto &identity) {
+        return !find_path(*journal.original_topology, identity);
+      });
+      if (!journal.local_sink.empty() && !find_path(*journal.original_topology, journal.local_sink)) {
+        journal.local_sink.clear();
+      }
+      return true;
     }
 
     bool owned_subset(const detail::snapshot_t &current, const detail::snapshot_t &reference) {
@@ -1521,21 +1648,21 @@ namespace platf::primary_display {
       }
       const bool remembered_exclusive = journal.exclusive_started && !journal.pending_restore && same_topology(*snapshot, *journal.before_exclusive);
       const bool continuing_exclusive = journal.exclusive_started &&
-                                         ((journal.exclusive_topology && owned_subset(*snapshot, *journal.exclusive_topology)) ||
-                                          exclusive_continuation_with_recorded_outputs(*snapshot, journal, device_path) ||
-                                          owned_exclusive_state(
+                                        ((journal.exclusive_topology && owned_subset(*snapshot, *journal.exclusive_topology)) ||
+                                         exclusive_continuation_with_recorded_outputs(*snapshot, journal, device_path) ||
+                                         owned_exclusive_state(
                                            *snapshot,
                                            device_path,
                                            journal.exclusive_preserved,
                                            *journal.original_topology
                                          ));
       const bool resuming_restore = journal.exclusive_started && journal.pending_restore &&
-                                    owned_subset(*snapshot, *journal.pending_restore);
+                                    (owned_subset(*snapshot, *journal.pending_restore) ||
+                                     same_layout_and_physical_modes(*snapshot, *journal.pending_restore, device_path));
       if (journal.exclusive_started && !remembered_exclusive && !continuing_exclusive && !resuming_restore) {
         return false;
       }
-      if (!remembered_exclusive && !continuing_exclusive && !resuming_restore &&
-          !same_layout(*layout, journal.original) && !same_layout(*layout, journal.promoted)) {
+      if (!remembered_exclusive && !continuing_exclusive && !resuming_restore && !same_layout(*layout, journal.original) && !same_layout(*layout, journal.promoted)) {
         return false;
       }
       snapshot_t current_physical, saved_physical;
@@ -1871,24 +1998,8 @@ namespace platf::primary_display {
                                           return find_path(*journal.original_topology, identity) ||
                                                  (journal.pending_restore && find_path(*journal.pending_restore, identity));
                                         });
-      bool paused_activation = false;
-      if (!keep_virtual_active && virtual_index && journal.pending_restore) {
-        const auto live_layout = inspect(*current);
-        const auto pending_layout = inspect(*journal.pending_restore);
-        if (live_layout && pending_layout && same_layout(*live_layout, *pending_layout)) {
-          auto physical_only = [&](snapshot_t snapshot) {
-            const auto index = find_path(snapshot, journal.promoted_primary);
-            if (index) {
-              snapshot.paths.erase(snapshot.paths.begin() + static_cast<std::ptrdiff_t>(*index));
-              snapshot.device_paths.erase(snapshot.device_paths.begin() + static_cast<std::ptrdiff_t>(*index));
-            }
-            return snapshot;
-          };
-          // An activation can return a different VD mode than requested. Its exact secondary
-          // target is still ours to detach when all physical modes and positions are unchanged.
-          paused_activation = same_modes(physical_only(*current), physical_only(*journal.pending_restore));
-        }
-      }
+      const bool paused_activation = !keep_virtual_active && virtual_index && journal.pending_restore &&
+                                     same_layout_and_physical_modes(*current, *journal.pending_restore, journal.promoted_primary);
       const bool owned = owned_current.paths.empty() || owned_exclusive || retired_local_source || paused_activation || same_topology(owned_current, *journal.before_exclusive) ||
                          exclusive_continuation_with_recorded_outputs(*current, journal, journal.promoted_primary) ||
                          (journal.pending_restore && owned_subset(owned_current, *journal.pending_restore)) ||
@@ -2021,7 +2132,7 @@ namespace platf::primary_display {
         // after they are unplugged. There is no remaining physical output to restore.
         return io_.clear();
       }
-      if (physical_count != 0 && wanted.empty()) {
+      if (physical_count != 0 && wanted.empty() && added_outputs.empty()) {
         return false;
       }
       if (wanted.empty()) {
@@ -2111,22 +2222,38 @@ namespace platf::primary_display {
         // mode and color; it must stay active for orderly retirement and warm reconnect.
         wanted.push_back(std::move(virtual_spec));
       }
-      bool local_restore_overlap = false;
-      if (!journal.local_sink.empty()) {
+      // User-owned active outputs override the saved plan before its geometry is validated.
+      // Removing a VD that bridged two physical monitors can disconnect that arrangement.
+      if (!owned) {
+        if (!preserve_current_desktop(*current, wanted, journal.promoted_primary, keep_virtual_active)) {
+          return false;
+        }
+        primary = std::ranges::find_if(wanted, [](const auto &spec) {
+          return spec.source.position.x == 0 && spec.source.position.y == 0;
+        });
+        if (primary == wanted.end()) {
+          return false;
+        }
+        restore_primary = primary->identity;
+        origin = {};
+        BOOST_LOG(info) << "Preserving the user's current desktop while restoring available disabled outputs.";
+      }
+      bool restore_overlap = false;
+      if (!journal.local_sink.empty() || !owned) {
         for (size_t i = 0; i < wanted.size(); ++i) {
           for (size_t j = 0; j < i; ++j) {
             const auto &a = wanted[i].source;
             const auto &b = wanted[j].source;
-            local_restore_overlap = local_restore_overlap ||
-                                    (static_cast<std::int64_t>(a.position.x) < static_cast<std::int64_t>(b.position.x) + b.width &&
-                                     static_cast<std::int64_t>(b.position.x) < static_cast<std::int64_t>(a.position.x) + a.width &&
-                                     static_cast<std::int64_t>(a.position.y) < static_cast<std::int64_t>(b.position.y) + b.height &&
-                                     static_cast<std::int64_t>(b.position.y) < static_cast<std::int64_t>(a.position.y) + a.height);
+            restore_overlap = restore_overlap ||
+                              (static_cast<std::int64_t>(a.position.x) < static_cast<std::int64_t>(b.position.x) + b.width &&
+                               static_cast<std::int64_t>(b.position.x) < static_cast<std::int64_t>(a.position.x) + a.width &&
+                               static_cast<std::int64_t>(a.position.y) < static_cast<std::int64_t>(b.position.y) + b.height &&
+                               static_cast<std::int64_t>(b.position.y) < static_cast<std::int64_t>(a.position.y) + a.height);
           }
         }
       }
-      bool local_restore_disconnected = false;
-      if (local_sink_resized && !wanted.empty()) {
+      bool restore_disconnected = false;
+      if ((local_sink_resized || !owned) && !wanted.empty()) {
         std::vector<bool> connected(wanted.size(), false);
         connected.front() = true;
         bool progress = true;
@@ -2158,14 +2285,14 @@ namespace platf::primary_display {
             }
           }
         }
-        local_restore_disconnected = std::ranges::any_of(connected, [](bool reached) {
+        restore_disconnected = std::ranges::any_of(connected, [](bool reached) {
           return !reached;
         });
       }
-      if (missing || missing_local_sink || local_restore_overlap || local_restore_disconnected) {
+      if ((owned && (missing || missing_local_sink)) || restore_overlap || restore_disconnected) {
         // Removing an unavailable monitor from the saved arrangement can leave a hole between
-        // survivors. GDI requires one contiguous desktop, so keep the durable original topology
-        // for the later complete restore while applying a deterministic temporary row now.
+        // survivors. Restore a contiguous usable desktop; absent originals do not retain
+        // a blocking recovery transaction after the available outputs are verified.
         if (!pack_horizontally(wanted, restore_primary, 0, 0)) {
           return false;
         }
@@ -2183,11 +2310,7 @@ namespace platf::primary_display {
       if (!desired) {
         return false;
       }
-      // A formerly unavailable saved physical display can return already active. Its
-      // identity, original mode and relative arrangement must match the restoration plan;
-      // an unrelated active output or a user-edited mode/layout still fails this check.
-      if (!owned && !(journal.pending_restore && owned_subset(*current, *desired))) {
-        BOOST_LOG(warning) << "Display topology was changed outside the exclusive-display transaction; preserving that arrangement and the recovery journal.";
+      if (!owned && !rebase_recovery(journal, *current, *desired)) {
         return false;
       }
       journal.pending_restore = *desired;
@@ -2236,15 +2359,14 @@ namespace platf::primary_display {
         color_ok = index && *index < observed->colors.size() && observed->colors[*index] &&
                    color_matches(*observed->colors[*index], *spec.color) && color_ok;
       }
-      if (!color_ok || missing) {
-        BOOST_LOG(warning) << "Available physical displays are active; retaining exclusive-display recovery until all original displays and color settings are restored.";
+      if (!color_ok) {
+        BOOST_LOG(warning) << "Available physical displays are active; retaining exclusive-display recovery until their color settings are restored.";
         return false;
       }
-      if (missing_local_sink) {
-        // Only the exact local presentation sink is optional. All connected ordinary
-        // displays were verified above. Temporary CCD state needs no offline mutation;
-        // reconnect starts from the newly published Windows topology and a fresh baseline.
-        BOOST_LOG(info) << "Restored available physical displays after local AR disconnect; the absent presentation sink will use a fresh topology baseline on reconnect.";
+      if (missing || missing_local_sink) {
+        // All available outputs were restored and verified. An unplugged monitor must not
+        // hold future sessions hostage; its return starts from Windows' current layout.
+        BOOST_LOG(info) << "Restored available physical displays; absent monitors will use a fresh topology baseline on reconnect.";
       }
       BOOST_LOG(info) << (keep_virtual_active ? "Restored physical displays, modes, color settings, and primary display after exclusive streaming." : "Restored physical displays and detached the retained virtual display from the desktop.");
       return io_.clear();
@@ -2405,7 +2527,7 @@ namespace platf::primary_display {
         const auto index = find_path(*observed, spec.identity);
         colors_ok = index && *index < observed->colors.size() && observed->colors[*index] && spec.color && color_matches(*observed->colors[*index], *spec.color) && colors_ok;
       }
-      if (missing || !extras.empty() || !colors_ok) {
+      if (!extras.empty() || !colors_ok) {
         return false;
       }
       return io_.clear();
@@ -2723,9 +2845,22 @@ namespace platf::primary_display {
       }
       const auto original = restrict_layout(journal.original, *layout, journal.promoted_primary);
       const auto promoted = restrict_layout(journal.promoted, *layout, journal.promoted_primary);
+      const auto preserve_current_desktop = [&]() {
+        if (std::ranges::none_of(*layout, [&](const auto &position) {
+              return !same_device(position.device_path, journal.promoted_primary);
+            })) {
+          // Keep recovery when the virtual source is the only usable desktop.
+          return false;
+        }
+        const auto verified = io_.query();
+        if (!verified || !same_topology(*snapshot, *verified)) {
+          return false;
+        }
+        BOOST_LOG(info) << "Preserving the current physical desktop and retiring the superseded primary-display recovery record.";
+        return io_.clear();
+      };
       if (!original || !promoted) {
-        BOOST_LOG(warning) << "Monitors changed since primary-display promotion; retaining recovery record until the original displays are available.";
-        return false;
+        return preserve_current_desktop();
       }
       if (same_layout(*layout, *original)) {
         return io_.clear();
@@ -2738,8 +2873,7 @@ namespace platf::primary_display {
         }
       }
       if (!same_layout(*layout, *promoted)) {
-        BOOST_LOG(warning) << "Monitor positions were changed outside the primary-display transaction; leaving that arrangement unchanged and retaining recovery record.";
-        return false;
+        return preserve_current_desktop();
       }
       if (!apply_verified(*snapshot, *original)) {
         return false;

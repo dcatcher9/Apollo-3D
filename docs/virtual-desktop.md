@@ -78,7 +78,10 @@ inactive source no longer holds application windows. If there is no usable physi
 host keeps the virtual source active rather than leaving Windows without a display.
 
 Resuming within that window reactivates the exact retained device and reapplies the selected mode,
-primary display, and exclusive-display policy before capture resumes. A remote `/resume` must match
+primary display, and exclusive-display policy before capture resumes. The requested resolution,
+refresh rate, and HDR mode may differ from the retained virtual display's previous mode; those
+changes do not invalidate its recorded display ownership. Physical-display identities, positions,
+and modes remain checked before promotion. A remote `/resume` must match
 the retained application and host-session token; wearing or reconnecting the same local glasses
 resumes their retained session. Expiry retires the device and ends the retained session.
 
@@ -88,13 +91,23 @@ this way. Glasses that remain worn throughout a remote session wait for its grac
 a new wear or connection event occurs. Both paths share the grace deadline rules and Windows display
 pause/reactivation implementation; their network and hardware event adapters remain separate.
 
+Local AR and remote streaming also share the bounded retirement proof in
+`platform/windows/virtual_display_retirement.h`. Each adapter retains its exact device identity,
+serialization lock, safe removal preparation, and topology cleanup; the primary-display manager
+remains the topology owner. A driver removal acknowledgment alone never releases that ownership.
+
 Recovery information is written to disk before the display change. Virtual-display-only mode also
 records the original active displays, their modes, and their advanced-color settings. A failed
 restore keeps that record and prevents the host from removing the virtual monitor before the
-pending restoration is reconciled. If an original physical monitor is unplugged, recovery lights
-the available original monitors and retains the record until the missing monitor returns and the
-remaining settings can be restored. Where a usable physical desktop can be restored, the virtual
-source is detached even while that incomplete recovery record is retained.
+pending restoration is reconciled. If an original physical monitor is unplugged, recovery restores
+the available outputs and completes once their layout and color settings are verified. An absent
+monitor does not block the next session; when it returns, Windows' current layout becomes the new
+baseline. Explicit user rearrangements and active-monitor settings are preserved, with still-disabled
+available outputs restored beside that desktop. If no usable physical output remains, recovery keeps
+the sole virtual source active instead of leaving Windows without a display.
+
+Display restoration precedes graceful app shutdown and preparation-command undo. Slow cleanup cannot
+delay the initial desktop restore; cleanup remains serialized and bounded before a successor starts.
 
 The host restores unfinished display transactions early during normal startup, before GPU and
 platform initialization. The existing packaged Windows service restarts the host after an
@@ -109,8 +122,9 @@ Normal disconnect and graceful shutdown restore displays without requiring a res
 A shared ownership lock prevents another host from restoring a live transaction. While a
 disconnected session remains in its reconnect grace period, the host retries a failed restore once
 per second without extending that deadline. A new accepted launch or active session cancels those
-retries. Changed physical display arrangements can prevent exact restoration until the saved
-arrangement is available again. Windows can also move windows when their monitor is removed.
+retries. Recovery preserves a verified user-edited desktop and retires
+the superseded layout record. Failed queries, applies, color verification, or durable journal updates
+still retain recovery ownership. Windows can also move windows when their monitor is removed.
 
 The ordinary virtual-display-only stream and disconnect path has been verified on Galaxy XR.
 Recovery after a hard host crash still requires a live multi-monitor test; automated lifecycle and
@@ -133,11 +147,16 @@ application's replacement.
 
 An authenticated Windows host `/serverinfo` advertises `VirtualDisplayOnlySupported=1`. Supporting
 clients send the exact query value `virtualDisplayOnly=1` (enabled) or `virtualDisplayOnly=0`
-(disabled) on both `/launch` and `/resume`. The host defaults to disabled when an older client omits
-the parameter. On resume, the retained session owner or a client with launch permission may change
+(disabled) on both `/launch` and `/resume`. An omitted parameter defaults to disabled.
+On resume, the retained session owner or a client with launch permission may change
 the choice. A different client with view-only permission can resume the stream but inherits the
 retained choice. A retryable reconfiguration failure keeps the last accepted choice; an
 unrecoverable topology failure terminates the retained session.
+
+Cancelling a Sunshine 3D session requires its exact advertised `hostSessionId`, even for the same
+paired client that started it. This prevents an old cancel request from ending that client's newer
+session. Client compatibility with ordinary Sunshine and Apollo remains capability-based; hosts
+without this extension continue to use their ordinary cancellation protocol.
 
 The cursor is shared Windows state. Exclusive isolation does not provide independent pointers or
 simultaneous independent keyboard focus for local and remote users.

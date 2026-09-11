@@ -5,8 +5,9 @@
 #pragma once
 
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
-
 #include <windows.h>
 
 namespace platf::display_config {
@@ -82,6 +83,27 @@ namespace platf::display_config {
     decltype(&::DisplayConfigGetDeviceInfo) get = &::DisplayConfigGetDeviceInfo;
     decltype(&::DisplayConfigSetDeviceInfo) set = &::DisplayConfigSetDeviceInfo;
   };
+
+  struct display_target_t {
+    LUID adapter_id {};
+    UINT32 target_id = 0;
+    std::wstring device_path;
+    std::wstring display_name;
+  };
+
+  /** Resolve one exact active target. A learned device path always takes precedence over
+   * the recyclable GDI name; clones and ambiguous identities are rejected.
+   */
+  std::optional<display_target_t> find_display_target(
+    const std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+    std::wstring_view device_path,
+    std::wstring_view display_name,
+    const device_info_api_t &api
+  );
+  std::optional<display_target_t> resolve_display_target(
+    std::wstring_view device_path,
+    std::wstring_view display_name = {}
+  );
 
   std::optional<advanced_color_state_t> query_advanced_color(
     const LUID &adapter_id,

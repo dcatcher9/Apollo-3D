@@ -4,7 +4,9 @@ The local gate runs Sunshine 3D native workflow tests, evaluator contract/proven
 Moonlight 3D native packet/FEC tests and JVM tests in sequence. It checks connection ownership, permissions, mode transitions,
 offline job/transport bounds, and capture/presentation timing without opening the host or using a
 headset. Local AR lifecycle, shared local/remote scheduling ownership, immutable DDup image delivery,
-and client reconnect intent/settings transitions are included. Packed chroma
+and client reconnect intent/settings transitions are included.
+The gate also exercises exact client Start/Resume/Replace decisions, asynchronous EGL lifecycle,
+stable physical HDR targets, and shared conversion-demand and display-retirement policies. Packed chroma
 regressions execute the production D3D shaders through WARP's software renderer, including transfer
 order and independent eye boundaries. Run it with both checkouts
 available and their existing build prerequisites configured:

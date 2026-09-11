@@ -8,6 +8,55 @@
 
 namespace platf::display_config {
 
+  std::optional<display_target_t> find_display_target(
+    const std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+    std::wstring_view device_path,
+    std::wstring_view display_name,
+    const device_info_api_t &api
+  ) {
+    if (!api.get || (device_path.empty() && display_name.empty())) {
+      return std::nullopt;
+    }
+    const auto same_name = [](std::wstring_view left, std::wstring_view right) {
+      return CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+    };
+    std::optional<display_target_t> found;
+    for (const auto &path : paths) {
+      if (!(path.flags & DISPLAYCONFIG_PATH_ACTIVE)) {
+        continue;
+      }
+      DISPLAYCONFIG_TARGET_DEVICE_NAME target {};
+      target.header = {DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, sizeof(target), path.targetInfo.adapterId, path.targetInfo.id};
+      DISPLAYCONFIG_SOURCE_DEVICE_NAME source {};
+      source.header = {DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, sizeof(source), path.sourceInfo.adapterId, path.sourceInfo.id};
+      if (api.get(&target.header) != ERROR_SUCCESS || api.get(&source.header) != ERROR_SUCCESS || !target.monitorDevicePath[0]) {
+        // An unresolved active path can make a GDI-name match ambiguous (cloning).
+        return std::nullopt;
+      }
+      if (!(device_path.empty() ? same_name(display_name, source.viewGdiDeviceName) :
+                                  same_name(device_path, target.monitorDevicePath))) {
+        continue;
+      }
+      if (found) {
+        return std::nullopt;
+      }
+      found = display_target_t {path.targetInfo.adapterId, path.targetInfo.id, target.monitorDevicePath, source.viewGdiDeviceName};
+    }
+    return found;
+  }
+
+  std::optional<display_target_t> resolve_display_target(
+    std::wstring_view device_path,
+    std::wstring_view display_name
+  ) {
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    if (!query_display_config(QDC_ONLY_ACTIVE_PATHS, paths, modes)) {
+      return std::nullopt;
+    }
+    return find_display_target(paths, device_path, display_name, device_info_api_t {});
+  }
+
   query_result_t query_display_config(
     const UINT32 flags,
     std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
@@ -15,8 +64,7 @@ namespace platf::display_config {
     const query_api_t &api,
     const query_policy_t policy
   ) {
-    if (!api.get_buffer_sizes || !api.query || !api.sleep ||
-        policy.max_attempts == 0) {
+    if (!api.get_buffer_sizes || !api.query || !api.sleep || policy.max_attempts == 0) {
       paths.clear();
       modes.clear();
       return {};
@@ -54,8 +102,7 @@ namespace platf::display_config {
         return {size_status};
       }
 
-      if (attempt + 1 < policy.max_attempts &&
-          policy.retry_delay == retry_delay_e::exponential_milliseconds) {
+      if (attempt + 1 < policy.max_attempts && policy.retry_delay == retry_delay_e::exponential_milliseconds) {
         api.sleep(1u << std::min(attempt, 5u));
       }
     }
@@ -106,8 +153,7 @@ namespace platf::display_config {
 
     const bool modern_api_unsupported =
       modern_status == ERROR_INVALID_PARAMETER || modern_status == ERROR_NOT_SUPPORTED;
-    if (fallback == legacy_fallback_e::unsupported_modern_api &&
-        !modern_api_unsupported) {
+    if (fallback == legacy_fallback_e::unsupported_modern_api && !modern_api_unsupported) {
       return std::nullopt;
     }
 

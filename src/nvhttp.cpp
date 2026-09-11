@@ -688,26 +688,12 @@ namespace nvhttp {
     return parsed && *parsed != 0 ? parsed : std::nullopt;
   }
 
-  detail::cancel_admission_e detail::cancel_admission(
+  bool detail::cancel_admission(
     std::optional<std::string_view> presented_host_session_id,
-    std::uint64_t retained_host_session_id,
-    std::string_view retained_client_uuid,
-    std::string_view requesting_client_uuid
+    std::uint64_t retained_host_session_id
   ) {
-    if (presented_host_session_id) {
-      const auto parsed_host_session_id = parse_host_session_id(*presented_host_session_id);
-      if (parsed_host_session_id && host_session_matches(retained_host_session_id, *parsed_host_session_id)) {
-        return cancel_admission_e::allowed_by_host_session_id;
-      }
-      return cancel_admission_e::rejected;
-    }
-
-    if (retained_host_session_id != 0 &&
-        !retained_client_uuid.empty() &&
-        retained_client_uuid == requesting_client_uuid) {
-      return cancel_admission_e::allowed_by_session_owner;
-    }
-    return cancel_admission_e::rejected;
+    const auto parsed = presented_host_session_id ? parse_host_session_id(*presented_host_session_id) : std::nullopt;
+    return parsed && host_session_matches(retained_host_session_id, *parsed);
   }
 
   bool detail::resolve_resume_virtual_display_only(
@@ -1713,8 +1699,7 @@ namespace nvhttp {
     auto args = request->parse_query_string();
     const auto host_session_id_arg = find_arg(args, "hostSessionId");
     const auto presented_host_session_id = host_session_id_arg ? parse_host_session_id(*host_session_id_arg) : std::nullopt;
-    if (!presented_host_session_id ||
-        !detail::host_session_matches(proc::proc.get_host_session_id(), *presented_host_session_id)) {
+    if (!presented_host_session_id || !detail::host_session_matches(proc::proc.get_host_session_id(), *presented_host_session_id)) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 409);
       tree.put("root.<xmlattr>.status_message", "Missing or stale host session ID");
@@ -1945,24 +1930,14 @@ namespace nvhttp {
     const auto args = request->parse_query_string();
     const auto process_status = proc::proc.get_status();
     const auto presented_host_session_id = find_arg(args, "hostSessionId");
-    const auto admission = detail::cancel_admission(
-      presented_host_session_id,
-      process_status.host_session_id,
-      process_status.client_uuid,
-      named_cert_p->uuid
-    );
-    if (admission == detail::cancel_admission_e::rejected) {
+    if (!detail::cancel_admission(presented_host_session_id, process_status.host_session_id)) {
       BOOST_LOG(warning) << "Rejecting cancel request from client [" << named_cert_p->name
-                         << "]: hostSessionId is absent without matching retained-session ownership, malformed, or stale";
+                         << "]: hostSessionId is absent, malformed, or stale";
       tree.put("root.cancel", 0);
       tree.put("root.<xmlattr>.status_code", 409);
       tree.put("root.<xmlattr>.status_message", "Missing or stale host session ID");
       return;
     }
-    if (admission == detail::cancel_admission_e::allowed_by_session_owner) {
-      BOOST_LOG(info) << "Accepting tokenless cancel from retained session owner [" << named_cert_p->name << ']';
-    }
-
     terminate_active_session_locked();
 
     tree.put("root.cancel", 1);

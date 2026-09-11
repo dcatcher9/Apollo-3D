@@ -1,5 +1,7 @@
 #pragma once
 
+#include "virtual_display_retirement.h"
+
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -28,12 +30,6 @@ namespace VDISPLAY {
 		[[nodiscard]] bool added() const {
 			return identity.has_value();
 		}
-	};
-
-	enum class display_identity_state_e {
-		indeterminate,
-		absent,
-		present,
 	};
 
 	struct display_identity_query_t {
@@ -78,6 +74,10 @@ namespace VDISPLAY {
   // Remote sessions use temporary modes so a live resize cannot persist their primary display.
   LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate, bool persist_settings = true);
   std::optional<bool> queryDisplayHDRByName(const wchar_t* displayName);
+
+  // Stable-target variants avoid resolving a recyclable GDI name during restoration.
+  std::optional<bool> queryDisplayHDR(const LUID &adapterLuid, uint32_t targetId);
+  bool setDisplayHDR(const LUID &adapterId, const uint32_t &targetId, bool enableAdvancedColor);
 	bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor);
 
 	void closeVDisplayDevice();
