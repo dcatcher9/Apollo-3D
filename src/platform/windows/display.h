@@ -17,6 +17,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // platform includes
@@ -75,6 +76,29 @@ namespace platf::dxgi {
   using keyed_mutex_t = util::safe_ptr<IDXGIKeyedMutex, Release<IDXGIKeyedMutex>>;
 
   namespace detail {
+    /** One external health publication per captured sample; control owns repeated heartbeats. */
+    class host_sbs_telemetry_sample_gate_t {
+    public:
+      [[nodiscard]] bool accept(
+        const std::uint64_t frame_id,
+        const std::chrono::steady_clock::time_point sampled_at
+      ) noexcept {
+        const auto sample = std::pair {frame_id, sampled_at};
+        if (last_sample == sample) {
+          return false;
+        }
+        last_sample = sample;
+        return true;
+      }
+
+      void reset() noexcept {
+        last_sample.reset();
+      }
+
+    private:
+      std::optional<std::pair<std::uint64_t, std::chrono::steady_clock::time_point>> last_sample;
+    };
+
     /** A held CutBridge pulse is one event; later health copies need a changed durable count. */
     [[nodiscard]] constexpr bool host_sbs_telemetry_cut_pulse(
       const bool has_prior_sample,

@@ -1095,6 +1095,41 @@ namespace {
   }
 
 
+  TEST(WindowsHostSbsTelemetryTest, CachedOutputsDoNotCreateNewHealthPublications) {
+    platf::dxgi::detail::host_sbs_telemetry_sample_gate_t gate;
+    const auto copied_at = std::chrono::steady_clock::time_point {1s};
+    ASSERT_TRUE(gate.accept(42u, copied_at));
+
+    // Ten cursor-only or packed-repeat outputs still describe one GPU health sample.
+    for (int output = 0; output < 10; ++output) {
+      EXPECT_FALSE(gate.accept(42u, copied_at));
+    }
+
+    // Frame IDs alone cannot identify a copy: the same frame may be sampled again.
+    EXPECT_TRUE(gate.accept(42u, copied_at + 1ms));
+    EXPECT_FALSE(gate.accept(42u, copied_at + 1ms));
+    // Nor can time alone identify it: distinct frames may share a clock tick.
+    EXPECT_TRUE(gate.accept(43u, copied_at + 1ms));
+    EXPECT_FALSE(gate.accept(43u, copied_at + 1ms));
+  }
+
+  TEST(WindowsHostSbsTelemetryTest, FailureAndGenerationResetAllowHealthRecovery) {
+    platf::dxgi::detail::host_sbs_telemetry_sample_gate_t gate;
+    const auto copied_at = std::chrono::steady_clock::time_point {1s};
+    ASSERT_TRUE(gate.accept(42u, copied_at));
+    EXPECT_FALSE(gate.accept(42u, copied_at));
+
+    // Failure has superseded the ready snapshot on the wire. Recovery must be published.
+    gate.reset();
+    EXPECT_TRUE(gate.accept(42u, copied_at));
+    EXPECT_FALSE(gate.accept(42u, copied_at));
+
+    // Reinitializing the pipeline starts a new telemetry generation, even for the same key.
+    gate.reset();
+    EXPECT_TRUE(gate.accept(42u, copied_at));
+    EXPECT_FALSE(gate.accept(42u, copied_at));
+  }
+
   TEST(WindowsHostSbsTelemetryTest, HeldPostCutStateAnnouncesTheEventOnlyOnce) {
     using platf::dxgi::detail::host_sbs_telemetry_cut_pulse;
     const std::uint32_t cut_count = 7;

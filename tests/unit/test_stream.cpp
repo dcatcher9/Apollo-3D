@@ -1251,6 +1251,44 @@ TEST(SbsTelemetryWireTests, V2PerformanceOffsetsIncludeActualCountsAndIndependen
   EXPECT_EQ(state.snapshot.performance->snapshot().outcomes.reuse, 80u);
 }
 
+TEST(SbsTelemetryWireTests, HealthHeartbeatKeepsIdentityWhilePerformanceAdvances) {
+  stream::sbs_telemetry_state_t state;
+  state.status = stream::sbs_telemetry_status_e::ok;
+  state.snapshot.generation = 7u;
+  state.snapshot.sequence = 11u;
+  state.snapshot.sampled_frame_id = 42u;
+  state.snapshot.performance = std::make_shared<host_sbs_telemetry::collector>();
+  const auto copied_at = host_sbs_telemetry::clock_t::time_point {1s};
+  auto &performance = *state.snapshot.performance;
+  performance.record_outcomes({10u, 20u, 0u}, copied_at);
+  performance.record_output(false, true, copied_at);
+
+  std::uint8_t first[stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_sbs_telemetry_state_payload(state, first));
+
+  // The control loop keeps the same health snapshot while its retained collector advances.
+  performance.record_outcomes({12u, 24u, 0u}, copied_at + 1s);
+  performance.record_output(true, false, copied_at + 1s);
+  std::uint8_t heartbeat[stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_sbs_telemetry_state_payload(state, heartbeat));
+
+  // All health/configuration bytes, including generation, sequence and source frame, stay fixed.
+  EXPECT_TRUE(std::equal(first, first + 88, heartbeat));
+  const auto u32 = [&](const std::size_t offset) {
+    return static_cast<std::uint32_t>(heartbeat[offset]) |
+           static_cast<std::uint32_t>(heartbeat[offset + 1]) << 8 |
+           static_cast<std::uint32_t>(heartbeat[offset + 2]) << 16 |
+           static_cast<std::uint32_t>(heartbeat[offset + 3]) << 24;
+  };
+  EXPECT_EQ(u32(92), 2u);  // A distinct outcome copy, independent of health sequence 11.
+  EXPECT_EQ(u32(96), 2000u);
+  EXPECT_EQ(u32(104), 12u);
+  EXPECT_EQ(u32(112), 24u);
+  EXPECT_EQ(u32(128), 2000u);
+  EXPECT_EQ(u32(132), 1u);  // One warped output and one packed repeat.
+  EXPECT_EQ(u32(136), 1u);
+}
+
 TEST(SbsTelemetryWireTests, RetiredSubscriptionVersionIsUnsupportedWithoutLosingRequestId) {
   const std::array<std::uint8_t, 8> payload {1, 1, 0x34, 0x12, 0, 0, 0, 0};
   stream::sbs_telemetry_subscription_request_t request;

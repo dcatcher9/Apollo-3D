@@ -927,9 +927,12 @@ this redelivery shortcut. A new captured source follows ordinary unchanged-input
 admission.
 
 Routine CutBridge health is collected with each completion receipt. An external Stats subscription
-throttles publication of that cached sample at the requested interval, preserving its original
-capture time. Its frame ID identifies the completed transaction, which may retain an older real
-depth owner. Health snapshots and aggregate outcome counters remain diagnostic-only; they cannot
+throttles publication of new samples at the requested interval. Repeated output with the same
+frame ID and copy time does not allocate another health sequence; the control loop sends the
+unchanged snapshot as a heartbeat, preserving client chart history and sample age while performance
+counters update independently. Failure publication and pipeline-generation reset clear the sample
+identity so recovery remains visible. Its frame ID identifies the completed transaction, which may
+retain an older real depth owner. Health snapshots and aggregate outcome counters remain diagnostic-only; they cannot
 substitute for exact rendering proof, seed cache lineage, select the detector branch or authorize
 another observation. Packed-image redelivery does not advance that completed-transaction identity.
 The external cut-event flag is emitted once for the initial sampled pulse, then only when the

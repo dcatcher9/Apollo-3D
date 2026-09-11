@@ -2818,6 +2818,8 @@ namespace platf::dxgi {
 
     void publish_sbs_telemetry_failure() {
       if (sbs_telemetry_event) {
+        // A recovery must supersede the failure even if its cached sample is unchanged.
+        sbs_telemetry_sample_gate.reset();
         sbs_telemetry_event->raise(base_sbs_telemetry_snapshot(
           ::video::sbs_telemetry_sample_status_e::failed
         ));
@@ -2825,7 +2827,8 @@ namespace platf::dxgi {
     }
 
     void publish_sbs_telemetry_sample(const models::depth_telemetry_sample &sample) {
-      if (!sbs_telemetry_event) {
+      if (!sbs_telemetry_event ||
+          !sbs_telemetry_sample_gate.accept(sample.sampled_frame_id, sample.sampled_at)) {
         return;
       }
 
@@ -2912,8 +2915,8 @@ namespace platf::dxgi {
       if (!depth_estimator) {
         return;
       }
-      // Sampling identity and time belong to the publication copy. Repeated idle output may
-      // publish the same health snapshot but cannot relabel it as a new analysis observation.
+      // Only a new captured sample creates a health sequence. The control loop repeats the
+      // existing snapshot as a heartbeat and samples performance independently at send time.
       const auto result = depth_estimator->latest_depth_telemetry();
       if (result.failed) {
         publish_sbs_telemetry_failure();
@@ -5127,6 +5130,7 @@ namespace platf::dxgi {
       sbs_debug_geometry_ready = false;
       sbs_telemetry_generation = telemetry_generation;
       sbs_telemetry_sequence = 0;
+      sbs_telemetry_sample_gate.reset();
       sbs_telemetry_min_frame_id = 0;
       sbs_telemetry_last_hard_cut_count = 0;
       sbs_telemetry_has_sample = false;
@@ -5845,6 +5849,7 @@ namespace platf::dxgi {
     std::shared_ptr<host_sbs_telemetry::collector> sbs_telemetry_performance;
     std::uint32_t sbs_telemetry_generation = 0;
     std::uint32_t sbs_telemetry_sequence = 0;
+    detail::host_sbs_telemetry_sample_gate_t sbs_telemetry_sample_gate;
     std::uint64_t sbs_telemetry_min_frame_id = 0;
     std::uint32_t sbs_telemetry_last_hard_cut_count = 0;
     bool sbs_telemetry_has_sample = false;
