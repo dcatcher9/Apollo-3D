@@ -173,6 +173,30 @@ namespace {
     }
   };
 
+  struct cursor_probe_t {
+    fake_io_t display;
+    std::optional<POINT> cursor;
+    unsigned cursor_queries = 0;
+    bool cursor_set_ok = true;
+    std::vector<POINT> cursor_sets;
+
+    io_t io() {
+      auto result = display.io();
+      result.query_cursor = [this]() {
+        ++cursor_queries;
+        return cursor;
+      };
+      result.set_cursor = [this](POINT point) {
+        cursor_sets.push_back(point);
+        if (cursor_set_ok) {
+          cursor = point;
+        }
+        return cursor_set_ok;
+      };
+      return result;
+    }
+  };
+
   void expect_layout(const snapshot_t &snapshot, const layout_t &expected) {
     const auto observed = inspect(snapshot);
     ASSERT_TRUE(observed);
@@ -1253,6 +1277,176 @@ TEST(PrimaryDisplayExclusive, PacksOnlyAvailablePreservedArOutputsBesideVirtualD
     {L"virtual", 0, 0},
     {L"physical-left", -1920, 0},
   });
+}
+
+TEST(PrimaryDisplayRetainedCursor, CapturesBeforeClipReleaseAndRestoresAfterFinalPromotion) {
+  cursor_probe_t fake;
+  start_exclusive(fake.display);
+  fake.cursor = POINT {227, 641};
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {
+    if (!bounds) {
+      // Model Windows moving the pointer as the previous restriction is released.
+      fake.cursor = POINT {960, 540};
+    }
+    return true;
+  };
+  manager_t manager(std::move(io));
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  EXPECT_TRUE(fake.cursor_sets.empty());
+  manager.restore_retained_cursor(retained);
+  ASSERT_EQ(fake.cursor_sets.size(), 1u);
+  EXPECT_EQ(fake.cursor_sets.front().x, 227);
+  EXPECT_EQ(fake.cursor_sets.front().y, 641);
+  EXPECT_EQ(fake.cursor_queries, 1u);
+}
+
+TEST(PrimaryDisplayRetainedCursor, KeepsDisplayRelativePixelsAcrossChangedDesktopOrigins) {
+  cursor_probe_t fake;
+  // The baseline VD starts at (1920, -200), away from the physical primary.
+  fake.cursor = POINT {2057, 84};
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, false));
+  const auto index = named_index(fake.display.current, L"virtual");
+  const auto &source = fake.display.current.modes[fake.display.current.paths[index].sourceInfo.sourceModeInfoIdx].sourceMode;
+  EXPECT_NE(source.position.x, 0);
+  manager.restore_retained_cursor(retained);
+  ASSERT_EQ(fake.cursor_sets.size(), 1u);
+  EXPECT_EQ(fake.cursor_sets.front().x, source.position.x + 137);
+  EXPECT_EQ(fake.cursor_sets.front().y, source.position.y + 284);
+}
+
+TEST(PrimaryDisplayRetainedCursor, ClampsSavedPixelsWhenResumeSelectsASmallerSource) {
+  cursor_probe_t fake;
+  start_exclusive(fake.display);
+  set_display_mode(fake.display.current, L"virtual", 3840, 2160, 72);
+  fake.cursor = POINT {3300, 1900};
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  set_display_mode(fake.display.current, L"virtual", 1280, 720, 90);
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  manager.restore_retained_cursor(retained);
+  ASSERT_EQ(fake.cursor_sets.size(), 1u);
+  EXPECT_EQ(fake.cursor_sets.front().x, 1279);
+  EXPECT_EQ(fake.cursor_sets.front().y, 719);
+}
+
+TEST(PrimaryDisplayRetainedCursor, DoesNotBookmarkAPointerOutsideTheExactVirtualDisplay) {
+  cursor_probe_t fake;
+  fake.cursor = POINT {500, 600};  // Physical primary, not the VD at (1920, -200).
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  manager.restore_retained_cursor(retained);
+  EXPECT_TRUE(fake.cursor_sets.empty());
+  EXPECT_EQ(fake.cursor_queries, 1u);
+}
+
+TEST(PrimaryDisplayRetainedCursor, FailedQueryAndFailedSetAreBestEffort) {
+  cursor_probe_t unavailable;
+  start_exclusive(unavailable.display);
+  manager_t no_cursor(unavailable.io());
+  platf::primary_display::retained_display_ptr without_bookmark;
+  ASSERT_TRUE(no_cursor.pause(L"virtual", without_bookmark));
+  ASSERT_TRUE(no_cursor.reactivate(without_bookmark, true));
+  ASSERT_TRUE(no_cursor.promote(L"virtual", true));
+  no_cursor.restore_retained_cursor(without_bookmark);
+  EXPECT_TRUE(unavailable.cursor_sets.empty());
+
+  cursor_probe_t fake;
+  start_exclusive(fake.display);
+  fake.cursor = POINT {44, 55};
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.display.failed_queries.insert(fake.display.query_count + 1);
+  EXPECT_NO_THROW(manager.restore_retained_cursor(retained));
+  EXPECT_TRUE(fake.cursor_sets.empty());
+  fake.cursor_set_ok = false;
+  EXPECT_NO_THROW(manager.restore_retained_cursor(retained));
+  EXPECT_EQ(fake.cursor_sets.size(), 1u);
+  EXPECT_EQ(fake.display.current.device_paths.front(), L"virtual");
+}
+
+TEST(PrimaryDisplayRetainedCursor, FailedPauseAndResumeRollbackKeepTheOriginalBookmark) {
+  cursor_probe_t fake;
+  start_exclusive(fake.display);
+  fake.cursor = POINT {444, 555};
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  fake.display.apply_ok = false;
+  EXPECT_FALSE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(retained);
+  fake.cursor = POINT {15, 25};
+  fake.display.apply_ok = true;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  // A failed resume rolls back through pause with the same retained metadata.
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  manager.restore_retained_cursor(retained);
+  ASSERT_EQ(fake.cursor_sets.size(), 1u);
+  EXPECT_EQ(fake.cursor_sets.front().x, 444);
+  EXPECT_EQ(fake.cursor_sets.front().y, 555);
+  EXPECT_EQ(fake.cursor_queries, 1u);
+}
+
+TEST(PrimaryDisplayRetainedCursor, InitialTopologyQueryFailureCannotReleaseClipBeforeBookmark) {
+  cursor_probe_t fake;
+  start_exclusive(fake.display);
+  fake.cursor = POINT {444, 555};
+  unsigned releases = 0;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {
+    if (!bounds) {
+      ++releases;
+      fake.cursor = POINT {960, 540};
+    }
+    return true;
+  };
+  manager_t manager(std::move(io));
+  platf::primary_display::retained_display_ptr retained;
+  fake.display.failed_queries.insert(fake.display.query_count + 1);
+  EXPECT_FALSE(manager.pause(L"virtual", retained));
+  EXPECT_FALSE(retained);
+  EXPECT_EQ(releases, 0u);
+  EXPECT_EQ(fake.cursor_queries, 0u);
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  manager.restore_retained_cursor(retained);
+  ASSERT_EQ(fake.cursor_sets.size(), 1u);
+  EXPECT_EQ(fake.cursor_sets.front().x, 444);
+  EXPECT_EQ(fake.cursor_sets.front().y, 555);
+  EXPECT_EQ(fake.cursor_queries, 1u);
+}
+
+TEST(PrimaryDisplayRetainedCursor, ReusedWindowsPathNumbersCannotRestoreOntoAnotherDisplay) {
+  cursor_probe_t fake;
+  start_exclusive(fake.display);
+  fake.cursor = POINT {123, 456};
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  const auto index = named_index(fake.display.current, L"virtual");
+  // Reuse the same CCD numeric IDs while replacing the stable monitor identity.
+  fake.display.current.device_paths[index] = L"replacement-physical-monitor";
+  manager.restore_retained_cursor(retained);
+  EXPECT_TRUE(fake.cursor_sets.empty());
 }
 
 TEST(PrimaryDisplayExclusive, RememberedVirtualOnlyTopologyReactivatesApprovedArOutput) {

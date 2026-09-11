@@ -7318,7 +7318,8 @@ namespace platf::dxgi {
                        << window_create_error;
       return local_presenter_result_e::error;
     }
-    auto destroy_window = util::fail_guard([&]() {
+    const auto close_window = [&]() {
+      const auto close_started = std::chrono::steady_clock::now();
       window_thread.request_stop();
       if (IsWindow(window)) {
         PostMessageW(window, WM_CLOSE, 0, 0);
@@ -7327,7 +7328,14 @@ namespace platf::dxgi {
         window_thread.join();
       }
       SetThreadExecutionState(ES_CONTINUOUS);
-    });
+      const auto close_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - close_started
+      );
+      if (close_ms > 250ms) {
+        BOOST_LOG(info) << "Local AR window-input shutdown took "sv << close_ms.count() << " ms."sv;
+      }
+    };
+    auto destroy_window = util::fail_guard(close_window);
 
     if (!SetWindowPos(
           window,
@@ -7766,6 +7774,13 @@ namespace platf::dxgi {
     const auto capture_status = dxgi_display->capture_with_pending_work(
       push_image, pull_image, &capture_cursor, has_pending_work
     );
+    // A mode-loss reinit can race an off-head request during graphics destruction. Publish the
+    // same stopped proof for every completed capture attempt, before those destructors run.
+    close_window();
+    destroy_window.disable();
+    if (config.on_quiesced) {
+      config.on_quiesced();
+    }
     if (config.capture_failover) {
       const auto previous_preference = config.capture_failover->preferred_backend();
       config.capture_failover->note_capture_result(
@@ -7792,7 +7807,7 @@ namespace platf::dxgi {
       return local_presenter_result_e::error;
     }
 
-    BOOST_LOG(info) << "Local AR presentation stopped."sv;
+    BOOST_LOG(info) << "Local AR capture and window input stopped; releasing presentation resources."sv;
     return local_presenter_result_e::stopped;
   }
 

@@ -324,6 +324,19 @@ namespace ar_glasses {
     /** Exercise the local admission slot with fake display I/O and a deferred final query. */
     local_retirement_transfer_result_t local_retirement_transfer_for_test();
 
+    struct local_pause_order_result_t {
+      bool pause_completed = false;
+      bool pause_saw_capture_stopped = false;
+      bool pause_preceded_cleanup = false;
+      bool cleanup_saw_desktop_restored = false;
+      bool cleanup_joined = false;
+      bool identity_retained = false;
+      int pause_calls = 0;
+    };
+
+    /** Exercise the real pause path with a presenter whose cleanup waits for desktop recovery. */
+    local_pause_order_result_t local_pause_order_for_test();
+
     /** Rebase one recovery record to a new physical mode without touching persistent state. */
     std::optional<std::string> rebase_topology_recovery_json_for_test(
       std::string_view contents,

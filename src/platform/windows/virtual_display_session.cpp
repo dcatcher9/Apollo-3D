@@ -44,6 +44,7 @@ namespace VDISPLAY {
         .remove = [](const GUID &guid) { return removeVirtualDisplay(guid); },
         .now = []() { return std::chrono::steady_clock::now(); },
         .sleep = [](std::chrono::milliseconds delay) { std::this_thread::sleep_for(delay); },
+        .restore_cursor = [](const auto &retained) { platf::primary_display::restore_retained_cursor(retained); },
       };
     }
   }
@@ -67,6 +68,7 @@ namespace VDISPLAY {
     override_if_set(io_.remove, io.remove);
     override_if_set(io_.now, io.now);
     override_if_set(io_.sleep, io.sleep);
+    override_if_set(io_.restore_cursor, io.restore_cursor);
   }
 
   session_t::session_t(session_t &&other) noexcept:
@@ -279,6 +281,10 @@ namespace VDISPLAY {
 
   void session_t::commit_resume() {
     if (!retiring()) {
+      // Mode, HDR and topology are final now. Earlier mutations can relocate the cursor again.
+      if (retained_ && io_.restore_cursor) {
+        io_.restore_cursor(retained_);
+      }
       retained_.reset();
       pause_requested_ = paused_ = false;
     }

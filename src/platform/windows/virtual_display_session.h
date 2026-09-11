@@ -36,6 +36,7 @@ namespace VDISPLAY {
     std::function<bool(const GUID &)> remove;
     std::function<std::chrono::steady_clock::time_point()> now;
     std::function<void(std::chrono::milliseconds)> sleep;
+    std::function<void(const platf::primary_display::retained_display_ptr &)> restore_cursor;
   };
 
   class session_t;

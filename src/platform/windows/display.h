@@ -1292,6 +1292,9 @@ namespace platf::dxgi {
     std::shared_ptr<target_t> live_target;
     std::shared_ptr<std::atomic<std::uint64_t>> presented_frames;
     std::shared_ptr<local_presenter_cursor_clip_t> cursor_clip;
+    // Called after an attempt stops capture and window input, before graphics destruction.
+    // Its owner prevents another attempt before using this proof to restore topology.
+    std::function<void()> on_quiesced;
   };
 
   enum class local_presenter_result_e {

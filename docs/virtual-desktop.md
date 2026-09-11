@@ -85,6 +85,12 @@ and modes remain checked before promotion. A remote `/resume` must match
 the retained application and host-session token; wearing or reconnecting the same local glasses
 resumes their retained session. Expiry retires the device and ends the retained session.
 
+Before pausing, the host remembers the cursor's position if it is on the virtual display. After a
+successful resume finishes applying the display layout, it restores that position relative to the
+virtual display, clamping it to the new bounds if the resolution shrank. This is a one-time,
+best-effort operation shared by local glasses and remote streaming; it does not move the physical
+desktop cursor during the grace period or block a resume if Windows rejects the cursor update.
+
 An authorized fresh `/launch`, or a new local glasses connection during remote grace, ends the old
 session before starting the new one. An active stream or pending remote handshake cannot be replaced
 this way. Glasses that remain worn throughout a remote session wait for its grace to expire unless

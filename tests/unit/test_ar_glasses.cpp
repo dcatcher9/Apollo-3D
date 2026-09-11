@@ -1349,6 +1349,17 @@ TEST(ArGlassesModeTransition, RetirementMovesTheOwnerAndLatchesCleanupAcrossWait
   EXPECT_EQ(result.finish_calls, 1);
 }
 
+TEST(ArGlassesModeTransition, PauseRestoresAfterCaptureStopsBeforeWaitingForCleanup) {
+  const auto result = ar_glasses::detail::local_pause_order_for_test();
+  EXPECT_TRUE(result.pause_completed);
+  EXPECT_TRUE(result.pause_saw_capture_stopped);
+  EXPECT_TRUE(result.pause_preceded_cleanup);
+  EXPECT_TRUE(result.cleanup_saw_desktop_restored);
+  EXPECT_TRUE(result.cleanup_joined);
+  EXPECT_TRUE(result.identity_retained);
+  EXPECT_EQ(result.pause_calls, 1);
+}
+
 TEST(ArGlassesModeTransition, RecognizesTheProductionSudoVirtualDisplayHardwarePath) {
   EXPECT_TRUE(VDISPLAY::isSudoVirtualDisplayPathForTest(
     LR"(\\?\DISPLAY#SMKD1CE#5&production&0&UID4352)"

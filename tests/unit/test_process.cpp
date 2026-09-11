@@ -49,6 +49,7 @@ namespace proc {
       // These owners contain only injected effects; consuming a fixture never removes a monitor.
       auto discarded = std::move(process._display_session);
       VDISPLAY::session_io_t io;
+      io.restore_cursor = [](const auto &) {};
       io.pause = [&process](std::wstring_view, auto &retained, std::wstring_view) {
         const auto storage = std::make_shared<int>(0);
         retained = platf::primary_display::retained_display_ptr(

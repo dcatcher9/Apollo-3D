@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iterator>
 #include <limits>
 #include <mutex>
@@ -2994,15 +2995,35 @@ namespace ar_glasses {
       }
 
       bool suspend_for_resume() {
-        stop_presenter();
-        release_pointer_isolation();
-        cursor_clip_.reset();
-        live_gpu_lease_.reset();
+        presenter_.request_stop();
+        if (presenter_.joinable() && presenter_quiesced_) {
+          // The renderer acknowledges that capture and input are stopped before its potentially
+          // slow graphics/scheduling destructors. Keep those resources owned until the join below.
+          presenter_quiesced_->view();
+        }
+        auto finish_presenter_cleanup = util::fail_guard([this]() {
+          const auto cleanup_started = std::chrono::steady_clock::now();
+          stop_presenter();
+          live_gpu_lease_.reset();
+          const auto cleanup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - cleanup_started
+          );
+          if (cleanup_ms > 250ms) {
+            BOOST_LOG(info) << "Local AR presentation-resource cleanup completed "sv
+                            << cleanup_ms.count() << " ms after the desktop pause attempt."sv;
+          }
+        });
+        auto release_pointer = util::fail_guard([this]() {
+          // Let the shared pause bookmark the cursor before restoring an older application clip,
+          // which can itself move it. Still release on failure, before joining the presenter.
+          release_pointer_isolation();
+          cursor_clip_.reset();
+        });
 
         if (!exclusive_ && !resume_topology_cleanup_) {
           bool topology_known = false;
           const auto current = find_target(target_device_path_, {}, &topology_known);
-          if (!topology_known || (current && !prepare_same_output_teardown(*current))) {
+          if (!topology_known || (current && !rebase_teardown_layout(*current))) {
             return false;
           }
           resume_topology_cleanup_ = std::make_shared<pre_removal_topology_cleanup_t>(
@@ -3263,6 +3284,10 @@ namespace ar_glasses {
 
       bool prepare_same_output_teardown(const target_state_t &target) {
         stop_presenter();
+        return rebase_teardown_layout(target);
+      }
+
+      bool rebase_teardown_layout(const target_state_t &target) {
         if (target.device_path != target_device_path_ || !same_luid(target.adapter_id, target_adapter_id_) || !valid_rect(target.rect)) {
           return false;
         }
@@ -3435,6 +3460,10 @@ namespace ar_glasses {
       }
 
     private:
+#ifdef SUNSHINE_TESTS
+      friend detail::local_pause_order_result_t detail::local_pause_order_for_test();
+#endif
+
       bool configure_source_refresh(int requested_millihz, const std::function<bool()> &cancelled) {
         // A successful mode setter is not proof of the active cadence. Conversely, a rejected
         // setter may have applied its baseline mode. Re-resolve the stable source for every
@@ -3626,17 +3655,43 @@ namespace ar_glasses {
         presented_frames_ = std::make_shared<std::atomic<std::uint64_t>>(0);
         presenter_config.presented_frames = presented_frames_;
         presenter_config.cursor_clip = cursor_clip_;
+        presenter_quiesced_ = std::make_shared<safe::event_t<bool>>();
+        presenter_config.on_quiesced = [quiesced = presenter_quiesced_]() {
+          quiesced->raise(true);
+        };
 
         failed_.store(false);
         running_.store(true);
-        presenter_ = std::jthread([this, presenter_config](std::stop_token stop_token) mutable {
+        presenter_ = std::jthread([this, presenter_config, quiesced = presenter_quiesced_](std::stop_token stop_token) mutable {
           // Match the remote conversion owner and keep its process scheduling lease across
           // capture reinits, instead of restoring and reapplying it for every DXGI attempt.
           auto presentation_scheduling = platf::acquire_presentation_scheduling();
+          // Also acknowledge an early initialization failure or an exhausted reinit loop.
+          // This guard runs before scheduling-lease cleanup and never captures local_session_t.
+          auto notify_quiesced = util::fail_guard(presenter_config.on_quiesced);
           platf::adjust_thread_priority(platf::thread_priority_e::high);
           auto reinit_window_started = std::chrono::steady_clock::now();
           int consecutive_reinits = 0;
-          while (!stop_token.stop_requested()) {
+          bool reinitializing = false;
+          while (true) {
+            // Clear the previous attempt's proof before checking stop. A controller that already
+            // observed that proof has requested stop, so no successor attempt can touch topology.
+            quiesced->reset();
+            if (stop_token.stop_requested()) {
+              break;
+            }
+            if (reinitializing) {
+              std::this_thread::sleep_for(100ms);
+              if (stop_token.stop_requested()) {
+                break;
+              }
+              if (const auto refreshed = refresh_virtual_display_reference()) {
+                presenter_config.source_display_name = platf::to_utf8(refreshed->gdi_name);
+              } else {
+                BOOST_LOG(error) << "Local AR virtual desktop could not be resolved; pausing for a controller retry."sv;
+                break;
+              }
+            }
             // Stability is per continuous presenter attempt. Do not let several short failed
             // attempts accumulate enough frames to be mistaken for one stable session.
             presenter_config.presented_frames->store(0, std::memory_order_relaxed);
@@ -3661,15 +3716,7 @@ namespace ar_glasses {
               break;
             }
 
-            // Recreate only capture/presentation resources. The SudoVDA source and its desktop
-            // contents must survive DXGI/topology churn, including a physical 2D/SBS mode switch.
-            std::this_thread::sleep_for(100ms);
-            if (const auto refreshed = refresh_virtual_display_reference()) {
-              presenter_config.source_display_name = platf::to_utf8(refreshed->gdi_name);
-            } else {
-              BOOST_LOG(error) << "Local AR virtual desktop could not be resolved; pausing for a controller retry."sv;
-              break;
-            }
+            reinitializing = true;
           }
           // Any exit not requested by the topology controller should be retried, including a
           // user-closed or driver-closed presenter window that otherwise exits cleanly.
@@ -3699,6 +3746,7 @@ namespace ar_glasses {
       };
       std::shared_ptr<std::atomic<std::uint64_t>> presented_frames_;
       std::shared_ptr<platf::dxgi::local_presenter_cursor_clip_t> cursor_clip_;
+      std::shared_ptr<safe::event_t<bool>> presenter_quiesced_;
       std::jthread presenter_;
       std::atomic<bool> running_ {false};
       std::atomic<bool> failed_ {false};
@@ -3877,7 +3925,6 @@ namespace ar_glasses {
           // displays without this evidence use authoritative Windows display absence directly.
           return false;
         }
-        session_->pause_presenter(observed);
         transition_presenter_paused_ = false;
         BOOST_LOG(info) << "Local AR presentation is inactive; restoring the desktop and retaining its session for reconnect."sv;
         resume_state_.disconnect(std::chrono::steady_clock::now(), config::stream.session_resume_grace);
@@ -4628,6 +4675,7 @@ namespace ar_glasses {
       .sleep = [&](std::chrono::milliseconds delay) {
         now += delay;
       },
+      .restore_cursor = [](const auto &) {},
     });
     VDISPLAY::creation_result_t binding {
       .display_name = L"test-local-display",
@@ -4672,6 +4720,75 @@ namespace ar_glasses {
       std::lock_guard lock(ownership_mutex);
       result.barrier_released = !retired_local_virtual_display;
     }
+    return result;
+  }
+
+  detail::local_pause_order_result_t detail::local_pause_order_for_test() {
+    local_pause_order_result_t result;
+    const bool previous_exclusive = config::video.local_ar_virtual_display_only;
+    config::video.local_ar_virtual_display_only = true;
+    auto restore_config = util::fail_guard([&]() {
+      config::video.local_ar_virtual_display_only = previous_exclusive;
+    });
+    std::atomic<bool> capture_stopped {false};
+    std::atomic<bool> cleanup_done {false};
+    std::atomic<bool> cleanup_saw_restored {false};
+    std::promise<void> desktop_restored;
+    const auto restored = desktop_restored.get_future();
+    const auto retained_marker = std::make_shared<int>(0);
+    const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT identity {{42, 0}, 7};
+    const std::wstring device_path = L"test-local-pause-source";
+    local_session_t session(gpu_workload::lease_t {}, []() { return true; });
+    auto discard_test_owner = util::fail_guard([&]() {
+      // Keep failure cleanup deterministic even if suspend stops joining. This fake device must
+      // never reach the production local-session destructor's retirement adapter.
+      session.stop_presenter();
+      auto discarded_owner = std::move(session.virtual_display_);
+    });
+    session.target_device_path_ = L"test-local-pause-sink";
+    session.virtual_display_ = VDISPLAY::session_t({
+      .pause = [&](std::wstring_view path, auto &retained, std::wstring_view sink) {
+        ++result.pause_calls;
+        result.pause_saw_capture_stopped = capture_stopped.load();
+        result.pause_preceded_cleanup = !cleanup_done.load();
+        if (path != device_path || sink != session.target_device_path_) {
+          return false;
+        }
+        retained = platf::primary_display::retained_display_ptr(
+          retained_marker,
+          reinterpret_cast<platf::primary_display::retained_display_t *>(retained_marker.get())
+        );
+        desktop_restored.set_value();
+        return true;
+      },
+      .restore_cursor = [](const auto &) {},
+    });
+    session.virtual_display_.adopt(
+      {.exclusive = true, .local_sink = session.target_device_path_},
+      {.display_name = L"test-local-pause-display", .device_path = device_path, .identity = identity}
+    );
+    const auto generation = session.virtual_display_.generation();
+    session.presenter_quiesced_ = std::make_shared<safe::event_t<bool>>();
+    session.presenter_ = std::jthread([&](std::stop_token stop) {
+      std::mutex mutex;
+      std::condition_variable_any changed;
+      std::unique_lock lock(mutex);
+      changed.wait(lock, stop, []() { return false; });
+      capture_stopped.store(true);
+      session.presenter_quiesced_->raise(true);
+      // A regression that joins before restoring fails after one second instead of deadlocking
+      // the test executable. This models cleanup that cannot finish until DWM restores outputs.
+      cleanup_saw_restored.store(restored.wait_for(1s) == std::future_status::ready);
+      cleanup_done.store(true);
+    });
+
+    result.pause_completed = session.suspend_for_resume();
+    result.cleanup_saw_desktop_restored = cleanup_saw_restored.load();
+    result.cleanup_joined = cleanup_done.load() && !session.presenter_.joinable();
+    const auto &binding = session.virtual_display_.binding();
+    result.identity_retained = session.virtual_display_.owns_display() && session.virtual_display_.has_retained() &&
+                               session.virtual_display_.generation() == generation && binding.identity &&
+                               same_virtual_display_identity(*binding.identity, identity) && binding.device_path == device_path;
     return result;
   }
 

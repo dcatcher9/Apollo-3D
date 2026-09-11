@@ -23,6 +23,7 @@ namespace {
     unsigned restores = 0;
     unsigned pauses = 0;
     unsigned reactivations = 0;
+    unsigned cursor_restores = 0;
     unsigned removes = 0;
     unsigned active_queries = 0;
     unsigned retirement_queries = 0;
@@ -127,6 +128,11 @@ namespace {
         },
         .now = [&]() { return now; },
         .sleep = [&](std::chrono::milliseconds delay) { now += delay; },
+        .restore_cursor = [&](const auto &retained) {
+          events.emplace_back("restore-cursor");
+          ++cursor_restores;
+          EXPECT_EQ(retained, retained_marker);
+        },
       };
     }
   };
@@ -303,6 +309,56 @@ namespace {
     EXPECT_EQ(fake.pauses, 0u);
     EXPECT_EQ(fake.reactivations, 0u);
     EXPECT_EQ(owner.binding().display_name, L"DISPLAY7");
+    owner.commit_resume();
+    EXPECT_EQ(fake.cursor_restores, 0u);
+  }
+
+  TEST(VirtualDisplaySession, CursorRestoresOnceAfterSuccessfulResumePromotion) {
+    owner_probe_t fake;
+    session_t owner(fake.io());
+    ASSERT_TRUE(owner.acquire(fake.spec()));
+    ASSERT_TRUE(owner.pause());
+    ASSERT_TRUE(owner.begin_resume());
+    ASSERT_TRUE(owner.refresh());
+    ASSERT_TRUE(owner.promote());
+    EXPECT_EQ(fake.cursor_restores, 0u);
+    owner.commit_resume();
+    ASSERT_GE(fake.events.size(), 2u);
+    EXPECT_EQ(fake.events[fake.events.size() - 2], "promote");
+    EXPECT_EQ(fake.events.back(), "restore-cursor");
+    owner.commit_resume();
+    EXPECT_EQ(fake.cursor_restores, 1u);
+  }
+
+  TEST(VirtualDisplaySession, FailedResumeKeepsCursorSnapshotAcrossRollbackAndOwnerMove) {
+    owner_probe_t fake;
+    session_t original(fake.io());
+    ASSERT_TRUE(original.acquire(fake.spec()));
+    ASSERT_TRUE(original.pause());
+    fake.reactivate_ok = false;
+    EXPECT_FALSE(original.begin_resume());
+    ASSERT_TRUE(original.pause());
+    EXPECT_EQ(fake.cursor_restores, 0u);
+    session_t owner(std::move(original));
+    fake.reactivate_ok = true;
+    ASSERT_TRUE(owner.begin_resume());
+    ASSERT_TRUE(owner.refresh());
+    ASSERT_TRUE(owner.promote());
+    owner.commit_resume();
+    EXPECT_EQ(fake.cursor_restores, 1u);
+    EXPECT_FALSE(owner.has_retained());
+  }
+
+  TEST(VirtualDisplaySession, RetiringPausedSessionDoesNotRestoreCursor) {
+    owner_probe_t fake;
+    session_t owner(fake.io());
+    ASSERT_TRUE(owner.acquire(fake.spec()));
+    ASSERT_TRUE(owner.pause());
+    owner.begin_retirement();
+    owner.commit_resume();
+    EXPECT_EQ(fake.cursor_restores, 0u);
+    ASSERT_TRUE(owner.retire_until(fake.now + 1s));
+    EXPECT_EQ(fake.cursor_restores, 0u);
   }
 
   TEST(VirtualDisplaySession, BindingRenumberingRequiresTheSameLearnedPhysicalIdentity) {

@@ -1066,13 +1066,23 @@ namespace platf::primary_display {
                                     path.targetInfo.id
                                   );
                                 },
-                                set_exclusive_cursor_clip});
+                                set_exclusive_cursor_clip,
+                                []() -> std::optional<POINT> {
+                                  POINT cursor {};
+                                  // CCD rectangles use physical pixels regardless of thread DPI.
+                                  return syncThreadDesktop() && GetPhysicalCursorPos(&cursor) ?
+                                           std::optional {cursor} : std::nullopt;
+                                },
+                                [](POINT cursor) {
+                                  return syncThreadDesktop() && SetPhysicalCursorPos(cursor.x, cursor.y);
+                                }});
     }
   }  // namespace
 
   struct retained_display_t {
     display_spec_t display;
     std::wstring local_sink;
+    std::optional<POINT> cursor_offset;
   };
 
   namespace detail {
@@ -1749,7 +1759,7 @@ namespace platf::primary_display {
     }
 
     bool manager_t::pause(std::wstring_view device_path, retained_display_ptr &retained, std::wstring_view local_sink) {
-      if (device_path.empty() || (retained && !same_device(retained->display.identity, device_path)) || (!local_sink.empty() && (same_device(local_sink, device_path) || (retained && !same_device(retained->local_sink, local_sink)))) || (io_.cursor_clip && !io_.cursor_clip(device_path, std::nullopt))) {
+      if (device_path.empty() || (retained && !same_device(retained->display.identity, device_path)) || (!local_sink.empty() && (same_device(local_sink, device_path) || (retained && !same_device(retained->local_sink, local_sink))))) {
         return false;
       }
       const auto loaded = io_.load();
@@ -1765,11 +1775,33 @@ namespace platf::primary_display {
         if (!index || *index >= current->colors.size() || !current->colors[*index]) {
           return false;
         }
+        std::optional<POINT> cursor_before_pause;
+        if (io_.query_cursor) {
+          try {
+            cursor_before_pause = io_.query_cursor();
+          } catch (...) {
+            // A cursor bookmark is optional; its failure must not delay display restoration.
+          }
+        }
         retained = std::make_shared<retained_display_t>(retained_display_t {display_spec(*current, *index)});
+        if (cursor_before_pause) {
+          const auto &source = retained->display.source;
+          const auto x = static_cast<std::int64_t>(cursor_before_pause->x) - source.position.x;
+          const auto y = static_cast<std::int64_t>(cursor_before_pause->y) - source.position.y;
+          if (x >= 0 && y >= 0 && x < source.width && y < source.height &&
+              x <= std::numeric_limits<LONG>::max() && y <= std::numeric_limits<LONG>::max()) {
+            retained->cursor_offset = POINT {static_cast<LONG>(x), static_cast<LONG>(y)};
+          }
+        }
         retained->display.source.position = {0, 0};
         retained->local_sink = loaded.journal && !loaded.journal->local_sink.empty() ?
                                  loaded.journal->local_sink :
-                                 std::wstring(local_sink);
+                                  std::wstring(local_sink);
+      }
+      // Persist the in-memory bookmark before a clip release can move the pointer. All work
+      // above is read-only; failed topology validation leaves both topology and clip unchanged.
+      if (io_.cursor_clip && !io_.cursor_clip(device_path, std::nullopt)) {
+        return false;
       }
       if (loaded.journal) {
         if (loaded.journal->exclusive_started) {
@@ -1801,6 +1833,37 @@ namespace platf::primary_display {
         return false;
       }
       return restore_exclusive(std::move(journal), false);
+    }
+
+    void manager_t::restore_retained_cursor(const retained_display_ptr &retained) {
+      if (!retained || !retained->cursor_offset || !io_.query || !io_.set_cursor) {
+        return;
+      }
+      try {
+        const auto current = io_.query();
+        if (!current || !inspect(*current)) {
+          return;
+        }
+        const auto index = find_path(*current, retained->display.identity);
+        if (!index) {
+          return;
+        }
+        const auto source = display_spec(*current, *index).source;
+        if (!source.width || !source.height) {
+          return;
+        }
+        const auto x = static_cast<std::int64_t>(source.position.x) +
+                       std::min<std::int64_t>(retained->cursor_offset->x, static_cast<std::int64_t>(source.width) - 1);
+        const auto y = static_cast<std::int64_t>(source.position.y) +
+                       std::min<std::int64_t>(retained->cursor_offset->y, static_cast<std::int64_t>(source.height) - 1);
+        if (x < std::numeric_limits<LONG>::min() || x > std::numeric_limits<LONG>::max() ||
+            y < std::numeric_limits<LONG>::min() || y > std::numeric_limits<LONG>::max()) {
+          return;
+        }
+        (void) io_.set_cursor(POINT {static_cast<LONG>(x), static_cast<LONG>(y)});
+      } catch (...) {
+        // Cursor restoration is best effort and never changes display/session admission.
+      }
     }
 
     bool manager_t::reactivate(const retained_display_ptr &retained, bool exclusive) {
@@ -3034,6 +3097,17 @@ namespace platf::primary_display {
     } catch (const std::exception &exception) {
       BOOST_LOG(error) << "Could not reactivate the retained virtual desktop: " << exception.what();
       return false;
+    }
+  }
+
+  void restore_retained_cursor(const retained_display_ptr &retained) {
+    std::lock_guard lock(transaction_mutex);
+    try {
+      if (retained && exclusive_session_state.can_use_identity(retained->display.identity)) {
+        manager().restore_retained_cursor(retained);
+      }
+    } catch (...) {
+      // A cursor failure must never undo an otherwise verified resume.
     }
   }
 

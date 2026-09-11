@@ -72,6 +72,11 @@ namespace platf::primary_display {
    */
   bool reactivate(const retained_display_ptr &retained, bool exclusive);
 
+  /** Best-effort cursor restoration after the exact retained display's final promotion.
+   * The bookmark is captured once before pause and remains relative to that stable display.
+   */
+  void restore_retained_cursor(const retained_display_ptr &retained);
+
   /** Recover an interrupted transaction on startup, before creating another virtual display. */
   bool recover();
 
@@ -206,6 +211,8 @@ namespace platf::primary_display {
       std::function<bool(const DISPLAYCONFIG_PATH_INFO &, const display_config::advanced_color_state_t &)> set_color;
       std::function<bool(const DISPLAYCONFIG_PATH_INFO &, std::wstring_view)> preserve_exclusive;
       std::function<bool(std::wstring_view, std::optional<cursor_bounds_t>)> cursor_clip;
+      std::function<std::optional<POINT>()> query_cursor;
+      std::function<bool(POINT)> set_cursor;
     };
 
     std::optional<layout_t> inspect(const snapshot_t &snapshot);
@@ -222,6 +229,7 @@ namespace platf::primary_display {
       bool restore(std::wstring_view expected_device_path = {});
       bool pause(std::wstring_view device_path, retained_display_ptr &retained, std::wstring_view local_sink = {});
       bool reactivate(const retained_display_ptr &retained, bool exclusive);
+      void restore_retained_cursor(const retained_display_ptr &retained);
       bool reconcile_active_exclusive(std::wstring_view device_path);
       bool recover_inactive_exclusive();
 
