@@ -90,26 +90,21 @@ TRACE_LOCATOR_FRAME_WORD = 22
 WORK_NONE = 0
 WORK_OPTIONAL_OCR = 1
 WORK_SUBTITLE_OBSERVATION = 2
-WORK_OPTIONAL_OCR_DUE = 8
-WORK_SUBTITLE_OBSERVATION_DUE = 16
 WORK_VALUES = {
     WORK_NONE, WORK_OPTIONAL_OCR, WORK_SUBTITLE_OBSERVATION,
-    WORK_OPTIONAL_OCR_DUE, WORK_SUBTITLE_OBSERVATION_DUE,
 }
 OPTIONAL_OCR_RECEIPT_MAGIC = 0x52434F4F
 PARALLAX_CONTAINER = np.float32(0.04)
 MAX_TRACE_FRAMES = 300
 UINT64_MAX = (1 << 64) - 1
-OCR_MAX_OBSERVATION_AGE_US = 33_000
-OCR_MAX_DIRTY_HOLDS = 2
-ADAPTIVE_REQUEST_POLICY_SCHEMA = 3
+ADAPTIVE_REQUEST_POLICY_SCHEMA = 6
 FRAME_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp"}
 OBSERVATION_TIMELINE_MAGIC = b"SBSOTL1\0"
 OBSERVATION_TIMELINE_SCHEMA = 1
 OBSERVATION_TIMELINE_HEADER_BYTES = 24
 CONTROL_SCOPE = "force-infer oracle for private adaptive replay"
-TREATMENT_SCOPE = "shared estimator transaction/OCR cadence; offline full-frame admission"
-TRACE_ROLE = "shared production estimator transaction and OCR cadence; offline ordered full-frame admission"
+TREATMENT_SCOPE = "shared estimator joint analysis refresh; offline full-frame admission"
+TRACE_ROLE = "shared production estimator joint analysis refresh; offline ordered full-frame admission"
 TRACE_FILENAME = "device_conditional_gpu_trace_ring.u32"
 METADATA_FILENAME = "device_conditional_replay.json"
 PER_FRAME_ARTIFACT_SCOPE = {
@@ -568,7 +563,7 @@ def _trace_subtitle_disposition(record: dict) -> int:
         if optional:
             raise EvidenceError("suppressed subtitle work carried an optional OCR receipt")
         return TRACE_SUBTITLE_SUPPRESSED
-    if work in (WORK_SUBTITLE_OBSERVATION, WORK_SUBTITLE_OBSERVATION_DUE) and optional:
+    if work == WORK_SUBTITLE_OBSERVATION and optional:
         raise EvidenceError("observation-only subtitle work carried an optional OCR receipt")
     if work == WORK_OPTIONAL_OCR and depth == TRACE_DEPTH_REUSE:
         if optional:
@@ -635,27 +630,6 @@ def _validate_subtitle_record(record: dict, previous: dict | None) -> None:
     elif expected_subtitle in (TRACE_SUBTITLE_OPTIONAL_OCR, TRACE_SUBTITLE_ABSTENTION):
         if locator_frame != frame_id:
             raise EvidenceError("published subtitle tuple is not bound to the current frame")
-
-
-def _validate_ocr_cadence(records: list[dict]) -> None:
-    last_guaranteed = 0
-    dirty_holds = 0
-    for record in records:
-        timestamp = record["observation_timestamp_us"]
-        due = (last_guaranteed == 0 or timestamp < last_guaranteed or
-               timestamp - last_guaranteed >= OCR_MAX_OBSERVATION_AGE_US or
-               dirty_holds >= OCR_MAX_DIRTY_HOLDS)
-        work = record["expected_work"]
-        if work == WORK_NONE:
-            raise EvidenceError("offline adaptive replay unexpectedly suppressed subtitle work")
-        if due != (work in (WORK_OPTIONAL_OCR_DUE, WORK_SUBTITLE_OBSERVATION_DUE)):
-            raise EvidenceError(
-                f"frame {record['frame_id']} disagrees with the shared due-OCR cadence")
-        if due or record["submission"] == TRACE_SUBMISSION_FORCE:
-            last_guaranteed = timestamp
-            dirty_holds = 0
-        else:
-            dirty_holds = min(dirty_holds + 1, OCR_MAX_DIRTY_HOLDS)
 
 
 def _validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
@@ -730,7 +704,7 @@ def _validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
             descriptor.get("enabled") is not True or
             descriptor.get("scope") != TREATMENT_SCOPE or
             descriptor.get("bootstrap") != "force-infer" or
-            descriptor.get("followup") != "gpu-owned-infer-or-reuse" or
+            descriptor.get("followup") != "known-publication-actual-depth-owner" or
             descriptor.get("raw_trace") != TRACE_FILENAME or
             descriptor.get("metadata") != METADATA_FILENAME):
         raise EvidenceError("treatment contract lacks device_conditional_replay authority")
@@ -822,7 +796,6 @@ def _validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
         raise EvidenceError(
             f"latest GPU trace input-domain reset {trace_reset} disagrees with capture "
             f"{capture['input_domain_reset']}")
-    _validate_ocr_cadence(records)
     reuse_count = 0
     infer_count = 0
     previous = None
@@ -837,6 +810,8 @@ def _validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
         TRACE_SUBTITLE_HELD_WITH_DEPTH: "held_with_depth",
     }
     for record in records:
+        if record["expected_work"] not in (WORK_OPTIONAL_OCR, WORK_SUBTITLE_OBSERVATION):
+            raise EvidenceError("offline replay requires ordinary joint analysis work")
         _validate_trace_transaction(record)
         _validate_subtitle_record(record, previous)
         decoded_subtitles[subtitle_names[record["subtitle"]]] += 1
@@ -1063,6 +1038,11 @@ def _authenticated_reuse_owner_ages(records: list[dict]) -> dict[int, int]:
                     record["observation_timestamp_us"] <= 0 or observation_age < 0):
                 raise EvidenceError(
                     "reuse has invalid authenticated GPU history-owner time ordering")
+            locator = record["locator"]
+            subtitle_frame = _join_u64(locator[TRACE_LOCATOR_FRAME_WORD],
+                                      locator[TRACE_LOCATOR_FRAME_WORD + 1])
+            if subtitle_frame != most_recent_infer_frame_id:
+                raise EvidenceError("reuse subtitle observation does not match its depth owner")
             result[frame_id] = owner_age
         else:
             raise EvidenceError("cannot derive owner age for invalid depth disposition")
@@ -1103,7 +1083,6 @@ def validate_adaptive_artifacts(control_dir: Path, treatment_dir: Path,
     previous_treatment_hash = None
     previous_treatment_final = None
     held_previous_final_equal = 0
-    reuse_subtitle_publications = 0
     transition_rows = {
         role: {
             "final_step_mae": [],
@@ -1151,18 +1130,13 @@ def validate_adaptive_artifacts(control_dir: Path, treatment_dir: Path,
             if previous_treatment_hash is None or treatment_hash != previous_treatment_hash:
                 raise EvidenceError(f"reuse frame {frame_id} did not retain previous raw depth")
             reuse_previous_equal += 1
-            if record["subtitle"] == TRACE_SUBTITLE_HELD_WITH_DEPTH:
-                if (previous_treatment_final is None or
-                        not _bit_exact(treatment_final_values, previous_treatment_final)):
-                    raise EvidenceError(
-                        f"held frame {frame_id} did not retain previous atomic final field")
-                held_previous_final_equal += 1
-            else:
-                if record["subtitle"] not in (
-                        TRACE_SUBTITLE_OPTIONAL_OCR, TRACE_SUBTITLE_ABSTENTION):
-                    raise EvidenceError(
-                        f"reuse frame {frame_id} has no authenticated subtitle publication")
-                reuse_subtitle_publications += 1
+            if record["subtitle"] != TRACE_SUBTITLE_HELD_WITH_DEPTH:
+                raise EvidenceError(f"reuse frame {frame_id} did not hold the joint subtitle tuple")
+            if (previous_treatment_final is None or
+                    not _bit_exact(treatment_final_values, previous_treatment_final)):
+                raise EvidenceError(
+                    f"held frame {frame_id} did not retain previous atomic final field")
+            held_previous_final_equal += 1
 
         record_transitions("control", control_final_values)
         record_transitions("treatment", treatment_final_values)
@@ -1182,7 +1156,6 @@ def validate_adaptive_artifacts(control_dir: Path, treatment_dir: Path,
         "infer_current_raw_bit_exact_frames": infer_current_equal,
         "reuse_previous_raw_bit_exact_frames": reuse_previous_equal,
         "held_previous_final_parallax_bit_exact_frames": held_previous_final_equal,
-        "reuse_subtitle_publication_frames": reuse_subtitle_publications,
         "authenticated_reuse_owner_ages": {
             str(frame_id): age for frame_id, age in reuse_owner_ages.items()
         },
@@ -1211,14 +1184,12 @@ def final_field_gate(artifact_checks: dict) -> dict:
     """Summarize the direct-render invariant already enforced while loading artifacts."""
     reuse_ages = artifact_checks["authenticated_reuse_owner_ages"]
     held = artifact_checks["held_previous_final_parallax_bit_exact_frames"]
-    publications = artifact_checks["reuse_subtitle_publication_frames"]
-    if held + publications != len(reuse_ages):
+    if held != len(reuse_ages):
         raise EvidenceError("final-field proof does not cover every authenticated depth reuse")
     return {
         "status": "pass",
         "authenticated_reuse_frames": len(reuse_ages),
         "bit_exact_atomic_final_holds": held,
-        "independent_subtitle_publications_on_reuse": publications,
     }
 
 
@@ -1353,10 +1324,10 @@ th,td{border:1px solid #bbb;padding:.4rem;text-align:left}code{white-space:pre-w
 </style>
 <h1>Host SBS adaptive replay A/B</h1>
 <p><b>Verdict:</b> %s</p>
-<p>Every accepted depth reuse compares against the fixed last real-inference input, without age or count expiry.
-Ordinary reuse holds the atomic subtitle/final tuple exactly; cadence-due OCR may independently
-publish a current subtitle tuple over the retained depth. The complete atomic final field is
-sampled directly by the production renderer.
+<p>Every accepted depth reuse compares against the fixed last real-inference input and holds the complete
+depth/subtitle/final tuple exactly. The detector alone decides reuse for an authenticated candidate;
+source age and the number of holds never force inference. Exact unchanged DDup deliveries submit no
+new observation. The atomic final field is sampled directly by the production renderer.
 Image residuals are diagnostics; optional command-line bounds make them gates.</p>
 <table><thead><tr>
 <th>Clip</th><th>Frames</th><th>Infer</th><th>Reuse</th><th>Exact final holds</th>

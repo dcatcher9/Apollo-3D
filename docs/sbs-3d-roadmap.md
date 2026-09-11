@@ -105,46 +105,39 @@ depth/cut/camera/OCR/SLR observation state and always warps the current capture 
 repeating a packed SBS frame. This exact-current DDup proof is distinct from the presentation-only
 fallback below, which is eligible only when no matched completion reaches the render deadline.
 
+When changed B reuses the complete tuple owned by A and then stays static, exact continuity from
+B's authenticated publication may retain A indefinitely. There is no idle-tail correction or
+periodic refresh. B remains the completed color and A remains the depth/subtitle owner; the next
+changed candidate compares against A. Local and remote display conversion share this behavior.
+
 GPU adaptive reuse is always part of the Host SBS depth pipeline. Exact cache reuse remains higher
-priority; otherwise host-only route, cadence and complete DDup history classify a changed frame as
+priority; otherwise host-only route, identity and complete DDup history classify a changed frame as
 either force-infer or GPU-undecided. No host motion-size/shape heuristic stands between an
 authority-valid frame and the dense atomics-free model-space detector, which compares every admitted
 current NCHW texel with the authenticated state-1 history and applies finite, global medium/strong,
-and supported-tile local bounds. The GPU selects the DAV2 infer/reuse branch without staging
-readback, a decision poll, or CPU branch knowledge. Subtitle work is a separate authenticated
-request domain inside the same joined completion. Ordinary current-ready OCR work `1`, or ordinary
-ineligible abstention work `2`, publishes only on infer. Cadence-due current-ready OCR work `8`
-publishes on infer or reuse; cadence-due ineligible work `16` publishes an exact-current abstention
-on either branch with the optional handle off. Native USER32 suppression advances neither OCR nor
-locator state.
+and supported-tile local bounds. The GPU selects the DAV2 infer/reuse branch without a CPU decision
+poll or wait. Only after final D3D publication may a nonblocking receipt report the completed outcome
+to the CPU. Depth and subtitle use one joint observation policy. Current-ready OCR (`1`) or current
+ineligible abstention (`2`) publishes only on valid infer; native USER32 suppression (`0`) advances
+neither OCR nor locator state. Every reuse preserves depth/cut/camera/V2 Base and the complete
+OCR8/SLR13/conditioned-final tuple. No mode relabels
+retained boxes as a new OCR observation, and there is no adaptive OCR-band, localized subtitle or
+SLR-state veto.
 
-There is no adaptive OCR-band, localized subtitle-transition, or SLR-state veto. The published
-expected work and transaction cookie authenticate the exact subtitle disposition. Ordinary reuse
-holds the prior OCR8/SLR13/final tuple. Due reuse retains depth, cut, camera, and immutable V2 Base
-but advances the current OCR or abstention, SLR13, and conditioned final field. No mode relabels
-retained boxes as a new OCR observation.
+Reprojection consumes the complete atomic final field directly with current capture color. A
+validated completed-publication receipt distinguishes completed color from the actual depth and
+subtitle owner. Only that exact current proof may establish reuse authority; missing, stale or
+invalid proof requires ordinary force-infer. Pending work and known completed lineage replace the
+former persistent opaque barrier and separate follow-up anchor. The device compares cumulatively
+against the actual infer input even when a newer color publication reused it. Reuse never moves
+that fixed comparison baseline, and neither elapsed time nor hold count forces inference.
 
-Repeated GPU-undecided deliveries may render private current color through GPU-selected
-authenticated V2 geometry. A reuse freezes depth/cut/camera/V2 Base and the complete
-OCR8/SLR13/conditioned-final tuple for ordinary work, while due subtitle work may advance that
-tuple independently. Reprojection consumes the complete atomic final field directly, with no
-schedule-coupled display recurrence. The CPU keeps the depth branch opaque. An ordinary opaque
-result cannot label subtitle evidence exact-current, whereas a due result is exact-current on both
-branches by request contract. The observation barrier continues blocking depth cache, telemetry,
-and host-owned approximate holds.
-A completed opaque draw may retain only its already-rendered packed SBS pixels for bounded
-presentation continuity. If the next root misses the same-frame completion budget, that image can
-be redelivered on the unchanged route/domain instead of flashing flat; it carries no DAV2, OCR,
-SLR, damage, cache-lineage, or follow-up-submission authority.
-A metadata-only anchor may nevertheless send the immediately following complete-history candidate
-back to the GPU when it has nonregressed observation ordering, on the identical route, and
-bound to the prior opaque frame and damage history. The device compares cumulatively against the
-last actual infer input without an age or delivery-count expiry. Reuse never moves this fixed
-comparison baseline. Invalid ownership, route/proof
-failure, or interop-signature drift still
-forces CPU-known inference and restores ordinary depth lineage.
-Diagnostics count initial and follow-up roots plus host ownership rejection/fallback, never the private
-branch outcome.
+Without receipt proof, a completed draw may retain its already-rendered packed SBS pixels only for
+bounded presentation continuity. If the next root misses the same-frame completion budget, that
+image can be redelivered on the unchanged route/domain instead of flashing flat; packed pixels alone
+carry no depth, OCR, SLR, damage or adaptive-submission authority. Invalid ownership, route/proof
+failure, or interop-signature drift still forces CPU-known inference. Diagnostic traces and aggregate
+outcome counters remain separate from production receipt authority.
 
 Coherent GPU temporal state is not synthetically reset. Every post-bootstrap DAV2 submission,
 including force-infer, uses the same conditional wrapper; wrapper/capability/interop failure is
@@ -152,15 +145,13 @@ terminal flat rather than a hidden raw-TensorRT fallback. The canonical threshol
 sub-threshold depth-reuse risk and reset matrix are in
 [Host SBS frame attribution](host-sbs.md#frame-attribution-and-failure-behavior).
 
-OCR instead has a narrower independent cadence. Every accepted ordinary opaque root is
-conservatively a dirty hold because the host cannot know whether its infer-coupled OCR ran. After two
-such holds, or `33 ms` of source observation time since the last guaranteed subtitle observation,
-the next accepted root is due. Current-ready due work uses `8`; an ineligible OCR input/interop/child
-uses `16` and publishes abstention. There is no OCR-only DDup retained-box proof because desktop
-damage does not cover separately composed hardware-cursor changes. Dump 3D always takes ordinary
-subtitle work on a force-infer root.
+Depth and subtitle share one detector decision, with no time/count expiration. Current-ready OCR
+uses `1`; an ineligible OCR input/interop/child uses `2` and publishes current abstention on valid
+infer. A suppressed completion cannot authorize ordinary joint reuse without a complete ordinary
+owner under the current route. Exact unchanged DDup proof bypasses admission and submits no root.
+Dump 3D always forces a complete ordinary observation.
 
-### Adaptive follow-up status
+### Adaptive completion status
 
 The presentation-only packed-SBS fallback is deliberately narrower than semantic cache reuse:
 already-rendered packed pixels may provide bounded continuity after a missed render deadline without
@@ -175,13 +166,23 @@ owner, diagnostic trace, mature
 single-line provisional bridge, and compatible-handoff fade preservation until separate evidence
 justifies changing them.
 
-Phase B is implemented as independently authenticated depth and subtitle choices inside the existing
-joined CUDA graph. Ordinary OCR is infer-coupled; due current-ready OCR (`8`) and due ineligible
-abstention (`16`) publish on either depth branch. The host cadence permits two conservative dirty
-holds or `33 ms`, while depth reuse continues against its fixed real-inference owner without
-elapsed-time or delivery-count expiry. Live and offline replay share the request/chaining policy and one joined completion
-proof. Do not restore the retired host motion-size, OCR-band, localized-tile, or SLR-state inference
-vetoes.
+The current policy is schema 6: detector-only joint depth/subtitle reuse, legal work `0`/`1`/`2`,
+and whole-tuple holds. The earlier independent due-OCR work `8`/`16`, host age/count budget and
+stable-tail forced observation have been removed. Live and offline replay share the same detector
+admission and joined completion proof. Every candidate compares cumulatively against the real last
+infer owner; reuse does not advance it. The offline replay authenticates long changed-source holds
+and their exact retained fields, but supplies no live DDup idle-tail evidence. A small semantic
+change may remain unobserved indefinitely while the detector approves it.
+Do not restore the retired host motion-size, OCR-band, localized-tile or SLR-state inference vetoes.
+
+The completed-publication receipt reuses existing finalized GPU records through bounded nonblocking
+copies, with no new shader pass, model call or calibration change. Local presentation, remote
+streaming and the offline estimator share its wire authentication. Exact publication generations
+prevent late receipts from authenticating overwritten borrowed resources. The design removes
+post-completion branch uncertainty from host ownership bookkeeping; it does not promise a faster
+GPU inference or higher FPS. Receipt readiness, saturated-slot fallback, final SBS latency and
+weak-GPU contention still require measurement under the shared qualification workflow. The full
+transport contract is owned by [Host SBS](host-sbs.md#gpu-owned-near-identical-transaction).
 
 For latency, keep DAV2 and OCR as siblings of the same CUDA root; do not add another stream or graph.
 First add diagnostic-only timestamps for both branches. If profiling shows OCR slack, the first
@@ -220,9 +221,12 @@ and renderer closure. There is no Host SBS model selector or unauthenticated fal
 
 ### Live telemetry is sampled
 
-Production readback is nonblocking. Samples may be missing under GPU load, while offline traces are
-complete. A live/offline discrepancy must first be aligned by exact source-frame identity before it
-is interpreted as a controller difference.
+Routine CutBridge and cumulative outcome samples share the completion receipt's nonblocking
+copy/event/map transport. Their validity remains separate from rendering proof and from each other;
+capture-time age and publication ordering prevent delayed samples from appearing fresh. Samples may
+be missing under GPU load, while offline traces are complete. A live/offline discrepancy must first
+be aligned by exact source-frame identity before it is interpreted as a controller difference.
+Dump 3D, performance timing and GPU safety queries retain their own lifecycles.
 
 ## Qualification priorities
 

@@ -85,8 +85,6 @@ namespace {
   static_assert(decision_cookie == models::near_identical_decision_cookie);
   static_assert(token_low_cookie == models::near_identical_token_low_cookie);
   static_assert(token_high_cookie == models::near_identical_token_high_cookie);
-  static_assert(work_flags_value(work_flag_e::optional_ocr_due) == 8u);
-  static_assert(work_flags_value(work_flag_e::subtitle_observation_due) == 16u);
   static_assert(models::near_identical_gpu_decision_record_byte_offset == 0u);
   static_assert(models::near_identical_gpu_request_record_byte_offset == 32u);
 
@@ -1190,53 +1188,33 @@ TEST(CudaConditionalGraphContract, AuthenticatesOptionalOcrOnlyOnInfer) {
     << "Subtitle dispositions are mutually exclusive authenticated modes";
 }
 
-TEST(CudaConditionalGraphContract, AuthenticatesCadenceDueOcrOnInferAndReuse) {
+TEST(CudaConditionalGraphContract, RetiredIndependentSubtitleWorkIsRejected) {
   constexpr std::uint64_t token = 0x9a8b7c6d5e4f3021ull;
-  const auto request = make_request(token, work_flag_e::optional_ocr_due);
-  ASSERT_TRUE(authenticated_request(request));
-
-  for (const auto branch : {branch_e::infer, branch_e::reuse}) {
-    const auto receipt = resolve_proposal(make_proposal(branch, token), request);
-    EXPECT_TRUE(authenticated_receipt(receipt, request));
-    EXPECT_TRUE(authenticated_optional_ocr_receipt(receipt, request));
-    EXPECT_EQ(receipt.decision, static_cast<std::uint32_t>(branch));
-    EXPECT_EQ(receipt.reserved, optional_ocr_receipt_magic);
+  for (const auto work : {4u, 8u, 16u, 3u}) {
+    const auto request = make_request(token, static_cast<work_flag_e>(work));
+    EXPECT_FALSE(authenticated_request(request));
+    for (const auto branch : {branch_e::infer, branch_e::reuse}) {
+      const auto receipt = resolve_proposal(make_proposal(branch, token), request);
+      EXPECT_EQ(receipt.decision, static_cast<std::uint32_t>(branch_e::infer));
+      EXPECT_FALSE(authenticated_receipt(receipt, request));
+      EXPECT_EQ(receipt.reserved, 0u);
+    }
   }
-
-  auto malformed = make_proposal(branch_e::reuse, token);
-  malformed.magic = 0u;
-  const auto fail_open_receipt = resolve_proposal(malformed, request);
-  EXPECT_TRUE(authenticated_receipt(fail_open_receipt, request));
-  EXPECT_EQ(
-    fail_open_receipt.decision,
-    static_cast<std::uint32_t>(branch_e::infer)
-  );
-  EXPECT_FALSE(authenticated_optional_ocr_receipt(fail_open_receipt, request));
-
-  const auto child_absent_receipt = resolve_proposal(
-    make_proposal(branch_e::reuse, token), request, false
-  );
-  EXPECT_TRUE(authenticated_receipt(child_absent_receipt, request));
-  EXPECT_FALSE(authenticated_optional_ocr_receipt(child_absent_receipt, request));
 }
 
-TEST(CudaConditionalGraphContract, CadenceDueAbstentionNeverAuthenticatesOptionalOcr) {
+TEST(CudaConditionalGraphContract, SubtitleAbstentionRemainsCoupledToTheDepthBranch) {
   constexpr std::uint64_t token = 0x6b5a493827160f1eull;
-  const auto request = make_request(token, work_flag_e::subtitle_observation_due);
+  const auto request = make_request(token, work_flag_e::subtitle_observation);
   ASSERT_TRUE(authenticated_request(request));
-
   for (const auto branch : {branch_e::infer, branch_e::reuse}) {
     const auto receipt = resolve_proposal(make_proposal(branch, token), request);
     EXPECT_TRUE(authenticated_receipt(receipt, request));
     EXPECT_EQ(receipt.decision, static_cast<std::uint32_t>(branch));
     EXPECT_EQ(receipt.reserved, 0u);
-    EXPECT_FALSE(authenticated_optional_ocr_receipt(receipt, request));
-
     auto forged_ocr = receipt;
     forged_ocr.reserved = optional_ocr_receipt_magic;
     forged_ocr.decision_cookie ^= optional_ocr_receipt_magic;
-    EXPECT_FALSE(authenticated_receipt(forged_ocr, request))
-      << "A branch-independent abstention may not claim optional OCR execution";
+    EXPECT_FALSE(authenticated_receipt(forged_ocr, request));
   }
 }
 
@@ -1288,9 +1266,15 @@ TEST(CudaConditionalGraphContract, EmbeddedPtxPublishesReceiptBeforeSettingCondi
   EXPECT_NE(ptx.find("setp.eq.u32 %p4, %r14, 0"), std::string_view::npos);
   EXPECT_NE(ptx.find("setp.eq.u32 %p24, %r14, 1"), std::string_view::npos);
   EXPECT_NE(ptx.find("setp.eq.u32 %p28, %r14, 2"), std::string_view::npos);
-  EXPECT_NE(ptx.find("setp.eq.u32 %p29, %r14, 8"), std::string_view::npos);
-  EXPECT_NE(ptx.find("setp.eq.u32 %p30, %r14, 16"), std::string_view::npos);
-  EXPECT_NE(ptx.find("setp.eq.u32 %p26, %r14, 8"), std::string_view::npos);
+  EXPECT_EQ(ptx.find("setp.eq.u32 %p29, %r14, 8"), std::string_view::npos);
+  EXPECT_EQ(ptx.find("setp.eq.u32 %p30, %r14, 16"), std::string_view::npos);
+  EXPECT_EQ(ptx.find("setp.eq.u32 %p26, %r14, 8"), std::string_view::npos);
+  EXPECT_NE(ptx.find("setp.eq.u32 %p20, %r14, 1"), std::string_view::npos);
+  EXPECT_NE(ptx.find("setp.eq.u32 %p25, %r22, 1"), std::string_view::npos);
+  EXPECT_NE(ptx.find("and.pred %p27, %p20, %p25"), std::string_view::npos)
+    << "The OCR sibling requires both optional work and the infer branch";
+  EXPECT_EQ(ptx.find("or.pred %p27"), std::string_view::npos)
+    << "No independent subtitle mode can bypass the joint infer branch";
   const auto receipt_publish = ptx.find("st.global.u32 [%rd3+24], %r24");
   const auto conditional_call = ptx.find("call.uni cudaGraphSetConditional");
   ASSERT_NE(receipt_publish, std::string_view::npos);
@@ -1859,47 +1843,24 @@ TEST(CudaConditionalGraphHardware, OptionalSiblingRequiresAuthenticatedProposalA
     false
   ));
 
-  const auto due_request = make_request(token, work_flag_e::optional_ocr_due);
-  EXPECT_TRUE(fixture.run_optional(
-    make_proposal(branch_e::infer, token),
-    due_request,
-    conditional_hardware_fixture_t::infer_marker,
-    conditional_hardware_fixture_t::optional_infer_marker,
-    branch_e::infer,
-    true,
-    true
-  ));
-  EXPECT_TRUE(fixture.run_optional(
-    make_proposal(branch_e::reuse, token),
-    due_request,
-    0u,
-    conditional_hardware_fixture_t::optional_infer_marker,
-    branch_e::reuse,
-    true,
-    true
-  ));
-
-  const auto due_abstention_request = make_request(
-    token, work_flag_e::subtitle_observation_due
-  );
-  EXPECT_TRUE(fixture.run_optional(
-    make_proposal(branch_e::infer, token),
-    due_abstention_request,
-    conditional_hardware_fixture_t::infer_marker,
-    0u,
-    branch_e::infer,
-    true,
-    false
-  ));
-  EXPECT_TRUE(fixture.run_optional(
-    make_proposal(branch_e::reuse, token),
-    due_abstention_request,
-    0u,
-    0u,
-    branch_e::reuse,
-    true,
-    false
-  ));
+  for (const auto work : {8u, 16u}) {
+    const auto retired_request = make_request(token, static_cast<work_flag_e>(work));
+    for (const auto branch : {branch_e::infer, branch_e::reuse}) {
+      EXPECT_TRUE(fixture.run_optional(
+        make_proposal(branch, token), retired_request,
+        conditional_hardware_fixture_t::infer_marker, 0u,
+        branch_e::infer, false, false
+      ));
+    }
+  }
+  const auto abstention_request = make_request(token, work_flag_e::subtitle_observation);
+  for (const auto branch : {branch_e::infer, branch_e::reuse}) {
+    EXPECT_TRUE(fixture.run_optional(
+      make_proposal(branch, token), abstention_request,
+      branch == branch_e::infer ? conditional_hardware_fixture_t::infer_marker : 0u,
+      0u, branch, true, false
+    ));
+  }
 
   auto malformed = make_proposal(branch_e::infer, token);
   malformed.magic = 0u;

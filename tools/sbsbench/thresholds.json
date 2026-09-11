@@ -473,7 +473,7 @@
     }
   },
   "perf_ms": {
-    "depth_infer": {
+    "depth_conditional_transaction": {
       "rel_tol": 0.3,
       "abs_floor": 1.0
     },

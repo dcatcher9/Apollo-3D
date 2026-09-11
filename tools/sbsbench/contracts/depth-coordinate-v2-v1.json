@@ -1,5 +1,5 @@
 {
-  "schema": 76,
+  "schema": 77,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -233,10 +233,10 @@
     }
   },
   "final_parallax": {
-    "schema": 2,
+    "schema": 3,
     "authority": "complete-atomic-subtitle-conditioned-r32f-live-render-authority",
-    "publication_policy": "authenticated-infer-or-cpu-known-publication-or-authenticated-cadence-due-subtitle-publication-direct-render",
-    "reuse_policy": "ordinary-reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte;authenticated-cadence-due-reuse-holds-depth-and-publishes-current-ocr-or-abstention-slr-final-tuple-against-retained-base",
+    "publication_policy": "authenticated-infer-or-cpu-known-publication-direct-render",
+    "reuse_policy": "reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte",
     "invalid_policy": "fail-closed-flat",
     "current_rgb_policy": "always-current-never-retained"
   },
@@ -336,7 +336,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "8d159966138e49538f7fde5318f6227332470834c70d3d27ec973885379c29ad"
+    "source_closure_sha256": "58033bdc70d2370607fcd4a195212deffcab2c28ed5bd516a3d0897b7b0ed02c"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

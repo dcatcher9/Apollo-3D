@@ -1,12 +1,12 @@
 {
   "name": "flat_transition",
-  "description": "Textured depth scene cutting to a static flat page: normalization recovery and false-stereo decay. Shot-state expectations re-verified against the V2 cut-only analysis trace on 2026-08-04 (pulse schedule unchanged).",
+  "description": "Textured depth scene cutting to a static flat page: normalization recovery and false-stereo decay. The source changes at frame 13; ordinary geometry confirmation emits the single cut pulse at frame 14.",
   "gt_depth_kind": "disparity",
   "shot_state_contract": {
     "kind": "hard-cut",
     "monitor_from_frame": 2,
     "expected_pulse_frames": [
-      13
+      14
     ]
   },
   "content_type": "synthetic",

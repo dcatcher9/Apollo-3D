@@ -706,7 +706,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_current_subtitle_record_and_state_abi_partition_exact_word_counts(self):
-        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 40)
+        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 41)
         self.assertEqual(dump_contract.DEPTH_INPUT_REGION_SCHEMA, 4)
         self.assertEqual(dump_contract.SUBTITLE_OCR_RECORD_SCHEMA, 3)
         self.assertEqual(dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA, 13)
@@ -742,7 +742,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(
             struct.pack("<I", dump_contract.SUBTITLE_LOCATOR_STATE_TAG), b"SL13")
 
-    def test_schema40_accepts_exact_single_high_grid_and_rejects_split_or_arbitrary_high(self):
+    def test_schema41_accepts_exact_single_high_grid_and_rejects_split_or_arbitrary_high(self):
         high = copy.deepcopy(self.manifest)
         self._set_manifest_capture_grid(high, 1540, 868)
         high["composite_runtime_provenance"] = self._composite_runtime_provenance()
@@ -2167,7 +2167,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             changed["artifacts"][field]["sha256"] = "not-a-hash"
             with self.assertRaisesRegex(ValueError, "content sha256"):
                 dump_contract.validate_v2_dump_manifest_document(changed)
-        # Schema 40 must not advertise packaged scalar previews at all.
+        # The current schema must not advertise packaged scalar previews at all.
         changed = copy.deepcopy(self.manifest)
         changed["artifacts"]["shadow_vertical_majorant.png"] = {
             "available": True, "required": False, "stage": "retired preview",
@@ -2906,7 +2906,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertEqual(summary["height"], 12)
             self.assertFalse(summary["window_region_verified"])
 
-    def test_schema40_generates_float_previews_on_demand_outside_package(self):
+    def test_schema41_generates_float_previews_on_demand_outside_package(self):
         from PIL import Image
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -3939,43 +3939,23 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 field_width=16, field_height=12,
                 expected_domain_tag=domain_tag, input_domain_reset=False)
 
-    def test_gpu_trace_due_observation_advances_on_reuse_without_reauthorizing_ordinary(self):
+    def test_gpu_trace_rejects_retired_due_work_and_ocr_on_reuse(self):
         input_region = copy.deepcopy(self.depth_input_region)
         input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
         input_region["analysis"]["tensor_content_rect_px"] = {
             "left": 0, "top": 0, "right": 16, "bottom": 12}
-        for work, marker, expected_name, expected_work_name in (
-                (dump_contract.GPU_TRACE_WORK_OPTIONAL_OCR_DUE,
-                 dump_contract.GPU_TRACE_OPTIONAL_RECEIPT_MAGIC,
-                 "optional-ocr", "optional-ocr-due"),
-                (dump_contract.GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE,
-                 0, "abstention", "subtitle-observation-due")):
+        for work in (8, 16):
             with self.subTest(work=work):
-                raw, _, domain_tag = self._gpu_trace_ring_payload(
-                    input_region, 16, 12)
+                raw, _, domain_tag = self._gpu_trace_ring_payload(input_region, 16, 12)
                 words = list(struct.unpack(
                     f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
-                base, transaction = self._set_gpu_trace_reuse(
-                    words, work=work, host_outcome=1)
-                words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS[
-                    "subtitle_disposition"]] = 1 if marker else 2
-                locator = base + dump_contract.GPU_TRACE_RECORD_OFFSETS[
-                    "subtitle_locator_begin"]
-                words[locator + 22] = 41
-                words[transaction + 1] = (
-                    dump_contract.GPU_TRACE_DECISION_COOKIE ^ marker)
-                words[transaction + 7] = marker
-                decoded = dump_contract.validate_gpu_trace_ring(
-                    struct.pack(f"<{len(words)}I", *words),
-                    matched_frame_id=41, analysis_generation=0,
-                    source_width=1920, source_height=1080,
-                    field_width=16, field_height=12,
-                    expected_domain_tag=domain_tag, input_domain_reset=False)
-                record = decoded["decoded"]["records"][0]
-                self.assertEqual(record["expected_work"]["name"], expected_work_name)
-                self.assertEqual(record["subtitle_disposition"]["name"], expected_name)
-                self.assertTrue(record["flags"]["condition_executed"])
-                self.assertFalse(record["subtitle_condition"]["held_with_depth"])
+                self._set_gpu_trace_reuse(words, work=work, host_outcome=1)
+                with self.assertRaisesRegex(ValueError, "depth disposition disagrees"):
+                    dump_contract.validate_gpu_trace_ring(
+                        struct.pack(f"<{len(words)}I", *words), matched_frame_id=41,
+                        analysis_generation=0, source_width=1920, source_height=1080,
+                        field_width=16, field_height=12, expected_domain_tag=domain_tag,
+                        input_domain_reset=False)
 
         raw, _, domain_tag = self._gpu_trace_ring_payload(input_region, 16, 12)
         words = list(struct.unpack(
@@ -4005,6 +3985,18 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 source_width=1920, source_height=1080,
                 field_width=16, field_height=12,
                 expected_domain_tag=domain_tag, input_domain_reset=False)
+
+    def test_gpu_trace_reuse_cannot_claim_direct_subtitle_publication(self):
+        for work in (dump_contract.GPU_TRACE_WORK_OPTIONAL_OCR,
+                     dump_contract.GPU_TRACE_WORK_SUBTITLE_OBSERVATION):
+            with self.subTest(work=work):
+                self.assertEqual(dump_contract._gpu_trace_subtitle_disposition(
+                    work, 1, 1, True, False,
+                    dump_contract.GPU_TRACE_FLAG_OCR_RECORD_SUBMITTED |
+                    dump_contract.GPU_TRACE_FLAG_CONDITION_EXECUTED), 6)
+                self.assertEqual(dump_contract._gpu_trace_subtitle_disposition(
+                    work, 1, 1, True, False,
+                    dump_contract.GPU_TRACE_FLAG_SUBTITLE_BRANCH_GATED), 5)
 
     def test_gpu_trace_requires_nonzero_nondecreasing_observation_timestamps(self):
         input_region = copy.deepcopy(self.depth_input_region)

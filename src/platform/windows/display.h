@@ -285,24 +285,6 @@ namespace platf::dxgi {
       exact_roi_damage,
     };
 
-    /** GPU-undecided admission has one anti-chaining latch outside opaque follow-ups. */
-    enum class host_sbs_approximate_reuse_provider_e : std::uint8_t {
-      none,
-      gpu_undecided,
-    };
-
-    /** CPU-side disposition using host metadata only.
-     *
-     * Exact DDup proof may reuse the completed cache. An otherwise eligible changed frame is
-     * deliberately undecided so the GPU can select inference or reuse without a decision
-     * readback. Every other frame sends a force-infer request through the same wrapper.
-     */
-    enum class host_sbs_depth_admission_e : std::uint8_t {
-      reuse_cached,
-      force_infer,
-      gpu_undecided,
-    };
-
     /** An existing exact captured-source result, not an inference or reusable-depth owner. */
     struct host_sbs_completed_source_proof_t {
       std::uint64_t frame_id = 0u;
@@ -325,8 +307,8 @@ namespace platf::dxgi {
 
     /** Consume or redeliver work already completed for this immutable captured image.
      *
-     * This runs before changed-source arbitration. The result has no raw-depth, OCR or inference
-     * ownership meaning, including when the completed GPU transaction privately chose reuse.
+     * This runs before changed-source arbitration. The caller separately proves that retained
+     * pixels were actually analyzed; near reuse of older analysis cannot become permanent here.
      * Content timestamps alone are insufficient: a new cursor presentation must still be handled.
      */
     [[nodiscard]] constexpr host_sbs_completed_source_action_e host_sbs_completed_source_action(
@@ -345,42 +327,6 @@ namespace platf::dxgi {
                host_sbs_completed_source_action_e::repeat_packed :
                host_sbs_completed_source_action_e::observe;
     }
-
-    [[nodiscard]] constexpr host_sbs_depth_admission_e host_sbs_depth_admission(
-      const bool cached_reuse_authorized,
-      const bool gpu_undecided_eligible,
-      const bool must_observe,
-      const bool opaque_followup_authorized = false
-    ) noexcept {
-      if (must_observe) {
-        // The observation barrier continues to block every host-owned cache path. It may admit
-        // only the immediately-prior opaque follow-up: the authenticated device history owner
-        // compares to the last actual infer and rejects invalid owners without branch readback.
-        return opaque_followup_authorized && gpu_undecided_eligible ?
-                 host_sbs_depth_admission_e::gpu_undecided :
-                 host_sbs_depth_admission_e::force_infer;
-      }
-      if (cached_reuse_authorized) {
-        return host_sbs_depth_admission_e::reuse_cached;
-      }
-      return gpu_undecided_eligible ? host_sbs_depth_admission_e::gpu_undecided :
-                                      host_sbs_depth_admission_e::force_infer;
-    }
-
-    [[nodiscard]] constexpr bool host_sbs_gpu_followup_order_valid(
-      const std::uint64_t anchor_frame_id,
-      const std::uint64_t barrier_frame_id,
-      const std::chrono::steady_clock::time_point enqueued_at,
-      const std::chrono::steady_clock::time_point now
-    ) noexcept {
-      return anchor_frame_id != 0u && anchor_frame_id == barrier_frame_id &&
-             enqueued_at.time_since_epoch().count() != 0 &&
-             now.time_since_epoch().count() != 0 && now >= enqueued_at;
-    }
-
-    /** Live alias of the shared production/offline conditional transaction policy. */
-    using host_sbs_gpu_observation_barrier_t =
-      models::gpu_adaptive_transaction_policy_t;
 
     /** One current-color/cache/render authority regardless of proof acquisition path. */
     struct host_sbs_depth_reuse_authorization_t {
@@ -423,41 +369,6 @@ namespace platf::dxgi {
       return result.valid() ? result : host_sbs_depth_reuse_authorization_t {};
     }
 
-    class ddup_damage_history_t;
-
-    /** Display-owned complete-DDup candidate retained across the private-copy route recheck. */
-    struct host_sbs_gpu_undecided_candidate_t {
-      std::uint64_t baseline_frame_id = 0u;
-      std::uint64_t current_frame_id = 0u;
-      const ddup_damage_history_t *damage_history = nullptr;
-      std::uint64_t baseline_damage_token = 0u;
-      std::uint64_t current_damage_token = 0u;
-      bool damage_history_complete = false;
-      bool opaque_followup = false;
-
-      [[nodiscard]] constexpr bool valid() const noexcept {
-        return baseline_frame_id != 0u && current_frame_id > baseline_frame_id &&
-               damage_history != nullptr && baseline_damage_token != 0u &&
-               current_damage_token > baseline_damage_token &&
-               damage_history_complete;
-      }
-    };
-
-    /** Host-owned approximate providers cannot chain without an intervening known inference.
-     * Device-authenticated opaque follow-ups are admitted separately under the barrier contract.
-     */
-    [[nodiscard]] constexpr bool host_sbs_approximate_reuse_provider_allowed(
-      const host_sbs_approximate_reuse_provider_e prior_since_enqueue,
-      const host_sbs_approximate_reuse_provider_e candidate,
-      const bool adaptive_refresh_required
-    ) noexcept {
-      if (prior_since_enqueue != host_sbs_approximate_reuse_provider_e::none) {
-        return false;
-      }
-      return !adaptive_refresh_required &&
-             candidate != host_sbs_approximate_reuse_provider_e::none;
-    }
-
     [[nodiscard]] constexpr bool host_sbs_cached_geometry_render_allowed(
       const bool dedup_gate_open,
       const bool renderer_authenticated,
@@ -477,10 +388,10 @@ namespace platf::dxgi {
       const bool renderer_authenticated,
       const bool result_authenticated,
       const bool completion_route_matches_current,
-      const bool known_force_infer_completion
+      const bool submission_class_matches
     ) noexcept {
       return renderer_authenticated && result_authenticated &&
-             completion_route_matches_current && known_force_infer_completion;
+             completion_route_matches_current && submission_class_matches;
     }
 
     /** Reset retained lineage only when its resource aliases or authority route are invalid. */
@@ -495,135 +406,6 @@ namespace platf::dxgi {
              (!route_matches_current || snapshot_debug_inputs || authority_reprocess_pending ||
               producer_terminal);
     }
-
-    /** Cache-independent live route fingerprint for invalidating predictive evidence. */
-    struct host_sbs_adaptive_motion_route_epoch_t {
-      std::uint32_t source_width = 0u;
-      std::uint32_t source_height = 0u;
-      std::uint32_t mip_levels = 0u;
-      std::uint32_t array_size = 0u;
-      std::uint32_t source_format = 0u;
-      std::uint32_t sample_count = 0u;
-      std::uint32_t sample_quality = 0u;
-      std::uint32_t input_color_space = 0u;
-      std::uint64_t root_authority_generation = 0u;
-      std::uint64_t region_authority_generation = 0u;
-      std::uint64_t browser_authority_epoch = 0u;
-      bool interactive_move_size = false;
-
-      bool operator==(const host_sbs_adaptive_motion_route_epoch_t &) const = default;
-    };
-
-    class host_sbs_adaptive_motion_route_state_t {
-    public:
-      constexpr void reset() noexcept {
-        observed_.reset();
-      }
-
-      /** Returns true only when an already-observed live route changes. */
-      [[nodiscard]] constexpr bool observe(
-        const host_sbs_adaptive_motion_route_epoch_t &current
-      ) noexcept {
-        const bool changed = observed_ && *observed_ != current;
-        observed_ = current;
-        return changed;
-      }
-
-    private:
-      std::optional<host_sbs_adaptive_motion_route_epoch_t> observed_;
-    };
-
-    enum class host_sbs_adaptive_hold_decision_e : std::uint8_t {
-      infer,
-      hold_candidate,
-      hold_same_identity,
-    };
-
-    /** Own initial-candidate cadence for GPU near-identical reuse.
-     *
-     * A candidate consumes the host arm. Device-authenticated opaque follow-ups are governed by
-     * their separate route/owner contract; a real observation must be enqueued before another
-     * initial host candidate may be armed.
-     */
-    class host_sbs_adaptive_hold_cadence_t {
-    public:
-      constexpr void reset() noexcept {
-        armed_ = false;
-        refresh_required_ = false;
-        last_enqueued_identity_.reset();
-        refresh_identity_.reset();
-        last_enqueued_at_ = {};
-      }
-
-      constexpr void record_successful_enqueue(
-        const std::optional<std::chrono::steady_clock::time_point> &identity,
-        const std::chrono::steady_clock::time_point enqueued_at
-      ) noexcept {
-        armed_ = identity.has_value() && enqueued_at.time_since_epoch().count() != 0;
-        refresh_required_ = false;
-        last_enqueued_identity_ = identity;
-        refresh_identity_.reset();
-        last_enqueued_at_ = enqueued_at;
-      }
-
-      [[nodiscard]] constexpr host_sbs_adaptive_hold_decision_e observe_changed(
-        const std::optional<std::chrono::steady_clock::time_point> &identity,
-        const bool candidate_eligible,
-        const std::chrono::steady_clock::time_point now
-      ) noexcept {
-        if (!identity || now.time_since_epoch().count() == 0) {
-          reset();
-          return host_sbs_adaptive_hold_decision_e::infer;
-        }
-        if (last_enqueued_identity_ && *identity == *last_enqueued_identity_) {
-          return host_sbs_adaptive_hold_decision_e::infer;
-        }
-        if (refresh_required_) {
-          const bool ordered = last_enqueued_at_.time_since_epoch().count() != 0 &&
-                               now >= last_enqueued_at_;
-          if (refresh_identity_ && *identity == *refresh_identity_ && ordered) {
-            return host_sbs_adaptive_hold_decision_e::hold_same_identity;
-          }
-          return host_sbs_adaptive_hold_decision_e::infer;
-        }
-        const bool ordered = last_enqueued_at_.time_since_epoch().count() != 0 &&
-                             now >= last_enqueued_at_;
-        if (armed_ && candidate_eligible && ordered) {
-          armed_ = false;
-          refresh_required_ = true;
-          refresh_identity_ = identity;
-          return host_sbs_adaptive_hold_decision_e::hold_candidate;
-        }
-        armed_ = false;
-        return host_sbs_adaptive_hold_decision_e::infer;
-      }
-
-      [[nodiscard]] constexpr bool refresh_required() const noexcept {
-        return refresh_required_;
-      }
-
-      /** Revalidate the consumed candidate immediately before GPU submission.
-       *
-       * Private frame copy and live-authority checks happen after `observe_changed()`. A delayed
-       * submit must retain that candidate identity and nonregressed observation ordering.
-       */
-      [[nodiscard]] constexpr bool hold_candidate_still_valid(
-        const std::optional<std::chrono::steady_clock::time_point> &identity,
-        const std::chrono::steady_clock::time_point now
-      ) const noexcept {
-        return refresh_required_ && identity && refresh_identity_ &&
-               *identity == *refresh_identity_ &&
-               last_enqueued_at_.time_since_epoch().count() != 0 &&
-               now >= last_enqueued_at_;
-      }
-
-    private:
-      bool armed_ = false;
-      bool refresh_required_ = false;
-      std::optional<std::chrono::steady_clock::time_point> last_enqueued_identity_;
-      std::optional<std::chrono::steady_clock::time_point> refresh_identity_;
-      std::chrono::steady_clock::time_point last_enqueued_at_ {};
-    };
 
     /** CPU shadow for an immutable-by-value GPU upload. The caller commits only after the D3D
      * create/update operation has been submitted successfully. */
@@ -815,6 +597,8 @@ namespace platf::dxgi {
     };
 
     /** Immutable identity of one desktop surface actually committed by CopyResource. */
+    class ddup_damage_history_t;
+
     struct ddup_damage_snapshot_t {
       std::shared_ptr<const ddup_damage_history_t> history;
       std::uint64_t token = 0u;

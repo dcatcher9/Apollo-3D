@@ -102,8 +102,6 @@ namespace {
       "#define GPU_TRACE_WORK_FLAGS_COOKIE 0x6F435257u",
       "#define GPU_TRACE_WORK_OPTIONAL_OCR (1u << 0u)",
       "#define GPU_TRACE_WORK_SUBTITLE_OBSERVATION (1u << 1u)",
-      "#define GPU_TRACE_WORK_OPTIONAL_OCR_DUE (1u << 3u)",
-      "#define GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE (1u << 4u)",
     };
     for (const auto *definition : definitions) {
       EXPECT_NE(shader.find(definition), std::string::npos) << definition;
@@ -159,7 +157,7 @@ namespace {
     return words;
   }
 
-  TEST(HostSbsGpuTraceContractTest, AuthenticatedReuseClassifiesOrdinaryHoldAndDuePublication) {
+  TEST(HostSbsGpuTraceContractTest, AuthenticatedReuseHoldsTheJointSubtitleTuple) {
     static_assert(static_cast<std::uint32_t>(
                     trace::subtitle_disposition_e::held_with_depth) == 5u);
     static_assert(static_cast<std::uint32_t>(trace::subtitle_disposition_e::invalid) == 6u);
@@ -189,18 +187,6 @@ namespace {
         false,
         trace::subtitle_disposition_e::held_with_depth,
       },
-      case_t {
-        cuda_conditional_graph::work_flag_e::optional_ocr_due,
-        trace::host_subtitle_outcome_e::ordinary_record,
-        true,
-        trace::subtitle_disposition_e::optional_ocr,
-      },
-      case_t {
-        cuda_conditional_graph::work_flag_e::optional_ocr_due,
-        trace::host_subtitle_outcome_e::ordinary_record,
-        false,
-        trace::subtitle_disposition_e::abstention,
-      },
     };
     constexpr auto flags = trace::subtitle_branch_gated;
     for (const auto &test : cases) {
@@ -217,11 +203,7 @@ namespace {
       );
       ASSERT_TRUE(receipt.receipt_valid);
       ASSERT_EQ(receipt.depth, trace::depth_disposition_e::reuse);
-      EXPECT_EQ(
-        receipt.optional_ocr_executed,
-        test.work == cuda_conditional_graph::work_flag_e::optional_ocr_due &&
-          test.optional_child
-      );
+      EXPECT_FALSE(receipt.optional_ocr_executed);
       EXPECT_EQ(
         trace::classify_subtitle_disposition(
           cuda_conditional_graph::work_flags_value(test.work),
@@ -261,18 +243,6 @@ namespace {
         false,
         trace::subtitle_disposition_e::abstention,
       },
-      case_t {
-        cuda_conditional_graph::work_flag_e::optional_ocr_due,
-        trace::host_subtitle_outcome_e::ordinary_record,
-        true,
-        trace::subtitle_disposition_e::optional_ocr,
-      },
-      case_t {
-        cuda_conditional_graph::work_flag_e::optional_ocr_due,
-        trace::host_subtitle_outcome_e::ordinary_record,
-        false,
-        trace::subtitle_disposition_e::abstention,
-      },
     };
     for (const auto &test : cases) {
       SCOPED_TRACE(cuda_conditional_graph::work_flags_value(test.work));
@@ -306,6 +276,24 @@ namespace {
         ),
         trace::subtitle_disposition_e::invalid
       ) << "opaque execution proof must come from the authenticated receipt";
+    }
+  }
+
+  TEST(HostSbsGpuTraceContractTest, ReuseCannotClaimASeparateCurrentSubtitlePublication) {
+    constexpr std::uint64_t token = 0x1020304050607080ull;
+    for (const auto work : {cuda_conditional_graph::work_flag_e::optional_ocr,
+                           cuda_conditional_graph::work_flag_e::subtitle_observation}) {
+      const auto receipt = trace::authenticate_receipt(
+        transaction(token, cuda_conditional_graph::branch_e::reuse, work, true),
+        token, cuda_conditional_graph::work_flags_value(work),
+        trace::submission_class_e::gpu_undecided
+      );
+      ASSERT_TRUE(receipt.receipt_valid);
+      EXPECT_EQ(trace::classify_subtitle_disposition(
+                  cuda_conditional_graph::work_flags_value(work),
+                  trace::host_subtitle_outcome_e::ordinary_record, receipt,
+                  trace::ocr_record_submitted | trace::condition_executed),
+                trace::subtitle_disposition_e::invalid);
     }
   }
 
@@ -503,7 +491,7 @@ namespace {
     D3D11_BUFFER_DESC transaction_desc {};
     transaction_desc.Usage = D3D11_USAGE_DEFAULT;
     transaction_desc.ByteWidth = sizeof(transaction_words);
-    transaction_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    transaction_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
     transaction_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
     D3D11_SUBRESOURCE_DATA transaction_data {transaction_words.data(), 0u, 0u};
     ComPtr<ID3D11Buffer> transaction_buffer;
@@ -663,6 +651,17 @@ namespace {
     };
 
     dispatch();
+    // The trace borrows the finalized producer buffer directly. Reinitialize that same buffer
+    // before any CPU read: immediate-context ordering must preserve the earlier committed record.
+    transaction_words = transaction(
+      token,
+      cuda_conditional_graph::branch_e::infer,
+      cuda_conditional_graph::work_flag_e::subtitle_observation,
+      false
+    );
+    context->UpdateSubresource(
+      transaction_buffer.Get(), 0u, nullptr, transaction_words.data(), 0u, 0u
+    );
     auto ring = read_ring();
     ASSERT_EQ(ring[1u], trace::ring_tag);
     ASSERT_EQ(ring[4u], 2u);
@@ -683,15 +682,6 @@ namespace {
                           trace::record_word_e::observation_timestamp_high)],
               0x01234567u);
 
-    transaction_words = transaction(
-      token,
-      cuda_conditional_graph::branch_e::infer,
-      cuda_conditional_graph::work_flag_e::subtitle_observation,
-      false
-    );
-    context->UpdateSubresource(
-      transaction_buffer.Get(), 0u, nullptr, transaction_words.data(), 0u, 0u
-    );
     constants[8u] = cuda_conditional_graph::work_flags_value(
       cuda_conditional_graph::work_flag_e::subtitle_observation
     );

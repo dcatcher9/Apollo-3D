@@ -26,10 +26,10 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 40
+DUMP_MANIFEST_SCHEMA = 41
 GPU_TRACE_RING_SCHEMA = 3
-GPU_TRACE_CONTRACT_SCHEMA = 3
-GPU_TRACE_DECODED_SCHEMA = 4
+GPU_TRACE_CONTRACT_SCHEMA = 4
+GPU_TRACE_DECODED_SCHEMA = 5
 GPU_TRACE_RING_TAG = 0x48525447
 GPU_TRACE_RECORD_TAG = 0x31525447
 GPU_TRACE_CAPACITY = 300
@@ -59,8 +59,6 @@ GPU_TRACE_OPTIONAL_RECEIPT_MAGIC = 0x52434F4F
 GPU_TRACE_WORK_NONE = 0
 GPU_TRACE_WORK_OPTIONAL_OCR = 1 << 0
 GPU_TRACE_WORK_SUBTITLE_OBSERVATION = 1 << 1
-GPU_TRACE_WORK_OPTIONAL_OCR_DUE = 1 << 3
-GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE = 1 << 4
 GPU_TRACE_KNOWN_FLAGS = 0x3F
 GPU_TRACE_FLAG_INPUT_DOMAIN_RESET = 1 << 0
 GPU_TRACE_FLAG_DUMP_FORCED_AT_ENQUEUE = 1 << 1
@@ -2984,8 +2982,6 @@ def _gpu_trace_contract_expected_sections() -> Dict[str, Any]:
                 "none": GPU_TRACE_WORK_NONE,
                 "optional_ocr": GPU_TRACE_WORK_OPTIONAL_OCR,
                 "subtitle_observation": GPU_TRACE_WORK_SUBTITLE_OBSERVATION,
-                "optional_ocr_due": GPU_TRACE_WORK_OPTIONAL_OCR_DUE,
-                "subtitle_observation_due": GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE,
             },
         },
         "enums": {
@@ -3061,8 +3057,7 @@ def _gpu_trace_authenticate_receipt(
         submission_class: int) -> tuple[int, bool, bool]:
     valid_work = expected_work in {
         GPU_TRACE_WORK_NONE, GPU_TRACE_WORK_OPTIONAL_OCR,
-        GPU_TRACE_WORK_SUBTITLE_OBSERVATION, GPU_TRACE_WORK_OPTIONAL_OCR_DUE,
-        GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE}
+        GPU_TRACE_WORK_SUBTITLE_OBSERVATION}
     token_low, token_high = token & 0xFFFFFFFF, token >> 32
     request_valid = (
         token != 0 and valid_work and transaction[8] == token_low and
@@ -3086,8 +3081,7 @@ def _gpu_trace_authenticate_receipt(
         transaction[6] == GPU_TRACE_RECEIPT_MAGIC and
         (marker == 0 or
          (marker == GPU_TRACE_OPTIONAL_RECEIPT_MAGIC and
-          ((expected_work == GPU_TRACE_WORK_OPTIONAL_OCR and decision == 1) or
-           expected_work == GPU_TRACE_WORK_OPTIONAL_OCR_DUE))))
+          expected_work == GPU_TRACE_WORK_OPTIONAL_OCR and decision == 1)))
     optional = receipt_valid and marker == GPU_TRACE_OPTIONAL_RECEIPT_MAGIC
     depth = 0 if not receipt_valid else (1 if decision == 0 else 2)
     return depth, receipt_valid, optional
@@ -3106,30 +3100,22 @@ def _gpu_trace_subtitle_disposition(
         if (not receipt_valid or expected_work == GPU_TRACE_WORK_NONE or
                 suppressed or published or conditioned):
             return 6
-        infer_coupled = (
-            expected_work in {GPU_TRACE_WORK_OPTIONAL_OCR,
-                              GPU_TRACE_WORK_SUBTITLE_OBSERVATION} and
-            host_outcome == 1)
-        cadence_due = (
-            expected_work in {GPU_TRACE_WORK_OPTIONAL_OCR_DUE,
-                              GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE} and
-            host_outcome == 1)
-        if not infer_coupled and not cadence_due:
+        if (expected_work not in {GPU_TRACE_WORK_OPTIONAL_OCR,
+                                  GPU_TRACE_WORK_SUBTITLE_OBSERVATION} or
+                host_outcome != 1):
             return 6
-        if infer_coupled and depth == 1:
+        if depth == 1:
             return 5 if not optional_ocr else 6
-        if depth != 2 and not (cadence_due and depth == 1):
+        if depth != 2:
             return 6
-        if expected_work == GPU_TRACE_WORK_OPTIONAL_OCR or cadence_due:
-            return 1 if optional_ocr else 2
-        if expected_work == GPU_TRACE_WORK_SUBTITLE_OBSERVATION:
-            return 2
-        return 6
+        return 1 if optional_ocr else 2
+    # Authenticated reuse can only retain the branch-gated tuple. Keep the existing
+    # force-root invalid-receipt diagnostic abstention; it grants no depth authority.
     if expected_work == GPU_TRACE_WORK_NONE:
         return 0 if host_outcome == 0 and suppressed and not published and not conditioned else 6
-    if expected_work in {GPU_TRACE_WORK_OPTIONAL_OCR,
-                         GPU_TRACE_WORK_OPTIONAL_OCR_DUE,
-                         GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE}:
+    if receipt_valid and depth == 1:
+        return 6
+    if expected_work == GPU_TRACE_WORK_OPTIONAL_OCR:
         if host_outcome != 1 or suppressed or not published or not conditioned:
             return 6
         return 1 if optional_ocr else 2
@@ -3180,7 +3166,6 @@ _GPU_TRACE_OUTCOME_NAMES = {
 }
 _GPU_TRACE_WORK_NAMES = {
     0: "none", 1: "optional-ocr", 2: "subtitle-observation",
-    8: "optional-ocr-due", 16: "subtitle-observation-due",
 }
 _GPU_TRACE_EVENT_NAMES = {0: "none", 1: "birth", 2: "death", 3: "handoff"}
 
@@ -4445,7 +4430,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
 
 def generate_float_artifact_previews(
         dump_dir: Any, artifact_name: str, output_dir: Any) -> Dict[str, Any]:
-    """Generate diagnostic PNGs from one authenticated schema-40 ``.f32`` artifact.
+    """Generate diagnostic PNGs from one authenticated schema-41 ``.f32`` artifact.
 
     Preview files are deliberately written outside the atomic package contract. Scalar tensors
     receive finite-p2/p98 grayscale and jet views; ``model_input.f32`` receives an RGB view by

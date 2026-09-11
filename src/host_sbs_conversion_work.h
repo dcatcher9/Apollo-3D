@@ -15,10 +15,8 @@ namespace models {
 
   /** Snapshot of the converter's existing owners; this stores no parallel lifecycle state.
    *
-   * An opaque adaptive watermark restricts reuse after its transaction completes, but is not
-   * unfinished work. Per-device construction has its own completion event. Global preparation
-   * is sampled at the adapter's ordinary idle boundary and requests conversion only once it can
-   * start construction or report failure, rather than reconverting flat frames while it builds.
+   * Retained analysis does not create work. Per-device construction has its own completion
+   * event. Global preparation requests conversion only once it can start construction or fail.
    */
   struct host_sbs_conversion_work_t {
     bool pipeline_enabled = false;

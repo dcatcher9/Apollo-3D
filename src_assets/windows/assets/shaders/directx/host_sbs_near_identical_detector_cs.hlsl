@@ -125,8 +125,8 @@ bool NearIdenticalHistoryOwnerMatchesRequest() {
         (owner_frame_high == near_identical_baseline_frame_high &&
          owner_frame_low <= near_identical_baseline_frame_low);
     // PreviousModelInput and this owner advance only on an authenticated infer. The host baseline
-    // names the immediately preceding opaque root. Every candidate still compares cumulatively
-    // against the same actual infer; elapsed time and frame count never slide or expire that owner.
+    // names a confirmed infer owner. Every admitted candidate compares cumulatively against that
+    // owner; reuse never advances the comparison baseline.
     bool owner_precedes_current =
         owner_frame_high < near_identical_current_frame_high ||
         (owner_frame_high == near_identical_current_frame_high &&
@@ -190,7 +190,7 @@ bool NearIdenticalGeometryConstantsValid() {
         ordinary;
 }
 
-bool NearIdenticalSubtitleConstantsValid() {
+bool NearIdenticalPublicationConstantsValid() {
     bool request_valid =
         (near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED ||
          near_identical_request_flags == NEAR_IDENTICAL_REQUEST_FORCE_INFER) &&
@@ -220,15 +220,13 @@ bool NearIdenticalSubtitleConstantsValid() {
             near_identical_ocr_field_width, near_identical_ocr_field_height);
 }
 
-// Authenticate the complete subtitle request/receipt pair without CPU readback. Callers use the
-// returned work only after this succeeds. A CPU-known force transaction may still publish an
-// exact-current abstention when this proof is malformed.
-bool NearIdenticalSubtitleReceiptValid(
+// Authenticate the complete joint request/receipt pair without CPU readback. A CPU-known force
+// transaction may still publish an exact-current abstention when this proof is malformed.
+bool NearIdenticalReceiptValid(
     out uint decision,
-    out uint request_work,
     out bool optional_ocr) {
     decision = NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_OFFSET);
-    request_work = NearIdenticalDecision.Load(
+    uint request_work = NearIdenticalDecision.Load(
         NEAR_IDENTICAL_REQUEST_WORK_FLAGS_OFFSET);
     optional_ocr = false;
     uint decision_token_low = NearIdenticalDecision.Load(
@@ -241,7 +239,7 @@ bool NearIdenticalSubtitleReceiptValid(
         NEAR_IDENTICAL_REQUEST_TOKEN_HIGH_OFFSET);
     uint optional_marker = NearIdenticalDecision.Load(
         NEAR_IDENTICAL_DECISION_RESERVED_OFFSET);
-    bool request_valid = NearIdenticalSubtitleConstantsValid() &&
+    bool request_valid = NearIdenticalPublicationConstantsValid() &&
         request_token_low == near_identical_request_token_low &&
         request_token_high == near_identical_request_token_high &&
         request_work == near_identical_expected_work &&
@@ -271,28 +269,17 @@ bool NearIdenticalSubtitleReceiptValid(
             (decision_token_high ^ NEAR_IDENTICAL_TOKEN_HIGH_COOKIE) &&
         (optional_marker == 0u ||
          (optional_marker == NEAR_IDENTICAL_OPTIONAL_RECEIPT_MAGIC &&
-          ((request_work == NEAR_IDENTICAL_WORK_OPTIONAL_OCR &&
-            decision == NEAR_IDENTICAL_DECISION_INFER) ||
-           request_work == NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE)));
+          request_work == NEAR_IDENTICAL_WORK_OPTIONAL_OCR &&
+          decision == NEAR_IDENTICAL_DECISION_INFER));
     optional_ocr = receipt_valid &&
         optional_marker == NEAR_IDENTICAL_OPTIONAL_RECEIPT_MAGIC;
     return receipt_valid;
 }
 
-// Depth authorization is deliberately stronger than subtitle authorization. The depth branch
-// consumes the owner/tile/reduction authority that made this transaction GPU-undecided, while the
-// independently clocked subtitle branch authenticates only its exact request/receipt disposition.
-bool NearIdenticalDepthReceiptValid(out uint decision) {
-    decision = NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_OFFSET);
-    uint decision_token_low = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_DECISION_TOKEN_LOW_OFFSET);
-    uint decision_token_high = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_DECISION_TOKEN_HIGH_OFFSET);
-    uint request_token_low = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_REQUEST_TOKEN_LOW_OFFSET);
-    uint request_token_high = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_REQUEST_TOKEN_HIGH_OFFSET);
-    bool constants_valid =
+// A conditional joint refresh also authenticates its comparison/reduction geometry. The common
+// request/receipt check above supplies the one branch authority for both depth and subtitles.
+bool NearIdenticalDepthConstantsValid() {
+    return
         near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED &&
         near_identical_tile_group_width == NearIdenticalTileAxisGroups(target_w) &&
         near_identical_tile_group_height == NearIdenticalTileAxisGroups(target_h) &&
@@ -301,49 +288,7 @@ bool NearIdenticalDepthReceiptValid(out uint decision) {
         near_identical_reduce_groups == NearIdenticalExpectedReduceGroups() &&
         near_identical_stream_frame_delta > 0u &&
         near_identical_stream_frame_delta <= 65535u &&
-        NearIdenticalOwnerIsNewer() &&
-        NearIdenticalWorkValid(near_identical_expected_work) &&
-        near_identical_expected_work_cookie ==
-            (near_identical_expected_work == 0u ? 0u :
-             near_identical_expected_work ^ NEAR_IDENTICAL_WORK_FLAGS_COOKIE) &&
-        request_token_low == near_identical_request_token_low &&
-        request_token_high == near_identical_request_token_high;
-    uint request_work_flags = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_REQUEST_WORK_FLAGS_OFFSET);
-    bool request_work_valid = NearIdenticalWorkValid(request_work_flags) &&
-        request_work_flags == near_identical_expected_work &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_WORK_FLAGS_COOKIE_OFFSET) ==
-            (request_work_flags == 0u ?
-                0u : request_work_flags ^ NEAR_IDENTICAL_WORK_FLAGS_COOKIE) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_RESERVED_OFFSET) == 0u;
-    uint receipt_optional = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_DECISION_RESERVED_OFFSET);
-    return constants_valid &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_MAGIC_OFFSET) ==
-            NEAR_IDENTICAL_RECEIPT_MAGIC &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_MAGIC_OFFSET) ==
-            NEAR_IDENTICAL_REQUEST_MAGIC &&
-        (decision == NEAR_IDENTICAL_DECISION_REUSE ||
-         decision == NEAR_IDENTICAL_DECISION_INFER) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_COOKIE_OFFSET) ==
-            (decision ^ NEAR_IDENTICAL_DECISION_COOKIE ^ receipt_optional) &&
-        decision_token_low == request_token_low &&
-        decision_token_high == request_token_high &&
-        (request_token_low != 0u || request_token_high != 0u) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_TOKEN_LOW_COOKIE_OFFSET) ==
-            (decision_token_low ^ NEAR_IDENTICAL_TOKEN_LOW_COOKIE) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_TOKEN_HIGH_COOKIE_OFFSET) ==
-            (decision_token_high ^ NEAR_IDENTICAL_TOKEN_HIGH_COOKIE) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_TOKEN_LOW_COOKIE_OFFSET) ==
-            (request_token_low ^ NEAR_IDENTICAL_TOKEN_LOW_COOKIE) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_TOKEN_HIGH_COOKIE_OFFSET) ==
-            (request_token_high ^ NEAR_IDENTICAL_TOKEN_HIGH_COOKIE) &&
-        request_work_valid &&
-        (receipt_optional == 0u ||
-         (receipt_optional == NEAR_IDENTICAL_OPTIONAL_RECEIPT_MAGIC &&
-          ((request_work_flags == NEAR_IDENTICAL_WORK_OPTIONAL_OCR &&
-            decision == NEAR_IDENTICAL_DECISION_INFER) ||
-           request_work_flags == NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE)));
+        NearIdenticalOwnerIsNewer();
 }
 
 void NearIdenticalWriteOcrAbstention() {
@@ -555,12 +500,10 @@ void resolve_main(uint3 group_thread : SV_GroupThreadID) {
             NEAR_IDENTICAL_DECISION_REUSE : NEAR_IDENTICAL_DECISION_INFER;
         uint requested_work = NearIdenticalDecision.Load(
             NEAR_IDENTICAL_REQUEST_WORK_FLAGS_OFFSET);
-        // Ordinary OCR remains infer-coupled. A cadence-due request is the bounded independent
-        // clock and preprocesses on either depth branch.
+        // Depth and subtitle analysis share one branch: reuse holds both; infer refreshes both.
         bool optional_preprocess = request_authorized &&
-            ((proposal == NEAR_IDENTICAL_DECISION_INFER &&
-              requested_work == NEAR_IDENTICAL_WORK_OPTIONAL_OCR) ||
-             requested_work == NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE);
+            proposal == NEAR_IDENTICAL_DECISION_INFER &&
+            requested_work == NEAR_IDENTICAL_WORK_OPTIONAL_OCR;
         NearIdenticalWriteDispatchArgs(
             NEAR_IDENTICAL_OPTIONAL_PREPROCESS_OFFSET,
             optional_preprocess ? (V2_OCR_INPUT_WIDTH + 15u) / 16u : 0u,
@@ -595,30 +538,26 @@ void resolve_main(uint3 group_thread : SV_GroupThreadID) {
 }
 
 // The joined CUDA root has completed and every interop resource is unmapped. One direct finalizer
-// independently validates depth and subtitle authority, publishes every postprocess shape, and
+// validates the joint refresh authority, publishes every postprocess shape, and
 // writes an exact-current abstention whenever no authenticated optional OCR receipt may be
 // consumed. Force-infer depth work remains host-authored and therefore skips the indirect shapes.
 [numthreads(1, 1, 1)]
 void finalize_main(uint3 dispatch_thread : SV_DispatchThreadID) {
     uint decision;
-    uint request_work_flags;
     bool optional_ocr;
-    bool receipt_valid = NearIdenticalSubtitleReceiptValid(
-        decision, request_work_flags, optional_ocr);
+    bool receipt_valid = NearIdenticalReceiptValid(
+        decision, optional_ocr);
     bool force_exact_publication =
         near_identical_request_flags == NEAR_IDENTICAL_REQUEST_FORCE_INFER &&
-        NearIdenticalSubtitleConstantsValid() &&
+        NearIdenticalPublicationConstantsValid() &&
         near_identical_expected_work != 0u;
-    bool branch_independent =
-        near_identical_expected_work == NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE ||
-        near_identical_expected_work == NEAR_IDENTICAL_WORK_SUBTITLE_OBSERVATION_DUE;
+    bool run_infer = receipt_valid &&
+        decision == NEAR_IDENTICAL_DECISION_INFER &&
+        NearIdenticalDepthConstantsValid();
     bool run_observation = near_identical_expected_work != 0u &&
-        ((receipt_valid &&
-          (decision == NEAR_IDENTICAL_DECISION_INFER || branch_independent)) ||
-         force_exact_publication);
+        (run_infer || force_exact_publication);
     bool run_optional = run_observation &&
-        (near_identical_expected_work == NEAR_IDENTICAL_WORK_OPTIONAL_OCR ||
-         near_identical_expected_work == NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE) &&
+        near_identical_expected_work == NEAR_IDENTICAL_WORK_OPTIONAL_OCR &&
         receipt_valid && optional_ocr;
     bool run_record = run_observation && !run_optional;
     // This slot held the pre-CUDA OCR-preprocess args. Republish it now as the full-field
@@ -655,11 +594,6 @@ void finalize_main(uint3 dispatch_thread : SV_DispatchThreadID) {
     // A force-infer root runs every depth postprocess stage with host-authored direct dispatches.
     // Only an opaque GPU-undecided root may replace these records with receipt-gated arguments.
     if (near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED) {
-        uint depth_decision;
-        bool depth_receipt_valid = NearIdenticalDepthReceiptValid(depth_decision);
-        bool run_infer =
-            depth_receipt_valid && depth_decision == NEAR_IDENTICAL_DECISION_INFER &&
-            NearIdenticalGeometryConstantsValid();
         // The depth textures are rotated before these arguments are consumed. A malformed opaque
         // receipt cannot authorize current inference state, but it must still restore the retained
         // normalized field into the new target. This bounded hold advances no inference, scene,

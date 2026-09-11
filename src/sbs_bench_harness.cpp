@@ -3974,11 +3974,38 @@ namespace sbs_bench {
     models::estimate_result est;
     bool cuda_graph_captured = false;
     std::size_t tensorrt_enqueue_count = 0;
-    models::gpu_adaptive_transaction_policy_t device_conditional_policy;
-    models::gpu_adaptive_ocr_cadence_t device_conditional_ocr_cadence;
-    std::uint64_t device_conditional_known_force_frame_id = 0u;
+    std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> device_conditional_publication;
     std::size_t device_conditional_force_submissions = 0u;
     std::size_t device_conditional_gpu_submissions = 0u;
+    models::publication_receipt_poll_result publication_transport;
+    std::size_t publication_receipt_infer = 0u;
+    std::size_t publication_receipt_reuse = 0u;
+    std::size_t publication_receipt_geometry_valid = 0u;
+    std::size_t publication_receipt_owner_valid = 0u;
+    std::size_t publication_receipt_current = 0u;
+    std::size_t publication_receipt_stale = 0u;
+    std::size_t publication_receipt_failures = 0u;
+    const auto observe_publications = [&]() {
+      if (!estimator) {
+        return;
+      }
+      publication_transport = estimator->poll_publication_receipts();
+      publication_receipt_failures += publication_transport.failed ? 1u : 0u;
+      device_conditional_publication = publication_transport.current_publication;
+      for (std::size_t index = 0u; index < publication_transport.count; ++index) {
+        const auto &receipt = publication_transport.receipts[index];
+        using depth_e = models::host_sbs_gpu_completion_receipt::depth_disposition_e;
+        publication_receipt_infer += receipt.depth == depth_e::infer ? 1u : 0u;
+        publication_receipt_reuse += receipt.depth == depth_e::reuse ? 1u : 0u;
+        publication_receipt_geometry_valid += receipt.geometry_valid ? 1u : 0u;
+        publication_receipt_owner_valid += receipt.depth_owner_valid ? 1u : 0u;
+        if (estimator->publication_is_current(receipt.expected)) {
+          ++publication_receipt_current;
+        } else {
+          ++publication_receipt_stale;
+        }
+      }
+    };
     ComPtr<ID3D11Buffer> device_conditional_trace_stage;
     std::vector<std::uint32_t> device_conditional_trace_words;
     bool scene_cache_contract_started = false;
@@ -4682,14 +4709,15 @@ namespace sbs_bench {
       } else {
         // The V2 authentication contract rejects frame id 0, so the estimator is always fed
         // the 1-based global sequence.
+        // Consume the same exact, nonblocking publication receipt as the live converter before
+        // admission. A pending/missing receipt uses force inference without an additional wait.
+        observe_publications();
         const auto estimator_frame_id =
           static_cast<std::uint64_t>(global_sequence);
         const auto observation_timestamp_us = observation_timestamps.empty() ?
                                                 0u :
                                                 observation_timestamps.at(global_sequence - 1u);
-        const auto replay_optional_work = device_conditional_replay_evidence ?
-          device_conditional_ocr_cadence.select_mode(observation_timestamp_us) :
-          models::depth_optional_work_mode_e::ordinary;
+        constexpr auto replay_optional_work = models::depth_optional_work_mode_e::ordinary;
         // An empty, non-ROI request is resolved by the estimator to the complete supplied
         // raster. State it explicitly here so this headless selected-file path can never inherit
         // a live window-region request from another caller.
@@ -4698,16 +4726,11 @@ namespace sbs_bench {
           .observation_timestamp_us = observation_timestamp_us,
         };
         if (o.device_conditional_replay) {
-          const bool opaque_followup = device_conditional_policy.active();
-          const auto baseline_frame_id = opaque_followup ?
-                                           device_conditional_policy
-                                             .conditional_frame_id() :
-                                           device_conditional_known_force_frame_id;
-          replay_request = device_conditional_policy.make_request(
-            estimator_frame_id,
-            baseline_frame_id != 0u,
-            opaque_followup,
-            baseline_frame_id,
+          const auto *receipt = device_conditional_publication ? &*device_conditional_publication : nullptr;
+          replay_request = models::make_gpu_adaptive_request(
+            estimator_frame_id, true, receipt,
+            receipt && estimator->publication_is_current(receipt->expected) ?
+              receipt->expected : models::host_sbs_gpu_completion_receipt::expected_t {},
             observation_timestamp_us
           );
         }
@@ -4725,7 +4748,7 @@ namespace sbs_bench {
           submitted.gpu_undecided_transaction_enqueued;
         const auto replay_submission_class =
           o.device_conditional_replay ?
-            device_conditional_policy.record_submission(
+            models::classify_gpu_adaptive_submission(
               estimator_frame_id,
               replay_request,
               submitted_force,
@@ -4735,11 +4758,6 @@ namespace sbs_bench {
              !submitted_gpu_undecided ?
                models::gpu_adaptive_submission_class_e::force_infer :
                models::gpu_adaptive_submission_class_e::invalid);
-        device_conditional_ocr_cadence.record_accepted(
-          replay_optional_work,
-          replay_submission_class,
-          observation_timestamp_us
-        );
         if (o.device_conditional_replay &&
             replay_submission_class ==
               models::gpu_adaptive_submission_class_e::invalid) {
@@ -4881,9 +4899,6 @@ namespace sbs_bench {
               break;
             case models::gpu_adaptive_submission_class_e::force_infer:
               ++device_conditional_force_submissions;
-              device_conditional_known_force_frame_id = estimator_frame_id;
-              (void) device_conditional_policy
-                .record_known_force_infer_completion(estimator_frame_id, true);
               break;
             case models::gpu_adaptive_submission_class_e::invalid:
               return 6;
@@ -5774,7 +5789,7 @@ namespace sbs_bench {
       using namespace models::host_sbs_gpu_trace;
       const nlohmann::ordered_json replay_trace_contract {
         {"schema", 3},
-        {"role", "shared production estimator transaction and OCR cadence; offline ordered full-frame admission"},
+        {"role", "shared production estimator joint analysis refresh; offline ordered full-frame admission"},
         {"raw_trace", raw_trace_path.filename().string()},
         {"ring", {
           {"schema", ring_schema},
@@ -6020,6 +6035,36 @@ namespace sbs_bench {
       }
     }
 
+    // Existing evaluation readbacks have completed the last rendered frame. Make one final
+    // nonblocking receipt poll; missing records remain visible rather than adding a GPU wait.
+    observe_publications();
+    if (estimator) {
+      const nlohmann::ordered_json receipt_evidence {
+        {"schema", 1u},
+        {"observation_timeline_provided", !observation_timestamps.empty()},
+        {"submitted", publication_transport.submitted},
+        {"skipped", publication_transport.skipped},
+        {"decoded", publication_transport.decoded},
+        {"decode_failed", publication_transport.decode_failed},
+        {"decoded_infer", publication_receipt_infer},
+        {"decoded_reuse", publication_receipt_reuse},
+        {"geometry_valid", publication_receipt_geometry_valid},
+        {"depth_owner_valid", publication_receipt_owner_valid},
+        {"matching_current_publication", publication_receipt_current},
+        {"stale_publication", publication_receipt_stale},
+        {"failure_polls", publication_receipt_failures},
+      };
+      std::ofstream evidence_stream(fs::path(o.out) / "publication_receipts.json");
+      evidence_stream << receipt_evidence.dump(2) << '\n';
+      if (!evidence_stream.good()) {
+        BOOST_LOG(error) << "sbs-bench: cannot write publication_receipts.json";
+        return 8;
+      }
+      BOOST_LOG(info) << "sbs-bench: publication receipts infer/reuse/current/stale/failure="
+                      << publication_receipt_infer << '/' << publication_receipt_reuse << '/'
+                      << publication_receipt_current << '/' << publication_receipt_stale << '/'
+                      << publication_receipt_failures;
+    }
     sbs_perf::dump_json((fs::path(o.out) / "sbs_perf.json").string());
     if (o.artifacts == artifact_mode_e::evaluation) {
       if (!direct_parallax_mode &&
@@ -6067,9 +6112,9 @@ namespace sbs_bench {
           contract
             << "  \"device_conditional_replay\": {"
                "\"enabled\": true, "
-               "\"scope\": \"shared estimator transaction/OCR cadence; offline full-frame admission\", "
+               "\"scope\": \"shared estimator joint analysis refresh; offline full-frame admission\", "
                "\"bootstrap\": \"force-infer\", "
-               "\"followup\": \"gpu-owned-infer-or-reuse\", "
+               "\"followup\": \"known-publication-actual-depth-owner\", "
                "\"raw_trace\": \"device_conditional_gpu_trace_ring.u32\", "
                "\"metadata\": \"device_conditional_replay.json\", "
                "\"force_submissions\": "

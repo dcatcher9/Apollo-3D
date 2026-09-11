@@ -213,7 +213,7 @@ class RescoreMetadataTests(unittest.TestCase):
                         side_effect=artifact_digests), \
                     mock.patch.object(
                         rescore_run.run_eval, "load_perf_metrics",
-                        return_value={"depth_infer": 1.25}), \
+                        return_value={"depth_conditional_transaction": 1.25}), \
                     mock.patch.object(
                         rescore_run, "authoritative_clip_meta",
                         side_effect=clip_meta), \
@@ -264,7 +264,7 @@ class RescoreMetadataTests(unittest.TestCase):
                  for clip in clip_names],
                 [1.0, 2.0])
             self.assertTrue(all(
-                rescored["clips"][clip]["perf_ms"] == {"depth_infer": 1.25}
+                rescored["clips"][clip]["perf_ms"] == {"depth_conditional_transaction": 1.25}
                 for clip in clip_names))
             with open(result_path, encoding="utf-8") as stream:
                 original = json.load(stream)

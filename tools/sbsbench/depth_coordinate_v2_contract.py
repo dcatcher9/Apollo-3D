@@ -68,15 +68,10 @@ SHADER_SOURCE_SPECS = (
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 EXPECTED_FINAL_PARALLAX = {
-    "schema": 2,
+    "schema": 3,
     "authority": "complete-atomic-subtitle-conditioned-r32f-live-render-authority",
-    "publication_policy": (
-        "authenticated-infer-or-cpu-known-publication-or-authenticated-cadence-due-"
-        "subtitle-publication-direct-render"),
-    "reuse_policy": (
-        "ordinary-reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte;"
-        "authenticated-cadence-due-reuse-holds-depth-and-publishes-current-ocr-or-"
-        "abstention-slr-final-tuple-against-retained-base"),
+    "publication_policy": "authenticated-infer-or-cpu-known-publication-direct-render",
+    "reuse_policy": "reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte",
     "invalid_policy": "fail-closed-flat",
     "current_rgb_policy": "always-current-never-retained",
 }

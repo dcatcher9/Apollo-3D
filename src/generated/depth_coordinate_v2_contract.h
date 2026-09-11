@@ -12,10 +12,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 76u;
-  inline constexpr std::uint32_t contract_tag = 0xFCD67067u;
-  inline constexpr std::string_view contract_canonical_sha256 = "a6769249b05f9123ed725c202b21b56891cc72a822067a859d04e2346ac20150";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "fcd67067a54366a2eedc91cbd7179ff07416ed21abc4039a68d17d657448609c";
+  inline constexpr std::uint32_t contract_schema = 77u;
+  inline constexpr std::uint32_t contract_tag = 0x05360D2Fu;
+  inline constexpr std::string_view contract_canonical_sha256 = "9ee049234edda521fb7536c195d055c36099d1d1f006efb4a7118a5584282763";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "05360d2f480b76a0d59c933d955638c362b8f06e1e013aa654e8dd417a22096a";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -24,10 +24,10 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t capture_provenance_schema = 3u;
   inline constexpr std::string_view capture_provenance_manifest_key = "raw_model_provenance";
   inline constexpr std::string_view capture_provenance_binding = "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3";
-  inline constexpr std::uint32_t final_parallax_contract_schema = 2u;
+  inline constexpr std::uint32_t final_parallax_contract_schema = 3u;
   inline constexpr std::string_view final_parallax_authority = "complete-atomic-subtitle-conditioned-r32f-live-render-authority";
-  inline constexpr std::string_view final_parallax_publication_policy = "authenticated-infer-or-cpu-known-publication-or-authenticated-cadence-due-subtitle-publication-direct-render";
-  inline constexpr std::string_view final_parallax_reuse_policy = "ordinary-reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte;authenticated-cadence-due-reuse-holds-depth-and-publishes-current-ocr-or-abstention-slr-final-tuple-against-retained-base";
+  inline constexpr std::string_view final_parallax_publication_policy = "authenticated-infer-or-cpu-known-publication-direct-render";
+  inline constexpr std::string_view final_parallax_reuse_policy = "reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte";
   inline constexpr std::string_view final_parallax_invalid_policy = "fail-closed-flat";
   inline constexpr std::string_view final_parallax_current_rgb_policy = "always-current-never-retained";
   inline constexpr std::uint32_t subtitle_ocr_contract_schema = 14u;

@@ -92,19 +92,24 @@ first requires and verifies the current `sunshine` target, then binds the execut
 runtime shader tree, production composite
 engine/ONNX, OCR engine/contract ONNX, and generated coordinate contract across both serial legs.
 The default gate requires at least one actual reuse and proves that every reuse retained the
-preceding fused `refined_depth` field bit-exactly. Native geometry replay authenticates the paired
-source snapshot hash but receives no source texture, color mode, or HDR scale. Ordinary
-subtitle work also holds the SLR13 locator state, condition parameters,
-and `final_parallax_<frame-id>.f32`; cadence-due work may instead publish a current subtitle
-observation on the reused depth. The authenticated trace distinguishes those cases and rejects an
-ordinary OCR marker on reuse. The runner derives GPU history-owner age from both the frame ID and
-the exact source-observation timeline—not from processing speed or a host baseline delta. Reuse
-has no age or frame-count expiry: each candidate remains tied to the same actual inference owner,
-with ordered nonzero observations and unchanged domain guards. Every infer raw field must match the
-same-frame force control. Request policy schema `3` distinguishes this policy from older captures.
-Missing, extra, wrong-sized, or misidentified artifacts fail closed. These trace and artifact
-invariants guard the adaptive subtitle-clock bug without image-tuned thresholds or headset
-judgment.
+preceding fused `refined_depth`, SLR13 locator state, condition parameters and
+`final_parallax_<frame-id>.f32` bit-exactly. Native geometry replay authenticates the paired source
+snapshot hash but receives no source texture, color mode or HDR scale. Every reuse holds the whole
+depth/OCR/SLR/final tuple; only valid infer publishes current OCR or abstention. The runner derives
+GPU history-owner age from frame identity and the exact source-observation timeline, not processing
+speed or a host baseline delta. Reuse preserves the actual infer owner. Every infer raw field must
+match the same-frame force control.
+
+Request policy schema `6` lets the near-identical detector decide depth and subtitle reuse together.
+Elapsed source time and hold count never force inference; each candidate still compares against the
+actual last infer owner. Legal work values are `0`/`1`/`2`; old policy `5` and independent due values
+`8`/`16` are rejected. Exact unchanged DDup reuse submits no root, even after the current color reused
+older analysis, but the offline replay supplies no DDup proof or live idle-tail coverage.
+The default gate still requires actual joint reuse. `--allow-zero-reuse` remains an explicit option
+for a comparison whose footage does not qualify; there is no frame-rate-based exemption. Missing,
+extra, wrong-sized or misidentified artifacts fail closed. Long holds retain the same byte-exact
+raw depth, subtitle state and final field checks. These invariants use no image-tuned thresholds or
+headset judgment.
 
 The report measures final-field step and jerk for both force control and adaptive treatment. Every
 serial harness stage from `sbs_perf.json` is also aligned by name/sample count and reported with mean and
@@ -113,11 +118,17 @@ Optional `--max-scene-residual-delta-p95` and `--max-subtitle-residual-delta-p95
 the report's downsampled image diagnostics into clip-specific CI gates.
 
 This replay deliberately supplies no Desktop Duplication damage history, live window authority,
-or encode-deadline scheduling. Those remain live admission inputs. Request formation, opaque
-chaining, force-completion release, estimator, conditioner, renderer, and GPU trace are the same
+retained-source idle delivery, or encode-deadline scheduling. Those remain live admission inputs.
+Request formation, bounded nonblocking completion receipts, known actual-owner lineage, estimator, conditioner, renderer and
+GPU trace are the same
 production code, so the offline path does not maintain a second infer/reuse state machine.
 The runner uses private replay harness schemas 29 (force oracle) and 28 (conditional treatment),
 plus metadata schema 3, leaving formal `run_eval.py` schema 22 and its baseline evidence untouched.
+Formal old-code/new-code reports use `--report-allow-executable-diff` (or the report launcher's
+`--allow-executable-diff`) for the binary and HLSL difference. Each run still authenticates its source,
+model/preprocess identity, scored artifacts and numeric remeasurement under the same metric, label
+and numeric-runtime contracts. This does not authorize reading old Dump 3D or adaptive-replay
+schemas with current validators; retain their original evaluator snapshot for independent replay.
 
 Host SBS V2 has no model/profile selector. Production and the maintained benchmark harness use the
 single authenticated DAV2 Small + frozen ZipDepth convex 2x composite specified by
@@ -173,7 +184,7 @@ captures directly with:
 
 See [Dump and replay format](DUMP_FORMAT.md) before generating or interpreting preview PNGs. The
 reader accepts only the current SLR13/OCR8 dump schema; older experimental captures are
-intentionally unsupported. An active schema-40 package authenticates the OCR8/SLR13 tuple for the
+intentionally unsupported. An active schema-41 package authenticates the OCR8/SLR13 tuple for the
 atomic final field's publication frame, ordinary Base, conditioned final field, and the resolver's
 bounded strict fallback placement policy. It replays SLR13 directly into
 `shadow_final_parallax.f32`, which is authenticated once as both the atomic final field and warp
@@ -181,13 +192,13 @@ input. An
 active resolver also authenticates the strict symmetric bottom-corner ordinary-core qualification
 and its ribbon exemption. An inactive package uses the one canonical `none` descriptor.
 
-Current schema-40 window-region packages preserve the complete authorized source rectangle at any
+Current schema-41 window-region packages preserve the complete authorized source rectangle at any
 aspect ratio. `depth_input_region.json` schema 4 records the centered integer content rectangle in
 the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
 that content width for limiter and SLR13 steps and must project OCR/SLR geometry only into that
 content rectangle; treating the whole tensor as real source pixels is rejected.
 
-Schema 40 packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a
+Schema 41 packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a
 verified diagnostic view from any retained authenticated `.f32` artifact outside the package:
 
 ```powershell

@@ -23,8 +23,7 @@ namespace cuda_conditional_graph {
   inline constexpr std::uint32_t receipt_magic = 0x47524243u;  // CBRG
   inline constexpr std::uint32_t optional_ocr_receipt_magic = 0x52434f4fu;  // OOCR
   // Compatibility name for the stable transaction ABI. The marker authenticates execution of
-  // the optional OCR sibling. Ordinary OCR requires an authenticated infer branch; cadence-due
-  // OCR may execute alongside either infer or reuse.
+  // the optional OCR sibling, which executes only with an authenticated infer branch.
   inline constexpr std::uint32_t optional_infer_receipt_magic =
     optional_ocr_receipt_magic;
 
@@ -37,8 +36,6 @@ namespace cuda_conditional_graph {
     none = 0u,
     optional_ocr = 1u << 0u,
     subtitle_observation = 1u << 1u,
-    optional_ocr_due = 1u << 3u,
-    subtitle_observation_due = 1u << 4u,
     optional_infer = optional_ocr,  // Stable source-compatible spelling.
   };
 
@@ -50,28 +47,21 @@ namespace cuda_conditional_graph {
 
   static_assert(work_flags_value(work_flag_e::optional_ocr) == 1u);
   static_assert(work_flags_value(work_flag_e::subtitle_observation) == 2u);
-  static_assert(work_flags_value(work_flag_e::optional_ocr_due) == 8u);
-  static_assert(work_flags_value(work_flag_e::subtitle_observation_due) == 16u);
 
   [[nodiscard]] constexpr bool authenticated_work_flags(
     const std::uint32_t flags
   ) noexcept {
     return flags == work_flags_value(work_flag_e::none) ||
            flags == work_flags_value(work_flag_e::optional_ocr) ||
-           flags == work_flags_value(work_flag_e::subtitle_observation) ||
-           flags == work_flags_value(work_flag_e::optional_ocr_due) ||
-           flags == work_flags_value(work_flag_e::subtitle_observation_due);
+           flags == work_flags_value(work_flag_e::subtitle_observation);
   }
 
   [[nodiscard]] constexpr bool optional_ocr_executes(
     const std::uint32_t flags,
     const branch_e resolved
   ) noexcept {
-    return (
-             flags == work_flags_value(work_flag_e::optional_ocr) &&
-             resolved == branch_e::infer
-           ) ||
-           flags == work_flags_value(work_flag_e::optional_ocr_due);
+    return flags == work_flags_value(work_flag_e::optional_ocr) &&
+           resolved == branch_e::infer;
   }
 
   /** GPU producer proposal, overwritten in place by CUDA with the resolved receipt.
@@ -315,10 +305,10 @@ namespace cuda_conditional_graph {
   struct build_desc_t {
     CUcontext context = nullptr;
     CUgraph infer_child = nullptr;
-    // Optional sibling IF child. An authenticated, preprocess-ready ordinary request runs it only
-    // when DAV2 resolves to infer; optional_ocr_due runs it on either resolved branch. It has no
-    // dependency on infer_child, so CUDA may schedule both graphs concurrently and the root joins
-    // them before completion. Host SBS uses this for the isolated OCR TensorRT context while
+    // Optional sibling IF child. An authenticated, preprocess-ready request runs it only
+    // when DAV2 resolves to infer. It has no dependency on infer_child, so CUDA may schedule both
+    // graphs concurrently and the root joins them before completion. Host SBS uses this for the
+    // isolated OCR TensorRT context while
     // keeping the published depth/OCR/SLR tuple atomic across reuse.
     CUgraph optional_infer_child = nullptr;
     CUgraph reuse_child = nullptr;  // Optional IF/ELSE false body; null means skip on reuse.

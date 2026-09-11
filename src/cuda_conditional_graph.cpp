@@ -59,12 +59,8 @@ namespace cuda_conditional_graph {
     setp.eq.u32 %p4, %r14, 0;
     setp.eq.u32 %p24, %r14, 1;
     setp.eq.u32 %p28, %r14, 2;
-    setp.eq.u32 %p29, %r14, 8;
-    setp.eq.u32 %p30, %r14, 16;
     or.pred %p4, %p4, %p24;
     or.pred %p4, %p4, %p28;
-    or.pred %p4, %p4, %p29;
-    or.pred %p4, %p4, %p30;
     setp.eq.u32 %p18, %r14, 0;
     selp.u32 %r27, 0, %r26, %p18;
     setp.eq.u32 %p5, %r15, %r27;
@@ -98,11 +94,9 @@ namespace cuda_conditional_graph {
     xor.b32 %r23, %r22, 0xd1ec15a5;
 
     setp.eq.u32 %p20, %r14, 1;
-    setp.eq.u32 %p26, %r14, 8;
     setp.eq.u32 %p22, %r31, 1;
     setp.eq.u32 %p25, %r22, 1;
     and.pred %p27, %p20, %p25;
-    or.pred %p27, %p27, %p26;
     and.pred %p21, %p17, %p27;
     and.pred %p21, %p21, %p22;
     selp.u32 %r28, 0x52434f4f, 0, %p21;
@@ -111,7 +105,7 @@ namespace cuda_conditional_graph {
 
     // PROP is not a consumable receipt. Invalidate its tag first, write the resolved record, and
     // publish CBRG last. A valid request plus any malformed proposal produces an infer receipt,
-    // but only a valid preprocess-ready proposal may arm ordinary infer OCR or cadence-due OCR.
+    // but only a valid preprocess-ready infer proposal may arm its OCR sibling.
     st.global.u32 [%rd3+24], 0;
     membar.gl;
     st.global.v4.u32 [%rd3], {%r22, %r30, %r9, %r10};

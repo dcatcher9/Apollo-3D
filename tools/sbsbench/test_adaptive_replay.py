@@ -166,7 +166,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             },
         }), encoding="utf-8")
 
-        force_count = sum(mode in ("force", "suppress") for mode in modes)
+        force_count = sum(mode in ("force", "force_no_ocr", "suppress") for mode in modes)
         gpu_count = len(modes) - force_count
         (treatment / "contract.json").write_text(json.dumps({
             **shared, "schema": replay.CONDITIONAL_HARNESS_SCHEMA,
@@ -176,7 +176,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 "enabled": True,
                 "scope": replay.TREATMENT_SCOPE,
                 "bootstrap": "force-infer",
-                "followup": "gpu-owned-infer-or-reuse",
+                "followup": "known-publication-actual-depth-owner",
                 "metadata": replay.METADATA_FILENAME,
                 "raw_trace": replay.TRACE_FILENAME,
                 "force_submissions": force_count,
@@ -202,8 +202,6 @@ class AdaptiveReplayContractTests(unittest.TestCase):
         reuse_count = 0
         previous_locator = locator.copy()
         previous_condition = condition.copy()
-        last_guaranteed = 0
-        dirty_holds = 0
         row_subtitles = []
         for slot, mode in enumerate(modes):
             frame_id = slot + 1
@@ -220,34 +218,21 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 optional_executed = False
                 infer_count += 1
                 subtitle_counts["suppressed"] += 1
-                last_guaranteed = 0
-                dirty_holds = 0
             else:
-                is_force = mode == "force"
+                is_force = mode in ("force", "force_no_ocr")
                 is_reuse = mode.startswith("reuse")
                 if mode not in (
-                        "force", "opaque", "cut", "reset",
+                        "force", "force_no_ocr", "opaque", "cut", "reset",
                         "reuse", "opaque_no_ocr", "reuse_no_ocr"):
                     raise AssertionError(mode)
                 submission = (replay.TRACE_SUBMISSION_FORCE if is_force else
                               replay.TRACE_SUBMISSION_GPU_UNDECIDED)
                 depth = replay.TRACE_DEPTH_REUSE if is_reuse else replay.TRACE_DEPTH_INFER
                 optional_ready = not mode.endswith("_no_ocr")
-                due = (last_guaranteed == 0 or timestamp < last_guaranteed or
-                       timestamp - last_guaranteed >= replay.OCR_MAX_OBSERVATION_AGE_US or
-                       dirty_holds >= replay.OCR_MAX_DIRTY_HOLDS)
-                expected_work = (
-                    replay.WORK_OPTIONAL_OCR_DUE if due and optional_ready else
-                    replay.WORK_SUBTITLE_OBSERVATION_DUE if due else
-                    replay.WORK_OPTIONAL_OCR if optional_ready else
-                    replay.WORK_SUBTITLE_OBSERVATION)
-                optional_executed = optional_ready and (
-                    expected_work == replay.WORK_OPTIONAL_OCR_DUE or
-                    (expected_work == replay.WORK_OPTIONAL_OCR and
-                     depth == replay.TRACE_DEPTH_INFER))
-                if (expected_work in (replay.WORK_OPTIONAL_OCR,
-                                     replay.WORK_SUBTITLE_OBSERVATION) and
-                        depth == replay.TRACE_DEPTH_REUSE):
+                expected_work = (replay.WORK_OPTIONAL_OCR if optional_ready else
+                                 replay.WORK_SUBTITLE_OBSERVATION)
+                optional_executed = optional_ready and depth == replay.TRACE_DEPTH_INFER
+                if depth == replay.TRACE_DEPTH_REUSE:
                     subtitle = replay.TRACE_SUBTITLE_HELD_WITH_DEPTH
                     subtitle_counts["held_with_depth"] += 1
                 elif optional_executed:
@@ -266,12 +251,6 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                     infer_count += 1
                 else:
                     reuse_count += 1
-                if due or is_force:
-                    last_guaranteed = timestamp
-                    dirty_holds = 0
-                else:
-                    dirty_holds = min(dirty_holds + 1, replay.OCR_MAX_DIRTY_HOLDS)
-
                 if subtitle != replay.TRACE_SUBTITLE_HELD_WITH_DEPTH:
                     row_locator[replay.TRACE_LOCATOR_FRAME_WORD] = frame_id
                     row_locator[replay.TRACE_LOCATOR_FRAME_WORD + 1] = 0
@@ -445,7 +424,6 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 "status": "pass",
                 "authenticated_reuse_frames": 1,
                 "bit_exact_atomic_final_holds": 1,
-                "independent_subtitle_publications_on_reuse": 0,
             })
             comparison = replay.comparison_metrics(control, treatment, 2)
             self.assertEqual(comparison["summary"]["residual_mae"]["max"], 0.0)
@@ -518,38 +496,85 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             with self.assertRaisesRegex(replay.EvidenceError, "misaligned"):
                 replay.validate_adaptive_artifacts(control, treatment, records)
 
-    def test_accepts_four_reuses_with_due_subtitle_publications(self):
+    def test_real_infer_replaces_the_owner_for_later_joint_reuse(self):
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(
-                Path(directory), modes=("force", "reuse", "reuse", "reuse", "reuse"))
+                Path(directory), modes=("force", "reuse", "reuse", "force", "reuse"),
+                timestamps=[1, 11_112, 22_223, 33_334, 44_445])
             metadata, records, checks = self.validate_pair(control, treatment, 5)
-            self.assertEqual(metadata["authenticated_device_dispositions"]["reuse"], 4)
-            self.assertEqual(
-                checks["authenticated_reuse_owner_ages"],
-                {"2": 1, "3": 2, "4": 3, "5": 4})
-            self.assertEqual(checks["held_previous_final_parallax_bit_exact_frames"], 2)
-            self.assertEqual(checks["reuse_subtitle_publication_frames"], 2)
-            self.assertEqual(
-                [row["expected_work"] for row in records],
-                [replay.WORK_OPTIONAL_OCR_DUE, replay.WORK_OPTIONAL_OCR,
-                 replay.WORK_OPTIONAL_OCR_DUE, replay.WORK_OPTIONAL_OCR,
-                 replay.WORK_OPTIONAL_OCR_DUE])
-
-    def test_accepts_prolonged_reuse_against_the_same_authenticated_owner(self):
-        with tempfile.TemporaryDirectory() as directory:
-            control, treatment = self.make_pair(
-                Path(directory), modes=("force",) + ("reuse",) * 64)
-            metadata, records, checks = self.validate_pair(control, treatment, 65)
-            self.assertEqual(metadata["authenticated_device_dispositions"]["reuse"], 64)
+            self.assertEqual(metadata["authenticated_device_dispositions"],
+                             {"infer": 2, "reuse": 3})
             self.assertEqual(checks["authenticated_reuse_owner_ages"],
-                             {str(frame): frame - 1 for frame in range(2, 66)})
+                             {"2": 1, "3": 2, "5": 1})
+            self.assertEqual(checks["held_previous_final_parallax_bit_exact_frames"], 3)
+            self.assertEqual([row["expected_work"] for row in records],
+                             [replay.WORK_OPTIONAL_OCR] * 5)
 
-    def test_accepts_reuse_without_observation_age_expiry(self):
+    def test_joint_reuse_has_no_source_age_or_hold_count_expiration(self):
+        count = 66
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(
-                Path(directory), timestamps=[1, (1 << 32) + 1])
-            _, _, checks = self.validate_pair(control, treatment, 2)
-            self.assertEqual(checks["authenticated_reuse_owner_ages"], {"2": 1})
+                Path(directory), modes=("force",) + ("reuse",) * (count - 1),
+                timestamps=[1 + index * (1 << 32) for index in range(count)])
+            metadata, _, checks = self.validate_pair(control, treatment, count)
+            self.assertEqual(metadata["authenticated_device_dispositions"],
+                             {"infer": 1, "reuse": count - 1})
+            self.assertEqual(checks["authenticated_reuse_owner_ages"],
+                             {str(frame): frame - 1 for frame in range(2, count + 1)})
+            self.assertEqual(checks["reuse_previous_raw_bit_exact_frames"], count - 1)
+            self.assertEqual(checks["held_previous_final_parallax_bit_exact_frames"], count - 1)
+
+    def test_changed_30fps_observations_can_reuse_the_same_infer_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(
+                Path(directory), modes=("force", "reuse", "reuse", "reuse"),
+                timestamps=[1, 33_334, 66_667, 100_001])
+            metadata, _, checks = self.validate_pair(control, treatment, 4)
+            self.assertEqual(metadata["authenticated_device_dispositions"],
+                             {"infer": 1, "reuse": 3})
+            self.assertEqual(checks["authenticated_reuse_owner_ages"],
+                             {"2": 1, "3": 2, "4": 3})
+
+    def test_long_joint_hold_still_rejects_changed_depth_or_final_field(self):
+        for prefix, error in (
+                ("raw_", "retain previous raw depth"),
+                ("final_parallax_", "atomic final field")):
+            with self.subTest(artifact=prefix), tempfile.TemporaryDirectory() as directory:
+                control, treatment = self.make_pair(
+                    Path(directory), modes=("force",) + ("reuse",) * 8,
+                    timestamps=[1 + index * 1_000_000 for index in range(9)])
+                path = treatment / f"{prefix}0000000009.f32"
+                values = np.frombuffer(path.read_bytes(), dtype="<f4").copy()
+                values[0] += np.float32(0.001)
+                path.write_bytes(values.tobytes())
+                with self.assertRaisesRegex(replay.EvidenceError, error):
+                    self.validate_pair(control, treatment, 9)
+
+    def test_long_joint_hold_still_rejects_changed_subtitle_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(
+                Path(directory), modes=("force",) + ("reuse",) * 8,
+                timestamps=[1 + index * 1_000_000 for index in range(9)])
+            self.mutate_trace_word(
+                treatment, 9, replay.TRACE_RECORD_CONDITION_BEGIN, 999)
+            with self.assertRaisesRegex(replay.EvidenceError, "bit-exactly hold"):
+                self.validate_pair(control, treatment, 9)
+
+    def test_offline_joint_replay_still_rejects_subtitle_suppression(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(
+                Path(directory), modes=("force", "suppress"))
+            with self.assertRaisesRegex(replay.EvidenceError, "ordinary joint analysis work"):
+                self.validate_pair(control, treatment, 2)
+
+    def test_completed_conditional_infer_is_the_next_reuse_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(
+                Path(directory), modes=("force", "opaque", "opaque", "reuse"),
+                timestamps=[1, 1_001, 2_001, 3_001])
+            _, _, checks = self.validate_pair(control, treatment, 4)
+            self.assertEqual(checks["authenticated_reuse_owner_ages"], {"4": 1})
+            self.assertEqual(checks["infer_current_raw_bit_exact_frames"], 3)
 
     def test_rejects_missing_or_regressed_reuse_owner_timestamps(self):
         for owner_time, current_time in ((0, 1), (1, 0), (2, 1)):
@@ -563,17 +588,15 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(replay.EvidenceError, "time ordering"):
                     replay._authenticated_reuse_owner_ages(records)
 
-    def test_accepts_due_abstention_publication_on_reused_depth(self):
+    def test_force_without_ocr_infers_and_publishes_current_abstention(self):
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(
-                Path(directory), modes=("force", "reuse_no_ocr"),
-                timestamps=[1, 40_001])
+                Path(directory), modes=("force", "force_no_ocr"), timestamps=[1, 40_001])
             metadata, records, checks = self.validate_pair(control, treatment, 2)
-            self.assertEqual(records[1]["expected_work"],
-                             replay.WORK_SUBTITLE_OBSERVATION_DUE)
+            self.assertEqual(records[1]["expected_work"], replay.WORK_SUBTITLE_OBSERVATION)
+            self.assertEqual(records[1]["depth"], replay.TRACE_DEPTH_INFER)
             self.assertEqual(records[1]["subtitle"], replay.TRACE_SUBTITLE_ABSTENTION)
             self.assertEqual(metadata["authenticated_subtitle_dispositions"]["abstention"], 1)
-            self.assertEqual(checks["reuse_subtitle_publication_frames"], 1)
             self.assertEqual(checks["held_previous_final_parallax_bit_exact_frames"], 0)
 
     def test_rejects_tampered_observation_timeline(self):
@@ -612,15 +635,24 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                         replay.EvidenceError, "unsigned 64-bit value"):
                     replay._validate_contract_and_trace(control, treatment, 2)
 
-    def test_rejects_work_that_skips_shared_due_cadence(self):
+    def test_rejects_retired_independent_due_work(self):
+        for work in (8, 16):
+            with self.subTest(work=work), tempfile.TemporaryDirectory() as directory:
+                control, treatment = self.make_pair(Path(directory))
+                self.mutate_trace_word(treatment, 2, replay.TRACE_RECORD_EXPECTED_WORK, work)
+                with self.assertRaises(replay.EvidenceError):
+                    replay._validate_contract_and_trace(control, treatment, 2)
+
+    def test_rejects_previous_bounded_refresh_policy_even_when_pair_agrees(self):
         with tempfile.TemporaryDirectory() as directory:
-            control, treatment = self.make_pair(
-                Path(directory), modes=("force", "reuse", "reuse"))
-            self.mutate_trace_word(
-                treatment, 3, replay.TRACE_RECORD_EXPECTED_WORK,
-                replay.WORK_OPTIONAL_OCR)
-            with self.assertRaisesRegex(replay.EvidenceError, "due-OCR cadence"):
-                replay._validate_contract_and_trace(control, treatment, 3)
+            control, treatment = self.make_pair(Path(directory))
+            for output in (control, treatment):
+                path = output / "contract.json"
+                contract = json.loads(path.read_text(encoding="utf-8"))
+                contract["adaptive_conditional"]["request_policy_schema"] = 5
+                path.write_text(json.dumps(contract), encoding="utf-8")
+            with self.assertRaisesRegex(replay.EvidenceError, "adaptive request policy.*stale"):
+                replay._validate_contract_and_trace(control, treatment, 2)
 
     def test_rejects_stale_trace_schema(self):
         with tempfile.TemporaryDirectory() as directory:

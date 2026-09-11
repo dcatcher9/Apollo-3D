@@ -35,13 +35,13 @@ The core package contains:
 | `window_region.json` | Required semantic observation for ROI packages |
 | `sbs.png` | Packed stereo preview |
 | `subtitle_conditioning.json` | Required current subtitle-authority descriptor; canonical `none` or `subtitle-slr13` |
-| `subtitle_ocr_record.u32` | Active-only OCR8 record for the atomic target's authenticated subtitle-publication frame: current on ordinary infer or due work, older on held ordinary reuse |
+| `subtitle_ocr_record.u32` | Active-only OCR8 record for the atomic target's authenticated subtitle-publication frame: current on infer, older on whole-tuple reuse |
 | `subtitle_locator_state.u32` | Active-only compact SLR13 state in generated-contract word order |
 | `gpu_trace_ring.u32` | Optional raw diagnostic history of the last 300 accepted-root completions; available only when diagnostics was enabled before reproduction |
 | `gpu_trace.json` | Optional chronological decode of the authenticated raw GPU trace |
 | `gpu_trace_contract.json` | Optional exact trace offsets, enums, receipt ABI, and shader provenance |
 
-All `.f32` files are little-endian float32. Schema 40 accepts the canonical inactive descriptor or
+All `.f32` files are little-endian float32. Schema 41 accepts the canonical inactive descriptor or
 the one current `subtitle-slr13` package. It binds the exact current generated Depth Coordinate V2
 identity, producer and renderer closures, OCR model provenance, entrypoints, and four artifact
 roles (OCR record, locator state, Base field, atomic final field). The generated contract is the sole
@@ -50,7 +50,7 @@ owner of those live identities and numeric policy values. The
 sole owner of their runtime and state-machine semantics; this dump-format document copies neither.
 No retired layout is preserved or reinterpreted.
 
-Schema 40 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
+Schema 41 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
 production package uses one exact supported convex-2x high shape; halving both dimensions must
 recover an exact calibrated embedded DAV2 shape. The capture-time model provenance continues to authenticate that embedded DAV2
 identity and derived coarse calibration, while the public numeric artifacts remain high-resolution.
@@ -60,10 +60,10 @@ half-shape relation is rejected rather than reinterpreted.
 ## Atomic final field
 
 The manifest's required `final_parallax` object binds one complete atomic field and the warp input.
-Depth infer publishes a new V2 Base, while authenticated depth reuse retains Base. Subtitle work is
-independent inside that joined publication: ordinary work publishes only on infer and holds on
-reuse; cadence-due work publishes current OCR or current abstention on either depth branch. The
-conditioned final field follows that authenticated combination; invalid publication fails closed.
+Depth infer publishes a new V2 Base and current subtitle observation, while authenticated reuse
+retains the complete depth/OCR/SLR/final tuple.
+Optional OCR readiness determines current OCR versus current abstention on valid infer; it cannot
+advance subtitle state on reuse. Invalid publication fails closed.
 There is no second persistent display resource, serialized warp-depth copy, or temporal display
 recurrence. In every package, `shadow_final_parallax.f32` is authenticated once and named by both
 `final_parallax.artifact` and `final_parallax.warp_input_artifact`. The verifier replays the
@@ -71,30 +71,28 @@ ordinary limiter and, when active, SLR13 directly into that one field.
 
 ## Diagnostic GPU completion trace
 
-Schema 40 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
+Schema 41 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
 depth roots, not source frames, presentation frames, busy drops, or every captured desktop update.
 Each 176-word (704-byte) record binds an exact trace ordinal, matched frame, analysis generation,
 analysis-domain tag, transaction token, analysis-source and live-field extents, the immutable
 64-word postprocessed transaction snapshot, all 80 SLR13 words, and all six condition-parameter
 words. The authenticated RQST/CBRG token, cookies, work disposition, optional OOCR marker, and
 submission class determine `infer`, `reuse`, or `invalid`; a force-class reuse receipt is invalid,
-never inferred as reuse. Work `1` is ordinary current-ready OCR, `2` ordinary abstention, `8`
-cadence-due current-ready OCR, and `16` cadence-due ineligible abstention. Ordinary work is
-infer-coupled; due work is branch-independent. `OOCR` is valid only for work `1` on infer or work
-`8` on either branch, and is always absent for work `2`/`16`. Subtitle disposition is cross-checked
-against expected work, host outcome, raw flags, and the authenticated device receipt. An ordinary
-reuse is `held_with_depth`: OCR8, SLR80, condition6, and the atomic conditioned target remain the
-prior coherent tuple. A due reuse is instead `optional_ocr` for work `8` or `abstention` for work
-`16`; it advances the subtitle tuple and reconditions retained immutable Base.
+never inferred as reuse. Legal work is `0` for native subtitle suppression, `1` for current-ready OCR,
+or `2` for current abstention. `OOCR` is valid only for work `1` on infer and is absent for work `0`/`2`.
+Retired independent due values `8`/`16` are invalid. Subtitle disposition is cross-checked against
+expected work, host outcome, raw flags and the authenticated device receipt. Every ordinary reuse is
+`held_with_depth`: OCR8, SLR80, condition6 and the atomic conditioned target remain the prior coherent
+tuple. Authenticated reuse cannot claim a direct current subtitle publication.
 
-The shared live/offline policy makes subtitle work due after two accepted ordinary opaque dirty
-holds or `33 ms` of source observation time since the last guaranteed subtitle observation. The
-device infer owner remains reusable without age or frame-count expiry, while source observations
-must retain valid ordering and every reuse must compare against that same actual inference input.
-The host's initial-candidate and opaque-follow-up checks preserve owner, route, and time ordering.
-Each trace record carries the source-observation timestamp; its frame identity and authenticated
-decision history expose those guards without a production readback. Replay request policy schema
-`3` authenticates this policy; the trace record layout is unchanged.
+The shared live/offline policy lets the near-identical detector decide joint reuse without a time
+or hold-count expiry. Every changed candidate names the true infer owner, never the newer completed
+color publication. Known completed lineage requires an exact current completion receipt and valid
+route/time ordering. Exact unchanged DDup deliveries submit no root; if B reused A and remains
+static, its authenticated tuple may retain A indefinitely without a final refresh. Offline
+changed-source replay does not cover that idle behavior. Replay request policy schema `6`
+authenticates this policy; the dump and trace record layouts are unchanged. Long reuse chains must
+still preserve the whole depth/subtitle/final tuple exactly.
 
 The ring writer invalidates the header tag before overwriting any slot, commits payload before the
 record tag, then updates the cursor and republishes the header tag last. The reader reconstructs
@@ -105,11 +103,10 @@ it is false when a dump request harvests a root that was already pending, and is
 requirement for the matched record.
 
 For non-suppressed authenticated subtitle publications, SLR80 and condition6 are captured after SLR
-resolve and condition-parameter publication. These are ordinary infer publications or due
-publications on either depth branch. A held ordinary reuse captures the same bytes with the
+resolve and condition-parameter publication on valid infer. A held reuse captures the same bytes with the
 locator's older frame identity. When its predecessor remains in the ring, both stored tuples must be
-byte-identical to that immediately prior record. The raw ring is schema 3; the decoded
-`gpu_trace.json` shape is schema 4. A nonzero
+byte-identical to that immediately prior record. The raw ring remains schema 3; the trace contract
+document is schema 4 and decoded `gpu_trace.json` is schema 5. A nonzero
 SLR `current_count` requires the exact six-word condition tuple; normal authority uses
 durable target/fade words 18/24, while provisional-current flag bit 4 uses ephemeral words 29/30.
 A zero `current_count` requires the conditioner's canonical zero6 Base verdict. Suppression freezes
@@ -133,8 +130,7 @@ capacities, flags, and numeric detector/box policy values. The dump serializes e
 word array as little-endian uint32 values. Its frame, analysis generation, analysis-source extent,
 tensor-content geometry, projected ROI, paired core/cover records, topology metadata, and canonical
 zero tail must all agree with the atomic target's publication frame. That is the matched frame for
-ordinary infer and either depth branch of a due publication, and the trace-authenticated older tuple
-frame for held ordinary reuse. See the
+infer, and the trace-authenticated older tuple frame for whole-tuple reuse. See the
 [live OCR8 contract](../../docs/host-sbs.md#ocr-box-subtitle-conditioner) for producer semantics.
 
 The generated `subtitle_ocr.locator_state` contract owns SLR13's schema, the unambiguous
@@ -147,7 +143,7 @@ The resolver descriptor serializes the aggregate-center
 primary policy exactly as `binocular-source-pixels`: two independent 16-sample rows; median indices
 `7/8`; both complete finite in-container rows bypass the IQR gate; a row-median difference of `4`
 is the both-valid mean-versus-maximum-median selection boundary; and a sole valid row is accepted
-only when its Tukey IQR at indices `3/4` and `11/12` is at most `8`. Schema 40 also authenticates
+only when its Tukey IQR at indices `3/4` and `11/12` is at most `8`. Schema 41 also authenticates
 the strict primary-failure fallback: ordinary-core span
 step `W/16`, maximum radius two, negative then positive order, ordinary-over-ribbon placement,
 unclamped 61-cell strips, two coherent rows and at most `4` pixels of intra-probe median separation.
@@ -223,7 +219,7 @@ The maintained reader:
 6. validates ROI placement, authority-specific window identity, inverse-map geometry, and the exterior
    zero-plane evidence; and
 7. validates canonical inactive metadata, or the exact authenticated current-subtitle-publication/
-   held-ordinary-reuse OCR8/SLR13 model, shader, record, state, and artifact identities;
+   held-reuse OCR8/SLR13 model, shader, record, state, and artifact identities;
 8. replays the ordinary V2 chain into `shadow_base_final_parallax.f32` when SLR13 is active, then
    replays the exact content-clamped analytic rectangle budget and fade into
    `shadow_final_parallax.f32` (including exact nearest-content Base extension when current
@@ -233,7 +229,7 @@ The maintained reader:
    closure and ABI document, chronological wrap/commit structure, raw branch/OCR proof, matched
    analysis domain, and bit-for-bit decoded JSON. An unavailable trace remains valid optional state.
 
-Use `.f32` artifacts for quantitative work. Schema 40 does not package scalar/heat preview PNGs or
+Use `.f32` artifacts for quantitative work. Schema 41 does not package scalar/heat preview PNGs or
 per-field shape sidecars. The sole retained shape sidecar, `model_input_shape.json`, is calibrated
 preprocess authority rather than a preview description. On a fused capture it describes the sole
 high input; the embedded DAV2 calibration is derived from its exact half shape. Float dimensions live in
@@ -244,8 +240,9 @@ only the color/evidence PNGs `source.png`, `depth_input_source.png`, `sbs.png`, 
 A production package carries `composite_runtime_provenance` schema 2 and authenticates the frozen fused
 ONNX, embedded DAV2, ZipDepth checkpoint, preprocess closure, engine recipe/artifact, and active
 engine manifest as one record. Missing or stale composite evidence rejects a high-grid package.
-The reader's one-grid legacy DAV2 branch exists only to inspect already-recorded schema-40 evidence;
-it is not a live or conversion runtime fallback.
+The reader also recognizes the calibrated one-grid DAV2 diagnostic shape under the same current
+schema and provenance checks; it is not a live or conversion runtime fallback. Historical schema-40
+packages require their original evaluator snapshot and are rejected by the current reader.
 
 Generate a non-authoritative diagnostic preview outside the atomic package when needed:
 

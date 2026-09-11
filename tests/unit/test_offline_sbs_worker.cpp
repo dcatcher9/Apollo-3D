@@ -867,19 +867,27 @@ TEST(OfflineSbsWorker, DeviceConditionalReplayUsesSharedProductionTransactionPol
     std::string::npos
   );
   EXPECT_NE(
-    source.find("models::gpu_adaptive_transaction_policy_t device_conditional_policy"),
+    source.find("std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> device_conditional_publication"),
     std::string::npos
   );
   EXPECT_NE(
-    source.find("device_conditional_policy.make_request("),
+    source.find("device_conditional_publication = publication_transport.current_publication"),
     std::string::npos
   );
   EXPECT_NE(
-    source.find("device_conditional_policy.record_submission("),
+    source.find("models::make_gpu_adaptive_request("),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    source.find("device_conditional_refresh_policy"),
     std::string::npos
   );
   EXPECT_NE(
-    source.find(".record_known_force_infer_completion(estimator_frame_id, true)"),
+    source.find("models::classify_gpu_adaptive_submission("),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("estimator->publication_is_current(receipt->expected)"),
     std::string::npos
   );
   EXPECT_EQ(source.find("device_conditional_baseline_is_opaque"), std::string::npos);

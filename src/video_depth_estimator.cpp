@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -69,6 +70,8 @@ public:
 };
 
 static Logger gLogger;
+
+static std::atomic<std::uint64_t> g_publication_generation {1u};
 
 static std::mutex g_model_prepare_status_mutex;
 static std::map<std::string, models::engine_build_status> g_model_prepare_status;
@@ -855,17 +858,27 @@ namespace models {
                   cuda_conditional_graph::work_flags_value(
                     cuda_conditional_graph::work_flag_e::subtitle_observation
                   ));
-    static_assert(near_identical_work_optional_ocr_due ==
-                  cuda_conditional_graph::work_flags_value(
-                    cuda_conditional_graph::work_flag_e::optional_ocr_due
-                  ));
-    static_assert(near_identical_work_subtitle_observation_due ==
-                  cuda_conditional_graph::work_flags_value(
-                    cuda_conditional_graph::work_flag_e::subtitle_observation_due
-                  ));
     static_assert(near_identical_gpu_decision_record_byte_offset == 0u);
     static_assert(near_identical_gpu_request_record_byte_offset ==
                   sizeof(cuda_conditional_graph::decision_record_t));
+
+    [[nodiscard]] std::array<std::uint32_t, near_identical_gpu_decision_word_count>
+    initialize_near_identical_transaction(
+      const std::uint64_t token,
+      const cuda_conditional_graph::work_flag_e subtitle_work
+    ) noexcept {
+      // Clear every old proposal, receipt and indirect argument before either admission path
+      // publishes this frame's request. Only force admission supplies a proposal on the CPU.
+      std::array<std::uint32_t, near_identical_gpu_decision_word_count> transaction {};
+      const auto request = cuda_conditional_graph::make_request(token, subtitle_work);
+      std::memcpy(
+        reinterpret_cast<std::byte *>(transaction.data()) +
+          near_identical_gpu_request_record_byte_offset,
+        &request,
+        sizeof(request)
+      );
+      return transaction;
+    }
 
     [[nodiscard]] constexpr cuda_conditional_graph::work_flag_e
     subtitle_transaction_work(
@@ -877,10 +890,6 @@ namespace models {
           return ocr_ready ?
                    cuda_conditional_graph::work_flag_e::optional_ocr :
                    cuda_conditional_graph::work_flag_e::subtitle_observation;
-        case depth_optional_work_mode_e::ordinary_due:
-          return ocr_ready ?
-                   cuda_conditional_graph::work_flag_e::optional_ocr_due :
-                   cuda_conditional_graph::work_flag_e::subtitle_observation_due;
         case depth_optional_work_mode_e::suppress_subtitle:
           return cuda_conditional_graph::work_flag_e::none;
       }
@@ -1943,6 +1952,298 @@ namespace models {
     return true;
   }
 
+  namespace {
+    namespace publication_receipt = host_sbs_gpu_completion_receipt;
+
+    // The offsets describe existing GPU records, copied without another shader or CUDA node.
+    constexpr std::array<std::pair<std::size_t, std::size_t>, 8> publication_copy_ranges {{
+      {publication_receipt::transaction_begin, publication_receipt::transaction_word_count},
+      {publication_receipt::history_owner_begin, publication_receipt::history_owner_word_count},
+      {publication_receipt::subtitle_locator_begin, publication_receipt::subtitle_locator_word_count},
+      {publication_receipt::subtitle_condition_begin, publication_receipt::subtitle_condition_word_count},
+      {publication_receipt::parallax_state_begin, publication_receipt::parallax_state_word_count},
+      {publication_receipt::depth_frame_state_begin, publication_receipt::depth_frame_state_word_count},
+      {publication_receipt::cut_state_begin, publication_receipt::cut_state_word_count},
+      {publication_receipt::outcome_counts_begin, publication_receipt::outcome_counts_word_count},
+    }};
+
+    class publication_readback_t {
+    public:
+      publication_readback_t(ID3D11Device *device, ID3D11DeviceContext *context):
+          device_(device), context_(context) {}
+
+      bool submit(
+        const std::array<ID3D11Buffer *, publication_copy_ranges.size()> &sources,
+        const publication_receipt::expected_t &expected
+      ) {
+        if (!publication_receipt::valid_expected(expected) ||
+            std::any_of(sources.begin(), sources.begin() + 6u, [](auto *source) { return !source; })) {
+          ++skipped_;
+          return false;
+        }
+        if (!ensure_resources()) {
+          ++skipped_;
+          return false;
+        }
+        for (auto &slot : slots_) {
+          if (!slot.state.reserve(expected)) {
+            continue;
+          }
+          slot.sampled_at = std::chrono::steady_clock::now();
+          slot.cut_present = sources[6u] != nullptr;
+          slot.outcomes_present = sources[7u] != nullptr;
+          for (std::size_t index = 0u; index < sources.size(); ++index) {
+            if (!sources[index]) {
+              continue;
+            }
+            const auto [begin, count] = publication_copy_ranges[index];
+            const D3D11_BOX range {
+              0u, 0u, 0u, static_cast<UINT>(count * sizeof(std::uint32_t)), 1u, 1u,
+            };
+            context_->CopySubresourceRegion(
+              slot.staging.Get(), 0u, static_cast<UINT>(begin * sizeof(std::uint32_t)),
+              0u, 0u, sources[index], 0u, &range
+            );
+          }
+          // This proves the complete D3D publication and its immutable snapshot, not merely the
+          // CUDA branch/unmap event. The next transaction may now reuse every source record.
+          context_->End(slot.completion.Get());
+          ++submitted_;
+          return true;
+        }
+        ++skipped_;
+        return false;
+      }
+
+      publication_receipt_poll_result poll(const std::uint64_t estimator_generation) {
+        publication_receipt_poll_result result;
+        for (auto &slot : slots_) {
+          if (!slot.state.pending()) {
+            continue;
+          }
+          BOOL complete = FALSE;
+          const auto ready = context_->GetData(
+            slot.completion.Get(), &complete, sizeof(complete), D3D11_ASYNC_GETDATA_DONOTFLUSH
+          );
+          if (ready == S_FALSE || (ready == S_OK && !complete)) {
+            continue;
+          }
+          if (FAILED(ready)) {
+            disable("nonblocking completion query failed");
+            break;
+          }
+          D3D11_MAPPED_SUBRESOURCE mapped {};
+          const auto mapped_result = context_->Map(
+            slot.staging.Get(), 0u, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped
+          );
+          if (mapped_result == DXGI_ERROR_WAS_STILL_DRAWING) {
+            continue;
+          }
+          if (FAILED(mapped_result)) {
+            disable("nonblocking snapshot map failed");
+            break;
+          }
+          if (!mapped.pData) {
+            context_->Unmap(slot.staging.Get(), 0u);
+            disable("snapshot map returned no data");
+            break;
+          }
+          publication_receipt::snapshot_words_t words {};
+          std::memcpy(words.data(), mapped.pData, sizeof(words));
+          context_->Unmap(slot.staging.Get(), 0u);
+          // Diagnostics remain independently useful when publication authentication fails.
+          // Presence bits belong to this slot; absent sources can never expose stale bytes.
+          const auto expected = *slot.state.expected();
+          if (expected.estimator_generation == estimator_generation) {
+            result.diagnostics[result.diagnostic_count++] = publication_receipt::decode_diagnostics(
+              words, expected, slot.cut_present, slot.outcomes_present, slot.sampled_at
+            );
+          }
+          if (auto receipt = slot.state.retire(words, estimator_generation)) {
+            result.receipts[result.count++] = *receipt;
+            ++decoded_;
+          } else {
+            result.failed = true;
+            ++decode_failed_;
+          }
+        }
+        // Recycled slots need not retire in submission order. Cumulative diagnostic consumers
+        // require monotonic sequence order, independently of rendering's exact-current check.
+        for (std::size_t index = 1u; index < result.diagnostic_count; ++index) {
+          for (auto cursor = index; cursor > 0u &&
+               result.diagnostics[cursor].expected.publication_sequence <
+                 result.diagnostics[cursor - 1u].expected.publication_sequence; --cursor) {
+            std::swap(result.diagnostics[cursor], result.diagnostics[cursor - 1u]);
+          }
+        }
+        result.transport_failed = std::exchange(failure_pending_, false);
+        result.failed = result.transport_failed || result.failed;
+        result.submitted = submitted_;
+        result.skipped = skipped_;
+        result.decoded = decoded_;
+        result.decode_failed = decode_failed_;
+        return result;
+      }
+
+      [[nodiscard]] std::size_t pending_count() const noexcept {
+        return static_cast<std::size_t>(std::count_if(
+          slots_.begin(), slots_.end(), [](const auto &slot) { return slot.state.pending(); }
+        ));
+      }
+    private:
+      bool ensure_resources() {
+        if (disabled_) {
+          return false;
+        }
+        if (ready_) {
+          return true;
+        }
+        if (!device_ || !context_) {
+          disable("D3D context is unavailable");
+          return false;
+        }
+        D3D11_BUFFER_DESC buffer_desc {};
+        buffer_desc.ByteWidth = publication_receipt::snapshot_byte_count;
+        buffer_desc.Usage = D3D11_USAGE_STAGING;
+        buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        const D3D11_QUERY_DESC query_desc {D3D11_QUERY_EVENT, 0u};
+        for (auto &slot : slots_) {
+          if (FAILED(device_->CreateBuffer(&buffer_desc, nullptr, slot.staging.ReleaseAndGetAddressOf())) ||
+              FAILED(device_->CreateQuery(&query_desc, slot.completion.ReleaseAndGetAddressOf()))) {
+            disable("staging/query allocation failed");
+            return false;
+          }
+        }
+        ready_ = true;
+        return true;
+      }
+
+      void disable(const std::string_view reason) {
+        disabled_ = true;
+        ready_ = false;
+        failure_pending_ = true;
+        for (auto &slot : slots_) {
+          slot.completion.Reset();
+          slot.staging.Reset();
+          slot.state.reset();
+        }
+        BOOST_LOG(warning) << "Host SBS asynchronous publication receipts are unavailable ("
+                           << reason << "); adaptive reuse is unavailable; using force inference.";
+      }
+
+      struct slot_t {
+        Microsoft::WRL::ComPtr<ID3D11Buffer> staging;
+        Microsoft::WRL::ComPtr<ID3D11Query> completion;
+        publication_receipt::slot_state_t state;
+        std::chrono::steady_clock::time_point sampled_at {};
+        bool cut_present = false;
+        bool outcomes_present = false;
+      };
+      ID3D11Device *device_;
+      ID3D11DeviceContext *context_;
+      std::array<slot_t, publication_receipt::slot_count> slots_;
+      bool ready_ = false;
+      bool disabled_ = false;
+      bool failure_pending_ = false;
+      std::uint64_t submitted_ = 0u;
+      std::uint64_t skipped_ = 0u;
+      std::uint64_t decoded_ = 0u;
+      std::uint64_t decode_failed_ = 0u;
+    };
+  }  // namespace
+
+#ifdef SUNSHINE_TESTS
+  detail::publication_receipt_readback_test_result detail::publication_receipt_readback_for_test(
+    ID3D11Device *device,
+    ID3D11DeviceContext *context,
+    const host_sbs_gpu_completion_receipt::snapshot_words_t &snapshot,
+    const host_sbs_gpu_completion_receipt::expected_t &expected,
+    const std::uint64_t poll_estimator_generation,
+    const bool cut_present,
+    const bool outcomes_present
+  ) {
+    publication_receipt_readback_test_result result;
+    if (!device || !context) {
+      return result;
+    }
+    std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, publication_copy_ranges.size()> buffers;
+    std::array<ID3D11Buffer *, publication_copy_ranges.size()> sources {};
+    for (std::size_t index = 0u; index < buffers.size(); ++index) {
+      const auto [begin, count] = publication_copy_ranges[index];
+      D3D11_BUFFER_DESC desc {};
+      desc.ByteWidth = static_cast<UINT>(count * sizeof(std::uint32_t));
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+      desc.StructureByteStride = sizeof(std::uint32_t);
+      const D3D11_SUBRESOURCE_DATA initial {snapshot.data() + begin, 0u, 0u};
+      if (FAILED(device->CreateBuffer(&desc, &initial, buffers[index].ReleaseAndGetAddressOf()))) {
+        return result;
+      }
+      sources[index] = buffers[index].Get();
+    }
+    result.resources_created = true;
+    if (!cut_present) {
+      sources[6u] = nullptr;
+    }
+    if (!outcomes_present) {
+      sources[7u] = nullptr;
+    }
+    publication_readback_t readback {device, context};
+    for (std::size_t index = 0u; index <= publication_receipt::slot_count; ++index) {
+      auto publication = expected;
+      publication.publication_sequence += index;
+      readback.submit(sources, publication);
+    }
+    // These writes are ordered after the three immutable snapshots. No later map may observe
+    // the poisoned mutable source records, and the fourth submission must not replace a slot.
+    const publication_receipt::snapshot_words_t poison {};
+    for (auto *source : sources) {
+      if (source) {
+        context->UpdateSubresource(source, 0u, nullptr, poison.data(), 0u, 0u);
+      }
+    }
+    const auto generation = poll_estimator_generation == 0u ?
+                              expected.estimator_generation : poll_estimator_generation;
+    const auto poll = [&] {
+      const auto batch = readback.poll(generation);
+      ++result.poll_count;
+      result.result.failed = result.result.failed || batch.failed;
+      result.result.transport_failed = result.result.transport_failed || batch.transport_failed;
+      result.result.submitted = batch.submitted;
+      result.result.skipped = batch.skipped;
+      result.result.decoded = batch.decoded;
+      result.result.decode_failed = batch.decode_failed;
+      for (std::size_t index = 0u; index < batch.diagnostic_count; ++index) {
+        if (result.result.diagnostic_count == result.result.diagnostics.size()) {
+          result.result.failed = true;
+          break;
+        }
+        result.result.diagnostics[result.result.diagnostic_count++] = batch.diagnostics[index];
+      }
+      for (std::size_t index = 0u; index < batch.count; ++index) {
+        if (result.result.count == result.result.receipts.size()) {
+          result.result.failed = true;
+          break;
+        }
+        result.result.receipts[result.result.count++] = batch.receipts[index];
+      }
+    };
+    poll();
+    result.pending_before_flush = readback.pending_count() != 0u;
+    // Production never flushes or waits. A WARP unit test has no Present/encode owner to drive
+    // submission, so this test-only boundary explicitly drives its bounded completion loop.
+    context->Flush();
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (readback.pending_count() != 0u && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(1ms);
+      poll();
+    }
+    result.completed = readback.pending_count() == 0u;
+    return result;
+  }
+#endif
+
   struct video_depth_estimator::impl {
     static constexpr std::uint32_t ocr_grid_width = ocr_engine_width / 8;
     static constexpr std::uint32_t ocr_grid_height = ocr_engine_height;
@@ -2058,24 +2359,10 @@ namespace models {
       parallax_v2_shader_provenance;
     bool parallax_v2_producer_active = false;
 
-    // Demand-gated, nonblocking telemetry readback. Resources are created lazily only after an
-    // external protocol subscriber requests evidence; a three-slot staging/query ring absorbs GPU
-    // latency without flushing or waiting on the encode thread.
-    static constexpr std::size_t telemetry_state_float_count =
-      sbs_adaptive_state::word_count;
-
-    struct telemetry_readback_slot {
-      Microsoft::WRL::ComPtr<ID3D11Buffer> staging;
-      Microsoft::WRL::ComPtr<ID3D11Query> completion;
-      bool pending = false;
-      std::uint64_t sampled_frame_id = 0;
-      std::chrono::steady_clock::time_point sampled_at {};
-    };
-
-    std::array<telemetry_readback_slot, 3> telemetry_readback_slots;
-    std::size_t telemetry_readback_next = 0;
-    bool telemetry_readback_ready = false;
-    bool telemetry_readback_init_failed = false;
+    // Debug consumers read this CPU cache; the publication receipt owns the only routine
+    // staging/query ring. Its original copy time and transaction identity remain unchanged.
+    depth_telemetry_poll_result cached_depth_telemetry;
+    std::uint64_t latest_diagnostic_sequence = 0u;
 
     // Throughput telemetry for the permanent stream-cadence matched-frame pipeline.
     std::chrono::steady_clock::time_point throughput_stats_start {};
@@ -2084,8 +2371,6 @@ namespace models {
     unsigned throughput_stats_enqueues = 0;
     unsigned throughput_stats_force_infer_enqueues = 0;
     unsigned throughput_stats_gpu_undecided_enqueues = 0;
-    unsigned throughput_stats_gpu_undecided_initial_enqueues = 0;
-    unsigned throughput_stats_gpu_undecided_followup_enqueues = 0;
     unsigned throughput_stats_completions = 0;
     unsigned throughput_stats_subtitle_suppressed = 0;
     unsigned throughput_stats_ocr_armed = 0;
@@ -2439,49 +2724,8 @@ namespace models {
       slot->pending = true;
     }
 
-    bool ensure_telemetry_readback() {
-      if (telemetry_readback_ready) {
-        return true;
-      }
-      if (telemetry_readback_init_failed || !cut_state_buf) {
-        return false;
-      }
-
-      D3D11_BUFFER_DESC source_desc {};
-      cut_state_buf->GetDesc(&source_desc);
-      if (source_desc.ByteWidth < telemetry_state_float_count * sizeof(float)) {
-        BOOST_LOG(error) << "Host SBS telemetry source is smaller than its append-only state contract.";
-        telemetry_readback_init_failed = true;
-        return false;
-      }
-
-      D3D11_BUFFER_DESC staging_desc = source_desc;
-      staging_desc.Usage = D3D11_USAGE_STAGING;
-      staging_desc.BindFlags = 0;
-      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      staging_desc.MiscFlags = 0;
-
-      D3D11_QUERY_DESC query_desc {D3D11_QUERY_EVENT, 0};
-      for (auto &slot : telemetry_readback_slots) {
-        if (FAILED(device->CreateBuffer(&staging_desc, nullptr, &slot.staging)) || FAILED(device->CreateQuery(&query_desc, &slot.completion))) {
-          for (auto &created : telemetry_readback_slots) {
-            created.staging.Reset();
-            created.completion.Reset();
-            created.pending = false;
-          }
-          BOOST_LOG(error) << "Host SBS telemetry staging/query ring initialization failed.";
-          // Device/resource pressure can be transient. The render caller rate-limits attempts to
-          // the requested telemetry cadence, so leave this retryable without creating a hot loop.
-          return false;
-        }
-      }
-
-      telemetry_readback_ready = true;
-      return true;
-    }
-
     static bool decode_telemetry_words(
-      const std::array<std::uint32_t, telemetry_state_float_count> &words,
+      const sbs_adaptive_state::words_t &words,
       int depth_width,
       int depth_height,
       std::uint64_t sampled_frame_id,
@@ -2492,52 +2736,14 @@ namespace models {
       const auto scalar = [&](const word_e word) {
         return std::bit_cast<float>(words[sbs_adaptive_state::index(word)]);
       };
-      if (words[sbs_adaptive_state::index(word_e::cut_contract_tag_bits)] !=
-          sbs_adaptive_state::cut_contract_tag) {
+      if (!publication_receipt::valid_cut_state_words(words)) {
         return false;
       }
-      for (const auto &field : sbs_adaptive_state::fields) {
-        const auto word_index = sbs_adaptive_state::index(field.word);
-        if (field.name.starts_with("reserved_") &&
-            words[word_index] != sbs_adaptive_state::initial_words[word_index]) {
-          return false;
-        }
-        if (
-          field.gpu_encoding != sbs_adaptive_state::gpu_encoding_e::uint_bits &&
-          !std::isfinite(scalar(field.word))
-        ) {
-          return false;
-        }
-      }
-
       const float scene_age = scalar(word_e::scene_age);
       const float cut_flags = scalar(word_e::cut_flags);
       const float analysis_flags = scalar(word_e::analysis_flags);
-      const float model_input_history_state =
-        scalar(word_e::model_input_history_state);
+      const float model_input_history_state = scalar(word_e::model_input_history_state);
       const float hard_cut_pulse = scalar(word_e::hard_cut_pulse);
-      if (
-        scene_age < 0.0f ||
-        cut_flags < 0.0f ||
-        cut_flags > static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) ||
-        std::trunc(cut_flags) != cut_flags ||
-        analysis_flags < 0.0f ||
-        analysis_flags >
-          static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) ||
-        std::trunc(analysis_flags) != analysis_flags ||
-        model_input_history_state < 0.0f ||
-        model_input_history_state > 4.0f ||
-        std::trunc(model_input_history_state) != model_input_history_state ||
-        (hard_cut_pulse != 0.0f && hard_cut_pulse != 1.0f) ||
-        words[sbs_adaptive_state::index(word_e::hard_cut_count)] >
-          sbs_adaptive_state::counter_max ||
-        words[sbs_adaptive_state::index(word_e::empty_raw_count)] >
-          sbs_adaptive_state::counter_max ||
-        words[sbs_adaptive_state::index(word_e::collapsed_raw_count)] >
-          sbs_adaptive_state::counter_max
-      ) {
-        return false;
-      }
 
       sample.depth_width = depth_width;
       sample.depth_height = depth_height;
@@ -2586,105 +2792,6 @@ namespace models {
       sample.depth_ready = scalar(word_e::depth_ready) > 0.5f;
       sample.hard_cut_pulse = hard_cut_pulse > 0.5f;
       return true;
-    }
-
-    depth_telemetry_poll_result poll_depth_telemetry(
-      bool schedule_copy,
-      std::uint64_t sampled_frame_id
-    ) {
-      depth_telemetry_poll_result result;
-      if (!telemetry_readback_ready && schedule_copy && !ensure_telemetry_readback()) {
-        result.failed = true;
-        return result;
-      }
-      if (!telemetry_readback_ready) {
-        return result;
-      }
-
-      std::uint64_t newest_frame_id = 0;
-      for (auto &slot : telemetry_readback_slots) {
-        if (!slot.pending) {
-          continue;
-        }
-
-        BOOL complete = FALSE;
-        const auto query_status = context->GetData(
-          slot.completion.Get(),
-          &complete,
-          sizeof(complete),
-          D3D11_ASYNC_GETDATA_DONOTFLUSH
-        );
-        if (query_status == S_FALSE || (SUCCEEDED(query_status) && !complete)) {
-          continue;
-        }
-        if (FAILED(query_status)) {
-          slot.pending = false;
-          result.failed = true;
-          continue;
-        }
-
-        D3D11_MAPPED_SUBRESOURCE mapped {};
-        const auto map_status = context->Map(
-          slot.staging.Get(),
-          0,
-          D3D11_MAP_READ,
-          D3D11_MAP_FLAG_DO_NOT_WAIT,
-          &mapped
-        );
-        if (map_status == DXGI_ERROR_WAS_STILL_DRAWING) {
-          continue;
-        }
-        slot.pending = false;
-        if (FAILED(map_status) || !mapped.pData) {
-          result.failed = true;
-          continue;
-        }
-
-        std::array<std::uint32_t, telemetry_state_float_count> words {};
-        std::memcpy(words.data(), mapped.pData, sizeof(words));
-        context->Unmap(slot.staging.Get(), 0);
-
-        depth_telemetry_sample decoded;
-        if (!decode_telemetry_words(
-              words,
-              target_w,
-              target_h,
-              slot.sampled_frame_id,
-              slot.sampled_at,
-              decoded
-            )) {
-          result.failed = true;
-          continue;
-        }
-        if (!result.sample || slot.sampled_frame_id >= newest_frame_id) {
-          newest_frame_id = slot.sampled_frame_id;
-          result.sample = decoded;
-        }
-      }
-
-      if (schedule_copy) {
-        for (std::size_t offset = 0; offset < telemetry_readback_slots.size(); ++offset) {
-          const auto index =
-            (telemetry_readback_next + offset) % telemetry_readback_slots.size();
-          auto &slot = telemetry_readback_slots[index];
-          if (slot.pending) {
-            continue;
-          }
-          // The caller invokes this only after submitting the SBS warp and encoder/local-output
-          // draw. D3D11 command ordering therefore puts this low-priority diagnostic copy behind
-          // every frame-critical consumer of the cut bridge.
-          slot.sampled_at = std::chrono::steady_clock::now();
-          context->CopyResource(slot.staging.Get(), cut_state_buf.Get());
-          context->End(slot.completion.Get());
-          slot.pending = true;
-          slot.sampled_frame_id = sampled_frame_id;
-          telemetry_readback_next = (index + 1) % telemetry_readback_slots.size();
-          result.copy_scheduled = true;
-          break;
-        }
-      }
-
-      return result;
     }
 
     void perf_try_resolve(perf_evt_ring &r, int slot, cuda_driver_api &cuda) {
@@ -3176,8 +3283,6 @@ namespace models {
         dispatch.Reset();
       }
     } near_identical_transaction;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> gpu_trace_transaction_buf;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> gpu_trace_transaction_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> gpu_trace_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> gpu_trace_ring_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> gpu_trace_ring_srv;
@@ -3186,16 +3291,15 @@ namespace models {
     bool gpu_trace_error_logged = false;
     Microsoft::WRL::ComPtr<ID3D11Buffer> gpu_outcome_buffer;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> gpu_outcome_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> gpu_outcome_staging;
-    Microsoft::WRL::ComPtr<ID3D11Query> gpu_outcome_readback_query;
     host_sbs_gpu_outcomes::delta_tracker_t gpu_outcome_counts;
-    std::chrono::steady_clock::time_point gpu_outcome_next_poll {};
     std::chrono::steady_clock::time_point gpu_outcome_next_log {};
-    std::chrono::steady_clock::time_point gpu_outcome_copied_at {};
-    bool gpu_outcome_readback_pending = false;
-    bool gpu_outcome_copy_needed = false;
     bool gpu_outcome_report_pending = false;
     bool gpu_outcome_error_logged = false;
+    publication_readback_t publication_readback {device.Get(), context.Get()};
+    const std::uint64_t publication_generation =
+      g_publication_generation.fetch_add(1u, std::memory_order_relaxed);
+    std::uint64_t publication_sequence = 0u;
+    host_sbs_gpu_completion_receipt::expected_t current_publication {};
     struct pending_gpu_trace_append_t {
       host_sbs_gpu_trace::host_subtitle_outcome_e host_subtitle_outcome =
         host_sbs_gpu_trace::host_subtitle_outcome_e::suppressed;
@@ -3370,13 +3474,9 @@ namespace models {
     depth_input_domain_tracker_t processed_input_domain;
     bool has_previous_frame = false;
     std::uint64_t pending_frame_id = 0;
-    std::uint64_t last_postprocessed_frame_id = 0;
-    bool has_last_postprocessed_frame_id = false;
-    // Host metadata may authorize only the immediately preceding opaque root. The device history
-    // owner remains the branch authority: infer advances it while reuse/invalid leaves it older.
-    // The detector always compares against that last actual infer without age/count expiry,
-    // so pairwise-near-identical opaque follow-ups cannot hide cumulative drift.
-    std::uint64_t last_gpu_opaque_transaction_frame_id = 0;
+    // Only a consumed final-publication receipt supplies this owner. A reused publication B may
+    // retain owner A; completed color identity is never substituted for the actual infer owner.
+    std::optional<publication_receipt::receipt_t> cached_current_publication;
     bool stream_error_logged = false;
     bool fused_input_region_error_logged = false;
     bool shape_mismatch_warning_logged = false;
@@ -3464,11 +3564,17 @@ namespace models {
       pending_depth_inference_event_recorded = false;
     }
 
+    void invalidate_publication() noexcept {
+      current_publication = {};
+      cached_current_publication.reset();
+    }
+
     // Host V2 fails flat on any producer error. Context quarantine is owned separately by failure
     // provenance: pre-enqueue validation may leave a context reusable, while a CUDA error after
     // asynchronous bootstrap/root work was submitted may be deferred and quarantines every
     // context that participated.
     void mark_terminal_failure(const bool poison_execution_context = false) {
+      invalidate_publication();
       clear_pending_inference_event_state();
       execution_context_poisoned =
         execution_context_poisoned || poison_execution_context;
@@ -4053,8 +4159,6 @@ namespace models {
 
     void reset_gpu_trace_resources() noexcept {
       gpu_trace_cs.Reset();
-      gpu_trace_transaction_buf.Reset();
-      gpu_trace_transaction_srv.Reset();
       gpu_trace_cbuffer.Reset();
       gpu_trace_ring_buf.Reset();
       gpu_trace_ring_srv.Reset();
@@ -4070,13 +4174,8 @@ namespace models {
       }
       gpu_outcome_buffer.Reset();
       gpu_outcome_uav.Reset();
-      gpu_outcome_staging.Reset();
-      gpu_outcome_readback_query.Reset();
       gpu_outcome_counts.reset();
-      gpu_outcome_next_poll = {};
       gpu_outcome_next_log = {};
-      gpu_outcome_readback_pending = false;
-      gpu_outcome_copy_needed = false;
       gpu_outcome_report_pending = false;
     }
 
@@ -4098,103 +4197,77 @@ namespace models {
       counter_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
       counter_desc.StructureByteStride = sizeof(std::uint32_t);
       D3D11_SUBRESOURCE_DATA initial {host_sbs_gpu_outcomes::initial_words.data(), 0u, 0u};
-      D3D11_BUFFER_DESC staging_desc {};
-      staging_desc.Usage = D3D11_USAGE_STAGING;
-      staging_desc.ByteWidth = host_sbs_gpu_outcomes::byte_count;
-      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      D3D11_QUERY_DESC query_desc {D3D11_QUERY_EVENT, 0u};
-      if (!SUCCEEDED(device->CreateBuffer(
+      if (FAILED(device->CreateBuffer(
             &counter_desc, &initial, gpu_outcome_buffer.ReleaseAndGetAddressOf()
-          )) || !SUCCEEDED(device->CreateUnorderedAccessView(
+          )) || FAILED(device->CreateUnorderedAccessView(
             gpu_outcome_buffer.Get(), nullptr, gpu_outcome_uav.ReleaseAndGetAddressOf()
-          )) || !SUCCEEDED(device->CreateBuffer(
-            &staging_desc, nullptr, gpu_outcome_staging.ReleaseAndGetAddressOf()
-          )) || !SUCCEEDED(device->CreateQuery(
-            &query_desc, gpu_outcome_readback_query.ReleaseAndGetAddressOf()
           ))) {
-        disable_gpu_outcome_logging("optional readback-resource setup failed");
+        disable_gpu_outcome_logging("optional counter-resource setup failed");
       }
     }
 
     void service_gpu_outcome_logging() {
-      // Only aggregate diagnostic counts cross the GPU/CPU boundary. Never flush, wait, or
-      // expose these observations to the scheduler; a busy readback retains its single slot.
-      if (!diagnostics_enabled || !gpu_outcome_readback_query ||
-          (!gpu_outcome_copy_needed && !gpu_outcome_readback_pending &&
-           !gpu_outcome_report_pending)) {
+      // Receipt consumption already collected cumulative counts. Idle logging performs no GPU
+      // access and never creates conversion demand or affects the adaptive scheduler.
+      if (!diagnostics_enabled || !gpu_outcome_report_pending) {
         return;
       }
       const auto now = std::chrono::steady_clock::now();
-      if (now < gpu_outcome_next_poll) {
+      if (now < gpu_outcome_next_log) {
         return;
       }
-      gpu_outcome_next_poll = now + 1s;
-      if (gpu_outcome_next_log == std::chrono::steady_clock::time_point {}) {
-        gpu_outcome_next_log = now + 5s;
+      const auto delta = gpu_outcome_counts.take_delta();
+      const auto totals = gpu_outcome_counts.totals();
+      BOOST_LOG(info) << "Host SBS GPU outcomes: infer=" << delta.infer
+                      << " reuse=" << delta.reuse << " invalid=" << delta.invalid
+                      << " reuse_percent=" << std::round(delta.reuse_percent() * 10.0) / 10.0
+                      << " cumulative_infer=" << totals.infer
+                      << " cumulative_reuse=" << totals.reuse
+                      << " cumulative_invalid=" << totals.invalid;
+      gpu_outcome_next_log = now + 5s;
+      gpu_outcome_report_pending = false;
+    }
+
+    void consume_completion_diagnostics(const publication_receipt_poll_result &batch) {
+      for (std::size_t index = 0u; index < batch.diagnostic_count; ++index) {
+        const auto &diagnostic = batch.diagnostics[index];
+        if (diagnostic.expected.publication_sequence <= latest_diagnostic_sequence) {
+          continue;
+        }
+        latest_diagnostic_sequence = diagnostic.expected.publication_sequence;
+        depth_telemetry_sample sample;
+        if (diagnostic.cut_state && decode_telemetry_words(
+              *diagnostic.cut_state,
+              diagnostic.expected.width, diagnostic.expected.height,
+              diagnostic.expected.frame_id, diagnostic.sampled_at, sample
+            )) {
+          cached_depth_telemetry = {.sample = sample};
+        } else {
+          cached_depth_telemetry = {.failed = true};
+        }
+        if (diagnostic.outcome_counts) {
+          if (gpu_outcome_counts.observe(*diagnostic.outcome_counts)) {
+            BOOST_LOG(warning) << "Host SBS diagnostic GPU outcome counters restarted; "
+                                  "reporting a new counter epoch.";
+          }
+          if (telemetry_performance) {
+            telemetry_performance->record_outcomes(*diagnostic.outcome_counts, diagnostic.sampled_at);
+          }
+          if (gpu_outcome_next_log == std::chrono::steady_clock::time_point {}) {
+            gpu_outcome_next_log = std::chrono::steady_clock::now() + 5s;
+          }
+          gpu_outcome_report_pending = true;
+        } else if (diagnostics_enabled && gpu_outcome_buffer && telemetry_performance) {
+          telemetry_performance->invalidate_outcomes();
+        }
       }
-      if (gpu_outcome_readback_pending) {
-        BOOL complete = FALSE;
-        const auto ready = context->GetData(
-          gpu_outcome_readback_query.Get(), &complete, sizeof(complete),
-          D3D11_ASYNC_GETDATA_DONOTFLUSH
-        );
-        if (ready == S_FALSE || (ready == S_OK && !complete)) {
-          return;
-        }
-        if (FAILED(ready)) {
-          disable_gpu_outcome_logging("nonblocking readback query failed");
-          return;
-        }
-        D3D11_MAPPED_SUBRESOURCE mapped {};
-        const auto map_result = context->Map(
-          gpu_outcome_staging.Get(), 0u, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped
-        );
-        if (map_result == DXGI_ERROR_WAS_STILL_DRAWING) {
-          return;
-        }
-        if (FAILED(map_result)) {
-          disable_gpu_outcome_logging("nonblocking counter map failed");
-          return;
-        }
-        host_sbs_gpu_outcomes::words_t words {};
-        std::memcpy(words.data(), mapped.pData, host_sbs_gpu_outcomes::byte_count);
-        context->Unmap(gpu_outcome_staging.Get(), 0u);
-        gpu_outcome_readback_pending = false;
-        const auto counts = host_sbs_gpu_outcomes::decode(words);
-        if (!counts) {
-          disable_gpu_outcome_logging("counter schema or tag is invalid");
-          return;
-        }
-        if (gpu_outcome_counts.observe(*counts)) {
-          BOOST_LOG(warning) << "Host SBS diagnostic GPU outcome counters restarted; "
-                                "reporting a new counter epoch.";
-        }
+      if (batch.transport_failed) {
+        cached_depth_telemetry = {.failed = true};
         if (telemetry_performance) {
-          telemetry_performance->record_outcomes(*counts, gpu_outcome_copied_at);
+          telemetry_performance->invalidate_outcomes();
         }
-        gpu_outcome_report_pending = true;
       }
-      // A final ready sample can be reported by ordinary idle polls even if no more trace
-      // appends arrive. Once drained, idle polls neither sample the clock nor copy unchanged data.
-      if (gpu_outcome_report_pending && now >= gpu_outcome_next_log) {
-        const auto delta = gpu_outcome_counts.take_delta();
-        const auto totals = gpu_outcome_counts.totals();
-        BOOST_LOG(info) << "Host SBS GPU outcomes: infer=" << delta.infer
-                        << " reuse=" << delta.reuse << " invalid=" << delta.invalid
-                        << " reuse_percent=" << std::round(delta.reuse_percent() * 10.0) / 10.0
-                        << " cumulative_infer=" << totals.infer
-                        << " cumulative_reuse=" << totals.reuse
-                        << " cumulative_invalid=" << totals.invalid;
-        gpu_outcome_next_log = now + 5s;
-        gpu_outcome_report_pending = false;
-      }
-      if (gpu_outcome_copy_needed) {
-        context->CopyResource(gpu_outcome_staging.Get(), gpu_outcome_buffer.Get());
-        context->End(gpu_outcome_readback_query.Get());
-        gpu_outcome_copied_at = now;
-        gpu_outcome_readback_pending = true;
-        gpu_outcome_copy_needed = false;
-      }
+      service_gpu_outcome_logging();
     }
 
     void initialize_gpu_trace() {
@@ -4216,18 +4289,6 @@ namespace models {
         );
         return;
       }
-
-      D3D11_BUFFER_DESC transaction_desc {};
-      transaction_desc.Usage = D3D11_USAGE_DEFAULT;
-      transaction_desc.ByteWidth = near_identical_gpu_decision_byte_count;
-      transaction_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-      transaction_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
-      D3D11_SHADER_RESOURCE_VIEW_DESC transaction_srv_desc {};
-      transaction_srv_desc.Format = DXGI_FORMAT_R32_TYPELESS;
-      transaction_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
-      transaction_srv_desc.BufferEx.FirstElement = 0u;
-      transaction_srv_desc.BufferEx.NumElements = near_identical_gpu_decision_word_count;
-      transaction_srv_desc.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
 
       std::vector<std::uint32_t> initial_ring(host_sbs_gpu_trace::ring_word_count, 0u);
       initial_ring[host_sbs_gpu_trace::word_index(
@@ -4260,16 +4321,6 @@ namespace models {
       constants_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
       const bool resources_ready =
-        SUCCEEDED(device->CreateBuffer(
-          &transaction_desc,
-          nullptr,
-          gpu_trace_transaction_buf.ReleaseAndGetAddressOf()
-        )) &&
-        SUCCEEDED(device->CreateShaderResourceView(
-          gpu_trace_transaction_buf.Get(),
-          &transaction_srv_desc,
-          gpu_trace_transaction_srv.ReleaseAndGetAddressOf()
-        )) &&
         SUCCEEDED(device->CreateBuffer(
           &ring_desc,
           &ring_data,
@@ -4382,6 +4433,7 @@ namespace models {
         return true;
       }
 
+      invalidate_publication();
       auto &cuda = cuda_driver_api::get();
       if (
         cuda_near_identical_decision_res &&
@@ -4577,9 +4629,9 @@ namespace models {
     }
 
     [[nodiscard]] std::uint64_t next_force_infer_transaction_token() noexcept {
-      // Keep host-forced tokens in a visibly distinct nonzero namespace. The record is consumed
-      // only by the GPU and is never read back; uniqueness across this estimator lifetime is
-      // sufficient to reject stale records from an earlier mapped transaction.
+      // Keep host-forced tokens in a visibly distinct nonzero namespace. The GPU owns selection;
+      // a later final-publication snapshot may authenticate the completed receipt. Uniqueness
+      // across this estimator lifetime rejects stale records from an earlier mapped transaction.
       constexpr std::uint64_t force_namespace = 0xf000000000000000ull;
       constexpr std::uint64_t sequence_mask = 0x0fffffffffffffffull;
       force_infer_transaction_sequence =
@@ -4597,14 +4649,10 @@ namespace models {
       if (token == 0u || !near_identical_transaction.buffer) {
         return false;
       }
-      std::array<std::uint32_t, near_identical_gpu_decision_word_count> transaction {};
+      auto transaction = initialize_near_identical_transaction(token, subtitle_work);
       const auto proposal = cuda_conditional_graph::make_proposal(
         cuda_conditional_graph::branch_e::infer,
         token
-      );
-      const auto request = cuda_conditional_graph::make_request(
-        token,
-        subtitle_work
       );
       std::memcpy(
         reinterpret_cast<std::byte *>(transaction.data()) +
@@ -4612,14 +4660,7 @@ namespace models {
         &proposal,
         sizeof(proposal)
       );
-      std::memcpy(
-        reinterpret_cast<std::byte *>(transaction.data()) +
-          near_identical_gpu_request_record_byte_offset,
-        &request,
-        sizeof(request)
-      );
-      if (subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr ||
-          subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr_due) {
+      if (subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr) {
         transaction[near_identical_gpu_decision_word_index(
           near_identical_gpu_decision_word_e::optional_preprocess_x
         )] = (ocr_engine_width + 15u) / 16u;
@@ -4698,12 +4739,12 @@ namespace models {
     [[nodiscard]] bool gpu_undecided_baseline_authorized(
       const gpu_adaptive_reuse_request &request
     ) const noexcept {
-      return request.opaque_followup ?
-               last_gpu_opaque_transaction_frame_id != 0u &&
-                 request.baseline_frame_id == last_gpu_opaque_transaction_frame_id :
-               last_gpu_opaque_transaction_frame_id == 0u &&
-                 has_last_postprocessed_frame_id &&
-                 request.baseline_frame_id == last_postprocessed_frame_id;
+      return cached_current_publication &&
+             publication_is_current(cached_current_publication->expected) &&
+             cached_current_publication->depth_cache_authorized() &&
+             (cached_current_publication->expected.flags &
+              host_sbs_gpu_trace::record_flag_e::subtitle_suppressed) == 0u &&
+             request.baseline_frame_id == cached_current_publication->depth_owner_frame_id;
     }
 
     bool prepare_near_identical_detector(
@@ -4759,17 +4800,9 @@ namespace models {
         subtitle_work,
         request.observation_timestamp_us
       );
-      std::array<std::uint32_t, near_identical_gpu_decision_word_count>
-        initialized_transaction {};
-      const auto transaction_request = cuda_conditional_graph::make_request(
+      const auto initialized_transaction = initialize_near_identical_transaction(
         request.gpu_reuse_decision_token,
         subtitle_work
-      );
-      std::memcpy(
-        reinterpret_cast<std::byte *>(initialized_transaction.data()) +
-          near_identical_gpu_request_record_byte_offset,
-        &transaction_request,
-        sizeof(transaction_request)
       );
       // One full-record write invalidates every prior proposal/receipt and every indirect arg
       // before this frame's fused evidence pass. Optional preprocess starts at zero and is enabled
@@ -6073,6 +6106,7 @@ namespace models {
     }
 
     void release_parallax_v2_resources() {
+      invalidate_publication();
       parallax_v2_producer_active = false;
       depth_coordinate_v2_cbuffer.Reset();
       depth_coordinate_v2_partials_buf.Reset();
@@ -6120,6 +6154,7 @@ namespace models {
     }
 
     bool ensure_subtitle_resources() {
+      invalidate_publication();
       auto create_uint_buffer = [&](
                                   const std::uint32_t word_count,
                                   Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer,
@@ -6341,6 +6376,7 @@ namespace models {
       if (parallax_v2_producer_active) {
         return true;
       }
+      invalidate_publication();
       if (target_w <= 0 || target_h <= 0 || field_w <= 0 || field_h <= 0 ||
           reduce_groups == 0) {
         std::ostringstream reason;
@@ -6855,8 +6891,8 @@ namespace models {
       ID3D11UnorderedAccessView *null_uav = nullptr;
       context->CSSetConstantBuffers(0, 3, constant_buffers);
       // resolve_main already publishes an empty authenticated state for invalid geometry. Keep
-      // that reset inside the same authenticated observation dispatch; only explicit subtitle
-      // suppression freezes SLR byte-for-byte.
+      // that reset inside the same authenticated observation dispatch. Joint depth reuse and
+      // explicit subtitle suppression both leave SLR unchanged.
       (void) locator_geometry_valid;
       context->CSSetShader(subtitle_locator_resolve_cs.Get(), nullptr, 0);
       ID3D11ShaderResourceView *resolve_srvs[8] = {
@@ -6885,8 +6921,8 @@ namespace models {
       context->CSSetUnorderedAccessViews(2, 3, null_resolve_uavs, nullptr);
 
       // Base remains immutable. Every authenticated subtitle observation writes the complete
-      // out-of-place field, including authoritative empty/abstaining observations. Ordinary work
-      // holds the prior conditioned target on reuse; cadence-due work may advance it independently.
+      // out-of-place field, including authoritative empty/abstaining observations. Reuse holds
+      // the complete depth, subtitle and conditioned target together.
       ID3D11ShaderResourceView *condition_srvs[5] = {
         nullptr,
         nullptr,
@@ -6909,30 +6945,9 @@ namespace models {
       return true;
     }
 
-    void dispatch_pending_gpu_completion_trace() {
-      if (!diagnostics_enabled) {
-        pending_gpu_trace_append = {};
-        return;
-      }
-      const auto append = std::exchange(pending_gpu_trace_append, {});
-      if (!append.valid || !gpu_trace_cs || !gpu_trace_transaction_buf ||
-          !gpu_trace_transaction_srv || !near_identical_transaction.buffer ||
-          !gpu_trace_cbuffer || !gpu_trace_ring_uav || !subtitle_locator_state_srv ||
-          !subtitle_condition_params_srv || !gpu_trace_provenance) {
-        return;
-      }
-      // Snapshot the complete postprocessed CBRG/RQST transaction only for this append, after the
-      // production postprocess timer has ended and before the next enqueue can reuse the source.
-      context->CopyResource(
-        gpu_trace_transaction_buf.Get(), near_identical_transaction.buffer.Get()
-      );
-
-      const auto domain_tag = near_identical_input_domain_tag(
-        pending_input_region,
-        pending_color_space,
-        static_cast<std::uint32_t>(target_w),
-        static_cast<std::uint32_t>(target_h)
-      );
+    [[nodiscard]] std::uint32_t pending_gpu_completion_flags(
+      const pending_gpu_trace_append_t &append
+    ) const noexcept {
       std::uint32_t flags = 0u;
       if (append.input_domain_reset) {
         flags |= host_sbs_gpu_trace::record_flag_e::input_domain_reset;
@@ -6952,6 +6967,100 @@ namespace models {
       if (append.subtitle_branch_gated) {
         flags |= host_sbs_gpu_trace::record_flag_e::subtitle_branch_gated;
       }
+      return flags;
+    }
+
+    void snapshot_pending_publication_receipt() {
+      current_publication = {
+        .estimator_generation = publication_generation,
+        .publication_sequence = publication_sequence,
+        .analysis_generation = pending_input_region.analysis_generation,
+        .frame_id = pending_frame_id,
+        .transaction_token = pending_wrapper_transaction_token,
+        .domain_tag = near_identical_input_domain_tag(
+          pending_input_region, pending_color_space,
+          static_cast<std::uint32_t>(target_w), static_cast<std::uint32_t>(target_h)
+        ),
+        .observation_timestamp_us = pending_observation_timestamp_us,
+        .baseline_frame_id = pending_gpu_transaction_baseline_frame_id,
+        .width = static_cast<std::uint32_t>(target_w),
+        .height = static_cast<std::uint32_t>(target_h),
+        .raw_coordinate_scale = parallax_v2_raw_coordinate_scale,
+        .expected_work = cuda_conditional_graph::work_flags_value(pending_subtitle_work),
+        .submission_class = gpu_undecided_postprocess_pending() ?
+                              publication_receipt::submission_class_e::gpu_undecided :
+                              publication_receipt::submission_class_e::force_infer,
+        .flags = pending_gpu_completion_flags(pending_gpu_trace_append),
+        .host_subtitle_outcome = pending_gpu_trace_append.host_subtitle_outcome,
+      };
+      publication_readback.submit(
+        {{
+          near_identical_transaction.buffer.Get(),
+          near_identical_history_owner.buffer.Get(),
+          subtitle_locator_state_buf.Get(),
+          subtitle_condition_params_buf.Get(),
+          depth_coordinate_v2_state_buf.Get(),
+          minmax_ema_buf.Get(),
+          cut_state_buf.Get(),
+          gpu_outcome_buffer.Get(),
+        }},
+        current_publication
+      );
+    }
+
+    [[nodiscard]] bool publication_is_current(
+      const publication_receipt::expected_t &publication
+    ) const noexcept {
+      return is_operational() && publication_receipt::valid_expected(current_publication) &&
+             current_publication == publication;
+    }
+
+    publication_receipt_poll_result poll_publication_receipts() {
+      auto result = publication_readback.poll(publication_generation);
+      consume_completion_diagnostics(result);
+      if (result.transport_failed) {
+        cached_current_publication.reset();
+      }
+      // A receipt for B may arrive after C was already accepted. It still describes B's final
+      // views, but cannot supply admission authority across the pending C transaction.
+      if (!has_previous_frame && !result.transport_failed) {
+        for (std::size_t index = 0u; index < result.count; ++index) {
+          const auto &receipt = result.receipts[index];
+          if (publication_is_current(receipt.expected)) {
+            cached_current_publication = receipt;
+          }
+        }
+      }
+      // Idle diagnostics may drain a slot before the rendering caller polls. Keep one current
+      // proof, replacing the old scalar owner cache; no extra queue or duplicate GPU reads.
+      if (cached_current_publication && publication_is_current(cached_current_publication->expected)) {
+        result.current_publication = cached_current_publication;
+      }
+      return result;
+    }
+
+    void dispatch_pending_gpu_completion_trace() {
+      if (!diagnostics_enabled) {
+        return;
+      }
+      const auto append = pending_gpu_trace_append;
+      if (!append.valid || !gpu_trace_cs || !near_identical_transaction.srv ||
+          !gpu_trace_cbuffer || !gpu_trace_ring_uav || !subtitle_locator_state_srv ||
+          !subtitle_condition_params_srv || !gpu_trace_provenance) {
+        return;
+      }
+      // Append after complete postprocessing and before the shared completion snapshot, so its
+      // cumulative counters include this transaction even when it is the final frame.
+      // The immediate context orders this read before the next transaction upload. Its existing
+      // raw SRV is safe to borrow here after finalization has unbound the transaction UAV.
+
+      const auto domain_tag = near_identical_input_domain_tag(
+        pending_input_region,
+        pending_color_space,
+        static_cast<std::uint32_t>(target_w),
+        static_cast<std::uint32_t>(target_h)
+      );
+      const auto flags = pending_gpu_completion_flags(append);
       const auto submission_class =
         pending_submission_class == pending_submission_class_e::gpu_undecided ?
           host_sbs_gpu_trace::submission_class_e::gpu_undecided :
@@ -6982,7 +7091,7 @@ namespace models {
         gpu_trace_cbuffer.Get(), 0u, nullptr, constants.data(), 0u, 0u
       );
       ID3D11ShaderResourceView *inputs[3] = {
-        gpu_trace_transaction_srv.Get(),
+        near_identical_transaction.srv.Get(),
         subtitle_locator_state_srv.Get(),
         subtitle_condition_params_srv.Get(),
       };
@@ -7004,10 +7113,7 @@ namespace models {
       context->CSSetUnorderedAccessViews(0u, 2u, null_outputs, nullptr);
       context->CSSetConstantBuffers(0u, 1u, &null_constant);
       context->CSSetShader(nullptr, nullptr, 0u);
-      if (gpu_outcome_uav) {
-        gpu_outcome_copy_needed = true;
-      }
-      service_gpu_outcome_logging();
+
     }
 
     bool ensure_parallax_v2_coordinate_diagnostic_resource() {
@@ -7197,6 +7303,9 @@ namespace models {
       r.gpu_undecided_transaction_enqueued =
         gpu_undecided_transaction_enqueued;
       r.gpu_undecided_completion = gpu_undecided_completion;
+      if (completed_frame_valid && current_publication.frame_id == completed_frame_id) {
+        r.publication = current_publication;
+      }
       r.subtitle_ocr_inference_enqueued = subtitle_ocr_inference_enqueued;
       r.cuda_graph_active = depth_conditional_graph.ready() &&
                             !depth_inference_graph.policy.capture_failed;
@@ -7338,8 +7447,10 @@ namespace models {
         end_d3d_perf(d3d_timer);
         return make_result();
       }
-      mark_d3d_post_end(d3d_timer);
       dispatch_pending_gpu_completion_trace();
+      snapshot_pending_publication_receipt();
+      pending_gpu_trace_append = {};
+      mark_d3d_post_end(d3d_timer);
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
       bool composite_snapshots_valid = false;
@@ -7636,6 +7747,7 @@ namespace models {
     }
 
     void reset_temporal_state_for_input_domain() {
+      invalidate_publication();
       // Domain changes are rare (video selection/extent or full-frame fallback). Reset every
       // history that could otherwise compare browser pixels with video-local pixels. All writes
       // are ordered on the owning immediate context; there is no CPU readback or synchronization.
@@ -7734,8 +7846,6 @@ namespace models {
           context->ClearUnorderedAccessViewFloat(uav, zero4);
         }
       }
-      has_last_postprocessed_frame_id = false;
-      last_gpu_opaque_transaction_frame_id = 0u;
     }
 
     bool prepare_pending_input_domain() {
@@ -7756,6 +7866,10 @@ namespace models {
       d3d_perf_slot *perf_slot,
       const bool input_domain_reset
     ) {
+      // Borrowed SRVs stop identifying the prior publication before any write, including a
+      // failed attempt or a repeated caller frame ID. Readback slots keep their immutable key.
+      invalidate_publication();
+      ++publication_sequence;
       pending_gpu_trace_append = {};
       const bool subtitle_publication_branch_opaque =
         gpu_undecided_postprocess_pending();
@@ -7922,11 +8036,6 @@ namespace models {
       {
         // scene_seed_main has just published the exact age from the last receipt-authorized infer
         // postprocess. Reuse dispatches zero groups and leaves all cut/history state untouched.
-        if (!gpu_undecided_postprocess_pending()) {
-          last_postprocessed_frame_id = pending_frame_id;
-          has_last_postprocessed_frame_id = true;
-        }
-
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
         ID3D11ShaderResourceView *analysis_srvs[9] = {
           depth_srv.Get(),
@@ -8028,19 +8137,17 @@ namespace models {
         mark_d3d_parallax_end(perf_slot);
       }
 
-      if (diagnostics_enabled) {
-        pending_gpu_trace_append = {
-          .host_subtitle_outcome = trace_host_subtitle_outcome,
-          .ocr_record_submitted =
-            !subtitle_publication_branch_opaque && ocr_record_submitted,
-          .subtitle_work_suppressed = subtitle_work_suppressed,
-          .condition_executed = trace_condition_executed,
-          .subtitle_branch_gated =
-            subtitle_publication_branch_opaque && !subtitle_work_suppressed,
-          .input_domain_reset = input_domain_reset,
-          .valid = true,
-        };
-      }
+      pending_gpu_trace_append = {
+        .host_subtitle_outcome = trace_host_subtitle_outcome,
+        .ocr_record_submitted =
+          !subtitle_publication_branch_opaque && ocr_record_submitted,
+        .subtitle_work_suppressed = subtitle_work_suppressed,
+        .condition_executed = trace_condition_executed,
+        .subtitle_branch_gated =
+          subtitle_publication_branch_opaque && !subtitle_work_suppressed,
+        .input_domain_reset = input_domain_reset,
+        .valid = true,
+      };
 
       return true;
     }
@@ -8067,10 +8174,6 @@ namespace models {
                           << "% (" << throughput_stats_busy_drops << '/' << throughput_stats_calls
                            << "), force-infer roots " << throughput_stats_force_infer_enqueues
                            << ", GPU-undecided roots " << throughput_stats_gpu_undecided_enqueues
-                           << ", GPU-undecided initial roots "
-                           << throughput_stats_gpu_undecided_initial_enqueues
-                          << ", GPU-undecided follow-up roots "
-                          << throughput_stats_gpu_undecided_followup_enqueues
                           << ", optional OCR armed " << throughput_stats_ocr_armed
                           << ", native subtitle suppressions " << throughput_stats_subtitle_suppressed;
           throughput_stats_start = now;
@@ -8079,8 +8182,6 @@ namespace models {
           throughput_stats_enqueues = 0;
           throughput_stats_force_infer_enqueues = 0;
           throughput_stats_gpu_undecided_enqueues = 0;
-          throughput_stats_gpu_undecided_initial_enqueues = 0;
-          throughput_stats_gpu_undecided_followup_enqueues = 0;
           throughput_stats_completions = 0;
           throughput_stats_subtitle_suppressed = 0;
           throughput_stats_ocr_armed = 0;
@@ -8561,12 +8662,12 @@ namespace models {
           mark_terminal_failure();
           return {};
         }
-        // Production post-process timing ends at the normalized depth result. The two stable
-        // Dump 3D copies and canonical-coordinate pass below are explicit diagnostic work and
-        // must not contaminate live
-        // depth_postprocess_gpu samples.
-        mark_d3d_post_end(d3d_timer);
+        // Measure the complete publication, including enabled counter/trace production and the
+        // single routine readback snapshot. Explicit Dump 3D exports remain outside this interval.
         dispatch_pending_gpu_completion_trace();
+        snapshot_pending_publication_receipt();
+        pending_gpu_trace_append = {};
+        mark_d3d_post_end(d3d_timer);
         if (snapshot_raw_model_depth && !completed_gpu_undecided) {
           // The diagnostic map belongs to the completed raw tensor, including its exact content
           // rectangle. The current-frame preprocess has not run yet, so the exclusion texture is
@@ -8730,8 +8831,7 @@ namespace models {
         ocr_available && ocr_exec_context && ocr_input_uav && ocr_output_srv &&
         cuda_ocr_in_res && cuda_ocr_out_res;
       bool ocr_frame_eligible =
-        (accepted_optional_work == depth_optional_work_mode_e::ordinary ||
-         accepted_optional_work == depth_optional_work_mode_e::ordinary_due) &&
+        accepted_optional_work == depth_optional_work_mode_e::ordinary &&
         ocr_interop_available && ocr_preprocess_cs && ocr_preprocess_cbuffer &&
         ocr_box_cells_cs && ocr_box_resolve_cs &&
         near_identical_finalize_cs && ocr_cell_stats_srv &&
@@ -8814,8 +8914,8 @@ namespace models {
       }
 
       // CUDA cannot map the raw transaction buffer while D3D owns it. Copy the proposal-authored
-      // preprocess args to the D3-only indirect twin, then run the crop for authenticated OCR:
-      // ordinary work on infer, or cadence-due work on either resolved depth branch.
+      // preprocess args to the D3D-only indirect twin, then run the crop for authenticated OCR
+      // only when the shared analysis decision selects inference.
       // Malformed/missing proposals do not consume stale input.
       context->CopyResource(
         near_identical_transaction.dispatch.Get(), near_identical_transaction.buffer.Get()
@@ -9295,8 +9395,7 @@ namespace models {
             if (wrapper_ready && !is_terminal()) {
               const bool launch_ocr_may_participate =
                 optional_child_ready &&
-                (subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr ||
-                 subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr_due);
+                subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr;
               // cuGraphLaunch failure does not prove that neither child was partially submitted.
               // Establish attempt lineage before the call so a suppressed transaction also retains
               // OCR ownership from any earlier root in this shared stream lifetime.
@@ -9409,9 +9508,7 @@ namespace models {
           accepted_submission_class == pending_submission_class_e::gpu_undecided ?
             adaptive_reuse_request.baseline_frame_id : 0u;
         pending_observation_timestamp_us = adaptive_reuse_request.observation_timestamp_us;
-        last_gpu_opaque_transaction_frame_id =
-          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
-            frame_id : 0u;
+        cached_current_publication.reset();
         if (diagnostics_enabled) {
           throughput_stats_enqueues++;
           if (accepted_submission_class == pending_submission_class_e::force_infer) {
@@ -9420,11 +9517,6 @@ namespace models {
             accepted_submission_class == pending_submission_class_e::gpu_undecided
           ) {
             throughput_stats_gpu_undecided_enqueues++;
-            if (adaptive_reuse_request.opaque_followup) {
-              throughput_stats_gpu_undecided_followup_enqueues++;
-            } else {
-              throughput_stats_gpu_undecided_initial_enqueues++;
-            }
           }
           if (accepted_optional_work == depth_optional_work_mode_e::suppress_subtitle) {
             throughput_stats_subtitle_suppressed++;
@@ -9450,8 +9542,7 @@ namespace models {
         completed_input_domain_reset,
         completed_subtitle_work_suppressed,
         enqueued && ocr_armed &&
-          (accepted_optional_work == depth_optional_work_mode_e::ordinary ||
-           accepted_optional_work == depth_optional_work_mode_e::ordinary_due),
+          accepted_optional_work == depth_optional_work_mode_e::ordinary,
         enqueued &&
           accepted_submission_class == pending_submission_class_e::gpu_undecided,
         completed_gpu_undecided
@@ -9547,21 +9638,39 @@ namespace models {
                    pending_depth_poll_result {.ready = true};
   }
 
-  void video_depth_estimator::poll_gpu_outcome_diagnostics() {
-    if (pimpl) {
-      pimpl->service_gpu_outcome_logging();
-    }
+  void video_depth_estimator::poll_gpu_completion() {
+    // Use the same poll (including its measured CPU cost) during idle owner-thread checks.
+    // Functional proof survives in the single exact-current cache for the rendering caller.
+    (void) poll_publication_receipts();
   }
 
-  depth_telemetry_poll_result video_depth_estimator::poll_depth_telemetry(
-    bool schedule_copy,
-    std::uint64_t sampled_frame_id
-  ) {
+  publication_receipt_poll_result video_depth_estimator::poll_publication_receipts() {
     if (!pimpl) {
-      depth_telemetry_poll_result result;
-      result.failed = schedule_copy;
-      return result;
+      return {};
     }
-    return pimpl->poll_depth_telemetry(schedule_copy, sampled_frame_id);
+    const auto started = pimpl->diagnostics_enabled ?
+                           std::chrono::steady_clock::now() :
+                           std::chrono::steady_clock::time_point {};
+    auto result = pimpl->poll_publication_receipts();
+    if (pimpl->diagnostics_enabled) {
+      sbs_perf::add_sample_ms(
+        "publication_receipt_poll_cpu",
+        std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started
+        ).count()
+      );
+    }
+    return result;
   }
+
+  bool video_depth_estimator::publication_is_current(
+    const host_sbs_gpu_completion_receipt::expected_t &publication
+  ) const noexcept {
+    return pimpl && pimpl->publication_is_current(publication);
+  }
+
+  depth_telemetry_poll_result video_depth_estimator::latest_depth_telemetry() const {
+    return pimpl ? pimpl->cached_depth_telemetry : depth_telemetry_poll_result {.failed = true};
+  }
+
 }  // namespace models

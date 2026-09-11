@@ -1152,6 +1152,50 @@ class LabelProvenanceTests(unittest.TestCase):
             run_eval.validate_preprocess_identity_meta(missing)
 
 
+class PerformanceEvidenceContractTests(unittest.TestCase):
+    def setUp(self):
+        with open(os.path.join(SCRIPT_DIR, "thresholds.json"), encoding="utf-8") as stream:
+            self.thresholds = json.load(stream)
+
+    def test_current_transaction_samples_satisfy_required_evidence_without_aliasing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "sbs_perf.json")
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump({"stages": {
+                    "depth_conditional_transaction": {"p50_ms": 2.5},
+                    "warp_infer": {"p50_ms": 0.2},
+                }}, stream)
+            current = run_eval.load_perf_metrics(path)
+        self.assertNotIn("depth_infer", current)
+        self.assertEqual(run_eval.perf_evidence_failures(
+            None, current, self.thresholds, "demo"), [])
+        # A legacy pure-inference sample does not prove the broader joined root's duration.
+        failures = run_eval.perf_evidence_failures(
+            None, {"depth_infer": 2.5, "warp_infer": 0.2}, self.thresholds, "demo")
+        self.assertEqual(failures, [{
+            "clip": "demo", "metric": "perf:depth_conditional_transaction",
+            "missing": True, "source": "current",
+        }])
+
+    def test_transaction_regression_preserves_absolute_and_relative_tolerances(self):
+        thresholds = {"metrics": {}, "perf_ms": self.thresholds["perf_ms"]}
+        for baseline_ms, allowed_ms in ((2.0, 3.0), (10.0, 13.0)):
+            baseline = {"aggregate": {}, "perf_ms": {
+                "depth_conditional_transaction": baseline_ms, "warp_infer": 0.2,
+            }}
+            for current_ms, regression_expected in ((allowed_ms, False),
+                                                     (allowed_ms + 0.01, True)):
+                with self.subTest(baseline_ms=baseline_ms, current_ms=current_ms):
+                    evidence, regressions = run_eval.score_baseline_comparison(
+                        {}, {"depth_conditional_transaction": current_ms, "warp_infer": 0.2},
+                        [], {}, {}, baseline, thresholds, "demo")
+                    self.assertEqual(evidence, [])
+                    self.assertEqual(bool(regressions), regression_expected)
+                    if regression_expected:
+                        self.assertEqual(regressions[0]["metric"],
+                                         "perf:depth_conditional_transaction")
+
+
 class ReportEvidenceContractTests(unittest.TestCase):
     def test_source_evidence_uses_exact_map_and_never_legacy_matcher(self):
         path = os.path.join(SCRIPT_DIR, "build_report.py")
@@ -1310,7 +1354,7 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 with open(os.path.join(artifact_dir, "sbs_perf.json"), "w",
                           encoding="utf-8") as stream:
                     json.dump({"stages": {
-                        "depth_infer": {"p50_ms": 1.0},
+                        "depth_conditional_transaction": {"p50_ms": 1.0},
                         "warp_infer": {"p50_ms": 1.0},
                     }}, stream)
 
@@ -1640,6 +1684,7 @@ class ReportEvidenceContractTests(unittest.TestCase):
             self.assertIn("replacement OCR-box trace", report)
             self.assertNotIn("9876.54", report)
             self.assertIn("render_integrity", report)
+            self.assertIn("depth conditional transaction", report)
             self.assertNotIn("__CONCLUSION__", report)
             self.assertNotIn("__GROUP_RADARS__", report)
             self.assertTrue(os.path.exists(os.path.join(directory, "decision.json")))

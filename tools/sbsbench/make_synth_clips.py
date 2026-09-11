@@ -53,6 +53,8 @@ EXPOSURE_GAINS_PERCENT = (
 SHOT_STATE_MONITOR_FROM_FRAME = 2
 EXPOSURE_STABLE_FROM_FRAME = 10
 SHOT_CUT_FRAME = N // 2 + 1
+# This fixture uses geometry confirmation; the appearance-backed scene_cut is immediate.
+FLAT_TRANSITION_PULSE_FRAME = SHOT_CUT_FRAME + 1
 SUSTAINED_SETUP_CUT_FRAME = 11
 SUSTAINED_TRUE_CUT_FRAME = 27
 SUSTAINED_ESCAPE_PULSE_FRAME = SUSTAINED_TRUE_CUT_FRAME + 1
@@ -188,8 +190,8 @@ DESC = {
     ),
     "flat_transition": (
         "Textured depth scene cutting to a static flat page: normalization recovery and "
-        "false-stereo decay. Shot-state expectations re-verified against the V2 cut-only "
-        "analysis trace on 2026-08-04 (pulse schedule unchanged)."
+        "false-stereo decay. The source changes at frame 13; ordinary geometry confirmation "
+        "emits the single cut pulse at frame 14."
     ),
     "exposure_flash_strobe": (
         "Static synthetic depth scene under exact global RGB gain flashes/strobe: exposure must "
@@ -845,7 +847,7 @@ def clip_metadata(clip):
             "shot_state_contract": {
                 "kind": "hard-cut",
                 "monitor_from_frame": SHOT_STATE_MONITOR_FROM_FRAME,
-                "expected_pulse_frames": [SHOT_CUT_FRAME],
+                "expected_pulse_frames": [FLAT_TRANSITION_PULSE_FRAME],
             },
         }
     if clip == "scene_cut":

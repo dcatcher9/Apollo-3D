@@ -1772,18 +1772,28 @@ namespace platf::primary_display {
       }
       const auto index = find_path(*current, device_path);
       if (!retained) {
-        if (!index || *index >= current->colors.size() || !current->colors[*index]) {
+        // Windows can deactivate the source or lose its color readback before disconnect
+        // reaches us. That must not block physical recovery. Retain only this exact identity's
+        // saved exclusive mode; reactivation still resolves and verifies the actual target.
+        const bool current_snapshot_complete = index && *index < current->colors.size() && current->colors[*index];
+        const auto *retained_snapshot = &*current;
+        auto retained_index = index;
+        if (!current_snapshot_complete && loaded.journal && loaded.journal->exclusive_topology) {
+          retained_snapshot = &*loaded.journal->exclusive_topology;
+          retained_index = find_path(*retained_snapshot, device_path);
+        }
+        if (!retained_index || *retained_index >= retained_snapshot->colors.size() || !retained_snapshot->colors[*retained_index]) {
           return false;
         }
         std::optional<POINT> cursor_before_pause;
-        if (io_.query_cursor) {
+        if (current_snapshot_complete && io_.query_cursor) {
           try {
             cursor_before_pause = io_.query_cursor();
           } catch (...) {
             // A cursor bookmark is optional; its failure must not delay display restoration.
           }
         }
-        retained = std::make_shared<retained_display_t>(retained_display_t {display_spec(*current, *index)});
+        retained = std::make_shared<retained_display_t>(retained_display_t {display_spec(*retained_snapshot, *retained_index)});
         if (cursor_before_pause) {
           const auto &source = retained->display.source;
           const auto x = static_cast<std::int64_t>(cursor_before_pause->x) - source.position.x;

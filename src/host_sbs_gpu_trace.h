@@ -12,8 +12,8 @@
 
 namespace models::host_sbs_gpu_trace {
   inline constexpr std::uint32_t ring_schema = 3u;
-  inline constexpr std::uint32_t dump_contract_schema = 3u;
-  inline constexpr std::uint32_t decoded_trace_schema = 4u;
+  inline constexpr std::uint32_t dump_contract_schema = 4u;
+  inline constexpr std::uint32_t decoded_trace_schema = 5u;
   inline constexpr std::uint32_t ring_tag = 0x48525447u;  // GTRH in little-endian memory.
   inline constexpr std::uint32_t record_tag = 0x31525447u;  // GTR1.
   inline constexpr std::uint32_t capacity = 300u;
@@ -223,22 +223,17 @@ namespace models::host_sbs_gpu_trace {
         (expected_work == work_flags_value(work_flag_e::optional_ocr) ||
          expected_work == work_flags_value(work_flag_e::subtitle_observation)) &&
         host_outcome == host_subtitle_outcome_e::ordinary_record;
-      const bool cadence_due =
-        (expected_work == work_flags_value(work_flag_e::optional_ocr_due) ||
-         expected_work == work_flags_value(work_flag_e::subtitle_observation_due)) &&
-        host_outcome == host_subtitle_outcome_e::ordinary_record;
-      if (!infer_coupled && !cadence_due) {
+      if (!infer_coupled) {
         return subtitle_disposition_e::invalid;
       }
-      if (infer_coupled && receipt.depth == depth_disposition_e::reuse) {
+      if (receipt.depth == depth_disposition_e::reuse) {
         return !receipt.optional_ocr_executed ?
           subtitle_disposition_e::held_with_depth : subtitle_disposition_e::invalid;
       }
-      if (receipt.depth != depth_disposition_e::infer &&
-          !(cadence_due && receipt.depth == depth_disposition_e::reuse)) {
+      if (receipt.depth != depth_disposition_e::infer) {
         return subtitle_disposition_e::invalid;
       }
-      if (expected_work == work_flags_value(work_flag_e::optional_ocr) || cadence_due) {
+      if (expected_work == work_flags_value(work_flag_e::optional_ocr)) {
         return receipt.optional_ocr_executed ?
           subtitle_disposition_e::optional_ocr : subtitle_disposition_e::abstention;
       }
@@ -252,9 +247,10 @@ namespace models::host_sbs_gpu_trace {
           !record_published && !conditioned ?
         subtitle_disposition_e::suppressed : subtitle_disposition_e::invalid;
     }
-    if (expected_work == work_flags_value(work_flag_e::optional_ocr) ||
-        expected_work == work_flags_value(work_flag_e::optional_ocr_due) ||
-        expected_work == work_flags_value(work_flag_e::subtitle_observation_due)) {
+    if (receipt.receipt_valid && receipt.depth == depth_disposition_e::reuse) {
+      return subtitle_disposition_e::invalid;
+    }
+    if (expected_work == work_flags_value(work_flag_e::optional_ocr)) {
       if (host_outcome != host_subtitle_outcome_e::ordinary_record || suppressed ||
           !record_published || !conditioned) {
         return subtitle_disposition_e::invalid;

@@ -41,8 +41,6 @@ TEST(HostSbsNearIdenticalPolicyTest, RawDecisionLayoutMatchesCudaBridge) {
   EXPECT_EQ(models::near_identical_history_owner_word_count, 10u);
   EXPECT_EQ(models::near_identical_work_optional_ocr, 1u);
   EXPECT_EQ(models::near_identical_work_subtitle_observation, 2u);
-  EXPECT_EQ(models::near_identical_work_optional_ocr_due, 8u);
-  EXPECT_EQ(models::near_identical_work_subtitle_observation_due, 16u);
 }
 
 TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparatorRemains) {
@@ -633,23 +631,53 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
       signature_refresh_assignment + 1u
     ),
     std::string::npos
-  ) << "An accepted opaque root must not require a blind force successor";
+  ) << "Only a CUDA signature change requires the separate force-infer repair path";
   EXPECT_NE(
     estimator.find("!detail::cuda_graph_signature_matches("),
     std::string::npos
   );
   EXPECT_NE(estimator.find("gpu_undecided_baseline_authorized("), std::string::npos);
-  EXPECT_NE(estimator.find("request.opaque_followup"), std::string::npos);
+  EXPECT_EQ(estimator.find("request.opaque_followup"), std::string::npos);
   EXPECT_NE(
-    estimator.find("last_gpu_opaque_transaction_frame_id == 0u &&"),
+    estimator.find("request.baseline_frame_id == cached_current_publication->depth_owner_frame_id"),
     std::string::npos
-  ) << "A stale CPU-known baseline must not masquerade as a new initial root after opaque work";
+  ) << "Adaptive comparison must name the receipt's actual infer owner, not completed color";
   EXPECT_NE(
-    estimator.find("last_gpu_opaque_transaction_frame_id ="),
+    estimator.find("publication_is_current(receipt.expected)"),
     std::string::npos
   );
-  EXPECT_NE(estimator.find("GPU-undecided initial roots"), std::string::npos);
-  EXPECT_NE(estimator.find("GPU-undecided follow-up roots"), std::string::npos);
+  EXPECT_NE(estimator.find("cached_current_publication = receipt;"), std::string::npos);
+  EXPECT_EQ(estimator.find("last_gpu_opaque_transaction_frame_id"), std::string::npos);
+  EXPECT_EQ(estimator.find("GPU-undecided initial roots"), std::string::npos);
+  EXPECT_EQ(estimator.find("GPU-undecided follow-up roots"), std::string::npos);
+  std::size_t publication_paths = 0u;
+  for (auto diagnostic_trace = estimator.find("dispatch_pending_gpu_completion_trace();");
+       diagnostic_trace != std::string::npos;
+       diagnostic_trace = estimator.find("dispatch_pending_gpu_completion_trace();", diagnostic_trace + 1u)) {
+    const auto publication = estimator.find("snapshot_pending_publication_receipt();", diagnostic_trace);
+    ASSERT_NE(publication, std::string::npos);
+    const auto production_end = estimator.find("mark_d3d_post_end(d3d_timer);", publication);
+    ASSERT_NE(production_end, std::string::npos);
+    EXPECT_LT(diagnostic_trace, publication);
+    EXPECT_LT(publication, production_end)
+      << "The shared snapshot includes current cumulative outcomes and all copy cost is timed";
+    const auto next_trace = estimator.find("dispatch_pending_gpu_completion_trace();", diagnostic_trace + 1u);
+    EXPECT_TRUE(next_trace == std::string::npos || production_end < next_trace);
+    ++publication_paths;
+  }
+  EXPECT_EQ(publication_paths, 2u);
+  const auto trace_begin = estimator.find("void dispatch_pending_gpu_completion_trace()");
+  const auto trace_end = estimator.find("bool ensure_parallax_v2_coordinate_diagnostic_resource()", trace_begin);
+  ASSERT_NE(trace_begin, std::string::npos);
+  ASSERT_NE(trace_end, std::string::npos);
+  const auto trace_body = estimator.substr(trace_begin, trace_end - trace_begin);
+  EXPECT_NE(trace_body.find("near_identical_transaction.srv.Get()"), std::string::npos);
+  EXPECT_EQ(trace_body.find("CopyResource("), std::string::npos);
+  const auto trace_dispatch = trace_body.find("context->Dispatch(1u, 1u, 1u);");
+  ASSERT_NE(trace_dispatch, std::string::npos);
+  EXPECT_NE(trace_body.find("context->CSSetShaderResources(0u, 3u, null_inputs);", trace_dispatch),
+            std::string::npos)
+    << "Release the producer SRV binding before the next transaction upload or CUDA map";
   EXPECT_NE(
     estimator.find("using near_identical_constants_t = std::array<std::uint32_t, 20u>"),
     std::string::npos
@@ -830,8 +858,8 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_EQ(shader.find("NearIdenticalSubtitleStateSteady"), std::string::npos);
   EXPECT_NE(shader.find("near_identical_expected_work"), std::string::npos);
   EXPECT_NE(shader.find("force_exact_publication"), std::string::npos);
-  EXPECT_NE(shader.find("NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE"), std::string::npos);
-  EXPECT_NE(
+  EXPECT_EQ(shader.find("NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE"), std::string::npos);
+  EXPECT_EQ(
     shader.find("NEAR_IDENTICAL_WORK_SUBTITLE_OBSERVATION_DUE"),
     std::string::npos
   );
@@ -1528,23 +1556,26 @@ namespace {
       const std::uint32_t reduce_groups = reduction_group_count,
       const std::uint32_t groups_x = tile_group_width,
       const std::uint32_t groups_y = tile_group_height,
-      const std::uint32_t group_count = tile_group_count
+      const std::uint32_t group_count = tile_group_count,
+      const std::uint64_t candidate_frame_id = current_frame_id,
+      const std::uint64_t observation_timestamp_us = current_observation_timestamp_us,
+      const std::uint32_t request_work = 0u
     ) {
       context_->UpdateSubresource(
         tile_buffer_.Get(), 0u, nullptr, tiles.data(), 0u, 0u
       );
-      initialize_transaction();
+      initialize_transaction(request_work);
       update_detector_constants(
         1u,
         groups_x,
         groups_y,
-        current_frame_id,
+        candidate_frame_id,
         baseline_frame_id,
         request_token,
-        current_observation_timestamp_us,
+        observation_timestamp_us,
         0u,
         reduce_groups,
-        0u,
+        request_work,
         group_count
       );
       ID3D11Buffer *constants[2] = {depth_constants_.Get(), detector_constants_.Get()};
@@ -1644,6 +1675,13 @@ namespace {
         ignored,
         error
       );
+    }
+
+    bool read_history_owner(
+      std::array<std::uint32_t, models::near_identical_history_owner_word_count> &owner,
+      std::string &error
+    ) {
+      return read_buffer(history_owner_buffer_.Get(), owner, error);
     }
 
     bool seed_scene_from_history_owner(
@@ -1769,7 +1807,8 @@ namespace {
       const std::uint32_t request_work = models::near_identical_work_optional_ocr,
       const bool bind_optional_cookie = true,
       const std::uint32_t expected_work = std::numeric_limits<std::uint32_t>::max(),
-      const std::uint32_t reduce_groups = subtitle_reduction_group_count
+      const std::uint32_t reduce_groups = subtitle_reduction_group_count,
+      const bool valid_ocr_shape = true
     ) {
       if (!read_decision(decision, error)) return false;
       const auto resolved = static_cast<std::uint32_t>(branch);
@@ -1813,7 +1852,7 @@ namespace {
       update_depth_constants(
         subtitle_content, subtitle_field_width, subtitle_field_height
       );
-      update_ocr_constants();
+      update_ocr_constants(valid_ocr_shape);
       const std::array<std::uint32_t, models::near_identical_history_owner_word_count>
         owner {
           models::near_identical_history_owner_contract_tag,
@@ -2121,7 +2160,7 @@ namespace {
       );
     }
 
-    void update_ocr_constants() {
+    void update_ocr_constants(const bool valid_shape = true) {
       constexpr std::uint64_t analysis_generation = 0x1020304050607080ull;
       const std::array<std::uint32_t, 16> constants {
         static_cast<std::uint32_t>(current_frame_id),
@@ -2130,7 +2169,7 @@ namespace {
         static_cast<std::uint32_t>(analysis_generation >> 32u),
         1920u,
         1080u,
-        subtitle_field_width,
+        valid_shape ? subtitle_field_width : subtitle_field_width + 1u,
         subtitle_field_height,
         900u,
         180u,
@@ -2700,45 +2739,14 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, OptionalPreprocessRequiresAuthenticate
     1u
   );
 
-  ASSERT_TRUE(fixture.run_detector(
-    previous,
-    previous,
-    history_state(1u),
-    decision,
-    error,
-    reduction_group_count,
-    models::near_identical_work_optional_ocr_due
-  )) << error;
-  EXPECT_EQ(
-    decision[word(models::near_identical_gpu_decision_word_e::decision)],
-    static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::reuse)
-  );
-  EXPECT_EQ(
-    decision[word(models::near_identical_gpu_decision_word_e::optional_preprocess_x)],
-    60u
-  ) << "cadence-due OCR preprocesses independently of the depth branch";
-  EXPECT_EQ(
-    decision[word(models::near_identical_gpu_decision_word_e::optional_preprocess_y)],
-    10u
-  );
-
-  ASSERT_TRUE(fixture.run_detector(
-    previous,
-    previous,
-    history_state(1u),
-    decision,
-    error,
-    reduction_group_count,
-    models::near_identical_work_subtitle_observation_due
-  )) << error;
-  EXPECT_EQ(
-    decision[word(models::near_identical_gpu_decision_word_e::decision)],
-    static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::reuse)
-  );
-  EXPECT_EQ(
-    decision[word(models::near_identical_gpu_decision_word_e::optional_preprocess_x)],
-    0u
-  ) << "cadence-due abstention publishes later without an OCR child";
+  for (const auto retired_work : {8u, 16u}) {
+    ASSERT_TRUE(fixture.run_detector(
+      previous, previous, history_state(1u), decision, error,
+      reduction_group_count, retired_work
+    )) << error;
+    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::decision_magic)], 0u);
+    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::optional_preprocess_x)], 0u);
+  }
 
   ASSERT_TRUE(fixture.run_detector(
     previous,
@@ -2973,32 +2981,74 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, LongReuseChainComparesAgainstUnchanged
     GTEST_SKIP() << error;
   }
   ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
-  const auto owner = uniform_model_input(0.5f);
-  const auto near_input = uniform_model_input(0.505f);
+  constexpr std::array<std::uint32_t, 4u> source_region {
+    0u, 0u, field_width, field_height,
+  };
+  std::vector<std::array<float, 4>> source(field_texels, {0.5f, 0.5f, 0.5f, 1.0f});
+  near_identical_gpu_fixture_t::preprocess_result_t owner_input;
+  ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+    true, source, field_width, field_height, source_region, content,
+    uniform_model_input(), owner_input, error, false
+  )) << error;
+  const std::vector<float> raw(field_texels, 0.5f);
+  fused_map_result_t owner;
+  ASSERT_TRUE(fixture.run_fused_map(
+    raw, owner_input.tensor, owner_input.appearance, raw, owner_input.exclusion,
+    history_state(1u), valid_minmax_ema, authenticated_mapping_state(),
+    baseline_frame_id, owner_observation_timestamp_us, owner, error
+  )) << error;
   decision_words_t decision {};
-  ASSERT_TRUE(fixture.run_detector(owner, owner, history_state(1u), decision, error)) << error;
+  near_identical_gpu_fixture_t::preprocess_result_t candidate;
+  const auto observe = [&](const float level, const std::uint64_t step,
+                           const std::vector<float> &previous) {
+    std::fill(source.begin(), source.end(), std::array<float, 4> {level, level, level, 1.0f});
+    return fixture.run_preprocess_and_tile_evidence(
+             true, source, field_width, field_height, source_region, content,
+             previous, candidate, error
+           ) && fixture.resolve_seeded_tiles(
+             candidate.tiles, decision, error, reduction_group_count,
+             tile_group_width, tile_group_height, tile_group_count,
+             baseline_frame_id + step, owner_observation_timestamp_us + step * 60'000u,
+             models::near_identical_work_optional_ocr
+           );
+  };
+  // Both stages consume real shader output. The first candidate crosses 33 ms; many later
+  // candidates cross the former hold budgets without relabeling the committed analysis owner.
   for (std::uint64_t step = 1u; step <= 64u; ++step) {
     SCOPED_TRACE(step);
-    ASSERT_TRUE(fixture.run_detector(
-      near_input, owner, history_state(1u), decision, error, reduction_group_count, 0u,
-      baseline_frame_id, owner_observation_timestamp_us,
-      owner_observation_timestamp_us + step * 30'000u, valid_minmax_ema, false,
-      baseline_frame_id + step, baseline_frame_id + step - 1u
-    )) << error;
+    ASSERT_TRUE(observe(0.505f, step, owner.previous_model_input)) << error;
     ASSERT_EQ(decision[word(models::near_identical_gpu_decision_word_e::decision)],
               static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::reuse));
+    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::optional_preprocess_x)], 0u);
   }
-  // This increment is near the last candidate, but exceeds the unchanged model owner's limit.
-  // Reuse must not slide the baseline from 0.5 to 0.505 and hide cumulative drift.
-  const auto changed = uniform_model_input(0.52f);
-  ASSERT_TRUE(fixture.run_detector(
-    changed, owner, history_state(1u), decision, error, reduction_group_count, 0u,
-    baseline_frame_id, owner_observation_timestamp_us,
-    owner_observation_timestamp_us + 65u * 30'000u, valid_minmax_ema, false,
-    baseline_frame_id + 65u, baseline_frame_id + 64u
-  )) << error;
-  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::decision)],
-            static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer));
+  std::array<std::uint32_t, models::near_identical_history_owner_word_count> held_owner {};
+  ASSERT_TRUE(fixture.read_history_owner(held_owner, error)) << error;
+  EXPECT_EQ(held_owner, owner.owner);
+
+  // Each incremental change is quiet relative to its predecessor. Comparison against the
+  // original inferred pixels must still notice accumulated drift and enable both analyses.
+  auto previous_candidate = candidate.tensor;
+  bool inferred = false;
+  for (std::uint64_t step = 1u; step <= 24u; ++step) {
+    SCOPED_TRACE(step);
+    const float level = 0.505f + static_cast<float>(step) * 0.001f;
+    ASSERT_TRUE(observe(level, 64u + step, owner.previous_model_input)) << error;
+    if (decision[word(models::near_identical_gpu_decision_word_e::decision)] ==
+        static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)) {
+      EXPECT_GT(decision[word(models::near_identical_gpu_decision_word_e::optional_preprocess_x)], 0u);
+      ASSERT_TRUE(observe(level, 64u + step, previous_candidate)) << error;
+      EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::decision)],
+                static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::reuse))
+        << "Sliding the analysis baseline to each reused candidate would hide this change";
+      inferred = true;
+      break;
+    }
+    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::optional_preprocess_x)], 0u);
+    previous_candidate = candidate.tensor;
+  }
+  EXPECT_TRUE(inferred);
+  ASSERT_TRUE(fixture.read_history_owner(held_owner, error)) << error;
+  EXPECT_EQ(held_owner, owner.owner) << "A proposal cannot advance analysis history";
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerForStatesOneAndThree) {
@@ -3326,7 +3376,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InvalidSuccessorClearsPreviouslyValidO
   );
 }
 
-TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdinaryAndDueWork) {
+TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationRequiresTheJointInferBranch) {
   near_identical_gpu_fixture_t fixture;
   std::string error;
   const auto initialized = initialize_fixture(fixture, error);
@@ -3405,58 +3455,15 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(0u, 0u, 0u, 0u, 0u);
 
-  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
-    models::near_identical_gpu_branch_e::reuse,
-    true,
-    true,
-    false,
-    decision,
-    error,
-    request_token,
-    request_token,
-    models::near_identical_work_optional_ocr_due
-  )) << error;
-  expect_gates(4u, 1u, 0u, 1u, subtitle_tile_group_width);
-
-  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
-    models::near_identical_gpu_branch_e::reuse,
-    true,
-    false,
-    false,
-    decision,
-    error,
-    request_token,
-    request_token,
-    models::near_identical_work_optional_ocr_due
-  )) << error;
-  expect_gates(0u, 0u, 1u, 1u, subtitle_tile_group_width);
-
-  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
-    models::near_identical_gpu_branch_e::reuse,
-    true,
-    false,
-    false,
-    decision,
-    error,
-    request_token,
-    request_token,
-    models::near_identical_work_subtitle_observation_due
-  )) << error;
-  expect_gates(0u, 0u, 1u, 1u, subtitle_tile_group_width);
-
-  // Due observation is branch-independent but can never authenticate an OOCR marker.
-  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
-    models::near_identical_gpu_branch_e::reuse,
-    true,
-    true,
-    false,
-    decision,
-    error,
-    request_token,
-    request_token,
-    models::near_identical_work_subtitle_observation_due
-  )) << error;
-  expect_gates(0u, 0u, 0u, 0u, 0u);
+  for (const auto retired_work : {8u, 16u}) {
+    for (const auto branch : {models::near_identical_gpu_branch_e::reuse, models::near_identical_gpu_branch_e::infer}) {
+      ASSERT_TRUE(fixture.finalize_subtitle_receipt(
+        branch, true, false, false, decision, error,
+        request_token, request_token, retired_work
+      )) << error;
+      expect_gates(0u, 0u, 0u, 0u, 0u);
+    }
+  }
 
   ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::infer,
@@ -3487,7 +3494,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
     error,
     request_token,
     request_token,
-    models::near_identical_work_subtitle_observation_due
+    models::near_identical_work_subtitle_observation
   )) << error;
   expect_gates(0u, 0u, 1u, 1u, subtitle_tile_group_width);
 
@@ -3668,7 +3675,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest,
     error,
     request_token,
     request_token + 1u,
-    models::near_identical_work_subtitle_observation_due
+    models::near_identical_work_subtitle_observation
   )) << error;
   expect_poisoned_record();
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 0u);
@@ -3678,11 +3685,11 @@ TEST(HostSbsNearIdenticalDetectorGpuTest,
   );
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::observation_one_x)], 0u);
 
-  // Malformed depth-only reduction authority must not suppress a separately valid due subtitle
-  // abstention. Depth fails closed to its retained-field copy while subtitle publication advances.
+  // Malformed depth authority cannot advance either half of the joint cached result.
+  // The retained-field copy and frozen subtitle tuple remain coherent.
   fixture.seed_ocr_record(poison);
   ASSERT_TRUE(fixture.finalize_subtitle_receipt(
-    models::near_identical_gpu_branch_e::reuse,
+    models::near_identical_gpu_branch_e::infer,
     true,
     false,
     false,
@@ -3690,18 +3697,47 @@ TEST(HostSbsNearIdenticalDetectorGpuTest,
     error,
     request_token,
     request_token,
-    models::near_identical_work_subtitle_observation_due,
+    models::near_identical_work_subtitle_observation,
     true,
-    models::near_identical_work_subtitle_observation_due,
+    models::near_identical_work_subtitle_observation,
     reduction_group_count + 1u
   )) << error;
-  expect_exact_abstention();
+  expect_poisoned_record();
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 0u);
   EXPECT_EQ(
     decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)],
     subtitle_tile_group_width
   );
-  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::observation_one_x)], 1u);
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::observation_one_x)], 0u);
+}
+
+TEST(HostSbsNearIdenticalDetectorGpuTest, JointRefreshRejectsBadOcrShapeButSuppressionDoesNotRequireOcr) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = initialize_fixture(fixture, error);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+  decision_words_t decision {};
+  ASSERT_TRUE(fixture.initialize_and_read_transaction(0u, decision, error)) << error;
+  constexpr std::uint32_t poison = 0xFFFFFFFFu;
+  for (const auto work : {models::near_identical_work_optional_ocr,
+                         models::near_identical_work_subtitle_observation, 0u}) {
+    fixture.seed_ocr_record(poison);
+    ASSERT_TRUE(fixture.finalize_subtitle_receipt(
+      models::near_identical_gpu_branch_e::infer, true, false, false,
+      decision, error, request_token, request_token, work, true, work,
+      subtitle_reduction_group_count, false
+    )) << error;
+    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], work == 0u ? 1u : 0u);
+    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::observation_one_x)], 0u);
+    ocr_record_words_t record {};
+    ASSERT_TRUE(fixture.read_ocr_record(record, error)) << error;
+    for (const auto value : record) {
+      EXPECT_EQ(value, poison);
+    }
+  }
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, MalformedUnsupportedTileInfers) {

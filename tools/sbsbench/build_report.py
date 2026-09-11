@@ -1451,7 +1451,8 @@ def _dumbbell_rows():
 
 def _runtime_strip():
     rows = []
-    for key, label in (("depth_infer", "depth"), ("warp_infer", "warp"),
+    for key, label in (("depth_conditional_transaction", "depth conditional transaction"),
+                       ("warp_infer", "warp"),
                        ("sbs_composite_cpu", "CPU composite")):
         control, treatment = _mean_perf(CTRL, key), _mean_perf(TREAT, key)
         if control is None and treatment is None:

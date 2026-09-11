@@ -3,9 +3,11 @@
 #include "config.h"
 #include "host_sbs_adaptive_submission.h"
 #include "host_sbs_conversion_work.h"
+#include "host_sbs_gpu_completion_receipt.h"
 #include "host_sbs_resolution.h"
 #include "host_sbs_telemetry_perf.h"
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -594,8 +596,7 @@ namespace models {
   ) noexcept {
     return !refresh_required || !ocr_available ||
            (force_infer_enqueued &&
-            (accepted_work == depth_optional_work_mode_e::ordinary ||
-             accepted_work == depth_optional_work_mode_e::ordinary_due) &&
+            accepted_work == depth_optional_work_mode_e::ordinary &&
             ocr_child_enqueued);
   }
 
@@ -662,8 +663,6 @@ namespace models {
   inline constexpr std::uint32_t near_identical_work_flags_cookie = 0x6F435257u;
   inline constexpr std::uint32_t near_identical_work_optional_ocr = 1u << 0u;
   inline constexpr std::uint32_t near_identical_work_subtitle_observation = 1u << 1u;
-  inline constexpr std::uint32_t near_identical_work_optional_ocr_due = 1u << 3u;
-  inline constexpr std::uint32_t near_identical_work_subtitle_observation_due = 1u << 4u;
   inline constexpr std::uint32_t near_identical_work_optional_infer =
     near_identical_work_optional_ocr;
   inline constexpr std::size_t near_identical_gpu_decision_word_count = 64u;
@@ -902,9 +901,8 @@ namespace models {
     // majorant. base_final_parallax is independently observable as the ordinary post-limiter field
     // for explicit diagnostics and padded ROI. Subtitle conditioning always writes a separate
     // complete texture, so base_final_parallax remains immutable. final_parallax is that atomic
-    // OCR-conditioned publication and is sampled directly by the renderer. Adaptive depth reuse
-    // always holds the DAV2 field; ordinary subtitle work holds the OCR/SLR/final tuple, while a
-    // cadence-due subtitle observation may advance that tuple independently.
+    // OCR-conditioned publication and is sampled directly by the renderer. Adaptive reuse holds
+    // the complete DAV2/OCR/SLR/final tuple; a shared refresh updates the analysis bundle together.
     // In ROI mode
     // both are crop-local producer q; only final_parallax becomes renderer authority through
     // input_region's authenticated scale/collar embedding. coordinate is an optional
@@ -943,7 +941,11 @@ namespace models {
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
     bool inference_enqueued = false;  ///< This call submitted a force-infer wrapper transaction for the supplied input frame.
     bool gpu_undecided_transaction_enqueued = false;  ///< This call submitted a GPU-conditional depth transaction; its branch remains device-owned.
-    bool gpu_undecided_completion = false;  ///< The completed transaction's actual branch remains GPU-owned and is deliberately not read back.
+    bool gpu_undecided_completion = false;  ///< Conditional completion; its branch is unknown until an exact final-publication receipt is consumed.
+    // Identity of the final D3D publication, distinct from CUDA execution readiness. A later
+    // asynchronous receipt may authenticate its branch; it never extends borrowed final views
+    // or authenticates mutable raw-model/preprocess buffers.
+    host_sbs_gpu_completion_receipt::expected_t publication {};
     bool cuda_graph_active = false;  ///< The mandatory DAV2 wrapper is ready and owns its embedded inference child.
     bool parallax_v2_producer_active = false;  ///< All production V2 producer shaders/resources are active.
     float parallax_v2_raw_coordinate_scale = 0.0f;  ///< Fixed authenticated model/shape coordinate scale.
@@ -953,7 +955,7 @@ namespace models {
     input_color_space color_space = input_color_space::srgb;  ///< Exact transfer domain used for this completion.
     bool input_domain_reset = false;  ///< Temporal/camera state was reset before this completion.
     bool subtitle_work_suppressed = false;  ///< This completion published Base and did not advance same-domain locator state.
-    bool subtitle_ocr_inference_enqueued = false;  ///< This call requested OCR participation; ordinary work is infer-coupled and cadence-due work may execute on either authenticated depth branch.
+    bool subtitle_ocr_inference_enqueued = false;  ///< This call requested OCR participation under the shared depth/subtitle inference decision.
   };
 
   [[nodiscard]] inline bool subtitle_evidence_is_exact_frame(
@@ -974,6 +976,47 @@ namespace models {
     std::chrono::steady_clock::duration wait_duration {};  ///< Query time only; excludes completed-depth postprocess.
   };
 
+  struct publication_receipt_poll_result {
+    std::array<host_sbs_gpu_completion_receipt::receipt_t,
+               host_sbs_gpu_completion_receipt::slot_count> receipts {};
+    std::size_t count = 0u;
+    // Current proof also survives an earlier idle drain; historical receipts above stay one-shot.
+    std::optional<host_sbs_gpu_completion_receipt::receipt_t> current_publication;
+    std::array<host_sbs_gpu_completion_receipt::diagnostic_sample_t,
+               host_sbs_gpu_completion_receipt::slot_count> diagnostics {};
+    std::size_t diagnostic_count = 0u;
+    bool failed = false;  ///< One-shot transport/decode failure; never supplies ownership proof.
+    bool transport_failed = false;  ///< Shared transport failed, independently of either payload decoder.
+    std::uint64_t submitted = 0u;
+    std::uint64_t skipped = 0u;
+    std::uint64_t decoded = 0u;
+    std::uint64_t decode_failed = 0u;
+  };
+
+#ifdef SUNSHINE_TESTS
+  namespace detail {
+    struct publication_receipt_readback_test_result {
+      publication_receipt_poll_result result;
+      bool resources_created = false;
+      bool completed = false;
+      bool pending_before_flush = false;
+      std::uint32_t poll_count = 0u;
+    };
+
+    // Exercises the production copies, saturation and nonblocking poll with synthetic source
+    // buffers. Only this test helper flushes and performs a bounded wait to drive a headless device.
+    publication_receipt_readback_test_result publication_receipt_readback_for_test(
+      ID3D11Device *device,
+      ID3D11DeviceContext *context,
+      const host_sbs_gpu_completion_receipt::snapshot_words_t &snapshot,
+      const host_sbs_gpu_completion_receipt::expected_t &expected,
+      std::uint64_t poll_estimator_generation = 0u,
+      bool cut_present = true,
+      bool outcomes_present = true
+    );
+  }  // namespace detail
+#endif
+
   /** Fail-closed CPU authentication for a completed live V2 result.
    *
    * This verifies the complete model/preprocess/shape and producer source identities, the exact
@@ -982,9 +1025,9 @@ namespace models {
    * It does not map GPU state; the live shader authenticates the per-frame contract tag before
    * sampling geometry. Subtitle-suppressed completions still authenticate their live geometry,
    * but their OCR/SLR views are not exact-frame evidence. A device-conditional completion also
-   * cannot expose exact-current CPU OCR lineage because an opaque reuse may either hold ordinary
-   * subtitle state or advance a cadence-due observation. Callers gate diagnostic and baseline uses on
-   * subtitle_evidence_is_exact_frame(); the diagnostic GPU trace owns per-branch evidence.
+   * cannot expose exact-current CPU OCR lineage before its shared infer/reuse outcome is known.
+   * Reuse holds the complete prior analysis bundle. Callers gate diagnostic and baseline uses on
+   * subtitle_evidence_is_exact_frame(); the completed receipt and GPU trace identify the outcome.
    */
   bool parallax_v2_result_is_authenticated(const estimate_result &result);
 
@@ -1107,7 +1150,7 @@ namespace models {
     // Latest authenticated completed transaction at copy submission. An opaque transaction may
     // retain the earlier real depth owner; this diagnostic ID never identifies that owner.
     std::uint64_t sampled_frame_id = 0;
-    // Exact wall-clock owner of the CopyResource that captured this CutBridge state. Readback may
+    // Wall-clock time of the shared snapshot submission that captured this CutBridge state. Readback may
     // complete much later and must never make old motion evidence look fresh.
     std::chrono::steady_clock::time_point sampled_at {};
     bool profile_initialized = false;
@@ -1119,7 +1162,6 @@ namespace models {
 
   struct depth_telemetry_poll_result {
     std::optional<depth_telemetry_sample> sample;
-    bool copy_scheduled = false;
     bool failed = false;
   };
 
@@ -1225,21 +1267,29 @@ namespace models {
       bool snapshot_debug_inputs = false
     );
 
-    /**
-     * Poll completed telemetry copies and optionally enqueue one new copy after the caller has
-     * submitted the critical warp/output work. Never flushes, waits, or maps an unsignaled slot.
-     * A busy three-slot ring deliberately drops the sampling opportunity rather than delaying
-     * capture, so callers must not compare its sample count one-for-one with offline traces.
+    /** Latest cached scene telemetry from the shared completion receipt. This accessor has no
+     * GPU work and never changes the original sample identity or copy-submission timestamp.
      */
-    depth_telemetry_poll_result poll_depth_telemetry(
-      bool schedule_copy,
-      std::uint64_t sampled_frame_id
-    );
+    depth_telemetry_poll_result latest_depth_telemetry() const;
 
-    /** Service optional cumulative outcome diagnostics on the normal D3D context owner.
-     * Safe during ordinary idle checks: never flushes, waits, or requests a conversion.
+    /** Drain shared completions on the normal D3D context owner during idle checks.
+     * Retains the current proof for rendering; never flushes, waits, or requests a conversion.
      */
-    void poll_gpu_outcome_diagnostics();
+    void poll_gpu_completion();
+
+    /** Consume immutable final-publication receipts on the estimator's D3D context owner.
+     * Never flushes or waits. Only an exact-current receipt may authorize later adaptive reuse.
+     * Busy slots retain their publication; a full ring omits the next receipt, requiring force
+     * inference until a later publication has a valid receipt. Batch order is unspecified.
+     */
+    publication_receipt_poll_result poll_publication_receipts();
+
+    /** Whether final depth/parallax/subtitle views still describe this exact publication.
+     * Mutable raw-model and preprocess views require their separate immutable debug snapshots.
+     */
+    [[nodiscard]] bool publication_is_current(
+      const host_sbs_gpu_completion_receipt::expected_t &publication
+    ) const noexcept;
 
   private:
     struct impl;

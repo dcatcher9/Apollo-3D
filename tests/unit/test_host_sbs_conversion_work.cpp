@@ -1,10 +1,10 @@
 #include <chrono>
 #include <gtest/gtest.h>
 #include <optional>
-#include <src/host_sbs_adaptive_submission.h>
 #include <src/host_sbs_conversion_work.h>
 #include <src/platform/windows/capture_timing.h>
 #include <src/video_encode_pacing.h>
+#include <tests/fixtures/host_sbs_gpu_completion_receipt.h>
 
 namespace {
   using namespace std::chrono_literals;
@@ -119,27 +119,20 @@ namespace {
     source.expect_service();
   }
 
-  TEST(HostSbsConversionWorkTest, CompletedOpaqueOwnershipDoesNotKeepEitherAdapterBusy) {
+  TEST(HostSbsConversionWorkTest, CompletedOutputDoesNotKeepEitherAdapterBusyForItsReceipt) {
     static_source_t source;
     source.work.estimator_present = true;
-    models::gpu_adaptive_transaction_policy_t ownership;
-    const auto request = ownership.make_request(2u, true, false, 1u, 1000u);
-    ASSERT_EQ(ownership.record_submission(2u, request, false, true), models::gpu_adaptive_submission_class_e::gpu_undecided);
     source.work.depth_completion_pending = true;
     source.expect_service();
 
-    // Retire and present the exact transaction without exposing its GPU branch. The ownership
-    // watermark stays live for the next changed source, while the static source becomes idle.
+    // Completed output needs no extra analysis. Its pending receipt is drained by ordinary
+    // idle checks without requiring another conversion/root.
     source.work.depth_completion_pending = false;
     source.presenter.record_converted();
     source.presenter.record_presented();
-    ASSERT_TRUE(ownership.active());
     for (int timeout = 0; timeout < 3; ++timeout) {
       source.expect_idle();
-      EXPECT_EQ(ownership.conditional_frame_id(), 2u);
     }
-    EXPECT_FALSE(ownership.make_request(3u, true, false, 1u, 2000u).authorize_gpu_undecided_reuse);
-    EXPECT_TRUE(ownership.make_request(3u, true, true, 2u, 2000u).authorize_gpu_undecided_reuse);
 
     source.work.authority_reprocess_pending = true;
     source.expect_service();
@@ -149,6 +142,39 @@ namespace {
     source.work.dump_pending = false;
     source.expect_idle();
     EXPECT_EQ(source.status_reads, 0u);
+  }
+
+  TEST(HostSbsConversionWorkTest, StableNearReuseDoesNotCreateAnalysisWorkInEitherAdapter) {
+    namespace fixture = host_sbs_gpu_completion_receipt_fixture;
+    namespace receipt = models::host_sbs_gpu_completion_receipt;
+    static_source_t source;
+    source.work.estimator_present = true;
+    const auto publication = fixture::expected();
+    source.work.depth_completion_pending = true;
+    source.expect_service();
+
+    // B completed using A's joint analysis, then B stopped changing. Both adapters retain
+    // their completed output indefinitely; only unfinished work is conversion demand.
+    source.work.depth_completion_pending = false;
+    source.presenter.record_converted();
+    source.presenter.record_presented();
+    source.expect_idle();  // A not-yet-drained receipt creates no new root either.
+    const auto held = receipt::decode(fixture::snapshot(publication), publication);
+    ASSERT_TRUE(held);
+    ASSERT_TRUE(held->depth_cache_authorized());
+    ASSERT_NE(held->depth_owner_frame_id, publication.frame_id);
+    ASSERT_EQ(held->subtitle_frame_id, held->depth_owner_frame_id);
+    for (unsigned idle = 0u; idle < 1000u; ++idle) {
+      source.expect_idle();
+    }
+    EXPECT_EQ(source.status_reads, 0u);
+
+    // New authority or explicit user work still wakes the exact same shared path.
+    source.work.authority_reprocess_pending = true;
+    source.expect_service();
+    source.work.authority_reprocess_pending = false;
+    source.work.dump_pending = true;
+    source.expect_service();
   }
 
   TEST(HostSbsConversionWorkTest, DisabledPipelineAndMissingSourceCannotStartStaticConversion) {

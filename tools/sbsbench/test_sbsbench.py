@@ -549,6 +549,60 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(
             sbsbench.aggregate(rows)["shot_state_accepted_pulse"], 1.0)
 
+    def test_flat_transition_metadata_distinguishes_source_cut_from_confirmation(self):
+        self.assertEqual(make_synth_clips.SHOT_CUT_FRAME, 13)
+        for clip, expected_pulses in (("flat_transition", [14]), ("scene_cut", [13])):
+            with self.subTest(clip=clip):
+                generated = make_synth_clips.clip_metadata(clip)
+                committed = run_eval.load_clip_metadata(
+                    os.path.join(make_synth_clips.CLIPS, clip), suite="core")
+                self.assertEqual(
+                    generated["shot_state_contract"], committed["shot_state_contract"])
+                self.assertEqual(
+                    committed["shot_state_contract"]["expected_pulse_frames"],
+                    expected_pulses)
+                self.assertEqual(committed["description"], make_synth_clips.DESC[clip])
+
+    def test_flat_transition_requires_exact_confirmed_pulse(self):
+        contract = run_eval.load_clip_metadata(
+            os.path.join(make_synth_clips.CLIPS, "flat_transition"),
+            suite="core")["shot_state_contract"]
+        # Real geometry-only event sequence: source replacement is pending at 13,
+        # confirmation emits one pulse at 14, then the flat scene rearms normally.
+        trace = {
+            frame_id: self.cut_state(frame_id - 1, 0 if frame_id < 9 else 3)
+            for frame_id in range(1, 13)
+        }
+        trace.update({
+            13: self.cut_state(12, 67, history=4),
+            14: self.cut_state(0, 16),
+            15: self.cut_state(1, 28),
+            16: self.cut_state(2, 19),
+        })
+        cases = (
+            ("confirmed", {}, []),
+            ("premature", {
+                13: self.cut_state(0, 16), 14: self.cut_state(1, 16),
+                15: self.cut_state(2, 28), 16: self.cut_state(3, 19),
+            }, [13, 14]),
+            ("missing", {
+                14: self.cut_state(13, 67, history=4),
+                15: self.cut_state(14, 3), 16: self.cut_state(15, 3),
+            }, [14]),
+            ("duplicate", {16: self.cut_state(0, 16)}, [16]),
+        )
+        for name, overrides, expected_mismatches in cases:
+            with self.subTest(sequence=name):
+                rows = [{"_frame_id": frame_id} for frame_id in range(1, 17)]
+                sbsbench.apply_shot_state_contract(
+                    rows, list(range(1, 17)), {**trace, **overrides}, contract)
+                self.assertEqual([
+                    row["_frame_id"] for row in rows
+                    if row.get("shot_state_pulse_mismatch", 0) != 0
+                ], expected_mismatches)
+                self.assertEqual(max(
+                    row.get("shot_state_trace_inconsistent", 0) for row in rows), 0)
+
     def test_v2_cut_state_requires_model_input_history(self):
         rows = [{"_frame_id": frame_id} for frame_id in range(1, 5)]
         trace = {

@@ -3086,12 +3086,6 @@ namespace platf::sbs_debug {
       if (value == work_flags_value(work_flag_e::subtitle_observation)) {
         return "subtitle-observation";
       }
-      if (value == work_flags_value(work_flag_e::optional_ocr_due)) {
-        return "optional-ocr-due";
-      }
-      if (value == work_flags_value(work_flag_e::subtitle_observation_due)) {
-        return "subtitle-observation-due";
-      }
       return "invalid";
     }
 
@@ -3267,8 +3261,6 @@ namespace platf::sbs_debug {
             {"none", work_flags_value(work_flag_e::none)},
             {"optional_ocr", work_flags_value(work_flag_e::optional_ocr)},
             {"subtitle_observation", work_flags_value(work_flag_e::subtitle_observation)},
-            {"optional_ocr_due", work_flags_value(work_flag_e::optional_ocr_due)},
-            {"subtitle_observation_due", work_flags_value(work_flag_e::subtitle_observation_due)},
           }},
         }},
         {"enums", {
@@ -5178,7 +5170,7 @@ namespace platf::sbs_debug {
             {"artifact", nullptr},
           };
         nlohmann::json manifest {
-          {"schema", 40},
+          {"schema", 41},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},

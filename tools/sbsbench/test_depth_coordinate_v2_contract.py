@@ -109,6 +109,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             74: "6feb4b8dd74cd4a67df8a8f0f6892aac6be93e9e068ce2177f43391563390c3a",
             75: "7f72195a723c9597db2be23e651b92a028040c0e4e6007accd315eb41c6690c4",
             76: "a6769249b05f9123ed725c202b21b56891cc72a822067a859d04e2346ac20150",
+            77: "9ee049234edda521fb7536c195d055c36099d1d1f006efb4a7118a5584282763",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -116,14 +117,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0xFCD67067)
+        self.assertEqual(generator.contract_tag(contract), 0x05360D2F)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "fcd67067a54366a2eedc91cbd7179ff07416ed21abc4039a68d17d657448609c",
+            "05360d2f480b76a0d59c933d955638c362b8f06e1e013aa654e8dd417a22096a",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "8d159966138e49538f7fde5318f6227332470834c70d3d27ec973885379c29ad",
+            "58033bdc70d2370607fcd4a195212deffcab2c28ed5bd516a3d0897b7b0ed02c",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -520,17 +521,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 76u',
-                'final_parallax_contract_schema = 2u',
+                'contract_schema = 77u',
+                'final_parallax_contract_schema = 3u',
                 'final_parallax_authority = '
                 '"complete-atomic-subtitle-conditioned-r32f-live-render-authority"',
                 'final_parallax_publication_policy = '
-                '"authenticated-infer-or-cpu-known-publication-or-authenticated-cadence-'
-                'due-subtitle-publication-direct-render"',
+                '"authenticated-infer-or-cpu-known-publication-direct-render"',
                 'final_parallax_reuse_policy = '
-                '"ordinary-reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte;'
-                'authenticated-cadence-due-reuse-holds-depth-and-publishes-current-ocr-or-'
-                'abstention-slr-final-tuple-against-retained-base"',
+                '"reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte"',
                 'subtitle_ocr_contract_schema = 14u',
                 'subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16"',
                 'subtitle_ocr_asset_path = '
@@ -599,7 +597,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 76u',
+                '#define V2_CONTRACT_SCHEMA 77u',
                 '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 14u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',

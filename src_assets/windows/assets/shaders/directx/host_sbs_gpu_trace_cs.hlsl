@@ -117,8 +117,6 @@ cbuffer TraceConstants : register(b0) {
 #define GPU_TRACE_WORK_FLAGS_COOKIE 0x6F435257u
 #define GPU_TRACE_WORK_OPTIONAL_OCR (1u << 0u)
 #define GPU_TRACE_WORK_SUBTITLE_OBSERVATION (1u << 1u)
-#define GPU_TRACE_WORK_OPTIONAL_OCR_DUE (1u << 3u)
-#define GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE (1u << 4u)
 
 #if V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT != GPU_TRACE_LOCATOR_WORDS
 #error GPU trace locator word count is stale
@@ -133,9 +131,7 @@ uint TraceTransactionWord(uint index) {
 
 bool TraceWorkValid(uint work) {
     return work == 0u || work == GPU_TRACE_WORK_OPTIONAL_OCR ||
-        work == GPU_TRACE_WORK_SUBTITLE_OBSERVATION ||
-        work == GPU_TRACE_WORK_OPTIONAL_OCR_DUE ||
-        work == GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE;
+        work == GPU_TRACE_WORK_SUBTITLE_OBSERVATION;
 }
 
 bool TraceHeaderValid() {
@@ -194,8 +190,7 @@ bool TraceReceiptValid(out bool optional_ocr, out uint decision) {
         TraceTransactionWord(6u) == GPU_TRACE_RECEIPT_MAGIC &&
         (optional_marker == 0u ||
          (optional_marker == GPU_TRACE_OPTIONAL_RECEIPT_MAGIC &&
-          ((trace_expected_work == GPU_TRACE_WORK_OPTIONAL_OCR && decision == 1u) ||
-           trace_expected_work == GPU_TRACE_WORK_OPTIONAL_OCR_DUE)));
+          trace_expected_work == GPU_TRACE_WORK_OPTIONAL_OCR && decision == 1u));
     optional_ocr = receipt_valid && optional_marker == GPU_TRACE_OPTIONAL_RECEIPT_MAGIC;
     return receipt_valid;
 }
@@ -217,22 +212,18 @@ uint TraceSubtitleDisposition(bool receipt_valid, uint decision, bool optional_o
             (trace_expected_work == GPU_TRACE_WORK_OPTIONAL_OCR ||
              trace_expected_work == GPU_TRACE_WORK_SUBTITLE_OBSERVATION) &&
             trace_host_subtitle_outcome == GPU_TRACE_HOST_ORDINARY_RECORD;
-        bool cadence_due =
-            (trace_expected_work == GPU_TRACE_WORK_OPTIONAL_OCR_DUE ||
-             trace_expected_work == GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE) &&
-            trace_host_subtitle_outcome == GPU_TRACE_HOST_ORDINARY_RECORD;
         if (!receipt_valid || trace_expected_work == 0u || suppressed ||
-            record_submitted || conditioned || (!infer_coupled && !cadence_due)) {
+            record_submitted || conditioned || !infer_coupled) {
             return GPU_TRACE_SUBTITLE_INVALID;
         }
-        if (infer_coupled && decision == 0u) {
+        if (decision == 0u) {
             return !optional_ocr ? GPU_TRACE_SUBTITLE_HELD_WITH_DEPTH :
                 GPU_TRACE_SUBTITLE_INVALID;
         }
-        if (decision != 1u && !(cadence_due && decision == 0u)) {
+        if (decision != 1u) {
             return GPU_TRACE_SUBTITLE_INVALID;
         }
-        if (trace_expected_work == GPU_TRACE_WORK_OPTIONAL_OCR || cadence_due) {
+        if (trace_expected_work == GPU_TRACE_WORK_OPTIONAL_OCR) {
             return optional_ocr ? GPU_TRACE_SUBTITLE_OPTIONAL_OCR :
                 GPU_TRACE_SUBTITLE_ABSTENTION;
         }
@@ -246,9 +237,10 @@ uint TraceSubtitleDisposition(bool receipt_valid, uint decision, bool optional_o
             !record_submitted && !conditioned ?
             GPU_TRACE_SUBTITLE_SUPPRESSED : GPU_TRACE_SUBTITLE_INVALID;
     }
-    if (trace_expected_work == GPU_TRACE_WORK_OPTIONAL_OCR ||
-        trace_expected_work == GPU_TRACE_WORK_OPTIONAL_OCR_DUE ||
-        trace_expected_work == GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE) {
+    if (receipt_valid && decision == 0u) {
+        return GPU_TRACE_SUBTITLE_INVALID;
+    }
+    if (trace_expected_work == GPU_TRACE_WORK_OPTIONAL_OCR) {
         if (trace_host_subtitle_outcome != GPU_TRACE_HOST_ORDINARY_RECORD || suppressed ||
             !record_submitted || !conditioned) {
             return GPU_TRACE_SUBTITLE_INVALID;

@@ -987,6 +987,53 @@ TEST(PrimaryDisplayExclusive, FailedPauseColorRestoreKeepsSnapshotAndRecoveryUnt
   EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-left")]->hdr_user_enabled);
 }
 
+TEST(PrimaryDisplayExclusive, PauseRecoversWhenVirtualSourceOrColorReadbackDisappears) {
+  for (const bool source_still_active : {false, true}) {
+    SCOPED_TRACE(source_still_active);
+    cursor_probe_t fake;
+    set_display_mode(fake.display.current, L"virtual", 3840, 2160, 120);
+    auto &color = fake.display.current.colors[named_index(fake.display.current, L"virtual")];
+    color->hdr_user_enabled = true;
+    color->advanced_color_active = true;
+    color->active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+    start_exclusive(fake.display);
+    if (source_still_active) {
+      fake.display.current.colors[0].reset();
+    } else {
+      fake.display.current = {};
+    }
+    fake.cursor = POINT {100, 100};
+    manager_t manager(fake.io());
+    platf::primary_display::retained_display_ptr retained;
+
+    ASSERT_TRUE(manager.pause(L"virtual", retained));
+    ASSERT_TRUE(retained);
+    expect_positions(fake.display.current, {{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}});
+    EXPECT_FALSE(fake.display.journal);
+    EXPECT_EQ(fake.cursor_queries, 0u) << "A historical mode cannot authenticate current cursor coordinates";
+
+    // A saved mode is resume intent, not evidence that the actual target is available.
+    fake.display.available_override = fake.display.current;
+    const auto applies = std::ranges::count(fake.display.events, "apply");
+    EXPECT_FALSE(manager.reactivate(retained, true));
+    EXPECT_EQ(std::ranges::count(fake.display.events, "apply"), applies);
+    EXPECT_FALSE(fake.display.journal);
+
+    fake.display.available_override.reset();
+    ASSERT_TRUE(manager.reactivate(retained, true));
+    ASSERT_TRUE(manager.promote(L"virtual", true));
+    const auto virtual_index = named_index(fake.display.current, L"virtual");
+    const auto &path = fake.display.current.paths[virtual_index];
+    const auto &mode = fake.display.current.modes[path.sourceInfo.sourceModeInfoIdx].sourceMode;
+    EXPECT_EQ(mode.width, 3840u);
+    EXPECT_EQ(mode.height, 2160u);
+    EXPECT_EQ(path.targetInfo.refreshRate.Numerator, 120u);
+    EXPECT_TRUE(fake.display.current.colors[virtual_index]->hdr_user_enabled);
+    manager.restore_retained_cursor(retained);
+    EXPECT_TRUE(fake.cursor_sets.empty());
+  }
+}
+
 TEST(PrimaryDisplayExclusive, ReactivationRefusesMissingAmbiguousOrUnjournaledTarget) {
   fake_io_t fake;
   start_exclusive(fake);
@@ -1154,6 +1201,26 @@ TEST(PrimaryDisplayLocalExclusive, PauseRetainsSelectedSinkAndItsCurrentHardware
   ASSERT_TRUE(manager.promote(L"virtual", true));
   expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -2560, 0}});
   EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-left")]->hdr_user_enabled);
+}
+
+TEST(PrimaryDisplayLocalExclusive, PauseRestoresOrdinaryMonitorWhenOnlyGlassesRemainActive) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"physical-left", 0, 0}});
+  set_display_mode(fake.current, L"physical-left", 2560, 1080, 120);
+  platf::primary_display::retained_display_ptr retained;
+
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(retained);
+  expect_positions(fake.current, {{L"physical-left", -2560, 120}, {L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -2560, 0}});
 }
 
 TEST(PrimaryDisplayLocalExclusive, ExtendedLocalPauseUsesCurrentPhysicalLayoutAndExplicitSink) {
