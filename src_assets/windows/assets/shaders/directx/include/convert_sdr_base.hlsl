@@ -4,7 +4,7 @@ cbuffer sdr_color_transform_cbuffer : register(b1) {
     uint target_bt2020;
     uint source_is_hdr;
     float source_sdr_white_scrgb;
-    float sdr_color_transform_padding;
+    uint target_is_hdr;
 };
 
 float3 ConvertLinearToTargetSdr(float3 input, bool input_is_hdr)

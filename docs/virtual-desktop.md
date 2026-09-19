@@ -46,12 +46,41 @@ desktop, including applications that were already open on disabled monitors: Win
 application may move or minimize those windows. It does not create an isolated desktop or guarantee
 how an application positions its windows.
 
+A game's display-mode change or exit can make Windows reactivate a remembered physical monitor
+and move the virtual display beside it. During a virtual-only session with no preserved AR output,
+the host restores the exact owned virtual display to the primary position and disables recorded
+ordinary outputs again, retaining the virtual display's current resolution and refresh rate.
+This recovery requires a valid display snapshot and the original virtual-display identity;
+preserved physical outputs keep their stricter mode checks. Windows still controls whether an
+application returns from a reactivated monitor or remains minimized. This repair applies only while
+the exclusive session is active; disconnect restoration still preserves user-arranged layouts.
+
+When a client sends a live mode request, the host resolves its exact owned display and verifies
+Windows' actual resolution and refresh rate before treating a repeated request as unchanged. If
+the game changed the display from the requested 90 Hz to 72 Hz, a subsequent 90 Hz request reapplies
+90 Hz through the existing verified mode transaction. The host does not enforce an earlier refresh
+rate without a client mode request; topology repair therefore cannot fight an explicit new mode
+change. Physical monitors and local AR hardware remain under their existing owners.
+
+After a display-mode change invalidates capture, the capture worker releases the old device and
+uses the same serialized topology repair before probing replacement outputs. Active repair retries
+use the existing 1.5-second/31-attempt limit and observe stream cancellation and owner-generation
+changes. An exhausted repair
+returns to ordinary capture recovery; it does not introduce an indefinite display wait. Windows
+mode switches and encoder teardown can still interrupt presentation, so this is not a seamless
+fullscreen-exit guarantee.
+
 Windows does not provide a general active-but-hidden state for a normal monitor: an active display
 path participates in the desktop. A black overlay or a powered-off panel would still leave that
 desktop region available to windows and the cursor. Sunshine therefore disables ordinary paths and
 keeps only approved AR outputs active when their glasses require a live scanout.
 
 Sunshine restores the previous displays on disconnect, including during the reconnect grace period.
+Disconnect wakes the cleanup thread immediately; restoration starts after capture, encoding, and
+input have stopped. After the first successful restore, the host makes a one-time Windows display
+wake request. This does not keep the monitors awake throughout reconnect grace. The restoration log
+verifies Windows display paths, modes, and color settings; it cannot confirm when a physical panel
+finishes waking or acquiring its signal.
 Applications may move again when physical displays return, and their exact positions or minimized
 states are not guaranteed to return. Streams using a physical desktop are unaffected.
 
@@ -74,13 +103,44 @@ The host records the original display setup before changing it. Remote disconnec
 off-head, and glasses USB disconnect share the same lifecycle: stop presentation, restore the
 previous monitor setup, and detach the virtual source from the Windows desktop. The session and
 virtual-display device remain available for `session_resume_grace` (60 seconds by default), but the
-inactive source no longer holds application windows. If there is no usable physical output, the
-host keeps the virtual source active rather than leaving Windows without a display.
+inactive source no longer participates in the active display topology. This does not verify that
+Windows or applications moved or restored their windows; remembered placement and minimized states
+can persist. If there is no usable physical output, the host keeps the virtual source active rather
+than leaving Windows without a display.
+
+During remote reconnect grace, the existing one-second session check revalidates the paused
+topology. If Windows reactivates the retained virtual target, the shared pause transaction detaches
+that exact target again while preserving the current physical layout, modes, and color settings.
+The pause bookmark also remembers the last successfully restored physical desktop. If a monitor
+temporarily disappears during wake and returns as an available but inactive output, a later check
+can reactivate it with that saved layout, mode, and color state before detaching the virtual target.
+Verified changes to the physical desktop become the new recovery baseline; a monitor already
+absent when the initial restoration completed is not added back by this retry.
+The saved virtual mode and cursor bookmark remain unchanged. This does not extend grace, repeat
+the wake request on successful checks, move application windows, or run while a reconnect or new
+launch owns the session. While no physical output is available, the sole usable virtual output
+remains active and the client can still reconnect. The virtual device is retained throughout grace.
+
+When remote pause changes the topology to restore physical outputs, the apply requests
+`SDC_NO_OPTIMIZATION` so Windows passes the mode change through to the graphics driver for each
+active output. This also applies to repairs after the retained virtual target reappears. It keeps
+the recorded physical modes and color contract and does not remove the virtual device. Healthy
+grace checks do not repeatedly force a mode change. This is a recovery measure for a physical
+screen that remains black despite matching Windows state; it cannot verify visible panel output.
+
+With runtime diagnostics enabled, restoration logs the observed/requested output identities, modes,
+positions, color states, and time spent applying topology and restoring/verifying color. A repeated
+detach explicitly reports that the retained target became active again. Display-change and session
+display-power notifications provide additional timing without querying or mutating displays from
+the Windows callback. Successful topology verification and a Windows power-on notification do not
+prove when a physical monitor finishes waking or establishes its video signal.
 
 Resuming within that window reactivates the exact retained device and reapplies the selected mode,
 primary display, and exclusive-display policy before capture resumes. The requested resolution,
 refresh rate, and HDR mode may differ from the retained virtual display's previous mode; those
-changes do not invalidate its recorded display ownership. Physical-display identities, positions,
+changes do not invalidate its recorded display ownership. Resume compares the current Windows
+mode as well as the saved request, so a fullscreen game cannot leave a changed resolution in place
+merely because the reconnect requests the same settings. Physical-display identities, positions,
 and modes remain checked before promotion. A remote `/resume` must match
 the retained application and host-session token; wearing or reconnecting the same local glasses
 resumes their retained session. Expiry retires the device and ends the retained session.

@@ -68,6 +68,7 @@ namespace proc {
     promote,
     restore,
     pause,
+    wake,
     reactivate,
     retire,
   };
@@ -243,12 +244,14 @@ namespace proc {
       std::uint32_t expected_launch_session_id
     );
     /**
-     * Non-blocking hint for the serialized live-mode worker: would `apply_live_video_mode` have
-     * real topology work to do? A bitrate-only change skips DisplayConfig but
+     * Hint for the serialized live-mode worker: would `apply_live_video_mode` have
+     * real topology work to do? An unchanged mode skips DisplayConfig only when
+     * Windows still reports the requested desktop geometry and refresh. A bitrate-only change
      * remains ordered behind any active encoder transaction. This never waits on the process lock;
-     * a transition already in flight conservatively answers "yes".
+     * a transition already in flight conservatively answers "yes". Windows identity and mode
+     * queries run on that worker, not the input/control thread.
      */
-    bool live_video_mode_needs_display_change(int width, int height, int fps_millihz) const;
+    bool live_video_mode_needs_display_change(int width, int height, int fps_millihz);
     /** Adopt the remote streaming session's virtual-display lease before platform startup. */
     bool activate_remote_virtual_display_lease(std::uint64_t lease);
     /** Restore the original primary on disconnect, retaining apps/display for a warm reconnect. */
@@ -297,12 +300,16 @@ namespace proc {
     std::shared_ptr<rtsp_stream::launch_session_t> _launch_session;
 #ifdef _WIN32
     VDISPLAY::session_t _display_session;
+    // Adapter notification only: a later failed topology check must not repeat the wake request.
+    bool _pause_wake_attempted = false;
     bool _virtual_display_retirement_handed_off = false;
     // Client-owned policy for the active launch or resume.
     bool _virtual_display_only = false;
   #ifdef SUNSHINE_TESTS
     // Process tests replace display/HDR side effects while preserving resume/teardown control flow.
     display_topology_test_hook_t _display_topology_test_hook;
+    std::function<std::optional<DEVMODEW>(std::wstring_view)> _display_mode_query_test_hook;
+    std::function<LONG(std::wstring_view, int, int, int, bool)> _display_mode_change_test_hook;
   #endif
     std::optional<std::uint64_t> _remote_virtual_display_lease;
     VDISPLAY::session_t create_retained_virtual_display(
@@ -324,6 +331,7 @@ namespace proc {
     static bool has_retired_virtual_display();
     void clear_virtual_display_binding();
     bool refresh_virtual_display_binding();
+    std::optional<DEVMODEW> query_virtual_display_mode();
     bool prepare_retained_display_for_resume();
     bool promote_virtual_display(
       bool enable_hdr,

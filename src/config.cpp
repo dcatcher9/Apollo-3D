@@ -657,6 +657,7 @@ namespace config {
     // EMA levers, dynamic depth sizing) no longer exist; the Depth Coordinate V2 pipeline uses
     // its fixed calibration. Reinitializing also clears stale values on reload.
     video.sbs = {};
+    bool_f(vars, "sbs_reshade", video.sbs.reshade);
     double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0});
     int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, {256, 16384});
     video.sbs.max_encode_width &= ~3;

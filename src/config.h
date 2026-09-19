@@ -57,10 +57,10 @@ namespace config {
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
     double minimum_fps_target;  ///< Lowest framerate used when streaming. Range 0-1000; 0 = max(one fifth of the requested rate, 10 FPS).
 
-    // Host/offline 2D->3D side-by-side (SBS) settings. Every geometry-producing path runs the
-    // Depth Coordinate V2 pipeline with its fixed calibration; only the explicit shared controls
-    // below remain configurable.
+    // Live Host 3D can receive authored ReShade stereo. Sunshine-generated live/offline geometry
+    // uses the Depth Coordinate V2 pipeline with its fixed calibration.
     struct sbs_t {
+      bool reshade = false;  ///< Receive live final SBS from the ReShade add-on; offline conversion remains V2.
       double pop_strength = 1.75;  ///< Literal live V2 stereo strength (0.25-2) and offline conversion base strength.
       int max_encode_width = 8192;  ///< Configured packed Host SBS width cap. Output also respects both runtime NVENC axes (RTX 5080: H.264 4096x4096, HEVC/AV1 8192x8192) with aspect-preserving scaling.
     };

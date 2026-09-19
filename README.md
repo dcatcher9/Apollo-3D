@@ -14,11 +14,6 @@
 > AMD and Intel GPUs, software encoding, Linux, and macOS hosts are not supported.
 
 <p align="center">
-  <img src="./docs/assets/readme/sunshine3d-moonlight3d-workflow.svg" width="900"
-       alt="Choose where to create 3D: Host 3D converts on the PC, Client 3D converts on the headset, Raw SBS preserves existing stereo, and 2D stays flat. Sunshine 3D also supports direct AR glasses and offline video conversion on the PC.">
-</p>
-
-<p align="center">
   Choose where to create 3D, then watch on your headset or connected glasses—or save a 3D video.
 </p>
 
@@ -32,8 +27,8 @@
   <a href="./docs/troubleshooting.md">Troubleshooting</a>
 </p>
 
-Sunshine 3D is the Windows host and host-side 2D-to-3D engine. It works on captured frames instead
-of requiring game mods, player plug-ins, or application-specific stereo support. It can estimate
+Sunshine 3D is the Windows host and host-side 2D-to-3D engine. Its AI path works on captured frames
+without requiring game mods, player plug-ins, or application-specific stereo support. It can estimate
 depth with Depth Anything V2 Small and frozen ZipDepth convex-2x refinement, then use its Depth
 Coordinate V2 renderer to create stereo for Moonlight 3D, supported local glasses, or a converted
 video file.
@@ -50,13 +45,14 @@ video file.
 
 | What you want to do | Best path and payoff |
 |---|---|
-| **🎬 Watch capturable browser or local video in 3D** | When Windows capture can see the decoded frames, choose Host 3D or Client 3D to convert the player output live |
+| **🎬 Watch capturable browser or local video in 3D** | When Windows capture can see the decoded frames, choose Host AI 3D or Client AI 3D to convert the player output live |
 | **📦 Create a 3D video file** | Convert a local video from the host Web UI into H.265 or AV1 SBS for later playback |
-| **🎮 Turn an existing flat PC game into 3D** | Use the PC GPU with Host 3D or the headset GPU with Client 3D—no game-specific stereo mod or profile required |
+| **🎮 Turn an existing flat PC game into 3D** | Use the PC GPU with Host AI 3D or the headset GPU with Client AI 3D—no game-specific stereo mod or profile required |
 | **🖥️ Use a private spatial Windows desktop** | Stay in 2D for maximum text clarity or enable AI depth when useful; the virtual display negotiates landscape or portrait geometry, refresh rate, HDR state, and scale |
-| **🎞️ Present native SBS games and media** | Select Raw SBS to preserve the source’s authored left/right views without estimating depth again |
-| **⚡ Choose where the AI runs** | Move between Host 3D and Client 3D while keeping the same app library, controls, audio, and input loop |
-| **👓 Drive tethered AR glasses directly** | Use Sunshine 3D’s local presenter for 2D or host-generated full SBS while bypassing network encode/decode |
+| **🎮 Play with game-depth stereo** | Install the Sunshine 3D ReShade add-on and select Game 3D; the game desktop stays at normal resolution and stereo activates when the source is ready |
+| **🎞️ Present an existing SBS movie** | Select Movie 3D, then explicitly choose Half SBS or Full SBS for the incoming picture; no AI depth is applied |
+| **⚡ Choose where the AI runs** | Move between Host AI 3D and Client AI 3D while keeping the same app library, controls, audio, and input loop |
+| **👓 Drive tethered AR glasses directly** | Use Sunshine 3D’s local presenter for 2D, host AI or ReShade full SBS while bypassing network encode/decode |
 
 ## PC, Android XR, and AR glasses
 
@@ -66,11 +62,11 @@ Android XR experience; directly attached AR glasses stay on the PC path.
 | Where you want to watch | What you need | What Sunshine 3D does |
 |---|---|---|
 | **Galaxy XR headset** | Sunshine 3D on the PC + Moonlight 3D on the headset | Streams 2D or stereo, with audio and input |
-| **PC-connected AR glasses** | Sunshine 3D + a supported glasses display | Presents 2D or Host 3D directly on the glasses |
+| **PC-connected AR glasses** | Sunshine 3D + a supported glasses display | Presents 2D, host AI or ReShade stereo directly on the glasses |
 | **A saved 3D video** | Sunshine 3D + the approved FFmpeg tools | Converts a local file to SBS for later playback |
 
-Direct AR output is currently video-only and supports 1920×1080 2D or 3840×1080 host-generated
-full SBS on an approved, non-primary, non-cloned display. A connecting or active remote XR session
+Direct AR output is currently video-only and supports 1920×1080 2D or 3840×1080 full SBS
+on an approved, non-primary, non-cloned display. A connecting or active remote XR session
 takes priority over the local glasses presenter. Both paths restore displays immediately on
 disconnect and retain their session for resume; a fresh connection can replace a retained session.
 Windows audio remains on its current default endpoint.
@@ -83,12 +79,37 @@ can be chosen for each workload.
 | Mode in Moonlight 3D | Where 3D is produced | Use when |
 |---|---|---|
 | **2D** | No 3D processing | You want a direct mono desktop or game with the lowest processing cost |
-| **Client 3D** | Galaxy XR GPU using original ZipDepth Base | Sunshine 3D sends mono video and the headset should create depth |
-| **Raw SBS** | The source creates both views; Moonlight 3D splits them | The source renders packed left/right views inside a Virtual Display-backed session, which Raw SBS requires |
-| **Host 3D** | Windows CUDA/TensorRT-capable NVIDIA GPU | Sunshine 3D should convert mono content before encoding |
+| **Host AI 3D** | Windows CUDA/TensorRT-capable NVIDIA GPU | Sunshine 3D should convert mono content before encoding |
+| **Client AI 3D** | Galaxy XR GPU using original ZipDepth Base | Sunshine 3D sends mono video and the headset should create depth |
+| **Game 3D** | The Sunshine 3D ReShade add-on using the game's depth buffer | The add-on supplies a separate full SBS texture; start mono and activate stereo after validated source readiness and a confirmed stream transition |
+| **Movie 3D** | The incoming movie already contains both views | Start in 2D, then explicitly choose Half SBS or Full SBS to interpret the existing picture |
 
-Host 3D and Client 3D are the real-time 2D-to-3D paths. Raw SBS preserves stereo supplied by the
-source, while 2D bypasses conversion entirely.
+Host AI 3D and Client AI 3D are the real-time 2D-to-3D paths. Game 3D and Movie 3D present stereo
+supplied by their source. Each mode has its own Resolution, FPS and Bandwidth controls.
+
+The [ReShade Game 3D path](./docs/reshade-sbs.md) runs its GPU renderer inside the Sunshine 3D
+add-on, using the game's depth buffer to produce a separate full-resolution stereo texture.
+The game and virtual desktop stay at W×H:
+1920×1080 for full-HD eyes or 3840×2160 for 4K eyes. Selecting Game 3D initially keeps the stream
+at that normal size. A valid export permits an acknowledged transition to exact 2W×H encoding;
+the client waits for a fresh decoded frame before splitting the eyes. Temporary source loss,
+including Alt-Tab or a resolution change, duplicates the desktop into both eyes while retaining
+the packed stream. ReShade's settings overlay appears over both stereo eyes so depth adjustments
+can be viewed live.
+
+Streamed Game 3D requires compatible host/client Game provider support, ReShade 6.8 with full
+add-on support, and `SunshineSBS.addon64`. No external FX shader or Depth3D checkout is required.
+Adjust strength in **ReShade → Add-ons → Sunshine 3D**; native controls save automatically.
+Select Game 3D in Moonlight 3D without changing a host provider toggle or
+restarting Sunshine. SDR and native HDR DirectX 11/12 input are supported; live game/glasses/headset
+compatibility depends on the game and display. Original SuperDepth3D is an optional comparison
+renderer, not part of normal installation. For local AR glasses, the separate **Use ReShade for local AR 3D**
+host setting selects this provider. Host AI 3D always uses Sunshine's AI conversion.
+
+Movie 3D uses an explicit picture-format choice; it does not automatically detect SBS or double
+the desktop width. Half SBS restores squeezed eyes to the incoming picture's normal aspect;
+Full SBS splits an already-wide picture. If a player scaled full-SBS video into a narrower
+desktop, selecting Full SBS cannot restore the lost detail.
 
 ## Install on Windows
 
@@ -111,9 +132,11 @@ feature. See [Microphone and DualSense setup](./docs/host-client-features.md).
 4. Build or install [Moonlight 3D](https://github.com/dcatcher9/moonlight-android) on Galaxy XR,
    then select the discovered PC or add its IP address manually.
 5. Moonlight 3D displays a four-digit PIN. Enter it in Sunshine 3D’s **Enter PIN** card.
-6. Open the client application library and launch **Virtual Display** for the complete resolution
-   and Raw SBS workflow, or launch another configured application.
-7. Begin in **2D**, then choose Client 3D, Raw SBS, or Host 3D from the in-headset dock.
+6. Open the client application library and launch **Virtual Display** for a desktop with full
+   resolution controls, or launch another configured application.
+7. Begin in **2D**, then choose **Host AI 3D**, **Client AI 3D**, **Game 3D** or **Movie 3D** from
+   the in-headset dock. Game 3D waits for a compatible export; Movie 3D starts in 2D until you
+   select the incoming movie's picture format.
 
 The Web UI also shows QR pairing as a secondary option for compatible clients. Moonlight 3D’s
 normal setup flow uses the PIN. For the direct local path, configure
@@ -134,13 +157,13 @@ and recovery after a host crash.
 
 ## Stable depth from scene to scene
 
-Host 3D and Client 3D use Depth Coordinate V2 with calibration for their respective models. On the
-first usable depth field of a shot, each places the screen plane at the average raw depth and holds
-it there while objects move. An accepted scene cut lets the next shot choose a new plane.
+Host AI 3D and Client AI 3D use Depth Coordinate V2 with calibration for their respective models.
+On the first usable depth field of a shot, each places the screen plane at the average raw depth
+and holds it there while objects move. An accepted scene cut lets the next shot choose a new plane.
 
-Host 3D uses the **Host 3D strength** setting in the host Web UI; Client 3D uses its fixed calibrated
-strength. Neither automatically increases or reduces strength for each scene. The models and GPU
-renderers differ, so their output is not expected to be identical.
+Host AI 3D uses the **Host 3D strength** setting in the host Web UI; Client AI 3D uses its fixed
+calibrated strength. Neither automatically increases or reduces strength for each scene. The
+models and GPU renderers differ, so their output is not expected to be identical.
 
 ```mermaid
 flowchart TD
@@ -166,7 +189,7 @@ own the model, geometry, and failure behavior.
 4. Start the job and follow its progress. The completed SBS video is saved beside the input as
    `.mkv` or `.mp4`.
 
-Conversion uses the same Host 3D pipeline in source order and runs as fast as decoding, the GPU,
+Conversion uses the same Host AI 3D pipeline in source order and runs as fast as decoding, the GPU,
 and encoding permit. Supported audio, subtitles, and other streams are preserved. SDR and static
 PQ/HLG HDR are supported; dynamic HDR, interlaced input, and other unsupported media are rejected.
 Existing output files are never overwritten.
@@ -200,9 +223,11 @@ views are available.
 | **Private virtual display** | An on-demand SudoVDA desktop negotiated from the client’s selected resolution, refresh rate, HDR state, and scale |
 | **Virtual-display-only streaming** | A client-controlled desktop mode that disables ordinary physical monitors, handles cursor bounds automatically, and restores displays on disconnect |
 | **Host AI 3D** | Matched-frame DAV2 Small depth with frozen ZipDepth convex-2x refinement, rendered through D3D11/TensorRT and encoded with NVENC |
-| **Window-aware Host 3D** | On supported Desktop Duplication captures, focuses depth analysis on eligible foreground video or app content; eligible subtitles receive dedicated plane conditioning |
-| **Offline Host 3D conversion** | Converts video to compressed H.265 or AV1 SBS with the same causal V2 estimator/renderer as live Host 3D, running as fast as decoder/GPU/encoder backpressure permits |
-| **Stable 3D screen plane** | Both AI modes hold a raw-depth scene center for the shot, with configured Host 3D strength or fixed Client 3D strength |
+| **Window-aware Host AI 3D** | On supported Desktop Duplication captures, focuses depth analysis on eligible foreground video or app content; eligible subtitles receive dedicated plane conditioning |
+| **Game 3D** | Discovers a compatible game export while streaming mono, then presents exact full SBS through a guarded transition; source loss retains packed duplicate-eye fallback |
+| **Movie 3D** | Interprets existing 2D, Half SBS or Full SBS pictures through an explicit format choice without changing transport geometry |
+| **Offline Host 3D conversion** | Converts video to compressed H.265 or AV1 SBS with the same causal V2 estimator/renderer as live Host AI 3D, running as fast as decoder/GPU/encoder backpressure permits |
+| **Stable 3D screen plane** | Both AI modes hold a raw-depth scene center for the shot, with configured Host 3D strength or fixed Client AI 3D strength |
 | **Responsive quality controls** | Live resolution, frame-rate, and bitrate updates without rebuilding the application, capture, or virtual-display session when the selected mode supports it |
 | **Headset Host Stats** | Host depth health and, with host diagnostics enabled, inference/reuse counts, output activity, and stage timings in Moonlight 3D |
 | **Modern video path** | Native H.264 NVENC as the baseline; HEVC, AV1, and 10-bit HDR are enabled only when their capabilities are available |
@@ -216,7 +241,7 @@ views are available.
 
 - **Host:** Windows 11.
 - **GPU:** Native H.264 NVENC and a current NVIDIA driver. HEVC, AV1, and 10-bit support are
-  optional capabilities. Host 3D additionally requires a CUDA/TensorRT-capable NVIDIA device that
+  optional capabilities. Host AI 3D additionally requires a CUDA/TensorRT-capable NVIDIA device that
   maps to the selected D3D capture adapter.
 - **Client:** Moonlight 3D using the modern encrypted protocol on Android XR. Samsung Galaxy XR is
   the validated headset.
@@ -233,7 +258,7 @@ subject to the selected codec and GPU’s NVENC limits.
 
 Moonlight 3D's resolution presets include landscape and portrait XR, phone, and tablet dimensions.
 These are virtual-display sizes for the XR client; they do not add phone or tablet app support.
-Host 3D requires a supported [resolution fit](./docs/host-sbs.md#authenticated-resolution-fitting).
+Host AI 3D requires a supported [resolution fit](./docs/host-sbs.md#authenticated-resolution-fitting).
 
 The Android app currently has the shared protocol foundations for microphone forwarding and
 authored DualSense PCM, but does not yet implement microphone capture or DualSense PCM playback. Ordinary
@@ -269,7 +294,7 @@ with the build directory as its working directory so it can find `assets/`.
 
 The production depth pipeline requires the authenticated model assets supplied with the build.
 On first preparation—or when model, TensorRT, or GPU cache identity changes—building the TensorRT
-engine can take several minutes. Missing or invalid model assets leave Host 3D flat; ordinary 2D
+engine can take several minutes. Missing or invalid model assets leave Host AI 3D flat; ordinary 2D
 streaming remains available. See [Building](./docs/building.md) for packaging and engine-cache details.
 
 ## Documentation
@@ -281,6 +306,7 @@ streaming remains available. See [Building](./docs/building.md) for packaging an
 | Virtual display, cursor, and display recovery | [Virtual desktop interaction](./docs/virtual-desktop.md) |
 | Microphone and DualSense setup | [Optional client features](./docs/host-client-features.md) |
 | Local AR glasses | [Local AR glasses](./docs/sbs-local-ar-glasses.md) |
+| ReShade game stereo | [ReShade SBS setup](./docs/reshade-sbs.md) |
 | Host AI 3D design | [Host SBS pipeline](./docs/host-sbs.md) |
 | Host AI 3D scene cuts | [Host SBS scene cuts](./docs/host-sbs-scene-cuts.md) |
 | Host AI 3D status and limitations | [SBS 3D roadmap](./docs/sbs-3d-roadmap.md) |

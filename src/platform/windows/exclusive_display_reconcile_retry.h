@@ -6,12 +6,58 @@
 
 #include "primary_display.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 
 namespace platf::primary_display::detail {
+  inline constexpr auto exclusive_reconcile_retry_delay = std::chrono::milliseconds {50};
+  inline constexpr auto exclusive_reconcile_retry_window = std::chrono::milliseconds {1500};
+  inline constexpr std::size_t exclusive_reconcile_max_attempts = 31;
+
+  enum class capture_reconcile_result_e {
+    ready,
+    cancelled,
+    exhausted,
+  };
+
+  /** Run only on the capture worker, after releasing the old capture device. Windows
+   * calls remain serialized by the primary-display manager; this phase avoids opening
+   * transient outputs while an active exclusive topology is still being restored.
+   * The deadline bounds retries, not the duration of a Windows configuration call.
+   */
+  template<class Reconcile, class Running, class Now, class Sleep>
+  capture_reconcile_result_e reconcile_before_capture(
+    Reconcile reconcile,
+    Running running,
+    Now now,
+    Sleep sleep
+  ) {
+    const auto deadline = now() + exclusive_reconcile_retry_window;
+    for (std::size_t attempt = 0; attempt < exclusive_reconcile_max_attempts; ++attempt) {
+      if (!running()) {
+        return capture_reconcile_result_e::cancelled;
+      }
+      const auto result = reconcile();
+      if (!running()) {
+        return capture_reconcile_result_e::cancelled;
+      }
+      // Pending inactive recovery has no active exclusive source to wait for.
+      if (result != exclusive_reconcile_result_e::retry_active) {
+        return capture_reconcile_result_e::ready;
+      }
+      const auto current = now();
+      if (attempt + 1 == exclusive_reconcile_max_attempts || current >= deadline) {
+        return capture_reconcile_result_e::exhausted;
+      }
+      sleep(std::min(exclusive_reconcile_retry_delay,
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - current)));
+    }
+    return capture_reconcile_result_e::exhausted;
+  }
+
   enum class exclusive_reconcile_followup_e {
     finish,
     retry_immediate,

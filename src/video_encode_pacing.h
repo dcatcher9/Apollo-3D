@@ -45,16 +45,23 @@ namespace video::detail {
     [[nodiscard]] bool due(
       std::chrono::steady_clock::time_point now,
       std::chrono::steady_clock::time_point encode_target,
-      bool force_idr = false
+      bool force_idr = false,
+      bool independent_conversion_pending = false
     ) const noexcept {
-      return pending_ && (force_idr || now >= encode_target);
+      return (pending_ || (latest_ && independent_conversion_pending)) &&
+             (force_idr || now >= encode_target);
     }
 
     [[nodiscard]] std::optional<std::chrono::nanoseconds> remaining_wait(
       std::chrono::steady_clock::time_point now,
-      std::chrono::steady_clock::time_point encode_target
+      std::chrono::steady_clock::time_point encode_target,
+      bool independent_conversion_pending = false
     ) const noexcept {
-      if (!pending_) {
+      // An external provider can publish new pixels independently of desktop capture. Its
+      // retained-source polls share the presentation deadline instead of adding a full frame
+      // wait after the preceding conversion/encode. Ordinary depth-completion polls keep their
+      // existing cadence-sized wait by leaving this opt-in false.
+      if (!pending_ && !(latest_ && independent_conversion_pending)) {
         return std::nullopt;
       }
       return std::chrono::duration_cast<std::chrono::nanoseconds>(

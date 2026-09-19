@@ -30,6 +30,7 @@ extern "C" {
 #include "config.h"
 #include "globals.h"
 #include "gpu_workload_arbiter.h"
+#include "host_sbs_provider.h"
 #include "host_sbs_resolution.h"
 #include "input.h"
 #include "logging.h"
@@ -757,6 +758,17 @@ namespace rtsp_stream {
     }
 
 #ifdef SUNSHINE_TESTS
+    std::size_t poll_for_test() {
+      io_context.restart();
+      return io_context.poll();
+    }
+
+    std::size_t run_once_for_test(std::chrono::milliseconds timeout) {
+      io_context.restart();
+      const auto work = asio::make_work_guard(io_context);
+      return io_context.run_one_for(timeout);
+    }
+
     std::function<void()> launch_expiry_callback(std::uint32_t launch_session_id) {
       std::lock_guard lock(_launch_mutex);
       const auto generation = _launch_timer_generation;
@@ -885,12 +897,18 @@ namespace rtsp_stream {
     }
 
   public:
+    void notify_session_stopping() {
+      // Wake run_one_for without taking the active-slot lock or retaining a session pointer.
+      // The RTSP owner still joins media workers before restoring the physical desktop.
+      asio::post(io_context, []() {});
+    }
+
     /**
      * @brief Runs an iteration of the RTSP server loop
      */
     void iterate() {
-      // If we have a session, we will return to the server loop every
-      // 500ms to allow session cleanup to happen.
+      // Session stop wakes this loop immediately. Keep the bounded fallback for broadcast
+      // shutdown and other process-wide events that do not transition a session to STOPPING.
       if (has_active_session()) {
         io_context.run_one_for(500ms);
       } else {
@@ -996,6 +1014,10 @@ namespace rtsp_stream {
 
   rtsp_server_t server {};
 
+  void notify_session_stopping() {
+    server.notify_session_stopping();
+  }
+
   bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session) {
     return server.session_raise(std::move(launch_session));
   }
@@ -1054,6 +1076,14 @@ namespace rtsp_stream {
   }
 
 #ifdef SUNSHINE_TESTS
+  std::size_t poll_server_for_test() {
+    return server.poll_for_test();
+  }
+
+  std::size_t run_server_once_for_test(std::chrono::milliseconds timeout) {
+    return server.run_once_for_test(timeout);
+  }
+
   bool insert_session_for_test(const std::shared_ptr<stream::session_t> &session) {
     return server.insert(session);
   }
@@ -1433,6 +1463,13 @@ namespace rtsp_stream {
         (client_features & stream::CLIENT_FEATURE_SBS_TELEMETRY) != 0;
       config.client_supports_atomic_presentation_v2 =
         (client_features & stream::CLIENT_FEATURE_ATOMIC_PRESENTATION_V2) != 0;
+      config.client_supports_game_provider_v1 =
+        config.client_supports_atomic_presentation_v2 &&
+        (client_features & stream::CLIENT_FEATURE_GAME_PROVIDER_V1) != 0 &&
+        (platf::get_capabilities() & platf::platform_caps::game_provider_v1) != 0;
+      if ((client_features & stream::CLIENT_FEATURE_GAME_PROVIDER_V1) && !config.client_supports_game_provider_v1) {
+        throw std::invalid_argument("Game provider v1 requires atomic presentation v2");
+      }
       config.client_supports_source_frame_id_v1 =
         (client_features & stream::CLIENT_FEATURE_SOURCE_FRAME_ID_V1) != 0;
       if ((client_features & ::client_features::client_authored_pcm) && (client_features & ::client_features::client_authored_ir_v2)) {
@@ -1499,25 +1536,20 @@ namespace rtsp_stream {
       }
 
       config.monitor.sbs_mode = session.sbs_mode;
+      if (config.monitor.sbs_mode == video::SBS_GAME_SBS || (video::is_game_mode(config.monitor.sbs_mode) && !config.client_supports_game_provider_v1)) {
+        throw std::invalid_argument("Game startup requires negotiated provider v1 in mono mode");
+      }
       const auto host_sbs_rejection =
         models::host_sbs_v2_source_resolution_rejection_reason(
           static_cast<std::uint32_t>(config.monitor.width),
           static_cast<std::uint32_t>(config.monitor.height)
         );
-      if (config.monitor.sbs_mode == video::SBS_AI &&
-          !host_sbs_rejection.empty()) {
+      if (config.monitor.sbs_mode == video::SBS_AI && !host_sbs_rejection.empty()) {
         const auto fitted = models::fit_host_sbs_v2_depth_tensor_shape(
           static_cast<std::uint32_t>(config.monitor.width),
           static_cast<std::uint32_t>(config.monitor.height)
         );
-        throw std::invalid_argument(std::format(
-          "Host SBS V2 viewport {}x{} is unsupported: {}; fitted depth tensor {}x{}",
-          config.monitor.width,
-          config.monitor.height,
-          host_sbs_rejection,
-          fitted.width,
-          fitted.height
-        ));
+        throw std::invalid_argument(std::format("Host SBS V2 viewport {}x{} is unsupported: {}; fitted depth tensor {}x{}", config.monitor.width, config.monitor.height, host_sbs_rejection, fitted.width, fitted.height));
       }
 
       configuredBitrateKbps = required_int(detail::announce_int_field::configured_bitrate_kbps, "x-ml-video.configuredBitrateKbps"sv);

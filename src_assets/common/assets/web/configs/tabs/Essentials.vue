@@ -125,6 +125,28 @@ function setOnOff(key, event) {
         <small>Keeps the single active session ready while a device reconnects.</small>
       </label>
 
+      <div v-if="platform === 'windows'" class="simple-toggle-row">
+        <div>
+          <strong>{{ $t('config.sbs_reshade') }}</strong>
+          <span>{{ $t('config.sbs_reshade_desc') }}</span>
+        </div>
+        <label class="form-switch" :aria-label="$t('config.sbs_reshade')">
+          <input
+            id="sbs_reshade"
+            class="form-check-input"
+            type="checkbox"
+            :checked="isEnabled('sbs_reshade')"
+            @change="setEnabled('sbs_reshade', $event)"
+          />
+        </label>
+      </div>
+      <p v-if="isEnabled('sbs_reshade')" class="card-note">
+        Install ReShade with full add-on support and the Sunshine 3D add-on in your game. No separate shader installation is needed.
+        Keep the game fullscreen on the virtual display at its normal resolution. Supports SDR and native HDR games.
+        Adjust stereo strength in ReShade's Sunshine 3D add-on panel. Restart Sunshine after changing this local AR setting.
+        For a streamed headset, select Game 3D in Moonlight 3D; no host provider toggle or restart is needed.
+      </p>
+
       <label class="simple-field" for="host-3d-strength">
         <span>Host 3D strength</span>
         <input
@@ -136,7 +158,7 @@ function setOnOff(key, event) {
           max="2"
           step="0.05"
         />
-        <small>Controls 3D separation in Host 3D. Higher values look deeper but may be harder to focus. Also sets the base strength for new offline conversions.</small>
+        <small>Controls Sunshine-generated 3D separation and the base strength for new offline conversions. Game 3D strength is set in ReShade's Sunshine 3D add-on panel.</small>
       </label>
     </section>
 

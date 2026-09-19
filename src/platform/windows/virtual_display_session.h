@@ -97,6 +97,7 @@ namespace VDISPLAY {
     bool bind();
     bool promote();
     bool restore();
+    // Revalidates the current topology on every call without replacing the retained bookmark.
     bool pause(std::wstring_view local_sink = {});
     // Reactivates only. The adapter verifies publication using its existing retry window before
     // committing resume, since Windows may publish the new GDI binding asynchronously.

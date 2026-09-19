@@ -1,0 +1,3 @@
+// Generated from the maintained GPU source. Do not edit.
+#pragma once
+inline constexpr char game3d_shader_source[] = R"SUNSHINE_HLSL(@GAME3D_HLSL@)SUNSHINE_HLSL";

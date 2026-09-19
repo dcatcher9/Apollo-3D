@@ -263,20 +263,41 @@ namespace {
     session_t owner(fake.io());
     ASSERT_TRUE(owner.acquire(fake.spec()));
     ASSERT_TRUE(owner.pause());
-    // A local row-cleanup retry must not repeat the already successful manager pause.
+    // A retained device may reappear after success. Revalidate without replacing its bookmark.
     ASSERT_TRUE(owner.pause());
-    EXPECT_EQ(fake.pauses, 1u);
+    EXPECT_EQ(fake.pauses, 2u);
     fake.reactivate_ok = false;
     EXPECT_FALSE(owner.begin_resume());
     EXPECT_FALSE(owner.paused());
     EXPECT_TRUE(owner.has_retained());
     ASSERT_TRUE(owner.pause());
-    EXPECT_EQ(fake.pauses, 2u);
+    EXPECT_EQ(fake.pauses, 3u);
     fake.reactivate_ok = true;
     ASSERT_TRUE(owner.begin_resume());
     EXPECT_TRUE(owner.has_retained());
     owner.commit_resume();
     EXPECT_FALSE(owner.has_retained());
+  }
+
+  TEST(VirtualDisplaySession, FailedPauseRecheckInvalidatesProofWithoutLosingRetainedIdentity) {
+    owner_probe_t fake;
+    session_t owner(fake.io());
+    ASSERT_TRUE(owner.acquire(fake.spec()));
+    ASSERT_TRUE(owner.pause());
+    const auto generation = owner.generation();
+    fake.pause_ok = false;
+    EXPECT_FALSE(owner.pause());
+    EXPECT_FALSE(owner.paused());
+    EXPECT_TRUE(owner.has_retained());
+    EXPECT_EQ(owner.generation(), generation);
+    EXPECT_EQ(owner.binding().device_path, L"stable-A");
+    EXPECT_FALSE(owner.begin_resume());
+    EXPECT_EQ(fake.reactivations, 0u);
+    fake.pause_ok = true;
+    EXPECT_TRUE(owner.pause());
+    EXPECT_EQ(fake.pauses, 4u);
+    EXPECT_EQ(fake.creates, 1u);
+    EXPECT_EQ(fake.removes, 0u);
   }
 
   TEST(VirtualDisplaySession, ReactivationLeavesAsynchronousBindingVerificationToTheAdapter) {

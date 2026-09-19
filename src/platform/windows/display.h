@@ -33,6 +33,7 @@
 // local includes
 #include "src/platform/common.h"
 #include "capture_timing.h"
+#include "sbs_cursor.h"
 #include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/host_sbs_adaptive_submission.h"
 #include "src/utility.h"
@@ -1033,6 +1034,8 @@ namespace platf::dxgi {
 
     gpu_cursor_t cursor_alpha;
     gpu_cursor_t cursor_xor;
+    // CPU shape data is immutable after publication and safe to upload on an encoder device.
+    std::shared_ptr<const sbs_cursor::shape_t> cursor_shape;
 
     texture2d_t old_surface_delayed_destruction;
     std::chrono::steady_clock::time_point old_surface_timestamp;

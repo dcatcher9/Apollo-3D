@@ -4,6 +4,15 @@ This file contains the repository-wide workflow for coding agents and contributo
 does not duplicate algorithm constants, evaluator metric definitions, or user configuration; those
 belong to the linked canonical documents.
 
+## Refactoring and simplification
+
+Judge simplification by clearer responsibilities, reduced coupling, explicit state ownership,
+and reuse of authoritative logic. Code-size reduction is a desirable side effect, not the goal.
+Preserve distinctions required for correctness, especially between resource availability,
+source selection, and calibration. Validate existing behavior and representative failure cases
+before claiming an improvement; recovering from an introduced regression is not itself evidence
+that the user experience is better than the original baseline.
+
 ## Product and platform
 
 Sunshine 3D is a Windows XR-streaming host paired with modern Moonlight 3D/Artemis clients on
@@ -103,8 +112,11 @@ Useful controlled levers are passed after `--extra`, for example:
 & $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label pop-1p0 --extra --pop-strength 1.0
 ```
 
-The GPU harness remains serial so performance evidence is uncontended. CPU scoring can use
-`--jobs`; use `--jobs 1` only when reproducing the serial reference. Run commands from the
+GPU performance comparisons require serial runs and an otherwise idle GPU so timing evidence is
+uncontended. Functional GPU regressions do not require closing Sunshine or other GPU applications;
+do not treat their timing output as performance evidence. Keep runs serial when they share capture
+resources or test output. CPU scoring can use `--jobs`; use `--jobs 1` only when reproducing the
+serial reference. Run commands from the
 RelWithDebInfo build working directory when a direct harness invocation needs relative `assets/`.
 
 For a live-only failure, capture a current **Dump 3D** package and align evidence by exact source

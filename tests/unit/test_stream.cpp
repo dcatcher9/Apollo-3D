@@ -262,6 +262,43 @@ TEST(SessionWorkerJoinTest, DequeuedWatchdogCannotExpireDuringSessionCleanup) {
   EXPECT_EQ(expirations, 0);
 }
 
+TEST(SessionWorkerJoinTest, FinishedModeWorkerCannotExpireWhileMediaWorkersStillJoin) {
+  std::function<void()> mode_expiry;
+  std::function<void()> media_expiry;
+  int mode_expirations = 0;
+  int media_expirations = 0;
+  {
+    const stream::detail::session_join_watchdog_t mode_watchdog {
+      [&](auto callback) {
+        mode_expiry = std::move(callback);
+        return nullptr;
+      },
+      [](auto) {},  // An already-dequeued timer cannot be recalled by cancellation.
+      [&]() { ++mode_expirations; },
+    };
+  }
+  {
+    const stream::detail::session_join_watchdog_t media_watchdog {
+      [&](auto callback) {
+        media_expiry = std::move(callback);
+        return nullptr;
+      },
+      [](auto) {},
+      [&]() { ++media_expirations; },
+    };
+    // Each phase has its own budget: a late callback for the completed mode worker
+    // cannot kill the host while the independently bounded media join is in progress.
+    mode_expiry();
+    EXPECT_EQ(mode_expirations, 0);
+    media_expiry();
+    EXPECT_EQ(media_expirations, 1);
+  }
+  mode_expiry();
+  media_expiry();
+  EXPECT_EQ(mode_expirations, 0);
+  EXPECT_EQ(media_expirations, 1);
+}
+
 TEST(PrimaryDisplayRestoreRetryTest, OnlyRetriesTheSameDisconnectedRetainedProcess) {
   const stream::detail::primary_display_restore_retry_t retry {3, 17};
   using action = stream::detail::primary_display_restore_retry_t::action_e;
@@ -541,11 +578,7 @@ TEST(ControlPayloadValidationTests, MinimumEnvelopeAlwaysContainsTheSplitHeader)
     stream::CONTROL_ENCRYPTED_MIN_LENGTH - stream::CONTROL_ENCRYPTED_SEQUENCE_SIZE,
     stream::CONTROL_GCM_TAG_SIZE + stream::CONTROL_HEADER_V2_SIZE
   );
-  EXPECT_FALSE(stream::is_valid_encrypted_control_payload(
-    stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE +
-      stream::CONTROL_ENCRYPTED_MIN_LENGTH - 1,
-    stream::CONTROL_ENCRYPTED_MIN_LENGTH - 1
-  ));
+  EXPECT_FALSE(stream::is_valid_encrypted_control_payload(stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + stream::CONTROL_ENCRYPTED_MIN_LENGTH - 1, stream::CONTROL_ENCRYPTED_MIN_LENGTH - 1));
 }
 
 TEST(ControlPayloadValidationTests, EnforcesDecryptedInnerLength) {
@@ -600,12 +633,26 @@ TEST(AtomicPresentationWireTests, DecodesExactV2GoldenVector) {
   EXPECT_EQ(stream::ATOMIC_PRESENTATION_VERSION, 2U);
 
   const std::array<std::uint8_t, 20> v2 {
-    0x02, 0x01, 0x00, 0x00,  // version, AI, flags=0
-    0xEF, 0xCD, 0xAB, 0x89,  // u32 request id
-    0x00, 0x14,  // source width 5120
-    0x70, 0x08,  // source height 2160
-    0x6A, 0x17, 0x00, 0x00,  // 59.94 Hz
-    0x50, 0xC3, 0x00, 0x00,  // 50000 kbps
+    0x02,
+    0x01,
+    0x00,
+    0x00,  // version, AI, flags=0
+    0xEF,
+    0xCD,
+    0xAB,
+    0x89,  // u32 request id
+    0x00,
+    0x14,  // source width 5120
+    0x70,
+    0x08,  // source height 2160
+    0x6A,
+    0x17,
+    0x00,
+    0x00,  // 59.94 Hz
+    0x50,
+    0xC3,
+    0x00,
+    0x00,  // 50000 kbps
   };
   stream::live_video_mode_wire_request_t request;
   const auto decoded = stream::decode_live_video_mode_request_payload(
@@ -631,7 +678,8 @@ TEST(AtomicPresentationWireTests, RejectsEveryNonExactBodyAndUnsupportedVersion)
     EXPECT_EQ(
       stream::decode_live_video_mode_request_payload({bytes.data(), size}, request),
       stream::live_video_mode_request_decode_e::invalid
-    ) << "size=" << size;
+    ) << "size="
+      << size;
   }
 
   std::array<char, stream::ATOMIC_PRESENTATION_V2_REQUEST_PAYLOAD_SIZE> future {};
@@ -770,13 +818,34 @@ TEST(AtomicPresentationAckTests, EncodesCompleteAppliedStateGoldenVector) {
   ASSERT_TRUE(stream::encode_atomic_presentation_ack_payload(ack, payload));
 
   const std::uint8_t expected[stream::ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE] = {
-    0x02, 0x00, 0x01, 0x00,  // version, applied, AI, flags=0
-    0xEF, 0xCD, 0xAB, 0x89,  // request id
-    0x40, 0x30, 0x20, 0x10,  // applied generation
-    0x00, 0x14, 0x70, 0x08,  // source 5120x2160
-    0x00, 0x20, 0xC0, 0x06,  // exact encoded 8192x1728
-    0x6A, 0x17, 0x00, 0x00,  // 59.94 Hz
-    0x70, 0x94, 0x00, 0x00,  // encoder bitrate 38000 kbps
+    0x02,
+    0x00,
+    0x01,
+    0x00,  // version, applied, AI, flags=0
+    0xEF,
+    0xCD,
+    0xAB,
+    0x89,  // request id
+    0x40,
+    0x30,
+    0x20,
+    0x10,  // applied generation
+    0x00,
+    0x14,
+    0x70,
+    0x08,  // source 5120x2160
+    0x00,
+    0x20,
+    0xC0,
+    0x06,  // exact encoded 8192x1728
+    0x6A,
+    0x17,
+    0x00,
+    0x00,  // 59.94 Hz
+    0x70,
+    0x94,
+    0x00,
+    0x00,  // encoder bitrate 38000 kbps
   };
   EXPECT_TRUE(std::equal(std::begin(payload), std::end(payload), std::begin(expected)));
 
@@ -789,7 +858,16 @@ TEST(AtomicPresentationAckTests, EncodesCompleteAppliedStateGoldenVector) {
 
 TEST(AtomicPresentationAckTests, RequiresACompleteProvenGeneration) {
   const video::effective_video_mode_t unproven {
-    1920, 1080, 6000, 20000, 1920, 1080, 1920, 1080, video::SBS_OFF, 0,
+    1920,
+    1080,
+    6000,
+    20000,
+    1920,
+    1080,
+    1920,
+    1080,
+    video::SBS_OFF,
+    0,
   };
   const auto ack = stream::make_live_video_mode_ack(
     std::numeric_limits<std::uint32_t>::max(),
@@ -882,7 +960,16 @@ TEST(AtomicPresentationAckTests, ReportsAClampedApplyWithExactSourceAndEncodedGe
 
 TEST(AtomicPresentationAckTests, RefusesValuesThatDoNotFitTheV2WireContract) {
   const video::effective_video_mode_t effective {
-    1920, 1080, 6000, 20000, 1920, 1080, 1920, 1080, video::SBS_OFF, 1,
+    1920,
+    1080,
+    6000,
+    20000,
+    1920,
+    1080,
+    1920,
+    1080,
+    video::SBS_OFF,
+    1,
   };
   const auto valid = stream::make_live_video_mode_ack(
     1,
@@ -900,29 +987,69 @@ TEST(AtomicPresentationAckTests, RefusesValuesThatDoNotFitTheV2WireContract) {
     }));
   };
 
-  reject([](auto &ack) { ack.request_id = -1; });
-  reject([](auto &ack) { ack.request_id = 4294967296LL; });
-  reject([](auto &ack) { ack.status = static_cast<stream::live_video_mode_ack_e>(4); });
-  reject([](auto &ack) { ack.applied_sbs_mode = 2; });
-  reject([](auto &ack) { ack.applied_source_width = 65536; });
-  reject([](auto &ack) { ack.applied_source_height = -1; });
-  reject([](auto &ack) { ack.applied_encoded_width = 65536; });
-  reject([](auto &ack) { ack.applied_encoded_height = -1; });
-  reject([](auto &ack) { ack.applied_framerate_x100 = -1; });
-  reject([](auto &ack) { ack.applied_bitrate_kbps = 4294967296LL; });
-  reject([](auto &ack) { ack.applied_generation = 0; });
+  reject([](auto &ack) {
+    ack.request_id = -1;
+  });
+  reject([](auto &ack) {
+    ack.request_id = 4294967296LL;
+  });
+  reject([](auto &ack) {
+    ack.status = static_cast<stream::live_video_mode_ack_e>(4);
+  });
+  reject([](auto &ack) {
+    ack.applied_sbs_mode = 4;
+  });
+  reject([](auto &ack) {
+    ack.applied_source_width = 65536;
+  });
+  reject([](auto &ack) {
+    ack.applied_source_height = -1;
+  });
+  reject([](auto &ack) {
+    ack.applied_encoded_width = 65536;
+  });
+  reject([](auto &ack) {
+    ack.applied_encoded_height = -1;
+  });
+  reject([](auto &ack) {
+    ack.applied_framerate_x100 = -1;
+  });
+  reject([](auto &ack) {
+    ack.applied_bitrate_kbps = 4294967296LL;
+  });
+  reject([](auto &ack) {
+    ack.applied_generation = 0;
+  });
 }
 
 TEST(AtomicPresentationAckTests, RefusalsReportTheLastProvenMode) {
   // A refusal reports the last proven mode rather than zeros or the rejected request. Status 2
   // still makes reconnect authoritative because a failed desktop rollback can invalidate it.
   video::effective_video_mode_publisher_t publisher {{
-    1920, 1080, 6000, 20000, 1920, 1080, 1920, 1080, video::SBS_OFF, 1,
+    1920,
+    1080,
+    6000,
+    20000,
+    1920,
+    1080,
+    1920,
+    1080,
+    video::SBS_OFF,
+    1,
   }};
   EXPECT_EQ(publisher.current().width, 1920);
 
   publisher.publish({
-    2560, 1440, 12000, 45000, 2560, 1440, 2560, 1440, video::SBS_OFF, 2,
+    2560,
+    1440,
+    12000,
+    45000,
+    2560,
+    1440,
+    2560,
+    1440,
+    video::SBS_OFF,
+    2,
   });
   const auto in_effect = publisher.current();
   EXPECT_EQ(in_effect.width, 2560);
@@ -940,6 +1067,151 @@ TEST(AtomicPresentationAckTests, RefusalsReportTheLastProvenMode) {
   EXPECT_EQ(payload[1], 2);  // needs reconnect
   EXPECT_EQ(static_cast<int>(payload[4]) | (static_cast<int>(payload[5]) << 8), 42);
   EXPECT_EQ(static_cast<int>(payload[12]) | (static_cast<int>(payload[13]) << 8), 2560);
+}
+
+TEST(GameSourceWireTests, NegotiationGatesOnlyTheNewModes) {
+  for (bool negotiated : {false, true}) {
+    EXPECT_TRUE(stream::is_valid_live_video_sbs_mode(video::SBS_OFF, negotiated));
+    EXPECT_TRUE(stream::is_valid_live_video_sbs_mode(video::SBS_AI, negotiated));
+    EXPECT_EQ(stream::is_valid_live_video_sbs_mode(video::SBS_GAME_MONO, negotiated), negotiated);
+    EXPECT_EQ(stream::is_valid_live_video_sbs_mode(video::SBS_GAME_SBS, negotiated), negotiated);
+    EXPECT_FALSE(stream::is_valid_live_video_sbs_mode(-1, negotiated));
+    EXPECT_FALSE(stream::is_valid_live_video_sbs_mode(4, negotiated));
+  }
+  EXPECT_EQ(stream::CLIENT_FEATURE_GAME_PROVIDER_V1, 0x80);
+  EXPECT_EQ(platf::platform_caps::game_provider_v1, 0x02000000);
+}
+
+TEST(GameSourceWireTests, EncodesExactVersionedLittleEndianProviderState) {
+  const video::game_source_state_t state {
+    video::GAME_SOURCE_READY,
+    video::GAME_PROVIDER_RESHADE,
+    0x10203040,
+    0x89ABCDEF,
+    1920,
+    1080,
+    3840,
+    1080,
+  };
+  std::uint8_t payload[stream::GAME_SOURCE_STATUS_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_game_source_status_payload(state, payload));
+  const std::uint8_t expected[] {
+    1,
+    1,
+    1,
+    0,
+    0x40,
+    0x30,
+    0x20,
+    0x10,
+    0xEF,
+    0xCD,
+    0xAB,
+    0x89,
+    0x80,
+    0x07,
+    0x38,
+    0x04,
+    0x00,
+    0x0F,
+    0x38,
+    0x04,
+  };
+  EXPECT_EQ(sizeof(payload), sizeof(expected));
+  EXPECT_TRUE(std::equal(std::begin(payload), std::end(payload), std::begin(expected)));
+  const auto reject = [&](auto mutate) {
+    auto invalid = state;
+    mutate(invalid);
+    std::fill(std::begin(payload), std::end(payload), 0xA5);
+    EXPECT_FALSE(stream::encode_game_source_status_payload(invalid, payload));
+    EXPECT_TRUE(std::all_of(std::begin(payload), std::end(payload), [](auto byte) {
+      return byte == 0xA5;
+    }));
+  };
+  reject([](auto &value) {
+    value.state = 3;
+  });
+  reject([](auto &value) {
+    value.provider = 2;
+  });
+  reject([](auto &value) {
+    value.provider = video::GAME_PROVIDER_NONE;
+  });
+  reject([](auto &value) {
+    value.presentation_generation = 0;
+  });
+  reject([](auto &value) {
+    value.source_revision = 0;
+  });
+  reject([](auto &value) {
+    value.source_width = 1919;
+  });
+  reject([](auto &value) {
+    value.packed_width = 1920;
+  });
+  reject([](auto &value) {
+    value.packed_height = 1078;
+  });
+}
+
+TEST(GameSourceWireTests, FiltersStaleGenerationOrGeometryButDeliversUnsupportedMonoCaps) {
+  video::effective_video_mode_t mode {
+    1920,
+    1080,
+    6000,
+    20000,
+    1920,
+    1080,
+    1920,
+    1080,
+    video::SBS_GAME_MONO,
+    7,
+  };
+  video::game_source_state_t state {video::GAME_SOURCE_READY, video::GAME_PROVIDER_RESHADE, 7, 1, 1920, 1080, 3840, 1080};
+  EXPECT_TRUE(stream::game_source_status_matches_mode(state, mode));
+  mode.generation = 8;
+  EXPECT_FALSE(stream::game_source_status_matches_mode(state, mode));
+  state.presentation_generation = 8;
+  mode.source_width = 2560;
+  EXPECT_FALSE(stream::game_source_status_matches_mode(state, mode));
+  mode.source_width = 1920;
+  mode.encoded_width = 1280;
+  mode.encoded_height = 720;
+  EXPECT_FALSE(stream::game_source_status_matches_mode(state, mode));
+  state.state = video::GAME_SOURCE_UNSUPPORTED;
+  EXPECT_TRUE(stream::game_source_status_matches_mode(state, mode));
+  mode.sbs_mode = video::SBS_GAME_SBS;
+  EXPECT_FALSE(stream::game_source_status_matches_mode(state, mode));
+  mode.encoded_width = 3840;
+  mode.encoded_height = 1080;
+  EXPECT_TRUE(stream::game_source_status_matches_mode(state, mode));
+  mode.sbs_mode = video::SBS_AI;
+  EXPECT_FALSE(stream::game_source_status_matches_mode(state, mode));
+}
+
+TEST(GameSourceWireTests, BothGameModesUseTheExistingAtomicAckWithoutFlags) {
+  for (int mode : {video::SBS_GAME_MONO, video::SBS_GAME_SBS}) {
+    const video::effective_video_mode_t effective {
+      1920,
+      1080,
+      6000,
+      20000,
+      1920,
+      1080,
+      mode == video::SBS_GAME_SBS ? 3840 : 1920,
+      1080,
+      mode,
+      7,
+    };
+    const auto ack = stream::make_live_video_mode_ack(9, stream::live_video_mode_ack_e::applied, effective);
+    std::uint8_t payload[stream::ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE] {};
+    ASSERT_TRUE(stream::encode_atomic_presentation_ack_payload(ack, payload));
+    EXPECT_EQ(payload[0], 2);
+    EXPECT_EQ(payload[2], mode);
+    EXPECT_EQ(payload[3], 0);
+    EXPECT_EQ(payload[4], 9);
+    EXPECT_EQ(payload[8], 7);
+  }
 }
 
 TEST(SbsTelemetryWireTests, VersionSizesFlagsAndStatusesAreFrozen) {

@@ -213,6 +213,9 @@ namespace platf::primary_display {
       std::function<bool(std::wstring_view, std::optional<cursor_bounds_t>)> cursor_clip;
       std::function<std::optional<POINT>()> query_cursor;
       std::function<bool(POINT)> set_cursor;
+      // Optional remote physical recovery path. Forces the supplied mode down to the driver;
+      // callers without this adapter retain the ordinary apply behavior.
+      std::function<bool(snapshot_t)> apply_physical_restore;
     };
 
     std::optional<layout_t> inspect(const snapshot_t &snapshot);
@@ -236,10 +239,10 @@ namespace platf::primary_display {
     private:
       io_t io_;
       bool apply_verified(const snapshot_t &before, const layout_t &desired);
-      bool promote_exclusive(std::wstring_view device_path);
+      bool promote_exclusive(std::wstring_view device_path, bool reconcile_active_source = false);
       bool refresh_exclusive_cursor_clip(std::wstring_view device_path);
       bool clip_cursor_to_display(const snapshot_t &snapshot, std::wstring_view device_path);
-      bool restore_exclusive(journal_t journal, bool keep_virtual_active = true);
+      bool restore_exclusive(journal_t journal, bool keep_virtual_active = true, retained_display_ptr retained = {});
       bool recover_prepared_outputs(journal_t journal);
     };
   }  // namespace detail

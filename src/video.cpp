@@ -12,20 +12,22 @@
 
 // local includes
 #include "config.h"
+#include "depth_coordinate_v2.h"
 #include "display_device.h"
 #include "globals.h"
+#include "host_sbs_provider.h"
+#include "host_sbs_resolution.h"
 #include "input.h"
 #include "logging.h"
-#include "host_sbs_resolution.h"
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
 #include "process.h"
 #include "sync.h"
 #include "tracked_async_worker.h"
 #include "video.h"
-#include "depth_coordinate_v2.h"
 
 #ifdef _WIN32
+  #include "platform/windows/exclusive_display_reconcile_retry.h"
   #include "platform/windows/virtual_display.h"
 #endif
 
@@ -51,10 +53,14 @@ namespace video {
     struct capture_stage_diagnostics_t {
       detail::diagnostic_content_tracker_t content;
       logging::min_max_avg_periodic_logger<double> new_content_age {
-        info, "Video capture: new content age at handoff", "ms",
+        info,
+        "Video capture: new content age at handoff",
+        "ms",
       };
       logging::min_max_avg_periodic_logger<double> repeated_content_age {
-        info, "Video capture: retained content age at handoff", "ms",
+        info,
+        "Video capture: retained content age at handoff",
+        "ms",
       };
 
       void record(platf::img_t &img) {
@@ -78,22 +84,34 @@ namespace video {
       detail::diagnostic_content_tracker_t input_capture;
       detail::diagnostic_content_tracker_t output_content;
       logging::min_max_avg_periodic_logger<double> new_input_age {
-        info, "Video input: new content age at conversion", "ms",
+        info,
+        "Video input: new content age at conversion",
+        "ms",
       };
       logging::min_max_avg_periodic_logger<double> repeated_input_age {
-        info, "Video input: retained content age at conversion", "ms",
+        info,
+        "Video input: retained content age at conversion",
+        "ms",
       };
       logging::min_max_avg_periodic_logger<double> capture_to_conversion {
-        info, "Video input: capture handoff to first conversion", "ms",
+        info,
+        "Video input: capture handoff to first conversion",
+        "ms",
       };
       logging::min_max_avg_periodic_logger<double> capture_to_reconversion {
-        info, "Video input: capture handoff to reconversion", "ms",
+        info,
+        "Video input: capture handoff to reconversion",
+        "ms",
       };
       logging::min_max_avg_periodic_logger<double> conversion_call {
-        info, "Video conversion: CPU call including requested dump work", "ms",
+        info,
+        "Video conversion: CPU call including requested dump work",
+        "ms",
       };
       logging::min_max_avg_periodic_logger<double> nvenc_call {
-        info, "Video NVENC: encode and retrieve call", "ms",
+        info,
+        "Video NVENC: encode and retrieve call",
+        "ms",
       };
 
       void begin_conversion(const platf::img_t &img) {
@@ -821,10 +839,7 @@ namespace video {
               while (capture_ctx->images->try_pop()) {
               }
 
-              if (detail::capture_display_release_wait_cancelled(
-                    capture_ctx_queue->running(),
-                    capture_ctx->images->running()
-                  )) {
+              if (detail::capture_display_release_wait_cancelled(capture_ctx_queue->running(), capture_ctx->images->running())) {
                 return;
               }
 
@@ -847,6 +862,30 @@ namespace video {
               }
             }
 
+            // The old DDUP/NVENC references are gone. Complete the owned topology
+            // repair before probing outputs, rather than racing a game-exit repair
+            // on the session-monitor worker and then opening a transient display.
+            disp.reset();
+#ifdef _WIN32
+            const auto topology_generation = platf::primary_display::exclusive_session_generation();
+            const auto topology = platf::primary_display::detail::reconcile_before_capture(
+              [topology_generation]() {
+                return platf::primary_display::reconcile_exclusive_display_topology(topology_generation).result;
+              },
+              [&]() {
+                return capture_ctx_queue->running() && capture_ctx->images->running() &&
+                       platf::primary_display::exclusive_session_generation() == topology_generation;
+              },
+              []() { return std::chrono::steady_clock::now(); },
+              [](auto delay) { std::this_thread::sleep_for(delay); }
+            );
+            if (topology == platf::primary_display::detail::capture_reconcile_result_e::cancelled) {
+              return;
+            }
+            if (topology == platf::primary_display::detail::capture_reconcile_result_e::exhausted) {
+              BOOST_LOG(warning) << "Exclusive display topology is still settling; continuing normal capture recovery."sv;
+            }
+#endif
             while (capture_ctx_queue->running()) {
               // Release the display before reenumerating displays, since some capture backends
               // only support a single display session per device/application.
@@ -1023,6 +1062,8 @@ namespace video {
     auto max_frametime = std::chrono::nanoseconds(1000ms) * 1000 / minimum_fps_target;
     auto encode_frame_threshold = std::chrono::nanoseconds(1000ms) * 1000 / config.encodingFramerate;
     auto frame_variation_threshold = encode_frame_threshold / 4;
+    const bool independent_provider = is_game_mode(config.sbs_mode) ||
+                                      (config.sbs_mode == SBS_AI && config.sbs_config.reshade);
     BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 1000) << "fps ("sv << max_frametime << ")"sv;
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
 
@@ -1110,7 +1151,7 @@ namespace video {
       video_mode_change_t active {
         published_mode.source_width > 0 ?
           published_mode.source_width :
-          (config.sbs_mode != SBS_OFF ? config.width / 2 : config.width),
+          (is_packed_mode(config.sbs_mode) ? config.width / 2 : config.width),
         published_mode.source_height > 0 ? published_mode.source_height : config.height,
         config.framerate,
         config.framerateX100,
@@ -1185,9 +1226,7 @@ namespace video {
       // one thread. Use that serialized seam for a same-geometry/same-cadence bitrate update. Any
       // mismatch, unsupported GPU, or driver failure restores the request and takes the unchanged
       // lifecycle rebuild path below.
-      if (!shutting_down && !capture_stopped && !display_reinit_pending &&
-          video_mode_event->peek() &&
-          try_reconfigure_pending_bitrate()) {
+      if (!shutting_down && !capture_stopped && !display_reinit_pending && video_mode_event->peek() && try_reconfigure_pending_bitrate()) {
         return false;
       }
       // Any queued atomic presentation change that is not bitrate-only rebuilds the encode
@@ -1241,17 +1280,8 @@ namespace video {
       // Idle keepalives preserve static image quality. Pending retained-source conversion is
       // serviced at the requested cadence instead of waiting for that slower heartbeat.
       if (!requested_idr_frame || images->peek()) {
-        if (auto img = detail::wait_for_encode_image(
-              *images,
-              max_frametime,
-              encode_frame_threshold,
-              static_cast<bool>(last_img),
-              depth_pipeline_ready_event && depth_pipeline_ready_event->peek(),
-              last_img && session->needs_conversion_poll(),
-              source.pending() ?
-                source.remaining_wait(std::chrono::steady_clock::now(), encode_frame_timestamp) :
-                std::nullopt
-            )) {
+        const bool conversion_poll_pending = last_img && session->needs_conversion_poll();
+        if (auto img = detail::wait_for_encode_image(*images, max_frametime, encode_frame_threshold, static_cast<bool>(last_img), depth_pipeline_ready_event && depth_pipeline_ready_event->peek(), conversion_poll_pending, source.remaining_wait(std::chrono::steady_clock::now(), encode_frame_timestamp, independent_provider && conversion_poll_pending))) {
           source.observe(std::move(img));
           frame_timestamp = last_img->frame_timestamp;
           if (!frame_timestamp) {
@@ -1321,7 +1351,10 @@ namespace video {
             break;
           }
           const auto schedule = detail::select_encode_frame_schedule(
-            now, encode_frame_timestamp, encode_frame_threshold, frame_variation_threshold
+            now,
+            encode_frame_timestamp,
+            encode_frame_threshold,
+            frame_variation_threshold
           );
           consume_sampled_depth_pipeline_ready =
             depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
@@ -1359,18 +1392,32 @@ namespace video {
       // blocking and keep D3D rendering on its normal owner. A busy poll keeps the exact slot
       // pending and suppresses duplicate inference for those same pixels.
       if (!converted_frame && last_img && session->needs_conversion_poll()) {
-        if (lifecycle_change_requested()) {
-          break;
+        const auto now = std::chrono::steady_clock::now();
+        // A faster minimum-FPS heartbeat may encode retained output before this deadline,
+        // but must not advance an independent provider's schedule ahead of actual time.
+        // Host AI completion retains its existing immediate timeout service.
+        if (!independent_provider || source.due(now, encode_frame_timestamp, requested_idr_frame, true)) {
+          if (lifecycle_change_requested()) {
+            break;
+          }
+          const auto schedule = independent_provider ?
+                                  std::optional {detail::select_encode_frame_schedule(
+                                    now, encode_frame_timestamp, encode_frame_threshold, frame_variation_threshold
+                                  )} :
+                                  std::nullopt;
+          frame_timestamp = schedule ? schedule->presentation_timestamp : now;
+          consume_sampled_depth_pipeline_ready =
+            depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
+          if (convert_frame(*last_img, schedule ? std::optional {schedule->next_encode_target} : std::nullopt)) {
+            BOOST_LOG(error) << "Could not consume pending Host SBS depth for retained source"sv;
+            break;
+          }
+          converted_frame = true;
+          source.converted();
+          if (schedule) {
+            encode_frame_timestamp = schedule->next_encode_target;
+          }
         }
-        frame_timestamp = std::chrono::steady_clock::now();
-        consume_sampled_depth_pipeline_ready =
-          depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
-        if (convert_frame(*last_img)) {
-          BOOST_LOG(error) << "Could not consume pending Host SBS depth for retained source"sv;
-          break;
-        }
-        converted_frame = true;
-        source.converted();
       }
 
       if (converted_frame && consume_sampled_depth_pipeline_ready && depth_pipeline_ready_event) {
@@ -1550,6 +1597,7 @@ namespace video {
     auto sbs_depth_status_event = mail->event<int>(mail::sbs_depth_status);
     auto sbs_telemetry_event =
       mail->event<sbs_telemetry_snapshot_t>(mail::sbs_telemetry);
+    auto game_source_status_event = mail->event<game_source_state_t>(mail::game_source_status);
     // Live client-requested geometry/rate/bitrate change (0x3007 control message). It rewrites
     // `config`, which every derived value below is rebuilt from on each iteration. This is a queue
     // rather than a single-slot event: every request owes the client an acknowledgement, so a
@@ -1589,7 +1637,7 @@ namespace video {
           if (config.requested_sbs_mode) {
             config.requested_sbs_mode->store(current_sbs_mode, std::memory_order_release);
           }
-          if (current_sbs_mode == SBS_OFF) {
+          if (current_sbs_mode != SBS_AI) {
             if (config.sbs_debug_dump_pending) {
               config.sbs_debug_dump_pending->store(false, std::memory_order_release);
             }
@@ -1637,7 +1685,7 @@ namespace video {
           static_cast<std::uint32_t>(base_width),
           static_cast<std::uint32_t>(config.height)
         );
-      if (current_sbs_mode != SBS_OFF && !host_sbs_rejection.empty()) {
+      if (current_sbs_mode == SBS_AI && !host_sbs_rejection.empty()) {
         // Launch state is checked here too, and a live request is rechecked at the final encoder
         // construction boundary. Never construct an unauthenticated Host SBS geometry.
         BOOST_LOG(warning)
@@ -1661,9 +1709,15 @@ namespace video {
       session_config.sbs_depth_pipeline_ready_event =
         std::make_shared<safe::event_t<bool>>();
       session_config.sbs_config = config::video.sbs;
+      // Remote provider selection is explicit and immutable within this presentation request.
+      // The legacy global ReShade switch continues to configure the independent local AR path.
+      session_config.sbs_config.reshade = is_game_mode(current_sbs_mode);
+      session_config.game_source_status_event = is_game_mode(current_sbs_mode) ? game_source_status_event : nullptr;
+      session_config.game_source_width = base_width;
+      session_config.game_source_height = config.height;
       session_config.sbs_telemetry_event = sbs_telemetry_event;
       session_config.sbs_telemetry_generation = next_sbs_telemetry_generation();
-      session_config.sbs_telemetry_performance = config::sunshine.diagnostics_enabled && current_sbs_mode != SBS_OFF ?
+      session_config.sbs_telemetry_performance = config::sunshine.diagnostics_enabled && current_sbs_mode == SBS_AI ?
                                                    std::make_shared<host_sbs_telemetry::collector>() :
                                                    nullptr;
       // Invalidate the previous renderer's state before any encoder/GPU initialization work. This
@@ -1675,7 +1729,21 @@ namespace video {
       ));
       int runtime_max_width = nvenc::max_encode_width_for_codec(session_config.videoFormat).value_or(0);
       int runtime_max_height = nvenc::max_encode_height_for_codec(session_config.videoFormat).value_or(0);
-      if (current_sbs_mode != SBS_OFF) {
+      const auto game_packed_dimensions = host_sbs_output_dimensions(
+        base_width,
+        config.height,
+        session_config.videoFormat,
+        session_config.sbs_config.max_encode_width,
+        runtime_max_width,
+        runtime_max_height
+      );
+      session_config.game_source_transport_supported = external_sbs_dimensions_match(
+        base_width,
+        config.height,
+        game_packed_dimensions.width,
+        game_packed_dimensions.height
+      );
+      if (is_packed_mode(current_sbs_mode)) {
         const auto dimensions = host_sbs_output_dimensions(
           base_width,
           config.height,
@@ -1687,8 +1755,7 @@ namespace video {
         session_config.width = dimensions.width;
         session_config.height = dimensions.height;
         const std::int64_t packed_width = static_cast<std::int64_t>(base_width) * 2;
-        if (session_config.width != packed_width ||
-            session_config.height != config.height) {
+        if (!session_config.sbs_config.reshade && (session_config.width != packed_width || session_config.height != config.height)) {
           BOOST_LOG(info) << "Host SBS: requested packed dimensions "sv << packed_width
                           << 'x' << config.height
                           << " exceed the effective encoder limits; capping to "sv
@@ -1716,14 +1783,14 @@ namespace video {
                           << session_config.width << 'x' << session_config.height;
         }
       }
-      BOOST_LOG(info) << "Encode session: Host SBS V2 mode "sv
+      BOOST_LOG(info) << "Encode session: Host SBS mode "sv
                       << current_sbs_mode << ", strength "sv
                       << session_config.sbs_config.pop_strength
-                      << ", model '"sv << host_sbs_v2_depth_model().name << "', output "sv
+                      << ", provider '"sv << (session_config.sbs_config.reshade ? "ReShade" : host_sbs_v2_depth_model().name) << "', output "sv
                       << session_config.width << 'x' << session_config.height;
 
       auto recover_failed_sbs_session = [&]() {
-        if (session_config.sbs_mode == SBS_OFF) {
+        if (session_config.sbs_mode != SBS_AI) {
           return false;
         }
         const int refreshed_max_width = nvenc::max_encode_width_for_codec(
@@ -1733,13 +1800,11 @@ namespace video {
         const int refreshed_max_height = nvenc::max_encode_height_for_codec(
                                            session_config.videoFormat
         )
-                                            .value_or(0);
+                                           .value_or(0);
         const bool learned_stricter_limit =
           (refreshed_max_width > 0 && refreshed_max_width < session_config.width) ||
           (refreshed_max_height > 0 && refreshed_max_height < session_config.height);
-        if (learned_stricter_limit &&
-            (refreshed_max_width != runtime_max_width ||
-             refreshed_max_height != runtime_max_height)) {
+        if (learned_stricter_limit && (refreshed_max_width != runtime_max_width || refreshed_max_height != runtime_max_height)) {
           BOOST_LOG(info) << "Host SBS learned lower runtime NVENC limits ("sv
                           << refreshed_max_width << 'x' << refreshed_max_height
                           << "); retrying with aspect-preserving SBS scaling."sv;
@@ -1774,7 +1839,7 @@ namespace video {
         if (config.requested_sbs_mode) {
           config.requested_sbs_mode->store(current_sbs_mode, std::memory_order_release);
         }
-        if (current_sbs_mode == SBS_OFF) {
+        if (current_sbs_mode != SBS_AI) {
           sbs_depth_status_event->raise(0);
         }
         capture_thread_ctx.live_video_mode = proven_video_mode;
@@ -1787,6 +1852,16 @@ namespace video {
         }
         return true;
       };
+
+      if (current_sbs_mode == SBS_GAME_SBS && !external_sbs_dimensions_match(base_width, config.height, session_config.width, session_config.height)) {
+        BOOST_LOG(error) << "ReShade Host 3D cannot encode the exact final-SBS raster "sv
+                         << static_cast<std::int64_t>(base_width) * 2 << 'x' << config.height
+                         << "; refusing to resize authored stereo."sv;
+        if (revert_failed_live_video_mode()) {
+          continue;
+        }
+        return;
+      }
 
       auto encode_device = make_encode_device(*display, session_config, true);
       if (!encode_device) {
@@ -1847,7 +1922,7 @@ namespace video {
       // base per-eye width is half the encoded width; both are reported after the codec-width cap,
       // which can differ from the request. The bitrate is the encoder budget, not the wire budget.
       effective_video_mode_t effective_mode {
-        session_config.sbs_mode != SBS_OFF ? session_config.width / 2 : session_config.width,
+        is_packed_mode(session_config.sbs_mode) ? session_config.width / 2 : session_config.width,
         session_config.height,
         // A launch that never negotiated an exact refresh rate leaves framerateX100 at zero. The
         // client is owed a real rate, so fall back to the whole-frames-per-second figure.

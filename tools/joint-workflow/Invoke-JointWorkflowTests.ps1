@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Builds and runs the host/client workflow boundary gate, including software D3D, without a headset.
+Builds and runs the host/client workflow boundary gate, including D3D shared-texture tests, without a headset.
 #>
 [CmdletBinding()]
 param(
@@ -86,6 +86,7 @@ try {
     'Offline*', 'GpuWorkloadArbiter.*', 'Rtsp*', 'NvHttpLaunchParsingTest.*', 'Input*', 'ProcessTest.*',
     'IdleProcessLifecycleTest.*', 'RetainedDisplayPauseTest.*', 'PlatformLaunchGuardTest.*', 'PrimaryDisplay*', 'VirtualDisplay*', 'DisplayConfigTarget.*', 'SessionResumeLifecycle.*',
     'SessionWorker*Test.*', 'AtomicPresentation*', 'WindowsQpc*', 'WindowsDdup*',
+    'GameSource*', 'ReShadeProviderDimensions.*', 'ReShadeBridgeProtocol.*', 'ReShadeBridgeGpu.*',
     'WindowsHostSbsCompletedSourceTest.*', 'DirectxShaderSourceTest.AdaptiveReuseUsesExactCurrentPublicationAndActualDepthOwner',
     'WindowsLocalPresenter*', 'PresentationScheduling*', 'ArGlasses*', 'RemoteEncode*Test.*',
     'HostSbsChromaGpuTest.*', 'HostSbsConversionWorkTest.*', 'WebUiDesign.*', 'TestEventListenerTest.*'
@@ -114,11 +115,24 @@ try {
     '-lcrypto', '-lwinmm', '-lws2_32', '-o', $packetTest
   ) $HostRoot
   Invoke-GateStage 'client-packet' $packetTest @() $HostRoot
+  $controlTest = Join-Path $resultsDirectory 'control-telemetry-test.exe'
+  Invoke-GateStage 'client-control-build' $cCompiler @(
+    '-std=c11', '-O2', '-flto', '-DLC_DEBUG', '-DHAS_SOCKLEN_T',
+    '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
+    '-I', (Join-Path $commonC 'src'), '-I', (Join-Path $commonC 'reedsolomon'),
+    '-I', (Join-Path $commonC 'enet/include'),
+    (Join-Path $commonC 'tests/ControlTelemetryTest.c'), (Join-Path $commonC 'src/ByteBuffer.c'),
+    (Join-Path $commonC 'src/LinkedBlockingQueue.c'), (Join-Path $commonC 'src/Platform.c'),
+    '-lwinmm', '-lws2_32', '-o', $controlTest
+  ) $HostRoot
+  Invoke-GateStage 'client-control' $controlTest @() $HostRoot
   $clientArguments = @(':app:testNonRoot_gameDebugUnitTest', '--console=plain')
   foreach ($testClass in @(
     'com.limelight.nvstream.http.NvHTTP*Test',
     'com.limelight.nvstream.NvConnection*Test',
     'com.limelight.GameReconnectLifecycleTest',
+    'com.limelight.GameTransportReconnectTest',
+    'com.limelight.TransportReconnectPolicyTest',
     'com.limelight.GameXrDisconnectTest',
     'com.limelight.utils.ClientSbs*Test',
     'com.limelight.sbs.*Test',
@@ -130,6 +144,8 @@ try {
     'com.limelight.ui.XrStreamPresenterControlTransportTeardownTest',
     'com.limelight.ui.XrClientPanelRefreshRateIntegrationTest',
     'com.limelight.ui.XrModeReconnectPolicyTest',
+    'com.limelight.ui.XrAuthoredPresentationTest',
+    'com.limelight.ui.XrGameStereoIntegrationTest',
     'com.limelight.ui.StreamContainerSurfaceHandoffContractTest',
     'com.limelight.ui.StreamContainerAsyncEglLifecycleTest',
     'com.limelight.ui.AsyncEglRenderLoopTest',

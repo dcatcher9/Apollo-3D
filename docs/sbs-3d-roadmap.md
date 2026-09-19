@@ -7,10 +7,23 @@ only the current product, its known limitations, and work that may still be just
 
 | Path | Geometry owner | Status |
 |---|---|---|
-| Host SBS live stream | Sunshine 3D on Windows/NVIDIA | V2 production pipeline, including a causally attributed foreground window-region ROI route with Chromium-video priority |
+| Host SBS live stream using Sunshine depth | Sunshine 3D on Windows/NVIDIA | V2 production pipeline, including a causally attributed foreground window-region ROI route with Chromium-video priority |
+| Streamed Game 3D | Depth3D in the game; Sunshine receives final SBS | Negotiated discovery starts mono, then enters exact full SBS through an acknowledged transition; D3D11/D3D12 SDR/HDR handoff has controlled-runtime coverage; live game/device acceptance remains |
 | Offline Host 3D conversion | Sunshine 3D isolated worker | Same causal V2 estimator/renderer, unpaced source-order processing, and compressed H.265/AV1 output |
 | Client SBS | Moonlight 3D on Android XR | Separate client pipeline; unchanged by Host V2 |
-| Local AR glasses | Sunshine 3D local presenter | Reuses Host V2 without network encode/decode |
+| Local AR glasses | Sunshine 3D local presenter | Uses Host V2 or the local-only `sbs_reshade` provider setting without network encode/decode |
+
+The [ReShade source](reshade-sbs.md) keeps the game and virtual display at normal resolution and
+shares a separate full SBS texture. A compatible headset selects Game 3D without a host provider
+toggle or restart. Resolution, FPS and Bandwidth belong to its own client pane. The stream remains
+mono until source readiness and a confirmed transition; later source loss uses duplicate-eye
+fallback while retaining packed geometry. Failed automatic widening stays latched until explicit
+re-entry or a deliberate quality change. Host AI 3D remains the Sunshine depth provider.
+
+Setup, HDR handling and outstanding device checks are documented in the ReShade guide. Exporting
+original color plus depth for warping in Sunshine remains future work. Automatic Movie SBS image
+detection is not part of Game provider discovery. The geometry and ROI behavior below describe
+Sunshine's V2 provider.
 
 Host V2 uses an authenticated DAV2 Small backbone with frozen ZipDepth convex-2x reconstruction,
 one high-resolution model input/output and one high-resolution downstream grid. It retains one

@@ -349,6 +349,25 @@ namespace stream {
   constexpr std::size_t ATOMIC_PRESENTATION_V2_REQUEST_PAYLOAD_SIZE = 20;
   constexpr std::uint16_t ATOMIC_PRESENTATION_V2_REQUEST_FLAGS_KNOWN = 0;
   constexpr std::uint8_t CLIENT_FEATURE_ATOMIC_PRESENTATION_V2 = 0x08;
+  constexpr std::uint8_t CLIENT_FEATURE_GAME_PROVIDER_V1 = 0x80;
+  constexpr std::uint8_t GAME_SOURCE_STATUS_VERSION = 1;
+  constexpr std::size_t GAME_SOURCE_STATUS_PAYLOAD_SIZE = 20;
+
+  [[nodiscard]] constexpr bool is_valid_live_video_sbs_mode(int mode, bool game_provider_negotiated) noexcept {
+    return mode == video::SBS_OFF || mode == video::SBS_AI ||
+           (game_provider_negotiated && video::is_game_mode(mode));
+  }
+
+  /** Only a coherent provider observation for the current Game presentation may reach a client. */
+  [[nodiscard]] bool game_source_status_matches_mode(
+    const video::game_source_state_t &state,
+    const video::effective_video_mode_t &mode
+  ) noexcept;
+
+  [[nodiscard]] bool encode_game_source_status_payload(
+    const video::game_source_state_t &state,
+    std::uint8_t (&out)[GAME_SOURCE_STATUS_PAYLOAD_SIZE]
+  ) noexcept;
 
   enum class live_video_mode_request_decode_e {
     v2,
@@ -656,6 +675,7 @@ namespace stream {
     int videoQosType;
     bool client_supports_sbs_telemetry = false;
     bool client_supports_atomic_presentation_v2 = false;
+    bool client_supports_game_provider_v1 = false;
     bool client_supports_source_frame_id_v1 = false;
     bool client_supports_authored_pcm = false;
   };
@@ -750,7 +770,7 @@ namespace stream {
     void retain_or_stop_session_for_test(bool platform_warm);
     std::uint64_t platform_lifecycle_generation_for_test();
     std::optional<std::chrono::steady_clock::time_point> platform_stop_deadline_for_test();
-    void check_platform_stop_for_test();
+    void check_platform_stop_for_test(std::optional<std::uint64_t> dispatched_generation = std::nullopt);
     bool worker_start_rollback_for_test();
 
     struct control_registration_test_result_t {

@@ -603,7 +603,8 @@ namespace nvhttp {
         valid = *parsed >= 20 && *parsed <= 200;
         break;
       case launch_int_field::sbs_mode:
-        valid = *parsed >= video::SBS_OFF && *parsed <= video::SBS_AI;
+        // Game always starts mono. Packed output requires a negotiated live transaction.
+        valid = *parsed >= video::SBS_OFF && *parsed <= video::SBS_GAME_MONO;
         break;
     }
 
@@ -1339,6 +1340,7 @@ namespace nvhttp {
 #ifdef _WIN32
       tree.put("root.VirtualDisplayCapable", true);
       tree.put("root.VirtualDisplayOnlySupported", 1);
+      tree.put("root.GameProviderV1Supported", 1);
       if (!!(named_cert_p->perm & PERM::_all_actions)) {
         tree.put("root.VirtualDisplayDriverReady", proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK);
       } else {

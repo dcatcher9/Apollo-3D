@@ -31,11 +31,13 @@
 #include "foreground_window_region.h"
 #include "host_sbs_v2_renderer.h"
 #include "misc.h"
+#include "reshade_bridge.h"
 #include "sbs_debug_dump.h"
-#include "video_dom_client.h"
 #include "src/config.h"
 #include "src/depth_coordinate_v2.h"
+#include "src/game_source_tracker.h"
 #include "src/generated/sbs_adaptive_state_contract.h"
+#include "src/host_sbs_provider.h"
 #include "src/host_sbs_resolution.h"
 #include "src/host_sbs_shader_cache.h"
 #include "src/host_sbs_v2_geometry.h"
@@ -47,6 +49,7 @@
 #include "src/sbs_perf.h"
 #include "src/video.h"
 #include "src/video_depth_estimator.h"
+#include "video_dom_client.h"
 
 #if !defined(SUNSHINE_SHADERS_DIR)  // for testing this needs to be defined in cmake as we don't do an install
   #define SUNSHINE_SHADERS_DIR SUNSHINE_ASSETS_DIR "/shaders/directx"
@@ -67,10 +70,9 @@ namespace platf::dxgi {
     }
     const auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(
                                 observed_at.time_since_epoch()
-    ).count();
-    if (microseconds < 0 ||
-        static_cast<std::uint64_t>(microseconds) ==
-          std::numeric_limits<std::uint64_t>::max()) {
+    )
+                                .count();
+    if (microseconds < 0 || static_cast<std::uint64_t>(microseconds) == std::numeric_limits<std::uint64_t>::max()) {
       return 0u;
     }
     // Zero remains the cross-ABI invalid sentinel. The matched capture observation, rather than
@@ -82,7 +84,7 @@ namespace platf::dxgi {
     std::uint32_t target_bt2020;
     std::uint32_t source_is_hdr;
     float source_sdr_white_scrgb;
-    float padding;
+    std::uint32_t target_is_hdr;
   };
 
   template<class T>
@@ -158,6 +160,7 @@ namespace platf::dxgi {
   blob_t cursor_ps_hlsl;
   blob_t cursor_ps_normalize_white_hlsl;
   blob_t rgb_present_linear_to_srgb_ps_hlsl;
+  blob_t rgb_present_hdr_to_srgb_ps_hlsl;
   blob_t rgb_present_srgb_to_linear_ps_hlsl;
   blob_t cursor_vs_hlsl;
   // Authenticated production Host SBS V2 shaders. The renderer closure covers the warp pixel
@@ -181,12 +184,12 @@ namespace platf::dxgi {
    * analysis generation are never inferred from the model output.
    */
   [[nodiscard]] static std::optional<models::depth_input_region_t>
-  realize_depth_input_region(
-    const models::depth_input_region_t &submitted_region,
-    const bool refined_live_geometry_active,
-    const int field_width,
-    const int field_height
-  ) noexcept {
+    realize_depth_input_region(
+      const models::depth_input_region_t &submitted_region,
+      const bool refined_live_geometry_active,
+      const int field_width,
+      const int field_height
+    ) noexcept {
     if (!submitted_region.valid() || field_width <= 0 || field_height <= 0) {
       return std::nullopt;
     }
@@ -214,8 +217,7 @@ namespace platf::dxgi {
       realized.tensor_content = *high_content;
     }
 
-    if (field_width != realized_shape.width || field_height != realized_shape.height ||
-        !realized.tensor_content.valid(realized_shape) || !realized.valid()) {
+    if (field_width != realized_shape.width || field_height != realized_shape.height || !realized.tensor_content.valid(realized_shape) || !realized.valid()) {
       return std::nullopt;
     }
     return realized;
@@ -227,10 +229,7 @@ namespace platf::dxgi {
     const models::depth_input_region_t &submitted_region
   ) noexcept {
     const bool fused_runtime = estimate.composite_depth_runtime_provenance != nullptr;
-    if (!estimate.input_region.valid() ||
-        estimate.refined_live_geometry_active != fused_runtime ||
-        estimate.raw_width != estimate.field_width ||
-        estimate.raw_height != estimate.field_height) {
+    if (!estimate.input_region.valid() || estimate.refined_live_geometry_active != fused_runtime || estimate.raw_width != estimate.field_width || estimate.raw_height != estimate.field_height) {
       return false;
     }
     const auto expected = realize_depth_input_region(
@@ -285,6 +284,10 @@ namespace platf::dxgi {
     // Cursor-only outputs retain their base surface's snapshot. WGC and dummy images leave this
     // disengaged so consumers fail open.
     std::optional<detail::ddup_damage_snapshot_t> ddup_damage;
+
+    // The desktop capture already contains this cursor. External SBS bypasses those pixels,
+    // so retain its immutable CPU shape and position for composition on the encoder device.
+    sbs_cursor::snapshot_t cursor;
 
     virtual ~img_d3d_t() override {
       if (encoder_texture_handle) {
@@ -342,148 +345,6 @@ namespace platf::dxgi {
       return _locked;
     }
   };
-
-  util::buffer_t<std::uint8_t> make_cursor_xor_image(const util::buffer_t<std::uint8_t> &img_data, DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info) {
-    constexpr std::uint32_t inverted = 0xFFFFFFFF;
-    constexpr std::uint32_t transparent = 0;
-
-    switch (shape_info.Type) {
-      case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR:
-        // This type doesn't require any XOR-blending
-        return {};
-      case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR:
-        {
-          util::buffer_t<std::uint8_t> cursor_img = img_data;
-          std::for_each((std::uint32_t *) std::begin(cursor_img), (std::uint32_t *) std::end(cursor_img), [](auto &pixel) {
-            auto alpha = (std::uint8_t) ((pixel >> 24) & 0xFF);
-            if (alpha == 0xFF) {
-              // Pixels with 0xFF alpha will be XOR-blended as is.
-            } else if (alpha == 0x00) {
-              // Pixels with 0x00 alpha will be blended by make_cursor_alpha_image().
-              // We make them transparent for the XOR-blended cursor image.
-              pixel = transparent;
-            } else {
-              // Other alpha values are illegal in masked color cursors
-              BOOST_LOG(warning) << "Illegal alpha value in masked color cursor: " << alpha;
-            }
-          });
-          return cursor_img;
-        }
-      case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME:
-        // Monochrome is handled below
-        break;
-      default:
-        BOOST_LOG(error) << "Invalid cursor shape type: " << shape_info.Type;
-        return {};
-    }
-
-    shape_info.Height /= 2;
-
-    util::buffer_t<std::uint8_t> cursor_img {shape_info.Width * shape_info.Height * 4};
-
-    auto bytes = shape_info.Pitch * shape_info.Height;
-    auto pixel_begin = (std::uint32_t *) std::begin(cursor_img);
-    auto pixel_data = pixel_begin;
-    auto and_mask = std::begin(img_data);
-    auto xor_mask = std::begin(img_data) + bytes;
-
-    for (auto x = 0; x < bytes; ++x) {
-      for (auto c = 7; c >= 0 && ((std::uint8_t *) pixel_data) != std::end(cursor_img); --c) {
-        auto bit = 1 << c;
-        auto color_type = ((*and_mask & bit) ? 1 : 0) + ((*xor_mask & bit) ? 2 : 0);
-
-        switch (color_type) {
-          case 0:  // Opaque black (handled by alpha-blending)
-          case 2:  // Opaque white (handled by alpha-blending)
-          case 1:  // Color of screen (transparent)
-            *pixel_data = transparent;
-            break;
-          case 3:  // Inverse of screen
-            *pixel_data = inverted;
-            break;
-        }
-
-        ++pixel_data;
-      }
-      ++and_mask;
-      ++xor_mask;
-    }
-
-    return cursor_img;
-  }
-
-  util::buffer_t<std::uint8_t> make_cursor_alpha_image(const util::buffer_t<std::uint8_t> &img_data, DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info) {
-    constexpr std::uint32_t black = 0xFF000000;
-    constexpr std::uint32_t white = 0xFFFFFFFF;
-    constexpr std::uint32_t transparent = 0;
-
-    switch (shape_info.Type) {
-      case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR:
-        {
-          util::buffer_t<std::uint8_t> cursor_img = img_data;
-          std::for_each((std::uint32_t *) std::begin(cursor_img), (std::uint32_t *) std::end(cursor_img), [](auto &pixel) {
-            auto alpha = (std::uint8_t) ((pixel >> 24) & 0xFF);
-            if (alpha == 0xFF) {
-              // Pixels with 0xFF alpha will be XOR-blended by make_cursor_xor_image().
-              // We make them transparent for the alpha-blended cursor image.
-              pixel = transparent;
-            } else if (alpha == 0x00) {
-              // Pixels with 0x00 alpha will be blended as opaque with the alpha-blended image.
-              pixel |= 0xFF000000;
-            } else {
-              // Other alpha values are illegal in masked color cursors
-              BOOST_LOG(warning) << "Illegal alpha value in masked color cursor: " << alpha;
-            }
-          });
-          return cursor_img;
-        }
-      case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR:
-        // Color cursors are just an ARGB bitmap which requires no processing.
-        return img_data;
-      case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME:
-        // Monochrome cursors are handled below.
-        break;
-      default:
-        BOOST_LOG(error) << "Invalid cursor shape type: " << shape_info.Type;
-        return {};
-    }
-
-    shape_info.Height /= 2;
-
-    util::buffer_t<std::uint8_t> cursor_img {shape_info.Width * shape_info.Height * 4};
-
-    auto bytes = shape_info.Pitch * shape_info.Height;
-    auto pixel_begin = (std::uint32_t *) std::begin(cursor_img);
-    auto pixel_data = pixel_begin;
-    auto and_mask = std::begin(img_data);
-    auto xor_mask = std::begin(img_data) + bytes;
-
-    for (auto x = 0; x < bytes; ++x) {
-      for (auto c = 7; c >= 0 && ((std::uint8_t *) pixel_data) != std::end(cursor_img); --c) {
-        auto bit = 1 << c;
-        auto color_type = ((*and_mask & bit) ? 1 : 0) + ((*xor_mask & bit) ? 2 : 0);
-
-        switch (color_type) {
-          case 0:  // Opaque black
-            *pixel_data = black;
-            break;
-          case 2:  // Opaque white
-            *pixel_data = white;
-            break;
-          case 3:  // Inverse of screen (handled by XOR blending)
-          case 1:  // Color of screen (transparent)
-            *pixel_data = transparent;
-            break;
-        }
-
-        ++pixel_data;
-      }
-      ++and_mask;
-      ++xor_mask;
-    }
-
-    return cursor_img;
-  }
 
   blob_t compile_shader(LPCSTR file, LPCSTR entrypoint, LPCSTR shader_model) {
     blob_t::pointer msg_p = nullptr;
@@ -625,6 +486,11 @@ namespace platf::dxgi {
     }
 
     bool needs_conversion_poll() const {
+      // ReShade publishes independently of desktop presents. The existing bounded owner loop
+      // polls it even while DDup/WGC retains a static desktop frame.
+      if (reshade_receiver || ::video::is_game_mode(sbs_mode)) {
+        return true;
+      }
       // This predicate is sampled on the normal D3D owner: the encode thread for streaming,
       // or the capture/presentation thread for Local AR. Drain completed publications there
       // without creating conversion demand or changing the caller's wait policy.
@@ -649,6 +515,31 @@ namespace platf::dxgi {
       return rendered_content_timestamp_;
     }
 
+    void publish_game_source_status(const std::optional<platf::reshade_bridge::frame_t> &frame) {
+      if (!::video::is_game_mode(sbs_mode) || !game_source_status_event || !game_effective_mode || game_source_width < 2 || game_source_width > 32767 || game_source_height < 2 || game_source_height > 65535) {
+        return;
+      }
+      const auto applied = game_effective_mode->current();
+      if (applied.sbs_mode != sbs_mode || applied.source_width != game_source_width || applied.source_height != game_source_height || applied.encoded_width != game_output_width || applied.encoded_height != game_output_height) {
+        return;
+      }
+      ::video::game_source_state_t state {};
+      state.state = !game_source_supported ? ::video::GAME_SOURCE_UNSUPPORTED :
+                                            (frame ? ::video::GAME_SOURCE_READY : ::video::GAME_SOURCE_WAITING);
+      state.provider = frame ? ::video::GAME_PROVIDER_RESHADE : ::video::GAME_PROVIDER_NONE;
+      state.presentation_generation = applied.generation;
+      state.source_width = static_cast<std::uint16_t>(game_source_width);
+      state.source_height = static_cast<std::uint16_t>(game_source_height);
+      state.packed_width = static_cast<std::uint16_t>(game_source_width * 2);
+      state.packed_height = state.source_height;
+      const ::video::game_source_identity_t identity = frame ?
+                                                         ::video::game_source_identity_t {frame->producer_process_id, frame->producer_creation_time, frame->resource_generation} :
+                                                         ::video::game_source_identity_t {};
+      if (const auto update = game_source_tracker.observe(state, identity, std::chrono::steady_clock::now())) {
+        game_source_status_event->raise(*update);
+      }
+    }
+
     int convert(
       platf::img_t &img_base,
       const std::optional<std::chrono::steady_clock::time_point> next_encode_target =
@@ -666,6 +557,22 @@ namespace platf::dxgi {
           img_base.frame_timestamp
         );
       if (!img.blank) {
+        std::optional<platf::reshade_bridge::frame_t> external;
+        if (reshade_receiver) {
+          const RECT source_rect {
+            display->offset_x,
+            display->offset_y,
+            display->offset_x + display->width,
+            display->offset_y + display->height,
+          };
+          external = reshade_receiver->poll(
+            source_rect,
+            ::video::is_game_mode(sbs_mode) ? game_source_width * 2 : display->width * 2,
+            ::video::is_game_mode(sbs_mode) ? game_source_height : display->height
+          );
+        }
+        publish_game_source_status(external);
+
         // Look up (or create) this image's encoder context. Only when a new id first appears do
         // we garbage-collect contexts whose capture img_t has since expired -- the set of live
         // ids is bounded by the capture pool, so this replaces an every-frame scan with one that
@@ -687,19 +594,24 @@ namespace platf::dxgi {
           return -1;
         }
 
-        // Acquire encoder mutex to synchronize with capture code
+        // Only desktop consumers need capture GPU completion. A valid packed export uses the
+        // receiver's private texture and immutable CPU cursor metadata; waiting for an unrelated
+        // desktop copy here can stall Game 3D. Flat fallback and unpacked discovery still lock.
         detail::keyed_mutex_lock_t encoder_mutex_lock {img_ctx.encoder_mutex.get()};
-        auto status = encoder_mutex_lock.lock(0, INFINITE);
-        if (status != S_OK) {
-          BOOST_LOG(error) << "Failed to acquire encoder mutex [0x"sv << util::hex(status).to_string_view() << ']';
-          return -1;
+        HRESULT status = S_OK;
+        if (!external || !::video::is_packed_mode(sbs_mode)) {
+          status = encoder_mutex_lock.lock(0, INFINITE);
+          if (status != S_OK) {
+            BOOST_LOG(error) << "Failed to acquire encoder mutex [0x"sv << util::hex(status).to_string_view() << ']';
+            return -1;
+          }
         }
 
-        auto draw = [&](auto &input, const D3D11_VIEWPORT &y_or_yuv_viewport, const D3D11_VIEWPORT &uv_viewport, bool input_is_linear, bool y_already_written = false) {
+        auto draw = [&](auto &input, const D3D11_VIEWPORT &y_or_yuv_viewport, const D3D11_VIEWPORT &uv_viewport, bool input_is_linear, bool y_already_written = false, bool external_input = false) {
           device_ctx->PSSetShaderResources(0, 1, &input);
           ID3D11Buffer *converter_buffers[] = {
             color_matrix.get(),
-            sdr_color_transform.get(),
+            external_input ? external_color_transform.get() : sdr_color_transform.get(),
             subsample_offset.get(),
           };
           // Bind all converter constants for every shader variant. Other passes use their own
@@ -727,17 +639,17 @@ namespace platf::dxgi {
           }
         };
 
-        auto draw_rgb = [&](ID3D11ShaderResourceView *input, bool input_is_linear) {
+        auto draw_rgb = [&](ID3D11ShaderResourceView *input, bool input_is_linear, bool input_is_hdr = false) {
           device_ctx->OMSetRenderTargets(1, &rgb_present_target, nullptr);
           device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
           ID3D11PixelShader *presentation_shader = rgb_present_ps.get();
           if (input_is_linear != rgb_present_target_is_linear) {
             presentation_shader = input_is_linear ?
-                                    rgb_present_linear_to_srgb_ps.get() :
+                                    (input_is_hdr ? rgb_present_hdr_to_srgb_ps.get() : rgb_present_linear_to_srgb_ps.get()) :
                                     rgb_present_srgb_to_linear_ps.get();
           }
           device_ctx->PSSetShader(presentation_shader, nullptr, 0);
-          if (!input_is_linear && rgb_present_target_is_linear) {
+          if ((!input_is_linear && rgb_present_target_is_linear) || (input_is_hdr && !rgb_present_target_is_linear)) {
             ID3D11Buffer *sdr_white = rgb_present_sdr_white.get();
             device_ctx->PSSetConstantBuffers(1, 1, &sdr_white);
           }
@@ -799,7 +711,61 @@ namespace platf::dxgi {
           return true;
         };
 
-        if (sbs_mode != ::video::SBS_OFF) {
+        if (reshade_receiver && ::video::is_packed_mode(sbs_mode)) {
+          ID3D11Texture2D *packed_texture = nullptr;
+          ID3D11ShaderResourceView *packed_view = nullptr;
+          bool packed_linear = false;
+          if (external) {
+            packed_texture = external->texture;
+            packed_view = external->view;
+            packed_linear = external->linear;
+            converted_content_timestamp = external->timestamp;
+            if (external_cursor) {
+              const auto composited = external_cursor->compose(
+                packed_texture, packed_view, img.cursor, packed_linear, external_cursor_white_multiplier
+              );
+              if (!composited) {
+                BOOST_LOG(error) << "Failed to composite the Windows cursor over external Game 3D."sv;
+                return -1;
+              }
+              packed_texture = composited->texture;
+              packed_view = composited->view;
+              if (!external_cursor_logged && packed_texture != external->texture) {
+                BOOST_LOG(info) << "Game 3D: compositing the Windows cursor into both eyes ("
+                                << (packed_linear ? "linear HDR" : "SDR") << ").";
+                external_cursor_logged = true;
+              }
+            }
+          } else {
+            // An unavailable, incompatible, or unfocused publisher never selects Host AI.
+            // Keep the ordinary desktop usable by duplicating it into two flat eyes.
+            packed_linear = img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+            if (!ensure_sbs_intermediate_storage(packed_linear)) {
+              return -1;
+            }
+            const host_sbs_v2_draw_command_t flat_draw {
+              .render_targets = {sbs_intermediate_rtv.get(), nullptr},
+              .vertex_shader = sbs_reprojection_vs.get(),
+              .pixel_shader = sbs_flat_identity_ps.get(),
+              .viewport = sbs_viewport,
+              .sampler = sampler_linear.get(),
+              .shader_resources = {img_ctx.encoder_input_res.get()},
+              .geometry_constants = sbs_reprojection_cbuffer.get(),
+            };
+            if (!record_host_sbs_v2_draw(device_ctx.get(), flat_draw)) {
+              return -1;
+            }
+            packed_texture = sbs_intermediate_texture.get();
+            packed_view = sbs_intermediate_srv.get();
+          }
+          if (rgb_present_target) {
+            if (!copy_rgb(packed_texture, packed_linear)) {
+              draw_rgb(packed_view, packed_linear, packed_linear && (external.has_value() || display_is_hdr));
+            }
+          } else {
+            draw(packed_view, out_Y_or_YUV_viewport, out_UV_viewport, packed_linear, false, external.has_value());
+          }
+        } else if (sbs_mode == ::video::SBS_AI) {
           const bool input_is_linear =
             img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
 
@@ -833,7 +799,7 @@ namespace platf::dxgi {
           // dirty/move record since the accepted crop. It still fresh-warps current color.
           const auto input_color_space = input_is_linear ?
                                            (display_is_hdr ? models::input_color_space::scrgb_hdr :
-                                                                models::input_color_space::linear_sdr) :
+                                                             models::input_color_space::linear_sdr) :
                                            models::input_color_space::srgb;
           const auto current_source_timestamp = img_base.frame_timestamp;
           const auto current_content_timestamp = img_base.content_timestamp;
@@ -854,10 +820,7 @@ namespace platf::dxgi {
           live_window_authority_observation_t pre_copy_authority;
           D3D11_TEXTURE2D_DESC live_source_desc {};
           img_ctx.encoder_texture->GetDesc(&live_source_desc);
-          if (detail::host_sbs_window_authority_observation_needed(
-                depth_estimator != nullptr,
-                models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)
-              )) {
+          if (detail::host_sbs_window_authority_observation_needed(depth_estimator != nullptr, models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer))) {
             pre_copy_authority = observe_live_window_authority(
               live_source_desc,
               current_content_timestamp
@@ -896,8 +859,7 @@ namespace platf::dxgi {
                                                     const matched_frame_slot_t *preserve_slot
                                                   ) {
             const auto error_now = std::chrono::steady_clock::now();
-            if (matched_unknown_frame_error_last.time_since_epoch().count() == 0 ||
-                error_now - matched_unknown_frame_error_last >= std::chrono::seconds(30)) {
+            if (matched_unknown_frame_error_last.time_since_epoch().count() == 0 || error_now - matched_unknown_frame_error_last >= std::chrono::seconds(30)) {
               if (matched_unknown_frame_errors_suppressed) {
                 BOOST_LOG(error) << "Matched depth completed unknown frame "sv
                                  << completed_frame_id << "; repeating the last output ("sv
@@ -1055,7 +1017,11 @@ namespace platf::dxgi {
               matched_render_slot->texture->GetDesc(&completed_source_desc);
             }
             (void) retain_latest_v2_lineage(
-              est, *matched_render_slot, completed_source_desc, live_source_desc, input_color_space
+              est,
+              *matched_render_slot,
+              completed_source_desc,
+              live_source_desc,
+              input_color_space
             );
           };
 
@@ -1071,9 +1037,7 @@ namespace platf::dxgi {
             }
             if (publications.current_publication) {
               const auto &receipt = *publications.current_publication;
-              if (depth_estimator->publication_is_current(receipt.expected) &&
-                  models::host_sbs_gpu_completion_receipt::matches_publication(
-                    receipt, latest_v2_lineage.estimate.publication)) {
+              if (depth_estimator->publication_is_current(receipt.expected) && models::host_sbs_gpu_completion_receipt::matches_publication(receipt, latest_v2_lineage.estimate.publication)) {
                 if (late && diagnostics_enabled && !latest_v2_lineage.receipt) {
                   ++matched_stats_publication_late_ready;
                 }
@@ -1155,7 +1119,7 @@ namespace platf::dxgi {
             depth_estimator && depth_estimator->has_terminal_failure();
           const detail::host_sbs_source_admission_t source_admission {
             .pipeline_active = depth_estimator &&
-              models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer),
+                               models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer),
             .parallax_v2_renderer =
               host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
             .snapshot_debug_inputs = snapshot_debug_inputs,
@@ -1239,13 +1203,7 @@ namespace platf::dxgi {
           );
           const bool current_source_already_completed =
             completed_source_action != detail::host_sbs_completed_source_action_e::observe;
-          if (detail::host_sbs_latest_v2_lineage_reset_required(
-                latest_v2_lineage.authenticated,
-                latest_v2_route_matches,
-                snapshot_debug_inputs,
-                depth_authority_reprocess_pending,
-                producer_terminal
-              )) {
+          if (detail::host_sbs_latest_v2_lineage_reset_required(latest_v2_lineage.authenticated, latest_v2_route_matches, snapshot_debug_inputs, depth_authority_reprocess_pending, producer_terminal)) {
             latest_v2_lineage.reset();
             // Route/dump/reprocess/terminal revocation invalidates the cached resource aliases
             // regardless of any current-frame proof computed above.
@@ -1273,15 +1231,7 @@ namespace platf::dxgi {
                 retained_source_pending_slot = &slot;
                 break;
               }
-              if (dedup_gate_open && slot.pending && matched_route_matches_current(
-                    slot,
-                    live_source_desc,
-                    input_color_space,
-                    current_root_authority_generation,
-                    current_region_authority_generation,
-                    current_browser_authority_epoch,
-                    current_interactive_move_size
-                  )) {
+              if (dedup_gate_open && slot.pending && matched_route_matches_current(slot, live_source_desc, input_color_space, current_root_authority_generation, current_region_authority_generation, current_browser_authority_epoch, current_interactive_move_size)) {
                 const auto reuse_kind = current_input_reuse_kind(slot);
                 if (reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none) {
                   unchanged_input_pending_slot = &slot;
@@ -1441,7 +1391,7 @@ namespace platf::dxgi {
                 // one nonblocking opportunity before forming C's adaptive proof against owner A.
                 consume_publications(true);
                 const bool known_publication_at_admission = latest_v2_lineage.known_depth() &&
-                  depth_estimator->publication_is_current(latest_v2_lineage.estimate.publication);
+                                                            depth_estimator->publication_is_current(latest_v2_lineage.estimate.publication);
                 const auto observation_timestamp_us =
                   host_sbs_observation_timestamp_us(
                     matched_candidate_slot->captured_at
@@ -1464,10 +1414,12 @@ namespace platf::dxgi {
                 // Native USER32 suppression remains an explicit eligibility rule.
                 const auto adaptive_request =
                   models::make_gpu_adaptive_request(
-                    frame_id, authorize_gpu_undecided,
+                    frame_id,
+                    authorize_gpu_undecided,
                     latest_v2_lineage.receipt ? &*latest_v2_lineage.receipt : nullptr,
                     depth_estimator->publication_is_current(latest_v2_lineage.estimate.publication) ?
-                      latest_v2_lineage.estimate.publication : models::host_sbs_gpu_completion_receipt::expected_t {},
+                      latest_v2_lineage.estimate.publication :
+                      models::host_sbs_gpu_completion_receipt::expected_t {},
                     observation_timestamp_us
                   );
                 auto submitted = depth_estimator->estimate_depth(
@@ -1528,7 +1480,9 @@ namespace platf::dxgi {
                     }
                   } else {
                     release_unknown_completion(
-                      est.completed_frame_id, matched_candidate_slot);
+                      est.completed_frame_id,
+                      matched_candidate_slot
+                    );
                   }
                 }
                 const bool gpu_undecided_transaction_enqueued =
@@ -1759,7 +1713,6 @@ namespace platf::dxgi {
                     }
                   }
                 }
-
               }
             }
           } else {
@@ -1778,13 +1731,13 @@ namespace platf::dxgi {
           // only after every path that could have consumed/normalized a completion above.
           const bool post_completion_cache_route_matches =
             latest_v2_lineage_route_matches_current(
-            live_source_desc,
-            input_color_space,
-            authority_generation(live_window_authority),
-            authority_generation(live_foreground_region),
-            live_browser_authority_epoch,
-            interactive_move_size_observed
-          );
+              live_source_desc,
+              input_color_space,
+              authority_generation(live_window_authority),
+              authority_generation(live_foreground_region),
+              live_browser_authority_epoch,
+              interactive_move_size_observed
+            );
           const bool post_completion_cache_gate_open =
             dedup_gate_open && latest_v2_lineage.known_depth();
           const auto post_completion_cache_reuse_kind =
@@ -1926,15 +1879,7 @@ namespace platf::dxgi {
           // continuing nonblocking queries so a later fresh completion can recover automatically.
           const auto repeat_now = std::chrono::steady_clock::now();
           bool stale_v2_completion = false;
-          if (matched_render_slot &&
-              host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
-              !models::host_sbs_matched_completion_is_current(
-                same_source(
-                  matched_render_slot->source_timestamp,
-                  current_source_timestamp
-                ),
-                repeat_now - matched_render_slot->captured_at
-              )) {
+          if (matched_render_slot && host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 && !models::host_sbs_matched_completion_is_current(same_source(matched_render_slot->source_timestamp, current_source_timestamp), repeat_now - matched_render_slot->captured_at)) {
             stale_v2_completion = true;
             matched_render_slot = nullptr;
             est = {};
@@ -1991,8 +1936,7 @@ namespace platf::dxgi {
               << models::host_sbs_v2_max_matched_repeat_age.count()
               << " ms for a changed source; rendering live current-frame flat identity until "sv
                  "depth recovers."sv;
-          } else if (!v2_repeat_timed_out && matched_presentation_cache.timeout_active() &&
-                     matched_render_slot) {
+          } else if (!v2_repeat_timed_out && matched_presentation_cache.timeout_active() && matched_render_slot) {
             matched_presentation_cache.clear_timeout();
             BOOST_LOG(info) << "Host SBS V2 depth completion recovered; stereo warp resumed."sv;
           }
@@ -2010,8 +1954,7 @@ namespace platf::dxgi {
             sbs_reprojection_v2_live_ps && v2_live_resources_complete;
           if (v2_live_warp_selected) {
             v2_live_warp_seen = true;
-          } else if (v2_renderer_selected && matched_render_slot && v2_live_warp_seen &&
-                     !v2_live_warp_loss_logged) {
+          } else if (v2_renderer_selected && matched_render_slot && v2_live_warp_seen && !v2_live_warp_loss_logged) {
             BOOST_LOG(error)
               << "Host SBS lost authenticated live-warp authority after parallax-v2 was active"
               << " (result_authenticated=" << (v2_result_authenticated ? "true" : "false")
@@ -2083,10 +2026,10 @@ namespace platf::dxgi {
             // complete later than the current capture; repeated output retains the transfer of
             // the packed texture already stored in the intermediate.
             const bool render_input_is_linear = matched_render_slot ?
-                                                    models::input_color_space_is_linear(
-                                                      matched_render_slot->color_space
-                                                    ) :
-                                                    input_is_linear;
+                                                  models::input_color_space_is_linear(
+                                                    matched_render_slot->color_space
+                                                  ) :
+                                                  input_is_linear;
 
             // DDup reveals the current capture transfer only after the first real frame, while
             // asynchronous depth completion can select an older buffered color frame. Size the
@@ -2116,7 +2059,7 @@ namespace platf::dxgi {
               detail::host_sbs_p010_y_mrt_eligible(
                 v2_live_warp_selected,
                 render_input_is_linear,
-                display_is_hdr,
+                output_is_hdr,
                 format == DXGI_FORMAT_P010,
                 rgb_present_target == nullptr,
                 snapshot_debug_inputs,
@@ -2139,11 +2082,8 @@ namespace platf::dxgi {
               },
               .render_target_count = p010_y_mrt_selected ? 2u : 1u,
               .vertex_shader = sbs_reprojection_vs.get(),
-              .pixel_shader = p010_y_mrt_selected ?
-                                sbs_reprojection_v2_p010_y_ps.get() :
-                                v2_live_warp_selected ?
-                                  sbs_reprojection_v2_live_ps.get() :
-                                  sbs_flat_identity_ps.get(),
+              .pixel_shader = p010_y_mrt_selected ? sbs_reprojection_v2_p010_y_ps.get() : v2_live_warp_selected ? sbs_reprojection_v2_live_ps.get() :
+                                                                                                                  sbs_flat_identity_ps.get(),
               .viewport = sbs_viewport,
               .sampler = sampler_linear.get(),
               .shader_resources = {
@@ -2166,10 +2106,7 @@ namespace platf::dxgi {
             final_sbs_texture = sbs_intermediate_texture.get();
             sbs_intermediate_is_linear = render_input_is_linear;
             final_sbs_is_linear = render_input_is_linear;
-            if (models::host_sbs_packed_output_can_enter_presentation_cache(
-                  matched_render_slot != nullptr,
-                  v2_live_warp_selected
-                )) {
+            if (models::host_sbs_packed_output_can_enter_presentation_cache(matched_render_slot != nullptr, v2_live_warp_selected)) {
               const auto rendered_content_timestamp =
                 ::video::detail::select_rendered_content_timestamp(
                   false,
@@ -2265,8 +2202,7 @@ namespace platf::dxgi {
               models::parallax_v2_result_is_authenticated(est);
             ID3D11ShaderResourceView *dump_depth_input_source =
               matched_render_slot ? matched_render_slot->analysis_input_srv() : nullptr;
-            if (complete_dump_snapshot && est.input_region.is_video_region() &&
-                matched_render_slot->texture) {
+            if (complete_dump_snapshot && est.input_region.is_video_region() && matched_render_slot->texture) {
               // This explicit diagnostic copy targets the exact completed slot after all live
               // timing has closed. The dumper revalidates the retained texture against the
               // completed region and owns the crop; ordinary ROI analysis allocates no crop.
@@ -2450,13 +2386,13 @@ namespace platf::dxgi {
                                                  matched_stats_calls :
                                                0.0;
               const double damage_reuse_pct = matched_stats_calls ?
-                                                 100.0 * matched_stats_damage_reuses /
-                                                   matched_stats_calls :
-                                                 0.0;
+                                                100.0 * matched_stats_damage_reuses /
+                                                  matched_stats_calls :
+                                                0.0;
               const double video_roi_pct = matched_stats_calls ?
-                                               100.0 * matched_stats_video_roi_route_outputs /
-                                                 matched_stats_calls :
-                                               0.0;
+                                             100.0 * matched_stats_video_roi_route_outputs /
+                                               matched_stats_calls :
+                                             0.0;
               const double same_frame_poll_wait_avg_ms =
                 matched_stats_same_frame_poll_attempts ?
                   matched_stats_same_frame_poll_wait_sum_ms /
@@ -2507,30 +2443,30 @@ namespace platf::dxgi {
                               << matched_stats_same_frame_poll_hits_le_2_ms << '/'
                               << matched_stats_same_frame_poll_hits_2_to_2_5_ms << '/'
                               << matched_stats_same_frame_poll_hits_2_5_to_3_ms << '/'
-                               << matched_stats_same_frame_poll_hits_over_3_ms
-                               << " repeated_wait_ms_avg/max="sv
-                               << same_frame_poll_wait_avg_ms << '/'
-                               << matched_stats_same_frame_poll_wait_max_ms
+                              << matched_stats_same_frame_poll_hits_over_3_ms
+                              << " repeated_wait_ms_avg/max="sv
+                              << same_frame_poll_wait_avg_ms << '/'
+                              << matched_stats_same_frame_poll_wait_max_ms
                               << " planned_budget_ms_avg/max="sv
-                               << same_frame_poll_budget_avg_ms << '/'
-                               << matched_stats_same_frame_poll_budget_max_ms
-                               << " hard_cap/cadence_timeouts="sv
-                               << matched_stats_same_frame_poll_hard_cap_timeouts << '/'
-                               << matched_stats_same_frame_poll_cadence_timeouts
-                               << " same_frame_outcomes="sv
-                               << "submissions/immediate_hit/wait_hit/cadence_ineligible_busy/"sv
-                               << "eligible_timeout/ready_failure/wait_unavailable_busy="sv
-                               << matched_stats_same_frame_poll_submissions << '/'
-                               << matched_stats_same_frame_immediate_hits << '/'
-                               << matched_stats_same_frame_poll_hits << '/'
-                               << matched_stats_same_frame_poll_cadence_ineligible_busy << '/'
-                               << matched_stats_same_frame_poll_timeouts << '/'
-                               << matched_stats_same_frame_poll_failures << '/'
-                               << matched_stats_same_frame_poll_wait_unavailable_busy
-                               << " publication_late_ready/force_missing_proof/failure_polls="sv
-                               << matched_stats_publication_late_ready << '/'
-                               << matched_stats_force_missing_publication << '/'
-                               << matched_stats_publication_failure_polls;
+                              << same_frame_poll_budget_avg_ms << '/'
+                              << matched_stats_same_frame_poll_budget_max_ms
+                              << " hard_cap/cadence_timeouts="sv
+                              << matched_stats_same_frame_poll_hard_cap_timeouts << '/'
+                              << matched_stats_same_frame_poll_cadence_timeouts
+                              << " same_frame_outcomes="sv
+                              << "submissions/immediate_hit/wait_hit/cadence_ineligible_busy/"sv
+                              << "eligible_timeout/ready_failure/wait_unavailable_busy="sv
+                              << matched_stats_same_frame_poll_submissions << '/'
+                              << matched_stats_same_frame_immediate_hits << '/'
+                              << matched_stats_same_frame_poll_hits << '/'
+                              << matched_stats_same_frame_poll_cadence_ineligible_busy << '/'
+                              << matched_stats_same_frame_poll_timeouts << '/'
+                              << matched_stats_same_frame_poll_failures << '/'
+                              << matched_stats_same_frame_poll_wait_unavailable_busy
+                              << " publication_late_ready/force_missing_proof/failure_polls="sv
+                              << matched_stats_publication_late_ready << '/'
+                              << matched_stats_force_missing_publication << '/'
+                              << matched_stats_publication_failure_polls;
               reset_matched_stats(now);
             }
             if (sbs_telemetry_performance) {
@@ -2565,6 +2501,7 @@ namespace platf::dxgi {
     }
 
     bool apply_colorspace(const ::video::sunshine_colorspace_t &colorspace) {
+      output_is_hdr = ::video::colorspace_is_hdr(colorspace);
       auto color_vectors = ::video::color_vectors_from_colorspace(colorspace, true);
 
       if (!color_vectors) {
@@ -2588,14 +2525,14 @@ namespace platf::dxgi {
       );
       constexpr float fallback_sdr_white_nits = 203.0f;
       float sdr_white_nits = fallback_sdr_white_nits;
-      if (source_is_hdr) {
+      if (display_is_hdr) {
         const auto queried_sdr_white_nits = display->get_sdr_white_nits();
         if (queried_sdr_white_nits && *queried_sdr_white_nits > 0.0f) {
           sdr_white_nits = *queried_sdr_white_nits;
         } else {
           BOOST_LOG(warning)
             << "Failed to query the display's SDR reference white; using "sv
-            << fallback_sdr_white_nits << " nits for HDR-to-SDR tone mapping."sv;
+            << fallback_sdr_white_nits << " nits for SDR/HDR color conversion."sv;
         }
       }
 
@@ -2603,11 +2540,20 @@ namespace platf::dxgi {
         colorspace.colorspace == ::video::colorspace_e::bt2020sdr,
         source_is_hdr,
         sdr_white_nits / 80.0f,
-        0.0f,
+        output_is_hdr,
       };
       auto sdr_color_transform = make_buffer(device.get(), transform);
       if (!sdr_color_transform) {
         BOOST_LOG(warning) << "Failed to create SDR color-transform constants"sv;
+        return false;
+      }
+      // External linear frames are explicitly scRGB HDR even when Windows capture is SDR.
+      // Encoded external frames ignore this source flag and retain their declared sRGB transfer.
+      auto external_transform = transform;
+      external_transform.source_is_hdr = !output_is_hdr;
+      external_color_transform = make_buffer(device.get(), external_transform);
+      if (!external_color_transform) {
+        BOOST_LOG(warning) << "Failed to create external color-transform constants"sv;
         return false;
       }
 
@@ -2663,8 +2609,7 @@ namespace platf::dxgi {
             fail_depth_pipeline_flat();
             return false;
           }
-          if (depth_estimator && depth_estimator->is_valid() &&
-              !depth_estimator->has_terminal_failure()) {
+          if (depth_estimator && depth_estimator->is_valid() && !depth_estimator->has_terminal_failure()) {
             BOOST_LOG(info) << "Host SBS per-stream GPU pipeline ready; depth is now live."sv;
             publish_depth_status(2);  // ready -> client hides indicator
           } else {
@@ -2710,12 +2655,10 @@ namespace platf::dxgi {
                       << "\" in the background (streaming flat until ready)..."sv;
       Microsoft::WRL::ComPtr<ID3D11Device> dev(device.get());
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx(device_ctx.get());
-      depth_estimator_build_task_t build_task([
-        dev = std::move(dev),
-        ctx = std::move(ctx),
-        active,
-        sbs_cfg
-      ]() mutable {
+      depth_estimator_build_task_t build_task([dev = std::move(dev),
+                                               ctx = std::move(ctx),
+                                               active,
+                                               sbs_cfg]() mutable {
         return std::make_unique<models::video_depth_estimator>(
           std::move(dev),
           std::move(ctx),
@@ -2834,8 +2777,7 @@ namespace platf::dxgi {
     }
 
     void publish_sbs_telemetry_sample(const models::depth_telemetry_sample &sample) {
-      if (!sbs_telemetry_event ||
-          !sbs_telemetry_sample_gate.accept(sample.sampled_frame_id, sample.sampled_at)) {
+      if (!sbs_telemetry_event || !sbs_telemetry_sample_gate.accept(sample.sampled_frame_id, sample.sampled_at)) {
         return;
       }
 
@@ -2896,16 +2838,12 @@ namespace platf::dxgi {
     }
 
     void publish_sbs_telemetry_after_output() {
-      if (!sbs_telemetry_subscription || !sbs_telemetry_event ||
-          !sbs_telemetry_subscription->enabled()) {
+      if (!sbs_telemetry_subscription || !sbs_telemetry_event || !sbs_telemetry_subscription->enabled()) {
         return;
       }
       const auto now = std::chrono::steady_clock::now();
-      const auto interval = std::chrono::milliseconds(std::max<std::uint16_t>(
-        sbs_telemetry_subscription->interval_ms(), 1
-      ));
-      if (sbs_telemetry_last_publish_attempt.time_since_epoch().count() != 0 &&
-          now - sbs_telemetry_last_publish_attempt < interval) {
+      const auto interval = std::chrono::milliseconds(std::max<std::uint16_t>(sbs_telemetry_subscription->interval_ms(), 1));
+      if (sbs_telemetry_last_publish_attempt.time_since_epoch().count() != 0 && now - sbs_telemetry_last_publish_attempt < interval) {
         return;
       }
       sbs_telemetry_last_publish_attempt = now;
@@ -3191,7 +3129,7 @@ namespace platf::dxgi {
       }
 
       [[nodiscard]] const std::optional<std::chrono::steady_clock::time_point> &
-      content_timestamp() const noexcept {
+        content_timestamp() const noexcept {
         return content_timestamp_;
       }
 
@@ -3221,13 +3159,7 @@ namespace platf::dxgi {
         const models::depth_input_region_t &region,
         const models::input_color_space color_space
       ) const noexcept {
-        return valid_ && depth_analysis_domain_matches_realization(
-                           region,
-                           input_region_,
-                           refined_live_geometry_active_,
-                           field_width_,
-                           field_height_
-                         ) &&
+        return valid_ && depth_analysis_domain_matches_realization(region, input_region_, refined_live_geometry_active_, field_width_, field_height_) &&
                color_space == color_space_;
       }
 
@@ -3297,6 +3229,7 @@ namespace platf::dxgi {
         return authenticated && receipt && receipt->depth_cache_authorized() &&
                models::host_sbs_gpu_completion_receipt::matches_publication(*receipt, estimate.publication);
       }
+
       UINT source_width = 0u;
       UINT source_height = 0u;
       UINT mip_levels = 0u;
@@ -3513,25 +3446,10 @@ namespace platf::dxgi {
       const auto current_root_generation = authority_generation(live_window_authority);
       const auto current_region_generation = authority_generation(live_foreground_region);
       const auto &baseline = latest_v2_lineage.slot;
-      if (!latest_v2_lineage.known_depth() || candidate.frame_id <= baseline.frame_id ||
-          candidate.pending || candidate.observed_interactive_move_size ||
-          depth_completion_poll_pending ||
-          std::any_of(matched_frame_slots.begin(), matched_frame_slots.end(),
-            [](const matched_frame_slot_t &slot) { return slot.pending; }) ||
-          !candidate.inference_content_timestamp ||
-          candidate.inference_content_timestamp == baseline.inference_content_timestamp ||
-          !candidate.inference_ddup_damage || !baseline.inference_ddup_damage ||
-          candidate.inference_ddup_damage->history != baseline.inference_ddup_damage->history ||
-          baseline.inference_ddup_damage->token == 0u ||
-          candidate.inference_ddup_damage->token <= baseline.inference_ddup_damage->token ||
-          candidate.depth_input_region != baseline.depth_input_region ||
-          candidate.color_space != baseline.color_space ||
-          !matched_route_matches_current(candidate, source_desc, candidate.color_space,
-            current_root_generation, current_region_generation, live_browser_authority_epoch,
-            interactive_move_size_observed) ||
-          !latest_v2_lineage_route_matches_current(source_desc, candidate.color_space,
-            current_root_generation, current_region_generation, live_browser_authority_epoch,
-            interactive_move_size_observed)) {
+      if (!latest_v2_lineage.known_depth() || candidate.frame_id <= baseline.frame_id || candidate.pending || candidate.observed_interactive_move_size || depth_completion_poll_pending || std::any_of(matched_frame_slots.begin(), matched_frame_slots.end(), [](const matched_frame_slot_t &slot) {
+            return slot.pending;
+          }) ||
+          !candidate.inference_content_timestamp || candidate.inference_content_timestamp == baseline.inference_content_timestamp || !candidate.inference_ddup_damage || !baseline.inference_ddup_damage || candidate.inference_ddup_damage->history != baseline.inference_ddup_damage->history || baseline.inference_ddup_damage->token == 0u || candidate.inference_ddup_damage->token <= baseline.inference_ddup_damage->token || candidate.depth_input_region != baseline.depth_input_region || candidate.color_space != baseline.color_space || !matched_route_matches_current(candidate, source_desc, candidate.color_space, current_root_generation, current_region_generation, live_browser_authority_epoch, interactive_move_size_observed) || !latest_v2_lineage_route_matches_current(source_desc, candidate.color_space, current_root_generation, current_region_generation, live_browser_authority_epoch, interactive_move_size_observed)) {
         return false;
       }
       const auto damage = matched_motion_damage(baseline, candidate.inference_ddup_damage);
@@ -3653,8 +3571,8 @@ namespace platf::dxgi {
 
     bool ensure_sbs_intermediate_storage(const bool input_is_linear) {
       const DXGI_FORMAT required_format = input_is_linear ?
-                                              DXGI_FORMAT_R16G16B16A16_FLOAT :
-                                              DXGI_FORMAT_B8G8R8A8_UNORM;
+                                            DXGI_FORMAT_R16G16B16A16_FLOAT :
+                                            DXGI_FORMAT_B8G8R8A8_UNORM;
       D3D11_TEXTURE2D_DESC current_desc {};
       if (sbs_intermediate_texture) {
         sbs_intermediate_texture->GetDesc(&current_desc);
@@ -3691,9 +3609,7 @@ namespace platf::dxgi {
         // FP16 can safely store either linear values or SDR code values because transfer state is
         // tracked separately. Retain an existing FP16 target if only the optional SDR downsizing
         // failed; never retain BGRA8 for genuine linear input.
-        if (!input_is_linear &&
-            sbs_intermediate_texture &&
-            current_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        if (!input_is_linear && sbs_intermediate_texture && current_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
           BOOST_LOG(warning)
             << "Could not resize the Host SBS intermediate to BGRA8 [0x"sv
             << util::hex(status).to_string_view()
@@ -4093,8 +4009,7 @@ namespace platf::dxgi {
     bool window_region_authorized_for_render(
       const matched_frame_slot_t &slot
     ) const noexcept {
-      if (!slot.window_region || !window_region_matches_live_authority(*slot.window_region) ||
-          slot.live_window_authority_generation == 0u) {
+      if (!slot.window_region || !window_region_matches_live_authority(*slot.window_region) || slot.live_window_authority_generation == 0u) {
         return false;
       }
       if (
@@ -4210,8 +4125,7 @@ namespace platf::dxgi {
       }
     }
 
-
-    template <typename CaptureRect>
+    template<typename CaptureRect>
     static sbs_debug::window_region_snapshot make_window_region_snapshot(
       sbs_debug::window_region_snapshot identity,
       const D3D11_TEXTURE2D_DESC &source_desc,
@@ -4234,7 +4148,8 @@ namespace platf::dxgi {
         std::clamp<std::int64_t>(
           std::chrono::duration_cast<std::chrono::milliseconds>(
             captured_at - observed_at
-          ).count(),
+          )
+            .count(),
           0,
           std::numeric_limits<std::uint32_t>::max()
         )
@@ -4246,7 +4161,8 @@ namespace platf::dxgi {
         std::max<std::int64_t>(
           std::chrono::duration_cast<std::chrono::milliseconds>(
             captured_at - geometry_valid_since
-          ).count(),
+          )
+            .count(),
           0
         )
       );
@@ -4254,7 +4170,8 @@ namespace platf::dxgi {
         std::max<std::int64_t>(
           std::chrono::duration_cast<std::chrono::milliseconds>(
             captured_at - content_timestamp
-          ).count(),
+          )
+            .count(),
           0
         )
       );
@@ -4266,15 +4183,15 @@ namespace platf::dxgi {
     }
 
     std::optional<sbs_debug::window_region_snapshot>
-    capture_browser_window_region(
-      const D3D11_TEXTURE2D_DESC &source_desc,
-      const video_dom::snapshot_ptr &observed,
-      const std::uint64_t frame_id,
-      const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
-      const std::chrono::steady_clock::time_point captured_at,
-      video_dom::status_e &video_status,
-      video_dom::mapping_status_e &mapping_status
-    ) const {
+      capture_browser_window_region(
+        const D3D11_TEXTURE2D_DESC &source_desc,
+        const video_dom::snapshot_ptr &observed,
+        const std::uint64_t frame_id,
+        const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
+        const std::chrono::steady_clock::time_point captured_at,
+        video_dom::status_e &video_status,
+        video_dom::mapping_status_e &mapping_status
+      ) const {
       video_status = video_dom::status_e::stopped;
       mapping_status = video_dom::mapping_status_e::invalid_video_rect;
       if (!observed || !display) {
@@ -4376,15 +4293,15 @@ namespace platf::dxgi {
     }
 
     std::optional<sbs_debug::window_region_snapshot>
-    capture_foreground_window_region(
-      const D3D11_TEXTURE2D_DESC &source_desc,
-      const std::uint64_t frame_id,
-      const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
-      const std::chrono::steady_clock::time_point captured_at,
-      const foreground_window::snapshot_t &snapshot,
-      std::string_view &observer_status,
-      std::string_view &mapping_status
-    ) {
+      capture_foreground_window_region(
+        const D3D11_TEXTURE2D_DESC &source_desc,
+        const std::uint64_t frame_id,
+        const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
+        const std::chrono::steady_clock::time_point captured_at,
+        const foreground_window::snapshot_t &snapshot,
+        std::string_view &observer_status,
+        std::string_view &mapping_status
+      ) {
       constexpr auto maximum_age = std::chrono::milliseconds {250};
       observer_status = foreground_window::status_name(snapshot.status);
       mapping_status = "not-mapped";
@@ -4417,8 +4334,7 @@ namespace platf::dxgi {
         .width = source_desc.Width,
         .height = source_desc.Height,
         .monitor = reinterpret_cast<std::uintptr_t>(output_desc.Monitor),
-        .identity_orientation =
-          display->display_rotation == DXGI_MODE_ROTATION_IDENTITY,
+        .identity_orientation = display->display_rotation == DXGI_MODE_ROTATION_IDENTITY,
       };
       const auto mapped = foreground_window::map_to_capture(snapshot, target);
       mapping_status = foreground_window::mapping_status_name(mapped.status);
@@ -4785,8 +4701,7 @@ namespace platf::dxgi {
         authority_generation(live_foreground_region);
       slot.observed_browser_authority_epoch = copied_authority.browser_authority_epoch;
       slot.observed_interactive_move_size = interactive_move_size_observed;
-      if (slot.depth_input_region.is_video_region() &&
-          slot.live_window_authority_generation == 0u) {
+      if (slot.depth_input_region.is_video_region() && slot.live_window_authority_generation == 0u) {
         slot.window_region.reset();
         slot.window_region_observer_status = "not-observed";
         slot.window_region_mapping_status = "not-mapped";
@@ -4914,13 +4829,13 @@ namespace platf::dxgi {
       );
       const bool diagnostic_sources_authenticated =
         cache::source_closure_sha256(diagnostic_sources) ==
-          cache::parallax_v2_live_diagnostic_source_closure_sha256;
+        cache::parallax_v2_live_diagnostic_source_closure_sha256;
       const auto mapping_bytecode = diagnostic_sources_authenticated ?
-        cache::get(diagnostic_sources, cache::parallax_v2_live_mapping) :
-        cache::bytecode_t {};
+                                      cache::get(diagnostic_sources, cache::parallax_v2_live_mapping) :
+                                      cache::bytecode_t {};
       const auto mask_bytecode = diagnostic_sources_authenticated ?
-        cache::get(diagnostic_sources, cache::parallax_v2_live_mask) :
-        cache::bytecode_t {};
+                                   cache::get(diagnostic_sources, cache::parallax_v2_live_mask) :
+                                   cache::bytecode_t {};
       const bool geometry_shaders_ready =
         mapping_bytecode && mask_bytecode &&
         SUCCEEDED(device->CreatePixelShader(
@@ -4968,8 +4883,7 @@ namespace platf::dxgi {
       ID3D11ShaderResourceView *parallax_state,
       ID3D11Buffer *constants
     ) {
-      if (!source || !warp_depth || !parallax_state || !constants ||
-          !ensure_sbs_debug_geometry_resources()) {
+      if (!source || !warp_depth || !parallax_state || !constants || !ensure_sbs_debug_geometry_resources()) {
         return false;
       }
 
@@ -5098,7 +5012,12 @@ namespace platf::dxgi {
       std::uint32_t telemetry_generation = 0,
       std::shared_ptr<std::atomic<bool>> sbs_debug_dump_request = {},
       bool rgb_only = false,
-      std::shared_ptr<host_sbs_telemetry::collector> telemetry_performance = {}
+      std::shared_ptr<host_sbs_telemetry::collector> telemetry_performance = {},
+      safe::mail_raw_t::event_t<::video::game_source_state_t> game_status_event = {},
+      std::shared_ptr<::video::effective_video_mode_publisher_t> effective_mode = {},
+      bool game_transport_supported = false,
+      int game_width = 0,
+      int game_height = 0
     ) {
       if (frame_texture) {
         // The underlying frame pool owns the texture, so we must reference it for ourselves.
@@ -5110,6 +5029,34 @@ namespace platf::dxgi {
       }
       sbs_mode = sbs_mode_param;
       sbs_config = settings;
+      game_source_status_event = std::move(game_status_event);
+      game_effective_mode = std::move(effective_mode);
+      game_source_width = game_width;
+      game_source_height = game_height;
+      game_output_width = width;
+      game_output_height = height;
+      game_source_tracker = {};
+      game_source_supported = game_transport_supported &&
+                              (display->display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ||
+                               display->display_rotation == DXGI_MODE_ROTATION_IDENTITY);
+      // This converter is used by live local/remote presentation only. The offline worker and
+      // benchmark own their independent AI renderer and never instantiate this receiver.
+      // A fullscreen game may render at the negotiated resolution while Windows presents it at
+      // another desktop resolution. The receiver checks fullscreen ownership independently from
+      // the exact authored stereo raster; missing exports retain the packed flat fallback.
+      reshade_receiver = ((::video::is_game_mode(sbs_mode) && game_source_supported) ||
+                          (sbs_mode == ::video::SBS_AI && sbs_config.reshade)) ?
+                           std::make_unique<platf::reshade_bridge::receiver_t>(device.get(), device_ctx.get()) :
+                           nullptr;
+      external_cursor.reset();
+      external_cursor_logged = false;
+      if (reshade_receiver) {
+        external_cursor = std::make_unique<sbs_cursor::compositor_t>(
+          device.get(), device_ctx.get(), cursor_vs_hlsl.get(), cursor_ps_hlsl.get(), cursor_ps_normalize_white_hlsl.get()
+        );
+        const auto white_nits = display->get_sdr_white_nits();
+        external_cursor_white_multiplier = white_nits && *white_nits > 0.0f ? *white_nits / 80.0f : 203.0f / 80.0f;
+      }
       host_sbs_renderer = models::host_sbs_renderer_e::awaiting_v2;
       v2_live_warp_seen = false;
       v2_live_warp_loss_logged = false;
@@ -5191,9 +5138,20 @@ namespace platf::dxgi {
     BOOST_LOG(error) << "Failed to create compute shader " << #x << ": " << util::log_hex(status); \
     return -1; \
   }
-      const bool sbs_on = sbs_mode != ::video::SBS_OFF;
+      const bool sbs_on = ::video::is_packed_mode(sbs_mode);
+      const bool ai_on = sbs_mode == ::video::SBS_AI && !reshade_receiver;
+      if (sbs_mode == ::video::SBS_GAME_SBS &&
+          (!game_source_supported ||
+           !::video::external_sbs_dimensions_match(game_width, game_height, width, height))) {
+        BOOST_LOG(error) << "Game 3D requires an unrotated source and supported exact full-SBS output raster."sv;
+        return -1;
+      }
+      if (reshade_receiver && sbs_on && !::video::is_game_mode(sbs_mode) && !::video::external_sbs_dimensions_match(display->width, display->height, width, height)) {
+        BOOST_LOG(error) << "ReShade Host 3D requires exact full-SBS output at twice the source width; refusing resizing."sv;
+        return -1;
+      }
 #if !defined(SUNSHINE_TESTS)
-      if (sbs_on) {
+      if (ai_on) {
         // Cross-process accessibility traversal is isolated in the supervised helper. This lease
         // only exposes an atomic snapshot to the matched-frame path and cannot block streaming.
         // A missing, stale, or ambiguous rectangle simply selects ordinary full-frame V2.
@@ -5218,7 +5176,7 @@ namespace platf::dxgi {
             static_cast<std::uint32_t>(display->height)
           ) :
           std::string_view {"source extent is empty"};
-      if (sbs_on && !host_sbs_rejection.empty()) {
+      if (ai_on && !host_sbs_rejection.empty()) {
         // Launch, RTSP, and live controls have already preflighted the negotiated mode. Reaching
         // this guard therefore means capture attached to a different surface/topology; never let
         // that internal mismatch proceed to inference and become an unexplained flat stream.
@@ -5245,6 +5203,7 @@ namespace platf::dxgi {
           rgb_present_linear_to_srgb_ps_hlsl,
           rgb_present_linear_to_srgb_ps
         );
+        create_pixel_shader_helper(rgb_present_hdr_to_srgb_ps_hlsl, rgb_present_hdr_to_srgb_ps);
         create_pixel_shader_helper(
           rgb_present_srgb_to_linear_ps_hlsl,
           rgb_present_srgb_to_linear_ps
@@ -5278,13 +5237,7 @@ namespace platf::dxgi {
           return -1;
         }
       }
-      if (!sbs_reprojection_vs_hlsl ||
-          FAILED(status = device->CreateVertexShader(
-                   sbs_reprojection_vs_hlsl->data(),
-                   sbs_reprojection_vs_hlsl->size(),
-                   nullptr,
-                   &sbs_reprojection_vs
-                 ))) {
+      if (!sbs_reprojection_vs_hlsl || FAILED(status = device->CreateVertexShader(sbs_reprojection_vs_hlsl->data(), sbs_reprojection_vs_hlsl->size(), nullptr, &sbs_reprojection_vs))) {
         BOOST_LOG(error) << "Failed to create vertex shader sbs_reprojection_vs_hlsl: "
                          << util::log_hex(status);
         return -1;
@@ -5305,6 +5258,12 @@ namespace platf::dxgi {
           }
         }
 
+        if (!sbs_flat_identity_ps) {
+          BOOST_LOG(error) << "Host SBS flat-identity safety renderer is unavailable."sv;
+          return -1;
+        }
+      }
+      if (ai_on) {
         HRESULT v2_pixel_status = E_FAIL;
         if (sbs_reprojection_v2_live_ps_hlsl) {
           v2_pixel_status = device->CreatePixelShader(
@@ -5373,7 +5332,7 @@ namespace platf::dxgi {
             // Semi-planar 16-bit YUV 4:2:0, 10 most significant bits store the value
             create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
             create_pixel_shader_helper(convert_yuv420_planar_y_ps_hlsl, convert_Y_or_YUV_ps);
-            if (display_is_hdr) {
+            if (output_is_hdr) {
               create_pixel_shader_helper(convert_yuv420_planar_y_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
             } else {
               create_pixel_shader_helper(convert_yuv420_planar_y_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
@@ -5381,7 +5340,7 @@ namespace platf::dxgi {
             if (downscaling && !sbs_on) {
               create_vertex_shader_helper(convert_yuv420_packed_uv_type0s_vs_hlsl, convert_UV_vs);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_hlsl, convert_UV_ps);
-              if (display_is_hdr) {
+              if (output_is_hdr) {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_perceptual_quantizer_hlsl, convert_UV_fp16_ps);
               } else {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_linear_hlsl, convert_UV_fp16_ps);
@@ -5389,7 +5348,7 @@ namespace platf::dxgi {
             } else {
               create_vertex_shader_helper(convert_yuv420_packed_uv_type0_vs_hlsl, convert_UV_vs);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_hlsl, convert_UV_ps);
-              if (display_is_hdr) {
+              if (output_is_hdr) {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_perceptual_quantizer_hlsl, convert_UV_fp16_ps);
               } else {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear_hlsl, convert_UV_fp16_ps);
@@ -5455,17 +5414,18 @@ namespace platf::dxgi {
       // Size the intermediate to the full encoded output. The warp renders directly at the
       // (possibly capped) encode resolution and applies identical aspect-fit bars inside each eye.
       if (sbs_on) {
-        initialize_sbs_gpu_timers();
-        BOOST_LOG(info)
-          << "Host SBS warp: authenticated Depth Coordinate V2 contractive renderer, fixed pop "
-          << sbs_config.pop_strength << ".";
+        if (ai_on) {
+          initialize_sbs_gpu_timers();
+          BOOST_LOG(info)
+            << "Host SBS warp: authenticated Depth Coordinate V2 contractive renderer, fixed pop "
+            << sbs_config.pop_strength << ".";
+        } else {
+          BOOST_LOG(info) << "Host SBS source: ReShade final full-SBS texture, with flat desktop fallback."sv;
+        }
         sbs_viewport = {0.0f, 0.0f, out_width_f, out_height_f, 0.0f, 1.0f};
         // DDup starts with UNKNOWN and exposes the actual format on its first real frame. Defer
         // allocation in that case; known WGC/DDup formats can be finalized now.
-        if (display->capture_format != DXGI_FORMAT_UNKNOWN &&
-            !ensure_sbs_intermediate_storage(
-              display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT
-            )) {
+        if (display->capture_format != DXGI_FORMAT_UNKNOWN && !ensure_sbs_intermediate_storage(display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT)) {
           return -1;
         }
       }
@@ -5794,6 +5754,7 @@ namespace platf::dxgi {
     buf_t subsample_offset;
     buf_t color_matrix;
     buf_t sdr_color_transform;
+    buf_t external_color_transform;
     float output_black_y = 0.0f;
     float output_neutral_uv = 0.5f;
 
@@ -5811,6 +5772,7 @@ namespace platf::dxgi {
 
     std::shared_ptr<display_base_t> display;
     bool display_is_hdr = false;
+    bool output_is_hdr = false;
 
     vs_t convert_Y_or_YUV_vs;
     ps_t convert_Y_or_YUV_ps;
@@ -5836,6 +5798,7 @@ namespace platf::dxgi {
     bool rgb_copy_fallback_logged = false;
     ps_t rgb_present_ps;
     ps_t rgb_present_linear_to_srgb_ps;
+    ps_t rgb_present_hdr_to_srgb_ps;
     ps_t rgb_present_srgb_to_linear_ps;
     buf_t rgb_present_sdr_white;
     D3D11_VIEWPORT rgb_present_viewport {};
@@ -5848,6 +5811,18 @@ namespace platf::dxgi {
     unsigned engine_poll_counter = 0;  ///< Rate-limits the startup model-preparation wait warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     config::video_t::sbs_t sbs_config {};  ///< Immutable Host SBS settings for this device.
+    std::unique_ptr<platf::reshade_bridge::receiver_t> reshade_receiver;
+    std::unique_ptr<sbs_cursor::compositor_t> external_cursor;
+    float external_cursor_white_multiplier = 203.0f / 80.0f;
+    bool external_cursor_logged = false;
+    safe::mail_raw_t::event_t<::video::game_source_state_t> game_source_status_event;
+    std::shared_ptr<::video::effective_video_mode_publisher_t> game_effective_mode;
+    ::video::game_source_tracker_t game_source_tracker;
+    bool game_source_supported = false;
+    int game_source_width = 0;
+    int game_source_height = 0;
+    int game_output_width = 0;
+    int game_output_height = 0;
     bool diagnostics_enabled = false;  ///< Cached once per device; the disabled hot path only branches.
     safe::mail_raw_t::event_t<int> sbs_depth_status_event;
     std::shared_ptr<safe::event_t<bool>> sbs_depth_pipeline_ready_event;
@@ -6743,13 +6718,7 @@ namespace platf::dxgi {
     }
 
     auto depth_pipeline_ready_event = std::make_shared<safe::event_t<bool>>();
-    if (converter.init_rgb_output(
-          output_width,
-          output_height,
-          config.sbs_mode,
-          config.sbs_config,
-          depth_pipeline_ready_event
-        )) {
+    if (converter.init_rgb_output(output_width, output_height, config.sbs_mode, config.sbs_config, depth_pipeline_ready_event)) {
       BOOST_LOG(error) << "Local AR presenter could not initialize RGB presentation resources."sv;
       return local_presenter_result_e::error;
     }
@@ -7077,10 +7046,10 @@ namespace platf::dxgi {
           candidate = display->alloc_img();
         }
         if (candidate && candidate.use_count() == 1) {
-            image = candidate;
-            image->frame_timestamp.reset();
-            image->content_timestamp.reset();
-            return true;
+          image = candidate;
+          image->frame_timestamp.reset();
+          image->content_timestamp.reset();
+          return true;
         }
       }
       image.reset();
@@ -7267,13 +7236,17 @@ namespace platf::dxgi {
     const auto capture_started = std::chrono::steady_clock::now();
     const auto has_pending_work = [&]() {
       return presenter_retry.should_process(
-        static_cast<bool>(retained_presenter_source),
-        depth_pipeline_ready_event && depth_pipeline_ready_event->peek(),
-        converter.needs_conversion_poll()
-      ) || (retained_presenter_source && converter.has_pending_depth_pipeline_build());
+               static_cast<bool>(retained_presenter_source),
+               depth_pipeline_ready_event && depth_pipeline_ready_event->peek(),
+               converter.needs_conversion_poll()
+             ) ||
+             (retained_presenter_source && converter.has_pending_depth_pipeline_build());
     };
     const auto capture_status = dxgi_display->capture_with_pending_work(
-      push_image, pull_image, &capture_cursor, has_pending_work
+      push_image,
+      pull_image,
+      &capture_cursor,
+      has_pending_work
     );
     // A mode-loss reinit can race an off-head request during graphics destruction. Publish the
     // same stopped proof for every completed capture attempt, before those destructors run.
@@ -7369,7 +7342,12 @@ namespace platf::dxgi {
                client_config.sbs_telemetry_generation,
                client_config.sbs_debug_dump_pending,
                false,
-               client_config.sbs_telemetry_performance
+               client_config.sbs_telemetry_performance,
+               client_config.game_source_status_event,
+               client_config.effective_mode,
+               client_config.game_source_transport_supported,
+               client_config.game_source_width,
+               client_config.game_source_height
              ) == 0;
     }
 
@@ -7398,7 +7376,7 @@ namespace platf::dxgi {
     NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
   };
 
-  bool set_cursor_texture(device_t::pointer device, gpu_cursor_t &cursor, util::buffer_t<std::uint8_t> &&cursor_img, DXGI_OUTDUPL_POINTER_SHAPE_INFO &shape_info) {
+  bool set_cursor_texture(device_t::pointer device, gpu_cursor_t &cursor, const std::vector<std::uint8_t> &cursor_img, const sbs_cursor::shape_t &shape) {
     // This cursor image may not be used
     if (cursor_img.size() == 0) {
       cursor.input_res.reset();
@@ -7407,15 +7385,15 @@ namespace platf::dxgi {
     }
 
     D3D11_SUBRESOURCE_DATA data {
-      std::begin(cursor_img),
-      4 * shape_info.Width,
+      cursor_img.data(),
+      4 * shape.width,
       0
     };
 
     // Create texture for cursor
     D3D11_TEXTURE2D_DESC t {};
-    t.Width = shape_info.Width;
-    t.Height = cursor_img.size() / data.SysMemPitch;
+    t.Width = shape.width;
+    t.Height = shape.height;
     t.MipLevels = 1;
     t.ArraySize = 1;
     t.SampleDesc.Count = 1;
@@ -7499,12 +7477,19 @@ namespace platf::dxgi {
         return capture_e::error;
       }
 
-      auto alpha_cursor_img = make_cursor_alpha_image(img_data, shape_info);
-      auto xor_cursor_img = make_cursor_xor_image(img_data, shape_info);
-
-      if (!set_cursor_texture(device.get(), cursor_alpha, std::move(alpha_cursor_img), shape_info) || !set_cursor_texture(device.get(), cursor_xor, std::move(xor_cursor_img), shape_info)) {
+      auto decoded = dummy <= img_data.size() ?
+                       sbs_cursor::decode_shape(shape_info, std::begin(img_data), dummy) : std::nullopt;
+      if (!decoded) {
+        // A malformed cursor must not interrupt the desktop/game stream or leave the previous
+        // pointer shape visible. Empty planes clear both capture textures and the SBS snapshot.
+        BOOST_LOG(warning) << "Ignoring invalid Desktop Duplication cursor shape."sv;
+        decoded.emplace();
+      }
+      auto shape = std::make_shared<sbs_cursor::shape_t>(std::move(*decoded));
+      if (!set_cursor_texture(device.get(), cursor_alpha, shape->alpha_bgra, *shape) || !set_cursor_texture(device.get(), cursor_xor, shape->xor_bgra, *shape)) {
         return capture_e::error;
       }
+      cursor_shape = std::move(shape);
     }
 
     if (frame_info.LastMouseUpdateTime.QuadPart) {
@@ -7721,6 +7706,7 @@ namespace platf::dxgi {
 
           device_ctx->CopyResource(d3d_img->capture_texture.get(), p_surface->get());
           d3d_img->ddup_damage = last_ddup_damage;
+          d3d_img->cursor = {};
 
           // We delay the destruction of intermediate surface in case the mouse cursor reappears shortly.
           old_surface_delayed_destruction.reset(p_surface->release());
@@ -7770,6 +7756,7 @@ namespace platf::dxgi {
           device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
           commit_desktop_surface();
           d3d_img->ddup_damage = last_ddup_damage;
+          d3d_img->cursor = {};
           last_frame_variant = img;
           break;
         }
@@ -7791,6 +7778,15 @@ namespace platf::dxgi {
     }
 
     auto blend_cursor = [&](img_d3d_t &d3d_img) {
+      // Called only for a newly acquired output image, never for a forwarded published image.
+      d3d_img.cursor = {
+        .shape = cursor_shape,
+        .viewport = cursor_alpha.texture ? cursor_alpha.cursor_view : cursor_xor.cursor_view,
+        .capture_width = static_cast<std::uint32_t>(width_before_rotation),
+        .capture_height = static_cast<std::uint32_t>(height_before_rotation),
+        .rotation = display_rotation,
+        .visible = blend_mouse_cursor_flag,
+      };
       device_ctx->VSSetShader(cursor_vs.get(), nullptr, 0);
       device_ctx->PSSetShader(cursor_ps.get(), nullptr, 0);
       device_ctx->OMSetRenderTargets(1, &d3d_img.capture_rt, nullptr);
@@ -7877,6 +7873,7 @@ namespace platf::dxgi {
             return capture_e::error;
           }
           d3d_img->ddup_damage.reset();
+          d3d_img->cursor = {};
 
           if (reclear_dummy) {
             const float rgb_black[] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -7915,6 +7912,7 @@ namespace platf::dxgi {
   }
 
   int display_ddup_vram_t::init(const ::video::config_t &config, const std::string &display_name) {
+    cursor_shape.reset();
     last_content_timestamp.reset();
     last_ddup_damage.reset();
     damage_history = std::make_shared<detail::ddup_damage_history_t>();
@@ -8025,8 +8023,10 @@ namespace platf::dxgi {
 
     const auto timestamp_now = std::chrono::steady_clock::now();
     const auto frame_timestamp = timestamp_now - detail::wgc_frame_age(
-      qpc_counter(), qpc_frequency(), frame_time
-    );
+                                                   qpc_counter(),
+                                                   qpc_frequency(),
+                                                   frame_time
+                                                 );
     D3D11_TEXTURE2D_DESC desc {};
     src->GetDesc(&desc);
 
@@ -8051,6 +8051,7 @@ namespace platf::dxgi {
 
     auto d3d_img = std::static_pointer_cast<img_d3d_t>(img);
     d3d_img->ddup_damage.reset();
+    d3d_img->cursor = {};
     d3d_img->blank = false;  // image is always ready for capture
     if (complete_img(d3d_img.get(), false) == 0) {
       texture_lock_helper lock_helper(d3d_img->capture_mutex.get());
@@ -8272,6 +8273,7 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(cursor_ps);
     compile_pixel_shader_helper(cursor_ps_normalize_white);
     compile_pixel_shader_helper(rgb_present_linear_to_srgb_ps);
+    compile_pixel_shader_helper(rgb_present_hdr_to_srgb_ps);
     compile_pixel_shader_helper(rgb_present_srgb_to_linear_ps);
     sbs_reprojection_v2_live_ps_hlsl.reset();
     sbs_reprojection_v2_live_source_closure_sha256.clear();
@@ -8279,56 +8281,62 @@ namespace platf::dxgi {
     sbs_reprojection_v2_p010_y_source_closure_sha256.clear();
     sbs_flat_identity_ps_hlsl.reset();
     sbs_reprojection_vs_hlsl.reset();
+
     namespace cache = models::host_sbs_shader_cache;
-    const auto renderer_sources = cache::snapshot_sources(
-      SUNSHINE_SHADERS_DIR,
-      cache::parallax_v2_live_renderer_specs
-    );
-    sbs_reprojection_v2_live_source_closure_sha256 =
-      cache::source_closure_sha256(renderer_sources);
-    const bool renderer_authenticated = renderer_sources &&
-                                        sbs_reprojection_v2_live_source_closure_sha256 ==
-                                          cache::parallax_v2_live_renderer_source_closure_sha256;
-    if (renderer_authenticated) {
-      sbs_reprojection_v2_live_ps_hlsl = cache::get(
-        renderer_sources,
-        cache::parallax_v2_live_renderer
+    {
+      // Host AI remains available independently of the local-AR provider selection. Game
+      // converters never instantiate this renderer, but a later Host AI session may need it.
+      const auto renderer_sources = cache::snapshot_sources(
+        SUNSHINE_SHADERS_DIR,
+        cache::parallax_v2_live_renderer_specs
       );
-      sbs_reprojection_vs_hlsl = cache::get(
-        renderer_sources,
-        cache::sbs_reprojection_vertex
+      sbs_reprojection_v2_live_source_closure_sha256 =
+        cache::source_closure_sha256(renderer_sources);
+      const bool renderer_authenticated = renderer_sources &&
+                                          sbs_reprojection_v2_live_source_closure_sha256 ==
+                                            cache::parallax_v2_live_renderer_source_closure_sha256;
+      if (renderer_authenticated) {
+        sbs_reprojection_v2_live_ps_hlsl = cache::get(
+          renderer_sources,
+          cache::parallax_v2_live_renderer
+        );
+        sbs_reprojection_vs_hlsl = cache::get(
+          renderer_sources,
+          cache::sbs_reprojection_vertex
+        );
+      }
+      if (!sbs_reprojection_v2_live_ps_hlsl) {
+        BOOST_LOG(warning)
+          << "Host SBS V2 renderer authentication or compilation failed; Host SBS will stream "sv
+             "current-frame flat identity (observed closure "sv
+          << sbs_reprojection_v2_live_source_closure_sha256 << ", expected "sv
+          << cache::parallax_v2_live_renderer_source_closure_sha256 << ")."sv;
+      }
+      const auto p010_y_sources = cache::snapshot_sources(
+        SUNSHINE_SHADERS_DIR,
+        cache::parallax_v2_p010_y_specs
       );
+      sbs_reprojection_v2_p010_y_source_closure_sha256 =
+        cache::source_closure_sha256(p010_y_sources);
+      const bool p010_y_authenticated =
+        p010_y_sources &&
+        sbs_reprojection_v2_p010_y_source_closure_sha256 ==
+          cache::parallax_v2_p010_y_source_closure_sha256;
+      if (p010_y_authenticated) {
+        sbs_reprojection_v2_p010_y_ps_hlsl = cache::get(
+          p010_y_sources,
+          cache::parallax_v2_p010_y_renderer
+        );
+      }
+      if (!sbs_reprojection_v2_p010_y_ps_hlsl) {
+        BOOST_LOG(info)
+          << "Host SBS direct P010 luma optimization is unavailable; retaining the established "sv
+             "RGB-to-P010 path (observed closure "sv
+          << sbs_reprojection_v2_p010_y_source_closure_sha256 << ", expected "sv
+          << cache::parallax_v2_p010_y_source_closure_sha256 << ")."sv;
+      }
     }
-    if (!sbs_reprojection_v2_live_ps_hlsl) {
-      BOOST_LOG(warning)
-        << "Host SBS V2 renderer authentication or compilation failed; Host SBS will stream "sv
-           "current-frame flat identity (observed closure "sv
-        << sbs_reprojection_v2_live_source_closure_sha256 << ", expected "sv
-        << cache::parallax_v2_live_renderer_source_closure_sha256 << ")."sv;
-    }
-    const auto p010_y_sources = cache::snapshot_sources(
-      SUNSHINE_SHADERS_DIR,
-      cache::parallax_v2_p010_y_specs
-    );
-    sbs_reprojection_v2_p010_y_source_closure_sha256 =
-      cache::source_closure_sha256(p010_y_sources);
-    const bool p010_y_authenticated =
-      p010_y_sources &&
-      sbs_reprojection_v2_p010_y_source_closure_sha256 ==
-        cache::parallax_v2_p010_y_source_closure_sha256;
-    if (p010_y_authenticated) {
-      sbs_reprojection_v2_p010_y_ps_hlsl = cache::get(
-        p010_y_sources,
-        cache::parallax_v2_p010_y_renderer
-      );
-    }
-    if (!sbs_reprojection_v2_p010_y_ps_hlsl) {
-      BOOST_LOG(info)
-        << "Host SBS direct P010 luma optimization is unavailable; retaining the established "sv
-           "RGB-to-P010 path (observed closure "sv
-        << sbs_reprojection_v2_p010_y_source_closure_sha256 << ", expected "sv
-        << cache::parallax_v2_p010_y_source_closure_sha256 << ")."sv;
-    }
+
     // This independent current-frame identity renderer is the safety net for Host SBS. Its
     // failure must not disable ordinary non-SBS video; a Host SBS device will reject creation
     // only if neither this shader nor the authenticated V2 renderer can be created. It shares

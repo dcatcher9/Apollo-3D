@@ -146,7 +146,8 @@ TEST(NvHttpLaunchParsingTest, EnforcesScalarLaunchOptionContracts) {
   EXPECT_EQ(parse_launch_int(field::sbs_mode, "0"), 0);
   EXPECT_EQ(parse_launch_int(field::sbs_mode, "1"), 1);
   EXPECT_FALSE(parse_launch_int(field::sbs_mode, "-1"));
-  EXPECT_FALSE(parse_launch_int(field::sbs_mode, "2"));
+  EXPECT_EQ(parse_launch_int(field::sbs_mode, "2"), 2);
+  EXPECT_FALSE(parse_launch_int(field::sbs_mode, "3"));  // Packed Game output needs a live ACK.
 }
 
 TEST(NvHttpLaunchParsingTest, DefaultsMissingDisplayExtensionsConservatively) {
@@ -173,7 +174,7 @@ TEST(NvHttpLaunchParsingTest, ValidatesExplicitDisplayExtensions) {
   );
   EXPECT_FALSE(nvhttp::parse_launch_display_options(maybe_value {"2"}, std::nullopt, std::nullopt));
   EXPECT_FALSE(nvhttp::parse_launch_display_options(std::nullopt, maybe_value {"201"}, std::nullopt));
-  EXPECT_FALSE(nvhttp::parse_launch_display_options(std::nullopt, std::nullopt, maybe_value {"2"}));
+  EXPECT_FALSE(nvhttp::parse_launch_display_options(std::nullopt, std::nullopt, maybe_value {"3"}));
 }
 
 TEST(NvHttpLaunchParsingTest, VirtualDisplayOnlyDefaultsOffAndAcceptsExactClientValues) {

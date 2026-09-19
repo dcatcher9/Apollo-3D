@@ -9,7 +9,11 @@ float3 CONVERT_FUNCTION(float3 input)
     // equivalent early-return form when this include is compiled through the three YUV entry
     // points, even though both branches return. The optimizer removes this initialization.
     float3 converted = float3(0.0, 0.0, 0.0);
-    if (!target_bt2020) {
+    if (target_is_hdr) {
+        // An SDR game (or WGC SDR frame) may feed an HDR stream. Restore its configured
+        // reference white in absolute scRGB before encoding Rec.2020/ST2084.
+        converted = scRGBTo2100PQ(RemoveSRGBCurve(input) * source_sdr_white_scrgb);
+    } else if (!target_bt2020) {
         converted = SRGBCodeToBT709Code(input);
     } else {
         // BGRA8 desktop capture is display-referred sRGB even when the physical display has

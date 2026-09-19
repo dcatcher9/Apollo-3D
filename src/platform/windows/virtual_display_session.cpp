@@ -256,10 +256,11 @@ namespace VDISPLAY {
       return false;
     }
     pause_requested_ = true;
-    if (!paused_) {
-      const auto sink = local_sink.empty() ? std::wstring_view(spec_.local_sink) : local_sink;
-      paused_ = io_.pause && io_.pause(binding_.device_path, retained_, sink);
-    }
+    // Paused is the result of the last observation, not a permanent absence proof. Windows can
+    // reactivate a retained device after the original detach. The shared manager rechecks the
+    // exact identity and preserves this bookmark while leaving an already detached source alone.
+    const auto sink = local_sink.empty() ? std::wstring_view(spec_.local_sink) : local_sink;
+    paused_ = io_.pause && io_.pause(binding_.device_path, retained_, sink);
     invalidate_gdi();
     return paused_;
   }

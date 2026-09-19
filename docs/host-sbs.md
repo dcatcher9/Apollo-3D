@@ -8,6 +8,15 @@ Client SBS is a separate Moonlight 3D pipeline and does not share these constant
 conversion uses the same V2 geometry and is described in
 [Offline Host 3D conversion](whole-clip-sbs-pipeline.md).
 
+Streamed **Game 3D** receives a [ReShade stereo source](reshade-sbs.md) separately from **Host AI 3D**.
+Game 3D starts with normal mono encoding and enters exact full SBS only after source readiness
+and a confirmed stream transition. Once packed, its unavailable-source fallback duplicates the
+current desktop without resizing the stream. The `sbs_reshade` setting selects this source only
+for locally connected AR glasses; streamed Host AI 3D always uses Sunshine's AI pipeline. Sunshine
+owns the normal-size virtual display and final presentation or encoding. The ReShade handoff has
+its own source, resource and color contract; the V2 contracts below continue to govern
+Sunshine-generated geometry.
+
 ## Pipeline
 
 ```mermaid
@@ -99,7 +108,7 @@ state checksum, and renderer closure must also authenticate. The fused engine ha
 input and one FP32 high-grid output; FP32 `2x2` average pooling supplies the internal DAV2 input and
 the coarse DAV2 output never crosses the engine boundary. The same high output owns normalization,
 temporal history, scene-cut evidence, camera state, geometry conditioning, and publication. Live
-Host SBS, production Web UI conversion, and the maintained benchmark harness require this pinned
+Host SBS using Sunshine depth, production Web UI conversion, and the maintained benchmark harness require this pinned
 composite. A missing, non-regular, unreadable, or hash-mismatched asset fails flat; no raw DAV2
 runtime is selected. There is no supported Host SBS model selector.
 

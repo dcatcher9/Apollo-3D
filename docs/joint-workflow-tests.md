@@ -1,15 +1,16 @@
 # Joint workflow tests
 
 The local gate runs Sunshine 3D native workflow tests, evaluator contract/provenance tests,
-Moonlight 3D native packet/FEC tests and JVM tests in sequence. It checks connection ownership, permissions, mode transitions,
+Moonlight 3D native packet/FEC and control tests, and JVM tests in sequence. It checks connection ownership, permissions, mode transitions,
 offline job/transport bounds, and capture/presentation timing without opening the host or using a
 headset. Local AR lifecycle, shared local/remote scheduling ownership, immutable DDup image delivery,
 and client reconnect intent/settings transitions are included.
 The gate also exercises exact client Start/Resume/Replace decisions, asynchronous EGL lifecycle,
 stable physical HDR targets, and shared conversion-demand and display-retirement policies. Packed chroma
 regressions execute the production D3D shaders through WARP's software renderer, including transfer
-order and independent eye boundaries. Shutdown coverage keeps the streaming watchdog out of app
-cleanup, while retained-source tests cover WGC images without DDup content metadata. Client surface
+order and independent eye boundaries. Shutdown coverage bounds the live-mode worker and media workers
+separately, and rejects delayed watchdog callbacks after each join completes, including during app
+cleanup. Retained-source tests cover WGC images without DDup content metadata. Client surface
 failure tests hold renderer locks to verify that timeout recovery remains responsive. Run it with
 both checkouts available and their existing build prerequisites configured:
 
@@ -29,6 +30,19 @@ official Windows Node, and installs nothing. It builds `sunshine` and `test_suns
 The packet test compiles the actual client ANNOUNCE writer, receive queue, AES-GCM, Reed–Solomon and depacketizer
 implementations with the host's configured C compiler. It checks first, interior and final data-shard
 loss at three packet sizes for HEVC and AV1 through the decoder callback.
+The control test compiles the production control writer, parser and callback queue through
+`ControlTelemetryTest.c`, checking Game provider capability negotiation, exact mode-request bytes,
+provider-status validation and delivery, and telemetry subscription bounds and coalescing. Both native
+client tests are compiled into the evidence directory on every run, including with `-SkipBuild`.
+
+Game 3D coverage includes host provider discovery, source revisions and presentation generations,
+full-resolution SBS limits, and the ReShade receiver's resource identity, shared fences, HDR transfer,
+and producer replacement. `ReShadeBridgeGpu` uses hardware D3D11 and D3D12 shared-resource support.
+These functional checks do not require closing Sunshine or games; keep GPU tests that share
+resources or fixtures serial. Performance measurements require an otherwise idle GPU. Unsupported
+hardware or interfaces produce explicit skips in `host.xml`, not proof that those paths passed.
+The existing chroma tests still use software WARP. The JVM gate also includes Game transport reconnect
+policy, authored Movie/Game presentation, and Game provider mode/readiness integration.
 
 Each run writes logs, native XML, both checkout commits, runtime identity and stage exit codes below
 `cmake-build-relwithdebinfo/joint-workflow-<time>/`. Client XML remains under the client's standard

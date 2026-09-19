@@ -7,6 +7,7 @@
 #include <codecvt>
 #include <csignal>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -20,8 +21,8 @@
 #include "confighttp.h"
 #include "entry_handler.h"
 #include "globals.h"
-#include "httpcommon.h"
 #include "host_sbs_shader_cache.h"
+#include "httpcommon.h"
 #include "logging.h"
 #include "main.h"
 #include "nvhttp.h"
@@ -90,9 +91,9 @@ namespace {
   constexpr UINT_PTR EXCLUSIVE_CURSOR_MAINTENANCE_TIMER = 2;
   constexpr UINT EXCLUSIVE_CURSOR_REFRESH_DELAY_MS = 100;
   constexpr UINT EXCLUSIVE_CURSOR_MAINTENANCE_MS = 250;
-  constexpr auto EXCLUSIVE_DISPLAY_RECONCILE_RETRY_DELAY = 50ms;
-  constexpr auto EXCLUSIVE_DISPLAY_RECONCILE_RETRY_WINDOW = 1500ms;
-  constexpr std::size_t EXCLUSIVE_DISPLAY_RECONCILE_MAX_ATTEMPTS = 31;
+  constexpr auto EXCLUSIVE_DISPLAY_RECONCILE_RETRY_DELAY = platf::primary_display::detail::exclusive_reconcile_retry_delay;
+  constexpr auto EXCLUSIVE_DISPLAY_RECONCILE_RETRY_WINDOW = platf::primary_display::detail::exclusive_reconcile_retry_window;
+  constexpr auto EXCLUSIVE_DISPLAY_RECONCILE_MAX_ATTEMPTS = platf::primary_display::detail::exclusive_reconcile_max_attempts;
 
   std::atomic<HWND> session_monitor_window {nullptr};
   std::atomic_bool cursor_refresh_posted {false};
@@ -331,11 +332,29 @@ namespace {
 LRESULT CALLBACK SessionMonitorWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
   switch (uMsg) {
     case WM_DISPLAYCHANGE:
+      if (config::sunshine.diagnostics_enabled) {
+        BOOST_LOG(info) << "Windows display-change notification: primary=" << LOWORD(lParam)
+                        << 'x' << HIWORD(lParam) << " bits=" << wParam;
+      }
       // SetDisplayConfig may synchronously broadcast this while the topology transaction mutex is
       // held. Defer all display queries to avoid a cross-thread broadcast deadlock.
       request_exclusive_display_reconcile();
       request_exclusive_cursor_refresh();
       return 0;
+    case WM_POWERBROADCAST:
+      if (config::sunshine.diagnostics_enabled && wParam == PBT_POWERSETTINGCHANGE && lParam) {
+        const auto *setting = reinterpret_cast<const POWERBROADCAST_SETTING *>(lParam);
+        if (IsEqualGUID(setting->PowerSetting, GUID_SESSION_DISPLAY_STATUS) && setting->DataLength == sizeof(DWORD)) {
+          DWORD state;
+          std::memcpy(&state, setting->Data, sizeof(state));
+          // This is Windows' session power state, not confirmation that a physical panel is lit.
+          BOOST_LOG(info) << "Windows session display-power notification: "
+                          << (state == 0 ? "off" : state == 1 ? "on" : state == 2 ? "dimmed" : "unknown")
+                          << " (" << state << ").";
+          return TRUE;
+        }
+      }
+      return DefWindowProc(hwnd, uMsg, wParam, lParam);
     case WM_RECONCILE_EXCLUSIVE_DISPLAY:
       display_reconcile_posted.store(false, std::memory_order_release);
       enqueue_exclusive_display_reconcile();
@@ -523,7 +542,8 @@ int main(int argc, char *argv[]) {
   // The executable-owned appdata directory is a trusted cache boundary; an arbitrary config-file
   // path must never become a high-privilege DXBC input.
   models::host_sbs_shader_cache::configure_persistent_cache(
-    platf::appdata() / "shader-cache" / "host-sbs-v1");
+    platf::appdata() / "shader-cache" / "host-sbs-v1"
+  );
 #endif
   std::jthread model_prepare_thread([model = video::host_sbs_v2_depth_model(),
                                      adapter_name = config::video.adapter_name]() {
@@ -609,6 +629,12 @@ int main(int argc, char *argv[]) {
 
     session_monitor_window.store(wnd, std::memory_order_release);
     ShowWindow(wnd, SW_HIDE);
+    const auto display_power_notification = config::sunshine.diagnostics_enabled ?
+                                              RegisterPowerSettingNotification(wnd, &GUID_SESSION_DISPLAY_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE) :
+                                              nullptr;
+    if (config::sunshine.diagnostics_enabled && !display_power_notification) {
+      BOOST_LOG(warning) << "Could not observe Windows session display power: " << GetLastError();
+    }
     if (!SetTimer(wnd, EXCLUSIVE_CURSOR_MAINTENANCE_TIMER, EXCLUSIVE_CURSOR_MAINTENANCE_MS, nullptr)) {
       BOOST_LOG(warning) << "Could not schedule periodic exclusive cursor-isolation maintenance."sv;
     }
@@ -631,6 +657,9 @@ int main(int argc, char *argv[]) {
     while (GetMessage(&msg, nullptr, 0, 0) > 0) {
       TranslateMessage(&msg);
       DispatchMessage(&msg);
+    }
+    if (display_power_notification && !UnregisterPowerSettingNotification(display_power_notification)) {
+      BOOST_LOG(warning) << "Could not unregister Windows session display-power observation: " << GetLastError();
     }
     if (foreground_hook && !UnhookWinEvent(foreground_hook)) {
       BOOST_LOG(warning) << "Could not unregister the exclusive cursor-isolation foreground monitor: "sv << GetLastError();
@@ -821,8 +850,7 @@ int main(int argc, char *argv[]) {
               detach_budget,
               detach_context
             );
-            if (detach.state == VDISPLAY::desktop_detach_state_e::detached ||
-                detach.state == VDISPLAY::desktop_detach_state_e::already_inactive) {
+            if (detach.state == VDISPLAY::desktop_detach_state_e::detached || detach.state == VDISPLAY::desktop_detach_state_e::already_inactive) {
               remove_ready = true;
               requires_active_path_absence = true;
             } else if (
@@ -840,10 +868,11 @@ int main(int argc, char *argv[]) {
           if (!remove_accepted && now >= next_remove_retry) {
             if (requires_active_path_absence) {
               const auto active_state = VDISPLAY::queryVirtualDisplayIdentity(
-                *probe_display.identity,
-                probe_display.device_path,
-                probe_display.display_name
-              ).state;
+                                          *probe_display.identity,
+                                          probe_display.device_path,
+                                          probe_display.display_name
+              )
+                                          .state;
               if (!VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
                     true,
                     active_state

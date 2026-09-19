@@ -30,9 +30,13 @@ The active physical-monitor resolution selects the presentation mode:
 | AR display mode | Private virtual source | Presentation |
 |---|---|---|
 | 1920x1080 | 1920x1080 | Normal 2D |
-| 3840x1080 | 1920x1080 | Sunshine 3D full-SBS AI |
+| 3840x1080 | 1920x1080 | Full SBS from the selected live Host 3D provider |
 
 Other resolutions are rejected. Resolution alone never identifies a monitor as AR glasses.
+
+The default provider is Sunshine's AI renderer. With `sbs_reshade = enabled`, the same presenter
+receives the game's final stereo texture and retains the normal 1920x1080 virtual source.
+See [ReShade SBS setup](reshade-sbs.md) for the shader, add-on and activation contract.
 
 ## Lifecycle
 

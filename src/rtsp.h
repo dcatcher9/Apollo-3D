@@ -6,6 +6,7 @@
 
 // standard includes
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -269,6 +270,8 @@ namespace rtsp_stream {
   );
 
 #ifdef SUNSHINE_TESTS
+  std::size_t poll_server_for_test();
+  std::size_t run_server_once_for_test(std::chrono::milliseconds timeout);
   bool insert_session_for_test(const std::shared_ptr<stream::session_t> &session);
   void remove_session_for_test(const std::shared_ptr<stream::session_t> &session);
   bool claim_launch_session_for_test(launch_session_t &launch_session);
@@ -279,6 +282,9 @@ namespace rtsp_stream {
   void expire_launch_session_for_test(std::uint32_t launch_session_id);
   std::function<void()> launch_expiry_callback_for_test(std::uint32_t launch_session_id);
 #endif
+
+  /** Wake the RTSP owner to reap a stopped session after its media shutdown is published. */
+  void notify_session_stopping();
 
   /** Terminate the pending or active remote streaming session. */
   void terminate_session();

@@ -32,6 +32,7 @@ extern "C" {
 #include "config.h"
 #include "crypto.h"
 #include "globals.h"
+#include "host_sbs_provider.h"
 #include "host_sbs_resolution.h"
 #include "input.h"
 #include "logging.h"
@@ -90,6 +91,7 @@ namespace stream {
     constexpr std::uint16_t live_video_mode_ack = 0x3008;
     constexpr std::uint16_t sbs_telemetry_subscription = 0x3009;
     constexpr std::uint16_t sbs_telemetry_state = 0x300A;
+    constexpr std::uint16_t game_source_status = 0x300B;
   }  // namespace control_packet
 
   enum class socket_e : int {
@@ -250,6 +252,7 @@ namespace stream {
 
     std::uint8_t body[ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE];
   };
+
   static_assert(
     sizeof(control_live_video_mode_ack_v2_t) ==
     sizeof(control_header_v2) + ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE
@@ -259,6 +262,11 @@ namespace stream {
     control_header_v2 header;
 
     std::uint8_t body[SBS_TELEMETRY_STATE_PAYLOAD_SIZE];
+  };
+
+  struct control_game_source_status_t {
+    control_header_v2 header;
+    std::uint8_t body[GAME_SOURCE_STATUS_PAYLOAD_SIZE];
   };
 
 #pragma pack(pop)
@@ -362,17 +370,7 @@ namespace stream {
   ) {
     constexpr std::int64_t u16_max = std::numeric_limits<std::uint16_t>::max();
     constexpr std::int64_t u32_max = std::numeric_limits<std::uint32_t>::max();
-    if (ack.status < live_video_mode_ack_e::applied ||
-        ack.status > live_video_mode_ack_e::failed ||
-        ack.request_id < 0 || ack.request_id > u32_max ||
-        (ack.applied_sbs_mode != video::SBS_OFF && ack.applied_sbs_mode != video::SBS_AI) ||
-        ack.applied_source_width < 0 || ack.applied_source_width > u16_max ||
-        ack.applied_source_height < 0 || ack.applied_source_height > u16_max ||
-        ack.applied_encoded_width < 0 || ack.applied_encoded_width > u16_max ||
-        ack.applied_encoded_height < 0 || ack.applied_encoded_height > u16_max ||
-        ack.applied_framerate_x100 < 0 || ack.applied_framerate_x100 > u32_max ||
-        ack.applied_bitrate_kbps < 0 || ack.applied_bitrate_kbps > u32_max ||
-        ack.applied_generation == 0) {
+    if (ack.status < live_video_mode_ack_e::applied || ack.status > live_video_mode_ack_e::failed || ack.request_id < 0 || ack.request_id > u32_max || (ack.applied_sbs_mode < video::SBS_OFF || ack.applied_sbs_mode > video::SBS_GAME_SBS) || ack.applied_source_width < 0 || ack.applied_source_width > u16_max || ack.applied_source_height < 0 || ack.applied_source_height > u16_max || ack.applied_encoded_width < 0 || ack.applied_encoded_width > u16_max || ack.applied_encoded_height < 0 || ack.applied_encoded_height > u16_max || ack.applied_framerate_x100 < 0 || ack.applied_framerate_x100 > u32_max || ack.applied_bitrate_kbps < 0 || ack.applied_bitrate_kbps > u32_max || ack.applied_generation == 0) {
       return false;
     }
 
@@ -400,6 +398,47 @@ namespace stream {
     write_u16(18, static_cast<std::uint16_t>(ack.applied_encoded_height));
     write_u32(20, static_cast<std::uint32_t>(ack.applied_framerate_x100));
     write_u32(24, static_cast<std::uint32_t>(ack.applied_bitrate_kbps));
+    std::copy(std::begin(encoded), std::end(encoded), std::begin(out));
+    return true;
+  }
+
+  bool game_source_status_matches_mode(
+    const video::game_source_state_t &state,
+    const video::effective_video_mode_t &mode
+  ) noexcept {
+    return video::is_game_mode(mode.sbs_mode) && mode.generation != 0 &&
+           state.presentation_generation == mode.generation &&
+           state.source_width == mode.source_width && state.source_height == mode.source_height &&
+           ((mode.sbs_mode == video::SBS_GAME_MONO && state.state != video::GAME_SOURCE_READY) ||
+            (mode.encoded_width == (mode.sbs_mode == video::SBS_GAME_SBS ? mode.source_width * 2 : mode.source_width) &&
+             mode.encoded_height == mode.source_height));
+  }
+
+  bool encode_game_source_status_payload(
+    const video::game_source_state_t &state,
+    std::uint8_t (&out)[GAME_SOURCE_STATUS_PAYLOAD_SIZE]
+  ) noexcept {
+    if (state.state > video::GAME_SOURCE_UNSUPPORTED || state.provider > video::GAME_PROVIDER_RESHADE || (state.state == video::GAME_SOURCE_READY && state.provider == video::GAME_PROVIDER_NONE) || state.presentation_generation == 0 || state.source_revision == 0 || !is_valid_live_video_mode_dimension(state.source_width) || !is_valid_live_video_mode_dimension(state.source_height) || state.packed_width != state.source_width * 2 || state.packed_height != state.source_height) {
+      return false;
+    }
+    std::uint8_t encoded[GAME_SOURCE_STATUS_PAYLOAD_SIZE] {};
+    const auto write_u16 = [&](std::size_t offset, std::uint16_t value) {
+      encoded[offset] = static_cast<std::uint8_t>(value);
+      encoded[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+    };
+    const auto write_u32 = [&](std::size_t offset, std::uint32_t value) {
+      write_u16(offset, static_cast<std::uint16_t>(value));
+      write_u16(offset + 2, static_cast<std::uint16_t>(value >> 16));
+    };
+    encoded[0] = GAME_SOURCE_STATUS_VERSION;
+    encoded[1] = state.state;
+    encoded[2] = state.provider;
+    write_u32(4, state.presentation_generation);
+    write_u32(8, state.source_revision);
+    write_u16(12, state.source_width);
+    write_u16(14, state.source_height);
+    write_u16(16, state.packed_width);
+    write_u16(18, state.packed_height);
     std::copy(std::begin(encoded), std::end(encoded), std::begin(out));
     return true;
   }
@@ -562,8 +601,7 @@ namespace stream {
 
   using audio_aes_t = std::array<
     char,
-    crypto::cipher::round_to_pkcs7_padded(MAX_AUDIO_PACKET_SIZE)
-  >;
+    crypto::cipher::round_to_pkcs7_padded(MAX_AUDIO_PACKET_SIZE)>;
 
   using message_queue_t = std::shared_ptr<safe::queue_t<std::pair<udp::endpoint, std::string>>>;
 
@@ -814,6 +852,7 @@ namespace stream {
       // a complete applied state exists; v2 never emits an unproven generation-zero ACK.
       std::vector<live_video_mode_ack_t> deferred_live_video_mode_acks;
       safe::mail_raw_t::event_t<video::sbs_telemetry_snapshot_t> sbs_telemetry_event;
+      safe::mail_raw_t::event_t<video::game_source_state_t> game_source_status_event;
       std::optional<video::sbs_telemetry_snapshot_t> latest_sbs_telemetry;
       std::shared_ptr<video::sbs_telemetry_subscription_t> sbs_telemetry_subscription;
       std::chrono::steady_clock::time_point last_sbs_telemetry_periodic {};
@@ -944,8 +983,7 @@ namespace stream {
           const auto submission = worker_state.serial_gate.submit();
           request.change.transaction_id = submission.transaction_id;
           superseded = std::exchange(worker_state.pending, std::move(request));
-          if (static_cast<bool>(superseded) !=
-              static_cast<bool>(submission.superseded_transaction_id)) {
+          if (static_cast<bool>(superseded) != static_cast<bool>(submission.superseded_transaction_id)) {
             BOOST_LOG(error) << "Live video-mode pending queue lost synchronization with its transaction gate."sv;
           }
         }
@@ -1006,8 +1044,7 @@ namespace stream {
             const auto next_transaction = state.serial_gate.begin_next();
             job = std::move(state.pending);
             state.pending.reset();
-            if (!next_transaction || !job ||
-                job->change.transaction_id != *next_transaction) {
+            if (!next_transaction || !job || job->change.transaction_id != *next_transaction) {
               BOOST_LOG(error) << "Live video-mode worker found a transaction/payload mismatch."sv;
               if (next_transaction) {
                 (void) state.serial_gate.finish(*next_transaction);
@@ -1030,9 +1067,9 @@ namespace stream {
             const int desired_sbs_mode = job->change.requested_sbs_mode;
             return desired_sbs_mode == ::video::SBS_AI &&
                    !models::host_sbs_v2_source_resolution_is_supported(
-                static_cast<std::uint32_t>(job->change.width),
-                static_cast<std::uint32_t>(job->change.height)
-              );
+                     static_cast<std::uint32_t>(job->change.width),
+                     static_cast<std::uint32_t>(job->change.height)
+                   );
           };
           // The quality request was validated on the control thread, but a Host SBS toggle can
           // race it while the serialized display worker is waiting. Check before touching the
@@ -1054,11 +1091,7 @@ namespace stream {
           }
 
           auto result = proc::live_video_mode_result_e::unchanged;
-          if (proc::proc.live_video_mode_needs_display_change(
-                job->change.width,
-                job->change.height,
-                job->change.encodingFramerate
-              )) {
+          if (proc::proc.live_video_mode_needs_display_change(job->change.width, job->change.height, job->change.encodingFramerate)) {
             result = proc::proc.apply_live_video_mode(
               job->change.width,
               job->change.height,
@@ -1075,9 +1108,7 @@ namespace stream {
               return;
             }
           }
-          if ((result == proc::live_video_mode_result_e::applied ||
-               result == proc::live_video_mode_result_e::unchanged) &&
-              host_sbs_rejects_geometry()) {
+          if ((result == proc::live_video_mode_result_e::applied || result == proc::live_video_mode_result_e::unchanged) && host_sbs_rejects_geometry()) {
             BOOST_LOG(warning)
               << "Host SBS V2 became active while live video mode "sv
               << job->change.width << 'x' << job->change.height
@@ -1091,8 +1122,7 @@ namespace stream {
                 previous.framerateX100 * 10,
                 job->launch_session_id
               );
-              if (rollback != proc::live_video_mode_result_e::applied &&
-                  rollback != proc::live_video_mode_result_e::unchanged) {
+              if (rollback != proc::live_video_mode_result_e::applied && rollback != proc::live_video_mode_result_e::unchanged) {
                 rollback_restored_desktop = false;
                 BOOST_LOG(error)
                   << "Could not restore the prior desktop after rejecting a raced Host SBS "sv
@@ -1156,8 +1186,7 @@ namespace stream {
               break;
           }
 
-          if (result != proc::live_video_mode_result_e::applied &&
-              result != proc::live_video_mode_result_e::unchanged) {
+          if (result != proc::live_video_mode_result_e::applied && result != proc::live_video_mode_result_e::unchanged) {
             continue;
           }
 
@@ -1199,8 +1228,7 @@ namespace stream {
               completion->desktop_mode.framerate_millihz,
               job->launch_session_id
             );
-            if (rollback_result != proc::live_video_mode_result_e::applied &&
-                rollback_result != proc::live_video_mode_result_e::unchanged) {
+            if (rollback_result != proc::live_video_mode_result_e::applied && rollback_result != proc::live_video_mode_result_e::unchanged) {
               rollback_restored_desktop = false;
               BOOST_LOG(error) << "The virtual desktop could not be restored after a live encoder "
                                   "rollback; the client will be told to reconnect."sv;
@@ -1462,8 +1490,7 @@ namespace stream {
       reed_solomon *acquire(std::size_t data_shards, std::size_t parity_shards) {
         ++use_generation_;
         for (auto &entry : entries_) {
-          if (entry.context && entry.data_shards == data_shards &&
-              entry.parity_shards == parity_shards) {
+          if (entry.context && entry.data_shards == data_shards && entry.parity_shards == parity_shards) {
             entry.last_use = use_generation_;
             return entry.context.get();
           }
@@ -1494,8 +1521,7 @@ namespace stream {
 
       void discard(std::size_t data_shards, std::size_t parity_shards) {
         for (auto &entry : entries_) {
-          if (entry.context && entry.data_shards == data_shards &&
-              entry.parity_shards == parity_shards) {
+          if (entry.context && entry.data_shards == data_shards && entry.parity_shards == parity_shards) {
             entry.context.reset();
             return;
           }
@@ -1547,8 +1573,7 @@ namespace stream {
         if (headers.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
           std::vector<char>().swap(headers);
         }
-        if (shard_pointers.capacity() * sizeof(std::uint8_t *) >
-            VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
+        if (shard_pointers.capacity() * sizeof(std::uint8_t *) > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
           std::vector<std::uint8_t *>().swap(shard_pointers);
         }
       }
@@ -1909,11 +1934,7 @@ namespace stream {
     plaintext.enabled = hdr_info->enabled;
     plaintext.metadata = hdr_info->metadata;
 
-    if (send_control_packet(
-          session,
-          session->broadcast_ref->control_server,
-          plaintext
-        ) != 0) {
+    if (send_control_packet(session, session->broadcast_ref->control_server, plaintext) != 0) {
       TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
       BOOST_LOG(warning) << "Couldn't send HDR mode to ["sv << addr << ':' << port << ']';
 
@@ -1935,11 +1956,7 @@ namespace stream {
     plaintext.header.payloadLength = sizeof(control_depth_status_t) - sizeof(control_header_v2);
     plaintext.phase = (std::uint8_t) phase;
 
-    if (send_control_packet(
-          session,
-          session->broadcast_ref->control_server,
-          plaintext
-        ) != 0) {
+    if (send_control_packet(session, session->broadcast_ref->control_server, plaintext) != 0) {
       TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
       BOOST_LOG(warning) << "Couldn't send depth status to ["sv << addr << ':' << port << ']';
       return -1;
@@ -1990,6 +2007,24 @@ namespace stream {
                      << '@' << (ack.applied_framerate_x100 / 100.0) << "Hz "sv
                      << ack.applied_bitrate_kbps << "kbps"sv;
     return 0;
+  }
+
+  void send_game_source_status(session_t &session) {
+    auto &event = session.control.game_source_status_event;
+    if (!event->peek()) {
+      return;
+    }
+    const auto state = event->pop(0ms);
+    if (!state || !session.control.peer || !session.config.client_supports_game_provider_v1 || !session.config.client_supports_atomic_presentation_v2 || !session.config.monitor.effective_mode || !game_source_status_matches_mode(*state, session.config.monitor.effective_mode->current())) {
+      return;
+    }
+    control_game_source_status_t plaintext {};
+    plaintext.header.type = control_packet::game_source_status;
+    plaintext.header.payloadLength = GAME_SOURCE_STATUS_PAYLOAD_SIZE;
+    if (encode_game_source_status_payload(*state, plaintext.body)) {
+      // Replaceable observations are retried by the provider heartbeat. Never emit an ACK here.
+      send_control_packet(&session, session.broadcast_ref->control_server, plaintext);
+    }
   }
 
   video::sbs_telemetry_snapshot_t unavailable_sbs_telemetry_snapshot() noexcept {
@@ -2147,8 +2182,7 @@ namespace stream {
         // id is still recoverable when offsets 2..3 exist; otherwise there is no safe correlation
         // token with which to answer status 3.
         std::uint16_t request_id = request.request_id;
-        if (payload.size() != SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE &&
-            payload.size() >= 4) {
+        if (payload.size() != SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE && payload.size() >= 4) {
           const auto *bytes =
             reinterpret_cast<const std::uint8_t *>(payload.data());
           request_id =
@@ -2231,9 +2265,8 @@ namespace stream {
         reject("v2 request flags contain unsupported bits"sv);
         return;
       }
-      if (request.desired_sbs_mode != ::video::SBS_OFF &&
-          request.desired_sbs_mode != ::video::SBS_AI) {
-        reject("v2 desired Host SBS mode must be OFF or AI"sv);
+      if (!is_valid_live_video_sbs_mode(request.desired_sbs_mode, session->config.client_supports_game_provider_v1)) {
+        reject("desired mode is invalid or Game provider v1 was not negotiated"sv);
         return;
       }
       if (!is_valid_live_video_mode_dimension(width) || !is_valid_live_video_mode_dimension(height)) {
@@ -2246,20 +2279,29 @@ namespace stream {
           static_cast<std::uint32_t>(height)
         );
       const int desired_sbs_mode = static_cast<int>(request.desired_sbs_mode);
-      if (desired_sbs_mode == ::video::SBS_AI &&
-          !host_sbs_rejection.empty()) {
+      if (desired_sbs_mode == ::video::SBS_AI && !host_sbs_rejection.empty()) {
         reject(std::format("Host SBS V2 rejects this resolution: {}", host_sbs_rejection));
         return;
       }
-      if (framerate_x100_u32 < LIVE_VIDEO_MODE_FRAMERATE_X100_MIN ||
-          framerate_x100_u32 > LIVE_VIDEO_MODE_FRAMERATE_X100_MAX) {
+      if (desired_sbs_mode == ::video::SBS_GAME_SBS) {
+        const auto packed = ::video::host_sbs_output_dimensions(
+          width,
+          height,
+          session->config.monitor.videoFormat,
+          config::video.sbs.max_encode_width
+        );
+        if (!::video::external_sbs_dimensions_match(width, height, packed.width, packed.height)) {
+          reject("Game 3D requires an exact full-SBS raster within the codec and configured encoder limits"sv);
+          return;
+        }
+      }
+      if (framerate_x100_u32 < LIVE_VIDEO_MODE_FRAMERATE_X100_MIN || framerate_x100_u32 > LIVE_VIDEO_MODE_FRAMERATE_X100_MAX) {
         reject("v2 frame rate must be within 1..1000 Hz"sv);
         return;
       }
       const int framerate_x100 = static_cast<int>(framerate_x100_u32);
-      // Encoder width limits are deliberately not checked here: the encode loop owns the codec
-      // capability snapshot and clamps an oversized request the same way it already caps an SBS
-      // packed width. Clamping there cannot fail, whereas rejecting a creatable mode here would.
+      // The encode loop owns the runtime capability snapshot. Ordinary and AI video can fit an
+      // oversized request; final ReShade stereo was preflighted above and must remain exact.
 
       // Reproduce the ANNOUNCE-time budget so a live change and a fresh launch agree for the same
       // request. The Warp multiplier is deliberately not applied: it compensates for a launch-time
@@ -2293,7 +2335,7 @@ namespace stream {
       change.requested_sbs_mode = desired_sbs_mode;
 
       BOOST_LOG(info) << "type [IDX_SET_VIDEO_MODE]: client requested atomic-presentation v2 "sv
-                      << (desired_sbs_mode == ::video::SBS_AI ? "AI "sv : "OFF "sv)
+                      << "mode="sv << desired_sbs_mode << ' '
                       << width << 'x' << height
                       << '@' << (framerate_x100 / 100.0) << "Hz "sv << requested_bitrate_kbps
                       << "kbps (encoder budget "sv << change.bitrate << "kbps) for ["sv
@@ -2315,11 +2357,8 @@ namespace stream {
     });
 
     server->map(control_packet::sbs_debug_dump, [](session_t *session, const std::string_view &) {
-      if (!sbs_debug_dump_request_allowed(
-            session->requested_sbs_mode->load(std::memory_order_acquire),
-            (bool) session->video->sbs_debug_dump_pending
-          )) {
-        BOOST_LOG(warning) << "Ignoring Dump 3D request outside Host SBS AI for ["sv
+      if (!sbs_debug_dump_request_allowed(session->requested_sbs_mode->load(std::memory_order_acquire), (bool) session->video->sbs_debug_dump_pending)) {
+        BOOST_LOG(warning) << "Ignoring Dump 3D request outside the Host SBS depth provider for ["sv
                            << session::client_name(*session) << ']';
         return;
       }
@@ -2555,8 +2594,7 @@ namespace stream {
                     send_live_video_mode_ack(session, *ack);
                     break;
                   case live_video_mode_ack_delivery_e::defer_until_initial_proof:
-                    if (session->control.deferred_live_video_mode_acks.size() <
-                        LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT) {
+                    if (session->control.deferred_live_video_mode_acks.size() < LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT) {
                       session->control.deferred_live_video_mode_acks.push_back(*ack);
                     } else {
                       BOOST_LOG(error) << "Atomic-presentation pre-proof ACK queue exceeded its session bound; closing the session"sv;
@@ -2570,9 +2608,7 @@ namespace stream {
                 }
               }
             }
-            if (server->_session->peer &&
-                !session->control.deferred_live_video_mode_acks.empty() &&
-                session->config.monitor.effective_mode) {
+            if (server->_session->peer && !session->control.deferred_live_video_mode_acks.empty() && session->config.monitor.effective_mode) {
               const auto proven = session->config.monitor.effective_mode->current();
               if (proven.generation != 0) {
                 for (const auto &deferred : session->control.deferred_live_video_mode_acks) {
@@ -2588,6 +2624,8 @@ namespace stream {
                 session->control.deferred_live_video_mode_acks.clear();
               }
             }
+            // Readiness describes the encoder-proven generation, after any queued mode ACK.
+            send_game_source_status(*session);
           }
         }
       }
@@ -2717,18 +2755,27 @@ namespace stream {
 
     struct video_stage_diagnostics_t {
       logging::min_max_avg_periodic_logger<double> encoded_queue {
-        info, "Video packet: encoded queue residence", "ms",
+        info,
+        "Video packet: encoded queue residence",
+        "ms",
       };
       logging::min_max_avg_periodic_logger<double> new_content_age {
-        info, "Video output: new content age before packetization", "ms",
+        info,
+        "Video output: new content age before packetization",
+        "ms",
       };
       logging::min_max_avg_periodic_logger<double> repeated_content_age {
-        info, "Video output: repeated content age before packetization", "ms",
+        info,
+        "Video output: repeated content age before packetization",
+        "ms",
       };
       logging::min_max_avg_periodic_logger<double> packetization {
-        info, "Video packet: packetization and pacing-plan CPU", "ms",
+        info,
+        "Video packet: packetization and pacing-plan CPU",
+        "ms",
       };
     };
+
     // Logger construction itself reads the clock and owns strings. Keep even that work outside
     // the disabled path, along with all new samples and packet classification.
     auto stage_diagnostics = video::detail::make_diagnostic_state<video_stage_diagnostics_t>(
@@ -2836,7 +2883,8 @@ namespace stream {
           );
           if (const auto elapsed = video::detail::diagnostic_elapsed_ms(content_timestamp, measured_at)) {
             auto &logger = packet->diagnostic_content == video::detail::diagnostic_content_e::new_content ?
-                             stage_diagnostics->new_content_age : stage_diagnostics->repeated_content_age;
+                             stage_diagnostics->new_content_age :
+                             stage_diagnostics->repeated_content_age;
             logger.collect_and_log(*elapsed);
             if (packet->sbs_telemetry_performance && packet->diagnostic_content == video::detail::diagnostic_content_e::new_content) {
               packet->sbs_telemetry_performance->record(host_sbs_telemetry::stage::new_content_age, *elapsed, measured_at);
@@ -2850,7 +2898,8 @@ namespace stream {
       auto fecPercentage = config::stream.fec_percentage;
 
       const auto packetization_started = video::detail::diagnostic_timestamp(
-        stage_diagnostics.has_value(), video::detail::diagnostic_clock_t::now
+        stage_diagnostics.has_value(),
+        video::detail::diagnostic_clock_t::now
       );
       // Insert space for packet headers
       auto blocksize = channel->packet_size + MAX_RTP_HEADER_SIZE;
@@ -3102,10 +3151,12 @@ namespace stream {
                 video_pacing_rebase_ns(
                   std::chrono::duration_cast<std::chrono::nanoseconds>(
                     due - ratecontrol_frame_start
-                  ).count(),
+                  )
+                    .count(),
                   std::chrono::duration_cast<std::chrono::nanoseconds>(
                     now - ratecontrol_frame_start
-                  ).count()
+                  )
+                    .count()
                 )
               };
               ratecontrol_frame_start += schedule_rebase;
@@ -3733,6 +3784,20 @@ namespace stream {
           return;
         }
         if (!platform_resume_state.expired(std::chrono::steady_clock::now())) {
+          // The retained driver target can reappear after a verified detach. Reuse this grace
+          // poll to maintain the pause invariant, but never touch an accepted reconnect or a
+          // replacement process. The absolute expiry and its generation remain unchanged.
+          const detail::primary_display_restore_retry_t pause_check {generation, warm_process_instance.value_or(0)};
+          if (!pending_primary_restore && pause_check.next_action(
+                platform_lifecycle_generation,
+                proc::proc.get_host_session_id(),
+                warm_process_instance,
+                remote_session_active,
+                !rtsp_stream::launch_session_available(),
+                platform_streaming_warm && platform_resume_state.retained()
+              ) == detail::primary_display_restore_retry_t::action_e::restore) {
+            (void) proc::proc.pause_display_for_resume();
+          }
           // Reuse the grace task to observe command exit while disconnected. Polling preserves
           // both the absolute deadline and the generation that owns primary-display retries.
           schedule_platform_stop_check_locked();
@@ -3861,8 +3926,7 @@ namespace stream {
       }
 
       bool prepare_new_session_locked() {
-        if (remote_session_active || !rtsp_stream::launch_session_available() ||
-            platform_resume_state.phase() == session_lifecycle::phase_e::connecting) {
+        if (remote_session_active || !rtsp_stream::launch_session_available() || platform_resume_state.phase() == session_lifecycle::phase_e::connecting) {
           return false;
         }
         if (proc::proc.get_status().app_id > 0) {
@@ -4002,12 +4066,13 @@ namespace stream {
       return platform_resume_state.deadline();
     }
 
-    void check_platform_stop_for_test() {
+    void check_platform_stop_for_test(std::optional<std::uint64_t> dispatched_generation) {
       std::lock_guard lock(platform_lifecycle_mutex);
-      if (pending_platform_stop) {
+      const auto generation = dispatched_generation.value_or(platform_lifecycle_generation);
+      if (generation == platform_lifecycle_generation && pending_platform_stop) {
         task_pool.cancel(pending_platform_stop);
       }
-      check_platform_stop_locked(platform_lifecycle_generation);
+      check_platform_stop_locked(generation);
     }
 
     bool worker_start_rollback_for_test() {
@@ -4156,6 +4221,7 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      rtsp_stream::notify_session_stopping();
     }
 
     void graceful_stop(session_t &session) {
@@ -4164,6 +4230,7 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      rtsp_stream::notify_session_stopping();
     }
 
     bool stop_if_client_policy_current(session_t &session, std::uint64_t generation, bool graceful) {
@@ -4177,6 +4244,7 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      rtsp_stream::notify_session_stopping();
       return true;
     }
 
@@ -4187,19 +4255,22 @@ namespace stream {
       // A live desktop resize owns process/display state and can outlive the control thread.
       // Reap it before arming the NVENC hang watchdog and before releasing the active-session
       // slot, so a successor can never overlap stale work from this launch.
-      auto mode_worker_hang_task = []() {
-        BOOST_LOG(fatal) << "Hang detected! Live video-mode worker failed to terminate in 30 seconds."sv;
-        logging::log_flush();
-        lifetime::debug_trap();
-      };
-      auto mode_worker_force_kill =
-        task_pool.pushDelayed(mode_worker_hang_task, 30s).task_id;
-      auto mode_worker_watchdog = util::fail_guard([&mode_worker_force_kill]() {
-        task_pool.cancel(mode_worker_force_kill);
-      });
-      join_live_video_mode_worker(session);
-      task_pool.cancel(mode_worker_force_kill);
-      mode_worker_watchdog.disable();
+      {
+        const detail::session_join_watchdog_t mode_worker_watchdog {
+          [](std::function<void()> expired) {
+            return task_pool.pushDelayed(std::move(expired), 30s).task_id;
+          },
+          [](auto task_id) {
+            task_pool.cancel(task_id);
+          },
+          []() {
+            BOOST_LOG(fatal) << "Hang detected! Live video-mode worker failed to terminate in 30 seconds."sv;
+            logging::log_flush();
+            lifetime::debug_trap();
+          },
+        };
+        join_live_video_mode_worker(session);
+      }
 
       // Current Nvidia drivers have a bug where NVENC can deadlock the encoder thread with hardware-accelerated
       // GPU scheduling enabled. If this happens, we will terminate ourselves and the service can restart.
@@ -4401,6 +4472,9 @@ namespace stream {
       );
       session->control.sbs_telemetry_event =
         mail->event<video::sbs_telemetry_snapshot_t>(mail::sbs_telemetry);
+      session->control.game_source_status_event =
+        mail->event<video::game_source_state_t>(mail::game_source_status);
+      session->config.monitor.game_source_status_event = session->control.game_source_status_event;
       session->control.sbs_telemetry_subscription =
         session->config.monitor.sbs_telemetry_subscription;
       session->control.cipher = crypto::cipher::gcm_t {

@@ -346,7 +346,7 @@ namespace nvenc {
                                        get_encoder_cap(NV_ENC_CAPS_NUM_ENCODER_ENGINES) :
                                        0;
     const bool split_frame_encoding = should_force_split_frame_encoding(
-      client_config.sbs_mode == video::SBS_AI,
+      video::is_packed_mode(client_config.sbs_mode),
       client_config.videoFormat,
       encoder_params.width,
       encoder_engine_count

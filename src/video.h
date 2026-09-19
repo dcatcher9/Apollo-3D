@@ -19,6 +19,7 @@
 
 // local includes
 #include "config.h"
+#include "game_stereo.h"
 #include "host_sbs_telemetry_perf.h"
 #include "input.h"
 #include "platform/common.h"
@@ -152,7 +153,9 @@ namespace video {
      Must match the SBS_MODE_* wire values in the client's moonlight-common-c Limelight.h. */
   enum sbs_mode_e : int {
     SBS_OFF = 0,  ///< No host depth; encoder emits a plain W x H frame.
-    SBS_AI = 1,  ///< Enable the startup-configured AI pipeline; encoder emits 2W x H.
+    SBS_AI = 1,  ///< Sunshine AI pipeline; encoder emits 2W x H.
+    SBS_GAME_MONO = 2,  ///< Discover an external game provider while encoding ordinary W x H.
+    SBS_GAME_SBS = 3,  ///< External authored SBS, or duplicate-eye fallback, encoded at exact 2W x H.
   };
 
   /**
@@ -455,7 +458,7 @@ namespace video {
 
     // APPEND-ONLY (see warning above). Host-side SBS mode (sbs_mode_e). It is selected during
     // launch/resume and may also be changed by an atomic-presentation v2 transaction.
-    // When != SBS_OFF the encoder output width is doubled to carry the side-by-side frame.
+    // Only is_packed_mode() doubles the encoded width; Game mono retains the ordinary raster.
     int sbs_mode = SBS_OFF;
 
     // APPEND-ONLY. Immutable snapshot selected for this encode device. Keeping the complete
@@ -500,6 +503,13 @@ namespace video {
     // loop owns authoritative application and rollback of atomic-presentation v2 transactions.
     std::shared_ptr<std::atomic<int>> requested_sbs_mode;
     std::shared_ptr<host_sbs_telemetry::collector> sbs_telemetry_performance;
+
+    // APPEND-ONLY. Game provider status belongs to this source/encoder owner. The converter
+    // reads effective_mode to bind notifications to the actual applied presentation generation.
+    safe::mail_raw_t::event_t<game_source_state_t> game_source_status_event;
+    bool game_source_transport_supported = false;
+    int game_source_width = 0;
+    int game_source_height = 0;
   };
 
   // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.

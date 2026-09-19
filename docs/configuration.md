@@ -32,6 +32,23 @@ editing the `conf` file in a text editor. Use the examples as reference.
 
 ## Essentials
 
+### sbs_reshade
+
+Use the ReShade add-on's final full SBS texture for **locally connected AR glasses** on Windows.
+The game stays at the normal virtual desktop resolution, and Sunshine presents the two
+full-resolution eyes on the glasses. While no compatible fullscreen game is publishing, the
+desktop is shown flat in both eyes. This setting controls only the local AR provider.
+
+Default: `disabled`. Set `sbs_reshade = enabled` and restart Sunshine to enable.
+For a streamed headset, select **Game 3D** in a compatible Moonlight 3D client; no host provider
+toggle or restart is required. Game 3D starts with normal W × H encoding and transitions to
+exact 2W × H only after a valid export and a confirmed stream change. Streamed **Host AI 3D** and
+offline conversion continue to use Sunshine's Host SBS V2 pipeline regardless of this setting.
+
+The add-on supports SDR and native HDR input and includes the GPU renderer; no separate shader
+or preset is required. See [ReShade setup](reshade-sbs.md#setup) for installation, resolution and
+codec requirements. Adjust stereo strength in **ReShade → Add-ons → Sunshine 3D**.
+
 ### sbs_3d_pop_strength
 
 <table>

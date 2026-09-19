@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -22,6 +23,8 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <sstream>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -396,9 +399,15 @@ namespace platf::primary_display {
       return true;
     }
 
-    std::optional<detail::snapshot_t> build_topology(const detail::snapshot_t &available, const std::vector<display_spec_t> &wanted) {
-      if (wanted.empty() || wanted.size() > max_displays || available.paths.size() > max_available_paths || available.paths.size() != available.device_paths.size()) {
+    std::optional<detail::snapshot_t> build_topology(const detail::snapshot_t &available, const std::vector<display_spec_t> &wanted, std::string_view *failure_reason = nullptr) {
+      const auto reject = [&](std::string_view reason) -> std::optional<detail::snapshot_t> {
+        if (failure_reason) {
+          *failure_reason = reason;
+        }
         return std::nullopt;
+      };
+      if (wanted.empty() || wanted.size() > max_displays || available.paths.size() > max_available_paths || available.paths.size() != available.device_paths.size()) {
+        return reject("route snapshot has invalid path counts");
       }
       using source_key_t = std::tuple<LONG, DWORD, UINT32>;
       std::map<source_key_t, size_t> sources;
@@ -418,7 +427,7 @@ namespace platf::primary_display {
             continue;
           }
           if (target && (!same_adapter(target->first, path.targetInfo.adapterId) || target->second != path.targetInfo.id)) {
-            return std::nullopt;
+            return reject("one required monitor identity maps to multiple available targets");
           }
           target = std::pair {path.targetInfo.adapterId, path.targetInfo.id};
           const source_key_t key {path.sourceInfo.adapterId.HighPart, path.sourceInfo.adapterId.LowPart, path.sourceInfo.id};
@@ -428,7 +437,7 @@ namespace platf::primary_display {
           }
         }
         if (candidates[i].empty()) {
-          return std::nullopt;
+          return reject("a required monitor has no available target route");
         }
       }
       // QDC_ALL_PATHS contains alternative routes, not duplicate monitors. An augmenting
@@ -453,7 +462,7 @@ namespace platf::primary_display {
       for (size_t i = 0; i < wanted.size(); ++i) {
         std::vector<bool> visited(sources.size());
         if (!assign(i, visited)) {
-          return std::nullopt;
+          return reject("available target routes cannot use distinct display sources");
         }
       }
       detail::snapshot_t result;
@@ -499,7 +508,7 @@ namespace platf::primary_display {
         result.device_paths.push_back(spec.identity);
         result.colors.push_back(spec.color);
       }
-      return detail::inspect(result) ? std::make_optional(std::move(result)) : std::nullopt;
+      return detail::inspect(result) ? std::make_optional(std::move(result)) : reject("reconstructed display modes or layout are invalid");
     }
 
     // A verified user arrangement becomes the existing recovery baseline, not another journal
@@ -654,7 +663,8 @@ namespace platf::primary_display {
     bool exclusive_continuation_with_recorded_outputs(
       const detail::snapshot_t &current,
       const detail::journal_t &journal,
-      std::wstring_view virtual_identity
+      std::wstring_view virtual_identity,
+      bool reconcile_active_source
     ) {
       if (!journal.exclusive_topology || !journal.original_topology ||
           !find_path(current, virtual_identity)) {
@@ -691,6 +701,14 @@ namespace platf::primary_display {
             })) {
           return true;
         }
+      } else if (reconcile_active_source && journal.exclusive_preserved.empty() && owned.paths.size() == 1 && detail::inspect(current)) {
+        // A game mode change or exit can restore a recorded ordinary monitor as primary
+        // while translating and retiming our virtual source. With no preserved outputs,
+        // the exact remaining source is still owned even when its previous mode no longer
+        // matches. Promotion retains its current mode and restores the exclusive origin.
+        // Unknown identities were rejected above; preserved physical modes use the stricter
+        // continuation checks below. Restore/pause must instead preserve user arrangements.
+        return true;
       }
       return owned_subset(owned, *journal.exclusive_topology) ||
              owned_exclusive_layout(owned, virtual_identity, *journal.exclusive_topology) ||
@@ -945,7 +963,36 @@ namespace platf::primary_display {
       return GetLastError() == ERROR_FILE_NOT_FOUND;
     }
 
-    bool apply_snapshot(detail::snapshot_t snapshot) {
+    void log_restore_snapshot(std::string_view phase, const detail::snapshot_t &snapshot) {
+      if (!config::sunshine.diagnostics_enabled) {
+        return;
+      }
+      std::ostringstream text;
+      for (size_t i = 0; i < snapshot.paths.size(); ++i) {
+        const auto &path = snapshot.paths[i];
+        text << " [device=" << (i < snapshot.device_paths.size() ? platf::to_utf8(snapshot.device_paths[i]) : "unknown")
+             << " available=" << path.targetInfo.targetAvailable
+             << " status=" << path.targetInfo.statusFlags;
+        const auto index = source_index(path);
+        if (index < snapshot.modes.size() && snapshot.modes[index].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
+          const auto &source = snapshot.modes[index].sourceMode;
+          text << " mode=" << source.width << 'x' << source.height
+               << " position=" << source.position.x << ',' << source.position.y;
+        }
+        text << " refresh=" << path.targetInfo.refreshRate.Numerator << '/' << path.targetInfo.refreshRate.Denominator;
+        if (i < snapshot.colors.size() && snapshot.colors[i]) {
+          const auto &color = *snapshot.colors[i];
+          text << " color_api=" << (color.api == display_config::advanced_color_api_e::modern ? "modern" : "legacy")
+               << " color_mode=" << static_cast<int>(color.active_mode)
+               << " color_enabled=" << color.advanced_color_enabled
+               << " hdr_enabled=" << color.hdr_user_enabled << " bits=" << color.bits_per_color_channel;
+        }
+        text << ']';
+      }
+      BOOST_LOG(info) << "Display restore " << phase << ":" << text.str();
+    }
+
+    bool apply_snapshot(detail::snapshot_t snapshot, bool force_driver_mode_set) {
       // Never save the temporary primary/layout to the Windows topology database and never
       // permit CCD to choose replacement modes. Restore reconstructs inactive paths using
       // their saved modes and currently available source/target identities.
@@ -957,7 +1004,10 @@ namespace platf::primary_display {
         BOOST_LOG(warning) << "Temporary primary-display configuration is not valid: " << validate;
         return false;
       }
-      const auto applied = SetDisplayConfig(static_cast<UINT32>(snapshot.paths.size()), snapshot.paths.data(), static_cast<UINT32>(snapshot.modes.size()), snapshot.modes.data(), flags | SDC_APPLY);
+      // NO_OPTIMIZATION is valid only for APPLY. A topology-only transition can otherwise
+      // leave an already-active physical target's driver mode untouched after monitor wake.
+      const auto apply_flags = flags | SDC_APPLY | (force_driver_mode_set ? SDC_NO_OPTIMIZATION : 0);
+      const auto applied = SetDisplayConfig(static_cast<UINT32>(snapshot.paths.size()), snapshot.paths.data(), static_cast<UINT32>(snapshot.modes.size()), snapshot.modes.data(), apply_flags);
       if (applied != ERROR_SUCCESS) {
         BOOST_LOG(warning) << "Temporary primary-display configuration failed: " << applied;
       }
@@ -1056,7 +1106,9 @@ namespace platf::primary_display {
     }
 
     detail::manager_t manager() {
-      return detail::manager_t({query_snapshot, apply_snapshot, load_journal, save_journal, clear_journal, [] {
+      return detail::manager_t({query_snapshot, [](detail::snapshot_t snapshot) {
+                                  return apply_snapshot(std::move(snapshot), false);
+                                }, load_journal, save_journal, clear_journal, [] {
                                   return query_snapshot_flags(QDC_ALL_PATHS);
                                 },
                                 apply_color,
@@ -1075,6 +1127,9 @@ namespace platf::primary_display {
                                 },
                                 [](POINT cursor) {
                                   return syncThreadDesktop() && SetPhysicalCursorPos(cursor.x, cursor.y);
+                                },
+                                [](detail::snapshot_t snapshot) {
+                                  return apply_snapshot(std::move(snapshot), true);
                                 }});
     }
   }  // namespace
@@ -1083,6 +1138,10 @@ namespace platf::primary_display {
     display_spec_t display;
     std::wstring local_sink;
     std::optional<POINT> cursor_offset;
+    std::string_view last_resume_failure {};
+    // Keep the last verified remote physical desktop after the durable transaction completes.
+    // A monitor may briefly disappear while waking, leaving Windows on the retained VD again.
+    std::optional<detail::journal_t> pause_recovery;
   };
 
   namespace detail {
@@ -1541,7 +1600,7 @@ namespace platf::primary_display {
       return true;
     }
 
-    bool manager_t::promote_exclusive(std::wstring_view device_path) {
+    bool manager_t::promote_exclusive(std::wstring_view device_path, bool reconcile_active_source) {
       auto loaded = io_.load();
       if (!loaded.success || (loaded.journal && (!valid_journal(*loaded.journal) || !loaded.journal->exclusive))) {
         return false;
@@ -1659,7 +1718,7 @@ namespace platf::primary_display {
       const bool remembered_exclusive = journal.exclusive_started && !journal.pending_restore && same_topology(*snapshot, *journal.before_exclusive);
       const bool continuing_exclusive = journal.exclusive_started &&
                                         ((journal.exclusive_topology && owned_subset(*snapshot, *journal.exclusive_topology)) ||
-                                         exclusive_continuation_with_recorded_outputs(*snapshot, journal, device_path) ||
+                                         exclusive_continuation_with_recorded_outputs(*snapshot, journal, device_path, reconcile_active_source) ||
                                          owned_exclusive_state(
                                            *snapshot,
                                            device_path,
@@ -1815,17 +1874,49 @@ namespace platf::primary_display {
       }
       if (loaded.journal) {
         if (loaded.journal->exclusive_started) {
-          return restore_exclusive(*loaded.journal, false);
+          return restore_exclusive(*loaded.journal, false, retained->local_sink.empty() ? retained : retained_display_ptr {});
         }
         // A failed reactivation may have saved its physical baseline before binding. Complete
         // that recovery first, then detach any target which Windows already made active.
         return restore(device_path) && pause(device_path, retained, retained->local_sink);
       }
-      if (!index || current->paths.size() == 1) {
-        // An already detached target needs no mutation. A truly headless desktop has nowhere
-        // to migrate windows, so retain its sole output for the next reconnect.
+      if (!index && !current->paths.empty()) {
+        // A healthy disconnected desktop is user-owned. Remember its latest arrangement, modes
+        // and color, including deliberate changes made after the first successful restore.
+        if (retained->pause_recovery) {
+          auto recovery = *retained->pause_recovery;
+          if (!rebase_recovery(recovery, *current, *current)) {
+            return false;
+          }
+          recovery.pending_restore = *current;
+          if (!valid_journal(recovery)) {
+            return false;
+          }
+          retained->pause_recovery = std::move(recovery);
+        }
         return true;
       }
+      if (current->paths.empty() || (index && current->paths.size() == 1)) {
+        if (retained->pause_recovery) {
+          const auto available = io_.query_all ? io_.query_all() : std::nullopt;
+          if (!available || available->paths.size() > max_available_paths || available->paths.size() != available->device_paths.size()) {
+            return false;
+          }
+          for (size_t i = 0; i < available->paths.size(); ++i) {
+            if (available->paths[i].targetInfo.targetAvailable &&
+                find_path(*retained->pause_recovery->original_topology, available->device_paths[i])) {
+              // Reconstruct current routes from the last verified physical modes. The ordinary
+              // restore transaction journals and verifies every mutation before detaching the VD.
+              return restore_exclusive(*retained->pause_recovery, false, retained);
+            }
+          }
+        }
+        // No remembered physical output is usable yet. Preserve both the sole VD and recovery
+        // intent; the grace poll retries, and an authorized headless reconnect remains possible.
+        return true;
+      }
+      BOOST_LOG(info) << "Retained virtual display is active again; detaching it from "
+                      << current->paths.size() << " active outputs while preserving the current physical desktop.";
       // Reconnect rollback can reach us after its activation journal was completed. Save the
       // current physical desktop before removing this still-active target from that desktop.
       const auto connected_sink = find_path(*current, retained->local_sink) ? std::wstring_view(retained->local_sink) : std::wstring_view {};
@@ -1842,7 +1933,7 @@ namespace platf::primary_display {
       if (!valid_journal(journal) || !io_.save(journal)) {
         return false;
       }
-      return restore_exclusive(std::move(journal), false);
+      return restore_exclusive(std::move(journal), false, retained->local_sink.empty() ? retained : retained_display_ptr {});
     }
 
     void manager_t::restore_retained_cursor(const retained_display_ptr &retained) {
@@ -1877,69 +1968,107 @@ namespace platf::primary_display {
     }
 
     bool manager_t::reactivate(const retained_display_ptr &retained, bool exclusive) {
-      if (!retained || !io_.query_all || !io_.set_color) {
+      // Reasons are static literals. Local AR may retry the same retained state periodically;
+      // report a changed failed proof once without monitor identities or altering rollback.
+      const auto reject = [&](std::string_view reason) {
+        if (retained && retained->last_resume_failure == reason) {
+          return false;
+        }
+        if (retained) {
+          retained->last_resume_failure = reason;
+        }
+        BOOST_LOG(warning) << "Retained virtual-display resume rejected: " << reason << '.';
         return false;
+      };
+      if (!retained || !io_.query_all || !io_.set_color) {
+        return reject("retained state or required display callbacks are unavailable");
       }
       const auto &identity = retained->display.identity;
       auto loaded = io_.load();
-      if (!loaded.success || (loaded.journal && (!valid_journal(*loaded.journal) || !loaded.journal->exclusive || loaded.journal->local_sink != retained->local_sink || loaded.journal->prepared || !same_device(loaded.journal->promoted_primary, identity)))) {
-        return false;
+      if (!loaded.success) {
+        return reject("display recovery journal could not be loaded");
+      }
+      if (loaded.journal && (!valid_journal(*loaded.journal) || !loaded.journal->exclusive || loaded.journal->local_sink != retained->local_sink || loaded.journal->prepared || !same_device(loaded.journal->promoted_primary, identity))) {
+        return reject("display recovery journal does not prove ownership of this retained output and sink");
       }
       const auto current = io_.query();
-      if (!current || (!current->paths.empty() && !inspect(*current)) || current->colors.size() != current->paths.size() || std::ranges::any_of(current->colors, [](const auto &color) {
+      if (!current) {
+        return reject("active display snapshot could not be queried");
+      }
+      if (!current->paths.empty() && !inspect(*current)) {
+        return reject("active display snapshot has invalid modes or layout");
+      }
+      if (current->colors.size() != current->paths.size() || std::ranges::any_of(current->colors, [](const auto &color) {
             return !color;
           })) {
-        return false;
+        return reject("active display snapshot lacks complete color state");
       }
       if (!retained->local_sink.empty() && !find_path(*current, retained->local_sink)) {
-        return false;
+        return reject("the retained local output is not active");
       }
       auto verify_colors = [&](const snapshot_t &desired) {
         auto observed = io_.query();
-        if (!observed || !same_topology(*observed, desired)) {
-          return false;
+        if (!observed) {
+          return reject("display snapshot could not be queried before resume color verification");
+        }
+        if (!same_topology(*observed, desired)) {
+          return reject("observed topology differs from the requested resume topology before color verification");
         }
         for (size_t i = 0; i < desired.paths.size(); ++i) {
           const auto index = find_path(*observed, desired.device_paths[i]);
           if (!index || *index >= observed->colors.size() || !observed->colors[*index] || !desired.colors[i]) {
-            return false;
+            return reject("a resumed output lacks observed or requested color state");
           }
           if (!color_matches(*observed->colors[*index], *desired.colors[i]) && !io_.set_color(observed->paths[*index], *desired.colors[i])) {
-            return false;
+            return reject("a resumed output rejected its requested color state");
           }
         }
         observed = io_.query();
-        return observed && same_topology(*observed, desired) && same_colors(*observed, desired);
+        if (!observed) {
+          return reject("display snapshot could not be queried after resume color setup");
+        }
+        if (!same_topology(*observed, desired)) {
+          return reject("observed topology differs from the requested resume topology after color setup");
+        }
+        return same_colors(*observed, desired) || reject("observed color state differs from the requested resume color state");
       };
       if (find_path(*current, identity)) {
         // Idempotence covers a previous CCD apply whose color verification had to retry, and
         // the sole-output pause which deliberately kept a headless virtual desktop active.
         if (!loaded.journal) {
           const auto index = *find_path(*current, identity);
-          const auto wanted = build_topology(*current, {retained->display});
+          std::string_view route_failure;
+          const auto wanted = build_topology(*current, {retained->display}, &route_failure);
           snapshot_t active_target = *current;
           active_target.paths = {current->paths[index]};
           active_target.device_paths = {current->device_paths[index]};
-          if (!wanted || !same_modes(active_target, *wanted)) {
-            return false;
+          if (!wanted) {
+            return reject(route_failure);
+          }
+          if (!same_modes(active_target, *wanted)) {
+            return reject("the already-active retained output mode differs from its saved pause mode");
           }
           // A local-only PC keeps its sole VD when the glasses are unplugged. Their return
           // needs a fresh local sink journal even though the source never needed activation.
           return !exclusive || retained->local_sink.empty() ||
-                 (prepare(true, retained->local_sink) && bind_pending(identity));
+                 (prepare(true, retained->local_sink) && bind_pending(identity)) ||
+                 reject("the already-active local source could not prepare and bind its recovery journal");
         }
         const auto &journal = *loaded.journal;
-        if (!journal.pending_restore || !same_topology(*current, *journal.pending_restore) || !verify_colors(*journal.pending_restore)) {
+        if (!journal.pending_restore || !same_topology(*current, *journal.pending_restore)) {
+          return reject("the already-active retained output topology differs from the pending recovery topology");
+        }
+        if (!verify_colors(*journal.pending_restore)) {
           return false;
         }
-        return exclusive || restore(identity);
+        return exclusive || restore(identity) || reject("primary-only resume could not complete its recovery journal");
       }
       if (loaded.journal && (!loaded.journal->pending_restore || !owned_subset(*current, *loaded.journal->pending_restore))) {
-        return false;
+        return reject("active physical outputs are not an owned subset of the pending recovery topology");
       }
       const auto available = io_.query_all();
       if (!available) {
-        return false;
+        return reject("available display routes could not be queried");
       }
       std::vector<display_spec_t> wanted;
       std::int64_t right = current->paths.empty() ? 0 : std::numeric_limits<LONG>::min();
@@ -1960,15 +2089,19 @@ namespace platf::primary_display {
         wanted.push_back(std::move(spec));
       }
       if (right > std::numeric_limits<LONG>::max() || right + retained->display.source.width > std::numeric_limits<LONG>::max()) {
-        return false;
+        return reject("the retained output would overflow desktop coordinates");
       }
       auto virtual_spec = retained->display;
       virtual_spec.source.position = {static_cast<LONG>(right), top};
       wanted.push_back(std::move(virtual_spec));
-      const auto desired = build_topology(*available, wanted);
+      std::string_view route_failure;
+      const auto desired = build_topology(*available, wanted, &route_failure);
       const auto layout = desired ? inspect(*desired) : std::nullopt;
-      if (!desired || !layout) {
-        return false;
+      if (!desired) {
+        return reject(route_failure);
+      }
+      if (!layout) {
+        return reject("the reconstructed resume layout is invalid");
       }
       if (!loaded.journal) {
         // Full color recovery is required even if this reconnect switches to primary-only
@@ -1978,7 +2111,7 @@ namespace platf::primary_display {
           // Record the actual empty baseline when physical outputs vanish during the pause.
           // A local presentation cannot resume without its physical sink.
           if (!retained->local_sink.empty()) {
-            return false;
+            return reject("a local session cannot resume without an active physical output");
           }
           journal_t headless {identity, identity, *layout, *layout};
           headless.exclusive = true;
@@ -1986,11 +2119,11 @@ namespace platf::primary_display {
           loaded.journal = std::move(headless);
         } else {
           if (!prepare(true, retained->local_sink)) {
-            return false;
+            return reject("the physical desktop recovery baseline could not be prepared");
           }
           loaded = io_.load();
           if (!loaded.success || !loaded.journal) {
-            return false;
+            return reject("the prepared physical desktop recovery journal could not be loaded");
           }
         }
       }
@@ -2001,25 +2134,44 @@ namespace platf::primary_display {
         journal.original = *layout;
         const auto promoted = translated(*layout, static_cast<LONG>(right), top);
         if (!promoted) {
-          return false;
+          return reject("the promoted resume layout would overflow desktop coordinates");
         }
         journal.promoted = *promoted;
       }
       journal.exclusive_started = true;
       journal.before_exclusive = *current;
       journal.pending_restore = *desired;
-      if (!valid_journal(journal) || !io_.save(journal)) {
-        return false;
+      if (!valid_journal(journal)) {
+        return reject("the proposed resume recovery journal is invalid");
+      }
+      if (!io_.save(journal)) {
+        return reject("the proposed resume recovery journal could not be saved");
       }
       const auto latest = io_.query();
-      if (!latest || !same_topology(*latest, *current) || !same_colors(*latest, *current) || !io_.apply(*desired) || !verify_colors(*desired) || !bind_pending(identity)) {
+      if (!latest) {
+        return reject("the physical desktop could not be queried before resume apply");
+      }
+      if (!same_topology(*latest, *current)) {
+        return reject("the physical desktop topology changed before resume apply");
+      }
+      if (!same_colors(*latest, *current)) {
+        return reject("the physical desktop color state changed before resume apply");
+      }
+      if (!io_.apply(*desired)) {
+        return reject("Windows rejected the requested resume topology");
+      }
+      if (!verify_colors(*desired)) {
         return false;
       }
+      if (!bind_pending(identity)) {
+        return reject("the resumed virtual output could not bind its recovery journal");
+      }
       BOOST_LOG(info) << "Reactivated the retained virtual display for session resume.";
-      return exclusive || restore(identity);
+      return exclusive || restore(identity) || reject("primary-only resume could not complete its recovery journal");
     }
 
-    bool manager_t::restore_exclusive(journal_t journal, bool keep_virtual_active) {
+    bool manager_t::restore_exclusive(journal_t journal, bool keep_virtual_active, retained_display_ptr retained) {
+      const auto restore_started = std::chrono::steady_clock::now();
       if (!io_.query_all || !io_.set_color) {
         return false;
       }
@@ -2074,7 +2226,7 @@ namespace platf::primary_display {
       const bool paused_activation = !keep_virtual_active && virtual_index && journal.pending_restore &&
                                      same_layout_and_physical_modes(*current, *journal.pending_restore, journal.promoted_primary);
       const bool owned = owned_current.paths.empty() || owned_exclusive || retired_local_source || paused_activation || same_topology(owned_current, *journal.before_exclusive) ||
-                         exclusive_continuation_with_recorded_outputs(*current, journal, journal.promoted_primary) ||
+                         exclusive_continuation_with_recorded_outputs(*current, journal, journal.promoted_primary, false) ||
                          (journal.pending_restore && owned_subset(owned_current, *journal.pending_restore)) ||
                          (!owned_virtual_index && owned_subset(owned_current, *journal.original_topology));
       const auto available = io_.query_all();
@@ -2198,7 +2350,13 @@ namespace platf::primary_display {
         wanted.push_back(std::move(spec));
       }
       if (physical_count == 0 && added_outputs.empty()) {
-        return io_.clear();
+        if (!io_.clear()) {
+          return false;
+        }
+        if (retained) {
+          retained->pause_recovery.reset();
+        }
+        return true;
       }
       if (missing_local_sink && !missing && physical_count == 1 && wanted.empty() && added_outputs.empty()) {
         // A PC whose only physical output was these glasses is intentionally headless
@@ -2399,14 +2557,26 @@ namespace platf::primary_display {
       if (!latest || !same_topology(*current, *latest)) {
         return false;
       }
-      if (!same_topology(*current, *desired) && !io_.apply(*desired)) {
-        return false;
+      log_restore_snapshot("before", *current);
+      log_restore_snapshot("requested", *desired);
+      const bool apply_needed = !same_topology(*current, *desired);
+      const auto apply_started = std::chrono::steady_clock::now();
+      if (apply_needed) {
+        const bool force_physical_restore = !keep_virtual_active && retained && retained->local_sink.empty() && io_.apply_physical_restore;
+        if (force_physical_restore) {
+          BOOST_LOG(info) << "Forcing the restored physical-display modes down to the driver while retaining the virtual-display device.";
+        }
+        if (!(force_physical_restore ? io_.apply_physical_restore(*desired) : io_.apply(*desired))) {
+          return false;
+        }
       }
+      const auto apply_finished = std::chrono::steady_clock::now();
       auto observed = io_.query();
       if (!observed || !same_topology(*observed, *desired)) {
         return false;
       }
       bool color_ok = true;
+      size_t color_changes = 0;
       for (const auto &spec : wanted) {
         if (!spec.color) {
           continue;
@@ -2417,10 +2587,22 @@ namespace platf::primary_display {
           continue;
         }
         if (!color_matches(*observed->colors[*index], *spec.color)) {
+          ++color_changes;
           color_ok = io_.set_color(observed->paths[*index], *spec.color) && color_ok;
         }
       }
       observed = io_.query();
+      if (config::sunshine.diagnostics_enabled) {
+        const auto now = std::chrono::steady_clock::now();
+        BOOST_LOG(info) << "Display restore timing: apply_needed=" << apply_needed
+                        << " apply_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(apply_finished - apply_started).count()
+                        << " color_changes=" << color_changes
+                        << " verify_color_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(now - apply_finished).count()
+                        << " total_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(now - restore_started).count();
+        if (observed) {
+          log_restore_snapshot("observed", *observed);
+        }
+      }
       if (!observed || !same_topology(*observed, *desired)) {
         return false;
       }
@@ -2441,8 +2623,25 @@ namespace platf::primary_display {
         // hold future sessions hostage; its return starts from Windows' current layout.
         BOOST_LOG(info) << "Restored available physical displays; absent monitors will use a fresh topology baseline on reconnect.";
       }
-      BOOST_LOG(info) << (keep_virtual_active ? "Restored physical displays, modes, color settings, and primary display after exclusive streaming." : "Restored physical displays and detached the retained virtual display from the desktop.");
-      return io_.clear();
+      if (retained) {
+        // Retain only the desktop that actually completed recovery. Missing originals must not
+        // be resurrected later, and user edits accepted above become the next recovery baseline.
+        if (!rebase_recovery(journal, *observed, *observed)) {
+          return false;
+        }
+        journal.pending_restore = *observed;
+        if (!valid_journal(journal)) {
+          return false;
+        }
+      }
+      BOOST_LOG(info) << (keep_virtual_active ? "Restored physical displays, modes, color settings, and primary display after exclusive streaming." : "Verified physical-display topology, modes, and color; detached the retained virtual display from the desktop.");
+      if (!io_.clear()) {
+        return false;
+      }
+      if (retained) {
+        retained->pause_recovery = std::move(journal);
+      }
+      return true;
     }
 
     bool manager_t::recover_prepared_outputs(journal_t journal) {
@@ -2741,7 +2940,7 @@ namespace platf::primary_display {
         }
         journal.pending_restore = *pending;
       }
-      if (!exclusive_continuation_with_recorded_outputs(*current, journal, device_path)) {
+      if (!exclusive_continuation_with_recorded_outputs(*current, journal, device_path, true)) {
         return false;
       }
       if (discovered_hotplug) {
@@ -2750,7 +2949,7 @@ namespace platf::primary_display {
       if (!valid_journal(journal) || !io_.save(journal)) {
         return false;
       }
-      return promote_exclusive(device_path) && refresh_exclusive_cursor_clip(device_path);
+      return promote_exclusive(device_path, true) && refresh_exclusive_cursor_clip(device_path);
     }
 
     bool manager_t::recover_inactive_exclusive() {
@@ -3092,7 +3291,15 @@ namespace platf::primary_display {
   bool reactivate(const retained_display_ptr &retained, bool exclusive) {
     std::lock_guard lock(transaction_mutex);
     try {
-      if (!retained || !exclusive_session_state.can_use_identity(retained->display.identity) || !acquire_ownership()) {
+      if (!retained) {
+        BOOST_LOG(warning) << "Retained virtual-display resume rejected: no retained display state.";
+        return false;
+      }
+      if (!exclusive_session_state.can_use_identity(retained->display.identity)) {
+        BOOST_LOG(warning) << "Retained virtual-display resume rejected: session ownership belongs to a different display identity.";
+        return false;
+      }
+      if (!acquire_ownership()) {
         return false;
       }
       // Reconciliation must defer until the caller completes HDR/mode setup and promotion.
@@ -3100,6 +3307,9 @@ namespace platf::primary_display {
       exclusive_session_state.prepared();
       exclusive_session_state.bound(retained->display.identity);
       const bool activated = manager().reactivate(retained, exclusive);
+      if (activated) {
+        retained->last_resume_failure = {};
+      }
       if (activated && !exclusive) {
         exclusive_session_state.disarm();
       }

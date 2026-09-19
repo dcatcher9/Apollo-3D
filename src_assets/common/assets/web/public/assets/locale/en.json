@@ -239,6 +239,8 @@
     "restart_note": "Sunshine 3D is restarting to apply changes.",
     "sbs_3d_max_encode_width": "Maximum packed 3D width",
     "sbs_3d_max_encode_width_desc": "Cap the packed side-by-side output width. The final size respects the codec's NVENC width and height limits and preserves aspect ratio to pixel alignment. Width is rounded down to a multiple of four so both eyes have even widths.",
+    "sbs_reshade": "Use ReShade for local AR 3D",
+    "sbs_reshade_desc": "Receive full-resolution game stereo for locally connected AR glasses. The desktop appears flat in both eyes until a compatible ReShade game is ready. Streamed headsets select Game 3D in Moonlight 3D independently of this setting.",
     "sbs_3d_pop_strength": "Host 3D strength",
     "sbs_3d_pop_strength_desc": "Literal 3D separation strength for live Host 3D and the base strength for new offline conversions.",
     "sunshine_name": "Server Name",

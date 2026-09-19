@@ -4,7 +4,11 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <functional>
+#include <future>
 #include <limits>
 #include <string_view>
 #include <unordered_map>
@@ -498,4 +502,71 @@ TEST(RtspMicrophoneLifecycleTest, TransferPreservesReceiverAndActivePermissionRe
   EXPECT_EQ(stream::session::permissions(*active), without_microphone);
   EXPECT_EQ(stream::session::update_client_policy(*active, 0, "stale-policy", crypto::PERM::_all, false), stream::session::client_policy_result_e::ignored);
   EXPECT_FALSE(retained_receiver->running());
+}
+
+TEST(RtspSessionCleanupWakeTest, StopRequestsWakeTheWaitingServerWithoutSocketTraffic) {
+  using namespace std::chrono_literals;
+  const std::array<std::function<void(stream::session_t &)>, 3> stop_requests {{
+    [](auto &session) {
+      stream::session::stop(session);
+    },
+    [](auto &session) {
+      stream::session::graceful_stop(session);
+    },
+    [](auto &session) {
+      stream::session::stop_if_client_policy_current(session, 0, true);
+    },
+  }};
+
+  for (std::size_t index = 0; index < stop_requests.size(); ++index) {
+    SCOPED_TRACE(index);
+    rtsp_stream::poll_server_for_test();
+    auto cleanup = util::fail_guard([] {
+      rtsp_stream::poll_server_for_test();
+    });
+    auto launch = make_modern_launch_session(700 + static_cast<std::uint32_t>(index), "cleanup-wakeup");
+    launch->iv.resize(16);
+    launch->perm = crypto::PERM::_all;
+    stream::config_t config {};
+    auto session = stream::session::alloc(config, *launch);
+    stream::session::set_state_for_test(*session, stream::session::state_e::RUNNING);
+
+    std::promise<void> waiter_started;
+    auto started = waiter_started.get_future();
+    auto dispatched = std::async(std::launch::async, [&] {
+      waiter_started.set_value();
+      return rtsp_stream::run_server_once_for_test(2s);
+    });
+    started.wait();
+    // The posted wake must survive either ordering: already waiting, or about to wait.
+    stop_requests[index](*session);
+    EXPECT_EQ(dispatched.get(), 1u);
+    EXPECT_EQ(stream::session::state(*session), stream::session::state_e::STOPPING);
+
+    stop_requests[index](*session);
+    EXPECT_EQ(rtsp_stream::poll_server_for_test(), 0u)
+      << "An already-stopping session must not queue another cleanup wake";
+  }
+}
+
+TEST(RtspSessionCleanupWakeTest, ObsoletePolicyCannotQueueCleanupForAnActiveSession) {
+  rtsp_stream::poll_server_for_test();
+  auto cleanup = util::fail_guard([] {
+    rtsp_stream::poll_server_for_test();
+  });
+  auto launch = make_modern_launch_session(710, "cleanup-policy");
+  launch->iv.resize(16);
+  launch->perm = crypto::PERM::_all;
+  stream::config_t config {};
+  auto session = stream::session::alloc(config, *launch);
+  stream::session::set_state_for_test(*session, stream::session::state_e::RUNNING);
+  ASSERT_EQ(stream::session::update_client_policy(*session, 1, "cleanup-policy", crypto::PERM::_all, false), stream::session::client_policy_result_e::updated);
+
+  EXPECT_FALSE(stream::session::stop_if_client_policy_current(*session, 0, true));
+  EXPECT_EQ(stream::session::state(*session), stream::session::state_e::RUNNING);
+  EXPECT_EQ(rtsp_stream::poll_server_for_test(), 0u);
+
+  EXPECT_TRUE(stream::session::stop_if_client_policy_current(*session, 1, true));
+  EXPECT_EQ(rtsp_stream::poll_server_for_test(), 1u)
+    << "An accepted stop must retain its wake even before the server starts waiting";
 }

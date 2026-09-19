@@ -105,6 +105,40 @@ target_link_options(${PROJECT_NAME} PRIVATE)
 # using a non-MSYS2 CMake executable.
 set_target_properties(${PROJECT_NAME} PROPERTIES LINK_SEARCH_START_STATIC 1)
 
+# Opt-in ReShade integration tests load this C facade around the unchanged production
+# receiver. Foreground observations are supplied by the fixture, as in its native unit tests.
+# It links the existing host Boost dependency without requiring it in the standalone add-on.
+if(WIN32)
+    add_library(reshade_receiver_test SHARED EXCLUDE_FROM_ALL
+        "${CMAKE_SOURCE_DIR}/tools/reshade/test_receiver.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/reshade_bridge.cpp")
+    target_include_directories(reshade_receiver_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_link_libraries(reshade_receiver_test PRIVATE Boost::log Boost::format Boost::property_tree d3d11 dxgi dxguid)
+    set_target_properties(reshade_receiver_test PROPERTIES
+        CXX_STANDARD 23 PREFIX "" LINK_SEARCH_START_STATIC 1)
+    if(MINGW)
+        target_link_options(reshade_receiver_test PRIVATE -static)
+    endif()
+
+    # Separate-process proof only. The helper loads the unchanged receiver facade;
+    # the proxy returns CPU inspection pixels after its completed private GPU copy.
+    add_executable(reshade_receiver_process_helper EXCLUDE_FROM_ALL
+        "${CMAKE_SOURCE_DIR}/tools/reshade/test_receiver_process.cpp")
+    target_compile_definitions(reshade_receiver_process_helper PRIVATE SUNSHINE_RECEIVER_PROCESS_HELPER)
+    add_library(reshade_receiver_process_test SHARED EXCLUDE_FROM_ALL
+        "${CMAKE_SOURCE_DIR}/tools/reshade/test_receiver_process.cpp")
+    set_target_properties(reshade_receiver_process_test PROPERTIES PREFIX "")
+    foreach(process_test_target reshade_receiver_process_helper reshade_receiver_process_test)
+        set_target_properties(${process_test_target} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES LINK_SEARCH_START_STATIC 1)
+        target_link_libraries(${process_test_target} PRIVATE d3d11 dxgi dxguid bcrypt)
+        if(MINGW)
+            target_link_options(${process_test_target} PRIVATE -static)
+        endif()
+    endforeach()
+    add_dependencies(reshade_receiver_process_helper reshade_receiver_test)
+    add_dependencies(reshade_receiver_process_test reshade_receiver_process_helper)
+endif()
+
 # The protocol peer is restricted to the standalone pipe lifecycle tests. The
 # shipping host and full host test executable retain production verification.
 add_executable(ds5_fake_sidecar ${CMAKE_SOURCE_DIR}/tests/tools/ds5_fake_sidecar.cpp)

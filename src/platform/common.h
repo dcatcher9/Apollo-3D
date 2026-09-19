@@ -296,6 +296,8 @@ namespace platf {
     constexpr caps_t pen_touch = 0x01;  // Pen and touch events
     constexpr caps_t controller_touch = 0x02;  // Controller touch events
     constexpr caps_t ds5_haptics_pcm = 0x80;
+    // Game provider status v1 and atomic-v2 modes 2/3; requires atomic_presentation_v2.
+    constexpr caps_t game_provider_v1 = 0x02000000;
     constexpr caps_t ds5_haptics_capabilities_v2 = 0x08000000;
     // Negotiated exact retained encoder-input token in short video-frame header bytes 6..7.
     constexpr caps_t source_frame_id_v1 = 0x10000000;

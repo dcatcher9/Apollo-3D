@@ -29,7 +29,7 @@
 
 namespace proc {
   // A retained desktop fixture with no real process, display, or HDR worker. The successful
-  // same-mode apply returns before any Windows call, exercising transport admission itself.
+  // same-mode apply uses an injected observed mode, exercising transport admission itself.
   struct process_test_access {
     static void retain(proc_t &process, const std::shared_ptr<rtsp_stream::launch_session_t> &launch) {
       process._app = {};
@@ -45,7 +45,10 @@ namespace proc {
 #endif
     }
 #ifdef _WIN32
-    static void mark_virtual(proc_t &process, bool enabled, bool with_identity = false) {
+    static void mark_virtual(
+      proc_t &process, bool enabled, bool with_identity = false,
+      std::function<VDISPLAY::display_identity_query_t()> identity_query = {}
+    ) {
       // These owners contain only injected effects; consuming a fixture never removes a monitor.
       auto discarded = std::move(process._display_session);
       VDISPLAY::session_io_t io;
@@ -67,7 +70,10 @@ namespace proc {
                                                          exclusive
                                                        );
       };
-      io.query = [&process](const auto &) {
+      io.query = [&process, identity_query](const auto &) {
+        if (identity_query) {
+          return identity_query();
+        }
         const bool present = !process._display_topology_test_hook || process._display_topology_test_hook(
                                                                        display_topology_test_operation_e::refresh_binding,
                                                                        process._virtual_display_only
@@ -82,7 +88,22 @@ namespace proc {
       };
       process._display_session = VDISPLAY::session_t {std::move(io)};
       process._virtual_display = enabled;
+      process._display_mode_query_test_hook = {};
+      process._display_mode_change_test_hook = {};
       if (enabled) {
+        if (!process._display_topology_test_hook) {
+          process._display_topology_test_hook = [](auto, bool) { return true; };
+        }
+        process._display_mode_query_test_hook = [&process](std::wstring_view) -> std::optional<DEVMODEW> {
+          if (!process._launch_session) {
+            return std::nullopt;
+          }
+          DEVMODEW mode {};
+          mode.dmPelsWidth = process._launch_session->width;
+          mode.dmPelsHeight = process._launch_session->height;
+          mode.dmDisplayFrequency = (process._launch_session->fps + 500) / 1000;
+          return mode;
+        };
         VDISPLAY::creation_result_t binding;
         binding.display_name = L"test-only-display";
         binding.device_path = L"test-only-monitor-path";
@@ -121,6 +142,22 @@ namespace proc {
       return process._active_launch_session_id;
     }
 
+    static void observe_display_mode(proc_t &process, std::optional<DEVMODEW> mode) {
+      process._display_mode_query_test_hook = [mode](std::wstring_view) { return mode; };
+    }
+
+    static void observe_display_mode(
+      proc_t &process, std::function<std::optional<DEVMODEW>(std::wstring_view)> query
+    ) {
+      process._display_mode_query_test_hook = std::move(query);
+    }
+
+    static void configure_display_mode(
+      proc_t &process, std::function<LONG(std::wstring_view, int, int, int, bool)> configure
+    ) {
+      process._display_mode_change_test_hook = std::move(configure);
+    }
+
     static void set_display_topology_hook(
       proc_t &process,
       display_topology_test_hook_t hook
@@ -138,6 +175,10 @@ namespace proc {
 
     static void mark_desktop(proc_t &process, bool enabled = true) {
       process.placebo = enabled;
+    }
+
+    static void set_host_session_id(proc_t &process, std::uint64_t id) {
+      process._host_session_id = id;
     }
 
     static void add_undo(proc_t &process, std::string command) {
@@ -220,6 +261,101 @@ TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
 }
 
 #ifdef _WIN32
+TEST(ProcessTest, SameLiveRequestVerifiesObservedModeInsteadOfCachedLaunchMode) {
+  proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->id = 41;
+  launch->width = 3840;
+  launch->height = 2160;
+  launch->fps = 90000;
+  proc::process_test_access::retain(process, launch);
+  auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
+  proc::process_test_access::mark_virtual(process, true);
+  proc::process_test_access::set_display_topology_hook(process, [](auto, bool) { return true; });
+
+  DEVMODEW observed {};
+  observed.dmPelsWidth = 3840;
+  observed.dmPelsHeight = 2160;
+  observed.dmDisplayFrequency = 72;
+  proc::process_test_access::observe_display_mode(process, observed);
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(launch->fps, 90000);  // The game never changed the accepted client request.
+
+  observed.dmDisplayFrequency = 90;
+  proc::process_test_access::observe_display_mode(process, observed);
+  EXPECT_FALSE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::unchanged);
+
+  observed.dmPelsWidth = 1920;
+  proc::process_test_access::observe_display_mode(process, observed);
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  proc::process_test_access::observe_display_mode(process, std::nullopt);
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::failed);
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 40), proc::live_video_mode_result_e::needs_reconnect);
+
+  launch->fps = 59940;
+  observed.dmPelsWidth = 3840;
+  observed.dmDisplayFrequency = 60;
+  proc::process_test_access::observe_display_mode(process, observed);
+  EXPECT_FALSE(process.live_video_mode_needs_display_change(3840, 2160, 59940));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 59940, 41), proc::live_video_mode_result_e::unchanged);
+}
+
+TEST(ProcessTest, LiveModeResolvesOwnedIdentityBeforeReadingRenamedOrReusedDisplayNames) {
+  proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->id = 41;
+  launch->width = 3840;
+  launch->height = 2160;
+  launch->fps = 90000;
+  proc::process_test_access::retain(process, launch);
+  auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
+  bool owned_present = true;
+  std::wstring owned_name = L"renamed-owned-display";
+  proc::process_test_access::mark_virtual(process, true, true, [&]() {
+    VDISPLAY::display_identity_query_t identity;
+    identity.state = owned_present ? VDISPLAY::display_identity_state_e::present : VDISPLAY::display_identity_state_e::indeterminate;
+    identity.display_name = owned_name;
+    identity.device_path = L"test-only-monitor-path";
+    return identity;
+  });
+  proc::process_test_access::set_display_topology_hook(process, [](auto, bool) { return true; });
+  unsigned observed_queries = 0;
+  DWORD owned_hz = 72;
+  proc::process_test_access::observe_display_mode(process, [&](std::wstring_view name) -> std::optional<DEVMODEW> {
+    ++observed_queries;
+    EXPECT_EQ(name, owned_name);
+    DEVMODEW mode {};
+    mode.dmPelsWidth = 3840;
+    mode.dmPelsHeight = 2160;
+    // The old GDI name has been reused by a different monitor already at 90 Hz.
+    mode.dmDisplayFrequency = name == owned_name ? owned_hz : 90;
+    return mode;
+  });
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(observed_queries, 1u);
+  owned_hz = 90;
+  EXPECT_FALSE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::unchanged);
+
+  // Even matching settings do not acknowledge a vanished/unresolved owned
+  // identity or probe a different requested mode through its stale GDI name.
+  owned_present = false;
+  const auto prior_queries = observed_queries;
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::failed);
+  EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 41), proc::live_video_mode_result_e::failed);
+  EXPECT_EQ(observed_queries, prior_queries);
+
+  // A later resolution of the same exact owner may recover under another name.
+  owned_present = true;
+  owned_name = L"renamed-again-owned-display";
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::unchanged);
+  EXPECT_EQ(launch->fps, 90000);
+}
+
 namespace {
   std::string test_command_interpreter() {
     std::array<wchar_t, MAX_PATH> system_directory {};
@@ -344,7 +480,7 @@ TEST_F(RetainedDisplayPauseTest, RestoresAndDetachesEveryVirtualPolicyBeforeReac
     proc::process_test_access::retain(process_, original_);
     operations_.clear();
     ASSERT_TRUE(process_.pause_display_for_resume());
-    EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause}));
+    EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause, operation_e::wake}));
     EXPECT_TRUE(proc::process_test_access::display_pause_pending(process_));
     EXPECT_EQ(process_.get_display_name(), "");
     EXPECT_EQ(process_.get_host_session_id(), 1234U);
@@ -357,6 +493,7 @@ TEST_F(RetainedDisplayPauseTest, RestoresAndDetachesEveryVirtualPolicyBeforeReac
     ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
     EXPECT_EQ(operations_, (std::vector<operation_e> {
                              operation_e::reactivate,
+                             operation_e::refresh_binding,
                              operation_e::refresh_binding,
                              operation_e::request_hdr,
                              operation_e::promote,
@@ -373,9 +510,98 @@ TEST_F(RetainedDisplayPauseTest, RestoresAndDetachesEveryVirtualPolicyBeforeReac
   }
 }
 
+TEST_F(RetainedDisplayPauseTest, ResumeRepairsObservedFullscreenModeWithoutChangingRequestedContract) {
+  original_->width = 3840;
+  original_->height = 2160;
+  original_->fps = 90000;
+  for (const auto observed : {std::array<DWORD, 3> {4800, 2700, 90}, std::array<DWORD, 3> {3840, 2160, 72}}) {
+    SCOPED_TRACE(observed[0]);
+    SCOPED_TRACE(observed[2]);
+    DEVMODEW current {};
+    current.dmPelsWidth = observed[0];
+    current.dmPelsHeight = observed[1];
+    current.dmDisplayFrequency = observed[2];
+    proc::process_test_access::observe_display_mode(process_, [&](std::wstring_view name) {
+      EXPECT_EQ(name, L"test-only-display");
+      return std::optional {current};
+    });
+    std::vector<bool> mode_requests;
+    proc::process_test_access::configure_display_mode(process_, [&](std::wstring_view name, int width, int height, int fps, bool probe) {
+      EXPECT_EQ(name, L"test-only-display");
+      EXPECT_EQ(width, 3840);
+      EXPECT_EQ(height, 2160);
+      EXPECT_EQ(fps, 90000);
+      mode_requests.push_back(probe);
+      if (!probe) {
+        current.dmPelsWidth = width;
+        current.dmPelsHeight = height;
+        current.dmDisplayFrequency = fps / 1000;
+      }
+      return DISP_CHANGE_SUCCESSFUL;
+    });
+    ASSERT_TRUE(process_.pause_display_for_resume());
+    auto resumed = make_launch(22);
+    resumed->width = original_->width;
+    resumed->height = original_->height;
+    resumed->fps = original_->fps;
+    ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+    EXPECT_EQ(mode_requests, (std::vector<bool> {true, false}));
+    EXPECT_EQ(current.dmPelsWidth, 3840U);
+    EXPECT_EQ(current.dmPelsHeight, 2160U);
+    EXPECT_EQ(current.dmDisplayFrequency, 90U);
+    EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
+    EXPECT_EQ(process_.get_host_session_id(), 1234U);
+    EXPECT_FALSE(proc::process_test_access::display_pause_pending(process_));
+  }
+}
+
+TEST_F(RetainedDisplayPauseTest, UnchangedResumeChecksActualModeWithoutResettingIt) {
+  // The same integer-Hz tolerance as live changes accepts fractional requested refresh rates.
+  original_->fps = 59940;
+  int queries = 0;
+  proc::process_test_access::observe_display_mode(process_, [&](std::wstring_view) {
+    ++queries;
+    DEVMODEW current {};
+    current.dmPelsWidth = 1920;
+    current.dmPelsHeight = 1080;
+    current.dmDisplayFrequency = 60;
+    return std::optional {current};
+  });
+  int mode_requests = 0;
+  proc::process_test_access::configure_display_mode(process_, [&](auto, auto, auto, auto, auto) {
+    ++mode_requests;
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  auto resumed = make_launch(22);
+  resumed->fps = original_->fps;
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  EXPECT_EQ(queries, 1);
+  EXPECT_EQ(mode_requests, 0);
+  EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
+}
+
+TEST_F(RetainedDisplayPauseTest, UnobservableUnchangedModeKeepsResumeRetryableWithoutReplacingTheDisplay) {
+  proc::process_test_access::observe_display_mode(process_, std::nullopt);
+  int mode_requests = 0;
+  proc::process_test_access::configure_display_mode(process_, [&](auto, auto, auto, auto, auto) {
+    ++mode_requests;
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  EXPECT_EQ(process_.reconfigure_retained_session(make_launch(22)), 503);
+  EXPECT_EQ(mode_requests, 0);
+  EXPECT_EQ(proc::process_test_access::active_transport(process_), 11U);
+  EXPECT_TRUE(proc::process_test_access::display_pause_pending(process_));
+  EXPECT_TRUE(proc::process_test_access::has_virtual_identity(process_));
+  EXPECT_EQ(process_.get_host_session_id(), 1234U);
+  EXPECT_EQ(std::ranges::count(operations_, operation_e::retire), 0);
+}
+
 TEST_F(RetainedDisplayPauseTest, FailedPhysicalRestorePreventsReactivationHdrAndTransportCommit) {
   failed_operation_ = operation_e::pause;
   ASSERT_FALSE(process_.pause_display_for_resume());
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause}));
   operations_.clear();
   EXPECT_EQ(process_.reconfigure_retained_session(make_launch(22)), 503);
   EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause, operation_e::pause}));
@@ -395,6 +621,7 @@ TEST_F(RetainedDisplayPauseTest, FailedReactivationLeavesExactSessionRetryable) 
   EXPECT_EQ(operations_, (std::vector<operation_e> {
                            operation_e::reactivate,
                            operation_e::pause,
+                           operation_e::wake,
                          }));
   EXPECT_EQ(process_.get_host_session_id(), 1234U);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 11U);
@@ -415,7 +642,9 @@ TEST_F(RetainedDisplayPauseTest, FailedReactivationLeavesExactSessionRetryable) 
 TEST_F(RetainedDisplayPauseTest, FailedHdrAfterReactivationKeepsRecoveryUntilSuccessfulRetry) {
   ASSERT_TRUE(process_.pause_display_for_resume());
   bool fail_hdr = true;
+  operations_.clear();
   proc::process_test_access::set_display_topology_hook(process_, [&](operation_e operation, bool) {
+    operations_.push_back(operation);
     if (operation == operation_e::request_hdr || operation == operation_e::promote) {
       EXPECT_TRUE(proc::process_test_access::has_retained_display(process_));
     }
@@ -430,9 +659,66 @@ TEST_F(RetainedDisplayPauseTest, FailedHdrAfterReactivationKeepsRecoveryUntilSuc
   EXPECT_TRUE(proc::process_test_access::display_pause_pending(process_));
   EXPECT_TRUE(proc::process_test_access::has_retained_display(process_));
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 11U);
+  EXPECT_EQ(std::ranges::count(operations_, operation_e::reactivate), 1);
+  EXPECT_EQ(std::ranges::count(operations_, operation_e::wake), 1);
+  operations_.clear();
+  EXPECT_TRUE(process_.pause_display_for_resume());
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause}));
   ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
   EXPECT_FALSE(proc::process_test_access::has_retained_display(process_));
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
+}
+
+TEST_F(RetainedDisplayPauseTest, RequestsWakeOnceAfterSuccessfulRecoveryIncludingRetry) {
+  failed_operation_ = operation_e::pause;
+  EXPECT_FALSE(process_.pause_display_for_resume());
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause}));
+
+  failed_operation_.reset();
+  operations_.clear();
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause, operation_e::wake}));
+
+  operations_.clear();
+  EXPECT_TRUE(process_.pause_display_for_resume());
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause}));
+  operations_.clear();
+  process_.terminate(false, false);
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause, operation_e::retire}));
+  EXPECT_EQ(process_.get_host_session_id(), 0U);
+}
+
+TEST_F(RetainedDisplayPauseTest, RecheckFailureDoesNotRepeatWakeButCompletedResumeStartsANewPauseEpisode) {
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  operations_.clear();
+  failed_operation_ = operation_e::pause;
+  EXPECT_FALSE(process_.pause_display_for_resume());
+  failed_operation_.reset();
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause, operation_e::pause}));
+
+  auto resumed = make_launch(22);
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  operations_.clear();
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause, operation_e::wake}));
+}
+
+TEST_F(RetainedDisplayPauseTest, RejectedWakeDoesNotInvalidateRecoveredTopologyOrRepeatOnCleanup) {
+  failed_operation_ = operation_e::wake;
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause, operation_e::wake}));
+  EXPECT_TRUE(proc::process_test_access::display_pause_pending(process_));
+  EXPECT_TRUE(proc::process_test_access::has_retained_display(process_));
+  EXPECT_TRUE(proc::process_test_access::has_virtual_identity(process_));
+  EXPECT_EQ(process_.get_host_session_id(), 1234U);
+
+  operations_.clear();
+  EXPECT_TRUE(process_.pause_display_for_resume());
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause}));
+  operations_.clear();
+  process_.terminate(false, false);
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause, operation_e::retire}));
 }
 
 TEST_F(IdleProcessLifecycleTest, ExitedAppIsCleanedAfterMediaStopsBeforeWarmRetention) {
@@ -585,6 +871,71 @@ TEST_F(IdleProcessLifecycleTest, GraceTaskPreservesDeadlineAndGenerationWhileApp
     EXPECT_EQ(stream::session::platform_lifecycle_generation_for_test(), generation);
     EXPECT_EQ(proc::proc.get_host_session_id(), 1234U);
   }
+}
+
+TEST_F(IdleProcessLifecycleTest, GraceTaskRechecksSuccessfulPauseWithoutRenewingDeadlineOrWake) {
+  using operation_e = proc::display_topology_test_operation_e;
+  proc::process_test_access::mark_desktop(proc::proc);
+  proc::process_test_access::mark_virtual(proc::proc, true, true);
+  unsigned pauses = 0;
+  unsigned wakes = 0;
+  bool target_active = true;
+  proc::process_test_access::set_display_topology_hook(proc::proc, [&](operation_e operation, bool) {
+    if (operation == operation_e::pause) {
+      ++pauses;
+      target_active = false;
+    } else if (operation == operation_e::wake) {
+      ++wakes;
+    }
+    return true;
+  });
+  stream::session::retain_or_stop_session_for_test(true);
+  ASSERT_EQ(pauses, 1u);
+  ASSERT_EQ(wakes, 1u);
+  const auto deadline = stream::session::platform_stop_deadline_for_test();
+  const auto generation = stream::session::platform_lifecycle_generation_for_test();
+  ASSERT_TRUE(deadline);
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    target_active = true;  // Simulates an owned retained device reappearing after success.
+    stream::session::check_platform_stop_for_test();
+    EXPECT_FALSE(target_active);
+    EXPECT_EQ(stream::session::platform_stop_deadline_for_test(), deadline);
+    EXPECT_EQ(stream::session::platform_lifecycle_generation_for_test(), generation);
+  }
+  EXPECT_EQ(pauses, 4u);
+  EXPECT_EQ(wakes, 1u);
+  EXPECT_EQ(proc::proc.get_host_session_id(), 1234u);
+}
+
+TEST_F(IdleProcessLifecycleTest, GracePauseCheckCannotTouchAnActiveOrReplacementSession) {
+  using operation_e = proc::display_topology_test_operation_e;
+  proc::process_test_access::mark_desktop(proc::proc);
+  proc::process_test_access::mark_virtual(proc::proc, true, true);
+  unsigned pauses = 0;
+  proc::process_test_access::set_display_topology_hook(proc::proc, [&](operation_e operation, bool) {
+    pauses += operation == operation_e::pause;
+    return true;
+  });
+  stream::session::retain_or_stop_session_for_test(true);
+  ASSERT_EQ(pauses, 1u);
+  const auto generation = stream::session::platform_lifecycle_generation_for_test();
+  ASSERT_TRUE(stream::session::claim_active_slot_for_test());
+  stream::session::check_platform_stop_for_test();
+  stream::session::release_active_slot_for_test();
+  EXPECT_EQ(pauses, 1u);
+
+  proc::process_test_access::set_host_session_id(proc::proc, 9999);
+  stream::session::check_platform_stop_for_test();
+  EXPECT_EQ(pauses, 1u);
+  proc::process_test_access::set_host_session_id(proc::proc, 1234);
+  {
+    auto guard = stream::session::guard_platform_launch();
+    guard.commit();  // An accepted launch changes generation before RTSP starts.
+  }
+  ASSERT_NE(stream::session::platform_lifecycle_generation_for_test(), generation);
+  stream::session::check_platform_stop_for_test(generation);
+  stream::session::check_platform_stop_for_test();  // Connecting is not retained/paused.
+  EXPECT_EQ(pauses, 1u);
 }
 
 TEST_F(IdleProcessLifecycleTest, RepeatedDisconnectAndPauseFailureDoNotRenewGrace) {
@@ -812,6 +1163,9 @@ TEST(ProcessTest, FailedPhysicalHdrResumeRestoresPreviousHdrAndTransportIdentity
   EXPECT_EQ(requests, (std::vector<bool> {true, false}));
   EXPECT_FALSE(process.get_status().enable_hdr);
   EXPECT_EQ(process.get_host_session_id(), 1234U);
+  // The following virtual-display transport check also resolves its owned
+  // identity; the physical HDR-only observation above is complete.
+  proc::process_test_access::set_display_topology_hook(process, [](auto, bool) { return true; });
   proc::process_test_access::mark_virtual(process, true);
   EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 11), proc::live_video_mode_result_e::unchanged);
   EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 22), proc::live_video_mode_result_e::needs_reconnect);
@@ -911,11 +1265,12 @@ TEST(ProcessTest, RetainedVirtualDisplayResumeCommitsPolicyAfterPromotionAndRebi
     resumed->virtual_display_only = !previous_policy;
     ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
 
-    ASSERT_EQ(operations.size(), 4U);
+    ASSERT_EQ(operations.size(), 5U);
     EXPECT_EQ(operations[0], (std::pair {operation_e::refresh_binding, !previous_policy}));
-    EXPECT_EQ(operations[1], (std::pair {operation_e::request_hdr, false}));
-    EXPECT_EQ(operations[2], (std::pair {operation_e::promote, !previous_policy}));
-    EXPECT_EQ(operations[3], (std::pair {operation_e::refresh_binding, !previous_policy}));
+    EXPECT_EQ(operations[1], (std::pair {operation_e::refresh_binding, !previous_policy}));
+    EXPECT_EQ(operations[2], (std::pair {operation_e::request_hdr, false}));
+    EXPECT_EQ(operations[3], (std::pair {operation_e::promote, !previous_policy}));
+    EXPECT_EQ(operations[4], (std::pair {operation_e::refresh_binding, !previous_policy}));
     EXPECT_EQ(proc::process_test_access::virtual_display_only(process), !previous_policy);
     EXPECT_EQ(original->virtual_display_only, !previous_policy);
     EXPECT_TRUE(resumed->virtual_display);
@@ -967,11 +1322,12 @@ TEST(ProcessTest, RestorePrimaryDisplayPreservesRetainedVirtualDisplayForResume)
   resumed->virtual_display_only = true;
   ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
 
-  ASSERT_EQ(operations.size(), 4U);
+  ASSERT_EQ(operations.size(), 5U);
   EXPECT_EQ(operations[0], (std::pair {operation_e::refresh_binding, true}));
-  EXPECT_EQ(operations[1], (std::pair {operation_e::request_hdr, false}));
-  EXPECT_EQ(operations[2], (std::pair {operation_e::promote, true}));
-  EXPECT_EQ(operations[3], (std::pair {operation_e::refresh_binding, true}));
+  EXPECT_EQ(operations[1], (std::pair {operation_e::refresh_binding, true}));
+  EXPECT_EQ(operations[2], (std::pair {operation_e::request_hdr, false}));
+  EXPECT_EQ(operations[3], (std::pair {operation_e::promote, true}));
+  EXPECT_EQ(operations[4], (std::pair {operation_e::refresh_binding, true}));
   EXPECT_EQ(process.get_host_session_id(), 1234U);
   EXPECT_TRUE(process.get_status().virtual_display);
 }
@@ -1019,6 +1375,7 @@ TEST(ProcessTest, RetainedVirtualDisplayResumeRetriesPromotionWhileWindowsTopolo
 
   EXPECT_EQ(operations, (std::vector<std::pair<operation_e, bool>> {
                           {operation_e::refresh_binding, true},
+                          {operation_e::refresh_binding, true},
                           {operation_e::request_hdr, false},
                           {operation_e::promote, true},
                           {operation_e::promote, true},
@@ -1062,9 +1419,9 @@ TEST(ProcessTest, FailedPostPromotionRebindPausesAndPreservesExactSessionForRetr
     [&](operation_e operation, bool value) {
       operations.emplace_back(operation, value);
       if (operation == operation_e::refresh_binding) {
-        // The retained binding resolves before promotion, but its required post-promotion
-        // verification fails after Windows accepted the topology change.
-        return !fail_rebind || ++refresh_count == 1;
+        // The retained binding and actual-mode query resolve before promotion, but its required
+        // post-promotion verification fails after Windows accepted the topology change.
+        return !fail_rebind || ++refresh_count <= 2;
       }
       return true;
     }
@@ -1079,14 +1436,16 @@ TEST(ProcessTest, FailedPostPromotionRebindPausesAndPreservesExactSessionForRetr
   resumed->virtual_display_only = true;
   EXPECT_EQ(process.reconfigure_retained_session(resumed), 503);
 
-  ASSERT_EQ(operations.size(), 5U);
+  ASSERT_EQ(operations.size(), 7U);
   EXPECT_EQ(operations[0], (std::pair {operation_e::refresh_binding, true}));
-  EXPECT_EQ(operations[1], (std::pair {operation_e::request_hdr, false}));
-  EXPECT_EQ(operations[2], (std::pair {operation_e::promote, true}));
-  EXPECT_EQ(operations[3], (std::pair {operation_e::refresh_binding, true}));
+  EXPECT_EQ(operations[1], (std::pair {operation_e::refresh_binding, true}));
+  EXPECT_EQ(operations[2], (std::pair {operation_e::request_hdr, false}));
+  EXPECT_EQ(operations[3], (std::pair {operation_e::promote, true}));
+  EXPECT_EQ(operations[4], (std::pair {operation_e::refresh_binding, true}));
   // Restore the previous policy and pause the unchanged source instead of destroying the app
   // because Windows has temporarily failed to publish its promoted GDI binding.
-  EXPECT_EQ(operations[4], (std::pair {operation_e::pause, false}));
+  EXPECT_EQ(operations[5], (std::pair {operation_e::pause, false}));
+  EXPECT_EQ(operations[6], (std::pair {operation_e::wake, false}));
   EXPECT_FALSE(proc::process_test_access::virtual_display_only(process));
   EXPECT_FALSE(original->virtual_display_only);
   EXPECT_EQ(process.get_host_session_id(), 1234U);
@@ -1192,7 +1551,7 @@ TEST(ProcessTest, LiveVideoModeIsRefusedWithoutAVirtualDisplay) {
     proc::live_video_mode_result_e::needs_reconnect
   );
 
-  // The control thread's fast-path hint must say "no display work" so a bitrate-only change is
+  // The live-mode worker's hint must say "no display work" so a bitrate-only change is
   // never queued behind a topology transition that would not happen anyway.
   EXPECT_FALSE(process.live_video_mode_needs_display_change(1920, 1080, 60000));
 }
