@@ -582,34 +582,31 @@ namespace platf::dxgi {
         }
         publish_game_source_status(external);
 
-        // Look up (or create) this image's encoder context. Only when a new id first appears do
-        // we garbage-collect contexts whose capture img_t has since expired -- the set of live
-        // ids is bounded by the capture pool, so this replaces an every-frame scan with one that
-        // runs only on the rare new-image insertion. (Erasing other map nodes leaves `it` valid.)
-        auto [it, inserted] = img_ctx_map.try_emplace(img.id);
-        if (inserted) {
-          for (auto gc = img_ctx_map.begin(); gc != img_ctx_map.end();) {
-            if (gc != it && gc->second.img_weak.expired()) {
-              gc = img_ctx_map.erase(gc);
-            } else {
-              ++gc;
+        // A valid packed export owns its texture and only uses immutable CPU cursor metadata
+        // from capture. Do not open or wait on an unrelated desktop resource on that path.
+        // Flat fallback, unpacked discovery and Host AI retain the desktop context and lock.
+        encoder_img_ctx_t *img_ctx = nullptr;
+        if (!external || !::video::is_packed_mode(sbs_mode)) {
+          auto [it, inserted] = img_ctx_map.try_emplace(img.id);
+          if (inserted) {
+            // Capture's pool bounds the cache. Collect expired images only on insertion;
+            // erasing other map nodes leaves this image's context valid.
+            for (auto gc = img_ctx_map.begin(); gc != img_ctx_map.end();) {
+              if (gc != it && gc->second.img_weak.expired()) {
+                gc = img_ctx_map.erase(gc);
+              } else {
+                ++gc;
+              }
             }
           }
+          img_ctx = &it->second;
+          if (initialize_image_context(img, *img_ctx)) {
+            return -1;
+          }
         }
-        auto &img_ctx = it->second;
-
-        // Open the shared capture texture with our ID3D11Device
-        if (initialize_image_context(img, img_ctx)) {
-          return -1;
-        }
-
-        // Only desktop consumers need capture GPU completion. A valid packed export uses the
-        // receiver's private texture and immutable CPU cursor metadata; waiting for an unrelated
-        // desktop copy here can stall Game 3D. Flat fallback and unpacked discovery still lock.
-        detail::keyed_mutex_lock_t encoder_mutex_lock {img_ctx.encoder_mutex.get()};
-        HRESULT status = S_OK;
-        if (!external || !::video::is_packed_mode(sbs_mode)) {
-          status = encoder_mutex_lock.lock(0, INFINITE);
+        detail::keyed_mutex_lock_t encoder_mutex_lock {img_ctx ? img_ctx->encoder_mutex.get() : nullptr};
+        if (img_ctx) {
+          const auto status = encoder_mutex_lock.lock(0, INFINITE);
           if (status != S_OK) {
             BOOST_LOG(error) << "Failed to acquire encoder mutex [0x"sv << util::hex(status).to_string_view() << ']';
             return -1;
@@ -758,7 +755,7 @@ namespace platf::dxgi {
               .pixel_shader = sbs_flat_identity_ps.get(),
               .viewport = sbs_viewport,
               .sampler = sampler_linear.get(),
-              .shader_resources = {img_ctx.encoder_input_res.get()},
+              .shader_resources = {img_ctx->encoder_input_res.get()},
               .geometry_constants = sbs_reprojection_cbuffer.get(),
             };
             if (!record_host_sbs_v2_draw(device_ctx.get(), flat_draw)) {
@@ -828,7 +825,7 @@ namespace platf::dxgi {
           // consumer. A focus transition between accepted inferences still revokes authority.
           live_window_authority_observation_t pre_copy_authority;
           D3D11_TEXTURE2D_DESC live_source_desc {};
-          img_ctx.encoder_texture->GetDesc(&live_source_desc);
+          img_ctx->encoder_texture->GetDesc(&live_source_desc);
           if (detail::host_sbs_window_authority_observation_needed(depth_estimator != nullptr, models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer))) {
             pre_copy_authority = observe_live_window_authority(
               live_source_desc,
@@ -849,7 +846,7 @@ namespace platf::dxgi {
             return left && right && *left == *right;
           };
           const auto frame_id = ++sbs_frame_sequence;
-          ID3D11ShaderResourceView *render_input_srv = img_ctx.encoder_input_res.get();
+          ID3D11ShaderResourceView *render_input_srv = img_ctx->encoder_input_res.get();
           matched_frame_slot_t *matched_render_slot = nullptr;
           matched_frame_slot_t *matched_candidate_slot = nullptr;
           models::estimate_result est;
@@ -911,7 +908,7 @@ namespace platf::dxgi {
                    "rendering current-frame identity."sv;
               matched_render_slot = nullptr;
               est = {};
-              render_input_srv = img_ctx.encoder_input_res.get();
+              render_input_srv = img_ctx->encoder_input_res.get();
               matched_presentation_cache.invalidate();
               return false;
             }
@@ -925,7 +922,7 @@ namespace platf::dxgi {
                 clear_cached_roi_output();
                 matched_render_slot = nullptr;
                 est = {};
-                render_input_srv = img_ctx.encoder_input_res.get();
+                render_input_srv = img_ctx->encoder_input_res.get();
                 return false;
               }
               // Full-source depth is independent of optional exact-full window provenance.
@@ -962,7 +959,7 @@ namespace platf::dxgi {
                 fail_depth_pipeline_flat();
                 matched_render_slot = nullptr;
                 est = {};
-                render_input_srv = img_ctx.encoder_input_res.get();
+                render_input_srv = img_ctx->encoder_input_res.get();
                 BOOST_LOG(error)
                   << "Host SBS parallax-v2 producer reported a terminal CUDA/TensorRT failure; "sv
                      "this stream is now live flat identity with depth submissions disabled."sv;
@@ -1010,7 +1007,7 @@ namespace platf::dxgi {
                 fail_depth_pipeline_flat();
                 matched_render_slot = nullptr;
                 est = {};
-                render_input_srv = img_ctx.encoder_input_res.get();
+                render_input_srv = img_ctx->encoder_input_res.get();
                 return false;
               }
             }
@@ -1359,7 +1356,7 @@ namespace platf::dxgi {
               const bool matched_copy_submitted =
                 estimator_ready &&
                 copy_matched_frame(
-                  img_ctx.encoder_texture.get(),
+                  img_ctx->encoder_texture.get(),
                   *matched_candidate_slot,
                   frame_id,
                   input_color_space,
@@ -1392,7 +1389,7 @@ namespace platf::dxgi {
                 latest_v2_lineage.reset();
                 matched_render_slot = nullptr;
                 est = {};
-                render_input_srv = img_ctx.encoder_input_res.get();
+                render_input_srv = img_ctx->encoder_input_res.get();
                 completion_finalized_before_admission = false;
               }
               if (matched_copy_submitted) {
@@ -1680,7 +1677,7 @@ namespace platf::dxgi {
                     latest_v2_lineage.reset();
                     depth_completion_poll_pending = false;
                     matched_render_slot = nullptr;
-                    render_input_srv = img_ctx.encoder_input_res.get();
+                    render_input_srv = img_ctx->encoder_input_res.get();
                     est = {};
                     completion_finalized_before_admission = false;
                     if (
@@ -1818,7 +1815,7 @@ namespace platf::dxgi {
             current_color_reuse_slot.captured_at = reuse_now;
             current_color_reuse_slot.pending = false;
             matched_render_slot = &current_color_reuse_slot;
-            render_input_srv = img_ctx.encoder_input_res.get();
+            render_input_srv = img_ctx->encoder_input_res.get();
             cached_current_color_warp = true;
             depth_reuse_authorization = post_completion_reuse_authorization;
           }
@@ -1849,7 +1846,7 @@ namespace platf::dxgi {
             }
             matched_render_slot = nullptr;
             est = {};
-            render_input_srv = img_ctx.encoder_input_res.get();
+            render_input_srv = img_ctx->encoder_input_res.get();
             completion_finalized_before_admission = false;
           } else if (!completion_finalized_before_admission && matched_render_slot) {
             (void) apply_completed_domain_and_renderer();
@@ -1864,7 +1861,7 @@ namespace platf::dxgi {
               fail_depth_pipeline_flat();
               matched_render_slot = nullptr;
               est = {};
-              render_input_srv = img_ctx.encoder_input_res.get();
+              render_input_srv = img_ctx->encoder_input_res.get();
               BOOST_LOG(error)
                 << "Host SBS parallax-v2 producer reported a terminal CUDA/TensorRT failure; "sv
                    "this stream is now live flat identity with depth submissions disabled."sv;
@@ -1892,7 +1889,7 @@ namespace platf::dxgi {
             stale_v2_completion = true;
             matched_render_slot = nullptr;
             est = {};
-            render_input_srv = img_ctx.encoder_input_res.get();
+            render_input_srv = img_ctx->encoder_input_res.get();
           }
           if (matched_render_slot) {
             publish_window_region_transition(*matched_render_slot);
@@ -2028,7 +2025,7 @@ namespace platf::dxgi {
             // deliberately renders current color/cursor with authenticated cached geometry.
             if (!matched_render_slot) {
               est = {};
-              render_input_srv = img_ctx.encoder_input_res.get();
+              render_input_srv = img_ctx->encoder_input_res.get();
             }
 
             // Output transfer follows the color frame actually rendered. Matched inference may
@@ -2487,15 +2484,15 @@ namespace platf::dxgi {
           if (rgb_present_target) {
             const bool input_is_linear =
               img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
-            if (!copy_rgb(img_ctx.encoder_texture.get(), input_is_linear)) {
+            if (!copy_rgb(img_ctx->encoder_texture.get(), input_is_linear)) {
               draw_rgb(
-                img_ctx.encoder_input_res.get(),
+                img_ctx->encoder_input_res.get(),
                 input_is_linear
               );
             }
           } else {
             // Plain 2D: draw the captured frame straight into the encoder output.
-            draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewport, out_UV_viewport, img.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+            draw(img_ctx->encoder_input_res, out_Y_or_YUV_viewport, out_UV_viewport, img.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
           }
         }
 

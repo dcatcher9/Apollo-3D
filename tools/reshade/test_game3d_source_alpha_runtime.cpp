@@ -83,6 +83,7 @@ namespace {
     ComPtr<ID3D11RenderTargetView> rtv;
     ComPtr<ID3D11ShaderResourceView> depth_view;
     sunshine_game3d::renderer renderer, control_renderer;
+    std::uint64_t mask_capture = 0;
     bool has_control{};
     std::vector<unsigned char> original;
     fixture(const fs::path &runtime, const fs::path &directory, unsigned c, unsigned w, unsigned h, const fs::path &control): width(w), height(h), color(c) {
@@ -202,11 +203,13 @@ namespace {
           pixels[i * bpp] = pixels[i * bpp + 1] = 0; pixels[i * bpp + 2] = 255;
         }
       }
-      const auto texture = renderer.ui_source();
-      require(texture.handle && renderer.ui_source_view().handle, "renderer-owned retained UI texture unavailable");
-      context->UpdateSubresource(reinterpret_cast<ID3D11Resource *>(texture.handle), 0, nullptr, pixels.data(), width * bpp, 0);
-      require(read(texture).bytes == pixels, "retained real-frame alpha upload changed native RGBA");
-      return renderer.ui_source_view();
+      const auto view = renderer.prepare_ui_source(++mask_capture, [&](api::resource texture) {
+        context->UpdateSubresource(reinterpret_cast<ID3D11Resource *>(texture.handle), 0, nullptr, pixels.data(), width * bpp, 0);
+        return true;
+      });
+      require(view.handle, "renderer-owned retained UI texture unavailable");
+      require(read(renderer.ui_source()).bytes == pixels, "retained real-frame alpha upload changed native RGBA");
+      return view;
     }
     result render(bool protect, int sign, bool flat = false, bool control = false, bool frame_generation_active = false,
         api::resource_view alpha_source = {}, const fs::path &dump_directory = {}) {
@@ -438,8 +441,13 @@ namespace {
           if (state == 2) for (unsigned y = 0; y < gpu.height / 3; ++y)
             for (unsigned x = gpu.width * 2 / 3; x < gpu.width; ++x) presented_alpha[size_t(y) * gpu.width + x] = .5f;
           gpu.pattern(presented_alpha, true, phase);
+          const auto reused = gpu.renderer.prepare_ui_source(gpu.mask_capture, [](api::resource) {
+            require(false, "generated presentation copied an already retained real-input mask");
+            return false;
+          });
+          require(reused.handle == retained.handle, "generated presentation lost the retained mask view");
           const bool capture = !dumped && state == 1;
-          const auto actual = gpu.render(true, sign, false, false, true, retained, capture ? dump_directory : fs::path{});
+          const auto actual = gpu.render(true, sign, false, false, true, reused, capture ? dump_directory : fs::path{});
           dumped |= capture;
           require(actual.field.bytes == reference.field.bytes && actual.output.bytes == reference.output.bytes,
             "FG output alpha overrode retained real alpha, or retained RGB replaced the current picture");
@@ -475,6 +483,34 @@ namespace {
     }
     std::puts("PASS retained FG alpha: changing output alpha ignored, current RGB preserved, real opaque honored, new clear mask replaces old");
   }
+
+  void verify_mask_upload_recovery(fixture &gpu) {
+    const auto previous = gpu.read(gpu.renderer.ui_source());
+    unsigned uploads = 0;
+    const auto upload = [&](api::resource texture) {
+      ++uploads;
+      gpu.context->UpdateSubresource(reinterpret_cast<ID3D11Resource *>(texture.handle), 0, nullptr,
+        previous.bytes.data(), previous.width * pixel_bytes(previous.format), 0);
+      return true;
+    };
+    require(!gpu.renderer.prepare_ui_source(0, upload).handle && !uploads,
+      "missing capture identity admitted an upload");
+    require(!gpu.renderer.prepare_ui_source(gpu.mask_capture + 1, [](api::resource) { return false; }).handle,
+      "failed mask upload returned a usable view");
+    require(gpu.renderer.prepare_ui_source(gpu.mask_capture, upload).handle && uploads == 1,
+      "failed replacement retained the previous upload identity");
+    require(gpu.renderer.prepare_ui_source(gpu.mask_capture, upload).handle && uploads == 1,
+      "successful retry was copied again");
+    observed_runtime->get_command_queue()->wait_idle();
+    gpu.renderer.reset_after_runtime_drain();
+    require(gpu.renderer.configure(observed_runtime, {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())},
+      static_cast<api::color_space>(gpu.color)), "recreate renderer for mask lifetime test");
+    require(gpu.renderer.prepare_ui_source(gpu.mask_capture, upload).handle && uploads == 2,
+      "renderer recreation reused an upload into a destroyed texture");
+    require(gpu.read(gpu.renderer.ui_source()).bytes == previous.bytes,
+      "recreated renderer did not restore the exact retained mask");
+    std::puts("PASS retained UI upload identity: no repeat copy; failures and renderer replacement reupload");
+  }
 }
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -507,6 +543,7 @@ int main(int argc, char **argv) {
     }
     verify_fg_transitions(gpu, report);
     verify_retained_fg_alpha(gpu, report, directory / "retained-alpha-dump");
+    verify_mask_upload_recovery(gpu);
     require(report.good(), "cannot write evidence");
     std::printf("PASS actual D3D11 source-alpha renderer %ux%u color=%u; no FX or visible window\n", gpu.width, gpu.height, color);
     return 0;

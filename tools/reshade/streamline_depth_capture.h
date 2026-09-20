@@ -220,6 +220,11 @@ namespace sunshine_streamline::depth_capture {
   // accepted ticket must finish; retain it until acquire or explicit cancel.
   diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value,
     record_diagnostic *diagnostic = nullptr);
+  // Local consumers use the same copy/fence owner, but their retired storage
+  // may be reused. These tickets expose no IPC handle. Externally shared dump
+  // textures above remain immutable even after the host acknowledges opening.
+  diagnostic_ticket record_local_texture(std::uint64_t command, const input &value,
+    record_diagnostic *diagnostic = nullptr);
   void finish_diagnostic_texture(const diagnostic_ticket &ticket, bool successful);
   // Nonblocking: pending work, even on the same queue, is not shareable. Both
   // GPU completion and Reset/destruction of its producing recording are needed

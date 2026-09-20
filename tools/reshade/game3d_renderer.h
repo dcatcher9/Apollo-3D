@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <string_view>
+#include <utility>
 
 namespace sunshine_game3d {
   // Byte-for-byte layout of game3d_native.hlsl b0. No ReShade FX uniforms.
@@ -52,6 +53,21 @@ namespace sunshine_game3d {
     // consumed, never this retained input's RGB.
     reshade::api::resource ui_source();
     reshade::api::resource_view ui_source_view() const;
+    // The caller must first admit a current capture. Repeated presentations of
+    // that immutable capture reuse our private texture in renderer queue order.
+    // A failed replacement never leaves the old identity marked as uploaded.
+    template<class Copy>
+    reshade::api::resource_view prepare_ui_source(std::uint64_t capture_id, Copy &&copy) {
+      if (!capture_id) return {};
+      const auto destination = ui_source();
+      if (!destination.handle) return {};
+      if (ui_source_capture_ != capture_id) {
+        ui_source_capture_ = 0;
+        if (!std::forward<Copy>(copy)(destination)) return {};
+        ui_source_capture_ = capture_id;
+      }
+      return ui_source_view();
+    }
     reshade::api::resource output() const;
     diagnostic_resources diagnostics() const;
     render_parameters consumed_parameters() const;
@@ -67,5 +83,6 @@ namespace sunshine_game3d {
   private:
     struct impl;
     std::unique_ptr<impl> data_;
+    std::uint64_t ui_source_capture_ = 0;
   };
 }

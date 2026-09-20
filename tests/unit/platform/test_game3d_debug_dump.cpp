@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "src/platform/windows/game3d_debug_dump.h"
 #include "src/game3d_debug_ui_resources.h"
+#include "src/platform/windows/sbs_debug_dump_async.h"
 
 #include <algorithm>
 #include <array>
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <d3d11_1.h>
 #include <fstream>
+#include <future>
 #include <gtest/gtest.h>
 #include <iterator>
 #include <nlohmann/json.hpp>
@@ -30,7 +32,62 @@ namespace {
     value.textures[0] = {wire::artifact::raw_depth, 8, 4, DXGI_FORMAT_R32_FLOAT, 1234};
     return value;
   }
+
+  bool wait_for_publications() {
+    auto drained = std::make_shared<std::promise<void>>();
+    auto finished = drained->get_future();
+    return platf::sbs_debug::detail::process_publication_queue().enqueue([drained] {
+      drained->set_value();
+    }) && finished.wait_for(5s) == std::future_status::ready;
+  }
 }  // namespace
+
+TEST(Game3DDumpPublication, ConverterReplacementCannotQueueAnotherLargePackage) {
+  // Hold the existing CPU worker instead of depending on GPU or disk timing.
+  struct release_guard {
+    std::promise<void> promise;
+    bool released = false;
+    void release() {
+      if (!released) {
+        released = true;
+        promise.set_value();
+      }
+    }
+    ~release_guard() { release(); }
+  } blocker;
+  const auto release = blocker.promise.get_future().share();
+  ASSERT_TRUE(platf::sbs_debug::detail::process_publication_queue().enqueue([release] {
+    release.wait();
+  }));
+
+  LARGE_INTEGER qpc {};
+  QueryPerformanceCounter(&qpc);
+  const auto directory = std::filesystem::temp_directory_path() /
+    ("sunshine_game_dump_publication_test_" + std::to_string(qpc.QuadPart));
+  auto button = std::make_shared<std::atomic<bool>>(true);
+  {
+    dump::dumper original({}, directory);
+    original.set_button_request(button);
+    // An invalid context produces a CPU-only unavailable package, using the
+    // same publication ownership as a complete full-resolution GPU package.
+    original.poll(nullptr, nullptr, {}, 8, 4, 2);
+    EXPECT_FALSE(button->load());
+  }
+  auto next_button = std::make_shared<std::atomic<bool>>(true);
+  dump::dumper replacement({}, directory);
+  replacement.set_button_request(next_button);
+  EXPECT_FALSE(replacement.needs_conversion_poll());
+  replacement.poll(nullptr, nullptr, {}, 8, 4, 2);
+  EXPECT_TRUE(next_button->load()) << "The replacement must leave its request pending until the old publication retires";
+
+  blocker.release();
+  // Drain a sentinel after the publication before inspecting or removing files.
+  ASSERT_TRUE(wait_for_publications());
+  EXPECT_TRUE(replacement.needs_conversion_poll());
+  replacement.cancel();
+  std::error_code ignored;
+  std::filesystem::remove_all(directory, ignored);
+}
 
 TEST(Game3DDumpProtocol, RejectsInvalidIdentityLengthsFormatsDimensionsAndMemory) {
   auto response = valid_response();
@@ -193,7 +250,9 @@ namespace {
       if (mapping) {
         CloseHandle(mapping);
       }
-      // All publication tests await the final renamed package before teardown.
+      // Rename precedes the worker clearing its shared single-flight state.
+      // Drain that last callback before the next fixture submits a new request.
+      EXPECT_TRUE(wait_for_publications());
       if (!directory.empty()) {
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);

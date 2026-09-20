@@ -56,7 +56,10 @@ namespace {
   struct automatic_ui_entry {
     sunshine_game3d::automatic_status status {};
     sunshine_game3d::source_alpha_ui_decision source_alpha;
+#if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
+    // Explicit resets exist only for controlled regression fixtures.
     bool recalibrate = false;
+#endif
   };
   class publisher_t;
   struct addon_session_t {
@@ -100,11 +103,12 @@ namespace {
   void publish_automatic_ui(api::effect_runtime *runtime, sunshine_game3d::automatic_status status) {
     std::lock_guard<std::mutex> lock(automatic_ui_mutex);
     auto &entry = automatic_ui[runtime];
-    if (!entry.recalibrate) {
-      if (status.phase != sunshine_game3d::automatic_phase::ready) status.scale.active = false;
-      status.scale = sunshine_game3d::retain_automatic_scale(entry.status.scale, status.scale);
-      entry.status = status;
-    }
+#if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
+    if (entry.recalibrate) return;
+#endif
+    if (status.phase != sunshine_game3d::automatic_phase::ready) status.scale.active = false;
+    status.scale = sunshine_game3d::retain_automatic_scale(entry.status.scale, status.scale);
+    entry.status = status;
   }
 
   void publish_source_alpha_ui(api::effect_runtime *runtime, sunshine_game3d::source_alpha_ui_decision value) {
@@ -112,6 +116,7 @@ namespace {
     automatic_ui[runtime].source_alpha = value;
   }
 
+#if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
   bool take_recalibration(api::effect_runtime *runtime) {
     std::lock_guard<std::mutex> lock(automatic_ui_mutex);
     const auto found = automatic_ui.find(runtime);
@@ -119,6 +124,7 @@ namespace {
     found->second.recalibrate = false;
     return true;
   }
+#endif
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   // Only the distinct test DLL can substitute this observation. Null fails closed
@@ -705,13 +711,12 @@ namespace {
       sunshine_game3d::ui_mask::selection alpha_selection;
       if (source_alpha.requested && source_alpha.fg_active() && backend == api::device_api::d3d12 &&
           sunshine_game3d::ui_mask::acquire(reinterpret_cast<std::uint64_t>(runtime), alpha_selection, GetTickCount64())) {
-        const auto destination = renderer->ui_source();
-        if (destination.handle && sunshine_streamline::depth_capture::copy_diagnostic_texture(commands->get_native(),
+        alpha_view = renderer->prepare_ui_source(alpha_selection.ticket.id, [&](api::resource destination) {
+          return sunshine_streamline::depth_capture::copy_diagnostic_texture(commands->get_native(),
             queue->get_native(), alpha_selection.ticket, destination.handle,
-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)) {
-          alpha_view = renderer->ui_source_view();
-          source_alpha.retained_alpha_ready = alpha_view.handle != 0;
-        }
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        });
+        source_alpha.retained_alpha_ready = alpha_view.handle != 0;
       }
       // Publish what this render actually consumes, not the saved preference or
       // a later SDK observation. No RGB from the retained input is displayed.
@@ -1017,8 +1022,8 @@ namespace {
       const bool provided = enabled && api_selected;
       const bool projection_provided = provided && depth.projection.supplied;
       const auto restart_reference = [&proof, now] {
-        // Explicit recalibration invalidates queued samples. The raw controller
-        // owns ordinary source changes and initializes each source only once.
+        // A new basis invalidates queued samples. The raw controller owns
+        // ordinary source changes and initializes each source only once.
         proof.raw_basis_epoch = next_raw_basis.fetch_add(1, std::memory_order_relaxed);
         proof.raw_policy.reset(proof.raw_basis_epoch, now);
         proof.provided_raw_policy.reset(proof.raw_basis_epoch, now);
@@ -1026,6 +1031,7 @@ namespace {
         proof.raw_log = {};
         proof.raw_reentry = {};
       };
+#if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
       if (take_recalibration(runtime)) {
         if (projection_provided) {
           const sunshine_projection_depth::domain domain{depth.projection.epoch, depth.projection.viewport};
@@ -1045,6 +1051,7 @@ namespace {
           log(reshade::log::level::info, "Sunshine 3D raw automation: user requested Recenter; acquiring a fresh nearest-depth gain reference and screen plane");
         }
       }
+#endif
       if (enabled && !proof.raw_basis_epoch)
         restart_reference();
       const auto budget = sunshine_scene_gain::render_limits(proof.frame_strength, proof.width, proof.height);
@@ -1936,6 +1943,7 @@ namespace sunshine_game3d {
     return found == automatic_ui.end() ? automatic_status{} : found->second.status;
   }
 
+#if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
   bool recalibrate_automatic(reshade::api::effect_runtime *runtime) {
     std::lock_guard<std::mutex> lock(automatic_ui_mutex);
     const auto found = automatic_ui.find(runtime);
@@ -1947,6 +1955,7 @@ namespace sunshine_game3d {
     found->second.status.scale.active = false;
     return true;
   }
+#endif
 }
 
 extern "C" {

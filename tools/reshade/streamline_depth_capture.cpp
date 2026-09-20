@@ -222,7 +222,7 @@ namespace sunshine_streamline::depth_capture {
       bool finished{}, success{}, acquired{}, invalid{}, producer_submitted{}, retirement_unknown{};
       bool shared_preservation{};
       bool preservation_only{};
-      bool diagnostic_only{}, diagnostic_released{};
+      bool diagnostic_only{}, diagnostic_released{}, diagnostic_reusable{};
       bool source_nominated{}, nomination_only{}, nomination_invalid{};
       status pixel_failure{status::unavailable};
       capture_failure failure{capture_failure::none};
@@ -826,10 +826,34 @@ namespace sunshine_streamline::depth_capture {
       if (!diagnostic_slots_active) return;
       bool retained = false;
       for (auto &value : diagnostic_slots) {
-        if (value.id && reclaimable(value)) value = {};
+        if (value.id && reclaimable(value)) {
+          // Retire the capture identity/leases, not its reusable allocation.
+          // Live FG alpha uses this owner every real frame; destroying storage
+          // here would turn the bounded ring into a per-frame GPU allocator.
+          auto storage = value.diagnostic_reusable ? std::move(value.texture) : nullptr;
+          value = {};
+          value.texture = std::move(storage);
+        }
         retained |= value.id != 0;
       }
       diagnostic_slots_active = retained;
+    }
+    bool reserve_diagnostic_bytes(std::array<slot, diagnostic_slot_limit> &pool,
+        const slot *replacement, std::uint64_t bytes) {
+      if (!bytes || bytes > diagnostic_byte_limit) return false;
+      std::uint64_t allocated = 0;
+      for (const auto &entry : pool)
+        if (&entry != replacement && entry.texture) allocated += entry.texture->allocation_bytes;
+      // A format/size change may need different storage. Evict only idle cache
+      // entries; live tickets and any unfinished GPU obligations retain theirs.
+      for (auto &entry : pool) {
+        if (allocated <= diagnostic_byte_limit - bytes) return true;
+        if (&entry != replacement && !entry.id && entry.texture) {
+          allocated -= entry.texture->allocation_bytes;
+          entry.texture.reset();
+        }
+      }
+      return allocated <= diagnostic_byte_limit - bytes;
     }
     std::uint64_t record_nomination(const input &value, std::uint64_t normalized_source,
         std::uint64_t cookie, const recording_ref &recording) {
@@ -1187,7 +1211,7 @@ namespace sunshine_streamline::depth_capture {
 
   static std::uint64_t record_impl(std::uint64_t native, const input &value, record_diagnostic *diagnostic,
       bool preservation_only, preservation_ticket *preserved = nullptr, bool nominate_source = false,
-      bool diagnostic_copy = false) {
+      bool diagnostic_copy = false, bool reusable_storage = false) {
     bool valid_nomination = false;
     std::uint64_t nomination_command{}, nomination_source{};
     recording_ref nomination_recording;
@@ -1331,9 +1355,19 @@ namespace sunshine_streamline::depth_capture {
     if (diagnostic_copy) collect_diagnostics();
     auto *pixel_begin = diagnostic_copy ? diagnostic_slots.data() : slots.data();
     auto *pixel_end = pixel_begin + (diagnostic_copy ? diagnostic_slot_limit : pixel_slot_limit);
+    const auto texture_format = diagnostic_copy ? desc.Format : typeless(desc.Format);
+    const auto compatible_storage = [&](const auto &texture) {
+      if (!texture || texture->device_identity != value.source->device_identity) return false;
+      if (diagnostic_copy && bool(texture->shared_handle) == reusable_storage) return false;
+      const auto existing = texture->resource->GetDesc();
+      return existing.Width == region.width && existing.Height == region.height && existing.Format == texture_format;
+    };
     auto *found = preservation_only && !diagnostic_copy ? std::find_if(pixel_begin, pixel_end, [&](const auto &entry) {
       return reusable_preserved(entry, value, cookie);
     }) : pixel_end;
+    if (diagnostic_copy && reusable_storage) found = std::find_if(pixel_begin, pixel_end, [&](const auto &entry) {
+      return !entry.id && compatible_storage(entry.texture);
+    });
     // Do not overwrite the only newly completed API snapshot with its pending
     // successor before the effects queue can consume it. This borrows an
     // existing pool slot; no extra owner, queue, or resource copy is introduced.
@@ -1343,10 +1377,8 @@ namespace sunshine_streamline::depth_capture {
     });
     if (found == pixel_end) return reject(status::exhausted, record_stage::capacity);
     auto texture = found->texture;
-    const auto texture_format = diagnostic_copy ? desc.Format : typeless(desc.Format);
     const auto resting_state = diagnostic_copy ? D3D12_RESOURCE_STATE_COMMON : sampled_state;
-    if (!texture || texture->device_identity != value.source->device_identity || texture->resource->GetDesc().Width != region.width ||
-        texture->resource->GetDesc().Height != region.height || texture->resource->GetDesc().Format != texture_format) {
+    if (!compatible_storage(texture)) {
       texture = std::make_shared<texture_reference>();
       value.source->device->AddRef(); texture->device.p = value.source->device.p;
       texture->device_identity = value.source->device_identity;
@@ -1364,26 +1396,25 @@ namespace sunshine_streamline::depth_capture {
           return reject(status::unsupported_resource, record_stage::resource_region);
         destination.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         const auto allocation = texture->device->GetResourceAllocationInfo(0, 1, &destination);
-        if (!allocation.SizeInBytes || allocation.SizeInBytes == UINT64_MAX || allocation.SizeInBytes > diagnostic_byte_limit)
-          return reject(status::exhausted, record_stage::capacity);
-        std::uint64_t allocated = 0;
-        for (const auto &entry : diagnostic_slots) if (&entry != found && entry.texture) allocated += entry.texture->allocation_bytes;
-        if (allocated > diagnostic_byte_limit - allocation.SizeInBytes)
+        if (!reserve_diagnostic_bytes(diagnostic_slots, found, allocation.SizeInBytes))
           return reject(status::exhausted, record_stage::capacity);
         texture->allocation_bytes = allocation.SizeInBytes;
+        // The replacement is retired too. Release its incompatible storage
+        // before allocation so even the replacement peak respects the budget.
+        found->texture.reset();
       }
       D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
       native_observer::suppression_scope suppress;
-      if (FAILED(texture->device->CreateCommittedResource(&heap, diagnostic_copy ? D3D12_HEAP_FLAG_SHARED : D3D12_HEAP_FLAG_NONE,
+      if (FAILED(texture->device->CreateCommittedResource(&heap, diagnostic_copy && !reusable_storage ? D3D12_HEAP_FLAG_SHARED : D3D12_HEAP_FLAG_NONE,
           &destination, resting_state,
           nullptr, __uuidof(ID3D12Resource), reinterpret_cast<void **>(texture->resource.put()))))
         return reject(status::failed, record_stage::texture_allocation);
       texture->identity = retain_source_cookie(texture->resource.p);
       if (!texture->identity) return reject(status::failed, record_stage::texture_allocation);
-      if (diagnostic_copy) {
+      if (diagnostic_copy && !reusable_storage) {
         if (FAILED(texture->device->CreateSharedHandle(texture->resource.p, nullptr, GENERIC_ALL, nullptr, &texture->shared_handle)))
           return reject(status::failed, record_stage::texture_allocation);
-      } else {
+      } else if (!diagnostic_copy) {
         D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
         descriptors.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; descriptors.NumDescriptors = 1;
         if (FAILED(texture->device->CreateDescriptorHeap(&descriptors, __uuidof(ID3D12DescriptorHeap),
@@ -1401,6 +1432,7 @@ namespace sunshine_streamline::depth_capture {
     found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
     found->preservation_only = preservation_only;
     found->diagnostic_only = diagnostic_copy;
+    found->diagnostic_reusable = reusable_storage;
     if (diagnostic_copy) diagnostic_slots_active = true;
     found->source_nominated = nominate_source;
     found->finished = found->success = preservation_only && !diagnostic_copy;
@@ -1440,9 +1472,10 @@ namespace sunshine_streamline::depth_capture {
   std::uint64_t record(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
     return record_impl(command, value, diagnostic, false);
   }
-  diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
+  static diagnostic_ticket record_auxiliary_texture(std::uint64_t command, const input &value,
+      record_diagnostic *diagnostic, bool reusable_storage) {
     try {
-      const auto id = record_impl(command, value, diagnostic, true, nullptr, false, true);
+      const auto id = record_impl(command, value, diagnostic, true, nullptr, false, true, reusable_storage);
       if (!id) return {};
       std::lock_guard lock(mutex);
       for (const auto &entry : diagnostic_slots) if (entry.id == id) return {id, entry.texture};
@@ -1452,6 +1485,12 @@ namespace sunshine_streamline::depth_capture {
       if (diagnostic) { diagnostic->result = status::exhausted; diagnostic->stage = record_stage::capacity; }
     }
     return {};
+  }
+  diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
+    return record_auxiliary_texture(command, value, diagnostic, false);
+  }
+  diagnostic_ticket record_local_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
+    return record_auxiliary_texture(command, value, diagnostic, true);
   }
   void finish_diagnostic_texture(const diagnostic_ticket &ticket, bool successful) {
     if (!ticket) return;
@@ -1994,7 +2033,22 @@ namespace sunshine_streamline::depth_capture {
         if (diagnostic_description(desc)) return false;
       }
       desc.Format = DXGI_FORMAT_R8_UNORM; desc.SampleDesc.Count = 2;
-      return !diagnostic_description(desc);
+      if (diagnostic_description(desc)) return false;
+      // Cached allocations count toward the same budget as live captures, but
+      // only the cache can be evicted to admit a changed output layout.
+      std::array<slot, diagnostic_slot_limit> cache;
+      for (unsigned i = 0; i != 3; ++i) {
+        cache[i].texture = std::make_shared<texture_reference>();
+        cache[i].texture->allocation_bytes = diagnostic_byte_limit / 4;
+      }
+      cache[0].id = 1; // Live GPU/IPC ownership must survive budget pressure.
+      if (!reserve_diagnostic_bytes(cache, &cache[3], diagnostic_byte_limit / 2) ||
+          !cache[0].texture || cache[1].texture || !cache[2].texture) return false;
+      if (reserve_diagnostic_bytes(cache, &cache[3], diagnostic_byte_limit) ||
+          !cache[0].texture || cache[2].texture) return false;
+      return !reserve_diagnostic_bytes(cache, &cache[0], 0) &&
+        !reserve_diagnostic_bytes(cache, &cache[0], diagnostic_byte_limit + 1) &&
+        reserve_diagnostic_bytes(cache, &cache[0], diagnostic_byte_limit);
     }
     bool record_diagnostic_regression() {
       // COM Release can synchronously invoke observers. Detach ownership first

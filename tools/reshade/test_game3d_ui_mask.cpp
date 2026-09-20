@@ -200,7 +200,7 @@ namespace {
 }
 
 namespace sunshine_streamline::depth_capture {
-  diagnostic_ticket record_diagnostic_texture(std::uint64_t, const input &value, record_diagnostic *) {
+  diagnostic_ticket record_local_texture(std::uint64_t, const input &value, record_diagnostic *) {
     ++records;
     if (fail_record) return {};
     const auto id = ++next_ticket;

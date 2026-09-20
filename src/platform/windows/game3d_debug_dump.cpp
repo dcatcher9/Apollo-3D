@@ -133,6 +133,14 @@ namespace platf::game3d_debug {
       std::string name;
     };
 
+    std::shared_ptr<sbs_debug::detail::publication_state> publication_owner() {
+      // A converter can be replaced while its CPU publisher still owns hundreds
+      // of MiB. Keep Game dump publication single-flight across those lifetimes,
+      // rather than letting each replacement add another package to the worker.
+      static const auto owner = sbs_debug::detail::publication_state::create();
+      return owner;
+    }
+
     void publish(const std::filesystem::path &root, const package_t &package) {
       const auto temporary = root / (package.name + ".tmp");
       const auto final = root / package.name;
@@ -298,7 +306,7 @@ namespace platf::game3d_debug {
     impl_t(observer_t observe, std::filesystem::path directory):
         observe_(std::move(observe)),
         directory_(directory.empty() ? output_directory() : std::move(directory)),
-        publication_(sbs_debug::detail::publication_state::create()) {}
+        publication_(publication_owner()) {}
 
     ~impl_t() {
       cancel();
@@ -323,7 +331,8 @@ namespace platf::game3d_debug {
     void poll(ID3D11Device *device, ID3D11DeviceContext *context, RECT fullscreen, int width, int height, int mode) {
       try {
         if (!pending_) {
-          if (publication_->busy() || !button_ || !button_->exchange(false, std::memory_order_acq_rel)) {
+          if (!button_ || !button_->load(std::memory_order_acquire) || publication_->busy() ||
+              !button_->exchange(false, std::memory_order_acq_rel)) {
             return;
           }
           start(device, context, fullscreen, width, height, mode);

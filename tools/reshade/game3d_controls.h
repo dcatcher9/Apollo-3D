@@ -144,13 +144,16 @@ namespace sunshine_game3d {
 
   struct automatic_status {
     automatic_phase phase = automatic_phase::unavailable;
+    // Capability for test-only reset adapters; the product has no manual reset.
     bool can_recalibrate = false;
     automatic_scale scale;
   };
 
   // Exporter-owned policy state. Values contain no borrowed GPU objects.
   automatic_status query_automatic(reshade::api::effect_runtime *runtime);
+#if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
   bool recalibrate_automatic(reshade::api::effect_runtime *runtime);
+#endif
 
   void initialize();
   void shutdown();

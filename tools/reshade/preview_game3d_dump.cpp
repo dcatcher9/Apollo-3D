@@ -59,13 +59,15 @@ int main(int argc, char **argv) {
         if (!width || !height || width > 16384 || height > 16384 || !row || size > limit || total > limit - size || artifact.at("row_bytes") != row || artifact.at("byte_count") != size || std::filesystem::file_size(path) != size) {
           throw std::runtime_error("Invalid artifact dimensions, packing or byte budget");
         }
-        storage.emplace_back(static_cast<std::size_t>(size));
-        auto &bytes = storage.back();
+        // A failed optional read must not retain unaccounted allocations while
+        // later artifacts continue through the same bounded-memory reader.
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
         std::ifstream input(path, std::ios::binary);
         input.exceptions(std::ios::failbit | std::ios::badbit);
         input.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        storage.push_back(std::move(bytes));
         total += size;
-        images.push_back({artifact.at("kind").get<std::string>(), width, height, format, bytes});
+        images.push_back({kind, width, height, format, storage.back()});
       } catch (const std::exception &error) {
         if (!optional) throw;
         auto &errors = manifest["optional_capture_errors"];

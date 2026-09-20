@@ -121,11 +121,13 @@ namespace {
       dst.pResource = source.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
       gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     }
-    void verify_host(fixture &gpu, const capture::diagnostic_texture &snapshot, unsigned image = 0) {
+    void verify_host(fixture &gpu, const capture::diagnostic_texture &snapshot, unsigned image = 0,
+        ID3D11Texture2D *already_open = nullptr) {
       require(snapshot.width == width && snapshot.height == height && snapshot.area.left == 4 && snapshot.area.width == width - 8,
         "allocation or tagged crop lost");
       ComPtr<ID3D11Texture2D> opened, staging;
-      check(gpu.host1->OpenSharedResource1(reinterpret_cast<HANDLE>(snapshot.shared_handle), IID_PPV_ARGS(&opened)), "host shared texture open");
+      if (already_open) opened = already_open;
+      else check(gpu.host1->OpenSharedResource1(reinterpret_cast<HANDLE>(snapshot.shared_handle), IID_PPV_ARGS(&opened)), "host shared texture open");
       D3D11_TEXTURE2D_DESC desc{}; opened->GetDesc(&desc); require(desc.Format == source->GetDesc().Format, "typed format changed");
       desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = desc.MiscFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
       check(gpu.host->CreateTexture2D(&desc, nullptr, &staging), "host staging");
@@ -207,11 +209,11 @@ namespace {
       list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
       transition(list, texture, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
-    void verify(unsigned width, unsigned height, unsigned bpp) {
+    void verify(unsigned width, unsigned height, unsigned bpp, unsigned image = 0) {
       unsigned char *mapped{}; check(bytes->Map(0, nullptr, reinterpret_cast<void **>(&mapped)), "consumer readback map");
       bool exact = true;
       for (unsigned y = 0; y != height; ++y) for (unsigned x = 0; x != width * bpp; ++x)
-        exact &= mapped[y * footprint.Footprint.RowPitch + x] == static_cast<unsigned char>((x * 7 + y * 11) & 255);
+        exact &= mapped[y * footprint.Footprint.RowPitch + x] == static_cast<unsigned char>((x * 7 + y * 11 + image * 97) & 255);
       D3D12_RANGE no_write{}; bytes->Unmap(0, &no_write);
       require(exact, "auxiliary consumer copy changed native RGBA bytes");
     }
@@ -371,6 +373,50 @@ namespace {
     snapshot = {}; ticket = {}; capture::poll();
     std::printf("PASS typed format %u: pre-mutation full bytes, crop, independent D3D11 host, nonblocking retirement\n", unsigned(format));
   }
+  void retired_storage_reuse(fixture &gpu) {
+    texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
+    consumer_fixture consumer(gpu);
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+    readback actual(gpu, target.Get());
+    // The host can acknowledge opening a dump before its own readback retires.
+    // Its COM reference is invisible to addon shared_ptr ownership, so an
+    // exported allocation must remain immutable after all addon leases expire.
+    auto exported = capture::record_diagnostic_texture(native(gpu.list.Get()), image.input);
+    require(bool(exported), "immutable exported capture setup");
+    capture::finish_diagnostic_texture(exported, true); gpu.submit(); gpu.wait(); gpu.reset();
+    capture::diagnostic_texture original;
+    require(capture::acquire_diagnostic_texture(exported, original) == capture::status::ready, "exported capture unavailable");
+    ComPtr<ID3D11Texture2D> host_pixels;
+    check(gpu.host1->OpenSharedResource1(reinterpret_cast<HANDLE>(original.shared_handle), IID_PPV_ARGS(&host_pixels)), "host opens before ack");
+    std::weak_ptr<const capture::texture_reference> exported_owner = exported.ownership;
+    capture::release_diagnostic_texture(exported); exported = {}; original.ownership = {}; capture::poll();
+    require(exported_owner.expired(), "exported snapshot was cached for unsafe overwrite after host ack");
+    std::weak_ptr<const capture::texture_reference> storage;
+    std::uint64_t previous_id{};
+    for (unsigned frame = 0; frame != 8; ++frame) {
+      if (frame) {
+        transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        image.copy(gpu, frame % 2);
+        transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      }
+      auto ticket = capture::record_local_texture(native(gpu.list.Get()), image.input);
+      require(bool(ticket) && ticket.id != previous_id, "reused storage kept a stale capture identity");
+      if (frame) require(ticket.ownership == storage.lock(), "retired matching storage was allocated again");
+      capture::finish_diagnostic_texture(ticket, true); gpu.submit(); gpu.wait(); gpu.reset();
+      capture::diagnostic_texture pixels;
+      require(capture::acquire_diagnostic_texture(ticket, pixels) == capture::status::ready, "reused capture unavailable");
+      require(!pixels.shared_handle, "reusable local pixels exposed an unsafe IPC handle");
+      require(capture::copy_diagnostic_texture(native(consumer.list.Get()), native(gpu.foreign_queue.Get()),
+        ticket, native(target.Get()), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "reused local snapshot copy unavailable");
+      actual.record(consumer.list.Get(), target.Get()); consumer.submit(); consumer.wait(); consumer.reset();
+      actual.verify(image.width, image.height, image.bpp, frame % 2);
+      image.verify_host(gpu, original, 0, host_pixels.Get());
+      storage = ticket.ownership; previous_id = ticket.id;
+      capture::release_diagnostic_texture(ticket); ticket = {}; pixels = {}; capture::poll();
+      require(storage.use_count() == 1, "retired capture did not retain exactly one cache owner");
+    }
+    std::puts("PASS local snapshot reuse with fresh IDs/exact pixels; exported pixels stay immutable after host ack");
+  }
   void replay_and_cancel(fixture &gpu) {
     texture_case image(gpu, DXGI_FORMAT_R8_UNORM, 1);
     gpu.submit(); gpu.wait(); gpu.reset(); // Initial upload is not part of the replayed recording.
@@ -403,6 +449,7 @@ int main() {
   try {
     require(capture::testing::diagnostic_snapshot_regression(), "diagnostic retirement/fence/format policy regression");
     fixture gpu;
+    retired_storage_reuse(gpu);
     captured_mutation(gpu, DXGI_FORMAT_R8_UNORM, 1);
     captured_mutation(gpu, DXGI_FORMAT_R8_UINT, 1);
     captured_mutation(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);

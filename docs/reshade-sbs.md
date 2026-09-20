@@ -27,7 +27,7 @@ stereo when a valid export returns. Local AR retains its display-sized stereo re
 Remote Game 3D polls the independent game export on the stream's presentation deadlines, including
 time spent converting and encoding in each frame interval. A static desktop must not add another
 whole-frame wait after encoding. Valid packed exports use the receiver's GPU synchronization;
-they do not wait on the unrelated desktop texture's keyed mutex. Ordinary desktop output and the
+they do not open the unrelated desktop texture or acquire its keyed mutex. Ordinary desktop output and the
 duplicate-eye fallback retain capture synchronization.
 
 With Desktop Duplication capture, Sunshine also composites the visible Windows cursor over each
@@ -153,6 +153,12 @@ CPU pixel readback is added. Unfinished captures are skipped rather than waiting
 resolution or observation-revision changes revoke old masks. Alpha and depth have independently
 recorded source identities: this is bounded previous-input reuse, not an exact generated-frame
 color/depth/mask pairing. Fast-changing UI can therefore briefly lag behind the current color.
+Local FG snapshots reuse their allocations only after all producer and consumer GPU work and
+recordings retire. They expose no shared handle; optional diagnostic snapshots shared with the
+host remain immutable even after acknowledgement. Both use the same bounded capture owner.
+The renderer copies each admitted capture into its private UI texture once, then reuses those
+bytes for later presentations while that capture remains valid. Renderer replacement clears this
+copy identity; failed replacement copies never authorize stale pixels.
 After the existing horizontal
 conditioning, each row computes the exact distance `d` in pixels to positive finite source alpha
 and clips its signed displacement to `+/- 0.5 * max(d - 1, 0) / source_width`. The one-pixel
@@ -378,8 +384,9 @@ shared resources only after nonblocking GPU completion; the host opens and retai
 acknowledging, stages readback without waiting for the GPU, and writes files on its publication
 worker. The same worker automatically generates human-readable PNGs and an `index.html` guide
 before publishing the directory. There is no additional client action, GPU pass or Python runtime
-requirement for previews. One package is in flight at a time. Diagnostic work is not performance
-evidence.
+requirement for previews. Game 3D CPU publication is limited to one package process-wide,
+including across converter replacement and reconnects; those transitions cannot accumulate
+large queued packages. Diagnostic work is not performance evidence.
 
 The human views include full-size `color.png`, `raw_depth.png` and `final_sbs.png` when those inputs
 are available, plus a cropped/jitter-aligned depth view, a color/depth alignment overlay, signed

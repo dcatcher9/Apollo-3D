@@ -1,6 +1,7 @@
 """End-to-end CPU tests of the native Game 3D preview CLI and manifest replacement."""
 
 import argparse
+import ctypes
 import json
 from pathlib import Path
 import struct
@@ -105,6 +106,39 @@ class PreviewCliTests(unittest.TestCase):
         self.assertEqual((self.root / "COLOR.PNG").read_bytes(), data)
         self.assertEqual(self.manifest.read_bytes(), original_bytes)
         self.assertFalse((self.root / "index.html").exists())
+
+    def test_unreadable_optional_input_does_not_block_later_artifacts(self):
+        self.package()
+        locked = self.root / "sl_alpha.bin"
+        locked.write_bytes(bytes([0, 255]))
+        self.original["artifacts"].insert(0, {
+            "kind": "sl_alpha", "file": locked.name, "width": 2, "height": 1,
+            "dxgi_format": 61, "row_bytes": 2, "byte_count": 2,
+        })
+        self.manifest.write_text(json.dumps(self.original), encoding="utf-8")
+        # Metadata remains visible, but opening the optional bytes fails with a
+        # sharing violation. The CLI must release any allocated input storage.
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                      ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                      ctypes.c_void_p]
+        kernel.CreateFileW.restype = ctypes.c_void_p
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel.CloseHandle.restype = ctypes.c_int
+        handle = kernel.CreateFileW(str(locked), 0x80000000, 0, None, 3, 0x80, None)
+        self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+        try:
+            result = self.run_cli()
+        finally:
+            kernel.CloseHandle(handle)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        updated = json.loads(self.manifest.read_text(encoding="utf-8"))
+        errors = updated["optional_capture_errors"]
+        self.assertTrue(any(e["kind"] == "sl_alpha" and e["stage"] == "preview_input"
+                            for e in errors))
+        self.assertEqual(updated["visualizations"]["status"], "complete")
+        self.assertTrue((self.root / "color.png").is_file())
+        self.assertTrue((self.root / "final_sbs.png").is_file())
 
 
 if __name__ == "__main__":

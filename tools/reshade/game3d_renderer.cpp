@@ -232,6 +232,7 @@ namespace sunshine_game3d {
         data_->source_format == typed(desc.texture.format) && data_->color == c &&
         data_->source_override == source_override) return !data_->failed;
     if (data_ && !data_->idle()) return false;
+    ui_source_capture_ = 0;
     data_.reset();
     auto next = std::make_unique<impl>();
     next->source_override.assign(source_override);
@@ -322,5 +323,5 @@ namespace sunshine_game3d {
     }
     data_->frame_state = false;
   }
-  void renderer::reset_after_runtime_drain() { data_.reset(); }
+  void renderer::reset_after_runtime_drain() { ui_source_capture_ = 0; data_.reset(); }
 }

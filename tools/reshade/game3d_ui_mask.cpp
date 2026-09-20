@@ -237,7 +237,7 @@ namespace sunshine_game3d::ui_mask {
     ReleaseSRWLockExclusive(&state.lock);
     release(old);
     if (!result.reservation) return result;
-    auto ticket = capture::record_diagnostic_texture(where.command, input);
+    auto ticket = capture::record_local_texture(where.command, input);
     bool retained = false;
     AcquireSRWLockExclusive(&state.lock);
     for (auto &item : state.entries) if (item.wanted.runtime == runtime && item.generation == result.generation) {
