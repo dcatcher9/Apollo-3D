@@ -6,9 +6,11 @@
 #include "scene_gain.h"
 
 // Relative controls for the selected depth/color pair. No camera matrices,
-// meters or final-color registration are recovered. The smoothly tracked center
-// defines the current screen plane and relative stereo units, not inferred
-// projection parameters. Unknown encoding changes remain a limitation.
+// meters or final-color registration are recovered. Whole-viewport extrema
+// supply a tracked midpoint screen plane; the full-image maximum supplies
+// its independent gain reference. Ratios cancel positive multiplicative units,
+// not unknown additive offsets in an undeclared depth encoding.
+// Unknown encoding changes remain a limitation.
 namespace sunshine_raw_scene {
   // Shared value types/constants only; the raw controller does not invoke the
   // physical-camera policy or claim its projection/registration proof.
@@ -36,7 +38,10 @@ namespace sunshine_raw_scene {
     frame_key readback_frame;
     source_key readback_source;
     std::uint64_t readback_layout_epoch{};
-    std::array<float, grid_width * grid_height> raw{};
+    std::array<float, grid_width * grid_height> raw{}; // Unmodified selector points; legacy fixture fallback.
+    bool range_supplied{}, range_valid{};
+    float range_min{}, range_max{};
+    sunshine_depth_statistics::moments moments;
   };
   enum class status {
     uninitialized, basis_epoch_mismatch, direction_unknown,
@@ -75,12 +80,17 @@ namespace sunshine_raw_scene {
     unsigned calibration_samples{};
     double target_H{};
     sunshine_scene_gain::refinement learning{};
+    bool limited{};
+    sunshine_scene_gain::depth_range depth_statistics{};
+    bool has_depth_statistics{};
+    double target_t0{};
   };
 
   class policy {
   public:
+    void configure(sunshine_scene_gain::limits budget) noexcept { budget_ = budget; gain_.configure(budget); }
     // Explicit reference reset discards numeric state and requests fresh packets
-    // in a strictly newer caller-owned epoch. Scale derives from current zero.
+    // in a strictly newer caller-owned epoch. Gain and zero initialize separately.
     bool reset(std::uint64_t basis_epoch, std::uint64_t now_ms) noexcept {
       if (!basis_epoch || basis_epoch <= epoch_) return false;
       *this = policy{};
@@ -134,18 +144,22 @@ namespace sunshine_raw_scene {
         evidence_reason_ = gain_.initialized() ? status::holding_reference : status::calibrating;
         return;
       }
-      double center_t{};
-      const auto measured = center(value, center_t);
-      if (measured != status::ready) { reject(measured); return; }
-
-      const auto gain_status = gain_.observe(center_t, value.capture_ms, value.metadata.feedback);
+      const bool normal = value.metadata.direction == orientation::normal;
+      const auto range = sunshine_scene_gain::decode_range(value.raw, value.range_supplied,
+        value.range_valid, value.range_min, value.range_max, normal ? 1.f : 0.f, normal ? -1.f : 1.f,
+        0.f, 1.f, value.moments);
+      if (!range.valid()) { reject(status::invalid_depth); return; }
+      const auto gain_status = gain_.observe(range, value.capture_ms, value.metadata.feedback);
+      if (gain_status == sunshine_scene_gain::status::unsupported) {
+        evidence_reason_ = status::unsupported_shader_domain;
+        return;
+      }
       if (!gain_.initialized()) {
-        evidence_reason_ = gain_status == sunshine_scene_gain::status::unsupported ?
-          status::unsupported_shader_domain : status::calibrating;
+        evidence_reason_ = status::calibrating;
         return;
       }
       target_frame_ = value.metadata.frame;
-      evidence_reason_ = status::ready;
+      evidence_reason_ = gain_.has_target() ? status::ready : status::holding_reference;
     }
 
     // Rendering uses only the actual current pair. Missing pixels suspend the
@@ -273,19 +287,6 @@ namespace sunshine_raw_scene {
       return !have_sample_ || (value.id > last_id_ && value.capture_ms > last_capture_ms_ &&
         value.metadata.frame.frame > last_sample_frame_.frame);
     }
-    static status center(const sample &value, double &mean) noexcept {
-      mean = 0.0;
-      for (unsigned y = 7; y != 11; ++y) for (unsigned x = 14; x != 18; ++x) {
-        const float raw = value.raw[y * grid_width + x];
-        if (!std::isfinite(raw) || raw < 0.0f || raw > 1.0f) return status::invalid_depth;
-        // Do not discard endpoints and reweight the remaining cells. Without
-        // per-cell written evidence either endpoint may be an unwritten clear.
-        if (raw == 0.0f || raw == 1.0f) return status::clear_depth;
-        const float t = value.metadata.direction == orientation::normal ? 1.0f - raw : raw;
-        mean += static_cast<double>(t) / 16.0;
-      }
-      return mean > 0.0 && std::isfinite(mean) ? status::ready : status::invalid_depth;
-    }
     static bool shader_domain(float H, double zero) noexcept {
       return timing::shader_coordinate_domain(H, 1.0f, zero);
     }
@@ -298,6 +299,7 @@ namespace sunshine_raw_scene {
       current_frame_ = last_sample_frame_ = target_frame_ = {};
       last_id_ = last_capture_ms_ = 0;
       gain_.reset();
+      gain_.configure(budget_);
       evidence_reason_ = status::calibrating;
       // reset/switch owns the capture floor. Initial adoption may consume a
       // valid asynchronous packet captured after reset but before this update.
@@ -317,6 +319,9 @@ namespace sunshine_raw_scene {
       out.calibration_samples = gain_.samples();
       out.target_H = gain_.target();
       out.learning = gain_.learning();
+      out.limited = gain_.limited();
+      out.has_depth_statistics = gain_.depth_statistics(out.depth_statistics);
+      out.target_t0 = gain_.target_zero();
       return out;
     }
 
@@ -325,6 +330,7 @@ namespace sunshine_raw_scene {
     std::uint64_t epoch_{}, wall_ms_{}, minimum_capture_ms_{}, minimum_frame_{},
       last_id_{}, last_capture_ms_{}, cut_ms_{};
     sunshine_scene_gain::policy gain_;
+    sunshine_scene_gain::limits budget_;
     status evidence_reason_{status::calibrating};
     bool have_wall_{}, have_current_{}, have_basis_{}, have_sample_{}, have_cut_{};
   };

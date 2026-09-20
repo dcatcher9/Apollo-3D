@@ -33,6 +33,7 @@
 #include "misc.h"
 #include "reshade_bridge.h"
 #include "sbs_debug_dump.h"
+#include "game3d_debug_dump.h"
 #include "src/config.h"
 #include "src/depth_coordinate_v2.h"
 #include "src/game_source_tracker.h"
@@ -546,6 +547,14 @@ namespace platf::dxgi {
         std::nullopt
     ) {
       auto &img = (img_d3d_t &) img_base;
+      if (::video::is_game_mode(sbs_mode)) {
+        // Missing depth/exports are diagnostic use cases too. Poll before the blank-image
+        // guard and without sharing the AI dumper's request/retry ownership.
+        game_dumper.poll(device.get(), device_ctx.get(),
+          RECT {display->offset_x, display->offset_y,
+            display->offset_x + display->width, display->offset_y + display->height},
+          game_source_width, game_source_height, sbs_mode);
+      }
       auto converted_content_timestamp =
         ::video::detail::select_rendered_content_timestamp(
           false,
@@ -5066,7 +5075,8 @@ namespace platf::dxgi {
       sbs_telemetry_event = std::move(telemetry_event);
       sbs_telemetry_subscription = std::move(telemetry_subscription);
       sbs_telemetry_performance = diagnostics_enabled ? std::move(telemetry_performance) : nullptr;
-      sbs_dumper.set_button_request(std::move(sbs_debug_dump_request));
+      game_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? sbs_debug_dump_request : nullptr);
+      sbs_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? nullptr : std::move(sbs_debug_dump_request));
       sbs_flat_identity_ps.reset();
       sbs_reprojection_v2_live_ps.reset();
       sbs_reprojection_v2_p010_y_ps.reset();
@@ -5941,6 +5951,7 @@ namespace platf::dxgi {
     bool sbs_gpu_timing_ready = false;
 
     platf::sbs_debug::dumper sbs_dumper;  ///< Debug: dumps SBS frames on the client button (see sbs_debug_dump.h).
+    platf::game3d_debug::dumper game_dumper;  ///< Exact add-on inputs and provider observations, independent of AI dumps.
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp_;
   };
 

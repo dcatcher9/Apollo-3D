@@ -37,7 +37,7 @@ namespace {
   void native_defaults_and_saved_values() {
     fake_config config;
     auto settings = load_settings(config);
-    check(settings.enabled && settings.strength == 50.f && settings.depth_view == 0 && config.writes.empty(),
+    check(settings.enabled && settings.strength == 50.f && settings.depth_view == 0 && !settings.source_alpha_ui && config.writes.empty(),
       "Native defaults or passive-load persistence differ");
     config.values = {{"Strength", 0.f}, {"DepthView", 2}, {"Enabled", false}, {"Unrelated", 17}};
     settings = load_settings(config);
@@ -83,6 +83,76 @@ namespace {
     settings.alive = false;
     check(!edit_strength(settings, 10.f, config) && !edit_depth_view(settings, 2, config) &&
       !edit_enabled(settings, false, config) && config.writes.empty(), "Destroyed runtime accepted an edit");
+  }
+
+  void source_alpha_ui_is_explicit_persistent_and_runtime_scoped() {
+    fake_config config, other_config;
+    config.values = {{"Strength", 23.5f}, {"DepthView", 2}, {"Enabled", false}, {"Unrelated", 17}};
+    const auto original = config.values;
+    settings_state settings {load_settings(config)};
+    check(!settings.values.source_alpha_ui && config.writes.empty(), "Source alpha UI was enabled implicitly");
+    check(edit_source_alpha_ui(settings, true, config) && settings.values.source_alpha_ui &&
+      std::get<bool>(config.values.at("SourceAlphaUI")) && config.writes == std::vector<std::string>{"SourceAlphaUI"},
+      "Source alpha interpretation did not persist as an explicit boolean");
+    for (const auto &[key, value] : original)
+      check(config.values.at(key) == value, "Source alpha edit changed an unrelated setting");
+    check(settings.values.strength == 23.5f && settings.values.depth_view == 2 && !settings.values.enabled &&
+      !edit_source_alpha_ui(settings, true, config) && config.writes.size() == 1,
+      "Source alpha edit changed rendering controls or saved redundantly");
+    settings_state recreated {load_settings(config)};
+    check(recreated.values.source_alpha_ui && config.writes.size() == 1 && !load_settings(other_config).source_alpha_ui,
+      "Source alpha interpretation was lost on recreation or leaked into another game");
+    check(edit_source_alpha_ui(recreated, false, config) && !load_settings(config).source_alpha_ui &&
+      !std::get<bool>(config.values.at("SourceAlphaUI")) && config.writes.size() == 2,
+      "Disabling source alpha UI did not persist");
+    recreated.alive = false;
+    check(!edit_source_alpha_ui(recreated, true, config) && config.writes.size() == 2,
+      "Destroyed runtime accepted a source alpha edit");
+  }
+
+  void source_alpha_ui_persistence_failure_does_not_commit() {
+    fake_config config;
+    settings_state settings;
+    config.on_write = [] { throw std::runtime_error("Synthetic config failure"); };
+    bool threw = false;
+    try { edit_source_alpha_ui(settings, true, config); } catch (const std::runtime_error &) { threw = true; }
+    check(threw && !settings.values.source_alpha_ui && config.writes.empty(),
+      "Failed source alpha persistence changed the applied setting");
+    config.on_write = [&] { settings.alive = false; };
+    check(!edit_source_alpha_ui(settings, true, config) && !settings.values.source_alpha_ui,
+      "Source alpha callback committed after runtime destruction");
+  }
+
+  void source_alpha_fg_mode_survives_observation_gaps() {
+    source_alpha_ui_policy policy;
+    check(policy.update(true, {}, true).effective(), "An unobserved FG mode disabled an explicit non-FG alpha preference");
+    frame_generation_mode fg {true, true, false, 1, 0, 7, 41};
+    const auto initial = policy.update(true, fg, true);
+    check(initial.blocked_by_fg() && !initial.effective(), "Confirmed FG did not block presentation alpha");
+    auto retained = initial;
+    retained.retained_alpha_ready = true;
+    check(retained.effective() && !retained.blocked_by_fg(), "Completed real alpha did not enable FG UI protection");
+    retained.requested = false;
+    check(!retained.effective(), "Retained alpha overrode the user's disabled preference");
+    // Busy, ambiguous and missing observations all carry no confirmed mode.
+    // None is an FG-off event, including while Generic depth is manually pinned.
+    for (unsigned missing = 0; missing < 3; ++missing) {
+      const auto held = policy.update(true, {}, true);
+      check(held.blocked_by_fg() && !held.effective() && held.fg.epoch == 7 && held.fg.sequence == 41,
+        "Observation loss reenables alpha or loses the confirmed mode's identity");
+    }
+    const auto disabled = policy.update(false, {}, true);
+    check(!disabled.requested && !disabled.effective() && disabled.fg.enabled,
+      "Disabling the UI preference lost the independent FG observation");
+    fg.enabled = false; fg.sequence = 42;
+    check(policy.update(true, fg, true).effective(), "Explicit FG Off did not restore the saved preference");
+    fg.enabled = true; fg.epoch = 8; fg.sequence = 1;
+    check(policy.update(true, fg, true).blocked_by_fg(), "New confirmed observer scope was not accepted");
+    const auto stopped = policy.update(true, {}, false);
+    check(!stopped.fg.known && stopped.effective(), "Observer shutdown retained a previous scope's FG mode");
+    source_alpha_ui_policy recreated;
+    check(!recreated.update(true, {}, true).fg.known, "A new runtime inherited the old runtime's mode");
+    check(initial.fg.enabled && !initial.effective(), "Later mode changes mutated an already frozen presentation");
   }
 
   void persistence_survives_runtime_recreation() {
@@ -170,6 +240,118 @@ namespace {
     check(automatic_status{}.scale.state() == availability::unavailable, "A new runtime inherited another runtime's scale");
   }
 
+  void measured_statistics_follow_applied_and_held_scale_ownership() {
+    using basis = automatic_scale_basis;
+    automatic_scale current{basis::camera_matrix, 4.f, true, 2.f};
+    current.reference_inverse = 2.;
+    current.minimum_inverse = 0.;
+    current.maximum_inverse = 2.;
+    current.mean_inverse = .3;
+    current.normalization = 4.;
+    current.zero_inverse = .25f;
+    current.has_zero = true;
+    current.target_zero_inverse = 1.;
+    current.zero_target_available = true;
+    current.mean_square_inverse = .2;
+    current.depth_pixel_count = 3072 * 2304;
+    current.depth_tiles_x = 28; current.depth_tiles_y = 21;
+    current.has_depth_statistics = true;
+    auto shown = retain_automatic_scale({}, current);
+    check(shown.depth_statistics_valid() && shown.reference_inverse == 2. && shown.mean_inverse == .3 &&
+        shown.normalization == 4. && shown.minimum_inverse == 0. &&
+        shown.has_zero_target() && shown.zero_inverse == .25f && shown.target_zero_inverse == 1. &&
+        shown.reference_inverse != 1. / shown.value && shown.reference_inverse != 1. / shown.target_value,
+      "Measured nearest reference was confused with the mean, reciprocal gain or infinite-far endpoint");
+
+    auto pending = current;
+    pending.active = false;
+    pending.reference_inverse = 1.;
+    pending.maximum_inverse = 1.;
+    pending.mean_inverse = .8;
+    pending.normalization = 16.;
+    pending.target_zero_inverse = .5;
+    shown = retain_automatic_scale(shown, pending);
+    check(shown.state() == automatic_scale_state::held && shown.depth_statistics_valid() && shown.reference_inverse == 2. &&
+        shown.mean_inverse == .3 && shown.normalization == 4. &&
+        !shown.has_zero_target() && !shown.zero_target_available && shown.target_zero_inverse == 0. &&
+        shown.zero_inverse == .25f &&
+        shown.depth_pixel_count == 3072 * 2304 && shown.depth_tiles_x == 28 && shown.mean_square_inverse == .2,
+      "Held applied scale acquired statistics from an unapplied frame");
+    shown = retain_automatic_scale(shown, {});
+    check(shown.state() == automatic_scale_state::held && shown.depth_statistics_valid() && shown.maximum_inverse == 2. &&
+        shown.mean_inverse == .3 && shown.normalization == 4.,
+      "Missing depth lost the last-applied held statistics");
+    current.target_value = 0.f;
+    current.has_depth_statistics = false;
+    shown = retain_automatic_scale(shown, current);
+    check(shown.state() == automatic_scale_state::active && !shown.depth_statistics_valid() && !shown.has_zero_target(),
+      "Active frame with expired target resurrected earlier fresh statistics");
+    pending.basis = basis::relative_depth;
+    shown = retain_automatic_scale(shown, pending);
+    check(shown.state() == automatic_scale_state::pending && !shown.has_depth_statistics &&
+        shown.reference_inverse == 0. && shown.minimum_inverse == 0. && shown.maximum_inverse == 0. &&
+        shown.mean_inverse == 0. && shown.normalization == 0. &&
+        shown.target_zero_inverse == 0. && !shown.zero_target_available && !shown.has_zero_target() &&
+        shown.depth_pixel_count == 0 && shown.depth_tiles_x == 0 && shown.depth_tiles_y == 0 && shown.mean_square_inverse == 0.,
+      "Pending basis change retained camera statistics as raw statistics");
+    check(!retain_automatic_scale({}, pending).depth_statistics_valid(),
+      "Statistics from a never-applied scale became visible during startup");
+
+    current.has_depth_statistics = true;
+    for (unsigned fault = 0; fault != 17; ++fault) {
+      auto invalid = current;
+      switch (fault) {
+        case 0: invalid.reference_inverse = std::numeric_limits<double>::quiet_NaN(); break;
+        case 1: invalid.minimum_inverse = -1.; break;
+        case 2: invalid.maximum_inverse = std::numeric_limits<double>::infinity(); break;
+        case 3: invalid.minimum_inverse = 3.; break;
+        case 4: invalid.reference_inverse = -.1; break;
+        case 5: invalid.reference_inverse = 2.1; break;
+        case 6: invalid.basis = basis::unknown; break;
+        case 7: invalid.mean_square_inverse = std::numeric_limits<double>::quiet_NaN(); break;
+        case 8: invalid.depth_tiles_x = 0; break;
+        case 9: invalid.reference_inverse = .3; break;
+        case 10: invalid.mean_inverse = std::numeric_limits<double>::quiet_NaN(); break;
+        case 11: invalid.mean_inverse = -.1; break;
+        case 12: invalid.mean_inverse = 2.1; break;
+        case 13: invalid.normalization = 0.; break;
+        case 14: invalid.normalization = -1.; break;
+        case 15: invalid.normalization = std::numeric_limits<double>::infinity(); break;
+        case 16: invalid.normalization = std::numeric_limits<double>::quiet_NaN(); break;
+      }
+      check(!invalid.depth_statistics_valid(), "Invalid depth statistics passed UI validation");
+    }
+    check(!automatic_scale{}.depth_statistics_valid(), "Default statistic zeros were shown as measured data");
+  }
+
+  void positive_flat_zero_target_does_not_invent_gain_tracking() {
+    automatic_scale measured{automatic_scale_basis::relative_depth, 4.f, true, 0.f};
+    measured.has_zero = true;
+    measured.zero_inverse = .1f;
+    measured.reference_inverse = measured.minimum_inverse = measured.maximum_inverse = .4;
+    measured.mean_inverse = .4;
+    measured.normalization = 7.68;
+    measured.has_depth_statistics = true;
+    measured.target_zero_inverse = .4;
+    measured.zero_target_available = true;
+    const auto shown = retain_automatic_scale({}, measured);
+    check(shown.state() == automatic_scale_state::active && shown.depth_statistics_valid() &&
+        shown.has_zero_target() && shown.target_zero_inverse == .4 && shown.zero_inverse == .1f &&
+        !shown.has_target() && shown.value == 4.f,
+      "A positive flat scene hid its zero target or fabricated a gain target");
+    const auto held = retain_automatic_scale(shown, {});
+    check(held.value == shown.value && held.zero_inverse == shown.zero_inverse &&
+        !held.has_target() && !held.has_zero_target() && held.target_zero_inverse == 0.,
+      "Missing depth exposed a stale flat-scene zero target");
+    for (double bad_target : {-1., std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+      auto invalid = measured;
+      invalid.target_zero_inverse = bad_target;
+      check(!invalid.has_zero_target(), "Invalid zero target passed UI validation");
+    }
+    measured.zero_target_available = false;
+    check(!measured.has_zero_target(), "Unavailable zero target was inferred from a default numeric value");
+  }
+
   void projection_conversion_is_independent_and_retained_with_its_reference() {
     using basis = automatic_scale_basis;
     using availability = automatic_scale_state;
@@ -237,10 +419,15 @@ int main() {
     native_defaults_and_saved_values();
     edits_save_exactly_one_owned_setting();
     invalid_edits_do_not_reach_config();
+    source_alpha_ui_is_explicit_persistent_and_runtime_scoped();
+    source_alpha_ui_persistence_failure_does_not_commit();
+    source_alpha_fg_mode_survives_observation_gaps();
     persistence_survives_runtime_recreation();
     config_failure_and_lifetime_do_not_commit_stale_values();
     output_status_distinguishes_flat_preview_and_stereo();
     automatic_scale_tracks_applied_basis();
+    measured_statistics_follow_applied_and_held_scale_ownership();
+    positive_flat_zero_target_does_not_invent_gain_tracking();
     projection_conversion_is_independent_and_retained_with_its_reference();
     std::puts("PASS native Game 3D controls: defaults, automatic persistence, independent resets, runtime lifetime, output status and scale/conversion");
     return 0;

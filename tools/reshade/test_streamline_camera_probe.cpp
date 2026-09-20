@@ -7,6 +7,7 @@
 #include "streamline_depth_provider.h"
 #include "streamline_camera_version.h"
 #include "upscaler_call_trace.h"
+#include "game3d_ui_mask.h"
 #include <reshade.hpp>
 
 #include <atomic>
@@ -813,7 +814,7 @@ namespace {
     require(GetTickCount64() > snapshot.tick, "source age clock did not advance within fixture deadline");
     require(query_depth_source(snapshot, 0) == evidence_status::stale, "age limit ignored");
     constants.reset = 1; call_v1_constants(constants, 4, 7); call_v1_evaluate(nullptr, 0, 4, 7);
-    query(evidence_status::camera_reset, "reset camera nominated old scene");
+    query(evidence_status::observation_lost, "reset camera nominated depth tags from the old scene");
     constants.reset = 0; call_v1_constants(constants, 5, 7); call_v1_tag(&resource, 0, 7, nullptr); call_v1_evaluate(nullptr, 0, 5, 7);
     resource.native = &other;
     depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&other), 50, 10, true);
@@ -1076,7 +1077,8 @@ namespace {
     tag.area.width = resource.width;
     constants = modern_camera(); constants.reset = 1;
     call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &tag, 1, nullptr); evaluate();
-    require(!testing::normalized_source(view.value, 0, normalized), "explicit camera reset bypassed source admission");
+    require(testing::normalized_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied,
+      "valid reset-frame depth lost its current projection/source");
 
     view = viewport(10); mint(token, nullptr); evaluate();
     require(!testing::normalized_source(view.value, 0, normalized), "missing depth tag acquired camera-free source authority");
@@ -1177,8 +1179,14 @@ namespace {
     evaluate(3, 1, true);
     evaluation_snapshot reset;
     require(testing::latest_snapshot(1, reset) && reset.feedback.reset &&
-        reset.feedback.revision > ordinary.feedback.revision && !testing::normalized_source(1, 0, other),
-      "reset failed to invalidate continuity or entered normalized capture");
+        reset.feedback.revision > ordinary.feedback.revision && testing::normalized_source(1, 0, other) &&
+        other.feedback.reset && other.feedback.revision == reset.feedback.revision &&
+        other.observation_revision == depth_observation_revision() && other.projection.supplied &&
+        other.projection.depth_offset == initial.projection.depth_offset &&
+        other.projection.depth_scale == initial.projection.depth_scale && other.source_frame_numeric == 3 &&
+        other.source_id == initial.source_id,
+      "reset failed to revoke history while admitting its fresh depth and projection");
+    require(!testing::normalized_source(2, 0, other), "reset promoted a pre-reset viewport snapshot to the new revision");
     evaluate(4, 1);
     sunshine_scene_depth::frame recovered;
     require(testing::normalized_source(1, 0, recovered) && !recovered.feedback.reset &&
@@ -1218,13 +1226,59 @@ namespace {
     evaluation_snapshot reset;
     require(testing::latest_snapshot(1, reset) && reset.frame.numeric == 2 && reset.feedback.reset &&
         reset.feedback.revision == depth_observation_revision() + 1 && !testing::normalized_source(1, 0, normalized),
-      "reset evaluation failed to preserve its own immutable continuity metadata");
+      "reset evaluation accepted depth tags from before its temporal boundary");
+    call_v1_tag(&resource, 0, 1, nullptr); call_v1_evaluate(nullptr, 0, 2, 1);
+    require(testing::normalized_source(1, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied &&
+        normalized.source_frame_numeric == 2 && normalized.feedback.revision == reset.feedback.revision,
+      "freshly retagged reset frame did not recover without waiting for a non-reset frame");
     constants.reset = 0;
     call_v1_constants(constants, 3, 1); call_v1_tag(&resource, 0, 1, nullptr); call_v1_evaluate(nullptr, 0, 3, 1);
     require(testing::normalized_source(1, 0, normalized) && normalized.source_frame_numeric == 3 &&
         !normalized.feedback.reset && normalized.feedback.revision == reset.feedback.revision &&
         first.feedback.revision == original_revision,
       "post-reset source failed to recover or rewrote earlier feedback");
+  }
+
+  void test_reset_constants_observation_loss(bool modern) {
+    fixture cleanup;
+    require(testing::install(modern ? testing::abi::v2_7_30 : testing::abi::v1_1_1,
+      modern ? tracked_v2_targets : v1_targets), "reset constants race install failed");
+    int native{}; abi_v1::resource old_resource{}; old_resource.native = &native;
+    auto resource = modern_resource(&native); auto tag = depth_tag_for(resource);
+    auto old = old_camera(); old.reset = 1;
+    auto current = modern_camera(); current.reset = 1;
+    auto view = viewport(1); opaque_token token; const std::uint32_t frame = 1;
+    if (modern) mint(token, &frame);
+    const auto constants = [&] {
+      if (modern) call_v2_constants(current, token.ref(), view);
+      else call_v1_constants(old, frame, view.value);
+    };
+    const auto evaluate = [&] {
+      if (modern) {
+        call_v2_tag(view, &tag, 1, nullptr);
+        const base_structure *inputs[] = {&view.base};
+        call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
+      } else {
+        call_v1_tag(&old_resource, 0, view.value, nullptr);
+        call_v1_evaluate(nullptr, 0, frame, view.value);
+      }
+    };
+    block_original = true;
+    std::thread pending(constants);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!original_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    const bool entered = original_entered.load(std::memory_order_acquire);
+    testing::lose_observation();
+    release_original = true; pending.join(); block_original = false;
+    require(entered, "reset constants race did not reach the original call");
+    evaluate();
+    sunshine_scene_depth::frame normalized;
+    require(!testing::normalized_source(view.value, 0, normalized),
+      "reset revision repaired unrelated observation loss during the constants call");
+    constants(); evaluate();
+    require(testing::normalized_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied,
+      "fresh reset constants did not recover after the interrupted reset call");
   }
 
   void test_evaluation_v1() {
@@ -1949,6 +2003,73 @@ namespace {
       "shutdown PCL hook lost pure passthrough");
   }
 
+  void test_frame_generation_color_only_alpha() {
+    namespace mask = sunshine_game3d::ui_mask;
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG alpha hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function,
+      "FG alpha options wrapper was unavailable");
+    auto options_call = reinterpret_cast<fg_function>(function);
+    auto view = viewport(11); fg_options options;
+    require(options_call(view, options) == 0, "FG alpha options call failed");
+    frame_generation_snapshot fg;
+    require(query_frame_generation(view.value, fg) && fg.enabled, "FG alpha mode was not confirmed");
+    constexpr std::uint64_t runtime = 0x100, device = 0x200;
+    mask::request wanted{runtime, device, fg.epoch, depth_observation_revision(), view.value, 3840, 2160, true};
+    mask::set_request(wanted);
+    int native{}, commands{};
+    auto resource = modern_resource(&native); resource.width = 3840; resource.height = 2160; resource.state = 8;
+    auto tag = depth_tag_for(resource); tag.type = 53; tag.lifecycle = 0; tag.area = {0, 0, 3840, 2160};
+    SetLastError(incoming_error);
+    require(call_v2_tag(view, &tag, 1, &commands) == 0 && GetLastError() == outgoing_error &&
+        tag_call.incoming_error == incoming_error, "color-only alpha hook changed SDK forwarding");
+    mask::boundary observed;
+    require(mask::testing::last_attempt(runtime, observed) && observed.source.epoch == fg.epoch &&
+        observed.source.resource.native == reinterpret_cast<std::uint64_t>(&native) &&
+        observed.source.resource.width == 3840 && observed.source.resource.height == 2160 &&
+        observed.source.resource.area.width == 3840 && observed.source.native_state == 8 &&
+        observed.source.valid_until == sunshine_scene_depth::lifetime::at_call && !observed.tag_scope &&
+        !observed.source.source_frame_explicit && observed.command == reinterpret_cast<std::uint64_t>(&commands),
+      "color-only global tag53 was not captured independently of depth/camera/dump/diagnostic probe");
+    evaluation_snapshot depth;
+    require(!testing::latest_snapshot(view.value, depth), "alpha-only tag nominated a depth evaluation");
+    const auto global_sequence = observed.source.sequence;
+    opaque_token token; std::uint32_t numeric = 71; mint(token, &numeric);
+    require(call_v2_framed_tag(token.ref(), view, &tag, 1, &commands) == 0 &&
+        mask::testing::last_attempt(runtime, observed) && observed.source.sequence > global_sequence &&
+        observed.tag_scope == 1 && observed.source.source_frame_explicit &&
+        observed.source.source_frame_has_numeric && observed.source.source_frame_numeric == numeric &&
+        observed.source.source_frame_token == reinterpret_cast<std::uint64_t>(&token.ref()),
+      "explicit-frame tag53 lost its own frame provenance");
+    tag.resource_ptr = nullptr;
+    call_v2_tag(view, &tag, 1, &commands);
+    require(mask::testing::last_attempt(runtime, observed) && !observed.source.resource.native,
+      "null color tag did not reach alpha revocation owner");
+    const auto null_sequence = observed.source.sequence;
+    tag.resource_ptr = &resource;
+    testing::lose_observation();
+    call_v2_tag(view, &tag, 1, &commands);
+    require(mask::testing::last_attempt(runtime, observed) && observed.source.sequence == null_sequence,
+      "new observation revision captured into an old requested alpha scope");
+    wanted.revision = depth_observation_revision(); mask::set_request(wanted);
+    call_v2_tag(view, &tag, 1, &commands);
+    require(mask::testing::last_attempt(runtime, observed), "renewed alpha scope failed to recover");
+    options.mode = 0; options_call(view, options);
+    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport) &&
+        !mask::testing::last_attempt(runtime, observed), "FG Off retained alpha owner scope");
+    options.mode = 1; options_call(view, options);
+    wanted.revision = depth_observation_revision(); mask::set_request(wanted);
+    call_v2_tag(view, &tag, 1, &commands);
+    require(mask::testing::last_attempt(runtime, observed), "re-enabled FG did not resume color-only alpha capture");
+    result_v2 = -7; options_call(view, options); result_v2 = 0;
+    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport), "failed FG options retained alpha scope");
+    mask::set_request(wanted); shutdown();
+    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport), "shutdown retained live alpha request");
+  }
+
   void test_frame_generation_tags() {
     fixture cleanup;
     probe_setting = "0"; source_setting = "1"; initialize(nullptr);
@@ -2266,7 +2387,14 @@ namespace {
     require(depth_observation_revision() != revision_before_reset,
       "FG camera reset did not revoke retained depth before the next tag");
     tag_now();
-    require(!testing::normalized_source(view.value, 0, normalized), "reset camera entered global FG capture");
+    require(testing::normalized_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied &&
+        normalized.observation_revision == depth_observation_revision() && normalized.frame_generation_input,
+      "valid global FG reset frame lost current depth/projection after retiring older depth");
+    constants.reset = 2; call_v2_constants(constants, token.ref(), view); tag_now();
+    require(!testing::normalized_source(view.value, 0, normalized), "malformed reset flag entered global FG capture");
+    constants = modern_camera(); constants.reset = 1; constants.common.camera_view_to_clip.m[0][0] = 0;
+    call_v2_constants(constants, token.ref(), view); tag_now();
+    require(!testing::normalized_source(view.value, 0, normalized), "reset admitted an invalid projection into global FG capture");
     constants = modern_camera(); constants.common.camera_view_to_clip.m[0][0] = 0;
     call_v2_constants(constants, token.ref(), view); tag_now();
     require(!testing::normalized_source(view.value, 0, normalized), "invalid global camera projection entered FG capture");
@@ -2445,6 +2573,8 @@ int main(int argc, char **argv) {
     test_high_resolution_jitter_domain();
     std::puts("PASS v1/v2 frame-owned jitter, padded render extent, high-res domain proof and optional metadata rejection");
     test_source_without_projection();
+    test_frame_generation_color_only_alpha();
+    std::puts("PASS live pre-FG alpha observes color-only global/frame tag53 with diagnostic probe off; null, revision, Off and shutdown revoke scope");
     test_frame_generation_tags();
     std::puts("PASS FG first-call options wrapper, synchronous OnlyValidNow tags, precision transforms, global/explicit frames, Off and failure gates");
     test_frame_generation_cached_options_and_global_camera();
@@ -2480,7 +2610,9 @@ int main(int argc, char **argv) {
     test_scene_feedback(false);
     test_scene_feedback(true);
     test_scene_feedback_inflight();
-    std::puts("PASS v1/v2 immutable reset feedback, source continuity and rejection of pre-reset in-flight completion");
+    test_reset_constants_observation_loss(false);
+    test_reset_constants_observation_loss(true);
+    std::puts("PASS v1/v2 fresh reset depth/projection, immutable feedback, and rejection of pre-reset tags, in-flight completion and interrupted reset constants");
     test_evaluation_immutable_and_ordered();
     std::puts("PASS immutable evaluation ordering, bounded frame eviction and age limits");
     test_evaluation_v2_tokens();

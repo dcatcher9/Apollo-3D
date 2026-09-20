@@ -342,4 +342,54 @@ namespace {
     }
     EXPECT_TRUE(image.expired());
   }
+
+  TEST(RemoteEncodePendingSourceTest, FailedEncoderReturnsStaticDesktopToReplacement) {
+    safe::event_t<std::shared_ptr<captured_source>> images;
+    source_owner retiring;
+    retiring.observe(std::make_shared<captured_source>(7, at(5ms)));
+    retiring.converted();  // No more desktop changes arrive before the encoder times out.
+    retiring.return_for_rebuild(images, false, false);
+    EXPECT_FALSE(retiring.latest());
+
+    source_owner replacement;
+    replacement.observe(images.pop(0ms));
+    ASSERT_TRUE(replacement.latest());
+    EXPECT_EQ(replacement.latest()->pixels, 7);
+    EXPECT_EQ(replacement.latest()->captured_at, at(5ms));
+    EXPECT_TRUE(replacement.pending());
+    EXPECT_FALSE(images.peek());
+  }
+
+  TEST(RemoteEncodePendingSourceTest, FailureHandoffPreservesNewerQueuedCapture) {
+    safe::event_t<std::shared_ptr<captured_source>> images;
+    source_owner retiring;
+    retiring.observe(std::make_shared<captured_source>(7, at(5ms)));
+    const std::weak_ptr<captured_source> old_image = retiring.latest();
+    images.raise(std::make_shared<captured_source>(8, at(6ms)));
+
+    retiring.return_for_rebuild(images, false, false);
+    EXPECT_TRUE(old_image.expired());
+    const auto next = images.pop(0ms);
+    ASSERT_TRUE(next);
+    EXPECT_EQ(next->pixels, 8);
+    EXPECT_EQ(next->captured_at, at(6ms));
+  }
+
+  TEST(RemoteEncodePendingSourceTest, FailureHandoffDoesNotKeepAnOldDisplayAliveAfterCancellation) {
+    for (int cancellation = 0; cancellation < 3; ++cancellation) {
+      safe::event_t<std::shared_ptr<captured_source>> images;
+      std::weak_ptr<captured_source> old_image;
+      {
+        source_owner retiring;
+        retiring.observe(std::make_shared<captured_source>(7, at(5ms)));
+        old_image = retiring.latest();
+        if (cancellation == 0) {
+          images.stop();
+        }
+        retiring.return_for_rebuild(images, cancellation == 1, cancellation == 2);
+        EXPECT_FALSE(images.try_pop());
+      }
+      EXPECT_TRUE(old_image.expired());
+    }
+  }
 }  // namespace

@@ -496,7 +496,7 @@ namespace video {
 
     // APPEND-ONLY. Session-owned request latch for the explicit Dump 3D control message. Keeping
     // this out of process-global state prevents a request from a 2D/retiring session being
-    // consumed by a different Host SBS encoder.
+    // consumed by a different AI or Game encoder. Only the active provider owns the latch.
     std::shared_ptr<std::atomic<bool>> sbs_debug_dump_pending;
 
     // APPEND-ONLY. Session-shared Host SBS mode used by control-side diagnostics while the encode

@@ -4,6 +4,8 @@
 #define SUNSHINE_DEPTH_SELECTION_RUNTIME
 #include "test_depth3d_runtime_d3d12.cpp"
 #include "game3d_renderer.h"
+#include "test_game3d_debug_dump_runtime.h"
+#include "test_game3d_budget.h"
 
 namespace {
   struct native_case {
@@ -15,6 +17,9 @@ namespace {
 
   std::vector<native_case> native_cases() {
     sunshine_game3d::render_parameters p;
+    // Frozen-FX parity covers the unchanged warp below the new display cap.
+    // The default cap and hostile stale gains are exercised independently below.
+    p.disparity_limit_uv = .04f;
     p.depth_ready = p.camera_ready = 1;
     p.coordinate_basis = 1;
     p.depth_scale = 128.f;
@@ -173,6 +178,7 @@ namespace {
     std::puts("PASS native phase has zero installed/loaded FX techniques");
 
     sunshine_game3d::renderer renderer;
+    sunshine_game3d_test::dump_fixture dump;
     auto *owner_queue = observed.runtime->get_command_queue();
     for (const auto &test : tests) {
       prepare_depth(fixture, test);
@@ -182,9 +188,17 @@ namespace {
       require(renderer.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color)), "Native renderer configure failed");
       require(renderer.render(owner_queue->get_immediate_command_list(), source,
         test.parameters.depth_ready ? fixture.depth_view : api::resource_view{}, test.parameters), "Native renderer rejected ready parity frame");
+      const bool dump_case = test.name == "raw-cliffs-strength50" || test.name == "depth-unavailable" || test.name == "cropped-lowres-jitter";
+      if (dump_case) dump.begin(observed.runtime,renderer,test.parameters,
+        test.parameters.depth_ready ? fixture.depth_view : api::resource_view{},test.name == "cropped-lowres-jitter",
+        static_cast<api::color_space>(fixture.color));
       owner_queue->flush_immediate_command_list();
       renderer.finish_present();
+      if (dump_case) dump.submitted(observed.runtime);
       owner_queue->wait_idle(); // Test-only readback; production remains asynchronous.
+      if (dump_case) dump.verify(observed.runtime,[&](api::resource texture,bool common) {
+        return fixture.read(reinterpret_cast<ID3D12Resource *>(texture.handle),common ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+      }, directory / ("dump-" + test.name));
       const auto output = renderer.output();
       require(output.handle != 0, "Native renderer has no packed output");
       auto *texture = reinterpret_cast<ID3D12Resource *>(output.handle);
@@ -197,6 +211,65 @@ namespace {
       compare_pixels(test, fixture.color, load_pixels(results / (test.name + ".fx.bin")), pixels, report);
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
         "Native renderer changed the game's mono backbuffer");
+    }
+    // Exercise the production cap independently of the deliberately uncapped
+    // frozen-FX oracle. Read both the candidate and authoritative final field.
+    prepare_depth(fixture, {"budget-depth", {}, width, height, false});
+    const auto original_depth = fixture.read(fixture.depth.p);
+    for (const auto &test : sunshine_game3d_test::budget_cases()) {
+      const auto parameters = sunshine_game3d_test::budget_parameters(test);
+      auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
+      write_native_source(fixture, backbuffer);
+      const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+      require(renderer.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color)), "Budget renderer configure failed");
+      require(renderer.render(owner_queue->get_immediate_command_list(), source, fixture.depth_view, parameters),
+        "Budget renderer rejected frame");
+      const bool dump_case = std::strcmp(test.name, "strength100") == 0;
+      if (dump_case) dump.begin(observed.runtime, renderer, parameters, fixture.depth_view, false,
+        static_cast<api::color_space>(fixture.color));
+      owner_queue->flush_immediate_command_list();
+      renderer.finish_present();
+      if (dump_case) dump.submitted(observed.runtime);
+      owner_queue->wait_idle();
+      if (dump_case) {
+        const auto output = directory / "dump-default-budget";
+        dump.verify(observed.runtime, [&](api::resource texture, bool common) {
+          return fixture.read(reinterpret_cast<ID3D12Resource *>(texture.handle),
+            common ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        }, output);
+        sunshine_game3d_test::verify_budget_dump(output, parameters.disparity_limit_uv);
+      }
+      const auto diagnostics = renderer.diagnostics();
+      require(diagnostics.candidate.handle && diagnostics.final_field.handle, "Budget field diagnostics missing");
+      sunshine_game3d_test::verify_budget_fields(test, width, height,
+        fixture.read(reinterpret_cast<ID3D12Resource *>(diagnostics.candidate.handle)),
+        fixture.read(reinterpret_cast<ID3D12Resource *>(diagnostics.final_field.handle)), report);
+      require(fixture.read(fixture.depth.p) == original_depth, "Budget renderer changed raw source depth");
+      require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
+        "Budget renderer changed mono source color");
+    }
+    // An enabled source-alpha frame must retain its separate b1 selection in
+    // the real cross-API dump, not merely in the offline package parser.
+    {
+      auto parameters = tests.front().parameters;
+      auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
+      write_native_source(fixture, backbuffer);
+      const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+      require(renderer.render(owner_queue->get_immediate_command_list(), source, fixture.depth_view, parameters, true),
+        "UI-protected D3D12 render failed");
+      require(renderer.consumed_source_alpha_ui(), "Renderer lost enabled UI source");
+      dump.begin(observed.runtime, renderer, parameters, fixture.depth_view, false, static_cast<api::color_space>(fixture.color));
+      owner_queue->flush_immediate_command_list();
+      renderer.finish_present(); dump.submitted(observed.runtime); owner_queue->wait_idle();
+      dump.verify(observed.runtime, [&](api::resource texture, bool common) {
+        return fixture.read(reinterpret_cast<ID3D12Resource *>(texture.handle),
+          common ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+      }, directory / "dump-source-alpha-ui");
+      const auto field = fixture.read(reinterpret_cast<ID3D12Resource *>(renderer.diagnostics().final_field.handle));
+      require(std::all_of(field.begin(), field.end(), [](std::uint8_t v) { return v == 0; }),
+        "Fully opaque UI source was not pinned through the D3D12 b1 binding");
+      require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
+        "UI protection changed the original color allocation");
     }
     require(observed.renders == effect_renders, "An FX technique ran during native parity");
     owner_queue->wait_idle();

@@ -8203,6 +8203,18 @@ namespace {
       return async_event_handle;
     }
 
+    nvenc::nvenc_event_wait_result wait_picture(uint32_t timeout_ms = 0) {
+      return wait_for_async_event(timeout_ms);
+    }
+
+    HANDLE make_flush_event() {
+      return create_flush_event();
+    }
+
+    nvenc::nvenc_event_wait_result wait_flush(uint32_t timeout_ms = 0) {
+      return wait_for_flush_event(timeout_ms);
+    }
+
   protected:
     bool create_and_register_input_buffer() override {
       return false;
@@ -8246,6 +8258,72 @@ TEST(NvencAsyncEventLifetimeTest, CapabilityOneKeepsEventUntilOwnerDestruction) 
   }
 
   EXPECT_FALSE(is_live_process_handle(event));
+}
+
+TEST(NvencAsyncEventWaitTest, ReadyConsumesAnAutoResetPictureEventOnlyOnce) {
+  nvenc_d3d11_async_event_probe encoder;
+  ASSERT_TRUE(is_live_process_handle(encoder.event_handle()));
+  ASSERT_NE(SetEvent(encoder.event_handle()), FALSE);
+
+  const auto ready = encoder.wait_picture();
+  EXPECT_EQ(ready.status, nvenc::nvenc_event_wait_status::ready);
+  EXPECT_EQ(ready.native_wait_result, WAIT_OBJECT_0);
+  EXPECT_EQ(ready.native_error, ERROR_SUCCESS);
+  EXPECT_FALSE(ready.device_removed_reason);
+
+  const auto consumed = encoder.wait_picture();
+  EXPECT_EQ(consumed.status, nvenc::nvenc_event_wait_status::timeout);
+  EXPECT_EQ(consumed.native_wait_result, WAIT_TIMEOUT);
+}
+
+TEST(NvencAsyncEventWaitTest, PictureTimeoutDoesNotReportAStaleLastError) {
+  nvenc_d3d11_async_event_probe encoder;
+  ASSERT_TRUE(is_live_process_handle(encoder.event_handle()));
+  SetLastError(ERROR_ACCESS_DENIED);
+
+  const auto timeout = encoder.wait_picture();
+  EXPECT_EQ(timeout.status, nvenc::nvenc_event_wait_status::timeout);
+  EXPECT_EQ(timeout.native_wait_result, WAIT_TIMEOUT);
+  EXPECT_EQ(timeout.native_error, ERROR_SUCCESS);
+  EXPECT_FALSE(timeout.device_removed_reason);
+}
+
+TEST(NvencAsyncEventWaitTest, MissingPictureEventReportsTheNativeWaitFailure) {
+  nvenc_d3d11_async_event_probe encoder;
+  // Let the existing owner close the event and clear its pointer; never close an owned handle
+  // behind its back merely to inject WAIT_FAILED.
+  encoder.apply_mock_async_capability(0);
+  ASSERT_EQ(encoder.event_handle(), nullptr);
+  SetLastError(ERROR_ACCESS_DENIED);
+
+  const auto failure = encoder.wait_picture();
+  EXPECT_EQ(failure.status, nvenc::nvenc_event_wait_status::failed);
+  EXPECT_EQ(failure.native_wait_result, WAIT_FAILED);
+  EXPECT_EQ(failure.native_error, ERROR_INVALID_HANDLE);
+  EXPECT_FALSE(failure.device_removed_reason);
+}
+
+TEST(NvencAsyncEventWaitTest, FlushUsesTheSameFailureTimeoutAndAutoResetClassification) {
+  nvenc_d3d11_async_event_probe encoder;
+  const auto missing = encoder.wait_flush();
+  EXPECT_EQ(missing.status, nvenc::nvenc_event_wait_status::failed);
+  EXPECT_EQ(missing.native_wait_result, WAIT_FAILED);
+  EXPECT_EQ(missing.native_error, ERROR_INVALID_HANDLE);
+
+  const auto event = encoder.make_flush_event();
+  ASSERT_TRUE(is_live_process_handle(event));
+  SetLastError(ERROR_ACCESS_DENIED);
+  const auto timeout = encoder.wait_flush();
+  EXPECT_EQ(timeout.status, nvenc::nvenc_event_wait_status::timeout);
+  EXPECT_EQ(timeout.native_wait_result, WAIT_TIMEOUT);
+  EXPECT_EQ(timeout.native_error, ERROR_SUCCESS);
+
+  ASSERT_NE(SetEvent(event), FALSE);
+  const auto ready = encoder.wait_flush();
+  EXPECT_EQ(ready.status, nvenc::nvenc_event_wait_status::ready);
+  EXPECT_EQ(ready.native_wait_result, WAIT_OBJECT_0);
+  EXPECT_EQ(ready.native_error, ERROR_SUCCESS);
+  EXPECT_EQ(encoder.wait_flush().status, nvenc::nvenc_event_wait_status::timeout);
 }
 #endif
 

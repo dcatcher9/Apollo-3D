@@ -59,11 +59,24 @@ namespace sunshine_streamline::depth_capture {
     consumer_queue_changed, evaluation_failed,
     evaluation_observation_changed, queue_retired, consumer_capacity, source_retired
   };
+  // Selection evidence only; never grants GPU access to a pending snapshot.
+  enum class selection_reason {
+    not_attempted, no_current_nomination, inactive_views, ambiguous_views,
+    pending_nomination, current_capture, current_already_consumed, no_admissible_capture,
+    no_completed_snapshot, completed_before_gap, completed_not_older,
+    completed_already_consumed, presentation_already_selected, layout_changed,
+    completed_not_readable, completed_snapshot, fg_scope_missing, fg_scope_mismatch
+  };
   struct capture_diagnostic {
     status result{status::unavailable};
     capture_failure failure{capture_failure::none};
+    selection_reason selection{selection_reason::not_attempted};
+    // Set only when the newest eligible completed snapshot is exactly the
+    // already-consumed sequence. A provider may hold its private display copy;
+    // this does not permit reading the newer pending texture.
+    std::uint64_t consumed_completed_capture{};
     std::uint64_t capture_id{}, sequence{}, epoch{}, command{}, queue{}, producer_fence{}, retire_fence{};
-    std::uint64_t newest_sequence{}; // Can be ahead of the completed FG snapshot selected for pixels.
+    std::uint64_t newest_sequence{}; // Can be ahead of the completed API snapshot selected for pixels.
     std::uint64_t requested_queue{}, consumer_queue{};
     std::uint64_t producer_completed{}; // producer_fence is the required value.
     bool producer_completion_valid{}, producer_recording_retired{};
@@ -159,8 +172,10 @@ namespace sunshine_streamline::depth_capture {
   // Registered preserved sources create a metadata-only ticket; other sources
   // record an independent copy. Every nonzero ticket must always finish.
   std::uint64_t record(std::uint64_t command, const input &value, record_diagnostic *diagnostic = nullptr);
-  // Source adapters supply identity/metadata; missing state hints are resolved
-  // against the shared owner's observed command state, never invented.
+  // Source adapters supply identity/metadata and always snapshot at the API
+  // call, even for a registered ReShade DSV. Matching its resource identity
+  // cannot authenticate a generic before-clear copy's contents. Missing state
+  // hints are resolved against observed command state, never invented.
   std::uint64_t nominate(std::uint64_t command, const input &value, record_diagnostic *diagnostic = nullptr);
   // Publish validated adapter candidates and their in-progress nomination as one
   // observation. Until the candidate batch resolves, only a bounded whole-FG-pair hold may
@@ -182,6 +197,45 @@ namespace sunshine_streamline::depth_capture {
     std::shared_ptr<const texture_reference> ownership;
     explicit operator bool() const { return id && ownership; }
   };
+  struct diagnostic_ticket {
+    std::uint64_t id{};
+    std::shared_ptr<const texture_reference> ownership;
+    explicit operator bool() const { return id && ownership; }
+  };
+  struct diagnostic_texture {
+    std::shared_ptr<const texture_reference> ownership;
+    // The handle belongs to ownership. Duplicate it for IPC; do not close it.
+    // Pixels are immutable, complete and in COMMON when acquisition succeeds.
+    std::uint64_t texture{}, shared_handle{}, device{}, device_identity{}, resource_id{};
+    std::uint64_t capture_id{}, producer_queue{}, producer_fence{}, producer_completed{};
+    std::uint32_t width{}, height{}, format{};
+    sunshine_scene_depth::extent area;
+    status result{status::unavailable};
+    capture_failure failure{capture_failure::none};
+    bool producer_recording_retired{};
+  };
+  // Auxiliary snapshots use the same state/recording/fence owner as depth, but
+  // an independent bounded pool. They never nominate or change a depth source.
+  // Call at the authenticated API boundary, before its original call. Every
+  // accepted ticket must finish; retain it until acquire or explicit cancel.
+  diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value,
+    record_diagnostic *diagnostic = nullptr);
+  void finish_diagnostic_texture(const diagnostic_ticket &ticket, bool successful);
+  // Nonblocking: pending work, even on the same queue, is not shareable. Both
+  // GPU completion and Reset/destruction of its producing recording are needed
+  // before a foreign process can safely read the immutable snapshot.
+  status acquire_diagnostic_texture(const diagnostic_ticket &ticket, diagnostic_texture &out);
+  // Copy a completed immutable auxiliary snapshot into a same-format/shape
+  // texture on one consumer queue. Both resource states are restored. Retain
+  // source AND destination until recorded consumers and their GPU fences retire;
+  // Reset alone never permits reuse. Never adds a queue wait. A ticket cannot
+  // switch destination or consumer queue after its first successful copy.
+  bool copy_diagnostic_texture(std::uint64_t command, std::uint64_t consumer_queue,
+    const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
+    consumer_diagnostic *diagnostic = nullptr);
+  // Revokes the ticket, never its outstanding GPU obligations. Drop all leases
+  // after cancellation/IPC acknowledgement so completed storage can be reclaimed.
+  void release_diagnostic_texture(const diagnostic_ticket &ticket);
   // A legal ReShade before-clear/end-of-frame opportunity records into the same
   // snapshot pool as API opportunities. It never selects a provider or advances
   // middleware evaluation watermarks. The caller supplies the actual source
@@ -204,7 +258,9 @@ namespace sunshine_streamline::depth_capture {
   // Independent copies require same-queue ordering or a completed private producer
   // fence on the same device with its producing recording retired. Pending foreign
   // copies remain unavailable: never insert a reverse dependency into the game's
-  // queue graph. No older-frame fallback or CPU depth-completion wait is introduced.
+  // queue graph or wait on the CPU. While a same-source successor is pending,
+  // the newest unconsumed completed snapshot may supply its own pixels and
+  // metadata within the existing freshness limit; resets/interruptions revoke it.
   // A copy binds to one consumer queue to serialize consumer resource-state
   // transitions. Effects require an unconsumed submitted source frame; a
   // failed copy may retry, while complete_frame commits successful consumption.
@@ -235,7 +291,9 @@ namespace sunshine_streamline::depth_capture {
   const char *name(consumer_status value);
   const char *name(recording_loss value);
   const char *name(record_stage value);
+  const char *name(selection_reason value);
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+  namespace testing { bool diagnostic_snapshot_regression(); }
   namespace testing { bool zero_cookie_submission_regression(); bool unsupported_com_boundary_regression(); bool source_cookie_reentry_regression(); bool recording_recovery_regression(); bool recording_state_loss_regression(); }
   namespace testing { bool submission_completion_regression(); bool provider_admission_regression(); bool crop_region_regression(); bool record_diagnostic_regression(); }
 #endif

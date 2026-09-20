@@ -97,8 +97,12 @@ TEST(SourceFrameIdTest, TokenWrapSkipsUnknownAndWireFrameWrapRemainsContinuous) 
   EXPECT_EQ(wrapping_frames.next_frame(true, 0, true, false, false), token);
 }
 
-TEST(SbsDebugDumpRequestTest, RequiresRuntimeHostSbsOwnershipAndSessionLatch) {
+TEST(SbsDebugDumpRequestTest, RequiresRuntimeAiOrGameOwnershipAndSessionLatch) {
   EXPECT_TRUE(stream::sbs_debug_dump_request_allowed(video::SBS_AI, true));
+  EXPECT_TRUE(stream::sbs_debug_dump_request_allowed(video::SBS_GAME_MONO, true));
+  EXPECT_TRUE(stream::sbs_debug_dump_request_allowed(video::SBS_GAME_SBS, true));
+  EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(video::SBS_GAME_MONO, false));
+  EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(video::SBS_GAME_SBS, false));
   EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(video::SBS_OFF, true));
   EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(video::SBS_AI, false));
   EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(-1, true));

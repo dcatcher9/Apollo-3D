@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 namespace {
@@ -28,6 +29,22 @@ namespace {
   }
 
   constexpr UINT source_width = 96, source_height = 54;
+#ifdef SUNSHINE_SAMPLER_BASELINE
+  constexpr UINT sample_pixel_bytes = sizeof(float);
+  constexpr UINT output_logical_bytes = 32 * 18 * sample_pixel_bytes;
+#else
+  constexpr UINT sample_pixel_bytes = 4 * sizeof(float);
+  constexpr UINT output_logical_bytes = sunshine_depth_statistics::maximum_tiles * 2 * sample_pixel_bytes;
+#endif
+  UINT point_coordinate(UINT index, UINT extent, UINT tiles) {
+#ifdef SUNSHINE_SAMPLER_BASELINE
+    return UINT((std::uint64_t(2 * index + 1) * extent) / (2 * tiles));
+#else
+    const UINT first = UINT(std::uint64_t(index) * extent / tiles);
+    const UINT last = UINT(std::uint64_t(index + 1) * extent / tiles);
+    return first + (last - first) / 2;
+#endif
+  }
   float scene_depth(UINT x, UINT y) {
     return .1f + .6f * float(x) / source_width + .2f * float(y) / source_height;
   }
@@ -92,6 +109,9 @@ namespace {
     request.source_height = source_height;
     request.x = x0; request.y = y0;
     request.width = region_width; request.height = region_height;
+#ifndef SUNSHINE_SAMPLER_BASELINE
+    request.collect_range = use_viewport;
+#endif
     sunshine_depth::sample_t sample;
     sample.native_queue = reinterpret_cast<std::uint64_t>(context);
     sample.pipeline = cache.acquire(api::device_api::d3d11, reinterpret_cast<std::uint64_t>(device), owner, shader);
@@ -154,7 +174,7 @@ namespace {
     float max_error = 0;
     for (UINT y = 0; y < 18; ++y) for (UINT x = 0; x < 32; ++x) {
       float actual;
-      std::memcpy(&actual, static_cast<const unsigned char *>(mapped.pData) + y * mapped.RowPitch + x * sizeof(float), sizeof(float));
+      std::memcpy(&actual, static_cast<const unsigned char *>(mapped.pData) + y * mapped.RowPitch + x * sample_pixel_bytes, sizeof(float));
       const UINT source_x = x0 + ((2 * x + 1) * region_width) / 64;
       const UINT source_y = y0 + ((2 * y + 1) * region_height) / 36;
       require(std::isfinite(actual), "Depth sampler returned non-finite data");
@@ -162,6 +182,14 @@ namespace {
     }
     context->Unmap(sample.readback11.get(), 0);
     require(max_error < .00002f, "Depth grid differs from independent coordinate/format oracle");
+#ifndef SUNSHINE_SAMPLER_BASELINE
+    sunshine_depth::read_sample(sample);
+    require(sample.result.valid && sample.result.range_valid == use_viewport,
+      "Optional range changed point-grid readiness or was collected without request");
+    if (use_viewport) require(std::abs(sample.result.range_min - scene_depth(x0, y0)) < .00002f &&
+      std::abs(sample.result.range_max - scene_depth(x0 + region_width - 1, y0 + region_height - 1)) < .00002f,
+      "Full-range reduction lost source-format precision or sampled allocation padding");
+#endif
     require(sample.result.token == 77 && sample.result.viewport_width == region_width && sample.result.viewport_height == region_height,
       "Sampler lost source identity or viewport metadata");
     std::printf("PASS D3D11 sampler format=%u viewport=%s grid oracle max_error=%.9g, caller CS state restored\n", unsigned(format), use_viewport ? "padded" : "full", max_error);
@@ -241,7 +269,12 @@ namespace {
     const D3D12_RANGE empty {0, 0};
     checked(upload->Map(0, &empty, &upload_data), "Map depth upload resource");
     for (UINT y = 0; y < source_height; ++y) for (UINT x = 0; x < source_width; ++x) {
-      const float value = scene_depth(x, y);
+      const float value =
+#ifndef SUNSHINE_SAMPLER_BASELINE
+        x == 8 && y == 5 ? 0.f : x == 70 && y == 5 ? 1.f :
+        x == 0 && y == 0 ? std::numeric_limits<float>::quiet_NaN() :
+#endif
+        scene_depth(x, y);
       std::memcpy(static_cast<unsigned char *>(upload_data) + footprint.Offset + y * footprint.Footprint.RowPitch + x * sizeof(float), &value, sizeof(value));
     }
     upload->Unmap(0, nullptr);
@@ -265,6 +298,11 @@ namespace {
     request.source = {reinterpret_cast<std::uint64_t>(source.get())};
     request.source_width = source_width; request.source_height = source_height;
     request.x = 8; request.y = 5; request.width = 64; request.height = 36;
+#ifndef SUNSHINE_SAMPLER_BASELINE
+    request.collect_moments = true; // Implies exact range in the same dispatch.
+    request.moments_A = 1.f;
+    request.moments_inverseB = -3.f;
+#endif
     sunshine_depth::sample_t sample;
     sample.native_queue = reinterpret_cast<std::uint64_t>(queue.get());
     sample.pipeline = cache.acquire(api::device_api::d3d12, native, owner, shader);
@@ -296,7 +334,7 @@ namespace {
     for (UINT y = 0; y < 18; ++y) for (UINT x = 0; x < 32; ++x) {
       float actual = 0;
       std::memcpy(&actual, static_cast<const unsigned char *>(readback) + sample.footprint12.Offset +
-        y * sample.footprint12.Footprint.RowPitch + x * sizeof(float), sizeof(actual));
+        y * sample.footprint12.Footprint.RowPitch + x * sample_pixel_bytes, sizeof(actual));
       const float expected = scene_depth(request.x + ((2 * x + 1) * request.width) / 64,
         request.y + ((2 * y + 1) * request.height) / 36);
       require(std::isfinite(actual), "D3D12 sample returned nonfinite data");
@@ -304,6 +342,25 @@ namespace {
     }
     sample.readback12->Unmap(0, &empty);
     require(max_error == 0.f && sample.result.token == 91, "Cached D3D12 sample failed independent coordinate/value oracle");
+#ifndef SUNSHINE_SAMPLER_BASELINE
+    sunshine_depth::read_sample(sample);
+    require(sample.result.valid && sample.result.range_valid && sample.result.range_min == 0.f && sample.result.range_max == 1.f,
+      "D3D12 exact range missed one-pixel endpoints between point samples or included nonfinite padding");
+    double expected_sum = 0., expected_squares = 0.;
+    for (UINT y = request.y; y < request.y + request.height; ++y)
+      for (UINT x = request.x; x < request.x + request.width; ++x) {
+        const float raw = x == 8 && y == 5 ? 0.f : x == 70 && y == 5 ? 1.f : scene_depth(x, y);
+        const float q = (raw - request.moments_A) * request.moments_inverseB;
+        expected_sum += q;
+        expected_squares += double(q) * q;
+      }
+    const auto &moments = sample.result.moments;
+    require(moments.supplied && moments.valid && moments.count == 64 * 36 &&
+      moments.tiles_x == 32 && moments.tiles_y == 18 &&
+      std::abs(moments.sum - expected_sum) <= expected_sum * 3e-5 &&
+      std::abs(moments.sum_squares - expected_squares) <= expected_squares * 3e-5,
+      "D3D12 full-image decoded moments differ from the independent per-pixel oracle");
+#endif
     std::printf("PASS native D3D12 cached root/PSO: repeated reuse, retirement during submitted sample, replacement and padded grid oracle max_error=%.9g\n", max_error);
     return retired;
   }
@@ -366,6 +423,259 @@ namespace {
     }
     throw std::runtime_error("Repeated sample did not complete");
   }
+
+#ifndef SUNSHINE_SAMPLER_BASELINE
+  void run_exact_range(ID3D11Device *device, ID3D11DeviceContext *context, ID3DBlob *shader) {
+    pipeline_cache_t cache;
+    int identity{};
+    auto *owner = reinterpret_cast<api::effect_runtime *>(&identity);
+    auto pipeline = cache.acquire(api::device_api::d3d11, reinterpret_cast<std::uint64_t>(device), owner, shader);
+    std::unique_ptr<sunshine_depth::sample_t> spare;
+    // The odd larger extent exercises strided tile scans and uneven integer
+    // partitions; a single texel caps the common grid to one nonempty tile.
+    for (const auto dimensions : {std::array<UINT, 2>{96, 54}, std::array<UINT, 2>{641, 359}}) {
+      const UINT width = dimensions[0], height = dimensions[1];
+      for (unsigned scenario = 0; scenario != 6; ++scenario) {
+        sunshine_depth::sample_request request;
+        request.source_width = width; request.source_height = height;
+        request.x = 8; request.y = 5;
+        request.width = scenario == 5 ? 1 : width - 32;
+        request.height = scenario == 5 ? 1 : height - 18;
+        std::vector<float> pixels(size_t(width) * height, .25f);
+        pixels[0] = std::numeric_limits<float>::infinity(); // Outside the active crop.
+        const auto first = size_t(request.y) * width + request.x;
+        const auto last = size_t(request.y) * width + request.x + request.width - 1;
+        pixels[first] = 0.f;
+        if (scenario != 5) pixels[last] = 1.f;
+        if (scenario == 1) { pixels[first] = -4.f; pixels[last] = 9.f; } // Packed raw domain, not [0,1].
+        if (scenario == 2) pixels[first] = std::numeric_limits<float>::quiet_NaN();
+        if (scenario == 3) pixels[first] = std::numeric_limits<float>::infinity();
+        if (scenario == 4) pixels[first] = -std::numeric_limits<float>::infinity();
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width; desc.Height = height;
+        desc.ArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+        desc.Format = DXGI_FORMAT_R32_FLOAT;
+        desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA initial{pixels.data(), width * UINT(sizeof(float)), 0};
+        com_ptr<ID3D11Texture2D> source;
+        checked(device->CreateTexture2D(&desc, &initial, source.put()), "Create exact-range test source");
+        request.source = {reinterpret_cast<std::uint64_t>(source.get())};
+        for (bool collect_range : {false, true}) {
+          request.collect_range = collect_range;
+          auto sample = sunshine_depth::take_sample(spare, pipeline);
+          sample->native_queue = reinterpret_cast<std::uint64_t>(context);
+          require(sunshine_depth::prepare11(*sample, request), "Prepare exact-range D3D11 sample");
+          context->ExecuteCommandList(sample->commands11.get(), TRUE);
+          wait_sample(*sample);
+          sunshine_depth::read_sample(*sample);
+          const auto &result = sample->result;
+          const auto layout = sunshine_depth_statistics::tile_grid(request.width, request.height);
+          require(result.valid && result.width == layout.x && result.height == layout.y &&
+            result.values.size() == size_t(layout.x) * layout.y, "Exact range altered point-grid readiness");
+          for (UINT y = 0; y < result.height; ++y) for (UINT x = 0; x < result.width; ++x) {
+            const UINT source_x = request.x + point_coordinate(x, request.width, result.width);
+            const UINT source_y = request.y + point_coordinate(y, request.height, result.height);
+            const float expected = pixels[size_t(source_y) * width + source_x];
+            require(result.values[y * result.width + x] == expected, "Exact-range mode changed selector point samples");
+          }
+          const bool expected_valid = collect_range && (scenario < 2 || scenario == 5);
+          require(result.range_valid == expected_valid, "Exact range skipped a nonfinite texel or included invalid padding");
+          if (expected_valid) require(result.range_min == (scenario == 1 ? -4.f : 0.f) &&
+            result.range_max == (scenario == 1 ? 9.f : scenario == 5 ? 0.f : 1.f),
+            "Exact range trimmed sparse extrema/endpoints or failed a one-texel crop");
+          sample->clear_capture();
+          spare = std::move(sample);
+        }
+      }
+    }
+    std::puts("PASS exact depth range: sparse endpoints, arbitrary finite raw domain, NaN/Inf rejection, crop/padding, uneven/tiny extents and unchanged optional point grid");
+  }
+
+  void run_full_moments(ID3D11Device *device, ID3D11DeviceContext *context, ID3DBlob *shader) {
+    using sunshine_depth_statistics::tile_grid;
+    using sunshine_depth_statistics::tile_bounds;
+    for (const auto shape : {std::array<UINT, 4>{96, 54, 32, 18}, {192, 108, 32, 18},
+        {64, 48, 28, 21}, {128, 96, 28, 21}, {36, 64, 18, 32}, {72, 128, 18, 32},
+        {1, 1, 1, 1}, {3, 2, 3, 2}, {1, 1024, 1, 576}, {1024, 1, 576, 1}}) {
+      const auto layout = tile_grid(shape[0], shape[1]);
+      require(layout.x == shape[2] && layout.y == shape[3], "Shared tile layout changed with resolution or lost aspect/tiny-crop bounds");
+      for (UINT axis = 0; axis < 2; ++axis) {
+        const UINT extent = shape[axis], tiles = axis ? layout.y : layout.x;
+        UINT previous = 0;
+        for (UINT i = 0; i < tiles; ++i) {
+          const auto interval = tile_bounds(i, extent, tiles);
+          require(interval.first == previous && interval.last > interval.first &&
+            interval.center() >= interval.first && interval.center() < interval.last,
+            "Shared integer tile partition has a gap, overlap, empty tile or outside point");
+          previous = interval.last;
+        }
+        require(previous == extent, "Shared tiles failed to cover an entire crop axis");
+      }
+    }
+    for (const auto shape : {std::array<UINT, 2>{1, UINT32_MAX}, {UINT32_MAX, 1}, {UINT32_MAX, UINT32_MAX}}) {
+      const auto layout = tile_grid(shape[0], shape[1]);
+      require(layout.x && layout.y && std::uint64_t(layout.x) * layout.y <= sunshine_depth_statistics::maximum_tiles,
+        "Extreme aspect escaped the bounded tile record capacity");
+    }
+    require(tile_grid(0, 10).x == 0 && tile_grid(10, 0).y == 0, "Empty crop fabricated a tile layout");
+
+    enum class pattern { gradient, sparse, zero, normal, normal_far, packed, negative, nan, infinity, overflow, maximum };
+    struct fixture { const char *name; UINT width, height; pattern content; float inverseB = 1.f; };
+    const fixture fixtures[] {
+      {"sparse between selector points", 96, 54, pattern::sparse},
+      {"same-aspect larger sparse", 192, 108, pattern::sparse},
+      {"four by three", 64, 48, pattern::gradient},
+      {"four by three larger", 128, 96, pattern::gradient},
+      {"portrait", 36, 64, pattern::gradient},
+      {"portrait larger", 72, 128, pattern::gradient},
+      {"uneven cropped partitions", 609, 341, pattern::gradient},
+      {"4K full-pixel reduction", 3840, 2160, pattern::gradient},
+      {"ultrawide near far endpoint", 3440, 1440, pattern::normal_far},
+      {"tiny positive", 1, 1, pattern::gradient},
+      {"tiny zero", 1, 1, pattern::zero},
+      {"tiny nondivisible", 3, 2, pattern::gradient},
+      {"extreme portrait", 1, 1024, pattern::gradient},
+      {"extreme landscape", 1024, 1, pattern::gradient},
+      {"all zero", 96, 54, pattern::zero},
+      {"normal depth", 96, 54, pattern::normal},
+      {"normal depth near far endpoint", 96, 54, pattern::normal_far},
+      {"packed affine basis", 96, 54, pattern::packed},
+      {"small depth units", 96, 54, pattern::gradient, 1e-30f},
+      {"large depth units", 96, 54, pattern::gradient, 1e30f},
+      {"largest finite decoded depth", 96, 54, pattern::maximum},
+      {"negative decoded depth", 96, 54, pattern::negative},
+      {"nonfinite raw NaN", 96, 54, pattern::nan},
+      {"nonfinite raw infinity", 96, 54, pattern::infinity},
+      {"overflowing decoded depth", 96, 54, pattern::overflow},
+      {"invalid zero decode coefficient", 96, 54, pattern::gradient, 0.f},
+      {"unrepresentable subnormal coefficient", 96, 54, pattern::gradient, std::numeric_limits<float>::denorm_min()},
+      {"recovery after invalid and changed aspect", 64, 48, pattern::gradient}
+    };
+    pipeline_cache_t cache;
+    int identity{};
+    auto *owner = reinterpret_cast<api::effect_runtime *>(&identity);
+    auto pipeline = cache.acquire(api::device_api::d3d11, reinterpret_cast<std::uint64_t>(device), owner, shader);
+    std::unique_ptr<sunshine_depth::sample_t> spare;
+    const ID3D11Texture2D *scratch = nullptr;
+    for (const auto &fixture : fixtures) {
+      try {
+        sunshine_depth::sample_request request;
+        request.source_width = fixture.width + 13; request.source_height = fixture.height + 9;
+        request.x = 5; request.y = 3; request.width = fixture.width; request.height = fixture.height;
+        request.moments_inverseB = fixture.inverseB;
+        if (fixture.content == pattern::normal || fixture.content == pattern::normal_far) {
+          request.moments_A = 1.f; request.moments_inverseB = -1.f;
+        } else if (fixture.content == pattern::packed) {
+          request.moments_A = -2.f; request.moments_inverseB = .5f;
+        } else if (fixture.content == pattern::overflow) request.moments_inverseB = std::numeric_limits<float>::max();
+        // Invalid allocation padding must not enter extrema or either moment.
+        std::vector<float> pixels(size_t(request.source_width) * request.source_height,
+          std::numeric_limits<float>::quiet_NaN());
+        double expected_sum = 0., expected_squares = 0.;
+        bool valid_raw = true, valid_moments = std::isnormal(request.moments_inverseB);
+        float lower = std::numeric_limits<float>::max(), upper = -std::numeric_limits<float>::max();
+        for (UINT y = 0; y < fixture.height; ++y) for (UINT x = 0; x < fixture.width; ++x) {
+          float raw = float(1 + (x * 17 + y * 11) % 31) / 32.f;
+          switch (fixture.content) {
+          case pattern::sparse: raw = y == 0 && x == 0 ? .75f : y == 0 && x == 2 ? .5f : 0.f; break;
+          case pattern::zero: raw = 0.f; break;
+          case pattern::normal: raw = 1.f - raw; break;
+          case pattern::normal_far: raw = 1.f - std::ldexp(float((x + 3 * y) % 4), -24); break;
+          case pattern::packed: raw = -2.f + 2.f * raw; break;
+          case pattern::negative: if (x == 0 && y == 0) raw = -.25f; break;
+          case pattern::nan: if (x == 0 && y == 0) raw = std::numeric_limits<float>::quiet_NaN(); break;
+          case pattern::infinity: if (x == 0 && y == 0) raw = std::numeric_limits<float>::infinity(); break;
+          case pattern::overflow: raw = 2.f; break;
+          case pattern::maximum: raw = std::numeric_limits<float>::max(); break;
+          default: break;
+          }
+          pixels[size_t(request.y + y) * request.source_width + request.x + x] = raw;
+          valid_raw &= std::isfinite(raw);
+          lower = std::min(lower, raw); upper = std::max(upper, raw);
+          // Match the actual FP32 decode, then independently sum every pixel in
+          // double. No affine expansion of raw squared sums is used as oracle.
+          const float delta = raw - request.moments_A;
+          const float q = delta * request.moments_inverseB;
+          valid_moments &= std::isfinite(q) && q >= 0.f;
+          expected_sum += q;
+          expected_squares += double(q) * q;
+        }
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = request.source_width; desc.Height = request.source_height;
+        desc.ArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+        desc.Format = DXGI_FORMAT_R32_FLOAT;
+        desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA initial{pixels.data(), request.source_width * UINT(sizeof(float)), 0};
+        com_ptr<ID3D11Texture2D> source;
+        checked(device->CreateTexture2D(&desc, &initial, source.put()), "Create full-moment test source");
+        request.source = {reinterpret_cast<std::uint64_t>(source.get())};
+        const auto layout = tile_grid(request.width, request.height);
+        std::vector<float> selector_only;
+        // Selector-only, old exact-range request, and moments-only request all
+        // publish bit-identical selector points from the one common tile grid.
+        for (unsigned mode = 0; mode < 3; ++mode) {
+          request.collect_range = mode == 1; request.collect_moments = mode == 2;
+          const auto submitted = request;
+          auto sample = sunshine_depth::take_sample(spare, pipeline);
+          sample->native_queue = reinterpret_cast<std::uint64_t>(context);
+          require(sunshine_depth::prepare11(*sample, request), "Prepare full-moment D3D11 sample");
+          if (!scratch) scratch = sample->output11.get();
+          require(sample->output11.get() == scratch, "Changing aspect or moment mode reallocated completed scratch");
+          request.moments_A = 123.f; request.moments_inverseB = 456.f;
+          request.width = request.height = 1; // Pending capture must own its basis/layout.
+          context->ExecuteCommandList(sample->commands11.get(), TRUE);
+          wait_sample(*sample);
+          sunshine_depth::read_sample(*sample);
+          request = submitted;
+          const auto &result = sample->result;
+          require(result.valid && result.width == layout.x && result.height == layout.y &&
+            result.values.size() == size_t(layout.x) * layout.y,
+            "Full moments corrupted point-grid readiness or frozen layout");
+          for (UINT y = 0; y < result.height; ++y) for (UINT x = 0; x < result.width; ++x) {
+            const UINT px = submitted.x + point_coordinate(x, submitted.width, result.width);
+            const UINT py = submitted.y + point_coordinate(y, submitted.height, result.height);
+            const float expected = pixels[size_t(py) * submitted.source_width + px];
+            const float actual = result.values[size_t(y) * result.width + x];
+            require(actual == expected || (std::isnan(actual) && std::isnan(expected)),
+              "Shared selector points differ from independent integer-partition center oracle");
+          }
+          if (!mode) selector_only = result.values;
+          else require(std::memcmp(selector_only.data(), result.values.data(), result.values.size() * sizeof(float)) == 0,
+            "Adding a range or moments scan changed raw selector point bits");
+          if (fixture.content == pattern::sparse) require(std::all_of(result.values.begin(), result.values.end(),
+            [](float value) { return value == 0.f; }), "Sparse full-image fixture accidentally hit selector points");
+          require(result.range_valid == (mode != 0 && valid_raw), "Moment decode validity leaked into raw range validity");
+          if (result.range_valid) require(result.range_min == lower && result.range_max == upper,
+            "Full-image moments changed exact extrema or included padding");
+          const auto &moments = result.moments;
+          require(moments.supplied == (mode == 2) && moments.valid == (mode == 2 && valid_moments),
+            "Invalid moments were accepted, or valid moments failed independently of raw points");
+          if (mode == 2) {
+            require(moments.A == submitted.moments_A && moments.inverseB == submitted.moments_inverseB &&
+              moments.count == std::uint64_t(submitted.width) * submitted.height &&
+              moments.tiles_x == layout.x && moments.tiles_y == layout.y,
+              "Moment basis, count or layout was not frozen with the full active crop");
+            if (valid_moments) {
+              const auto close = [](double actual, double expected) {
+                return expected == 0. ? actual == 0. : std::abs(actual - expected) <= std::abs(expected) * 3e-5;
+              };
+              require(close(moments.sum, expected_sum) && close(moments.sum_squares, expected_squares),
+                "Stable full-image moments differ from independent double accumulation");
+            }
+          } else require(moments.count == 0 && moments.tiles_x == 0 && moments.tiles_y == 0,
+            "A raw-only request retained a previous capture's moment facts");
+          if (!moments.valid) require(moments.sum == 0. && moments.sum_squares == 0.,
+            "Invalid or unrequested moments retained numeric data from an older capture");
+          sample->clear_capture();
+          spare = std::move(sample);
+        }
+      } catch (const std::exception &error) {
+        throw std::runtime_error(std::string(fixture.name) + ": " + error.what());
+      }
+    }
+    std::puts("PASS full-image decoded moments: sparse geometry, shared aspect grid, resolution/crop reuse, zero counts, frozen basis, normal/reverse depth, cancellation, extreme units and independent invalidation");
+  }
+#endif
 
   std::vector<float> read_grid(sunshine_depth::sample_t &sample) {
 #ifndef SUNSHINE_SAMPLER_BASELINE
@@ -488,7 +798,7 @@ namespace {
       measured.prepare_us += prepare_us;
       measured.prepare_samples_us.push_back(prepare_us);
       measured.created_bundles += fresh;
-      measured.readback_bytes = sample->readback12.get() ? sample->bytes12 : 32 * 18 * sizeof(float);
+      measured.readback_bytes = sample->readback12.get() ? sample->bytes12 : output_logical_bytes;
       // Mutable submission metadata must not alias a pending result's facts.
       const auto submitted = request;
       request.token = request.capture_id = request.source_lifetime = 999999;
@@ -537,10 +847,10 @@ namespace {
         result.viewport_width == submitted.width && result.viewport_height == submitted.height,
         "Repeated sample reused old provenance, source, format or crop");
       float max_error = 0;
-      for (UINT y = 0; y < 18; ++y) for (UINT x = 0; x < 32; ++x) {
-        const float actual = result.values[y * 32 + x];
-        const float expected = source.expected(submitted.x + ((2 * x + 1) * submitted.width) / 64,
-          submitted.y + ((2 * y + 1) * submitted.height) / 36);
+      for (UINT y = 0; y < result.height; ++y) for (UINT x = 0; x < result.width; ++x) {
+        const float actual = result.values[y * result.width + x];
+        const float expected = source.expected(submitted.x + point_coordinate(x, submitted.width, result.width),
+          submitted.y + point_coordinate(y, submitted.height, result.height));
         require(std::isfinite(actual), "Repeated sample returned nonfinite depth");
         max_error = std::max(max_error, std::abs(actual - expected));
       }
@@ -556,7 +866,8 @@ namespace {
 #endif
     }
     for (unsigned i = 0; i < count; ++i)
-      require(completed[i].valid && completed[i].capture_id == 1000 + i && completed[i].values.size() == 32 * 18,
+      require(completed[i].valid && completed[i].capture_id == 1000 + i &&
+        completed[i].values.size() == size_t(completed[i].width) * completed[i].height,
         "Later scratch reuse mutated an earlier immutable result");
     if (reuse) {
       // Keep the completed spare alive while dropping the remaining owner refs.
@@ -591,11 +902,12 @@ namespace {
     auto ordered_prepare_us = measured.prepare_samples_us;
     std::sort(ordered_prepare_us.begin(), ordered_prepare_us.end());
     const double prepare_p95_us = ordered_prepare_us[(count * 95 + 99) / 100 - 1];
-    std::printf("MEASURE scratch api=%s implementation=%s workload=%s samples=%u prepare_mean_us=%.6f prepare_p95_us=%.6f prepare_max_us=%.6f submit_mean_us=%.6f readback_mean_us=%.6f created_bundles=%u scratch_resource_creations=%u output_logical_bytes=2304 readback_bytes=%llu; CPU wall time, waits/source creation excluded, bytes exclude driver allocation overhead\n",
+    std::printf("MEASURE scratch api=%s implementation=%s workload=%s samples=%u prepare_mean_us=%.6f prepare_p95_us=%.6f prepare_max_us=%.6f submit_mean_us=%.6f readback_mean_us=%.6f created_bundles=%u scratch_resource_creations=%u output_logical_bytes=%u readback_bytes=%llu; CPU wall time, waits/source creation excluded, bytes exclude driver allocation overhead\n",
       kind == api::device_api::d3d12 ? "D3D12" : "D3D11", implementation, reuse ? "persistent" : "fresh", count,
       measured.prepare_us / count, prepare_p95_us, ordered_prepare_us.back(), measured.submit_us / count,
       measured.readback_us / count, measured.created_bundles,
-      measured.created_bundles * (kind == api::device_api::d3d12 ? 2 : 3), static_cast<unsigned long long>(measured.readback_bytes));
+      measured.created_bundles * (kind == api::device_api::d3d12 ? 2 : 3), output_logical_bytes,
+      static_cast<unsigned long long>(measured.readback_bytes));
     return measured;
   }
 
@@ -705,9 +1017,15 @@ int main(int argc, char **argv) {
     checked(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
       D3D11_SDK_VERSION, device.put(), nullptr, context.put()), "Create hardware D3D11 device");
     com_ptr<ID3DBlob> shader, errors;
-    checked(D3DCompile(sunshine_depth::shader_source, sizeof(sunshine_depth::shader_source) - 1, nullptr,
-      nullptr, nullptr, "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, shader.put(), errors.put()), "Compile actual sampler shader");
+    const auto compiled = D3DCompile(sunshine_depth::shader_source, sizeof(sunshine_depth::shader_source) - 1, nullptr,
+      nullptr, nullptr, "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, shader.put(), errors.put());
+    if (FAILED(compiled) && errors.get()) std::fprintf(stderr, "%s\n", static_cast<const char *>(errors->GetBufferPointer()));
+    checked(compiled, "Compile actual sampler shader");
     verify_device_cache(device.get(), shader.get());
+#ifndef SUNSHINE_SAMPLER_BASELINE
+    run_exact_range(device.get(), context.get(), shader.get());
+    run_full_moments(device.get(), context.get(), shader.get());
+#endif
     pipeline_cache_t cache;
     int identity{};
     auto *owner = reinterpret_cast<api::effect_runtime *>(&identity);

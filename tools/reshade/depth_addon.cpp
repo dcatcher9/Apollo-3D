@@ -2906,8 +2906,7 @@ static sunshine_camera_binding::selection_key raw_selection_key(effect_runtime *
 }
 
 static void complete_raw_sample(effect_runtime *runtime, generic_depth_data &data,
-	generic_depth_device_data &device_data, const sunshine_depth::sample_result &completed,
-	const sunshine_depth::depth_quality &quality)
+	generic_depth_device_data &device_data, const sunshine_depth::sample_result &completed)
 {
 	if (completed.capture_id == 0 || completed.capture_id != data.raw_pending_capture_id)
 		return;
@@ -2962,8 +2961,13 @@ static void complete_raw_sample(effect_runtime *runtime, generic_depth_data &dat
 	const auto status = data.raw_sample_binding.complete(readback, GetTickCount64(), associated);
 	data.raw_pending_capture_id = 0;
 	if (status != sunshine_camera_binding::status::associated || !data.raw_pending_metadata.depth_ready ||
-		quality.kind != sunshine_depth::content_kind::useful)
-		return; // Only authenticated useful scene captures become numeric evidence.
+		!completed.moments.supplied)
+		return; // Selector-only point samples cannot become geometry evidence after promotion.
+	// This source was retained when the full-image measurement was requested.
+	// Sparse selector points can miss its geometry; their classification chooses
+	// candidates but cannot veto an authenticated full-image measurement here.
+	// Deliver a requested but malformed full-image measurement too: the scene
+	// policy must invalidate it rather than keep learning from older evidence.
 	data.raw_latest_submission = associated.captured;
 	data.raw_latest_sample = {};
 	data.raw_latest_sample.id = associated.sample.id;
@@ -2972,7 +2976,13 @@ static void complete_raw_sample(effect_runtime *runtime, generic_depth_data &dat
 	data.raw_latest_sample.readback_frame = data.raw_pending_metadata.frame;
 	data.raw_latest_sample.readback_source = data.raw_pending_metadata.source;
 	data.raw_latest_sample.readback_layout_epoch = associated.captured.selection.layout_epoch;
-	data.raw_latest_sample.raw = associated.sample.raw;
+	// Geometry consumes the full-image moments; dynamic selector points are not
+	// squeezed into the historical fixed-grid fixture carried by scene::sample.
+	data.raw_latest_sample.range_supplied = true;
+	data.raw_latest_sample.range_valid = completed.range_valid;
+	data.raw_latest_sample.range_min = completed.range_min;
+	data.raw_latest_sample.range_max = completed.range_max;
+	data.raw_latest_sample.moments = completed.moments;
 	data.raw_latest_available = true;
 	// The asynchronous result belongs to its submitted physical member, even
 	// when another source is the currently preferred rendering allocation.
@@ -3041,6 +3051,7 @@ static void sample_probe_target(effect_runtime *runtime, command_list *cmd_list,
 	if (backup->backup_texture.handle != captured.record.sampled || backup->content_identity != captured.record.assignment ||
 		info.layout_epoch != captured.record.layout) return;
 	sunshine_depth::sample_request request;
+	request.collect_range = data.raw_scene_requested;
 	request.token = info.identity;
 	request.source = backup->backup_texture;
 	request.before = resource_usage::copy_dest;
@@ -3063,6 +3074,9 @@ static void sample_probe_target(effect_runtime *runtime, command_list *cmd_list,
 			region.x, region.y, region.width, region.height};
 		binding.selection.crop = {region.x, region.y, region.width, region.height};
 		binding.selection.layout_epoch = captured.record.layout;
+		const auto grid = sunshine_depth_statistics::tile_grid(region.width, region.height);
+		binding.grid_width = grid.x;
+		binding.grid_height = grid.y;
 		binding.camera.unit_epoch = data.raw_basis_epoch;
 		binding.camera.frame = { captured.record.frame, captured.record.runtime };
 		binding.camera.source = binding.selection.original;
@@ -3094,6 +3108,16 @@ static void sample_probe_target(effect_runtime *runtime, command_list *cmd_list,
 			data.raw_pending_metadata.source = binding.selection.original;
 			data.raw_pending_metadata.frame = binding.camera.frame;
 			data.raw_pending_metadata.direction = captured.metadata.detected_orientation;
+			// Raw geometry and its full-image moments must use the same frozen
+			// convention. Unknown direction still permits selector point sampling.
+			const auto direction = data.raw_pending_metadata.direction;
+			if (raw_member(data, target_id) != nullptr &&
+				(direction == sunshine_depth::depth_orientation::normal || direction == sunshine_depth::depth_orientation::reversed))
+			{
+				request.collect_moments = true;
+				request.moments_A = direction == sunshine_depth::depth_orientation::normal ? 1.f : 0.f;
+				request.moments_inverseB = direction == sunshine_depth::depth_orientation::normal ? -1.f : 1.f;
+			}
 			data.raw_pending_metadata.depth_ready = captured.metadata.ready;
 			data.raw_pending_metadata.copy_ambiguous = captured.record.ambiguous;
 			uint32_t frame_width = 0, frame_height = 0;
@@ -3142,8 +3166,8 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	auto completed_sample = sunshine_depth::poll(runtime);
 	if (completed_sample && sunshine_streamline::provider::complete(runtime, *completed_sample))
 		completed_sample.reset();
-	// One content classification serves source preference and numeric evidence.
-	// Flat interior loading frames must not establish H before a scene appears.
+	// Point classification serves candidate preference only. Established-source
+	// scene controls independently consume authenticated full-image statistics.
 	const auto completed_quality = completed_sample && completed_sample->valid ?
 		sunshine_depth::analyze_depth(completed_sample->values.data(), completed_sample->values.size(), completed_sample->width, completed_sample->height) :
 		sunshine_depth::depth_quality {};
@@ -3151,7 +3175,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		completed_sample->capture_id != 0 && completed_sample->capture_id == data.raw_pending_capture_id && data.raw_pending_metadata.depth_ready;
 	if (completed_sample)
 	{
-		complete_raw_sample(runtime, data, *device_data, *completed_sample, completed_quality);
+		complete_raw_sample(runtime, data, *device_data, *completed_sample);
 		release_sample_reference(runtime, data);
 	}
 	const bool was_streamline = sunshine_streamline::provider::selected(runtime);

@@ -4,7 +4,8 @@
 // below remains on the GPU. No external FX shader or ReShade preset is needed.
 // Ported from the frozen 2026-09-18 three-file Game 3D source. Geometry authority:
 // docs/host-sbs.md and the Depth Coordinate V2 vertical/horizontal limit shaders.
-// Keep this pass graph and its floating-point precision unchanged during migration.
+// Optional source-alpha UI pinning reuses the horizontal pass after conditioning.
+// Its UI source is explicitly selected per game; it adds no color-layer blending.
 //
 // Specialize BUFFER_WIDTH, BUFFER_HEIGHT and BUFFER_COLOR_SPACE at compile time.
 // This preserves the original per-resolution group-memory footprint. Color-space
@@ -34,12 +35,20 @@ cbuffer SunshineGame3DConstants : register(b0)
     int Sunshine_CameraCoordinateBasis : packoffset(c1.x);
     float Sunshine_CameraDepthScale : packoffset(c1.y);
     float Sunshine_CameraStrengthBlend : packoffset(c1.z);
-    float Sunshine_Reserved : packoffset(c1.w);
+    float Sunshine_DisparityLimitUv : packoffset(c1.w);
     float2 Sunshine_CameraProjection : packoffset(c2.x);
     float2 Sunshine_CameraRawDepthRange : packoffset(c2.z);
     float2 Sunshine_CameraConvergence : packoffset(c3.x);
     float2 Sunshine_DepthJitter : packoffset(c3.z);
     float4 Sunshine_CameraDepthRect : packoffset(c4);
+};
+
+// Independent UI contract; preserve the existing 80-byte geometry ABI.
+// The user opts in only when this game's source alpha represents UI coverage.
+cbuffer SunshineUIConstants : register(b1)
+{
+    uint Sunshine_SourceAlphaUI;
+    uint3 Sunshine_UIPadding;
 };
 
 Texture2D<float4> SunshineSourceSampler : register(t0);
@@ -80,6 +89,9 @@ float2 SunshineCameraRawDepthRange()
 bool SunshineCameraActive()
 {
     if (!Sunshine_CameraDepthReady)
+        return false;
+    if (!SunshineCameraFinite(Sunshine_DisparityLimitUv) ||
+        Sunshine_DisparityLimitUv <= 0.0 || Sunshine_DisparityLimitUv > 0.04)
         return false;
     float4 rect = Sunshine_CameraDepthRect;
     if (!SunshineCameraFinite(rect.x) || !SunshineCameraFinite(rect.y) ||
@@ -197,6 +209,16 @@ static const float SunshineHostContainer = 0.04;
 static const float SunshineHostQScale = 1073741824.0;
 static const int SunshineHostContainerQ = 42949672;
 
+float SunshineBoundFinalParallax(float value)
+{
+    // Reapply the same uniform interval after fixed-point conditioning so its
+    // outward rounding cannot exceed the actual per-frame display budget.
+    float limit = SunshineCameraFinite(Sunshine_DisparityLimitUv) && SunshineCameraFinite(Depth_Adjustment) ?
+        clamp(Sunshine_DisparityLimitUv, 0.0, SunshineHostContainer) *
+        clamp(Depth_Adjustment, 0.0, 100.0) * 0.01 * SunshineAutomaticStrengthBlend() : 0.0;
+    return clamp(value, -limit, limit);
+}
+
 bool SunshineHostWarpActive()
 {
     return Sunshine_DepthReady && SunshineCameraActive() &&
@@ -208,6 +230,7 @@ void SunshineHostCandidateCS(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= BUFFER_WIDTH || id.y >= BUFFER_HEIGHT) return;
     float parallax = 0.0;
+    float displayLimit = 0.0;
     if (SunshineHostWarpActive())
     {
         float2 coordinate = (float2(id.xy) + 0.5) / float2(BUFFER_WIDTH, BUFFER_HEIGHT);
@@ -215,13 +238,17 @@ void SunshineHostCandidateCS(uint3 id : SV_DispatchThreadID)
         float raw = DepthBuffer.SampleLevel(SunshinePointBorder, (float4(uv, 0, 0)).xy, (float4(uv, 0, 0)).w).x;
         precise float q = (raw - Sunshine_CameraProjection.x) * Sunshine_CameraProjection.y;
         precise float strength = clamp(Depth_Adjustment, 0.0, 100.0) * 0.01 * SunshineAutomaticStrengthBlend();
+        displayLimit = Sunshine_DisparityLimitUv * strength;
         precise float displacement = Sunshine_CameraConvergence.x * Sunshine_CameraDepthScale *
             (Sunshine_CameraConvergence.y - q) * strength;
         if (SunshineCameraFinite(displacement))
             parallax = -clamp(displacement, -1.5, 2.5) * (float(BUFFER_HEIGHT) * rcp(2160.0) * 100.0) / BUFFER_WIDTH;
     }
     // Same signed source-U safety domain as the current Host conditioner.
-    SunshineHostCandidateStore[int2(id.xy)] = clamp(parallax, -SunshineHostContainer, SunshineHostContainer);
+    // This bound applies to CURRENT pixels, including newly revealed near
+    // geometry that the asynchronous CPU extrema have not observed yet.
+    // It never rewrites/clips raw depth and never moves the screen plane.
+    SunshineHostCandidateStore[int2(id.xy)] = clamp(parallax, -displayLimit, displayLimit);
 }
 
 // Mechanical ReShade binding translation of depth_coordinate_v2_vertical_limit_cs.hlsl
@@ -519,6 +546,97 @@ int H_V2LimitDecayQ30(int step_q30, uint distance, int max_decay_q30) {
         max_decay_q30 : step_q30 * signed_distance;
 }
 
+bool SunshineSourceUI(uint x, uint y) {
+    float alpha = SunshineSourceSampler.Load(int3(int2(uint2(x, y)), 0)).a;
+    return SunshineCameraFinite(alpha) && alpha > 0.0;
+}
+
+void SunshinePinSourceUI(uint x, uint y, int distance_pixels) {
+    // No UI exists in this row: leave the original field bit-for-bit intact.
+    if (distance_pixels >= BUFFER_WIDTH) return;
+    // Bilinear color reaches one texel beyond a positive-alpha texel center.
+    // Pin that support too, so a neighboring output cannot pull a faint copy
+    // of an antialiased glyph into otherwise unmasked background.
+    float bound = 0.5 * float(max(distance_pixels - 1, 0)) / float(BUFFER_WIDTH);
+    float value = SunshineHostFinalStore[int2(uint2(x, y))];
+    SunshineHostFinalStore[int2(uint2(x, y))] = distance_pixels <= 1 ? 0.0 : clamp(value, -bound, bound);
+}
+
+void SunshinePinSourceUISerial(uint y) {
+    int nearest_left = -1;
+    [loop]
+    for (uint x = 0u; x < BUFFER_WIDTH; ++x) {
+        bool is_ui = SunshineSourceUI(x, y);
+        H_LineCandidateQ30[x] = is_ui ? (int)x : -1;
+        if (is_ui) nearest_left = (int)x;
+        H_ForwardMajorantQ30[x] = nearest_left;
+    }
+    int nearest_right = BUFFER_WIDTH;
+    [loop]
+    for (int x = (int)BUFFER_WIDTH - 1; x >= 0; --x) {
+        if (H_LineCandidateQ30[(uint)x] >= 0) nearest_right = x;
+        int left = H_ForwardMajorantQ30[(uint)x];
+        int distance_left = left >= 0 ? x - left : BUFFER_WIDTH;
+        int distance_right = nearest_right < BUFFER_WIDTH ? nearest_right - x : BUFFER_WIDTH;
+        SunshinePinSourceUI((uint)x, y, min(distance_left, distance_right));
+    }
+}
+
+void SunshinePinSourceUIParallel(uint y, uint lane, uint chunk_start, uint chunk_end) {
+    // All horizontal conditioning stores/readers must finish before its scratch
+    // arrays are reused. This adds no group memory beyond the original 32 KB
+    // budget; the arrays below now contain pixel indices, never Q30 parallax.
+    AllMemoryBarrierWithGroupSync();
+    [loop]
+    for (uint x = lane; x < BUFFER_WIDTH; x += 32u)
+        H_LineCandidateQ30[x] = SunshineSourceUI(x, y) ? (int)x : -1;
+    GroupMemoryBarrierWithGroupSync();
+
+    int first_ui = BUFFER_WIDTH;
+    int last_ui = -1;
+    [loop]
+    for (uint x = chunk_start; x < chunk_end; ++x) {
+        int index = H_LineCandidateQ30[x];
+        if (index >= 0) {
+            first_ui = min(first_ui, index);
+            last_ui = index;
+        }
+    }
+    H_LocalEndsQ30[lane] = int2(last_ui, first_ui);
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0u) {
+        int left = -1;
+        [unroll]
+        for (uint chunk = 0u; chunk < 32u; ++chunk) {
+            H_ChunkCarriesQ30[chunk].x = left;
+            left = max(left, H_LocalEndsQ30[chunk].x);
+        }
+        int right = BUFFER_WIDTH;
+        [unroll]
+        for (int chunk = 31; chunk >= 0; --chunk) {
+            H_ChunkCarriesQ30[(uint)chunk].y = right;
+            right = min(right, H_LocalEndsQ30[(uint)chunk].y);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    int nearest_left = H_ChunkCarriesQ30[lane].x;
+    [loop]
+    for (uint x = chunk_start; x < chunk_end; ++x) {
+        nearest_left = max(nearest_left, H_LineCandidateQ30[x]);
+        H_ForwardMajorantQ30[x] = nearest_left;
+    }
+    int nearest_right = H_ChunkCarriesQ30[lane].y;
+    [loop]
+    for (int x = (int)chunk_end - 1; x >= (int)chunk_start; --x) {
+        int index = H_LineCandidateQ30[(uint)x];
+        if (index >= 0) nearest_right = min(nearest_right, index);
+        int left = H_ForwardMajorantQ30[(uint)x];
+        int distance_left = left >= 0 ? x - left : BUFFER_WIDTH;
+        int distance_right = nearest_right < BUFFER_WIDTH ? nearest_right - x : BUFFER_WIDTH;
+        SunshinePinSourceUI((uint)x, y, min(distance_left, distance_right));
+    }
+}
+
 [numthreads(32, 1, 1)]
 void SunshineHostHorizontalCS(
     uint3 group_id : SV_GroupID,
@@ -535,11 +653,11 @@ void SunshineHostHorizontalCS(
     if (BUFFER_WIDTH <= 32u) {
         if (lane == 0u) {
             float value = SunshineHostVerticalConditionedSampler.Load(int3(int2(uint2(0u, y)), 0));
-            SunshineHostFinalStore[int2(uint2(0u, y))] = value;
+            SunshineHostFinalStore[int2(uint2(0u, y))] = SunshineBoundFinalParallax(value);
             [loop]
             for (uint serial_x = 1u; serial_x < BUFFER_WIDTH; ++serial_x) {
                 value = max(SunshineHostVerticalConditionedSampler.Load(int3(int2(uint2(serial_x, y)), 0)), value - max_step);
-                SunshineHostFinalStore[int2(uint2(serial_x, y))] = value;
+                SunshineHostFinalStore[int2(uint2(serial_x, y))] = SunshineBoundFinalParallax(value);
             }
             AllMemoryBarrier();
             value = SunshineHostFinalStore[int2(uint2(BUFFER_WIDTH - 1u, y))];
@@ -549,8 +667,12 @@ void SunshineHostHorizontalCS(
                  --serial_back_x) {
                 const uint2 position = uint2((uint)serial_back_x, y);
                 value = max(SunshineHostFinalStore[int2(position)], value - max_step);
-                SunshineHostFinalStore[int2(position)] = value;
+                SunshineHostFinalStore[int2(position)] = SunshineBoundFinalParallax(value);
             }
+        }
+        if (Sunshine_SourceAlphaUI != 0u) {
+            AllMemoryBarrierWithGroupSync();
+            if (lane == 0u) SunshinePinSourceUISerial(y);
         }
         return;
     }
@@ -650,7 +772,7 @@ void SunshineHostHorizontalCS(
     }
     uint write_x = chunk_end - 1u;
     int final_q30 = max(H_ForwardMajorantQ30[write_x], backward_q30);
-    SunshineHostFinalStore[int2(uint2(write_x, y))] = H_V2LimitFromQ30(final_q30);
+    SunshineHostFinalStore[int2(uint2(write_x, y))] = SunshineBoundFinalParallax(H_V2LimitFromQ30(final_q30));
     [loop]
     for (int scan_x = (int)chunk_end - 2; scan_x >= (int)chunk_start; --scan_x) {
         write_x = (uint)scan_x;
@@ -658,8 +780,10 @@ void SunshineHostHorizontalCS(
             H_LineCandidateQ30[write_x],
             backward_q30 - max_step_q30);
         final_q30 = max(H_ForwardMajorantQ30[write_x], backward_q30);
-        SunshineHostFinalStore[int2(uint2(write_x, y))] = H_V2LimitFromQ30(final_q30);
+        SunshineHostFinalStore[int2(uint2(write_x, y))] = SunshineBoundFinalParallax(H_V2LimitFromQ30(final_q30));
     }
+    if (Sunshine_SourceAlphaUI != 0u)
+        SunshinePinSourceUIParallel(y, lane, chunk_start, chunk_end);
 }
 
 

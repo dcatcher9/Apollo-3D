@@ -4,12 +4,16 @@
 #define NOMINMAX
 #endif
 #include "camera_sample_observation.h"
+#include "depth_selection_policy.h"
+#include "raw_scene_policy.h"
 
 #include <array>
+#include <algorithm>
 #include <cstdio>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
+#include <vector>
 
 namespace {
   namespace binding = sunshine_camera_binding;
@@ -40,9 +44,10 @@ namespace {
     return s;
   }
   struct completion_fixture {
-    std::array<float, scene::grid_width * scene::grid_height> pixels;
+    std::vector<float> pixels;
     binding::readback result;
-    explicit completion_fixture(const binding::submission &s, std::uint64_t capture_id) {
+    explicit completion_fixture(const binding::submission &s, std::uint64_t capture_id) :
+        pixels(std::size_t(s.grid_width) * s.grid_height) {
       for (std::size_t i = 0; i != pixels.size(); ++i) pixels[i] = static_cast<float>(i + 1) / (pixels.size() + 1);
       result.capture_id = capture_id;
       result.scope = s.selection.scope;
@@ -51,6 +56,8 @@ namespace {
       result.source_width = s.selection.sample_width;
       result.source_height = s.selection.sample_height;
       result.crop = s.selection.crop;
+      result.width = s.grid_width;
+      result.height = s.grid_height;
       result.values = pixels.data();
       result.value_count = pixels.size();
       result.valid = true;
@@ -63,7 +70,8 @@ namespace {
   }
   void clean_rejection(const binding::associated_sample &out) {
     require(!out.association_available && !out.projection_associated && !out.sample.metadata.proof_admitted &&
-      out.sample.id == 0 && out.sample.capture_ms == 0 && out.sample.raw[0] == 0,
+      out.sample.id == 0 && out.sample.capture_ms == 0 && out.sample.raw[0] == 0 &&
+      out.sample.width == 0 && out.sample.height == 0 && out.sample.count == 0,
       "Failed completion retained a previous association or pixels");
   }
 
@@ -101,7 +109,18 @@ namespace {
     require(out.sample.raw[0] != 99, "Mailbox retained borrowed readback storage");
     scene::policy numerical;
     numerical.reset(expected.camera.unit_epoch, 1000);
-    require(numerical.observe(out.sample, 1200) == scene::status::proof_missing,
+    // The old numerical fixture accepts only its fixed layout. Explicitly adapt
+    // this legacy test case; live dynamic grids never enter that fixed payload.
+    scene::sample physical;
+    require(out.sample.width == scene::grid_width && out.sample.height == scene::grid_height &&
+      out.sample.count == physical.raw.size(), "Legacy fixture silently changed point layout");
+    physical.id = out.sample.id;
+    physical.capture_ms = out.sample.capture_ms;
+    physical.metadata = out.sample.metadata;
+    physical.readback_frame = out.sample.readback_frame;
+    physical.readback_source = out.sample.readback_source;
+    std::copy_n(out.sample.raw.begin(), physical.raw.size(), physical.raw.begin());
+    require(numerical.observe(physical, 1200) == scene::status::proof_missing,
       "Weak bound metadata entered the numerical policy");
     require(m.complete(complete.result, 1201, out) == binding::status::no_pending, "Duplicate completion was accepted");
     clean_rejection(out);
@@ -234,6 +253,10 @@ namespace {
     bad = s; ++bad.camera.source.lifetime; reject(bad);
     bad = s; ++bad.camera.source.viewport; reject(bad);
     bad = s; bad.camera.unit_epoch = 0; reject(bad);
+    bad = s; bad.grid_width = 0; reject(bad);
+    bad = s; bad.grid_height = 0; reject(bad);
+    bad = s; bad.grid_width = bad.selection.crop.width + 1; reject(bad);
+    bad = s; bad.grid_width = sunshine_depth_statistics::maximum_tiles; bad.grid_height = 2; reject(bad);
   }
 
   void absent_projection_and_no_numerical_policy() {
@@ -244,13 +267,153 @@ namespace {
     completion_fixture c(s, start(m, s));
     // Association is about which readback belongs to which request. It does
     // not fabricate a camera, filter clear depth, or perform depth statistics.
-    c.pixels.fill(0.0f);
+    std::fill(c.pixels.begin(), c.pixels.end(), 0.0f);
     c.pixels[0] = std::numeric_limits<float>::quiet_NaN();
     binding::associated_sample out;
     require(m.complete(c.result, 1100, out) == binding::status::associated, "Metadata transport performed numerical calibration");
     require(out.association_available && !out.projection_associated && !out.sample.metadata.proof_admitted &&
       out.sample.metadata.unit_epoch == 0 && std::isnan(out.sample.raw[0]) && out.sample.raw[1] == 0,
       "Absent projection or raw sample values were fabricated");
+  }
+
+  binding::submission dynamic_fixture(std::uint32_t width, std::uint32_t height) {
+    auto s = fixture();
+    s.selection.original.width = s.selection.original.extent_width = width;
+    s.selection.original.height = s.selection.original.extent_height = height;
+    s.selection.original.left = s.selection.original.top = 0;
+    s.selection.sample_width = width;
+    s.selection.sample_height = height;
+    s.selection.crop = {0, 0, width, height};
+    s.camera.source = s.selection.original;
+    const auto grid = sunshine_depth_statistics::tile_grid(width, height);
+    s.grid_width = grid.x;
+    s.grid_height = grid.y;
+    return s;
+  }
+
+  void dynamic_grid_and_crop_are_frozen() {
+    for (const auto extent : {binding::rectangle{0, 0, 3440, 1440}, binding::rectangle{0, 0, 1080, 1920},
+        binding::rectangle{0, 0, 1024, 1024}, binding::rectangle{0, 0, 3, 2}}) {
+      binding::mailbox m;
+      auto submitted = dynamic_fixture(extent.width, extent.height);
+      completion_fixture c(submitted, start(m, submitted));
+      const auto expected_width = submitted.grid_width, expected_height = submitted.grid_height;
+      submitted.grid_width = submitted.grid_height = 1; // New caller state is unrelated.
+      binding::associated_sample out;
+      require(m.complete(c.result, 1100, out) == binding::status::associated,
+        "Valid aspect-dependent point grid was rejected");
+      require(out.sample.width == expected_width && out.sample.height == expected_height &&
+        out.sample.count == c.pixels.size() && out.captured.grid_width == expected_width &&
+        out.captured.grid_height == expected_height, "Dynamic grid dimensions were not frozen with the capture");
+      for (std::size_t i = 0; i != c.pixels.size(); ++i)
+        require(out.sample.raw[i] == c.pixels[i], "Dynamic grid was truncated, resampled or reordered");
+      c.pixels.back() = 99;
+      require(out.sample.raw[out.sample.count - 1] != 99, "Dynamic grid retained borrowed storage");
+    }
+
+    binding::mailbox m;
+    const auto old = dynamic_fixture(3440, 1440);
+    completion_fixture stale(old, start(m, old));
+    auto resized = dynamic_fixture(1080, 1920);
+    require(m.invalidate_if_changed(resized.selection) == binding::status::selection_changed,
+      "Aspect and source-size change retained an old pending grid");
+    completion_fixture current(resized, start(m, resized));
+    binding::associated_sample out;
+    require(m.complete(stale.result, 1100, out) == binding::status::wrong_capture_id && m.busy(),
+      "Old grid completion consumed the resized pending request");
+    require(m.complete(current.result, 1100, out) == binding::status::associated,
+      "Resized pending request was lost after stale completion");
+
+    auto cropped = old;
+    cropped.selection.crop = {0, 0, 1920, 1080};
+    const auto cropped_grid = sunshine_depth_statistics::tile_grid(1920, 1080);
+    cropped.grid_width = cropped_grid.x;
+    cropped.grid_height = cropped_grid.y;
+    completion_fixture before_crop(old, start(m, old));
+    require(m.invalidate_if_changed(cropped.selection) == binding::status::selection_changed,
+      "Active crop change retained a pending grid from the full allocation");
+    completion_fixture after_crop(cropped, start(m, cropped));
+    require(m.complete(before_crop.result, 1100, out) == binding::status::wrong_capture_id && m.busy(),
+      "Old crop completion consumed the current request");
+    // Same element count does not establish the same point locations.
+    std::swap(after_crop.result.width, after_crop.result.height);
+    require(m.complete(after_crop.result, 1100, out) == binding::status::layout_mismatch,
+      "Transposed point layout was accepted because its element count matched");
+    clean_rejection(out);
+  }
+
+  void sparse_selector_points_do_not_veto_full_image_geometry() {
+    namespace raw = sunshine_raw_scene;
+    for (const auto direction : {raw::orientation::normal, raw::orientation::reversed}) {
+      auto submitted = dynamic_fixture(192, 108);
+      std::vector<float> q(192 * 108, 0.f);
+      // Real foreground lies between tile centers. Its full-image moments are
+      // valid even though every selector point observes clear background.
+      q.front() = .25f;
+      q.back() = .5f;
+      sunshine_depth_statistics::moments moments;
+      moments.supplied = moments.valid = true;
+      moments.A = direction == raw::orientation::normal ? 1.f : 0.f;
+      moments.inverseB = direction == raw::orientation::normal ? -1.f : 1.f;
+      moments.count = q.size();
+      moments.tiles_x = submitted.grid_width;
+      moments.tiles_y = submitted.grid_height;
+      for (const double value : q) { moments.sum += value; moments.sum_squares += value * value; }
+      raw::selected_frame current;
+      current.basis_epoch = submitted.camera.unit_epoch;
+      current.layout_epoch = submitted.selection.layout_epoch;
+      current.source = submitted.selection.original;
+      current.direction = direction;
+      current.depth_ready = current.aligned_viewport_assumed = true;
+      raw::policy controller;
+      require(controller.reset(current.basis_epoch, 1000), "Full-image integration fixture did not reset");
+      const double budget = double(scene::reference_zpd) * .5;
+      controller.configure({.5, budget, budget});
+      binding::mailbox mailbox;
+      raw::output state;
+      for (unsigned capture = 0; capture != 6; ++capture) {
+        const auto now = 1000 + capture * 250;
+        submitted.capture_ms = now;
+        submitted.camera.frame = {80 + capture, 800};
+        current.frame = submitted.camera.frame;
+        completion_fixture completed(submitted, start(mailbox, submitted, now));
+        for (unsigned y = 0; y != submitted.grid_height; ++y)
+          for (unsigned x = 0; x != submitted.grid_width; ++x) {
+            const auto px = sunshine_depth_statistics::tile_bounds(x, 192, submitted.grid_width).center();
+            const auto py = sunshine_depth_statistics::tile_bounds(y, 108, submitted.grid_height).center();
+            const float depth = q[py * 192 + px];
+            completed.pixels[y * submitted.grid_width + x] =
+              direction == raw::orientation::normal ? 1.f - depth : depth;
+          }
+        const auto classification = sunshine_depth::analyze_depth(completed.pixels.data(), completed.pixels.size(),
+          submitted.grid_width, submitted.grid_height);
+        require(classification.kind != sunshine_depth::content_kind::useful,
+          "Sparse fixture unexpectedly placed foreground at a selector point");
+        binding::associated_sample associated;
+        require(mailbox.complete(completed.result, now, associated) == binding::status::associated,
+          "Selector classification vetoed authenticated depth transport");
+        raw::sample packet;
+        packet.id = associated.sample.id;
+        packet.capture_ms = associated.sample.capture_ms;
+        packet.metadata = current;
+        packet.readback_frame = current.frame;
+        packet.readback_source = current.source;
+        packet.readback_layout_epoch = current.layout_epoch;
+        packet.range_supplied = packet.range_valid = true;
+        packet.range_min = direction == raw::orientation::normal ? .5f : 0.f;
+        packet.range_max = direction == raw::orientation::normal ? 1.f : .5f;
+        packet.moments = moments;
+        packet.moments.valid = capture != 4;
+        state = controller.update(current, &packet, now);
+        if (capture == 3 || capture == 5)
+          require(state.ready && state.has_depth_statistics && state.depth_statistics.pixel_count == q.size() &&
+            state.depth_statistics.mean == moments.sum / moments.count,
+            "Authenticated full-image geometry was replaced by empty selector points");
+        if (capture == 4)
+          require(!state.ready && state.reason == raw::status::invalid_depth && !state.has_depth_statistics,
+            "Malformed supplied moments failed to invalidate earlier scene evidence");
+      }
+    }
   }
 
   struct observation_fixture {
@@ -369,6 +532,8 @@ int main() {
     owner_lifetime_invalidation();
     age_and_invalid_submission();
     absent_projection_and_no_numerical_policy();
+    dynamic_grid_and_crop_are_frozen();
+    sparse_selector_points_do_not_veto_full_image_geometry();
     captured_probe_is_immutable_and_weak();
     probe_capture_rejects_mismatched_envelopes();
     std::puts("PASS camera sample binding: immutable camera/copy/frame, independent request IDs, scope/layout/lifetimes, cancellation, aging and proof boundary");

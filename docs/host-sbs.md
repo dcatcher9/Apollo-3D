@@ -1477,6 +1477,11 @@ no DWM/client geometry mapping on that path.
 
 ## Dump 3D and evaluation
 
+The client also exposes Dump 3D in Game 3D. That provider uses a separate
+[native-game diagnostic package](reshade-sbs.md#dump-3d-diagnostics) containing the add-on's
+actual inputs and SL/NGX observations; the AI-specific schema and authentication below do not
+apply to it. A Game request never initializes the AI estimator to manufacture a dump.
+
 Dump 3D records one matched current-contract frame: source/model/public raw-model evidence,
 authenticated analysis-region placement, the V2 geometry chain and inverse map, scene/cut
 attribution, packed SBS, and—when selected—the exact OCR8 record and compact SLR13 state used by

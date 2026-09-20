@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "ngx_depth_source.h"
 #include "addon_lifetime.h"
+#include "game3d_diagnostic_metadata.h"
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
 #include "streamline_depth_capture.h"
 #include "streamline_native_observer.h"
@@ -10,6 +11,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace sunshine_ngx {
   namespace {
@@ -39,6 +41,9 @@ namespace sunshine_ngx {
     SRWLOCK feature_lock = SRWLOCK_INIT;
     std::array<feature, max_features> features;
     std::atomic<std::uint64_t> active_epoch{}, next_epoch{}, sequence{}, next_feature{};
+    // Dump-only observations must not advance the capture/evaluation ordering
+    // counter when the feature was never admitted to the source adapter.
+    std::atomic<std::uint64_t> unknown_diagnostic_sequence{};
     std::atomic<std::uint64_t> evaluations{}, recorded{}, unknown{}, missing_parameters{}, failed{}, feature_overflow{};
     std::uint64_t next_report{};
     bool calibration_probe_requested{}; // Protected by feature_lock, like the feature records.
@@ -79,6 +84,64 @@ namespace sunshine_ngx {
       ~preserve_error() { SetLastError(value); }
     };
     bool success(result value) { return (value & 0xfff00000u) != 0xbad00000u; }
+    sunshine_game3d::diagnostic::stamp observe_dump_parameters(const parameter_api &api, const void *parameters,
+        const sunshine_scene_depth::frame &frame, const feature &selected,
+        const void *handle, std::uint64_t command, std::uint64_t diagnostic_session) {
+      namespace diagnostic = sunshine_game3d::diagnostic;
+      using kind = diagnostic::parameter_type;
+      diagnostic::ngx_evaluation out;
+      out.observation = {diagnostic_session, frame.epoch, frame.sequence, frame.tick, 0, 0, command, UINT32_MAX, false};
+      out.owner = reinterpret_cast<std::uint64_t>(selected.owner); out.handle = reinterpret_cast<std::uint64_t>(handle);
+      out.source_id = selected.generation; out.scene_revision = frame.feedback.revision; out.feature_known = selected.handle != nullptr;
+      out.feature = selected.parameters.feature; out.create_width = selected.parameters.width;
+      out.create_height = selected.parameters.height; out.create_flags = selected.parameters.flags;
+      const auto probe = [&](const char *name, kind type) {
+        if (out.parameter_count == out.parameters.size()) { out.truncated = true; return; }
+        auto &p = out.parameters[out.parameter_count++];
+        std::snprintf(p.name, sizeof(p.name), "%s", name); p.type = type;
+        void *pointer{}; unsigned uint_value{}; int int_value{}; float float_value{};
+        switch (type) {
+          case kind::resource: case kind::pointer: {
+            const auto getter = type == kind::resource ? api.resource : api.void_pointer;
+            p.getter_available = getter != nullptr;
+            if (getter) p.result = getter(const_cast<void *>(parameters), name, &pointer);
+            p.integer = reinterpret_cast<std::uint64_t>(pointer); break;
+          }
+          case kind::unsigned_integer:
+            p.getter_available = api.unsigned_integer != nullptr;
+            if (api.unsigned_integer) p.result = api.unsigned_integer(const_cast<void *>(parameters), name, &uint_value);
+            p.integer = uint_value; break;
+          case kind::signed_integer:
+            p.getter_available = api.integer != nullptr;
+            if (api.integer) p.result = api.integer(const_cast<void *>(parameters), name, &int_value);
+            p.integer = static_cast<std::int64_t>(int_value); break;
+          case kind::floating:
+            p.getter_available = api.floating != nullptr;
+            if (api.floating) p.result = api.floating(const_cast<void *>(parameters), name, &float_value);
+            p.number = float_value; break;
+        }
+        p.successful = p.getter_available && success(p.result);
+        // Never publish an out parameter left untouched/poisoned by failure.
+        if (!p.successful) { p.integer = 0; p.number = 0; }
+      };
+      // Bounded public named-parameter list, independently checked against
+      // NVIDIA/DLSS nvsdk_ngx_defs.h. Availability is a getter result, never an
+      // inference from a loaded DLL. Optional pointer payloads remain opaque.
+      for (const char *name : {"Color", "Output", "Depth", "DepthHighRes", "MotionVectors", "ExposureTexture", "Position.ViewSpace"}) probe(name, kind::resource);
+      for (const auto &entry : sunshine_game3d::ui_resources::catalog) {
+        if (entry.source == sunshine_game3d::ui_resources::provider::ngx) probe(entry.parameter_key, kind::resource);
+      }
+      for (const char *name : {"WorldToViewMatrix", "ViewToClipMatrix", "InvViewProjectionMatrix", "ClipToPrevClipMatrix"}) probe(name, kind::pointer);
+      for (const char *name : {"Width", "Height", "OutWidth", "OutHeight", "Color.Format", "Output.Format",
+          "DLSS.Render.Subrect.Dimensions.Width", "DLSS.Render.Subrect.Dimensions.Height",
+          "DLSS.Input.Color.Subrect.Base.X", "DLSS.Input.Color.Subrect.Base.Y", "DLSS.Input.Depth.Subrect.Base.X", "DLSS.Input.Depth.Subrect.Base.Y",
+          "DLSS.Input.MV.Subrect.Base.X", "DLSS.Input.MV.Subrect.Base.Y", "DLSS.Output.Subrect.Base.X", "DLSS.Output.Subrect.Base.Y"}) probe(name, kind::unsigned_integer);
+      for (const char *name : {"Reset", "DLSS.Feature.Create.Flags", "PerfQualityValue"}) probe(name, kind::signed_integer);
+      for (const char *name : {"Jitter.Offset.X", "Jitter.Offset.Y", "MV.Scale.X", "MV.Scale.Y", "MV.Offset.X", "MV.Offset.Y",
+          "DLSS.Pre.Exposure", "DLSS.Exposure.Scale", "FrameTimeDeltaInMsec"}) probe(name, kind::floating);
+      diagnostic::observe_ngx(out);
+      return out.observation;
+    }
     const char *name(availability state) {
       switch (state) {
       case availability::missing_getter: return "missing-getter";
@@ -164,6 +227,7 @@ namespace sunshine_ngx {
     preserve_error error;
     parameter_api value;
     if (sunshine_addon_lifetime::stopping() || !owner) return value;
+    sunshine_game3d::diagnostic::observe_module(owner, "ngx", "named C parameter exports");
     value.integer = reinterpret_cast<decltype(value.integer)>(export_pointer(owner, "NVSDK_NGX_Parameter_GetI"));
     value.unsigned_integer = reinterpret_cast<decltype(value.unsigned_integer)>(export_pointer(owner, "NVSDK_NGX_Parameter_GetUI"));
     value.resource = reinterpret_cast<decltype(value.resource)>(export_pointer(owner, "NVSDK_NGX_Parameter_GetD3d12Resource"));
@@ -257,7 +321,23 @@ namespace sunshine_ngx {
       selected_slot = static_cast<unsigned>(entry - features.data());
     }
     ReleaseSRWLockShared(&feature_lock);
-    if (!selected.handle || selected.parameters.epoch != attempt.epoch) { ++unknown; return attempt; }
+    if (!selected.handle || selected.parameters.epoch != attempt.epoch) {
+      ++unknown;
+      const auto diagnostic_session = sunshine_game3d::diagnostic_metadata_generation();
+      if (diagnostic_session) {
+        // A late add-on can miss CreateFeature while actual evaluations still
+        // expose useful parameters. Observe those arguments for this dump only;
+        // do not infer a feature, source ID, reset revision or capture ticket.
+        sunshine_scene_depth::frame diagnostic_frame;
+        diagnostic_frame.epoch = attempt.epoch;
+        diagnostic_frame.sequence = ++unknown_diagnostic_sequence;
+        diagnostic_frame.tick = GetTickCount64();
+        feature diagnostic_feature;
+        diagnostic_feature.owner = owner;
+        attempt.diagnostic_observation = observe_dump_parameters(api, parameters, diagnostic_frame, diagnostic_feature, handle, command, diagnostic_session);
+      }
+      return attempt;
+    }
     attempt.observed = true;
     attempt.source_id = selected.generation;
     ++evaluations;
@@ -285,6 +365,9 @@ namespace sunshine_ngx {
     ReleaseSRWLockExclusive(&feature_lock);
     if (!value.sequence) return attempt;
     value.tick = GetTickCount64();
+    const auto diagnostic_session = sunshine_game3d::diagnostic_metadata_generation();
+    if (diagnostic_session)
+      attempt.diagnostic_observation = observe_dump_parameters(api, parameters, value, selected, handle, command, diagnostic_session);
     value.projection.reversed = (selected.parameters.flags & inverted_depth) != 0;
     value.projection.direction_supplied = true;
     // NGX names the resource, but does not supply its current D3D12 state.
@@ -370,7 +453,10 @@ namespace sunshine_ngx {
     preserve_error error;
     // An original vendor call can return after detach began. Its old ticket
     // must not reenter the capture owner's already destructing containers.
-    if (sunshine_addon_lifetime::stopping() || !value.observed) return;
+    if (sunshine_addon_lifetime::stopping()) return;
+    if (value.diagnostic_observation.session)
+      sunshine_game3d::diagnostic::finish_ngx(value.diagnostic_observation, value.source_id, successful);
+    if (!value.observed) return;
     bool current = false;
     if (value.epoch == active_epoch.load(std::memory_order_acquire) && TryAcquireSRWLockShared(&feature_lock)) {
       for (const auto &entry : features) {

@@ -25,6 +25,7 @@
 #include "sync.h"
 #include "tracked_async_worker.h"
 #include "video.h"
+#include "video_session_recovery.h"
 
 #ifdef _WIN32
   #include "platform/windows/exclusive_display_reconcile_retry.h"
@@ -1042,18 +1043,26 @@ namespace video {
     std::shared_ptr<platf::display_t> disp,
     std::unique_ptr<nvenc_encode_session_t> session,
     safe::signal_t &reinit_event,
+    detail::encoder_recovery_t &recovery,
     std::shared_ptr<void> channel_data,
     const std::function<void(const video_mode_change_t &)> &on_bitrate_reconfigured
   ) {
     // Move expensive NVENC destruction off the encode thread so a reinit can proceed. The worker
     // is process-owned rather than detached: it must drain while logging, CUDA, TensorRT, and D3D
     // globals are still alive, under the application's forced-shutdown watchdog.
-    auto fail_guard = util::fail_guard([&session] {
+    bool failed = true;
+    auto fail_guard = util::fail_guard([&session, &recovery, &failed] {
       std::packaged_task<void()> teardown([session = std::move(session)]() mutable {
         BOOST_LOG(info) << "Starting async encoder teardown";
         session.reset();
         BOOST_LOG(info) << "Async encoder teardown complete";
       });
+      if (failed) {
+        // A timeout keeps NVENC's global creation gate closed until its owner is destroyed.
+        // Keep this completion so capture_async does not treat that temporary refusal as a
+        // fatal encoder/configuration error. Ordinary mode changes still retire asynchronously.
+        recovery.start(teardown.get_future());
+      }
       launch_async_teardown_worker(std::move(teardown));
     });
 
@@ -1099,13 +1108,16 @@ namespace video {
     std::size_t encoded_queue_drops_since_log = 0;
     auto next_encoded_queue_drop_log = std::chrono::steady_clock::now();
 
-    // Most recent real captured frame. On a host SBS toggle the display and its capture session
-    // survive, so no new frame is delivered until
-    // the desktop actually changes; the fresh session would encode its dummy (black) prime at
-    // min-FPS until then. Re-queue this frame on rebuild so the next session starts with the
-    // current desktop instead.
+    // Most recent real captured frame. On a same-display rebuild, no new frame is delivered
+    // until the desktop changes. Keep this source so the replacement can resume real content.
     detail::latest_encode_source_t<std::shared_ptr<platf::img_t>> source;
     const auto &last_img = source.latest();
+    auto retain_source = util::fail_guard([&] {
+      // Encoder failures also rebuild against the same capture display. Preserve its last real
+      // image so a static desktop does not keep encoding the replacement's black dummy frame.
+      // A newer queued capture wins; the capture thread drains old images on display reinit.
+      source.return_for_rebuild(*images, shutdown_event->peek(), reinit_event.peek());
+    });
     auto encode_diagnostics = detail::make_diagnostic_state<encode_stage_diagnostics_t>(
       config::sunshine.diagnostics_enabled
     );
@@ -1240,13 +1252,7 @@ namespace video {
         return false;
       }
 
-      // Same-display rebuild: hand the current desktop to the next session. Never retain an
-      // image across a real display reinitialization because it may own resources from the old
-      // display. Do not overwrite a newer frame that capture has already queued.
-      if (last_img && !shutting_down && !capture_stopped && !display_reinit_pending && encode_config_change_pending) {
-        images->try_raise(source.release());
-      }
-
+      failed = false;
       return true;
     };
 
@@ -1590,6 +1596,8 @@ namespace video {
     }
 
     int frame_nr = 1;
+    detail::encoder_recovery_t recovery;
+    bool recovery_wait_logged = false;
 
     auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
@@ -1656,6 +1664,27 @@ namespace video {
                           << '@' << (config.framerateX100 > 0 ? config.framerateX100 / 100.0 : (double) config.framerate)
                           << "Hz, "sv << config.bitrate << "kbps"sv;
         }
+      }
+
+      // A failed encode retires on a tracked worker. Wait before acquiring the display or
+      // attempting another encoder, and keep servicing cancellation/live-mode requests above.
+      // Waiting only on this owner cannot stall behind unrelated process teardown workers.
+      const auto recovery_state = recovery.poll();
+      if (recovery_state == detail::encoder_recovery_t::state_t::pending) {
+        if (!recovery_wait_logged) {
+          BOOST_LOG(info) << "Waiting for failed encoder teardown before rebuilding the stream"sv;
+          recovery_wait_logged = true;
+        }
+        std::this_thread::sleep_for(20ms);
+        continue;
+      }
+      if (recovery_state != detail::encoder_recovery_t::state_t::ready) {
+        BOOST_LOG(error) << (recovery_state == detail::encoder_recovery_t::state_t::timed_out ? "Failed encoder teardown exceeded the 10-second recovery window; ending the stream"sv : "Failed encoder teardown raised an exception; ending the stream"sv);
+        return;
+      }
+      if (recovery_wait_logged) {
+        BOOST_LOG(info) << "Failed encoder teardown complete; rebuilding the stream"sv;
+        recovery_wait_logged = false;
       }
 
       // Wait for the main capture event when the display is being reinitialized
@@ -1991,6 +2020,7 @@ namespace video {
         display,
         std::move(encode_session),
         capture_thread_ctx.reinit_event,
+        recovery,
         channel_data,
         [&](const video_mode_change_t &mode) {
           // Keep every rebuild/fallback owner on the bitrate NVENC actually accepted. Without

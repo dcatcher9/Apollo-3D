@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "depth_content_sampler.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <d3d11.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -15,7 +18,10 @@ static_assert(RESHADE_API_VERSION == 20, "Use the pinned ReShade 6.8 SDK");
 namespace sunshine_depth {
 namespace {
   namespace api = reshade::api;
-  constexpr UINT grid_width = 32, grid_height = 18;
+  constexpr UINT storage_width = 32;
+  constexpr UINT tile_capacity = sunshine_depth_statistics::maximum_tiles;
+  static_assert(tile_capacity == 768 && tile_capacity % storage_width == 0,
+    "Keep shader record addressing synchronized with the fixed scratch layout");
 
   template<class T> class com_ptr {
   public:
@@ -37,19 +43,102 @@ namespace {
   }
 
   // Integer texel loads avoid filtering across geometry and padded viewport edges.
-  // The shader never linearizes or reverses depth, so either depth convention is
-  // measured in its original representation.
+  // Selector points and extrema remain raw. Optional moments decode only the
+  // immutable capture's depth basis, alongside the existing full-depth scan.
   constexpr char shader_source[] = R"(
 Texture2D<float> source_depth : register(t0);
-RWTexture2D<float> sampled_depth : register(u0);
-cbuffer Region : register(b0) { uint4 region; };
+RWTexture2D<float4> sampled_depth : register(u0);
+cbuffer Region : register(b0) {
+  uint4 region;
+  uint collect_range, collect_moments;
+  float moments_A, moments_inverseB;
+  uint2 tile_dimensions;
+};
+groupshared float2 tile_range[64];
+groupshared uint tile_invalid[64];
+groupshared float3 tile_moments[64];
+groupshared uint tile_moments_invalid[64];
+bool finite_value(float value) {
+  return (asuint(value) & 0x7f800000u) != 0x7f800000u;
+}
+float3 merge_moments(float3 a, float3 b) {
+  float scale = max(a.x, b.x);
+  if (scale == 0.0) return 0.0;
+  float ra = a.x / scale, rb = b.x / scale;
+  return float3(scale, a.y * ra + b.y * rb, a.z * ra * ra + b.z * rb * rb);
+}
+float3 add_moment(float3 state, float q) {
+  if (q == 0.0) return state;
+  // A power-of-two scale keeps both the scale and its reciprocal normal,
+  // even near FLT_MAX. Squared normalized values stay below sixteen.
+  float scale = asfloat(min(max(asuint(q) & 0x7f800000u, 0x00800000u), 0x7e800000u));
+  float normalized = q / scale;
+  return merge_moments(state, float3(scale, normalized, normalized * normalized));
+}
 [numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-  uint width, height;
-  sampled_depth.GetDimensions(width, height);
-  if (id.x >= width || id.y >= height) return;
-  uint2 pixel = region.xy + ((id.xy * 2 + 1) * region.zw) / (uint2(width, height) * 2);
-  sampled_depth[id.xy] = source_depth.Load(int3(pixel, 0));
+void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
+    uint3 local : SV_GroupThreadID, uint lane : SV_GroupIndex) {
+  // One frozen layout defines both selector points and full-image partitions.
+  // Scratch coordinates only pack records and never determine the tile grid.
+  const uint storage_width = 32;
+  if (!collect_range) {
+    if (all(id.xy < tile_dimensions)) {
+      uint2 first = id.xy * region.zw / tile_dimensions;
+      uint2 last = (id.xy + 1) * region.zw / tile_dimensions;
+      uint2 pixel = region.xy + first + (last - first) / 2;
+      uint tile = id.y * tile_dimensions.x + id.x;
+      sampled_depth[uint2(tile % storage_width, tile / storage_width)] =
+        float4(source_depth.Load(int3(pixel, 0)), 0, 0, 0);
+    }
+  } else {
+    // Disjoint integer partitions cover the entire active rectangle, including
+    // tiny/thin geometry between point samples. Padding is never inspected.
+    uint2 first = region.xy + group.xy * region.zw / tile_dimensions;
+    uint2 last = region.xy + (group.xy + 1) * region.zw / tile_dimensions;
+    float lower = 3.402823466e+38, upper = -3.402823466e+38;
+    uint invalid = 0;
+    float3 moments = 0.0;
+    uint moments_invalid = 0;
+    for (uint y = first.y + local.y; y < last.y; y += 8)
+      for (uint x = first.x + local.x; x < last.x; x += 8) {
+        float value = source_depth.Load(int3(x, y, 0));
+        if (!finite_value(value)) invalid = 1;
+        else { lower = min(lower, value); upper = max(upper, value); }
+        if (collect_moments) {
+          precise float q = (value - moments_A) * moments_inverseB;
+          if (!finite_value(q) || q < 0.0) moments_invalid = 1;
+          else moments = add_moment(moments, q);
+        }
+      }
+    tile_range[lane] = float2(lower, upper);
+    tile_invalid[lane] = invalid;
+    tile_moments[lane] = moments;
+    tile_moments_invalid[lane] = moments_invalid;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint stride = 32; stride; stride >>= 1) {
+      if (lane < stride) {
+        tile_range[lane] = float2(min(tile_range[lane].x, tile_range[lane + stride].x),
+          max(tile_range[lane].y, tile_range[lane + stride].y));
+        tile_invalid[lane] |= tile_invalid[lane + stride];
+        if (collect_moments) {
+          tile_moments[lane] = merge_moments(tile_moments[lane], tile_moments[lane + stride]);
+          tile_moments_invalid[lane] |= tile_moments_invalid[lane + stride];
+        }
+      }
+      GroupMemoryBarrierWithGroupSync();
+    }
+    if (!lane) {
+      uint tile = group.y * tile_dimensions.x + group.x;
+      uint2 output = uint2(tile % storage_width, tile / storage_width);
+      uint2 pixel = first + (last - first) / 2;
+      float point_value = source_depth.Load(int3(pixel, 0));
+      float status = tile_invalid[0] ? 0.0 : any(first == last) ? 2.0 : 1.0;
+      sampled_depth[output] = float4(point_value, tile_range[0], status);
+      float moments_status = !collect_moments || tile_moments_invalid[0] ? 0.0 : any(first == last) ? 2.0 : 1.0;
+      sampled_depth[uint2((tile + 768) % storage_width, (tile + 768) / storage_width)] =
+        float4(tile_moments[0], moments_status);
+    }
+  }
 }
 )";
 
@@ -115,7 +204,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         parameters[0].DescriptorTable = {2, ranges};
         parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        parameters[1].Constants.Num32BitValues = 4;
+        parameters[1].Constants.Num32BitValues = 12;
         D3D12_ROOT_SIGNATURE_DESC root_desc {};
         root_desc.NumParameters = 2;
         root_desc.pParameters = parameters;
@@ -155,7 +244,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     api::effect_runtime *runtime = nullptr; // Identity only; may have been destroyed.
     std::uint64_t swapchain = 0, native_queue = 0;
     sample_result result;
-    std::array<UINT, 4> region {};
+    std::array<UINT, 12> region {};
     bool executed = false, signalled = false, abandoned = false;
     bool retired = false, quarantined = false;
 
@@ -224,7 +313,22 @@ void main(uint3 id : SV_DispatchThreadID) {
     out.viewport_y = inside ? request.y : 0;
     out.viewport_width = inside ? request.width : width;
     out.viewport_height = inside ? request.height : height;
-    sample.region = {out.viewport_x, out.viewport_y, out.viewport_width, out.viewport_height};
+    sample.region = {out.viewport_x, out.viewport_y, out.viewport_width, out.viewport_height,
+      request.collect_range || request.collect_moments ? 1u : 0u, request.collect_moments ? 1u : 0u};
+    std::memcpy(&sample.region[6], &request.moments_A, sizeof(float));
+    std::memcpy(&sample.region[7], &request.moments_inverseB, sizeof(float));
+    const auto tiles = sunshine_depth_statistics::tile_grid(out.viewport_width, out.viewport_height);
+    out.width = tiles.x;
+    out.height = tiles.y;
+    sample.region[8] = tiles.x;
+    sample.region[9] = tiles.y;
+    out.moments = {};
+    out.moments.supplied = request.collect_moments;
+    out.moments.A = request.moments_A;
+    out.moments.inverseB = request.moments_inverseB;
+    out.moments.count = request.collect_moments ? std::uint64_t(out.viewport_width) * out.viewport_height : 0;
+    out.moments.tiles_x = request.collect_moments ? tiles.x : 0;
+    out.moments.tiles_y = request.collect_moments ? tiles.y : 0;
     return true;
   }
 
@@ -249,10 +353,10 @@ void main(uint3 id : SV_DispatchThreadID) {
 
     if (!sample.output11.get()) {
       D3D11_TEXTURE2D_DESC output_desc {};
-      output_desc.Width = grid_width;
-      output_desc.Height = grid_height;
+      output_desc.Width = storage_width;
+      output_desc.Height = tile_capacity * 2 / storage_width;
       output_desc.ArraySize = output_desc.MipLevels = 1;
-      output_desc.Format = DXGI_FORMAT_R32_FLOAT;
+      output_desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
       output_desc.SampleDesc.Count = 1;
       output_desc.Usage = D3D11_USAGE_DEFAULT;
       output_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
@@ -284,7 +388,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     deferred->CSSetShaderResources(0, 1, &srv);
     deferred->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
     deferred->CSSetConstantBuffers(0, 1, &constants);
-    deferred->Dispatch((grid_width + 7) / 8, (grid_height + 7) / 8, 1);
+    deferred->Dispatch(sample.region[4] ? sample.region[8] : (sample.region[8] + 7) / 8,
+      sample.region[4] ? sample.region[9] : (sample.region[9] + 7) / 8, 1);
     uav = nullptr;
     deferred->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
     deferred->CopyResource(sample.readback11.get(), sample.output11.get());
@@ -318,10 +423,10 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (!sample.output12.get()) {
       D3D12_RESOURCE_DESC output_desc {};
       output_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-      output_desc.Width = grid_width;
-      output_desc.Height = grid_height;
+      output_desc.Width = storage_width;
+      output_desc.Height = tile_capacity * 2 / storage_width;
       output_desc.DepthOrArraySize = output_desc.MipLevels = 1;
-      output_desc.Format = DXGI_FORMAT_R32_FLOAT;
+      output_desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
       output_desc.SampleDesc.Count = 1;
       output_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
       D3D12_HEAP_PROPERTIES heap_properties {};
@@ -377,8 +482,9 @@ void main(uint3 id : SV_DispatchThreadID) {
     sample.commands12->SetDescriptorHeaps(1, &descriptor_heap);
     sample.commands12->SetComputeRootSignature(sample.pipeline->root12.get());
     sample.commands12->SetComputeRootDescriptorTable(0, sample.descriptors12->GetGPUDescriptorHandleForHeapStart());
-    sample.commands12->SetComputeRoot32BitConstants(1, 4, sample.region.data(), 0);
-    sample.commands12->Dispatch((grid_width + 7) / 8, (grid_height + 7) / 8, 1);
+    sample.commands12->SetComputeRoot32BitConstants(1, UINT(sample.region.size()), sample.region.data(), 0);
+    sample.commands12->Dispatch(sample.region[4] ? sample.region[8] : (sample.region[8] + 7) / 8,
+      sample.region[4] ? sample.region[9] : (sample.region[9] + 7) / 8, 1);
     std::swap(source_barrier.Transition.StateBefore, source_barrier.Transition.StateAfter);
     D3D12_RESOURCE_BARRIER output_barrier {};
     output_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -403,10 +509,55 @@ void main(uint3 id : SV_DispatchThreadID) {
   }
 
   void read_sample(sample_t &sample) {
-    std::vector<float> values(grid_width * grid_height);
+    const UINT tiles_x = sample.region[8], tiles_y = sample.region[9];
+    if (!tiles_x || !tiles_y || std::uint64_t(tiles_x) * tiles_y > tile_capacity) return;
+    std::vector<float> values(tiles_x * tiles_y);
+    bool valid_range = sample.region[4] != 0, have_range = false;
+    auto &moments = sample.result.moments;
+    bool valid_moments = moments.supplied && std::isfinite(moments.A) &&
+      (moments.A == 0.f || std::isnormal(moments.A)) && std::isnormal(moments.inverseB);
+    double sum = 0., sum_squares = 0.;
+    std::uint64_t moment_count = 0;
+    float range_min = std::numeric_limits<float>::max(), range_max = -std::numeric_limits<float>::max();
     const auto copy_rows = [&](const std::uint8_t *bytes, UINT pitch) {
-      for (UINT row = 0; row < grid_height; ++row)
-        std::memcpy(values.data() + row * grid_width, bytes + row * pitch, grid_width * sizeof(float));
+      const auto record = [&](UINT index) {
+        std::array<float, 4> cell;
+        std::memcpy(cell.data(), bytes + (index / storage_width) * pitch +
+          (index % storage_width) * sizeof(cell), sizeof(cell));
+        return cell;
+      };
+      for (UINT tile = 0; tile < values.size(); ++tile) {
+        const auto cell = record(tile);
+        values[tile] = cell[0];
+        if (!sample.region[4]) continue;
+        const auto horizontal = sunshine_depth_statistics::tile_bounds(tile % tiles_x,
+          sample.result.viewport_width, tiles_x);
+        const auto vertical = sunshine_depth_statistics::tile_bounds(tile / tiles_x,
+          sample.result.viewport_height, tiles_y);
+        const auto count = std::uint64_t(horizontal.size()) * vertical.size();
+        if (moments.supplied) {
+          const auto measured = record(tile + tile_capacity);
+          if (measured[3] == 2.f && count == 0) {
+            // Empty partitions contribute neither samples nor a fabricated zero.
+          } else if (measured[3] != 1.f || !count || !std::isfinite(measured[0]) || measured[0] < 0.f ||
+              !std::isfinite(measured[1]) || measured[1] < 0.f || !std::isfinite(measured[2]) || measured[2] < 0.f) {
+            valid_moments = false;
+          } else {
+            const double scale = measured[0];
+            sum += scale * measured[1];
+            sum_squares += scale * scale * measured[2];
+            moment_count += count;
+          }
+        }
+        if (cell[3] == 2.f && !count) continue;
+        if (cell[3] != 1.f || !std::isfinite(cell[1]) || !std::isfinite(cell[2]) || cell[1] > cell[2]) {
+          valid_range = false;
+          continue;
+        }
+        range_min = std::min(range_min, cell[1]);
+        range_max = std::max(range_max, cell[2]);
+        have_range = true;
+      }
     };
     if (sample.readback12.get()) {
       const D3D12_RANGE range {0, SIZE_T(sample.bytes12)};
@@ -423,6 +574,13 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
     sample.result.values = std::move(values);
     sample.result.valid = true;
+    sample.result.range_valid = valid_range && have_range;
+    sample.result.range_min = sample.result.range_valid ? range_min : 0.f;
+    sample.result.range_max = sample.result.range_valid ? range_max : 0.f;
+    moments.valid = valid_moments && moment_count == moments.count &&
+      std::isfinite(sum) && std::isfinite(sum_squares);
+    moments.sum = moments.valid ? sum : 0.;
+    moments.sum_squares = moments.valid ? sum_squares : 0.;
   }
 
   class sampler_t {

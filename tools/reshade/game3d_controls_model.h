@@ -20,6 +20,7 @@ namespace sunshine_game3d {
     config.read("Strength", result.strength);
     config.read("DepthView", result.depth_view);
     config.read("Enabled", result.enabled);
+    config.read("SourceAlphaUI", result.source_alpha_ui);
     if (!std::isfinite(result.strength)) result.strength = default_strength;
     if (result.depth_view < 0 || result.depth_view > 2) result.depth_view = 0;
     // Preserve exact finite saved strength, including old off-range values.
@@ -51,6 +52,15 @@ namespace sunshine_game3d {
     config.write("Enabled", value);
     if (!settings.alive) return false;
     settings.values.enabled = value;
+    return true;
+  }
+
+  template<class Backend>
+  bool edit_source_alpha_ui(settings_state &settings, bool value, Backend &config) {
+    if (!settings.alive || value == settings.values.source_alpha_ui) return false;
+    config.write("SourceAlphaUI", value);
+    if (!settings.alive) return false;
+    settings.values.source_alpha_ui = value;
     return true;
   }
 

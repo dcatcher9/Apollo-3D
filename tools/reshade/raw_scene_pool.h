@@ -23,6 +23,10 @@ namespace sunshine_raw_scene {
 
   class pool {
   public:
+    void configure(sunshine_scene_gain::limits budget) noexcept {
+      budget_ = budget;
+      for (auto &entry : entries_) if (entry.occupied) entry.controller.configure(budget);
+    }
     bool reset(std::uint64_t basis_epoch, std::uint64_t now_ms) noexcept {
       if (!basis_epoch || basis_epoch <= epoch_) return false;
       *this = pool{};
@@ -88,6 +92,7 @@ namespace sunshine_raw_scene {
           packet.metadata.frame.token_generation != observed_frame_.token_generation) return;
       for (auto &entry : entries_)
         if (entry.occupied && entry.active && matches(entry.basis, packet.metadata)) {
+          entry.controller.configure(budget_);
           entry.controller.observe(packet, observed_frame_, now_ms);
           return;
         }
@@ -205,6 +210,7 @@ namespace sunshine_raw_scene {
         entry->basis = roster.members[i];
         // A genuinely new or evicted basis still starts after current admission.
         entry->controller.reset(epoch_, now_ms);
+        entry->controller.configure(budget_);
         selected_frame basis;
         basis.basis_epoch = epoch_;
         basis.source = entry->basis.source;
@@ -235,6 +241,7 @@ namespace sunshine_raw_scene {
     }
 
     std::array<entry_t, maximum_history_sources> entries_{};
+    sunshine_scene_gain::limits budget_;
     frame_key current_frame_{}, observed_frame_{};
     status sync_status_{status::uninitialized};
     std::uint64_t epoch_{}, wall_ms_{}, cut_ms_{};

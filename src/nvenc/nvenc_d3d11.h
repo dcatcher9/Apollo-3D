@@ -35,12 +35,14 @@ namespace nvenc {
 
   protected:
     bool init_library() override;
-    bool wait_for_async_event(uint32_t timeout_ms) override;
+    nvenc_event_wait_result wait_for_async_event(uint32_t timeout_ms) override;
     void *create_flush_event() override;
-    bool wait_for_flush_event(uint32_t timeout_ms) override;
+    nvenc_event_wait_result wait_for_flush_event(uint32_t timeout_ms) override;
     void release_async_event() override;
 
   private:
+    nvenc_event_wait_result wait_for_event(void *event, uint32_t timeout_ms);
+
     util::safe_ptr_v2<void, BOOL, CloseHandle> owned_async_event;
     util::safe_ptr_v2<void, BOOL, CloseHandle> owned_flush_event;
     HMODULE dll = nullptr;

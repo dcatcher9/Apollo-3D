@@ -7,6 +7,7 @@
 #include <unknwn.h> // Defines MinGW's __uuidof helper before the ReShade SDK.
 #include <reshade.hpp>
 #include "camera_sample_binding.h"
+#include "depth_moments.h"
 
 namespace sunshine_depth {
   struct sample_request {
@@ -20,6 +21,13 @@ namespace sunshine_depth {
     // A nonempty rectangle fully inside the source is sampled. Otherwise use the
     // full source. Coordinates are pixels of the original depth backup.
     std::uint32_t x = 0, y = 0, width = 0, height = 0;
+    // Optional exact finite extrema over every texel of the active rectangle.
+    // The selector's point grid is unchanged when this is requested.
+    bool collect_range = false;
+    // Also collects the range in the same full-rectangle scan. Only the
+    // moment channel decodes depth; selector points and extrema stay raw.
+    bool collect_moments = false;
+    float moments_A = 0.f, moments_inverseB = 1.f;
   };
 
   struct sample_result {
@@ -31,11 +39,17 @@ namespace sunshine_depth {
     reshade::api::resource source {};
     std::uint32_t source_format = 0;
     bool valid = false;
-    std::uint32_t width = 32, height = 18;
+    // Frozen common layout for raw selector points and full-image reductions.
+    std::uint32_t width = 0, height = 0;
     std::uint32_t source_width = 0, source_height = 0;
     std::uint32_t viewport_x = 0, viewport_y = 0, viewport_width = 0, viewport_height = 0;
     // Row-major raw hardware depth; failure never returns fabricated flat data.
     std::vector<float> values;
+    // Exact full-rectangle extrema, including hardware endpoints. Any NaN/Inf
+    // in the rectangle invalidates this range without fabricating grid values.
+    bool range_valid = false;
+    float range_min = 0.f, range_max = 0.f;
+    sunshine_depth_statistics::moments moments;
   };
 
   // Call after end_render_effects has restored the tracked backup's state. This

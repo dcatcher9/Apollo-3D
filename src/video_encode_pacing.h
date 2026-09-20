@@ -42,6 +42,17 @@ namespace video::detail {
       return std::exchange(latest_, Image {});
     }
 
+    /** Return real content to a same-display replacement after either failure or a mode change.
+     * A capture already waiting in the mailbox is newer and must win. Display reinitialization
+     * owns disposal of old-device images, so never hand one back across that boundary.
+     */
+    template<class ImageEvent>
+    void return_for_rebuild(ImageEvent &images, bool shutting_down, bool display_reinit_pending) {
+      if (latest_ && !shutting_down && images.running() && !display_reinit_pending) {
+        images.try_raise(release());
+      }
+    }
+
     [[nodiscard]] bool due(
       std::chrono::steady_clock::time_point now,
       std::chrono::steady_clock::time_point encode_target,

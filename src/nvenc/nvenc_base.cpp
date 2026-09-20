@@ -39,6 +39,21 @@ namespace {
   std::mutex encoder_creation_mutex;
   std::atomic<unsigned> blocked_encoder_cleanups {0};
 
+  bool device_removed(const nvenc::nvenc_event_wait_result &result) {
+    return result.device_removed_reason && *result.device_removed_reason < 0;
+  }
+
+  std::string event_wait_diagnostics(const nvenc::nvenc_event_wait_result &result) {
+    return std::format(
+      "native_wait=0x{:08X}, native_error=0x{:08X}, device_removed_reason={}",
+      result.native_wait_result,
+      result.native_error,
+      result.device_removed_reason ?
+        std::format("0x{:08X}", static_cast<std::uint32_t>(*result.device_removed_reason)) :
+        "unavailable"
+    );
+  }
+
   [[noreturn]] void retain_failed_encoder_until_exit() {
     BOOST_LOG(error) << "NvEnc: bounded cleanup retries exhausted; retaining the failed session "
                         "without further driver calls. Restart the host to recover.";
@@ -673,7 +688,7 @@ namespace nvenc {
 
   bool nvenc_base::drain_input() {
     if (input_phase == input_phase_t::submitted) {
-      if (async_event_handle && !wait_for_async_event(100)) {
+      if (async_event_handle && !teardown_wait_ready(wait_for_async_event(100), "picture completion")) {
         return false;
       }
       input_phase = input_phase_t::completion_seen;
@@ -689,6 +704,19 @@ namespace nvenc {
       input_phase = input_phase_t::locked;
     }
     return release_completed_input();
+  }
+
+  bool nvenc_base::teardown_wait_ready(const nvenc_event_wait_result &result, const char *operation) {
+    if (result.status == nvenc_event_wait_status::ready) {
+      return true;
+    }
+    // A previous streaming timeout already closed admission. Still report the first native
+    // wait/device failure during teardown so that the original timeout cannot hide its cause.
+    if (!teardown_wait_failure_logged && (result.status == nvenc_event_wait_status::failed || device_removed(result))) {
+      teardown_wait_failure_logged = true;
+      BOOST_LOG(error) << "NvEnc: teardown " << operation << " wait failed; " << event_wait_diagnostics(result);
+    }
+    return false;
   }
 
   void nvenc_base::destroy_encoder() {
@@ -707,7 +735,7 @@ namespace nvenc {
     retry([&] {
       return !encoder || (submit_flush() && drain_input() &&
                           (!encoder_used || flush_completed ||
-                           (flush_completed = wait_for_flush_event(100))));
+                           (flush_completed = teardown_wait_ready(wait_for_flush_event(100), "EOS completion"))));
     });
     retry([&] {
       return release_encoder_resources();
@@ -757,11 +785,54 @@ namespace nvenc {
     flush_submitted = false;
     flush_completed = false;
     encoder_used = false;
+    teardown_wait_failure_logged = false;
     if (cleanup_blocked) {
       cleanup_blocked = false;
       blocked_encoder_cleanups.fetch_sub(1, std::memory_order_acq_rel);
     }
     return true;
+  }
+
+  bool nvenc_base::wait_for_frame_completion(uint64_t frame_index) {
+    using namespace std::chrono_literals;
+    const auto started = async_wait_clock_now();
+    const auto deadline = started + 250ms;
+    auto result = wait_for_async_event(100);
+    const bool soft_timeout = result.status == nvenc_event_wait_status::timeout && !device_removed(result);
+    if (soft_timeout && async_wait_clock_now() < deadline) {
+      BOOST_LOG(warning) << "NvEnc: frame " << frame_index
+                         << " exceeded the 100 ms completion wait; allowing up to 250 ms total";
+      // Stay in this encode call with exactly one mapped/submitted input. Returning to the
+      // caller here would let conversion overwrite the texture still owned by NVENC.
+      while (result.status == nvenc_event_wait_status::timeout && !device_removed(result)) {
+        const auto now = async_wait_clock_now();
+        if (now >= deadline) {
+          break;
+        }
+        const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+        result = wait_for_async_event(static_cast<std::uint32_t>(std::min(remaining, 25ms).count()));
+      }
+    }
+    if (result.status == nvenc_event_wait_status::ready) {
+      if (soft_timeout) {
+        BOOST_LOG(info) << "NvEnc: frame " << frame_index << " completed after soft timeout in "
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(async_wait_clock_now() - started).count() << " ms";
+      }
+      return true;
+    }
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(async_wait_clock_now() - started).count();
+    if (result.status == nvenc_event_wait_status::failed) {
+      BOOST_LOG(error) << "NvEnc: frame " << frame_index << " completion event wait failed after "
+                       << elapsed << " ms; " << event_wait_diagnostics(result);
+    } else if (device_removed(result)) {
+      BOOST_LOG(error) << "NvEnc: frame " << frame_index << " device removed during encode wait after "
+                       << elapsed << " ms; " << event_wait_diagnostics(result);
+    } else {
+      BOOST_LOG(error) << "NvEnc: frame " << frame_index << " encode wait timeout after "
+                       << elapsed << " ms (250 ms budget); " << event_wait_diagnostics(result);
+    }
+    return false;
   }
 
   nvenc_encoded_frame nvenc_base::encode_frame(
@@ -847,7 +918,7 @@ namespace nvenc {
       if (stage_diagnostics) {
         stage_diagnostics->completion_wait.first_point_now();
       }
-      const bool ready = wait_for_async_event(100);
+      const bool ready = wait_for_frame_completion(frame_index);
       if (ready) {
         input_phase = input_phase_t::completion_seen;
       }
@@ -855,7 +926,6 @@ namespace nvenc {
         stage_diagnostics->completion_wait.second_point_now_and_log();
       }
       if (!ready) {
-        BOOST_LOG(error) << "NvEnc: frame " << frame_index << " encode wait timeout";
         return {};
       }
     } else {

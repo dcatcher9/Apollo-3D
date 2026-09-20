@@ -9,10 +9,10 @@ left/right image for its local glasses presenter or Game 3D stream. Follow the
 The Game 3D panel keeps **3D strength** and depth-source status visible. Strength defaults to **50%**;
 **Reset** appears beside each editable image parameter only when it differs from its default.
 Existing saved values, including zero strength, are preserved until an explicit edit/reset.
-Output state, depth source/resolution, camera/relative conversion, current/target scale values
+Output state, depth source/resolution, camera/relative conversion, current/target gain and zero values
 and depth-freshness statistics are visible without expanding a section. Sharpening is removed.
-**Depth & troubleshooting** contains the depth view (default game image), **Recenter screen plane**
-and manual buffer selection. Capture heuristics are under **Advanced capture settings**.
+**Depth & troubleshooting** contains the depth view (default game image) and manual buffer
+selection. Gain and zero placement are fully automatic. Capture heuristics are under **Advanced capture settings**.
 Depth setup is automatic: source-associated camera data or the explicit raw-depth
 assumption controls preparation. Manual shader setup, per-game geometry/weapon profiles and their
 legacy processing branch have been removed. Manual **depth-buffer pinning** remains available;
@@ -21,7 +21,7 @@ and save automatically in ReShade.ini. The old ray-search renderer, its quality 
 selector have been removed. Sources larger than 3840 in either dimension show an explicit warning
 and remain 2D; there is no hidden legacy renderer fallback.
 
-Game3D uses the current smoothed screen plane to normalize depth, as described below, with the
+Game3D maintains independent stereo gain and screen-plane placement, as described below, with the
 Sunshine renderer, export, HDR handling and stereo settings overlay. Changes are checked
 against the actual shader and independent color/geometry oracles; controlled runtime tests do not
 replace live game/headset acceptance.
@@ -29,7 +29,7 @@ replace live game/headset acceptance.
 Automatic uses an associated camera projection when available and otherwise assumes an
 infinite far plane for relative depth. The experimental motion-based calibration has been
 removed, including its extra capture, fitting worker, controls and build option. The ordinary
-center-depth sampler and smoothed screen-plane policy serve both remaining paths.
+depth sampler and shared gain/zero-plane policy serve both remaining paths.
 
 The implementation supports **64-bit Windows games, Direct3D 11 or Direct3D 12, SDR and HDR**, and
 ReShade **6.8.0 with full add-on support**. It requires native NT texture sharing and shared fences
@@ -38,6 +38,9 @@ are not supported. A top-level game window must be the foreground window; child-
 is not supported by this exporter.
 
 ## Build
+
+The build requires the header-only `nlohmann_json` CMake package (3.11 or newer) for on-demand
+diagnostic metadata. Its license is included in the add-on package.
 
 Build this directory separately from the host. CMake downloads the official ReShade source,
 pinned to `v6.8.0`, commit `18deaa52de0c425a78b329e9cb3c497281cd00ec`, and its exact ImGui headers
@@ -73,6 +76,17 @@ The default build stages the shipping files in `cmake-build-reshade/package`; te
 and obsolete files left in an existing build directory are not part of that package.
 
 ## Install and enable
+
+For a troubleshooting capture, use the client's **Dump 3D** action while in Game 3D. See the
+[Game dump contract](../../docs/reshade-sbs.md#dump-3d-diagnostics) for the lossless artifacts,
+SL/NGX observations, missing-data reporting and output location.
+Dump wire v3 also carries optional UI-related resources and reports every catalog entry, including
+null or unavailable inputs. Native bytes stay unchanged; full-allocation mask and alpha previews
+use fixed black=0/white=1, with separate channels and visible nonfinite values. Optional color
+transfer is labeled unknown unless captured metadata declares or explicitly assumes it. These
+resources are diagnostics and do not establish UI classification or frame matching. Host and
+add-on must both support the diagnostic mapping version.
+NGX failures include readable result codes. Successful null and failed query remain separate states.
 
 1. Install ReShade **6.8 with full add-on support** for the game's actual executable, then close it.
 2. Run the installer from the add-on build/package directory:
@@ -146,45 +160,70 @@ already observed enabled, the panel reports the missing camera data without aski
 again; the existing 3×/higher and artifact guidance still applies. Initial unknown depth status
 does not show this hint, and Sunshine does not change the game's FG setting.
 
-The shared screen-plane policy collects four center measurements at least 250 ms apart during
-setup. They initialize the zero plane only. Fresh center measurements then move it with a
-0.5-second smoothing time constant and a bounded rate of change. For reconstructed inverse
-distance `q=1/Z`, the current published inverse zero is `q0`; the shader multiplier is always
-`K=1/q0`. Raw fallback uses `H=1/t0` for its current oriented-raw zero `t0`.
-There is no separately retained initial reference or second gain adaptation loop.
-The signed field is `0.05*(1-q/q0)`, or `0.05*(1-Zzero/Z)`, multiplied by the user's
-strength percentage (`slider/100`). Multiplicative game-distance units cancel from the ratio.
+The shared policy initializes an independent stereo gain and zero plane from four non-flat exact
+depth measurements at least 250 ms apart. Each later valid non-flat measurement updates the gain
+target from its nearest depth; the first instruction screen or scene does not establish a permanent
+scale. Gain follows the current target gradually in either direction. A separate per-pixel limit
+bounds rendered parallax while gain adapts. Exact flat depth cannot initialize gain. After
+initialization, positive flat depth can move the zero while holding gain; all-zero depth holds
+both controls. No reset or manual gain adjustment is needed.
+For reconstructed inverse distance `q=1/Z`, the signed field is `0.05*K*(q0-q)`, multiplied
+by the user's strength percentage (`slider/100`). Raw fallback uses the same policy on its
+oriented raw coordinate `t`, with independent gain `H` and zero `t0`. Moving the zero plane
+preserves separation between fixed depths in the unclamped field when gain remains unchanged.
+The gain target is `Ktarget=L/Q`, where Q is the largest decoded inverse depth in the whole
+active image, independent of zero placement. L normalizes for output shape and the full-strength
+parallax limit. Scaling inverse-depth units scales both `(q-q0)` and Q, so their units cancel.
+Applied gain can lag its target during bounded adaptation. The zero starts from the average
+startup range midpoint, then tracks the current midpoint `(qmin+Q)/2`. At fixed gain this target
+minimizes the largest absolute unclamped displacement, independently of depth occupancy. Zero
+tracking uses exponential smoothing and a bound in normalized parallax, without an immediate
+clamp to the observed range. Even one nearest pixel contributes to Q and the midpoint. A persistent
+near outlier can therefore reduce gain, flatten the background and change zero placement;
+smoothing limits sudden global changes, not that eventual tradeoff. During adaptation,
+saturation can reduce depth separation locally.
 The native-depth adapter converts that field to a bounded source-UV displacement before Sunshine's
 vertical/horizontal conditioning and inverse. It does not run the removed ray reconstruction or
 depth-history preparation passes. The [canonical Host contract](../../docs/host-sbs.md) owns the
-conditioning and inverse; Game3D's native-depth adapter is documented in the setup contract above.
-For decoded perspective depth `r=A+B/Z`, this ratio is `(r-A)/(r0-A)`; `B` cancels.
-The fallback uses `r/r0` for reversed depth or `(1-r)/(1-r0)` for normal depth. These are exact
-for the corresponding infinite-far encoding endpoints (`A=0` reversed, `A=1` normal), and
-approximations for finite-far encodings with a different infinity offset. A valid associated
-projection supplies that offset. At the same screen-plane distance `Zzero`, with finite far distance `f`,
-the fallback inflates the unclamped signed stereo field by `1/(1-Zzero/f)`; it is a close
-approximation only when the screen plane is well inside the far distance. Custom encodings
-need not obey this perspective model.
+conditioning and inverse. The [Game3D policy contract](../../docs/reshade-sbs.md#experimental-raw-depth-automation)
+owns gain initialization, temporal tracking, zero placement and the final per-eye parallax limit.
+An exact GPU reduction scans every texel in the active depth crop, including hardware endpoints;
+there is no percentile trimming. A shared aspect-aware grid (about 576 tiles) supplies one point
+per tile for Generic selection and full per-tile statistics for stereo geometry. The full-pixel
+maximum supplies Q and the extrema supply the zero midpoint. Mean and second moments are retained
+for diagnostics, not used to set gain or zero. No second source scan or GPU wait is added.
+Game3D does not force screen-edge parallax to zero. Basic source-coordinate and
+sampler clamps remain; missing offscreen color can therefore repeat the nearest image edge.
+Readbacks are asynchronous, so newly appearing geometry can precede a range update. The renderer's
+per-pixel parallax limit remains active and scales with user strength and stereo reentry.
+These are artistic renderer limits, not a validated comfort standard or recovered camera baseline.
 There are no per-game presets or hidden percentile calibration in this Automatic conversion.
-Moving the screen plane changes both depth placement and normalization, so separation between
-two fixed objects can change as the screen plane moves. The initial scene's influence fades
-with continued valid observations. No percentile clipping is applied to rendered depth.
+The raw fallback still does not recover an unknown depth offset or physical distance. Matched
+multiplicative inverse-depth representations preserve ratio geometry; separate histories or custom
+encodings need not match. No percentile clipping is applied to rendered depth.
 
-The visible calibration table separates **Conversion scale**, **Conversion offset**,
-**Zero plane**, and **Stereo normalization**, with current/target columns and explicit plane units.
-The latter is `K=1/q0` or `H=1/t0`,
-and a visible note explains its current coupling to the zero plane and apparent strength.
+The always-visible calibration table shows **Nearest reference Q**, **Farthest (q min)**,
+**Zero plane q0**, **Stereo gain K**, and **Normalization L**, with Current/Target columns.
+Q and the farthest value are the same accepted measurement's full active-depth extrema, not camera
+clipping planes. These depth values share one inverse-depth coordinate: larger is nearer.
+Gain shows the applied value and target `L/Q`; q0 shows the applied zero and midpoint target.
+A positive flat scene has a zero target but no gain target. L is captured for
+the render decision's output shape, and `1/K` is not Q. The panel also shows the per-eye parallax
+limit as a percentage of source-image width at the current slider strength.
+Camera mode additionally shows current and target **Zero-plane distance** (reciprocal inverse depth
+in game units, infinity at zero),
+and the table retains **Conversion scale** and **Conversion offset**. No additional GPU work is
+requested for these rows. Dump 3D includes its captured scene decision's accepted measurements with
+their units, mean, second moment, pixel count, tile layout and zero target; a missing measurement stays null even if
+the UI displays older values labeled as held. The UI also shows the accepted pixel count and layout.
 Without a matrix, the conversion is labeled **relative depth (assumed infinite far plane)**
-and **Zero plane (relative raw depth)** displays `t0=1/H` rather than a distance. The target comes
-from the latest admitted center measurements; the inverse zero is smoothed before the camera
-distance is displayed. The matrix line shows the shader's affine conversion `q=scale*raw+offset`,
+and the zero row displays `t0` in relative raw units. A visible status identifies gain below
+its target. The matrix line shows the shader's affine conversion `q=scale*raw+offset`,
 including raw packing. It is derived from the checked projection matrix, not estimated from
-scene content. Held values are marked as last applied and paused. **Recenter** initializes the
-screen plane from fresh post-action captures,
-with the same behavior for projection and relative depth. It can change apparent strength because
-normalization follows that plane. SDK history resets discard stale measurements while retaining
-the last applied screen plane until fresh observations resume tracking.
+scene content. Held values are marked as last applied and paused, with target columns cleared. The panel exposes no recenter
+or manual gain control; zero placement and gain adaptation are automatic on both paths.
+SDK history resets discard stale measurements while retaining established gain and plane until
+fresh observations resume.
 Same-source pin/unpin retains generic state; a real generic source change initializes from fresh
 captures. Retained depth allocations have independent bounded controller
 state; unrelated or destroyed sources do not inherit an old calibration. Camera and raw branches
@@ -204,11 +243,15 @@ default for supported D3D12 games. Automatic buffer selection prefers the game's
 high-resolution depth, otherwise its tagged DLSS render-resolution depth, ahead of unrelated
 larger heuristic candidates. Manual pins take precedence. SL/NGX select the resource; Generic
 selection is the fallback when no valid API source owns selection. One D3D12 capture owner handles
-both preservation boundaries and API evaluation opportunities, including snapshot storage,
-submission, consumer leases and retirement. Only admitted current pixels can render; a valid API
-source with unavailable pixels stays selected and returns mono. Automatic reconstructs inverse
-depth from the exact current projection, without smoothing its coefficients. The screen plane
-tracks the decoded center smoothly and supplies its reciprocal normalization. Current depth and
+both Generic preservation boundaries and API evaluation opportunities, including snapshot storage,
+submission, consumer leases and retirement. API capture snapshots the nominated resource at the
+middleware call, including tracked depth-stencil resources; matching a Generic backup's resource
+identity cannot authenticate its contents. While a same-source successor is pending, acquisition
+may advance to an unconsumed completed snapshot with its own sequence and metadata under the
+contract's ordering, freshness and interruption checks. A valid API source with no admitted pixels
+stays selected and returns mono. Automatic reconstructs inverse
+depth from the exact current projection, without smoothing its coefficients. The independent gain
+and screen plane follow the measured-range policy above. Current depth and
 zero-plane values must fit the shader domain. Unsupported encodings stay mono without clamping depth. Missing matrices use
 the shared raw-depth screen-plane controller with the explicit infinite-far assumption.
 The linked contract describes the reference convention and
@@ -225,6 +268,10 @@ it uses the shared raw-depth screen plane, preserving its history across rotatin
 dynamic resolution changes. NGX and Generic fallback use the same explicit infinite-far assumption.
 The panel identifies the actual NGX/Streamline/Generic path. Read the
 linked contract for supported crops, feature lifetime and early-discovery limitations.
+When a confirmed newer NGX capture is waiting only for GPU completion, the owned completed depth
+can bridge one native presentation. This holds its exact previous scene controls and never advances
+calibration. Unknown, failed, changed or stale input cannot authorize this hold; a second missing
+presentation returns to mono. No completion wait or extra copy is added.
 
 When a supported Streamline Frame Generation source is enabled, its depth and associated camera
 data take priority over NGX, including while its current snapshot is pending. A missing usable FG
@@ -232,6 +279,8 @@ copy stays with that source and uses the documented bounded real-depth reuse or 
 it does not borrow an NGX depth texture and attach unrelated SL constants. Explicit FG Off retires
 that source and lets a fresh NGX submission resume. Motion-vector interpolation of two real depth
 frames for FG 2x is future work; the current implementation does not generate intermediate depth.
+Reused depth holds its applied gain and zero without learning. User strength reductions apply
+immediately, including zero; increases wait for fresh real depth and a new placement decision.
 
 Valid SL/NGX TAA jitter is stored with the captured real depth. The shader converts render-pixel
 offsets through the active render extent and depth crop before its existing clamped depth fetch.
@@ -271,22 +320,61 @@ load frozen comparison sources. It is not a current Game3D shader-mode definitio
 installation and ordinary play require no such switch; historical Manual comparisons below
 apply only to their archived shader/add-on controls.
 
+Current API-boundary capture validation uses `reshade_depth_queue_cycle_test`, which links the
+production capture owner and native observer directly:
+
+```text
+reshade_depth_queue_cycle_test.exe
+reshade_depth_queue_cycle_test.exe --pipeline
+reshade_depth_queue_cycle_test.exe --content 3840 2160
+```
+
+The default case checks that a pending foreign producer cannot introduce a reverse GPU queue
+dependency, then verifies natural recovery and same-queue admission. `--pipeline` checks admission
+of an unconsumed completed NGX snapshot while its successor is CPU-recorded or GPU-pending, plus
+rejection across failed/missing input, observation/reset revisions, a reset flag, epoch and layout
+changes. `--content [width height]` nominates a full patterned packed D32S8 scene through NGX
+while the Generic preservation callback reports availability, then clears that same source after
+the API capture. It checks the snapshot's scene depth byte-for-byte and verifies that depth-plane
+copies preserve both the original and consumer stencil. This is one post-capture-clear scenario;
+it does not cover a separate missing-callback or no-clear case.
+Any fixture completion waits serve its deterministic pixel oracle and cleanup; they are not
+production capture behavior. These owner-level tests do not establish SDK-hook coverage or
+color/depth correspondence in a real game.
+
+Use `reshade_game3d_native_provider_runtime_test` for the add-on's current native lifecycle with
+zero installed FX techniques:
+
+```text
+reshade_game3d_native_provider_runtime_test.exe <ReShade64.dll> <frozenShaders> <SunshineSBSTest.addon64> <fresh-output-directory> 3840 2160 <frame_generation_interposer.dll>
+```
+
+It exercises real GPU depth production, capture, sampling and matrix preparation, including
+padded/nonzero-offset rectangles, failed evaluation and recovery. The optional metadata-only
+interposer enables the SL FG 2x case: retained real depth, generated presentations, FG-off
+rejection and fresh SL recovery. It injects no captured pixels, readiness or GPU completion.
+Run these functional cases serially when they share resources or output directories; their timing
+is not performance evidence. The effect-based fixtures documented below remain in the repository,
+but their shader-uniform and shared-preservation expectations are historical and do not replace
+these native capture gates.
+
 The optional `reshade_streamline_direct_runtime_test` is a component integration fixture.
 Its metadata seam bypasses SDK discovery; the real SDK-entry NGX/Streamline cases below remain
-necessary to validate that entry path. Its rendering assertions use current-zero normalization
-and independently derived inverse-depth values.
+necessary to validate that entry path. Its historical rendering assertions use the former
+current-zero ratio and independently derived inverse-depth values; those assertions are not
+acceptance evidence for the current gain policy.
 
 This fixture exercises independent capture and
 projection-based rendering. It writes real R32_FLOAT UAV textures that never enter the generic
 depth-stencil inventory, preserves them through native command submission, and checks their
 spatial depth pattern against the shader input. It also checks rotating resources, manual
-pin/release, coupled screen-plane/normalization changes, explicit recentering, proportional strength,
+pin/release, the former coupled screen-plane/normalization changes, explicit recentering, proportional strength,
 failed evaluation recovery, and zero-strength HDR color. It uses the same arguments/environment
 below, with `reshade_streamline_direct_runtime_test.exe` and a fresh output directory. Its test-only
 seam supplies middleware metadata, never shader readiness, copied pixels or GPU completion.
 `SUNSHINE_STREAMLINE_MATRIX_CHANGE_TEST=1` checks changed near/far projection metadata:
-the shader must use current reconstruction coefficients while the zero plane tracks the newly
-decoded scene and normalization follows that same published zero. It also checks rotation, gaps, FOV invariance
+the shader must use current reconstruction coefficients. Its old zero-tracking assertions belong
+to the coupled ratio policy. It also checks rotation, gaps, FOV invariance
 and actual HDR pixels.
 Like the modes below, it is exclusive. A source nomination ticket is not a pixel-readiness
 assertion: negative capture cases verify held API ownership and current-color mono separately.
@@ -317,8 +405,9 @@ last. Each case checks current shader pixels and source stencil, then failure/re
 snapshot and checks current, missing/last-valid and manual-override source reporting. Without that
 flag an older control DLL lacking the getter can still run the GPU capture comparison.
 
-`reshade_ngx_depth_runtime_test` exercises the real named NGX entry points, shared/native capture,
-current-zero depth controls and HDR shader output. Use `SUNSHINE_GAME3D_AUTOMATIC=1`,
+`reshade_ngx_depth_runtime_test` is the historical effect-based fixture for named NGX entry points,
+depth controls and HDR shader output. It does not observe the current no-FX native lifecycle
+reliably, including when supplied frozen FX sources. Its archived invocation uses `SUNSHINE_GAME3D_AUTOMATIC=1`,
 `SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST=1`, and `SUNSHINE_DEPTH3D_EFFECT=SunshineGame3D`:
 
 ```text
@@ -336,25 +425,17 @@ may remain mono. These are functional checks, not performance evidence; an idle 
 Run cases serially with separate output directories. `SUNSHINE_NGX_STATE_PRESSURE_TEST=1`
 is a separate case and must not be combined with the cross-queue flags.
 
-Set `SUNSHINE_NGX_TRACKED_SOURCE_TEST=1` alone for API selection through shared ReShade
-preservation. The game fixture draws packed depth on a separate producer queue, nominates the
-exact source via NGX, clears the original, and presents using its normal GPU queue dependency.
-No CPU completion or early recording retirement is forced. A matching-size, higher-draw-count
-decoy must not win. After warmup the test requires 32/32 current stereo frames, exact depth and
-changing HDR output, rotation without recalibration, current-color mono on failed/missing API
-frames, and transitions to standalone UAV snapshot capture and back. Source authority remains
-NGX for both transports. The default is preservation mode 1; add
-`SUNSHINE_DEPTH_BIND_SWITCH_TEST=1` to repeat it in mode 2. Every ready frame during the return to
-tracked depth must contain the exact scene pixels and retain the established calibration; a missed
-before-clear copy must not admit the cleared original. Do not combine this case with
-completed-producer or state-pressure flags.
+The legacy `SUNSHINE_NGX_TRACKED_SOURCE_TEST=1` case assumes API nominations reuse Generic
+preservation and that DSV/UAV transport changes toggle Generic capture demand. Those assumptions
+conflict with the current API-boundary snapshot contract, so this case is not a current regression
+gate. It remains available for historical binaries; its mode-2 variant uses
+`SUNSHINE_DEPTH_BIND_SWITCH_TEST=1`. Use the current `--content` owner test and native provider
+runtime above for this change, not a passing legacy effect-based result.
 
-The retired generic-nomination adapter and its metadata-injection fixture are removed. Streamline
-regressions must use the current provider through `reshade_streamline_direct_runtime_test` and
-the actual-hook CPU tests; NGX uses `reshade_ngx_depth_runtime_test`. These exercise the same
-source authority and capture paths as the production add-on, including manual override through
-the shared UI handover. The generic selector retains its separate policy and runtime tests.
-These fixtures do not establish a particular game's hook order or final depth/color jitter alignment.
+The retired generic-nomination adapter and its metadata-injection fixture are removed. Current
+validation combines the native owner/provider gates above with the actual-hook CPU tests.
+The generic selector retains its separate policy and runtime tests. No synthetic fixture alone
+establishes a particular game's hook order or final depth/color jitter alignment.
 
 For SL tag priority and capture-failure recovery, run `reshade_ngx_depth_runtime_test` with
 `SUNSHINE_NGX_FRAME_GENERATION_TEST=1` and `SUNSHINE_SL_TAG_FALLBACK_TEST=1`. The real SL
@@ -542,16 +623,15 @@ selection/access readiness. Its counters are add-on callback ordinals, not game
 frame IDs. It adds no depth readback or GPU wait and does not change selection or
 calibration. Leave it disabled outside a diagnostic session.
 
-The current raw screen-plane controller is covered by `reshade_raw_scene_policy_tests` and the
-`reshade_adaptive_raw_runtime_test` actual-ReShade fixture, whose target name is retained for
-compatibility. The latter uses real game DSV draws,
+The raw screen-plane controller has unit coverage in `reshade_raw_scene_policy_tests`.
+The historical `reshade_adaptive_raw_runtime_test` actual-ReShade fixture uses real game DSV draws,
 the integrated selector/sampler, and published scale/zero-plane/readiness uniforms. Its scenarios
-check reciprocal normalization of the current smoothed zero through scene changes, pin/unpin
+check the former reciprocal normalization of the smoothed zero through scene changes, pin/unpin
 continuity, source initialization, gaps, stereo and mono
 in both HDR depth conventions. No camera/gain uniforms or synthetic readback results are injected.
 Use a separate control add-on and fresh output directories for a matched run. When comparing
-against a former fixed-reference implementation, it must fail the current-zero normalization
-assertion after the scene changes, not a missing test action or incompatible fixture.
+the old ratio and fixed-reference implementations, its normalization assertion distinguishes
+those historical policies. It does not establish acceptance of the current range-based policy.
 
 Build `reshade_adaptive_raw_runtime_test` with runtime tests enabled, then run it
 with `SUNSHINE_GAME3D_AUTOMATIC=1`, `SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST=1` and
@@ -564,10 +644,11 @@ reshade_adaptive_raw_runtime_test.exe <ReShade64.dll> <Depth3D/Shaders> <Sunshin
 Set `SUNSHINE_DEPTH_RELOAD_TEST=1` to also reload the real effect while depth is absent,
 rediscover its new resources, and require fresh readiness, calibration and HDR stereo after
 depth returns. `reshade_depth_ready_uniform_cache_tests` covers reflection reuse and change-only
-publication by the shared Generic/API readiness owner. In the NGX runtime fixture,
-`SUNSHINE_CAPTURE_DEMAND_TEST=1` checks dormant Generic capture on steady native API frames;
-combine it with `SUNSHINE_NGX_TRACKED_SOURCE_TEST=1` to check shared-preservation bootstrap,
-transport handovers and manual pins using the same capture owner.
+publication by the shared Generic/API readiness owner. The legacy NGX runtime fixture's
+`SUNSHINE_CAPTURE_DEMAND_TEST=1` and `SUNSHINE_NGX_TRACKED_SOURCE_TEST=1` combination expects
+shared-preservation bootstrap and DSV/UAV demand handovers. Those are historical expectations,
+not current acceptance criteria: API snapshots keep Generic capture dormant for both resource
+types, while manual pins still enable Generic capture.
 
 The fixture requires the separate test add-on for the real pin/unpin/**Recenter**
 actions. It checks native depth pixels, shader preparation and exported HDR pixels
@@ -708,8 +789,8 @@ separately from startup, transient return, snapshots, distribution tests, Perfor
 test-only actions; neither depth nor camera/calibration uniforms are injected.
 
 Those historical source-recovery scenarios used two successive qualification windows and kept
-H fixed within a source. The current controller uses one fresh initialization window for the
-zero plane, derives H from that same smoothed zero, and resumes A's history when A → B → A stays within the retained
+H fixed within a source. The current controller uses one fresh initialization window for
+independent gain and zero, and resumes A's history when A → B → A stays within the retained
 capture set. Eviction or a change to A's exact source basis requires fresh initialization. Its
 [source and timing contract](../../docs/reshade-sbs.md#experimental-raw-depth-automation) owns
 the current behavior; the older frozen experiments do not establish current-policy acceptance.
@@ -954,7 +1035,7 @@ synthetic evidence, not game/headset or performance acceptance.
 
 ### Full-pipeline shader tests
 
-For the current-zero ratio contract, set `SUNSHINE_GAME3D_AUTOMATIC=1`,
+For the historical current-zero ratio fixture, set `SUNSHINE_GAME3D_AUTOMATIC=1`,
 `SUNSHINE_DEPTH3D_EFFECT=SunshineGame3D` and
 `SUNSHINE_GAME3D_STEREO_REFERENCE_TEST=1`, then run:
 
@@ -962,20 +1043,20 @@ For the current-zero ratio contract, set `SUNSHINE_GAME3D_AUTOMATIC=1`,
 reshade_depth3d_runtime_d3d12_test.exe <ReShade64.dll> <supplied-shader-directory> <fresh-output-directory> scrgb 0 3840 2160
 ```
 
-Repeat with `pq` and with `1920 1080`. The fixture runs the production projection/raw
-screen-plane policies and the actual shader, measuring exported eye shifts, unit/encoding
-invariance, zero disparity and strength 0/50/100. Its independent oracle is
+Repeat with `pq` and with `1920 1080` only against the matching frozen implementation. The fixture
+measures exported eye shifts, unit/encoding invariance, zero disparity and strength 0/50/100.
+Its historical independent oracle is
 `0.05*(1-q/q0)` before strength. Room → wall → return changes normalization with the
 screen plane; different starting scenes must converge to the same current geometry.
 Projection inputs are synthetic and explicitly trusted; these tests do not validate a live
 source association. The earlier [fixed-reference evidence](../../cmake-build-reshade/unit-independent-reference-20260917/stereo-reference-README.md)
-is historical and superseded for normalization behavior. It retains complete-export hashes and
-a 640×360 failure in the unchanged shader's low-resolution ray interpolation. New current-zero
-runs require fresh evidence directories; no assertion is weakened for that failure.
+is historical. It retains complete-export hashes and a 640×360 failure in the old shader's
+low-resolution ray interpolation. These records predate the current independent-gain and
+bounded midpoint-zero policy and do not validate it.
 The [current-zero shader evidence](../../cmake-build-reshade/zero-plane-reference-20260917/stereo-reference-README.md)
 passed 1080p scRGB and 4K scRGB/PQ, including the independent ratio oracle, complete-export
 unit/encoding parity and different-initial-scene convergence. It is shader/controller evidence;
-the separate source-integration fixtures and live-game checks remain necessary.
+the current policy requires its own source-integration and live-game evidence.
 
 The same opt-in build includes a full-effect D3D11 fixture for the separately obtained original
 Depth3D reference. It needs no exporter or foreground observation override:

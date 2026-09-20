@@ -24,13 +24,19 @@ namespace sunshine_game3d {
     api::command_queue *queue = nullptr;
     uint32_t width = 0, height = 0, color = 0;
     api::format source_format = api::format::unknown;
+    // Only offline replay supplies an override. Live rendering keeps a view of
+    // the immutable embedded source and does not copy/compare it each frame.
+    std::string source_override;
+    std::string_view shader_source() const {
+      return source_override.empty() ? renderer::shader_source() : std::string_view(source_override);
+    }
     api::pipeline_layout layout{};
     enum pass { pq, candidate, vertical, horizontal, eyes, pack, pass_count };
     std::array<api::pipeline, pass_count> pipelines{};
     std::array<api::sampler, 3> samplers{};
     api::resource_view null_srv{}, null_uav{};
     struct texture { api::resource resource{}; api::resource_view srv{}, uav{}, rtv{}; };
-    enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field, left, right, packed, texture_count };
+    enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field, left, right, packed, ui_source, texture_count };
     std::array<texture, texture_count> textures{};
     std::vector<std::pair<api::resource, api::resource_view>> backbuffers;
     api::fence completion{};
@@ -40,6 +46,10 @@ namespace sunshine_game3d {
     com<ID3DDeviceContextState> isolated11;
     ID3DDeviceContextState *previous11 = nullptr;
     bool frame_state = false;
+    render_parameters consumed;
+    bool source_alpha_ui = false;
+    api::resource consumed_ui_source{};
+    bool ui_source_failed = false;
 
     bool idle() const {
       return !pending && !failed && (!completion.handle || device->get_completed_fence_value(completion) >= sequence);
@@ -74,7 +84,8 @@ namespace sunshine_game3d {
       const auto w = std::to_string(width), h = std::to_string(height), c = std::to_string(color);
       const D3D_SHADER_MACRO defines[]{{"BUFFER_WIDTH", w.c_str()}, {"BUFFER_HEIGHT", h.c_str()}, {"BUFFER_COLOR_SPACE", c.c_str()}, {nullptr, nullptr}};
       com<ID3DBlob> errors;
-      const HRESULT result = D3DCompile(game3d_shader_source, sizeof(game3d_shader_source) - 1,
+      const auto source = shader_source();
+      const HRESULT result = D3DCompile(source.data(), source.size(),
         "Sunshine Game 3D", defines, nullptr, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code.put(), errors.put());
       if (FAILED(result) && errors.p) reshade::log::message(reshade::log::level::error, static_cast<const char *>(errors->GetBufferPointer()));
       return SUCCEEDED(result);
@@ -123,7 +134,8 @@ namespace sunshine_game3d {
         api::constant_range{0, 0, 0, sizeof(render_parameters) / 4, api::shader_stage::all},
         api::descriptor_range{0, 0, 0, 3, api::shader_stage::all, 1, api::descriptor_type::sampler},
         api::descriptor_range{0, 0, 0, 8, api::shader_stage::all, 1, api::descriptor_type::shader_resource_view},
-        api::descriptor_range{0, 0, 0, 4, api::shader_stage::compute, 1, api::descriptor_type::unordered_access_view}};
+        api::descriptor_range{0, 0, 0, 4, api::shader_stage::compute, 1, api::descriptor_type::unordered_access_view},
+        api::constant_range{0, 1, 0, 4, api::shader_stage::compute}};
       if (!device->create_pipeline_layout(uint32_t(std::size(params)), params, &layout)) return false;
       for (unsigned i = 0; i < samplers.size(); ++i) {
         api::sampler_desc sampler;
@@ -157,6 +169,10 @@ namespace sunshine_game3d {
       for (auto &view : srvs) if (!view.handle) view = null_srv;
       for (auto &view : uavs) if (!view.handle) view = null_uav;
       cmd->push_constants(stage, layout, 0, 0, sizeof(p) / 4, &p);
+      if (stage == api::shader_stage::compute) {
+        const std::array<uint32_t, 4> ui{source_alpha_ui ? 1u : 0u, 0u, 0u, 0u};
+        cmd->push_constants(stage, layout, 4, 0, uint32_t(ui.size()), ui.data());
+      }
       cmd->push_descriptors(stage, layout, 1, {{}, 0, 0, uint32_t(samplers.size()), api::descriptor_type::sampler, samplers.data()});
       cmd->push_descriptors(stage, layout, 2, {{}, 0, 0, uint32_t(srvs.size()), api::descriptor_type::shader_resource_view, srvs.data()});
       if (stage == api::shader_stage::compute)
@@ -199,7 +215,9 @@ namespace sunshine_game3d {
     // Explicit hot-unload is rare. Never free a recorded frame or block the game.
     if (data_ && !data_->idle()) data_.release();
   }
-  bool renderer::configure(api::effect_runtime *runtime, api::resource backbuffer, api::color_space color) {
+  std::string_view renderer::shader_source() { return {game3d_shader_source, sizeof(game3d_shader_source) - 1}; }
+  std::string_view renderer::active_shader_source() const { return data_ ? data_->shader_source() : shader_source(); }
+  bool renderer::configure(api::effect_runtime *runtime, api::resource backbuffer, api::color_space color, std::string_view source_override) {
     auto *device = runtime->get_device();
     const auto desc = device->get_resource_desc(backbuffer);
     const auto format = typed(desc.texture.format);
@@ -211,16 +229,18 @@ namespace sunshine_game3d {
         // for X8 swapchains. Our native overlay target must be the backbuffer.
         format == api::format::r8g8b8x8_unorm || format == api::format::b8g8r8x8_unorm) return false;
     if (data_ && data_->device == device && data_->width == desc.texture.width && data_->height == desc.texture.height &&
-        data_->source_format == typed(desc.texture.format) && data_->color == c) return !data_->failed;
+        data_->source_format == typed(desc.texture.format) && data_->color == c &&
+        data_->source_override == source_override) return !data_->failed;
     if (data_ && !data_->idle()) return false;
     data_.reset();
     auto next = std::make_unique<impl>();
+    next->source_override.assign(source_override);
     if (!next->initialize(runtime, desc, c)) return false;
     data_ = std::move(next);
     reshade::log::message(reshade::log::level::info, "Sunshine Game 3D: add-on GPU renderer ready (no FX file required)");
     return true;
   }
-  bool renderer::render(api::command_list *cmd, api::resource backbuffer, api::resource_view depth, const render_parameters &parameters) {
+  bool renderer::render(api::command_list *cmd, api::resource backbuffer, api::resource_view depth, const render_parameters &parameters, bool source_alpha_ui, api::resource_view alpha_source) {
     if (!data_ || data_->failed || data_->pending) return false;
     auto &d = *data_;
     com<ID3DDeviceContextState> previous;
@@ -236,17 +256,44 @@ namespace sunshine_game3d {
     cmd->barrier(backbuffer, api::resource_usage::copy_source, api::resource_usage::present);
     render_parameters p = parameters;
     if (!depth.handle) { depth = t[impl::empty_depth].srv; p.depth_ready = p.camera_ready = 0; }
+    d.consumed = p;
+    d.source_alpha_ui = source_alpha_ui;
+    d.consumed_ui_source = source_alpha_ui && alpha_source.handle ? d.device->get_resource_from_view(alpha_source) : api::resource{};
     if (d.color == 3) d.draw(cmd, impl::pq, d.width, {impl::linear}, p, {t[impl::source].srv});
     if (d.width <= 3840 && d.height <= 3840) {
       d.dispatch(cmd, impl::candidate, (d.width + 7) / 8, (d.height + 7) / 8, p, {api::resource_view{}, depth}, {impl::raw});
       d.dispatch(cmd, impl::vertical, d.width, 1, p, {api::resource_view{}, {}, {}, t[impl::raw].srv}, {impl::vertical_majorant, impl::vertical_field});
-      d.dispatch(cmd, impl::horizontal, d.height, 1, p, {api::resource_view{}, {}, {}, {}, t[impl::vertical_field].srv}, {impl::field});
+      // This pass reads only t0.a. All color passes keep the current frame.
+      d.dispatch(cmd, impl::horizontal, d.height, 1, p, {d.consumed_ui_source.handle ? alpha_source : t[impl::source].srv, {}, {}, {}, t[impl::vertical_field].srv}, {impl::field});
     }
     d.draw(cmd, impl::eyes, d.width, {impl::left, impl::right}, p, {t[impl::source].srv, depth, t[impl::linear].srv, {}, {}, t[impl::field].srv});
     d.draw(cmd, impl::pack, d.width * 2, {impl::packed}, p, {t[impl::source].srv, {}, {}, {}, {}, {}, t[impl::left].srv, t[impl::right].srv});
     return true;
   }
   api::resource renderer::output() const { return data_ ? data_->textures[impl::packed].resource : api::resource{}; }
+  api::resource renderer::ui_source() {
+    if (!data_ || data_->failed || data_->ui_source_failed) return {};
+    auto &d = *data_;
+    auto &texture = d.textures[impl::ui_source];
+    if (!texture.resource.handle && !d.texture_create(impl::ui_source, d.width, d.height, d.source_format,
+        api::resource_usage::copy_dest | api::resource_usage::copy_source)) {
+      d.ui_source_failed = true;
+      return {};
+    }
+    return texture.resource;
+  }
+  api::resource_view renderer::ui_source_view() const {
+    return data_ && !data_->ui_source_failed ? data_->textures[impl::ui_source].srv : api::resource_view{};
+  }
+  render_parameters renderer::consumed_parameters() const { return data_ ? data_->consumed : render_parameters{}; }
+  bool renderer::consumed_source_alpha_ui() const { return data_ && data_->source_alpha_ui; }
+  diagnostic_resources renderer::diagnostics() const {
+    if (!data_) return {};
+    const auto &t = data_->textures;
+    return {t[impl::source].resource, t[impl::linear].resource, t[impl::raw].resource,
+      t[impl::vertical_majorant].resource, t[impl::vertical_field].resource,
+      t[impl::field].resource, t[impl::packed].resource, data_->consumed_ui_source};
+  }
   api::resource_view renderer::native_rtv(api::resource backbuffer) {
     if (!data_) return {};
     for (const auto &entry : data_->backbuffers) if (entry.first == backbuffer) return entry.second;

@@ -20,6 +20,11 @@ namespace {
       throw std::runtime_error(message);
     }
   }
+  float expected_gain(double maximum) {
+    const double requested = 1. / maximum;
+    float value = static_cast<float>(requested);
+    return value > requested ? std::nextafter(value, 0.f) : value;
+  }
   selected_frame selected(orientation direction = orientation::reversed) {
     selected_frame value;
     value.basis_epoch = 7;
@@ -40,13 +45,8 @@ namespace {
     value.readback_frame = current.frame;
     value.readback_source = current.source;
     value.readback_layout_epoch = current.layout_epoch;
-    // Outer endpoints do not change the center reference or get clipped away.
-    for (unsigned y = 0; y < grid_height; ++y)
-      for (unsigned x = 0; x < grid_width; ++x) {
-        const bool center = x >= 14 && x < 18 && y >= 7 && y < 11;
-        value.raw[y * grid_width + x] = raw_value(current.direction,
-          center ? t : ((x + y) % 2 ? 1.0f : 0.0f));
-      }
+    for (size_t i = 0; i < value.raw.size(); ++i)
+      value.raw[i] = raw_value(current.direction, t * (i % 2 ? 1.5f : .5f));
     return value;
   }
   struct fixture {
@@ -59,13 +59,19 @@ namespace {
     explicit fixture(orientation direction = orientation::reversed) {
       current.direction = direction;
       require(controller.reset(current.basis_epoch, 0), "Initial epoch was refused");
+      configure();
+    }
+    void configure() {
+      controller.configure({.5, 1., 1.});
     }
     void next(std::uint64_t time) {
       now = time;
       current.frame = {++present, 17};
     }
     output checked_output(output value) {
-      if(value.calibrated) require(value.H==1.f/value.t0,"Published gain and zero do not share one state");
+      if (value.calibrated) require(std::isnormal(value.H) && value.H > 0.f &&
+        std::isfinite(value.t0) && value.t0 >= 0.f,
+        "Published gain or independent zero plane is outside the shader domain");
       return result=value;
     }
     output tick(std::uint64_t time) {
@@ -106,7 +112,99 @@ namespace {
       a.calibration_samples == b.calibration_samples, message);
   }
 
-  void initialization_uses_all_center_cells_and_one_window() {
+  void full_image_statistics_use_the_captured_basis_not_selector_points() {
+    for (const auto direction : {orientation::normal, orientation::reversed}) {
+      fixture value(direction);
+      const auto capture = [&](std::uint64_t tick, bool wrong_basis = false) {
+        value.next(tick);
+        auto packet = scene(value.current, ++value.id, tick, .1f);
+        packet.raw.fill(raw_value(direction, 0.f)); // Points miss all foreground.
+        packet.range_supplied = packet.range_valid = true;
+        packet.range_min = direction == orientation::normal ? .5f : 0.f;
+        packet.range_max = direction == orientation::normal ? 1.f : .5f;
+        auto &m = packet.moments;
+        m.supplied = m.valid = true;
+        m.A = direction == orientation::normal ? 1.f : 0.f;
+        m.inverseB = direction == orientation::normal ? -1.f : 1.f;
+        if (wrong_basis) m.inverseB = -m.inverseB;
+        m.count = 1920 * 1080;
+        m.sum = double(m.count) * .25;
+        m.sum_squares = double(m.count) * .125;
+        m.tiles_x = 32; m.tiles_y = 18;
+        return value.checked_output(value.controller.update(value.current, &packet, tick));
+      };
+      for (unsigned i = 0; i < 4; ++i) capture(i * 250);
+      require(value.result.ready && value.result.depth_statistics.mean == .25 &&
+        value.result.depth_statistics.mean_square == .125 && value.result.depth_statistics.pixel_count == 1920 * 1080,
+        "Sparse selector points overrode full active-pixel scene statistics");
+      require(!capture(1000, true).ready && value.result.reason == status::invalid_depth,
+        "A decoded measurement from another depth convention was accepted");
+      require(capture(1250).ready, "Fresh matching moments did not restore scene controls");
+    }
+  }
+
+  void measured_statistics_keep_the_oriented_basis_and_target_lifetime() {
+    for (const auto direction : {orientation::normal, orientation::reversed}) {
+      fixture value(direction);
+      for (unsigned i = 0; i != 4; ++i) {
+        value.capture(i * 250, .25f);
+        require(value.result.has_depth_statistics == (i == 3), "Raw startup exposed partial statistics");
+      }
+      const auto &stats = value.result.depth_statistics;
+      require(stats.minimum == .125 && stats.maximum == .375 && stats.mean == .25,
+        "Raw near/far statistics did not use the same oriented basis as zero");
+      value.next(1000);
+      auto packet = scene(value.current, ++value.id, 1000, .125f);
+      packet.range_supplied = packet.range_valid = true;
+      packet.range_min = 0.f; packet.range_max = 1.f;
+      value.result = value.controller.update(value.current, &packet, 1000);
+      require(value.result.has_depth_statistics && value.result.depth_statistics.minimum == 0. &&
+          value.result.depth_statistics.maximum == 1. && value.result.depth_statistics.mean == .125,
+        "Raw statistics confused complete extrema with point-grid mean");
+      value.current.depth_ready = false;
+      require(value.tick(1050).has_depth_statistics, "Missing presentation discarded valid asynchronous statistics");
+      value.current.depth_ready = true;
+      require(!value.tick(2500).has_depth_statistics && value.result.calibrated,
+        "Expired raw target exposed stale statistics or erased established controls");
+      value.capture(2750);
+      require(value.result.has_depth_statistics, "Fresh raw evidence did not restore statistics");
+      value.controller.scene_cut(2800);
+      require(!value.tick(2850).has_depth_statistics, "Scene cut retained fresh raw statistics");
+      require(value.controller.reset(8, 3000), "Statistics fixture reset failed");
+      value.current.basis_epoch = 8;
+      require(!value.tick(3000).has_depth_statistics, "Explicit raw reset inherited statistics");
+    }
+  }
+
+  void clear_center_does_not_reject_valid_off_center_geometry() {
+    for (const auto direction : {orientation::normal, orientation::reversed}) {
+      decltype(sample::raw) raw;
+      raw.fill(raw_value(direction, 0.f));
+      raw.front() = raw_value(direction, .125f);
+      raw.back() = raw_value(direction, .375f);
+      const auto accepted = [](const output &state) {
+        require(state.ready && state.has_depth_statistics && state.depth_statistics.minimum == 0. &&
+            state.depth_statistics.maximum == .375 && state.depth_statistics.mean > 0.,
+          "Clear central samples rejected valid off-center depth or omitted it from statistics");
+      };
+      // Admission cannot infer missing color/depth correspondence from a clear
+      // center. This checks valid depth evidence, not semantic scene matching.
+      fixture startup(direction);
+      for (unsigned i = 0; i != 4; ++i) {
+        const auto state = startup.capture_grid(i * 250, raw);
+        require(state.reason != status::clear_depth && state.reason != status::invalid_depth,
+          "Finite nonflat depth was declared invalid solely because its center is clear");
+      }
+      accepted(startup.result);
+
+      fixture initialized(direction);
+      initialized.initialize();
+      accepted(initialized.capture_grid(1000, raw));
+      accepted(initialized.tick(1250));
+    }
+  }
+
+  void initialization_uses_all_depth_extrema_and_one_window() {
     fixture basic;
     basic.capture(0);
     basic.capture(10);
@@ -116,41 +214,52 @@ namespace {
     basic.capture(250);
     basic.capture(500);
     require(basic.capture(750).ready, "A coherent spanning capture needed a second qualification window");
-    close(basic.result.H, 4, 0, "Center mean did not initialize H");
-    close(basic.result.t0, .25, 0, "Initial zero plane did not match the center reference");
+    close(basic.result.H, expected_gain(.375), 0, "Nonflat span did not initialize full-strength gain");
+    close(basic.result.t0, .25, 0, "Nonflat scene did not start at the feasible midpoint");
 
     fixture late;
     late.tick(6000);
     late.initialize(.125f, 6100);
-    close(late.result.H, 8, 0, "Startup still has a five-second timeout");
+    close(late.result.H, expected_gain(.1875), 0, "Startup still has a five-second timeout");
 
     fixture unstable;
     unstable.capture(0, .125f);
     unstable.capture(250, .5f);
     unstable.capture(500, .125f);
     require(unstable.capture(750, .5f).ready, "Moving scene was required to become stationary before calibration");
-    close(unstable.result.H, 3.2f, 0, "Moving startup did not use all four spaced observations");
+    close(unstable.result.H, expected_gain(1.5 * .3125), 2e-5,
+      "Moving startup did not average all four admitted maxima");
 
     fixture extremes;
     auto grid = scene(extremes.current, 1, 0, .25f).raw;
     grid[7 * grid_width + 14] = std::numeric_limits<float>::denorm_min();
     grid[7 * grid_width + 15] = std::nextafter(1.0f, 0.0f);
     const auto immutable = grid;
-    const double mean = (14 * .25 + static_cast<double>(grid[7 * grid_width + 14]) +
-      static_cast<double>(grid[7 * grid_width + 15])) / 16;
+    const double maximum = grid[7 * grid_width + 15];
     for (unsigned i = 0; i < 4; ++i) extremes.capture_grid(i * 250, grid);
     require(extremes.result.ready, "Finite interior extremes were excluded or rejected");
-    close(extremes.result.H, 1.f / static_cast<float>(mean), 0, "Center values were trimmed, clipped or reweighted");
-    close(extremes.result.t0, static_cast<float>(mean), 0, "Zero plane did not include every center cell");
+    close(extremes.result.H, expected_gain(maximum), 1e-5,
+      "Depth extrema were trimmed, clipped or replaced by an average");
     require(grid == immutable && extremes.latest.raw == immutable, "Reference calculation changed raw input");
 
-    for (const float bad : {0.0f, 1.0f, -0.1f, 1.1f, std::numeric_limits<float>::quiet_NaN()}) {
+    for (const auto direction : {orientation::normal, orientation::reversed}) {
+      fixture endpoints(direction);
+      auto complete = scene(endpoints.current, 1, 0, .25f).raw;
+      complete.front() = 0.f; complete.back() = 1.f;
+      for (unsigned i = 0; i < 4; ++i) endpoints.capture_grid(i * 250, complete);
+      require(endpoints.result.ready, "Exact zero/one depth endpoints were rejected or treated as missing");
+      close(endpoints.result.H, 1., 1e-5,
+        "Full-grid endpoints were clipped out of the startup span");
+      require(endpoints.latest.raw == complete, "Range calculation changed endpoint depth pixels");
+    }
+
+    for (const float bad : {-0.1f, 1.1f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
       fixture invalid;
       auto malformed = scene(invalid.current, 1, 0, .25f).raw;
       malformed[7 * grid_width + 14] = bad;
       for (unsigned i = 0; i < 4; ++i) invalid.capture_grid(i * 250, malformed);
       require(!invalid.result.ready && !invalid.result.calibrated,
-        "An invalid center cell was discarded to fabricate a usable reference");
+        "An invalid grid cell was discarded to fabricate a usable range");
       invalid.initialize(.25f, 1000);
     }
   }
@@ -159,7 +268,7 @@ namespace {
     for (const auto direction : {orientation::normal, orientation::reversed}) {
       fixture f(direction);
       const auto state = f.initialize(.125f);
-      close(state.H, 8, 0, "Orientation changed gain for equivalent raw geometry");
+      close(state.H, expected_gain(.1875), 0, "Orientation changed gain for equivalent raw geometry");
       close(state.t0, .125, 0, "Orientation changed the raw-coordinate zero plane");
       require(state.shader_A == (direction == orientation::normal ? 1.f : 0.f) &&
         state.shader_inverseB == (direction == orientation::normal ? -1.f : 1.f),
@@ -176,52 +285,120 @@ namespace {
     }
   }
 
-  void screen_plane_and_reference_follow_together() {
+  void flat_depth_cannot_seed_gain_but_tracks_established_zero() {
+    fixture value;
+    decltype(sample::raw) raw;
+    for (std::uint64_t time = 0; time <= 1000; time += 250) {
+      raw.fill(time % 500 ? .25f : 1.f);
+      const auto result = value.capture_grid(time, raw);
+      require(!result.ready && !result.calibrated && result.calibration_samples == 0,
+        "Flat clear/title raw depth seeded automatic calibration");
+    }
+    value.initialize(.25f, 1250);
+    value.capture(2250, .125f);
+    const auto held = value.result;
+    raw.fill(.5f);
+    const auto flat = value.capture_grid(2500, raw);
+    require(flat.ready && flat.reason == status::ready && flat.H == held.H && flat.t0 > held.t0 &&
+      flat.t0 < .5f && flat.target_t0 == .5 && flat.target_H == 0. && flat.has_depth_statistics &&
+      flat.H*(flat.t0-held.t0) <= .25 + 2e-7,
+      "Initialized flat raw surface changed gain or failed bounded convergence");
+    const auto later = value.tick(2750);
+    require(later.ready && later.H == held.H && later.t0 > flat.t0 && later.t0 < .5f,
+      "Flat positive raw surface pursued old gain or stopped converging");
+    raw.fill(0.f);
+    const auto infinite = value.capture_grid(3000, raw);
+    require(infinite.ready && infinite.reason == status::holding_reference && infinite.H == later.H &&
+      infinite.t0 == later.t0 && !infinite.has_depth_statistics,
+      "All-infinity raw depth moved established controls");
+  }
+
+  void feasible_composition_holds_gain_and_zero() {
     fixture f;
     const auto initial = f.initialize();
-    double analytic_zero = initial.t0;
-    for (std::uint64_t now = 800; now <= 20750; now += 50) {
+    for (std::uint64_t now = 800; now <= 3000; now += 50) {
       const bool fresh = now % 250 == 0;
-      f.result = fresh ? f.capture(now, .5f) : f.tick(now);
+      if (fresh) {
+        decltype(sample::raw) raw;
+        raw.fill(.25f);
+        const auto position = (now / 250) % raw.size();
+        raw[position] = .125f;
+        raw[(position + raw.size() / 2) % raw.size()] = .375f;
+        f.capture_grid(now, raw);
+      } else f.tick(now);
       require(f.result.ready, "Continuous valid scene became unready");
-      if (now >= 1000) {
-        // Here the raw movement is below the independent 2/H speed bound.
-        analytic_zero += (.5 - analytic_zero) * -std::expm1(-.05 / .5);
-        close(f.result.t0, analytic_zero, 2e-7,
-          "Shared smoother changed zero-plane convergence or its elapsed time");
-      }
-      close(f.result.H, 1.f/f.result.t0, 0, "Scale detached from published screen plane");
-      close(f.result.target_H, now < 1000 ? 4 : 2, 0, "Fresh target differs from reciprocal target zero");
-    }
-    close(f.result.t0, .5, 2e-7, "Screen plane failed to converge");
-  }
-
-  void room_wall_room_preserves_relative_depth() {
-    fixture f;f.initialize();
-    for(const float center:{.0001f,.25f,.9999f,.25f}) {
-      const auto end=f.now+15000;
-      while(f.now<end) {
-        const auto next=f.capture(f.now+250,center);
-        require(next.ready && next.H==1.f/next.t0,"Screen plane and reference diverged");
-        close(next.referenceZPD*next.H*(next.t0-.5*next.t0),next.referenceZPD*.5,1e-7,"Equal relative depth changed disparity");
-      }
-      close(f.result.t0,center,2e-7,"Room/wall transition retained initial scene");
+      require(f.result.H == initial.H && f.result.t0 == initial.t0,
+        "Feasible scene motion changed unchanged-span gain or recentered the plane");
+      close(f.result.target_H, initial.H, 0, "Feasible scene replaced the requested gain");
     }
   }
 
-  void zero_movement_has_its_own_speed_bound() {
+  void room_wall_room_preserves_pairwise_depth() {
+    fixture f; f.initialize();
+    for (const float depth : {.125f, .5f, .25f}) {
+      const auto end = f.now + 12000;
+      for (auto time = f.now + 50; time <= end; time += 50) {
+        const float previous = f.result.H;
+        const auto next = f.capture(time, depth);
+        require(next.ready && next.H <= previous * std::exp2(.05) * (1. + 2e-7),
+          "Live raw range increased gain faster than twice per second");
+      }
+      close(f.result.H, expected_gain(1.5 * depth), 1e-6, "Raw range retained the startup gain instead of learning the current scene");
+      close(f.result.referenceZPD * f.result.H * ((f.result.t0 - .125) - (f.result.t0 - .5)),
+        double(timing::reference_zpd) * f.result.H * .375, 1e-7,
+        "Minimum-change zero shifted pairwise inverse-depth separation");
+    }
+  }
+
+  void full_extrema_drive_target_without_safety_zero_projection() {
     fixture f;
-    f.initialize(1.f / 128);
-    float previous = f.result.t0;
-    for (std::uint64_t time = 800; time <= 1300; time += 50) {
-      const auto next = f.capture(time, .9f);
-      close(next.t0 - previous, 2 * .05 * previous, 2e-8,
-        "Raw zero-plane speed was not bounded independently of the reference");
-      previous = next.t0;
+    f.controller.configure({.5, 1., 1.});
+    const auto capture_range = [&](std::uint64_t time, float minimum, float maximum) {
+      f.next(time);
+      auto exact = scene(f.current, ++f.id, time, .25f);
+      exact.range_supplied = exact.range_valid = true;
+      exact.range_min = minimum; exact.range_max = maximum;
+      exact.raw.fill((minimum+maximum)*.5f);
+      return f.checked_output(f.controller.update(f.current, &exact, time));
+    };
+    for (unsigned i = 0; i < 4; ++i) capture_range(i * 250, .225f, .275f);
+    const auto initial = f.result;
+    close(initial.H, expected_gain(.275f), 0., "Full-range initialization ignored the exact maximum");
+    const auto spike = capture_range(800, .25f, .9f);
+    require(spike.ready && spike.H < initial.H && spike.H >= initial.H / std::exp2(.05) * (1.-2e-7),
+      "One raw maximum bypassed bounded gain adaptation");
+    require(spike.t0 > initial.t0 && spike.t0 < spike.target_t0 &&
+      spike.H*(spike.t0-initial.t0) <= .05 + 2e-7,
+      "A new near depth bypassed bounded zero adaptation");
+    close(spike.target_t0, (.25 + double(.9f))*.5, 0., "Raw zero target did not use full extrema");
+    close(spike.target_H, expected_gain(.9f), 0., "Point-grid mean replaced the full-range maximum target");
+    float previous = spike.H, previous_zero = spike.t0;
+    for (std::uint64_t time = 850; time <= 10000; time += 50) {
+      const auto narrower = capture_range(time, .225f, .275f);
+      require(narrower.H >= previous && narrower.H <= initial.H &&
+        narrower.H <= previous * std::exp2(.05) * (1. + 2e-7),
+        "Near-point exit exceeded automatic gain bounds");
+      require(narrower.t0 <= previous_zero && narrower.t0 >= initial.t0 &&
+        narrower.H*(previous_zero-narrower.t0) <= .05 + 2e-7,
+        "Near-point exit exceeded zero adaptation bounds");
+      previous = narrower.H; previous_zero = narrower.t0;
     }
+    close(f.result.H, initial.H, 0., "Raw depth did not automatically recover after point exit");
+    close(f.result.t0, initial.t0, 2e-6, "Transient point left permanent raw zero drift");
+    const auto before_projection = f.result;
+    const auto projected = capture_range(10250, .475f, .525f);
+    require(projected.t0 > before_projection.t0 && projected.t0 < .475f &&
+      projected.H*(projected.t0-before_projection.t0) <= .25 + 2e-7,
+      "Translated range instantly clamped zero instead of bounded adaptation");
+    close(projected.target_t0, (double(.475f)+double(.525f))*.5, 0., "Translated zero target is not its midpoint");
+    require(projected.H < initial.H && projected.H >= initial.H / std::exp2(.25) * (1.-2e-7),
+      "Translated maximum bypassed the gain rate limit");
+    auto failed = f.pending(10500, .5f);
+    failed.range_supplied = true; failed.range_valid = false;
+    require(!f.inject(10510, failed).ready, "Failed exact range silently used the sparse diagnostic grid");
   }
 
-  void frame_quantized_capture_cadence_keeps_reference_coupled() {
+  void frame_quantized_capture_cadence_keeps_unchanged_range() {
     for (const std::uint64_t interval : {267ULL, 333ULL, 500ULL}) {
       fixture f;
       f.initialize();
@@ -230,21 +407,21 @@ namespace {
         // Presentation remains responsive while GPU capture completes slightly
         // after its nominal 250 ms interval, or at the allowed 500 ms boundary.
         while (f.now + 50 < capture_at) f.tick(f.now + 50);
-        const auto next = f.capture(capture_at, .5f);
-        require(next.ready && next.H == 1.f/next.t0 && next.target_H == 2,
-          "Frame-quantized readback cadence lost readiness or coupled reference");
+        const auto next = f.capture(capture_at, .25f);
+        require(next.ready && next.H == expected_gain(.375) && next.t0 == .25f && next.target_H == expected_gain(.375),
+          "Frame-quantized readback cadence lost readiness or unchanged range target");
       }
-      require(f.result.t0 > .49f, "Fresh frame-quantized captures never updated the zero plane");
+      require(f.result.t0 == .25f, "Frame-quantized captures moved a feasible plane");
     }
 
     fixture gap;
     gap.initialize();
     while (gap.now + 50 < 1251) gap.tick(gap.now + 50);
-    const auto first=gap.capture(1251, .5f);
-    require(first.ready && first.H==1.f/first.t0,"Sparse capture detached the reference");
-    const auto resumed = gap.capture(1301, .5f);
-    require(resumed.ready && resumed.H == 1.f/resumed.t0 && resumed.t0 > .25f,
-      "Fresh continuity failed to update zero while retaining the reference");
+    const auto first=gap.capture(1251, .25f);
+    require(first.ready && first.H == expected_gain(.375) && first.t0 == .25f, "Sparse capture changed unchanged-range geometry");
+    const auto resumed = gap.capture(1301, .25f);
+    require(resumed.ready && resumed.H == expected_gain(.375) && resumed.t0 == .25f,
+      "Fresh continuity moved feasible depth or changed the reference");
   }
 
   void ignored_packets_are_identical_to_absent_packets() {
@@ -289,7 +466,7 @@ namespace {
   void expired_comfort_target_holds_only_a_valid_current_reference() {
     fixture f;
     f.initialize();
-    f.capture(1000, .5f);
+    f.capture(1000, .25f);
     const auto duplicate = f.latest;
     for (std::uint64_t time = 1050; time < 2500; time += 50) f.tick(time);
     const auto held = f.result;
@@ -311,20 +488,20 @@ namespace {
     f.current.copy_ambiguous = false;
     require(f.tick(10030).reason == status::holding_reference,
       "Short copy absence destroyed initialized numerical history");
-    const auto resumed = f.capture(10050, .125f);
+    const auto resumed = f.capture(10050, .25f);
     require(resumed.ready && resumed.reason == status::ready && resumed.H == held.H && resumed.t0 == held.t0,
       "Fresh target return accumulated catch-up movement");
-    const auto adapting = f.capture(10300, .125f);
-    require(adapting.H > held.H && adapting.target_H == 8 && adapting.t0 < held.t0,
-      "Fresh observations failed to resume coupled zero/reference movement");
+    const auto adapting = f.capture(10300, .25f);
+    require(adapting.ready && adapting.H == held.H && adapting.target_H == held.target_H && adapting.t0 == held.t0,
+      "Fresh observations altered unchanged-range geometry despite a feasible zero");
 
     fixture cut = f;
     cut.controller.scene_cut(10400);
     require(!cut.tick(10400).ready && !cut.tick(13000).ready,
       "Explicit cut was mistaken for a harmless target timeout");
     fixture malformed = f;
-    auto bad = malformed.pending(10400, .125f);
-    bad.raw[7 * grid_width + 14] = 0;
+    auto bad = malformed.pending(10400, .25f);
+    bad.raw[7 * grid_width + 14] = -1.f;
     require(!malformed.inject(10410, bad).ready && !malformed.tick(13000).ready,
       "Malformed new evidence was mistaken for a harmless target timeout");
     fixture replaced = f;
@@ -335,20 +512,20 @@ namespace {
   void asynchronous_packet_identity_and_malformed_recovery() {
     fixture delayed;
     delayed.initialize();
-    const auto submitted = delayed.pending(800, .5f);
+    const auto submitted = delayed.pending(800, .25f);
     delayed.tick(850);
     require(delayed.inject(900, submitted).ready, "Legitimate asynchronous readback older than current was rejected");
-    require(delayed.result.H == 1.f/delayed.result.t0 && delayed.result.target_H == 2 && delayed.result.t0 > .25,
-      "Admitted asynchronous readback failed to update the coupled zero/reference");
+    require(delayed.result.H == expected_gain(.375) && delayed.result.target_H == expected_gain(.375) && delayed.result.t0 == .25f,
+      "Admitted asynchronous readback altered feasible unchanged-range geometry");
 
     for (unsigned kind = 0; kind < 11; ++kind) {
       fixture f;
       f.initialize();
-      auto bad = f.pending(800, .5f);
+      auto bad = f.pending(800, .25f);
       switch (kind) {
       case 0: bad.raw[7 * grid_width + 14] = std::numeric_limits<float>::quiet_NaN(); break;
-      case 1: bad.raw[7 * grid_width + 14] = 0; break;
-      case 2: bad.raw[7 * grid_width + 14] = 1; break;
+      case 1: bad.range_supplied = true; bad.range_valid = false; break;
+      case 2: bad.range_supplied = bad.range_valid = true; bad.range_min = .5f; bad.range_max = .25f; break;
       case 3: bad.raw[7 * grid_width + 14] = -.1f; break;
       case 4: ++bad.readback_frame.token_generation; break;
       case 5: ++bad.readback_source.lifetime; break;
@@ -364,12 +541,12 @@ namespace {
         "Malformed new readback moved numeric state or stayed ready");
       auto absent = f;
       same_output(f.inject(900, bad), absent.tick(900), "Repeated immutable malformed ID was rejected twice");
-      const auto restored = f.capture(950, .5f);
+      const auto restored = f.capture(950, .25f);
       require(restored.ready && restored.H == previous.H && restored.t0 == previous.t0,
         "Same-source valid recovery restarted calibration or accumulated gap motion");
-      const auto adapting = f.capture(1000, .5f);
-      require(adapting.H < previous.H && adapting.target_H == 2 && adapting.t0 > previous.t0,
-        "Fresh recovery left coupled zero/reference adaptation suspended");
+      const auto adapting = f.capture(1000, .25f);
+      require(adapting.ready && adapting.H == previous.H && adapting.target_H == previous.target_H && adapting.t0 == previous.t0,
+        "Fresh recovery changed gain or moved an already feasible zero");
     }
   }
 
@@ -377,7 +554,7 @@ namespace {
     for (unsigned kind = 0; kind < 5; ++kind) {
       fixture f;
       f.initialize();
-      f.capture(1000, .5f);
+      f.capture(1000, .25f);
       const auto held = f.result;
       const auto original = f.current;
       if (kind == 0) f.current.depth_ready = false;
@@ -391,41 +568,41 @@ namespace {
         "A long observation gap silently refreshed the zero target");
       f.current = original;
       const std::uint64_t resumed_at = kind == 4 ? 5050 : 1100;
-      const auto resumed = f.capture(resumed_at, .5f);
+      const auto resumed = f.capture(resumed_at, .25f);
       require(resumed.ready && resumed.t0 == held.t0,
         "First recovered current frame earned zero movement across a gap");
       close(resumed.H, held.H, 0, "Recovery changed the established reference");
-      const auto adapting = f.capture(resumed_at + 50, .5f);
-      require(adapting.H < held.H && adapting.target_H == 2 && adapting.t0 > held.t0,
-        "Recovery did not rearm coupled zero/reference movement");
+      const auto adapting = f.capture(resumed_at + 50, .25f);
+      require(adapting.ready && adapting.H == held.H && adapting.target_H == held.target_H && adapting.t0 == held.t0,
+        "Recovery moved feasible depth or changed the unchanged range target");
     }
 
     fixture short_gap;
     short_gap.initialize();
-    short_gap.capture(1000, .5f);
+    short_gap.capture(1000, .25f);
     const auto held = short_gap.result;
     const auto gap_return=short_gap.tick(1301);
     require(gap_return.H==held.H && gap_return.t0==held.t0,"Presentation gap banked motion");
-    const auto first = short_gap.capture(1350, .5f);
-    require(first.H<held.H && first.t0>held.t0,"Fresh post-gap continuity failed to resume smoothing");
-    const auto recent = short_gap.capture(1400, .5f);
-    require(recent.ready && recent.H < held.H && recent.H==1.f/recent.t0 && recent.t0 > first.t0,
-      "Presentation recovery did not resume coupled zero/reference movement");
+    const auto first = short_gap.capture(1350, .25f);
+    require(first.H == held.H && first.t0 == held.t0, "Fresh post-gap continuity moved a feasible plane");
+    const auto recent = short_gap.capture(1400, .25f);
+    require(recent.ready && recent.H == held.H && recent.t0 == first.t0,
+      "Presentation recovery changed the unchanged range target or feasible zero");
 
     fixture sparse;
     sparse.initialize();
     for (std::uint64_t time = 800; time <= 1400; time += 50) sparse.tick(time);
-    const auto first_sparse=sparse.capture(1450,.5f);
-    require(first_sparse.H==1.f/first_sparse.t0,"Sparse captures detached scale and zero");
-    const auto second = sparse.capture(1500, .5f);
-    require(second.ready && second.H == 1.f/second.t0 && second.target_H == 2 && second.t0 > .25f,
-      "Second fresh capture did not resume coupled zero/reference movement");
+    const auto first_sparse=sparse.capture(1450,.25f);
+    require(first_sparse.H == expected_gain(.375) && first_sparse.t0 == .25f, "Sparse captures changed unchanged-range geometry");
+    const auto second = sparse.capture(1500, .25f);
+    require(second.ready && second.H == expected_gain(.375) && second.target_H == expected_gain(.375) && second.t0 == .25f,
+      "Second fresh capture changed the unchanged range target or feasible zero");
   }
 
   void missing_frames_preserve_asynchronous_evidence_but_strict_errors_do_not() {
     fixture startup;
     // Every actual sample takes 20 ms to complete, crossing a missing present.
-    // A moving center must still initialize from four authenticated captures.
+    // A changing range must still initialize from four authenticated captures.
     for (unsigned i = 0; i < 4; ++i) {
       const auto time = i * 250ULL;
       const auto packet = startup.pending(time, i % 2 ? .5f : .125f);
@@ -438,7 +615,8 @@ namespace {
       require(received.calibration_samples == i + 1 && received.ready == (i == 3),
         "A short missing frame discarded a valid in-flight startup observation");
     }
-    close(startup.result.H, 3.2f, 0, "Moving asynchronous startup changed its arithmetic reference");
+    close(startup.result.H, expected_gain(1.5 * .3125), 2e-5,
+      "Moving asynchronous startup lost an admitted maximum");
     const auto held = startup.result;
     selected_frame missing;
     missing.basis_epoch = startup.current.basis_epoch;
@@ -495,7 +673,7 @@ namespace {
       for (unsigned i = 0; i < 4; ++i)
         require(f.capture(900 + i * 250, .125f).ready == (i == 3),
           "New source has no single fresh 750 ms initialization");
-      close(f.result.H, 8, 0, "New source inherited an old raw-depth basis");
+      close(f.result.H, expected_gain(.1875), 0, "New source inherited an old raw-depth basis");
       f.current = old_source;
       require(!f.tick(1700).calibrated, "A to B to A silently restored a cached gain");
       require(!f.inject(1750, old_packet).ready && f.result.calibration_samples == 0,
@@ -503,7 +681,7 @@ namespace {
       for (unsigned i = 0; i < 4; ++i)
         require(f.capture(1800 + i * 250, .5f).ready == (i == 3),
           "Returning source bypassed or doubled fresh initialization");
-      close(f.result.H, 2, 0, "Returning source reused cached scene calibration");
+      close(f.result.H, expected_gain(.75), 0, "Returning source reused cached scene calibration");
     }
 
     fixture floor;
@@ -518,7 +696,7 @@ namespace {
     fixture same;
     same.initialize();
     for (std::uint64_t time = 800; time <= 1200; time += 50)
-      require(same.capture(time).ready && same.result.H == 4 && same.result.t0 == .25f,
+      require(same.capture(time).ready && same.result.H == expected_gain(.375) && same.result.t0 == .25f,
         "Repeated same-source selection (pin/unpin) reset numeric state");
   }
 
@@ -542,20 +720,21 @@ namespace {
     require(!f.controller.update(f.current, nullptr, 999).ready, "Backward wall time was accepted");
     require(f.capture(1050).ready, "Monotonic clock recovery failed");
 
-    const auto queued = f.pending(1100, .5f);
+    const auto queued = f.pending(1100, .25f);
     f.controller.scene_cut(1150);
     const auto held = f.result;
     require(!f.inject(1200, queued).ready, "Pre-cut queued readback revived a discarded target");
-    const auto resumed = f.capture(1250, .5f);
+    const auto resumed = f.capture(1250, .25f);
     require(resumed.ready && resumed.H == held.H && resumed.t0 == held.t0,
       "Scene cut recalibrated gain or accumulated zero-plane movement");
 
     const auto old_packet = f.latest;
     require(f.controller.reset(8, 1300), "New explicit epoch was refused");
     f.current.basis_epoch = 8;
+    f.configure();
     require(!f.inject(1350, old_packet).ready, "Queued old-epoch packet survived explicit recalibration");
     f.initialize(.125f, 1400);
-    close(f.result.H, 8, 0, "Explicit new epoch retained the old gain");
+    close(f.result.H, expected_gain(.1875), 0, "Explicit new epoch retained the old gain");
   }
 
   void large_gain_uses_r32_without_clamping_raw() {
@@ -565,12 +744,14 @@ namespace {
     for(std::uint64_t time=800;time<=15000;time+=50)too_large.capture(time,.25f);
     require(too_large.result.ready,"Unsupported startup could not recover without reset");
 
-    fixture near_limit;near_limit.initialize(1.f/16380);
+    fixture near_limit;
+    const auto near_initial = near_limit.initialize(1.f / 16380);
     for(std::uint64_t time=800;time<=4000;time+=50) {
       const auto next=near_limit.capture(time,1e-8f);
       require(next.ready,"Finite scale stopped rendering after crossing the retired FP16 boundary");
-      require(next.H==1.f/next.t0 && next.t0>0,"Unsupported numerical update detached scale or crossed zero");
-      require(near_limit.latest.raw[7*grid_width+14]==1e-8f,"Shader limits rewrote raw input");
+      require(next.H >= near_initial.H && next.t0 >= 0.f,
+        "Live range failed to increase finite gain or crossed zero");
+      require(near_limit.latest.raw[7*grid_width+14]==.5e-8f,"Shader limits rewrote raw input");
     }
     for(std::uint64_t time=4050;time<=15000;time+=50)near_limit.capture(time,.25f);
     require(near_limit.result.ready,"Unsupported shader pair trapped later valid target");
@@ -580,12 +761,16 @@ namespace {
 
 int main() {
   try {
-    initialization_uses_all_center_cells_and_one_window();
+    full_image_statistics_use_the_captured_basis_not_selector_points();
+    initialization_uses_all_depth_extrema_and_one_window();
+    measured_statistics_keep_the_oriented_basis_and_target_lifetime();
+    clear_center_does_not_reject_valid_off_center_geometry();
     raw_orientation_and_shader_contract();
-    screen_plane_and_reference_follow_together();
-    room_wall_room_preserves_relative_depth();
-    zero_movement_has_its_own_speed_bound();
-    frame_quantized_capture_cadence_keeps_reference_coupled();
+    flat_depth_cannot_seed_gain_but_tracks_established_zero();
+    feasible_composition_holds_gain_and_zero();
+    room_wall_room_preserves_pairwise_depth();
+    full_extrema_drive_target_without_safety_zero_projection();
+    frame_quantized_capture_cadence_keeps_unchanged_range();
     ignored_packets_are_identical_to_absent_packets();
     expired_comfort_target_holds_only_a_valid_current_reference();
     asynchronous_packet_identity_and_malformed_recovery();
@@ -594,7 +779,7 @@ int main() {
     source_changes_have_one_fresh_initialization_without_cache();
     current_order_reset_and_cut_guards();
     large_gain_uses_r32_without_clamping_raw();
-    std::puts("PASS raw scene policy: coupled screen-plane reference; unclipped raw input; relative disparity; numerical recovery; source, async, replay, gap and shader-domain guards");
+    std::puts("PASS raw scene policy: maximum gain, bounded midpoint convergence, flat-wall behavior and source/async/replay guards");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL raw scene policy: %s\n", error.what());

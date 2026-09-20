@@ -2,6 +2,8 @@
 #pragma once
 
 #include "camera_scene_policy.h"
+#include "depth_moments.h"
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -92,6 +94,9 @@ namespace sunshine_camera_binding {
     camera_observation observation;
     std::uint64_t capture_frame{}, capture_ms{};
     bool projection_associated{}; // Caller observed this camera/source pairing.
+    // Freeze the requested point layout with the crop. Defaults preserve the
+    // historical physical-camera fixture; live requests use tile_grid(crop).
+    std::uint32_t grid_width{scene::grid_width}, grid_height{scene::grid_height};
   };
   struct readback {
     // Independent sampler request identity, never its legacy source-ID token.
@@ -108,9 +113,20 @@ namespace sunshine_camera_binding {
     std::size_t value_count{};
     bool valid{};
   };
+  struct point_sample {
+    std::uint64_t id{}, capture_ms{};
+    scene::registration metadata;
+    scene::frame_key readback_frame;
+    scene::source_key readback_source;
+    std::uint32_t width{}, height{};
+    std::size_t count{};
+    std::array<float, sunshine_depth_statistics::maximum_tiles> raw{};
+  };
   struct associated_sample {
     submission captured;
-    scene::sample sample;
+    // Transport is independent of the old fixed-grid numerical policy. These
+    // points remain exact; no truncation, resampling or fake padding is admitted.
+    point_sample sample;
     bool association_available{}, projection_associated{};
   };
   enum class status {
@@ -173,7 +189,10 @@ namespace sunshine_camera_binding {
     status begin(const submission &value, std::uint64_t now_ms, std::uint64_t &capture_id) noexcept {
       capture_id = 0;
       if (pending_) return status::busy;
-      if (!detail::valid_selection(value.selection) || value.capture_ms > now_ms ||
+      if (!detail::valid_selection(value.selection) || !value.grid_width || !value.grid_height ||
+          value.grid_width > value.selection.crop.width || value.grid_height > value.selection.crop.height ||
+          std::uint64_t(value.grid_width) * value.grid_height > sunshine_depth_statistics::maximum_tiles ||
+          value.capture_ms > now_ms ||
           (value.projection_associated && (!value.camera.unit_epoch || !(value.camera.source == value.selection.original))))
         return status::invalid_submission;
       if (now_ms - value.capture_ms >= maximum_age_ms) return status::expired;
@@ -203,9 +222,9 @@ namespace sunshine_camera_binding {
       if (!(value.sampled == expected.sampled)) return status::source_mismatch;
       if (value.source_format != expected.sample_format) return status::format_mismatch;
       if (value.source_width != expected.sample_width || value.source_height != expected.sample_height ||
-          !(value.crop == expected.crop) || value.width != scene::grid_width || value.height != scene::grid_height)
+          !(value.crop == expected.crop) || value.width != captured_.grid_width || value.height != captured_.grid_height)
         return status::layout_mismatch;
-      if (!value.valid || !value.values || value.value_count != scene::grid_width * scene::grid_height)
+      if (!value.valid || !value.values || value.value_count != std::size_t(captured_.grid_width) * captured_.grid_height)
         return status::invalid_gpu_result;
       out.captured = captured_;
       out.sample.id = capture_id_;
@@ -213,7 +232,10 @@ namespace sunshine_camera_binding {
       out.sample.metadata = captured_.camera;
       out.sample.readback_frame = captured_.camera.frame;
       out.sample.readback_source = captured_.camera.source;
-      for (std::size_t i = 0; i != out.sample.raw.size(); ++i) out.sample.raw[i] = value.values[i];
+      out.sample.width = value.width;
+      out.sample.height = value.height;
+      out.sample.count = value.value_count;
+      for (std::size_t i = 0; i != value.value_count; ++i) out.sample.raw[i] = value.values[i];
       out.sample.metadata.proof_admitted = false;
       out.association_available = true;
       out.projection_associated = captured_.projection_associated;

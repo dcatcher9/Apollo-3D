@@ -9,6 +9,11 @@
 #include <thread>
 #include "test_exporter_async_d3d12.h"
 
+namespace sunshine_streamline::provider {
+  void test_describe_copied_depth(sunshine_depth::frame_depth &, const depth_capture::packet &,
+    const sunshine_depth::frame_depth &, reshade::api::resource, reshade::api::resource_view, std::uint64_t);
+}
+
 namespace {
   void require(bool result, const char *message) {
     if (!result) {
@@ -107,6 +112,172 @@ namespace {
   }
 
   struct publisher_tests {
+    static void pending_depth_continuity() {
+      using namespace sunshine_streamline;
+      sunshine_depth::frame_depth previous;
+      previous.ready = true; previous.frame_index = 100;
+      previous.width = 2228; previous.height = 1256;
+      previous.active_width = 2228; previous.active_height = 1253;
+      previous.provided.provider = sunshine_scene_depth::provider_kind::ngx;
+      previous.provided.epoch = 4; previous.provided.source_id = 7;
+      previous.provided.sequence = 200; previous.provided.tick = 1000;
+      previous.provided.feedback.revision = 3;
+      previous.provided.projection.direction_supplied = previous.provided.projection.reversed = true;
+      depth_capture::packet pending;
+      pending.metadata = {};
+      static_cast<sunshine_scene_depth::frame &>(pending.metadata) = previous.provided;
+      pending.metadata.sequence = 201; pending.metadata.tick = 1016;
+      pending.width = previous.width; pending.height = previous.height; pending.format = 39;
+      pending.area = {0, 0, previous.active_width, previous.active_height};
+      pending.capture_id = 301;
+      depth_capture::capture_diagnostic info;
+      info.result = depth_capture::status::submitted;
+      info.selection = depth_capture::selection_reason::completed_already_consumed;
+      info.consumed_completed_capture = 300;
+      info.capture_id = pending.capture_id;
+      info.provider = pending.metadata.provider;
+      info.epoch = pending.metadata.epoch; info.source_id = pending.metadata.source_id;
+      info.sequence = pending.metadata.sequence; info.viewport = pending.metadata.viewport;
+      info.finished = info.success = info.submitted = true;
+      info.producer_recording_retired = info.producer_completion_valid = true;
+      info.producer_fence = 12; info.producer_completed = 10;
+      const auto allowed = [&](const sunshine_depth::frame_depth &before, const depth_capture::packet &next,
+          const depth_capture::capture_diagnostic &proof, std::uint64_t present = 101, std::uint64_t now = 1032,
+          std::uint64_t capture = 300) {
+        return provider::reuse_pending_ngx(before, capture, 39, next, proof, present, now);
+      };
+      require(allowed(previous, pending, info), "One-presentation completed NGX depth hold rejected");
+      require(allowed(previous, pending, info), "Repeated effects in one held presentation disagreed");
+      // The display texture already contains the previous completed copy. A
+      // successor's still-live recording only prevents reading that successor;
+      // it must not revoke the independent private display texture.
+      auto unretired = info;
+      unretired.producer_recording_retired = false;
+      require(allowed(previous, pending, unretired),
+        "Submitted unretired successor revoked the previous private NGX depth");
+      unretired.producer_completed = unretired.producer_fence;
+      require(allowed(previous, pending, unretired),
+        "GPU-completed unretired successor revoked the previous private NGX depth");
+      require(!allowed(previous, pending, unretired, 102) &&
+          !allowed(previous, pending, unretired, 101, 1250),
+        "Unretired successor extended the NGX presentation or age limit");
+      unretired.producer_recording_retired = true;
+      require(!allowed(previous, pending, unretired),
+        "Retired completed successor bypassed ordinary fresh-copy admission");
+      require(!allowed(previous, pending, info, 100) && !allowed(previous, pending, info, 102),
+        "NGX hold admitted an earlier or second missing presentation");
+      require(!allowed(previous, pending, info, 101, 1250) && !allowed(previous, pending, info, 101, 999),
+        "NGX hold admitted stale depth or a backwards clock");
+      for (unsigned retirement = 0; retirement != 3; ++retirement)
+      for (unsigned field = 0; field != 32; ++field) {
+        auto before = previous;
+        auto next = pending;
+        auto proof = info;
+        proof.producer_recording_retired = retirement == 0;
+        if (retirement == 2) proof.producer_completed = proof.producer_fence;
+        switch (field) {
+          case 0: before.ready = false; break;
+          case 1: before.provided.feedback.reset = true; break;
+          case 2: next.metadata.feedback.reset = true; break;
+          case 3: ++next.metadata.feedback.revision; break;
+          case 4: next.metadata.feedback.revision = before.provided.feedback.revision = 0; break;
+          case 5: ++next.metadata.epoch; break;
+          case 6: ++next.metadata.source_id; break;
+          case 7: ++next.metadata.viewport; break;
+          case 8: next.metadata.sequence = before.provided.sequence; break;
+          case 9: ++next.metadata.observation_revision; break;
+          case 10: next.metadata.provider = sunshine_scene_depth::provider_kind::streamline; break;
+          case 11: next.metadata.frame_generation_input = true; break;
+          case 12: next.metadata.projection.reversed = false; break;
+          case 13: next.metadata.projection.raw_scale = 2; break;
+          case 14: ++next.width; break;
+          case 15: ++next.height; break;
+          case 16: ++next.format; break;
+          case 17: ++next.area.top; break;
+          case 18: --next.area.height; break;
+          case 19: next.metadata.resource.kind = sunshine_scene_depth::resource_kind::display_depth; break;
+          case 20: next.shared_preservation = true; break;
+          case 21: next.pixel_ready = true; break;
+          case 22: proof.result = depth_capture::status::failed; break;
+          case 23: proof.finished = false; break;
+          case 24: proof.success = false; break;
+          case 25: proof.submitted = false; break;
+          case 26: proof.invalid = true; break;
+          case 27: proof.failure = depth_capture::capture_failure::observer_loss; break;
+          case 28: proof.selection = depth_capture::selection_reason::no_current_nomination; break;
+          case 29: --proof.consumed_completed_capture; break;
+          case 30: proof.producer_fence = 0; break;
+          case 31: proof.producer_completion_valid = false; break;
+        }
+        require(!allowed(before, next, proof), "Changed, failed, unknown or unsafe NGX input inherited held depth");
+      }
+      auto complete = info;
+      complete.producer_completed = complete.producer_fence;
+      require(!allowed(previous, pending, complete), "Already completed input bypassed ordinary fresh-copy path");
+      auto resumed = previous;
+      resumed.frame_index = 102;
+      resumed.provided.sequence = 201; resumed.provided.tick = 1032;
+      auto newer = pending;
+      newer.metadata.sequence = 202; newer.metadata.tick = 1048;
+      newer.capture_id = info.capture_id = 302;
+      info.sequence = 202; info.consumed_completed_capture = 301;
+      require(allowed(resumed, newer, info, 103, 1064, 301), "Fresh successful copy did not rearm the next bounded hold");
+    }
+
+    static void copied_depth_provenance() {
+      using namespace sunshine_streamline;
+      depth_capture::packet packet;
+      packet.metadata.provider = sunshine_scene_depth::provider_kind::ngx;
+      packet.metadata.resource.native = 100;
+      packet.metadata.source_id = 9;
+      packet.metadata.sequence = 10472;
+      packet.metadata.epoch = 4;
+      packet.metadata.projection.direction_supplied = packet.metadata.projection.reversed = true;
+      packet.width = 2228; packet.height = 1256;
+      packet.area = {0, 0, 2228, 1253};
+      packet.queue = 200;
+      packet.resource_id = 7;
+      packet.shared_preservation = true;
+      sunshine_depth::frame_depth captured;
+      captured.resource = {300};
+      captured.source_id = 7;
+      captured.backup_id = 231;
+      captured.frame_index = 11190;
+      captured.capture_marker = {400, 8, 9, 10, 11, 0};
+      captured.depth_copy.state = content::status::valid_observation;
+      captured.depth_copy.copy_id = 541;
+      captured.depth_copy.source.resource = {100, 7};
+      captured.depth_copy.source.version = 812;
+      captured.depth_copy.backup = {300, 231};
+      captured.depth_copy.recording = captured.capture_marker;
+      sunshine_depth::frame_depth out;
+      provider::test_describe_copied_depth(out, packet, captured, {500}, {501}, 11193);
+      require(out.ready && out.resource.handle == 500 && out.shader_resource.handle == 501 &&
+          out.source_resource.handle == 100 && out.provided.sequence == 10472 && out.frame_index == 11193 &&
+          out.source_id == 9 && out.width == 2228 && out.height == 1256 && out.active_height == 1253 &&
+          out.command_queue == 200 && out.orientation == sunshine_depth::depth_orientation::reversed,
+        "Preservation diagnostics replaced the renderer's current display or SDK metadata");
+      require(out.backup_id == 231 && out.capture_marker.command == 400 && out.capture_marker.event == 10 &&
+          out.depth_copy.valid() && out.depth_copy.copy_id == 541 &&
+          out.depth_copy.source.resource.lifetime == 7 && out.depth_copy.source.version == 812 &&
+          out.depth_copy.backup.native == 300 && out.depth_copy.backup.lifetime == 231 &&
+          content::same_recording(out.depth_copy.recording, captured.capture_marker),
+        "SDK display publication discarded the preserved depth's copy/content/recording identity");
+      const auto selected = sunshine_depth::camera_selection_snapshot(out);
+      require(selected.capture_marker.command == 400 && selected.depth_copy.copy_id == 541 && selected.backup_id == 231,
+        "Renderer diagnostic selection discarded the consumed preservation provenance");
+
+      // Independent native snapshots do not supply ReShade preservation
+      // metadata. An already populated output must not retain the prior copy.
+      packet.shared_preservation = false;
+      ++packet.metadata.sequence;
+      provider::test_describe_copied_depth(out, packet, {}, {500}, {501}, 11194);
+      require(out.ready && out.provided.sequence == 10473 && !out.backup_id && !out.capture_marker &&
+          out.depth_copy.state == content::status::unavailable && !out.depth_copy.copy_id &&
+          !out.depth_copy.source.version && !out.depth_copy.backup.lifetime,
+        "An unobserved native snapshot inherited or invented preservation provenance");
+    }
+
     static void jitter_publication() {
       struct runtime : runtime_fixture::empty_runtime {
         std::array<float, 2> offset{};
@@ -131,11 +302,120 @@ namespace {
       require(runtime.offset == std::array<float, 2>{}, "Missing/current generic depth retained previous API jitter");
     }
 
+    static void pending_scene_identity() {
+      frame_decision_t previous;
+      previous.depth_ready = previous.scene.ready = previous.scene.owned = true;
+      previous.scene_source = {4, 7, 100, 0};
+      previous.scene.basis = 2;
+      previous.scene.scale = 300.f;
+      previous.scene.zero = {.01f, .25f};
+      previous.scene.raw_range = {.001f, .08f};
+      previous.scene.blend = .75f;
+      previous.scene.admitted_strength = 40.f;
+      for (bool generated : {false, true}) {
+        frame_decision_t frame;
+        frame.depth_ready = frame.reused_depth = true;
+        frame.fg_active = generated;
+        frame.scene_source = previous.scene_source;
+        restore_reused_scene(frame, previous, true);
+        require(frame.depth_ready && frame.scene.ready && frame.scene.scale == previous.scene.scale &&
+            frame.scene.zero == previous.scene.zero && frame.scene.raw_range == previous.scene.raw_range &&
+            frame.scene.blend == previous.scene.blend && frame.scene.admitted_strength == previous.scene.admitted_strength,
+          "Known pending NGX/FG depth did not retain its exact previously admitted scene");
+        for (unsigned field = 0; field != frame.scene_source.size(); ++field) {
+          auto changed = frame;
+          changed.scene = {};
+          ++changed.scene_source[field];
+          restore_reused_scene(changed, previous, true);
+          require(!changed.depth_ready && !changed.scene.ready &&
+              changed.scene.ui.phase == sunshine_game3d::automatic_phase::waiting_for_depth,
+            "Held depth inherited geometry from a different epoch/source/capture/viewport");
+        }
+        auto missing = previous;
+        missing.depth_ready = false;
+        frame.scene = {};
+        restore_reused_scene(frame, missing, true);
+        require(!frame.depth_ready && !frame.scene.ready, "A missing previous pair resurrected cached geometry");
+      }
+    }
+
+    static void cached_scene_strength_publication() {
+      struct runtime : runtime_fixture::empty_runtime {
+        float scale{}, blend{};
+        bool ready{};
+        int basis{};
+        std::array<float, 2> projection{}, zero{};
+        void set_uniform_value_bool(api::effect_uniform_variable variable, const bool *values,
+            size_t count, size_t) override {
+          require(variable.handle == 101 && count == 4, "Strength publication touched an unrelated bool uniform");
+          ready = values[0];
+        }
+        void set_uniform_value_int(api::effect_uniform_variable variable, const int *values,
+            size_t count, size_t) override {
+          require(variable.handle == 102 && count == 4, "Strength publication touched an unrelated int uniform");
+          basis = values[0];
+        }
+        void set_uniform_value_float(api::effect_uniform_variable variable, const float *values,
+            size_t count, size_t) override {
+          if (variable.handle == 103 && count == 2) std::copy_n(values, 2, projection.begin());
+          else if (variable.handle == 104 && count == 4) scale = values[0];
+          else if (variable.handle == 105 && count == 2) std::copy_n(values, 2, zero.begin());
+          else if (variable.handle == 106 && count == 4) blend = values[0];
+          else require(false, "Strength publication touched an unrelated float uniform");
+        }
+      } runtime;
+      runtime_t proof;
+      proof.camera_ready = {101}; proof.camera_basis = {102}; proof.camera_projection = {103};
+      proof.camera_scale = {104}; proof.camera_zero = {105}; proof.camera_blend = {106};
+      proof.frame_strength = 50.f;
+      frame_decision_t fresh;
+      fresh.depth_ready = fresh.fg_active = true;
+      fresh.scene.owned = fresh.scene.ready = true;
+      fresh.scene.basis = 1;
+      fresh.scene.scale = 4.f;
+      fresh.scene.projection = {0.f, 1.f};
+      fresh.scene.zero = {.05f, .25f};
+      fresh.scene.blend = 1.f;
+      fresh.scene.admitted_strength = 50.f;
+      publisher_t::publish_frame(&runtime, proof, fresh);
+      require(runtime.ready && runtime.basis == 1 && runtime.scale == 4.f,
+        "Fresh reference publication changed its admitted geometry");
+      for (const float strength : {100.f, 100.f, 25.f, 0.f, 75.f, 0.f, 100.f, 50.f}) {
+        auto reused = proof.frame;
+        reused.reused_depth = true;
+        proof.frame_strength = strength;
+        publisher_t::publish_frame(&runtime, proof, reused);
+        const float effective = runtime.scale * runtime.blend * strength;
+        require(std::isfinite(runtime.scale) && std::abs(effective - 4.f * std::min(strength, 50.f)) < 1e-5f,
+          "Cached FG scene exceeded its admitted strength or delayed an immediate decrease");
+        require(runtime.zero == fresh.scene.zero && runtime.projection == fresh.scene.projection && runtime.scale == fresh.scene.scale,
+          "FG strength cap changed convergence, normalized depth or its diagnostic geometry");
+        require(proof.frame.scene.scale == fresh.scene.scale && proof.frame.scene.admitted_strength == 50.f,
+          "FX strength publication modified its cached scene and compounded repeated attenuation");
+      }
+      // A fresh real-depth decision authorizes the new strength independently;
+      // the previous cached cap cannot remain latched after that decision.
+      auto resumed = proof.frame;
+      resumed.reused_depth = false;
+      resumed.scene.admitted_strength = proof.frame_strength = 100.f;
+      resumed.scene.scale = 3.f;
+      publisher_t::publish_frame(&runtime, proof, resumed);
+      require(runtime.scale == 3.f && runtime.blend == 1.f && proof.frame.scene.admitted_strength == 100.f,
+        "Fresh real-depth scene retained the previous FG strength cap");
+      resumed.scene.admitted_strength = 0.f;
+      resumed.reused_depth = true;
+      publisher_t::publish_frame(&runtime, proof, resumed);
+      require(runtime.scale == 3.f && runtime.blend == 0.f,
+        "Scene admitted at zero strength authorized nonzero FG disparity");
+    }
+
     static void automatic_raw_and_matrix_resolver(bool native_cropped = false) {
       runtime_fixture::empty_runtime runtime;
       publisher_t publisher;
       runtime_t proof;
       proof.addon_native = native_cropped;
+      proof.frame_strength = 37.f;
+      proof.width = 1920; proof.height = 1080;
       proof.raw_supported = true;
       proof.raw_basis_epoch = 77;
       require(proof.provided_raw_policy.reset(proof.raw_basis_epoch, 1000),
@@ -152,7 +432,7 @@ namespace {
       depth.provided.provider = sunshine_scene_depth::provider_kind::ngx;
       depth.provided.epoch = 3;
       depth.provided.source_id = 9;
-      if (native_cropped) depth.provided.sequence = 1;
+      depth.provided.sequence = 1;
       depth.provided.projection.direction_supplied = depth.provided.projection.reversed = true;
       const std::array<float, 4> active_rect{0.f, 0.f, 1.f, 1253.f / 1256.f};
       const auto check_native_crop = [&](const scene_parameters_t &scene, std::uint64_t now) {
@@ -179,32 +459,78 @@ namespace {
         proof.camera_rect = {};
         proof.addon_native = true;
       };
-      if (native_cropped) {
+      {
         const auto pending = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 1000);
-        require(!pending.ready && pending.rect == active_rect &&
+        require(!pending.ready && (!native_cropped || pending.rect == active_rect) &&
             pending.ui.phase == sunshine_game3d::automatic_phase::calibrating &&
-            pending.ui.scale.basis == sunshine_game3d::automatic_scale_basis::relative_depth,
-          "Padded native NGX depth did not enter raw calibration");
+            pending.ui.scale.basis == sunshine_game3d::automatic_scale_basis::relative_depth &&
+            !pending.ui.scale.depth_statistics_valid(),
+          "NGX depth did not enter raw calibration with the current render configuration");
       }
       std::array<float, sunshine_raw_scene::grid_width * sunshine_raw_scene::grid_height> raw;
       const auto measure = [&](float value, std::uint64_t now) {
-        raw.fill(value);
+        for (size_t i = 0; i < raw.size(); ++i) raw[i] = value * (i % 2 ? 1.5f : .5f);
         ++depth.provided.sequence;
         depth.provided.tick = now;
         const auto current = sunshine_provided_raw::selected(depth.provided, proof.raw_basis_epoch, true);
-        const auto sample = sunshine_provided_raw::measured(depth.provided, depth.provided.sequence,
+        auto sample = sunshine_provided_raw::measured(depth.provided, depth.provided.sequence,
           proof.raw_basis_epoch, raw);
+        sample.range_supplied = sample.range_valid = true;
+        sample.range_min = value * .5f; sample.range_max = value * 1.5f;
+        sample.moments.supplied = sample.moments.valid = true;
+        sample.moments.count = native_cropped ? 2228u * 1253u : 1920u * 1080u;
+        sample.moments.sum = double(sample.moments.count) * value;
+        sample.moments.sum_squares = double(sample.moments.count) * value * value * 1.25;
+        sample.moments.tiles_x = 32; sample.moments.tiles_y = 18;
         proof.provided_raw_policy.update(current, &sample, now);
       };
       for (unsigned i = 0; i != 4; ++i) measure(.25f, 1000 + i * 250);
       const auto scene = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 1750);
-      require(scene.ready && scene.basis == 1 && scene.scale == 4.f && scene.zero[1] == .25f,
+      const double initial_L = sunshine_scene_gain::render_limits(37.f, 1920, 1080).normalization;
+      require(scene.ready && scene.basis == 1 && std::abs(scene.scale - initial_L / .375) < 1e-5 && std::isfinite(scene.zero[1]) &&
+          scene.admitted_strength == 37.f,
         "NGX resolver did not retain ready relative stereo");
+      require(scene.ui.scale.depth_statistics_valid() && scene.ui.scale.reference_inverse == .375 &&
+          scene.ui.scale.mean_inverse == .25 && scene.ui.scale.normalization == initial_L &&
+          scene.ui.scale.minimum_inverse == .125 && scene.ui.scale.maximum_inverse == .375 &&
+          scene.ui.scale.mean_square_inverse == .078125 && scene.ui.scale.depth_pixel_count > 0 &&
+          scene.ui.scale.depth_tiles_x == 32 && scene.ui.scale.depth_tiles_y == 18,
+        "NGX resolver lost accepted oriented depth statistics");
       check_native_crop(scene, 1750);
       measure(.125f, 2000);
+      proof.frame_strength = 83.f;
       const auto tracking = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 2000);
-      require(tracking.ready && tracking.scale > scene.scale && tracking.zero[1] < scene.zero[1],
-        "NGX resolver stopped ordinary screen-plane tracking");
+      require(tracking.ready && tracking.scale > scene.scale && tracking.scale <= scene.scale * std::exp2(.25) * (1. + 2e-7) &&
+          tracking.admitted_strength == 83.f,
+        "NGX resolver stopped bounded live range learning or failed to admit current strength");
+      require(tracking.ui.scale.depth_statistics_valid() && tracking.ui.scale.reference_inverse == .1875 &&
+          tracking.ui.scale.mean_inverse == .125 && tracking.ui.scale.normalization == initial_L &&
+          tracking.ui.scale.minimum_inverse == .0625 && tracking.ui.scale.maximum_inverse == .1875,
+        "NGX resolver derived measured statistics from smoothed scale");
+
+      proof.width = 1080; proof.height = 1920;
+      const auto portrait = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 2000);
+      const double portrait_L = sunshine_scene_gain::render_limits(83.f, 1080, 1920).normalization;
+      require(portrait.ready && portrait.ui.scale.depth_statistics_valid() &&
+          portrait.ui.scale.reference_inverse == tracking.ui.scale.reference_inverse &&
+          portrait.ui.scale.mean_inverse == tracking.ui.scale.mean_inverse &&
+          portrait.ui.scale.normalization == portrait_L && portrait_L != initial_L &&
+          std::abs(portrait.ui.scale.target_value - portrait_L / .1875) < 1e-5 &&
+          portrait.scale == tracking.scale && portrait.zero == tracking.zero,
+        "Output aspect change altered captured depth or zero instead of updating only normalization and the gain target");
+      proof.width = 1920; proof.height = 1080;
+      proof.frame_strength = 0.f;
+      const auto zero_strength_resize = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 2000);
+      require(zero_strength_resize.ready && zero_strength_resize.admitted_strength == 0.f &&
+          zero_strength_resize.ui.scale.depth_statistics_valid() && zero_strength_resize.ui.scale.has_target() &&
+          zero_strength_resize.ui.scale.reference_inverse == portrait.ui.scale.reference_inverse &&
+          zero_strength_resize.ui.scale.mean_inverse == portrait.ui.scale.mean_inverse &&
+          zero_strength_resize.ui.scale.normalization == initial_L &&
+          std::abs(zero_strength_resize.ui.scale.target_value - initial_L / .1875) < 1e-5 &&
+          zero_strength_resize.ui.scale.target_value != portrait.ui.scale.target_value &&
+          zero_strength_resize.scale == portrait.scale && zero_strength_resize.zero == portrait.zero,
+        "Zero-strength resize kept a stale normalization target or moved the held gain and zero");
+      proof.frame_strength = 83.f;
 
       depth.projection.supplied = true;
       depth.projection.epoch = 3;
@@ -213,12 +539,13 @@ namespace {
       proof.projection_domain = {3, 0};
       proof.projection_policy.reset(proof.projection_domain, 2000);
       const auto coefficients = sunshine_projection_depth::make(depth.projection.A, depth.projection.B);
-      if (native_cropped) {
+      {
         const auto pending = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 2000);
-        require(!pending.ready && pending.rect == active_rect &&
+        require(!pending.ready && (!native_cropped || pending.rect == active_rect) &&
             pending.ui.phase == sunshine_game3d::automatic_phase::calibrating &&
-            pending.ui.scale.basis == sunshine_game3d::automatic_scale_basis::camera_matrix,
-          "Padded native camera depth did not enter projection calibration");
+            pending.ui.scale.basis == sunshine_game3d::automatic_scale_basis::camera_matrix &&
+            !pending.ui.scale.depth_statistics_valid(),
+          "Camera depth did not enter projection calibration with the current render configuration");
       }
       for (unsigned i = 0; i != 4; ++i) {
         sunshine_projection_depth::sample sample;
@@ -226,14 +553,35 @@ namespace {
         sample.capture_ms = 2001 + i * 250;
         sample.logical_domain = proof.projection_domain;
         sample.projection = coefficients;
-        sample.raw.fill(.25f);
+        for (size_t j = 0; j < sample.raw.size(); ++j) sample.raw[j] = j % 2 ? .375f : .125f;
+        sample.range_supplied = sample.range_valid = true;
+        sample.range_min = .125f; sample.range_max = .375f;
+        const float far_value = (.125f-coefficients.shader_A)*coefficients.inverseB;
+        const float near_value = (.375f-coefficients.shader_A)*coefficients.inverseB;
+        sample.moments.supplied = sample.moments.valid = true;
+        sample.moments.A = coefficients.shader_A; sample.moments.inverseB = coefficients.inverseB;
+        sample.moments.count = native_cropped ? 2228u * 1253u : 1920u * 1080u;
+        sample.moments.sum = double(sample.moments.count) * (double(far_value)+near_value) * .5;
+        sample.moments.sum_squares = double(sample.moments.count) * (double(far_value)*far_value+double(near_value)*near_value) * .5;
+        sample.moments.tiles_x = 32; sample.moments.tiles_y = 18;
         proof.projection_policy.observe(sample, sample.capture_ms);
       }
+      proof.frame_strength = 71.f;
       const auto matrix = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 2751);
+      const float expected_far = (.125f - coefficients.shader_A) * coefficients.inverseB;
+      const float expected_near = (.375f - coefficients.shader_A) * coefficients.inverseB;
       require(matrix.ready && matrix.basis == 0 && matrix.projection[0] == coefficients.shader_A &&
-          matrix.projection[1] == coefficients.inverseB && std::abs(matrix.zero[1] - 1.3f) < 1e-6f &&
-          std::abs(matrix.scale * matrix.zero[1] - 1.f) < 1e-6f,
+          matrix.projection[1] == coefficients.inverseB && std::isfinite(matrix.zero[1]) &&
+          std::abs(matrix.scale - initial_L / expected_near) < 2e-5 && matrix.admitted_strength == 71.f,
         "Associated matrix did not take precedence over the relative-depth reference");
+      require(matrix.ui.scale.depth_statistics_valid() && matrix.ui.scale.minimum_inverse == expected_far &&
+          matrix.ui.scale.maximum_inverse == expected_near &&
+          matrix.ui.scale.reference_inverse == expected_near &&
+          matrix.ui.scale.mean_inverse == (double(expected_far) + expected_near) * .5 &&
+          matrix.ui.scale.normalization == initial_L &&
+          matrix.ui.scale.depth_pixel_count > 0 && matrix.ui.scale.depth_tiles_x == 32 &&
+          matrix.ui.scale.mean_square_inverse > 0.,
+        "Camera resolver did not publish captured projection statistics in zero-plane units");
       check_native_crop(matrix, 2751);
     }
 
@@ -335,7 +683,7 @@ namespace {
           &proof.raw_gain, &proof.depth_rect, &proof.direction, &proof.camera_ready,
           &proof.camera_basis, &proof.camera_projection, &proof.camera_scale,
           &proof.camera_zero, &proof.camera_blend, &proof.camera_rect,
-          &proof.camera_raw_range, &proof.depth_jitter})
+          &proof.camera_raw_range, &proof.depth_jitter, &proof.effect_strength})
         uniform->handle = handle++;
       proof.native_uniforms_checked = proof.proof_checked = true;
     }
@@ -351,7 +699,7 @@ namespace {
           proof.raw_gain, proof.depth_rect, proof.direction, proof.camera_ready,
           proof.camera_basis, proof.camera_projection, proof.camera_scale,
           proof.camera_zero, proof.camera_blend, proof.camera_rect,
-          proof.camera_raw_range, proof.depth_jitter})
+          proof.camera_raw_range, proof.depth_jitter, proof.effect_strength})
         require(!uniform.handle, "Effect reload retained a stale FX uniform handle");
     }
 
@@ -439,6 +787,28 @@ namespace {
       publisher.invalidate(owner(), true);
       require(!publisher.overlay_open(owner()), "runtime destruction retained overlay state across pointer reuse");
       require(publisher.runtimes_.empty(), "runtime destruction retained its native owner");
+    }
+
+    static void source_alpha_scope_lifetime() {
+      publisher_t publisher;
+      auto &proof = publisher.runtimes_[owner()];
+      const sunshine_game3d::frame_generation_mode fg {true, true, false, 1, 0, 7, 41};
+      proof.frame.source_alpha = proof.source_alpha_policy.update(true, fg, true);
+      proof.frame.depth_ready = true;
+      proof.frame.fg_active = false; // Ready manual/Generic depth has no SL FG provenance.
+      require(!proof.frame.source_alpha.effective(), "Manual depth bypassed the FG alpha guard");
+      publish_source_alpha_ui(owner(), proof.frame.source_alpha);
+      const auto visible = sunshine_game3d::query_source_alpha_ui(owner());
+      require(visible.blocked_by_fg() && visible.fg.sequence == 41,
+        "UI did not receive the renderer's frozen FG decision");
+      publisher.invalidate(owner(), false);
+      const auto retained = publisher.runtimes_.at(owner()).source_alpha_policy.update(true, {}, true);
+      require(retained.blocked_by_fg() && retained.fg.sequence == 41,
+        "An effects reload cleared a confirmed game FG mode");
+      publish_source_alpha_ui(owner(), retained);
+      publisher.invalidate(owner(), true);
+      require(!sunshine_game3d::query_source_alpha_ui(owner()).fg.known && publisher.runtimes_.empty(),
+        "Runtime destruction retained FG mode or its UI status");
     }
 
     static void disabled_native_reload_lifetime() {
@@ -781,6 +1151,21 @@ namespace {
 
 int main(int argc, char **argv) {
   try {
+    if (argc == 2 && std::strcmp(argv[1], "--scene-strength") == 0) {
+      publisher_tests::source_alpha_scope_lifetime();
+      publisher_tests::pending_depth_continuity();
+      publisher_tests::pending_scene_identity();
+      publisher_tests::cached_scene_strength_publication();
+      publisher_tests::automatic_raw_and_matrix_resolver();
+      publisher_tests::automatic_raw_and_matrix_resolver(true);
+      std::puts("PASS: current scene strength and cached FG publication (CPU only)");
+      return 0;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--depth-provenance") == 0) {
+      publisher_tests::copied_depth_provenance();
+      std::puts("PASS: consumed SDK depth preservation provenance (CPU only)");
+      return 0;
+    }
     if (argc == 2 && std::strcmp(argv[1], "--async-ring") == 0) {
       // Opt-in GPU regression; a stuck driver must not leave the game-like gate
       // waiting indefinitely. The process exits before this detached watchdog.
@@ -792,9 +1177,14 @@ int main(int argc, char **argv) {
       publisher_tests::d3d12_async_ring();
       return 0;
     }
-    require(argc == 1, "usage: reshade_exporter_tests [--async-ring]");
+    require(argc == 1, "usage: reshade_exporter_tests [--async-ring|--depth-provenance|--scene-strength]");
+    publisher_tests::copied_depth_provenance();
+    publisher_tests::source_alpha_scope_lifetime();
+    publisher_tests::pending_depth_continuity();
     publisher_tests::automatic_ui_lifetime();
     publisher_tests::jitter_publication();
+    publisher_tests::cached_scene_strength_publication();
+    publisher_tests::pending_scene_identity();
     publisher_tests::automatic_raw_and_matrix_resolver();
     publisher_tests::automatic_raw_and_matrix_resolver(true);
     publisher_tests::session_teardown_ownership();

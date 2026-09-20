@@ -82,8 +82,28 @@ namespace nvenc {
     return unload_library();
   }
 
-  bool nvenc_d3d11::wait_for_async_event(uint32_t timeout_ms) {
-    return WaitForSingleObject(async_event_handle, timeout_ms) == WAIT_OBJECT_0;
+  nvenc_event_wait_result nvenc_d3d11::wait_for_event(void *event, uint32_t timeout_ms) {
+    const auto wait_result = WaitForSingleObject(event, timeout_ms);
+    // LastError is defined for WAIT_FAILED only. Capture it before another Windows/driver call.
+    const auto wait_error = wait_result == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+    nvenc_event_wait_result result;
+    result.native_wait_result = wait_result;
+    result.native_error = wait_error;
+    if (wait_result == WAIT_OBJECT_0) {
+      result.status = nvenc_event_wait_status::ready;
+    } else if (wait_result == WAIT_TIMEOUT) {
+      result.status = nvenc_event_wait_status::timeout;
+    } else {
+      result.status = nvenc_event_wait_status::failed;
+    }
+    if (result.status != nvenc_event_wait_status::ready && device && device_type == NV_ENC_DEVICE_TYPE_DIRECTX) {
+      result.device_removed_reason = static_cast<int32_t>(static_cast<ID3D11Device *>(device)->GetDeviceRemovedReason());
+    }
+    return result;
+  }
+
+  nvenc_event_wait_result nvenc_d3d11::wait_for_async_event(uint32_t timeout_ms) {
+    return wait_for_event(async_event_handle, timeout_ms);
   }
 
   void *nvenc_d3d11::create_flush_event() {
@@ -93,8 +113,8 @@ namespace nvenc {
     return owned_flush_event.get();
   }
 
-  bool nvenc_d3d11::wait_for_flush_event(uint32_t timeout_ms) {
-    return WaitForSingleObject(owned_flush_event.get(), timeout_ms) == WAIT_OBJECT_0;
+  nvenc_event_wait_result nvenc_d3d11::wait_for_flush_event(uint32_t timeout_ms) {
+    return wait_for_event(owned_flush_event.get(), timeout_ms);
   }
 
   void nvenc_d3d11::release_async_event() {

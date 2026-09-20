@@ -8,6 +8,12 @@
 
 namespace {
   using namespace sunshine_raw_scene;
+  constexpr double test_normalization = .5;
+  constexpr sunshine_scene_gain::limits test_budget{
+    .5, double(sunshine_camera_scene::reference_zpd) * .5,
+    double(sunshine_camera_scene::reference_zpd) * .5, test_normalization};
+  // capture() spans [0.5*t, 1.5*t]; each exact source owns its own Qmax.
+  double expected_gain(float t) { return test_normalization / double(1.5f * t); }
 
   void require(bool condition, const char *message) {
     if (!condition) throw std::runtime_error(message);
@@ -26,7 +32,10 @@ namespace {
     value.readback_frame = current.frame;
     value.readback_source = current.source;
     value.readback_layout_epoch = current.layout_epoch;
-    value.raw.fill(current.direction == orientation::normal ? 1.f - t : t);
+    for (std::size_t i = 0; i < value.raw.size(); ++i) {
+      const float depth = t * (i % 2 ? 1.5f : .5f);
+      value.raw[i] = current.direction == orientation::normal ? 1.f - depth : depth;
+    }
     return value;
   }
   struct fixture {
@@ -48,6 +57,7 @@ namespace {
         roster.members[i] = {{0x100 + i, 20 + i, 0, 3840, 2160, 0, 0, 3840, 2160},
           3, 0, i == 1 ? orientation::normal : orientation::reversed};
       require(controller.reset(roster.basis_epoch, 0), "Initial reset rejected");
+      controller.configure(test_budget);
     }
     selected_frame current(unsigned index) {
       const auto &basis = roster.members[index];
@@ -69,8 +79,8 @@ namespace {
       const auto result = controller.update(roster, selected,
         use_cache && latest[index].id ? &latest[index] : nullptr, time);
       if (result.ready)
-        close(double(result.H) * result.t0, 1, 2e-7,
-          "Ready rotating source did not use its current zero as the scale reference");
+        require(std::isnormal(result.H) && result.H > 0 && std::isfinite(result.t0) && result.t0 >= 0 &&
+          std::isfinite(result.target_H), "Ready rotating source published invalid independent gain/zero");
       blend = transition.update(result.ready, time);
       return last[index] = result;
     }
@@ -101,7 +111,7 @@ namespace {
       for (unsigned i = 0; i < count; ++i) {
         require(value.last[i].ready, "Short resource rotation repeatedly lost initialization");
         require(value.last[i].calibration_samples == 4, "Member shared or restarted the startup window");
-        close(value.last[i].H, 1 / value.t[i], 0, "Resource inherited another member's H");
+        close(value.last[i].H, expected_gain(value.t[i]), expected_gain(value.t[i]) * 2e-7, "Resource inherited another member's H");
         close(value.last[i].t0, value.t[i], 0, "Resource inherited another member's zero plane");
       }
       close(value.blend, 1, 0, "Continuous ready rotation restarted global reentry");
@@ -115,11 +125,11 @@ namespace {
     for (unsigned i = 0; i < 3; ++i) {
       const auto waiting = value.tick(1820 + i * 10, i);
       require(waiting.ready, "A brief missing present discarded fresh numerical evidence");
-      close(waiting.H, 1 / value.t[i], 0, "A depth gap erased established numeric state");
+      close(waiting.H, expected_gain(value.t[i]), expected_gain(value.t[i]) * 2e-7, "A depth gap erased established numeric state");
     }
     for (unsigned i = 0; i < 3; ++i) {
       require(value.tick(1860 + i * 10, i, true).ready, "Fresh post-gap capture failed to recover member");
-      close(value.last[i].H, 1 / value.t[i], 0, "Recovery recalibrated an established member");
+      close(value.last[i].H, expected_gain(value.t[i]), expected_gain(value.t[i]) * 2e-7, "Recovery recalibrated an established member");
     }
     require(value.blend == 1, "A brief missing present restarted established strength");
 
@@ -140,7 +150,7 @@ namespace {
     value.roster.count = 1;
     ++value.roster.routing_epoch;
     require(value.tick(1810, 0).ready, "Same-source pin discarded its calibration");
-    close(value.last[0].H, 8, 0, "Same-source pin changed H");
+    close(value.last[0].H, expected_gain(.125f), expected_gain(.125f) * 2e-7, "Same-source pin changed H");
     auto omitted = value.current(1);
     auto unadmitted = capture(omitted, 1000000, 1820, .5f);
     require(value.controller.update(value.roster, omitted, &unadmitted, 1820).reason == status::source_mismatch,
@@ -150,7 +160,7 @@ namespace {
     require(value.tick(1830, 0).ready, "Same-source unpin discarded retained calibration");
     require(value.tick(1840, 1).ready && value.last[1].calibration_samples == 4,
       "Temporary capture-slot omission reinitialized a still-live exact source");
-    close(value.last[1].H, 4, 0, "Returning physical source inherited another source's gain");
+    close(value.last[1].H, expected_gain(.25f), expected_gain(.25f) * 2e-7, "Returning physical source inherited another source's gain");
     close(value.last[1].t0, .25, 0, "Returning source spent inactive-time zero-plane credit");
     require(value.tick(1850, 1, true).ready, "Ignored high-ID omitted packet poisoned fresh reentry");
 
@@ -187,7 +197,7 @@ namespace {
     const auto held = value.tick(4010, 1);
     require(held.ready && held.reason == status::holding_reference && held.calibration_samples == 4,
       "Expired omitted history either restarted initialization or pretended its old target was fresh");
-    close(held.H, 4, 0, "Omission changed the retained source's scale");
+    close(held.H, expected_gain(.25f), expected_gain(.25f) * 2e-7, "Omission changed the retained source's scale");
     close(held.t0, .25, 0, "Omission changed the retained source's zero");
     const auto duplicate = value.tick(4020, 1);
     require(duplicate.reason == status::holding_reference, "Duplicate packet refreshed an expired target");
@@ -196,7 +206,8 @@ namespace {
     require(resumed.ready && resumed.reason == status::ready && resumed.calibration_samples == 4,
       "Fresh target forced an initialized retained source through startup again");
     close(resumed.H, held.H, 0, "Fresh reentry spent omitted capture-time gain credit");
-    close(resumed.t0, held.t0, 0, "Fresh reentry spent omitted motion-time credit");
+    close(resumed.t0, held.t0, 0, "Fresh reentry spent omitted time on zero adaptation");
+    close(resumed.target_t0, .125, 0, "Fresh reentry lost the new midpoint target");
     require(!value.missing(4040).ready, "Held numerical history fabricated missing current depth");
   }
 
@@ -233,7 +244,7 @@ namespace {
       value.roster.members[1].source.native = 0x200 + i;
       value.roster.members[1].source.lifetime = 500 + i;
       require(value.tick(1810 + i * 10, 0).ready, "Cache pressure evicted an admitted initialized source");
-      close(value.last[0].H, 8, 0, "Cache pressure changed the admitted source's H");
+      close(value.last[0].H, expected_gain(.125f), expected_gain(.125f) * 2e-7, "Cache pressure changed the admitted source's H");
     }
     unsigned retained = 0;
     for (const auto &basis : value.controller.history_sources()) retained += basis.source.native != 0;
@@ -247,7 +258,7 @@ namespace {
     value.roster.members[0].source.lifetime = 900;
     value.roster.members[1] = first;
     require(value.tick(2000, 1, false, false).ready, "Roster order evicted the later admitted peer");
-    close(value.last[1].H, 8, 0, "Roster order changed a retained source's independent basis");
+    close(value.last[1].H, expected_gain(.125f), expected_gain(.125f) * 2e-7, "Roster order changed a retained source's independent basis");
   }
 
   void incomplete_history_expires_while_capture_slot_is_omitted() {
@@ -372,7 +383,7 @@ namespace {
         const auto state = value.controller.evaluate(current, captured_at + 20);
         require(state.calibration_samples == i + 1 && state.ready == (i == 3),
           "Missing selected depth discarded an exact off-turn asynchronous measurement");
-        if (state.ready) close(state.H, 1 / value.t[member], 0, "Off-turn sources shared their raw coordinate scales");
+        if (state.ready) close(state.H, expected_gain(value.t[member]), expected_gain(value.t[member]) * 2e-7, "Off-turn sources shared their raw coordinate scales");
       }
     }
     auto current = value.current(0);
@@ -390,10 +401,15 @@ namespace {
     const auto real = capture(current, ++value.id, 800, .25f);
     value.controller.observe(real, 800);
     const auto refined = value.controller.evaluate(current, 800);
-    require(refined.ready && refined.H < 8 && refined.H > 4 && refined.target_H == 4 && refined.t0 > .125f,
+    require(refined.ready && refined.H <= expected_gain(.125f) &&
+        refined.H >= expected_gain(.125f) / std::exp2(.02) - 1e-6 &&
+        std::abs(refined.target_H - expected_gain(.25f)) < 1e-6,
       "Future or wrong-generation packet poisoned ordinary sample admission");
-    close(double(refined.H) * refined.t0, 1, 2e-7,
-      "Off-turn observation left scale detached from the updated zero");
+    require(refined.t0 > .125 && refined.t0 < .25 && refined.target_t0 == .25 &&
+      refined.H*(refined.t0-.125)/test_normalization <= .02 + 2e-7,
+      "Fresh source midpoint did not use bounded zero adaptation");
+    require(refined.reason == status::ready,
+      "Valid lower-ID observation failed to refresh range evidence");
 
     auto malformed = capture(value.current(0), ++value.id, 850, .25f);
     ++malformed.readback_source.lifetime;
@@ -455,32 +471,37 @@ namespace {
     close(value.blend, 1, 0, "Moving ready scene repeatedly restarted reentry");
   }
 
-  void rotating_members_follow_their_current_zero_through_room_wall_room() {
+  void rotating_members_adapt_to_live_room_wall_ranges() {
     fixture value;
     value.rotate_until(1800);
-    for (const float center : {.0001f, .75f, .25f}) {
-      const auto end = value.now + 12000;
+    for (const float center : {.0001f, .5f, .25f}) {
+      const auto end = value.now + 30000;
       for (auto time = value.now + 10; time <= end; time += 10) {
         const unsigned index = unsigned(time / 10 % value.roster.count);
         value.t[index] = center;
         const bool take = time >= value.due[index];
         if (take) value.due[index] = time + 250;
+        const auto previous = value.last[index];
         const auto state = value.tick(time, index, take);
         require(state.ready && state.calibration_samples == 4,
           "Room/wall changes recalibrated an established rotating source");
-        close(double(state.H) * state.t0, 1, 2e-7,
-          "Room/wall movement detached scale from the current zero plane");
-        // Scene changes legitimately change separation of fixed raw depths.
-        // Equal ratios to the CURRENT zero must still give equal warp fields.
-        const double at_half_zero = state.referenceZPD * state.H * (state.t0 - .5 * state.t0);
-        close(at_half_zero, .5 * state.referenceZPD, 1e-8,
-          "Equal relative depth changed separation as the zero moved");
+        require(state.H <= previous.H * std::exp2(.03) + 1e-3,
+          "Rotating source gained more than its own elapsed-time allowance");
+        const auto &packet = value.latest[index];
+        const auto range = sunshine_scene_gain::decode_range(packet.raw, false, false, 0, 0,
+          packet.metadata.direction == orientation::normal ? 1.f : 0.f,
+          packet.metadata.direction == orientation::normal ? -1.f : 1.f);
+        const double target_zero = range.minimum*.5 + range.maximum*.5;
+        close(state.target_t0, target_zero, 0., "Rotating source lost its own observed midpoint target");
+        require(std::abs(double(state.t0)-target_zero) <= std::abs(double(previous.t0)-target_zero) + 6e-8 &&
+          state.H*std::abs(double(state.t0)-previous.t0)/test_normalization <= .03 + 2e-7,
+          "Rotating source zero moved away from its target or exceeded its own time budget");
       }
       for (unsigned i = 0; i < value.roster.count; ++i) {
-        close(value.last[i].t0, center, .001,
-          "Rotating sources failed to converge to the fresh scene zero");
-        close(double(value.last[i].H) * center, 1, .003,
-          "Rotating source scale stayed at its startup value after zero converged");
+        close(value.last[i].H, value.last[i].target_H, 0,
+          "Rotating source stayed capped by an obsolete startup gain");
+        close(value.last[i].target_H, expected_gain(center), .001 * expected_gain(center),
+          "Rotating source did not derive its target from the current range");
       }
     }
     close(value.blend, 1, 0, "Room/wall rotation restarted the shared reentry");
@@ -503,7 +524,7 @@ int main() {
     independent_observation_survives_missing_presents_and_offturn_sources();
     failed_authority_sync_closes_admission_and_presentation_errors_do_not_erase_evidence();
     same_coordinate_moving_scene_has_bounded_member_phase_difference();
-    rotating_members_follow_their_current_zero_through_room_wall_room();
+    rotating_members_adapt_to_live_room_wall_ranges();
     std::puts("Raw scene pool: 15 cases passed");
     return 0;
   } catch (const std::exception &error) {

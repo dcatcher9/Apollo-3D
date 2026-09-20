@@ -5,6 +5,8 @@
 #include "test_depth3d_runtime.cpp"
 #undef main
 #include "game3d_renderer.h"
+#include "test_game3d_debug_dump_runtime.h"
+#include "test_game3d_budget.h"
 
 namespace {
   struct native11_case {
@@ -64,6 +66,7 @@ namespace {
     observed.inject_depth = true;
     observed.depth_ready_uniforms = {fixture.uniform("Sunshine_DepthReady")};
     sunshine_game3d::render_parameters p;
+    p.disparity_limit_uv = .04f; // Unclipped parity; default-cap regressions below.
     p.depth_ready = p.camera_ready = 1; p.coordinate_basis = 1;
     p.depth_scale = 128; p.strength_blend = 1; p.projection = {0, 1}; p.convergence = {.05f, 1.f / 128.f};
     fixture.set_int("Sunshine_CameraCoordinateBasis", p.coordinate_basis);
@@ -100,6 +103,7 @@ namespace {
       require(entry.path().extension() != ".fx", "D3D11 native phase retains installed FX");
     const auto effects = observed.renders;
     sunshine_game3d::renderer renderer;
+    sunshine_game3d_test::dump_fixture dump;
     auto *queue = observed.runtime->get_command_queue();
     const api::resource backbuffer{reinterpret_cast<std::uint64_t>(fixture.backbuffer.p)};
     require(renderer.configure(observed.runtime, backbuffer, static_cast<api::color_space>(fixture.color)), "D3D11 native renderer configure failed");
@@ -109,7 +113,15 @@ namespace {
       p.strength = test.strength; p.depth_view = test.view; p.depth_ready = test.ready;
       fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
       require(renderer.render(queue->get_immediate_command_list(), backbuffer, test.ready ? observed.depth_view : api::resource_view{}, p), "D3D11 native renderer rejected frame");
-      queue->flush_immediate_command_list(); renderer.finish_present(); queue->wait_idle();
+      const bool dump_case = std::strcmp(test.name,"strength50")==0 || std::strcmp(test.name,"depth-unavailable")==0;
+      if (dump_case) dump.begin(observed.runtime,renderer,p,test.ready ? observed.depth_view : api::resource_view{},false,
+        static_cast<api::color_space>(fixture.color));
+      queue->flush_immediate_command_list(); renderer.finish_present();
+      if (dump_case) dump.submitted(observed.runtime);
+      queue->wait_idle();
+      if (dump_case) dump.verify(observed.runtime,[&](api::resource texture,bool) {
+        return fixture.read(reinterpret_cast<ID3D11Texture2D *>(texture.handle));
+      }, directory / (std::string("dump-") + test.name));
       const auto output = renderer.output();
       require(output.handle != 0, "D3D11 native renderer output missing");
       com_ptr<ID3D11Texture2D> texture;
@@ -137,6 +149,34 @@ namespace {
       require(maximum <= (fixture.color == 1 ? 1.01 / 1023 : .002), "D3D11 native/FX parity exceeded export quantization");
       require(fixture.read(fixture.backbuffer.p) == source, "D3D11 native renderer changed mono game color");
       ++index;
+    }
+    const auto original_depth = fixture.read(fixture.depth.p);
+    for (const auto &test : sunshine_game3d_test::budget_cases()) {
+      const auto parameters = sunshine_game3d_test::budget_parameters(test);
+      fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
+      require(renderer.render(queue->get_immediate_command_list(), backbuffer, observed.depth_view, parameters),
+        "D3D11 budget renderer rejected frame");
+      const bool dump_case = std::strcmp(test.name, "strength100") == 0;
+      if (dump_case) dump.begin(observed.runtime, renderer, parameters, observed.depth_view, false,
+        static_cast<api::color_space>(fixture.color));
+      queue->flush_immediate_command_list();
+      renderer.finish_present();
+      if (dump_case) dump.submitted(observed.runtime);
+      queue->wait_idle();
+      if (dump_case) {
+        const auto output = directory / "dump-default-budget";
+        dump.verify(observed.runtime, [&](api::resource texture, bool) {
+          return fixture.read(reinterpret_cast<ID3D11Texture2D *>(texture.handle));
+        }, output);
+        sunshine_game3d_test::verify_budget_dump(output, parameters.disparity_limit_uv);
+      }
+      const auto diagnostics = renderer.diagnostics();
+      require(diagnostics.candidate.handle && diagnostics.final_field.handle, "D3D11 budget diagnostics missing");
+      sunshine_game3d_test::verify_budget_fields(test, width, height,
+        fixture.read(reinterpret_cast<ID3D11Texture2D *>(diagnostics.candidate.handle)),
+        fixture.read(reinterpret_cast<ID3D11Texture2D *>(diagnostics.final_field.handle)), report);
+      require(fixture.read(fixture.depth.p) == original_depth, "D3D11 budget renderer changed raw source depth");
+      require(fixture.read(fixture.backbuffer.p) == source, "D3D11 budget renderer changed mono source color");
     }
     require(observed.renders == effects, "An FX technique ran during native D3D11 phase");
     queue->wait_idle(); renderer.reset_after_runtime_drain();

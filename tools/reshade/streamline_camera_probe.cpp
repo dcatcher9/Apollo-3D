@@ -5,6 +5,8 @@
 #include "streamline_camera_version.h"
 #include "streamline_v1_resource_state.h"
 #include "upscaler_call_trace.h"
+#include "game3d_diagnostic_metadata.h"
+#include "game3d_ui_mask.h"
 
 #include <MinHook.h>
 #include <reshade.hpp>
@@ -25,6 +27,12 @@
 
 namespace sunshine_streamline {
   namespace {
+    namespace dump_metadata = sunshine_game3d::diagnostic;
+    dump_metadata::stamp dump_stamp(std::uint64_t epoch, std::uint64_t sequence, std::uint64_t tick,
+        std::uint32_t viewport = UINT32_MAX, std::uint64_t token = 0, std::uint64_t frame = 0,
+        bool numeric = false, std::uint64_t command = 0) {
+      return {sunshine_game3d::diagnostic_metadata_generation(), epoch, sequence, tick, token, frame, command, viewport, numeric};
+    }
     using abi = versioning::abi;
     enum class origin { global, frame, local };
     constexpr unsigned slot_count = 4, tag_limit = 32, chain_limit = 32, frame_count = 32;
@@ -203,7 +211,7 @@ namespace sunshine_streamline {
         (requested.load(std::memory_order_acquire) || source_requested.load(std::memory_order_acquire));
     }
     unsigned tag_index(std::uint32_t type) {
-      if (!requested.load(std::memory_order_acquire) && type != 0 && type != 48)
+      if (!requested.load(std::memory_order_acquire) && type != 0 && type != 48 && type != 53)
         return static_cast<unsigned>(observed_tag_types.size());
       for (unsigned i = 0; i != observed_tag_types.size(); ++i) if (observed_tag_types[i] == type) return i;
       return static_cast<unsigned>(observed_tag_types.size());
@@ -618,6 +626,7 @@ namespace sunshine_streamline {
       --fg_forwarding_depth;
       const DWORD outgoing = GetLastError();
       std::uint64_t retired_epoch{};
+      if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, GetTickCount64(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, result == 0);
       bool changed = false;
       if (sample && current(ticket) && TryAcquireSRWLockExclusive(&records_lock)) {
         if (current(ticket)) {
@@ -638,6 +647,10 @@ namespace sunshine_streamline {
       } else if (sample && current(ticket)) ++fg_loss_revision;
       if (retired_epoch) depth_capture::retire_source(sunshine_scene_depth::provider_kind::streamline,
         retired_epoch, (1ull << 63) | id);
+      if (sample && current(ticket) && (!valid || result != 0 || retired_epoch)) {
+        if (valid_viewport) sunshine_game3d::ui_mask::invalidate_scope(epoch, id);
+        else sunshine_game3d::ui_mask::invalidate_all();
+      }
       if (changed) {
         char text[256]{};
         std::snprintf(text, sizeof(text), "Sunshine Streamline frame generation: viewport=%u mode=%u generated_frames=%u supported=%u success=%u",
@@ -658,6 +671,7 @@ namespace sunshine_streamline {
       bool okay = true;
       for (unsigned i = 0; i != count; ++i) {
         const auto index = pending[i]; auto &slot = fg_targets[index];
+        dump_metadata::observe_module(slot.owner, "streamline", "DLSS Frame Generation options");
         void *trampoline{};
         // retain_fg_target already holds the target module, and discovery pins
         // this add-on. Hooks/trampolines remain pass-through after shutdown.
@@ -769,13 +783,21 @@ namespace sunshine_streamline {
         std::uint64_t frame, bool explicit_frame, std::uintptr_t token, std::uint64_t ticket,
         const frame_identity &identity, std::uint64_t serial, std::uint64_t loss, std::uint64_t entry_tick) {
       if (!current(ticket)) return;
-      const bool invalid_camera = decoded != decode_status::ok || camera.reset != 0 ||
+      const bool invalid_camera = decoded != decode_status::ok || camera.reset > 1 ||
         (explicit_frame && camera.not_rendering_game_frames != 0) || !validate(camera).valid();
       if (!TryAcquireSRWLockExclusive(&records_lock)) { dropped_observation(); return; }
       if (!current(ticket)) { ReleaseSRWLockExclusive(&records_lock); return; }
       auto &record = slot(viewport);
       if (serial < record.camera_serial) { ReleaseSRWLockExclusive(&records_lock); return; }
       if (invalid_camera) lose();
+      else if (camera.reset == 1) {
+        // Reset ends temporal history, not the validity of this frame's depth
+        // or projection. Retire prior leases immediately, then associate this
+        // camera with its own new revision. Never heal unrelated observation
+        // loss that occurred while the original constants call was in flight.
+        const auto previous_loss = loss_revision.fetch_add(1, std::memory_order_acq_rel);
+        if (previous_loss == loss) loss = previous_loss + 1;
+      }
       const auto camera_identity = identity.kind == frame_identity_kind::unavailable &&
           installed_abi == abi::v2_7_30 && token ?
         frame_identity{frame_identity_kind::v2_constants_call, serial, 0, token, false} : identity;
@@ -934,8 +956,9 @@ namespace sunshine_streamline {
       if (out.frame_correlated) {
         out.projection = validate(out.camera);
         if (out.decoded != decode_status::ok) out.status = evidence_status::rejected_constants;
-        else if (out.camera.reset == 1) out.status = evidence_status::camera_reset;
-        else if (!out.projection.valid() || out.camera.reset != 0 ||
+        else if (out.camera.reset == 1 && out.projection.valid() &&
+            out.status == evidence_status::source_associated_evaluation) out.status = evidence_status::camera_reset;
+        else if (!out.projection.valid() || out.camera.reset > 1 ||
             (identity.kind == frame_identity_kind::v1_numeric && out.camera.not_rendering_game_frames != 0))
           out.status = evidence_status::invalid_camera;
         else if (out.status == evidence_status::source_associated_evaluation && !has_depth) out.status = evidence_status::missing_depth;
@@ -1106,16 +1129,20 @@ namespace sunshine_streamline {
       const auto serial = sample ? ++call_sequence : 0;
       const auto loss = loss_revision.load(std::memory_order_acquire);
       const auto entry_tick = sample ? GetTickCount64() : 0;
+      const auto diagnostic = dump_stamp(ticket, serial, entry_tick, viewport, 0, frame, true);
       camera_data camera;
       decode_status decoded = decode_status::short_buffer;
       if (sample) {
         ++constant_calls;
-        abi_v1::constants copy;
-        if (read(&values, copy)) decoded = decode_v1_constants(&copy, sizeof(copy), camera);
+        abi_v1::constants copy{};
+        const bool readable = read(&values, copy);
+        if (readable) decoded = decode_v1_constants(&copy, sizeof(copy), camera);
+        if (diagnostic.session) dump_metadata::observe_sl_constants(diagnostic, copy, readable, decoded);
       }
       SetLastError(incoming);
       const bool result = original_constants_v1(values, frame, viewport);
       const DWORD outgoing = GetLastError();
+      if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result);
       if (sample && result) store_camera(viewport, camera, decoded, frame, true, 0, ticket, numeric_frame(frame), serial, loss, entry_tick);
       else if (sample && current(ticket)) lose();
       SetLastError(outgoing);
@@ -1130,6 +1157,8 @@ namespace sunshine_streamline {
       out.serial = sample ? ++call_sequence : 0;
       out.loss = loss_revision.load(std::memory_order_acquire);
       out.tick = sample ? GetTickCount64() : 0;
+      const auto diagnostic = dump_stamp(ticket, out.serial, out.tick, viewport);
+      if (sample && diagnostic.session) dump_metadata::observe_sl_tag_v1(diagnostic, resource, type, area);
       if (sample) {
         ++tag_calls;
         out.viewport = viewport;
@@ -1166,6 +1195,7 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const bool result = original_tag_v1(resource, type, viewport, area);
       const DWORD outgoing = GetLastError();
+      if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result);
       if (sample && result && out.count) store_tags(out);
       else if (sample && !result && current(ticket)) lose();
       SetLastError(outgoing);
@@ -1177,6 +1207,7 @@ namespace sunshine_streamline {
       // camera status for diagnostic queries rather than upgrading that evidence.
       switch (snapshot.status) {
         case evidence_status::source_associated_evaluation:
+        case evidence_status::camera_reset:
         case evidence_status::missing_constants:
         case evidence_status::rejected_constants:
         case evidence_status::invalid_camera: break;
@@ -1185,9 +1216,12 @@ namespace sunshine_streamline {
       if (!snapshot.epoch || !snapshot.sequence ||
           (snapshot.feature != 0 && !(snapshot.feature == 1000 && snapshot.tag_boundary)) ||
           snapshot.loss_revision != loss_revision.load(std::memory_order_acquire)) return false;
-      if (snapshot.frame_correlated && snapshot.decoded == decode_status::ok &&
-          (snapshot.camera.reset != 0 || (snapshot.frame.kind == frame_identity_kind::v1_numeric &&
-            snapshot.camera.not_rendering_game_frames != 0))) return false;
+      if (snapshot.frame_correlated && snapshot.decoded == decode_status::ok) {
+        const bool current_reset = snapshot.camera.reset == 1 && snapshot.projection.valid() &&
+          snapshot.status == evidence_status::camera_reset;
+        if ((snapshot.camera.reset != 0 && !current_reset) ||
+            (snapshot.frame.kind == frame_identity_kind::v1_numeric && snapshot.camera.not_rendering_game_frames != 0)) return false;
+      }
       if (!TryAcquireSRWLockShared(&records_lock)) return false;
       const bool associated = snapshot.epoch == epoch && token_current(snapshot.frame);
       ReleaseSRWLockShared(&records_lock);
@@ -1242,8 +1276,9 @@ namespace sunshine_streamline {
       value.source_frame_explicit = !snapshot.tag_boundary || tag.scope == tag_scope::explicit_frame;
       value.frame_generation_input = snapshot.tag_boundary;
       value.source_id = snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : 0;
-      const bool valid = snapshot.status == evidence_status::source_associated_evaluation &&
-        snapshot.projection.valid() && snapshot.camera.reset == 0 && tag.present && tag.supported &&
+      const bool valid = (snapshot.status == evidence_status::source_associated_evaluation ||
+          snapshot.status == evidence_status::camera_reset) &&
+        snapshot.projection.valid() && snapshot.camera.reset <= 1 && tag.present && tag.supported &&
         tag.value.viewport == snapshot.viewport && (tag.value.type == 0 || tag.value.type == 48);
       const bool direction = snapshot.frame_correlated && snapshot.decoded == decode_status::ok &&
         snapshot.camera.depth_inverted <= 1;
@@ -1356,9 +1391,11 @@ namespace sunshine_streamline {
           serial, loss_revision.load(std::memory_order_acquire));
       }
       const auto captured = sample ? nominate_depth_source(snapshot, true) : 0;
+      const auto diagnostic = dump_stamp(ticket, snapshot.sequence, GetTickCount64(), viewport, 0, frame, true, reinterpret_cast<std::uint64_t>(commands));
       SetLastError(incoming);
       const bool result = original_evaluate_v1(commands, feature, frame, viewport);
       const DWORD outgoing = GetLastError();
+      if (sample && diagnostic.session) dump_metadata::observe_sl_evaluation(diagnostic, feature, result);
       call_trace.finish(result);
       if (captured) depth_capture::finish(captured,
         result && current(ticket) && snapshot.loss_revision == loss_revision.load(std::memory_order_acquire),
@@ -1376,6 +1413,7 @@ namespace sunshine_streamline {
       const auto loss = loss_revision.load(std::memory_order_acquire);
       const auto identity = sample ? observed_frame(reinterpret_cast<std::uintptr_t>(&frame)) : frame_identity{};
       const auto entry_tick = sample ? GetTickCount64() : 0;
+      auto diagnostic = dump_stamp(ticket, serial, entry_tick, UINT32_MAX, reinterpret_cast<std::uintptr_t>(&frame), identity.numeric, identity.has_numeric);
       camera_data camera;
       decode_status decoded = decode_status::short_buffer;
       std::uint32_t id{};
@@ -1384,17 +1422,68 @@ namespace sunshine_streamline {
         ++constant_calls;
         abi_v2::constants copy{};
         constexpr auto prefix = offsetof(abi_v2::constants, motion_vectors_jittered) + 1;
-        if (read_bytes(&values, &copy, prefix)) decoded = decode_v2_constants(&copy, prefix, camera);
+        const bool readable = read_bytes(&values, &copy, prefix);
+        if (readable) decoded = decode_v2_constants(&copy, prefix, camera);
         valid_viewport = viewport_value(viewport, id);
+        diagnostic.viewport = valid_viewport ? id : UINT32_MAX;
+        if (diagnostic.session) {
+          const bool tail_read = decoded == decode_status::ok && copy.base.version == 2 &&
+            read_bytes(reinterpret_cast<const unsigned char *>(&values) + offsetof(abi_v2::constants, min_relative_linear_depth_object_separation),
+              &copy.min_relative_linear_depth_object_separation, sizeof(copy.min_relative_linear_depth_object_separation));
+          dump_metadata::observe_sl_constants(diagnostic, copy, readable, decoded, tail_read);
+        }
       }
       SetLastError(incoming);
       const auto result = original_constants_v2(values, frame, viewport);
       const DWORD outgoing = GetLastError();
+      if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result == 0);
       if (sample && result == 0 && valid_viewport)
         store_camera(id, camera, decoded, 0, false, reinterpret_cast<std::uintptr_t>(&frame), ticket, identity, serial, loss, entry_tick);
       else if (sample && current(ticket)) lose();
       SetLastError(outgoing);
       return result;
+    }
+    sunshine_game3d::ui_mask::attempt capture_fg_alpha(const batch &out, void *commands) {
+      namespace mask = sunshine_game3d::ui_mask;
+      if (!out.valid_viewport || !current(out.observation) ||
+          out.loss != loss_revision.load(std::memory_order_acquire) || !out.tags[6].present) return {};
+      frame_generation_snapshot fg;
+      if (!query_frame_generation(out.viewport, fg) || !fg.enabled ||
+          !mask::interested(fg.epoch, out.loss, out.viewport)) return {};
+      // Backbuffer (53) commonly arrives in a separate color-only call, after
+      // depth/HUDless tags. Its own live command/state/lifetime are authoritative;
+      // no camera, depth tag, dump request, or Present correlation is required.
+      const auto &tag = out.tags[6];
+      depth_capture::input input;
+      input.epoch = fg.epoch; input.sequence = out.serial; input.tick = out.tick;
+      input.viewport = out.viewport; input.observation_revision = out.loss;
+      input.source_id = (1ull << 63) | out.viewport;
+      input.frame_generation_input = true;
+      input.source_frame_generation = out.frame.generation;
+      input.source_frame_token = tag.token;
+      input.source_frame_numeric = out.frame.numeric;
+      input.source_frame_has_numeric = out.frame.has_numeric;
+      input.source_frame_explicit = tag.source == origin::frame;
+      input.resource.native = tag.supported ? tag.value.native_resource : 0;
+      input.resource.width = tag.value.resource_width; input.resource.height = tag.value.resource_height;
+      input.resource.area = {tag.value.area.left, tag.value.area.top, tag.value.area.width, tag.value.area.height};
+      input.native_state = tag.native_state;
+      input.proof = tag.state_requires_observation ? sunshine_scene_depth::state_proof::observed_nonzero :
+        sunshine_scene_depth::state_proof::declared;
+      input.valid_until = !tag.supported ? sunshine_scene_depth::lifetime::unsupported : tag.value.lifecycle == 0 ?
+        sunshine_scene_depth::lifetime::at_call : tag.value.lifecycle == 1 ? sunshine_scene_depth::lifetime::until_present :
+        sunshine_scene_depth::lifetime::until_evaluation;
+      input.force_snapshot = true;
+      depth_capture::record_diagnostic retained;
+      input.source = depth_capture::retain_source(input.resource.native, &retained);
+      input.source_present_generation = depth_capture::source_present_generation(input.source);
+      // Validate actual allocation size before recording, even if SL omitted
+      // the optional resource dimensions. Partial output extents are rejected.
+      if (input.source) { input.resource.width = retained.width; input.resource.height = retained.height; }
+      mask::boundary where;
+      where.source = input; where.command = reinterpret_cast<std::uint64_t>(commands);
+      where.tag_scope = tag.source == origin::frame ? 1u : 0u;
+      return mask::begin(where, input);
     }
     evaluation_snapshot capture_fg_tag(const batch &out, void *commands) {
       evaluation_snapshot snapshot;
@@ -1439,23 +1528,29 @@ namespace sunshine_streamline {
       const auto serial = sample ? ++call_sequence : 0;
       const auto loss = loss_revision.load(std::memory_order_acquire);
       const auto entry_tick = sample ? GetTickCount64() : 0;
+      const auto diagnostic = dump_stamp(ticket, serial, entry_tick, UINT32_MAX, 0, 0, false, reinterpret_cast<std::uint64_t>(commands));
+      if (sample && diagnostic.session) dump_metadata::observe_sl_tags_v2(diagnostic, viewport, tags, count, dump_metadata::tag_scope::global);
       batch out;
       if (sample) { ++tag_calls; out = read_tags(viewport, tags, count, origin::global, 0); }
       out.observation = ticket;
       out.serial = serial;
       out.loss = loss;
       out.tick = entry_tick;
+      const auto alpha = sample ? capture_fg_alpha(out, commands) : sunshine_game3d::ui_mask::attempt{};
       const auto snapshot = sample ? capture_fg_tag(out, commands) : evaluation_snapshot{};
       const auto captured = snapshot.tag_boundary ? nominate_depth_source(snapshot, false) : 0;
       SetLastError(incoming);
       const auto result = original_tag_v2(viewport, tags, count, commands);
       const DWORD outgoing = GetLastError();
+      if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result == 0);
       if (captured) depth_capture::finish(captured,
         result == 0 && current(ticket) && loss == loss_revision.load(std::memory_order_acquire),
         result == 0 ? depth_capture::capture_failure::evaluation_observation_changed : depth_capture::capture_failure::evaluation_failed);
       if (sample && result == 0 && out.count) store_tags(out);
       else if (sample && (result != 0 || !out.valid_viewport) && current(ticket)) lose();
       if (snapshot.tag_boundary) finish_evaluation(snapshot, result == 0, ticket);
+      sunshine_game3d::ui_mask::finish(alpha,
+        result == 0 && current(ticket) && loss == loss_revision.load(std::memory_order_acquire));
       SetLastError(outgoing);
       return result;
     }
@@ -1468,6 +1563,8 @@ namespace sunshine_streamline {
       const auto loss = loss_revision.load(std::memory_order_acquire);
       const auto identity = sample ? observed_frame(reinterpret_cast<std::uintptr_t>(&frame)) : frame_identity{};
       const auto entry_tick = sample ? GetTickCount64() : 0;
+      const auto diagnostic = dump_stamp(ticket, serial, entry_tick, UINT32_MAX, reinterpret_cast<std::uintptr_t>(&frame), identity.numeric, identity.has_numeric, reinterpret_cast<std::uint64_t>(commands));
+      if (sample && diagnostic.session) dump_metadata::observe_sl_tags_v2(diagnostic, viewport, tags, count, dump_metadata::tag_scope::frame);
       batch out;
       if (sample) { ++tag_calls; out = read_tags(viewport, tags, count, origin::frame, reinterpret_cast<std::uintptr_t>(&frame)); }
       out.observation = ticket;
@@ -1475,17 +1572,21 @@ namespace sunshine_streamline {
       out.loss = loss;
       out.frame = identity;
       out.tick = entry_tick;
+      const auto alpha = sample ? capture_fg_alpha(out, commands) : sunshine_game3d::ui_mask::attempt{};
       const auto snapshot = sample ? capture_fg_tag(out, commands) : evaluation_snapshot{};
       const auto captured = snapshot.tag_boundary ? nominate_depth_source(snapshot, false) : 0;
       SetLastError(incoming);
       const auto result = original_frame_tag_v2(frame, viewport, tags, count, commands);
       const DWORD outgoing = GetLastError();
+      if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result == 0);
       if (captured) depth_capture::finish(captured,
         result == 0 && current(ticket) && loss == loss_revision.load(std::memory_order_acquire),
         result == 0 ? depth_capture::capture_failure::evaluation_observation_changed : depth_capture::capture_failure::evaluation_failed);
       if (sample && result == 0 && out.count) store_tags(out);
       else if (sample && (result != 0 || !out.valid_viewport) && current(ticket)) lose();
       if (snapshot.tag_boundary) finish_evaluation(snapshot, result == 0, ticket);
+      sunshine_game3d::ui_mask::finish(alpha,
+        result == 0 && current(ticket) && loss == loss_revision.load(std::memory_order_acquire));
       SetLastError(outgoing);
       return result;
     }
@@ -1541,6 +1642,9 @@ namespace sunshine_streamline {
       const auto entry_tick = sample ? GetTickCount64() : 0;
       batch out;
       if (sample) out = read_local_inputs(inputs, count, reinterpret_cast<std::uintptr_t>(&frame));
+      const auto diagnostic = dump_stamp(ticket, serial, entry_tick, out.valid_viewport ? out.viewport : UINT32_MAX,
+        reinterpret_cast<std::uintptr_t>(&frame), identity.numeric, identity.has_numeric, reinterpret_cast<std::uint64_t>(commands));
+      if (sample && diagnostic.session) dump_metadata::observe_sl_inputs_v2(diagnostic, inputs, count);
       out.observation = ticket;
       out.serial = serial;
       out.loss = loss;
@@ -1557,6 +1661,10 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const auto result = original_evaluate_v2(feature, frame, inputs, count, commands);
       const DWORD outgoing = GetLastError();
+      if (sample && diagnostic.session) {
+        dump_metadata::finish_sl_call(diagnostic, result == 0);
+        dump_metadata::observe_sl_evaluation(diagnostic, feature, result == 0);
+      }
       call_trace.finish(result == 0);
       if (captured) depth_capture::finish(captured,
         result == 0 && current(ticket) && snapshot.loss_revision == loss_revision.load(std::memory_order_acquire),
@@ -1680,6 +1788,7 @@ namespace sunshine_streamline {
       // a delayed load remains eligible at the next existing discovery poll.
       HMODULE module{};
       if (!GetModuleHandleExW(0, L"sl.common.dll", &module)) return;
+      dump_metadata::observe_module(module, "streamline", "1.1.1 resource-state adapter");
       auto info = module_version(module);
       const bool supported = versioning::classify(info) == abi::v1_1_1;
       HMODULE pinned{};
@@ -1705,6 +1814,7 @@ namespace sunshine_streamline {
       }
       auto info = module_version(module);
       const abi version = versioning::classify(info);
+      dump_metadata::observe_module(module, "streamline", version == abi::v1_1_1 ? "1.1.1 observer" : version == abi::v2_7_30 ? "2.7.30 observer" : "unsupported observer ABI");
       targets functions{
         reinterpret_cast<void *>(GetProcAddress(module, "slSetConstants")),
         reinterpret_cast<void *>(GetProcAddress(module, "slSetTag")),
@@ -1829,6 +1939,7 @@ namespace sunshine_streamline {
     observing.store(false, std::memory_order_release);
     observation_generation.fetch_add(1, std::memory_order_acq_rel);
     // The shared capture owner retains GPU completion/retirement leases.
+    sunshine_game3d::ui_mask::invalidate_all();
     release_camera_records();
   }
 
@@ -2593,6 +2704,7 @@ namespace sunshine_streamline {
       return found;
     }
     void clear() {
+      sunshine_game3d::ui_mask::invalidate_all();
       observing.store(false, std::memory_order_release);
       if (minhook_initialized) {
         // No other thread exists in the fixture; production never does this.

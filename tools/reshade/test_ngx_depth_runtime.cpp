@@ -13,7 +13,7 @@ namespace ngx_fixture {
   struct parameters {
     ID3D12Resource *depth{};
     unsigned width{},height{},left{},top{},active_width{},active_height{};
-    int flags=8;
+    int flags=8,reset=0;
     bool evaluation_success{},provide_depth=true,provide_extent=true;
   };
   std::array<unsigned,16> handle_storage{};
@@ -53,8 +53,11 @@ NGX_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_D3D12_ReleaseFeature(void *ha
 NGX_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_Parameter_GetI(
     const void *parameters,const char *name,int *out) {
   ++ngx_fixture::getters;
-  if(!parameters || !name || !out || std::strcmp(name,"DLSS.Feature.Create.Flags")) return ngx_fixture::failure;
-  *out=static_cast<const ngx_fixture::parameters *>(parameters)->flags;
+  if(!parameters || !name || !out) return ngx_fixture::failure;
+  const auto &value=*static_cast<const ngx_fixture::parameters *>(parameters);
+  if(!std::strcmp(name,"DLSS.Feature.Create.Flags")) *out=value.flags;
+  else if(!std::strcmp(name,"Reset")) *out=value.reset;
+  else return ngx_fixture::failure;
   return ngx_fixture::success;
 }
 NGX_FIXTURE_EXPORT std::uint32_t __cdecl NVSDK_NGX_Parameter_GetUI(
@@ -531,8 +534,12 @@ namespace {
             static_cast<unsigned long long>(measured.metadata.sequence),static_cast<unsigned long long>(measured.metadata.source_id),
             unsigned(measured.projection.supplied),measured.projection.A,measured.projection.B,
             measured.projection.raw_scale,measured.projection.raw_bias);
-          for(unsigned y=7;y<11;++y)for(unsigned x=14;x<18;++x)
-            std::printf("%.9g%s",measured.raw[y*32+x],x==17 && y==10?"\n":",");
+          if (measured.width && measured.height && std::uint64_t(measured.width)*measured.height<=measured.raw.size()) {
+            const auto columns=std::min(measured.width,4u),rows=std::min(measured.height,4u);
+            const auto left_sample=(measured.width-columns)/2,top_sample=(measured.height-rows)/2;
+            for(unsigned y=0;y<rows;++y)for(unsigned x=0;x<columns;++x)
+              std::printf("%.9g%s",measured.raw[(top_sample+y)*measured.width+left_sample+x],x+1==columns && y+1==rows?"\n":",");
+          } else std::puts("unavailable");
           const auto original_bytes=read(selected->resource.p,selected->state);
           const auto witness_bytes=read(boundary_witness.p,D3D12_RESOURCE_STATE_COPY_DEST);
           const auto original_offset=(size_t(top+active_height/2)*selected->width+left+active_width/2)*4;
@@ -1767,6 +1774,147 @@ float ps(float4 position : SV_Position) : SV_Depth {
       require(producer_generation==4,"NGX producer queue retirement was not exercised across four native queue lifetimes");
       std::puts("PASS game-ordered separate NGX producer queue drives exact current 4K HDR depth and shader pixels across resets, missing-frame mono/recovery and four producer queue lifetimes");
     }
+    void check_pending_continuity() {
+      namespace wire = reshade_bridge;
+      require(cross_queue && complete_producer && retire_producer_recording,
+        "NGX continuity requires a genuine separate retired producer queue");
+      const auto set_foreground=reinterpret_cast<void (*)(HWND)>(GetProcAddress(
+        GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineSbsTestSetForeground"));
+      require(set_foreground,"NGX continuity requires the existing test foreground observer");
+      struct foreground_scope {void (*set)(HWND);~foreground_scope(){set(nullptr);}} foreground{set_foreground};
+      set_foreground(window);
+      struct mapping_guard {
+        HANDLE handle{};wire::shared_state_t *state{};
+        ~mapping_guard(){if(state)UnmapViewOfFile(state);if(handle)CloseHandle(handle);}
+      } mapping;
+      const auto mapping_name=std::wstring(wire::mapping_prefix)+std::to_wstring(GetCurrentProcessId());
+      mapping.handle=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,mapping_name.c_str());
+      require(mapping.handle,"NGX continuity cannot open actual exporter mapping");
+      mapping.state=static_cast<wire::shared_state_t *>(MapViewOfFile(mapping.handle,FILE_MAP_ALL_ACCESS,0,0,sizeof(wire::shared_state_t)));
+      require(mapping.state,"NGX continuity cannot map actual exporter state");
+      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&mapping.state->consumer_nonce),0x4e475850454e4449);
+      const auto read64=[](std::uint64_t &value){return std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&value),0,0));};
+      std::uint64_t last_publication{},generation{};
+      const auto output=[&] {
+        const auto before=InterlockedCompareExchange(reinterpret_cast<volatile LONG *>(&mapping.state->metadata_sequence),0,0);
+        require(!(before&1),"NGX exporter metadata was being changed after completed Present");
+        const auto metadata=mapping.state->metadata;MemoryBarrier();
+        require(before==InterlockedCompareExchange(reinterpret_cast<volatile LONG *>(&mapping.state->metadata_sequence),0,0) &&
+          wire::valid_metadata(metadata) && metadata.dxgi_format==10 && metadata.color_transfer==wire::transfer::scrgb &&
+          metadata.source_width==width && metadata.source_height==height,"NGX continuity export lost coherent HDR metadata");
+        unsigned index=wire::slot_count;std::uint64_t sequence{};
+        for(unsigned i=0;i<wire::slot_count;++i) {
+          const auto control=read64(mapping.state->slots[i].control),candidate=read64(mapping.state->slots[i].sequence);
+          if(wire::control_generation(control)==metadata.generation && wire::control_state(control)==wire::slot_state::ready && candidate>sequence)
+            {index=i;sequence=candidate;}
+        }
+        require(index<wire::slot_count && sequence>last_publication && (!generation || generation==metadata.generation),
+          "NGX continuity retained an old export instead of publishing current color");
+        auto &slot=mapping.state->slots[index];
+        const auto ready_control=wire::slot_control(metadata.generation,wire::slot_state::ready);
+        const auto reading_control=wire::slot_control(metadata.generation,wire::slot_state::reading);
+        require(std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&slot.control),reading_control,ready_control))==ready_control &&
+          read64(slot.sequence)==sequence,"NGX continuity could not claim its actual exported pixels");
+        const auto release=[&]{InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&slot.control),ready_control,reading_control);};
+        try {
+          com_ptr<ID3D12Fence> fence;com_ptr<ID3D12Resource> texture;
+          checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(metadata.ready_fence_handle),IID_PPV_ARGS(fence.put())),"Open NGX exported fence");
+          require(fence->GetCompletedValue()!=UINT64_MAX && fence->GetCompletedValue()>=sequence,"NGX export preceded GPU completion");
+          checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(metadata.texture_handles[index]),IID_PPV_ARGS(texture.put())),"Open NGX exported texture");
+          auto pixels=read(texture.p,D3D12_RESOURCE_STATE_COMMON);release();
+          require(pixels==read(exported.p),"NGX exporter did not publish the actual current shader result");
+          generation=metadata.generation;last_publication=sequence;return pixels;
+        } catch(...) {release();throw;}
+      };
+      com_ptr<ID3D12Resource> alternate_upload;
+      auto alternate_bytes=source_bytes;
+      for(size_t i=0;i<alternate_bytes.size();i+=8) {
+        const std::uint16_t red=0x4200,green=0x3400;
+        std::memcpy(alternate_bytes.data()+i,&red,2);std::memcpy(alternate_bytes.data()+i+2,&green,2);
+      }
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT alternate_footprint{};
+      fill_upload(alternate_upload,backbuffers[0]->GetDesc(),alternate_bytes.data(),alternate_footprint);
+      require(alternate_footprint.Footprint.RowPitch==source_footprint.Footprint.RowPitch,"Alternate NGX source color changed upload layout");
+      const auto change_color=[&]{std::swap(source_upload.p,alternate_upload.p);source_bytes.swap(alternate_bytes);};
+      for(bool reset : {false,true}) {
+        parameters.reset=0;
+        ngx_settle("NGX-continuity-fresh-seed");verify_ngx_depth();
+        const auto original_depth=read(reinterpret_cast<ID3D12Resource *>(captured.resource.handle));
+        // Full-resolution readback may exceed the age bound. Refresh the exact
+        // same scene once before starting the measured pending presentation.
+        ngx_tick("NGX-continuity-refresh-after-readback");
+        const auto previous=captured;
+        const auto scale=scalar("Sunshine_CameraDepthScale");const auto convergence=zero();
+        require(previous.ready && ready() && !previous.reused_depth,"NGX continuity seed is not a fresh stereo capture");
+        com_ptr<ID3D12Fence> gate;
+        checked(game->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(gate.put())),"Create NGX continuity producer gate");
+        HANDLE done=CreateEventW(nullptr,TRUE,FALSE,nullptr);require(done,"Create NGX continuity cleanup event");
+        std::atomic<bool> rescued{false};
+        std::thread watchdog([&]{if(WaitForSingleObject(done,5000)!=WAIT_OBJECT_0){rescued=true;gate->Signal(1);}});
+        const auto cleanup=[&] {
+          gate->Signal(1);SetEvent(done);watchdog.join();CloseHandle(done);
+          ngx_frame_observer={};producer_gated=false;independent_generated_present=false;parameters.reset=0;
+          render_tracked_depth=[&]{record_ngx_frame();};
+          checked(producer_completion->SetEventOnCompletion(producer_fence_value,completion_event),"Observe continuity producer cleanup");
+          require(WaitForSingleObject(completion_event,3000)==WAIT_OBJECT_0,"Continuity producer did not finish after fixture gate release");
+        };
+        try {
+          bool observed{},pending{};
+          ngx_frame_observer=[&] {
+            if(observed)return;
+            observed=true;const auto complete=producer_completion->GetCompletedValue();
+            pending=complete!=UINT64_MAX && complete<producer_fence_value;
+          };
+          independent_generated_present=true;producer_gated=true;parameters.reset=reset?1:0;
+          selected->pattern^=1u;change_color();
+          checked(producer_queue->Wait(gate.p,1),"Keep NGX producer pending across two independent presentations");
+          ngx_tick(reset?"NGX-pending-reset-mono":"NGX-pending-one-presentation-hold");
+          require(!rescued && observed && pending,"NGX acquisition waited for pending work or failed to exercise a real pending producer");
+          const auto first_output=output();
+          if(reset) {
+            require(!captured_ready && !ready() && !captured.reused_depth && first_output==check_current_mono(),
+              "A pending NGX reset reused old depth or old stereo");
+          } else {
+            require(captured_ready && ready() && captured.reused_depth && captured.frame_index==previous.frame_index+1 &&
+              captured.resource==previous.resource && captured.provided.sequence==previous.provided.sequence &&
+              captured.provided.tick==previous.provided.tick && captured.provided.feedback.revision==previous.provided.feedback.revision &&
+              scalar("Sunshine_CameraDepthScale")==scale && zero()==convergence && scalar("Sunshine_CameraStrengthBlend")==1.f,
+              "Known pending NGX copy did not retain exactly one completed depth/geometry pair");
+            require(read(reinterpret_cast<ID3D12Resource *>(captured.resource.handle))==original_depth,
+              "NGX pending hold sampled newer unfinished depth instead of the owned completed display");
+            float green_error{},stereo_difference{};
+            for(unsigned y=height/8;y<height*7/8;y+=std::max(1u,height/90))
+              for(unsigned x=width/8;x<width*7/8;x+=std::max(1u,width/160)) {
+                std::uint16_t expected{};std::memcpy(&expected,source_bytes.data()+(size_t(y)*width+x)*8+2,2);
+                for(unsigned eye=0;eye<2;++eye)
+                  green_error=std::max(green_error,std::abs(channel(first_output,eye*width+x,y,1)-half_float(expected)));
+                stereo_difference=std::max(stereo_difference,std::abs(channel(first_output,x,y,2)-channel(first_output,width+x,y,2)));
+              }
+            require(green_error<.003f && stereo_difference>.01f,"NGX hold exported old color or mono instead of current-color stereo");
+            std::printf("MEASURE NGX one-presentation hold current_color_error=%.9g stereo_difference=%.9g sequence=%llu depth_sequence=%llu\n",
+              green_error,stereo_difference,static_cast<unsigned long long>(last_publication),static_cast<unsigned long long>(captured.provided.sequence));
+            // Do not reset the gated producer allocator or issue another depth
+            // call. The same successful pending input spans a second Present.
+            require(GetTickCount64()>=previous.provided.tick &&
+              GetTickCount64()-previous.provided.tick<sunshine_scene_depth::maximum_source_age_ms,
+              "Fixture readback exhausted source freshness before the second-presentation bound could be tested");
+            render_tracked_depth=[]{};change_color();
+            ngx_tick("NGX-pending-second-presentation-mono");
+            require(!captured_ready && !ready() && !captured.reused_depth && output()==check_current_mono(),
+              "NGX held old depth beyond one subsequent native presentation");
+          }
+          require(!rescued && producer_completion->GetCompletedValue()<producer_fence_value,
+            "NGX display/export completion depended on releasing the pending producer");
+        } catch(...) {cleanup();throw;}
+        cleanup();
+        ngx_settle("NGX-continuity-fresh-recovery");verify_ngx_depth();
+        require(captured_ready && ready() && !captured.reused_depth && captured.provided.sequence>previous.provided.sequence,
+          "Fresh completed NGX input did not recover after bounded hold/reset");
+        require(output()==read(exported.p),"Recovered NGX did not export fresh stereo");
+        std::printf("PASS NGX continuity reset=%u: pending GPU remained gated through completed current-color exports; fresh depth recovered; watchdog_releases=0\n",unsigned(reset));
+      }
+    }
+
     void check_pending_cross_queue() {
       const auto previous_scale=scalar("Sunshine_CameraDepthScale");
       const auto previous_binding=selected_binding();
@@ -2081,6 +2229,12 @@ float ps(float4 position : SV_Position) : SV_Depth {
       query_frame=reinterpret_cast<frame_t>(GetProcAddress(module,"SunshineDepthTestFrame"));
       query_provider_status=reinterpret_cast<provider_status_t>(GetProcAddress(module,"SunshineDepthTestProviderStatus"));
       require(manual && recenter && query_frame && query_provider_status,"NGX fixture requires passive frame/UI observation adapters");
+      if(sunshine_camera_fixture::flag("SUNSHINE_NGX_PENDING_CONTINUITY_TEST")) {
+        // Exercise the actual FX reference and exporter callback path in this
+        // existing fixture. Native-only rendering has its separate fixture.
+        const auto set_enabled=reinterpret_cast<BOOL (*)(api::effect_runtime *,BOOL)>(GetProcAddress(module,"SunshineGame3DTestSetEnabled"));
+        require(set_enabled && set_enabled(observed.runtime,FALSE),"Pending NGX fixture could not select its explicit FX reference path");
+      }
       reshade::register_event<reshade::addon_event::reshade_render_technique>(observe_ngx_source);
       set_int("Depth_Map_View",0);set_float("Depth_Adjustment",100);set_float("Sharpen_Power",0);
       find_texture("DoubleTex",exported,width*2,DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -2121,6 +2275,13 @@ float ps(float4 position : SV_Position) : SV_Depth {
       }
       if(cross_queue && !complete_producer) {
         run_cross_queue_async();
+        render_tracked_depth={};
+        reshade::unregister_event<reshade::addon_event::reshade_render_technique>(observe_ngx_source);
+        reshade::unregister_event<reshade::addon_event::reset_command_list>(observe_reset);
+        return;
+      }
+      if(sunshine_camera_fixture::flag("SUNSHINE_NGX_PENDING_CONTINUITY_TEST")) {
+        check_pending_continuity();
         render_tracked_depth={};
         reshade::unregister_event<reshade::addon_event::reshade_render_technique>(observe_ngx_source);
         reshade::unregister_event<reshade::addon_event::reset_command_list>(observe_reset);

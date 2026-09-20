@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include "scene_depth_source.h"
+#include "game3d_diagnostic_metadata.h"
 #include <Windows.h>
 #include <cstdint>
 
@@ -34,6 +35,9 @@ namespace sunshine_ngx {
   struct evaluation {
     std::uint64_t epoch{}, ticket{}, source_id{};
     bool observed{}; // Confirmed feature, even when this frame's metadata fails.
+    // Preserve the entire API-call identity through the original evaluation;
+    // rebuilding only session/sequence loses the producing command list.
+    sunshine_game3d::diagnostic::stamp diagnostic_observation {};
   };
   evaluation before_evaluate(HMODULE owner, const parameter_api &api, std::uint64_t command,
     const void *handle, const void *parameters);

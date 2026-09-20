@@ -61,6 +61,10 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/reshade_bridge.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_cursor.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_cursor.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_debug_dump.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_debug_dump.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_debug_preview.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_debug_preview.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_wgc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/foreground_window_region.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/foreground_window_region.cpp"
@@ -128,3 +132,11 @@ if(SUNSHINE_ENABLE_TRAY)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/third-party/tray/src/tray_windows.c")
 endif()
+
+# Same CPU-only preview publisher as live Game 3D dumps, for previously captured packages.
+add_executable(preview_game3d_dump EXCLUDE_FROM_ALL
+        "${CMAKE_SOURCE_DIR}/tools/reshade/preview_game3d_dump.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_debug_preview.cpp")
+set_target_properties(preview_game3d_dump PROPERTIES CXX_STANDARD 23 LINK_SEARCH_START_STATIC 1)
+target_include_directories(preview_game3d_dump PRIVATE "${CMAKE_SOURCE_DIR}")
+target_link_libraries(preview_game3d_dump PRIVATE nlohmann_json::nlohmann_json ole32 windowscodecs)

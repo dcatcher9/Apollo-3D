@@ -17,7 +17,12 @@ namespace sunshine_projection_depth {
     std::uint64_t id{}, capture_ms{};
     domain logical_domain;
     coefficients projection;
+    // Legacy point-only fixture input. Live captures carry full-image moments
+    // decoded with this exact projection; extrema constrain safety separately.
     std::array<float, grid_width * grid_height> raw{};
+    bool range_supplied{}, range_valid{};
+    float range_min{}, range_max{};
+    sunshine_depth_statistics::moments moments;
     sunshine_scene_feedback::sample feedback;
   };
   enum class center_status {
@@ -26,7 +31,7 @@ namespace sunshine_projection_depth {
   };
   inline const char *name(center_status value) noexcept {
     switch (value) {
-      case center_status::waiting_for_center: return "waiting_for_center";
+      case center_status::waiting_for_center: return "waiting_for_depth_range";
       case center_status::ready: return "ready";
       case center_status::holding: return "holding";
       case center_status::invalid_domain: return "invalid_domain";
@@ -45,15 +50,20 @@ namespace sunshine_projection_depth {
     double target_K{};
     unsigned calibration_samples{};
     sunshine_scene_gain::refinement learning{};
+    bool limited{};
+    sunshine_scene_gain::depth_range depth_statistics{};
+    bool has_depth_statistics{};
+    double target_q0{};
   };
 
   // One zero-plane state per authenticated logical viewport/unit domain, not
   // per rotating depth resource. The caller proves sample/source association
   // and current capture readiness independently. Camera data reconstructs q;
-  // one shared policy tracks q0 and derives K=1/q0. Current A/B reconstruct
+  // one shared policy tracks nearest-depth gain and the observed range midpoint. Current A/B reconstruct
   // current pixels exactly, without interpolating camera coefficients.
   class controller {
   public:
+    void configure(sunshine_scene_gain::limits budget) noexcept { gain_.configure(budget); }
     void reset(domain logical_domain, std::uint64_t now_ms) noexcept {
       *this = {};
       domain_ = logical_domain;
@@ -88,25 +98,14 @@ namespace sunshine_projection_depth {
         gain_.invalidate();
         return gain_.initialized() ? center_status::holding : center_status::waiting_for_center;
       }
-      double sum = 0.0;
-      unsigned count = 0;
-      for (unsigned y=7; y<11; ++y) for (unsigned x=14; x<18; ++x) {
-        const float raw = value.raw[y*grid_width+x];
-        // Exact hardware endpoints are ambiguous clear values without per-cell
-        // written evidence. Exclude them only from the comfort target; rendered
-        // scene depths remain unchanged.
-        if (raw == value.projection.raw_min || raw == value.projection.raw_max) continue;
-        float q = 0;
-        if (!inverse_distance(value.projection, raw, q) || !(q > 0.f)) continue;
-        sum += q;
-        ++count;
-      }
-      if (!count) {
+      const auto range = sunshine_scene_gain::decode_range(value.raw, value.range_supplied,
+        value.range_valid, value.range_min, value.range_max, value.projection.shader_A,
+        value.projection.inverseB, value.projection.raw_min, value.projection.raw_max, value.moments);
+      if (!range.valid()) {
         gain_.invalidate();
         return center_status::invalid_depth;
       }
-      const double center = sum/count;
-      const auto gain_status = gain_.observe(center, value.capture_ms, value.feedback);
+      const auto gain_status = gain_.observe(range, value.capture_ms, value.feedback);
       if (gain_status == sunshine_scene_gain::status::unsupported) {
         return center_status::unsupported_shader_domain;
       }
@@ -138,8 +137,11 @@ namespace sunshine_projection_depth {
       return true;
     }
     center_output output(center_status reason) const noexcept {
-      return {gain_.initialized(), reason == center_status::ready || reason == center_status::holding,
-        reason, gain_.zero(), gain_.value(), gain_.target(), gain_.samples(), gain_.learning()};
+      center_output out{gain_.initialized(), reason == center_status::ready || reason == center_status::holding,
+        reason, gain_.zero(), gain_.value(), gain_.target(), gain_.samples(), gain_.learning(), gain_.limited()};
+      out.has_depth_statistics = gain_.depth_statistics(out.depth_statistics);
+      out.target_q0 = gain_.target_zero();
+      return out;
     }
     domain domain_;
     std::uint64_t wall_ms_{}, capture_floor_ms_{}, last_id_{}, last_capture_ms_{};

@@ -2,12 +2,16 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <future>
 #include <gtest/gtest.h>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <src/nvenc/nvenc_base.h>
+#include <src/video_session_recovery.h>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -94,6 +98,7 @@ namespace {
       bool input_owned;
       int open_calls;
       int map_calls;
+      int submit_calls;
       int frame_wait_calls;
       int flush_wait_calls;
       int lock_calls;
@@ -117,6 +122,7 @@ namespace {
         input_owned,
         open_calls,
         map_calls,
+        submit_calls,
         frame_wait_calls,
         flush_wait_calls,
         lock_calls,
@@ -174,6 +180,10 @@ namespace {
     int lock_failures = 0;
     int unlock_failures = 0;
     int unmap_failures = 0;
+    int frame_timeouts_remaining = 0;
+    int flush_timeouts_remaining = 0;
+    std::optional<nvenc::nvenc_event_wait_result> next_frame_wait_result;
+    std::chrono::milliseconds extra_frame_timeout_elapsed {0};
 
   protected:
     bool init_library() override {
@@ -199,7 +209,12 @@ namespace {
       return &flush_token;
     }
 
-    bool wait_for_async_event(std::uint32_t timeout_ms) override {
+    std::chrono::steady_clock::time_point async_wait_clock_now() const override {
+      std::lock_guard lock(mutex);
+      return fake_now;
+    }
+
+    nvenc::nvenc_event_wait_result wait_for_async_event(std::uint32_t timeout_ms) override {
       std::unique_lock lock(mutex);
       ++frame_wait_calls;
       frame_wait_timeouts.push_back(timeout_ms);
@@ -208,13 +223,28 @@ namespace {
       EXPECT_TRUE(picture_pending);
       if (frame_event_consumed) {
         ADD_FAILURE() << "An auto-reset picture event cannot be consumed twice";
-        return true;  // Report the ownership error without hanging teardown.
+        return {nvenc::nvenc_event_wait_status::ready};  // Report the ownership error without hanging teardown.
       }
-      if (!stream_wait_returned && ((defer_frame && !frame_released) || (submission_status == NV_ENC_ERR_NEED_MORE_INPUT && !eos_submitted))) {
-        stream_wait_returned = true;
-        EXPECT_EQ(timeout_ms, 100u);
+      if (next_frame_wait_result) {
+        const auto result = *std::exchange(next_frame_wait_result, std::nullopt);
+        if (result.status == nvenc::nvenc_event_wait_status::timeout) {
+          fake_now += std::chrono::milliseconds(timeout_ms) + extra_frame_timeout_elapsed;
+        }
+        if (result.status != nvenc::nvenc_event_wait_status::ready) {
+          operations.emplace_back(result.status == nvenc::nvenc_event_wait_status::timeout ? "frame-timeout" : "frame-wait-failed");
+          return result;
+        }
+      }
+      if (frame_timeouts_remaining > 0) {
+        --frame_timeouts_remaining;
+        fake_now += std::chrono::milliseconds(timeout_ms) + extra_frame_timeout_elapsed;
         operations.emplace_back("frame-timeout");
-        return false;
+        return {nvenc::nvenc_event_wait_status::timeout, 0x102};
+      }
+      if (!eos_submitted && ((defer_frame && !frame_released) || submission_status == NV_ENC_ERR_NEED_MORE_INPUT)) {
+        fake_now += std::chrono::milliseconds(timeout_ms) + extra_frame_timeout_elapsed;
+        operations.emplace_back("frame-timeout");
+        return {nvenc::nvenc_event_wait_status::timeout, 0x102};
       }
       if (defer_frame && !frame_released) {
         teardown_frame_wait_entered = true;
@@ -230,10 +260,10 @@ namespace {
       frame_event_consumed = true;
       frame_completed = true;
       operations.emplace_back("frame-ready");
-      return true;
+      return {nvenc::nvenc_event_wait_status::ready};
     }
 
-    bool wait_for_flush_event(std::uint32_t) override {
+    nvenc::nvenc_event_wait_result wait_for_flush_event(std::uint32_t timeout_ms) override {
       std::unique_lock lock(mutex);
       ++flush_wait_calls;
       EXPECT_TRUE(flush_registered);
@@ -241,6 +271,16 @@ namespace {
       EXPECT_FALSE(picture_pending);
       EXPECT_FALSE(bitstream_locked);
       EXPECT_FALSE(input_mapped);
+      EXPECT_TRUE(event_registered);
+      EXPECT_TRUE(bitstream_owned);
+      EXPECT_TRUE(input_owned);
+      if (flush_timeouts_remaining > 0) {
+        --flush_timeouts_remaining;
+        EXPECT_EQ(timeout_ms, 100u);
+        fake_now += std::chrono::milliseconds(timeout_ms);
+        operations.emplace_back("flush-timeout");
+        return {nvenc::nvenc_event_wait_status::timeout, 0x102};
+      }
       if (defer_flush && !flush_released) {
         flush_wait_entered = true;
         condition.notify_all();
@@ -252,11 +292,12 @@ namespace {
       }
       flush_completed = true;
       operations.emplace_back("flush-ready");
-      return true;
+      return {nvenc::nvenc_event_wait_status::ready};
     }
 
   private:
-    std::mutex mutex;
+    mutable std::mutex mutex;
+    std::chrono::steady_clock::time_point fake_now {};
     std::condition_variable condition;
     int flush_token = 0;
     bool flush_registered = false;
@@ -274,12 +315,12 @@ namespace {
     bool frame_released = false;
     bool flush_released = false;
     bool destroy_released = false;
-    bool stream_wait_returned = false;
     bool teardown_frame_wait_entered = false;
     bool flush_wait_entered = false;
     bool destroy_entered = false;
     int open_calls = 0;
     int map_calls = 0;
+    int submit_calls = 0;
     int frame_wait_calls = 0;
     int flush_wait_calls = 0;
     int lock_calls = 0;
@@ -469,6 +510,7 @@ namespace {
       EXPECT_FALSE(probe.picture_pending);
       EXPECT_EQ(params->inputBuffer, encoder);
       EXPECT_EQ(params->completionEvent, probe.async_event_handle);
+      ++probe.submit_calls;
       probe.operations.emplace_back("submit");
       if (probe.submission_status == NV_ENC_SUCCESS || probe.submission_status == NV_ENC_ERR_NEED_MORE_INPUT) {
         probe.accepted_picture = true;
@@ -541,10 +583,17 @@ namespace {
   class scoped_encoder_teardown {
   public:
     explicit scoped_encoder_teardown(nvenc_lifecycle_probe &probe):
-        probe(probe),
-        worker([&probe] {
-          probe.destroy_encoder();
-        }) {}
+        probe(probe) {
+      std::packaged_task<void()> teardown([&probe] {
+        probe.destroy_encoder();
+      });
+      completion = teardown.get_future();
+      worker = std::thread(std::move(teardown));
+    }
+
+    std::future<void> take_completion() {
+      return std::move(completion);
+    }
 
     ~scoped_encoder_teardown() {
       probe.release_all_waits();
@@ -553,6 +602,7 @@ namespace {
 
   private:
     nvenc_lifecycle_probe &probe;
+    std::future<void> completion;
     std::thread worker;
   };
 
@@ -615,7 +665,7 @@ TEST(NvencLifecycleTest, TimedOutPictureKeepsWholeOwnerUntilCompletionAndDestroy
 
   EXPECT_TRUE(probe.encode_frame(1, true).data.empty());
   const auto timed_out = probe.snapshot();
-  ASSERT_EQ(timed_out.frame_wait_timeouts, (std::vector<std::uint32_t> {100}));
+  ASSERT_EQ(timed_out.frame_wait_timeouts, (std::vector<std::uint32_t> {100, 25, 25, 25, 25, 25, 25}));
   EXPECT_TRUE(timed_out.input_mapped);
   EXPECT_TRUE(timed_out.picture_pending);
   EXPECT_EQ(timed_out.lock_calls, 0);
@@ -623,13 +673,19 @@ TEST(NvencLifecycleTest, TimedOutPictureKeepsWholeOwnerUntilCompletionAndDestroy
   // A second submission must not overwrite the retained surface or open another session.
   EXPECT_TRUE(probe.encode_frame(2, false).data.empty());
   EXPECT_EQ(probe.snapshot().map_calls, 1);
+  EXPECT_EQ(probe.snapshot().submit_calls, 1);
+  EXPECT_EQ(probe.snapshot().frame_wait_calls, 7);
   nvenc_lifecycle_probe replacement;
   EXPECT_FALSE(replacement.create());
   EXPECT_EQ(replacement.snapshot().open_calls, 0);
 
+  video::detail::encoder_recovery_t recovery;
+  const auto recovery_started = std::chrono::steady_clock::now();
   {
     scoped_encoder_teardown teardown(probe);
+    recovery.start(teardown.take_completion(), recovery_started);
     ASSERT_TRUE(probe.await_boundary(nvenc_lifecycle_probe::boundary_t::frame_wait));
+    EXPECT_EQ(recovery.poll(recovery_started), video::detail::encoder_recovery_t::state_t::pending);
     const auto waiting = probe.snapshot();
     EXPECT_TRUE(waiting.input_mapped);
     EXPECT_TRUE(waiting.picture_pending);
@@ -652,13 +708,175 @@ TEST(NvencLifecycleTest, TimedOutPictureKeepsWholeOwnerUntilCompletionAndDestroy
     EXPECT_EQ(destroying.flush_wait_calls, 1);
     EXPECT_EQ(destroying.sessions_destroyed, 0);
     // Driver destruction is still running even though its child resources have been released.
+    EXPECT_EQ(recovery.poll(recovery_started), video::detail::encoder_recovery_t::state_t::pending);
     EXPECT_FALSE(replacement.create());
     EXPECT_EQ(replacement.snapshot().open_calls, 0);
   }
 
   EXPECT_EQ(probe.snapshot().sessions_destroyed, 1);
+  EXPECT_EQ(recovery.poll(recovery_started), video::detail::encoder_recovery_t::state_t::ready);
   EXPECT_TRUE(replacement.create());
   EXPECT_EQ(replacement.snapshot().open_calls, 1);
+}
+
+TEST(NvencLifecycleTest, RepeatedPictureAndEosWaitTimeoutsReopenAdmissionAfterCleanup) {
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  // Seven waits exhaust the 250 ms streaming budget; two further timeouts exercise teardown's
+  // retry loop before picture completion. Every fake timeout advances the monotonic clock.
+  probe.frame_timeouts_remaining = 9;
+  probe.flush_timeouts_remaining = 2;
+  EXPECT_TRUE(probe.encode_frame(1, true).data.empty());
+
+  nvenc_lifecycle_probe replacement;
+  EXPECT_FALSE(replacement.create());
+  EXPECT_EQ(replacement.snapshot().open_calls, 0);
+
+  probe.destroy_encoder();
+  const auto cleaned = probe.snapshot();
+  EXPECT_EQ(cleaned.frame_wait_timeouts, (std::vector<std::uint32_t> {100, 25, 25, 25, 25, 25, 25, 100, 100, 100}));
+  EXPECT_EQ(cleaned.flush_wait_calls, 3);
+  EXPECT_EQ(cleaned.eos_calls, 1);
+  EXPECT_EQ(cleaned.lock_calls, 1);
+  EXPECT_EQ(cleaned.unlock_calls, 1);
+  EXPECT_EQ(cleaned.unmap_calls, 1);
+  EXPECT_EQ(cleaned.sessions_destroyed, 1);
+  EXPECT_FALSE(cleaned.input_mapped);
+  EXPECT_FALSE(cleaned.frame_event_registered);
+  EXPECT_FALSE(cleaned.flush_event_registered);
+  EXPECT_TRUE(replacement.create());
+  EXPECT_EQ(replacement.snapshot().open_calls, 1);
+}
+
+TEST(NvencLifecycleTest, SoftTimeoutCompletesTheSamePictureOnceAndAllowsTheNextFrame) {
+  for (const auto device_reason : {std::optional<std::int32_t> {}, std::optional<std::int32_t> {0}, std::optional<std::int32_t> {1}}) {
+    SCOPED_TRACE(device_reason ? std::to_string(*device_reason) : "device status unavailable");
+    nvenc_lifecycle_probe probe;
+    ASSERT_TRUE(probe.create());
+    probe.next_frame_wait_result = nvenc::nvenc_event_wait_result {nvenc::nvenc_event_wait_status::timeout, 0x102, 0, device_reason};
+
+    const auto recovered = probe.encode_frame(7, true);
+    ASSERT_FALSE(recovered.data.empty());
+    EXPECT_EQ(recovered.frame_index, 7u);
+    const auto completed = probe.snapshot();
+    EXPECT_EQ(completed.frame_wait_timeouts, (std::vector<std::uint32_t> {100, 25}));
+    EXPECT_EQ(completed.map_calls, 1);
+    EXPECT_EQ(completed.submit_calls, 1);
+    EXPECT_EQ(completed.lock_calls, 1);
+    EXPECT_EQ(completed.unlock_calls, 1);
+    EXPECT_EQ(completed.unmap_calls, 1);
+    EXPECT_EQ(std::count(completed.operations.begin(), completed.operations.end(), "frame-ready"), 1);
+    EXPECT_FALSE(completed.input_mapped);
+    EXPECT_FALSE(completed.picture_pending);
+    EXPECT_EQ(completed.eos_calls, 0);
+
+    const auto next = probe.encode_frame(8, false);
+    ASSERT_FALSE(next.data.empty());
+    EXPECT_EQ(next.frame_index, 8u);
+    const auto continued = probe.snapshot();
+    EXPECT_EQ(continued.map_calls, 2);
+    EXPECT_EQ(continued.submit_calls, 2);
+    EXPECT_EQ(continued.lock_calls, 2);
+    EXPECT_EQ(continued.unlock_calls, 2);
+    EXPECT_EQ(continued.unmap_calls, 2);
+    EXPECT_EQ(continued.open_calls, 1);
+    EXPECT_EQ(continued.frame_wait_timeouts, (std::vector<std::uint32_t> {100, 25, 100}));
+  }
+}
+
+TEST(NvencLifecycleTest, CompletionCanArriveAfterSeveralSoftTimeoutSlicesWithoutResubmission) {
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.frame_timeouts_remaining = 6;
+
+  EXPECT_FALSE(probe.encode_frame(1, true).data.empty());
+  const auto completed = probe.snapshot();
+  EXPECT_EQ(completed.frame_wait_timeouts, (std::vector<std::uint32_t> {100, 25, 25, 25, 25, 25, 25}));
+  EXPECT_EQ(completed.map_calls, 1);
+  EXPECT_EQ(completed.submit_calls, 1);
+  EXPECT_EQ(completed.lock_calls, 1);
+  EXPECT_EQ(completed.unmap_calls, 1);
+  EXPECT_FALSE(completed.input_mapped);
+  EXPECT_FALSE(completed.picture_pending);
+}
+
+TEST(NvencLifecycleTest, NativeWaitFailureDoesNotEnterSoftTimeoutRecovery) {
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  // WAIT_FAILED with ERROR_INVALID_HANDLE must stay a native wait error, not become a timeout.
+  probe.next_frame_wait_result = nvenc::nvenc_event_wait_result {nvenc::nvenc_event_wait_status::failed, 0xFFFFFFFF, 6, 0};
+
+  EXPECT_TRUE(probe.encode_frame(1, true).data.empty());
+  const auto failed = probe.snapshot();
+  EXPECT_EQ(failed.frame_wait_timeouts, (std::vector<std::uint32_t> {100}));
+  EXPECT_EQ(failed.map_calls, 1);
+  EXPECT_EQ(failed.submit_calls, 1);
+  EXPECT_EQ(failed.lock_calls, 0);
+  EXPECT_EQ(failed.unmap_calls, 0);
+  EXPECT_TRUE(failed.input_mapped);
+  EXPECT_TRUE(failed.picture_pending);
+
+  probe.destroy_encoder();
+  EXPECT_EQ(probe.snapshot().sessions_destroyed, 1);
+}
+
+TEST(NvencLifecycleTest, RemovedDeviceDoesNotEnterSoftTimeoutRecovery) {
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  // DXGI_ERROR_DEVICE_REMOVED remains terminal even when the event itself reports WAIT_TIMEOUT.
+  probe.next_frame_wait_result = nvenc::nvenc_event_wait_result {
+    nvenc::nvenc_event_wait_status::timeout,
+    0x102,
+    0,
+    static_cast<std::int32_t>(0x887A0005u)
+  };
+
+  EXPECT_TRUE(probe.encode_frame(1, true).data.empty());
+  const auto removed = probe.snapshot();
+  EXPECT_EQ(removed.frame_wait_timeouts, (std::vector<std::uint32_t> {100}));
+  EXPECT_EQ(removed.map_calls, 1);
+  EXPECT_EQ(removed.submit_calls, 1);
+  EXPECT_EQ(removed.lock_calls, 0);
+  EXPECT_EQ(removed.unmap_calls, 0);
+  EXPECT_TRUE(removed.input_mapped);
+  EXPECT_TRUE(removed.picture_pending);
+
+  probe.destroy_encoder();
+  EXPECT_EQ(probe.snapshot().sessions_destroyed, 1);
+}
+
+TEST(NvencLifecycleTest, InitialWaitSchedulingOverrunDoesNotStartAnotherWait) {
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.frame_timeouts_remaining = 1;
+  probe.extra_frame_timeout_elapsed = std::chrono::milliseconds(151);
+
+  EXPECT_TRUE(probe.encode_frame(1, true).data.empty());
+  const auto expired = probe.snapshot();
+  EXPECT_EQ(expired.frame_wait_timeouts, (std::vector<std::uint32_t> {100}));
+  EXPECT_EQ(expired.map_calls, 1);
+  EXPECT_EQ(expired.submit_calls, 1);
+  EXPECT_EQ(expired.lock_calls, 0);
+  EXPECT_EQ(expired.unmap_calls, 0);
+  EXPECT_TRUE(expired.input_mapped);
+  EXPECT_TRUE(expired.picture_pending);
+}
+
+TEST(NvencLifecycleTest, FinalSoftTimeoutSliceUsesOnlyTheRemainingBudget) {
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.frame_timeouts_remaining = 7;
+  probe.extra_frame_timeout_elapsed = std::chrono::milliseconds(1);
+
+  EXPECT_TRUE(probe.encode_frame(1, true).data.empty());
+  const auto expired = probe.snapshot();
+  EXPECT_EQ(expired.frame_wait_timeouts, (std::vector<std::uint32_t> {100, 25, 25, 25, 25, 25, 19}));
+  EXPECT_EQ(expired.map_calls, 1);
+  EXPECT_EQ(expired.submit_calls, 1);
+  EXPECT_EQ(expired.lock_calls, 0);
+  EXPECT_EQ(expired.unmap_calls, 0);
+  EXPECT_TRUE(expired.input_mapped);
+  EXPECT_TRUE(expired.picture_pending);
 }
 
 TEST(NvencLifecycleTest, CompletedPictureWithFailedLockDoesNotWaitItsAutoResetEventTwice) {

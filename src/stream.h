@@ -645,7 +645,7 @@ namespace stream {
    */
   [[nodiscard]] video::sbs_telemetry_snapshot_t unavailable_sbs_telemetry_snapshot() noexcept;
 
-  /** Manual Dump 3D requires Host SBS ownership, independently of performance diagnostics. */
+  /** Manual Dump 3D requires Host AI or Game provider ownership, independently of diagnostics. */
   [[nodiscard]] bool sbs_debug_dump_request_allowed(
     int requested_sbs_mode,
     bool has_session_request_latch

@@ -62,7 +62,8 @@ namespace stream {
     int requested_sbs_mode,
     bool has_session_request_latch
   ) noexcept {
-    return requested_sbs_mode == ::video::SBS_AI && has_session_request_latch;
+    return has_session_request_latch &&
+           (requested_sbs_mode == ::video::SBS_AI || ::video::is_game_mode(requested_sbs_mode));
   }
 
   namespace control_packet {
@@ -866,7 +867,7 @@ namespace stream {
     std::uint64_t client_policy_generation;
     std::atomic<crypto::PERM> permission;
     // Session-shared Host SBS mode. Atomic-presentation v2 updates it with the immutable mode
-    // transaction; Dump 3D is accepted only while this session is explicitly in AI mode.
+    // transaction; Dump 3D is routed to the active AI or Game provider, including Game waiting.
     std::shared_ptr<std::atomic<int>> requested_sbs_mode =
       std::make_shared<std::atomic<int>>(::video::SBS_OFF);
 
@@ -2358,7 +2359,7 @@ namespace stream {
 
     server->map(control_packet::sbs_debug_dump, [](session_t *session, const std::string_view &) {
       if (!sbs_debug_dump_request_allowed(session->requested_sbs_mode->load(std::memory_order_acquire), (bool) session->video->sbs_debug_dump_pending)) {
-        BOOST_LOG(warning) << "Ignoring Dump 3D request outside the Host SBS depth provider for ["sv
+        BOOST_LOG(warning) << "Ignoring Dump 3D request outside Host AI or Game 3D for ["sv
                            << session::client_name(*session) << ']';
         return;
       }

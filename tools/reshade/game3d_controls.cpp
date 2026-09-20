@@ -2,14 +2,16 @@
 #include "addon_lifetime.h"
 #include "game3d_controls.h"
 #include "game3d_controls_model.h"
-#include "streamline_camera_probe.h"
+#include "game3d_stereo_contract.h"
 
 // COM declares MinGW's __uuidof support before ReShade's API templates.
 #include <Windows.h>
 #include <Unknwn.h>
 
+#include <algorithm>
 #include <atomic>
 #include <imgui.h>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <reshade.hpp>
@@ -104,28 +106,29 @@ namespace sunshine_game3d {
     }
 
     void camera_hint(const automatic_status &status, bool enabled,
-        const sunshine_streamline::frame_generation_snapshot &fg,
-        sunshine_streamline::frame_generation_query_status fg_status) {
+        const frame_generation_mode &fg) {
       if (status.scale.basis != automatic_scale_basis::relative_depth || !enabled) return;
-      using fg_query = sunshine_streamline::frame_generation_query_status;
-      if (fg_status == fg_query::observed && fg.enabled)
+      if (fg.known && fg.enabled)
         ImGui::TextWrapped("Camera data unavailable with this game's Frame Generation.");
-      else if (fg_status == fg_query::unavailable || (fg_status == fg_query::observed && !fg.enabled))
-        ImGui::TextWrapped("Camera data unavailable. Try Frame Generation 2x if supported.");
       else
-        ImGui::TextWrapped("Camera data unavailable for this depth source.");
+        ImGui::TextWrapped("Camera data unavailable. Try Frame Generation 2x if supported.");
       ImGui::SetItemTooltip("Some games provide Streamline camera data only with Frame Generation. This is not guaranteed. Without it, relative depth assumes an infinite far plane. Sunshine does not change game settings.");
     }
 
-    void calibration_status(const automatic_status &status) {
+    void calibration_status(const automatic_status &status, float strength) {
       const auto &scale = status.scale;
       const auto scale_state = scale.state();
       const bool camera_scale = scale.basis == automatic_scale_basis::camera_matrix;
       const bool held = scale_state == automatic_scale_state::held;
+      const bool has_zero = scale.has_zero && std::isfinite(scale.zero_inverse) && scale.zero_inverse >= 0.f;
+      const double zero_plane = camera_scale ? scale.zero_inverse > 0.f ? 1.0 / scale.zero_inverse :
+        std::numeric_limits<double>::infinity() : scale.zero_inverse;
+      const double target_zero_plane = camera_scale ? scale.target_zero_inverse > 0. ? 1.0 / scale.target_zero_inverse :
+        std::numeric_limits<double>::infinity() : scale.target_zero_inverse;
       ImGui::TextWrapped("Depth conversion: %s", camera_scale ? "camera projection matrix" :
         scale.basis == automatic_scale_basis::relative_depth ? "relative depth (assumed infinite far plane)" : "waiting for depth data");
-      ImGui::TextWrapped("Zero-plane units: %s", camera_scale ? "game units, not necessarily meters" :
-        scale.basis == automatic_scale_basis::relative_depth ? "relative raw depth, not distance" : "unavailable");
+      ImGui::TextWrapped("Depth q: %s", camera_scale ? "inverse game units (1/Z); larger is nearer" :
+        scale.basis == automatic_scale_basis::relative_depth ? "relative inverse depth; larger is nearer" : "unavailable");
       if (held) ImGui::TextDisabled("Last applied values; tracking paused");
       else if (!scale.has_value()) ImGui::TextDisabled("Screen plane: %s", scale_state == automatic_scale_state::pending ? "centering" : "unavailable");
       if (ImGui::BeginTable("ScaleDetails", 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerH)) {
@@ -139,20 +142,44 @@ namespace sunshine_game3d {
           ImGui::TextWrapped("%s", label);
           ImGui::SetItemTooltip("%s", tooltip);
           ImGui::TableNextColumn();
-          if (has_value) ImGui::Text("%.6g", value); else ImGui::TextDisabled("--");
+          if (has_value && std::isinf(value)) ImGui::TextUnformatted("Infinity");
+          else if (has_value) ImGui::Text("%.6g", value); else ImGui::TextDisabled("--");
           ImGui::TableNextColumn();
-          if (has_target) ImGui::Text("%.6g", target); else ImGui::TextDisabled("--");
+          if (has_target && std::isinf(target)) ImGui::TextUnformatted("Infinity");
+          else if (has_target) ImGui::Text("%.6g", target); else ImGui::TextDisabled("--");
         };
+        const bool has_depth = scale.depth_statistics_valid();
+        row("Nearest reference Q", "Largest converted inverse depth in the full active depth rectangle of the accepted measurement. Target stereo gain is L/Q. This is a scene measurement, not the camera's near clipping plane; even a single nearest pixel contributes.",
+          has_depth, scale.reference_inverse);
+        row("Farthest (q min)", "Smallest converted inverse depth in the full active depth rectangle of the same accepted measurement. Zero denotes infinite distance in this depth model. This is not the camera's far clipping plane.",
+          has_depth, scale.minimum_inverse);
+        row("Zero plane q0", "Inverse depth where objects appear at screen depth. Target is the midpoint of the nearest and farthest observed inverse depths, balancing their unclamped displacement at fixed gain. Current zero follows gradually with a parallax-based speed limit; it can remain outside the new range during a transition. Changing zero does not redefine gain.",
+          has_zero, scale.zero_inverse, scale.has_zero_target(), scale.target_zero_inverse);
+        row("Stereo gain K", "Target is L/Q, independently of the zero plane and strength slider. Current gain follows it gradually in either direction. The renderer limits each pixel's final parallax during adaptation. A positive flat scene can update zero while holding gain. K is also called H in relative-depth diagnostics; 1/K is not the measured reference Q.",
+          scale.has_value(), scale.value, scale.has_target(), scale.target_value);
+        row("Normalization L", "Full-strength normalization captured for this output shape and parallax limit. Target K=L/Q; L is dimensionless and does not recover a physical camera baseline.",
+          scale.has_value() && std::isfinite(scale.normalization) && scale.normalization > 0., scale.normalization);
+        if (camera_scale)
+          row("Zero-plane distance", "1/q0 in game units, not necessarily meters. The relative-depth path cannot recover this distance.",
+            has_zero, zero_plane, scale.has_zero_target(), target_zero_plane);
         row("Conversion scale", "Calculated from the projection matrix and raw-depth packing: inverse distance = scale * raw depth + offset. This is not estimated from scene content.", scale.projection_conversion_valid(), scale.conversion_multiplier);
         row("Conversion offset", "The offset in the camera's affine inverse-depth conversion. It has no scene target; the current validated matrix determines it.", scale.projection_conversion_valid(), scale.conversion_offset);
-        row("Zero plane", "Objects here appear at screen depth. Current is smoothed; Target follows the center of the scene. See the units above.",
-          scale.has_value(), camera_scale ? scale.value : scale.has_value() ? 1.0 / scale.value : 0,
-          scale.has_target(), camera_scale ? scale.target_value : scale.has_target() ? 1.0 / scale.target_value : 0);
-        row("Stereo normalization", "Derived from the screen plane: K = 1/q0 with matrix depth, H = 1/t0 with relative depth. 3D strength is a separate user multiplier afterward.",
-          scale.has_value(), scale.value, scale.has_target(), scale.target_value);
         ImGui::EndTable();
       }
-      ImGui::TextWrapped("Zero-plane tracking also changes stereo normalization and apparent strength.");
+      if (scale.depth_statistics_valid() && scale.depth_pixel_count)
+        ImGui::TextDisabled("Full depth: %llu pixels, %u x %u tiles",
+          static_cast<unsigned long long>(scale.depth_pixel_count), scale.depth_tiles_x, scale.depth_tiles_y);
+      const float bounded_strength = std::isfinite(strength) ? std::clamp(strength, 0.f, 100.f) : 0.f;
+      ImGui::TextWrapped("Per-eye parallax limit: %.3g%% of image width at current strength",
+        double(default_disparity_limit_uv) * bounded_strength);
+      ImGui::SetItemTooltip("Maximum horizontal shift per eye in the source image. Re-entry and reused-frame strength protection can reduce it further. This limits rendered parallax, not raw depth values.");
+      if (scale.gain_below_target && scale.has_target()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+        ImGui::TextWrapped("Stereo gain is below its current target.");
+        ImGui::PopStyleColor();
+      } else {
+        ImGui::TextWrapped("Gain follows the nearest depth. Zero follows the depth-range midpoint independently.");
+      }
     }
   }  // namespace
 
@@ -192,9 +219,9 @@ namespace sunshine_game3d {
     if (!data->alive) { finish(); return false; }
     ImGui::Spacing();
 
-    sunshine_streamline::frame_generation_snapshot fg;
-    auto fg_status = sunshine_streamline::frame_generation_query_status::unavailable;
-    if (data->values.enabled && sunshine_streamline::query_frame_generation(UINT32_MAX, fg, &fg_status) && fg.enabled) {
+    const auto source_alpha = query_source_alpha_ui(runtime);
+    const auto &fg = source_alpha.fg;
+    if (data->values.enabled && fg.known && fg.enabled) {
       const char *automatic_mode = fg.automatic ? " (Auto)" : "";
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
       if (fg.generated_frames >= 2) {
@@ -210,14 +237,27 @@ namespace sunshine_game3d {
     }
     strength_control(*data, config);
     if (!data->alive) { finish(); return false; }
-    camera_hint(automatic, data->values.enabled, fg, fg_status);
+    bool source_alpha_ui = data->values.source_alpha_ui;
+    if (ImGui::Checkbox("Keep UI at screen plane (source alpha)", &source_alpha_ui))
+      edit_source_alpha_ui(*data, source_alpha_ui, config);
+    ImGui::SetItemTooltip("Enable only when this game's real-frame alpha represents UI. White keeps UI fixed at the screen plane; black keeps the scene stereoscopic. Gray also pins UI already composited into the image. All white makes the entire frame flat. Frame Generation reuses the latest completed real-input alpha; current RGB stays current. Fast-changing UI may briefly lag. If that input is unavailable, UI protection waits instead of using generated output alpha.");
+    if (!data->alive) { finish(); return false; }
+    if (source_alpha.blocked_by_fg()) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+      ImGui::TextWrapped("UI protection: waiting for real-frame alpha. This FG path must expose its input color; generated output alpha is not used.");
+      ImGui::PopStyleColor();
+    } else if (source_alpha.effective()) {
+      ImGui::TextWrapped("UI protection: %s", source_alpha.retained_alpha_ready ?
+        "using latest real-frame alpha (reused during FG)" : "using current real-frame alpha");
+    }
+    camera_hint(automatic, data->values.enabled, fg);
     if (data->values.depth_view != 0) {
       ImGui::TextWrapped("Depth preview is selected.");
       if (ImGui::Button("Return to game image")) edit_depth_view(*data, 0, config);
       if (!data->alive) { finish(); return false; }
     }
     ImGui::Spacing();
-    calibration_status(automatic);
+    calibration_status(automatic, data->values.strength);
     finish();
     return data->alive;
   }
@@ -230,13 +270,6 @@ namespace sunshine_game3d {
     config_backend config {runtime};
     ImGui::PushID("SunshineGame3DDiagnostics");
     depth_view_control(*data, config);
-    if (data->alive) {
-      const auto status = query_automatic(runtime);
-      ImGui::BeginDisabled(!data->values.enabled || !status.can_recalibrate);
-      if (ImGui::Button("Recenter screen plane")) recalibrate_automatic(runtime);
-      ImGui::SetItemTooltip("Set the screen plane from fresh captures of the current view, then continue tracking smoothly. This also changes stereo normalization and apparent strength. It does not reset your 3D strength setting.");
-      ImGui::EndDisabled();
-    }
     ImGui::PopID();
     return data->alive;
   }

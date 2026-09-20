@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "depth_selection_policy.h"
+#include "depth_moments.h"
 
 #include <cstdio>
 #include <limits>
@@ -25,6 +26,28 @@ namespace {
 
   depth_quality analyze(const std::vector<float> &values) {
     return analyze_depth(values.data(), values.size(), width, height);
+  }
+
+  struct sampled_scene {
+    sunshine_depth_statistics::tile_layout grid;
+    std::vector<float> values;
+
+    depth_quality quality() const {
+      return analyze_depth(values.data(), values.size(), grid.x, grid.y);
+    }
+  };
+
+  template<class Depth>
+  sampled_scene sample_scene(unsigned crop_width, unsigned crop_height, Depth depth) {
+    const auto grid = sunshine_depth_statistics::tile_grid(crop_width, crop_height);
+    sampled_scene scene {grid, std::vector<float>(std::size_t(grid.x) * grid.y)};
+    for (unsigned y = 0; y < grid.y; ++y)
+      for (unsigned x = 0; x < grid.x; ++x) {
+        const float u = (sunshine_depth_statistics::tile_bounds(x, crop_width, grid.x).center() + .5f) / crop_width;
+        const float v = (sunshine_depth_statistics::tile_bounds(y, crop_height, grid.y).center() + .5f) / crop_height;
+        scene.values[std::size_t(y) * grid.x + x] = depth(u, v);
+      }
+    return scene;
   }
 
   candidate_info candidate(std::uint64_t id, std::uint64_t frame, std::uint64_t draws, unsigned w = 640, unsigned h = 360) {
@@ -674,6 +697,73 @@ namespace {
     std::puts("PASS fuller-source preference: same resolution, lower-resolution complete scene, global quality guard");
   }
 
+  void test_aspect_grid_candidate_quality() {
+    const auto surface = [](float u, float v) { return .01f + .035f * (.7f * u + .3f * v); };
+    // Exercise the sampler's actual integer pixel centers, including dimensions
+    // that do not divide evenly into tiles, instead of resizing a fixed 32x18 grid.
+    for (const auto dimensions : {std::array<unsigned, 2> {1920, 1080}, {1600, 1200}, {3440, 1440}, {1080, 1920}}) {
+      const auto crop_width = dimensions[0], crop_height = dimensions[1];
+      const auto full = sample_scene(crop_width, crop_height, surface);
+      const auto larger = sample_scene(2 * crop_width, 2 * crop_height, surface);
+      const auto scene = full.quality(), high_resolution = larger.quality();
+      require(full.grid.x == larger.grid.x && full.grid.y == larger.grid.y,
+              "equal-aspect higher resolution must retain the same candidate sampling layout");
+      require(scene.kind == content_kind::useful && high_resolution.kind == content_kind::useful,
+              "coherent scene depth must remain useful at landscape, ultrawide and portrait aspects");
+      require(scene.completeness == 1 && high_resolution.completeness == 1,
+              "full scene support must not depend on tile dimensions or source resolution");
+      require(std::abs(scene.score - high_resolution.score) < .002f &&
+              std::abs(scene.histogram_span - high_resolution.histogram_span) < .01f,
+              "equivalent higher-resolution geometry must preserve candidate quality and histogram breadth");
+
+      for (float endpoint : {0.f, 1.f}) {
+        const auto people = sample_scene(crop_width, crop_height, [&](float u, float v) {
+          return u >= .35f && u <= .65f && v >= .1f && v <= .9f ? surface(u, v) : endpoint;
+        }).quality();
+        require(people.kind == content_kind::useful && people.completeness + .20f < scene.completeness,
+                "aspect-aware sampling must retain coherent partial depth while recognizing fuller scene support");
+        const auto terrain = sample_scene(crop_width, crop_height, [&](float u, float v) {
+          return u < .75f && v > .9f ? surface(u, v) : endpoint;
+        }).quality();
+        require(terrain.kind == content_kind::useful && terrain.clear_fraction > .88f,
+                "sparse off-center terrain must remain useful despite endpoint-heavy sky at every aspect");
+        selection_policy policy;
+        auto partial_source = candidate(1, 10, 1, crop_width, crop_height);
+        auto full_source = candidate(2, 10, 1, crop_width, crop_height);
+        partial_source.output_width = full_source.output_width = crop_width;
+        partial_source.output_height = full_source.output_height = crop_height;
+        policy.observe(partial_source);
+        policy.observe(full_source);
+        for (std::uint64_t frame : {8u, 9u, 10u}) {
+          policy.sample(1, people, frame);
+          policy.sample(2, scene, frame);
+        }
+        paired_challenge(policy, 10, partial_source, people, full_source, scene);
+      }
+
+      auto noise = full;
+      for (unsigned y = 0; y < noise.grid.y; ++y)
+        for (unsigned x = 0; x < noise.grid.x; ++x)
+          noise.values[std::size_t(y) * noise.grid.x + x] = (x + y) % 2 ? .2f : .8f;
+      require(noise.quality().kind == content_kind::unreliable,
+              "aspect-aware candidate sampling must still reject spatially incoherent depth");
+      for (float constant : {0.f, .1f, 1.f}) {
+        const auto flat = sample_scene(crop_width, crop_height, [constant](float, float) { return constant; });
+        require(flat.quality().kind == content_kind::flat,
+                "clear buffers and constant planes must remain flat at every sampling aspect");
+      }
+      require(analyze_depth(full.values.data(), full.values.size() - 1, full.grid.x, full.grid.y).kind == content_kind::unknown,
+              "a truncated dynamic-grid readback must not become candidate evidence");
+      require(analyze_depth(full.values.data(), full.values.size(), 0, full.grid.y).kind == content_kind::unknown &&
+              analyze_depth(full.values.data(), full.values.size(), full.grid.x, 0).kind == content_kind::unknown,
+              "invalid dynamic-grid dimensions must stay unknown");
+    }
+    require(sample_scene(0, 1080, surface).quality().kind == content_kind::unknown &&
+            sample_scene(1920, 0, surface).quality().kind == content_kind::unknown,
+            "empty source dimensions cannot produce positive depth evidence");
+    std::puts("PASS aspect-aware candidates: resolution-stable quality, full/partial ordering, noise/flat rejection, incomplete readbacks");
+  }
+
   void test_completeness_hysteresis() {
     const auto people = analyze(people_depth()), scene = analyze(gradient(.01f, .045f));
     const auto slightly_larger = analyze(people_depth(0, .25f, .75f, .05f, .95f));
@@ -1116,6 +1206,7 @@ int main() {
     test_comparison_capture_freshness();
     test_completeness_measurement_and_noise();
     test_full_scene_beats_people();
+    test_aspect_grid_candidate_quality();
     test_completeness_hysteresis();
     test_sky_support();
     test_histogram_measurement();

@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <chrono>
+#include <cstdint>
 #include <optional>
 
 // lib includes
@@ -20,6 +22,21 @@
  * @brief Standalone NVENC encoder
  */
 namespace nvenc {
+
+  enum class nvenc_event_wait_status {
+    ready,
+    timeout,
+    failed
+  };
+
+  struct nvenc_event_wait_result {
+    nvenc_event_wait_status status = nvenc_event_wait_status::failed;
+    std::uint32_t native_wait_result = 0;
+    // Captured immediately on a native wait failure; never reuse a stale timeout error.
+    std::uint32_t native_error = 0;
+    // Empty when no device was queried, zero for a healthy D3D device, negative on removal.
+    std::optional<std::int32_t> device_removed_reason;
+  };
 
   /** Last per-codec width capability reported by the active NVENC driver probe. */
   std::optional<int> max_encode_width_for_codec(int video_format);
@@ -132,10 +149,15 @@ namespace nvenc {
      * @brief Optional. Override if you want to create encoder in async mode.
      *        In this case must also set `async_event_handle` variable.
      * @param timeout_ms Wait timeout in milliseconds
-     * @return `true` on success, `false` on timeout or error
+     * @return Completion, elapsed timeout, or a wait failure with its native diagnostics.
      */
-    virtual bool wait_for_async_event(uint32_t timeout_ms) {
-      return false;
+    virtual nvenc_event_wait_result wait_for_async_event(uint32_t timeout_ms) {
+      return {};
+    }
+
+    /** Monotonic clock shared by the frame's initial wait and its bounded grace period. */
+    virtual std::chrono::steady_clock::time_point async_wait_clock_now() const {
+      return std::chrono::steady_clock::now();
     }
 
     /** Teardown-only EOS event, distinct from the auto-reset picture-completion event. */
@@ -143,8 +165,8 @@ namespace nvenc {
       return nullptr;
     }
 
-    virtual bool wait_for_flush_event(uint32_t timeout_ms) {
-      return false;
+    virtual nvenc_event_wait_result wait_for_flush_event(uint32_t timeout_ms) {
+      return {};
     }
 
     /**
@@ -195,6 +217,7 @@ namespace nvenc {
     bool flush_completed = false;
     bool encoder_used = false;
     bool cleanup_blocked = false;
+    bool teardown_wait_failure_logged = false;
     NV_ENC_INPUT_PTR mapped_input = nullptr;
     enum class input_phase_t {
       unmapped,
@@ -211,6 +234,8 @@ namespace nvenc {
     bool submit_flush();
     bool drain_input();
     bool release_encoder_resources();
+    bool teardown_wait_ready(const nvenc_event_wait_result &result, const char *operation);
+    bool wait_for_frame_completion(uint64_t frame_index);
 
     struct stage_diagnostics_t {
       logging::time_delta_periodic_logger input_map {info, "Video NVENC: input map CPU"};

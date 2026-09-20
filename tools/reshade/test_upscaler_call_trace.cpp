@@ -3,6 +3,8 @@
 #include "upscaler_call_trace.h"
 #include "ngx_depth_source.h"
 #include "addon_lifetime.h"
+#include "game3d_diagnostic_metadata.h"
+#include <nlohmann/json.hpp>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -56,6 +58,8 @@ namespace {
     int flags{8};
     unsigned width{1920}, height{1080}, render_width{1280}, render_height{720}, x{3}, y{2};
     void *depth{reinterpret_cast<void *>(0xface0000)};
+    void *ui_hint{};
+    bool ui_hint_available{};
     bool missing_flags{}, missing_render{}, missing_y{}, missing_depth{};
     int reset_value{};
     bool reset_unavailable{true};
@@ -71,6 +75,28 @@ namespace {
   bool last_finish{};
   std::mutex feedback_capture_mutex;
   std::vector<sunshine_scene_depth::frame> feedback_captures;
+  sunshine_game3d::diagnostic::resource_observation diagnostic_resource;
+  sunshine_game3d::diagnostic::stamp diagnostic_finish;
+  std::uint64_t diagnostic_finish_source{};
+  unsigned diagnostic_resources{}, diagnostic_finishes{}, diagnostic_originals_before{}, diagnostic_originals_after{};
+  bool diagnostic_success{}, diagnostic_provider_valid{};
+  const sunshine_game3d::diagnostic::resource_callbacks diagnostic_callbacks {
+    [](const sunshine_game3d::diagnostic::resource_observation &value) noexcept {
+      if (value.artifact_id != 20) return;
+      diagnostic_resource = value;
+      ++diagnostic_resources;
+      diagnostic_originals_before = actual_evaluations.load();
+    },
+    [](sunshine_game3d::ui_resources::provider provider, const sunshine_game3d::diagnostic::stamp &at,
+        std::uint64_t source_id, bool successful) noexcept {
+      diagnostic_finish = at;
+      diagnostic_finish_source = source_id;
+      diagnostic_provider_valid = provider == sunshine_game3d::ui_resources::provider::ngx;
+      diagnostic_success = successful;
+      ++diagnostic_finishes;
+      diagnostic_originals_after = actual_evaluations.load();
+    }
+  };
   create_type create_entry{};
   evaluate_type evaluate_entry{}, evaluate_c_entry{};
   release_type release_entry{};
@@ -168,6 +194,10 @@ extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_Param
   if (std::strcmp(key, "Position.ViewSpace") == 0) {
     probe_requests.emplace_back(std::string("Resource:") + key);
     return optional_pointer_reply(value.probe_values[0], output);
+  }
+  if (std::strcmp(key, "TransparencyMask") == 0 && value.ui_hint_available) {
+    *output = value.ui_hint;
+    return ngx_success;
   }
   if (value.missing_depth || std::strcmp(key, "Depth") != 0) return ngx_failure;
   *output = value.depth;
@@ -817,6 +847,107 @@ namespace {
     sunshine_ngx::shutdown();
     sunshine_ngx::testing::set_callbacks({});
   }
+  void unknown_feature_dump_test() {
+    initialize(GetModuleHandleW(nullptr), false, true);
+    sunshine_ngx::testing::set_callbacks({
+      [](std::uint64_t, const sunshine_scene_depth::frame &) -> std::uint64_t { ++captures; return 91; },
+      [](std::uint64_t, bool) { ++finishes; },
+      [](std::uint64_t, std::uint64_t) { ++retirements; }});
+    fixture_parameters parameters;
+    auto *first = reinterpret_cast<void *>(handle_bits);
+    auto *second = reinterpret_cast<void *>(handle_bits + 16);
+    const auto captures_before = captures, finishes_before = finishes, retirements_before = retirements;
+    const auto originals_before = actual_evaluations.load();
+    sunshine_game3d::arm_diagnostic_metadata(false);
+    sunshine_game3d::arm_diagnostic_metadata(true);
+    const auto evaluate_unknown = [&](void *handle, result expected) {
+      return_result = expected;
+      SetLastError(input_error);
+      require(evaluate_entry(reinterpret_cast<void *>(0x123), handle, &parameters, &callback) == expected &&
+        GetLastError() == output_error && observed.incoming_error == input_error,
+        "unknown-feature dump altered original evaluation/result/LastError");
+    };
+    evaluate_unknown(first, ngx_success);
+    auto dumped = nlohmann::json::parse(sunshine_game3d::diagnostic_metadata_json());
+    require(dumped["ngx"].size() == 1, "unknown NGX evaluation omitted diagnostic evidence");
+    const auto &entry = dumped["ngx"][0];
+    require(entry["feature_known"] == false && entry["feature"].is_null() && entry["source_id"] == 0 &&
+      entry["create_width"].is_null() && entry["create_flags"].is_null() && entry["result_known"] == true && entry["successful"] == true &&
+      entry["sequence_domain"] == "diagnostic-unknown-feature", "unknown feature fabricated capture/creation metadata or lost original result");
+    require(entry["owner_identity"] != "0x0" && entry["feature_handle_identity"] == "0x123456780", "unknown evaluation lost owner/handle identity");
+    bool found_depth = false;
+    for (const auto &value : entry["parameters"]) if (value["name"] == "Depth")
+      found_depth = value["successful"] == true && value["value"] == "0xface0000";
+    require(found_depth, "unknown evaluation lost available named parameters");
+    evaluate_unknown(first, ngx_failure);
+    evaluate_unknown(second, ngx_success);
+    dumped = nlohmann::json::parse(sunshine_game3d::diagnostic_metadata_json());
+    require(dumped["ngx"].size() == 2 && dumped["ngx"][0]["successful"] == false && dumped["ngx"][1]["successful"] == true,
+      "source ID zero misassociated results across unknown handles");
+    require(captures == captures_before && finishes == finishes_before && retirements == retirements_before &&
+      actual_evaluations == originals_before + 3, "unknown diagnostic observations changed capture admission or original call count");
+    sunshine_game3d::arm_diagnostic_metadata(false);
+    const auto resource_queries = feedback_requests.size(), pointer_queries = probe_requests.size(), float_queries = jitter_requests.size();
+    evaluate_unknown(first, ngx_success);
+    require(feedback_requests.size() == resource_queries && probe_requests.size() == pointer_queries && jitter_requests.size() == float_queries,
+      "disarmed unknown-feature evaluation performed diagnostic getters");
+    require(nlohmann::json::parse(sunshine_game3d::diagnostic_metadata_json())["ngx"] == dumped["ngx"],
+      "disarmed unknown evaluation mutated retained diagnostic evidence");
+    shutdown();
+    sunshine_ngx::testing::set_callbacks({});
+  }
+  void diagnostic_completion_identity_test() {
+    initialize(GetModuleHandleW(nullptr), true, true);
+    sunshine_ngx::testing::set_callbacks({
+      [](std::uint64_t, const sunshine_scene_depth::frame &) -> std::uint64_t { return 91; },
+      [](std::uint64_t, bool) {},
+      [](std::uint64_t, std::uint64_t) {}});
+    fixture_parameters parameters;
+    parameters.ui_hint_available = true;
+    parameters.ui_hint = reinterpret_cast<void *>(0xcafebeef);
+    void *handle {};
+    return_result = ngx_success;
+    require(create_entry(reinterpret_cast<void *>(0x123), 1, &parameters, &handle) == ngx_success,
+      "diagnostic identity fixture could not create known DLSS feature");
+    sunshine_game3d::diagnostic::set_resource_callbacks(&diagnostic_callbacks);
+    for (unsigned known = 1; ; --known) {
+      for (const auto expected : {ngx_success, ngx_failure}) {
+        sunshine_game3d::arm_diagnostic_metadata(false);
+        sunshine_game3d::arm_diagnostic_metadata(true);
+        diagnostic_resources = diagnostic_finishes = 0;
+        diagnostic_provider_valid = false;
+        const auto originals = actual_evaluations.load();
+        const auto command = std::uint64_t(0x432100 + known);
+        return_result = expected;
+        SetLastError(input_error);
+        require(evaluate_entry(reinterpret_cast<void *>(command), handle, &parameters, &callback) == expected &&
+            GetLastError() == output_error, "diagnostic observer changed SDK result/LastError");
+        require(diagnostic_resources == 1 && diagnostic_finishes == 1 && diagnostic_provider_valid &&
+            diagnostic_originals_before == originals && diagnostic_originals_after == originals + 1,
+            "resource observation/finish did not bracket the real vendor evaluation exactly once");
+        const auto &before = diagnostic_resource.observation;
+        const auto &after = diagnostic_finish;
+        require(diagnostic_resource.readable && diagnostic_resource.descriptor_supported && diagnostic_resource.native == 0xcafebeef,
+            "NGX diagnostic observer lost available optional resource");
+        require(before.session && before.epoch && before.sequence && before.command == command &&
+            after.session == before.session && after.epoch == before.epoch && after.sequence == before.sequence &&
+            after.tick == before.tick && after.command == before.command && after.viewport == before.viewport &&
+            after.frame_token == before.frame_token && after.frame_numeric == before.frame_numeric && after.numeric_frame == before.numeric_frame,
+            "NGX after_evaluate lost the original diagnostic command/stamp needed to finish optional capture");
+        require(diagnostic_finish_source == diagnostic_resource.source_id &&
+            (known ? diagnostic_finish_source != 0 : diagnostic_finish_source == 0) &&
+            diagnostic_success == (expected == ngx_success), "known/unknown diagnostic completion lost source or result");
+      }
+      if (!known) break;
+      return_result = ngx_success;
+      require(release_entry(handle) == ngx_success, "diagnostic identity fixture could not remove known feature");
+    }
+    sunshine_game3d::diagnostic::set_resource_callbacks(nullptr);
+    sunshine_game3d::arm_diagnostic_metadata(false);
+    return_result = ngx_success;
+    shutdown();
+    sunshine_ngx::testing::set_callbacks({});
+  }
   void detach_test() {
     initialize(GetModuleHandleW(nullptr), true, true);
     sunshine_ngx::testing::set_callbacks({
@@ -877,6 +1008,10 @@ int main() {
     std::puts("PASS per-evaluation NGX jitter, signed/zero offsets, cropped/legacy render domains, missing/nonfinite inputs and optional float export");
     concurrent_feedback_test();
     std::puts("PASS concurrent NGX reset getter completion preserves scene revision and source sequence ordering");
+    unknown_feature_dump_test();
+    std::puts("PASS armed unknown-feature NGX diagnostic parameters/results with unchanged capture rejection, original calls and disarmed getter silence");
+    diagnostic_completion_identity_test();
+    std::puts("PASS real NGX before/after evaluation preserves full diagnostic stamp and source across known/unknown feature success/failure");
     detach_test();
     std::puts("PASS cached NGX forwarding across process detach suppresses capture, late completion, release and tracing");
     return 0;

@@ -5,6 +5,7 @@
 #include "depth_content_sampler.h"
 #include "depth_ready_uniform_cache.h"
 #include "diagnostic_log_gate.h"
+#include "projection_depth_scale.h"
 #include <reshade.hpp>
 #include <algorithm>
 #include <cstring>
@@ -25,6 +26,7 @@ namespace sunshine_streamline::provider {
       source_description last_valid;
       center_sample latest;
       depth_capture::input pending_metadata;
+      sunshine_depth_statistics::tile_layout pending_grid;
       std::uint64_t pending_id{}, pending_texture{}, next_sample{};
       bool owns_pass{}, open{}, have_latest{};
       bool shared_preservation{};
@@ -36,6 +38,7 @@ namespace sunshine_streamline::provider {
       sunshine_diagnostics::log_gate logging;
       depth_capture::status last_status{depth_capture::status::inactive};
       depth_capture::capture_failure last_capture_failure{depth_capture::capture_failure::none};
+      depth_capture::selection_reason last_selection{depth_capture::selection_reason::not_attempted};
       display_status last_display{display_status::not_attempted};
       depth_capture::consumer_status last_consumer{depth_capture::consumer_status::not_attempted};
       depth_capture::recording_loss last_loss{depth_capture::recording_loss::none};
@@ -57,6 +60,34 @@ namespace sunshine_streamline::provider {
         packet.area.width, packet.area.height, packet.format,
         packet.metadata.resource.kind == sunshine_scene_depth::resource_kind::display_depth ? 48u : 0u,
         packet.resource_id};
+    }
+    void describe_copied_depth(sunshine_depth::frame_depth &out, const depth_capture::packet &packet,
+        const sunshine_depth::frame_depth &captured, api::resource display_texture,
+        api::resource_view display_view, std::uint64_t present) {
+      out.provided = packet.metadata;
+      out.projection = projection(packet.metadata);
+      out.source_resource = {packet.metadata.resource.native};
+      out.resource = display_texture;
+      out.shader_resource = display_view;
+      out.source_id = packet.metadata.source_id ? packet.metadata.source_id : packet.resource_id;
+      out.layout_epoch = packet.metadata.epoch;
+      out.frame_index = present;
+      out.runtime_epoch = packet.metadata.epoch;
+      out.width = packet.width; out.height = packet.height;
+      out.x = packet.area.left; out.y = packet.area.top;
+      out.active_width = packet.area.width; out.active_height = packet.area.height;
+      out.command_queue = packet.queue;
+      // Retain the upstream preserved-copy observation through the owned
+      // display copy. These IDs describe that capture, not the display texture
+      // or a color/depth frame match. Native snapshots leave them unavailable.
+      out.capture_marker = captured.capture_marker;
+      out.depth_copy = captured.depth_copy;
+      out.backup_id = captured.backup_id;
+      out.ready = true;
+      out.aligned_viewport_assumed = true;
+      out.detected_orientation = out.orientation = !(packet.metadata.projection.supplied || packet.metadata.projection.direction_supplied) ?
+        sunshine_depth::depth_orientation::automatic : packet.metadata.projection.reversed ?
+          sunshine_depth::depth_orientation::reversed : sunshine_depth::depth_orientation::normal;
     }
     bool same_successful_fg_source(const state &data, const depth_capture::capture_diagnostic &current) {
       const auto &previous = data.last_successful_metadata;
@@ -118,6 +149,15 @@ namespace sunshine_streamline::provider {
       return display_status::ready;
     }
   }
+#ifdef SUNSHINE_SBS_TEST
+  // Exercise the exact value-only publication used by the renderer and dump
+  // without allocating resources or executing a GPU capture.
+  void test_describe_copied_depth(sunshine_depth::frame_depth &out, const depth_capture::packet &packet,
+      const sunshine_depth::frame_depth &captured, api::resource display_texture,
+      api::resource_view display_view, std::uint64_t present) {
+    describe_copied_depth(out, packet, captured, display_texture, display_view, present);
+  }
+#endif
   void initialize(api::effect_runtime *runtime) { runtime->create_private_data<state>(); }
   void destroy(api::effect_runtime *runtime) {
     if (auto *data = runtime->get_private_data<state>()) {
@@ -170,8 +210,10 @@ namespace sunshine_streamline::provider {
     auto *data = runtime->get_private_data<state>();
     if (!data || !data->pending_id || value.capture_id != data->pending_id || value.token != 0)
       return false;
-    const bool matches = value.valid && value.source.handle == data->pending_texture &&
-      value.width == 32 && value.height == 18 && value.values.size() == data->latest.raw.size() &&
+    const bool matches = value.valid && value.moments.supplied && value.source.handle == data->pending_texture &&
+      value.width == data->pending_grid.x && value.height == data->pending_grid.y &&
+      value.values.size() == std::size_t(data->pending_grid.x) * data->pending_grid.y &&
+      value.values.size() <= data->latest.raw.size() &&
       value.source_width == data->pending_metadata.resource.width && value.source_height == data->pending_metadata.resource.height &&
       value.viewport_x == data->pending_metadata.resource.area.left && value.viewport_y == data->pending_metadata.resource.area.top &&
       value.viewport_width == data->pending_metadata.resource.area.width && value.viewport_height == data->pending_metadata.resource.area.height;
@@ -180,11 +222,19 @@ namespace sunshine_streamline::provider {
       data->latest.projection = projection(data->pending_metadata);
       data->latest.id = data->pending_id;
       data->latest.tick = data->pending_metadata.tick;
+      data->latest.width = value.width;
+      data->latest.height = value.height;
+      data->latest.raw = {};
       std::copy(value.values.begin(), value.values.end(), data->latest.raw.begin());
+      data->latest.range_valid = value.range_valid;
+      data->latest.range_min = value.range_min;
+      data->latest.range_max = value.range_max;
+      data->latest.moments = value.moments;
       data->have_latest = true;
     }
     data->pending_id = 0;
     data->pending_metadata = {};
+    data->pending_grid = {};
     return true;
   }
   bool begin(api::effect_runtime *runtime, api::command_list *commands, std::uint64_t present, bool allowed) {
@@ -273,7 +323,8 @@ namespace sunshine_streamline::provider {
       data->shared_preservation = data->frame.shared_preservation;
       data->last_metadata = data->frame.metadata;
     }
-    // Keep the encoding identity through gaps, but never expose old pixels as ready.
+    // Keep the encoding identity through gaps. Only the explicit bounded hold
+    // below can authorize the already-owned display pixels during a pending copy.
     data->output.provided = data->last_metadata;
     data->output.projection = projection(data->frame.metadata);
     if (!available) {
@@ -281,6 +332,7 @@ namespace sunshine_streamline::provider {
     }
     display_status display{display_status::not_attempted};
     depth_capture::consumer_diagnostic consumer;
+    sunshine_depth::frame_depth captured;
     bool copied = false;
     const bool observation_current = !available || data->frame.metadata.provider != sunshine_scene_depth::provider_kind::streamline ||
       data->frame.metadata.observation_revision == depth_observation_revision();
@@ -289,7 +341,6 @@ namespace sunshine_streamline::provider {
     if (available && observation_current && (data->frame.shared_preservation || data->frame.pixel_ready) &&
         (display = prepare_display(runtime, *data, data->frame)) == display_status::ready) {
       const auto &packet = data->frame;
-      sunshine_depth::frame_depth captured;
       copied = sunshine_depth::copy_selected_depth(runtime, commands, packet, data->display_texture, captured, &consumer);
       if (!copied) display = display_status::waiting_capture;
       else if (!(packet.metadata.projection.supplied || packet.metadata.projection.direction_supplied) &&
@@ -304,24 +355,7 @@ namespace sunshine_streamline::provider {
       const auto &packet = data->frame;
       depth_capture::complete_frame(packet, present);
       auto &out = data->output;
-      out.provided = packet.metadata;
-      out.projection = projection(packet.metadata);
-      out.source_resource = {packet.metadata.resource.native};
-      out.resource = data->display_texture;
-      out.shader_resource = data->display_view;
-      out.source_id = packet.metadata.source_id ? packet.metadata.source_id : packet.resource_id;
-      out.layout_epoch = packet.metadata.epoch;
-      out.frame_index = present;
-      out.runtime_epoch = packet.metadata.epoch;
-      out.width = packet.width; out.height = packet.height;
-      out.x = packet.area.left; out.y = packet.area.top;
-      out.active_width = packet.area.width; out.active_height = packet.area.height;
-      out.command_queue = packet.queue;
-      out.ready = true;
-      out.aligned_viewport_assumed = true;
-      out.detected_orientation = out.orientation = !(packet.metadata.projection.supplied || packet.metadata.projection.direction_supplied) ?
-        sunshine_depth::depth_orientation::automatic : packet.metadata.projection.reversed ?
-          sunshine_depth::depth_orientation::reversed : sunshine_depth::depth_orientation::normal;
+      describe_copied_depth(out, packet, captured, data->display_texture, data->display_view, present);
       data->last_valid = describe_source(packet);
       data->last_metadata = packet.metadata;
       data->last_successful_metadata = packet.metadata;
@@ -333,7 +367,11 @@ namespace sunshine_streamline::provider {
     const auto reuse_tick = GetTickCount64();
     const auto prior_depth_age = data->last_real_depth.ready && reuse_tick >= data->last_real_depth.provided.tick ?
       reuse_tick - data->last_real_depth.provided.tick : UINT64_MAX;
-    if (!copied && data->last_real_depth.ready && same_successful_fg_source(*data, capture_info)) {
+    const bool ngx_pending = available && !selection.require_frame_generation &&
+      reuse_pending_ngx(data->last_real_depth, data->last_valid.capture, data->display_format,
+        data->frame, capture_info, present, reuse_tick);
+    if (!copied && data->last_real_depth.ready &&
+        (ngx_pending || same_successful_fg_source(*data, capture_info))) {
       const bool repeated = !available && capture_info.repeated_frame &&
         capture_info.capture_id == data->last_valid.capture && capture_info.sequence == data->last_valid.sequence;
       const bool pending = capture_info.pending_frame &&
@@ -347,8 +385,9 @@ namespace sunshine_streamline::provider {
       const bool same_shape = !available || (data->frame.width == previous.width && data->frame.height == previous.height &&
         data->frame.format == data->display_format && data->frame.area.left == previous.x && data->frame.area.top == previous.y &&
         data->frame.area.width == previous.active_width && data->frame.area.height == previous.active_height);
-      if ((repeated || pending) && enabled && same_shape &&
-          previous.provided.observation_revision == depth_observation_revision() &&
+      const bool observation_matches = previous.provided.provider != sunshine_scene_depth::provider_kind::streamline ||
+        previous.provided.observation_revision == depth_observation_revision();
+      if ((ngx_pending || ((repeated || pending) && enabled)) && same_shape && observation_matches &&
           color_width == data->last_color_width && color_height == data->last_color_height &&
           commands == runtime->get_command_queue()->get_immediate_command_list() &&
           previous.command_queue == runtime->get_command_queue()->get_native() &&
@@ -379,6 +418,7 @@ namespace sunshine_streamline::provider {
     // Fresh and deliberately reused depth share the existing stable descriptor.
     bind(runtime, *data, data->display_view, data->output.ready);
     const bool handoff_changed = display != data->last_display || consumer.result != data->last_consumer ||
+      capture_info.selection != data->last_selection ||
       consumer.invalidation != data->last_loss || data->output.ready != data->last_output_ready;
     if (data->logging.due(GetTickCount64(), status != data->last_status ||
         capture_info.failure != data->last_capture_failure || handoff_changed, !previously_owned, !available)) {
@@ -418,12 +458,14 @@ namespace sunshine_streamline::provider {
       }
       const auto used = std::strlen(text);
       const auto &jitter = data->output.provided.jitter;
-      std::snprintf(text + used, sizeof(text) - used, "; newest_sequence=%llu observation_current=%u prior_depth_age_ms=%llu jitter_supplied=%u jitter_px=(%.6g,%.6g) jitter_render=%ux%u",
+      std::snprintf(text + used, sizeof(text) - used, "; selection=%s consumed_completed_capture=%llu newest_sequence=%llu observation_current=%u prior_depth_age_ms=%llu jitter_supplied=%u jitter_px=(%.6g,%.6g) jitter_render=%ux%u",
+        depth_capture::name(capture_info.selection), static_cast<unsigned long long>(capture_info.consumed_completed_capture),
         static_cast<unsigned long long>(capture_info.newest_sequence), unsigned(observation_current),
         static_cast<unsigned long long>(prior_depth_age), unsigned(jitter.supplied),
         double(jitter.x), double(jitter.y), jitter.width, jitter.height);
       reshade::log::message(reshade::log::level::info, text);
       data->last_status = status;
+      data->last_selection = capture_info.selection;
       data->last_capture_failure = capture_info.failure;
       data->last_display = display;
       data->last_consumer = consumer.result;
@@ -440,6 +482,22 @@ namespace sunshine_streamline::provider {
     if (!data->output.ready || data->output.reused_depth) return true;
     if (now >= data->next_sample && !sunshine_depth::busy()) {
       sunshine_depth::sample_request request;
+      request.collect_range = true;
+      // Decode on the GPU with this capture's coefficients. Never retrofit a
+      // later camera or inferred orientation when asynchronous results arrive.
+      const auto &basis = data->frame.metadata.projection;
+      const auto coefficients = basis.supplied ? sunshine_projection_depth::make(
+        basis.depth_offset, basis.depth_scale, basis.raw_scale, basis.raw_bias) :
+        sunshine_projection_depth::coefficients{};
+      if (coefficients.valid()) {
+        request.collect_moments = true;
+        request.moments_A = coefficients.shader_A;
+        request.moments_inverseB = coefficients.inverseB;
+      } else if (!basis.supplied && basis.direction_supplied) {
+        request.collect_moments = true;
+        request.moments_A = basis.reversed ? 0.f : 1.f;
+        request.moments_inverseB = basis.reversed ? 1.f : -1.f;
+      }
       request.capture_id = data->frame.capture_id;
       // Both transports publish to this stable display allocation. The sampler
       // retains its COM source and submits after these effects on the same
@@ -457,6 +515,7 @@ namespace sunshine_streamline::provider {
         data->pending_metadata.resource.width = data->frame.width;
         data->pending_metadata.resource.height = data->frame.height;
         data->pending_metadata.resource.area = data->frame.area;
+        data->pending_grid = sunshine_depth_statistics::tile_grid(request.width, request.height);
         data->next_sample = now + 125;
       }
     }
