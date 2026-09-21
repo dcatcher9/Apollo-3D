@@ -5,6 +5,7 @@
 #include "src/reshade_bridge_protocol.h"
 #include "test_overlay_pixels.h"
 #include "test_receiver_api.h"
+#include "game3d_alpha_auto.h"
 
 #include <algorithm>
 #include <chrono>
@@ -260,7 +261,8 @@ uniform int DepthDirection < hidden = true; >;
     BOOL (*query_automatic)(api::effect_runtime *, unsigned *) = nullptr;
     BOOL (*recalibrate)(api::effect_runtime *) = nullptr;
 #endif
-    bool native_only = false, migrated_settings = false;
+    bool native_only = false, migrated_settings = false, alpha_delayed_startup = false;
+    std::uint64_t alpha_delay_begin = 0, alpha_delay_complete = 0;
     fs::path output_directory;
     bool expect_overlay = false;
     float expected_gain = 1.0f;
@@ -323,9 +325,22 @@ uniform int DepthDirection < hidden = true; >;
       };
       native_only = flag("SUNSHINE_GAME3D_NATIVE_ONLY");
       migrated_settings = flag("SUNSHINE_GAME3D_NATIVE_MIGRATED");
+      alpha_delayed_startup = flag("SUNSHINE_GAME3D_ALPHA_DELAYED_STARTUP_TEST");
 #ifndef SUNSHINE_GAME_EXPORT_FIXTURE
-      require(!native_only && !migrated_settings, "Native controls/no-FX tests require the Game 3D fixture executable");
+      require(!native_only && !migrated_settings && !alpha_delayed_startup,
+        "Native controls/no-FX/alpha-startup tests require the Game 3D fixture executable");
 #endif
+      require(!alpha_delayed_startup || native_only, "Delayed alpha startup requires native-only Game 3D rendering");
+      if (alpha_delayed_startup) {
+        require(!fs::exists(directory / "ReShade.log"), "Delayed alpha startup requires a fresh output log");
+        // Reproduce delayed device/runtime setup. No ReShade or game device
+        // exists during this wait; detection must still start at the first probe.
+        alpha_delay_begin = GetTickCount64();
+        std::puts("Delayed alpha startup: waiting 11 seconds before graphics initialization");
+        Sleep(11000);
+        alpha_delay_complete = GetTickCount64();
+        require(alpha_delay_complete - alpha_delay_begin >= 11000, "Delayed alpha startup wait was shortened");
+      }
       if (!receiver_dll.empty()) {
         receiver_module = LoadLibraryW(receiver_dll.c_str());
         require(receiver_module != nullptr, "Could not load production-receiver test facade");
@@ -353,7 +368,8 @@ uniform int DepthDirection < hidden = true; >;
       write_file(directory / "preset.ini", preset_definitions + "Techniques=" + selected + "\nTechniqueSorting=" + selected +
         "\n[SunshineGame3D.fx]\nDepth_Adjustment=137.125\nDepth_Map_View=2\n[Other.fx]\nUntouchedPreference=42.125\n");
       const std::string native_config = std::string("[SUNSHINE_GAME3D]\nEnabled=") + (native_only ? "1\n" : "0\n") +
-        (migrated_settings ? "Strength=37.25\nDepthView=2\n" : "");
+        (migrated_settings ? "Strength=37.25\nDepthView=2\n" : "") +
+        (alpha_delayed_startup ? "SourceAlphaUIMode=0\n" : "");
       write_file(directory / "ReShade.ini", "[ADDON]\nAddonPath=.\\addons\nDisabledAddons=Generic Depth\n[GENERAL]\n" + global_definitions + "EffectSearchPaths=.\\effects\nPresetPath=.\\preset.ini\nPresetTransitionDuration=250\nPerformanceMode=0\nSkipLoadingDisabledEffects=0\nEffectCachePath=.\\cache\n[OVERLAY]\nTutorialProgress=4\nShowFPS=0\nShowClock=0\nShowPresetName=0\n[STYLE]\nHdrOverlayBrightness=203\n" + native_config);
       SetEnvironmentVariableW(L"RESHADE_BASE_PATH_OVERRIDE", directory.c_str());
 
@@ -990,6 +1006,103 @@ uniform int DepthDirection < hidden = true; >;
 #endif
 
 #ifdef SUNSHINE_GAME_EXPORT_FIXTURE
+    void verify_delayed_alpha_startup() {
+      struct alpha_log {
+        bool started = false, sparse = false, completed = false;
+        std::uint64_t window_start = 0, elapsed = 0, accepted = 0, sparse_accepted = 0;
+      };
+      const auto read_alpha_log = [&] {
+        std::ifstream input(output_directory / "ReShade.log");
+        require(input.good(), "Could not read production alpha transition log");
+        alpha_log result;
+        std::string line;
+        while (std::getline(input, line)) {
+          if (line.find("Sunshine UI alpha: ") == std::string::npos) continue;
+          const auto field = [&](const char *key) {
+            const std::string prefix = std::string(" ") + key + "=";
+            const auto first = line.find(prefix);
+            require(first != std::string::npos, "Production alpha transition log is missing a required field");
+            const auto value = first + prefix.size();
+            return line.substr(value, line.find_first_of(" \r\n", value) - value);
+          };
+          const auto number = [&](const char *key) { return std::stoull(field(key)); };
+          const auto state = field("state");
+          if (state == "startup_waiting") {
+            require(!result.started && number("window_started") == 0,
+              "Production alpha detection restarted its window after renderer/control activity");
+          } else if (state == "startup_observing") {
+            const auto start = number("window_start_ms");
+            require(number("window_started") == 1 && start >= alpha_delay_complete &&
+                start - alpha_delay_begin >= 11000,
+              "Production alpha detection used process creation instead of the first eligible probe");
+            require(!result.started || result.window_start == start,
+              "Production alpha detection changed its window during native-only tests");
+            require(!result.completed && number("enabled") == 0 && number("monitoring") == 1,
+              "Uniform opaque source unexpectedly enabled or resumed Auto detection");
+            const auto elapsed = number("elapsed_ms"), interval = number("probe_interval_ms");
+            if (interval == sunshine_game3d::alpha_slow_probe_interval_ms) {
+              require(elapsed >= sunshine_game3d::alpha_initial_window_ms &&
+                  elapsed < sunshine_game3d::alpha_startup_window_ms &&
+                  field("reason") == "sparse_observation_started" && number("accepted_samples") > 0,
+                "Production alpha detection did not enter sparse monitoring after its first minute");
+              result.sparse = true; result.sparse_accepted = number("accepted_samples");
+            } else {
+              require(!result.sparse && interval == sunshine_game3d::alpha_fast_probe_interval_ms &&
+                  elapsed < sunshine_game3d::alpha_initial_window_ms,
+                "Production opaque-alpha monitoring used the wrong sampling interval");
+            }
+            result.started = true; result.window_start = start;
+          } else if (state == "startup_off") {
+            require(result.started && number("window_started") == 1 && number("window_start_ms") == result.window_start,
+              "Production Auto expired before a post-delay alpha observation window started");
+            require(result.sparse && field("reason") == "deadline_without_500ms_confirmation" &&
+                number("elapsed_ms") >= sunshine_game3d::alpha_startup_window_ms && number("probe_interval_ms") == 0 &&
+                number("accepted_samples") > 0 && number("last_covered") == source_width * source_height &&
+                number("last_total") == source_width * source_height && number("enabled") == 0 && number("monitoring") == 0,
+              "Production Auto did not finish its measured opaque-alpha window with accepted GPU samples");
+            result.completed = true; result.elapsed = number("elapsed_ms"); result.accepted = number("accepted_samples");
+            constexpr auto sparse_limit = (sunshine_game3d::alpha_startup_window_ms - sunshine_game3d::alpha_initial_window_ms) /
+              sunshine_game3d::alpha_slow_probe_interval_ms;
+            constexpr auto total_limit = sunshine_game3d::alpha_initial_window_ms /
+              sunshine_game3d::alpha_fast_probe_interval_ms + sparse_limit;
+            require(result.accepted > result.sparse_accepted && result.accepted - result.sparse_accepted <= sparse_limit + 4 &&
+                result.accepted <= total_limit + 16,
+              "Production sparse alpha monitoring did not collect samples at its bounded one-per-second cadence");
+          } else {
+            require(false, "Uniform-alpha Auto fixture unexpectedly confirmed On or entered manual mode");
+          }
+        }
+        return result;
+      };
+      auto result = read_alpha_log();
+      require(result.started, "Production add-on never started alpha detection after delayed graphics initialization");
+      std::printf("Production delayed alpha startup: window started at %llu; checking the real one-minute sparse transition and five-minute deadline\n",
+        static_cast<unsigned long long>(result.window_start));
+      // Existing controls, reloads and overlay tests have already used part of
+      // this real window. Keep presenting only until its original deadline.
+      const auto deadline = result.window_start + sunshine_game3d::alpha_startup_window_ms + 5000;
+      auto next_log_read = GetTickCount64();
+      bool reported_sparse = false;
+      while (!result.completed && GetTickCount64() < deadline) {
+        step();
+        Sleep(12); // Keep this long-running functional fixture near ordinary presentation rates.
+        if (GetTickCount64() >= next_log_read) {
+          result = read_alpha_log();
+          next_log_read = GetTickCount64() + 250;
+          if (result.sparse && !reported_sparse) {
+            std::printf("Production alpha sparse transition observed: accepted_samples=%llu; continuing to the original five-minute deadline\n",
+              static_cast<unsigned long long>(result.sparse_accepted));
+            reported_sparse = true;
+          }
+        }
+      }
+      require(result.completed, "Production alpha detection did not stop five minutes after its first eligible probe");
+      std::printf("PASS production delayed alpha startup: pre-device wait=%llu ms, window_start=%llu, deadline_elapsed=%llu ms, accepted_samples=%llu; real controls/exporter/renderer, fast first minute then sparse, opaque source Off\n",
+        static_cast<unsigned long long>(alpha_delay_complete - alpha_delay_begin),
+        static_cast<unsigned long long>(result.window_start), static_cast<unsigned long long>(result.elapsed),
+        static_cast<unsigned long long>(result.accepted));
+    }
+
     void run_native_only() {
       auto generation = wait_pixels();
       require(observation.runtime && observation.techniques == 0 && fs::is_empty(output_directory / "effects"),
@@ -1043,6 +1156,7 @@ uniform int DepthDirection < hidden = true; >;
         wait_pixels(generation);
         require(read64(shared->consumer_nonce) != previous_nonce, "Native receiver restart reused its old nonce");
       }
+      if (alpha_delayed_startup) verify_delayed_alpha_startup();
       require(observation.presents == observation.finishes && observation.techniques == 0,
         "Native no-FX presentation lifecycle is incomplete");
       std::printf("PASS native add-on-only D3D12 color=%u: no FX files or techniques; native source/SDR/HDR pixels, controls/config, zero strength, enable/focus recovery, actual panel/overlay, reload%s\n",
@@ -1093,8 +1207,15 @@ int main(int argc, char **argv) {
     return 2;
   }
   // A broken presentation hook must never leave the synthetic window running indefinitely.
-  std::thread([] {
-    Sleep(45000);
+  DWORD watchdog_ms = 45000;
+#ifdef SUNSHINE_GAME_EXPORT_FIXTURE
+  const auto delayed_flag = std::getenv("SUNSHINE_GAME3D_ALPHA_DELAYED_STARTUP_TEST");
+  const auto native_flag = std::getenv("SUNSHINE_GAME3D_NATIVE_ONLY");
+  if (delayed_flag && !std::strcmp(delayed_flag, "1") && native_flag && !std::strcmp(native_flag, "1"))
+    watchdog_ms = DWORD(sunshine_game3d::alpha_startup_window_ms + 60000);
+#endif
+  std::thread([watchdog_ms] {
+    Sleep(watchdog_ms);
     std::fputs("FAIL runtime fixture watchdog\n", stderr);
     TerminateProcess(GetCurrentProcess(), 3);
   }).detach();

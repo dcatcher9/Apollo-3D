@@ -18,6 +18,8 @@ namespace sunshine_game3d::ui_mask {
     struct entry {
       request wanted;
       std::uint64_t generation{}, latest_sequence{};
+      std::uint64_t last_capture_tick{};
+      bool captured{};
       std::array<slot, snapshot_capacity> snapshots;
       diagnostic_snapshot diagnostic;
       std::uint64_t diagnostic_reservation{};
@@ -48,6 +50,8 @@ namespace sunshine_game3d::ui_mask {
     void clear(entry &value, retired &values, unsigned &count) {
       for (auto &item : value.snapshots) retire(item, values, count);
       value.latest_sequence = 0;
+      value.last_capture_tick = 0;
+      value.captured = false;
       value.generation = ++owner().serial;
       value.diagnostic = {};
       value.diagnostic_reservation = 0;
@@ -147,6 +151,8 @@ namespace sunshine_game3d::ui_mask {
     if (selected && !same(selected->wanted, wanted)) {
       clear(*selected, old, count);
       selected->wanted = wanted.enabled ? wanted : request{};
+    } else if (selected) {
+      selected->wanted.min_capture_interval_ms = wanted.min_capture_interval_ms;
     }
     ReleaseSRWLockExclusive(&state.lock);
     release(old);
@@ -248,10 +254,16 @@ namespace sunshine_game3d::ui_mask {
       if (!where.command || !source.resource.native || !input.source || !shape ||
           source.valid_until == sunshine_scene_depth::lifetime::unsupported) {
         for (auto &snapshot : item.snapshots) retire(snapshot, old, count);
-      } else {
+      } else if (!item.wanted.min_capture_interval_ms || !item.captured ||
+          (source.tick >= item.last_capture_tick && source.tick - item.last_capture_tick >= item.wanted.min_capture_interval_ms)) {
         for (auto &snapshot : item.snapshots) if (!snapshot.reservation) {
           result.reservation = ++state.serial;
           snapshot.reservation = result.reservation; snapshot.origin = where;
+          // Reserve the cadence together with the slot, before native recording
+          // can reenter this owner. Skipped tags still finish their SDK call and
+          // revoke older pixels on failure, exactly like a capacity skip.
+          item.last_capture_tick = source.tick;
+          item.captured = true;
           item.diagnostic_reservation = result.reservation;
           item.diagnostic.record_attempted = true;
           break;

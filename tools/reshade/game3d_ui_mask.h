@@ -11,6 +11,9 @@ namespace sunshine_game3d::ui_mask {
     std::uint64_t runtime{}, device_identity{}, epoch{}, revision{};
     std::uint32_t viewport{}, width{}, height{};
     bool enabled{};
+    // Probe-only captures may be sparse. Zero preserves continuous real-input
+    // capture; changing cadence never revokes completed or pending pixels.
+    std::uint64_t min_capture_interval_ms{};
   };
   struct boundary {
     sunshine_scene_depth::frame source;

@@ -4,6 +4,7 @@
 #include "game3d_controls.h"
 
 #include <cmath>
+#include <memory>
 
 namespace sunshine_game3d {
   inline constexpr const char *config_section = "SUNSHINE_GAME3D";
@@ -12,6 +13,7 @@ namespace sunshine_game3d {
   struct settings_state {
     render_settings values;
     bool alive = true;
+    std::shared_ptr<alpha_auto_policy> alpha_session{};
   };
 
   template<class Backend>
@@ -20,7 +22,14 @@ namespace sunshine_game3d {
     config.read("Strength", result.strength);
     config.read("DepthView", result.depth_view);
     config.read("Enabled", result.enabled);
-    config.read("SourceAlphaUI", result.source_alpha_ui);
+    // The old checkbox enabled heuristics, so legacy true migrates to Auto.
+    // Preserve an explicitly disabled old checkbox until a three-way edit.
+    bool legacy_alpha = true;
+    config.read("SourceAlphaUI", legacy_alpha);
+    int alpha_mode = legacy_alpha ? 0 : 2;
+    config.read("SourceAlphaUIMode", alpha_mode);
+    result.ui_protection = alpha_mode >= 0 && alpha_mode <= 2 ? source_alpha_mode(alpha_mode) : source_alpha_mode::automatic;
+    result.source_alpha_ui = result.ui_protection == source_alpha_mode::on;
     if (!std::isfinite(result.strength)) result.strength = default_strength;
     if (result.depth_view < 0 || result.depth_view > 2) result.depth_view = 0;
     // Preserve exact finite saved strength, including old off-range values.
@@ -56,11 +65,16 @@ namespace sunshine_game3d {
   }
 
   template<class Backend>
-  bool edit_source_alpha_ui(settings_state &settings, bool value, Backend &config) {
-    if (!settings.alive || value == settings.values.source_alpha_ui) return false;
-    config.write("SourceAlphaUI", value);
+  bool edit_source_alpha_mode(settings_state &settings, source_alpha_mode value, Backend &config, std::uint64_t now_ms) {
+    if (!settings.alive || int(value) < 0 || int(value) > 2 || value == settings.values.ui_protection) return false;
+    config.write("SourceAlphaUIMode", int(value));
     if (!settings.alive) return false;
-    settings.values.source_alpha_ui = value;
+    settings.values.ui_protection = value;
+    settings.values.source_alpha_ui = value == source_alpha_mode::on;
+    if (settings.alpha_session) {
+      if (value == source_alpha_mode::automatic) settings.alpha_session->set_automatic(now_ms);
+      else settings.alpha_session->set_manual(value == source_alpha_mode::on);
+    }
     return true;
   }
 

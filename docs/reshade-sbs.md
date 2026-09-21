@@ -125,12 +125,67 @@ shows that camera data is still unavailable; the existing 3×/higher guidance re
 The hint is not shown during the initial unknown-depth state. A busy or ambiguous FG observation
 does not produce a suggestion to enable a mode that may already be enabled.
 
-**Keep UI on a separate plane (source alpha)** is off by default and saved per game as `SourceAlphaUI`.
-Enable it only when the game's source alpha represents UI: white and gray pin already-composited
+**UI protection (source alpha)** offers **On / Off / Auto**, saved per game in ReShade.ini as
+`SourceAlphaUIMode` (0 Auto, 1 On, 2 Off). All runtimes in the game share this choice and its
+per-game configuration file. Auto is the default. On and Off are persistent manual
+overrides, including across game restarts. The previous `SourceAlphaUI=false` migrates to Off;
+the old enabled heuristic migrates to Auto. An explicit new mode takes precedence over the old key.
+No game-specific detection profile is used. When protection is enabled, white and gray pin already-composited
 UI to one global plane at the independently tracked, smoothed inverse-depth midpoint, while
 black keeps scene depth. This is a placement policy, not recovered UI geometry or physical distance.
-An entirely white real-input alpha channel makes the entire frame flat at the UI plane; an entirely black
-one adds no UI pins. No content heuristic overrides this interpretation. With FG off, alpha comes from the current color frame,
+An entirely white real-input alpha channel makes the entire frame flat at the UI plane when
+protection is on; an entirely black one adds no UI pins. Auto starts one 300000 ms observation
+window when the renderer first queues an eligible alpha probe. It probes at most every 100 ms
+for the first 60000 ms, then at most once per 1000 ms until five minutes total. Game/device initialization and
+waiting for an eligible FG input do not consume that window. The first sampled alpha need not
+be selective: all-zero and all-one frames also start the timer. It counts finite positive alpha using the protection shader's
+predicate. Fresh selective nonzero coverage below 99.9% immediately enables protection
+provisionally and returns to the 100 ms probe interval, including during the sparse phase.
+When that evidence persists for 500 ms, Auto confirms On and stops monitoring
+immediately. If the evidence becomes full, empty, invalid or stale before confirmation,
+protection turns off and detection continues at the rate for the original window's current phase. Entirely gray
+positive alpha also counts as full coverage. Without confirmation by the fixed observation
+deadline, Auto freezes Off and stops monitoring; constant zero or one stays off throughout.
+The panel first shows **Auto: Waiting for a game frame...**, then
+**Auto: Detecting... (protection off)**, **Auto: Off (checking once per second...)** during the sparse phase,
+or **Auto: On (confirming for 500 ms...)** while a candidate is being checked,
+then the final **Auto: On** or **Auto: Off**.
+
+The frozen decision survives menus, later alpha changes, source/format/extent changes, renderer
+replacement and runtime recreation. On/Off overrides it immediately and persists; selecting Auto
+again uses the same startup window/result rather than starting another scan. Auto
+runs a new startup scan on the next game launch. A manual selection before any probe does not
+start the clock; returning to Auto then waits for the first eligible probe. Once a scan has
+started, manual overrides, returning to Auto and source/runtime changes never restart it.
+This remains a heuristic: a game showing only
+loading screens/full-screen menus in its startup window may select Off even if later gameplay
+has useful UI alpha. The user can select On. On intentionally honors all-one alpha.
+
+The GPU scans every pixel into 256 small coverage records at the current probe interval. One pending
+4096-byte readback per renderer uses the existing completion fence; the CPU reads only completed
+statistics without a GPU wait or flush. These coverage dispatches and readback mappings stop
+on confirmation, at the deadline or on a manual selection. A pending observation then retires without mapping, and
+late completions cannot change the result. Sample timestamps, not duplicate presentations,
+establish the selective interval. Evidence older than 500 ms is unusable; gaps, source changes
+and renderer replacement reset only the current interval, not the original deadline or already
+qualified evidence. Each renderer has independent sample continuity; interleaved runtimes cannot
+reject each other's sequence numbers or combine partial selective intervals. A process-owned
+policy outlives GPU resource recreation. Fresh retained FG input may have been captured before
+the first probe was queued; capture freshness is independent of the observation-window start.
+While Auto is Off in the sparse phase, real-input FG mask copies are also limited to one
+attempt per 1000 ms. The owner keeps the request active, preserves pending/ready copies across
+cadence changes, and still processes invalid-tag revocation. The existing input freshness limit
+is unchanged. A fresh selective sample resumes continuous FG input capture for protection and
+frequent coverage probes for confirmation; manual or confirmed On also uses continuous capture.
+Probe failure leaves
+ordinary stereo available. Input availability remains independent of the chosen On/Off result.
+
+ReShade.log records the waiting/start and sparse-phase transitions, first selective candidate in each phase,
+and final or manual decision with `Sunshine UI alpha`. Records include window start/elapsed time, probe interval, accepted sample
+count and last accepted coverage/sequence/timestamp. This distinguishes an unstarted scan from
+a completed scan without qualifying evidence without logging every frame or candidate flicker.
+
+With FG off, alpha comes from the current color frame,
 independently of depth-provider selection. With FG on, the D3D12 adapter captures the real input's
 Streamline Backbuffer tag 53 at its declared call boundary, keeps a bounded private GPU snapshot,
 and reuses the latest completed input alpha across presentations. Generated output alpha is never
@@ -172,13 +227,14 @@ current gain, scene zero, strength, stereo blend and per-eye clamp as scene dept
 UI pixel shares this plane, but its displayed disparity can move as those controls or the tracked
 midpoint change during walking and camera rotation. Unavailable stereo resolves to zero UI
 parallax. The plane does not follow the nearest depth beneath UI coverage and does not guarantee
-placement in front of that foreground. The source-selection switch is retained because arbitrary game backbuffer
-alpha is not universally a UI mask; after selection, constant alpha is honored without heuristics.
+placement in front of that foreground. The switch can disable automatic protection because arbitrary
+game backbuffer alpha is not universally a UI mask and selective coverage can still be a false positive.
 
 Both paths use the same UI protection shader. For FG, only its alpha input changes; all RGB passes
 still use the current color, never the retained input's RGB. Captures share the existing depth
 transport's producer/consumer fence retirement and maximum source age. No new queue, GPU wait or
-CPU pixel readback is added. Unfinished captures are skipped rather than waiting. Scope, viewport,
+CPU image readback is added; the automatic gate reads only the small coverage records described above.
+Unfinished captures are skipped rather than waiting. Scope, viewport,
 resolution or observation-revision changes revoke old masks. Alpha and depth have independently
 recorded source identities: this is bounded previous-input reuse, not an exact generated-frame
 color/depth/mask pairing. Fast-changing UI can therefore briefly lag behind the current color.
@@ -205,9 +261,13 @@ pass and its shared memory. It does not retain the
 vertical shear bound across UI-row boundaries. Half-transparent UI retains its original color but
 locally flattens the background beneath it; exact independent stereo background requires a separate
 HUDless image and UI color/alpha layer. Source alpha interpretation is not inferred from NGX or SL
-provider identity. Dump/replay records the effective switch as `replay.source_alpha_ui`, the saved
-request as `source_alpha_ui_requested`, and the reason as `source_alpha_ui_status`. Offline replay
-uses the effective value and the separate 16-byte `b1` UI constants; the 80-byte geometry `b0` ABI
+provider identity. Dump/replay records the effective switch as `replay.source_alpha_ui`, the chosen
+request as `source_alpha_ui_requested`, and the reason as `source_alpha_ui_status`. `source_alpha_auto`
+records the startup result or manual override, monitoring state, window start, probe interval, accepted sample
+count, coverage counts and the observation
+sequence/timestamp separately from the current render.
+Offline replay uses the frozen effective value without rerunning the automatic timer; explicit replay
+overrides still honor entirely white masks. It uses the separate 16-byte `b1` UI constants; the 80-byte geometry `b0` ABI
 is unchanged. `source_alpha_ui_fg_mode` records the retained mode and its observation provenance.
 The UI constant buffer stores four 32-bit words: enabled, mode, inverse-depth float bits, and
 zero reserved padding. Live mode 1 records the applied UI midpoint in
@@ -245,7 +305,7 @@ and whether state selection used observed recording evidence (including the narr
 A declared-state selection reports `copy_state_known=true` and `used_observed_state=false`;
 "known" here identifies the selected copy state, not independent validation of the provider hint.
 
-The panel controls native `Strength`, `DepthView`, `Enabled` and `SourceAlphaUI` settings in ReShade.ini.
+The panel controls native `Strength`, `DepthView`, `Enabled` and `SourceAlphaUIMode` settings in ReShade.ini.
 Opening the panel does not rewrite values. Edits apply immediately and are saved automatically,
 independently of shader preset Auto Save. Each reset changes only its own parameter.
 These controls remain independent of shader enablement, Performance Mode and preset transitions.

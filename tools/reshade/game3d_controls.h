@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "game3d_alpha_auto.h"
 #include <cmath>
 #include <cstdint>
 
@@ -10,16 +11,21 @@ namespace reshade::api {
 
 namespace sunshine_game3d {
   inline constexpr float default_strength = 50.f;
+  enum class source_alpha_mode : int { automatic = 0, on = 1, off = 2 };
   struct render_settings {
     float strength = default_strength;
     int depth_view = 0;
     bool enabled = true;
+    source_alpha_mode ui_protection = source_alpha_mode::automatic;
     bool source_alpha_ui = false;
+    bool source_alpha_monitoring = false;
+    std::uint64_t source_alpha_probe_interval_ms = 0;
   };
 
   // Present alpha is a game-specific convention, not an FG output contract.
   // Generated output alpha is never a mask. FG requires a retained, completed
-  // real-input alpha copy. A fully white real mask remains valid full-screen UI.
+  // real-input alpha copy. Coverage gating is a separate heuristic and never
+  // changes which input is eligible; explicit replay still honors white masks.
   inline bool source_alpha_ui_for_present(bool requested, bool frame_generation_active, bool retained_alpha_ready = false) {
     return requested && (!frame_generation_active || retained_alpha_ready);
   }
@@ -47,8 +53,10 @@ namespace sunshine_game3d {
     // Latest input attempt observed at this render; it is not the identity of
     // a retained mask, and failure does not revoke an otherwise usable copy.
     source_alpha_input_state input_state = source_alpha_input_state::not_observed;
+    bool automatic = false;
+    alpha_auto_decision coverage;
     bool fg_active() const { return fg.known && fg.enabled; }
-    bool effective() const { return source_alpha_ui_for_present(requested, fg_active(), retained_alpha_ready); }
+    bool effective() const { return source_alpha_ui_for_present(requested, fg_active(), retained_alpha_ready) && (!automatic || coverage.enabled); }
     bool blocked_by_fg() const { return requested && fg_active() && !retained_alpha_ready; }
   };
   struct source_alpha_ui_policy {
@@ -58,7 +66,10 @@ namespace sunshine_game3d {
       // clears it. In particular, manually pinning Generic depth is not FG Off.
       if (!observer_active) mode = {};
       else if (observed.known) mode = observed;
-      return {requested, mode};
+      source_alpha_ui_decision result;
+      result.requested = requested;
+      result.fg = mode;
+      return result;
     }
   private:
     frame_generation_mode mode;
@@ -68,8 +79,12 @@ namespace sunshine_game3d {
   source_alpha_ui_decision query_source_alpha_ui(reshade::api::effect_runtime *runtime);
 
   // Add-on-owned settings, independent of effects, presets and Performance Mode.
-  // Each actual edit is persisted to this runtime's ReShade configuration.
+  // Edits persist in ReShade configuration; UI protection uses the per-game
+  // global file so all of the game's runtimes share the saved choice.
   render_settings query_render_settings(reshade::api::effect_runtime *runtime);
+  // One window beginning with the first eligible alpha probe, shared across
+  // renderer and runtime recreation for this game process.
+  alpha_auto_policy &source_alpha_startup_policy();
 
   enum class automatic_phase { unavailable, waiting_for_depth, calibrating, ready, suspended, unsupported_resolution, renderer_unavailable };
   enum class automatic_scale_basis { unknown, camera_matrix, relative_depth };

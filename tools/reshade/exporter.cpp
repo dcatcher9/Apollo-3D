@@ -625,7 +625,7 @@ namespace {
         std::lock_guard<std::mutex> lock(mutex_);
         auto &proof = runtimes_[runtime];
         proof.addon_native = settings.enabled;
-        source_alpha = proof.source_alpha_policy.update(settings.source_alpha_ui, observed_fg,
+        source_alpha = proof.source_alpha_policy.update(settings.source_alpha_ui || settings.source_alpha_monitoring, observed_fg,
           sunshine_streamline::source_enabled() || sunshine_streamline::enabled());
       }
       struct publish_alpha_decision {
@@ -667,7 +667,10 @@ namespace {
         const auto reference = sunshine_streamline::depth_capture::retain_source(backbuffer.handle, &identity);
         sunshine_game3d::ui_mask::set_request({reinterpret_cast<std::uint64_t>(runtime), identity.expected_device_identity,
           source_alpha.fg.epoch, sunshine_streamline::depth_observation_revision(), source_alpha.fg.viewport,
-          desc.texture.width, desc.texture.height, true});
+          desc.texture.width, desc.texture.height, true,
+          settings.source_alpha_monitoring && !settings.source_alpha_ui &&
+            settings.source_alpha_probe_interval_ms == sunshine_game3d::alpha_slow_probe_interval_ms ?
+              sunshine_game3d::alpha_slow_probe_interval_ms : 0});
       }
       sunshine_game3d::renderer *renderer = nullptr;
       api::resource_view rtv{};
@@ -750,7 +753,6 @@ namespace {
         p.coordinate_basis = scene.basis; p.depth_scale = scene.scale; p.strength_blend = scene.blend;
         p.projection = scene.projection; p.raw_depth_range = scene.raw_range;
         p.convergence = scene.zero; p.jitter = proof.frame.jitter.offset; p.depth_rect = scene.rect;
-        proof.frame.source_alpha = source_alpha;
         proof.diagnostic_ui_source.clear();
         proof.diagnostic_ui_capture_attempt.clear();
         if (diagnostic_owner && have_alpha_diagnostic) {
@@ -787,7 +789,30 @@ namespace {
             {"producer_completed", copy.producer_completed}, {"producer_recording_retired", copy.producer_recording_retired}
           }.dump();
         }
-        rendered = proof.frame.prepared && renderer->render(commands, backbuffer, proof.borrowed_depth, p, source_alpha.effective(), alpha_view, scene.ui_plane);
+        sunshine_game3d::alpha_auto_source alpha_observation;
+        alpha_observation.now_ms = GetTickCount64();
+        alpha_observation.session = &sunshine_game3d::source_alpha_startup_policy();
+        alpha_observation.tick_ms = alpha_observation.now_ms;
+        alpha_observation.epoch = source_alpha.fg.epoch;
+        alpha_observation.revision = sunshine_streamline::depth_observation_revision();
+        alpha_observation.viewport = source_alpha.fg.viewport;
+        alpha_observation.retained = source_alpha.retained_alpha_ready;
+        if (alpha_observation.retained) {
+          const auto &input = alpha_selection.origin.source;
+          alpha_observation.epoch = input.epoch;
+          alpha_observation.revision = input.observation_revision;
+          alpha_observation.viewport = input.viewport;
+          alpha_observation.sequence = input.sequence;
+          alpha_observation.tick_ms = input.tick;
+        }
+        // Startup detection is owned by the game process, not the renderer.
+        // After its deadline/manual selection, this records no new observations.
+        rendered = proof.frame.prepared && renderer->render(commands, backbuffer, proof.borrowed_depth, p,
+          source_alpha.effective(), alpha_view, scene.ui_plane, &alpha_observation);
+        source_alpha.automatic = true;
+        source_alpha.coverage = rendered ? renderer->consumed_alpha_auto() : alpha_observation.session->decision(alpha_observation.now_ms);
+        source_alpha.requested = source_alpha.coverage.enabled;
+        proof.frame.source_alpha = source_alpha;
         proof.native_output = rendered ? renderer->output() : api::resource{};
       }
       if (rendered) frame(runtime, {}, commands, rtv, true);

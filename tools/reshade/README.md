@@ -28,8 +28,11 @@ entry permits fallback to an explicit supported nonzero provider declaration wit
 resource flags and declared-state proof. Blocked, unknown, COMMON/zero, split, lost, invalid or
 render-pass state still rejects capture; a source requiring observed-state proof cannot fall back.
 The private copy restores the selected state. Other captures retain their existing declaration
-checks. SourceAlphaUI remains opt-in, RGB remains current and real-input reuse remains bounded;
-entirely white or black input alpha is still honored. The declaration fallback restores the
+checks. UI protection offers per-game, persistent On / Off / Auto choices. Auto starts detection
+when alpha sampling can begin, enables selective alpha provisionally, and holds its result after
+confirmation or timeout. Game/device loading does not consume the scan. The panel shows the
+current detection status and result;
+RGB remains current and real-input reuse remains bounded. The declaration fallback restores the
 original declared-source trust, without independent validation, and its live game/headset
 acceptance is pending. See the [UI protection contract](../../docs/reshade-sbs.md#setup).
 
@@ -148,13 +151,22 @@ entry and asks for one game restart; it cannot remove ReShade's already-register
 Use the installer to configure this before the first launch and migrate old separate DLLs safely.
 
 Native Game 3D stores `Strength` (percent, default 50), `DepthView` (0 game, 1 stereo depth,
-2 normal depth) and `Enabled` (default 1) under `[SUNSHINE_GAME3D]` in ReShade.ini.
+2 normal depth), `Enabled` (default 1), and `SourceAlphaUIMode` (0 Auto, 1 On, 2 Off;
+default Auto) under `[SUNSHINE_GAME3D]` in ReShade.ini. On/Off persists across restarts;
+Auto performs one observation window each game launch, beginning with the first eligible alpha
+probe. It uses an initial frequent scan followed by sparse checks for a later mask.
+The panel displays Waiting, Detecting, Off (checking), On (confirming), then the final On or Off.
+See the [UI protection contract](../../docs/reshade-sbs.md#setup) for timing and coverage rules.
 Edits save independently of ReShade's shader-preset Auto Save option; no Save button is needed.
 Reset affects only its parameter.
 The opt-in `reshade_game_present_d3d12_test` draws this production panel in the real
 ReShade GUI with collapsed and expanded sections, in addition to checking control
 edits and persistence. Model/API tests or Home-tab overlay tests alone cannot catch
 cross-compiler ABI failures in the panel's layout calls.
+With `SUNSHINE_GAME3D_NATIVE_ONLY=1`, setting
+`SUNSHINE_GAME3D_ALPHA_DELAYED_STARTUP_TEST=1` also delays device initialization
+and checks the production alpha detection window and final result in ReShade.log.
+Use a fresh output directory for this regression.
 No editable shader definitions are required. Obsolete Game3D/debug definitions are removed from
 their saved scopes; shared definitions belonging to other effects remain unchanged. Original
 SuperDepth3D controls and includes remain in their separate reference installation.

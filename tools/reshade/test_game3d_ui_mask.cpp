@@ -298,6 +298,89 @@ namespace {
       report.sdk_result_known && report.sdk_successful,
       "SDK completion lost the completed native diagnostic");
   }
+
+  void sparse_capture_preserves_scope_and_resumes_immediately() {
+    reset();
+    auto first = capture_one(1, 1000);
+    auto sparse = request(); sparse.min_capture_interval_ms = 1000;
+    mask::set_request(sparse);
+    require(!snapshots.at(first.ticket.id).released && mask::interested(7, 3, 11),
+      "Changing capture cadence revoked a pending ticket or disabled its scope");
+    complete(first); selected(1, 1001);
+    auto skipped = capture_one(2, 1100);
+    mask::diagnostic_snapshot report;
+    require(!skipped.ticket && skipped.runtime == runtime && records == 1 &&
+      mask::query_diagnostic(runtime, report) && !report.record_attempted && !report.record_completed &&
+      report.sdk_result_known && report.sdk_successful && report.wanted.min_capture_interval_ms == 1000,
+      "Sparse cadence skip performed a copy or fabricated a capture rejection");
+    selected(1, 1101);
+    require(!capture_one(3, 1999).ticket && records == 1, "Sparse cadence admitted a capture before one second");
+    auto second = capture_one(4, 2000);
+    require(second.ticket && records == 2, "Sparse cadence failed to capture at exactly one second");
+    complete(second); selected(4, 2001);
+    require(!begin(input(4, 2001)).runtime && records == 2, "Sparse cadence reserved a duplicate source sequence");
+
+    mask::set_request(request());
+    selected(4, 2002);
+    auto burst = capture_one(5, 2003);
+    require(burst.ticket && records == 3 && !snapshots.at(second.ticket.id).released,
+      "Restoring continuous capture waited for sparse cadence or revoked ready pixels");
+    complete(burst); selected(5, 2004);
+  }
+
+  void sparse_capture_still_revokes_invalid_tags_and_sdk_failures() {
+    for (unsigned invalid = 0; invalid != 6; ++invalid) {
+      reset();
+      auto sparse = request(); sparse.min_capture_interval_ms = 1000;
+      mask::set_request(sparse);
+      auto first = capture_one(1, 1000); complete(first); selected(1);
+      auto bad = input(2, 1010);
+      if (invalid == 0) { bad.resource.native = 0; bad.source = {}; }
+      if (invalid == 1) bad.resource.width = 1920;
+      if (invalid == 2) bad.resource.area.left = 1;
+      if (invalid == 3) bad.resource.area.width = 1920;
+      if (invalid == 4) bad.valid_until = scene::lifetime::unsupported;
+      auto skipped = begin(bad); mask::finish(skipped, invalid != 5);
+      absent(1011);
+      require(records == 1 && snapshots.at(first.ticket.id).released,
+        "Sparse cadence masked invalid-tag or SDK-failure revocation");
+    }
+  }
+
+  void sparse_capture_reservation_bounds_concurrent_recording() {
+    reset();
+    auto sparse = request(); sparse.min_capture_interval_ms = 1000;
+    mask::set_request(sparse);
+    std::atomic<bool> record_started{}, finish_record{};
+    during_record = [&] {
+      record_started.store(true, std::memory_order_release);
+      while (!finish_record.load(std::memory_order_acquire)) std::this_thread::yield();
+    };
+    mask::attempt first;
+    std::thread producer([&] { first = capture_one(1, 1000); });
+    while (!record_started.load(std::memory_order_acquire)) std::this_thread::yield();
+    auto skipped = capture_one(2, 1001);
+    const bool bounded = !skipped.ticket && skipped.runtime == runtime && records == 1;
+    finish_record.store(true, std::memory_order_release);
+    producer.join();
+    require(bounded && first.ticket, "Concurrent callback bypassed the sparse native-copy reservation");
+    complete(first); selected(1, 1002);
+  }
+
+  void sparse_capture_backwards_ticks_do_not_extend_the_cadence() {
+    reset();
+    auto sparse = request(); sparse.min_capture_interval_ms = 1000;
+    mask::set_request(sparse);
+    auto first = capture_one(1, 2000); complete(first);
+    require(!capture_one(2, 1500).ticket && records == 1,
+      "A backwards source tick bypassed the capture cadence");
+    selected(1, 2001);
+    require(!capture_one(3, 2999).ticket && records == 1,
+      "A backwards callback rewound the capture cadence");
+    auto next = capture_one(4, 3000);
+    require(next.ticket && records == 2, "Backwards callback poisoned later capture recovery");
+    complete(next); selected(4, 3001);
+  }
 }
 
 namespace sunshine_streamline::depth_capture {
@@ -359,6 +442,10 @@ int main() {
     diagnostic_rejections_and_no_attempt(); std::puts("PASS exact live rejection diagnostics and distinct no-attempt states");
     diagnostic_newest_scope_wins(); std::puts("PASS newest diagnostic ownership, stale completion/invalidation guards and metadata-only lifetime");
     diagnostic_in_flight_is_not_a_rejection(); std::puts("PASS pending native diagnostic is distinct from a completed result and SDK completion");
+    sparse_capture_preserves_scope_and_resumes_immediately(); std::puts("PASS sparse capture keeps pending/ready scope, exact cadence and immediate continuous resume");
+    sparse_capture_still_revokes_invalid_tags_and_sdk_failures(); std::puts("PASS sparse capture preserves invalid-tag and SDK-failure revocation");
+    sparse_capture_reservation_bounds_concurrent_recording(); std::puts("PASS concurrent callbacks share the sparse capture reservation");
+    sparse_capture_backwards_ticks_do_not_extend_the_cadence(); std::puts("PASS backwards source ticks cannot bypass or extend sparse capture cadence");
     mask::invalidate_all();
     return 0;
   } catch (const std::exception &error) {

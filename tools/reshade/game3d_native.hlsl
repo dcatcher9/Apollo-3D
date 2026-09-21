@@ -5,10 +5,12 @@
 // Ported from the frozen 2026-09-18 three-file Game 3D source. Geometry authority:
 // docs/host-sbs.md and the Depth Coordinate V2 vertical/horizontal limit shaders.
 // Optional source-alpha UI pinning reuses the horizontal pass after conditioning.
-// Its UI source is explicitly selected per game; it adds no color-layer blending.
+// Live UI selection uses bounded alpha-coverage observations; explicit replay
+// retains its captured selection. Neither path adds color-layer blending.
 // Nearest-covered-depth mode first resolves one global UI plane on this queue.
 #define SUNSHINE_UI_NEAREST_PLANE 1
 #define SUNSHINE_UI_FRONT_LIMIT_PLANE 1
+#define SUNSHINE_UI_ALPHA_COVERAGE 1
 //
 // Specialize BUFFER_WIDTH, BUFFER_HEIGHT and BUFFER_COLOR_SPACE at compile time.
 // This preserves the original per-resolution group-memory footprint. Color-space
@@ -47,7 +49,8 @@ cbuffer SunshineGame3DConstants : register(b0)
 };
 
 // Independent UI contract; preserve the existing 80-byte geometry ABI.
-// The user opts in only when this game's source alpha represents UI coverage.
+// Live coverage policy supplies the effective switch; replay uses its frozen
+// selection without re-running the temporal observation policy.
 cbuffer SunshineUIConstants : register(b1)
 {
     uint Sunshine_SourceAlphaUI;
@@ -72,6 +75,7 @@ RWTexture2D<float> SunshineHostVerticalConditionedStore : register(u2);
 RWTexture2D<float> SunshineHostFinalStore : register(u3);
 RWTexture2D<float> SunshineUIPlaneTilesStore : register(u4);
 RWTexture2D<float> SunshineUIPlaneResolvedStore : register(u5);
+RWTexture2D<uint4> SunshineAlphaCoverageStore : register(u6);
 SamplerState SunshinePointClamp : register(s0);
 SamplerState SunshineLinearClampState : register(s1);
 SamplerState SunshinePointBorder : register(s2);
@@ -85,6 +89,37 @@ float2 SunshineDepthAllocationSize()
 bool SunshineCameraFinite(float value)
 {
     return (asuint(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+// Fixed-size exact coverage observation. Every source texel participates; the
+// small result is read asynchronously, independently of whether UI is enabled.
+groupshared uint4 SunshineAlphaCoverageScratch[64];
+[numthreads(8, 8, 1)]
+void SunshineAlphaCoverageCS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID)
+{
+    uint2 first = group_id.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
+    uint2 last = (group_id.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
+    uint4 counts = 0u;
+    [loop]
+    for (uint y = first.y + thread_id.y; y < last.y; y += 8u) {
+        [loop]
+        for (uint x = first.x + thread_id.x; x < last.x; x += 8u) {
+            float alpha = SunshineSourceSampler.Load(int3(int2(x, y), 0)).a;
+            bool finite = SunshineCameraFinite(alpha);
+            counts.x += finite && alpha > 0.0 ? 1u : 0u;
+            counts.y += 1u;
+            counts.z += finite ? 0u : 1u;
+        }
+    }
+    uint lane = thread_id.y * 8u + thread_id.x;
+    SunshineAlphaCoverageScratch[lane] = counts;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint step = 32u; step != 0u; step >>= 1u) {
+        if (lane < step) SunshineAlphaCoverageScratch[lane] += SunshineAlphaCoverageScratch[lane + step];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane == 0u) SunshineAlphaCoverageStore[int2(group_id.xy)] = SunshineAlphaCoverageScratch[0];
 }
 
 float2 SunshineCameraRawDepthRange()

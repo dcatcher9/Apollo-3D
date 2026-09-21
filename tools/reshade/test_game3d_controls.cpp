@@ -37,7 +37,8 @@ namespace {
   void native_defaults_and_saved_values() {
     fake_config config;
     auto settings = load_settings(config);
-    check(settings.enabled && settings.strength == 50.f && settings.depth_view == 0 && !settings.source_alpha_ui && config.writes.empty(),
+    check(settings.enabled && settings.strength == 50.f && settings.depth_view == 0 &&
+      settings.ui_protection == source_alpha_mode::automatic && !settings.source_alpha_ui && config.writes.empty(),
       "Native defaults or passive-load persistence differ");
     config.values = {{"Strength", 0.f}, {"DepthView", 2}, {"Enabled", false}, {"Unrelated", 17}};
     settings = load_settings(config);
@@ -85,42 +86,112 @@ namespace {
       !edit_enabled(settings, false, config) && config.writes.empty(), "Destroyed runtime accepted an edit");
   }
 
-  void source_alpha_ui_is_explicit_persistent_and_runtime_scoped() {
+  void source_alpha_modes_are_persistent_and_game_scoped() {
     fake_config config, other_config;
-    config.values = {{"Strength", 23.5f}, {"DepthView", 2}, {"Enabled", false}, {"Unrelated", 17}};
+    config.values = {{"Strength", 23.5f}, {"DepthView", 2}, {"Enabled", false}, {"SourceAlphaUI", false}, {"Unrelated", 17}};
     const auto original = config.values;
     settings_state settings {load_settings(config)};
-    check(!settings.values.source_alpha_ui && config.writes.empty(), "Source alpha UI was enabled implicitly");
-    check(edit_source_alpha_ui(settings, true, config) && settings.values.source_alpha_ui &&
-      std::get<bool>(config.values.at("SourceAlphaUI")) && config.writes == std::vector<std::string>{"SourceAlphaUI"},
-      "Source alpha interpretation did not persist as an explicit boolean");
-    for (const auto &[key, value] : original)
-      check(config.values.at(key) == value, "Source alpha edit changed an unrelated setting");
-    check(settings.values.strength == 23.5f && settings.values.depth_view == 2 && !settings.values.enabled &&
-      !edit_source_alpha_ui(settings, true, config) && config.writes.size() == 1,
-      "Source alpha edit changed rendering controls or saved redundantly");
-    settings_state recreated {load_settings(config)};
-    check(recreated.values.source_alpha_ui && config.writes.size() == 1 && !load_settings(other_config).source_alpha_ui,
-      "Source alpha interpretation was lost on recreation or leaked into another game");
-    check(edit_source_alpha_ui(recreated, false, config) && !load_settings(config).source_alpha_ui &&
-      !std::get<bool>(config.values.at("SourceAlphaUI")) && config.writes.size() == 2,
-      "Disabling source alpha UI did not persist");
-    recreated.alive = false;
-    check(!edit_source_alpha_ui(recreated, true, config) && config.writes.size() == 2,
-      "Destroyed runtime accepted a source alpha edit");
+    check(settings.values.ui_protection == source_alpha_mode::off && !settings.values.source_alpha_ui && config.writes.empty(),
+      "Legacy disabled source alpha did not migrate to Off without rewriting config");
+    unsigned writes = 0;
+    for (const auto mode : {source_alpha_mode::on, source_alpha_mode::off, source_alpha_mode::automatic}) {
+      check(edit_source_alpha_mode(settings, mode, config, 1000), "Source alpha mode edit did not apply");
+      ++writes;
+      check(settings.values.ui_protection == mode && settings.values.source_alpha_ui == (mode == source_alpha_mode::on) &&
+        std::get<int>(config.values.at("SourceAlphaUIMode")) == int(mode) && config.writes.size() == writes &&
+        config.writes.back() == "SourceAlphaUIMode", "Source alpha mode was not saved to its owned integer setting");
+      for (const auto &[key, value] : original)
+        check(config.values.at(key) == value, "Source alpha mode edit changed a legacy or unrelated setting");
+      check(settings.values.strength == 23.5f && settings.values.depth_view == 2 && !settings.values.enabled &&
+        !edit_source_alpha_mode(settings, mode, config, 1000) && config.writes.size() == writes,
+        "Source alpha edit changed rendering controls or saved redundantly");
+      settings_state recreated {load_settings(config)};
+      check(recreated.values.ui_protection == mode && recreated.values.source_alpha_ui == (mode == source_alpha_mode::on) &&
+        config.writes.size() == writes, "Source alpha mode changed during passive runtime recreation");
+    }
+    const auto other = load_settings(other_config);
+    check(other.ui_protection == source_alpha_mode::automatic && !other.source_alpha_ui && other_config.writes.empty(),
+      "Another game inherited the edited game's source alpha preference");
+    check(!edit_source_alpha_mode(settings, source_alpha_mode(-1), config, 1000) &&
+      !edit_source_alpha_mode(settings, source_alpha_mode(3), config, 1000) && config.writes.size() == writes,
+      "An invalid source alpha mode reached persistence");
+    settings.alive = false;
+    check(!edit_source_alpha_mode(settings, source_alpha_mode::on, config, 1000) && config.writes.size() == writes,
+      "Destroyed runtime accepted a source alpha mode edit");
   }
 
-  void source_alpha_ui_persistence_failure_does_not_commit() {
+  void source_alpha_mode_migration_and_precedence() {
+    for (bool legacy : {false, true}) {
+      fake_config config;
+      config.values["SourceAlphaUI"] = legacy;
+      const auto migrated = load_settings(config);
+      check(migrated.ui_protection == (legacy ? source_alpha_mode::automatic : source_alpha_mode::off) &&
+        !migrated.source_alpha_ui && config.writes.empty(), "Legacy source alpha migration changed meaning or rewrote settings");
+      for (int mode : {0, 1, 2}) {
+        config.values["SourceAlphaUIMode"] = mode;
+        const auto explicit_mode = load_settings(config);
+        check(explicit_mode.ui_protection == source_alpha_mode(mode) && explicit_mode.source_alpha_ui == (mode == 1) &&
+          config.writes.empty(), "Legacy checkbox overrode the saved three-way source alpha mode");
+      }
+      for (int invalid : {-1, 3, 99}) {
+        config.values["SourceAlphaUIMode"] = invalid;
+        const auto fallback = load_settings(config);
+        check(fallback.ui_protection == source_alpha_mode::automatic && !fallback.source_alpha_ui && config.writes.empty(),
+          "Invalid source alpha configuration enabled protection or caused a passive write");
+      }
+    }
+  }
+
+  void source_alpha_mode_persistence_failure_does_not_commit() {
     fake_config config;
     settings_state settings;
+    settings.alpha_session = std::make_shared<alpha_auto_policy>(1000);
     config.on_write = [] { throw std::runtime_error("Synthetic config failure"); };
     bool threw = false;
-    try { edit_source_alpha_ui(settings, true, config); } catch (const std::runtime_error &) { threw = true; }
-    check(threw && !settings.values.source_alpha_ui && config.writes.empty(),
-      "Failed source alpha persistence changed the applied setting");
+    try { edit_source_alpha_mode(settings, source_alpha_mode::on, config, 1000); } catch (const std::runtime_error &) { threw = true; }
+    check(threw && settings.values.ui_protection == source_alpha_mode::automatic && !settings.values.source_alpha_ui &&
+      settings.alpha_session->decision(1000).monitoring && config.writes.empty(),
+      "Failed source alpha persistence changed the applied mode or session latch");
     config.on_write = [&] { settings.alive = false; };
-    check(!edit_source_alpha_ui(settings, true, config) && !settings.values.source_alpha_ui,
-      "Source alpha callback committed after runtime destruction");
+    check(!edit_source_alpha_mode(settings, source_alpha_mode::on, config, 1000) &&
+      settings.values.ui_protection == source_alpha_mode::automatic && !settings.values.source_alpha_ui &&
+      settings.alpha_session->decision(1000).monitoring,
+      "Source alpha callback committed a mode or manual latch after runtime destruction");
+  }
+
+  void source_alpha_mode_edits_control_the_session_without_restarting_it() {
+    fake_config config;
+    settings_state settings;
+    settings.alpha_session = std::make_shared<alpha_auto_policy>(1000);
+    settings.alpha_session->observe({1, 1010, 200, 1000, 0}, 1010);
+    settings.alpha_session->observe({2, 1510, 200, 1000, 0}, 1510);
+    check(edit_source_alpha_mode(settings, source_alpha_mode::off, config, 1600), "Manual Off edit was rejected");
+    auto applied = settings.alpha_session->decision(1600);
+    check(!applied.enabled && !applied.monitoring && applied.state == alpha_auto_state::manual_off,
+      "Manual Off did not cancel startup observation immediately");
+    settings.alpha_session->observe({3, 1700, 200, 1000, 0}, 1700);
+    settings.alpha_session->reset_continuity();
+    check(settings.alpha_session->decision(1750).state == alpha_auto_state::manual_off,
+      "A new observation or source reset overrode the persisted manual Off mode");
+    check(edit_source_alpha_mode(settings, source_alpha_mode::on, config, 1800), "Manual On edit after confirmation was rejected");
+    applied = settings.alpha_session->decision(1800);
+    check(applied.enabled && !applied.monitoring && applied.state == alpha_auto_state::manual_on,
+      "Manual On did not immediately override the completed session");
+    check(edit_source_alpha_mode(settings, source_alpha_mode::automatic, config, 1900), "Return to Auto was rejected");
+    applied = settings.alpha_session->decision(1900);
+    check(applied.enabled && !applied.monitoring && applied.state == alpha_auto_state::automatic_on,
+      "Returning to Auto before the deadline lost confirmed On or opened a new observation window");
+    check(load_settings(config).ui_protection == source_alpha_mode::automatic && !load_settings(config).source_alpha_ui,
+      "Loading Auto confused its selected mode with the previous session's applied result");
+
+    settings_state unqualified;
+    fake_config unqualified_config;
+    unqualified.alpha_session = std::make_shared<alpha_auto_policy>(1000);
+    check(edit_source_alpha_mode(unqualified, source_alpha_mode::on, unqualified_config, 1000), "Early manual On was rejected");
+    check(edit_source_alpha_mode(unqualified, source_alpha_mode::automatic, unqualified_config, 1000 + alpha_startup_window_ms), "Late return to Auto was rejected");
+    applied = unqualified.alpha_session->decision(1000 + alpha_startup_window_ms);
+    check(!applied.enabled && !applied.monitoring && applied.state == alpha_auto_state::automatic_off,
+      "Returning to Auto without startup evidence kept manual On or started a new detection window");
   }
 
   void source_alpha_fg_mode_survives_observation_gaps() {
@@ -427,8 +498,10 @@ int main() {
     native_defaults_and_saved_values();
     edits_save_exactly_one_owned_setting();
     invalid_edits_do_not_reach_config();
-    source_alpha_ui_is_explicit_persistent_and_runtime_scoped();
-    source_alpha_ui_persistence_failure_does_not_commit();
+    source_alpha_modes_are_persistent_and_game_scoped();
+    source_alpha_mode_migration_and_precedence();
+    source_alpha_mode_persistence_failure_does_not_commit();
+    source_alpha_mode_edits_control_the_session_without_restarting_it();
     source_alpha_fg_mode_survives_observation_gaps();
     persistence_survives_runtime_recreation();
     config_failure_and_lifetime_do_not_commit_stale_values();

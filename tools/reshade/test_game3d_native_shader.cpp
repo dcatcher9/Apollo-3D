@@ -44,6 +44,7 @@ namespace {
     {"SunshineHostFinalStore", D3D_SIT_UAV_RWTYPED, 3},
     {"SunshineUIPlaneTilesStore", D3D_SIT_UAV_RWTYPED, 4},
     {"SunshineUIPlaneResolvedStore", D3D_SIT_UAV_RWTYPED, 5},
+    {"SunshineAlphaCoverageStore", D3D_SIT_UAV_RWTYPED, 6},
     {"SunshinePointClamp", D3D_SIT_SAMPLER, 0},
     {"SunshineLinearClampState", D3D_SIT_SAMPLER, 1},
     {"SunshinePointBorder", D3D_SIT_SAMPLER, 2},
@@ -191,6 +192,7 @@ int main(int argc, char **argv) {
         std::ofstream manifest(directory / "bindings.txt");
         std::vector<entry_point> entries {
           {"PostProcessVS", "vs_5_0"}, {"SunshineRenderEyesPS", "ps_5_0"}, {"SunshinePackEyesPS", "ps_5_0"},
+          {"SunshineAlphaCoverageCS", "cs_5_0", 8, 8, 1},
         };
         if (color == 3) entries.push_back({"SunshinePreparePQPS", "ps_5_0"});
         if (width <= 3840 && height <= 3840) {

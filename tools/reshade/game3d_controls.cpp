@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cstring>
 #include <imgui.h>
 #include <limits>
 #include <memory>
@@ -24,10 +26,56 @@ namespace sunshine_game3d {
     std::recursive_mutex state_mutex;
     std::unordered_map<api::effect_runtime *, std::shared_ptr<settings_state>> runtimes;
     std::atomic_bool registered {false};
+    source_alpha_mode process_alpha_mode = source_alpha_mode::automatic;
+    bool alpha_mode_loaded = false;
+
+    const std::shared_ptr<alpha_auto_policy> &alpha_session() {
+      // Initializing a game and its GPU can take longer than the whole detection
+      // window. The renderer starts this once it can queue an eligible alpha probe.
+      static const auto session = std::make_shared<alpha_auto_policy>();
+      return session;
+    }
+
+    void log_alpha_detection(const alpha_auto_decision &decision, std::uint64_t now) {
+      // Called under state_mutex. Log transitions and the first candidate, not
+      // every frame or each flicker during the bounded confirmation interval.
+      static bool initialized = false, candidate_logged = false, sparse_logged = false, started = false;
+      static alpha_auto_state previous = alpha_auto_state::waiting_for_source;
+      const bool changed = !initialized || previous != decision.state || started != decision.window_started;
+      if (changed && (decision.state == alpha_auto_state::waiting_for_source || decision.state == alpha_auto_state::collecting))
+        candidate_logged = sparse_logged = false;
+      const bool first_sparse = decision.monitoring && decision.probe_interval_ms == alpha_slow_probe_interval_ms && !sparse_logged;
+      if (first_sparse) candidate_logged = false;
+      const bool first_candidate = decision.monitoring && decision.enabled && !candidate_logged;
+      if (!changed && !first_candidate && !first_sparse) return;
+      const char *reason = decision.state == alpha_auto_state::waiting_for_source ? "waiting_for_first_alpha_probe" :
+        decision.state == alpha_auto_state::automatic_on ? "selective_alpha_confirmed_500ms" :
+        decision.state == alpha_auto_state::automatic_off ? "deadline_without_500ms_confirmation" :
+        decision.state == alpha_auto_state::manual_on || decision.state == alpha_auto_state::manual_off ? "manual_override" :
+        first_candidate ? "selective_alpha_provisional" : first_sparse ? "sparse_observation_started" : "observation_window_started";
+      const auto elapsed = decision.window_started && now >= decision.window_start_ms ? now - decision.window_start_ms : 0;
+      char message[640];
+      std::snprintf(message, sizeof(message),
+        "Sunshine UI alpha: state=%s enabled=%d monitoring=%d reason=%s window_started=%d window_start_ms=%llu elapsed_ms=%llu probe_interval_ms=%llu accepted_samples=%llu last_covered=%u last_total=%u last_sequence=%llu last_tick_ms=%llu",
+        name(decision.state), int(decision.enabled), int(decision.monitoring), reason, int(decision.window_started),
+        static_cast<unsigned long long>(decision.window_start_ms), static_cast<unsigned long long>(elapsed),
+        static_cast<unsigned long long>(decision.probe_interval_ms), static_cast<unsigned long long>(decision.accepted_samples), decision.covered, decision.pixels,
+        static_cast<unsigned long long>(decision.sample_sequence), static_cast<unsigned long long>(decision.sample_tick_ms));
+      reshade::log::message(reshade::log::level::info, message);
+      initialized = true; previous = decision.state; started = decision.window_started;
+      if (first_candidate) candidate_logged = true;
+      if (first_sparse) sparse_logged = true;
+    }
 
     struct config_backend {
       api::effect_runtime *runtime;
       template<class T> void read(const char *key, T &value) {
+        // UI protection is one game-process choice, including games with more
+        // than one runtime. Always reload it from the same per-game file.
+        if (std::strcmp(key, "SourceAlphaUIMode") == 0) {
+          reshade::get_config_value(nullptr, config_section, key, value);
+          return;
+        }
         // The installer migrates ReShade.ini. Secondary runtimes may use a
         // separate ReShade[index].ini; inherit only keys they do not override.
         if (!reshade::get_config_value(runtime, config_section, key, value))
@@ -36,7 +84,8 @@ namespace sunshine_game3d {
       template<class T> void write(const char *key, T value) {
         // ReShade saves its configuration independently of shader presets and
         // their Auto Save setting. There is no effect reload or uniform write.
-        reshade::set_config_value(runtime, config_section, key, value);
+        reshade::set_config_value(std::strcmp(key, "SourceAlphaUIMode") == 0 ? nullptr : runtime,
+          config_section, key, value);
       }
     };
 
@@ -46,7 +95,15 @@ namespace sunshine_game3d {
         data = std::make_shared<settings_state>();
         config_backend config {runtime};
         data->values = load_settings(config);
+        data->alpha_session = alpha_session();
+        if (!alpha_mode_loaded) {
+          process_alpha_mode = data->values.ui_protection;
+          if (process_alpha_mode != source_alpha_mode::automatic)
+            data->alpha_session->set_manual(process_alpha_mode == source_alpha_mode::on);
+          alpha_mode_loaded = true;
+        }
       }
+      data->values.ui_protection = process_alpha_mode;
       return data;
     }
 
@@ -187,6 +244,7 @@ namespace sunshine_game3d {
 
   void initialize() {
     if (registered.exchange(true)) return;
+    alpha_session();
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(sunshine_addon_lifetime::guarded<destroy>);
   }
 
@@ -201,8 +259,18 @@ namespace sunshine_game3d {
   render_settings query_render_settings(api::effect_runtime *runtime) {
     std::lock_guard<std::recursive_mutex> lock(state_mutex);
     if (!runtime || !registered) return {default_strength, 0, false};
-    return get_state(runtime)->values;
+    const auto data = get_state(runtime);
+    auto result = data->values;
+    const auto now = GetTickCount64();
+    const auto decision = data->alpha_session->decision(now);
+    log_alpha_detection(decision, now);
+    result.source_alpha_ui = decision.enabled;
+    result.source_alpha_monitoring = decision.monitoring;
+    result.source_alpha_probe_interval_ms = decision.probe_interval_ms;
+    return result;
   }
+
+  alpha_auto_policy &source_alpha_startup_policy() { return *alpha_session(); }
 
   bool draw(api::effect_runtime *runtime) {
     if (!runtime) return false;
@@ -239,11 +307,23 @@ namespace sunshine_game3d {
     }
     strength_control(*data, config);
     if (!data->alive) { finish(); return false; }
-    bool source_alpha_ui = data->values.source_alpha_ui;
-    if (ImGui::Checkbox("Keep UI on a separate plane (source alpha)", &source_alpha_ui))
-      edit_source_alpha_ui(*data, source_alpha_ui, config);
-    ImGui::SetItemTooltip("Enable only when this game's real-frame alpha represents UI. White and gray keep composited UI on one flat plane at the smoothed inverse-depth midpoint, independently of the scene zero target. Its displayed position follows the current scene mapping and 3D strength. Black keeps scene depth. All white makes the entire frame flat at the UI plane. Frame Generation reuses the latest completed real-input alpha; current RGB stays current. Fast-changing UI may briefly lag. If that input is unavailable, UI protection waits instead of using generated output alpha.");
+    // Display order is On / Off / Auto; persisted enum values remain stable.
+    const source_alpha_mode alpha_modes[]{source_alpha_mode::on, source_alpha_mode::off, source_alpha_mode::automatic};
+    int alpha_choice = data->values.ui_protection == source_alpha_mode::on ? 0 : data->values.ui_protection == source_alpha_mode::off ? 1 : 2;
+    if (ImGui::Combo("UI protection (source alpha)", &alpha_choice, "On\0Off\0Auto\0")) {
+      if (edit_source_alpha_mode(*data, alpha_modes[alpha_choice], config, GetTickCount64()))
+        process_alpha_mode = data->values.ui_protection;
+    }
+    ImGui::SetItemTooltip("%s", "On and Off are saved per game and override detection, including after restart. Auto probes frequently for one minute from the first eligible alpha frame, then once per second until five minutes total. Selective alpha enables protection immediately and resumes frequent sampling; 500 ms of sustained evidence confirms On and stops monitoring. Without confirmation by five minutes, detection ends with Off. Changing back to Auto does not restart a scan that has already begun. Frame Generation still requires completed real-input alpha.");
     if (!data->alive) { finish(); return false; }
+    const auto alpha_now = GetTickCount64();
+    const auto alpha_result = data->alpha_session->decision(alpha_now);
+    log_alpha_detection(alpha_result, alpha_now);
+    if (data->values.ui_protection == source_alpha_mode::automatic)
+      ImGui::TextWrapped("Auto: %s", alpha_result.state == alpha_auto_state::waiting_for_source ? "Waiting for a game frame..." : alpha_result.monitoring ?
+        (alpha_result.enabled ? "On (confirming for 500 ms...)" :
+          alpha_result.probe_interval_ms == alpha_slow_probe_interval_ms ? "Off (checking once per second...)" : "Detecting... (protection off)") :
+        alpha_result.enabled ? "On" : "Off");
     if (source_alpha.blocked_by_fg()) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
       if (source_alpha.input_state == source_alpha_input_state::state_conflict)
@@ -257,7 +337,7 @@ namespace sunshine_game3d {
       ImGui::PopStyleColor();
     } else if (source_alpha.effective()) {
       ImGui::TextWrapped("UI protection: %s", source_alpha.retained_alpha_ready ?
-        "using latest real-frame alpha (reused during FG)" : "using current real-frame alpha");
+        "using real-input alpha (reused during FG)" : "using source alpha");
     }
     camera_hint(automatic, data->values.enabled, fg);
     if (data->values.depth_view != 0) {

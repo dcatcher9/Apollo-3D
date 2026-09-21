@@ -141,6 +141,293 @@ namespace {
     fixture.submit();
   }
 
+  void check_alpha_auto_d3d12(fixture_t &fixture, sunshine_game3d::renderer &renderer, std::ostream &report) {
+    using namespace sunshine_game3d;
+    auto *queue = observed.runtime->get_command_queue();
+    auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
+    const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+    const auto original = fixture.source_bytes;
+    const auto parameters = native_cases().front().parameters;
+    const ui_plane_parameters plane{ui_plane_mode::front_limit, 0.f};
+    const auto upload = [&] {
+      void *mapped = nullptr;
+      const D3D12_RANGE no_read{0, 0};
+      checked(fixture.source_upload->Map(0, &no_read, &mapped), "Map D3D12 alpha fixture source");
+      const auto row = size_t(width) * bytes_per_pixel(fixture.source_format);
+      for (unsigned y = 0; y < height; ++y)
+        std::memcpy(static_cast<std::uint8_t *>(mapped) + fixture.source_footprint.Offset +
+          size_t(y) * fixture.source_footprint.Footprint.RowPitch, fixture.source_bytes.data() + size_t(y) * row, row);
+      fixture.source_upload->Unmap(0, nullptr);
+    };
+    // 0 = full, 1 = selective, 2 = empty. RGB is identical in every case.
+    const auto pattern = [&](unsigned mask) {
+      fixture.source_bytes = original;
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const bool covered = mask != 2 && (mask == 0 ||
+          (x >= width / 3 && x < width / 2 && y >= height / 4 && y < height * 3 / 4));
+        const auto pixel = size_t(y) * width + x;
+        if (fixture.color == 1) fixture.source_bytes[pixel * 4 + 3] = covered ? 255 : 0;
+        else if (fixture.color == 2) {
+          const std::uint16_t alpha = covered ? 0x3c00 : 0;
+          std::memcpy(fixture.source_bytes.data() + pixel * 8 + 6, &alpha, sizeof(alpha));
+        } else {
+          std::uint32_t packed = 0;
+          std::memcpy(&packed, fixture.source_bytes.data() + pixel * 4, sizeof(packed));
+          packed = (packed & 0x3fffffffu) | (covered ? 0xc0000000u : 0u);
+          std::memcpy(fixture.source_bytes.data() + pixel * 4, &packed, sizeof(packed));
+        }
+      }
+      upload();
+    };
+    const auto render = [&](bool eligible, const alpha_auto_source *automatic) {
+      write_native_source(fixture, backbuffer);
+      require(renderer.render(queue->get_immediate_command_list(), source, fixture.depth_view,
+        parameters, eligible, {}, plane, automatic), "Automatic-alpha D3D12 render failed");
+      const auto decision = renderer.consumed_alpha_auto();
+      require(renderer.consumed_source_alpha_ui() == (automatic ? eligible && decision.enabled : eligible),
+        "Automatic-alpha D3D12 decision differed from the consumed b1 switch");
+      queue->flush_immediate_command_list();
+      renderer.finish_present();
+      queue->wait_idle(); // Test-only drain: next render must consume this exact completed observation.
+      return decision;
+    };
+    struct result { std::vector<std::uint8_t> field, color; };
+    const auto pixels = [&] {
+      const auto resources = renderer.diagnostics();
+      return result{fixture.read(reinterpret_cast<ID3D12Resource *>(resources.final_field.handle)),
+        fixture.read(reinterpret_cast<ID3D12Resource *>(resources.sbs.handle))};
+    };
+    const auto equal = [&](const result &expected, const char *message) {
+      const auto actual = pixels();
+      require(actual.field == expected.field && actual.color == expected.color, message);
+    };
+    // Explicit rendering supplies independent pixel references before any
+    // automatic history exists; reference calls must not reset a live streak.
+    pattern(false); render(false, nullptr); const auto full_off = pixels();
+    render(true, nullptr); const auto full_on = pixels();
+    require(full_on.field != full_off.field, "D3D12 automatic fixture has no meaningful UI/scene difference");
+    pattern(true); render(false, nullptr); const auto selective_off = pixels();
+    render(true, nullptr); const auto selective_on = pixels();
+    require(selective_on.field != selective_off.field, "D3D12 selective fixture has no UI field difference");
+    pattern(2); render(false, nullptr); const auto empty_off = pixels();
+    const auto unchanged = [&](alpha_probe_counters before, const char *message) {
+      const auto after = renderer.alpha_probe_activity();
+      require(after.submitted == before.submitted && after.mapped == before.mapped, message);
+    };
+    pattern(false);
+    alpha_auto_source input;
+    input.epoch = 17; input.revision = 23; input.viewport = 1;
+    alpha_auto_policy full_session(1000);
+    input.session = &full_session;
+    alpha_auto_decision decision;
+    for (unsigned frame = 0; frame < 3; ++frame) {
+      input.sequence = frame + 1;
+      input.now_ms = input.tick_ms = 1000 + frame * 100;
+      decision = render(true, &input);
+      require(!decision.enabled && decision.monitoring, "D3D12 full alpha enabled provisional UI");
+      if (!frame) require(!decision.sample_sequence, "D3D12 auto used an uncompleted initial readback");
+      else require(decision.covered == width * height && decision.pixels == width * height &&
+          decision.sample_sequence == input.sequence - 1 && decision.sample_tick_ms == input.tick_ms - 100,
+        "D3D12 startup coverage count or completed-fence sample identity is incorrect");
+    }
+    const auto full_stopped = renderer.alpha_probe_activity();
+    input.now_ms = 1000 + alpha_startup_window_ms;
+    decision = render(true, &input);
+    require(!decision.enabled && !decision.monitoring && decision.state == alpha_auto_state::automatic_off,
+      "D3D12 full-only startup did not choose Off at the original deadline");
+    equal(full_off, "D3D12 startup Off does not match explicit scene stereo");
+    pattern(true); input.now_ms += 5000; render(true, &input);
+    equal(selective_off, "D3D12 post-startup selective alpha changed frozen Off choice");
+    unchanged(full_stopped, "D3D12 full-only startup continued dispatch/map after deadline");
+
+    const auto selective_pixels = (width / 2 - width / 3) * (height * 3 / 4 - height / 4);
+    const auto sample = [&](unsigned mask, std::uint64_t tick, bool monitoring = true) {
+      ++input.sequence; input.now_ms = input.tick_ms = tick;
+      pattern(mask); render(true, &input);
+      decision = render(true, &input);
+      const auto expected_covered = mask == 0 ? width * height : mask == 1 ? selective_pixels : 0;
+      require(decision.sample_sequence == input.sequence && decision.sample_tick_ms == tick &&
+          decision.covered == expected_covered && decision.pixels == width * height,
+        "D3D12 alpha reduction lost exact counts or completed source identity");
+      require(decision.enabled == (mask == 1) && decision.monitoring == monitoring,
+        "D3D12 alpha observation applied the wrong provisional or confirmed choice");
+      equal(mask == 1 ? selective_on : mask == 0 ? full_off : empty_off,
+        "D3D12 provisional/confirmed UI does not match its explicit pixel reference");
+      if (!monitoring) require(decision.state == alpha_auto_state::automatic_on,
+        "D3D12 500-ms selective interval did not confirm Auto On early");
+    };
+    {
+      alpha_auto_policy delayed_session;
+      input.session = &delayed_session; ++input.epoch; input.sequence = 0; input.now_ms = 1000;
+      pattern(true);
+      const auto waiting = renderer.alpha_probe_activity();
+      decision = render(false, &input);
+      equal(selective_off, "D3D12 ineligible waiting source changed stereo");
+      input.now_ms = 14000; input.retained = true;
+      decision = render(true, &input); // Retained source requested, but no view is available.
+      require(decision.monitoring && !decision.window_started && decision.state == alpha_auto_state::waiting_for_source,
+        "D3D12 unavailable startup alpha consumed its detection window");
+      unchanged(waiting, "D3D12 unavailable startup source submitted or mapped a probe");
+      input.retained = false; input.now_ms = input.tick_ms = 15000; input.sequence = 1;
+      decision = render(true, &input);
+      require(decision.window_started && decision.window_start_ms == 15000 && decision.monitoring &&
+          !decision.sample_sequence && renderer.alpha_probe_activity().submitted == waiting.submitted + 1,
+        "D3D12 first eligible dispatch did not publish its delayed window start immediately");
+      equal(selective_off, "D3D12 uncompleted first probe changed UI");
+      decision = render(true, &input);
+      require(decision.enabled && decision.monitoring, "D3D12 delayed first selective sample did not enable provisional UI");
+      equal(selective_on, "D3D12 delayed provisional UI differs from explicit protection");
+      sample(1, 15500, false);
+      const auto stopped = renderer.alpha_probe_activity();
+      input.now_ms = 16000; pattern(false); render(true, &input);
+      equal(full_on, "D3D12 delayed detection failed to preserve confirmed Auto On");
+      unchanged(stopped, "D3D12 delayed detection continued probes after confirmation");
+    }
+    {
+      alpha_auto_policy delayed_full_session;
+      input.session = &delayed_full_session; ++input.epoch; input.sequence = 1;
+      input.now_ms = input.tick_ms = 35000; pattern(false);
+      delayed_full_session.set_manual(false);
+      const auto waiting = renderer.alpha_probe_activity();
+      render(true, &input);
+      delayed_full_session.set_manual(true); decision = render(true, &input);
+      require(!decision.window_started, "D3D12 manual mode started an automatic detection window");
+      unchanged(waiting, "D3D12 manual mode submitted an automatic probe");
+      delayed_full_session.set_automatic(39000);
+      sample(0, 40000);
+      require(decision.window_start_ms == 40000, "D3D12 Auto resume started before a probe could be queued");
+      sample(0, 40400);
+      input.now_ms = 40000 + alpha_startup_window_ms - 1; decision = render(true, &input);
+      require(decision.monitoring, "D3D12 delayed full-alpha detection expired before five minutes");
+      const auto stopped = renderer.alpha_probe_activity();
+      input.now_ms = 40000 + alpha_startup_window_ms; decision = render(true, &input);
+      require(!decision.enabled && !decision.monitoring, "D3D12 delayed full-alpha deadline failed to choose Off");
+      equal(full_off, "D3D12 delayed full-alpha Off differs from explicit scene rendering");
+      input.now_ms += 5000; pattern(true); render(true, &input);
+      equal(selective_off, "D3D12 selective alpha restarted a completed delayed window");
+      unchanged(stopped, "D3D12 delayed full-alpha detection continued probes after deadline");
+    }
+    alpha_auto_policy empty_session(16000);
+    input.session = &empty_session; ++input.epoch; input.sequence = 0;
+    sample(2, 16100); sample(2, 16400);
+    const auto empty_stopped = renderer.alpha_probe_activity();
+    input.now_ms = 16000 + alpha_startup_window_ms; decision = render(true, &input);
+    require(!decision.enabled && !decision.monitoring && decision.state == alpha_auto_state::automatic_off,
+      "D3D12 empty-only startup did not freeze Off");
+    equal(empty_off, "D3D12 empty-only startup changed scene stereo");
+    unchanged(empty_stopped, "D3D12 empty-only startup dispatched/mapped after its deadline");
+
+    alpha_auto_policy selective_session(30000);
+    input.session = &selective_session; ++input.epoch; input.sequence = 0;
+    sample(1, 30100); // First selective observation immediately protects UI.
+    sample(0, 30400); // Full alpha interrupts before 500 ms and turns UI off.
+    sample(1, 30600);
+    sample(2, 30900); // Zero alpha also interrupts provisional protection.
+    sample(1, 31100);
+    ++input.revision;
+    sample(1, 31400); // Scope replacement requires a new confirmation interval.
+    sample(1, 31600); // 500 ms since the old scope still must not confirm.
+    sample(1, 31900, false); // Exactly 500 ms in the new scope confirms early.
+    const auto selective_stopped = renderer.alpha_probe_activity();
+    ++input.revision; input.now_ms = 32000; pattern(true); decision = render(true, &input);
+    require(decision.enabled && !decision.monitoring && decision.state == alpha_auto_state::automatic_on,
+      "D3D12 source change erased early confirmed Auto On");
+    equal(selective_on, "D3D12 confirmed On differs from explicit selective protection");
+    pattern(false); input.now_ms = 32100; render(true, &input);
+    equal(full_on, "D3D12 full alpha altered early confirmed Auto On");
+    pattern(2); input.now_ms = 32200; decision = render(true, &input);
+    require(decision.enabled && !decision.monitoring, "D3D12 zero alpha altered confirmed Auto On");
+    equal(empty_off, "D3D12 confirmed On with empty alpha changed scene stereo");
+    pattern(false); input.now_ms = 30000 + alpha_startup_window_ms + 5000; render(true, &input);
+    equal(full_on, "D3D12 post-deadline full alpha altered confirmed Auto On");
+    unchanged(selective_stopped, "D3D12 confirmed Auto On dispatched/mapped before or after deadline");
+    renderer.reset_after_runtime_drain();
+    require(renderer.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color)),
+      "D3D12 reconfigure after startup failed");
+    pattern(true); render(true, &input);
+    equal(selective_on, "D3D12 renderer recreation forgot the frozen process choice");
+    unchanged({}, "D3D12 recreated renderer monitored a completed startup session");
+
+    alpha_auto_policy pending_session(50000);
+    input.session = &pending_session; ++input.epoch; input.sequence = 1;
+    input.now_ms = input.tick_ms = 50000 + alpha_startup_window_ms - 510;
+    render(true, &input); render(true, &input);
+    ++input.sequence; input.now_ms = input.tick_ms = 50000 + alpha_startup_window_ms - 10; render(true, &input);
+    const auto pending = renderer.alpha_probe_activity();
+    input.now_ms = 50000 + alpha_startup_window_ms; decision = render(true, &input);
+    require(!decision.enabled && !decision.monitoring,
+      "D3D12 late completed sample qualified after the startup deadline");
+    equal(selective_off, "D3D12 deadline discard changed scene stereo");
+    unchanged(pending, "D3D12 deadline retirement mapped a pending startup observation");
+
+    alpha_auto_policy manual_session(70000);
+    input.session = &manual_session; ++input.epoch; input.sequence = 1;
+    input.now_ms = input.tick_ms = 70100; pattern(false); render(true, &input);
+    const auto manual_stopped = renderer.alpha_probe_activity();
+    manual_session.set_manual(true); input.now_ms = 70101;
+    decision = render(true, &input);
+    require(decision.enabled && !decision.monitoring && decision.state == alpha_auto_state::manual_on,
+      "D3D12 manual On did not bypass startup immediately");
+    equal(full_on, "D3D12 manual On differs from explicit UI rendering");
+    manual_session.set_manual(false); decision = render(true, &input);
+    require(!decision.enabled && !decision.monitoring && decision.state == alpha_auto_state::manual_off,
+      "D3D12 manual Off did not bypass startup immediately");
+    equal(full_off, "D3D12 manual Off differs from explicit scene rendering");
+    unchanged(manual_stopped, "D3D12 manual override dispatched/mapped pending startup work");
+    {
+      constexpr std::uint64_t cadence_start = 200000;
+      alpha_auto_policy cadence_session(cadence_start);
+      input.session = &cadence_session; ++input.epoch; input.sequence = 0;
+      const auto queued = [&](unsigned mask, std::uint64_t offset, bool monitoring = true) {
+        const auto before = renderer.alpha_probe_activity();
+        sample(mask, cadence_start + offset, monitoring);
+        const auto after = renderer.alpha_probe_activity();
+        require(after.submitted == before.submitted + 1 && after.mapped == before.mapped + 1,
+          "D3D12 cadence did not queue/map exactly one eligible observation");
+      };
+      const auto throttled = [&](std::uint64_t offset, std::uint64_t interval) {
+        input.now_ms = input.tick_ms = cadence_start + offset; ++input.sequence; pattern(false);
+        const auto before = renderer.alpha_probe_activity();
+        render(true, &input); decision = render(true, &input);
+        equal(full_off, "D3D12 throttled opaque alpha changed UI");
+        require(decision.probe_interval_ms == interval, "D3D12 renderer consumed the wrong alpha probe interval");
+        unchanged(before, "D3D12 cadence admitted a probe before its next interval");
+      };
+      queued(0, 0);
+      throttled(99, 100);
+      queued(0, 100);
+      queued(0, alpha_initial_window_ms - 100);
+      throttled(alpha_initial_window_ms, 1000);
+      throttled(alpha_initial_window_ms + 899, 1000);
+      queued(0, alpha_initial_window_ms + 900);
+      queued(1, alpha_initial_window_ms + 1900);
+      require(decision.probe_interval_ms == 100, "D3D12 sparse selective sample did not request fast confirmation");
+      queued(0, alpha_initial_window_ms + 2000);
+      require(decision.probe_interval_ms == 1000, "D3D12 failed candidate did not return to one probe per second");
+      throttled(alpha_initial_window_ms + 2999, 1000);
+      queued(0, alpha_initial_window_ms + 3000);
+      queued(1, alpha_initial_window_ms + 4000);
+      queued(1, alpha_initial_window_ms + 4100);
+      queued(1, alpha_initial_window_ms + 4400);
+      queued(1, alpha_initial_window_ms + 4500, false);
+      require(!decision.probe_interval_ms, "D3D12 confirmed candidate retained an active probe interval");
+      const auto stopped = renderer.alpha_probe_activity();
+      input.now_ms = cadence_start + alpha_startup_window_ms; pattern(false); render(true, &input);
+      equal(full_on, "D3D12 sparse-phase confirmation was lost at five minutes");
+      unchanged(stopped, "D3D12 sparse-phase confirmation restarted monitoring at final deadline");
+    }
+    render(true, nullptr);
+    equal(full_on, "D3D12 startup decision leaked into explicit replay");
+    render(false, nullptr);
+    fixture.source_bytes = original;
+    upload();
+    write_native_source(fixture, backbuffer);
+    require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == original,
+      "D3D12 alpha regression failed to restore its original source");
+    report << "startup-alpha D3D12 exact_counts=1 completed_sample_identity=1 delayed_first_source=1 ineligible_manual_do_not_start=1 provisional_on=1 zero_full_interrupt=1 confirmation_500ms=1 fast_60s_then_1hz=1 fixed_5min=1 post_confirmation_and_deadline_dispatch_and_map=0 pending_discard=1 renderer_recreation=1 manual_override=1 explicit_pixels=1\n";
+    std::puts("PASS D3D12 startup alpha: provisional UI, 500ms confirmation, zero later dispatch/map, pending discard, recreation and manual/explicit pixel parity");
+  }
+
   void check_native_parity(fixture_t &fixture, const fs::path &directory) {
     fixture.discover();
     const auto tests = native_cases();
@@ -524,6 +811,7 @@ namespace {
     require(original_depth.size() == restored_depth.size() * sizeof(float), "Original depth readback size changed");
     std::memcpy(restored_depth.data(), original_depth.data(), original_depth.size());
     fixture.upload_depth(restored_depth);
+    check_alpha_auto_d3d12(fixture, renderer, report);
     std::puts("PASS nearest-UI D3D12 current GPU scalar, corner coverage, both depth directions, floor/strength and v3 dump bindings");
     require(observed.renders == effect_renders, "An FX technique ran during native parity");
     owner_queue->wait_idle();

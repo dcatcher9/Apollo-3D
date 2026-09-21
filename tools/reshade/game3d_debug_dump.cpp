@@ -126,7 +126,16 @@ namespace sunshine_game3d {
       result["source_alpha_capture_attempt"] = f.ui_capture_attempt_metadata.empty() ? json(nullptr) :
         json::parse(f.ui_capture_attempt_metadata);
       result["source_alpha_ui_status"] = f.source_alpha_ui ? (external_ui ? "captured_pre_fg_alpha" : "present_alpha") :
-        f.source_alpha_decision.blocked_by_fg() ? "unavailable_fg_output_alpha" : "disabled";
+        f.source_alpha_decision.blocked_by_fg() ? "unavailable_fg_output_alpha" :
+        f.source_alpha_decision.automatic ? name(f.source_alpha_decision.coverage.state) : "disabled";
+      if (f.source_alpha_decision.automatic) {
+        const auto &coverage = f.source_alpha_decision.coverage;
+        result["source_alpha_auto"] = {{"state", name(coverage.state)}, {"enabled", coverage.enabled}, {"monitoring", coverage.monitoring},
+          {"window_started", coverage.window_started}, {"window_start_ms", coverage.window_start_ms}, {"probe_interval_ms", coverage.probe_interval_ms}, {"accepted_samples", coverage.accepted_samples},
+          {"covered_pixels", coverage.covered}, {"total_pixels", coverage.pixels},
+          {"sample_sequence", coverage.sample_sequence}, {"sample_tick_ms", coverage.sample_tick_ms},
+          {"meaning", "Detection starts with the first eligible alpha probe, not process creation, or follows an explicit manual choice. It probes frequently for one minute, then once per second until five minutes total. Selective alpha enables protection provisionally and resumes frequent probing; 500 ms of sustained evidence confirms On and stops monitoring. Without confirmation, the five-minute deadline fixes Off. Manual choices also stop monitoring. A retained choice is not ongoing semantic validation. Replay uses source_alpha_ui without rerunning detection."}};
+      }
       const auto &fg = f.source_alpha_decision.fg;
       result["source_alpha_ui_fg_mode"] = {{"known", fg.known}, {"enabled", fg.enabled},
         {"automatic", fg.automatic}, {"generated_frames", fg.generated_frames}, {"epoch", fg.epoch},
@@ -143,7 +152,7 @@ namespace sunshine_game3d {
           nearest_mode ? "depth_midpoint_nearest_ui" : front_mode ? "front_limit" : "unknown"},
         {"inverse_depth", std::isfinite(f.ui_plane.inverse_depth) ? json(f.ui_plane.inverse_depth) : json(nullptr)},
         {"inverse_depth_bits", ui[2]},
-        {"meaning", "Alpha from ui_alpha_source is explicitly selected as UI coverage for this game. Horizontal-pass t0 uses that input; eye RGB remains current source_color. Mode 3 pins UI at the current positive display bound scaled by strength and stereo blend, independent of scene depth/gain/zero; its inverse-depth word is unused. Screen mode pins at zero disparity. Mode 1 uses the submitted independent depth. Mode 2 reduces max(submitted midpoint floor, nearest valid decoded depth under finite positive alpha). Both depth modes use b0 geometry. The horizontal protection includes one bilinear-support pixel. All-white masks are entirely UI; all-black masks have no UI constraints."}};
+        {"meaning", "When source_alpha_ui is enabled, alpha from ui_alpha_source supplies UI coverage. Horizontal-pass t0 uses that input; eye RGB remains current source_color. Mode 3 pins UI at the current positive display bound scaled by strength and stereo blend, independent of scene depth/gain/zero; its inverse-depth word is unused. Screen mode pins at zero disparity. Mode 1 uses the submitted independent depth. Mode 2 reduces max(submitted midpoint floor, nearest valid decoded depth under finite positive alpha). Both depth modes use b0 geometry. The horizontal protection includes one bilinear-support pixel. With protection enabled all-white masks are entirely UI; all-black masks have no UI constraints."}};
       return result;
     }
 

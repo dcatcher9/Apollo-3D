@@ -2,6 +2,7 @@
 #pragma once
 #include "game3d_stereo_contract.h"
 #include "game3d_ui_plane.h"
+#include "game3d_alpha_auto.h"
 #include <windows.h>
 #include <reshade_api.hpp>
 #include <array>
@@ -34,6 +35,10 @@ namespace sunshine_game3d {
       vertical_field{}, final_field{}, sbs{}, ui_source{}, ui_plane_tiles{}, ui_plane_resolved{};
   };
 
+  struct alpha_probe_counters {
+    std::uint64_t submitted = 0, mapped = 0; // Recorded probes and native Map calls.
+  };
+
   // One runtime owns its GPU working set. All passes run on ReShade's graphics
   // queue; borrowed depth is consumed entirely within the owner's read lease.
   class renderer {
@@ -48,7 +53,8 @@ namespace sunshine_game3d {
     std::string_view active_shader_source() const;
     bool render(reshade::api::command_list *commands, reshade::api::resource backbuffer,
       reshade::api::resource_view depth, const render_parameters &parameters, bool source_alpha_ui = false,
-      reshade::api::resource_view alpha_source = {}, const ui_plane_parameters &plane = {});
+      reshade::api::resource_view alpha_source = {}, const ui_plane_parameters &plane = {},
+      const alpha_auto_source *automatic = nullptr);
     // Lazily allocated at the current color extent/format. Copies and reads use
     // the renderer queue; shader_resource is the resting state. Only alpha is
     // consumed, never this retained input's RGB.
@@ -73,6 +79,11 @@ namespace sunshine_game3d {
     diagnostic_resources diagnostics() const;
     render_parameters consumed_parameters() const;
     bool consumed_source_alpha_ui() const;
+    // Process-owned toggle decision, independent of current FG input eligibility.
+    // The caller keeps automatic->session alive for this render; the renderer
+    // owns only bounded GPU observation storage, never the detection deadline.
+    alpha_auto_decision consumed_alpha_auto() const;
+    alpha_probe_counters alpha_probe_activity() const;
     // Submitted bits. In nearest-UI mode inverse_depth is the floor; only the
     // current-render diagnostic GPU scalar contains the resolved global plane.
     // Front-limit mode ignores this depth word and dispatches no UI reduction.
