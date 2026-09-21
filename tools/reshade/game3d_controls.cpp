@@ -3,6 +3,7 @@
 #include "game3d_controls.h"
 #include "game3d_controls_model.h"
 #include "game3d_stereo_contract.h"
+#include "game3d_ui_adaptive.h"
 
 // COM declares MinGW's __uuidof support before ReShade's API templates.
 #include <Windows.h>
@@ -214,7 +215,7 @@ namespace sunshine_game3d {
           has_zero, scale.zero_inverse, scale.has_zero_target(), scale.target_zero_inverse);
         row("Stereo gain K", "Target is L/Q, independently of the zero plane and strength slider. Current gain follows it gradually in either direction. The renderer limits each pixel's final parallax during adaptation. A positive flat scene can update zero while holding gain. K is also called H in relative-depth diagnostics; 1/K is not the measured reference Q.",
           scale.has_value(), scale.value, scale.has_target(), scale.target_value);
-        row("UI midpoint q", "UI plane follows the independently smoothed inverse-depth midpoint (q min + q max) / 2. This is separate from the scene zero plane and is not a physical-distance midpoint. Current scene gain, zero, strength and stereo blend map this depth to displayed parallax.",
+        row("Reference midpoint q", "Independently smoothed inverse-depth midpoint (q min + q max) / 2, retained for comparison with the earlier UI placement. Adaptive UI chooses a fraction of the display parallax limit instead of this depth.",
           scale.has_ui_midpoint, scale.ui_midpoint_inverse, scale.has_ui_midpoint_target(), scale.target_ui_midpoint_inverse);
         row("Normalization L", "Full-strength normalization captured for this output shape and parallax limit. Target K=L/Q; L is dimensionless and does not recover a physical camera baseline.",
           scale.has_value() && std::isfinite(scale.normalization) && scale.normalization > 0., scale.normalization);
@@ -232,6 +233,9 @@ namespace sunshine_game3d {
       ImGui::TextWrapped("Per-eye parallax limit: %.3g%% of image width at current strength",
         double(default_disparity_limit_uv) * bounded_strength);
       ImGui::SetItemTooltip("Maximum horizontal shift per eye in the source image. Re-entry and reused-frame strength protection can reduce it further. This limits rendered parallax, not raw depth values.");
+      ImGui::TextWrapped("UI plane: adaptive, with limited separation");
+      ImGui::SetItemTooltip("Prefers screen depth. Inside the central 75%% of image width and height, moves nearer when foreground conflicts cover more than %u%% of UI or %.1f%% of the central image. Per-eye movement is limited to 0.35%% of image width and 50%% of the scene front limit. Retreat requires both overlap measures to clear and is delayed and smoothed. The system cursor follows UI; ReShade controls stay at screen depth. The limits may leave overlap.",
+        static_cast<unsigned>(ui_adaptive::entry_conflict_percent), double(ui_adaptive::entry_area_per_mille) / 10.);
       if (scale.gain_below_target && scale.has_target()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
         ImGui::TextWrapped("Stereo gain is below its current target.");

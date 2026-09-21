@@ -307,6 +307,7 @@ namespace {
     std::uint64_t last_submitted = 0;
     std::uint64_t native_swapchain = 0;
     std::uint64_t pending_qpc = 0;
+    float pending_ui_parallax_uv = 0.f;
     std::uint32_t pending_slot = wire::slot_count;
     bool signal_failed = false;
     bool pending_overlay = false;
@@ -463,6 +464,7 @@ namespace {
   // No borrowed textures or independently mutable copies of readiness live here.
   struct scene_parameters_t {
     bool owned = false, ready = false;
+    std::uint64_t generic_routing_epoch = 0;
     int basis = 0;
     float scale = 0.f, blend = 0.f;
     // Held-depth presentations reuse the geometry admitted at this strength.
@@ -470,7 +472,9 @@ namespace {
     float admitted_strength = sunshine_game3d::default_strength;
     std::array<float, 2> projection{}, zero{}, raw_range{0.f, 1.f};
     std::array<float, 4> rect{0.f, 0.f, 1.f, 1.f};
-    sunshine_game3d::ui_plane_parameters ui_plane;
+    // Temporary scene unavailability suspends this live policy; it must not
+    // masquerade as an explicit switch to a different placement mode.
+    sunshine_game3d::ui_plane_parameters ui_plane{sunshine_game3d::ui_plane_mode::display_fraction, 0.f};
     sunshine_game3d::automatic_status ui;
   };
   struct frame_decision_t {
@@ -479,9 +483,39 @@ namespace {
     // Identify the real capture for which scene parameters were resolved. A
     // later pending/generated presentation may reuse that scene, never another source's.
     std::array<std::uint64_t, 4> scene_source{}; // epoch, source, sequence, viewport
+    sunshine_game3d::ui_adaptive::source ui_source;
     scene_parameters_t scene;
     sunshine_depth_jitter::correction jitter;
   };
+
+  sunshine_game3d::ui_adaptive::source resolve_ui_observation(const sunshine_depth::frame_depth &depth,
+      const sunshine_game3d::ui_adaptive::source &previous, const scene_parameters_t &scene,
+      std::uint64_t raw_basis_epoch, std::uint64_t now) {
+    sunshine_game3d::ui_adaptive::source input;
+    input.now_ms = now;
+    input.tick_ms = depth.provided.tick;
+    input.epoch = depth.provided.epoch;
+    input.revision = depth.provided.observation_revision;
+    input.source_id = depth.provided.source_id;
+    input.sequence = depth.provided.sequence;
+    input.viewport = depth.provided.viewport;
+    input.eligible = depth.ready && scene.ready;
+    if (!depth.provided.sequence && depth.ready && !depth.reused_depth) {
+      // Generic capture identity remains physical provenance. Placement follows
+      // the admitted capture group across its rotating, independently calibrated
+      // members; per-resource layout epochs cannot identify that logical group.
+      input.epoch = depth.runtime_epoch;
+      input.revision = depth.layout_epoch;
+      input.source_id = depth.source_id;
+      input.sequence = depth.frame_index;
+      input.generic_basis_epoch = raw_basis_epoch;
+      input.generic_routing_epoch = scene.generic_routing_epoch;
+      input.eligible = input.eligible && input.generic_basis_epoch && input.generic_routing_epoch;
+      input.tick_ms = previous.epoch == input.epoch && previous.revision == input.revision &&
+        previous.source_id == input.source_id && previous.sequence == input.sequence ? previous.tick_ms : now;
+    }
+    return input;
+  }
 
   void restore_reused_scene(frame_decision_t &frame, const frame_decision_t &previous, bool supported) {
     // Only the provider can authorize old pixels. Their already resolved scene
@@ -505,6 +539,7 @@ namespace {
     std::uint64_t presentation_ordinal = 0;
     std::unique_ptr<sunshine_game3d::renderer> renderer;
     api::resource native_output{};
+    float native_ui_parallax_uv = 0.f;
     api::resource_view borrowed_depth{};
     // Populated only while a one-shot diagnostic is armed, and cleared before
     // the native depth lease ends. GPU handles here are never historical state.
@@ -805,15 +840,27 @@ namespace {
           alpha_observation.sequence = input.sequence;
           alpha_observation.tick_ms = input.tick;
         }
+        auto ui_observation = proof.frame.ui_source;
+        ui_observation.now_ms = alpha_observation.now_ms;
+        ui_observation.eligible = ui_observation.eligible && proof.frame.prepared && proof.frame.depth_ready && scene.ready;
+        if (alpha_observation.retained) {
+          ui_observation.mask_sequence = alpha_observation.sequence;
+          ui_observation.tick_ms = std::min(ui_observation.tick_ms, alpha_observation.tick_ms);
+          ui_observation.eligible = ui_observation.eligible && alpha_observation.epoch == ui_observation.epoch &&
+            alpha_observation.revision == ui_observation.revision && alpha_observation.viewport == ui_observation.viewport;
+        }
         // Startup detection is owned by the game process, not the renderer.
         // After its deadline/manual selection, this records no new observations.
         rendered = proof.frame.prepared && renderer->render(commands, backbuffer, proof.borrowed_depth, p,
-          source_alpha.effective(), alpha_view, scene.ui_plane, &alpha_observation);
+          source_alpha.effective(), alpha_view, scene.ui_plane, &alpha_observation, &ui_observation);
         source_alpha.automatic = true;
         source_alpha.coverage = rendered ? renderer->consumed_alpha_auto() : alpha_observation.session->decision(alpha_observation.now_ms);
         source_alpha.requested = source_alpha.coverage.enabled;
         proof.frame.source_alpha = source_alpha;
         proof.native_output = rendered ? renderer->output() : api::resource{};
+        proof.native_ui_parallax_uv = rendered ? sunshine_game3d::admitted_ui_parallax_uv(
+          renderer->consumed_parameters(), renderer->consumed_ui_plane(), scene.ready && proof.frame.depth_ready,
+          renderer->consumed_source_alpha_ui(), proof.width, proof.height) : 0.f;
       }
       if (rendered) frame(runtime, {}, commands, rtv, true);
       {
@@ -1073,6 +1120,7 @@ namespace {
         const bool provided = sunshine_streamline::provider::selected(runtime);
         frame.scene = resolve_raw_scene(runtime, proof, depth, game_enabled, provided, now);
       }
+      frame.ui_source = resolve_ui_observation(depth, previous_frame.ui_source, frame.scene, proof.raw_basis_epoch, now);
       publish_frame(runtime, proof, std::move(frame));
     }
 
@@ -1182,7 +1230,8 @@ namespace {
         current.depth_ready = depth.ready;
         current.aligned_viewport_assumed = depth.aligned_viewport_assumed;
         sunshine_depth::raw_source_roster roster;
-        sunshine_depth::get_raw_source_roster(runtime, roster);
+        if (sunshine_depth::get_raw_source_roster(runtime, roster))
+          scene.generic_routing_epoch = roster.routing_epoch;
         // Capture slots are transient; only authoritative resource/basis changes
         // invalidate retained calibration. Validate all bounded histories at once.
         const auto history = proof.raw_policy.history_sources();
@@ -1258,7 +1307,7 @@ namespace {
       scene.projection = {state.shader_A, state.shader_inverseB};
       scene.zero = {state.referenceZPD, state.t0};
       if (state.calibrated)
-        scene.ui_plane = {sunshine_game3d::ui_plane_mode::depth_midpoint, state.ui_midpoint_q};
+        scene.ui_plane = {sunshine_game3d::ui_plane_mode::display_fraction, 0.f};
       scene.scale = state.H;
       return scene;
     }
@@ -1363,7 +1412,7 @@ namespace {
       scene.projection = {coefficients.shader_A, coefficients.inverseB};
       scene.zero = {projection::reference_zpd, center.q0};
       if (center.initialized)
-        scene.ui_plane = {sunshine_game3d::ui_plane_mode::depth_midpoint, center.ui_midpoint_q};
+        scene.ui_plane = {sunshine_game3d::ui_plane_mode::display_fraction, 0.f};
       scene.raw_range = {coefficients.raw_min, coefficients.raw_max};
       scene.scale = center.K;
     }
@@ -1592,6 +1641,9 @@ namespace {
         // source, ring and overlay resources alive until that work can be fenced.
         generation_->pending_slot = index;
         generation_->pending_qpc = static_cast<std::uint64_t>(timestamp.QuadPart);
+        // The scalar belongs to this exact packed texture, including retained
+        // exports. ReShade's own controls and cursor are at screen disparity.
+        generation_->pending_ui_parallax_uv = addon_render && !overlay_open(runtime) ? proof.native_ui_parallax_uv : 0.f;
         generation_->pending_fg_output = game && proof.frame.fg_active;
         generation_->pending_depth_ready = proof.frame.depth_ready;
         generation_->pending_reused_depth = proof.frame.reused_depth;
@@ -1627,6 +1679,8 @@ namespace {
       sunshine_game3d::diagnostic_frame frame;
       frame.parameters = proof.renderer->consumed_parameters();
       frame.ui_plane = proof.renderer->consumed_ui_plane();
+      if (frame.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction)
+        frame.ui_adaptive = proof.renderer->consumed_ui_adaptive();
       frame.source_alpha_ui = proof.renderer->consumed_source_alpha_ui();
       frame.source_alpha_decision = proof.frame.source_alpha;
       frame.ui_source_metadata = proof.diagnostic_ui_source;
@@ -1749,6 +1803,8 @@ namespace {
       auto &slot = shared_->slots[index];
       slot.sequence = generation_->last_submitted;
       slot.qpc = qpc;
+      slot.cursor_plane_flags = wire::cursor_plane_present;
+      slot.ui_parallax_uv = generation_->pending_ui_parallax_uv;
       store_state(slot, generation_->id, wire::slot_state::ready);
       if (generation_->pending_fg_output) {
         const auto found = runtimes_.find(generation_->runtime);
@@ -1775,6 +1831,8 @@ namespace {
         for (auto &slot : shared_->slots) {
           slot.sequence = 0;
           slot.qpc = 0;
+          slot.cursor_plane_flags = 0;
+          slot.ui_parallax_uv = 0.f;
           store_state(slot, metadata.generation, wire::slot_state::free);
         }
       }

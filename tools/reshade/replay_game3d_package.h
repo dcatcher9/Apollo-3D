@@ -107,6 +107,12 @@ namespace sunshine_game3d::replay {
   inline bool supports_front_ui_plane(const std::string &shader) {
     return shader.find("#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1") != std::string::npos;
   }
+  inline bool supports_shallow_ui_plane(const std::string &shader) {
+    return shader.find("#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1") != std::string::npos;
+  }
+  inline bool supports_display_fraction_ui_plane(const std::string &shader) {
+    return shader.find("#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1") != std::string::npos;
+  }
 
   inline std::string hex(const void *data, std::size_t size) {
     const auto *bytes = static_cast<const std::uint8_t *>(data);
@@ -151,7 +157,9 @@ namespace sunshine_game3d::replay {
     p.ui_parameter_abi = record.at("ui_parameter_abi").get<std::string>();
     require((p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v2" ||
         p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v3" ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4") &&
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4" ||
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" ||
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6") &&
       natural(record.at("ui_parameter_bytes"), "ui_parameter_bytes", ui_parameter_bytes) == ui_parameter_bytes,
       "Unsupported UI parameter ABI");
     parse_hex(record.at("ui_parameter_hex").get<std::string>(), p.ui_parameters.data(), p.ui_parameters.size());
@@ -160,11 +168,19 @@ namespace sunshine_game3d::replay {
     require(words[3] == 0, "Unknown UI parameter reserved bits");
     p.ui_plane.mode = static_cast<ui_plane_mode>(words[1]);
     require(words[1] != static_cast<std::uint32_t>(ui_plane_mode::depth_midpoint_nearest_ui) ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v3" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4",
-      "Nearest-covered UI mode requires the v3 or v4 UI parameter contract");
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v3" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4" ||
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6",
+      "Nearest-covered UI mode requires the v3 or newer UI parameter contract");
     require(words[1] != static_cast<std::uint32_t>(ui_plane_mode::front_limit) ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4",
-      "Fixed front-limit UI mode requires the v4 UI parameter contract");
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" ||
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6",
+      "Fixed front-limit UI mode requires the v4 or newer UI parameter contract");
+    require(words[1] != static_cast<std::uint32_t>(ui_plane_mode::shallow_front) ||
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6",
+      "Fixed shallow-front UI mode requires the v5 or newer UI parameter contract");
+    const bool fraction_mode = p.ui_plane.mode == ui_plane_mode::display_fraction;
+    require(!fraction_mode || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6",
+      "Display-fraction UI mode requires the v6 UI parameter contract");
     p.ui_plane.inverse_depth = ui_parameter<float>(p, 8);
     const auto &binding = record.at("ui_constant_binding");
     require(binding.at("register") == "b1" && binding.at("uint32").is_array() && binding.at("uint32").size() == 4,
@@ -172,17 +188,28 @@ namespace sunshine_game3d::replay {
     for (unsigned i = 0; i != 4; ++i)
       require(natural(binding.at("uint32").at(i), "UI constant word", UINT32_MAX) == words[i], "UI constant words disagree with exact bytes");
     require(natural(binding.at("mode"), "UI plane mode", UINT32_MAX) == words[1], "UI plane mode disagrees with exact bytes");
-    require(natural(binding.at("inverse_depth_bits"), "UI inverse depth bits", UINT32_MAX) == words[2], "UI inverse depth bits disagree with exact bytes");
+    const char *value_key = fraction_mode ? "front_limit_fraction" : "inverse_depth";
+    const char *bits_key = fraction_mode ? "front_limit_fraction_bits" : "inverse_depth_bits";
+    require(natural(binding.at(bits_key), "UI word2 bits", UINT32_MAX) == words[2], "UI word2 bits disagree with exact bytes");
+    if (fraction_mode) {
+      require(binding.at("word2_role") == "front_limit_fraction" && !binding.contains("inverse_depth") &&
+          !binding.contains("inverse_depth_bits"), "Display-fraction UI word must not describe an inverse depth");
+    }
+    if (p.ui_plane.mode == ui_plane_mode::shallow_front) {
+      require(binding.contains("front_limit_fraction") && binding.at("front_limit_fraction").is_number() &&
+          binding.at("front_limit_fraction").get<double>() == 0.25,
+        "Fixed shallow-front UI mode requires a one-quarter front-limit fraction");
+    }
     // Invalid production-domain bits are part of diagnostic replay. Preserve
     // them so the production shader's zero-disparity guards are exercised.
     if (std::isfinite(p.ui_plane.inverse_depth)) {
-      require(binding.at("inverse_depth").is_number(), "Finite UI inverse depth must be numeric");
-      const float described_q = binding.at("inverse_depth").get<float>();
+      require(binding.at(value_key).is_number(), "Finite UI word2 value must be numeric");
+      const float described_q = binding.at(value_key).get<float>();
       std::uint32_t described_bits;
       std::memcpy(&described_bits, &described_q, sizeof(described_bits));
-      require(described_bits == words[2], "UI inverse depth disagrees with exact bytes");
+      require(described_bits == words[2], "UI word2 value disagrees with exact bytes");
     } else {
-      require(binding.at("inverse_depth").is_null(), "Nonfinite UI inverse depth must have a null JSON description");
+      require(binding.at(value_key).is_null(), "Nonfinite UI word2 value must have a null JSON description");
     }
   }
 
@@ -220,6 +247,10 @@ namespace sunshine_game3d::replay {
       "Captured nearest-covered UI plane requires its GPU reduction shader");
     require(p.ui_plane.mode != ui_plane_mode::front_limit || supports_front_ui_plane(p.shader),
       "Captured fixed front-limit UI plane requires its shader contract");
+    require(p.ui_plane.mode != ui_plane_mode::shallow_front || supports_shallow_ui_plane(p.shader),
+      "Captured fixed shallow-front UI plane requires its shader contract");
+    require(p.ui_plane.mode != ui_plane_mode::display_fraction || supports_display_fraction_ui_plane(p.shader),
+      "Captured display-fraction UI plane requires its shader contract");
     const auto &defines = record.at("defines");
     p.width = unsigned(natural(defines.at("BUFFER_WIDTH"), "BUFFER_WIDTH", 8192));
     p.height = unsigned(natural(defines.at("BUFFER_HEIGHT"), "BUFFER_HEIGHT", 8192));

@@ -334,7 +334,7 @@ namespace {
 
 int main(int argc, char **argv) {
   if (argc < 4) {
-    std::fprintf(stderr, "usage: replay_game3d_dump <dump-dir> <official-ReShade64.dll> <fresh-output-dir> [--shader file.hlsl] [--strength 0..100] [--zero-inverse-depth nonnegative-float] [--ui-inverse-depth nonnegative-float | --ui-nearest-floor nonnegative-float | --ui-plane screen|front-limit] [--depth-gain positive-float] [--disparity-limit-uv (0,.04]] [--source-alpha-ui on|off] [--verify]\n");
+    std::fprintf(stderr, "usage: replay_game3d_dump <dump-dir> <official-ReShade64.dll> <fresh-output-dir> [--shader file.hlsl] [--strength 0..100] [--zero-inverse-depth nonnegative-float] [--ui-inverse-depth nonnegative-float | --ui-nearest-floor nonnegative-float | --ui-front-fraction 0..0.75 | --ui-plane screen|front-limit|shallow-front] [--depth-gain positive-float] [--disparity-limit-uv (0,.04]] [--source-alpha-ui on|off] [--verify]\n");
     return 2;
   }
   fs::path output;
@@ -386,12 +386,21 @@ int main(int argc, char **argv) {
         ui_plane_override = sunshine_game3d::ui_plane_parameters {
           option == "--ui-nearest-floor" ? sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui :
             sunshine_game3d::ui_plane_mode::depth_midpoint, inverse};
+      } else if (option == "--ui-front-fraction") {
+        require(!ui_plane_override && i + 1 < argc, "Expected one UI front fraction override");
+        std::size_t end = 0;
+        ui_plane_argument = argv[++i];
+        const float fraction = std::stof(ui_plane_argument, &end);
+        require(end == ui_plane_argument.size() && std::isfinite(fraction) && fraction >= 0.f && fraction <= .75f,
+          "UI front fraction must be finite and within 0..0.75");
+        ui_plane_override = sunshine_game3d::ui_plane_parameters {sunshine_game3d::ui_plane_mode::display_fraction, fraction};
       } else if (option == "--ui-plane") {
         require(!ui_plane_override && i + 1 < argc, "Expected one independent UI plane override");
         ui_plane_argument = argv[++i];
-        require(ui_plane_argument == "screen" || ui_plane_argument == "front-limit", "UI plane must be screen or front-limit; use --ui-inverse-depth to supply an independent depth");
+        require(ui_plane_argument == "screen" || ui_plane_argument == "front-limit" || ui_plane_argument == "shallow-front", "UI plane must be screen, front-limit or shallow-front; adaptive requires live history, so use --ui-front-fraction for a frozen resolved fraction");
         ui_plane_override = sunshine_game3d::ui_plane_parameters {
-          ui_plane_argument == "front-limit" ? sunshine_game3d::ui_plane_mode::front_limit : sunshine_game3d::ui_plane_mode::screen, 0.f};
+          ui_plane_argument == "shallow-front" ? sunshine_game3d::ui_plane_mode::shallow_front :
+            ui_plane_argument == "front-limit" ? sunshine_game3d::ui_plane_mode::front_limit : sunshine_game3d::ui_plane_mode::screen, 0.f};
       } else if (option == "--depth-gain") {
         require(!depth_gain && i + 1 < argc, "Expected one depth gain");
         std::size_t end = 0;
@@ -453,6 +462,10 @@ int main(int argc, char **argv) {
       "Nearest-covered UI plane requires its GPU reduction shader; supply --shader for a legacy captured shader");
     require(ui_plane.mode != sunshine_game3d::ui_plane_mode::front_limit || replay::supports_front_ui_plane(shader),
       "Fixed front-limit UI plane requires its shader contract; supply --shader for a legacy captured shader");
+    require(ui_plane.mode != sunshine_game3d::ui_plane_mode::shallow_front || replay::supports_shallow_ui_plane(shader),
+      "Fixed shallow-front UI plane requires its shader contract; supply --shader for a legacy captured shader");
+    require(ui_plane.mode != sunshine_game3d::ui_plane_mode::display_fraction || replay::supports_display_fraction_ui_plane(shader),
+      "Display-fraction UI plane requires its shader contract; supply --shader for a legacy captured shader");
     const bool experiment = ui_plane_override.has_value() || source_alpha_ui.has_value() || strength.has_value() || zero_inverse_depth.has_value() || depth_gain.has_value() || disparity_limit_uv.has_value() || !shader_override.empty();
     require(fs::create_directories(output), "Cannot create fresh output directory");
     created = true;
@@ -469,27 +482,43 @@ int main(int argc, char **argv) {
     report["captured_source_alpha_ui"] = package.source_alpha_ui;
     const auto describe_ui = [](bool enabled, const sunshine_game3d::ui_plane_parameters &plane) {
       const auto words = sunshine_game3d::ui_parameter_words(enabled, plane);
-      return json {{"mode", static_cast<std::uint32_t>(plane.mode)},
+      const bool fraction_mode = plane.mode == sunshine_game3d::ui_plane_mode::display_fraction;
+      json value {{"mode", static_cast<std::uint32_t>(plane.mode)},
         {"mode_name", plane.mode == sunshine_game3d::ui_plane_mode::screen ? "screen" :
           plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint ? "depth_midpoint" :
           plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui ? "depth_midpoint_nearest_ui" :
-          plane.mode == sunshine_game3d::ui_plane_mode::front_limit ? "front_limit" : "unknown"},
+          plane.mode == sunshine_game3d::ui_plane_mode::front_limit ? "front_limit" :
+          plane.mode == sunshine_game3d::ui_plane_mode::shallow_front ? "shallow_front" : fraction_mode ? "display_fraction" : "unknown"},
         {"inverse_depth", std::isfinite(plane.inverse_depth) ? json(plane.inverse_depth) : json(nullptr)},
-        {"inverse_depth_role", plane.mode == sunshine_game3d::ui_plane_mode::front_limit ||
+        {"inverse_depth_role", fraction_mode || plane.mode == sunshine_game3d::ui_plane_mode::shallow_front || plane.mode == sunshine_game3d::ui_plane_mode::front_limit ||
           plane.mode == sunshine_game3d::ui_plane_mode::screen ? "unused" :
           plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui ? "midpoint_floor" : "explicit_plane"},
+        {"word2_role", fraction_mode ? "front_limit_fraction" : "inverse_depth"},
+        {"front_limit_fraction", fraction_mode ? (std::isfinite(plane.inverse_depth) ? json(plane.inverse_depth) : json(nullptr)) : plane.mode == sunshine_game3d::ui_plane_mode::shallow_front ? json(0.25) :
+          plane.mode == sunshine_game3d::ui_plane_mode::front_limit ? json(1.0) : json(nullptr)},
         {"inverse_depth_bits", words[2]}, {"uint32", words}};
+      if (fraction_mode) {
+        value.erase("inverse_depth");
+        value.erase("inverse_depth_bits");
+        value["front_limit_fraction_bits"] = words[2];
+        value["resolution"] = "Frozen consumed fraction; temporal adaptive classifier and observational probe are not replayed";
+      }
+      return value;
     };
     report["captured_ui_parameter_abi"] = package.ui_parameter_abi;
     report["captured_ui_parameter_hex"] = replay::hex(package.ui_parameters.data(), package.ui_parameters.size());
     report["captured_ui_plane"] = describe_ui(package.source_alpha_ui, package.ui_plane);
-    report["ui_parameter_abi"] = ui_plane.mode == sunshine_game3d::ui_plane_mode::front_limit ? "sunshine_game3d.ui_parameters.v4" :
+    report["ui_parameter_abi"] = ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction ? "sunshine_game3d.ui_parameters.v6" :
+      ui_plane.mode == sunshine_game3d::ui_plane_mode::shallow_front ? "sunshine_game3d.ui_parameters.v5" :
+      ui_plane.mode == sunshine_game3d::ui_plane_mode::front_limit ? "sunshine_game3d.ui_parameters.v4" :
       ui_plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui ?
       "sunshine_game3d.ui_parameters.v3" : "sunshine_game3d.ui_parameters.v2";
     report["ui_parameter_bytes"] = replay::ui_parameter_bytes;
     if (ui_plane_override) report["ui_plane_override"] = {{"scope", "offline experiment only"},
       {"requested_argument", ui_plane_argument},
-      {"rule", "Only the UI plane changes. Front-limit mode uses the current positive display bound scaled by strength and stereo blend, independent of scene depth/gain/zero. Depth modes map qUI through current geometry. No frozen displacement is supplied."}};
+      {"rule", "Only the UI plane changes. Display-fraction mode freezes the supplied fraction without adaptive history. Shallow-front mode uses one quarter of the current positive display bound after strength, stereo blend and warp-readiness guards. Front-limit mode uses the full bound. Display fractions ignore scene depth/gain/zero when mapped to parallax. Depth modes map qUI through current geometry. No frozen displacement is supplied."}};
+    if (manifest.at("producer_metadata").at("replay").contains("ui_adaptive"))
+      report["captured_ui_adaptive_not_replayed"] = manifest.at("producer_metadata").at("replay").at("ui_adaptive");
     report["ui_alpha_source"] = ui_alpha_source;
     report["captured_ui_alpha_source"] = package.ui_alpha_source;
     if (package.ui_alpha_source == "ui_source_color") report["captured_ui_source_provenance"] = manifest.at("producer_metadata").value("ui_source", json::object());

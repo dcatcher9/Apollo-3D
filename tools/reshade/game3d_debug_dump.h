@@ -4,8 +4,10 @@
 #include "depth_addon.h"
 #include "game3d_controls.h"
 #include "game3d_renderer.h"
+#include "game3d_ui_adaptive.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace sunshine_game3d {
@@ -13,6 +15,9 @@ namespace sunshine_game3d {
     render_parameters parameters;
     bool source_alpha_ui = false;
     ui_plane_parameters ui_plane;
+    // Observational policy snapshot; replay consumes ui_plane's frozen word2
+    // and never reconstructs temporal decisions from this optional telemetry.
+    std::optional<sunshine_game3d::ui_adaptive::decision> ui_adaptive;
     source_alpha_ui_decision source_alpha_decision;
     // Provenance for resources.ui_source, not the latest optional SL snapshot.
     std::string ui_source_metadata;

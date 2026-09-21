@@ -22,6 +22,9 @@ namespace platf::reshade_bridge {
     std::uint32_t producer_process_id = 0;
     std::uint64_t producer_creation_time = 0;
     std::uint64_t resource_generation = 0;
+    // Frozen with the received texture and sequence, including when a frame is reused.
+    // Positive values put the cursor in front of the screen (left eye moves right).
+    float ui_parallax_uv = 0.0f;
   };
 
   class receiver_t {

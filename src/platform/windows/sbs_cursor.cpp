@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "sbs_cursor.h"
 
+#include "src/reshade_bridge_protocol.h"
+
 #include <cmath>
 #include <cstring>
 #include <d3d11_1.h>
@@ -84,8 +86,8 @@ namespace platf::sbs_cursor {
     return shape;
   }
 
-  std::optional<placement_t> place_cursor(const snapshot_t &cursor, std::uint32_t packed_width, std::uint32_t packed_height) {
-    if (!cursor.capture_width || !cursor.capture_height || !packed_height || packed_width < 2 || packed_width % 2 || packed_width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || packed_height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || (cursor.rotation != DXGI_MODE_ROTATION_UNSPECIFIED && cursor.rotation != DXGI_MODE_ROTATION_IDENTITY)) {
+  std::optional<placement_t> place_cursor(const snapshot_t &cursor, std::uint32_t packed_width, std::uint32_t packed_height, float ui_parallax_uv) {
+    if (!::reshade_bridge::valid_ui_parallax(ui_parallax_uv) || !cursor.capture_width || !cursor.capture_height || !packed_height || packed_width < 2 || packed_width % 2 || packed_width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || packed_height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || (cursor.rotation != DXGI_MODE_ROTATION_UNSPECIFIED && cursor.rotation != DXGI_MODE_ROTATION_IDENTITY)) {
       return std::nullopt;
     }
     const auto &v = cursor.viewport;
@@ -97,7 +99,8 @@ namespace platf::sbs_cursor {
     const float sy = float(packed_height) / cursor.capture_height;
     placement_t result {};
     for (int eye = 0; eye < 2; ++eye) {
-      result.viewports[eye] = {v.TopLeftX * sx + eye * eye_width, v.TopLeftY * sy, v.Width * sx, v.Height * sy, 0, 1};
+      const float disparity_pixels = (eye == 0 ? ui_parallax_uv : -ui_parallax_uv) * eye_width;
+      result.viewports[eye] = {v.TopLeftX * sx + eye * eye_width + disparity_pixels, v.TopLeftY * sy, v.Width * sx, v.Height * sy, 0, 1};
       const auto &p = result.viewports[eye];
       if (!std::isfinite(p.TopLeftX) || !std::isfinite(p.TopLeftY) || !std::isfinite(p.Width) || !std::isfinite(p.Height) || p.TopLeftX < D3D11_VIEWPORT_BOUNDS_MIN || p.TopLeftY < D3D11_VIEWPORT_BOUNDS_MIN || p.TopLeftX + p.Width > D3D11_VIEWPORT_BOUNDS_MAX || p.TopLeftY + p.Height > D3D11_VIEWPORT_BOUNDS_MAX) {
         return std::nullopt;
@@ -247,8 +250,8 @@ namespace platf::sbs_cursor {
 
   compositor_t::~compositor_t() = default;
 
-  std::optional<result_t> compositor_t::compose(ID3D11Texture2D *texture, ID3D11ShaderResourceView *view, const snapshot_t &cursor, bool linear, float white_multiplier) {
-    if (!texture || !view) {
+  std::optional<result_t> compositor_t::compose(ID3D11Texture2D *texture, ID3D11ShaderResourceView *view, const snapshot_t &cursor, bool linear, float white_multiplier, float ui_parallax_uv) {
+    if (!texture || !view || !::reshade_bridge::valid_ui_parallax(ui_parallax_uv)) {
       return std::nullopt;
     }
     if (!cursor.visible || !cursor.shape || (cursor.shape->alpha_bgra.empty() && cursor.shape->xor_bgra.empty())) {
@@ -259,7 +262,7 @@ namespace platf::sbs_cursor {
     }
     D3D11_TEXTURE2D_DESC source {};
     texture->GetDesc(&source);
-    const auto placement = place_cursor(cursor, source.Width, source.Height);
+    const auto placement = place_cursor(cursor, source.Width, source.Height, ui_parallax_uv);
     if (!placement || source.SampleDesc.Count != 1 || source.MipLevels != 1 || source.ArraySize != 1) {
       return std::nullopt;
     }

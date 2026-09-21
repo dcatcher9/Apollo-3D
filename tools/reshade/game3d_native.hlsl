@@ -10,6 +10,10 @@
 // Nearest-covered-depth mode first resolves one global UI plane on this queue.
 #define SUNSHINE_UI_NEAREST_PLANE 1
 #define SUNSHINE_UI_FRONT_LIMIT_PLANE 1
+#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1
+#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1
+#define SUNSHINE_UI_CONFLICT_PROBE 1
+#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1
 #define SUNSHINE_UI_ALPHA_COVERAGE 1
 //
 // Specialize BUFFER_WIDTH, BUFFER_HEIGHT and BUFFER_COLOR_SPACE at compile time.
@@ -76,6 +80,7 @@ RWTexture2D<float> SunshineHostFinalStore : register(u3);
 RWTexture2D<float> SunshineUIPlaneTilesStore : register(u4);
 RWTexture2D<float> SunshineUIPlaneResolvedStore : register(u5);
 RWTexture2D<uint4> SunshineAlphaCoverageStore : register(u6);
+RWTexture2D<uint4> SunshineUIConflictStore : register(u7);
 SamplerState SunshinePointClamp : register(s0);
 SamplerState SunshineLinearClampState : register(s1);
 SamplerState SunshinePointBorder : register(s2);
@@ -651,6 +656,19 @@ int H_V2LimitDecayQ30(int step_q30, uint distance, int max_decay_q30) {
 }
 
 float SunshineUIPlaneParallax() {
+    // Adaptive live selection is resolved outside the geometry pipeline. Replay
+    // receives this exact applied fraction, including intermediate ramp values.
+    if (Sunshine_UIPlaneMode == 5u) {
+        if (!SunshineHostWarpActive() || !SunshineCameraFinite(Sunshine_UIPlaneInverseDepth) ||
+            Sunshine_UIPlaneInverseDepth < 0.0 || Sunshine_UIPlaneInverseDepth > 0.75) return 0.0;
+        return Sunshine_UIPlaneInverseDepth * SunshineBoundFinalParallax(SunshineHostContainer);
+    }
+    // A fixed shallow plane at one quarter of the authoritative display cap.
+    // The inverse-depth word is unused; scene geometry only gates admission.
+    if (Sunshine_UIPlaneMode == 4u) {
+        if (!SunshineHostWarpActive()) return 0.0;
+        return 0.25f * SunshineBoundFinalParallax(SunshineHostContainer);
+    }
     // A fixed display-space plane at the current permitted front limit. Scene
     // depth, gain and zero affect admission but never position this UI plane.
     // The inverse-depth word is intentionally unused in this explicit mode.
@@ -918,6 +936,83 @@ void SunshineHostHorizontalCS(
         SunshinePinSourceUIParallel(y, lane, chunk_start, chunk_end);
 }
 
+
+// A probe frame conditions the scene with UI disabled, observes it, then runs
+// the exact same UI pinning once. This prevents measuring our own pinned field.
+[numthreads(32, 1, 1)]
+void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID) {
+    uint y = group_id.x, lane = thread_id.x;
+    if (y >= BUFFER_HEIGHT || Sunshine_SourceAlphaUI == 0u) return;
+    if (BUFFER_WIDTH <= 32u) {
+        if (lane == 0u) SunshinePinSourceUISerial(y);
+    } else {
+        SunshinePinSourceUIParallel(y, lane, lane * BUFFER_WIDTH / 32u,
+            (lane + 1u) * BUFFER_WIDTH / 32u);
+    }
+}
+
+// Exact tile counts from the selected mask and the unprotected, conditioned
+// scene. Each tile writes two uint4 rows: coverage, invalid, five conflict
+// counts, and pixel count. The absolute candidate planes remain within half
+// the current scene cap. All 16x16 tiles fit in an 8 KiB statistics texture.
+// Edge tiles publish only their pixel partition; placement evidence and source
+// reads are restricted to the exact central 75% rectangle.
+groupshared uint4 SunshineUIConflictA[64];
+groupshared uint4 SunshineUIConflictB[64];
+[numthreads(8, 8, 1)]
+void SunshineUIConflictCS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID) {
+    uint lane = thread_id.y * 8u + thread_id.x;
+    uint2 first = group_id.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
+    uint2 last = (group_id.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
+    if (group_id.x < 2u || group_id.x >= 14u || group_id.y < 2u || group_id.y >= 14u) {
+        if (lane == 0u) {
+            SunshineUIConflictStore[int2(group_id.x, group_id.y * 2u)] = uint4(0u, 0u, 0u, 0u);
+            SunshineUIConflictStore[int2(group_id.x, group_id.y * 2u + 1u)] =
+                uint4(0u, 0u, 0u, (last.x - first.x) * (last.y - first.y));
+        }
+        return;
+    }
+    uint4 a = 0u, b = 0u;
+    bool active = SunshineHostWarpActive();
+    float cap = SunshineBoundFinalParallax(SunshineHostContainer);
+    float uiLimit = 0.5 * cap;
+    [loop]
+    for (uint y = first.y + thread_id.y; y < last.y; y += 8u) {
+        [loop]
+        for (uint x = first.x + thread_id.x; x < last.x; x += 8u) {
+            float alpha = SunshineSourceSampler.Load(int3(int2(x, y), 0)).a;
+            b.w += 1u;
+            if (!SunshineCameraFinite(alpha) || alpha <= 0.0) continue;
+            a.x += 1u;
+            float p = SunshineHostFinalSampler.Load(int3(int2(x, y), 0));
+            if (!active || !SunshineCameraFinite(p) || cap <= 0.0) { a.y += 1u; continue; }
+            float required = p + 0.05 * cap;
+            a.z += required > 0.0 ? 1u : 0u;
+            a.w += required > min(0.001, uiLimit) ? 1u : 0u;
+            b.x += required > min(0.002, uiLimit) ? 1u : 0u;
+            b.y += required > min(0.003, uiLimit) ? 1u : 0u;
+            b.z += required > min(0.0035, uiLimit) ? 1u : 0u;
+        }
+    }
+    SunshineUIConflictA[lane] = a;
+    SunshineUIConflictB[lane] = b;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint step = 32u; step != 0u; step >>= 1u) {
+        if (lane < step) {
+            SunshineUIConflictA[lane] += SunshineUIConflictA[lane + step];
+            SunshineUIConflictB[lane] += SunshineUIConflictB[lane + step];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane == 0u) {
+        // No covered pixels does not prove clearance if scene admission failed.
+        // An impossible count invalidates the whole bounded observation.
+        if ((!active || cap <= 0.0) && all(group_id.xy == 2u)) SunshineUIConflictA[0].y = 0xffffffffu;
+        SunshineUIConflictStore[int2(group_id.x, group_id.y * 2u)] = SunshineUIConflictA[0];
+        SunshineUIConflictStore[int2(group_id.x, group_id.y * 2u + 1u)] = SunshineUIConflictB[0];
+    }
+}
 
 float4 SunshineHostRender(float2 eyeUV, bool rightEye)
 {

@@ -38,8 +38,10 @@ namespace platf::sbs_cursor {
     std::array<D3D11_RECT, 2> scissors;
   };
 
-  // Game 3D accepts identity-oriented displays only. Reject unsupported rotations explicitly.
-  std::optional<placement_t> place_cursor(const snapshot_t &cursor, std::uint32_t packed_width, std::uint32_t packed_height);
+  // Game 3D accepts identity-oriented displays only. Positive source-UV parallax places the
+  // cursor in front of the screen: left eye moves right, right eye moves left. The supplied
+  // value belongs to the exact packed frame, independently of the current cursor position.
+  std::optional<placement_t> place_cursor(const snapshot_t &cursor, std::uint32_t packed_width, std::uint32_t packed_height, float ui_parallax_uv = 0.0f);
 
   struct result_t {
     ID3D11Texture2D *texture = nullptr;
@@ -57,7 +59,7 @@ namespace platf::sbs_cursor {
     // Visible output is private scratch, valid until the next call or destruction. Source is
     // never modified. All device-context state is restored. Nullopt means invalid input/failure.
     // Linear output uses the existing cursor HDR shader: sRGB decode * SDR-white-nits / 80.
-    std::optional<result_t> compose(ID3D11Texture2D *texture, ID3D11ShaderResourceView *view, const snapshot_t &cursor, bool linear, float white_multiplier);
+    std::optional<result_t> compose(ID3D11Texture2D *texture, ID3D11ShaderResourceView *view, const snapshot_t &cursor, bool linear, float white_multiplier, float ui_parallax_uv = 0.0f);
 
   private:
     struct impl_t;

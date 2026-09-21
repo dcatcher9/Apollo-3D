@@ -105,6 +105,65 @@ TEST(ReShadeBridgeProtocol, RejectsHalfSbsOversizedAndColorIncoherentMetadata) {
   EXPECT_FALSE(valid_metadata(metadata));
 }
 
+TEST(ReShadeBridgeProtocol, PreservesLegacyLayoutAndTreatsLegacyPaddingAsScreenPlane) {
+  using namespace ::reshade_bridge;
+  EXPECT_EQ(sizeof(metadata_t), 120u);
+  EXPECT_EQ(sizeof(slot_t), 64u);
+  EXPECT_EQ(sizeof(shared_state_t), 384u);
+  EXPECT_EQ(offsetof(shared_state_t, slots), 192u);
+  auto metadata = valid_bridge_metadata();
+  metadata.protocol_version = screen_plane_version;
+  ASSERT_TRUE(valid_metadata(metadata));
+  ASSERT_TRUE(matches_output(metadata, 3840, 1080));
+
+  slot_t legacy;
+  legacy.cursor_plane_flags = UINT32_MAX;
+  legacy.ui_parallax_uv = std::numeric_limits<float>::quiet_NaN();
+  float value = 1.0f;
+  ASSERT_TRUE(read_ui_parallax(metadata.protocol_version, legacy, value));
+  EXPECT_EQ(value, 0.0f);
+}
+
+TEST(ReShadeBridgeProtocol, CarriesResolvedSignedEyeUvWithoutRescalingOrClamping) {
+  using namespace ::reshade_bridge;
+  slot_t slot;
+  float value = 1.0f;
+  ASSERT_TRUE(read_ui_parallax(version, slot, value));
+  EXPECT_EQ(value, 0.0f);
+
+  slot.cursor_plane_flags = cursor_plane_present;
+  for (const auto expected : {-maximum_ui_parallax_uv, -0.00375f, 0.0f, 0.00375f, maximum_ui_parallax_uv}) {
+    slot.ui_parallax_uv = expected;
+    ASSERT_TRUE(read_ui_parallax(version, slot, value));
+    EXPECT_EQ(value, expected);
+  }
+}
+
+TEST(ReShadeBridgeProtocol, RejectsMalformedPlaneExtensionsAndUnknownVersions) {
+  using namespace ::reshade_bridge;
+  slot_t slot;
+  slot.cursor_plane_flags = cursor_plane_present;
+  for (const auto invalid : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(), 0.040001f, -0.040001f}) {
+    slot.ui_parallax_uv = invalid;
+    float value = 1.0f;
+    EXPECT_FALSE(read_ui_parallax(version, slot, value));
+    EXPECT_EQ(value, 0.0f);
+  }
+  slot.ui_parallax_uv = 0.005f;
+  for (const auto flags : {0u, 2u, cursor_plane_present | 2u, UINT32_MAX}) {
+    slot.cursor_plane_flags = flags;
+    float value = 1.0f;
+    EXPECT_FALSE(read_ui_parallax(version, slot, value));
+    EXPECT_EQ(value, 0.0f);
+  }
+  slot.cursor_plane_flags = cursor_plane_present;
+  for (const auto invalid_version : {0u, version + 1u, UINT32_MAX}) {
+    float value = 1.0f;
+    EXPECT_FALSE(read_ui_parallax(invalid_version, slot, value));
+    EXPECT_EQ(value, 0.0f);
+  }
+}
+
 #ifdef _WIN32
 
   #include "src/platform/windows/reshade_bridge.h"
@@ -283,12 +342,12 @@ namespace {
       return result;
     }
 
-    void publish(std::uint64_t sequence, bool signal = true) {
+    void publish(std::uint64_t sequence, bool signal = true, float ui_parallax_uv = 0.0f, std::uint32_t cursor_plane_flags = protocol::cursor_plane_present) {
       const auto source_pixels = pixels(0xFF0000FF, 0xFFFF0000);
-      publish_pixels(sequence, source_pixels.data(), packed_width * sizeof(std::uint32_t), signal);
+      publish_pixels(sequence, source_pixels.data(), packed_width * sizeof(std::uint32_t), signal, ui_parallax_uv, cursor_plane_flags);
     }
 
-    void publish_pixels(std::uint64_t sequence, const void *source_pixels, UINT row_pitch, bool signal = true) {
+    void publish_pixels(std::uint64_t sequence, const void *source_pixels, UINT row_pitch, bool signal = true, float ui_parallax_uv = 0.0f, std::uint32_t cursor_plane_flags = protocol::cursor_plane_present) {
       auto &slot = state->slots[0];
       const auto generation = state->metadata.generation;
       ASSERT_EQ(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&slot.control), static_cast<LONG64>(protocol::slot_control(generation, protocol::slot_state::writing)), static_cast<LONG64>(protocol::slot_control(generation, protocol::slot_state::free))), static_cast<LONG64>(protocol::slot_control(generation, protocol::slot_state::free)));
@@ -297,6 +356,8 @@ namespace {
       LARGE_INTEGER qpc {};
       ASSERT_TRUE(QueryPerformanceCounter(&qpc));
       slot.qpc = qpc.QuadPart;
+      slot.cursor_plane_flags = cursor_plane_flags;
+      slot.ui_parallax_uv = ui_parallax_uv;
       if (signal) {
         signal_ready(sequence);
       }
@@ -383,7 +444,7 @@ namespace {
 }  // namespace
 
 TEST_F(ReShadeBridgeGpu, CopiesBothEyesAndReturnsSlotOnlyAfterPrivateCopyCompletes) {
-  publish(1, false);
+  publish(1, false, 0.007f);
   const auto started = bridge_clock_t::now();
   for (int i = 0; i < 20; ++i) {
     EXPECT_FALSE(poll());
@@ -395,11 +456,15 @@ TEST_F(ReShadeBridgeGpu, CopiesBothEyesAndReturnsSlotOnlyAfterPrivateCopyComplet
   const auto frame = await_frame();
   ASSERT_TRUE(frame);
   EXPECT_EQ(frame->sequence, 1u);
+  EXPECT_EQ(frame->ui_parallax_uv, 0.007f);
   EXPECT_FALSE(frame->linear);
   EXPECT_NE(frame->timestamp, bridge_clock_t::time_point {});
   const auto copying = bridge_clock_t::now();
   for (int i = 0; i < 20; ++i) {
-    EXPECT_TRUE(poll());
+    const auto retained = poll();
+    ASSERT_TRUE(retained);
+    EXPECT_EQ(retained->sequence, frame->sequence);
+    EXPECT_EQ(retained->ui_parallax_uv, frame->ui_parallax_uv);
     EXPECT_EQ(protocol::control_state(state->slots[0].control), protocol::slot_state::reading);
   }
   EXPECT_LT(bridge_clock_t::now() - copying, std::chrono::milliseconds(500));
@@ -413,7 +478,81 @@ TEST_F(ReShadeBridgeGpu, CopiesBothEyesAndReturnsSlotOnlyAfterPrivateCopyComplet
   const auto overwritten = pixels(0xFF00FF00, 0xFF00FF00);
   producer_context->UpdateSubresource(rings.back()->textures[0].Get(), 0, nullptr, overwritten.data(), packed_width * sizeof(std::uint32_t), 0);
   signal_ready(3);
+  state->slots[0].ui_parallax_uv = 0.025f;
+  const auto retained = poll();
+  ASSERT_TRUE(retained);
+  EXPECT_EQ(retained->sequence, frame->sequence);
+  EXPECT_EQ(retained->ui_parallax_uv, frame->ui_parallax_uv);
   expect_pixels(frame->texture);
+}
+
+TEST_F(ReShadeBridgeGpu, KeepsCursorPlaneWithItsFrameAcrossPendingInvalidAndReplacedExports) {
+  publish(1, true, 0.006f);
+  const auto first = await_frame();
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(await_free());
+  EXPECT_EQ(first->sequence, 1u);
+  EXPECT_EQ(first->ui_parallax_uv, 0.006f);
+
+  publish(2, false, 0.012f);
+  for (int i = 0; i < 20; ++i) {
+    const auto retained = poll();
+    ASSERT_TRUE(retained);
+    EXPECT_EQ(retained->sequence, first->sequence);
+    EXPECT_EQ(retained->ui_parallax_uv, first->ui_parallax_uv);
+  }
+  EXPECT_EQ(protocol::control_state(state->slots[0].control), protocol::slot_state::ready);
+  signal_ready(2);
+  ASSERT_TRUE(await_free());
+  const auto second = poll();
+  ASSERT_TRUE(second);
+  EXPECT_EQ(second->sequence, 2u);
+  EXPECT_EQ(second->ui_parallax_uv, 0.012f);
+
+  // Invalid metadata must not advance either the retained pixels or their cursor plane.
+  const auto invalid_pixels = pixels(0xFF00FF00, 0xFF00FF00);
+  publish_pixels(3, invalid_pixels.data(), packed_width * sizeof(std::uint32_t), true, std::numeric_limits<float>::quiet_NaN());
+  ASSERT_TRUE(await_free());
+  const auto after_invalid = poll();
+  ASSERT_TRUE(after_invalid);
+  EXPECT_EQ(after_invalid->sequence, second->sequence);
+  EXPECT_EQ(after_invalid->ui_parallax_uv, second->ui_parallax_uv);
+  expect_pixels(after_invalid->texture);
+
+  publish(4, true, -0.004f);
+  ASSERT_TRUE(await_free());
+  const auto recovered = poll();
+  ASSERT_TRUE(recovered);
+  EXPECT_EQ(recovered->sequence, 4u);
+  EXPECT_EQ(recovered->ui_parallax_uv, -0.004f);
+
+  ASSERT_TRUE(new_generation());
+  publish(1);
+  const auto replacement = await_frame();
+  ASSERT_TRUE(replacement);
+  EXPECT_NE(replacement->resource_generation, recovered->resource_generation);
+  EXPECT_EQ(replacement->sequence, 1u);
+  EXPECT_EQ(replacement->ui_parallax_uv, 0.0f);
+}
+
+TEST_F(ReShadeBridgeGpu, ImportsLegacyPublisherWithUnspecifiedSlotPaddingAtScreenPlane) {
+  auto metadata = state->metadata;
+  metadata.protocol_version = protocol::screen_plane_version;
+  write_metadata(metadata);
+  publish(1, true, std::numeric_limits<float>::quiet_NaN(), UINT32_MAX);
+  const auto legacy = await_frame();
+  ASSERT_TRUE(legacy);
+  EXPECT_EQ(legacy->sequence, 1u);
+  EXPECT_EQ(legacy->ui_parallax_uv, 0.0f);
+  ASSERT_TRUE(await_free());
+  expect_pixels(legacy->texture);
+
+  ASSERT_TRUE(new_generation());
+  publish(1, true, 0.009f);
+  const auto current = await_frame();
+  ASSERT_TRUE(current);
+  EXPECT_NE(current->resource_generation, legacy->resource_generation);
+  EXPECT_EQ(current->ui_parallax_uv, 0.009f);
 }
 
 TEST_F(ReShadeBridgeGpu, PublisherIdentityStaysStableAcrossFramesAndTracksResourceReplacement) {

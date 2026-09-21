@@ -100,6 +100,10 @@ namespace sunshine_game3d {
       result["ui_alpha_source"] = !f.source_alpha_ui ? "none" : external_ui ? "ui_source_color" : "source_color";
       const bool nearest_mode = f.ui_plane.mode == ui_plane_mode::depth_midpoint_nearest_ui;
       const bool front_mode = f.ui_plane.mode == ui_plane_mode::front_limit;
+      const bool shallow_mode = f.ui_plane.mode == ui_plane_mode::shallow_front;
+      const bool fraction_mode = f.ui_plane.mode == ui_plane_mode::display_fraction;
+      const auto fraction = fraction_mode ? (std::isfinite(f.ui_plane.inverse_depth) ? json(f.ui_plane.inverse_depth) : json(nullptr)) :
+        shallow_mode ? json(0.25) : front_mode ? json(1.0) : json(nullptr);
       const auto captured_shader = f.shader_source.empty() ? renderer::shader_source() : f.shader_source;
       if (captured_shader.find("#define SUNSHINE_UI_NEAREST_PLANE 1") != std::string_view::npos) {
         const bool reduced = f.resources.ui_plane_resolved.handle != 0;
@@ -111,10 +115,12 @@ namespace sunshine_game3d {
           {"enabled", reduced}, {"srvs", {{"t8", "ui_plane_tiles"}}}, {"uavs", {{"u5", "ui_plane_resolved:R32_FLOAT"}}}});
         if (reduced) passes[5]["srvs"]["t9"] = "ui_plane_resolved";
         result["ui_plane_resolution"] = {{"reduction_ran", reduced},
-          {"policy", front_mode ? "fixed_current_front_limit" : nearest_mode ? "max(submitted midpoint floor, maximum valid decoded q under finite positive selected alpha); one scalar for the entire UI in this render" : f.ui_plane.mode == ui_plane_mode::depth_midpoint ? "explicit_inverse_depth_plane" : "screen_plane"},
-          {"inverse_depth_role", front_mode || f.ui_plane.mode == ui_plane_mode::screen ? "unused" : nearest_mode ? "midpoint_floor" : "explicit_plane"},
+          {"policy", fraction_mode ? "resolved_display_fraction" : shallow_mode ? "fixed_shallow_front" : front_mode ? "fixed_current_front_limit" : nearest_mode ? "max(submitted midpoint floor, maximum valid decoded q under finite positive selected alpha); one scalar for the entire UI in this render" : f.ui_plane.mode == ui_plane_mode::depth_midpoint ? "explicit_inverse_depth_plane" : "screen_plane"},
+          {"inverse_depth_role", fraction_mode || shallow_mode || front_mode || f.ui_plane.mode == ui_plane_mode::screen ? "unused" : nearest_mode ? "midpoint_floor" : "explicit_plane"},
+          {"word2_role", fraction_mode ? "front_limit_fraction" : "inverse_depth"},
+          {"front_limit_fraction", fraction},
           {"resolved_value", nullptr},
-          {"resolved_value_note", front_mode ? "No depth reduction. UI parallax is the current positive b0 display bound times strength and stereo blend when warp is active; depth/gain/zero do not place this plane." : nearest_mode ? "GPU result; no CPU readback in the live producer. Replay recomputes it from the exact captured depth, alpha, crop/jitter and constants." : "No depth reduction. Replay uses the exact captured UI mode and inverse-depth word."}};
+          {"resolved_value_note", fraction_mode ? "Replay freezes the exact consumed front-limit fraction, including ramp values, and does not rerun the temporal adaptive classifier or its observational probe. The shader multiplies a finite fraction in [0,0.75] by the authoritative current positive display bound; invalid values fall back to screen disparity." : shallow_mode ? "No depth reduction. UI parallax is one quarter of the current positive b0 display bound after strength, stereo blend and warp-readiness guards; depth/gain/zero do not place this plane." : front_mode ? "No depth reduction. UI parallax is the current positive b0 display bound times strength and stereo blend when warp is active; depth/gain/zero do not place this plane." : nearest_mode ? "GPU result; no CPU readback in the live producer. Replay recomputes it from the exact captured depth, alpha, crop/jitter and constants." : "No depth reduction. Replay uses the exact captured UI mode and inverse-depth word."}};
       }
       if (external_ui) {
         for (auto &pass : result["passes"]) {
@@ -142,17 +148,48 @@ namespace sunshine_game3d {
         {"sequence", fg.sequence}, {"viewport", fg.viewport},
         {"meaning", "Last confirmed game-requested FG mode, retained during transient observation loss. Independent of selected depth; does not identify this presentation as real or generated."}};
       const auto ui = ui_parameter_words(f.source_alpha_ui, f.ui_plane);
-      result["ui_parameter_abi"] = front_mode ? "sunshine_game3d.ui_parameters.v4" : nearest_mode ? "sunshine_game3d.ui_parameters.v3" : "sunshine_game3d.ui_parameters.v2";
+      result["ui_parameter_abi"] = fraction_mode ? "sunshine_game3d.ui_parameters.v6" : shallow_mode ? "sunshine_game3d.ui_parameters.v5" : front_mode ? "sunshine_game3d.ui_parameters.v4" : nearest_mode ? "sunshine_game3d.ui_parameters.v3" : "sunshine_game3d.ui_parameters.v2";
       result["ui_parameter_bytes"] = sizeof(ui);
       result["ui_parameter_hex"] = parameter_hex(ui);
-      result["ui_parameter_encoding"] = "little-endian exact b1 bytes: uint32 enabled, uint32 mode, IEEE754 float32 inverse depth, uint32 reserved zero";
+      result["ui_parameter_encoding"] = fraction_mode ? "little-endian exact b1 bytes: uint32 enabled, uint32 mode, IEEE754 float32 resolved front-limit fraction, uint32 reserved zero" :
+        "little-endian exact b1 bytes: uint32 enabled, uint32 mode, IEEE754 float32 inverse depth, uint32 reserved zero";
       result["ui_constant_binding"] = {{"register", "b1"}, {"uint32", ui},
         {"mode", static_cast<std::uint32_t>(f.ui_plane.mode)},
         {"mode_name", f.ui_plane.mode == ui_plane_mode::screen ? "screen" : f.ui_plane.mode == ui_plane_mode::depth_midpoint ? "depth_midpoint" :
-          nearest_mode ? "depth_midpoint_nearest_ui" : front_mode ? "front_limit" : "unknown"},
+          nearest_mode ? "depth_midpoint_nearest_ui" : front_mode ? "front_limit" : shallow_mode ? "shallow_front" : fraction_mode ? "display_fraction" : "unknown"},
         {"inverse_depth", std::isfinite(f.ui_plane.inverse_depth) ? json(f.ui_plane.inverse_depth) : json(nullptr)},
         {"inverse_depth_bits", ui[2]},
-        {"meaning", "When source_alpha_ui is enabled, alpha from ui_alpha_source supplies UI coverage. Horizontal-pass t0 uses that input; eye RGB remains current source_color. Mode 3 pins UI at the current positive display bound scaled by strength and stereo blend, independent of scene depth/gain/zero; its inverse-depth word is unused. Screen mode pins at zero disparity. Mode 1 uses the submitted independent depth. Mode 2 reduces max(submitted midpoint floor, nearest valid decoded depth under finite positive alpha). Both depth modes use b0 geometry. The horizontal protection includes one bilinear-support pixel. With protection enabled all-white masks are entirely UI; all-black masks have no UI constraints."}};
+        {"inverse_depth_role", fraction_mode || shallow_mode || front_mode || f.ui_plane.mode == ui_plane_mode::screen ? "unused" : nearest_mode ? "midpoint_floor" : "explicit_plane"},
+        {"word2_role", fraction_mode ? "front_limit_fraction" : "inverse_depth"},
+        {"front_limit_fraction", fraction},
+        {"meaning", "When source_alpha_ui is enabled, alpha from ui_alpha_source supplies UI coverage. Horizontal-pass t0 uses that input; eye RGB remains current source_color. Mode 4 pins UI at one quarter of the current positive display bound after strength, stereo blend and warp-readiness guards. Mode 3 uses that full bound. Both fixed modes ignore scene depth/gain/zero and their inverse-depth word is unused. Screen mode pins at zero disparity. Mode 1 uses the submitted independent depth. Mode 2 reduces max(submitted midpoint floor, nearest valid decoded depth under finite positive alpha). Both depth modes use b0 geometry. The horizontal protection includes one bilinear-support pixel. With protection enabled all-white masks are entirely UI; all-black masks have no UI constraints."}};
+      if (fraction_mode) {
+        auto &binding = result["ui_constant_binding"];
+        binding.erase("inverse_depth");
+        binding.erase("inverse_depth_bits");
+        binding["front_limit_fraction_bits"] = ui[2];
+        binding["meaning"] = "Mode 5 consumes the exact resolved display fraction from b1 word2, multiplied by the authoritative current positive display bound. Finite fractions in [0,0.75] are valid; invalid values fall back to screen disparity. The word is not an inverse depth. Replay freezes it and does not run the temporal adaptive classifier. UI coverage and RGB input semantics are unchanged.";
+      }
+      if (f.ui_adaptive) {
+        const auto &a = *f.ui_adaptive;
+        result["ui_adaptive"] = {{"levels_uv", ui_adaptive::levels_uv}, {"target_index", a.target_index},
+          {"count_scope", "center_75_percent_width_and_height"}, {"entry_ratio", double(ui_adaptive::entry_conflict_percent) / 100.},
+          {"conflict_aggregation", "ui_ratio_or_center_area"}, {"center_pixels", a.center_pixels},
+          {"entry_area_ratio", double(ui_adaptive::entry_area_per_mille) / 1000.},
+          {"release_area_ratio", double(ui_adaptive::release_area_per_mille) / 1000.},
+          {"entry_comparison", "strictly_greater"}, {"release_ratio", double(ui_adaptive::release_conflict_percent) / 100.},
+          {"required_index", a.required_index}, {"applied_fraction", std::isfinite(a.applied_fraction) ? json(a.applied_fraction) : json(nullptr)},
+          {"placement", "absolute_uv_levels"}, {"applied_uv", a.applied_uv}, {"target_uv", a.target_uv},
+          {"required_uv", a.required_uv}, {"limit_uv", a.limit_uv},
+          {"observed_front_cap_uv", a.observed_front_cap_uv},
+          {"comfort_cap_uv", ui_adaptive::comfort_cap_uv}, {"max_live_fraction", ui_adaptive::max_live_fraction},
+          {"capped_conflict", a.capped_conflict}, {"probe_age_ms", a.probe_age_ms},
+          {"accepted_sequence", a.accepted_sequence}, {"accepted_tick_ms", a.accepted_tick},
+          {"accepted_mask_sequence", a.accepted_mask_sequence}, {"covered_pixels", a.covered_pixels},
+          {"conflict_pixels", a.conflict_pixels}, {"invalid_pixels", a.invalid_pixels},
+          {"conflict_counts", a.conflict_counts}, {"status", a.status ? a.status : "unknown"},
+          {"meaning", "Optional snapshot of live absolute-disparity placement. Counts aggregate central 75% width and height. Entry occurs above 20% of covered UI OR 2% of central image pixels; retreat requires below 15% of covered UI AND 1.5% of central image pixels. Each absolute level is clipped to half observed_front_cap_uv. Counts belong to the accepted sample, not necessarily this render. Exact consumed mode5 fraction is frozen in b1; policy history is not a replay input."}};
+      }
       return result;
     }
 
@@ -272,7 +309,7 @@ namespace sunshine_game3d {
       state["zero_inverse"] = scale.has_zero ? nlohmann::json(scale.zero_inverse) : nlohmann::json(nullptr);
       state["ui_midpoint_inverse"] = scale.has_ui_midpoint ? nlohmann::json(scale.ui_midpoint_inverse) : nlohmann::json(nullptr);
       state["target_ui_midpoint_inverse"] = scale.has_ui_midpoint_target() ? nlohmann::json(scale.target_ui_midpoint_inverse) : nlohmann::json(nullptr);
-      state["ui_midpoint_policy"] = "Live mode 1 consumes the independently smoothed inverse-depth midpoint target=(qmin+qmax)/2, separate from scene zero. Current gain, zero, strength and blend map it to display parallax. Historical mode 2 uses the submitted midpoint as a floor for covered-depth reduction; mode 3 uses the full positive display bound. Exact consumed mode and words are in replay b1.";
+      state["ui_midpoint_policy"] = "Live mode 5 consumes an independently resolved display fraction; midpoint, gain and zero do not directly place it. The independently smoothed inverse-depth midpoint target=(qmin+qmax)/2 remains diagnostic state. Historical mode 1 maps the submitted midpoint through current geometry; mode 2 uses it as a covered-depth floor; mode 3 uses the full positive display bound; mode 4 uses one quarter. Exact consumed mode and words are in replay b1; replay does not rerun adaptive history.";
       state["zero_plane_at_infinity"] = scale.has_zero && camera && scale.zero_inverse == 0.f;
       state["current_zero_plane"] = scale.has_zero && (!camera || scale.zero_inverse > 0.f) ?
         nlohmann::json(camera ? 1.0 / scale.zero_inverse : double(scale.zero_inverse)) : nlohmann::json(nullptr);

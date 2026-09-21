@@ -9,12 +9,26 @@
 // layout, not a C++ object ABI: use Interlocked operations for ownership/control fields.
 namespace reshade_bridge {
   inline constexpr std::uint64_t magic = 0x3153425353485353ULL;
-  inline constexpr std::uint32_t version = 1;
+  inline constexpr std::uint32_t version = 2;
+  inline constexpr std::uint32_t screen_plane_version = 1;
   inline constexpr std::uint32_t slot_count = 3;
   inline constexpr wchar_t mapping_prefix[] = L"Local\\Sunshine3D.ReShade.SBS.";
   inline constexpr std::uint32_t max_source_width = 8192;
   inline constexpr std::uint32_t max_source_height = 8192;
   inline constexpr std::uint32_t max_packed_width = 16384;
+  // Signed displacement of one eye in source-eye UV. The producer publishes the actual
+  // rendered UI displacement; the receiver never recomputes it from scene parameters.
+  inline constexpr float maximum_ui_parallax_uv = 0.04f;
+  inline constexpr std::uint32_t cursor_plane_present = 1u;
+
+  [[nodiscard]] constexpr bool supported_version(std::uint32_t candidate) {
+    return candidate == screen_plane_version || candidate == version;
+  }
+
+  [[nodiscard]] constexpr bool valid_ui_parallax(float value) {
+    // Ordered comparisons also reject NaN and either infinity.
+    return value >= -maximum_ui_parallax_uv && value <= maximum_ui_parallax_uv;
+  }
 
   enum class slot_state : std::uint32_t {
     free = 0,
@@ -72,7 +86,26 @@ namespace reshade_bridge {
     std::uint64_t control = 0;
     std::uint64_t sequence = 0;
     std::uint64_t qpc = 0;
+    // Protocol 2 consumes eight bytes of protocol 1's slot padding. These fields have
+    // exactly the same writing/ready/reading ownership as the texture and sequence.
+    // Protocol 1's padding is unspecified and must never be interpreted as metadata.
+    std::uint32_t cursor_plane_flags = 0;
+    float ui_parallax_uv = 0.0f;
   };
+
+  [[nodiscard]] constexpr bool read_ui_parallax(std::uint32_t protocol_version, const slot_t &slot, float &value) {
+    value = 0.0f;
+    if (protocol_version == screen_plane_version) {
+      return true;
+    }
+    if (protocol_version != version || (slot.cursor_plane_flags != 0u && slot.cursor_plane_flags != cursor_plane_present) || !valid_ui_parallax(slot.ui_parallax_uv) || (slot.cursor_plane_flags == 0u && slot.ui_parallax_uv != 0.0f)) {
+      return false;
+    }
+    if (slot.cursor_plane_flags == cursor_plane_present) {
+      value = slot.ui_parallax_uv;
+    }
+    return true;
+  }
 
   struct alignas(64) shared_state_t {
     // Producer is the single metadata writer: odd during replacement, even when readable.
@@ -92,7 +125,7 @@ namespace reshade_bridge {
   }
 
   [[nodiscard]] constexpr bool valid_metadata(const metadata_t &m) {
-    if (m.signature != magic || m.protocol_version != version || m.metadata_bytes != sizeof(metadata_t) || m.producer_pid == 0 || m.producer_creation_time == 0 || m.window == 0 || m.generation == 0 || m.generation > max_generation || m.accepted_consumer_nonce == 0 || m.source_width == 0 || m.source_width > max_source_width || m.source_height == 0 || m.source_height > max_source_height || m.packed_width != m.source_width * 2 || m.packed_width > max_packed_width || m.packed_height != m.source_height || m.packed_width % 4 != 0 || m.packed_height % 2 != 0 || m.image_layout != layout::full_sbs_left_first || !supported_format(m.dxgi_format, m.color_transfer) || m.ready_fence_handle == 0) {
+    if (m.signature != magic || !supported_version(m.protocol_version) || m.metadata_bytes != sizeof(metadata_t) || m.producer_pid == 0 || m.producer_creation_time == 0 || m.window == 0 || m.generation == 0 || m.generation > max_generation || m.accepted_consumer_nonce == 0 || m.source_width == 0 || m.source_width > max_source_width || m.source_height == 0 || m.source_height > max_source_height || m.packed_width != m.source_width * 2 || m.packed_width > max_packed_width || m.packed_height != m.source_height || m.packed_width % 4 != 0 || m.packed_height % 2 != 0 || m.image_layout != layout::full_sbs_left_first || !supported_format(m.dxgi_format, m.color_transfer) || m.ready_fence_handle == 0) {
       return false;
     }
     for (auto handle : m.texture_handles) {
@@ -110,7 +143,11 @@ namespace reshade_bridge {
   }
 
   static_assert(std::is_standard_layout_v<shared_state_t> && std::is_trivially_copyable_v<shared_state_t>);
+  static_assert(sizeof(metadata_t) == 120);
   static_assert(sizeof(slot_t) == 64);
+  static_assert(sizeof(shared_state_t) == 384);
+  static_assert(offsetof(slot_t, cursor_plane_flags) == 24);
+  static_assert(offsetof(slot_t, ui_parallax_uv) == 28);
   static_assert(offsetof(shared_state_t, consumer_nonce) % 8 == 0);
-  static_assert(offsetof(shared_state_t, slots) % 64 == 0);
+  static_assert(offsetof(shared_state_t, slots) == 192);
 }  // namespace reshade_bridge

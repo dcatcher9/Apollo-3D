@@ -224,6 +224,10 @@ namespace platf::reshade_bridge {
       }
       const auto sequence = read64(slot.sequence);
       const auto qpc = read64(slot.qpc);
+      float ui_parallax_uv = 0.0f;
+      const bool cursor_plane_valid = wire::read_ui_parallax(metadata_.protocol_version, slot, ui_parallax_uv);
+      // Capture all slot fields before validating their generation. Replacement resets
+      // the mapped slots, so reading a field after this check could mix generations.
       wire::metadata_t current;
       if (!snapshot(*shared_, current) || current.generation != metadata_.generation || current.accepted_consumer_nonce != nonce_ || read64(shared_->consumer_nonce) != nonce_) {
         cached_.reset();
@@ -232,6 +236,12 @@ namespace platf::reshade_bridge {
       }
       if (sequence == 0 || sequence > ready_fence_->GetCompletedValue() || (cached_ && sequence <= cached_->sequence)) {
         claim(slot, metadata_.generation, wire::slot_state::reading, wire::slot_state::ready);
+        return cached_;
+      }
+      if (!cursor_plane_valid) {
+        // Retain the previous texture and its plane together. A malformed new frame must
+        // neither move its cursor nor keep an unusable slot at the head of the ready ring.
+        claim(slot, metadata_.generation, wire::slot_state::reading, wire::slot_state::free);
         return cached_;
       }
       context_->CopyResource(private_texture_.Get(), textures_[selected].Get());
@@ -250,13 +260,14 @@ namespace platf::reshade_bridge {
         .producer_process_id = metadata_.producer_pid,
         .producer_creation_time = metadata_.producer_creation_time,
         .resource_generation = metadata_.generation,
+        .ui_parallax_uv = ui_parallax_uv,
       };
       return cached_;
     }
 
   private:
     bool identity_matches(const wire::metadata_t &metadata) const {
-      return metadata.signature == wire::magic && metadata.protocol_version == wire::version &&
+      return metadata.signature == wire::magic && wire::supported_version(metadata.protocol_version) &&
              metadata.metadata_bytes == sizeof(wire::metadata_t) && metadata.producer_pid == pid_ &&
              metadata.producer_creation_time == process_creation_ && metadata.window == window_;
     }

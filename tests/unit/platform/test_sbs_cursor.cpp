@@ -171,6 +171,43 @@ TEST(SbsCursorPlacement, RejectsUnsupportedRotationAndInvalidCoordinates) {
   EXPECT_FALSE(cursor::place_cursor(s, 16, 8));
 }
 
+TEST(SbsCursorPlacement, AppliesSignedUiParallaxAfterCaptureScaling) {
+  auto s = snapshot(20, 10, 8, 8);
+  s.capture_width = s.capture_height = 100;
+  for (const float parallax : {0.025f, -0.025f}) {
+    SCOPED_TRACE(parallax);
+    const auto p = cursor::place_cursor(s, 400, 100, parallax);
+    ASSERT_TRUE(p);
+    const float shift = parallax > 0 ? 5.0f : -5.0f;
+    EXPECT_FLOAT_EQ(p->viewports[0].TopLeftX, 40 + shift);
+    EXPECT_FLOAT_EQ(p->viewports[1].TopLeftX, 240 - shift);
+    EXPECT_FLOAT_EQ(p->viewports[0].TopLeftY, 10);
+    EXPECT_FLOAT_EQ(p->viewports[1].TopLeftY, 10);
+    EXPECT_FLOAT_EQ(p->viewports[0].Width, 16);
+    EXPECT_FLOAT_EQ(p->viewports[1].Width, 16);
+    EXPECT_EQ(p->scissors[0].left, 0);
+    EXPECT_EQ(p->scissors[0].right, 200);
+    EXPECT_EQ(p->scissors[1].left, 200);
+    EXPECT_EQ(p->scissors[1].right, 400);
+  }
+}
+
+TEST(SbsCursorPlacement, RejectsNonfiniteOrOutOfRangeUiParallax) {
+  const auto s = snapshot();
+  for (const float valid : {0.0f, -0.0f, 0.04f, -0.04f}) {
+    EXPECT_TRUE(cursor::place_cursor(s, 16, 8, valid));
+  }
+  for (const float invalid : {
+         std::numeric_limits<float>::quiet_NaN(),
+         std::numeric_limits<float>::infinity(),
+         -std::numeric_limits<float>::infinity(),
+         std::nextafter(0.04f, 1.0f),
+         std::nextafter(-0.04f, -1.0f),
+       }) {
+    EXPECT_FALSE(cursor::place_cursor(s, 16, 8, invalid));
+  }
+}
+
 namespace {
   // Compile the same files/blobs supplied by production, including their shared color helpers.
   struct shader_includes_t: ID3DInclude {
@@ -437,8 +474,79 @@ TEST_F(SbsCursorGpu, HiddenPathRequiresNoShadersOrGpuInitialization) {
   const auto result = uninitialized.compose(source.Get(), source_view.Get(), s, false, 1);
   ASSERT_TRUE(result);
   EXPECT_EQ(result->texture, source.Get());
+  const auto shifted = uninitialized.compose(source.Get(), source_view.Get(), s, false, 1, 0.02f);
+  ASSERT_TRUE(shifted);
+  EXPECT_EQ(shifted->texture, source.Get());
+  EXPECT_FALSE(uninitialized.compose(source.Get(), source_view.Get(), s, false, 1, std::numeric_limits<float>::quiet_NaN()));
   s.visible = true;
   EXPECT_FALSE(uninitialized.compose(source.Get(), source_view.Get(), s, false, 1));
+}
+
+TEST_F(SbsCursorGpu, UiParallaxMovesAlphaAndXorTogetherAcrossSdrAndHdr) {
+  auto s = snapshot(16, 2, 2, 2);
+  s.capture_width = 64;
+  auto shape = std::make_shared<cursor::shape_t>(*s.shape);
+  shape->alpha_bgra.assign(16, 0);
+  shape->xor_bgra.assign(16, 0);
+  for (UINT y = 0; y < 2; ++y) {
+    // Each row contains a translucent gray pixel followed by a white XOR pixel.
+    std::fill_n(shape->alpha_bgra.begin() + y * 8, 4, 128);
+    std::fill_n(shape->xor_bgra.begin() + y * 8 + 4, 4, 255);
+  }
+  s.shape = shape;
+  for (const auto format : {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT}) {
+    SCOPED_TRACE(format);
+    const bool linear = format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    const float white = linear ? 203.0f / 80 : 1;
+    make_source(format, 128, 8);
+    const auto original = read(source.Get());
+    const auto unshifted = compositor->compose(source.Get(), source_view.Get(), s, linear, white);
+    ASSERT_TRUE(unshifted);
+    const auto reference = read(unshifted->texture);
+    for (const float parallax : {0.03125f, -0.03125f}) {
+      SCOPED_TRACE(parallax);
+      const auto shifted = compositor->compose(source.Get(), source_view.Get(), s, linear, white, parallax);
+      ASSERT_TRUE(shifted);
+      const auto output = read(shifted->texture);
+      const int left_shift = parallax > 0 ? 2 : -2;
+      for (UINT y = 0; y < 8; ++y) {
+        for (UINT x = 0; x < 128; ++x) {
+          const int local_x = x % 64;
+          const int shift = x < 64 ? left_shift : -left_shift;
+          const int reference_x = local_x - shift;
+          const auto expected = reference_x >= 0 && reference_x < 64 ?
+                                  reference.at((x / 64) * 64 + reference_x, y) :
+                                  original.at(x, y);
+          expect_rgb(output, x, y, expected, 0);
+        }
+      }
+      EXPECT_EQ(read(source.Get()).bytes, original.bytes);
+    }
+    const auto returned = compositor->compose(source.Get(), source_view.Get(), s, linear, white);
+    ASSERT_TRUE(returned);
+    EXPECT_EQ(read(returned->texture).bytes, reference.bytes);
+  }
+}
+
+TEST_F(SbsCursorGpu, UiParallaxClipsEachEyeWithoutCrossingTheSeam) {
+  make_source(DXGI_FORMAT_R8G8B8A8_UNORM, 128, 8);
+  const auto original = read(source.Get());
+  auto s = snapshot(62, 2, 4, 2);
+  s.capture_width = 64;
+  const auto result = compositor->compose(source.Get(), source_view.Get(), s, false, 1, 0.03125f);
+  ASSERT_TRUE(result);
+  const auto output = read(result->texture);
+  for (UINT y = 0; y < 8; ++y) {
+    for (UINT x = 0; x < 128; ++x) {
+      auto expected = original.at(x, y);
+      // Left cursor is shifted wholly beyond its eye; only right-eye columns 60..63 remain.
+      if (x >= 124 && (y == 2 || y == 3)) {
+        expected[0] = expected[1] = expected[2] = 1;
+      }
+      expect_rgb(output, x, y, expected);
+    }
+  }
+  EXPECT_EQ(read(source.Get()).bytes, original.bytes);
 }
 
 TEST_F(SbsCursorGpu, EyeBoundaryClipsWithoutLeakingIntoOtherEyeAndScalesCaptureCoordinates) {

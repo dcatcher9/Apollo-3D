@@ -111,6 +111,8 @@ namespace sunshine_game3d_test {
       frame_.parameters = renderer.consumed_parameters();
       frame_.source_alpha_ui = renderer.consumed_source_alpha_ui();
       frame_.ui_plane = renderer.consumed_ui_plane();
+      if (frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction)
+        frame_.ui_adaptive = renderer.consumed_ui_adaptive();
       frame_.resources = renderer.diagnostics();
       frame_.source_alpha_decision.requested = frame_.source_alpha_ui;
       frame_.source_alpha_decision.retained_alpha_ready = frame_.resources.ui_source.handle != 0;
@@ -239,13 +241,58 @@ namespace sunshine_game3d_test {
       const auto ui_hex = replay.at("ui_parameter_hex").get<std::string>();
       const bool nearest_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui;
       const bool front_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::front_limit;
-      check(replay.at("ui_parameter_abi") == (front_plane ? "sunshine_game3d.ui_parameters.v4" : nearest_plane ? "sunshine_game3d.ui_parameters.v3" : "sunshine_game3d.ui_parameters.v2") &&
+      const bool shallow_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::shallow_front;
+      const bool fraction_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction;
+      check(replay.at("ui_parameter_abi") == (fraction_plane ? "sunshine_game3d.ui_parameters.v6" : shallow_plane ? "sunshine_game3d.ui_parameters.v5" : front_plane ? "sunshine_game3d.ui_parameters.v4" : nearest_plane ? "sunshine_game3d.ui_parameters.v3" : "sunshine_game3d.ui_parameters.v2") &&
           replay.at("ui_parameter_bytes") == sizeof(ui_words) && ui_hex.size() == sizeof(ui_words) * 2 &&
           replay.at("ui_constant_binding").at("uint32") == ui_words,
         "Dump lost exact consumed independent UI plane words");
       check(replay.at("ui_plane_resolution").at("reduction_ran") == bool(frame_.resources.ui_plane_resolved.handle) &&
-          replay.at("ui_plane_resolution").at("inverse_depth_role") == (front_plane || frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::screen ? "unused" : nearest_plane ? "midpoint_floor" : "explicit_plane"),
+          replay.at("ui_plane_resolution").at("inverse_depth_role") == (fraction_plane || shallow_plane || front_plane || frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::screen ? "unused" : nearest_plane ? "midpoint_floor" : "explicit_plane"),
         "Dump confused the submitted UI base with the GPU-resolved plane");
+      if (shallow_plane) {
+        check(replay.at("ui_constant_binding").at("mode_name") == "shallow_front" &&
+            replay.at("ui_constant_binding").at("inverse_depth_role") == "unused" &&
+            replay.at("ui_constant_binding").at("front_limit_fraction") == 0.25 &&
+            replay.at("ui_plane_resolution").at("policy") == "fixed_shallow_front" &&
+            replay.at("ui_plane_resolution").at("front_limit_fraction") == 0.25 &&
+            !replay.at("ui_plane_resolution").at("reduction_ran").get<bool>(),
+          "Dump lost the fixed quarter-front contract or claimed an unused reduction");
+      }
+      if (fraction_plane) {
+        const auto &binding = replay.at("ui_constant_binding");
+        check(binding.at("mode_name") == "display_fraction" && binding.at("word2_role") == "front_limit_fraction" &&
+            binding.at("front_limit_fraction_bits") == ui_words[2] && !binding.contains("inverse_depth") &&
+            !binding.contains("inverse_depth_bits") && replay.at("ui_plane_resolution").at("policy") == "resolved_display_fraction" &&
+            !replay.at("ui_plane_resolution").at("reduction_ran").get<bool>(),
+          "Dump changed the resolved fraction into a depth or recomputed plane");
+        if (std::isfinite(frame_.ui_plane.inverse_depth))
+          check(binding.at("front_limit_fraction") == frame_.ui_plane.inverse_depth,
+            "Dump changed the consumed fraction value");
+        else check(binding.at("front_limit_fraction").is_null(), "Nonfinite fraction description must be null");
+      }
+      if (frame_.ui_adaptive) {
+        const auto &adaptive = replay.at("ui_adaptive");
+        const auto &expected = *frame_.ui_adaptive;
+        check(adaptive.at("levels_uv") == sunshine_game3d::ui_adaptive::levels_uv &&
+            adaptive.at("count_scope") == "center_75_percent_width_and_height" &&
+            adaptive.at("conflict_aggregation") == "ui_ratio_or_center_area" &&
+            adaptive.at("center_pixels") == expected.center_pixels &&
+            adaptive.at("entry_area_ratio") == .02 && adaptive.at("release_area_ratio") == .015 &&
+            adaptive.at("entry_ratio") == 0.20 && adaptive.at("entry_comparison") == "strictly_greater" &&
+            adaptive.at("release_ratio") == 0.15 && adaptive.at("placement") == "absolute_uv_levels" &&
+            adaptive.at("applied_uv") == expected.applied_uv && adaptive.at("target_uv") == expected.target_uv &&
+            adaptive.at("required_uv") == expected.required_uv && adaptive.at("limit_uv") == expected.limit_uv &&
+            adaptive.at("observed_front_cap_uv") == expected.observed_front_cap_uv &&
+            adaptive.at("target_index") == expected.target_index && adaptive.at("required_index") == expected.required_index &&
+            (std::isfinite(expected.applied_fraction) ? adaptive.at("applied_fraction") == expected.applied_fraction : adaptive.at("applied_fraction").is_null()) &&
+            adaptive.at("capped_conflict") == expected.capped_conflict &&
+            adaptive.at("probe_age_ms") == expected.probe_age_ms && adaptive.at("accepted_sequence") == expected.accepted_sequence &&
+            adaptive.at("accepted_tick_ms") == expected.accepted_tick && adaptive.at("accepted_mask_sequence") == expected.accepted_mask_sequence &&
+            adaptive.at("covered_pixels") == expected.covered_pixels && adaptive.at("conflict_pixels") == expected.conflict_pixels &&
+            adaptive.at("invalid_pixels") == expected.invalid_pixels && adaptive.at("conflict_counts") == expected.conflict_counts,
+          "Dump adaptive telemetry differs from the consumed policy snapshot");
+      } else check(!replay.contains("ui_adaptive"), "Dump invented adaptive policy telemetry");
       const auto *ui_bytes = reinterpret_cast<const unsigned char *>(ui_words.data());
       for (size_t i = 0; i < sizeof(ui_words); ++i)
         check(ui_hex[i * 2] == digits[ui_bytes[i] >> 4] && ui_hex[i * 2 + 1] == digits[ui_bytes[i] & 15],

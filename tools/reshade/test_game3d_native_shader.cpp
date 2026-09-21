@@ -45,6 +45,7 @@ namespace {
     {"SunshineUIPlaneTilesStore", D3D_SIT_UAV_RWTYPED, 4},
     {"SunshineUIPlaneResolvedStore", D3D_SIT_UAV_RWTYPED, 5},
     {"SunshineAlphaCoverageStore", D3D_SIT_UAV_RWTYPED, 6},
+    {"SunshineUIConflictStore", D3D_SIT_UAV_RWTYPED, 7},
     {"SunshinePointClamp", D3D_SIT_SAMPLER, 0},
     {"SunshineLinearClampState", D3D_SIT_SAMPLER, 1},
     {"SunshinePointBorder", D3D_SIT_SAMPLER, 2},
@@ -126,7 +127,7 @@ namespace {
       require(known, std::string("Unrecognized native shader resource: ") + actual.Name);
       manifest << "  binding " << actual.Name << ' ' << actual.Type << ' ' << actual.BindPoint << '\n';
     }
-    if (std::string(entry.name) == "SunshineHostHorizontalCS" ||
+    if (std::string(entry.name) == "SunshineHostHorizontalCS" || std::string(entry.name) == "SunshineApplyUICS" ||
         std::string(entry.name) == "SunshineUINearestTilesCS" || std::string(entry.name) == "SunshineUINearestReduceCS")
       require(has_ui_binding, "UI plane pass lost its independent b1 binding");
     for (unsigned index = 0; index < shader.ConstantBuffers; ++index) {
@@ -201,6 +202,8 @@ int main(int argc, char **argv) {
           entries.push_back({"SunshineHostHorizontalCS", "cs_5_0", 32, 1, 1});
           entries.push_back({"SunshineUINearestTilesCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUINearestReduceCS", "cs_5_0", 256, 1, 1});
+          entries.push_back({"SunshineUIConflictCS", "cs_5_0", 8, 8, 1});
+          entries.push_back({"SunshineApplyUICS", "cs_5_0", 32, 1, 1});
         }
         for (const auto &entry : entries) {
           compile(source, source_path.string(), directory, width, height, color, entry, manifest);

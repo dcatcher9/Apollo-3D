@@ -113,6 +113,57 @@ namespace {
   }
 
   struct publisher_tests {
+    static void adaptive_ui_source_provenance() {
+      sunshine_depth::frame_depth depth;
+      depth.ready = true; depth.runtime_epoch = 3;
+      depth.source_id = 100; depth.layout_epoch = 7; depth.frame_index = 50;
+      scene_parameters_t scene;
+      scene.ready = true; scene.generic_routing_epoch = 12;
+      const auto a = resolve_ui_observation(depth, {}, scene, 17, 1000);
+      require(a.eligible && a.epoch == 3 && a.source_id == 100 && a.revision == 7 &&
+          a.sequence == 50 && a.tick_ms == 1000 && a.generic_basis_epoch == 17 && a.generic_routing_epoch == 12,
+        "Generic UI observation lost capture provenance or logical placement scope");
+      depth.source_id = 200; depth.layout_epoch = 11; depth.frame_index = 51;
+      const auto b = resolve_ui_observation(depth, a, scene, 17, 1016);
+      require(b.eligible && b.source_id != a.source_id && b.revision != a.revision && b.sequence == 51 &&
+          b.tick_ms == 1016 && b.epoch == a.epoch && b.generic_basis_epoch == a.generic_basis_epoch &&
+          b.generic_routing_epoch == a.generic_routing_epoch && sunshine_game3d::ui_adaptive::same_scope(a, b),
+        "Physical buffer rotation changed the logical UI scope or erased member provenance");
+      const auto repeated = resolve_ui_observation(depth, b, scene, 17, 1050);
+      require(repeated.tick_ms == b.tick_ms && repeated.sequence == b.sequence,
+        "Repeated access made the same generic depth capture fresh again");
+      scene.generic_routing_epoch = 13;
+      const auto rerouted = resolve_ui_observation(depth, b, scene, 17, 1066);
+      require(rerouted.generic_routing_epoch == 13 && !sunshine_game3d::ui_adaptive::same_scope(b, rerouted),
+        "A new preferred capture group retained the old UI routing identity");
+      require(!resolve_ui_observation(depth, b, scene, 0, 1066).eligible,
+        "Generic UI observation without a basis fell back to provider matching");
+      scene.generic_routing_epoch = 0;
+      require(!resolve_ui_observation(depth, b, scene, 17, 1066).eligible,
+        "Generic UI observation without authoritative routing was admitted");
+      scene.generic_routing_epoch = 12; scene.ready = false;
+      require(!resolve_ui_observation(depth, b, scene, 17, 1066).eligible,
+        "Uncalibrated generic depth became adaptive UI evidence");
+      scene.ready = true;
+      depth.provided.epoch = 9; depth.provided.observation_revision = 4;
+      depth.provided.source_id = 1000; depth.provided.viewport = 2;
+      depth.provided.sequence = 55; depth.provided.tick = 990;
+      const auto provided = resolve_ui_observation(depth, b, scene, 17, 1066);
+      require(provided.eligible && provided.epoch == 9 && provided.revision == 4 && provided.source_id == 1000 &&
+          provided.viewport == 2 && provided.sequence == 55 && provided.tick_ms == 990 &&
+          provided.generic_basis_epoch == 0 && provided.generic_routing_epoch == 0,
+        "Provider logical identity was replaced by generic resource or roster metadata");
+      depth.reused_depth = true;
+      const auto held = resolve_ui_observation(depth, provided, scene, 19, 1100);
+      require(held.eligible && held.epoch == provided.epoch && held.revision == provided.revision &&
+          held.source_id == provided.source_id && held.sequence == provided.sequence && held.tick_ms == provided.tick_ms &&
+          held.generic_basis_epoch == 0 && held.generic_routing_epoch == 0,
+        "FG reuse fabricated new UI evidence or acquired a generic placement scope");
+      depth.ready = false;
+      require(!resolve_ui_observation(depth, held, scene, 19, 1116).eligible,
+        "Unavailable depth remained eligible for adaptive UI observation");
+    }
+
     static void pending_depth_continuity() {
       using namespace sunshine_streamline;
       depth_capture::retained_depth previous;
@@ -438,7 +489,8 @@ namespace {
           ++changed.scene_source[field];
           restore_reused_scene(changed, previous, true);
           require(!changed.depth_ready && !changed.scene.ready &&
-              changed.scene.ui_plane.mode == sunshine_game3d::ui_plane_mode::screen &&
+              changed.scene.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction &&
+              changed.scene.ui_plane.inverse_depth == 0.f &&
               changed.scene.ui.phase == sunshine_game3d::automatic_phase::waiting_for_depth,
             "Held depth inherited geometry from a different epoch/source/capture/viewport");
         }
@@ -573,6 +625,7 @@ namespace {
       {
         const auto pending = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 1000);
         require(!pending.ready && (!native_cropped || pending.rect == active_rect) &&
+            pending.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction &&
             pending.ui.phase == sunshine_game3d::automatic_phase::calibrating &&
             pending.ui.scale.basis == sunshine_game3d::automatic_scale_basis::relative_depth &&
             !pending.ui.scale.depth_statistics_valid(),
@@ -602,7 +655,7 @@ namespace {
           scene.admitted_strength == 37.f,
         "NGX resolver did not retain ready relative stereo");
       require(scene.ui.scale.depth_statistics_valid() && scene.ui.scale.reference_inverse == .375 &&
-          scene.ui_plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint && scene.ui_plane.inverse_depth == .25f &&
+          scene.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction && scene.ui_plane.inverse_depth == 0.f &&
           scene.ui.scale.has_ui_midpoint && scene.ui.scale.ui_midpoint_inverse == .25f &&
           scene.ui.scale.has_ui_midpoint_target() && scene.ui.scale.target_ui_midpoint_inverse == .25 &&
           scene.ui.scale.mean_inverse == .25 && scene.ui.scale.normalization == initial_L &&
@@ -689,8 +742,7 @@ namespace {
           std::abs(matrix.scale - initial_L / expected_near) < 2e-5 && matrix.admitted_strength == 71.f,
         "Associated matrix did not take precedence over the relative-depth reference");
       require(matrix.ui.scale.depth_statistics_valid() && matrix.ui.scale.minimum_inverse == expected_far &&
-          matrix.ui_plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint &&
-          matrix.ui_plane.inverse_depth == float((double(expected_far) + expected_near) * .5) &&
+          matrix.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction && matrix.ui_plane.inverse_depth == 0.f &&
           matrix.ui.scale.has_ui_midpoint && matrix.ui.scale.ui_midpoint_inverse == float((double(expected_far) + expected_near) * .5) &&
           matrix.ui.scale.has_ui_midpoint_target() &&
           matrix.ui.scale.target_ui_midpoint_inverse == (double(expected_far) + expected_near) * .5 &&
@@ -1090,6 +1142,7 @@ namespace {
       const auto native_queue = reinterpret_cast<std::uint64_t>(generation->queue12.get());
       publisher.generation_ = std::move(generation);
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&publisher.shared_->consumer_nonce), 42);
+      publisher.generation_->pending_ui_parallax_uv = .0037f;
       store_state(publisher.shared_->slots[0], 1, wire::slot_state::writing);
       publisher.finish_present(native_queue + 1, 99);
       publisher.finish_present(native_queue, 100);
@@ -1111,6 +1164,8 @@ namespace {
       require(wire::control_state(slot.control) == (retire_before_signal ? wire::slot_state::writing : wire::slot_state::ready), "retired copy was republished or valid copy was hidden");
       if (!retire_before_signal) {
         require(slot.sequence == 1 && slot.qpc == 1234, "published copy lost its source timestamp");
+        require(slot.cursor_plane_flags == wire::cursor_plane_present && slot.ui_parallax_uv == .0037f,
+          "Published cursor plane did not follow its fenced source frame");
       }
     }
 
@@ -1142,6 +1197,7 @@ namespace {
         const auto sequence = generation.last_submitted + 1;
         generation.pending_slot = index;
         generation.pending_qpc = 1000 + sequence;
+        generation.pending_ui_parallax_uv = float(sequence) * .001f;
         exporter_async_fixture::native_commands commands;
         commands.native = gpu.copies[pattern].commands.get();
         require(generation.submit(&commands, {reinterpret_cast<std::uint64_t>(source.get())}, index, sequence),
@@ -1161,6 +1217,9 @@ namespace {
         require(wire::control_state(publisher.shared_->slots[index].control) == wire::slot_state::ready &&
           publisher.shared_->slots[index].sequence == sequence && publisher.shared_->slots[index].qpc == 1000 + sequence,
           "A queued export lost slot ownership, sequence or timestamp");
+        require(publisher.shared_->slots[index].cursor_plane_flags == wire::cursor_plane_present &&
+            publisher.shared_->slots[index].ui_parallax_uv == float(sequence) * .001f,
+          "A queued export inherited another frame's cursor plane");
         publisher.next_slot_ = (index + 1) % wire::slot_count;
       };
 
@@ -1274,6 +1333,7 @@ namespace {
 int main(int argc, char **argv) {
   try {
     if (argc == 2 && std::strcmp(argv[1], "--scene-strength") == 0) {
+      publisher_tests::adaptive_ui_source_provenance();
       publisher_tests::source_alpha_scope_lifetime();
       publisher_tests::pending_depth_continuity();
       publisher_tests::retained_depth_decision();
@@ -1302,6 +1362,7 @@ int main(int argc, char **argv) {
     }
     require(argc == 1, "usage: reshade_exporter_tests [--async-ring|--depth-provenance|--scene-strength]");
     publisher_tests::copied_depth_provenance();
+    publisher_tests::adaptive_ui_source_provenance();
     publisher_tests::source_alpha_scope_lifetime();
     publisher_tests::pending_depth_continuity();
     publisher_tests::retained_depth_decision();

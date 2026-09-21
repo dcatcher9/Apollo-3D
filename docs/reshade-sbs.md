@@ -31,13 +31,20 @@ they do not open the unrelated desktop texture or acquire its keyed mutex. Ordin
 duplicate-eye fallback retain capture synchronization.
 
 With Desktop Duplication capture, Sunshine also composites the visible Windows cursor over each
-authored eye at the screen plane. ReShade exports do not contain that separate cursor, even when it
-appears on the PC monitor. The capture frame carries an immutable cursor shape/position snapshot;
-the encoder uploads the small shape only when it changes and composites into its own scratch
-texture, leaving the retained game export untouched. Hidden Windows cursors skip this pass;
-cursors already rendered by the game remain in the export. Fullscreen display scaling applies to
-cursor placement, each eye clips its own cursor, and HDR cursor white follows the display's SDR white level. This cursor metadata
-is currently supplied by Desktop Duplication; the WGC fallback does not expose it.
+authored eye at the protected game UI's rendered plane. The add-on publishes that frame's applied
+per-eye UI displacement with its stereo texture; the host uses the published value without
+recomputing scene depth or advancing the UI policy. A cached export retains its matching scalar.
+Protocol-1 exports retain the screen-plane cursor behavior. Opening ReShade's overlay selects
+screen depth for the system cursor to match its controls; unavailable or disabled game UI
+protection and depth diagnostic views also publish zero cursor displacement.
+ReShade exports do not contain that separate Windows cursor, even when it appears on the PC
+monitor. The capture frame carries an immutable cursor shape/position snapshot; the encoder
+uploads the small shape only when it changes and composites into its own scratch texture,
+leaving the retained game export untouched. Hidden Windows cursors skip this pass; cursors
+already rendered by the game remain in the export. Fullscreen display scaling applies to cursor
+placement, each eye clips its own cursor, and HDR cursor white follows the display's SDR white
+level. This cursor metadata is currently supplied by Desktop Duplication; the WGC fallback does
+not expose it. Install the matching protocol-2 host and add-on together for cursor/UI alignment.
 
 ## Native renderer ownership
 
@@ -131,7 +138,7 @@ per-game configuration file. Auto is the default. On and Off are persistent manu
 overrides, including across game restarts. The previous `SourceAlphaUI=false` migrates to Off;
 the old enabled heuristic migrates to Auto. An explicit new mode takes precedence over the old key.
 No game-specific detection profile is used. When protection is enabled, white and gray pin already-composited
-UI to one global plane at the independently tracked, smoothed inverse-depth midpoint, while
+UI to one global plane selected by the adaptive display-fraction policy below, while
 black keeps scene depth. This is a placement policy, not recovered UI geometry or physical distance.
 An entirely white real-input alpha channel makes the entire frame flat at the UI plane when
 protection is on; an entirely black one adds no UI pins. Auto starts one 300000 ms observation
@@ -220,20 +227,86 @@ confirmed mode or observer/runtime shutdown updates it. Renderer, panel and dump
 presentation decision. An enabled FG mode does not identify an individual generated frame.
 UI placement is independent of shape protection: explicitly supplied UI-layer geometry may define
 its placement, but the current SL/NGX adapters expose no authoritative target UI depth. This path
-therefore uses mode 1, `depth_midpoint`, while the scene retains its contrast-midpoint zero.
-The submitted UI inverse depth is the applied, independently smoothed extrema midpoint described
-below, not the instantaneous midpoint or the scene zero. The shader maps it through the same
-current gain, scene zero, strength, stereo blend and per-eye clamp as scene depth. Every protected
-UI pixel shares this plane, but its displayed disparity can move as those controls or the tracked
-midpoint change during walking and camera rotation. Unavailable stereo resolves to zero UI
-parallax. The plane does not follow the nearest depth beneath UI coverage and does not guarantee
-placement in front of that foreground. The switch can disable automatic protection because arbitrary
+therefore uses mode 5, `display_fraction`, while the scene retains its contrast-midpoint zero.
+The shader consumes `pUI = f * C`, where `C` is the authoritative current positive display
+bound, including strength and stereo blend. Live policy controls absolute per-eye parallax
+`pUI` and derives the consumed fraction `f = pUI / C`. Its five targets are
+`min(L, 0.50 * C)` for `L = {0, 0.001, 0.002, 0.003, 0.0035}` in source UV. At source width
+3840 these absolute levels are 0, 3.84, 7.68, 11.52 and 13.44 pixels per eye before the relative
+cap. Increasing scene strength does not increase the 0.0035 independent ceiling. This is a
+trial value, not a general headset comfort guarantee. The policy starts at screen depth;
+unavailable stereo resolves to zero rendered UI parallax. Scene zero, gain and display limits
+remain unchanged.
+
+The observational GPU pass divides the screen into a 16-by-16 grid but scans only the 144
+tiles with both zero-based coordinates in `2..13`. This is the central 75% of width and height:
+`[floor(W/8), floor(7W/8))` by `[floor(H/8), floor(7H/8))`. Outer tiles write empty coverage
+records without loading the mask or scene. Their geometric pixel count remains initialized
+for readback validation. This omits 43.75% of image pixels at dimensions divisible by 16;
+integer bounds define the exact saving otherwise. Border UI remains protected by the normal
+UI conditioner at the same global plane and moves with the system cursor.
+
+Inside the central rectangle, each pixel first loads the selected alpha. Only finite positive
+alpha causes a scene-field load and five comparisons. These measure the conditioned scene
+before UI pinning, so they cannot measure the previous UI correction. A covered pixel conflicts
+at candidate `i` when `scene_parallax + 0.05 * C > min(levels_uv[i], 0.50 * C)`.
+The CPU sums the central counters once. A candidate conflicts when its bad-pixel count is
+strictly greater than 20% of central covered UI **or** strictly greater than 2% of all pixels
+in the central rectangle. The second condition prevents a large clear panel from diluting
+substantial foreground overlap. Both use the same conflict numerator; central image area is
+`(floor(7W/8)-floor(W/8)) * (floor(7H/8)-floor(H/8))`, independent of UI coverage. Integer
+cross-products preserve the exact thresholds without rounded percentages. The first candidate
+that exceeds neither bound is the required target; if none qualifies, it is the cap and
+`capped_conflict` is set. Exact threshold equality and empty coverage do not trigger entry.
+There is no per-region grouping, pixel floor, image subsampling or histogram. Each GPU tile
+still keeps five counters; the extra area comparison adds no GPU work or readback data. Dump
+records `center_pixels`, both area thresholds and `observed_front_cap_uv` alongside coverage
+and conflicts so the decision remains interpretable after a bound change.
+
+A nearer requirement must persist across distinct observations for at least 100 ms before
+changing the target. The controller chooses the least forward requirement sustained through
+that confirmation. After reaching its current target, retreat requires a shallower candidate
+with conflicts strictly below both 15% of covered UI and 1.5% of central image pixels for
+1500 ms of fresh observations. Equality at either release threshold blocks retreat. The nearest candidate needed during that dwell becomes the retreat target, so a
+briefly clearer observation cannot pull it too far back. Empty coverage permits return to zero.
+Applied movement is limited to 0.03 UV per second forward and 0.005 UV per second backward.
+Targets and movement use absolute UV. A changed scene bound immediately enforces its current
+half-bound cap, invalidates old-cap observations and disarms movement until fresh evidence
+arrives. Fraction serialization rounds conservatively so its shader product cannot exceed
+the controlled absolute position or current cap.
+
+Probes run at most once per 100 ms with one bounded asynchronous readback outstanding. Source
+and routing changes invalidate evidence without restarting this renderer-wide work interval. Each
+tile contains eight uint32 words; the 16-by-32 RGBA32_UINT record texture occupies 8 KiB.
+No source image is read back. Source age uses the older consumed depth/retained-alpha timestamp
+and must be at most 250 ms. Duplicate depth or retained-mask identities do not renew evidence.
+Missing, expired, invalid or failed observations hold the absolute applied position, subject
+to the current cap, and disarm ramps and continuity. Gaps over 250 ms break continuity. A fresh
+eligible source scope starts at screen depth. Generic depth uses runtime, raw-basis and routing
+epochs as that logical scope; normal A/B/C allocation rotation and different per-allocation layout
+epochs preserve placement and pending display-space observations. Every observation still retains
+its physical source/layout, original capture time and global frame sequence. Calibration admission
+must validate the currently selected depth; a changed routing group, basis or runtime revokes the
+old scope. Provider sources keep their existing feature/viewport/observation-revision identity.
+Alpha On / Off / Auto admission remains separate
+from placement. Live probes require `SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE` so historical relative
+count shaders cannot be misinterpreted as absolute statistics.
+
+A cap can leave scene geometry in front of UI; fresh geometry can also arrive before the next
+probe or before a ramp finishes. The existing local UI conditioner continues to adjust adjacent
+scene pixels; no additional scene-wide compression is added. These correctness and work bounds
+do not establish headset comfort or a measured frame-time improvement.
+Historical nearest-depth mode 2 creates its reduction textures and pipelines only when first
+requested. Normal adaptive mode 5 does not allocate or compile those legacy resources; mode-2
+preparation failure occurs before command recording and leaves ordinary rendering usable.
+The switch can disable automatic protection because arbitrary
 game backbuffer alpha is not universally a UI mask and selective coverage can still be a false positive.
 
 Both paths use the same UI protection shader. For FG, only its alpha input changes; all RGB passes
 still use the current color, never the retained input's RGB. Captures share the existing depth
 transport's producer/consumer fence retirement and maximum source age. No new queue, GPU wait or
-CPU image readback is added; the automatic gate reads only the small coverage records described above.
+CPU image readback is added; the alpha gate and adaptive placement read only their bounded
+coverage and conflict records described above.
 Unfinished captures are skipped rather than waiting. Scope, viewport,
 resolution or observation-revision changes revoke old masks. Alpha and depth have independently
 recorded source identities: this is bounded previous-input reuse, not an exact generated-frame
@@ -244,7 +317,7 @@ host remain immutable even after acknowledgement. Both use the same bounded capt
 The renderer copies each admitted capture into its private UI texture once, then reuses those
 bytes for later presentations while that capture remains valid. Renderer replacement clears this
 copy identity; failed replacement copies never authorize stale pixels.
-Live midpoint placement dispatches no nearest-covered-depth reduction. Historical mode 2
+Live adaptive placement uses conflict counts, not a nearest-covered-depth maximum. Historical mode 2
 remains available for replay: a 16-by-16 tile pass and a 256-thread reduction resolve
 `max(submitted midpoint floor, nearest valid decoded q under finite positive selected alpha)`
 into one R32 float on the rendering queue. Its crop/jitter mapping matches the scene candidate;
@@ -252,8 +325,9 @@ every covered valid pixel contributes, and empty coverage retains the submitted 
 resources are overwritten on each mode-2 render, with no CPU readback or additional queue wait.
 After the existing horizontal conditioning, each row computes the exact distance `d` in pixels
 to positive finite source alpha and clips its signed displacement to
-`pUI +/- 0.5 * max(d - 1, 0) / source_width`. Live mode 1 supplies the displacement derived from
-the applied UI midpoint and current geometry. The one-pixel
+`pUI +/- 0.5 * max(d - 1, 0) / source_width`. Live mode 5 supplies the applied display-fraction displacement
+described above. This existing local conditioner can compress nearby foreground or bring nearby
+background forward toward the UI plane; the trial adds no separate scene-wide compression. The one-pixel
 horizontal collar protects the bilinear color footprint. This rigidly shifts UI in each eye and
 preserves the horizontal invertibility bound without overlaying a second copy of already-composited
 text. Empty rows retain their original field exactly. The distance scan itself reuses the horizontal
@@ -269,8 +343,24 @@ sequence/timestamp separately from the current render.
 Offline replay uses the frozen effective value without rerunning the automatic timer; explicit replay
 overrides still honor entirely white masks. It uses the separate 16-byte `b1` UI constants; the 80-byte geometry `b0` ABI
 is unchanged. `source_alpha_ui_fg_mode` records the retained mode and its observation provenance.
-The UI constant buffer stores four 32-bit words: enabled, mode, inverse-depth float bits, and
-zero reserved padding. Live mode 1 records the applied UI midpoint in
+The UI constant buffer stores four 32-bit words: enabled, mode, a mode-dependent float word, and
+zero reserved padding. Live mode 5 records `sunshine_game3d.ui_parameters.v6` and requires
+`#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1`. Its third word is the exact applied display fraction,
+not inverse depth. The binding labels it `word2_role: front_limit_fraction` and records
+`front_limit_fraction` plus `front_limit_fraction_bits`. Finite fractions in `[0,0.75]` are valid
+for frozen replay compatibility; live adaptation is capped at 0.50.
+Out-of-range and nonfinite words retain their raw bits for replay but produce screen disparity.
+Nonfinite values have a null JSON description. Optional `replay.ui_adaptive` records levels,
+target and required indices, applied fraction, capped conflict, probe age, accepted depth/mask
+identities and coverage/conflict counts. Current policy counts include only UI inside the central
+rectangle; full-screen alpha-enable detection retains its separate counts. These describe accepted observations rather than a new
+measurement of the dumped frame. Replay freezes the exact applied fraction, including intermediate
+ramp values, without rerunning the classifier, its history or its observational probe. No new
+GPU artifact is required for replay.
+Historical mode 4, `shallow_front`, retains v5 and requires `#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1`.
+It uses one quarter of `C`; its inverse-depth word is unused and its binding retains the required
+`front_limit_fraction: 0.25` metadata without adding another constant-buffer word.
+Historical mode 1 retains the applied inverse-depth plane in
 `sunshine_game3d.ui_parameters.v2`; the shader must consume `Sunshine_UIPlaneMode` and the supplied
 inverse depth. Historical mode 0 retains the screen plane and the same v2 ABI. Historical mode 2
 uses the submitted depth as a floor for the GPU maximum and retains the v3 ABI; its shader requires
@@ -278,15 +368,21 @@ uses the submitted depth as a floor for the GPU maximum and retains the v3 ABI; 
 `front_limit`, retains v4 and requires `#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1`. It places UI at
 the current positive `b0` display budget times strength and stereo blend, subject to warp
 readiness; its inverse-depth word is unused, including malformed bits preserved for replay.
-Mode 2 is rejected in v2 packages, and mode 3 is rejected in v2/v3 packages. Unknown modes,
+Mode 2 requires v3 or newer, mode 3 requires v4 or newer, mode 4 requires v5 or newer, and mode 5 requires v6.
+Unknown modes,
 invalid depth in modes 1/2, and unavailable stereo resolve to zero UI parallax.
 Dump 3D records the exact submitted UI constants, separate from diagnostic targets. Old packages
 without these constants retain mode 0. Replay's `--ui-inverse-depth` selects mode 1;
-`--ui-nearest-floor` selects mode 2; `--ui-plane screen` selects mode 0; and
-`--ui-plane front-limit` selects mode 3. Depth-mode geometry overrides recompute UI displacement
-on the GPU. Front-limit placement responds to the applied display budget, strength, blend and
-readiness, without deriving a displacement from scene gain or zero. Mode-3 dumps mark the
-inverse-depth word unused and the reduction inactive. Historical mode-2 dumps distinguish the
+`--ui-nearest-floor` selects mode 2; `--ui-plane screen` selects mode 0;
+`--ui-plane front-limit` selects mode 3; `--ui-plane shallow-front` selects mode 4; and
+`--ui-front-fraction 0..0.75` selects mode 5 with an explicit frozen fraction.
+`--ui-plane adaptive` is invalid because a single-frame package has no policy history to replay.
+Depth-mode geometry overrides recompute UI displacement on the GPU. Front-limit and shallow-front
+placement respond to the applied display budget, strength, blend and readiness, without deriving
+a displacement from scene gain or zero. Mode 5 keeps the consumed fraction fixed while applying
+the current display bound; geometry overrides do not rerun its classifier.
+Mode-3 and mode-4 dumps mark the inverse-depth word unused
+and the reduction inactive. Historical mode-2 dumps distinguish the
 submitted floor from the GPU-resolved plane; replay additionally saves that resolved scalar.
 Live rendering never waits to read it back.
 `replay.ui_alpha_source` identifies `none`, `source_color`, or `ui_source_color`. When a retained
@@ -497,7 +593,7 @@ available UI mask or a match to the exported frame. Before using either input to
 capture it within its declared resource lifetime and verify frame, extent, color-space and
 pixel semantics. Comparing unsynchronized final and HUDless images is not reliable UI separation.
 
-The request uses diagnostic wire v3 with capacity for 40 textures, independent of streaming SBS v1.
+The request uses diagnostic wire v3 with capacity for 40 textures, independent of streaming SBS v2.
 Host and add-on must agree on this mapping version; incompatible versions fail explicitly.
 The additive on-disk artifact schema remains `sunshine.game3d.dump.v1`.
 Optional metadata publication is transactional. If its serialization or mailbox budget fails,
@@ -581,13 +677,16 @@ reporting byte equality and numeric errors in `replay.json`. `--verify` returns 
 errors exceed the reported format tolerance; source color copying must remain byte-exact.
 An optional `--strength 30`, `--shader '<experimental.hlsl>'`,
 `--depth-gain 500`, `--source-alpha-ui on|off`, `--zero-inverse-depth 0.001`,
-`--ui-inverse-depth 0.002`, `--ui-nearest-floor 0.002`, or `--ui-plane screen|front-limit` creates a clearly labeled experiment using
+`--ui-inverse-depth 0.002`, `--ui-nearest-floor 0.002`, `--ui-front-fraction 0.25`, or
+`--ui-plane screen|front-limit|shallow-front` creates a clearly labeled experiment using
 the same pass/constant ABI. Gain and zero overrides are independent: moving the zero changes
 only `convergence[1] = q0`, preserving the captured gain unless separately overridden.
-Live midpoint UI maps the captured applied UI depth through the overridden geometry; its target
-is not recomputed by a single-frame replay. Historical front-limit UI instead uses the applied
-display budget, strength and blend, subject to warp readiness; gain and zero overrides do not
-position it. A legacy captured shader needs a compatible `--shader` override to select that mode.
+Historical midpoint UI maps the captured applied UI depth through the overridden geometry; its
+target is not recomputed by a single-frame replay. Mode 5 freezes the consumed display fraction
+without rerunning adaptive observations or history. Historical shallow-front UI uses one quarter
+of the applied positive display limit; historical front-limit UI uses that full limit. All include
+strength, blend and warp readiness; gain and zero overrides do not directly position them. A legacy
+captured shader needs a compatible `--shader` override to select a mode it does not support.
 Gain must be positive and representable; zero must be finite and nonnegative.
 Its argument and resulting values are recorded alongside the unchanged captured parameter bytes
 in `replay.json`. It does not change the live zero-plane policy. Inputs remain unchanged and each
@@ -1618,7 +1717,7 @@ and area. Every finite pixel remains represented; there is no percentile trimmin
 main-object detection. For two exact depth layers this equals their midpoint independently of
 their relative areas. With additional layers it lies between `b` and the former extrema midpoint
 `(b+Q)/2`. Gain remains `Ktarget=L/Q`. The UI midpoint independently tracks the extrema midpoint
-for live mode-1 placement, as described below.
+for historical depth-mode placement and diagnostics, as described below; live mode 5 does not consume it.
 The scene-zero formula is unchanged by UI protection.
 After initialization, an exact positive flat range targets its single depth `b` while holding
 gain; an all-zero range holds both controls and clears their targets.
@@ -1646,14 +1745,17 @@ controller's accepted evidence, clock, reset, hold and expiry rules. It adds no 
 or sampling pass. Positive flat depth updates both plane targets to that depth while holding gain;
 all-zero depth clears both targets and holds both tracked values. The applied UI base travels with the
 resolved real-depth scene, including FG reuse, instead of being recomputed from newer statistics.
-Live mode 1 consumes the applied UI midpoint directly and dispatches no covered-depth reduction.
-Its disparity follows the current native-depth adapter, including gain, scene zero, strength,
-stereo blend and the final per-eye bound. Smoothing the midpoint does not make its displayed
-disparity constant while the scene or controls change. The scene candidate and vertical fields
-are unchanged; source-alpha conditioning moves UI and its horizontal support to one rigid plane.
-The midpoint can be behind nearer scene objects. Fullscreen UI may encounter the existing
-edge-sampling limits. Depth/alpha registration and bounded FG reuse limitations still apply.
-Historical modes 2 and 3 retain their replay behavior but are not selected for live placement.
+This tracking remains available for diagnostics and historical depth-mode replay. Live mode 5
+instead applies a fraction of the current positive display-parallax limit, including strength and
+stereo blend, subject to warp readiness. Its independent temporal policy observes scene/UI overlap
+as described in the setup contract above; it does not map this historical midpoint to parallax.
+It dispatches no covered-depth maximum. The scene candidate and vertical fields are unchanged;
+the existing source-alpha conditioner moves UI and its horizontal support to one rigid plane,
+locally changing adjacent geometry as described above. The scene's positive and negative display
+limits stay unchanged, so foreground can be nearer than UI even at the 50% live cap. Fullscreen UI may
+encounter the existing edge-sampling limits. Depth/alpha registration
+and bounded FG reuse limitations still apply. Historical modes 0 through 4 retain their replay
+behavior but are not selected for live placement.
 A change of nearest depth can change gain and hence separation between otherwise unchanged
 depths. The exact maximum deliberately includes even a single nearest particle or surface:
 if it persists, its smaller gain target can flatten the distant background. Large depth contrasts
@@ -1686,7 +1788,7 @@ per-feature reset revision reject older readbacks without
 changing logical source identity. Established gain and the applied zero plane remain; old
 zero-plane targets are discarded while valid current depth can continue rendering. Startup samples
 from different revisions cannot mix. The always-visible UI table displays **Nearest reference Q**,
-**Farthest (q min)**, **Zero plane q0**, **Stereo gain K**, **UI midpoint q**, and **Normalization L**, with
+**Farthest (q min)**, **Zero plane q0**, **Stereo gain K**, **Reference midpoint q**, and **Normalization L**, with
 **Current/Target** columns. Q and the farthest bound come directly from the same accepted policy
 measurement, without new sampling, and cover the full active depth rectangle. The depth
 rows use the same converted inverse-depth coordinate, where
@@ -1702,9 +1804,11 @@ The gain target follows the latest valid nearest reference as `L/Q`; the applied
 either side. L is captured for the render decision's output shape. `1/K` is not the measured Q.
 The panel separately shows the per-eye source-width parallax limit at the current slider strength.
 The zero shows its applied value and contrast-midpoint target. A positive flat scene can show a zero target
-while its gain target is absent. **UI midpoint q** shows the independently applied UI depth and
-its extrema-midpoint target. The applied value is consumed by live mode 1 and recorded separately
-from its diagnostic target; there is no covered-depth reduction value to read back.
+while its gain target is absent. **Reference midpoint q** shows the independently tracked historical UI
+depth and its extrema-midpoint target. These are diagnostics, not the live mode-5 placement input.
+The panel identifies adaptive UI targets as **0 / 10 / 25 / 50% of the front limit**.
+The exact consumed fraction and optional accepted-observation telemetry are recorded separately;
+the bounded conflict readback is not a covered-depth plane value.
 Camera mode additionally shows current and target **Zero-plane distance** as
 the reciprocal inverse depth in game-distance units, including infinity at zero. The table retains **Conversion scale**
 and **Conversion offset**. A visible status reports when gain is below target while adapting.
@@ -2062,6 +2166,13 @@ authored eyes. Native sharing support is required; there is no CPU readback tran
 
 `src/reshade_bridge_protocol.h` is the versioned ABI shared by the add-on and Windows receiver.
 The per-process `Local\\Sunshine3D.ReShade.SBS.<PID>` mapping contains metadata and three slots.
+Streaming protocol 2 adds `cursor_plane_flags` and `ui_parallax_uv` in eight bytes of each slot's
+former padding, preserving the 64-byte slot, 120-byte metadata and 384-byte shared-state layouts.
+The signed scalar is one eye's displacement in source-eye UV, with finite values in `[-0.04,0.04]`.
+Only zero flags or `cursor_plane_present` are valid; zero flags require a zero scalar. The current
+host accepts protocol 1 as well, ignores its unspecified padding and uses zero cursor displacement.
+An older protocol-1 host rejects protocol-2 exports, so this feature requires a paired host/add-on
+update; it does not change the separate streamed Game provider negotiation version.
 The mapping uses Windows' default access control. Sunshine verifies the process creation time
 before duplicating its NT texture and fence handles; resources are never looked up by a global
 texture name.
@@ -2071,8 +2182,8 @@ generation of textures and a producer-ready fence. Each slot's atomic 64-bit con
 its generation and ownership state, so an old consumer cannot unlock a replacement ring.
 
 For each exported frame, the producer claims a slot, copies the final stereo texture, includes
-any overlay composition, signals its GPU fence, writes the frame sequence and QPC timestamp,
-then marks the slot ready. Up to three submitted GPU writes may remain unfinished, bounded by
+any overlay composition, signals its GPU fence, writes the frame sequence, QPC timestamp and
+matching UI displacement, then marks the slot ready. Up to three submitted GPU writes may remain unfinished, bounded by
 the existing three-slot ring. A recorded copy must receive its submission fence before the next
 is admitted; there is no global requirement to wait for the previous GPU write to complete.
 Admission checks each slot's own fence sequence, including slots already marked free by a
@@ -2093,7 +2204,9 @@ conversion and presentation read that private texture on the same D3D11 context.
 releases the shared slot only after the copy completes. There is at most one pending receiver
 copy, no cross-process GPU wait, and no texture overwrite while either side uses the slot.
 Receiver teardown abandons an unfinished read. A new consumer requests fresh resources rather
-than reusing the abandoned generation. Repeated presentation retains the original frame timestamp.
+than reusing the abandoned generation. The receiver validates and copies the scalar while it owns
+the same reading slot as the texture. Invalid cursor metadata rejects that publication.
+Repeated presentation retains the original frame timestamp and matching UI displacement.
 
 ## Streamed Game provider contract
 

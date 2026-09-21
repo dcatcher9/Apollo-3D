@@ -728,7 +728,8 @@ namespace platf::dxgi {
             converted_content_timestamp = external->timestamp;
             if (external_cursor) {
               const auto composited = external_cursor->compose(
-                packed_texture, packed_view, img.cursor, packed_linear, external_cursor_white_multiplier
+                packed_texture, packed_view, img.cursor, packed_linear, external_cursor_white_multiplier,
+                external->ui_parallax_uv
               );
               if (!composited) {
                 BOOST_LOG(error) << "Failed to composite the Windows cursor over external Game 3D."sv;

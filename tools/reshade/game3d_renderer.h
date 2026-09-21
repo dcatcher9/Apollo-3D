@@ -3,9 +3,12 @@
 #include "game3d_stereo_contract.h"
 #include "game3d_ui_plane.h"
 #include "game3d_alpha_auto.h"
+#include "game3d_ui_adaptive.h"
 #include <windows.h>
 #include <reshade_api.hpp>
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -27,6 +30,33 @@ namespace sunshine_game3d {
   };
   static_assert(sizeof(render_parameters) == 80);
   static_assert(offsetof(render_parameters, disparity_limit_uv) == 28);
+
+  // Current positive display bound after strength and blend. Scene admission
+  // is a separate concern; keep this arithmetic shared by UI observation and
+  // export, in SunshineBoundFinalParallax's multiplication order.
+  inline float display_parallax_cap_uv(const render_parameters &p) {
+    if (!std::isfinite(p.strength) || !std::isfinite(p.strength_blend) ||
+        !std::isfinite(p.disparity_limit_uv) || p.disparity_limit_uv <= 0.f || p.disparity_limit_uv > .04f)
+      return 0.f;
+    float cap = p.disparity_limit_uv * std::clamp(p.strength, 0.f, 100.f);
+    cap *= .01f;
+    cap *= std::clamp(p.strength_blend, 0.f, 1.f);
+    return cap;
+  }
+
+  // Export-only conversion of an already admitted live scene and its consumed
+  // UI fraction. Scene admission remains owned by the scene controller; this
+  // does not infer depth, choose a plane, or advance an adaptive policy. The
+  // multiplication order matches SunshineBoundFinalParallax in the shader.
+  // Diagnostic views and unsupported dimensions have no shifted game UI.
+  inline float admitted_ui_parallax_uv(const render_parameters &p, const ui_plane_parameters &plane,
+      bool scene_admitted, bool ui_enabled, std::uint32_t width, std::uint32_t height) {
+    if (!scene_admitted || !ui_enabled || !width || !height || width > 3840 || height > 3840 ||
+        !p.depth_ready || !p.camera_ready || p.depth_view != 0 || plane.mode != ui_plane_mode::display_fraction ||
+        !std::isfinite(plane.inverse_depth) || plane.inverse_depth < 0.f || plane.inverse_depth > .75f)
+      return 0.f;
+    return plane.inverse_depth * display_parallax_cap_uv(p);
+  }
 
   // Borrowed only during the current render lease. Diagnostic copies must be
   // recorded before the next render reuses these textures.
@@ -51,10 +81,12 @@ namespace sunshine_game3d {
       reshade::api::color_space color, std::string_view source_override = {});
     static std::string_view shader_source();
     std::string_view active_shader_source() const;
+    // Mode-5 live adaptation uses caller-owned source identity only. Omitting
+    // adaptive freezes the submitted fraction for deterministic replay.
     bool render(reshade::api::command_list *commands, reshade::api::resource backbuffer,
       reshade::api::resource_view depth, const render_parameters &parameters, bool source_alpha_ui = false,
       reshade::api::resource_view alpha_source = {}, const ui_plane_parameters &plane = {},
-      const alpha_auto_source *automatic = nullptr);
+      const alpha_auto_source *automatic = nullptr, const ui_adaptive::source *adaptive = nullptr);
     // Lazily allocated at the current color extent/format. Copies and reads use
     // the renderer queue; shader_resource is the resting state. Only alpha is
     // consumed, never this retained input's RGB.
@@ -84,9 +116,15 @@ namespace sunshine_game3d {
     // owns only bounded GPU observation storage, never the detection deadline.
     alpha_auto_decision consumed_alpha_auto() const;
     alpha_probe_counters alpha_probe_activity() const;
+    // Value copy: policy evidence for the fraction consumed by this render.
+    // Explicit mode-5 replay reports the supplied fraction with status frozen.
+    ui_adaptive::decision consumed_ui_adaptive() const;
+    // Recorded conflict probes, independent of readback acceptance or scope.
+    std::uint64_t ui_probe_submissions() const;
     // Submitted bits. In nearest-UI mode inverse_depth is the floor; only the
     // current-render diagnostic GPU scalar contains the resolved global plane.
     // Front-limit mode ignores this depth word and dispatches no UI reduction.
+    // Display-fraction mode freezes the resolved fraction in the same word.
     ui_plane_parameters consumed_ui_plane() const;
     reshade::api::resource_view native_rtv(reshade::api::resource backbuffer);
     // Also bracket capture's D3D11 unbinds, not only our draw calls. D3D12

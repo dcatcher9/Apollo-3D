@@ -196,11 +196,15 @@ does not show this hint, and Sunshine does not change the game's FG setting.
 
 The current production policy trials a contrast midpoint for the scene's zero plane, using the
 farthest depth and moments of each pixel's contrast from it. The independent gain still follows
-the nearest depth. Protected UI uses mode 1, `depth_midpoint`, with the independently tracked,
-smoothed inverse-depth midpoint. The shader maps this applied UI depth through the current gain,
-scene zero, strength, stereo blend and per-eye clamp, subject to warp readiness. All protected UI
-shares one plane, but its disparity can vary as the scene and controls change. It is not forced
-ahead of the nearest depth beneath UI coverage. Gain and zero retain their existing
+the nearest depth. Protected UI uses mode 5, `display_fraction`: one rigid display-space plane
+with five absolute-disparity targets selected from central UI overlap. Placement uses
+absolute per-eye disparity with an independent trial ceiling, also bounded by half the current
+scene front limit. It prefers screen depth, confirms forward changes, and returns after sustained
+clearance. The system cursor follows the final consumed position. The policy observes the
+conditioned scene before UI pinning and does not change scene zero, gain or display limits.
+The caps can leave foreground nearer than UI; `capped_conflict` records significant unresolved
+overlap. The existing local UI conditioner and one-pixel support collar remain unchanged.
+Gain and zero retain their existing
 initialization, bounded temporal tracking and source lifecycle. Exact flat depth cannot initialize
 gain. After initialization, positive flat depth can move the zero while holding gain; all-zero
 depth holds both controls. The first instruction screen or scene does not establish a permanent
@@ -215,13 +219,40 @@ tracking can reduce an approaching object's apparent pop-out in a scene with sev
 acceptance is pending. Historical midpoint and fixed-reference tests do not establish acceptance
 of this trial.
 
-Live midpoint UI dispatches no nearest-covered-depth reduction and records its applied depth in
-the exact 16-byte `sunshine_game3d.ui_parameters.v2` contract. Replay's `--ui-inverse-depth` selects
-mode 1 with an explicit depth. Historical modes 0 (screen/v2), 2 (nearest covered depth with a
-submitted floor/v3) and 3 (maximum front display limit/v4) retain their replay behavior. Mode 2
-alone dispatches the tile/reduction passes. Mode 3 requires
+Live adaptive placement reads five bounded conflict counters per tile, with one asynchronous
+probe outstanding. Only the central rectangle is scanned; scene disparity is read only for
+covered UI. The CPU checks the summed conflicts against both covered UI and central image area,
+so a large clear panel cannot indefinitely dilute substantial foreground overlap. Border UI
+remains protected at the same global plane. Fixed absolute targets,
+confirmed entry and delayed release keep placement independent of scene strength. Missing or
+invalid observations hold the position; new eligible scopes start at screen depth. The
+[UI protection contract](../../docs/reshade-sbs.md#setup) owns the record layout, trial levels and caps,
+thresholds, timing, source admission and remaining limitations. This observation path is
+separate from the automatic alpha enable detector and adds no source-image readback or GPU wait.
+
+Mode 5 uses the exact 16-byte `sunshine_game3d.ui_parameters.v6` contract and requires
+`#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1`. Its third word is the consumed display fraction,
+not inverse depth. Dump records `word2_role: front_limit_fraction`, the finite fraction or null,
+and its raw bits. Replay freezes that word, including intermediate ramp values; it does not rerun
+the temporal classifier or its observational probe. Optional `ui_adaptive` telemetry records the
+absolute levels, target/applied/required UV, central image area, UI coverage, conflict counts,
+both area thresholds, capped conflict, accepted source identities and age.
+Current policy coverage/conflict counts refer to the central rectangle; the separate automatic
+alpha-enable detector continues to measure full-screen coverage.
+No new probe artifact is required. `--ui-front-fraction 0..0.75` supplies an explicit offline
+fraction and preserves historical 75% renders despite the lower live ceiling;
+`--ui-plane adaptive` is invalid without history. Invalid captured fraction words retain
+their bits and exercise the shader's screen-disparity fallback.
+
+Replay's `--ui-inverse-depth` selects historical mode 1 with an explicit depth. Modes 0 (screen/v2),
+1 (inverse-depth plane/v2), 2 (nearest covered depth with a submitted floor/v3), 3 (maximum front
+display limit/v4) and 4 (fixed quarter-limit/v5) retain their replay behavior. Mode 2 alone
+dispatches the nearest-depth tile/reduction passes. Mode 3 requires
 `#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1` and ignores its inverse-depth word; it is available via
-`--ui-plane front-limit` with a compatible shader. Neither mode 2 nor mode 3 is selected live.
+`--ui-plane front-limit` with a compatible shader. Mode 4 requires
+`#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1`, ignores its inverse-depth word, records the required
+`front_limit_fraction: 0.25` metadata, and is available via `--ui-plane shallow-front`.
+Modes 0 through 4 are historical replay choices rather than the live adaptive policy.
 The 80-byte geometry `b0` ABI and default numeric parallax limit are unchanged.
 
 The sampler covers every texel in the active depth crop, including hardware endpoints, without
@@ -246,15 +277,16 @@ multiplicative inverse-depth representations preserve ratio geometry; separate h
 encodings need not match. No percentile clipping is applied to rendered depth.
 
 The always-visible calibration table shows **Nearest reference Q**, **Farthest (q min)**,
-**Zero plane q0**, **Stereo gain K**, **UI midpoint q**, and **Normalization L**, with Current/Target columns.
+**Zero plane q0**, **Stereo gain K**, **Reference midpoint q**, and **Normalization L**, with Current/Target columns.
 Q and the farthest value are the same accepted measurement's full active-depth extrema, not camera
 clipping planes. These depth values share one inverse-depth coordinate: larger is nearer.
 Gain shows the applied value and nearest-depth-derived target; q0 shows the applied zero and
-contrast-midpoint target. **UI midpoint q** shows the independently applied UI depth and its
-extrema-midpoint target; live rendering consumes the applied value, not the latest target.
+contrast-midpoint target. **Reference midpoint q** shows the independently tracked historical UI depth and
+its extrema-midpoint target. This tracking continues for diagnostics and historical depth-mode
+replay; live adaptive placement consumes neither value.
 The [UI protection contract](../../docs/reshade-sbs.md#setup) owns its displacement, timing,
-occlusion limitations and replay constants. UI uses the same current geometry mapping and
-per-eye bound as the scene; it is not a fixed display disparity or recovered physical distance.
+occlusion limitations and replay constants. UI uses an independently resolved fraction of the
+current display budget, not recovered physical distance; strength, stereo blend and readiness still apply.
 A positive flat scene has a zero target but no gain target. L is captured for
 the render decision's output shape, and `1/K` is not Q. The panel also shows the per-eye parallax
 limit as a percentage of source-image width at the current slider strength.
@@ -357,6 +389,14 @@ route; inspect the positive call evidence and reported hook coverage. Disable it
 Opening ReShade's overlay keeps the game in stereo, with its real controls composed at the same
 position in both eyes. Normal mouse coordinates are retained and add-on control changes appear
 live. Closing the overlay removes the controls without replacing the stereo resource generation.
+With Desktop Duplication, the host composites the separate Windows cursor at the protected game
+UI's applied plane, using the same frame's exported per-eye displacement. Cached stereo frames
+retain their matching scalar; the host does not recalculate scene depth or the adaptive target.
+While ReShade's overlay is open, the system cursor returns to screen depth to match its controls.
+Disabled or unavailable UI protection and depth diagnostic views also use zero cursor displacement.
+Game-rendered cursors remain part of the exported image. Install the matching protocol-2 host and
+add-on together: the current host accepts protocol-1 exports with zero cursor displacement, while
+an old host rejects protocol-2 exports. WGC does not supply the separate cursor metadata.
 If another add-on cancels that transition, the observed state may differ from the visible overlay;
 toggle the overlay again after resolving that add-on conflict. Native Game 3D does not depend on
 ReShade FX compilation or the Home tab's effect toggle. The explicit reference renderer retains

@@ -7,7 +7,8 @@
 
 namespace sunshine_game3d {
   enum class ui_plane_mode : std::uint32_t {
-    screen = 0, depth_midpoint = 1, depth_midpoint_nearest_ui = 2, front_limit = 3
+    screen = 0, depth_midpoint = 1, depth_midpoint_nearest_ui = 2, front_limit = 3, shallow_front = 4,
+    display_fraction = 5
   };
 
   // The scene owner resolves this plane independently of the scene's zero.
@@ -16,6 +17,9 @@ namespace sunshine_game3d {
   // max(floor, nearest decoded depth under current selected UI coverage).
   // Front-limit mode uses the current positive display-disparity budget and
   // ignores inverse_depth, including malformed bits preserved for replay.
+  // Shallow-front mode uses one quarter of that same authoritative bound.
+  // Display-fraction mode freezes the independently resolved UI fraction in
+  // the legacy inverse_depth word; valid fractions range from zero to 0.75.
   struct ui_plane_parameters {
     ui_plane_mode mode = ui_plane_mode::screen;
     float inverse_depth = 0.f;
