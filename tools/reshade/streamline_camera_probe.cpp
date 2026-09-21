@@ -7,6 +7,7 @@
 #include "upscaler_call_trace.h"
 #include "game3d_diagnostic_metadata.h"
 #include "game3d_ui_mask.h"
+#include "observer_snapshot.h"
 
 #include <MinHook.h>
 #include <reshade.hpp>
@@ -96,7 +97,7 @@ namespace sunshine_streamline {
 
     // POD/atomic storage remains live in the pinned add-on after AddonUninit. In
     // particular there is no destructible C++ mutex or worker used by detours.
-    SRWLOCK records_lock = SRWLOCK_INIT;
+    SRWLOCK presentations_lock = SRWLOCK_INIT;
     SRWLOCK poll_lock = SRWLOCK_INIT;
     SRWLOCK commands_lock = SRWLOCK_INIT;
     SRWLOCK source_resources_lock = SRWLOCK_INIT;
@@ -114,9 +115,19 @@ namespace sunshine_streamline {
     std::atomic<bool> test_capture_requested{};
 #endif
     std::atomic<bool> command_observation_lost{};
-    viewport_record records[slot_count]{};
-    frame_record frames[frame_count]{};
-    token_record tokens[frame_count]{};
+    struct metadata_state {
+      viewport_record records[slot_count]{};
+      frame_record frames[frame_count]{};
+      std::uint64_t epoch{}, observation{}, revision{};
+    };
+    using metadata_owner = observation::snapshot_owner<metadata_state, 8>;
+    metadata_owner metadata;
+    struct token_state {
+      token_record tokens[frame_count]{};
+      std::uint64_t observation{};
+    };
+    using token_owner = observation::snapshot_owner<token_state, 8>;
+    token_owner token_metadata;
     presentation_record presentations[32]{};
     std::atomic<std::uint64_t> presentation_loss{}, presentation_dropped{}, presentation_generation{};
     std::atomic<bool> pcl_available{};
@@ -137,7 +148,21 @@ namespace sunshine_streamline {
     std::atomic<std::uint64_t> observation_generation{};
     std::atomic<std::uint64_t> constant_calls{}, tag_calls{}, evaluation_calls{}, dropped{}, invalid{};
     std::atomic<std::uint64_t> call_sequence{}, loss_revision{};
-    std::uint64_t epoch{}, revision{}, next_discovery{}, next_report{}, last_report_activity{UINT64_MAX};
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+    thread_local bool entry_policy_armed{}, entry_policy_observed{}, entry_path_selected{}, entry_source_admitted{};
+#endif
+    loss_diagnostics::journal loss_journal;
+    thread_local loss_diagnostics::context loss_context;
+    // Nested middleware calls restore the outer callback's metadata. This
+    // context is diagnostic only and never participates in source admission.
+    struct loss_context_scope {
+      loss_diagnostics::context previous{loss_context};
+      explicit loss_context_scope(std::uint64_t sequence = 0, std::uint32_t viewport = UINT32_MAX,
+          std::uint32_t feature = UINT32_MAX) { loss_context = {sequence, viewport, feature}; }
+      ~loss_context_scope() { loss_context = previous; }
+    };
+    std::atomic<std::uint64_t> epoch{};
+    std::uint64_t next_discovery{}, next_report{}, last_report_activity{UINT64_MAX};
     selected_depth last_selected{};
     HMODULE addon_module{};
     abi installed_abi{};
@@ -177,20 +202,9 @@ namespace sunshine_streamline {
     thread_local unsigned fg_forwarding_depth{};
 
     void release_camera_records() {
-      // Metadata owns leases only. Move them out under the observation lock,
-      // then release with no lock held: COM Release can reenter ReShade events.
-      std::array<viewport_record, slot_count> retired_records;
-      std::array<frame_record, frame_count> retired_frames;
-      AcquireSRWLockExclusive(&records_lock);
-      for (unsigned i = 0; i != slot_count; ++i) {
-        retired_records[i] = std::move(records[i]);
-        records[i] = {};
-      }
-      for (unsigned i = 0; i != frame_count; ++i) {
-        retired_frames[i] = std::move(frames[i]);
-        frames[i] = {};
-      }
-      ReleaseSRWLockExclusive(&records_lock);
+      // Lifecycle only: callbacks are already closed. Readers never delay this
+      // clear; retired source leases are released outside mutation ownership.
+      while (!metadata.clear()) SwitchToThread();
     }
 
     bool same(const guid &a, const guid &b) { return std::memcmp(&a, &b, sizeof(guid)) == 0; }
@@ -203,9 +217,23 @@ namespace sunshine_streamline {
       return source == origin::local ? "evaluate-local" : source == origin::frame ? "frame-tag" : "global-tag";
     }
     void message(const char *text) { reshade::log::message(reshade::log::level::info, text); }
-    void lose() { loss_revision.fetch_add(1, std::memory_order_acq_rel); }
-    void invalid_observation() { ++invalid; lose(); }
-    void dropped_observation() { ++dropped; lose(); }
+    std::uint64_t lose(loss_diagnostics::reason cause, const char *site, std::uint32_t line,
+        loss_diagnostics::context details = loss_context) {
+      const auto previous = loss_revision.fetch_add(1, std::memory_order_acq_rel);
+      const DWORD saved_error = GetLastError();
+      // A contended or overwritten diagnostic slot is simply unavailable. It
+      // must never itself lose source observations or alter the revision count.
+      loss_journal.publish({previous + 1, GetTickCount64(), GetCurrentThreadId(), line, cause, site, details});
+      SetLastError(saved_error);
+      return previous;
+    }
+    void invalid_observation(loss_diagnostics::reason cause, const char *site, std::uint32_t line) {
+      ++invalid; lose(cause, site, line);
+    }
+    void dropped_observation(loss_diagnostics::reason cause, const char *site, std::uint32_t line,
+        loss_diagnostics::context details = loss_context) {
+      ++dropped; lose(cause, site, line, details);
+    }
     bool middleware_requested() {
       return !sunshine_addon_lifetime::stopping() &&
         (requested.load(std::memory_order_acquire) || source_requested.load(std::memory_order_acquire));
@@ -243,7 +271,10 @@ namespace sunshine_streamline {
         ReleaseSRWLockExclusive(&source_resources_lock); return;
       }
       if (add && empty) *empty = {native, lifetime, device};
-      else if (add) { source_resources_lost.store(true, std::memory_order_release); dropped_observation(); }
+      else if (add) {
+        source_resources_lost.store(true, std::memory_order_release);
+        dropped_observation(loss_diagnostics::reason::resource_table_full, __func__, __LINE__, {});
+      }
       ReleaseSRWLockExclusive(&source_resources_lock);
     }
     source_resource source_identity(std::uint64_t native) {
@@ -287,7 +318,7 @@ namespace sunshine_streamline {
       if (!ticket) return;
       if (!TryAcquireSRWLockExclusive(&commands_lock)) {
         command_observation_lost.store(true, std::memory_order_release);
-        dropped_observation();
+        dropped_observation(loss_diagnostics::reason::commands_busy, __func__, __LINE__);
         return;
       }
       if (current_commands(ticket)) {
@@ -333,7 +364,11 @@ namespace sunshine_streamline {
     void capture_content(evaluation_snapshot &out) {
       const auto ticket = command_ticket();
       if (!ticket) return;
-      if (!TryAcquireSRWLockExclusive(&commands_lock)) { dropped_observation(); return; }
+      if (!TryAcquireSRWLockExclusive(&commands_lock)) {
+        auto details = loss_context;
+        details.sequence = out.sequence; details.viewport = out.viewport; details.feature = out.feature;
+        dropped_observation(loss_diagnostics::reason::commands_busy, __func__, __LINE__, details); return;
+      }
       if (current_commands(ticket) && !command_observation_lost.load(std::memory_order_acquire)) {
         sync_content_observation();
         const auto loss = loss_revision.load(std::memory_order_acquire);
@@ -406,10 +441,29 @@ namespace sunshine_streamline {
         observation_generation.load(std::memory_order_acquire) == ticket;
     }
 
-    viewport_record &slot(std::uint32_t viewport) {
-      for (auto &record : records) if (record.used && record.viewport == viewport) return record;
-      auto *chosen = &records[0];
-      for (auto &record : records) {
+    metadata_owner::read_pin read_metadata() {
+      auto pin = metadata.read();
+      if (pin && (pin->epoch != epoch.load(std::memory_order_acquire) ||
+          pin->observation != observation_generation.load(std::memory_order_acquire))) pin.reset();
+      return pin;
+    }
+    metadata_owner::transaction write_metadata(std::uint64_t ticket) {
+      auto update = metadata.try_write();
+      if (update) {
+        if (!current(ticket)) update.reset();
+        else { update->epoch = epoch.load(std::memory_order_acquire); update->observation = ticket; }
+      }
+      return update;
+    }
+    void metadata_write_lost(const metadata_owner::transaction &update, const char *site,
+        std::uint32_t line, loss_diagnostics::context details = loss_context) {
+      dropped_observation(update.failure() == observation::write_failure::storage_busy ?
+        loss_diagnostics::reason::metadata_storage_busy : loss_diagnostics::reason::records_busy, site, line, details);
+    }
+    viewport_record &slot(metadata_state &state, std::uint32_t viewport) {
+      for (auto &record : state.records) if (record.used && record.viewport == viewport) return record;
+      auto *chosen = &state.records[0];
+      for (auto &record : state.records) {
         if (!record.used) { chosen = &record; break; }
         if (record.changed < chosen->changed) chosen = &record;
       }
@@ -453,41 +507,68 @@ namespace sunshine_streamline {
     frame_identity numeric_frame(std::uint32_t frame) {
       return {frame_identity_kind::v1_numeric, 0, frame, 0, true};
     }
-    bool token_current(const frame_identity &frame) {
+    bool token_current(const metadata_state &state, const frame_identity &frame) {
+      // Constants-call identity is checked in the same immutable metadata
+      // version; token mint identity has a separate bounded owner.
+      if (frame.kind == frame_identity_kind::v1_numeric) return true;
+      if (frame.kind != frame_identity_kind::v2_constants_call &&
+          frame.kind != frame_identity_kind::v2_observed_token) return false;
+      auto pin = token_metadata.read();
+      if ((!pin && token_metadata.has_publication()) ||
+          (pin && pin->observation != observation_generation.load(std::memory_order_acquire))) return false;
+      bool current_token = frame.kind == frame_identity_kind::v2_constants_call;
+      if (pin) for (const auto &token : pin->tokens) {
+        if (frame.kind == frame_identity_kind::v2_constants_call) {
+          if (token.frame.token == frame.token && token.frame.generation > frame.generation) {
+            current_token = false; break;
+          }
+        } else if (same_frame(token.frame, frame)) {
+          current_token = true; break;
+        }
+      }
+      if (!current_token) return false;
       // Only a synchronous global FG tag may use this latest successful
       // constants-call identity. It is never an SDK frame number/token mint.
       if (frame.kind == frame_identity_kind::v2_constants_call) {
-        for (const auto &token : tokens)
-          if (token.frame.token == frame.token && token.frame.generation > frame.generation) return false;
-        for (const auto &record : records)
+        for (const auto &record : state.records)
           if (record.used && same_frame(record.camera_frame, frame)) return true;
         return false;
       }
-      if (frame.kind != frame_identity_kind::v2_observed_token) return frame.kind == frame_identity_kind::v1_numeric;
-      for (const auto &token : tokens) if (same_frame(token.frame, frame)) return true;
-      return false;
+      return true;
+    }
+    bool presentation_token_current(const frame_identity &frame) {
+      // Presentation markers carry minted/numeric identities, never the
+      // synchronous FG-only constants-call association.
+      if (frame.kind == frame_identity_kind::v2_constants_call) return false;
+      static const metadata_state empty;
+      return token_current(empty, frame);
     }
     frame_identity observed_frame(std::uintptr_t address) {
       frame_identity result;
-      if (!TryAcquireSRWLockShared(&records_lock)) { dropped_observation(); return result; }
-      for (const auto &token : tokens) if (token.frame.token == address && address) { result = token.frame; break; }
-      ReleaseSRWLockShared(&records_lock);
+      auto pin = token_metadata.read();
+      if (!pin) {
+        if (token_metadata.has_publication()) dropped_observation(loss_diagnostics::reason::tokens_busy, __func__, __LINE__);
+        return result;
+      }
+      if (pin->observation != observation_generation.load(std::memory_order_acquire)) return result;
+      for (const auto &token : pin->tokens) if (token.frame.token == address && address) { result = token.frame; break; }
       return result;
     }
     frame_identity presentation_frame(std::uintptr_t address) {
       frame_identity result;
-      if (!TryAcquireSRWLockShared(&records_lock)) { drop_presentation(); return result; }
-      for (const auto &token : tokens) if (token.frame.token == address && address) { result = token.frame; break; }
-      ReleaseSRWLockShared(&records_lock);
+      auto pin = token_metadata.read();
+      if (!pin) { if (token_metadata.has_publication()) drop_presentation(); return result; }
+      if (pin->observation != observation_generation.load(std::memory_order_acquire)) return result;
+      for (const auto &token : pin->tokens) if (token.frame.token == address && address) { result = token.frame; break; }
       return result;
     }
     std::uint64_t start_presentation_marker(std::uint32_t marker, const frame_identity &frame, std::uint64_t ticket) {
       if ((marker != 4 && marker != 5) || !current(ticket)) return 0;
       const auto serial = ++call_sequence;
-      if (!TryAcquireSRWLockExclusive(&records_lock)) { drop_presentation(); return 0; }
-      if (!current(ticket)) { ReleaseSRWLockExclusive(&records_lock); return 0; }
+      if (!TryAcquireSRWLockExclusive(&presentations_lock)) { drop_presentation(); return 0; }
+      if (!current(ticket)) { ReleaseSRWLockExclusive(&presentations_lock); return 0; }
       auto *record = presentation_thread(true);
-      if (!record) { ReleaseSRWLockExclusive(&records_lock); drop_presentation(); return 0; }
+      if (!record) { ReleaseSRWLockExclusive(&presentations_lock); drop_presentation(); return 0; }
       auto &value = record->value;
       const auto prior = value.status;
       record->pending_sequence = serial;
@@ -496,7 +577,7 @@ namespace sunshine_streamline {
       value.epoch = epoch;
       value.loss_revision = loss_revision.load(std::memory_order_acquire);
       value.marker_loss_revision = presentation_loss.load(std::memory_order_acquire);
-      if (!token_current(frame)) value.status = presentation_status::untracked_frame;
+      if (!presentation_token_current(frame)) value.status = presentation_status::untracked_frame;
       else if (marker == 4) {
         const auto &previous = record->latest_started;
         const bool repeated = same_frame(previous, frame);
@@ -513,25 +594,25 @@ namespace sunshine_streamline {
         value.status = prior == presentation_status::open_bracket && same_frame(value.frame, frame) ?
           presentation_status::pending_marker : presentation_status::out_of_order;
       }
-      ReleaseSRWLockExclusive(&records_lock);
+      ReleaseSRWLockExclusive(&presentations_lock);
       return serial;
     }
     void finish_presentation_marker(std::uint32_t marker, std::uint64_t serial, bool success, std::uint64_t ticket) {
       if (!serial || !current(ticket)) return;
-      if (!TryAcquireSRWLockExclusive(&records_lock)) { drop_presentation(); return; }
+      if (!TryAcquireSRWLockExclusive(&presentations_lock)) { drop_presentation(); return; }
       auto *record = current(ticket) ? presentation_thread(false) : nullptr;
       if (record && record->pending_sequence == serial) {
         auto &value = record->value;
         if (!success) { value.status = presentation_status::failed_marker; value.explicit_bracket = false; lose_presentation(); }
         else if (value.marker_loss_revision != presentation_loss.load(std::memory_order_acquire) ||
             value.loss_revision != loss_revision.load(std::memory_order_acquire)) value.status = presentation_status::observation_lost;
-        else if (value.status == presentation_status::pending_marker && !token_current(value.frame)) value.status = presentation_status::untracked_frame;
+        else if (value.status == presentation_status::pending_marker && !presentation_token_current(value.frame)) value.status = presentation_status::untracked_frame;
         else if (value.status == presentation_status::pending_marker) {
           value.status = marker == 4 ? presentation_status::open_bracket : presentation_status::ended_bracket;
           value.explicit_bracket = marker == 4;
         }
       }
-      ReleaseSRWLockExclusive(&records_lock);
+      ReleaseSRWLockExclusive(&presentations_lock);
     }
     void queue_pcl_target(void *entry, std::uint64_t ticket) {
       if (!entry) { current_pcl_target = nullptr; pcl_available = false; lose_presentation(); return; }
@@ -628,23 +709,25 @@ namespace sunshine_streamline {
       std::uint64_t retired_epoch{};
       if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, GetTickCount64(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, result == 0);
       bool changed = false;
-      if (sample && current(ticket) && TryAcquireSRWLockExclusive(&records_lock)) {
+      auto update = sample && current(ticket) ? write_metadata(ticket) : metadata_owner::transaction{};
+      if (update) {
         if (current(ticket)) {
           if (!valid_viewport) {
-            for (auto &record : records) record.frame_generation = {};
+            for (auto &record : update->records) record.frame_generation = {};
           } else {
-            auto &state = slot(id).frame_generation;
+            auto &state = slot(*update, id).frame_generation;
             if (serial >= state.sequence) {
               changed = !state.sequence || state.known != (valid && result == 0) ||
                 state.mode != copy.mode || state.generated_frames != copy.generated_frames;
-              state = {epoch, serial, GetTickCount64(), options_loss, id, copy.mode, copy.generated_frames,
+              state = {update->epoch, serial, GetTickCount64(), options_loss, id, copy.mode, copy.generated_frames,
                 valid && result == 0, valid && result == 0 && copy.mode != 0, valid && copy.mode == 2};
-              if (valid && result == 0 && copy.mode == 0) retired_epoch = epoch;
+              if (valid && result == 0 && copy.mode == 0) retired_epoch = update->epoch;
             }
           }
         }
-        ReleaseSRWLockExclusive(&records_lock);
+        if (current(ticket) && !update.commit()) ++fg_loss_revision;
       } else if (sample && current(ticket)) ++fg_loss_revision;
+      update.reset(); // No mutation ownership across capture/COM reentry below.
       if (retired_epoch) depth_capture::retire_source(sunshine_scene_depth::provider_kind::streamline,
         retired_epoch, (1ull << 63) | id);
       if (sample && current(ticket) && (!valid || result != 0 || retired_epoch)) {
@@ -763,12 +846,12 @@ namespace sunshine_streamline {
       }
       return okay;
     }
-    frame_record *frame_slot(std::uint32_t viewport, const frame_identity &identity, std::uint64_t serial, bool create) {
+    frame_record *frame_slot(metadata_state &state, std::uint32_t viewport, const frame_identity &identity, std::uint64_t serial, bool create) {
       if (identity.kind == frame_identity_kind::unavailable) return nullptr;
-      for (auto &frame : frames) if (frame.used && frame.viewport == viewport && same_frame(frame.frame, identity)) return &frame;
+      for (auto &frame : state.frames) if (frame.used && frame.viewport == viewport && same_frame(frame.frame, identity)) return &frame;
       if (!create) return nullptr;
-      auto *chosen = &frames[0];
-      for (auto &frame : frames) {
+      auto *chosen = &state.frames[0];
+      for (auto &frame : state.frames) {
         if (!frame.used) { chosen = &frame; break; }
         if (frame.changed < chosen->changed) chosen = &frame;
       }
@@ -779,23 +862,32 @@ namespace sunshine_streamline {
       chosen->changed = serial;
       return chosen;
     }
+    const frame_record *find_frame(const metadata_state &state, std::uint32_t viewport, const frame_identity &identity) {
+      for (const auto &frame : state.frames)
+        if (frame.used && frame.viewport == viewport && same_frame(frame.frame, identity)) return &frame;
+      return nullptr;
+    }
     void store_camera(std::uint32_t viewport, const camera_data &camera, decode_status decoded,
         std::uint64_t frame, bool explicit_frame, std::uintptr_t token, std::uint64_t ticket,
         const frame_identity &identity, std::uint64_t serial, std::uint64_t loss, std::uint64_t entry_tick) {
       if (!current(ticket)) return;
       const bool invalid_camera = decoded != decode_status::ok || camera.reset > 1 ||
         (explicit_frame && camera.not_rendering_game_frames != 0) || !validate(camera).valid();
-      if (!TryAcquireSRWLockExclusive(&records_lock)) { dropped_observation(); return; }
-      if (!current(ticket)) { ReleaseSRWLockExclusive(&records_lock); return; }
-      auto &record = slot(viewport);
-      if (serial < record.camera_serial) { ReleaseSRWLockExclusive(&records_lock); return; }
-      if (invalid_camera) lose();
+      auto details = loss_context;
+      details.sequence = serial; details.viewport = viewport;
+      details.reset = decoded == decode_status::ok ? camera.reset : UINT32_MAX;
+      auto update = write_metadata(ticket);
+      if (!update) { if (current(ticket)) metadata_write_lost(update, __func__, __LINE__, details); return; }
+      auto &state = *update;
+      auto &record = slot(state, viewport);
+      if (serial < record.camera_serial) return;
+      if (invalid_camera) lose(loss_diagnostics::reason::invalid_camera, __func__, __LINE__, details);
       else if (camera.reset == 1) {
         // Reset ends temporal history, not the validity of this frame's depth
         // or projection. Retire prior leases immediately, then associate this
         // camera with its own new revision. Never heal unrelated observation
         // loss that occurred while the original constants call was in flight.
-        const auto previous_loss = loss_revision.fetch_add(1, std::memory_order_acq_rel);
+        const auto previous_loss = lose(loss_diagnostics::reason::camera_reset, __func__, __LINE__, details);
         if (previous_loss == loss) loss = previous_loss + 1;
       }
       const auto camera_identity = identity.kind == frame_identity_kind::unavailable &&
@@ -803,14 +895,14 @@ namespace sunshine_streamline {
         frame_identity{frame_identity_kind::v2_constants_call, serial, 0, token, false} : identity;
       record.camera = camera;
       record.decoded = decoded;
-      record.key = {viewport, epoch, frame, explicit_frame};
+      record.key = {viewport, state.epoch, frame, explicit_frame};
       record.camera_token = token;
       record.camera_frame = camera_identity;
       record.camera_tick = entry_tick;
       record.camera_serial = serial;
       record.has_camera = true;
-      record.changed = ++revision;
-      if (token_current(camera_identity)) if (auto *saved = frame_slot(viewport, camera_identity, serial, true)) {
+      record.changed = ++state.revision;
+      if (token_current(state, camera_identity)) if (auto *saved = frame_slot(state, viewport, camera_identity, serial, true)) {
         if (serial >= saved->camera_serial) {
           saved->camera = camera;
           saved->decoded = decoded;
@@ -820,16 +912,19 @@ namespace sunshine_streamline {
           saved->has_camera = true;
         }
       }
-      ReleaseSRWLockExclusive(&records_lock);
+      if (current(ticket) && !update.commit()) metadata_write_lost(update, __func__, __LINE__, details);
     }
     void store_tags(batch &values) {
       if (!values.valid_viewport || !current(values.observation)) return;
-      if (!TryAcquireSRWLockExclusive(&records_lock)) { dropped_observation(); return; }
-      if (!current(values.observation)) { ReleaseSRWLockExclusive(&records_lock); return; }
+      auto details = loss_context;
+      details.sequence = values.serial; details.viewport = values.viewport;
+      auto update = write_metadata(values.observation);
+      if (!update) { if (current(values.observation)) metadata_write_lost(update, __func__, __LINE__, details); return; }
+      auto &state = *update;
       for (const auto &tag : values.tags) {
         if (!tag.present) continue;
         auto tagged = tag.value;
-        tagged.observation_epoch = epoch;
+        tagged.observation_epoch = state.epoch;
         // UntilEvaluate is valid at the synchronous copy boundary, but never
         // promoted to UntilPresent in stored/public metadata. Preserve all of
         // match()'s other identity/extent checks using a local validation copy.
@@ -837,13 +932,15 @@ namespace sunshine_streamline {
         if (at_evaluation.lifecycle == 0 || at_evaluation.lifecycle == 2) at_evaluation.lifecycle = 1;
         if (tag_index(tagged.type) < 3 && (!tag.supported || !tagged.native_resource ||
             ((tagged.type == 0 || tagged.type == 48) &&
-              match({values.viewport, epoch, 0, false}, at_evaluation) != match_status::same_epoch_only))) { lose(); break; }
+              match({values.viewport, state.epoch, 0, false}, at_evaluation) != match_status::same_epoch_only))) {
+          lose(loss_diagnostics::reason::tag_replaced, __func__, __LINE__, details); break;
+        }
       }
-      auto &record = slot(values.viewport);
+      auto &record = slot(state, values.viewport);
       for (unsigned i = 0; i < values.count; ++i) {
         auto value = values.tags[i];
         if (!value.present) continue;
-        value.value.observation_epoch = epoch;
+        value.value.observation_epoch = state.epoch;
         value.tick = values.tick;
         value.serial = values.serial;
         value.loss = values.loss;
@@ -851,19 +948,19 @@ namespace sunshine_streamline {
         auto &destination = value.source == origin::local ? record.local_tags : record.global_tags;
         destination[i] = value;
         if (value.source == origin::global && value.serial >= record.active_tags[i].serial) record.active_tags[i] = value;
-        if (value.source == origin::frame && token_current(values.frame)) {
-          if (auto *saved = frame_slot(values.viewport, values.frame, values.serial, true)) {
+        if (value.source == origin::frame && token_current(state, values.frame)) {
+          if (auto *saved = frame_slot(state, values.viewport, values.frame, values.serial, true)) {
             if (value.serial >= saved->tags[i].serial) saved->tags[i] = value;
             saved->changed = std::max(saved->changed, values.serial);
           }
         }
       }
-      record.changed = ++revision;
-      ReleaseSRWLockExclusive(&records_lock);
+      record.changed = ++state.revision;
+      if (current(values.observation) && !update.commit()) metadata_write_lost(update, __func__, __LINE__, details);
     }
     evaluation_snapshot capture_evaluation(std::uint32_t viewport, std::uint32_t feature,
         const frame_identity &identity, void *commands, std::uint64_t ticket, std::uint64_t serial,
-        std::uint64_t loss, const batch *local = nullptr) {
+        std::uint64_t loss, const batch *local = nullptr, const metadata_state *selected_state = nullptr) {
       evaluation_snapshot out;
       out.viewport = viewport;
       out.feature = feature;
@@ -873,16 +970,23 @@ namespace sunshine_streamline {
       out.loss_revision = loss;
       out.status = evidence_status::source_associated_evaluation;
       if (!current(ticket)) { out.status = evidence_status::inactive; return out; }
-      if (!TryAcquireSRWLockExclusive(&records_lock)) {
-        dropped_observation(); out.status = evidence_status::busy; return out;
-      }
-      if (!current(ticket)) {
-        ReleaseSRWLockExclusive(&records_lock); out.status = evidence_status::inactive; return out;
-      }
-      out.epoch = epoch;
-      auto &record = slot(viewport);
-      const auto *saved = frame_slot(viewport, identity, serial, false);
-      if (!token_current(identity)) out.status = evidence_status::untracked_frame;
+      auto pin = selected_state ? metadata_owner::read_pin{} : read_metadata();
+      if (!selected_state && pin) selected_state = &*pin;
+      if (!selected_state && metadata.has_publication()) { out.status = evidence_status::busy; return out; }
+      // The first evaluation may provide local raw depth before any constants
+      // or stored tags. It still owns its explicit inputs and minted identity.
+      static const metadata_state empty_state;
+      if (!selected_state) selected_state = &empty_state;
+      const auto &state = *selected_state;
+      if (!current(ticket) || (state.observation && state.observation != ticket)) { out.status = evidence_status::inactive; return out; }
+      out.epoch = state.observation ? state.epoch : epoch.load(std::memory_order_acquire);
+      static const viewport_record empty;
+      const viewport_record *selected = &empty;
+      for (const auto &candidate : state.records)
+        if (candidate.used && candidate.viewport == viewport) { selected = &candidate; break; }
+      const auto &record = *selected;
+      const auto *saved = find_frame(state, viewport, identity);
+      if (!token_current(state, identity)) out.status = evidence_status::untracked_frame;
       else if (!saved || !saved->has_camera) out.status = evidence_status::missing_constants;
       else {
         out.camera = saved->camera;
@@ -911,7 +1015,7 @@ namespace sunshine_streamline {
         auto &value = out.tags[i];
         value = {tag->value, tag->source == origin::local ? tag_scope::evaluation_local :
           tag->source == origin::frame ? tag_scope::explicit_frame : tag_scope::active_global, true, tag->supported, {}, {}, {}};
-        value.value.observation_epoch = epoch;
+        value.value.observation_epoch = out.epoch;
         value.observed_tick = at_boundary ? local->tick : tag->tick;
         value.observation_sequence = at_boundary ? serial : tag->serial;
         value.native_state = tag->native_state;
@@ -942,7 +1046,7 @@ namespace sunshine_streamline {
         if (local && local->tags[index].present) tag = &local->tags[index];
         if (!tag->present) continue;
         auto &value = out.colors[i];
-        value.value = tag->value; value.value.observation_epoch = epoch;
+        value.value = tag->value; value.value.observation_epoch = out.epoch;
         value.scope = tag->source == origin::local ? tag_scope::evaluation_local :
           tag->source == origin::frame ? tag_scope::explicit_frame : tag_scope::active_global;
         value.present = true;
@@ -951,7 +1055,7 @@ namespace sunshine_streamline {
         value.observed_tick = tag->source == origin::local ? local->tick : tag->tick;
         value.observation_sequence = tag->source == origin::local ? serial : tag->serial;
       }
-      ReleaseSRWLockExclusive(&records_lock);
+      pin.reset();
       capture_content(out);
       if (out.frame_correlated) {
         out.projection = validate(out.camera);
@@ -969,16 +1073,24 @@ namespace sunshine_streamline {
     }
     void finish_evaluation(evaluation_snapshot value, bool success, std::uint64_t ticket) {
       if (!current(ticket)) return;
+      auto details = loss_context;
+      details.sequence = value.sequence; details.viewport = value.viewport; details.feature = value.feature;
+      details.reset = value.frame_correlated && value.decoded == decode_status::ok ? value.camera.reset : UINT32_MAX;
       value.successful_evaluation = success;
       value.tick = GetTickCount64();
       value.recording_stable = success && recording_unchanged(value.evaluation_recording);
       if (success) finish_content(value);
-      if (!success) { value.status = evidence_status::evaluation_failed; lose(); }
+      if (!success) {
+        value.status = evidence_status::evaluation_failed;
+        lose(loss_diagnostics::reason::sdk_failure, __func__, __LINE__, details);
+      }
       else if (value.status == evidence_status::source_associated_evaluation &&
           value.loss_revision != loss_revision.load(std::memory_order_acquire)) value.status = evidence_status::observation_lost;
-      if (!TryAcquireSRWLockExclusive(&records_lock)) { dropped_observation(); return; }
+      auto update = write_metadata(ticket);
+      if (!update) { if (current(ticket)) metadata_write_lost(update, __func__, __LINE__, details); return; }
       if (current(ticket)) {
-        auto &record = slot(value.viewport);
+        auto &state = *update;
+        auto &record = slot(state, value.viewport);
         // Lifecycle2 ends at this return even when the feature failed. Strong
         // COM references do not extend pixel validity. Never consume a newer
         // concurrent tag or turn an evaluation-local tag into a global one.
@@ -987,7 +1099,7 @@ namespace sunshine_streamline {
           if (!used.present || used.value.lifecycle != 2 || used.scope == tag_scope::evaluation_local) continue;
           tag_record *original = nullptr;
           if (used.scope == tag_scope::active_global) original = &record.active_tags[i];
-          else if (auto *saved = frame_slot(value.viewport, value.frame, 0, false)) original = &saved->tags[i];
+          else if (auto *saved = frame_slot(state, value.viewport, value.frame, 0, false)) original = &saved->tags[i];
           if (original && original->present && original->serial == used.observation_sequence) {
             original->supported = false;
             original->direct_source.reset();
@@ -999,10 +1111,10 @@ namespace sunshine_streamline {
         if (success) {
           record.feature = value.feature;
           record.evaluation_tick = value.tick;
-          record.changed = ++revision;
+          record.changed = ++state.revision;
         }
       }
-      ReleaseSRWLockExclusive(&records_lock);
+      if (current(ticket) && !update.commit()) metadata_write_lost(update, __func__, __LINE__, details);
     }
     bool viewport_value(const abi_v2::viewport &value, std::uint32_t &output) {
       abi_v2::viewport copy{};
@@ -1027,7 +1139,9 @@ namespace sunshine_streamline {
       const bool header_ok = same(tag.base.type, tag_guid) && tag.base.version == 1;
       constexpr auto resource_prefix = offsetof(abi_v2::resource, height) + sizeof(resource.height);
       const bool resource_ok = header_ok && (!tag.resource_ptr || read_bytes(tag.resource_ptr, &resource, resource_prefix));
-      if (!resource_ok) { invalid_observation(); resource = {}; }
+      if (!resource_ok) {
+        invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); resource = {};
+      }
       tag_record value{};
       value.present = true;
       const bool precision_ok = decode_precision(tag.base.next, value.precision_scale, value.precision_bias);
@@ -1103,10 +1217,13 @@ namespace sunshine_streamline {
         std::uint32_t count, origin source, std::uintptr_t token) {
       batch out;
       out.valid_viewport = viewport_value(viewport, out.viewport);
-      if (!out.valid_viewport) { invalid_observation(); return out; }
+      if (!out.valid_viewport) {
+        invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); return out;
+      }
+      loss_context.viewport = out.viewport;
       std::array<abi_v2::resource_tag, tag_limit> copy{};
       if (count > tag_limit || (count && !read_bytes(tags, copy.data(), count * sizeof(copy[0])))) {
-        invalid_observation();
+        invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
         // A successful call with an unreadable/unsupported tag array must not
         // leave an older resource looking current for this known viewport.
         out.count = static_cast<unsigned>(out.tags.size());
@@ -1127,6 +1244,7 @@ namespace sunshine_streamline {
       const auto ticket = observation_ticket();
       const bool sample = ticket != 0;
       const auto serial = sample ? ++call_sequence : 0;
+      const loss_context_scope loss_scope(serial, viewport);
       const auto loss = loss_revision.load(std::memory_order_acquire);
       const auto entry_tick = sample ? GetTickCount64() : 0;
       const auto diagnostic = dump_stamp(ticket, serial, entry_tick, viewport, 0, frame, true);
@@ -1142,9 +1260,10 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const bool result = original_constants_v1(values, frame, viewport);
       const DWORD outgoing = GetLastError();
+      loss_context.sdk_result = result ? 1 : 0; loss_context.has_sdk_result = true;
       if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result);
       if (sample && result) store_camera(viewport, camera, decoded, frame, true, 0, ticket, numeric_frame(frame), serial, loss, entry_tick);
-      else if (sample && current(ticket)) lose();
+      else if (sample && current(ticket)) lose(loss_diagnostics::reason::sdk_failure, __func__, __LINE__);
       SetLastError(outgoing);
       return result;
     }
@@ -1155,6 +1274,7 @@ namespace sunshine_streamline {
       batch out;
       out.observation = ticket;
       out.serial = sample ? ++call_sequence : 0;
+      const loss_context_scope loss_scope(out.serial, viewport);
       out.loss = loss_revision.load(std::memory_order_acquire);
       out.tick = sample ? GetTickCount64() : 0;
       const auto diagnostic = dump_stamp(ticket, out.serial, out.tick, viewport);
@@ -1184,7 +1304,7 @@ namespace sunshine_streamline {
             tag.resource_lifetime = identity.lifetime;
             tag.resource_device = identity.device;
           } else {
-            invalid_observation();
+            invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
             out.count = index + 1;
             out.tags[index].present = true;
             out.tags[index].value.type = type;
@@ -1195,9 +1315,10 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const bool result = original_tag_v1(resource, type, viewport, area);
       const DWORD outgoing = GetLastError();
+      loss_context.sdk_result = result ? 1 : 0; loss_context.has_sdk_result = true;
       if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result);
       if (sample && result && out.count) store_tags(out);
-      else if (sample && !result && current(ticket)) lose();
+      else if (sample && !result && current(ticket)) lose(loss_diagnostics::reason::sdk_failure, __func__, __LINE__);
       SetLastError(outgoing);
       return result;
     }
@@ -1222,10 +1343,14 @@ namespace sunshine_streamline {
         if ((snapshot.camera.reset != 0 && !current_reset) ||
             (snapshot.frame.kind == frame_identity_kind::v1_numeric && snapshot.camera.not_rendering_game_frames != 0)) return false;
       }
-      if (!TryAcquireSRWLockShared(&records_lock)) return false;
-      const bool associated = snapshot.epoch == epoch && token_current(snapshot.frame);
-      ReleaseSRWLockShared(&records_lock);
-      return associated;
+      auto pin = read_metadata();
+      if (!pin && metadata.has_publication()) return false;
+      static const metadata_state empty;
+      const auto &state = pin ? *pin : empty;
+      const bool associated = snapshot.epoch == (pin ? pin->epoch : epoch.load(std::memory_order_acquire)) &&
+        token_current(state, snapshot.frame);
+      pin.reset();
+      return associated && snapshot.loss_revision == loss_revision.load(std::memory_order_acquire);
     }
     bool direct_tag_admissible(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
       if (!tag.present || !tag.supported || (tag.value.type != 0 && tag.value.type != 48)) return false;
@@ -1302,17 +1427,15 @@ namespace sunshine_streamline {
     bool source_path_selected(const evaluation_snapshot &snapshot) {
       if (snapshot.feature != 0) return true;
       if (!fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire)) return true;
-      // Contention is not evidence that FG was disabled. Drop this SR attempt
-      // rather than overwrite an FG watermark whose mode cannot be inspected.
-      if (!TryAcquireSRWLockShared(&records_lock)) return false;
+      auto pin = read_metadata();
+      if (!pin) return !metadata.has_publication();
       bool selected = true;
-      for (const auto &record : records) if (record.used && record.viewport == snapshot.viewport) {
+      for (const auto &record : pin->records) if (record.used && record.viewport == snapshot.viewport) {
         const auto &fg = record.frame_generation;
-        selected = !(fg.known && fg.enabled && fg.epoch == epoch &&
+        selected = !(fg.known && fg.enabled && fg.epoch == pin->epoch &&
           fg.loss_revision == fg_loss_revision.load(std::memory_order_acquire));
         break;
       }
-      ReleaseSRWLockShared(&records_lock);
       return selected;
     }
     std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one) {
@@ -1381,12 +1504,14 @@ namespace sunshine_streamline {
       // including marker 0, rather than a viewport. Only DLSS (feature 0) has
       // the renderer-input contract this probe validates. Others pass through.
       const bool sample = ticket && feature == 0;
+      const loss_context_scope loss_scope(0, sample ? viewport : UINT32_MAX, feature);
       if (ticket) ++evaluation_calls;
       const auto present_serial = ticket && feature == 3 ?
         start_presentation_marker(viewport, numeric_frame(frame), ticket) : 0;
       evaluation_snapshot snapshot;
       if (sample) {
         const auto serial = ++call_sequence;
+        loss_context.sequence = serial;
         snapshot = capture_evaluation(viewport, feature, numeric_frame(frame), commands, ticket,
           serial, loss_revision.load(std::memory_order_acquire));
       }
@@ -1395,6 +1520,7 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const bool result = original_evaluate_v1(commands, feature, frame, viewport);
       const DWORD outgoing = GetLastError();
+      loss_context.sdk_result = result ? 1 : 0; loss_context.has_sdk_result = true;
       if (sample && diagnostic.session) dump_metadata::observe_sl_evaluation(diagnostic, feature, result);
       call_trace.finish(result);
       if (captured) depth_capture::finish(captured,
@@ -1410,6 +1536,7 @@ namespace sunshine_streamline {
       const auto ticket = observation_ticket();
       const bool sample = ticket != 0;
       const auto serial = sample ? ++call_sequence : 0;
+      const loss_context_scope loss_scope(serial);
       const auto loss = loss_revision.load(std::memory_order_acquire);
       const auto identity = sample ? observed_frame(reinterpret_cast<std::uintptr_t>(&frame)) : frame_identity{};
       const auto entry_tick = sample ? GetTickCount64() : 0;
@@ -1425,6 +1552,7 @@ namespace sunshine_streamline {
         const bool readable = read_bytes(&values, &copy, prefix);
         if (readable) decoded = decode_v2_constants(&copy, prefix, camera);
         valid_viewport = viewport_value(viewport, id);
+        loss_context.viewport = valid_viewport ? id : UINT32_MAX;
         diagnostic.viewport = valid_viewport ? id : UINT32_MAX;
         if (diagnostic.session) {
           const bool tail_read = decoded == decode_status::ok && copy.base.version == 2 &&
@@ -1436,10 +1564,12 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const auto result = original_constants_v2(values, frame, viewport);
       const DWORD outgoing = GetLastError();
+      loss_context.sdk_result = result; loss_context.has_sdk_result = true;
       if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result == 0);
       if (sample && result == 0 && valid_viewport)
         store_camera(id, camera, decoded, 0, false, reinterpret_cast<std::uintptr_t>(&frame), ticket, identity, serial, loss, entry_tick);
-      else if (sample && current(ticket)) lose();
+      else if (sample && current(ticket))
+        lose(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
       SetLastError(outgoing);
       return result;
     }
@@ -1491,28 +1621,28 @@ namespace sunshine_streamline {
           !fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire) ||
           (!out.tags[0].present && !out.tags[1].present)) return snapshot;
       frame_identity identity = out.frame;
-      if (!TryAcquireSRWLockShared(&records_lock)) return snapshot;
+      auto pin = read_metadata();
+      if (!pin) return snapshot;
       bool enabled = false;
-      for (const auto &record : records) if (record.used && record.viewport == out.viewport) {
-        enabled = record.frame_generation.known && record.frame_generation.enabled && record.frame_generation.epoch == epoch &&
+      for (const auto &record : pin->records) if (record.used && record.viewport == out.viewport) {
+        enabled = record.frame_generation.known && record.frame_generation.enabled && record.frame_generation.epoch == pin->epoch &&
           record.frame_generation.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
         const auto &first_tag = out.tags[0].present ? out.tags[0] : out.tags[1];
         const bool synchronous_global_depth = std::any_of(out.tags.begin(), out.tags.begin() + 2, [](const tag_record &tag) {
           return tag.present && tag.source == origin::global && tag.value.lifecycle == 0;
         });
-        const auto *camera_frame = frame_slot(out.viewport, record.camera_frame, 0, false);
+        const auto *camera_frame = find_frame(*pin, out.viewport, record.camera_frame);
         if (identity.kind == frame_identity_kind::unavailable && first_tag.source == origin::global &&
             (record.camera_frame.kind != frame_identity_kind::v2_constants_call || synchronous_global_depth) &&
             record.has_camera && record.camera_tick <= out.tick && out.tick - record.camera_tick <= 250 &&
             camera_frame && camera_frame->camera_serial < out.serial && camera_frame->loss == out.loss &&
-            token_current(record.camera_frame))
+            token_current(*pin, record.camera_frame))
           identity = record.camera_frame;
         break;
       }
-      ReleaseSRWLockShared(&records_lock);
       if (!enabled) return snapshot;
       snapshot = capture_evaluation(out.viewport, 1000, identity, commands,
-        out.observation, out.serial, out.loss, &out);
+        out.observation, out.serial, out.loss, &out, &*pin);
       snapshot.tag_boundary = true;
       if (snapshot.frame_correlated && (snapshot.camera_sequence >= out.serial || snapshot.camera_tick > out.tick ||
           out.tick - snapshot.camera_tick > 250)) {
@@ -1526,6 +1656,7 @@ namespace sunshine_streamline {
       const auto ticket = observation_ticket();
       const bool sample = ticket != 0;
       const auto serial = sample ? ++call_sequence : 0;
+      const loss_context_scope loss_scope(serial);
       const auto loss = loss_revision.load(std::memory_order_acquire);
       const auto entry_tick = sample ? GetTickCount64() : 0;
       const auto diagnostic = dump_stamp(ticket, serial, entry_tick, UINT32_MAX, 0, 0, false, reinterpret_cast<std::uint64_t>(commands));
@@ -1538,16 +1669,19 @@ namespace sunshine_streamline {
       out.tick = entry_tick;
       const auto alpha = sample ? capture_fg_alpha(out, commands) : sunshine_game3d::ui_mask::attempt{};
       const auto snapshot = sample ? capture_fg_tag(out, commands) : evaluation_snapshot{};
+      if (snapshot.tag_boundary) loss_context.feature = snapshot.feature;
       const auto captured = snapshot.tag_boundary ? nominate_depth_source(snapshot, false) : 0;
       SetLastError(incoming);
       const auto result = original_tag_v2(viewport, tags, count, commands);
       const DWORD outgoing = GetLastError();
+      loss_context.sdk_result = result; loss_context.has_sdk_result = true;
       if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result == 0);
       if (captured) depth_capture::finish(captured,
         result == 0 && current(ticket) && loss == loss_revision.load(std::memory_order_acquire),
         result == 0 ? depth_capture::capture_failure::evaluation_observation_changed : depth_capture::capture_failure::evaluation_failed);
       if (sample && result == 0 && out.count) store_tags(out);
-      else if (sample && (result != 0 || !out.valid_viewport) && current(ticket)) lose();
+      else if (sample && (result != 0 || !out.valid_viewport) && current(ticket))
+        lose(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
       if (snapshot.tag_boundary) finish_evaluation(snapshot, result == 0, ticket);
       sunshine_game3d::ui_mask::finish(alpha,
         result == 0 && current(ticket) && loss == loss_revision.load(std::memory_order_acquire));
@@ -1560,6 +1694,7 @@ namespace sunshine_streamline {
       const auto ticket = observation_ticket();
       const bool sample = ticket != 0;
       const auto serial = sample ? ++call_sequence : 0;
+      const loss_context_scope loss_scope(serial);
       const auto loss = loss_revision.load(std::memory_order_acquire);
       const auto identity = sample ? observed_frame(reinterpret_cast<std::uintptr_t>(&frame)) : frame_identity{};
       const auto entry_tick = sample ? GetTickCount64() : 0;
@@ -1574,16 +1709,19 @@ namespace sunshine_streamline {
       out.tick = entry_tick;
       const auto alpha = sample ? capture_fg_alpha(out, commands) : sunshine_game3d::ui_mask::attempt{};
       const auto snapshot = sample ? capture_fg_tag(out, commands) : evaluation_snapshot{};
+      if (snapshot.tag_boundary) loss_context.feature = snapshot.feature;
       const auto captured = snapshot.tag_boundary ? nominate_depth_source(snapshot, false) : 0;
       SetLastError(incoming);
       const auto result = original_frame_tag_v2(frame, viewport, tags, count, commands);
       const DWORD outgoing = GetLastError();
+      loss_context.sdk_result = result; loss_context.has_sdk_result = true;
       if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result == 0);
       if (captured) depth_capture::finish(captured,
         result == 0 && current(ticket) && loss == loss_revision.load(std::memory_order_acquire),
         result == 0 ? depth_capture::capture_failure::evaluation_observation_changed : depth_capture::capture_failure::evaluation_failed);
       if (sample && result == 0 && out.count) store_tags(out);
-      else if (sample && (result != 0 || !out.valid_viewport) && current(ticket)) lose();
+      else if (sample && (result != 0 || !out.valid_viewport) && current(ticket))
+        lose(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
       if (snapshot.tag_boundary) finish_evaluation(snapshot, result == 0, ticket);
       sunshine_game3d::ui_mask::finish(alpha,
         result == 0 && current(ticket) && loss == loss_revision.load(std::memory_order_acquire));
@@ -1592,36 +1730,50 @@ namespace sunshine_streamline {
     }
     batch read_local_inputs(const base_structure **inputs, std::uint32_t count, std::uintptr_t token) {
       batch out;
-      if (count > tag_limit) { invalid_observation(); return out; }
+      if (count > tag_limit) { invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); return out; }
       std::array<const base_structure *, tag_limit> roots{};
-      if (count && !read_bytes(inputs, roots.data(), count * sizeof(roots[0]))) { invalid_observation(); return out; }
+      if (count && !read_bytes(inputs, roots.data(), count * sizeof(roots[0]))) {
+        invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); return out;
+      }
       std::array<abi_v2::resource_tag, tag_limit> tags{};
       unsigned tag_count = 0, visited = 0;
       for (unsigned i = 0; i < count; ++i) {
         const auto *current = roots[i];
         while (current && visited++ < chain_limit) {
           base_structure base;
-          if (!read(current, base)) { invalid_observation(); return out; }
+          if (!read(current, base)) { invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); return out; }
           if (same(base.type, viewport_guid)) {
             abi_v2::viewport viewport{};
             std::uint32_t id{};
             constexpr auto prefix = offsetof(abi_v2::viewport, value) + sizeof(viewport.value);
-            if (!read_bytes(current, &viewport, prefix)) { invalid_observation(); out.valid_viewport = false; return out; }
+            if (!read_bytes(current, &viewport, prefix)) {
+              loss_context.viewport = UINT32_MAX;
+              invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); out.valid_viewport = false; return out;
+            }
             // In an evaluate input list 'next' is the documented input chain,
             // which this loop independently traverses under a global cap. It
             // does not change the viewport identifier's known prefix layout.
             viewport.base.next = nullptr;
             if (
                 decode_v2_viewport(&viewport, sizeof(viewport), id) != decode_status::ok ||
-                (out.valid_viewport && out.viewport != id)) { invalid_observation(); out.valid_viewport = false; return out; }
+                (out.valid_viewport && out.viewport != id)) {
+              loss_context.viewport = UINT32_MAX;
+              invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); out.valid_viewport = false; return out;
+            }
             out.viewport = id;
             out.valid_viewport = true;
+            loss_context.viewport = id;
           } else if (same(base.type, tag_guid) && tag_count < tags.size()) {
-            if (!read_bytes(current, &tags[tag_count++], sizeof(tags[0]))) { invalid_observation(); return out; }
+            if (!read_bytes(current, &tags[tag_count++], sizeof(tags[0]))) {
+              invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); return out;
+            }
           }
           current = static_cast<const base_structure *>(base.next);
         }
-        if (current) { invalid_observation(); out.valid_viewport = false; return out; }
+        if (current) {
+          loss_context.viewport = UINT32_MAX;
+          invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); out.valid_viewport = false; return out;
+        }
       }
       if (out.valid_viewport)
         for (unsigned i = 0; i < tag_count; ++i) append_tag(out, tags[i], origin::local, token);
@@ -1637,6 +1789,7 @@ namespace sunshine_streamline {
       const bool sample = ticket && feature == 0;
       if (ticket) ++evaluation_calls;
       const auto serial = sample ? ++call_sequence : 0;
+      const loss_context_scope loss_scope(serial, UINT32_MAX, feature);
       const auto loss = loss_revision.load(std::memory_order_acquire);
       const auto identity = sample ? observed_frame(reinterpret_cast<std::uintptr_t>(&frame)) : frame_identity{};
       const auto entry_tick = sample ? GetTickCount64() : 0;
@@ -1653,6 +1806,14 @@ namespace sunshine_streamline {
       evaluation_snapshot snapshot;
       if (sample && out.valid_viewport)
         snapshot = capture_evaluation(out.viewport, feature, identity, commands, ticket, serial, loss, &out);
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+      if (entry_policy_armed) {
+        entry_policy_armed = false;
+        entry_policy_observed = true;
+        entry_path_selected = source_path_selected(snapshot);
+        entry_source_admitted = direct_source_admissible(snapshot);
+      }
+#endif
       const auto captured = sample && out.valid_viewport ? nominate_depth_source(snapshot, false) : 0;
       if (sample && !out.valid_viewport && source_requested.load(std::memory_order_acquire) && depth_capture::active()) {
         depth_capture::observe_provider(reinterpret_cast<std::uintptr_t>(commands));
@@ -1661,6 +1822,7 @@ namespace sunshine_streamline {
       SetLastError(incoming);
       const auto result = original_evaluate_v2(feature, frame, inputs, count, commands);
       const DWORD outgoing = GetLastError();
+      loss_context.sdk_result = result; loss_context.has_sdk_result = true;
       if (sample && diagnostic.session) {
         dump_metadata::finish_sl_call(diagnostic, result == 0);
         dump_metadata::observe_sl_evaluation(diagnostic, feature, result == 0);
@@ -1675,7 +1837,7 @@ namespace sunshine_streamline {
       } else if (sample && current(ticket)) {
         // An unresolvable evaluation viewport cannot leave any older camera
         // evidence looking applicable to a new successful call.
-        lose();
+        lose(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
       }
       SetLastError(outgoing);
       return result;
@@ -1685,22 +1847,28 @@ namespace sunshine_streamline {
       const DWORD incoming = GetLastError();
       const auto ticket = observation_ticket();
       const auto serial = ticket ? ++call_sequence : 0;
+      const loss_context_scope loss_scope(serial);
       std::uint32_t numeric{};
       const bool index_ok = !ticket || !frame_index || read(frame_index, numeric);
       SetLastError(incoming);
       const auto result = original_new_token_v2(token, frame_index);
       const DWORD outgoing = GetLastError();
+      loss_context.sdk_result = result; loss_context.has_sdk_result = true;
       if (current(ticket)) {
         abi_v2::frame_token *returned{};
         if (result != 0 || !index_ok || !read(&token, returned) || !returned) {
-          invalid_observation();
-        } else if (!TryAcquireSRWLockExclusive(&records_lock)) {
-          dropped_observation();
+          invalid_observation(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input,
+            __func__, __LINE__);
         } else {
-          if (current(ticket)) {
+          auto update = token_metadata.try_write();
+          if (!update) {
+            if (current(ticket)) dropped_observation(update.failure() == observation::write_failure::storage_busy ?
+              loss_diagnostics::reason::metadata_storage_busy : loss_diagnostics::reason::tokens_busy, __func__, __LINE__);
+          } else if (current(ticket)) {
+            update->observation = ticket;
             const auto address = reinterpret_cast<std::uintptr_t>(returned);
-            auto *chosen = &tokens[0];
-            for (auto &candidate : tokens) {
+            auto *chosen = &update->tokens[0];
+            for (auto &candidate : update->tokens) {
               if (candidate.frame.token == address) { chosen = &candidate; break; }
               if (!candidate.frame.token || candidate.frame.generation < chosen->frame.generation) chosen = &candidate;
             }
@@ -1708,9 +1876,10 @@ namespace sunshine_streamline {
             // numeric index is caller-owned; absent means unknown, never zero.
             if (chosen->frame.token != address || serial > chosen->frame.generation)
               chosen->frame = {frame_identity_kind::v2_observed_token, serial, numeric, address, frame_index != nullptr};
-            else lose(); // Concurrent out-of-order allocation of the same address.
+            else lose(loss_diagnostics::reason::token_replaced, __func__, __LINE__); // Concurrent out-of-order allocation of the same address.
+            if (current(ticket) && !update.commit())
+              dropped_observation(loss_diagnostics::reason::metadata_storage_busy, __func__, __LINE__);
           }
-          ReleaseSRWLockExclusive(&records_lock);
         }
       }
       SetLastError(outgoing);
@@ -1906,15 +2075,14 @@ namespace sunshine_streamline {
     addon_module = addon;
     // ReShade may re-register this process-pinned add-on after device recreation.
     // Keep the existing hooks and only start a fresh observation epoch.
+    while (!token_metadata.clear()) SwitchToThread();
     release_camera_records();
-    AcquireSRWLockExclusive(&records_lock);
-    for (auto &token : tokens) token = {};
+    AcquireSRWLockExclusive(&presentations_lock);
     for (auto &record : presentations) { if (record.thread) CloseHandle(record.thread); record = {}; }
     lose_presentation();
-    lose();
+    lose(loss_diagnostics::reason::lifecycle, __func__, __LINE__, {});
     ++epoch;
-    revision = 0;
-    ReleaseSRWLockExclusive(&records_lock);
+    ReleaseSRWLockExclusive(&presentations_lock);
     next_discovery = next_report = 0;
     last_report_activity = UINT64_MAX;
     last_selected = {};
@@ -1931,6 +2099,9 @@ namespace sunshine_streamline {
   bool enabled() { return requested.load(std::memory_order_acquire); }
   bool source_enabled() { return source_requested.load(std::memory_order_acquire); }
   std::uint64_t depth_observation_revision() { return loss_revision.load(std::memory_order_acquire); }
+  bool query_depth_observation_loss(std::uint64_t revision, loss_diagnostics::event &out) {
+    return loss_journal.query(revision, out);
+  }
   void shutdown() {
     sunshine_upscaler_trace::shutdown();
     native_discard::shutdown();
@@ -1974,7 +2145,7 @@ namespace sunshine_streamline {
     if (!TryAcquireSRWLockExclusive(&commands_lock)) {
       // A missed optional marker does not lose lifecycle identity or destroy the
       // live-object maps. Revoke only evidence that depended on this observation.
-      dropped_observation();
+      dropped_observation(loss_diagnostics::reason::commands_busy, __func__, __LINE__);
       return out;
     }
     if (current_commands(ticket) && !command_observation_lost.load(std::memory_order_acquire))
@@ -2029,12 +2200,13 @@ namespace sunshine_streamline {
     const auto fail = [&](evidence_status status) { output.status = status; output.tags = {}; return status; };
     const auto ticket = observation_ticket();
     if (!source_enabled() || !ticket) return fail(evidence_status::inactive);
-    if (!TryAcquireSRWLockShared(&records_lock)) return fail(evidence_status::busy);
+    auto pin = read_metadata();
+    if (!pin) return fail(evidence_status::missing_evaluation);
     const auto loss = loss_revision.load(std::memory_order_acquire);
     const auto now = GetTickCount64();
     const viewport_record *chosen = nullptr;
     unsigned recent_viewports = 0;
-    for (const auto &record : records) {
+    for (const auto &record : pin->records) {
       const auto &value = record.evaluation;
       if (!value.sequence) continue;
       if (!chosen || value.sequence > chosen->evaluation.sequence) chosen = &record;
@@ -2046,12 +2218,12 @@ namespace sunshine_streamline {
       output.epoch = value.epoch; output.sequence = value.sequence; output.tick = value.tick;
       output.loss_revision = value.loss_revision; output.frame = value.frame; output.viewport = value.viewport;
       status = value.status;
-      const auto *frame = frame_slot(value.viewport, value.frame, 0, false);
+      const auto *frame = find_frame(*pin, value.viewport, value.frame);
       if (recent_viewports > 1) status = evidence_status::ambiguous_viewport;
       else if (status == evidence_status::source_associated_evaluation) {
         if (!value.successful_evaluation || !value.frame_correlated || !value.projection.valid()) status = evidence_status::invalid_camera;
         else if (value.loss_revision != loss) status = evidence_status::observation_lost;
-        else if (!token_current(value.frame)) status = evidence_status::untracked_frame;
+        else if (!token_current(*pin, value.frame)) status = evidence_status::untracked_frame;
         else if (!frame || frame->camera_serial != value.camera_sequence) status = evidence_status::stale;
         else if (now < value.tick || now - value.tick > max_age_ms ||
             now < value.camera_tick || now - value.camera_tick > max_age_ms) status = evidence_status::stale;
@@ -2087,7 +2259,7 @@ namespace sunshine_streamline {
         if (status == evidence_status::source_associated_evaluation && !available) status = evidence_status::missing_depth;
       }
     }
-    ReleaseSRWLockShared(&records_lock);
+    pin.reset();
     if (!current(ticket) || !source_enabled()) return fail(evidence_status::inactive);
     if (loss != loss_revision.load(std::memory_order_acquire) || source_resources_lost.load(std::memory_order_acquire))
       return fail(evidence_status::observation_lost);
@@ -2106,19 +2278,20 @@ namespace sunshine_streamline {
         static_cast<std::uint64_t>(selected.x) + selected.active_width > selected.width ||
         static_cast<std::uint64_t>(selected.y) + selected.active_height > selected.height)
       return fail(evidence_status::depth_not_ready);
-    if (!TryAcquireSRWLockShared(&records_lock)) return fail(evidence_status::busy);
+    auto pin = read_metadata();
+    if (!pin) return fail(evidence_status::missing_evaluation);
     const auto loss = loss_revision.load(std::memory_order_acquire);
     const auto now = GetTickCount64();
     evaluation_snapshot newest;
     bool found = false, ambiguous = false;
-    for (const auto &record : records) {
+    for (const auto &record : pin->records) {
       const auto &candidate = record.evaluation;
       if (!candidate.sequence) continue;
       if (candidate.sequence > newest.sequence) newest = candidate;
       unsigned matching = static_cast<unsigned>(candidate.tags.size());
       bool source_seen = false;
       auto status = candidate.status;
-      const auto *frame_state = frame_slot(candidate.viewport, candidate.frame, 0, false);
+      const auto *frame_state = find_frame(*pin, candidate.viewport, candidate.frame);
       for (unsigned i = 0; i != 2; ++i) {
         const auto &tag = candidate.tags[i];
         if (!tag.present || tag.value.native_resource != selected.resource) continue;
@@ -2163,14 +2336,14 @@ namespace sunshine_streamline {
       if (status == evidence_status::source_associated_evaluation) {
         if (!candidate.successful_evaluation || !candidate.frame_correlated || !candidate.projection.valid()) status = evidence_status::invalid_camera;
         else if (candidate.loss_revision != loss) status = evidence_status::observation_lost;
-        else if (!token_current(candidate.frame)) status = evidence_status::untracked_frame;
+        else if (!token_current(*pin, candidate.frame)) status = evidence_status::untracked_frame;
         else if (!frame_state || frame_state->camera_serial != candidate.camera_sequence) status = evidence_status::stale;
         else if (now < candidate.tick || now - candidate.tick > max_age_ms ||
             now < candidate.camera_tick || now - candidate.camera_tick > max_age_ms) status = evidence_status::stale;
       }
       output.status = status;
     }
-    ReleaseSRWLockShared(&records_lock);
+    pin.reset();
     if (!current(ticket)) return fail(evidence_status::inactive);
     if (loss != loss_revision.load(std::memory_order_acquire)) return fail(evidence_status::observation_lost);
     if (ambiguous) return fail(evidence_status::ambiguous_viewport);
@@ -2192,20 +2365,21 @@ namespace sunshine_streamline {
     if (status) *status = frame_generation_query_status::unavailable;
     const auto ticket = observation_ticket();
     if (!ticket || !fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire)) return false;
-    if (!TryAcquireSRWLockShared(&records_lock)) {
-      if (status) *status = frame_generation_query_status::busy;
+    auto pin = read_metadata();
+    if (!pin) {
+      if (status && metadata.has_publication()) *status = frame_generation_query_status::busy;
       return false;
     }
     bool found = false, ambiguous = false;
     const auto options_loss = fg_loss_revision.load(std::memory_order_acquire);
-    for (const auto &record : records) {
+    for (const auto &record : pin->records) {
       const auto &state = record.frame_generation;
       if (!record.used || !state.sequence || (viewport != UINT32_MAX && record.viewport != viewport)) continue;
-      if (!state.known || state.epoch != epoch || state.loss_revision != options_loss) { ambiguous = true; continue; }
+      if (!state.known || state.epoch != pin->epoch || state.loss_revision != options_loss) { ambiguous = true; continue; }
       if (found) { ambiguous = true; continue; }
       output = state; found = true;
     }
-    ReleaseSRWLockShared(&records_lock);
+    pin.reset();
     if (!found || ambiguous || !current(ticket) || options_loss != fg_loss_revision.load(std::memory_order_acquire)) {
       if (status && ambiguous) *status = frame_generation_query_status::ambiguous;
       output = {}; return false;
@@ -2221,7 +2395,7 @@ namespace sunshine_streamline {
     if (!ticket) return fail(presentation_status::inactive);
     if (installed_abi == abi::v2_7_30 && (!pcl_available.load(std::memory_order_acquire) || !current_pcl_target.load(std::memory_order_acquire)))
       return fail(presentation_status::missing_marker_function);
-    if (!TryAcquireSRWLockExclusive(&records_lock)) return fail(presentation_status::busy);
+    if (!TryAcquireSRWLockExclusive(&presentations_lock)) return fail(presentation_status::busy);
     const auto loss = loss_revision.load(std::memory_order_acquire);
     const auto marker_loss = presentation_loss.load(std::memory_order_acquire);
     const auto *record = current(ticket) ? presentation_thread(false) : nullptr;
@@ -2230,13 +2404,13 @@ namespace sunshine_streamline {
       if ((output.status == presentation_status::open_bracket || output.status == presentation_status::pending_marker) &&
           (output.epoch != epoch || output.loss_revision != loss || output.marker_loss_revision != marker_loss))
         fail(presentation_status::observation_lost);
-      else if (output.status == presentation_status::open_bracket && !token_current(output.frame)) fail(presentation_status::untracked_frame);
+      else if (output.status == presentation_status::open_bracket && !presentation_token_current(output.frame)) fail(presentation_status::untracked_frame);
       else if (output.status == presentation_status::open_bracket) {
         const auto now = GetTickCount64();
         if (now < output.start_tick || now - output.start_tick > max_age_ms) fail(presentation_status::stale);
       }
     }
-    ReleaseSRWLockExclusive(&records_lock);
+    ReleaseSRWLockExclusive(&presentations_lock);
     if (!current(ticket)) return fail(presentation_status::inactive);
     if (loss != loss_revision.load(std::memory_order_acquire) || marker_loss != presentation_loss.load(std::memory_order_acquire))
       return fail(presentation_status::observation_lost);
@@ -2308,7 +2482,8 @@ namespace sunshine_streamline {
     // through NGX. This is observation only, never a cross-API frame match.
     if (sunshine_upscaler_trace::capture_enabled() && hooks_installed) {
       static std::uint64_t camera_report_at{}, camera_report_count{UINT64_MAX};
-      if (now >= camera_report_at && TryAcquireSRWLockShared(&records_lock)) {
+      auto camera_pin = now >= camera_report_at ? read_metadata() : metadata_owner::read_pin{};
+      if (camera_pin) {
         unsigned cameras = 0, valid_recent = 0;
         camera_data camera_sample;
         camera_key camera_sample_key;
@@ -2321,7 +2496,7 @@ namespace sunshine_streamline {
           bool present{}, supported{};
         };
         std::array<depth_tag_sample, 2> depth_samples{};
-        for (const auto &record : records) if (record.used && record.has_camera) {
+        for (const auto &record : camera_pin->records) if (record.used && record.has_camera) {
           ++cameras;
           const auto checked = validate(record.camera);
           valid_recent += record.camera_tick <= now && now - record.camera_tick <= 250 &&
@@ -2343,7 +2518,7 @@ namespace sunshine_streamline {
           }
         }
         const auto calls = constant_calls.load(std::memory_order_relaxed);
-        ReleaseSRWLockShared(&records_lock);
+        camera_pin.reset();
         camera_report_at = now + 5000;
         if (calls != camera_report_count) {
           char availability[320]{};
@@ -2404,12 +2579,10 @@ namespace sunshine_streamline {
     }
     if (!enabled() || !hooks_installed || !observing.load(std::memory_order_acquire) || now < next_report) return;
     next_report = now + 5000;
-    std::array<viewport_record, slot_count> copy;
-    std::uint64_t copied_revision{};
-    if (!TryAcquireSRWLockShared(&records_lock)) return;
-    std::copy(std::begin(records), std::end(records), copy.begin());
-    copied_revision = revision;
-    ReleaseSRWLockShared(&records_lock);
+    auto pin = read_metadata();
+    if (!pin) return;
+    const auto &copy = pin->records;
+    const auto copied_revision = pin->revision;
     const auto snapshot_now = GetTickCount64();
     // Stable/no-call states are reported only once. Active games have bounded
     // five-second numeric snapshots, never per-frame text or file I/O in hooks.
@@ -2615,7 +2788,7 @@ namespace sunshine_streamline {
   }
   extern "C" __declspec(dllexport) void SunshineCommandTestLoseLifecycle() {
     command_observation_lost.store(true, std::memory_order_release);
-    dropped_observation();
+    dropped_observation(loss_diagnostics::reason::test_injected, __func__, __LINE__, {});
   }
   extern "C" __declspec(dllexport) BOOL SunshineCommandTestCapture(std::uint64_t command, commands::recording_marker *out) {
     if (!out) return FALSE;
@@ -2659,19 +2832,38 @@ namespace sunshine_streamline {
       return true;
     }
     bool latest_snapshot(std::uint32_t viewport, evaluation_snapshot &out) {
-      AcquireSRWLockShared(&records_lock);
+      auto pin = read_metadata();
+      if (!pin) return false;
       bool found = false;
-      for (const auto &record : records) if (record.evaluation.sequence && record.evaluation.viewport == viewport) {
+      for (const auto &record : pin->records) if (record.evaluation.sequence && record.evaluation.viewport == viewport) {
         out = record.evaluation; found = true; break;
       }
-      ReleaseSRWLockShared(&records_lock);
       return found;
     }
     void lock_source_resources() { AcquireSRWLockExclusive(&source_resources_lock); }
     void unlock_source_resources() { ReleaseSRWLockExclusive(&source_resources_lock); }
     unsigned waiting_source_resources() { return source_lifecycle_waiters.load(std::memory_order_acquire); }
-    void lock_records() { AcquireSRWLockExclusive(&records_lock); }
-    void unlock_records() { ReleaseSRWLockExclusive(&records_lock); }
+    thread_local metadata_owner::transaction held_metadata_writer;
+    thread_local metadata_owner::read_pin held_metadata_reader;
+    void lock_records() { while (!(held_metadata_writer = metadata.try_write())) SwitchToThread(); }
+    void unlock_records() { held_metadata_writer.reset(); }
+    void lock_records_shared() { held_metadata_reader = read_metadata(); }
+    void unlock_records_shared() { held_metadata_reader.reset(); }
+    thread_local token_owner::transaction held_token_writer;
+    thread_local std::array<token_owner::read_pin, 8> held_token_readers;
+    void lock_tokens() { while (!(held_token_writer = token_metadata.try_write())) SwitchToThread(); }
+    void unlock_tokens() { held_token_writer.reset(); }
+    bool pin_tokens(unsigned index) {
+      if (index >= held_token_readers.size()) return false;
+      held_token_readers[index] = token_metadata.read();
+      return bool(held_token_readers[index]);
+    }
+    void unpin_tokens() { for (auto &pin : held_token_readers) pin.reset(); }
+    void arm_entry_policy() { entry_policy_armed = true; entry_policy_observed = false; }
+    bool entry_policy(bool &selected, bool &admissible) {
+      selected = entry_path_selected; admissible = entry_source_admitted;
+      return entry_policy_observed;
+    }
     bool install_presentation_hooks() { return install_pcl_hooks(); }
     bool discover_frame_generation_hooks() { discover_fg_options(); return install_fg_hooks(); }
     bool install(testing::abi version, const testing::targets &functions) {
@@ -2684,11 +2876,12 @@ namespace sunshine_streamline {
       return success;
     }
     counters counts() { return {constant_calls.load(), tag_calls.load(), evaluation_calls.load(), dropped.load(), invalid.load()}; }
-    void lose_observation() { dropped_observation(); }
+    void lose_observation() { dropped_observation(loss_diagnostics::reason::test_injected, __func__, __LINE__, {}); }
     bool latest(std::uint32_t viewport, std::uint64_t &resource, bool &has_camera, bool &explicit_same_frame, bool &same_token_address) {
-      if (!TryAcquireSRWLockShared(&records_lock)) return false;
+      auto pin = read_metadata();
+      if (!pin) return false;
       bool found = false;
-      for (const auto &record : records) if (record.used && record.viewport == viewport) {
+      for (const auto &record : pin->records) if (record.used && record.viewport == viewport) {
         const tag_record *chosen = nullptr;
         for (const auto &tag : record.global_tags) if (!chosen && tag.present) chosen = &tag;
         for (const auto &tag : record.local_tags) if (tag.present) { chosen = &tag; break; }
@@ -2700,7 +2893,6 @@ namespace sunshine_streamline {
         same_token_address = record.camera_token && record.camera_token == tag.token;
         found = tag.present;
       }
-      ReleaseSRWLockShared(&records_lock);
       return found;
     }
     void clear() {

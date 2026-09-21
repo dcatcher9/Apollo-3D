@@ -54,12 +54,14 @@ namespace sunshine_projection_depth {
     sunshine_scene_gain::depth_range depth_statistics{};
     bool has_depth_statistics{};
     double target_q0{};
+    float ui_midpoint_q{};
+    double target_ui_midpoint_q{};
   };
 
   // One zero-plane state per authenticated logical viewport/unit domain, not
   // per rotating depth resource. The caller proves sample/source association
   // and current capture readiness independently. Camera data reconstructs q;
-  // one shared policy tracks nearest-depth gain and the observed range midpoint. Current A/B reconstruct
+  // one shared policy tracks nearest-depth gain and an independent scene zero. Current A/B reconstruct
   // current pixels exactly, without interpolating camera coefficients.
   class controller {
   public:
@@ -141,6 +143,8 @@ namespace sunshine_projection_depth {
         reason, gain_.zero(), gain_.value(), gain_.target(), gain_.samples(), gain_.learning(), gain_.limited()};
       out.has_depth_statistics = gain_.depth_statistics(out.depth_statistics);
       out.target_q0 = gain_.target_zero();
+      out.ui_midpoint_q = gain_.ui_midpoint();
+      out.target_ui_midpoint_q = gain_.target_ui_midpoint();
       return out;
     }
     domain domain_;

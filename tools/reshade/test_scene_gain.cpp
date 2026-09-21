@@ -27,6 +27,8 @@ namespace {
     fixture() { gain.configure(budget); gain.synchronize(context); }
     void capture(depth_range range, std::uint64_t time) {
       gain.advance(time); gain.synchronize(context); gain.observe(range, time, context); gain.update(time);
+      require(gain.ui_midpoint() == gain.zero() && gain.target_ui_midpoint() == gain.target_zero(),
+        "Legacy midpoint fixtures diverged between scene zero and independent UI midpoint");
     }
     void start(depth_range range = {1., 3.}) {
       for (std::uint64_t time = 1000; time <= 1750; time += 250) {
@@ -114,7 +116,7 @@ namespace {
     }
   }
 
-  void midpoint_is_minimax_epsilon_continuous_and_approach_monotone() {
+  void legacy_midpoint_compatibility_is_minimax_epsilon_continuous_and_approach_monotone() {
     for (const double low : {0., 1e-9, .5, 2.}) {
       fixture value; value.start({low, 4., low + .001});
       const double midpoint = (low + 4.) * .5;
@@ -324,7 +326,7 @@ namespace {
     value.placed({2., 4.});
   }
 
-  void startup_uses_maximum_and_midpoint_histories_with_flat_rules() {
+  void legacy_startup_uses_maximum_and_midpoint_histories_with_flat_rules() {
     fixture value;
     value.capture({1., 2., 1.01}, 1000); value.capture({2., 3., 2.01}, 1250);
     value.capture({.5, 2., .51}, 1500); value.capture({1., 2.5, 1.01}, 1750);
@@ -534,7 +536,7 @@ int main() {
   try {
     full_moments_preserve_statistics_while_maximum_controls_gain();
     maximum_reference_is_independent_of_coverage_mean_and_zero();
-    midpoint_is_minimax_epsilon_continuous_and_approach_monotone();
+    legacy_midpoint_compatibility_is_minimax_epsilon_continuous_and_approach_monotone();
     near_spike_has_bounded_zero_and_gain_response();
     recovery_cannot_bank_gap_invalid_or_expired_time();
     strength_changes_hold_geometry_and_normalization_updates_without_recalibration();
@@ -542,7 +544,7 @@ int main() {
     configured_display_budget_has_one_strength_independent_normalization();
     published_float_zero_stays_in_the_representable_observed_range();
     zero_strength_startup_preserves_feasible_zero_when_enabled();
-    startup_uses_maximum_and_midpoint_histories_with_flat_rules();
+    legacy_startup_uses_maximum_and_midpoint_histories_with_flat_rules();
     multiplicative_units_preserve_disparity_and_projection();
     history_invalidity_and_expiry_preserve_applied_values();
     startup_spacing_and_expiry_are_preserved();
@@ -550,7 +552,7 @@ int main() {
     exact_extrema_and_all_grid_mean_have_distinct_roles();
     depth_statistics_require_an_accepted_current_target();
     low_strength_startup_does_not_amplify_zero_plane_translation();
-    std::puts("PASS shared zero plane: maximum gain, midpoint minimax, occupancy/epsilon continuity, approach pop, bounded zero/gain adaptation and history safety");
+    std::puts("PASS shared scene gain: maximum reference, legacy midpoint-fixture compatibility, bounded zero/gain adaptation and history safety");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL shared zero plane: %s\n", error.what()); return 1;

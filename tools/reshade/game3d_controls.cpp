@@ -153,10 +153,12 @@ namespace sunshine_game3d {
           has_depth, scale.reference_inverse);
         row("Farthest (q min)", "Smallest converted inverse depth in the full active depth rectangle of the same accepted measurement. Zero denotes infinite distance in this depth model. This is not the camera's far clipping plane.",
           has_depth, scale.minimum_inverse);
-        row("Zero plane q0", "Inverse depth where objects appear at screen depth. Target is the midpoint of the nearest and farthest observed inverse depths, balancing their unclamped displacement at fixed gain. Current zero follows gradually with a parallax-based speed limit; it can remain outside the new range during a transition. Changing zero does not redefine gain.",
+        row("Zero plane q0", "Inverse depth where objects appear at screen depth. Trial placement balances the farthest depth with a depth-contrast-weighted foreground reference. This is not subject recognition. Current zero follows gradually with a parallax-based speed limit; it can remain outside the new range during a transition. Changing zero does not redefine gain.",
           has_zero, scale.zero_inverse, scale.has_zero_target(), scale.target_zero_inverse);
         row("Stereo gain K", "Target is L/Q, independently of the zero plane and strength slider. Current gain follows it gradually in either direction. The renderer limits each pixel's final parallax during adaptation. A positive flat scene can update zero while holding gain. K is also called H in relative-depth diagnostics; 1/K is not the measured reference Q.",
           scale.has_value(), scale.value, scale.has_target(), scale.target_value);
+        row("UI midpoint q", "UI plane follows the independently smoothed inverse-depth midpoint (q min + q max) / 2. This is separate from the scene zero plane and is not a physical-distance midpoint. Current scene gain, zero, strength and stereo blend map this depth to displayed parallax.",
+          scale.has_ui_midpoint, scale.ui_midpoint_inverse, scale.has_ui_midpoint_target(), scale.target_ui_midpoint_inverse);
         row("Normalization L", "Full-strength normalization captured for this output shape and parallax limit. Target K=L/Q; L is dimensionless and does not recover a physical camera baseline.",
           scale.has_value() && std::isfinite(scale.normalization) && scale.normalization > 0., scale.normalization);
         if (camera_scale)
@@ -178,7 +180,7 @@ namespace sunshine_game3d {
         ImGui::TextWrapped("Stereo gain is below its current target.");
         ImGui::PopStyleColor();
       } else {
-        ImGui::TextWrapped("Gain follows the nearest depth. Zero follows the depth-range midpoint independently.");
+        ImGui::TextWrapped("Trial zero plane: between the farthest depth and a representative foreground depth. Gain remains independent.");
       }
     }
   }  // namespace
@@ -238,13 +240,20 @@ namespace sunshine_game3d {
     strength_control(*data, config);
     if (!data->alive) { finish(); return false; }
     bool source_alpha_ui = data->values.source_alpha_ui;
-    if (ImGui::Checkbox("Keep UI at screen plane (source alpha)", &source_alpha_ui))
+    if (ImGui::Checkbox("Keep UI on a separate plane (source alpha)", &source_alpha_ui))
       edit_source_alpha_ui(*data, source_alpha_ui, config);
-    ImGui::SetItemTooltip("Enable only when this game's real-frame alpha represents UI. White keeps UI fixed at the screen plane; black keeps the scene stereoscopic. Gray also pins UI already composited into the image. All white makes the entire frame flat. Frame Generation reuses the latest completed real-input alpha; current RGB stays current. Fast-changing UI may briefly lag. If that input is unavailable, UI protection waits instead of using generated output alpha.");
+    ImGui::SetItemTooltip("Enable only when this game's real-frame alpha represents UI. White and gray keep composited UI on one flat plane at the smoothed inverse-depth midpoint, independently of the scene zero target. Its displayed position follows the current scene mapping and 3D strength. Black keeps scene depth. All white makes the entire frame flat at the UI plane. Frame Generation reuses the latest completed real-input alpha; current RGB stays current. Fast-changing UI may briefly lag. If that input is unavailable, UI protection waits instead of using generated output alpha.");
     if (!data->alive) { finish(); return false; }
     if (source_alpha.blocked_by_fg()) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
-      ImGui::TextWrapped("UI protection: waiting for real-frame alpha. This FG path must expose its input color; generated output alpha is not used.");
+      if (source_alpha.input_state == source_alpha_input_state::state_conflict)
+        ImGui::TextWrapped("UI protection: real-frame alpha capture is blocked by a resource-state conflict. Use Dump 3D to record the details.");
+      else if (source_alpha.input_state == source_alpha_input_state::rejected)
+        ImGui::TextWrapped("UI protection: real-frame input was received, but alpha capture was rejected. Use Dump 3D to record the reason.");
+      else if (source_alpha.input_state == source_alpha_input_state::seen)
+        ImGui::TextWrapped("UI protection: real-frame input received; waiting for usable alpha.");
+      else
+        ImGui::TextWrapped("UI protection: waiting for real-frame alpha input. This FG path must expose its input color.");
       ImGui::PopStyleColor();
     } else if (source_alpha.effective()) {
       ImGui::TextWrapped("UI protection: %s", source_alpha.retained_alpha_ready ?

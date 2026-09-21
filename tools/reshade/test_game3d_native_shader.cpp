@@ -27,6 +27,7 @@ namespace {
   };
   constexpr binding bindings[] = {
     {"SunshineGame3DConstants", D3D_SIT_CBUFFER, 0},
+    {"SunshineUIConstants", D3D_SIT_CBUFFER, 1},
     {"SunshineSourceSampler", D3D_SIT_TEXTURE, 0},
     {"DepthBuffer", D3D_SIT_TEXTURE, 1},
     {"SunshineLinearClamp", D3D_SIT_TEXTURE, 2},
@@ -35,10 +36,14 @@ namespace {
     {"SunshineHostFinalSampler", D3D_SIT_TEXTURE, 5},
     {"SunshineEyeLeftSampler", D3D_SIT_TEXTURE, 6},
     {"SunshineEyeRightSampler", D3D_SIT_TEXTURE, 7},
+    {"SunshineUIPlaneTilesSampler", D3D_SIT_TEXTURE, 8},
+    {"SunshineUIPlaneResolvedSampler", D3D_SIT_TEXTURE, 9},
     {"SunshineHostCandidateStore", D3D_SIT_UAV_RWTYPED, 0},
     {"SunshineHostVerticalMajorantStore", D3D_SIT_UAV_RWTYPED, 1},
     {"SunshineHostVerticalConditionedStore", D3D_SIT_UAV_RWTYPED, 2},
     {"SunshineHostFinalStore", D3D_SIT_UAV_RWTYPED, 3},
+    {"SunshineUIPlaneTilesStore", D3D_SIT_UAV_RWTYPED, 4},
+    {"SunshineUIPlaneResolvedStore", D3D_SIT_UAV_RWTYPED, 5},
     {"SunshinePointClamp", D3D_SIT_SAMPLER, 0},
     {"SunshineLinearClampState", D3D_SIT_SAMPLER, 1},
     {"SunshinePointBorder", D3D_SIT_SAMPLER, 2},
@@ -57,12 +62,18 @@ namespace {
     {"Sunshine_CameraCoordinateBasis", 16, 4, D3D_SVT_INT},
     {"Sunshine_CameraDepthScale", 20, 4, D3D_SVT_FLOAT},
     {"Sunshine_CameraStrengthBlend", 24, 4, D3D_SVT_FLOAT},
-    {"Sunshine_Reserved", 28, 4, D3D_SVT_FLOAT},
+    {"Sunshine_DisparityLimitUv", 28, 4, D3D_SVT_FLOAT},
     {"Sunshine_CameraProjection", 32, 8, D3D_SVT_FLOAT},
     {"Sunshine_CameraRawDepthRange", 40, 8, D3D_SVT_FLOAT},
     {"Sunshine_CameraConvergence", 48, 8, D3D_SVT_FLOAT},
     {"Sunshine_DepthJitter", 56, 8, D3D_SVT_FLOAT},
     {"Sunshine_CameraDepthRect", 64, 16, D3D_SVT_FLOAT},
+  };
+  constexpr constant ui_constants[] = {
+    {"Sunshine_SourceAlphaUI", 0, 4, D3D_SVT_UINT},
+    {"Sunshine_UIPlaneMode", 4, 4, D3D_SVT_UINT},
+    {"Sunshine_UIPlaneInverseDepth", 8, 4, D3D_SVT_FLOAT},
+    {"Sunshine_UIReserved", 12, 4, D3D_SVT_UINT},
   };
 
   struct entry_point {
@@ -98,9 +109,11 @@ namespace {
     require(((shader.Version >> 4) & 0xfu) == 5 && (shader.Version & 0xfu) == 0,
       "Native shader is not Shader Model 5.0");
     manifest << "entry " << entry.name << ' ' << entry.profile << '\n';
+    bool has_ui_binding = false;
     for (unsigned index = 0; index < shader.BoundResources; ++index) {
       D3D11_SHADER_INPUT_BIND_DESC actual {};
       require(SUCCEEDED(reflection->GetResourceBindingDesc(index, &actual)), "Binding reflection failed");
+      has_ui_binding |= std::string(actual.Name) == "SunshineUIConstants";
       bool known = false;
       for (const auto &expected : bindings) {
         if (std::string(actual.Name) != expected.name) continue;
@@ -112,13 +125,21 @@ namespace {
       require(known, std::string("Unrecognized native shader resource: ") + actual.Name);
       manifest << "  binding " << actual.Name << ' ' << actual.Type << ' ' << actual.BindPoint << '\n';
     }
+    if (std::string(entry.name) == "SunshineHostHorizontalCS" ||
+        std::string(entry.name) == "SunshineUINearestTilesCS" || std::string(entry.name) == "SunshineUINearestReduceCS")
+      require(has_ui_binding, "UI plane pass lost its independent b1 binding");
     for (unsigned index = 0; index < shader.ConstantBuffers; ++index) {
       auto *buffer = reflection->GetConstantBufferByIndex(index);
       D3D11_SHADER_BUFFER_DESC description {};
       require(SUCCEEDED(buffer->GetDesc(&description)), "Constant-buffer reflection failed");
-      require(std::string(description.Name) == "SunshineGame3DConstants" && description.Size == 80,
-        "Native constants must remain an 80-byte b0");
-      for (const auto &expected : constants) {
+      const bool ui = std::string(description.Name) == "SunshineUIConstants";
+      require((ui && description.Size == 16) ||
+          (std::string(description.Name) == "SunshineGame3DConstants" && description.Size == 80),
+        "Native constants must retain the 80-byte b0 and 16-byte b1");
+      const constant *begin = ui ? std::begin(ui_constants) : std::begin(constants);
+      const constant *end = ui ? std::end(ui_constants) : std::end(constants);
+      for (auto item = begin; item != end; ++item) {
+        const auto &expected = *item;
         auto *variable = buffer->GetVariableByName(expected.name);
         D3D11_SHADER_VARIABLE_DESC actual {};
         D3D11_SHADER_TYPE_DESC type {};
@@ -126,7 +147,7 @@ namespace {
           actual.StartOffset == expected.offset && actual.Size == expected.size && type.Type == expected.type,
           std::string("Constant ABI mismatch: ") + expected.name);
       }
-      manifest << "  constant_buffer_bytes " << description.Size << '\n';
+      manifest << "  constant_buffer " << description.Name << " bytes " << description.Size << '\n';
     }
     if (entry.x != 0) {
       unsigned x, y, z;
@@ -176,6 +197,8 @@ int main(int argc, char **argv) {
           entries.push_back({"SunshineHostCandidateCS", "cs_5_0", 8, 8, 1});
           entries.push_back({"SunshineHostVerticalCS", "cs_5_0", 32, 1, 1});
           entries.push_back({"SunshineHostHorizontalCS", "cs_5_0", 32, 1, 1});
+          entries.push_back({"SunshineUINearestTilesCS", "cs_5_0", 16, 16, 1});
+          entries.push_back({"SunshineUINearestReduceCS", "cs_5_0", 256, 1, 1});
         }
         for (const auto &entry : entries) {
           compile(source, source_path.string(), directory, width, height, color, entry, manifest);

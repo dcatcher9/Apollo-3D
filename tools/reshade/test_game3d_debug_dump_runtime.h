@@ -110,6 +110,7 @@ namespace sunshine_game3d_test {
       frame_ = {};
       frame_.parameters = renderer.consumed_parameters();
       frame_.source_alpha_ui = renderer.consumed_source_alpha_ui();
+      frame_.ui_plane = renderer.consumed_ui_plane();
       frame_.resources = renderer.diagnostics();
       frame_.source_alpha_decision.requested = frame_.source_alpha_ui;
       frame_.source_alpha_decision.retained_alpha_ready = frame_.resources.ui_source.handle != 0;
@@ -149,6 +150,10 @@ namespace sunshine_game3d_test {
       scale.has_depth_statistics = d.ready;
       scale.target_zero_inverse = reused ? .4 : 1.;
       scale.zero_target_available = d.ready;
+      scale.ui_midpoint_inverse = frame_.ui_plane.inverse_depth;
+      scale.has_ui_midpoint = true;
+      scale.target_ui_midpoint_inverse = reused ? .4 : 1.;
+      scale.ui_midpoint_target_available = d.ready;
       if (d.ready) {
         d.shader_resource = depth;
         d.resource = runtime->get_device()->get_resource_from_view(depth);
@@ -230,6 +235,21 @@ namespace sunshine_game3d_test {
       check(replay.at("parameter_bytes") == sizeof(frame_.parameters) && hex.size() == sizeof(frame_.parameters) * 2, "Replay constants do not describe the complete ABI");
       const auto *constant_bytes = reinterpret_cast<const unsigned char *>(&frame_.parameters);
       constexpr char digits[] = "0123456789abcdef";
+      const auto ui_words = sunshine_game3d::ui_parameter_words(frame_.source_alpha_ui, frame_.ui_plane);
+      const auto ui_hex = replay.at("ui_parameter_hex").get<std::string>();
+      const bool nearest_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui;
+      const bool front_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::front_limit;
+      check(replay.at("ui_parameter_abi") == (front_plane ? "sunshine_game3d.ui_parameters.v4" : nearest_plane ? "sunshine_game3d.ui_parameters.v3" : "sunshine_game3d.ui_parameters.v2") &&
+          replay.at("ui_parameter_bytes") == sizeof(ui_words) && ui_hex.size() == sizeof(ui_words) * 2 &&
+          replay.at("ui_constant_binding").at("uint32") == ui_words,
+        "Dump lost exact consumed independent UI plane words");
+      check(replay.at("ui_plane_resolution").at("reduction_ran") == bool(frame_.resources.ui_plane_resolved.handle) &&
+          replay.at("ui_plane_resolution").at("inverse_depth_role") == (front_plane || frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::screen ? "unused" : nearest_plane ? "midpoint_floor" : "explicit_plane"),
+        "Dump confused the submitted UI base with the GPU-resolved plane");
+      const auto *ui_bytes = reinterpret_cast<const unsigned char *>(ui_words.data());
+      for (size_t i = 0; i < sizeof(ui_words); ++i)
+        check(ui_hex[i * 2] == digits[ui_bytes[i] >> 4] && ui_hex[i * 2 + 1] == digits[ui_bytes[i] & 15],
+          "Replay UI constants differ from the exact GPU buffer bytes");
       for (size_t i = 0; i < sizeof(frame_.parameters); ++i) {
         check(hex[i * 2] == digits[constant_bytes[i] >> 4] && hex[i * 2 + 1] == digits[constant_bytes[i] & 15], "Replay constants differ from the exact GPU buffer bytes");
       }

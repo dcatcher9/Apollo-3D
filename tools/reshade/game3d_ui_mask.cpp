@@ -19,6 +19,8 @@ namespace sunshine_game3d::ui_mask {
       request wanted;
       std::uint64_t generation{}, latest_sequence{};
       std::array<slot, snapshot_capacity> snapshots;
+      diagnostic_snapshot diagnostic;
+      std::uint64_t diagnostic_reservation{};
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
       boundary last_attempt;
 #endif
@@ -47,6 +49,8 @@ namespace sunshine_game3d::ui_mask {
       for (auto &item : value.snapshots) retire(item, values, count);
       value.latest_sequence = 0;
       value.generation = ++owner().serial;
+      value.diagnostic = {};
+      value.diagnostic_reservation = 0;
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
       value.last_attempt = {};
 #endif
@@ -184,6 +188,21 @@ namespace sunshine_game3d::ui_mask {
     return collect(runtime, now_ms, &out);
   }
 
+  bool query_diagnostic(std::uint64_t runtime, diagnostic_snapshot &out) {
+    out = {};
+    auto &state = owner();
+    bool found = false;
+    AcquireSRWLockShared(&state.lock);
+    for (const auto &item : state.entries) if (item.wanted.runtime == runtime && item.wanted.enabled) {
+      out = item.diagnostic;
+      out.wanted = item.wanted;
+      found = true;
+      break;
+    }
+    ReleaseSRWLockShared(&state.lock);
+    return found;
+  }
+
   bool interested(std::uint64_t epoch, std::uint64_t revision, std::uint32_t viewport) {
     auto &state = owner();
     unsigned matches_count = 0;
@@ -214,6 +233,10 @@ namespace sunshine_game3d::ui_mask {
     for (auto &item : state.entries) if (item.wanted.runtime == runtime &&
         matches(item.wanted, source.epoch, source.observation_revision, source.viewport) && source.sequence > item.latest_sequence) {
       item.latest_sequence = source.sequence;
+      item.diagnostic = {};
+      item.diagnostic.wanted = item.wanted;
+      item.diagnostic.latest_boundary = where;
+      item.diagnostic_reservation = 0;
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
       item.last_attempt = where;
 #endif
@@ -229,6 +252,8 @@ namespace sunshine_game3d::ui_mask {
         for (auto &snapshot : item.snapshots) if (!snapshot.reservation) {
           result.reservation = ++state.serial;
           snapshot.reservation = result.reservation; snapshot.origin = where;
+          item.diagnostic_reservation = result.reservation;
+          item.diagnostic.record_attempted = true;
           break;
         }
       }
@@ -237,11 +262,21 @@ namespace sunshine_game3d::ui_mask {
     ReleaseSRWLockExclusive(&state.lock);
     release(old);
     if (!result.reservation) return result;
-    auto ticket = capture::record_local_texture(where.command, input);
+    capture::record_diagnostic record;
+    // A synchronous pre-FG snapshot runs at this command's current boundary.
+    // Prefer current recording evidence over a stale tag hint. If this recording
+    // contains no state observation, the capture owner validates the explicitly
+    // provided state under the ordinary source contract; never invent a state.
+    auto ticket = capture::record_local_texture(where.command, input, &record,
+      capture::local_texture_state_policy::prefer_observed_recording);
     bool retained = false;
     AcquireSRWLockExclusive(&state.lock);
     for (auto &item : state.entries) if (item.wanted.runtime == runtime && item.generation == result.generation) {
       for (auto &snapshot : item.snapshots) if (snapshot.reservation == result.reservation) {
+        if (item.latest_sequence == result.sequence && item.diagnostic_reservation == result.reservation) {
+          item.diagnostic.record = record;
+          item.diagnostic.record_completed = true;
+        }
         snapshot.ticket = ticket;
         if (!ticket) snapshot = {};
         retained = true;
@@ -264,6 +299,10 @@ namespace sunshine_game3d::ui_mask {
     bool current = false;
     AcquireSRWLockExclusive(&state.lock);
     for (auto &item : state.entries) if (item.wanted.runtime == value.runtime && item.generation == value.generation) {
+      if (item.latest_sequence == value.sequence && item.diagnostic_reservation == value.reservation) {
+        item.diagnostic.sdk_result_known = true;
+        item.diagnostic.sdk_successful = successful;
+      }
       // A failed SDK call revokes this and older real inputs, but cannot erase
       // a newer successful call that completed on another application thread.
       if (!successful) {

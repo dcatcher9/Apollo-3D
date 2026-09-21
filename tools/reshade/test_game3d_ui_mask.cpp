@@ -197,11 +197,127 @@ namespace {
     absent(999); // A backwards tick cannot extend a source's lifetime.
     selected(2, 1101); // It also cannot retire a future snapshot.
   }
+
+  void diagnostic_rejections_and_no_attempt() {
+    reset();
+    mask::diagnostic_snapshot report;
+    require(mask::query_diagnostic(runtime, report) && report.wanted.runtime == runtime &&
+      report.wanted.width == 3840 && !report.latest_boundary.source.sequence &&
+      !report.record_attempted && !report.record_completed && !report.sdk_result_known,
+      "requested scope without a boundary was reported as a capture attempt");
+    fail_record = true;
+    auto rejected = begin(input(1));
+    require(!rejected.ticket && mask::query_diagnostic(runtime, report) && report.record_attempted && report.record_completed &&
+      !report.sdk_result_known && report.latest_boundary.source.sequence == 1 &&
+      report.latest_boundary.source.native_state == 8 && report.record.native_state == 8 &&
+      report.record.observed_state == 128 && report.record.observed && !report.record.blocked &&
+      report.record.recording_cookie == 0xc01 && report.record.command == 0x300 &&
+      report.record.resource == 0x401 && report.record.result == capture::status::conflicting_state &&
+      report.record.stage == capture::record_stage::conflicting_state,
+      "native rejection lost its exact requested/observed state or recording identity");
+    mask::finish(rejected, true);
+    require(mask::query_diagnostic(runtime, report) && report.sdk_result_known && report.sdk_successful &&
+      report.record.result == capture::status::conflicting_state,
+      "successful SDK call rewrote the native capture rejection");
+    auto null_tag = input(2, 1010); null_tag.resource.native = 0; null_tag.source = {};
+    auto skipped = begin(null_tag); mask::finish(skipped, true);
+    require(mask::query_diagnostic(runtime, report) && report.latest_boundary.source.sequence == 2 &&
+      !report.record_attempted && !report.record_completed && report.record.stage == capture::record_stage::not_attempted &&
+      report.sdk_result_known && report.sdk_successful && records == 1,
+      "invalid tag retained an older rejection or fabricated a native attempt");
+
+    reset(); capture_one(1); capture_one(2, 1010); capture_one(3, 1020);
+    capture_one(4, 1030);
+    require(mask::query_diagnostic(runtime, report) && report.latest_boundary.source.sequence == 4 &&
+      !report.record_attempted && report.sdk_result_known && records == 3,
+      "owner capacity skip was mislabeled as a native capture rejection");
+  }
+
+  void diagnostic_newest_scope_wins() {
+    reset();
+    mask::attempt newer;
+    during_record = [&] { newer = capture_one(2, 1010); };
+    auto older = begin(input(1));
+    mask::diagnostic_snapshot report;
+    require(mask::query_diagnostic(runtime, report) && report.latest_boundary.source.sequence == 2 &&
+      report.record.recording_cookie == 0xc02 && report.record.resource == 0x402 &&
+      report.sdk_result_known && report.sdk_successful,
+      "older native record completion replaced a newer diagnostic");
+    mask::finish(older, false);
+    require(mask::query_diagnostic(runtime, report) && report.latest_boundary.source.sequence == 2 &&
+      report.sdk_result_known && report.sdk_successful,
+      "older failed SDK callback replaced the newest diagnostic");
+    mask::set_request(request());
+    require(mask::query_diagnostic(runtime, report) && report.latest_boundary.source.sequence == 2,
+      "identical request discarded its newest diagnostic");
+    auto changed = request(); changed.revision++;
+    mask::set_request(changed); mask::finish(newer, false);
+    require(mask::query_diagnostic(runtime, report) && report.wanted.revision == changed.revision &&
+      !report.latest_boundary.source.sequence && !report.record_attempted && !report.sdk_result_known,
+      "scope change retained or resurrected an older diagnostic");
+
+    reset();
+    during_record = [] { mask::invalidate(runtime); mask::set_request(request()); };
+    auto revoked = begin(input(1)); mask::finish(revoked, true);
+    require(mask::query_diagnostic(runtime, report) && !report.latest_boundary.source.sequence &&
+      !report.record_attempted && !report.sdk_result_known,
+      "record return across invalidation revived diagnostics in a replacement owner");
+    mask::invalidate(runtime);
+    require(!mask::query_diagnostic(runtime, report) && !report.wanted.runtime &&
+      !report.latest_boundary.source.sequence,
+      "invalidated request exposed stale diagnostic metadata");
+
+    reset();
+    auto source = input(1);
+    std::weak_ptr<const capture::source_reference> source_lifetime = source.source;
+    auto attempt = begin(source); mask::finish(attempt, true); source.source.reset();
+    require(source_lifetime.expired() && mask::query_diagnostic(runtime, report),
+      "diagnostic metadata retained an application source COM lease");
+  }
+
+  void diagnostic_in_flight_is_not_a_rejection() {
+    reset();
+    bool checked_pending = false;
+    during_record = [&] {
+      mask::diagnostic_snapshot pending;
+      require(mask::query_diagnostic(runtime, pending) && pending.record_attempted &&
+        !pending.record_completed && !pending.sdk_result_known &&
+        pending.latest_boundary.source.sequence == 1,
+        "in-flight native call was not distinguished from a completed rejection");
+      checked_pending = true;
+    };
+    auto recorded = begin(input(1));
+    mask::diagnostic_snapshot report;
+    require(checked_pending && mask::query_diagnostic(runtime, report) && report.record_attempted &&
+      report.record_completed && report.record.result == capture::status::recorded && !report.sdk_result_known &&
+      report.record.copy_state_known && report.record.used_observed_state && report.record.copy_state == 128 &&
+      report.record.native_state == 8,
+      "returned native call did not complete its diagnostic independently of the SDK call");
+    mask::finish(recorded, true);
+    require(mask::query_diagnostic(runtime, report) && report.record_completed &&
+      report.sdk_result_known && report.sdk_successful,
+      "SDK completion lost the completed native diagnostic");
+  }
 }
 
 namespace sunshine_streamline::depth_capture {
-  diagnostic_ticket record_local_texture(std::uint64_t, const input &value, record_diagnostic *) {
+  diagnostic_ticket record_local_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic,
+      local_texture_state_policy state_policy) {
+    require(state_policy == local_texture_state_policy::prefer_observed_recording && value.frame_generation_input &&
+      value.valid_until == scene::lifetime::at_call && value.force_snapshot,
+      "Live UI owner did not prefer observed-recording state for its synchronous FG input");
     ++records;
+    if (diagnostic) {
+      *diagnostic = {};
+      diagnostic->command = command; diagnostic->resource = value.resource.native;
+      diagnostic->native_state = value.native_state; diagnostic->observed_state = 128;
+      diagnostic->observed = true; diagnostic->recording_cookie = 0xc00 + value.sequence;
+      diagnostic->result = fail_record ? status::conflicting_state : status::recorded;
+      diagnostic->stage = fail_record ? record_stage::conflicting_state : record_stage::recorded;
+      if (!fail_record) {
+        diagnostic->copy_state = 128; diagnostic->copy_state_known = true; diagnostic->used_observed_state = true;
+      }
+    }
     if (fail_record) return {};
     const auto id = ++next_ticket;
     auto lease = std::shared_ptr<const texture_reference>(reinterpret_cast<const texture_reference *>(id), [](auto *) {});
@@ -240,6 +356,9 @@ int main() {
     reservation_race(); std::puts("PASS collect versus in-flight native-record publication preserves the pending reservation");
     invalid_tags_and_sdk_failure(); std::puts("PASS null/partial/unsupported tags, SDK failure, native transient failure and out-of-order calls");
     admission_and_isolation(); std::puts("PASS actual shape/device/alpha format, unique runtime scope and monotonic source admission");
+    diagnostic_rejections_and_no_attempt(); std::puts("PASS exact live rejection diagnostics and distinct no-attempt states");
+    diagnostic_newest_scope_wins(); std::puts("PASS newest diagnostic ownership, stale completion/invalidation guards and metadata-only lifetime");
+    diagnostic_in_flight_is_not_a_rejection(); std::puts("PASS pending native diagnostic is distinct from a completed result and SDK completion");
     mask::invalidate_all();
     return 0;
   } catch (const std::exception &error) {

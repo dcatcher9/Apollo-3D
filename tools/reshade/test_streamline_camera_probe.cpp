@@ -177,6 +177,7 @@ namespace {
     new_token_call.first = &token;
     new_token_call.second = index;
     token = returned_token;
+    block_if_requested();
     SetLastError(outgoing_error);
     return result_v2;
   }
@@ -731,6 +732,308 @@ namespace {
     require(new_token_call.incoming_error == incoming_error && GetLastError() == outgoing_error,
       "frame token LastError changed");
   }
+  struct token_source_fixture {
+    fixture cleanup;
+    abi_v2::viewport view{viewport(61)};
+    abi_v2::constants constants{modern_camera()};
+    opaque_token token;
+    int native{};
+    abi_v2::resource resource{modern_resource(&native)};
+    abi_v2::resource_tag tag{depth_tag_for(resource)};
+    const base_structure *inputs[1]{&view.base};
+    std::uint32_t number{401};
+    token_source_fixture() {
+      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      require(!enabled() && source_enabled(), "Token isolation enabled the optional full probe");
+      require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "Token isolation hook install failed");
+      depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&native), 91, 10, true);
+      mint(token, &number);
+      publish(token);
+    }
+    evaluation_snapshot publish(opaque_token &current) {
+      require(call_v2_constants(constants, current.ref(), view) == 0 &&
+          call_v2_framed_tag(current.ref(), view, &tag, 1, nullptr) == 0 &&
+          call_v2_evaluate(0, current.ref(), inputs, 1, nullptr) == 0,
+        "Token fixture changed native API forwarding");
+      sunshine_scene_depth::frame normalized;
+      evaluation_snapshot snapshot;
+      require(testing::normalized_source(view.value, 0, normalized) && normalized.projection.supplied &&
+          normalized.projection.depth_scale == .5 && normalized.observation_revision == depth_observation_revision() &&
+          testing::latest_snapshot(view.value, snapshot) && snapshot.frame.kind == frame_identity_kind::v2_observed_token,
+        "Registered token did not establish its own fresh source tuple");
+      return snapshot;
+    }
+    bool ready() {
+      depth_source_snapshot snapshot;
+      return query_depth_source(snapshot) == evidence_status::source_associated_evaluation;
+    }
+  };
+  enum class fixture_lock { records_exclusive, records_shared, tokens };
+  struct observation_guard {
+    fixture_lock kind;
+    bool locked{true};
+    explicit observation_guard(fixture_lock value): kind(value) {
+      if (kind == fixture_lock::records_exclusive) testing::lock_records();
+      else if (kind == fixture_lock::records_shared) testing::lock_records_shared();
+      else testing::lock_tokens();
+    }
+    ~observation_guard() { release(); }
+    void release() {
+      if (!locked) return;
+      if (kind == fixture_lock::records_exclusive) testing::unlock_records();
+      else if (kind == fixture_lock::records_shared) testing::unlock_records_shared();
+      else testing::unlock_tokens();
+      locked = false;
+    }
+  };
+  bool bounded_finish(const std::atomic<bool> &done) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    while (!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return done.load(std::memory_order_acquire);
+  }
+  void test_token_records_independence(bool shared) {
+    token_source_fixture source;
+    opaque_token next;
+    const std::uint32_t number = 402;
+    returned_token = const_cast<abi_v2::frame_token *>(&next.ref());
+    abi_v2::frame_token *output{};
+    const auto before = depth_observation_revision();
+    const auto counters = testing::counts();
+    const auto calls = new_token_call.calls;
+    std::atomic<bool> done{};
+    bool forwarded{};
+    observation_guard held(shared ? fixture_lock::records_shared : fixture_lock::records_exclusive);
+    std::thread worker([&] {
+      SetLastError(incoming_error);
+      const auto result = call_v2_new_token(output, &number);
+      const auto error = GetLastError();
+      forwarded = result == 0 && output == returned_token && error == outgoing_error &&
+        new_token_call.incoming_error == incoming_error && new_token_call.first == &output && new_token_call.second == &number;
+      done.store(true, std::memory_order_release);
+    });
+    const bool nonblocking = bounded_finish(done);
+    held.release(); worker.join();
+    require(nonblocking && forwarded && new_token_call.calls == calls + 1,
+      "Token registration blocked on camera metadata or changed SDK forwarding");
+    require(depth_observation_revision() == before && testing::counts().dropped == counters.dropped &&
+        testing::counts().invalid == counters.invalid,
+      shared ? "Shared camera-table reader invalidated independent token registration" :
+        "Exclusive camera-table owner invalidated independent token registration");
+    require(source.ready(), "Unrelated token registration revoked an existing camera/source tuple");
+    const auto fresh = source.publish(next);
+    require(fresh.frame.has_numeric && fresh.frame.numeric == number && fresh.frame.token == reinterpret_cast<std::uintptr_t>(returned_token),
+      "Token registered during camera-table contention lost its exact identity");
+  }
+  void test_token_contention_and_remint() {
+    token_source_fixture source;
+    evaluation_snapshot initial;
+    require(testing::latest_snapshot(source.view.value, initial), "Token fixture omitted initial identity");
+    const auto before_remint = depth_observation_revision();
+    const auto before_counts = testing::counts();
+    mint(source.token, &source.number); // Same pointer and numeric frame, new generation.
+    require(depth_observation_revision() == before_remint && testing::counts().dropped == before_counts.dropped &&
+        !source.ready(), "Same-address token remint reused old identity or triggered broad observation loss");
+    const auto reminted = source.publish(source.token);
+    require(reminted.frame.generation > initial.frame.generation && reminted.frame.numeric == initial.frame.numeric,
+      "Same-address token remint failed to establish a distinct exact generation");
+
+    // An unfinished writer cannot hide the last immutable token publication.
+    // Actual lost token registration below must still revoke that identity.
+    std::atomic<bool> queried{};
+    bool accepted = true;
+    observation_guard held(fixture_lock::tokens);
+    std::thread reader([&] { accepted = source.ready(); queried.store(true, std::memory_order_release); });
+    const bool query_nonblocking = bounded_finish(queried);
+    held.release(); reader.join();
+    require(query_nonblocking && accepted && depth_observation_revision() == before_remint,
+      "Unfinished token writer hid the last complete identity or changed observation history");
+    require(source.ready(), "A read-only token lookup permanently revoked unchanged identity");
+
+    returned_token = const_cast<abi_v2::frame_token *>(&source.token.ref());
+    abi_v2::frame_token *output{};
+    std::atomic<bool> done{};
+    bool forwarded{};
+    const auto before = depth_observation_revision();
+    const auto counters = testing::counts();
+    observation_guard busy(fixture_lock::tokens);
+    std::thread writer([&] {
+      SetLastError(incoming_error);
+      const auto result = call_v2_new_token(output, &source.number);
+      const auto error = GetLastError();
+      forwarded = result == 0 && output == returned_token && error == outgoing_error &&
+        new_token_call.incoming_error == incoming_error && new_token_call.first == &output && new_token_call.second == &source.number;
+      done.store(true, std::memory_order_release);
+    });
+    const bool nonblocking = bounded_finish(done);
+    busy.release(); writer.join();
+    require(nonblocking && forwarded && depth_observation_revision() == before + 1 &&
+        testing::counts().dropped == counters.dropped + 1 && testing::counts().invalid == counters.invalid,
+      "Real token-table contention lost its bounded fail-closed registration behavior");
+    loss_diagnostics::event loss;
+    require(query_depth_observation_loss(before + 1, loss) && loss.site &&
+        std::strcmp(loss.site, "hook_new_token_v2") == 0 && loss.details.sequence &&
+        loss.details.has_sdk_result && loss.details.sdk_result == 0 && !source.ready() && !source.ready(),
+      "Lost token registration was unlabeled or revived old source evidence after unlocking");
+    mint(source.token, &source.number);
+    require(!source.ready(), "Successful remint without new constants revived pre-loss source evidence");
+    source.publish(source.token);
+  }
+  void test_pending_token_lifecycle() {
+    token_source_fixture source;
+    opaque_token pending;
+    const std::uint32_t number = 403;
+    returned_token = const_cast<abi_v2::frame_token *>(&pending.ref());
+    abi_v2::frame_token *output{};
+    bool forwarded{};
+    block_original = true;
+    std::thread worker([&] {
+      SetLastError(incoming_error);
+      const auto result = call_v2_new_token(output, &number);
+      const auto error = GetLastError();
+      forwarded = result == 0 && output == returned_token && error == outgoing_error &&
+        new_token_call.incoming_error == incoming_error && new_token_call.first == &output && new_token_call.second == &number;
+    });
+    const bool entered = bounded_finish(original_entered);
+    shutdown();
+    initialize(nullptr); // The pending SDK call belongs to the retired epoch.
+    const auto after_restart = depth_observation_revision();
+    const auto counters = testing::counts();
+    release_original = true;
+    worker.join();
+    block_original = false;
+    require(entered && forwarded && depth_observation_revision() == after_restart,
+      "Pending token call failed SDK forwarding or modified the restarted observation epoch");
+    unchanged(counters, testing::counts(), "Retired token callback changed new-epoch observation counters");
+
+    depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&source.native), 92, 10, true);
+    require(call_v2_constants(source.constants, pending.ref(), source.view) == 0 &&
+        call_v2_framed_tag(pending.ref(), source.view, &source.tag, 1, nullptr) == 0 &&
+        call_v2_evaluate(0, pending.ref(), source.inputs, 1, nullptr) == 0,
+      "Post-restart token fixture changed native API forwarding");
+    sunshine_scene_depth::frame normalized;
+    require(!testing::normalized_source(source.view.value, 0, normalized) && !source.ready(),
+      "Token returned from a retired callback populated the new epoch's source identity");
+    mint(pending, &number);
+    source.publish(pending);
+  }
+  void test_metadata_reader_isolation() {
+    token_source_fixture source;
+    evaluation_snapshot before;
+    require(testing::latest_snapshot(source.view.value, before), "Metadata fixture missing initial source");
+    const auto revision = depth_observation_revision();
+    const auto counters = testing::counts();
+    std::atomic<bool> done{};
+    bool forwarded{};
+    observation_guard held(fixture_lock::records_shared);
+    std::thread worker([&] {
+      SetLastError(incoming_error);
+      const bool camera = call_v2_constants(source.constants, source.token.ref(), source.view) == 0 &&
+        constants_call.incoming_error == incoming_error && GetLastError() == outgoing_error;
+      SetLastError(incoming_error);
+      const bool tag = call_v2_framed_tag(source.token.ref(), source.view, &source.tag, 1, nullptr) == 0 &&
+        framed_tag_call.incoming_error == incoming_error && GetLastError() == outgoing_error;
+      SetLastError(incoming_error);
+      const bool evaluated = call_v2_evaluate(0, source.token.ref(), source.inputs, 1, nullptr) == 0 &&
+        evaluate_call.incoming_error == incoming_error && GetLastError() == outgoing_error;
+      forwarded = camera && tag && evaluated;
+      done.store(true, std::memory_order_release);
+    });
+    const bool bounded = bounded_finish(done);
+    held.release(); worker.join();
+    require(bounded && forwarded, "Metadata callback blocked on a reader or changed native forwarding");
+    require(depth_observation_revision() == revision && testing::counts().dropped == counters.dropped,
+      "Published metadata reader invalidated camera/tag/evaluation observations");
+    evaluation_snapshot after;
+    require(testing::latest_snapshot(source.view.value, after) && source.ready() &&
+        after.sequence > before.sequence && after.camera_sequence > before.camera_sequence &&
+        after.loss_revision == revision && after.frame.generation == before.frame.generation,
+      "Metadata reader prevented fresh exact camera/tag/evaluation publication");
+  }
+  void benchmark_metadata_callbacks() {
+    token_source_fixture source;
+    const auto update = [&] {
+      call_v2_constants(source.constants, source.token.ref(), source.view);
+      call_v2_framed_tag(source.token.ref(), source.view, &source.tag, 1, nullptr);
+      call_v2_evaluate(0, source.token.ref(), source.inputs, 1, nullptr);
+    };
+    for (unsigned i = 0; i != 100; ++i) update();
+    const auto revision = depth_observation_revision();
+    constexpr unsigned iterations = 2000;
+    const auto start = std::chrono::steady_clock::now();
+    for (unsigned i = 0; i != iterations; ++i) update();
+    const auto elapsed = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
+    require(source.ready() && depth_observation_revision() == revision,
+      "Serial metadata benchmark lost valid source observations");
+    std::printf("metadata_callback_bench iterations=%u total_us=%.3f camera_tag_evaluate_us=%.3f\n",
+      iterations, elapsed, elapsed / iterations);
+  }
+#ifndef SUNSHINE_STREAMLINE_PROBE_LEGACY_CONTROL
+  void test_token_reader_and_storage_pressure() {
+    token_source_fixture source;
+    struct pins_guard { ~pins_guard() { testing::unpin_tokens(); } } pins;
+    const auto before = depth_observation_revision();
+    const auto counters = testing::counts();
+    opaque_token next;
+    require(testing::pin_tokens(0), "Token publication could not be pinned");
+    mint(next, &source.number);
+    source.publish(next);
+    require(depth_observation_revision() == before && testing::counts().dropped == counters.dropped,
+      "Immutable token reader invalidated mint or camera/tag/evaluation callbacks");
+    testing::unpin_tokens();
+    // Eight distinct retained versions exhaust the fixed bank, not a mutable
+    // metadata lock. Native API forwarding survives, but lost identity revokes.
+    for (unsigned i = 0; i != 8; ++i) {
+      require(testing::pin_tokens(i), "Token pressure fixture lost a published version");
+      if (i != 7) mint(next, &source.number);
+    }
+    const auto exhausted = depth_observation_revision();
+    mint(next, &source.number);
+    loss_diagnostics::event loss;
+    require(depth_observation_revision() == exhausted + 1 && !source.ready() &&
+        query_depth_observation_loss(exhausted + 1, loss) && loss.cause == loss_diagnostics::reason::metadata_storage_busy,
+      "Token version exhaustion did not preserve explicit fail-closed observation loss");
+    testing::unpin_tokens();
+    mint(next, &source.number);
+    source.publish(next);
+  }
+  void test_pinned_metadata_lifecycle() {
+    token_source_fixture source;
+    observation_guard reader(fixture_lock::records_shared);
+    struct pins_guard { ~pins_guard() { testing::unpin_tokens(); } } pins;
+    require(testing::pin_tokens(0), "Lifecycle fixture omitted token version");
+    shutdown();
+    initialize(nullptr);
+    require(!source.ready(), "Pinned retired version revived source after reinitialization");
+    depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&source.native), 92, 10, true);
+    mint(source.token, &source.number);
+    source.publish(source.token);
+    require(source.ready(), "Held old metadata/token reader prevented fresh lifecycle publication");
+  }
+  void test_first_local_raw_entry() {
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "First-local-raw hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function,
+      "First-local-raw fixture failed FG discovery"); // No options call or metadata publication.
+    opaque_token token; mint(token, nullptr);
+    auto view = viewport(73);
+    int native{}; auto resource = modern_resource(&native); auto tag = depth_tag_for(resource);
+    depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&native), 94, 10, true);
+    const base_structure *inputs[]{&view.base, &tag.base};
+    testing::arm_entry_policy();
+    require(call_v2_evaluate(0, token.ref(), inputs, 2, nullptr) == 0,
+      "First-local-raw evaluation changed SDK result");
+    bool selected{}, admitted{};
+    require(testing::entry_policy(selected, admitted) && selected && admitted,
+      "Initial local raw evaluation was rejected before SDK entry when metadata store was empty");
+    sunshine_scene_depth::frame normalized;
+    require(testing::normalized_source(view.value, 0, normalized) && !normalized.projection.supplied,
+      "First local raw evaluation failed to publish its own camera-free source");
+  }
+#endif
   void test_source_nomination_v1() {
     fixture cleanup;
     probe_setting = nullptr;
@@ -1279,6 +1582,163 @@ namespace {
     constants(); evaluate();
     require(testing::normalized_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied,
       "fresh reset constants did not recover after the interrupted reset call");
+  }
+
+  void test_depth_observation_loss_diagnostics(bool modern) {
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    require(!enabled() && source_enabled(), "Loss journal enabled the optional command/content probe");
+    require(testing::install(modern ? testing::abi::v2_7_30 : testing::abi::v1_1_1,
+      modern ? tracked_v2_targets : v1_targets), "Loss journal hook install failed");
+    const auto view = viewport(59);
+    int native{};
+    const auto address = reinterpret_cast<std::uintptr_t>(&native);
+    depth_resource_initialized(address, 41, 10, true);
+    abi_v1::resource old_resource{}; old_resource.native = &native;
+    auto resource = modern_resource(&native);
+    auto tag = depth_tag_for(resource);
+    auto old = old_camera();
+    auto current = modern_camera();
+    opaque_token token;
+    std::uint32_t frame{};
+    const base_structure *inputs[]{&view.base};
+    const auto constants = [&] {
+      return modern ? call_v2_constants(current, token.ref(), view) == result_v2 :
+        call_v1_constants(old, frame, view.value) == result_v1;
+    };
+    const auto evaluate = [&] {
+      return modern ? call_v2_evaluate(0, token.ref(), inputs, 1, nullptr) == result_v2 :
+        call_v1_evaluate(nullptr, 0, frame, view.value) == result_v1;
+    };
+    const auto next_frame = [&] {
+      ++frame;
+      if (modern) mint(token, &frame);
+    };
+    const auto recover = [&] {
+      old = old_camera(); current = modern_camera();
+      next_frame();
+      preserves_last_error(constants, constants_call);
+      if (modern) call_v2_tag(view, &tag, 1, nullptr);
+      else call_v1_tag(&old_resource, 0, view.value, nullptr);
+      preserves_last_error(evaluate, evaluate_call);
+      sunshine_scene_depth::frame normalized;
+      require(testing::normalized_source(view.value, 0, normalized) &&
+        normalized.resource.native == address && normalized.observation_revision == depth_observation_revision() &&
+        normalized.projection.supplied && normalized.projection.depth_offset == 0. &&
+        normalized.projection.depth_scale == .5 && normalized.projection.reversed && !normalized.feedback.reset,
+        "Loss diagnostics changed fresh depth/projection recovery");
+      return normalized;
+    };
+    const auto event_for = [&](std::uint64_t revision, loss_diagnostics::reason cause, DWORD thread) {
+      loss_diagnostics::event event;
+      require(query_depth_observation_loss(revision, event) && event.revision == revision && event.cause == cause &&
+        event.tick && event.tick <= GetTickCount64() && event.thread_id == thread && event.line && event.site && *event.site,
+        "Loss journal did not describe the exact real-hook invalidation");
+      return event;
+    };
+    const auto still_recorded = [&](const loss_diagnostics::event &saved) {
+      const auto actual = event_for(saved.revision, saved.cause, saved.thread_id);
+      require(actual.tick == saved.tick && actual.line == saved.line && std::strcmp(actual.site, saved.site) == 0 &&
+        actual.details.sequence == saved.details.sequence && actual.details.viewport == saved.details.viewport &&
+        actual.details.feature == saved.details.feature && actual.details.sdk_result == saved.details.sdk_result &&
+        actual.details.has_sdk_result == saved.details.has_sdk_result && actual.details.reset == saved.details.reset,
+        "Recovery or a later loss overwrote an earlier exact-revision cause");
+    };
+    const auto no_old_source = [&] {
+      sunshine_scene_depth::frame normalized;
+      require(!testing::normalized_source(view.value, 0, normalized),
+        "Diagnostic recording repaired the source invalidation it only describes");
+    };
+
+    const auto first = recover();
+    old.reset = current.reset = 1;
+    next_frame();
+    const auto before_reset = depth_observation_revision();
+    preserves_last_error(constants, constants_call);
+    require(depth_observation_revision() == before_reset + 1,
+      "Camera reset diagnostic changed the existing single revision increment");
+    const auto reset = event_for(before_reset + 1, loss_diagnostics::reason::camera_reset, GetCurrentThreadId());
+    require(reset.details.viewport == view.value && reset.details.sequence && reset.details.reset == 1,
+      "Camera reset cause omitted its viewport/call/reset context");
+    no_old_source();
+    recover();
+    still_recorded(reset);
+    require(first.observation_revision == before_reset && !first.feedback.reset &&
+      first.projection.depth_scale == .5, "Later diagnostic activity mutated the earlier normalized value");
+
+    next_frame();
+    old.common.clip_to_camera_view.m[0][0] = current.common.clip_to_camera_view.m[0][0] = 2.f;
+    const auto before_invalid = depth_observation_revision();
+    preserves_last_error(constants, constants_call);
+    require(depth_observation_revision() == before_invalid + 1,
+      "Invalid camera diagnostic changed the existing single revision increment");
+    const auto invalid = event_for(before_invalid + 1, loss_diagnostics::reason::invalid_camera, GetCurrentThreadId());
+    require(invalid.details.viewport == view.value && invalid.details.sequence && invalid.details.reset == 0,
+      "Invalid projection was mislabeled as a game-requested camera reset");
+    no_old_source();
+    recover();
+
+    const auto before_failure = depth_observation_revision();
+    result_v1 = false; result_v2 = -73;
+    preserves_last_error(evaluate, evaluate_call);
+    result_v1 = true; result_v2 = 0;
+    require(depth_observation_revision() == before_failure + 1,
+      "Failed SDK evaluation diagnostic changed the existing revision increment");
+    const auto failed = event_for(before_failure + 1, loss_diagnostics::reason::sdk_failure, GetCurrentThreadId());
+    require(failed.details.viewport == view.value && failed.details.feature == 0 && failed.details.sequence &&
+      failed.details.has_sdk_result && failed.details.sdk_result == (modern ? -73 : 0),
+      "Failed SDK evaluation lost its original result or logical call identity");
+    no_old_source();
+    recover();
+
+    const auto before_busy = depth_observation_revision();
+    const auto counters_before_busy = testing::counts();
+    std::atomic<bool> finished{};
+    bool forwarded{};
+    DWORD worker_thread{};
+    struct records_guard {
+      bool locked{true};
+      records_guard() { testing::lock_records(); }
+      ~records_guard() { release(); }
+      void release() { if (locked) { testing::unlock_records(); locked = false; } }
+    } guard;
+    std::thread worker([&] {
+      worker_thread = GetCurrentThreadId();
+      SetLastError(incoming_error);
+      const bool original_result = constants();
+      const auto original_error = GetLastError();
+      forwarded = original_result && constants_call.incoming_error == incoming_error && original_error == outgoing_error;
+      finished.store(true, std::memory_order_release);
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    while (!finished.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool nonblocking = finished.load(std::memory_order_acquire);
+    guard.release();
+    worker.join();
+    // V2 already observes the token and stores the camera under separate
+    // try-locks; instrumentation must retain both original loss increments.
+    // Token lookup has its own lock; only the camera-table update is lost.
+    const auto expected_losses = 1u;
+    require(nonblocking && forwarded && depth_observation_revision() == before_busy + expected_losses &&
+      testing::counts().dropped == counters_before_busy.dropped + expected_losses,
+      "Contended diagnostic changed callback latency, API forwarding or existing loss accounting");
+    for (unsigned i = 1; i <= expected_losses; ++i)
+      event_for(before_busy + i, loss_diagnostics::reason::records_busy, worker_thread);
+    const auto busy = event_for(before_busy + expected_losses, loss_diagnostics::reason::records_busy, worker_thread);
+    require(busy.details.viewport == view.value && busy.details.sequence,
+      "Contended camera storage omitted its exact callback context");
+    no_old_source();
+    recover();
+
+    const auto recovered_revision = depth_observation_revision();
+    for (const auto &saved : {reset, invalid, failed, busy}) still_recorded(saved);
+    loss_diagnostics::event missing;
+    require(!query_depth_observation_loss(0, missing) &&
+      !query_depth_observation_loss(recovered_revision + 1, missing) &&
+      !query_depth_observation_loss(UINT64_MAX, missing) && depth_observation_revision() == recovered_revision,
+      "Missing diagnostic revision borrowed another event or changed source authority");
+    require(!enabled() && source_enabled(), "Loss diagnostics enabled the optional full probe during recovery");
   }
 
   void test_evaluation_v1() {
@@ -2124,9 +2584,9 @@ namespace {
       const bool nonblocking = completed.load(std::memory_order_acquire);
       guard.release();
       reader.join();
-      require(nonblocking && !queried && contended_status == frame_generation_query_status::busy &&
-          !contended_snapshot.known && !contended_snapshot.epoch,
-        "Contended FG query blocked or hid its busy status");
+      require(nonblocking && queried && contended_status == frame_generation_query_status::observed &&
+          contended_snapshot.known && contended_snapshot.epoch == fg.epoch && contended_snapshot.sequence == fg.sequence,
+        "Metadata writer hid or mutated the last complete FG publication");
       selected = policy.update(contended_status, contended_snapshot);
       require(selected.require_frame_generation && selected.epoch == fg.epoch && selected.viewport == fg.viewport &&
           policy.generated_frames() == fg.generated_frames,
@@ -2150,6 +2610,11 @@ namespace {
         "Runtime policy reset retained an old FG requirement");
     }
     const auto before_evaluations = testing::counts().evaluations;
+    const auto before_reader_loss = depth_observation_revision();
+    const auto before_reader_drops = testing::counts().dropped;
+    observation_guard immutable_reader(fixture_lock::records_shared);
+    require(set_options(view, options) == 0 && query_frame_generation(view.value, fg) && fg.enabled,
+      "Pinned metadata reader blocked fresh FG options");
     opaque_token token; std::uint32_t numeric = 41; mint(token, &numeric);
     auto constants = modern_camera();
     constants.common.jitter_offset[0] = .25f; constants.common.jitter_offset[1] = -.375f;
@@ -2173,6 +2638,9 @@ namespace {
         normalized.jitter.supplied && normalized.jitter.x == .25f && normalized.jitter.y == -.375f &&
         normalized.jitter.width == 1920 && normalized.jitter.height == 1080,
       "FG precision transform/frame identity/lifetime normalization is incorrect");
+    immutable_reader.release();
+    require(depth_observation_revision() == before_reader_loss && testing::counts().dropped == before_reader_drops,
+      "Pinned metadata reader invalidated FG options/camera/synchronous tag capture");
     const auto inverse_distance = [](const sunshine_scene_depth::frame &value, double raw) {
       return (raw * value.projection.raw_scale + value.projection.raw_bias - value.projection.depth_offset) / value.projection.depth_scale;
     };
@@ -2536,6 +3004,52 @@ static void test_call_trace_only(bool modern) {
 
 int main(int argc, char **argv) {
   try {
+    if (argc == 2 && std::strcmp(argv[1], "--metadata-callback-bench") == 0) {
+      benchmark_metadata_callbacks();
+      return 0;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--metadata-reader-isolation") == 0) {
+      test_metadata_reader_isolation();
+      std::puts("PASS published reader cannot lose camera/tag/evaluation callbacks");
+#ifndef SUNSHINE_STREAMLINE_PROBE_LEGACY_CONTROL
+      test_first_local_raw_entry();
+      test_pinned_metadata_lifecycle();
+      test_token_reader_and_storage_pressure();
+      std::puts("PASS first local raw entry, pinned lifecycle and token reader/storage boundaries");
+#endif
+      return 0;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--token-lock-isolation") == 0) {
+      bool passed = true;
+      for (bool shared : {false, true}) {
+        const auto name = shared ? "shared records lock" : "exclusive records lock";
+        try {
+          test_token_records_independence(shared);
+          std::printf("PASS token registration independent of %s\n", name);
+        }
+        catch (const std::exception &error) {
+          std::fprintf(stderr, "FAIL %s: %s\n", name, error.what());
+          passed = false;
+        }
+      }
+      try {
+        test_token_contention_and_remint();
+        std::puts("PASS genuine token contention and same-address remint remain fail closed");
+      }
+      catch (const std::exception &error) {
+        std::fprintf(stderr, "FAIL token contention/remint: %s\n", error.what());
+        passed = false;
+      }
+      try {
+        test_pending_token_lifecycle();
+        std::puts("PASS pending token callback cannot publish across shutdown/reinitialization");
+      }
+      catch (const std::exception &error) {
+        std::fprintf(stderr, "FAIL pending token lifecycle: %s\n", error.what());
+        passed = false;
+      }
+      return passed ? 0 : 1;
+    }
     if (argc == 3 && std::strcmp(argv[1], "--inspect-version") == 0) {
       wchar_t path[32768]{};
       require(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, argv[2], -1, path, static_cast<int>(std::size(path))) > 0,
@@ -2584,6 +3098,17 @@ int main(int argc, char **argv) {
     std::puts("PASS default-on lightweight source nomination, no selected-depth dependency, lifetime ABA, freshness, loss and viewport gates");
     test_source_lifecycle_contention();
     std::puts("PASS bounded lifecycle lock contention preserves existing resources, records destruction and rejects queued old epochs");
+    test_token_records_independence(false);
+    test_token_records_independence(true);
+    test_token_contention_and_remint();
+    test_pending_token_lifecycle();
+    test_metadata_reader_isolation();
+#ifndef SUNSHINE_STREAMLINE_PROBE_LEGACY_CONTROL
+    test_first_local_raw_entry();
+    test_pinned_metadata_lifecycle();
+    test_token_reader_and_storage_pressure();
+#endif
+    std::puts("PASS camera-table readers/writers cannot lose token registration; genuine token contention and remint still reject stale source identity");
     test_v1_forwarding();
     std::puts("PASS v1 real-hook forwarding and success-only capture");
     test_v2_forwarding();
@@ -2605,6 +3130,9 @@ int main(int argc, char **argv) {
     test_last_error(false);
     test_last_error(true);
     std::puts("PASS v1/v2 incoming/outgoing LastError on success and failure");
+    test_depth_observation_loss_diagnostics(false);
+    test_depth_observation_loss_diagnostics(true);
+    std::puts("PASS source-only v1/v2 exact-revision reset, invalid camera, SDK failure and lock contention causes preserve forwarding and source recovery");
     test_evaluation_v1();
     std::puts("PASS v1 evaluation evidence, exact frame history, copy isolation and fail-closed recovery");
     test_scene_feedback(false);

@@ -7,7 +7,7 @@
 
 // Relative controls for the selected depth/color pair. No camera matrices,
 // meters or final-color registration are recovered. Whole-viewport extrema
-// supply a tracked midpoint screen plane; the full-image maximum supplies
+// supply an independently tracked screen plane; the full-image maximum supplies
 // its independent gain reference. Ratios cancel positive multiplicative units,
 // not unknown additive offsets in an undeclared depth encoding.
 // Unknown encoding changes remain a limitation.
@@ -84,6 +84,8 @@ namespace sunshine_raw_scene {
     sunshine_scene_gain::depth_range depth_statistics{};
     bool has_depth_statistics{};
     double target_t0{};
+    float ui_midpoint_q{};
+    double target_ui_midpoint_q{};
   };
 
   class policy {
@@ -322,6 +324,8 @@ namespace sunshine_raw_scene {
       out.limited = gain_.limited();
       out.has_depth_statistics = gain_.depth_statistics(out.depth_statistics);
       out.target_t0 = gain_.target_zero();
+      out.ui_midpoint_q = gain_.ui_midpoint();
+      out.target_ui_midpoint_q = gain_.target_ui_midpoint();
       return out;
     }
 

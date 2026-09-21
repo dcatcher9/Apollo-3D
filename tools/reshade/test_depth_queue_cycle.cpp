@@ -186,6 +186,10 @@ namespace {
     capture::packet packet;
     capture::capture_diagnostic acquired;
     const bool metadata = capture::acquire(gpu.consumer.native(), 1, packet, &acquired);
+    require(acquired.source_tick_ms == input.tick && acquired.selection_tick_ms >= input.tick &&
+      acquired.newest_view_tick_ms >= input.tick && acquired.newest_view_tick_ms <= acquired.selection_tick_ms &&
+      acquired.active_view_count == 1,
+      "Acquisition diagnostics lost the source/view age at the actual selection boundary");
     require(acquired.submitted && acquired.success && acquired.producer_recording_retired &&
       acquired.producer_completion_valid && acquired.producer_completed < acquired.producer_fence,
       "Fixture did not reach a valid immutable-but-pending foreign-queue snapshot");
@@ -498,6 +502,229 @@ namespace {
     }
   };
 
+  enum class foreign_allocation { ngx, generic_preservation };
+  enum class reclamation_case { consumed, completed, pending, missing, failed };
+
+  const char *name(foreign_allocation value) {
+    return value == foreign_allocation::ngx ? "NGX" : "Generic preservation";
+  }
+  const char *name(reclamation_case value) {
+    switch (value) {
+      case reclamation_case::consumed: return "consumed head";
+      case reclamation_case::completed: return "unconsumed completed head";
+      case reclamation_case::pending: return "pending successor";
+      case reclamation_case::missing: return "missing successor";
+      case reclamation_case::failed: return "failed successor";
+    }
+    return "unknown";
+  }
+
+  void run_foreign_reclamation(foreign_allocation allocation, reclamation_case scenario) {
+    // Release every packet and retire both recordings before the foreign call.
+    // Otherwise a consumer lease can accidentally hide pool reclamation bugs.
+    constexpr unsigned width = 64, height = 64;
+    com_ptr<ID3D12DescriptorHeap> descriptors;
+    com_ptr<ID3D12Resource> generic_source;
+    fixture gpu(width, height, true);
+    D3D12_DESCRIPTOR_HEAP_DESC heap{};
+    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap.NumDescriptors = 2;
+    checked(gpu.device->CreateDescriptorHeap(&heap, IID_ID3D12DescriptorHeap,
+      reinterpret_cast<void **>(descriptors.put())), "Create reclamation DSV heap");
+    D3D12_DEPTH_STENCIL_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    const auto source_dsv = descriptors->GetCPUDescriptorHandleForHeapStart();
+    gpu.device->CreateDepthStencilView(gpu.source.value, &view, source_dsv);
+    auto generic_dsv = source_dsv;
+    generic_dsv.ptr += gpu.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    if (allocation == foreign_allocation::generic_preservation) {
+      D3D12_HEAP_PROPERTIES memory{};
+      memory.Type = D3D12_HEAP_TYPE_DEFAULT;
+      const auto description = gpu.source->GetDesc();
+      checked(gpu.device->CreateCommittedResource(&memory, D3D12_HEAP_FLAG_NONE, &description,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, nullptr, IID_ID3D12Resource,
+        reinterpret_cast<void **>(generic_source.put())), "Create unrelated Generic depth source");
+      gpu.device->CreateDepthStencilView(generic_source.value, &view, generic_dsv);
+    }
+
+    capture::input input;
+    input.provider = sunshine_scene_depth::provider_kind::streamline;
+    input.epoch = 47; input.sequence = 1; input.viewport = 1;
+    input.source_id = (1ull << 63) | input.viewport;
+    input.frame_generation_input = true;
+    input.observation_revision = 7; input.feedback.revision = 8;
+    input.resource = {gpu.source.native(), width, height, {0, 0, width, height}};
+    input.native_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    input.proof = sunshine_scene_depth::state_proof::observed_nonzero;
+    input.valid_until = sunshine_scene_depth::lifetime::at_call;
+    input.force_snapshot = true;
+    input.source = capture::retain_source(gpu.source.native());
+    input.source_present_generation = capture::source_present_generation(input.source);
+    require(bool(input.source), "Retain reclamation source");
+    const capture::selection_policy fg{true, input.epoch, input.viewport};
+    D3D12_RESOURCE_STATES source_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    UINT64 producer_sequence{}, consumer_sequence{};
+    const auto record = [&](capture::input value, float depth, bool successful = true) {
+      if (source_state != D3D12_RESOURCE_STATE_DEPTH_WRITE)
+        transition(gpu.producer_commands.value, gpu.source.value, source_state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+      gpu.producer_commands->ClearDepthStencilView(source_dsv,
+        D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, depth, 17, 0, nullptr);
+      transition(gpu.producer_commands.value, gpu.source.value, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      source_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      value.tick = GetTickCount64();
+      capture::record_diagnostic diagnostic;
+      const auto ticket = capture::nominate_evaluation(gpu.producer_commands.native(), value, UINT64_MAX, &diagnostic);
+      require(ticket && diagnostic.result == capture::status::recorded, "Record reclamation snapshot");
+      capture::finish(ticket, successful);
+      return ticket;
+    };
+    const auto submit = [&] {
+      checked(gpu.producer_commands->Close(), "Close reclamation producer");
+      ID3D12CommandList *lists[]{gpu.producer_commands.value};
+      gpu.producer->ExecuteCommandLists(1, lists);
+      checked(gpu.producer->Signal(gpu.producer_done.value, ++producer_sequence), "Fence reclamation producer");
+      require(wait_until(gpu.producer_done.value, producer_sequence, 5000), "Reclamation producer did not finish");
+      checked(gpu.producer_allocator->Reset(), "Reset retired reclamation producer allocator");
+      checked(gpu.producer_commands->Reset(gpu.producer_allocator.value, nullptr), "Retire reclamation producer recording");
+    };
+    transition(gpu.consumer_commands.value, gpu.destination.value, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+      D3D12_RESOURCE_STATE_COPY_DEST);
+    const auto submit_consumer = [&] {
+      checked(gpu.consumer_commands->Close(), "Close reclamation consumer");
+      ID3D12CommandList *lists[]{gpu.consumer_commands.value};
+      gpu.consumer->ExecuteCommandLists(1, lists);
+      checked(gpu.consumer->Signal(gpu.consumer_done.value, ++consumer_sequence), "Fence reclamation consumer");
+      require(wait_until(gpu.consumer_done.value, consumer_sequence, 5000), "Reclamation consumer did not finish");
+      checked(gpu.consumer_allocator->Reset(), "Reset retired reclamation consumer allocator");
+      checked(gpu.consumer_commands->Reset(gpu.consumer_allocator.value, nullptr), "Retire reclamation consumer recording");
+    };
+    const auto consume = [&](capture::packet &packet, UINT64 present, float expected) {
+      plane_readback bytes;
+      require(capture::copy_current(gpu.consumer_commands.native(), packet, gpu.destination.native(),
+        D3D12_RESOURCE_STATE_COPY_DEST), "Copy surviving SL snapshot");
+      capture::complete_frame(packet, present);
+      transition(gpu.consumer_commands.value, gpu.destination.value, D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_COPY_SOURCE);
+      bytes.record(gpu.device.value, gpu.consumer_commands.value, gpu.destination.value, 0);
+      transition(gpu.consumer_commands.value, gpu.destination.value, D3D12_RESOURCE_STATE_COPY_SOURCE,
+        D3D12_RESOURCE_STATE_COPY_DEST);
+      submit_consumer();
+      bytes.verify(width, false, [=](UINT, UINT) { return expected; }, "Foreign capture replaced SL depth bytes");
+      packet = {};
+    };
+    std::uint64_t foreign_sequence{};
+    D3D12_RESOURCE_STATES generic_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    const auto allocate_foreign = [&] {
+      if (allocation == foreign_allocation::ngx) {
+        auto foreign = input;
+        foreign.provider = sunshine_scene_depth::provider_kind::ngx;
+        foreign.frame_generation_input = false; foreign.force_snapshot = false;
+        foreign.valid_until = sunshine_scene_depth::lifetime::until_present;
+        foreign.source_id = 51; foreign.sequence = ++foreign_sequence;
+        record(foreign, .875f);
+      } else {
+        // Use a distinct physical source and the real before-clear API. Drop
+        // its CPU lease, execute its GPU copy, then retire the recording before
+        // checking SL. The pending SL successor remains on the producer list.
+        if (generic_state != D3D12_RESOURCE_STATE_DEPTH_WRITE)
+          transition(gpu.consumer_commands.value, generic_source.value, generic_state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        gpu.consumer_commands->ClearDepthStencilView(generic_dsv,
+          D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, .875f, 29, 0, nullptr);
+        transition(gpu.consumer_commands.value, generic_source.value, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        generic_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        capture::record_diagnostic diagnostic;
+        auto ticket = capture::record_preserved(gpu.consumer_commands.native(), generic_source.native(),
+          generic_state, &diagnostic);
+        require(bool(ticket) && diagnostic.result == capture::status::recorded && ticket.texture != generic_source.native(),
+          "Record unrelated Generic preservation snapshot");
+        ticket = {};
+        submit_consumer();
+      }
+      sunshine_scene_depth::provider_kind provider{};
+      std::uint64_t source_id{};
+      require(capture::provider_identity(gpu.consumer.native(), provider, source_id) &&
+        provider == input.provider && source_id == input.source_id,
+        "Foreign allocation changed the established SL provider identity");
+    };
+
+    const auto first_ticket = record(input, .125f);
+    submit();
+    capture::packet first;
+    require(capture::acquire(gpu.consumer.native(), 1, first, nullptr, fg) && first.pixel_ready &&
+      first.capture_id == first_ticket, "Establish SL FG before foreign reclamation");
+    consume(first, 1, .125f);
+    std::uint64_t expected_ticket = first_ticket;
+    const bool completed_successor = scenario != reclamation_case::consumed;
+    const bool gap = scenario == reclamation_case::missing || scenario == reclamation_case::failed;
+    if (completed_successor) {
+      input.sequence = 2;
+      expected_ticket = record(input, .25f);
+      submit();
+    }
+    if (scenario == reclamation_case::pending || gap) {
+      input.sequence = 3;
+      if (scenario == reclamation_case::missing)
+        capture::begin_evaluation(input.epoch, input.sequence, input.viewport, input.provider, input.source_id);
+      else record(input, .5f, scenario != reclamation_case::failed); // New SL input remains unsubmitted.
+    }
+    allocate_foreign();
+
+    capture::packet selected;
+    capture::capture_diagnostic diagnostic;
+    const bool acquired = capture::acquire(gpu.consumer.native(), 2, selected, &diagnostic, fg);
+    std::printf("foreign reclamation %s / %s: available=%d ready=%d selection=%s capture=%llu expected=%llu repeated=%d\n",
+      name(allocation), name(scenario), int(acquired), int(selected.pixel_ready),
+      capture::name(diagnostic.selection), static_cast<unsigned long long>(diagnostic.capture_id),
+      static_cast<unsigned long long>(expected_ticket), int(diagnostic.repeated_frame));
+    if (gap) {
+      require(!acquired && !selected.pixel_ready && selected.capture_id != expected_ticket &&
+        !diagnostic.repeated_frame && !diagnostic.pending_frame &&
+        diagnostic.provider == input.provider && diagnostic.epoch == input.epoch &&
+        diagnostic.source_id == input.source_id && diagnostic.viewport == input.viewport,
+        "Foreign allocation resurrected completed SL pixels across a missing/failed head");
+      // Acquiring the known gap revokes earlier admission. A later pending
+      // head plus another unrelated allocation must not undo that boundary.
+      input.sequence = 4;
+      record(input, .625f);
+      allocate_foreign();
+      capture::packet after_gap;
+      capture::capture_diagnostic after_gap_diagnostic;
+      capture::acquire(gpu.consumer.native(), 3, after_gap, &after_gap_diagnostic, fg);
+      require(!after_gap.pixel_ready && after_gap.capture_id != expected_ticket &&
+        !after_gap_diagnostic.repeated_frame && !after_gap_diagnostic.consumed_completed_capture &&
+        after_gap_diagnostic.provider == input.provider && after_gap_diagnostic.epoch == input.epoch &&
+        after_gap_diagnostic.source_id == input.source_id && after_gap_diagnostic.viewport == input.viewport &&
+        after_gap_diagnostic.sequence == input.sequence,
+        "Foreign allocation let a pending SL successor resurrect pre-gap pixels");
+    } else if (completed_successor) {
+      require(acquired && selected.pixel_ready && selected.capture_id == expected_ticket &&
+        selected.metadata.provider == sunshine_scene_depth::provider_kind::streamline &&
+        selected.metadata.epoch == input.epoch && selected.metadata.source_id == input.source_id &&
+        selected.metadata.viewport == input.viewport && selected.metadata.sequence == 2 &&
+        selected.metadata.observation_revision == input.observation_revision &&
+        selected.metadata.feedback.revision == input.feedback.revision,
+        "Foreign capture reclaimed the latest completed SL FG snapshot");
+      consume(selected, 2, .25f);
+    } else {
+      // The selector can report completed_not_older after identifying this
+      // already-consumed head. Reuse consumes its explicit identity/repeated
+      // evidence, not the diagnostic selection-reason label.
+      require(!acquired && !selected.pixel_ready && diagnostic.repeated_frame && diagnostic.capture_id == expected_ticket &&
+        diagnostic.provider == input.provider && diagnostic.epoch == input.epoch &&
+        diagnostic.source_id == input.source_id && diagnostic.viewport == input.viewport && diagnostic.sequence == 1 &&
+        diagnostic.finished && diagnostic.success && diagnostic.submitted && !diagnostic.invalid &&
+        diagnostic.failure == capture::capture_failure::none,
+        "Foreign capture erased the established SL FG nomination authority");
+    }
+    // Execute and retire the remaining NGX/SL recording only after checking
+    // pending-head behavior. No outstanding recording or lease masks reclaim.
+    submit();
+    gpu.drain();
+    std::printf("PASS foreign reclamation: %s / %s preserves SL authority and the gap boundary\n", name(allocation), name(scenario));
+  }
+
   void run_content(unsigned width, unsigned height) {
     require(width >= 16 && height >= 16 && width <= 8192 && height <= 8192, "Content size must be between 16 and 8192 pixels");
     // Declare resources before the fixture so exceptional cleanup drains the
@@ -609,14 +836,28 @@ namespace {
 int main(int argc, char **argv) {
   const bool expect_cycle = argc == 2 && std::strcmp(argv[1], "--expect-cycle") == 0;
   const bool pipeline = argc == 2 && std::strcmp(argv[1], "--pipeline") == 0;
+  const bool reclamation = argc == 2 && std::strcmp(argv[1], "--foreign-reclaim") == 0;
   const bool content = (argc == 2 || argc == 4) && std::strcmp(argv[1], "--content") == 0;
-  if ((!content && argc > 2) || (argc == 2 && !expect_cycle && !pipeline && !content)) {
-    std::fprintf(stderr, "Usage: %s [--expect-cycle|--pipeline|--content [width height]]\n", argv[0]);
+  if ((!content && argc > 2) || (argc == 2 && !expect_cycle && !pipeline && !content && !reclamation)) {
+    std::fprintf(stderr, "Usage: %s [--expect-cycle|--pipeline|--foreign-reclaim|--content [width height]]\n", argv[0]);
     return 2;
   }
   try {
     if (content) {
       run_content(argc == 4 ? unsigned(std::stoul(argv[2])) : 64, argc == 4 ? unsigned(std::stoul(argv[3])) : 64);
+    } else if (reclamation) {
+      unsigned failures = 0;
+      for (const auto allocation : {foreign_allocation::ngx, foreign_allocation::generic_preservation}) {
+        for (const auto scenario : {reclamation_case::consumed, reclamation_case::completed, reclamation_case::pending,
+          reclamation_case::missing, reclamation_case::failed}) {
+          try { run_foreign_reclamation(allocation, scenario); }
+          catch (const std::exception &error) {
+            ++failures;
+            std::fprintf(stderr, "FAIL foreign reclamation %s / %s: %s\n", name(allocation), name(scenario), error.what());
+          }
+        }
+      }
+      if (failures) return 1;
     } else if (pipeline) {
       for (const auto scenario : {pipeline_case::recorded, pipeline_case::submitted, pipeline_case::failed,
         pipeline_case::missing, pipeline_case::observation_reset, pipeline_case::feedback_reset,

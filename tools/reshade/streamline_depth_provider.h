@@ -5,6 +5,7 @@
 #include "depth_presentation_stats.h"
 #include "depth_moments.h"
 #include "streamline_depth_capture.h"
+#include "depth_cache_update.h"
 #include <array>
 
 namespace sunshine_depth { struct sample_result; }
@@ -63,44 +64,6 @@ namespace sunshine_streamline::provider {
     source_description current, last_valid;
     sunshine_depth_stats::presentation_statistics presentations;
   };
-  // Authorizes only the existing private display depth for ONE subsequent
-  // native presentation. The newer API snapshot must be successful and submitted,
-  // but may still await recording retirement or GPU completion. Neither makes
-  // the previous private display copy unsafe; unknown/missing input never holds.
-  inline bool reuse_pending_ngx(const sunshine_depth::frame_depth &previous,
-      std::uint64_t previous_capture, std::uint32_t previous_format,
-      const depth_capture::packet &pending, const depth_capture::capture_diagnostic &current,
-      std::uint64_t present, std::uint64_t now) {
-    const auto &before = previous.provided;
-    const auto &next = pending.metadata;
-    const auto &a = before.projection;
-    const auto &b = next.projection;
-    return previous.ready && previous_capture && previous.frame_index && present > previous.frame_index &&
-      present - previous.frame_index == 1 && before.tick && now >= before.tick &&
-      now - before.tick < sunshine_scene_depth::maximum_source_age_ms &&
-      before.provider == sunshine_scene_depth::provider_kind::ngx && !before.frame_generation_input &&
-      next.provider == before.provider && !next.frame_generation_input &&
-      before.epoch && before.source_id && before.sequence && next.epoch == before.epoch &&
-      next.source_id == before.source_id && next.viewport == before.viewport && next.sequence > before.sequence &&
-      next.tick >= before.tick && now >= next.tick &&
-      next.observation_revision == before.observation_revision &&
-      before.feedback.revision && next.feedback.revision == before.feedback.revision &&
-      !before.feedback.reset && !next.feedback.reset &&
-      a.supplied == b.supplied && a.direction_supplied == b.direction_supplied && a.reversed == b.reversed &&
-      a.depth_offset == b.depth_offset && a.depth_scale == b.depth_scale && a.raw_scale == b.raw_scale && a.raw_bias == b.raw_bias &&
-      pending.width == previous.width && pending.height == previous.height && pending.format == previous_format &&
-      next.resource.kind == before.resource.kind && pending.area.left == previous.x && pending.area.top == previous.y &&
-      pending.area.width == previous.active_width && pending.area.height == previous.active_height &&
-      !pending.shared_preservation && !pending.pixel_ready && pending.capture_id &&
-      current.result == depth_capture::status::submitted && current.finished && current.success && current.submitted &&
-      !current.invalid && current.failure == depth_capture::capture_failure::none &&
-      current.selection == depth_capture::selection_reason::completed_already_consumed &&
-      current.consumed_completed_capture == previous_capture && current.capture_id == pending.capture_id &&
-      current.provider == next.provider && current.epoch == next.epoch && current.source_id == next.source_id &&
-      current.sequence == next.sequence && current.viewport == next.viewport &&
-      current.producer_completion_valid && current.producer_fence &&
-      (!current.producer_recording_retired || current.producer_completed < current.producer_fence);
-  }
   void initialize(reshade::api::effect_runtime *runtime);
   void destroy(reshade::api::effect_runtime *runtime);
   void reload(reshade::api::effect_runtime *runtime);

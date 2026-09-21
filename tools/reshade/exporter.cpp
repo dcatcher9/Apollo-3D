@@ -16,6 +16,7 @@
 #include "game3d_renderer.h"
 #include "game3d_debug_dump.h"
 #include "game3d_ui_mask.h"
+#include "game3d_capture_diagnostic.h"
 #include "diagnostic_log_gate.h"
 #include "src/reshade_bridge_protocol.h"
 
@@ -469,6 +470,7 @@ namespace {
     float admitted_strength = sunshine_game3d::default_strength;
     std::array<float, 2> projection{}, zero{}, raw_range{0.f, 1.f};
     std::array<float, 4> rect{0.f, 0.f, 1.f, 1.f};
+    sunshine_game3d::ui_plane_parameters ui_plane;
     sunshine_game3d::automatic_status ui;
   };
   struct frame_decision_t {
@@ -508,6 +510,7 @@ namespace {
     // the native depth lease ends. GPU handles here are never historical state.
     sunshine_depth::frame_depth diagnostic_depth;
     std::string diagnostic_ui_source;
+    std::string diagnostic_ui_capture_attempt;
     bool diagnostic_armed = false;
     api::effect_texture_variable texture {};
     std::string effect_name;
@@ -718,6 +721,22 @@ namespace {
         });
         source_alpha.retained_alpha_ready = alpha_view.handle != 0;
       }
+      sunshine_game3d::ui_mask::diagnostic_snapshot alpha_diagnostic;
+      const bool have_alpha_diagnostic = source_alpha.requested && source_alpha.fg_active() &&
+        sunshine_game3d::ui_mask::query_diagnostic(reinterpret_cast<std::uint64_t>(runtime), alpha_diagnostic);
+      if (have_alpha_diagnostic && alpha_diagnostic.latest_boundary.source.sequence) {
+        using input_state = sunshine_game3d::source_alpha_input_state;
+        source_alpha.input_state = input_state::seen;
+        if (alpha_diagnostic.record_completed) {
+          const auto result = alpha_diagnostic.record.result;
+          if (result == sunshine_streamline::depth_capture::status::conflicting_state)
+            source_alpha.input_state = input_state::state_conflict;
+          else if (result != sunshine_streamline::depth_capture::status::recorded)
+            source_alpha.input_state = input_state::rejected;
+        }
+        if (alpha_diagnostic.sdk_result_known && !alpha_diagnostic.sdk_successful)
+          source_alpha.input_state = input_state::rejected;
+      }
       // Publish what this render actually consumes, not the saved preference or
       // a later SDK observation. No RGB from the retained input is displayed.
       bool rendered = false;
@@ -733,6 +752,24 @@ namespace {
         p.convergence = scene.zero; p.jitter = proof.frame.jitter.offset; p.depth_rect = scene.rect;
         proof.frame.source_alpha = source_alpha;
         proof.diagnostic_ui_source.clear();
+        proof.diagnostic_ui_capture_attempt.clear();
+        if (diagnostic_owner && have_alpha_diagnostic) {
+          const auto &wanted = alpha_diagnostic.wanted;
+          const auto &boundary = alpha_diagnostic.latest_boundary;
+          const auto &input = boundary.source;
+          proof.diagnostic_ui_capture_attempt = nlohmann::json{
+            {"meaning", "Latest live real-input attempt observed at this render; independent of any retained alpha actually consumed. No generated-frame pairing is implied."},
+            {"request", {{"epoch", wanted.epoch}, {"revision", wanted.revision}, {"viewport", wanted.viewport},
+              {"device_identity", wanted.device_identity}, {"width", wanted.width}, {"height", wanted.height}}},
+            {"input_observed", input.sequence != 0}, {"sequence", input.sequence}, {"tick_ms", input.tick},
+            {"source_native", input.resource.native}, {"command", boundary.command}, {"tag_scope", boundary.tag_scope},
+            {"record_attempted", alpha_diagnostic.record_attempted},
+            {"record_completed", alpha_diagnostic.record_completed},
+            {"sdk_success", alpha_diagnostic.sdk_result_known ? nlohmann::json(alpha_diagnostic.sdk_successful) : nlohmann::json(nullptr)},
+            {"capture_diagnostic", alpha_diagnostic.record_completed ?
+              sunshine_game3d::capture_diagnostic_json(alpha_diagnostic.record) : nlohmann::json(nullptr)}
+          }.dump();
+        }
         if (diagnostic_owner && source_alpha.retained_alpha_ready) {
           const auto &origin = alpha_selection.origin;
           const auto &input = origin.source;
@@ -750,7 +787,7 @@ namespace {
             {"producer_completed", copy.producer_completed}, {"producer_recording_retired", copy.producer_recording_retired}
           }.dump();
         }
-        rendered = proof.frame.prepared && renderer->render(commands, backbuffer, proof.borrowed_depth, p, source_alpha.effective(), alpha_view);
+        rendered = proof.frame.prepared && renderer->render(commands, backbuffer, proof.borrowed_depth, p, source_alpha.effective(), alpha_view, scene.ui_plane);
         proof.native_output = rendered ? renderer->output() : api::resource{};
       }
       if (rendered) frame(runtime, {}, commands, rtv, true);
@@ -766,6 +803,7 @@ namespace {
         proof.borrowed_depth = {};
         proof.diagnostic_depth = {};
         proof.diagnostic_ui_source.clear();
+        proof.diagnostic_ui_capture_attempt.clear();
         proof.diagnostic_armed = false;
       }
     }
@@ -1156,6 +1194,10 @@ namespace {
         scene.ui.scale.has_zero = state.calibrated;
         scene.ui.scale.target_zero_inverse = state.target_t0;
         scene.ui.scale.zero_target_available = state.has_depth_statistics;
+        scene.ui.scale.ui_midpoint_inverse = state.ui_midpoint_q;
+        scene.ui.scale.target_ui_midpoint_inverse = state.target_ui_midpoint_q;
+        scene.ui.scale.has_ui_midpoint = state.calibrated;
+        scene.ui.scale.ui_midpoint_target_available = state.has_depth_statistics;
         scene.ui.scale.gain_below_target = state.limited;
         scene.ui.scale.reference_inverse = state.depth_statistics.maximum;
         scene.ui.scale.mean_inverse = state.depth_statistics.mean;
@@ -1164,6 +1206,9 @@ namespace {
         scene.ui.scale.maximum_inverse = state.depth_statistics.maximum;
         scene.ui.scale.has_depth_statistics = state.has_depth_statistics;
         scene.ui.scale.mean_square_inverse = state.depth_statistics.mean_square;
+        scene.ui.scale.has_centered_depth_statistics = state.depth_statistics.has_centered_moments;
+        scene.ui.scale.mean_contrast_inverse = state.depth_statistics.mean_contrast;
+        scene.ui.scale.mean_contrast_square_inverse = state.depth_statistics.mean_contrast_square;
         scene.ui.scale.depth_pixel_count = state.depth_statistics.pixel_count;
         scene.ui.scale.depth_tiles_x = state.depth_statistics.tiles_x;
         scene.ui.scale.depth_tiles_y = state.depth_statistics.tiles_y;
@@ -1187,6 +1232,8 @@ namespace {
       scene.basis = 1; // Explicitly not recovered camera coefficients.
       scene.projection = {state.shader_A, state.shader_inverseB};
       scene.zero = {state.referenceZPD, state.t0};
+      if (state.calibrated)
+        scene.ui_plane = {sunshine_game3d::ui_plane_mode::depth_midpoint, state.ui_midpoint_q};
       scene.scale = state.H;
       return scene;
     }
@@ -1242,6 +1289,10 @@ namespace {
       scene.ui.scale.has_zero = center.initialized;
       scene.ui.scale.target_zero_inverse = center.target_q0;
       scene.ui.scale.zero_target_available = center.has_depth_statistics;
+      scene.ui.scale.ui_midpoint_inverse = center.ui_midpoint_q;
+      scene.ui.scale.target_ui_midpoint_inverse = center.target_ui_midpoint_q;
+      scene.ui.scale.has_ui_midpoint = center.initialized;
+      scene.ui.scale.ui_midpoint_target_available = center.has_depth_statistics;
       scene.ui.scale.gain_below_target = center.limited;
       scene.ui.scale.reference_inverse = center.depth_statistics.maximum;
       scene.ui.scale.mean_inverse = center.depth_statistics.mean;
@@ -1250,6 +1301,9 @@ namespace {
       scene.ui.scale.maximum_inverse = center.depth_statistics.maximum;
       scene.ui.scale.has_depth_statistics = center.has_depth_statistics;
       scene.ui.scale.mean_square_inverse = center.depth_statistics.mean_square;
+      scene.ui.scale.has_centered_depth_statistics = center.depth_statistics.has_centered_moments;
+      scene.ui.scale.mean_contrast_inverse = center.depth_statistics.mean_contrast;
+      scene.ui.scale.mean_contrast_square_inverse = center.depth_statistics.mean_contrast_square;
       scene.ui.scale.depth_pixel_count = center.depth_statistics.pixel_count;
       scene.ui.scale.depth_tiles_x = center.depth_statistics.tiles_x;
       scene.ui.scale.depth_tiles_y = center.depth_statistics.tiles_y;
@@ -1283,6 +1337,8 @@ namespace {
       scene.ready = ready;
       scene.projection = {coefficients.shader_A, coefficients.inverseB};
       scene.zero = {projection::reference_zpd, center.q0};
+      if (center.initialized)
+        scene.ui_plane = {sunshine_game3d::ui_plane_mode::depth_midpoint, center.ui_midpoint_q};
       scene.raw_range = {coefficients.raw_min, coefficients.raw_max};
       scene.scale = center.K;
     }
@@ -1545,9 +1601,11 @@ namespace {
       LARGE_INTEGER qpc{}; QueryPerformanceCounter(&qpc);
       sunshine_game3d::diagnostic_frame frame;
       frame.parameters = proof.renderer->consumed_parameters();
+      frame.ui_plane = proof.renderer->consumed_ui_plane();
       frame.source_alpha_ui = proof.renderer->consumed_source_alpha_ui();
       frame.source_alpha_decision = proof.frame.source_alpha;
       frame.ui_source_metadata = proof.diagnostic_ui_source;
+      frame.ui_capture_attempt_metadata = proof.diagnostic_ui_capture_attempt;
       frame.scene_status = proof.frame.scene.ui;
       frame.depth = proof.diagnostic_depth;
       frame.resources = proof.renderer->diagnostics();

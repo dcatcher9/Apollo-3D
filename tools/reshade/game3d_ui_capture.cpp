@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_ui_capture.h"
+#include "game3d_capture_diagnostic.h"
 #include "game3d_diagnostic_metadata.h"
 #include "streamline_depth_capture.h"
 #include "../../src/game3d_debug_formats.h"
@@ -18,6 +19,7 @@ namespace sunshine_game3d {
     constexpr unsigned resource_count = sizeof(ui_resources::catalog) / sizeof(ui_resources::catalog[0]);
     struct entry {
       diagnostic::resource_observation observed;
+      diagnostic::stamp record_observation;
       capture::diagnostic_ticket ticket;
       capture::diagnostic_texture pixels;
       capture::record_diagnostic record;
@@ -60,6 +62,7 @@ namespace sunshine_game3d {
         if (!observation.observation.command) { e.status = "no_command_at_observation"; return; }
         if (e.attempts >= 4) { e.status = "attempt_limit"; return; }
         ++e.attempts;
+        e.record_observation = observation.observation;
         capture::input input;
         input.source = capture::retain_source(observation.native, &e.record);
         if (!input.source) { e.status = "source_unavailable"; return; }
@@ -183,6 +186,14 @@ namespace sunshine_game3d {
         {"name", kind.name}, {"semantic", kind.semantic}, {"role", ui_resources::role_name(kind.content)}, {"status", e.status}, {"attempts", e.attempts}, {"transfer_status", "unknown"},
         {"pairing", "Independent API-call snapshot; association with the main color/depth frame is not verified."},
         {"capture_stage", capture::name(e.record.stage)}, {"capture_result", capture::name(e.ticket ? p.result : e.record.result)}, {"failure", capture::name(p.failure)}};
+      if (e.attempts) {
+        auto record = capture_diagnostic_json(e.record);
+        const auto &attempt = e.record_observation;
+        record["attempt"] = e.attempts;
+        record["observation"] = {{"session", attempt.session}, {"epoch", attempt.epoch}, {"sequence", attempt.sequence},
+          {"tick_ms", attempt.tick}, {"viewport", attempt.viewport}};
+        row["capture_diagnostic"] = std::move(record);
+      }
       if (at.session) {
         row["observation"] = {{"session", at.session}, {"epoch", at.epoch}, {"sequence", at.sequence}, {"tick_ms", at.tick}, {"frame_token", hex(at.frame_token)},
           {"frame_numeric", at.numeric_frame ? nlohmann::json(at.frame_numeric) : nlohmann::json(nullptr)}, {"viewport", at.viewport}, {"command", hex(at.command)},

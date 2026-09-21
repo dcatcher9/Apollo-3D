@@ -252,6 +252,9 @@ namespace {
     current.has_zero = true;
     current.target_zero_inverse = 1.;
     current.zero_target_available = true;
+    current.ui_midpoint_inverse = .75f;
+    current.target_ui_midpoint_inverse = 1.;
+    current.has_ui_midpoint = current.ui_midpoint_target_available = true;
     current.mean_square_inverse = .2;
     current.depth_pixel_count = 3072 * 2304;
     current.depth_tiles_x = 28; current.depth_tiles_y = 21;
@@ -260,6 +263,7 @@ namespace {
     check(shown.depth_statistics_valid() && shown.reference_inverse == 2. && shown.mean_inverse == .3 &&
         shown.normalization == 4. && shown.minimum_inverse == 0. &&
         shown.has_zero_target() && shown.zero_inverse == .25f && shown.target_zero_inverse == 1. &&
+        shown.has_ui_midpoint_target() && shown.ui_midpoint_inverse == .75f && shown.target_ui_midpoint_inverse == 1. &&
         shown.reference_inverse != 1. / shown.value && shown.reference_inverse != 1. / shown.target_value,
       "Measured nearest reference was confused with the mean, reciprocal gain or infinite-far endpoint");
 
@@ -275,6 +279,8 @@ namespace {
         shown.mean_inverse == .3 && shown.normalization == 4. &&
         !shown.has_zero_target() && !shown.zero_target_available && shown.target_zero_inverse == 0. &&
         shown.zero_inverse == .25f &&
+        shown.has_ui_midpoint && shown.ui_midpoint_inverse == .75f && !shown.has_ui_midpoint_target() &&
+        !shown.ui_midpoint_target_available && shown.target_ui_midpoint_inverse == 0. &&
         shown.depth_pixel_count == 3072 * 2304 && shown.depth_tiles_x == 28 && shown.mean_square_inverse == .2,
       "Held applied scale acquired statistics from an unapplied frame");
     shown = retain_automatic_scale(shown, {});
@@ -292,6 +298,8 @@ namespace {
         shown.reference_inverse == 0. && shown.minimum_inverse == 0. && shown.maximum_inverse == 0. &&
         shown.mean_inverse == 0. && shown.normalization == 0. &&
         shown.target_zero_inverse == 0. && !shown.zero_target_available && !shown.has_zero_target() &&
+        !shown.has_ui_midpoint && shown.ui_midpoint_inverse == 0.f && !shown.has_ui_midpoint_target() &&
+        !shown.ui_midpoint_target_available && shown.target_ui_midpoint_inverse == 0. &&
         shown.depth_pixel_count == 0 && shown.depth_tiles_x == 0 && shown.depth_tiles_y == 0 && shown.mean_square_inverse == 0.,
       "Pending basis change retained camera statistics as raw statistics");
     check(!retain_automatic_scale({}, pending).depth_statistics_valid(),

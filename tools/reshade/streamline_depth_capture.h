@@ -67,6 +67,22 @@ namespace sunshine_streamline::depth_capture {
     completed_already_consumed, presentation_already_selected, layout_changed,
     completed_not_readable, completed_snapshot, fg_scope_missing, fg_scope_mismatch
   };
+  // Acquisition authority, frozen under the capture lock. Diagnostics may be
+  // omitted or reformatted without changing these source/continuity decisions.
+  // This never authorizes reading pending pixels; packet::pixel_ready and the
+  // normal consumer lease still govern every GPU read.
+  struct acquisition_decision {
+    bool source_selected{};
+    sunshine_scene_depth::provider_kind provider{sunshine_scene_depth::provider_kind::streamline};
+    std::uint64_t epoch{}, sequence{}, source_id{}, capture_id{};
+    std::uint32_t viewport{};
+    bool source_valid{}, repeated_frame{}, pending_frame{};
+    // Capture-side proof for the provider's existing one-presentation NGX hold.
+    // Nonzero identifies the exact consumed predecessor; the provider must
+    // still match its private display copy, metadata, shape, age and queue.
+    std::uint64_t pending_ngx_previous_capture{};
+  };
+  // Observation only. Rendering and source reuse consume acquisition_decision.
   struct capture_diagnostic {
     status result{status::unavailable};
     capture_failure failure{capture_failure::none};
@@ -77,6 +93,10 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t consumed_completed_capture{};
     std::uint64_t capture_id{}, sequence{}, epoch{}, command{}, queue{}, producer_fence{}, retire_fence{};
     std::uint64_t newest_sequence{}; // Can be ahead of the completed API snapshot selected for pixels.
+    // Frozen under the same lock/clock as selection; diagnostics only. A zero
+    // tick is unavailable, never evidence that a source has age zero.
+    std::uint64_t selection_tick_ms{}, newest_view_tick_ms{}, source_tick_ms{};
+    std::uint32_t active_view_count{};
     std::uint64_t requested_queue{}, consumer_queue{};
     std::uint64_t producer_completed{}; // producer_fence is the required value.
     bool producer_completion_valid{}, producer_recording_retired{};
@@ -115,9 +135,13 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t command{}, recording_cookie{}, resource{}, device_identity{}, expected_device_identity{};
     std::uint64_t expected_generation{}, current_generation{};
     std::uint32_t width{}, height{}, format{}, flags{}, native_state{}, observed_state{};
+    // Selected transition/restore basis, distinct from the unchanged raw hint.
+    // Known means admission selected a supported state, not that a copy ran.
+    std::uint32_t copy_state{};
     std::uint32_t dimension{}, mip_levels{}, array_size{}, samples{};
     std::uint32_t command_type{0xffffffffu};
     bool recording_closed{}, recording_invalid{}, render_pass{}, observed{}, blocked{};
+    bool copy_state_known{}, used_observed_state{};
   };
   struct consumer_diagnostic {
     consumer_status result{consumer_status::not_attempted};
@@ -220,11 +244,18 @@ namespace sunshine_streamline::depth_capture {
   // accepted ticket must finish; retain it until acquire or explicit cancel.
   diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value,
     record_diagnostic *diagnostic = nullptr);
+  enum class local_texture_state_policy { source_contract, prefer_observed_recording };
   // Local consumers use the same copy/fence owner, but their retired storage
   // may be reused. These tickets expose no IPC handle. Externally shared dump
   // textures above remain immutable even after the host acknowledges opening.
+  // prefer_observed_recording is restricted to synchronous Streamline FG input
+  // color snapshots. It prefers the known, unblocked, nonzero state on this
+  // exact recording, despite a stale hint. Only absent observation permits a
+  // supported, explicit nonzero declaration compatible with resource flags.
+  // Incomplete/blocked/COMMON evidence never falls back to a declaration.
   diagnostic_ticket record_local_texture(std::uint64_t command, const input &value,
-    record_diagnostic *diagnostic = nullptr);
+    record_diagnostic *diagnostic = nullptr,
+    local_texture_state_policy state_policy = local_texture_state_policy::source_contract);
   void finish_diagnostic_texture(const diagnostic_ticket &ticket, bool successful);
   // Nonblocking: pending work, even on the same queue, is not shareable. Both
   // GPU completion and Reset/destruction of its producing recording are needed
@@ -277,6 +308,10 @@ namespace sunshine_streamline::depth_capture {
   // resolves its current copy separately. Diagnostics retain the pixel status.
   bool acquire(std::uint64_t queue, std::uint64_t present, packet &out, capture_diagnostic *diagnostic = nullptr,
     selection_policy policy = {});
+  // Rendering consumes this explicit decision. The overload above is a
+  // compatibility adapter and computes the same decision without returning it.
+  bool acquire(std::uint64_t queue, std::uint64_t present, packet &out, acquisition_decision &decision,
+    capture_diagnostic *diagnostic = nullptr, selection_policy policy = {});
   // Commit only after the selected snapshot was successfully copied for this
   // effects pass. Nomination/acquisition alone must not consume a frame.
   void complete_frame(const packet &value, std::uint64_t present);
@@ -285,8 +320,8 @@ namespace sunshine_streamline::depth_capture {
   // the registered recording with a queue fence.
   // It is invalid to reuse the packet in another command list without marking
   // that consumer too (or holding ownership through its independent completion
-  // fence, as the sampler does). Pending cross-queue packets require the caller's
-  // explicit immediate-list flush described above; this owner queues only a GPU Wait.
+  // fence, as the sampler does). Pending foreign-queue packets remain unreadable
+  // until producer completion and recording retirement; this adds no GPU wait.
   // Optional diagnostics describe this exact call, not the shared status last
   // written by another producer/consumer thread. They do not alter admission.
   bool mark_consumer(std::uint64_t command, const packet &value, consumer_diagnostic *diagnostic = nullptr);

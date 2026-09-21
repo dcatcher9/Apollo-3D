@@ -20,6 +20,18 @@ it selects the source and does not select another renderer. Image controls live 
 and save automatically in ReShade.ini. The old ray-search renderer, its quality settings and the experimental warp
 selector have been removed. Sources larger than 3840 in either dimension show an explicit warning
 and remain 2D; there is no hidden legacy renderer fallback.
+With Frame Generation, source-alpha UI protection distinguishes missing real-input alpha from
+an observed input whose capture was rejected. It requires a valid completed input mask; generated
+output alpha is never substituted. Its synchronous live Streamline input snapshot prefers a clean,
+supported nonzero state observed on the same command recording. Only a completely absent state
+entry permits fallback to an explicit supported nonzero provider declaration with compatible
+resource flags and declared-state proof. Blocked, unknown, COMMON/zero, split, lost, invalid or
+render-pass state still rejects capture; a source requiring observed-state proof cannot fall back.
+The private copy restores the selected state. Other captures retain their existing declaration
+checks. SourceAlphaUI remains opt-in, RGB remains current and real-input reuse remains bounded;
+entirely white or black input alpha is still honored. The declaration fallback restores the
+original declared-source trust, without independent validation, and its live game/headset
+acceptance is pending. See the [UI protection contract](../../docs/reshade-sbs.md#setup).
 
 Game3D maintains independent stereo gain and screen-plane placement, as described below, with the
 Sunshine renderer, export, HDR handling and stereo settings overlay. Changes are checked
@@ -87,6 +99,16 @@ transfer is labeled unknown unless captured metadata declares or explicitly assu
 resources are diagnostics and do not establish UI classification or frame matching. Host and
 add-on must both support the diagnostic mapping version.
 NGX failures include readable result codes. Successful null and failed query remain separate states.
+The dump records the latest scoped live-alpha capture attempt observed at the render in
+`replay.source_alpha_capture_attempt`, and optional copies carry `capture_diagnostic` state and
+recording provenance. The latest attempt is not proof of a consumed-alpha pairing, and an optional
+copy's rejection does not prove the same live failure: optional tag-53 copies can still reject a
+stale declaration while the guarded live-alpha copy succeeds from observed recording state.
+Diagnostics retain both input states and identify the selected copy state with `copy_state`,
+`copy_state_known` and `used_observed_state`. A declaration fallback has a known copy state and
+`used_observed_state=false`; that is provider provenance, not independent state validation.
+The linked dump contract defines these separate
+evidence scopes; recording diagnostics does not change capture admission or rendering.
 
 1. Install ReShade **6.8 with full add-on support** for the game's actual executable, then close it.
 2. Run the installer from the add-on build/package directory:
@@ -160,38 +182,47 @@ already observed enabled, the panel reports the missing camera data without aski
 again; the existing 3×/higher and artifact guidance still applies. Initial unknown depth status
 does not show this hint, and Sunshine does not change the game's FG setting.
 
-The shared policy initializes an independent stereo gain and zero plane from four non-flat exact
-depth measurements at least 250 ms apart. Each later valid non-flat measurement updates the gain
-target from its nearest depth; the first instruction screen or scene does not establish a permanent
-scale. Gain follows the current target gradually in either direction. A separate per-pixel limit
-bounds rendered parallax while gain adapts. Exact flat depth cannot initialize gain. After
-initialization, positive flat depth can move the zero while holding gain; all-zero depth holds
-both controls. No reset or manual gain adjustment is needed.
-For reconstructed inverse distance `q=1/Z`, the signed field is `0.05*K*(q0-q)`, multiplied
-by the user's strength percentage (`slider/100`). Raw fallback uses the same policy on its
-oriented raw coordinate `t`, with independent gain `H` and zero `t0`. Moving the zero plane
-preserves separation between fixed depths in the unclamped field when gain remains unchanged.
-The gain target is `Ktarget=L/Q`, where Q is the largest decoded inverse depth in the whole
-active image, independent of zero placement. L normalizes for output shape and the full-strength
-parallax limit. Scaling inverse-depth units scales both `(q-q0)` and Q, so their units cancel.
-Applied gain can lag its target during bounded adaptation. The zero starts from the average
-startup range midpoint, then tracks the current midpoint `(qmin+Q)/2`. At fixed gain this target
-minimizes the largest absolute unclamped displacement, independently of depth occupancy. Zero
-tracking uses exponential smoothing and a bound in normalized parallax, without an immediate
-clamp to the observed range. Even one nearest pixel contributes to Q and the midpoint. A persistent
-near outlier can therefore reduce gain, flatten the background and change zero placement;
-smoothing limits sudden global changes, not that eventual tradeoff. During adaptation,
-saturation can reduce depth separation locally.
-The native-depth adapter converts that field to a bounded source-UV displacement before Sunshine's
+The current production policy trials a contrast midpoint for the scene's zero plane, using the
+farthest depth and moments of each pixel's contrast from it. The independent gain still follows
+the nearest depth. Protected UI uses mode 1, `depth_midpoint`, with the independently tracked,
+smoothed inverse-depth midpoint. The shader maps this applied UI depth through the current gain,
+scene zero, strength, stereo blend and per-eye clamp, subject to warp readiness. All protected UI
+shares one plane, but its disparity can vary as the scene and controls change. It is not forced
+ahead of the nearest depth beneath UI coverage. Gain and zero retain their existing
+initialization, bounded temporal tracking and source lifecycle. Exact flat depth cannot initialize
+gain. After initialization, positive flat depth can move the zero while holding gain; all-zero
+depth holds both controls. The first instruction screen or scene does not establish a permanent
+scale. Moving zero preserves separation between fixed depths in the unclamped field when gain
+remains unchanged. No reset or manual gain adjustment is needed.
+
+The [Game3D policy contract](../../docs/reshade-sbs.md#experimental-raw-depth-automation) owns the
+trial formula, centered statistics, initialization, temporal limits, compatibility behavior and
+final per-eye parallax limit for both camera and raw-depth paths. The trial does not detect the
+main subject and remains sensitive to near outliers. With nearest-depth gain adaptation, zero
+tracking can reduce an approaching object's apparent pop-out in a scene with several depth layers. Headset
+acceptance is pending. Historical midpoint and fixed-reference tests do not establish acceptance
+of this trial.
+
+Live midpoint UI dispatches no nearest-covered-depth reduction and records its applied depth in
+the exact 16-byte `sunshine_game3d.ui_parameters.v2` contract. Replay's `--ui-inverse-depth` selects
+mode 1 with an explicit depth. Historical modes 0 (screen/v2), 2 (nearest covered depth with a
+submitted floor/v3) and 3 (maximum front display limit/v4) retain their replay behavior. Mode 2
+alone dispatches the tile/reduction passes. Mode 3 requires
+`#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1` and ignores its inverse-depth word; it is available via
+`--ui-plane front-limit` with a compatible shader. Neither mode 2 nor mode 3 is selected live.
+The 80-byte geometry `b0` ABI and default numeric parallax limit are unchanged.
+
+The sampler covers every texel in the active depth crop, including hardware endpoints, without
+percentile trimming. It obtains tile extrema, then scans each tile again for centered moments
+within the same dispatch. Resources, readback and queue submission remain unchanged; the extra
+texture traversal and reduction add GPU work, so this is not a performance claim. Old uncentered
+moments remain diagnostic. All live geometry samples provide the centered statistics; the
+historical midpoint fallback exists only for fixtures lacking that payload, and an invalid
+supplied payload cannot use it.
+The native-depth adapter converts its field to bounded source-UV displacement before Sunshine's
 vertical/horizontal conditioning and inverse. It does not run the removed ray reconstruction or
 depth-history preparation passes. The [canonical Host contract](../../docs/host-sbs.md) owns the
-conditioning and inverse. The [Game3D policy contract](../../docs/reshade-sbs.md#experimental-raw-depth-automation)
-owns gain initialization, temporal tracking, zero placement and the final per-eye parallax limit.
-An exact GPU reduction scans every texel in the active depth crop, including hardware endpoints;
-there is no percentile trimming. A shared aspect-aware grid (about 576 tiles) supplies one point
-per tile for Generic selection and full per-tile statistics for stereo geometry. The full-pixel
-maximum supplies Q and the extrema supply the zero midpoint. Mean and second moments are retained
-for diagnostics, not used to set gain or zero. No second source scan or GPU wait is added.
+conditioning and inverse.
 Game3D does not force screen-edge parallax to zero. Basic source-coordinate and
 sampler clamps remain; missing offscreen color can therefore repeat the nearest image edge.
 Readbacks are asynchronous, so newly appearing geometry can precede a range update. The renderer's
@@ -203,10 +234,15 @@ multiplicative inverse-depth representations preserve ratio geometry; separate h
 encodings need not match. No percentile clipping is applied to rendered depth.
 
 The always-visible calibration table shows **Nearest reference Q**, **Farthest (q min)**,
-**Zero plane q0**, **Stereo gain K**, and **Normalization L**, with Current/Target columns.
+**Zero plane q0**, **Stereo gain K**, **UI midpoint q**, and **Normalization L**, with Current/Target columns.
 Q and the farthest value are the same accepted measurement's full active-depth extrema, not camera
 clipping planes. These depth values share one inverse-depth coordinate: larger is nearer.
-Gain shows the applied value and target `L/Q`; q0 shows the applied zero and midpoint target.
+Gain shows the applied value and nearest-depth-derived target; q0 shows the applied zero and
+contrast-midpoint target. **UI midpoint q** shows the independently applied UI depth and its
+extrema-midpoint target; live rendering consumes the applied value, not the latest target.
+The [UI protection contract](../../docs/reshade-sbs.md#setup) owns its displacement, timing,
+occlusion limitations and replay constants. UI uses the same current geometry mapping and
+per-eye bound as the scene; it is not a fixed display disparity or recovered physical distance.
 A positive flat scene has a zero target but no gain target. L is captured for
 the render decision's output shape, and `1/K` is not Q. The panel also shows the per-eye parallax
 limit as a percentage of source-image width at the current slider strength.
@@ -214,7 +250,8 @@ Camera mode additionally shows current and target **Zero-plane distance** (recip
 in game units, infinity at zero),
 and the table retains **Conversion scale** and **Conversion offset**. No additional GPU work is
 requested for these rows. Dump 3D includes its captured scene decision's accepted measurements with
-their units, mean, second moment, pixel count, tile layout and zero target; a missing measurement stays null even if
+their units, diagnostic moments, centered statistics, pixel count, tile layout and zero target;
+a missing measurement stays null even if
 the UI displays older values labeled as held. The UI also shows the accepted pixel count and layout.
 Without a matrix, the conversion is labeled **relative depth (assumed infinite far plane)**
 and the zero row displays `t0` in relative raw units. A visible status identifies gain below
@@ -326,6 +363,7 @@ production capture owner and native observer directly:
 ```text
 reshade_depth_queue_cycle_test.exe
 reshade_depth_queue_cycle_test.exe --pipeline
+reshade_depth_queue_cycle_test.exe --foreign-reclaim
 reshade_depth_queue_cycle_test.exe --content 3840 2160
 ```
 
@@ -333,7 +371,12 @@ The default case checks that a pending foreign producer cannot introduce a rever
 dependency, then verifies natural recovery and same-queue admission. `--pipeline` checks admission
 of an unconsumed completed NGX snapshot while its successor is CPU-recorded or GPU-pending, plus
 rejection across failed/missing input, observation/reset revisions, a reset flag, epoch and layout
-changes. `--content [width height]` nominates a full patterned packed D32S8 scene through NGX
+changes. `--foreign-reclaim` retires producer and consumer recordings and releases private
+snapshot leases before allocating an unrelated NGX capture or a Generic preservation copy from
+a separate resource. Its ten cases check that SL FG nomination authority, current depth and
+completed depth beneath a pending successor survive reclamation, while failed/missing input
+still revokes old depth and prevents pre-gap resurrection. Pixel cases use actual GPU readback.
+`--content [width height]` nominates a full patterned packed D32S8 scene through NGX
 while the Generic preservation callback reports availability, then clears that same source after
 the API capture. It checks the snapshot's scene depth byte-for-byte and verifies that depth-plane
 copies preserve both the original and consumer stencil. This is one post-capture-clear scenario;
@@ -352,7 +395,9 @@ reshade_game3d_native_provider_runtime_test.exe <ReShade64.dll> <frozenShaders> 
 It exercises real GPU depth production, capture, sampling and matrix preparation, including
 padded/nonzero-offset rectangles, failed evaluation and recovery. The optional metadata-only
 interposer enables the SL FG 2x case: retained real depth, generated presentations, FG-off
-rejection and fresh SL recovery. It injects no captured pixels, readiness or GPU completion.
+rejection and fresh SL recovery. It also checks repeated holds against the original capture's
+expiry, camera reset, and FG off/on without a fresh capture; none may revive invalidated depth.
+Fresh copies must recover each interval. It injects no captured pixels, readiness or GPU completion.
 Run these functional cases serially when they share resources or output directories; their timing
 is not performance evidence. The effect-based fixtures documented below remain in the repository,
 but their shader-uniform and shared-preservation expectations are historical and do not replace
@@ -1052,7 +1097,7 @@ Projection inputs are synthetic and explicitly trusted; these tests do not valid
 source association. The earlier [fixed-reference evidence](../../cmake-build-reshade/unit-independent-reference-20260917/stereo-reference-README.md)
 is historical. It retains complete-export hashes and a 640×360 failure in the old shader's
 low-resolution ray interpolation. These records predate the current independent-gain and
-bounded midpoint-zero policy and do not validate it.
+contrast-midpoint zero trial and do not validate it.
 The [current-zero shader evidence](../../cmake-build-reshade/zero-plane-reference-20260917/stereo-reference-README.md)
 passed 1080p scRGB and 4K scRGB/PQ, including the independent ratio oracle, complete-export
 unit/encoding parity and different-initial-scene convergence. It is shader/controller evidence;

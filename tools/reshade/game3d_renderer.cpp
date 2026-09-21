@@ -31,12 +31,13 @@ namespace sunshine_game3d {
       return source_override.empty() ? renderer::shader_source() : std::string_view(source_override);
     }
     api::pipeline_layout layout{};
-    enum pass { pq, candidate, vertical, horizontal, eyes, pack, pass_count };
+    enum pass { pq, candidate, vertical, ui_tiles, ui_reduce, horizontal, eyes, pack, pass_count };
     std::array<api::pipeline, pass_count> pipelines{};
     std::array<api::sampler, 3> samplers{};
     api::resource_view null_srv{}, null_uav{};
     struct texture { api::resource resource{}; api::resource_view srv{}, uav{}, rtv{}; };
-    enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field, left, right, packed, ui_source, texture_count };
+    enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field,
+      ui_plane_tiles, ui_plane_resolved, left, right, packed, ui_source, texture_count };
     std::array<texture, texture_count> textures{};
     std::vector<std::pair<api::resource, api::resource_view>> backbuffers;
     api::fence completion{};
@@ -47,9 +48,12 @@ namespace sunshine_game3d {
     ID3DDeviceContextState *previous11 = nullptr;
     bool frame_state = false;
     render_parameters consumed;
+    ui_plane_parameters consumed_plane;
     bool source_alpha_ui = false;
     api::resource consumed_ui_source{};
     bool ui_source_failed = false;
+    bool nearest_ui_supported = false, nearest_ui_rendered = false;
+    bool front_limit_ui_supported = false;
 
     bool idle() const {
       return !pending && !failed && (!completion.handle || device->get_completed_fence_value(completion) >= sequence);
@@ -119,6 +123,8 @@ namespace sunshine_game3d {
     bool initialize(api::effect_runtime *runtime, const api::resource_desc &desc, uint32_t input_color) {
       device = runtime->get_device(); queue = runtime->get_command_queue();
       width = desc.texture.width; height = desc.texture.height; source_format = typed(desc.texture.format); color = input_color;
+      nearest_ui_supported = shader_source().find("#define SUNSHINE_UI_NEAREST_PLANE 1") != std::string_view::npos;
+      front_limit_ui_supported = shader_source().find("#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1") != std::string_view::npos;
       if (!device->create_fence(0, api::fence_flags::none, &completion)) return false;
       if (device->get_api() == api::device_api::d3d12 &&
           (!device->create_resource_view({}, api::resource_usage::shader_resource, api::resource_view_desc(api::format::r32_float), &null_srv) ||
@@ -133,8 +139,8 @@ namespace sunshine_game3d {
       const api::pipeline_layout_param params[]{
         api::constant_range{0, 0, 0, sizeof(render_parameters) / 4, api::shader_stage::all},
         api::descriptor_range{0, 0, 0, 3, api::shader_stage::all, 1, api::descriptor_type::sampler},
-        api::descriptor_range{0, 0, 0, 8, api::shader_stage::all, 1, api::descriptor_type::shader_resource_view},
-        api::descriptor_range{0, 0, 0, 4, api::shader_stage::compute, 1, api::descriptor_type::unordered_access_view},
+        api::descriptor_range{0, 0, 0, 10, api::shader_stage::all, 1, api::descriptor_type::shader_resource_view},
+        api::descriptor_range{0, 0, 0, 6, api::shader_stage::compute, 1, api::descriptor_type::unordered_access_view},
         api::constant_range{0, 1, 0, 4, api::shader_stage::compute}};
       if (!device->create_pipeline_layout(uint32_t(std::size(params)), params, &layout)) return false;
       for (unsigned i = 0; i < samplers.size(); ++i) {
@@ -149,6 +155,9 @@ namespace sunshine_game3d {
       if (width <= 3840 && height <= 3840)
         for (auto id : {raw, vertical_majorant, vertical_field, field})
           if (!texture_create(id, width, height, api::format::r32_float, api::resource_usage::unordered_access)) return false;
+      if (width <= 3840 && height <= 3840 && nearest_ui_supported &&
+          (!texture_create(ui_plane_tiles, (width + 15) / 16, (height + 15) / 16, api::format::r32_float, api::resource_usage::unordered_access) ||
+           !texture_create(ui_plane_resolved, 1, 1, api::format::r32_float, api::resource_usage::unordered_access))) return false;
       for (auto id : {left, right})
         if (!texture_create(id, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target)) return false;
       if (!texture_create(packed, width * 2, height, color == 1 ? api::format::r10g10b10a2_unorm : api::format::r16g16b16a16_float,
@@ -160,17 +169,20 @@ namespace sunshine_game3d {
       if (width <= 3840 && height <= 3840)
         if (!pipeline_create(candidate, "SunshineHostCandidateCS", true, vs) || !pipeline_create(vertical, "SunshineHostVerticalCS", true, vs) ||
             !pipeline_create(horizontal, "SunshineHostHorizontalCS", true, vs)) return false;
+      if (width <= 3840 && height <= 3840 && nearest_ui_supported &&
+          (!pipeline_create(ui_tiles, "SunshineUINearestTilesCS", true, vs) ||
+           !pipeline_create(ui_reduce, "SunshineUINearestReduceCS", true, vs))) return false;
       return pipeline_create(eyes, "SunshineRenderEyesPS", false, vs) && pipeline_create(pack, "SunshinePackEyesPS", false, vs);
     }
     void bindings(api::command_list *cmd, api::shader_stage stage, const render_parameters &p,
-        std::array<api::resource_view, 8> srvs, std::array<api::resource_view, 4> uavs = {}) {
+        std::array<api::resource_view, 10> srvs, std::array<api::resource_view, 6> uavs = {}) {
       // D3D12 needs actual null descriptors; a zero CPU descriptor handle is
       // not a valid CopyDescriptors source. D3D11 uses zero COM views normally.
       for (auto &view : srvs) if (!view.handle) view = null_srv;
       for (auto &view : uavs) if (!view.handle) view = null_uav;
       cmd->push_constants(stage, layout, 0, 0, sizeof(p) / 4, &p);
       if (stage == api::shader_stage::compute) {
-        const std::array<uint32_t, 4> ui{source_alpha_ui ? 1u : 0u, 0u, 0u, 0u};
+        const auto ui = ui_parameter_words(source_alpha_ui, consumed_plane);
         cmd->push_constants(stage, layout, 4, 0, uint32_t(ui.size()), ui.data());
       }
       cmd->push_descriptors(stage, layout, 1, {{}, 0, 0, uint32_t(samplers.size()), api::descriptor_type::sampler, samplers.data()});
@@ -179,7 +191,7 @@ namespace sunshine_game3d {
         cmd->push_descriptors(stage, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
     }
     void draw(api::command_list *cmd, pass id, uint32_t w, std::initializer_list<texture_id> targets,
-        const render_parameters &p, const std::array<api::resource_view, 8> &srvs) {
+        const render_parameters &p, const std::array<api::resource_view, 10> &srvs) {
       std::array<api::resource_view, 2> rtvs{}; unsigned index = 0;
       for (auto target : targets) {
         auto &t = textures[target]; rtvs[index++] = t.rtv;
@@ -196,8 +208,8 @@ namespace sunshine_game3d {
       for (auto target : targets) cmd->barrier(textures[target].resource, api::resource_usage::render_target, api::resource_usage::shader_resource);
     }
     void dispatch(api::command_list *cmd, pass id, uint32_t x, uint32_t y,
-        const render_parameters &p, const std::array<api::resource_view, 8> &srvs, std::initializer_list<texture_id> targets) {
-      std::array<api::resource_view, 4> uavs{};
+        const render_parameters &p, const std::array<api::resource_view, 10> &srvs, std::initializer_list<texture_id> targets) {
+      std::array<api::resource_view, 6> uavs{};
       for (auto target : targets) {
         cmd->barrier(textures[target].resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
         uavs[unsigned(target) - unsigned(raw)] = textures[target].uav;
@@ -206,7 +218,7 @@ namespace sunshine_game3d {
       bindings(cmd, api::shader_stage::compute, p, srvs, uavs);
       cmd->dispatch(x, y, 1);
       uavs.fill(null_uav);
-      cmd->push_descriptors(api::shader_stage::compute, layout, 3, {{}, 0, 0, 4, api::descriptor_type::unordered_access_view, uavs.data()});
+      cmd->push_descriptors(api::shader_stage::compute, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
       for (auto target : targets) cmd->barrier(textures[target].resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
     }
   };
@@ -241,9 +253,11 @@ namespace sunshine_game3d {
     reshade::log::message(reshade::log::level::info, "Sunshine Game 3D: add-on GPU renderer ready (no FX file required)");
     return true;
   }
-  bool renderer::render(api::command_list *cmd, api::resource backbuffer, api::resource_view depth, const render_parameters &parameters, bool source_alpha_ui, api::resource_view alpha_source) {
+  bool renderer::render(api::command_list *cmd, api::resource backbuffer, api::resource_view depth, const render_parameters &parameters, bool source_alpha_ui, api::resource_view alpha_source, const ui_plane_parameters &plane) {
     if (!data_ || data_->failed || data_->pending) return false;
     auto &d = *data_;
+    if (source_alpha_ui && plane.mode == ui_plane_mode::depth_midpoint_nearest_ui && !d.nearest_ui_supported) return false;
+    if (source_alpha_ui && plane.mode == ui_plane_mode::front_limit && !d.front_limit_ui_supported) return false;
     com<ID3DDeviceContextState> previous;
     const bool isolated = d.context11.p && !d.frame_state;
     if (isolated) d.context11->SwapDeviceContextState(d.isolated11.p, previous.put());
@@ -258,14 +272,26 @@ namespace sunshine_game3d {
     render_parameters p = parameters;
     if (!depth.handle) { depth = t[impl::empty_depth].srv; p.depth_ready = p.camera_ready = 0; }
     d.consumed = p;
+    d.consumed_plane = plane;
     d.source_alpha_ui = source_alpha_ui;
+    d.nearest_ui_rendered = false;
     d.consumed_ui_source = source_alpha_ui && alpha_source.handle ? d.device->get_resource_from_view(alpha_source) : api::resource{};
     if (d.color == 3) d.draw(cmd, impl::pq, d.width, {impl::linear}, p, {t[impl::source].srv});
     if (d.width <= 3840 && d.height <= 3840) {
       d.dispatch(cmd, impl::candidate, (d.width + 7) / 8, (d.height + 7) / 8, p, {api::resource_view{}, depth}, {impl::raw});
       d.dispatch(cmd, impl::vertical, d.width, 1, p, {api::resource_view{}, {}, {}, t[impl::raw].srv}, {impl::vertical_majorant, impl::vertical_field});
-      // This pass reads only t0.a. All color passes keep the current frame.
-      d.dispatch(cmd, impl::horizontal, d.height, 1, p, {d.consumed_ui_source.handle ? alpha_source : t[impl::source].srv, {}, {}, {}, t[impl::vertical_field].srv}, {impl::field});
+      const auto ui_alpha = d.consumed_ui_source.handle ? alpha_source : t[impl::source].srv;
+      if (source_alpha_ui && plane.mode == ui_plane_mode::depth_midpoint_nearest_ui) {
+        d.dispatch(cmd, impl::ui_tiles, (d.width + 15) / 16, (d.height + 15) / 16, p,
+          {ui_alpha, depth}, {impl::ui_plane_tiles});
+        d.dispatch(cmd, impl::ui_reduce, 1, 1, p,
+          {api::resource_view{}, {}, {}, {}, {}, {}, {}, {}, t[impl::ui_plane_tiles].srv}, {impl::ui_plane_resolved});
+        d.nearest_ui_rendered = true;
+      }
+      // UI passes read only the selected t0.a. Eye RGB stays the current frame.
+      d.dispatch(cmd, impl::horizontal, d.height, 1, p,
+        {ui_alpha, {}, {}, {}, t[impl::vertical_field].srv, {}, {}, {}, {},
+          d.nearest_ui_rendered ? t[impl::ui_plane_resolved].srv : api::resource_view{}}, {impl::field});
     }
     d.draw(cmd, impl::eyes, d.width, {impl::left, impl::right}, p, {t[impl::source].srv, depth, t[impl::linear].srv, {}, {}, t[impl::field].srv});
     d.draw(cmd, impl::pack, d.width * 2, {impl::packed}, p, {t[impl::source].srv, {}, {}, {}, {}, {}, t[impl::left].srv, t[impl::right].srv});
@@ -288,12 +314,15 @@ namespace sunshine_game3d {
   }
   render_parameters renderer::consumed_parameters() const { return data_ ? data_->consumed : render_parameters{}; }
   bool renderer::consumed_source_alpha_ui() const { return data_ && data_->source_alpha_ui; }
+  ui_plane_parameters renderer::consumed_ui_plane() const { return data_ ? data_->consumed_plane : ui_plane_parameters{}; }
   diagnostic_resources renderer::diagnostics() const {
     if (!data_) return {};
     const auto &t = data_->textures;
     return {t[impl::source].resource, t[impl::linear].resource, t[impl::raw].resource,
       t[impl::vertical_majorant].resource, t[impl::vertical_field].resource,
-      t[impl::field].resource, t[impl::packed].resource, data_->consumed_ui_source};
+      t[impl::field].resource, t[impl::packed].resource, data_->consumed_ui_source,
+      data_->nearest_ui_rendered ? t[impl::ui_plane_tiles].resource : api::resource{},
+      data_->nearest_ui_rendered ? t[impl::ui_plane_resolved].resource : api::resource{}};
   }
   api::resource_view renderer::native_rtv(api::resource backbuffer) {
     if (!data_) return {};

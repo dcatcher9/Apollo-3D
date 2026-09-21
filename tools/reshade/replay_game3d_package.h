@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
+#include "game3d_ui_plane.h"
 #include "../../src/game3d_debug_formats.h"
 #include "../../src/game3d_debug_protocol.h"
 #include "../../src/game3d_debug_ui_resources.h"
@@ -18,6 +19,7 @@
 namespace sunshine_game3d::replay {
   inline constexpr std::uint64_t max_package_bytes = game3d_debug::max_capture_bytes;
   inline constexpr unsigned parameter_bytes = 80;
+  inline constexpr unsigned ui_parameter_bytes = 16;
 
   inline void require(bool condition, const std::string &message) {
     if (!condition) {
@@ -63,6 +65,9 @@ namespace sunshine_game3d::replay {
     bool source_alpha_ui = false;
     std::string ui_alpha_source = "none";
     std::array<std::uint8_t, parameter_bytes> parameters {};
+    std::array<std::uint8_t, ui_parameter_bytes> ui_parameters {};
+    ui_plane_parameters ui_plane;
+    std::string ui_parameter_abi = "legacy_screen";
     std::string shader, parameter_abi;
     std::map<std::string, artifact> artifacts;
     // Validated optional captures are diagnostics, not inputs to this renderer.
@@ -85,6 +90,24 @@ namespace sunshine_game3d::replay {
     return result;
   }
 
+  template<class T>
+  inline T ui_parameter(const package &p, unsigned offset) {
+    static_assert(sizeof(T) == 4);
+    T result;
+    std::memcpy(&result, p.ui_parameters.data() + offset, sizeof(T));
+    return result;
+  }
+
+  inline bool supports_ui_plane(const std::string &shader) {
+    return shader.find("Sunshine_UIPlaneMode") != std::string::npos;
+  }
+  inline bool supports_nearest_ui_plane(const std::string &shader) {
+    return shader.find("#define SUNSHINE_UI_NEAREST_PLANE 1") != std::string::npos;
+  }
+  inline bool supports_front_ui_plane(const std::string &shader) {
+    return shader.find("#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1") != std::string::npos;
+  }
+
   inline std::string hex(const void *data, std::size_t size) {
     const auto *bytes = static_cast<const std::uint8_t *>(data);
     constexpr char digits[] = "0123456789abcdef";
@@ -94,6 +117,73 @@ namespace sunshine_game3d::replay {
       result[2 * i + 1] = digits[bytes[i] & 15];
     }
     return result;
+  }
+
+  inline void parse_hex(const std::string &encoded, std::uint8_t *bytes, std::size_t size) {
+    require(encoded.size() == 2 * size, "Incorrect parameter byte count");
+    const auto digit = [](char c) -> unsigned {
+      if (c >= '0' && c <= '9') return unsigned(c - '0');
+      if (c >= 'a' && c <= 'f') return unsigned(c - 'a' + 10);
+      if (c >= 'A' && c <= 'F') return unsigned(c - 'A' + 10);
+      throw std::runtime_error("Invalid parameter hex");
+    };
+    for (std::size_t i = 0; i < size; ++i)
+      bytes[i] = std::uint8_t(digit(encoded[2 * i]) * 16 + digit(encoded[2 * i + 1]));
+  }
+
+  inline void parse_ui_parameters(const nlohmann::json &record, package &p) {
+    auto words = ui_parameter_words(p.source_alpha_ui, p.ui_plane);
+    std::memcpy(p.ui_parameters.data(), words.data(), sizeof(words));
+    if (!record.contains("ui_parameter_abi")) {
+      require(!record.contains("ui_parameter_hex") && !record.contains("ui_parameter_bytes"), "UI parameter bytes require an explicit ABI");
+      // Pre-v2 packages used only b1.x; no independent UI depth was consumed.
+      if (record.contains("ui_constant_binding")) {
+        const auto &legacy = record.at("ui_constant_binding");
+        require(legacy.at("register") == "b1" && legacy.at("uint32").is_array() && legacy.at("uint32").size() == 4,
+          "Invalid legacy UI constant binding");
+        for (unsigned i = 0; i != 4; ++i)
+          require(natural(legacy.at("uint32").at(i), "legacy UI word", UINT32_MAX) == words[i],
+            "Legacy UI constant binding conflicts with screen-plane ABI");
+        require(!legacy.contains("mode") && !legacy.contains("inverse_depth") && !legacy.contains("inverse_depth_bits"), "Independent UI plane requires an explicit ABI");
+      }
+      return;
+    }
+    p.ui_parameter_abi = record.at("ui_parameter_abi").get<std::string>();
+    require((p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v2" ||
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v3" ||
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4") &&
+      natural(record.at("ui_parameter_bytes"), "ui_parameter_bytes", ui_parameter_bytes) == ui_parameter_bytes,
+      "Unsupported UI parameter ABI");
+    parse_hex(record.at("ui_parameter_hex").get<std::string>(), p.ui_parameters.data(), p.ui_parameters.size());
+    std::memcpy(words.data(), p.ui_parameters.data(), sizeof(words));
+    require(words[0] <= 1 && bool(words[0]) == p.source_alpha_ui, "UI parameter enable conflicts with effective protection flag");
+    require(words[3] == 0, "Unknown UI parameter reserved bits");
+    p.ui_plane.mode = static_cast<ui_plane_mode>(words[1]);
+    require(words[1] != static_cast<std::uint32_t>(ui_plane_mode::depth_midpoint_nearest_ui) ||
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v3" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4",
+      "Nearest-covered UI mode requires the v3 or v4 UI parameter contract");
+    require(words[1] != static_cast<std::uint32_t>(ui_plane_mode::front_limit) ||
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4",
+      "Fixed front-limit UI mode requires the v4 UI parameter contract");
+    p.ui_plane.inverse_depth = ui_parameter<float>(p, 8);
+    const auto &binding = record.at("ui_constant_binding");
+    require(binding.at("register") == "b1" && binding.at("uint32").is_array() && binding.at("uint32").size() == 4,
+      "Invalid UI constant binding");
+    for (unsigned i = 0; i != 4; ++i)
+      require(natural(binding.at("uint32").at(i), "UI constant word", UINT32_MAX) == words[i], "UI constant words disagree with exact bytes");
+    require(natural(binding.at("mode"), "UI plane mode", UINT32_MAX) == words[1], "UI plane mode disagrees with exact bytes");
+    require(natural(binding.at("inverse_depth_bits"), "UI inverse depth bits", UINT32_MAX) == words[2], "UI inverse depth bits disagree with exact bytes");
+    // Invalid production-domain bits are part of diagnostic replay. Preserve
+    // them so the production shader's zero-disparity guards are exercised.
+    if (std::isfinite(p.ui_plane.inverse_depth)) {
+      require(binding.at("inverse_depth").is_number(), "Finite UI inverse depth must be numeric");
+      const float described_q = binding.at("inverse_depth").get<float>();
+      std::uint32_t described_bits;
+      std::memcpy(&described_bits, &described_q, sizeof(described_bits));
+      require(described_bits == words[2], "UI inverse depth disagrees with exact bytes");
+    } else {
+      require(binding.at("inverse_depth").is_null(), "Nonfinite UI inverse depth must have a null JSON description");
+    }
   }
 
   inline package parse(const nlohmann::json &manifest) {
@@ -121,8 +211,15 @@ namespace sunshine_game3d::replay {
       require(p.ui_alpha_source == "none" || p.ui_alpha_source == "source_color" || p.ui_alpha_source == "ui_source_color", "Unknown consumed UI-alpha source");
       require(p.source_alpha_ui == (p.ui_alpha_source != "none"), "Consumed UI-alpha source conflicts with effective protection flag");
     }
+    parse_ui_parameters(record, p);
     p.shader = record.at("shader_source").get<std::string>();
     require(!p.shader.empty() && p.shader.size() <= 256 * 1024 && p.shader.find('\0') == std::string::npos, "Missing or invalid embedded shader");
+    require(p.ui_plane.mode == ui_plane_mode::screen || supports_ui_plane(p.shader),
+      "Captured independent UI plane requires a shader that consumes its parameters");
+    require(p.ui_plane.mode != ui_plane_mode::depth_midpoint_nearest_ui || supports_nearest_ui_plane(p.shader),
+      "Captured nearest-covered UI plane requires its GPU reduction shader");
+    require(p.ui_plane.mode != ui_plane_mode::front_limit || supports_front_ui_plane(p.shader),
+      "Captured fixed front-limit UI plane requires its shader contract");
     const auto &defines = record.at("defines");
     p.width = unsigned(natural(defines.at("BUFFER_WIDTH"), "BUFFER_WIDTH", 8192));
     p.height = unsigned(natural(defines.at("BUFFER_HEIGHT"), "BUFFER_HEIGHT", 8192));
@@ -130,22 +227,7 @@ namespace sunshine_game3d::replay {
     require(p.width && p.height && p.width % 2 == 0 && p.height % 2 == 0 && p.color, "Unsupported render dimensions or color space");
     require(natural(metadata.at("color_space"), "color_space", 3) == p.color, "Conflicting captured color spaces");
     const auto encoded = record.at("parameter_hex").get<std::string>();
-    require(encoded.size() == 2 * parameter_bytes, "Incorrect render parameter byte count");
-    const auto digit = [](char c) -> unsigned {
-      if (c >= '0' && c <= '9') {
-        return unsigned(c - '0');
-      }
-      if (c >= 'a' && c <= 'f') {
-        return unsigned(c - 'a' + 10);
-      }
-      if (c >= 'A' && c <= 'F') {
-        return unsigned(c - 'A' + 10);
-      }
-      throw std::runtime_error("Invalid render parameter hex");
-    };
-    for (unsigned i = 0; i < parameter_bytes; ++i) {
-      p.parameters[i] = std::uint8_t(digit(encoded[2 * i]) * 16 + digit(encoded[2 * i + 1]));
-    }
+    parse_hex(encoded, p.parameters.data(), p.parameters.size());
     // Preserve every constant bit, including NaNs and invalid camera domains:
     // reproducing the production shader's guards is part of diagnostic replay.
     const auto &entries = manifest.at("artifacts");

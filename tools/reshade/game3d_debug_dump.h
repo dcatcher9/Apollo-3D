@@ -12,9 +12,13 @@ namespace sunshine_game3d {
   struct diagnostic_frame {
     render_parameters parameters;
     bool source_alpha_ui = false;
+    ui_plane_parameters ui_plane;
     source_alpha_ui_decision source_alpha_decision;
     // Provenance for resources.ui_source, not the latest optional SL snapshot.
     std::string ui_source_metadata;
+    // Latest live input attempt observed at this render, separate from the
+    // exact provenance of a retained alpha texture actually consumed above.
+    std::string ui_capture_attempt_metadata;
     automatic_status scene_status;
     sunshine_depth::frame_depth depth;
     diagnostic_resources resources;

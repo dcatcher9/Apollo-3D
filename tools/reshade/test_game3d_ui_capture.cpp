@@ -37,6 +37,7 @@ namespace {
   std::vector<operation> operations;
   unsigned record_calls {};
   bool reject_record {};
+  capture::record_diagnostic rejection;
   std::uint32_t next_width = 128, next_height = 64, next_format = 41;
 
   operation &op(std::uint64_t id) { return operations.at(static_cast<std::size_t>(id - 1)); }
@@ -45,6 +46,9 @@ namespace {
     operations.clear();
     record_calls = 0;
     reject_record = false;
+    rejection = {};
+    rejection.stage = capture::record_stage::missing_state;
+    rejection.result = capture::status::missing_state;
     next_width = 128; next_height = 64; next_format = 41;
   }
   std::uint64_t begin_window() {
@@ -100,9 +104,15 @@ namespace sunshine_streamline::depth_capture {
   diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
     ++record_calls;
     if (diagnostic) {
+      *diagnostic = reject_record ? rejection : record_diagnostic {};
       diagnostic->command = command;
-      diagnostic->stage = reject_record ? record_stage::missing_state : record_stage::recorded;
-      diagnostic->result = reject_record ? status::missing_state : status::recorded;
+      diagnostic->resource = value.resource.native;
+      diagnostic->native_state = value.native_state;
+      diagnostic->expected_generation = value.source_present_generation;
+      if (!reject_record) {
+        diagnostic->stage = record_stage::recorded;
+        diagnostic->result = status::recorded;
+      }
     }
     if (reject_record) return {};
     operation value_copy;
@@ -146,11 +156,21 @@ namespace sunshine_streamline::depth_capture {
       case status::submitted: return "submitted";
       case status::failed: return "failed";
       case status::recorded: return "recorded";
+      case status::missing_state: return "missing_state";
+      case status::conflicting_state: return "conflicting_state";
       default: return "unavailable";
     }
   }
   const char *name(capture_failure value) { return value == capture_failure::evaluation_failed ? "evaluation_failed" : "none"; }
-  const char *name(record_stage value) { return value == record_stage::recorded ? "recorded" : "not_recorded"; }
+  const char *name(record_stage value) {
+    switch (value) {
+      case record_stage::recorded: return "recorded";
+      case record_stage::missing_state: return "missing_state";
+      case record_stage::conflicting_state: return "conflicting_state";
+      default: return "not_recorded";
+    }
+  }
+  const char *name(recording_loss value) { return value == recording_loss::global_observation_loss ? "global_observation_loss" : "none"; }
 }
 
 int main() try {
@@ -165,7 +185,49 @@ int main() try {
     require(row(metadata, 10)["status"] == "explicit_null" && row(metadata, 9)["status"] == "not_observed",
             "null resource was conflated with an unobserved resource");
     require(response.texture_count == 1 && bytes == 64 && record_calls == 0, "null resource scheduled native capture");
+    require(!row(metadata, 10).contains("capture_diagnostic") && !row(metadata, 9).contains("capture_diagnostic"),
+            "unattempted resources fabricated a native capture diagnostic");
     require(json::parse(metadata)["sentinel"] == 42, "bridge replaced primary metadata");
+  }
+  reset_native();
+  {
+    ui_capture_batch batch(begin_window());
+    reject_record = true;
+    rejection.result = capture::status::conflicting_state;
+    rejection.stage = capture::record_stage::conflicting_state;
+    rejection.recording_cookie = 123;
+    rejection.device_identity = rejection.expected_device_identity = 456;
+    rejection.current_generation = 45;
+    rejection.observed_state = 4;
+    rejection.observed = true;
+    rejection.command_type = 0;
+    rejection.width = 3840; rejection.height = 2160; rejection.format = 24; rejection.flags = 5;
+    rejection.dimension = 3; rejection.mip_levels = 1; rejection.array_size = 1; rejection.samples = 1;
+    const auto at = stamp(19);
+    tag(53, 0x5353, at, 8);
+    batch.freeze();
+    auto response = primary(); std::uint64_t bytes = 64; std::string metadata = "{}";
+    require(batch.append(response, bytes, metadata, true), "state conflict blocked primary capture");
+    const auto captured = row(metadata, 32);
+    const json expected {
+      {"result", "conflicting_state"}, {"stage", "conflicting_state"}, {"loss", "none"},
+      {"command", "0x4321"}, {"resource", "0x5353"}, {"recording_cookie", 123},
+      {"device_identity", 456}, {"expected_device_identity", 456},
+      {"expected_present_generation", 44}, {"current_present_generation", 45},
+      {"native_state", 8}, {"observed_state", 4}, {"observed", true}, {"blocked", false},
+      {"copy_state", nullptr}, {"copy_state_known", false}, {"used_observed_state", false},
+      {"recording_closed", false}, {"recording_invalid", false}, {"render_pass", false},
+      {"command_type", 0}, {"width", 3840}, {"height", 2160}, {"format", 24}, {"flags", 5},
+      {"dimension", 3}, {"mip_levels", 1}, {"array_size", 1}, {"samples", 1}, {"attempt", 1},
+      {"observation", {{"session", at.session}, {"epoch", 71}, {"sequence", 19}, {"tick_ms", at.tick}, {"viewport", 7}}}
+    };
+    require(captured.at("capture_diagnostic") == expected, "state conflict evidence was omitted, relabeled or altered");
+    require(captured["status"] == "capture_rejected" && captured["capture_stage"] == "conflicting_state" &&
+            captured["capture_result"] == "conflicting_state" && !captured.contains("gpu") &&
+            response.texture_count == 1 && bytes == 64 && operations.empty(),
+            "state conflict diagnostics changed native admission or published pixels");
+    require(json::parse(metadata)["optional_captures"].size() == std::size(ui::catalog) && metadata.size() < wire::max_json_bytes,
+            "capture diagnostics exceeded the fixed inventory or metadata budget");
   }
   reset_native();
   {
@@ -258,6 +320,10 @@ int main() try {
     auto response = primary(); std::uint64_t bytes = 64; std::string metadata = "{}";
     require(batch.append(response, bytes, metadata, true) && record_calls == 4 &&
             row(metadata, 10)["status"] == "attempt_limit", "failed diagnostic allocation retries were unbounded");
+    require(row(metadata, 10)["observation"]["sequence"] == 7 &&
+            row(metadata, 10)["capture_diagnostic"]["attempt"] == 4 &&
+            row(metadata, 10)["capture_diagnostic"]["observation"]["sequence"] == 4,
+            "later retry-limit observation relabeled the last attempted capture diagnostic");
   }
   reset_native();
   {

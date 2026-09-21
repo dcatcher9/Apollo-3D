@@ -7,6 +7,7 @@
 #include "src/game3d_debug_protocol.h"
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <d3d11_4.h>
@@ -70,7 +71,7 @@ namespace sunshine_game3d {
       }
     }
 
-    std::string parameter_hex(const render_parameters &parameters) {
+    template<class T> std::string parameter_hex(const T &parameters) {
       constexpr char digits[] = "0123456789abcdef";
       const auto *bytes = reinterpret_cast<const unsigned char *>(&parameters);
       std::string encoded(sizeof(parameters) * 2, '0');
@@ -97,12 +98,33 @@ namespace sunshine_game3d {
       result["source_alpha_ui"] = f.source_alpha_ui;
       const bool external_ui = f.source_alpha_ui && f.resources.ui_source.handle;
       result["ui_alpha_source"] = !f.source_alpha_ui ? "none" : external_ui ? "ui_source_color" : "source_color";
+      const bool nearest_mode = f.ui_plane.mode == ui_plane_mode::depth_midpoint_nearest_ui;
+      const bool front_mode = f.ui_plane.mode == ui_plane_mode::front_limit;
+      const auto captured_shader = f.shader_source.empty() ? renderer::shader_source() : f.shader_source;
+      if (captured_shader.find("#define SUNSHINE_UI_NEAREST_PLANE 1") != std::string_view::npos) {
+        const bool reduced = f.resources.ui_plane_resolved.handle != 0;
+        auto &passes = result["passes"];
+        passes.insert(passes.begin() + 3, json {{"entry", "SunshineUINearestTilesCS"}, {"target", "cs_5_0"},
+          {"enabled", reduced}, {"srvs", {{"t0", external_ui ? "ui_source_color" : "source_color"}, {"t1", "raw_depth"}}},
+          {"uavs", {{"u4", "ui_plane_tiles:R32_FLOAT"}}}});
+        passes.insert(passes.begin() + 4, json {{"entry", "SunshineUINearestReduceCS"}, {"target", "cs_5_0"},
+          {"enabled", reduced}, {"srvs", {{"t8", "ui_plane_tiles"}}}, {"uavs", {{"u5", "ui_plane_resolved:R32_FLOAT"}}}});
+        if (reduced) passes[5]["srvs"]["t9"] = "ui_plane_resolved";
+        result["ui_plane_resolution"] = {{"reduction_ran", reduced},
+          {"policy", front_mode ? "fixed_current_front_limit" : nearest_mode ? "max(submitted midpoint floor, maximum valid decoded q under finite positive selected alpha); one scalar for the entire UI in this render" : f.ui_plane.mode == ui_plane_mode::depth_midpoint ? "explicit_inverse_depth_plane" : "screen_plane"},
+          {"inverse_depth_role", front_mode || f.ui_plane.mode == ui_plane_mode::screen ? "unused" : nearest_mode ? "midpoint_floor" : "explicit_plane"},
+          {"resolved_value", nullptr},
+          {"resolved_value_note", front_mode ? "No depth reduction. UI parallax is the current positive b0 display bound times strength and stereo blend when warp is active; depth/gain/zero do not place this plane." : nearest_mode ? "GPU result; no CPU readback in the live producer. Replay recomputes it from the exact captured depth, alpha, crop/jitter and constants." : "No depth reduction. Replay uses the exact captured UI mode and inverse-depth word."}};
+      }
       if (external_ui) {
         for (auto &pass : result["passes"]) {
           if (pass["entry"] == "SunshineHostHorizontalCS") pass["srvs"]["t0"] = "ui_source_color";
         }
       }
       result["source_alpha_ui_requested"] = f.source_alpha_decision.requested;
+      result["source_alpha_input_state"] = name(f.source_alpha_decision.input_state);
+      result["source_alpha_capture_attempt"] = f.ui_capture_attempt_metadata.empty() ? json(nullptr) :
+        json::parse(f.ui_capture_attempt_metadata);
       result["source_alpha_ui_status"] = f.source_alpha_ui ? (external_ui ? "captured_pre_fg_alpha" : "present_alpha") :
         f.source_alpha_decision.blocked_by_fg() ? "unavailable_fg_output_alpha" : "disabled";
       const auto &fg = f.source_alpha_decision.fg;
@@ -110,8 +132,18 @@ namespace sunshine_game3d {
         {"automatic", fg.automatic}, {"generated_frames", fg.generated_frames}, {"epoch", fg.epoch},
         {"sequence", fg.sequence}, {"viewport", fg.viewport},
         {"meaning", "Last confirmed game-requested FG mode, retained during transient observation loss. Independent of selected depth; does not identify this presentation as real or generated."}};
-      result["ui_constant_binding"] = {{"register", "b1"}, {"uint32", {f.source_alpha_ui ? 1u : 0u, 0u, 0u, 0u}},
-        {"meaning", "Alpha from ui_alpha_source is explicitly selected as UI coverage for this game. Only horizontal-pass t0 uses that input; eye RGB remains current source_color. Positive finite alpha pins the UI and one horizontal bilinear-support pixel. All-white masks are entirely UI; all-black masks have no UI pins."}};
+      const auto ui = ui_parameter_words(f.source_alpha_ui, f.ui_plane);
+      result["ui_parameter_abi"] = front_mode ? "sunshine_game3d.ui_parameters.v4" : nearest_mode ? "sunshine_game3d.ui_parameters.v3" : "sunshine_game3d.ui_parameters.v2";
+      result["ui_parameter_bytes"] = sizeof(ui);
+      result["ui_parameter_hex"] = parameter_hex(ui);
+      result["ui_parameter_encoding"] = "little-endian exact b1 bytes: uint32 enabled, uint32 mode, IEEE754 float32 inverse depth, uint32 reserved zero";
+      result["ui_constant_binding"] = {{"register", "b1"}, {"uint32", ui},
+        {"mode", static_cast<std::uint32_t>(f.ui_plane.mode)},
+        {"mode_name", f.ui_plane.mode == ui_plane_mode::screen ? "screen" : f.ui_plane.mode == ui_plane_mode::depth_midpoint ? "depth_midpoint" :
+          nearest_mode ? "depth_midpoint_nearest_ui" : front_mode ? "front_limit" : "unknown"},
+        {"inverse_depth", std::isfinite(f.ui_plane.inverse_depth) ? json(f.ui_plane.inverse_depth) : json(nullptr)},
+        {"inverse_depth_bits", ui[2]},
+        {"meaning", "Alpha from ui_alpha_source is explicitly selected as UI coverage for this game. Horizontal-pass t0 uses that input; eye RGB remains current source_color. Mode 3 pins UI at the current positive display bound scaled by strength and stereo blend, independent of scene depth/gain/zero; its inverse-depth word is unused. Screen mode pins at zero disparity. Mode 1 uses the submitted independent depth. Mode 2 reduces max(submitted midpoint floor, nearest valid decoded depth under finite positive alpha). Both depth modes use b0 geometry. The horizontal protection includes one bilinear-support pixel. All-white masks are entirely UI; all-black masks have no UI constraints."}};
       return result;
     }
 
@@ -215,17 +247,23 @@ namespace sunshine_game3d {
       state["depth_statistics"] = scale.depth_statistics_valid() ? nlohmann::json{
         {"reference_Q", scale.reference_inverse}, {"nearest_q", scale.maximum_inverse}, {"farthest_q", scale.minimum_inverse}, {"mean_q", scale.mean_inverse}, {"normalization_L", scale.normalization},
         {"mean_square_q", scale.depth_pixel_count ? nlohmann::json(scale.mean_square_inverse) : nlohmann::json(nullptr)},
+        {"centered_moments_supplied", scale.has_centered_depth_statistics},
+        {"mean_q_minus_min", scale.has_centered_depth_statistics ? nlohmann::json(scale.mean_contrast_inverse) : nlohmann::json(nullptr)},
+        {"mean_square_q_minus_min", scale.has_centered_depth_statistics ? nlohmann::json(scale.mean_contrast_square_inverse) : nlohmann::json(nullptr)},
         {"pixel_count", scale.depth_pixel_count},
         {"tiles", {scale.depth_tiles_x, scale.depth_tiles_y}},
         {"sampling", scale.depth_pixel_count ? "all_active_pixels" : "legacy_point_fixture"},
         {"units", camera ? "inverse game units" : "relative inverse depth"},
-        {"note", "Accepted scene-policy measurement for this captured rendering decision, not a new measurement of its pixels. Live Q, mean, second moment and bounds include every active-depth pixel. Larger q is nearer; these are not camera clipping planes. Second moment is diagnostic and does not set gain. The UI may retain older values during a missing-depth hold when this decision has no statistics."}
+        {"note", "Accepted scene-policy measurement for this captured rendering decision, not a new measurement of its pixels. Live Q, mean, second moment and bounds include every active-depth pixel. Larger q is nearer; these are not camera clipping planes. The uncentered mean_square_q is diagnostic and does not set gain. Centered moments determine the trial zero target. The UI may retain older values during a missing-depth hold when this decision has no statistics."}
       } : nlohmann::json(nullptr);
-      state["zero_plane_policy"] = "q0 target=(qmin+Q)/2 minimizes maximum absolute unclamped displacement at fixed gain; exponential tracking bounded by abs(Knew*delta_q0/L)<=zero_budget_per_second*elapsed_seconds; no immediate range clamp; positive flat depth updates zero while holding gain, all-zero depth holds both";
+      state["zero_plane_policy"] = "trial contrast midpoint: b=qmin, d=q-b, q0 target=b+0.5*sum(d*d)/sum(d); stable centered full-pixel moments, fixtures without centered moments retain midpoint; exponential tracking bounded by abs(Knew*delta_q0/L)<=zero_budget_per_second*elapsed_seconds; no immediate applied-zero range clamp; positive flat depth targets b while holding gain, all-zero depth holds both";
       state["zero_tracking"] = {{"time_constant_seconds", sunshine_camera_scene::time_constant_seconds},
         {"zero_budget_per_second", sunshine_scene_gain::zero_budget_per_second}};
       state["gain_below_target"] = scale.gain_below_target;
       state["zero_inverse"] = scale.has_zero ? nlohmann::json(scale.zero_inverse) : nlohmann::json(nullptr);
+      state["ui_midpoint_inverse"] = scale.has_ui_midpoint ? nlohmann::json(scale.ui_midpoint_inverse) : nlohmann::json(nullptr);
+      state["target_ui_midpoint_inverse"] = scale.has_ui_midpoint_target() ? nlohmann::json(scale.target_ui_midpoint_inverse) : nlohmann::json(nullptr);
+      state["ui_midpoint_policy"] = "Live mode 1 consumes the independently smoothed inverse-depth midpoint target=(qmin+qmax)/2, separate from scene zero. Current gain, zero, strength and blend map it to display parallax. Historical mode 2 uses the submitted midpoint as a floor for covered-depth reduction; mode 3 uses the full positive display bound. Exact consumed mode and words are in replay b1.";
       state["zero_plane_at_infinity"] = scale.has_zero && camera && scale.zero_inverse == 0.f;
       state["current_zero_plane"] = scale.has_zero && (!camera || scale.zero_inverse > 0.f) ?
         nlohmann::json(camera ? 1.0 / scale.zero_inverse : double(scale.zero_inverse)) : nlohmann::json(nullptr);

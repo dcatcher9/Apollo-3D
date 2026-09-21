@@ -6,6 +6,9 @@
 // docs/host-sbs.md and the Depth Coordinate V2 vertical/horizontal limit shaders.
 // Optional source-alpha UI pinning reuses the horizontal pass after conditioning.
 // Its UI source is explicitly selected per game; it adds no color-layer blending.
+// Nearest-covered-depth mode first resolves one global UI plane on this queue.
+#define SUNSHINE_UI_NEAREST_PLANE 1
+#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1
 //
 // Specialize BUFFER_WIDTH, BUFFER_HEIGHT and BUFFER_COLOR_SPACE at compile time.
 // This preserves the original per-resolution group-memory footprint. Color-space
@@ -48,7 +51,9 @@ cbuffer SunshineGame3DConstants : register(b0)
 cbuffer SunshineUIConstants : register(b1)
 {
     uint Sunshine_SourceAlphaUI;
-    uint3 Sunshine_UIPadding;
+    uint Sunshine_UIPlaneMode;
+    float Sunshine_UIPlaneInverseDepth;
+    uint Sunshine_UIReserved;
 };
 
 Texture2D<float4> SunshineSourceSampler : register(t0);
@@ -59,10 +64,14 @@ Texture2D<float> SunshineHostVerticalConditionedSampler : register(t4);
 Texture2D<float> SunshineHostFinalSampler : register(t5);
 Texture2D<float4> SunshineEyeLeftSampler : register(t6);
 Texture2D<float4> SunshineEyeRightSampler : register(t7);
+Texture2D<float> SunshineUIPlaneTilesSampler : register(t8);
+Texture2D<float> SunshineUIPlaneResolvedSampler : register(t9);
 RWTexture2D<float> SunshineHostCandidateStore : register(u0);
 RWTexture2D<float> SunshineHostVerticalMajorantStore : register(u1);
 RWTexture2D<float> SunshineHostVerticalConditionedStore : register(u2);
 RWTexture2D<float> SunshineHostFinalStore : register(u3);
+RWTexture2D<float> SunshineUIPlaneTilesStore : register(u4);
+RWTexture2D<float> SunshineUIPlaneResolvedStore : register(u5);
 SamplerState SunshinePointClamp : register(s0);
 SamplerState SunshineLinearClampState : register(s1);
 SamplerState SunshinePointBorder : register(s2);
@@ -223,6 +232,66 @@ bool SunshineHostWarpActive()
 {
     return Sunshine_DepthReady && SunshineCameraActive() &&
         SunshineCameraFinite(Depth_Adjustment) && Depth_Adjustment > 0 && SunshineAutomaticStrengthBlend() > 0;
+}
+
+bool SunshineSourceUI(uint x, uint y) {
+    float alpha = SunshineSourceSampler.Load(int3(int2(uint2(x, y)), 0)).a;
+    return SunshineCameraFinite(alpha) && alpha > 0.0;
+}
+
+bool SunshineUINearestActive() {
+    return Sunshine_SourceAlphaUI != 0u && Sunshine_UIPlaneMode == 2u && SunshineHostWarpActive() &&
+        SunshineCameraFinite(Sunshine_UIPlaneInverseDepth) && Sunshine_UIPlaneInverseDepth >= 0.0;
+}
+
+// Full source-pixel coverage, including soft positive alpha. Depth coordinates
+// and decoding match the scene candidate, before its displacement clamp. Every
+// tile and the final scalar are overwritten on each enabled render; no history,
+// CPU readback or source-plane smoothing participates in the covered maximum.
+groupshared float SunshineUINearestScratch[256];
+[numthreads(16, 16, 1)]
+void SunshineUINearestTilesCS(uint3 id : SV_DispatchThreadID,
+    uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID) {
+    uint lane = thread_id.y * 16u + thread_id.x;
+    float nearest = 0.0;
+    if (SunshineUINearestActive() && id.x < BUFFER_WIDTH && id.y < BUFFER_HEIGHT && SunshineSourceUI(id.x, id.y)) {
+        float2 coordinate = (float2(id.xy) + 0.5) / float2(BUFFER_WIDTH, BUFFER_HEIGHT);
+        float2 uv = SunshineCameraDepthCoordinates(coordinate, SunshineDepthAllocationSize());
+        float raw = DepthBuffer.SampleLevel(SunshinePointBorder, uv, 0).x;
+        precise float q = (raw - Sunshine_CameraProjection.x) * Sunshine_CameraProjection.y;
+        if (SunshineCameraFinite(q) && q >= 0.0) nearest = q;
+    }
+    SunshineUINearestScratch[lane] = nearest;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint step = 128u; step != 0u; step >>= 1u) {
+        if (lane < step) SunshineUINearestScratch[lane] = max(SunshineUINearestScratch[lane], SunshineUINearestScratch[lane + step]);
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane == 0u) SunshineUIPlaneTilesStore[int2(group_id.xy)] = SunshineUINearestScratch[0];
+}
+
+[numthreads(256, 1, 1)]
+void SunshineUINearestReduceCS(uint3 thread_id : SV_GroupThreadID) {
+    uint lane = thread_id.x;
+    const uint tiles_x = (BUFFER_WIDTH + 15u) / 16u;
+    const uint tiles_y = (BUFFER_HEIGHT + 15u) / 16u;
+    float nearest = 0.0;
+    if (SunshineUINearestActive()) {
+        [loop]
+        for (uint index = lane; index < tiles_x * tiles_y; index += 256u)
+            nearest = max(nearest, SunshineUIPlaneTilesSampler.Load(int3(int2(index % tiles_x, index / tiles_x), 0)));
+    }
+    SunshineUINearestScratch[lane] = nearest;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint step = 128u; step != 0u; step >>= 1u) {
+        if (lane < step) SunshineUINearestScratch[lane] = max(SunshineUINearestScratch[lane], SunshineUINearestScratch[lane + step]);
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane == 0u)
+        SunshineUIPlaneResolvedStore[int2(0, 0)] = SunshineUINearestActive() ?
+            max(Sunshine_UIPlaneInverseDepth, SunshineUINearestScratch[0]) : 0.0;
 }
 
 [numthreads(8, 8, 1)]
@@ -546,9 +615,36 @@ int H_V2LimitDecayQ30(int step_q30, uint distance, int max_decay_q30) {
         max_decay_q30 : step_q30 * signed_distance;
 }
 
-bool SunshineSourceUI(uint x, uint y) {
-    float alpha = SunshineSourceSampler.Load(int3(int2(uint2(x, y)), 0)).a;
-    return SunshineCameraFinite(alpha) && alpha > 0.0;
+float SunshineUIPlaneParallax() {
+    // A fixed display-space plane at the current permitted front limit. Scene
+    // depth, gain and zero affect admission but never position this UI plane.
+    // The inverse-depth word is intentionally unused in this explicit mode.
+    if (Sunshine_UIPlaneMode == 3u) {
+        if (!SunshineHostWarpActive()) return 0.0;
+        // Reuse the final scene clamp, including its float operation order.
+        return SunshineBoundFinalParallax(SunshineHostContainer);
+    }
+    // Mode zero preserves historical screen-plane UI. Malformed UI metadata
+    // falls back to that plane without disabling otherwise valid scene depth.
+    if ((Sunshine_UIPlaneMode != 1u && Sunshine_UIPlaneMode != 2u) || !SunshineHostWarpActive() ||
+        !SunshineCameraFinite(Sunshine_UIPlaneInverseDepth) || Sunshine_UIPlaneInverseDepth < 0.0)
+        return 0.0;
+    float inverse_depth = Sunshine_UIPlaneInverseDepth;
+    if (Sunshine_UIPlaneMode == 2u) {
+        float resolved = SunshineUIPlaneResolvedSampler.Load(int3(0, 0, 0));
+        if (!SunshineCameraFinite(resolved) || resolved < 0.0) return 0.0;
+        inverse_depth = max(inverse_depth, resolved);
+    }
+    // Same native-depth adapter and display budget as the scene candidate,
+    // evaluated at the independently resolved UI depth rather than a texel.
+    precise float strength = clamp(Depth_Adjustment, 0.0, 100.0) * 0.01 * SunshineAutomaticStrengthBlend();
+    precise float displacement = Sunshine_CameraConvergence.x * Sunshine_CameraDepthScale *
+        (Sunshine_CameraConvergence.y - inverse_depth) * strength;
+    if (!SunshineCameraFinite(displacement)) return 0.0;
+    float parallax = -clamp(displacement, -1.5, 2.5) *
+        (float(BUFFER_HEIGHT) * rcp(2160.0) * 100.0) / BUFFER_WIDTH;
+    // Match the final scene field's bound, including float operation order.
+    return SunshineBoundFinalParallax(parallax);
 }
 
 void SunshinePinSourceUI(uint x, uint y, int distance_pixels) {
@@ -559,7 +655,8 @@ void SunshinePinSourceUI(uint x, uint y, int distance_pixels) {
     // of an antialiased glyph into otherwise unmasked background.
     float bound = 0.5 * float(max(distance_pixels - 1, 0)) / float(BUFFER_WIDTH);
     float value = SunshineHostFinalStore[int2(uint2(x, y))];
-    SunshineHostFinalStore[int2(uint2(x, y))] = distance_pixels <= 1 ? 0.0 : clamp(value, -bound, bound);
+    float plane = SunshineUIPlaneParallax();
+    SunshineHostFinalStore[int2(uint2(x, y))] = distance_pixels <= 1 ? plane : clamp(value, plane - bound, plane + bound);
 }
 
 void SunshinePinSourceUISerial(uint y) {

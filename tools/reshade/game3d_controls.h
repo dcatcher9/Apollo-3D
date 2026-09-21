@@ -31,10 +31,22 @@ namespace sunshine_game3d {
     std::uint32_t generated_frames = 0, viewport = 0;
     std::uint64_t epoch = 0, sequence = 0;
   };
+  enum class source_alpha_input_state { not_observed, seen, rejected, state_conflict };
+  inline const char *name(source_alpha_input_state value) {
+    switch (value) {
+      case source_alpha_input_state::seen: return "input_seen";
+      case source_alpha_input_state::rejected: return "capture_rejected";
+      case source_alpha_input_state::state_conflict: return "resource_state_conflict";
+      default: return "not_observed";
+    }
+  }
   struct source_alpha_ui_decision {
     bool requested = false;
     frame_generation_mode fg;
     bool retained_alpha_ready = false;
+    // Latest input attempt observed at this render; it is not the identity of
+    // a retained mask, and failure does not revoke an otherwise usable copy.
+    source_alpha_input_state input_state = source_alpha_input_state::not_observed;
     bool fg_active() const { return fg.known && fg.enabled; }
     bool effective() const { return source_alpha_ui_for_present(requested, fg_active(), retained_alpha_ready); }
     bool blocked_by_fg() const { return requested && fg_active() && !retained_alpha_ready; }
@@ -76,14 +88,19 @@ namespace sunshine_game3d {
     // decoded inverse-depth basis. These are measurements, not clipping planes.
     double reference_inverse{}, minimum_inverse{}, maximum_inverse{};
     double mean_square_inverse{};
+    bool has_centered_depth_statistics = false;
+    double mean_contrast_inverse{}, mean_contrast_square_inverse{};
     std::uint64_t depth_pixel_count{};
     std::uint32_t depth_tiles_x{}, depth_tiles_y{};
     bool has_depth_statistics = false;
-    // The mean is diagnostic; exact extrema define gain and zero targets.
+    // Raw moments remain diagnostics; stable centered moments define zero.
     // Captured L is dimensionless and sets target K=L/Q for this output shape.
     double mean_inverse{}, normalization{};
     double target_zero_inverse{};
     bool zero_target_available = false;
+    float ui_midpoint_inverse{};
+    double target_ui_midpoint_inverse{};
+    bool has_ui_midpoint = false, ui_midpoint_target_available = false;
 
     bool has_value() const {
       return basis != automatic_scale_basis::unknown && std::isfinite(value) && value > 0.f;
@@ -94,6 +111,10 @@ namespace sunshine_game3d {
     bool has_zero_target() const {
       return active && has_value() && zero_target_available && depth_statistics_valid() &&
         std::isfinite(target_zero_inverse) && target_zero_inverse >= 0.;
+    }
+    bool has_ui_midpoint_target() const {
+      return active && has_value() && ui_midpoint_target_available && depth_statistics_valid() &&
+        std::isfinite(target_ui_midpoint_inverse) && target_ui_midpoint_inverse >= 0.;
     }
     bool projection_conversion_valid() const {
       return basis == automatic_scale_basis::camera_matrix && has_projection_conversion &&
@@ -125,6 +146,8 @@ namespace sunshine_game3d {
       previous.target_value = 0.f;
       previous.target_zero_inverse = 0.;
       previous.zero_target_available = false;
+      previous.target_ui_midpoint_inverse = 0.;
+      previous.ui_midpoint_target_available = false;
       return previous;
     }
     // Camera distance and raw coordinates are different representations.
@@ -134,9 +157,14 @@ namespace sunshine_game3d {
     current.active = false;
     current.reference_inverse = current.minimum_inverse = current.maximum_inverse = 0.0;
     current.mean_square_inverse = 0.;
+    current.has_centered_depth_statistics = false;
+    current.mean_contrast_inverse = current.mean_contrast_square_inverse = 0.;
     current.mean_inverse = current.normalization = 0.;
     current.target_zero_inverse = 0.;
     current.zero_target_available = false;
+    current.ui_midpoint_inverse = 0.f;
+    current.target_ui_midpoint_inverse = 0.;
+    current.has_ui_midpoint = current.ui_midpoint_target_available = false;
     current.depth_pixel_count = current.depth_tiles_x = current.depth_tiles_y = 0;
     current.has_depth_statistics = false;
     return current;

@@ -173,10 +173,9 @@ namespace {
       // separately exercises successful/failed evaluation while FG is off.
       configure(true);
       unsigned fg_frame{};
-      const auto real_frame = [&] {
-        draw(*decoy); write_depth_pixels();
-        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
-        require(new_token(token, &frame) == 0 && token, "FG SDK did not supply an explicit frame token");
+      abi_v2::frame_token *last_token{};
+      std::uint64_t tag_started{}, tag_returned{};
+      const auto camera_constants = [&](bool reset) {
         abi_v2::constants constants{}; constants.base = {nullptr, constants_guid, 1};
         constants.common.camera_view_to_clip = camera.projection;
         constants.common.clip_to_camera_view = camera.inverse_projection;
@@ -184,14 +183,25 @@ namespace {
         constants.common.camera_fov = camera.fov; constants.common.camera_aspect = camera.aspect;
         constants.common.camera_right[0] = constants.common.camera_up[1] = constants.common.camera_forward[2] = 1;
         constants.depth_inverted = 1;
+        constants.reset = reset ? 1u : 0u;
+        return constants;
+      };
+      const auto real_frame = [&] {
+        draw(*decoy); write_depth_pixels();
+        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
+        require(new_token(token, &frame) == 0 && token, "FG SDK did not supply an explicit frame token");
+        last_token = token;
+        const auto constants = camera_constants(false);
         require(constants_call(constants, *token, viewport) == 0, "FG constants observation changed the SDK result");
         abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
         resource.type = 8; resource.native = selected->resource.p; resource.state = unsigned(selected->state);
         resource.width = selected->width; resource.height = selected->height;
         resource.native_format = DXGI_FORMAT_R32_FLOAT; resource.mip_levels = resource.array_layers = 1;
         const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
+        tag_started = GetTickCount64();
         require(tag_call(*token, viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) == 0,
           "FG tag observation changed the SDK result");
+        tag_returned = GetTickCount64();
         const base_structure *inputs[]{&viewport.base};
         require(evaluate(0, *token, inputs, 1, reinterpret_cast<void *>(game_native_command)) == 0,
           "FG same-frame SR observation changed the SDK result");
@@ -237,6 +247,103 @@ namespace {
       render_tracked_depth = [&] { draw_frame(); };
       settle("SL-recovered-after-FG-off");
       std::puts("PASS native SLFG 2x: actual cropped SDK depth, eight real/generated pairs with retained completed depth, FG-off rejection and fresh SL recovery; no FX");
+
+      // Keep the original measured trajectory above unchanged. These additional
+      // native presentations exercise the lifetime of the private display copy,
+      // without an FX callback, injected readiness or synthetic GPU completion.
+      const auto missing = [&](const char *label) {
+        step(); no_effects(); const auto value = inspect(); log_status(label, value);
+        require(!value.ready() && !value.source.ready && !value.source.reused_depth &&
+          !value.source.current.capture && !value.source.current.sequence,
+          "Invalidated native FG cache supplied previous depth without a fresh successful copy");
+      };
+      const auto held = [&](const status &seed, const char *label) {
+        step(); no_effects(); const auto value = inspect();
+        require(active(value) && value.source.reused_depth &&
+          value.source.current.capture == seed.source.current.capture &&
+          value.source.current.sequence == seed.source.current.sequence &&
+          value.source.current.resource == seed.source.current.resource && same_scale(value.scale, seed.scale),
+          "Native FG hold changed the admitted real depth identity or scale");
+        if (label) log_status(label, value);
+        return value;
+      };
+      const auto recovered_fresh = [&](const status &before, const char *label) {
+        render_tracked_depth = real_frame;
+        const auto value = settle(label);
+        require(!value.source.reused_depth && value.source.current.capture != before.source.current.capture &&
+          value.source.current.sequence > before.source.current.sequence,
+          "Native FG cache recovered without a newly completed real capture");
+        return value;
+      };
+
+      configure(true); render_tracked_depth = real_frame;
+      const auto expiry_seed = settle("SLFG-cache-expiry-seed");
+      const auto seed_started = tag_started, seed_returned = tag_returned;
+      const auto seed_frame = fg_frame;
+      render_tracked_depth = {};
+      unsigned holds{};
+      std::uint64_t last_held{};
+      do {
+        held(expiry_seed, holds ? nullptr : "SLFG-cache-expiry-first-hold");
+        last_held = GetTickCount64(); ++holds;
+      } while (holds < 2 || last_held < seed_returned + 140);
+      require(last_held >= seed_started && last_held - seed_started < sunshine_scene_depth::maximum_source_age_ms,
+        "Native expiry fixture exhausted its source-age window before exercising repeated holds");
+      log_status("SLFG-cache-expiry-last-hold", inspect());
+      // The public passive status exposes identity, not the private capture tick.
+      // Bracket the actual SDK tag instead: expiry after its upper time bound,
+      // while the most recent successful hold is still young, distinguishes the
+      // original capture lifetime from a TTL accidentally renewed on each hold.
+      const auto expiry_at = seed_returned + sunshine_scene_depth::maximum_source_age_ms + 20;
+      const auto before_expiry_wait = GetTickCount64();
+      if (before_expiry_wait < expiry_at) Sleep(DWORD(expiry_at - before_expiry_wait));
+      missing("SLFG-cache-expired-after-repeated-holds");
+      const auto expired = GetTickCount64();
+      require(expired >= expiry_at && expired >= last_held &&
+        expired - last_held < sunshine_scene_depth::maximum_source_age_ms && fg_frame == seed_frame &&
+        tag_started == seed_started && tag_returned == seed_returned,
+        "Native expiry fixture did not distinguish the original capture age from renewed hold age");
+      missing("SLFG-cache-expired-no-revival");
+      std::printf("MEASURE native FG cache expiry holds=%u tag_begin_ms=%llu tag_end_ms=%llu last_hold_ms=%llu expired_ms=%llu\n",
+        holds, static_cast<unsigned long long>(seed_started), static_cast<unsigned long long>(seed_returned),
+        static_cast<unsigned long long>(last_held), static_cast<unsigned long long>(expired));
+      recovered_fresh(expiry_seed, "SLFG-cache-expiry-fresh-recovery");
+
+      const auto reset_seed = settle("SLFG-cache-reset-seed");
+      const auto reset_seed_started = tag_started;
+      const auto reset_seed_frame = fg_frame;
+      render_tracked_depth = {};
+      held(reset_seed, "SLFG-cache-reset-before-hold");
+      render_tracked_depth = [&] {
+        require(last_token, "Native camera-reset fixture has no existing frame token");
+        const auto constants = camera_constants(true);
+        require(constants_call(constants, *last_token, viewport) == 0, "Camera reset changed the SDK result");
+      };
+      missing("SLFG-cache-camera-reset");
+      require(GetTickCount64() - reset_seed_started < sunshine_scene_depth::maximum_source_age_ms,
+        "Native camera-reset fixture expired before reset could be distinguished from age rejection");
+      // Restore valid camera metadata on the same token, without a depth tag or
+      // evaluation. This must not repair the invalidated copy's observation lease.
+      render_tracked_depth = [&] {
+        const auto constants = camera_constants(false);
+        require(constants_call(constants, *last_token, viewport) == 0, "Camera recovery changed the SDK result");
+      };
+      missing("SLFG-cache-camera-valid-without-depth");
+      render_tracked_depth = {};
+      missing("SLFG-cache-camera-reset-no-revival");
+      require(fg_frame == reset_seed_frame, "Camera-reset no-revival case accidentally produced a new real frame");
+      recovered_fresh(reset_seed, "SLFG-cache-camera-reset-fresh-recovery");
+
+      const auto mode_seed = settle("SLFG-cache-mode-seed");
+      const auto mode_seed_frame = fg_frame;
+      render_tracked_depth = {};
+      held(mode_seed, "SLFG-cache-mode-before-hold");
+      configure(false); missing("SLFG-cache-mode-off");
+      configure(true); missing("SLFG-cache-mode-on-without-depth");
+      missing("SLFG-cache-mode-on-no-revival");
+      require(fg_frame == mode_seed_frame, "FG mode no-revival case accidentally produced a new real frame");
+      recovered_fresh(mode_seed, "SLFG-cache-mode-fresh-recovery");
+      std::puts("PASS native FG cache: repeated holds cannot renew capture age; camera reset and FG off/on cannot revive old depth; fresh copies recover all three intervals; no FX");
     }
 
     void finish() {

@@ -334,7 +334,7 @@ namespace {
 
 int main(int argc, char **argv) {
   if (argc < 4) {
-    std::fprintf(stderr, "usage: replay_game3d_dump <dump-dir> <official-ReShade64.dll> <fresh-output-dir> [--shader file.hlsl] [--strength 0..100] [--zero-inverse-depth nonnegative-float] [--depth-gain positive-float] [--disparity-limit-uv (0,.04]] [--source-alpha-ui on|off] [--verify]\n");
+    std::fprintf(stderr, "usage: replay_game3d_dump <dump-dir> <official-ReShade64.dll> <fresh-output-dir> [--shader file.hlsl] [--strength 0..100] [--zero-inverse-depth nonnegative-float] [--ui-inverse-depth nonnegative-float | --ui-nearest-floor nonnegative-float | --ui-plane screen|front-limit] [--depth-gain positive-float] [--disparity-limit-uv (0,.04]] [--source-alpha-ui on|off] [--verify]\n");
     return 2;
   }
   fs::path output;
@@ -345,6 +345,8 @@ int main(int argc, char **argv) {
     std::optional<float> depth_gain;
     std::optional<float> disparity_limit_uv;
     std::optional<bool> source_alpha_ui;
+    std::optional<sunshine_game3d::ui_plane_parameters> ui_plane_override;
+    std::string ui_plane_argument;
     std::string zero_inverse_depth_argument;
     fs::path shader_override;
     bool verify = false;
@@ -374,6 +376,22 @@ int main(int argc, char **argv) {
         zero_inverse_depth = std::stof(zero_inverse_depth_argument, &end);
         require(end == zero_inverse_depth_argument.size() && *zero_inverse_depth >= 0.f && std::isfinite(*zero_inverse_depth),
           "Zero inverse depth must be finite and nonnegative");
+      } else if (option == "--ui-inverse-depth" || option == "--ui-nearest-floor") {
+        require(!ui_plane_override && i + 1 < argc, "Expected one independent UI plane override");
+        std::size_t end = 0;
+        ui_plane_argument = argv[++i];
+        const float inverse = std::stof(ui_plane_argument, &end);
+        require(end == ui_plane_argument.size() && inverse >= 0.f && std::isfinite(inverse),
+          "UI inverse depth must be finite and nonnegative");
+        ui_plane_override = sunshine_game3d::ui_plane_parameters {
+          option == "--ui-nearest-floor" ? sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui :
+            sunshine_game3d::ui_plane_mode::depth_midpoint, inverse};
+      } else if (option == "--ui-plane") {
+        require(!ui_plane_override && i + 1 < argc, "Expected one independent UI plane override");
+        ui_plane_argument = argv[++i];
+        require(ui_plane_argument == "screen" || ui_plane_argument == "front-limit", "UI plane must be screen or front-limit; use --ui-inverse-depth to supply an independent depth");
+        ui_plane_override = sunshine_game3d::ui_plane_parameters {
+          ui_plane_argument == "front-limit" ? sunshine_game3d::ui_plane_mode::front_limit : sunshine_game3d::ui_plane_mode::screen, 0.f};
       } else if (option == "--depth-gain") {
         require(!depth_gain && i + 1 < argc, "Expected one depth gain");
         std::size_t end = 0;
@@ -425,10 +443,17 @@ int main(int argc, char **argv) {
     if (depth_gain) parameters.depth_scale = *depth_gain;
     if (disparity_limit_uv) parameters.disparity_limit_uv = *disparity_limit_uv;
     const bool protect_ui = source_alpha_ui.value_or(package.source_alpha_ui);
+    const auto ui_plane = ui_plane_override.value_or(package.ui_plane);
     const std::string ui_alpha_source = !protect_ui ? "none" : package.ui_alpha_source == "ui_source_color" ? "ui_source_color" : "source_color";
     require(!protect_ui || shader.find("Sunshine_SourceAlphaUI") != std::string::npos,
       "Source-alpha UI requires a shader that consumes the UI selection");
-    const bool experiment = source_alpha_ui.has_value() || strength.has_value() || zero_inverse_depth.has_value() || depth_gain.has_value() || disparity_limit_uv.has_value() || !shader_override.empty();
+    require(ui_plane.mode == sunshine_game3d::ui_plane_mode::screen || replay::supports_ui_plane(shader),
+      "Independent UI plane requires a shader that consumes its parameters; supply --shader for a legacy captured shader");
+    require(ui_plane.mode != sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui || replay::supports_nearest_ui_plane(shader),
+      "Nearest-covered UI plane requires its GPU reduction shader; supply --shader for a legacy captured shader");
+    require(ui_plane.mode != sunshine_game3d::ui_plane_mode::front_limit || replay::supports_front_ui_plane(shader),
+      "Fixed front-limit UI plane requires its shader contract; supply --shader for a legacy captured shader");
+    const bool experiment = ui_plane_override.has_value() || source_alpha_ui.has_value() || strength.has_value() || zero_inverse_depth.has_value() || depth_gain.has_value() || disparity_limit_uv.has_value() || !shader_override.empty();
     require(fs::create_directories(output), "Cannot create fresh output directory");
     created = true;
     write_file(output / "shader_used.hlsl", shader.data(), shader.size());
@@ -442,6 +467,29 @@ int main(int argc, char **argv) {
     if (depth_gain) report["depth_gain_override"] = *depth_gain;
     report["source_alpha_ui"] = protect_ui;
     report["captured_source_alpha_ui"] = package.source_alpha_ui;
+    const auto describe_ui = [](bool enabled, const sunshine_game3d::ui_plane_parameters &plane) {
+      const auto words = sunshine_game3d::ui_parameter_words(enabled, plane);
+      return json {{"mode", static_cast<std::uint32_t>(plane.mode)},
+        {"mode_name", plane.mode == sunshine_game3d::ui_plane_mode::screen ? "screen" :
+          plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint ? "depth_midpoint" :
+          plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui ? "depth_midpoint_nearest_ui" :
+          plane.mode == sunshine_game3d::ui_plane_mode::front_limit ? "front_limit" : "unknown"},
+        {"inverse_depth", std::isfinite(plane.inverse_depth) ? json(plane.inverse_depth) : json(nullptr)},
+        {"inverse_depth_role", plane.mode == sunshine_game3d::ui_plane_mode::front_limit ||
+          plane.mode == sunshine_game3d::ui_plane_mode::screen ? "unused" :
+          plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui ? "midpoint_floor" : "explicit_plane"},
+        {"inverse_depth_bits", words[2]}, {"uint32", words}};
+    };
+    report["captured_ui_parameter_abi"] = package.ui_parameter_abi;
+    report["captured_ui_parameter_hex"] = replay::hex(package.ui_parameters.data(), package.ui_parameters.size());
+    report["captured_ui_plane"] = describe_ui(package.source_alpha_ui, package.ui_plane);
+    report["ui_parameter_abi"] = ui_plane.mode == sunshine_game3d::ui_plane_mode::front_limit ? "sunshine_game3d.ui_parameters.v4" :
+      ui_plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui ?
+      "sunshine_game3d.ui_parameters.v3" : "sunshine_game3d.ui_parameters.v2";
+    report["ui_parameter_bytes"] = replay::ui_parameter_bytes;
+    if (ui_plane_override) report["ui_plane_override"] = {{"scope", "offline experiment only"},
+      {"requested_argument", ui_plane_argument},
+      {"rule", "Only the UI plane changes. Front-limit mode uses the current positive display bound scaled by strength and stereo blend, independent of scene depth/gain/zero. Depth modes map qUI through current geometry. No frozen displacement is supplied."}};
     report["ui_alpha_source"] = ui_alpha_source;
     report["captured_ui_alpha_source"] = package.ui_alpha_source;
     if (package.ui_alpha_source == "ui_source_color") report["captured_ui_source_provenance"] = manifest.at("producer_metadata").value("ui_source", json::object());
@@ -490,11 +538,28 @@ int main(int argc, char **argv) {
       ui_source = fixture.upload(a, read_artifact(directory, a));
       checked(fixture.device->CreateShaderResourceView(ui_source.Get(), nullptr, &ui_source_view), "Create exact consumed UI-alpha SRV");
     }
-    require(renderer.render(queue->get_immediate_command_list(), backbuffer, {reinterpret_cast<std::uint64_t>(depth_view.Get())}, parameters, protect_ui, {reinterpret_cast<std::uint64_t>(ui_source_view.Get())}), "Production renderer rejected replay");
+    require(renderer.render(queue->get_immediate_command_list(), backbuffer, {reinterpret_cast<std::uint64_t>(depth_view.Get())}, parameters, protect_ui, {reinterpret_cast<std::uint64_t>(ui_source_view.Get())}, ui_plane), "Production renderer rejected replay");
+    const auto consumed_ui = renderer.consumed_ui_plane();
+    const auto consumed_ui_words = sunshine_game3d::ui_parameter_words(renderer.consumed_source_alpha_ui(), consumed_ui);
+    require(consumed_ui_words == sunshine_game3d::ui_parameter_words(protect_ui, ui_plane), "Renderer changed the submitted UI constants");
+    report["ui_parameter_hex"] = replay::hex(consumed_ui_words.data(), sizeof(consumed_ui_words));
+    report["applied_ui_plane"] = describe_ui(renderer.consumed_source_alpha_ui(), consumed_ui);
     queue->flush_immediate_command_list();
     renderer.finish_present();
     queue->wait_idle();
     const auto resources = renderer.diagnostics();
+    if (resources.ui_plane_resolved.handle) {
+      const replay::artifact scalar {"ui_plane_resolved", "ui_plane_resolved.bin", 1, 1, DXGI_FORMAT_R32_FLOAT, 4, 4};
+      const auto bytes = fixture.read(reinterpret_cast<ID3D11Texture2D *>(resources.ui_plane_resolved.handle), scalar);
+      require(bytes.size() == sizeof(float), "Invalid resolved UI plane readback");
+      float resolved;
+      std::memcpy(&resolved, bytes.data(), sizeof(resolved));
+      require(std::isfinite(resolved) && resolved >= 0.f, "Invalid GPU-resolved UI inverse depth");
+      write_file(output / scalar.file, bytes.data(), bytes.size());
+      report["applied_ui_plane"]["resolved_inverse_depth"] = resolved;
+      report["applied_ui_plane"]["resolved_inverse_depth_file"] = scalar.file;
+      report["applied_ui_plane"]["resolution"] = "Same-render GPU maximum over covered depth with the submitted midpoint floor";
+    }
     bool all_exact = true, all_within = true;
     for (const auto &[kind, a] : package.artifacts) {
       if (kind == "raw_depth") {

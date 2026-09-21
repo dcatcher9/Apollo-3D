@@ -620,6 +620,46 @@ namespace sunshine_streamline::depth_capture {
         owner.provider == value->metadata.provider && owner.source_id == value->metadata.source_id &&
         owner.last_epoch == value->metadata.epoch && value->metadata.sequence > owner.last_sequence;
     }
+    acquisition_decision classify_acquisition(const capture_pick &chosen, const queue_state &owner,
+        const queue_progress &progress, bool recording_retired, selection_policy policy) {
+      acquisition_decision out;
+      out.source_selected = chosen.value != nullptr;
+      out.pending_frame = pending_frame(chosen, owner);
+      const auto *value = chosen.value ? chosen.value : chosen.latest;
+      if (value) {
+        const auto &metadata = value->metadata;
+        out.provider = metadata.provider; out.epoch = metadata.epoch;
+        out.sequence = metadata.sequence; out.source_id = metadata.source_id;
+        out.viewport = metadata.viewport; out.capture_id = value->id;
+        out.source_valid = !value->invalid && value->failure == capture_failure::none &&
+          (!value->finished || value->success);
+        out.repeated_frame = !chosen.value && chosen.result != status::failed && chosen.result != status::stale &&
+          chosen.result != status::ambiguous && value->finished && value->success &&
+          !value->nomination_invalid && !value->invalid &&
+          owner.last_epoch == metadata.epoch && owner.last_sequence == metadata.sequence;
+        // select_capture sets this identity only for the exact eligible completed
+        // predecessor already consumed by this owner. The selection label merely
+        // explains that branch; it is not an input to this continuity proof.
+        if (chosen.value && metadata.provider == provider_kind::ngx && !metadata.frame_generation_input &&
+            chosen.result == status::submitted && value->finished && value->success &&
+            value->producer_submitted && out.source_valid && chosen.consumed_completed_capture &&
+            progress.valid() && value->producer_fence &&
+            (!recording_retired || progress.completed < value->producer_fence))
+          out.pending_ngx_previous_capture = chosen.consumed_completed_capture;
+      }
+      else if (chosen.pending_nomination) {
+        const auto &pending = *chosen.pending_nomination;
+        out.provider = policy.require_frame_generation ? provider_kind::streamline : owner.provider;
+        out.epoch = pending.epoch; out.sequence = pending.sequence;
+        out.source_id = pending.source_id; out.viewport = pending.viewport;
+        out.source_valid = true; // The selector already validated this bounded nomination.
+      }
+      else if (policy.require_frame_generation) {
+        out.epoch = policy.epoch; out.viewport = policy.viewport;
+        out.source_id = (1ull << 63) | policy.viewport;
+      }
+      return out;
+    }
     // Keep one completed API snapshot while the CPU records its successor.
     // Completion and nomination advance independently for SR as well as FG.
     // Requiring the latest nomination to finish can starve a pipelined game.
@@ -797,19 +837,45 @@ namespace sunshine_streamline::depth_capture {
         if (auxiliary_consumers[i]) consumer_submitted(diagnostic_slots[i], native, fence, signaled);
       }
     }
-    bool reclaimable(slot &value) {
-      retire_dead_recordings(value);
+    bool current_source_nomination(const slot &value) {
+      if (!value.id || !value.source_nominated || value.preservation_only || value.invalid ||
+          value.nomination_invalid || (value.finished && !value.success) || !valid_provider(value.metadata.provider))
+        return false;
+      const auto &head = evaluations[provider_index(value.metadata.provider)];
+      return value.metadata.epoch == head.epoch && value.metadata.sequence == head.sequence &&
+        value.metadata.source_id == head.source_id;
+    }
+    enum class source_retention { none, current_nomination, completed_fallback };
+    source_retention logical_source_retention(slot &value) {
+      if (value.shared_preservation || value.nomination_only) {
+        // Metadata-only nominations carry source authority but no GPU storage.
+        const auto &head = evaluations[provider_index(value.metadata.provider)];
+        const bool current = !value.invalid && (!value.finished || value.success) &&
+          value.metadata.epoch == head.epoch && value.metadata.sequence == head.sequence &&
+          value.metadata.source_id == head.source_id;
+        return current ? source_retention::current_nomination : source_retention::none;
+      }
+      if (!value.source_nominated || value.preservation_only || value.invalid || value.nomination_invalid ||
+          !valid_provider(value.metadata.provider)) return source_retention::none;
+      // GPU retirement does not retire the provider's nomination authority.
+      // A different provider (or Generic preservation) shares this pool and
+      // must not erase the current head while its namespace still names it.
+      if (current_source_nomination(value)) return source_retention::current_nomination;
+      const slot *latest = nullptr;
+      for (const auto &candidate : slots)
+        if (candidate.metadata.provider == value.metadata.provider && current_source_nomination(candidate) &&
+            (!latest || candidate.id > latest->id)) latest = &candidate;
+      // Preserve exactly the existing eligible completed fallback too. Its
+      // age, reset/revision, source and GPU-completion requirements remain in
+      // completed_snapshot; retaining storage grants no extra admission.
+      return latest && completed_snapshot(latest->metadata, GetTickCount64()) == &value ?
+        source_retention::completed_fallback : source_retention::none;
+    }
+    bool snapshot_storage_retired(const slot &value) {
       if (!value.id) return true;
       if (value.diagnostic_only && !value.diagnostic_released) return false;
-      if (value.shared_preservation || value.nomination_only) {
-        // No GPU commands/resources belong to a nomination. Superseded or
-        // rejected metadata can be discarded even if the game's list remains
-        // closed. Retain the latest pending/successful ticket for acquisition.
-        const auto &head = evaluations[provider_index(value.metadata.provider)];
-        return value.invalid || (value.finished && !value.success) ||
-          value.metadata.epoch != head.epoch || value.metadata.sequence != head.sequence ||
-          value.metadata.source_id != head.source_id;
-      }
+      // No copy allocation or submitted GPU obligation belongs to metadata.
+      if (value.shared_preservation || value.nomination_only) return true;
       if (value.retirement_unknown) return false;
       if (value.command) return false; // A closed producer may legally replay.
       if (value.texture.use_count() > 1) return false;
@@ -821,6 +887,14 @@ namespace sunshine_streamline::depth_capture {
         const auto complete = owner->fence->GetCompletedValue();
         return complete != UINT64_MAX && complete >= point.value;
       });
+    }
+    bool reclaimable(slot &value) {
+      retire_dead_recordings(value);
+      if (!value.id) return true;
+      // Logical source lifetime and GPU storage lifetime are independent. A
+      // retired allocation can still carry authority; withdrawing authority
+      // never discharges an unfinished recording, CPU lease or queue fence.
+      return logical_source_retention(value) == source_retention::none && snapshot_storage_retired(value);
     }
     void collect_diagnostics() {
       if (!diagnostic_slots_active) return;
@@ -1211,7 +1285,8 @@ namespace sunshine_streamline::depth_capture {
 
   static std::uint64_t record_impl(std::uint64_t native, const input &value, record_diagnostic *diagnostic,
       bool preservation_only, preservation_ticket *preserved = nullptr, bool nominate_source = false,
-      bool diagnostic_copy = false, bool reusable_storage = false) {
+      bool diagnostic_copy = false, bool reusable_storage = false,
+      local_texture_state_policy state_policy = local_texture_state_policy::source_contract) {
     bool valid_nomination = false;
     std::uint64_t nomination_command{}, nomination_source{};
     recording_ref nomination_recording;
@@ -1248,6 +1323,12 @@ namespace sunshine_streamline::depth_capture {
       return 0;
     };
     if (!requested.load()) return reject(status::malformed, record_stage::inactive);
+    const bool prefer_observed_recording = state_policy == local_texture_state_policy::prefer_observed_recording;
+    if (state_policy != local_texture_state_policy::source_contract &&
+        (!prefer_observed_recording || !preservation_only || !diagnostic_copy || !reusable_storage ||
+          value.provider != provider_kind::streamline || !value.frame_generation_input || !value.force_snapshot ||
+          value.valid_until != sunshine_scene_depth::lifetime::at_call))
+      return reject(status::malformed, record_stage::malformed_input);
     if (!native) return reject(status::malformed, record_stage::malformed_input);
     if (!value.source) return reject(status::malformed, record_stage::missing_source);
     if ((!preservation_only && (!valid_provider(value.provider) || !valid_projection(value.projection) ||
@@ -1342,13 +1423,31 @@ namespace sunshine_streamline::depth_capture {
     // An explicit/provider state cannot override an in-progress split barrier
     // or another transition that we know cannot be represented safely.
     if (observed && (observed->blocked || !observed->known)) return reject(status::incomplete_state, record_stage::incomplete_state);
-    if (value.proof == sunshine_scene_depth::state_proof::observed_nonzero) {
+    const bool use_observed_state = (prefer_observed_recording && observed) ||
+      value.proof == sunshine_scene_depth::state_proof::observed_nonzero;
+    if (use_observed_state) {
       if (!observed || observed->value == 0) return reject(status::missing_state, record_stage::missing_state);
       before = observed->value;
     } else if (observed && observed->value != before) {
       return reject(status::conflicting_state, record_stage::conflicting_state);
     }
+    if (prefer_observed_recording && !observed) {
+      // A valid resource may remain in its declared state across recordings.
+      // Trust only the explicit supplied contract here; absence is not an
+      // observation of COMMON, and known incomplete evidence never gets here.
+      if (value.proof != sunshine_scene_depth::state_proof::declared || before == 0 || before == UINT32_MAX)
+        return reject(status::missing_state, record_stage::missing_state);
+      if (((before & D3D12_RESOURCE_STATE_RENDER_TARGET) && !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) ||
+          ((before & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) && !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) ||
+          ((before & (D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE)) &&
+            !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)))
+        return reject(status::unsupported_state, record_stage::unsupported_state);
+    }
     if (!supported_state(before)) return reject(status::unsupported_state, record_stage::unsupported_state);
+    if (diagnostic) {
+      diagnostic->copy_state = before; diagnostic->copy_state_known = true;
+      diagnostic->used_observed_state = use_observed_state;
+    }
     // Multiple legal clear boundaries in one unsubmitted recording may replace
     // the same source snapshot before anyone reads it. Old tickets are retired
     // by ID; their CPU leases alone do not represent recorded GPU reads.
@@ -1473,9 +1572,10 @@ namespace sunshine_streamline::depth_capture {
     return record_impl(command, value, diagnostic, false);
   }
   static diagnostic_ticket record_auxiliary_texture(std::uint64_t command, const input &value,
-      record_diagnostic *diagnostic, bool reusable_storage) {
+      record_diagnostic *diagnostic, bool reusable_storage,
+      local_texture_state_policy state_policy = local_texture_state_policy::source_contract) {
     try {
-      const auto id = record_impl(command, value, diagnostic, true, nullptr, false, true, reusable_storage);
+      const auto id = record_impl(command, value, diagnostic, true, nullptr, false, true, reusable_storage, state_policy);
       if (!id) return {};
       std::lock_guard lock(mutex);
       for (const auto &entry : diagnostic_slots) if (entry.id == id) return {id, entry.texture};
@@ -1489,8 +1589,9 @@ namespace sunshine_streamline::depth_capture {
   diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
     return record_auxiliary_texture(command, value, diagnostic, false);
   }
-  diagnostic_ticket record_local_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
-    return record_auxiliary_texture(command, value, diagnostic, true);
+  diagnostic_ticket record_local_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic,
+      local_texture_state_policy state_policy) {
+    return record_auxiliary_texture(command, value, diagnostic, true, state_policy);
   }
   void finish_diagnostic_texture(const diagnostic_ticket &ticket, bool successful) {
     if (!ticket) return;
@@ -1635,30 +1736,37 @@ namespace sunshine_streamline::depth_capture {
 
   bool acquire(std::uint64_t native, std::uint64_t present, packet &out, capture_diagnostic *diagnostic,
       selection_policy policy) {
+    acquisition_decision ignored;
+    return acquire(native, present, out, ignored, diagnostic, policy);
+  }
+  bool acquire(std::uint64_t native, std::uint64_t present, packet &out, acquisition_decision &decision,
+      capture_diagnostic *diagnostic, selection_policy policy) {
     out = {};
+    decision = {};
+    if (policy.require_frame_generation) {
+      decision.epoch = policy.epoch; decision.viewport = policy.viewport;
+      decision.source_id = (1ull << 63) | policy.viewport;
+    }
     if (diagnostic) {
       *diagnostic = {}; diagnostic->requested_queue = native;
-      if (policy.require_frame_generation) {
-        diagnostic->provider = provider_kind::streamline;
-        diagnostic->epoch = policy.epoch; diagnostic->viewport = policy.viewport;
-        diagnostic->source_id = (1ull << 63) | policy.viewport;
-      }
     }
     queue_progress progress;
-    const auto result = [diagnostic, &progress](status why, const slot *value = nullptr) {
+    bool recording_retired = false;
+    const auto result = [diagnostic, &decision, &progress, &recording_retired](status why, const slot *value = nullptr) {
       if (diagnostic) {
         diagnostic->result = why;
+        diagnostic->capture_id = decision.capture_id; diagnostic->sequence = decision.sequence;
+        diagnostic->epoch = decision.epoch; diagnostic->source_id = decision.source_id;
+        diagnostic->viewport = decision.viewport; diagnostic->provider = decision.provider;
+        diagnostic->repeated_frame = decision.repeated_frame; diagnostic->pending_frame = decision.pending_frame;
         if (value) {
           diagnostic->failure = value->failure;
-          diagnostic->capture_id = value->id; diagnostic->sequence = value->metadata.sequence;
-          diagnostic->epoch = value->metadata.epoch; diagnostic->command = value->command;
-          diagnostic->source_id = value->metadata.source_id;
-          diagnostic->viewport = value->metadata.viewport;
-          diagnostic->provider = value->metadata.provider;
+          diagnostic->source_tick_ms = value->metadata.tick;
+          diagnostic->command = value->command;
           diagnostic->queue = value->queue; diagnostic->producer_fence = value->producer_fence;
           diagnostic->producer_completed = progress.completed;
           diagnostic->producer_completion_valid = progress.valid();
-          diagnostic->producer_recording_retired = producer_recording_retired(*value);
+          diagnostic->producer_recording_retired = recording_retired;
           for (const auto &point : value->retirements)
             if (point.queue == diagnostic->consumer_queue) diagnostic->retire_fence = point.value;
           diagnostic->finished = value->finished; diagnostic->success = value->success;
@@ -1674,11 +1782,31 @@ namespace sunshine_streamline::depth_capture {
     if (!owner || owner->retiring) return result(status::unsupported_queue);
     native = reinterpret_cast<std::uint64_t>(owner->queue.p);
     if (diagnostic) diagnostic->consumer_queue = native;
-    const auto chosen = select_provider(*owner, native, present, GetTickCount64(), policy);
+    const auto selection_tick = GetTickCount64();
+    const auto chosen = select_provider(*owner, native, present, selection_tick, policy);
     progress = chosen.progress;
+    const auto *selected = chosen.value ? chosen.value : chosen.latest;
+    if (selected) {
+      // Continuity needs the same completion facts whether or not diagnostics
+      // were requested. This query never changes admission or GPU ordering.
+      if (selected->queue == native) progress = producer_progress(*selected);
+      recording_retired = producer_recording_retired(*selected);
+    }
+    decision = classify_acquisition(chosen, *owner, progress, recording_retired, policy);
     if (diagnostic) {
       diagnostic->selection = chosen.selection;
       diagnostic->consumed_completed_capture = chosen.consumed_completed_capture;
+      diagnostic->selection_tick_ms = selection_tick;
+      if (selected || policy.require_frame_generation || owner->provider_established) {
+        const auto provider = selected ? selected->metadata.provider :
+          policy.require_frame_generation ? provider_kind::streamline : owner->provider;
+        const auto &current = evaluations[provider_index(provider)];
+        for (const auto &view : current.views) if (view.epoch == current.epoch && view.sequence) {
+          diagnostic->newest_view_tick_ms = std::max(diagnostic->newest_view_tick_ms, view.tick);
+          if (selection_tick >= view.tick && selection_tick - view.tick < sunshine_scene_depth::maximum_source_age_ms)
+            ++diagnostic->active_view_count;
+        }
+      }
     }
     // A genuine source interruption revokes snapshots from before the gap.
     // Normal pending/repeated frames do not move this admission watermark.
@@ -1689,24 +1817,9 @@ namespace sunshine_streamline::depth_capture {
       chosen.pending_nomination ? chosen.pending_nomination->sequence : 0;
     if (diagnostic && chosen.pending_nomination) {
       const auto &pending = *chosen.pending_nomination;
-      diagnostic->pending_frame = true;
-      diagnostic->epoch = pending.epoch; diagnostic->sequence = pending.sequence;
-      diagnostic->source_id = pending.source_id; diagnostic->viewport = pending.viewport;
-      diagnostic->provider = policy.require_frame_generation ? provider_kind::streamline : owner->provider;
+      diagnostic->source_tick_ms = pending.tick;
     }
-    if (diagnostic) diagnostic->pending_frame = pending_frame(chosen, *owner);
-    if (diagnostic) {
-      const auto *value = chosen.value ? chosen.value : chosen.latest;
-      if (value && value->queue == native) progress = producer_progress(*value);
-    }
-    if (!chosen.value) {
-      if (diagnostic && chosen.latest && chosen.result != status::failed && chosen.result != status::stale &&
-          chosen.result != status::ambiguous && chosen.latest->finished && chosen.latest->success &&
-          !chosen.latest->nomination_invalid && !chosen.latest->invalid &&
-          owner->last_epoch == chosen.latest->metadata.epoch && owner->last_sequence == chosen.latest->metadata.sequence)
-        diagnostic->repeated_frame = true;
-      return result(chosen.result, chosen.latest);
-    }
+    if (!chosen.value) return result(chosen.result, chosen.latest);
     auto *best = chosen.value;
     // Borrowed CPU ownership alone does not imply a GPU consumer. Only a
     // successful pre-read mark_consumer establishes that retirement obligation.
@@ -2203,6 +2316,78 @@ namespace sunshine_streamline::depth_capture {
       queue_state owner;
       constexpr std::uint64_t native = 77;
       {
+        // These prerequisites belong to capture ownership, not the provider's
+        // diagnostic consumer. Exercise each refusal without COM/GPU work.
+        slot next;
+        next.id = 301; next.metadata.provider = provider_kind::ngx;
+        next.metadata.epoch = 4; next.metadata.sequence = 201;
+        next.metadata.source_id = 7; next.metadata.viewport = 2;
+        next.finished = next.success = next.producer_submitted = true;
+        next.producer_fence = 12;
+        capture_pick picked;
+        picked.value = &next; picked.latest = &next;
+        picked.result = status::submitted;
+        picked.selection = selection_reason::completed_already_consumed;
+        picked.consumed_completed_capture = 300;
+        queue_progress progress;
+        progress.queried = true; progress.completed = 10;
+        const auto classified = [&](const capture_pick &choice, const queue_progress &gpu,
+            bool retired = true) { return classify_acquisition(choice, owner, gpu, retired, {}); };
+        const auto proof = classified(picked, progress);
+        if (!proof.source_selected || !proof.source_valid || proof.pending_ngx_previous_capture != 300 ||
+            proof.provider != next.metadata.provider || proof.capture_id != next.id ||
+            proof.epoch != next.metadata.epoch || proof.sequence != next.metadata.sequence ||
+            proof.source_id != next.metadata.source_id || proof.viewport != next.metadata.viewport) return false;
+        // The consumed identity is produced only by the selector's precise
+        // predecessor branch. Rewording its explanatory label changes no proof.
+        auto relabeled = picked; relabeled.selection = selection_reason::not_attempted;
+        if (classified(relabeled, progress).pending_ngx_previous_capture != 300) return false;
+        for (unsigned retirement = 0; retirement != 3; ++retirement) {
+          auto base_progress = progress;
+          const bool retired = retirement == 0;
+          if (retirement == 2) base_progress.completed = next.producer_fence;
+          if (classified(picked, base_progress, retired).pending_ngx_previous_capture != 300) return false;
+          for (unsigned condition = 0; condition != 12; ++condition) {
+            auto candidate = next;
+            auto choice = picked; choice.value = &candidate; choice.latest = &candidate;
+            auto gpu = base_progress;
+            switch (condition) {
+              case 0: choice.result = status::failed; break;
+              case 1: candidate.finished = false; break;
+              case 2: candidate.success = false; break;
+              case 3: candidate.producer_submitted = false; break;
+              case 4: candidate.invalid = true; break;
+              case 5: candidate.failure = capture_failure::observer_loss; break;
+              case 6: choice.consumed_completed_capture = 0; break;
+              case 7: candidate.producer_fence = 0; break;
+              case 8: gpu.queried = false; break;
+              case 9: gpu.completed = UINT64_MAX; break;
+              case 10: candidate.metadata.provider = provider_kind::streamline; break;
+              case 11: candidate.metadata.frame_generation_input = true; break;
+            }
+            if (classified(choice, gpu, retired).pending_ngx_previous_capture) return false;
+          }
+        }
+        auto completed = progress; completed.completed = next.producer_fence;
+        if (classified(picked, completed).pending_ngx_previous_capture) return false;
+        auto no_selection = picked; no_selection.value = nullptr;
+        if (classified(no_selection, progress).source_selected ||
+            classified(no_selection, progress).pending_ngx_previous_capture) return false;
+        owner.last_epoch = next.metadata.epoch; owner.last_sequence = next.metadata.sequence;
+        if (!classified(no_selection, progress).repeated_frame) return false;
+        no_selection.result = status::failed;
+        if (classified(no_selection, progress).repeated_frame) return false;
+        next.finished = next.success = false;
+        if (!classified(picked, progress).source_valid) return false; // Unfinished is not a failed result.
+        next.finished = true;
+        if (classified(picked, progress).source_valid) return false;
+        capture_pick absent;
+        const auto missing = classify_acquisition(absent, owner, {}, false, {true, 4, 2});
+        if (missing.source_selected || missing.source_valid || missing.pending_frame || missing.repeated_frame ||
+            missing.epoch != 4 || missing.viewport != 2 || missing.source_id != ((1ull << 63) | 2)) return false;
+        owner.last_epoch = owner.last_sequence = 0;
+      }
+      {
         // The continuity consumer needs a precise refusal reason, not merely
         // "submitted". Exercise the same pre-GPU fallback checks used below.
         auto source = std::make_shared<source_reference>();
@@ -2435,6 +2620,11 @@ namespace sunshine_streamline::depth_capture {
       auto pending = pending_pick();
       if (pending.value || pending.latest || !pending.pending_nomination || pending.result != status::recorded ||
           !matching_evaluation(*pending.pending_nomination, candidate)) return false;
+      const auto pending_decision = classify_acquisition(pending, pending_owner, {}, false, {true, 20, 0});
+      if (pending_decision.source_selected || !pending_decision.source_valid || !pending_decision.pending_frame ||
+          pending_decision.capture_id || pending_decision.epoch != candidate.epoch ||
+          pending_decision.sequence != candidate.sequence || pending_decision.source_id != candidate.source_id ||
+          pending_decision.viewport != candidate.viewport || pending_decision.pending_ngx_previous_capture) return false;
       pending_owner.provider_established = false;
       if (pending_pick().pending_nomination || pending_pick().value) return false;
       pending_owner.provider_established = true;

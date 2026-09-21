@@ -8,6 +8,9 @@
 
 namespace {
   using namespace sunshine_game3d::replay;
+  using sunshine_game3d::ui_parameter_words;
+  using sunshine_game3d::ui_plane_mode;
+  using sunshine_game3d::ui_plane_parameters;
   using json = nlohmann::json;
 
   json artifact(const char *kind, unsigned width, unsigned height, unsigned format) {
@@ -82,6 +85,141 @@ namespace {
     for (const auto &value : json::array({0, 1, -1, .5, "true", "false", nullptr, json::array(), json::object()})) {
       reject([&](json &bad) { bad["producer_metadata"]["replay"]["source_alpha_ui"] = value; });
     }
+  }
+
+  void set_ui(json &m, bool enabled, std::uint32_t mode, std::uint32_t inverse_bits) {
+    auto &record = m["producer_metadata"]["replay"];
+    float inverse;
+    std::memcpy(&inverse, &inverse_bits, sizeof(inverse));
+    const std::array<std::uint32_t, 4> words {enabled ? 1u : 0u, mode, inverse_bits, 0u};
+    record["source_alpha_ui"] = enabled;
+    record["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v2";
+    record["ui_parameter_bytes"] = ui_parameter_bytes;
+    record["ui_parameter_hex"] = hex(words.data(), sizeof(words));
+    record["ui_constant_binding"] = {{"register", "b1"}, {"uint32", words}, {"mode", mode},
+      {"inverse_depth", std::isfinite(inverse) ? json(inverse) : json(nullptr)}, {"inverse_depth_bits", inverse_bits}};
+    record["shader_source"] = "Sunshine_SourceAlphaUI Sunshine_UIPlaneMode";
+  }
+
+  void legacy_ui_screen_compatibility() {
+    for (const bool enabled : {false, true}) {
+      auto m = valid();
+      auto &record = m["producer_metadata"]["replay"];
+      record["source_alpha_ui"] = enabled;
+      const auto legacy = parse(m);
+      const auto expected = ui_parameter_words(enabled, {});
+      require(legacy.ui_parameter_abi == "legacy_screen" && legacy.ui_plane.mode == ui_plane_mode::screen &&
+        legacy.ui_plane.inverse_depth == 0.f &&
+        hex(legacy.ui_parameters.data(), legacy.ui_parameters.size()) == hex(expected.data(), sizeof(expected)),
+        "Legacy package did not synthesize exact screen-plane b1");
+      record["ui_constant_binding"] = {{"register", "b1"}, {"uint32", expected}};
+      require(parse(m).ui_parameters == legacy.ui_parameters, "Legacy explicit screen binding changed");
+    }
+    reject([](json &m) { m["producer_metadata"]["replay"]["ui_parameter_hex"] = std::string(32, '0'); });
+    reject([](json &m) { m["producer_metadata"]["replay"]["ui_parameter_bytes"] = 16; });
+    reject([](json &m) { m["producer_metadata"]["replay"]["ui_constant_binding"] = {{"register", "b1"}, {"uint32", {0, 1, 0, 0}}}; });
+    reject([](json &m) { m["producer_metadata"]["replay"]["ui_constant_binding"] = {{"register", "b1"}, {"uint32", {0, 0, 0, 0}}, {"inverse_depth", 0}}; });
+  }
+
+  void exact_independent_ui_plane() {
+    // Include signed zero, subnormal/maximum values and malformed production
+    // inputs: replay must exercise the shader guards without rewriting bytes.
+    for (const auto bits : {0u, 0x80000000u, 1u, 0x3f000001u, 0x7f7fffffu, 0xbf000000u,
+           0x7f800000u, 0xff800000u, 0x7fc01234u}) {
+      for (const auto mode : {0u, 1u, UINT32_MAX}) {
+        for (const bool enabled : {false, true}) {
+          auto m = valid();
+          const auto original = parse(m).parameters;
+          set_ui(m, enabled, mode, bits);
+          // JSON serialization must preserve finite float32 roundtrips and use
+          // null for nonfinite descriptions while the exact bytes retain them.
+          const auto p = parse(json::parse(m.dump()));
+          require(p.parameters == original && static_cast<std::uint32_t>(p.ui_plane.mode) == mode &&
+            ui_parameter<std::uint32_t>(p, 0) == (enabled ? 1u : 0u) && ui_parameter<std::uint32_t>(p, 8) == bits,
+            "Independent UI plane changed captured b0 or b1 bits");
+          require(ui_parameter_words(enabled, p.ui_plane)[2] == bits, "Decoded UI plane cannot recreate consumed b1");
+          auto changed = original;
+          const float value = .125f;
+          for (const unsigned offset : {0u, 20u, 52u}) std::memcpy(changed.data() + offset, &value, sizeof(value));
+          m["producer_metadata"]["replay"]["parameter_hex"] = hex(changed.data(), changed.size());
+          require(parse(m).ui_parameters == p.ui_parameters, "Scene strength/gain/zero changed independent qUI bytes");
+        }
+      }
+    }
+  }
+
+  void malformed_independent_ui_metadata() {
+    const auto reject_ui = [](const std::function<void(json &)> &change) {
+      reject([&](json &m) { set_ui(m, true, 1, 0x3f000000u); change(m["producer_metadata"]["replay"]); });
+    };
+    reject_ui([](json &r) { r["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v5"; });
+    reject_ui([](json &r) { r["ui_parameter_bytes"] = 20; });
+    reject_ui([](json &r) { r["ui_parameter_hex"] = std::string(30, '0'); });
+    reject_ui([](json &r) { r["ui_parameter_hex"] = std::string(32, 'x'); });
+    reject_ui([](json &r) { r["ui_parameter_hex"] = "02000000010000000000003f00000000"; });
+    reject_ui([](json &r) { r["source_alpha_ui"] = false; });
+    reject_ui([](json &r) { r["ui_parameter_hex"] = "01000000010000000000003f01000000"; });
+    reject_ui([](json &r) { r["shader_source"] = "legacy shader"; });
+    reject_ui([](json &r) { r.erase("ui_constant_binding"); });
+    reject_ui([](json &r) { r["ui_constant_binding"]["register"] = "b0"; });
+    reject_ui([](json &r) { r["ui_constant_binding"]["uint32"] = {1, 1, 0}; });
+    reject_ui([](json &r) { r["ui_constant_binding"]["uint32"][2] = 0; });
+    reject_ui([](json &r) { r["ui_constant_binding"]["mode"] = 0; });
+    reject_ui([](json &r) { r["ui_constant_binding"]["mode"] = 1.5; });
+    reject_ui([](json &r) { r["ui_constant_binding"]["inverse_depth_bits"] = 0; });
+    reject_ui([](json &r) { r["ui_constant_binding"]["inverse_depth"] = .25f; });
+    reject_ui([](json &r) { r["ui_constant_binding"]["inverse_depth"] = nullptr; });
+    reject_ui([](json &r) { r["ui_constant_binding"]["inverse_depth"] = "0.5"; });
+    reject([](json &m) { set_ui(m, true, 1, 0x7f800000u); m["producer_metadata"]["replay"]["ui_constant_binding"]["inverse_depth"] = 1.f; });
+  }
+
+  void exact_nearest_ui_plane_contract() {
+    for (const bool enabled : {false, true}) {
+      auto m = valid();
+      set_ui(m, enabled, 2, 0x3f000001u);
+      auto &record = m["producer_metadata"]["replay"];
+      record["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v3";
+      record["shader_source"] = "#define SUNSHINE_UI_NEAREST_PLANE 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode";
+      const auto p = parse(json::parse(m.dump()));
+      require(p.ui_plane.mode == ui_plane_mode::depth_midpoint_nearest_ui &&
+          p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v3" &&
+          ui_parameter<std::uint32_t>(p, 8) == 0x3f000001u && p.source_alpha_ui == enabled,
+        "Nearest UI replay changed the exact submitted floor or protection flag");
+    }
+    reject([](json &m) { set_ui(m, true, 2, 0x3f000000u); });
+    reject([](json &m) {
+      set_ui(m, true, 2, 0x3f000000u);
+      m["producer_metadata"]["replay"]["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v3";
+    });
+  }
+
+  void exact_front_limit_ui_plane_contract() {
+    for (const bool enabled : {false, true}) {
+      for (const auto unused_bits : {0u, 0x3f000001u, 0x7fc12345u}) {
+        auto m = valid();
+        set_ui(m, enabled, 3, unused_bits);
+        auto &record = m["producer_metadata"]["replay"];
+        record["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v4";
+        record["shader_source"] = "#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode";
+        const auto p = parse(json::parse(m.dump()));
+        require(p.ui_plane.mode == ui_plane_mode::front_limit && p.source_alpha_ui == enabled &&
+            p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4" &&
+            ui_parameter<std::uint32_t>(p, 8) == unused_bits,
+          "Front-limit replay changed consumed mode, protection flag, or unused q bytes");
+      }
+    }
+    for (const auto *abi : {"sunshine_game3d.ui_parameters.v2", "sunshine_game3d.ui_parameters.v3"}) {
+      reject([&](json &m) {
+        set_ui(m, true, 3, 0u);
+        auto &record = m["producer_metadata"]["replay"];
+        record["ui_parameter_abi"] = abi;
+        record["shader_source"] = "#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode";
+      });
+    }
+    reject([](json &m) {
+      set_ui(m, true, 3, 0u);
+      m["producer_metadata"]["replay"]["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v4";
+    });
   }
 
   void optional_catalog_stays_out_of_renderer_inputs() {
@@ -303,6 +441,11 @@ int main() {
     exact_native_parameters_and_padded_depth();
     malformed_abi_and_shader();
     explicit_source_alpha_interpretation();
+    legacy_ui_screen_compatibility();
+    exact_independent_ui_plane();
+    malformed_independent_ui_metadata();
+    exact_nearest_ui_plane_contract();
+    exact_front_limit_ui_plane_contract();
     exact_external_ui_source_is_required();
     optional_catalog_stays_out_of_renderer_inputs();
     optional_descriptors_are_validated_before_ignoring();
@@ -311,7 +454,7 @@ int main() {
     bounds_and_formats();
     path_and_duplicates();
     missing_and_partial();
-    std::puts("PASS: eleven Game 3D replay package regression groups");
+    std::puts("PASS: sixteen Game 3D replay package regression groups");
     return 0;
   } catch (const std::exception &e) {
     std::fprintf(stderr, "FAIL: %s\n", e.what());

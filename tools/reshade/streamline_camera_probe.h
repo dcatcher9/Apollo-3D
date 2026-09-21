@@ -10,6 +10,7 @@
 #include "streamline_depth_content.h"
 #include "native_discard_observer.h"
 #include "streamline_depth_capture.h"
+#include "observation_loss_journal.h"
 
 namespace sunshine_streamline {
   struct effects_input_observation {
@@ -41,6 +42,8 @@ namespace sunshine_streamline {
   // Existing source-observation invalidation counter only. An unchanged value
   // does not prove frame correspondence; a changed value revokes retained depth.
   std::uint64_t depth_observation_revision();
+  // Exact-revision diagnostics only; absence never changes observation validity.
+  bool query_depth_observation_loss(std::uint64_t revision, loss_diagnostics::event &out);
   void poll(const selected_depth &selected);
   // Installed hooks and their pinned modules remain alive as pure pass-through until
   // process exit. This never waits for game threads or removes a live trampoline.
@@ -211,6 +214,15 @@ namespace sunshine_streamline {
     unsigned waiting_source_resources();
     void lock_records();
     void unlock_records();
+    void lock_records_shared();
+    void unlock_records_shared();
+    void lock_tokens();
+    void unlock_tokens();
+    bool pin_tokens(unsigned index);
+    void unpin_tokens();
+    // One explicitly armed fixture observation of the real pre-SDK policy.
+    void arm_entry_policy();
+    bool entry_policy(bool &selected, bool &admissible);
   }
 #endif
 }

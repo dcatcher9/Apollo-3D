@@ -49,6 +49,33 @@ namespace {
     return .1f + .6f * float(x) / source_width + .2f * float(y) / source_height;
   }
 
+#ifndef SUNSHINE_SAMPLER_BASELINE
+  void verify_centered_moments(const sunshine_depth_statistics::moments &actual,
+      const std::vector<float> &decoded) {
+    require(!decoded.empty() && actual.valid && actual.centered_supplied,
+      "Valid full-pixel measurement did not supply centered moments");
+    const double center = *std::min_element(decoded.begin(), decoded.end());
+    double sum = 0., squares = 0.;
+    for (const float q : decoded) {
+      // Direct full-image double oracle, independent of GPU tiles and their
+      // scaled accumulation. Never subtract uncentered squared sums.
+      const double d = double(q) - center;
+      sum += d;
+      squares += d * d;
+    }
+    const auto close = [](double measured, double expected) {
+      return expected == 0. ? measured == 0. : std::abs(measured - expected) <= std::abs(expected) * 3e-5;
+    };
+    require(actual.center == center && close(actual.sum_centered, sum) && close(actual.sum_centered_squares, squares),
+      "Direct centered moments differ from the independent per-pixel double oracle");
+    if (sum > 0.) {
+      const double offset = .5 * squares / sum;
+      const double measured_offset = .5 * actual.sum_centered_squares / actual.sum_centered;
+      require(close(measured_offset, offset), "Centered contrast plane lost near-flat precision");
+    }
+  }
+#endif
+
   void measure_cache(api::device_api kind, std::uint64_t native, ID3DBlob *shader) {
     pipeline_cache_t cache;
     int identity{};
@@ -234,10 +261,10 @@ namespace {
     measure_cache(api::device_api::d3d11, native, shader);
   }
 
-  std::weak_ptr<sunshine_depth::device_pipeline_t> run_d3d12(ID3DBlob *shader) {
+  std::weak_ptr<sunshine_depth::device_pipeline_t> run_d3d12(ID3DBlob *shader, unsigned scenario = 0) {
     com_ptr<ID3D12Device> device;
     checked(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.put())), "Create native D3D12 device");
-    measure_cache(api::device_api::d3d12, reinterpret_cast<std::uint64_t>(device.get()), shader);
+    if (!scenario) measure_cache(api::device_api::d3d12, reinterpret_cast<std::uint64_t>(device.get()), shader);
     com_ptr<ID3D12CommandQueue> queue;
     const D3D12_COMMAND_QUEUE_DESC queue_desc {D3D12_COMMAND_LIST_TYPE_DIRECT};
     checked(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(queue.put())), "Create sampler fixture queue");
@@ -268,13 +295,22 @@ namespace {
     void *upload_data = nullptr;
     const D3D12_RANGE empty {0, 0};
     checked(upload->Map(0, &empty, &upload_data), "Map depth upload resource");
-    for (UINT y = 0; y < source_height; ++y) for (UINT x = 0; x < source_width; ++x) {
-      const float value =
+    const auto raw_at = [scenario](UINT x, UINT y) {
 #ifndef SUNSHINE_SAMPLER_BASELINE
-        x == 8 && y == 5 ? 0.f : x == 70 && y == 5 ? 1.f :
-        x == 0 && y == 0 ? std::numeric_limits<float>::quiet_NaN() :
+      if (scenario) {
+        if (x < 8 || x >= 72 || y < 5 || y >= 41) return std::numeric_limits<float>::quiet_NaN();
+        if (scenario == 3) return x == 8 && y == 5 ? .75f : 0.f;
+        const float q = 1.f - std::ldexp(float((x + 3 * y) % 17), -24);
+        return scenario == 2 ? 1.f - q : q;
+      }
+      if (x == 8 && y == 5) return 0.f;
+      if (x == 70 && y == 5) return 1.f;
+      if (x == 0 && y == 0) return std::numeric_limits<float>::quiet_NaN();
 #endif
-        scene_depth(x, y);
+      return scene_depth(x, y);
+    };
+    for (UINT y = 0; y < source_height; ++y) for (UINT x = 0; x < source_width; ++x) {
+      const float value = raw_at(x, y);
       std::memcpy(static_cast<unsigned char *>(upload_data) + footprint.Offset + y * footprint.Footprint.RowPitch + x * sizeof(float), &value, sizeof(value));
     }
     upload->Unmap(0, nullptr);
@@ -302,6 +338,10 @@ namespace {
     request.collect_moments = true; // Implies exact range in the same dispatch.
     request.moments_A = 1.f;
     request.moments_inverseB = -3.f;
+    if (scenario) {
+      request.moments_A = scenario == 2 ? 1.f : 0.f;
+      request.moments_inverseB = scenario == 2 ? -1.f : 1.f;
+    }
 #endif
     sunshine_depth::sample_t sample;
     sample.native_queue = reinterpret_cast<std::uint64_t>(queue.get());
@@ -335,7 +375,7 @@ namespace {
       float actual = 0;
       std::memcpy(&actual, static_cast<const unsigned char *>(readback) + sample.footprint12.Offset +
         y * sample.footprint12.Footprint.RowPitch + x * sample_pixel_bytes, sizeof(actual));
-      const float expected = scene_depth(request.x + ((2 * x + 1) * request.width) / 64,
+      const float expected = raw_at(request.x + ((2 * x + 1) * request.width) / 64,
         request.y + ((2 * y + 1) * request.height) / 36);
       require(std::isfinite(actual), "D3D12 sample returned nonfinite data");
       max_error = std::max(max_error, std::abs(actual - expected));
@@ -344,22 +384,28 @@ namespace {
     require(max_error == 0.f && sample.result.token == 91, "Cached D3D12 sample failed independent coordinate/value oracle");
 #ifndef SUNSHINE_SAMPLER_BASELINE
     sunshine_depth::read_sample(sample);
-    require(sample.result.valid && sample.result.range_valid && sample.result.range_min == 0.f && sample.result.range_max == 1.f,
-      "D3D12 exact range missed one-pixel endpoints between point samples or included nonfinite padding");
     double expected_sum = 0., expected_squares = 0.;
+    float expected_min = std::numeric_limits<float>::max(), expected_max = -std::numeric_limits<float>::max();
+    std::vector<float> decoded;
     for (UINT y = request.y; y < request.y + request.height; ++y)
       for (UINT x = request.x; x < request.x + request.width; ++x) {
-        const float raw = x == 8 && y == 5 ? 0.f : x == 70 && y == 5 ? 1.f : scene_depth(x, y);
+        const float raw = raw_at(x, y);
+        expected_min = std::min(expected_min, raw); expected_max = std::max(expected_max, raw);
         const float q = (raw - request.moments_A) * request.moments_inverseB;
+        decoded.push_back(q);
         expected_sum += q;
         expected_squares += double(q) * q;
       }
+    require(sample.result.valid && sample.result.range_valid && sample.result.range_min == expected_min && sample.result.range_max == expected_max,
+      "D3D12 exact range missed one-pixel endpoints between point samples or included nonfinite padding");
     const auto &moments = sample.result.moments;
     require(moments.supplied && moments.valid && moments.count == 64 * 36 &&
       moments.tiles_x == 32 && moments.tiles_y == 18 &&
       std::abs(moments.sum - expected_sum) <= expected_sum * 3e-5 &&
       std::abs(moments.sum_squares - expected_squares) <= expected_squares * 3e-5,
       "D3D12 full-image decoded moments differ from the independent per-pixel oracle");
+    verify_centered_moments(moments, decoded);
+    std::printf("PASS D3D12 direct centered moments scenario=%u: crop, sparse/gradient and near-flat normal/reversed decode\n", scenario);
 #endif
     std::printf("PASS native D3D12 cached root/PSO: repeated reuse, retirement during submitted sample, replacement and padded grid oracle max_error=%.9g\n", max_error);
     return retired;
@@ -519,7 +565,8 @@ namespace {
     }
     require(tile_grid(0, 10).x == 0 && tile_grid(10, 0).y == 0, "Empty crop fabricated a tile layout");
 
-    enum class pattern { gradient, sparse, zero, normal, normal_far, packed, negative, nan, infinity, overflow, maximum };
+    enum class pattern { gradient, sparse, zero, normal, normal_far, near_flat, near_flat_normal,
+      tile_flat, packed, negative, nan, infinity, overflow, maximum };
     struct fixture { const char *name; UINT width, height; pattern content; float inverseB = 1.f; };
     const fixture fixtures[] {
       {"sparse between selector points", 96, 54, pattern::sparse},
@@ -539,6 +586,9 @@ namespace {
       {"all zero", 96, 54, pattern::zero},
       {"normal depth", 96, 54, pattern::normal},
       {"normal depth near far endpoint", 96, 54, pattern::normal_far},
+      {"near-flat reversed q near one", 609, 341, pattern::near_flat},
+      {"near-flat normal q near one", 609, 341, pattern::near_flat_normal},
+      {"near-flat tilewise constant origins", 96, 54, pattern::tile_flat},
       {"packed affine basis", 96, 54, pattern::packed},
       {"small depth units", 96, 54, pattern::gradient, 1e-30f},
       {"large depth units", 96, 54, pattern::gradient, 1e30f},
@@ -563,7 +613,7 @@ namespace {
         request.source_width = fixture.width + 13; request.source_height = fixture.height + 9;
         request.x = 5; request.y = 3; request.width = fixture.width; request.height = fixture.height;
         request.moments_inverseB = fixture.inverseB;
-        if (fixture.content == pattern::normal || fixture.content == pattern::normal_far) {
+        if (fixture.content == pattern::normal || fixture.content == pattern::normal_far || fixture.content == pattern::near_flat_normal) {
           request.moments_A = 1.f; request.moments_inverseB = -1.f;
         } else if (fixture.content == pattern::packed) {
           request.moments_A = -2.f; request.moments_inverseB = .5f;
@@ -572,6 +622,8 @@ namespace {
         std::vector<float> pixels(size_t(request.source_width) * request.source_height,
           std::numeric_limits<float>::quiet_NaN());
         double expected_sum = 0., expected_squares = 0.;
+        std::vector<float> decoded;
+        decoded.reserve(size_t(fixture.width) * fixture.height);
         bool valid_raw = true, valid_moments = std::isnormal(request.moments_inverseB);
         float lower = std::numeric_limits<float>::max(), upper = -std::numeric_limits<float>::max();
         for (UINT y = 0; y < fixture.height; ++y) for (UINT x = 0; x < fixture.width; ++x) {
@@ -581,6 +633,9 @@ namespace {
           case pattern::zero: raw = 0.f; break;
           case pattern::normal: raw = 1.f - raw; break;
           case pattern::normal_far: raw = 1.f - std::ldexp(float((x + 3 * y) % 4), -24); break;
+          case pattern::near_flat: raw = 1.f - std::ldexp(float((x + 3 * y) % 17), -24); break;
+          case pattern::near_flat_normal: raw = std::ldexp(float((x + 3 * y) % 17), -24); break;
+          case pattern::tile_flat: raw = 1.f - std::ldexp(float((x / 3 + y / 3) % 17), -24); break;
           case pattern::packed: raw = -2.f + 2.f * raw; break;
           case pattern::negative: if (x == 0 && y == 0) raw = -.25f; break;
           case pattern::nan: if (x == 0 && y == 0) raw = std::numeric_limits<float>::quiet_NaN(); break;
@@ -597,6 +652,7 @@ namespace {
           const float delta = raw - request.moments_A;
           const float q = delta * request.moments_inverseB;
           valid_moments &= std::isfinite(q) && q >= 0.f;
+          decoded.push_back(q);
           expected_sum += q;
           expected_squares += double(q) * q;
         }
@@ -648,7 +704,8 @@ namespace {
           if (result.range_valid) require(result.range_min == lower && result.range_max == upper,
             "Full-image moments changed exact extrema or included padding");
           const auto &moments = result.moments;
-          require(moments.supplied == (mode == 2) && moments.valid == (mode == 2 && valid_moments),
+          require(moments.supplied == (mode == 2) && moments.centered_supplied == (mode == 2) &&
+            moments.valid == (mode == 2 && valid_moments),
             "Invalid moments were accepted, or valid moments failed independently of raw points");
           if (mode == 2) {
             require(moments.A == submitted.moments_A && moments.inverseB == submitted.moments_inverseB &&
@@ -661,10 +718,12 @@ namespace {
               };
               require(close(moments.sum, expected_sum) && close(moments.sum_squares, expected_squares),
                 "Stable full-image moments differ from independent double accumulation");
+              verify_centered_moments(moments, decoded);
             }
           } else require(moments.count == 0 && moments.tiles_x == 0 && moments.tiles_y == 0,
             "A raw-only request retained a previous capture's moment facts");
-          if (!moments.valid) require(moments.sum == 0. && moments.sum_squares == 0.,
+          if (!moments.valid) require(moments.sum == 0. && moments.sum_squares == 0. &&
+            moments.center == 0. && moments.sum_centered == 0. && moments.sum_centered_squares == 0.,
             "Invalid or unrequested moments retained numeric data from an older capture");
           sample->clear_capture();
           spare = std::move(sample);
@@ -1039,6 +1098,10 @@ int main(int argc, char **argv) {
         "Format or crop changes recreated immutable native shader");
     }
     require(run_d3d12(shader.get()).expired(), "Finished D3D12 sample retained retired program/device");
+#ifndef SUNSHINE_SAMPLER_BASELINE
+    for (unsigned scenario = 1; scenario <= 3; ++scenario)
+      require(run_d3d12(shader.get(), scenario).expired(), "Centered D3D12 sample retained retired program/device");
+#endif
     run_repeated_samples(device.get(), context.get(), shader.get(), repeated_count);
     std::puts("PASS production D3D11 depth sampler: all four depth format families, full/padded viewport, independent value oracle and exact CS state preservation");
     return 0;

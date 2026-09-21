@@ -125,25 +125,54 @@ shows that camera data is still unavailable; the existing 3×/higher guidance re
 The hint is not shown during the initial unknown-depth state. A busy or ambiguous FG observation
 does not produce a suggestion to enable a mode that may already be enabled.
 
-**Keep UI at screen plane (source alpha)** is off by default and saved per game as `SourceAlphaUI`.
-Enable it only when the game's source alpha represents UI: white keeps UI fixed at the screen
-plane, black keeps the scene stereoscopic, and gray also pins UI already composited into the
-image. An entirely white real-input alpha channel makes the entire frame flat; no content
-heuristic overrides this interpretation. With FG off, alpha comes from the current color frame,
+**Keep UI on a separate plane (source alpha)** is off by default and saved per game as `SourceAlphaUI`.
+Enable it only when the game's source alpha represents UI: white and gray pin already-composited
+UI to one global plane at the independently tracked, smoothed inverse-depth midpoint, while
+black keeps scene depth. This is a placement policy, not recovered UI geometry or physical distance.
+An entirely white real-input alpha channel makes the entire frame flat at the UI plane; an entirely black
+one adds no UI pins. No content heuristic overrides this interpretation. With FG off, alpha comes from the current color frame,
 independently of depth-provider selection. With FG on, the D3D12 adapter captures the real input's
 Streamline Backbuffer tag 53 at its declared call boundary, keeps a bounded private GPU snapshot,
 and reuses the latest completed input alpha across presentations. Generated output alpha is never
-used as the UI mask. This path requires that the game expose that input tag; otherwise the UI says
-it is waiting for real-frame alpha and protection stays off. Changing the switch does not reload
-shaders or recalibrate depth.
+used as the UI mask. This path requires that the game expose that input tag. The panel distinguishes
+no observed real-input alpha from an observed input whose capture was rejected; neither authorizes
+generated output alpha. Protection stays off when no valid completed input mask is available.
+Changing the switch does not reload shaders or recalibrate depth.
+
+Only the synchronous live pre-FG alpha snapshot uses
+`record_local_texture` with `local_texture_state_policy::prefer_observed_recording`. At the guarded
+Streamline FG tag-53 call, a supported, known, unblocked, nonzero state observed on the same
+command recording takes precedence over the provider's declaration. This permits a stale declared
+UAV hint when the recording independently proves the resource is currently a render target.
+If that recording has no state entry for the resource at all, an explicit nonzero supported
+provider declaration may supply the state, but only with declared-state proof and compatible
+render-target, UAV or depth resource flags. This restores the original trust in a declared source
+when no current barrier was observed; it does not independently validate the declaration.
+There is no declaration fallback over a blocked or unknown entry, COMMON/zero, a split barrier,
+lost or invalid recording evidence, an active render pass, or a source requiring
+`observed_nonzero` proof.
+The [matching Streamline 2.7.30 DLSS-G contract](https://github.com/NVIDIA-RTX/Streamline/blob/v2.7.30/docs/ProgrammingGuideDLSS_G.md#tagging-recommendations)
+requires only type and extent for the special Backbuffer tag; its other tag inputs are optional.
+The fallback therefore requires an explicitly supplied state rather than assuming one from the tag.
+The private copy transitions from and restores exactly the selected state, preserving whether
+that state came from an observation or the provider declaration.
+Depth copies, optional diagnostic captures and default local texture copies retain their existing
+declaration checks. The declaration fallback still needs live game/headset acceptance.
+
 The FG decision is independent of depth-provider selection, including a manually pinned Generic
 buffer. The last confirmed mode survives transient observation loss and effects reloads; a new
 confirmed mode or observer/runtime shutdown updates it. Renderer, panel and dump share that
 presentation decision. An enabled FG mode does not identify an individual generated frame.
 UI placement is independent of shape protection: explicitly supplied UI-layer geometry may define
 its placement, but the current SL/NGX adapters expose no authoritative target UI depth. This path
-therefore uses the zero-disparity screen plane. It never substitutes the scene depth underneath UI
-for the UI layer's depth. The source-selection switch is retained because arbitrary game backbuffer
+therefore uses mode 1, `depth_midpoint`, while the scene retains its contrast-midpoint zero.
+The submitted UI inverse depth is the applied, independently smoothed extrema midpoint described
+below, not the instantaneous midpoint or the scene zero. The shader maps it through the same
+current gain, scene zero, strength, stereo blend and per-eye clamp as scene depth. Every protected
+UI pixel shares this plane, but its displayed disparity can move as those controls or the tracked
+midpoint change during walking and camera rotation. Unavailable stereo resolves to zero UI
+parallax. The plane does not follow the nearest depth beneath UI coverage and does not guarantee
+placement in front of that foreground. The source-selection switch is retained because arbitrary game backbuffer
 alpha is not universally a UI mask; after selection, constant alpha is honored without heuristics.
 
 Both paths use the same UI protection shader. For FG, only its alpha input changes; all RGB passes
@@ -159,13 +188,20 @@ host remain immutable even after acknowledgement. Both use the same bounded capt
 The renderer copies each admitted capture into its private UI texture once, then reuses those
 bytes for later presentations while that capture remains valid. Renderer replacement clears this
 copy identity; failed replacement copies never authorize stale pixels.
-After the existing horizontal
-conditioning, each row computes the exact distance `d` in pixels to positive finite source alpha
-and clips its signed displacement to `+/- 0.5 * max(d - 1, 0) / source_width`. The one-pixel
-horizontal collar protects the bilinear color footprint. This fixes the original UI pixels and
+Live midpoint placement dispatches no nearest-covered-depth reduction. Historical mode 2
+remains available for replay: a 16-by-16 tile pass and a 256-thread reduction resolve
+`max(submitted midpoint floor, nearest valid decoded q under finite positive selected alpha)`
+into one R32 float on the rendering queue. Its crop/jitter mapping matches the scene candidate;
+every covered valid pixel contributes, and empty coverage retains the submitted floor. These
+resources are overwritten on each mode-2 render, with no CPU readback or additional queue wait.
+After the existing horizontal conditioning, each row computes the exact distance `d` in pixels
+to positive finite source alpha and clips its signed displacement to
+`pUI +/- 0.5 * max(d - 1, 0) / source_width`. Live mode 1 supplies the displacement derived from
+the applied UI midpoint and current geometry. The one-pixel
+horizontal collar protects the bilinear color footprint. This rigidly shifts UI in each eye and
 preserves the horizontal invertibility bound without overlaying a second copy of already-composited
-text. Empty rows retain their original field exactly. The scan reuses the horizontal pass and its
-shared memory, adding no texture, GPU pass, queue wait or CPU readback. It does not retain the
+text. Empty rows retain their original field exactly. The distance scan itself reuses the horizontal
+pass and its shared memory. It does not retain the
 vertical shear bound across UI-row boundaries. Half-transparent UI retains its original color but
 locally flattens the background beneath it; exact independent stereo background requires a separate
 HUDless image and UI color/alpha layer. Source alpha interpretation is not inferred from NGX or SL
@@ -173,12 +209,41 @@ provider identity. Dump/replay records the effective switch as `replay.source_al
 request as `source_alpha_ui_requested`, and the reason as `source_alpha_ui_status`. Offline replay
 uses the effective value and the separate 16-byte `b1` UI constants; the 80-byte geometry `b0` ABI
 is unchanged. `source_alpha_ui_fg_mode` records the retained mode and its observation provenance.
+The UI constant buffer stores four 32-bit words: enabled, mode, inverse-depth float bits, and
+zero reserved padding. Live mode 1 records the applied UI midpoint in
+`sunshine_game3d.ui_parameters.v2`; the shader must consume `Sunshine_UIPlaneMode` and the supplied
+inverse depth. Historical mode 0 retains the screen plane and the same v2 ABI. Historical mode 2
+uses the submitted depth as a floor for the GPU maximum and retains the v3 ABI; its shader requires
+`#define SUNSHINE_UI_NEAREST_PLANE 1` and the reduction entry points. Historical mode 3,
+`front_limit`, retains v4 and requires `#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1`. It places UI at
+the current positive `b0` display budget times strength and stereo blend, subject to warp
+readiness; its inverse-depth word is unused, including malformed bits preserved for replay.
+Mode 2 is rejected in v2 packages, and mode 3 is rejected in v2/v3 packages. Unknown modes,
+invalid depth in modes 1/2, and unavailable stereo resolve to zero UI parallax.
+Dump 3D records the exact submitted UI constants, separate from diagnostic targets. Old packages
+without these constants retain mode 0. Replay's `--ui-inverse-depth` selects mode 1;
+`--ui-nearest-floor` selects mode 2; `--ui-plane screen` selects mode 0; and
+`--ui-plane front-limit` selects mode 3. Depth-mode geometry overrides recompute UI displacement
+on the GPU. Front-limit placement responds to the applied display budget, strength, blend and
+readiness, without deriving a displacement from scene gain or zero. Mode-3 dumps mark the
+inverse-depth word unused and the reduction inactive. Historical mode-2 dumps distinguish the
+submitted floor from the GPU-resolved plane; replay additionally saves that resolved scalar.
+Live rendering never waits to read it back.
 `replay.ui_alpha_source` identifies `none`, `source_color`, or `ui_source_color`. When a retained
 input was consumed, required artifact 33 (`ui_source_color.bin`) preserves its exact full RGBA
 pixels, and `ui_source_alpha.png` shows the alpha used by that render. Its provenance records the
 input observation, age and completed capture; it never substitutes the optional latest tag-53
 diagnostic snapshot. Live dump transport is version 3 with 40 descriptor slots; offline replay
 also accepts earlier packages without an external alpha input.
+`replay.source_alpha_capture_attempt` freezes the latest scope- and lifecycle-qualified live
+alpha capture attempt observed at that render, including its outcome and available capture-state
+evidence. It describes an attempt, not the consumed mask or an exact color/depth/alpha pairing;
+the consumed-alpha artifact and its provenance remain authoritative when a mask was used.
+Capture diagnostics preserve the raw declared hint and independent observed state.
+`copy_state`, `copy_state_known` and `used_observed_state` identify the selected copy/restore state
+and whether state selection used observed recording evidence (including the narrow live-alpha policy).
+A declared-state selection reports `copy_state_known=true` and `used_observed_state=false`;
+"known" here identifies the selected copy state, not independent validation of the provider hint.
 
 The panel controls native `Strength`, `DepthView`, `Enabled` and `SourceAlphaUI` settings in ReShade.ini.
 Opening the panel does not rewrite values. Edits apply immediately and are saved automatically,
@@ -357,6 +422,15 @@ capture-budget limits are reported per resource without discarding the main repl
 `ui_resources` contains middleware observations; `optional_captures` describes frozen optional
 copy decisions, and host-side failures appear in `optional_capture_errors`. These scopes must not
 be treated as interchangeable frame evidence.
+Each optional copy's `capture_diagnostic` records its available declared and observed resource
+states, state flags, resource cookie, device and command-recording identity. These are existing
+capture-admission observations; recording them does not relax capture checks or change GPU work,
+geometry or zero placement. A rejected optional Backbuffer tag-53 copy does not by itself establish
+that live alpha capture failed for the same reason. Compare its provenance with the separately
+recorded live attempt. Optional tag-53 copies retain declaration checks and can report a declaration
+mismatch even while live alpha succeeds using the guarded observed-recording policy. The optional
+copy and live snapshot have separate roles; a single dump's optional rejection cannot prove the
+live failure reason.
 In Expedition 33's earlier 2026-09-19 FG-on diagnostic windows, tags 2 and 54 were nonnull,
 and tag 23 was explicitly null. This establishes potential HUDless/no-warp inputs, not an
 available UI mask or a match to the exported frame. Before using either input to protect UI,
@@ -369,7 +443,7 @@ The additive on-disk artifact schema remains `sunshine.game3d.dump.v1`.
 Optional metadata publication is transactional. If its serialization or mailbox budget fails,
 the producer keeps the primary response unchanged and sets the wire `optional_metadata_omitted`
 flag; the host records that failure without requiring another byte in the producer JSON.
-Only an explicit request allocates snapshot textures or arms detailed middleware observation.
+Only an explicit dump request allocates diagnostic snapshot textures or arms detailed middleware observation.
 Main replay snapshots use the rendering queue inside its depth lease. Optional UI resources
 are copied at their authenticated SDK call on that call's command list, with the original resource
 state restored. They reuse the native capture owner's state, submission and retirement checks,
@@ -446,9 +520,14 @@ the reconstructed conditioning fields and SBS against the captured production ar
 reporting byte equality and numeric errors in `replay.json`. `--verify` returns failure when
 errors exceed the reported format tolerance; source color copying must remain byte-exact.
 An optional `--strength 30`, `--shader '<experimental.hlsl>'`,
-`--depth-gain 500`, `--source-alpha-ui on|off`, or `--zero-inverse-depth 0.001` creates a clearly labeled experiment using
+`--depth-gain 500`, `--source-alpha-ui on|off`, `--zero-inverse-depth 0.001`,
+`--ui-inverse-depth 0.002`, `--ui-nearest-floor 0.002`, or `--ui-plane screen|front-limit` creates a clearly labeled experiment using
 the same pass/constant ABI. Gain and zero overrides are independent: moving the zero changes
 only `convergence[1] = q0`, preserving the captured gain unless separately overridden.
+Live midpoint UI maps the captured applied UI depth through the overridden geometry; its target
+is not recomputed by a single-frame replay. Historical front-limit UI instead uses the applied
+display budget, strength and blend, subject to warp readiness; gain and zero overrides do not
+position it. A legacy captured shader needs a compatible `--shader` override to select that mode.
 Gain must be positive and representable; zero must be finite and nonnegative.
 Its argument and resulting values are recorded alongside the unchanged captured parameter bytes
 in `replay.json`. It does not change the live zero-plane policy. Inputs remain unchanged and each
@@ -780,12 +859,75 @@ without acquiring pending pixels. Missing/invalid attempts withdraw that intent;
 returning cannot clear a newer intent. The explicit bounded reuse policy above may use its private
 previous depth during this gap; GPU resource retirement is unchanged.
 
+The shared capture pool also retains the current valid nominated record after its GPU work has
+retired. Pixel-backed and metadata-only records carry the same source authority: an unrelated
+NGX/Streamline capture or Generic preservation must not recycle the current record and fabricate
+a missing nomination. The same pool retains the existing eligible completed snapshot beneath a
+valid current nomination while its successor is pending, including against allocations by another
+provider. Supersession, failure or invalidation releases the current record's authority hold;
+completed-fallback eligibility and all GPU retirement requirements still apply before storage can
+be reused. This uses the existing bounded pool and does not extend capture freshness or authorize
+reading expired depth.
+
+Capture acquisition returns source authority separately from the packet's pixel readiness.
+Its typed decision carries the selected identity, valid repeated/pending FG continuity, and
+the eligible consumed predecessor for an NGX pending successor. The capture owner alone
+classifies SDK success, invalidation, recording retirement and producer completion.
+`depth_cache_update.h` turns those facts and the last successful copy's value description into
+one source decision: `copy_fresh`, `hold`, or `invalidate`. It owns source identity, FG mode,
+NGX predecessor/presentation limits, depth layout, observation revision and source-age policy.
+One sampled SL observation revision is used coherently for the current and retained checks.
+
+`display_depth_cache.h` owns the sole reusable private depth frame. `copy_fresh` permits a copy
+attempt; only successful copying commits that frame and its capture identity, original timestamp,
+projection and crop. A failed attempt clears reuse eligibility and cannot fall back to a hold.
+`hold` verifies the cache's local color size, immediate command list, queue, texture/view and age,
+then copies the saved description for this presentation without changing the saved frame or age.
+`invalidate` clears the cache; restoring a source or receiving another pending nomination cannot
+revive it. A new successful copy is required. Lifecycle invalidations use that same cache operation.
+Calibration/scene placement still belongs to the renderer and retains the existing real-capture
+pairing; cache loss does not itself reset learned geometry. Historical UI status is not authority
+to reuse pixels. The provider dispatches these actions rather than recombining continuity flags.
+Capture diagnostics remain observations, never inputs to reuse authorization.
+
+Pool reclamation composes two independent checks: whether the record is still logically
+required by source selection, and whether its GPU storage has retired. Metadata-only records
+retain their existing no-GPU-storage semantics. Neither a GPU fence completing nor logical
+supersession by itself permits recycling a pixel-backed slot.
+
 While FG is active, `Sunshine SBS FG output` reports cumulative per-runtime publication counters
 at most once every five seconds. `published_fresh_depth`, `published_reused_depth` and
 `published_depth_missing` distinguish actual shared-ring publications using fresh, reused or
 unavailable depth. Their disposition is retained with the pending export copy. These classify
 depth availability, not stereo pixels: diagnostics, zero strength and calibration can change the
 rendered image. Runtime reload/destruction resets these counters.
+
+`Sunshine depth readiness: lost/recovered` records the first availability transition of a
+bounded diagnostic episode independently of the one-second status-log gate. At most four loss
+episodes per second are admitted, each with a paired recovery; suppressed episodes are counted.
+The record freezes source and newest-view ages at selection, the prior retained depth identity
+before invalidation, FG scope, reset/observation revisions, copy outcome, source action/reason and
+the cache's final reason. A zero timestamp is unavailable (reported age `UINT64_MAX`), not fresh
+data. An untested current observation is `-1`; a zero check revision means no such check ran.
+Explicit lifecycle/reuse invalidation clears
+are also identified. This is read-only evidence: it adds no GPU pass, readback, wait, or extension
+of depth freshness, and does not change source selection or stereo placement.
+
+Each admitted readiness episode also logs `Sunshine depth observation evidence`. Its
+`current_check` and `retained_check` query the exact Streamline observation revisions read by
+those decisions. `sampled_only` is an additional contemporaneous revision sample, useful when
+no decision check ran; it is not proof of what caused the loss. Recovery repeats the frozen
+first-loss evidence, rather than attributing the interruption to a later callback.
+The observation owner keeps a fixed 64-entry diagnostic journal of revision changes, including
+the reason, call site, tick, thread, call sequence, and known viewport, feature, SDK result and
+camera reset. It operates with the lightweight source observer even when `StreamlineCameraProbe`
+is disabled. Publication and lookup each try one independent slot lock without waiting;
+contention, overwritten entries and an in-flight publication report `found=0` / `unavailable`.
+They never substitute another revision, alter the production loss counter or authorize reuse.
+Unknown viewport, feature and reset values are `UINT32_MAX`; `sdk_known=0` means no SDK result
+was observed at that point. Interpret the raw result using the observed SDK ABI: v1 returns a
+Boolean, while v2 returns a result code. A recorded reason explains that revision increment,
+not necessarily the whole availability episode when several increments or other rejection gates intervened.
 
 The add-on panel separately reports **Fresh / Previous / Unavailable** percentages for the last
 five completed one-second buckets of observed provider presentations. It updates once per second,
@@ -797,7 +939,7 @@ publications. Source/FG-mode, focus and lifecycle changes reset the window. The 
 ACTIVE label identifies ownership; these percentages describe how often its pixels were usable.
 
 Current capture validation uses the production-owner `reshade_depth_queue_cycle_test` default,
-`--pipeline` and `--content` cases plus `reshade_game3d_native_provider_runtime_test` with its
+`--pipeline`, `--foreign-reclaim` and `--content` cases plus `reshade_game3d_native_provider_runtime_test` with its
 optional SL FG 2x metadata interposer and zero installed FX techniques. Their roles and commands
 are documented in [source and submission validation](../tools/reshade/README.md#source-and-submission-validation).
 They check capture timing and native lifecycle independently; neither proves a real game's
@@ -895,7 +1037,8 @@ In **Automatic**, stored depth `r` is decoded as `d=r*raw_scale+raw_bias`, then 
 projection supplies `q=(d-A)/B`. The identity transform is used without `PrecisionInfo`.
 Camera reconstruction and scene placement have separate owners. The shared
 `tools/reshade/scene_gain.h` policy initializes an independent gain `K` from the nearest depth
-and zero `q0` from observed range midpoints, then tracks the current midpoint with a parallax-based speed limit.
+and zero `q0` from the contrast-midpoint trial described below, then tracks that target with a
+parallax-based speed limit.
 The raw fallback shares this policy on its oriented coordinate, with independent `H`
 and `t0`. The [gain and zero-plane contract](#experimental-raw-depth-automation) below owns
 initialization, gradual gain tracking, rendered parallax limits, and sample timing.
@@ -1014,7 +1157,7 @@ dynamic render sizes. Rotating textures retain the reference; a new feature/conv
 fresh one. Frame and sample ordering is scoped to that logical encoding: switching between SL and
 NGX resets their independent sequence watermarks, while capture-time floors and exact identity
 continue rejecting delayed packets from the previous source. Immutable exact-range readbacks drive
-the same independent gain and midpoint zero tracking as Generic; this is
+the same independent gain and contrast-midpoint zero trial as Generic; this is
 not percentile clipping or a separate NGX strength formula. Rendering still requires current depth.
 
 The panel identifies **Depth path: NGX (game provided)** and displays the current active resource
@@ -1118,6 +1261,26 @@ stability, not rule out shorter projection changes or provide dense point corres
 Matching a camera matrix and resource does not prove that a captured depth copy contains the same
 scene or that game-space units represent meters. Same-observation evidence is distinguished from
 an explicit frame identity; an opaque Streamline frame-token address alone is not a frame number.
+
+Camera, tag, frame history, evaluation and FG-option metadata are published as coherent immutable
+versions. Every callback, renderer, panel and diagnostic reader pins a completed version without
+owning the mutation flag. The synchronous FG camera selection and evaluation capture use one pin,
+so they cannot splice different metadata versions. Presentation markers retain their separate
+owner. The v2 token table uses a separate instance of the same publication mechanism, so neither
+unrelated metadata reads nor token-generation reads can lock out SDK token registration.
+
+Each owner has eight fixed slots. A nonblocking writer reserves an unpinned slot, copies the
+latest completed state, mutates its private candidate and publishes only after lifecycle checks.
+Publication tickets include a monotonically increasing generation to reject address-reuse ABA.
+Readers can retain old values; they do not grant old observation generations authority. Retired
+source leases are destroyed outside mutation ownership, including when the final reader releases
+an old version. Actual writer collisions and exhaustion of pinned slots remain explicit losses;
+they do not silently publish partial state or authorize retained depth. This is bounded storage
+and acquisition, not a guarantee that observations can never be lost under arbitrary contention.
+Lifecycle reset closes observation admission before clearing each owner and opening a fresh epoch.
+Recycled token addresses still get a new generation even if the optional numeric index is unchanged.
+Camera reset, SDK failures, token-generation checks, resource lifetimes and depth expiry remain
+authoritative. The command/content ledger retains its independent observation contract.
 
 When the diagnostic is enabled, the actual depth-sampling submission freezes a compact camera
 observation in its existing immutable sample envelope. The coefficients, evidence level and
@@ -1330,16 +1493,21 @@ aspect ratio, targeting approximately 576 nearly square tiles: 32x18 at 16:9, 28
 and 18x32 at 9:16. Tiny crops cap each axis to its pixel extent; a bounded capacity handles
 extreme aspect ratios. Resolution changes at a fixed aspect otherwise preserve the grid.
 Generic selection takes one representative texel per tile; a geometry request additionally
-reduces every texel in those same tiles to raw extrema and decoded inverse-depth sums and
-squared sums. They share layout generation, not the decision about which buffer to use.
-Known API providers bypass Generic candidate selection. The same bounded asynchronous readback
-carries the points, extrema and moments, with no additional queue submission or CPU/GPU wait.
-Totals are combined by pixel count, never by assigning equal weight to unequal-sized tiles.
-Projection coefficients are frozen with the capture and applied before accumulation; scaled
-moments avoid squaring extreme FP32 depth units directly. CPU merging uses double precision.
-The full-image maximum supplies Q, including a nearest pixel between the diagnostic grid points.
-The full-image extrema also supply the zero target; mean and squared moments remain diagnostics,
-not gain or zero references. Full-image sampling removes point-grid aliasing without discarding sparse geometry.
+reduces every texel in those same tiles to raw extrema and decoded inverse-depth statistics.
+They share layout generation, not the decision about which buffer to use. Known API providers
+bypass Generic candidate selection. The contrast-midpoint trial first obtains each tile's
+extrema, then traverses that tile again to accumulate first and second moments centered on its
+decoded minimum. Both scans run in the same GPU dispatch. They retain the existing resources,
+bounded asynchronous readback and queue submission, with no additional CPU/GPU wait. The extra
+texture traversal and reduction add GPU work; unchanged dispatch count is not a performance claim.
+Projection coefficients are frozen with the capture and applied before accumulation. The CPU
+merges centered tile sums in double precision, shifting each origin to the full-image minimum
+using nonnegative offsets. This avoids deriving small depth contrasts by subtracting nearly equal
+raw moments. Totals follow pixel counts, never equal weighting of unequal-sized tiles.
+The full-image maximum still supplies Q, including a nearest pixel between the diagnostic grid
+points. The full-image minimum and centered moments supply the trial zero target below; the
+previous uncentered mean and squared moments remain diagnostics. Full-image sampling removes
+point-grid aliasing without discarding sparse geometry.
 Every finite value contributes, including hardware endpoints, sky and thin objects between
 point samples. Allocation padding outside the crop does not contribute. Any NaN or infinity
 inside the crop invalidates the range; no percentile selection, trimming, winsorization or
@@ -1364,7 +1532,7 @@ At zero strength, established gain and zero hold and rendered parallax is zero.
 
 Initialization collects four valid non-flat observations at least 250 ms apart, spanning at
 least 750 ms. The average of their nearest references initializes gain to `L/Q`; the average
-of their range midpoints initializes the zero. An exact flat range cannot initialize scale.
+of their contrast-midpoint targets initializes the zero. An exact flat range cannot initialize scale.
 After initialization, a positive flat range updates the zero target while holding gain and
 clearing its gain target; an all-zero range holds both controls and clears both targets.
 No epsilon span is invented. Incomplete
@@ -1382,9 +1550,25 @@ its rendered parallax is capped while gain adapts. Exact flat depth suspends gai
 Missing or expired evidence, all-zero depth, zero strength, clock rollback and presentation gaps
 over 250 ms disarm temporal adaptation; resumed frames earn no catch-up time.
 
-The zero target is the observed range midpoint `m=(qmin+Q)/2`. At fixed gain, this minimizes
-the maximum absolute unclamped displacement across the observed range, independently of how
-many pixels occupy each depth. It includes zero-valued background and sparse foreground geometry.
+The current zero-plane trial uses a contrast midpoint. For every decoded pixel in the active
+depth rectangle, let `b=qmin` and `d=q-b`. For a non-flat range, the target is
+`m=b+0.5*sum(d*d)/sum(d)`. The ratio is the mean contrast weighted by contrast itself, so pixels
+at the farthest depth contribute zero while nearer pixels contribute by their depth contrast
+and area. Every finite pixel remains represented; there is no percentile trimming or semantic
+main-object detection. For two exact depth layers this equals their midpoint independently of
+their relative areas. With additional layers it lies between `b` and the former extrema midpoint
+`(b+Q)/2`. Gain remains `Ktarget=L/Q`. The UI midpoint independently tracks the extrema midpoint
+for live mode-1 placement, as described below.
+The scene-zero formula is unchanged by UI protection.
+After initialization, an exact positive flat range targets its single depth `b` while holding
+gain; an all-zero range holds both controls and clears their targets.
+
+All live geometry samples supply the centered payload described above. Legacy point/range
+fixtures and old uncentered-moment fixtures that lack it retain the extrema midpoint solely for
+compatibility. Invalid supplied centered statistics invalidate the target instead of silently
+falling back to that midpoint. The trial is a production policy experiment, with headset
+acceptance still pending; historical midpoint and fixed-reference evidence does not validate it.
+
 The applied zero follows this target with the same 0.5-second exponential time constant:
 `alpha=1-exp(-dt/0.5)`, followed by
 `delta_q0=clamp(alpha*(m-q0), -L*dt/Knew, L*dt/Knew)`.
@@ -1394,11 +1578,29 @@ positive multiplicative change of inverse-depth units. There is no immediate cla
 applied zero to the new range; it can remain outside that range during a transition. The renderer's
 final per-pixel limit remains active. The zero and gain targets share accepted evidence and timing;
 a positive flat range can move the zero toward its single depth without changing gain.
+
+The independent UI midpoint targets `qm_target=(qmin+qmax)/2`. Its initial value is the arithmetic mean
+of the same four accepted startup samples' extrema midpoints. It then follows its own target
+with the identical exponential update and `L*dt/Knew` step limit above, sharing the scene
+controller's accepted evidence, clock, reset, hold and expiry rules. It adds no independent gain
+or sampling pass. Positive flat depth updates both plane targets to that depth while holding gain;
+all-zero depth clears both targets and holds both tracked values. The applied UI base travels with the
+resolved real-depth scene, including FG reuse, instead of being recomputed from newer statistics.
+Live mode 1 consumes the applied UI midpoint directly and dispatches no covered-depth reduction.
+Its disparity follows the current native-depth adapter, including gain, scene zero, strength,
+stereo blend and the final per-eye bound. Smoothing the midpoint does not make its displayed
+disparity constant while the scene or controls change. The scene candidate and vertical fields
+are unchanged; source-alpha conditioning moves UI and its horizontal support to one rigid plane.
+The midpoint can be behind nearer scene objects. Fullscreen UI may encounter the existing
+edge-sampling limits. Depth/alpha registration and bounded FG reuse limitations still apply.
+Historical modes 2 and 3 retain their replay behavior but are not selected for live placement.
 A change of nearest depth can change gain and hence separation between otherwise unchanged
 depths. The exact maximum deliberately includes even a single nearest particle or surface:
-if it persists, its smaller gain target can flatten the distant background, and its range midpoint
-also changes zero placement. Gradual tracking limits abrupt global changes but cannot remove this
-steady-state tradeoff. During adaptation,
+if it persists, its smaller gain target can flatten the distant background. Large depth contrasts
+also receive more zero-target weight, so the trial remains sensitive to near outliers. Together
+with nearest-depth gain adaptation, zero tracking can reduce an approaching object's apparent
+pop-out in a three-layer scene. Gradual tracking limits abrupt global changes but cannot
+remove these steady-state tradeoffs. During adaptation,
 per-pixel saturation can reduce depth separation locally. There is no percentile rejection or
 menu/content detector in this policy.
 No manual reset is needed to recover depth strength or leave startup imagery behind. A real
@@ -1424,21 +1626,26 @@ per-feature reset revision reject older readbacks without
 changing logical source identity. Established gain and the applied zero plane remain; old
 zero-plane targets are discarded while valid current depth can continue rendering. Startup samples
 from different revisions cannot mix. The always-visible UI table displays **Nearest reference Q**,
-**Farthest (q min)**, **Zero plane q0**, **Stereo gain K**, and **Normalization L**, with
+**Farthest (q min)**, **Zero plane q0**, **Stereo gain K**, **UI midpoint q**, and **Normalization L**, with
 **Current/Target** columns. Q and the farthest bound come directly from the same accepted policy
-measurement, without new sampling, and cover the full active depth rectangle. The three depth
+measurement, without new sampling, and cover the full active depth rectangle. The depth
 rows use the same converted inverse-depth coordinate, where
 larger values are nearer; the bounds are scene extrema, not camera clipping planes. Unavailable
 measurements display `--`; retained values during a missing-depth hold are labeled as last applied.
 Dump 3D records the captured scene decision's accepted measurements in
 `render_scene_policy.depth_statistics`, rather than statistics newly computed for the dumped frame.
+Its `centered_moments_supplied`, `mean_q_minus_min` and `mean_square_q_minus_min` fields identify
+the centered evidence; `zero_plane_policy` records the trial formula and the legacy fixture path.
 A missing-depth decision may record `null` while the UI retains older values labeled as held;
 the dump never borrows UI history to fill missing frame evidence.
 The gain target follows the latest valid nearest reference as `L/Q`; the applied gain can lag on
 either side. L is captured for the render decision's output shape. `1/K` is not the measured Q.
 The panel separately shows the per-eye source-width parallax limit at the current slider strength.
-The zero shows its applied value and midpoint target. A positive flat scene can show a zero target
-while its gain target is absent. Camera mode additionally shows current and target **Zero-plane distance** as
+The zero shows its applied value and contrast-midpoint target. A positive flat scene can show a zero target
+while its gain target is absent. **UI midpoint q** shows the independently applied UI depth and
+its extrema-midpoint target. The applied value is consumed by live mode 1 and recorded separately
+from its diagnostic target; there is no covered-depth reduction value to read back.
+Camera mode additionally shows current and target **Zero-plane distance** as
 the reciprocal inverse depth in game-distance units, including infinity at zero. The table retains **Conversion scale**
 and **Conversion offset**. A visible status reports when gain is below target while adapting.
 Moving the zero alone does not change gain. The matrix line
@@ -1462,7 +1669,7 @@ Repeated ingestion of the latest packet is equivalent to no new packet: it never
 range/statistics evidence or its age. Gain and zero can continue following already valid targets on fresh presentations;
 authorized depth reuse holds its captured controls as described above. Output dimensions can update
 L and the gain target for a still-valid measured range; strength scales rendered parallax and its
-limit without changing Q or the midpoint target. Ranges expire 1500 ms after capture, rather than after readback
+limit without changing Q or the contrast-midpoint target. Ranges expire 1500 ms after capture, rather than after readback
 arrival. Ordinary expiry pauses placement and reports `holding_reference`: initialized H and t0 remain
 unchanged while the same exact source supplies a valid current depth image. It does not turn
 3D off or reuse old depth pixels. A fresh range resumes placement. Missing or

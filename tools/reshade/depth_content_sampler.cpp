@@ -44,7 +44,8 @@ namespace {
 
   // Integer texel loads avoid filtering across geometry and padded viewport edges.
   // Selector points and extrema remain raw. Optional moments decode only the
-  // immutable capture's depth basis, alongside the existing full-depth scan.
+  // immutable capture's depth basis. Moments make a second tile traversal after
+  // reducing its minimum, inside this same dispatch and scratch/readback layout.
   constexpr char shader_source[] = R"(
 Texture2D<float> source_depth : register(t0);
 RWTexture2D<float4> sampled_depth : register(u0);
@@ -97,35 +98,53 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
     uint2 last = region.xy + (group.xy + 1) * region.zw / tile_dimensions;
     float lower = 3.402823466e+38, upper = -3.402823466e+38;
     uint invalid = 0;
-    float3 moments = 0.0;
-    uint moments_invalid = 0;
     for (uint y = first.y + local.y; y < last.y; y += 8)
       for (uint x = first.x + local.x; x < last.x; x += 8) {
         float value = source_depth.Load(int3(x, y, 0));
         if (!finite_value(value)) invalid = 1;
         else { lower = min(lower, value); upper = max(upper, value); }
-        if (collect_moments) {
-          precise float q = (value - moments_A) * moments_inverseB;
-          if (!finite_value(q) || q < 0.0) moments_invalid = 1;
-          else moments = add_moment(moments, q);
-        }
       }
     tile_range[lane] = float2(lower, upper);
     tile_invalid[lane] = invalid;
-    tile_moments[lane] = moments;
-    tile_moments_invalid[lane] = moments_invalid;
     GroupMemoryBarrierWithGroupSync();
     for (uint stride = 32; stride; stride >>= 1) {
       if (lane < stride) {
         tile_range[lane] = float2(min(tile_range[lane].x, tile_range[lane + stride].x),
           max(tile_range[lane].y, tile_range[lane + stride].y));
         tile_invalid[lane] |= tile_invalid[lane + stride];
-        if (collect_moments) {
+      }
+      GroupMemoryBarrierWithGroupSync();
+    }
+    float3 moments = 0.0;
+    uint moments_invalid = 0;
+    if (collect_moments) {
+      // Decode the near/far endpoint with the same FP32 operations as every
+      // texel. Subtract before summing so nearly flat q near one retains its
+      // tiny contrast; E[q*q] - 2*b*E[q] + b*b would lose it in FP32.
+      float raw_origin = moments_inverseB > 0.0 ? tile_range[0].x : tile_range[0].y;
+      precise float origin = (raw_origin - moments_A) * moments_inverseB;
+      moments_invalid = tile_invalid[0] || !finite_value(origin) || origin < 0.0;
+      for (uint y = first.y + local.y; y < last.y; y += 8)
+        for (uint x = first.x + local.x; x < last.x; x += 8) {
+          float value = source_depth.Load(int3(x, y, 0));
+          precise float q = (value - moments_A) * moments_inverseB;
+          precise float centered = q - origin;
+          if (!finite_value(q) || q < 0.0 || !finite_value(centered) || centered < 0.0)
+            moments_invalid = 1;
+          else moments = add_moment(moments, centered);
+        }
+    }
+    tile_moments[lane] = moments;
+    tile_moments_invalid[lane] = moments_invalid;
+    GroupMemoryBarrierWithGroupSync();
+    if (collect_moments) {
+      for (uint stride = 32; stride; stride >>= 1) {
+        if (lane < stride) {
           tile_moments[lane] = merge_moments(tile_moments[lane], tile_moments[lane + stride]);
           tile_moments_invalid[lane] |= tile_moments_invalid[lane + stride];
         }
+        GroupMemoryBarrierWithGroupSync();
       }
-      GroupMemoryBarrierWithGroupSync();
     }
     if (!lane) {
       uint tile = group.y * tile_dimensions.x + group.x;
@@ -324,6 +343,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
     sample.region[9] = tiles.y;
     out.moments = {};
     out.moments.supplied = request.collect_moments;
+    out.moments.centered_supplied = request.collect_moments;
     out.moments.A = request.moments_A;
     out.moments.inverseB = request.moments_inverseB;
     out.moments.count = request.collect_moments ? std::uint64_t(out.viewport_width) * out.viewport_height : 0;
@@ -516,7 +536,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
     auto &moments = sample.result.moments;
     bool valid_moments = moments.supplied && std::isfinite(moments.A) &&
       (moments.A == 0.f || std::isnormal(moments.A)) && std::isnormal(moments.inverseB);
-    double sum = 0., sum_squares = 0.;
+    double center = 0., sum_centered = 0., sum_centered_squares = 0.;
     std::uint64_t moment_count = 0;
     float range_min = std::numeric_limits<float>::max(), range_max = -std::numeric_limits<float>::max();
     const auto copy_rows = [&](const std::uint8_t *bytes, UINT pitch) {
@@ -535,22 +555,44 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
         const auto vertical = sunshine_depth_statistics::tile_bounds(tile / tiles_x,
           sample.result.viewport_height, tiles_y);
         const auto count = std::uint64_t(horizontal.size()) * vertical.size();
+        const bool tile_valid = cell[3] == 1.f && count && std::isfinite(cell[1]) &&
+          std::isfinite(cell[2]) && cell[1] <= cell[2];
         if (moments.supplied) {
           const auto measured = record(tile + tile_capacity);
-          if (measured[3] == 2.f && count == 0) {
+          if (measured[3] == 2.f && cell[3] == 2.f && count == 0) {
             // Empty partitions contribute neither samples nor a fabricated zero.
-          } else if (measured[3] != 1.f || !count || !std::isfinite(measured[0]) || measured[0] < 0.f ||
-              !std::isfinite(measured[1]) || measured[1] < 0.f || !std::isfinite(measured[2]) || measured[2] < 0.f) {
+          } else if (!tile_valid || measured[3] != 1.f || !std::isfinite(measured[0]) || measured[0] < 0.f ||
+              !std::isfinite(measured[1]) || measured[1] < 0.f || !std::isfinite(measured[2]) || measured[2] < 0.f ||
+              (measured[0] == 0.f && (measured[1] != 0.f || measured[2] != 0.f))) {
             valid_moments = false;
           } else {
+            // Match the shader's decoded tile minimum in FP32. The remaining
+            // arithmetic only shifts nonnegative moments to a smaller origin;
+            // no subtraction of large uncentered sums occurs.
+            const float raw_origin = moments.inverseB > 0.f ? cell[1] : cell[2];
+            const float delta = raw_origin - moments.A;
+            const float decoded_origin = delta * moments.inverseB;
             const double scale = measured[0];
-            sum += scale * measured[1];
-            sum_squares += scale * scale * measured[2];
-            moment_count += count;
+            const double tile_sum = scale * measured[1];
+            const double tile_squares = scale * scale * measured[2];
+            if (!std::isfinite(decoded_origin) || decoded_origin < 0.f) valid_moments = false;
+            else {
+              if (!moment_count) center = decoded_origin;
+              if (decoded_origin < center) {
+                const double shift = center - decoded_origin;
+                sum_centered_squares += 2. * shift * sum_centered + double(moment_count) * shift * shift;
+                sum_centered += double(moment_count) * shift;
+                center = decoded_origin;
+              }
+              const double shift = double(decoded_origin) - center;
+              sum_centered_squares += tile_squares + 2. * shift * tile_sum + double(count) * shift * shift;
+              sum_centered += tile_sum + double(count) * shift;
+              moment_count += count;
+            }
           }
         }
         if (cell[3] == 2.f && !count) continue;
-        if (cell[3] != 1.f || !std::isfinite(cell[1]) || !std::isfinite(cell[2]) || cell[1] > cell[2]) {
+        if (!tile_valid) {
           valid_range = false;
           continue;
         }
@@ -577,8 +619,16 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
     sample.result.range_valid = valid_range && have_range;
     sample.result.range_min = sample.result.range_valid ? range_min : 0.f;
     sample.result.range_max = sample.result.range_valid ? range_max : 0.f;
-    moments.valid = valid_moments && moment_count == moments.count &&
+    // Legacy sums remain diagnostics, reconstructed in double from the stable
+    // centered measurement. Consumers needing contrast use the fields directly.
+    const double sum = sum_centered + double(moment_count) * center;
+    const double sum_squares = sum_centered_squares + 2. * center * sum_centered + double(moment_count) * center * center;
+    moments.valid = valid_moments && sample.result.range_valid && moment_count == moments.count &&
+      std::isfinite(center) && std::isfinite(sum_centered) && std::isfinite(sum_centered_squares) &&
       std::isfinite(sum) && std::isfinite(sum_squares);
+    moments.center = moments.valid ? center : 0.;
+    moments.sum_centered = moments.valid ? sum_centered : 0.;
+    moments.sum_centered_squares = moments.valid ? sum_centered_squares : 0.;
     moments.sum = moments.valid ? sum : 0.;
     moments.sum_squares = moments.valid ? sum_squares : 0.;
   }

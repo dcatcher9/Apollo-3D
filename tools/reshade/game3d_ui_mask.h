@@ -22,6 +22,12 @@ namespace sunshine_game3d::ui_mask {
     sunshine_streamline::depth_capture::diagnostic_texture texture;
     boundary origin;
   };
+  struct diagnostic_snapshot {
+    request wanted;
+    boundary latest_boundary;
+    sunshine_streamline::depth_capture::record_diagnostic record;
+    bool record_attempted{}, record_completed{}, sdk_result_known{}, sdk_successful{};
+  };
 
   // Repeating an identical request preserves completed pixels. Disable or any
   // scope/size change revokes them, including in-flight attempts from the old scope.
@@ -32,6 +38,13 @@ namespace sunshine_game3d::ui_mask {
   // Nonblocking GPU query; true exposes only completed immutable pixels within
   // maximum_source_age_ms. The consumer must still use copy_diagnostic_texture.
   bool acquire(std::uint64_t runtime, selection &out, std::uint64_t now_ms);
+  // Plain metadata for the newest boundary in the current requested scope.
+  // True with a zero boundary sequence means no matching tag has arrived yet;
+  // record_attempted distinguishes a native call from no call; record_completed
+  // is true only when that call returned its diagnostic. A pending native call
+  // must not be classified as a rejection using its default record fields.
+  // This does not poll the GPU, retain a source lease, or authorize any pixels.
+  bool query_diagnostic(std::uint64_t runtime, diagnostic_snapshot &out);
 
   // Streamline adapter boundary. No source reference is obtained when no live
   // request matches. Every begin attempt must finish after the original SDK call,

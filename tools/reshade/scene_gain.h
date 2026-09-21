@@ -16,6 +16,10 @@ namespace sunshine_scene_gain {
   inline constexpr double zero_budget_per_second = 1.;
   struct depth_range {
     double minimum{}, maximum{}, mean{}, mean_square{};
+    // Stable full-pixel moments of d=q-minimum. Keep these separate from raw
+    // diagnostic moments: subtracting E[q^2]-2*b*E[q]+b^2 loses near-flat detail.
+    bool has_centered_moments = false;
+    double mean_contrast = 0., mean_contrast_square = 0.;
     // Zero count identifies legacy point-only fixtures. Live geometry carries
     // the full active-rectangle measurement, independently of selector points.
     std::uint64_t pixel_count{};
@@ -26,8 +30,31 @@ namespace sunshine_scene_gain {
     depth_range(double low, double high) noexcept : minimum(low), maximum(high), mean(low*.5+high*.5) {}
     depth_range(double low, double high, double average) noexcept : minimum(low), maximum(high), mean(average) {}
     bool valid() const noexcept {
-      return std::isfinite(minimum) && std::isfinite(maximum) && std::isfinite(mean) &&
-        minimum >= 0 && maximum >= minimum && mean >= minimum && mean <= maximum;
+      if (!std::isfinite(minimum) || !std::isfinite(maximum) || !std::isfinite(mean) ||
+          minimum < 0 || maximum < minimum || mean < minimum || mean > maximum) return false;
+      if (!has_centered_moments) return true;
+      const double span = maximum-minimum;
+      if (!std::isfinite(mean_contrast) || !std::isfinite(mean_contrast_square) ||
+          mean_contrast < 0 || mean_contrast_square < 0) return false;
+      if (span == 0.) return mean_contrast == 0. && mean_contrast_square == 0.;
+      if (!(mean_contrast > 0.) || !(mean_contrast_square > 0.)) return false;
+      constexpr double roundoff = 256. * std::numeric_limits<float>::epsilon();
+      return mean_contrast <= span*(1.+roundoff) &&
+        mean_contrast_square >= mean_contrast*mean_contrast*(1.-roundoff) &&
+        mean_contrast_square <= span*mean_contrast*(1.+roundoff);
+    }
+    double zero_target() const noexcept {
+      if (!has_centered_moments) {
+        // Legacy point/range-only callers carry no trustworthy distribution.
+        // Production's full-pixel sampler always supplies centered moments.
+        return minimum*.5 + maximum*.5;
+      }
+      if (maximum == minimum) return minimum;
+      // valid() bounds any overshoot to FP32 reduction roundoff. This rounds
+      // the representative back into its measured domain; no depth is clipped.
+      const double representative = std::min(maximum-minimum,
+        mean_contrast_square/mean_contrast);
+      return minimum + .5*representative;
     }
   };
   // Production supplies full GPU moments and extrema with one frozen decoding
@@ -40,6 +67,7 @@ namespace sunshine_scene_gain {
     static_assert(N != 0, "Scene reference needs a nonempty point grid");
     const auto invalid = [] { return depth_range{std::numeric_limits<double>::quiet_NaN(), 0}; };
     if (supplied && !valid) return invalid();
+    if (moments.centered_supplied && !moments.supplied) return invalid();
     if (moments.supplied && (!supplied || !moments.valid || !moments.count ||
         moments.A != A || moments.inverseB != inverseB ||
         !std::isfinite(moments.sum) || !std::isfinite(moments.sum_squares) ||
@@ -80,6 +108,17 @@ namespace sunshine_scene_gain {
     out.pixel_count = moments.count;
     out.tiles_x = moments.tiles_x;
     out.tiles_y = moments.tiles_y;
+    if (moments.centered_supplied) {
+      if (!std::isfinite(moments.center) || moments.center != low ||
+          !std::isfinite(moments.sum_centered) || !std::isfinite(moments.sum_centered_squares)) return invalid();
+      out.has_centered_moments = true;
+      out.mean_contrast = moments.sum_centered/moments.count;
+      out.mean_contrast_square = moments.sum_centered_squares/moments.count;
+      if (!out.valid() || std::abs((low+out.mean_contrast)-out.mean) > relative_roundoff*high) return invalid();
+      const double reconstructed_square = low*low + 2.*low*out.mean_contrast + out.mean_contrast_square;
+      if (std::abs(reconstructed_square-mean_square) >
+          relative_roundoff*std::max(reconstructed_square, mean_square)) return invalid();
+    }
     return out;
   }
   // Pre-warp displacement units, not a universal viewing-comfort guarantee.
@@ -177,11 +216,13 @@ namespace sunshine_scene_gain {
       if (!initialized_) {
         constexpr auto spacing = reference_span_ms/(reference_samples-1);
         if (count_ && (capture_ms <= reference_ms_ || capture_ms-reference_ms_ < spacing)) return status::calibrating;
-        if (!count_) { first_ms_ = capture_ms; initial_zero_ = initial_maximum_ = 0.; }
+        if (!count_) { first_ms_ = capture_ms; initial_zero_ = initial_maximum_ = initial_ui_midpoint_ = 0.; }
         reference_ms_ = capture_ms;
-        const double midpoint = range.minimum*.5 + range.maximum*.5;
-        initial_zero_ += (midpoint-initial_zero_)/(count_+1);
+        const double zero_target = range.zero_target();
+        initial_zero_ += (zero_target-initial_zero_)/(count_+1);
         initial_maximum_ += (range.maximum-initial_maximum_)/(count_+1);
+        const double midpoint = range.minimum*.5 + range.maximum*.5;
+        initial_ui_midpoint_ += (midpoint-initial_ui_midpoint_)/(count_+1);
         if (++count_ < reference_samples) return status::calibrating;
         // Gain uses the nearest-depth reference, while zero has its own seed.
         // Neither the display budget nor subsequent gain changes move zero.
@@ -190,6 +231,7 @@ namespace sunshine_scene_gain {
         if (gain_ > gain) gain_ = std::nextafter(gain_, 0.f);
         if (!std::isnormal(gain_) || !(gain_ > 0)) { count_ = 0; return status::unsupported; }
         zero_ = initial_zero_;
+        ui_midpoint_ = initial_ui_midpoint_;
         initialized_ = true;
       }
       requested_gain_ = has_span ? target : 0.f;
@@ -237,12 +279,18 @@ namespace sunshine_scene_gain {
           gain_ = seconds > 0 && next == gain_ && gain_ != requested_gain_ ?
             std::nextafter(gain_, requested_gain_) : next;
         }
-        // The range midpoint minimizes max |q-q0| at fixed gain. Limit its
+        // The trial zero balances the far anchor and contrast-weighted
+        // foreground representative. Limit its
         // movement in display units, so a cut or near outlier cannot teleport
         // the entire image. Never clamp the applied zero into the new range:
         // that would bypass this bound. The GPU still caps current disparity.
         const double bound = budget_.normalization/double(gain_) * zero_budget_per_second * seconds;
         zero_ += std::clamp(alpha*(target_zero()-zero_), -bound, bound);
+        // The UI keeps the former extrema-midpoint trajectory using exactly
+        // the same accepted samples, clock and current-gain movement bound.
+        // This independent scalar never changes scene zero or gain. Ordered
+        // targets and identical monotone updates preserve midpoint >= zero.
+        ui_midpoint_ += std::clamp(alpha*(target_ui_midpoint()-ui_midpoint_), -bound, bound);
       }
       last_tick_ms_ = now_ms;
       recovery_armed_ = true;
@@ -259,10 +307,14 @@ namespace sunshine_scene_gain {
       return true;
     }
     float zero() const noexcept { return initialized_ ? static_cast<float>(zero_) : 0.f; }
+    float ui_midpoint() const noexcept { return initialized_ ? static_cast<float>(ui_midpoint_) : 0.f; }
     float value() const noexcept { return initialized_ ? gain_ : 0.f; }
     double reference() const noexcept { return initialized_ && have_target_ ? range_.maximum : 0.0; }
     double target() const noexcept { return has_gain_target() ? requested_gain_ : 0.0; }
-    double target_zero() const noexcept { return initialized_ && have_target_ ? range_.minimum*.5 + range_.maximum*.5 : 0.0; }
+    double target_zero() const noexcept { return initialized_ && have_target_ ? range_.zero_target() : 0.0; }
+    double target_ui_midpoint() const noexcept {
+      return initialized_ && have_target_ ? range_.minimum*.5 + range_.maximum*.5 : 0.0;
+    }
     double lower() const noexcept { return range_.minimum; }
     double upper() const noexcept { return range_.maximum; }
     bool limited() const noexcept { return has_gain_target() && gain_ < requested_gain_; }
@@ -272,6 +324,7 @@ namespace sunshine_scene_gain {
   private:
     std::uint64_t first_ms_{}, reference_ms_{}, revision_{}, target_ms_{}, wall_ms_{}, last_tick_ms_{};
     double zero_{}, initial_zero_{}, initial_maximum_{};
+    double ui_midpoint_{}, initial_ui_midpoint_{};
     float gain_{}, requested_gain_{};
     depth_range range_;
     limits budget_;

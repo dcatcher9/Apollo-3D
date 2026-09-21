@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -212,18 +213,23 @@ namespace {
       return view;
     }
     result render(bool protect, int sign, bool flat = false, bool control = false, bool frame_generation_active = false,
-        api::resource_view alpha_source = {}, const fs::path &dump_directory = {}) {
+        api::resource_view alpha_source = {}, const fs::path &dump_directory = {},
+        const sunshine_game3d::ui_plane_parameters &plane = {},
+        const sunshine_game3d::render_parameters *override_parameters = nullptr) {
       auto &active = control ? control_renderer : renderer;
       sunshine_game3d::render_parameters p;
       p.strength = flat ? 0 : 100; p.depth_ready = p.camera_ready = 1; p.coordinate_basis = 1;
       p.depth_scale = 100000; p.strength_blend = 1; p.projection = {0, 1};
       p.convergence = {.05f, sign > 0 ? .03f : .01f}; p.disparity_limit_uv = .04f;
+      if (override_parameters) p = *override_parameters;
       context->CopyResource(backbuffer.Get(), source.Get());
       auto *queue = observed_runtime->get_command_queue();
       require(active.render(queue->get_immediate_command_list(), {reinterpret_cast<std::uint64_t>(backbuffer.Get())},
         {reinterpret_cast<std::uint64_t>(depth_view.Get())}, p,
         alpha_source.handle ? protect : sunshine_game3d::source_alpha_ui_for_present(protect, frame_generation_active),
-        alpha_source), "production render failed");
+        alpha_source, plane), "production render failed");
+      require(sunshine_game3d::ui_parameter_words(protect, active.consumed_ui_plane()) ==
+          sunshine_game3d::ui_parameter_words(protect, plane), "renderer changed consumed UI-plane bits");
       std::unique_ptr<sunshine_game3d_test::dump_fixture> dump;
       if (!dump_directory.empty()) {
         dump = std::make_unique<sunshine_game3d_test::dump_fixture>();
@@ -247,6 +253,713 @@ namespace {
   double float_spacing(double value) {
     const float f = static_cast<float>(std::abs(value));
     return double(std::nextafter(f, std::numeric_limits<float>::infinity())) - f;
+  }
+
+  // Closed-form projection of one constant UI plane, not a CPU warp replica.
+  double plane_parallax(const fixture &gpu, const sunshine_game3d::render_parameters &p,
+      const sunshine_game3d::ui_plane_parameters &plane) {
+    const double strength = p.strength * .01 * p.strength_blend;
+    const double uv = double(gpu.height) * 100. / (2160. * gpu.width);
+    const double projected = p.convergence[0] * double(p.depth_scale) *
+      (double(plane.inverse_depth) - p.convergence[1]) * strength * uv;
+    const double budget = p.disparity_limit_uv * strength;
+    return std::clamp(std::clamp(projected, -2.5 * uv, 1.5 * uv), -budget, budget);
+  }
+
+  // Diagnosis only: measure consecutive native GPU planes and fields without
+  // requiring a temporal stability policy. No production path or clock changes.
+  void temporal_ui_probe(fixture &gpu, const fs::path &directory, bool front_limit) {
+    using sunshine_game3d::ui_plane_mode;
+    using sunshine_game3d::ui_plane_parameters;
+    require(gpu.width >= 320 && gpu.height >= 180, "temporal UI probe needs at least 320x180");
+    auto &active = gpu.has_control ? gpu.control_renderer : gpu.renderer;
+    require(active.active_shader_source().find(front_limit ? "#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1" :
+        "#define SUNSHINE_UI_NEAREST_PLANE 1") != std::string_view::npos,
+      "temporal UI probe requires a shader supporting the selected mode");
+    std::ofstream shader(directory / "temporal-ui-probe-shader.hlsl", std::ios::binary);
+    shader << active.active_shader_source();
+    require(shader.good(), "cannot freeze temporal probe shader");
+    const size_t count = size_t(gpu.width) * gpu.height;
+    const unsigned px = gpu.width / 2, py = gpu.height * 5 / 12;
+    const size_t peak = size_t(py) * gpu.width + px;
+    std::vector<float> alpha(count, 0.f), raw(count, .125f);
+    size_t covered{};
+    for (unsigned y = gpu.height / 3; y < gpu.height / 2; ++y)
+      for (unsigned x = gpu.width / 4; x < gpu.width * 3 / 4; ++x) {
+        alpha[size_t(y) * gpu.width + x] = .25f;
+        ++covered;
+      }
+    require(alpha[peak] > 0 && alpha.front() == 0, "temporal probe coverage fixture is invalid");
+    raw.front() = .95f; // A closer uncovered sample must not set the UI plane.
+    gpu.pattern(alpha, true); // The exact RGB, alpha, crop and jitter stay fixed.
+    sunshine_game3d::render_parameters base;
+    base.strength = 100; base.depth_ready = base.camera_ready = 1; base.coordinate_basis = 0;
+    base.depth_scale = 4320.f / gpu.height; base.strength_blend = 1;
+    base.projection = {0, 1}; base.convergence = {.05f, .125f}; base.disparity_limit_uv = .04f;
+    const ui_plane_parameters plane{front_limit ? ui_plane_mode::front_limit : ui_plane_mode::depth_midpoint_nearest_ui, .25f};
+    const std::array<const char *, 5> scenarios{{
+      "steady_control", "alternating_covered_nearest", "static_depth_changing_gain",
+      "static_depth_changing_zero", "static_depth_changing_gain_and_zero"}};
+    nlohmann::json document{{"schema", "sunshine.game3d.temporal-ui-probe.v1"},
+      {"purpose", "Measure current native GPU temporal response; no assertion of a desired smoothing or stability policy."},
+      {"measurement", front_limit ? "Actual GPU final_field readback after every render; no inverse-depth scalar exists in front-limit mode and no CPU warp is simulated." :
+        "Actual GPU ui_plane_resolved and final_field readback after every render; no CPU warp simulation."},
+      {"timing", "Sequential completed fixture renders with synchronous diagnostic readback; frame steps are not game timestamps or performance measurements."},
+      {"renderer", gpu.has_control ? "frozen_shader_override" : "embedded_shader"},
+      {"ui_plane_mode", static_cast<std::uint32_t>(plane.mode)},
+      {"inverse_depth_role", front_limit ? "unused" : "midpoint_floor"},
+      {"shader_file", "temporal-ui-probe-shader.hlsl"},
+      {"width", gpu.width}, {"height", gpu.height}, {"color_space", gpu.color},
+      {"covered_pixels", covered}, {"covered_peak_xy", {px, py}},
+      {"uncovered_nearest_q", .95f}, {"midpoint_floor_q", plane.inverse_depth},
+      {"fixed_inputs", "Current RGB, positive-alpha coverage, projection A/inverseB, crop, jitter, strength, strength blend and UI floor."},
+      {"frames", nlohmann::json::array()}, {"scenarios", nlohmann::json::array()}};
+    std::ofstream csv(directory / "temporal-ui-probe.csv");
+    require(csv.good(), "cannot create temporal probe CSV");
+    csv << std::setprecision(std::numeric_limits<double>::max_digits10)
+      << "scenario,frame,sequence,covered_nearest_q,midpoint_floor_q,gain_K,scene_zero_q,gpu_ui_q,gpu_ui_q_delta,ui_source_u,ui_per_eye_pixels,ui_step_pixels,ui_pair_disparity_pixels,candidate_at_ui_pixels,display_budget_pixels,field_nonfinite,field_capped,covered_nonuniform\n";
+    unsigned sequence{};
+    for (unsigned scenario = 0; scenario != scenarios.size(); ++scenario) {
+      const unsigned frames = scenario == 0 ? 8u : 12u;
+      double previous_ui{}, previous_q{}, maximum_step{}, maximum_q_step{};
+      double minimum_ui = std::numeric_limits<double>::infinity(), maximum_ui = -minimum_ui;
+      for (unsigned frame = 0; frame != frames; ++frame) {
+        auto parameters = base;
+        const bool alternate = (frame & 1) != 0;
+        raw[peak] = scenario == 1 ? (alternate ? .8f : .4f) : .6f;
+        if ((scenario == 2 || scenario == 4) && alternate) parameters.depth_scale *= 2.f;
+        if ((scenario == 3 || scenario == 4) && alternate) parameters.convergence[1] = .325f;
+        gpu.context->UpdateSubresource(gpu.depth.Get(), 0, nullptr, raw.data(), gpu.width * sizeof(float), 0);
+        const auto actual = gpu.render(true, 1, false, gpu.has_control, false, {}, {}, plane, &parameters);
+        const auto diagnostics = active.diagnostics();
+        float q{};
+        if (front_limit) {
+          require(!diagnostics.ui_plane_tiles.handle && !diagnostics.ui_plane_resolved.handle,
+            "front-limit temporal probe exposed nearest-depth reduction resources");
+        } else {
+          const auto resolved = gpu.read(diagnostics.ui_plane_resolved);
+          require(resolved.width == 1 && resolved.height == 1 && resolved.format == DXGI_FORMAT_R32_FLOAT,
+            "temporal probe did not receive the actual single-plane GPU scalar");
+          q = resolved.channel(0, 0, 0);
+        }
+        const float field = actual.field.channel(px, py, 0);
+        const double ui_pixels = double(field) * gpu.width;
+        const auto candidate = gpu.read(diagnostics.candidate);
+        const double candidate_pixels = double(candidate.channel(px, py, 0)) * gpu.width;
+        const float budget = parameters.disparity_limit_uv * parameters.strength * .01f * parameters.strength_blend;
+        size_t nonfinite{}, capped{}, nonuniform{};
+        float field_min = std::numeric_limits<float>::infinity(), field_max = -field_min;
+        for (unsigned y = 0; y != gpu.height; ++y) for (unsigned x = 0; x != gpu.width; ++x) {
+          const auto value = actual.field.channel(x, y, 0);
+          if (!std::isfinite(value)) ++nonfinite;
+          else {
+            field_min = std::min(field_min, value); field_max = std::max(field_max, value);
+            if (std::abs(value) >= budget) ++capped;
+          }
+          if (alpha[size_t(y) * gpu.width + x] > 0 && value != field) ++nonuniform;
+        }
+        require(std::isfinite(q) && std::isfinite(field) && !nonfinite,
+          "temporal probe produced nonfinite GPU evidence");
+        const double delta = frame ? ui_pixels - previous_ui : 0.;
+        const double q_delta = frame ? double(q) - previous_q : 0.;
+        maximum_step = std::max(maximum_step, std::abs(delta));
+        maximum_q_step = std::max(maximum_q_step, std::abs(q_delta));
+        minimum_ui = std::min(minimum_ui, ui_pixels); maximum_ui = std::max(maximum_ui, ui_pixels);
+        previous_ui = ui_pixels; previous_q = q;
+        std::uint32_t q_bits{}; std::memcpy(&q_bits, &q, sizeof(q));
+        nlohmann::json row{{"scenario", scenarios[scenario]}, {"frame", frame}, {"sequence", sequence++},
+          {"ui_plane_mode", static_cast<std::uint32_t>(plane.mode)},
+          {"covered_nearest_q", raw[peak]}, {"midpoint_floor_q", plane.inverse_depth},
+          {"gain_K", parameters.depth_scale}, {"scene_zero_q", parameters.convergence[1]},
+          {"gpu_ui_q", front_limit ? nlohmann::json(nullptr) : nlohmann::json(q)},
+          {"gpu_ui_q_bits", front_limit ? nlohmann::json(nullptr) : nlohmann::json(q_bits)},
+          {"gpu_ui_q_delta", frame && !front_limit ? nlohmann::json(q_delta) : nlohmann::json(nullptr)},
+          {"ui_source_u", field}, {"ui_per_eye_pixels", ui_pixels},
+          {"ui_step_pixels", frame ? nlohmann::json(delta) : nlohmann::json(nullptr)},
+          {"ui_pair_disparity_pixels", 2 * ui_pixels}, {"candidate_at_ui_pixels", candidate_pixels},
+          {"display_budget_pixels", double(budget) * gpu.width},
+          {"field_min_per_eye_pixels", double(field_min) * gpu.width},
+          {"field_max_per_eye_pixels", double(field_max) * gpu.width},
+          {"field_nonfinite", nonfinite}, {"field_capped", capped}, {"covered_nonuniform", nonuniform}};
+        document["frames"].push_back(row);
+        // One JSON object per frame also makes a redirected stdout log useful.
+        std::printf("%s\n", row.dump().c_str());
+        csv << scenarios[scenario] << ',' << frame << ',' << sequence - 1 << ',' << raw[peak] << ','
+          << plane.inverse_depth << ',' << parameters.depth_scale << ',' << parameters.convergence[1] << ',';
+        if (!front_limit) csv << q;
+        csv << ',';
+        if (frame && !front_limit) csv << q_delta;
+        csv << ',' << field << ',' << ui_pixels << ',';
+        if (frame) csv << delta;
+        csv << ',' << 2 * ui_pixels << ',' << candidate_pixels << ',' << double(budget) * gpu.width << ','
+          << nonfinite << ',' << capped << ',' << nonuniform << '\n';
+      }
+      document["scenarios"].push_back({{"scenario", scenarios[scenario]}, {"frames", frames},
+        {"maximum_absolute_ui_step_pixels", maximum_step},
+        {"maximum_absolute_q_step", front_limit ? nlohmann::json(nullptr) : nlohmann::json(maximum_q_step)},
+        {"ui_min_per_eye_pixels", minimum_ui}, {"ui_max_per_eye_pixels", maximum_ui}});
+    }
+    document["status"] = "diagnostic_complete";
+    std::ofstream json(directory / "temporal-ui-probe.json");
+    json << document.dump(2) << '\n';
+    require(csv.good() && json.good(), "cannot write temporal UI probe evidence");
+    std::printf("DIAGNOSTIC COMPLETE native GPU temporal UI probe: %u frames; no temporal stability assertion\n", sequence);
+  }
+  double translated_color(const image &source, double x, unsigned y, unsigned channel) {
+    x = std::clamp(x, 0., double(source.width - 1));
+    const unsigned left = static_cast<unsigned>(std::floor(x));
+    const unsigned right = std::min(left + 1, source.width - 1);
+    return source.channel(left, y, channel) * (1. - (x - left)) + source.channel(right, y, channel) * (x - left);
+  }
+  void verify_independent_ui_plane(fixture &gpu, std::ostream &report, const fs::path &dump_directory) {
+    using sunshine_game3d::ui_plane_mode;
+    using sunshine_game3d::ui_plane_parameters;
+    sunshine_game3d::render_parameters p;
+    p.strength = 100; p.depth_ready = p.camera_ready = 1; p.coordinate_basis = 1;
+    p.depth_scale = 432.f / gpu.height; p.strength_blend = 1;
+    p.projection = {0, 1}; p.convergence = {.05f, 1.f}; p.disparity_limit_uv = .04f;
+    const auto render = [&](bool protect, const ui_plane_parameters &plane,
+        const sunshine_game3d::render_parameters &parameters, bool control = false,
+        api::resource_view alpha_source = {}, const fs::path &dump = {}) {
+      return gpu.render(protect, 1, false, control, alpha_source.handle != 0, alpha_source, dump, plane, &parameters);
+    };
+    const double color_tolerance = gpu.color == 2 ? .0021 : 1.01 / 1023;
+    // The analytic translated image also crosses the hardware linear filter:
+    // allow one 8-bit subtexel step and two float UV rounding steps, scaled by
+    // the fixture's largest channel edge. Existing zero-plane tests retain
+    // their tighter export-quantization-only tolerance below.
+    const double translated_tolerance = color_tolerance + (gpu.color == 2 ? 2. : 1.) *
+      (1. / 256 + 2 * float_spacing(1.) * gpu.width);
+    std::vector<float> alpha(size_t(gpu.width) * gpu.height, 1.f);
+    for (float inverse : {0.f, 2.f}) {
+      const ui_plane_parameters plane{ui_plane_mode::depth_midpoint, inverse};
+      gpu.pattern(alpha, true);
+      const auto off = render(false, {}, p);
+      const auto off_plane = render(false, plane, p);
+      require(off.field.bytes == off_plane.field.bytes && off.output.bytes == off_plane.output.bytes,
+        "UI depth changed output with protection disabled");
+      const auto legacy = render(true, {}, p);
+      if (gpu.has_control) {
+        const auto frozen = render(true, {}, p, true);
+        require(legacy.field.bytes == frozen.field.bytes && legacy.output.bytes == frozen.output.bytes,
+          "legacy screen-plane UI changed frozen output");
+      }
+      const auto scene_candidate = gpu.read(gpu.renderer.diagnostics().candidate).bytes;
+      const auto scene_vertical = gpu.read(gpu.renderer.diagnostics().vertical_field).bytes;
+      const image source{gpu.original, gpu.width, gpu.height,
+        gpu.color == 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM};
+      // Full white and gray are real planar UI; their color must translate as
+      // one rigid layer, including both signs, fractional shifts and clipping.
+      for (unsigned variant = 0; variant != 4; ++variant) {
+        auto parameters = p;
+        if (variant == 1) { parameters.strength = 50; parameters.strength_blend = .5f; }
+        if (variant == 2) parameters.disparity_limit_uv = .0001f;
+        if (variant == 3) { parameters.depth_scale *= 100; parameters.disparity_limit_uv = .001f; }
+        std::fill(alpha.begin(), alpha.end(), variant == 1 ? .25f : 1.f);
+        gpu.pattern(alpha, true);
+        const auto actual = render(true, plane, parameters);
+        const double expected = plane_parallax(gpu, parameters, plane);
+        const double observed = actual.field.channel(0, 0, 0);
+        require(std::abs(observed - expected) <= 8 * float_spacing(expected), "independent UI plane has wrong signed projection");
+        const double limit = parameters.disparity_limit_uv * double(parameters.strength) * .01 * parameters.strength_blend;
+        require(std::abs(observed) <= limit + float_spacing(limit), "UI plane exceeds per-eye display budget");
+        double color_error_max{};
+        for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
+          require(actual.field.channel(x, y, 0) == observed, "whole-image UI did not retain one exact plane");
+          for (unsigned eye = 0; eye != 2; ++eye) for (unsigned channel = 0; channel != 3; ++channel) {
+            const double sample_x = x + (eye ? 1. : -1.) * observed * gpu.width;
+            color_error_max = std::max(color_error_max, std::abs(double(actual.output.channel(x + eye * gpu.width, y, channel)) -
+              translated_color(source, sample_x, y, channel)));
+          }
+        }
+        require(color_error_max <= translated_tolerance, "constant UI plane did not rigidly translate current RGB");
+        if (!variant) {
+          require(gpu.read(gpu.renderer.diagnostics().candidate).bytes == scene_candidate &&
+              gpu.read(gpu.renderer.diagnostics().vertical_field).bytes == scene_vertical,
+            "UI plane changed scene candidate or vertical conditioning");
+          if (gpu.has_control && gpu.control_renderer.active_shader_source().find("Sunshine_UIPlaneMode") != std::string_view::npos) {
+            const auto frozen = render(true, plane, parameters, true);
+            require(actual.field.bytes == frozen.field.bytes && actual.output.bytes == frozen.output.bytes,
+              "fixed midpoint mode changed frozen field or RGB bits");
+          }
+        }
+        report << "UI-plane inverse=" << inverse << " variant=" << variant << " per_eye_px=" << observed * gpu.width
+          << " rigid_RGB_error=" << color_error_max << std::endl;
+      }
+      std::fill(alpha.begin(), alpha.end(), 0.f); gpu.pattern(alpha, true);
+      const auto empty = render(true, plane, p);
+      const auto empty_off = render(false, {}, p);
+      require(empty.field.bytes == empty_off.field.bytes && empty.output.bytes == empty_off.output.bytes,
+        "all-black alpha changed stereo at a nonzero UI plane");
+
+      // A partial layer must keep the same shape at its projected position.
+      // Only its red marker is compared outside UI; the underlying green
+      // scene is intentionally free to follow the conditioned scene field.
+      for (unsigned y = gpu.height / 4; y < gpu.height * 3 / 4; ++y)
+        for (unsigned x = gpu.width / 3; x < gpu.width / 2; ++x) alpha[size_t(y) * gpu.width + x] = .25f;
+      alpha[size_t(gpu.height / 8) * gpu.width + gpu.width / 4] = 1.f;
+      gpu.pattern(alpha);
+      const image partial_source{gpu.original, gpu.width, gpu.height, source.format};
+      const auto unprotected = render(false, {}, p);
+      const auto partial = render(true, plane, p, false, {}, inverse == 2.f ? dump_directory : fs::path{});
+      const double expected = plane_parallax(gpu, p, plane);
+      const double anchor = partial.field.channel(gpu.width / 3, gpu.height / 4, 0);
+      require(std::abs(anchor - expected) <= 8 * float_spacing(expected), "partial UI has the wrong plane");
+      double red_error{};
+      for (unsigned y = 0; y < gpu.height; ++y) {
+        std::vector<unsigned> distance(gpu.width, gpu.width);
+        int nearest = -int(gpu.width);
+        for (unsigned x = 0; x < gpu.width; ++x) {
+          if (alpha[size_t(y) * gpu.width + x] > 0) nearest = int(x);
+          distance[x] = std::min(gpu.width, unsigned(int(x) - nearest));
+        }
+        nearest = 2 * int(gpu.width);
+        for (int x = int(gpu.width) - 1; x >= 0; --x) {
+          if (alpha[size_t(y) * gpu.width + unsigned(x)] > 0) nearest = x;
+          distance[unsigned(x)] = std::min(distance[unsigned(x)], unsigned(nearest - x));
+        }
+        for (unsigned x = 0; x < gpu.width; ++x) {
+          const double value = partial.field.channel(x, y, 0);
+          if (distance[x] == gpu.width) {
+            require(std::memcmp(partial.field.bytes.data() + (size_t(y) * gpu.width + x) * 4,
+              unprotected.field.bytes.data() + (size_t(y) * gpu.width + x) * 4, 4) == 0,
+              "blank UI row changed scene field bits");
+          } else {
+            const double radius = .5 * std::max(int(distance[x]) - 1, 0) / gpu.width;
+            const double tolerance = 4 * (float_spacing(value) + float_spacing(anchor) + float_spacing(radius));
+            require(std::abs(value - anchor) <= radius + tolerance, "shifted UI collar exceeded its distance bound");
+            if (distance[x] <= 1) require(value == anchor, "UI and bilinear collar were not pinned exactly");
+          }
+          if (x) {
+            const double previous = partial.field.channel(x - 1, y, 0);
+            require(std::abs(value - previous) * gpu.width <= .5 +
+                4 * (float_spacing(value) + float_spacing(previous)) * gpu.width,
+              "shifted UI field exceeded horizontal invertibility bound");
+          }
+          for (unsigned eye = 0; eye != 2; ++eye)
+            red_error = std::max(red_error, std::abs(double(partial.output.channel(x + eye * gpu.width, y, 0)) -
+              translated_color(partial_source, x + (eye ? 1. : -1.) * anchor * gpu.width, y, 0)));
+        }
+      }
+      require(red_error <= translated_tolerance, "partial UI shape changed or left a ghost outside translated support");
+      const auto external = gpu.retain_mask(alpha);
+      gpu.pattern(alpha, true);
+      const auto direct = render(true, plane, p);
+      std::vector<float> wrong_alpha(alpha.size(), 1.f); gpu.pattern(wrong_alpha, true);
+      const auto retained = render(true, plane, p, false, external);
+      require(direct.field.bytes == retained.field.bytes && direct.output.bytes == retained.output.bytes,
+        "nonzero UI plane changed retained-alpha selection or current RGB");
+      report << "UI-plane inverse=" << inverse << " partial_per_eye_px=" << anchor * gpu.width
+        << " translated_red_error=" << red_error << " retained_alpha_exact=1" << std::endl;
+      std::fill(alpha.begin(), alpha.end(), 1.f);
+    }
+    gpu.pattern(alpha, true);
+    const auto legacy = render(true, {}, p);
+    for (const auto &invalid : std::array<ui_plane_parameters, 5>{{
+      {static_cast<ui_plane_mode>(4), 1.f}, {ui_plane_mode::depth_midpoint, -1.f},
+      {ui_plane_mode::depth_midpoint, std::numeric_limits<float>::infinity()},
+      {ui_plane_mode::depth_midpoint, std::numeric_limits<float>::quiet_NaN()},
+      {ui_plane_mode::screen, std::numeric_limits<float>::quiet_NaN()}}}) {
+      const auto actual = render(true, invalid, p);
+      require(actual.field.bytes == legacy.field.bytes && actual.output.bytes == legacy.output.bytes,
+        "invalid UI-plane metadata did not preserve legacy screen pinning");
+    }
+    for (unsigned condition = 0; condition != 3; ++condition) {
+      auto mono = p;
+      if (!condition) mono.strength = 0;
+      if (condition == 1) mono.depth_ready = 0;
+      if (condition == 2) mono.camera_ready = 0;
+      const auto actual = render(true, {ui_plane_mode::depth_midpoint, 2.f}, mono);
+      const auto reference = render(true, {}, mono);
+      require(actual.field.bytes == reference.field.bytes && actual.output.bytes == reference.output.bytes,
+        "independent UI plane changed mono fallback");
+      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x)
+        require(actual.field.channel(x, y, 0) == 0.f, "mono fallback retained UI disparity");
+    }
+    std::puts("PASS independent UI plane: both signs, rigid RGB, collar, budget, legacy/disabled parity, retained alpha and invalid/mono fallback");
+  }
+
+  void verify_nearest_ui_plane(fixture &gpu, std::ostream &report, const fs::path &dump_directory) {
+    using sunshine_game3d::ui_plane_mode;
+    using sunshine_game3d::ui_plane_parameters;
+    const auto count = size_t(gpu.width) * gpu.height;
+    const auto at = [&](unsigned x, unsigned y) { return size_t(y) * gpu.width + x; };
+    const unsigned ax = gpu.width / 3, ay = gpu.height / 3;
+    const unsigned bx = gpu.width * 2 / 3, by = gpu.height * 2 / 3;
+    const unsigned cx = gpu.width - 1, cy = gpu.height - 1;
+    std::vector<float> alpha(count, 0.f), q(count, .125f);
+    alpha[at(ax, ay)] = .25f; alpha[at(bx, by)] = 1.f; alpha[at(cx, cy)] = 1.f / 64;
+    sunshine_game3d::render_parameters p;
+    p.strength = 100; p.depth_ready = p.camera_ready = 1; p.coordinate_basis = 0;
+    p.depth_scale = 432.f / gpu.height; p.strength_blend = 1;
+    p.projection = {0, 1}; p.convergence = {.05f, .125f}; p.disparity_limit_uv = .04f;
+    ui_plane_parameters plane{ui_plane_mode::depth_midpoint_nearest_ui, .25f};
+    const auto upload = [&](const std::vector<float> &values, bool reverse) {
+      auto raw = values;
+      if (reverse) for (auto &value : raw) value = 1.f - value;
+      gpu.context->UpdateSubresource(gpu.depth.Get(), 0, nullptr, raw.data(), gpu.width * sizeof(float), 0);
+    };
+    const auto render = [&](bool protect, const ui_plane_parameters &selected,
+        const sunshine_game3d::render_parameters &parameters, api::resource_view external = {},
+        const fs::path &dump = {}, bool control = false) {
+      return gpu.render(protect, 1, false, control, external.handle != 0, external, dump, selected, &parameters);
+    };
+    const auto resolved = [&] {
+      const auto resources = gpu.renderer.diagnostics();
+      require(resources.ui_plane_tiles.handle && resources.ui_plane_resolved.handle,
+        "current render omitted nearest-UI GPU evidence");
+      const auto scalar = gpu.read(resources.ui_plane_resolved);
+      require(scalar.width == 1 && scalar.height == 1 && scalar.format == DXGI_FORMAT_R32_FLOAT,
+        "nearest-UI result is not one global float32 plane");
+      const auto tiles = gpu.read(resources.ui_plane_tiles);
+      require(tiles.width == (gpu.width + 15) / 16 && tiles.height == (gpu.height + 15) / 16,
+        "nearest-UI tile reduction dimensions are incomplete");
+      return scalar.channel(0, 0, 0);
+    };
+    const auto pinned = [&](const result &value, float inverse, const sunshine_game3d::render_parameters &parameters,
+        const std::vector<float> &coverage) {
+      const double expected = plane_parallax(gpu, parameters, {ui_plane_mode::depth_midpoint, inverse});
+      bool seen = false; float first{};
+      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
+        if (!std::isfinite(coverage[at(x, y)]) || coverage[at(x, y)] <= 0.f) continue;
+        const float actual = value.field.channel(x, y, 0);
+        require(std::abs(double(actual) - expected) <= 8 * float_spacing(expected),
+          "UI pixels were not pinned to the resolved global near plane");
+        if (seen) require(actual == first, "separate UI rows received different planes");
+        else { first = actual; seen = true; }
+      }
+      return first;
+    };
+    if (gpu.has_control && gpu.control_renderer.active_shader_source().find("#define SUNSHINE_UI_NEAREST_PLANE 1") == std::string_view::npos)
+      require(!gpu.control_renderer.render(observed_runtime->get_command_queue()->get_immediate_command_list(),
+          {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())},
+          {reinterpret_cast<std::uint64_t>(gpu.depth_view.Get())}, p, true, {}, plane),
+        "historical shader silently accepted an unsupported nearest-UI plane");
+
+    for (bool reverse : {false, true}) {
+      p.projection = reverse ? std::array<float, 2>{1, -1} : std::array<float, 2>{0, 1};
+      q.assign(count, .125f); q[0] = .9375f;
+      q[at(ax, ay)] = .5f; q[at(bx, by)] = .75f; q[at(cx, cy)] = .625f;
+      upload(q, reverse); gpu.pattern(alpha, true);
+      const auto off = render(false, {}, p);
+      const auto off_new = render(false, plane, p);
+      require(off.field.bytes == off_new.field.bytes && off.output.bytes == off_new.output.bytes &&
+          !gpu.renderer.diagnostics().ui_plane_resolved.handle,
+        "disabled UI changed output or exposed an obsolete resolved plane");
+      const auto candidate = gpu.read(gpu.renderer.diagnostics().candidate).bytes;
+      const auto vertical = gpu.read(gpu.renderer.diagnostics().vertical_field).bytes;
+      const auto actual = render(true, plane, p, {}, reverse ? fs::path{} : dump_directory);
+      require(resolved() == .75f, "nearest UI plane included closer uncovered depth or missed covered depth");
+      const float applied = pinned(actual, .75f, p, alpha);
+      require(gpu.read(gpu.renderer.diagnostics().candidate).bytes == candidate &&
+          gpu.read(gpu.renderer.diagnostics().vertical_field).bytes == vertical,
+        "nearest-UI reduction changed scene geometry before UI pinning");
+      for (unsigned x = 0; x < gpu.width; ++x)
+        require(actual.field.channel(x, 0, 0) == off.field.channel(x, 0, 0),
+          "nearest-UI plane changed an unmasked row");
+      if (gpu.has_control) {
+        const auto frozen = render(true, {ui_plane_mode::depth_midpoint, plane.inverse_depth}, p, {}, {}, true);
+        const float prior = frozen.field.channel(ax, ay, 0);
+        require(prior < applied && applied - prior > .1f / gpu.width,
+          "frozen midpoint control did not demonstrate the covered-foreground counterexample");
+        report << "nearest-UI control=midpoint reverse=" << reverse << " prior_px=" << prior * gpu.width
+          << " required_px=" << applied * gpu.width << " old_requirement_failed=1" << std::endl;
+      }
+      // Lower the previously closest covered pixel. A maximum from another
+      // render must not survive, even though nearer unmasked geometry remains.
+      q[at(bx, by)] = .375f; upload(q, reverse);
+      const auto lower = render(true, plane, p);
+      require(resolved() == .625f, "nearest-UI maximum retained the previous render");
+      pinned(lower, .625f, p, alpha);
+      // One faint covered corner texel is enough, including a partial edge tile.
+      q[at(cx, cy)] = .875f; upload(q, reverse);
+      const auto outlier = render(true, plane, p);
+      require(resolved() == .875f, "single soft-alpha corner pixel was missed");
+      pinned(outlier, .875f, p, alpha);
+      q[at(ax, ay)] = q[at(bx, by)] = q[at(cx, cy)] = .125f; upload(q, reverse);
+      const auto floor = render(true, plane, p);
+      require(resolved() == plane.inverse_depth, "nearest-UI plane moved behind the midpoint floor");
+      pinned(floor, plane.inverse_depth, p, alpha);
+
+      std::vector<float> white(count, 1.f); gpu.pattern(white, true);
+      const auto full = render(true, plane, p);
+      require(resolved() == .9375f, "all-white UI failed to include the nearest depth");
+      pinned(full, .9375f, p, white);
+      std::vector<float> black(count, 0.f); gpu.pattern(black, true);
+      const auto empty = render(true, plane, p);
+      require(resolved() == plane.inverse_depth, "all-black coverage reused an old foreground maximum");
+      const auto empty_off = render(false, {}, p);
+      require(empty.field.bytes == empty_off.field.bytes && empty.output.bytes == empty_off.output.bytes,
+        "all-black UI changed scene output in nearest mode");
+
+      // An independent retained mask must control the reduction and pinning;
+      // current output alpha and the old texture's RGB have no authority here.
+      q[at(ax, ay)] = .5f; q[at(bx, by)] = .75f; q[at(cx, cy)] = .625f; upload(q, reverse);
+      const auto external = gpu.retain_mask(alpha);
+      gpu.pattern(alpha, true); const auto direct = render(true, plane, p);
+      gpu.pattern(white, true); const auto retained = render(true, plane, p, external);
+      require(resolved() == .75f && retained.field.bytes == direct.field.bytes && retained.output.bytes == direct.output.bytes,
+        "nearest-UI reduction used current alpha or retained RGB instead of selected coverage");
+
+      // With a cropped allocation and nonzero jitter, the selected source pixel
+      // maps to this exact interior texel. A closer unjittered/padding texel must
+      // not become the UI plane. All quantities here are exactly representable.
+      auto cropped = p; cropped.depth_rect = {.25f, .25f, .5f, .5f};
+      cropped.jitter = {1.f / gpu.width, -1.f / gpu.height};
+      std::vector<float> point(count, 0.f); point[at(gpu.width / 2, gpu.height / 2)] = .25f;
+      q.assign(count, .125f); q[0] = .9375f; q[at(gpu.width / 2, gpu.height / 2)] = .9375f;
+      q[at(gpu.width / 2 + 1, gpu.height / 2 - 1)] = .75f;
+      upload(q, reverse); gpu.pattern(point, true);
+      const auto shifted = render(true, plane, cropped);
+      require(resolved() == .75f, "nearest-UI reduction ignored depth crop or projection jitter");
+      pinned(shifted, .75f, cropped, point);
+      report << "nearest-UI reverse=" << reverse
+        << " covered_max_exact=1 uncovered_ignored=1 floor=1 current_frame=1 soft_corner=1 all_white_black=1 retained_alpha=1 crop_jitter=1" << std::endl;
+    }
+
+    // Nonfinite/negative decoded depths do not invent a near plane. Positive
+    // alpha still pins at the valid midpoint floor when no covered q is valid.
+    p.projection = {0, 1};
+    q.assign(count, .125f); q[at(ax, ay)] = std::numeric_limits<float>::quiet_NaN();
+    q[at(bx, by)] = std::numeric_limits<float>::infinity(); q[at(cx, cy)] = -1.f;
+    upload(q, false); gpu.pattern(alpha, true);
+    const auto invalid_q = render(true, plane, p);
+    require(resolved() == plane.inverse_depth, "invalid covered depth became the nearest plane");
+    pinned(invalid_q, plane.inverse_depth, p, alpha);
+    if (gpu.color == 2) {
+      auto invalid_alpha = alpha;
+      invalid_alpha[at(ax, ay)] = std::numeric_limits<float>::quiet_NaN();
+      invalid_alpha[at(bx, by)] = std::numeric_limits<float>::infinity(); invalid_alpha[at(cx, cy)] = -1.f;
+      q.assign(count, .875f); upload(q, false); gpu.pattern(invalid_alpha, true);
+      const auto no_coverage = render(true, plane, p);
+      require(resolved() == plane.inverse_depth, "nonfinite or negative alpha entered the maximum");
+      const auto reference = render(false, {}, p);
+      require(no_coverage.field.bytes == reference.field.bytes && no_coverage.output.bytes == reference.output.bytes,
+        "invalid alpha changed nearest-mode output");
+    }
+    q.assign(count, .75f); upload(q, false); gpu.pattern(alpha, true);
+    const auto legacy = render(true, {}, p);
+    for (float bad_floor : {-1.f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+      const auto bad = render(true, {ui_plane_mode::depth_midpoint_nearest_ui, bad_floor}, p);
+      require(bad.field.bytes == legacy.field.bytes && bad.output.bytes == legacy.output.bytes && resolved() == 0.f,
+        "invalid nearest-UI floor did not preserve screen-plane fallback");
+    }
+    for (unsigned condition = 0; condition != 4; ++condition) {
+      auto mono = p;
+      if (condition == 0) mono.strength = 0;
+      if (condition == 1) mono.depth_ready = 0;
+      if (condition == 2) mono.camera_ready = 0;
+      if (condition == 3) mono.projection[1] = 0;
+      const auto inactive = render(true, plane, mono);
+      require(resolved() == 0.f, "inactive stereo retained a prior resolved UI plane");
+      const auto reference = render(true, {}, mono);
+      require(inactive.field.bytes == reference.field.bytes && inactive.output.bytes == reference.output.bytes,
+        "nearest-UI mode changed mono or invalid projection fallback");
+    }
+    // Leave the longstanding source-alpha fixtures' original depth untouched.
+    q.assign(count, .02f); upload(q, false);
+    std::puts("PASS nearest-UI global plane: exact current-frame maximum/floor, both depth directions, selected alpha, crop/jitter, invalid input and legacy/mono compatibility");
+  }
+  void verify_front_limit_ui_plane(fixture &gpu, std::ostream &report, const fs::path &dump_directory) {
+    using sunshine_game3d::ui_plane_mode;
+    using sunshine_game3d::ui_plane_parameters;
+    const size_t count = size_t(gpu.width) * gpu.height;
+    const unsigned px = gpu.width / 2, py = gpu.height / 2;
+    const size_t peak = size_t(py) * gpu.width + px;
+    std::vector<float> alpha(count, 0.f), raw(count, .125f);
+    for (unsigned y = gpu.height / 3; y < gpu.height * 2 / 3; ++y)
+      for (unsigned x = gpu.width / 3; x < gpu.width * 2 / 3; ++x)
+        alpha[size_t(y) * gpu.width + x] = .25f;
+    alpha[peak] = .25f;
+    sunshine_game3d::render_parameters p;
+    p.strength = 100; p.depth_ready = p.camera_ready = 1; p.coordinate_basis = 0;
+    p.depth_scale = 432.f / gpu.height; p.strength_blend = 1;
+    p.projection = {0, 1}; p.convergence = {.05f, .125f}; p.disparity_limit_uv = .04f;
+    const ui_plane_parameters front{ui_plane_mode::front_limit, 0.f};
+    const auto upload = [&] { gpu.context->UpdateSubresource(gpu.depth.Get(), 0, nullptr, raw.data(), gpu.width * sizeof(float), 0); };
+    const auto render = [&](bool protect, const ui_plane_parameters &plane,
+        const sunshine_game3d::render_parameters &parameters, bool control = false,
+        api::resource_view external = {}, const fs::path &dump = {}) {
+      return gpu.render(protect, 1, false, control, external.handle != 0, external, dump, plane, &parameters);
+    };
+    const auto no_reduction = [&] {
+      require(!gpu.renderer.diagnostics().ui_plane_tiles.handle && !gpu.renderer.diagnostics().ui_plane_resolved.handle,
+        "front-limit UI exposed a current nearest-depth reduction");
+    };
+    const auto budget = [](const sunshine_game3d::render_parameters &parameters) {
+      const float strength = std::clamp(parameters.strength, 0.f, 100.f) * .01f * std::clamp(parameters.strength_blend, 0.f, 1.f);
+      return parameters.disparity_limit_uv * strength;
+    };
+    const auto pinned = [&](const result &actual, const sunshine_game3d::render_parameters &parameters) {
+      const float expected = budget(parameters);
+      const float observed = actual.field.channel(px, py, 0);
+      require(std::abs(double(observed) - expected) <= 2 * float_spacing(expected), "front-limit UI does not use the positive current display budget");
+      for (unsigned y = 0; y != gpu.height; ++y) for (unsigned x = 0; x != gpu.width; ++x) {
+        const float value = actual.field.channel(x, y, 0);
+        require(std::isfinite(value) && std::abs(value) <= expected + float_spacing(expected), "front-limit field exceeded the current finite display budget");
+        if (alpha[size_t(y) * gpu.width + x] > 0) require(value == observed, "front-limit UI did not share one global plane");
+      }
+      no_reduction();
+      return observed;
+    };
+    if (gpu.has_control && gpu.control_renderer.active_shader_source().find("#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1") == std::string_view::npos)
+      require(!gpu.control_renderer.render(observed_runtime->get_command_queue()->get_immediate_command_list(),
+          {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())}, {reinterpret_cast<std::uint64_t>(gpu.depth_view.Get())}, p, true, {}, front),
+        "historical shader silently accepted the unsupported front-limit UI plane");
+    gpu.pattern(alpha, true);
+    float first{}, mode2_min = std::numeric_limits<float>::infinity(), mode2_max = -mode2_min;
+    std::vector<unsigned char> first_candidate;
+    bool candidate_changed = false;
+    for (unsigned frame = 0; frame != 12; ++frame) {
+      auto parameters = p;
+      raw[peak] = frame & 1 ? .8f : .4f;
+      raw.front() = .95f;
+      parameters.depth_scale *= frame % 3 == 0 ? .5f : frame % 3 == 1 ? 8.f : 2.f;
+      parameters.convergence[1] = frame % 4 < 2 ? .025f : .375f;
+      upload();
+      const auto nearest = render(true, {ui_plane_mode::depth_midpoint_nearest_ui, .25f}, parameters);
+      const auto candidate = gpu.read(gpu.renderer.diagnostics().candidate).bytes;
+      const auto vertical = gpu.read(gpu.renderer.diagnostics().vertical_field).bytes;
+      if (!frame) first_candidate = candidate;
+      else candidate_changed |= candidate != first_candidate;
+      const float prior = nearest.field.channel(px, py, 0);
+      mode2_min = std::min(mode2_min, prior); mode2_max = std::max(mode2_max, prior);
+      if (!frame && gpu.has_control && gpu.control_renderer.active_shader_source().find("#define SUNSHINE_UI_NEAREST_PLANE 1") != std::string_view::npos) {
+        const auto frozen = render(true, {ui_plane_mode::depth_midpoint_nearest_ui, .25f}, parameters, true);
+        require(frozen.field.bytes == nearest.field.bytes && frozen.output.bytes == nearest.output.bytes,
+          "new front-limit support changed frozen nearest-mode field or RGB bits");
+      }
+      const auto actual = render(true, front, parameters, false, {}, !frame ? dump_directory : fs::path{});
+      const float observed = pinned(actual, parameters);
+      if (!frame) first = observed;
+      else require(observed == first, "front-limit UI moved with scene depth, gain or zero");
+      require(gpu.read(gpu.renderer.diagnostics().candidate).bytes == candidate && gpu.read(gpu.renderer.diagnostics().vertical_field).bytes == vertical,
+        "front-limit UI changed scene candidate or vertical conditioning");
+      for (unsigned x = 0; x != gpu.width; ++x)
+        require(actual.field.channel(x, 0, 0) == nearest.field.channel(x, 0, 0), "front-limit UI changed an unmasked row");
+      report << "front-limit temporal frame=" << frame << " raw_q=" << raw[peak] << " gain=" << parameters.depth_scale
+        << " zero=" << parameters.convergence[1] << " nearest_px=" << prior * gpu.width << " front_px=" << observed * gpu.width << std::endl;
+    }
+    require(candidate_changed && mode2_max > mode2_min, "front-limit temporal fixture did not exercise changing scene geometry and nearest-mode UI");
+    for (unsigned variant = 0; variant != 4; ++variant) {
+      auto parameters = p;
+      if (variant == 0) parameters.strength = 40;
+      if (variant == 1) parameters.strength_blend = .25f;
+      if (variant == 2) { parameters.strength = 150; parameters.strength_blend = 1.5f; }
+      if (variant == 3) parameters.disparity_limit_uv = .006f;
+      pinned(render(true, front, parameters), parameters);
+    }
+    const auto reference = render(true, front, p);
+    for (float ignored : {.7f, -1.f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+      const auto actual = render(true, {ui_plane_mode::front_limit, ignored}, p);
+      require(actual.field.bytes == reference.field.bytes && actual.output.bytes == reference.output.bytes,
+        "front-limit UI consumed its explicitly unused inverse-depth word");
+    }
+    const auto off = render(false, {}, p), front_off = render(false, front, p);
+    require(off.field.bytes == front_off.field.bytes && off.output.bytes == front_off.output.bytes, "disabled front-limit UI changed scene output");
+    if (gpu.has_control) {
+      const auto frozen_off = render(false, front, p, true);
+      require(frozen_off.field.bytes == off.field.bytes && frozen_off.output.bytes == off.output.bytes, "disabled front-limit UI changed frozen shader output");
+    }
+    // Selected retained alpha still supplies coverage only; current RGB wins.
+    const auto external = gpu.retain_mask(alpha);
+    gpu.pattern(alpha, true, 3); const auto direct = render(true, front, p);
+    std::vector<float> white(count, 1.f);
+    gpu.pattern(white, true, 3); const auto retained = render(true, front, p, false, external);
+    require(retained.field.bytes == direct.field.bytes && retained.output.bytes == direct.output.bytes,
+      "front-limit UI consumed retained RGB or current alpha instead of the selected mask");
+    std::fill(alpha.begin(), alpha.end(), 0.f); gpu.pattern(alpha, true);
+    const auto empty = render(true, front, p), empty_off = render(false, {}, p);
+    require(empty.field.bytes == empty_off.field.bytes && empty.output.bytes == empty_off.output.bytes, "front-limit all-black mask changed stereo");
+    std::fill(alpha.begin(), alpha.end(), 1.f); gpu.pattern(alpha, true);
+    const image source{gpu.original, gpu.width, gpu.height, gpu.color == 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM};
+    const auto whole = render(true, front, p);
+    const float whole_plane = pinned(whole, p);
+    double rgb_error{};
+    for (unsigned y = 0; y != gpu.height; ++y) for (unsigned x = 0; x != gpu.width; ++x)
+      for (unsigned eye = 0; eye != 2; ++eye) for (unsigned channel = 0; channel != 3; ++channel)
+        rgb_error = std::max(rgb_error, std::abs(double(whole.output.channel(x + eye * gpu.width, y, channel)) -
+          translated_color(source, x + (eye ? 1. : -1.) * whole_plane * gpu.width, y, channel)));
+    const double tolerance = (gpu.color == 2 ? .0021 : 1.01 / 1023) + (gpu.color == 2 ? 2. : 1.) *
+      (1. / 256 + 2 * float_spacing(1.) * gpu.width);
+    require(rgb_error <= tolerance, "front-limit all-white plane did not rigidly translate current RGB");
+    // This non-binary strength/blend combination distinguishes regrouped
+    // limit*(strength*.01*blend) from the authoritative final scene clamp.
+    // A uniform, saturated scene supplies the actual GPU bound as the oracle.
+    auto fractional = p;
+    fractional.depth_scale *= 1000.f;
+    fractional.strength = 3.f; fractional.strength_blend = .7f; fractional.disparity_limit_uv = .02f;
+    raw.assign(count, 1.f); upload();
+    const auto saturated_scene = render(false, {}, fractional);
+    const auto exact_front = render(true, front, fractional);
+    no_reduction();
+    require(saturated_scene.field.channel(0, 0, 0) > 0 && exact_front.field.bytes == saturated_scene.field.bytes,
+      "front-limit float ordering differs from the authoritative final scene bound at .02/3/.7");
+    std::uint32_t bound_bits{};
+    const float actual_bound = saturated_scene.field.channel(0, 0, 0);
+    std::memcpy(&bound_bits, &actual_bound, sizeof(bound_bits));
+    report << "front-limit bound_rounding=exact limit=.02 strength=3 blend=.7 source_u_bits=" << bound_bits << std::endl;
+    // Depth-plane modes must obey the same final bound in both directions.
+    // The actual positive GPU bound and its exact sign flip define the
+    // symmetric display interval. A negative uniform scene can round inward
+    // during Q30 conditioning, so its field is not the negative-bound oracle.
+    for (const float inverse_depth : {1.f, 0.f}) {
+      raw.assign(count, inverse_depth); upload();
+      const auto saturated = render(false, {}, fractional);
+      const float scene_bound = saturated.field.channel(0, 0, 0);
+      require(std::isfinite(scene_bound) && (inverse_depth > 0 ? scene_bound > 0 : scene_bound < 0),
+        "depth-plane bound fixture did not produce the intended saturated scene sign");
+      if (gpu.has_control) {
+        const auto frozen_off = render(false, {}, fractional, true);
+        require(frozen_off.field.bytes == saturated.field.bytes && frozen_off.output.bytes == saturated.output.bytes,
+          "UI-plane final-bound change altered the unprotected scene or RGB");
+      }
+      for (const auto mode : {ui_plane_mode::depth_midpoint, ui_plane_mode::depth_midpoint_nearest_ui}) {
+        // Mode 2 obtains the same q from the real uniform depth texture.
+        const ui_plane_parameters plane{mode, mode == ui_plane_mode::depth_midpoint ? inverse_depth : 0.f};
+        const auto actual = render(true, plane, fractional);
+        const float expected = inverse_depth > 0 ? actual_bound : -actual_bound;
+        const float ui_bound = actual.field.channel(0, 0, 0);
+        std::uint32_t scene_bits{}, ui_bits{}, expected_bits{};
+        std::memcpy(&scene_bits, &scene_bound, sizeof(scene_bits));
+        std::memcpy(&ui_bits, &ui_bound, sizeof(ui_bits));
+        std::memcpy(&expected_bits, &expected, sizeof(expected_bits));
+        report << "depth-plane bound_observation mode=" << static_cast<unsigned>(mode)
+          << " q=" << inverse_depth << " scene_bits=" << scene_bits << " ui_bits=" << ui_bits
+          << " expected_signed_cap_bits=" << expected_bits << std::endl;
+        for (unsigned y = 0; y != gpu.height; ++y) for (unsigned x = 0; x != gpu.width; ++x) {
+          const float value = actual.field.channel(x, y, 0);
+          require(std::isfinite(value) && value == expected && std::abs(value) <= actual_bound,
+            "depth-plane UI is not uniformly pinned to the authoritative signed display bound at .02/3/.7");
+        }
+        if (mode == ui_plane_mode::depth_midpoint) no_reduction();
+        else require(gpu.renderer.diagnostics().ui_plane_tiles.handle && gpu.renderer.diagnostics().ui_plane_resolved.handle,
+          "nearest depth-plane bound test did not execute the production GPU reduction");
+        report << "depth-plane bound_rounding=exact mode=" << static_cast<unsigned>(mode)
+          << " q=" << inverse_depth << " limit=.02 strength=3 blend=.7 source_u_bits=" << ui_bits << std::endl;
+      }
+    }
+    for (unsigned condition = 0; condition != 10; ++condition) {
+      auto invalid = p;
+      if (condition == 0) invalid.strength = 0;
+      if (condition == 1) invalid.strength_blend = 0;
+      if (condition == 2) invalid.strength_blend = std::numeric_limits<float>::quiet_NaN();
+      if (condition == 3) invalid.depth_ready = 0;
+      if (condition == 4) invalid.camera_ready = 0;
+      if (condition == 5) invalid.projection[1] = 0;
+      if (condition == 6) invalid.depth_scale = 0;
+      if (condition == 7) invalid.convergence[1] = std::numeric_limits<float>::quiet_NaN();
+      if (condition == 8) invalid.disparity_limit_uv = .05f;
+      if (condition == 9) invalid.disparity_limit_uv = -1.f;
+      const auto actual = render(true, front, invalid);
+      no_reduction();
+      const auto screen = render(true, {}, invalid);
+      require(actual.field.bytes == screen.field.bytes && actual.output.bytes == screen.output.bytes,
+        "front-limit UI changed mono or existing camera-admission fallback");
+    }
+    raw.assign(count, .02f); upload();
+    report << "front-limit stability=exact strength_blend_budget=1 unused_q=1 mono=1 no_reduction=1 current_RGB_error=" << rgb_error << std::endl;
+    std::puts("PASS front-limit UI: fixed across depth/gain/zero, current strength/blend/budget, ignored q bits, selected alpha, current RGB and legacy/mono compatibility");
   }
   void verify_fg_transitions(fixture &gpu, std::ostream &report) {
     const size_t pixels = size_t(gpu.width) * gpu.height;
@@ -514,13 +1227,25 @@ namespace {
 }
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  if (argc != 6 && argc != 7) { std::fputs("usage: source_alpha_runtime official-ReShade64.dll fresh-output srgb|scrgb width height [frozen-control.hlsl]\n", stderr); return 2; }
+  if (argc < 6 || argc > 8) { std::fputs("usage: source_alpha_runtime official-ReShade64.dll fresh-output srgb|scrgb width height [frozen-control.hlsl] [--temporal-ui-probe|--temporal-ui-front-limit]\n", stderr); return 2; }
   std::thread([] { Sleep(120000); TerminateProcess(GetCurrentProcess(), 124); }).detach();
   try {
     const unsigned color = !std::strcmp(argv[3], "srgb") ? 1 : !std::strcmp(argv[3], "scrgb") ? 2 : 0;
     require(color != 0, "unsupported source transfer");
     const auto directory = fs::absolute(argv[2]);
-    fixture gpu(fs::absolute(argv[1]), directory, color, unsigned(std::stoul(argv[4])), unsigned(std::stoul(argv[5])), argc == 7 ? fs::absolute(argv[6]) : fs::path{});
+    bool temporal_probe = false, temporal_front_limit = false;
+    fs::path control;
+    for (int index = 6; index < argc; ++index) {
+      if (!std::strcmp(argv[index], "--temporal-ui-probe") || !std::strcmp(argv[index], "--temporal-ui-front-limit")) {
+        require(!temporal_probe, "duplicate temporal probe argument"); temporal_probe = true;
+        temporal_front_limit = !std::strcmp(argv[index], "--temporal-ui-front-limit");
+      } else {
+        require(control.empty() && std::strncmp(argv[index], "--", 2), "unknown or duplicate runtime-test argument");
+        control = fs::absolute(argv[index]);
+      }
+    }
+    fixture gpu(fs::absolute(argv[1]), directory, color, unsigned(std::stoul(argv[4])), unsigned(std::stoul(argv[5])), control);
+    if (temporal_probe) { temporal_ui_probe(gpu, directory, temporal_front_limit); return 0; }
     std::ofstream report(directory / "source-alpha-results.txt");
     std::vector<float> alpha(size_t(gpu.width) * gpu.height, 0);
     verify(gpu, alpha, "all-black", report);
@@ -542,6 +1267,9 @@ int main(int argc, char **argv) {
       verify(gpu, alpha, "nonpositive-nonfinite-alpha", report);
     }
     verify_fg_transitions(gpu, report);
+    verify_independent_ui_plane(gpu, report, directory / "independent-ui-plane-dump");
+    verify_nearest_ui_plane(gpu, report, directory / "nearest-ui-plane-dump");
+    verify_front_limit_ui_plane(gpu, report, directory / "front-limit-ui-plane-dump");
     verify_retained_fg_alpha(gpu, report, directory / "retained-alpha-dump");
     verify_mask_upload_recovery(gpu);
     require(report.good(), "cannot write evidence");

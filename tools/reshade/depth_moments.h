@@ -43,5 +43,11 @@ namespace sunshine_depth_statistics {
     std::uint64_t count = 0;
     double sum = 0., sum_squares = 0.;
     std::uint32_t tiles_x = 0, tiles_y = 0;
+    // Production reduces (q - tile_min) directly and merges origins in double.
+    // These are not reconstructed by subtracting nearly equal raw moments.
+    // Supplied remains true on invalid results, so malformed centered evidence
+    // cannot fall back to the cancellation-prone uncentered diagnostic sums.
+    bool centered_supplied = false;
+    double center = 0., sum_centered = 0., sum_centered_squares = 0.;
   };
 }

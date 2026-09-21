@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include "game3d_stereo_contract.h"
+#include "game3d_ui_plane.h"
 #include <windows.h>
 #include <reshade_api.hpp>
 #include <array>
@@ -30,7 +31,7 @@ namespace sunshine_game3d {
   // recorded before the next render reuses these textures.
   struct diagnostic_resources {
     reshade::api::resource source{}, linear_color{}, candidate{}, vertical_majorant{},
-      vertical_field{}, final_field{}, sbs{}, ui_source{};
+      vertical_field{}, final_field{}, sbs{}, ui_source{}, ui_plane_tiles{}, ui_plane_resolved{};
   };
 
   // One runtime owns its GPU working set. All passes run on ReShade's graphics
@@ -47,7 +48,7 @@ namespace sunshine_game3d {
     std::string_view active_shader_source() const;
     bool render(reshade::api::command_list *commands, reshade::api::resource backbuffer,
       reshade::api::resource_view depth, const render_parameters &parameters, bool source_alpha_ui = false,
-      reshade::api::resource_view alpha_source = {});
+      reshade::api::resource_view alpha_source = {}, const ui_plane_parameters &plane = {});
     // Lazily allocated at the current color extent/format. Copies and reads use
     // the renderer queue; shader_resource is the resting state. Only alpha is
     // consumed, never this retained input's RGB.
@@ -72,6 +73,10 @@ namespace sunshine_game3d {
     diagnostic_resources diagnostics() const;
     render_parameters consumed_parameters() const;
     bool consumed_source_alpha_ui() const;
+    // Submitted bits. In nearest-UI mode inverse_depth is the floor; only the
+    // current-render diagnostic GPU scalar contains the resolved global plane.
+    // Front-limit mode ignores this depth word and dispatches no UI reduction.
+    ui_plane_parameters consumed_ui_plane() const;
     reshade::api::resource_view native_rtv(reshade::api::resource backbuffer);
     // Also bracket capture's D3D11 unbinds, not only our draw calls. D3D12
     // records to ReShade's dedicated immediate list and needs no app-state swap.
