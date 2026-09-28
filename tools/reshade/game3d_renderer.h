@@ -118,7 +118,15 @@ namespace sunshine_game3d {
     std::string_view active_shader_source() const;
     // Mode-5 live adaptation uses caller-owned source identity only. Omitting
     // adaptive freezes the submitted fraction for deterministic replay.
-    bool render(reshade::api::command_list *commands, const render_frame_input &input);
+    // defer_pack leaves the final SBS pack owed until a consumer calls pack(),
+    // into an export slot or output(). An unconsumed pack is never recorded, and
+    // output() then keeps an earlier image.
+    bool render(reshade::api::command_list *commands, const render_frame_input &input, bool defer_pack = false);
+    // Records the owed pack. A null target writes output(); an export target
+    // receives the SBS image directly, avoiding a full-frame copy. Views of
+    // export targets are cached for one export generation only.
+    bool pack(reshade::api::command_list *commands, reshade::api::resource export_target = {},
+      std::uint64_t export_generation = 0);
     // Lazily allocated at the current extent and exact input format. At most
     // three formats are retained; copies never reinterpret a different format.
     // The renderer queue reads only the explicitly selected mask channel.
@@ -180,6 +188,10 @@ namespace sunshine_game3d {
     // records to ReShade's dedicated immediate list and needs no app-state swap.
     void begin_frame_state();
     void end_frame_state();
+    // A new presentation begins. Work recorded for a Present that never reached
+    // finish_present stays unsignaled until the next signal covers it, so this
+    // presentation can render while resource replacement remains blocked.
+    void begin_present();
     void finish_present();
     // ReShade's destroy_effect_runtime follows its GPU drain. No extra wait.
     void reset_after_runtime_drain();

@@ -1138,6 +1138,12 @@ transfer, retained timestamps, effect/overlay/reload/focus invalidation, recover
 restart are checked. Producer and receiver run in one process on independent native devices;
 these tests do not establish access across a live game's process or host-service boundary.
 
+Set `SUNSHINE_GAME3D_NATIVE_ONLY=1` for the controlled D3D11 fixture to run native Game 3D with
+no FX file or technique installed. It requires the production receiver facade and checks the
+add-on's direct slot export, the overlay's copy path, effects toggle, focus recovery and
+receiver restart with exact SDR/scRGB/PQ pixels. `reshade_game_present_d3d12_test` accepts the same
+flag.
+
 To exercise the same checks with the production receiver in a separate process, build its
 test proxy and helper in the host build directory:
 

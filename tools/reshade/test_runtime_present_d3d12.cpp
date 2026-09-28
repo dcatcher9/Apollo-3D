@@ -681,58 +681,9 @@ uniform int DepthDirection < hidden = true; >;
     }
 
     bool inspect_native_pixels(const void *data, unsigned pitch, unsigned format) const {
-      auto expected = native_background();
-      if (expected_color == 1) {
-        for (unsigned c = 0; c < 3; ++c) expected[c] = std::round(expected[c] * 255.f) / 255.f;
-      } else if (expected_color == 3) {
-        std::array<double, 3> linear {};
-        for (unsigned c = 0; c < 3; ++c) {
-          const double code = std::round(expected[c] * 1023.0) / 1023.0;
-          const double p = std::pow(code, 32.0 / 2523.0);
-          linear[c] = 125.0 * std::pow(std::max(p - 3424.0 / 4096.0, 0.0) /
-            (2413.0 / 128.0 - 2392.0 / 128.0 * p), 16384.0 / 2610.0);
-        }
-        expected[0] = float(1.6604910021 * linear[0] - .5876411388 * linear[1] - .0728498633 * linear[2]);
-        expected[1] = float(-.1245504745 * linear[0] + 1.1328998971 * linear[1] - .0083494226 * linear[2]);
-        expected[2] = float(-.0181507634 * linear[0] - .1005788980 * linear[1] + 1.1187296614 * linear[2]);
-      }
-      const auto pixel = [&](unsigned x, unsigned y, unsigned c) {
-        const auto row = static_cast<const std::uint8_t *>(data) + y * pitch;
-        return format == 24 ? float((reinterpret_cast<const std::uint32_t *>(row)[x] >> (10 * c)) & 1023) / 1023.f :
-          sunshine_sbs_overlay_pixels::half(reinterpret_cast<const std::uint16_t *>(row)[x * 4 + c]);
-      };
-      const float tolerance = format == 24 ? .004f : .012f;
-      const float white = format == 24 ? 1.f : 203.f / 80.f;
-      const unsigned probes[][2] {{source_width - 200, source_height - 64}, {source_width - 96, source_height - 144},
-        {source_width - 96, source_height - 80}};
-      for (unsigned eye = 0; eye < 2; ++eye) {
-        for (unsigned probe = 0; probe < 3; ++probe) {
-          const float alpha = !expect_overlay || !set_overlay_patch || probe == 0 ? 0.f : probe == 1 ? 1.f : 128.f / 255.f;
-          for (unsigned c = 0; c < 3; ++c) {
-            const float wanted = format == 24 && alpha > 0 ?
-              sunshine_sbs_overlay_pixels::encode_srgb(sunshine_sbs_overlay_pixels::decode_srgb(expected[c]) * (1 - alpha) + alpha) :
-              expected[c] * (1 - alpha) + white * alpha;
-            const float actual = pixel(eye * source_width + probes[probe][0], probes[probe][1], c);
-            if (!std::isfinite(actual) || std::abs(actual - wanted) > tolerance) {
-              std::printf("native no-FX pixel mismatch eye=%u probe=%u channel=%u actual=%.6g expected=%.6g overlay=%u\n",
-                eye, probe, c, actual, wanted, unsigned(expect_overlay));
-              return false;
-            }
-          }
-        }
-        unsigned changed = 0;
-        for (unsigned y = 96; y < source_height - 32; y += 24) for (unsigned x = 24; x < source_width / 3 - 24; x += 24) {
-          bool different = false;
-          for (unsigned c = 0; c < 3; ++c) {
-            const float actual = pixel(eye * source_width + x, y, c);
-            if (!std::isfinite(actual)) return false;
-            different |= std::abs(actual - expected[c]) > .05f;
-          }
-          changed += different;
-        }
-        if ((expect_overlay && changed < 20) || (!expect_overlay && changed != 0)) return false;
-      }
-      return true;
+      const auto background = native_background();
+      return sunshine_sbs_overlay_pixels::check_native(data, pitch, format, source_width, source_height, expected_color,
+        {background[0], background[1], background[2]}, expect_overlay, set_overlay_patch != nullptr);
     }
 
     bool set_test_focus(bool focused) {

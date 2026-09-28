@@ -117,7 +117,9 @@ run on the desktop view; they are not part of the native SBS pass graph.
 
 All rendering stays on the runtime's graphics queue. Native passes add no CPU fence wait or full
 frame CPU readback. A completion fence protects replacement of the renderer's working set;
-in-flight reconfiguration skips output instead of waiting. ReShade drains the GPU before runtime
+in-flight reconfiguration skips output instead of waiting. A Present that never reaches `finish_present`
+leaves its recorded work unsignaled rather than assumed complete: the next presentation renders
+again, and the next completion signal retires both, so working-set replacement waits until then. ReShade drains the GPU before runtime
 destruction, allowing normal resource disposal. Exceptional hot-unload retains an unfinished
 working set until process exit rather than freeing commands' resources prematurely.
 D3D11 context state is restored across capture and rendering; D3D12 uses ReShade's immediate list.
@@ -2575,10 +2577,17 @@ The producer publishes immutable metadata with a seqlock. A new consumer nonce r
 generation of textures and a producer-ready fence. Each slot's atomic 64-bit control word binds
 its generation and ownership state, so an old consumer cannot unlock a replacement ring.
 
-For each exported frame, the producer claims a slot, copies the final stereo texture, includes
-any overlay composition, signals its GPU fence, writes the frame sequence, QPC timestamp and
-matching UI displacement, then marks the slot ready. Up to three submitted GPU writes may remain unfinished, bounded by
-the existing three-slot ring. A recorded copy must receive its submission fence before the next
+For each exported frame, the producer claims a slot, writes the final stereo image into it,
+signals its GPU fence, writes the frame sequence, QPC timestamp and matching UI displacement,
+then marks the slot ready. Native Game 3D records its final side-by-side pass directly into the
+claimed slot, so the common path has no full-frame copy. While the ReShade overlay is visible or
+a diagnostic dump is armed, the pass writes the renderer's own SBS image instead, which is then
+copied into the slot with any overlay composition; reference FX exports always use that copy.
+Without a consumer, a free slot or an armed dump, the side-by-side pass is not recorded at all.
+Slot render-target views are cached for one export generation. The slot rests in the shared
+common state between owners, and the pass reads only the renderer's working set, which the
+renderer's completion fence already retains. Up to three submitted GPU writes may remain unfinished, bounded by
+the existing three-slot ring. A recorded slot write must receive its submission fence before the next
 is admitted; there is no global requirement to wait for the previous GPU write to complete.
 Admission checks each slot's own fence sequence, including slots already marked free by a
 consumer that discarded them. Only free or unconsumed-ready ownership can be claimed, and only

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -83,6 +84,62 @@ namespace sunshine_sbs_overlay_pixels {
         std::printf("native ReShade controls visibility mismatch: eye=%u overlay=%d changed probes=%u\n", eye, overlay, controls);
         return false;
       }
+    }
+    return true;
+  }
+
+  // Native add-on output of a flat game frame with no depth: both eyes carry the
+  // source color, encoded for the export (color 1 = 8-bit sRGB game, 2 = scRGB,
+  // 3 = PQ BT.2020 game exported as scRGB), with the optional UI patches.
+  inline bool check_native(const void *data, unsigned pitch, unsigned format, unsigned width, unsigned height,
+    unsigned color, std::array<float, 3> expected, bool overlay, bool patches) {
+    if (color == 1) {
+      for (unsigned c = 0; c < 3; ++c) expected[c] = std::round(expected[c] * 255.f) / 255.f;
+    } else if (color == 3) {
+      std::array<double, 3> linear {};
+      for (unsigned c = 0; c < 3; ++c) {
+        const double code = std::round(expected[c] * 1023.0) / 1023.0;
+        const double p = std::pow(code, 32.0 / 2523.0);
+        linear[c] = 125.0 * std::pow(std::max(p - 3424.0 / 4096.0, 0.0) /
+          (2413.0 / 128.0 - 2392.0 / 128.0 * p), 16384.0 / 2610.0);
+      }
+      expected[0] = float(1.6604910021 * linear[0] - .5876411388 * linear[1] - .0728498633 * linear[2]);
+      expected[1] = float(-.1245504745 * linear[0] + 1.1328998971 * linear[1] - .0083494226 * linear[2]);
+      expected[2] = float(-.0181507634 * linear[0] - .1005788980 * linear[1] + 1.1187296614 * linear[2]);
+    }
+    const auto pixel = [&](unsigned x, unsigned y, unsigned c) {
+      const auto row = static_cast<const std::uint8_t *>(data) + y * pitch;
+      return format == 24 ? float((reinterpret_cast<const std::uint32_t *>(row)[x] >> (10 * c)) & 1023) / 1023.f :
+        half(reinterpret_cast<const std::uint16_t *>(row)[x * 4 + c]);
+    };
+    const float tolerance = format == 24 ? .004f : .012f;
+    const float white = format == 24 ? 1.f : 203.f / 80.f;
+    const unsigned probes[][2] {{width - 200, height - 64}, {width - 96, height - 144}, {width - 96, height - 80}};
+    for (unsigned eye = 0; eye < 2; ++eye) {
+      for (unsigned probe = 0; probe < 3; ++probe) {
+        const float alpha = !overlay || !patches || probe == 0 ? 0.f : probe == 1 ? 1.f : 128.f / 255.f;
+        for (unsigned c = 0; c < 3; ++c) {
+          const float wanted = format == 24 && alpha > 0 ?
+            encode_srgb(decode_srgb(expected[c]) * (1 - alpha) + alpha) : expected[c] * (1 - alpha) + white * alpha;
+          const float actual = pixel(eye * width + probes[probe][0], probes[probe][1], c);
+          if (!std::isfinite(actual) || std::abs(actual - wanted) > tolerance) {
+            std::printf("native no-FX pixel mismatch eye=%u probe=%u channel=%u actual=%.6g expected=%.6g overlay=%u\n",
+              eye, probe, c, actual, wanted, unsigned(overlay));
+            return false;
+          }
+        }
+      }
+      unsigned changed = 0;
+      for (unsigned y = 96; y < height - 32; y += 24) for (unsigned x = 24; x < width / 3 - 24; x += 24) {
+        bool different = false;
+        for (unsigned c = 0; c < 3; ++c) {
+          const float actual = pixel(eye * width + x, y, c);
+          if (!std::isfinite(actual)) return false;
+          different |= std::abs(actual - expected[c]) > .05f;
+        }
+        changed += different;
+      }
+      if ((overlay && changed < 20) || (!overlay && changed != 0)) return false;
     }
     return true;
   }

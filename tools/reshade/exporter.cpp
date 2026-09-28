@@ -336,6 +336,7 @@ namespace {
     std::uint32_t pending_slot = wire::slot_count;
     bool signal_failed = false;
     bool pending_overlay = false;
+    bool rendered_directly = false; // Logged once per generation.
     // Diagnostic disposition travels with this copy until its slot is actually
     // published. A later effects callback must not relabel an earlier copy.
     bool pending_fg_output = false, pending_depth_ready = false, pending_reused_depth = false;
@@ -460,6 +461,13 @@ namespace {
       return true;
     }
 
+    // The native renderer wrote this slot directly on the same command list;
+    // its inputs are the renderer's own resources, retained by its fence.
+    void adopt_rendered(std::uint32_t index, std::uint64_t sequence) {
+      submitted_sources[index].reset();
+      last_submitted = sequence;
+    }
+
     bool submit(api::command_list *commands, api::resource input, std::uint32_t index, std::uint64_t sequence) {
       auto &submitted_source = submitted_sources[index];
       submitted_source.reset();
@@ -545,6 +553,51 @@ namespace {
     return input;
   }
 
+  // Raw and projection controllers report the same placement quantities under
+  // different names; the panel and dumps describe both through one mapping.
+  struct placement_report {
+    float gain{}, zero{}, ui_midpoint{};
+    double target_gain{}, target_zero{}, target_ui_midpoint{};
+    bool ready{}, placed{}, limited{}, has_statistics{};
+    sunshine_scene_gain::depth_range statistics{};
+  };
+  placement_report report(const sunshine_raw_scene::output &state) {
+    return {state.H, state.t0, state.ui_midpoint_q, state.target_H, state.target_t0, state.target_ui_midpoint_q,
+      state.ready, state.calibrated, state.limited, state.has_depth_statistics, state.depth_statistics};
+  }
+  placement_report report(const sunshine_projection_depth::center_output &center) {
+    return {center.K, center.q0, center.ui_midpoint_q, center.target_K, center.target_q0, center.target_ui_midpoint_q,
+      center.ready, center.initialized, center.limited, center.has_depth_statistics, center.depth_statistics};
+  }
+  sunshine_game3d::automatic_scale describe_scale(sunshine_game3d::automatic_scale_basis basis,
+      const placement_report &placement, double normalization) {
+    sunshine_game3d::automatic_scale scale{basis, placement.gain, placement.ready, static_cast<float>(placement.target_gain)};
+    const auto &statistics = placement.statistics;
+    scale.zero_inverse = placement.zero;
+    scale.has_zero = placement.placed;
+    scale.target_zero_inverse = placement.target_zero;
+    scale.zero_target_available = placement.has_statistics;
+    scale.ui_midpoint_inverse = placement.ui_midpoint;
+    scale.target_ui_midpoint_inverse = placement.target_ui_midpoint;
+    scale.has_ui_midpoint = placement.placed;
+    scale.ui_midpoint_target_available = placement.has_statistics;
+    scale.gain_below_target = placement.limited;
+    scale.reference_inverse = statistics.maximum;
+    scale.mean_inverse = statistics.mean;
+    scale.normalization = normalization;
+    scale.minimum_inverse = statistics.minimum;
+    scale.maximum_inverse = statistics.maximum;
+    scale.has_depth_statistics = placement.has_statistics;
+    scale.mean_square_inverse = statistics.mean_square;
+    scale.has_centered_depth_statistics = statistics.has_centered_moments;
+    scale.mean_contrast_inverse = statistics.mean_contrast;
+    scale.mean_contrast_square_inverse = statistics.mean_contrast_square;
+    scale.depth_pixel_count = statistics.pixel_count;
+    scale.depth_tiles_x = statistics.tiles_x;
+    scale.depth_tiles_y = statistics.tiles_y;
+    return scale;
+  }
+
   void restore_reused_scene(frame_decision_t &frame, const frame_decision_t &previous, bool supported) {
     // Only the provider can authorize old pixels. Their already resolved scene
     // travels with the exact real capture, for NGX pending copies as well as FG.
@@ -597,6 +650,9 @@ namespace {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     export_color_t color;
+    // A runtime's device never changes adapter; resolve its LUID once.
+    std::uint64_t adapter_luid = 0;
+    bool adapter_known = false;
     bool proof_checked = false;
     bool rendered_since_present = false;
     frame_decision_t frame;
@@ -782,7 +838,7 @@ namespace {
           proof.frame.prepared && proof.frame.depth_ready && scene.ready);
         const sunshine_game3d::render_frame_input input{backbuffer, proof.borrowed_depth, p,
           ui_input.for_render(scene.ui_plane, ui_observation)};
-        rendered = proof.frame.prepared && renderer->render(commands, input);
+        rendered = proof.frame.prepared && renderer->render(commands, input, true);
         ui_input.complete(*renderer, rendered);
         source_alpha = ui_input.status;
         proof.frame.source_alpha = source_alpha;
@@ -791,6 +847,8 @@ namespace {
           renderer->consumed_parameters(), renderer->consumed_ui_plane(), scene.ready && proof.frame.depth_ready,
           renderer->consumed_source_alpha_ui(), proof.width, proof.height) : 0.f;
       }
+      // Export records the owed pack only when a slot receives this frame. Without
+      // a consumer, a free slot or a dump, the SBS pack is skipped.
       if (rendered) frame(runtime, {}, commands, rtv, true);
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1086,7 +1144,7 @@ namespace {
         return scene; // An older shader must not sample allocation padding as scene depth.
       }
       if (projection_provided) {
-        resolve_projection_scene(runtime, proof, depth, now, scene);
+        resolve_projection_scene(runtime, proof, depth, now, budget, scene);
         return scene;
       }
       proof.projection_policy.suspend();
@@ -1162,31 +1220,8 @@ namespace {
           display = phase::calibrating;
         else if (state.reason == reason::unsupported_shader_domain)
           display = phase::suspended;
-        scene.ui = {display, true, {
-          depth.ready ? sunshine_game3d::automatic_scale_basis::relative_depth : sunshine_game3d::automatic_scale_basis::unknown,
-          state.H, state.ready, static_cast<float>(state.target_H)}};
-        scene.ui.scale.zero_inverse = state.t0;
-        scene.ui.scale.has_zero = state.calibrated;
-        scene.ui.scale.target_zero_inverse = state.target_t0;
-        scene.ui.scale.zero_target_available = state.has_depth_statistics;
-        scene.ui.scale.ui_midpoint_inverse = state.ui_midpoint_q;
-        scene.ui.scale.target_ui_midpoint_inverse = state.target_ui_midpoint_q;
-        scene.ui.scale.has_ui_midpoint = state.calibrated;
-        scene.ui.scale.ui_midpoint_target_available = state.has_depth_statistics;
-        scene.ui.scale.gain_below_target = state.limited;
-        scene.ui.scale.reference_inverse = state.depth_statistics.maximum;
-        scene.ui.scale.mean_inverse = state.depth_statistics.mean;
-        scene.ui.scale.normalization = budget.normalization;
-        scene.ui.scale.minimum_inverse = state.depth_statistics.minimum;
-        scene.ui.scale.maximum_inverse = state.depth_statistics.maximum;
-        scene.ui.scale.has_depth_statistics = state.has_depth_statistics;
-        scene.ui.scale.mean_square_inverse = state.depth_statistics.mean_square;
-        scene.ui.scale.has_centered_depth_statistics = state.depth_statistics.has_centered_moments;
-        scene.ui.scale.mean_contrast_inverse = state.depth_statistics.mean_contrast;
-        scene.ui.scale.mean_contrast_square_inverse = state.depth_statistics.mean_contrast_square;
-        scene.ui.scale.depth_pixel_count = state.depth_statistics.pixel_count;
-        scene.ui.scale.depth_tiles_x = state.depth_statistics.tiles_x;
-        scene.ui.scale.depth_tiles_y = state.depth_statistics.tiles_y;
+        scene.ui = {display, true, describe_scale(depth.ready ? sunshine_game3d::automatic_scale_basis::relative_depth :
+          sunshine_game3d::automatic_scale_basis::unknown, report(state), budget.normalization)};
       }
       const bool status_changed = state.reason != proof.raw_last_status;
       // Rotation through already admitted members must not bypass the log gate
@@ -1214,7 +1249,8 @@ namespace {
     }
 
     void resolve_projection_scene(api::effect_runtime *runtime, runtime_t &proof,
-        const sunshine_depth::frame_depth &depth, std::uint64_t now, scene_parameters_t &scene) {
+        const sunshine_depth::frame_depth &depth, std::uint64_t now,
+        const sunshine_scene_gain::limits &budget, scene_parameters_t &scene) {
       namespace projection = sunshine_projection_depth;
       using phase = sunshine_game3d::automatic_phase;
       bool ready = false;
@@ -1232,7 +1268,7 @@ namespace {
         coefficients = projection::make(depth.projection.encoding, depth.projection.A, depth.projection.B,
           depth.projection.raw_scale, depth.projection.raw_bias);
         if (linear && !proof.addon_native) coefficients = {}; // Legacy FX has no reciprocal input basis.
-        proof.projection_policy.configure(sunshine_scene_gain::render_limits(proof.frame_strength, proof.width, proof.height));
+        proof.projection_policy.configure(budget);
         if (!proof.addon_native && !proof.camera_raw_range.handle &&
             (depth.projection.raw_scale != 1.0 || depth.projection.raw_bias != 0.0)) coefficients = {};
         proof.projection_policy.synchronize_feedback(depth.provided.feedback);
@@ -1260,33 +1296,13 @@ namespace {
       scene.blend = proof.raw_reentry.update(ready, now, sunshine_raw_scene::stereo_basis::projection);
       const bool unsupported = center.reason == projection::center_status::unsupported_shader_domain ||
         center.reason == projection::center_status::invalid_projection;
+      auto placement = report(center);
+      placement.ready = ready; // A suspended controller keeps its last center but is not ready.
       scene.ui = {
         ready ? phase::ready : !depth.ready ? phase::waiting_for_depth :
           unsupported ? phase::suspended : phase::calibrating, true,
-        {linear ? sunshine_game3d::automatic_scale_basis::linear_distance : sunshine_game3d::automatic_scale_basis::camera_matrix,
-          center.K, ready, static_cast<float>(center.target_K)}};
-      scene.ui.scale.zero_inverse = center.q0;
-      scene.ui.scale.has_zero = center.initialized;
-      scene.ui.scale.target_zero_inverse = center.target_q0;
-      scene.ui.scale.zero_target_available = center.has_depth_statistics;
-      scene.ui.scale.ui_midpoint_inverse = center.ui_midpoint_q;
-      scene.ui.scale.target_ui_midpoint_inverse = center.target_ui_midpoint_q;
-      scene.ui.scale.has_ui_midpoint = center.initialized;
-      scene.ui.scale.ui_midpoint_target_available = center.has_depth_statistics;
-      scene.ui.scale.gain_below_target = center.limited;
-      scene.ui.scale.reference_inverse = center.depth_statistics.maximum;
-      scene.ui.scale.mean_inverse = center.depth_statistics.mean;
-      scene.ui.scale.normalization = sunshine_scene_gain::render_limits(proof.frame_strength, proof.width, proof.height).normalization;
-      scene.ui.scale.minimum_inverse = center.depth_statistics.minimum;
-      scene.ui.scale.maximum_inverse = center.depth_statistics.maximum;
-      scene.ui.scale.has_depth_statistics = center.has_depth_statistics;
-      scene.ui.scale.mean_square_inverse = center.depth_statistics.mean_square;
-      scene.ui.scale.has_centered_depth_statistics = center.depth_statistics.has_centered_moments;
-      scene.ui.scale.mean_contrast_inverse = center.depth_statistics.mean_contrast;
-      scene.ui.scale.mean_contrast_square_inverse = center.depth_statistics.mean_contrast_square;
-      scene.ui.scale.depth_pixel_count = center.depth_statistics.pixel_count;
-      scene.ui.scale.depth_tiles_x = center.depth_statistics.tiles_x;
-      scene.ui.scale.depth_tiles_y = center.depth_statistics.tiles_y;
+        describe_scale(linear ? sunshine_game3d::automatic_scale_basis::linear_distance :
+          sunshine_game3d::automatic_scale_basis::camera_matrix, placement, budget.normalization)};
       if (coefficients.valid() && !linear) {
         // Show the same affine conversion the shader applies, including any
         // packed raw-depth transform. Its units differ from the scene-estimated
@@ -1359,6 +1375,8 @@ namespace {
       for (auto &[runtime, proof] : runtimes_)
         if (proof.swapchain == swapchain) {
           ++proof.presentation_ordinal;
+          // A missed finish_present must not leave native rendering wedged.
+          if (proof.renderer) proof.renderer->begin_present();
           diagnostic_frame = awaiting_diagnostic && static_cast<HWND>(runtime->get_hwnd()) == observed_foreground_window();
           break;
         }
@@ -1555,9 +1573,22 @@ namespace {
         generation_->pending_fg_output = game && proof.frame.diagnostics.frame_generation_active;
         generation_->pending_depth_ready = proof.frame.depth_ready;
         generation_->pending_reused_depth = proof.frame.reused_depth;
-        if (!generation_->submit(commands, source.resource, index, sequence)) {
-          deactivate(runtime);
-          return;
+        // The owed native pack renders straight into the slot. The overlay and
+        // dumps read the internal SBS image, so they pack it and copy it here.
+        auto *renderer = addon_render ? proof.renderer.get() : nullptr;
+        const bool direct = renderer && !overlay_open(runtime) && !(proof.diagnostic_armed && debug_dump_.requested());
+        if (direct) generation_->adopt_rendered(index, sequence);
+        if (direct && renderer->pack(commands, generation_->texture(index), generation_->id)) {
+          if (!generation_->rendered_directly) {
+            generation_->rendered_directly = true;
+            log(reshade::log::level::info, "Sunshine SBS: rendering stereo directly into export slots (no copy)");
+          }
+        } else {
+          if (renderer) renderer->pack(commands);
+          if (!generation_->submit(commands, source.resource, index, sequence)) {
+            deactivate(runtime);
+            return;
+          }
         }
         if (addon_render && proof.diagnostic_armed && debug_dump_.requested())
           capture_diagnostic(runtime, proof, commands, generation_->id, sequence);
@@ -1583,6 +1614,7 @@ namespace {
     void capture_diagnostic(api::effect_runtime *runtime, runtime_t &proof, api::command_list *commands,
         std::uint64_t generation, std::uint64_t sequence) {
       if (!proof.renderer) return;
+      proof.renderer->pack(commands); // The dump reads the internal SBS image.
       LARGE_INTEGER qpc{}; QueryPerformanceCounter(&qpc);
       sunshine_game3d::diagnostic_frame frame;
       frame.parameters = proof.renderer->consumed_parameters();
@@ -1788,7 +1820,7 @@ namespace {
       }
     }
 
-    static bool describe(api::effect_runtime *runtime, const runtime_t &proof, source_t &source) {
+    static bool describe(api::effect_runtime *runtime, runtime_t &proof, source_t &source) {
       std::uint32_t width = 0, height = 0;
       runtime->get_screenshot_width_and_height(&width, &height);
       if (width != proof.width || height != proof.height) {
@@ -1818,24 +1850,31 @@ namespace {
           return false;
         }
         source.format = typed_format(desc.Format);
-        com_ptr<IDXGIDevice> device;
-        com_ptr<IDXGIAdapter> adapter;
-        DXGI_ADAPTER_DESC adapter_desc {};
-        auto *native = reinterpret_cast<ID3D11Device *>(runtime->get_device()->get_native());
-        if (FAILED(native->QueryInterface(IID_PPV_ARGS(device.put()))) || FAILED(device->GetAdapter(adapter.put())) || FAILED(adapter->GetDesc(&adapter_desc))) {
-          return false;
+        if (!proof.adapter_known) {
+          com_ptr<IDXGIDevice> device;
+          com_ptr<IDXGIAdapter> adapter;
+          DXGI_ADAPTER_DESC adapter_desc {};
+          auto *native = reinterpret_cast<ID3D11Device *>(runtime->get_device()->get_native());
+          if (FAILED(native->QueryInterface(IID_PPV_ARGS(device.put()))) || FAILED(device->GetAdapter(adapter.put())) || FAILED(adapter->GetDesc(&adapter_desc))) {
+            return false;
+          }
+          std::memcpy(&proof.adapter_luid, &adapter_desc.AdapterLuid, sizeof(proof.adapter_luid));
+          proof.adapter_known = true;
         }
-        std::memcpy(&source.adapter, &adapter_desc.AdapterLuid, sizeof(source.adapter));
       } else {
         const auto desc = reinterpret_cast<ID3D12Resource *>(source.resource.handle)->GetDesc();
         if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.Width != width * 2 || desc.Height != height || desc.MipLevels != 1 || desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1) {
           return false;
         }
         source.format = typed_format(desc.Format);
-        auto *native = reinterpret_cast<ID3D12Device *>(runtime->get_device()->get_native());
-        const LUID luid = native->GetAdapterLuid();
-        std::memcpy(&source.adapter, &luid, sizeof(source.adapter));
+        if (!proof.adapter_known) {
+          auto *native = reinterpret_cast<ID3D12Device *>(runtime->get_device()->get_native());
+          const LUID luid = native->GetAdapterLuid();
+          std::memcpy(&proof.adapter_luid, &luid, sizeof(proof.adapter_luid));
+          proof.adapter_known = true;
+        }
       }
+      source.adapter = proof.adapter_luid;
       return wire::supported_format(static_cast<std::uint32_t>(source.format), source.color.output);
     }
 

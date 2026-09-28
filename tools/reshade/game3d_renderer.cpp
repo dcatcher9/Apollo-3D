@@ -45,9 +45,18 @@ namespace sunshine_game3d {
       ui_conflict_statistics, detection_statistics, detection_decision, detected_mask, texture_count };
     std::array<texture, texture_count> textures{};
     std::vector<std::pair<api::resource, api::resource_view>> backbuffers;
+    // Render-target views of the current export generation's slot textures.
+    std::vector<std::pair<api::resource, api::resource_view>> export_views;
+    std::uint64_t export_generation = 0;
+    // The final pack of this presentation is recorded exactly once, after the
+    // caller knows whether an export slot can receive it directly.
+    bool pack_owed = false;
+    render_parameters pack_parameters;
     api::fence completion{};
     uint64_t sequence = 0;
-    bool pending = false, failed = false;
+    // pending: this presentation recorded work awaiting finish_present.
+    // unsignaled: an earlier presentation's work awaits the next signal.
+    bool pending = false, unsignaled = false, failed = false;
     com<ID3D11DeviceContext1> context11;
     com<ID3DDeviceContextState> isolated11;
     ID3DDeviceContextState *previous11 = nullptr;
@@ -95,10 +104,12 @@ namespace sunshine_game3d {
     uint64_t adaptive_submitted = 0;
 
     bool idle() const {
-      return !pending && !failed && (!completion.handle || device->get_completed_fence_value(completion) >= sequence);
+      return !pending && !unsignaled && !failed &&
+        (!completion.handle || device->get_completed_fence_value(completion) >= sequence);
     }
     ~impl() {
       for (auto &[resource, view] : backbuffers) device->destroy_resource_view(view);
+      for (auto &[resource, view] : export_views) device->destroy_resource_view(view);
       for (auto &t : textures) {
         if (t.srv.handle) device->destroy_resource_view(t.srv);
         if (t.uav.handle) device->destroy_resource_view(t.uav);
@@ -204,7 +215,7 @@ namespace sunshine_game3d {
           if (!texture_create(id, width, height, api::format::r32_float, api::resource_usage::unordered_access)) return false;
       for (auto id : {left, right})
         if (!texture_create(id, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target)) return false;
-      if (!texture_create(packed, width * 2, height, color == 1 ? api::format::r10g10b10a2_unorm : api::format::r16g16b16a16_float,
+      if (!texture_create(packed, width * 2, height, packed_format(),
           api::resource_usage::render_target | api::resource_usage::copy_source)) return false;
       com<ID3DBlob> vs_code;
       if (!compile("PostProcessVS", "vs_5_0", vs_code)) return false;
@@ -244,6 +255,22 @@ namespace sunshine_game3d {
       cmd->push_descriptors(stage, layout, 2, {{}, 0, 0, uint32_t(srvs.size()), api::descriptor_type::shader_resource_view, srvs.data()});
       if (stage == api::shader_stage::compute)
         cmd->push_descriptors(stage, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
+    }
+    api::format packed_format() const { return color == 1 ? api::format::r10g10b10a2_unorm : api::format::r16g16b16a16_float; }
+    // The final side-by-side pass. Its target rests in `resting` between owners.
+    void record_pack(api::command_list *cmd, api::resource target, api::resource_view view, api::resource_usage resting) {
+      cmd->barrier(target, resting, api::resource_usage::render_target);
+      cmd->bind_pipeline(api::pipeline_stage::all_graphics, pipelines[pack]);
+      bindings(cmd, api::shader_stage::all_graphics, pack_parameters,
+        {textures[source].srv, {}, {}, {}, {}, {}, textures[left].srv, textures[right].srv});
+      const api::viewport viewport{0, 0, float(width * 2), float(height), 0, 1};
+      const api::rect scissor{0, 0, int32_t(width * 2), int32_t(height)};
+      cmd->bind_viewports(0, 1, &viewport); cmd->bind_scissor_rects(0, 1, &scissor);
+      cmd->bind_render_targets_and_depth_stencil(1, &view);
+      cmd->draw(3, 1, 0, 0);
+      cmd->bind_render_targets_and_depth_stencil(0, nullptr);
+      cmd->barrier(target, api::resource_usage::render_target, resting);
+      pack_owed = false;
     }
     void draw(api::command_list *cmd, pass id, uint32_t w, std::initializer_list<texture_id> targets,
         const render_parameters &p, const std::array<api::resource_view, 15> &srvs) {
@@ -668,7 +695,7 @@ namespace sunshine_game3d {
     reshade::log::message(reshade::log::level::info, "Sunshine Game 3D: add-on GPU renderer ready (no FX file required)");
     return true;
   }
-  bool renderer::render(api::command_list *cmd, const render_frame_input &input) {
+  bool renderer::render(api::command_list *cmd, const render_frame_input &input, bool defer_pack) {
     const auto backbuffer = input.color;
     auto depth = input.depth;
     const auto &parameters = input.scene;
@@ -778,7 +805,46 @@ namespace sunshine_game3d {
       }
     }
     d.draw(cmd, impl::eyes, d.width, {impl::left, impl::right}, p, {t[impl::source].srv, depth, t[impl::linear].srv, {}, {}, t[impl::field].srv});
-    d.draw(cmd, impl::pack, d.width * 2, {impl::packed}, p, {t[impl::source].srv, {}, {}, {}, {}, {}, t[impl::left].srv, t[impl::right].srv});
+    d.pack_parameters = p;
+    d.pack_owed = true;
+    if (!defer_pack) d.record_pack(cmd, t[impl::packed].resource, t[impl::packed].rtv, api::resource_usage::shader_resource);
+    return true;
+  }
+  bool renderer::pack(api::command_list *cmd, api::resource export_target, std::uint64_t export_generation) {
+    if (!data_ || !data_->pack_owed) return false;
+    auto &d = *data_;
+    auto target = d.textures[impl::packed].resource;
+    auto view = d.textures[impl::packed].rtv;
+    auto resting = api::resource_usage::shader_resource;
+    if (!export_target.handle && !d.export_views.empty()) {
+      // Views keep D3D11 slot textures alive; hold them only while exporting.
+      for (auto &[resource, old] : d.export_views) d.device->destroy_resource_view(old);
+      d.export_views.clear();
+      d.export_generation = 0;
+    }
+    if (export_target.handle) {
+      if (d.export_generation != export_generation) {
+        // RTV descriptors are consumed when commands are recorded, so another
+        // generation's views can be destroyed without waiting for the GPU.
+        for (auto &[resource, old] : d.export_views) d.device->destroy_resource_view(old);
+        d.export_views.clear();
+        d.export_generation = export_generation;
+      }
+      view = {};
+      for (const auto &[resource, cached] : d.export_views) if (resource == export_target) view = cached;
+      if (!view.handle) {
+        if (!d.device->create_resource_view(export_target, api::resource_usage::render_target,
+            api::resource_view_desc(d.packed_format()), &view)) return false;
+        d.export_views.emplace_back(export_target, view);
+      }
+      target = export_target;
+      resting = api::resource_usage::general; // Shared slots rest in COMMON between owners.
+    }
+    com<ID3DDeviceContextState> previous;
+    const bool isolated = d.context11.p && !d.frame_state;
+    if (isolated) d.context11->SwapDeviceContextState(d.isolated11.p, previous.put());
+    d.record_pack(cmd, target, view, resting);
+    if (isolated) d.context11->SwapDeviceContextState(previous.p, nullptr);
     return true;
   }
   api::resource renderer::output() const { return data_ ? data_->textures[impl::packed].resource : api::resource{}; }
@@ -871,8 +937,15 @@ namespace sunshine_game3d {
     data_->backbuffers.emplace_back(backbuffer, view);
     return view;
   }
-  void renderer::finish_present() {
+  void renderer::begin_present() {
     if (!data_ || !data_->pending) return;
+    // The missed presentation's commands still execute in queue order before
+    // any later signal, so that signal conservatively retires them too.
+    data_->pending = false;
+    data_->unsignaled = true;
+  }
+  void renderer::finish_present() {
+    if (!data_ || (!data_->pending && !data_->unsignaled)) return;
     auto &d = *data_;
     if (!d.queue->signal(d.completion, ++d.sequence)) d.failed = true;
     else {
@@ -885,7 +958,7 @@ namespace sunshine_game3d {
         d.detection_awaiting_signal = false;
       }
     }
-    d.pending = false;
+    d.pending = d.unsignaled = false;
   }
   void renderer::begin_frame_state() {
     if (!data_ || data_->frame_state) return;

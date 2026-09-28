@@ -1303,6 +1303,38 @@ namespace {
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
         "Native renderer changed the game's mono backbuffer");
     }
+    {
+      // A Present that never reaches finish_present must not wedge native
+      // rendering; its work is retired by the next signal, not assumed complete.
+      const auto &test = tests.front();
+      prepare_depth(fixture, test);
+      auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
+      write_native_source(fixture, backbuffer);
+      const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+      const auto color = static_cast<api::color_space>(fixture.color);
+      const auto depth = test.parameters.depth_ready ? fixture.depth_view : api::resource_view{};
+      auto *commands = owner_queue->get_immediate_command_list();
+      require(renderer.configure(observed.runtime, source, color) &&
+        sunshine_game3d::test::render_frame(renderer, commands, source, depth, test.parameters),
+        "Missed-finish fixture rejected its first frame");
+      require(!sunshine_game3d::test::render_frame(renderer, commands, source, depth, test.parameters),
+        "Renderer recorded twice in one presentation");
+      renderer.begin_present(); // The preceding finish_present never arrived.
+      require(sunshine_game3d::test::render_frame(renderer, commands, source, depth, test.parameters),
+        "Renderer stayed wedged after a missed finish_present");
+      const std::string alternate(sunshine_game3d::renderer::shader_source());
+      require(!renderer.configure(observed.runtime, source, color, alternate),
+        "Renderer replaced resources before the missed presentation was signaled");
+      owner_queue->flush_immediate_command_list();
+      renderer.finish_present();
+      owner_queue->wait_idle();
+      require(renderer.configure(observed.runtime, source, color, alternate) &&
+        renderer.configure(observed.runtime, source, color),
+        "Renderer stayed busy after the covering signal completed");
+      require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
+        "Missed-finish recovery changed the game's mono backbuffer");
+      std::puts("PASS missed finish_present: next presentation renders, resource replacement waits for the covering signal");
+    }
     // Exercise the production cap independently of the deliberately uncapped
     // frozen-FX oracle. Read both the candidate and authoritative final field.
     prepare_depth(fixture, {"budget-depth", {}, width, height, false});

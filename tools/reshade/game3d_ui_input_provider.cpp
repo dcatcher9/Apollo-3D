@@ -21,6 +21,9 @@ namespace sunshine_game3d::ui_input {
       ui_qualification::session selection;
       ui_qualification::scope base;
       std::uint64_t instance{}, last_observe_tick{}, frame_sequence{}, next_gate_log{};
+      // The capture owner's identity for this runtime's native device. It is
+      // resolved from a backbuffer once instead of on every presentation.
+      std::uint64_t native_device{}, device_identity{};
       bool suspended{};
     };
     std::mutex source_mutex;
@@ -158,18 +161,28 @@ namespace sunshine_game3d::ui_input {
     base.output_format = base.mask_format = static_cast<std::uint32_t>(desc.texture.format);
     base.color_space = static_cast<std::uint32_t>(color_space);
     std::uint32_t filter;
+    std::uint64_t device_identity{};
     {
       std::lock_guard<std::mutex> lock(source_mutex);
       auto &entry = entry_for(runtime); entry.suspended = false;
       if (entry.base != base) { entry.selection.clear(); entry.last_observe_tick = 0; entry.base = base; }
       filter = source_filter(entry.selection.selected_choice());
+      if (entry.native_device == base.device) device_identity = entry.device_identity;
     }
     if (!capture_needed(status, device->get_api()) || !have_scope || !filter) {
       ui_mask::invalidate(reinterpret_cast<std::uint64_t>(runtime)); return;
     }
-    capture::record_diagnostic identity;
-    const auto reference = capture::retain_source(color.handle, &identity);
-    ui_mask::set_request({reinterpret_cast<std::uint64_t>(runtime), identity.expected_device_identity,
+    if (!device_identity) {
+      capture::record_diagnostic identity;
+      if (!capture::retain_source(color.handle, &identity) || !identity.expected_device_identity) {
+        ui_mask::invalidate(reinterpret_cast<std::uint64_t>(runtime)); return;
+      }
+      device_identity = identity.expected_device_identity;
+      std::lock_guard<std::mutex> lock(source_mutex);
+      auto &entry = entry_for(runtime);
+      entry.native_device = base.device; entry.device_identity = device_identity;
+    }
+    ui_mask::set_request({reinterpret_cast<std::uint64_t>(runtime), device_identity,
       observed.epoch, observed.revision, observed.viewport, desc.texture.width, desc.texture.height, true, 0, true, filter});
   }
   frame acquire(api::effect_runtime *runtime, renderer &renderer, source_alpha_ui_decision status,

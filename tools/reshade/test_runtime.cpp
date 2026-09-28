@@ -203,6 +203,9 @@ technique SuperDepth3D {
     unsigned expected_color = 1;
     bool interactive = false;
     bool controlled = false;
+    // Native Game 3D without any FX: the add-on packs stereo straight into export slots.
+    bool native_only = false;
+    fs::path output_directory;
     HMODULE receiver_module = nullptr;
     void *receiver_state = nullptr;
     sunshine_receiver_test_create receiver_create = nullptr;
@@ -246,6 +249,12 @@ technique SuperDepth3D {
     void initialize(const fs::path &runtime, const fs::path &addon, const fs::path &directory, unsigned color, const fs::path &receiver_dll = {}) {
       expected_color = color;
       controlled = !receiver_dll.empty();
+      output_directory = directory;
+      const char *native_flag = std::getenv("SUNSHINE_GAME3D_NATIVE_ONLY");
+      require(!native_flag || !*native_flag || !std::strcmp(native_flag, "0") || !std::strcmp(native_flag, "1"),
+        "SUNSHINE_GAME3D_NATIVE_ONLY must be 0 or 1");
+      native_only = native_flag && !std::strcmp(native_flag, "1");
+      require(!native_only || controlled, "The native D3D11 fixture requires the production-receiver facade");
       if (controlled) {
         receiver_module = LoadLibraryW(receiver_dll.c_str());
         require(receiver_module != nullptr, "Could not load production-receiver test facade");
@@ -259,9 +268,15 @@ technique SuperDepth3D {
       fs::create_directories(directory / "addons");
       fs::copy_file(runtime, directory / "dxgi.dll", fs::copy_options::overwrite_existing);
       fs::copy_file(addon, directory / "addons" / "SunshineSBS.addon64", fs::copy_options::overwrite_existing);
-      write_file(directory / "effects" / "SuperDepth3D.fx", fixture_effect);
-      write_file(directory / "preset.ini", "Techniques=SuperDepth3D@SuperDepth3D.fx\nTechniqueSorting=SuperDepth3D@SuperDepth3D.fx\n");
-      write_file(directory / "ReShade.ini", "[ADDON]\nAddonPath=.\\addons\nDisabledAddons=Generic Depth\n[GENERAL]\nEffectSearchPaths=.\\effects\nPresetPath=.\\preset.ini\nPerformanceMode=0\nSkipLoadingDisabledEffects=0\nEffectCachePath=.\\cache\n[OVERLAY]\nTutorialProgress=4\nShowFPS=0\nShowClock=0\nShowPresetName=0\n[STYLE]\nHdrOverlayBrightness=203\n");
+      if (native_only) {
+        write_file(directory / "preset.ini", "");
+      } else {
+        write_file(directory / "effects" / "SuperDepth3D.fx", fixture_effect);
+        write_file(directory / "preset.ini", "Techniques=SuperDepth3D@SuperDepth3D.fx\nTechniqueSorting=SuperDepth3D@SuperDepth3D.fx\n");
+      }
+      write_file(directory / "ReShade.ini", "[ADDON]\nAddonPath=.\\addons\nDisabledAddons=Generic Depth\n[GENERAL]\nEffectSearchPaths=.\\effects\nPresetPath=.\\preset.ini\nPerformanceMode=0\nSkipLoadingDisabledEffects=0\nEffectCachePath=.\\cache\n[OVERLAY]\nTutorialProgress=4\nShowFPS=0\nShowClock=0\nShowPresetName=0\n[STYLE]\nHdrOverlayBrightness=203\n"
+        // Native Game 3D is on by default; the reference-effect transport turns it off.
+        + std::string("[SUNSHINE_GAME3D]\nEnabled=") + (native_only ? "1\n" : "0\n"));
       SetEnvironmentVariableW(L"RESHADE_BASE_PATH_OVERRIDE", directory.c_str());
 
       // Create the receiver before loading ReShade so it is a separate native D3D11 device.
@@ -490,7 +505,10 @@ technique SuperDepth3D {
       require(result == S_OK, "Test readback did not finish within the bound");
       D3D11_MAPPED_SUBRESOURCE mapped {};
       checked(context->Map(staging.p, 0, D3D11_MAP_READ, 0, &mapped), "Map completed test readback");
-      const bool correct = sunshine_sbs_overlay_pixels::check(mapped.pData, mapped.RowPitch, format, source_width, source_height, expect_overlay, expect_overlay && set_overlay_patch, expected_gain);
+      const bool correct = native_only ?
+        sunshine_sbs_overlay_pixels::check_native(mapped.pData, mapped.RowPitch, format, source_width, source_height, expected_color,
+          {0.125f, 0.25f, 0.375f}, expect_overlay, set_overlay_patch != nullptr) :
+        sunshine_sbs_overlay_pixels::check(mapped.pData, mapped.RowPitch, format, source_width, source_height, expect_overlay, expect_overlay && set_overlay_patch, expected_gain);
       context->Unmap(staging.p, 0);
       return correct;
     }
@@ -651,7 +669,54 @@ technique SuperDepth3D {
       std::printf("PASS partial actual runtime color=%u: present=%u technique=%u finish=%u reload=%u; FX pixels/ABI/color/events/background rejection. Full shared publication SKIPPED.\n", expected_color, observation.presents, observation.techniques, observation.finishes, observation.reloads);
     }
 
+    bool logged(const char *marker) const {
+      std::ifstream input(output_directory / "ReShade.log");
+      const std::string log((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+      return log.find(marker) != std::string::npos;
+    }
+
+    void run_native_only() {
+      auto generation = wait_pixels();
+      require(observation.runtime && observation.techniques == 0, "Native D3D11 renderer depended on an effect technique");
+      require(logged("rendering stereo directly into export slots"), "Native D3D11 export did not render straight into its slots");
+      // A global effect toggle must not turn off add-on-owned rendering.
+      observation.runtime->set_effects_state(false);
+      wait_pixels(0, generation, last_sequence);
+      observation.runtime->set_effects_state(true);
+      // The open overlay composes over the internal SBS image, then copies it.
+      set_overlay_patch(TRUE);
+      expect_overlay = true;
+      require(observation.runtime->open_overlay(true, api::input_source::keyboard), "Native D3D11 overlay failed to open");
+      wait_pixels(0, generation, last_sequence);
+      set_overlay_patch(FALSE);
+      expect_overlay = false;
+      require(observation.runtime->open_overlay(false, api::input_source::keyboard), "Native D3D11 overlay failed to close");
+      wait_pixels(0, generation, last_sequence);
+
+      set_test_focus(false);
+      step();
+      wire::metadata_t metadata;
+      require(snapshot(*shared, metadata) && !metadata.generation, "Native D3D11 output bypassed focus loss");
+      require_receiver_inactive("Receiver retained native D3D11 output after focus loss");
+      set_test_focus(true);
+      generation = wait_pixels(generation);
+      const auto previous_nonce = read64(shared->consumer_nonce);
+      receiver_destroy(receiver_state);
+      receiver_state = receiver_create(receiver.p, receiver_context.p, window, GetCurrentProcessId(), &source_rect);
+      require(receiver_state != nullptr, "Could not restart native D3D11 production receiver");
+      wait_pixels(generation);
+      require(read64(shared->consumer_nonce) != previous_nonce, "Native D3D11 receiver restart reused its old nonce");
+      require(observation.presents == observation.finishes && observation.techniques == 0,
+        "Native D3D11 presentation lifecycle is incomplete");
+      std::printf("PASS native add-on-only D3D11 color=%u: direct slot export, overlay copy path, effects toggle, focus recovery, receiver restart\n",
+        expected_color);
+    }
+
     void run() {
+      if (native_only) {
+        run_native_only();
+        return;
+      }
       if (!interactive && !controlled) {
         run_background();
         return;
