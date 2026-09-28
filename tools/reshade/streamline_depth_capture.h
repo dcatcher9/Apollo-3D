@@ -47,6 +47,10 @@ namespace sunshine_streamline::depth_capture {
     bool require_frame_generation{};
     std::uint64_t epoch{};
     std::uint32_t viewport{};
+    bool check_streamline_observation{};
+    std::uint64_t streamline_observation_revision{};
+    // Lost FG mode evidence revokes FG inputs, not independent ordinary depth.
+    bool exclude_unconfirmed_fg{};
   };
   enum class status {
     inactive, unavailable, malformed, unsupported_state, missing_state, conflicting_state, incomplete_state, unsupported_lifetime,
@@ -65,7 +69,7 @@ namespace sunshine_streamline::depth_capture {
     pending_nomination, current_capture, current_already_consumed, no_admissible_capture,
     no_completed_snapshot, completed_before_gap, completed_not_older,
     completed_already_consumed, presentation_already_selected, layout_changed,
-    completed_not_readable, completed_snapshot, fg_scope_missing, fg_scope_mismatch
+    completed_not_readable, completed_snapshot, fg_scope_missing, fg_scope_mismatch, source_observation_changed
   };
   // Acquisition authority, frozen under the capture lock. Diagnostics may be
   // omitted or reformatted without changing these source/continuity decisions.
@@ -134,6 +138,10 @@ namespace sunshine_streamline::depth_capture {
     recording_loss loss{recording_loss::none};
     std::uint64_t command{}, recording_cookie{}, resource{}, device_identity{}, expected_device_identity{};
     std::uint64_t expected_generation{}, current_generation{};
+    // Scoped to the exact recording above. Aggregate observer notifications
+    // elsewhere do not prove that this list transitioned the nominated source.
+    std::uint64_t native_barrier_calls{}, native_transition_count{}, tracked_source_count{};
+    std::uint64_t last_barrier_command{}, source_cookie{};
     std::uint32_t width{}, height{}, format{}, flags{}, native_state{}, observed_state{};
     // Selected transition/restore basis, distinct from the unchanged raw hint.
     // Known means admission selected a supported state, not that a copy ran.
@@ -167,15 +175,15 @@ namespace sunshine_streamline::depth_capture {
   void set_preservation_available(preservation_available_callback callback);
   // Observing an API attempt discovers its command list, never claims ownership.
   // Only acquire of a successful, submitted current source establishes a
-  // provider on that exact queue. The first accepted provider remains selected
-  // through missing frames until release/reset, except that an explicit FG
-  // selection policy requires its SL input. If two ordinary providers are
-  // initially ready, the earlier capture wins.
+  // provider on that exact queue. Readable SL takes priority over NGX; pending
+  // SL cannot displace working NGX. An established SL source keeps priority
+  // through a bounded pending interval, then usable NGX may replace it. Each
+  // packet keeps its own camera/encoding. Explicit FG still requires SL FG.
   void observe_provider(std::uint64_t command);
   bool provider_active(std::uint64_t queue);
   bool provider_identity(std::uint64_t queue, sunshine_scene_depth::provider_kind &provider,
     std::uint64_t &source_id);
-  // An explicit successful feature release is different from a missing frame.
+  // An explicit feature release or authority revocation differs from a missing frame.
   // It removes only this logical source, retaining in-flight GPU allocations
   // until their existing fence/recording retirement conditions are satisfied.
   void retire_source(sunshine_scene_depth::provider_kind provider, std::uint64_t epoch, std::uint64_t source_id);
@@ -208,7 +216,7 @@ namespace sunshine_streamline::depth_capture {
   // only this attempt; missing adapter input must use begin_evaluation() instead.
   std::uint64_t nominate_evaluation(std::uint64_t command, const input &value,
     std::uint64_t superseded_source_id = UINT64_MAX, record_diagnostic *diagnostic = nullptr);
-  // One or two priority-ordered tags from the exact same logical evaluation.
+  // Up to three priority-ordered tags from the exact same logical evaluation.
   // Keep source authority when all captures fail, but try usable alternatives.
   std::uint64_t nominate_evaluation(std::uint64_t command, const input *candidates, std::size_t count,
     std::uint64_t superseded_source_id = UINT64_MAX, record_diagnostic *diagnostic = nullptr);
@@ -229,7 +237,8 @@ namespace sunshine_streamline::depth_capture {
   struct diagnostic_texture {
     std::shared_ptr<const texture_reference> ownership;
     // The handle belongs to ownership. Duplicate it for IPC; do not close it.
-    // Pixels are immutable, complete and in COMMON when acquisition succeeds.
+    // Strict diagnostic acquisition exposes complete immutable COMMON pixels.
+    // Local acquisition can instead authorize an ordered same-queue GPU copy.
     std::uint64_t texture{}, shared_handle{}, device{}, device_identity{}, resource_id{};
     std::uint64_t capture_id{}, producer_queue{}, producer_fence{}, producer_completed{};
     std::uint32_t width{}, height{}, format{};
@@ -242,31 +251,49 @@ namespace sunshine_streamline::depth_capture {
   // an independent bounded pool. They never nominate or change a depth source.
   // Call at the authenticated API boundary, before its original call. Every
   // accepted ticket must finish; retain it until acquire or explicit cancel.
-  diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value,
-    record_diagnostic *diagnostic = nullptr);
-  enum class local_texture_state_policy { source_contract, prefer_observed_recording };
-  // Local consumers use the same copy/fence owner, but their retired storage
-  // may be reused. These tickets expose no IPC handle. Externally shared dump
-  // textures above remain immutable even after the host acknowledges opening.
-  // prefer_observed_recording is restricted to synchronous Streamline FG input
-  // color snapshots. It prefers the known, unblocked, nonzero state on this
+  enum class texture_state_policy { source_contract, prefer_observed_recording };
+  // Preserve the declared lifetime when choosing a policy. A longer-lived SL
+  // input may describe its state at later consumption, not this tag boundary.
+  inline texture_state_policy auxiliary_state_policy(const input &value) {
+    return value.provider == sunshine_scene_depth::provider_kind::streamline &&
+      value.valid_until == sunshine_scene_depth::lifetime::at_call ?
+      texture_state_policy::prefer_observed_recording : texture_state_policy::source_contract;
+  }
+  // prefer_observed_recording is restricted to at-call Streamline auxiliary
+  // snapshots. UI adapters use it for both local and shared copies, independently
+  // of FG mode or storage lifetime. It prefers the known, unblocked, nonzero state on this
   // exact recording, despite a stale hint. Only absent observation permits a
   // supported, explicit nonzero declaration compatible with resource flags.
   // Incomplete/blocked/COMMON evidence never falls back to a declaration.
+  diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value,
+    record_diagnostic *diagnostic = nullptr,
+    texture_state_policy state_policy = texture_state_policy::source_contract);
+  // Local consumers use the same state/copy/fence owner, but their retired storage
+  // may be reused. These tickets expose no IPC handle. Externally shared dump
+  // textures above remain immutable even after the host acknowledges opening.
   diagnostic_ticket record_local_texture(std::uint64_t command, const input &value,
     record_diagnostic *diagnostic = nullptr,
-    local_texture_state_policy state_policy = local_texture_state_policy::source_contract);
+    texture_state_policy state_policy = texture_state_policy::source_contract);
   void finish_diagnostic_texture(const diagnostic_ticket &ticket, bool successful);
   // Nonblocking: pending work, even on the same queue, is not shareable. Both
   // GPU completion and Reset/destruction of its producing recording are needed
   // before a foreign process can safely read the immutable snapshot.
   status acquire_diagnostic_texture(const diagnostic_ticket &ticket, diagnostic_texture &out);
+  // Local-only snapshots may be copied after their successful producer
+  // submission on that same queue, using GPU order without a CPU wait or Reset.
+  // Foreign queues retain completion/producer-retirement requirements. Shared
+  // dump tickets cannot opt into this path; GPU retirement is never relaxed.
+  status acquire_local_texture(const diagnostic_ticket &ticket, std::uint64_t consumer_queue,
+    diagnostic_texture &out);
   // Copy a completed immutable auxiliary snapshot into a same-format/shape
   // texture on one consumer queue. Both resource states are restored. Retain
   // source AND destination until recorded consumers and their GPU fences retire;
   // Reset alone never permits reuse. Never adds a queue wait. A ticket cannot
   // switch destination or consumer queue after its first successful copy.
   bool copy_diagnostic_texture(std::uint64_t command, std::uint64_t consumer_queue,
+    const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
+    consumer_diagnostic *diagnostic = nullptr);
+  bool copy_local_texture(std::uint64_t command, std::uint64_t consumer_queue,
     const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
     consumer_diagnostic *diagnostic = nullptr);
   // Revokes the ticket, never its outstanding GPU obligations. Drop all leases
@@ -334,7 +361,7 @@ namespace sunshine_streamline::depth_capture {
   const char *name(selection_reason value);
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   namespace testing { bool diagnostic_snapshot_regression(); }
-  namespace testing { bool zero_cookie_submission_regression(); bool unsupported_com_boundary_regression(); bool source_cookie_reentry_regression(); bool recording_recovery_regression(); bool recording_state_loss_regression(); }
+  namespace testing { bool initial_recording_regression(); bool zero_cookie_submission_regression(); bool unsupported_com_boundary_regression(); bool source_cookie_reentry_regression(); bool recording_recovery_regression(); bool recording_state_loss_regression(); }
   namespace testing { bool submission_completion_regression(); bool provider_admission_regression(); bool crop_region_regression(); bool record_diagnostic_regression(); }
 #endif
 

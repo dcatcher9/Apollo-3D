@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Opt-in functional test of source-alpha protection in the real native shader.
 // No installed FX, CPU warp replica, visible window or performance claim.
-#include "game3d_renderer.h"
+#include "test_game3d_render_input.h"
 #include "game3d_controls.h"
 #include "test_game3d_debug_dump_runtime.h"
 #include <reshade.hpp>
@@ -239,7 +239,8 @@ namespace {
         const sunshine_game3d::render_parameters *override_parameters = nullptr,
         const sunshine_game3d::alpha_auto_source *automatic = nullptr,
         const sunshine_game3d::ui_adaptive::source *adaptive = nullptr,
-        sunshine_game3d::renderer *render_target = nullptr) {
+        sunshine_game3d::renderer *render_target = nullptr,
+        const sunshine_game3d::ui_render_input *ui_override = nullptr) {
       auto &active = render_target ? *render_target : control ? control_renderer : renderer;
       sunshine_game3d::render_parameters p;
       p.strength = flat ? 0 : 100; p.depth_ready = p.camera_ready = 1; p.coordinate_basis = 1;
@@ -248,10 +249,18 @@ namespace {
       if (override_parameters) p = *override_parameters;
       context->CopyResource(backbuffer.Get(), source.Get());
       auto *queue = observed_runtime->get_command_queue();
-      require(active.render(queue->get_immediate_command_list(), {reinterpret_cast<std::uint64_t>(backbuffer.Get())},
-        {reinterpret_cast<std::uint64_t>(depth_view.Get())}, p,
-        alpha_source.handle ? protect : sunshine_game3d::source_alpha_ui_for_present(protect, frame_generation_active),
-        alpha_source, plane, automatic, adaptive), "production render failed");
+      if (ui_override) {
+        sunshine_game3d::render_frame_input frame;
+        frame.color = {reinterpret_cast<std::uint64_t>(backbuffer.Get())};
+        frame.depth = {reinterpret_cast<std::uint64_t>(depth_view.Get())};
+        frame.scene = p; frame.ui = *ui_override;
+        require(active.render(queue->get_immediate_command_list(), frame), "production UI detection render failed");
+      } else {
+        require(sunshine_game3d::test::render_frame(active, queue->get_immediate_command_list(), {reinterpret_cast<std::uint64_t>(backbuffer.Get())},
+          {reinterpret_cast<std::uint64_t>(depth_view.Get())}, p,
+          alpha_source.handle ? protect : sunshine_game3d::source_alpha_ui_for_present(protect, frame_generation_active),
+          alpha_source, plane, automatic, adaptive), "production render failed");
+      }
       require(adaptive || sunshine_game3d::ui_parameter_words(protect, active.consumed_ui_plane()) ==
           sunshine_game3d::ui_parameter_words(protect, plane), "renderer changed consumed UI-plane bits");
       std::unique_ptr<sunshine_game3d_test::dump_fixture> dump;
@@ -899,7 +908,7 @@ namespace {
       return first;
     };
     if (gpu.has_control && gpu.control_renderer.active_shader_source().find("#define SUNSHINE_UI_NEAREST_PLANE 1") == std::string_view::npos)
-      require(!gpu.control_renderer.render(observed_runtime->get_command_queue()->get_immediate_command_list(),
+      require(!sunshine_game3d::test::render_frame(gpu.control_renderer, observed_runtime->get_command_queue()->get_immediate_command_list(),
           {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())},
           {reinterpret_cast<std::uint64_t>(gpu.depth_view.Get())}, p, true, {}, plane),
         "historical shader silently accepted an unsupported nearest-UI plane");
@@ -928,7 +937,7 @@ namespace {
       require(before.field.bytes == expected.field.bytes && before.output.bytes == expected.output.bytes,
         "lazy legacy preparation changed ordinary UI rendering");
       for (unsigned attempt = 0; attempt != 2; ++attempt) {
-        require(!lazy.render(observed_runtime->get_command_queue()->get_immediate_command_list(),
+        require(!sunshine_game3d::test::render_frame(lazy, observed_runtime->get_command_queue()->get_immediate_command_list(),
             backbuffer, depth, p, true, {}, plane), "unavailable nearest-UI entry did not reject its render");
         require(sunshine_game3d::ui_parameter_words(true, lazy.consumed_ui_plane()) ==
             sunshine_game3d::ui_parameter_words(true, ordinary),
@@ -1114,7 +1123,7 @@ namespace {
     };
     if (gpu.has_control && gpu.control_renderer.active_shader_source().find(shallow ? "#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1" :
         "#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1") == std::string_view::npos)
-      require(!gpu.control_renderer.render(observed_runtime->get_command_queue()->get_immediate_command_list(),
+      require(!sunshine_game3d::test::render_frame(gpu.control_renderer, observed_runtime->get_command_queue()->get_immediate_command_list(),
           {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())}, {reinterpret_cast<std::uint64_t>(gpu.depth_view.Get())}, p, true, {}, front),
         "historical shader silently accepted the unsupported front-limit UI plane");
     gpu.pattern(alpha, true);
@@ -1563,305 +1572,256 @@ namespace {
 
   void verify_automatic_source_alpha(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;
-    const std::uint64_t pixels = std::uint64_t(gpu.width) * gpu.height;
-    std::vector<float> selective(size_t(pixels), 0), clear(size_t(pixels), 0), full(size_t(pixels), 1);
+    const auto pixels = size_t(gpu.width) * gpu.height;
+    std::array<std::vector<float>, 3> masks{
+      std::vector<float>(pixels, 1.f), std::vector<float>(pixels, 0.f), std::vector<float>(pixels, 0.f)};
     for (unsigned y = gpu.height / 4; y < gpu.height * 3 / 4; ++y)
-      for (unsigned x = gpu.width / 3; x < gpu.width / 2; ++x) selective[size_t(y) * gpu.width + x] = .25f;
-    selective.back() = .5f; // Isolated corner coverage must not vanish in sampling.
-    const auto covered = std::uint64_t(std::count_if(selective.begin(), selective.end(), [](float a) { return a > 0; }));
-    require(covered > 0 && covered < pixels, "startup-alpha fixture needs selective coverage");
-    gpu.pattern(selective, true);
-    const auto off = gpu.render(false, 1);
-    const auto selective_on = gpu.render(true, 1);
-    gpu.pattern(full, true);
-    const auto full_on = gpu.render(true, 1);
-    require(selective_on.field.bytes != off.field.bytes && selective_on.output.bytes != off.output.bytes &&
-        full_on.field.bytes != off.field.bytes && full_on.output.bytes != off.output.bytes,
-      "startup-alpha fixture does not exercise UI protection");
+      for (unsigned x = gpu.width / 3; x < gpu.width / 2; ++x) masks[1][size_t(y) * gpu.width + x] = .25f;
+    masks[1].back() = .5f; // Include isolated translucent coverage in the exact pixel reference.
+    std::array<result, 3> off, on;
+    for (unsigned mask = 0; mask != masks.size(); ++mask) {
+      gpu.pattern(masks[mask], true);
+      off[mask] = gpu.render(false, 1);
+      on[mask] = gpu.render(true, 1);
+    }
+    require(on[0].field.bytes != off[0].field.bytes && on[0].output.bytes != off[0].output.bytes &&
+        on[1].field.bytes != off[1].field.bytes && on[1].output.bytes != off[1].output.bytes,
+      "Automatic UI fixture does not exercise full/selective protection");
     const auto exact = [](const result &actual, const result &expected) {
       return actual.field.bytes == expected.field.bytes && actual.output.bytes == expected.output.bytes;
     };
-    const auto unchanged = [&](alpha_probe_counters before, const char *message) {
-      const auto after = gpu.renderer.alpha_probe_activity();
-      require(after.submitted == before.submitted && after.mapped == before.mapped, message);
-    };
+    alpha_auto_policy policy;
     alpha_auto_source source;
-    std::uint64_t epoch = 17;
-    const auto begin = [&](alpha_auto_policy &policy, std::uint64_t start) {
-      source = {}; source.now_ms = start; source.epoch = ++epoch; source.revision = 1; source.session = &policy;
-    };
-    const auto render = [&](api::resource_view retained = {}, bool eligible = true) {
-      return gpu.render(eligible, 1, false, false, source.retained, retained, {}, {}, nullptr, &source);
-    };
-    // The fixture already drains actual GPU work. A repeated render at the same
-    // fake timestamp consumes one completed sample without advancing its age.
-    const auto sample = [&](const std::vector<float> &presented, std::uint64_t tick,
-                            std::uint64_t expected_covered, api::resource_view retained = {}, bool monitoring = true) {
-      source.now_ms = source.tick_ms = tick; ++source.sequence;
-      gpu.pattern(presented, true);
-      render(retained);
-      const auto actual = render(retained);
-      const auto decision = gpu.renderer.consumed_alpha_auto();
-      if (decision.sample_sequence != source.sequence || decision.sample_tick_ms != tick) {
-        const auto activity = gpu.renderer.alpha_probe_activity();
-        std::printf("AUTO SAMPLE expected_sequence=%llu actual_sequence=%llu expected_tick=%llu actual_tick=%llu state=%s submitted=%llu mapped=%llu\n",
-          static_cast<unsigned long long>(source.sequence), static_cast<unsigned long long>(decision.sample_sequence),
-          static_cast<unsigned long long>(tick), static_cast<unsigned long long>(decision.sample_tick_ms),
-          sunshine_game3d::name(decision.state), static_cast<unsigned long long>(activity.submitted),
-          static_cast<unsigned long long>(activity.mapped));
+    source.session = &policy; source.now_ms = source.tick_ms = 1000;
+    source.epoch = 17; source.revision = 1; source.sequence = 1;
+    const auto verify = [&](unsigned mask, api::resource_view retained, bool eligible = true) {
+      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+      const auto actual = gpu.render(eligible, 1, false, false, source.retained, retained, {}, {}, nullptr, &source);
+      const bool protected_pixels = eligible && mask == 1;
+      require(exact(actual, protected_pixels ? on[mask] : off[mask]),
+        "Automatic alpha detection changed exact field/SBS or accepted a full-scene mask");
+      const auto resolved = gpu.renderer.diagnostics().ui_source;
+      require(resolved.handle, "Auto did not expose its actual resolved GPU mask");
+      const auto selected = gpu.read(resolved);
+      require(selected.format == DXGI_FORMAT_R32_FLOAT && selected.width == gpu.width && selected.height == gpu.height,
+        "Auto diagnostic is not the resolved full-resolution R32 mask");
+      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
+        const auto value = selected.channel(x, y, 0);
+        const bool wanted = protected_pixels && masks[mask][size_t(y) * gpu.width + x] > 0.f;
+        require(std::isfinite(value) && value >= 0.f && value <= 1.f && (value > 0.f) == wanted,
+          "Auto mask retained full-scene/old coverage or lost selective UI pixels");
       }
-      require(decision.sample_sequence == source.sequence && decision.sample_tick_ms == tick,
-        "startup alpha lost completed source sample identity");
-      require(decision.covered == expected_covered && decision.pixels == pixels,
-        "startup alpha GPU reduction did not count every finite positive texel exactly");
-      const bool enabled = expected_covered > 0 && expected_covered < pixels;
-      require(decision.monitoring == monitoring && decision.enabled == enabled &&
-          gpu.renderer.consumed_source_alpha_ui() == enabled && exact(actual, enabled ? selective_on : off),
-        "startup detector did not apply the current provisional or confirmed UI decision exactly");
-      if (!monitoring) require(decision.state == alpha_auto_state::automatic_on,
-        "500 ms of selective alpha did not confirm Auto On early");
     };
-    {
-      alpha_auto_policy policy; begin(policy, 1000);
-      gpu.pattern(selective, true);
-      const auto waiting = gpu.renderer.alpha_probe_activity();
-      require(exact(render({}, false), off), "ineligible waiting source changed stereo");
-      source.now_ms = 14000; source.retained = true;
-      require(exact(render(), off), "missing FG alpha source changed stereo");
-      auto decision = gpu.renderer.consumed_alpha_auto();
-      require(decision.monitoring && !decision.window_started &&
-          decision.state == alpha_auto_state::waiting_for_source,
-        "unavailable startup source consumed the detection window");
-      unchanged(waiting, "unavailable startup source submitted or mapped an alpha probe");
-      source.retained = false; source.now_ms = source.tick_ms = 15000; source.sequence = 1;
-      require(exact(render(), off), "uncompleted first observation enabled UI");
-      decision = gpu.renderer.consumed_alpha_auto();
-      require(decision.window_started && decision.window_start_ms == 15000 && decision.monitoring &&
-          !decision.sample_sequence && gpu.renderer.alpha_probe_activity().submitted == waiting.submitted + 1,
-        "first queued alpha observation did not publish the delayed window start immediately");
-      require(exact(render(), selective_on), "delayed first selective observation did not enable provisional UI");
-      sample(selective, 15500, covered, {}, false);
-      const auto stopped = gpu.renderer.alpha_probe_activity();
-      source.now_ms = 16000; gpu.pattern(full, true);
-      require(exact(render(), full_on), "delayed startup failed to preserve early confirmed On");
-      unchanged(stopped, "delayed startup continued probing after confirmation");
-    }
-    {
-      alpha_auto_policy policy; begin(policy, 30000);
-      policy.set_manual(false); source.now_ms = source.tick_ms = 35000; source.sequence = 1;
-      const auto waiting = gpu.renderer.alpha_probe_activity();
-      gpu.pattern(full, true); render();
-      policy.set_manual(true); render();
-      require(!gpu.renderer.consumed_alpha_auto().window_started,
-        "manual protection started an automatic observation window");
-      unchanged(waiting, "manual protection queued an automatic observation");
-      policy.set_automatic(39000);
-      sample(full, 40000, pixels);
-      require(gpu.renderer.consumed_alpha_auto().window_start_ms == 40000,
-        "returning Auto started before an eligible probe was queued");
-      sample(full, 40400, pixels);
-      source.now_ms = 40000 + alpha_startup_window_ms - 1; render();
-      require(gpu.renderer.consumed_alpha_auto().monitoring,
-        "delayed full-alpha window expired before five minutes");
-      const auto stopped = gpu.renderer.alpha_probe_activity();
-      source.now_ms = 40000 + alpha_startup_window_ms;
-      require(exact(render(), off) && !gpu.renderer.consumed_alpha_auto().monitoring,
-        "delayed full-alpha window did not finish Off five minutes after its first probe");
-      source.now_ms += 5000; gpu.pattern(selective, true);
-      require(exact(render(), off), "selective alpha restarted the delayed completed window");
-      unchanged(stopped, "delayed full-alpha window continued monitoring after its deadline");
-    }
-    std::uint64_t start = 10000;
-    for (float value : {0.f, 1.f, .5f}) {
-      alpha_auto_policy policy(start); begin(policy, start);
-      std::fill(full.begin(), full.end(), value);
-      sample(full, start + 100, value > 0 ? pixels : 0);
-      sample(full, start + 400, value > 0 ? pixels : 0);
-      const auto stopped = gpu.renderer.alpha_probe_activity();
-      source.now_ms = start + alpha_startup_window_ms;
-      require(exact(render(), off) && !gpu.renderer.consumed_alpha_auto().monitoring &&
-          gpu.renderer.consumed_alpha_auto().state == alpha_auto_state::automatic_off,
-        "zero/full-only startup did not choose Off at its original deadline");
-      gpu.pattern(selective, true); source.now_ms += 5000;
-      require(exact(render(), off), "post-startup selective alpha changed the frozen Off choice");
-      unchanged(stopped, "full-only startup continued GPU dispatch/map after its deadline");
-      policy.set_manual(true); gpu.pattern(full, true);
-      require(exact(render(), value > 0 ? full_on : off) && gpu.renderer.consumed_alpha_auto().state == alpha_auto_state::manual_on,
-        "manual On failed to override startup Off");
-      policy.set_manual(false);
-      require(exact(render(), off) && gpu.renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off,
-        "manual Off failed to override startup On");
-      unchanged(stopped, "manual overrides restarted GPU coverage monitoring");
-      start += 20000;
-    }
-    std::fill(full.begin(), full.end(), 1.f);
-    {
-      alpha_auto_policy policy(70000); begin(policy, 70000);
-      sample(selective, 70100, covered); // The first completed selective mask is provisional On.
-      sample(full, 70400, pixels); // Full coverage interrupts an unconfirmed candidate.
-      sample(selective, 70600, covered);
-      sample(clear, 70900, 0); // Empty coverage also turns provisional protection off.
-      sample(selective, 71100, covered);
+    // All decisions come from the real GPU inputs. No review, provider approval
+    // mutation or injected CPU coverage statistics are used by this fixture.
+    for (unsigned kind = 0; kind != 3; ++kind) {
+      source.retained = kind != 0; source.dedicated_mask = kind == 2;
       ++source.revision;
-      sample(selective, 71400, covered); // New scope starts a new 500-ms interval.
-      sample(selective, 71600, covered); // 500 ms since the old scope must not confirm.
-      sample(selective, 71900, covered, {}, false); // Exactly 500 ms in this scope confirms early.
-      const auto stopped = gpu.renderer.alpha_probe_activity();
-      ++source.revision; source.now_ms = 72000; gpu.pattern(selective, true);
-      require(exact(render(), selective_on) && !gpu.renderer.consumed_alpha_auto().monitoring &&
-          gpu.renderer.consumed_alpha_auto().state == alpha_auto_state::automatic_on,
-        "confirmed Auto On was lost after a source change");
-      source.now_ms = 72100; gpu.pattern(full, true);
-      require(exact(render(), full_on), "full alpha changed the early confirmed On choice");
-      source.now_ms = 72200; gpu.pattern(clear, true);
-      require(exact(render(), off) && gpu.renderer.consumed_source_alpha_ui(),
-        "empty alpha changed the early confirmed On choice");
-      source.now_ms = 70000 + alpha_startup_window_ms + 5000; gpu.pattern(full, true);
-      require(exact(render(), full_on), "post-deadline full alpha changed confirmed On choice");
-      unchanged(stopped, "confirmed Auto On continued GPU dispatch/map before or after deadline");
-      // Recreating renderer resources cannot recreate the process-owned window.
-      gpu.renderer.reset_after_runtime_drain();
-      require(gpu.renderer.configure(observed_runtime, {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())},
-        static_cast<api::color_space>(gpu.color)), "reconfigure renderer after startup detection");
-      gpu.pattern(selective, true);
-      require(exact(render(), selective_on), "renderer recreation forgot the frozen process toggle");
-      unchanged({}, "new renderer allocated/submitted/mapped a post-deadline observation");
-    }
-    {
-      alpha_auto_policy policy(90000); begin(policy, 90000);
-      sample(selective, 90000 + alpha_startup_window_ms - 510, covered);
-      source.now_ms = source.tick_ms = 90000 + alpha_startup_window_ms - 10; ++source.sequence;
-      gpu.pattern(selective, true); render(); // Completed GPU copy, not yet observed on CPU.
-      const auto pending = gpu.renderer.alpha_probe_activity();
-      source.now_ms = 90000 + alpha_startup_window_ms;
-      require(exact(render(), off) && !gpu.renderer.consumed_alpha_auto().enabled,
-        "a readback completed at the deadline qualified startup after its window");
-      unchanged(pending, "deadline retirement mapped a pending alpha observation");
-    }
-    {
-      alpha_auto_policy policy(110000); begin(policy, 110000);
-      source.retained = true;
-      const auto retained = gpu.retain_mask(selective);
-      sample(full, 110100, covered, retained);
-      const auto first = gpu.renderer.consumed_alpha_auto();
-      const auto once = gpu.renderer.alpha_probe_activity();
-      source.now_ms = 110600; render(retained);
-      require(gpu.renderer.consumed_alpha_auto().sample_sequence == first.sample_sequence &&
-          gpu.renderer.consumed_alpha_auto().sample_tick_ms == first.sample_tick_ms &&
-          gpu.renderer.consumed_alpha_auto().monitoring,
-        "re-presenting one retained input for 500 ms confirmed or advanced startup evidence");
-      unchanged(once, "duplicate retained mask was dispatched/mapped twice");
-      source.now_ms = 110000 + alpha_startup_window_ms;
-      require(exact(render(retained), off), "one retained input incorrectly qualified a stable startup interval");
-      unchanged(once, "retained-only startup continued monitoring after deadline");
-    }
-    {
-      alpha_auto_policy policy(130000); begin(policy, 130000);
-      source.retained = true;
-      auto retained = gpu.retain_mask(selective);
-      sample(full, 130100, covered, retained);
-      retained = gpu.retain_mask(selective);
-      sample(full, 130600, covered, retained, false);
-      const auto stopped = gpu.renderer.alpha_probe_activity();
-      source.now_ms = 130700;
-      require(exact(render(retained), selective_on), "startup detector used presented alpha instead of retained input");
-      unchanged(stopped, "retained qualified startup continued GPU monitoring");
-    }
-    {
-      alpha_auto_policy policy(150000); begin(policy, 150000);
-      sample(selective, 150100, covered);
-      source.now_ms = source.tick_ms = 150300; ++source.sequence;
-      gpu.pattern(full, true); render();
-      const auto pending = gpu.renderer.alpha_probe_activity();
-      policy.set_manual(true); source.now_ms = 150301;
-      require(exact(render(), full_on), "manual On during startup did not apply immediately");
-      policy.set_manual(false);
-      require(exact(render(), off), "manual Off during startup did not apply immediately");
-      unchanged(pending, "manual override mapped/submitted a pending startup observation");
-    }
-    {
-      constexpr std::uint64_t cadence_start = 200000;
-      alpha_auto_policy policy(cadence_start); begin(policy, cadence_start);
-      const auto queued = [&](const std::vector<float> &alpha, std::uint64_t offset,
-                              std::uint64_t count, bool monitoring = true) {
-        const auto before = gpu.renderer.alpha_probe_activity();
-        sample(alpha, cadence_start + offset, count, {}, monitoring);
-        const auto after = gpu.renderer.alpha_probe_activity();
-        require(after.submitted == before.submitted + 1 && after.mapped == before.mapped + 1,
-          "alpha cadence did not queue and map exactly one eligible observation");
-      };
-      const auto throttled = [&](std::uint64_t offset, std::uint64_t interval) {
-        source.now_ms = source.tick_ms = cadence_start + offset; ++source.sequence;
-        gpu.pattern(full, true);
-        const auto before = gpu.renderer.alpha_probe_activity();
-        require(exact(render(), off) && exact(render(), off), "throttled opaque alpha changed UI");
-        require(gpu.renderer.consumed_alpha_auto().probe_interval_ms == interval,
-          "renderer consumed the wrong alpha probe interval");
-        unchanged(before, "alpha cadence admitted a probe before its next interval");
-      };
-      queued(full, 0, pixels);
-      throttled(99, 100);
-      queued(full, 100, pixels);
-      queued(full, alpha_initial_window_ms - 100, pixels);
-      throttled(alpha_initial_window_ms, 1000);
-      throttled(alpha_initial_window_ms + 899, 1000);
-      queued(full, alpha_initial_window_ms + 900, pixels);
-      queued(selective, alpha_initial_window_ms + 1900, covered);
-      require(gpu.renderer.consumed_alpha_auto().probe_interval_ms == 100,
-        "selective evidence at sparse cadence did not request fast confirmation");
-      queued(full, alpha_initial_window_ms + 2000, pixels);
-      require(gpu.renderer.consumed_alpha_auto().probe_interval_ms == 1000,
-        "failed selective candidate did not resume one-probe-per-second monitoring");
-      throttled(alpha_initial_window_ms + 2999, 1000);
-      queued(full, alpha_initial_window_ms + 3000, pixels);
-      queued(selective, alpha_initial_window_ms + 4000, covered);
-      queued(selective, alpha_initial_window_ms + 4100, covered);
-      queued(selective, alpha_initial_window_ms + 4400, covered);
-      queued(selective, alpha_initial_window_ms + 4500, covered, false);
-      require(!gpu.renderer.consumed_alpha_auto().probe_interval_ms,
-        "confirmed sparse-phase candidate retained an active probe interval");
-      const auto stopped = gpu.renderer.alpha_probe_activity();
-      source.now_ms = cadence_start + alpha_startup_window_ms; gpu.pattern(full, true);
-      require(exact(render(), full_on), "confirmed sparse-phase choice was lost at five minutes");
-      unchanged(stopped, "confirmed sparse-phase choice resumed monitoring at the final deadline");
-    }
-    {
-      constexpr std::uint64_t fg_start = 300000;
-      alpha_auto_policy policy(fg_start); begin(policy, fg_start); source.retained = true;
-      auto retained = gpu.retain_mask(full);
-      sample(full, fg_start + alpha_initial_window_ms, pixels, retained);
-      for (unsigned second = 1; second <= 2; ++second) {
-        const auto before = gpu.renderer.alpha_probe_activity();
-        source.now_ms = fg_start + alpha_initial_window_ms + (second - 1) * 1000 + 251;
-        require(exact(render(), off) && gpu.renderer.consumed_alpha_auto().window_start_ms == fg_start,
-          "expired retained FG alpha changed stereo or restarted sparse detection");
-        unchanged(before, "missing retained FG input dispatched or mapped an observation");
-        retained = gpu.retain_mask(second == 2 ? selective : full);
-        sample(full, fg_start + alpha_initial_window_ms + second * 1000,
-          second == 2 ? covered : pixels, retained);
+      // Switching from selective directly to opaque/empty tests current-frame
+      // rejection: yesterday's valid UI may not flatten today's whole scene.
+      for (const unsigned mask : {1u, 0u, 2u, 1u}) {
+        const auto retained = kind ? gpu.retain_mask(masks[mask]) : api::resource_view{};
+        gpu.pattern(masks[mask], true);
+        verify(mask, retained);
       }
-      require(gpu.renderer.consumed_alpha_auto().probe_interval_ms == 100,
-        "fresh selective FG input after a stale gap did not enter fast confirmation");
-      for (unsigned step = 1; step <= 5; ++step) {
-        retained = gpu.retain_mask(selective);
-        sample(full, fg_start + alpha_initial_window_ms + 2000 + step * 100, covered, retained, step != 5);
-      }
-      const auto stopped = gpu.renderer.alpha_probe_activity();
-      source.now_ms = fg_start + alpha_initial_window_ms + 3000;
-      require(exact(render(), off) && gpu.renderer.consumed_alpha_auto().enabled,
-        "missing retained input erased the confirmed FG choice or consumed current output alpha");
-      retained = gpu.retain_mask(full);
-      require(exact(render(retained), full_on), "confirmed FG choice did not resume with eligible retained alpha");
-      unchanged(stopped, "confirmed FG choice resumed monitoring after retained-input availability changed");
     }
-    // No session pointer means deterministic explicit/replay interpretation.
-    gpu.pattern(full, true);
-    require(exact(gpu.render(true, 1), full_on), "startup policy leaked into explicit full-alpha replay");
+    if (gpu.color == 2) {
+      source.retained = source.dedicated_mask = false;
+      for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
+          std::numeric_limits<float>::infinity(), -1.f, 2.f}) {
+        auto malformed = masks[1]; malformed.front() = invalid;
+        gpu.pattern(malformed, true);
+        source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+        require(exact(gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, &source), off[1]),
+          "Automatic alpha accepted nonfinite or out-of-range input as a valid UI mask");
+      }
+    }
+    // A usable retained candidate wins over unusable presented alpha, while
+    // its unrelated historical RGB must never enter the current picture.
+    source.retained = source.dedicated_mask = true;
+    const auto selective = gpu.retain_mask(masks[1]);
+    gpu.pattern(masks[0], true);
+    source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+    require(exact(gpu.render(true, 1, false, false, true, selective, {}, {}, nullptr, &source), on[1]),
+      "Automatic retained UI lost precedence or replaced current RGB");
+    policy.set_manual(false);
+    require(exact(gpu.render(true, 1, false, false, true, selective, {}, {}, nullptr, &source), off[0]) &&
+        gpu.renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off,
+      "Manual Off did not suppress automatically detected retained UI");
+    policy.set_automatic(source.now_ms);
+    require(exact(gpu.render(true, 1, false, false, true, selective, {}, {}, nullptr, &source), on[1]),
+      "Returning to Auto required review or lost an available selective mask");
+    source.retained = source.dedicated_mask = false;
+    gpu.renderer.reset_after_runtime_drain();
+    require(gpu.renderer.configure(observed_runtime, {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())},
+      static_cast<api::color_space>(gpu.color)), "recreate renderer for automatic source");
+    gpu.pattern(masks[1], true); verify(1, {});
+    for (unsigned mask = 0; mask != masks.size(); ++mask) {
+      gpu.pattern(masks[mask], true);
+      require(exact(gpu.render(true, 1), on[mask]), "Automatic detection changed explicit replay rendering");
+    }
+    report << "automatic-ui D3D11 current_captured_dedicated=1 full_scene_rejected=1 empty_rejected=1 selective_without_review=1 immediate_bad_frame_rejection=1 resolved_gpu_mask_checked=1 current_RGB_preserved=1 renderer_recreation=1 manual_off_wins=1 explicit_field_and_sbs_parity=1\n";
+    std::puts("PASS D3D11 automatic UI: full-scene/empty rejected immediately, selective exact field/SBS without review, current RGB and manual Off preserved");
+  }
+  void verify_automatic_hudless(fixture &gpu, std::ostream &report) {
+    using namespace sunshine_game3d;
+    const auto pixels = size_t(gpu.width) * gpu.height;
+    std::vector<float> mask(pixels, 0.f), empty(pixels, 0.f);
+    for (unsigned y = gpu.height / 4; y < gpu.height * 3 / 4; ++y)
+      for (unsigned x = gpu.width / 3; x < gpu.width / 2; ++x) mask[size_t(y) * gpu.width + x] = 1.f;
+    const auto bpp = gpu.color == 2 ? 8u : 4u;
+    const auto opaque = [&](std::vector<unsigned char> &bytes) {
+      for (size_t i = 0; i != pixels; ++i) {
+        if (gpu.color == 2) { const auto one = half_bits(1.f); std::memcpy(bytes.data() + i * bpp + 6, &one, 2); }
+        else bytes[i * bpp + 3] = 255;
+      }
+    };
+    gpu.pattern(empty); auto hudless = gpu.original; opaque(hudless);
+    gpu.pattern(empty, false, 13); auto moved_scene = gpu.original; opaque(moved_scene);
+    gpu.pattern(mask); const auto protected_reference = gpu.render(true, 1);
+    const auto off_reference = gpu.render(false, 1);
+    auto final_color = gpu.original; opaque(final_color);
+    require(protected_reference.field.bytes != off_reference.field.bytes &&
+        protected_reference.output.bytes != off_reference.output.bytes,
+      "HUDless fixture did not exercise a visible HUD protection change");
+
+    std::vector<ComPtr<ID3D11Texture2D>> textures;
+    std::vector<ComPtr<ID3D11ShaderResourceView>> views;
+    const auto color_view = [&](const std::vector<unsigned char> &bytes) {
+      D3D11_TEXTURE2D_DESC desc{}; gpu.source->GetDesc(&desc); desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      D3D11_SUBRESOURCE_DATA data{bytes.data(), gpu.width * bpp, 0};
+      ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> view;
+      checked(gpu.device->CreateTexture2D(&desc, &data, &texture), "HUDless candidate texture");
+      checked(gpu.device->CreateShaderResourceView(texture.Get(), nullptr, &view), "HUDless candidate view");
+      const api::resource_view result{reinterpret_cast<std::uint64_t>(view.Get())};
+      textures.push_back(std::move(texture)); views.push_back(std::move(view)); return result;
+    };
+    const auto red_view = [&](const std::vector<float> &values) {
+      D3D11_TEXTURE2D_DESC desc{}; gpu.source->GetDesc(&desc);
+      desc.Format = DXGI_FORMAT_R32_FLOAT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      D3D11_SUBRESOURCE_DATA data{values.data(), gpu.width * unsigned(sizeof(float)), 0};
+      ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> view;
+      checked(gpu.device->CreateTexture2D(&desc, &data, &texture), "UI alpha candidate texture");
+      checked(gpu.device->CreateShaderResourceView(texture.Get(), nullptr, &view), "UI alpha candidate view");
+      const api::resource_view result{reinterpret_cast<std::uint64_t>(view.Get())};
+      textures.push_back(std::move(texture)); views.push_back(std::move(view)); return result;
+    };
+    const auto correct = color_view(hudless), shifted = color_view(moved_scene), flattened_ui = color_view(final_color);
+    const auto explicit_alpha = red_view(mask), opaque_alpha = red_view(std::vector<float>(pixels, 1.f));
+    gpu.original = final_color;
+    gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), gpu.width * bpp, 0);
+    const auto exact = [](const result &a, const result &b) {
+      return a.field.bytes == b.field.bytes && a.output.bytes == b.output.bytes;
+    };
+    require(exact(gpu.render(false, 1), off_reference), "Opaque final alpha changed the unprotected RGB reference");
+    alpha_auto_policy policy;
+    alpha_auto_source source;
+    source.session = &policy; source.now_ms = source.tick_ms = 1000;
+    source.epoch = 29; source.revision = 1; source.sequence = 1;
+    ui_render_input ui;
+    ui.kind = ui_input_kind::hudless_difference; ui.view = correct; ui.automatic = &source;
+    const auto run = [&](bool accepted, const char *label, bool inspect_mask = true) {
+      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+      const auto actual = gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      require(exact(actual, accepted ? protected_reference : off_reference),
+        std::string(label) + ": HUDless detection changed RGB, missed HUD or flattened mismatched scene");
+      if (inspect_mask) {
+        const auto resource = gpu.renderer.diagnostics().ui_source;
+        require(resource.handle, std::string(label) + ": missing resolved GPU mask");
+        const auto selected = gpu.read(resource);
+        require(selected.format == DXGI_FORMAT_R32_FLOAT, "HUDless diagnostic is not an R32 mask");
+        for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
+          const auto value = selected.channel(x, y, 0);
+          const bool wanted = accepted && mask[size_t(y) * gpu.width + x] > 0.f;
+          require(std::isfinite(value) && value >= 0.f && value <= 1.f && (value > 0.f) == wanted,
+            std::string(label) + ": resolved mask does not match the visible HUD difference");
+        }
+      }
+    };
+    run(true, "matching final/HUDless");
+    ui.view = shifted;
+    run(false, "scene-wide camera shift after a good pair");
+    ui.view = flattened_ui;
+    run(false, "identical final/HUDless has no separator");
+    ui.view = correct;
+    run(true, "matching pair recovers automatically");
+    // Reproduce the useful part of Hogwarts' discovery: a transport-valid
+    // UIColorAndAlpha can be an opaque full scene. Continue to HUDless in the
+    // same frame instead of letting that unusable higher candidate win.
+    ui_detection_inputs inputs;
+    inputs.masks[1] = flattened_ui; inputs.hudless = correct; inputs.current_color = true;
+    ui.detection = &inputs;
+    run(true, "flattened explicit UI falls through to HUDless");
+    inputs.hudless = shifted;
+    run(false, "all candidates unsuitable");
+    inputs.masks[0] = explicit_alpha;
+    run(true, "explicit single-channel alpha wins over unsuitable color inputs");
+    inputs.masks[0] = opaque_alpha;
+    run(false, "full-scene explicit alpha cannot override unsuitable inputs");
+    inputs.hudless = correct;
+    run(true, "full-scene explicit alpha falls through to HUDless");
+    inputs.masks[0] = {};
+    policy.set_manual(false);
+    run(false, "manual Off wins over a valid pair", false);
+    require(gpu.renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off,
+      "HUDless detection changed the user's manual Off setting");
+    policy.set_automatic(source.now_ms);
+    run(true, "Auto resumes without review");
+    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
+    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback and manual Off without review");
+  }
+  void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
+    using namespace sunshine_game3d;
+    std::vector<float> selective(size_t(gpu.width) * gpu.height, 0.f);
+    for (unsigned y = gpu.height / 4; y < gpu.height * 3 / 4; ++y)
+      for (unsigned x = gpu.width / 3; x < gpu.width / 2; ++x)
+        selective[size_t(y) * gpu.width + x] = 1.f;
+    const auto retained = gpu.retain_mask(std::vector<float>(selective.size(), 0.f));
     gpu.pattern(selective, true);
-    require(exact(gpu.render(true, 1), selective_on), "startup policy leaked into explicit selective replay");
-    report << "startup-alpha exact_gpu_counts=1 delayed_first_source=1 ineligible_manual_do_not_start=1 provisional_on=1 zero_full_interrupt=1 confirmation_500ms=1 fast_60s_then_1hz=1 fixed_5min_window=1 scope_resets_candidate=1"
-      " post_confirmation_and_deadline_dispatch_and_map=0 pending_deadline_discard=1 renderer_recreation=1 retained_identity=1 manual_override=1 explicit_replay=1" << std::endl;
-    std::puts("PASS startup alpha: exact GPU coverage, provisional UI, 500ms confirmation, zero later dispatch/map, retained identity and manual/replay overrides");
+    const auto protected_pixels = gpu.render(true, 1);
+    const auto unprotected_pixels = gpu.render(false, 1);
+    require(protected_pixels.field.bytes != unprotected_pixels.field.bytes,
+      "Normalized UI input fixture must distinguish protected and unprotected geometry");
+
+    render_frame_input frame;
+    frame.color = {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())};
+    frame.depth = {reinterpret_cast<std::uint64_t>(gpu.depth_view.Get())};
+    frame.scene = gpu.renderer.consumed_parameters();
+    const auto verify = [&](const result &expected, bool enabled) {
+      gpu.context->CopyResource(gpu.backbuffer.Get(), gpu.source.Get());
+      auto *queue = observed_runtime->get_command_queue();
+      require(gpu.renderer.render(queue->get_immediate_command_list(), frame),
+        "Normalized UI input render was rejected");
+      queue->flush_immediate_command_list();
+      gpu.renderer.finish_present();
+      gpu.drain_render();
+      require(gpu.renderer.consumed_source_alpha_ui() == enabled &&
+          gpu.read(gpu.renderer.diagnostics().final_field).bytes == expected.field.bytes &&
+          gpu.read(gpu.renderer.output()).bytes == expected.output.bytes,
+        "Normalized UI kind selected a different alpha source or changed pixels");
+    };
+    require(!frame.ui.available(), "Default UI input is unexpectedly available");
+    verify(unprotected_pixels, false);
+    frame.ui.view = retained;
+    require(!frame.ui.available(), "A stray view enabled explicitly unavailable UI input");
+    verify(unprotected_pixels, false);
+    for (const auto kind : {ui_input_kind::captured_color_alpha, ui_input_kind::dedicated_mask}) {
+      frame.ui.kind = kind;
+      frame.ui.view = {};
+      require(!frame.ui.available(), "Missing captured view fell back to current color alpha");
+      verify(unprotected_pixels, false);
+      frame.ui.view = retained;
+      require(frame.ui.available(), "Completed captured mask was not available");
+      verify(unprotected_pixels, true); // The retained mask is empty; current alpha is selective.
+    }
+    frame.ui.kind = ui_input_kind::current_color_alpha;
+    frame.ui.view = {};
+    require(frame.ui.available(), "Explicit current color requires an unrelated captured view");
+    verify(protected_pixels, true);
+    frame.ui.view = retained;
+    verify(protected_pixels, true); // Source kind, not stray view presence, owns selection.
+    report << "normalized-ui-input current_explicit=1 captured_missing_no_fallback=1 unavailable_view_ignored=1 current_view_ignored=1 exact_pixels=1\n";
+    std::puts("PASS normalized UI input: explicit current alpha, captured-view availability, no implicit fallback and exact pixels");
   }
   void verify_mask_upload_recovery(fixture &gpu) {
     const auto previous = gpu.read(gpu.renderer.ui_source());
@@ -1947,6 +1907,8 @@ int main(int argc, char **argv) {
     verify_adaptive_ui_plane(gpu, report, directory / "adaptive-ui-plane-dump");
     verify_retained_fg_alpha(gpu, report, directory / "retained-alpha-dump");
     verify_automatic_source_alpha(gpu, report);
+    verify_automatic_hudless(gpu, report);
+    verify_normalized_ui_input(gpu, report);
     verify_mask_upload_recovery(gpu);
     require(report.good(), "cannot write evidence");
     std::printf("PASS actual D3D11 source-alpha renderer %ux%u color=%u; no FX or visible window\n", gpu.width, gpu.height, color);

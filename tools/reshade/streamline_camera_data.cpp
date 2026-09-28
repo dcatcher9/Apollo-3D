@@ -153,7 +153,7 @@ namespace sunshine_streamline {
 
   match_status match(const camera_key &camera, const depth_tag &tag) {
     if (!tag.native_resource) return match_status::missing_resource;
-    if (tag.type != 0 && tag.type != 48) return match_status::not_depth;
+    if (tag.type != 0 && tag.type != 48 && tag.type != 49) return match_status::not_depth;
     if (camera.viewport != tag.viewport) return match_status::wrong_viewport;
     if (!camera.observation_epoch || camera.observation_epoch != tag.observation_epoch)
       return match_status::stale_epoch;
@@ -203,7 +203,7 @@ namespace sunshine_streamline {
       case match_status::exact_frame: return "explicit-frame-match";
       case match_status::same_epoch_only: return "same-observation-epoch-frame-unverified";
       case match_status::missing_resource: return "missing-resource";
-      case match_status::not_depth: return "not-projection-depth";
+      case match_status::not_depth: return "not-depth";
       case match_status::wrong_viewport: return "wrong-viewport";
       case match_status::stale_epoch: return "stale-observation-epoch";
       case match_status::wrong_frame: return "wrong-frame";

@@ -5,6 +5,7 @@
 #include "game3d_ui_capture.h"
 #include "scene_gain.h"
 #include "src/game3d_debug_protocol.h"
+#include "src/game3d_debug_formats.h"
 
 #include <array>
 #include <cmath>
@@ -54,21 +55,7 @@ namespace sunshine_game3d {
     };
 
     unsigned pixel_bytes(DXGI_FORMAT format) {
-      switch (format) {
-        case DXGI_FORMAT_R8G8B8A8_UNORM:
-        case DXGI_FORMAT_B8G8R8A8_UNORM:
-        case DXGI_FORMAT_R10G10B10A2_UNORM:
-        case DXGI_FORMAT_R32_FLOAT:
-        case DXGI_FORMAT_R16G16_FLOAT:
-          return 4;
-        case DXGI_FORMAT_R16G16B16A16_FLOAT:
-        case DXGI_FORMAT_R32G32_FLOAT:
-          return 8;
-        case DXGI_FORMAT_R32G32B32A32_FLOAT:
-          return 16;
-        default:
-          return 0;
-      }
+      return wire::pixel_bytes(static_cast<unsigned>(format));
     }
 
     template<class T> std::string parameter_hex(const T &parameters) {
@@ -129,9 +116,24 @@ namespace sunshine_game3d {
       }
       result["source_alpha_ui_requested"] = f.source_alpha_decision.requested;
       result["source_alpha_input_state"] = name(f.source_alpha_decision.input_state);
+      const auto &review = f.source_alpha_decision.qualification;
+      const auto &scope = review.candidate;
+      result["ui_source_detection"] = {
+        {"selected", ui_qualification::name(review.selected)}, {"source", ui_qualification::name(scope.source)},
+        {"revision", review.token}, {"available", review.available}, {"automatic", true},
+        {"scope", {{"runtime", scope.runtime}, {"device", scope.device}, {"provider", scope.provider},
+          {"source_id", scope.source_id}, {"epoch", scope.epoch}, {"revision", scope.revision}, {"viewport", scope.viewport},
+          {"fg_known", scope.fg_known}, {"fg_enabled", scope.fg_enabled}, {"fg_automatic", scope.fg_automatic},
+          {"fg_generated_frames", scope.fg_generated_frames}, {"semantic_contract", scope.semantic_contract},
+          {"output_width", scope.output_width}, {"output_height", scope.output_height}, {"output_format", scope.output_format},
+          {"color_space", scope.color_space}, {"mask_width", scope.mask_width}, {"mask_height", scope.mask_height},
+          {"mask_format", scope.mask_format}, {"channel", scope.channel},
+          {"left", scope.left}, {"top", scope.top}, {"width", scope.width}, {"height", scope.height}}},
+        {"meaning", "Automatic source discovery; no human approval. Availability and current GPU selection are separate. Candidate metadata identifies inspected inputs; asynchronous status does not label the exact current-frame winner. Replay uses the frozen resolved mask."}};
       result["source_alpha_capture_attempt"] = f.ui_capture_attempt_metadata.empty() ? json(nullptr) :
         json::parse(f.ui_capture_attempt_metadata);
-      result["source_alpha_ui_status"] = f.source_alpha_ui ? (external_ui ? "captured_pre_fg_alpha" : "present_alpha") :
+      result["source_alpha_ui_status"] = f.source_alpha_ui ?
+        (f.source_alpha_decision.mode == source_alpha_mode::automatic ? "automatic_gpu_mask" : external_ui ? "captured_alpha" : "present_alpha") :
         f.source_alpha_decision.blocked_by_fg() ? "unavailable_fg_output_alpha" :
         f.source_alpha_decision.automatic ? name(f.source_alpha_decision.coverage.state) : "disabled";
       if (f.source_alpha_decision.automatic) {
@@ -140,20 +142,22 @@ namespace sunshine_game3d {
           {"window_started", coverage.window_started}, {"window_start_ms", coverage.window_start_ms}, {"probe_interval_ms", coverage.probe_interval_ms}, {"accepted_samples", coverage.accepted_samples},
           {"covered_pixels", coverage.covered}, {"total_pixels", coverage.pixels},
           {"sample_sequence", coverage.sample_sequence}, {"sample_tick_ms", coverage.sample_tick_ms},
-          {"meaning", "Detection starts with the first eligible alpha probe, not process creation, or follows an explicit manual choice. It probes frequently for one minute, then once per second until five minutes total. Selective alpha enables protection provisionally and resumes frequent probing; 500 ms of sustained evidence confirms On and stops monitoring. Without confirmation, the five-minute deadline fixes Off. Manual choices also stop monitoring. A retained choice is not ongoing semantic validation. Replay uses source_alpha_ui without rerunning detection."}};
+          {"sampled_source", coverage.source_kind},
+          {"meaning", "Auto selects and validates current-frame candidates on the GPU without review. These bounded asynchronous statistics describe a completed earlier detection sample and never authorize current pixels. ui_source_color contains the actual resolved red-channel mask for this frame, possibly empty. Replay uses that frozen mask without rerunning detection."}};
       }
       const auto &fg = f.source_alpha_decision.fg;
       result["source_alpha_ui_fg_mode"] = {{"known", fg.known}, {"enabled", fg.enabled},
         {"automatic", fg.automatic}, {"generated_frames", fg.generated_frames}, {"epoch", fg.epoch},
         {"sequence", fg.sequence}, {"viewport", fg.viewport},
         {"meaning", "Last confirmed game-requested FG mode, retained during transient observation loss. Independent of selected depth; does not identify this presentation as real or generated."}};
-      const auto ui = ui_parameter_words(f.source_alpha_ui, f.ui_plane);
-      result["ui_parameter_abi"] = fraction_mode ? "sunshine_game3d.ui_parameters.v6" : shallow_mode ? "sunshine_game3d.ui_parameters.v5" : front_mode ? "sunshine_game3d.ui_parameters.v4" : nearest_mode ? "sunshine_game3d.ui_parameters.v3" : "sunshine_game3d.ui_parameters.v2";
+      const auto ui = ui_parameter_words(f.source_alpha_ui, f.ui_plane, f.ui_channel);
+      result["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v7";
       result["ui_parameter_bytes"] = sizeof(ui);
       result["ui_parameter_hex"] = parameter_hex(ui);
-      result["ui_parameter_encoding"] = fraction_mode ? "little-endian exact b1 bytes: uint32 enabled, uint32 mode, IEEE754 float32 resolved front-limit fraction, uint32 reserved zero" :
-        "little-endian exact b1 bytes: uint32 enabled, uint32 mode, IEEE754 float32 inverse depth, uint32 reserved zero";
+      result["ui_parameter_encoding"] = fraction_mode ? "little-endian exact b1 bytes: uint32 enabled, uint32 mode, IEEE754 float32 resolved front-limit fraction, uint32 mask channel (0=alpha,1=red)" :
+        "little-endian exact b1 bytes: uint32 enabled, uint32 mode, IEEE754 float32 inverse depth, uint32 mask channel (0=alpha,1=red)";
       result["ui_constant_binding"] = {{"register", "b1"}, {"uint32", ui},
+        {"mask_channel", f.ui_channel == ui_mask_channel::red ? "red" : "alpha"},
         {"mode", static_cast<std::uint32_t>(f.ui_plane.mode)},
         {"mode_name", f.ui_plane.mode == ui_plane_mode::screen ? "screen" : f.ui_plane.mode == ui_plane_mode::depth_midpoint ? "depth_midpoint" :
           nearest_mode ? "depth_midpoint_nearest_ui" : front_mode ? "front_limit" : shallow_mode ? "shallow_front" : fraction_mode ? "display_fraction" : "unknown"},
@@ -214,7 +218,7 @@ namespace sunshine_game3d {
         {"artifact_semantics", {{"source_color", f.color == api::color_space::hdr10_pq ? "Unmodified game color: ST.2084 PQ, Rec.2020 primaries, encoded absolute luminance." : f.color == api::color_space::scrgb ? "Unmodified game color: linear scRGB, Rec.709 primaries, 1.0 = 80 nits; negative and greater-than-one values preserved." :
                                                                                                                                                                                                                      "Unmodified game color: encoded sRGB SDR, Rec.709 primaries."},
                                 {"linear_color", "Optional PQ-decoded game color: linear scRGB, Rec.709 primaries, 1.0 = 80 nits."},
-                                {"raw_depth", "Full allocation of unfiltered float32 hardware depth. Active rectangle and encoding belong to consumed_depth; no normalization or clamp applied."},
+                                {"raw_depth", "Full allocation of unfiltered float32 depth samples. Device or linear-distance encoding and active rectangle belong to consumed_depth; no normalization or clamp applied."},
                                 {"candidate", "Signed full-source-U parallax before spatial conditioning."},
                                 {"vertical_majorant", "Signed full-source-U vertical upper envelope of candidate parallax."},
                                 {"vertical_field", "Signed full-source-U field after fixed vertical envelope blending."},
@@ -236,7 +240,7 @@ namespace sunshine_game3d {
                             {"source_frame_numeric", provided.source_frame_numeric},
                             {"source_frame_has_numeric", provided.source_frame_has_numeric},
                             {"source_frame_explicit", provided.source_frame_explicit},
-                            {"projection", {{"supplied", d.projection.supplied}, {"epoch", d.projection.epoch}, {"viewport", d.projection.viewport}, {"A", d.projection.A}, {"B", d.projection.B}, {"raw_scale", d.projection.raw_scale}, {"raw_bias", d.projection.raw_bias}}},
+                            {"projection", {{"supplied", d.projection.supplied}, {"encoding", d.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance ? "linear_distance" : "device"}, {"epoch", d.projection.epoch}, {"viewport", d.projection.viewport}, {"A", d.projection.A}, {"B", d.projection.B}, {"raw_scale", d.projection.raw_scale}, {"raw_bias", d.projection.raw_bias}}},
                             {"jitter", {{"supplied", provided.jitter.supplied}, {"x", provided.jitter.x}, {"y", provided.jitter.y}, {"width", provided.jitter.width}, {"height", provided.jitter.height}}},
                             {"raw_depth_encoding", "unfiltered Texture2D.Load of the consumed depth SRV, float32; no calibration, crop, jitter compensation or clamp"}}}
       };
@@ -247,7 +251,7 @@ namespace sunshine_game3d {
       if (f.source_alpha_ui && f.resources.ui_source.handle) {
         result["ui_source_allocation"] = allocation_json(device->get_resource_desc(f.resources.ui_source));
         result["ui_source"] = f.ui_source_metadata.empty() ? nlohmann::json::object() : nlohmann::json::parse(f.ui_source_metadata);
-        result["artifact_semantics"]["ui_source_color"] = "Exact full RGBA texture consumed as horizontal-pass UI alpha; RGB is diagnostic only and never replaces current source_color for eye rendering. This does not prove same-game-frame pairing.";
+        result["artifact_semantics"]["ui_source_color"] = "Exact typed texture consumed for UI coverage. b1 word3 selects alpha (RGBA) or red (single-channel mask). Other channels never replace current source_color for eye rendering. This does not prove same-game-frame pairing.";
       }
       if (d.ready && d.shader_resource.handle) {
         const auto resource = device->get_resource_from_view(d.shader_resource);
@@ -275,11 +279,12 @@ namespace sunshine_game3d {
       }
       const auto &scale = f.scene_status.scale;
       const bool camera = scale.basis == automatic_scale_basis::camera_matrix;
+      const bool distance = camera || scale.basis == automatic_scale_basis::linear_distance;
       auto &state = result["render_scene_policy"];
-      state = {{"phase", static_cast<unsigned>(f.scene_status.phase)}, {"basis", camera ? "camera_matrix" : scale.basis == automatic_scale_basis::relative_depth ? "relative_depth" :
+      state = {{"phase", static_cast<unsigned>(f.scene_status.phase)}, {"basis", camera ? "camera_matrix" : distance ? "linear_distance" : scale.basis == automatic_scale_basis::relative_depth ? "relative_depth" :
                                                                                                                                                                    "unknown"},
                {"active", scale.active},
-               {"zero_plane_units", camera ? "game units, not necessarily meters" : "relative raw depth, not distance"},
+               {"zero_plane_units", distance ? "game units, not necessarily meters" : "relative raw depth, not distance"},
                {"applied_zero_inverse", p.convergence[1]},
                {"reference_zpd", p.convergence[0]}};
       state["current_scale"] = scale.has_value() ? nlohmann::json(scale.value) : nlohmann::json(nullptr);
@@ -299,7 +304,7 @@ namespace sunshine_game3d {
         {"pixel_count", scale.depth_pixel_count},
         {"tiles", {scale.depth_tiles_x, scale.depth_tiles_y}},
         {"sampling", scale.depth_pixel_count ? "all_active_pixels" : "legacy_point_fixture"},
-        {"units", camera ? "inverse game units" : "relative inverse depth"},
+        {"units", distance ? "inverse game units" : "relative inverse depth"},
         {"note", "Accepted scene-policy measurement for this captured rendering decision, not a new measurement of its pixels. Live Q, mean, second moment and bounds include every active-depth pixel. Larger q is nearer; these are not camera clipping planes. The uncentered mean_square_q is diagnostic and does not set gain. Centered moments determine the trial zero target. The UI may retain older values during a missing-depth hold when this decision has no statistics."}
       } : nlohmann::json(nullptr);
       state["zero_plane_policy"] = "trial contrast midpoint: b=qmin, d=q-b, q0 target=b+0.5*sum(d*d)/sum(d); stable centered full-pixel moments, fixtures without centered moments retain midpoint; exponential tracking bounded by abs(Knew*delta_q0/L)<=zero_budget_per_second*elapsed_seconds; no immediate applied-zero range clamp; positive flat depth targets b while holding gain, all-zero depth holds both";
@@ -310,13 +315,13 @@ namespace sunshine_game3d {
       state["ui_midpoint_inverse"] = scale.has_ui_midpoint ? nlohmann::json(scale.ui_midpoint_inverse) : nlohmann::json(nullptr);
       state["target_ui_midpoint_inverse"] = scale.has_ui_midpoint_target() ? nlohmann::json(scale.target_ui_midpoint_inverse) : nlohmann::json(nullptr);
       state["ui_midpoint_policy"] = "Live mode 5 consumes an independently resolved display fraction; midpoint, gain and zero do not directly place it. The independently smoothed inverse-depth midpoint target=(qmin+qmax)/2 remains diagnostic state. Historical mode 1 maps the submitted midpoint through current geometry; mode 2 uses it as a covered-depth floor; mode 3 uses the full positive display bound; mode 4 uses one quarter. Exact consumed mode and words are in replay b1; replay does not rerun adaptive history.";
-      state["zero_plane_at_infinity"] = scale.has_zero && camera && scale.zero_inverse == 0.f;
-      state["current_zero_plane"] = scale.has_zero && (!camera || scale.zero_inverse > 0.f) ?
-        nlohmann::json(camera ? 1.0 / scale.zero_inverse : double(scale.zero_inverse)) : nlohmann::json(nullptr);
+      state["zero_plane_at_infinity"] = scale.has_zero && distance && scale.zero_inverse == 0.f;
+      state["current_zero_plane"] = scale.has_zero && (!distance || scale.zero_inverse > 0.f) ?
+        nlohmann::json(distance ? 1.0 / scale.zero_inverse : double(scale.zero_inverse)) : nlohmann::json(nullptr);
       state["target_zero_inverse"] = scale.has_zero_target() ? nlohmann::json(scale.target_zero_inverse) : nlohmann::json(nullptr);
-      state["target_zero_plane_at_infinity"] = scale.has_zero_target() && camera && scale.target_zero_inverse == 0.;
-      state["target_zero_plane"] = scale.has_zero_target() && (!camera || scale.target_zero_inverse > 0.) ?
-        nlohmann::json(camera ? 1.0 / scale.target_zero_inverse : scale.target_zero_inverse) : nlohmann::json(nullptr);
+      state["target_zero_plane_at_infinity"] = scale.has_zero_target() && distance && scale.target_zero_inverse == 0.;
+      state["target_zero_plane"] = scale.has_zero_target() && (!distance || scale.target_zero_inverse > 0.) ?
+        nlohmann::json(distance ? 1.0 / scale.target_zero_inverse : scale.target_zero_inverse) : nlohmann::json(nullptr);
       state["conversion_scale"] = scale.projection_conversion_valid() ? nlohmann::json(scale.conversion_multiplier) : nlohmann::json(nullptr);
       state["conversion_offset"] = scale.projection_conversion_valid() ? nlohmann::json(scale.conversion_offset) : nlohmann::json(nullptr);
       // These observations are useful diagnostics, but are not the authority for

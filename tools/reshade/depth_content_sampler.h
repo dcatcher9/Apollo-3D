@@ -28,6 +28,7 @@ namespace sunshine_depth {
     // moment channel decodes depth; selector points and extrema stay raw.
     bool collect_moments = false;
     float moments_A = 0.f, moments_inverseB = 1.f;
+    sunshine_scene_depth::depth_encoding moments_encoding{sunshine_scene_depth::depth_encoding::device};
   };
 
   struct sample_result {

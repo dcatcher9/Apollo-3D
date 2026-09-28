@@ -299,6 +299,7 @@ namespace {
 #ifndef SUNSHINE_SAMPLER_BASELINE
       if (scenario) {
         if (x < 8 || x >= 72 || y < 5 || y >= 41) return std::numeric_limits<float>::quiet_NaN();
+        if (scenario == 4) return std::ldexp(1.f,int((x+3*y)%8));
         if (scenario == 3) return x == 8 && y == 5 ? .75f : 0.f;
         const float q = 1.f - std::ldexp(float((x + 3 * y) % 17), -24);
         return scenario == 2 ? 1.f - q : q;
@@ -341,6 +342,7 @@ namespace {
     if (scenario) {
       request.moments_A = scenario == 2 ? 1.f : 0.f;
       request.moments_inverseB = scenario == 2 ? -1.f : 1.f;
+      if (scenario == 4) request.moments_encoding=sunshine_scene_depth::depth_encoding::linear_distance;
     }
 #endif
     sunshine_depth::sample_t sample;
@@ -391,7 +393,7 @@ namespace {
       for (UINT x = request.x; x < request.x + request.width; ++x) {
         const float raw = raw_at(x, y);
         expected_min = std::min(expected_min, raw); expected_max = std::max(expected_max, raw);
-        const float q = (raw - request.moments_A) * request.moments_inverseB;
+        const float q = scenario==4 ? 1.f/raw : (raw - request.moments_A) * request.moments_inverseB;
         decoded.push_back(q);
         expected_sum += q;
         expected_squares += double(q) * q;
@@ -535,6 +537,70 @@ namespace {
       }
     }
     std::puts("PASS exact depth range: sparse endpoints, arbitrary finite raw domain, NaN/Inf rejection, crop/padding, uneven/tiny extents and unchanged optional point grid");
+  }
+
+  void run_linear_moments(ID3D11Device *device, ID3D11DeviceContext *context, ID3DBlob *shader) {
+    pipeline_cache_t cache;
+    int identity{};
+    const auto pipeline = cache.acquire(api::device_api::d3d11, reinterpret_cast<std::uint64_t>(device),
+      reinterpret_cast<api::effect_runtime *>(&identity), shader);
+    std::unique_ptr<sunshine_depth::sample_t> spare;
+    constexpr UINT width=96, height=64;
+    for (unsigned scenario=0; scenario!=5; ++scenario) {
+      sunshine_depth::sample_request request;
+      request.source_width=width; request.source_height=height;
+      request.x=7; request.y=3; request.width=80; request.height=50;
+      request.collect_range=request.collect_moments=true;
+      request.moments_encoding=sunshine_scene_depth::depth_encoding::linear_distance;
+      request.moments_A=scenario==3 ? 2.f : 0.f;
+      request.moments_inverseB=scenario==3 ? -2.f : 1.f;
+      std::vector<float> pixels(size_t(width)*height,NAN), decoded;
+      float expected_min=INFINITY, expected_max=-INFINITY;
+      double sum=0., squares=0.;
+      for (UINT y=0; y<request.height; ++y) for (UINT x=0; x<request.width; ++x) {
+        float distance=std::ldexp(1.f,int((x+y)%6));
+        if (scenario==4) distance*=1024.f;
+        if (scenario==2 || (scenario==1 && (x<12 || (x+y)%7==0)))
+          distance=(x%4)==0 ? 0.f : (x%4)==1 ? -1.f : (x%4)==2 ? INFINITY : NAN;
+        const float raw=request.moments_A+distance/request.moments_inverseB;
+        pixels[size_t(y+request.y)*width+x+request.x]=raw;
+        if (std::isfinite(distance) && distance>0.f) {
+          const float q=1.f/distance;
+          decoded.push_back(q); sum+=q; squares+=double(q)*q;
+          expected_min=std::min(expected_min,raw); expected_max=std::max(expected_max,raw);
+        }
+      }
+      D3D11_TEXTURE2D_DESC desc{};
+      desc.Width=width; desc.Height=height; desc.MipLevels=desc.ArraySize=1;
+      desc.Format=DXGI_FORMAT_R32_FLOAT; desc.SampleDesc.Count=1;
+      desc.Usage=D3D11_USAGE_DEFAULT; desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+      const D3D11_SUBRESOURCE_DATA initial{pixels.data(),width*sizeof(float),0};
+      com_ptr<ID3D11Texture2D> source;
+      checked(device->CreateTexture2D(&desc,&initial,source.put()),"Create linear-distance sampler source");
+      request.source={reinterpret_cast<std::uint64_t>(source.get())};
+      auto sample=sunshine_depth::take_sample(spare,pipeline);
+      sample->native_queue=reinterpret_cast<std::uint64_t>(context);
+      require(sunshine_depth::prepare11(*sample,request),"Prepare linear-distance sample");
+      context->ExecuteCommandList(sample->commands11.get(),TRUE);
+      wait_sample(*sample);
+      sunshine_depth::read_sample(*sample);
+      const auto &result=sample->result;
+      const auto &m=result.moments;
+      require(result.valid && m.supplied && m.encoding==request.moments_encoding && m.count==decoded.size(),
+        "Linear sample lost encoding or counted invalid/cropped-out texels");
+      require(result.range_valid==!decoded.empty() && m.valid==!decoded.empty(),
+        "Linear invalid pixels disabled usable distance or empty frame created calibration");
+      if (!decoded.empty()) {
+        require(result.range_min==expected_min && result.range_max==expected_max,
+          "Linear range included padding or invalid distances");
+        require(std::abs(m.sum-sum)<=sum*3e-5 && std::abs(m.sum_squares-squares)<=squares*3e-5,
+          "GPU linear reciprocal moments differ from independent distance oracle");
+        verify_centered_moments(m,decoded);
+      } else require(m.sum==0. && m.sum_squares==0. && m.center==0.,
+        "Empty linear sample retained previous numeric moments");
+      sample->clear_capture(); spare=std::move(sample);
+    }
+    std::puts("PASS linear-distance GPU moments: reciprocal units/storage, disjoint active crop, invalid pixel exclusion, all-invalid frame and scratch reuse");
   }
 
   void run_full_moments(ID3D11Device *device, ID3D11DeviceContext *context, ID3DBlob *shader) {
@@ -1084,6 +1150,7 @@ int main(int argc, char **argv) {
 #ifndef SUNSHINE_SAMPLER_BASELINE
     run_exact_range(device.get(), context.get(), shader.get());
     run_full_moments(device.get(), context.get(), shader.get());
+    run_linear_moments(device.get(), context.get(), shader.get());
 #endif
     pipeline_cache_t cache;
     int identity{};
@@ -1099,7 +1166,7 @@ int main(int argc, char **argv) {
     }
     require(run_d3d12(shader.get()).expired(), "Finished D3D12 sample retained retired program/device");
 #ifndef SUNSHINE_SAMPLER_BASELINE
-    for (unsigned scenario = 1; scenario <= 3; ++scenario)
+    for (unsigned scenario = 1; scenario <= 4; ++scenario)
       require(run_d3d12(shader.get(), scenario).expired(), "Centered D3D12 sample retained retired program/device");
 #endif
     run_repeated_samples(device.get(), context.get(), shader.get(), repeated_count);

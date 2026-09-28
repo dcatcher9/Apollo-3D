@@ -28,6 +28,7 @@ namespace {
   constexpr binding bindings[] = {
     {"SunshineGame3DConstants", D3D_SIT_CBUFFER, 0},
     {"SunshineUIConstants", D3D_SIT_CBUFFER, 1},
+    {"SunshineUIDetectionConstants", D3D_SIT_CBUFFER, 2},
     {"SunshineSourceSampler", D3D_SIT_TEXTURE, 0},
     {"DepthBuffer", D3D_SIT_TEXTURE, 1},
     {"SunshineLinearClamp", D3D_SIT_TEXTURE, 2},
@@ -38,6 +39,11 @@ namespace {
     {"SunshineEyeRightSampler", D3D_SIT_TEXTURE, 7},
     {"SunshineUIPlaneTilesSampler", D3D_SIT_TEXTURE, 8},
     {"SunshineUIPlaneResolvedSampler", D3D_SIT_TEXTURE, 9},
+    {"SunshineUIDetectionSampler", D3D_SIT_TEXTURE, 10},
+    {"SunshineUIDedicatedAlpha", D3D_SIT_TEXTURE, 11},
+    {"SunshineUIColorAlpha", D3D_SIT_TEXTURE, 12},
+    {"SunshineUIBackbufferAlpha", D3D_SIT_TEXTURE, 13},
+    {"SunshineHUDless", D3D_SIT_TEXTURE, 14},
     {"SunshineHostCandidateStore", D3D_SIT_UAV_RWTYPED, 0},
     {"SunshineHostVerticalMajorantStore", D3D_SIT_UAV_RWTYPED, 1},
     {"SunshineHostVerticalConditionedStore", D3D_SIT_UAV_RWTYPED, 2},
@@ -75,7 +81,11 @@ namespace {
     {"Sunshine_SourceAlphaUI", 0, 4, D3D_SVT_UINT},
     {"Sunshine_UIPlaneMode", 4, 4, D3D_SVT_UINT},
     {"Sunshine_UIPlaneInverseDepth", 8, 4, D3D_SVT_FLOAT},
-    {"Sunshine_UIReserved", 12, 4, D3D_SVT_UINT},
+    {"Sunshine_UIMaskChannel", 12, 4, D3D_SVT_UINT},
+  };
+  constexpr constant detection_constants[] = {
+    {"Sunshine_UICandidates", 0, 4, D3D_SVT_UINT},
+    {"Sunshine_UIDifferenceThreshold", 4, 4, D3D_SVT_FLOAT},
   };
 
   struct entry_point {
@@ -135,11 +145,12 @@ namespace {
       D3D11_SHADER_BUFFER_DESC description {};
       require(SUCCEEDED(buffer->GetDesc(&description)), "Constant-buffer reflection failed");
       const bool ui = std::string(description.Name) == "SunshineUIConstants";
-      require((ui && description.Size == 16) ||
+      const bool detection = std::string(description.Name) == "SunshineUIDetectionConstants";
+      require(((ui || detection) && description.Size == 16) ||
           (std::string(description.Name) == "SunshineGame3DConstants" && description.Size == 80),
-        "Native constants must retain the 80-byte b0 and 16-byte b1");
-      const constant *begin = ui ? std::begin(ui_constants) : std::begin(constants);
-      const constant *end = ui ? std::end(ui_constants) : std::end(constants);
+        "Native constants must retain the 80-byte b0 and 16-byte b1/b2");
+      const constant *begin = detection ? std::begin(detection_constants) : ui ? std::begin(ui_constants) : std::begin(constants);
+      const constant *end = detection ? std::end(detection_constants) : ui ? std::end(ui_constants) : std::end(constants);
       for (auto item = begin; item != end; ++item) {
         const auto &expected = *item;
         auto *variable = buffer->GetVariableByName(expected.name);
@@ -204,6 +215,9 @@ int main(int argc, char **argv) {
           entries.push_back({"SunshineUINearestReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIConflictCS", "cs_5_0", 8, 8, 1});
           entries.push_back({"SunshineApplyUICS", "cs_5_0", 32, 1, 1});
+          entries.push_back({"SunshineUIDetectionTilesCS", "cs_5_0", 8, 8, 1});
+          entries.push_back({"SunshineUIDetectionReduceCS", "cs_5_0", 1, 1, 1});
+          entries.push_back({"SunshineUIDetectionMaskCS", "cs_5_0", 8, 8, 1});
         }
         for (const auto &entry : entries) {
           compile(source, source_path.string(), directory, width, height, color, entry, manifest);

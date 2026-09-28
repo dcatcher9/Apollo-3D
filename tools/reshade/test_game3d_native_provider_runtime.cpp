@@ -5,6 +5,8 @@
 #define SUNSHINE_DIRECT_RUNTIME_FIXTURE_ONLY
 #include "test_streamline_direct_runtime.cpp"
 #include "game3d_controls.h"
+#include "../../src/game3d_debug_protocol.h"
+#include <nlohmann/json.hpp>
 
 namespace {
   struct native_provider_fixture : direct_fixture {
@@ -137,6 +139,343 @@ namespace {
       std::puts("PASS native SL provider: real lower-resolution UAV/copy/fences/sampling over full-resolution Generic decoy, matrix scale, FX reload, failed evaluation and recovery; no FX");
     }
 
+    void run_ui_hook(const std::function<void()> &real_frame,
+        sunshine_streamline::abi_v2::frame_token *&token,
+        const sunshine_streamline::abi_v2::viewport &viewport,
+        sunshine_streamline::abi_v2::set_tag_for_frame frame_tag,
+        sunshine_streamline::abi_v2::set_tag global_tag,
+        std::uint32_t resource_type) {
+      using namespace sunshine_streamline;
+      namespace dump = ::game3d_debug;
+      const auto hook_directory = runtime_directory / ("ui-hook-type-" + std::to_string(resource_type));
+      std::filesystem::create_directories(hook_directory);
+      // At-call ownership must freeze this mask before the game reuses its
+      // allocation. Only the public SDK tag is offered to the loaded add-on.
+      com_ptr<ID3D12Resource> mask, before_upload, after_upload;
+      D3D12_RESOURCE_DESC desc{};
+      desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      desc.Width = width; desc.Height = height;
+      desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+      desc.Format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+      const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+      checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(mask.put())), "Create tagged BGRA allocation");
+      std::vector<std::uint8_t> expected(size_t(width) * height * 4), overwritten(expected.size());
+      unsigned covered{};
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const auto offset = (size_t(y) * width + x) * 4;
+        const bool ui = x >= width / 3 && x < width / 2 && y >= height / 4 && y < height * 3 / 4;
+        const std::uint8_t levels[]{1, 64, 255}; covered += ui;
+        expected[offset] = static_cast<std::uint8_t>((x * 3 + y * 7 + 17) & 255);
+        expected[offset + 1] = static_cast<std::uint8_t>((x * 11 + y * 5 + 31) & 255);
+        expected[offset + 2] = static_cast<std::uint8_t>((x * 19 + y * 13 + 47) & 255);
+        expected[offset + 3] = ui ? levels[(x + y) % 3] : 0;
+        for (unsigned c = 0; c < 3; ++c) overwritten[offset + c] = 255 - expected[offset + c];
+        overwritten[offset + 3] = 255;
+      }
+      require(covered && covered < width * height, "Public UI hook fixture has no selective alpha");
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT before_footprint{}, after_footprint{};
+      fill_upload(before_upload, desc, expected.data(), before_footprint);
+      fill_upload(after_upload, desc, overwritten.data(), after_footprint);
+      const auto copy = [&](ID3D12GraphicsCommandList *list, ID3D12Resource *upload,
+                            const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint) {
+        transition(list, mask.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+        from.pResource = upload; from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; from.PlacedFootprint = footprint;
+        to.pResource = mask.p; to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        transition(list, mask.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+      };
+      struct restore_callback {
+        std::function<void()> &target;
+        std::function<void()> previous;
+        ~restore_callback() { target = std::move(previous); }
+      } restore{render_tracked_depth, render_tracked_depth};
+      render_tracked_depth = [&] {
+        real_frame();
+        auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
+        copy(list, before_upload.p, before_footprint);
+        abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
+        resource.type = resource_type; resource.native = mask.p; resource.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        resource.width = width; resource.height = height; resource.native_format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
+        resource.mip_levels = resource.array_layers = 1;
+        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 23, 0, {0, 0, width, height}};
+        require(token && (frame_tag ? frame_tag(*token, viewport, &tag, 1, list) : global_tag(viewport, &tag, 1, list)) == 0,
+          "Public UI tag changed the synthetic SDK result");
+        copy(list, after_upload.p, after_footprint);
+      };
+      for (unsigned i = 0; i < 8; ++i) { step(); no_effects(); }
+
+      struct mailbox {
+        HANDLE handle{};
+        dump::shared_state_t *state{};
+        std::uint64_t request{};
+        ~mailbox() {
+          if (state) {
+            if (request) InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state->released_id), request);
+            UnmapViewOfFile(state);
+          }
+          if (handle) CloseHandle(handle);
+        }
+      } box;
+      const auto name = std::wstring(dump::mapping_prefix) + std::to_wstring(GetCurrentProcessId());
+      box.handle = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, name.c_str());
+      require(box.handle != nullptr, "Loaded add-on did not publish its production Dump3D mailbox");
+      box.state = static_cast<dump::shared_state_t *>(MapViewOfFile(box.handle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(dump::shared_state_t)));
+      require(box.state && box.state->signature == dump::magic && box.state->protocol_version == dump::version,
+        "Production Dump3D mailbox is incompatible");
+      FILETIME created{}, exited{}, kernel{}, user{};
+      require(GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user), "Identify actual dump consumer");
+      box.state->consumer_pid = GetCurrentProcessId();
+      box.state->consumer_creation_time = (std::uint64_t(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+      box.state->consumer_nonce = 0x5549484f4f4bULL;
+      box.request = box.state->request_id + 1;
+      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
+      const auto until = GetTickCount64() + 10000;
+      while (std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) != box.request && GetTickCount64() < until) {
+        step(); no_effects();
+      }
+      require(box.state->response_id == box.request && box.state->response.result == dump::status::complete &&
+          box.state->response.json_bytes <= dump::max_json_bytes && box.state->response.texture_count <= dump::max_textures,
+        "Production Dump3D did not complete the public UI hook capture");
+      const auto metadata = nlohmann::json::parse(std::string(box.state->json, box.state->response.json_bytes));
+      {
+        std::ofstream manifest(hook_directory / "ui-hook-producer-metadata.json");
+        manifest << metadata.dump(2) << '\n';
+        require(manifest.good(), "Write actual public UI hook provenance");
+      }
+      const auto &origin = metadata.at("ui_source");
+      const auto &replay = metadata.at("replay");
+      require(origin.at("source") == "sl_ui_color_and_alpha" && origin.at("tag_type") == 23 &&
+          origin.at("channel") == "alpha" && origin.at("format") == 87 &&
+          origin.at("source_native") == reinterpret_cast<std::uint64_t>(mask.p) &&
+          replay.at("source_alpha_ui") == true && replay.at("ui_alpha_source") == "ui_source_color" &&
+          replay.at("ui_constant_binding").at("uint32")[3] == 0,
+        "Public UI hook did not select the actual tag23 alpha source in the renderer");
+      bool optional = false;
+      for (const auto &entry : metadata.at("optional_captures")) if (entry.at("artifact_id") == 10) {
+        if (entry.value("status", std::string{}) != "captured" || !entry.contains("capture_diagnostic"))
+          throw std::runtime_error("Public UI hook optional tag23 was not captured: " + entry.dump());
+        const auto &attempt = entry.at("capture_diagnostic");
+        if (!(attempt.at("format") == 90 && attempt.at("flags") == 4 && attempt.at("native_state") == 8 &&
+            attempt.at("copy_state") == 192 && attempt.at("used_observed_state") == true))
+          throw std::runtime_error("Public UI hook dump lost its actual typeless source/state provenance: " + entry.dump());
+        optional = true;
+      }
+      require(optional, "Production dump omitted the observed tag23 capture");
+      std::array<com_ptr<ID3D12Resource>, 2> retained;
+      unsigned retained_count{};
+      bool consumed = false, tagged = false;
+      for (unsigned i = 0; i < box.state->response.texture_count; ++i) {
+        const auto &item = box.state->response.textures[i];
+        const auto kind = unsigned(item.kind);
+        if (kind != unsigned(dump::artifact::ui_source_color) && kind != 10) continue;
+        require(item.dxgi_format == 87 && item.width == width && item.height == height, "Public UI hook dump changed typed extent");
+        require(retained_count < retained.size(), "Public UI hook dump repeated a requested artifact");
+        auto &texture = retained[retained_count++];
+        checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(item.handle), IID_PPV_ARGS(texture.put())), "Open production UI snapshot");
+        const auto bytes = read(texture.p, D3D12_RESOURCE_STATE_COMMON);
+        require(bytes == expected, "Public UI hook captured post-tag overwrite or changed alpha/RGB bytes");
+        const auto path = hook_directory / (kind == 10 ? "ui-hook-tag23.bin" : "ui-hook-consumed.bin");
+        sunshine_parity::write_bytes(path, bytes.data(), bytes.size());
+        consumed |= kind == unsigned(dump::artifact::ui_source_color); tagged |= kind == 10;
+      }
+      require(consumed && tagged && read(mask.p) == overwritten,
+        "Hook regression lacks both snapshots or the game allocation was not overwritten after the tag");
+      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
+      step(); no_effects();
+      for (const auto &texture : retained)
+        require(read(texture.p, D3D12_RESOURCE_STATE_COMMON) == expected, "Host acknowledgement or later game write changed UI snapshot");
+      evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
+        " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 frame_tags=" << bool(frame_tag) << '\n';
+      std::puts("PASS actual public SL tag23 hook: typeless90 to typed87, selected selective alpha and optional dump exact before opaque overwrite; host lease immutable");
+    }
+
+    void run_automatic_ui_tags(HMODULE sdk) {
+      using namespace sunshine_streamline;
+      namespace dump = ::game3d_debug;
+      const auto tag_call = reinterpret_cast<abi_v2::set_tag>(GetProcAddress(sdk, "slSetTag"));
+      const auto new_token = reinterpret_cast<abi_v2::get_new_frame_token>(GetProcAddress(sdk, "slGetNewFrameToken"));
+      const auto constants_call = reinterpret_cast<abi_v2::set_constants>(GetProcAddress(sdk, "slSetConstants"));
+      const bool failed_off = sunshine_camera_fixture::flag("SUNSHINE_GAME3D_UI_FAILED_OFF_TEST");
+      struct options { base_structure base; std::uint32_t mode{}, generated_frames{}; };
+      using options_t = std::int32_t (*)(const abi_v2::viewport &, const options &);
+      options_t options_call{};
+      if (failed_off) {
+        const auto getter = reinterpret_cast<abi_v2::get_feature_function>(GetProcAddress(sdk, "slGetFeatureFunction"));
+        const auto set_result = reinterpret_cast<void (*)(std::int32_t)>(GetProcAddress(sdk, "SunshineFixtureSetOptionsResult"));
+        void *function{};
+        require(getter && set_result && getter(1000, "slDLSSGSetOptions", function) == 0 && function,
+          "Failed-Off regression requires the controllable public SDK options result");
+        set_result(1); options_call = reinterpret_cast<options_t>(function);
+      }
+      const auto set_foreground = reinterpret_cast<void (*)(HWND)>(GetProcAddress(
+        GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineSbsTestSetForeground"));
+      require(tag_call && new_token && constants_call && set_foreground && source_format == DXGI_FORMAT_R10G10B10A2_UNORM,
+        "Public UI regression requires the real global SL tag entry and native R10 color");
+      struct foreground_scope {
+        void (*set)(HWND);
+        ~foreground_scope() { set(nullptr); }
+      } foreground{set_foreground};
+      set_foreground(window); // Select the hidden fixture without moving desktop focus.
+      const abi_v2::viewport viewport{{nullptr, viewport_guid, 1}, 0};
+      com_ptr<ID3D12Resource> hudless, upload;
+      auto desc = backbuffers[0]->GetDesc();
+      desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+      const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+      checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(hudless.put())), "Create public HUDless input");
+      auto hudless_bytes = source_bytes;
+      std::vector<float> expected(size_t(width) * height);
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const auto pixel = size_t(y) * width + x;
+        const bool covered = x >= width / 8 && x < width / 4 && y >= height * 3 / 4 && y < height * 7 / 8;
+        expected[pixel] = covered ? 1.f : 0.f;
+        if (covered) {
+          std::uint32_t value{}; std::memcpy(&value, hudless_bytes.data() + pixel * 4, 4);
+          value = (value & ~1023u) | ((value & 1023u) - 16u);
+          std::memcpy(hudless_bytes.data() + pixel * 4, &value, 4);
+        }
+      }
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+      fill_upload(upload, desc, hudless_bytes.data(), footprint);
+      unsigned frame_number{};
+      render_tracked_depth = [&] {
+        draw(*decoy); write_depth_pixels();
+        auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
+        abi_v2::frame_token *token{}; const auto frame = ++frame_number;
+        require(new_token(token, &frame) == 0 && token, "Public tag regression could not obtain frame token");
+        abi_v2::constants constants{}; constants.base = {nullptr, constants_guid, 1};
+        constants.common.camera_view_to_clip = camera.projection;
+        constants.common.clip_to_camera_view = camera.inverse_projection;
+        constants.common.camera_near = camera.near_plane; constants.common.camera_far = camera.far_plane;
+        constants.common.camera_fov = camera.fov; constants.common.camera_aspect = camera.aspect;
+        constants.common.camera_right[0] = constants.common.camera_up[1] = constants.common.camera_forward[2] = 1;
+        constants.depth_inverted = 1;
+        require(constants_call(constants, *token, viewport) == 0, "Public standalone constants changed the SDK result");
+        transition(list, hudless.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+        from.pResource = upload.p; from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; from.PlacedFootprint = footprint;
+        to.pResource = hudless.p; to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        transition(list, hudless.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        // Exact live descriptor pattern: zero Resource header/dimensions and
+        // full tagged extents; one global depth/motion/HUDless batch at viewport0.
+        abi_v2::resource resources[3]{};
+        resources[0].native = selected->resource.p; resources[0].state = unsigned(selected->state);
+        resources[1].native = selected->resource.p; resources[1].state = unsigned(selected->state);
+        resources[2].native = hudless.p; resources[2].state = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        const abi_v2::resource_tag tags[]{
+          {{nullptr, tag_guid, 1}, &resources[0], 0, 0, active_area},
+          {{nullptr, tag_guid, 1}, &resources[1], 1, 0, active_area},
+          {{nullptr, tag_guid, 1}, &resources[2], 2, 0, {0, 0, width, height}}};
+        require(tag_call(viewport, tags, 3, list) == 0, "Public mixed UI tags changed the SDK result");
+        if (options_call) {
+          const options off{{nullptr, {0xfac5f1cb,0x2dfd,0x4f36,{0xa1,0xe6,0x3a,0x9e,0x86,0x52,0x56,0xc5}}, 3}, 0, 0};
+          require(options_call(viewport, off) == 1, "Repeated failed Off call changed the SDK result");
+        }
+      };
+      // Only public SDK hooks supply UI/depth. The optional failure case calls
+      // unsupported FG Off immediately after each tag, matching the live game.
+      // No evaluation or private capture export is used.
+      const auto warm_until = GetTickCount64() + 750;
+      do { step(); no_effects(); } while (GetTickCount64() < warm_until);
+      settle("public-SL-global-tags-no-FG-no-evaluate");
+      struct mailbox {
+        HANDLE handle{}; dump::shared_state_t *state{}; std::uint64_t request{};
+        ~mailbox() {
+          if (state) {
+            if (request) InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state->released_id), request);
+            UnmapViewOfFile(state);
+          }
+          if (handle) CloseHandle(handle);
+        }
+      } box;
+      const auto name = std::wstring(dump::mapping_prefix) + std::to_wstring(GetCurrentProcessId());
+      box.handle = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, name.c_str());
+      require(box.handle != nullptr, "Public automatic UI test has no production dump mailbox");
+      box.state = static_cast<dump::shared_state_t *>(MapViewOfFile(box.handle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(dump::shared_state_t)));
+      require(box.state && box.state->signature == dump::magic && box.state->protocol_version == dump::version,
+        "Public automatic UI test has incompatible dump mailbox");
+      FILETIME created{}, exited{}, kernel{}, user{};
+      require(GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user), "Identify UI dump consumer");
+      box.state->consumer_pid = GetCurrentProcessId();
+      box.state->consumer_creation_time = (std::uint64_t(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+      box.state->consumer_nonce = 0x55494155544fULL;
+      std::uint64_t request_generation{};
+      for (unsigned round = 0; round != 2; ++round) {
+        for (unsigned i = 0; i != 20; ++i) { step(); no_effects(); }
+        box.request = box.state->request_id + 1;
+        InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
+        const auto until = GetTickCount64() + 10000;
+        while (std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) != box.request && GetTickCount64() < until) {
+          step(); no_effects();
+        }
+        require(box.state->response_id == box.request && box.state->response.result == dump::status::complete &&
+            box.state->response.json_bytes <= dump::max_json_bytes && box.state->response.texture_count <= dump::max_textures,
+          "Production dump did not finish automatic public UI capture");
+        const auto metadata = nlohmann::json::parse(std::string(box.state->json, box.state->response.json_bytes));
+        {
+          std::ofstream output(runtime_directory / ("public-ui-auto-" + std::to_string(round) + ".json"));
+          output << metadata.dump(2) << '\n';
+          require(output.good(), "Write public UI regression evidence");
+        }
+        const auto &replay = metadata.at("replay");
+        const auto &attempt = replay.at("source_alpha_capture_attempt");
+        const auto &gate = attempt.at("hook_gate");
+        require(attempt.at("input_observed") == true && gate.at("state") == "admitted" &&
+            gate.at("matching_requests") == 1 && gate.at("seen_kinds") == 8 &&
+            attempt.at("request").at("viewport") == 0 && gate.at("viewport") == 0,
+          "Actual public UI hook never reached the live request: inspect public-ui-auto JSON gate evidence");
+        const auto generation = attempt.at("request_generation").get<std::uint64_t>();
+        require(!round || generation == request_generation, "Normal public-hook frames repeatedly replaced the UI request");
+        request_generation = generation;
+        require(replay.at("source_alpha_ui_fg_mode").at("known") == false &&
+            replay.at("source_alpha_ui") == true && replay.at("ui_alpha_source") == "ui_source_color",
+          "Automatic public UI detection required FG or bypassed the resolved mask");
+        bool paired{};
+        for (const auto &candidate : metadata.at("ui_source").at("candidates"))
+          if (candidate.at("source") == "sl_hudless_difference")
+            paired = candidate.at("available_for_detection") == true && candidate.at("current_present_pair") == true;
+        require(paired, "Live public HUDless source did not reach current-frame GPU comparison");
+        require(active(inspect()), "Public standalone tags did not retain the actual SL depth and finite native scale");
+        bool consumed{}, stereo{};
+        for (unsigned i = 0; i != box.state->response.texture_count; ++i) {
+          const auto &item = box.state->response.textures[i];
+          if (item.kind == dump::artifact::sbs) {
+            require(item.dxgi_format == DXGI_FORMAT_R16G16B16A16_FLOAT && item.width == 2 * width && item.height == height,
+              "Public standalone depth dump has wrong SBS format");
+            com_ptr<ID3D12Resource> texture;
+            checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(item.handle), IID_PPV_ARGS(texture.put())), "Open standalone public-tag SBS");
+            const auto bytes = read(texture.p, D3D12_RESOURCE_STATE_COMMON);
+            const auto eye_row = size_t(width) * 8;
+            require(bytes.size() == eye_row * 2 * height, "Public standalone SBS has wrong byte count");
+            for (unsigned y = 0; y < height; ++y)
+              stereo |= std::memcmp(bytes.data() + y * eye_row * 2, bytes.data() + y * eye_row * 2 + eye_row, eye_row) != 0;
+            sunshine_parity::write_bytes(runtime_directory / ("public-depth-sbs-" + std::to_string(round) + ".bin"), bytes.data(), bytes.size());
+          }
+          if (item.kind != dump::artifact::ui_source_color) continue;
+          require(item.dxgi_format == DXGI_FORMAT_R32_FLOAT && item.width == width && item.height == height,
+            "Automatic public UI dump has wrong resolved-mask format");
+          com_ptr<ID3D12Resource> texture;
+          checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(item.handle), IID_PPV_ARGS(texture.put())), "Open resolved automatic UI mask");
+          const auto bytes = read(texture.p, D3D12_RESOURCE_STATE_COMMON);
+          require(bytes.size() == expected.size() * sizeof(float) && std::memcmp(bytes.data(), expected.data(), bytes.size()) == 0,
+            "Automatic public HUDless comparison did not produce exact selective current-frame coverage");
+          sunshine_parity::write_bytes(runtime_directory / ("public-ui-mask-" + std::to_string(round) + ".bin"), bytes.data(), bytes.size());
+          consumed = true;
+        }
+        require(consumed && stereo && !v2_capture_calls && !v1_capture_calls,
+          "Public tag result lacked the exact mask, distinct stereo eyes, or used private capture injection");
+        InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
+      }
+      render_tracked_depth = {};
+      evidence << "public-ui-auto viewport=0 zero_header=1 omitted_size=1 mixed_tags=0,1,2 FG_unknown=1 repeated_failed_Off=" << failed_off << " SL_evaluate=0 persistent_request="
+        << request_generation << " exact_resolved_mask=1 real_SL_depth=1 distinct_eyes=1\n";
+      std::puts("PASS actual public mixed SL tags -> persistent UI request -> same-present HUDless comparison -> exact automatic mask, FG unknown and no SL evaluation");
+    }
+
     void run_fg(HMODULE sdk) {
       using namespace sunshine_streamline;
       const auto set_foreground = reinterpret_cast<void (*)(HWND)>(GetProcAddress(
@@ -156,8 +495,10 @@ namespace {
       const auto new_token = reinterpret_cast<abi_v2::get_new_frame_token>(GetProcAddress(sdk, "slGetNewFrameToken"));
       const auto constants_call = reinterpret_cast<abi_v2::set_constants>(GetProcAddress(sdk, "slSetConstants"));
       const auto tag_call = reinterpret_cast<abi_v2::set_tag_for_frame>(GetProcAddress(sdk, "slSetTagForFrame"));
+      const auto global_tag_call = reinterpret_cast<abi_v2::set_tag>(GetProcAddress(sdk, "slSetTag"));
       const auto evaluate = reinterpret_cast<abi_v2::evaluate_feature>(GetProcAddress(sdk, "slEvaluateFeature"));
-      require(getter && new_token && constants_call && tag_call && evaluate, "FG metadata fixture lacks public SL exports");
+      require(getter && new_token && constants_call && global_tag_call && evaluate, "FG metadata fixture lacks public SL exports");
+      std::printf("MEASURE SL SDK capability frame_tags=%u; using %s tags\n", unsigned(tag_call != nullptr), tag_call ? "frame" : "global");
       void *function{};
       require(getter(1000, "slDLSSGSetOptions", function) == 0 && function, "Public SDK did not expose FG options");
       set_options_t volatile set_options = reinterpret_cast<set_options_t>(function);
@@ -199,7 +540,9 @@ namespace {
         resource.native_format = DXGI_FORMAT_R32_FLOAT; resource.mip_levels = resource.array_layers = 1;
         const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
         tag_started = GetTickCount64();
-        require(tag_call(*token, viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) == 0,
+        const auto tagged = tag_call ? tag_call(*token, viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) :
+          global_tag_call(viewport, &tag, 1, reinterpret_cast<void *>(game_native_command));
+        require(tagged == 0,
           "FG tag observation changed the SDK result");
         tag_returned = GetTickCount64();
         const base_structure *inputs[]{&viewport.base};
@@ -344,6 +687,93 @@ namespace {
       require(fg_frame == mode_seed_frame, "FG mode no-revival case accidentally produced a new real frame");
       recovered_fresh(mode_seed, "SLFG-cache-mode-fresh-recovery");
       std::puts("PASS native FG cache: repeated holds cannot renew capture age; camera reset and FG off/on cannot revive old depth; fresh copies recover all three intervals; no FX");
+      for (const std::uint32_t type : {0u, 8u})
+        run_ui_hook(real_frame, last_token, viewport, tag_call, global_tag_call, type);
+
+      // Use the same public SDK boundary for linear RR depth with no usable
+      // camera. The native copy, provider acquisition and GPU moment readback
+      // remain production paths; only the game-authored input is synthetic.
+      configure(false);
+      using center_t = bool (*)(api::effect_runtime *, provider::center_sample *);
+      const auto query_center = reinterpret_cast<center_t>(GetProcAddress(
+        GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineStreamlineTestCenter"));
+      require(query_center, "Linear provider fixture lacks passive moment observation");
+      const float original_center = center_raw;
+      const auto original_area = active_area;
+      active_area = {0, 0, selected->width, selected->height};
+      render_tracked_depth = [&] {
+        draw(*decoy); write_depth_pixels();
+        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
+        require(new_token(token, &frame) == 0 && token, "Linear RR SDK did not supply a frame token");
+        // This frame has no camera metadata. Publishing malformed matrices
+        // instead would intentionally invalidate the observation revision and
+        // test a different contract from linear depth without a camera.
+        abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
+        resource.type = 8; resource.native = selected->resource.p; resource.state = unsigned(selected->state);
+        resource.width = selected->width; resource.height = selected->height;
+        resource.native_format = DXGI_FORMAT_R32_FLOAT; resource.mip_levels = resource.array_layers = 1;
+        // Clear the preceding hardware-depth tag so it cannot hide tag49.
+        const abi_v2::resource_tag tags[]{
+          {{nullptr, tag_guid, 1}, nullptr, 0, 1, {}},
+          {{nullptr, tag_guid, 1}, &resource, 49, 1, active_area}};
+        const auto tagged = tag_call ? tag_call(*token, viewport, tags, 2, reinterpret_cast<void *>(game_native_command)) :
+          global_tag_call(viewport, tags, 2, reinterpret_cast<void *>(game_native_command));
+        require(tagged == 0, "Linear RR tag observation changed the SDK result");
+        const base_structure *inputs[]{&viewport.base};
+        require(evaluate(1001, *token, inputs, 1, reinterpret_cast<void *>(game_native_command)) == 0,
+          "Linear RR evaluation changed the SDK result");
+      };
+      for (const float center_value : {original_center, 0.f, -1.f,
+          std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+        const auto preceding = inspect().source.current.sequence;
+        center_raw = center_value;
+        provider::center_sample sampled;
+        status s;
+        unsigned consecutive{};
+        const auto until = GetTickCount64() + 15000;
+        do {
+          step(); no_effects(); s = inspect();
+          const bool complete = query_center(observed.runtime, &sampled) && sampled.metadata.sequence > preceding &&
+            sampled.metadata.resource.native == native(*selected) && !sampled.metadata.projection.supplied &&
+            sampled.metadata.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
+            sampled.moments.supplied && sampled.moments.valid &&
+            sampled.moments.encoding == sunshine_scene_depth::depth_encoding::linear_distance;
+          const bool selected_linear = s.ready() && s.source.selected && s.source.ready && !s.source.reused_depth &&
+            s.source.provider == sunshine_scene_depth::provider_kind::streamline &&
+            s.source.current.resource == native(*selected) && s.source.current.capture &&
+            s.basis == unsigned(sunshine_game3d::automatic_scale_basis::linear_distance) &&
+            s.scale_state == unsigned(sunshine_game3d::automatic_scale_state::active) && std::isfinite(s.scale) && s.scale > 0;
+          consecutive = complete && selected_linear ? consecutive + 1 : 0;
+        } while (consecutive < 8 && GetTickCount64() < until);
+        log_status("SL-RR-linear-no-camera", s);
+        require(consecutive >= 8, "Linear RR input failed native capture/acquisition/calibration without camera matrices");
+        const auto raw = read(selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        require(raw.size() == size_t(selected->width) * selected->height * sizeof(float),
+          "Linear provider source readback has the wrong extent");
+        std::uint64_t count{};
+        double sum{}, squared{};
+        for (size_t offset = 0; offset < raw.size(); offset += sizeof(float)) {
+          float distance{}; std::memcpy(&distance, raw.data() + offset, sizeof(distance));
+          if (!std::isfinite(distance) || distance <= 0.f) continue;
+          const double inverse = 1. / distance;
+          ++count; sum += inverse; squared += inverse * inverse;
+        }
+        const auto &moments = sampled.moments;
+        require(moments.count == count && std::abs(moments.sum - sum) <= sum * 2e-5 &&
+            std::abs(moments.sum_squares - squared) <= squared * 2e-5,
+          "Native provider linear moments included invalid distances or decoded device depth");
+        require(count && (std::isfinite(center_value) && center_value > 0.f ?
+            count == std::uint64_t(selected->width) * selected->height :
+            count < std::uint64_t(selected->width) * selected->height),
+          "Linear provider invalid-pixel fixture did not exercise rejection");
+        evidence << "linear-no-camera center=" << center_value << " count=" << count << " sum=" << moments.sum
+          << " sum_squares=" << moments.sum_squares << " capture=" << sampled.id
+          << " sequence=" << sampled.metadata.sequence << '\n';
+      }
+      center_raw = original_center; active_area = original_area;
+      render_tracked_depth = [&] { draw_frame(); };
+      settle("SL-recovered-after-linear-RR");
+      std::puts("PASS native linear RR provider: public tag49 and feature1001, no camera matrix, actual capture/acquire/calibration and reciprocal moments excluding zero/negative/NaN/Inf; no FX");
     }
 
     void finish() {
@@ -383,10 +813,13 @@ int main(int argc, char **argv) {
       sdk = LoadLibraryW(isolated.c_str());
       require(sdk, "Could not load isolated metadata-only FG SDK");
     }
+    const bool public_ui = sunshine_camera_fixture::flag("SUNSHINE_GAME3D_UI_PUBLIC_TAG_TEST");
+    require(!public_ui || sdk, "Public UI regression requires the metadata-only SDK argument");
     native_provider_fixture fixture; fixture.runtime_directory = directory;
-    fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), directory, 2, 0, fs::absolute(argv[3]));
-    fixture.load_native(directory); fixture.run_streamline();
-    if (sdk) fixture.run_fg(sdk);
+    fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), directory, public_ui ? 3 : 2, 0, fs::absolute(argv[3]));
+    fixture.load_native(directory);
+    if (public_ui) fixture.run_automatic_ui_tags(sdk);
+    else { fixture.run_streamline(); if (sdk) fixture.run_fg(sdk); }
     fixture.finish();
     return 0;
   } catch (const std::exception &error) {

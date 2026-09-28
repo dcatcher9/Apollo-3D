@@ -2,9 +2,11 @@
 // Real executable exports + MinHook. No game, graphics runtime or GPU needed.
 #include "upscaler_call_trace.h"
 #include "ngx_depth_source.h"
+#include "streamline_depth_capture.h"
 #include "addon_lifetime.h"
 #include "game3d_diagnostic_metadata.h"
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -38,6 +40,9 @@ namespace {
   std::vector<std::string> probe_requests;
   std::vector<std::string> jitter_requests;
   enum class probe_reply { failed, null_value, present };
+  constexpr const char *dlssg_keys[]{"DLSSG.HUDLess", "DLSSG.UI", "DLSSG.UIAlpha", "DLSSG.Backbuffer"};
+  constexpr const char *dlssg_rects[]{"DLSSG.HUDLessSubrect", "DLSSG.UISubrect", "DLSSG.UIAlphaSubrect", "DLSSG.InputBackbufferSubrect"};
+  constexpr const char *rect_fields[]{"BaseX", "BaseY", "Width", "Height"};
   struct observed_call {
     void *commands{};
     const void *handle{}, *parameters{};
@@ -52,6 +57,7 @@ namespace {
   std::atomic<result> return_result{ngx_success};
   std::atomic<bool> write_output{true};
   bool nested_evaluation{};
+  const void *nested_parameters{};
   bool release_in_original{};
   bool release_in_probe{};
   struct fixture_parameters {
@@ -65,7 +71,11 @@ namespace {
     bool reset_unavailable{true};
     float jitter_x{}, jitter_y{};
     bool missing_jitter_x{true}, missing_jitter_y{true};
+    unsigned hardware_depth{1};
+    bool missing_hardware_depth{true};
     std::array<probe_reply, 5> probe_values{};
+    std::array<probe_reply, 4> dlssg_values{};
+    bool dlssg_rect_available{};
   };
   sunshine_scene_depth::frame captured_frame;
   std::uint64_t captured_command{};
@@ -95,6 +105,17 @@ namespace {
       diagnostic_success = successful;
       ++diagnostic_finishes;
       diagnostic_originals_after = actual_evaluations.load();
+    }
+  };
+  std::vector<sunshine_game3d::diagnostic::resource_observation> dlssg_resources;
+  std::vector<sunshine_game3d::diagnostic::stamp> dlssg_finishes;
+  const sunshine_game3d::diagnostic::resource_callbacks dlssg_callbacks {
+    [](const sunshine_game3d::diagnostic::resource_observation &value) noexcept {
+      if (value.artifact_id >= 34 && value.artifact_id <= 37) dlssg_resources.push_back(value);
+    },
+    [](sunshine_game3d::ui_resources::provider provider, const sunshine_game3d::diagnostic::stamp &at,
+        std::uint64_t, bool) noexcept {
+      if (provider == sunshine_game3d::ui_resources::provider::ngx) dlssg_finishes.push_back(at);
     }
   };
   create_type create_entry{};
@@ -134,7 +155,7 @@ extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_D3D12
     void *commands, const void *handle, const void *parameters, callback_type progress) {
   observed = {commands, handle, parameters, nullptr, progress, 0, GetLastError()};
   ++actual_evaluations;
-  if (nested_evaluation) evaluate_c_entry(commands, handle, parameters, progress);
+  if (nested_evaluation) evaluate_c_entry(commands, handle, nested_parameters ? nested_parameters : parameters, progress);
   if (release_in_original) release_entry(const_cast<void *>(handle));
   if (block_original.load()) {
     original_entered.store(true);
@@ -177,12 +198,19 @@ extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_Param
     void *opaque, const char *key, unsigned *output) {
   auto &value = *static_cast<fixture_parameters *>(opaque);
   SetLastError(0xfade);
+  for (const auto *prefix : dlssg_rects) for (unsigned i = 0; i != 4; ++i) {
+    if (std::string(prefix) + rect_fields[i] != key) continue;
+    constexpr unsigned rectangle[]{7, 11, 64, 32};
+    *output = value.dlssg_rect_available ? rectangle[i] : 0xdeadbeef;
+    return value.dlssg_rect_available ? ngx_success : ngx_failure;
+  }
   if (std::strcmp(key, "Width") == 0) *output = value.width;
   else if (std::strcmp(key, "Height") == 0) *output = value.height;
   else if (std::strcmp(key, "DLSS.Render.Subrect.Dimensions.Width") == 0 && !value.missing_render) *output = value.render_width;
   else if (std::strcmp(key, "DLSS.Render.Subrect.Dimensions.Height") == 0 && !value.missing_render) *output = value.render_height;
   else if (std::strcmp(key, "DLSS.Input.Depth.Subrect.Base.X") == 0) *output = value.x;
   else if (std::strcmp(key, "DLSS.Input.Depth.Subrect.Base.Y") == 0 && !value.missing_y) *output = value.y;
+  else if (std::strcmp(key, "DLSS.Use.HW.Depth") == 0 && !value.missing_hardware_depth) *output = value.hardware_depth;
   else return ngx_failure;
   return ngx_success;
 }
@@ -191,6 +219,8 @@ extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_Param
   auto &value = *static_cast<fixture_parameters *>(opaque);
   SetLastError(0xfade);
   feedback_requests.emplace_back(std::string("Resource:") + key);
+  for (unsigned i = 0; i != 4; ++i)
+    if (!std::strcmp(key, dlssg_keys[i])) return optional_pointer_reply(value.dlssg_values[i], output);
   if (std::strcmp(key, "Position.ViewSpace") == 0) {
     probe_requests.emplace_back(std::string("Resource:") + key);
     return optional_pointer_reply(value.probe_values[0], output);
@@ -433,6 +463,7 @@ namespace {
     const auto first_id = captured_frame.source_id;
     {
       streamline_scope scope(0, 0x123);
+      scope.claim_depth_capture(true);
       evaluate_feature();
       scope.finish(true);
     }
@@ -478,6 +509,213 @@ namespace {
     shutdown();
     evaluate_feature();
     require(captures == 5, "shutdown did not stop production capture");
+    sunshine_ngx::testing::set_callbacks({});
+  }
+  void nested_capture_authority_test() {
+    initialize(GetModuleHandleW(nullptr), false, true);
+    captures = finishes = 0;
+    unsigned attempts{};
+    bool reject_outer{};
+    bool metadata_only_outer{};
+    constexpr std::uint64_t outer_depth = 0xface1000, inner_depth = 0xface2000;
+    static unsigned *attempt_counter;
+    static bool *reject;
+    static bool *metadata_only;
+    attempt_counter = &attempts; reject = &reject_outer; metadata_only = &metadata_only_outer;
+    sunshine_ngx::testing::set_callbacks({
+      [](std::uint64_t, const sunshine_scene_depth::frame &value) -> std::uint64_t {
+        ++*attempt_counter;
+        if (*reject && value.resource.native == outer_depth) return 0;
+        if (*metadata_only && value.resource.native == outer_depth) return 94;
+        captured_frame = value; ++captures; return 93;
+      },
+      [](std::uint64_t, bool successful) { ++finishes; last_finish = successful; }, nullptr,
+      [](std::uint64_t ticket) { return ticket != 94; }});
+    fixture_parameters outer, inner;
+    outer.depth = reinterpret_cast<void *>(outer_depth); inner.depth = reinterpret_cast<void *>(inner_depth);
+    outer.missing_hardware_depth = false; // Arbitrary feature with an explicit depth contract.
+    void *handle{};
+    return_result = ngx_success;
+    require(create_entry(reinterpret_cast<void *>(0x123), 60001, &outer, &handle) == ngx_success,
+      "Nested authority fixture failed to create its compatible feature");
+    nested_evaluation = true; nested_parameters = &inner;
+    const auto evaluate = [&] {
+      const auto calls = actual_evaluations.load();
+      SetLastError(input_error);
+      require(evaluate_entry(reinterpret_cast<void *>(0x123), handle, &outer, &callback) == ngx_success &&
+          GetLastError() == output_error && actual_evaluations == calls + 2,
+        "Nested capture authority changed original calls, result or LastError");
+    };
+    outer.missing_depth = true; evaluate();
+    require(captures == 1 && attempts == 1 && finishes == 1 && last_finish && captured_frame.resource.native == inner_depth,
+      "A known outer feature with missing Depth suppressed the inner usable depth");
+    outer.missing_depth = false; outer.missing_y = true; evaluate();
+    require(captures == 2 && attempts == 2 && finishes == 2 && captured_frame.resource.native == inner_depth,
+      "An invalid outer depth region suppressed the inner usable depth");
+    outer.missing_y = false; reject_outer = true; evaluate();
+    require(captures == 3 && attempts == 4 && finishes == 3 && captured_frame.resource.native == inner_depth,
+      "A rejected native nomination claimed nested capture authority");
+    reject_outer = false; metadata_only_outer = true; evaluate();
+    require(captures == 4 && attempts == 6 && finishes == 5 && captured_frame.resource.native == inner_depth,
+      "A metadata-only native nomination suppressed the inner usable depth or lost ticket completion");
+    metadata_only_outer = false; evaluate();
+    require(captures == 5 && attempts == 7 && finishes == 6 && captured_frame.resource.native == outer_depth,
+      "A valid outer nomination failed to deduplicate its pending nested evaluation");
+    nested_evaluation = false; nested_parameters = nullptr;
+    release_entry(handle); shutdown(); sunshine_ngx::testing::set_callbacks({});
+    attempt_counter = nullptr; reject = nullptr; metadata_only = nullptr;
+  }
+
+  void metadata_nomination_diagnostic_test() {
+    namespace capture = sunshine_streamline::depth_capture;
+    const auto owner = GetModuleHandleW(nullptr);
+    initialize(owner, false, true);
+    sunshine_ngx::initialize(true);
+    capture::record_diagnostic supplied;
+    std::uint64_t ticket = 77;
+    static capture::record_diagnostic *reply;
+    static std::uint64_t *next_ticket;
+    reply = &supplied; next_ticket = &ticket;
+    finishes = 0;
+    sunshine_ngx::testing::set_callbacks({
+      [](std::uint64_t, const sunshine_scene_depth::frame &) { return *next_ticket; },
+      [](std::uint64_t value, bool successful) { require(value == 77, "Nomination completion changed ticket"); ++finishes; last_finish = successful; },
+      nullptr, nullptr,
+      [](std::uint64_t, capture::record_diagnostic &out) { out = *reply; }});
+    const auto api = sunshine_ngx::resolve_parameter_api(owner);
+    fixture_parameters parameters;
+    const auto handle = reinterpret_cast<void *>(handle_bits);
+    sunshine_ngx::after_create(owner, handle, sunshine_ngx::before_create(api, 1, &parameters), true);
+    messages.clear();
+    for (const bool observed : {false, true}) {
+      supplied = {};
+      supplied.result = capture::status::missing_state;
+      supplied.stage = capture::record_stage::missing_state;
+      supplied.command = 0x123; supplied.recording_cookie = 42;
+      supplied.native_state = UINT32_MAX;
+      supplied.observed = observed;
+      supplied.observed_state = 0; // Distinguish absent evidence from observed COMMON.
+      SetLastError(input_error);
+      const auto attempt = sunshine_ngx::before_evaluate(owner, api, 0x123, handle, &parameters);
+      require(attempt.ticket == 77 && !attempt.capture_authority,
+        "Metadata-only missing-state nomination changed capture authority or lost completion ticket");
+      sunshine_ngx::after_evaluate(attempt, true);
+      capture::record_diagnostic retained;
+      std::uint64_t retained_ticket{};
+      require(sunshine_ngx::testing::last_capture_rejection(retained, retained_ticket) && retained_ticket == 77 &&
+        retained.result == capture::status::missing_state && retained.stage == capture::record_stage::missing_state &&
+        retained.observed == observed && retained.observed_state == 0 && retained.native_state == UINT32_MAX &&
+        retained.command == 0x123 && retained.recording_cookie == 42,
+        "Nonzero nomination ticket hid or altered absent-state versus COMMON-state diagnostic evidence");
+      require(GetLastError() == input_error && last_finish && messages.empty(),
+        "Diagnostic retention changed LastError, SDK completion or logged inside the capture callback");
+    }
+    supplied.result = capture::status::recorded; supplied.stage = capture::record_stage::recorded;
+    const auto copied = sunshine_ngx::before_evaluate(owner, api, 0x123, handle, &parameters);
+    require(copied.ticket == 77 && copied.capture_authority, "Successful recording lost capture authority");
+    sunshine_ngx::after_evaluate(copied, true);
+    ticket = 0; supplied.result = capture::status::unavailable; supplied.stage = capture::record_stage::capacity;
+    const auto rejected = sunshine_ngx::before_evaluate(owner, api, 0x123, handle, &parameters);
+    sunshine_ngx::after_evaluate(rejected, true);
+    require(!rejected.ticket && !rejected.capture_authority && finishes == 3,
+      "A rejected copy fabricated a nomination completion or swallowed metadata-only completion");
+    sunshine_ngx::poll();
+    require(logged("evaluations=4 nominations=3 copy_recorded=1 metadata_only=2") &&
+      logged("recorded work is not completed pixels"),
+      "NGX summary conflated metadata-only nominations, recorded copies and completed pixels");
+    shutdown(); sunshine_ngx::testing::set_callbacks({});
+    reply = nullptr; next_ticket = nullptr;
+  }
+
+  void ray_reconstruction_test() {
+    using encoding = sunshine_scene_depth::depth_encoding;
+    initialize(GetModuleHandleW(nullptr), false, true);
+    captures = finishes = 0;
+    sunshine_ngx::testing::set_callbacks({
+      [](std::uint64_t, const sunshine_scene_depth::frame &value) -> std::uint64_t {
+        captured_frame = value; ++captures; return 77;
+      },
+      [](std::uint64_t, bool successful) { ++finishes; last_finish = successful; }, nullptr});
+    fixture_parameters parameters;
+    void *handle{};
+    auto create_rr = [&] {
+      SetLastError(input_error);
+      const auto reply = create_entry(reinterpret_cast<void *>(0x123), 13, &parameters, &handle);
+      require(reply == return_result.load() && GetLastError() == output_error && observed.feature == 13,
+        "RR creation changed SDK forwarding/result/LastError");
+    };
+    auto evaluate_rr = [&] {
+      SetLastError(input_error);
+      const auto reply = evaluate_c_entry(reinterpret_cast<void *>(0x123), handle, &parameters, &callback);
+      require(reply == return_result.load() && GetLastError() == output_error,
+        "RR evaluation changed SDK forwarding/result/LastError");
+    };
+    return_result = ngx_success;
+    parameters.missing_hardware_depth = false;
+    create_rr(); evaluate_rr();
+    require(captures == 1 && finishes == 1 && last_finish && captured_frame.projection.encoding == encoding::device &&
+      captured_frame.projection.reversed && captured_frame.resource.native == reinterpret_cast<std::uint64_t>(parameters.depth),
+      "RR hardware depth did not share exact-resource capture");
+    const auto hardware_source = captured_frame.source_id;
+    parameters.hardware_depth = 0;
+    create_rr(); evaluate_rr();
+    require(captures == 2 && captured_frame.projection.encoding == encoding::linear_distance &&
+      !captured_frame.projection.supplied && !captured_frame.projection.reversed && captured_frame.projection.direction_supplied &&
+      captured_frame.source_id != hardware_source, "RR linear depth inherited hardware convention or camera metadata");
+    parameters.hardware_depth = 1; // Evaluation-time mutation must not rewrite creation encoding.
+    evaluate_rr();
+    require(captures == 3 && captured_frame.projection.encoding == encoding::linear_distance,
+      "RR evaluation replaced its immutable creation encoding");
+    {
+      streamline_scope unsupported(1004, 0x123);
+      evaluate_rr();
+      require(captures == 4, "unclaimed SL call suppressed a valid nested NGX depth source");
+      {
+        streamline_scope accepted(1001, 0x123);
+        accepted.claim_depth_capture(true);
+        accepted.claim_depth_capture(true); // Idempotent, including nested scopes.
+        {
+          streamline_scope inner(1004, 0x123);
+          inner.claim_depth_capture(false);
+          evaluate_rr();
+        }
+        require(captures == 4, "nested SL scope lost its ancestor's capture authority");
+      }
+      evaluate_rr();
+      require(captures == 5, "SL capture claim survived its owning scope");
+    }
+    evaluate_rr();
+    require(captures == 6, "SL tracing scope leaked capture suppression");
+    release_entry(handle);
+    parameters.missing_hardware_depth = true;
+    create_rr(); evaluate_rr();
+    require(captures == 6, "RR guessed missing depth encoding");
+    parameters.missing_hardware_depth = false;
+    parameters.hardware_depth = 2;
+    create_rr(); evaluate_rr();
+    require(captures == 6, "RR admitted unknown depth encoding");
+    parameters.hardware_depth = 0;
+    return_result = ngx_failure;
+    create_rr();
+    return_result = ngx_success;
+    evaluate_rr();
+    require(captures == 6, "failed RR creation established capture authority");
+    create_rr();
+    return_result = ngx_failure;
+    evaluate_rr();
+    require(captures == 7 && !last_finish, "failed RR evaluation published its depth");
+    return_result = ngx_success;
+    release_entry(handle);
+    evaluate_rr();
+    require(captures == 7, "released RR source continued capturing");
+    parameters.hardware_depth = 1;
+    require(create_entry(reinterpret_cast<void *>(0x123), 60001, &parameters, &handle) == ngx_success,
+      "arbitrary feature creation did not forward");
+    evaluate_rr();
+    require(captures == 8 && captured_frame.projection.encoding == encoding::device,
+      "valid explicit depth was rejected by feature identity");
+    release_entry(handle);
+    shutdown();
     sunshine_ngx::testing::set_callbacks({});
   }
   void reset_feedback_test() {
@@ -893,8 +1131,194 @@ namespace {
       "disarmed unknown-feature evaluation performed diagnostic getters");
     require(nlohmann::json::parse(sunshine_game3d::diagnostic_metadata_json())["ngx"] == dumped["ngx"],
       "disarmed unknown evaluation mutated retained diagnostic evidence");
+    void *incomplete{};
+    return_result = ngx_success;
+    require(create_entry(reinterpret_cast<void *>(0x123), 60002, &parameters, &incomplete) == ngx_success,
+      "Incomplete feature fixture failed to register");
+    for (const auto result : {ngx_success, ngx_failure}) {
+      sunshine_game3d::arm_diagnostic_metadata(true);
+      evaluate_unknown(incomplete, result);
+      const auto snapshot = nlohmann::json::parse(sunshine_game3d::diagnostic_metadata_json());
+      const auto found = std::find_if(snapshot["ngx"].begin(), snapshot["ngx"].end(),
+        [](const auto &value) { return value["feature"] == 60002; });
+      require(found != snapshot["ngx"].end() && (*found)["feature_known"] == true &&
+        (*found)["capture_metadata_available"] == false && (*found)["source_id"] == 0 &&
+        (*found)["sequence_domain"] == "diagnostic-incomplete-feature" && (*found)["scene_revision"].is_null() &&
+        (*found)["create_flags"].is_null() && (*found)["result_known"] == true &&
+        (*found)["successful"] == (result == ngx_success),
+        "Known incomplete feature lost identity/result or fabricated capture metadata");
+      require(captures == captures_before && finishes == finishes_before,
+        "Incomplete feature acquired capture authority");
+      sunshine_game3d::arm_diagnostic_metadata(false);
+    }
+    return_result = ngx_success;
     shutdown();
     sunshine_ngx::testing::set_callbacks({});
+  }
+  void dlssg_input_diagnostics_test() {
+    namespace d = sunshine_game3d::diagnostic;
+    initialize(GetModuleHandleW(nullptr), false, true);
+    sunshine_ngx::testing::set_callbacks({
+      [](std::uint64_t, const sunshine_scene_depth::frame &) -> std::uint64_t { ++captures; return 91; },
+      [](std::uint64_t, bool) { ++finishes; }, nullptr});
+    d::set_resource_callbacks(&dlssg_callbacks);
+    fixture_parameters parameters;
+    parameters.dlssg_rect_available = true;
+    void *handle{};
+    return_result = ngx_success;
+    const auto arm = [&] {
+      sunshine_game3d::arm_diagnostic_metadata(false);
+      sunshine_game3d::arm_diagnostic_metadata(true);
+      dlssg_resources.clear(); dlssg_finishes.clear(); feedback_requests.clear();
+    };
+    const auto evaluate = [&] {
+      SetLastError(input_error);
+      require(evaluate_entry(reinterpret_cast<void *>(0x123), handle, &parameters, &callback) == ngx_success &&
+          GetLastError() == output_error, "DLSSG diagnostic inputs changed SDK result/LastError");
+    };
+    const auto check = [&](probe_reply reply) {
+      const auto snapshot = nlohmann::json::parse(sunshine_game3d::diagnostic_metadata_json());
+      require(snapshot.at("ngx").size() == 1 && dlssg_resources.size() == 4 && dlssg_finishes.size() == 1,
+        "DLSSG input observation/completion was feature-restricted or incomplete");
+      const auto &entry = snapshot.at("ngx")[0];
+      require(entry.at("truncated") == false, "New DLSSG probes truncated existing parameter evidence");
+      const auto parameter = [&](const std::string &name) {
+        for (const auto &p : entry.at("parameters")) if (p.at("name") == name) return p;
+        throw std::runtime_error("Missing exact NGX parameter key: " + name);
+      };
+      for (unsigned i = 0; i != 4; ++i) {
+        const auto p = parameter(dlssg_keys[i]);
+        const bool success = reply != probe_reply::failed;
+        require(p.at("getter_available") == true && p.at("successful") == success &&
+            (success ? p.at("value") == (reply == probe_reply::present ? "0x1" : "0x0") : p.at("value").is_null()),
+          "NGX DLSSG input confused successful null with failed/absent getter or leaked poisoned pointer");
+        const auto &resource = dlssg_resources[i];
+        const bool expected_resource = resource.artifact_id == 34 + i && resource.native == (success && reply == probe_reply::present ? 1u : 0u) &&
+            resource.readable == success && !resource.state_declared && resource.area.left == 7 &&
+            resource.area.top == 11 && resource.area.width == 64 && resource.area.height == 32;
+        if (!expected_resource) throw std::runtime_error(std::string("DLSSG resource/subrect callback mismatch for ") + dlssg_keys[i] +
+          ": id=" + std::to_string(resource.artifact_id) + " native=" + std::to_string(resource.native) +
+          " readable=" + std::to_string(resource.readable) + " declared_state=" + std::to_string(resource.state_declared) +
+          " rect=" + std::to_string(resource.area.left) + "," + std::to_string(resource.area.top) + "," +
+          std::to_string(resource.area.width) + "," + std::to_string(resource.area.height));
+        for (unsigned field = 0; field != 4; ++field) {
+          constexpr unsigned rectangle[]{7, 11, 64, 32};
+          const auto p = parameter(std::string(dlssg_rects[i]) + rect_fields[field]);
+          require(p.at("successful") == true && p.at("value") == rectangle[field], "NGX DLSSG subrect key/value changed");
+        }
+      }
+      parameter("Jitter.Offset.X"); parameter("Reset"); parameter("FrameTimeDeltaInMsec");
+    };
+    for (const auto feature : {1u, 11u, 13u, 60001u, UINT32_MAX}) {
+      if (feature != UINT32_MAX)
+        require(create_entry(reinterpret_cast<void *>(0x123), feature, &parameters, &handle) == ngx_success,
+          "DLSSG diagnostic fixture failed to create feature");
+      for (const auto reply : {probe_reply::present, probe_reply::null_value, probe_reply::failed}) {
+        parameters.dlssg_values.fill(reply); arm(); evaluate(); check(reply);
+        const auto snapshot = nlohmann::json::parse(sunshine_game3d::diagnostic_metadata_json());
+        require(snapshot["ngx"][0]["feature_known"] == (feature != UINT32_MAX) &&
+            (feature == UINT32_MAX ? snapshot["ngx"][0]["feature"].is_null() : snapshot["ngx"][0]["feature"] == feature),
+          "DLSSG diagnostic probes fabricated or changed their originating feature");
+      }
+      if (feature != UINT32_MAX) require(release_entry(handle) == ngx_success, "Release DLSSG diagnostic fixture");
+    }
+    // The SDK adapter requires the exact resource getter; scalar metadata
+    // cannot make a module with an incomplete parameter API capture eligible.
+    auto api = sunshine_ngx::resolve_parameter_api(GetModuleHandleW(nullptr));
+    api.resource = nullptr; arm();
+    const auto missing = sunshine_ngx::before_evaluate(GetModuleHandleW(nullptr), api, 0x123, handle, &parameters);
+    sunshine_ngx::after_evaluate(missing, true);
+    require(!missing.ticket && !missing.diagnostic_observation.session && dlssg_resources.empty() && dlssg_finishes.empty(),
+      "Missing NGX resource getter fabricated an input observation or capture");
+
+    sunshine_game3d::arm_diagnostic_metadata(false);
+    d::set_resource_callbacks(nullptr); shutdown(); sunshine_ngx::testing::set_callbacks({});
+  }
+  void depth_owned_ui_diagnostics_test() {
+    namespace d = sunshine_game3d::diagnostic;
+    initialize(GetModuleHandleW(nullptr), false, true);
+    captures = finishes = 0;
+    sunshine_ngx::testing::set_callbacks({
+      [](std::uint64_t, const sunshine_scene_depth::frame &value) -> std::uint64_t {
+        captured_frame = value; ++captures; return 91;
+      },
+      [](std::uint64_t, bool) { ++finishes; }, nullptr});
+    d::set_resource_callbacks(&dlssg_callbacks);
+    fixture_parameters parameters;
+    parameters.dlssg_values.fill(probe_reply::present);
+    parameters.reset_unavailable = false;
+    void *handle{};
+    return_result = ngx_success;
+    require(create_entry(reinterpret_cast<void *>(0x123), 1, &parameters, &handle) == ngx_success,
+      "Depth-owned UI diagnostic fixture failed to create feature");
+    const auto evaluate = [&] {
+      const auto originals = actual_evaluations.load();
+      SetLastError(input_error);
+      require(evaluate_entry(reinterpret_cast<void *>(0x123), handle, &parameters, &callback) == return_result &&
+          GetLastError() == output_error && actual_evaluations == originals + (nested_evaluation ? 2 : 1),
+        "Depth-owned UI observation changed original calls, result or LastError");
+    };
+    const auto arm = [&] {
+      sunshine_game3d::arm_diagnostic_metadata(false);
+      sunshine_game3d::arm_diagnostic_metadata(true);
+      dlssg_resources.clear(); dlssg_finishes.clear(); feedback_requests.clear();
+    };
+    sunshine_game3d::arm_diagnostic_metadata(false);
+    evaluate();
+    const auto prior_frame = captured_frame;
+    require(captures == 1 && finishes == 1, "Depth-owned UI fixture lacks baseline capture");
+
+    parameters.reset_value = 1;
+    nested_evaluation = true;
+    for (const auto reply : {ngx_success, ngx_failure}) {
+      arm(); return_result = reply;
+      {
+        streamline_scope scope(0, 0x123);
+        scope.claim_depth_capture(true);
+        evaluate();
+      }
+      const auto snapshot = nlohmann::json::parse(sunshine_game3d::diagnostic_metadata_json());
+      require(snapshot.at("ngx").size() == 1, "SL depth ownership hid NGX UI parameters");
+      const auto &entry = snapshot.at("ngx")[0];
+      require(entry.at("feature_known") == true && entry.at("feature") == 1 && entry.at("source_id") == 0 &&
+          entry.at("scene_revision").is_null() && entry.at("capture_metadata_available") == false &&
+          entry.at("sequence_domain") == "diagnostic-depth-owned" &&
+          entry.at("resource_capture_status") == "not_attempted_depth_owned" &&
+          entry.at("result_known") == true && entry.at("successful") == (reply == ngx_success),
+        "Depth-owned NGX diagnostic fabricated capture authority or lost SDK outcome");
+      require(std::count(feedback_requests.begin(), feedback_requests.end(), "Resource:DLSSG.UIAlpha") == 1 &&
+          dlssg_resources.empty() && dlssg_finishes.empty() && captures == 1 && finishes == 1,
+        "Nested depth-owned UI observation repeated getters or initiated resource/depth capture");
+    }
+    return_result = ngx_success;
+    sunshine_game3d::arm_diagnostic_metadata(false);
+    feedback_requests.clear();
+    {
+      streamline_scope scope(0, 0x123);
+      scope.claim_depth_capture(true);
+      evaluate();
+    }
+    require(feedback_requests.empty(), "Disarmed SL-owned NGX path performed diagnostic getters");
+    nested_evaluation = false;
+    parameters.reset_value = 0;
+    evaluate();
+    require(captures == 2 && finishes == 2 && captured_frame.sequence == prior_frame.sequence + 1 &&
+        captured_frame.feedback.revision == prior_frame.feedback.revision && !captured_frame.feedback.reset,
+      "Dump-only SL-owned query changed NGX source sequencing or consumed a reset");
+
+    // Missing outer depth still allows the inner SDK wrapper to capture depth,
+    // but the optional UI inputs have one dump observation/copy opportunity.
+    fixture_parameters inner = parameters;
+    parameters.missing_depth = true;
+    nested_evaluation = true; nested_parameters = &inner;
+    arm(); evaluate();
+    require(captures == 3 && finishes == 3 && dlssg_resources.size() == 4 && dlssg_finishes.size() == 1 &&
+        std::count(feedback_requests.begin(), feedback_requests.end(), "Resource:DLSSG.UIAlpha") == 1,
+      "Rejected outer depth duplicated nested UI diagnostics or suppressed valid inner depth");
+    nested_evaluation = false; nested_parameters = nullptr;
+    sunshine_game3d::arm_diagnostic_metadata(false);
+    d::set_resource_callbacks(nullptr);
+    release_entry(handle); shutdown(); sunshine_ngx::testing::set_callbacks({});
   }
   void diagnostic_completion_identity_test() {
     initialize(GetModuleHandleW(nullptr), true, true);
@@ -1000,6 +1424,12 @@ int main() {
     std::puts("PASS delayed-original shutdown/reinitialize, retained hooks and unreadable output safety");
     capture_test();
     std::puts("PASS default-off trace with independent NGX capture, named getters, crop/orientation, feature lifetime, nested and SL deduplication");
+    nested_capture_authority_test();
+    std::puts("PASS nested NGX capture requires a validated nomination, not feature metadata, depth presence or a rejected native attempt");
+    metadata_nomination_diagnostic_test();
+    std::puts("PASS metadata-only NGX nominations preserve missing-state diagnostics, ticket completion and truthful copy counters");
+    ray_reconstruction_test();
+    std::puts("PASS RR hardware/linear depth, explicit encoding, failed/released features, and capture-authority-based SL/NGX nesting");
     reset_feedback_test();
     std::puts("PASS per-evaluation reset feedback, persistent scene revisions, no unused metadata queries and unchanged calls/LastError");
     calibration_probe_test();
@@ -1010,6 +1440,10 @@ int main() {
     std::puts("PASS concurrent NGX reset getter completion preserves scene revision and source sequence ordering");
     unknown_feature_dump_test();
     std::puts("PASS armed unknown-feature NGX diagnostic parameters/results with unchanged capture rejection, original calls and disarmed getter silence");
+    dlssg_input_diagnostics_test();
+    std::puts("PASS exact DLSSG UI resource/subrect queries across SR, FG, RR, arbitrary/unknown features");
+    depth_owned_ui_diagnostics_test();
+    std::puts("PASS SL-owned depth retains dump-only NGX UI evidence, deduplicates wrappers and preserves depth/reset ordering");
     diagnostic_completion_identity_test();
     std::puts("PASS real NGX before/after evaluation preserves full diagnostic stamp and source across known/unknown feature success/failure");
     detach_test();

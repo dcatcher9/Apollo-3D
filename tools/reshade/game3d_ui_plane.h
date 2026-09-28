@@ -6,6 +6,7 @@
 #include <cstring>
 
 namespace sunshine_game3d {
+  enum class ui_mask_channel : std::uint32_t { alpha = 0, red = 1 };
   enum class ui_plane_mode : std::uint32_t {
     screen = 0, depth_midpoint = 1, depth_midpoint_nearest_ui = 2, front_limit = 3, shallow_front = 4,
     display_fraction = 5
@@ -27,10 +28,11 @@ namespace sunshine_game3d {
 
   // Exact 16-byte b1 layout shared by renderer and diagnostic replay. Preserve
   // submitted bits, including malformed inputs handled by the shader guards.
-  inline std::array<std::uint32_t, 4> ui_parameter_words(bool enabled, const ui_plane_parameters &plane) {
+  inline std::array<std::uint32_t, 4> ui_parameter_words(bool enabled, const ui_plane_parameters &plane,
+      ui_mask_channel channel = ui_mask_channel::alpha) {
     std::uint32_t inverse_bits{};
     static_assert(sizeof(inverse_bits) == sizeof(plane.inverse_depth));
     std::memcpy(&inverse_bits, &plane.inverse_depth, sizeof(inverse_bits));
-    return {enabled ? 1u : 0u, static_cast<std::uint32_t>(plane.mode), inverse_bits, 0u};
+    return {enabled ? 1u : 0u, static_cast<std::uint32_t>(plane.mode), inverse_bits, static_cast<std::uint32_t>(channel)};
   }
 }

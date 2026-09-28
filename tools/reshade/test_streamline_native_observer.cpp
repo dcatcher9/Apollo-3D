@@ -48,6 +48,7 @@ namespace {
     object_kind kind{};
     object *queried{};
     unsigned references{1};
+    bool cookie_present{true};
   };
 #if defined(__GNUC__) && defined(__x86_64__)
   static_assert(offsetof(object, forwarded) == 16);
@@ -76,6 +77,9 @@ namespace {
   D3D12_RESOURCE_BARRIER observed_barrier{};
   bool error_preserved = true, callback_after_original = true, mutate_cookie{}, inject_capture{}, throw_callback{};
   bool trace_batch{}, mutate_barriers{};
+  unsigned association_events{};
+  bool check_entry_cookie{}, entry_cookie_present{};
+  std::uint64_t replace_barrier_cookie{};
   unsigned original_submit_count{}, original_barrier_count{}, original_forwarded_submissions{};
   void *const *original_submit_pointer{}, *const *original_wrapper_pointer{};
   const D3D12_RESOURCE_BARRIER *original_barrier_pointer{};
@@ -117,6 +121,7 @@ namespace {
     auto *value = reinterpret_cast<object *>(native);
     if (value->forwarded) value = value->forwarded;
     if (!size || *size != sizeof(value->cookie) || !output) return E_INVALIDARG;
+    if (!value->cookie_present) { SetLastError(0xbadf00d); return DXGI_ERROR_NOT_FOUND; }
     std::memcpy(output, &value->cookie, sizeof(value->cookie));
     SetLastError(0xbadf00d);
     return S_OK;
@@ -126,6 +131,7 @@ namespace {
     if (value->forwarded) value = value->forwarded;
     if (size != sizeof(value->cookie) || !input) return E_INVALIDARG;
     std::memcpy(&value->cookie, input, sizeof(value->cookie));
+    value->cookie_present = true;
     SetLastError(0xbadf00d);
     return S_OK;
   }
@@ -139,6 +145,8 @@ namespace {
     } else {
       original_barrier_count = count;
       original_barrier_pointer = barriers;
+      if (check_entry_cookie) entry_cookie_present = value->cookie_present && value->cookie != 0;
+      if (replace_barrier_cookie) value->cookie = replace_barrier_cookie;
       if (mutate_barriers) for (UINT i = 0; i != count; ++i)
         const_cast<D3D12_RESOURCE_BARRIER *>(barriers)[i].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
     }
@@ -219,6 +227,13 @@ namespace {
     observed_barriers.clear();
     if (count) observed_barriers.assign(barriers, barriers + count);
     if (count) observed_barrier = barriers[0];
+    SetLastError(0xbadf00d);
+  }
+  void on_associate_recording(std::uint64_t command, std::uint64_t *cookie) {
+    ++association_events;
+    *cookie = 0;
+    if (observer::recording_cookie_absent(command) && observer::set_recording_cookie(command, 100000 + association_events))
+      *cookie = 100000 + association_events;
     SetLastError(0xbadf00d);
   }
   void on_reset(std::uint64_t command, std::uint64_t cookie, HRESULT result) {
@@ -376,7 +391,7 @@ int main() {
     require(barrier_slot == 26 && reset_slot == 10 && close_slot == 9 && execute_slot == 10 && allocator_slot == close_slot,
       "D3D12 COM ABI differs from pinned headers");
     require(MH_Initialize() == MH_OK, "MinHook init failed"); minhook = true;
-    const observer::callbacks callbacks{on_barrier, on_reset, on_close, on_submit, on_invalidated, on_invalidated_command, on_render_pass};
+    const observer::callbacks callbacks{on_barrier, on_reset, on_close, on_submit, on_invalidated, on_invalidated_command, on_render_pass, on_associate_recording};
     observer::initialize(callbacks);
     static std::array<void *, enhanced_slot + 1> unrelated_table{};
     unrelated_table.fill(reinterpret_cast<void *>(unrelated_method));
@@ -513,6 +528,36 @@ int main() {
         original_barriers == barriers_before_invalid + 2 && original_submissions == submissions_before_invalid + 2,
       "small and large unreadable input did not fail closed after exactly one original call");
     large_batch_cases(commands, queues);
+    object first{}; first.vtable = commands[0].vtable; first.kind = object_kind::command; first.cookie_present = false;
+    object first_proxy{}; first_proxy.vtable = commands[1].vtable; first_proxy.kind = object_kind::command; first_proxy.forwarded = &first;
+    const auto associations_before = association_events;
+    const auto events_before_first = barrier_events;
+    check_entry_cookie = true;
+    barrier(first_proxy, 1, &native_barrier);
+    check_entry_cookie = false;
+    const auto first_cookie = observer::get_recording_cookie(address(first));
+    require(first_cookie && entry_cookie_present && association_events == associations_before + 1 &&
+        barrier_events == events_before_first + 1 && observed_cookie == first_cookie && observed_command == address(first),
+      "first barrier without Reset did not associate the forwarded native recording before the original call");
+    replace_barrier_cookie = first_cookie + 100;
+    barrier(first, 1, &native_barrier);
+    replace_barrier_cookie = 0;
+    require(association_events == associations_before + 1 && observed_cookie == first_cookie &&
+        observer::get_recording_cookie(address(first)) == first_cookie + 100,
+      "post-call observation rebound to a replacement recording instead of retaining its entry cookie");
+    object malformed{}; malformed.vtable = commands[0].vtable; malformed.kind = object_kind::command;
+    barrier(malformed, 1, &native_barrier);
+    require(association_events == associations_before + 1 && observed_cookie == 0 && !observer::recording_cookie_absent(address(malformed)),
+      "malformed zero private data was mistaken for an absent first recording");
+    object never_recorded{}; never_recorded.vtable = commands[0].vtable; never_recorded.kind = object_kind::command; never_recorded.cookie_present = false;
+    void *never_recorded_pointer = &never_recorded;
+    submit(queues[0], 1, &never_recorded_pointer);
+    require(association_events == associations_before + 1 && observed_commands.size() == 1 && observed_commands[0].recording_cookie == 0 &&
+        observer::recording_cookie_absent(address(never_recorded)), "submission invented an unobserved producer recording");
+    { observer::suppression_scope scope; barrier(never_recorded, 1, &native_barrier); }
+    require(association_events == associations_before + 1 && observer::recording_cookie_absent(address(never_recorded)),
+      "suppressed native work associated a source recording");
+    std::puts("PASS first native recording associates before forwarding, freezes identity, and rejects malformed/suppressed/submission bootstrap");
     observer::observe_queue(1);
     for (unsigned i = 2; i != queues.size(); ++i) observer::observe_queue(address(queues[i]));
     require(observer::counts().targets == 19 && observer::counts().rejected >= 2 && !observer::queue_ready(address(queues[9])), "per-method target bounds failed");

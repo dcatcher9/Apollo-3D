@@ -78,6 +78,27 @@ namespace sunshine_game3d {
     return true;
   }
 
+  inline const char *source_alpha_capture_block_text(source_alpha_capture_block blocked) {
+    switch (blocked) {
+      case source_alpha_capture_block::generated_current_color:
+        return "Current color alpha is unavailable during Frame Generation. Choose Discover automatically to use captured game inputs.";
+      default: return nullptr;
+    }
+  }
+
+  inline const char *source_alpha_detection_text(const ui_qualification::status &source, const source_alpha_ui_decision &decision) {
+    if (const auto blocked = source_alpha_capture_block_text(source_alpha_capture_block_for(source.selected, decision.fg))) return blocked;
+    if (!source.available) return "Finding a usable UI source; protection off";
+    // A source edit can happen before the next rendered decision. Never label
+    // the replacement using quality evidence from the previous source.
+    if (source.selected != decision.qualification.selected || source.candidate != decision.qualification.candidate)
+      return "Checking source quality";
+    if (decision.coverage.enabled) return "UI source detected automatically";
+    if (decision.coverage.state == alpha_auto_state::automatic_off)
+      return "No usable UI mask detected";
+    return "Checking source quality";
+  }
+
   inline const char *output_status_text(const automatic_status &status, const render_settings &settings) {
     if (!settings.enabled) return "2D: Game 3D is disabled";
     switch (status.phase) {

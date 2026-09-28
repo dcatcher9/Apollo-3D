@@ -93,7 +93,7 @@ namespace sunshine_streamline::provider {
     sunshine_depth::frame_depth::projection_t projection(const sunshine_scene_depth::frame &metadata) {
       return {metadata.projection.supplied, metadata.epoch, metadata.viewport,
         metadata.projection.depth_offset, metadata.projection.depth_scale,
-        metadata.projection.raw_scale, metadata.projection.raw_bias};
+        metadata.projection.raw_scale, metadata.projection.raw_bias, metadata.projection.encoding};
     }
     source_description describe_source(const depth_capture::packet &packet) {
       return {packet.metadata.resource.native, packet.capture_id, packet.metadata.sequence,
@@ -404,10 +404,23 @@ namespace sunshine_streamline::provider {
     frame_generation_snapshot fg_source;
     frame_generation_query_status fg_status;
     query_frame_generation(UINT32_MAX, fg_source, &fg_status);
-    const auto selection = data->source_policy.update(fg_status, fg_source);
+    auto selection = data->source_policy.update(fg_status, fg_source);
+    selection.check_streamline_observation = true;
+    selection.streamline_observation_revision = depth_observation_revision();
     evidence.fg = fg_source;
     evidence.fg_query = fg_status;
     evidence.selection = selection;
+    if (selection.exclude_unconfirmed_fg && data->source_metadata.frame_generation_input) {
+      data->source_metadata = {};
+      data->cache.invalidate("FG_scope_unconfirmed");
+      data->last_valid = {};
+      data->have_latest = data->shared_preservation = false;
+      data->pending_id = 0;
+      data->pending_metadata = {};
+      data->pending_grid = {};
+      data->presentations.reset();
+      data->presentation_source = {};
+    }
     if (selection.require_frame_generation) {
       const auto &previous = data->source_metadata;
       if (previous.provider != sunshine_scene_depth::provider_kind::streamline || !previous.frame_generation_input ||
@@ -641,14 +654,16 @@ namespace sunshine_streamline::provider {
       // Decode on the GPU with this capture's coefficients. Never retrofit a
       // later camera or inferred orientation when asynchronous results arrive.
       const auto &basis = data->frame.metadata.projection;
-      const auto coefficients = basis.supplied ? sunshine_projection_depth::make(
-        basis.depth_offset, basis.depth_scale, basis.raw_scale, basis.raw_bias) :
+      const auto coefficients = basis.supplied || basis.encoding == sunshine_scene_depth::depth_encoding::linear_distance ? sunshine_projection_depth::make(
+        basis.encoding, basis.depth_offset, basis.depth_scale, basis.raw_scale, basis.raw_bias) :
         sunshine_projection_depth::coefficients{};
       if (coefficients.valid()) {
         request.collect_moments = true;
         request.moments_A = coefficients.shader_A;
         request.moments_inverseB = coefficients.inverseB;
-      } else if (!basis.supplied && basis.direction_supplied) {
+        request.moments_encoding = coefficients.encoding;
+      } else if (basis.encoding == sunshine_scene_depth::depth_encoding::device &&
+          !basis.supplied && basis.direction_supplied) {
         request.collect_moments = true;
         request.moments_A = basis.reversed ? 0.f : 1.f;
         request.moments_inverseB = basis.reversed ? 1.f : -1.f;

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include "scene_feedback.h"
+#include "depth_encoding.h"
 
 // Provider adapters validate their own ABI/frame/camera evidence before emitting
 // this small value snapshot. It contains no vendor structures or pixel owner.
@@ -33,9 +34,13 @@ namespace sunshine_scene_depth {
     // evidence can supply direction without projection coefficients. Without
     // either, consumers must not assume normal.
     bool direction_supplied{};
-    // Optional texture encoding: camera clip depth = raw * scale + bias.
+    // Optional texture encoding: decoded = raw * scale + bias. Decoded is
+    // camera clip depth or positive view distance according to encoding.
     // Keep this separate from the camera coefficients and their comfort gain.
     double raw_scale{1.0}, raw_bias{};
+    // Linear inputs carry positive view distance, independently of whether
+    // paired camera matrices are available. supplied still means camera data.
+    depth_encoding encoding{depth_encoding::device};
   };
   struct resource_description {
     std::uint64_t native{};

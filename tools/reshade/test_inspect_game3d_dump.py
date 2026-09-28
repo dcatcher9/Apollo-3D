@@ -1,6 +1,9 @@
+import hashlib
 import json
 from pathlib import Path
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -46,6 +49,19 @@ class GameDumpReaderTest(unittest.TestCase):
         self.assertEqual(report["artifacts"][0]["max"], 12.5)
         self.assertTrue((self.root / "previews/depth.png").read_bytes().startswith(b"\x89PNG"))
         self.assertEqual((self.root / "depth.bin").read_bytes(), struct.pack("<4f", *values))
+
+    def test_consumed_red_mask_uses_declared_channel_without_stretch(self):
+        metadata = dict(replay=dict(ui_alpha_source="ui_source_color", ui_constant_binding=dict(mask_channel="red")))
+        for fmt, values, channels in ((61, [255, 255], 1), (54, [0, .5], 1),
+                                      (41, [.25, .75], 1), (28, [0, 0, 0, 255, 255, 0, 0, 0], 4)):
+            with self.subTest(fmt=fmt):
+                desc = self.artifact("ui_source_color", values, fmt=fmt, channels=channels, artifact_id=33)
+                report = self.inspect([desc], metadata)
+                mask = reader.read_artifact(self.root, desc)[:, :, 0].ravel()
+                expected = [[round(float(v) * 255)] * 3 for v in mask]
+                self.assertEqual(self.png("ui_source_mask.png"), expected)
+                self.assertEqual(report["artifacts"][0]["ui_source_mask_preview"]["channel"], "R")
+                self.assertFalse((self.root / "previews/ui_source_alpha.png").exists())
 
     def test_packed_color_and_rejected_lengths(self):
         (self.root / "color.bin").write_bytes(struct.pack("<I", 1023 | (512 << 10) | (3 << 30)))
@@ -178,6 +194,58 @@ class GameDumpReaderTest(unittest.TestCase):
             self.inspect([source, consumed, optional], metadata)
         with self.assertRaises(ValueError):
             self.inspect([source, optional], metadata)
+
+    def test_production_nested_inventory_controls_preview_and_discovery(self):
+        image = self.artifact("sl_ui_color_alpha", [.2, .4, .6, .5], fmt=2, channels=4, artifact_id=10)
+        row = dict(artifact_id=10, file_stem="sl_ui_color_alpha", provider="streamline",
+                   role="color_alpha", semantic="ui_color_and_alpha", state="non_null")
+        metadata = dict(ui_resources=[dict(row, role="mask", state="null")],
+                        latest_observations=dict(ui_resources=[row], status="observed-window"),
+                        optional_captures=[dict(artifact_id=10, file_stem="sl_ui_color_alpha", status="captured")])
+        report = self.inspect([image], metadata)
+        self.assertEqual(report["ui_resources"], [row])
+        self.assertEqual(report["artifacts"][0]["role"], "color_alpha")
+        self.assertEqual(self.png("sl_ui_color_alpha_alpha.png"), [[128, 128, 128]])
+        self.assertIn("ui_discovery", report)
+        # An intentionally empty canonical catalog must not revive stale flat data.
+        metadata["latest_observations"]["ui_resources"] = []
+        self.assertEqual(self.inspect([image], metadata)["ui_resources"], [])
+
+    def test_review_fingerprint_uses_native_bytes_before_swizzle_and_decode(self):
+        for fmt, values in ((87, [1, 2, 3, 128]), (24, [1023 | (2 << 30)])):
+            with self.subTest(fmt=fmt):
+                image = self.artifact("source_color", values, fmt=fmt, channels=4 if fmt == 87 else 1)
+                native_bytes = (self.root / image["file"]).read_bytes()
+                decoded, digest = reader.read_artifact(self.root, image, include_digest=True)
+                self.assertEqual(digest, hashlib.sha256(native_bytes).hexdigest())
+                self.assertEqual(decoded.shape, (1, 1, 4))
+                self.assertFalse(np.array_equal(decoded.ravel(), values))
+                (self.root / "manifest.json").write_text(json.dumps(dict(
+                    schema="sunshine.game3d.dump.v1", status="complete", artifacts=[image])))
+                report = reader.inspect(self.root)
+                self.assertIn("ui_discovery", report)
+                self.assertFalse((self.root / "previews").exists())
+
+    def test_cli_creates_review_and_report_without_overwriting_evidence(self):
+        source = self.artifact("source_color", [1, 2, 3, 0, 4, 5, 6, 255], fmt=28, channels=4)
+        (self.root / "manifest.json").write_text(json.dumps(dict(
+            schema="sunshine.game3d.dump.v1", status="complete", artifacts=[source])))
+        review_path = self.root / "review.json"
+        report_path = self.root / "ui-report.md"
+        command = [sys.executable, str(Path(reader.__file__)), str(self.root),
+                   "--write-ui-review", str(review_path), "--ui-report", str(report_path)]
+        first = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        report = json.loads(first.stdout)
+        template = json.loads(review_path.read_text(encoding="utf-8"))
+        self.assertEqual(template["manifest_sha256"], report["ui_discovery"]["manifest_sha256"])
+        self.assertIn("source\\_color", report_path.read_text(encoding="utf-8"))
+        original = {path: path.read_bytes() for path in
+                    (review_path, report_path, self.root / "manifest.json", self.root / source["file"])}
+        second = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(second.returncode, 0)
+        for path, content in original.items():
+            self.assertEqual(path.read_bytes(), content)
 
 
 if __name__ == "__main__":

@@ -3842,10 +3842,8 @@ static void draw_capture_settings(device *device, bool &force_reset)
 	}
 }
 
-static void draw_settings_overlay(effect_runtime *runtime)
+static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
 {
-	if (!sunshine_game3d::draw(runtime))
-		return;
 	if (!s_registered)
 	{
 		ImGui::TextWrapped("%s", s_status_message);
@@ -3870,133 +3868,132 @@ static void draw_settings_overlay(effect_runtime *runtime)
 		generic_current = !provided.selected && device_data && data.capture_ready && data.selected_shader_resource != 0 &&
 			data.selected_depth_stencil != 0 && data.native_access_present == device_data->native_present_index;
 	}
-	if (game_provided)
+	if (!troubleshooting)
 	{
-		// Ownership survives capture gaps. The dimensions describe the last valid
-		// source, not a claim that the current presentation has usable depth.
-		if (provided.last_valid.resource)
-			ImGui::Text("Depth: %s | %ux%u | game provided", provider_name,
-				provided.last_valid.width, provided.last_valid.height);
+		if (game_provided)
+		{
+			// Ownership survives capture gaps. The dimensions describe the last valid
+			// source, not a claim that the current presentation has usable depth.
+			if (provided.last_valid.resource)
+				ImGui::TextWrapped("Depth: %s | %ux%u | game provided", provider_name,
+					provided.last_valid.width, provided.last_valid.height);
+			else
+				ImGui::TextWrapped("Depth: %s | waiting for first depth", provider_name);
+			ImGui::SetItemTooltip("The game-provided source remains selected through capture gaps. Dimensions are from its last valid capture. Current availability and depth freshness are shown in the status rows.");
+		}
+		else if (manual && (provided.selected || data.selected_depth_stencil != data.override_depth_stencil ||
+			data.selected_identity != data.override_identity))
+			ImGui::TextWrapped("Depth: Generic (manual) | waiting for selected buffer");
+		else if (data.selected_shader_resource != 0 && data.selected_depth_stencil != 0)
+			ImGui::TextWrapped("Depth: %s | %ux%u | %s", manual ? "Generic (manual)" : "Generic",
+				data.selected_desc.texture.width, data.selected_desc.texture.height,
+				format_to_string(data.selected_desc.texture.format));
 		else
-			ImGui::Text("Depth: %s | waiting for first depth", provider_name);
-		ImGui::SetItemTooltip("The game-provided source remains selected through capture gaps. Dimensions are from its last valid capture. Current availability and depth freshness are shown in the status rows.");
+			ImGui::TextWrapped("Depth: %s | waiting for a usable buffer", manual ? "Generic (manual)" : "Generic");
+		if (!game_provided && generic_current)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+			ImGui::TextWrapped("Generic depth fallback is in use. Game-provided depth and camera data are not used.");
+			ImGui::PopStyleColor();
+		}
+		if (data.manual_recovery_probing)
+			ImGui::TextWrapped("Selected buffer is no longer rendering. Checking for replacement scene depth...");
+
+		if (!provided.selected && data.binding_state != depth_binding_state::ready)
+			ImGui::TextWrapped("%s", data.binding_detail);
+		if (game_provided)
+		{
+			// Report freshness over a completed window instead of alternating
+			// Ready/Previous on every frame-generation presentation.
+			const auto &stats = provided.presentations;
+			if (const auto total = stats.total())
+			{
+				const double percent = 100.0 / static_cast<double>(total);
+				ImGui::TextWrapped("Fresh: %.1f%% | Previous: %.1f%% | Unavailable: %.1f%%",
+					stats.fresh * percent, stats.reused * percent, stats.unavailable * percent);
+				ImGui::TextDisabled("Last %.0f s | %llu presentations", stats.window_ms / 1000.0,
+					static_cast<unsigned long long>(total));
+			}
+			else
+				ImGui::TextDisabled("Depth freshness: collecting samples (5-second window)");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Updates once per second. Fresh = newly copied depth; Previous = reused depth; Unavailable = no usable depth.\n"
+					"All observed presentations are counted. This does not identify rendered or generated color frames.");
+		}
+		bool native_effect_enabled = false;
+		if (data.native_depth_requested && runtime->get_effects_state())
+		{
+			bool game_effect_enabled = false;
+			runtime->enumerate_techniques("SunshineGame3D.fx", [&game_effect_enabled](effect_runtime *owner, effect_technique technique) {
+				char name[128] {};
+				owner->get_technique_name(technique, name);
+				if (std::strcmp(name, "SunshineGame3D") == 0 && owner->get_technique_state(technique))
+					game_effect_enabled = true;
+			});
+			// Match the exporter's primary-effect priority even if the user toggled
+			// techniques after this frame's capture-identity observation.
+			if (!game_effect_enabled)
+				runtime->enumerate_techniques("SunshineDepth3D.fx", [&native_effect_enabled](effect_runtime *owner, effect_technique technique) {
+					char name[128] {};
+					owner->get_technique_name(technique, name);
+					if (std::strcmp(name, "SunshineDepth3D") == 0 && owner->get_technique_state(technique))
+						native_effect_enabled = true;
+				});
+		}
+		if (native_effect_enabled)
+		{
+			native_depth_ui_state status = data.native_ui_state;
+			{
+				const std::shared_lock<std::shared_mutex> status_lock(s_mutex);
+				if (device_data == nullptr || data.native_ui_present != device_data->native_present_index)
+					status = native_depth_ui_state::waiting_depth;
+			}
+			switch (status)
+			{
+			case native_depth_ui_state::calibrating:
+				ImGui::Text("Game 3D: calibrating depth (%u/3 samples).", data.native_ui_samples);
+				break;
+			case native_depth_ui_state::waiting_orientation:
+				ImGui::TextWrapped("Game 3D: depth direction is unknown. In Sunshine 3D's shader controls, set Depth direction to Normal depth or Reversed depth.");
+				break;
+			case native_depth_ui_state::ready:
+				ImGui::TextUnformatted("Game 3D: depth is calibrated and ready.");
+				break;
+			default:
+				ImGui::TextUnformatted("Game 3D: waiting for current depth.");
+				break;
+			}
+		}
+		return;
 	}
-	else if (manual && (provided.selected || data.selected_depth_stencil != data.override_depth_stencil ||
-		data.selected_identity != data.override_identity))
-		ImGui::TextUnformatted("Depth: Generic (manual) | waiting for selected buffer");
-	else if (data.selected_shader_resource != 0 && data.selected_depth_stencil != 0)
-		ImGui::Text("Depth: %s | %ux%u | %s", manual ? "Generic (manual)" : "Generic",
-			data.selected_desc.texture.width, data.selected_desc.texture.height,
-			format_to_string(data.selected_desc.texture.format));
-	else
-		ImGui::Text("Depth: %s | waiting for a usable buffer", manual ? "Generic (manual)" : "Generic");
-	if (!game_provided && generic_current)
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
-		ImGui::TextWrapped("Generic depth fallback is in use. Game-provided depth and camera data are not used.");
-		ImGui::PopStyleColor();
-	}
-	if (data.manual_recovery_probing)
-		ImGui::TextWrapped("Selected buffer is no longer rendering. Checking for replacement scene depth...");
-	if (manual && ImGui::Button("Return to automatic"))
+	if (!sunshine_game3d::draw_diagnostics(runtime))
+		return;
+	ImGui::BeginDisabled(!manual && s_sunshine_auto);
+	if (ImGui::Button("Use automatic depth"))
 	{
 		set_manual_depth_override(data, {}, 0);
 		s_sunshine_auto = true;
 		reshade::set_config_value(nullptr, "SUNSHINE_DEPTH", "AutoSelectSceneDepth", s_sunshine_auto);
 	}
-	if (manual)
-		ImGui::SetItemTooltip("Let Sunshine choose the scene-depth buffer again.");
-
-	if (!provided.selected && data.binding_state != depth_binding_state::ready)
-		ImGui::TextWrapped("%s", data.binding_detail);
-	if (game_provided)
+	ImGui::SetItemTooltip("Release any manual depth override and let Sunshine choose scene depth.");
+	ImGui::EndDisabled();
+	ImGui::Spacing();
+	if (ImGui::CollapsingHeader("Advanced capture settings"))
 	{
-		// Report freshness over a completed window instead of alternating
-		// Ready/Previous on every frame-generation presentation.
-		const auto &stats = provided.presentations;
-		if (const auto total = stats.total())
-		{
-			const double percent = 100.0 / static_cast<double>(total);
-			ImGui::Text("Fresh: %.1f%% | Previous: %.1f%% | Unavailable: %.1f%%",
-				stats.fresh * percent, stats.reused * percent, stats.unavailable * percent);
-			ImGui::TextDisabled("Last %.0f s | %llu presentations", stats.window_ms / 1000.0,
-				static_cast<unsigned long long>(total));
-		}
-		else
-			ImGui::TextDisabled("Depth freshness: collecting samples (5-second window)");
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Updates once per second. Fresh = newly copied depth; Previous = reused depth; Unavailable = no usable depth.\n"
-				"All observed presentations are counted. This does not identify rendered or generated color frames.");
-	}
-	if (!ImGui::CollapsingHeader("Depth & troubleshooting"))
-		return;
-	ImGui::Indent();
-	if (!sunshine_game3d::draw_diagnostics(runtime))
-	{
+		ImGui::Indent();
+		draw_capture_settings(device, force_reset);
 		ImGui::Unindent();
-		return;
 	}
-	bool native_effect_enabled = false;
-	if (data.native_depth_requested && runtime->get_effects_state())
-	{
-		bool game_effect_enabled = false;
-		runtime->enumerate_techniques("SunshineGame3D.fx", [&game_effect_enabled](effect_runtime *owner, effect_technique technique) {
-			char name[128] {};
-			owner->get_technique_name(technique, name);
-			if (std::strcmp(name, "SunshineGame3D") == 0 && owner->get_technique_state(technique))
-				game_effect_enabled = true;
-		});
-		// Match the exporter's primary-effect priority even if the user toggled
-		// techniques after this frame's capture-identity observation.
-		if (!game_effect_enabled)
-			runtime->enumerate_techniques("SunshineDepth3D.fx", [&native_effect_enabled](effect_runtime *owner, effect_technique technique) {
-				char name[128] {};
-				owner->get_technique_name(technique, name);
-				if (std::strcmp(name, "SunshineDepth3D") == 0 && owner->get_technique_state(technique))
-					native_effect_enabled = true;
-			});
-	}
-	if (native_effect_enabled)
-	{
-		native_depth_ui_state status = data.native_ui_state;
-		{
-			const std::shared_lock<std::shared_mutex> status_lock(s_mutex);
-			if (device_data == nullptr || data.native_ui_present != device_data->native_present_index)
-				status = native_depth_ui_state::waiting_depth;
-		}
-		switch (status)
-		{
-		case native_depth_ui_state::calibrating:
-			ImGui::Text("Game 3D: calibrating depth (%u/3 samples).", data.native_ui_samples);
-			break;
-		case native_depth_ui_state::waiting_orientation:
-			ImGui::TextWrapped("Game 3D: depth direction is unknown. In Sunshine 3D's shader controls, set Depth direction to Normal depth or Reversed depth.");
-			break;
-		case native_depth_ui_state::ready:
-			ImGui::TextUnformatted("Game 3D: depth is calibrated and ready.");
-			break;
-		default:
-			ImGui::TextUnformatted("Game 3D: waiting for current depth.");
-			break;
-		}
-	}
+
 	// Request optional candidate statistics only while this list is visible.
 	// Source routing and the shared capture lifetime stay independent of the UI.
-	if (ImGui::CollapsingHeader("Manual depth selection"))
+	const bool manual_open = ImGui::CollapsingHeader("Manual depth selection");
+	ImGui::SetItemTooltip("Depth is chosen automatically. Check a buffer only to override it manually. ACTIVE marks the current source; automatic selection leaves the boxes unchecked.");
+	if (manual_open)
 	{
 		ImGui::Indent();
 		const bool is_d3d12_or_vulkan = device->get_api() == device_api::d3d12 || device->get_api() == device_api::vulkan;
 		request_depth_candidate_list(device_data);
-		if (game_provided)
-		{
-			ImGui::TextWrapped("The game supplies depth automatically. Check a buffer below only to override it manually.");
-		}
-		else if (data.binding_state == depth_binding_state::ready)
-			ImGui::TextWrapped("%s", data.binding_detail);
-		ImGui::TextWrapped("ACTIVE marks the buffer in use. Check a row only to select it manually; automatic selection leaves the boxes unchecked.");
-		ImGui::Spacing();
-		ImGui::Separator();
-		ImGui::Spacing();
 
 		std::shared_lock<std::shared_mutex> lock(s_mutex);
 
@@ -4172,29 +4169,59 @@ static void draw_settings_overlay(effect_runtime *runtime)
 					s_preserve_depth_buffers != 2 ? "Try enabling \"Copy depth buffer before fullscreen draw calls\" or disable \"Copy depth buffer before clear operations\"!" : "Disable \"Copy depth buffer before clear operations\" or select a different depth buffer!");
 			ImGui::PopTextWrapPos();
 		}
-		ImGui::Spacing();
-		if (ImGui::CollapsingHeader("Advanced capture settings"))
-		{
-			ImGui::Indent();
-			draw_capture_settings(device, force_reset);
-			ImGui::Unindent();
-		}
+
 		ImGui::Unindent();
 	}
 
 	if (force_reset)
 		reset_depth_selection(runtime, data);
-	ImGui::Unindent();
+}
+
+static void draw_settings_panel(effect_runtime *runtime, int selected_tab = -1)
+{
+	if (!sunshine_game3d::draw(runtime))
+		return;
+	// All live prose is below the controls and tab bar. Tabs keep source and
+	// preview controls stationary even when status messages wrap or disappear.
+	if (!ImGui::BeginTabBar("Game3DDetails"))
+		return;
+	if (ImGui::BeginTabItem("Status", nullptr, selected_tab == 0 ? ImGuiTabItemFlags_SetSelected : 0))
+	{
+		if (ImGui::BeginChild("StatusContent"))
+		{
+			sunshine_game3d::draw_status(runtime);
+			draw_depth_panel(runtime, false);
+		}
+		ImGui::EndChild();
+		ImGui::EndTabItem();
+	}
+	if (ImGui::BeginTabItem("Troubleshooting", nullptr, selected_tab == 1 ? ImGuiTabItemFlags_SetSelected : 0))
+	{
+		if (ImGui::BeginChild("TroubleshootingContent", ImVec2(0, 0), 0, ImGuiWindowFlags_AlwaysVerticalScrollbar))
+			draw_depth_panel(runtime, true);
+		ImGui::EndChild();
+		ImGui::EndTabItem();
+	}
+	if (ImGui::BeginTabItem("Calibration", nullptr, selected_tab == 2 ? ImGuiTabItemFlags_SetSelected : 0))
+	{
+		if (ImGui::BeginChild("CalibrationContent"))
+			sunshine_game3d::draw_calibration(runtime);
+		ImGui::EndChild();
+		ImGui::EndTabItem();
+	}
+	ImGui::EndTabBar();
+}
+
+static void draw_settings_overlay(effect_runtime *runtime)
+{
+	draw_settings_panel(runtime);
 }
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-void sunshine_game3d_test_draw_production_panel(effect_runtime *runtime, bool expanded)
+void sunshine_game3d_test_draw_production_panel(effect_runtime *runtime, unsigned mode)
 {
-	// Set only this isolated test window's tree state. No duplicate layout,
-	// control implementation, shader values or production capture state.
-	ImGui::GetStateStorage()->SetInt(ImGui::GetID("Depth & troubleshooting"), expanded);
-	ImGui::GetStateStorage()->SetInt(ImGui::GetID("Manual depth selection"), expanded);
-	draw_settings_overlay(runtime);
+	// Exercise the actual production tabs without changing capture or settings.
+	draw_settings_panel(runtime, static_cast<int>(mode) - 1);
 }
 #endif
 

@@ -119,7 +119,7 @@ namespace sunshine_streamline {
     decode_status decoded{decode_status::short_buffer};
     frame_identity frame;
     std::array<evaluated_depth_tag, 3> tags{}; // raw, high-resolution raw, linear
-    std::array<evaluated_color_tag, 4> colors{}; // HUDless2, scaling input3, scaling output4, v2 backbuffer53
+    std::array<evaluated_color_tag, 6> colors{}; // HUDless2, scaling input3/output4, backbuffer53, UI23, alpha69
     std::uint64_t epoch{}, sequence{}, tick{}, camera_tick{}, camera_sequence{}, loss_revision{};
     sunshine_scene_feedback::sample feedback;
     std::uintptr_t command_buffer{};
@@ -134,6 +134,7 @@ namespace sunshine_streamline {
     // completion, ReShade presentation or final-color/jitter registration.
     bool successful_evaluation{}, frame_correlated{}, recording_stable{};
     bool tag_boundary{}; // Copied synchronously while an OnlyValidNow tag is valid.
+    bool frame_generation_input{}; // An independently observed enabled FG role, not implied by tagging.
   };
   // Returns a value copy, never live pointers or mutable internal storage. Even
   // tracked_content_evaluation is NOT permission to drive geometry: complete
@@ -153,7 +154,7 @@ namespace sunshine_streamline {
     std::uint64_t epoch{}, sequence{}, tick{}, loss_revision{};
     frame_identity frame;
     std::uint32_t viewport{};
-    std::array<depth_source_tag, 2> tags{}; // Preferred display-resolution48, then raw0.
+    std::array<depth_source_tag, 3> tags{}; // Preferred display-resolution48, raw0, then linear49.
   };
   // Nomination only: no selected-depth prerequisite and no geometry/content
   // proof. The owner must consume a fresh sequence once per native present and
@@ -189,9 +190,19 @@ namespace sunshine_streamline {
   bool query_frame_generation(std::uint32_t viewport, frame_generation_snapshot &output,
     frame_generation_query_status *status = nullptr);
 
+  struct ui_observation_scope {
+    std::uint64_t epoch{}, revision{}, sequence{}, tick{};
+    std::uint32_t viewport{};
+  };
+  // A unique fresh viewport with a successful UI/HUD-less/color tag, independent
+  // of FG mode or camera validity. This admits capture, never authorizes a mask
+  // or claims correspondence to a ReShade presentation. UINT32_MAX searches all.
+  bool query_ui_scope(std::uint32_t viewport, ui_observation_scope &output,
+    std::uint32_t max_age_ms = 250);
+
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   namespace testing {
-    enum class abi { unsupported, v1_1_1, v2_7_30 };
+    enum class abi { unsupported, v1_0_0, v1_1_1, v2_7_30 };
     struct targets { void *constants{}, *tag{}, *tag_for_frame{}, *evaluate{}, *new_frame_token{}, *get_feature_function{}; };
     struct counters { std::uint64_t constants{}, tags{}, evaluations{}, dropped{}, invalid{}; };
     // Real inline hooks on fixture functions, without pinning the process executable.

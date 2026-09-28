@@ -96,7 +96,8 @@ namespace {
 
   unsigned bytes_per_pixel(DXGI_FORMAT format) {
     if (format == DXGI_FORMAT_R32G32B32A32_FLOAT) return 16;
-    if (format == DXGI_FORMAT_R16_FLOAT) return 2;
+    if (format == DXGI_FORMAT_R8_UNORM) return 1;
+    if (format == DXGI_FORMAT_R16_FLOAT || format == DXGI_FORMAT_R16_UNORM) return 2;
     return format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
   }
 

@@ -4,7 +4,7 @@
 #define main sunshine_legacy_d3d11_fixture_main
 #include "test_depth3d_runtime.cpp"
 #undef main
-#include "game3d_renderer.h"
+#include "test_game3d_render_input.h"
 #include "test_game3d_debug_dump_runtime.h"
 #include "test_game3d_budget.h"
 
@@ -112,7 +112,7 @@ namespace {
     for (const auto &test : native11_cases) {
       p.strength = test.strength; p.depth_view = test.view; p.depth_ready = test.ready;
       fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
-      require(renderer.render(queue->get_immediate_command_list(), backbuffer, test.ready ? observed.depth_view : api::resource_view{}, p), "D3D11 native renderer rejected frame");
+      require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), backbuffer, test.ready ? observed.depth_view : api::resource_view{}, p), "D3D11 native renderer rejected frame");
       const bool dump_case = std::strcmp(test.name,"strength50")==0 || std::strcmp(test.name,"depth-unavailable")==0;
       if (dump_case) dump.begin(observed.runtime,renderer,p,test.ready ? observed.depth_view : api::resource_view{},false,
         static_cast<api::color_space>(fixture.color));
@@ -154,7 +154,7 @@ namespace {
     for (const auto &test : sunshine_game3d_test::budget_cases()) {
       const auto parameters = sunshine_game3d_test::budget_parameters(test);
       fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
-      require(renderer.render(queue->get_immediate_command_list(), backbuffer, observed.depth_view, parameters),
+      require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), backbuffer, observed.depth_view, parameters),
         "D3D11 budget renderer rejected frame");
       const bool dump_case = std::strcmp(test.name, "strength100") == 0;
       if (dump_case) dump.begin(observed.runtime, renderer, parameters, observed.depth_view, false,

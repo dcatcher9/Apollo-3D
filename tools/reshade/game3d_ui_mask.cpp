@@ -9,15 +9,18 @@
 namespace sunshine_game3d::ui_mask {
   namespace {
     namespace capture = sunshine_streamline::depth_capture;
-    constexpr unsigned runtime_capacity = 4, snapshot_capacity = 3;
+    constexpr unsigned runtime_capacity = 4, source_count = 4, snapshots_per_source = 2;
+    constexpr unsigned snapshot_capacity = source_count * snapshots_per_source;
     struct slot {
       std::uint64_t reservation{};
       boundary origin;
       capture::diagnostic_ticket ticket;
+      capture::source_ref source;
     };
     struct entry {
       request wanted;
       std::uint64_t generation{}, latest_sequence{};
+      unsigned latest_kinds{};
       std::uint64_t last_capture_tick{};
       bool captured{};
       std::array<slot, snapshot_capacity> snapshots;
@@ -30,6 +33,7 @@ namespace sunshine_game3d::ui_mask {
     struct state {
       SRWLOCK lock = SRWLOCK_INIT;
       std::uint64_t serial{};
+      capture_gate_observation hook_gate;
       std::array<entry, runtime_capacity> entries;
     };
     state &owner() {
@@ -50,6 +54,7 @@ namespace sunshine_game3d::ui_mask {
     void clear(entry &value, retired &values, unsigned &count) {
       for (auto &item : value.snapshots) retire(item, values, count);
       value.latest_sequence = 0;
+      value.latest_kinds = 0;
       value.last_capture_tick = 0;
       value.captured = false;
       value.generation = ++owner().serial;
@@ -61,7 +66,8 @@ namespace sunshine_game3d::ui_mask {
     }
     bool same(const request &a, const request &b) {
       return a.runtime == b.runtime && a.device_identity == b.device_identity && a.epoch == b.epoch && a.revision == b.revision &&
-        a.viewport == b.viewport && a.width == b.width && a.height == b.height && a.enabled == b.enabled;
+        a.viewport == b.viewport && a.width == b.width && a.height == b.height && a.enabled == b.enabled &&
+        a.allowed_kinds == b.allowed_kinds;
     }
     bool matches(const request &a, std::uint64_t epoch, std::uint64_t revision, std::uint32_t viewport) {
       return a.enabled && a.epoch == epoch && a.revision == revision && a.viewport == viewport;
@@ -69,23 +75,25 @@ namespace sunshine_game3d::ui_mask {
     bool recent(std::uint64_t tick, std::uint64_t now) {
       return tick && now >= tick && now - tick < sunshine_scene_depth::maximum_source_age_ms;
     }
-    bool alpha_format(std::uint32_t format) {
-      // Typed DXGI color formats with a real alpha channel, not BGRX padding.
-      return format == 2 || format == 10 || format == 24 || format == 28 || format == 29 || format == 87 || format == 91;
+    unsigned priority(source_kind kind) {
+      return kind == source_kind::alpha ? 4u : kind == source_kind::color_and_alpha ? 3u :
+        kind == source_kind::backbuffer ? 2u : kind == source_kind::hudless ? 1u : 0u;
     }
-    bool usable(const request &wanted, const capture::diagnostic_texture &value) {
+    bool usable(const request &wanted, source_kind kind, const capture::diagnostic_texture &value) {
       return value.device_identity == wanted.device_identity && value.width == wanted.width && value.height == wanted.height &&
         !value.area.left && !value.area.top && value.area.width == wanted.width && value.area.height == wanted.height &&
-        alpha_format(value.format);
+        supported_format(kind, value.format);
     }
     struct observed_slot {
       slot value;
       capture::diagnostic_texture texture;
       capture::status status{capture::status::unavailable};
+      std::uint64_t current_present_generation{};
     };
     // Poll outside our lock, then commit only against the identical generation
     // and reservation. Producers/consumers can never revive a revoked scope.
-    bool collect(std::uint64_t runtime, std::uint64_t now, selection *out) {
+    bool collect(std::uint64_t runtime, std::uint64_t now, selection *out, std::uint32_t allowed = all_sources,
+        std::uint64_t consumer_queue = 0) {
       auto &state = owner();
       std::array<observed_slot, snapshot_capacity> observed;
       request wanted;
@@ -98,11 +106,18 @@ namespace sunshine_game3d::ui_mask {
       }
       ReleaseSRWLockShared(&state.lock);
       if (!wanted.enabled) return false;
-      std::uint64_t newest_ready{};
+      std::array<std::uint64_t, source_count> newest_ready{};
+      unsigned best_priority{};
       for (auto &item : observed) if (item.value.ticket && recent(item.value.origin.source.tick, now)) {
-        item.status = capture::acquire_diagnostic_texture(item.value.ticket, item.texture);
-        if (item.status == capture::status::ready && usable(wanted, item.texture))
-          newest_ready = std::max(newest_ready, item.value.origin.source.sequence);
+        item.status = consumer_queue ? capture::acquire_local_texture(item.value.ticket, consumer_queue, item.texture) :
+          capture::acquire_diagnostic_texture(item.value.ticket, item.texture);
+        item.current_present_generation = capture::source_present_generation(item.value.source);
+        if (item.status == capture::status::ready && usable(wanted, item.value.origin.kind, item.texture)) {
+          const auto rank = priority(item.value.origin.kind);
+          if (!rank || rank > source_count) continue;
+          newest_ready[rank - 1] = std::max(newest_ready[rank - 1], item.value.origin.source.sequence);
+          if (allowed & source_mask(item.value.origin.kind)) best_priority = std::max(best_priority, rank);
+        }
       }
       retired old; unsigned count = 0;
       bool found = false;
@@ -113,18 +128,21 @@ namespace sunshine_game3d::ui_mask {
           const auto &checked = observed[i];
           if (!stored.reservation || stored.reservation != checked.value.reservation) continue;
           // A record call is still reserving its slot. Never evict pending work
-          // merely to admit another frame when all three slots are occupied.
+          // merely to admit another frame when its two source slots are occupied.
           if (!stored.ticket || !checked.value.ticket) continue;
           // Older SDK callbacks can arrive after a newer one. Their entry tick
           // cannot expire a future snapshot; acquire likewise cannot expose it.
           if (now < stored.origin.source.tick) continue;
-          const bool ready = checked.status == capture::status::ready && usable(wanted, checked.texture);
+          const auto rank = priority(stored.origin.kind);
+          if (!rank || rank > source_count) { retire(stored, old, count); continue; }
+          const bool ready = checked.status == capture::status::ready && usable(wanted, stored.origin.kind, checked.texture);
           const bool pending = checked.status == capture::status::recorded || checked.status == capture::status::submitted;
           if (!recent(stored.origin.source.tick, now) || (!ready && !pending) ||
-              (ready && stored.origin.source.sequence < newest_ready)) {
+              (ready && stored.origin.source.sequence < newest_ready[rank - 1])) {
             retire(stored, old, count);
-          } else if (ready && stored.origin.source.sequence == newest_ready && out) {
+          } else if (ready && rank == best_priority && stored.origin.source.sequence == newest_ready[rank - 1] && out) {
             out->ticket = stored.ticket; out->texture = checked.texture; out->origin = stored.origin;
+            out->current_source_present_generation = checked.current_present_generation;
             found = true;
           }
         }
@@ -139,7 +157,9 @@ namespace sunshine_game3d::ui_mask {
   void set_request(const request &value) {
     if (!value.runtime) return;
     auto wanted = value;
-    wanted.enabled = wanted.enabled && wanted.device_identity && wanted.epoch && wanted.width && wanted.height;
+    wanted.allowed_kinds &= all_sources;
+    wanted.enabled = wanted.enabled && wanted.device_identity && wanted.epoch && wanted.width && wanted.height &&
+      wanted.allowed_kinds;
     auto &state = owner();
     retired old; unsigned count = 0;
     AcquireSRWLockExclusive(&state.lock);
@@ -153,6 +173,10 @@ namespace sunshine_game3d::ui_mask {
       selected->wanted = wanted.enabled ? wanted : request{};
     } else if (selected) {
       selected->wanted.min_capture_interval_ms = wanted.min_capture_interval_ms;
+      selected->wanted.capture_backbuffer = wanted.capture_backbuffer;
+      if (!wanted.capture_backbuffer)
+        for (auto &snapshot : selected->snapshots)
+          if (snapshot.origin.kind == source_kind::backbuffer) retire(snapshot, old, count);
     }
     ReleaseSRWLockExclusive(&state.lock);
     release(old);
@@ -174,6 +198,7 @@ namespace sunshine_game3d::ui_mask {
     retired old; unsigned count = 0;
     AcquireSRWLockExclusive(&state.lock);
     for (auto &item : state.entries) { clear(item, old, count); item.wanted = {}; }
+    state.hook_gate = {};
     ReleaseSRWLockExclusive(&state.lock);
     release(old);
   }
@@ -194,6 +219,11 @@ namespace sunshine_game3d::ui_mask {
     return collect(runtime, now_ms, &out);
   }
 
+  bool acquire_kind(std::uint64_t runtime, source_kind kind, selection &out, std::uint64_t now_ms, std::uint64_t consumer_queue) {
+    out = {};
+    return source_mask(kind) && collect(runtime, now_ms, &out, source_mask(kind), consumer_queue);
+  }
+
   bool query_diagnostic(std::uint64_t runtime, diagnostic_snapshot &out) {
     out = {};
     auto &state = owner();
@@ -202,6 +232,8 @@ namespace sunshine_game3d::ui_mask {
     for (const auto &item : state.entries) if (item.wanted.runtime == runtime && item.wanted.enabled) {
       out = item.diagnostic;
       out.wanted = item.wanted;
+      out.hook_gate = state.hook_gate;
+      out.request_generation = item.generation;
       found = true;
       break;
     }
@@ -209,25 +241,44 @@ namespace sunshine_game3d::ui_mask {
     return found;
   }
 
-  bool interested(std::uint64_t epoch, std::uint64_t revision, std::uint32_t viewport) {
+  bool interested(std::uint64_t epoch, std::uint64_t revision, std::uint32_t viewport,
+      std::uint32_t *matching_requests) {
     auto &state = owner();
     unsigned matches_count = 0;
     AcquireSRWLockShared(&state.lock);
     for (const auto &item : state.entries) if (matches(item.wanted, epoch, revision, viewport)) ++matches_count;
     ReleaseSRWLockShared(&state.lock);
+    if (matching_requests) *matching_requests = matches_count;
     // Two runtimes claiming the same viewport cannot safely share a ticket:
     // each ticket binds one destination/queue. Do not guess the active consumer.
     return matches_count == 1;
   }
 
+  void observe_gate(const capture_gate_observation &value) {
+    auto &state = owner();
+    AcquireSRWLockExclusive(&state.lock);
+    // SDK calls can finish out of order; telemetry must not move backwards.
+    if (value.sequence >= state.hook_gate.sequence) state.hook_gate = value;
+    ReleaseSRWLockExclusive(&state.lock);
+  }
+
   attempt begin(const boundary &where, const capture::input &input) {
     auto &state = owner();
     const auto &source = where.source;
+    const auto rank = priority(where.kind);
+    if (!rank) return {};
+    const auto kind_bit = 1u << rank;
+    const auto newer = [&](const entry &item) {
+      return source.sequence > item.latest_sequence ||
+        (source.sequence == item.latest_sequence && !(item.latest_kinds & kind_bit));
+    };
     std::uint64_t runtime{};
     unsigned matches_count = 0;
     AcquireSRWLockShared(&state.lock);
     for (const auto &item : state.entries) if (matches(item.wanted, source.epoch, source.observation_revision, source.viewport)) {
-      if (source.sequence <= item.latest_sequence) { ReleaseSRWLockShared(&state.lock); return {}; }
+      if (!(item.wanted.allowed_kinds & source_mask(where.kind))) continue;
+      if (where.kind == source_kind::backbuffer && !item.wanted.capture_backbuffer) continue;
+      if (!newer(item)) { ReleaseSRWLockShared(&state.lock); return {}; }
       runtime = item.wanted.runtime; ++matches_count;
     }
     ReleaseSRWLockShared(&state.lock);
@@ -237,8 +288,12 @@ namespace sunshine_game3d::ui_mask {
     attempt result;
     AcquireSRWLockExclusive(&state.lock);
     for (auto &item : state.entries) if (item.wanted.runtime == runtime &&
-        matches(item.wanted, source.epoch, source.observation_revision, source.viewport) && source.sequence > item.latest_sequence) {
+        matches(item.wanted, source.epoch, source.observation_revision, source.viewport) && newer(item)) {
+      if (!(item.wanted.allowed_kinds & source_mask(where.kind))) break;
+      if (where.kind == source_kind::backbuffer && !item.wanted.capture_backbuffer) break;
+      if (source.sequence != item.latest_sequence) item.latest_kinds = 0;
       item.latest_sequence = source.sequence;
+      item.latest_kinds |= kind_bit;
       item.diagnostic = {};
       item.diagnostic.wanted = item.wanted;
       item.diagnostic.latest_boundary = where;
@@ -247,23 +302,33 @@ namespace sunshine_game3d::ui_mask {
       item.last_attempt = where;
 #endif
       result.runtime = runtime; result.generation = item.generation; result.sequence = source.sequence;
+      result.kind = where.kind;
       const auto &area = source.resource.area;
       const bool shape = (!source.resource.width || source.resource.width == item.wanted.width) &&
         (!source.resource.height || source.resource.height == item.wanted.height) && !area.left && !area.top &&
         (!area.width || area.width == item.wanted.width) && (!area.height || area.height == item.wanted.height);
       if (!where.command || !source.resource.native || !input.source || !shape ||
           source.valid_until == sunshine_scene_depth::lifetime::unsupported) {
-        for (auto &snapshot : item.snapshots) retire(snapshot, old, count);
-      } else if (!item.wanted.min_capture_interval_ms || !item.captured ||
+        for (auto &snapshot : item.snapshots) if (snapshot.origin.kind == where.kind) retire(snapshot, old, count);
+      } else if (where.kind != source_kind::backbuffer || !item.wanted.min_capture_interval_ms || !item.captured ||
           (source.tick >= item.last_capture_tick && source.tick - item.last_capture_tick >= item.wanted.min_capture_interval_ms)) {
-        for (auto &snapshot : item.snapshots) if (!snapshot.reservation) {
+        // Two reservations per semantic source prevent a full-scene alpha
+        // candidate from starving HUD-less comparison. The shared native owner
+        // additionally enforces its global snapshot and allocation-byte limits.
+        const auto begin = (rank - 1) * snapshots_per_source;
+        for (unsigned i = begin; i != begin + snapshots_per_source; ++i) if (!item.snapshots[i].reservation) {
+          auto &snapshot = item.snapshots[i];
           result.reservation = ++state.serial;
           snapshot.reservation = result.reservation; snapshot.origin = where;
+          snapshot.origin.source_present_generation = input.source_present_generation;
+          snapshot.source = input.source;
           // Reserve the cadence together with the slot, before native recording
           // can reenter this owner. Skipped tags still finish their SDK call and
           // revoke older pixels on failure, exactly like a capacity skip.
-          item.last_capture_tick = source.tick;
-          item.captured = true;
+          if (where.kind == source_kind::backbuffer) {
+            item.last_capture_tick = source.tick;
+            item.captured = true;
+          }
           item.diagnostic_reservation = result.reservation;
           item.diagnostic.record_attempted = true;
           break;
@@ -275,12 +340,10 @@ namespace sunshine_game3d::ui_mask {
     release(old);
     if (!result.reservation) return result;
     capture::record_diagnostic record;
-    // A synchronous pre-FG snapshot runs at this command's current boundary.
-    // Prefer current recording evidence over a stale tag hint. If this recording
-    // contains no state observation, the capture owner validates the explicitly
-    // provided state under the ordinary source contract; never invent a state.
+    // OnlyValidNow can use current recording evidence over a stale hint.
+    // Longer-lived tags retain their declared lifetime and strict state contract.
     auto ticket = capture::record_local_texture(where.command, input, &record,
-      capture::local_texture_state_policy::prefer_observed_recording);
+      capture::auxiliary_state_policy(input));
     bool retained = false;
     AcquireSRWLockExclusive(&state.lock);
     for (auto &item : state.entries) if (item.wanted.runtime == runtime && item.generation == result.generation) {
@@ -311,7 +374,8 @@ namespace sunshine_game3d::ui_mask {
     bool current = false;
     AcquireSRWLockExclusive(&state.lock);
     for (auto &item : state.entries) if (item.wanted.runtime == value.runtime && item.generation == value.generation) {
-      if (item.latest_sequence == value.sequence && item.diagnostic_reservation == value.reservation) {
+      if (item.latest_sequence == value.sequence && item.diagnostic.latest_boundary.kind == value.kind &&
+          item.diagnostic_reservation == value.reservation) {
         item.diagnostic.sdk_result_known = true;
         item.diagnostic.sdk_successful = successful;
       }
@@ -319,7 +383,7 @@ namespace sunshine_game3d::ui_mask {
       // a newer successful call that completed on another application thread.
       if (!successful) {
         for (auto &snapshot : item.snapshots)
-          if (snapshot.origin.source.sequence <= value.sequence) retire(snapshot, old, count);
+          if (snapshot.origin.kind == value.kind && snapshot.origin.source.sequence <= value.sequence) retire(snapshot, old, count);
       } else {
         for (const auto &snapshot : item.snapshots)
           if (snapshot.reservation == value.reservation && snapshot.ticket.id == value.ticket.id) current = true;

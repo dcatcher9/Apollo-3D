@@ -2,6 +2,7 @@
 // Functional GPU regression for the actual dump snapshot owner. No timing claim.
 #include "streamline_depth_capture.h"
 #include "streamline_native_observer.h"
+#include "native_resource_identity.h"
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -111,7 +112,7 @@ namespace {
     unsigned bpp{}, width{64}, height{48};
     capture::input input;
     texture_case(fixture &gpu, DXGI_FORMAT format, unsigned bytes,
-        D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE) : bpp(bytes) {
+        D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE, bool retain_before_barrier = true) : bpp(bytes) {
       D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
       desc.Width = width; desc.Height = height; desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1; desc.Format = format;
       desc.Flags = flags;
@@ -127,13 +128,16 @@ namespace {
       for (unsigned image = 0; image != 2; ++image) for (unsigned y = 0; y != height; ++y) for (unsigned x = 0; x != width * bpp; ++x)
         mapped[image * size + y * footprint.Footprint.RowPitch + x] = static_cast<unsigned char>((x * 7 + y * 11 + image * 97) & 255);
       upload->Unmap(0, nullptr);
-      input.source = capture::retain_source(native(source.Get())); require(bool(input.source), "retain typed source");
+      if (retain_before_barrier) {
+        input.source = capture::retain_source(native(source.Get())); require(bool(input.source), "retain typed source");
+      }
       input.resource.native = native(source.Get()); input.resource.area = {4, 3, width - 8, height - 6};
       input.valid_until = sunshine_scene_depth::lifetime::at_call; input.force_snapshot = true;
       input.proof = sunshine_scene_depth::state_proof::declared;
       input.native_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
       copy(gpu, 0);
-      transition(gpu.list.Get(), source.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      if (retain_before_barrier)
+        transition(gpu.list.Get(), source.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
     void copy(fixture &gpu, unsigned image) {
       const auto desc = source->GetDesc(); UINT64 size{}; gpu.device->GetCopyableFootprints(&desc, 0, 1, 0, nullptr, nullptr, nullptr, &size);
@@ -143,13 +147,16 @@ namespace {
       gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     }
     void verify_host(fixture &gpu, const capture::diagnostic_texture &snapshot, unsigned image = 0,
-        ID3D11Texture2D *already_open = nullptr) {
+        ID3D11Texture2D *already_open = nullptr, DXGI_FORMAT expected_format = DXGI_FORMAT_UNKNOWN) {
       require(snapshot.width == width && snapshot.height == height && snapshot.area.left == 4 && snapshot.area.width == width - 8,
         "allocation or tagged crop lost");
       ComPtr<ID3D11Texture2D> opened, staging;
       if (already_open) opened = already_open;
       else check(gpu.host1->OpenSharedResource1(reinterpret_cast<HANDLE>(snapshot.shared_handle), IID_PPV_ARGS(&opened)), "host shared texture open");
-      D3D11_TEXTURE2D_DESC desc{}; opened->GetDesc(&desc); require(desc.Format == source->GetDesc().Format, "typed format changed");
+      if (expected_format == DXGI_FORMAT_UNKNOWN) expected_format = source->GetDesc().Format;
+      D3D11_TEXTURE2D_DESC desc{}; opened->GetDesc(&desc);
+      require(desc.Format == expected_format && snapshot.format == unsigned(expected_format),
+        "shared host texture does not expose the captured typed format");
       desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = desc.MiscFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
       check(gpu.host->CreateTexture2D(&desc, nullptr, &staging), "host staging");
       gpu.context->CopyResource(staging.Get(), opened.Get());
@@ -240,96 +247,220 @@ namespace {
     }
   };
 
-  void observed_recording_color_capture(fixture &gpu, DXGI_FORMAT format) {
+  capture::diagnostic_ticket auxiliary_snapshot(fixture &gpu, bool shared, const capture::input &input,
+      capture::record_diagnostic *diagnostic, capture::texture_state_policy policy) {
+    return shared ? capture::record_diagnostic_texture(native(gpu.list.Get()), input, diagnostic, policy) :
+      capture::record_local_texture(native(gpu.list.Get()), input, diagnostic, policy);
+  }
+
+  void first_recording_depth_capture(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    consumer_fixture consumer(gpu);
+    texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4, D3D12_RESOURCE_FLAG_NONE, false);
+    gpu.submit(); gpu.wait(); gpu.reset(); // Finish the source upload on its own recording.
+    require(!depth.input.source && !sunshine_native_identity::resource_cookie(depth.source.Get()),
+      "first-resource fixture retained source identity before the observed barrier");
+
+    // Hooks are already installed, but these native lists have never been
+    // observed explicitly or Reset. CreateCommandList returns an open recording.
+    ComPtr<ID3D12CommandAllocator> empty_allocator, source_allocator;
+    ComPtr<ID3D12GraphicsCommandList> empty_list, source_list;
+    const auto fresh_list = [&](ComPtr<ID3D12CommandAllocator> &allocator,
+        ComPtr<ID3D12GraphicsCommandList> &list) {
+      check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)),
+        "first-recording allocator");
+      check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+        IID_PPV_ARGS(&list)), "first-recording command list");
+      require(observer::get_recording_cookie(native(list.Get())) == 0,
+        "fresh native command list already has a recording cookie");
+      require(observer::command_ready(native(list.Get())), "fresh native list did not share installed hooks");
+    };
+    fresh_list(empty_allocator, empty_list);
+    fresh_list(source_allocator, source_list);
+
+    // Neither this open command list nor this native resource has been
+    // registered. Preserve the first ordinary transition before NGX supplies
+    // the resource to retain_source. Upload left the source in COPY_DEST.
+    transition(source_list.Get(), depth.source.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+      D3D12_RESOURCE_STATE_COPY_SOURCE);
+    const auto first_cookie = observer::get_recording_cookie(native(source_list.Get()));
+    const auto first_source_cookie = sunshine_native_identity::resource_cookie(depth.source.Get());
+
+    auto input = depth.input;
+    input.source = capture::retain_source(native(depth.source.Get()));
+    require(bool(input.source), "retain source after its first ordinary barrier");
+    input.provider = sunshine_scene_depth::provider_kind::ngx;
+    input.epoch = 73; input.sequence = 1; input.source_id = 91; input.viewport = 0;
+    input.tick = GetTickCount64();
+    input.native_state = 0; // NGX supplies no resource-state declaration.
+    input.proof = sunshine_scene_depth::state_proof::observed_nonzero;
+    capture::record_diagnostic diagnostic;
+    const auto empty_ticket = capture::nominate_evaluation(native(empty_list.Get()), input, UINT64_MAX, &diagnostic);
+    if (empty_ticket) capture::finish(empty_ticket, false); // Metadata-only nomination never authorizes pixels.
+    require(diagnostic.result == capture::status::missing_state && diagnostic.stage == capture::record_stage::missing_state &&
+        !diagnostic.observed && !diagnostic.copy_state_known,
+      "fresh recording imported NGX state from another command list's source barrier");
+    check(empty_list->Close(), "empty first-recording close");
+    capture::command_destroyed(native(empty_list.Get()));
+
+    input.sequence = 2; input.tick = GetTickCount64();
+    const auto ticket = capture::nominate_evaluation(native(source_list.Get()), input, UINT64_MAX, &diagnostic);
+    if (ticket) capture::finish(ticket, diagnostic.result == capture::status::recorded);
+    if (diagnostic.result != capture::status::recorded) std::fprintf(stderr,
+      "first native barrier: result=%s stage=%s before_nomination_cookie=%llu nomination_cookie=%llu source_cookie_at_barrier=%llu observed=%u\n",
+      capture::name(diagnostic.result), capture::name(diagnostic.stage), static_cast<unsigned long long>(first_cookie),
+      static_cast<unsigned long long>(diagnostic.recording_cookie), static_cast<unsigned long long>(first_source_cookie), unsigned(diagnostic.observed));
+    require(first_cookie && first_source_cookie && ticket && diagnostic.result == capture::status::recorded && diagnostic.observed &&
+        !diagnostic.blocked && diagnostic.observed_state == D3D12_RESOURCE_STATE_COPY_SOURCE &&
+        diagnostic.copy_state_known && diagnostic.copy_state == D3D12_RESOURCE_STATE_COPY_SOURCE &&
+        diagnostic.used_observed_state && diagnostic.recording_cookie == first_cookie,
+      "NGX nomination lost the first pre-retention resource barrier or replaced its recording identity");
+    transition(source_list.Get(), depth.source.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE); // Validate exact source-state restoration.
+    check(source_list->Close(), "first-recording source close");
+    ID3D12CommandList *lists[]{source_list.Get()}; gpu.queue->ExecuteCommandLists(1, lists); gpu.wait();
+    check(source_allocator->Reset(), "first-recording completed allocator reset");
+    check(source_list->Reset(source_allocator.Get(), nullptr), "first-recording source retirement");
+    capture::poll();
+
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    require(capture::acquire(native(gpu.foreign_queue.Get()), 1, packet, &acquired) && packet.pixel_ready &&
+        !packet.shared_preservation && packet.capture_id == ticket &&
+        packet.metadata.provider == sunshine_scene_depth::provider_kind::ngx && !packet.metadata.frame_generation_input,
+      "completed first-recording NGX depth was unavailable or changed provider role");
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
+    readback actual(gpu, target.Get());
+    require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "first-recording NGX depth readback copy failed");
+    actual.record(consumer.list.Get(), target.Get());
+    capture::complete_frame(packet, 1);
+    consumer.submit(); consumer.wait(); consumer.reset();
+    actual.verify(depth.width, depth.height, depth.bpp);
+    packet = {};
+    capture::retire_source(input.provider, input.epoch, input.source_id);
+    capture::command_destroyed(native(source_list.Get()));
+    capture::command_destroyed(native(consumer.list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS first native recording and resource: barrier before registration/Reset/retain_source preserves observed-only NGX depth and exact pixels; cross-recording state rejected%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
+  void observed_recording_color_capture(fixture &gpu, DXGI_FORMAT format, bool shared,
+      D3D12_RESOURCE_STATES observed_state = D3D12_RESOURCE_STATE_RENDER_TARGET,
+      DXGI_FORMAT snapshot_format = DXGI_FORMAT_UNKNOWN,
+      D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+      bool frame_generation = true,
+      D3D12_RESOURCE_STATES declared_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+    if (snapshot_format == DXGI_FORMAT_UNKNOWN) snapshot_format = format;
     consumer_fixture consumer(gpu);
     if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
-    constexpr auto policy = capture::local_texture_state_policy::prefer_observed_recording;
-    constexpr auto rt = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    constexpr auto uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    texture_case image(gpu, format, 4,
-      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    auto input = image.input; input.frame_generation_input = true; input.native_state = uav;
+    constexpr auto policy = capture::texture_state_policy::prefer_observed_recording;
+    const auto rt = observed_state;
+    texture_case image(gpu, format, format == DXGI_FORMAT_R8_UNORM ? 1 : 4, flags);
+    auto input = image.input; input.frame_generation_input = frame_generation; input.native_state = declared_state;
     transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, rt);
     capture::record_diagnostic diagnostic;
     const auto strict_rejection = [&] {
       require(diagnostic.result == capture::status::conflicting_state &&
         diagnostic.stage == capture::record_stage::conflicting_state && diagnostic.observed && !diagnostic.blocked &&
-        diagnostic.native_state == uav && diagnostic.observed_state == rt && diagnostic.recording_cookie &&
+        diagnostic.native_state == declared_state && diagnostic.observed_state == rt && diagnostic.recording_cookie &&
         !diagnostic.copy_state_known && !diagnostic.used_observed_state,
-        "strict capture changed admission or lost declared UAV/observed RT evidence");
+        "strict capture changed admission or lost declared/observed state evidence");
     };
     require(!capture::record_diagnostic_texture(native(gpu.list.Get()), input, &diagnostic),
       "optional shared diagnostic accepted conflicting tag state"); strict_rejection();
     require(!capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic),
       "default local capture accepted conflicting tag state"); strict_rejection();
 
-    // The opt-in cannot escape its synchronous Streamline FG input role.
+    // Both storage lifetimes use the same synchronous Streamline input policy;
+    // FG status is not part of the resource-state proof.
     const auto reject_role = [&](const capture::input &wrong) {
-      require(!capture::record_local_texture(native(gpu.list.Get()), wrong, &diagnostic, policy) &&
+      require(!auxiliary_snapshot(gpu, shared, wrong, &diagnostic, policy) &&
         diagnostic.result == capture::status::malformed && diagnostic.stage == capture::record_stage::malformed_input &&
         !diagnostic.copy_state_known, "observed-recording policy accepted a different capture role");
     };
     auto wrong = input; wrong.provider = sunshine_scene_depth::provider_kind::ngx; reject_role(wrong);
-    wrong = input; wrong.frame_generation_input = false; reject_role(wrong);
     wrong = input; wrong.force_snapshot = false; reject_role(wrong);
     for (const auto lifetime : {sunshine_scene_depth::lifetime::until_present,
         sunshine_scene_depth::lifetime::until_evaluation, sunshine_scene_depth::lifetime::unsupported}) {
       wrong = input; wrong.valid_until = lifetime; reject_role(wrong);
     }
-    require(!capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic,
-      static_cast<capture::local_texture_state_policy>(99)) && diagnostic.result == capture::status::malformed,
-      "unknown local state policy silently selected a fallback");
+    require(!auxiliary_snapshot(gpu, shared, input, &diagnostic,
+      static_cast<capture::texture_state_policy>(99)) && diagnostic.result == capture::status::malformed,
+      "unknown auxiliary state policy silently selected a fallback");
 
     // Ordinary depth still requires its source contract to agree with evidence.
     texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
-    auto depth_input = depth.input; depth_input.epoch = 1; depth_input.sequence = 1; depth_input.native_state = uav;
+    auto depth_input = depth.input; depth_input.epoch = 1; depth_input.sequence = 1; depth_input.native_state = declared_state;
     require(!capture::record(native(gpu.list.Get()), depth_input, &diagnostic) &&
       diagnostic.result == capture::status::conflicting_state && !diagnostic.copy_state_known,
-      "ordinary depth admission was weakened by the local color policy");
+      "ordinary depth admission was weakened by the auxiliary color policy");
 
     const auto record = [&] {
-      auto ticket = capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic, policy);
+      auto ticket = auxiliary_snapshot(gpu, shared, input, &diagnostic, policy);
       require(bool(ticket) && diagnostic.result == capture::status::recorded && diagnostic.copy_state_known &&
-        diagnostic.used_observed_state && diagnostic.copy_state == rt && diagnostic.native_state == uav &&
-        diagnostic.observed && diagnostic.observed_state == rt && !diagnostic.blocked && diagnostic.recording_cookie,
-        "explicit local policy did not select and report observed RT while preserving the raw UAV hint");
+        diagnostic.used_observed_state && diagnostic.copy_state == rt && diagnostic.native_state == declared_state &&
+        diagnostic.observed && diagnostic.observed_state == rt && !diagnostic.blocked && diagnostic.recording_cookie &&
+        diagnostic.format == unsigned(format) && diagnostic.flags == unsigned(flags),
+        "auxiliary policy did not preserve observed state, original format and declared-state provenance");
       capture::finish_diagnostic_texture(ticket, true); return ticket;
     };
     auto original = record();
-    // This real write requires capture to have restored RT, not its stale UAV hint.
+    // This real write requires capture to restore its observed input state.
     transition(gpu.list.Get(), image.source.Get(), rt, D3D12_RESOURCE_STATE_COPY_DEST);
     image.copy(gpu, 1);
     transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_COPY_DEST, rt);
     auto changed = record();
     auto correct = input; correct.native_state = rt;
-    auto strict_after = capture::record_local_texture(native(gpu.list.Get()), correct, &diagnostic);
+    auto strict_after = auxiliary_snapshot(gpu, shared, correct, &diagnostic, capture::texture_state_policy::source_contract);
     require(bool(strict_after) && diagnostic.copy_state_known && diagnostic.copy_state == rt &&
-      !diagnostic.used_observed_state, "local override changed later declared-state admission");
+      !diagnostic.used_observed_state, "auxiliary override changed later declared-state admission");
     capture::finish_diagnostic_texture(strict_after, true);
     gpu.submit(); gpu.wait(); gpu.reset();
 
-    auto first_target = destination(gpu.device.Get(), format);
-    auto next_target = destination(gpu.device.Get(), format);
+    auto first_target = destination(gpu.device.Get(), snapshot_format);
+    auto next_target = destination(gpu.device.Get(), snapshot_format);
     readback first_bytes(gpu, first_target.Get()), next_bytes(gpu, next_target.Get());
-    const auto read = [&](const capture::diagnostic_ticket &ticket, ID3D12Resource *target, readback &bytes) {
+    ComPtr<ID3D11Texture2D> host_lease;
+    capture::diagnostic_texture host_snapshot;
+    std::weak_ptr<const capture::texture_reference> host_storage;
+    const auto read = [&](const capture::diagnostic_ticket &ticket, ID3D12Resource *target, readback &bytes, unsigned version) {
       capture::diagnostic_texture pixels;
-      require(capture::acquire_diagnostic_texture(ticket, pixels) == capture::status::ready && !pixels.shared_handle,
-        "observed-state local copy did not retain private completed storage");
+      require(capture::acquire_diagnostic_texture(ticket, pixels) == capture::status::ready &&
+          bool(pixels.shared_handle) == shared && pixels.format == unsigned(snapshot_format),
+        "observed-state auxiliary copy lost its storage lifetime or typed format");
+      if (shared) {
+        image.verify_host(gpu, pixels, version, nullptr, snapshot_format);
+        if (!version) {
+          host_snapshot = pixels;
+          host_storage = pixels.ownership;
+          check(gpu.host1->OpenSharedResource1(reinterpret_cast<HANDLE>(pixels.shared_handle), IID_PPV_ARGS(&host_lease)),
+            "retain observed-state shared host snapshot");
+        }
+      }
       require(capture::copy_diagnostic_texture(native(consumer.list.Get()), native(gpu.foreign_queue.Get()),
-        ticket, native(target), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "observed-state local readback copy failed");
+        ticket, native(target), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "observed-state auxiliary readback copy failed");
       bytes.record(consumer.list.Get(), target);
     };
-    read(original, first_target.Get(), first_bytes); read(changed, next_target.Get(), next_bytes);
+    read(original, first_target.Get(), first_bytes, 0); read(changed, next_target.Get(), next_bytes, 1);
     consumer.submit(); consumer.wait(); consumer.reset();
     first_bytes.verify(image.width, image.height, image.bpp, 0);
     next_bytes.verify(image.width, image.height, image.bpp, 1);
     capture::release_diagnostic_texture(original); capture::release_diagnostic_texture(changed);
     capture::release_diagnostic_texture(strict_after); original = {}; changed = {}; strict_after = {}; capture::poll();
+    host_snapshot.ownership = {};
+    capture::poll();
+    if (shared) {
+      require(host_storage.expired(), "shared observed-state storage retained an add-on lease after host acknowledgement");
+      image.verify_host(gpu, host_snapshot, 0, host_lease.Get(), snapshot_format);
+    }
 
     // An observation-required proof must still reject after Reset. The
     // explicit-declaration compatibility path is tested separately in UAV.
     const auto reject_state = [&](capture::status result, capture::record_stage stage) {
-      require(!capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic, policy) &&
+      require(!auxiliary_snapshot(gpu, shared, input, &diagnostic, policy) &&
         diagnostic.result == result && diagnostic.stage == stage && !diagnostic.copy_state_known &&
         !diagnostic.used_observed_state, "observed-recording state guard admitted missing or unsafe evidence");
     };
@@ -362,26 +493,30 @@ namespace {
       "lost recording evidence was accepted or misreported");
     gpu.submit(); gpu.wait(); gpu.reset();
     gpu.check_debug_errors();
-    std::printf("PASS explicit local observed-state policy format %u: UAV8/RT4 exact bytes and restoration; strict depth/default, role, missing/COMMON, split and loss guards%s\n",
-      unsigned(format), gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+    std::printf("PASS %s observed-state policy format %u->%u flags=%u FG=%u: declared%u/observed%u exact bytes and restoration; strict depth/default, role, missing/COMMON, split and loss guards%s\n",
+      shared ? "shared" : "local", unsigned(format), unsigned(snapshot_format), unsigned(flags), unsigned(frame_generation),
+      unsigned(declared_state), unsigned(observed_state), gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
-  void declared_recording_color_capture(fixture &gpu, DXGI_FORMAT format) {
+  void declared_recording_color_capture(fixture &gpu, DXGI_FORMAT format, bool shared,
+      DXGI_FORMAT snapshot_format = DXGI_FORMAT_UNKNOWN,
+      D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+      bool frame_generation = true) {
+    if (snapshot_format == DXGI_FORMAT_UNKNOWN) snapshot_format = format;
     consumer_fixture consumer(gpu);
     if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
-    constexpr auto policy = capture::local_texture_state_policy::prefer_observed_recording;
+    constexpr auto policy = capture::texture_state_policy::prefer_observed_recording;
     constexpr auto uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    texture_case image(gpu, format, 4,
-      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    texture_case image(gpu, format, 4, flags);
     texture_case ordinary(gpu, format, 4); // Deliberately lacks RT/UAV/depth capabilities.
-    auto input = image.input; input.frame_generation_input = true; input.native_state = uav;
+    auto input = image.input; input.frame_generation_input = frame_generation; input.native_state = uav;
     // A UAV write state does not decay when the original recording is submitted.
     // Capture will run on a fresh recording without any source-state observation.
     transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, uav);
     gpu.submit(); gpu.wait(); gpu.reset();
     capture::record_diagnostic diagnostic;
     const auto reject = [&](const capture::input &candidate, capture::status result, capture::record_stage stage) {
-      require(!capture::record_local_texture(native(gpu.list.Get()), candidate, &diagnostic, policy) &&
+      require(!auxiliary_snapshot(gpu, shared, candidate, &diagnostic, policy) &&
         diagnostic.result == result && diagnostic.stage == stage && !diagnostic.observed &&
         !diagnostic.copy_state_known && !diagnostic.used_observed_state,
         "absent-observation fallback accepted an absent, malformed or incompatible declaration");
@@ -401,14 +536,15 @@ namespace {
     }
     for (const auto hint : {D3D12_RESOURCE_STATE_RENDER_TARGET, uav,
         D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE}) {
-      wrong = ordinary.input; wrong.frame_generation_input = true; wrong.native_state = hint;
+      wrong = ordinary.input; wrong.frame_generation_input = frame_generation; wrong.native_state = hint;
       reject(wrong, capture::status::unsupported_state, capture::record_stage::unsupported_state);
     }
     const auto record = [&] {
-      auto ticket = capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic, policy);
+      auto ticket = auxiliary_snapshot(gpu, shared, input, &diagnostic, policy);
       require(bool(ticket) && diagnostic.result == capture::status::recorded && !diagnostic.observed &&
         diagnostic.copy_state_known && diagnostic.copy_state == uav && diagnostic.native_state == uav &&
-        !diagnostic.used_observed_state && diagnostic.recording_cookie,
+        !diagnostic.used_observed_state && diagnostic.recording_cookie &&
+        diagnostic.format == unsigned(format) && diagnostic.flags == unsigned(flags),
         "absent recording evidence did not preserve explicit UAV declaration provenance");
       capture::finish_diagnostic_texture(ticket, true); return ticket;
     };
@@ -421,36 +557,80 @@ namespace {
     auto changed = record(); // Same declaration on another fresh, unobserved recording.
     gpu.submit(); gpu.wait(); gpu.reset();
 
-    auto first_target = destination(gpu.device.Get(), format);
-    auto next_target = destination(gpu.device.Get(), format);
+    auto first_target = destination(gpu.device.Get(), snapshot_format);
+    auto next_target = destination(gpu.device.Get(), snapshot_format);
     readback first_bytes(gpu, first_target.Get()), next_bytes(gpu, next_target.Get());
-    const auto read = [&](const capture::diagnostic_ticket &ticket, ID3D12Resource *target, readback &bytes) {
+    ComPtr<ID3D11Texture2D> host_lease;
+    capture::diagnostic_texture host_snapshot;
+    std::weak_ptr<const capture::texture_reference> host_storage;
+    const auto read = [&](const capture::diagnostic_ticket &ticket, ID3D12Resource *target, readback &bytes, unsigned version) {
       capture::diagnostic_texture pixels;
-      require(capture::acquire_diagnostic_texture(ticket, pixels) == capture::status::ready && !pixels.shared_handle,
-        "declared-state local copy did not retain private completed storage");
+      require(capture::acquire_diagnostic_texture(ticket, pixels) == capture::status::ready && bool(pixels.shared_handle) == shared &&
+          pixels.format == unsigned(snapshot_format),
+        "declared-state auxiliary copy lost its typed storage or sharing policy");
+      if (shared) {
+        image.verify_host(gpu, pixels, version, nullptr, snapshot_format);
+        if (!version) {
+          host_snapshot = pixels;
+          host_storage = pixels.ownership;
+          check(gpu.host1->OpenSharedResource1(reinterpret_cast<HANDLE>(pixels.shared_handle), IID_PPV_ARGS(&host_lease)),
+            "retain declared-state shared host snapshot");
+        }
+      }
       require(capture::copy_diagnostic_texture(native(consumer.list.Get()), native(gpu.foreign_queue.Get()),
-        ticket, native(target), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "declared-state local readback copy failed");
+        ticket, native(target), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "declared-state auxiliary readback copy failed");
       bytes.record(consumer.list.Get(), target);
     };
-    read(original, first_target.Get(), first_bytes); read(changed, next_target.Get(), next_bytes);
+    read(original, first_target.Get(), first_bytes, 0); read(changed, next_target.Get(), next_bytes, 1);
     consumer.submit(); consumer.wait(); consumer.reset();
     first_bytes.verify(image.width, image.height, image.bpp, 0);
     next_bytes.verify(image.width, image.height, image.bpp, 1);
     capture::release_diagnostic_texture(original); capture::release_diagnostic_texture(changed);
     original = {}; changed = {}; capture::poll();
+    host_snapshot.ownership = {};
+    capture::poll();
+    if (shared) {
+      require(host_storage.expired(), "shared declared-state storage retained an add-on lease after host acknowledgement");
+      image.verify_host(gpu, host_snapshot, 0, host_lease.Get(), snapshot_format);
+    }
     gpu.check_debug_errors();
-    std::printf("PASS local declared-state compatibility format %u: prior-recording UAV, exact bytes/restoration, absent/malformed/flag guards%s\n",
-      unsigned(format), gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+    std::printf("PASS %s declared-state compatibility format %u->%u flags=%u FG=%u: prior-recording UAV, exact bytes/restoration, absent/malformed/flag guards%s\n",
+      shared ? "shared" : "local", unsigned(format), unsigned(snapshot_format), unsigned(flags), unsigned(frame_generation),
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
-  void live_auxiliary_copy(fixture &gpu, DXGI_FORMAT format, unsigned bpp, DXGI_FORMAT target_format = DXGI_FORMAT_UNKNOWN) {
+  void live_auxiliary_copy(fixture &gpu, DXGI_FORMAT format, unsigned bpp,
+      DXGI_FORMAT target_format = DXGI_FORMAT_UNKNOWN, bool local = false,
+      sunshine_scene_depth::lifetime lifetime = sunshine_scene_depth::lifetime::at_call) {
     if (target_format == DXGI_FORMAT_UNKNOWN) target_format = format;
+    const bool typeless = format == DXGI_FORMAT_R8G8B8A8_TYPELESS || format == DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    if (typeless && gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
     consumer_fixture consumer(gpu);
     texture_case image(gpu, format, bpp);
+    image.input.valid_until = lifetime;
+    image.input.source_present_generation = capture::source_present_generation(image.input.source);
     auto target = destination(gpu.device.Get(), target_format);
     capture::consumer_diagnostic diagnostic;
-    auto ticket = capture::record_diagnostic_texture(native(gpu.list.Get()), image.input);
+    capture::record_diagnostic producer_diagnostic;
+    const auto record = [&](const capture::input &input) {
+      return local ? capture::record_local_texture(native(gpu.list.Get()), input, &producer_diagnostic) :
+        capture::record_diagnostic_texture(native(gpu.list.Get()), input, &producer_diagnostic);
+    };
+    if (lifetime != sunshine_scene_depth::lifetime::at_call) {
+      auto expired = image.input;
+      expired.source_present_generation = 0;
+      require(!record(expired) && producer_diagnostic.result == capture::status::unsupported_lifetime,
+        "long-lived auxiliary source bypassed its presentation generation");
+    }
+    auto wrong_state = image.input;
+    wrong_state.native_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    require(!record(wrong_state) && producer_diagnostic.result == capture::status::conflicting_state &&
+        producer_diagnostic.observed_state == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE &&
+        !producer_diagnostic.copy_state_known,
+      "typed auxiliary normalization weakened the source-state guard");
+    auto ticket = record(image.input);
     require(bool(ticket), "live auxiliary producer capture");
+    require(producer_diagnostic.format == unsigned(format), "producer diagnostic lost original source format");
     const auto copy = [&](std::uint64_t output, std::uint64_t queue = 0) {
       return capture::copy_diagnostic_texture(native(consumer.list.Get()), queue ? queue : native(gpu.foreign_queue.Get()),
         ticket, output, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &diagnostic);
@@ -465,6 +645,18 @@ namespace {
         "pending producer was consumed after Reset but before completion");
       require(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(100), "auxiliary copy waited for producer GPU");
       delayed.open(); gpu.wait();
+    }
+    capture::diagnostic_texture snapshot;
+    const auto snapshot_format = typeless ? target_format : format;
+    require(capture::acquire_diagnostic_texture(ticket, snapshot) == capture::status::ready &&
+        snapshot.format == unsigned(snapshot_format) &&
+        bool(snapshot.shared_handle) != local,
+      "completed auxiliary snapshot lost its typed format or sharing policy");
+    snapshot = {};
+    if (typeless) {
+      auto typeless_target = destination(gpu.device.Get(), format);
+      require(!copy(native(typeless_target.Get())) && diagnostic.result == capture::consumer_status::invalid_destination,
+        "normalized source allowed a typeless consumer destination");
     }
     auto wrong_format = destination(gpu.device.Get(), target_format == DXGI_FORMAT_R8G8B8A8_UNORM ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM);
     require(!copy(native(wrong_format.Get())) && diagnostic.result == capture::consumer_status::invalid_destination,
@@ -507,9 +699,86 @@ namespace {
       for (auto &next : other) capture::release_diagnostic_texture(next);
       check(gpu.list->Close(), "cancel auxiliary pool recording"); gpu.reset(); other.clear(); capture::poll();
       delayed.open(); consumer.wait(); actual.verify(image.width, image.height, bpp); capture::poll();
-      require(source_lifetime.expired() && target_lifetime.expired(), "completed auxiliary consumer ownership was not reclaimed");
+      require((local ? source_lifetime.use_count() == 1 : source_lifetime.expired()) && target_lifetime.expired(),
+        "completed auxiliary consumer retained a lease beyond the optional local storage cache");
     }
-    std::printf("PASS live auxiliary format %u->%u: exact cross-queue copy, delayed producer/consumer, destination ownership, bounded reuse\n", unsigned(format), unsigned(target_format));
+    if (typeless) gpu.check_debug_errors();
+    std::printf("PASS %s auxiliary format %u->%u: exact cross-queue RGB/alpha, delayed producer/consumer, destination/state guards, bounded reuse\n",
+      local ? "local" : "shared", unsigned(format), unsigned(target_format));
+  }
+
+  void local_same_queue_ordered_capture(fixture &gpu) {
+    consumer_fixture consumer(gpu);
+    texture_case image(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, 4);
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R10G10B10A2_UNORM);
+    auto other_target = destination(gpu.device.Get(), DXGI_FORMAT_R10G10B10A2_UNORM);
+    auto local = capture::record_local_texture(native(gpu.list.Get()), image.input);
+    auto shared = capture::record_diagnostic_texture(native(gpu.list.Get()), image.input);
+    auto failed = capture::record_local_texture(native(gpu.list.Get()), image.input);
+    require(local && shared && failed, "same-queue ordered auxiliary capture setup failed");
+    capture::finish_diagnostic_texture(shared, true);
+    capture::finish_diagnostic_texture(failed, false);
+    capture::diagnostic_texture pixels;
+    capture::consumer_diagnostic diagnostic;
+    const auto copy = [&](const capture::diagnostic_ticket &ticket, std::uint64_t queue, ID3D12Resource *output) {
+      return capture::copy_local_texture(native(consumer.list.Get()), queue, ticket,
+        native(output), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &diagnostic);
+    };
+    require(capture::acquire_local_texture(local, native(gpu.queue.Get()), pixels) == capture::status::recorded &&
+        !copy(local, native(gpu.queue.Get()), target.Get()), "unsubmitted local snapshot became GPU-readable");
+    readback actual(gpu, target.Get());
+    std::weak_ptr<const capture::texture_reference> source_lifetime = local.ownership;
+    std::weak_ptr<const capture::source_reference> target_lifetime;
+    {
+      gate delayed(gpu.device.Get(), gpu.queue.Get());
+      gpu.submit(); // Keep the producer closed and its GPU submission blocked.
+      const auto before = std::chrono::steady_clock::now();
+      require(capture::acquire_local_texture(local, native(gpu.queue.Get()), pixels) == capture::status::recorded &&
+          !copy(local, native(gpu.queue.Get()), target.Get()), "unfinished SDK call admitted local pixels");
+      capture::finish_diagnostic_texture(local, true);
+      require(capture::acquire_diagnostic_texture(local, pixels) == capture::status::submitted &&
+          capture::acquire_local_texture(local, native(gpu.foreign_queue.Get()), pixels) == capture::status::submitted &&
+          !copy(local, native(gpu.foreign_queue.Get()), target.Get()),
+        "shared/foreign acquisition bypassed in-flight producer completion or recording retirement");
+      require(capture::acquire_local_texture(shared, native(gpu.queue.Get()), pixels) == capture::status::unsupported_resource &&
+          !copy(shared, native(gpu.queue.Get()), target.Get()), "shared dump ticket opted into local-only ordered reads");
+      require(capture::acquire_local_texture(failed, native(gpu.queue.Get()), pixels) == capture::status::failed &&
+          !copy(failed, native(gpu.queue.Get()), target.Get()), "failed SDK capture became readable through local ordering");
+      require(capture::acquire_local_texture(local, native(gpu.queue.Get()), pixels) == capture::status::ready &&
+          !pixels.producer_recording_retired && pixels.producer_fence && !pixels.shared_handle &&
+          pixels.producer_queue == native(gpu.queue.Get()) && pixels.format == DXGI_FORMAT_R10G10B10A2_UNORM,
+        "submitted local same-queue snapshot still required CPU completion or producer Reset");
+      require(!capture::copy_diagnostic_texture(native(consumer.list.Get()), native(gpu.queue.Get()), local,
+          native(target.Get()), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &diagnostic),
+        "strict diagnostic copy was weakened by local snapshot support");
+      require(copy(local, native(gpu.queue.Get()), target.Get()), "same-queue GPU-ordered local copy was rejected");
+      // Observe the wrapper retained by the successful copy. The source
+      // registry itself is weak; an earlier temporary wrapper is a different
+      // lifetime and can expire before this destination lease is established.
+      auto target_reference = capture::retain_source(native(target.Get()));
+      target_lifetime = target_reference;
+      target_reference = {};
+      require(!copy(local, native(gpu.queue.Get()), other_target.Get()) &&
+          !copy(local, native(gpu.foreign_queue.Get()), target.Get()),
+        "ordered local copy rebound its destination or consuming queue");
+      require(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(100),
+        "local auxiliary admission/copy waited for GPU completion");
+      actual.record(consumer.list.Get(), target.Get());
+      check(consumer.list->Close(), "ordered consumer close");
+      ID3D12CommandList *submitted[]{consumer.list.Get()};
+      gpu.queue->ExecuteCommandLists(1, submitted);
+      pixels = {};
+      capture::release_diagnostic_texture(local); local = {};
+      capture::release_diagnostic_texture(shared); shared = {};
+      capture::release_diagnostic_texture(failed); failed = {};
+      target.Reset(); gpu.reset(); consumer.reset(); capture::poll();
+      require(!source_lifetime.expired() && !target_lifetime.expired(),
+        "ordered consumer Reset released source/destination before queued GPU work completed");
+      delayed.open(); gpu.wait(); actual.verify(image.width, image.height, 4); capture::poll();
+      require(target_lifetime.expired(), "ordered local consumer retained destination after GPU retirement");
+    }
+    gpu.check_debug_errors();
+    std::puts("PASS local same-queue pending GPU copy: strict shared/foreign rejection, exact R10 bytes, no wait, fixed consumer/destination and fence retirement");
   }
 
   void auxiliary_consumer_replay_and_discard(fixture &gpu) {
@@ -557,7 +826,10 @@ namespace {
     capture::observe_queue(native(gpu.foreign_queue.Get())); capture::poll();
     std::puts("PASS auxiliary consumer discard, same-queue replay, cross-queue replay rejection and queue retirement");
   }
-  void captured_mutation(fixture &gpu, DXGI_FORMAT format, unsigned bpp) {
+  void captured_mutation(fixture &gpu, DXGI_FORMAT format, unsigned bpp,
+      DXGI_FORMAT snapshot_format = DXGI_FORMAT_UNKNOWN) {
+    if (snapshot_format == DXGI_FORMAT_UNKNOWN) snapshot_format = format;
+    if (snapshot_format != format && gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
     texture_case image(gpu, format, bpp);
     auto wrong = image.input; wrong.native_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     capture::record_diagnostic diagnostic;
@@ -569,6 +841,7 @@ namespace {
     auto ticket = capture::record_diagnostic_texture(native(gpu.list.Get()), image.input, &diagnostic);
     if (!ticket) { std::fprintf(stderr, "record result=%s stage=%s\n", capture::name(diagnostic.result), capture::name(diagnostic.stage)); }
     require(bool(ticket), "typed diagnostic copy not recorded");
+    require(diagnostic.format == unsigned(format), "snapshot normalization changed original source diagnostic format");
     capture::diagnostic_texture snapshot;
     require(capture::acquire_diagnostic_texture(ticket, snapshot) == capture::status::recorded && !snapshot.texture, "unsubmitted texture exposed");
     transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -588,17 +861,19 @@ namespace {
     require(capture::acquire_diagnostic_texture(ticket, snapshot) == capture::status::submitted, "reset assumed GPU completion");
     check(gate->Signal(1), "release test gate"); gpu.wait();
     require(capture::acquire_diagnostic_texture(ticket, snapshot) == capture::status::ready, "completed immutable copy not ready");
-    image.verify_host(gpu, snapshot);
+    image.verify_host(gpu, snapshot, 0, nullptr, snapshot_format);
     capture::diagnostic_texture changed;
     require(capture::acquire_diagnostic_texture(after_mutation, changed) == capture::status::ready, "later capture unavailable");
-    image.verify_host(gpu, changed, 1); // The snapshot must not interfere with the game's later write.
+    image.verify_host(gpu, changed, 1, nullptr, snapshot_format); // The snapshot must not interfere with the game's later write.
     capture::release_diagnostic_texture(after_mutation); changed = {}; after_mutation = {};
     capture::release_diagnostic_texture(ticket);
     capture::diagnostic_texture released;
     require(capture::acquire_diagnostic_texture(ticket, released) == capture::status::stale, "released ticket resurrected");
-    image.verify_host(gpu, snapshot); // Existing consumer lease remains valid.
+    image.verify_host(gpu, snapshot, 0, nullptr, snapshot_format); // Existing consumer lease remains valid.
     snapshot = {}; ticket = {}; capture::poll();
-    std::printf("PASS typed format %u: pre-mutation full bytes, crop, independent D3D11 host, nonblocking retirement\n", unsigned(format));
+    if (snapshot_format != format) gpu.check_debug_errors();
+    std::printf("PASS source format %u->%u: immutable RGB/alpha bytes, crop, typed shared D3D11 host, state guard, nonblocking retirement\n",
+      unsigned(format), unsigned(snapshot_format));
   }
   void retired_storage_reuse(fixture &gpu) {
     texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
@@ -676,20 +951,52 @@ int main() {
   try {
     require(capture::testing::diagnostic_snapshot_regression(), "diagnostic retirement/fence/format policy regression");
     fixture gpu;
-    observed_recording_color_capture(gpu, DXGI_FORMAT_R8G8B8A8_UNORM);
-    observed_recording_color_capture(gpu, DXGI_FORMAT_R10G10B10A2_UNORM);
-    declared_recording_color_capture(gpu, DXGI_FORMAT_R8G8B8A8_UNORM);
-    declared_recording_color_capture(gpu, DXGI_FORMAT_R10G10B10A2_UNORM);
+    first_recording_depth_capture(gpu);
+    local_same_queue_ordered_capture(gpu);
+    for (const bool shared : {false, true}) {
+      observed_recording_color_capture(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, shared);
+      observed_recording_color_capture(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, shared);
+      // Exact Hogwarts tag53 conflict: format24, flags5, declared UAV8 / observed192.
+      observed_recording_color_capture(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, shared,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      // HUDLess tag2 has the same state-proof contract as UI tags. Mask semantics
+      // and absent application RT/UAV flags must not change that contract either.
+      observed_recording_color_capture(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, shared,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        DXGI_FORMAT_R10G10B10A2_UNORM,
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        false, D3D12_RESOURCE_STATE_COPY_DEST);
+      observed_recording_color_capture(gpu, DXGI_FORMAT_R8_UNORM, shared,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_NONE, false, D3D12_RESOURCE_STATE_COPY_DEST);
+      observed_recording_color_capture(gpu, DXGI_FORMAT_B8G8R8A8_TYPELESS, shared,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, false);
+      declared_recording_color_capture(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, shared);
+      declared_recording_color_capture(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, shared);
+      declared_recording_color_capture(gpu, DXGI_FORMAT_B8G8R8A8_TYPELESS, shared, DXGI_FORMAT_B8G8R8A8_UNORM,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, false);
+    }
     retired_storage_reuse(gpu);
     captured_mutation(gpu, DXGI_FORMAT_R8_UNORM, 1);
     captured_mutation(gpu, DXGI_FORMAT_R8_UINT, 1);
     captured_mutation(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
+    captured_mutation(gpu, DXGI_FORMAT_R8G8B8A8_TYPELESS, 4, DXGI_FORMAT_R8G8B8A8_UNORM);
+    captured_mutation(gpu, DXGI_FORMAT_B8G8R8A8_TYPELESS, 4, DXGI_FORMAT_B8G8R8A8_UNORM);
     captured_mutation(gpu, DXGI_FORMAT_R16G16B16A16_FLOAT, 8);
     live_auxiliary_copy(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
     live_auxiliary_copy(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, 4);
     live_auxiliary_copy(gpu, DXGI_FORMAT_R16G16B16A16_FLOAT, 8);
     live_auxiliary_copy(gpu, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 4, DXGI_FORMAT_R8G8B8A8_UNORM);
     live_auxiliary_copy(gpu, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, 4, DXGI_FORMAT_B8G8R8A8_UNORM);
+    live_auxiliary_copy(gpu, DXGI_FORMAT_R8G8B8A8_TYPELESS, 4, DXGI_FORMAT_R8G8B8A8_UNORM, true);
+    live_auxiliary_copy(gpu, DXGI_FORMAT_B8G8R8A8_TYPELESS, 4, DXGI_FORMAT_B8G8R8A8_UNORM, true);
+    for (const auto lifetime : {sunshine_scene_depth::lifetime::until_present, sunshine_scene_depth::lifetime::until_evaluation})
+      for (const bool local : {false, true}) {
+        live_auxiliary_copy(gpu, DXGI_FORMAT_B8G8R8A8_TYPELESS, 4, DXGI_FORMAT_B8G8R8A8_UNORM, local, lifetime);
+        std::printf("PASS auxiliary lifetime=%u %s: strict-state admission/rejection, generation guard and exact BGRA bytes\n",
+          unsigned(lifetime), local ? "local" : "shared");
+      }
     auxiliary_consumer_replay_and_discard(gpu);
     replay_and_cancel(gpu);
     std::puts("PASS diagnostic texture capture functional GPU regression (no performance measurement)");

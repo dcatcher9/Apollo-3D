@@ -306,7 +306,9 @@ namespace {
     require(match(camera, depth) == match_status::unsupported_lifecycle, "valid-now resource claimed safe at present");
     depth.lifecycle = 1;
     depth.type = 49;
-    require(match(camera, depth) == match_status::not_depth, "linear depth mistaken for projection depth");
+    require(match(camera, depth) == match_status::exact_frame, "linear depth association rejected");
+    depth.type = 53;
+    require(match(camera, depth) == match_status::not_depth, "color mistaken for depth");
     depth.type = 48;
     require(match(camera, depth) == match_status::exact_frame, "high resolution depth rejected");
     depth.native_resource = 0;

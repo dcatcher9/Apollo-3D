@@ -8,21 +8,22 @@
 
 // Calls the very same registered production panel from a real ImGui frame.
 // The fixture must render it, not only exercise its model through API adapters.
-void sunshine_game3d_test_draw_production_panel(reshade::api::effect_runtime *runtime, bool expanded);
+void sunshine_game3d_test_draw_production_panel(reshade::api::effect_runtime *runtime, unsigned mode);
 
 namespace sunshine_sbs_test_overlay {
   inline std::atomic<bool> enabled {false};
   inline std::atomic<unsigned> production_panel_mode {0};
   inline std::atomic<unsigned> production_panel_draws {0};
+  inline std::atomic<unsigned> production_panel_width {630};
 
   inline void draw(reshade::api::effect_runtime *runtime) {
     if (const unsigned mode = production_panel_mode.load(std::memory_order_acquire)) {
       // Keep the fixture's independent right-hand HDR/alpha probes uncovered.
       ImGui::SetNextWindowPos(ImVec2(8, 48), ImGuiCond_Always);
-      ImGui::SetNextWindowSize(ImVec2(630, 440), ImGuiCond_Always);
+      ImGui::SetNextWindowSize(ImVec2(float(production_panel_width.load(std::memory_order_acquire)), 440), ImGuiCond_Always);
       if (ImGui::Begin("Sunshine production panel regression", nullptr,
           ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking)) {
-        sunshine_game3d_test_draw_production_panel(runtime, mode == 2);
+        sunshine_game3d_test_draw_production_panel(runtime, mode);
         production_panel_draws.fetch_add(1, std::memory_order_release);
       }
       ImGui::End();
@@ -43,10 +44,15 @@ extern "C" __declspec(dllexport) void SunshineSbsTestSetOverlayPatch(BOOL enable
 }
 
 extern "C" __declspec(dllexport) void SunshineSbsTestSetProductionPanel(unsigned mode) {
-  sunshine_sbs_test_overlay::production_panel_mode.store(mode <= 2 ? mode : 0, std::memory_order_release);
+  sunshine_sbs_test_overlay::production_panel_mode.store(mode <= 3 ? mode : 0, std::memory_order_release);
 }
 
 extern "C" __declspec(dllexport) unsigned SunshineSbsTestProductionPanelDraws() {
   return sunshine_sbs_test_overlay::production_panel_draws.load(std::memory_order_acquire);
+}
+
+extern "C" __declspec(dllexport) void SunshineSbsTestSetProductionPanelWidth(unsigned width) {
+  sunshine_sbs_test_overlay::production_panel_width.store(width >= 320 && width <= 630 ? width : 630,
+    std::memory_order_release);
 }
 #endif

@@ -37,7 +37,9 @@ namespace sunshine_streamline {
     using abi = versioning::abi;
     enum class origin { global, frame, local };
     constexpr unsigned slot_count = 4, tag_limit = 32, chain_limit = 32, frame_count = 32;
-    constexpr std::array<std::uint32_t, 7> observed_tag_types{0, 48, 49, 2, 3, 4, 53};
+    constexpr std::array<std::uint32_t, 9> observed_tag_types{0, 48, 49, 2, 3, 4, 53, 23, 69};
+    constexpr std::array<unsigned, 3> depth_priority{1, 0, 2};
+    bool known_renderer_contract(std::uint32_t feature) { return feature == 0 || feature == 1001; }
     unsigned tag_index(std::uint32_t type);
     struct tag_record {
       depth_tag value;
@@ -58,8 +60,8 @@ namespace sunshine_streamline {
       camera_data camera;
       camera_key key;
       decode_status decoded{decode_status::short_buffer};
-      std::array<tag_record, 7> global_tags{}, local_tags{};
-      std::array<tag_record, 7> active_tags{};
+      std::array<tag_record, observed_tag_types.size()> global_tags{}, local_tags{};
+      std::array<tag_record, observed_tag_types.size()> active_tags{};
       evaluation_snapshot evaluation;
       frame_generation_snapshot frame_generation;
       frame_identity camera_frame;
@@ -70,7 +72,7 @@ namespace sunshine_streamline {
     };
     struct targets { void *constants{}, *tag{}, *tag_for_frame{}, *evaluate{}, *new_frame_token{}, *get_feature_function{}; };
     struct batch {
-      std::array<tag_record, 7> tags{}; // Three depth and four separately retained color kinds.
+      std::array<tag_record, observed_tag_types.size()> tags{}; // Three depth and six independently tagged UI/color kinds.
       unsigned count{};
       std::uint32_t viewport{};
       std::uint64_t observation{};
@@ -82,7 +84,7 @@ namespace sunshine_streamline {
       frame_identity frame;
       camera_data camera;
       decode_status decoded{decode_status::short_buffer};
-      std::array<tag_record, 7> tags{};
+      std::array<tag_record, observed_tag_types.size()> tags{};
       std::uint64_t camera_serial{}, camera_tick{}, loss{}, changed{};
       std::uint32_t viewport{};
       bool used{}, has_camera{};
@@ -180,13 +182,13 @@ namespace sunshine_streamline {
     abi_v2::get_new_frame_token original_new_token_v2{};
     abi_v2::get_feature_function original_feature_function_v2{};
 
-    // Pinned v2.7.30 sl_core_types.h/sl_dlss_g.h prefixes. These are copied,
+    // Surveyed 2.x sl_core_types.h/sl_dlss_g.h prefixes. These are copied,
     // never called as SDK objects or followed past the supported version.
     constexpr guid precision_guid{0x98f6e9ba, 0x8d16, 0x4831, {0xa8,0x02,0x4d,0x3b,0x52,0xff,0x26,0xbf}};
     constexpr guid fg_options_guid{0xfac5f1cb, 0x2dfd, 0x4f36, {0xa1,0xe6,0x3a,0x9e,0x86,0x52,0x56,0xc5}};
     struct precision_info { base_structure base; std::uint32_t formula{}; float bias{}, scale{1}; };
-    struct fg_options_prefix { base_structure base; std::uint32_t mode{}, generated_frames{}; };
-    using fg_set_options = std::int32_t (*)(const abi_v2::viewport &, const fg_options_prefix &);
+    using fg_options_prefix = abi_v2::fg_options_prefix;
+    using fg_set_options = abi_v2::fg_set_options;
     struct fg_target {
       void *entry{};
       HMODULE owner{};
@@ -239,7 +241,7 @@ namespace sunshine_streamline {
         (requested.load(std::memory_order_acquire) || source_requested.load(std::memory_order_acquire));
     }
     unsigned tag_index(std::uint32_t type) {
-      if (!requested.load(std::memory_order_acquire) && type != 0 && type != 48 && type != 53)
+      if (!requested.load(std::memory_order_acquire) && type != 0 && type != 48 && type != 49 && type != 53 && type != 23 && type != 69 && type != 2)
         return static_cast<unsigned>(observed_tag_types.size());
       for (unsigned i = 0; i != observed_tag_types.size(); ++i) if (observed_tag_types[i] == type) return i;
       return static_cast<unsigned>(observed_tag_types.size());
@@ -527,7 +529,7 @@ namespace sunshine_streamline {
         }
       }
       if (!current_token) return false;
-      // Only a synchronous global FG tag may use this latest successful
+      // Only a synchronous global depth tag may use this latest successful
       // constants-call identity. It is never an SDK frame number/token mint.
       if (frame.kind == frame_identity_kind::v2_constants_call) {
         for (const auto &record : state.records)
@@ -538,7 +540,7 @@ namespace sunshine_streamline {
     }
     bool presentation_token_current(const frame_identity &frame) {
       // Presentation markers carry minted/numeric identities, never the
-      // synchronous FG-only constants-call association.
+      // synchronous tag-boundary constants-call association.
       if (frame.kind == frame_identity_kind::v2_constants_call) return false;
       static const metadata_state empty;
       return token_current(empty, frame);
@@ -698,8 +700,8 @@ namespace sunshine_streamline {
       std::uint32_t id{};
       const bool valid_viewport = sample && viewport_value(viewport, id);
       const bool valid = valid_viewport && read(&options, copy) &&
-        same(copy.base.type, fg_options_guid) && copy.base.version >= 1 && copy.base.version <= 3 &&
-        !copy.base.next && copy.mode <= 2 && (!copy.mode || copy.generated_frames != 0);
+        same(copy.base.type, fg_options_guid) && copy.base.version >= 1 && copy.base.version <= 5 &&
+        !copy.base.next && copy.mode <= 3 && (!copy.mode || copy.mode == 3 || copy.generated_frames != 0);
       SetLastError(incoming);
       const auto options_loss = fg_loss_revision.load(std::memory_order_acquire);
       ++fg_forwarding_depth;
@@ -713,24 +715,35 @@ namespace sunshine_streamline {
       if (update) {
         if (current(ticket)) {
           if (!valid_viewport) {
-            for (auto &record : update->records) record.frame_generation = {};
+            for (auto &record : update->records) {
+              changed |= record.frame_generation.known;
+              record.frame_generation = {};
+            }
           } else {
             auto &state = slot(*update, id).frame_generation;
             if (serial >= state.sequence) {
-              changed = !state.sequence || state.known != (valid && result == 0) ||
-                state.mode != copy.mode || state.generated_frames != copy.generated_frames;
+              const bool known = valid && result == 0;
+              changed = !state.sequence || state.known != known ||
+                (known && (state.mode != copy.mode || state.generated_frames != copy.generated_frames));
               state = {update->epoch, serial, GetTickCount64(), options_loss, id, copy.mode, copy.generated_frames,
-                valid && result == 0, valid && result == 0 && copy.mode != 0, valid && copy.mode == 2};
-              if (valid && result == 0 && copy.mode == 0) retired_epoch = update->epoch;
+                valid && result == 0, valid && result == 0 && copy.mode != 0, valid && copy.mode >= 2};
+              if (!valid || result != 0 || copy.mode == 0) retired_epoch = update->epoch;
             }
           }
         }
-        if (current(ticket) && !update.commit()) ++fg_loss_revision;
+        if (!current(ticket)) retired_epoch = 0;
+        else if (!update.commit()) { ++fg_loss_revision; retired_epoch = 0; }
       } else if (sample && current(ticket)) ++fg_loss_revision;
       update.reset(); // No mutation ownership across capture/COM reentry below.
+      // Revoke the exact FG scope, including tags recorded while the failed
+      // SDK call was in flight. A concurrent new On may lose one capture;
+      // a fresh tag restores it without resurrecting pre-loss pixels.
       if (retired_epoch) depth_capture::retire_source(sunshine_scene_depth::provider_kind::streamline,
         retired_epoch, (1ull << 63) | id);
-      if (sample && current(ticket) && (!valid || result != 0 || retired_epoch)) {
+      // Only an actual FG-mode/knowledge transition revokes UI scope. Games
+      // can call unsupported Off options after every successful HUDless tag;
+      // repeated failure is not a new failure of those independent input tags.
+      if (sample && changed && current(ticket) && (!valid || result != 0 || retired_epoch)) {
         if (valid_viewport) sunshine_game3d::ui_mask::invalidate_scope(epoch, id);
         else sunshine_game3d::ui_mask::invalidate_all();
       }
@@ -775,7 +788,7 @@ namespace sunshine_streamline {
     }
     void discover_fg_options() {
       const auto ticket = observation_ticket();
-      if (!ticket || installed_abi != abi::v2_7_30 || !original_feature_function_v2) return;
+      if (!ticket || installed_abi != abi::v2 || !original_feature_function_v2) return;
       // Engines may cache this public function before the first ReShade poll.
       // Resolve its real entry at discovery so those cached pointers also pass
       // through our deferred detour. A lookup never establishes enabled state.
@@ -891,7 +904,7 @@ namespace sunshine_streamline {
         if (previous_loss == loss) loss = previous_loss + 1;
       }
       const auto camera_identity = identity.kind == frame_identity_kind::unavailable &&
-          installed_abi == abi::v2_7_30 && token ?
+          installed_abi == abi::v2 && token ?
         frame_identity{frame_identity_kind::v2_constants_call, serial, 0, token, false} : identity;
       record.camera = camera;
       record.decoded = decoded;
@@ -921,6 +934,8 @@ namespace sunshine_streamline {
       auto update = write_metadata(values.observation);
       if (!update) { if (current(values.observation)) metadata_write_lost(update, __func__, __LINE__, details); return; }
       auto &state = *update;
+      auto &record = slot(state, values.viewport);
+      bool revoke_previous = false;
       for (const auto &tag : values.tags) {
         if (!tag.present) continue;
         auto tagged = tag.value;
@@ -930,20 +945,34 @@ namespace sunshine_streamline {
         // match()'s other identity/extent checks using a local validation copy.
         auto at_evaluation = tagged;
         if (at_evaluation.lifecycle == 0 || at_evaluation.lifecycle == 2) at_evaluation.lifecycle = 1;
-        if (tag_index(tagged.type) < 3 && (!tag.supported || !tagged.native_resource ||
-            ((tagged.type == 0 || tagged.type == 48) &&
-              match({values.viewport, state.epoch, 0, false}, at_evaluation) != match_status::same_epoch_only))) {
-          lose(loss_diagnostics::reason::tag_replaced, __func__, __LINE__, details); break;
+        const auto index = tag_index(tagged.type);
+        if (index < 3 && (!tag.supported || !tagged.native_resource ||
+            match({values.viewport, state.epoch, 0, false}, at_evaluation) != match_status::same_epoch_only)) {
+          const auto &global = record.global_tags[index];
+          const auto &local = record.local_tags[index];
+          const auto &previous = local.serial > global.serial ? local : global;
+          // A successful null tag clears that kind. Repeating the same clear
+          // must not reset an independently supplied linear-depth history.
+          const bool repeated_clear = tag.supported && !tagged.native_resource &&
+            previous.present && previous.supported && !previous.value.native_resource;
+          revoke_previous |= !repeated_clear;
         }
       }
-      auto &record = slot(state, values.viewport);
+      auto batch_loss = values.loss;
+      if (revoke_previous) {
+        const auto previous = lose(loss_diagnostics::reason::tag_replaced, __func__, __LINE__, details);
+        // Revoke earlier leases, but retain fresh alternatives supplied by this
+        // same successful call. Never heal an intervening observation loss or
+        // restamp cached tags/cameras that were not part of this batch.
+        if (previous == values.loss) batch_loss = previous + 1;
+      }
       for (unsigned i = 0; i < values.count; ++i) {
         auto value = values.tags[i];
         if (!value.present) continue;
         value.value.observation_epoch = state.epoch;
         value.tick = values.tick;
         value.serial = values.serial;
-        value.loss = values.loss;
+        value.loss = batch_loss;
         value.frame = values.frame;
         auto &destination = value.source == origin::local ? record.local_tags : record.global_tags;
         destination[i] = value;
@@ -960,10 +989,12 @@ namespace sunshine_streamline {
     }
     evaluation_snapshot capture_evaluation(std::uint32_t viewport, std::uint32_t feature,
         const frame_identity &identity, void *commands, std::uint64_t ticket, std::uint64_t serial,
-        std::uint64_t loss, const batch *local = nullptr, const metadata_state *selected_state = nullptr) {
+        std::uint64_t loss, const batch *local = nullptr, const metadata_state *selected_state = nullptr,
+        bool tag_boundary = false, bool track_contents = true) {
       evaluation_snapshot out;
       out.viewport = viewport;
       out.feature = feature;
+      out.tag_boundary = tag_boundary;
       out.frame = identity;
       out.sequence = serial;
       out.command_buffer = reinterpret_cast<std::uintptr_t>(commands);
@@ -1003,10 +1034,10 @@ namespace sunshine_streamline {
       out.feedback.reset = out.frame_correlated && out.decoded == decode_status::ok && out.camera.reset == 1;
       bool has_depth = false;
       for (unsigned i = 0; i != out.tags.size(); ++i) {
-        // A standalone FG tag call supplies its complete synchronous input.
+        // A standalone tag call supplies its complete synchronous input.
         // Older global tags must not contaminate this call's loss/validity or
-        // outrank its explicit candidates before capture_fg_tag returns.
-        if (feature == 1000 && local && !local->tags[i].present) continue;
+        // outrank its explicit candidates before capture_depth_tag returns.
+        if (tag_boundary && local && !local->tags[i].present) continue;
         const auto *tag = &record.active_tags[i];
         if (saved && saved->tags[i].present) tag = &saved->tags[i];
         if (local && local->tags[i].present) tag = &local->tags[i];
@@ -1036,11 +1067,11 @@ namespace sunshine_streamline {
           if (out.status == evidence_status::source_associated_evaluation) out.status = evidence_status::observation_lost;
           value.supported = false;
         }
-        if (i < 2 && value.supported && value.value.native_resource) has_depth = true;
+        if (value.supported && value.value.native_resource) has_depth = true;
       }
       for (unsigned i = 0; i != out.colors.size(); ++i) {
         const unsigned index = i + 3;
-        if (feature == 1000 && local && !local->tags[index].present) continue;
+        if (tag_boundary && local && !local->tags[index].present) continue;
         const auto *tag = &record.active_tags[index];
         if (saved && saved->tags[index].present) tag = &saved->tags[index];
         if (local && local->tags[index].present) tag = &local->tags[index];
@@ -1056,7 +1087,7 @@ namespace sunshine_streamline {
         value.observation_sequence = tag->source == origin::local ? serial : tag->serial;
       }
       pin.reset();
-      capture_content(out);
+      if (track_contents) capture_content(out);
       if (out.frame_correlated) {
         out.projection = validate(out.camera);
         if (out.decoded != decode_status::ok) out.status = evidence_status::rejected_constants;
@@ -1094,7 +1125,10 @@ namespace sunshine_streamline {
         // Lifecycle2 ends at this return even when the feature failed. Strong
         // COM references do not extend pixel validity. Never consume a newer
         // concurrent tag or turn an evaluation-local tag into a global one.
-        for (unsigned i = 0; i != 2; ++i) {
+        for (unsigned i = 0; i != value.tags.size(); ++i) {
+          // An ordinary standalone tag call does not end UntilEvaluate. A
+          // mixed batch may carry that tag beside the OnlyValidNow copy.
+          if (value.tag_boundary && !value.frame_generation_input) break;
           const auto &used = value.tags[i];
           if (!used.present || used.value.lifecycle != 2 || used.scope == tag_scope::evaluation_local) continue;
           tag_record *original = nullptr;
@@ -1132,7 +1166,7 @@ namespace sunshine_streamline {
       scale = precision.scale; bias = precision.bias;
       return true;
     }
-    void append_tag(batch &out, const abi_v2::resource_tag &tag, origin source, std::uintptr_t token) {
+    void append_tag(batch &out, const abi_v2::resource_tag &tag, origin source, std::uintptr_t token, bool report_invalid = true) {
       const unsigned index = tag_index(tag.type);
       if (index == observed_tag_types.size()) return;
       abi_v2::resource resource{};
@@ -1140,17 +1174,18 @@ namespace sunshine_streamline {
       constexpr auto resource_prefix = offsetof(abi_v2::resource, height) + sizeof(resource.height);
       const bool resource_ok = header_ok && (!tag.resource_ptr || read_bytes(tag.resource_ptr, &resource, resource_prefix));
       if (!resource_ok) {
-        invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); resource = {};
+        if (report_invalid) invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+        resource = {};
       }
       tag_record value{};
       value.present = true;
       const bool precision_ok = decode_precision(tag.base.next, value.precision_scale, value.precision_bias);
-      // Some validated 2.7.30 integrations zero-initialize Resource's base
+      // Some 2.x integrations zero-initialize Resource's base
       // while constructing a correctly typed ResourceTag. Accept that one
       // known layout variant, not arbitrary GUIDs/versions or extensions. The
       // native IID/device/description checks still belong to the shared owner.
       const guid empty_guid{};
-      const bool zero_resource_header = installed_abi == abi::v2_7_30 && resource.base.next == nullptr &&
+      const bool zero_resource_header = installed_abi == abi::v2 && resource.base.next == nullptr &&
         same(resource.base.type, empty_guid) && resource.base.version == 0;
       const bool resource_header = resource.base.next == nullptr &&
         ((same(resource.base.type, resource_guid) && resource.base.version == 1) ||
@@ -1171,7 +1206,7 @@ namespace sunshine_streamline {
       // COMMON. Reuse the shared observed-state path; a normal typed Resource
       // retains the SDK's declared-zero COMMON semantics.
       value.state_requires_observation = zero_resource_header && resource.state == 0;
-      if (value.supported && index < 2)
+      if (value.supported && index < 3)
         value.direct_source = depth_capture::retain_source(value.value.native_resource);
       value.source_present_generation = depth_capture::source_present_generation(value.direct_source);
       const auto identity = source_identity(value.value.native_resource);
@@ -1180,7 +1215,7 @@ namespace sunshine_streamline {
       // An opaque FrameToken address can be reused. Its identity is diagnostic
       // only and must never be promoted to an exact numeric frame identifier.
       value.value.explicit_frame = false;
-      if (value.supported && zero_resource_header && index < 2) {
+      if (value.supported && zero_resource_header && index < 3) {
         static std::atomic<std::uint64_t> next_compatibility_report{};
         const auto now = GetTickCount64();
         auto next = next_compatibility_report.load(std::memory_order_relaxed);
@@ -1194,7 +1229,7 @@ namespace sunshine_streamline {
           message(text);
         }
       }
-      if (!value.supported && index < 2) {
+      if (!value.supported && index < 3) {
         static std::atomic<std::uint64_t> next_tag_report{};
         const auto now = GetTickCount64();
         auto next = next_tag_report.load(std::memory_order_relaxed);
@@ -1278,16 +1313,17 @@ namespace sunshine_streamline {
       out.loss = loss_revision.load(std::memory_order_acquire);
       out.tick = sample ? GetTickCount64() : 0;
       const auto diagnostic = dump_stamp(ticket, out.serial, out.tick, viewport);
-      if (sample && diagnostic.session) dump_metadata::observe_sl_tag_v1(diagnostic, resource, type, area);
+      const bool resource_has_state = installed_abi != abi::legacy_no_state;
+      if (sample && diagnostic.session) dump_metadata::observe_sl_tag_v1(diagnostic, resource, type, area, resource_has_state);
       if (sample) {
         ++tag_calls;
         out.viewport = viewport;
         out.valid_viewport = true;
         const unsigned index = tag_index(type);
-        if (index < observed_tag_types.size() && type != 53) {
+        if (index < 6) {
           abi_v1::resource copy{};
           extent copied_area{};
-          if ((!resource || read(resource, copy)) && (!area || read(area, copied_area))) {
+          if (abi_v1::read_resource(resource, resource_has_state, copy, read_bytes) && (!area || read(area, copied_area))) {
             out.count = index + 1;
             auto &tag = out.tags[index];
             tag.present = true;
@@ -1297,7 +1333,7 @@ namespace sunshine_streamline {
             tag.value.viewport = viewport;
             tag.value.area = copied_area;
             tag.native_state = copy.state;
-            if (tag.supported && index < 2)
+            if (tag.supported && index < 3)
               tag.direct_source = depth_capture::retain_source(tag.value.native_resource);
             tag.source_present_generation = depth_capture::source_present_generation(tag.direct_source);
             const auto identity = source_identity(tag.value.native_resource);
@@ -1322,6 +1358,12 @@ namespace sunshine_streamline {
       SetLastError(outgoing);
       return result;
     }
+    bool unframed_tag_source(const evaluation_snapshot &snapshot) {
+      // A synchronous ordinary tag can identify its own pixels without an SDK
+      // frame identity. It supplies no camera, numeric frame or FG association.
+      return snapshot.tag_boundary && !snapshot.frame_generation_input &&
+        snapshot.frame.kind == frame_identity_kind::unavailable && !snapshot.frame_correlated;
+    }
     bool direct_source_admissible(const evaluation_snapshot &snapshot) {
       // A depth tag names the renderer's source independently of whether its
       // optional camera matrices can supply a scale. Preserve the stricter
@@ -1332,10 +1374,13 @@ namespace sunshine_streamline {
         case evidence_status::missing_constants:
         case evidence_status::rejected_constants:
         case evidence_status::invalid_camera: break;
+        case evidence_status::untracked_frame:
+          if (!unframed_tag_source(snapshot)) return false;
+          break;
         default: return false;
       }
       if (!snapshot.epoch || !snapshot.sequence ||
-          (snapshot.feature != 0 && !(snapshot.feature == 1000 && snapshot.tag_boundary)) ||
+          (snapshot.tag_boundary && !snapshot.command_buffer) ||
           snapshot.loss_revision != loss_revision.load(std::memory_order_acquire)) return false;
       if (snapshot.frame_correlated && snapshot.decoded == decode_status::ok) {
         const bool current_reset = snapshot.camera.reset == 1 && snapshot.projection.valid() &&
@@ -1348,12 +1393,13 @@ namespace sunshine_streamline {
       static const metadata_state empty;
       const auto &state = pin ? *pin : empty;
       const bool associated = snapshot.epoch == (pin ? pin->epoch : epoch.load(std::memory_order_acquire)) &&
-        token_current(state, snapshot.frame);
+        (unframed_tag_source(snapshot) || token_current(state, snapshot.frame));
       pin.reset();
       return associated && snapshot.loss_revision == loss_revision.load(std::memory_order_acquire);
     }
     bool direct_tag_admissible(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
-      if (!tag.present || !tag.supported || (tag.value.type != 0 && tag.value.type != 48)) return false;
+      if (!tag.present || !tag.supported || (tag.value.type != 0 && tag.value.type != 48 && tag.value.type != 49)) return false;
+      if (snapshot.tag_boundary && !snapshot.frame_generation_input && tag.value.lifecycle != 0) return false;
       if (snapshot.frame.kind == frame_identity_kind::v2_constants_call &&
           (!snapshot.tag_boundary || tag.scope != tag_scope::active_global || tag.value.lifecycle != 0)) return false;
       auto at_evaluation = tag.value;
@@ -1378,7 +1424,7 @@ namespace sunshine_streamline {
             (source.resource_height && (area.top > source.resource_height || height > source.resource_height-area.top))) return result;
         return sunshine_scene_depth::jitter_offset{snapshot.camera.jitter_offset[0], snapshot.camera.jitter_offset[1], width, height, true};
       };
-      if (tag.value.type == 0) return dimensions(tag.value);
+      if (tag.value.type == 0 || tag.value.type == 49) return dimensions(tag.value);
       // High-resolution depth is still jittered in render pixels. Its own
       // extent is not the denominator. Accept only a render input explicitly
       // frozen with this frame/batch; an older global tag may have another size.
@@ -1398,13 +1444,14 @@ namespace sunshine_streamline {
       value.source_frame_token = snapshot.frame.token;
       value.source_frame_numeric = snapshot.frame.numeric;
       value.source_frame_has_numeric = snapshot.frame.has_numeric;
-      value.source_frame_explicit = !snapshot.tag_boundary || tag.scope == tag_scope::explicit_frame;
-      value.frame_generation_input = snapshot.tag_boundary;
-      value.source_id = snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : 0;
+      value.source_frame_explicit = snapshot.frame.kind != frame_identity_kind::unavailable &&
+        (!snapshot.tag_boundary || tag.scope == tag_scope::explicit_frame);
+      value.frame_generation_input = snapshot.frame_generation_input;
+      value.source_id = snapshot.frame_generation_input ? (1ull << 63) | snapshot.viewport : 0;
       const bool valid = (snapshot.status == evidence_status::source_associated_evaluation ||
           snapshot.status == evidence_status::camera_reset) &&
         snapshot.projection.valid() && snapshot.camera.reset <= 1 && tag.present && tag.supported &&
-        tag.value.viewport == snapshot.viewport && (tag.value.type == 0 || tag.value.type == 48);
+        tag.value.viewport == snapshot.viewport && (tag.value.type == 0 || tag.value.type == 48 || tag.value.type == 49);
       const bool direction = snapshot.frame_correlated && snapshot.decoded == decode_status::ok &&
         snapshot.camera.depth_inverted <= 1;
       value.projection = {valid ? snapshot.projection.depth_offset : 0.0,
@@ -1412,6 +1459,11 @@ namespace sunshine_streamline {
         direction && ((snapshot.camera.depth_inverted != 0) != (tag.precision_scale < 0)), direction};
       value.projection.raw_scale = tag.precision_scale;
       value.projection.raw_bias = tag.precision_bias;
+      if (tag.value.type == 49) {
+        value.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
+        value.projection.direction_supplied = true;
+        value.projection.reversed = tag.precision_scale < 0;
+      }
       value.jitter = depth_frame_jitter(snapshot, tag);
       value.resource = {tag.value.native_resource, tag.value.resource_width, tag.value.resource_height,
         {tag.value.area.left, tag.value.area.top, tag.value.area.width, tag.value.area.height},
@@ -1425,7 +1477,7 @@ namespace sunshine_streamline {
       return value;
     }
     bool source_path_selected(const evaluation_snapshot &snapshot) {
-      if (snapshot.feature != 0) return true;
+      if (snapshot.frame_generation_input) return true;
       if (!fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire)) return true;
       auto pin = read_metadata();
       if (!pin) return !metadata.has_publication();
@@ -1438,10 +1490,24 @@ namespace sunshine_streamline {
       }
       return selected;
     }
-    std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one) {
+    bool owns_nested_depth_capture(const evaluation_snapshot &snapshot, bool copy_recorded) {
+      if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return false;
+      frame_generation_snapshot fg;
+      // Confirmed same-viewport FG ownership also suppresses nested SR/RR work.
+      // A busy/ambiguous metadata read alone is never ownership evidence.
+      if (query_frame_generation(snapshot.viewport, fg) && fg.enabled) return true;
+      // A retained resource or metadata-only nomination is not a depth copy.
+      // Allow nested NGX to provide usable pixels when native SL admission fails.
+      if (!copy_recorded || !source_path_selected(snapshot) || !direct_source_admissible(snapshot)) return false;
+      return std::any_of(snapshot.tags.begin(), snapshot.tags.end(), [&](const evaluated_depth_tag &tag) {
+        return tag.direct_source && direct_tag_admissible(snapshot, tag);
+      });
+    }
+    std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one, bool *copy_recorded = nullptr) {
+      if (copy_recorded) *copy_recorded = false;
       if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return 0;
       // FG has an explicit lifecycle for its rendered-frame inputs. The same
-      // game's SR evaluations remain diagnostics and must not overwrite that
+      // game's SR/RR evaluations remain diagnostics and must not overwrite that
       // viewport's newer FG source with a competing renderer-input watermark.
       if (!source_path_selected(snapshot)) return 0;
       // Observation discovers interfaces; only an accepted submitted capture
@@ -1449,15 +1515,15 @@ namespace sunshine_streamline {
       depth_capture::observe_provider(snapshot.command_buffer);
       const auto withdraw_invalid_attempt = [&] {
         depth_capture::begin_evaluation(snapshot.epoch, snapshot.sequence, snapshot.viewport,
-          sunshine_scene_depth::provider_kind::streamline, snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : 0,
-          snapshot.tag_boundary ? 0 : UINT64_MAX);
+          sunshine_scene_depth::provider_kind::streamline, snapshot.frame_generation_input ? (1ull << 63) | snapshot.viewport : 0,
+          snapshot.frame_generation_input ? 0 : snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : UINT64_MAX);
       };
       if (!direct_source_admissible(snapshot)) { withdraw_invalid_attempt(); return 0; }
       // The adapter defines semantic priority; the capture owner tries this
       // ordered set as one evaluation, including its in-progress lifetime.
-      std::array<depth_capture::input, 2> candidates;
+      std::array<depth_capture::input, depth_priority.size()> candidates;
       std::size_t count = 0;
-      for (const unsigned index : {1u, 0u}) {
+      for (const unsigned index : depth_priority) {
         const auto &tag = snapshot.tags[index];
         if (!direct_tag_admissible(snapshot, tag) || !tag.direct_source) continue;
         auto &value = candidates[count];
@@ -1491,8 +1557,13 @@ namespace sunshine_streamline {
         if (!tag.state_requires_observation) value.proof = state.proof;
         ++count;
       }
+      depth_capture::record_diagnostic diagnostic;
       if (count) if (const auto ticket = depth_capture::nominate_evaluation(snapshot.command_buffer,
-          candidates.data(), count, snapshot.tag_boundary ? 0 : UINT64_MAX)) return ticket;
+          candidates.data(), count, snapshot.frame_generation_input ? 0 :
+            snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : UINT64_MAX, &diagnostic)) {
+        if (copy_recorded) *copy_recorded = diagnostic.result == depth_capture::status::recorded;
+        return ticket;
+      }
       withdraw_invalid_attempt();
       return 0;
     }
@@ -1500,22 +1571,30 @@ namespace sunshine_streamline {
       const DWORD incoming = GetLastError();
       sunshine_upscaler_trace::streamline_scope call_trace(feature, SUNSHINE_UPSCALER_CALLER);
       const auto ticket = observation_ticket();
-      // v1 Reflex (feature 3) uses the fourth argument as a timing marker,
-      // including marker 0, rather than a viewport. Only DLSS (feature 0) has
-      // the renderer-input contract this probe validates. Others pass through.
-      const bool sample = ticket && feature == 0;
-      const loss_context_scope loss_scope(0, sample ? viewport : UINT32_MAX, feature);
+      // Reflex's fourth argument is a timing marker, not a viewport. Other
+      // unknown legacy features need commands and an exact observed numeric
+      // camera/depth tuple before that untyped argument may act as a viewport.
+      const bool known_contract = feature == 0;
+      const bool inspect = ticket && feature != 3 && (known_contract || commands);
+      const loss_context_scope loss_scope(0, inspect ? viewport : UINT32_MAX, feature);
       if (ticket) ++evaluation_calls;
       const auto present_serial = ticket && feature == 3 ?
         start_presentation_marker(viewport, numeric_frame(frame), ticket) : 0;
       evaluation_snapshot snapshot;
-      if (sample) {
+      if (inspect) {
         const auto serial = ++call_sequence;
         loss_context.sequence = serial;
         snapshot = capture_evaluation(viewport, feature, numeric_frame(frame), commands, ticket,
-          serial, loss_revision.load(std::memory_order_acquire));
+          serial, loss_revision.load(std::memory_order_acquire), nullptr, nullptr, false, known_contract);
       }
-      const auto captured = sample ? nominate_depth_source(snapshot, true) : 0;
+      const bool sample = inspect && (known_contract || (snapshot.frame_correlated &&
+        snapshot.decoded == decode_status::ok && snapshot.projection.valid() && direct_source_admissible(snapshot) &&
+        std::any_of(snapshot.tags.begin(), snapshot.tags.end(),
+          [&](const evaluated_depth_tag &tag) { return direct_tag_admissible(snapshot, tag); })));
+      if (sample && !known_contract) capture_content(snapshot);
+      bool copy_recorded{};
+      const auto captured = sample ? nominate_depth_source(snapshot, true, &copy_recorded) : 0;
+      call_trace.claim_depth_capture(sample && owns_nested_depth_capture(snapshot, copy_recorded));
       const auto diagnostic = dump_stamp(ticket, snapshot.sequence, GetTickCount64(), viewport, 0, frame, true, reinterpret_cast<std::uint64_t>(commands));
       SetLastError(incoming);
       const bool result = original_evaluate_v1(commands, feature, frame, viewport);
@@ -1573,22 +1652,14 @@ namespace sunshine_streamline {
       SetLastError(outgoing);
       return result;
     }
-    sunshine_game3d::ui_mask::attempt capture_fg_alpha(const batch &out, void *commands) {
+    sunshine_game3d::ui_mask::attempt capture_ui_tag(const batch &out, void *commands,
+        const tag_record &tag, std::uint64_t source_epoch, bool fg_enabled) {
       namespace mask = sunshine_game3d::ui_mask;
-      if (!out.valid_viewport || !current(out.observation) ||
-          out.loss != loss_revision.load(std::memory_order_acquire) || !out.tags[6].present) return {};
-      frame_generation_snapshot fg;
-      if (!query_frame_generation(out.viewport, fg) || !fg.enabled ||
-          !mask::interested(fg.epoch, out.loss, out.viewport)) return {};
-      // Backbuffer (53) commonly arrives in a separate color-only call, after
-      // depth/HUDless tags. Its own live command/state/lifetime are authoritative;
-      // no camera, depth tag, dump request, or Present correlation is required.
-      const auto &tag = out.tags[6];
       depth_capture::input input;
-      input.epoch = fg.epoch; input.sequence = out.serial; input.tick = out.tick;
+      input.epoch = source_epoch; input.sequence = out.serial; input.tick = out.tick;
       input.viewport = out.viewport; input.observation_revision = out.loss;
       input.source_id = (1ull << 63) | out.viewport;
-      input.frame_generation_input = true;
+      input.frame_generation_input = fg_enabled;
       input.source_frame_generation = out.frame.generation;
       input.source_frame_token = tag.token;
       input.source_frame_numeric = out.frame.numeric;
@@ -1613,22 +1684,54 @@ namespace sunshine_streamline {
       mask::boundary where;
       where.source = input; where.command = reinterpret_cast<std::uint64_t>(commands);
       where.tag_scope = tag.source == origin::frame ? 1u : 0u;
+      where.kind = static_cast<mask::source_kind>(tag.value.type);
+      where.source_present_generation = input.source_present_generation;
       return mask::begin(where, input);
     }
-    evaluation_snapshot capture_fg_tag(const batch &out, void *commands) {
+    using alpha_attempts = std::array<sunshine_game3d::ui_mask::attempt, 4>;
+    alpha_attempts capture_ui_inputs(const batch &out, void *commands) {
+      namespace mask = sunshine_game3d::ui_mask;
+      const auto source_epoch = epoch.load(std::memory_order_acquire);
+      constexpr std::array<unsigned, 4> priority{3, 8, 7, 6}; // HUDLess2, UIAlpha69, UI23, Backbuffer53.
+      mask::capture_gate_observation gate;
+      gate.epoch = source_epoch; gate.revision = out.loss; gate.sequence = out.serial; gate.tick = out.tick;
+      gate.viewport = out.valid_viewport ? out.viewport : UINT32_MAX;
+      for (const auto index : priority) if (out.tags[index].present)
+        gate.seen_kinds |= mask::source_mask(static_cast<mask::source_kind>(out.tags[index].value.type));
+      const bool interested = mask::interested(source_epoch, out.loss, out.viewport, &gate.matching_requests);
+      if (!out.valid_viewport) gate.state = mask::capture_gate::invalid_viewport;
+      else if (!current(out.observation)) gate.state = mask::capture_gate::inactive_observation;
+      else if (out.loss != loss_revision.load(std::memory_order_acquire)) gate.state = mask::capture_gate::observation_changed;
+      else if (!interested) gate.state = gate.matching_requests ? mask::capture_gate::ambiguous_request : mask::capture_gate::no_matching_request;
+      else gate.state = gate.seen_kinds ? mask::capture_gate::admitted : mask::capture_gate::no_ui_tags;
+      mask::observe_gate(gate);
+      if (gate.state != mask::capture_gate::admitted) return {};
+      frame_generation_snapshot fg;
+      const bool fg_enabled = query_frame_generation(out.viewport, fg) && fg.enabled;
+      // Every source uses its own synchronous command/state/lifetime boundary.
+      // Capture availability is independent of its eventual per-frame mask
+      // validation, and HUD-less color remains a separate scene-color input.
+      alpha_attempts attempts;
+      for (unsigned i = 0; i != priority.size(); ++i) {
+        const auto &tag = out.tags[priority[i]];
+        if (tag.present) attempts[i] = capture_ui_tag(out, commands, tag, source_epoch, fg_enabled);
+      }
+      return attempts;
+    }
+    evaluation_snapshot capture_depth_tag(const batch &out, void *commands) {
       evaluation_snapshot snapshot;
       if (!out.valid_viewport || !source_requested.load(std::memory_order_acquire) ||
-          !fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire) ||
-          (!out.tags[0].present && !out.tags[1].present)) return snapshot;
+          (!out.tags[0].present && !out.tags[1].present && !out.tags[2].present)) return snapshot;
       frame_identity identity = out.frame;
       auto pin = read_metadata();
-      if (!pin) return snapshot;
+      if (!pin && metadata.has_publication()) return snapshot;
       bool enabled = false;
-      for (const auto &record : pin->records) if (record.used && record.viewport == out.viewport) {
-        enabled = record.frame_generation.known && record.frame_generation.enabled && record.frame_generation.epoch == pin->epoch &&
+      if (pin) for (const auto &record : pin->records) if (record.used && record.viewport == out.viewport) {
+        enabled = fg_available.load(std::memory_order_acquire) && current_fg_target.load(std::memory_order_acquire) &&
+          record.frame_generation.known && record.frame_generation.enabled && record.frame_generation.epoch == pin->epoch &&
           record.frame_generation.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
-        const auto &first_tag = out.tags[0].present ? out.tags[0] : out.tags[1];
-        const bool synchronous_global_depth = std::any_of(out.tags.begin(), out.tags.begin() + 2, [](const tag_record &tag) {
+        const auto &first_tag = out.tags[0].present ? out.tags[0] : out.tags[1].present ? out.tags[1] : out.tags[2];
+        const bool synchronous_global_depth = std::any_of(out.tags.begin(), out.tags.begin() + 3, [](const tag_record &tag) {
           return tag.present && tag.source == origin::global && tag.value.lifecycle == 0;
         });
         const auto *camera_frame = find_frame(*pin, out.viewport, record.camera_frame);
@@ -1640,14 +1743,27 @@ namespace sunshine_streamline {
           identity = record.camera_frame;
         break;
       }
-      if (!enabled) return snapshot;
-      snapshot = capture_evaluation(out.viewport, 1000, identity, commands,
-        out.observation, out.serial, out.loss, &out, &*pin);
+      if (!enabled && std::none_of(out.tags.begin(), out.tags.begin() + 3, [](const tag_record &tag) {
+          return tag.present && tag.value.lifecycle == 0;
+        })) return snapshot;
+      snapshot = capture_evaluation(out.viewport, enabled ? 1000 : UINT32_MAX, identity, commands,
+        out.observation, out.serial, out.loss, &out, pin ? &*pin : nullptr, true);
       snapshot.tag_boundary = true;
+      snapshot.frame_generation_input = enabled;
       if (snapshot.frame_correlated && (snapshot.camera_sequence >= out.serial || snapshot.camera_tick > out.tick ||
           out.tick - snapshot.camera_tick > 250)) {
         snapshot.status = evidence_status::stale;
         snapshot.frame_correlated = false;
+        if (!enabled) {
+          // A stale camera cannot calibrate this call, but the call still owns
+          // its explicit OnlyValidNow depth. Keep that raw-only fallback free
+          // of stale camera, jitter, direction and SDK frame claims.
+          snapshot.frame = {}; snapshot.camera = {}; snapshot.projection = {};
+          snapshot.decoded = decode_status::short_buffer;
+          snapshot.camera_tick = snapshot.camera_sequence = 0;
+          snapshot.feedback.reset = false;
+          snapshot.status = evidence_status::untracked_frame;
+        }
       }
       return snapshot;
     }
@@ -1667,8 +1783,8 @@ namespace sunshine_streamline {
       out.serial = serial;
       out.loss = loss;
       out.tick = entry_tick;
-      const auto alpha = sample ? capture_fg_alpha(out, commands) : sunshine_game3d::ui_mask::attempt{};
-      const auto snapshot = sample ? capture_fg_tag(out, commands) : evaluation_snapshot{};
+      const auto alpha = sample ? capture_ui_inputs(out, commands) : alpha_attempts{};
+      const auto snapshot = sample ? capture_depth_tag(out, commands) : evaluation_snapshot{};
       if (snapshot.tag_boundary) loss_context.feature = snapshot.feature;
       const auto captured = snapshot.tag_boundary ? nominate_depth_source(snapshot, false) : 0;
       SetLastError(incoming);
@@ -1683,7 +1799,7 @@ namespace sunshine_streamline {
       else if (sample && (result != 0 || !out.valid_viewport) && current(ticket))
         lose(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
       if (snapshot.tag_boundary) finish_evaluation(snapshot, result == 0, ticket);
-      sunshine_game3d::ui_mask::finish(alpha,
+      for (const auto &attempt : alpha) sunshine_game3d::ui_mask::finish(attempt,
         result == 0 && current(ticket) && loss == loss_revision.load(std::memory_order_acquire));
       SetLastError(outgoing);
       return result;
@@ -1707,8 +1823,8 @@ namespace sunshine_streamline {
       out.loss = loss;
       out.frame = identity;
       out.tick = entry_tick;
-      const auto alpha = sample ? capture_fg_alpha(out, commands) : sunshine_game3d::ui_mask::attempt{};
-      const auto snapshot = sample ? capture_fg_tag(out, commands) : evaluation_snapshot{};
+      const auto alpha = sample ? capture_ui_inputs(out, commands) : alpha_attempts{};
+      const auto snapshot = sample ? capture_depth_tag(out, commands) : evaluation_snapshot{};
       if (snapshot.tag_boundary) loss_context.feature = snapshot.feature;
       const auto captured = snapshot.tag_boundary ? nominate_depth_source(snapshot, false) : 0;
       SetLastError(incoming);
@@ -1723,17 +1839,21 @@ namespace sunshine_streamline {
       else if (sample && (result != 0 || !out.valid_viewport) && current(ticket))
         lose(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
       if (snapshot.tag_boundary) finish_evaluation(snapshot, result == 0, ticket);
-      sunshine_game3d::ui_mask::finish(alpha,
+      for (const auto &attempt : alpha) sunshine_game3d::ui_mask::finish(attempt,
         result == 0 && current(ticket) && loss == loss_revision.load(std::memory_order_acquire));
       SetLastError(outgoing);
       return result;
     }
-    batch read_local_inputs(const base_structure **inputs, std::uint32_t count, std::uintptr_t token) {
+    batch read_local_inputs(const base_structure **inputs, std::uint32_t count, std::uintptr_t token, bool report_invalid) {
       batch out;
-      if (count > tag_limit) { invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); return out; }
+      const auto reject = [&] {
+        out.valid_viewport = false;
+        if (report_invalid) invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__);
+      };
+      if (count > tag_limit) { reject(); return out; }
       std::array<const base_structure *, tag_limit> roots{};
       if (count && !read_bytes(inputs, roots.data(), count * sizeof(roots[0]))) {
-        invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); return out;
+        reject(); return out;
       }
       std::array<abi_v2::resource_tag, tag_limit> tags{};
       unsigned tag_count = 0, visited = 0;
@@ -1741,14 +1861,14 @@ namespace sunshine_streamline {
         const auto *current = roots[i];
         while (current && visited++ < chain_limit) {
           base_structure base;
-          if (!read(current, base)) { invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); return out; }
+          if (!read(current, base)) { reject(); return out; }
           if (same(base.type, viewport_guid)) {
             abi_v2::viewport viewport{};
             std::uint32_t id{};
             constexpr auto prefix = offsetof(abi_v2::viewport, value) + sizeof(viewport.value);
             if (!read_bytes(current, &viewport, prefix)) {
               loss_context.viewport = UINT32_MAX;
-              invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); out.valid_viewport = false; return out;
+              reject(); out.valid_viewport = false; return out;
             }
             // In an evaluate input list 'next' is the documented input chain,
             // which this loop independently traverses under a global cap. It
@@ -1758,25 +1878,25 @@ namespace sunshine_streamline {
                 decode_v2_viewport(&viewport, sizeof(viewport), id) != decode_status::ok ||
                 (out.valid_viewport && out.viewport != id)) {
               loss_context.viewport = UINT32_MAX;
-              invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); out.valid_viewport = false; return out;
+              reject(); out.valid_viewport = false; return out;
             }
             out.viewport = id;
             out.valid_viewport = true;
             loss_context.viewport = id;
           } else if (same(base.type, tag_guid) && tag_count < tags.size()) {
             if (!read_bytes(current, &tags[tag_count++], sizeof(tags[0]))) {
-              invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); return out;
+              reject(); return out;
             }
           }
           current = static_cast<const base_structure *>(base.next);
         }
         if (current) {
           loss_context.viewport = UINT32_MAX;
-          invalid_observation(loss_diagnostics::reason::invalid_input, __func__, __LINE__); out.valid_viewport = false; return out;
+          reject(); out.valid_viewport = false; return out;
         }
       }
       if (out.valid_viewport)
-        for (unsigned i = 0; i < tag_count; ++i) append_tag(out, tags[i], origin::local, token);
+        for (unsigned i = 0; i < tag_count; ++i) append_tag(out, tags[i], origin::local, token, report_invalid);
       return out;
     }
     std::int32_t hook_evaluate_v2(std::uint32_t feature, const abi_v2::frame_token &frame,
@@ -1784,28 +1904,34 @@ namespace sunshine_streamline {
       const DWORD incoming = GetLastError();
       sunshine_upscaler_trace::streamline_scope call_trace(feature, SUNSHINE_UPSCALER_CALLER);
       const auto ticket = observation_ticket();
-      // Non-DLSS feature inputs have different contracts; do not parse them as
-      // viewport/depth metadata or let their failures revoke renderer evidence.
-      const bool sample = ticket && feature == 0;
+      // Known renderer profiles retain their fail-closed malformed-input
+      // behavior. Other features are admitted by a validated typed depth tuple,
+      // never by a feature-ID whitelist; opaque/non-renderer inputs pass through.
+      const bool known_contract = known_renderer_contract(feature);
       if (ticket) ++evaluation_calls;
-      const auto serial = sample ? ++call_sequence : 0;
+      const auto serial = ticket ? ++call_sequence : 0;
       const loss_context_scope loss_scope(serial, UINT32_MAX, feature);
       const auto loss = loss_revision.load(std::memory_order_acquire);
-      const auto identity = sample ? observed_frame(reinterpret_cast<std::uintptr_t>(&frame)) : frame_identity{};
-      const auto entry_tick = sample ? GetTickCount64() : 0;
+      const auto entry_tick = ticket ? GetTickCount64() : 0;
       batch out;
-      if (sample) out = read_local_inputs(inputs, count, reinterpret_cast<std::uintptr_t>(&frame));
-      const auto diagnostic = dump_stamp(ticket, serial, entry_tick, out.valid_viewport ? out.viewport : UINT32_MAX,
-        reinterpret_cast<std::uintptr_t>(&frame), identity.numeric, identity.has_numeric, reinterpret_cast<std::uint64_t>(commands));
-      if (sample && diagnostic.session) dump_metadata::observe_sl_inputs_v2(diagnostic, inputs, count);
+      if (ticket) out = read_local_inputs(inputs, count, reinterpret_cast<std::uintptr_t>(&frame), known_contract);
+      const auto identity = ticket && (known_contract || out.valid_viewport) ?
+        observed_frame(reinterpret_cast<std::uintptr_t>(&frame)) : frame_identity{};
       out.observation = ticket;
       out.serial = serial;
       out.loss = loss;
       out.frame = identity;
       out.tick = entry_tick;
       evaluation_snapshot snapshot;
-      if (sample && out.valid_viewport)
-        snapshot = capture_evaluation(out.viewport, feature, identity, commands, ticket, serial, loss, &out);
+      if (ticket && out.valid_viewport)
+        snapshot = capture_evaluation(out.viewport, feature, identity, commands, ticket, serial, loss, &out, nullptr, false, known_contract);
+      const bool sample = ticket && (known_contract || (commands && out.valid_viewport &&
+        direct_source_admissible(snapshot) && std::any_of(snapshot.tags.begin(), snapshot.tags.end(),
+          [&](const evaluated_depth_tag &tag) { return direct_tag_admissible(snapshot, tag); })));
+      if (sample && !known_contract) capture_content(snapshot);
+      const auto diagnostic = dump_stamp(ticket, serial, entry_tick, out.valid_viewport ? out.viewport : UINT32_MAX,
+        reinterpret_cast<std::uintptr_t>(&frame), identity.numeric, identity.has_numeric, reinterpret_cast<std::uint64_t>(commands));
+      if (sample && diagnostic.session) dump_metadata::observe_sl_inputs_v2(diagnostic, inputs, count);
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
       if (entry_policy_armed) {
         entry_policy_armed = false;
@@ -1814,7 +1940,9 @@ namespace sunshine_streamline {
         entry_source_admitted = direct_source_admissible(snapshot);
       }
 #endif
-      const auto captured = sample && out.valid_viewport ? nominate_depth_source(snapshot, false) : 0;
+      bool copy_recorded{};
+      const auto captured = sample && out.valid_viewport ? nominate_depth_source(snapshot, false, &copy_recorded) : 0;
+      call_trace.claim_depth_capture(sample && out.valid_viewport && owns_nested_depth_capture(snapshot, copy_recorded));
       if (sample && !out.valid_viewport && source_requested.load(std::memory_order_acquire) && depth_capture::active()) {
         depth_capture::observe_provider(reinterpret_cast<std::uintptr_t>(commands));
         depth_capture::begin_evaluation(0, serial, 0xffffffffu);
@@ -1887,8 +2015,7 @@ namespace sunshine_streamline {
     }
 
     bool install_hooks(abi version, const targets &functions) {
-      if (version == abi::unsupported || !functions.constants || !functions.tag || !functions.evaluate ||
-          (version == abi::v2_7_30 && !functions.tag_for_frame)) return false;
+      if (version == abi::unsupported || !functions.constants || !functions.tag || !functions.evaluate) return false;
       if (!minhook_initialized) {
         const auto status = MH_Initialize();
         if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) return false;
@@ -1897,14 +2024,14 @@ namespace sunshine_streamline {
       struct entry { void *target, *hook; void **original; };
       std::array<entry, 6> entries{};
       unsigned count{};
-      if (version == abi::v1_1_1) {
+      if (versioning::is_legacy(version)) {
         entries[count++] = {functions.constants, reinterpret_cast<void *>(hook_constants_v1), reinterpret_cast<void **>(&original_constants_v1)};
         entries[count++] = {functions.tag, reinterpret_cast<void *>(hook_tag_v1), reinterpret_cast<void **>(&original_tag_v1)};
         entries[count++] = {functions.evaluate, reinterpret_cast<void *>(hook_evaluate_v1), reinterpret_cast<void **>(&original_evaluate_v1)};
       } else {
         entries[count++] = {functions.constants, reinterpret_cast<void *>(hook_constants_v2), reinterpret_cast<void **>(&original_constants_v2)};
         entries[count++] = {functions.tag, reinterpret_cast<void *>(hook_tag_v2), reinterpret_cast<void **>(&original_tag_v2)};
-        entries[count++] = {functions.tag_for_frame, reinterpret_cast<void *>(hook_frame_tag_v2), reinterpret_cast<void **>(&original_frame_tag_v2)};
+        if (functions.tag_for_frame) entries[count++] = {functions.tag_for_frame, reinterpret_cast<void *>(hook_frame_tag_v2), reinterpret_cast<void **>(&original_frame_tag_v2)};
         entries[count++] = {functions.evaluate, reinterpret_cast<void *>(hook_evaluate_v2), reinterpret_cast<void **>(&original_evaluate_v2)};
         if (functions.new_frame_token) entries[count++] = {functions.new_frame_token, reinterpret_cast<void *>(hook_new_token_v2), reinterpret_cast<void **>(&original_new_token_v2)};
         if (functions.get_feature_function) entries[count++] = {functions.get_feature_function, reinterpret_cast<void *>(hook_get_feature_function), reinterpret_cast<void **>(&original_feature_function_v2)};
@@ -1951,7 +2078,7 @@ namespace sunshine_streamline {
       return versioning::read_file(path);
     }
     void discover_v1_private_state() {
-      if (installed_abi != abi::v1_1_1 || v1_private_state_checked) return;
+      if (!versioning::is_legacy(installed_abi) || v1_private_state_checked) return;
       // The encoding is owned by sl.common, whose version can differ from the
       // interposer in a mixed installation. Resolve it once outside callbacks;
       // a delayed load remains eligible at the next existing discovery poll.
@@ -1959,7 +2086,7 @@ namespace sunshine_streamline {
       if (!GetModuleHandleExW(0, L"sl.common.dll", &module)) return;
       dump_metadata::observe_module(module, "streamline", "1.1.1 resource-state adapter");
       auto info = module_version(module);
-      const bool supported = versioning::classify(info) == abi::v1_1_1;
+      const bool supported = versioning::private_state_v1_1_1(info);
       HMODULE pinned{};
       const bool ready = supported && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
         reinterpret_cast<LPCWSTR>(module), &pinned);
@@ -1983,7 +2110,7 @@ namespace sunshine_streamline {
       }
       auto info = module_version(module);
       const abi version = versioning::classify(info);
-      dump_metadata::observe_module(module, "streamline", version == abi::v1_1_1 ? "1.1.1 observer" : version == abi::v2_7_30 ? "2.7.30 observer" : "unsupported observer ABI");
+      dump_metadata::observe_module(module, "streamline", versioning::name(version));
       targets functions{
         reinterpret_cast<void *>(GetProcAddress(module, "slSetConstants")),
         reinterpret_cast<void *>(GetProcAddress(module, "slSetTag")),
@@ -1991,19 +2118,25 @@ namespace sunshine_streamline {
         reinterpret_cast<void *>(GetProcAddress(module, "slEvaluateFeature")),
         reinterpret_cast<void *>(GetProcAddress(module, "slGetNewFrameToken")),
         reinterpret_cast<void *>(GetProcAddress(module, "slGetFeatureFunction"))};
+      // 1.0.0/1.0.1 shipped namespace exports; 1.0.2 kept that resource layout
+      // but introduced the C names. These are the official Windows x64 names.
+      if (version == abi::legacy_no_state) {
+        if (!functions.constants) functions.constants = reinterpret_cast<void *>(GetProcAddress(module, "?setConstants@sl@@YA_NAEBUConstants@1@II@Z"));
+        if (!functions.tag) functions.tag = reinterpret_cast<void *>(GetProcAddress(module, "?setTag@sl@@YA_NPEBUResource@1@W4BufferType@1@IPEBUExtent@1@@Z"));
+        if (!functions.evaluate) functions.evaluate = reinterpret_cast<void *>(GetProcAddress(module, "?evaluateFeature@sl@@YA_NPEAXW4Feature@1@II@Z"));
+      }
       char identity[768]{};
       std::snprintf(identity, sizeof(identity),
-        "Sunshine Streamline: version fixed-file=%u.%u.%u.%u fixed-product=%u.%u.%u.%u strings='%ls'/'%ls' result=%s; exports constants=%d tag=%d frame-tag=%d evaluate=%d new-frame-token=%d",
+        "Sunshine Streamline: version fixed-file=%u.%u.%u.%u fixed-product=%u.%u.%u.%u strings='%ls'/'%ls' result=%s; adapter=%s; exports constants=%d tag=%d frame-tag=%d evaluate=%d new-frame-token=%d feature-function=%d",
         HIWORD(info.file_ms), LOWORD(info.file_ms), HIWORD(info.file_ls), LOWORD(info.file_ls),
         HIWORD(info.product_ms), LOWORD(info.product_ms), HIWORD(info.product_ls), LOWORD(info.product_ls),
-        info.file_text.data(), info.product_text.data(), info.reason,
+        info.file_text.data(), info.product_text.data(), info.reason, versioning::name(version),
         functions.constants != nullptr, functions.tag != nullptr, functions.tag_for_frame != nullptr, functions.evaluate != nullptr,
-        functions.new_frame_token != nullptr);
+        functions.new_frame_token != nullptr, functions.get_feature_function != nullptr);
       message(identity);
-      if (version == abi::unsupported || !functions.constants || !functions.tag || !functions.evaluate ||
-          (version == abi::v2_7_30 && !functions.tag_for_frame)) {
+      if (version == abi::unsupported || !functions.constants || !functions.tag || !functions.evaluate) {
         message(version == abi::unsupported ?
-          "Sunshine Streamline: camera hooks disabled because the version identity above is not validated" :
+          "Sunshine Streamline: camera hooks disabled because the version identity or ABI major above is unsupported" :
           "Sunshine Streamline: camera hooks disabled because a required export above is missing");
         permanently_rejected = true;
         FreeLibrary(module);
@@ -2032,10 +2165,12 @@ namespace sunshine_streamline {
         return;
       }
       observing.store(middleware_requested(), std::memory_order_release);
-      message(version == abi::v1_1_1 ?
-        "Sunshine Streamline: observing 1.1.1.0 constants, global depth tags and feature evaluation; direct depth capture enabled when supported" :
-        "Sunshine Streamline: observing 2.7.30.0 constants, global/frame/local depth tags and feature evaluation; direct depth capture enabled when supported");
-      if (version == abi::v2_7_30 && !functions.new_frame_token)
+      message(versioning::is_legacy(version) ?
+        "Sunshine Streamline: observing 1.x constants, global depth tags and feature evaluation; direct depth capture enabled when supported" :
+        "Sunshine Streamline: observing 2.x constants, global/local depth tags and feature evaluation; direct depth capture enabled when supported");
+      if (version == abi::v2 && !functions.tag_for_frame)
+        message("Sunshine Streamline: optional slSetTagForFrame unavailable; global/evaluation-local tags remain enabled");
+      if (version == abi::v2 && !functions.new_frame_token)
         message("Sunshine Streamline: slGetNewFrameToken unavailable; v2 evaluation frame evidence stays untracked");
     }
   }
@@ -2230,8 +2365,8 @@ namespace sunshine_streamline {
       }
       if (status == evidence_status::source_associated_evaluation) {
         bool available = false;
-        for (unsigned order = 0; order != 2; ++order) {
-          const unsigned index = order == 0 ? 1 : 0;
+        for (unsigned order = 0; order != depth_priority.size(); ++order) {
+          const unsigned index = depth_priority[order];
           const auto &tag = value.tags[index];
           if (!tag.present || !tag.value.native_resource) continue;
           if (!tag.supported || match({value.viewport, value.epoch, 0, false}, tag.value) != match_status::same_epoch_only) {
@@ -2292,6 +2427,8 @@ namespace sunshine_streamline {
       bool source_seen = false;
       auto status = candidate.status;
       const auto *frame_state = find_frame(*pin, candidate.viewport, candidate.frame);
+      // Generic ReShade depth evidence has no linear-encoding transport. Native
+      // provider capture handles tag49 with its explicit encoding instead.
       for (unsigned i = 0; i != 2; ++i) {
         const auto &tag = candidate.tags[i];
         if (!tag.present || tag.value.native_resource != selected.resource) continue;
@@ -2359,6 +2496,36 @@ namespace sunshine_streamline {
     return output.status;
   }
 
+  bool query_ui_scope(std::uint32_t viewport, ui_observation_scope &output, std::uint32_t max_age_ms) {
+    output = {};
+    const auto ticket = observation_ticket();
+    if (!ticket) return false;
+    auto pin = read_metadata();
+    if (!pin) return false;
+    const auto loss = loss_revision.load(std::memory_order_acquire);
+    const auto now = GetTickCount64();
+    bool found = false, ambiguous = false;
+    for (const auto &record : pin->records) {
+      if (!record.used || (viewport != UINT32_MAX && record.viewport != viewport)) continue;
+      const tag_record *newest{};
+      for (const auto index : {3u, 6u, 7u, 8u}) {
+        const auto &tag = record.global_tags[index];
+        if (!tag.present || !tag.supported || !tag.serial || tag.loss != loss ||
+            tag.value.observation_epoch != pin->epoch || !tag.tick || now < tag.tick || now - tag.tick >= max_age_ms) continue;
+        if (!newest || tag.serial > newest->serial) newest = &tag;
+      }
+      if (!newest) continue;
+      if (found) { ambiguous = true; break; }
+      output = {pin->epoch, loss, newest->serial, newest->tick, record.viewport};
+      found = true;
+    }
+    pin.reset();
+    if (!found || ambiguous || !current(ticket) || loss != loss_revision.load(std::memory_order_acquire)) {
+      output = {}; return false;
+    }
+    return true;
+  }
+
   bool query_frame_generation(std::uint32_t viewport, frame_generation_snapshot &output,
       frame_generation_query_status *status) {
     output = {};
@@ -2393,7 +2560,7 @@ namespace sunshine_streamline {
     const auto ticket = observation_ticket();
     const auto fail = [&](presentation_status status) { output.status = status; output.explicit_bracket = false; return status; };
     if (!ticket) return fail(presentation_status::inactive);
-    if (installed_abi == abi::v2_7_30 && (!pcl_available.load(std::memory_order_acquire) || !current_pcl_target.load(std::memory_order_acquire)))
+    if (installed_abi == abi::v2 && (!pcl_available.load(std::memory_order_acquire) || !current_pcl_target.load(std::memory_order_acquire)))
       return fail(presentation_status::missing_marker_function);
     if (!TryAcquireSRWLockExclusive(&presentations_lock)) return fail(presentation_status::busy);
     const auto loss = loss_revision.load(std::memory_order_acquire);
@@ -2495,7 +2662,7 @@ namespace sunshine_streamline {
           origin scope{};
           bool present{}, supported{};
         };
-        std::array<depth_tag_sample, 2> depth_samples{};
+        std::array<depth_tag_sample, 3> depth_samples{};
         for (const auto &record : camera_pin->records) if (record.used && record.has_camera) {
           ++cameras;
           const auto checked = validate(record.camera);
@@ -2509,8 +2676,8 @@ namespace sunshine_streamline {
             depth_samples = {};
             for (const auto *group : {&record.active_tags, &record.global_tags, &record.local_tags}) {
               for (const auto &tag : *group) {
-                if (!tag.present || (tag.value.type != 0 && tag.value.type != 48)) continue;
-                auto &sample = depth_samples[tag.value.type == 0 ? 0 : 1];
+                if (!tag.present || (tag.value.type != 0 && tag.value.type != 48 && tag.value.type != 49)) continue;
+                auto &sample = depth_samples[tag.value.type == 0 ? 0 : tag.value.type == 48 ? 1 : 2];
                 if (!sample.present || tag.tick > sample.tick)
                   sample = {tag.value, tag.tick, tag.source, tag.present, tag.supported};
               }
@@ -2527,7 +2694,7 @@ namespace sunshine_streamline {
             static_cast<unsigned long long>(calls), cameras, valid_recent);
           message(availability);
           if (camera_sample_tick) {
-            char detail[1400]{};
+            char detail[1800]{};
             std::snprintf(detail, sizeof(detail),
               "Sunshine Streamline camera sample: viewport=%u frame=%llu explicit_frame=%u age_ms=%llu projection=%s A=%.9g B=%.9g matrix_near=%.9g matrix_far=%.9g infinite_far=%u checked_fov_rad=%.9g checked_aspect=%.9g declared_near=%.9g declared_far=%.9g declared_fov_rad=%.9g declared_aspect=%.9g inverted=%u orthographic=%u reset=%u; checked fields may be incomplete on failure; observation only, NGX_frame_match=unproven",
               camera_sample_key.viewport, static_cast<unsigned long long>(camera_sample_key.frame_key),
@@ -2541,13 +2708,13 @@ namespace sunshine_streamline {
               unsigned(camera_sample.depth_inverted), unsigned(camera_sample.orthographic),
               unsigned(camera_sample.reset));
             message(detail);
-            char tag_details[2][480]{};
+            char tag_details[3][480]{};
             for (unsigned i = 0; i < depth_samples.size(); ++i) {
               const auto &sample = depth_samples[i];
               const auto &tag = sample.value;
               std::snprintf(tag_details[i], sizeof(tag_details[i]),
                 "type=%u present=%u supported=%u scope=%u native=0x%llx declared_size=%ux%u area_xywh=%u,%u,%u,%u lifetime=%u age_ms=%llu tag_viewport=%u frame=%llu explicit_frame=%u",
-                i == 0 ? 0u : 48u, sample.present ? 1u : 0u,
+                observed_tag_types[i], sample.present ? 1u : 0u,
                 sample.supported ? 1u : 0u, static_cast<unsigned>(sample.scope),
                 static_cast<unsigned long long>(tag.native_resource), tag.resource_width, tag.resource_height,
                 tag.area.left, tag.area.top, tag.area.width, tag.area.height, tag.lifecycle,
@@ -2555,8 +2722,8 @@ namespace sunshine_streamline {
                 tag.viewport, static_cast<unsigned long long>(tag.frame_key), tag.explicit_frame ? 1u : 0u);
             }
             std::snprintf(detail, sizeof(detail),
-              "Sunshine Streamline depth tag sample: camera_viewport=%u depth={%s} highres_depth={%s}; observation only, NGX_resource_overlap=unproven",
-              camera_sample_key.viewport, tag_details[0], tag_details[1]);
+              "Sunshine Streamline depth tag sample: camera_viewport=%u depth={%s} highres_depth={%s} linear_depth={%s}; observation only, NGX_resource_overlap=unproven",
+              camera_sample_key.viewport, tag_details[0], tag_details[1], tag_details[2]);
             message(detail);
           }
           camera_report_count = calls;
@@ -2868,8 +3035,9 @@ namespace sunshine_streamline {
     bool discover_frame_generation_hooks() { discover_fg_options(); return install_fg_hooks(); }
     bool install(testing::abi version, const testing::targets &functions) {
       if (!middleware_requested() && !sunshine_upscaler_trace::enabled()) return false;
-      const auto native_version = version == testing::abi::v1_1_1 ? sunshine_streamline::abi::v1_1_1 :
-        version == testing::abi::v2_7_30 ? sunshine_streamline::abi::v2_7_30 : sunshine_streamline::abi::unsupported;
+      const auto native_version = version == testing::abi::v1_1_1 ? sunshine_streamline::abi::legacy :
+        version == testing::abi::v1_0_0 ? sunshine_streamline::abi::legacy_no_state :
+        version == testing::abi::v2_7_30 ? sunshine_streamline::abi::v2 : sunshine_streamline::abi::unsupported;
       const bool success = install_hooks(native_version, {functions.constants, functions.tag, functions.tag_for_frame, functions.evaluate, functions.new_frame_token, functions.get_feature_function});
       if (success) observing.store(middleware_requested(), std::memory_order_release);
       sunshine_upscaler_trace::set_streamline_coverage(success);

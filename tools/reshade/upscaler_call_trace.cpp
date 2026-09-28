@@ -93,16 +93,26 @@ namespace sunshine_upscaler_trace {
     bool minhook_ready{};
     thread_local std::uint64_t tls_epoch{};
     thread_local unsigned tls_depth{};
+    thread_local unsigned tls_capture_depth{};
     thread_local unsigned ngx_capture_depth{};
+    thread_local unsigned ngx_diagnostic_depth{};
 
     class capture_scope {
     public:
       sunshine_ngx::evaluation value;
       bool finished{};
+      bool diagnostic_owner{};
       capture_scope(const target &hook, std::uint64_t command, const void *handle, const void *parameters) {
-        if (hook.d3d11 || tls_depth || ngx_capture_depth || !sunshine_ngx::enabled()) return;
-        value = sunshine_ngx::before_evaluate(hook.owner, hook.parameters, command, handle, parameters);
-        if (value.observed) ++ngx_capture_depth;
+        if (hook.d3d11 || ngx_capture_depth || !sunshine_ngx::enabled()) return;
+        // SDK/core wrappers can evaluate recursively even after an outer depth
+        // nomination was rejected. Query/copy the dump resources once while
+        // still allowing the inner wrapper to supply a usable depth input.
+        diagnostic_owner = !ngx_diagnostic_depth && hook.parameters && command && handle && parameters &&
+          sunshine_game3d::diagnostic_metadata_generation();
+        if (diagnostic_owner) ++ngx_diagnostic_depth;
+        value = sunshine_ngx::before_evaluate(hook.owner, hook.parameters, command, handle, parameters,
+          tls_capture_depth == 0, diagnostic_owner);
+        if (value.capture_authority) ++ngx_capture_depth;
       }
       void finish(bool success) {
         if (finished) return;
@@ -111,7 +121,8 @@ namespace sunshine_upscaler_trace {
       }
       ~capture_scope() {
         if (!finished) finish(false);
-        if (value.observed) --ngx_capture_depth;
+        if (value.capture_authority) --ngx_capture_depth;
+        if (diagnostic_owner) --ngx_diagnostic_depth;
       }
     };
 
@@ -312,12 +323,8 @@ namespace sunshine_upscaler_trace {
       unsigned examined = 0;
       if (Module32FirstW(snapshot, &value)) do {
         if (++examined > 1024) break;
-        wchar_t lower[MAX_PATH]{};
-        for (unsigned i = 0; i + 1 < MAX_PATH && value.szModule[i]; ++i) lower[i] = std::towlower(value.szModule[i]);
-        const bool ngx_module = std::wcscmp(lower, L"nvngx.dll") == 0 || std::wcscmp(lower, L"_nvngx.dll") == 0 ||
-          std::wcscmp(lower, L"nvngx_dlss.dll") == 0 || std::wcscmp(lower, L"nvngx_dlssd.dll") == 0 ||
-          std::wcscmp(lower, L"nvngx_dlssg.dll") == 0 || std::wcscmp(lower, L"nvngx_deepdvc.dll") == 0;
-        if (value.hModule != GetModuleHandleW(nullptr) && !ngx_module) continue;
+        // Static SDKs can export NGX from any game/plugin module. Discover by
+        // exact public exports, independently of DLL filename or SDK version.
         HMODULE retained{};
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
             reinterpret_cast<LPCWSTR>(value.hModule), &retained)) continue;
@@ -452,11 +459,15 @@ namespace sunshine_upscaler_trace {
   }
   streamline_scope::streamline_scope(std::uint32_t feature, std::uintptr_t caller) :
       epoch_(sunshine_addon_lifetime::stopping() ? 0 : active_epoch.load(std::memory_order_acquire)), previous_epoch_(tls_epoch),
-      feature_(feature), previous_depth_(tls_depth), caller_(caller) {
-    // Native NGX calls made underneath SL must not produce a second capture,
-    // including when diagnostic tracing is disabled.
+      feature_(feature), previous_depth_(tls_depth), previous_capture_depth_(tls_capture_depth), caller_(caller) {
     tls_depth = tls_depth + 1;
     tls_epoch = epoch_;
+  }
+  void streamline_scope::claim_depth_capture(bool owns) {
+    if (owns && !capture_claimed_) {
+      ++tls_capture_depth;
+      capture_claimed_ = true;
+    }
   }
   void streamline_scope::finish(bool success) {
     last_error_guard error;
@@ -470,6 +481,7 @@ namespace sunshine_upscaler_trace {
   streamline_scope::~streamline_scope() {
     tls_epoch = previous_epoch_;
     tls_depth = previous_depth_;
+    tls_capture_depth = previous_capture_depth_;
   }
 
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST

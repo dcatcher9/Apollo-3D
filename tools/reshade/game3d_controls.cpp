@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <reshade.hpp>
+#include "game3d_ui_input_provider.h"
 #include <unordered_map>
 
 namespace sunshine_game3d {
@@ -30,42 +31,39 @@ namespace sunshine_game3d {
     source_alpha_mode process_alpha_mode = source_alpha_mode::automatic;
     bool alpha_mode_loaded = false;
 
-    const std::shared_ptr<alpha_auto_policy> &alpha_session() {
-      // Initializing a game and its GPU can take longer than the whole detection
-      // window. The renderer starts this once it can queue an eligible alpha probe.
-      static const auto session = std::make_shared<alpha_auto_policy>();
-      return session;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    float control_positions[5][2] {};
+#endif
+
+    void record_control_position(unsigned index) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      control_positions[index][0] = ImGui::GetCursorPosX();
+      control_positions[index][1] = ImGui::GetCursorPosY();
+#else
+      (void)index;
+#endif
     }
 
-    void log_alpha_detection(const alpha_auto_decision &decision, std::uint64_t now) {
-      // Called under state_mutex. Log transitions and the first candidate, not
-      // every frame or each flicker during the bounded confirmation interval.
-      static bool initialized = false, candidate_logged = false, sparse_logged = false, started = false;
-      static alpha_auto_state previous = alpha_auto_state::waiting_for_source;
-      const bool changed = !initialized || previous != decision.state || started != decision.window_started;
-      if (changed && (decision.state == alpha_auto_state::waiting_for_source || decision.state == alpha_auto_state::collecting))
-        candidate_logged = sparse_logged = false;
-      const bool first_sparse = decision.monitoring && decision.probe_interval_ms == alpha_slow_probe_interval_ms && !sparse_logged;
-      if (first_sparse) candidate_logged = false;
-      const bool first_candidate = decision.monitoring && decision.enabled && !candidate_logged;
-      if (!changed && !first_candidate && !first_sparse) return;
-      const char *reason = decision.state == alpha_auto_state::waiting_for_source ? "waiting_for_first_alpha_probe" :
-        decision.state == alpha_auto_state::automatic_on ? "selective_alpha_confirmed_500ms" :
-        decision.state == alpha_auto_state::automatic_off ? "deadline_without_500ms_confirmation" :
-        decision.state == alpha_auto_state::manual_on || decision.state == alpha_auto_state::manual_off ? "manual_override" :
-        first_candidate ? "selective_alpha_provisional" : first_sparse ? "sparse_observation_started" : "observation_window_started";
-      const auto elapsed = decision.window_started && now >= decision.window_start_ms ? now - decision.window_start_ms : 0;
-      char message[640];
-      std::snprintf(message, sizeof(message),
-        "Sunshine UI alpha: state=%s enabled=%d monitoring=%d reason=%s window_started=%d window_start_ms=%llu elapsed_ms=%llu probe_interval_ms=%llu accepted_samples=%llu last_covered=%u last_total=%u last_sequence=%llu last_tick_ms=%llu",
-        name(decision.state), int(decision.enabled), int(decision.monitoring), reason, int(decision.window_started),
-        static_cast<unsigned long long>(decision.window_start_ms), static_cast<unsigned long long>(elapsed),
-        static_cast<unsigned long long>(decision.probe_interval_ms), static_cast<unsigned long long>(decision.accepted_samples), decision.covered, decision.pixels,
-        static_cast<unsigned long long>(decision.sample_sequence), static_cast<unsigned long long>(decision.sample_tick_ms));
-      reshade::log::message(reshade::log::level::info, message);
-      initialized = true; previous = decision.state; started = decision.window_started;
-      if (first_candidate) candidate_logged = true;
-      if (first_sparse) sparse_logged = true;
+    bool begin_controls(const char *id) {
+      if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp)) return false;
+      ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 7.f * ImGui::GetFontSize());
+      ImGui::TableSetupColumn("Control", ImGuiTableColumnFlags_WidthStretch);
+      return true;
+    }
+
+    void control_row(const char *label) {
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::AlignTextToFramePadding();
+      ImGui::TextUnformatted(label);
+      ImGui::TableNextColumn();
+      ImGui::SetNextItemWidth(-1.f);
+    }
+
+    const std::shared_ptr<alpha_auto_policy> &alpha_session() {
+      // Manual On/Off is shared per game; live Auto qualification is per runtime.
+      static const auto session = std::make_shared<alpha_auto_policy>();
+      return session;
     }
 
     struct config_backend {
@@ -128,15 +126,18 @@ namespace sunshine_game3d {
     void strength_control(settings_state &settings, config_backend &config) {
       float value = settings.values.strength;
       ImGui::PushID("Strength");
-      ImGui::TextUnformatted("3D strength");
+      control_row("3D strength");
       const float reset_width = reserve_reset_button();
+      record_control_position(1);
       if (ImGui::SliderFloat("##value", &value, 0, 100, "%.0f%%", ImGuiSliderFlags_NoRoundToFormat))
         edit_strength(settings, value, config);
       ImGui::SetItemTooltip("Stereo separation. 0%% shows the same image to both eyes. The default is 50%%. Changes are saved automatically for this game.");
-      if (settings.alive && settings.values.strength != default_strength) {
+      if (settings.alive) {
         ImGui::SameLine();
+        ImGui::BeginDisabled(settings.values.strength == default_strength);
         if (ImGui::Button("Reset", ImVec2(reset_width, 0))) edit_strength(settings, default_strength, config);
         ImGui::SetItemTooltip("Restore 50%% strength");
+        ImGui::EndDisabled();
       }
       ImGui::PopID();
     }
@@ -145,8 +146,9 @@ namespace sunshine_game3d {
       const char *views[] {"Game image", "Stereo depth", "Normal depth"};
       const int value = settings.values.depth_view;
       ImGui::PushID("DepthView");
-      ImGui::TextUnformatted("Depth view");
+      control_row("Depth view");
       const float reset_width = reserve_reset_button();
+      record_control_position(3);
       if (ImGui::BeginCombo("##value", views[value])) {
         for (int i = 0; i < 3; ++i) {
           if (ImGui::Selectable(views[i], value == i)) edit_depth_view(settings, i, config);
@@ -155,10 +157,12 @@ namespace sunshine_game3d {
         ImGui::EndCombo();
       }
       ImGui::SetItemTooltip("Normal depth checks scene capture. Stereo depth shows the field used for the 3D effect. Choose Game image to return to normal viewing.");
-      if (settings.alive && settings.values.depth_view != 0) {
+      if (settings.alive) {
         ImGui::SameLine();
+        ImGui::BeginDisabled(settings.values.depth_view == 0);
         if (ImGui::Button("Reset", ImVec2(reset_width, 0))) edit_depth_view(settings, 0, config);
         ImGui::SetItemTooltip("Restore Game image");
+        ImGui::EndDisabled();
       }
       ImGui::PopID();
     }
@@ -177,15 +181,17 @@ namespace sunshine_game3d {
       const auto &scale = status.scale;
       const auto scale_state = scale.state();
       const bool camera_scale = scale.basis == automatic_scale_basis::camera_matrix;
+      const bool distance_scale = camera_scale || scale.basis == automatic_scale_basis::linear_distance;
       const bool held = scale_state == automatic_scale_state::held;
       const bool has_zero = scale.has_zero && std::isfinite(scale.zero_inverse) && scale.zero_inverse >= 0.f;
-      const double zero_plane = camera_scale ? scale.zero_inverse > 0.f ? 1.0 / scale.zero_inverse :
+      const double zero_plane = distance_scale ? scale.zero_inverse > 0.f ? 1.0 / scale.zero_inverse :
         std::numeric_limits<double>::infinity() : scale.zero_inverse;
-      const double target_zero_plane = camera_scale ? scale.target_zero_inverse > 0. ? 1.0 / scale.target_zero_inverse :
+      const double target_zero_plane = distance_scale ? scale.target_zero_inverse > 0. ? 1.0 / scale.target_zero_inverse :
         std::numeric_limits<double>::infinity() : scale.target_zero_inverse;
       ImGui::TextWrapped("Depth conversion: %s", camera_scale ? "camera projection matrix" :
+        scale.basis == automatic_scale_basis::linear_distance ? "linear game-distance (1/Z)" :
         scale.basis == automatic_scale_basis::relative_depth ? "relative depth (assumed infinite far plane)" : "waiting for depth data");
-      ImGui::TextWrapped("Depth q: %s", camera_scale ? "inverse game units (1/Z); larger is nearer" :
+      ImGui::TextWrapped("Depth q: %s", distance_scale ? "inverse game units (1/Z); larger is nearer" :
         scale.basis == automatic_scale_basis::relative_depth ? "relative inverse depth; larger is nearer" : "unavailable");
       if (held) ImGui::TextDisabled("Last applied values; tracking paused");
       else if (!scale.has_value()) ImGui::TextDisabled("Screen plane: %s", scale_state == automatic_scale_state::pending ? "centering" : "unavailable");
@@ -265,12 +271,9 @@ namespace sunshine_game3d {
     if (!runtime || !registered) return {default_strength, 0, false};
     const auto data = get_state(runtime);
     auto result = data->values;
-    const auto now = GetTickCount64();
-    const auto decision = data->alpha_session->decision(now);
-    log_alpha_detection(decision, now);
-    result.source_alpha_ui = decision.enabled;
-    result.source_alpha_monitoring = decision.monitoring;
-    result.source_alpha_probe_interval_ms = decision.probe_interval_ms;
+    result.source_alpha_ui = result.ui_protection == source_alpha_mode::on;
+    result.source_alpha_monitoring = false;
+    result.source_alpha_probe_interval_ms = 0;
     return result;
   }
 
@@ -282,20 +285,82 @@ namespace sunshine_game3d {
     if (!registered) return true;
     const auto data = get_state(runtime);
     config_backend config {runtime};
-    const auto automatic = query_automatic(runtime);
     ImGui::PushID("SunshineGame3DControls");
-    const auto finish = [] { ImGui::Spacing(); ImGui::PopID(); };
     ImGui::TextUnformatted("Game 3D");
-    ImGui::TextWrapped("%s", output_status_text(automatic, data->values));
+    // Keep every primary control ahead of live text. Neither a capture gap,
+    // wrapped warning nor the active diagnostics tab may move these targets.
     bool enabled = data->values.enabled;
+    record_control_position(0);
     if (ImGui::Checkbox("Enable Game 3D", &enabled)) edit_enabled(*data, enabled, config);
     ImGui::SetItemTooltip("Enable native SBS rendering and export. This setting is independent of ReShade effects and presets.");
-    if (!data->alive) { finish(); return false; }
+    if (data->alive && begin_controls("MainControls")) {
+      strength_control(*data, config);
+      if (data->alive) {
+        control_row("UI protection");
+        // Display order is On / Off / Auto; persisted enum values stay stable.
+        const source_alpha_mode modes[]{source_alpha_mode::on, source_alpha_mode::off, source_alpha_mode::automatic};
+        int choice = data->values.ui_protection == source_alpha_mode::on ? 0 : data->values.ui_protection == source_alpha_mode::off ? 1 : 2;
+        record_control_position(2);
+        if (ImGui::Combo("##UIProtection", &choice, "On\0Off\0Auto\0")) {
+          if (edit_source_alpha_mode(*data, modes[choice], config, GetTickCount64()))
+            process_alpha_mode = data->values.ui_protection;
+        }
+        ImGui::SetItemTooltip("On and Off are saved per game. Auto finds a compatible UI source and checks its quality automatically. Frame Generation requires submitted usable input pixels.");
+      }
+      ImGui::EndTable();
+    }
     ImGui::Spacing();
+    ImGui::PopID();
+    return data->alive;
+  }
 
+  void draw_status(api::effect_runtime *runtime) {
+    if (!runtime) return;
+    std::lock_guard<std::recursive_mutex> lock(state_mutex);
+    if (!registered) return;
+    const auto data = get_state(runtime);
+    const auto automatic = query_automatic(runtime);
     const auto source_alpha = query_source_alpha_ui(runtime);
     const auto &fg = source_alpha.fg;
-    if (data->values.enabled && fg.known && fg.enabled) {
+    const auto source = ui_input::source_status(runtime);
+    ImGui::TextWrapped("%s", output_status_text(automatic, data->values));
+    if (!data->values.enabled)
+      ImGui::TextUnformatted("UI protection: inactive while Game 3D is disabled");
+    else if (data->values.ui_protection == source_alpha_mode::off)
+      ImGui::TextUnformatted("UI protection: off");
+    const bool dedicated_ui = source_alpha.dedicated_ui_active(data->values.ui_protection, data->values.enabled);
+    if (data->values.enabled && data->values.ui_protection == source_alpha_mode::automatic)
+      ImGui::TextWrapped("UI protection: %s", source_alpha_detection_text(source, source_alpha));
+    else if (data->values.enabled && data->values.ui_protection == source_alpha_mode::on)
+      if (const auto blocked = source_alpha_capture_block_text(source_alpha_capture_block_for(source.selected, fg)))
+        ImGui::TextWrapped("UI protection: %s", blocked);
+    if (source.candidate.source != ui_qualification::choice::automatic)
+      ImGui::TextWrapped("Candidate: %s", ui_qualification::name(source.candidate.source));
+    if (source.selected == ui_qualification::choice::sl_ui_alpha && data->values.ui_protection == source_alpha_mode::automatic)
+      ImGui::TextWrapped("UI alpha tag meaning is unverified for this game's SDK. This source cannot pass automatic detection.");
+    if (data->values.enabled && data->values.ui_protection != source_alpha_mode::off &&
+        source_alpha.mode == data->values.ui_protection && source_alpha.blocked_by_fg()) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+      if (source_alpha.input_state == source_alpha_input_state::state_conflict)
+        ImGui::TextWrapped("UI protection: real-frame alpha capture is blocked by a resource-state conflict. Use Dump 3D to record the details.");
+      else if (source_alpha.input_state == source_alpha_input_state::rejected)
+        ImGui::TextWrapped("UI protection: real-frame input was received, but alpha capture was rejected. Use Dump 3D to record the reason.");
+      else if (source_alpha.input_state == source_alpha_input_state::seen)
+        ImGui::TextWrapped("UI protection: real-frame input received; waiting for usable alpha.");
+      else
+        ImGui::TextWrapped("UI protection: waiting for real-frame alpha input. This FG path must expose its input color.");
+      ImGui::PopStyleColor();
+    } else if (data->values.ui_protection == source_alpha_mode::on &&
+        source_alpha.applied_for(data->values.ui_protection, data->values.enabled)) {
+      ImGui::TextWrapped("UI protection: %s", source_alpha.input == source_alpha_input::sl_hudless_difference ?
+        "using HUDless color difference" : dedicated_ui ? "using a dedicated UI mask" : source_alpha.retained_alpha_ready ?
+        "using captured input alpha" : "using source alpha");
+    }
+
+    ImGui::Spacing();
+    if (!fg.known) ImGui::TextUnformatted("Frame Generation: unknown");
+    else if (!fg.enabled) ImGui::TextUnformatted("Frame Generation: off");
+    if (fg.known && fg.enabled) {
       const char *automatic_mode = fg.automatic ? " (Auto)" : "";
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
       if (fg.generated_frames >= 2) {
@@ -309,50 +374,11 @@ namespace sunshine_game3d {
       ImGui::SetItemTooltip("Change Frame Generation in the game's settings. DLSS Super Resolution can stay on. This is the game's requested setting, not a measurement of generated frames. Sunshine does not change it automatically.");
       ImGui::PopStyleColor();
     }
-    strength_control(*data, config);
-    if (!data->alive) { finish(); return false; }
-    // Display order is On / Off / Auto; persisted enum values remain stable.
-    const source_alpha_mode alpha_modes[]{source_alpha_mode::on, source_alpha_mode::off, source_alpha_mode::automatic};
-    int alpha_choice = data->values.ui_protection == source_alpha_mode::on ? 0 : data->values.ui_protection == source_alpha_mode::off ? 1 : 2;
-    if (ImGui::Combo("UI protection (source alpha)", &alpha_choice, "On\0Off\0Auto\0")) {
-      if (edit_source_alpha_mode(*data, alpha_modes[alpha_choice], config, GetTickCount64()))
-        process_alpha_mode = data->values.ui_protection;
-    }
-    ImGui::SetItemTooltip("%s", "On and Off are saved per game and override detection, including after restart. Auto probes frequently for one minute from the first eligible alpha frame, then once per second until five minutes total. Selective alpha enables protection immediately and resumes frequent sampling; 500 ms of sustained evidence confirms On and stops monitoring. Without confirmation by five minutes, detection ends with Off. Changing back to Auto does not restart a scan that has already begun. Frame Generation still requires completed real-input alpha.");
-    if (!data->alive) { finish(); return false; }
-    const auto alpha_now = GetTickCount64();
-    const auto alpha_result = data->alpha_session->decision(alpha_now);
-    log_alpha_detection(alpha_result, alpha_now);
-    if (data->values.ui_protection == source_alpha_mode::automatic)
-      ImGui::TextWrapped("Auto: %s", alpha_result.state == alpha_auto_state::waiting_for_source ? "Waiting for a game frame..." : alpha_result.monitoring ?
-        (alpha_result.enabled ? "On (confirming for 500 ms...)" :
-          alpha_result.probe_interval_ms == alpha_slow_probe_interval_ms ? "Off (checking once per second...)" : "Detecting... (protection off)") :
-        alpha_result.enabled ? "On" : "Off");
-    if (source_alpha.blocked_by_fg()) {
-      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
-      if (source_alpha.input_state == source_alpha_input_state::state_conflict)
-        ImGui::TextWrapped("UI protection: real-frame alpha capture is blocked by a resource-state conflict. Use Dump 3D to record the details.");
-      else if (source_alpha.input_state == source_alpha_input_state::rejected)
-        ImGui::TextWrapped("UI protection: real-frame input was received, but alpha capture was rejected. Use Dump 3D to record the reason.");
-      else if (source_alpha.input_state == source_alpha_input_state::seen)
-        ImGui::TextWrapped("UI protection: real-frame input received; waiting for usable alpha.");
-      else
-        ImGui::TextWrapped("UI protection: waiting for real-frame alpha input. This FG path must expose its input color.");
-      ImGui::PopStyleColor();
-    } else if (source_alpha.effective()) {
-      ImGui::TextWrapped("UI protection: %s", source_alpha.retained_alpha_ready ?
-        "using real-input alpha (reused during FG)" : "using source alpha");
-    }
+
     camera_hint(automatic, data->values.enabled, fg);
-    if (data->values.depth_view != 0) {
-      ImGui::TextWrapped("Depth preview is selected.");
-      if (ImGui::Button("Return to game image")) edit_depth_view(*data, 0, config);
-      if (!data->alive) { finish(); return false; }
-    }
+    if (data->values.depth_view != 0)
+      ImGui::TextWrapped("Depth preview is selected. To return to gameplay, choose Troubleshooting > Depth view > Game image.");
     ImGui::Spacing();
-    calibration_status(automatic, data->values.strength);
-    finish();
-    return data->alive;
   }
 
   bool draw_diagnostics(api::effect_runtime *runtime) {
@@ -362,14 +388,40 @@ namespace sunshine_game3d {
     const auto data = get_state(runtime);
     config_backend config {runtime};
     ImGui::PushID("SunshineGame3DDiagnostics");
-    depth_view_control(*data, config);
+    if (begin_controls("DiagnosticControls")) {
+      depth_view_control(*data, config);
+      if (data->alive) {
+        control_row("UI mask source");
+        const auto source = ui_input::source_status(runtime);
+        int choice = static_cast<int>(source.selected);
+        record_control_position(4);
+        if (ImGui::Combo("##UIMaskSource", &choice,
+            "Discover automatically\0Current color alpha\0Streamline UI alpha\0Streamline UI color alpha\0Streamline real-input alpha\0HUDless color difference\0"))
+          ui_input::select_source(runtime, static_cast<ui_qualification::choice>(choice));
+        ImGui::SetItemTooltip("Automatic discovery chooses a usable UI source. Select a specific source to troubleshoot it; selection does not bypass capture or quality checks.\nSelected: %s", ui_qualification::name(source.selected));
+      }
+      ImGui::EndTable();
+    }
     ImGui::PopID();
     return data->alive;
   }
 
+  void draw_calibration(api::effect_runtime *runtime) {
+    if (!runtime) return;
+    std::lock_guard<std::recursive_mutex> lock(state_mutex);
+    if (!registered) return;
+    calibration_status(query_automatic(runtime), get_state(runtime)->values.strength);
+  }
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   // Scalar-only adapters retain the existing test ABI while exercising native
   // config ownership. No test path reflects, modifies or saves shader presets.
+  extern "C" __declspec(dllexport) BOOL SunshineGame3DTestControlPosition(unsigned index, float *x, float *y) {
+    if (index >= 5 || !x || !y) return FALSE;
+    *x = control_positions[index][0];
+    *y = control_positions[index][1];
+    return TRUE;
+  }
+
   extern "C" __declspec(dllexport) BOOL SunshineGame3DTestQuery(api::effect_runtime *runtime, unsigned index, unsigned *flags, float *value) {
     if (!runtime || index >= unsigned(control::count) || !flags || !value) return FALSE;
     std::lock_guard<std::recursive_mutex> lock(state_mutex);

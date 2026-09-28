@@ -42,6 +42,7 @@ namespace sunshine_game3d {
       unsigned feature {UINT32_MAX}, tag_type {UINT32_MAX}, lifecycle {UINT32_MAX}, native_state {};
       sunshine_streamline::extent area;
       bool readable {}, descriptor_supported {}, state_declared {}, version_one {};
+      bool area_valid {true};
     };
     struct resource_callbacks {
       void (*resource)(const resource_observation &) noexcept {};
@@ -57,7 +58,7 @@ namespace sunshine_game3d {
     // Call synchronously before the original SDK function, while its arguments
     // are valid. Only bounded readable value prefixes are copied; no saved pointer
     // is subsequently followed and no texture is retained or read back.
-    void observe_sl_tag_v1(const stamp &, const sunshine_streamline::abi_v1::resource *, std::uint32_t type, const sunshine_streamline::extent *) noexcept;
+    void observe_sl_tag_v1(const stamp &, const sunshine_streamline::abi_v1::resource *, std::uint32_t type, const sunshine_streamline::extent *, bool resource_has_state = true) noexcept;
     void observe_sl_tags_v2(const stamp &, const sunshine_streamline::abi_v2::viewport &, const sunshine_streamline::abi_v2::resource_tag *, unsigned count, tag_scope) noexcept;
     void observe_sl_inputs_v2(const stamp &, const sunshine_streamline::base_structure **, unsigned count) noexcept;
     void observe_sl_evaluation(const stamp &, unsigned feature, bool successful) noexcept;
@@ -81,7 +82,7 @@ namespace sunshine_game3d {
       double number {};
     };
 
-    inline constexpr unsigned maximum_parameters = 48;
+    inline constexpr unsigned maximum_parameters = 80;
 
     struct ngx_evaluation {
       stamp observation;
@@ -91,10 +92,16 @@ namespace sunshine_game3d {
       std::array<parameter, maximum_parameters> parameters {};
       unsigned parameter_count {};
       bool truncated {}, feature_known {}, result_known {}, successful {};
+      bool metadata_unavailable {};
+      // A depth owner may suppress duplicate native copies without hiding this
+      // evaluation's bounded named-parameter observations. Such observations
+      // never dispatch resource callbacks or acquire GPU capture authority.
+      bool capture_suppressed_by_depth_owner {};
     };
 
     void observe_ngx(const ngx_evaluation &) noexcept;
-    void finish_ngx(const stamp &, std::uint64_t source_id, bool successful) noexcept;
+    void finish_ngx(const stamp &, std::uint64_t source_id, bool successful,
+      bool capture_suppressed_by_depth_owner = false) noexcept;
 
   }  // namespace diagnostic
 }  // namespace sunshine_game3d

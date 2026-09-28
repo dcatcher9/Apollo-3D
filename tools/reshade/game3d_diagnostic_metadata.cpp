@@ -106,6 +106,12 @@ namespace sunshine_game3d {
       return value.version_one || (same_guid(value.tag_type, sl::tag_guid) && value.tag_version == 1);
     }
 
+    bool tag_resource_type_supported(const tag_value &value) noexcept {
+      // SL v2 eUnknown carries an IUnknown. Like the live adapter, pass it to
+      // native COM/device/texture validation; the enum alone proves no texture.
+      return value.descriptor.type == 0 || (!value.version_one && value.descriptor.type == 8);
+    }
+
     void notify_tag(const tag_value &value) noexcept {
       const auto *catalog = ui_resources::find_sl(value.type);
       if (!catalog) return;
@@ -118,7 +124,7 @@ namespace sunshine_game3d {
       out.version_one = value.version_one;
       out.readable = value.tag_read && value.resource_read;
       out.descriptor_supported = out.readable && tag_layout_supported(value) &&
-                                 (!value.resource_pointer || value.descriptor.type == 0);
+                                 (!value.resource_pointer || tag_resource_type_supported(value));
       if (out.descriptor_supported) {
         out.native = reinterpret_cast<std::uint64_t>(value.descriptor.native);
         out.native_state = value.descriptor.state;
@@ -288,7 +294,7 @@ namespace sunshine_game3d {
       if (!value.resource_read) {
         return value.descriptor.base.version ? "unsupported" : "unreadable";
       }
-      if (value.resource_pointer && value.descriptor.type != 0) return "unsupported";
+      if (value.resource_pointer && !tag_resource_type_supported(value)) return "unsupported";
       return value.descriptor.native ? "non_null" : "null";
     }
 
@@ -297,6 +303,50 @@ namespace sunshine_game3d {
       if (!value.successful) return "query_failed";
       if (value.type != parameter_type::resource) return "unsupported";
       return value.integer ? "non_null" : "null";
+    }
+
+    struct ngx_rectangle {
+      sl::extent area;
+      const char *source = "not_observed_for_this_parameter";
+      bool valid = true;
+    };
+    ngx_rectangle ngx_resource_rectangle(const ngx_evaluation &value, const ui_resources::descriptor &entry) {
+      ngx_rectangle result;
+      if (!entry.parameter_subrect_prefix) return result;
+      unsigned present = 0;
+      std::uint64_t parts[4]{};
+      const char *suffixes[] {"BaseX", "BaseY", "Width", "Height"};
+      for (unsigned part = 0; part != 4; ++part) {
+        char key[64]{};
+        std::snprintf(key, sizeof(key), "%s%s", entry.parameter_subrect_prefix, suffixes[part]);
+        for (unsigned i = 0; i != std::min(value.parameter_count, maximum_parameters); ++i) {
+          const auto &p = value.parameters[i];
+          if (std::strcmp(p.name, key)) continue;
+          if (p.type == parameter_type::unsigned_integer && p.getter_available && p.successful) {
+            ++present;
+            parts[part] = p.integer;
+          }
+          break;
+        }
+      }
+      if (!present) return result;
+      // The SDK's all-zero default means no subrect. Partial observations must
+      // never be completed from another resource or a different evaluation.
+      if (present == 4 && !parts[0] && !parts[1] && !parts[2] && !parts[3]) {
+        result.source = "declared_full_allocation";
+        return result;
+      }
+      result.valid = present == 4 && parts[2] && parts[3] &&
+        parts[0] < 16384 && parts[1] < 16384 && parts[2] <= 16384 && parts[3] <= 16384 &&
+        parts[0] + parts[2] <= 16384 && parts[1] + parts[3] <= 16384;
+      result.source = result.valid ? "declared_for_this_resource" : "incomplete_or_invalid";
+      if (result.valid) {
+        result.area.left = unsigned(parts[0]);
+        result.area.top = unsigned(parts[1]);
+        result.area.width = unsigned(parts[2]);
+        result.area.height = unsigned(parts[3]);
+      }
+      return result;
     }
 
     json ui_inventory(const storage &snapshot) {
@@ -341,12 +391,16 @@ namespace sunshine_game3d {
             for (unsigned i = 0; i != std::min(feature.parameter_count, maximum_parameters); ++i) {
               const auto &p = feature.parameters[i];
               if (std::strcmp(p.name, entry.parameter_key)) continue;
+              const auto rectangle = ngx_resource_rectangle(feature, entry);
               json item {{"native_identity", p.getter_available && p.successful ? json(address(p.integer)) : json(nullptr)},
                 {"owner_identity", address(feature.owner)}, {"feature_handle_identity", address(feature.handle)}, {"source_id", feature.source_id},
                 {"getter_available", p.getter_available}, {"getter_successful", p.getter_available ? json(p.successful) : json(nullptr)},
                 {"getter_result", p.getter_available ? json(p.result) : json(nullptr)},
                 {"getter_result_detail", ngx_result(p.result, p.getter_available)},
-                {"active_rect", nullptr}, {"active_rect_source", "not_observed_for_this_parameter"},
+                {"resource_capture_status", feature.capture_suppressed_by_depth_owner ? "not_attempted_depth_owned" : "reported_separately"},
+                {"active_rect", rectangle.valid && rectangle.area.width ? json {{"left", rectangle.area.left}, {"top", rectangle.area.top},
+                  {"width", rectangle.area.width}, {"height", rectangle.area.height}} : json(nullptr)},
+                {"active_rect_source", rectangle.source},
                 {"sdk_result_known", feature.result_known}, {"sdk_successful", feature.result_known ? json(feature.successful) : json(nullptr)}};
               append(std::move(item), feature.observation, parameter_availability(p));
             }
@@ -487,7 +541,7 @@ namespace sunshine_game3d {
       });
     }
 
-    void observe_sl_tag_v1(const stamp &at, const sl::abi_v1::resource *resource, unsigned type, const sl::extent *area) noexcept {
+    void observe_sl_tag_v1(const stamp &at, const sl::abi_v1::resource *resource, unsigned type, const sl::extent *area, bool resource_has_state) noexcept {
       if (!at.session) {
         return;
       }
@@ -498,7 +552,7 @@ namespace sunshine_game3d {
       value.resource_pointer = reinterpret_cast<std::uint64_t>(resource);
       sl::abi_v1::resource raw {};
       value.tag_read = !area || read_bytes(area, &value.area, sizeof(value.area));
-      value.resource_read = !resource || read_bytes(resource, &raw, sizeof(raw));
+      value.resource_read = sl::abi_v1::read_resource(resource, resource_has_state, raw, read_bytes);
       if (value.resource_read) {
         value.descriptor.type = raw.type;
         value.descriptor.native = raw.native;
@@ -658,7 +712,7 @@ namespace sunshine_game3d {
     }
 
     void observe_ngx(const ngx_evaluation &value) noexcept {
-      for (unsigned i = 0; i != std::min(value.parameter_count, maximum_parameters); ++i) {
+      for (unsigned i = 0; !value.capture_suppressed_by_depth_owner && i != std::min(value.parameter_count, maximum_parameters); ++i) {
         const auto &p = value.parameters[i];
         const auto *catalog = ui_resources::find_ngx(p.name);
         if (!catalog) continue;
@@ -671,8 +725,11 @@ namespace sunshine_game3d {
         out.readable = p.getter_available && p.successful;
         out.descriptor_supported = out.readable && p.type == parameter_type::resource;
         if (out.descriptor_supported) out.native = p.integer;
-        // NGX has no declaration of the resource state or this optional
-        // resource's active rectangle. Do not borrow the depth/color rectangle.
+        const auto rectangle = ngx_resource_rectangle(value, *catalog);
+        out.area = rectangle.area;
+        out.area_valid = rectangle.valid;
+        // NGX supplies no current D3D12 state. The copy owner still requires
+        // observed state; each optional input keeps only its own active rect.
         notify_resource(out);
       }
       write_frame(value.observation, [&] {
@@ -693,7 +750,7 @@ namespace sunshine_game3d {
     }
 
 
-    void finish_ngx(const stamp &at, std::uint64_t source_id, bool successful) noexcept {
+    void finish_ngx(const stamp &at, std::uint64_t source_id, bool successful, bool capture_suppressed_by_depth_owner) noexcept {
       write(at, [&] {
         for (auto &entry : values.ngx) {
           if (entry.observation.epoch == at.epoch && entry.observation.sequence == at.sequence && entry.source_id == source_id) {
@@ -702,7 +759,7 @@ namespace sunshine_game3d {
           }
         }
       });
-      notify_finish(ui_resources::provider::ngx, at, source_id, successful);
+      if (!capture_suppressed_by_depth_owner) notify_finish(ui_resources::provider::ngx, at, source_id, successful);
     }
   }  // namespace diagnostic
 
@@ -741,7 +798,19 @@ namespace sunshine_game3d {
     }
     for (const auto &value : snapshot.ngx) {
       if (value.observation.session) {
-        json item {{"observation", to_json(value.observation)}, {"owner_identity", address(value.owner)}, {"feature_handle_identity", address(value.handle)}, {"source_id", value.source_id}, {"scene_revision", value.feature_known ? json(value.scene_revision) : json(nullptr)}, {"feature_known", value.feature_known}, {"feature", value.feature_known ? json(value.feature) : json(nullptr)}, {"sequence_domain", value.feature_known ? "capture-adapter" : "diagnostic-unknown-feature"}, {"create_width", value.feature_known ? json(value.create_width) : json(nullptr)}, {"create_height", value.feature_known ? json(value.create_height) : json(nullptr)}, {"create_flags", value.feature_known ? json(value.create_flags) : json(nullptr)}, {"truncated", value.truncated}, {"result_known", value.result_known}, {"successful", value.result_known ? json(value.successful) : json(nullptr)}, {"parameters", json::array()}, {"camera_pointer_policy", "Optional pointer presence only; matrix/position memory is not dereferenced or used for rendering."}};
+        const bool feature_metadata = value.feature_known && !value.metadata_unavailable;
+        const bool capture_metadata = feature_metadata && !value.capture_suppressed_by_depth_owner;
+        json item {{"observation", to_json(value.observation)}, {"owner_identity", address(value.owner)}, {"feature_handle_identity", address(value.handle)},
+          {"source_id", value.source_id}, {"scene_revision", capture_metadata ? json(value.scene_revision) : json(nullptr)},
+          {"feature_known", value.feature_known}, {"feature", value.feature_known ? json(value.feature) : json(nullptr)},
+          {"capture_metadata_available", capture_metadata},
+          {"sequence_domain", value.capture_suppressed_by_depth_owner ? "diagnostic-depth-owned" : capture_metadata ? "capture-adapter" : value.feature_known ? "diagnostic-incomplete-feature" : "diagnostic-unknown-feature"},
+          {"resource_capture_status", value.capture_suppressed_by_depth_owner ? "not_attempted_depth_owned" : "reported_separately"},
+          {"create_width", feature_metadata ? json(value.create_width) : json(nullptr)},
+          {"create_height", feature_metadata ? json(value.create_height) : json(nullptr)},
+          {"create_flags", feature_metadata ? json(value.create_flags) : json(nullptr)},
+          {"truncated", value.truncated}, {"result_known", value.result_known}, {"successful", value.result_known ? json(value.successful) : json(nullptr)},
+          {"parameters", json::array()}, {"camera_pointer_policy", "Optional pointer presence only; matrix/position memory is not dereferenced or used for rendering."}};
         for (unsigned i = 0; i != std::min(value.parameter_count, maximum_parameters); ++i) {
           const auto &p = value.parameters[i];
           json number = nullptr;

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <cmath>
+#include "depth_encoding.h"
 
 namespace sunshine_depth_statistics {
   inline constexpr std::uint32_t target_tiles = 576, maximum_tiles = 768;
@@ -34,8 +35,9 @@ namespace sunshine_depth_statistics {
     return {std::uint32_t(std::uint64_t(index) * extent / tiles),
       std::uint32_t((std::uint64_t(index) + 1) * extent / tiles)};
   }
-  // Full active-rectangle moments of q = (raw - A) * inverseB, including zero
-  // depth. The immutable coefficients belong to this capture, not its reader.
+  // Full active-rectangle moments of decoded inverse distance. Device depth
+  // includes zero; linear distance excludes nonpositive/nonfinite values.
+  // The immutable coefficients and encoding belong to this capture, not its reader.
   // A supplied but invalid measurement must not become a sparse-grid fallback.
   struct moments {
     bool supplied = false, valid = false;
@@ -49,5 +51,6 @@ namespace sunshine_depth_statistics {
     // cannot fall back to the cancellation-prone uncentered diagnostic sums.
     bool centered_supplied = false;
     double center = 0., sum_centered = 0., sum_centered_squares = 0.;
+    sunshine_scene_depth::depth_encoding encoding{sunshine_scene_depth::depth_encoding::device};
   };
 }

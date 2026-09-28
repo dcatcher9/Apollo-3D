@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "replay_game3d_package.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <iterator>
@@ -48,6 +49,55 @@ namespace {
     require(hex(p.parameters.data(), p.parameters.size()) == m["producer_metadata"]["replay"]["parameter_hex"].get<std::string>(), "Parameter byte identity changed");
     auto hdr = parse(valid(true));
     require(hdr.artifacts.at("source_color").format == DXGI_FORMAT_R16G16B16A16_FLOAT, "HDR source converted");
+  }
+
+  void explicit_typed_ui_mask() {
+    using sunshine_game3d::ui_mask_channel;
+    const auto configure = [](json &m, unsigned format, ui_mask_channel channel) {
+      auto &r = m["producer_metadata"]["replay"];
+      const auto words = ui_parameter_words(true, {}, channel);
+      r["source_alpha_ui"] = true;
+      r["ui_alpha_source"] = "ui_source_color";
+      r["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v7";
+      r["ui_parameter_bytes"] = ui_parameter_bytes;
+      r["ui_parameter_hex"] = hex(words.data(), sizeof(words));
+      r["ui_constant_binding"] = {{"register", "b1"}, {"uint32", words}, {"mode", 0},
+        {"inverse_depth", 0.f}, {"inverse_depth_bits", 0}, {"mask_channel", channel == ui_mask_channel::red ? "red" : "alpha"}};
+      r["shader_source"] = "Sunshine_SourceAlphaUI Sunshine_UIPlaneMode Sunshine_UIMaskChannel";
+      m["artifacts"].push_back(artifact("ui_source_color", 8, 6, format));
+    };
+    for (const auto format : {DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16_FLOAT,
+        DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT}) {
+      auto m = valid();
+      configure(m, format, ui_mask_channel::red);
+      const auto p = parse(json::parse(m.dump()));
+      require(p.ui_channel == ui_mask_channel::red && ui_parameter<unsigned>(p, 12) == 1 &&
+        p.artifacts.at("ui_source_color").format == unsigned(format), "Typed UI mask format/channel changed");
+    }
+    for (const auto format : {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32G32B32A32_FLOAT,
+        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB}) {
+      auto m = valid();
+      configure(m, format, ui_mask_channel::alpha);
+      require(parse(m).ui_channel == ui_mask_channel::alpha, "V7 alpha mask was reinterpreted as red");
+    }
+    reject([&](json &bad) { configure(bad, DXGI_FORMAT_R8_UNORM, ui_mask_channel::alpha); });
+    reject([&](json &bad) { configure(bad, DXGI_FORMAT_R8_UINT, ui_mask_channel::red); });
+    reject([&](json &bad) {
+      configure(bad, DXGI_FORMAT_R8_UNORM, ui_mask_channel::red);
+      bad["producer_metadata"]["replay"]["ui_constant_binding"]["mask_channel"] = "alpha";
+    });
+    reject([&](json &bad) {
+      configure(bad, DXGI_FORMAT_R8_UNORM, ui_mask_channel::red);
+      bad["producer_metadata"]["replay"]["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v6";
+    });
+    reject([&](json &bad) {
+      configure(bad, DXGI_FORMAT_R8_UNORM, ui_mask_channel::red);
+      bad["producer_metadata"]["replay"]["shader_source"] = "Sunshine_SourceAlphaUI Sunshine_UIPlaneMode";
+    });
+    reject([&](json &bad) {
+      configure(bad, DXGI_FORMAT_R8_UNORM, ui_mask_channel::red);
+      bad["artifacts"].erase(bad["artifacts"].size() - 1);
+    });
   }
 
   void malformed_abi_and_shader() {
@@ -388,8 +438,9 @@ namespace {
       "Optional diagnostics changed replay geometry or entered renderer inputs");
     for (const auto &name : p.ignored_optional_artifacts)
       require(!p.artifacts.count(name), "Optional diagnostics were retained as renderer textures");
-    require(p.ignored_optional_artifacts.front() == "sl_hudless_color" &&
-      p.ignored_optional_artifacts.back() == "sl_backbuffer", "Ignored optional names were not retained");
+    for (const auto &entry : sunshine_game3d::ui_resources::catalog)
+      require(std::count(p.ignored_optional_artifacts.begin(), p.ignored_optional_artifacts.end(), entry.file_stem) == 1,
+        "Ignored optional catalog name was missing or duplicated");
     // Kind names also identify captures from manifests without numeric IDs.
     m["artifacts"].back().erase("artifact_id");
     require(parse(m).ignored_optional_artifacts == p.ignored_optional_artifacts, "Optional artifact required redundant numeric ID");
@@ -597,7 +648,8 @@ int main() {
     bounds_and_formats();
     path_and_duplicates();
     missing_and_partial();
-    std::puts("PASS: eighteen Game 3D replay package regression groups");
+    explicit_typed_ui_mask();
+    std::puts("PASS: nineteen Game 3D replay package regression groups");
     return 0;
   } catch (const std::exception &e) {
     std::fprintf(stderr, "FAIL: %s\n", e.what());

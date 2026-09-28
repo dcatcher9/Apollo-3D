@@ -2,6 +2,7 @@
 #pragma once
 
 #include "camera_scene_policy.h"
+#include "depth_encoding.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,6 +20,7 @@ namespace sunshine_projection_depth {
     float shader_A{}, inverseB{};
     float raw_min{}, raw_max{1.f};
     double near_plane{};
+    sunshine_scene_depth::depth_encoding encoding{sunshine_scene_depth::depth_encoding::device};
     bool valid() const noexcept { return reason == status::ready; }
   };
 
@@ -67,6 +69,28 @@ namespace sunshine_projection_depth {
     return out;
   }
 
+  inline coefficients make_linear(double raw_scale = 1.0, double raw_bias = 0.0) noexcept {
+    coefficients out;
+    out.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
+    if (!std::isfinite(raw_scale) || raw_scale == 0.0 || !std::isfinite(raw_bias)) return out;
+    const double A = -raw_bias / raw_scale;
+    out.shader_A = static_cast<float>(A);
+    out.inverseB = static_cast<float>(raw_scale);
+    out.reason = status::unsupported_shader_domain;
+    if (!std::isfinite(out.shader_A) || (A != 0. && !std::isnormal(out.shader_A)) ||
+        !std::isnormal(out.inverseB)) return out;
+    out.raw_min = -std::numeric_limits<float>::max();
+    out.raw_max = std::numeric_limits<float>::max();
+    out.reason = status::ready;
+    return out;
+  }
+
+  inline coefficients make(sunshine_scene_depth::depth_encoding encoding, double A, double B,
+      double raw_scale = 1.0, double raw_bias = 0.0) noexcept {
+    if (encoding == sunshine_scene_depth::depth_encoding::linear_distance) return make_linear(raw_scale, raw_bias);
+    return encoding == sunshine_scene_depth::depth_encoding::device ? make(A, B, raw_scale, raw_bias) : coefficients{};
+  }
+
   // Mathematical conversion only. Exact endpoints can be real near/far depth
   // or an unwritten clear; the capture/controller owns that evidence decision.
   // A completed asynchronous sample uses its frozen coefficients, not a newer
@@ -75,10 +99,7 @@ namespace sunshine_projection_depth {
   inline bool inverse_distance(const coefficients &projection, float raw, float &q) noexcept {
     q = 0.0f;
     if (!projection.valid() || !std::isfinite(raw) || raw < projection.raw_min || raw > projection.raw_max) return false;
-    const float converted = (raw - projection.shader_A) * projection.inverseB;
-    if (!std::isfinite(converted) || converted < 0.0f) return false;
-    q = converted;
-    return true;
+    return sunshine_scene_depth::decode_inverse_distance(raw, projection.shader_A, projection.inverseB, projection.encoding, q);
   }
 
   // The displayed scene gain must fit THIS frame's exact encoding before use.
@@ -86,6 +107,8 @@ namespace sunshine_projection_depth {
   // or substitute old projection coefficients to make the transition fit.
   inline bool supports_scale(const coefficients &projection, float K) noexcept {
     if (!projection.valid() || !std::isnormal(K) || !(K > 0.f)) return false;
+    if (projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance)
+      return std::isfinite(reference_zpd * K);
     const float q0 = (projection.raw_min - projection.shader_A) * projection.inverseB;
     const float q1 = (projection.raw_max - projection.shader_A) * projection.inverseB;
     return sunshine_camera_scene::shader_coordinate_domain(K, std::max(q0, q1), 0.0);
@@ -98,6 +121,8 @@ namespace sunshine_projection_depth {
         !std::isfinite(q0) || q0 < 0.0 || q0 > std::numeric_limits<float>::max()) return false;
     const float stored = static_cast<float>(q0);
     if (q0 > 0.0 && !std::isnormal(stored)) return false;
+    if (projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance)
+      return std::isfinite(reference_zpd * K) && std::isfinite(reference_zpd * K * stored);
     const float near_q = (projection.raw_min - projection.shader_A) * projection.inverseB;
     const float far_q = (projection.raw_max - projection.shader_A) * projection.inverseB;
     return sunshine_camera_scene::shader_coordinate_domain(K, std::max(near_q, far_q), stored);

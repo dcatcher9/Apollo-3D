@@ -31,6 +31,41 @@ namespace sunshine_game3d {
   static_assert(sizeof(render_parameters) == 80);
   static_assert(offsetof(render_parameters, disparity_limit_uv) == 28);
 
+  // Semantic input contract. API versions, feature IDs and generated-frame
+  // capture/reuse rules belong to providers, not stereo rendering. An absent
+  // captured view is unavailable; it must never fall back to current color.
+  enum class ui_input_kind { unavailable, current_color_alpha, captured_color_alpha, dedicated_mask, hudless_difference };
+  struct ui_detection_inputs {
+    // Provider-admitted, current native captures. Ordering is semantic priority.
+    std::array<reshade::api::resource_view, 3> masks{}; // UI alpha R, UI color A, backbuffer A.
+    reshade::api::resource_view hudless{};
+    bool current_color = false;
+  };
+  struct ui_render_input {
+    ui_input_kind kind = ui_input_kind::unavailable;
+    reshade::api::resource_view view{};
+    ui_plane_parameters plane;
+    const alpha_auto_source *automatic{};
+    const ui_adaptive::source *adaptive{};
+    ui_mask_channel channel = ui_mask_channel::alpha;
+    const ui_detection_inputs *detection{};
+    bool available() const {
+      return kind == ui_input_kind::current_color_alpha ||
+        ((kind == ui_input_kind::captured_color_alpha || kind == ui_input_kind::dedicated_mask ||
+          kind == ui_input_kind::hudless_difference) && view.handle) ||
+        (detection && (detection->current_color || detection->hudless.handle ||
+          detection->masks[0].handle || detection->masks[1].handle || detection->masks[2].handle));
+    }
+  };
+  struct render_frame_input {
+    reshade::api::resource color{};
+    reshade::api::resource_view depth{};
+    // Resolved depth encoding, paired camera conversion, jitter and stereo
+    // controls; readiness belongs to this frame, never to an SDK capability.
+    render_parameters scene;
+    ui_render_input ui;
+  };
+
   // Current positive display bound after strength and blend. Scene admission
   // is a separate concern; keep this arithmetic shared by UI observation and
   // export, in SunshineBoundFinalParallax's multiplication order.
@@ -83,22 +118,35 @@ namespace sunshine_game3d {
     std::string_view active_shader_source() const;
     // Mode-5 live adaptation uses caller-owned source identity only. Omitting
     // adaptive freezes the submitted fraction for deterministic replay.
-    bool render(reshade::api::command_list *commands, reshade::api::resource backbuffer,
-      reshade::api::resource_view depth, const render_parameters &parameters, bool source_alpha_ui = false,
-      reshade::api::resource_view alpha_source = {}, const ui_plane_parameters &plane = {},
-      const alpha_auto_source *automatic = nullptr, const ui_adaptive::source *adaptive = nullptr);
-    // Lazily allocated at the current color extent/format. Copies and reads use
-    // the renderer queue; shader_resource is the resting state. Only alpha is
-    // consumed, never this retained input's RGB.
-    reshade::api::resource ui_source();
+    bool render(reshade::api::command_list *commands, const render_frame_input &input);
+    // Lazily allocated at the current extent and exact input format. At most
+    // three formats are retained; copies never reinterpret a different format.
+    // The renderer queue reads only the explicitly selected mask channel.
+    reshade::api::resource ui_source(reshade::api::format format = reshade::api::format::unknown);
     reshade::api::resource_view ui_source_view() const;
+    reshade::api::resource ui_candidate(unsigned slot, reshade::api::format format);
+    reshade::api::resource_view ui_candidate_view(unsigned slot) const;
+    template<class Copy>
+    reshade::api::resource_view prepare_ui_candidate(unsigned slot, std::uint64_t capture_id, Copy &&copy,
+        reshade::api::format format) {
+      if (slot >= ui_candidate_captures_.size() || !capture_id) return {};
+      const auto destination = ui_candidate(slot, format);
+      if (!destination.handle) return {};
+      if (ui_candidate_captures_[slot] != capture_id) {
+        ui_candidate_captures_[slot] = 0;
+        if (!std::forward<Copy>(copy)(destination)) return {};
+        ui_candidate_captures_[slot] = capture_id;
+      }
+      return ui_candidate_view(slot);
+    }
     // The caller must first admit a current capture. Repeated presentations of
     // that immutable capture reuse our private texture in renderer queue order.
     // A failed replacement never leaves the old identity marked as uploaded.
     template<class Copy>
-    reshade::api::resource_view prepare_ui_source(std::uint64_t capture_id, Copy &&copy) {
+    reshade::api::resource_view prepare_ui_source(std::uint64_t capture_id, Copy &&copy,
+        reshade::api::format format = reshade::api::format::unknown) {
       if (!capture_id) return {};
-      const auto destination = ui_source();
+      const auto destination = ui_source(format);
       if (!destination.handle) return {};
       if (ui_source_capture_ != capture_id) {
         ui_source_capture_ = 0;
@@ -111,6 +159,7 @@ namespace sunshine_game3d {
     diagnostic_resources diagnostics() const;
     render_parameters consumed_parameters() const;
     bool consumed_source_alpha_ui() const;
+    ui_mask_channel consumed_ui_channel() const;
     // Process-owned toggle decision, independent of current FG input eligibility.
     // The caller keeps automatic->session alive for this render; the renderer
     // owns only bounded GPU observation storage, never the detection deadline.
@@ -138,5 +187,6 @@ namespace sunshine_game3d {
     struct impl;
     std::unique_ptr<impl> data_;
     std::uint64_t ui_source_capture_ = 0;
+    std::array<std::uint64_t, 4> ui_candidate_captures_{};
   };
 }

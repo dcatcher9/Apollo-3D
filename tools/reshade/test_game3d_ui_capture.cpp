@@ -29,24 +29,29 @@ namespace {
 
   struct operation {
     capture::input input;
+    capture::texture_state_policy state_policy{capture::texture_state_policy::source_contract};
     std::shared_ptr<const capture::texture_reference> gpu_owner;
     capture::diagnostic_texture texture;
     unsigned finish_count {}, release_count {};
     bool finished {}, successful {}, completed {};
   };
   std::vector<operation> operations;
+  std::vector<capture::texture_state_policy> requested_policies;
   unsigned record_calls {};
   bool reject_record {};
   capture::record_diagnostic rejection;
+  capture::record_diagnostic acceptance;
   std::uint32_t next_width = 128, next_height = 64, next_format = 41;
 
   operation &op(std::uint64_t id) { return operations.at(static_cast<std::size_t>(id - 1)); }
   void reset_native() {
     for (const auto &value : operations) require(value.release_count == 1, "batch did not release exactly one native ticket lease");
     operations.clear();
+    requested_policies.clear();
     record_calls = 0;
     reject_record = false;
     rejection = {};
+    acceptance = {};
     rejection.stage = capture::record_stage::missing_state;
     rejection.result = capture::status::missing_state;
     next_width = 128; next_height = 64; next_format = 41;
@@ -59,13 +64,15 @@ namespace {
   d::stamp stamp(std::uint64_t sequence = 1) {
     return {sunshine_game3d::diagnostic_metadata_generation(), 71, sequence, GetTickCount64(), 19, 24, 0x4321, 7, true};
   }
-  void tag(unsigned type, std::uint64_t native, const d::stamp &at, std::uint32_t state = 128) {
+  void tag(unsigned type, std::uint64_t native, const d::stamp &at, std::uint32_t state = 128,
+      std::uint32_t lifecycle = 0, std::uint64_t version = 1) {
     sl::abi_v2::resource resource {};
     resource.base.type = sl::resource_guid; resource.base.version = 1;
     resource.native = reinterpret_cast<void *>(native); resource.state = state;
     sl::abi_v2::resource_tag value {};
-    value.base.type = sl::tag_guid; value.base.version = 1;
+    value.base.type = sl::tag_guid; value.base.version = version;
     value.type = type; value.resource_ptr = native ? &resource : nullptr;
+    value.lifecycle = lifecycle;
     value.area = {3, 5, 64, 32};
     sl::abi_v2::viewport viewport {};
     viewport.base.type = sl::viewport_guid; viewport.base.version = 1; viewport.value = 7;
@@ -101,10 +108,12 @@ namespace sunshine_streamline::depth_capture {
     return native ? std::make_shared<source_reference>() : source_ref {};
   }
   std::uint64_t source_present_generation(const source_ref &) { return 44; }
-  diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
+  diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic,
+      texture_state_policy state_policy) {
     ++record_calls;
+    requested_policies.push_back(state_policy);
     if (diagnostic) {
-      *diagnostic = reject_record ? rejection : record_diagnostic {};
+      *diagnostic = reject_record ? rejection : acceptance;
       diagnostic->command = command;
       diagnostic->resource = value.resource.native;
       diagnostic->native_state = value.native_state;
@@ -117,6 +126,7 @@ namespace sunshine_streamline::depth_capture {
     if (reject_record) return {};
     operation value_copy;
     value_copy.input = value;
+    value_copy.state_policy = state_policy;
     value_copy.gpu_owner = std::make_shared<texture_reference>();
     value_copy.texture.width = next_width; value_copy.texture.height = next_height; value_copy.texture.format = next_format;
     value_copy.texture.shared_handle = 0x10000 + operations.size();
@@ -158,6 +168,8 @@ namespace sunshine_streamline::depth_capture {
       case status::recorded: return "recorded";
       case status::missing_state: return "missing_state";
       case status::conflicting_state: return "conflicting_state";
+      case status::incomplete_state: return "incomplete_state";
+      case status::unsupported_resource: return "unsupported_resource";
       default: return "unavailable";
     }
   }
@@ -167,13 +179,98 @@ namespace sunshine_streamline::depth_capture {
       case record_stage::recorded: return "recorded";
       case record_stage::missing_state: return "missing_state";
       case record_stage::conflicting_state: return "conflicting_state";
+      case record_stage::incomplete_state: return "incomplete_state";
+      case record_stage::texture_allocation: return "texture_allocation";
+      case record_stage::source_description: return "source_description";
       default: return "not_recorded";
     }
   }
   const char *name(recording_loss value) { return value == recording_loss::global_observation_loss ? "global_observation_loss" : "none"; }
 }
 
+namespace {
+  void dlssg_capture_admission_test() {
+    constexpr const char *keys[]{"DLSSG.HUDLess", "DLSSG.UI", "DLSSG.UIAlpha", "DLSSG.Backbuffer"};
+    constexpr const char *prefixes[]{"DLSSG.HUDLessSubrect", "DLSSG.UISubrect", "DLSSG.UIAlphaSubrect", "DLSSG.InputBackbufferSubrect"};
+    constexpr const char *stems[]{"ngx_hudless_color", "ngx_ui_color_alpha", "ngx_ui_alpha", "ngx_backbuffer"};
+    enum class scenario { absent_rect, rectangle, zero_rect, null_input, failed_getter, missing_getter,
+      partial_rect, empty_width, oversized_rect, wrong_type, unsupported_format, sdk_failure };
+    for (unsigned kind = 0; kind != 4; ++kind) for (const auto test : {
+        scenario::absent_rect, scenario::rectangle, scenario::zero_rect, scenario::null_input,
+        scenario::failed_getter, scenario::missing_getter, scenario::partial_rect, scenario::empty_width,
+        scenario::oversized_rect, scenario::wrong_type, scenario::unsupported_format, scenario::sdk_failure}) {
+      {
+        ui_capture_batch batch(begin_window());
+        const auto at = stamp();
+        d::ngx_evaluation value;
+        value.observation = at; value.owner = 66; value.handle = 77; value.source_id = 12;
+        value.feature_known = true; value.feature = 11;
+        auto &input = value.parameters[value.parameter_count++];
+        std::snprintf(input.name, sizeof(input.name), "%s", keys[kind]);
+        input.type = test == scenario::wrong_type ? d::parameter_type::pointer : d::parameter_type::resource;
+        input.getter_available = test != scenario::missing_getter;
+        input.successful = input.getter_available && test != scenario::failed_getter;
+        input.result = input.successful ? 1 : 0xbad00005;
+        input.integer = test == scenario::null_input ? 0 : 0x1234;
+        constexpr const char *fields[]{"BaseX", "BaseY", "Width", "Height"};
+        for (unsigned field = 0; field != 4; ++field) {
+          auto &part = value.parameters[value.parameter_count++];
+          std::snprintf(part.name, sizeof(part.name), "%s%s", prefixes[kind], fields[field]);
+          part.type = d::parameter_type::unsigned_integer;
+          part.getter_available = true;
+          part.successful = test != scenario::absent_rect && !(test == scenario::partial_rect && field == 3);
+          part.result = part.successful ? 1 : 0xbad00005;
+          constexpr unsigned rectangle[]{7, 11, 64, 32};
+          part.integer = test == scenario::zero_rect ? 0 : rectangle[field];
+          if (test == scenario::empty_width && field == 2) part.integer = 0;
+          if (test == scenario::oversized_rect && field == 0) part.integer = UINT32_MAX;
+          if (!part.successful) part.integer = 0xdeadbeef; // Failed values cannot become crop evidence.
+        }
+        reject_record = test == scenario::unsupported_format;
+        rejection.stage = capture::record_stage::source_description;
+        rejection.result = capture::status::unsupported_resource;
+        rejection.format = 0; // Native owner reports an unsupported/unknown storage format.
+        next_format = kind == 2 ? 61 : 87;
+        d::observe_ngx(value);
+        const bool invalid_rect = test == scenario::partial_rect || test == scenario::empty_width || test == scenario::oversized_rect;
+        const bool attempted = !invalid_rect && test != scenario::null_input && test != scenario::failed_getter &&
+          test != scenario::missing_getter && test != scenario::wrong_type;
+        require(record_calls == unsigned(attempted), "DLSSG input admission used failed/null/unsupported metadata or rejected a valid resource");
+        if (!operations.empty()) {
+          const auto &submitted = op(1);
+          const bool full = test == scenario::absent_rect || test == scenario::zero_rect;
+          require(submitted.input.provider == sunshine_scene_depth::provider_kind::ngx &&
+              submitted.input.native_state == UINT32_MAX && submitted.input.proof == sunshine_scene_depth::state_proof::observed_nonzero &&
+              submitted.state_policy == capture::texture_state_policy::source_contract && submitted.input.force_snapshot &&
+              submitted.input.valid_until == sunshine_scene_depth::lifetime::at_call &&
+              submitted.input.resource.area.left == (full ? 0u : 7u) && submitted.input.resource.area.top == (full ? 0u : 11u) &&
+              submitted.input.resource.area.width == (full ? 0u : 64u) && submitted.input.resource.area.height == (full ? 0u : 32u),
+            "DLSSG input invented state, lost its own subrect, or changed synchronous snapshot ownership");
+        }
+        d::finish_ngx(at, 12, test != scenario::sdk_failure);
+        for (auto &operation : operations) operation.completed = true;
+        batch.freeze();
+        auto response = primary(); std::uint64_t bytes = 64; std::string metadata = "{}";
+        require(batch.append(response, bytes, metadata, true), "DLSSG rejected/ready input blocked the primary dump");
+        const auto captured = row(metadata, 34 + kind);
+        const bool accepted = attempted && !reject_record && test != scenario::sdk_failure;
+        const char *expected = accepted ? "captured" : invalid_rect ? "invalid_active_rect" :
+          test == scenario::null_input ? "explicit_null" : test == scenario::wrong_type ? "unsupported_descriptor" :
+          test == scenario::unsupported_format ? "capture_rejected" : test == scenario::sdk_failure ? "capture_failed" : "unreadable_or_query_failed";
+        require(captured["status"] == expected && captured["file_stem"] == stems[kind] &&
+            response.result == wire::status::complete && response.texture_count == (accepted ? 2u : 1u),
+          "DLSSG capture result changed resource identity, published rejected pixels or altered the primary dump");
+        if (accepted) require(unsigned(response.textures[1].kind) == 34 + kind && response.textures[1].dxgi_format == next_format,
+          "DLSSG captured texture was relabeled or reformatted by the dump bridge");
+        else require(bytes == 64, "Rejected DLSSG input consumed transport bytes");
+      }
+      reset_native();
+    }
+  }
+}
+
 int main() try {
+  dlssg_capture_admission_test();
   {
     ui_capture_batch batch(begin_window());
     tag(23, 0, stamp());
@@ -193,43 +290,188 @@ int main() try {
   {
     ui_capture_batch batch(begin_window());
     reject_record = true;
-    rejection.result = capture::status::conflicting_state;
-    rejection.stage = capture::record_stage::conflicting_state;
+    rejection.result = capture::status::incomplete_state;
+    rejection.stage = capture::record_stage::incomplete_state;
     rejection.recording_cookie = 123;
     rejection.device_identity = rejection.expected_device_identity = 456;
-    rejection.current_generation = 45;
-    rejection.observed_state = 4;
-    rejection.observed = true;
+    rejection.current_generation = 44;
+    rejection.native_barrier_calls = 7;
+    rejection.native_transition_count = 11;
+    rejection.tracked_source_count = 3;
+    rejection.last_barrier_command = 0x4321;
+    rejection.source_cookie = 789;
+    rejection.observed_state = 192;
+    rejection.observed = rejection.blocked = true;
     rejection.command_type = 0;
     rejection.width = 3840; rejection.height = 2160; rejection.format = 24; rejection.flags = 5;
     rejection.dimension = 3; rejection.mip_levels = 1; rejection.array_size = 1; rejection.samples = 1;
     const auto at = stamp(19);
-    tag(53, 0x5353, at, 8);
+    // Every SL auxiliary resource uses observed recording state, but an
+    // incomplete/blocked observation still cannot authorize a snapshot.
+    tag(2, 0x2222, at, 1024);
+    require(requested_policies.size() == 1 && requested_policies[0] == capture::texture_state_policy::prefer_observed_recording,
+      "HUDLessColor did not receive the shared SL state policy");
     batch.freeze();
     auto response = primary(); std::uint64_t bytes = 64; std::string metadata = "{}";
-    require(batch.append(response, bytes, metadata, true), "state conflict blocked primary capture");
-    const auto captured = row(metadata, 32);
+    require(batch.append(response, bytes, metadata, true), "blocked state observation blocked primary capture");
+    const auto captured = row(metadata, 9);
     const json expected {
-      {"result", "conflicting_state"}, {"stage", "conflicting_state"}, {"loss", "none"},
-      {"command", "0x4321"}, {"resource", "0x5353"}, {"recording_cookie", 123},
+      {"result", "incomplete_state"}, {"stage", "incomplete_state"}, {"loss", "none"},
+      {"command", "0x4321"}, {"resource", "0x2222"}, {"recording_cookie", 123},
       {"device_identity", 456}, {"expected_device_identity", 456},
-      {"expected_present_generation", 44}, {"current_present_generation", 45},
-      {"native_state", 8}, {"observed_state", 4}, {"observed", true}, {"blocked", false},
+      {"expected_present_generation", 44}, {"current_present_generation", 44},
+      {"recording_barrier_calls", 7}, {"recording_transition_count", 11},
+      {"recording_tracked_sources", 3}, {"last_barrier_command", "0x4321"}, {"source_cookie", 789},
+      {"native_state", 1024}, {"observed_state", 192}, {"observed", true}, {"blocked", true},
       {"copy_state", nullptr}, {"copy_state_known", false}, {"used_observed_state", false},
       {"recording_closed", false}, {"recording_invalid", false}, {"render_pass", false},
       {"command_type", 0}, {"width", 3840}, {"height", 2160}, {"format", 24}, {"flags", 5},
       {"dimension", 3}, {"mip_levels", 1}, {"array_size", 1}, {"samples", 1}, {"attempt", 1},
       {"observation", {{"session", at.session}, {"epoch", 71}, {"sequence", 19}, {"tick_ms", at.tick}, {"viewport", 7}}}
     };
-    require(captured.at("capture_diagnostic") == expected, "state conflict evidence was omitted, relabeled or altered");
-    require(captured["status"] == "capture_rejected" && captured["capture_stage"] == "conflicting_state" &&
-            captured["capture_result"] == "conflicting_state" && !captured.contains("gpu") &&
+    require(captured.at("capture_diagnostic") == expected, "blocked state evidence was omitted, relabeled or altered");
+    require(captured["status"] == "capture_rejected" && captured["capture_stage"] == "incomplete_state" &&
+            captured["capture_result"] == "incomplete_state" && captured["observation"]["native_state"] == 1024 &&
+            captured["observation"]["state_declared"] == true && !captured.contains("gpu") &&
             response.texture_count == 1 && bytes == 64 && operations.empty(),
-            "state conflict diagnostics changed native admission or published pixels");
+            "blocked state diagnostics changed native admission or published pixels");
     require(json::parse(metadata)["optional_captures"].size() == std::size(ui::catalog) && metadata.size() < wire::max_json_bytes,
             "capture diagnostics exceeded the fixed inventory or metadata budget");
   }
   reset_native();
+  {
+    ui_capture_batch batch(begin_window());
+    const auto at = stamp(27);
+    // Script the native owner's result, then verify which policy the real
+    // bridge requested. Admission itself is covered by native-owner tests.
+    for (const auto &description : ui::catalog) {
+      const bool is_ngx = description.source == ui::provider::ngx;
+      acceptance = {};
+      acceptance.observed = acceptance.copy_state_known = true;
+      acceptance.observed_state = acceptance.copy_state = is_ngx ? 4 : 192;
+      acceptance.used_observed_state = true;
+      const auto native = 0x1000 + description.artifact_id;
+      if (is_ngx) ngx(description.artifact_id, native, at, 12);
+      else tag(description.tag_type, native, at, 1024);
+      require(operations.size() == requested_policies.size() && !operations.empty(),
+        "Catalog resource did not reach the native snapshot boundary");
+      const auto &submitted = operations.back();
+      require(submitted.input.resource.native == native &&
+          submitted.state_policy == (is_ngx ? capture::texture_state_policy::source_contract :
+            capture::texture_state_policy::prefer_observed_recording),
+        "SL dump state policy depended on resource role/tag, or NGX lost its strict contract");
+      require(submitted.input.native_state == (is_ngx ? UINT32_MAX : 1024u) &&
+          submitted.input.proof == (is_ngx ? sunshine_scene_depth::state_proof::observed_nonzero :
+            sunshine_scene_depth::state_proof::declared) &&
+          submitted.input.valid_until == sunshine_scene_depth::lifetime::at_call && submitted.input.force_snapshot &&
+          !submitted.input.frame_generation_input,
+        "UI dump rewrote the declared state, forged FG eligibility or changed synchronous lifetime");
+    }
+    require(operations.size() == std::size(ui::catalog), "State-policy fixture missed a catalog resource");
+    d::finish_sl_call(at, true);
+    d::finish_ngx(at, 12, true);
+    for (auto &submitted : operations) {
+      require(submitted.finished && submitted.successful, "State-policy fixture lost its SDK completion");
+      submitted.completed = true;
+    }
+    batch.freeze();
+    auto response = primary(); std::uint64_t bytes = 64; std::string metadata = "{}";
+    require(batch.append(response, bytes, metadata, true), "Ready state-policy snapshots remained pending");
+    for (const auto &description : ui::catalog) {
+      const bool is_ngx = description.source == ui::provider::ngx;
+      const auto captured = row(metadata, description.artifact_id);
+      const auto &observed = captured.at("observation");
+      const auto &native = captured.at("capture_diagnostic");
+      require(captured["status"] == "captured" && observed["native_state"] == (is_ngx ? 0u : 1024u) &&
+          observed["state_declared"] == !is_ngx && native["native_state"] == (is_ngx ? UINT32_MAX : 1024u) &&
+          native["observed"] == true && native["observed_state"] == (is_ngx ? 4 : 192) &&
+          native["copy_state"] == (is_ngx ? 4 : 192) && native["copy_state_known"] == true && native["used_observed_state"] == true,
+        "Accepted UI snapshot erased declared/observed/effective state provenance");
+      if (!is_ngx && description.tag_type == 2)
+        require(captured["file_stem"] == "sl_hudless_color" && captured["role"] == "color" &&
+            captured["semantic"] == "color_without_ui" && observed["tag_type"] == 2 &&
+            observed["native_state"] == 1024 && native["observed_state"] == 192 && native["copy_state"] == 192,
+          "HUDLessColor declared1024/observed192 capture changed state provenance or pixel meaning");
+    }
+  }
+  reset_native();
+  for (const auto lifecycle : {0u, 1u, 2u, 3u, UINT32_MAX}) {
+    {
+      ui_capture_batch batch(begin_window());
+      const auto at = stamp(); tag(23, 0x1111, at, 128, lifecycle);
+      if (lifecycle <= 2) {
+        const auto lifetime = lifecycle == 0 ? sunshine_scene_depth::lifetime::at_call : lifecycle == 1 ?
+          sunshine_scene_depth::lifetime::until_present : sunshine_scene_depth::lifetime::until_evaluation;
+        require(operations.size() == 1 && op(1).input.valid_until == lifetime && op(1).input.force_snapshot &&
+            op(1).input.native_state == 128 && op(1).input.proof == sunshine_scene_depth::state_proof::declared &&
+            op(1).state_policy == (lifecycle == 0 ? capture::texture_state_policy::prefer_observed_recording :
+              capture::texture_state_policy::source_contract),
+          "SL dump rewrote the declared lifecycle or relaxed a longer-lived state contract");
+        d::finish_sl_call(at, true); op(1).completed = true;
+      } else require(record_calls == 0, "Unknown SL v2 lifecycle was normalized into an at-call capture");
+      batch.freeze();
+      auto response = primary(); std::uint64_t bytes = 64; std::string metadata = "{}";
+      require(batch.append(response, bytes, metadata, true), "Lifecycle decision blocked the primary dump");
+      const auto captured = row(metadata, 10);
+      require(captured["observation"]["lifecycle"] == lifecycle &&
+          captured["status"] == (lifecycle <= 2 ? "captured" : "unsupported_lifetime"),
+        "SL dump lost original lifecycle provenance or accepted an unknown lifecycle");
+      if (lifecycle > 2) require(response.texture_count == 1 && bytes == 64,
+        "Rejected lifecycle published an optional texture");
+    }
+    reset_native();
+  }
+  {
+    ui_capture_batch batch(begin_window());
+    const auto at = stamp();
+    sl::abi_v1::resource resource {}; resource.native = reinterpret_cast<void *>(0x1111); resource.state = 128;
+    d::observe_sl_tag_v1(at, &resource, 23, nullptr, true);
+    require(operations.size() == 1 && op(1).input.valid_until == sunshine_scene_depth::lifetime::at_call &&
+        op(1).state_policy == capture::texture_state_policy::prefer_observed_recording,
+      "Legacy SL v1 without a lifecycle lost its existing synchronous capture");
+    d::finish_sl_call(at, true); op(1).completed = true; batch.freeze();
+    auto response = primary(); std::uint64_t bytes = 64; std::string metadata = "{}";
+    require(batch.append(response, bytes, metadata, true) && row(metadata, 10)["status"] == "captured" &&
+        row(metadata, 10)["observation"]["lifecycle"] == UINT32_MAX,
+      "Legacy SL v1 fabricated a declared lifecycle or failed capture");
+  }
+  reset_native();
+  {
+    ui_capture_batch batch(begin_window());
+    tag(23, 0, stamp(), 128, UINT32_MAX, 2);
+    batch.freeze();
+    auto response = primary(); std::uint64_t bytes = 64; std::string metadata = "{}";
+    require(batch.append(response, bytes, metadata, true) && record_calls == 0 &&
+        row(metadata, 10)["status"] == "unsupported_descriptor",
+      "Unknown descriptor was mistaken for a supported tag with an unknown lifecycle");
+  }
+  reset_native();
+  for (const auto type : {23u, 53u, 69u}) {
+    {
+      ui_capture_batch batch(begin_window());
+      reject_record = true;
+      rejection.result = capture::status::failed;
+      rejection.stage = capture::record_stage::texture_allocation;
+      rejection.observed = rejection.copy_state_known = rejection.used_observed_state = true;
+      rejection.observed_state = rejection.copy_state = 4;
+      tag(type, 0x8888, stamp(), 8);
+      require(requested_policies.size() == 1 && requested_policies[0] == capture::texture_state_policy::prefer_observed_recording,
+        "Rejected SL UI snapshot did not receive the shared state policy");
+      batch.freeze();
+      auto response = primary(); std::uint64_t bytes = 64; std::string metadata = "{}";
+      require(batch.append(response, bytes, metadata, true), "Native rejection blocked primary capture");
+      const auto captured = row(metadata, ui::find_sl(type)->artifact_id);
+      const auto &native = captured.at("capture_diagnostic");
+      require(captured["status"] == "capture_rejected" && captured["capture_stage"] == "texture_allocation" &&
+          captured["capture_result"] == "failed" && captured["observation"]["native_state"] == 8 &&
+          captured["observation"]["state_declared"] == true && native["native_state"] == 8 &&
+          native["observed_state"] == 4 && native["observed"] == true && native["copy_state"] == 4 &&
+          native["copy_state_known"] == true && native["used_observed_state"] == true &&
+          !captured.contains("gpu") && operations.empty() && response.texture_count == 1 && bytes == 64,
+        "Rejected UI snapshot lost selected-state evidence or fabricated successful pixels");
+    }
+    reset_native();
+  }
   {
     ui_capture_batch batch(begin_window());
     const auto at = stamp();

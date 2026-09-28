@@ -3,7 +3,7 @@
 // then exercise the production add-on renderer on the same inputs with no FX.
 #define SUNSHINE_DEPTH_SELECTION_RUNTIME
 #include "test_depth3d_runtime_d3d12.cpp"
-#include "game3d_renderer.h"
+#include "test_game3d_render_input.h"
 #include "test_game3d_debug_dump_runtime.h"
 #include "test_game3d_budget.h"
 #include <atomic>
@@ -182,11 +182,9 @@ namespace {
     };
     const auto render = [&](bool eligible, const alpha_auto_source *automatic) {
       write_native_source(fixture, backbuffer);
-      require(renderer.render(queue->get_immediate_command_list(), source, fixture.depth_view,
+      require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), source, fixture.depth_view,
         parameters, eligible, {}, plane, automatic), "Automatic-alpha D3D12 render failed");
       const auto decision = renderer.consumed_alpha_auto();
-      require(renderer.consumed_source_alpha_ui() == (automatic ? eligible && decision.enabled : eligible),
-        "Automatic-alpha D3D12 decision differed from the consumed b1 switch");
       queue->flush_immediate_command_list();
       renderer.finish_present();
       queue->wait_idle(); // Test-only drain: next render must consume this exact completed observation.
@@ -202,231 +200,226 @@ namespace {
       const auto actual = pixels();
       require(actual.field == expected.field && actual.color == expected.color, message);
     };
-    // Explicit rendering supplies independent pixel references before any
-    // automatic history exists; reference calls must not reset a live streak.
-    pattern(false); render(false, nullptr); const auto full_off = pixels();
-    render(true, nullptr); const auto full_on = pixels();
-    require(full_on.field != full_off.field, "D3D12 automatic fixture has no meaningful UI/scene difference");
-    pattern(true); render(false, nullptr); const auto selective_off = pixels();
-    render(true, nullptr); const auto selective_on = pixels();
-    require(selective_on.field != selective_off.field, "D3D12 selective fixture has no UI field difference");
-    pattern(2); render(false, nullptr); const auto empty_off = pixels();
-    const auto unchanged = [&](alpha_probe_counters before, const char *message) {
-      const auto after = renderer.alpha_probe_activity();
-      require(after.submitted == before.submitted && after.mapped == before.mapped, message);
-    };
-    pattern(false);
+    // Resolve independent references through the actual native shader. The
+    // detection tests compare both the authoritative field and SBS pixels.
+    std::array<result, 3> off, on;
+    for (unsigned mask = 0; mask != 3; ++mask) {
+      pattern(mask); render(false, nullptr); off[mask] = pixels();
+      render(true, nullptr); on[mask] = pixels();
+    }
+    require(on[0].field != off[0].field && on[1].field != off[1].field,
+      "D3D12 automatic fixture has no meaningful full/selective UI difference");
+    alpha_auto_policy session;
     alpha_auto_source input;
     input.epoch = 17; input.revision = 23; input.viewport = 1;
-    alpha_auto_policy full_session(1000);
-    input.session = &full_session;
-    alpha_auto_decision decision;
-    for (unsigned frame = 0; frame < 3; ++frame) {
-      input.sequence = frame + 1;
-      input.now_ms = input.tick_ms = 1000 + frame * 100;
-      decision = render(true, &input);
-      require(!decision.enabled && decision.monitoring, "D3D12 full alpha enabled provisional UI");
-      if (!frame) require(!decision.sample_sequence, "D3D12 auto used an uncompleted initial readback");
-      else require(decision.covered == width * height && decision.pixels == width * height &&
-          decision.sample_sequence == input.sequence - 1 && decision.sample_tick_ms == input.tick_ms - 100,
-        "D3D12 startup coverage count or completed-fence sample identity is incorrect");
-    }
-    const auto full_stopped = renderer.alpha_probe_activity();
-    input.now_ms = 1000 + alpha_startup_window_ms;
-    decision = render(true, &input);
-    require(!decision.enabled && !decision.monitoring && decision.state == alpha_auto_state::automatic_off,
-      "D3D12 full-only startup did not choose Off at the original deadline");
-    equal(full_off, "D3D12 startup Off does not match explicit scene stereo");
-    pattern(true); input.now_ms += 5000; render(true, &input);
-    equal(selective_off, "D3D12 post-startup selective alpha changed frozen Off choice");
-    unchanged(full_stopped, "D3D12 full-only startup continued dispatch/map after deadline");
-
-    const auto selective_pixels = (width / 2 - width / 3) * (height * 3 / 4 - height / 4);
-    const auto sample = [&](unsigned mask, std::uint64_t tick, bool monitoring = true) {
-      ++input.sequence; input.now_ms = input.tick_ms = tick;
-      pattern(mask); render(true, &input);
-      decision = render(true, &input);
-      const auto expected_covered = mask == 0 ? width * height : mask == 1 ? selective_pixels : 0;
-      require(decision.sample_sequence == input.sequence && decision.sample_tick_ms == tick &&
-          decision.covered == expected_covered && decision.pixels == width * height,
-        "D3D12 alpha reduction lost exact counts or completed source identity");
-      require(decision.enabled == (mask == 1) && decision.monitoring == monitoring,
-        "D3D12 alpha observation applied the wrong provisional or confirmed choice");
-      equal(mask == 1 ? selective_on : mask == 0 ? full_off : empty_off,
-        "D3D12 provisional/confirmed UI does not match its explicit pixel reference");
-      if (!monitoring) require(decision.state == alpha_auto_state::automatic_on,
-        "D3D12 500-ms selective interval did not confirm Auto On early");
+    input.now_ms = input.tick_ms = 1000; input.sequence = 1; input.session = &session;
+    const auto verify = [&](unsigned mask, bool eligible, bool enabled, bool inspect_mask = true) {
+      pattern(mask);
+      input.now_ms += 100; input.tick_ms = input.now_ms; ++input.sequence;
+      render(eligible, &input);
+      equal(enabled ? on[mask] : off[mask], "D3D12 automatic mask differs from explicit field/SBS reference");
+      if (inspect_mask) {
+        const auto resource = renderer.diagnostics().ui_source;
+        require(resource.handle, "D3D12 automatic detection did not expose its current GPU mask");
+        auto *texture = reinterpret_cast<ID3D12Resource *>(resource.handle);
+        require(texture->GetDesc().Format == DXGI_FORMAT_R32_FLOAT, "D3D12 automatic mask has the wrong format");
+        const auto bytes = fixture.read(texture);
+        require(bytes.size() == size_t(width) * height * sizeof(float), "D3D12 automatic mask size differs");
+        for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+          float value{}; std::memcpy(&value, bytes.data() + (size_t(y) * width + x) * sizeof(float), sizeof(float));
+          const bool wanted = enabled && mask == 1 && x >= width / 3 && x < width / 2 &&
+            y >= height / 4 && y < height * 3 / 4;
+          require(value == (wanted ? 1.f : 0.f), "D3D12 current GPU mask retained an unsuitable frame");
+        }
+      }
     };
-    {
-      alpha_auto_policy delayed_session;
-      input.session = &delayed_session; ++input.epoch; input.sequence = 0; input.now_ms = 1000;
-      pattern(true);
-      const auto waiting = renderer.alpha_probe_activity();
-      decision = render(false, &input);
-      equal(selective_off, "D3D12 ineligible waiting source changed stereo");
-      input.now_ms = 14000; input.retained = true;
-      decision = render(true, &input); // Retained source requested, but no view is available.
-      require(decision.monitoring && !decision.window_started && decision.state == alpha_auto_state::waiting_for_source,
-        "D3D12 unavailable startup alpha consumed its detection window");
-      unchanged(waiting, "D3D12 unavailable startup source submitted or mapped a probe");
-      input.retained = false; input.now_ms = input.tick_ms = 15000; input.sequence = 1;
-      decision = render(true, &input);
-      require(decision.window_started && decision.window_start_ms == 15000 && decision.monitoring &&
-          !decision.sample_sequence && renderer.alpha_probe_activity().submitted == waiting.submitted + 1,
-        "D3D12 first eligible dispatch did not publish its delayed window start immediately");
-      equal(selective_off, "D3D12 uncompleted first probe changed UI");
-      decision = render(true, &input);
-      require(decision.enabled && decision.monitoring, "D3D12 delayed first selective sample did not enable provisional UI");
-      equal(selective_on, "D3D12 delayed provisional UI differs from explicit protection");
-      sample(1, 15500, false);
-      const auto stopped = renderer.alpha_probe_activity();
-      input.now_ms = 16000; pattern(false); render(true, &input);
-      equal(full_on, "D3D12 delayed detection failed to preserve confirmed Auto On");
-      unchanged(stopped, "D3D12 delayed detection continued probes after confirmation");
+    // Alternate good/bad inputs without review or a CPU policy observation.
+    // An asynchronous status from the previous frame may never authorize pixels.
+    for (const unsigned mask : {1u, 0u, 2u, 1u}) verify(mask, true, mask == 1);
+    verify(1, true, true);
+    require(renderer.consumed_alpha_auto().enabled && renderer.consumed_alpha_auto().source_kind == 4 &&
+        renderer.consumed_alpha_auto().pixels == size_t(width) * height,
+      "D3D12 native status readback did not retain its measured current-alpha source");
+    // Status is delayed evidence, but it must never be attributed to a new
+    // source scope merely because that scope has the same candidate bitset.
+    for (unsigned scope = 0; scope != 3; ++scope) {
+      if (scope == 0) ++input.epoch;
+      else if (scope == 1) ++input.revision;
+      else ++input.viewport;
+      verify(1, true, true);
+      require(!renderer.consumed_alpha_auto().sample_sequence,
+        "D3D12 status readback crossed epoch/revision/viewport provenance");
+      verify(1, true, true);
+      require(renderer.consumed_alpha_auto().enabled && renderer.consumed_alpha_auto().source_kind == 4,
+        "D3D12 new source scope did not acquire its own status sample");
     }
-    {
-      alpha_auto_policy delayed_full_session;
-      input.session = &delayed_full_session; ++input.epoch; input.sequence = 1;
-      input.now_ms = input.tick_ms = 35000; pattern(false);
-      delayed_full_session.set_manual(false);
-      const auto waiting = renderer.alpha_probe_activity();
-      render(true, &input);
-      delayed_full_session.set_manual(true); decision = render(true, &input);
-      require(!decision.window_started, "D3D12 manual mode started an automatic detection window");
-      unchanged(waiting, "D3D12 manual mode submitted an automatic probe");
-      delayed_full_session.set_automatic(39000);
-      sample(0, 40000);
-      require(decision.window_start_ms == 40000, "D3D12 Auto resume started before a probe could be queued");
-      sample(0, 40400);
-      input.now_ms = 40000 + alpha_startup_window_ms - 1; decision = render(true, &input);
-      require(decision.monitoring, "D3D12 delayed full-alpha detection expired before five minutes");
-      const auto stopped = renderer.alpha_probe_activity();
-      input.now_ms = 40000 + alpha_startup_window_ms; decision = render(true, &input);
-      require(!decision.enabled && !decision.monitoring, "D3D12 delayed full-alpha deadline failed to choose Off");
-      equal(full_off, "D3D12 delayed full-alpha Off differs from explicit scene rendering");
-      input.now_ms += 5000; pattern(true); render(true, &input);
-      equal(selective_off, "D3D12 selective alpha restarted a completed delayed window");
-      unchanged(stopped, "D3D12 delayed full-alpha detection continued probes after deadline");
-    }
-    alpha_auto_policy empty_session(16000);
-    input.session = &empty_session; ++input.epoch; input.sequence = 0;
-    sample(2, 16100); sample(2, 16400);
-    const auto empty_stopped = renderer.alpha_probe_activity();
-    input.now_ms = 16000 + alpha_startup_window_ms; decision = render(true, &input);
-    require(!decision.enabled && !decision.monitoring && decision.state == alpha_auto_state::automatic_off,
-      "D3D12 empty-only startup did not freeze Off");
-    equal(empty_off, "D3D12 empty-only startup changed scene stereo");
-    unchanged(empty_stopped, "D3D12 empty-only startup dispatched/mapped after its deadline");
-
-    alpha_auto_policy selective_session(30000);
-    input.session = &selective_session; ++input.epoch; input.sequence = 0;
-    sample(1, 30100); // First selective observation immediately protects UI.
-    sample(0, 30400); // Full alpha interrupts before 500 ms and turns UI off.
-    sample(1, 30600);
-    sample(2, 30900); // Zero alpha also interrupts provisional protection.
-    sample(1, 31100);
-    ++input.revision;
-    sample(1, 31400); // Scope replacement requires a new confirmation interval.
-    sample(1, 31600); // 500 ms since the old scope still must not confirm.
-    sample(1, 31900, false); // Exactly 500 ms in the new scope confirms early.
-    const auto selective_stopped = renderer.alpha_probe_activity();
-    ++input.revision; input.now_ms = 32000; pattern(true); decision = render(true, &input);
-    require(decision.enabled && !decision.monitoring && decision.state == alpha_auto_state::automatic_on,
-      "D3D12 source change erased early confirmed Auto On");
-    equal(selective_on, "D3D12 confirmed On differs from explicit selective protection");
-    pattern(false); input.now_ms = 32100; render(true, &input);
-    equal(full_on, "D3D12 full alpha altered early confirmed Auto On");
-    pattern(2); input.now_ms = 32200; decision = render(true, &input);
-    require(decision.enabled && !decision.monitoring, "D3D12 zero alpha altered confirmed Auto On");
-    equal(empty_off, "D3D12 confirmed On with empty alpha changed scene stereo");
-    pattern(false); input.now_ms = 30000 + alpha_startup_window_ms + 5000; render(true, &input);
-    equal(full_on, "D3D12 post-deadline full alpha altered confirmed Auto On");
-    unchanged(selective_stopped, "D3D12 confirmed Auto On dispatched/mapped before or after deadline");
+    verify(1, false, false, false);
+    input.retained = true; // No captured view: Auto cannot manufacture availability.
+    verify(1, true, false, false);
+    input.retained = false;
+    verify(1, true, true);
+    require(renderer.alpha_probe_activity().submitted && renderer.alpha_probe_activity().mapped,
+      "D3D12 automatic status never submitted and mapped its native asynchronous readback");
     renderer.reset_after_runtime_drain();
     require(renderer.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color)),
-      "D3D12 reconfigure after startup failed");
-    pattern(true); render(true, &input);
-    equal(selective_on, "D3D12 renderer recreation forgot the frozen process choice");
-    unchanged({}, "D3D12 recreated renderer monitored a completed startup session");
-
-    alpha_auto_policy pending_session(50000);
-    input.session = &pending_session; ++input.epoch; input.sequence = 1;
-    input.now_ms = input.tick_ms = 50000 + alpha_startup_window_ms - 510;
-    render(true, &input); render(true, &input);
-    ++input.sequence; input.now_ms = input.tick_ms = 50000 + alpha_startup_window_ms - 10; render(true, &input);
-    const auto pending = renderer.alpha_probe_activity();
-    input.now_ms = 50000 + alpha_startup_window_ms; decision = render(true, &input);
-    require(!decision.enabled && !decision.monitoring,
-      "D3D12 late completed sample qualified after the startup deadline");
-    equal(selective_off, "D3D12 deadline discard changed scene stereo");
-    unchanged(pending, "D3D12 deadline retirement mapped a pending startup observation");
-
-    alpha_auto_policy manual_session(70000);
-    input.session = &manual_session; ++input.epoch; input.sequence = 1;
-    input.now_ms = input.tick_ms = 70100; pattern(false); render(true, &input);
-    const auto manual_stopped = renderer.alpha_probe_activity();
-    manual_session.set_manual(true); input.now_ms = 70101;
-    decision = render(true, &input);
-    require(decision.enabled && !decision.monitoring && decision.state == alpha_auto_state::manual_on,
-      "D3D12 manual On did not bypass startup immediately");
-    equal(full_on, "D3D12 manual On differs from explicit UI rendering");
-    manual_session.set_manual(false); decision = render(true, &input);
-    require(!decision.enabled && !decision.monitoring && decision.state == alpha_auto_state::manual_off,
-      "D3D12 manual Off did not bypass startup immediately");
-    equal(full_off, "D3D12 manual Off differs from explicit scene rendering");
-    unchanged(manual_stopped, "D3D12 manual override dispatched/mapped pending startup work");
-    {
-      constexpr std::uint64_t cadence_start = 200000;
-      alpha_auto_policy cadence_session(cadence_start);
-      input.session = &cadence_session; ++input.epoch; input.sequence = 0;
-      const auto queued = [&](unsigned mask, std::uint64_t offset, bool monitoring = true) {
-        const auto before = renderer.alpha_probe_activity();
-        sample(mask, cadence_start + offset, monitoring);
-        const auto after = renderer.alpha_probe_activity();
-        require(after.submitted == before.submitted + 1 && after.mapped == before.mapped + 1,
-          "D3D12 cadence did not queue/map exactly one eligible observation");
-      };
-      const auto throttled = [&](std::uint64_t offset, std::uint64_t interval) {
-        input.now_ms = input.tick_ms = cadence_start + offset; ++input.sequence; pattern(false);
-        const auto before = renderer.alpha_probe_activity();
-        render(true, &input); decision = render(true, &input);
-        equal(full_off, "D3D12 throttled opaque alpha changed UI");
-        require(decision.probe_interval_ms == interval, "D3D12 renderer consumed the wrong alpha probe interval");
-        unchanged(before, "D3D12 cadence admitted a probe before its next interval");
-      };
-      queued(0, 0);
-      throttled(99, 100);
-      queued(0, 100);
-      queued(0, alpha_initial_window_ms - 100);
-      throttled(alpha_initial_window_ms, 1000);
-      throttled(alpha_initial_window_ms + 899, 1000);
-      queued(0, alpha_initial_window_ms + 900);
-      queued(1, alpha_initial_window_ms + 1900);
-      require(decision.probe_interval_ms == 100, "D3D12 sparse selective sample did not request fast confirmation");
-      queued(0, alpha_initial_window_ms + 2000);
-      require(decision.probe_interval_ms == 1000, "D3D12 failed candidate did not return to one probe per second");
-      throttled(alpha_initial_window_ms + 2999, 1000);
-      queued(0, alpha_initial_window_ms + 3000);
-      queued(1, alpha_initial_window_ms + 4000);
-      queued(1, alpha_initial_window_ms + 4100);
-      queued(1, alpha_initial_window_ms + 4400);
-      queued(1, alpha_initial_window_ms + 4500, false);
-      require(!decision.probe_interval_ms, "D3D12 confirmed candidate retained an active probe interval");
-      const auto stopped = renderer.alpha_probe_activity();
-      input.now_ms = cadence_start + alpha_startup_window_ms; pattern(false); render(true, &input);
-      equal(full_on, "D3D12 sparse-phase confirmation was lost at five minutes");
-      unchanged(stopped, "D3D12 sparse-phase confirmation restarted monitoring at final deadline");
+      "D3D12 reconfigure after automatic detection failed");
+    verify(1, true, true);
+    for (unsigned mask = 0; mask != 3; ++mask) {
+      session.set_manual(true);
+      verify(mask, true, true, false);
+      require(renderer.consumed_alpha_auto().state == alpha_auto_state::manual_on, "D3D12 Manual On was lost");
+      verify(mask, false, false, false);
+      session.set_manual(false);
+      verify(mask, true, false, false);
+      require(renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off, "D3D12 Manual Off was lost");
+      session.set_automatic(input.now_ms);
+      verify(mask, true, mask == 1);
     }
-    render(true, nullptr);
-    equal(full_on, "D3D12 startup decision leaked into explicit replay");
+    input.session = nullptr;
+    verify(1, true, false, false);
+    pattern(0); render(true, nullptr);
+    equal(on[0], "D3D12 automatic detection leaked into explicit replay");
     render(false, nullptr);
     fixture.source_bytes = original;
     upload();
     write_native_source(fixture, backbuffer);
     require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == original,
       "D3D12 alpha regression failed to restore its original source");
-    report << "startup-alpha D3D12 exact_counts=1 completed_sample_identity=1 delayed_first_source=1 ineligible_manual_do_not_start=1 provisional_on=1 zero_full_interrupt=1 confirmation_500ms=1 fast_60s_then_1hz=1 fixed_5min=1 post_confirmation_and_deadline_dispatch_and_map=0 pending_discard=1 renderer_recreation=1 manual_override=1 explicit_pixels=1\n";
-    std::puts("PASS D3D12 startup alpha: provisional UI, 500ms confirmation, zero later dispatch/map, pending discard, recreation and manual/explicit pixel parity");
+    report << "automatic-ui D3D12 full_scene_rejected=1 empty_rejected=1 selective_without_review=1 immediate_bad_frame_rejection=1 resolved_gpu_mask_checked=1 missing_capture_rejected=1 renderer_recreation=1 manual_override=1 explicit_field_and_sbs_parity=1 asynchronous_readback=1\n";
+    std::puts("PASS D3D12 automatic UI: full/empty rejected immediately, selective exact GPU mask and field/SBS without review, native readback, manual modes and replay parity");
+  }
+
+  void check_automatic_hudless_d3d12(fixture_t &fixture, sunshine_game3d::renderer &renderer, std::ostream &report) {
+    using namespace sunshine_game3d;
+    auto *queue = observed.runtime->get_command_queue();
+    auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
+    const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+    const auto original = fixture.source_bytes;
+    const auto parameters = native_cases().front().parameters;
+    const ui_plane_parameters plane{ui_plane_mode::shallow_front, 0.f};
+    const auto count = size_t(width) * height;
+    const auto stride = bytes_per_pixel(fixture.source_format);
+    std::vector<float> mask(count);
+    std::vector<std::uint8_t> hudless(count * stride), shifted(count * stride), final_color(count * stride);
+    const auto pixel = [&](std::vector<std::uint8_t> &bytes, size_t index, bool hud, bool mismatch, bool alpha) {
+      if (fixture.color == 1) {
+        const std::uint8_t value[]{static_cast<std::uint8_t>(hud ? 255 : 64), static_cast<std::uint8_t>(hud ? 64 : 128),
+          static_cast<std::uint8_t>(mismatch ? 0 : hud ? 128 : 192), static_cast<std::uint8_t>(alpha ? 255 : 0)};
+        std::memcpy(bytes.data() + index * stride, value, sizeof(value));
+      } else if (fixture.color == 2) {
+        const std::uint16_t value[]{static_cast<std::uint16_t>(hud ? 0x3c00 : 0x3400), static_cast<std::uint16_t>(hud ? 0x3400 : 0x3800),
+          static_cast<std::uint16_t>(mismatch ? 0 : hud ? 0x3800 : 0x3a00), static_cast<std::uint16_t>(alpha ? 0x3c00 : 0)};
+        std::memcpy(bytes.data() + index * stride, value, sizeof(value));
+      } else {
+        const std::uint32_t value = (hud ? 1023u : 256u) | ((hud ? 256u : 512u) << 10) |
+          ((mismatch ? 0u : hud ? 512u : 768u) << 20) | (alpha ? 0xc0000000u : 0u);
+        std::memcpy(bytes.data() + index * stride, &value, sizeof(value));
+      }
+    };
+    for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+      const auto index = size_t(y) * width + x;
+      const bool hud = x >= width / 3 && x < width / 2 && y >= height / 4 && y < height * 3 / 4;
+      mask[index] = hud ? 1.f : 0.f;
+      pixel(hudless, index, false, false, true);
+      pixel(shifted, index, false, true, true);
+      pixel(final_color, index, hud, false, hud);
+    }
+    const auto upload_source = [&](const std::vector<std::uint8_t> &bytes) {
+      fixture.source_bytes = bytes;
+      void *mapped{}; const D3D12_RANGE no_read{0, 0};
+      checked(fixture.source_upload->Map(0, &no_read, &mapped), "Map automatic HUDless source");
+      for (unsigned y = 0; y < height; ++y)
+        std::memcpy(static_cast<std::uint8_t *>(mapped) + fixture.source_footprint.Offset +
+          size_t(y) * fixture.source_footprint.Footprint.RowPitch, bytes.data() + size_t(y) * width * stride, size_t(width) * stride);
+      fixture.source_upload->Unmap(0, nullptr);
+    };
+    struct result { std::vector<std::uint8_t> field, color; };
+    const auto render = [&](ui_render_input ui) {
+      write_native_source(fixture, backbuffer);
+      render_frame_input frame; frame.color = source; frame.depth = fixture.depth_view; frame.scene = parameters;
+      frame.ui = ui; frame.ui.plane = plane;
+      require(renderer.render(queue->get_immediate_command_list(), frame), "D3D12 automatic HUDless render failed");
+      queue->flush_immediate_command_list(); renderer.finish_present(); queue->wait_idle();
+      const auto resources = renderer.diagnostics();
+      return result{fixture.read(reinterpret_cast<ID3D12Resource *>(resources.final_field.handle)),
+        fixture.read(reinterpret_cast<ID3D12Resource *>(resources.sbs.handle))};
+    };
+    upload_source(final_color);
+    const auto off = render({});
+    ui_render_input explicit_ui; explicit_ui.kind = ui_input_kind::current_color_alpha;
+    const auto on = render(explicit_ui);
+    require(on.field != off.field && on.color != off.color, "D3D12 HUDless fixture has no visible UI protection change");
+    for (size_t i = 0; i < count; ++i) pixel(final_color, i, mask[i] > 0.f, false, true);
+    upload_source(final_color);
+
+    std::array<com_ptr<ID3D12Resource>, 5> textures;
+    std::array<api::resource_view, 5> views{};
+    auto *device = observed.runtime->get_device();
+    const auto create_candidate = [&](unsigned slot, DXGI_FORMAT format, const void *bytes) {
+      fixture.texture(textures[slot], format, D3D12_RESOURCE_STATE_COPY_DEST);
+      com_ptr<ID3D12Resource> upload; D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+      fixture.fill_upload(upload, textures[slot]->GetDesc(), bytes, footprint);
+      fixture.begin_commands();
+      D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+      from.pResource = upload.p; from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; from.PlacedFootprint = footprint;
+      to.pResource = textures[slot].p; to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      fixture.commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+      transition(fixture.commands.p, textures[slot].p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+      fixture.submit();
+      require(device->create_resource_view({reinterpret_cast<std::uint64_t>(textures[slot].p)},
+          api::resource_usage::shader_resource, api::resource_view_desc(static_cast<api::format>(format)), &views[slot]),
+        "Create automatic HUDless D3D12 view");
+    };
+    create_candidate(0, fixture.source_format, hudless.data());
+    create_candidate(1, fixture.source_format, shifted.data());
+    create_candidate(2, fixture.source_format, final_color.data());
+    create_candidate(3, DXGI_FORMAT_R32_FLOAT, mask.data());
+    const std::vector<float> full(count, 1.f);
+    create_candidate(4, DXGI_FORMAT_R32_FLOAT, full.data());
+    alpha_auto_policy policy;
+    alpha_auto_source observation;
+    observation.session = &policy; observation.now_ms = observation.tick_ms = 40000;
+    observation.sequence = 1; observation.epoch = 81; observation.revision = 1;
+    ui_render_input ui; ui.kind = ui_input_kind::hudless_difference; ui.view = views[0]; ui.automatic = &observation;
+    const auto run = [&](bool accepted, const char *message, bool inspect = true) {
+      observation.now_ms += 100; observation.tick_ms = observation.now_ms; ++observation.sequence;
+      const auto actual = render(ui); const auto &expected = accepted ? on : off;
+      require(actual.field == expected.field && actual.color == expected.color, message);
+      if (inspect) {
+        const auto resource = renderer.diagnostics().ui_source;
+        require(resource.handle, "D3D12 HUDless result has no resolved mask");
+        auto *texture = reinterpret_cast<ID3D12Resource *>(resource.handle);
+        require(texture->GetDesc().Format == DXGI_FORMAT_R32_FLOAT, "D3D12 HUDless mask is not R32");
+        const auto bytes = fixture.read(texture);
+        require(bytes.size() == count * sizeof(float), "D3D12 HUDless mask size differs");
+        for (size_t i = 0; i < count; ++i) {
+          float value{}; std::memcpy(&value, bytes.data() + i * sizeof(float), sizeof(float));
+          require(value == (accepted ? mask[i] : 0.f), "D3D12 HUDless resolved mask retained an unsuitable candidate");
+        }
+      }
+    };
+    run(true, "D3D12 matching final/HUDless differs from explicit protection");
+    ui.view = views[1]; run(false, "D3D12 mismatched scene retained preceding HUD protection");
+    ui.view = views[2]; run(false, "D3D12 identical final/HUDless invented a mask");
+    ui.view = views[0]; run(true, "D3D12 matching pair did not recover without review");
+    ui_detection_inputs inputs;
+    inputs.current_color = true;
+    inputs.masks[1] = inputs.masks[2] = views[2]; inputs.hudless = views[0];
+    ui.detection = &inputs;
+    run(true, "D3D12 opaque UI/backbuffer candidates prevented HUDless fallback");
+    inputs.hudless = views[1]; run(false, "D3D12 all-unsuitable candidates did not produce Off");
+    inputs.masks[0] = views[3]; run(true, "D3D12 explicit R32 alpha did not take priority over unsuitable RGB inputs");
+    inputs.masks[0] = views[4]; run(false, "D3D12 opaque R32 alpha was accepted");
+    inputs.hudless = views[0]; run(true, "D3D12 all opaque alpha candidates did not fall through to HUDless");
+    policy.set_manual(false); run(false, "D3D12 Manual Off did not override valid HUDless", false);
+    require(renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off, "D3D12 HUDless lost Manual Off state");
+    policy.set_automatic(observation.now_ms); run(true, "D3D12 Auto resume required manual review");
+    queue->wait_idle();
+    for (const auto view : views) device->destroy_resource_view(view);
+    upload_source(original); write_native_source(fixture, backbuffer);
+    require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == original, "D3D12 HUDless fixture did not restore source");
+    report << "automatic-hudless D3D12 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_mismatch_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 all_candidate_descriptors=1 flattened_explicit_fallback=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
+    std::puts("PASS D3D12 automatic HUDless: exact paired HUD mask, immediate mismatched/empty rejection, all native candidate descriptors, priority/fallback and Manual Off");
   }
 
   void check_adaptive_ui_d3d12(fixture_t &fixture, sunshine_game3d::renderer &renderer,
@@ -509,7 +502,7 @@ namespace {
     const auto render = [&](sunshine_game3d::renderer &active, bool protect, const ui_plane_parameters &selected,
                             const ui_adaptive::source *observation, bool capture = false) {
       write_native_source(fixture, backbuffer);
-      require(active.render(queue->get_immediate_command_list(), source, fixture.depth_view,
+      require(sunshine_game3d::test::render_frame(active, queue->get_immediate_command_list(), source, fixture.depth_view,
           parameters, protect, selected_alpha, selected, nullptr, observation), "Adaptive D3D12 render failed");
       if (capture) dump.begin(observed.runtime, active, parameters, fixture.depth_view, false,
         static_cast<api::color_space>(fixture.color));
@@ -589,7 +582,7 @@ namespace {
       require(file.good(), "Adaptive D3D12 dump missing");
       const auto manifest = nlohmann::json::parse(file);
       const auto &replay = manifest.at("producer_metadata").at("replay");
-      require(replay.at("ui_parameter_abi") == "sunshine_game3d.ui_parameters.v6" &&
+      require(replay.at("ui_parameter_abi") == "sunshine_game3d.ui_parameters.v7" &&
           replay.at("ui_constant_binding").at("mode") == 5 &&
           replay.at("ui_constant_binding").at("front_limit_fraction") == dumped_fraction,
         "Adaptive D3D12 dump did not freeze the exact applied fraction");
@@ -675,7 +668,7 @@ namespace {
     input.now_ms = input.tick_ms = 5000; ++input.sequence; input.mask_sequence = 101;
     const auto blocked_sequence = input.sequence;
     const auto blocked_render = [&] {
-      require(renderer.render(queue->get_immediate_command_list(), source, fixture.depth_view,
+      require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), source, fixture.depth_view,
           parameters, true, selected_alpha, plane, nullptr, &input), "Record gated adaptive D3D12 render");
       queue->flush_immediate_command_list(); renderer.finish_present(); ++renders;
     };
@@ -1018,6 +1011,227 @@ namespace {
     std::printf("PASS adaptive D3D12 UI: %u renders; asynchronous GPU absolute-plane counts and stable actual UV, central75 conflict ratio or area and full-frame protection, cap/ramp/retreat, selected retained mask, duplicate/loss hold, exact frozen parity, v6 dump and exported cursor/UI plane parity\n", renders);
   }
 
+  void check_typed_ui_masks_d3d12(fixture_t &fixture, sunshine_game3d::renderer &renderer,
+      sunshine_game3d_test::dump_fixture &dump, std::ostream &report, const fs::path &directory) {
+    using namespace sunshine_game3d;
+    auto *queue = observed.runtime->get_command_queue();
+    auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
+    const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+    const auto original = fixture.source_bytes, original_depth = fixture.read(fixture.depth.p);
+    auto parameters = native_cases().front().parameters;
+    parameters.strength = 100; parameters.depth_scale = 100000; parameters.disparity_limit_uv = .01f;
+    const ui_plane_parameters plane{ui_plane_mode::display_fraction, .25f};
+    fixture.upload_depth(std::vector<float>(size_t(width) * height, .9f));
+    struct pixels { std::vector<std::uint8_t> field, color; };
+    const auto render = [&](bool enabled, api::resource_view mask, ui_mask_channel channel,
+                            const alpha_auto_source *automatic = nullptr, bool capture = false,
+                            const char *dump_name = "dump-typed-ui-red") {
+      write_native_source(fixture, backbuffer);
+      require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), source, fixture.depth_view, parameters,
+        enabled, mask, plane, automatic, nullptr, channel), "Typed D3D12 UI render failed");
+      if (capture) dump.begin(observed.runtime, renderer, parameters, fixture.depth_view, false,
+        static_cast<api::color_space>(fixture.color));
+      queue->flush_immediate_command_list(); renderer.finish_present();
+      if (capture) dump.submitted(observed.runtime);
+      queue->wait_idle();
+      if (capture) dump.verify(observed.runtime, [&](api::resource texture, bool common) {
+        return fixture.read(reinterpret_cast<ID3D12Resource *>(texture.handle),
+          common ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+      }, directory / dump_name);
+      const auto resources = renderer.diagnostics();
+      const auto mode = automatic && automatic->session ? automatic->session->decision(automatic->now_ms).state : alpha_auto_state::manual_off;
+      const bool detecting = automatic && automatic->session && mode != alpha_auto_state::manual_on && mode != alpha_auto_state::manual_off;
+      require(renderer.consumed_ui_channel() == (detecting ? ui_mask_channel::red : channel),
+        "D3D12 UI channel metadata differs from the consumed mask");
+      return pixels{fixture.read(reinterpret_cast<ID3D12Resource *>(resources.final_field.handle)),
+        fixture.read(reinterpret_cast<ID3D12Resource *>(resources.sbs.handle))};
+    };
+    const auto equal = [](const pixels &a, const pixels &b, const char *message) {
+      require(a.field == b.field && a.color == b.color, message);
+    };
+    unsigned case_index = 0;
+    for (const auto format : {DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R32_FLOAT,
+                             DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM}) {
+      const bool byte_color_mask = format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM;
+      const bool color_mask = format == DXGI_FORMAT_R16G16B16A16_FLOAT || byte_color_mask;
+      // R8 and RGBA are selective; R16 is all white; R32 is all black.
+      const auto covered_at = [&](unsigned x, unsigned y) {
+        if (format == DXGI_FORMAT_R16_FLOAT) return true;
+        if (format == DXGI_FORMAT_R32_FLOAT) return false;
+        return x >= width / 3 && x < width / 2 && y >= height / 4 && y < height * 3 / 4;
+      };
+      const unsigned stride = format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 :
+        format == DXGI_FORMAT_R8_UNORM ? 1 : format == DXGI_FORMAT_R16_FLOAT ? 2 : 4;
+      std::vector<std::uint8_t> mask_bytes(size_t(width) * height * stride);
+      fixture.source_bytes = original;
+      std::uint32_t covered{};
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const auto pixel = size_t(y) * width + x;
+        const bool ui = covered_at(x, y); covered += ui;
+        const std::uint16_t half = ui ? 0x3400 : 0; // Soft alpha > 0 is still covered.
+        if (stride == 1) mask_bytes[pixel] = ui ? 64 : 0;
+        else if (stride == 2) std::memcpy(mask_bytes.data() + pixel * stride, &half, 2);
+        else if (byte_color_mask) {
+          const std::uint8_t channels[]{255, 127, 255, static_cast<std::uint8_t>(ui ? 64 : 0)};
+          std::memcpy(mask_bytes.data() + pixel * stride, channels, 4); // RGB deliberately disagrees with alpha.
+          if (format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+            // Exercise Hogwarts' typed snapshot format with independently
+            // varying B/G/R and sparse soft/full alpha, never inferred RGB.
+            const std::uint8_t alpha_levels[]{1, 64, 255};
+            auto *bgra = mask_bytes.data() + pixel * stride;
+            bgra[0] = static_cast<std::uint8_t>((x * 3 + y * 7 + 17) & 255);
+            bgra[1] = static_cast<std::uint8_t>((x * 11 + y * 5 + 31) & 255);
+            bgra[2] = static_cast<std::uint8_t>((x * 19 + y * 13 + 47) & 255);
+            bgra[3] = ui ? alpha_levels[(x + y) % 3] : 0;
+          }
+        } else if (stride == 4) {
+          const float value = ui ? .25f : 0.f;
+          std::memcpy(mask_bytes.data() + pixel * stride, &value, 4);
+        } else {
+          const std::uint16_t channels[]{0x3c00, 0, 0, half}; // Red deliberately disagrees with alpha.
+          std::memcpy(mask_bytes.data() + pixel * stride, channels, 8);
+        }
+        if (fixture.color == 1) fixture.source_bytes[pixel * 4 + 3] = ui ? 255 : 0;
+        else if (fixture.color == 2) std::memcpy(fixture.source_bytes.data() + pixel * 8 + 6, &half, 2);
+        else {
+          std::uint32_t packed{}; std::memcpy(&packed, fixture.source_bytes.data() + pixel * 4, 4);
+          packed = (packed & 0x3fffffffu) | (ui ? 0x40000000u : 0u);
+          std::memcpy(fixture.source_bytes.data() + pixel * 4, &packed, 4);
+        }
+      }
+      const auto upload_source = [&] {
+        void *mapped{}; const D3D12_RANGE no_read{0, 0};
+        checked(fixture.source_upload->Map(0, &no_read, &mapped), "Map typed UI source color");
+        const auto row = size_t(width) * bytes_per_pixel(fixture.source_format);
+        for (unsigned y = 0; y < height; ++y)
+          std::memcpy(static_cast<std::uint8_t *>(mapped) + fixture.source_footprint.Offset +
+            size_t(y) * fixture.source_footprint.Footprint.RowPitch, fixture.source_bytes.data() + size_t(y) * row, row);
+        fixture.source_upload->Unmap(0, nullptr);
+      };
+      upload_source();
+      const auto reference_off = render(false, {}, ui_mask_channel::alpha);
+      const auto reference_on = render(true, {}, ui_mask_channel::alpha);
+      require(!covered || reference_on.field != reference_off.field, "Typed UI reference does not expose mask application");
+      com_ptr<ID3D12Resource> mask, upload;
+      fixture.texture(mask, format, D3D12_RESOURCE_STATE_COPY_DEST);
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+      UINT64 bytes{}; const auto desc = mask->GetDesc();
+      fixture.game->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+      fixture.buffer(upload, bytes, D3D12_HEAP_TYPE_UPLOAD);
+      void *mapped{}; const D3D12_RANGE no_read{0, 0};
+      checked(upload->Map(0, &no_read, &mapped), "Map typed UI mask");
+      for (unsigned y = 0; y < height; ++y)
+        std::memcpy(static_cast<std::uint8_t *>(mapped) + footprint.Offset + size_t(y) * footprint.Footprint.RowPitch,
+          mask_bytes.data() + size_t(y) * width * stride, size_t(width) * stride);
+      upload->Unmap(0, nullptr);
+      fixture.begin_commands();
+      D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+      from.pResource = upload.p; from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; from.PlacedFootprint = footprint;
+      to.pResource = mask.p; to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      fixture.commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+      transition(fixture.commands.p, mask.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+      fixture.submit();
+      unsigned copies{};
+      const auto copy = [&](api::resource destination) {
+        ++copies;
+        auto *target = reinterpret_cast<ID3D12Resource *>(destination.handle);
+        require(target->GetDesc().Format == format, "Typed UI private allocation changed the captured format");
+        auto *commands = reinterpret_cast<ID3D12GraphicsCommandList *>(queue->get_immediate_command_list()->get_native());
+        transition(commands, mask.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        transition(commands, target, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        commands->CopyResource(target, mask.p);
+        transition(commands, target, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        transition(commands, mask.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        return true;
+      };
+      const auto selected = renderer.prepare_ui_source(10000 + case_index, copy, static_cast<api::format>(format));
+      require(selected.handle, "Typed UI private texture unavailable");
+      const auto channel = color_mask ? ui_mask_channel::alpha : ui_mask_channel::red;
+      equal(render(true, selected, channel), reference_on, "Typed UI field/SBS differs from equivalent color-alpha coverage");
+      if (format == DXGI_FORMAT_R8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+        const bool red = format == DXGI_FORMAT_R8_UNORM;
+        const char *dump_name = red ? "dump-typed-ui-red" : "dump-typed-ui-bgra";
+        equal(render(true, selected, channel, nullptr, true, dump_name), reference_on,
+          "Typed UI diagnostic capture changed its field/SBS pixels");
+        std::ifstream file(directory / dump_name / "manifest.json");
+        require(file.good(), "Typed UI diagnostic dump missing");
+        const auto manifest = nlohmann::json::parse(file);
+        const auto &replay = manifest.at("producer_metadata").at("replay");
+        require(replay.at("ui_parameter_abi") == "sunshine_game3d.ui_parameters.v7" &&
+            replay.at("ui_constant_binding").at("uint32")[3] == (red ? 1u : 0u) &&
+            replay.at("ui_constant_binding").at("mask_channel") == (red ? "red" : "alpha") &&
+            replay.at("ui_alpha_source") == "ui_source_color",
+          "Typed UI dump lost its exact selected channel or texture binding");
+        bool found_mask = false;
+        for (const auto &artifact : manifest.at("artifacts")) if (artifact.at("kind") == "ui_source_color") {
+          require(artifact.at("dxgi_format") == unsigned(format) &&
+              artifact.at("row_bytes") == size_t(width) * stride && artifact.at("byte_count") == mask_bytes.size(),
+            "Typed UI dump changed the source format or packed byte layout");
+          const auto path = directory / dump_name / artifact.at("file").get<std::string>();
+          require(fs::file_size(path) == mask_bytes.size(), "Typed UI binary dump has the wrong byte count");
+          std::ifstream input(path, std::ios::binary);
+          std::vector<std::uint8_t> saved(mask_bytes.size());
+          input.read(reinterpret_cast<char *>(saved.data()), saved.size());
+          require(input.good() && saved == mask_bytes,
+            "Consumed UI binary dump changed selective alpha or independent color bytes");
+          found_mask = true;
+        }
+        require(found_mask, "Typed UI dump omitted the immutable mask texture");
+        require(fixture.read(mask.p) == mask_bytes &&
+            fixture.read(reinterpret_cast<ID3D12Resource *>(renderer.ui_source(static_cast<api::format>(format)).handle)) == mask_bytes,
+          "Diagnostic snapshot lifecycle changed the source or renderer-owned mask bytes");
+      }
+      require(renderer.prepare_ui_source(10000 + case_index, copy, static_cast<api::format>(format)).handle == selected.handle && copies == 1,
+        "Repeated immutable UI capture performed another copy or changed its allocation");
+      alpha_auto_policy session(1);
+      alpha_auto_source observation;
+      observation.now_ms = observation.tick_ms = 400000 + case_index * 1000;
+      observation.sequence = 1; observation.epoch = 300 + case_index; observation.revision = 1;
+      observation.retained = observation.dedicated_mask = true; observation.session = &session;
+      const bool selective = covered > 0 && covered < size_t(width) * height;
+      equal(render(true, selected, channel, &observation), selective ? reference_on : reference_off,
+        "Automatic typed UI did not immediately accept selective or reject full/empty coverage");
+      require(renderer.consumed_source_alpha_ui(), "Automatic typed UI did not arm its current-frame mask path");
+      auto *resolved = reinterpret_cast<ID3D12Resource *>(renderer.diagnostics().ui_source.handle);
+      require(resolved && resolved->GetDesc().Format == DXGI_FORMAT_R32_FLOAT, "Automatic typed UI did not expose R32 mask");
+      const auto selected_bytes = fixture.read(resolved);
+      require(selected_bytes.size() == size_t(width) * height * sizeof(float), "Automatic typed mask size differs");
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        float value{}; std::memcpy(&value, selected_bytes.data() + (size_t(y) * width + x) * sizeof(float), sizeof(float));
+        require(std::isfinite(value) && value >= 0.f && value <= 1.f &&
+            (value > 0.f) == (selective && covered_at(x, y)), "Automatic typed mask has incorrect selected-channel support");
+      }
+      if (color_mask) {
+        observation.dedicated_mask = false;
+        equal(render(true, selected, channel, &observation), reference_on,
+          "Automatic captured color alpha incorrectly depended on its dedicated tag");
+      }
+      observation.dedicated_mask = true;
+      session.set_manual(true);
+      equal(render(true, selected, channel, &observation), reference_on,
+        "Manual On failed to admit an available typed UI source");
+      session.set_manual(false);
+      equal(render(true, selected, channel, &observation), reference_off,
+        "Automatic typed UI ignored explicit Manual Off");
+      session.set_automatic(observation.now_ms);
+      equal(render(true, selected, channel, &observation), selective ? reference_on : reference_off,
+        "Automatic typed UI resume required manual review");
+      ++case_index;
+    }
+    std::vector<float> restored(size_t(width) * height);
+    std::memcpy(restored.data(), original_depth.data(), original_depth.size()); fixture.upload_depth(restored);
+    fixture.source_bytes = original;
+    void *mapped{}; const D3D12_RANGE no_read{0, 0};
+    checked(fixture.source_upload->Map(0, &no_read, &mapped), "Restore typed UI fixture source");
+    const auto row = size_t(width) * bytes_per_pixel(fixture.source_format);
+    for (unsigned y = 0; y < height; ++y)
+      std::memcpy(static_cast<std::uint8_t *>(mapped) + fixture.source_footprint.Offset +
+        size_t(y) * fixture.source_footprint.Footprint.RowPitch, original.data() + size_t(y) * row, row);
+    fixture.source_upload->Unmap(0, nullptr); write_native_source(fixture, backbuffer);
+    report << "typed-ui D3D12 R8_selective=1 R16_white=1 R32_black=1 RGBA_alpha_not_red=1 RGBA8_alpha=1 BGRA8_alpha=1 exact_frozen_pixels=1 copy_once=1 automatic_selective_without_review=1 full_empty_rejected=1 resolved_mask_checked=1 manual_modes=1 typed_red_v7_dump=1 typed_bgra_v7_dump=1 selective_alpha_binary_exact=1 source_immutable_after_dump=1\n";
+    std::puts("PASS D3D12 typed UI masks: R8/R16/R32/RGBA/BGRA, explicit channels, automatic selective admission and full/empty rejection, exact field/SBS parity");
+  }
+
   void check_native_parity(fixture_t &fixture, const fs::path &directory) {
     fixture.discover();
     const auto tests = native_cases();
@@ -1063,7 +1277,7 @@ namespace {
       write_native_source(fixture, backbuffer);
       const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
       require(renderer.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color)), "Native renderer configure failed");
-      require(renderer.render(owner_queue->get_immediate_command_list(), source,
+      require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source,
         test.parameters.depth_ready ? fixture.depth_view : api::resource_view{}, test.parameters), "Native renderer rejected ready parity frame");
       const bool dump_case = test.name == "raw-cliffs-strength50" || test.name == "depth-unavailable" || test.name == "cropped-lowres-jitter";
       if (dump_case) dump.begin(observed.runtime,renderer,test.parameters,
@@ -1099,7 +1313,7 @@ namespace {
       write_native_source(fixture, backbuffer);
       const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
       require(renderer.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color)), "Budget renderer configure failed");
-      require(renderer.render(owner_queue->get_immediate_command_list(), source, fixture.depth_view, parameters),
+      require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source, fixture.depth_view, parameters),
         "Budget renderer rejected frame");
       const bool dump_case = std::strcmp(test.name, "strength100") == 0;
       if (dump_case) dump.begin(observed.runtime, renderer, parameters, fixture.depth_view, false,
@@ -1125,6 +1339,66 @@ namespace {
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
         "Budget renderer changed mono source color");
     }
+    // Compare two documented encodings of the same inverse-distance field
+    // through the actual production D3D12 compute pipeline. Powers of two
+    // make the independent storage/unit transform exact in FP32.
+    {
+      auto parameters=tests.front().parameters;
+      parameters.coordinate_basis=0; parameters.projection={0.f,1.f};
+      parameters.depth_scale=4.f; parameters.convergence={.05f,.25f};
+      parameters.strength=100.f; parameters.strength_blend=1.f;
+      parameters.depth_rect={.125f,.125f,.75f,.75f};
+      std::vector<float> inverse(size_t(width)*height);
+      for (unsigned y=0; y<height; ++y) for (unsigned x=0; x<width; ++x)
+        inverse[size_t(y)*width+x]=std::ldexp(.125f,int((x/17+y/13)%4));
+      const auto render_candidate=[&](const std::vector<float> &raw, bool capture = false) {
+        fixture.upload_depth(raw);
+        auto *backbuffer=fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
+        write_native_source(fixture,backbuffer);
+        const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+        require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(),source,fixture.depth_view,parameters),
+          "Linear-equivalence D3D12 render failed");
+        if (capture) dump.begin(observed.runtime, renderer, parameters, fixture.depth_view, false,
+          static_cast<api::color_space>(fixture.color));
+        owner_queue->flush_immediate_command_list(); renderer.finish_present();
+        if (capture) dump.submitted(observed.runtime);
+        owner_queue->wait_idle();
+        if (capture) dump.verify(observed.runtime, [&](api::resource texture, bool common) {
+          return fixture.read(reinterpret_cast<ID3D12Resource *>(texture.handle),
+            common ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        }, directory / "dump-linear-distance");
+        return fixture.read(reinterpret_cast<ID3D12Resource *>(renderer.diagnostics().candidate.handle));
+      };
+      const auto reference=render_candidate(inverse);
+      for (unsigned scenario=0; scenario!=4; ++scenario) {
+        const float units=scenario==1 ? 1024.f : 1.f;
+        const float A=scenario==2 ? 2.f : 0.f, scale=scenario==2 ? -2.f : 1.f;
+        parameters.coordinate_basis=2; parameters.projection={A,scale};
+        parameters.depth_scale=4.f*units; parameters.convergence={.05f,.25f/units};
+        std::vector<float> raw(inverse.size());
+        for (size_t i=0; i<raw.size(); ++i) raw[i]=A+(units/inverse[i])/scale;
+        if (scenario==3) {
+          // Whole source invalid: no reciprocal, overflow or stale candidate
+          // may move pixels, including after three successful linear frames.
+          for (size_t i=0; i<raw.size(); ++i)
+            raw[i]=(i%4)==0 ? 0.f : (i%4)==1 ? -1.f : (i%4)==2 ? NAN : INFINITY;
+        }
+        const auto actual=render_candidate(raw, scenario==0);
+        require(actual.size()==reference.size(),"Linear field shape changed");
+        for (size_t offset=0; offset<actual.size(); offset+=sizeof(float)) {
+          float got{}, wanted{};
+          std::memcpy(&got,actual.data()+offset,sizeof(got));
+          if (scenario!=3) std::memcpy(&wanted,reference.data()+offset,sizeof(wanted));
+          require(std::isfinite(got) && std::abs(got-wanted)<=2e-8f,
+            "Linear distance changed equivalent geometry or invalid pixels acquired disparity");
+        }
+      }
+      report << "linear-depth D3D12 reciprocal=1 device_equivalence=1 units=1 negative_storage_scale=1 crop=1 all_invalid_neutral=1\n";
+      std::puts("PASS linear-distance native D3D12: device-equivalent geometry, units/storage, crop and invalid pixels");
+      std::vector<float> restored(size_t(width)*height);
+      std::memcpy(restored.data(),original_depth.data(),original_depth.size());
+      fixture.upload_depth(restored);
+    }
     // An enabled source-alpha frame must retain its separate b1 selection in
     // the real cross-API dump, not merely in the offline package parser.
     {
@@ -1132,7 +1406,7 @@ namespace {
       auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
       write_native_source(fixture, backbuffer);
       const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
-      require(renderer.render(owner_queue->get_immediate_command_list(), source, fixture.depth_view, parameters, true),
+      require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source, fixture.depth_view, parameters, true),
         "UI-protected D3D12 render failed");
       require(renderer.consumed_source_alpha_ui(), "Renderer lost enabled UI source");
       dump.begin(observed.runtime, renderer, parameters, fixture.depth_view, false, static_cast<api::color_space>(fixture.color));
@@ -1155,21 +1429,27 @@ namespace {
       const char *name;
       float maximum, floor, strength, blend;
       bool reverse;
+      bool linear = false;
     };
-    const std::array<nearest_case, 3> nearest_tests {{
+    const std::array<nearest_case, 4> nearest_tests {{
       {"normal", .75f, .25f, 100.f, 1.f, false},
       {"reversed", .625f, .25f, 100.f, 1.f, true},
       {"floor-partial-strength", .5f, .875f, 50.f, .5f, false},
+      {"linear-distance", .5f, .25f, 100.f, 1.f, false, true},
     }};
     for (const auto &test : nearest_tests) {
       std::vector<float> raw(size_t(width) * height, .125f);
       raw[size_t(height / 2) * width + width / 2] = .375f;
       raw.back() = test.maximum;
       if (test.reverse) for (auto &value : raw) value = 1.f - value;
+      if (test.linear) {
+        for (auto &value : raw) value = 1.f / value;
+        raw.front() = NAN; // Invalid sky must not poison the covered maximum.
+      }
       fixture.upload_depth(raw);
       const auto frozen_depth = fixture.read(fixture.depth.p);
       auto parameters = tests.front().parameters;
-      parameters.coordinate_basis = 0;
+      parameters.coordinate_basis = test.linear ? 2 : 0;
       parameters.strength = test.strength;
       parameters.strength_blend = test.blend;
       parameters.depth_scale = 432.f / height;
@@ -1180,7 +1460,7 @@ namespace {
       auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
       write_native_source(fixture, backbuffer);
       const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
-      require(renderer.render(owner_queue->get_immediate_command_list(), source, fixture.depth_view,
+      require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source, fixture.depth_view,
         parameters, true, {}, plane), "Nearest-UI D3D12 render failed");
       require(sunshine_game3d::ui_parameter_words(true, renderer.consumed_ui_plane()) ==
           sunshine_game3d::ui_parameter_words(true, plane), "Nearest-UI D3D12 changed submitted floor/mode bits");
@@ -1246,7 +1526,7 @@ namespace {
         require(input.good(), "Nearest-UI D3D12 dump manifest missing");
         const auto manifest = nlohmann::json::parse(input);
         const auto &replay = manifest.at("producer_metadata").at("replay");
-        require(replay.at("ui_parameter_abi") == "sunshine_game3d.ui_parameters.v3" &&
+        require(replay.at("ui_parameter_abi") == "sunshine_game3d.ui_parameters.v7" &&
             replay.at("ui_constant_binding").at("mode") == 2 &&
             replay.at("ui_constant_binding").at("inverse_depth") == test.floor &&
             replay.at("ui_plane_resolution").at("reduction_ran") == true &&
@@ -1320,7 +1600,7 @@ namespace {
       const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
       const auto render = [&](bool protect, const sunshine_game3d::ui_plane_parameters &plane) {
         write_native_source(fixture, backbuffer);
-        require(renderer.render(owner_queue->get_immediate_command_list(), source, fixture.depth_view,
+        require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source, fixture.depth_view,
           parameters, protect, {}, plane), "Front-limit D3D12 render failed");
         const bool shallow = plane.mode == sunshine_game3d::ui_plane_mode::shallow_front;
         const bool dump_case = protect && case_index == 0 &&
@@ -1345,7 +1625,7 @@ namespace {
           require(input.good(), "Front-limit D3D12 dump manifest missing");
           const auto manifest = nlohmann::json::parse(input);
           const auto &replay = manifest.at("producer_metadata").at("replay");
-          require(replay.at("ui_parameter_abi") == (shallow ? "sunshine_game3d.ui_parameters.v5" : "sunshine_game3d.ui_parameters.v4") &&
+          require(replay.at("ui_parameter_abi") == "sunshine_game3d.ui_parameters.v7" &&
               replay.at("ui_constant_binding").at("mode") == (shallow ? 4 : 3) &&
               replay.at("ui_constant_binding").at("mode_name") == (shallow ? "shallow_front" : "front_limit") &&
               replay.at("ui_constant_binding").at("inverse_depth") == 0.f &&
@@ -1440,7 +1720,9 @@ namespace {
     std::memcpy(restored_depth.data(), original_depth.data(), original_depth.size());
     fixture.upload_depth(restored_depth);
     check_alpha_auto_d3d12(fixture, renderer, report);
+    check_automatic_hudless_d3d12(fixture, renderer, report);
     check_adaptive_ui_d3d12(fixture, renderer, dump, report, directory);
+    check_typed_ui_masks_d3d12(fixture, renderer, dump, report, directory);
     std::puts("PASS nearest-UI D3D12 current GPU scalar, corner coverage, both depth directions, floor/strength and v3 dump bindings");
     require(observed.renders == effect_renders, "An FX technique ran during native parity");
     owner_queue->wait_idle();

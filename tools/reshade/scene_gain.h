@@ -63,25 +63,32 @@ namespace sunshine_scene_gain {
   template<std::size_t N>
   inline depth_range decode_range(const std::array<float, N> &grid, bool supplied, bool valid,
       float minimum, float maximum, float A, float inverseB, float raw_min = 0, float raw_max = 1,
-      const sunshine_depth_statistics::moments &moments = {}) noexcept {
+      const sunshine_depth_statistics::moments &moments = {},
+      sunshine_scene_depth::depth_encoding encoding = sunshine_scene_depth::depth_encoding::device) noexcept {
     static_assert(N != 0, "Scene reference needs a nonempty point grid");
     const auto invalid = [] { return depth_range{std::numeric_limits<double>::quiet_NaN(), 0}; };
     if (supplied && !valid) return invalid();
     if (moments.centered_supplied && !moments.supplied) return invalid();
     if (moments.supplied && (!supplied || !moments.valid || !moments.count ||
-        moments.A != A || moments.inverseB != inverseB ||
+        moments.A != A || moments.inverseB != inverseB || moments.encoding != encoding ||
         !std::isfinite(moments.sum) || !std::isfinite(moments.sum_squares) ||
         moments.sum < 0. || moments.sum_squares < 0.)) return invalid();
     double mean = 0.;
+    std::size_t point_count = 0;
+    const bool linear = encoding == sunshine_scene_depth::depth_encoding::linear_distance;
     if (!supplied) {
       minimum = std::numeric_limits<float>::infinity();
       maximum = -minimum;
     }
     if (!moments.supplied) for (float value : grid) {
-      if (!std::isfinite(value) || value < raw_min || value > raw_max) return invalid();
-      const float decoded = (value-A)*inverseB;
-      if (!std::isfinite(decoded) || decoded < 0) return invalid();
+      float decoded{};
+      if (!std::isfinite(value) || value < raw_min || value > raw_max ||
+          !sunshine_scene_depth::decode_inverse_distance(value, A, inverseB, encoding, decoded)) {
+        if (linear) continue;
+        return invalid();
+      }
       mean += decoded;
+      ++point_count;
       if (!supplied) {
         minimum = std::min(minimum, value);
         maximum = std::max(maximum, value);
@@ -89,9 +96,10 @@ namespace sunshine_scene_gain {
     }
     if (!std::isfinite(minimum) || !std::isfinite(maximum) || minimum < raw_min || maximum > raw_max || minimum > maximum)
       return invalid();
-    const float a = (minimum-A)*inverseB, b = (maximum-A)*inverseB;
-    if (!std::isfinite(a) || !std::isfinite(b) || a < 0.f || b < 0.f) return invalid();
-    if (!moments.supplied) return {std::min(a,b), std::max(a,b), mean/N};
+    float a{}, b{};
+    if (!sunshine_scene_depth::decode_inverse_distance(minimum, A, inverseB, encoding, a) ||
+        !sunshine_scene_depth::decode_inverse_distance(maximum, A, inverseB, encoding, b)) return invalid();
+    if (!moments.supplied) return point_count ? depth_range{std::min(a,b), std::max(a,b), mean/point_count} : invalid();
     mean = moments.sum / moments.count;
     const double mean_square = moments.sum_squares / moments.count;
     const double low = std::min(a,b), high = std::max(a,b);

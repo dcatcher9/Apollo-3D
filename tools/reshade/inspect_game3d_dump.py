@@ -1,10 +1,13 @@
 """Inspect lossless native Game 3D artifacts; optional PNGs are display previews only."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
 import numpy as np
+
+from game3d_ui_discovery import artifact_facts, discover_ui, format_report, review_template
 
 MAX_ARTIFACTS = 40  # game3d_debug_protocol.h v3; disk artifact schema stays v1.
 PRIMARY_ARTIFACTS = {"source_color", "raw_depth", "candidate", "vertical_majorant",
@@ -20,7 +23,7 @@ FORMATS = {
 }
 
 
-def read_artifact(root, descriptor):
+def read_artifact(root, descriptor, *, include_digest=False):
     root = Path(root).resolve()
     path = (root / descriptor["file"]).resolve()
     if path.parent != root:
@@ -39,16 +42,21 @@ def read_artifact(root, descriptor):
     if descriptor["byte_count"] != size or path.stat().st_size != size:
         raise ValueError("Artifact byte count differs from its descriptor")
     value = np.fromfile(path, dtype=dtype).reshape(height, width, channels)
+    # Bind review to the native bytes, before channel swizzles or normalization.
+    digest = hashlib.sha256(value).hexdigest() if include_digest else None
     if fmt == 24:
         packed = value[:, :, 0]
         channels = [(packed >> shift) & mask for shift, mask in
                     ((0, 1023), (10, 1023), (20, 1023), (30, 3))]
-        return np.stack(channels, axis=-1).astype(np.float32) / [1023, 1023, 1023, 3]
-    if fmt in (87, 91):
-        value = value[:, :, [2, 1, 0, 3]]
-    if np.issubdtype(value.dtype, np.integer) and fmt != 62:
-        return value.astype(np.float32) / np.iinfo(value.dtype).max
-    return value.astype(np.float32)
+        value = np.stack(channels, axis=-1).astype(np.float32) / [1023, 1023, 1023, 3]
+    else:
+        if fmt in (87, 91):
+            value = value[:, :, [2, 1, 0, 3]]
+        if np.issubdtype(value.dtype, np.integer) and fmt != 62:
+            value = value.astype(np.float32) / np.iinfo(value.dtype).max
+        else:
+            value = value.astype(np.float32)
+    return (value, digest) if include_digest else value
 
 
 def statistics(value):
@@ -99,13 +107,22 @@ def scalar_preview(value, low=0.0, high=1.0, signed=False):
 
 
 def resource_metadata(metadata, key, artifact):
-    rows = metadata.get(key, [])
+    rows = resource_rows(metadata, key)
     if not isinstance(rows, list):
         return {}
     return next((row for row in rows if isinstance(row, dict) and
                  (row.get("file_stem") == artifact["kind"] or
                   (artifact.get("artifact_id") is not None and
                   row.get("artifact_id") == artifact["artifact_id"]))), {})
+
+
+def resource_rows(metadata, key):
+    # Production nests independent API observations; capture decisions belong to
+    # the outer producer. Prefer the canonical location even when it is empty.
+    latest = metadata.get("latest_observations", {})
+    if key == "ui_resources" and isinstance(latest, dict) and key in latest:
+        return latest[key]
+    return metadata.get(key, [])
 
 
 def save_preview(pixels, path, optional, result):
@@ -118,9 +135,10 @@ def save_preview(pixels, path, optional, result):
         result.setdefault("preview_errors", []).append(str(error))
 
 
-def inspect(root, previews=False):
+def inspect(root, previews=False, ui_review=None):
     root = Path(root)
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    manifest_bytes = (root / "manifest.json").read_bytes()
+    manifest = json.loads(manifest_bytes)
     if manifest.get("schema") != "sunshine.game3d.dump.v1":
         raise ValueError("This is not a native Game 3D dump")
     report = {"status": manifest.get("status"), "reason": manifest.get("reason"), "artifacts": []}
@@ -129,29 +147,35 @@ def inspect(root, previews=False):
     report["render_parameters"] = metadata.get("render_parameters", {})
     report["pairing_evidence"] = metadata.get("pairing_evidence", {})
     report["render_scene_policy"] = metadata.get("render_scene_policy", {})
-    report["ui_resources"] = metadata.get("ui_resources", [])
+    report["ui_resources"] = resource_rows(metadata, "ui_resources")
     report["optional_captures"] = metadata.get("optional_captures", [])
     report["optional_capture_errors"] = manifest.get("optional_capture_errors", [])
     report["ui_source"] = metadata.get("ui_source", {})
     report["ui_alpha_source"] = metadata.get("replay", {}).get("ui_alpha_source", "legacy")
+    report["ui_mask_channel"] = metadata.get("replay", {}).get("ui_constant_binding", {}).get("mask_channel", "alpha")
+    if report["ui_mask_channel"] not in ("alpha", "red"):
+        raise ValueError("Unknown consumed UI mask channel")
     artifacts = manifest.get("artifacts", [])
     if not isinstance(artifacts, list) or len(artifacts) > MAX_ARTIFACTS:
         raise ValueError("Invalid artifact list")
     if report["ui_alpha_source"] == "ui_source_color" and not any(a.get("kind") == "ui_source_color" for a in artifacts):
         raise ValueError("Required consumed UI-alpha texture is missing; optional SL snapshots cannot substitute")
     total_bytes = 0
+    facts = []
     for artifact in sorted(artifacts, key=lambda item: item.get("kind") not in PRIMARY_ARTIFACTS):
         optional = artifact["kind"] not in PRIMARY_ARTIFACTS
         try:
             if not isinstance(artifact["byte_count"], int) or not 0 <= artifact["byte_count"] <= 768 * 1024 * 1024 - total_bytes:
                 raise ValueError("Capture byte budget exceeded")
-            value = read_artifact(root, artifact)
+            value, digest = read_artifact(root, artifact, include_digest=True)
             total_bytes += artifact["byte_count"]
         except (ValueError, OSError, KeyError, TypeError) as error:
             if not optional:
                 raise
             report["artifacts"].append({"kind": artifact["kind"], "status": "unavailable", "reason": str(error)})
+            facts.append(artifact_facts(artifact, error=error))
             continue
+        facts.append(artifact_facts(artifact, value, artifact_sha256=digest))
         observation = resource_metadata(metadata, "ui_resources", artifact) if optional else {}
         captured = resource_metadata(metadata, "optional_captures", artifact) if optional else {}
         role = observation.get("role", "unknown")
@@ -171,7 +195,7 @@ def inspect(root, previews=False):
                     if transfer not in (1, 2, 3):
                         transfer = 0
                 elif artifact["kind"] == "ui_source_color":
-                    transfer = 0  # Only alpha is consumed; do not invent RGB transfer metadata.
+                    transfer = 0  # Mask channel only; do not invent RGB transfer metadata.
                 elif artifact["kind"] == "linear_color" or (artifact["kind"] == "sbs" and transfer == 3):
                     transfer = 2
                 pixels = color_preview(value, transfer)
@@ -213,14 +237,21 @@ def inspect(root, previews=False):
                     semantic="uninterpreted_source_alpha",
                     note="Raw source color alpha; UI meaning is not guaranteed. Full allocation, no transfer, crop, jitter or threshold. Never SBS alpha. Generating this preview does not enable source-alpha UI protection.",
                     **statistics(value[:, :, 3]))
-            if artifact["kind"] == "ui_source_color" and artifact["dxgi_format"] in ALPHA_FORMATS:
-                save_preview(scalar_preview(value[:, :, 3]), output / "ui_source_alpha.png", False, result)
-                result["ui_source_alpha_preview"] = dict(
-                    file="ui_source_alpha.png", source_artifact="ui_source_color", channel="A", black=0, white=1,
-                    semantic="consumed_ui_alpha",
-                    note="Exact consumed alpha, not a latest optional SL snapshot. No color transfer, crop, jitter or threshold; same-game-frame pairing is not proven.",
-                    **statistics(value[:, :, 3]))
+            if artifact["kind"] == "ui_source_color":
+                red = report["ui_mask_channel"] == "red"
+                if not red and artifact["dxgi_format"] not in ALPHA_FORMATS:
+                    raise ValueError("Consumed alpha channel requires a texture with alpha")
+                mask = value[:, :, 0 if red else 3]
+                name = "ui_source_mask" if red else "ui_source_alpha"
+                save_preview(scalar_preview(mask), output / (name + ".png"), False, result)
+                result[name + "_preview"] = dict(
+                    file=name + ".png", source_artifact="ui_source_color", channel="R" if red else "A", black=0, white=1,
+                    semantic="consumed_ui_mask" if red else "consumed_ui_alpha",
+                    note="Exact consumed mask, not a latest optional SL snapshot. No color transfer, crop, jitter or threshold; same-game-frame pairing is not proven.",
+                    **statistics(mask))
         report["artifacts"].append(result)
+    report["ui_discovery"] = discover_ui(
+        manifest, facts, ui_review, manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest())
     return report
 
 
@@ -228,5 +259,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dump", type=Path)
     parser.add_argument("--previews", action="store_true", help="write diagnostic PNGs; never modify lossless data")
+    parser.add_argument("--ui-review", type=Path,
+                        help="apply an explicit review bound to this dump and its artifact bytes")
+    parser.add_argument("--write-ui-review", type=Path,
+                        help="create an unreviewed UI qualification template; never overwrite a file")
+    parser.add_argument("--ui-report", type=Path,
+                        help="create a readable Markdown UI discovery report; never overwrite a file")
     args = parser.parse_args()
-    print(json.dumps(inspect(args.dump, args.previews), indent=2, allow_nan=False))
+    review = json.loads(args.ui_review.read_text(encoding="utf-8")) if args.ui_review else None
+    report = inspect(args.dump, args.previews, review)
+    if args.write_ui_review:
+        with args.write_ui_review.open("x", encoding="utf-8") as output:
+            json.dump(review_template(report["ui_discovery"]), output, indent=2, allow_nan=False)
+            output.write("\n")
+    if args.ui_report:
+        with args.ui_report.open("x", encoding="utf-8") as output:
+            output.write(format_report(report["ui_discovery"]))
+    print(json.dumps(report, indent=2, allow_nan=False))

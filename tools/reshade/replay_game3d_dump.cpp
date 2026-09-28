@@ -244,12 +244,17 @@ namespace {
   }
 
   double component(const std::vector<std::uint8_t> &bytes, unsigned format, std::size_t index) {
-    if (format == DXGI_FORMAT_R32_FLOAT) {
+    if (format == DXGI_FORMAT_R32_FLOAT || format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
       float f;
       std::memcpy(&f, bytes.data() + index * 4, 4);
       return f;
     }
-    if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+    if (format == DXGI_FORMAT_R16_UNORM) {
+      std::uint16_t v;
+      std::memcpy(&v, bytes.data() + index * 2, 2);
+      return double(v) / 65535.;
+    }
+    if (format == DXGI_FORMAT_R16G16B16A16_FLOAT || format == DXGI_FORMAT_R16_FLOAT) {
       std::uint16_t h;
       std::memcpy(&h, bytes.data() + index * 2, 2);
       return half_float(h);
@@ -268,7 +273,8 @@ namespace {
     for (std::size_t i = 0; i < actual.size(); ++i) {
       different += captured[i] != actual[i];
     }
-    const auto channels = a.format == DXGI_FORMAT_R32_FLOAT ? 1u : 4u;
+    const auto channels = a.format == DXGI_FORMAT_R32_FLOAT || a.format == DXGI_FORMAT_R16_FLOAT ||
+      a.format == DXGI_FORMAT_R16_UNORM || a.format == DXGI_FORMAT_R8_UNORM ? 1u : 4u;
     const auto count = std::size_t(a.width) * a.height * channels;
     double max_abs = 0, max_relative = 0;
     long double squared = 0;
@@ -286,12 +292,14 @@ namespace {
       // Verification tolerates one output quantization step; float32 fields get
       // 1e-7 absolute + 1e-5 relative. The exact byte verdict remains separate.
       double tolerance = 0;
-      if (a.format == DXGI_FORMAT_R32_FLOAT) {
+      if (a.format == DXGI_FORMAT_R32_FLOAT || a.format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
         tolerance = 1.e-7 + magnitude * 1.e-5;
-      } else if (a.format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+      } else if (a.format == DXGI_FORMAT_R16G16B16A16_FLOAT || a.format == DXGI_FORMAT_R16_FLOAT) {
         int e = 0;
         std::frexp(magnitude, &e);
         tolerance = std::ldexp(1., std::max(-24, e - 11));
+      } else if (a.format == DXGI_FORMAT_R16_UNORM) {
+        tolerance = 1. / 65535.;
       } else if (a.format == DXGI_FORMAT_R10G10B10A2_UNORM) {
         tolerance = i % 4 == 3 ? 1. / 3. : 1. / 1023.;
       } else {
@@ -442,6 +450,8 @@ int main(int argc, char **argv) {
     sunshine_game3d::render_parameters parameters;
     static_assert(sizeof(parameters) == replay::parameter_bytes);
     std::memcpy(&parameters, package.parameters.data(), sizeof(parameters));
+    require(parameters.coordinate_basis != 2 || shader.find("#define SUNSHINE_LINEAR_DISTANCE_DEPTH 1") != std::string::npos,
+      "Linear-distance input requires an explicit linear-depth shader contract");
     if (strength) {
       parameters.strength = *strength;
     }
@@ -454,6 +464,9 @@ int main(int argc, char **argv) {
     const bool protect_ui = source_alpha_ui.value_or(package.source_alpha_ui);
     const auto ui_plane = ui_plane_override.value_or(package.ui_plane);
     const std::string ui_alpha_source = !protect_ui ? "none" : package.ui_alpha_source == "ui_source_color" ? "ui_source_color" : "source_color";
+    const auto ui_channel = protect_ui ? package.ui_channel : sunshine_game3d::ui_mask_channel::alpha;
+    require(ui_channel != sunshine_game3d::ui_mask_channel::red || shader.find("Sunshine_UIMaskChannel") != std::string::npos,
+      "Single-channel UI input requires the typed UI shader contract");
     require(!protect_ui || shader.find("Sunshine_SourceAlphaUI") != std::string::npos,
       "Source-alpha UI requires a shader that consumes the UI selection");
     require(ui_plane.mode == sunshine_game3d::ui_plane_mode::screen || replay::supports_ui_plane(shader),
@@ -480,10 +493,11 @@ int main(int argc, char **argv) {
     if (depth_gain) report["depth_gain_override"] = *depth_gain;
     report["source_alpha_ui"] = protect_ui;
     report["captured_source_alpha_ui"] = package.source_alpha_ui;
-    const auto describe_ui = [](bool enabled, const sunshine_game3d::ui_plane_parameters &plane) {
-      const auto words = sunshine_game3d::ui_parameter_words(enabled, plane);
+    const auto describe_ui = [](bool enabled, const sunshine_game3d::ui_plane_parameters &plane, sunshine_game3d::ui_mask_channel channel) {
+      const auto words = sunshine_game3d::ui_parameter_words(enabled, plane, channel);
       const bool fraction_mode = plane.mode == sunshine_game3d::ui_plane_mode::display_fraction;
       json value {{"mode", static_cast<std::uint32_t>(plane.mode)},
+        {"mask_channel", channel == sunshine_game3d::ui_mask_channel::red ? "red" : "alpha"},
         {"mode_name", plane.mode == sunshine_game3d::ui_plane_mode::screen ? "screen" :
           plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint ? "depth_midpoint" :
           plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui ? "depth_midpoint_nearest_ui" :
@@ -507,8 +521,8 @@ int main(int argc, char **argv) {
     };
     report["captured_ui_parameter_abi"] = package.ui_parameter_abi;
     report["captured_ui_parameter_hex"] = replay::hex(package.ui_parameters.data(), package.ui_parameters.size());
-    report["captured_ui_plane"] = describe_ui(package.source_alpha_ui, package.ui_plane);
-    report["ui_parameter_abi"] = ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction ? "sunshine_game3d.ui_parameters.v6" :
+    report["captured_ui_plane"] = describe_ui(package.source_alpha_ui, package.ui_plane, package.ui_channel);
+    report["ui_parameter_abi"] = ui_channel == sunshine_game3d::ui_mask_channel::red ? "sunshine_game3d.ui_parameters.v7" : ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction ? "sunshine_game3d.ui_parameters.v6" :
       ui_plane.mode == sunshine_game3d::ui_plane_mode::shallow_front ? "sunshine_game3d.ui_parameters.v5" :
       ui_plane.mode == sunshine_game3d::ui_plane_mode::front_limit ? "sunshine_game3d.ui_parameters.v4" :
       ui_plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui ?
@@ -567,12 +581,25 @@ int main(int argc, char **argv) {
       ui_source = fixture.upload(a, read_artifact(directory, a));
       checked(fixture.device->CreateShaderResourceView(ui_source.Get(), nullptr, &ui_source_view), "Create exact consumed UI-alpha SRV");
     }
-    require(renderer.render(queue->get_immediate_command_list(), backbuffer, {reinterpret_cast<std::uint64_t>(depth_view.Get())}, parameters, protect_ui, {reinterpret_cast<std::uint64_t>(ui_source_view.Get())}, ui_plane), "Production renderer rejected replay");
+    sunshine_game3d::render_frame_input frame;
+    frame.color = backbuffer;
+    frame.depth = {reinterpret_cast<std::uint64_t>(depth_view.Get())};
+    frame.scene = parameters;
+    frame.ui.view = {reinterpret_cast<std::uint64_t>(ui_source_view.Get())};
+    frame.ui.plane = ui_plane;
+    frame.ui.channel = ui_channel;
+    if (protect_ui) {
+      frame.ui.kind = ui_channel == sunshine_game3d::ui_mask_channel::red ?
+        sunshine_game3d::ui_input_kind::dedicated_mask :
+        ui_alpha_source == "ui_source_color" ? sunshine_game3d::ui_input_kind::captured_color_alpha :
+        sunshine_game3d::ui_input_kind::current_color_alpha;
+    }
+    require(renderer.render(queue->get_immediate_command_list(), frame), "Production renderer rejected replay");
     const auto consumed_ui = renderer.consumed_ui_plane();
-    const auto consumed_ui_words = sunshine_game3d::ui_parameter_words(renderer.consumed_source_alpha_ui(), consumed_ui);
-    require(consumed_ui_words == sunshine_game3d::ui_parameter_words(protect_ui, ui_plane), "Renderer changed the submitted UI constants");
+    const auto consumed_ui_words = sunshine_game3d::ui_parameter_words(renderer.consumed_source_alpha_ui(), consumed_ui, renderer.consumed_ui_channel());
+    require(consumed_ui_words == sunshine_game3d::ui_parameter_words(protect_ui, ui_plane, ui_channel), "Renderer changed the submitted UI constants");
     report["ui_parameter_hex"] = replay::hex(consumed_ui_words.data(), sizeof(consumed_ui_words));
-    report["applied_ui_plane"] = describe_ui(renderer.consumed_source_alpha_ui(), consumed_ui);
+    report["applied_ui_plane"] = describe_ui(renderer.consumed_source_alpha_ui(), consumed_ui, renderer.consumed_ui_channel());
     queue->flush_immediate_command_list();
     renderer.finish_present();
     queue->wait_idle();

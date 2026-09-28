@@ -16,11 +16,13 @@ namespace sunshine_game3d::ui_resources {
     role content;
     unsigned tag_type;
     const char *parameter_key;
+    const char *parameter_subrect_prefix = nullptr;
   };
 
   // SDK authority: NVIDIA-RTX/Streamline include/sl_core_types.h (2026-09-19)
   // and NVIDIA/DLSS 374959484e79a640feaba44c93ac8cfb0a03f5b5
-  // include/nvsdk_ngx_defs.h. IDs are dump identities, not SDK enum values.
+  // include/nvsdk_ngx_defs.h and nvsdk_ngx_defs_dlssg.h.
+  // IDs are dump identities, not SDK enum values.
   // A catalog entry proves neither runtime availability nor a usable HUD mask.
   // Transfer functions and rectangles belong to each captured observation.
   inline constexpr descriptor catalog[] {
@@ -48,6 +50,10 @@ namespace sunshine_game3d::ui_resources {
     {30, provider::streamline, "TransparencyLayer", "sl_transparency_layer", "transparent_effect_color_not_ui_layer", role::color_alpha, 51, nullptr},
     {31, provider::streamline, "TransparencyLayerOpacity", "sl_transparency_layer_opacity", "transparent_effect_opacity_not_ui_mask", role::alpha, 52, nullptr},
     {32, provider::streamline, "Backbuffer", "sl_backbuffer", "final_game_color_before_fg_candidate_not_verified_ui_mask", role::color_alpha, 53, nullptr},
+    {34, provider::ngx, "HUDLess", "ngx_hudless_color", "color_without_ui", role::color, UINT32_MAX, "DLSSG.HUDLess", "DLSSG.HUDLessSubrect"},
+    {35, provider::ngx, "UI", "ngx_ui_color_alpha", "ui_color_and_alpha", role::color_alpha, UINT32_MAX, "DLSSG.UI", "DLSSG.UISubrect"},
+    {36, provider::ngx, "UIAlpha", "ngx_ui_alpha", "ui_alpha", role::alpha, UINT32_MAX, "DLSSG.UIAlpha", "DLSSG.UIAlphaSubrect"},
+    {37, provider::ngx, "Backbuffer", "ngx_backbuffer", "final_game_color_before_fg_candidate_not_verified_ui_mask", role::color_alpha, UINT32_MAX, "DLSSG.Backbuffer", "DLSSG.InputBackbufferSubrect"},
   };
   inline constexpr const descriptor *find(unsigned id) noexcept {
     for (const auto &entry : catalog) if (entry.artifact_id == id) return &entry;

@@ -51,6 +51,8 @@ namespace sunshine_game3d_test {
       texture->GetDesc(&desc);
       const unsigned bpp = desc.Format == DXGI_FORMAT_R32G32B32A32_FLOAT                                            ? 16 :
                            desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || desc.Format == DXGI_FORMAT_R32G32_FLOAT ? 8 :
+                           desc.Format == DXGI_FORMAT_R16_FLOAT || desc.Format == DXGI_FORMAT_R16_UNORM           ? 2 :
+                           desc.Format == DXGI_FORMAT_R8_UNORM                                                    ? 1 :
                                                                                                                       4;
       desc.Usage = D3D11_USAGE_STAGING;
       desc.BindFlags = desc.MiscFlags = 0;
@@ -111,6 +113,7 @@ namespace sunshine_game3d_test {
       frame_.parameters = renderer.consumed_parameters();
       frame_.source_alpha_ui = renderer.consumed_source_alpha_ui();
       frame_.ui_plane = renderer.consumed_ui_plane();
+      frame_.ui_channel = renderer.consumed_ui_channel();
       if (frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction)
         frame_.ui_adaptive = renderer.consumed_ui_adaptive();
       frame_.resources = renderer.diagnostics();
@@ -135,10 +138,28 @@ namespace sunshine_game3d_test {
       d.provided.sequence = 71;
       d.provided.tick = 54321;
       d.provided.epoch = 13;
+      const bool linear = frame_.parameters.coordinate_basis == 2;
+      d.projection.encoding = linear ? sunshine_scene_depth::depth_encoding::linear_distance :
+        sunshine_scene_depth::depth_encoding::device;
+      d.provided.projection.encoding = d.projection.encoding;
+      d.projection.supplied = frame_.parameters.coordinate_basis == 0 && frame_.parameters.camera_ready;
+      d.provided.projection.supplied = d.projection.supplied;
+      if (linear) {
+        d.projection.raw_scale = frame_.parameters.projection[1];
+        d.projection.raw_bias = -double(frame_.parameters.projection[0]) * frame_.parameters.projection[1];
+        d.provided.projection.raw_scale = d.projection.raw_scale;
+        d.provided.projection.raw_bias = d.projection.raw_bias;
+      } else if (d.projection.supplied) {
+        d.projection.A = frame_.parameters.projection[0];
+        d.projection.B = 1. / frame_.parameters.projection[1];
+        d.provided.projection.depth_offset = d.projection.A;
+        d.provided.projection.depth_scale = d.projection.B;
+      }
       // Supply distinct diagnostic targets to exercise metadata transport;
       // this renderer fixture does not run or impersonate the scene policy.
       auto &scale = frame_.scene_status.scale;
-      scale.basis = p.camera_ready ? sunshine_game3d::automatic_scale_basis::camera_matrix :
+      scale.basis = linear ? sunshine_game3d::automatic_scale_basis::linear_distance :
+        d.projection.supplied ? sunshine_game3d::automatic_scale_basis::camera_matrix :
         sunshine_game3d::automatic_scale_basis::relative_depth;
       scale.value = p.depth_scale > 0.f ? p.depth_scale : 1.f;
       scale.active = d.ready;
@@ -204,9 +225,16 @@ namespace sunshine_game3d_test {
       check(response.runtime_epoch == 37 && response.export_generation == 43 && response.export_sequence == frame_.export_sequence, "Diagnostic render/export identity changed while pending");
       const auto json = nlohmann::json::parse(std::string(shared_->json, response.json_bytes));
       check(json.at("consumed_depth").at("provider_sequence") == 71 && json.at("consumed_depth").at("reused_depth") == frame_.depth.reused_depth && json.at("render_parameters").at("strength") == frame_.parameters.strength, "Dump lost its captured depth lineage or render parameters");
+      const auto &projection = json.at("consumed_depth").at("projection");
+      check(projection.at("supplied") == frame_.depth.projection.supplied &&
+        projection.at("encoding") == (frame_.depth.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance ?
+          "linear_distance" : "device"), "Dump lost its supplied-camera/linear-encoding distinction");
       check(json.at("overlay_included") == false, "Pre-overlay dump mislabeled");
       const auto &policy = json.at("render_scene_policy");
       const auto &scale = frame_.scene_status.scale;
+      check(policy.at("basis") == (scale.basis == sunshine_game3d::automatic_scale_basis::linear_distance ? "linear_distance" :
+        scale.basis == sunshine_game3d::automatic_scale_basis::camera_matrix ? "camera_matrix" : "relative_depth"),
+        "Dump changed the scene calibration basis");
       check(policy.at("zero_tracking").at("time_constant_seconds") == sunshine_camera_scene::time_constant_seconds &&
         policy.at("zero_tracking").at("zero_budget_per_second") == sunshine_scene_gain::zero_budget_per_second,
         "Dump zero tracking constants differ from the production policy");
@@ -216,9 +244,10 @@ namespace sunshine_game3d_test {
       check(policy.at("target_scale") == (scale.has_target() ? nlohmann::json(scale.target_value) : nlohmann::json(nullptr)),
         "Dump invented a gain target for held or positive-flat evidence");
       if (scale.has_zero_target()) {
-        const bool camera = scale.basis == sunshine_game3d::automatic_scale_basis::camera_matrix;
+        const bool distance = scale.basis == sunshine_game3d::automatic_scale_basis::camera_matrix ||
+          scale.basis == sunshine_game3d::automatic_scale_basis::linear_distance;
         check(policy.at("target_zero_inverse") == scale.target_zero_inverse &&
-          policy.at("target_zero_plane") == (camera ? 1. / scale.target_zero_inverse : scale.target_zero_inverse) &&
+          policy.at("target_zero_plane") == (distance ? 1. / scale.target_zero_inverse : scale.target_zero_inverse) &&
           policy.at("depth_statistics").at("mean_q") == scale.mean_inverse,
           "Dump lost the accepted midpoint target or confused it with the diagnostic mean");
       } else {
@@ -237,15 +266,17 @@ namespace sunshine_game3d_test {
       check(replay.at("parameter_bytes") == sizeof(frame_.parameters) && hex.size() == sizeof(frame_.parameters) * 2, "Replay constants do not describe the complete ABI");
       const auto *constant_bytes = reinterpret_cast<const unsigned char *>(&frame_.parameters);
       constexpr char digits[] = "0123456789abcdef";
-      const auto ui_words = sunshine_game3d::ui_parameter_words(frame_.source_alpha_ui, frame_.ui_plane);
+      const auto ui_words = sunshine_game3d::ui_parameter_words(frame_.source_alpha_ui, frame_.ui_plane, frame_.ui_channel);
       const auto ui_hex = replay.at("ui_parameter_hex").get<std::string>();
       const bool nearest_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui;
       const bool front_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::front_limit;
       const bool shallow_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::shallow_front;
       const bool fraction_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction;
-      check(replay.at("ui_parameter_abi") == (fraction_plane ? "sunshine_game3d.ui_parameters.v6" : shallow_plane ? "sunshine_game3d.ui_parameters.v5" : front_plane ? "sunshine_game3d.ui_parameters.v4" : nearest_plane ? "sunshine_game3d.ui_parameters.v3" : "sunshine_game3d.ui_parameters.v2") &&
+      check(replay.at("ui_parameter_abi") == "sunshine_game3d.ui_parameters.v7" &&
           replay.at("ui_parameter_bytes") == sizeof(ui_words) && ui_hex.size() == sizeof(ui_words) * 2 &&
-          replay.at("ui_constant_binding").at("uint32") == ui_words,
+          replay.at("ui_constant_binding").at("uint32") == ui_words &&
+          replay.at("ui_constant_binding").at("mask_channel") ==
+            (frame_.ui_channel == sunshine_game3d::ui_mask_channel::red ? "red" : "alpha"),
         "Dump lost exact consumed independent UI plane words");
       check(replay.at("ui_plane_resolution").at("reduction_ran") == bool(frame_.resources.ui_plane_resolved.handle) &&
           replay.at("ui_plane_resolution").at("inverse_depth_role") == (fraction_plane || shallow_plane || front_plane || frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::screen ? "unused" : nearest_plane ? "midpoint_floor" : "explicit_plane"),

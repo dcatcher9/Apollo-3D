@@ -3,6 +3,7 @@
 
 #include "camera_scene_policy.h"
 #include "projection_depth_scale.h"
+#include "scene_depth_source.h"
 #include "scene_gain.h"
 
 namespace sunshine_projection_depth {
@@ -11,7 +12,13 @@ namespace sunshine_projection_depth {
   struct domain {
     std::uint64_t epoch{};
     std::uint32_t viewport{};
-    bool operator==(const domain &other) const noexcept { return epoch == other.epoch && viewport == other.viewport; }
+    sunshine_scene_depth::depth_encoding encoding{sunshine_scene_depth::depth_encoding::device};
+    sunshine_scene_depth::provider_kind provider{sunshine_scene_depth::provider_kind::streamline};
+    std::uint64_t source_id{};
+    bool operator==(const domain &other) const noexcept {
+      return epoch == other.epoch && viewport == other.viewport && encoding == other.encoding &&
+        provider == other.provider && source_id == other.source_id;
+    }
   };
   struct sample {
     std::uint64_t id{}, capture_ms{};
@@ -92,7 +99,7 @@ namespace sunshine_projection_depth {
       if (!value.id || !gain_.accepts(value.feedback) || value.capture_ms > now_ms || value.capture_ms < capture_floor_ms_ ||
           (strict_floor_ && value.capture_ms == capture_floor_ms_) || now_ms-value.capture_ms >= timing::target_expiry_ms ||
           (have_sample_ && (value.id <= last_id_ || value.capture_ms <= last_capture_ms_))) return center_status::stale_sample;
-      if (!value.projection.valid()) return center_status::invalid_projection;
+      if (!value.projection.valid() || value.projection.encoding != domain_.encoding) return center_status::invalid_projection;
       have_sample_ = true;
       last_id_ = value.id;
       last_capture_ms_ = value.capture_ms;
@@ -102,7 +109,7 @@ namespace sunshine_projection_depth {
       }
       const auto range = sunshine_scene_gain::decode_range(value.raw, value.range_supplied,
         value.range_valid, value.range_min, value.range_max, value.projection.shader_A,
-        value.projection.inverseB, value.projection.raw_min, value.projection.raw_max, value.moments);
+        value.projection.inverseB, value.projection.raw_min, value.projection.raw_max, value.moments, value.projection.encoding);
       if (!range.valid()) {
         gain_.invalidate();
         return center_status::invalid_depth;
@@ -118,7 +125,7 @@ namespace sunshine_projection_depth {
     center_output evaluate(domain logical_domain, const coefficients &current, std::uint64_t now_ms) noexcept {
       if (!domain_.epoch || !(logical_domain == domain_)) { suspend(); return output(center_status::invalid_domain); }
       if (!advance(now_ms)) return output(center_status::clock_went_backwards);
-      if (!current.valid()) { suspend(); return output(center_status::invalid_projection); }
+      if (!current.valid() || current.encoding != domain_.encoding) { suspend(); return output(center_status::invalid_projection); }
       if (!gain_.initialized()) return output(center_status::waiting_for_center);
       // Progress the numerical plane before validating the current shader pair.
       // An unsupported old pair must not prevent convergence into a valid one.

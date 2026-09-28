@@ -16,14 +16,19 @@ namespace scene = sunshine_scene_depth;
 
 namespace {
   struct native_snapshot {
+    capture::input input;
+    capture::texture_state_policy state_policy{};
     capture::diagnostic_texture texture;
     capture::status status{capture::status::recorded};
     bool finished{}, success{}, released{};
   };
   std::map<std::uint64_t, native_snapshot> snapshots;
   std::uint64_t next_ticket{};
+  std::uint64_t present_generation = 4;
+  std::uint64_t local_consumer_queue{};
   unsigned records{}, releases{};
   bool fail_record{};
+  std::uint32_t record_format = 24;
   std::function<void()> during_record;
   std::function<void()> during_acquire;
   constexpr std::uint64_t device = 0x100, runtime = 0x200;
@@ -35,8 +40,37 @@ namespace {
   void reset() {
     mask::invalidate_all();
     snapshots.clear(); next_ticket = 0; records = releases = 0;
-    fail_record = false; during_record = {}; during_acquire = {};
+    fail_record = false; record_format = 24; present_generation = 4; local_consumer_queue = 0; during_record = {}; during_acquire = {};
     mask::set_request(request());
+  }
+  void gate_diagnostics_preserve_scope_mismatch_without_capture() {
+    reset();
+    auto wanted = request();
+    std::uint32_t matches{};
+    require(mask::interested(wanted.epoch, wanted.revision, wanted.viewport, &matches) && matches == 1,
+      "Gate diagnostics lost the unique request match");
+    mask::capture_gate_observation gate{mask::capture_gate::admitted, wanted.epoch, wanted.revision, 9, 1000,
+      wanted.viewport, mask::source_mask(mask::source_kind::hudless), matches};
+    mask::observe_gate(gate);
+    mask::diagnostic_snapshot observed;
+    require(mask::query_diagnostic(runtime, observed) && observed.hook_gate.sequence == 9 &&
+        !observed.latest_boundary.source.sequence && !records,
+      "Hook gate metadata fabricated a capture boundary or GPU work");
+    const auto generation = observed.request_generation;
+    ++wanted.revision; mask::set_request(wanted);
+    require(!mask::interested(gate.epoch, gate.revision, gate.viewport, &matches) && !matches,
+      "Gate diagnostics bypassed a mismatching observation scope");
+    gate.state = mask::capture_gate::no_matching_request; gate.matching_requests = matches; ++gate.sequence;
+    mask::observe_gate(gate);
+    auto older = gate; --older.sequence; older.state = mask::capture_gate::admitted;
+    mask::observe_gate(older);
+    require(mask::query_diagnostic(runtime, observed) && observed.request_generation > generation &&
+        observed.hook_gate.state == mask::capture_gate::no_matching_request &&
+        observed.hook_gate.revision != observed.wanted.revision && !observed.latest_boundary.source.sequence,
+      "Request replacement hid its rejected gate or an older callback rewound diagnostics");
+    auto other = wanted; ++other.runtime; mask::set_request(other);
+    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, &matches) && matches == 2,
+      "Gate diagnostics hid an ambiguous consumer request");
   }
   capture::input input(std::uint64_t sequence, std::uint64_t tick = 1000) {
     capture::input value;
@@ -47,9 +81,12 @@ namespace {
     value.valid_until = scene::lifetime::at_call; value.force_snapshot = true;
     value.frame_generation_input = true; value.source_frame_token = 123;
     value.source_frame_generation = 6; value.source_frame_numeric = 456; value.source_frame_has_numeric = true;
+    value.source_present_generation = present_generation;
     return value;
   }
-  mask::attempt begin(const capture::input &value) { return mask::begin({value, 0x300, 1}, value); }
+  mask::attempt begin(const capture::input &value, mask::source_kind kind = mask::source_kind::backbuffer) {
+    return mask::begin({value, 0x300, 1, kind}, value);
+  }
   mask::attempt capture_one(std::uint64_t sequence, std::uint64_t tick = 1000) {
     auto value = begin(input(sequence, tick)); mask::finish(value, true); return value;
   }
@@ -87,14 +124,14 @@ namespace {
 
   void bounded_pending() {
     reset(); auto first = capture_one(1); complete(first); selected(1);
-    auto second = capture_one(2, 1010); auto third = capture_one(3, 1020);
-    auto skipped = capture_one(4, 1030);
-    require(!skipped.ticket && skipped.runtime == runtime && records == 3 && releases == 0,
+    auto second = capture_one(2, 1010);
+    auto skipped = capture_one(3, 1030);
+    require(!skipped.ticket && skipped.runtime == runtime && records == 2 && releases == 0,
       "full owner evicted a pending snapshot or allocated unbounded work");
     selected(1, 1031);
     complete(second); selected(2, 1031);
-    auto fourth = capture_one(5, 1040);
-    require(fourth.ticket && records == 4 && !snapshots.at(third.ticket.id).released,
+    auto third = capture_one(4, 1040);
+    require(third.ticket && records == 3 && !snapshots.at(second.ticket.id).released,
       "completed replacement did not free bounded capacity without evicting pending work");
   }
 
@@ -229,7 +266,7 @@ namespace {
     reset(); capture_one(1); capture_one(2, 1010); capture_one(3, 1020);
     capture_one(4, 1030);
     require(mask::query_diagnostic(runtime, report) && report.latest_boundary.source.sequence == 4 &&
-      !report.record_attempted && report.sdk_result_known && records == 3,
+      !report.record_attempted && report.sdk_result_known && records == 2,
       "owner capacity skip was mislabeled as a native capture rejection");
   }
 
@@ -271,8 +308,11 @@ namespace {
     auto source = input(1);
     std::weak_ptr<const capture::source_reference> source_lifetime = source.source;
     auto attempt = begin(source); mask::finish(attempt, true); source.source.reset();
-    require(source_lifetime.expired() && mask::query_diagnostic(runtime, report),
-      "diagnostic metadata retained an application source COM lease");
+    require(!source_lifetime.expired() && mask::query_diagnostic(runtime, report),
+      "live candidate did not retain source present-generation identity");
+    mask::invalidate(runtime);
+    require(source_lifetime.expired() && report.latest_boundary.source.sequence,
+      "plain diagnostic metadata retained a revoked application source COM lease");
   }
 
   void diagnostic_in_flight_is_not_a_rejection() {
@@ -381,18 +421,225 @@ namespace {
     require(next.ticket && records == 2, "Backwards callback poisoned later capture recovery");
     complete(next); selected(4, 3001);
   }
+
+  void dedicated_kind_format_and_provenance() {
+    for (auto format : {41u, 54u, 56u, 61u}) {
+      reset(); record_format = format;
+      auto alpha = begin(input(1), mask::source_kind::alpha); mask::finish(alpha, true); complete(alpha);
+      const auto value = selected(1);
+      require(value.origin.kind == mask::source_kind::alpha && value.texture.format == format,
+        "Single-channel UIAlpha lost its explicit tag semantics or exact format");
+    }
+    for (auto format : {2u, 10u, 24u, 28u, 29u, 87u, 91u}) {
+      reset(); record_format = format;
+      auto color = begin(input(1), mask::source_kind::color_and_alpha); mask::finish(color, true); complete(color);
+      require(selected(1).origin.kind == mask::source_kind::color_and_alpha,
+        "Dedicated UI color lost its alpha-channel semantics");
+    }
+    for (auto kind : {mask::source_kind::alpha, mask::source_kind::color_and_alpha}) {
+      reset(); record_format = kind == mask::source_kind::alpha ? 24 : 61;
+      auto wrong = begin(input(1), kind); mask::finish(wrong, true); complete(wrong); absent();
+      require(snapshots.at(wrong.ticket.id).released, "UI kind guessed a mask channel from an incompatible format");
+    }
+    reset();
+    require(!begin(input(1), static_cast<mask::source_kind>(54)).runtime && !records,
+      "A non-UI Streamline resource entered the live mask owner");
+  }
+
+  void dedicated_preference_and_same_batch_fallback() {
+    reset(); auto back = capture_one(1); complete(back);
+    auto color = begin(input(2, 1010), mask::source_kind::color_and_alpha); mask::finish(color, true);
+    selected(1, 1011); // Ready lower-priority pixels survive a preferred pending copy.
+    auto second_back = capture_one(3, 1020);
+    require(second_back.ticket && records == 3, "Preferred candidate blocked independent backbuffer acquisition");
+    complete(color); selected(2, 1021);
+    record_format = 61;
+    auto alpha = begin(input(4, 1030), mask::source_kind::alpha); mask::finish(alpha, true);
+    record_format = 24;
+    auto second_color = begin(input(4, 1030), mask::source_kind::color_and_alpha); mask::finish(second_color, true);
+    require(second_color.ticket && records == 5, "Same-batch preferred candidate starved an independently validated UI source");
+    complete(second_color);
+    complete(alpha); selected(4, 1031);
+    mask::selection independent;
+    require(mask::acquire_kind(runtime, mask::source_kind::color_and_alpha, independent, 1031) &&
+        independent.ticket.id == second_color.ticket.id &&
+        mask::acquire_kind(runtime, mask::source_kind::backbuffer, independent, 1031) && independent.ticket.id == back.ticket.id,
+      "Default priority selection retired a valid lower candidate");
+    auto null_back = input(5, 1040); null_back.resource.native = 0; null_back.source = {};
+    auto unrelated = begin(null_back); mask::finish(unrelated, true); selected(4, 1041);
+    auto null_alpha = input(6, 1050); null_alpha.resource.native = 0; null_alpha.source = {};
+    auto revoked = begin(null_alpha, mask::source_kind::alpha);
+    record_format = 24;
+    auto fallback = begin(input(6, 1050), mask::source_kind::color_and_alpha);
+    mask::finish(revoked, false); mask::finish(fallback, true); complete(fallback);
+    require(selected(6, 1051).origin.kind == mask::source_kind::color_and_alpha,
+      "Null preferred tag or its delayed completion erased same-batch valid fallback");
+    auto low = capture_one(7, 1300); complete(low);
+    require(selected(7, 1301).origin.kind == mask::source_kind::backbuffer,
+      "Expired dedicated input permanently suppressed the ordinary real backbuffer");
+
+    reset(); fail_record = true;
+    auto rejected = begin(input(1), mask::source_kind::alpha);
+    fail_record = false;
+    auto usable = begin(input(1), mask::source_kind::color_and_alpha);
+    mask::finish(rejected, true); mask::finish(usable, true); complete(usable);
+    selected(1);
+    require(records == 2 && !rejected.ticket && usable.ticket,
+      "Native rejection of preferred UI blocked a valid same-call alternative");
+  }
+
+  void hudless_independent_capacity_and_pairing_provenance() {
+    reset(); record_format = 61;
+    auto alpha = begin(input(1), mask::source_kind::alpha); mask::finish(alpha, true); complete(alpha);
+    auto pending_alpha = begin(input(2, 1010), mask::source_kind::alpha); mask::finish(pending_alpha, true);
+    require(!begin(input(3, 1020), mask::source_kind::alpha).ticket, "Alpha exceeded its independent two-slot limit");
+    record_format = 24;
+    auto source = input(3, 1020); source.frame_generation_input = false;
+    auto hudless = begin(source, mask::source_kind::hudless); mask::finish(hudless, true); complete(hudless);
+    mask::selection chosen;
+    require(mask::acquire_kind(runtime, mask::source_kind::hudless, chosen, 1021) && chosen.ticket.id == hudless.ticket.id &&
+        chosen.origin.kind == mask::source_kind::hudless && !chosen.origin.source.frame_generation_input &&
+        chosen.origin.source.source_frame_token == source.source_frame_token && chosen.origin.tag_scope == 1 &&
+        chosen.origin.source_present_generation == 4 && chosen.current_source_present_generation == 4,
+      "Full alpha queue starved FG-off HUD-less capture or erased its exact pairing provenance");
+    ++present_generation;
+    require(mask::acquire_kind(runtime, mask::source_kind::hudless, chosen, 1022) &&
+        chosen.origin.source_present_generation == 4 && chosen.current_source_present_generation == 5,
+      "Current Present mutation rewrote frozen HUD-less tag provenance");
+    selected(1, 1022); // Availability ranking cannot consume or suppress HUD-less.
+    auto next = begin(input(4, 1030), mask::source_kind::hudless); mask::finish(next, true);
+    auto full = begin(input(5, 1040), mask::source_kind::hudless); mask::finish(full, true);
+    require(next.ticket && !full.ticket && records == 4 &&
+        mask::acquire_kind(runtime, mask::source_kind::hudless, chosen, 1041) && chosen.ticket.id == hudless.ticket.id,
+      "HUD-less latest-ready plus pending capacity was unbounded or lost its ready snapshot");
+    mask::finish(next, false);
+    require(!mask::acquire_kind(runtime, mask::source_kind::hudless, chosen, 1042) &&
+        mask::acquire_kind(runtime, mask::source_kind::alpha, chosen, 1042),
+      "Failed HUD-less source retained earlier comparison pixels or revoked unrelated alpha");
+  }
+
+  void local_queue_acquisition_preserves_current_candidate() {
+    reset(); auto source = input(1); source.frame_generation_input = false;
+    const auto captured = begin(source, mask::source_kind::hudless); mask::finish(captured, true);
+    snapshots.at(captured.ticket.id).status = capture::status::submitted;
+    mask::selection chosen;
+    require(!mask::acquire_kind(runtime, mask::source_kind::hudless, chosen, 1001),
+      "Strict diagnostic acquisition exposed an unfinished GPU snapshot");
+    require(mask::acquire_kind(runtime, mask::source_kind::hudless, chosen, 1001, 0x900) &&
+        local_consumer_queue == 0x900 && chosen.ticket.id == captured.ticket.id &&
+        !snapshots.at(captured.ticket.id).released,
+      "UI owner failed to use queue-ordered local acquisition for its current candidate");
+  }
+
+  void dedicated_masks_survive_heuristic_auto_off_without_extra_backbuffer_work() {
+    reset(); auto sparse = request(); sparse.min_capture_interval_ms = 1000; mask::set_request(sparse);
+    auto back = capture_one(1); complete(back);
+    record_format = 61;
+    auto alpha = begin(input(2, 1010), mask::source_kind::alpha); mask::finish(alpha, true); complete(alpha);
+    selected(2, 1011);
+    sparse.capture_backbuffer = false; mask::set_request(sparse);
+    require(!begin(input(3, 1020)).runtime && records == 2,
+      "Dedicated-only Auto-Off request continued copying unqualified backbuffer alpha");
+    auto next = begin(input(4, 1030), mask::source_kind::alpha); mask::finish(next, true); complete(next);
+    require(next.ticket && selected(4, 1031).origin.kind == mask::source_kind::alpha,
+      "Backbuffer probe cadence or Auto-Off disabled an explicitly tagged UI mask");
+  }
+
+  void explicit_source_filter_prevents_higher_priority_starvation() {
+    reset();
+    auto wanted = request(); wanted.allowed_kinds = mask::source_mask(mask::source_kind::backbuffer);
+    mask::set_request(wanted);
+    require(mask::interested(7, 3, 11), "Explicit backbuffer filter disabled capture");
+    require(!begin(input(99), mask::source_kind::alpha).runtime &&
+      !begin(input(99), mask::source_kind::color_and_alpha).runtime && records == 0,
+      "Unselected higher-priority mask allocated or reserved capture work");
+    // An ignored high sequence must not prevent the selected source's next call.
+    auto back = capture_one(1); complete(back);
+    require(selected(1).origin.kind == mask::source_kind::backbuffer,
+      "Selected backbuffer was starved by an unselected dedicated source");
+    require(!begin(input(2, 1010), mask::source_kind::alpha).runtime && records == 1,
+      "Higher-priority tag displaced an explicitly selected backbuffer");
+    mask::set_request(wanted); selected(1);
+
+    for (const auto kind : {mask::source_kind::alpha, mask::source_kind::color_and_alpha}) {
+      reset(); wanted = request(); wanted.allowed_kinds = mask::source_mask(kind); mask::set_request(wanted);
+      require(!begin(input(1)).runtime && records == 0, "Dedicated source filter admitted backbuffer fallback");
+      record_format = kind == mask::source_kind::alpha ? 61 : 28;
+      auto captured = begin(input(1), kind); mask::finish(captured, true); complete(captured);
+      require(selected(1).origin.kind == kind, "Exact dedicated source filter did not admit its own input");
+    }
+    reset(); wanted = request(); wanted.allowed_kinds = 0; mask::set_request(wanted);
+    require(!mask::interested(7, 3, 11) && !begin(input(1)).runtime && records == 0,
+      "Empty source filter admitted capture work");
+    wanted.allowed_kinds = 0x80000000u; mask::set_request(wanted);
+    require(!mask::interested(7, 3, 11), "Unsupported source-mask bits enabled capture");
+  }
+
+  void source_filter_change_revokes_ready_pending_and_inflight_attempts() {
+    reset();
+    auto ready = capture_one(1); complete(ready); selected(1);
+    auto pending = begin(input(2, 1010));
+    auto wanted = request(); wanted.allowed_kinds = mask::source_mask(mask::source_kind::backbuffer);
+    mask::set_request(wanted);
+    require(snapshots.at(ready.ticket.id).released && snapshots.at(pending.ticket.id).released,
+      "Source filter change retained completed or pending captures");
+    mask::finish(pending, true); complete(pending); absent(1011);
+    require(!snapshots.at(pending.ticket.id).success, "Stale completion after filter change revived old pixels");
+    auto fresh = capture_one(3, 1020); complete(fresh); selected(3, 1021);
+    mask::finish(ready, false); selected(3, 1021);
+
+    reset(); record_format = 61;
+    during_record = [] {
+      auto changed = request(); changed.allowed_kinds = mask::source_mask(mask::source_kind::backbuffer);
+      mask::set_request(changed);
+    };
+    auto stale = begin(input(1), mask::source_kind::alpha); mask::finish(stale, true);
+    require(records == 1 && releases == 1 && !snapshots.begin()->second.success,
+      "Native recording across a filter change published its old reservation");
+    absent(); record_format = 28;
+    auto back = capture_one(2, 1010); complete(back); selected(2, 1011);
+    require(records == 2, "Canceled higher-priority work starved selected backbuffer after filter change");
+  }
+
+  void declared_lifetimes_preserve_state_policy() {
+    for (const auto kind : {mask::source_kind::backbuffer, mask::source_kind::color_and_alpha, mask::source_kind::alpha, mask::source_kind::hudless}) {
+      for (const auto lifetime : {scene::lifetime::at_call, scene::lifetime::until_present, scene::lifetime::until_evaluation}) {
+        reset(); record_format = kind == mask::source_kind::alpha ? 61 : 28;
+        auto source = input(1); source.valid_until = lifetime; source.native_state = 128;
+        auto captured = begin(source, kind);
+        require(bool(captured.ticket), "Supported declared UI lifetime did not reach native capture");
+        const auto &recorded = snapshots.at(captured.ticket.id);
+        require(recorded.input.valid_until == lifetime && recorded.input.native_state == source.native_state &&
+            recorded.input.proof == source.proof && recorded.input.force_snapshot &&
+            recorded.state_policy == (lifetime == scene::lifetime::at_call ?
+              capture::texture_state_policy::prefer_observed_recording : capture::texture_state_policy::source_contract),
+          "Live UI snapshot rewrote lifetime/state provenance or selected the wrong state policy");
+        mask::finish(captured, true); complete(captured);
+        const auto chosen = selected(1);
+        require(chosen.origin.kind == kind && chosen.origin.source.valid_until == lifetime,
+          "Selected UI snapshot lost its original declared lifetime");
+        source.sequence = 2; source.valid_until = scene::lifetime::unsupported;
+        const auto invalid = begin(source, kind); mask::finish(invalid, true);
+        require(!invalid.ticket && records == 1, "Unsupported UI lifetime reached native capture");
+        absent();
+      }
+    }
+  }
 }
 
 namespace sunshine_streamline::depth_capture {
+  std::uint64_t source_present_generation(const source_ref &source) { return source ? present_generation : 0; }
   diagnostic_ticket record_local_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic,
-      local_texture_state_policy state_policy) {
-    require(state_policy == local_texture_state_policy::prefer_observed_recording && value.frame_generation_input &&
-      value.valid_until == scene::lifetime::at_call && value.force_snapshot,
-      "Live UI owner did not prefer observed-recording state for its synchronous FG input");
+      texture_state_policy state_policy) {
+    require(value.force_snapshot &&
+      state_policy == (value.valid_until == scene::lifetime::at_call ?
+        texture_state_policy::prefer_observed_recording : texture_state_policy::source_contract),
+      "Live UI owner changed source lifetime or state-policy scope");
     ++records;
     if (diagnostic) {
       *diagnostic = {};
       diagnostic->command = command; diagnostic->resource = value.resource.native;
+      diagnostic->format = record_format;
       diagnostic->native_state = value.native_state; diagnostic->observed_state = 128;
       diagnostic->observed = true; diagnostic->recording_cookie = 0xc00 + value.sequence;
       diagnostic->result = fail_record ? status::conflicting_state : status::recorded;
@@ -405,10 +652,11 @@ namespace sunshine_streamline::depth_capture {
     const auto id = ++next_ticket;
     auto lease = std::shared_ptr<const texture_reference>(reinterpret_cast<const texture_reference *>(id), [](auto *) {});
     auto &snapshot = snapshots[id];
+    snapshot.input = value; snapshot.input.source.reset(); snapshot.state_policy = state_policy;
     snapshot.texture.ownership = lease; snapshot.texture.texture = 0x500 + id;
     snapshot.texture.device = device; snapshot.texture.device_identity = device;
     snapshot.texture.width = value.resource.width; snapshot.texture.height = value.resource.height;
-    snapshot.texture.area = value.resource.area; snapshot.texture.format = 24; snapshot.texture.capture_id = id;
+    snapshot.texture.area = value.resource.area; snapshot.texture.format = record_format; snapshot.texture.capture_id = id;
     if (during_record) { auto callback = std::move(during_record); callback(); }
     return {id, std::move(lease)};
   }
@@ -424,6 +672,12 @@ namespace sunshine_streamline::depth_capture {
     if (snapshot.status == status::ready) out = snapshot.texture;
     return snapshot.status;
   }
+  status acquire_local_texture(const diagnostic_ticket &ticket, std::uint64_t consumer_queue, diagnostic_texture &out) {
+    local_consumer_queue = consumer_queue;
+    const auto state = acquire_diagnostic_texture(ticket, out);
+    if (state == status::submitted && consumer_queue == 0x900) { out = snapshots.at(ticket.id).texture; return status::ready; }
+    return state;
+  }
   void release_diagnostic_texture(const diagnostic_ticket &ticket) {
     auto &snapshot = snapshots.at(ticket.id);
     require(!snapshot.released, "owner released one ticket twice");
@@ -434,7 +688,8 @@ namespace sunshine_streamline::depth_capture {
 int main() {
   try {
     completed_and_pending(); std::puts("PASS completed real alpha, exact provenance, pending hold, unchanged request and fixed age");
-    bounded_pending(); std::puts("PASS three-slot bound preserves pending GPU work and replaces only completed old snapshots");
+    bounded_pending(); std::puts("PASS per-source two-slot bound preserves pending GPU work and replaces only completed old snapshots");
+    gate_diagnostics_preserve_scope_mismatch_without_capture(); std::puts("PASS bounded hook gate metadata preserves exact request mismatches without authorizing capture");
     revoke_scopes(); std::puts("PASS epoch/revision/device/viewport/size/off/runtime and in-flight invalidation");
     reservation_race(); std::puts("PASS collect versus in-flight native-record publication preserves the pending reservation");
     invalid_tags_and_sdk_failure(); std::puts("PASS null/partial/unsupported tags, SDK failure, native transient failure and out-of-order calls");
@@ -446,6 +701,14 @@ int main() {
     sparse_capture_still_revokes_invalid_tags_and_sdk_failures(); std::puts("PASS sparse capture preserves invalid-tag and SDK-failure revocation");
     sparse_capture_reservation_bounds_concurrent_recording(); std::puts("PASS concurrent callbacks share the sparse capture reservation");
     sparse_capture_backwards_ticks_do_not_extend_the_cadence(); std::puts("PASS backwards source ticks cannot bypass or extend sparse capture cadence");
+    dedicated_kind_format_and_provenance(); std::puts("PASS typed dedicated UI alpha/color formats and exact tag semantics");
+    dedicated_preference_and_same_batch_fallback(); std::puts("PASS independent UI candidates retain lower sources through priority selection and same-call null/native fallback");
+    hudless_independent_capacity_and_pairing_provenance(); std::puts("PASS bounded FG-off HUD-less capture and immutable tag/current presentation-generation provenance");
+    local_queue_acquisition_preserves_current_candidate(); std::puts("PASS explicit local consumer queue selects current submitted pixels without changing strict diagnostic acquisition");
+    dedicated_masks_survive_heuristic_auto_off_without_extra_backbuffer_work(); std::puts("PASS dedicated-only Auto-Off admission with no backbuffer copies or inherited probe cadence");
+    explicit_source_filter_prevents_higher_priority_starvation(); std::puts("PASS exact source filtering prevents unreviewed priority starvation and fallback");
+    source_filter_change_revokes_ready_pending_and_inflight_attempts(); std::puts("PASS source-filter changes revoke completed, pending and in-flight old reservations");
+    declared_lifetimes_preserve_state_policy(); std::puts("PASS UI tag lifetimes preserve provenance and choose observed-at-call or strict longer-lived state policy");
     mask::invalidate_all();
     return 0;
   } catch (const std::exception &error) {

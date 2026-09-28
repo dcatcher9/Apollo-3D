@@ -226,6 +226,114 @@ namespace {
     check(initial.fg.enabled && !initial.effective(), "Later mode changes mutated an already frozen presentation");
   }
 
+  void source_alpha_selection_reports_capture_prerequisite() {
+    using choice = ui_qualification::choice;
+    using block = source_alpha_capture_block;
+    source_alpha_ui_decision value;
+    for (const auto selected : {choice::sl_ui_alpha, choice::sl_ui_color_alpha, choice::sl_backbuffer, choice::sl_hudless}) {
+      value.qualification.selected = selected;
+      for (bool known : {false, true}) for (bool enabled : {false, true}) {
+        value.fg = {}; value.fg.known = known; value.fg.enabled = enabled;
+        check(source_alpha_capture_block_for(selected, value.fg) == block::none &&
+            std::string_view(value.source_availability()) == "source_unavailable" &&
+            std::string_view(source_alpha_detection_text(value.qualification, value)).find("Finding a usable UI source") != std::string_view::npos,
+          "Captured Streamline source incorrectly required Frame Generation or looked ready before capture");
+      }
+    }
+    value.qualification.selected = choice::current_color;
+    value.fg.known = value.fg.enabled = true;
+    check(source_alpha_capture_block_for(choice::current_color, value.fg) == block::generated_current_color &&
+        std::string_view(source_alpha_detection_text(value.qualification, value)).find("unavailable during Frame Generation") != std::string_view::npos,
+      "Generated current-color alpha was offered as a real UI source");
+    value.fg = {};
+    for (const auto selected : {choice::automatic, choice::current_color}) {
+      value.qualification.selected = selected;
+      for (bool known : {false, true}) {
+        value.fg = {}; value.fg.known = known;
+        check(source_alpha_capture_block_for(selected, value.fg) == block::none &&
+            std::string_view(value.source_availability()) == "source_unavailable",
+          "Current color discovery incorrectly required enabled FG");
+      }
+    }
+    value.qualification.available = true;
+    check(std::string_view(value.source_availability()) == "checking_quality" &&
+        std::string_view(source_alpha_detection_text(value.qualification, value)) == "Checking source quality",
+      "Pending diagnostic feedback claimed the current GPU mask was off");
+    value.coverage.state = alpha_auto_state::automatic_off;
+    check(std::string_view(value.source_availability()) == "quality_rejected" &&
+        std::string_view(source_alpha_detection_text(value.qualification, value)) == "No usable UI mask detected",
+      "Completed quality feedback claimed to control the current GPU mask");
+    value.coverage.state = alpha_auto_state::automatic_on;
+    value.coverage.enabled = true;
+    check(std::string_view(value.source_availability()) == "detected" &&
+        std::string_view(source_alpha_detection_text(value.qualification, value)).find("detected automatically") != std::string_view::npos,
+      "Automatic detection still required a human approval flag");
+    auto replacement = value.qualification;
+    replacement.candidate.revision++;
+    check(std::string_view(source_alpha_detection_text(replacement, value)) == "Checking source quality",
+      "A replacement source inherited the previous source's automatic detection status");
+    value.qualification.available = false;
+    check(std::string_view(value.source_availability()) == "source_unavailable" &&
+        std::string_view(source_alpha_detection_text(value.qualification, value)).find("Finding a usable UI source") != std::string_view::npos,
+      "An automatically detected source with lost pixels was still described as available");
+  }
+
+  void source_alpha_applied_status_is_transient_and_mode_scoped() {
+    alpha_auto_policy session(1000);
+    const auto generic = session.decision(1000 + alpha_startup_window_ms);
+    check(generic.state == alpha_auto_state::automatic_off && !generic.enabled && !generic.monitoring,
+      "Status regression did not begin with a frozen generic Auto Off decision");
+    source_alpha_ui_decision presented;
+    presented.mode = source_alpha_mode::automatic;
+    presented.automatic = presented.requested = presented.retained_alpha_ready = true;
+    presented.fg = {true, true, false, 1, 0, 7, 41};
+    presented.coverage = generic;
+    presented.coverage.enabled = true;
+    presented.coverage.state = alpha_auto_state::dedicated_ui;
+    presented.rendered = presented.applied = true;
+    for (const auto input : {source_alpha_input::sl_ui_color_alpha, source_alpha_input::sl_ui_alpha}) {
+      presented.input = input;
+      check(presented.dedicated_ui_active(source_alpha_mode::automatic, true),
+        "Frozen generic Auto Off hid an actually rendered dedicated UI mask");
+    }
+    const auto still_generic = session.decision(1001 + alpha_startup_window_ms);
+    check(still_generic.state == alpha_auto_state::automatic_off && !still_generic.enabled && !still_generic.monitoring,
+      "Showing a dedicated mask changed generic alpha qualification");
+
+    check(!presented.applied_for(source_alpha_mode::off, true) &&
+      !presented.dedicated_ui_active(source_alpha_mode::off, true) &&
+      !presented.dedicated_ui_active(source_alpha_mode::automatic, false),
+      "A previously rendered UI mask overrode a newly disabled setting");
+    check(!presented.dedicated_ui_active(source_alpha_mode::on, true),
+      "A mode edit reused the previous mode's rendered decision");
+    presented.mode = source_alpha_mode::on;
+    check(presented.applied_for(source_alpha_mode::on, true) &&
+      !presented.dedicated_ui_active(source_alpha_mode::automatic, true),
+      "Returning to Auto reused a manual On presentation");
+    presented.mode = source_alpha_mode::automatic;
+
+    auto next = presented;
+    next.rendered = false;
+    check(!next.applied_for(source_alpha_mode::automatic, true) &&
+      !next.dedicated_ui_active(source_alpha_mode::automatic, true),
+      "Available mask metadata reported protection after a failed render");
+    next = presented;
+    next.applied = false;
+    next.coverage = generic;
+    check(!next.dedicated_ui_active(source_alpha_mode::automatic, true),
+      "Unapplied input inherited the previous frame's dedicated status");
+    for (const auto input : {source_alpha_input::none, source_alpha_input::present_alpha, source_alpha_input::sl_backbuffer_alpha}) {
+      next = presented;
+      next.input = input;
+      check(!next.dedicated_ui_active(source_alpha_mode::automatic, true),
+        "A replacement generic input was mislabeled as a dedicated UI mask");
+    }
+    source_alpha_ui_decision missing;
+    check(!missing.applied_for(source_alpha_mode::automatic, true) &&
+      !missing.dedicated_ui_active(source_alpha_mode::automatic, true),
+      "Missing presentation evidence reported active UI protection");
+  }
+
   void persistence_survives_runtime_recreation() {
     fake_config first_config, other_config;
     settings_state first {load_settings(first_config)}, other {load_settings(other_config)};
@@ -503,6 +611,8 @@ int main() {
     source_alpha_mode_persistence_failure_does_not_commit();
     source_alpha_mode_edits_control_the_session_without_restarting_it();
     source_alpha_fg_mode_survives_observation_gaps();
+    source_alpha_selection_reports_capture_prerequisite();
+    source_alpha_applied_status_is_transient_and_mode_scoped();
     persistence_survives_runtime_recreation();
     config_failure_and_lifetime_do_not_commit_stale_values();
     output_status_distinguishes_flat_preview_and_stereo();

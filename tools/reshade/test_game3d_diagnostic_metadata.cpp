@@ -58,6 +58,88 @@ namespace {
     last_finished_source = source_id;
   }
   const d::resource_callbacks callbacks {observe_resource, observe_finish};
+
+  void test_sl_resource_type_admission() {
+    d::set_resource_callbacks(&callbacks);
+    for (const bool version_one : {false, true}) {
+      for (const auto type : {0u, 8u, 1u, UINT32_MAX}) {
+        arm_diagnostic_metadata(false); arm_diagnostic_metadata(true);
+        const auto at = stamp();
+        constexpr std::uint64_t identity = 0xabcdef;
+        if (version_one) {
+          sl::abi_v1::resource resource {};
+          resource.type = type; resource.native = reinterpret_cast<void *>(identity); resource.state = 128;
+          d::observe_sl_tag_v1(at, &resource, 23, nullptr, true);
+        } else {
+          sl::abi_v2::resource resource {};
+          resource.base.type = sl::resource_guid; resource.base.version = 1;
+          resource.type = type; resource.native = reinterpret_cast<void *>(identity); resource.state = 128;
+          sl::abi_v2::resource_tag tag {};
+          tag.base.type = sl::tag_guid; tag.base.version = 1;
+          tag.resource_ptr = &resource; tag.type = 23; tag.lifecycle = 0;
+          const auto view = viewport(7);
+          d::observe_sl_tags_v2(at, view, &tag, 1, d::tag_scope::frame);
+        }
+        const bool accepted = type == 0 || (!version_one && type == 8);
+        const auto row = ui_row(snapshot(), 10);
+        require(last_resource.readable && last_resource.version_one == version_one &&
+            last_resource.descriptor_supported == accepted && last_resource.native == (accepted ? identity : 0) &&
+            row["state"] == (accepted ? "non_null" : "unsupported"),
+          "SL resource enum admission diverged between callback/inventory or accepted a buffer/invalid type");
+        // The identity is deliberately not a COM object. Metadata reports its
+        // declaration only; the native capture owner must still validate it.
+        require(row["capture_status"].is_null() && row["runtime_support"] == "unknown",
+          "SL resource enum was promoted to a validated texture or successful capture");
+      }
+    }
+    d::set_resource_callbacks(nullptr);
+    arm_diagnostic_metadata(false); arm_diagnostic_metadata(true);
+  }
+
+  void test_ngx_depth_owned_observation() {
+    arm_diagnostic_metadata(false); arm_diagnostic_metadata(true);
+    d::set_resource_callbacks(&callbacks);
+    const auto resources_before = resource_notifications;
+    const auto finishes_before = finish_notifications;
+    d::ngx_evaluation value;
+    value.observation = stamp(7, 50);
+    value.owner = 4; value.handle = 5;
+    value.feature_known = true; value.feature = 11;
+    value.create_width = 1920; value.create_height = 1080;
+    value.capture_suppressed_by_depth_owner = true;
+    value.parameter_count = 1;
+    auto &p = value.parameters[0];
+    std::snprintf(p.name, sizeof(p.name), "DLSSG.UIAlpha");
+    p.type = d::parameter_type::resource;
+    p.getter_available = p.successful = true; p.integer = 0xfeed;
+    d::observe_ngx(value);
+    d::finish_ngx(value.observation, value.source_id, true, true);
+    const auto data = snapshot();
+    const auto &feature = data.at("ngx").at(0);
+    const auto row = ui_row(data, 36);
+    require(row["state"] == "non_null" && row["observations"][0]["sdk_successful"] == true &&
+        row["observations"][0]["resource_capture_status"] == "not_attempted_depth_owned",
+      "Depth ownership hid a successful NGX UI query or its capture suppression");
+    require(feature["feature"] == 11 && feature["create_width"] == 1920 &&
+        feature["capture_metadata_available"] == false && feature["scene_revision"].is_null() &&
+        feature["sequence_domain"] == "diagnostic-depth-owned",
+      "Metadata-only NGX observation lost known feature metadata or claimed depth capture identity");
+    require(resource_notifications == resources_before && finish_notifications == finishes_before,
+      "Metadata-only NGX observation dispatched native capture callbacks");
+    // A dropped/stale metadata entry must not regain native callback authority.
+    arm_diagnostic_metadata(false); arm_diagnostic_metadata(true);
+    d::finish_ngx(value.observation, value.source_id, true, true);
+    require(finish_notifications == finishes_before, "Suppressed stale finish dispatched a capture callback");
+    value.observation = stamp(7, 51);
+    value.capture_suppressed_by_depth_owner = false;
+    value.source_id = 6;
+    d::observe_ngx(value);
+    d::finish_ngx(value.observation, value.source_id, true);
+    require(resource_notifications == resources_before + 1 && finish_notifications == finishes_before + 1,
+      "Suppression leaked into a subsequent independent NGX capture");
+    d::set_resource_callbacks(nullptr);
+    arm_diagnostic_metadata(false); arm_diagnostic_metadata(true);
+  }
 }  // namespace
 
 int main() try {
@@ -247,6 +329,8 @@ int main() try {
   arm_diagnostic_metadata(true);
   require(ui_row(snapshot(), 10)["state"] == "unobserved" && ui_row(snapshot(), 20)["state"] == "unobserved",
           "new dump inherited old optional resource availability");
+  test_sl_resource_type_admission();
+  test_ngx_depth_owned_observation();
 
   // More types than the per-viewport bound must be explicitly marked. A
   // maximum-size snapshot must fit the outer IPC envelope as valid JSON.

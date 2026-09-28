@@ -4,6 +4,7 @@
 #include "depth_addon.h"
 #include "depth_presentation_stats.h"
 #include "depth_moments.h"
+#include "game3d_depth_input.h"
 #include "streamline_depth_capture.h"
 #include "depth_cache_update.h"
 #include <array>
@@ -14,7 +15,8 @@ namespace sunshine_depth { struct sample_result; }
 // shared ReShade preservation feed the same binding and calibration readback.
 namespace sunshine_streamline::provider {
   // Busy queries retain a confirmed source choice, not stale pixel readiness.
-  // Observation loss revokes the old FG scope until the game confirms a mode.
+  // Observation loss revokes FG scope while independent ordinary depth remains
+  // eligible. This does not turn a failed Off request into confirmed Off.
   struct frame_generation_policy {
     depth_capture::selection_policy update(frame_generation_query_status status,
         const frame_generation_snapshot &value) {
@@ -24,9 +26,10 @@ namespace sunshine_streamline::provider {
         generated_frames_ = value.enabled ? value.generated_frames : 0;
         confirmed_ = true;
       } else if (status == frame_generation_query_status::busy) {
-        return confirmed_ ? selected_ : depth_capture::selection_policy{true};
+        return confirmed_ || selected_.exclude_unconfirmed_fg ? selected_ : depth_capture::selection_policy{true};
       } else if (status == frame_generation_query_status::ambiguous || selected_.require_frame_generation) {
-        selected_ = {true};
+        selected_ = {};
+        selected_.exclude_unconfirmed_fg = true;
         generated_frames_ = 0;
         confirmed_ = false;
       }
@@ -38,17 +41,9 @@ namespace sunshine_streamline::provider {
     std::uint32_t generated_frames_{};
     bool confirmed_{};
   };
-  struct center_sample {
-    sunshine_scene_depth::frame metadata;
-    sunshine_depth::frame_depth::projection_t projection;
-    std::uint64_t id{}, tick{};
-    // Exact point grid for diagnostics only; live scene geometry uses moments.
-    std::uint32_t width{}, height{};
-    std::array<float, sunshine_depth_statistics::maximum_tiles> raw{};
-    bool range_valid{};
-    float range_min{}, range_max{};
-    sunshine_depth_statistics::moments moments{};
-  };
+  // The completed sample contract is owned by the neutral presentation input.
+  // Keep the adapter's existing internal/test spelling without a second layout.
+  using center_sample = sunshine_game3d::depth_input::sample;
   struct source_description {
     std::uint64_t resource{}, capture{}, sequence{};
     std::uint32_t width{}, height{}, format{}, tag{};

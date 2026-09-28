@@ -4,19 +4,15 @@
 #include "overlay_compositor.h"
 #include "depth_addon.h"
 #include "depth_jitter.h"
-#include "streamline_camera_probe.h"
-#include "streamline_depth_provider.h"
-#include "streamline_depth_capture.h"
-#include "upscaler_call_trace.h"
 #include "projection_depth_controller.h"
 #include "raw_scene_pool.h"
 #include "provided_raw_scene.h"
 #include "automatic_scene_transition.h"
 #include "game3d_controls.h"
 #include "game3d_renderer.h"
+#include "game3d_depth_input.h"
+#include "game3d_ui_input_provider.h"
 #include "game3d_debug_dump.h"
-#include "game3d_ui_mask.h"
-#include "game3d_capture_diagnostic.h"
 #include "diagnostic_log_gate.h"
 #include "src/reshade_bridge_protocol.h"
 
@@ -32,7 +28,6 @@
 #include <imgui.h>
 #include <memory>
 #include <mutex>
-#include <nlohmann/json.hpp>
 #include <reshade.hpp>
 #include "depth_content_sampler.h"
 #include <string>
@@ -53,10 +48,13 @@ namespace {
   namespace api = reshade::api;
   namespace wire = reshade_bridge;
   std::atomic<std::uint64_t> next_raw_basis {1};
+  void log(reshade::log::level level, const char *message);
 
   struct automatic_ui_entry {
     sunshine_game3d::automatic_status status {};
     sunshine_game3d::source_alpha_ui_decision source_alpha;
+    sunshine_game3d::source_alpha_ui_decision logged_source_alpha;
+    sunshine_diagnostics::log_gate source_alpha_log;
 #if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
     // Explicit resets exist only for controlled regression fixtures.
     bool recalibrate = false;
@@ -113,8 +111,35 @@ namespace {
   }
 
   void publish_source_alpha_ui(api::effect_runtime *runtime, sunshine_game3d::source_alpha_ui_decision value) {
-    std::lock_guard<std::mutex> lock(automatic_ui_mutex);
-    automatic_ui[runtime].source_alpha = value;
+    const auto now = GetTickCount64();
+    bool write_log = false;
+    {
+      std::lock_guard<std::mutex> lock(automatic_ui_mutex);
+      auto &entry = automatic_ui[runtime];
+      entry.source_alpha = value;
+      const auto &last = entry.logged_source_alpha;
+      const bool changed = value.mode != last.mode || value.rendered != last.rendered || value.applied != last.applied ||
+        value.input != last.input || value.input_state != last.input_state || value.fg.known != last.fg.known ||
+        value.fg.enabled != last.fg.enabled || value.qualification.selected != last.qualification.selected ||
+        value.qualification.available != last.qualification.available ||
+        value.coverage.state != last.coverage.state || value.qualification.token != last.qualification.token ||
+        value.coverage.source_kind != last.coverage.source_kind;
+      write_log = entry.source_alpha_log.due(now, changed, false, true);
+      if (write_log) entry.logged_source_alpha = value;
+    }
+    if (!write_log) return;
+    char message[768];
+    std::snprintf(message, sizeof(message),
+      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u status_revision=%llu",
+      static_cast<void *>(runtime), value.mode == sunshine_game3d::source_alpha_mode::automatic ? "auto" :
+        value.mode == sunshine_game3d::source_alpha_mode::on ? "on" : "off",
+      int(value.rendered), int(value.applied), sunshine_game3d::name(value.input), int(value.retained_alpha_ready),
+      int(value.fg_active()), int(value.fg.known), int(value.fg.enabled), sunshine_game3d::name(value.input_state),
+      sunshine_game3d::name(value.coverage.state), sunshine_game3d::ui_qualification::name(value.qualification.selected),
+      sunshine_game3d::ui_qualification::name(value.qualification.candidate.source), value.source_availability(),
+      value.coverage.source_kind, value.coverage.covered, value.coverage.pixels,
+      static_cast<unsigned long long>(value.qualification.token));
+    log(reshade::log::level::info, message);
   }
 
 #if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
@@ -478,7 +503,10 @@ namespace {
     sunshine_game3d::automatic_status ui;
   };
   struct frame_decision_t {
-    bool prepared = false, depth_ready = false, fg_active = false, reused_depth = false;
+    bool prepared = false, depth_ready = false, reused_depth = false;
+    // Feature observations are reporting only. Scene admission consumes ready,
+    // reused_depth and the frozen capture identity, never a feature switch.
+    struct { bool frame_generation_active = false; } diagnostics;
     sunshine_game3d::source_alpha_ui_decision source_alpha;
     // Identify the real capture for which scene parameters were resolved. A
     // later pending/generated presentation may reuse that scene, never another source's.
@@ -650,18 +678,14 @@ namespace {
       const bool diagnostic_owner = debug_dump_.awaiting_capture() &&
         static_cast<HWND>(runtime->get_hwnd()) == observed_foreground_window();
       const auto settings = sunshine_game3d::query_render_settings(runtime);
-      sunshine_streamline::frame_generation_snapshot fg;
-      sunshine_game3d::frame_generation_mode observed_fg;
-      if (sunshine_streamline::query_frame_generation(UINT32_MAX, fg))
-        observed_fg = {fg.known, fg.enabled, fg.automatic, fg.generated_frames, fg.viewport, fg.epoch, fg.sequence};
+      const auto presentation = sunshine_game3d::ui_input::observe();
       sunshine_game3d::source_alpha_ui_decision source_alpha;
       sunshine_depth::set_native_driver(runtime, settings.enabled);
       {
         std::lock_guard<std::mutex> lock(mutex_);
         auto &proof = runtimes_[runtime];
         proof.addon_native = settings.enabled;
-        source_alpha = proof.source_alpha_policy.update(settings.source_alpha_ui || settings.source_alpha_monitoring, observed_fg,
-          sunshine_streamline::source_enabled() || sunshine_streamline::enabled());
+        source_alpha = sunshine_game3d::ui_input::resolve(proof.source_alpha_policy, settings, presentation);
       }
       struct publish_alpha_decision {
         api::effect_runtime *runtime;
@@ -669,15 +693,14 @@ namespace {
         ~publish_alpha_decision() { publish_source_alpha_ui(runtime, value); }
       } publish_alpha{runtime, source_alpha};
       if (!settings.enabled) {
-        sunshine_game3d::ui_mask::invalidate(reinterpret_cast<std::uint64_t>(runtime));
+        sunshine_game3d::ui_input::suspend(runtime);
         if (diagnostic_owner) debug_dump_.unavailable("The add-on Game 3D renderer is disabled for this foreground game.");
         sunshine_depth::set_raw_scene_request(runtime, 0, false);
         return;
       }
       auto *device = runtime->get_device();
       const auto backend = device->get_api();
-      if (!source_alpha.requested || !source_alpha.fg_active() || backend != api::device_api::d3d12)
-        sunshine_game3d::ui_mask::invalidate(reinterpret_cast<std::uint64_t>(runtime));
+      sunshine_game3d::ui_input::configure(runtime, source_alpha, backend);
       auto *queue = runtime->get_command_queue();
       if (!queue || (backend != api::device_api::d3d11 && backend != api::device_api::d3d12)) {
         if (diagnostic_owner) debug_dump_.unavailable("The foreground runtime has no supported D3D11/D3D12 render queue.");
@@ -696,17 +719,7 @@ namespace {
         if (FAILED(native_swapchain->GetBuffer(index, IID_PPV_ARGS(back12.put())))) return;
         backbuffer.handle = reinterpret_cast<uint64_t>(back12.get());
       }
-      if (source_alpha.requested && source_alpha.fg_active() && backend == api::device_api::d3d12) {
-        const auto desc = device->get_resource_desc(backbuffer);
-        sunshine_streamline::depth_capture::record_diagnostic identity;
-        const auto reference = sunshine_streamline::depth_capture::retain_source(backbuffer.handle, &identity);
-        sunshine_game3d::ui_mask::set_request({reinterpret_cast<std::uint64_t>(runtime), identity.expected_device_identity,
-          source_alpha.fg.epoch, sunshine_streamline::depth_observation_revision(), source_alpha.fg.viewport,
-          desc.texture.width, desc.texture.height, true,
-          settings.source_alpha_monitoring && !settings.source_alpha_ui &&
-            settings.source_alpha_probe_interval_ms == sunshine_game3d::alpha_slow_probe_interval_ms ?
-              sunshine_game3d::alpha_slow_probe_interval_ms : 0});
-      }
+      sunshine_game3d::ui_input::request(runtime, backbuffer, source_alpha, settings, swapchain->get_color_space());
       sunshine_game3d::renderer *renderer = nullptr;
       api::resource_view rtv{};
       {
@@ -748,33 +761,8 @@ namespace {
         ~finish_depth() { sunshine_depth::end_native_frame(runtime, commands); }
       } finish{runtime, commands};
       prepare_native_depth(runtime, commands, rtv);
-      api::resource_view alpha_view{};
-      sunshine_game3d::ui_mask::selection alpha_selection;
-      if (source_alpha.requested && source_alpha.fg_active() && backend == api::device_api::d3d12 &&
-          sunshine_game3d::ui_mask::acquire(reinterpret_cast<std::uint64_t>(runtime), alpha_selection, GetTickCount64())) {
-        alpha_view = renderer->prepare_ui_source(alpha_selection.ticket.id, [&](api::resource destination) {
-          return sunshine_streamline::depth_capture::copy_diagnostic_texture(commands->get_native(),
-            queue->get_native(), alpha_selection.ticket, destination.handle,
-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        });
-        source_alpha.retained_alpha_ready = alpha_view.handle != 0;
-      }
-      sunshine_game3d::ui_mask::diagnostic_snapshot alpha_diagnostic;
-      const bool have_alpha_diagnostic = source_alpha.requested && source_alpha.fg_active() &&
-        sunshine_game3d::ui_mask::query_diagnostic(reinterpret_cast<std::uint64_t>(runtime), alpha_diagnostic);
-      if (have_alpha_diagnostic && alpha_diagnostic.latest_boundary.source.sequence) {
-        using input_state = sunshine_game3d::source_alpha_input_state;
-        source_alpha.input_state = input_state::seen;
-        if (alpha_diagnostic.record_completed) {
-          const auto result = alpha_diagnostic.record.result;
-          if (result == sunshine_streamline::depth_capture::status::conflicting_state)
-            source_alpha.input_state = input_state::state_conflict;
-          else if (result != sunshine_streamline::depth_capture::status::recorded)
-            source_alpha.input_state = input_state::rejected;
-        }
-        if (alpha_diagnostic.sdk_result_known && !alpha_diagnostic.sdk_successful)
-          source_alpha.input_state = input_state::rejected;
-      }
+      auto ui_input = sunshine_game3d::ui_input::acquire(runtime, *renderer, source_alpha,
+        sunshine_game3d::source_alpha_startup_policy(), diagnostic_owner);
       // Publish what this render actually consumes, not the saved preference or
       // a later SDK observation. No RGB from the retained input is displayed.
       bool rendered = false;
@@ -788,74 +776,15 @@ namespace {
         p.coordinate_basis = scene.basis; p.depth_scale = scene.scale; p.strength_blend = scene.blend;
         p.projection = scene.projection; p.raw_depth_range = scene.raw_range;
         p.convergence = scene.zero; p.jitter = proof.frame.jitter.offset; p.depth_rect = scene.rect;
-        proof.diagnostic_ui_source.clear();
-        proof.diagnostic_ui_capture_attempt.clear();
-        if (diagnostic_owner && have_alpha_diagnostic) {
-          const auto &wanted = alpha_diagnostic.wanted;
-          const auto &boundary = alpha_diagnostic.latest_boundary;
-          const auto &input = boundary.source;
-          proof.diagnostic_ui_capture_attempt = nlohmann::json{
-            {"meaning", "Latest live real-input attempt observed at this render; independent of any retained alpha actually consumed. No generated-frame pairing is implied."},
-            {"request", {{"epoch", wanted.epoch}, {"revision", wanted.revision}, {"viewport", wanted.viewport},
-              {"device_identity", wanted.device_identity}, {"width", wanted.width}, {"height", wanted.height}}},
-            {"input_observed", input.sequence != 0}, {"sequence", input.sequence}, {"tick_ms", input.tick},
-            {"source_native", input.resource.native}, {"command", boundary.command}, {"tag_scope", boundary.tag_scope},
-            {"record_attempted", alpha_diagnostic.record_attempted},
-            {"record_completed", alpha_diagnostic.record_completed},
-            {"sdk_success", alpha_diagnostic.sdk_result_known ? nlohmann::json(alpha_diagnostic.sdk_successful) : nlohmann::json(nullptr)},
-            {"capture_diagnostic", alpha_diagnostic.record_completed ?
-              sunshine_game3d::capture_diagnostic_json(alpha_diagnostic.record) : nlohmann::json(nullptr)}
-          }.dump();
-        }
-        if (diagnostic_owner && source_alpha.retained_alpha_ready) {
-          const auto &origin = alpha_selection.origin;
-          const auto &input = origin.source;
-          const auto &copy = alpha_selection.texture;
-          proof.diagnostic_ui_source = nlohmann::json{
-            {"source", "sl_backbuffer_real_input_alpha"}, {"tag_type", 53}, {"tag_scope", origin.tag_scope},
-            {"association", "latest_completed_real_input_approximation"},
-            {"epoch", input.epoch}, {"observation_revision", input.observation_revision},
-            {"sequence", input.sequence}, {"tick_ms", input.tick}, {"age_ms", GetTickCount64() - input.tick},
-            {"viewport", input.viewport}, {"source_native", input.resource.native}, {"source_command", origin.command},
-            {"source_frame_generation", input.source_frame_generation}, {"source_frame_token", input.source_frame_token},
-            {"source_frame_numeric", input.source_frame_numeric}, {"source_frame_has_numeric", input.source_frame_has_numeric},
-            {"source_frame_explicit", input.source_frame_explicit}, {"capture_id", copy.capture_id},
-            {"producer_queue", copy.producer_queue}, {"producer_fence", copy.producer_fence},
-            {"producer_completed", copy.producer_completed}, {"producer_recording_retired", copy.producer_recording_retired}
-          }.dump();
-        }
-        sunshine_game3d::alpha_auto_source alpha_observation;
-        alpha_observation.now_ms = GetTickCount64();
-        alpha_observation.session = &sunshine_game3d::source_alpha_startup_policy();
-        alpha_observation.tick_ms = alpha_observation.now_ms;
-        alpha_observation.epoch = source_alpha.fg.epoch;
-        alpha_observation.revision = sunshine_streamline::depth_observation_revision();
-        alpha_observation.viewport = source_alpha.fg.viewport;
-        alpha_observation.retained = source_alpha.retained_alpha_ready;
-        if (alpha_observation.retained) {
-          const auto &input = alpha_selection.origin.source;
-          alpha_observation.epoch = input.epoch;
-          alpha_observation.revision = input.observation_revision;
-          alpha_observation.viewport = input.viewport;
-          alpha_observation.sequence = input.sequence;
-          alpha_observation.tick_ms = input.tick;
-        }
-        auto ui_observation = proof.frame.ui_source;
-        ui_observation.now_ms = alpha_observation.now_ms;
-        ui_observation.eligible = ui_observation.eligible && proof.frame.prepared && proof.frame.depth_ready && scene.ready;
-        if (alpha_observation.retained) {
-          ui_observation.mask_sequence = alpha_observation.sequence;
-          ui_observation.tick_ms = std::min(ui_observation.tick_ms, alpha_observation.tick_ms);
-          ui_observation.eligible = ui_observation.eligible && alpha_observation.epoch == ui_observation.epoch &&
-            alpha_observation.revision == ui_observation.revision && alpha_observation.viewport == ui_observation.viewport;
-        }
-        // Startup detection is owned by the game process, not the renderer.
-        // After its deadline/manual selection, this records no new observations.
-        rendered = proof.frame.prepared && renderer->render(commands, backbuffer, proof.borrowed_depth, p,
-          source_alpha.effective(), alpha_view, scene.ui_plane, &alpha_observation, &ui_observation);
-        source_alpha.automatic = true;
-        source_alpha.coverage = rendered ? renderer->consumed_alpha_auto() : alpha_observation.session->decision(alpha_observation.now_ms);
-        source_alpha.requested = source_alpha.coverage.enabled;
+        proof.diagnostic_ui_source = std::move(ui_input.source_metadata);
+        proof.diagnostic_ui_capture_attempt = std::move(ui_input.capture_metadata);
+        const auto ui_observation = ui_input.match_scene(proof.frame.ui_source,
+          proof.frame.prepared && proof.frame.depth_ready && scene.ready);
+        const sunshine_game3d::render_frame_input input{backbuffer, proof.borrowed_depth, p,
+          ui_input.for_render(scene.ui_plane, ui_observation)};
+        rendered = proof.frame.prepared && renderer->render(commands, input);
+        ui_input.complete(*renderer, rendered);
+        source_alpha = ui_input.status;
         proof.frame.source_alpha = source_alpha;
         proof.native_output = rendered ? renderer->output() : api::resource{};
         proof.native_ui_parallax_uv = rendered ? sunshine_game3d::admitted_ui_parallax_uv(
@@ -885,7 +814,7 @@ namespace {
       // The lock never encloses a CPU/GPU fence wait.
       std::lock_guard<std::mutex> lock(mutex_);
       const auto current = runtimes_.find(runtime);
-      if (destroy) sunshine_game3d::ui_mask::invalidate(reinterpret_cast<std::uint64_t>(runtime));
+      if (destroy) sunshine_game3d::ui_input::invalidate(runtime);
       if (destroy) debug_dump_.retire_runtime(runtime);
       if (!destroy && current != runtimes_.end() && current->second.addon_native) {
         // Effects can disappear while the native owner and scene continue.
@@ -900,7 +829,7 @@ namespace {
       }
       if (destroy && current != runtimes_.end() && current->second.renderer)
         current->second.renderer->reset_after_runtime_drain();
-      sunshine_streamline::provider::invalidate_reused_depth(runtime);
+      sunshine_game3d::depth_input::invalidate_reuse(runtime);
       deactivate(runtime);
       if (destroy) runtimes_.erase(runtime);
       else {
@@ -942,7 +871,7 @@ namespace {
       std::lock_guard<std::mutex> lock(mutex_);
       const auto found = runtimes_.find(runtime);
       if (published_runtime_ == runtime && (observed_foreground_window() != reinterpret_cast<HWND>(published_metadata_.window) || found == runtimes_.end() || !found->second.rendered_since_present)) {
-        sunshine_streamline::provider::invalidate_reused_depth(runtime);
+        sunshine_game3d::depth_input::invalidate_reuse(runtime);
         deactivate(runtime);
       }
       if (generation_ && generation_->owner_runtime == runtime && generation_->pending_slot != wire::slot_count) {
@@ -1048,55 +977,25 @@ namespace {
       // shader-readable now; calibration history never substitutes for readiness.
       sunshine_depth::frame_depth depth;
       const bool game_enabled = proof.addon_native || (proof.game_technique.handle && runtime->get_technique_state(proof.game_technique));
-      if (!game_enabled) sunshine_streamline::provider::invalidate_reused_depth(runtime);
+      if (!game_enabled) sunshine_game3d::depth_input::invalidate_reuse(runtime);
       const bool independent_enabled = !game_enabled && proof.native_technique.handle && runtime->get_technique_state(proof.native_technique);
       if (independent_enabled && proof.depth_ready.handle && proof.calibrated.handle && proof.raw_anchor.handle &&
           proof.raw_gain.handle && proof.depth_rect.handle && proof.direction.handle) {
         int direction = 0;
         runtime->get_uniform_value_int(proof.direction, &direction, 1);
-        sunshine_depth::get_frame_depth(runtime, depth, direction == 1 ? sunshine_depth::depth_orientation::normal :
-          direction == 2 ? sunshine_depth::depth_orientation::reversed : sunshine_depth::depth_orientation::automatic);
+        sunshine_game3d::depth_input::query(runtime, depth, direction == 1 ? sunshine_depth::depth_orientation::normal :
+          direction == 2 ? sunshine_depth::depth_orientation::reversed : sunshine_depth::depth_orientation::automatic, true);
         apply_native_depth(runtime, proof, depth);
       } else {
         // The original-derived effect owns its preparation and convergence.
         // Camera diagnostics may inspect capture identity without enabling the
         // independent renderer's percentile calibration or altering uniforms.
-        sunshine_depth::get_frame_depth(runtime, depth, sunshine_depth::depth_orientation::automatic, false);
+        sunshine_game3d::depth_input::query(runtime, depth);
       }
       proof.borrowed_depth = proof.addon_native && depth.ready ? depth.shader_resource : api::resource_view{};
       proof.diagnostic_armed = proof.addon_native && debug_dump_.requested();
       proof.diagnostic_depth = proof.diagnostic_armed ? depth : sunshine_depth::frame_depth{};
-      // Shared capture observation also runs when every API source is disabled.
-      // Deferred hook discovery separately serves lightweight source nomination.
-      // Detailed camera/content observations remain diagnostic-only.
-      if (sunshine_streamline::depth_capture::active() || sunshine_streamline::enabled() || sunshine_streamline::source_enabled() ||
-          sunshine_upscaler_trace::enabled() || sunshine_upscaler_trace::capture_enabled()) {
-        auto selected = sunshine_depth::camera_selection_snapshot(depth);
-        // ReShade can resolve/copy the swapchain before effects. Observe the
-        // actual effects input while its view is valid, never a guessed backbuffer.
-        // This is identity/extent evidence, not proof that color and depth share UVs.
-        if (sunshine_streamline::enabled() && effects_rtv.handle && commands) {
-          auto *device = runtime->get_device();
-          const auto resource = device->get_resource_from_view(effects_rtv);
-          if (resource.handle) {
-            const auto desc = device->get_resource_desc(resource);
-            if (desc.type == api::resource_type::texture_2d || desc.type == api::resource_type::surface) {
-              auto &input = selected.effects_input;
-              input.runtime = reinterpret_cast<std::uint64_t>(runtime);
-              input.device = device->get_native();
-              input.command = commands->get_native();
-              input.resource = resource.handle;
-              input.width = desc.texture.width;
-              input.height = desc.texture.height;
-              input.format = static_cast<std::uint32_t>(desc.texture.format);
-              input.ready = input.width && input.height;
-            }
-          }
-        }
-        sunshine_streamline::poll(selected);
-        if (sunshine_streamline::enabled())
-          sunshine_depth::report_camera_observations(runtime, selected);
-      }
+      sunshine_game3d::depth_input::observe(runtime, commands, effects_rtv, depth);
       const auto now = GetTickCount64();
       frame_decision_t frame;
       frame.depth_ready = depth.ready;
@@ -1108,7 +1007,7 @@ namespace {
         depth.provided.sequence, depth.provided.viewport};
       // Source choice and bounded reuse are resolved once by the depth provider.
       // Another fallible metadata query here could contradict this same frame.
-      frame.fg_active = game_enabled && depth.frame_generation_active;
+      frame.diagnostics.frame_generation_active = game_enabled && depth.frame_generation_active;
       if (depth.reused_depth) {
         // The provider owns the short, invalidation-aware depth reuse window.
         // Render current color with those pixels and their previously resolved
@@ -1117,7 +1016,7 @@ namespace {
         // real-depth frame re-evaluates this scene's disparity interval.
         restore_reused_scene(frame, previous_frame, proof.raw_supported);
       } else {
-        const bool provided = sunshine_streamline::provider::selected(runtime);
+        const bool provided = sunshine_game3d::depth_input::provider_selected(runtime);
         frame.scene = resolve_raw_scene(runtime, proof, depth, game_enabled, provided, now);
       }
       frame.ui_source = resolve_ui_observation(depth, previous_frame.ui_source, frame.scene, proof.raw_basis_epoch, now);
@@ -1131,7 +1030,8 @@ namespace {
       scene.owned = proof.raw_supported;
       const bool enabled = proof.raw_supported && game_enabled;
       const bool provided = enabled && api_selected;
-      const bool projection_provided = provided && depth.projection.supplied;
+      const bool projection_provided = provided && (depth.projection.supplied ||
+        depth.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance);
       const auto restart_reference = [&proof, now] {
         // A new basis invalidates queued samples. The raw controller owns
         // ordinary source changes and initializes each source only once.
@@ -1145,7 +1045,8 @@ namespace {
 #if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
       if (take_recalibration(runtime)) {
         if (projection_provided) {
-          const sunshine_projection_depth::domain domain{depth.projection.epoch, depth.projection.viewport};
+          const sunshine_projection_depth::domain domain{depth.projection.epoch, depth.projection.viewport,
+            depth.projection.encoding, depth.provided.provider, depth.provided.source_id};
           if (!(domain == proof.projection_domain)) {
             proof.projection_domain = domain;
             proof.projection_policy.reset(domain, now);
@@ -1185,7 +1086,7 @@ namespace {
         return scene; // An older shader must not sample allocation padding as scene depth.
       }
       if (projection_provided) {
-        resolve_streamline_scene(runtime, proof, depth, now, scene);
+        resolve_projection_scene(runtime, proof, depth, now, scene);
         return scene;
       }
       proof.projection_policy.suspend();
@@ -1202,8 +1103,8 @@ namespace {
       if (provided) {
         const auto current = sunshine_provided_raw::selected(depth.provided, proof.raw_basis_epoch, depth.ready);
         proof.provided_raw_policy.bind(current, now);
-        sunshine_streamline::provider::center_sample measured;
-        if (sunshine_streamline::provider::latest_center(runtime, measured) && measured.moments.supplied) {
+        sunshine_game3d::depth_input::sample measured;
+        if (sunshine_game3d::depth_input::latest_sample(runtime, measured) && measured.moments.supplied) {
           sunshine_raw_scene::sample sample;
           sample.id = measured.id;
           sample.capture_ms = measured.tick;
@@ -1312,32 +1213,36 @@ namespace {
       return scene;
     }
 
-    void resolve_streamline_scene(api::effect_runtime *runtime, runtime_t &proof,
+    void resolve_projection_scene(api::effect_runtime *runtime, runtime_t &proof,
         const sunshine_depth::frame_depth &depth, std::uint64_t now, scene_parameters_t &scene) {
       namespace projection = sunshine_projection_depth;
       using phase = sunshine_game3d::automatic_phase;
       bool ready = false;
       projection::coefficients coefficients;
       projection::center_output center;
-      if (depth.ready && depth.projection.supplied) {
-        const projection::domain domain{depth.projection.epoch, depth.projection.viewport};
+      const bool linear = depth.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance;
+      if (depth.ready && (depth.projection.supplied || linear)) {
+        const projection::domain domain{depth.projection.epoch, depth.projection.viewport,
+          depth.projection.encoding, depth.provided.provider, depth.provided.source_id};
         if (!(domain == proof.projection_domain)) {
           proof.projection_domain = domain;
           proof.projection_policy.reset(domain, now);
           proof.raw_reentry = {};
         }
-        coefficients = projection::make(depth.projection.A, depth.projection.B,
+        coefficients = projection::make(depth.projection.encoding, depth.projection.A, depth.projection.B,
           depth.projection.raw_scale, depth.projection.raw_bias);
+        if (linear && !proof.addon_native) coefficients = {}; // Legacy FX has no reciprocal input basis.
         proof.projection_policy.configure(sunshine_scene_gain::render_limits(proof.frame_strength, proof.width, proof.height));
         if (!proof.addon_native && !proof.camera_raw_range.handle &&
             (depth.projection.raw_scale != 1.0 || depth.projection.raw_bias != 0.0)) coefficients = {};
         proof.projection_policy.synchronize_feedback(depth.provided.feedback);
-        sunshine_streamline::provider::center_sample measured;
-        if (sunshine_streamline::provider::latest_center(runtime, measured) && measured.moments.supplied) {
+        sunshine_game3d::depth_input::sample measured;
+        if (sunshine_game3d::depth_input::latest_sample(runtime, measured) && measured.moments.supplied) {
           projection::sample sample;
           sample.id = measured.id; sample.capture_ms = measured.tick;
-          sample.logical_domain = {measured.projection.epoch, measured.projection.viewport};
-          sample.projection = projection::make(measured.projection.A, measured.projection.B,
+          sample.logical_domain = {measured.projection.epoch, measured.projection.viewport,
+            measured.projection.encoding, measured.metadata.provider, measured.metadata.source_id};
+          sample.projection = projection::make(measured.projection.encoding, measured.projection.A, measured.projection.B,
             measured.projection.raw_scale, measured.projection.raw_bias);
           sample.range_supplied = true;
           sample.range_valid = measured.range_valid;
@@ -1358,7 +1263,8 @@ namespace {
       scene.ui = {
         ready ? phase::ready : !depth.ready ? phase::waiting_for_depth :
           unsupported ? phase::suspended : phase::calibrating, true,
-        {sunshine_game3d::automatic_scale_basis::camera_matrix, center.K, ready, static_cast<float>(center.target_K)}};
+        {linear ? sunshine_game3d::automatic_scale_basis::linear_distance : sunshine_game3d::automatic_scale_basis::camera_matrix,
+          center.K, ready, static_cast<float>(center.target_K)}};
       scene.ui.scale.zero_inverse = center.q0;
       scene.ui.scale.has_zero = center.initialized;
       scene.ui.scale.target_zero_inverse = center.target_q0;
@@ -1381,7 +1287,7 @@ namespace {
       scene.ui.scale.depth_pixel_count = center.depth_statistics.pixel_count;
       scene.ui.scale.depth_tiles_x = center.depth_statistics.tiles_x;
       scene.ui.scale.depth_tiles_y = center.depth_statistics.tiles_y;
-      if (coefficients.valid()) {
+      if (coefficients.valid() && !linear) {
         // Show the same affine conversion the shader applies, including any
         // packed raw-depth transform. Its units differ from the scene-estimated
         // stereo normalization K; neither display value drives rendering.
@@ -1397,8 +1303,9 @@ namespace {
           std::snprintf(message, sizeof(message), "Sunshine 3D Streamline scale: waiting_for_depth; viewport=%u; retaining calibration state",
             depth.projection.viewport);
         } else {
-          std::snprintf(message, sizeof(message), "Sunshine 3D Streamline scale: %s; viewport=%u A=%.9g B=%.9g near=%.9g stereo_scale=%.9g target_scale=%.9g q0=%.9g target_q0=%.9g reference_Q=%.9g normalization_L=%.9g reference_valid=%u conversion_scale=%.9g conversion_offset=%.9g samples=%u plane_state=%s feedback_revision=%llu; projection depth, independent stereo gain and zero plane",
+          std::snprintf(message, sizeof(message), "Sunshine 3D Streamline scale: %s; viewport=%u encoding=%s A=%.9g B=%.9g near=%.9g stereo_scale=%.9g target_scale=%.9g q0=%.9g target_q0=%.9g reference_Q=%.9g normalization_L=%.9g reference_valid=%u conversion_scale=%.9g conversion_offset=%.9g samples=%u plane_state=%s feedback_revision=%llu; inverse-distance depth, independent stereo gain and zero plane",
             ready ? "ready" : projection::name(center.reason), depth.projection.viewport,
+            linear ? "linear_distance" : "device",
             depth.projection.A, depth.projection.B, coefficients.near_plane, center.K, center.target_K, center.q0, center.target_q0,
             scene.ui.scale.reference_inverse, scene.ui.scale.normalization, unsigned(center.has_depth_statistics),
             scene.ui.scale.conversion_multiplier, scene.ui.scale.conversion_offset,
@@ -1409,6 +1316,7 @@ namespace {
         proof.projection_ready = ready;
       }
       scene.ready = ready;
+      scene.basis = linear ? 2 : 0;
       scene.projection = {coefficients.shader_A, coefficients.inverseB};
       scene.zero = {projection::reference_zpd, center.q0};
       if (center.initialized)
@@ -1530,7 +1438,7 @@ namespace {
       DWORD window_pid = 0;
       GetWindowThreadProcessId(window, &window_pid);
       if (!window || window_pid != identity_.producer_pid || observed_foreground_window() != window) {
-        sunshine_streamline::provider::invalidate_reused_depth(runtime);
+        sunshine_game3d::depth_input::invalidate_reuse(runtime);
         deactivate(runtime);
         return;
       }
@@ -1644,7 +1552,7 @@ namespace {
         // The scalar belongs to this exact packed texture, including retained
         // exports. ReShade's own controls and cursor are at screen disparity.
         generation_->pending_ui_parallax_uv = addon_render && !overlay_open(runtime) ? proof.native_ui_parallax_uv : 0.f;
-        generation_->pending_fg_output = game && proof.frame.fg_active;
+        generation_->pending_fg_output = game && proof.frame.diagnostics.frame_generation_active;
         generation_->pending_depth_ready = proof.frame.depth_ready;
         generation_->pending_reused_depth = proof.frame.reused_depth;
         if (!generation_->submit(commands, source.resource, index, sequence)) {
@@ -1679,6 +1587,7 @@ namespace {
       sunshine_game3d::diagnostic_frame frame;
       frame.parameters = proof.renderer->consumed_parameters();
       frame.ui_plane = proof.renderer->consumed_ui_plane();
+      frame.ui_channel = proof.renderer->consumed_ui_channel();
       if (frame.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction)
         frame.ui_adaptive = proof.renderer->consumed_ui_adaptive();
       frame.source_alpha_ui = proof.renderer->consumed_source_alpha_ui();
@@ -1733,7 +1642,7 @@ namespace {
       runtime->set_uniform_value_float(proof.raw_gain, &gain, 1);
       runtime->set_uniform_value_float(proof.depth_rect, rect, 4);
       runtime->set_uniform_value_bool(proof.calibrated, calibrated);
-      sunshine_streamline::provider::set_depth_ready(runtime, ready);
+      sunshine_game3d::depth_input::set_ready(runtime, ready);
       proof.native_depth_prepared = true;
     }
 
@@ -1787,7 +1696,7 @@ namespace {
 
     void log_fg_output(api::effect_runtime *runtime, runtime_t &proof, std::uint64_t now) {
       auto &counts = proof.fg_output;
-      if (!proof.frame.fg_active || now < counts.next_log) return;
+      if (!proof.frame.diagnostics.frame_generation_active || now < counts.next_log) return;
       char text[384]{};
       std::snprintf(text, sizeof(text), "Sunshine SBS FG output: published_fresh_depth=%llu published_reused_depth=%llu published_depth_missing=%llu runtime=0x%llx generation=%llu; new color publications, reused depth is bounded and does not advance calibration",
         static_cast<unsigned long long>(counts.published_fresh_depth), static_cast<unsigned long long>(counts.published_reused_depth),
@@ -1968,7 +1877,7 @@ namespace {
     // Observer metadata releases its source leases while capture/UI owners are
     // still alive; capture keeps any leases required by outstanding GPU work.
     addon_session().end([&] {
-      sunshine_streamline::shutdown();
+      sunshine_game3d::depth_input::shutdown_observers();
       sunshine_depth::shutdown();
       reshade::unregister_addon(addon, reshade);
     });
@@ -2133,7 +2042,7 @@ extern "C" {
       }
       // Generic Depth is registered before external add-ons. On a first manual
       // installation the module can request a restart while export stays available.
-      sunshine_streamline::initialize(addon);
+      sunshine_game3d::depth_input::initialize_observers(addon);
       sunshine_depth::initialize(addon);
       reshade::register_event<reshade::addon_event::init_effect_runtime>(sunshine_addon_lifetime::guarded<on_init_runtime>);
       reshade::register_event<reshade::addon_event::reshade_begin_effects>(sunshine_addon_lifetime::guarded<on_begin_effects>);

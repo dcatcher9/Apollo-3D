@@ -24,12 +24,16 @@ namespace {
       coefficients projection = make(0., .0625), domain source = viewport) {
     sample value;
     value.id = id; value.capture_ms = capture_ms; value.logical_domain = source; value.projection = projection;
-    const float a = projection.shader_A + float(depths.minimum) / projection.inverseB;
-    const float b = projection.shader_A + float(depths.maximum) / projection.inverseB;
+    const auto stored = [&](double q) {
+      const double decoded = projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance ? 1./q : q;
+      return projection.shader_A + float(decoded) / projection.inverseB;
+    };
+    const float a = stored(depths.minimum);
+    const float b = stored(depths.maximum);
     value.range_supplied = value.range_valid = true;
     value.range_min = std::min(a, b); value.range_max = std::max(a, b);
     // The full-range record owns extrema, not this legacy diagnostic grid.
-    value.raw.fill(projection.shader_A + float((depths.minimum + depths.maximum) * .5) / projection.inverseB);
+    value.raw.fill(stored((depths.minimum + depths.maximum) * .5));
     return value;
   }
   struct fixture {
@@ -55,6 +59,54 @@ namespace {
       return output;
     }
   };
+
+  void linear_distance_calibration_and_domain() {
+    const domain linear_domain{3,7,sunshine_scene_depth::depth_encoding::linear_distance};
+    const auto linear = make_linear();
+    controller policy;
+    policy.reset(linear_domain,1000);
+    center_output out;
+    std::uint64_t id = 0;
+    for (std::uint64_t tick=1000; tick<=1750; tick+=250) {
+      auto source=packet(++id,tick,{.125,.5},linear,linear_domain);
+      require(policy.observe(source,tick)==(tick==1750 ? center_status::ready : center_status::waiting_for_center),
+        "Linear distance failed ordinary shared scene calibration");
+      out=policy.evaluate(linear_domain,linear,tick);
+    }
+    require(out.ready && out.depth_statistics.minimum==.125 && out.depth_statistics.maximum==.5,
+      "Linear calibration did not decode inverse distance");
+    const auto previous=out;
+    auto empty=packet(++id,2000,{.125,.5},linear,linear_domain);
+    empty.range_valid=false;
+    empty.moments.supplied=true;
+    empty.moments.encoding=sunshine_scene_depth::depth_encoding::linear_distance;
+    require(policy.observe(empty,2000)==center_status::invalid_depth,"Empty linear frame manufactured a reference");
+    controller uncalibrated;
+    uncalibrated.reset(linear_domain,2000);
+    require(uncalibrated.observe(empty,2000)==center_status::invalid_depth &&
+        !uncalibrated.evaluate(linear_domain,linear,2000).initialized,
+      "All-invalid first linear frame initialized a fabricated reference");
+    out=policy.evaluate(linear_domain,linear,2000);
+    require(out.ready && out.K==previous.K && out.q0==previous.q0 && !out.has_depth_statistics,
+      "Empty linear frame replaced calibrated controls");
+    require(policy.evaluate(viewport,linear,2000).reason==center_status::invalid_domain &&
+      policy.evaluate(linear_domain,make(0,1),2000).reason==center_status::invalid_projection,
+      "Device and linear depth reused one numeric reference domain");
+    for (unsigned change=0; change!=2; ++change) {
+      auto replacement=linear_domain;
+      if (change==0) replacement.provider=sunshine_scene_depth::provider_kind::ngx;
+      else replacement.source_id=41;
+      require(policy.observe(packet(++id,2250,{.125,.5},linear,replacement),2250)==center_status::invalid_domain,
+        "Another provider or feature supplied late calibration into the old unit domain");
+      require(policy.evaluate(replacement,linear,2250).reason==center_status::invalid_domain,
+        "Provider or feature handoff inherited numeric calibration");
+      controller replaced;
+      replaced.reset(replacement,2250);
+      require(replaced.observe(packet(1,2250,{.125,.5},linear,linear_domain),2250)==center_status::invalid_domain &&
+        !replaced.evaluate(replacement,linear,2250).initialized,
+        "Late old-provider sample seeded the replacement reference");
+    }
+  }
 
   void full_image_moments_reject_mixed_camera_coefficients() {
     for (const auto projection : {make(0., .0625), make(1., -.0625)}) {
@@ -335,6 +387,7 @@ namespace {
 int main() {
   try {
     full_image_moments_reject_mixed_camera_coefficients();
+    linear_distance_calibration_and_domain();
     unchanged_span_survives_feasible_scene_and_zero_changes();
     measured_statistics_are_decoded_with_the_captured_projection();
     full_extrema_override_the_grid_and_legacy_grid_uses_every_cell();

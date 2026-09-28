@@ -2,8 +2,8 @@
 #include "ngx_depth_source.h"
 #include "addon_lifetime.h"
 #include "game3d_diagnostic_metadata.h"
-#ifndef SUNSHINE_UPSCALER_TRACE_TEST
 #include "streamline_depth_capture.h"
+#ifndef SUNSHINE_UPSCALER_TRACE_TEST
 #include "streamline_native_observer.h"
 #endif
 #include <reshade.hpp>
@@ -42,9 +42,10 @@ namespace sunshine_ngx {
     std::array<feature, max_features> features;
     std::atomic<std::uint64_t> active_epoch{}, next_epoch{}, sequence{}, next_feature{};
     // Dump-only observations must not advance the capture/evaluation ordering
-    // counter when the feature was never admitted to the source adapter.
+    // counter when the feature was never admitted or depth belongs to SL.
     std::atomic<std::uint64_t> unknown_diagnostic_sequence{};
-    std::atomic<std::uint64_t> evaluations{}, recorded{}, unknown{}, missing_parameters{}, failed{}, feature_overflow{};
+    std::atomic<std::uint64_t> evaluations{}, nominations{}, copy_recorded{}, metadata_only{},
+      unknown{}, missing_parameters{}, failed{}, feature_overflow{};
     std::uint64_t next_report{};
     bool calibration_probe_requested{}; // Protected by feature_lock, like the feature records.
     struct calibration_slot {
@@ -55,27 +56,28 @@ namespace sunshine_ngx {
     // completion uses a shared try-lock and would mistake contention for loss.
     SRWLOCK calibration_lock = SRWLOCK_INIT;
     std::array<calibration_slot, max_features> calibration_slots;
-#ifndef SUNSHINE_UPSCALER_TRACE_TEST
     struct capture_rejection {
       sunshine_streamline::depth_capture::record_diagnostic diagnostic;
       sunshine_scene_depth::extent area;
-      std::uint64_t source_id{}, sequence{};
+      std::uint64_t source_id{}, sequence{}, nomination_ticket{};
       bool retaining{};
     };
     SRWLOCK rejection_lock = SRWLOCK_INIT;
     capture_rejection last_rejection;
     std::atomic<std::uint64_t> rejected_captures{};
+#ifndef SUNSHINE_UPSCALER_TRACE_TEST
     std::uint64_t reported_rejections{};
+#endif
     void remember_rejection(const sunshine_scene_depth::frame &value,
-        const sunshine_streamline::depth_capture::record_diagnostic &diagnostic, bool retaining) {
+        const sunshine_streamline::depth_capture::record_diagnostic &diagnostic, bool retaining,
+        std::uint64_t nomination_ticket) {
       if (value.epoch != active_epoch.load(std::memory_order_acquire)) return;
       ++rejected_captures;
       if (!TryAcquireSRWLockExclusive(&rejection_lock)) return;
       if (value.epoch == active_epoch.load(std::memory_order_acquire))
-        last_rejection = {diagnostic, value.resource.area, value.source_id, value.sequence, retaining};
+        last_rejection = {diagnostic, value.resource.area, value.source_id, value.sequence, nomination_ticket, retaining};
       ReleaseSRWLockExclusive(&rejection_lock);
     }
-#endif
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
     testing::callbacks backend;
 #endif
@@ -86,15 +88,19 @@ namespace sunshine_ngx {
     bool success(result value) { return (value & 0xfff00000u) != 0xbad00000u; }
     sunshine_game3d::diagnostic::stamp observe_dump_parameters(const parameter_api &api, const void *parameters,
         const sunshine_scene_depth::frame &frame, const feature &selected,
-        const void *handle, std::uint64_t command, std::uint64_t diagnostic_session) {
+        const void *handle, std::uint64_t command, std::uint64_t diagnostic_session,
+        bool capture_suppressed_by_depth_owner = false) {
       namespace diagnostic = sunshine_game3d::diagnostic;
       using kind = diagnostic::parameter_type;
       diagnostic::ngx_evaluation out;
       out.observation = {diagnostic_session, frame.epoch, frame.sequence, frame.tick, 0, 0, command, UINT32_MAX, false};
       out.owner = reinterpret_cast<std::uint64_t>(selected.owner); out.handle = reinterpret_cast<std::uint64_t>(handle);
-      out.source_id = selected.generation; out.scene_revision = frame.feedback.revision; out.feature_known = selected.handle != nullptr;
+      out.source_id = selected.parameters.valid && !capture_suppressed_by_depth_owner ? selected.generation : 0;
+      out.scene_revision = frame.feedback.revision; out.feature_known = selected.handle != nullptr;
       out.feature = selected.parameters.feature; out.create_width = selected.parameters.width;
       out.create_height = selected.parameters.height; out.create_flags = selected.parameters.flags;
+      out.metadata_unavailable = selected.handle && !selected.parameters.valid;
+      out.capture_suppressed_by_depth_owner = capture_suppressed_by_depth_owner;
       const auto probe = [&](const char *name, kind type) {
         if (out.parameter_count == out.parameters.size()) { out.truncated = true; return; }
         auto &p = out.parameters[out.parameter_count++];
@@ -131,8 +137,19 @@ namespace sunshine_ngx {
       for (const auto &entry : sunshine_game3d::ui_resources::catalog) {
         if (entry.source == sunshine_game3d::ui_resources::provider::ngx) probe(entry.parameter_key, kind::resource);
       }
+      for (const auto &entry : sunshine_game3d::ui_resources::catalog) {
+        if (!entry.parameter_subrect_prefix) continue;
+        for (const auto *suffix : {"BaseX", "BaseY", "Width", "Height"}) {
+          char key[64]{};
+          std::snprintf(key, sizeof(key), "%s%s", entry.parameter_subrect_prefix, suffix);
+          probe(key, kind::unsigned_integer);
+        }
+      }
+      // A boolean HDR flag alone does not identify PQ vs scRGB; preserve it as
+      // evidence without assigning a transfer function to the captured pixels.
+      probe("DLSSG.ColorBuffersHDR", kind::unsigned_integer);
       for (const char *name : {"WorldToViewMatrix", "ViewToClipMatrix", "InvViewProjectionMatrix", "ClipToPrevClipMatrix"}) probe(name, kind::pointer);
-      for (const char *name : {"Width", "Height", "OutWidth", "OutHeight", "Color.Format", "Output.Format",
+      for (const char *name : {"DLSS.Use.HW.Depth", "Width", "Height", "OutWidth", "OutHeight", "Color.Format", "Output.Format",
           "DLSS.Render.Subrect.Dimensions.Width", "DLSS.Render.Subrect.Dimensions.Height",
           "DLSS.Input.Color.Subrect.Base.X", "DLSS.Input.Color.Subrect.Base.Y", "DLSS.Input.Depth.Subrect.Base.X", "DLSS.Input.Depth.Subrect.Base.Y",
           "DLSS.Input.MV.Subrect.Base.X", "DLSS.Input.MV.Subrect.Base.Y", "DLSS.Output.Subrect.Base.X", "DLSS.Output.Subrect.Base.Y"}) probe(name, kind::unsigned_integer);
@@ -245,14 +262,15 @@ namespace sunshine_ngx {
     AcquireSRWLockExclusive(&calibration_lock);
     calibration_slots = {};
     ReleaseSRWLockExclusive(&calibration_lock);
-    evaluations = recorded = unknown = missing_parameters = failed = feature_overflow = 0;
+    evaluations = nominations = copy_recorded = metadata_only = unknown = missing_parameters = failed = feature_overflow = 0;
     next_report = 0;
+    rejected_captures = 0;
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
-    rejected_captures = reported_rejections = 0;
+    reported_rejections = 0;
+#endif
     AcquireSRWLockExclusive(&rejection_lock);
     last_rejection = {};
     ReleaseSRWLockExclusive(&rejection_lock);
-#endif
     if (requested) active_epoch.store(++next_epoch, std::memory_order_release);
     ReleaseSRWLockExclusive(&feature_lock);
   }
@@ -264,7 +282,18 @@ namespace sunshine_ngx {
     creation value;
     value.epoch = epoch();
     value.feature = feature_id;
-    if (!value.epoch || feature_id != super_sampling || !api || !parameters) return value;
+    if (!value.epoch || !api || !parameters) return value;
+    unsigned hardware_depth{};
+    const bool explicit_encoding = get_uint(api, parameters, "DLSS.Use.HW.Depth", hardware_depth);
+    if (explicit_encoding) {
+      if (hardware_depth > 1) return value;
+      value.encoding = hardware_depth ? sunshine_scene_depth::depth_encoding::device :
+        sunshine_scene_depth::depth_encoding::linear_distance;
+    } else if (feature_id != super_sampling) {
+      // Every feature is registered. SR's documented input is device depth;
+      // other features need an explicit encoding before pixels can be used.
+      return value;
+    }
     value.valid = success(api.integer(const_cast<void *>(parameters), "DLSS.Feature.Create.Flags", &value.flags)) &&
       get_uint(api, parameters, "Width", value.width) && get_uint(api, parameters, "Height", value.height) &&
       valid_dimension(value.width) && valid_dimension(value.height);
@@ -279,10 +308,9 @@ namespace sunshine_ngx {
     AcquireSRWLockExclusive(&feature_lock);
     if (value.epoch == active_epoch.load(std::memory_order_acquire)) {
       if (!handle) features = {}; // Unreadable output cannot preserve old identities.
-      else if (auto *entry = find_feature(owner, handle, value.valid)) {
-        if (value.valid) *entry = {owner, handle, value, ++next_feature, 1};
-        else *entry = {};
-      } else if (value.valid) ++feature_overflow;
+      else if (auto *entry = find_feature(owner, handle, true))
+        *entry = {owner, handle, value, ++next_feature, 1};
+      else ++feature_overflow;
     }
     ReleaseSRWLockExclusive(&feature_lock);
   }
@@ -306,11 +334,16 @@ namespace sunshine_ngx {
 #endif
   }
   evaluation before_evaluate(HMODULE owner, const parameter_api &api, std::uint64_t command,
-      const void *handle, const void *parameters) {
+      const void *handle, const void *parameters, bool capture_depth, bool observe_diagnostics) {
     preserve_error error;
     evaluation attempt;
     attempt.epoch = epoch();
     if (!attempt.epoch || !api || !parameters || !command || !handle) return attempt;
+    const auto diagnostic_session = observe_diagnostics ? sunshine_game3d::diagnostic_metadata_generation() : 0;
+    // An enclosing SL owner still owns all depth work. Only an explicitly armed
+    // dump may query this nested NGX call, without committing resets, advancing
+    // source ordering or invoking optional-resource copy callbacks.
+    if (!capture_depth && !diagnostic_session) return attempt;
     feature selected;
     unsigned selected_slot{};
     // Missing a read is one missed frame, not evidence that feature lifetimes
@@ -321,18 +354,30 @@ namespace sunshine_ngx {
       selected_slot = static_cast<unsigned>(entry - features.data());
     }
     ReleaseSRWLockShared(&feature_lock);
-    if (!selected.handle || selected.parameters.epoch != attempt.epoch) {
-      ++unknown;
-      const auto diagnostic_session = sunshine_game3d::diagnostic_metadata_generation();
+    if (!capture_depth) {
+      if (selected.parameters.epoch != attempt.epoch) selected = {};
+      selected.owner = owner;
+      sunshine_scene_depth::frame diagnostic_frame;
+      diagnostic_frame.epoch = attempt.epoch;
+      diagnostic_frame.sequence = ++unknown_diagnostic_sequence;
+      diagnostic_frame.tick = GetTickCount64();
+      attempt.capture_suppressed_by_depth_owner = true;
+      attempt.diagnostic_observation = observe_dump_parameters(api, parameters, diagnostic_frame,
+        selected, handle, command, diagnostic_session, true);
+      return attempt;
+    }
+    if (!selected.handle || selected.parameters.epoch != attempt.epoch || !selected.parameters.valid) {
+      if (!selected.handle || selected.parameters.epoch != attempt.epoch) { ++unknown; selected = {}; }
+      else ++missing_parameters;
       if (diagnostic_session) {
-        // A late add-on can miss CreateFeature while actual evaluations still
-        // expose useful parameters. Observe those arguments for this dump only;
-        // do not infer a feature, source ID, reset revision or capture ticket.
+        // Late attachment can miss CreateFeature; other features can expose
+        // incomplete creation metadata. Preserve observed identity and named
+        // parameters, without inventing capture metadata or a capture ticket.
         sunshine_scene_depth::frame diagnostic_frame;
         diagnostic_frame.epoch = attempt.epoch;
         diagnostic_frame.sequence = ++unknown_diagnostic_sequence;
         diagnostic_frame.tick = GetTickCount64();
-        feature diagnostic_feature;
+        feature diagnostic_feature = selected;
         diagnostic_feature.owner = owner;
         attempt.diagnostic_observation = observe_dump_parameters(api, parameters, diagnostic_frame, diagnostic_feature, handle, command, diagnostic_session);
       }
@@ -365,10 +410,11 @@ namespace sunshine_ngx {
     ReleaseSRWLockExclusive(&feature_lock);
     if (!value.sequence) return attempt;
     value.tick = GetTickCount64();
-    const auto diagnostic_session = sunshine_game3d::diagnostic_metadata_generation();
     if (diagnostic_session)
       attempt.diagnostic_observation = observe_dump_parameters(api, parameters, value, selected, handle, command, diagnostic_session);
-    value.projection.reversed = (selected.parameters.flags & inverted_depth) != 0;
+    value.projection.encoding = selected.parameters.encoding;
+    value.projection.reversed = value.projection.encoding == sunshine_scene_depth::depth_encoding::device &&
+      (selected.parameters.flags & inverted_depth) != 0;
     value.projection.direction_supplied = true;
     // NGX names the resource, but does not supply its current D3D12 state.
     // The shared copy owner decides whether its own state evidence is usable.
@@ -428,25 +474,44 @@ namespace sunshine_ngx {
         ReleaseSRWLockShared(&feature_lock);
       }
     }
+    sunshine_streamline::depth_capture::record_diagnostic diagnostic;
+    bool retaining = false;
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
     if (backend.record) attempt.ticket = backend.record(command, value);
+    attempt.capture_authority = attempt.ticket && (!backend.capture_recorded || backend.capture_recorded(attempt.ticket));
+    diagnostic.result = attempt.capture_authority ? sunshine_streamline::depth_capture::status::recorded :
+      sunshine_streamline::depth_capture::status::unavailable;
+    if (backend.describe_record) {
+      backend.describe_record(attempt.ticket, diagnostic);
+      attempt.capture_authority = attempt.ticket && diagnostic.result == sunshine_streamline::depth_capture::status::recorded;
+    }
 #else
     depth_capture::input input;
     static_cast<sunshine_scene_depth::frame &>(input) = value;
-    depth_capture::record_diagnostic diagnostic;
     input.source = depth_capture::retain_source(value.resource.native, &diagnostic);
     input.source_present_generation = depth_capture::source_present_generation(input.source);
     if (input.source) {
       attempt.ticket = depth_capture::nominate(command, input, &diagnostic);
-      if (!attempt.ticket) remember_rejection(value, diagnostic, false);
+      attempt.capture_authority = attempt.ticket && diagnostic.result == depth_capture::status::recorded;
     } else {
       // Preserve the existing admission/status path; retain_source's own
       // diagnostic explains why the subsequent missing-source record fails.
       attempt.ticket = depth_capture::nominate(command, input);
-      remember_rejection(value, diagnostic, true);
+      retaining = true;
     }
 #endif
-    if (attempt.ticket) ++recorded;
+    // A failed pixel copy can still yield a valid metadata-only nomination.
+    // Preserve that admission failure even though its SDK/submission ticket
+    // must continue through after_evaluate; ticket presence is not pixel proof.
+    if (diagnostic.result != sunshine_streamline::depth_capture::status::recorded)
+      remember_rejection(value, diagnostic, retaining, attempt.ticket);
+    // Keep completing metadata-only nominations, but only a recorded copy or
+    // authenticated shared preservation may suppress a nested usable input.
+    if (attempt.ticket) {
+      ++nominations;
+      if (attempt.capture_authority) ++copy_recorded;
+      else ++metadata_only;
+    }
     return attempt;
   }
   void after_evaluate(const evaluation &value, bool successful) {
@@ -455,7 +520,8 @@ namespace sunshine_ngx {
     // must not reenter the capture owner's already destructing containers.
     if (sunshine_addon_lifetime::stopping()) return;
     if (value.diagnostic_observation.session)
-      sunshine_game3d::diagnostic::finish_ngx(value.diagnostic_observation, value.source_id, successful);
+      sunshine_game3d::diagnostic::finish_ngx(value.diagnostic_observation, value.source_id, successful,
+        value.capture_suppressed_by_depth_owner);
     if (!value.observed) return;
     bool current = false;
     if (value.epoch == active_epoch.load(std::memory_order_acquire) && TryAcquireSRWLockShared(&feature_lock)) {
@@ -481,7 +547,7 @@ namespace sunshine_ngx {
     const auto now = GetTickCount64();
     if (now < next_report) return;
     next_report = now + 5000;
-    unsigned count = 0;
+    unsigned count = 0, capture_eligible = 0;
     std::array<calibration_observation, max_features> probes;
     unsigned probe_count = 0;
     AcquireSRWLockShared(&feature_lock);
@@ -489,6 +555,7 @@ namespace sunshine_ngx {
     for (unsigned i = 0; i < features.size(); ++i) {
       const auto &value = features[i];
       count += value.handle != nullptr;
+      capture_eligible += value.handle && value.parameters.valid;
       if (read_probes) {
         auto &slot = calibration_slots[i];
         if (value.handle && slot.source_id == value.generation && slot.observation.sequence > slot.reported_sequence) {
@@ -500,10 +567,11 @@ namespace sunshine_ngx {
     if (read_probes) ReleaseSRWLockExclusive(&calibration_lock);
     ReleaseSRWLockShared(&feature_lock);
     for (unsigned i = 0; i < probe_count; ++i) report_calibration(probes[i]);
-    char message[400]{};
+    char message[512]{};
     std::snprintf(message, sizeof(message),
-      "Sunshine NGX depth: confirmed_features=%u evaluations=%llu recorded=%llu unknown_feature=%llu missing_parameters=%llu failed=%llu feature_capacity_loss=%llu; D3D12 DLSS, named parameter exports, shared copy owner",
-      count, static_cast<unsigned long long>(evaluations.load()), static_cast<unsigned long long>(recorded.load()),
+      "Sunshine NGX depth: confirmed_features=%u capture_eligible=%u evaluations=%llu nominations=%llu copy_recorded=%llu metadata_only=%llu unknown_feature=%llu missing_parameters=%llu failed=%llu feature_capacity_loss=%llu; D3D12 NGX, named parameter exports, shared copy owner; recorded work is not completed pixels",
+      count, capture_eligible, static_cast<unsigned long long>(evaluations.load()), static_cast<unsigned long long>(nominations.load()),
+      static_cast<unsigned long long>(copy_recorded.load()), static_cast<unsigned long long>(metadata_only.load()),
       static_cast<unsigned long long>(unknown.load()), static_cast<unsigned long long>(missing_parameters.load()),
       static_cast<unsigned long long>(failed.load()), static_cast<unsigned long long>(feature_overflow.load()));
     reshade::log::message(reshade::log::level::info, message);
@@ -516,13 +584,14 @@ namespace sunshine_ngx {
         reported_rejections = rejected_count;
         const auto &d = snapshot.diagnostic;
         const auto observer = sunshine_streamline::native_observer::counts();
-        char rejected[1600]{};
+        char rejected[1900]{};
         std::snprintf(rejected, sizeof(rejected),
-          "Sunshine NGX capture rejection: count=%llu operation=%s result=%s stage=%s loss=%s source=%llu sequence=%llu command=0x%llx cookie=%llu type=%u resource=0x%llx dimensions=%ux%u format=%u flags=0x%x dimension=%u mips=%u layers=%u samples=%u area=%u,%u,%u,%u state=0x%x observed_state=0x%x observed=%u blocked=%u closed=%u invalid=%u render_pass=%u generation=%llu/%llu device=%llu/%llu; observer calls=%llu observed=%llu unreadable=%llu dropped=%llu installed=%llu/%llu rejected=%llu barrier_overflow=%llu submission_overflow=%llu discovery_contention=%llu",
+          "Sunshine NGX capture rejection: count=%llu operation=%s result=%s stage=%s loss=%s source=%llu sequence=%llu nomination_ticket=%llu command=0x%llx cookie=%llu type=%u resource=0x%llx dimensions=%ux%u format=%u flags=0x%x dimension=%u mips=%u layers=%u samples=%u area=%u,%u,%u,%u state=0x%x observed_state=0x%x observed=%u blocked=%u closed=%u invalid=%u render_pass=%u generation=%llu/%llu device=%llu/%llu; recording barriers=%llu transitions=%llu tracked_sources=%llu last_barrier_command=0x%llx source_cookie=%llu; observer calls=%llu observed=%llu unreadable=%llu dropped=%llu installed=%llu/%llu rejected=%llu barrier_overflow=%llu submission_overflow=%llu discovery_contention=%llu",
           static_cast<unsigned long long>(rejected_count), snapshot.retaining ? "retain_source" : "nominate",
           sunshine_streamline::depth_capture::name(d.result), sunshine_streamline::depth_capture::name(d.stage),
           sunshine_streamline::depth_capture::name(d.loss), static_cast<unsigned long long>(snapshot.source_id),
-          static_cast<unsigned long long>(snapshot.sequence), static_cast<unsigned long long>(d.command),
+          static_cast<unsigned long long>(snapshot.sequence), static_cast<unsigned long long>(snapshot.nomination_ticket),
+          static_cast<unsigned long long>(d.command),
           static_cast<unsigned long long>(d.recording_cookie), d.command_type, static_cast<unsigned long long>(d.resource),
           d.width, d.height, d.format, d.flags, d.dimension, d.mip_levels, d.array_size, d.samples,
           snapshot.area.left, snapshot.area.top, snapshot.area.width, snapshot.area.height,
@@ -530,6 +599,9 @@ namespace sunshine_ngx {
           d.recording_invalid ? 1 : 0, d.render_pass ? 1 : 0,
           static_cast<unsigned long long>(d.expected_generation), static_cast<unsigned long long>(d.current_generation),
           static_cast<unsigned long long>(d.expected_device_identity), static_cast<unsigned long long>(d.device_identity),
+          static_cast<unsigned long long>(d.native_barrier_calls), static_cast<unsigned long long>(d.native_transition_count),
+          static_cast<unsigned long long>(d.tracked_source_count), static_cast<unsigned long long>(d.last_barrier_command),
+          static_cast<unsigned long long>(d.source_cookie),
           static_cast<unsigned long long>(observer.calls), static_cast<unsigned long long>(observer.observed),
           static_cast<unsigned long long>(observer.unreadable), static_cast<unsigned long long>(observer.dropped),
           static_cast<unsigned long long>(observer.installed), static_cast<unsigned long long>(observer.targets),
@@ -541,6 +613,17 @@ namespace sunshine_ngx {
 #endif
   }
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
-  namespace testing { void set_callbacks(callbacks value) { backend = value; } }
+  namespace testing {
+    void set_callbacks(callbacks value) { backend = value; }
+    bool last_capture_rejection(sunshine_streamline::depth_capture::record_diagnostic &out,
+        std::uint64_t &nomination_ticket) {
+      AcquireSRWLockShared(&rejection_lock);
+      out = last_rejection.diagnostic;
+      nomination_ticket = last_rejection.nomination_ticket;
+      const bool available = last_rejection.sequence != 0;
+      ReleaseSRWLockShared(&rejection_lock);
+      return available;
+    }
+  }
 #endif
 }

@@ -25,6 +25,10 @@ namespace sunshine_streamline::native_observer {
     // state proof until Reset; no enhanced-layout interpretation is invented.
     void (*invalidated_command)(std::uint64_t command, std::uint64_t cookie){};
     void (*render_pass)(std::uint64_t command, std::uint64_t cookie, bool inside){};
+    // Called at native operation entry, before forwarding, only for an object
+    // without a recording cookie. The owner may authenticate a new recording;
+    // post-call evidence freezes its returned identity across any later Reset.
+    void (*associate_recording)(std::uint64_t command, std::uint64_t *cookie){};
   };
   struct counters {
     std::uint64_t calls{}, observed{}, unreadable{}, dropped{}, targets{}, installed{}, rejected{}, nested{}, suppressed{};
@@ -61,6 +65,9 @@ namespace sunshine_streamline::native_observer {
   // Zero means unassociated; owner supplies a unique nonzero recording cookie.
   bool set_recording_cookie(std::uint64_t command, std::uint64_t cookie);
   std::uint64_t get_recording_cookie(std::uint64_t command);
+  // Exact absence only. Malformed private data and driver errors are not a new
+  // recording and must never permit lazy identity creation.
+  bool recording_cookie_absent(std::uint64_t command);
 
   // Callbacks automatically suppress nested observer notifications. Use this
   // scope around capture-issued native work outside a callback as well.

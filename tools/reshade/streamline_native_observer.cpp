@@ -56,6 +56,7 @@ namespace sunshine_streamline::native_observer {
     std::atomic<decltype(callbacks::invalidated)> invalidated_callback{};
     std::atomic<decltype(callbacks::invalidated_command)> invalidated_command_callback{};
     std::atomic<decltype(callbacks::render_pass)> render_pass_callback{};
+    std::atomic<decltype(callbacks::associate_recording)> associate_recording_callback{};
     std::atomic<std::uint64_t> calls{}, observed{}, unreadable{}, dropped{}, installed{}, rejected{}, nested{}, suppressed{};
     std::atomic<std::uint64_t> barrier_overflow{}, submission_overflow{}, discovery_contention{};
     thread_local unsigned suppression_depth{};
@@ -134,6 +135,13 @@ namespace sunshine_streamline::native_observer {
       invalidate();
     }
 
+    std::uint64_t operation_cookie(std::uint64_t command) {
+      auto cookie = get_recording_cookie(command);
+      if (!cookie && recording_cookie_absent(command))
+        notify(associate_recording_callback.load(std::memory_order_acquire), command, &cookie);
+      return cookie;
+    }
+
     template<unsigned Index> void STDMETHODCALLTYPE barrier_detour(ID3D12GraphicsCommandList *command,
         UINT count, const D3D12_RESOURCE_BARRIER *values) {
       const DWORD incoming = GetLastError();
@@ -144,7 +152,7 @@ namespace sunshine_streamline::native_observer {
       std::uint64_t cookie{};
       bool complete = true, allocated = true;
       if (call.eligible) {
-        cookie = get_recording_cookie(reinterpret_cast<std::uintptr_t>(command));
+        cookie = operation_cookie(reinterpret_cast<std::uintptr_t>(command));
         allocated = copied.prepare(count);
         complete = allocated && (!count || read_elements(values, 0, count, copied.data()));
       }
@@ -171,7 +179,7 @@ namespace sunshine_streamline::native_observer {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::close)][Index];
       invocation call(method::close, slot.status.load(std::memory_order_acquire));
-      const auto cookie = call.eligible ? get_recording_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
+      const auto cookie = call.eligible ? operation_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
       SetLastError(incoming);
       const HRESULT result = reinterpret_cast<close_fn>(slot.original.load(std::memory_order_acquire))(command);
       const restore_error outgoing{GetLastError()};
@@ -215,7 +223,7 @@ namespace sunshine_streamline::native_observer {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::bundle)][Index];
       invocation call(method::bundle, slot.status.load(std::memory_order_acquire));
-      const auto cookie = call.eligible ? get_recording_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
+      const auto cookie = call.eligible ? operation_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
       SetLastError(incoming);
       reinterpret_cast<bundle_fn>(slot.original.load(std::memory_order_acquire))(command, bundle);
       const restore_error outgoing{GetLastError()};
@@ -225,7 +233,7 @@ namespace sunshine_streamline::native_observer {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::enhanced)][Index];
       invocation call(method::enhanced, slot.status.load(std::memory_order_acquire));
-      const auto cookie = call.eligible ? get_recording_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
+      const auto cookie = call.eligible ? operation_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
       SetLastError(incoming);
       reinterpret_cast<enhanced_fn>(slot.original.load(std::memory_order_acquire))(command, count, groups);
       const restore_error outgoing{GetLastError()};
@@ -236,7 +244,7 @@ namespace sunshine_streamline::native_observer {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::begin_pass)][Index];
       invocation call(method::begin_pass, slot.status.load(std::memory_order_acquire));
-      const auto cookie = call.eligible ? get_recording_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
+      const auto cookie = call.eligible ? operation_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
       SetLastError(incoming);
       reinterpret_cast<begin_pass_fn>(slot.original.load(std::memory_order_acquire))(command, count, render_targets, depth, flags);
       const restore_error outgoing{GetLastError()};
@@ -246,7 +254,7 @@ namespace sunshine_streamline::native_observer {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::end_pass)][Index];
       invocation call(method::end_pass, slot.status.load(std::memory_order_acquire));
-      const auto cookie = call.eligible ? get_recording_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
+      const auto cookie = call.eligible ? operation_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
       SetLastError(incoming);
       reinterpret_cast<end_pass_fn>(slot.original.load(std::memory_order_acquire))(command);
       const restore_error outgoing{GetLastError()};
@@ -381,6 +389,7 @@ namespace sunshine_streamline::native_observer {
     invalidated_callback.store(value.invalidated, std::memory_order_release);
     invalidated_command_callback.store(value.invalidated_command, std::memory_order_release);
     render_pass_callback.store(value.render_pass, std::memory_order_release);
+    associate_recording_callback.store(value.associate_recording, std::memory_order_release);
     requested.store(true, std::memory_order_release);
   }
   void set_active(bool value) {
@@ -476,6 +485,14 @@ namespace sunshine_streamline::native_observer {
     std::uint64_t cookie{};
     return SUCCEEDED(object->lpVtbl->GetPrivateData(object, recording_guid, &size, &cookie)) && size == sizeof(cookie) ? cookie : 0;
   }
+  bool recording_cookie_absent(std::uint64_t command) {
+    if (sunshine_addon_lifetime::stopping() || !command) return false;
+    const restore_error incoming{GetLastError()};
+    auto *object = reinterpret_cast<ID3D12Object *>(command);
+    UINT size = sizeof(std::uint64_t);
+    std::uint64_t cookie{};
+    return object->lpVtbl->GetPrivateData(object, recording_guid, &size, &cookie) == DXGI_ERROR_NOT_FOUND;
+  }
   counters counts() {
     counters result{calls.load(), observed.load(), unreadable.load(), dropped.load(), 0, installed.load(), rejected.load(), nested.load(), suppressed.load(),
       barrier_overflow.load(), submission_overflow.load(), discovery_contention.load()};
@@ -511,7 +528,7 @@ namespace sunshine_streamline::native_observer {
     calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = 0;
     barrier_overflow = submission_overflow = discovery_contention = 0;
     barrier_callback = nullptr; reset_callback = nullptr; close_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;
-    invalidated_command_callback = nullptr; render_pass_callback = nullptr;
+    invalidated_command_callback = nullptr; render_pass_callback = nullptr; associate_recording_callback = nullptr;
   }
 #endif
 }

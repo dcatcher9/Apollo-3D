@@ -18,6 +18,7 @@ namespace {
   struct options_prefix { base_structure base; std::uint32_t mode{}, generated_frames{}; };
   static_assert(sizeof(options_prefix) == 40);
   std::atomic<std::int32_t> tag_result{};
+  std::atomic<std::int32_t> options_result{};
   std::atomic<HANDLE> tag_entered{},tag_release{};
   alignas(void *) unsigned char token_storage[16]{};
   // Observable work gives every exported boundary a real, distinct prologue.
@@ -41,11 +42,16 @@ FG_FIXTURE_EXPORT std::int32_t slSetConstants(const abi_v2::constants &, const a
 FG_FIXTURE_EXPORT std::int32_t slSetTag(const abi_v2::viewport &, const abi_v2::resource_tag *, std::uint32_t, void *) {
   calls[1].fetch_add(1,std::memory_order_relaxed);return finish_tag();
 }
+#ifndef SUNSHINE_SL_LEGACY_V2_FIXTURE
 FG_FIXTURE_EXPORT std::int32_t slSetTagForFrame(const abi_v2::frame_token &, const abi_v2::viewport &, const abi_v2::resource_tag *, std::uint32_t, void *) {
   calls[2].fetch_add(1,std::memory_order_relaxed);return finish_tag();
 }
+#endif
 FG_FIXTURE_EXPORT void SunshineFixtureSetTagResult(std::int32_t result) {
   calls[3].fetch_add(1,std::memory_order_relaxed);tag_result.store(result,std::memory_order_release);
+}
+FG_FIXTURE_EXPORT void SunshineFixtureSetOptionsResult(std::int32_t result) {
+  options_result.store(result,std::memory_order_release);
 }
 FG_FIXTURE_EXPORT void SunshineFixtureBlockNextTag(HANDLE entered,HANDLE release) {
   tag_release.store(release,std::memory_order_release);
@@ -62,7 +68,7 @@ FG_FIXTURE_EXPORT std::int32_t slEvaluateFeature(std::uint32_t, const abi_v2::fr
 }
 FG_FIXTURE_EXPORT std::int32_t slDLSSGSetOptions(const abi_v2::viewport &, const options_prefix &options) {
   calls[6].fetch_add(1,std::memory_order_relaxed);
-  return options.mode <= 2 && (!options.mode || options.generated_frames) ? 0 : 1;
+  return options.mode <= 2 && (!options.mode || options.generated_frames) ? options_result.load(std::memory_order_acquire) : 1;
 }
 FG_FIXTURE_EXPORT std::int32_t slGetFeatureFunction(std::uint32_t feature, const char *name, void *&function) {
   calls[7].fetch_add(1,std::memory_order_relaxed);

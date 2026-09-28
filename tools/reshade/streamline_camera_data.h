@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Narrow ABI declarations adapted from NVIDIA Streamline, Copyright (c) 2022-2024 NVIDIA CORPORATION.
-// Pinned sources: v1.1.1 (5bac43f464f53bc0583bab8df506b788d8d14c3c),
-// v2.7.30 (4bcd1fbe8d4f38b50ec86817f1f7cecc55db9779), include/sl_consts.h,
-// sl_core_types.h, sl_struct.h, sl.h, sl_core_api.h and sl_pcl.h. See streamline_camera_license.txt.
+// Sources: public v1.0.0 through v2.14.1, include/sl_consts.h, sl_core_types.h,
+// sl_struct.h, sl.h, sl_core_api.h and sl_pcl.h. ABI boundaries and pinned
+// revisions: docs/reshade-sbs.md, "Streamline ABI compatibility".
+// See streamline_camera_license.txt and test_streamline_sdk_abi.cpp.
 // Windows x64 observation ABI. Only the documented feature-function lookup is
 // called for hook discovery; observers never enable or evaluate SDK features.
 #pragma once
@@ -34,6 +35,19 @@ namespace sunshine_streamline {
       const void *ext{};
     };
     struct resource { std::uint8_t type{}; void *native{}, *memory{}, *view{}; std::uint32_t state{}; void *ext{}; };
+    struct resource_without_state { std::uint8_t type{}; void *native{}, *memory{}, *view{}, *ext{}; };
+    // Read exactly the selected ABI allocation. Normalize the absent legacy
+    // state to zero (requires observed state), never read its extension as one.
+    template<class Read> bool read_resource(const void *source, bool has_state, resource &out, Read &&read) {
+      out = {};
+      if (!source) return true;
+      if (has_state) return read(source, &out, sizeof(out));
+      resource_without_state early{};
+      if (!read(source, &early, sizeof(early))) return false;
+      out.type = early.type; out.native = early.native; out.memory = early.memory;
+      out.view = early.view; out.ext = early.ext;
+      return true;
+    }
     using set_constants = bool (*)(const constants &, std::uint32_t frame, std::uint32_t viewport);
     using set_tag = bool (*)(const resource *, std::uint32_t type, std::uint32_t viewport, const extent *);
     using evaluate_feature = bool (*)(void *commands, std::uint32_t feature, std::uint32_t frame, std::uint32_t viewport);
@@ -55,6 +69,10 @@ namespace sunshine_streamline {
     };
     struct resource_tag { base_structure base; const resource *resource_ptr{}; std::uint32_t type{}, lifecycle{}; extent area; };
     struct viewport { base_structure base; std::uint32_t value{}; };
+    // Options versions 1-5 share this prefix. Dynamic mode requests an
+    // adaptive multiplier; this count is never proof of generated presents.
+    struct fg_options_prefix { base_structure base; std::uint32_t mode{}, generated_frames{}; };
+    using fg_set_options = std::int32_t (*)(const viewport &, const fg_options_prefix &);
     // FrameToken has a virtual conversion operator. Do not declare or call that operator across
     // compilers: keep its address opaque. A reused token address is not a frame number.
     struct frame_token;
@@ -73,12 +91,14 @@ namespace sunshine_streamline {
   static_assert(sizeof(base_structure) == 32 && sizeof(common_constants) == 412);
   static_assert(sizeof(abi_v1::constants) == 432 && offsetof(abi_v1::constants, ext) == 424);
   static_assert(sizeof(abi_v1::resource) == 48 && offsetof(abi_v1::resource, native) == 8);
+  static_assert(sizeof(abi_v1::resource_without_state) == 40 && offsetof(abi_v1::resource_without_state, ext) == 32);
   static_assert(sizeof(abi_v2::constants) == 456 && offsetof(abi_v2::constants, depth_inverted) == 444);
   static_assert(sizeof(abi_v2::resource) == 112 && offsetof(abi_v2::resource, native) == 40);
   static_assert(sizeof(abi_v2::resource_tag) == 64 && sizeof(abi_v2::viewport) == 40);
+  static_assert(sizeof(abi_v2::fg_options_prefix) == 40);
   static_assert(std::is_trivially_copyable_v<abi_v1::constants> && std::is_trivially_copyable_v<abi_v2::constants>);
   static_assert(std::is_trivially_copyable_v<abi_v2::viewport>);
-  // Verified against independently compiled, unmodified headers at the two pinned revisions.
+  // Checked against official SDK headers by test_streamline_sdk_abi.cpp.
   static_assert(offsetof(common_constants, clip_to_camera_view) == 64 && offsetof(common_constants, jitter_offset) == 320);
   static_assert(offsetof(common_constants, camera_near) == 392);
   static_assert(offsetof(abi_v1::constants, not_rendering_game_frames) == 416 && offsetof(abi_v1::constants, orthographic_projection) == 417);

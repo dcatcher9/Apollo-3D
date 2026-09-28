@@ -57,7 +57,7 @@ namespace sunshine_streamline::depth_capture {
         next.observation_revision == before.observation_revision &&
         before.feedback.revision && next.feedback.revision == before.feedback.revision &&
         !before.feedback.reset && !next.feedback.reset &&
-        a.supplied == b.supplied && a.direction_supplied == b.direction_supplied && a.reversed == b.reversed &&
+        a.encoding == b.encoding && a.supplied == b.supplied && a.direction_supplied == b.direction_supplied && a.reversed == b.reversed &&
         a.depth_offset == b.depth_offset && a.depth_scale == b.depth_scale && a.raw_scale == b.raw_scale && a.raw_bias == b.raw_bias &&
         same_layout(previous, pending) && next.resource.kind == before.resource.kind &&
         !pending.shared_preservation && !pending.pixel_ready && pending.capture_id &&
@@ -77,6 +77,10 @@ namespace sunshine_streamline::depth_capture {
       const retained_depth &previous, selection_policy policy, std::uint64_t present,
       std::uint64_t now, std::uint64_t observed_sl_revision) {
     display_decision out;
+    if (policy.exclude_unconfirmed_fg && current.source_selected && candidate.metadata.frame_generation_input) {
+      out.reason = "FG_scope_unconfirmed";
+      return out;
+    }
     const bool check_current = current.source_selected &&
       candidate.metadata.provider == sunshine_scene_depth::provider_kind::streamline;
     if (check_current) out.current_check_revision = observed_sl_revision;
@@ -87,6 +91,11 @@ namespace sunshine_streamline::depth_capture {
       return out;
     }
     if (!previous.capture_id) return out;
+
+    if (policy.exclude_unconfirmed_fg && previous.metadata.frame_generation_input) {
+      out.reason = "FG_scope_unconfirmed";
+      return out;
+    }
 
     out.reason = "reuse_not_authorized";
     const bool ngx_pending = current.source_selected && !policy.require_frame_generation &&
@@ -105,6 +114,10 @@ namespace sunshine_streamline::depth_capture {
     }
     if (current.source_selected && !detail::same_layout(previous, candidate)) {
       out.reason = "depth_shape_changed";
+      return out;
+    }
+    if (current.source_selected && previous.metadata.projection.encoding != candidate.metadata.projection.encoding) {
+      out.reason = "depth_encoding_changed";
       return out;
     }
     if (check_retained && previous.metadata.observation_revision != observed_sl_revision) {

@@ -15,6 +15,9 @@
 #define SUNSHINE_UI_CONFLICT_PROBE 1
 #define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1
 #define SUNSHINE_UI_ALPHA_COVERAGE 1
+#define SUNSHINE_UI_MASK_CHANNEL 1
+#define SUNSHINE_UI_AUTOMATIC_DETECTION 1
+#define SUNSHINE_LINEAR_DISTANCE_DEPTH 1
 //
 // Specialize BUFFER_WIDTH, BUFFER_HEIGHT and BUFFER_COLOR_SPACE at compile time.
 // This preserves the original per-resolution group-memory footprint. Color-space
@@ -60,7 +63,7 @@ cbuffer SunshineUIConstants : register(b1)
     uint Sunshine_SourceAlphaUI;
     uint Sunshine_UIPlaneMode;
     float Sunshine_UIPlaneInverseDepth;
-    uint Sunshine_UIReserved;
+    uint Sunshine_UIMaskChannel; // 0 = alpha; 1 = red from an explicit single-channel UIAlpha tag.
 };
 
 Texture2D<float4> SunshineSourceSampler : register(t0);
@@ -73,6 +76,18 @@ Texture2D<float4> SunshineEyeLeftSampler : register(t6);
 Texture2D<float4> SunshineEyeRightSampler : register(t7);
 Texture2D<float> SunshineUIPlaneTilesSampler : register(t8);
 Texture2D<float> SunshineUIPlaneResolvedSampler : register(t9);
+Texture2D<uint4> SunshineUIDetectionSampler : register(t10);
+Texture2D<float4> SunshineUIDedicatedAlpha : register(t11);
+Texture2D<float4> SunshineUIColorAlpha : register(t12);
+Texture2D<float4> SunshineUIBackbufferAlpha : register(t13);
+Texture2D<float4> SunshineHUDless : register(t14);
+cbuffer SunshineUIDetectionConstants : register(b2)
+{
+    uint Sunshine_UICandidates; // bit0..2 captured alpha, bit3 current alpha, bit4 paired HUDless.
+    float Sunshine_UIDifferenceThreshold;
+    uint Sunshine_UIDetectionReserved0;
+    uint Sunshine_UIDetectionReserved1;
+};
 RWTexture2D<float> SunshineHostCandidateStore : register(u0);
 RWTexture2D<float> SunshineHostVerticalMajorantStore : register(u1);
 RWTexture2D<float> SunshineHostVerticalConditionedStore : register(u2);
@@ -95,6 +110,113 @@ bool SunshineCameraFinite(float value)
 {
     return (asuint(value) & 0x7f800000u) != 0x7f800000u;
 }
+float SunshineSelectedUIAlpha(uint2 coordinate)
+{
+    float4 value = SunshineSourceSampler.Load(int3(int2(coordinate), 0));
+    return Sunshine_UIMaskChannel == 1u ? value.r : value.a;
+}
+
+// Auto validates each CURRENT pair on the GPU. No prior CPU observation can
+// authorize a changed candidate. Counts copied to the CPU are diagnostics only.
+float4 SunshineUIDetectionAlpha(uint2 xy)
+{
+    int3 at = int3(xy, 0);
+    return float4(SunshineUIDedicatedAlpha.Load(at).r, SunshineUIColorAlpha.Load(at).a,
+        SunshineUIBackbufferAlpha.Load(at).a, SunshineSourceSampler.Load(at).a);
+}
+float SunshineHUDlessDifference(uint2 xy, out bool valid)
+{
+    float3 a = SunshineSourceSampler.Load(int3(xy, 0)).rgb;
+    float3 b = SunshineHUDless.Load(int3(xy, 0)).rgb;
+    valid = all(isfinite(a)) && all(isfinite(b));
+    // scRGB is unbounded linear light; use a relative tolerance above one.
+    float scale = BUFFER_COLOR_SPACE == 2 ? max(1.0, max(max(abs(a.r), abs(a.g)), abs(a.b))) : 1.0;
+    return max(max(abs(a.r-b.r), abs(a.g-b.g)), abs(a.b-b.b)) / scale;
+}
+groupshared uint4 SunshineUIDetectionCoverage[64];
+groupshared uint4 SunshineUIDetectionInvalid[64];
+groupshared uint4 SunshineUIDetectionDifference[64];
+[numthreads(8, 8, 1)]
+void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
+{
+    uint2 first = group.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
+    uint2 last = (group.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
+    uint4 coverage = 0u, invalid = 0u, difference = 0u;
+    [loop] for (uint y = first.y + thread.y; y < last.y; y += 8u)
+    [loop] for (uint x = first.x + thread.x; x < last.x; x += 8u) {
+        float4 a = SunshineUIDetectionAlpha(uint2(x,y));
+        bool4 okay = isfinite(a) && a >= 0.0 && a <= 1.0;
+        coverage += uint4(okay && a > 0.0);
+        invalid += uint4(!okay);
+        bool finite;
+        float delta = SunshineHUDlessDifference(uint2(x,y), finite);
+        difference.x += finite && delta > Sunshine_UIDifferenceThreshold ? 1u : 0u;
+        difference.y += finite ? 0u : 1u;
+        difference.z += finite && delta <= Sunshine_UIDifferenceThreshold * .5 ? 1u : 0u;
+        difference.w += 1u;
+    }
+    uint lane = thread.y * 8u + thread.x;
+    SunshineUIDetectionCoverage[lane] = coverage;
+    SunshineUIDetectionInvalid[lane] = invalid;
+    SunshineUIDetectionDifference[lane] = difference;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint step = 32u; step; step >>= 1u) {
+        if (lane < step) {
+            SunshineUIDetectionCoverage[lane] += SunshineUIDetectionCoverage[lane+step];
+            SunshineUIDetectionInvalid[lane] += SunshineUIDetectionInvalid[lane+step];
+            SunshineUIDetectionDifference[lane] += SunshineUIDetectionDifference[lane+step];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (!lane) {
+        SunshineAlphaCoverageStore[group.xy] = SunshineUIDetectionCoverage[0];
+        SunshineAlphaCoverageStore[group.xy + uint2(0,16)] = SunshineUIDetectionInvalid[0];
+        SunshineAlphaCoverageStore[group.xy + uint2(0,32)] = SunshineUIDetectionDifference[0];
+    }
+}
+[numthreads(1, 1, 1)]
+void SunshineUIDetectionReduceCS(uint3 id : SV_DispatchThreadID)
+{
+    uint4 coverage = 0u, invalid = 0u, difference = 0u;
+    uint matching_tiles = 0u;
+    [loop] for (uint y = 0u; y < 16u; ++y)
+    [loop] for (uint x = 0u; x < 16u; ++x) {
+        coverage += SunshineUIDetectionSampler.Load(int3(x,y,0));
+        invalid += SunshineUIDetectionSampler.Load(int3(x,y+16u,0));
+        uint4 d = SunshineUIDetectionSampler.Load(int3(x,y+32u,0));
+        difference += d;
+        matching_tiles += d.w && d.z * 100u >= d.w * 99u ? 1u : 0u;
+    }
+    uint source = 0u, covered = 0u;
+    [unroll] for (uint candidate = 0u; candidate < 4u; ++candidate) {
+        // Reject empty, invalid and nearly full-scene alpha. Re-evaluate even
+        // after a valid previous frame; a menu cannot latch an all-scene mask.
+        if (!source && (Sunshine_UICandidates & (1u << candidate)) && !invalid[candidate] &&
+            coverage[candidate] && coverage[candidate] * 10u < difference.w * 9u) {
+            source = candidate + 1u; covered = coverage[candidate];
+        }
+    }
+    // Difference is changed-color support, not uniquely recovered opacity.
+    // Require broad unchanged scene evidence as well as bounded total coverage.
+    if (!source && (Sunshine_UICandidates & 16u) && !difference.y && difference.x &&
+        difference.x * 4u < difference.w && difference.z * 100u >= difference.w * 75u && matching_tiles >= 128u) {
+        source = 5u; covered = difference.x;
+    }
+    SunshineAlphaCoverageStore[uint2(0,0)] = uint4(source, covered, difference.w, matching_tiles);
+}
+[numthreads(8, 8, 1)]
+void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= BUFFER_WIDTH || id.y >= BUFFER_HEIGHT) return;
+    uint source = SunshineUIDetectionSampler.Load(int3(0,0,0)).x;
+    float mask = 0.0;
+    if (source >= 1u && source <= 4u) mask = SunshineUIDetectionAlpha(id.xy)[source-1u];
+    else if (source == 5u) {
+        bool finite;
+        mask = SunshineHUDlessDifference(id.xy, finite) > Sunshine_UIDifferenceThreshold && finite ? 1.0 : 0.0;
+    }
+    SunshineHostCandidateStore[id.xy] = mask;
+}
 
 // Fixed-size exact coverage observation. Every source texel participates; the
 // small result is read asynchronously, independently of whether UI is enabled.
@@ -109,7 +231,7 @@ void SunshineAlphaCoverageCS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_G
     for (uint y = first.y + thread_id.y; y < last.y; y += 8u) {
         [loop]
         for (uint x = first.x + thread_id.x; x < last.x; x += 8u) {
-            float alpha = SunshineSourceSampler.Load(int3(int2(x, y), 0)).a;
+            float alpha = SunshineSelectedUIAlpha(uint2(x, y));
             bool finite = SunshineCameraFinite(alpha);
             counts.x += finite && alpha > 0.0 ? 1u : 0u;
             counts.y += 1u;
@@ -148,7 +270,7 @@ bool SunshineCameraActive()
         any(rect.xy < 0.0) || any(rect.zw <= 0.0) || any(rect.xy + rect.zw > 1.000001))
         return false;
     float A = Sunshine_CameraProjection.x, inverseB = Sunshine_CameraProjection.y;
-    if (Sunshine_CameraCoordinateBasis != 0 && Sunshine_CameraCoordinateBasis != 1)
+    if (Sunshine_CameraCoordinateBasis != 0 && Sunshine_CameraCoordinateBasis != 1 && Sunshine_CameraCoordinateBasis != 2)
         return false;
     if (Sunshine_CameraCoordinateBasis == 1)
     {
@@ -163,6 +285,13 @@ bool SunshineCameraActive()
         return false;
     if (inverseB == 0.0 || K <= 0.0 || referenceZPD <= 0.0 || referenceZPD > 1.0 || zeroInverseDistance < 0.0)
         return false;
+    if (Sunshine_CameraCoordinateBasis == 2)
+    {
+        // Positive linear distances have no camera near endpoint. Validate
+        // each reciprocal and bound displacement before its multiplication.
+        float gain = referenceZPD * K;
+        return SunshineCameraFinite(gain) && SunshineCameraFinite(gain * zeroInverseDistance);
+    }
     // Resource precision may store the hardware-depth [0,1] interval in a
     // different raw range. Decode those actual endpoints without clipping.
     float2 rawRange = SunshineCameraRawDepthRange();
@@ -208,11 +337,27 @@ bool SunshineAutomaticMono()
     return !SunshineCameraFinite(Depth_Adjustment) || Depth_Adjustment <= 0.0 ||
         SunshineAutomaticStrengthBlend() <= 0.0;
 }
+bool SunshineCameraInverseDistance(float rawDepth, out float inverseDistance)
+{
+    // Geometry passes a precise output. Keep visualization non-precise here:
+    // otherwise FXC propagates it through sampled UVs into the eye warp.
+    float affine = (rawDepth - Sunshine_CameraProjection.x) * Sunshine_CameraProjection.y;
+    inverseDistance = affine;
+    if (Sunshine_CameraCoordinateBasis != 2)
+        return SunshineCameraFinite(inverseDistance) && inverseDistance >= 0.0;
+    if (!SunshineCameraFinite(rawDepth) || !SunshineCameraFinite(affine) || affine <= 0.0 || asuint(affine) < 0x00800000u)
+        return false;
+    inverseDistance = 1.0 / affine;
+    return SunshineCameraFinite(inverseDistance) && inverseDistance > 0.0 && asuint(inverseDistance) >= 0x00800000u;
+}
+
 float SunshineCameraDepth(float rawDepth)
 {
-    // Camera basis: q=(raw-A)/B. Raw basis: t=raw or 1-raw. Both share the
-    // same rational visualization only; geometry uses inverse depth directly.
+    // Device, relative raw and reciprocal linear bases share the same
+    // rational visualization; geometry uses decoded inverse depth directly.
     float inverseDistance = (rawDepth - Sunshine_CameraProjection.x) * Sunshine_CameraProjection.y;
+    if (Sunshine_CameraCoordinateBasis == 2)
+        if (!SunshineCameraInverseDistance(rawDepth, inverseDistance)) return 1.0;
     return rcp(1.0 + Sunshine_CameraDepthScale * inverseDistance);
 }
 
@@ -275,7 +420,7 @@ bool SunshineHostWarpActive()
 }
 
 bool SunshineSourceUI(uint x, uint y) {
-    float alpha = SunshineSourceSampler.Load(int3(int2(uint2(x, y)), 0)).a;
+    float alpha = SunshineSelectedUIAlpha(uint2(x, y));
     return SunshineCameraFinite(alpha) && alpha > 0.0;
 }
 
@@ -299,7 +444,9 @@ void SunshineUINearestTilesCS(uint3 id : SV_DispatchThreadID,
         float2 uv = SunshineCameraDepthCoordinates(coordinate, SunshineDepthAllocationSize());
         float raw = DepthBuffer.SampleLevel(SunshinePointBorder, uv, 0).x;
         precise float q = (raw - Sunshine_CameraProjection.x) * Sunshine_CameraProjection.y;
-        if (SunshineCameraFinite(q) && q >= 0.0) nearest = q;
+        bool validDepth = true;
+        if (Sunshine_CameraCoordinateBasis == 2) validDepth = SunshineCameraInverseDistance(raw, q);
+        if (validDepth && SunshineCameraFinite(q) && q >= 0.0) nearest = q;
     }
     SunshineUINearestScratch[lane] = nearest;
     GroupMemoryBarrierWithGroupSync();
@@ -346,11 +493,21 @@ void SunshineHostCandidateCS(uint3 id : SV_DispatchThreadID)
         float2 uv = SunshineCameraDepthCoordinates(coordinate, SunshineDepthAllocationSize());
         float raw = DepthBuffer.SampleLevel(SunshinePointBorder, (float4(uv, 0, 0)).xy, (float4(uv, 0, 0)).w).x;
         precise float q = (raw - Sunshine_CameraProjection.x) * Sunshine_CameraProjection.y;
+        bool validDepth = true;
+        if (Sunshine_CameraCoordinateBasis == 2) validDepth = SunshineCameraInverseDistance(raw, q);
         precise float strength = clamp(Depth_Adjustment, 0.0, 100.0) * 0.01 * SunshineAutomaticStrengthBlend();
         displayLimit = Sunshine_DisparityLimitUv * strength;
         precise float displacement = Sunshine_CameraConvergence.x * Sunshine_CameraDepthScale *
             (Sunshine_CameraConvergence.y - q) * strength;
-        if (SunshineCameraFinite(displacement))
+        if (Sunshine_CameraCoordinateBasis == 2)
+        {
+            float gain = Sunshine_CameraConvergence.x * Sunshine_CameraDepthScale * strength;
+            float delta = Sunshine_CameraConvergence.y - q;
+            // Bound the product using the existing field limits; do not clip
+            // decoded q or overflow before the final display-parallax clamp.
+            displacement = gain > 0.0 ? clamp(delta, -1.5 / gain, 2.5 / gain) * gain : 0.0;
+        }
+        if (validDepth && SunshineCameraFinite(displacement))
             parallax = -clamp(displacement, -1.5, 2.5) * (float(BUFFER_HEIGHT) * rcp(2160.0) * 100.0) / BUFFER_WIDTH;
     }
     // Same signed source-U safety domain as the current Host conditioner.
@@ -980,7 +1137,7 @@ void SunshineUIConflictCS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_Grou
     for (uint y = first.y + thread_id.y; y < last.y; y += 8u) {
         [loop]
         for (uint x = first.x + thread_id.x; x < last.x; x += 8u) {
-            float alpha = SunshineSourceSampler.Load(int3(int2(x, y), 0)).a;
+            float alpha = SunshineSelectedUIAlpha(uint2(x, y));
             b.w += 1u;
             if (!SunshineCameraFinite(alpha) || alpha <= 0.0) continue;
             a.x += 1u;

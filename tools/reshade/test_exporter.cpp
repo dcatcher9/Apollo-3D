@@ -2,6 +2,7 @@
 // Exercise the actual publisher state transitions without loading an add-on into a game.
 #include "exporter.cpp"
 #include "depth_cache_update.h"
+#include "streamline_depth_provider.h"
 
 #include <algorithm>
 #include <atomic>
@@ -204,7 +205,7 @@ namespace {
         "NGX hold admitted an earlier or second missing presentation");
       require(!allowed(previous, pending, info, 101, 1250) && !allowed(previous, pending, info, 101, 999),
         "NGX hold admitted stale depth or a backwards clock");
-      for (unsigned field = 0; field != 35; ++field) {
+      for (unsigned field = 0; field != 36; ++field) {
         auto before = previous;
         auto next = pending;
         auto proof = info;
@@ -244,6 +245,7 @@ namespace {
           case 32: before.metadata.source_id = 0; break;
           case 33: before.metadata.epoch = 0; break;
           case 34: next.capture_id = 0; break;
+          case 35: next.metadata.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance; break;
         }
         require(!allowed(before, next, proof), "Changed, failed, unknown or unsafe NGX input inherited held depth");
       }
@@ -350,6 +352,11 @@ namespace {
       pending.source_selected = true; pending.capture_id = candidate.capture_id;
       require(decide(previous, pending, candidate).action == action::hold,
         "Selected pending FG snapshot could not retain completed private pixels");
+      auto changed_encoding = candidate;
+      changed_encoding.metadata.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
+      const auto incompatible = decide(previous, pending, changed_encoding);
+      require(incompatible.action == action::invalidate && std::strcmp(incompatible.reason, "depth_encoding_changed") == 0,
+        "FG retained pixels across a changed depth encoding");
       for (unsigned field = 0; field != 7; ++field) {
         auto next = candidate;
         switch (field) {
@@ -380,6 +387,49 @@ namespace {
       candidate.metadata.observation_revision = 5; candidate.metadata.feedback.reset = true;
       require(depth_capture::decide_display(pending, candidate, {}, enabled, 101, 1032, 5).action == action::copy_fresh,
         "A valid current reset frame could not establish a fresh private copy");
+
+      provider::frame_generation_policy source_policy;
+      frame_generation_snapshot fg;
+      fg.known = fg.enabled = true; fg.epoch = metadata.epoch; fg.viewport = metadata.viewport; fg.generated_frames = 1;
+      source_policy.update(frame_generation_query_status::observed, fg);
+      const auto excluded = source_policy.update(frame_generation_query_status::ambiguous, {});
+      require(!excluded.require_frame_generation && excluded.exclude_unconfirmed_fg && !excluded.epoch,
+        "Ambiguous FG kept a mandatory missing scope or failed to revoke FG input authority");
+      auto unready_fg = candidate;
+      unready_fg.pixel_ready = false; unready_fg.metadata.observation_revision = 4;
+      unready_fg.metadata.feedback.reset = false;
+      require(decide(previous, pending, unready_fg).action == action::hold,
+        "Revocation fixture did not start with an otherwise eligible pending FG hold");
+      require(depth_capture::decide_display(current, {}, previous, excluded, 101, 1032, 4).action == action::invalidate &&
+          depth_capture::decide_display(pending, unready_fg, previous, excluded, 101, 1032, 4).action == action::invalidate,
+        "Ambiguous FG inherited a repeated or pending previous FG display copy");
+      candidate.metadata.observation_revision = 4;
+      require(depth_capture::decide_display(pending, candidate, previous, excluded, 101, 1032, 4).action == action::invalidate &&
+          depth_capture::decide_display(pending, candidate, {}, excluded, 101, 1032, 4).action == action::invalidate,
+        "Ready old-scope FG pixels bypassed explicit FG exclusion");
+
+      depth_capture::packet fallback;
+      fallback.capture_id = 900; fallback.pixel_ready = true;
+      fallback.width = 1280; fallback.height = 720; fallback.format = 41; fallback.area = {0, 0, 1280, 720};
+      fallback.metadata.provider = sunshine_scene_depth::provider_kind::ngx;
+      fallback.metadata.epoch = 17; fallback.metadata.source_id = 99;
+      fallback.metadata.sequence = 70; fallback.metadata.tick = 1032;
+      fallback.metadata.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
+      fallback.metadata.projection.direction_supplied = true;
+      depth_capture::acquisition_decision fresh;
+      fresh.source_selected = fresh.source_valid = true; fresh.capture_id = fallback.capture_id;
+      fresh.provider = fallback.metadata.provider; fresh.epoch = fallback.metadata.epoch;
+      fresh.source_id = fallback.metadata.source_id; fresh.sequence = fallback.metadata.sequence;
+      fresh.viewport = fallback.metadata.viewport;
+      require(depth_capture::decide_display(fresh, fallback, previous, excluded, 101, 1032, 5).action == action::copy_fresh &&
+          depth_capture::decide_display(fresh, fallback, {}, excluded, 101, 1032, 5).action == action::copy_fresh,
+        "Revoked SL FG scope blocked an independently valid fresh NGX linear-depth copy");
+      const auto busy_fallback = source_policy.update(frame_generation_query_status::busy, {});
+      require(depth_capture::decide_display(fresh, fallback, previous, busy_fallback, 101, 1032, 5).action == action::copy_fresh,
+        "Busy query disabled independently valid fallback after FG revocation");
+      fallback.pixel_ready = false;
+      require(depth_capture::decide_display(fresh, fallback, previous, excluded, 101, 1032, 4).action == action::invalidate,
+        "Pending NGX fallback inherited the former SL FG pixels or encoding");
     }
 
     static void copied_depth_provenance() {
@@ -474,7 +524,7 @@ namespace {
       for (bool generated : {false, true}) {
         frame_decision_t frame;
         frame.depth_ready = frame.reused_depth = true;
-        frame.fg_active = generated;
+        frame.diagnostics.frame_generation_active = generated;
         frame.scene_source = previous.scene_source;
         restore_reused_scene(frame, previous, true);
         require(frame.depth_ready && frame.scene.ready && frame.scene.scale == previous.scene.scale &&
@@ -532,7 +582,7 @@ namespace {
       proof.camera_scale = {104}; proof.camera_zero = {105}; proof.camera_blend = {106};
       proof.frame_strength = 50.f;
       frame_decision_t fresh;
-      fresh.depth_ready = fresh.fg_active = true;
+      fresh.depth_ready = fresh.diagnostics.frame_generation_active = true;
       fresh.scene.owned = fresh.scene.ready = true;
       fresh.scene.basis = 1;
       fresh.scene.scale = 4.f;
@@ -617,8 +667,8 @@ namespace {
           "Legacy FX without camera-rect support accepted padded scene depth");
         proof.camera_rect = {991};
         const auto supported_fx = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, now);
-        require(supported_fx.ready && supported_fx.rect == active_rect,
-          "Legacy FX with camera-rect support lost a valid padded depth scene");
+        require(supported_fx.ready == (scene.basis != 2) && supported_fx.rect == active_rect,
+          "Legacy FX crop support changed affine readiness or admitted unsupported linear depth");
         proof.camera_rect = {};
         proof.addon_native = true;
       };
@@ -754,6 +804,44 @@ namespace {
           matrix.ui.scale.mean_square_inverse > 0.,
         "Camera resolver did not publish captured projection statistics in zero-plane units");
       check_native_crop(matrix, 2751);
+      // Explicit linear distance routes independently of camera evidence. Old
+      // FX has no reciprocal basis and cannot silently treat it as raw depth.
+      depth.projection.supplied = false;
+      depth.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
+      depth.projection.A = depth.projection.B = NAN;
+      auto linear = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 3000);
+      require(!linear.ready && linear.basis == 2 &&
+          linear.ui.scale.basis == sunshine_game3d::automatic_scale_basis::linear_distance &&
+          linear.ui.phase == (native_cropped ? sunshine_game3d::automatic_phase::calibrating : sunshine_game3d::automatic_phase::suspended),
+        "Linear input required a fake camera or entered the affine raw fallback");
+      if (native_cropped) {
+        const auto logical_domain = proof.projection_domain;
+        for (unsigned i = 0; i != 4; ++i) {
+          sunshine_projection_depth::sample sample;
+          sample.id = i + 1; sample.capture_ms = 3001 + i * 250;
+          sample.logical_domain = logical_domain;
+          sample.projection = sunshine_projection_depth::make_linear();
+          sample.range_supplied = sample.range_valid = true;
+          sample.range_min = 2.f; sample.range_max = 8.f;
+          auto &m = sample.moments;
+          m.supplied = m.valid = true; m.encoding = depth.projection.encoding;
+          m.A = 0.f; m.inverseB = 1.f; m.count = 2228u * 1253u;
+          m.sum = double(m.count) * .3125;
+          m.sum_squares = double(m.count) * .1328125;
+          m.tiles_x = 32; m.tiles_y = 18;
+          proof.projection_policy.observe(sample, sample.capture_ms);
+        }
+        linear = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 3751);
+        require(linear.ready && linear.basis == 2 && linear.projection == std::array<float, 2>{0.f, 1.f} &&
+            linear.ui.scale.minimum_inverse == .125 && linear.ui.scale.maximum_inverse == .5 &&
+            !linear.ui.scale.has_projection_conversion,
+          "Linear depth did not publish calibrated reciprocal geometry without camera matrices");
+        check_native_crop(linear, 3751);
+        ++depth.provided.source_id;
+        const auto handoff = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 4000);
+        require(!handoff.ready && !(proof.projection_domain == logical_domain),
+          "New feature generation inherited another source's inverse-distance calibration");
+      }
     }
 
     static void session_teardown_ownership() {
@@ -960,6 +1048,130 @@ namespace {
       require(publisher.runtimes_.empty(), "runtime destruction retained its native owner");
     }
 
+    static void normalized_ui_input_preserves_source_authority() {
+      using namespace sunshine_game3d;
+      source_alpha_ui_policy policy;
+      render_settings settings;
+      alpha_auto_policy session(1000);
+      const auto generic = session.decision(1000 + alpha_startup_window_ms);
+      require(generic.state == alpha_auto_state::automatic_off && !generic.enabled,
+        "Normalized UI fixture did not begin with generic Auto Off");
+      ui_input::presentation observed{{true, true, false, 1, 11, 7, 41}, true};
+      ui_input::frame input;
+      input.status = ui_input::resolve(policy, settings, observed);
+      input.observation.session = &session;
+      input.observation.now_ms = 1001 + alpha_startup_window_ms;
+      ui_plane_parameters plane;
+      ui_adaptive::source scene;
+      require(input.status.requested && input.status.fg_active() &&
+        !input.for_render(plane, scene).available(),
+        "Auto Off stopped dedicated input discovery or missing FG input became usable");
+      // Even a stale view or an incorrect current-color hint cannot bypass the
+      // presentation adapter's requirement for a usable submitted real input.
+      input.kind = ui_input_kind::current_color_alpha;
+      input.view = {123};
+      require(!input.for_render(plane, scene).available(),
+        "Missing FG input silently selected generated current color");
+      input.automatic_detection = true;
+      input.detection.current_color = true; // A stale candidate set is guarded too.
+      require(!input.for_render(plane, scene).available() && !input.detection.current_color,
+        "Automatic discovery admitted generated current color at the normalized boundary");
+      input.detection.current_color = true;
+      input.detection.masks[1] = {456};
+      const auto captured_candidates = input.for_render(plane, scene);
+      require(captured_candidates.available() && captured_candidates.kind == ui_input_kind::unavailable &&
+        captured_candidates.detection && !captured_candidates.detection->current_color &&
+        captured_candidates.detection->masks[1].handle == 456,
+        "FG current-color filtering discarded an independent captured candidate");
+      input.automatic_detection = false;
+      input.detection = {};
+      const auto held = ui_input::resolve(policy, settings, {{}, true});
+      require(held.fg_active() && held.fg.epoch == 7 && !held.effective(),
+        "Missing observer data cleared the provider's confirmed FG requirement");
+
+      input.status.retained_alpha_ready = true;
+      input.observation.retained = true;
+      input.kind = ui_input_kind::captured_color_alpha;
+      auto render_input = input.for_render(plane, scene);
+      require(render_input.available() && render_input.kind == ui_input_kind::captured_color_alpha &&
+        render_input.automatic == &input.observation && render_input.automatic->session == &session,
+        "Generic real-input alpha lost its shared automatic policy or acquired dedicated semantics");
+      input.kind = ui_input_kind::dedicated_mask;
+      input.observation.dedicated_mask = true;
+      input.channel = ui_mask_channel::red;
+      render_input = input.for_render(plane, scene);
+      require(render_input.available() && render_input.kind == ui_input_kind::dedicated_mask &&
+        render_input.channel == ui_mask_channel::red && render_input.view.handle == 123 &&
+        session.decision(input.observation.now_ms).state == alpha_auto_state::automatic_off,
+        "Dedicated input was blocked by Auto Off or contaminated generic alpha qualification");
+      input.view = {};
+      require(!input.for_render(plane, scene).available(),
+        "Failed captured-mask materialization fell back to current color");
+      input.view = {123};
+      settings.ui_protection = source_alpha_mode::off;
+      input.status = ui_input::resolve(policy, settings, observed);
+      input.status.retained_alpha_ready = true;
+      require(!input.for_render(plane, scene).available(),
+        "A retained dedicated mask bypassed Manual Off at the normalized boundary");
+
+      settings.ui_protection = source_alpha_mode::automatic;
+      observed.mode.enabled = false;
+      ++observed.mode.sequence;
+      input.status = ui_input::resolve(policy, settings, observed);
+      input.kind = ui_input_kind::current_color_alpha;
+      input.view = {};
+      input.observation.retained = input.observation.dedicated_mask = false;
+      input.channel = ui_mask_channel::alpha;
+      require(input.for_render(plane, scene).available() && !input.status.fg_active(),
+        "Confirmed FG Off did not restore eligible current-color alpha");
+      renderer unconfigured;
+      input.complete(unconfigured, false);
+      require(!input.status.rendered && !input.status.applied &&
+        input.status.coverage.state == alpha_auto_state::automatic_off,
+        "Failed rendering published an applied input or changed the shared Auto decision");
+    }
+
+    static void normalized_ui_scene_match_only_gates_adaptive_evidence() {
+      using namespace sunshine_game3d;
+      ui_input::frame input;
+      input.status.requested = input.status.retained_alpha_ready = true;
+      input.status.fg = {true, true, false, 1, 11, 7, 41};
+      input.kind = ui_input_kind::dedicated_mask;
+      input.view = {123};
+      input.observation.retained = input.observation.dedicated_mask = true;
+      input.observation.now_ms = 1200; input.observation.tick_ms = 1100;
+      input.observation.epoch = 7; input.observation.revision = 3;
+      input.observation.viewport = 11; input.observation.sequence = 101;
+      ui_adaptive::source scene;
+      scene.eligible = true; scene.epoch = 7; scene.revision = 3; scene.viewport = 11;
+      scene.tick_ms = 1150; scene.sequence = 99; scene.source_id = 56;
+      const auto matched = input.match_scene(scene, true);
+      require(matched.eligible && matched.now_ms == 1200 && matched.tick_ms == 1100 &&
+        matched.mask_sequence == 101 && matched.sequence == scene.sequence && matched.source_id == scene.source_id,
+        "Matching retained UI did not preserve independent depth identity and conservative freshness");
+      ui_plane_parameters plane;
+      for (unsigned field = 0; field != 3; ++field) {
+        auto unrelated = scene;
+        if (field == 0) ++unrelated.epoch;
+        if (field == 1) ++unrelated.revision;
+        if (field == 2) ++unrelated.viewport;
+        const auto rejected = input.match_scene(unrelated, true);
+        require(!rejected.eligible && input.for_render(plane, rejected).available() &&
+          input.for_render(plane, rejected).kind == ui_input_kind::dedicated_mask,
+          "Depth/camera scope mismatch disabled an independently valid UI mask");
+      }
+      require(!input.match_scene(scene, false).eligible,
+        "Unready scene admitted adaptive conflict evidence");
+      scene.eligible = false;
+      require(!input.match_scene(scene, true).eligible,
+        "UI scope matching revived rejected depth evidence");
+      input.observation.retained = false;
+      scene.eligible = true; scene.epoch = 99;
+      const auto current = input.match_scene(scene, true);
+      require(current.eligible && current.tick_ms == scene.tick_ms && !current.mask_sequence,
+        "Current-color alpha invented a retained-mask association or rejected unrelated provider metadata");
+    }
+
     static void source_alpha_scope_lifetime() {
       publisher_t publisher;
       auto &proof = publisher.runtimes_[owner()];
@@ -967,22 +1179,76 @@ namespace {
       proof.frame.source_alpha = proof.source_alpha_policy.update(true, fg, true);
       proof.frame.source_alpha.input_state = sunshine_game3d::source_alpha_input_state::state_conflict;
       proof.frame.depth_ready = true;
-      proof.frame.fg_active = false; // Ready manual/Generic depth has no SL FG provenance.
+      proof.frame.diagnostics.frame_generation_active = false; // Ready manual/Generic depth has no SL FG provenance.
       require(!proof.frame.source_alpha.effective(), "Manual depth bypassed the FG alpha guard");
       publish_source_alpha_ui(owner(), proof.frame.source_alpha);
       const auto visible = sunshine_game3d::query_source_alpha_ui(owner());
       require(visible.blocked_by_fg() && visible.fg.sequence == 41 &&
         visible.input_state == sunshine_game3d::source_alpha_input_state::state_conflict,
         "UI did not receive the renderer's frozen FG decision");
+      auto presented = proof.frame.source_alpha;
+      presented.mode = sunshine_game3d::source_alpha_mode::automatic;
+      presented.input = sunshine_game3d::source_alpha_input::sl_ui_alpha;
+      presented.rendered = presented.applied = presented.retained_alpha_ready = true;
+      presented.automatic = presented.coverage.enabled = true;
+      presented.coverage.state = sunshine_game3d::alpha_auto_state::dedicated_ui;
+      publish_source_alpha_ui(owner(), presented);
+      const auto active = sunshine_game3d::query_source_alpha_ui(owner());
+      require(active.rendered && active.applied && active.input == sunshine_game3d::source_alpha_input::sl_ui_alpha &&
+        active.coverage.state == sunshine_game3d::alpha_auto_state::dedicated_ui &&
+        active.dedicated_ui_active(sunshine_game3d::source_alpha_mode::automatic, true),
+        "UI did not receive the renderer's dedicated input and applied decision");
       publisher.invalidate(owner(), false);
+      const auto invalidated = sunshine_game3d::query_source_alpha_ui(owner());
+      require(!invalidated.rendered && !invalidated.applied &&
+        invalidated.input == sunshine_game3d::source_alpha_input::none &&
+        !invalidated.dedicated_ui_active(sunshine_game3d::source_alpha_mode::automatic, true),
+        "An effects reload retained the prior applied UI source");
       const auto retained = publisher.runtimes_.at(owner()).source_alpha_policy.update(true, {}, true);
       require(retained.blocked_by_fg() && retained.fg.sequence == 41 &&
-        retained.input_state == sunshine_game3d::source_alpha_input_state::not_observed,
+        retained.input_state == sunshine_game3d::source_alpha_input_state::not_observed &&
+        !retained.rendered && !retained.applied && retained.input == sunshine_game3d::source_alpha_input::none,
         "An effects reload cleared a confirmed game FG mode");
       publish_source_alpha_ui(owner(), retained);
+      require(!sunshine_game3d::query_source_alpha_ui(owner()).dedicated_ui_active(
+        sunshine_game3d::source_alpha_mode::automatic, true),
+        "FG mode continuity revived an unapplied dedicated UI source");
+      publish_source_alpha_ui(owner(), presented);
       publisher.invalidate(owner(), true);
-      require(!sunshine_game3d::query_source_alpha_ui(owner()).fg.known && publisher.runtimes_.empty(),
+      const auto destroyed = sunshine_game3d::query_source_alpha_ui(owner());
+      require(!destroyed.fg.known && !destroyed.rendered && !destroyed.applied &&
+        destroyed.input == sunshine_game3d::source_alpha_input::none && publisher.runtimes_.empty(),
         "Runtime destruction retained FG mode or its UI status");
+    }
+
+    static void ui_source_choice_and_runtime_lifetime() {
+      namespace ui = sunshine_game3d::ui_input;
+      using choice = sunshine_game3d::ui_qualification::choice;
+      runtime_fixture::empty_runtime runtime;
+      ui::invalidate(&runtime);
+      // Selecting before a GPU frame must work without touching the device or
+      // manufacturing available pixels or requiring human approval.
+      ui::select_source(&runtime, choice::sl_backbuffer);
+      const auto selected = ui::source_status(&runtime);
+      require(selected.selected == choice::sl_backbuffer && selected.token && !selected.available,
+        "Pre-frame source selection disappeared or manufactured captured pixels");
+      ui::suspend(&runtime);
+      const auto suspended = ui::source_status(&runtime);
+      require(suspended.selected == choice::sl_backbuffer && suspended.token > selected.token &&
+        !suspended.available, "Disabling Game 3D lost the source choice or kept stale pixels");
+      ui::suspend(&runtime);
+      require(ui::source_status(&runtime).token == suspended.token,
+        "Repeated disabled presentations continually restarted source identity");
+      ui::select_source(&runtime, choice::sl_hudless);
+      require(ui::source_status(&runtime).selected == choice::sl_hudless,
+        "Source choice could not be changed while Game 3D was disabled");
+      ui::invalidate(&runtime);
+      require(ui::source_status(&runtime).selected == choice::automatic && !ui::source_status(&runtime).available,
+        "Destroyed runtime retained session choice or pixels");
+      ui::select_source(&runtime, choice::sl_backbuffer);
+      require(ui::source_status(&runtime).selected == choice::sl_backbuffer && !ui::source_status(&runtime).available,
+        "Recreated runtime inherited pixels from its previous lifetime");
+      ui::invalidate(&runtime);
     }
 
     static void disabled_native_reload_lifetime() {
@@ -1344,6 +1610,14 @@ int main(int argc, char **argv) {
       std::puts("PASS: current scene strength and cached FG publication (CPU only)");
       return 0;
     }
+    if (argc == 2 && std::strcmp(argv[1], "--ui-status") == 0) {
+      publisher_tests::normalized_ui_input_preserves_source_authority();
+      publisher_tests::normalized_ui_scene_match_only_gates_adaptive_evidence();
+      publisher_tests::source_alpha_scope_lifetime();
+      publisher_tests::ui_source_choice_and_runtime_lifetime();
+      std::puts("PASS: normalized UI input authority, adaptive association, publication and lifecycle cleanup (CPU only)");
+      return 0;
+    }
     if (argc == 2 && std::strcmp(argv[1], "--depth-provenance") == 0) {
       publisher_tests::copied_depth_provenance();
       std::puts("PASS: consumed SDK depth preservation provenance (CPU only)");
@@ -1360,10 +1634,13 @@ int main(int argc, char **argv) {
       publisher_tests::d3d12_async_ring();
       return 0;
     }
-    require(argc == 1, "usage: reshade_exporter_tests [--async-ring|--depth-provenance|--scene-strength]");
+    require(argc == 1, "usage: reshade_exporter_tests [--async-ring|--depth-provenance|--scene-strength|--ui-status]");
     publisher_tests::copied_depth_provenance();
     publisher_tests::adaptive_ui_source_provenance();
+    publisher_tests::normalized_ui_input_preserves_source_authority();
+    publisher_tests::normalized_ui_scene_match_only_gates_adaptive_evidence();
     publisher_tests::source_alpha_scope_lifetime();
+    publisher_tests::ui_source_choice_and_runtime_lifetime();
     publisher_tests::pending_depth_continuity();
     publisher_tests::retained_depth_decision();
     publisher_tests::automatic_ui_lifetime();

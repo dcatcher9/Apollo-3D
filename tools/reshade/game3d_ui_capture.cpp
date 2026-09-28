@@ -58,7 +58,12 @@ namespace sunshine_game3d {
         e.observed = observation;
         if (!observation.readable) { e.status = "unreadable_or_query_failed"; return; }
         if (!observation.descriptor_supported) { e.status = "unsupported_descriptor"; return; }
+        const bool sl_input = description->source == ui_resources::provider::streamline;
+        if (sl_input && !observation.version_one && observation.lifecycle > 2) {
+          e.status = "unsupported_lifetime"; return;
+        }
         if (!observation.native) { e.status = "explicit_null"; return; }
+        if (!observation.area_valid) { e.status = "invalid_active_rect"; return; }
         if (!observation.observation.command) { e.status = "no_command_at_observation"; return; }
         if (e.attempts >= 4) { e.status = "attempt_limit"; return; }
         ++e.attempts;
@@ -77,10 +82,17 @@ namespace sunshine_game3d {
         input.resource.area = {observation.area.left, observation.area.top, observation.area.width, observation.area.height};
         input.native_state = observation.state_declared ? observation.native_state : UINT32_MAX;
         input.proof = observation.state_declared ? scene::state_proof::declared : scene::state_proof::observed_nonzero;
-        input.valid_until = scene::lifetime::at_call;
+        // SL v1 has no lifecycle field; retain its existing synchronous copy.
+        // SL v2 keeps the supplied lifetime, exactly like the live UI adapter.
+        input.valid_until = sl_input && !observation.version_one ?
+          (observation.lifecycle == 0 ? scene::lifetime::at_call : observation.lifecycle == 1 ?
+            scene::lifetime::until_present : scene::lifetime::until_evaluation) : scene::lifetime::at_call;
         input.force_snapshot = true;
         input.source_present_generation = capture::source_present_generation(input.source);
-        e.ticket = capture::record_diagnostic_texture(at.command, input, &e.record);
+        // State policy follows the source lifetime, not tag semantics or storage.
+        // NGX keeps its existing contract; no tag is promoted to UI or infers FG.
+        e.ticket = capture::record_diagnostic_texture(at.command, input, &e.record,
+          capture::auxiliary_state_policy(input));
         e.status = e.ticket ? "pending_gpu" : "capture_rejected";
       } catch (...) {
         // Diagnostic failure cannot propagate across a game's vendor API hook.

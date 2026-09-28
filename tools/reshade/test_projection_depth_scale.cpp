@@ -154,6 +154,34 @@ namespace {
     require(!supports_scale(ordinary,std::numeric_limits<float>::denorm_min()),
       "Flush-sensitive scene gain admitted");
   }
+
+  void linear_distance_geometry() {
+    for (double units : {1., .001, 1000.}) {
+      for (const auto storage : std::array<encoding, 3>{{{1,0}, {2,-8}, {-4,64}}}) {
+        const auto value = make_linear(storage.A, storage.B);
+        require(value.valid() && supports_scale(value, float(8.*units)) && supports_zero(value, float(8.*units), .25/units),
+          "Finite linear-distance coefficients and unit-scaled controls rejected");
+        for (double distance : {1., 2., 8., 1024.}) {
+          const float raw = float((distance*units-storage.B)/storage.A);
+          float q{};
+          require(inverse_distance(value,raw,q), "Positive linear distance rejected");
+          // Nonzero storage offsets may lose precision in tiny world units;
+          // decoded distance is the actual representable stored value.
+          const float z = (raw-value.shader_A)*value.inverseB;
+          close(q,1.f/z,0.,"Linear distance used device-depth decoding");
+        }
+      }
+    }
+    const auto ordinary = make_linear();
+    for (float raw : {0.f, -1.f, INFINITY, -INFINITY, NAN, std::numeric_limits<float>::denorm_min()}) {
+      float q = 99.f;
+      require(!inverse_distance(ordinary,raw,q) && q==0.f, "Invalid linear distance produced geometry");
+    }
+    require(!make_linear(0,0).valid() && !make_linear(INFINITY,0).valid() && !make_linear(1,NAN).valid(),
+      "Invalid linear storage transform admitted");
+    require(!supports_zero(ordinary,std::numeric_limits<float>::max(),1000.),
+      "Linear zero-plane overflow admitted");
+  }
 }
 int main() {
   try {
@@ -162,6 +190,7 @@ int main() {
     unit_and_storage_invariance();
     invalid_and_unrepresentable_inputs();
     fp32_displacement_limits();
+    linear_distance_geometry();
     std::puts("PASS projection geometry: exact depth, independent artistic gain, clipping/units/storage and shader limits");
     return 0;
   } catch (const std::exception &error) {

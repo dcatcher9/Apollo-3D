@@ -32,7 +32,7 @@ namespace game3d_debug {
     final_field = 6,
     sbs = 7,
     linear_color = 8,
-    // Exact RGBA input consumed for UI alpha; optional catalog occupies 9..32.
+    // Exact RGBA input consumed for UI alpha; optional IDs are in the resource catalog.
     ui_source_color = 33,
   };
 

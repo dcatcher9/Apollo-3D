@@ -1,6 +1,9 @@
 The narrow Streamline ABI declarations in streamline_camera_data.h are adapted from:
+https://github.com/NVIDIA-RTX/Streamline/tree/999b2087d0858bcec3d9d0113c99cf0d1c8b932e/include
 https://github.com/NVIDIA-RTX/Streamline/tree/5bac43f464f53bc0583bab8df506b788d8d14c3c/include
 https://github.com/NVIDIA-RTX/Streamline/tree/4bcd1fbe8d4f38b50ec86817f1f7cecc55db9779/include
+https://github.com/NVIDIA-RTX/Streamline/tree/2122257e0fce486f91b385aa63b9a09b0a34b363/include
+The public ABI family boundaries and validation scope are documented in docs/reshade-sbs.md.
 
 Copyright (c) 2022-2024 NVIDIA CORPORATION. All rights reserved
 

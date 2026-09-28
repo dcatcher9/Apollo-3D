@@ -17,8 +17,10 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 
 #if defined(__GNUC__) && !defined(__clang__)
   #define FIXTURE_NOINLINE __attribute__((noinline, noipa))
@@ -73,6 +75,7 @@ namespace {
   abi_v2::frame_token *returned_token{};
   void *returned_feature_function{};
   bool inspect_presentation_in_original{};
+  bool lose_during_tag_original{};
   presentation_snapshot presentation_inside_original;
 
   void require(bool condition, const char *message) {
@@ -143,6 +146,7 @@ namespace {
     tag_call.second = tags;
     tag_call.third = commands;
     tag_call.a = count;
+    if (lose_during_tag_original) { lose_during_tag_original = false; testing::lose_observation(); }
     SetLastError(outgoing_error);
     return result_v2;
   }
@@ -155,6 +159,7 @@ namespace {
     framed_tag_call.third = tags;
     framed_tag_call.fourth = commands;
     framed_tag_call.a = count;
+    if (lose_during_tag_original) { lose_during_tag_original = false; testing::lose_observation(); }
     SetLastError(outgoing_error);
     return result_v2;
   }
@@ -234,6 +239,7 @@ namespace {
       returned_token = nullptr;
       returned_feature_function = reinterpret_cast<void *>(&fake_pcl_marker);
       inspect_presentation_in_original = false; presentation_inside_original = {};
+      lose_during_tag_original = false;
       result_v1 = true;
       result_v2 = 0;
       block_original = original_entered = release_original = false;
@@ -368,9 +374,49 @@ namespace {
     require(latest(17).resource == reinterpret_cast<std::uintptr_t>(&native), "v1 failed tag overwrote successful state");
   }
 
-  void test_v2_forwarding() {
+  void test_legacy_resource_without_state() {
     fixture cleanup;
-    require(testing::install(testing::abi::v2_7_30, v2_targets), "v2 real MinHook install failed");
+    require(testing::install(testing::abi::v1_0_0, v1_targets), "legacy resource-prefix MinHook install failed");
+    SYSTEM_INFO system{};
+    GetSystemInfo(&system);
+    struct guarded_allocation {
+      unsigned char *address{};
+      ~guarded_allocation() { if (address) VirtualFree(address, 0, MEM_RELEASE); }
+    } allocation{static_cast<unsigned char *>(VirtualAlloc(nullptr, system.dwPageSize * 2,
+        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE))};
+    require(allocation.address != nullptr, "cannot allocate legacy resource guard pages");
+    DWORD previous{};
+    require(VirtualProtect(allocation.address + system.dwPageSize, system.dwPageSize, PAGE_NOACCESS, &previous),
+      "cannot protect legacy resource guard page");
+    auto *resource = new (allocation.address + system.dwPageSize - sizeof(abi_v1::resource_without_state))
+      abi_v1::resource_without_state{};
+    int native{};
+    resource->native = &native;
+    const auto *wire = reinterpret_cast<const abi_v1::resource *>(resource);
+    const auto constants = old_camera();
+    const extent area{0, 0, 1920, 1080};
+    require(call_v1_constants(constants, 101, 17), "legacy prefix constants failed");
+    SetLastError(incoming_error);
+    require(call_v1_tag(wire, 0, 17, &area) && tag_call.first == wire &&
+        tag_call.incoming_error == incoming_error && GetLastError() == outgoing_error,
+      "legacy prefix tag forwarding changed");
+    const auto observed = latest(17);
+    require(observed.found && observed.camera && observed.resource == reinterpret_cast<std::uintptr_t>(&native),
+      "legacy resource read crossed its 40-byte allocation or lost native depth");
+    resource->ext = &native;
+    require(call_v1_tag(wire, 0, 17, &area) && latest(17).resource == 0,
+      "legacy extension pointer was mistaken for declared resource state");
+    resource->ext = nullptr;
+    require(call_v1_tag(wire, 0, 17, &area) &&
+        latest(17).resource == reinterpret_cast<std::uintptr_t>(&native),
+      "legacy prefix failed to recover after unsupported extension");
+  }
+
+  void test_v2_forwarding(bool frame_tags = true) {
+    fixture cleanup;
+    auto exports = v2_targets;
+    if (!frame_tags) exports.tag_for_frame = nullptr;
+    require(testing::install(testing::abi::v2_7_30, exports), "v2 real MinHook install failed");
     auto constants = modern_camera();
     const auto original_constants = constants;
     auto view = viewport(27);
@@ -387,13 +433,15 @@ namespace {
     require(constants_call.calls == 1 && constants_call.first == &constants && constants_call.second == &token.ref() && constants_call.third == &view, "v2 constants references changed");
     require(call_v2_tag(view, tags, 2, &commands) == 0, "v2 tag success changed");
     require(tag_call.calls == 1 && tag_call.first == &view && tag_call.second == tags && tag_call.third == &commands && tag_call.a == 2, "v2 tag arguments changed");
-    require(call_v2_framed_tag(token.ref(), view, tags, 2, &commands) == 0, "v2 framed tag success changed");
-    require(framed_tag_call.calls == 1 && framed_tag_call.first == &token.ref() && framed_tag_call.second == &view && framed_tag_call.third == tags && framed_tag_call.fourth == &commands && framed_tag_call.a == 2, "v2 framed tag arguments changed");
+    if (frame_tags) {
+      require(call_v2_framed_tag(token.ref(), view, tags, 2, &commands) == 0, "v2 framed tag success changed");
+      require(framed_tag_call.calls == 1 && framed_tag_call.first == &token.ref() && framed_tag_call.second == &view && framed_tag_call.third == tags && framed_tag_call.fourth == &commands && framed_tag_call.a == 2, "v2 framed tag arguments changed");
+    }
     require(call_v2_evaluate(0x87654321u, token.ref(), inputs, 1, &commands) == 0, "v2 evaluate success changed");
     require(evaluate_call.calls == 1 && evaluate_call.first == &token.ref() && evaluate_call.second == inputs && evaluate_call.third == &commands && evaluate_call.a == 0x87654321u && evaluate_call.b == 1, "v2 evaluate arguments changed");
     require(std::memcmp(&constants, &original_constants, sizeof(constants)) == 0 && std::memcmp(&resource, &original_resource, sizeof(resource)) == 0 && std::memcmp(&tags[0], &original_tag, sizeof(original_tag)) == 0, "v2 input mutated");
     const auto after = testing::counts();
-    require(after.constants == before.constants + 1 && after.tags == before.tags + 2 && after.evaluations == before.evaluations + 1, "v2 successful calls not observed exactly once");
+    require(after.constants == before.constants + 1 && after.tags == before.tags + (frame_tags ? 2 : 1) && after.evaluations == before.evaluations + 1, "v2 successful calls not observed exactly once");
 
     opaque_token failed_token;
     int replacement_native {};
@@ -404,14 +452,14 @@ namespace {
       require(call_v2_constants(constants, failed_token.ref(), view) == failure, "v2 constants failure changed");
       require(call_v2_tag(view, nullptr, 0, nullptr) == failure, "v2 tag failure changed");
       require(tag_call.second == nullptr && tag_call.third == nullptr && tag_call.a == 0, "v2 empty tag arguments replaced");
-      require(call_v2_framed_tag(token.ref(), view, nullptr, 0, nullptr) == failure, "v2 framed tag failure changed");
+      if (frame_tags) require(call_v2_framed_tag(token.ref(), view, nullptr, 0, nullptr) == failure, "v2 framed tag failure changed");
       require(call_v2_evaluate(7, token.ref(), nullptr, 0, nullptr) == failure, "v2 evaluate failure changed");
       require(evaluate_call.second == nullptr && evaluate_call.third == nullptr && evaluate_call.b == 0, "v2 empty evaluate inputs replaced");
-      require(call_v2_framed_tag(failed_token.ref(), view, &replacement_tag, 1, &commands) == failure, "v2 replacement tag failure changed");
+      if (frame_tags) require(call_v2_framed_tag(failed_token.ref(), view, &replacement_tag, 1, &commands) == failure, "v2 replacement tag failure changed");
       const base_structure *replacement_inputs[] {&view.base, &replacement_tag.base};
       require(call_v2_evaluate(7, failed_token.ref(), replacement_inputs, 2, &commands) == failure, "v2 replacement local tag failure changed");
       const auto retained = latest(view.value);
-      require(retained.found && retained.camera && retained.same_token && retained.resource == reinterpret_cast<std::uintptr_t>(&native), "v2 failed constants/tag/evaluation overwrote successful state");
+      require(retained.found && retained.camera && retained.same_token == frame_tags && retained.resource == reinterpret_cast<std::uintptr_t>(&native), "v2 failed constants/tag/evaluation overwrote successful state");
     }
   }
 
@@ -484,9 +532,13 @@ namespace {
     require(GetModuleHandleW(L"sl.interposer.dll") == nullptr, "probe loaded middleware during discovery");
     require(!testing::install(testing::abi::unsupported, v2_targets), "unsupported ABI installed hooks");
     require(!testing::install(testing::abi::v2_7_30, {}), "empty export set installed hooks");
-    auto incomplete = v2_targets;
-    incomplete.tag_for_frame = nullptr;
-    require(!testing::install(testing::abi::v2_7_30, incomplete), "incomplete v2 exports installed hooks");
+    for (unsigned missing = 0; missing < 3; ++missing) {
+      auto incomplete = v2_targets;
+      if (missing == 0) incomplete.constants = nullptr;
+      if (missing == 1) incomplete.tag = nullptr;
+      if (missing == 2) incomplete.evaluate = nullptr;
+      require(!testing::install(testing::abi::v2_7_30, incomplete), "incomplete required v2 exports installed hooks");
+    }
     auto constants = modern_camera();
     auto view = viewport(41);
     opaque_token token;
@@ -1238,6 +1290,216 @@ namespace {
     require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation, "valid v2 source did not recover");
     mint(token, nullptr);
     require(query_depth_source(snapshot) == evidence_status::untracked_frame, "token reuse retained source nomination");
+  }
+
+  void test_rr_and_linear_depth_source() {
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "RR/linear source install failed");
+    auto view = viewport(3); auto constants = modern_camera(); opaque_token token;
+    constants.common.jitter_offset[0] = .25f;
+    constants.common.jitter_offset[1] = -.375f;
+    int native{}, commands{};
+    auto resource = modern_resource(&native);
+    auto tag = depth_tag_for(resource); tag.type = 49;
+    const base_structure *local[]{&view.base, &tag.base};
+    const base_structure *global[]{&view.base};
+    mint(token, nullptr);
+    call_v2_constants(constants, token.ref(), view);
+    sunshine_scene_depth::frame normalized;
+    evaluation_snapshot snapshot;
+    for (const auto feature : {0u, 1001u}) {
+      SetLastError(incoming_error);
+      require(call_v2_evaluate(feature, token.ref(), local, 2, &commands) == 0 &&
+          GetLastError() == outgoing_error && evaluate_call.incoming_error == incoming_error && evaluate_call.a == feature,
+        "SR/RR linear evaluation changed native forwarding");
+      require(testing::latest_snapshot(view.value, snapshot) && snapshot.feature == feature &&
+          snapshot.status == evidence_status::source_associated_evaluation &&
+          testing::normalized_source(view.value, 2, normalized) && normalized.projection.supplied &&
+          normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
+          normalized.projection.direction_supplied && !normalized.projection.reversed &&
+          normalized.projection.raw_scale == 1 && normalized.projection.raw_bias == 0 &&
+          normalized.jitter.supplied && normalized.jitter.width == 1920 && normalized.jitter.x == .25f,
+        "SR/RR linear input was dropped or treated as reversed device depth");
+    }
+    tag_precision precision; precision.scale = -.5f; precision.bias = 8.f; tag.base.next = &precision;
+    call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
+    require(testing::normalized_source(view.value, 2, normalized) && normalized.projection.reversed &&
+        normalized.projection.raw_scale == -.5 && normalized.projection.raw_bias == 8,
+      "linear PrecisionInfo transform/direction was lost");
+    tag.base.next = nullptr;
+    auto no_camera = viewport(4); const base_structure *without_constants[]{&no_camera.base, &tag.base};
+    call_v2_evaluate(1001, token.ref(), without_constants, 2, nullptr);
+    require(testing::normalized_source(no_camera.value, 2, normalized) && !normalized.projection.supplied &&
+        normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
+        normalized.projection.direction_supplied && !normalized.projection.reversed,
+      "explicit linear-distance input incorrectly required projection constants");
+    tag.lifecycle = 2;
+    call_v2_tag(view, &tag, 1, nullptr); call_v2_evaluate(1001, token.ref(), global, 1, nullptr);
+    require(testing::normalized_source(view.value, 2, normalized) &&
+        normalized.valid_until == sunshine_scene_depth::lifetime::until_evaluation,
+      "linear UntilEvaluate was not available at its synchronous boundary");
+    call_v2_evaluate(1001, token.ref(), global, 1, nullptr);
+    require(!testing::normalized_source(view.value, 2, normalized), "linear UntilEvaluate survived its SDK return");
+    tag.lifecycle = 0; call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
+    require(!testing::normalized_source(view.value, 2, normalized), "linear OnlyValidNow was consumed at a later evaluation");
+    tag.lifecycle = 1; tag.base.next = &precision; precision.scale = 0;
+    call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
+    require(!testing::normalized_source(view.value, 2, normalized), "malformed linear precision reached capture");
+    tag.base.next = nullptr; call_v2_constants(constants, token.ref(), view);
+    call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
+    require(testing::normalized_source(view.value, 2, normalized), "RR did not recover with fresh valid inputs");
+    result_v2 = -7; call_v2_evaluate(1001, token.ref(), local, 2, nullptr); result_v2 = 0;
+    require(!testing::normalized_source(view.value, 2, normalized), "failed RR evaluation retained source authority");
+    call_v2_constants(constants, token.ref(), view);
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{}; call_feature_function(1000, "slDLSSGSetOptions", function);
+    require(function != nullptr, "RR/linear FG options missing");
+    auto set_options = reinterpret_cast<fg_function>(function); fg_options options; set_options(view, options);
+    call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
+    require(!testing::normalized_source(view.value, 2, normalized), "RR competed with enabled same-viewport FG");
+    tag.lifecycle = 0;
+    call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
+    require(testing::normalized_source(view.value, 2, normalized) && normalized.frame_generation_input &&
+        normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
+        normalized.valid_until == sunshine_scene_depth::lifetime::at_call,
+      "FG linear OnlyValidNow input did not use its own synchronous boundary");
+    options.mode = 0; set_options(view, options);
+    tag.lifecycle = 1; call_v2_constants(constants, token.ref(), view);
+    call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
+    require(testing::normalized_source(view.value, 2, normalized) && !normalized.frame_generation_input,
+      "FG Off did not restore RR source admission");
+    mint(token, nullptr);
+    require(!testing::normalized_source(view.value, 2, normalized), "linear RR tuple survived token reuse");
+  }
+
+  void test_mixed_clear_and_linear_depth() {
+    for (const bool framed : {false, true}) for (const bool reverse_order : {false, true}) {
+      fixture cleanup;
+      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Mixed clear source install failed");
+      auto view = viewport(3); auto constants = modern_camera(); opaque_token old_token, token;
+      int native{}, linear_native{}, commands{};
+      auto resource = modern_resource(&native), linear_resource = modern_resource(&linear_native);
+      auto raw = depth_tag_for(resource), high = raw, linear = depth_tag_for(linear_resource);
+      high.type = 48; linear.type = 49;
+      auto clear_raw = raw; clear_raw.resource_ptr = nullptr;
+      const base_structure *inputs[]{&view.base};
+      mint(old_token, nullptr); call_v2_constants(constants, old_token.ref(), view);
+      const abi_v2::resource_tag old_tags[]{raw, high};
+      call_v2_tag(view, old_tags, 2, &commands);
+      call_v2_evaluate(0, old_token.ref(), inputs, 1, &commands);
+      sunshine_scene_depth::frame normalized;
+      require(testing::normalized_source(view.value, 0, normalized) && normalized.projection.supplied,
+        "Mixed clear fixture did not establish its old camera/depth tuple");
+      const auto old_revision = normalized.observation_revision;
+      const auto publish = [&](const abi_v2::resource_tag *tags, unsigned count) {
+        return framed ? call_v2_framed_tag(token.ref(), view, tags, count, &commands) :
+          call_v2_tag(view, tags, count, &commands);
+      };
+      abi_v2::resource_tag mixed[]{clear_raw, linear};
+      if (reverse_order) std::swap(mixed[0], mixed[1]);
+      mint(token, nullptr);
+      require(publish(mixed, 2) == 0 && depth_observation_revision() == old_revision + 1 &&
+          !testing::normalized_source(view.value, 0, normalized),
+        "Mixed clear failed to revoke its earlier camera/depth lease");
+      const auto mixed_revision = depth_observation_revision();
+      for (unsigned repeat = 0; repeat != 3; ++repeat) {
+        if (repeat) { mint(token, nullptr); require(publish(mixed, 2) == 0, "Repeated mixed tag failed"); }
+        require(call_v2_evaluate(1001, token.ref(), inputs, 1, &commands) == 0 &&
+            testing::normalized_source(view.value, 2, normalized) && !normalized.projection.supplied &&
+            normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
+            normalized.observation_revision == mixed_revision && depth_observation_revision() == mixed_revision &&
+            !testing::normalized_source(view.value, 0, normalized) && !testing::normalized_source(view.value, 1, normalized),
+          "Null alternative poisoned fresh linear depth, renewed its revision, or restamped cached depth/camera");
+      }
+      auto clear_linear = linear; clear_linear.resource_ptr = nullptr;
+      const abi_v2::resource_tag full_clear[]{clear_raw, clear_linear};
+      require(publish(full_clear, 2) == 0 && depth_observation_revision() == mixed_revision + 1,
+        "Full depth clear did not revoke the current linear source");
+      call_v2_evaluate(1001, token.ref(), inputs, 1, &commands);
+      require(!testing::normalized_source(view.value, 2, normalized), "Full clear retained a linear source");
+
+      mint(token, nullptr); publish(mixed, 2); call_v2_evaluate(1001, token.ref(), inputs, 1, &commands);
+      require(testing::normalized_source(view.value, 2, normalized), "Fresh mixed tags did not recover after full clear");
+      result_v2 = -7;
+      require(publish(mixed, 2) == -7, "Failed mixed SDK call changed its result");
+      result_v2 = 0;
+      call_v2_evaluate(1001, token.ref(), inputs, 1, &commands);
+      require(!testing::normalized_source(view.value, 2, normalized), "Failed mixed SDK call published fresh depth");
+
+      // The original SDK can trigger another observed loss before returning.
+      // A subsequent clear may advance only its own revision, never heal that gap.
+      mint(token, nullptr); publish(&raw, 1);
+      const auto before_interruption = depth_observation_revision();
+      lose_during_tag_original = true;
+      require(publish(mixed, 2) == 0 && depth_observation_revision() == before_interruption + 2,
+        "Mixed clear did not preserve the intervening loss and its own revocation");
+      call_v2_evaluate(1001, token.ref(), inputs, 1, &commands);
+      require(!testing::normalized_source(view.value, 2, normalized), "Mixed clear healed an intervening observation loss");
+    }
+  }
+
+  void test_source_without_frame_tag_export() {
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    auto exports = tracked_v2_targets;
+    exports.tag_for_frame = nullptr;
+    require(testing::install(testing::abi::v2_7_30, exports), "v2 global-only source install failed");
+    auto view = viewport(3);
+    auto constants = modern_camera();
+    constants.base.version = 1; // Older typed SDKs do not supply the optional constants tail.
+    opaque_token token;
+    int native{}, commands{};
+    auto resource = modern_resource(&native);
+    auto tag = depth_tag_for(resource);
+    const auto address = reinterpret_cast<std::uintptr_t>(&native);
+    depth_resource_initialized(address, address, 10, true);
+    const base_structure *inputs[]{&view.base};
+
+    const auto observe = [&] {
+      SetLastError(incoming_error);
+      require(call_v2_constants(constants, token.ref(), view) == 0 &&
+          constants_call.incoming_error == incoming_error && GetLastError() == outgoing_error,
+        "v2 global-only constants changed return value or LastError");
+      SetLastError(incoming_error);
+      require(call_v2_tag(view, &tag, 1, &commands) == 0 &&
+          tag_call.incoming_error == incoming_error && GetLastError() == outgoing_error,
+        "v2 global-only tag changed return value or LastError");
+      SetLastError(incoming_error);
+      require(call_v2_evaluate(0, token.ref(), inputs, 1, &commands) == 0 &&
+          evaluate_call.incoming_error == incoming_error && GetLastError() == outgoing_error,
+        "v2 global-only evaluation changed return value or LastError");
+    };
+    observe();
+    depth_source_snapshot snapshot;
+    require(query_depth_source(snapshot) == evidence_status::untracked_frame,
+      "missing frame-tag export promoted an untracked token to a frame");
+    mint(token, nullptr);
+    observe();
+    sunshine_scene_depth::frame normalized;
+    require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation &&
+        testing::normalized_source(view.value, 0, normalized) && normalized.resource.native == address &&
+        normalized.resource.width == 1920 && normalized.resource.height == 1080 &&
+        normalized.proof == sunshine_scene_depth::state_proof::declared &&
+        normalized.valid_until == sunshine_scene_depth::lifetime::until_present,
+      "global tags and observed tokens failed to supply production depth without frame-tag export");
+    require(framed_tag_call.calls == 0 && feature_function_call.calls == 0,
+      "global-only source depended on unavailable optional exports");
+    result_v2 = -7;
+    SetLastError(incoming_error);
+    require(call_v2_evaluate(0, token.ref(), inputs, 1, &commands) == -7 &&
+        evaluate_call.incoming_error == incoming_error && GetLastError() == outgoing_error &&
+        !testing::normalized_source(view.value, 0, normalized),
+      "failed global-only evaluation changed forwarding or retained usable depth");
+    result_v2 = 0;
+    mint(token, nullptr);
+    observe();
+    require(testing::normalized_source(view.value, 0, normalized),
+      "global-only source did not recover after a failed evaluation");
+    mint(token, nullptr);
+    require(query_depth_source(snapshot) == evidence_status::untracked_frame,
+      "global-only source reused stale depth after token remint");
   }
 
   void test_jitter_frame_and_render_domain(bool modern) {
@@ -2263,6 +2525,68 @@ namespace {
     }
   }
 
+  void test_feature_independent_depth_contracts() {
+    {
+      fixture cleanup;
+      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 feature-contract install failed");
+      int native{}, commands{}; abi_v1::resource resource{}; resource.native = &native;
+      auto constants = old_camera();
+      call_v1_constants(constants, 77, 0); call_v1_tag(&resource, 0, 0, nullptr);
+      sunshine_scene_depth::frame normalized; evaluation_snapshot snapshot;
+      for (const auto feature : {1u, 2u, 0xffffffffu}) {
+        require(call_v1_evaluate(&commands, feature, 77, 0) && testing::normalized_source(0, 0, normalized) &&
+            testing::latest_snapshot(0, snapshot) && snapshot.feature == feature && snapshot.frame.numeric == 77,
+          "legacy feature ID blocked an exact numeric camera/depth contract");
+      }
+      const auto sequence = snapshot.sequence, revision = depth_observation_revision();
+      for (const auto feature : {3u, 17u}) {
+        // Reflex remains a timing marker even with matching numbers. The other
+        // feature has no exact numeric camera tuple for frame78.
+        call_v1_evaluate(&commands, feature, feature == 3 ? 77 : 78, 0);
+        require(testing::latest_snapshot(0, snapshot) && snapshot.sequence == sequence &&
+            depth_observation_revision() == revision,
+          "unproven legacy argument semantics changed scene-depth authority");
+      }
+      result_v1 = false; call_v1_evaluate(&commands, 17, 77, 0); result_v1 = true;
+      require(!testing::normalized_source(0, 0, normalized), "failed feature with proven depth contract retained source");
+    }
+    {
+      fixture cleanup;
+      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 feature-contract install failed");
+      opaque_token token; mint(token, nullptr);
+      int native{}, commands{}; auto view = viewport(0);
+      auto resource = modern_resource(&native); auto tag = depth_tag_for(resource); tag.type = 49;
+      const base_structure *inputs[]{&view.base, &tag.base};
+      sunshine_scene_depth::frame normalized; evaluation_snapshot snapshot;
+      for (const auto feature : {3u, 17u, 1005u, 0xffffffffu}) {
+        SetLastError(incoming_error);
+        require(call_v2_evaluate(feature, token.ref(), inputs, 2, &commands) == 0 &&
+            GetLastError() == outgoing_error && evaluate_call.incoming_error == incoming_error &&
+            testing::normalized_source(view.value, 2, normalized) && !normalized.projection.supplied &&
+            normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
+            testing::latest_snapshot(view.value, snapshot) && snapshot.feature == feature,
+          "arbitrary v2 feature ID blocked a valid typed depth contract or changed forwarding");
+      }
+      const auto sequence = snapshot.sequence, revision = depth_observation_revision();
+      tag.resource_ptr = reinterpret_cast<const abi_v2::resource *>(1);
+      result_v2 = -7;
+      call_v2_evaluate(17, token.ref(), inputs, 2, &commands);
+      call_v2_evaluate(17, token.ref(), reinterpret_cast<const base_structure **>(1), UINT32_MAX, &commands);
+      result_v2 = 0;
+      require(testing::latest_snapshot(view.value, snapshot) && snapshot.sequence == sequence &&
+          depth_observation_revision() == revision,
+        "speculative opaque/invalid feature input revoked valid source evidence");
+      tag.resource_ptr = &resource;
+      call_v2_evaluate(17, token.ref(), inputs, 2, nullptr);
+      require(testing::latest_snapshot(view.value, snapshot) && snapshot.sequence == sequence,
+        "unknown feature without a scene command acquired depth authority");
+      result_v2 = -7; call_v2_evaluate(17, token.ref(), inputs, 2, &commands); result_v2 = 0;
+      require(!testing::normalized_source(view.value, 2, normalized), "failed typed feature evaluation retained source");
+    }
+  }
+
   void test_color_tag_snapshots() {
     {
       fixture cleanup;
@@ -2504,6 +2828,38 @@ namespace {
         observed.source.source_frame_has_numeric && observed.source.source_frame_numeric == numeric &&
         observed.source.source_frame_token == reinterpret_cast<std::uint64_t>(&token.ref()),
       "explicit-frame tag53 lost its own frame provenance");
+    for (const auto kind : {mask::source_kind::color_and_alpha, mask::source_kind::alpha, mask::source_kind::hudless}) {
+      tag.type = static_cast<std::uint32_t>(kind);
+      call_v2_tag(view, &tag, 1, &commands);
+      require(mask::testing::last_attempt(runtime, observed) && observed.kind == kind &&
+          observed.source.resource.native == reinterpret_cast<std::uint64_t>(&native) &&
+          observed.source.valid_until == sunshine_scene_depth::lifetime::at_call && !observed.tag_scope,
+        "dedicated UI tag was not offered to the live owner with diagnostics off");
+      call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
+      require(mask::testing::last_attempt(runtime, observed) && observed.kind == kind && observed.tag_scope == 1 &&
+          observed.source.source_frame_numeric == numeric,
+        "dedicated UI tag lost its explicit frame provenance");
+    }
+    for (const auto kind : {53u, 23u, 69u, 2u}) {
+      for (const auto lifecycle : {0u, 1u, 2u, 3u, UINT32_MAX}) {
+        auto lifetime_tag = tag; lifetime_tag.type = kind; lifetime_tag.lifecycle = lifecycle;
+        call_v2_tag(view, &lifetime_tag, 1, &commands);
+        const auto expected = lifecycle == 0 ? sunshine_scene_depth::lifetime::at_call : lifecycle == 1 ?
+          sunshine_scene_depth::lifetime::until_present : lifecycle == 2 ?
+          sunshine_scene_depth::lifetime::until_evaluation : sunshine_scene_depth::lifetime::unsupported;
+        require(mask::testing::last_attempt(runtime, observed) && observed.kind == static_cast<mask::source_kind>(kind) &&
+            observed.source.valid_until == expected && observed.source.native_state == resource.state &&
+            observed.source.resource.native == (lifecycle <= 2 ? reinterpret_cast<std::uint64_t>(&native) : 0),
+          "UI tag hook rewrote the declared lifetime/state or accepted an unsupported lifecycle");
+      }
+    }
+    auto absent_alpha = tag; absent_alpha.resource_ptr = nullptr;
+    tag.type = 53;
+    const abi_v2::resource_tag fallback[]{absent_alpha, tag};
+    call_v2_tag(view, fallback, 2, &commands);
+    require(mask::testing::last_attempt(runtime, observed) && observed.kind == mask::source_kind::backbuffer &&
+        observed.source.resource.native == reinterpret_cast<std::uint64_t>(&native),
+      "null preferred UI source blocked a valid same-batch backbuffer fallback");
     tag.resource_ptr = nullptr;
     call_v2_tag(view, &tag, 1, &commands);
     require(mask::testing::last_attempt(runtime, observed) && !observed.source.resource.native,
@@ -2520,6 +2876,11 @@ namespace {
     options.mode = 0; options_call(view, options);
     require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport) &&
         !mask::testing::last_attempt(runtime, observed), "FG Off retained alpha owner scope");
+    wanted.revision = depth_observation_revision(); mask::set_request(wanted);
+    tag.type = 2;
+    call_v2_tag(view, &tag, 1, &commands);
+    require(mask::testing::last_attempt(runtime, observed) && observed.kind == mask::source_kind::hudless &&
+        !observed.source.frame_generation_input, "Fresh FG-off scope did not capture HUD-less color");
     options.mode = 1; options_call(view, options);
     wanted.revision = depth_observation_revision(); mask::set_request(wanted);
     call_v2_tag(view, &tag, 1, &commands);
@@ -2528,6 +2889,263 @@ namespace {
     require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport), "failed FG options retained alpha scope");
     mask::set_request(wanted); shutdown();
     require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport), "shutdown retained live alpha request");
+  }
+
+  void test_ui_gate_viewport_zero_mixed_batch() {
+    namespace mask = sunshine_game3d::ui_mask;
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Mixed UI hook install failed");
+    auto view = viewport(0);
+    int depth{}, motion{}, hudless{}, commands{};
+    abi_v2::resource resources[3]{};
+    resources[0].native = &depth; resources[0].state = 96;
+    resources[1].native = &motion; resources[1].state = 8;
+    resources[2].native = &hudless; resources[2].state = 1024;
+    // Match the live zero-base descriptors, omitted dimensions and mixed tag
+    // batch. No FG options, explicit frame tag or SL evaluation is supplied.
+    const abi_v2::resource_tag tags[]{
+      {{nullptr, tag_guid, 1}, &resources[0], 0, 0, {0, 0, 2228, 1253}},
+      {{nullptr, tag_guid, 1}, &resources[1], 1, 0, {0, 0, 2228, 1253}},
+      {{nullptr, tag_guid, 1}, &resources[2], 2, 0, {0, 0, 3840, 2160}}};
+    call_v2_tag(view, tags, 3, &commands);
+    ui_observation_scope scope;
+    require(query_ui_scope(UINT32_MAX, scope) && !scope.viewport,
+      "Mixed viewport-zero tags did not establish live UI discovery scope");
+    mask::request wanted{0x710, 0x720, scope.epoch, scope.revision, 0, 3840, 2160, true};
+    mask::set_request(wanted);
+    SetLastError(incoming_error);
+    require(call_v2_tag(view, tags, 3, &commands) == 0 && GetLastError() == outgoing_error,
+      "Mixed UI capture gate changed public SDK forwarding");
+    mask::diagnostic_snapshot observed;
+    require(mask::query_diagnostic(wanted.runtime, observed) &&
+        observed.hook_gate.state == mask::capture_gate::admitted && observed.hook_gate.matching_requests == 1 &&
+        observed.hook_gate.seen_kinds == mask::source_mask(mask::source_kind::hudless) &&
+        observed.hook_gate.epoch == wanted.epoch && observed.hook_gate.revision == wanted.revision &&
+        observed.latest_boundary.kind == mask::source_kind::hudless && observed.latest_boundary.source.sequence &&
+        !observed.latest_boundary.source.viewport && !observed.latest_boundary.source.frame_generation_input,
+      "Mixed viewport-zero HUDless batch did not reach its matching live capture boundary");
+    ++wanted.revision;
+    mask::set_request(wanted);
+    call_v2_tag(view, tags, 3, &commands);
+    require(mask::query_diagnostic(wanted.runtime, observed) && !observed.latest_boundary.source.sequence &&
+        observed.hook_gate.state == mask::capture_gate::no_matching_request && !observed.hook_gate.matching_requests &&
+        observed.hook_gate.seen_kinds == 8 && observed.hook_gate.revision != observed.wanted.revision,
+      "Rejected UI request scope lacked exact hook gate evidence or fabricated capture");
+  }
+
+  void test_repeated_fg_off_preserves_independent_ui() {
+    namespace mask = sunshine_game3d::ui_mask;
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Repeated FG Off hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function,
+      "Repeated FG Off options wrapper was unavailable");
+    const auto options_call = reinterpret_cast<fg_function>(function);
+    const auto view = viewport(0);
+    fg_options options; options.mode = options.generated_frames = 0;
+    int depth{}, motion{}, hudless{}, commands{};
+    abi_v2::resource resources[3]{};
+    resources[0].native = &depth; resources[0].state = 96;
+    resources[1].native = &motion; resources[1].state = 8;
+    resources[2].native = &hudless; resources[2].state = 1024;
+    const abi_v2::resource_tag tags[]{
+      {{nullptr, tag_guid, 1}, &resources[0], 0, 0, {0, 0, 2228, 1253}},
+      {{nullptr, tag_guid, 1}, &resources[1], 1, 0, {0, 0, 2228, 1253}},
+      {{nullptr, tag_guid, 1}, &resources[2], 2, 0, {0, 0, 3840, 2160}}};
+    const auto set_options = [&](std::int32_t result) {
+      result_v2 = result;
+      SetLastError(incoming_error);
+      const auto actual = options_call(view, options);
+      result_v2 = 0;
+      require(actual == result && fg_call.incoming_error == incoming_error && GetLastError() == outgoing_error,
+        "Repeated FG options changed SDK result or LastError");
+    };
+    // Reproduce successful independent tags followed by an unsupported Off
+    // call every frame. A known, unchanged Off has the same ownership rule.
+    for (const std::int32_t result : {-7, 0}) {
+      set_options(result);
+      call_v2_tag(view, tags, 3, &commands);
+      ui_observation_scope scope;
+      require(query_ui_scope(0, scope), "Repeated Off prevented independent UI scope discovery");
+      const mask::request wanted{0x730, 0x740, scope.epoch, scope.revision, 0, 3840, 2160, true};
+      mask::set_request(wanted);
+      mask::diagnostic_snapshot observed;
+      require(mask::query_diagnostic(wanted.runtime, observed), "Repeated Off fixture lost initial request");
+      const auto generation = observed.request_generation;
+      std::uint64_t sequence{};
+      for (unsigned frame = 0; frame != 4; ++frame) {
+        call_v2_tag(view, tags, 3, &commands);
+        require(mask::query_diagnostic(wanted.runtime, observed) &&
+            observed.latest_boundary.source.sequence > sequence,
+          "Mixed independent tag batch did not update its capture boundary");
+        sequence = observed.latest_boundary.source.sequence;
+        set_options(result);
+        require(mask::query_diagnostic(wanted.runtime, observed) && observed.request_generation == generation &&
+            observed.latest_boundary.source.sequence == sequence &&
+            observed.hook_gate.state == mask::capture_gate::admitted && observed.hook_gate.matching_requests == 1 &&
+            observed.hook_gate.seen_kinds == 8 && !observed.latest_boundary.source.frame_generation_input,
+          "Unchanged failed/Off options cleared independent HUDless request or captured boundary");
+      }
+      // Changing the FG knowledge state still revokes once; the next fresh tag
+      // may establish a new independent request under the resulting state.
+      options.mode = options.generated_frames = 1;
+      set_options(0);
+      call_v2_tag(view, tags, 3, &commands);
+      require(mask::testing::last_attempt(wanted.runtime, observed.latest_boundary) &&
+          observed.latest_boundary.source.frame_generation_input,
+        "Confirmed FG On did not retain its distinct input role");
+      options.mode = options.generated_frames = 0;
+      set_options(result);
+      require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport),
+        "Actual FG mode/knowledge loss retained the previous UI request");
+    }
+  }
+
+  void test_ui_scope_without_frame_generation_options() {
+    namespace mask = sunshine_game3d::ui_mask;
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Automatic UI hook install failed");
+    auto view = viewport(11);
+    int native{}, commands{};
+    auto resource = modern_resource(&native); resource.width = 3840; resource.height = 2160; resource.state = 8;
+    auto tag = depth_tag_for(resource); tag.type = 2; tag.lifecycle = 0; tag.area = {0, 0, 3840, 2160};
+    ui_observation_scope scope;
+    require(!query_ui_scope(UINT32_MAX, scope), "Unobserved SL viewport invented a UI capture scope");
+    call_v2_tag(view, &tag, 1, &commands);
+    require(query_ui_scope(UINT32_MAX, scope) && scope.epoch && scope.sequence && scope.viewport == view.value &&
+        scope.revision == depth_observation_revision(), "Fresh HUD-less tag did not establish scope with FG/diagnostic probe absent");
+    require(!query_ui_scope(view.value, scope, 0), "Expired UI tag admitted capture scope");
+    require(query_ui_scope(view.value, scope), "Fresh UI scope could not be selected explicitly");
+    constexpr std::uint64_t runtime = 0x100, device = 0x200;
+    mask::request wanted{runtime, device, scope.epoch, scope.revision, scope.viewport, 3840, 2160, true};
+    mask::set_request(wanted);
+    mask::boundary observed;
+    for (const auto kind : {mask::source_kind::hudless, mask::source_kind::backbuffer,
+        mask::source_kind::color_and_alpha, mask::source_kind::alpha}) {
+      tag.type = static_cast<std::uint32_t>(kind);
+      SetLastError(incoming_error);
+      require(call_v2_tag(view, &tag, 1, &commands) == 0 && GetLastError() == outgoing_error &&
+          tag_call.incoming_error == incoming_error && mask::testing::last_attempt(runtime, observed) &&
+          observed.kind == kind && observed.source.epoch == scope.epoch && !observed.source.frame_generation_input &&
+          observed.source.resource.native == reinterpret_cast<std::uint64_t>(&native) && !observed.tag_scope,
+        "Automatic capture depended on FG options or changed source forwarding/provenance");
+    }
+    opaque_token token; std::uint32_t frame = 89; mint(token, &frame);
+    tag.type = 2;
+    call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
+    require(mask::testing::last_attempt(runtime, observed) && observed.kind == mask::source_kind::hudless &&
+        observed.tag_scope == 1 && observed.source.source_frame_explicit && observed.source.source_frame_has_numeric &&
+        observed.source.source_frame_numeric == frame && !observed.source.frame_generation_input,
+      "FG-independent HUD-less capture fabricated or lost explicit frame identity");
+    auto other = viewport(12); call_v2_tag(other, &tag, 1, &commands);
+    require(!query_ui_scope(UINT32_MAX, scope) && query_ui_scope(view.value, scope),
+      "Multiple fresh UI viewports were guessed to belong to one output");
+    testing::lose_observation();
+    require(!query_ui_scope(view.value, scope), "UI scope survived observation loss");
+    call_v2_tag(view, &tag, 1, &commands);
+    require(query_ui_scope(view.value, scope) && scope.revision == depth_observation_revision(),
+      "Fresh UI tag did not recover after observation loss");
+    result_v2 = -7; call_v2_tag(view, &tag, 1, &commands); result_v2 = 0;
+    require(!query_ui_scope(view.value, scope), "Failed SDK tag call retained an automatic UI scope");
+  }
+
+  void test_standalone_depth_tags() {
+    fixture cleanup;
+    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Standalone depth hook install failed");
+    auto view = viewport(0);
+    int native{}, commands{};
+    auto resource = modern_resource(&native);
+    resource.base = {}; resource.width = resource.height = 0; resource.state = 0x60;
+    auto depth = depth_tag_for(resource); depth.lifecycle = 0; depth.area = {0, 0, 2228, 1253};
+    auto hudless = depth; hudless.type = 2; hudless.area = {0, 0, 3840, 2160};
+    auto motion = depth; motion.type = 1;
+    abi_v2::resource_tag tags[]{hudless, motion, depth};
+    const auto before = testing::counts().evaluations;
+    evaluation_snapshot snapshot;
+    sunshine_scene_depth::frame normalized;
+    const auto tag_now = [&] { return call_v2_tag(view, tags, 3, &commands); };
+    SetLastError(incoming_error);
+    require(tag_now() == 0 && tag_call.incoming_error == incoming_error && GetLastError() == outgoing_error &&
+        tag_call.first == &view && tag_call.second == tags && tag_call.third == &commands,
+      "Standalone mixed tags changed public SDK arguments or LastError");
+    require(testing::latest_snapshot(0, snapshot) && snapshot.tag_boundary && !snapshot.frame_generation_input &&
+        snapshot.command_buffer == reinterpret_cast<std::uintptr_t>(&commands) && snapshot.successful_evaluation &&
+        testing::normalized_source(0, 0, normalized) && !normalized.frame_generation_input && !normalized.source_id &&
+        !normalized.projection.supplied && !normalized.projection.direction_supplied && !normalized.jitter.supplied &&
+        !normalized.source_frame_explicit && !normalized.source_frame_generation && !normalized.source_frame_token &&
+        normalized.native_state == 0x60 && normalized.proof == sunshine_scene_depth::state_proof::declared &&
+        normalized.valid_until == sunshine_scene_depth::lifetime::at_call,
+      "FG-unobserved viewport-zero tag did not retain raw depth with its own exact state/boundary");
+    auto constants = modern_camera(); opaque_token token;
+    call_v2_constants(constants, token.ref(), view); tag_now();
+    require(testing::latest_snapshot(0, snapshot) && snapshot.frame.kind == frame_identity_kind::v2_constants_call &&
+        snapshot.camera_sequence < snapshot.sequence && snapshot.frame_correlated &&
+        testing::normalized_source(0, 0, normalized) && normalized.projection.supplied &&
+        !normalized.source_frame_explicit && !normalized.source_frame_has_numeric && !normalized.frame_generation_input,
+      "Standalone global depth lost its fresh same-viewport camera-call association");
+    call_v2_tag(view, tags, 3, nullptr);
+    require(!testing::normalized_source(0, 0, normalized), "Standalone depth accepted a missing copy command");
+    tags[2].resource_ptr = nullptr; tag_now();
+    require(!testing::normalized_source(0, 0, normalized), "Standalone untag retained old depth");
+    tags[2] = depth;
+    result_v2 = -7; tag_now(); result_v2 = 0;
+    require(!testing::normalized_source(0, 0, normalized), "Failed standalone tag retained source authority");
+    tag_now();
+    require(testing::normalized_source(0, 0, normalized) && !normalized.projection.supplied,
+      "Fresh post-failure tag did not recover raw depth independently of revoked camera");
+    call_v2_constants(constants, token.ref(), view); tag_now();
+    testing::lose_observation();
+    require(!testing::normalized_source(0, 0, normalized), "Standalone depth crossed observation loss");
+    tag_now();
+    require(testing::normalized_source(0, 0, normalized) && !normalized.projection.supplied,
+      "Fresh tag borrowed a camera from before observation loss");
+    call_v2_constants(constants, token.ref(), view);
+    std::this_thread::sleep_for(std::chrono::milliseconds(270)); tag_now();
+    require(testing::normalized_source(0, 0, normalized) && !normalized.projection.supplied &&
+        !normalized.projection.direction_supplied && !normalized.jitter.supplied,
+      "Stale camera calibrated standalone raw depth");
+    // A mixed batch must not expire or eagerly copy an UntilEvaluate input.
+    std::uint32_t numeric = 99; mint(token, &numeric); call_v2_constants(constants, token.ref(), view);
+    auto until = depth; until.type = 48; until.lifecycle = 2;
+    abi_v2::resource_tag mixed[]{depth, until};
+    call_v2_framed_tag(token.ref(), view, mixed, 2, &commands);
+    require(testing::normalized_source(0, 0, normalized) && normalized.source_frame_explicit &&
+        normalized.source_frame_numeric == numeric && !testing::normalized_source(0, 1, normalized),
+      "Standalone mixed lifetimes claimed an UntilEvaluate input at the tag boundary");
+    require(testing::counts().evaluations == before, "Standalone tags fabricated SL evaluation calls");
+    const base_structure *inputs[]{&view.base};
+    call_v2_evaluate(0, token.ref(), inputs, 1, &commands);
+    require(testing::normalized_source(0, 1, normalized) &&
+        normalized.valid_until == sunshine_scene_depth::lifetime::until_evaluation,
+      "Standalone OnlyValidNow capture prematurely expired a neighboring UntilEvaluate tag");
+    call_v2_evaluate(0, token.ref(), inputs, 1, &commands);
+    require(!testing::normalized_source(0, 1, normalized), "UntilEvaluate escaped its real evaluation return");
+    // The same tag call changes role only after observed successful FG options.
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{}; call_feature_function(1000, "slDLSSGSetOptions", function);
+    require(function != nullptr, "Standalone role transition lacked FG options wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function); fg_options options;
+    set_options(view, options); call_v2_constants(constants, token.ref(), view); tag_now();
+    require(testing::normalized_source(0, 0, normalized) && normalized.frame_generation_input &&
+        normalized.source_id == (1ull << 63), "Observed FG On lost its distinct mandatory source role");
+    options.mode = 0; set_options(view, options); tag_now();
+    require(testing::normalized_source(0, 0, normalized) && !normalized.frame_generation_input && !normalized.source_id,
+      "FG Off suppressed independent standalone depth or retained its FG namespace");
+    require(testing::latest_snapshot(0, snapshot), "Standalone final observation missing");
+    const auto only_valid_now_sequence = snapshot.sequence;
+    tags[2].lifecycle = 1; tag_now();
+    require(testing::latest_snapshot(0, snapshot) && snapshot.sequence == only_valid_now_sequence,
+      "Ordinary UntilPresent tag invented a synchronous depth opportunity");
+    tags[2].lifecycle = 2; tag_now();
+    require(testing::latest_snapshot(0, snapshot) && snapshot.sequence == only_valid_now_sequence,
+      "Ordinary longer-lived tag invented a synchronous depth opportunity");
+    tags[2].lifecycle = 3; tag_now();
+    require(!testing::normalized_source(0, 0, normalized), "Unsupported tag lifetime retained old standalone depth");
   }
 
   void test_frame_generation_tags() {
@@ -2561,8 +3179,12 @@ namespace {
         "A first busy FG query was treated as confirmed Off");
       auto selected = policy.update(frame_generation_query_status::observed, fg);
       require(selected.require_frame_generation && selected.epoch == fg.epoch && selected.viewport == fg.viewport &&
-          policy.generated_frames() == fg.generated_frames,
+          !selected.exclude_unconfirmed_fg && policy.generated_frames() == fg.generated_frames,
         "Confirmed FG did not select its exact scope");
+      selected = policy.update(frame_generation_query_status::busy, {});
+      require(selected.require_frame_generation && selected.epoch == fg.epoch && selected.viewport == fg.viewport &&
+          !selected.exclude_unconfirmed_fg && policy.generated_frames() == fg.generated_frames,
+        "Busy FG query discarded confirmed scope or admitted ordinary depth");
 
       frame_generation_snapshot contended_snapshot;
       frame_generation_query_status contended_status{};
@@ -2592,17 +3214,21 @@ namespace {
           policy.generated_frames() == fg.generated_frames,
         "Contended FG query permitted an established NGX provider to take over");
       selected = policy.update(frame_generation_query_status::ambiguous, {});
-      require(selected.require_frame_generation && !selected.epoch && !policy.generated_frames(),
-        "Ambiguous FG reused old scope or selected ordinary depth");
+      require(!selected.require_frame_generation && selected.exclude_unconfirmed_fg && !selected.epoch && !policy.generated_frames(),
+        "Ambiguous FG retained a mandatory missing scope or authorized unconfirmed FG depth");
       selected = policy.update(frame_generation_query_status::busy, {});
-      require(selected.require_frame_generation && !selected.epoch,
-        "Busy query resurrected scope revoked by observation loss");
-      policy.update(frame_generation_query_status::observed, fg);
+      require(!selected.require_frame_generation && selected.exclude_unconfirmed_fg && !selected.epoch,
+        "Busy query resurrected revoked FG scope or blocked independent ordinary depth");
+      selected = policy.update(frame_generation_query_status::observed, fg);
+      require(selected.require_frame_generation && selected.epoch == fg.epoch && selected.viewport == fg.viewport &&
+          !selected.exclude_unconfirmed_fg && policy.generated_frames() == fg.generated_frames,
+        "A new confirmed FG On failed to restore its exact scope after ambiguity");
       selected = policy.update(frame_generation_query_status::unavailable, {});
-      require(selected.require_frame_generation && !selected.epoch,
-        "Lost FG evidence selected ordinary depth or preserved an obsolete scope");
+      require(!selected.require_frame_generation && selected.exclude_unconfirmed_fg && !selected.epoch,
+        "Lost FG evidence preserved an obsolete scope or blocked independent ordinary depth");
       auto off = fg; off.enabled = false;
-      require(!policy.update(frame_generation_query_status::observed, off).require_frame_generation &&
+      selected = policy.update(frame_generation_query_status::observed, off);
+      require(!selected.require_frame_generation && !selected.exclude_unconfirmed_fg && !selected.epoch &&
           !policy.update(frame_generation_query_status::busy, {}).require_frame_generation && !policy.generated_frames(),
         "Confirmed Off did not restore ordinary routing through a busy query");
       policy = {};
@@ -2709,8 +3335,9 @@ namespace {
     require(query_frame_generation(UINT32_MAX, fg) && !fg.enabled, "FG Off retained enabled state");
     const auto last_fg_sequence = snapshot.sequence;
     call_v2_tag(view, &tag, 1, &commands);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.sequence == last_fg_sequence,
-      "FG Off still captured standalone FG tags");
+    require(testing::latest_snapshot(view.value, snapshot) && snapshot.sequence > last_fg_sequence &&
+        testing::normalized_source(view.value, 1, normalized) && !normalized.frame_generation_input && !normalized.source_id,
+      "FG Off did not switch standalone depth to its independent ordinary source role");
     sr_tag.base.next = nullptr;
     mint(token, &numeric); call_v2_constants(constants, token.ref(), view);
     call_v2_evaluate(0, token.ref(), sr_inputs, 2, &commands);
@@ -2719,7 +3346,59 @@ namespace {
     options.mode = 2; options.generated_frames = 3; set_options(view, options);
     require(query_frame_generation(view.value, fg) && fg.enabled && fg.automatic && fg.generated_frames == 3,
       "Auto/MFG options were lost");
-    options.base.version = 4; set_options(view, options);
+    for (const auto version : {4u, 5u}) {
+      options.base.version = version;
+      SetLastError(incoming_error);
+      require(set_options(view, options) == 0 && fg_call.first == &view && fg_call.second == &options &&
+          fg_call.incoming_error == incoming_error && GetLastError() == outgoing_error &&
+          query_frame_generation(view.value, fg) && fg.enabled && fg.automatic && fg.generated_frames == 3,
+        "append-only modern FG options lost prefix compatibility or forwarding");
+    }
+    options.mode = 3; options.generated_frames = 0; set_options(view, options);
+    require(query_frame_generation(view.value, fg) && fg.enabled && fg.automatic && fg.generated_frames == 0,
+      "Dynamic FG incorrectly required a fixed generated-frame count");
+    provider::frame_generation_policy dynamic_policy;
+    require(dynamic_policy.update(frame_generation_query_status::observed, fg).require_frame_generation &&
+        dynamic_policy.generated_frames() == 0,
+      "Dynamic FG with an unknown count selected ordinary depth routing");
+    mint(token, &numeric); call_v2_constants(constants, token.ref(), view);
+    call_v2_tag(view, &tag, 1, &commands);
+    require(testing::normalized_source(view.value, 1, normalized) && normalized.frame_generation_input,
+      "Dynamic FG with an unknown count blocked valid tag-boundary depth");
+    // A failed Off request is not evidence that the SDK disabled FG. Revoke
+    // its former scope while keeping independently valid fallback eligible.
+    options.mode = 0; result_v2 = -7;
+    SetLastError(incoming_error);
+    const auto failed_off_result = set_options(view, options);
+    const auto failed_off_error = GetLastError();
+    result_v2 = 0;
+    frame_generation_query_status failed_off_status{};
+    frame_generation_snapshot failed_off;
+    require(failed_off_result == -7 && failed_off_error == outgoing_error &&
+        !query_frame_generation(UINT32_MAX, failed_off, &failed_off_status) &&
+        failed_off_status == frame_generation_query_status::ambiguous && !failed_off.known,
+      "Failed FG Off call was treated as confirmed Off or retained the old known mode");
+    auto fallback_policy = dynamic_policy.update(failed_off_status, failed_off);
+    require(!fallback_policy.require_frame_generation && fallback_policy.exclude_unconfirmed_fg &&
+        !fallback_policy.epoch && !dynamic_policy.generated_frames(),
+      "Failed FG Off left a mandatory missing scope or authorized old FG reuse");
+    fallback_policy = dynamic_policy.update(frame_generation_query_status::busy, {});
+    require(!fallback_policy.require_frame_generation && fallback_policy.exclude_unconfirmed_fg && !fallback_policy.epoch,
+      "Busy query revived the failed-Off scope or blocked fresh independent fallback");
+    options.mode = 1; options.generated_frames = 1;
+    require(set_options(view, options) == 0 && query_frame_generation(UINT32_MAX, fg) && fg.enabled,
+      "A successful FG On did not recover after the failed Off");
+    const auto restored_policy = dynamic_policy.update(frame_generation_query_status::observed, fg);
+    require(restored_policy.require_frame_generation && !restored_policy.exclude_unconfirmed_fg &&
+        restored_policy.epoch == fg.epoch && restored_policy.viewport == view.value && dynamic_policy.generated_frames() == 1,
+      "Successful FG On did not restore exact SL priority after fallback");
+    options.generated_frames = 0;
+    options.mode = 4; set_options(view, options);
+    require(!query_frame_generation(view.value, fg), "unknown FG mode retained a known enabled state");
+    options.mode = 1; set_options(view, options);
+    require(!query_frame_generation(view.value, fg), "fixed FG On admitted a zero generated-frame count");
+    options.mode = 2; options.generated_frames = 3;
+    options.base.version = 6; set_options(view, options);
     require(!query_frame_generation(view.value, fg), "unknown FG options version retained a known enabled state");
     options.base.version = 3; set_options(view, options);
     auto second_view = viewport(12); set_options(second_view, options);
@@ -2924,16 +3603,69 @@ namespace {
       value.strings_complete = file[0] && product[0];
       return value;
     };
+    for (const auto &entry : std::initializer_list<std::tuple<unsigned, unsigned, unsigned, abi>>{
+        {1, 0, 0, abi::legacy_no_state}, {1, 0, 1, abi::legacy_no_state}, {1, 0, 2, abi::legacy_no_state},
+        {1, 0, 3, abi::legacy},
+        {1, 1, 0, abi::legacy}, {1, 1, 1, abi::legacy}, {1, 1, 2, abi::legacy},
+        {2, 0, 0, abi::v2}, {2, 1, 0, abi::v2}, {2, 6, 10, abi::v2}, {2, 7, 30, abi::v2},
+        {2, 9, 0, abi::v2}, {2, 12, 0, abi::v2}, {2, 14, 1, abi::v2}}) {
+      const auto [major, minor, patch, expected] = entry;
+      wchar_t dotted[64]{}, comma[64]{};
+      std::swprintf(dotted, std::size(dotted), L"%u.%u.%u.0", major, minor, patch);
+      std::swprintf(comma, std::size(comma), L"%u,%u,%u,0", major, minor, patch);
+      auto value = make(major, minor, patch, dotted, comma);
+      require(versioning::classify(value) == expected, "matching dotted/comma version rejected by ABI family");
+      auto fixed_only = make(major, minor, patch, L"", L"");
+      require(versioning::classify(fixed_only) == expected, "consistent fixed-only ABI family rejected");
+    }
     auto v1 = make(1, 1, 1, L"1.1.1.0", L"1.1.1.0");
-    require(versioning::classify(v1) == abi::v1_1_1, "validated v1 fixed version rejected");
-    auto v2 = make(2, 7, 30, L"2,7,30,0", L"2,7,30,0");
-    require(versioning::classify(v2) == abi::v2_7_30, "installed v2 comma-string version rejected");
+    require(versioning::classify(v1) == abi::legacy && versioning::private_state_v1_1_1(v1),
+      "validated v1 fixed version or exact private-state adapter rejected");
+    auto revision = make(2, 6, 10, L"2.6.10.7", L"2,6,10,7");
+    revision.file_ls = revision.product_ls = MAKELONG(7, 10);
+    require(versioning::classify(revision) == abi::v2, "compatible build revision rejected");
     auto legacy = make(1, 0, 0, L"1.1.1.0", L"1.1.1.0");
-    require(versioning::classify(legacy) == abi::v1_1_1, "pinned v1 SDK fixed-resource quirk rejected");
+    require(versioning::classify(legacy) == abi::legacy && versioning::private_state_v1_1_1(legacy),
+      "pinned v1 SDK fixed-resource quirk rejected");
     require(std::strstr(legacy.reason, "quirk") != nullptr, "v1 quirk recognition not diagnosed");
-    for (const auto *text : {L"", L"1.0.0.0", L"1.1.2.0", L"1.1.1.0-beta", L"2.7.30.0", L"1,1,1,0"}) {
+    for (const auto &entry : std::initializer_list<std::array<unsigned, 2>>{
+        {0, 0}, {0, 1}, {0, 2}, {0, 3}, {0, 4}, {1, 0}, {1, 1}}) {
+      wchar_t label[64]{};
+      std::swprintf(label, std::size(label), L"1.%u.%u.0", entry[0], entry[1]);
+      auto quirk = make(1, 0, 0, label, label);
+      require(versioning::classify(quirk) ==
+          (entry[0] == 0 && entry[1] < 3 ? abi::legacy_no_state : abi::legacy),
+        "surveyed legacy resource-version quirk selected the wrong resource layout");
+      require(versioning::private_state_v1_1_1(quirk) == (entry[0] == 1 && entry[1] == 1),
+        "legacy resource-version quirk broadened private-state compatibility");
+    }
+    for (const auto *text : {L"1.1.1.0-beta", L"2.7.30.0", L"1.1.1", L"1.1.1.0.0", L"1.1.1.-1"}) {
       auto rejected = make(1, 0, 0, text, text);
       require(versioning::classify(rejected) == abi::unsupported, "unknown legacy string pair accepted");
+    }
+    for (const auto *text : {L"2.0.1.0", L"2,1,0,0"}) {
+      auto early_v2 = make(2, 0, 0, text, text);
+      require(versioning::classify(early_v2) == abi::v2 && !versioning::private_state_v1_1_1(early_v2),
+        "surveyed early typed SDK resource-version quirk rejected or enabled legacy private state");
+      early_v2.strings_complete = false;
+      require(versioning::classify(early_v2) == abi::unsupported,
+        "partial translation enabled the early typed SDK resource-version quirk");
+    }
+    for (const auto *text : {L"2.1.1.0", L"2.6.10.0", L"2.14.1.0", L"3.0.0.0"}) {
+      auto unknown_quirk = make(2, 0, 0, text, text);
+      require(versioning::classify(unknown_quirk) == abi::unsupported,
+        "early typed SDK quirk overrode an unverified fixed/string disagreement");
+    }
+    for (const auto major : {0u, 3u, 65535u}) {
+      auto future = make(major, 0, 0, L"", L"");
+      require(versioning::classify(future) == abi::unsupported,
+        "unknown ABI major inferred from version metadata alone");
+    }
+    for (const auto &entry : std::initializer_list<std::array<unsigned, 3>>{
+        {1, 0, 0}, {1, 0, 1}, {1, 0, 2}, {1, 1, 0}, {1, 1, 2}, {2, 6, 10}}) {
+      auto public_only = make(entry[0], entry[1], entry[2], L"", L"");
+      require(!versioning::private_state_v1_1_1(public_only),
+        "public ABI compatibility enabled an unverified private resource-state encoding");
     }
     auto missing_product = make(1, 0, 0, L"1.1.1.0", L"");
     require(versioning::classify(missing_product) == abi::unsupported, "one string alone enabled legacy ABI");
@@ -2955,6 +3687,11 @@ namespace {
     require(versioning::classify(incomplete_translation) == abi::unsupported, "partial translation fallback accepted");
     auto bad_known = make(2, 7, 30, L"2.7.31.0", L"2.7.31.0");
     require(versioning::classify(bad_known) == abi::unsupported, "contradictory fixed/string identity accepted");
+    for (const auto *text : {L"2.6.10", L"2,6.10,0", L"2.6.10.65536", L"2.6.10.4294967296",
+        L"2.6.10.-1", L"2.6.10.0.0", L"2.6.10.0-beta"}) {
+      auto malformed = make(2, 6, 10, text, text);
+      require(versioning::classify(malformed) == abi::unsupported, "malformed typed ABI version accepted");
+    }
     auto missing = versioning::read_file(L"Z:\\__sunshine_streamline_no_such_file__.dll");
     require(versioning::classify(missing) == abi::unsupported && std::strstr(missing.reason, "resource"),
       "missing file did not produce a specific rejection reason");
@@ -3004,6 +3741,11 @@ static void test_call_trace_only(bool modern) {
 
 int main(int argc, char **argv) {
   try {
+    if (argc == 2 && std::strcmp(argv[1], "--standalone-depth-tags") == 0) {
+      test_standalone_depth_tags();
+      std::puts("PASS standalone viewport-zero mixed depth tags capture independently of FG and SL evaluation with bounded camera/raw-only evidence");
+      return 0;
+    }
     if (argc == 2 && std::strcmp(argv[1], "--metadata-callback-bench") == 0) {
       benchmark_metadata_callbacks();
       return 0;
@@ -3065,6 +3807,8 @@ int main(int argc, char **argv) {
     std::puts("PASS valid IUnknown-only object rejected before graphics/queue methods and provider ownership");
     require(depth_capture::testing::zero_cookie_submission_regression(), "unobserved submission matched a retired capture producer");
     std::puts("PASS zero-cookie submissions preserve retired producers while real producers/consumers/replay remain tracked");
+    require(depth_capture::testing::initial_recording_regression(), "first native operation lost state/lifetime evidence or revived a stale callback");
+    std::puts("PASS newly created command recording keeps first barrier/close/pass/opaque evidence without Reset; stale callbacks remain rejected");
     require(depth_capture::testing::submission_completion_regression(), "submission ordering invalidated pending completion or admitted an unfinished/failed capture");
     require(depth_capture::testing::provider_admission_regression(), "provider ownership admitted unusable or cross-provider depth");
     require(depth_capture::testing::crop_region_regression(), "native depth crop admitted an unsupported copy or rejected a valid extent");
@@ -3077,18 +3821,27 @@ int main(int argc, char **argv) {
     require(depth_capture::testing::recording_state_loss_regression(), "declared state could bypass alias/split history loss");
     std::puts("PASS 162 source states preserve unrelated depth and named alias/split blocks; Reset reuses storage; wildcard/identity/allocation loss rejects without retiring owned copies");
     test_version_identity();
-    std::puts("PASS exact version identity, pinned v1 resource quirk and unknown/conflicting rejection");
+    std::puts("PASS ABI families, optional version strings, exact private-state scope and unknown/conflicting rejection");
     test_diagnostic_opt_in();
     std::puts("PASS default-off diagnostic config, absent command/native tracking, opt-in hooks and disabled retained pass-through");
     test_source_nomination_v1();
     test_source_nomination_v2();
+    test_rr_and_linear_depth_source();
+    test_mixed_clear_and_linear_depth();
+    std::puts("PASS SR/RR linear depth encoding, precision, camera-independent input, lifecycle, FG priority and token reuse");
+    test_source_without_frame_tag_export();
+    std::puts("PASS optional frame-tag export preserves global-only production depth, token safety, failure and recovery");
     test_jitter_frame_and_render_domain(false);
     test_jitter_frame_and_render_domain(true);
     test_high_resolution_jitter_domain();
     std::puts("PASS v1/v2 frame-owned jitter, padded render extent, high-res domain proof and optional metadata rejection");
     test_source_without_projection();
+    test_standalone_depth_tags();
     test_frame_generation_color_only_alpha();
-    std::puts("PASS live pre-FG alpha observes color-only global/frame tag53 with diagnostic probe off; null, revision, Off and shutdown revoke scope");
+    test_ui_gate_viewport_zero_mixed_batch();
+    test_repeated_fg_off_preserves_independent_ui();
+    test_ui_scope_without_frame_generation_options();
+    std::puts("PASS live pre-FG alpha observes color-only global/frame tags53/23/69 and null-preferred fallback with diagnostic probe off; null, revision, Off and shutdown revoke scope");
     test_frame_generation_tags();
     std::puts("PASS FG first-call options wrapper, synchronous OnlyValidNow tags, precision transforms, global/explicit frames, Off and failure gates");
     test_frame_generation_cached_options_and_global_camera();
@@ -3111,7 +3864,10 @@ int main(int argc, char **argv) {
     std::puts("PASS camera-table readers/writers cannot lose token registration; genuine token contention and remint still reject stale source identity");
     test_v1_forwarding();
     std::puts("PASS v1 real-hook forwarding and success-only capture");
+    test_legacy_resource_without_state();
+    std::puts("PASS legacy no-state resource reads stop at the 40-byte ABI boundary and preserve extension rejection");
     test_v2_forwarding();
+    test_v2_forwarding(false);
     std::puts("PASS v2 real-hook forwarding and success-only capture");
     test_v1_pairing();
     std::puts("PASS v1 viewport isolation and conservative frame pairing");
@@ -3158,6 +3914,8 @@ int main(int argc, char **argv) {
     test_inactive_content_transition();
     std::puts("PASS inactive content gating preserves command markers and restarts content evidence on observer activation");
     test_non_renderer_evaluations();
+    test_feature_independent_depth_contracts();
+    std::puts("PASS arbitrary feature IDs with proven depth contracts; opaque v2 and unproven legacy/Reflex inputs remain pass-through");
     std::puts("PASS Reflex/unknown feature passthrough preserves DLSS viewport/frame evidence and ignores non-renderer failures");
     test_color_tag_snapshots();
     std::puts("PASS separate immutable HUDless/input/output/backbuffer color tags and legal null-backbuffer metadata");

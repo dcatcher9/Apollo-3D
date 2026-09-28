@@ -48,6 +48,57 @@ not expose it. Install the matching protocol-2 host and add-on together for curs
 
 ## Native renderer ownership
 
+Game input has a provider boundary shared by depth, camera and UI:
+
+```text
+ReShade / Streamline / NGX adapters
+       -> bounded capture and source selection
+       -> depth_input (paired depth + camera + completed statistics)
+          ui_input   (available mask + semantics + observation identity)
+       -> stereo calibration and one render_frame_input
+       -> native renderer -> stereo export
+```
+
+`game3d_depth_input` owns the presentation-facing depth/camera queries and passive
+observer calls. Camera conversion and jitter remain attached to the exact captured depth;
+there is no separate camera selection that could mix providers or frames. Current readiness,
+completed calibration evidence and permission to reuse prior pixels remain distinct.
+`game3d_ui_input_provider` owns feature observation, capture requests, mask selection and
+upload, channel interpretation, automatic candidate admission and source diagnostics. SDK versions, feature IDs,
+generated-frame rules and resource lifetimes stay below these providers. Feature information
+may still be reported in diagnostics and controls; it does not select a stereo formula.
+
+The renderer accepts one `render_frame_input`: current color, borrowed depth, resolved
+depth/camera/stereo parameters, and eligible UI candidates. UI input distinguishes current color
+alpha, captured color alpha, a dedicated UI mask and paired HUD-less scene color. The GPU
+validates and selects a usable candidate on each current frame. Missing or rejected inputs
+allow the next eligible candidate; no user review or approval is required. Captured pixels
+still require independent scope, lifetime, completion and presentation-pairing checks.
+
+The native presentation follows this order: observe presentation requirements and
+request future UI captures; open the shared depth lease; acquire depth with its
+paired camera/encoding and resolve stereo controls; acquire the completed UI input;
+assemble one `render_frame_input`; render and publish its consumed state; close the
+lease. SDK callbacks capture inputs at their declared lifetimes before presentation;
+the presentation path consumes completed snapshots rather than fetching every SDK anew.
+
+| Resource | Automatic source order and fallback |
+| --- | --- |
+| Displayed color | Current game swapchain backbuffer, before unrelated ReShade effects. Retained input color never replaces displayed RGB. |
+| Depth | Prefer usable SL captures, then usable NGX captures. Generic ReShade depth is the fallback when the API provider does not own the pass. Within an SL batch, try HighResDepth (48), Depth (0), then LinearDepth (49). |
+| Camera / encoding / jitter | Use metadata paired with the selected depth capture. Linear-distance depth can work without camera matrices; device depth without a paired projection uses the existing relative-depth calibration when eligible. Never borrow another provider's camera. |
+| UI with FG off or no observed FG | Automatically validate captured SL UIAlpha (R, authenticated contract required), UIColorAndAlpha (23, A), Backbuffer (53, A), current color alpha, then paired HUDLessColor (2) difference. |
+| UI with FG on | Use the same captured-source order and HUD-less fallback; presented alpha is excluded. Tag 69 remains excluded from Auto until its caller contract is authenticated. |
+
+Depth order preserves source continuity: a brief pending copy can retain an admitted
+source and its authorized prior pixels. Known FG requirements restrict selection to
+the matching SL FG source; missing pixels then use only permitted bounded reuse or
+remain unavailable. An established API source's temporary gap does not trigger Generic
+recalibration. Explicit manual depth pins bypass automatic API selection. These rules
+belong to the capture/provider layer; stereo consumes only readiness, provenance and
+the resulting depth/camera values. Manual UI Off always wins. Discovery and capture availability
+do not by themselves authorize automatic UI protection.
+
 The maintained GPU code is `tools/reshade/game3d_native.hlsl`, embedded into the add-on at build time.
 `game3d_renderer.cpp` owns compilation, pipelines, textures and pass submission for D3D11/D3D12.
 The prior external Game3D effect is only a frozen comparison oracle. GPU math, FP32 depth fields,
@@ -100,13 +151,16 @@ an unavailable display mode rather than redirecting the GUI to the wrong texture
    **Use ReShade for local AR 3D**, save and restart Sunshine. The equivalent configuration is
    `sbs_reshade = enabled`; it defaults to disabled. This setting selects only the local AR
    provider. Streamed **Host AI 3D** always uses Sunshine's AI conversion.
-6. In **ReShade → Add-ons → Sunshine 3D**, the **Game 3D** panel keeps **3D strength** and source
-   status visible. Strength defaults to **50%**. Each editable image parameter shows **Reset**
-   only when its value differs from its default; opening the UI preserves existing saved values.
-   Output state, depth source/resolution, conversion, current/target gain and depth freshness
-   are always visible. Sharpening is not part of the native renderer or its controls.
-   **Depth & troubleshooting** contains **Depth view** (default game image)
-   and manual selection. Generic capture heuristics are under **Advanced capture settings**.
+6. In **ReShade → Add-ons → Sunshine 3D**, the **Game 3D** panel keeps **Enable Game 3D**,
+   **3D strength**, and **UI protection** in fixed rows above the live diagnostics.
+   Strength defaults to **50%**. **Reset** buttons keep their space and are disabled at the
+   default value; opening the UI preserves existing saved values.
+   **Status** shows output state, UI detection, Frame Generation, depth source/resolution and
+   depth freshness. **Troubleshooting** contains **Depth view** (default game image),
+   **UI mask source**, and **Use automatic depth**, followed by **Advanced capture settings**
+   and **Manual depth selection**. **Calibration** contains conversion and current/target gain.
+   Live messages and word wrapping cannot push the primary controls or tab bar down.
+   Troubleshooting controls precede live buffer details. Sharpening is not part of the native controls.
    Depth setup is always automatic. There is no Manual shader mode, per-game geometry/weapon
    profile branch or warp selector. Image controls are owned by the add-on and automatically saved
    independently of ReShade shader presets, Performance Mode and the global effects toggle.
@@ -115,12 +169,12 @@ an unavailable display mode rather than redirecting the GUI to the wrong texture
    **Generic (fallback/manual override)**. Active generic capture shows a warning that game-provided
    depth and camera data are not being used. Loading a Streamline DLL alone does not establish an
    active Streamline depth provider. AMD depth integration is not implemented yet.
-   Current depth-source status stays visible; raw buffers are under **Manual depth selection**.
+   Current depth-source status is in **Status**; raw buffers are under **Manual depth selection**.
    Streamline's current depth has its own **ACTIVE** row because its native resource need not appear
    in the generic list. **Last valid** describes history only; unavailable current depth remains 2D.
    Sunshine's host depth-strength control applies to Sunshine-generated stereo and offline conversion.
 
-When the game requests Frame Generation, the panel shows guidance near the **Game 3D** heading.
+When the game requests Frame Generation, the **Status** tab shows guidance below the controls.
 For **3× or higher**, select **Off** or **2×** in the game's settings. **2× may work**; turn it off
 if artifacts or stutter appear. **DLSS Super Resolution can stay on.** The message reflects verified
 game settings, including Auto mode, rather than measured generated output. Ambiguous settings are
@@ -132,7 +186,7 @@ shows that camera data is still unavailable; the existing 3×/higher guidance re
 The hint is not shown during the initial unknown-depth state. A busy or ambiguous FG observation
 does not produce a suggestion to enable a mode that may already be enabled.
 
-**UI protection (source alpha)** offers **On / Off / Auto**, saved per game in ReShade.ini as
+**UI protection** offers **On / Off / Auto**, saved per game in ReShade.ini as
 `SourceAlphaUIMode` (0 Auto, 1 On, 2 Off). All runtimes in the game share this choice and its
 per-game configuration file. Auto is the default. On and Off are persistent manual
 overrides, including across game restarts. The previous `SourceAlphaUI=false` migrates to Off;
@@ -140,70 +194,77 @@ the old enabled heuristic migrates to Auto. An explicit new mode takes precedenc
 No game-specific detection profile is used. When protection is enabled, white and gray pin already-composited
 UI to one global plane selected by the adaptive display-fraction policy below, while
 black keeps scene depth. This is a placement policy, not recovered UI geometry or physical distance.
-An entirely white real-input alpha channel makes the entire frame flat at the UI plane when
-protection is on; an entirely black one adds no UI pins. Auto starts one 300000 ms observation
-window when the renderer first queues an eligible alpha probe. It probes at most every 100 ms
-for the first 60000 ms, then at most once per 1000 ms until five minutes total. Game/device initialization and
-waiting for an eligible FG input do not consume that window. The first sampled alpha need not
-be selective: all-zero and all-one frames also start the timer. It counts finite positive alpha using the protection shader's
-predicate. Fresh selective nonzero coverage below 99.9% immediately enables protection
-provisionally and returns to the 100 ms probe interval, including during the sparse phase.
-When that evidence persists for 500 ms, Auto confirms On and stops monitoring
-immediately. If the evidence becomes full, empty, invalid or stale before confirmation,
-protection turns off and detection continues at the rate for the original window's current phase. Entirely gray
-positive alpha also counts as full coverage. Without confirmation by the fixed observation
-deadline, Auto freezes Off and stops monitoring; constant zero or one stays off throughout.
-The panel first shows **Auto: Waiting for a game frame...**, then
-**Auto: Detecting... (protection off)**, **Auto: Off (checking once per second...)** during the sparse phase,
-or **Auto: On (confirming for 500 ms...)** while a candidate is being checked,
-then the final **Auto: On** or **Auto: Off**.
+Auto detects eligible inputs continuously and validates their current pixels on the GPU. It
+requires no human review, approval, game profile, startup scan or confirmation timer. The
+candidate order is authenticated UI opacity, UI color alpha, captured real-input alpha,
+current color alpha unless FG is known enabled, then a paired HUD-less/final-color difference. A missing or
+rejected candidate allows the next candidate in that same render. If none passes, UI protection
+is off for that frame; it can recover automatically on a later frame.
 
-The frozen decision survives menus, later alpha changes, source/format/extent changes, renderer
-replacement and runtime recreation. On/Off overrides it immediately and persists; selecting Auto
-again uses the same startup window/result rather than starting another scan. Auto
-runs a new startup scan on the next game launch. A manual selection before any probe does not
-start the clock; returning to Auto then waits for the first eligible probe. Once a scan has
-started, manual overrides, returning to Auto and source/runtime changes never restart it.
-This remains a heuristic: a game showing only
-loading screens/full-screen menus in its startup window may select Off even if later gameplay
-has useful UI alpha. The user can select On. On intentionally honors all-one alpha.
+The **Troubleshooting → UI mask source** selector offers automatic discovery and explicit source overrides,
+including HUD-less difference. It is useful for diagnosis; normal use needs no source choice.
+Tag 69 is currently excluded from Auto because its caller-header semantic contract is not
+authenticated. Its presence does not block tag 23, Backbuffer, current alpha or HUD-less
+comparison. Manual On can use eligible alpha as an explicit override, including tag 69 and
+an all-one alpha channel. An all-one manual mask places the whole frame at the UI plane.
+Off always disables protection. Neither manual mode overrides GPU capture ordering,
+source lifetime, scope, format or pairing requirements, and changing mode does not recalibrate depth.
 
-The GPU scans every pixel into 256 small coverage records at the current probe interval. One pending
-4096-byte readback per renderer uses the existing completion fence; the CPU reads only completed
-statistics without a GPU wait or flush. These coverage dispatches and readback mappings stop
-on confirmation, at the deadline or on a manual selection. A pending observation then retires without mapping, and
-late completions cannot change the result. Sample timestamps, not duplicate presentations,
-establish the selective interval. Evidence older than 500 ms is unusable; gaps, source changes
-and renderer replacement reset only the current interval, not the original deadline or already
-qualified evidence. Each renderer has independent sample continuity; interleaved runtimes cannot
-reject each other's sequence numbers or combine partial selective intervals. A process-owned
-policy outlives GPU resource recreation. Fresh retained FG input may have been captured before
-the first probe was queued; capture freshness is independent of the observation-window start.
-While Auto is Off in the sparse phase, real-input FG mask copies are also limited to one
-attempt per 1000 ms. The owner keeps the request active, preserves pending/ready copies across
-cadence changes, and still processes invalid-tag revocation. The existing input freshness limit
-is unchanged. A fresh selective sample resumes continuous FG input capture for protection and
-frequent coverage probes for confirmation; manual or confirmed On also uses continuous capture.
-Probe failure leaves
-ordinary stereo available. Input availability remains independent of the chosen On/Off result.
+For automatic alpha selection, the GPU rejects nonfinite or out-of-range samples, an empty
+mask and a mask covering at least 90% of the image. These are conservative content checks,
+not a claim to recover UI semantics in every game. In particular, Auto may reject a genuine
+full-screen UI. Selection is recomputed from the current frame instead of using an earlier
+CPU decision or latching a startup result.
 
-ReShade.log records the waiting/start and sparse-phase transitions, first selective candidate in each phase,
-and final or manual decision with `Sunshine UI alpha`. Records include window start/elapsed time, probe interval, accepted sample
-count and last accepted coverage/sequence/timestamp. This distinguishes an unstarted scan from
-a completed scan without qualifying evidence without logging every frame or candidate flicker.
+The D3D12 adapter captures Streamline UIAlpha (69, red), UIColorAndAlpha (23, alpha),
+Backbuffer (53, alpha) and HUDLessColor (2, RGB) independently of FG being enabled. A fresh
+successful tag establishes its epoch, observation revision and viewport even when no FG
+options were observed. Each source has at most two snapshot reservations: latest ready and
+pending. The shared native owner also enforces its 32-slot, 256 MiB auxiliary limit. A full or
+invalid high-priority candidate cannot consume another kind's reservations. Null tags, failed
+SDK calls, incompatible extents/formats, observation loss and expiry revoke the affected
+available pixels. Recreated layouts and runtimes cannot inherit an earlier capture scope.
 
-With FG off, alpha comes from the current color frame,
-independently of depth-provider selection. With FG on, the D3D12 adapter captures the real input's
-Streamline Backbuffer tag 53 at its declared call boundary, keeps a bounded private GPU snapshot,
-and reuses the latest completed input alpha across presentations. Generated output alpha is never
-used as the UI mask. This path requires that the game expose that input tag. The panel distinguishes
-no observed real-input alpha from an observed input whose capture was rejected; neither authorizes
-generated output alpha. Protection stays off when no valid completed input mask is available.
-Changing the switch does not reload shaders or recalibrate depth.
+HUD-less comparison additionally requires the same producer/presentation queue, matching
+format and full extents, and a current source presentation generation exactly one beyond the
+generation captured at the tag. The integrated depth Present callback advances that generation
+before the Game 3D render. A merely recent snapshot from an earlier presentation does not pass.
+Local-only snapshots use the existing depth owner's queue-ordering contract: after the SDK
+call succeeds and the producer is actually submitted on the presentation queue, a local GPU
+copy may follow it without waiting for CPU-visible completion or producer Reset. The consumer
+copy rechecks this admission and binds one queue and destination. Foreign queues and shared
+dump acquisition still require producer completion and recording retirement. No reverse queue
+wait is inserted, and all producer/consumer fence and recording leases remain required before
+storage can be reused. Unsubmitted, failed or replay-invalidated captures remain unavailable.
 
-Only the synchronous live pre-FG alpha snapshot uses
-`record_local_texture` with `local_texture_state_policy::prefer_observed_recording`. At the guarded
-Streamline FG tag-53 call, a supported, known, unblocked, nonzero state observed on the same
+The GPU compares native RGB in matching color space. A changed pixel exceeds 4/1023 for
+R10 color or 2/255 for other SDR/PQ color; floating-point scRGB uses 0.005 times the larger
+of one and the current pixel's largest absolute RGB component. Both RGB inputs must be finite.
+Acceptance requires a nonempty difference covering fewer than 25% of pixels, at least 75% of pixels within half the
+threshold, and at least 128 of 256 tiles with 99% matching pixels. These guards reject broad
+scene mismatch before the difference becomes a UI mask. HUD-less comparison remains guarded
+in manual modes. Its binary mask identifies changed pixels, not exact compositing opacity, and cannot detect
+UI whose color matches the underlying scene. Local motion or other postprocessing differences
+can still resemble UI; live game/headset validation remains necessary.
+
+The native path uses GPU statistics, reduction/selection and mask passes. A bounded asynchronous
+16-byte summary may be read at 100 ms intervals for diagnostics; it never authorizes protection
+and there is no full-frame CPU readback. Source availability, GPU validation and actual applied
+protection remain separate diagnostic facts. Older startup fields describe a retired heuristic.
+NGX UI resources remain discovery/dump observations; live NGX, FSR and XeSS UI adapters are not
+implemented. Current presented alpha is excluded while the retained FG mode is known enabled;
+an initial unknown mode alone does not establish that the presented color is generated.
+
+Live `record_local_texture` and dump `record_diagnostic_texture` captures use the same
+`auxiliary_state_policy` and preserve the declared SL v2 lifetime. `OnlyValidNow` inputs use
+`texture_state_policy::prefer_observed_recording`; `ValidUntilPresent` and `ValidUntilEvaluate`
+use the strict `source_contract` policy. A synchronous copy does not rewrite a longer-lived tag
+into `OnlyValidNow` or authorize overriding a state declaration intended for later consumption.
+Unknown SL v2 lifetimes are rejected; SL v1, which has no lifecycle field, keeps its existing
+synchronous capture. This applies to HUDLessColor, UIAlpha, UIColorAndAlpha, Backbuffer and other
+optional masks/hints. Resource content and local/shared storage do not change GPU-state proof,
+and the dump does not require or fabricate FG.
+For the at-call policy, a supported, known, unblocked, nonzero state observed on the same
 command recording takes precedence over the provider's declaration. This permits a stale declared
 UAV hint when the recording independently proves the resource is currently a render target.
 If that recording has no state entry for the resource at all, an explicit nonzero supported
@@ -218,8 +279,10 @@ requires only type and extent for the special Backbuffer tag; its other tag inpu
 The fallback therefore requires an explicitly supplied state rather than assuming one from the tag.
 The private copy transitions from and restores exactly the selected state, preserving whether
 that state came from an observation or the provider declaration.
-Depth copies, optional diagnostic captures and default local texture copies retain their existing
-declaration checks. The declaration fallback still needs live game/headset acceptance.
+Depth copies, NGX and default local texture copies retain
+their existing declaration checks. Shared dump allocations remain immutable after host
+acknowledgement; local retired storage may be reused. This storage distinction does not select
+the resource-state policy. The declaration fallback still needs live game/headset acceptance.
 
 The FG decision is independent of depth-provider selection, including a manually pinned Generic
 buffer. The last confirmed mode survives transient observation loss and effects reloads; a new
@@ -302,12 +365,12 @@ preparation failure occurs before command recording and leaves ordinary renderin
 The switch can disable automatic protection because arbitrary
 game backbuffer alpha is not universally a UI mask and selective coverage can still be a false positive.
 
-Both paths use the same UI protection shader. For FG, only its alpha input changes; all RGB passes
-still use the current color, never the retained input's RGB. Captures share the existing depth
-transport's producer/consumer fence retirement and maximum source age. No new queue, GPU wait or
-CPU image readback is added; the alpha gate and adaptive placement read only their bounded
-coverage and conflict records described above.
-Unfinished captures are skipped rather than waiting. Scope, viewport,
+All candidate paths feed the same UI protection shader. Displayed RGB still comes from current
+color, never retained input RGB. Captures share the existing depth transport's producer/consumer
+fence retirement and maximum source age. Automatic detection adds the three GPU passes described
+above and a bounded diagnostic summary, without a new queue, GPU wait or CPU image readback.
+Adaptive placement separately reads only its bounded conflict records described above.
+Captures without the required submission/queue ordering are skipped rather than waiting. Scope, viewport,
 resolution or observation-revision changes revoke old masks. Alpha and depth have independently
 recorded source identities: this is bounded previous-input reuse, not an exact generated-frame
 color/depth/mask pairing. Fast-changing UI can therefore briefly lag behind the current color.
@@ -337,14 +400,17 @@ locally flattens the background beneath it; exact independent stereo background 
 HUDless image and UI color/alpha layer. Source alpha interpretation is not inferred from NGX or SL
 provider identity. Dump/replay records the effective switch as `replay.source_alpha_ui`, the chosen
 request as `source_alpha_ui_requested`, and the reason as `source_alpha_ui_status`. `source_alpha_auto`
-records the startup result or manual override, monitoring state, window start, probe interval, accepted sample
-count, coverage counts and the observation
-sequence/timestamp separately from the current render.
-Offline replay uses the frozen effective value without rerunning the automatic timer; explicit replay
+records automatic/manual state separately from the current render. New `ui_source_detection`
+metadata replaces session qualification and carries no approval flag. Its asynchronous summary
+may describe an earlier frame and is diagnostic only. Historical monitoring, timer and coverage
+fields remain readable in older packages but do not authorize live UI. Offline replay uses the
+frozen effective value and mask without reclassification; explicit replay
 overrides still honor entirely white masks. It uses the separate 16-byte `b1` UI constants; the 80-byte geometry `b0` ABI
 is unchanged. `source_alpha_ui_fg_mode` records the retained mode and its observation provenance.
 The UI constant buffer stores four 32-bit words: enabled, mode, a mode-dependent float word, and
-zero reserved padding. Live mode 5 records `sunshine_game3d.ui_parameters.v6` and requires
+mask channel (`0` alpha, `1` red). New dumps record `sunshine_game3d.ui_parameters.v7` and
+`ui_constant_binding.mask_channel`; older v2–v6 packages require zero in the formerly reserved word.
+Live mode 5 requires
 `#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1`. Its third word is the exact applied display fraction,
 not inverse depth. The binding labels it `word2_role: front_limit_fraction` and records
 `front_limit_fraction` plus `front_limit_fraction_bits`. Finite fractions in `[0,0.75]` are valid
@@ -368,7 +434,7 @@ uses the submitted depth as a floor for the GPU maximum and retains the v3 ABI; 
 `front_limit`, retains v4 and requires `#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1`. It places UI at
 the current positive `b0` display budget times strength and stereo blend, subject to warp
 readiness; its inverse-depth word is unused, including malformed bits preserved for replay.
-Mode 2 requires v3 or newer, mode 3 requires v4 or newer, mode 4 requires v5 or newer, and mode 5 requires v6.
+Mode 2 requires v3 or newer, mode 3 requires v4 or newer, mode 4 requires v5 or newer, and mode 5 requires v6 or newer.
 Unknown modes,
 invalid depth in modes 1/2, and unavailable stereo resolve to zero UI parallax.
 Dump 3D records the exact submitted UI constants, separate from diagnostic targets. Old packages
@@ -386,8 +452,15 @@ and the reduction inactive. Historical mode-2 dumps distinguish the
 submitted floor from the GPU-resolved plane; replay additionally saves that resolved scalar.
 Live rendering never waits to read it back.
 `replay.ui_alpha_source` identifies `none`, `source_color`, or `ui_source_color`. When a retained
-input was consumed, required artifact 33 (`ui_source_color.bin`) preserves its exact full RGBA
-pixels, and `ui_source_alpha.png` shows the alpha used by that render. Its provenance records the
+input was consumed, required artifact 33 (`ui_source_color.bin`) preserves its exact typed pixels.
+For automatic detection this artifact is the resolved full-resolution `R32_FLOAT` mask, consumed
+through its red channel. It includes an all-zero result when every candidate was rejected;
+the enabled mask path does not by itself imply any protected pixels. Replay uses these frozen
+values and does not run candidate selection again. Optional candidate metadata remains separate.
+RGBA sources retain their native color format; red-channel masks additionally accept R8_UNORM,
+R16_UNORM, R16_FLOAT and R32_FLOAT. No conversion pass or color-space interpretation is applied.
+`ui_source_alpha.png` shows an alpha-channel input and `ui_source_mask.png` shows a red-channel input.
+Its provenance records the
 input observation, age and completed capture; it never substitutes the optional latest tag-53
 diagnostic snapshot. Live dump transport is version 3 with 40 descriptor slots; offline replay
 also accepts earlier packages without an external alpha input.
@@ -395,20 +468,28 @@ also accepts earlier packages without an external alpha input.
 alpha capture attempt observed at that render, including its outcome and available capture-state
 evidence. It describes an attempt, not the consumed mask or an exact color/depth/alpha pairing;
 the consumed-alpha artifact and its provenance remain authoritative when a mask was used.
+Its `hook_gate` records the latest public tag callback's scope, observed UI kinds, matching
+request count and admission result; `request_generation` identifies the retained live request.
+A bounded `Sunshine UI capture gate` log reports the same evidence. An admitted hook with a
+zero capture boundary and a changing request generation indicates that the request was replaced
+or invalidated after admission, rather than that the game supplied no UI tag. Unchanged failed
+or successful FG Off options preserve independent UI tags; an actual FG knowledge/mode loss
+still revokes the old scope once and requires fresh input.
 Capture diagnostics preserve the raw declared hint and independent observed state.
 `copy_state`, `copy_state_known` and `used_observed_state` identify the selected copy/restore state
-and whether state selection used observed recording evidence (including the narrow live-alpha policy).
+and whether state selection used observed recording evidence (including the shared UI capture policy).
 A declared-state selection reports `copy_state_known=true` and `used_observed_state=false`;
 "known" here identifies the selected copy state, not independent validation of the provider hint.
 
-The panel controls native `Strength`, `DepthView`, `Enabled` and `SourceAlphaUIMode` settings in ReShade.ini.
+The panel controls native `Strength`, `DepthView`, `Enabled` and `SourceAlphaUIMode` settings in ReShade.ini,
+and provides the optional UI source selector and automatic-detection status described above.
 Opening the panel does not rewrite values. Edits apply immediately and are saved automatically,
 independently of shader preset Auto Save. Each reset changes only its own parameter.
 These controls remain independent of shader enablement, Performance Mode and preset transitions.
 Source-owned camera/raw inputs determine depth decoding, coordinate transforms and screen plane;
 no `SUNSHINE_GAME3D_AUTOMATIC`, `SUNSHINE_GAME3D_CAMERA_DEPTH` or
 `SUNSHINE_GAME3D_GENERIC_CONFIG` mode definitions are needed. The installer removes those
-obsolete definitions while preserving unrelated definitions. **Calibration details** displays the
+obsolete definitions while preserving unrelated definitions. The **Calibration** tab displays the
 current zero plane and independent gain, or the last applied values while paused, in a labeled table.
 **Conversion scale** and **Conversion offset** identify validated camera decoding;
 **relative depth (assumed infinite far plane)** identifies the normal raw-depth fallback.
@@ -558,6 +639,30 @@ that those pixels represent UI. Consult the game's actual SDK version, for examp
 NGX's `TransparencyMask` likewise is not a UI classification. A successful getter returning
 null means no resource was supplied by that observation.
 
+The NGX catalog also queries the official DLSS-G inputs `DLSSG.HUDLess`, `DLSSG.UI`,
+`DLSSG.UIAlpha` and `DLSSG.Backbuffer` through the owning SDK's D3D12 resource getter.
+These are separate from Super Resolution's `Color`/`Output` and transparency hints.
+Their [SDK definitions](https://github.com/NVIDIA/DLSS/blob/374959484e79a640feaba44c93ac8cfb0a03f5b5/include/nvsdk_ngx_defs_dlssg.h)
+describe HUDless scene color, premultiplied UI color/alpha and single-channel UI opacity;
+the three optional UI inputs need not be supplied. Successful capture produces
+`ngx_hudless_color`, `ngx_ui_color_alpha`, `ngx_ui_alpha` and `ngx_backbuffer` artifacts.
+Each input's own complete subrectangle is retained; all-zero or entirely unavailable
+subrectangle fields use the full allocation, while partial or malformed rectangles reject
+that optional copy. `DLSSG.ColorBuffersHDR` is recorded but does not alone identify a transfer
+function. Copies require observed native resource-state evidence and successful evaluation.
+The existing SL-first depth ownership gate remains in force: a successfully admitted SL
+capture suppresses nested NGX resource copies. During an armed dump, the outer supported
+NGX evaluation still records bounded named-parameter observations, including UI inputs,
+without nominating depth, advancing its reset/sequence state or issuing resource-copy callbacks.
+These observations report `resource_capture_status = not_attempted_depth_owned` and
+`sequence_domain = diagnostic-depth-owned`; known feature creation metadata remains available,
+while capture metadata and scene association remain unavailable. Nested NGX wrappers share one
+diagnostic observation owner, independently of whether a rejected outer depth input permits an
+inner depth fallback. Direct/fallback NGX evaluations query
+these keys only during an armed dump, without restricting the feature ID. These resources
+are diagnostic inputs; they do not automatically replace the selected live UI mask or prove
+pairing with the final rendered color.
+
 NGX query failures retain the numeric result and a `result_detail` containing its hexadecimal
 code and known SDK name. `FAIL_UnsupportedParameter` does not distinguish an unset key from
 an unsupported parameter or a getter-type mismatch. The dump records the original typed
@@ -571,9 +676,16 @@ or a missing HUD mask. The dump records what the current game evaluation actuall
 
 An explicit dump also requests the catalogued UI-related SL/NGX resources, including HUDless
 and UI color, alpha, no-warp, transparency, particle, history-rejection and related hints.
-Every catalog entry remains visible in metadata when unobserved, null or unavailable. Optional
-copies preserve the full allocation's native typed bytes and its own rectangle; they do not apply
-the selected depth crop or jitter. Unsupported formats, expired resources, readback failures and
+Every catalog entry remains visible in metadata when unobserved, null or unavailable.
+SL v2 descriptors accept `eTex2d` and `eUnknown` identities, matching live capture; SL v1 accepts
+only `eTex2d`. `eUnknown` still requires native COM, device and texture-description validation;
+known buffer and invalid resource types remain unsupported.
+Optional copies preserve the full allocation's native bytes and its own rectangle; they do not apply
+the selected depth crop or jitter. RGBA8/BGRA8 typeless color allocations are copied into compatible
+UNORM snapshots without changing their bytes, including alpha. This normalization is shared by live
+UI capture and diagnostics; source diagnostics retain the original allocation format while captured
+artifacts report their actual typed format. Other typeless families remain unsupported here because
+their numeric interpretation cannot be inferred from storage alone. Unsupported formats, expired resources, readback failures and
 capture-budget limits are reported per resource without discarding the main replay inputs.
 `ui_resources` contains middleware observations; `optional_captures` describes frozen optional
 copy decisions, and host-side failures appear in `optional_capture_errors`. These scopes must not
@@ -581,12 +693,14 @@ be treated as interchangeable frame evidence.
 Each optional copy's `capture_diagnostic` records its available declared and observed resource
 states, state flags, resource cookie, device and command-recording identity. These are existing
 capture-admission observations; recording them does not relax capture checks or change GPU work,
-geometry or zero placement. A rejected optional Backbuffer tag-53 copy does not by itself establish
-that live alpha capture failed for the same reason. Compare its provenance with the separately
-recorded live attempt. Optional tag-53 copies retain declaration checks and can report a declaration
-mismatch even while live alpha succeeds using the guarded observed-recording policy. The optional
-copy and live snapshot have separate roles; a single dump's optional rejection cannot prove the
-live failure reason.
+geometry or zero placement. Optional Streamline copies and live UI captures select the same
+state policy from the unchanged declared lifecycle. For `OnlyValidNow`, a stale declared UAV
+hint does not reject the dump when that recording proves a supported shader-resource or
+render-target state. Longer-lived tags keep the strict source contract.
+The original declaration, observed state and selected copy state remain separately recorded.
+A rejected optional copy does not by itself establish that live alpha failed for the same reason:
+the optional capture and live snapshot still have separate request timing, source selection and
+storage ownership. Compare their provenance rather than assuming an identical frame.
 In Expedition 33's earlier 2026-09-19 FG-on diagnostic windows, tags 2 and 54 were nonnull,
 and tag 23 was explicitly null. This establishes potential HUDless/no-warp inputs, not an
 available UI mask or a match to the exported frame. Before using either input to protect UI,
@@ -664,6 +778,97 @@ the host's preview implementation. `tools/reshade/inspect_game3d_dump.py <packag
 reports numeric statistics offline (NumPy required); its optional `--previews` writes
 artifact PNGs in a `previews` subdirectory (Pillow required).
 
+### UI source discovery and snapshot qualification
+
+The inspector's `ui_discovery` report separates interface observation, native capture,
+pixel content, optional offline review and the input actually consumed by the renderer. It reads the
+production catalog from `producer_metadata.latest_observations.ui_resources`; older flat
+catalogs remain readable. An empty current catalog never inherits a stale flat catalog.
+The catalog supplies resource semantics; this report does not infer SDK tag meanings from
+numeric IDs or load a game's middleware.
+
+Live discovery follows the automatic order above. For troubleshooting a new game, the offline
+inspector investigates these sources without changing live protection:
+
+| Priority | Candidate | Current observed interfaces |
+| --- | --- | --- |
+| 1 | Explicit UI opacity | Streamline UIAlpha; NGX DLSSG.UIAlpha |
+| 2 | Explicit UI color with alpha | Streamline UIColorAndAlpha; NGX DLSSG.UI |
+| 3 | Game color alpha | Streamline/NGX pre-FG Backbuffer; presented source alpha |
+| 4 | HUDless/final-color comparison for a derived mask | Streamline HUDLessColor; NGX DLSSG.HUDLess |
+| Diagnostic only | No-warp, transparency, particle and other hints | Catalogued SL/NGX inputs |
+
+The offline order applies to captured snapshots, not merely nonnull pointers. AMD FSR and
+Intel XeSS UI adapters are not implemented by this workflow. An unobserved interface, an
+explicit null, a failed getter, a rejected copy, a pending copy and a missing/unreadable artifact
+remain distinct outcomes. Depth-owned NGX observations explicitly explain why pixels were not
+copied. Optional snapshots retain their own provenance and never replace the required consumed
+UI artifact. Neither matching dimensions nor nearby sequence numbers establish correspondence
+with the presented color.
+
+When dedicated masks and color alpha are unsuitable, compare native HUDless RGB with final
+RGB as the next candidate investigation. Decode both with the same transfer and color-space
+handling; independently rendered preview PNGs can create a false scene-wide difference.
+Inspect scene residuals, camera motion and HUD alignment before choosing a noise threshold.
+A selective difference can locate changed HUD pixels, but does not recover exact compositing
+opacity or identify HUD pixels whose color happens to match the scene. Live use additionally
+needs a paired capture/presentation identity and checks for scene-wide mismatch. The live
+Streamline provider now supplies this guarded difference fallback automatically. Offline
+comparison remains useful for investigating its acceptance or rejection.
+
+When automatic discovery fails in a new game, establish hook/feature coverage with the call-route diagnostic
+below. Check SDK contract identity before interpreting tags; notably Streamline 2.11.1 assigns
+UIAlpha to 68, while 2.12.0 assigns 68 to ResponsivityMask and UIAlpha to 69. The current producer
+catalog uses 69 and this offline report does not repair that compatibility gap or authenticate
+caller-header semantics from an interposer DLL version. Explicitly ambiguous/unsupported
+catalog bindings cannot be qualified. Live Auto also excludes captured tag 69 until its caller
+contract is authenticated, and proceeds automatically to independent lower candidates.
+
+Capture ordinary gameplay with visible UI, camera movement, hidden UI when available, a menu,
+and a return to gameplay. Use the validated evaluation interpreter selected by the repository's
+runtime procedure to inspect each existing Dump 3D package:
+
+```powershell
+& $SbsbenchPython tools/reshade/inspect_game3d_dump.py '<dump-directory>' --previews `
+  --ui-report '<new-report.md>' --write-ui-review '<new-review.json>'
+```
+
+The report and review paths must be new files; the inspector never overwrites an existing review.
+Without `--previews`, numeric channel facts and discovery still run. The generated review is
+intentionally incomplete. Review the fixed-range mask alongside the game image and record
+scene context, mask alignment, exclusion of scene content, an explicit verdict and explanatory
+notes before supplying it with `--ui-review`:
+
+```powershell
+& $SbsbenchPython tools/reshade/inspect_game3d_dump.py '<dump-directory>' `
+  --ui-review '<review.json>' --ui-report '<new-reviewed-report.md>'
+```
+
+Review binds the manifest, candidate native bytes and source-color evidence by SHA-256.
+Changed evidence, missing required channels, failed captures, nonfinite/out-of-range opacity
+or contradictory review context prevent qualification. Numeric coverage alone never establishes
+UI meaning: empty coverage can be correct without visible UI, and full positive coverage can be
+correct for a full-screen menu or can incorrectly cover a 3D scene. All-positive gray values
+also cover the entire frame under the protection predicate. A selective pattern is only a
+candidate, not a semantic verdict. HUDless color and generic hints cannot become opacity masks
+through this review mechanism.
+
+`human_reviewed_snapshot` qualifies only the specific artifact and observed scene. The report's
+`selected_snapshot` is an offline recommendation; it neither changes live protection nor proves
+frame pairing, continuous availability, moving-UI alignment or generated-frame correctness.
+The required consumed artifact and recorded enable state remain separate render facts. Reviewing
+several game states can explain automatic decisions and remaining failure cases. Loading or
+editing this JSON does not affect live behavior; no review file or in-game approval is required.
+
+The inspector/qualification regression tests run without a game or GPU:
+
+```powershell
+& $SbsbenchPython tools/reshade/test_game3d_ui_discovery.py
+& $SbsbenchPython tools/reshade/test_inspect_game3d_dump.py
+```
+
+### Native frame replay
+
 The add-on build also produces `replay_game3d_dump.exe`. It uses an official ReShade runtime
 and the production native renderer, with the package's embedded shader and exact constants:
 
@@ -699,6 +904,27 @@ They do not substitute for the original source-color alpha or the required consu
 This reproduces one native Game 3D frame before overlay/cursor, host scaling, HDR encoding and
 video compression. Saved constants freeze the scene policy at capture time. A single snapshot
 does not evaluate temporal adaptation, FG interpolation or flicker; those need a frame sequence.
+
+### Explicit linear-distance depth
+
+Production Game3D carries a depth encoding with each immutable capture and asynchronous sample.
+Device depth keeps its existing camera-affine or relative-raw path. Explicit linear distance
+uses `z = raw * raw_scale + raw_bias`, then `q = 1/z`; it needs no guessed near plane or camera
+matrix. Streamline tag 49 declares this encoding, including its resource precision transform.
+NGX's explicit `DLSS.Use.HW.Depth = 0` selects linear distance and `1` selects device depth.
+
+The native shader uses `coordinate_basis = 2`, retaining the 80-byte b0 layout. Its existing
+projection pair stores `(-raw_bias/raw_scale, raw_scale)` for the reciprocal decoder.
+`#define SUNSHINE_LINEAR_DISTANCE_DEPTH 1` identifies shaders that implement this basis.
+The same inverse-distance controller sets scene gain and zero; provider, logical source,
+encoding and observation domain isolate calibration across source changes. A linear input
+does not imply that camera projection metadata was recovered.
+
+Nonfinite or nonpositive decoded distances produce neutral disparity and do not contribute to
+calibration. The existing tiled GPU reduction counts valid samples, and an all-invalid capture
+cannot establish or replace a reference. Linear depth has no supplied near-clip bound, so each
+pixel's reciprocal and scaled displacement must remain finite. Equivalent world-unit changes
+cancel through the shared gain. Device-depth decoding and its endpoint policy remain unchanged.
 
 ### Native depth calibration and rendering
 
@@ -768,15 +994,74 @@ Matching resolution alone does not establish alignment. Calibration currently re
 backup; keep the installed depth-preservation setting enabled. Physical game/headset acceptance
 is separate from synthetic buffer, shader and transport validation.
 
+### Streamline ABI compatibility
+
+Streamline discovery selects a public ABI family from consistent DLL version metadata, then checks
+the exports actually present. It does not maintain a game-name or individual patch-version allowlist.
+The public-header survey covers all 28 published tags from **1.0.0 through 2.14.1**. The relevant
+Windows x64 boundaries are:
+
+| Public ABI family | Consumed layout and entry points | Pinned official boundary headers |
+| --- | --- | --- |
+| 1.0.0–1.0.2 | 432-byte Constants; 40-byte Resource without a state field. 1.0.0/1.0.1 use the original `sl::setConstants`, `sl::setTag` and `sl::evaluateFeature` namespace exports; 1.0.2 introduces the `slSet*`/`slEvaluateFeature` C names. | [1.0.0](https://github.com/NVIDIA-RTX/Streamline/blob/999b2087d0858bcec3d9d0113c99cf0d1c8b932e/include/sl.h), [1.0.2](https://github.com/NVIDIA-RTX/Streamline/blob/1da84fff73a02df9d7f7a732b83005e833c21a34/include/sl.h) |
+| 1.x from 1.0.3 | Same Constants; 48-byte Resource adds state before the extension pointer. | [1.0.3](https://github.com/NVIDIA-RTX/Streamline/blob/8a9e67be0279f248d04391be7a4dc40546be40b9/include/sl.h), [1.1.1](https://github.com/NVIDIA-RTX/Streamline/blob/5bac43f464f53bc0583bab8df506b788d8d14c3c/include/sl.h) |
+| 2.x | Typed/versioned structures; the consumed core function signatures and field offsets remain compatible across the surveyed releases. Constants are 456 bytes, Resource 112, ResourceTag 64 and ViewportHandle 40. | [2.0.0](https://github.com/NVIDIA-RTX/Streamline/blob/f36f47cffef53c59e7da54288689f1525049aa7d/include/sl.h), [2.14.1](https://github.com/NVIDIA-RTX/Streamline/blob/2122257e0fce486f91b385aa63b9a09b0a34b363/include/sl_core_types.h) |
+
+NVIDIA's [versioned-structure contract](https://github.com/NVIDIA-RTX/Streamline/blob/2122257e0fce486f91b385aa63b9a09b0a34b363/include/sl_struct.h#L49-L106)
+requires appended fields and a version increment. The observer still validates the structure GUID,
+supported structure version, readable prefix and extension interpretation; a compatible DLL major
+does not make arbitrary structures or missing resources usable. Missing or contradictory version
+metadata and unknown ABI majors remain unsupported. Official 1.0.2–1.1.1 binaries have a resource
+script quirk: fixed file/product version 1.0.0.0 but matching strings containing the actual version.
+Official 2.0.1 and 2.1.0 have the equivalent fixed 2.0.0.0 quirk. These exceptions are limited to
+the surveyed legacy release range and those two exact 2.x releases, with complete, agreeing strings.
+
+Constants, global tags and evaluation exports are required. `slSetTagForFrame`,
+`slGetNewFrameToken` and `slGetFeatureFunction` are optional capabilities. Frame tags first appear
+in the surveyed 2.7.30 headers; earlier 2.x releases retain global/evaluation-local tag observation.
+Without token creation observations the adapter cannot invent numeric frame evidence, and without
+feature-function lookup it cannot discover the optional PCL/FG observers. These omissions do not
+disable the core hooks. Hogwarts Legacy's **2.6.10** build is not a public SDK tag: its admission is
+based on the compatible 2.x family, with game behavior still requiring live validation.
+
+An ABI match is separate from a capturable depth source. Early 1.x resources have no state word;
+they require state established by the native command-recording observer. Later legacy resources
+can declare a nonzero state. The private resource-state encoding is still enabled only for an
+exactly identified **sl.common 1.1.1.0**, independently of the public interposer family.
+Unknown, incomplete or conflicting state remains unavailable.
+
+ABI changes are checked with the `reshade_streamline_camera_data`,
+`reshade_streamline_camera_probe` and `reshade_streamline_v1_resource_state` CTest cases. The probe
+test executable also accepts `--inspect-version <path-to-sl.interposer.dll>` for read-only identity
+checks. The opt-in [SDK ABI checker](../tools/reshade/test_streamline_sdk_abi.cpp) compiles external
+official headers against the production sizes, offsets and function signatures; supply the SDK
+include path and `SUNSHINE_SL_MAJOR`, `SUNSHINE_SL_MINOR`, `SUNSHINE_SL_PATCH` definitions as shown
+in that file. Keep original headers unchanged and document any compiler-only portability copies.
+Run this comparison at the pinned boundaries when extending a family; it does not load SDK DLLs
+or replace a game capture test.
+
 ### Streamline depth selection
 
-Supported D3D12 Streamline integrations identify depth at successful DLSS
-evaluations or supported enabled-FG tag boundaries. This path defaults on
-(`[SUNSHINE_DEPTH] StreamlineDepthSource=1`). It prefers
-tag48 (explicit high-resolution depth), then tag0 (scene/render-resolution depth), even when the
-heuristic inventory contains a larger texture. A valid high-tag nomination whose capture is
-unsupported does not block a capturable tag0 from the same evaluation. If neither tag can be
-captured, the preferred valid nomination retains SL ownership without authorizing stereo pixels.
+Supported D3D12 Streamline integrations identify depth at successful evaluations or supported
+enabled-FG tag boundaries. This path defaults on (`[SUNSHINE_DEPTH] StreamlineDepthSource=1`).
+Admission is based on the resource contract, not a feature-ID allowlist. Typed 2.x evaluation
+inputs can identify the viewport and depth for any feature; opaque or unrelated inputs pass through
+without replacing valid evidence. Legacy features without a documented renderer contract require
+their exact numeric frame/view tuple and validated depth/camera association. Legacy Reflex remains
+a timing-marker contract, not a viewport.
+Known SR/RR malformed contracts still revoke their own evidence instead of being ignored.
+
+Capture prefers tag48 (explicit high-resolution device depth), then tag0 (scene/render-resolution
+device depth), then tag49 (positive linear view distance), even when the heuristic inventory contains
+a larger texture. Unsupported capture of an earlier candidate does not block a capturable later
+candidate from the same evaluation. If no tagged texture can be copied, a metadata-only nomination
+cannot displace usable NGX or authorize stereo pixels; without another usable API source it remains
+explicitly unavailable. Linear depth carries its encoding and precision scale/bias with the resource;
+it reconstructs inverse distance directly and does not require a camera matrix.
+A successful batch may clear an old depth tag and supply an alternate in either order.
+The first clear revokes prior leases; only explicitly supplied entries in that same batch can
+advance across its own revision change. Repeated successful null clears are idempotent.
+Cached tags/cameras, failed SDK calls and intervening observation losses are never revalidated.
 The ordered API tags share one pending-evaluation lifetime. An intermediate failed tag cannot
 interrupt that lifetime; after it resolves, a known unsupported capture is not pending GPU work
 and cannot authorize holding historical stereo. Metadata nominations prefer their reserved slots
@@ -791,7 +1076,8 @@ explicitly; a directly supplied resource is not represented by a checked generic
 **ACTIVE** and places it first, matching SL/NGX and ReShade by native lifetime identity rather than
 address or resolution. API-only textures appear as a read-only active row; historical sources are
 never marked active. Checkboxes continue to mean manual override, independently of the active label.
-No game middleware is loaded or replaced; supported ABI versions remain 1.1.1 and 2.7.30.
+No game middleware is loaded or replaced; the supported public interfaces are described in
+[Streamline ABI compatibility](#streamline-abi-compatibility).
 
 Source selection, capture and scale preparation are separate responsibilities. SL/NGX adapters
 identify the exact game resource and provide a logical source generation, extent and optional camera
@@ -814,11 +1100,20 @@ source references and the current registry entry prevent address reuse from matc
 source. Identity retention does not require that the capture owner support the resource's format.
 
 A validated, successfully evaluated and actually submitted source nomination establishes API
-ownership on the consuming queue independently of pixel readiness. Unsupported capture format or
-state or failed display creation therefore produces mono while retaining the API source. A pending
-snapshot can use the newest unconsumed completed snapshot from the same source under the ordering,
-freshness and interruption rules below; otherwise it also produces mono. Neither case starts
-Generic ranking or scene-derived recalibration. Invalid pointers,
+ownership on the consuming queue independently of display readiness. Between API providers,
+readable SL takes priority over NGX; an SL DLL, metadata-only nomination or pending first copy cannot
+replace working NGX. Once SL has supplied pixels, a valid successor pending for less than 250 ms
+from the last copied source timestamp retains that preference. Failed, unsupported, missing,
+expired or revoked SL evidence permits a ready NGX source to take over. The current SL observation
+revision is checked before arbitration, so an obsolete native copy cannot hide valid NGX.
+Explicit enabled FG retains its separate mandatory SL scope described below. Provider choice is
+frozen within one presentation, and each packet retains its own encoding, camera and logical source.
+
+When no alternative API source is usable, unsupported format/state or failed display creation
+produces mono while retaining the established API selection. A pending snapshot can use the newest
+unconsumed completed snapshot from the same source under the ordering, freshness and interruption
+rules below; otherwise it also produces mono. Neither case starts Generic ranking or scene-derived
+recalibration. Invalid pointers,
 device/extent/lifetime mismatches and an unsuccessful or unsubmitted first evaluation cannot
 establish authority. A loaded DLL alone cannot establish it either. Once established, temporary
 missing or failed observations retain ownership. Explicit source release, disable or lifecycle
@@ -931,15 +1226,30 @@ process-persistent, preventing a second implicit CRT cleanup owner. A shared det
 callback observation before other C++ owners are destroyed; vendor calls still forward normally.
 Ordinary add-on unload continues to unregister callbacks and release its active session resources.
 
-Streamline 2.7.30 Frame Generation has a separate tag-boundary adapter. Observed successful FG
-options enable it; constants and depth tags are associated within their own viewport/frame scope.
+Streamline 2.x has a synchronous depth tag adapter independent of Frame Generation. Ordinary
+`OnlyValidNow` depth can be copied on the command list supplied to a successful tag call even if
+FG options and `slEvaluateFeature` have never been observed. That call's declared resource state,
+resource identity, active rectangle and lifetime remain the copy contract; it does not provide
+state evidence for a different NGX command list. Constants and depth tags are associated within
+their own viewport/frame scope. Observed successful enabled FG options assign the separate FG
+source role; a tag boundary alone never implies FG.
+The consumed `DLSSGOptions` mode/count prefix is validated for structure versions 1–5. Off, On,
+Auto and Dynamic modes are recognized; Auto/Dynamic describe an enabled policy, not proof that
+a particular presentation was generated. The requested count is diagnostic metadata, not an
+observed fixed frame-generation multiplier.
 The observer intercepts both newly returned and previously cached FG options function pointers.
 Resolving the public function or loading middleware does not enable FG; a successful game options
 call is still required. Global `OnlyValidNow` tags may pair with the latest successful constants
 call for that viewport when a frame-token creation was not observed. This bounded association
 uses the constants-call identity, ordering, observation generation and age, never an invented
 numeric frame index. Newer constants, invalid/reset camera data or lost observations invalidate it.
-Within the validated 2.7.30 layout, the observed all-zero nested Resource header is also supported.
+An ordinary synchronous tag without a current camera identity still supplies raw depth, with no
+projection, direction, jitter or SDK-frame claim borrowed from older constants or another API.
+The existing raw-depth calibration and orientation requirements continue to apply. This fallback
+is limited to the explicit `OnlyValidNow` resource in that call; neighboring longer-lived tags
+retain their original evaluation/presentation lifetimes. Known enabled FG retains its stricter
+frame/camera association and mandatory source priority.
+Within the compatible 2.x Resource layout, the observed all-zero nested Resource header is also supported.
 Unknown nonzero headers and extensions remain rejected; actual native resource/device/description
 validation still applies. A zero state in this uninitialized header form requires observed native
 state rather than being assumed to declare COMMON.
@@ -954,19 +1264,24 @@ write states already provide that ordering boundary; original COPY_SOURCE stays 
 This is a bounded GPU ordering measure, not a claim that a particular game or driver is at fault.
 An independent FG Present cannot expire this synchronous tag-call lifetime. Other lifetime rules,
 recording retirement and the shared consumer-ordering checks above still apply.
-Known linear `PrecisionInfo` extensions are decoded, and their scale/bias are reflected in the
-texture-space projection coefficients and valid stored-depth range. The original camera matrix
-still determines inverse-distance reconstruction; changing only the storage encoding cannot change
-the reconstructed center or its adaptive stereo gain.
+Known affine `PrecisionInfo` extensions are decoded. For device depth their scale/bias are reflected
+in the texture-space projection coefficients and valid stored-depth range. For tag49 they recover
+positive view distance before reciprocal-depth reconstruction. Changing only the storage encoding
+cannot change the reconstructed geometry or its adaptive stereo gain.
 Unknown or malformed extensions remain unavailable with a
-bounded rejection diagnostic. A supported enabled FG source has priority over NGX Super Resolution,
+bounded rejection diagnostic. A supported enabled FG source has priority over NGX,
 including while its current capture is pending. Its depth and source-associated camera metadata
 stay together; missing usable FG pixels do not authorize an NGX substitution or cross-API
-projection borrowing. An observed FG Off retires that source so NGX can resume with a newly
-submitted frame. Older captures from the
-previous ownership interval cannot be resurrected. While FG is enabled for a viewport, its SR
-adapter does not also nominate that same viewport; FG's first attempt supersedes only the old
-same-viewport SR observation. Other viewports remain independently ambiguous. No cross-API
+projection borrowing. An observed FG Off retires that source so independently captured ordinary
+SL tag/evaluation or NGX depth can resume with newly submitted pixels. A failed or ambiguous FG-options observation also revokes the old FG scope
+and its retained display pixels, but does not confirm that FG is Off. Selection excludes those
+unconfirmed FG inputs and permits independently validated ordinary SL or NGX depth, with the
+selected capture's own encoding and camera. A busy query preserves a confirmed policy or this
+revoked-scope fallback policy; it cannot restore the old FG scope. A subsequent successful enabled
+observation restores mandatory FG selection. Older captures from the
+previous ownership interval cannot be resurrected. While FG is enabled for a viewport, ordinary
+evaluation adapters do not also nominate that same viewport; FG's first attempt supersedes only
+its old ordinary evaluation observation. Other viewports remain independently ambiguous. No cross-API
 projection borrowing is needed.
 
 When an explicitly enabled FG viewport presents again without a new source frame, or a valid
@@ -1144,11 +1459,11 @@ scale coefficients. Without projection, a known depth direction allows the share
 controller to follow the provider's logical generation/viewport. Direction comes from the API when
 supplied, otherwise from shared preservation's established clear-value evidence; unknown stays mono.
 
-The initial direct provider supports D3D12 full-resource, single-sample
-hardware depth and UntilEvaluate/UntilPresent lifetimes; it accepts bounded active rectangles while
+The direct provider supports D3D12 full-resource, single-sample
+device depth and positive linear view distance with UntilEvaluate/UntilPresent lifetimes; it accepts bounded active rectangles while
 copying the full allocation's depth plane. Evaluation-bound native capture declines OnlyValidNow;
-the synchronous FG tag boundary supports it. Native capture still declines
-linear-depth tags, enhanced/unknown resource states and ambiguous viewports. For V1.1.1, an
+the synchronous v2 tag boundary supports it with or without FG. Native capture still declines
+unknown depth encodings, enhanced/unknown resource states and ambiguous viewports. For V1.1.1, an
 explicit nonzero tag state takes priority. If omitted, its adapter reads the provider's resource
 state at evaluation entry, just as that version's DLSS implementation does. This private,
 version-pinned encoding is enabled only after validating the loaded `sl.common` version too.
@@ -1162,8 +1477,8 @@ remain eligible. Per-resource state storage grows with the actual command record
 allocation on Reset; unrelated resources cannot invalidate depth by exceeding a fixed entry count.
 Wildcard aliases or an actual state-storage allocation failure conservatively block the whole
 recording. Already-owned copies retain their normal lifetime checks. No state is guessed from texture type.
-The current adapters validate versions 1.1.1.0 and 2.7.30.0; other versions
-require explicit ABI validation, not a wider unchecked version match. Resource identity remains
+The [public ABI families](#streamline-abi-compatibility) share these capture checks; broad version
+admission does not broaden the private 1.1.1 resource-state encoding. Resource identity remains
 attached to the native resource when temporary metadata expires, so rotating buffers retain their
 observed state. Failed acquisition logs describe the rejection without presenting an empty output
 packet as evidence of absent depth or camera metadata.
@@ -1280,12 +1595,18 @@ or a required gain reduction.
 
 ### Direct NGX depth selection
 
-`[SUNSHINE_DEPTH] NGXDepthSource=1` defaults on for D3D12 games that evaluate DLSS Super Resolution
-directly through NGX. Exact exported Create/Evaluate/Release and typed parameter getter functions
-are discovered in already loaded SDK modules or the linked game executable. Discovery also runs
+`[SUNSHINE_DEPTH] NGXDepthSource=1` defaults on for compatible D3D12 NGX integrations, including
+Super Resolution and Ray Reconstruction. Exact exported Create/Evaluate/Release and typed parameter getter functions
+are discovered in already loaded modules, including a linked game executable or plugin, without
+a module-filename allowlist. Discovery also runs
 at device initialization, before ordinary feature creation. No game DLL is replaced, no unknown
 C++ parameter vtable is interpreted, and no feature is inferred merely from installed files.
-Successful creation of feature 1 establishes its handle generation, render size and depth direction.
+There is no DLL patch-version or feature-ID allowlist. Every observed successful feature creation
+establishes its handle generation; capture additionally requires valid render dimensions, create
+flags and depth encoding. `DLSS.Use.HW.Depth` explicitly selects device depth or positive linear
+view distance. Standard Super Resolution's documented device-depth default is accepted when that
+parameter is absent; other features require the explicit encoding. Unknown ABI contracts, missing
+getters or opaque input are not interpreted speculatively.
 If discovery misses creation, the source remains unknown until the game recreates the feature.
 D3D11 NGX interception remains diagnostic-only.
 
@@ -1298,20 +1619,30 @@ allocation padding, travels with that capture. The shader and immutable depth sa
 same rectangle; no extra GPU crop pass or illegal partial depth/stencil copy is introduced.
 An older shader without the rectangle uniform must remain mono for cropped input.
 
-NGX nested within an observed Streamline evaluation is suppressed, as are nested SDK/core calls,
-so one evaluation cannot create competing copies. Before ownership is established, Streamline and
-NGX observations are kept separate; a malformed attempt from one cannot invalidate the other's
-usable frame. Outside the explicitly enabled FG priority above, the first usable provider on
-the queue retains ownership through temporary gaps.
+A newly created native command list can record transitions before its first Reset or API
+evaluation. The observer associates its first recording at native operation entry, before
+forwarding the operation, so those transitions and any Close, render-pass or opaque-command
+restrictions reach the capture owner. The callback retains that recording identity across the
+original call; a later Reset cannot relabel old evidence as belonging to the new recording.
+Creating the identity supplies no resource state: capture still requires an actual observed
+nonzero transition, and a submission with no observed recording cannot establish ownership.
+
+Nested NGX capture is suppressed only when an enclosing SL or NGX evaluation has actually recorded
+a valid native copy, or when SL has confirmed enabled FG authority for that viewport. A retained
+resource, metadata-only ticket or rejected native attempt does not block a usable inner NGX input.
+Pending recorded copies retain deduplication authority; all nonzero tickets still receive completion.
+SL and NGX observations remain separate, so malformed input from one cannot invalidate the other's
+usable frame. The shared selector prefers readable SL and uses ready NGX when ordinary SL is
+unusable, with the bounded established-SL pending interval and explicit FG scope described above.
 An explicit successful release of its feature ends NGX ownership and permits automatic fallback;
 silence alone does not. Manual pins continue to override the automatic provider.
 Concurrent ambiguous NGX feature/view evaluations remain mono; the add-on does not infer which
 unrelated viewport is the final game camera.
 
-Ordinary NGX Super Resolution does not supply a camera projection. Its confirmed depth uses the
-shared raw-scene controller with the infinite-far assumption above.
-The same signed native-depth input feeds the Sunshine warp. Calibration is keyed
-to the logical feature generation and depth convention, rather than physical texture addresses or
+Ordinary NGX Super Resolution does not supply a camera projection. Its confirmed device depth uses
+the shared raw-scene controller with the infinite-far assumption above. Explicit linear view distance
+uses reciprocal depth directly without that assumption or an invented camera matrix.
+Calibration is keyed to the provider, logical feature generation and depth convention, rather than physical texture addresses or
 dynamic render sizes. Rotating textures retain the reference; a new feature/convention starts a
 fresh one. Frame and sample ordering is scoped to that logical encoding: switching between SL and
 NGX resets their independent sequence watermarks, while capture-time floors and exact identity
@@ -1346,7 +1677,7 @@ an NGX capture.
 ### NGX direct-calibration diagnostic
 
 `[SUNSHINE_DEPTH] NGXCalibrationProbe=1` enables a default-off availability check after restart.
-At most once per five seconds per observed D3D12 Super Resolution feature, it queries the optional
+At most once per five seconds per observed capture-eligible D3D12 feature, it queries the optional
 research `Position.ViewSpace` texture with the SDK's typed resource getter and the public
 `WorldToViewMatrix`, `ViewToClipMatrix`, `InvViewProjectionMatrix`, and `ClipToPrevClipMatrix`
 names with its optional void-pointer getter. Failed queries, successful null values, non-null values
@@ -1379,6 +1710,12 @@ can break that association. Zero calls mean none observed in the reported window
 Use positive call/caller evidence to decide which integration adapter a game needs; DLL presence
 or version alone is insufficient. This diagnostic is independent of the active depth-path label.
 
+NGX depth telemetry distinguishes `nominations`, `copy_recorded`, and `metadata_only`.
+A successful metadata nomination can survive a rejected pixel copy and does not establish
+readable depth. Rejection details are retained even when that nomination has a nonzero ticket;
+`observed` and `observed_state` distinguish absent state evidence from observed COMMON/zero.
+Recording a copy still does not establish GPU completion or a successful consumer handoff.
+
 Diagnostic callbacks only record bounded in-memory observations. Discovery, module-name resolution and
 throttled logging run from the existing serialized effect callback. Process-pinned hooks become
 pass-through when disabled. Set the option back to `0` and restart after the diagnostic session.
@@ -1386,10 +1723,10 @@ Full `StreamlineCameraProbe` command/content tracking stays disabled unless sepa
 
 ### Streamline camera metadata experiment
 
-The add-on includes an optional passive camera-metadata probe for Streamline **1.1.1.0** and **2.7.30.0**,
-the installed interfaces in the current Dead Space and Expedition 33 test setups. It observes
+The add-on includes an optional passive camera-metadata probe using the same
+[Streamline ABI families](#streamline-abi-compatibility) as the production depth adapter. It observes
 only an already-loaded `sl.interposer.dll`; it does not load or replace game middleware. One shared
-adapter handles each supported interface, without game-name profiles. Unknown versions remain
+adapter handles each supported interface, without game-name profiles. Unknown ABI majors remain
 unobserved. Camera constants and tagged depth resources are copied for validation; original call
 arguments and results are passed through unchanged.
 
@@ -1423,7 +1760,7 @@ an explicit frame identity; an opaque Streamline frame-token address alone is no
 
 Camera, tag, frame history, evaluation and FG-option metadata are published as coherent immutable
 versions. Every callback, renderer, panel and diagnostic reader pins a completed version without
-owning the mutation flag. The synchronous FG camera selection and evaluation capture use one pin,
+owning the mutation flag. The synchronous tag camera selection and evaluation capture use one pin,
 so they cannot splice different metadata versions. Presentation markers retain their separate
 owner. The v2 token table uses a separate instance of the same publication mechanism, so neither
 unrelated metadata reads nor token-generation reads can lock out SDK token registration.
@@ -1490,13 +1827,17 @@ revoke whole-resource evidence without reading the optional rectangle array. Hoo
 add-on stay loaded for process lifetime; shutdown leaves pass-through hooks in place. Activating
 new observation coverage starts a fresh content epoch, so earlier snapshots cannot inherit it.
 
-Supported DLSS rendering evaluations (feature 0) publish diagnostic camera/depth evidence. The
-separate enabled-FG source adapter can capture depth at a successful tag boundary. Reflex and
-other features still execute unchanged. In Streamline 1.1.1, Reflex uses the apparent viewport
-argument for a timing marker; treating marker 0 as viewport 0 would overwrite the DLSS evidence.
+Evaluations with validated scene-depth contracts publish diagnostic camera/depth evidence,
+independently of their feature ID. Typed 2.x inputs and exact legacy frame/view contracts use the
+same production admission described above. Unsupported opaque inputs execute unchanged without
+invalidating another source. The separate v2 tag adapter can capture `OnlyValidNow` depth at a successful
+tag boundary independently of FG. Legacy Reflex uses the apparent viewport argument for a timing marker; treating marker
+0 as viewport 0 would overwrite the rendering evidence.
 
-The observer separately retains HUD-less, scaling-input, scaling-output and supported backbuffer
-color tags. Actual effects-input identity comes from ReShade's begin-effects render-target view,
+The observer separately retains HUD-less, scaling-input, scaling-output, backbuffer, UIColorAndAlpha
+and UIAlpha tags. Live UI capture at tag boundaries independent of FG is described under the UI protection
+contract; merely retaining diagnostic color metadata does not authorize a mask. Actual effects-input
+identity comes from ReShade's begin-effects render-target view,
 which may differ from the swapchain after a resolve/copy. V1 Reflex and V2 PCL PresentStart/End
 markers supply bounded, current-thread presentation brackets. V2 PCL discovery passively observes
 `slGetFeatureFunction`; a marker function cached before the hook was installed remains unavailable.

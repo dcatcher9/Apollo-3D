@@ -6,7 +6,8 @@
 #include <unordered_map>
 
 namespace sunshine_game3d {
-  // Generic coverage heuristic, not a claim that alpha has UI semantics.
+  // Historical generic coverage policy retained for diagnostic comparisons and
+  // manual-mode state. Live Auto validates current inputs on the GPU, never with these counts.
   // The owning contract is docs/reshade-sbs.md, UI protection under Setup.
   inline constexpr std::uint64_t alpha_startup_window_ms = 300000;
   inline constexpr std::uint64_t alpha_initial_window_ms = 60000;
@@ -21,6 +22,7 @@ namespace sunshine_game3d {
     std::uint32_t viewport{};
     bool retained{};
     alpha_auto_policy *session{}; // Caller-owned game session; never owned by a renderer.
+    bool dedicated_mask{}; // Declared source type, not evidence of usable UI semantics.
   };
 
   struct alpha_coverage_sample {
@@ -28,16 +30,17 @@ namespace sunshine_game3d {
     std::uint32_t covered{}, pixels{}, invalid{};
   };
 
-  enum class alpha_auto_state { waiting_for_source, collecting, automatic_on, automatic_off, manual_on, manual_off };
+  enum class alpha_auto_state { waiting_for_source, collecting, automatic_on, automatic_off, manual_on, manual_off, dedicated_ui };
 
   inline const char *name(alpha_auto_state value) {
     switch (value) {
-      case alpha_auto_state::waiting_for_source: return "startup_waiting";
-      case alpha_auto_state::automatic_on: return "startup_on";
-      case alpha_auto_state::automatic_off: return "startup_off";
+      case alpha_auto_state::waiting_for_source: return "searching";
+      case alpha_auto_state::automatic_on: return "detected";
+      case alpha_auto_state::automatic_off: return "no_usable_mask";
       case alpha_auto_state::manual_on: return "manual_on";
       case alpha_auto_state::manual_off: return "manual_off";
-      default: return "startup_observing";
+      case alpha_auto_state::dedicated_ui: return "dedicated_ui";
+      default: return "checking";
     }
   }
 
@@ -50,6 +53,7 @@ namespace sunshine_game3d {
     bool window_started = false;
     std::uint64_t window_start_ms{}, accepted_samples{};
     std::uint64_t probe_interval_ms{};
+    std::uint32_t source_kind{}; // Latest completed diagnostic: 1 UI R, 2 UI A, 3 backbuffer A, 4 current A, 5 HUDless.
   };
 
   class alpha_auto_policy {

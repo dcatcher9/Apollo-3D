@@ -2,6 +2,7 @@
 #pragma once
 
 #include "game3d_alpha_auto.h"
+#include "game3d_ui_qualification.h"
 #include <cmath>
 #include <cstdint>
 
@@ -24,8 +25,8 @@ namespace sunshine_game3d {
 
   // Present alpha is a game-specific convention, not an FG output contract.
   // Generated output alpha is never a mask. FG requires a retained, completed
-  // real-input alpha copy. Coverage gating is a separate heuristic and never
-  // changes which input is eligible; explicit replay still honors white masks.
+  // real-input alpha copy. Automatic quality checks are separate from availability;
+  // explicit replay still honors white masks.
   inline bool source_alpha_ui_for_present(bool requested, bool frame_generation_active, bool retained_alpha_ready = false) {
     return requested && (!frame_generation_active || retained_alpha_ready);
   }
@@ -37,7 +38,32 @@ namespace sunshine_game3d {
     std::uint32_t generated_frames = 0, viewport = 0;
     std::uint64_t epoch = 0, sequence = 0;
   };
+  enum class source_alpha_capture_block { none, generated_current_color };
+  inline source_alpha_capture_block source_alpha_capture_block_for(ui_qualification::choice selected,
+      const frame_generation_mode &fg) {
+    using choice = ui_qualification::choice;
+    return selected == choice::current_color && fg.known && fg.enabled ?
+      source_alpha_capture_block::generated_current_color : source_alpha_capture_block::none;
+  }
+  inline const char *name(source_alpha_capture_block value) {
+    switch (value) {
+      case source_alpha_capture_block::generated_current_color: return "generated_current_color";
+      default: return "none";
+    }
+  }
   enum class source_alpha_input_state { not_observed, seen, rejected, state_conflict };
+  enum class source_alpha_input { none, present_alpha, sl_backbuffer_alpha, sl_ui_color_alpha, sl_ui_alpha, sl_hudless_difference, automatic_mask };
+  inline const char *name(source_alpha_input value) {
+    switch (value) {
+      case source_alpha_input::present_alpha: return "present_alpha";
+      case source_alpha_input::sl_backbuffer_alpha: return "sl_backbuffer_alpha";
+      case source_alpha_input::sl_ui_color_alpha: return "sl_ui_color_alpha";
+      case source_alpha_input::sl_ui_alpha: return "sl_ui_alpha";
+      case source_alpha_input::sl_hudless_difference: return "sl_hudless_difference";
+      case source_alpha_input::automatic_mask: return "automatic_gpu_mask";
+      default: return "none";
+    }
+  }
   inline const char *name(source_alpha_input_state value) {
     switch (value) {
       case source_alpha_input_state::seen: return "input_seen";
@@ -55,9 +81,29 @@ namespace sunshine_game3d {
     source_alpha_input_state input_state = source_alpha_input_state::not_observed;
     bool automatic = false;
     alpha_auto_decision coverage;
+    ui_qualification::status qualification;
+    // Presentation telemetry, independent of source quality and manual mode.
+    // Early exits leave rendered/applied false; available input alone is not On.
+    source_alpha_mode mode = source_alpha_mode::automatic;
+    source_alpha_input input = source_alpha_input::none;
+    bool rendered = false, applied = false;
     bool fg_active() const { return fg.known && fg.enabled; }
     bool effective() const { return source_alpha_ui_for_present(requested, fg_active(), retained_alpha_ready) && (!automatic || coverage.enabled); }
     bool blocked_by_fg() const { return requested && fg_active() && !retained_alpha_ready; }
+    bool applied_for(source_alpha_mode current_mode, bool game3d_enabled) const {
+      return game3d_enabled && current_mode != source_alpha_mode::off && current_mode == mode && rendered && applied;
+    }
+    bool dedicated_ui_active(source_alpha_mode current_mode, bool game3d_enabled) const {
+      return applied_for(current_mode, game3d_enabled) &&
+        (input == source_alpha_input::sl_ui_color_alpha || input == source_alpha_input::sl_ui_alpha);
+    }
+    const char *source_availability() const {
+      const auto blocked = source_alpha_capture_block_for(qualification.selected, fg);
+      if (blocked != source_alpha_capture_block::none) return name(blocked);
+      if (!qualification.available) return "source_unavailable";
+      if (coverage.enabled) return "detected";
+      return coverage.state == alpha_auto_state::automatic_off ? "quality_rejected" : "checking_quality";
+    }
   };
   struct source_alpha_ui_policy {
     source_alpha_ui_decision update(bool requested, frame_generation_mode observed, bool observer_active) {
@@ -82,12 +128,11 @@ namespace sunshine_game3d {
   // Edits persist in ReShade configuration; UI protection uses the per-game
   // global file so all of the game's runtimes share the saved choice.
   render_settings query_render_settings(reshade::api::effect_runtime *runtime);
-  // One window beginning with the first eligible alpha probe, shared across
-  // renderer and runtime recreation for this game process.
+  // Shared manual-mode state. Live Auto checks source quality independently.
   alpha_auto_policy &source_alpha_startup_policy();
 
   enum class automatic_phase { unavailable, waiting_for_depth, calibrating, ready, suspended, unsupported_resolution, renderer_unavailable };
-  enum class automatic_scale_basis { unknown, camera_matrix, relative_depth };
+  enum class automatic_scale_basis { unknown, camera_matrix, relative_depth, linear_distance };
   enum class automatic_scale_state { unavailable, pending, active, held };
   struct automatic_scale {
     automatic_scale_basis basis = automatic_scale_basis::unknown;
@@ -203,8 +248,10 @@ namespace sunshine_game3d {
   // False means a synchronous edit invalidated the runtime snapshot. Stop
   // drawing before accessing any earlier runtime state.
   bool draw(reshade::api::effect_runtime *runtime);
-  // Optional depth-preview action, drawn only inside the depth
-  // owner's troubleshooting section. Read-only status stays in the main panel.
-  // Does not request candidate enumeration.
+  // Read-only tabs never insert controls or change the primary layout.
+  void draw_status(reshade::api::effect_runtime *runtime);
+  void draw_calibration(reshade::api::effect_runtime *runtime);
+  // Preview and source overrides, ahead of live diagnostics. Does not request
+  // candidate enumeration; the depth owner handles its manual buffer list.
   bool draw_diagnostics(reshade::api::effect_runtime *runtime);
 }  // namespace sunshine_game3d

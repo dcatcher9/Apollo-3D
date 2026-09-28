@@ -53,6 +53,10 @@ namespace sunshine_game3d::replay {
     return format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM ||
            format == DXGI_FORMAT_R10G10B10A2_UNORM || format == DXGI_FORMAT_R16G16B16A16_FLOAT;
   }
+  inline bool ui_color_format(unsigned format) {
+    return color_format(format) || format == DXGI_FORMAT_R32G32B32A32_FLOAT ||
+      format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+  }
 
   struct artifact {
     std::string kind, file;
@@ -67,6 +71,7 @@ namespace sunshine_game3d::replay {
     std::array<std::uint8_t, parameter_bytes> parameters {};
     std::array<std::uint8_t, ui_parameter_bytes> ui_parameters {};
     ui_plane_parameters ui_plane;
+    ui_mask_channel ui_channel{ui_mask_channel::alpha};
     std::string ui_parameter_abi = "legacy_screen";
     std::string shader, parameter_abi;
     std::map<std::string, artifact> artifacts;
@@ -159,30 +164,36 @@ namespace sunshine_game3d::replay {
         p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v3" ||
         p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4" ||
         p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6") &&
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6" ||
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v7") &&
       natural(record.at("ui_parameter_bytes"), "ui_parameter_bytes", ui_parameter_bytes) == ui_parameter_bytes,
       "Unsupported UI parameter ABI");
     parse_hex(record.at("ui_parameter_hex").get<std::string>(), p.ui_parameters.data(), p.ui_parameters.size());
     std::memcpy(words.data(), p.ui_parameters.data(), sizeof(words));
     require(words[0] <= 1 && bool(words[0]) == p.source_alpha_ui, "UI parameter enable conflicts with effective protection flag");
-    require(words[3] == 0, "Unknown UI parameter reserved bits");
+    const bool channel_abi = p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v7";
+    require(words[3] <= (channel_abi ? 1u : 0u), "Unknown UI mask channel or legacy reserved bits");
+    p.ui_channel = static_cast<ui_mask_channel>(words[3]);
     p.ui_plane.mode = static_cast<ui_plane_mode>(words[1]);
     require(words[1] != static_cast<std::uint32_t>(ui_plane_mode::depth_midpoint_nearest_ui) ||
         p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v3" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4" ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6",
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6" || channel_abi,
       "Nearest-covered UI mode requires the v3 or newer UI parameter contract");
     require(words[1] != static_cast<std::uint32_t>(ui_plane_mode::front_limit) ||
         p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6",
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6" || channel_abi,
       "Fixed front-limit UI mode requires the v4 or newer UI parameter contract");
     require(words[1] != static_cast<std::uint32_t>(ui_plane_mode::shallow_front) ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6",
+        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6" || channel_abi,
       "Fixed shallow-front UI mode requires the v5 or newer UI parameter contract");
     const bool fraction_mode = p.ui_plane.mode == ui_plane_mode::display_fraction;
-    require(!fraction_mode || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6",
+    require(!fraction_mode || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6" || channel_abi,
       "Display-fraction UI mode requires the v6 UI parameter contract");
     p.ui_plane.inverse_depth = ui_parameter<float>(p, 8);
     const auto &binding = record.at("ui_constant_binding");
+    if (channel_abi)
+      require(binding.at("mask_channel") == (p.ui_channel == ui_mask_channel::red ? "red" : "alpha"),
+        "UI mask channel disagrees with exact bytes");
     require(binding.at("register") == "b1" && binding.at("uint32").is_array() && binding.at("uint32").size() == 4,
       "Invalid UI constant binding");
     for (unsigned i = 0; i != 4; ++i)
@@ -251,6 +262,8 @@ namespace sunshine_game3d::replay {
       "Captured fixed shallow-front UI plane requires its shader contract");
     require(p.ui_plane.mode != ui_plane_mode::display_fraction || supports_display_fraction_ui_plane(p.shader),
       "Captured display-fraction UI plane requires its shader contract");
+    require(p.ui_channel != ui_mask_channel::red || p.shader.find("Sunshine_UIMaskChannel") != std::string::npos,
+      "Captured red-channel UI mask requires a shader that consumes its channel");
     const auto &defines = record.at("defines");
     p.width = unsigned(natural(defines.at("BUFFER_WIDTH"), "BUFFER_WIDTH", 8192));
     p.height = unsigned(natural(defines.at("BUFFER_HEIGHT"), "BUFFER_HEIGHT", 8192));
@@ -308,7 +321,12 @@ namespace sunshine_game3d::replay {
         require(a.format == DXGI_FORMAT_R32_FLOAT, "Raw depth must contain unfiltered float32 samples");
       } else {
         require(a.width == p.width * (a.kind == "sbs" ? 2u : 1u) && a.height == p.height, "Artifact dimensions differ from captured shader defines");
-        if (a.kind == "source_color" || a.kind == "ui_source_color") {
+        if (a.kind == "ui_source_color" && p.ui_channel == ui_mask_channel::red) {
+          require(ui_color_format(a.format) || a.format == DXGI_FORMAT_R8_UNORM || a.format == DXGI_FORMAT_R16_UNORM ||
+            a.format == DXGI_FORMAT_R16_FLOAT || a.format == DXGI_FORMAT_R32_FLOAT, "Unsupported single-channel UI mask format");
+        } else if (a.kind == "ui_source_color") {
+          require(ui_color_format(a.format), "Unsupported UI alpha source format");
+        } else if (a.kind == "source_color") {
           require(color_format(a.format), "Unsupported native source format");
         } else if (a.kind == "sbs") {
           require(a.format == (p.color == 1 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R16G16B16A16_FLOAT), "Unexpected SBS format");
@@ -323,6 +341,8 @@ namespace sunshine_game3d::replay {
     require(p.artifacts.count("source_color") && p.artifacts.count("sbs"), "Replay requires captured source color and SBS");
     require(p.artifacts.count("raw_depth") || !parameter<unsigned>(p, 8), "Ready depth has no captured raw texture");
     require(p.artifacts.count("ui_source_color") == (p.ui_alpha_source == "ui_source_color"), "Consumed UI-alpha source requires its exact captured texture; optional SL snapshots cannot substitute");
+    require(p.ui_channel != ui_mask_channel::red || p.ui_alpha_source == "ui_source_color",
+      "Red-channel UI mask requires an explicit captured mask resource");
     return p;
   }
 }  // namespace sunshine_game3d::replay

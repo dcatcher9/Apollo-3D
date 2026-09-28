@@ -20,15 +20,18 @@ namespace sunshine_upscaler_trace {
   public:
     // Caller must be captured at the actual SL detour, not in a helper.
     streamline_scope(std::uint32_t feature, std::uintptr_t caller);
+    // Trace nesting alone does not establish an SL depth source. Claim only
+    // after its adapter validates capture authority, including a pending copy.
+    void claim_depth_capture(bool owns);
     ~streamline_scope();
     void finish(bool success);
     streamline_scope(const streamline_scope &) = delete;
     streamline_scope &operator=(const streamline_scope &) = delete;
   private:
     std::uint64_t epoch_{}, previous_epoch_{};
-    std::uint32_t feature_{}, previous_depth_{};
+    std::uint32_t feature_{}, previous_depth_{}, previous_capture_depth_{};
     std::uintptr_t caller_{};
-    bool finished_{};
+    bool finished_{}, capture_claimed_{};
   };
 
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST

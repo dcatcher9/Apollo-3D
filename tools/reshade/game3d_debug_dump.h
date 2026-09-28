@@ -15,6 +15,7 @@ namespace sunshine_game3d {
     render_parameters parameters;
     bool source_alpha_ui = false;
     ui_plane_parameters ui_plane;
+    ui_mask_channel ui_channel{ui_mask_channel::alpha};
     // Observational policy snapshot; replay consumes ui_plane's frozen word2
     // and never reconstructs temporal decisions from this optional telemetry.
     std::optional<sunshine_game3d::ui_adaptive::decision> ui_adaptive;

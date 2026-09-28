@@ -60,6 +60,10 @@ namespace sunshine_streamline::depth_capture {
       if (valid_provider(provider)) attempt_status[provider_index(provider)] = value;
     }
     bool valid_projection(const sunshine_scene_depth::projection_basis &value) {
+      if (value.encoding == sunshine_scene_depth::depth_encoding::linear_distance)
+        return std::isfinite(value.raw_scale) && value.raw_scale != 0.0 && std::isfinite(value.raw_bias) &&
+          value.direction_supplied && value.reversed == (value.raw_scale < 0.0);
+      if (value.encoding != sunshine_scene_depth::depth_encoding::device) return false;
       return !value.supplied || (std::isfinite(value.depth_offset) && std::isfinite(value.depth_scale) &&
         value.depth_scale != 0.0 && std::isfinite(value.raw_scale) && value.raw_scale != 0.0 &&
         std::isfinite(value.raw_bias) && value.reversed == ((value.depth_scale > 0.0) != (value.raw_scale < 0.0)));
@@ -74,6 +78,15 @@ namespace sunshine_streamline::depth_capture {
     }
     std::uint64_t retain_source_cookie(ID3D12Object *value) {
       return sunshine_native_identity::resource_cookie(value, true);
+    }
+    std::uint64_t observed_source_cookie(ID3D12Object *value) {
+      // Most transitions concern existing identities. Avoid the creation lock
+      // on that hot path, and never overwrite malformed data or driver errors.
+      if (!value) return 0;
+      std::uint64_t identity{}; UINT size = sizeof(identity);
+      const auto result = value->GetPrivateData(sunshine_native_identity::resource_guid, &size, &identity);
+      if (SUCCEEDED(result)) return size == sizeof(identity) ? identity : 0;
+      return result == DXGI_ERROR_NOT_FOUND ? retain_source_cookie(value) : 0;
     }
     DXGI_FORMAT typeless(DXGI_FORMAT value) {
       switch (value) {
@@ -102,8 +115,20 @@ namespace sunshine_streamline::depth_capture {
         desc.DepthOrArraySize == 1 && desc.MipLevels == 1 && desc.Width && desc.Width <= 16384 &&
         desc.Height && desc.Height <= 16384 && typeless(desc.Format) != DXGI_FORMAT_UNKNOWN;
     }
+    DXGI_FORMAT diagnostic_storage_format(DXGI_FORMAT format) {
+      // Color/alpha allocations may be typeless while their UI views are UNORM.
+      // Copy those bytes into a compatible typed snapshot so both the renderer
+      // and diagnostic host receive an explicit format. Alpha is unaffected by
+      // an sRGB RGB view. Do not guess float/integer interpretations for other
+      // typeless families, especially single-channel depth or mask resources.
+      switch (format) {
+      case DXGI_FORMAT_R8G8B8A8_TYPELESS: return DXGI_FORMAT_R8G8B8A8_UNORM;
+      case DXGI_FORMAT_B8G8R8A8_TYPELESS: return DXGI_FORMAT_B8G8R8A8_UNORM;
+      default: return format;
+      }
+    }
     unsigned diagnostic_pixel_bytes(DXGI_FORMAT format) {
-      return game3d_debug::pixel_bytes(static_cast<unsigned>(format));
+      return game3d_debug::pixel_bytes(static_cast<unsigned>(diagnostic_storage_format(format)));
     }
     bool diagnostic_description(const D3D12_RESOURCE_DESC &desc) {
       return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.SampleDesc.Count == 1 &&
@@ -159,6 +184,7 @@ namespace sunshine_streamline::depth_capture {
     struct command_state {
       std::uint64_t cookie{};
       std::uint64_t observation_generation{};
+      std::uint64_t native_barrier_calls{}, native_transition_count{}, last_barrier_command{};
       // The number of alias/split resources in a game recording is not bounded
       // by the number of depth sources we capture. Reuse this storage on Reset.
       std::vector<source_state> states;
@@ -167,6 +193,7 @@ namespace sunshine_streamline::depth_capture {
       void restart(std::uint64_t next_cookie, std::uint64_t generation) noexcept {
         states.clear();
         cookie = next_cookie; observation_generation = generation;
+        native_barrier_calls = native_transition_count = last_barrier_command = 0;
         closed = invalid = render_pass = false;
         invalidation = recording_loss::none;
       }
@@ -179,7 +206,7 @@ namespace sunshine_streamline::depth_capture {
       com_ptr<ID3D12Device> device;
       com_ptr<ID3D12Fence> fence;
       std::uint64_t cookie{}, next_fence{}, last_epoch{}, last_sequence{}, nominated_epoch{}, present{}, present_capture{};
-      std::uint64_t admission_after{};
+      std::uint64_t admission_after{}, last_source_tick{};
       std::uint64_t device_identity{};
       bool retiring{}, provider_established{};
       provider_kind provider{provider_kind::streamline};
@@ -236,7 +263,11 @@ namespace sunshine_streamline::depth_capture {
     }
     std::array<std::weak_ptr<const source_reference>, source_limit> sources;
     std::array<std::unique_ptr<queue_state>, queue_limit> queues;
-    struct evaluation_head { std::uint64_t epoch{}, sequence{}, tick{}, source_id{}; std::uint32_t viewport{}; };
+    struct evaluation_head {
+      std::uint64_t epoch{}, sequence{}, tick{}, source_id{};
+      std::uint32_t viewport{};
+      std::uint64_t observation_revision{};
+    };
     struct evaluation_namespace {
       std::array<evaluation_head, 4> views{};
       std::uint64_t epoch{}, sequence{}, source_id{};
@@ -278,6 +309,29 @@ namespace sunshine_streamline::depth_capture {
         entry->invalid = true;
       }
       return entry;
+    }
+    void invalidate(command_state &owner, recording_loss why);
+    void associate_recording(std::uint64_t native, std::uint64_t *out_cookie) {
+      if (!out_cookie) return;
+      *out_cookie = 0;
+      // Native method entry authenticates a live command object. A fresh list
+      // is already open after CreateCommandList and need not call Reset first.
+      // Never initialize from a post-call zero-cookie observation: Reset could
+      // have changed its lifetime while the original operation was executing.
+      std::lock_guard lock(mutex);
+      if (!native || !native_observer::recording_cookie_absent(native)) return;
+      auto *object = reinterpret_cast<ID3D12Object *>(native);
+      if (command_storage::acquire(object, false)) return;
+      auto owner = command_storage::acquire(object, true);
+      if (!owner || owner->cookie) return;
+      const auto cookie = ++serial;
+      if (!native_observer::set_recording_cookie(native, cookie)) {
+        invalidate(*owner, recording_loss::source_identity_unavailable);
+        return;
+      }
+      owner->restart(cookie, command_generation);
+      owner.life()->cookie.store(cookie, std::memory_order_release);
+      *out_cookie = cookie;
     }
     queue_state *known_queue(std::uint64_t native) {
       for (auto &value : queues) if (value && reinterpret_cast<std::uint64_t>(value->queue.p) == native) return value.get();
@@ -338,6 +392,8 @@ namespace sunshine_streamline::depth_capture {
       std::lock_guard lock(mutex);
       auto owner = command(native, cookie, true);
       if (!owner || owner->closed) return;
+      ++owner->native_barrier_calls;
+      owner->last_barrier_command = native;
       for (unsigned n = 0; n != count; ++n) {
         const auto &value = values[n];
         if (value.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
@@ -346,11 +402,17 @@ namespace sunshine_streamline::depth_capture {
           if (!value.Aliasing.pResourceBefore || !value.Aliasing.pResourceAfter) invalidate(*owner, recording_loss::wildcard_alias);
           else { block_source(*owner, value.Aliasing.pResourceBefore); block_source(*owner, value.Aliasing.pResourceAfter); }
         } else if (value.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
+          ++owner->native_transition_count;
           // A split can precede the first tag/cookie. Preserve that source's
           // rejection until Reset without poisoning unrelated captured depth.
           if (value.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) { block_source(*owner, value.Transition.pResource); continue; }
-          const auto identity = source_cookie(value.Transition.pResource);
-          if (!identity || (value.Transition.Subresource != 0 && value.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES)) continue;
+          if (value.Transition.Subresource != 0 && value.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) continue;
+          // A resource can reach its first SDK nomination after all of its
+          // transitions were recorded. Preserve that live object's identity
+          // now, just as split/alias barriers already do. The observed state
+          // remains local to this exact recording; it is never a global hint.
+          const auto identity = observed_source_cookie(value.Transition.pResource);
+          if (!identity) { invalidate(*owner, recording_loss::source_identity_unavailable); continue; }
           auto *known = state(*owner, identity, true);
           if (!known) { invalidate(*owner, recording_loss::source_state_capacity); continue; }
           if (known->blocked) continue;
@@ -520,6 +582,17 @@ namespace sunshine_streamline::depth_capture {
       if (value.nomination_invalid) return status::failed;
       return value.metadata.source && consumer_device && value.metadata.source->device_identity == consumer_device ?
         status::ready : status::unsupported_queue;
+    }
+    status local_texture_admission(const slot &value, std::uint64_t consumer, std::uint64_t device,
+        const queue_progress &progress) {
+      if (!value.diagnostic_only || !value.diagnostic_reusable) return status::unsupported_resource;
+      if (value.diagnostic_released) return status::stale;
+      if (!value.texture || value.texture->device_identity != device) return status::unsupported_queue;
+      if (value.retirement_unknown) return status::failed;
+      // Reuse the depth owner's existing same-queue ordering contract. A later
+      // producer replay on this queue follows an already submitted consumer;
+      // it still invalidates future acquisition and retains every GPU lease.
+      return submission_status(value, consumer, device, progress);
     }
     void bind_pixel_consumer(slot &value, std::uint64_t consumer, status pixels) {
       // Source authority may be admitted even when this queue cannot read the
@@ -734,11 +807,32 @@ namespace sunshine_streamline::depth_capture {
     }
     capture_pick select_provider(const queue_state &owner, std::uint64_t native,
         std::uint64_t present, std::uint64_t now, selection_policy policy = {}) {
+      const auto select_sl = [&] {
+        auto chosen = select_capture(owner, native, present, provider_kind::streamline, now);
+        const auto *source = chosen.value ? chosen.value : chosen.latest;
+        if (policy.exclude_unconfirmed_fg &&
+            ((source && source->metadata.frame_generation_input) ||
+              (chosen.pending_nomination && chosen.pending_nomination->source_id ==
+                ((1ull << 63) | chosen.pending_nomination->viewport)))) {
+          chosen = {};
+          chosen.result = status::stale;
+          chosen.selection = selection_reason::fg_scope_missing;
+          return chosen;
+        }
+        if (policy.check_streamline_observation &&
+            ((source && source->metadata.observation_revision != policy.streamline_observation_revision) ||
+              (chosen.pending_nomination && chosen.pending_nomination->observation_revision != policy.streamline_observation_revision))) {
+          chosen = {};
+          chosen.result = status::stale;
+          chosen.selection = selection_reason::source_observation_changed;
+        }
+        return chosen;
+      };
       if (policy.require_frame_generation) {
         if (!policy.epoch) { capture_pick missing; missing.selection = selection_reason::fg_scope_missing; return missing; }
         // FG owns the source choice before pixels are ready. Do not silently
         // substitute SR depth while its matching camera belongs to SL FG.
-        auto fg = select_capture(owner, native, present, provider_kind::streamline, now);
+        auto fg = select_sl();
         const auto matches = [&](const sunshine_scene_depth::frame &value) {
           return value.provider == provider_kind::streamline && value.frame_generation_input &&
             value.epoch == policy.epoch && value.viewport == policy.viewport &&
@@ -752,21 +846,37 @@ namespace sunshine_streamline::depth_capture {
         }
         return fg;
       }
-      if (owner.provider_established) return select_capture(owner, native, present, owner.provider, now);
-      capture_pick chosen;
-      for (unsigned index = 0; index != provider_count; ++index) {
-        auto candidate = select_capture(owner, native, present, static_cast<provider_kind>(index), now);
-        if (candidate.value) {
-          if (!chosen.value || candidate.value->id < chosen.value->id) chosen = candidate;
-        } else if (!chosen.value && (candidate.latest ? !chosen.latest || candidate.latest->id > chosen.latest->id :
-            !chosen.latest && evaluations[index].sequence)) chosen = candidate;
+      // Repeated effects in one presentation keep one immutable provider tuple.
+      if (owner.provider_established && owner.present == present && owner.present_capture)
+        return owner.provider == provider_kind::streamline ? select_sl() : select_capture(owner, native, present, owner.provider, now);
+      auto sl = select_sl();
+      const auto readable = [](const capture_pick &value) { return value.value && value.result == status::ready; };
+      if (readable(sl)) return sl;
+      if (owner.provider_established && owner.provider == provider_kind::streamline &&
+          owner.last_source_tick && now >= owner.last_source_tick &&
+          now - owner.last_source_tick < sunshine_scene_depth::maximum_source_age_ms) {
+        const auto *pending = sl.latest;
+        const bool same_pending_source = pending && !pending->nomination_only && !pending->invalid && !pending->nomination_invalid &&
+          (!pending->finished || pending->success) && pending->metadata.epoch == owner.nominated_epoch &&
+          pending->metadata.source_id == owner.source_id && pending->metadata.viewport == owner.viewport;
+        // A short pipeline delay must not alternate providers every frame.
+        // This preserves selection only: display-cache rules still govern old
+        // pixels. Missing/failed/unsupported SL permits immediate NGX fallback.
+        if (sl.pending_nomination || (same_pending_source &&
+            (sl.result == status::recorded || sl.result == status::submitted))) return sl;
       }
-      return chosen;
+      auto ngx = select_capture(owner, native, present, provider_kind::ngx, now);
+      if (readable(ngx)) return ngx;
+      if (owner.provider_established) return owner.provider == provider_kind::streamline ? sl : ngx;
+      // Preserve pending/failure diagnostics when neither provider is ready.
+      // Pending SL cannot block a subsequently readable NGX source.
+      if (sl.value || (!ngx.value && (sl.latest || !evaluations[provider_index(provider_kind::ngx)].sequence))) return sl;
+      return ngx;
     }
     void establish_provider(queue_state &owner, const slot &value, std::uint64_t present) {
       if (!owner.provider_established || owner.provider != value.metadata.provider ||
           owner.source_id != value.metadata.source_id || owner.nominated_epoch != value.metadata.epoch)
-        owner.last_epoch = owner.last_sequence = 0;
+        owner.last_epoch = owner.last_sequence = owner.last_source_tick = 0;
       owner.provider_established = true;
       owner.provider = value.metadata.provider;
       owner.source_id = value.metadata.source_id;
@@ -998,7 +1108,7 @@ namespace sunshine_streamline::depth_capture {
       for (auto &attempt : attempt_status) attempt = status::unavailable;
       for (auto &owner : queues) if (owner) {
         owner->provider_established = false;
-        owner->source_id = owner->last_epoch = owner->last_sequence = owner->nominated_epoch = owner->present_capture = 0;
+        owner->source_id = owner->last_epoch = owner->last_sequence = owner->last_source_tick = owner->nominated_epoch = owner->present_capture = 0;
         owner->admission_after = 0;
       }
     }
@@ -1008,6 +1118,7 @@ namespace sunshine_streamline::depth_capture {
     callbacks.barriers = barriers; callbacks.reset = reset; callbacks.close = close;
     callbacks.submitted = submitted; callbacks.invalidated = invalidate_all;
     callbacks.invalidated_command = invalidated_command; callbacks.render_pass = render_pass;
+    callbacks.associate_recording = associate_recording;
     native_observer::initialize(callbacks);
     native_observer::set_active(enabled);
   }
@@ -1031,12 +1142,15 @@ namespace sunshine_streamline::depth_capture {
     com_ptr<ID3D12GraphicsCommandList> checked;
     if (!query_native(native, IID_ID3D12GraphicsCommandList, checked)) return;
     native = reinterpret_cast<std::uint64_t>(checked.p);
-    if (!native_observer::get_recording_cookie(native)) native_observer::set_recording_cookie(native, ++serial);
+    auto cookie = native_observer::get_recording_cookie(native);
+    // Nomination uses the same strict first-recording association as native
+    // method entry. Failed/malformed private data must never be revived here.
+    if (!cookie) associate_recording(native, &cookie);
     {
       std::lock_guard lock(mutex);
       // Attach before hook discovery can invalidate the current recording.
       // Late payload allocation must not erase a loss already observed here.
-      command(native, native_observer::get_recording_cookie(native), true);
+      command(native, cookie, true);
     }
     native_observer::observe_command(native);
   }
@@ -1128,16 +1242,18 @@ namespace sunshine_streamline::depth_capture {
     const auto matches = [&](const input &value) {
       return value.provider == provider && value.epoch == epoch && value.source_id == source_id;
     };
-    for (auto &value : slots) if (value.id && !value.preservation_only && matches(value.metadata)) invalidate(value, capture_failure::source_retired);
+    for (auto &value : slots) if (value.id && !value.preservation_only && matches(value.metadata)) {
+      invalidate(value, capture_failure::source_retired);
+    }
     for (auto &owner : queues) if (owner && owner->provider_established && owner->provider == provider &&
         owner->nominated_epoch == epoch && owner->source_id == source_id) {
       owner->provider_established = false;
-      owner->source_id = owner->last_epoch = owner->last_sequence = owner->nominated_epoch = owner->present_capture = 0;
+      owner->source_id = owner->last_epoch = owner->last_sequence = owner->last_source_tick = owner->nominated_epoch = owner->present_capture = 0;
       // The next provider must submit a new frame after release. An otherwise
       // recent snapshot captured while the old provider owned presentation is
       // historical, and must not be resurrected by an FG Off/On transition.
       // IDs use pre-increment: serial is the last issued ID, not the next one.
-      owner->admission_after = serial.load(std::memory_order_relaxed);
+      owner->admission_after = std::max(owner->admission_after, serial.load(std::memory_order_relaxed));
     }
     auto &current = evaluations[provider_index(provider)];
     for (auto &view : current.views) if (view.epoch == epoch && view.source_id == source_id) view = {};
@@ -1254,7 +1370,7 @@ namespace sunshine_streamline::depth_capture {
       return false;
     if (value.provider != provider_kind::streamline || !value.frame_generation_input || !value.epoch ||
         !value.sequence || !value.source_id || !value.source || !value.resource.native) return false;
-    current.pending_nomination = {value.epoch, value.sequence, GetTickCount64(), value.source_id, value.viewport};
+    current.pending_nomination = {value.epoch, value.sequence, GetTickCount64(), value.source_id, value.viewport, value.observation_revision};
     return true;
   }
 
@@ -1286,7 +1402,7 @@ namespace sunshine_streamline::depth_capture {
   static std::uint64_t record_impl(std::uint64_t native, const input &value, record_diagnostic *diagnostic,
       bool preservation_only, preservation_ticket *preserved = nullptr, bool nominate_source = false,
       bool diagnostic_copy = false, bool reusable_storage = false,
-      local_texture_state_policy state_policy = local_texture_state_policy::source_contract) {
+      texture_state_policy state_policy = texture_state_policy::source_contract) {
     bool valid_nomination = false;
     std::uint64_t nomination_command{}, nomination_source{};
     recording_ref nomination_recording;
@@ -1323,10 +1439,10 @@ namespace sunshine_streamline::depth_capture {
       return 0;
     };
     if (!requested.load()) return reject(status::malformed, record_stage::inactive);
-    const bool prefer_observed_recording = state_policy == local_texture_state_policy::prefer_observed_recording;
-    if (state_policy != local_texture_state_policy::source_contract &&
-        (!prefer_observed_recording || !preservation_only || !diagnostic_copy || !reusable_storage ||
-          value.provider != provider_kind::streamline || !value.frame_generation_input || !value.force_snapshot ||
+    const bool prefer_observed_recording = state_policy == texture_state_policy::prefer_observed_recording;
+    if (state_policy != texture_state_policy::source_contract &&
+        (!prefer_observed_recording || !preservation_only || !diagnostic_copy ||
+          value.provider != provider_kind::streamline || !value.force_snapshot ||
           value.valid_until != sunshine_scene_depth::lifetime::at_call))
       return reject(status::malformed, record_stage::malformed_input);
     if (!native) return reject(status::malformed, record_stage::malformed_input);
@@ -1389,6 +1505,11 @@ namespace sunshine_streamline::depth_capture {
     if (diagnostic) {
       diagnostic->loss = owner->invalidation; diagnostic->recording_closed = owner->closed;
       diagnostic->recording_invalid = owner->invalid; diagnostic->render_pass = owner->render_pass;
+      diagnostic->native_barrier_calls = owner->native_barrier_calls;
+      diagnostic->native_transition_count = owner->native_transition_count;
+      diagnostic->tracked_source_count = owner->states.size();
+      diagnostic->last_barrier_command = owner->last_barrier_command;
+      diagnostic->source_cookie = value.source->cookie;
     }
     if (owner->closed) return reject(status::unavailable, record_stage::recording_closed);
     const auto &desc = value.source->desc;
@@ -1454,7 +1575,7 @@ namespace sunshine_streamline::depth_capture {
     if (diagnostic_copy) collect_diagnostics();
     auto *pixel_begin = diagnostic_copy ? diagnostic_slots.data() : slots.data();
     auto *pixel_end = pixel_begin + (diagnostic_copy ? diagnostic_slot_limit : pixel_slot_limit);
-    const auto texture_format = diagnostic_copy ? desc.Format : typeless(desc.Format);
+    const auto texture_format = diagnostic_copy ? diagnostic_storage_format(desc.Format) : typeless(desc.Format);
     const auto compatible_storage = [&](const auto &texture) {
       if (!texture || texture->device_identity != value.source->device_identity) return false;
       if (diagnostic_copy && bool(texture->shared_handle) == reusable_storage) return false;
@@ -1573,7 +1694,7 @@ namespace sunshine_streamline::depth_capture {
   }
   static diagnostic_ticket record_auxiliary_texture(std::uint64_t command, const input &value,
       record_diagnostic *diagnostic, bool reusable_storage,
-      local_texture_state_policy state_policy = local_texture_state_policy::source_contract) {
+      texture_state_policy state_policy = texture_state_policy::source_contract) {
     try {
       const auto id = record_impl(command, value, diagnostic, true, nullptr, false, true, reusable_storage, state_policy);
       if (!id) return {};
@@ -1586,11 +1707,12 @@ namespace sunshine_streamline::depth_capture {
     }
     return {};
   }
-  diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic) {
-    return record_auxiliary_texture(command, value, diagnostic, false);
+  diagnostic_ticket record_diagnostic_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic,
+      texture_state_policy state_policy) {
+    return record_auxiliary_texture(command, value, diagnostic, false, state_policy);
   }
   diagnostic_ticket record_local_texture(std::uint64_t command, const input &value, record_diagnostic *diagnostic,
-      local_texture_state_policy state_policy) {
+      texture_state_policy state_policy) {
     return record_auxiliary_texture(command, value, diagnostic, true, state_policy);
   }
   void finish_diagnostic_texture(const diagnostic_ticket &ticket, bool successful) {
@@ -1603,18 +1725,27 @@ namespace sunshine_streamline::depth_capture {
       return;
     }
   }
-  status acquire_diagnostic_texture(const diagnostic_ticket &ticket, diagnostic_texture &out) {
+  static status acquire_auxiliary_texture(const diagnostic_ticket &ticket, diagnostic_texture &out,
+      std::uint64_t consumer_queue, bool local) {
     out = {};
     const auto result = [&](status value) { out.result = value; return value; };
     if (!ticket) return result(status::unavailable);
+    if (local) {
+      if (!consumer_queue) return result(status::unsupported_queue);
+      observe_queue(consumer_queue);
+    }
     std::lock_guard lock(mutex);
+    const auto *consumer = local ? queue(consumer_queue) : nullptr;
+    if (local && (!consumer || consumer->retiring)) return result(status::unsupported_queue);
+    const auto native_consumer = consumer ? reinterpret_cast<std::uint64_t>(consumer->queue.p) : 0;
     for (auto &entry : diagnostic_slots) if (entry.id == ticket.id && entry.texture == ticket.ownership) {
       retire_dead_recordings(entry);
       out.capture_id = entry.id; out.producer_queue = entry.queue; out.producer_fence = entry.producer_fence;
       out.failure = entry.failure; out.producer_recording_retired = producer_recording_retired(entry);
-      const auto progress = producer_progress(entry);
+      const auto progress = local && entry.queue == native_consumer ? queue_progress{} : producer_progress(entry);
       out.producer_completed = progress.completed;
-      const auto admission = diagnostic_admission(entry, progress);
+      const auto admission = local ? local_texture_admission(entry, native_consumer, consumer->device_identity, progress) :
+        diagnostic_admission(entry, progress);
       if (admission != status::ready) return result(admission);
       const auto &texture = entry.texture;
       const auto desc = texture->resource->GetDesc();
@@ -1630,6 +1761,12 @@ namespace sunshine_streamline::depth_capture {
       return result(status::ready);
     }
     return result(status::unavailable);
+  }
+  status acquire_diagnostic_texture(const diagnostic_ticket &ticket, diagnostic_texture &out) {
+    return acquire_auxiliary_texture(ticket, out, 0, false);
+  }
+  status acquire_local_texture(const diagnostic_ticket &ticket, std::uint64_t consumer_queue, diagnostic_texture &out) {
+    return acquire_auxiliary_texture(ticket, out, consumer_queue, true);
   }
   void release_diagnostic_texture(const diagnostic_ticket &ticket) {
     if (!ticket) return;
@@ -1666,7 +1803,7 @@ namespace sunshine_streamline::depth_capture {
       }
       return std::uint64_t{};
     };
-    if (!candidates || !count || count > 2) return malformed();
+    if (!candidates || !count || count > 3) return malformed();
     const auto &value = candidates[0];
     for (std::size_t i = 1; i < count; ++i) {
       const auto &other = candidates[i];
@@ -1838,9 +1975,10 @@ namespace sunshine_streamline::depth_capture {
         owner->nominated_epoch != value.metadata.epoch) return;
     owner->last_epoch = value.metadata.epoch;
     owner->last_sequence = value.metadata.sequence;
+    owner->last_source_tick = value.metadata.tick;
   }
   static bool consume_owned(std::uint64_t native, const packet &value, std::uint64_t destination,
-      std::uint32_t destination_state, consumer_diagnostic *diagnostic, bool auxiliary = false) {
+      std::uint32_t destination_state, consumer_diagnostic *diagnostic, bool auxiliary = false, bool local_auxiliary = false) {
     if (diagnostic) *diagnostic = {};
     const auto result = [diagnostic](consumer_status why) {
       if (diagnostic) diagnostic->result = why;
@@ -1910,7 +2048,10 @@ namespace sunshine_streamline::depth_capture {
         const auto *consumer = known_queue(value.queue);
         if (!consumer || consumer->retiring || consumer->device_identity != device_identity)
           return result(consumer_status::device_mismatch);
-        if (diagnostic_admission(entry, producer_progress(entry)) != status::ready)
+        const auto progress = local_auxiliary && entry.queue == value.queue ? queue_progress{} : producer_progress(entry);
+        const auto admission = local_auxiliary ? local_texture_admission(entry, value.queue, device_identity, progress) :
+          diagnostic_admission(entry, progress);
+        if (admission != status::ready)
           return result(consumer_status::capture_not_ready);
         if (entry.auxiliary_destination && entry.auxiliary_destination != retained_target)
           return result(consumer_status::invalid_destination);
@@ -1970,9 +2111,9 @@ namespace sunshine_streamline::depth_capture {
     }
     return consume_owned(command, value, destination, destination_state, diagnostic);
   }
-  bool copy_diagnostic_texture(std::uint64_t command, std::uint64_t consumer_queue,
+  static bool copy_auxiliary_texture(std::uint64_t command, std::uint64_t consumer_queue,
       const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
-      consumer_diagnostic *diagnostic) {
+      consumer_diagnostic *diagnostic, bool local) {
     const auto reject = [&](consumer_status value) {
       if (diagnostic) { *diagnostic = {}; diagnostic->result = value; }
       return false;
@@ -1990,14 +2131,28 @@ namespace sunshine_streamline::depth_capture {
       if (found == diagnostic_slots.end()) return reject(consumer_status::slot_missing);
       if (found->texture != ticket.ownership) return reject(consumer_status::ownership_mismatch);
       if (found->texture->device_identity != owner->device_identity) return reject(consumer_status::device_mismatch);
-      if (diagnostic_admission(*found, producer_progress(*found)) != status::ready)
+      const auto native_consumer = reinterpret_cast<std::uint64_t>(owner->queue.p);
+      const auto progress = local && found->queue == native_consumer ? queue_progress{} : producer_progress(*found);
+      const auto admission = local ? local_texture_admission(*found, native_consumer, owner->device_identity, progress) :
+        diagnostic_admission(*found, progress);
+      if (admission != status::ready)
         return reject(consumer_status::capture_not_ready);
       selected.capture_id = found->id;
       selected.ownership = ticket.ownership;
       selected.device = reinterpret_cast<std::uint64_t>(found->texture->device.p);
       selected.queue = reinterpret_cast<std::uint64_t>(owner->queue.p);
     }
-    return consume_owned(command, selected, destination, destination_state, diagnostic, true);
+    return consume_owned(command, selected, destination, destination_state, diagnostic, true, local);
+  }
+  bool copy_diagnostic_texture(std::uint64_t command, std::uint64_t consumer_queue,
+      const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
+      consumer_diagnostic *diagnostic) {
+    return copy_auxiliary_texture(command, consumer_queue, ticket, destination, destination_state, diagnostic, false);
+  }
+  bool copy_local_texture(std::uint64_t command, std::uint64_t consumer_queue,
+      const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
+      consumer_diagnostic *diagnostic) {
+    return copy_auxiliary_texture(command, consumer_queue, ticket, destination, destination_state, diagnostic, true);
   }
   namespace {
     consumer_status preserved_admission(const slot &value, const preservation_ticket &ticket,
@@ -2067,7 +2222,7 @@ namespace sunshine_streamline::depth_capture {
     CASE(pending_nomination); CASE(current_capture); CASE(current_already_consumed); CASE(no_admissible_capture);
     CASE(no_completed_snapshot); CASE(completed_before_gap); CASE(completed_not_older);
     CASE(completed_already_consumed); CASE(presentation_already_selected); CASE(layout_changed);
-    CASE(completed_not_readable); CASE(completed_snapshot); CASE(fg_scope_missing); CASE(fg_scope_mismatch);
+    CASE(completed_not_readable); CASE(completed_snapshot); CASE(fg_scope_missing); CASE(fg_scope_mismatch); CASE(source_observation_changed);
 #undef CASE
     }
     return "unknown";
@@ -2137,11 +2292,13 @@ namespace sunshine_streamline::depth_capture {
       D3D12_RESOURCE_DESC desc{};
       desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; desc.Width = 64; desc.Height = 48;
       desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
-      for (const auto format : {DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UINT, DXGI_FORMAT_R16G16B16A16_FLOAT}) {
+      for (const auto format : {DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UINT, DXGI_FORMAT_R16G16B16A16_FLOAT,
+          DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_TYPELESS}) {
         desc.Format = format;
         if (!diagnostic_description(desc)) return false;
       }
-      for (const auto format : {DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_NV12, DXGI_FORMAT_BC1_UNORM}) {
+      for (const auto format : {DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R16G16B16A16_TYPELESS,
+          DXGI_FORMAT_B8G8R8X8_TYPELESS, DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_NV12, DXGI_FORMAT_BC1_UNORM}) {
         desc.Format = format;
         if (diagnostic_description(desc)) return false;
       }
@@ -2294,7 +2451,21 @@ namespace sunshine_streamline::depth_capture {
       projection.reversed = false;
       if (valid_projection(projection)) return false;
       projection.depth_scale = -.0625;
-      return valid_projection(projection);
+      if (!valid_projection(projection)) return false;
+      projection = {};
+      projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
+      projection.direction_supplied = true;
+      if (!valid_projection(projection)) return false; // Linear distance needs no camera matrix.
+      projection.reversed = true;
+      if (valid_projection(projection)) return false;
+      projection.raw_scale = -2;
+      if (!valid_projection(projection)) return false;
+      projection.raw_scale = 0;
+      if (valid_projection(projection)) return false;
+      projection.raw_scale = -2; projection.raw_bias = NAN;
+      if (valid_projection(projection)) return false;
+      projection.raw_bias = 0; projection.direction_supplied = false;
+      return !valid_projection(projection);
     }
     bool provider_admission_regression() {
       // Exercise the production acquisition policy without COM/GPU operations.
@@ -2450,15 +2621,15 @@ namespace sunshine_streamline::depth_capture {
       // Acquisition without a successful copy must not consume this frame.
       if (select(2).value != &ngx) return false;
       owner.last_epoch = ngx.metadata.epoch; owner.last_sequence = ngx.metadata.sequence;
-      // A newer SL success cannot replace the established NGX source, and an
-      // invalid SL attempt cannot revoke its reusable current presentation.
+      // A ready SL source takes priority on the next presentation; repeated
+      // effects within the already-selected presentation remain on NGX.
       make(1, provider_kind::streamline, 1, 101, 0);
-      if (select(1).value != &ngx || select(2).value) return false;
+      if (select(1).value != &ngx || select(2).value != &slots[1]) return false;
       slots[1].metadata.frame_generation_input = true;
       slots[1].metadata.source_id = 1ull << 63;
       slots[1].metadata.sequence = 102;
       begin_evaluation(1, 102, 0, provider_kind::streamline, slots[1].metadata.source_id, 0);
-      if (select(2).value || select_provider(owner, native, 2, GetTickCount64(), {true, 1, 0}).value != &slots[1]) return false;
+      if (select(2).value != &slots[1] || select_provider(owner, native, 2, GetTickCount64(), {true, 1, 0}).value != &slots[1]) return false;
       queue_state takeover;
       takeover.provider_established = true; takeover.provider = provider_kind::ngx;
       takeover.source_id = 99; takeover.nominated_epoch = takeover.last_epoch = 1; takeover.last_sequence = 999;
@@ -2477,17 +2648,71 @@ namespace sunshine_streamline::depth_capture {
       if (select(3).value != &recreated) return false;
       establish_provider(owner, recreated, 3);
       if (owner.source_id != 100 || owner.provider != provider_kind::ngx) return false;
-      // Fresh queues arbitrate by accepted capture order, never module order.
+      // Fresh queues prefer ready SL even when NGX captured first.
       slots = {}; evaluations = {};
       owner.provider_established = false; owner.present_capture = owner.last_sequence = owner.last_epoch = 0;
-      auto &first = make(0, provider_kind::ngx, 3, 1, 123);
-      make(1, provider_kind::streamline, 3, 1, 0);
-      if (select(4).value != &first) return false;
+      make(0, provider_kind::ngx, 3, 1, 123);
+      auto &preferred = make(1, provider_kind::streamline, 3, 1, 0);
+      if (select(4).value != &preferred) return false;
       // Simultaneous distinct view/source identities remain ambiguous.
       begin_evaluation(3, 2, 1, provider_kind::ngx, 124);
       const auto ambiguous = select_capture(owner, native, 4, provider_kind::ngx, GetTickCount64());
       if (ambiguous.value || ambiguous.result != status::ambiguous ||
           ambiguous.selection != selection_reason::ambiguous_views) return false;
+      {
+        slots = {}; evaluations = {};
+        queue_state preferred_owner;
+        auto &fallback = make(0, provider_kind::ngx, 60, 1, 500);
+        auto &preferred = make(1, provider_kind::streamline, 70, 1, 0);
+        preferred.finished = false;
+        const auto pick = [&](std::uint64_t presentation, selection_policy policy = {}) {
+          return select_provider(preferred_owner, native, presentation, GetTickCount64(), policy);
+        };
+        if (pick(1).value != &fallback) return false;
+        establish_provider(preferred_owner, fallback, 1);
+        preferred_owner.last_epoch = 60; preferred_owner.last_sequence = 1;
+        preferred_owner.last_source_tick = fallback.metadata.tick;
+        // A submitted nomination without readable pixels must not take over.
+        preferred.finished = true; preferred.nomination_only = true;
+        preferred.pixel_failure = status::unsupported_resource;
+        auto source = std::make_shared<source_reference>(); source->device_identity = 17;
+        preferred.metadata.source = source; preferred.source_nominated = true;
+        preferred_owner.device_identity = 17;
+        if (pick(2).value == &preferred) return false;
+        preferred.nomination_only = false; preferred.source_nominated = false;
+        if (pick(2).value != &preferred) return false;
+        preferred.metadata.observation_revision = 5;
+        auto &ready_fallback = make(2, provider_kind::ngx, 60, 2, 500);
+        selection_policy current_observation;
+        current_observation.check_streamline_observation = true;
+        current_observation.streamline_observation_revision = 6;
+        // A completed SL copy cannot hide valid NGX after its metadata evidence
+        // was revoked, even though the native slot itself remains readable.
+        if (pick(2, current_observation).value != &ready_fallback) return false;
+        current_observation.streamline_observation_revision = 5;
+        if (pick(2, current_observation).value != &preferred) return false;
+        establish_provider(preferred_owner, preferred, 2);
+        preferred_owner.last_epoch = 70; preferred_owner.last_sequence = 1;
+        preferred_owner.last_source_tick = preferred.metadata.tick;
+        auto &next_fallback = make(2, provider_kind::ngx, 60, 2, 500);
+        auto &pending = make(3, provider_kind::streamline, 70, 2, 0); pending.finished = false;
+        pending.metadata.observation_revision = 5;
+        auto held = pick(3);
+        if (held.value || held.latest != &pending || held.result != status::recorded) return false;
+        current_observation.streamline_observation_revision = 6;
+        if (pick(3, current_observation).value != &next_fallback) return false;
+        current_observation.streamline_observation_revision = 5;
+        if (pick(3, current_observation).latest != &pending) return false;
+        preferred_owner.last_source_tick = GetTickCount64() - sunshine_scene_depth::maximum_source_age_ms - 1;
+        if (pick(3).value != &next_fallback) return false;
+        preferred_owner.last_source_tick = GetTickCount64();
+        pending.finished = true; pending.success = false;
+        if (pick(3).value != &next_fallback) return false;
+        pending.success = true;
+        if (pick(3).value != &pending) return false;
+        begin_evaluation(70, 3, 0, provider_kind::streamline);
+        if (pick(3).value != &next_fallback) return false;
+      }
       const auto empty_queue = std::find_if(queues.begin(), queues.end(), [](const auto &entry) { return !entry; });
       if (empty_queue == queues.end()) return false;
       *empty_queue = std::make_unique<queue_state>();
@@ -2526,6 +2751,12 @@ namespace sunshine_streamline::depth_capture {
         if (accepted.value != &fg || accepted.value->metadata.projection.depth_offset != 0 ||
             accepted.value->metadata.projection.depth_scale != 1 ||
             pick(21, {true, fg_epoch + 1, 0}).value || pick(21, {true, fg_epoch, 1}).value) return false;
+        auto revoked_fg = fg_policy;
+        revoked_fg.check_streamline_observation = true;
+        revoked_fg.streamline_observation_revision = fg.metadata.observation_revision + 1;
+        const auto revoked = pick(21, revoked_fg);
+        if (revoked.value || revoked.latest || revoked.pending_nomination || revoked.result != status::stale ||
+            revoked.selection != selection_reason::source_observation_changed) return false;
         // No prior provider: the same policy still beats the earlier NGX ID.
         queue_state fresh;
         if (select_provider(fresh, native, 21, GetTickCount64(), fg_policy).value != &fg) return false;
@@ -2549,6 +2780,72 @@ namespace sunshine_streamline::depth_capture {
         if (established.provider_established || pick(23).value || pick(23, fg_policy).value) return false;
         auto &resumed_ngx = make(4, provider_kind::ngx, 30, 3, 400);
         if (pick(24).value != &resumed_ngx || pick(24, fg_policy).value) return false;
+      }
+      {
+        // A failed/ambiguous FG option revokes FG authority without starving
+        // independent ordinary depth on subsequent presentations.
+        slots = {}; evaluations = {};
+        queue_state revoked_owner;
+        constexpr std::uint64_t fg_epoch = 42, fg_id = 1ull << 63;
+        selection_policy excluded;
+        excluded.exclude_unconfirmed_fg = true;
+        const auto pick = [&](std::uint64_t present, selection_policy policy) {
+          return select_provider(revoked_owner, native, present, GetTickCount64(), policy);
+        };
+        auto &old_fg = make(0, provider_kind::streamline, fg_epoch, 1, fg_id);
+        old_fg.metadata.frame_generation_input = true;
+        establish_provider(revoked_owner, old_fg, 30);
+        revoked_owner.last_epoch = fg_epoch; revoked_owner.last_sequence = 1;
+        revoked_owner.last_source_tick = old_fg.metadata.tick;
+        make(1, provider_kind::ngx, 60, 1, 500);
+        if (pick(30, excluded).value) return false; // Keep the existing presentation pin.
+        revoked_owner.admission_after = serial.load(); // acquire's one-time gap watermark.
+        auto &fallback = make(2, provider_kind::ngx, 60, 2, 500);
+        fallback.metadata.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
+        fallback.metadata.projection.raw_scale = 2;
+        for (const auto present : {31ull, 32ull}) {
+          const auto selected = pick(present, excluded);
+          if (selected.value != &fallback || selected.result != status::ready ||
+              selected.value->metadata.projection.encoding != sunshine_scene_depth::depth_encoding::linear_distance ||
+              selected.value->metadata.projection.raw_scale != 2) return false;
+        }
+        fallback.success = false;
+        const auto unavailable = pick(31, excluded);
+        if (unavailable.value || unavailable.latest || unavailable.pending_nomination) return false;
+        fallback.success = true;
+        auto &pending_fg = make(3, provider_kind::streamline, fg_epoch, 2, fg_id);
+        pending_fg.metadata.frame_generation_input = true; pending_fg.finished = false;
+        if (pick(31, excluded).value != &fallback || pick(31, {true, fg_epoch, 0}).value == &fallback) return false;
+        // Retirement invalidates old pixels and removes that FG view, without
+        // suppressing a later independent ordinary SL source on this viewport.
+        retire_source(provider_kind::streamline, fg_epoch, fg_id);
+        if (!old_fg.invalid || !pending_fg.invalid || pick(32, {true, fg_epoch, 0}).value) return false;
+        auto &ordinary_sl = make(4, provider_kind::streamline, fg_epoch, 3, 0);
+        if (pick(31, excluded).value != &ordinary_sl) return false;
+      }
+      {
+        // A failed options call revokes all captures in its exact FG scope,
+        // including tags observed while the SDK call was in flight. A racing
+        // newer capture may be discarded once; only a fresh tag restores FG.
+        slots = {}; evaluations = {};
+        constexpr std::uint64_t fg_epoch = 80, fg_id = 1ull << 63;
+        auto &old_fg = make(0, provider_kind::streamline, fg_epoch, 10, fg_id);
+        old_fg.metadata.frame_generation_input = true;
+        auto &new_fg = make(1, provider_kind::streamline, fg_epoch, 12, fg_id);
+        new_fg.metadata.frame_generation_input = true;
+        establish_provider(established, new_fg, 100);
+        established.last_epoch = fg_epoch; established.last_sequence = 12;
+        retire_source(provider_kind::streamline, fg_epoch, fg_id);
+        finish(new_fg.id, true);
+        if (!old_fg.invalid || !new_fg.invalid || established.provider_established ||
+            select_provider(established, native, 101, GetTickCount64(), {true, fg_epoch, 0}).value) return false;
+        auto &fresh_ngx = make(2, provider_kind::ngx, 81, 1, 600);
+        if (select_provider(established, native, 102, GetTickCount64()).value != &fresh_ngx) return false;
+        establish_provider(established, fresh_ngx, 102);
+        if (select_provider(established, native, 103, GetTickCount64(), {true, fg_epoch, 0}).value) return false;
+        auto &renewed_fg = make(3, provider_kind::streamline, fg_epoch, 14, fg_id);
+        renewed_fg.metadata.frame_generation_input = true;
+        if (select_provider(established, native, 103, GetTickCount64(), {true, fg_epoch, 0}).value != &renewed_fg) return false;
       }
       for (const bool complete_before_release : {false, true}) {
         slots = {}; evaluations = {};
@@ -2616,10 +2913,23 @@ namespace sunshine_streamline::depth_capture {
         return select_capture(pending_owner, native, 11, provider_kind::streamline, now);
       };
       auto candidate = prepare_pending();
+      candidate.observation_revision = 9;
       if (!begin_nomination(candidate, UINT64_MAX)) return false;
       auto pending = pending_pick();
       if (pending.value || pending.latest || !pending.pending_nomination || pending.result != status::recorded ||
           !matching_evaluation(*pending.pending_nomination, candidate)) return false;
+      auto &pending_fallback = make(1, provider_kind::ngx, 60, 1, 500);
+      selection_policy excluded_pending;
+      excluded_pending.exclude_unconfirmed_fg = true;
+      if (select_provider(pending_owner, native, 11, GetTickCount64(), excluded_pending).value != &pending_fallback) return false;
+      selection_policy revoked_pending;
+      revoked_pending.check_streamline_observation = true;
+      revoked_pending.streamline_observation_revision = 10;
+      if (select_provider(pending_owner, native, 11, GetTickCount64(), revoked_pending).value != &pending_fallback) return false;
+      revoked_pending.require_frame_generation = true; revoked_pending.epoch = 20;
+      const auto revoked = select_provider(pending_owner, native, 11, GetTickCount64(), revoked_pending);
+      if (revoked.value || revoked.latest || revoked.pending_nomination || revoked.result != status::stale ||
+          revoked.selection != selection_reason::source_observation_changed) return false;
       const auto pending_decision = classify_acquisition(pending, pending_owner, {}, false, {true, 20, 0});
       if (pending_decision.source_selected || !pending_decision.source_valid || !pending_decision.pending_frame ||
           pending_decision.capture_id || pending_decision.epoch != candidate.epoch ||
@@ -2649,8 +2959,11 @@ namespace sunshine_streamline::depth_capture {
       record_diagnostic rejected;
       if (nominate_evaluation(0, candidate, UINT64_MAX, &rejected) || rejected.stage != record_stage::malformed_input ||
           pending_pick().pending_nomination || pending_pick().value) return false;
-      input alternatives[]{candidate, candidate};
+      input alternatives[]{candidate, candidate, candidate};
       if (nominate_evaluation(0, alternatives, 2, UINT64_MAX, &rejected) || rejected.stage != record_stage::malformed_input ||
+          pending_pick().pending_nomination || pending_pick().value) return false;
+      if (!begin_nomination(candidate, UINT64_MAX)) return false;
+      if (nominate_evaluation(0, alternatives, 3, UINT64_MAX, &rejected) || rejected.stage != record_stage::malformed_input ||
           pending_pick().pending_nomination || pending_pick().value) return false;
       // A batch cannot combine logical evaluations or revoke a separately
       // active nomination when its adapter contract is malformed.
@@ -2668,7 +2981,7 @@ namespace sunshine_streamline::depth_capture {
       }
       if (nominate_evaluation(0, nullptr, 1, UINT64_MAX, &rejected) ||
           nominate_evaluation(0, alternatives, 0, UINT64_MAX, &rejected) ||
-          nominate_evaluation(0, alternatives, 3, UINT64_MAX, &rejected) || !pending_pick().pending_nomination) return false;
+          nominate_evaluation(0, alternatives, 4, UINT64_MAX, &rejected) || !pending_pick().pending_nomination) return false;
       end_nomination(candidate);
       for (unsigned mismatch = 0; mismatch != 4; ++mismatch) {
         candidate = prepare_pending();
@@ -2739,6 +3052,7 @@ namespace sunshine_streamline::depth_capture {
         std::uint64_t cookie{};
         unsigned writes{};
         bool refuse_write{};
+        HRESULT read_failure{S_OK};
         struct bytes_entry { GUID key{}; std::uint64_t value{}; bool present{}; };
         std::array<bytes_entry,4> private_bytes{};
         GUID interface_key{};
@@ -2753,6 +3067,7 @@ namespace sunshine_streamline::depth_capture {
         ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
         ULONG STDMETHODCALLTYPE Release() override { return --references; }
         HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID key, UINT *size, void *out) override {
+          if (FAILED(read_failure)) return read_failure;
           if (!size) return E_POINTER;
           if (private_interface && IsEqualGUID(key, interface_key)) {
             if (!out || *size < sizeof(private_interface)) { *size = sizeof(private_interface); return DXGI_ERROR_MORE_DATA; }
@@ -2851,6 +3166,81 @@ namespace sunshine_streamline::depth_capture {
         return command_storage::live_count() == baseline &&
           std::all_of(lives.begin(), lives.end(), [](const auto &life) { return life->cookie.load() == 0; });
       }
+    }
+    bool initial_recording_regression() {
+      private_object native, resource;
+      const auto address = native_object(native);
+      if (source_cookie(&resource) || native_observer::get_recording_cookie(address) ||
+          !native_observer::recording_cookie_absent(address)) return false;
+      // These are the production entry and post-call callbacks for a newly
+      // created, already-open list. There has been no Reset or SDK nomination.
+      std::uint64_t cookie{};
+      associate_recording(address, &cookie);
+      auto owner = command(address, cookie, false);
+      if (!cookie || !owner || owner->closed || owner->invalid || !owner->states.empty() ||
+          native_observer::get_recording_cookie(address) != cookie || owner.life()->cookie.load() != cookie) return false;
+      D3D12_RESOURCE_BARRIER transition{};
+      transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      transition.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&resource);
+      transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      transition.Transition.StateAfter = sampled_state;
+      barriers(address, cookie, 1, &transition);
+      const auto source = source_cookie(&resource);
+      const auto *observed = state(*owner, source, false);
+      if (!source || resource.writes != 1 || !observed || !observed->known || observed->blocked ||
+          observed->value != sampled_state || retain_source_cookie(&resource) != source || resource.writes != 1) return false;
+      if (owner->native_barrier_calls != 1 || owner->native_transition_count != 1 || owner->last_barrier_command != address) return false;
+      private_object other_command;
+      const auto other = command(native_object(other_command), ++serial, true);
+      if (!other || state(*other, source, false)) return false; // Another list's barrier is never a state proof.
+      // Entry association never invents a missing resource state or overwrites
+      // an already associated recording, including malformed zero data.
+      std::uint64_t duplicate = 99;
+      associate_recording(address, &duplicate);
+      if (duplicate || owner->cookie != cookie) return false;
+      close(address, cookie, S_OK);
+      if (!owner->closed) return false;
+      reset(address, cookie, S_OK);
+      const auto next_cookie = native_observer::get_recording_cookie(address);
+      if (!next_cookie || next_cookie == cookie || owner->closed || !owner->states.empty() ||
+          owner->native_barrier_calls || owner->native_transition_count || owner->last_barrier_command) return false;
+      // A post-call callback carrying the entry's old or zero identity cannot
+      // attach to the new recording after Reset. This applies to state, close,
+      // render-pass and opaque-command evidence alike.
+      for (const auto stale : {std::uint64_t{}, cookie}) {
+        barriers(address, stale, 1, &transition);
+        close(address, stale, S_OK);
+        render_pass(address, stale, true);
+        invalidated_command(address, stale);
+      }
+      if (owner->closed || owner->render_pass || owner->invalid || !owner->states.empty()) return false;
+      render_pass(address, next_cookie, true);
+      if (!owner->render_pass) return false;
+      render_pass(address, next_cookie, false);
+      invalidated_command(address, next_cookie);
+      if (owner->render_pass || !owner->invalid || owner->invalidation != recording_loss::opaque_commands) return false;
+
+      private_object closed, pass, opaque, malformed, refused, orphan;
+      std::uint64_t first{};
+      associate_recording(native_object(closed), &first); close(native_object(closed), first, S_OK);
+      auto closed_owner = command(native_object(closed), first, false);
+      if (!first || !closed_owner || !closed_owner->closed) return false;
+      associate_recording(native_object(pass), &first); render_pass(native_object(pass), first, true);
+      auto pass_owner = command(native_object(pass), first, false);
+      if (!first || !pass_owner || !pass_owner->render_pass) return false;
+      associate_recording(native_object(opaque), &first); invalidated_command(native_object(opaque), first);
+      auto opaque_owner = command(native_object(opaque), first, false);
+      if (!first || !opaque_owner || !opaque_owner->invalid) return false;
+      if (!native_observer::set_recording_cookie(native_object(malformed), 0) ||
+          native_observer::recording_cookie_absent(native_object(malformed))) return false;
+      associate_recording(native_object(malformed), &first);
+      if (first || command_storage::acquire(&malformed, false)) return false;
+      refused.refuse_write = true;
+      associate_recording(native_object(refused), &first);
+      if (first || native_observer::get_recording_cookie(native_object(refused))) return false;
+      auto orphan_owner = command(native_object(orphan), ++serial, true);
+      associate_recording(native_object(orphan), &first);
+      return orphan_owner && !first && !native_observer::get_recording_cookie(native_object(orphan));
     }
     bool recording_recovery_regression() {
       // Exercise actual global loss and allocation together. Existing named
@@ -2957,7 +3347,22 @@ namespace sunshine_streamline::depth_capture {
       value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&native);
       value.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
       barriers(native_command, cookie, 1, &value);
-      if (recording->invalid || native.cookie) return false; // Ordinary untagged resources are not registered.
+      const auto *ordinary = state(*recording, native.cookie, false);
+      if (recording->invalid || !native.cookie || !ordinary || !ordinary->known || ordinary->blocked ||
+          ordinary->value != D3D12_RESOURCE_STATE_UNORDERED_ACCESS || capture->invalid) return false;
+      // Pre-nomination identity is not permission to invent another plane's
+      // state, or to reinterpret unsupported native states as ordinary ones.
+      private_object different_plane;
+      value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&different_plane);
+      value.Transition.Subresource = 1;
+      barriers(native_command, cookie, 1, &value);
+      if (different_plane.cookie || recording->invalid) return false;
+      value.Transition.Subresource = 0;
+      value.Transition.StateAfter = static_cast<D3D12_RESOURCE_STATES>(0x80000000u);
+      barriers(native_command, cookie, 1, &value);
+      const auto *unsupported = state(*recording, different_plane.cookie, false);
+      if (!different_plane.cookie || !unsupported || unsupported->known || recording->invalid) return false;
+      value.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
       for (const auto flags : {D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY, D3D12_RESOURCE_BARRIER_FLAG_END_ONLY}) {
         restart_case();
         private_object pretag;
@@ -3009,10 +3414,25 @@ namespace sunshine_streamline::depth_capture {
       restart_case();
       refused.refuse_write = true;
       value = {}; value.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&refused);
+      barriers(native_command, cookie, 1, &value);
+      if (!recording->invalid || recording->invalidation != recording_loss::source_identity_unavailable || capture->invalid) return false;
+      // Only exact private-data absence permits first-use association.
+      private_object malformed, failed_read;
+      malformed.private_bytes[0] = {source_guid, 0, true};
+      failed_read.read_failure = E_FAIL;
+      for (auto *unavailable : {&malformed, &failed_read}) {
+        restart_case();
+        value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(unavailable);
+        barriers(native_command, cookie, 1, &value);
+        if (!recording->invalid || recording->invalidation != recording_loss::source_identity_unavailable ||
+            unavailable->writes || capture->invalid) return false;
+      }
+      restart_case();
       value.Flags = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;
       value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&refused);
       barriers(native_command, cookie, 1, &value);
-      if (!recording->invalid || capture->invalid) return false;
+      if (!recording->invalid || recording->invalidation != recording_loss::source_identity_unavailable || capture->invalid) return false;
       restart_case();
       // Exercise the real allocation-failure boundary without exhausting the
       // test process. Growth success is covered below; failure still closes.

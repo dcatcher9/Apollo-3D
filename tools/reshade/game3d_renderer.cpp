@@ -5,7 +5,6 @@
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
-#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -22,7 +21,6 @@ namespace sunshine_game3d {
       T *operator->() const { return p; }
     };
     api::format typed(api::format f) { return api::format_to_default_typed(f, 0); }
-    std::atomic<uint64_t> next_alpha_observation_source{1};
   }
   struct renderer::impl {
     api::device *device = nullptr;
@@ -36,13 +34,15 @@ namespace sunshine_game3d {
       return source_override.empty() ? renderer::shader_source() : std::string_view(source_override);
     }
     api::pipeline_layout layout{};
-    enum pass { pq, candidate, vertical, ui_tiles, ui_reduce, horizontal, eyes, pack, alpha_coverage, ui_conflict, ui_apply, pass_count };
+    enum pass { pq, candidate, vertical, ui_tiles, ui_reduce, horizontal, eyes, pack, ui_conflict, ui_apply,
+      detection_tiles, detection_reduce, detection_mask, pass_count };
     std::array<api::pipeline, pass_count> pipelines{};
     std::array<api::sampler, 3> samplers{};
     api::resource_view null_srv{}, null_uav{};
     struct texture { api::resource resource{}; api::resource_view srv{}, uav{}, rtv{}; };
     enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field,
-      ui_plane_tiles, ui_plane_resolved, left, right, packed, ui_source, alpha_statistics, ui_conflict_statistics, texture_count };
+      ui_plane_tiles, ui_plane_resolved, left, right, packed, ui_source, ui_source_second, ui_source_third,
+      ui_conflict_statistics, detection_statistics, detection_decision, detected_mask, texture_count };
     std::array<texture, texture_count> textures{};
     std::vector<std::pair<api::resource, api::resource_view>> backbuffers;
     api::fence completion{};
@@ -56,28 +56,30 @@ namespace sunshine_game3d {
     ui_plane_parameters consumed_plane;
     bool source_alpha_ui = false;
     api::resource consumed_ui_source{};
-    bool ui_source_failed = false;
+    std::array<api::format, 3> ui_source_formats{};
+    std::array<bool, 3> ui_source_failed{};
+    unsigned ui_source_active{};
+    std::array<texture, 4> ui_candidates{};
+    std::array<api::format, 4> ui_candidate_formats{};
+    ui_mask_channel consumed_channel = ui_mask_channel::alpha;
+    bool mask_channel_supported = false;
     bool nearest_ui_supported = false, nearest_ui_rendered = false;
     bool nearest_ui_attempted = false, nearest_ui_ready = false;
     bool front_limit_ui_supported = false, shallow_front_ui_supported = false;
     bool display_fraction_ui_supported = false;
     alpha_auto_decision consumed_auto;
-    alpha_probe_counters alpha_activity;
-    // A process can own several runtimes/renderers, each with its own source
-    // sequence. Their continuity and watermarks must never reset each other.
-    const uint64_t alpha_observation_source = next_alpha_observation_source.fetch_add(1, std::memory_order_relaxed);
-    alpha_auto_source alpha_scope;
-    bool alpha_scope_active = false, alpha_probe_attempted = false, alpha_probe_ready = false;
-    bool alpha_readback_pending = false, alpha_awaiting_signal = false;
-    uint64_t alpha_scope_generation = 0, alpha_pending_generation = 0;
-    uint64_t alpha_fence = 0, alpha_last_submit = 0, alpha_last_sequence = 0, alpha_last_tick = 0, alpha_present_serial = 0;
-    alpha_coverage_sample alpha_pending_sample;
-    com<ID3D11Texture2D> alpha_readback11;
-    com<ID3D12Resource> alpha_readback12;
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT alpha_footprint{};
-    uint64_t alpha_readback_bytes = 0;
+    bool detection_attempted{}, detection_ready{}, detection_active{}, detection_pending{}, detection_awaiting_signal{};
+    uint32_t detection_bits{}, detection_pending_bits{};
+    float difference_threshold = 4.f / 1023.f;
+    uint64_t detection_fence{}, detection_last_submit{}, detection_submitted{}, detection_mapped{};
+    alpha_auto_source detection_pending_source, detection_latest_source;
+    alpha_auto_decision detection_latest;
+    com<ID3D11Texture2D> detection_readback11;
+    com<ID3D12Resource> detection_readback12;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT detection_footprint{};
+    uint64_t detection_readback_bytes{};
     // Adaptive placement has its own observation slot and lifecycle. It never
-    // changes alpha detection, depth admission or capture ownership.
+    // changes UI qualification, depth admission or capture ownership.
     ui_adaptive::policy adaptive_policy;
     ui_adaptive::decision consumed_adaptive;
     ui_adaptive::source adaptive_scope, adaptive_pending_source;
@@ -101,6 +103,10 @@ namespace sunshine_game3d {
         if (t.srv.handle) device->destroy_resource_view(t.srv);
         if (t.uav.handle) device->destroy_resource_view(t.uav);
         if (t.rtv.handle) device->destroy_resource_view(t.rtv);
+        if (t.resource.handle) device->destroy_resource(t.resource);
+      }
+      for (auto &t : ui_candidates) {
+        if (t.srv.handle) device->destroy_resource_view(t.srv);
         if (t.resource.handle) device->destroy_resource(t.resource);
       }
       for (auto p : pipelines) if (p.handle) device->destroy_pipeline(p);
@@ -164,6 +170,7 @@ namespace sunshine_game3d {
       front_limit_ui_supported = shader_source().find("#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1") != std::string_view::npos;
       shallow_front_ui_supported = shader_source().find("#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1") != std::string_view::npos;
       display_fraction_ui_supported = shader_source().find("#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1") != std::string_view::npos;
+      mask_channel_supported = shader_source().find("#define SUNSHINE_UI_MASK_CHANNEL 1") != std::string_view::npos;
       if (!device->create_fence(0, api::fence_flags::none, &completion)) return false;
       if (device->get_api() == api::device_api::d3d12 &&
           (!device->create_resource_view({}, api::resource_usage::shader_resource, api::resource_view_desc(api::format::r32_float), &null_srv) ||
@@ -178,9 +185,10 @@ namespace sunshine_game3d {
       const api::pipeline_layout_param params[]{
         api::constant_range{0, 0, 0, sizeof(render_parameters) / 4, api::shader_stage::all},
         api::descriptor_range{0, 0, 0, 3, api::shader_stage::all, 1, api::descriptor_type::sampler},
-        api::descriptor_range{0, 0, 0, 10, api::shader_stage::all, 1, api::descriptor_type::shader_resource_view},
+        api::descriptor_range{0, 0, 0, 15, api::shader_stage::all, 1, api::descriptor_type::shader_resource_view},
         api::descriptor_range{0, 0, 0, 8, api::shader_stage::compute, 1, api::descriptor_type::unordered_access_view},
-        api::constant_range{0, 1, 0, 4, api::shader_stage::compute}};
+        api::constant_range{0, 1, 0, 4, api::shader_stage::compute},
+        api::constant_range{0, 2, 0, 4, api::shader_stage::compute}};
       if (!device->create_pipeline_layout(uint32_t(std::size(params)), params, &layout)) return false;
       for (unsigned i = 0; i < samplers.size(); ++i) {
         api::sampler_desc sampler;
@@ -222,14 +230,14 @@ namespace sunshine_game3d {
       return true;
     }
     void bindings(api::command_list *cmd, api::shader_stage stage, const render_parameters &p,
-        std::array<api::resource_view, 10> srvs, std::array<api::resource_view, 8> uavs = {}) {
+        std::array<api::resource_view, 15> srvs, std::array<api::resource_view, 8> uavs = {}) {
       // D3D12 needs actual null descriptors; a zero CPU descriptor handle is
       // not a valid CopyDescriptors source. D3D11 uses zero COM views normally.
       for (auto &view : srvs) if (!view.handle) view = null_srv;
       for (auto &view : uavs) if (!view.handle) view = null_uav;
       cmd->push_constants(stage, layout, 0, 0, sizeof(p) / 4, &p);
       if (stage == api::shader_stage::compute) {
-        const auto ui = ui_parameter_words(source_alpha_ui, consumed_plane);
+        const auto ui = ui_parameter_words(source_alpha_ui, consumed_plane, consumed_channel);
         cmd->push_constants(stage, layout, 4, 0, uint32_t(ui.size()), ui.data());
       }
       cmd->push_descriptors(stage, layout, 1, {{}, 0, 0, uint32_t(samplers.size()), api::descriptor_type::sampler, samplers.data()});
@@ -238,7 +246,7 @@ namespace sunshine_game3d {
         cmd->push_descriptors(stage, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
     }
     void draw(api::command_list *cmd, pass id, uint32_t w, std::initializer_list<texture_id> targets,
-        const render_parameters &p, const std::array<api::resource_view, 10> &srvs) {
+        const render_parameters &p, const std::array<api::resource_view, 15> &srvs) {
       std::array<api::resource_view, 2> rtvs{}; unsigned index = 0;
       for (auto target : targets) {
         auto &t = textures[target]; rtvs[index++] = t.rtv;
@@ -255,7 +263,7 @@ namespace sunshine_game3d {
       for (auto target : targets) cmd->barrier(textures[target].resource, api::resource_usage::render_target, api::resource_usage::shader_resource);
     }
     void dispatch(api::command_list *cmd, pass id, uint32_t x, uint32_t y,
-        const render_parameters &p, const std::array<api::resource_view, 10> &srvs, std::initializer_list<texture_id> targets) {
+        const render_parameters &p, const std::array<api::resource_view, 15> &srvs, std::initializer_list<texture_id> targets) {
       std::array<api::resource_view, 8> uavs{};
       for (auto target : targets) {
         cmd->barrier(textures[target].resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
@@ -268,186 +276,155 @@ namespace sunshine_game3d {
       cmd->push_descriptors(api::shader_stage::compute, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
       for (auto target : targets) cmd->barrier(textures[target].resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
     }
-    bool prepare_alpha_probe() {
-      if (alpha_probe_attempted) return alpha_probe_ready;
-      alpha_probe_attempted = true;
-      if (shader_source().find("#define SUNSHINE_UI_ALPHA_COVERAGE 1") == std::string_view::npos) return false;
-      if (!texture_create(alpha_statistics, 16, 16, api::format::r32g32b32a32_uint,
-            api::resource_usage::unordered_access | api::resource_usage::copy_source) ||
-          !pipeline_create(alpha_coverage, "SunshineAlphaCoverageCS", true, {})) return false;
-      if (context11.p) {
-        D3D11_TEXTURE2D_DESC desc{};
-        desc.Width = desc.Height = 16;
-        desc.MipLevels = desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_STAGING;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        auto *native = reinterpret_cast<ID3D11Device *>(device->get_native());
-        if (FAILED(native->CreateTexture2D(&desc, nullptr, alpha_readback11.put()))) return false;
-      } else {
-        auto *native = reinterpret_cast<ID3D12Device *>(device->get_native());
-        const auto desc = reinterpret_cast<ID3D12Resource *>(textures[alpha_statistics].resource.handle)->GetDesc();
-        native->GetCopyableFootprints(&desc, 0, 1, 0, &alpha_footprint, nullptr, nullptr, &alpha_readback_bytes);
-        D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_READBACK;
-        D3D12_RESOURCE_DESC buffer{};
-        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        buffer.Width = alpha_readback_bytes;
-        buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
-        buffer.SampleDesc.Count = 1;
-        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        if (FAILED(native->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(alpha_readback12.put())))) return false;
-      }
-      alpha_probe_ready = true;
-      return true;
-    }
-    void reset_alpha_scope() {
-      alpha_scope_active = false;
-      ++alpha_scope_generation;
-      alpha_last_submit = alpha_last_sequence = alpha_last_tick = 0;
-      // An old GPU copy still owns its storage until its recorded fence retires.
-    }
-    void poll_alpha_probe(uint64_t now, alpha_auto_policy *session) {
-      if (!alpha_readback_pending || alpha_awaiting_signal || !alpha_fence) return;
-      const auto completed = device->get_completed_fence_value(completion);
-      if (completed == UINT64_MAX) {
-        alpha_probe_ready = false;
-        if (session) session->reset_continuity(alpha_observation_source);
-        failed = true;
-        return;
-      }
-      if (completed < alpha_fence) return;
-      if (!session || !alpha_scope_active || alpha_pending_generation != alpha_scope_generation) {
-        alpha_readback_pending = false;
-        return;
-      }
-      const unsigned char *pixels = nullptr;
-      uint32_t pitch = 0;
-      D3D11_MAPPED_SUBRESOURCE mapped11{};
-      void *mapped12 = nullptr;
-      ++alpha_activity.mapped;
-      if (context11.p) {
-        const auto result = context11->Map(alpha_readback11.p, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped11);
-        if (result == DXGI_ERROR_WAS_STILL_DRAWING) return;
-        if (SUCCEEDED(result)) { pixels = static_cast<const unsigned char *>(mapped11.pData); pitch = mapped11.RowPitch; }
-      } else {
-        const D3D12_RANGE range{0, SIZE_T(alpha_readback_bytes)};
-        if (SUCCEEDED(alpha_readback12->Map(0, &range, &mapped12))) {
-          pixels = static_cast<const unsigned char *>(mapped12) + alpha_footprint.Offset;
-          pitch = alpha_footprint.Footprint.RowPitch;
-        }
-      }
-      uint64_t covered = 0, count = 0, invalid = 0;
-      const bool readable = pixels && pitch >= 16 * 4 * sizeof(uint32_t);
-      if (readable) for (unsigned y = 0; y < 16; ++y) for (unsigned x = 0; x < 16; ++x) {
-        std::array<uint32_t, 4> tile{};
-        std::memcpy(tile.data(), pixels + size_t(y) * pitch + x * sizeof(tile), sizeof(tile));
-        covered += tile[0]; count += tile[1]; invalid += tile[2];
-      }
-      if (mapped11.pData) context11->Unmap(alpha_readback11.p, 0);
-      if (mapped12) { const D3D12_RANGE written{0, 0}; alpha_readback12->Unmap(0, &written); }
-      alpha_readback_pending = false;
-      if (!readable || count != uint64_t(width) * height || covered > count || invalid > count - covered) {
-        // A failed observation disables protection, never stereo rendering.
-        alpha_probe_ready = false;
-        session->reset_continuity(alpha_observation_source);
-        return;
-      }
-      auto sample = alpha_pending_sample;
-      sample.covered = uint32_t(covered); sample.pixels = uint32_t(count); sample.invalid = uint32_t(invalid);
-      session->observe(sample, now, alpha_observation_source);
-    }
-    bool submit_alpha_probe(api::command_list *cmd, api::resource_view selected,
-        const render_parameters &p, const alpha_auto_source &input) {
-      if (alpha_readback_pending || !consumed_auto.probe_interval_ms || !input.sequence || !input.tick_ms || input.tick_ms > input.now_ms ||
-          input.now_ms - input.tick_ms > alpha_observation_max_age_ms ||
-          input.sequence <= alpha_last_sequence || input.tick_ms < alpha_last_tick ||
-          (alpha_last_submit && input.now_ms >= alpha_last_submit &&
-            input.now_ms - alpha_last_submit < consumed_auto.probe_interval_ms)) return false;
-      // A game can spend its first seconds creating graphics resources. Start
-      // the one-shot window only when an eligible observation can be recorded.
-      input.session->begin_observation(input.now_ms);
-      consumed_auto = input.session->decision(input.now_ms);
-      if (!consumed_auto.monitoring) return false;
-      auto &t = textures[alpha_statistics];
-      cmd->barrier(t.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
-      std::array<api::resource_view, 8> uavs{}; uavs[6] = t.uav;
-      cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[alpha_coverage]);
-      bindings(cmd, api::shader_stage::compute, p, {selected}, uavs);
-      cmd->dispatch(16, 16, 1);
-      uavs.fill(null_uav);
-      cmd->push_descriptors(api::shader_stage::compute, layout, 3,
-        {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
-      cmd->barrier(t.resource, api::resource_usage::unordered_access, api::resource_usage::copy_source);
-      if (context11.p) {
-        context11->CopyResource(alpha_readback11.p, reinterpret_cast<ID3D11Resource *>(t.resource.handle));
-      } else {
-        D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
-        source.pResource = reinterpret_cast<ID3D12Resource *>(t.resource.handle);
-        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        destination.pResource = alpha_readback12.p;
-        destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        destination.PlacedFootprint = alpha_footprint;
-        reinterpret_cast<ID3D12GraphicsCommandList *>(cmd->get_native())->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-      }
-      cmd->barrier(t.resource, api::resource_usage::copy_source, api::resource_usage::shader_resource);
-      alpha_pending_sample = {};
-      alpha_pending_sample.sequence = input.sequence;
-      alpha_pending_sample.tick_ms = input.tick_ms;
-      alpha_pending_generation = alpha_scope_generation;
-      alpha_last_sequence = input.sequence; alpha_last_tick = input.tick_ms; alpha_last_submit = input.now_ms;
-      alpha_fence = 0; alpha_readback_pending = alpha_awaiting_signal = true;
-      ++alpha_activity.submitted;
-      return true;
-    }
-    void update_alpha_auto(api::command_list *cmd, api::resource_view selected,
-        const render_parameters &p, bool eligible, const alpha_auto_source *automatic) {
+    void update_alpha_auto(bool eligible, const alpha_auto_source *automatic) {
       consumed_auto = {};
       if (!automatic || !automatic->session) {
-        if (alpha_scope_active) reset_alpha_scope();
-        poll_alpha_probe(automatic ? automatic->now_ms : 0, nullptr);
+        // Explicit offline/replay input is already a resolved choice. An
+        // incomplete live observation never acquires that authority.
         source_alpha_ui = !automatic && eligible;
         consumed_auto.enabled = source_alpha_ui;
         consumed_auto.state = source_alpha_ui ? alpha_auto_state::manual_on : alpha_auto_state::manual_off;
-        consumed_auto.monitoring = false;
         return;
       }
-      auto input = *automatic;
-      auto &session = *input.session;
-      // The process-owned session waits for its first eligible observation,
-      // then keeps that original deadline across renderer recreation.
-      consumed_auto = session.decision(input.now_ms);
-      source_alpha_ui = eligible && consumed_auto.enabled;
-      if (!consumed_auto.monitoring || !eligible) {
-        if (alpha_scope_active) {
-          if (consumed_auto.monitoring) session.reset_continuity(alpha_observation_source);
-          reset_alpha_scope();
+      const auto requested = automatic->session->decision(automatic->now_ms).state;
+      if (requested == alpha_auto_state::manual_on || requested == alpha_auto_state::manual_off) {
+        consumed_auto.state = requested;
+        source_alpha_ui = eligible && requested == alpha_auto_state::manual_on;
+      } else {
+        // Current-frame GPU validation chooses the mask. CPU readback is only
+        // a bounded status sample, never authority for a later input image.
+        source_alpha_ui = eligible;
+        consumed_auto = detection_latest;
+        if (!consumed_auto.sample_tick_ms || automatic->now_ms < consumed_auto.sample_tick_ms ||
+            automatic->now_ms - consumed_auto.sample_tick_ms > 500) {
+          consumed_auto = {};
+          consumed_auto.state = eligible ? alpha_auto_state::collecting : alpha_auto_state::waiting_for_source;
         }
-        // Retire an already recorded copy without mapping it. No observation,
-        // new resource allocation or dispatch occurs after detection/manual.
-        poll_alpha_probe(input.now_ms, nullptr);
+        consumed_auto.monitoring = true;
         return;
       }
-      if (!input.retained) {
-        if (!input.sequence) input.sequence = ++alpha_present_serial;
-        else if (input.sequence > alpha_present_serial) alpha_present_serial = input.sequence;
-        if (!input.tick_ms) input.tick_ms = input.now_ms;
+      consumed_auto.enabled = source_alpha_ui;
+    }
+    bool prepare_detection() {
+      if (detection_attempted) return detection_ready;
+      detection_attempted = true;
+      if (shader_source().find("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") == std::string_view::npos ||
+          !texture_create(detection_statistics, 16, 48, api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
+          !texture_create(detection_decision, 1, 1, api::format::r32g32b32a32_uint,
+            api::resource_usage::unordered_access | api::resource_usage::copy_source) ||
+          !texture_create(detected_mask, width, height, api::format::r32_float, api::resource_usage::unordered_access) ||
+          !pipeline_create(detection_tiles, "SunshineUIDetectionTilesCS", true, {}) ||
+          !pipeline_create(detection_reduce, "SunshineUIDetectionReduceCS", true, {}) ||
+          !pipeline_create(detection_mask, "SunshineUIDetectionMaskCS", true, {})) return false;
+      if (context11.p) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = desc.Height = desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+        desc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+        desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(reinterpret_cast<ID3D11Device *>(device->get_native())->CreateTexture2D(&desc, nullptr,
+            detection_readback11.put()))) return false;
+      } else {
+        auto *native = reinterpret_cast<ID3D12Device *>(device->get_native());
+        const auto desc = reinterpret_cast<ID3D12Resource *>(textures[detection_decision].resource.handle)->GetDesc();
+        native->GetCopyableFootprints(&desc, 0, 1, 0, &detection_footprint, nullptr, nullptr, &detection_readback_bytes);
+        D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC buffer{}; buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = detection_readback_bytes; buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1; buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(native->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(detection_readback12.put())))) return false;
       }
-      if (!alpha_scope_active || alpha_scope.session != input.session ||
-          alpha_scope.retained != input.retained || alpha_scope.epoch != input.epoch ||
-          alpha_scope.revision != input.revision || alpha_scope.viewport != input.viewport ||
-          input.now_ms < alpha_last_submit) {
-        reset_alpha_scope();
-        session.reset_continuity(alpha_observation_source);
-        alpha_scope = input;
-        alpha_scope_active = true;
+      detection_ready = true;
+      return true;
+    }
+    void poll_detection(const alpha_auto_source &input) {
+      if (!detection_pending || detection_awaiting_signal || !detection_fence) return;
+      const auto completed = device->get_completed_fence_value(completion);
+      if (completed == UINT64_MAX) { failed = true; return; }
+      if (completed < detection_fence) return;
+      if (input.epoch != detection_pending_source.epoch || input.revision != detection_pending_source.revision ||
+          input.viewport != detection_pending_source.viewport || detection_bits != detection_pending_bits ||
+          input.now_ms < detection_pending_source.now_ms || input.now_ms - detection_pending_source.now_ms > 500) {
+        detection_pending = false; detection_latest = {}; return;
       }
-      poll_alpha_probe(input.now_ms, &session);
-      consumed_auto = session.decision(input.now_ms);
-      if (consumed_auto.monitoring && prepare_alpha_probe() && submit_alpha_probe(cmd, selected, p, input))
-        consumed_auto = session.decision(input.now_ms);
-      source_alpha_ui = eligible && consumed_auto.enabled;
+      std::array<uint32_t, 4> counts{};
+      bool read = false;
+      ++detection_mapped;
+      if (context11.p) {
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        const auto result = context11->Map(detection_readback11.p, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        if (result == DXGI_ERROR_WAS_STILL_DRAWING) return;
+        if (SUCCEEDED(result)) {
+          std::memcpy(counts.data(), mapped.pData, sizeof(counts));
+          context11->Unmap(detection_readback11.p, 0); read = true;
+        }
+      } else {
+        void *mapped{}; const D3D12_RANGE range{0, SIZE_T(detection_readback_bytes)};
+        if (SUCCEEDED(detection_readback12->Map(0, &range, &mapped))) {
+          std::memcpy(counts.data(), static_cast<const unsigned char *>(mapped) + detection_footprint.Offset, sizeof(counts));
+          const D3D12_RANGE written{0, 0}; detection_readback12->Unmap(0, &written); read = true;
+        }
+      }
+      detection_pending = false;
+      detection_latest = {};
+      if (!read) return;
+      detection_latest.source_kind = counts[0];
+      detection_latest.enabled = counts[0] != 0;
+      detection_latest.state = counts[0] ? alpha_auto_state::automatic_on : alpha_auto_state::automatic_off;
+      detection_latest.covered = counts[1]; detection_latest.pixels = counts[2];
+      detection_latest.sample_sequence = detection_submitted;
+      detection_latest.sample_tick_ms = detection_pending_source.now_ms;
+      detection_latest.accepted_samples = detection_submitted;
+      detection_latest.monitoring = true;
+      detection_latest_source = detection_pending_source;
+    }
+    void detect_ui(api::command_list *cmd, const render_parameters &p, const ui_detection_inputs &input,
+        const alpha_auto_source &observation) {
+      std::array<api::resource_view, 15> views{};
+      views[0] = textures[source].srv;
+      for (unsigned i = 0; i != 3; ++i) views[11+i] = input.masks[i];
+      views[14] = input.hudless;
+      const auto dispatch_stage = [&](pass stage, texture_id target, unsigned output, unsigned x, unsigned y) {
+        auto &t = textures[target];
+        cmd->barrier(t.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
+        std::array<api::resource_view, 8> uavs{}; uavs[output] = t.uav;
+        cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[stage]);
+        bindings(cmd, api::shader_stage::compute, p, views, uavs);
+        struct constants { uint32_t bits; float threshold; uint32_t padding[2]; } values{detection_bits, difference_threshold, {}};
+        cmd->push_constants(api::shader_stage::compute, layout, 5, 0, 4, &values);
+        cmd->dispatch(x, y, 1);
+        uavs.fill(null_uav);
+        cmd->push_descriptors(api::shader_stage::compute, layout, 3,
+          {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
+        cmd->barrier(t.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
+      };
+      dispatch_stage(detection_tiles, detection_statistics, 6, 16, 16);
+      views[10] = textures[detection_statistics].srv;
+      dispatch_stage(detection_reduce, detection_decision, 6, 1, 1);
+      views[10] = textures[detection_decision].srv;
+      dispatch_stage(detection_mask, detected_mask, 0, (width+7)/8, (height+7)/8);
+      if (detection_pending || (detection_last_submit && observation.now_ms >= detection_last_submit &&
+          observation.now_ms - detection_last_submit < 100)) return;
+      // The single small diagnostic slot cannot accumulate GPU work. Its sample
+      // may lag; the mask above always uses this frame's completed GPU decision.
+      views.fill(null_srv);
+      cmd->push_descriptors(api::shader_stage::compute, layout, 2,
+        {{}, 0, 0, uint32_t(views.size()), api::descriptor_type::shader_resource_view, views.data()});
+      auto &t = textures[detection_decision];
+      cmd->barrier(t.resource, api::resource_usage::shader_resource, api::resource_usage::copy_source);
+      if (context11.p) context11->CopyResource(detection_readback11.p, reinterpret_cast<ID3D11Resource *>(t.resource.handle));
+      else {
+        D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+        source.pResource = reinterpret_cast<ID3D12Resource *>(t.resource.handle);
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        destination.pResource = detection_readback12.p; destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        destination.PlacedFootprint = detection_footprint;
+        reinterpret_cast<ID3D12GraphicsCommandList *>(cmd->get_native())->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+      }
+      cmd->barrier(t.resource, api::resource_usage::copy_source, api::resource_usage::shader_resource);
+      detection_pending_source = observation; detection_pending_bits = detection_bits;
+      detection_pending = detection_awaiting_signal = true;
+      detection_last_submit = observation.now_ms; ++detection_submitted;
     }
     bool prepare_adaptive_probe() {
       if (adaptive_probe_attempted) return adaptive_probe_ready;
@@ -632,7 +609,7 @@ namespace sunshine_game3d {
       cmd->push_descriptors(api::shader_stage::compute, layout, 3,
         {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
       // Unbind the pre-UI field SRV before the following UI application writes it.
-      std::array<api::resource_view, 10> srvs{}; srvs.fill(null_srv);
+      std::array<api::resource_view, 15> srvs{}; srvs.fill(null_srv);
       cmd->push_descriptors(api::shader_stage::compute, layout, 2,
         {{}, 0, 0, uint32_t(srvs.size()), api::descriptor_type::shader_resource_view, srvs.data()});
       cmd->barrier(t.resource, api::resource_usage::unordered_access, api::resource_usage::copy_source);
@@ -682,6 +659,7 @@ namespace sunshine_game3d {
         data_->source_override == source_override) return !data_->failed;
     if (data_ && !data_->idle()) return false;
     ui_source_capture_ = 0;
+    ui_candidate_captures_.fill(0);
     data_.reset();
     auto next = std::make_unique<impl>();
     next->source_override.assign(source_override);
@@ -690,9 +668,54 @@ namespace sunshine_game3d {
     reshade::log::message(reshade::log::level::info, "Sunshine Game 3D: add-on GPU renderer ready (no FX file required)");
     return true;
   }
-  bool renderer::render(api::command_list *cmd, api::resource backbuffer, api::resource_view depth, const render_parameters &parameters, bool source_alpha_ui, api::resource_view alpha_source, const ui_plane_parameters &plane, const alpha_auto_source *automatic, const ui_adaptive::source *adaptive) {
+  bool renderer::render(api::command_list *cmd, const render_frame_input &input) {
+    const auto backbuffer = input.color;
+    auto depth = input.depth;
+    const auto &parameters = input.scene;
+    const auto &ui = input.ui;
+    const bool source_alpha_ui = ui.available();
+    auto alpha_source = !source_alpha_ui || ui.kind == ui_input_kind::current_color_alpha ? api::resource_view{} : ui.view;
+    const auto &plane = ui.plane;
+    auto observation = ui.automatic ? *ui.automatic : alpha_auto_source{};
+    observation.retained = ui.kind == ui_input_kind::captured_color_alpha || ui.kind == ui_input_kind::dedicated_mask;
+    observation.dedicated_mask = ui.kind == ui_input_kind::dedicated_mask;
+    const auto *automatic = ui.automatic ? &observation : nullptr;
+    const auto *adaptive = ui.adaptive;
+    const auto channel = source_alpha_ui ? ui.channel : ui_mask_channel::alpha;
     if (!data_ || data_->failed || data_->pending) return false;
     auto &d = *data_;
+    const auto mode = automatic && automatic->session ? automatic->session->decision(automatic->now_ms).state : alpha_auto_state::manual_off;
+    const bool auto_mode = automatic && automatic->session && mode != alpha_auto_state::manual_on && mode != alpha_auto_state::manual_off;
+    ui_detection_inputs candidates;
+    candidates.current_color = ui.kind == ui_input_kind::current_color_alpha;
+    if (ui.detection) candidates = *ui.detection;
+    else if (ui.kind == ui_input_kind::hudless_difference) candidates.hudless = ui.view;
+    else if (ui.kind == ui_input_kind::captured_color_alpha) candidates.masks[2] = ui.view;
+    else if (ui.kind == ui_input_kind::dedicated_mask) candidates.masks[channel == ui_mask_channel::red ? 0 : 1] = ui.view;
+    const auto compatible = [&](api::resource_view view, bool paired_color) {
+      if (!view.handle) return false;
+      const auto desc = d.device->get_resource_desc(d.device->get_resource_from_view(view));
+      return desc.type == api::resource_type::texture_2d && desc.texture.width == d.width && desc.texture.height == d.height &&
+        desc.texture.samples == 1 && desc.texture.depth_or_layers == 1 &&
+        (!paired_color || typed(desc.texture.format) == d.source_format);
+    };
+    uint32_t bits = candidates.current_color ? 8u : 0u;
+    for (unsigned i = 0; i < candidates.masks.size(); ++i) {
+      if (compatible(candidates.masks[i], false)) bits |= 1u << i;
+      else candidates.masks[i] = {};
+    }
+    if (compatible(candidates.hudless, true)) bits |= 16u;
+    else candidates.hudless = {};
+    if (d.detection_bits != bits) d.detection_latest = {};
+    d.detection_bits = bits;
+    d.difference_threshold = d.source_format == api::format::r10g10b10a2_unorm ? 4.f / 1023.f :
+      d.color == 2 ? .005f : 2.f / 255.f;
+    const bool needs_detection = auto_mode || ui.kind == ui_input_kind::hudless_difference;
+    const bool detection_requested = needs_detection && (!automatic || mode != alpha_auto_state::manual_off);
+    d.detection_active = detection_requested && source_alpha_ui && bits && d.width <= 3840 && d.height <= 3840 && d.prepare_detection();
+    if (channel != ui_mask_channel::alpha && channel != ui_mask_channel::red) return false;
+    if (channel == ui_mask_channel::red && (!alpha_source.handle || !d.mask_channel_supported)) return false;
+    d.consumed_channel = d.detection_active ? ui_mask_channel::red : channel;
     const bool ui_mode_supported = (plane.mode != ui_plane_mode::depth_midpoint_nearest_ui || d.nearest_ui_supported) &&
       (plane.mode != ui_plane_mode::front_limit || d.front_limit_ui_supported) &&
       (plane.mode != ui_plane_mode::shallow_front || d.shallow_front_ui_supported) &&
@@ -715,10 +738,17 @@ namespace sunshine_game3d {
     if (!depth.handle) { depth = t[impl::empty_depth].srv; p.depth_ready = p.camera_ready = 0; }
     d.consumed = p;
     d.consumed_plane = plane;
-    const auto selected_alpha = alpha_source.handle ? alpha_source : t[impl::source].srv;
-    // Probe the eligible selected input even while the automatic policy has UI
-    // protection disabled. A retained input's RGB never enters the eye passes.
-    d.update_alpha_auto(cmd, selected_alpha, p, source_alpha_ui && ui_mode_supported &&
+    if (d.detection_active) {
+      if (!observation.now_ms) observation.now_ms = observation.tick_ms = GetTickCount64();
+      if (observation.epoch != d.detection_latest_source.epoch || observation.revision != d.detection_latest_source.revision ||
+          observation.viewport != d.detection_latest_source.viewport) d.detection_latest = {};
+      d.poll_detection(observation);
+      d.detect_ui(cmd, p, candidates, observation);
+      alpha_source = t[impl::detected_mask].srv;
+    }
+    // A captured input's RGB never replaces current eye color. Auto consumes a
+    // freshly derived mask; explicit manual/replay inputs retain their meaning.
+    d.update_alpha_auto(source_alpha_ui && ui_mode_supported && (!needs_detection || d.detection_active) &&
       (!automatic || !automatic->retained || alpha_source.handle), automatic);
     const bool probe_ui = d.prepare_adaptive_frame(p, adaptive);
     d.nearest_ui_rendered = false;
@@ -735,7 +765,7 @@ namespace sunshine_game3d {
           {api::resource_view{}, {}, {}, {}, {}, {}, {}, {}, t[impl::ui_plane_tiles].srv}, {impl::ui_plane_resolved});
         d.nearest_ui_rendered = true;
       }
-      // UI passes read only the selected t0.a. Eye RGB stays the current frame.
+      // UI passes read the explicit selected mask channel. Eye RGB stays current.
       const bool apply_ui = d.source_alpha_ui;
       if (probe_ui) d.source_alpha_ui = false;
       d.dispatch(cmd, impl::horizontal, d.height, 1, p,
@@ -752,24 +782,75 @@ namespace sunshine_game3d {
     return true;
   }
   api::resource renderer::output() const { return data_ ? data_->textures[impl::packed].resource : api::resource{}; }
-  api::resource renderer::ui_source() {
-    if (!data_ || data_->failed || data_->ui_source_failed) return {};
+  api::resource renderer::ui_source(api::format format) {
+    if (!data_ || data_->failed) return {};
     auto &d = *data_;
-    auto &texture = d.textures[impl::ui_source];
-    if (!texture.resource.handle && !d.texture_create(impl::ui_source, d.width, d.height, d.source_format,
+    if (format == api::format::unknown) format = d.source_format;
+    unsigned selected = 3;
+    for (unsigned i = 0; i != 3; ++i)
+      if (d.ui_source_formats[i] == format) { selected = i; break; }
+    if (selected == 3) {
+      for (unsigned i = 0; i != 3; ++i)
+        if (d.ui_source_formats[i] == api::format::unknown) { selected = i; break; }
+      if (selected == 3) {
+        if (!d.idle()) return {}; // Bounded storage; never destroy an in-flight view.
+        selected = d.ui_source_active;
+        auto &old = d.textures[static_cast<impl::texture_id>(impl::ui_source + selected)];
+        if (old.srv.handle) d.device->destroy_resource_view(old.srv);
+        if (old.resource.handle) d.device->destroy_resource(old.resource);
+        old = {};
+      }
+      d.ui_source_formats[selected] = format;
+      d.ui_source_failed[selected] = false;
+      ui_source_capture_ = 0;
+    }
+    if (d.ui_source_active != selected) ui_source_capture_ = 0;
+    d.ui_source_active = selected;
+    if (d.ui_source_failed[selected]) return {};
+    const auto id = static_cast<impl::texture_id>(impl::ui_source + selected);
+    auto &texture = d.textures[id];
+    if (!texture.resource.handle && !d.texture_create(id, d.width, d.height, format,
         api::resource_usage::copy_dest | api::resource_usage::copy_source)) {
-      d.ui_source_failed = true;
+      d.ui_source_failed[selected] = true;
       return {};
     }
     return texture.resource;
   }
   api::resource_view renderer::ui_source_view() const {
-    return data_ && !data_->ui_source_failed ? data_->textures[impl::ui_source].srv : api::resource_view{};
+    return data_ && !data_->ui_source_failed[data_->ui_source_active] ?
+      data_->textures[static_cast<impl::texture_id>(impl::ui_source + data_->ui_source_active)].srv : api::resource_view{};
+  }
+  api::resource renderer::ui_candidate(unsigned slot, api::format format) {
+    if (!data_ || slot >= data_->ui_candidates.size()) return {};
+    auto &d = *data_;
+    auto &t = d.ui_candidates[slot];
+    format = typed(format);
+    if (t.resource.handle && d.ui_candidate_formats[slot] != format) {
+      if (!d.idle()) return {};
+      d.device->destroy_resource_view(t.srv); d.device->destroy_resource(t.resource);
+      t = {}; ui_candidate_captures_[slot] = 0;
+    }
+    if (!t.resource.handle) {
+      const api::resource_desc desc(d.width, d.height, 1, 1, format, 1, api::memory_heap::default_,
+        api::resource_usage::shader_resource | api::resource_usage::copy_dest);
+      if (!d.device->create_resource(desc, nullptr, api::resource_usage::shader_resource, &t.resource)) return {};
+      if (!d.device->create_resource_view(t.resource, api::resource_usage::shader_resource, api::resource_view_desc(format), &t.srv)) {
+        d.device->destroy_resource(t.resource); t = {}; return {};
+      }
+      d.ui_candidate_formats[slot] = format;
+    }
+    return t.resource;
+  }
+  api::resource_view renderer::ui_candidate_view(unsigned slot) const {
+    return data_ && slot < data_->ui_candidates.size() ? data_->ui_candidates[slot].srv : api::resource_view{};
   }
   render_parameters renderer::consumed_parameters() const { return data_ ? data_->consumed : render_parameters{}; }
   bool renderer::consumed_source_alpha_ui() const { return data_ && data_->source_alpha_ui; }
+  ui_mask_channel renderer::consumed_ui_channel() const { return data_ ? data_->consumed_channel : ui_mask_channel::alpha; }
   alpha_auto_decision renderer::consumed_alpha_auto() const { return data_ ? data_->consumed_auto : alpha_auto_decision{}; }
-  alpha_probe_counters renderer::alpha_probe_activity() const { return data_ ? data_->alpha_activity : alpha_probe_counters{}; }
+  alpha_probe_counters renderer::alpha_probe_activity() const {
+    return data_ ? alpha_probe_counters{data_->detection_submitted, data_->detection_mapped} : alpha_probe_counters{};
+  }
   ui_adaptive::decision renderer::consumed_ui_adaptive() const { return data_ ? data_->consumed_adaptive : ui_adaptive::decision{}; }
   std::uint64_t renderer::ui_probe_submissions() const { return data_ ? data_->adaptive_submitted : 0; }
   ui_plane_parameters renderer::consumed_ui_plane() const { return data_ ? data_->consumed_plane : ui_plane_parameters{}; }
@@ -795,13 +876,13 @@ namespace sunshine_game3d {
     auto &d = *data_;
     if (!d.queue->signal(d.completion, ++d.sequence)) d.failed = true;
     else {
-      if (d.alpha_awaiting_signal) {
-        d.alpha_fence = d.sequence;
-        d.alpha_awaiting_signal = false;
-      }
       if (d.adaptive_awaiting_signal) {
         d.adaptive_fence = d.sequence;
         d.adaptive_awaiting_signal = false;
+      }
+      if (d.detection_awaiting_signal) {
+        d.detection_fence = d.sequence;
+        d.detection_awaiting_signal = false;
       }
     }
     d.pending = false;
@@ -820,5 +901,5 @@ namespace sunshine_game3d {
     }
     data_->frame_state = false;
   }
-  void renderer::reset_after_runtime_drain() { ui_source_capture_ = 0; data_.reset(); }
+  void renderer::reset_after_runtime_drain() { ui_source_capture_ = 0; ui_candidate_captures_.fill(0); data_.reset(); }
 }
