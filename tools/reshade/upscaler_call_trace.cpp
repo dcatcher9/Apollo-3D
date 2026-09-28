@@ -91,6 +91,34 @@ namespace sunshine_upscaler_trace {
     std::uint64_t next_epoch{}, next_poll{}, next_report{}, began{}, reports{};
     unsigned target_count{}, rejected{}, found_modules{}, found_exports{};
     bool minhook_ready{};
+    // A full export scan of ~200 game modules costs ~5 ms. It runs on the
+    // present path, so rescan only after the loader reports a new module.
+    // The notification only counts loads; discovery stays in poll, outside
+    // the loader lock. Without notifications, keep the periodic rescan.
+    using loader_notification = void (NTAPI *)(ULONG reason, const void *data, void *context);
+    using loader_register = LONG (NTAPI *)(ULONG flags, loader_notification callback, void *context, void **cookie);
+    using loader_unregister = LONG (NTAPI *)(void *cookie);
+    constexpr ULONG module_loaded_reason = 1; // LDR_DLL_NOTIFICATION_REASON_LOADED
+    std::atomic<std::uint64_t> module_loads{1};
+    std::uint64_t scanned_loads{}, scans{}; // poll-owned
+    std::atomic<void *> loader_cookie{}; // Written by initialize/shutdown; poll reads it.
+    void NTAPI module_loaded(ULONG reason, const void *, void *) {
+      if (reason == module_loaded_reason) module_loads.fetch_add(1, std::memory_order_release);
+    }
+    void watch_modules() {
+      if (loader_cookie.load(std::memory_order_acquire)) return;
+      const auto ntdll = GetModuleHandleW(L"ntdll.dll");
+      const auto watch = ntdll ? reinterpret_cast<loader_register>(reinterpret_cast<void *>(GetProcAddress(ntdll, "LdrRegisterDllNotification"))) : nullptr;
+      void *cookie{};
+      if (watch && watch(0, &module_loaded, nullptr, &cookie) == 0) loader_cookie.store(cookie, std::memory_order_release);
+    }
+    void unwatch_modules() {
+      const auto cookie = loader_cookie.exchange(nullptr, std::memory_order_acq_rel);
+      if (!cookie) return;
+      const auto ntdll = GetModuleHandleW(L"ntdll.dll");
+      const auto unwatch = ntdll ? reinterpret_cast<loader_unregister>(reinterpret_cast<void *>(GetProcAddress(ntdll, "LdrUnregisterDllNotification"))) : nullptr;
+      if (unwatch) unwatch(cookie);
+    }
     thread_local std::uint64_t tls_epoch{};
     thread_local unsigned tls_depth{};
     thread_local unsigned tls_capture_depth{};
@@ -316,6 +344,7 @@ namespace sunshine_upscaler_trace {
     }
     void discover() {
       found_modules = found_exports = 0;
+      ++scans;
       HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
       if (snapshot == INVALID_HANDLE_VALUE) return;
       MODULEENTRY32W value{};
@@ -438,13 +467,19 @@ namespace sunshine_upscaler_trace {
     dropped = stale = 0;
     reports = 0;
     next_poll = next_report = 0;
+    scanned_loads = 0;
     began = GetTickCount64();
     addon_module.store(addon);
     if (requested) active_epoch.store(++next_epoch, std::memory_order_release);
     ReleaseSRWLockExclusive(&records_lock);
     sunshine_ngx::initialize(capture, calibration_probe);
+    if (requested || capture) watch_modules();
   }
-  void shutdown() { active_epoch.store(0, std::memory_order_release); sunshine_ngx::shutdown(); }
+  void shutdown() {
+    active_epoch.store(0, std::memory_order_release);
+    sunshine_ngx::shutdown();
+    unwatch_modules();
+  }
   bool enabled() { return !sunshine_addon_lifetime::stopping() && active_epoch.load(std::memory_order_acquire) != 0; }
   bool capture_enabled() { return sunshine_ngx::enabled(); }
   void set_streamline_coverage(bool installed) { streamline_covered.store(installed, std::memory_order_release); }
@@ -452,7 +487,14 @@ namespace sunshine_upscaler_trace {
     last_error_guard error;
     if ((!enabled() && !capture_enabled()) || !TryAcquireSRWLockExclusive(&poll_lock)) return;
     const auto now = GetTickCount64();
-    if (now >= next_poll) { next_poll = now + 1000; discover(); }
+    const auto loads = module_loads.load(std::memory_order_acquire);
+    const bool notified = loader_cookie.load(std::memory_order_acquire) != nullptr;
+    if (now >= next_poll && (!notified || loads != scanned_loads)) {
+      // Loads observed during this scan leave the count changed for the next one.
+      scanned_loads = loads;
+      next_poll = now + (notified ? 250 : 1000);
+      discover();
+    }
     if (enabled() && now >= next_report) { next_report = now + 5000; report(); }
     sunshine_ngx::poll();
     ReleaseSRWLockExclusive(&poll_lock);
@@ -496,6 +538,8 @@ namespace sunshine_upscaler_trace {
       out.reports = reports;
       out.discovered = target_count;
       out.rejected = rejected;
+      out.scans = scans;
+      out.load_notifications = loader_cookie.load() != nullptr;
       for (unsigned i = 0; i != target_count; ++i) out.installed += targets[i].state.load() == 2;
       AcquireSRWLockShared(&records_lock);
       for (const auto &value : events) if (value.used) {

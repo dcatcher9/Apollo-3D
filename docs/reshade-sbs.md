@@ -87,8 +87,8 @@ the presentation path consumes completed snapshots rather than fetching every SD
 | Displayed color | Current game swapchain backbuffer, before unrelated ReShade effects. Retained input color never replaces displayed RGB. |
 | Depth | Prefer usable SL captures, then usable NGX captures. Generic ReShade depth is the fallback when the API provider does not own the pass. Within an SL batch, try HighResDepth (48), Depth (0), then LinearDepth (49). |
 | Camera / encoding / jitter | Use metadata paired with the selected depth capture. Linear-distance depth can work without camera matrices; device depth without a paired projection uses the existing relative-depth calibration when eligible. Never borrow another provider's camera. |
-| UI with FG off or no observed FG | Automatically validate captured SL UIAlpha (R, authenticated contract required), UIColorAndAlpha (23, A), Backbuffer (53, A), current color alpha, then paired HUDLessColor (2) difference. |
-| UI with FG on | Use the same captured-source order and HUD-less fallback; presented alpha is excluded. Tag 69 remains excluded from Auto until its caller contract is authenticated. |
+| UI with FG off or no observed FG | Automatically validate captured SL UIAlpha (R; tag 68 in 2.11.x, 69 from 2.12.0, see [buffer contract](#streamline-buffer-type-contract)), UIColorAndAlpha (23, A), Backbuffer (53, A), current color alpha, then paired HUDLessColor (2) difference. |
+| UI with FG on | Use the same captured-source order and HUD-less fallback; presented alpha is excluded. UIAlpha stays manual-only when the loaded interposer is outside the surveyed header range. |
 
 Depth order preserves source continuity: a brief pending copy can retain an admitted
 source and its authorized prior pixels. Known FG requirements restrict selection to
@@ -203,9 +203,11 @@ is off for that frame; it can recover automatically on a later frame.
 
 The **Troubleshooting → UI mask source** selector offers automatic discovery and explicit source overrides,
 including HUD-less difference. It is useful for diagnosis; normal use needs no source choice.
-Tag 69 is currently excluded from Auto because its caller-header semantic contract is not
-authenticated. Its presence does not block tag 23, Backbuffer, current alpha or HUD-less
-comparison. Manual On can use eligible alpha as an explicit override, including tag 69 and
+UIAlpha is admitted to Auto when the hooked interposer's version lies in the surveyed header
+range that assigns it (2.11.x tag 68; 2.12.0 through 2.14.x tag 69); see the
+[buffer contract](#streamline-buffer-type-contract). Outside that range it stays manual-only, and
+its presence never blocks tag 23, Backbuffer, current alpha or HUD-less comparison. The same GPU
+content checks apply as for every candidate. Manual On can use eligible alpha as an explicit override, including UIAlpha and
 an all-one alpha channel. An all-one manual mask places the whole frame at the UI plane.
 Off always disables protection. Neither manual mode overrides GPU capture ordering,
 source lifetime, scope, format or pairing requirements, and changing mode does not recalibrate depth.
@@ -283,6 +285,11 @@ Depth copies, NGX and default local texture copies retain
 their existing declaration checks. Shared dump allocations remain immutable after host
 acknowledgement; local retired storage may be reused. This storage distinction does not select
 the resource-state policy. The declaration fallback still needs live game/headset acceptance.
+Every proof/policy combination above, including NGX's SDK input contract, resolves through the one
+table in [`capture_state_policy.h`](../tools/reshade/capture_state_policy.h): declared (must match an
+observation), observed only, observed-else-declared and observed-else-contract. Blocked or
+incomplete observations reject every rule. Its CPU test enumerates every proof, policy, claimed state,
+observation and resource-flag combination.
 
 The FG decision is independent of depth-provider selection, including a manually pinned Generic
 buffer. The last confirmed mode survives transient observation loss and effects reloads; a new
@@ -817,12 +824,11 @@ Streamline provider now supplies this guarded difference fallback automatically.
 comparison remains useful for investigating its acceptance or rejection.
 
 When automatic discovery fails in a new game, establish hook/feature coverage with the call-route diagnostic
-below. Check SDK contract identity before interpreting tags; notably Streamline 2.11.1 assigns
-UIAlpha to 68, while 2.12.0 assigns 68 to ResponsivityMask and UIAlpha to 69. The current producer
-catalog uses 69 and this offline report does not repair that compatibility gap or authenticate
-caller-header semantics from an interposer DLL version. Explicitly ambiguous/unsupported
-catalog bindings cannot be qualified. Live Auto also excludes captured tag 69 until its caller
-contract is authenticated, and proceeds automatically to independent lower candidates.
+below. The producer translates each raw Streamline tag through the hooked interposer's
+[buffer contract](#streamline-buffer-type-contract) before cataloguing it, so catalog rows and
+`tag_type` fields use canonical 2.12+ numbers (UIAlpha is 69 even when a 2.11.x game sent 68).
+Dump tag rows keep the raw SDK value as `type` beside `canonical_type`. Explicitly
+ambiguous/unsupported catalog bindings cannot be qualified.
 
 Capture ordinary gameplay with visible UI, camera movement, hidden UI when available, a menu,
 and a return to gameplay. Use the validated evaluation interpreter selected by the repository's
@@ -1039,6 +1045,32 @@ include path and `SUNSHINE_SL_MAJOR`, `SUNSHINE_SL_MINOR`, `SUNSHINE_SL_PATCH` d
 in that file. Keep original headers unchanged and document any compiler-only portability copies.
 Run this comparison at the pinned boundaries when extending a family; it does not load SDK DLLs
 or replace a game capture test.
+
+#### Streamline buffer-type contract
+
+Buffer-type numbers are header constants compiled into the game, and they are not stable across
+releases. [`streamline_buffer_contract.h`](../tools/reshade/streamline_buffer_contract.h) translates
+each raw tag once, at the hook boundary, using the hooked interposer's validated version:
+
+| Interposer header | Declared range | Consumed differences |
+| --- | --- | --- |
+| 1.0.x / 1.1.x | 0–32 / 0–33 | Tag 23 is `UIHint`, not UIColorAndAlpha; it is not consumed. |
+| 2.0–2.2 | 0–37 | No HighResDepth, LinearDepth or Backbuffer. |
+| 2.4–2.6 | 0–53 | Adds HighResDepth 48, LinearDepth 49, Backbuffer 53. |
+| 2.7–2.10 | 0–66 (0–67 from 2.7.30) | No UIAlpha. |
+| 2.11.x | 0–68 | UIAlpha is **68**. |
+| 2.12.0 and later | 0–72 | ResponsivityMask is 68; UIAlpha is **69**. |
+
+Raw values above the governing header's range are unknown and ignored. Consumers compare only
+canonical 2.12+ numbers, so the depth order, UI candidate order and dump catalog need no
+per-version branches. The pinned boundaries are the public NVIDIA-RTX/Streamline headers
+`include/sl.h` (1.0.0–2.4.15) and `include/sl_core_types.h` (2.7.2–2.14.1); types were append-only
+between them except for the two differences above. A release newer than 2.14.x keeps the 2.12
+numbering but is not treated as surveyed, so its UIAlpha stays manual-only until the table is
+extended. The version identifies the header the loaded interposer interprets; a game whose DLLs
+were downgraded below its compile-time headers can still send a number with a different meaning.
+The UI candidate's GPU content checks remain in force for that case. The log line
+`Sunshine Streamline: buffer contract` records the selected contract at hook installation.
 
 ### Streamline depth selection
 
@@ -1598,8 +1630,14 @@ or a required gain reduction.
 `[SUNSHINE_DEPTH] NGXDepthSource=1` defaults on for compatible D3D12 NGX integrations, including
 Super Resolution and Ray Reconstruction. Exact exported Create/Evaluate/Release and typed parameter getter functions
 are discovered in already loaded modules, including a linked game executable or plugin, without
-a module-filename allowlist. Discovery also runs
-at device initialization, before ordinary feature creation. No game DLL is replaced, no unknown
+a module-filename allowlist. The NGX SDK declares its API `dllexport`, so a game or engine plugin
+that links it directly exports these symbols. The driver's `_nvngx.dll` core and DLSS snippets
+export only Create/Evaluate/Release, so calls Streamline makes through them stay with the
+Streamline adapter. Discovery also runs
+at device initialization, before ordinary feature creation. After that it rescans only when the
+loader reports a newly loaded module (at most every 250 ms), not on a fixed timer: a full export
+scan of about 200 modules measured about 5 ms on the present path. Without loader notifications
+the one-second rescan remains. No game DLL is replaced, no unknown
 C++ parameter vtable is interpreted, and no feature is inferred merely from installed files.
 There is no DLL patch-version or feature-ID allowlist. Every observed successful feature creation
 establishes its handle generation; capture additionally requires valid render dimensions, create
@@ -1607,13 +1645,28 @@ flags and depth encoding. `DLSS.Use.HW.Depth` explicitly selects device depth or
 view distance. Standard Super Resolution's documented device-depth default is accepted when that
 parameter is absent; other features require the explicit encoding. Unknown ABI contracts, missing
 getters or opaque input are not interpreted speculatively.
-If discovery misses creation, the source remains unknown until the game recreates the feature.
+If creation was missed (late hook discovery, or an add-on reinitialization that cleared the
+registry), the first evaluation registers the live handle from its own parameter map. NGX's create
+helpers write `Width`, `Height` and `DLSS.Feature.Create.Flags` into the map that later
+evaluations reuse. Recovery requires those values plus a valid explicit encoding or, when absent,
+applies the SR device-depth default. Ray Reconstruction's helpers always write the explicit key,
+and Frame Generation has no `Depth` input. A map without creation values stays unknown, and a
+handle released in the current epoch is never revived without a new successful creation. The
+five-second `Sunshine NGX depth` line reports `recovered_features`.
 D3D11 NGX interception remains diagnostic-only.
 
 At evaluation entry the adapter reads the exact `Depth` resource and explicit render/depth subrect.
-Native capture requires observed nonzero state on the actual command recording and preserves the
-resource before the original call; successful evaluation and actual queue submission are separate
-requirements. Capture always copies the full depth subresource (plane zero for packed formats),
+NGX supplies no per-call resource state, but its SDK fixes one: NVIDIA's DLSS Programming Guide,
+section 3.4 "Resource States", requires every D3D12 input to be
+`D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE` at the evaluation call and states that DLSS
+restores it afterwards. The adapter therefore nominates with `state_proof::sdk_contract`. A known,
+unblocked state observed on the same recording takes precedence. An observed COMMON/zero,
+blocked, split or unknown state still rejects capture. Only a recording with no entry for the
+resource uses the contract state, and a resource created with `DENY_SHADER_RESOURCE` is rejected.
+Engines commonly record that transition on an earlier command list. Hogwarts Legacy logged
+`missing_state` for all 27,290 NGX nominations under the former observed-only rule. Capture
+preserves the resource before the original call; successful evaluation and actual queue
+submission are separate requirements. Capture diagnostics report `used_contract_state`. Capture always copies the full depth subresource (plane zero for packed formats),
 as D3D12 requires for depth/stencil textures. A validated active rectangle, including offsets and
 allocation padding, travels with that capture. The shader and immutable depth sampler use the
 same rectangle; no extra GPU crop pass or illegal partial depth/stencil copy is introduced.

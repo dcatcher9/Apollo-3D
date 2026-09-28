@@ -4,6 +4,7 @@
 #include "game3d_controls_model.h"
 #include "game3d_stereo_contract.h"
 #include "game3d_ui_adaptive.h"
+#include "streamline_buffer_contract.h"
 
 // COM declares MinGW's __uuidof support before ReShade's API templates.
 #include <Windows.h>
@@ -336,8 +337,9 @@ namespace sunshine_game3d {
         ImGui::TextWrapped("UI protection: %s", blocked);
     if (source.candidate.source != ui_qualification::choice::automatic)
       ImGui::TextWrapped("Candidate: %s", ui_qualification::name(source.candidate.source));
-    if (source.selected == ui_qualification::choice::sl_ui_alpha && data->values.ui_protection == source_alpha_mode::automatic)
-      ImGui::TextWrapped("UI alpha tag meaning is unverified for this game's SDK. This source cannot pass automatic detection.");
+    if (source.selected == ui_qualification::choice::sl_ui_alpha && data->values.ui_protection == source_alpha_mode::automatic &&
+        !sunshine_streamline::buffers::ui_alpha_authenticated(sunshine_streamline::buffers::active()))
+      ImGui::TextWrapped("UI alpha tag meaning is unverified for this game's Streamline version. This source cannot pass automatic detection.");
     if (data->values.enabled && data->values.ui_protection != source_alpha_mode::off &&
         source_alpha.mode == data->values.ui_protection && source_alpha.blocked_by_fg()) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
@@ -373,6 +375,17 @@ namespace sunshine_game3d {
       }
       ImGui::SetItemTooltip("Change Frame Generation in the game's settings. DLSS Super Resolution can stay on. This is the game's requested setting, not a measurement of generated frames. Sunshine does not change it automatically.");
       ImGui::PopStyleColor();
+    }
+    namespace buffers = sunshine_streamline::buffers;
+    if (const auto contract = buffers::active(); contract.known) {
+      char text[128]{};
+      const auto &v = contract.version;
+      if (contract.raw_ui_alpha != buffers::unknown)
+        std::snprintf(text, sizeof(text), "Streamline %u.%u.%u: UI alpha tag %u (%s)", v.major, v.minor, v.patch,
+          contract.raw_ui_alpha, buffers::ui_alpha_authenticated(contract) ? "automatic" : "manual only");
+      else
+        std::snprintf(text, sizeof(text), "Streamline %u.%u.%u: this SDK has no UI alpha tag", v.major, v.minor, v.patch);
+      ImGui::TextUnformatted(text);
     }
 
     camera_hint(automatic, data->values.enabled, fg);

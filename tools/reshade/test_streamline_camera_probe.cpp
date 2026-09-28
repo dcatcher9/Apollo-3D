@@ -4,6 +4,7 @@
 #include "streamline_camera_data.h"
 #include "addon_lifetime.h"
 #include "streamline_camera_probe.h"
+#include "streamline_buffer_contract.h"
 #include "streamline_depth_provider.h"
 #include "streamline_camera_version.h"
 #include "upscaler_call_trace.h"
@@ -2787,11 +2788,72 @@ namespace {
       "shutdown PCL hook lost pure passthrough");
   }
 
+
+  // Streamline 2.11.x declares UIAlpha as 68; 2.12.0 moved it to 69 and reused
+  // 68 for ResponsivityMask. Earlier headers declare neither. The hook maps the
+  // raw tag through the loaded interposer's header before offering UI capture.
+  void test_versioned_ui_alpha_tags() {
+    namespace mask = sunshine_game3d::ui_mask;
+    namespace buffers = sunshine_streamline::buffers;
+    struct expectation { testing::abi version; std::uint32_t raw; bool offered; };
+    const expectation cases[]{
+      {testing::abi::v2_11_1, 68, true}, {testing::abi::v2_11_1, 69, false},
+      {testing::abi::v2_12_0, 69, true}, {testing::abi::v2_12_0, 68, false},
+      {testing::abi::v2_7_30, 68, false}, {testing::abi::v2_7_30, 69, false}};
+    for (const auto &c : cases) {
+      fixture cleanup;
+      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      require(testing::install(c.version, presentation_v2_targets), "versioned UI alpha hook install failed");
+      const auto contract = buffers::active();
+      require(contract.known && buffers::ui_alpha_authenticated(contract) == (c.version != testing::abi::v2_7_30),
+        "installed interposer did not publish its buffer contract");
+      returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+      void *function{};
+      require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function,
+        "versioned UI alpha FG options wrapper was unavailable");
+      auto view = viewport(12); fg_options options;
+      require(reinterpret_cast<fg_function>(function)(view, options) == 0, "versioned UI alpha FG options call failed");
+      frame_generation_snapshot fg;
+      require(query_frame_generation(view.value, fg) && fg.enabled, "versioned UI alpha FG mode was not confirmed");
+      constexpr std::uint64_t runtime = 0x101, device = 0x201;
+      mask::set_request({runtime, device, fg.epoch, depth_observation_revision(), view.value, 1920, 1080, true});
+      int native{}, commands{};
+      auto resource = modern_resource(&native); resource.width = 1920; resource.height = 1080; resource.state = 8;
+      auto tag = depth_tag_for(resource); tag.type = c.raw; tag.lifecycle = 0; tag.area = {0, 0, 1920, 1080};
+      require(call_v2_tag(view, &tag, 1, &commands) == 0, "versioned UI alpha tag changed SDK forwarding");
+      mask::boundary observed;
+      const bool offered = mask::testing::last_attempt(runtime, observed) && observed.kind == mask::source_kind::alpha &&
+        observed.source.resource.native == reinterpret_cast<std::uint64_t>(&native);
+      require(offered == c.offered, c.offered ? "header-declared UIAlpha tag was not offered as UI alpha" :
+        "a tag number not assigned to UIAlpha by the loaded header was offered as UI alpha");
+      mask::invalidate(runtime);
+    }
+    // The pure contract also rejects 1.x UIHint as UIColorAndAlpha and clamps
+    // each release's declared range.
+    const auto v1 = buffers::for_version({1, 1, 1, 0});
+    require(buffers::canonical(v1, 23) == buffers::unknown && buffers::canonical(v1, 0) == 0 &&
+        buffers::canonical(v1, 48) == buffers::unknown && buffers::canonical(v1, 2) == 2,
+      "1.x buffer contract changed depth/HUD-less or accepted UIHint/unknown tags");
+    const auto v2_2 = buffers::for_version({2, 2, 1, 0});
+    require(buffers::canonical(v2_2, 23) == 23 && buffers::canonical(v2_2, 48) == buffers::unknown &&
+        buffers::canonical(v2_2, 53) == buffers::unknown, "2.2 contract accepted post-2.4 tags");
+    const auto v2_6 = buffers::for_version({2, 6, 10, 0});
+    require(buffers::canonical(v2_6, 48) == 48 && buffers::canonical(v2_6, 53) == 53 &&
+        buffers::canonical(v2_6, 68) == buffers::unknown && !buffers::ui_alpha_authenticated(v2_6),
+      "unpublished 2.6 build lost its 2.4 tags or gained UIAlpha");
+    const auto future = buffers::for_version({2, 16, 0, 0});
+    require(future.known && !future.surveyed && buffers::canonical(future, 69) == buffers::ui_alpha &&
+        !buffers::ui_alpha_authenticated(future), "unsurveyed 2.x release was treated as authenticated");
+    require(!buffers::for_version({3, 0, 0, 0}).known, "unknown Streamline major received a buffer contract");
+    std::puts("PASS versioned Streamline buffer contract: 2.11.x tag68 and 2.12+ tag69 map to UIAlpha; undeclared/renumbered tags stay unavailable");
+  }
+
   void test_frame_generation_color_only_alpha() {
     namespace mask = sunshine_game3d::ui_mask;
     fixture cleanup;
     probe_setting = "0"; source_setting = "1"; initialize(nullptr);
-    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG alpha hook install failed");
+    // UIAlpha is tag 69 only from Streamline 2.12.0 onward.
+    require(testing::install(testing::abi::v2_12_0, presentation_v2_targets), "FG alpha hook install failed");
     returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
     void *function{};
     require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function,
@@ -3008,7 +3070,8 @@ namespace {
     namespace mask = sunshine_game3d::ui_mask;
     fixture cleanup;
     probe_setting = "0"; source_setting = "1"; initialize(nullptr);
-    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Automatic UI hook install failed");
+    // Includes UIAlpha, which is tag 69 only from Streamline 2.12.0 onward.
+    require(testing::install(testing::abi::v2_12_0, presentation_v2_targets), "Automatic UI hook install failed");
     auto view = viewport(11);
     int native{}, commands{};
     auto resource = modern_resource(&native); resource.width = 3840; resource.height = 2160; resource.state = 8;
@@ -3838,6 +3901,7 @@ int main(int argc, char **argv) {
     test_source_without_projection();
     test_standalone_depth_tags();
     test_frame_generation_color_only_alpha();
+    test_versioned_ui_alpha_tags();
     test_ui_gate_viewport_zero_mixed_batch();
     test_repeated_fg_off_preserves_independent_ui();
     test_ui_scope_without_frame_generation_options();

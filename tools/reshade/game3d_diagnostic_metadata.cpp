@@ -2,6 +2,7 @@
 #include "game3d_diagnostic_metadata.h"
 
 #include "addon_lifetime.h"
+#include "streamline_buffer_contract.h"
 
 #include <algorithm>
 #include <atomic>
@@ -20,7 +21,8 @@ namespace sunshine_game3d {
     struct tag_value {
       stamp observation;
       tag_scope scope {};
-      unsigned type {}, lifecycle {UINT32_MAX};
+      // Raw SDK value and its canonical meaning under the hooked interposer header.
+      unsigned type {}, canonical_type {UINT32_MAX}, lifecycle {UINT32_MAX};
       sl::extent area;
       sl::abi_v2::resource descriptor;
       std::uint64_t tag_version {}, tag_extension {}, resource_pointer {};
@@ -113,12 +115,12 @@ namespace sunshine_game3d {
     }
 
     void notify_tag(const tag_value &value) noexcept {
-      const auto *catalog = ui_resources::find_sl(value.type);
+      const auto *catalog = ui_resources::find_sl(value.canonical_type);
       if (!catalog) return;
       resource_observation out;
       out.observation = value.observation;
       out.artifact_id = catalog->artifact_id;
-      out.tag_type = value.type;
+      out.tag_type = value.canonical_type;
       out.lifecycle = value.lifecycle;
       out.area = value.area;
       out.version_one = value.version_one;
@@ -202,6 +204,7 @@ namespace sunshine_game3d {
       out.scope = scope;
       out.tag_read = true;
       out.type = tag.type;
+      out.canonical_type = sl::buffers::canonical(sl::buffers::active(), tag.type);
       out.lifecycle = tag.lifecycle;
       out.area = tag.area;
       out.tag_type = tag.base.type;
@@ -285,7 +288,7 @@ namespace sunshine_game3d {
 
     json tag_json(const tag_value &value) {
       const auto &r = value.descriptor;
-      return {{"observation", to_json(value.observation)}, {"scope", unsigned(value.scope)}, {"type", value.type}, {"lifecycle", value.version_one ? json(nullptr) : json(value.lifecycle)}, {"extent", {{"left", value.area.left}, {"top", value.area.top}, {"width", value.area.width}, {"height", value.area.height}}}, {"tag_readable", value.tag_read}, {"tag_struct_version", value.tag_version}, {"tag_structure_guid", guid_string(value.tag_type)}, {"tag_extension_identity", address(value.tag_extension)}, {"resource_argument_identity", address(value.resource_pointer)}, {"resource_readable", value.resource_read}, {"resource_type", r.type}, {"native_identity", address(reinterpret_cast<std::uint64_t>(r.native))}, {"memory_identity", address(reinterpret_cast<std::uint64_t>(r.memory))}, {"view_identity", address(reinterpret_cast<std::uint64_t>(r.view))}, {"state", r.state}, {"width", value.version_one ? json(nullptr) : json(r.width)}, {"height", value.version_one ? json(nullptr) : json(r.height)}, {"resource_struct_version", r.base.version}, {"resource_structure_guid", guid_string(r.base.type)}, {"resource_extension_identity", address(reinterpret_cast<std::uint64_t>(r.base.next))}, {"full_descriptor_readable", value.full_descriptor}, {"format", value.full_descriptor ? json(r.native_format) : json(nullptr)}, {"mip_levels", value.full_descriptor ? json(r.mip_levels) : json(nullptr)}, {"array_layers", value.full_descriptor ? json(r.array_layers) : json(nullptr)}, {"flags", value.full_descriptor ? json(r.flags) : json(nullptr)}, {"usage", value.full_descriptor ? json(r.usage) : json(nullptr)}, {"gpu_virtual_address_identity", value.full_descriptor ? json(address(r.gpu_virtual_address)) : json(nullptr)}, {"result_known", value.result_known}, {"successful", value.result_known ? json(value.successful) : json(nullptr)}};
+      return {{"observation", to_json(value.observation)}, {"scope", unsigned(value.scope)}, {"type", value.type}, {"canonical_type", value.canonical_type == UINT32_MAX ? json(nullptr) : json(value.canonical_type)}, {"lifecycle", value.version_one ? json(nullptr) : json(value.lifecycle)}, {"extent", {{"left", value.area.left}, {"top", value.area.top}, {"width", value.area.width}, {"height", value.area.height}}}, {"tag_readable", value.tag_read}, {"tag_struct_version", value.tag_version}, {"tag_structure_guid", guid_string(value.tag_type)}, {"tag_extension_identity", address(value.tag_extension)}, {"resource_argument_identity", address(value.resource_pointer)}, {"resource_readable", value.resource_read}, {"resource_type", r.type}, {"native_identity", address(reinterpret_cast<std::uint64_t>(r.native))}, {"memory_identity", address(reinterpret_cast<std::uint64_t>(r.memory))}, {"view_identity", address(reinterpret_cast<std::uint64_t>(r.view))}, {"state", r.state}, {"width", value.version_one ? json(nullptr) : json(r.width)}, {"height", value.version_one ? json(nullptr) : json(r.height)}, {"resource_struct_version", r.base.version}, {"resource_structure_guid", guid_string(r.base.type)}, {"resource_extension_identity", address(reinterpret_cast<std::uint64_t>(r.base.next))}, {"full_descriptor_readable", value.full_descriptor}, {"format", value.full_descriptor ? json(r.native_format) : json(nullptr)}, {"mip_levels", value.full_descriptor ? json(r.mip_levels) : json(nullptr)}, {"array_layers", value.full_descriptor ? json(r.array_layers) : json(nullptr)}, {"flags", value.full_descriptor ? json(r.flags) : json(nullptr)}, {"usage", value.full_descriptor ? json(r.usage) : json(nullptr)}, {"gpu_virtual_address_identity", value.full_descriptor ? json(address(r.gpu_virtual_address)) : json(nullptr)}, {"result_known", value.result_known}, {"successful", value.result_known ? json(value.successful) : json(nullptr)}};
     }
 
     const char *tag_availability(const tag_value &value) noexcept {
@@ -375,7 +378,7 @@ namespace sunshine_game3d {
             if (!view.present) continue;
             for (unsigned i = 0; i != view.count; ++i) {
               const auto &tag = view.tags[i];
-              if (tag.type != entry.tag_type) continue;
+              if (tag.canonical_type != entry.tag_type) continue;
               json item {{"native_identity", tag.resource_read ? json(address(reinterpret_cast<std::uint64_t>(tag.descriptor.native))) : json(nullptr)},
                 {"scope", unsigned(tag.scope)}, {"active_rect", {{"left", tag.area.left}, {"top", tag.area.top}, {"width", tag.area.width}, {"height", tag.area.height}}},
                 {"active_rect_source", "sl_tag_extent_zero_means_full_resource"},
@@ -548,6 +551,7 @@ namespace sunshine_game3d {
       tag_value value;
       value.observation = at;
       value.type = type;
+      value.canonical_type = sl::buffers::canonical(sl::buffers::active(), type);
       value.version_one = true;
       value.resource_pointer = reinterpret_cast<std::uint64_t>(resource);
       sl::abi_v1::resource raw {};

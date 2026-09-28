@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_diagnostic_metadata.h"
+#include "streamline_buffer_contract.h"
 
 #include <cmath>
 #include <cstdio>
@@ -254,6 +255,8 @@ int main() try {
   arm_diagnostic_metadata(false);
   arm_diagnostic_metadata(true);
   d::set_resource_callbacks(&callbacks);
+  // Catalog matching uses the hooked interposer's header numbering.
+  sl::buffers::set_active({2, 12, 0, 0});
   tag.base.type = sl::tag_guid;
   tag.base.version = 1;
   tag.type = 23;
@@ -288,6 +291,23 @@ int main() try {
   tag.type = 69;
   d::observe_sl_tags_v2(stamp(7, 5), view, &tag, 1, d::tag_scope::frame);
   require(last_resource.artifact_id == 19 && ui_row(snapshot(), 19)["state"] == "null", "verified UIAlpha tag69 was not recognized");
+  // Streamline 2.11.x declares UIAlpha as 68; 2.12+ reuses 68 for ResponsivityMask.
+  sl::buffers::set_active({2, 11, 1, 0});
+  resource_notifications = 0;
+  tag.type = 68;
+  d::observe_sl_tags_v2(stamp(7, 5), view, &tag, 1, d::tag_scope::frame);
+  require(resource_notifications == 1 && last_resource.artifact_id == 19 && last_resource.tag_type == 69,
+          "2.11 UIAlpha tag68 was not catalogued as canonical UIAlpha");
+  const auto streamline_rows = snapshot()["streamline"];
+  bool raw_preserved = false;
+  for (const auto &view_row : streamline_rows)
+    for (const auto &tag_row : view_row["tags"]) raw_preserved |= tag_row["type"] == 68 && tag_row["canonical_type"] == 69;
+  require(raw_preserved, "dump lost the raw SDK tag number or its canonical meaning");
+  sl::buffers::set_active({2, 12, 0, 0});
+  resource_notifications = 0;
+  d::observe_sl_tags_v2(stamp(7, 5), view, &tag, 1, d::tag_scope::frame);
+  require(resource_notifications == 0, "2.12 ResponsivityMask tag68 was catalogued as UIAlpha");
+  tag.type = 69;
 
   ngx = {};
   ngx.observation = stamp(7, 6);

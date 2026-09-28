@@ -42,7 +42,8 @@ namespace sunshine_upscaler_trace {
         inside_streamline{}, outside_streamline{}, succeeded{}, failed{},
         unknown_feature{}, dropped{}, stale{}, reports{};
       unsigned installed{}, discovered{}, rejected{};
-      bool enabled{}, streamline_covered{};
+      std::uint64_t scans{};
+      bool enabled{}, streamline_covered{}, load_notifications{};
     };
     summary counts();
     // Same native validation/pinning/install route as discovered exports.

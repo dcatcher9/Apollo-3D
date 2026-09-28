@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "streamline_buffer_types.h"
 #include "streamline_depth_capture.h"
 
 // A live, bounded owner for SL's dedicated UI alpha/color, real backbuffer and
@@ -8,7 +9,13 @@
 // It shares the native snapshot/retirement machinery with depth, but never
 // nominates a depth source or interprets the alpha pixels on the CPU.
 namespace sunshine_game3d::ui_mask {
-  enum class source_kind : std::uint32_t { backbuffer = 53, color_and_alpha = 23, alpha = 69, hudless = 2 };
+  // Values are canonical Streamline buffer types, so dumps record the same tag number.
+  enum class source_kind : std::uint32_t {
+    backbuffer = sunshine_streamline::buffers::backbuffer,
+    color_and_alpha = sunshine_streamline::buffers::ui_color_and_alpha,
+    alpha = sunshine_streamline::buffers::ui_alpha,
+    hudless = sunshine_streamline::buffers::hudless_color
+  };
   constexpr std::uint32_t source_mask(source_kind kind) {
     return kind == source_kind::backbuffer ? 1u : kind == source_kind::color_and_alpha ? 2u :
       kind == source_kind::alpha ? 4u : kind == source_kind::hudless ? 8u : 0u;

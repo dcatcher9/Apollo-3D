@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "streamline_depth_capture.h"
+#include "capture_state_policy.h"
 #include "streamline_native_observer.h"
 #include "native_command_storage.h"
 #include "native_resource_identity.h"
@@ -40,8 +41,7 @@ namespace sunshine_streamline::depth_capture {
     constexpr unsigned diagnostic_slot_limit = 32;
     constexpr std::uint64_t diagnostic_byte_limit = 256ull * 1024 * 1024;
     constexpr D3D12_RESOURCE_STATES sampled_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    constexpr std::uint32_t write_states = D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_COPY_DEST |
-      D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RENDER_TARGET;
+    using copy_state::write_states;
     constexpr GUID source_guid = sunshine_native_identity::resource_guid;
     constexpr GUID queue_guid{0x091eab97, 0xfcc2, 0x47fb, {0x97, 0x3b, 0x02, 0x7c, 0x69, 0xb0, 0xd5, 0x26}};
     std::atomic<std::uint64_t> serial{1};
@@ -169,16 +169,6 @@ namespace sunshine_streamline::depth_capture {
         const sunshine_scene_depth::resource_description &resource, copy_region &out) {
       if (!supported_description(desc)) { out = {}; return status::unsupported_resource; }
       return source_region(desc, resource, out);
-    }
-    bool supported_state(std::uint32_t value) {
-      // Only ordinary legacy texture states. Enhanced/split/unknown states are
-      // not converted into an invented legacy state for this capture.
-      constexpr std::uint32_t allowed = D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_DEPTH_READ |
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-        D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_COPY_DEST |
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RENDER_TARGET;
-      if (value & ~allowed) return false;
-      return !(value & write_states) || ((value & (value - 1)) == 0);
     }
     struct source_state { std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}; };
     struct command_state {
@@ -416,7 +406,7 @@ namespace sunshine_streamline::depth_capture {
           auto *known = state(*owner, identity, true);
           if (!known) { invalidate(*owner, recording_loss::source_state_capacity); continue; }
           if (known->blocked) continue;
-          known->known = value.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE && supported_state(value.Transition.StateAfter);
+          known->known = value.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE && copy_state::supported(value.Transition.StateAfter);
           known->value = value.Transition.StateAfter;
         }
       }
@@ -1458,8 +1448,9 @@ namespace sunshine_streamline::depth_capture {
     // can identify the same allocation while holding a different render pass.
     const auto preservation_lookup = preservation_only || nominate_source || value.force_snapshot ?
       nullptr : preservation_available.load(std::memory_order_acquire);
-    if (!preservation_lookup && value.proof != sunshine_scene_depth::state_proof::declared &&
-        value.proof != sunshine_scene_depth::state_proof::observed_nonzero)
+    const auto state_rule = copy_state::select(value.proof, state_policy);
+    const bool state_proof_supplied = state_rule != copy_state::rule::none;
+    if (!preservation_lookup && !state_proof_supplied)
       return reject(status::unsupported_state, record_stage::unsupported_proof);
     com_ptr<ID3D12GraphicsCommandList> checked;
     if (!query_native(native, IID_ID3D12GraphicsCommandList, checked))
@@ -1476,8 +1467,7 @@ namespace sunshine_streamline::depth_capture {
         value.source->cookie, value.source->device_identity); }
       catch (...) { shared_preservation = false; }
     }
-    if (!shared_preservation && value.proof != sunshine_scene_depth::state_proof::declared &&
-        value.proof != sunshine_scene_depth::state_proof::observed_nonzero)
+    if (!shared_preservation && !state_proof_supplied)
       return reject(status::unsupported_state, record_stage::unsupported_proof);
     native = reinterpret_cast<std::uint64_t>(checked.p);
     if (diagnostic) diagnostic->command = native;
@@ -1536,38 +1526,18 @@ namespace sunshine_streamline::depth_capture {
     }
     if (owner->invalid) return reject(status::unavailable, record_stage::recording_invalid);
     if (owner->render_pass) return reject(status::unavailable, record_stage::recording_render_pass);
-    auto before = value.native_state;
     const auto *observed = state(*owner, value.source->cookie, false);
     if (diagnostic && observed) {
       diagnostic->observed = true; diagnostic->observed_state = observed->value; diagnostic->blocked = observed->blocked;
     }
-    // An explicit/provider state cannot override an in-progress split barrier
-    // or another transition that we know cannot be represented safely.
-    if (observed && (observed->blocked || !observed->known)) return reject(status::incomplete_state, record_stage::incomplete_state);
-    const bool use_observed_state = (prefer_observed_recording && observed) ||
-      value.proof == sunshine_scene_depth::state_proof::observed_nonzero;
-    if (use_observed_state) {
-      if (!observed || observed->value == 0) return reject(status::missing_state, record_stage::missing_state);
-      before = observed->value;
-    } else if (observed && observed->value != before) {
-      return reject(status::conflicting_state, record_stage::conflicting_state);
-    }
-    if (prefer_observed_recording && !observed) {
-      // A valid resource may remain in its declared state across recordings.
-      // Trust only the explicit supplied contract here; absence is not an
-      // observation of COMMON, and known incomplete evidence never gets here.
-      if (value.proof != sunshine_scene_depth::state_proof::declared || before == 0 || before == UINT32_MAX)
-        return reject(status::missing_state, record_stage::missing_state);
-      if (((before & D3D12_RESOURCE_STATE_RENDER_TARGET) && !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) ||
-          ((before & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) && !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) ||
-          ((before & (D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE)) &&
-            !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)))
-        return reject(status::unsupported_state, record_stage::unsupported_state);
-    }
-    if (!supported_state(before)) return reject(status::unsupported_state, record_stage::unsupported_state);
+    const auto chosen = copy_state::resolve(state_rule, value.native_state, observed ?
+      copy_state::observation{true, observed->known, observed->blocked, observed->value} : copy_state::observation{}, desc.Flags);
+    if (!chosen.admitted) return reject(chosen.result, chosen.stage);
+    const auto before = chosen.state;
     if (diagnostic) {
       diagnostic->copy_state = before; diagnostic->copy_state_known = true;
-      diagnostic->used_observed_state = use_observed_state;
+      diagnostic->used_observed_state = chosen.used_observed;
+      diagnostic->used_contract_state = chosen.used_contract;
     }
     // Multiple legal clear boundaries in one unsubmitted recording may replace
     // the same source snapshot before anyone reads it. Old tickets are retired
@@ -2007,7 +1977,7 @@ namespace sunshine_streamline::depth_capture {
     source_ref retained_target;
     if (destination) {
       if (!query_native(destination, IID_ID3D12Resource, target) || target.p == value.ownership->resource.p ||
-          !supported_state(destination_state)) return result(consumer_status::invalid_destination);
+          !copy_state::supported(destination_state)) return result(consumer_status::invalid_destination);
       com_ptr<ID3D12Device> target_device;
       if (FAILED(target->GetDevice(IID_ID3D12Device, reinterpret_cast<void **>(target_device.put()))) ||
           device_cookie(target_device.p) != device_identity) return result(consumer_status::device_mismatch);

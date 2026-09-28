@@ -3,6 +3,7 @@
 #include "game3d_ui_mask.h"
 #include "game3d_capture_diagnostic.h"
 #include "streamline_camera_probe.h"
+#include "streamline_buffer_contract.h"
 #include <d3d12.h>
 #include <reshade.hpp>
 #include <nlohmann/json.hpp>
@@ -68,7 +69,8 @@ namespace sunshine_game3d::ui_input {
       base.mask_width = selected.texture.width; base.mask_height = selected.texture.height; base.mask_format = selected.texture.format;
       base.left = selected.texture.area.left; base.top = selected.texture.area.top;
       base.width = selected.texture.area.width; base.height = selected.texture.area.height;
-      base.semantic_contract = origin.kind == ui_mask::source_kind::alpha ? 0 : 1;
+      base.semantic_contract = origin.kind != ui_mask::source_kind::alpha ||
+        sunshine_streamline::buffers::ui_alpha_authenticated(sunshine_streamline::buffers::active()) ? 1 : 0;
       return base;
     }
     nlohmann::json captured_metadata(const ui_mask::selection &selected, std::uint64_t now, bool admitted, bool paired) {
@@ -199,6 +201,10 @@ namespace sunshine_game3d::ui_input {
     auto *commands = queue->get_immediate_command_list();
     constexpr ui_mask::source_kind kinds[]{ui_mask::source_kind::alpha, ui_mask::source_kind::color_and_alpha,
       ui_mask::source_kind::backbuffer, ui_mask::source_kind::hudless};
+    // The hooked interposer's own header range decides UIAlpha's raw number
+    // (2.11.x: 68, 2.12+: 69). Outside the surveyed range it stays manual-only.
+    const bool alpha_authenticated =
+      sunshine_streamline::buffers::ui_alpha_authenticated(sunshine_streamline::buffers::active());
     if (capture_needed(status, runtime->get_device()->get_api())) for (unsigned slot = 0; slot != 4; ++slot) {
       const auto kind = kinds[slot];
       if (!(source_filter(wanted_source) & ui_mask::source_mask(kind))) continue;
@@ -208,9 +214,10 @@ namespace sunshine_game3d::ui_input {
       const bool paired = selected.texture.producer_queue == queue->get_native() &&
         selected.origin.source_present_generation && selected.origin.source_present_generation != UINT64_MAX &&
         selected.current_source_present_generation == selected.origin.source_present_generation + 1;
-      // Tag 69 is not authenticated against this game's caller SDK. Its physical
-      // availability cannot hide independently usable lower-priority candidates.
-      const bool admissible = (!result.automatic_detection || kind != ui_mask::source_kind::alpha) && (!hudless || paired);
+      // An unauthenticated UIAlpha tag cannot hide independently usable
+      // lower-priority candidates; an authenticated one is validated on the GPU.
+      const bool admissible = (!result.automatic_detection || kind != ui_mask::source_kind::alpha || alpha_authenticated) &&
+        (!hudless || paired);
       api::resource_view view{};
       if (admissible) view = renderer.prepare_ui_candidate(slot, selected.ticket.id, [&](api::resource destination) {
         return capture::copy_local_texture(commands->get_native(), queue->get_native(), selected.ticket,

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_ui_capture.h"
 #include "game3d_diagnostic_metadata.h"
+#include "streamline_buffer_contract.h"
 #include "streamline_depth_capture.h"
 
 #include <algorithm>
@@ -270,6 +271,8 @@ namespace {
 }
 
 int main() try {
+  // These fixtures emit 2.12+ tag numbers (UIAlpha 69) through the dump observer.
+  sunshine_streamline::buffers::set_active({2, 12, 0, 0});
   dlssg_capture_admission_test();
   {
     ui_capture_batch batch(begin_window());
@@ -324,7 +327,7 @@ int main() try {
       {"recording_tracked_sources", 3}, {"last_barrier_command", "0x4321"}, {"source_cookie", 789},
       {"native_state", 1024}, {"observed_state", 192}, {"observed", true}, {"blocked", true},
       {"copy_state", nullptr}, {"copy_state_known", false}, {"used_observed_state", false},
-      {"recording_closed", false}, {"recording_invalid", false}, {"render_pass", false},
+      {"used_contract_state", false}, {"recording_closed", false}, {"recording_invalid", false}, {"render_pass", false},
       {"command_type", 0}, {"width", 3840}, {"height", 2160}, {"format", 24}, {"flags", 5},
       {"dimension", 3}, {"mip_levels", 1}, {"array_size", 1}, {"samples", 1}, {"attempt", 1},
       {"observation", {{"session", at.session}, {"epoch", 71}, {"sequence", 19}, {"tick_ms", at.tick}, {"viewport", 7}}}

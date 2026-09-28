@@ -245,14 +245,20 @@ namespace {
         manifest << metadata.dump(2) << '\n';
         require(manifest.good(), "Write actual public UI hook provenance");
       }
+      // Auto validates every admitted candidate on the GPU and consumes the
+      // resolved R32 mask through its red channel (mask channel 1).
       const auto &origin = metadata.at("ui_source");
       const auto &replay = metadata.at("replay");
-      require(origin.at("source") == "sl_ui_color_and_alpha" && origin.at("tag_type") == 23 &&
-          origin.at("channel") == "alpha" && origin.at("format") == 87 &&
-          origin.at("source_native") == reinterpret_cast<std::uint64_t>(mask.p) &&
+      bool tag23_candidate = false;
+      for (const auto &candidate : origin.value("candidates", nlohmann::json::array()))
+        tag23_candidate |= candidate.at("source") == "sl_ui_color_alpha" && candidate.at("tag_type") == 23 &&
+          candidate.at("channel") == "alpha" && candidate.at("format") == 87 &&
+          candidate.at("available_for_detection") == true &&
+          candidate.at("source_native") == reinterpret_cast<std::uint64_t>(mask.p);
+      require(origin.at("source") == "automatic_candidate_set" && tag23_candidate &&
           replay.at("source_alpha_ui") == true && replay.at("ui_alpha_source") == "ui_source_color" &&
-          replay.at("ui_constant_binding").at("uint32")[3] == 0,
-        "Public UI hook did not select the actual tag23 alpha source in the renderer");
+          replay.at("ui_constant_binding").at("uint32")[3] == 1,
+        "Public UI hook did not offer the actual tag23 alpha source to automatic detection");
       bool optional = false;
       for (const auto &entry : metadata.at("optional_captures")) if (entry.at("artifact_id") == 10) {
         if (entry.value("status", std::string{}) != "captured" || !entry.contains("capture_diagnostic"))
@@ -265,31 +271,47 @@ namespace {
       }
       require(optional, "Production dump omitted the observed tag23 capture");
       std::array<com_ptr<ID3D12Resource>, 2> retained;
+      std::array<std::vector<std::uint8_t>, 2> retained_bytes;
       unsigned retained_count{};
       bool consumed = false, tagged = false;
       for (unsigned i = 0; i < box.state->response.texture_count; ++i) {
         const auto &item = box.state->response.textures[i];
         const auto kind = unsigned(item.kind);
         if (kind != unsigned(dump::artifact::ui_source_color) && kind != 10) continue;
-        require(item.dxgi_format == 87 && item.width == width && item.height == height, "Public UI hook dump changed typed extent");
+        const bool resolved = kind == unsigned(dump::artifact::ui_source_color);
+        require(item.dxgi_format == (resolved ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM) &&
+          item.width == width && item.height == height, "Public UI hook dump changed typed extent");
         require(retained_count < retained.size(), "Public UI hook dump repeated a requested artifact");
-        auto &texture = retained[retained_count++];
+        auto &texture = retained[retained_count];
         checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(item.handle), IID_PPV_ARGS(texture.put())), "Open production UI snapshot");
         const auto bytes = read(texture.p, D3D12_RESOURCE_STATE_COMMON);
-        require(bytes == expected, "Public UI hook captured post-tag overwrite or changed alpha/RGB bytes");
+        if (resolved) {
+          // The resolved mask is the winning candidate's own alpha, alpha/255.
+          require(bytes.size() == expected.size(), "Resolved UI mask changed extent");
+          bool exact = true;
+          for (size_t pixel = 0; pixel * 4 < expected.size(); ++pixel) {
+            float value{}; std::memcpy(&value, bytes.data() + pixel * 4, sizeof(value));
+            exact &= std::abs(value - float(expected[pixel * 4 + 3]) / 255.f) <= 1e-6f;
+          }
+          require(exact, "Resolved automatic UI mask did not reproduce the pre-overwrite tag23 alpha");
+        } else {
+          require(bytes == expected, "Public UI hook captured post-tag overwrite or changed alpha/RGB bytes");
+        }
         const auto path = hook_directory / (kind == 10 ? "ui-hook-tag23.bin" : "ui-hook-consumed.bin");
         sunshine_parity::write_bytes(path, bytes.data(), bytes.size());
-        consumed |= kind == unsigned(dump::artifact::ui_source_color); tagged |= kind == 10;
+        retained_bytes[retained_count++] = bytes;
+        consumed |= resolved; tagged |= kind == 10;
       }
       require(consumed && tagged && read(mask.p) == overwritten,
         "Hook regression lacks both snapshots or the game allocation was not overwritten after the tag");
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
       step(); no_effects();
-      for (const auto &texture : retained)
-        require(read(texture.p, D3D12_RESOURCE_STATE_COMMON) == expected, "Host acknowledgement or later game write changed UI snapshot");
+      for (unsigned i = 0; i != retained_count; ++i)
+        require(read(retained[i].p, D3D12_RESOURCE_STATE_COMMON) == retained_bytes[i],
+          "Host acknowledgement or later game write changed UI snapshot");
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
         " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 frame_tags=" << bool(frame_tag) << '\n';
-      std::puts("PASS actual public SL tag23 hook: typeless90 to typed87, selected selective alpha and optional dump exact before opaque overwrite; host lease immutable");
+      std::puts("PASS actual public SL tag23 hook: typeless90 to typed87, automatic GPU mask equals pre-overwrite alpha and optional dump exact before opaque overwrite; host lease immutable");
     }
 
     void run_automatic_ui_tags(HMODULE sdk) {

@@ -150,6 +150,8 @@ namespace sunshine_streamline::depth_capture {
     std::uint32_t command_type{0xffffffffu};
     bool recording_closed{}, recording_invalid{}, render_pass{}, observed{}, blocked{};
     bool copy_state_known{}, used_observed_state{};
+    // The copy used the SDK input contract because the recording had no entry.
+    bool used_contract_state{};
   };
   struct consumer_diagnostic {
     consumer_status result{consumer_status::not_attempted};

@@ -13,7 +13,12 @@ namespace sunshine_scene_depth {
   inline constexpr std::uint64_t maximum_source_age_ms = 250;
   enum class provider_kind { streamline, ngx };
   enum class resource_kind { raw_depth, display_depth };
-  enum class state_proof { unavailable, declared, observed_nonzero };
+  // declared: the caller stated this resource's state for this call.
+  // observed_nonzero: only a state observed on the recording is acceptable.
+  // sdk_contract: the SDK requires this state at the capture boundary for every
+  // input (NGX: NON_PIXEL_SHADER_RESOURCE). A known state observed on the same
+  // recording takes precedence; the contract applies only when none was observed.
+  enum class state_proof { unavailable, declared, observed_nonzero, sdk_contract };
   enum class lifetime { unsupported, until_present, until_evaluation, at_call };
   struct extent { std::uint32_t left{}, top{}, width{}, height{}; };
   struct jitter_offset {

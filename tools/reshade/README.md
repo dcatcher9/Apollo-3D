@@ -22,9 +22,11 @@ selector have been removed. Sources larger than 3840 in either dimension show an
 and remain 2D; there is no hidden legacy renderer fallback.
 Automatic UI discovery considers authenticated UI opacity, tag 23 alpha, tag 53 backbuffer
 alpha, current color alpha unless FG is known enabled, then paired tag 2 HUD-less color difference.
-It validates candidates on the GPU every frame and requires no review or approval. Tag 69 is
-currently excluded from Auto because its caller SDK contract is unverified; lower candidates
-remain available automatically. Manual On remains an eligible-source override
+It validates candidates on the GPU every frame and requires no review or approval. Raw Streamline
+tags are first translated through the hooked interposer's version-specific
+[buffer contract](../../docs/reshade-sbs.md#streamline-buffer-type-contract): UIAlpha is tag 68 in
+2.11.x and 69 from 2.12.0. It is automatic inside the surveyed header range and manual-only
+outside it; lower candidates remain available either way. Manual On remains an eligible-source override
 and Off is absolute. Typed private copies preserve the original channel and format through dump/replay.
 With Frame Generation, source-alpha UI protection distinguishes missing real-input alpha from
 an observed input whose capture was rejected. It requires a valid submitted input mask with
@@ -40,8 +42,9 @@ render-pass state still rejects capture; a source requiring observed-state proof
 the tag call does not rewrite their lifetime. Unknown SL v2 lifetimes reject capture, while
 SL v1 without a lifecycle keeps its existing synchronous behavior.
 The copy restores the selected state; shared dump storage stays immutable and local retired
-storage may be reused. Depth and NGX captures retain their existing declaration/proof
-checks. UI protection offers per-game, persistent On / Off / Auto choices. Auto rejects invalid,
+storage may be reused. Depth captures retain their existing declaration/proof checks. NGX depth
+uses the SDK's documented `NON_PIXEL_SHADER_RESOURCE` input contract only when the evaluating
+recording has no state entry for the resource; an observed state still takes precedence. UI protection offers per-game, persistent On / Off / Auto choices. Auto rejects invalid,
 empty and nearly full alpha and tests the next candidate in the same render. HUD-less comparison
 requires a matching queue/presentation generation and spatial scene-agreement checks. Capture
 works with FG off or unknown; there is no startup deadline or confirmation timer. The panel

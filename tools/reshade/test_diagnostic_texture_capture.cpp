@@ -347,6 +347,86 @@ namespace {
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
+  // NVIDIA's DLSS guide fixes every D3D12 input at NON_PIXEL_SHADER_RESOURCE for
+  // the evaluation call. Engines often transition depth on an earlier command
+  // list, so the evaluating recording has no entry for it (Hogwarts Legacy logged
+  // missing_state for every NGX evaluation). Observed state still takes priority.
+  void ngx_contract_depth_capture(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    consumer_fixture consumer(gpu);
+    texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4);
+    // The source reaches its contract state on a separate, retired recording.
+    gpu.submit(); gpu.wait(); gpu.reset();
+    auto input = depth.input;
+    input.provider = sunshine_scene_depth::provider_kind::ngx;
+    input.epoch = 74; input.source_id = 92; input.viewport = 0;
+    input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
+    input.source_present_generation = capture::source_present_generation(input.source);
+    input.native_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    input.proof = sunshine_scene_depth::state_proof::sdk_contract;
+    capture::record_diagnostic diagnostic;
+    const auto nominate = [&](std::uint64_t sequence) {
+      input.sequence = sequence; input.tick = GetTickCount64();
+      return capture::nominate_evaluation(native(gpu.list.Get()), input, UINT64_MAX, &diagnostic);
+    };
+
+    // An unobserved source uses the SDK contract; the debug layer validates it.
+    const auto ticket = nominate(1);
+    require(ticket && diagnostic.result == capture::status::recorded && !diagnostic.observed &&
+        diagnostic.copy_state_known && diagnostic.copy_state == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE &&
+        diagnostic.used_contract_state && !diagnostic.used_observed_state,
+      "NGX contract state did not admit an unobserved evaluation input");
+    capture::finish(ticket, true);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    require(capture::acquire(native(gpu.foreign_queue.Get()), 11, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == ticket && packet.metadata.provider == sunshine_scene_depth::provider_kind::ngx,
+      "contract-state NGX depth was unavailable to its consumer");
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
+    readback actual(gpu, target.Get());
+    require(capture::copy_current(native(consumer.list.Get()), packet, native(target.Get()),
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE), "contract-state NGX depth consumer copy failed");
+    actual.record(consumer.list.Get(), target.Get());
+    capture::complete_frame(packet, 11);
+    consumer.submit(); consumer.wait(); consumer.reset();
+    actual.verify(depth.width, depth.height, depth.bpp);
+    packet = {};
+
+    // A state observed on the evaluating recording overrides the contract.
+    transition(gpu.list.Get(), depth.source.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+      D3D12_RESOURCE_STATE_COPY_SOURCE);
+    const auto observed = nominate(2);
+    require(observed && diagnostic.result == capture::status::recorded && diagnostic.observed &&
+        diagnostic.copy_state == D3D12_RESOURCE_STATE_COPY_SOURCE && diagnostic.used_observed_state &&
+        !diagnostic.used_contract_state, "NGX contract replaced state observed on the same recording");
+    capture::finish(observed, true);
+    // Observed COMMON is evidence against the contract, not an absent entry.
+    transition(gpu.list.Get(), depth.source.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+    const auto common = nominate(3);
+    if (common) capture::finish(common, false);
+    require(diagnostic.result == capture::status::missing_state && diagnostic.observed &&
+        diagnostic.observed_state == 0 && !diagnostic.copy_state_known,
+      "NGX contract admitted a source observed in COMMON");
+    transition(gpu.list.Get(), depth.source.Get(), D3D12_RESOURCE_STATE_COMMON,
+      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    // A contract proof without a usable state value remains unavailable.
+    for (const auto hint : {0u, UINT32_MAX}) {
+      input.native_state = hint;
+      const auto missing = nominate(4 + hint % 2);
+      if (missing) capture::finish(missing, false);
+      require(diagnostic.result == capture::status::missing_state && !diagnostic.observed && !diagnostic.copy_state_known,
+        "NGX contract proof without a state value admitted capture");
+    }
+    capture::retire_source(input.provider, input.epoch, input.source_id);
+    capture::command_destroyed(native(consumer.list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS NGX SDK-contract input state: unobserved source uses NON_PIXEL_SHADER_RESOURCE with exact pixels; observed state wins; COMMON and absent values rejected%s\n",
+      gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
   void observed_recording_color_capture(fixture &gpu, DXGI_FORMAT format, bool shared,
       D3D12_RESOURCE_STATES observed_state = D3D12_RESOURCE_STATE_RENDER_TARGET,
       DXGI_FORMAT snapshot_format = DXGI_FORMAT_UNKNOWN,
@@ -952,6 +1032,7 @@ int main() {
     require(capture::testing::diagnostic_snapshot_regression(), "diagnostic retirement/fence/format policy regression");
     fixture gpu;
     first_recording_depth_capture(gpu);
+    ngx_contract_depth_capture(gpu);
     local_same_queue_ordered_capture(gpu);
     for (const bool shared : {false, true}) {
       observed_recording_color_capture(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, shared);

@@ -20,6 +20,13 @@ namespace sunshine_ngx {
     // nvsdk_ngx_defs.h and nvsdk_ngx_helpers_d3d.h. The public C Get* wrappers
     // dispatch through the owning SDK's own C++ ABI. We never decode that ABI.
     constexpr std::uint32_t super_sampling = 1, inverted_depth = 1u << 3;
+    // D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE. NVIDIA's DLSS Programming
+    // Guide, section 3.4 "Resource States": every D3D12 input must be in this
+    // state at the evaluation call, and DLSS always restores it afterwards.
+    constexpr std::uint32_t evaluation_input_state = 0x40;
+    // Feature ID for a registration recovered at evaluation: CreateFeature ran
+    // before these hooks or before the add-on's current epoch.
+    constexpr std::uint32_t recovered_feature = 0xfffffffeu;
     constexpr unsigned max_features = 64;
     enum class availability { missing_getter, failed, empty, present };
     struct optional_pointer {
@@ -40,12 +47,24 @@ namespace sunshine_ngx {
     };
     SRWLOCK feature_lock = SRWLOCK_INIT;
     std::array<feature, max_features> features;
+    // Handles released in this epoch; evaluation-time recovery never revives
+    // one. A later successful CreateFeature for the same address clears it.
+    struct released_handle { HMODULE owner{}; const void *handle{}; };
+    std::array<released_handle, 16> released_handles;
+    unsigned next_released{};
+    bool released(HMODULE owner, const void *handle) {
+      for (const auto &value : released_handles) if (value.handle == handle && value.owner == owner) return true;
+      return false;
+    }
+    void forget_release(HMODULE owner, const void *handle) {
+      for (auto &value : released_handles) if (value.handle == handle && value.owner == owner) value = {};
+    }
     std::atomic<std::uint64_t> active_epoch{}, next_epoch{}, sequence{}, next_feature{};
     // Dump-only observations must not advance the capture/evaluation ordering
     // counter when the feature was never admitted or depth belongs to SL.
     std::atomic<std::uint64_t> unknown_diagnostic_sequence{};
     std::atomic<std::uint64_t> evaluations{}, nominations{}, copy_recorded{}, metadata_only{},
-      unknown{}, missing_parameters{}, failed{}, feature_overflow{};
+      unknown{}, missing_parameters{}, failed{}, feature_overflow{}, recovered{};
     std::uint64_t next_report{};
     bool calibration_probe_requested{}; // Protected by feature_lock, like the feature records.
     struct calibration_slot {
@@ -258,11 +277,12 @@ namespace sunshine_ngx {
     active_epoch.store(0, std::memory_order_release);
     AcquireSRWLockExclusive(&feature_lock);
     features = {};
+    released_handles = {}; next_released = 0;
     calibration_probe_requested = calibration_probe;
     AcquireSRWLockExclusive(&calibration_lock);
     calibration_slots = {};
     ReleaseSRWLockExclusive(&calibration_lock);
-    evaluations = nominations = copy_recorded = metadata_only = unknown = missing_parameters = failed = feature_overflow = 0;
+    evaluations = nominations = copy_recorded = metadata_only = unknown = missing_parameters = failed = feature_overflow = recovered = 0;
     next_report = 0;
     rejected_captures = 0;
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
@@ -277,27 +297,60 @@ namespace sunshine_ngx {
   void shutdown() { active_epoch.store(0, std::memory_order_release); }
   bool enabled() { return !sunshine_addon_lifetime::stopping() && active_epoch.load(std::memory_order_acquire) != 0; }
   std::uint64_t epoch() { return sunshine_addon_lifetime::stopping() ? 0 : active_epoch.load(std::memory_order_acquire); }
-  creation before_create(const parameter_api &api, std::uint32_t feature_id, const void *parameters) {
-    preserve_error error;
-    creation value;
-    value.epoch = epoch();
-    value.feature = feature_id;
-    if (!value.epoch || !api || !parameters) return value;
-    unsigned hardware_depth{};
-    const bool explicit_encoding = get_uint(api, parameters, "DLSS.Use.HW.Depth", hardware_depth);
-    if (explicit_encoding) {
-      if (hardware_depth > 1) return value;
-      value.encoding = hardware_depth ? sunshine_scene_depth::depth_encoding::device :
-        sunshine_scene_depth::depth_encoding::linear_distance;
-    } else if (feature_id != super_sampling) {
-      // Every feature is registered. SR's documented input is device depth;
-      // other features need an explicit encoding before pixels can be used.
+  namespace {
+    // device_default: the feature's documented depth input is device depth when
+    // DLSS.Use.HW.Depth is absent. That holds for Super Resolution/DLAA only;
+    // Ray Reconstruction's helpers always write the explicit key.
+    creation parse_creation(const parameter_api &api, std::uint32_t feature_id, const void *parameters, bool device_default) {
+      creation value;
+      value.epoch = epoch();
+      value.feature = feature_id;
+      if (!value.epoch || !api || !parameters) return value;
+      unsigned hardware_depth{};
+      const bool explicit_encoding = get_uint(api, parameters, "DLSS.Use.HW.Depth", hardware_depth);
+      if (explicit_encoding) {
+        if (hardware_depth > 1) return value;
+        value.encoding = hardware_depth ? sunshine_scene_depth::depth_encoding::device :
+          sunshine_scene_depth::depth_encoding::linear_distance;
+      } else if (!device_default) {
+        // Every feature is registered. SR's documented input is device depth;
+        // other features need an explicit encoding before pixels can be used.
+        return value;
+      }
+      value.valid = success(api.integer(const_cast<void *>(parameters), "DLSS.Feature.Create.Flags", &value.flags)) &&
+        get_uint(api, parameters, "Width", value.width) && get_uint(api, parameters, "Height", value.height) &&
+        valid_dimension(value.width) && valid_dimension(value.height);
       return value;
     }
-    value.valid = success(api.integer(const_cast<void *>(parameters), "DLSS.Feature.Create.Flags", &value.flags)) &&
-      get_uint(api, parameters, "Width", value.width) && get_uint(api, parameters, "Height", value.height) &&
-      valid_dimension(value.width) && valid_dimension(value.height);
-    return value;
+    // NGX's create helpers write Width/Height/Create.Flags (and RR's explicit
+    // depth encoding) into the parameter map that later evaluations reuse. When
+    // CreateFeature was missed, register the live handle from that map once.
+    // Only SR/DLAA evaluates a "Depth" input without the explicit encoding key,
+    // so the SR default is applied; a map without creation values stays unknown.
+    feature recover_feature(HMODULE owner, const void *handle, const parameter_api &api, const void *parameters,
+        std::uint64_t epoch, unsigned &slot) {
+      auto value = parse_creation(api, recovered_feature, parameters, true);
+      if (!value.valid || value.epoch != epoch) return {};
+      feature result;
+      AcquireSRWLockExclusive(&feature_lock);
+      if (epoch == active_epoch.load(std::memory_order_acquire) && !released(owner, handle)) {
+        if (auto *entry = find_feature(owner, handle, true)) {
+          // A concurrent create or recovery for this handle keeps its registration.
+          if (entry->handle != handle || entry->parameters.epoch != epoch) {
+            *entry = {owner, handle, value, ++next_feature, 1};
+            ++recovered;
+          }
+          result = *entry;
+          slot = static_cast<unsigned>(entry - features.data());
+        } else ++feature_overflow;
+      }
+      ReleaseSRWLockExclusive(&feature_lock);
+      return result;
+    }
+  }
+  creation before_create(const parameter_api &api, std::uint32_t feature_id, const void *parameters) {
+    preserve_error error;
+    return parse_creation(api, feature_id, parameters, feature_id == super_sampling);
   }
   void after_create(HMODULE owner, const void *handle, const creation &value, bool successful) {
     preserve_error error;
@@ -311,6 +364,7 @@ namespace sunshine_ngx {
       else if (auto *entry = find_feature(owner, handle, true))
         *entry = {owner, handle, value, ++next_feature, 1};
       else ++feature_overflow;
+      if (handle) forget_release(owner, handle);
     }
     ReleaseSRWLockExclusive(&feature_lock);
   }
@@ -323,6 +377,10 @@ namespace sunshine_ngx {
       if (auto *entry = find_feature(owner, handle, false)) {
         generation = entry->generation;
         *entry = {};
+      }
+      if (handle && !released(owner, handle)) {
+        released_handles[next_released] = {owner, handle};
+        next_released = (next_released + 1) % released_handles.size();
       }
     }
     ReleaseSRWLockExclusive(&feature_lock);
@@ -354,33 +412,30 @@ namespace sunshine_ngx {
       selected_slot = static_cast<unsigned>(entry - features.data());
     }
     ReleaseSRWLockShared(&feature_lock);
-    if (!capture_depth) {
-      if (selected.parameters.epoch != attempt.epoch) selected = {};
-      selected.owner = owner;
+    // Dump-only observation of a call that yields no capture: its own sequence
+    // domain, the observed owner/handle, and no invented capture metadata.
+    const auto observe_without_capture = [&](feature observed, bool suppressed) {
+      observed.owner = owner;
       sunshine_scene_depth::frame diagnostic_frame;
       diagnostic_frame.epoch = attempt.epoch;
       diagnostic_frame.sequence = ++unknown_diagnostic_sequence;
       diagnostic_frame.tick = GetTickCount64();
+      attempt.diagnostic_observation = observe_dump_parameters(api, parameters, diagnostic_frame, observed, handle, command,
+        diagnostic_session, suppressed);
+    };
+    if (!capture_depth) {
+      if (selected.parameters.epoch != attempt.epoch) selected = {};
       attempt.capture_suppressed_by_depth_owner = true;
-      attempt.diagnostic_observation = observe_dump_parameters(api, parameters, diagnostic_frame,
-        selected, handle, command, diagnostic_session, true);
+      observe_without_capture(selected, true);
       return attempt;
     }
+    if (!selected.handle || selected.parameters.epoch != attempt.epoch)
+      selected = recover_feature(owner, handle, api, parameters, attempt.epoch, selected_slot);
     if (!selected.handle || selected.parameters.epoch != attempt.epoch || !selected.parameters.valid) {
       if (!selected.handle || selected.parameters.epoch != attempt.epoch) { ++unknown; selected = {}; }
       else ++missing_parameters;
-      if (diagnostic_session) {
-        // Late attachment can miss CreateFeature; other features can expose
-        // incomplete creation metadata. Preserve observed identity and named
-        // parameters, without inventing capture metadata or a capture ticket.
-        sunshine_scene_depth::frame diagnostic_frame;
-        diagnostic_frame.epoch = attempt.epoch;
-        diagnostic_frame.sequence = ++unknown_diagnostic_sequence;
-        diagnostic_frame.tick = GetTickCount64();
-        feature diagnostic_feature = selected;
-        diagnostic_feature.owner = owner;
-        attempt.diagnostic_observation = observe_dump_parameters(api, parameters, diagnostic_frame, diagnostic_feature, handle, command, diagnostic_session);
-      }
+      // An unrecoverable or incomplete feature still reports its named parameters.
+      if (diagnostic_session) observe_without_capture(selected, false);
       return attempt;
     }
     attempt.observed = true;
@@ -416,8 +471,12 @@ namespace sunshine_ngx {
     value.projection.reversed = value.projection.encoding == sunshine_scene_depth::depth_encoding::device &&
       (selected.parameters.flags & inverted_depth) != 0;
     value.projection.direction_supplied = true;
-    // NGX names the resource, but does not supply its current D3D12 state.
-    // The shared copy owner decides whether its own state evidence is usable.
+    // NGX names the resource but no per-call state. Its SDK contract fixes the
+    // input state at this boundary; a state observed on the same recording
+    // still takes precedence in the shared copy owner. Engines commonly record
+    // that transition on an earlier command list, where it cannot be observed.
+    value.native_state = evaluation_input_state;
+    value.proof = sunshine_scene_depth::state_proof::sdk_contract;
     value.valid_until = sunshine_scene_depth::lifetime::until_evaluation;
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
     using namespace sunshine_streamline;
@@ -569,8 +628,9 @@ namespace sunshine_ngx {
     for (unsigned i = 0; i < probe_count; ++i) report_calibration(probes[i]);
     char message[512]{};
     std::snprintf(message, sizeof(message),
-      "Sunshine NGX depth: confirmed_features=%u capture_eligible=%u evaluations=%llu nominations=%llu copy_recorded=%llu metadata_only=%llu unknown_feature=%llu missing_parameters=%llu failed=%llu feature_capacity_loss=%llu; D3D12 NGX, named parameter exports, shared copy owner; recorded work is not completed pixels",
-      count, capture_eligible, static_cast<unsigned long long>(evaluations.load()), static_cast<unsigned long long>(nominations.load()),
+      "Sunshine NGX depth: confirmed_features=%u capture_eligible=%u recovered_features=%llu evaluations=%llu nominations=%llu copy_recorded=%llu metadata_only=%llu unknown_feature=%llu missing_parameters=%llu failed=%llu feature_capacity_loss=%llu; D3D12 NGX, named parameter exports, shared copy owner; recorded work is not completed pixels",
+      count, capture_eligible, static_cast<unsigned long long>(recovered.load()),
+      static_cast<unsigned long long>(evaluations.load()), static_cast<unsigned long long>(nominations.load()),
       static_cast<unsigned long long>(copy_recorded.load()), static_cast<unsigned long long>(metadata_only.load()),
       static_cast<unsigned long long>(unknown.load()), static_cast<unsigned long long>(missing_parameters.load()),
       static_cast<unsigned long long>(failed.load()), static_cast<unsigned long long>(feature_overflow.load()));

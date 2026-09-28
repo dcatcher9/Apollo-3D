@@ -320,6 +320,16 @@ namespace {
       "real export discovery or no-call coverage failed");
     require(logged("NGX_evaluate=0") && logged("not API absence") && logged("SL_hook=0"),
       "zero-call report omitted coverage limits");
+    // Discovery walks every module's exports on the present path. With loader
+    // notifications it must not repeat until a module actually loads.
+    require(counts.load_notifications && counts.scans == 1, "initial discovery did not use loader notifications");
+    Sleep(1100); poll();
+    require(testing::counts().scans == 1, "discovery rescanned without a module load");
+    const auto added = LoadLibraryExW(L"msimg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    require(added != nullptr, "discovery fixture could not load a system module");
+    Sleep(300); poll();
+    require(testing::counts().scans == 2, "a newly loaded module did not trigger discovery");
+    FreeLibrary(added);
     create(); evaluate(); evaluate(true);
     counts = testing::counts();
     require(counts.ngx_create == 1 && counts.ngx_evaluate == 2 && counts.outside_streamline == 3 &&
@@ -444,8 +454,27 @@ namespace {
         "capture changed evaluation result/LastError");
     };
     handle = reinterpret_cast<void *>(handle_bits);
+    // A missed CreateFeature (late attach or add-on reinitialization) stays
+    // unknown unless the evaluation map still carries its creation values.
+    parameters.missing_flags = true;
     evaluate_feature();
-    require(captures == 0, "late unknown feature was guessed");
+    require(captures == 0, "late feature without creation values was guessed");
+    parameters.missing_flags = false;
+    parameters.missing_hardware_depth = false; parameters.hardware_depth = 2;
+    evaluate_feature();
+    require(captures == 0, "late feature with an unknown explicit depth encoding was recovered");
+    parameters.missing_hardware_depth = true;
+    evaluate_feature();
+    require(captures == 1 && finishes == 1 && last_finish && captured_frame.source_id &&
+        captured_frame.projection.encoding == sunshine_scene_depth::depth_encoding::device &&
+        captured_frame.projection.reversed && captured_frame.proof == sunshine_scene_depth::state_proof::sdk_contract,
+      "late SR feature was not recovered from its evaluation parameter map");
+    const auto recovered_id = captured_frame.source_id;
+    evaluate_feature();
+    require(captures == 2 && captured_frame.source_id == recovered_id, "recovered feature identity was not stable");
+    release();
+    require(retirements == 1 && retired_id == recovered_id, "recovered feature was not retired by its release");
+    retirements = 0; retired_id = 0; captures = finishes = 0;
     create_feature();
     nested_evaluation = true;
     evaluate_feature();
@@ -454,7 +483,7 @@ namespace {
       "nested NGX evaluation did not capture exactly once");
     require(captured_frame.provider == sunshine_scene_depth::provider_kind::ngx && captured_frame.source_id &&
       !captured_frame.projection.supplied && captured_frame.projection.direction_supplied && captured_frame.projection.reversed &&
-      captured_frame.proof == sunshine_scene_depth::state_proof::unavailable && captured_frame.native_state == UINT32_MAX &&
+      captured_frame.proof == sunshine_scene_depth::state_proof::sdk_contract && captured_frame.native_state == 0x40 &&
       captured_frame.valid_until == sunshine_scene_depth::lifetime::until_evaluation &&
       captured_frame.resource.native == reinterpret_cast<std::uint64_t>(parameters.depth) &&
       captured_frame.resource.area.left == 3 && captured_frame.resource.area.top == 2 &&
@@ -1092,6 +1121,9 @@ namespace {
       [](std::uint64_t, bool) { ++finishes; },
       [](std::uint64_t, std::uint64_t) { ++retirements; }});
     fixture_parameters parameters;
+    // Without creation values the evaluation map cannot recover a missed
+    // CreateFeature, so these handles remain genuinely unknown.
+    parameters.missing_flags = true;
     auto *first = reinterpret_cast<void *>(handle_bits);
     auto *second = reinterpret_cast<void *>(handle_bits + 16);
     const auto captures_before = captures, finishes_before = finishes, retirements_before = retirements;

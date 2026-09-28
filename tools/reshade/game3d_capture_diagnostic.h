@@ -28,6 +28,7 @@ namespace sunshine_game3d {
       {"native_state", value.native_state}, {"observed_state", value.observed_state}, {"observed", value.observed}, {"blocked", value.blocked},
       {"copy_state", value.copy_state_known ? nlohmann::json(value.copy_state) : nlohmann::json(nullptr)},
       {"copy_state_known", value.copy_state_known}, {"used_observed_state", value.used_observed_state},
+      {"used_contract_state", value.used_contract_state},
       {"recording_closed", value.recording_closed}, {"recording_invalid", value.recording_invalid}, {"render_pass", value.render_pass},
       {"command_type", value.command_type}, {"width", value.width}, {"height", value.height}, {"format", value.format}, {"flags", value.flags},
       {"dimension", value.dimension}, {"mip_levels", value.mip_levels}, {"array_size", value.array_size}, {"samples", value.samples}
