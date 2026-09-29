@@ -2191,6 +2191,52 @@ namespace sunshine_streamline {
     }
   }
 
+  // MinHook snapshots every thread on the system (~50 ms with ~10k threads)
+  // for each enable or apply. Streamline hook discovery and newly registered
+  // FG/PCL targets are therefore installed on a pool thread that holds
+  // poll_lock; a present-path poll meanwhile skips, as on contention. The
+  // add-on is pinned, so a pending callback never outlives its code.
+  namespace {
+    std::atomic<bool> install_scheduled{false};
+    bool fg_targets_pending() {
+      if (!TryAcquireSRWLockShared(&fg_lock)) return false;
+      bool pending = false;
+      for (unsigned i = 0; i != fg_target_count && !pending; ++i)
+        pending = fg_targets[i].state.load(std::memory_order_acquire) == 0;
+      ReleaseSRWLockShared(&fg_lock);
+      return pending;
+    }
+    bool pcl_targets_pending() {
+      if (!TryAcquireSRWLockShared(&pcl_lock)) return false;
+      bool pending = false;
+      for (unsigned i = 0; i != pcl_target_count && !pending; ++i)
+        pending = pcl_targets[i].state.load(std::memory_order_acquire) == 0;
+      ReleaseSRWLockShared(&pcl_lock);
+      return pending;
+    }
+    // Caller holds poll_lock.
+    void install_hook_work() {
+      if (!hooks_installed && !permanently_rejected) discover();
+      if (middleware_requested() && observing.load(std::memory_order_acquire)) {
+        install_pcl_hooks();
+        install_fg_hooks();
+      }
+    }
+    void CALLBACK install_on_pool(PTP_CALLBACK_INSTANCE, void *) {
+      AcquireSRWLockExclusive(&poll_lock);
+      if (!sunshine_addon_lifetime::stopping()) install_hook_work();
+      install_scheduled.store(false, std::memory_order_release);
+      ReleaseSRWLockExclusive(&poll_lock);
+    }
+    // Caller holds poll_lock.
+    void schedule_install() {
+      if (install_scheduled.exchange(true, std::memory_order_acq_rel)) return;
+      if (TrySubmitThreadpoolCallback(install_on_pool, nullptr, nullptr)) return;
+      install_hook_work(); // Without a pool thread, install here as before.
+      install_scheduled.store(false, std::memory_order_release);
+    }
+  }
+
   void initialize(HMODULE addon) {
     bool diagnostic_enabled = false;
     reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "StreamlineCameraProbe", diagnostic_enabled);
@@ -2203,6 +2249,9 @@ namespace sunshine_streamline {
     bool ngx_calibration_probe = false;
     reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "NGXCalibrationProbe", ngx_calibration_probe);
     sunshine_upscaler_trace::initialize(addon, call_trace_enabled, ngx_source_enabled, ngx_calibration_probe);
+    // A pool install may still be discovering after device recreation; wait
+    // for it before resetting the state it reads and writes.
+    AcquireSRWLockExclusive(&poll_lock);
     requested.store(false, std::memory_order_release);
     source_requested.store(false, std::memory_order_release);
     observing.store(false, std::memory_order_release);
@@ -2244,6 +2293,7 @@ namespace sunshine_streamline {
     requested.store(diagnostic_enabled, std::memory_order_release);
     source_requested.store(source_enabled, std::memory_order_release);
     if (hooks_installed) observing.store(diagnostic_enabled || source_enabled, std::memory_order_release);
+    ReleaseSRWLockExclusive(&poll_lock);
     if (!diagnostic_enabled)
       message("Sunshine Streamline: diagnostic probe disabled; command/content tracking is off");
   }
@@ -2883,7 +2933,7 @@ namespace sunshine_streamline {
     const auto now = GetTickCount64();
     if (api_requested && now >= next_discovery) {
       next_discovery = now + 1000;
-      if (!hooks_installed && !permanently_rejected) discover();
+      if (!hooks_installed && !permanently_rejected) schedule_install();
       if (hooks_installed) discover_v1_private_state();
       if (hooks_installed) discover_fg_options();
     }
@@ -2902,10 +2952,8 @@ namespace sunshine_streamline {
       }
       if (minhook_initialized) depth_capture::poll();
     }
-    if (middleware_requested() && observing.load(std::memory_order_acquire)) {
-      install_pcl_hooks();
-      install_fg_hooks();
-    }
+    if (middleware_requested() && observing.load(std::memory_order_acquire) && (pcl_targets_pending() || fg_targets_pending()))
+      schedule_install();
     report_probe_diagnostics(selected, now);
   }
 

@@ -1730,7 +1730,12 @@ enables all of its new hooks in one queued MinHook apply. Every MinHook enable/a
 a system-wide thread snapshot: about 50 ms with ~10,000 system threads, before any thread is
 suspended. Hogwarts Legacy exposes 38 NGX entry points, and enabling them one by one on the present
 thread froze the game for 2.06 s at startup. The export scan itself is about 2 ms. Reports wait
-for a pending scan, so coverage is never reported from its pre-scan state. No game DLL is replaced, no unknown
+for a pending scan, so coverage is never reported from its pre-scan state. Streamline's own
+hooks (the interposer entry points in one queued apply, and each Frame Generation options and PCL
+marker target as it is registered) are installed the same way: a pool thread holding the probe's
+poll lock runs them, while the present-path poll skips for those few frames. In Hogwarts Legacy this
+removed the last start-up stalls of 160 ms and 106 ms. The per-frame vtable-slot observers patch
+no code and stay on the present path. No game DLL is replaced, no unknown
 C++ parameter vtable is interpreted, and no feature is inferred merely from installed files.
 There is no DLL patch-version or feature-ID allowlist. Every observed successful feature creation
 establishes its handle generation; capture additionally requires valid render dimensions, create
