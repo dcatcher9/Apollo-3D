@@ -88,6 +88,9 @@ namespace sunshine_game3d {
     std::array<api::format, 4> ui_candidate_formats{};
     ui_mask_channel consumed_channel = ui_mask_channel::alpha;
     bool mask_channel_supported = false;
+    // Older embedded replay shaders scan one line per 32-thread group and pin
+    // UI inside the horizontal pass.
+    bool tiled_limiters = false;
     bool nearest_ui_supported = false, nearest_ui_rendered = false;
     bool nearest_ui_attempted = false, nearest_ui_ready = false;
     bool front_limit_ui_supported = false, shallow_front_ui_supported = false;
@@ -214,6 +217,7 @@ namespace sunshine_game3d {
       shallow_front_ui_supported = shader_source().find("#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1") != std::string_view::npos;
       display_fraction_ui_supported = shader_source().find("#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1") != std::string_view::npos;
       mask_channel_supported = shader_source().find("#define SUNSHINE_UI_MASK_CHANNEL 1") != std::string_view::npos;
+      tiled_limiters = shader_source().find("#define SUNSHINE_LIMITER_LINE_GROUPS 8") != std::string_view::npos;
       if (!device->create_fence(0, api::fence_flags::none, &completion)) return false;
       if (device->get_api() == api::device_api::d3d12 &&
           (!device->create_resource_view({}, api::resource_usage::shader_resource, api::resource_view_desc(api::format::r32_float), &null_srv) ||
@@ -256,7 +260,7 @@ namespace sunshine_game3d {
       if (width <= 3840 && height <= 3840)
         if (!pipeline_create(candidate, "SunshineHostCandidateCS", true, vs) || !pipeline_create(vertical, "SunshineHostVerticalCS", true, vs) ||
             !pipeline_create(horizontal, "SunshineHostHorizontalCS", true, vs) ||
-            !pipeline_create(ui_apply, "SunshineApplyUICS", true, vs)) return false;
+            (tiled_limiters && !pipeline_create(ui_apply, "SunshineApplyUICS", true, vs))) return false;
       return pipeline_create(eyes, "SunshineRenderEyesPS", false, vs) && pipeline_create(pack, "SunshinePackEyesPS", false, vs);
     }
     bool prepare_nearest_ui() {
@@ -590,7 +594,7 @@ namespace sunshine_game3d {
           !texture_create(ui_conflict_statistics, 16, 32, api::format::r32g32b32a32_uint,
             api::resource_usage::unordered_access | api::resource_usage::copy_source) ||
           !pipeline_create(ui_conflict, "SunshineUIConflictCS", true, {}) ||
-          !pipelines[ui_apply].handle) return false;
+          (!pipelines[ui_apply].handle && !pipeline_create(ui_apply, "SunshineApplyUICS", true, {}))) return false;
       if (context11.p) {
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = 16; desc.Height = 32;
@@ -938,7 +942,8 @@ namespace sunshine_game3d {
     if (d.width <= 3840 && d.height <= 3840) {
       d.dispatch(cmd, impl::candidate, (d.width + 7) / 8, (d.height + 7) / 8, p, {api::resource_view{}, depth}, {impl::raw});
       d.mark(cmd, impl::mark_candidate);
-      d.dispatch(cmd, impl::vertical, (d.width + 7) / 8, 1, p, {api::resource_view{}, {}, {}, t[impl::raw].srv}, {impl::vertical_majorant, impl::vertical_field});
+      const uint32_t group_lines = d.tiled_limiters ? 8u : 1u;
+      d.dispatch(cmd, impl::vertical, (d.width + group_lines - 1) / group_lines, 1, p, {api::resource_view{}, {}, {}, t[impl::raw].srv}, {impl::vertical_majorant, impl::vertical_field});
       d.mark(cmd, impl::mark_vertical);
       const auto ui_alpha = d.consumed_ui_source.handle ? alpha_source : t[impl::source].srv;
       if (d.source_alpha_ui && plane.mode == ui_plane_mode::depth_midpoint_nearest_ui) {
@@ -949,13 +954,17 @@ namespace sunshine_game3d {
         d.nearest_ui_rendered = true;
       }
       // UI passes read the explicit selected mask channel. Eye RGB stays current.
-      // Limiter groups own eight adjacent columns or rows. UI pinning follows
-      // as its own pass; a probe observes the unpinned field in between.
+      // UI pinning follows the complete scene field as its own pass, and a
+      // probe observes the unpinned field in between. Older embedded replay
+      // shaders pin inside the horizontal pass unless a probe needs it apart.
       const std::array<api::resource_view, 15> field_inputs{ui_alpha, {}, {}, {}, t[impl::vertical_field].srv,
         {}, {}, {}, {}, d.nearest_ui_rendered ? t[impl::ui_plane_resolved].srv : api::resource_view{}};
-      d.dispatch(cmd, impl::horizontal, (d.height + 7) / 8, 1, p, field_inputs, {impl::field});
+      const bool apply_ui = d.source_alpha_ui, pin_apart = d.tiled_limiters || probe_ui;
+      if (pin_apart) d.source_alpha_ui = false;
+      d.dispatch(cmd, impl::horizontal, (d.height + group_lines - 1) / group_lines, 1, p, field_inputs, {impl::field});
+      d.source_alpha_ui = apply_ui;
       if (probe_ui) d.submit_adaptive_probe(cmd, ui_alpha, p);
-      if (d.source_alpha_ui) d.dispatch(cmd, impl::ui_apply, d.height, 1, p, field_inputs, {impl::field});
+      if (pin_apart && apply_ui) d.dispatch(cmd, impl::ui_apply, d.height, 1, p, field_inputs, {impl::field});
     }
     d.mark(cmd, impl::mark_conditioning);
     d.draw(cmd, impl::eyes, d.width, {impl::left, impl::right}, p, {t[impl::source].srv, depth, t[impl::linear].srv, {}, {}, t[impl::field].srv});

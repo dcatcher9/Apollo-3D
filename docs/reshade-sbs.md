@@ -138,7 +138,10 @@ rows, so the passes no longer hold whole lines in group memory. UI pinning alway
 pass (`SunshineApplyUICS`) after the horizontal pass; the adaptive probe observes the unpinned
 field between them, as before. Results are byte-identical. At 4K on an idle GPU the vertical pass
 went from 0.44 to 0.17 ms and the horizontal pass, including the UI pass, from 0.35 to 0.24 ms; the
-whole renderer went from 1.38 to 0.91 ms.
+whole renderer went from 1.38 to 0.91 ms. The shader declares `SUNSHINE_LIMITER_LINE_GROUPS`;
+a dump whose embedded shader predates it replays with one group per line and in-limiter UI
+pinning. Replaying two Hogwarts Legacy dumps with either shader reproduced every captured
+artifact byte-exactly.
 
 All rendering stays on the runtime's graphics queue. Native passes add no CPU fence wait or full
 frame CPU readback. A completion fence protects replacement of the renderer's working set;

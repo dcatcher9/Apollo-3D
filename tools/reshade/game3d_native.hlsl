@@ -18,6 +18,8 @@
 #define SUNSHINE_UI_MASK_CHANNEL 1
 #define SUNSHINE_UI_AUTOMATIC_DETECTION 1
 #define SUNSHINE_LINEAR_DISTANCE_DEPTH 1
+// Limiter groups own eight adjacent lines; UI pinning is a separate pass.
+#define SUNSHINE_LIMITER_LINE_GROUPS 8
 //
 // Specialize BUFFER_WIDTH, BUFFER_HEIGHT and BUFFER_COLOR_SPACE at compile time.
 // This preserves the original per-resolution group-memory footprint. Color-space
