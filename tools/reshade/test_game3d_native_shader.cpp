@@ -137,9 +137,12 @@ namespace {
       require(known, std::string("Unrecognized native shader resource: ") + actual.Name);
       manifest << "  binding " << actual.Name << ' ' << actual.Type << ' ' << actual.BindPoint << '\n';
     }
-    if (std::string(entry.name) == "SunshineHostHorizontalCS" || std::string(entry.name) == "SunshineApplyUICS" ||
+    if (std::string(entry.name) == "SunshineApplyUICS" ||
         std::string(entry.name) == "SunshineUINearestTilesCS" || std::string(entry.name) == "SunshineUINearestReduceCS")
       require(has_ui_binding, "UI plane pass lost its independent b1 binding");
+    // UI pinning is its own pass after the scene field; the limiter never reads UI state.
+    if (std::string(entry.name) == "SunshineHostHorizontalCS")
+      require(!has_ui_binding, "Scene limiter must not pin UI");
     for (unsigned index = 0; index < shader.ConstantBuffers; ++index) {
       auto *buffer = reflection->GetConstantBufferByIndex(index);
       D3D11_SHADER_BUFFER_DESC description {};
@@ -209,8 +212,9 @@ int main(int argc, char **argv) {
         if (color == 3) entries.push_back({"SunshinePreparePQPS", "ps_5_0"});
         if (width <= 3840 && height <= 3840) {
           entries.push_back({"SunshineHostCandidateCS", "cs_5_0", 8, 8, 1});
-          entries.push_back({"SunshineHostVerticalCS", "cs_5_0", 32, 1, 1});
-          entries.push_back({"SunshineHostHorizontalCS", "cs_5_0", 32, 1, 1});
+          // Limiter groups: eight adjacent columns (rows) by eight chunks.
+          entries.push_back({"SunshineHostVerticalCS", "cs_5_0", 8, 8, 1});
+          entries.push_back({"SunshineHostHorizontalCS", "cs_5_0", 8, 8, 1});
           entries.push_back({"SunshineUINearestTilesCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUINearestReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIConflictCS", "cs_5_0", 8, 8, 1});
