@@ -1625,7 +1625,9 @@ namespace {
         // An abandoned consumer read of a reused slot finishes within frames;
         // a ring idle this long only ever served consumers that are gone. A
         // consumer that restarts while exporting still gets fresh resources.
+        // finished() is also true for a removed device; such a ring is never reused.
         const bool reuse = generation_ && !generation_->owner_destroyed && generation_->owner_runtime == runtime &&
+          generation_->completed() != UINT64_MAX &&
           generation_->native_swapchain == runtime->get_native() && same_ring(generation_->source, source) &&
           generation_->inactive_since != std::chrono::steady_clock::time_point{} && now - generation_->inactive_since >= idle_ring_reuse;
         if (reuse) {

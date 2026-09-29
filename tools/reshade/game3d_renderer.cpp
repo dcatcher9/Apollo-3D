@@ -8,6 +8,7 @@
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -24,6 +25,14 @@ namespace sunshine_game3d {
       T *operator->() const { return p; }
     };
     api::format typed(api::format f) { return api::format_to_default_typed(f, 0); }
+    // Value of an integer capability marker "#define NAME value"; zero when absent.
+    uint32_t shader_marker(std::string_view source, std::string_view name) {
+      const std::string key = "#define " + std::string(name) + ' ';
+      const auto at = source.find(key);
+      uint32_t value = 0;
+      if (at != std::string_view::npos) std::from_chars(source.data() + at + key.size(), source.data() + source.size(), value);
+      return value;
+    }
   }
   struct renderer::impl {
     api::device *device = nullptr;
@@ -92,14 +101,16 @@ namespace sunshine_game3d {
     std::array<api::format, 4> ui_candidate_formats{};
     ui_mask_channel consumed_channel = ui_mask_channel::alpha;
     bool mask_channel_supported = false;
-    // Older embedded replay shaders scan one line per 32-thread group and pin
+    // Lines per limiter group, from SUNSHINE_LIMITER_LINE_GROUPS. Zero for older
+    // embedded replay shaders, which scan one line per 32-thread group and pin
     // UI inside the horizontal pass.
-    bool tiled_limiters = false;
+    uint32_t limiter_lines = 0;
     // Older embedded replay shaders render two FP16 eye textures and pack them
     // in a second pass.
     bool packed_eyes = false;
-    // Older embedded replay shaders pin UI with one 32-thread group per row.
-    bool tiled_ui_pin = false;
+    // Rows per UI pinning group, from SUNSHINE_UI_PIN_LINE_GROUPS. Zero for
+    // older embedded replay shaders, which pin one row per 32-thread group.
+    uint32_t pin_lines = 0;
     bool nearest_ui_supported = false, nearest_ui_rendered = false;
     bool nearest_ui_attempted = false, nearest_ui_ready = false;
     bool front_limit_ui_supported = false, shallow_front_ui_supported = false;
@@ -224,9 +235,9 @@ namespace sunshine_game3d {
       shallow_front_ui_supported = shader_source().find("#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1") != std::string_view::npos;
       display_fraction_ui_supported = shader_source().find("#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1") != std::string_view::npos;
       mask_channel_supported = shader_source().find("#define SUNSHINE_UI_MASK_CHANNEL 1") != std::string_view::npos;
-      tiled_limiters = shader_source().find("#define SUNSHINE_LIMITER_LINE_GROUPS 8") != std::string_view::npos;
+      limiter_lines = shader_marker(shader_source(), "SUNSHINE_LIMITER_LINE_GROUPS");
       packed_eyes = shader_source().find("#define SUNSHINE_PACKED_EYES 1") != std::string_view::npos;
-      tiled_ui_pin = shader_source().find("#define SUNSHINE_UI_PIN_LINE_GROUPS 8") != std::string_view::npos;
+      pin_lines = shader_marker(shader_source(), "SUNSHINE_UI_PIN_LINE_GROUPS");
       if (!device->create_fence(0, api::fence_flags::none, &completion)) return false;
       if (device->get_api() == api::device_api::d3d12 &&
           (!device->create_resource_view({}, api::resource_usage::shader_resource, api::resource_view_desc(api::format::r32_float), &null_srv) ||
@@ -270,7 +281,7 @@ namespace sunshine_game3d {
       if (width <= 3840 && height <= 3840)
         if (!pipeline_create(candidate, "SunshineHostCandidateCS", true, vs) || !pipeline_create(vertical, "SunshineHostVerticalCS", true, vs) ||
             !pipeline_create(horizontal, "SunshineHostHorizontalCS", true, vs) ||
-            (tiled_limiters && !pipeline_create(ui_apply, "SunshineApplyUICS", true, vs))) return false;
+            (limiter_lines && !pipeline_create(ui_apply, "SunshineApplyUICS", true, vs))) return false;
       if (packed_eyes) return pipeline_create(pack, "SunshineRenderPackedPS", false, vs);
       return pipeline_create(eyes, "SunshineRenderEyesPS", false, vs) && pipeline_create(pack, "SunshinePackEyesPS", false, vs);
     }
@@ -831,7 +842,7 @@ namespace sunshine_game3d {
     if (w <= 3840 && h <= 3840) {
       entries.insert(entries.end(), {{"SunshineHostCandidateCS", "cs_5_0"}, {"SunshineHostVerticalCS", "cs_5_0"},
         {"SunshineHostHorizontalCS", "cs_5_0"}});
-      if (has("#define SUNSHINE_LIMITER_LINE_GROUPS 8") || has("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1"))
+      if (shader_marker(source, "SUNSHINE_LIMITER_LINE_GROUPS") || has("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1"))
         entries.push_back({"SunshineApplyUICS", "cs_5_0"});
       if (has("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1")) entries.push_back({"SunshineUIConflictCS", "cs_5_0"});
       if (has("#define SUNSHINE_UI_NEAREST_PLANE 1"))
@@ -995,7 +1006,7 @@ namespace sunshine_game3d {
     if (d.width <= 3840 && d.height <= 3840) {
       d.dispatch(cmd, impl::candidate, (d.width + 7) / 8, (d.height + 7) / 8, p, {api::resource_view{}, depth}, {impl::raw});
       d.mark(cmd, impl::mark_candidate);
-      const uint32_t group_lines = d.tiled_limiters ? 8u : 1u;
+      const uint32_t group_lines = std::max(d.limiter_lines, 1u);
       d.dispatch(cmd, impl::vertical, (d.width + group_lines - 1) / group_lines, 1, p, {api::resource_view{}, {}, {}, t[impl::raw].srv}, {impl::vertical_majorant, impl::vertical_field});
       d.mark(cmd, impl::mark_vertical);
       const auto ui_alpha = d.consumed_ui_source.handle ? alpha_source : t[impl::source].srv;
@@ -1012,12 +1023,12 @@ namespace sunshine_game3d {
       // shaders pin inside the horizontal pass unless a probe needs it apart.
       const std::array<api::resource_view, 15> field_inputs{ui_alpha, {}, {}, {}, t[impl::vertical_field].srv,
         {}, {}, {}, {}, d.nearest_ui_rendered ? t[impl::ui_plane_resolved].srv : api::resource_view{}};
-      const bool apply_ui = d.source_alpha_ui, pin_apart = d.tiled_limiters || probe_ui;
+      const bool apply_ui = d.source_alpha_ui, pin_apart = d.limiter_lines || probe_ui;
       if (pin_apart) d.source_alpha_ui = false;
       d.dispatch(cmd, impl::horizontal, (d.height + group_lines - 1) / group_lines, 1, p, field_inputs, {impl::field});
       d.source_alpha_ui = apply_ui;
       if (probe_ui) d.submit_adaptive_probe(cmd, ui_alpha, p);
-      const uint32_t pin_lines = d.tiled_ui_pin ? 8u : 1u;
+      const uint32_t pin_lines = std::max(d.pin_lines, 1u);
       if (pin_apart && apply_ui)
         d.dispatch(cmd, impl::ui_apply, (d.height + pin_lines - 1) / pin_lines, 1, p, field_inputs, {impl::field});
     }

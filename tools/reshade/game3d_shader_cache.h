@@ -21,9 +21,9 @@
 // Compiled bytecode for the production Game 3D shader. D3DCompile of the whole
 // source costs 100-300 ms per entry point, and the renderer used to run it on
 // the game's Present at every (re)configuration: about 2 s at a 4K start and
-// again after an HDR switch. Entry points now compile in parallel on the thread
-// pool while the game stays 2D; blobs are kept for the process and persisted
-// per user, so later launches only read them back. Explicit replay/test
+// again after an HDR switch. Entry points now load or compile in parallel on
+// the thread pool while the game stays 2D; blobs are kept for the process and
+// persisted per user, so later launches only read them back. Explicit replay/test
 // sources keep compiling synchronously and never touch this store.
 namespace sunshine_game3d::shader_cache {
   using blob = std::vector<std::uint8_t>;
@@ -72,8 +72,6 @@ namespace sunshine_game3d::shader_cache {
       std::mutex mutex;
       std::map<std::string, blob> blobs;
       std::map<std::string, std::shared_ptr<job_t>> jobs;
-      std::wstring directory;
-      bool directory_checked = false;
     };
     // Deliberately leaked: a pool callback may finish during process exit.
     inline store_t &store() {
@@ -110,41 +108,47 @@ namespace sunshine_game3d::shader_cache {
       for (unsigned char c : text) hash = (hash ^ c) * 1099511628211ull;
       return hash;
     }
-    // %LOCALAPPDATA%\Sunshine3D\game3d-shaders; empty when unavailable.
-    inline const std::wstring &directory(store_t &s) {
-      if (s.directory_checked) return s.directory;
-      s.directory_checked = true;
-      wchar_t base[MAX_PATH]{};
-      const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
-      if (!length || length >= MAX_PATH) return s.directory;
-      std::wstring path = std::wstring(base) + L"\\Sunshine3D";
-      CreateDirectoryW(path.c_str(), nullptr);
-      path += L"\\game3d-shaders";
-      CreateDirectoryW(path.c_str(), nullptr);
-      const DWORD attributes = GetFileAttributesW(path.c_str());
-      if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) return s.directory;
-      s.directory = path;
-      // Each shader build adds its own files. Drop those untouched for 30
-      // days and any abandoned temporary files; a live entry is recompiled once.
+    // %LOCALAPPDATA%\Sunshine3D\game3d-shaders; empty when unavailable. Only
+    // pool tasks touch the disk, so the game's Present never waits on it.
+    inline const std::wstring &directory() {
+      static const std::wstring value = [] {
+        wchar_t base[MAX_PATH]{};
+        const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+        if (!length || length >= MAX_PATH) return std::wstring();
+        std::wstring path = std::wstring(base) + L"\\Sunshine3D";
+        CreateDirectoryW(path.c_str(), nullptr);
+        path += L"\\game3d-shaders";
+        CreateDirectoryW(path.c_str(), nullptr);
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) ? path : std::wstring();
+      }();
+      return value;
+    }
+    // Each shader build adds its own files. Once per process, drop those
+    // untouched for 30 days (a live entry is recompiled once) and temporary
+    // files older than an hour (never another task's write in progress).
+    inline void prune_once() {
+      static std::atomic<bool> done{false};
+      const auto &path = directory();
+      if (path.empty() || done.exchange(true)) return;
       FILETIME now{};
       GetSystemTimeAsFileTime(&now);
       const auto ticks = [](const FILETIME &t) { return (std::uint64_t(t.dwHighDateTime) << 32) | t.dwLowDateTime; };
-      const std::uint64_t cutoff = ticks(now) - 30ull * 24 * 3600 * 10000000ull;
+      const std::uint64_t hour = 3600ull * 10000000ull;
       WIN32_FIND_DATAW found{};
       const HANDLE search = FindFirstFileW((path + L"\\*").c_str(), &found);
-      if (search != INVALID_HANDLE_VALUE) {
-        do {
-          if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-          const std::wstring name = found.cFileName;
-          if (name.find(L".tmp") != std::wstring::npos || ticks(found.ftLastWriteTime) < cutoff)
-            DeleteFileW((path + L"\\" + name).c_str());
-        } while (FindNextFileW(search, &found));
-        FindClose(search);
-      }
-      return s.directory;
+      if (search == INVALID_HANDLE_VALUE) return;
+      do {
+        if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        const std::wstring name = found.cFileName;
+        const std::uint64_t age = ticks(now) - ticks(found.ftLastWriteTime);
+        if (age > (name.find(L".tmp") != std::wstring::npos ? hour : 30 * 24 * hour))
+          DeleteFileW((path + L"\\" + name).c_str());
+      } while (FindNextFileW(search, &found));
+      FindClose(search);
     }
-    inline std::wstring file_path(store_t &s, const std::string &key) {
-      const auto &dir = directory(s);
+    inline std::wstring file_path(const std::string &key) {
+      const auto &dir = directory();
       if (dir.empty()) return {};
       wchar_t name[40];
       std::swprintf(name, 40, L"\\%016llx.dxbc", static_cast<unsigned long long>(fnv1a(key)));
@@ -188,32 +192,34 @@ namespace sunshine_game3d::shader_cache {
       std::shared_ptr<job_t> job;
       entry_point entry;
     };
-    inline void CALLBACK compile_task(PTP_CALLBACK_INSTANCE, void *context) {
+    // Loads the entry from disk, or compiles and persists it.
+    inline void CALLBACK prepare_task(PTP_CALLBACK_INSTANCE, void *context) {
       std::unique_ptr<task_t> task(static_cast<task_t *>(context));
       auto &job = *task->job;
+      const auto key = blob_key(job.key, task->entry);
+      const auto path = file_path(key);
+      prune_once();
       blob code;
-      const bool okay = !sunshine_addon_lifetime::stopping() && compile(job.config, task->entry, code);
-      auto &s = store();
-      std::wstring path;
-      std::string key;
+      bool okay = !sunshine_addon_lifetime::stopping();
+      if (okay && !read_file(path, key, code)) {
+        okay = compile(job.config, task->entry, code);
+        if (okay) write_file(path, key, code);
+      }
       if (okay) {
-        key = blob_key(job.key, task->entry);
-        std::lock_guard<std::mutex> lock(s.mutex);
-        path = file_path(s, key);
-        s.blobs[key] = code;
+        std::lock_guard<std::mutex> lock(store().mutex);
+        store().blobs[key] = std::move(code);
       } else {
         job.failed.store(true, std::memory_order_release);
       }
-      if (okay) write_file(path, key, code);
       job.remaining.fetch_sub(1, std::memory_order_acq_rel);
     }
   }
 
   enum class state { ready, pending, failed };
 
-  // Makes every listed entry point available. Memory and disk hits are ready
-  // at once; otherwise one pool task per missing entry compiles it and this
-  // returns pending until all of them finish.
+  // Makes every listed entry point available. Entries already in memory are
+  // ready at once; otherwise one pool task per missing entry loads it from
+  // disk or compiles it, and this returns pending until all of them finish.
   inline state prepare(const configuration &config, const std::vector<entry_point> &entries) {
     auto &s = detail::store();
     const auto key = detail::config_key(config);
@@ -229,13 +235,8 @@ namespace sunshine_game3d::shader_cache {
         s.jobs.erase(running);
       }
       std::vector<entry_point> missing;
-      for (const auto &entry : entries) {
-        const auto name = detail::blob_key(key, entry);
-        if (s.blobs.count(name)) continue;
-        blob code;
-        if (detail::read_file(detail::file_path(s, name), name, code)) s.blobs.emplace(name, std::move(code));
-        else missing.push_back(entry);
-      }
+      for (const auto &entry : entries)
+        if (!s.blobs.count(detail::blob_key(key, entry))) missing.push_back(entry);
       if (missing.empty()) return state::ready;
       job = std::make_shared<detail::job_t>();
       job->source.assign(config.source);
@@ -249,11 +250,11 @@ namespace sunshine_game3d::shader_cache {
     // Submitted outside the lock: each task takes it to publish its blob.
     for (const auto &entry : job->entries) {
       auto *task = new detail::task_t{job, entry};
-      // Without a pool thread, compile here rather than never finish.
-      if (!TrySubmitThreadpoolCallback(detail::compile_task, task, nullptr)) detail::compile_task(nullptr, task);
+      // Without a pool thread, prepare here rather than never finish.
+      if (!TrySubmitThreadpoolCallback(detail::prepare_task, task, nullptr)) detail::prepare_task(nullptr, task);
     }
     char text[128];
-    std::snprintf(text, sizeof(text), "Sunshine Game 3D: compiling %u shader entries off the present thread (%ux%u, color %u)",
+    std::snprintf(text, sizeof(text), "Sunshine Game 3D: preparing %u shader entries off the present thread (%ux%u, color %u)",
       unsigned(job->entries.size()), config.width, config.height, config.color);
     sunshine_log::message(reshade::log::level::info, text);
     return state::pending;

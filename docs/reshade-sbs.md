@@ -135,12 +135,14 @@ synchronous build.
 
 The renderer compiles its HLSL for each swapchain size and color space. D3DCompile of the full
 source costs 100-300 ms per entry point, and doing it on the Present froze Hogwarts Legacy for
-about 2 s at start and 1.4 s after an HDR switch. The add-on now compiles every entry point a
-configuration can use (including lazily created UI passes) in parallel on the thread pool. Until
+about 2 s at start and 1.4 s after an HDR switch. The add-on now loads or compiles every entry point a
+configuration can use (including lazily created UI passes) in parallel on the thread pool; the
+Present only looks up bytecode already in memory and never touches the disk. Until
 they finish the game stays 2D and the overlay reports "2D: preparing Game 3D shaders". Bytecode is
 kept for the process and written to `%LOCALAPPDATA%\Sunshine3D\game3d-shaders`, keyed by the
 shader's build SHA-256, the loaded `d3dcompiler_47.dll`, the defines and the entry point. A later
-launch loads it without compiling. Files untouched for 30 days are pruned. A failed compile is
+launch loads it without compiling, and a damaged file is recompiled. Once per process the first
+pool task prunes files untouched for 30 days and stale temporary files. A failed compile is
 remembered rather than retried every Present. Replay and test renderers with explicit sources
 still compile synchronously and never use the cache. With the cache in place the slowest renderer
 setup Present went from 1,969 ms to about 10 ms in the 4K provider fixture.
@@ -155,8 +157,10 @@ each side, and a look-ahead cursor yields each texel's distance. Rows without UI
 once, and no row is held in group memory. With UI active the pass fell from about 0.1 to 0.02 ms in
 the 4K provider fixture; distances, and therefore the pinned field, are unchanged. Results are byte-identical. At 4K on an idle GPU the vertical pass
 went from 0.44 to 0.17 ms and the horizontal pass, including the UI pass, from 0.35 to 0.24 ms; the
-whole renderer went from 1.38 to 0.91 ms. The shader declares `SUNSHINE_LIMITER_LINE_GROUPS`;
-a dump whose embedded shader predates it replays with one group per line and in-limiter UI
+whole renderer went from 1.38 to 0.91 ms. The shader declares the lines per group as
+`SUNSHINE_LIMITER_LINE_GROUPS` and `SUNSHINE_UI_PIN_LINE_GROUPS`; the renderer sizes its dispatches
+from those values, and the shader test requires them to match the reflected thread-group shapes.
+A dump whose embedded shader predates them replays with one group per line and in-limiter UI
 pinning. Replaying two Hogwarts Legacy dumps with either shader reproduced every captured
 artifact byte-exactly.
 

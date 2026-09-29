@@ -608,13 +608,7 @@ namespace {
     warp.context->CSSetShaderResources(0u, 1u, srvs);
     warp.context->CSSetUnorderedAccessViews(0u, uav_count, uavs, nullptr);
     warp.context->CSSetConstantBuffers(0u, 2u, constant_buffers);
-    // Each limiter group owns limiter_group_lines adjacent columns or rows.
-    namespace v2 = models::depth_coordinate_v2;
-    warp.context->Dispatch(
-      (dispatch_lines + v2::limiter_group_lines - 1u) / v2::limiter_group_lines,
-      1u,
-      1u
-    );
+    warp.context->Dispatch(models::host_sbs_v2_gpu::limiter_groups(dispatch_lines), 1u, 1u);
 
     ID3D11ShaderResourceView *null_srvs[] = {nullptr};
     ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr};

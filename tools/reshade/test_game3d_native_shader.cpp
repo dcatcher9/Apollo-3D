@@ -194,6 +194,14 @@ int main(int argc, char **argv) {
     require(input.good(), "Cannot read native shader source");
     const std::string source((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
     std::filesystem::create_directories(output);
+    // The renderer sizes limiter and UI pinning dispatches from these markers.
+    const auto marker = [&source](const std::string &name) {
+      const auto key = "#define " + name + ' ';
+      const auto at = source.find(key);
+      require(at != std::string::npos, "Missing shader marker " + name);
+      return unsigned(std::stoul(source.substr(at + key.size())));
+    };
+    const unsigned limiter_lines = marker("SUNSHINE_LIMITER_LINE_GROUPS"), pin_lines = marker("SUNSHINE_UI_PIN_LINE_GROUPS");
     unsigned compiled = 0;
     for (const auto [width, height] : std::array<std::array<unsigned, 2>, 6> {{
       {16, 8}, {64, 36}, {1920, 1080}, {3840, 2160}, {2160, 3840}, {4800, 2700},
@@ -210,13 +218,13 @@ int main(int argc, char **argv) {
         if (color == 3) entries.push_back({"SunshinePreparePQPS", "ps_5_0"});
         if (width <= 3840 && height <= 3840) {
           entries.push_back({"SunshineHostCandidateCS", "cs_5_0", 8, 8, 1});
-          // Limiter groups: eight adjacent columns (rows) by eight chunks.
-          entries.push_back({"SunshineHostVerticalCS", "cs_5_0", 8, 8, 1});
-          entries.push_back({"SunshineHostHorizontalCS", "cs_5_0", 8, 8, 1});
+          // Limiter groups: the marked number of adjacent columns (rows) by eight chunks.
+          entries.push_back({"SunshineHostVerticalCS", "cs_5_0", limiter_lines, 8, 1});
+          entries.push_back({"SunshineHostHorizontalCS", "cs_5_0", limiter_lines, 8, 1});
           entries.push_back({"SunshineUINearestTilesCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUINearestReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIConflictCS", "cs_5_0", 8, 8, 1});
-          entries.push_back({"SunshineApplyUICS", "cs_5_0", 8, 8, 1});
+          entries.push_back({"SunshineApplyUICS", "cs_5_0", pin_lines, 8, 1});
           entries.push_back({"SunshineUIDetectionTilesCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUIDetectionReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIDetectionMaskCS", "cs_5_0", 8, 8, 1});
