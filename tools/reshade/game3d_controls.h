@@ -131,7 +131,7 @@ namespace sunshine_game3d {
   // Shared manual-mode state. Live Auto checks source quality independently.
   alpha_auto_policy &source_alpha_startup_policy();
 
-  enum class automatic_phase { unavailable, waiting_for_depth, calibrating, ready, suspended, unsupported_resolution, renderer_unavailable };
+  enum class automatic_phase { unavailable, waiting_for_depth, calibrating, ready, suspended, unsupported_resolution, renderer_unavailable, renderer_preparing };
   enum class automatic_scale_basis { unknown, camera_matrix, relative_depth, linear_distance };
   enum class automatic_scale_state { unavailable, pending, active, held };
   struct automatic_scale {

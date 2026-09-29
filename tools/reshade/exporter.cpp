@@ -843,11 +843,15 @@ namespace {
         auto &proof = runtimes_[runtime];
         if (!proof.renderer) proof.renderer = std::make_unique<sunshine_game3d::renderer>();
         renderer = proof.renderer.get();
-        if (!renderer->configure(runtime, backbuffer, swapchain->get_color_space())) {
-          if (diagnostic_owner) debug_dump_.unavailable("The foreground Game 3D renderer is unavailable for this swapchain format, extent or transition.");
+        // Shaders compile on the thread pool; the game stays 2D until they are ready.
+        if (!renderer->configure(runtime, backbuffer, swapchain->get_color_space(), {}, true)) {
+          const bool preparing = renderer->preparing();
+          if (diagnostic_owner) debug_dump_.unavailable(preparing ? "The foreground Game 3D renderer is still compiling its shaders." :
+            "The foreground Game 3D renderer is unavailable for this swapchain format, extent or transition.");
           deactivate(runtime);
           sunshine_game3d::automatic_status unavailable;
-          unavailable.phase = sunshine_game3d::automatic_phase::renderer_unavailable;
+          unavailable.phase = preparing ? sunshine_game3d::automatic_phase::renderer_preparing :
+            sunshine_game3d::automatic_phase::renderer_unavailable;
           publish_automatic_ui(runtime, unavailable);
           return;
         }

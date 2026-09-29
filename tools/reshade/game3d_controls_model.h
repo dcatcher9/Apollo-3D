@@ -108,6 +108,7 @@ namespace sunshine_game3d {
       case automatic_phase::suspended: return "2D: automatic depth paused";
       case automatic_phase::unsupported_resolution: return "2D: source resolution exceeds 3840 x 3840";
       case automatic_phase::renderer_unavailable: return "2D: Game 3D renderer unavailable for this display mode";
+      case automatic_phase::renderer_preparing: return "2D: preparing Game 3D shaders";
       case automatic_phase::ready: break;
     }
     // Normal depth remains visible at zero strength. Stereo depth follows the

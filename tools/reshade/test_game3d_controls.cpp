@@ -378,7 +378,7 @@ namespace {
     check(label() == "Depth preview: stereo depth", "Stereo depth was labeled as the game image");
     for (auto phase : {automatic_phase::unavailable, automatic_phase::waiting_for_depth,
         automatic_phase::calibrating, automatic_phase::suspended, automatic_phase::unsupported_resolution,
-        automatic_phase::renderer_unavailable}) {
+        automatic_phase::renderer_unavailable, automatic_phase::renderer_preparing}) {
       status.phase = phase;
       for (int view = 0; view < 3; ++view) {
         settings.depth_view = view;

@@ -140,8 +140,12 @@ namespace sunshine_game3d {
     ~renderer();
     renderer(const renderer &) = delete;
     renderer &operator=(const renderer &) = delete;
+    // Background preparation (production shader only) compiles missing
+    // entry points on the thread pool and returns false while they are
+    // pending; preparing() then distinguishes that from an unusable mode.
     bool configure(reshade::api::effect_runtime *runtime, reshade::api::resource backbuffer,
-      reshade::api::color_space color, std::string_view source_override = {});
+      reshade::api::color_space color, std::string_view source_override = {}, bool prepare_in_background = false);
+    bool preparing() const { return preparing_; }
     static std::string_view shader_source();
     std::string_view active_shader_source() const;
     // Mode-5 live adaptation uses caller-owned source identity only. Omitting
@@ -234,5 +238,6 @@ namespace sunshine_game3d {
     std::unique_ptr<impl> data_;
     std::uint64_t ui_source_capture_ = 0;
     std::array<std::uint64_t, 4> ui_candidate_captures_{};
+    bool preparing_ = false;
   };
 }

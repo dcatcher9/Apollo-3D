@@ -133,6 +133,18 @@ enqueues. At most 512 lines wait, later ones are counted and reported as dropped
 lines are discarded once DLL detach begins. Unit tests that intercept ReShade's log use a
 synchronous build.
 
+The renderer compiles its HLSL for each swapchain size and color space. D3DCompile of the full
+source costs 100-300 ms per entry point, and doing it on the Present froze Hogwarts Legacy for
+about 2 s at start and 1.4 s after an HDR switch. The add-on now compiles every entry point a
+configuration can use (including lazily created UI passes) in parallel on the thread pool. Until
+they finish the game stays 2D and the overlay reports "2D: preparing Game 3D shaders". Bytecode is
+kept for the process and written to `%LOCALAPPDATA%\Sunshine3D\game3d-shaders`, keyed by the
+shader's build SHA-256, the loaded `d3dcompiler_47.dll`, the defines and the entry point. A later
+launch loads it without compiling. Files untouched for 30 days are pruned. A failed compile is
+remembered rather than retried every Present. Replay and test renderers with explicit sources
+still compile synchronously and never use the cache. With the cache in place the slowest renderer
+setup Present went from 1,969 ms to about 10 ms in the 4K provider fixture.
+
 The vertical and horizontal limit passes are mechanical translations of the host shaders, whose
 tiling is described in [Host SBS pipeline](host-sbs.md). Each group owns eight adjacent columns or
 rows, so the passes no longer hold whole lines in group memory. UI pinning always runs as its own

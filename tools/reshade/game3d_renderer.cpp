@@ -3,6 +3,7 @@
 #include "game3d_shader_source.h"
 #include <reshade.hpp>
 #include "async_log.h"
+#include "game3d_shader_cache.h"
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
@@ -179,20 +180,18 @@ namespace sunshine_game3d {
       return (extra & api::resource_usage::render_target) == api::resource_usage::undefined ||
         device->create_resource_view(t.resource, api::resource_usage::render_target, api::resource_view_desc(format), &t.rtv);
     }
-    bool compile(const char *entry, const char *target, com<ID3DBlob> &code) {
-      const auto w = std::to_string(width), h = std::to_string(height), c = std::to_string(color);
-      const D3D_SHADER_MACRO defines[]{{"BUFFER_WIDTH", w.c_str()}, {"BUFFER_HEIGHT", h.c_str()}, {"BUFFER_COLOR_SPACE", c.c_str()}, {nullptr, nullptr}};
-      com<ID3DBlob> errors;
-      const auto source = shader_source();
-      const HRESULT result = D3DCompile(source.data(), source.size(),
-        "Sunshine Game 3D", defines, nullptr, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code.put(), errors.put());
-      if (FAILED(result) && errors.p) sunshine_log::message(reshade::log::level::error, static_cast<const char *>(errors->GetBufferPointer()));
-      return SUCCEEDED(result);
+    // Prepared production bytecode comes from the shared store; anything else
+    // (explicit replay/test sources, an entry missing from the store) compiles here.
+    bool precompiled = false;
+    bool compile(const char *entry, const char *target, shader_cache::blob &code) {
+      const shader_cache::configuration config{shader_source(), width, height, color};
+      if (precompiled && !(code = shader_cache::find(config, {entry, target})).empty()) return true;
+      return shader_cache::compile(config, {entry, target}, code);
     }
     bool pipeline_create(pass id, const char *entry, bool compute, api::shader_desc vs) {
-      com<ID3DBlob> code;
+      shader_cache::blob code;
       if (!compile(entry, compute ? "cs_5_0" : "ps_5_0", code)) return false;
-      api::shader_desc shader{code->GetBufferPointer(), code->GetBufferSize()};
+      api::shader_desc shader{code.data(), code.size()};
       if (compute) {
         const api::pipeline_subobject part{api::pipeline_subobject_type::compute_shader, 1, &shader};
         return device->create_pipeline(layout, 1, &part, &pipelines[id]);
@@ -261,9 +260,9 @@ namespace sunshine_game3d {
           if (!texture_create(id, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target)) return false;
       if (!texture_create(packed, width * 2, height, packed_format(),
           api::resource_usage::render_target | api::resource_usage::copy_source)) return false;
-      com<ID3DBlob> vs_code;
+      shader_cache::blob vs_code;
       if (!compile("PostProcessVS", "vs_5_0", vs_code)) return false;
-      const api::shader_desc vs{vs_code->GetBufferPointer(), vs_code->GetBufferSize()};
+      const api::shader_desc vs{vs_code.data(), vs_code.size()};
       if (color == 3 && !pipeline_create(pq, "SunshinePreparePQPS", false, vs)) return false;
       if (width <= 3840 && height <= 3840)
         if (!pipeline_create(candidate, "SunshineHostCandidateCS", true, vs) || !pipeline_create(vertical, "SunshineHostVerticalCS", true, vs) ||
@@ -820,7 +819,31 @@ namespace sunshine_game3d {
   }
   std::string_view renderer::shader_source() { return {game3d_shader_source, sizeof(game3d_shader_source) - 1}; }
   std::string_view renderer::active_shader_source() const { return data_ ? data_->shader_source() : shader_source(); }
-  bool renderer::configure(api::effect_runtime *runtime, api::resource backbuffer, api::color_space color, std::string_view source_override) {
+  // Every entry point a renderer for this configuration may create, eagerly
+  // or on first use, so background preparation leaves no compile on Present.
+  static std::vector<shader_cache::entry_point> shader_entries(std::string_view source, uint32_t w, uint32_t h, uint32_t c) {
+    const auto has = [source](const char *marker) { return source.find(marker) != std::string_view::npos; };
+    std::vector<shader_cache::entry_point> entries{{"PostProcessVS", "vs_5_0"}};
+    if (c == 3) entries.push_back({"SunshinePreparePQPS", "ps_5_0"});
+    if (w <= 3840 && h <= 3840) {
+      entries.insert(entries.end(), {{"SunshineHostCandidateCS", "cs_5_0"}, {"SunshineHostVerticalCS", "cs_5_0"},
+        {"SunshineHostHorizontalCS", "cs_5_0"}});
+      if (has("#define SUNSHINE_LIMITER_LINE_GROUPS 8") || has("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1"))
+        entries.push_back({"SunshineApplyUICS", "cs_5_0"});
+      if (has("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1")) entries.push_back({"SunshineUIConflictCS", "cs_5_0"});
+      if (has("#define SUNSHINE_UI_NEAREST_PLANE 1"))
+        entries.insert(entries.end(), {{"SunshineUINearestTilesCS", "cs_5_0"}, {"SunshineUINearestReduceCS", "cs_5_0"}});
+      if (has("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1"))
+        entries.insert(entries.end(), {{"SunshineUIDetectionTilesCS", "cs_5_0"}, {"SunshineUIDetectionReduceCS", "cs_5_0"},
+          {"SunshineUIDetectionMaskCS", "cs_5_0"}});
+    }
+    if (has("#define SUNSHINE_PACKED_EYES 1")) entries.push_back({"SunshineRenderPackedPS", "ps_5_0"});
+    else entries.insert(entries.end(), {{"SunshineRenderEyesPS", "ps_5_0"}, {"SunshinePackEyesPS", "ps_5_0"}});
+    return entries;
+  }
+  bool renderer::configure(api::effect_runtime *runtime, api::resource backbuffer, api::color_space color, std::string_view source_override,
+      bool prepare_in_background) {
+    preparing_ = false;
     auto *device = runtime->get_device();
     const auto desc = device->get_resource_desc(backbuffer);
     const auto format = typed(desc.texture.format);
@@ -835,11 +858,21 @@ namespace sunshine_game3d {
         data_->source_format == typed(desc.texture.format) && data_->color == c &&
         data_->source_override == source_override) return !data_->failed;
     if (data_ && !data_->idle()) return false;
+    const bool background = prepare_in_background && source_override.empty();
+    if (background) {
+      const auto state = shader_cache::prepare({shader_source(), desc.texture.width, desc.texture.height, c},
+        shader_entries(shader_source(), desc.texture.width, desc.texture.height, c));
+      if (state != shader_cache::state::ready) {
+        preparing_ = state == shader_cache::state::pending;
+        return false;
+      }
+    }
     ui_source_capture_ = 0;
     ui_candidate_captures_.fill(0);
     data_.reset();
     auto next = std::make_unique<impl>();
     next->source_override.assign(source_override);
+    next->precompiled = background;
     if (!next->initialize(runtime, desc, c)) return false;
     data_ = std::move(next);
     sunshine_log::message(reshade::log::level::info, "Sunshine Game 3D: add-on GPU renderer ready (no FX file required)");
