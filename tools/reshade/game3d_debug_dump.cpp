@@ -143,6 +143,11 @@ namespace sunshine_game3d {
           {"covered_pixels", coverage.covered}, {"total_pixels", coverage.pixels},
           {"sample_sequence", coverage.sample_sequence}, {"sample_tick_ms", coverage.sample_tick_ms},
           {"sampled_source", coverage.source_kind},
+          {"sampled_evidence", {{"candidates", coverage.evidence.candidates},
+            {"alpha_covered", coverage.evidence.alpha_covered}, {"alpha_invalid", coverage.evidence.alpha_invalid},
+            {"hudless_changed", coverage.evidence.hudless_changed}, {"hudless_unchanged", coverage.evidence.hudless_unchanged},
+            {"hudless_invalid", coverage.evidence.hudless_invalid}, {"matching_tiles", coverage.evidence.matching_tiles},
+            {"hudless_lit", coverage.evidence.hudless_lit}}},
           {"meaning", "Auto selects and validates current-frame candidates on the GPU without review. These bounded asynchronous statistics describe a completed earlier detection sample and never authorize current pixels. ui_source_color contains the actual resolved red-channel mask for this frame, possibly empty. Replay uses that frozen mask without rerunning detection."}};
       }
       const auto &fg = f.source_alpha_decision.fg;

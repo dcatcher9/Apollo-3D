@@ -5,6 +5,7 @@
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -42,7 +43,8 @@ namespace sunshine_game3d {
     struct texture { api::resource resource{}; api::resource_view srv{}, uav{}, rtv{}; };
     enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field,
       ui_plane_tiles, ui_plane_resolved, left, right, packed, ui_source, ui_source_second, ui_source_third,
-      ui_conflict_statistics, detection_statistics, detection_decision, detected_mask, texture_count };
+      ui_conflict_statistics, detection_statistics, detection_decision, detected_mask,
+      retained_color, retained_color_last = retained_color + ui_detection_inputs::max_retained_presents - 1, texture_count };
     std::array<texture, texture_count> textures{};
     std::vector<std::pair<api::resource, api::resource_view>> backbuffers;
     // Render-target views of the current export generation's slot textures.
@@ -54,6 +56,19 @@ namespace sunshine_game3d {
     render_parameters pack_parameters;
     api::fence completion{};
     uint64_t sequence = 0;
+    // Timestamps per presentation: begin, render, source, detection,
+    // conditioning, eyes, pack. A small ring is read after its fence completes.
+    enum profile_mark { mark_begin, mark_render, mark_source, mark_detection, mark_linearize, mark_candidate, mark_vertical,
+      mark_conditioning, mark_eyes, mark_pack, mark_count };
+    static constexpr uint32_t profile_frames = 4;
+    struct profile_frame { uint64_t fence{}; uint32_t written{}; };
+    api::query_heap profile_heap{};
+    bool profile_attempted{}, profile_ready{}, profile_open{};
+    double profile_ticks_per_ms{};
+    uint32_t profile_slot{};
+    std::array<profile_frame, profile_frames> profile_ring{};
+    gpu_timing profile_window{};
+    std::array<double, gpu_timing::stage_count> profile_sum_ms{};
     // pending: this presentation recorded work awaiting finish_present.
     // unsignaled: an earlier presentation's work awaits the next signal.
     bool pending = false, unsignaled = false, failed = false;
@@ -78,6 +93,21 @@ namespace sunshine_game3d {
     bool display_fraction_ui_supported = false;
     alpha_auto_decision consumed_auto;
     bool detection_attempted{}, detection_ready{}, detection_active{}, detection_pending{}, detection_awaiting_signal{};
+    // Decision, then candidate bits with HUD-less counts, alpha coverage,
+    // invalid alpha, and lit HUD-less pixels.
+    static constexpr uint32_t detection_decision_texels = 5;
+    // detected_mask holds a HUD-less-capable decision that generated presents
+    // may reuse for a bounded number of presents.
+    bool detection_mask_ready{};
+    uint32_t detection_holds{};
+    // Presented colors kept for late HUD-less captures, created on first need.
+    // Each slot records the Present number it holds; zero is empty.
+    bool retention_wanted{}, retention_attempted{}, retention_ready{};
+    // Retention stops this many Presents after the last late capture needed it.
+    static constexpr uint64_t retention_linger_presents = 120;
+    uint64_t retention_requested_present{};
+    std::array<uint64_t, ui_detection_inputs::max_retained_presents> retained_present{};
+    uint64_t present_number{};
     uint32_t detection_bits{}, detection_pending_bits{};
     float difference_threshold = 4.f / 1023.f;
     uint64_t detection_fence{}, detection_last_submit{}, detection_submitted{}, detection_mapped{};
@@ -108,6 +138,7 @@ namespace sunshine_game3d {
         (!completion.handle || device->get_completed_fence_value(completion) >= sequence);
     }
     ~impl() {
+      if (profile_heap.handle) device->destroy_query_heap(profile_heap);
       for (auto &[resource, view] : backbuffers) device->destroy_resource_view(view);
       for (auto &[resource, view] : export_views) device->destroy_resource_view(view);
       for (auto &t : textures) {
@@ -257,6 +288,89 @@ namespace sunshine_game3d {
         cmd->push_descriptors(stage, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
     }
     api::format packed_format() const { return color == 1 ? api::format::r10g10b10a2_unorm : api::format::r16g16b16a16_float; }
+    bool prepare_profile() {
+      if (profile_attempted) return profile_ready;
+      profile_attempted = true;
+      const auto frequency = queue->get_timestamp_frequency();
+      if (!frequency || !device->create_query_heap(api::query_type::timestamp, profile_frames * mark_count, &profile_heap))
+        return false;
+      profile_ticks_per_ms = double(frequency) / 1000.0;
+      return profile_ready = true;
+    }
+    // Reads completed frames into the window; never waits on the GPU.
+    void collect_profile() {
+      if (!profile_ready) return;
+      const auto completed = device->get_completed_fence_value(completion);
+      for (uint32_t i = 0; i != profile_frames; ++i) {
+        auto &frame = profile_ring[i];
+        if (!frame.written || completed == UINT64_MAX || completed < frame.fence) continue;
+        // ReShade refuses a range containing a query this frame never wrote,
+        // so read each written timestamp on its own.
+        std::array<uint64_t, mark_count> ticks{};
+        bool read = true;
+        for (unsigned m = 0; m != mark_count; ++m)
+          if (frame.written >> m & 1u)
+            read = read && device->get_query_heap_results(profile_heap, api::query_type::timestamp,
+              i * mark_count + m, 1, &ticks[m], sizeof(uint64_t));
+        if (!read) continue; // Not resolved yet; retry on a later collection.
+        const auto written = frame.written;
+        frame.written = 0;
+        const auto has = [written](unsigned mark) { return (written >> mark & 1u) != 0; };
+        if (!has(mark_render) || !has(mark_eyes)) continue;
+        const auto span = [&](unsigned from, unsigned to) {
+          return has(from) && has(to) && ticks[to] >= ticks[from] ? double(ticks[to] - ticks[from]) / profile_ticks_per_ms : 0.0;
+        };
+        const unsigned first = has(mark_begin) ? mark_begin : mark_render, last = has(mark_pack) ? mark_pack : mark_eyes;
+        const std::array<double, gpu_timing::stage_count> ms{span(mark_begin, mark_render), span(mark_render, mark_source),
+          span(mark_source, mark_detection), span(mark_detection, mark_linearize), span(mark_linearize, mark_candidate),
+          span(mark_candidate, mark_vertical), span(mark_vertical, mark_conditioning), span(mark_conditioning, mark_eyes),
+          span(mark_eyes, mark_pack), span(first, last)};
+        ++profile_window.frames;
+        for (unsigned s = 0; s != gpu_timing::stage_count; ++s) {
+          profile_sum_ms[s] += ms[s];
+          profile_window.max_ms[s] = std::max(profile_window.max_ms[s], ms[s]);
+        }
+      }
+    }
+    void mark(api::command_list *cmd, profile_mark which) {
+      if (!profile_ready) return;
+      if (!profile_open) {
+        // The first mark of a presentation claims the next slot, dropping an
+        // unread frame; this presentation's completion signal retires it.
+        profile_slot = (profile_slot + 1) % profile_frames;
+        profile_ring[profile_slot] = {sequence + 1, 0};
+        profile_open = true;
+      }
+      profile_ring[profile_slot].written |= 1u << which;
+      cmd->end_query(profile_heap, api::query_type::timestamp, profile_slot * mark_count + which);
+    }
+    bool prepare_retention() {
+      if (retention_attempted) return retention_ready;
+      retention_attempted = true;
+      for (unsigned i = 0; i != ui_detection_inputs::max_retained_presents; ++i)
+        if (!texture_create(texture_id(retained_color + i), width, height, source_format, api::resource_usage::copy_dest)) return false;
+      return retention_ready = true;
+    }
+    api::resource_view retained_view(uint32_t presents_ago) const {
+      if (!retention_ready || !presents_ago || presents_ago > present_number) return {};
+      const auto wanted = present_number - presents_ago;
+      for (unsigned i = 0; i != retained_present.size(); ++i)
+        if (retained_present[i] && retained_present[i] == wanted) return textures[retained_color + i].srv;
+      return {};
+    }
+    // Keep this Present's source color, replacing the oldest retained one.
+    void retain_color(api::command_list *cmd) {
+      if (!retention_wanted || present_number - retention_requested_present > retention_linger_presents ||
+          !prepare_retention() || !present_number) return;
+      const auto slot = unsigned(present_number % retained_present.size());
+      const auto target = textures[retained_color + slot].resource, from = textures[source].resource;
+      cmd->barrier(from, api::resource_usage::shader_resource, api::resource_usage::copy_source);
+      cmd->barrier(target, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
+      cmd->copy_resource(from, target);
+      cmd->barrier(target, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
+      cmd->barrier(from, api::resource_usage::copy_source, api::resource_usage::shader_resource);
+      retained_present[slot] = present_number;
+    }
     // The final side-by-side pass. Its target rests in `resting` between owners.
     void record_pack(api::command_list *cmd, api::resource target, api::resource_view view, api::resource_usage resting) {
       cmd->barrier(target, resting, api::resource_usage::render_target);
@@ -270,6 +384,7 @@ namespace sunshine_game3d {
       cmd->draw(3, 1, 0, 0);
       cmd->bind_render_targets_and_depth_stencil(0, nullptr);
       cmd->barrier(target, api::resource_usage::render_target, resting);
+      mark(cmd, mark_pack);
       pack_owed = false;
     }
     void draw(api::command_list *cmd, pass id, uint32_t w, std::initializer_list<texture_id> targets,
@@ -336,8 +451,8 @@ namespace sunshine_game3d {
       if (detection_attempted) return detection_ready;
       detection_attempted = true;
       if (shader_source().find("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") == std::string_view::npos ||
-          !texture_create(detection_statistics, 16, 48, api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
-          !texture_create(detection_decision, 1, 1, api::format::r32g32b32a32_uint,
+          !texture_create(detection_statistics, 16, 64, api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
+          !texture_create(detection_decision, detection_decision_texels, 1, api::format::r32g32b32a32_uint,
             api::resource_usage::unordered_access | api::resource_usage::copy_source) ||
           !texture_create(detected_mask, width, height, api::format::r32_float, api::resource_usage::unordered_access) ||
           !pipeline_create(detection_tiles, "SunshineUIDetectionTilesCS", true, {}) ||
@@ -346,6 +461,7 @@ namespace sunshine_game3d {
       if (context11.p) {
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = desc.Height = desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+        desc.Width = detection_decision_texels;
         desc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
         desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         if (FAILED(reinterpret_cast<ID3D11Device *>(device->get_native())->CreateTexture2D(&desc, nullptr,
@@ -374,7 +490,7 @@ namespace sunshine_game3d {
           input.now_ms < detection_pending_source.now_ms || input.now_ms - detection_pending_source.now_ms > 500) {
         detection_pending = false; detection_latest = {}; return;
       }
-      std::array<uint32_t, 4> counts{};
+      std::array<uint32_t, 4 * detection_decision_texels> counts{};
       bool read = false;
       ++detection_mapped;
       if (context11.p) {
@@ -403,12 +519,23 @@ namespace sunshine_game3d {
       detection_latest.sample_tick_ms = detection_pending_source.now_ms;
       detection_latest.accepted_samples = detection_submitted;
       detection_latest.monitoring = true;
+      auto &evidence = detection_latest.evidence;
+      evidence.matching_tiles = counts[3];
+      evidence.candidates = counts[4]; evidence.hudless_changed = counts[5];
+      evidence.hudless_unchanged = counts[6]; evidence.hudless_invalid = counts[7];
+      std::copy_n(counts.begin() + 8, 4, evidence.alpha_covered.begin());
+      std::copy_n(counts.begin() + 12, 4, evidence.alpha_invalid.begin());
+      evidence.hudless_lit = counts[16];
       detection_latest_source = detection_pending_source;
     }
     void detect_ui(api::command_list *cmd, const render_parameters &p, const ui_detection_inputs &input,
-        const alpha_auto_source &observation) {
+        const alpha_auto_source &observation, api::resource_view paired_color) {
       std::array<api::resource_view, 15> views{};
-      views[0] = textures[source].srv;
+      // A HUD-less image is compared with the color of the frame it belongs to:
+      // its batch's tagged Backbuffer or a retained Present. Detection then also
+      // reads that color's alpha for the present-alpha candidate; eye rendering
+      // stays current.
+      views[0] = paired_color.handle ? paired_color : textures[source].srv;
       for (unsigned i = 0; i != 3; ++i) views[11+i] = input.masks[i];
       views[14] = input.hudless;
       const auto dispatch_stage = [&](pass stage, texture_id target, unsigned output, unsigned x, unsigned y) {
@@ -731,8 +858,22 @@ namespace sunshine_game3d {
       if (compatible(candidates.masks[i], false)) bits |= 1u << i;
       else candidates.masks[i] = {};
     }
-    if (compatible(candidates.hudless, true)) bits |= 16u;
-    else candidates.hudless = {};
+    api::resource_view hudless_color{};
+    if (candidates.hudless.handle && candidates.hudless_pair.handle) {
+      hudless_color = candidates.hudless_pair; // Same tag batch: an exact pair.
+    } else if (candidates.hudless.handle && candidates.hudless_presents_ago) {
+      d.retention_wanted = true; // Retain colors from now on; this frame has none yet.
+      d.retention_requested_present = d.present_number;
+      hudless_color = d.retained_view(candidates.hudless_presents_ago);
+      if (!hudless_color.handle) candidates.hudless = {};
+    }
+    if (hudless_color.handle && !compatible(hudless_color, true)) { candidates.hudless = {}; hudless_color = {}; }
+    if (compatible(candidates.hudless, true)) bits |= candidates.hudless_exact ? 48u : 16u;
+    else { candidates.hudless = {}; hudless_color = {}; }
+    // A generated present keeps the preceding real frame's decision and mask.
+    const bool hold = candidates.hold_previous && d.detection_mask_ready &&
+      d.detection_holds < ui_detection_inputs::max_held_presents;
+    if (hold) bits = d.detection_bits;
     if (d.detection_bits != bits) d.detection_latest = {};
     d.detection_bits = bits;
     d.difference_threshold = d.source_format == api::format::r10g10b10a2_unorm ? 4.f / 1023.f :
@@ -756,11 +897,14 @@ namespace sunshine_game3d {
     struct restore { impl &d; ID3DDeviceContextState *previous; bool isolated; ~restore() { if (isolated) d.context11->SwapDeviceContextState(previous, nullptr); } } restore_state{d, previous.p, isolated};
     d.pending = true;
     const auto &t = d.textures;
+    d.collect_profile();
+    if (d.prepare_profile()) d.mark(cmd, impl::mark_render);
     cmd->barrier(backbuffer, api::resource_usage::present, api::resource_usage::copy_source);
     cmd->barrier(t[impl::source].resource, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
     cmd->copy_resource(backbuffer, t[impl::source].resource);
     cmd->barrier(t[impl::source].resource, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
     cmd->barrier(backbuffer, api::resource_usage::copy_source, api::resource_usage::present);
+    d.mark(cmd, impl::mark_source);
     render_parameters p = parameters;
     if (!depth.handle) { depth = t[impl::empty_depth].srv; p.depth_ready = p.camera_ready = 0; }
     d.consumed = p;
@@ -769,10 +913,17 @@ namespace sunshine_game3d {
       if (!observation.now_ms) observation.now_ms = observation.tick_ms = GetTickCount64();
       if (observation.epoch != d.detection_latest_source.epoch || observation.revision != d.detection_latest_source.revision ||
           observation.viewport != d.detection_latest_source.viewport) d.detection_latest = {};
-      d.poll_detection(observation);
-      d.detect_ui(cmd, p, candidates, observation);
+      if (hold) ++d.detection_holds;
+      else {
+        d.poll_detection(observation);
+        d.detect_ui(cmd, p, candidates, observation, hudless_color);
+        d.detection_holds = 0;
+        d.detection_mask_ready = (bits & 16u) != 0;
+      }
       alpha_source = t[impl::detected_mask].srv;
-    }
+    } else d.detection_mask_ready = false;
+    d.retain_color(cmd);
+    d.mark(cmd, impl::mark_detection);
     // A captured input's RGB never replaces current eye color. Auto consumes a
     // freshly derived mask; explicit manual/replay inputs retain their meaning.
     d.update_alpha_auto(source_alpha_ui && ui_mode_supported && (!needs_detection || d.detection_active) &&
@@ -781,9 +932,12 @@ namespace sunshine_game3d {
     d.nearest_ui_rendered = false;
     d.consumed_ui_source = d.source_alpha_ui && alpha_source.handle ? d.device->get_resource_from_view(alpha_source) : api::resource{};
     if (d.color == 3) d.draw(cmd, impl::pq, d.width, {impl::linear}, p, {t[impl::source].srv});
+    d.mark(cmd, impl::mark_linearize);
     if (d.width <= 3840 && d.height <= 3840) {
       d.dispatch(cmd, impl::candidate, (d.width + 7) / 8, (d.height + 7) / 8, p, {api::resource_view{}, depth}, {impl::raw});
+      d.mark(cmd, impl::mark_candidate);
       d.dispatch(cmd, impl::vertical, d.width, 1, p, {api::resource_view{}, {}, {}, t[impl::raw].srv}, {impl::vertical_majorant, impl::vertical_field});
+      d.mark(cmd, impl::mark_vertical);
       const auto ui_alpha = d.consumed_ui_source.handle ? alpha_source : t[impl::source].srv;
       if (d.source_alpha_ui && plane.mode == ui_plane_mode::depth_midpoint_nearest_ui) {
         d.dispatch(cmd, impl::ui_tiles, (d.width + 15) / 16, (d.height + 15) / 16, p,
@@ -804,7 +958,9 @@ namespace sunshine_game3d {
         d.dispatch(cmd, impl::ui_apply, d.height, 1, p, {ui_alpha}, {impl::field});
       }
     }
+    d.mark(cmd, impl::mark_conditioning);
     d.draw(cmd, impl::eyes, d.width, {impl::left, impl::right}, p, {t[impl::source].srv, depth, t[impl::linear].srv, {}, {}, t[impl::field].srv});
+    d.mark(cmd, impl::mark_eyes);
     d.pack_parameters = p;
     d.pack_owed = true;
     if (!defer_pack) d.record_pack(cmd, t[impl::packed].resource, t[impl::packed].rtv, api::resource_usage::shader_resource);
@@ -938,13 +1094,33 @@ namespace sunshine_game3d {
     return view;
   }
   void renderer::begin_present() {
-    if (!data_ || !data_->pending) return;
+    if (!data_) return;
+    ++data_->present_number;
+    data_->profile_open = false;
+    if (!data_->pending) return;
     // The missed presentation's commands still execute in queue order before
     // any later signal, so that signal conservatively retires them too.
     data_->pending = false;
     data_->unsignaled = true;
   }
+  void renderer::begin_gpu_profile(api::command_list *cmd) {
+    if (!data_ || data_->failed || !data_->prepare_profile()) return;
+    data_->collect_profile();
+    data_->mark(cmd, impl::mark_begin);
+  }
+  bool renderer::take_gpu_timing(gpu_timing &out) {
+    if (!data_) return false;
+    auto &d = *data_;
+    d.collect_profile();
+    out = d.profile_window;
+    for (unsigned s = 0; s != gpu_timing::stage_count; ++s)
+      out.mean_ms[s] = out.frames ? d.profile_sum_ms[s] / out.frames : 0.0;
+    d.profile_window = {};
+    d.profile_sum_ms = {};
+    return out.frames != 0;
+  }
   void renderer::finish_present() {
+    if (data_) data_->profile_open = false;
     if (!data_ || (!data_->pending && !data_->unsignaled)) return;
     auto &d = *data_;
     if (!d.queue->signal(d.completion, ++d.sequence)) d.failed = true;

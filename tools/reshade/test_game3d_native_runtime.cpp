@@ -1304,6 +1304,19 @@ namespace {
         "Native renderer changed the game's mono backbuffer");
     }
     {
+      // Completed parity frames report GPU stage times without a CPU wait.
+      sunshine_game3d::gpu_timing timing;
+      using stage = sunshine_game3d::gpu_timing;
+      const bool took = renderer.take_gpu_timing(timing);
+      require(took && timing.frames > 0 && timing.mean_ms[stage::eyes] > 0 &&
+          timing.mean_ms[stage::pack] > 0 && timing.mean_ms[stage::total] >= timing.mean_ms[stage::eyes] &&
+          timing.max_ms[stage::total] >= timing.mean_ms[stage::total],
+        "Native renderer did not report completed GPU stage timing");
+      std::printf("PASS native GPU timing: frames=%u total=%.3f ms eyes=%.3f ms pack=%.3f ms\n", timing.frames,
+        timing.mean_ms[stage::total], timing.mean_ms[stage::eyes], timing.mean_ms[stage::pack]);
+      require(!renderer.take_gpu_timing(timing) && timing.frames == 0, "GPU timing window did not reset");
+    }
+    {
       // A Present that never reaches finish_present must not wedge native
       // rendering; its work is retired by the next signal, not assumed complete.
       const auto &test = tests.front();

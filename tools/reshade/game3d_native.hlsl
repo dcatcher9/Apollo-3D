@@ -83,7 +83,7 @@ Texture2D<float4> SunshineUIBackbufferAlpha : register(t13);
 Texture2D<float4> SunshineHUDless : register(t14);
 cbuffer SunshineUIDetectionConstants : register(b2)
 {
-    uint Sunshine_UICandidates; // bit0..2 captured alpha, bit3 current alpha, bit4 paired HUDless.
+    uint Sunshine_UICandidates; // bit0..2 captured alpha, bit3 current alpha, bit4 paired HUDless, bit5 exact pair.
     float Sunshine_UIDifferenceThreshold;
     uint Sunshine_UIDetectionReserved0;
     uint Sunshine_UIDetectionReserved1;
@@ -136,12 +136,14 @@ float SunshineHUDlessDifference(uint2 xy, out bool valid)
 groupshared uint4 SunshineUIDetectionCoverage[64];
 groupshared uint4 SunshineUIDetectionInvalid[64];
 groupshared uint4 SunshineUIDetectionDifference[64];
+groupshared uint SunshineUIDetectionLit[64];
 [numthreads(8, 8, 1)]
 void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     uint2 first = group.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
     uint2 last = (group.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
     uint4 coverage = 0u, invalid = 0u, difference = 0u;
+    uint lit = 0u;
     [loop] for (uint y = first.y + thread.y; y < last.y; y += 8u)
     [loop] for (uint x = first.x + thread.x; x < last.x; x += 8u) {
         float4 a = SunshineUIDetectionAlpha(uint2(x,y));
@@ -154,17 +156,22 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         difference.y += finite ? 0u : 1u;
         difference.z += finite && delta <= Sunshine_UIDifferenceThreshold * .5 ? 1u : 0u;
         difference.w += 1u;
+        // A HUD-less pixel that shows scene content rather than black.
+        float3 hudless = SunshineHUDless.Load(int3(x, y, 0)).rgb;
+        lit += finite && max(max(abs(hudless.r), abs(hudless.g)), abs(hudless.b)) > Sunshine_UIDifferenceThreshold * 8.0 ? 1u : 0u;
     }
     uint lane = thread.y * 8u + thread.x;
     SunshineUIDetectionCoverage[lane] = coverage;
     SunshineUIDetectionInvalid[lane] = invalid;
     SunshineUIDetectionDifference[lane] = difference;
+    SunshineUIDetectionLit[lane] = lit;
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint step = 32u; step; step >>= 1u) {
         if (lane < step) {
             SunshineUIDetectionCoverage[lane] += SunshineUIDetectionCoverage[lane+step];
             SunshineUIDetectionInvalid[lane] += SunshineUIDetectionInvalid[lane+step];
             SunshineUIDetectionDifference[lane] += SunshineUIDetectionDifference[lane+step];
+            SunshineUIDetectionLit[lane] += SunshineUIDetectionLit[lane+step];
         }
         GroupMemoryBarrierWithGroupSync();
     }
@@ -172,19 +179,21 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         SunshineAlphaCoverageStore[group.xy] = SunshineUIDetectionCoverage[0];
         SunshineAlphaCoverageStore[group.xy + uint2(0,16)] = SunshineUIDetectionInvalid[0];
         SunshineAlphaCoverageStore[group.xy + uint2(0,32)] = SunshineUIDetectionDifference[0];
+        SunshineAlphaCoverageStore[group.xy + uint2(0,48)] = uint4(SunshineUIDetectionLit[0], 0u, 0u, 0u);
     }
 }
 [numthreads(1, 1, 1)]
 void SunshineUIDetectionReduceCS(uint3 id : SV_DispatchThreadID)
 {
     uint4 coverage = 0u, invalid = 0u, difference = 0u;
-    uint matching_tiles = 0u;
+    uint matching_tiles = 0u, lit = 0u;
     [loop] for (uint y = 0u; y < 16u; ++y)
     [loop] for (uint x = 0u; x < 16u; ++x) {
         coverage += SunshineUIDetectionSampler.Load(int3(x,y,0));
         invalid += SunshineUIDetectionSampler.Load(int3(x,y+16u,0));
         uint4 d = SunshineUIDetectionSampler.Load(int3(x,y+32u,0));
         difference += d;
+        lit += SunshineUIDetectionSampler.Load(int3(x,y+48u,0)).x;
         matching_tiles += d.w && d.z * 100u >= d.w * 99u ? 1u : 0u;
     }
     uint source = 0u, covered = 0u;
@@ -202,7 +211,20 @@ void SunshineUIDetectionReduceCS(uint3 id : SV_DispatchThreadID)
         difference.x * 4u < difference.w && difference.z * 100u >= difference.w * 75u && matching_tiles >= 128u) {
         source = 5u; covered = difference.x;
     }
+    // UI covering the whole frame (menus, title screens) changes nearly every
+    // pixel while the HUD-less image still shows a lit scene: keep it flat.
+    // Only an exact pair qualifies; a mismatched pair can also differ
+    // everywhere, and a black HUD-less image is no scene.
+    if (!source && (Sunshine_UICandidates & 48u) == 48u && !difference.y &&
+        difference.x * 100u >= difference.w * 98u && lit * 2u >= difference.w) {
+        source = 6u; covered = difference.w;
+    }
     SunshineAlphaCoverageStore[uint2(0,0)] = uint4(source, covered, difference.w, matching_tiles);
+    // Diagnostic evidence for the CPU readback; nothing reads it on the GPU.
+    SunshineAlphaCoverageStore[uint2(1,0)] = uint4(Sunshine_UICandidates, difference.x, difference.z, difference.y);
+    SunshineAlphaCoverageStore[uint2(2,0)] = coverage;
+    SunshineAlphaCoverageStore[uint2(3,0)] = invalid;
+    SunshineAlphaCoverageStore[uint2(4,0)] = uint4(lit, 0u, 0u, 0u);
 }
 [numthreads(8, 8, 1)]
 void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
@@ -211,6 +233,7 @@ void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
     uint source = SunshineUIDetectionSampler.Load(int3(0,0,0)).x;
     float mask = 0.0;
     if (source >= 1u && source <= 4u) mask = SunshineUIDetectionAlpha(id.xy)[source-1u];
+    else if (source == 6u) mask = 1.0;
     else if (source == 5u) {
         bool finite;
         mask = SunshineHUDlessDifference(id.xy, finite) > Sunshine_UIDifferenceThreshold && finite ? 1.0 : 0.0;

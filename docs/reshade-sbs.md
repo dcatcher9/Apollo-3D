@@ -88,7 +88,7 @@ the presentation path consumes completed snapshots rather than fetching every SD
 | Depth | Prefer usable SL captures, then usable NGX captures. Generic ReShade depth is the fallback when the API provider does not own the pass. Within an SL batch, try HighResDepth (48), Depth (0), then LinearDepth (49). |
 | Camera / encoding / jitter | Use metadata paired with the selected depth capture. Linear-distance depth can work without camera matrices; device depth without a paired projection uses the existing relative-depth calibration when eligible. Never borrow another provider's camera. |
 | UI with FG off or no observed FG | Automatically validate captured SL UIAlpha (R; tag 68 in 2.11.x, 69 from 2.12.0, see [buffer contract](#streamline-buffer-type-contract)), UIColorAndAlpha (23, A), Backbuffer (53, A), current color alpha, then paired HUDLessColor (2) difference. |
-| UI with FG on | Use the same captured-source order and HUD-less fallback; presented alpha is excluded. UIAlpha stays manual-only when the loaded interposer is outside the surveyed header range. |
+| UI with FG on | Use the same captured-source order and HUD-less fallback; presented alpha is excluded. HUD-less pairs with its same-batch tagged Backbuffer, else with the real frame after the generated Presents, which reuse its mask. UIAlpha stays manual-only when the loaded interposer is outside the surveyed header range. |
 
 Depth order preserves source continuity: a brief pending copy can retain an admitted
 source and its authorized prior pixels. Known FG requirements restrict selection to
@@ -114,6 +114,13 @@ padding and nonzero crop origins. Reference FX must separately expose their rect
 the absence of an FX handle must never reject native cropped depth.
 Its color input is the game backbuffer before unrelated ReShade effects. Those effects can still
 run on the desktop view; they are not part of the native SBS pass graph.
+
+Every Game 3D pass runs inside the game's Present on its graphics queue, so its GPU time is
+display latency. A `Sunshine Game 3D timing` log line every 10 seconds reports the present hook's
+CPU time and GPU stage times (mean/max ms: inputs, source copy, UI detection, depth conditioning,
+eyes, pack, total) from timestamp queries read after each frame's completion fence, without a
+wait. Inputs covers the depth and UI captures recorded before rendering; pack is zero on frames
+nothing consumed.
 
 All rendering stays on the runtime's graphics queue. Native passes add no CPU fence wait or full
 frame CPU readback. A completion fence protects replacement of the renderer's working set;
@@ -229,10 +236,34 @@ invalid high-priority candidate cannot consume another kind's reservations. Null
 SDK calls, incompatible extents/formats, observation loss and expiry revoke the affected
 available pixels. Recreated layouts and runtimes cannot inherit an earlier capture scope.
 
-HUD-less comparison additionally requires the same producer/presentation queue, matching
-format and full extents, and a current source presentation generation exactly one beyond the
-generation captured at the tag. The integrated depth Present callback advances that generation
-before the Game 3D render. A merely recent snapshot from an earlier presentation does not pass.
+HUD-less comparison additionally requires matching format and full extents. When the game also
+tags its Backbuffer (53) and that capture was made in the same Present interval as HUDLessColor
+(equal Presents since each tag), the two images belong to one tag batch and HUD-less is compared
+with that tagged Backbuffer. This exact pair does not depend on which Present Game 3D renders, on
+frame generation or on queue timing; the mask then protects the current frame. Hogwarts Legacy
+needed it: with DLSS-G on, differencing HUD-less with the presented color changed nearly every
+pixel, while its same-batch HUD-less and Backbuffer differed only in the UI (5.7-12.8% of pixels,
+over 200 of 256 tiles unchanged). A manual HUD-less choice captures the Backbuffer only for this
+pairing. Without a same-batch Backbuffer, HUD-less must pair with the real frame of its tag: a current source presentation generation
+one beyond the generation captured at the tag, or `generated_frames + 1` beyond while FG is known
+enabled (at most three generated frames). Streamline presents the generated frames first, so the
+Present that matches HUDLessColor comes last. The integrated depth Present callback advances that
+generation before the Game 3D render. A merely recent snapshot from an earlier presentation does
+not pass. Each generated Present in between shows interpolated scene color, which must not be
+differenced. It copies nothing and reuses the mask the GPU resolved on the preceding real frame,
+for at most three consecutive Presents, and only when that frame compared a HUD-less candidate.
+A capture from another queue can still be incomplete or unretired at its own real frame. When
+the newest ready capture belongs to a real frame one or two Presents ago, it is compared with that
+frame's retained color, and the resulting mask protects the current frame. The renderer starts
+retaining the last two presented colors (two source-size copies, one extra copy per Present) only
+after the first such late capture, and stops copying 120 Presents after the last one; games whose
+captures pair on time never allocate them. A late
+capture older than the retained history does not pair.
+Hogwarts Legacy (SL 2.6.10, DLSS-G on) showed the pattern: its real frame matched HUDLessColor
+on 93.5% of pixels two Presents after the tag, and its UIColorAndAlpha was the opaque final image.
+It also presents on a different queue from the one that records its tags, so pairing does not
+require the producer's queue. The capture rules below already admit another queue's pixels only
+after the producer completes and its recording retires.
 Local-only snapshots use the existing depth owner's queue-ordering contract: after the SDK
 call succeeds and the producer is actually submitted on the presentation queue, a local GPU
 copy may follow it without waiting for CPU-visible completion or producer Reset. The consumer
@@ -246,14 +277,24 @@ R10 color or 2/255 for other SDR/PQ color; floating-point scRGB uses 0.005 times
 of one and the current pixel's largest absolute RGB component. Both RGB inputs must be finite.
 Acceptance requires a nonempty difference covering fewer than 25% of pixels, at least 75% of pixels within half the
 threshold, and at least 128 of 256 tiles with 99% matching pixels. These guards reject broad
-scene mismatch before the difference becomes a UI mask. HUD-less comparison remains guarded
-in manual modes. Its binary mask identifies changed pixels, not exact compositing opacity, and cannot detect
+scene mismatch before the difference becomes a UI mask. One exception covers full-screen UI:
+when the pair is exact (a same-batch Backbuffer, or Present counting with frame generation off),
+at least 98% of pixels changed and at least half of the HUD-less pixels are lit (above eight times
+the threshold), the whole frame is UI and stays flat. Hogwarts Legacy's title screen needed it:
+the game keeps rendering its next 3D scene behind the menu and tags that scene's depth and
+HUD-less image, so 99.9% of pixels differed while the depth matched the hidden room. A mismatched
+pair can also change every pixel, so an unverified pair is still rejected, and a black HUD-less
+image never counts as a scene. HUD-less comparison remains guarded in manual modes. Its binary mask identifies changed pixels, not exact compositing opacity, and cannot detect
 UI whose color matches the underlying scene. Local motion or other postprocessing differences
 can still resemble UI; live game/headset validation remains necessary.
 
 The native path uses GPU statistics, reduction/selection and mask passes. A bounded asynchronous
-16-byte summary may be read at 100 ms intervals for diagnostics; it never authorizes protection
-and there is no full-frame CPU readback. Source availability, GPU validation and actual applied
+64-byte summary may be read at 100 ms intervals for diagnostics; it never authorizes protection
+and there is no full-frame CPU readback. Besides the decision, it carries the candidate bits the
+shader was offered, each alpha candidate's covered and invalid pixels, and the HUD-less changed,
+unchanged, non-finite and lit pixel counts with matching tiles. The `Sunshine UI protection` log
+(`sampled_candidates`, `sampled_alpha_covered`, `sampled_hudless`) and the dump's
+`source_alpha_auto.sampled_evidence` report it, so a rejection names the failing check. Source availability, GPU validation and actual applied
 protection remain separate diagnostic facts. Older startup fields describe a retired heuristic.
 NGX UI resources remain discovery/dump observations; live NGX, FSR and XeSS UI adapters are not
 implemented. Current presented alpha is excluded while the retained FG mode is known enabled;
@@ -481,7 +522,11 @@ Its `hook_gate` records the latest public tag callback's scope, observed UI kind
 request count and admission result; `request_generation` identifies the retained live request.
 A bounded `Sunshine UI capture gate` log reports the same evidence. An admitted hook with a
 zero capture boundary and a changing request generation indicates that the request was replaced
-or invalidated after admission, rather than that the game supplied no UI tag. Unchanged failed
+or invalidated after admission, rather than that the game supplied no UI tag. Its
+`hudless_presents` counts, since the previous line, Presents whose newest ready HUD-less capture
+paired with its `batch` Backbuffer, was the current `real` frame, a `late` real frame paired with retained color, a `generated`
+Present that held the previous mask, `stale` (older than the retained history), `other`, or
+`none` (no ready HUD-less capture). Unchanged failed
 or successful FG Off options preserve independent UI tags; an actual FG knowledge/mode loss
 still revokes the old scope once and requires fresh input.
 Capture diagnostics preserve the raw declared hint and independent observed state.

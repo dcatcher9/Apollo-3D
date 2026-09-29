@@ -46,6 +46,40 @@ namespace sunshine_game3d::ui_mask {
     source_kind kind = source_kind::backbuffer;
     std::uint64_t source_present_generation{}; // Captured at this exact tag entry.
   };
+  // HUD-less color belongs to its tag's real frame: the Present one after the
+  // tag, or generated_frames + 1 after it under frame generation, which
+  // presents the generated frames first. Generated presents in between see
+  // interpolated color and reuse the preceding real frame's mask. A capture
+  // from another queue may complete after its real frame was presented; it
+  // then pairs with that frame's retained color, a bounded number of Presents ago.
+  enum class hudless_present { unpaired, real_frame, generated_frame, earlier_real_frame };
+  inline constexpr std::uint32_t max_generated_frames = 3; // DLSS 4 multi-frame generation.
+  inline constexpr std::uint32_t max_late_presents = 2;
+  struct hudless_pairing {
+    hudless_present kind = hudless_present::unpaired;
+    std::uint32_t presents_ago = 0; // Since the real frame; nonzero only for earlier_real_frame.
+  };
+  constexpr hudless_pairing pair_hudless_present(std::uint64_t tagged, std::uint64_t current,
+      bool fg_active, std::uint32_t generated_frames) {
+    if (!tagged || tagged == UINT64_MAX || current <= tagged) return {};
+    const std::uint64_t generated = !fg_active ? 0u : !generated_frames ? 1u :
+      generated_frames > max_generated_frames ? max_generated_frames : generated_frames;
+    const auto after = current - tagged, real = generated + 1;
+    if (after == real) return {hudless_present::real_frame};
+    if (after < real) return {hudless_present::generated_frame};
+    if (after - real > max_late_presents) return {};
+    return {hudless_present::earlier_real_frame, static_cast<std::uint32_t>(after - real)};
+  }
+  // Two captures belong to one tag batch (one game frame) when both were made
+  // in the same Present interval. Each source keeps its own Present counter, so
+  // compare Presents since each tag rather than the raw counter values.
+  constexpr bool same_tag_interval(std::uint64_t tagged_a, std::uint64_t current_a,
+      std::uint64_t tagged_b, std::uint64_t current_b) {
+    const auto valid = [](std::uint64_t tagged, std::uint64_t current) {
+      return tagged && tagged != UINT64_MAX && current >= tagged;
+    };
+    return valid(tagged_a, current_a) && valid(tagged_b, current_b) && current_a - tagged_a == current_b - tagged_b;
+  }
   struct selection {
     sunshine_streamline::depth_capture::diagnostic_ticket ticket;
     sunshine_streamline::depth_capture::diagnostic_texture texture;

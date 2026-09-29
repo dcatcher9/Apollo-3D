@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
@@ -53,7 +54,17 @@ namespace sunshine_game3d {
     bool window_started = false;
     std::uint64_t window_start_ms{}, accepted_samples{};
     std::uint64_t probe_interval_ms{};
-    std::uint32_t source_kind{}; // Latest completed diagnostic: 1 UI R, 2 UI A, 3 backbuffer A, 4 current A, 5 HUDless.
+    // Latest completed diagnostic: 1 UI R, 2 UI A, 3 backbuffer A, 4 current A,
+    // 5 HUD-less difference, 6 full-frame UI (HUD-less differs almost everywhere).
+    std::uint32_t source_kind{};
+    // Inputs of that GPU decision, for diagnosis only: the candidate bits the
+    // shader was offered (1, 2, 4, 8 alpha candidates, 16 HUD-less), each alpha
+    // candidate's covered and invalid pixels, HUD-less changed, unchanged and
+    // non-finite pixels, and tiles (of 256) whose pixels are 99% unchanged.
+    struct detection_evidence {
+      std::uint32_t candidates{}, hudless_changed{}, hudless_unchanged{}, hudless_invalid{}, matching_tiles{}, hudless_lit{};
+      std::array<std::uint32_t, 4> alpha_covered{}, alpha_invalid{};
+    } evidence;
   };
 
   class alpha_auto_policy {

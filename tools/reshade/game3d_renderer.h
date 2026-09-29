@@ -40,6 +40,23 @@ namespace sunshine_game3d {
     std::array<reshade::api::resource_view, 3> masks{}; // UI alpha R, UI color A, backbuffer A.
     reshade::api::resource_view hudless{};
     bool current_color = false;
+    // A generated present between a HUD-less tag and its real frame. Reuse the
+    // real frame's detected mask rather than differencing interpolated color.
+    bool hold_previous = false;
+    static constexpr std::uint32_t max_held_presents = 3;
+    // The game's own final color from the HUD-less image's tag batch (Streamline
+    // Backbuffer). When present, HUD-less is compared with it exactly, and
+    // hudless_presents_ago is not used.
+    reshade::api::resource_view hudless_pair{};
+    // Otherwise the HUD-less image belongs to the frame presented this many
+    // Presents ago. It is compared with that frame's retained color; zero is
+    // the current one.
+    std::uint32_t hudless_presents_ago = 0;
+    static constexpr std::uint32_t max_retained_presents = 2;
+    // The pair is known to show one game frame (a tag batch, or Present
+    // counting without frame generation). Only then may a difference covering
+    // the whole frame mean full-screen UI rather than a mismatched pair.
+    bool hudless_exact = false;
   };
   struct ui_render_input {
     ui_input_kind kind = ui_input_kind::unavailable;
@@ -53,7 +70,7 @@ namespace sunshine_game3d {
       return kind == ui_input_kind::current_color_alpha ||
         ((kind == ui_input_kind::captured_color_alpha || kind == ui_input_kind::dedicated_mask ||
           kind == ui_input_kind::hudless_difference) && view.handle) ||
-        (detection && (detection->current_color || detection->hudless.handle ||
+        (detection && (detection->current_color || detection->hudless.handle || detection->hold_previous ||
           detection->masks[0].handle || detection->masks[1].handle || detection->masks[2].handle));
     }
   };
@@ -98,6 +115,17 @@ namespace sunshine_game3d {
   struct diagnostic_resources {
     reshade::api::resource source{}, linear_color{}, candidate{}, vertical_majorant{},
       vertical_field{}, final_field{}, sbs{}, ui_source{}, ui_plane_tiles{}, ui_plane_resolved{};
+  };
+
+  // GPU time of the live render stages over a reporting window, in ms. Inputs
+  // covers work the caller records after begin_gpu_profile (depth and UI
+  // captures); pack is zero on frames nothing consumed.
+  struct gpu_timing {
+    // Conditioning is split into PQ linearization, depth candidate, and the
+    // vertical and horizontal scans (the latter includes UI placement passes).
+    enum stage { inputs, source, detection, linearize, candidate, vertical, horizontal, eyes, pack, total, stage_count };
+    std::uint32_t frames{};
+    std::array<double, stage_count> mean_ms{}, max_ms{};
   };
 
   struct alpha_probe_counters {
@@ -190,9 +218,15 @@ namespace sunshine_game3d {
     void end_frame_state();
     // A new presentation begins. Work recorded for a Present that never reached
     // finish_present stays unsignaled until the next signal covers it, so this
-    // presentation can render while resource replacement remains blocked.
+    // presentation can render while resource replacement remains blocked. It
+    // also numbers Presents for colors retained for late HUD-less pairing.
     void begin_present();
     void finish_present();
+    // Marks the start of this presentation's input work for the GPU profile.
+    void begin_gpu_profile(reshade::api::command_list *commands);
+    // Completed-frame GPU stage times since the last call; resets the window.
+    // No CPU wait: frames still in flight are reported by a later call.
+    bool take_gpu_timing(gpu_timing &out);
     // ReShade's destroy_effect_runtime follows its GPU drain. No extra wait.
     void reset_after_runtime_drain();
   private:

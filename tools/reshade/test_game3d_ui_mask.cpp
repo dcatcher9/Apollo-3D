@@ -625,6 +625,47 @@ namespace {
       }
     }
   }
+  void hudless_pairs_with_the_real_frame_under_frame_generation() {
+    using present = mask::hudless_present;
+    constexpr auto kind = [](std::uint64_t tagged, std::uint64_t current, bool fg, std::uint32_t generated) {
+      return mask::pair_hudless_present(tagged, current, fg, generated).kind;
+    };
+    constexpr auto ago = [](std::uint64_t tagged, std::uint64_t current, bool fg, std::uint32_t generated) {
+      return mask::pair_hudless_present(tagged, current, fg, generated).presents_ago;
+    };
+    // Without FG the next present is the tag's own frame.
+    static_assert(kind(10, 11, false, 0) == present::real_frame && ago(10, 11, false, 0) == 0);
+    static_assert(kind(10, 10, false, 0) == present::unpaired);
+    // A capture that completes after its frame pairs with that frame's retained
+    // color, at most max_late_presents ago.
+    static_assert(kind(10, 12, false, 0) == present::earlier_real_frame && ago(10, 12, false, 0) == 1);
+    static_assert(kind(10, 13, false, 0) == present::earlier_real_frame && ago(10, 13, false, 0) == 2);
+    static_assert(kind(10, 14, false, 0) == present::unpaired);
+    // Hogwarts Legacy, SL 2.6.10 DLSS-G: the generated frame is presented
+    // first, then the real frame that matches HUDLessColor two presents on.
+    static_assert(kind(3725, 3726, true, 1) == present::generated_frame);
+    static_assert(kind(3725, 3727, true, 1) == present::real_frame);
+    static_assert(kind(3725, 3728, true, 1) == present::earlier_real_frame && ago(3725, 3728, true, 1) == 1);
+    // Enabled FG with an unreported count means one generated frame.
+    static_assert(kind(5, 7, true, 0) == present::real_frame);
+    // Multi-frame generation, bounded to what the renderer can hold.
+    static_assert(kind(5, 8, true, 3) == present::generated_frame);
+    static_assert(kind(5, 9, true, 3) == present::real_frame);
+    static_assert(kind(5, 9, true, 7) == present::real_frame);
+    // FG status only moves the real frame when it is known enabled.
+    static_assert(kind(5, 6, false, 1) == present::real_frame && kind(5, 7, false, 1) == present::earlier_real_frame);
+    // Unknown, sentinel and reversed generations never pair.
+    static_assert(kind(0, 1, false, 0) == present::unpaired);
+    static_assert(kind(UINT64_MAX, 0, true, 1) == present::unpaired);
+    static_assert(kind(9, 3, true, 1) == present::unpaired);
+    // Hogwarts tags HUDLessColor and Backbuffer in one batch; their counters
+    // started at different values but advanced by the same Presents.
+    static_assert(mask::same_tag_interval(619, 621, 1, 3));
+    static_assert(mask::same_tag_interval(10, 10, 4, 4));
+    static_assert(!mask::same_tag_interval(619, 621, 1, 4));
+    static_assert(!mask::same_tag_interval(0, 2, 1, 3) && !mask::same_tag_interval(5, 4, 1, 0));
+    static_assert(!mask::same_tag_interval(UINT64_MAX, 2, 1, 3));
+  }
 }
 
 namespace sunshine_streamline::depth_capture {
@@ -708,6 +749,7 @@ int main() {
     dedicated_masks_survive_heuristic_auto_off_without_extra_backbuffer_work(); std::puts("PASS dedicated-only Auto-Off admission with no backbuffer copies or inherited probe cadence");
     explicit_source_filter_prevents_higher_priority_starvation(); std::puts("PASS exact source filtering prevents unreviewed priority starvation and fallback");
     source_filter_change_revokes_ready_pending_and_inflight_attempts(); std::puts("PASS source-filter changes revoke completed, pending and in-flight old reservations");
+    hudless_pairs_with_the_real_frame_under_frame_generation(); std::puts("PASS HUD-less pairs with its real frame after generated presents, late captures within retained history, never stale or reversed generations");
     declared_lifetimes_preserve_state_policy(); std::puts("PASS UI tag lifetimes preserve provenance and choose observed-at-call or strict longer-lived state policy");
     mask::invalidate_all();
     return 0;

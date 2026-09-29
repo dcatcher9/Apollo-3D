@@ -8,15 +8,26 @@
 #include <reshade.hpp>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 
 namespace sunshine_game3d::ui_input {
+  static_assert(ui_detection_inputs::max_held_presents == ui_mask::max_generated_frames,
+    "The renderer must be able to hold a mask across every generated present");
+  static_assert(ui_detection_inputs::max_retained_presents == ui_mask::max_late_presents,
+    "The renderer must retain the color of every admitted late HUD-less frame");
   namespace api = reshade::api;
   namespace capture = sunshine_streamline::depth_capture;
   namespace {
     using choice = ui_qualification::choice;
+    // Paired with its batch's tagged Backbuffer, on time, late but paired with
+    // retained color, held on a generated present, too old to pair, otherwise
+    // unpaired, and no HUD-less capture.
+    enum hudless_outcome : unsigned { hudless_batch, hudless_real, hudless_late, hudless_generated, hudless_stale,
+      hudless_other, hudless_none, hudless_outcome_count };
     struct source_entry {
       ui_qualification::session selection;
       ui_qualification::scope base;
@@ -24,6 +35,8 @@ namespace sunshine_game3d::ui_input {
       // The capture owner's identity for this runtime's native device. It is
       // resolved from a backbuffer once instead of on every presentation.
       std::uint64_t native_device{}, device_identity{};
+      // HUD-less pairing outcomes since the last gate log.
+      std::array<std::uint32_t, hudless_outcome_count> hudless_outcomes{};
       bool suspended{};
     };
     std::mutex source_mutex;
@@ -48,7 +61,9 @@ namespace sunshine_game3d::ui_input {
         case choice::sl_ui_alpha: return ui_mask::source_mask(ui_mask::source_kind::alpha);
         case choice::sl_ui_color_alpha: return ui_mask::source_mask(ui_mask::source_kind::color_and_alpha);
         case choice::sl_backbuffer: return ui_mask::source_mask(ui_mask::source_kind::backbuffer);
-        case choice::sl_hudless: return ui_mask::source_mask(ui_mask::source_kind::hudless);
+        // The tagged Backbuffer is captured as HUD-less's exact color pair.
+        case choice::sl_hudless: return ui_mask::source_mask(ui_mask::source_kind::hudless) |
+          ui_mask::source_mask(ui_mask::source_kind::backbuffer);
         case choice::current_color: return 0;
         default: return ui_mask::all_sources;
       }
@@ -83,7 +98,7 @@ namespace sunshine_game3d::ui_input {
         {"tag_type", static_cast<std::uint32_t>(origin.kind)}, {"tag_scope", origin.tag_scope},
         {"channel", origin.kind == ui_mask::source_kind::hudless ? "rgb_difference" : origin.kind == ui_mask::source_kind::alpha ? "red" : "alpha"}, {"format", copy.format},
         {"available_for_detection", admitted}, {"current_present_pair", paired},
-        {"association", origin.kind == ui_mask::source_kind::hudless ? "same_queue_current_present_generation" : "latest_submitted_input_approximation"},
+        {"association", origin.kind == ui_mask::source_kind::hudless ? "real_frame_present_generation" : "latest_submitted_input_approximation"},
         {"epoch", source.epoch}, {"observation_revision", source.observation_revision},
         {"sequence", source.sequence}, {"tick_ms", source.tick}, {"age_ms", now >= source.tick ? now - source.tick : 0},
         {"viewport", source.viewport}, {"source_native", source.resource.native}, {"source_command", origin.command},
@@ -218,15 +233,60 @@ namespace sunshine_game3d::ui_input {
     // (2.11.x: 68, 2.12+: 69). Outside the surveyed range it stays manual-only.
     const bool alpha_authenticated =
       sunshine_streamline::buffers::ui_alpha_authenticated(sunshine_streamline::buffers::active());
-    if (capture_needed(status, runtime->get_device()->get_api())) for (unsigned slot = 0; slot != 4; ++slot) {
+    // A manual choice observes its selected capture's own provenance.
+    const auto observe_origin = [&](const ui_mask::selection &selected, bool dedicated_mask) {
+      const auto &source = selected.origin.source;
+      input.retained = true; input.dedicated_mask = dedicated_mask;
+      input.epoch = source.epoch; input.revision = source.observation_revision;
+      input.viewport = source.viewport; input.sequence = source.sequence; input.tick_ms = source.tick;
+    };
+    const auto sign = [&](unsigned slot, const ui_mask::selection &selected) {
+      signature ^= (std::uint64_t(1) << (slot + 48)) ^ (selected.origin.source.source_id * (slot + 1));
+    };
+    auto hudless_result = hudless_none;
+    // The tagged Backbuffer is the game's own final color. Captured in the same
+    // tag batch as HUD-less, it is that image's exact pair on any Present.
+    struct { api::resource_view view; std::uint64_t tagged{}, current{}; } backbuffer;
+    const bool capturing = capture_needed(status, runtime->get_device()->get_api());
+    const bool hudless_wanted = capturing && (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::hudless));
+    if (capturing) for (unsigned slot = 0; slot != 4; ++slot) {
       const auto kind = kinds[slot];
       if (!(source_filter(wanted_source) & ui_mask::source_mask(kind))) continue;
       ui_mask::selection selected;
       if (!ui_mask::acquire_kind(reinterpret_cast<std::uint64_t>(runtime), kind, selected, now, queue->get_native())) continue;
       const bool hudless = kind == ui_mask::source_kind::hudless;
-      const bool paired = selected.texture.producer_queue == queue->get_native() &&
-        selected.origin.source_present_generation && selected.origin.source_present_generation != UINT64_MAX &&
-        selected.current_source_present_generation == selected.origin.source_present_generation + 1;
+      // Pairing is by Present count only. Streamline can present on its own
+      // queue; pixels from another queue were already admitted only after the
+      // producer completed and its recording retired.
+      const auto tagged = selected.origin.source_present_generation, current = selected.current_source_present_generation;
+      const auto pairing = ui_mask::pair_hudless_present(tagged, current, status.fg_active(), status.fg.generated_frames);
+      using ui_mask::hudless_present;
+      const bool batch = hudless && backbuffer.view.handle &&
+        ui_mask::same_tag_interval(tagged, current, backbuffer.tagged, backbuffer.current);
+      const bool paired = batch || pairing.kind == hudless_present::real_frame || pairing.kind == hudless_present::earlier_real_frame;
+      if (hudless) hudless_result = batch ? hudless_batch : pairing.kind == hudless_present::real_frame ? hudless_real :
+        pairing.kind == hudless_present::earlier_real_frame ? hudless_late :
+        pairing.kind == hudless_present::generated_frame ? hudless_generated :
+        tagged && tagged != UINT64_MAX && current > tagged ? hudless_stale : hudless_other;
+      if (hudless && !batch && pairing.kind == hudless_present::generated_frame) {
+        // Interpolated color cannot be differenced against this tag's scene.
+        // Nothing is copied; the renderer reuses the preceding real frame's mask.
+        if (diagnostic) {
+          candidates.push_back(captured_metadata(selected, now, false, false));
+          candidates.back()["held_for_generated_present"] = true;
+        }
+        sign(slot, selected);
+        result.status.retained_alpha_ready = true;
+        result.detection.hold_previous = true;
+        if (result.automatic_detection) available = true;
+        else if (!available) {
+          available = true; candidate = captured_scope(base, selected);
+          result.kind = ui_input_kind::hudless_difference; result.view = {};
+          result.status.input = source_alpha_input::sl_hudless_difference;
+          observe_origin(selected, false);
+        }
+        continue;
+      }
       // An unauthenticated UIAlpha tag cannot hide independently usable
       // lower-priority candidates; an authenticated one is validated on the GPU.
       const bool admissible = (!result.automatic_detection || kind != ui_mask::source_kind::alpha || alpha_authenticated) &&
@@ -236,9 +296,25 @@ namespace sunshine_game3d::ui_input {
         return capture::copy_local_texture(commands->get_native(), queue->get_native(), selected.ticket,
           destination.handle, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
       }, static_cast<api::format>(selected.texture.format));
-      if (diagnostic) candidates.push_back(captured_metadata(selected, now, view.handle != 0, paired));
+      if (diagnostic) {
+        candidates.push_back(captured_metadata(selected, now, view.handle != 0, pairing.kind == hudless_present::real_frame));
+        if (hudless) {
+          candidates.back()["paired_with"] = batch ? "tagged_backbuffer_same_batch" : "presented_color";
+          candidates.back()["real_frame_presents_ago"] = pairing.presents_ago;
+        }
+      }
       if (!view.handle) continue;
-      signature ^= (std::uint64_t(1) << (slot + 48)) ^ (selected.origin.source.source_id * (slot + 1));
+      if (kind == ui_mask::source_kind::backbuffer) backbuffer = {view, tagged, current};
+      // A manual HUD-less choice captures the Backbuffer only as its pair.
+      if (!result.automatic_detection && wanted_source == choice::sl_hudless && !hudless) continue;
+      if (hudless) {
+        if (batch) result.detection.hudless_pair = backbuffer.view;
+        else result.detection.hudless_presents_ago = pairing.presents_ago;
+        // Present counting is exact only without frame generation; Hogwarts
+        // showed FG-on Present pairs that belonged to another frame.
+        result.detection.hudless_exact = batch || !status.fg_active();
+      }
+      sign(slot, selected);
       result.status.retained_alpha_ready = true;
       if (result.automatic_detection) {
         if (hudless) result.detection.hudless = view;
@@ -246,15 +322,14 @@ namespace sunshine_game3d::ui_input {
         available = true;
       } else if (!available) {
         available = true; candidate = captured_scope(base, selected); result.view = view;
+        if (hudless) result.detection.hudless = view;
         result.kind = hudless ? ui_input_kind::hudless_difference : kind == ui_mask::source_kind::backbuffer ?
           ui_input_kind::captured_color_alpha : ui_input_kind::dedicated_mask;
         result.channel = kind == ui_mask::source_kind::alpha ? ui_mask_channel::red : ui_mask_channel::alpha;
         result.status.input = hudless ? source_alpha_input::sl_hudless_difference : kind == ui_mask::source_kind::alpha ?
           source_alpha_input::sl_ui_alpha : kind == ui_mask::source_kind::color_and_alpha ?
           source_alpha_input::sl_ui_color_alpha : source_alpha_input::sl_backbuffer_alpha;
-        input.retained = true; input.dedicated_mask = result.kind == ui_input_kind::dedicated_mask;
-        input.epoch = selected.origin.source.epoch; input.revision = selected.origin.source.observation_revision;
-        input.viewport = selected.origin.source.viewport; input.sequence = selected.origin.source.sequence; input.tick_ms = selected.origin.source.tick;
+        observe_origin(selected, result.kind == ui_input_kind::dedicated_mask);
         if (diagnostic) result.source_metadata = candidates.back().dump();
       }
     }
@@ -287,6 +362,7 @@ namespace sunshine_game3d::ui_input {
       const auto found = sources.find(runtime);
       if (found != sources.end()) {
         auto &entry = found->second;
+        if (hudless_wanted) ++entry.hudless_outcomes[hudless_result];
         const bool matches = entry.instance == instance && !entry.suspended && entry.base == base &&
           entry.selection.snapshot().choice_revision == before.choice_revision;
         if (matches && available) {
@@ -305,18 +381,20 @@ namespace sunshine_game3d::ui_input {
     ui_mask::diagnostic_snapshot latest;
     const bool have_diagnostic = status.requested && ui_mask::query_diagnostic(reinterpret_cast<std::uint64_t>(runtime), latest);
     bool log_gate = false;
+    std::array<std::uint32_t, hudless_outcome_count> outcomes{};
     if (have_diagnostic) {
       std::lock_guard<std::mutex> lock(source_mutex);
       if (auto found = sources.find(runtime); found != sources.end() && now >= found->second.next_gate_log) {
         found->second.next_gate_log = now + 5000;
+        outcomes = std::exchange(found->second.hudless_outcomes, {});
         log_gate = true;
       }
     }
     if (log_gate) {
       const auto &gate = latest.hook_gate;
-      char message[768]{};
+      char message[896]{};
       std::snprintf(message, sizeof(message),
-        "Sunshine UI capture gate: runtime=%p request_generation=%llu wanted={epoch=%llu revision=%llu viewport=%u device=%llu size=%ux%u kinds=0x%x} hook={state=%s epoch=%llu revision=%llu viewport=%u sequence=%llu tick=%llu kinds=0x%x matches=%u} boundary=%llu attempted=%u recorded=%u; gate metadata does not authorize pixels",
+        "Sunshine UI capture gate: runtime=%p request_generation=%llu wanted={epoch=%llu revision=%llu viewport=%u device=%llu size=%ux%u kinds=0x%x} hook={state=%s epoch=%llu revision=%llu viewport=%u sequence=%llu tick=%llu kinds=0x%x matches=%u} boundary=%llu attempted=%u recorded=%u hudless_presents={batch=%u real=%u late=%u generated=%u stale=%u other=%u none=%u}; gate metadata does not authorize pixels",
         static_cast<void *>(runtime), static_cast<unsigned long long>(latest.request_generation),
         static_cast<unsigned long long>(latest.wanted.epoch), static_cast<unsigned long long>(latest.wanted.revision),
         latest.wanted.viewport, static_cast<unsigned long long>(latest.wanted.device_identity),
@@ -324,7 +402,9 @@ namespace sunshine_game3d::ui_input {
         ui_mask::name(gate.state), static_cast<unsigned long long>(gate.epoch), static_cast<unsigned long long>(gate.revision),
         gate.viewport, static_cast<unsigned long long>(gate.sequence), static_cast<unsigned long long>(gate.tick),
         gate.seen_kinds, gate.matching_requests, static_cast<unsigned long long>(latest.latest_boundary.source.sequence),
-        unsigned(latest.record_attempted), unsigned(latest.record_completed));
+        unsigned(latest.record_attempted), unsigned(latest.record_completed),
+        outcomes[hudless_batch], outcomes[hudless_real], outcomes[hudless_late], outcomes[hudless_generated],
+        outcomes[hudless_stale], outcomes[hudless_other], outcomes[hudless_none]);
       reshade::log::message(reshade::log::level::info, message);
     }
     if (have_diagnostic && latest.latest_boundary.source.sequence) {
@@ -376,8 +456,11 @@ namespace sunshine_game3d::ui_input {
     // delayed CPU quality feedback. Captured candidates remain eligible.
     if (status.fg_active()) detection.current_color = false;
     const bool direct = requested && !(status.fg_active() && kind == ui_input_kind::current_color_alpha);
+    // A HUD-less override also carries detection inputs, so a generated
+    // present can hold the real frame's mask.
+    const bool detected = automatic_detection || kind == ui_input_kind::hudless_difference;
     return {direct ? kind : ui_input_kind::unavailable, direct ? view : api::resource_view{}, plane,
-      &observation, &adaptive, channel, requested && automatic_detection ? &detection : nullptr};
+      &observation, &adaptive, channel, requested && detected ? &detection : nullptr};
   }
   void frame::complete(const renderer &renderer, bool rendered) {
     status.rendered = rendered; status.applied = rendered && renderer.consumed_source_alpha_ui();

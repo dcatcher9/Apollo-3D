@@ -1745,6 +1745,17 @@ namespace {
     run(false, "identical final/HUDless has no separator");
     ui.view = correct;
     run(true, "matching pair recovers automatically");
+    run(true, "matching pair publishes its detection evidence");
+    {
+      // The CPU sample of the previous frame's decision explains which check passed.
+      const auto sample = gpu.renderer.consumed_alpha_auto();
+      const auto &evidence = sample.evidence;
+      require(sample.source_kind == 5 && evidence.candidates == 16u && evidence.hudless_changed == sample.covered &&
+          evidence.hudless_changed && evidence.hudless_invalid == 0 &&
+          evidence.hudless_unchanged + evidence.hudless_changed <= sample.pixels &&
+          evidence.hudless_unchanged * 4u >= sample.pixels * 3u && evidence.matching_tiles >= 128u,
+        "HUD-less detection evidence does not describe the accepted decision");
+    }
     // Reproduce the useful part of Hogwarts' discovery: a transport-valid
     // UIColorAndAlpha can be an opaque full scene. Continue to HUDless in the
     // same frame instead of letting that unusable higher candidate win.
@@ -1752,6 +1763,16 @@ namespace {
     inputs.masks[1] = flattened_ui; inputs.hudless = correct; inputs.current_color = true;
     ui.detection = &inputs;
     run(true, "flattened explicit UI falls through to HUDless");
+    // Frame generation presents interpolated frames between a HUD-less tag and
+    // its real frame. They hold the real frame's mask instead of differencing.
+    inputs.hudless = {}; inputs.hold_previous = true;
+    run(true, "generated present holds the real frame's HUD-less mask");
+    run(true, "second generated present still holds");
+    run(true, "third generated present still holds");
+    run(false, "holding is bounded to three generated presents");
+    run(false, "a hold needs a preceding HUD-less decision");
+    inputs.hold_previous = false; inputs.hudless = correct;
+    run(true, "the next real frame detects again");
     inputs.hudless = shifted;
     run(false, "all candidates unsuitable");
     inputs.masks[0] = explicit_alpha;
@@ -1767,8 +1788,64 @@ namespace {
       "HUDless detection changed the user's manual Off setting");
     policy.set_automatic(source.now_ms);
     run(true, "Auto resumes without review");
-    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
-    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback and manual Off without review");
+    // A HUD-less capture from another queue can complete after its own frame
+    // was presented. It pairs with that frame's retained color, never with the
+    // current frame, and only within the retained history.
+    inputs = {}; inputs.masks[1] = flattened_ui; inputs.current_color = true;
+    const auto late = [&](const std::vector<unsigned char> &color, std::uint32_t presents_ago, bool accepted,
+        const char *label, api::resource_view pair = {}) {
+      gpu.original = color;
+      gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), gpu.width * bpp, 0);
+      inputs.hudless = correct; inputs.hudless_presents_ago = presents_ago; inputs.hudless_pair = pair;
+      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+      gpu.renderer.begin_present();
+      gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
+      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
+        const auto value = selected.channel(x, y, 0);
+        require(std::isfinite(value) && (value > 0.f) == (accepted && mask[size_t(y) * gpu.width + x] > 0.f),
+          std::string(label) + ": late HUD-less mask does not match its own frame's HUD");
+      }
+    };
+    late(final_color, 1, false, "late HUD-less before any color is retained");
+    late(moved_scene, 1, true, "late HUD-less pairs with the previous frame's retained color");
+    late(moved_scene, 2, true, "two Presents late still pairs within retained history");
+    late(moved_scene, 3, false, "a frame no longer retained is unpaired");
+    late(final_color, 0, true, "an on-time capture still uses the current color");
+    late(moved_scene, 0, false, "an on-time capture never pairs with an earlier color");
+    // The game's tagged Backbuffer from the HUD-less image's own batch is its
+    // exact pair on any Present, whatever the current frame shows.
+    late(moved_scene, 0, true, "HUD-less pairs exactly with its batch's tagged Backbuffer", flattened_ui);
+    late(moved_scene, 2, true, "a batch pair takes precedence over Present counting", flattened_ui);
+    late(final_color, 0, false, "a mismatched batch image is rejected", shifted);
+    // A menu or title screen covers the whole frame while the game still renders
+    // its scene: HUD-less shows that scene, nearly every pixel differs, and the
+    // frame stays flat. A black HUD-less image is not a scene and flattens nothing.
+    auto menu = hudless;
+    for (auto &byte : menu) byte ^= 0x80;
+    opaque(menu);
+    std::vector<unsigned char> black(hudless.size(), 0);
+    opaque(black);
+    const auto dark = color_view(black);
+    const auto full_frame = [&](api::resource_view hudless_view, bool exact, bool flat, const char *label) {
+      gpu.original = menu;
+      gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), gpu.width * bpp, 0);
+      inputs.hudless = hudless_view; inputs.hudless_presents_ago = 0; inputs.hudless_pair = {}; inputs.hudless_exact = exact;
+      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+      gpu.renderer.begin_present();
+      gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
+      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
+        const auto value = selected.channel(x, y, 0);
+        require(std::isfinite(value) && (flat ? value == 1.f : value == 0.f), std::string(label) + ": wrong full-frame UI mask");
+      }
+    };
+    full_frame(correct, true, true, "a full-frame menu over a lit scene stays flat");
+    full_frame(correct, false, false, "an unverified pair differing everywhere is rejected, not flattened");
+    full_frame(dark, true, false, "a black HUD-less image never flattens the frame");
+    inputs.hudless_exact = false;
+    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
+    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, bounded generated-present hold, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening and manual Off without review");
   }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;

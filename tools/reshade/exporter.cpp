@@ -128,16 +128,19 @@ namespace {
       if (write_log) entry.logged_source_alpha = value;
     }
     if (!write_log) return;
-    char message[768];
+    const auto &evidence = value.coverage.evidence;
+    char message[1024];
     std::snprintf(message, sizeof(message),
-      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u status_revision=%llu",
+      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} status_revision=%llu",
       static_cast<void *>(runtime), value.mode == sunshine_game3d::source_alpha_mode::automatic ? "auto" :
         value.mode == sunshine_game3d::source_alpha_mode::on ? "on" : "off",
       int(value.rendered), int(value.applied), sunshine_game3d::name(value.input), int(value.retained_alpha_ready),
       int(value.fg_active()), int(value.fg.known), int(value.fg.enabled), sunshine_game3d::name(value.input_state),
       sunshine_game3d::name(value.coverage.state), sunshine_game3d::ui_qualification::name(value.qualification.selected),
       sunshine_game3d::ui_qualification::name(value.qualification.candidate.source), value.source_availability(),
-      value.coverage.source_kind, value.coverage.covered, value.coverage.pixels,
+      value.coverage.source_kind, value.coverage.covered, value.coverage.pixels, evidence.candidates,
+      evidence.alpha_covered[0], evidence.alpha_covered[1], evidence.alpha_covered[2], evidence.alpha_covered[3],
+      evidence.hudless_changed, evidence.hudless_unchanged, evidence.hudless_invalid, evidence.matching_tiles, evidence.hudless_lit,
       static_cast<unsigned long long>(value.qualification.token));
     log(reshade::log::level::info, message);
   }
@@ -651,6 +654,12 @@ namespace {
     std::uint32_t height = 0;
     export_color_t color;
     // A runtime's device never changes adapter; resolve its LUID once.
+    // Bounded timing of the add-on's own work inside the game's Present.
+    struct {
+      std::uint64_t presents = 0, next_log = 0;
+      double cpu_sum_ms = 0, cpu_max_ms = 0;
+      std::array<double, 5> worst{}; // Setup, depth, UI, render, export of the slowest present.
+    } timing;
     std::uint64_t adapter_luid = 0;
     bool adapter_known = false;
     bool proof_checked = false;
@@ -724,6 +733,46 @@ namespace {
       return found != runtimes_.end() && found->second.addon_native;
     }
 
+    void finish_present_timing(api::effect_runtime *runtime, const std::array<LARGE_INTEGER, 5> &marks, unsigned count) {
+      if (!count) return;
+      LARGE_INTEGER end{}, frequency{};
+      QueryPerformanceCounter(&end);
+      QueryPerformanceFrequency(&frequency);
+      const auto ms = [&](const LARGE_INTEGER &from, const LARGE_INTEGER &to) {
+        return double(to.QuadPart - from.QuadPart) * 1000.0 / double(frequency.QuadPart);
+      };
+      const double cpu_ms = ms(marks[0], end);
+      // Sections end at the next mark, or at the end when the present left early.
+      std::array<double, 5> sections{};
+      for (unsigned i = 0; i < count; ++i) sections[i] = ms(marks[i], i + 1 < count ? marks[i + 1] : end);
+      const auto now = GetTickCount64();
+      char message[1024]{};
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto &proof = runtimes_[runtime];
+        auto &timing = proof.timing;
+        ++timing.presents; timing.cpu_sum_ms += cpu_ms;
+        if (cpu_ms > timing.cpu_max_ms) { timing.cpu_max_ms = cpu_ms; timing.worst = sections; }
+        if (!timing.next_log) timing.next_log = now + 10000;
+        if (now < timing.next_log) return;
+        sunshine_game3d::gpu_timing gpu;
+        if (proof.renderer) proof.renderer->take_gpu_timing(gpu);
+        using stage = sunshine_game3d::gpu_timing;
+        std::snprintf(message, sizeof(message),
+          "Sunshine Game 3D timing: presents=%llu cpu_ms={mean=%.3f max=%.3f} cpu_worst_ms={setup=%.3f depth=%.3f ui=%.3f render=%.3f export=%.3f} gpu_frames=%u gpu_ms mean/max={total=%.3f/%.3f inputs=%.3f/%.3f source=%.3f/%.3f detection=%.3f/%.3f linearize=%.3f/%.3f candidate=%.3f/%.3f vertical=%.3f/%.3f horizontal=%.3f/%.3f eyes=%.3f/%.3f pack=%.3f/%.3f}",
+          static_cast<unsigned long long>(timing.presents), timing.cpu_sum_ms / double(timing.presents), timing.cpu_max_ms,
+          timing.worst[0], timing.worst[1], timing.worst[2], timing.worst[3], timing.worst[4], gpu.frames,
+          gpu.mean_ms[stage::total], gpu.max_ms[stage::total], gpu.mean_ms[stage::inputs], gpu.max_ms[stage::inputs],
+          gpu.mean_ms[stage::source], gpu.max_ms[stage::source], gpu.mean_ms[stage::detection], gpu.max_ms[stage::detection],
+          gpu.mean_ms[stage::linearize], gpu.max_ms[stage::linearize], gpu.mean_ms[stage::candidate], gpu.max_ms[stage::candidate],
+          gpu.mean_ms[stage::vertical], gpu.max_ms[stage::vertical], gpu.mean_ms[stage::horizontal], gpu.max_ms[stage::horizontal],
+          gpu.mean_ms[stage::eyes], gpu.max_ms[stage::eyes], gpu.mean_ms[stage::pack], gpu.max_ms[stage::pack]);
+        timing = {};
+        timing.next_log = now + 10000;
+      }
+      log(reshade::log::level::info, message);
+    }
+
     void render_present(api::swapchain *swapchain) {
       api::effect_runtime *runtime = nullptr;
       {
@@ -754,6 +803,15 @@ namespace {
         sunshine_depth::set_raw_scene_request(runtime, 0, false);
         return;
       }
+      // Everything below runs inside the game's Present, so it is latency.
+      struct present_timer {
+        publisher_t &self; api::effect_runtime *runtime;
+        std::array<LARGE_INTEGER, 5> marks{}; // Start, then the end of setup, depth, UI and render.
+        unsigned count = 0;
+        void mark() { if (count < marks.size()) QueryPerformanceCounter(&marks[count++]); }
+        ~present_timer() { self.finish_present_timing(runtime, marks, count); }
+      } timer{*this, runtime};
+      timer.mark();
       auto *device = runtime->get_device();
       const auto backend = device->get_api();
       sunshine_game3d::ui_input::configure(runtime, source_alpha, backend);
@@ -806,6 +864,8 @@ namespace {
         sunshine_game3d::renderer *renderer;
         ~restore_game_state() { renderer->end_frame_state(); }
       } restore{renderer};
+      timer.mark();
+      renderer->begin_gpu_profile(commands); // Depth and UI input copies follow.
       // The owner brackets the same capture used by the FX reference path. No
       // raw resource pointer is retained once this lease closes.
       if (!sunshine_depth::begin_native_frame(runtime, commands)) {
@@ -817,8 +877,10 @@ namespace {
         ~finish_depth() { sunshine_depth::end_native_frame(runtime, commands); }
       } finish{runtime, commands};
       prepare_native_depth(runtime, commands, rtv);
+      timer.mark();
       auto ui_input = sunshine_game3d::ui_input::acquire(runtime, *renderer, source_alpha,
         sunshine_game3d::source_alpha_startup_policy(), diagnostic_owner);
+      timer.mark();
       // Publish what this render actually consumes, not the saved preference or
       // a later SDK observation. No RGB from the retained input is displayed.
       bool rendered = false;
@@ -847,6 +909,7 @@ namespace {
           renderer->consumed_parameters(), renderer->consumed_ui_plane(), scene.ready && proof.frame.depth_ready,
           renderer->consumed_source_alpha_ui(), proof.width, proof.height) : 0.f;
       }
+      timer.mark();
       // Export records the owed pack only when a slot receives this frame. Without
       // a consumer, a free slot or a dump, the SBS pack is skipped.
       if (rendered) frame(runtime, {}, commands, rtv, true);
