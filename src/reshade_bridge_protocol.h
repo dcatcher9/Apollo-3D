@@ -111,8 +111,10 @@ namespace reshade_bridge {
     // Producer is the single metadata writer: odd during replacement, even when readable.
     std::uint32_t metadata_sequence = 0;
     std::uint32_t shared_bytes = sizeof(shared_state_t);
-    // A new receiver writes a nonzero nonce once. The producer creates NEW resources for it;
-    // resources with abandoned reading slots are never reused across consumer lifetimes.
+    // A new receiver writes a nonzero nonce once and the producer answers with a new
+    // generation. Its textures are new unless the previous ring has been idle (no receiver and
+    // no producer GPU work) for at least 500 ms, long after any read an abandoned receiver left
+    // in flight; the receiver then reopens the same shared handles under the new generation.
     // A detaching receiver resets its own nonce to zero; zero means no receiver.
     std::uint64_t consumer_nonce = 0;
     metadata_t metadata;

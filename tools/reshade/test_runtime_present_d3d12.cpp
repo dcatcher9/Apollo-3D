@@ -1038,6 +1038,8 @@ uniform int DepthDirection < hidden = true; >;
       require(observation.runtime->open_overlay(false, api::input_source::keyboard), "Native no-FX overlay failed to close");
       wait_pixels(0, generation, last_sequence);
 
+      wire::metadata_t ring;
+      require(snapshot(*shared, ring) && ring.generation == generation, "Native no-FX generation changed before focus loss");
       set_test_focus(false);
       step();
       wire::metadata_t metadata;
@@ -1045,6 +1047,23 @@ uniform int DepthDirection < hidden = true; >;
       require_receiver_inactive("Receiver retained native output after focus loss");
       set_test_focus(true);
       generation = wait_pixels(generation);
+      const auto same_ring = [](const wire::metadata_t &a, const wire::metadata_t &b) {
+        return std::equal(std::begin(a.texture_handles), std::end(a.texture_handles), std::begin(b.texture_handles)) &&
+          a.ready_fence_handle == b.ready_fence_handle;
+      };
+      // A consumer that returns at once may still have a read in flight: fresh ring.
+      require(snapshot(*shared, metadata) && metadata.generation == generation && !same_ring(metadata, ring),
+        "An immediate focus return reused the export ring");
+      // After an idle gap the returning consumer is served by the same ring under
+      // a new generation instead of another 2W x H allocation.
+      ring = metadata;
+      set_test_focus(false);
+      const auto idle_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(700);
+      while (std::chrono::steady_clock::now() < idle_until) step();
+      set_test_focus(true);
+      generation = wait_pixels(generation);
+      require(snapshot(*shared, metadata) && metadata.generation == generation && same_ring(metadata, ring),
+        "An idle focus return reallocated the export ring");
       if (receiver_state) {
         const auto previous_nonce = read64(shared->consumer_nonce);
         receiver_destroy(receiver_state);
@@ -1055,7 +1074,7 @@ uniform int DepthDirection < hidden = true; >;
       }
       require(observation.presents == observation.finishes && observation.techniques == 0,
         "Native no-FX presentation lifecycle is incomplete");
-      std::printf("PASS native add-on-only D3D12 color=%u: no FX files or techniques; native source/SDR/HDR pixels, controls/config, zero strength, enable/focus recovery, actual panel/overlay, reload%s\n",
+      std::printf("PASS native add-on-only D3D12 color=%u: no FX files or techniques; native source/SDR/HDR pixels, controls/config, zero strength, enable/focus recovery, idle ring reuse, actual panel/overlay, reload%s\n",
         expected_color, receiver_state ? ", production receiver restart" : "");
     }
 #endif

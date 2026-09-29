@@ -325,6 +325,13 @@ namespace {
     std::uint64_t adapter = 0;
     HWND window = nullptr;
   };
+  // A ring idle this long is reused for the next consumer (see generation_t::renew).
+  constexpr auto idle_ring_reuse = std::chrono::milliseconds(500);
+  // Everything a generation's ring textures depend on, besides the consumer.
+  bool same_ring(const source_t &a, const source_t &b) {
+    return a.width == b.width && a.height == b.height && a.format == b.format && a.adapter == b.adapter &&
+      a.color.input == b.color.input && a.color.output == b.color.output && a.window == b.window;
+  }
 
   // Own native objects rather than ReShade wrappers, which disappear during runtime teardown.
   struct generation_t {
@@ -342,6 +349,9 @@ namespace {
     bool signal_failed = false;
     bool pending_overlay = false;
     bool rendered_directly = false; // Logged once per generation.
+    // When this ring stopped exporting (focus loss, consumer detach). An idle
+    // ring can serve the next consumer under a new generation.
+    std::chrono::steady_clock::time_point inactive_since{};
     // Diagnostic disposition travels with this copy until its slot is actually
     // published. A later effects callback must not relabel an earlier copy.
     bool pending_fg_output = false, pending_depth_ready = false, pending_reused_depth = false;
@@ -392,6 +402,16 @@ namespace {
       for (auto &source : submitted_sources) source.release();
       for (auto &overlay : overlays) overlay.release();
       log(reshade::log::level::warning, "Sunshine SBS: preserving one in-flight generation until process exit during add-on unload");
+    }
+
+    // A finished ring idle for idle_ring_reuse serves a new consumer under a new
+    // generation: slots are reset on publication and the consumer reopens the
+    // same shared handles, instead of allocating another 2W x H ring.
+    void renew(api::effect_runtime *owner, std::uint64_t consumer, std::uint64_t generation_id) {
+      runtime = owner;
+      nonce = consumer;
+      id = generation_id;
+      rendered_directly = false;
     }
 
     bool create(api::effect_runtime *owner, const source_t &input, std::uint64_t consumer, std::uint64_t generation_id) {
@@ -1585,10 +1605,7 @@ namespace {
         return;
       }
       const bool replace = !generation_ || generation_->runtime != runtime || generation_->nonce != nonce ||
-                           generation_->source.width != source.width || generation_->source.height != source.height ||
-                           generation_->source.format != source.format || generation_->source.adapter != source.adapter ||
-                           generation_->source.color.input != source.color.input || generation_->source.color.output != source.color.output ||
-                           generation_->source.window != source.window;
+                           !same_ring(generation_->source, source);
       if (replace) {
         if (generation_) {
           deactivate(generation_->runtime);
@@ -1605,13 +1622,23 @@ namespace {
           deactivate(runtime);
           return;
         }
-        auto next = std::make_unique<generation_t>();
-        if (!next->create(runtime, source, nonce, ++next_generation_)) {
-          deactivate(runtime);
-          retry_at_ = now + std::chrono::seconds(2);
-          return;
+        // An abandoned consumer read of a reused slot finishes within frames;
+        // a ring idle this long only ever served consumers that are gone. A
+        // consumer that restarts while exporting still gets fresh resources.
+        const bool reuse = generation_ && !generation_->owner_destroyed && generation_->owner_runtime == runtime &&
+          generation_->native_swapchain == runtime->get_native() && same_ring(generation_->source, source) &&
+          generation_->inactive_since != std::chrono::steady_clock::time_point{} && now - generation_->inactive_since >= idle_ring_reuse;
+        if (reuse) {
+          generation_->renew(runtime, nonce, ++next_generation_);
+        } else {
+          auto next = std::make_unique<generation_t>();
+          if (!next->create(runtime, source, nonce, ++next_generation_)) {
+            deactivate(runtime);
+            retry_at_ = now + std::chrono::seconds(2);
+            return;
+          }
+          generation_ = std::move(next);
         }
-        generation_ = std::move(next);
         wire::metadata_t metadata = identity_;
         set_source(metadata, source);
         metadata.generation = generation_->id;
@@ -1622,7 +1649,7 @@ namespace {
         metadata.ready_fence_handle = reinterpret_cast<std::uint64_t>(generation_->fence_handle.get());
         publish(metadata, true, runtime);
         char message[256];
-        std::snprintf(message, sizeof(message), "Sunshine SBS: generation %llu, %ux%u full SBS, DXGI %u, D3D%u, %s (source color %u)", static_cast<unsigned long long>(metadata.generation), metadata.packed_width, metadata.packed_height, metadata.dxgi_format, backend == api::device_api::d3d11 ? 11u : 12u, metadata.color_transfer == wire::transfer::scrgb ? "scRGB" : "sRGB", static_cast<unsigned>(source.color.input));
+        std::snprintf(message, sizeof(message), "Sunshine SBS: generation %llu, %ux%u full SBS, DXGI %u, D3D%u, %s (source color %u)%s", static_cast<unsigned long long>(metadata.generation), metadata.packed_width, metadata.packed_height, metadata.dxgi_format, backend == api::device_api::d3d11 ? 11u : 12u, metadata.color_transfer == wire::transfer::scrgb ? "scRGB" : "sRGB", static_cast<unsigned>(source.color.input), reuse ? ", reusing the idle export ring" : "");
         log(reshade::log::level::info, message);
       }
       if (generation_->signal_failed) {
@@ -1804,6 +1831,7 @@ namespace {
       if (generation_ && generation_->runtime == runtime) {
         for (auto &overlay : generation_->overlays) if (overlay) overlay->cancel();
         generation_->runtime = nullptr;
+        generation_->inactive_since = std::chrono::steady_clock::now();
       }
     }
 

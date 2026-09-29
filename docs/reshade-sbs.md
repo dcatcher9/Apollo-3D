@@ -2674,9 +2674,18 @@ generation of textures and a producer-ready fence. Each slot's atomic 64-bit con
 its generation and ownership state, so an old consumer cannot unlock a replacement ring.
 Sunshine detaches whenever the game stops being the covering foreground window and then clears
 its own nonce (compare-exchange, so a replacement receiver's nonce survives). Returning to the
-game therefore builds one generation, for the reattached receiver's new nonce. Previously the
-stale nonce was answered first, so each return built two 7680x2160 generations, each a 24-45 ms
+game therefore publishes one generation, for the reattached receiver's new nonce. Previously the
+stale nonce was answered first, so each return built two 7680x2160 generations, each a 24-120 ms
 present-thread step in Hogwarts Legacy, and discarded the first.
+
+A new generation normally allocates a new ring. When the previous ring has the same source
+(size, format, color, adapter, window), belongs to the same runtime and swapchain, has no
+unfinished producer work and has been inactive for at least 500 ms, it is reused: the generation
+number and slot states are new, and the receiver reopens the same shared texture and fence
+handles. Any read an abandoned receiver left in flight finished long before that, so this only
+removes the allocation from a return to the game or a reconnecting stream. A receiver that
+restarts while the game keeps exporting still gets a fresh ring, as does any size, format or HDR
+change.
 
 For each exported frame, the producer claims a slot, writes the final stereo image into it,
 signals its GPU fence, writes the frame sequence, QPC timestamp and matching UI displacement,
