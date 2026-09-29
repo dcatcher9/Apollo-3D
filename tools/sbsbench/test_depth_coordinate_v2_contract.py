@@ -110,6 +110,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             75: "7f72195a723c9597db2be23e651b92a028040c0e4e6007accd315eb41c6690c4",
             76: "a6769249b05f9123ed725c202b21b56891cc72a822067a859d04e2346ac20150",
             77: "9ee049234edda521fb7536c195d055c36099d1d1f006efb4a7118a5584282763",
+            78: "6560a9bd08f3750ad6daf961302651032d0027bb2e7d6dadd1611d3c28723872",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -117,14 +118,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x05360D2F)
+        self.assertEqual(generator.contract_tag(contract), 0xB4221F70)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "05360d2f480b76a0d59c933d955638c362b8f06e1e013aa654e8dd417a22096a",
+            "b4221f7012b21a6e60e7104824abf0c0282f97c5ed0315ca84414ce79ed9e0b1",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "58033bdc70d2370607fcd4a195212deffcab2c28ed5bd516a3d0897b7b0ed02c",
+            "6f91d6290272ba8a4c9ccb56d654bc5f52f0a88a1fcd02374d075d400e98f6fc",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -521,7 +522,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 77u',
+                'contract_schema = 78u',
                 'final_parallax_contract_schema = 3u',
                 'final_parallax_authority = '
                 '"complete-atomic-subtitle-conditioned-r32f-live-render-authority"',
@@ -556,7 +557,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'subtitle_condition_param_schema = 3u',
                 'subtitle_condition_param_tag = 0x33504353u',
                 'subtitle_condition_param_word_count = 6u',
-                'limiter_group_threads = 32u',
+                'limiter_serial_max_lines = 32u',
+                'limiter_group_lines = 8u',
+                'limiter_line_chunks = 8u',
                 'limiter_q_fraction_bits = 30u',
                 'limiter_q_scale = 1073741824u',
                 'limiter_container_q_limit = 42949672',
@@ -597,7 +600,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 77u',
+                '#define V2_CONTRACT_SCHEMA 78u',
                 '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 14u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
@@ -617,7 +620,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 '#define V2_SUBTITLE_CONDITION_PARAM_TAG 0x33504353u',
                 '#define V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT 6u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_COUNT 24u',
-                '#define V2_LIMITER_GROUP_THREADS 32u',
+                '#define V2_LIMITER_SERIAL_MAX_LINES 32u',
+                '#define V2_LIMITER_GROUP_LINES 8u',
+                '#define V2_LIMITER_LINE_CHUNKS 8u',
                 '#define V2_LIMITER_Q_FRACTION_BITS 30u',
                 '#define V2_LIMITER_Q_SCALE 1073741824.0f',
                 '#define V2_LIMITER_CONTAINER_Q_LIMIT 42949672',

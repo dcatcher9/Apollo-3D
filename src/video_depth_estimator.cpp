@@ -6686,7 +6686,7 @@ namespace models {
         .vertical_conditioned_output =
           depth_coordinate_v2_vertical_conditioned_uav.Get(),
         .dispatch = parallax_v2_dispatch_command(
-          static_cast<UINT>(field_w),
+          host_sbs_v2_gpu::limiter_groups(static_cast<UINT>(field_w)),
           1u,
           1u,
           near_identical_gpu_infer_columns_byte_offset
@@ -6704,7 +6704,7 @@ namespace models {
         .vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv.Get(),
         .final_output = depth_coordinate_v2_final_uav.Get(),
         .dispatch = parallax_v2_dispatch_command(
-          static_cast<UINT>(field_h),
+          host_sbs_v2_gpu::limiter_groups(static_cast<UINT>(field_h)),
           1u,
           1u,
           near_identical_gpu_infer_rows_byte_offset

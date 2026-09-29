@@ -76,13 +76,13 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_condition,
   };
   inline constexpr std::string_view parallax_v2_producer_source_closure_sha256 =
-    "58033bdc70d2370607fcd4a195212deffcab2c28ed5bd516a3d0897b7b0ed02c";
+    "6f91d6290272ba8a4c9ccb56d654bc5f52f0a88a1fcd02374d075d400e98f6fc";
 
   inline constexpr std::array parallax_v2_coordinate_diagnostic_specs {
     depth_coordinate_v2_coordinate_diagnostic,
   };
   inline constexpr std::string_view parallax_v2_coordinate_diagnostic_source_closure_sha256 =
-    "818382c98ec2e4409232858190731d27c0219982e705b29a81874a85f24317c9";
+    "bf19e88ff178a11c14da3b42439dd000033093bd53a3b6d171e41f69917fa759";
 
   inline constexpr std::array near_identical_detector_specs {
     host_sbs_near_identical_resolve,
@@ -91,26 +91,26 @@ namespace models::host_sbs_shader_cache {
     host_sbs_near_identical_reuse_depth,
   };
   inline constexpr std::string_view near_identical_detector_source_closure_sha256 =
-    "c81f0ec6488a010b38f63f50ac0d4b21f05dbeea2ffdf428fa167d901520b60a";
+    "4285fad7312d630f83fb23e6ea5ec76453d2872f59341d08545e63ddfa032289";
 
   inline constexpr std::array gpu_trace_specs {
     host_sbs_gpu_trace,
   };
   inline constexpr std::string_view gpu_trace_source_closure_sha256 =
-    "d898e87d1d0112f52966001772c618aa7702051606a3c87d50f69979b5d0f895";
+    "2074b01cf769a09fd3ad5001cb1f1c505615d224e4bd9c26e18b677a2934b0f6";
 
   inline constexpr std::array parallax_v2_live_renderer_specs {
     parallax_v2_live_renderer,
     sbs_reprojection_vertex,
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "454b1a5cb438981106f5befaa02067816218674997c6fe5b20f9a1972abade40";
+    "020401a4393953a92e4214169b15e9204ef8ece10d9305e755e80356e27b6fdb";
 
   inline constexpr std::array parallax_v2_p010_y_specs {
     parallax_v2_p010_y_renderer,
   };
   inline constexpr std::string_view parallax_v2_p010_y_source_closure_sha256 =
-    "c3d9a41dc90d4b0f6ecf54b726feb2482bcd9c99f1d9fb1ca4a4e6f6643b5088";
+    "2f76236d3e48c6b341d4650d052aa568b3a91cc69731ce51fc514da11a8c662f";
 
   inline constexpr std::array sbs_flat_fallback_specs {
     sbs_flat_identity,
@@ -124,6 +124,6 @@ namespace models::host_sbs_shader_cache {
     parallax_v2_live_mask,
   };
   inline constexpr std::string_view parallax_v2_live_diagnostic_source_closure_sha256 =
-    "a905b252b3f06185667003f882e0bcf4a893ea34464b6046373f6704e4d12283";
+    "ccc4dfac1fb7808a555381615f18fcdb9953433f637a928a5836211130a55191";
 
 }  // namespace models::host_sbs_shader_cache

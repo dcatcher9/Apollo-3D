@@ -611,14 +611,17 @@ void finalize_main(uint3 dispatch_thread : SV_DispatchThreadID) {
             run_infer ? (near_identical_geometry_width + 15u) / 16u : 0u,
             run_infer ? (near_identical_geometry_height + 15u) / 16u : 1u,
             1u);
+        // Each limiter group owns V2_LIMITER_GROUP_LINES adjacent columns or rows.
         NearIdenticalWriteDispatchArgs(
             NEAR_IDENTICAL_INFER_COLUMNS_OFFSET,
-            run_infer ? near_identical_geometry_width : 0u,
+            run_infer ? (near_identical_geometry_width + V2_LIMITER_GROUP_LINES - 1u) /
+                V2_LIMITER_GROUP_LINES : 0u,
             1u,
             1u);
         NearIdenticalWriteDispatchArgs(
             NEAR_IDENTICAL_INFER_ROWS_OFFSET,
-            run_infer ? near_identical_geometry_height : 0u,
+            run_infer ? (near_identical_geometry_height + V2_LIMITER_GROUP_LINES - 1u) /
+                V2_LIMITER_GROUP_LINES : 0u,
             1u,
             1u);
         NearIdenticalWriteDispatchArgs(

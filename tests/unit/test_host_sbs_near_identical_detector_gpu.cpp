@@ -4017,8 +4017,9 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 1u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_grid16_x)], 7u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_grid16_y)], 6u);
-  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_columns_x)], 112u);
-  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_rows_x)], 96u);
+  // Each limiter group owns eight adjacent columns (112) or rows (96).
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_columns_x)], 14u);
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_rows_x)], 12u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)], 0u);
   std::array<std::uint32_t, 10> preserved_scene_evidence {};
   ASSERT_TRUE(fixture.read_scene_evidence(preserved_scene_evidence, error)) << error;

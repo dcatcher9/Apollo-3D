@@ -33,7 +33,12 @@ HLSL_OCR_ASSERT_TARGET = (
     ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx" /
     "include" / "depth_coordinate_v2_ocr_assert.generated.hlsl"
 )
-LIMITER_GROUP_THREADS = 32
+# Lines of LIMITER_SERIAL_MAX_LINES cells or fewer keep the serial float recurrence. Longer
+# lines are scanned in LIMITER_LINE_CHUNKS Q30 chunks, LIMITER_GROUP_LINES adjacent lines per
+# group, so neighboring threads read and write neighboring texels.
+LIMITER_SERIAL_MAX_LINES = 32
+LIMITER_GROUP_LINES = 8
+LIMITER_LINE_CHUNKS = 8
 LIMITER_Q_FRACTION_BITS = 30
 LIMITER_Q_SCALE = 1 << LIMITER_Q_FRACTION_BITS
 
@@ -1003,7 +1008,9 @@ def render_cpp(contract: dict[str, Any]) -> str:
         for name in EXPECTED_DEFAULT_NAMES
     )
     lines.extend([
-        f"  inline constexpr std::uint32_t limiter_group_threads = {LIMITER_GROUP_THREADS}u;",
+        f"  inline constexpr std::uint32_t limiter_serial_max_lines = {LIMITER_SERIAL_MAX_LINES}u;",
+        f"  inline constexpr std::uint32_t limiter_group_lines = {LIMITER_GROUP_LINES}u;",
+        f"  inline constexpr std::uint32_t limiter_line_chunks = {LIMITER_LINE_CHUNKS}u;",
         f"  inline constexpr std::uint32_t limiter_q_fraction_bits = "
         f"{LIMITER_Q_FRACTION_BITS}u;",
         f"  inline constexpr std::uint32_t limiter_q_scale = {LIMITER_Q_SCALE}u;",
@@ -1511,7 +1518,9 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_MODEL_CALIBRATED_SHAPE_COUNT {len(calibrated_shapes)}u",
         f"#define V2_MODEL_CALIBRATED_MAX_DIMENSION {calibrated_max_dimension}u",
         f"#define V2_SUBTITLE_LIVE_FIELD_SHAPE_COUNT {len(live_field_shapes)}u",
-        f"#define V2_LIMITER_GROUP_THREADS {LIMITER_GROUP_THREADS}u",
+        f"#define V2_LIMITER_SERIAL_MAX_LINES {LIMITER_SERIAL_MAX_LINES}u",
+        f"#define V2_LIMITER_GROUP_LINES {LIMITER_GROUP_LINES}u",
+        f"#define V2_LIMITER_LINE_CHUNKS {LIMITER_LINE_CHUNKS}u",
         f"#define V2_LIMITER_Q_FRACTION_BITS {LIMITER_Q_FRACTION_BITS}u",
         f"#define V2_LIMITER_Q_SCALE {LIMITER_Q_SCALE}.0f",
         f"#define V2_LIMITER_CONTAINER_Q_LIMIT {limiter_container_q_limit}",

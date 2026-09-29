@@ -541,13 +541,11 @@ void SunshineHostCandidateCS(uint3 id : SV_DispatchThreadID)
 }
 
 // Mechanical ReShade binding translation of depth_coordinate_v2_vertical_limit_cs.hlsl
-// Original SHA256: 68392c96466d4b3b165dac71740adbec05da7ede9d900d9569b0efa4ebcb2841
-groupshared int V_ForwardUpperQ30[BUFFER_HEIGHT];
-groupshared int V_ForwardLowerQ30[BUFFER_HEIGHT];
-// {forward upper end, forward lower end, backward upper end, backward lower end}
-groupshared int4 V_LocalEndsQ30[32u];
+// Original SHA256: fbcad9fe485ea5c82904ea3587afaac26b7bc04bdb61d88f115d405c5ffca5bf
+// {forward upper end, forward lower end, backward upper start, backward lower start}
+groupshared int4 V_LocalEndsQ30[8u][8u];
 // {incoming forward upper, incoming forward lower, incoming backward upper, incoming backward lower}
-groupshared int4 V_ChunkCarriesQ30[32u];
+groupshared int4 V_ChunkCarriesQ30[8u][8u];
 
 int V_V2LimitUpperQ30(float value) {
     value = SunshineCameraFinite(value) ?
@@ -580,27 +578,11 @@ int V_V2LimitDecayQ30(int step_q30, uint distance, int max_decay_q30) {
         max_decay_q30 : step_q30 * signed_distance;
 }
 
-// Performance-only deviation from the mechanical translation, with identical
-// results: each lane reads its rows from the texture once and replays its
-// three later passes over them from group memory. A lane only rereads rows it
-// cached itself, so no barrier is added. Tall buffers exceed the 32 KB group
-// budget and read the texture as before.
-#if BUFFER_HEIGHT <= 2560
-groupshared float V_ColumnCandidate[BUFFER_HEIGHT];
-#endif
-float V_FetchCandidate(uint x, uint y) {
-    float value = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, y)), 0));
-#if BUFFER_HEIGHT <= 2560
-    V_ColumnCandidate[y] = value;
-#endif
-    return value;
-}
-float V_CachedCandidate(uint x, uint y) {
-#if BUFFER_HEIGHT <= 2560
-    return V_ColumnCandidate[y];
-#else
-    return SunshineHostCandidateSampler.Load(int3(int2(uint2(x, y)), 0));
-#endif
+// Equal to V_V2LimitDecayQ30 for every distance, with saturation_distance = max_decay / step
+// computed once instead of one integer division per texel.
+int V_V2LimitSaturatedDecayQ30(int step_q30, uint distance, uint saturation_distance,
+                             int max_decay_q30) {
+    return distance <= saturation_distance ? step_q30 * (int)distance : max_decay_q30;
 }
 
 float V_share_vertical_envelopes(float upper, float lower) {
@@ -613,21 +595,21 @@ float V_share_vertical_envelopes(float upper, float lower) {
     return conditioned;
 }
 
-[numthreads(32, 1, 1)]
+[numthreads(8u, 8u, 1)]
 void SunshineHostVerticalCS(
     uint3 group_id : SV_GroupID,
     uint3 group_thread_id : SV_GroupThreadID) {
-    uint x = group_id.x;
-    if (x >= BUFFER_WIDTH) {
-        return;
-    }
+    uint column = group_thread_id.x;
+    uint lane = group_thread_id.y;
+    uint x = group_id.x * 8u + column;
+    // A partial last group keeps its idle threads until the final group barrier.
+    bool active = x < BUFFER_WIDTH;
 
     float max_step = 2.0 / float(BUFFER_WIDTH);
-    uint lane = group_thread_id.x;
 
     // Preserve the tiny diagnostic/unit-test path exactly and avoid empty chunks.
     if (BUFFER_HEIGHT <= 32u) {
-        if (lane == 0u) {
+        if (active && lane == 0u) {
             float candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, 0u)), 0));
             float upper = candidate;
             float lower = candidate;
@@ -663,40 +645,48 @@ void SunshineHostVerticalCS(
     int max_decay_q30 = 2 * SunshineHostContainerQ;
     uint content_width = BUFFER_WIDTH;
     int max_step_q30 = V_V2LimitStepQ30(content_width, max_decay_q30);
+    uint saturation_distance = (uint)(max_decay_q30 / max_step_q30);
 
-    uint chunk_start = lane * BUFFER_HEIGHT / 32u;
-    uint chunk_end = (lane + 1u) * BUFFER_HEIGHT / 32u;
-    float candidate = V_FetchCandidate(x, chunk_start);
-    int forward_upper_q30 = V_V2LimitUpperQ30(candidate);
-    int forward_lower_q30 = V_V2LimitLowerQ30(candidate);
-    [loop]
-    for (uint local_forward_y = chunk_start + 1u;
-         local_forward_y < chunk_end;
-         ++local_forward_y) {
-        candidate = V_FetchCandidate(x, local_forward_y);
-        forward_upper_q30 = max(
-            V_V2LimitUpperQ30(candidate),
-            forward_upper_q30 - max_step_q30);
-        forward_lower_q30 = min(
-            V_V2LimitLowerQ30(candidate),
-            forward_lower_q30 + max_step_q30);
+    uint chunk_start = lane * BUFFER_HEIGHT / 8u;
+    uint chunk_end = (lane + 1u) * BUFFER_HEIGHT / 8u;
+    int forward_upper_q30 = 0;
+    int forward_lower_q30 = 0;
+    int backward_upper_q30 = 0;
+    int backward_lower_q30 = 0;
+    if (active) {
+        // One forward traversal stores this chunk's local forward envelopes and forms both chunk
+        // ends. The backward value at chunk_start is the closed form
+        // max_s(Candidate(s) - decay(s - chunk_start)). Every Q30 input lies in
+        // [-container, container] and the decay saturates at twice that limit, so a saturated
+        // term can never exceed Candidate(chunk_start); the serial recurrence gives the same value.
+        float candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, chunk_start)), 0));
+        forward_upper_q30 = V_V2LimitUpperQ30(candidate);
+        forward_lower_q30 = V_V2LimitLowerQ30(candidate);
+        backward_upper_q30 = forward_upper_q30;
+        backward_lower_q30 = forward_lower_q30;
+        SunshineHostVerticalMajorantStore[int2(uint2(x, chunk_start))] = V_V2LimitFromQ30(forward_upper_q30);
+        SunshineHostVerticalConditionedStore[int2(uint2(x, chunk_start))] = V_V2LimitFromQ30(forward_lower_q30);
+        [loop]
+        for (uint local_forward_y = chunk_start + 1u;
+             local_forward_y < chunk_end;
+             ++local_forward_y) {
+            candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, local_forward_y)), 0));
+            int upper_q30 = V_V2LimitUpperQ30(candidate);
+            int lower_q30 = V_V2LimitLowerQ30(candidate);
+            forward_upper_q30 = max(upper_q30, forward_upper_q30 - max_step_q30);
+            forward_lower_q30 = min(lower_q30, forward_lower_q30 + max_step_q30);
+            int decay_q30 = V_V2LimitSaturatedDecayQ30(
+                max_step_q30,
+                local_forward_y - chunk_start,
+                saturation_distance,
+                max_decay_q30);
+            backward_upper_q30 = max(backward_upper_q30, upper_q30 - decay_q30);
+            backward_lower_q30 = min(backward_lower_q30, lower_q30 + decay_q30);
+            SunshineHostVerticalMajorantStore[int2(uint2(x, local_forward_y))] = V_V2LimitFromQ30(forward_upper_q30);
+            SunshineHostVerticalConditionedStore[int2(uint2(x, local_forward_y))] = V_V2LimitFromQ30(forward_lower_q30);
+        }
     }
-    candidate = V_CachedCandidate(x, chunk_end - 1u);
-    int backward_upper_q30 = V_V2LimitUpperQ30(candidate);
-    int backward_lower_q30 = V_V2LimitLowerQ30(candidate);
-    [loop]
-    for (int local_backward_y = (int)chunk_end - 2;
-         local_backward_y >= (int)chunk_start;
-         --local_backward_y) {
-        candidate = V_CachedCandidate(x, (uint)local_backward_y);
-        backward_upper_q30 = max(
-            V_V2LimitUpperQ30(candidate),
-            backward_upper_q30 - max_step_q30);
-        backward_lower_q30 = min(
-            V_V2LimitLowerQ30(candidate),
-            backward_lower_q30 + max_step_q30);
-    }
-    V_LocalEndsQ30[lane] = int4(
+    V_LocalEndsQ30[lane][column] = int4(
         forward_upper_q30,
         forward_lower_q30,
         backward_upper_q30,
@@ -704,118 +694,99 @@ void SunshineHostVerticalCS(
     GroupMemoryBarrierWithGroupSync();
 
     if (lane == 0u) {
-        forward_upper_q30 = V_LocalEndsQ30[0u].x;
-        forward_lower_q30 = V_LocalEndsQ30[0u].y;
+        forward_upper_q30 = V_LocalEndsQ30[0u][column].x;
+        forward_lower_q30 = V_LocalEndsQ30[0u][column].y;
         [unroll]
         for (uint forward_chunk = 1u;
-             forward_chunk < 32u;
+             forward_chunk < 8u;
              ++forward_chunk) {
-            V_ChunkCarriesQ30[forward_chunk].xy = int2(
+            V_ChunkCarriesQ30[forward_chunk][column].xy = int2(
                 forward_upper_q30,
                 forward_lower_q30);
-            uint forward_start = forward_chunk * BUFFER_HEIGHT / 32u;
-            uint forward_end = (forward_chunk + 1u) * BUFFER_HEIGHT / 32u;
+            uint forward_start = forward_chunk * BUFFER_HEIGHT / 8u;
+            uint forward_end = (forward_chunk + 1u) * BUFFER_HEIGHT / 8u;
             int forward_span_q30 = V_V2LimitDecayQ30(
                 max_step_q30,
                 forward_end - forward_start,
                 max_decay_q30);
             forward_upper_q30 = max(
-                V_LocalEndsQ30[forward_chunk].x,
+                V_LocalEndsQ30[forward_chunk][column].x,
                 forward_upper_q30 - forward_span_q30);
             forward_lower_q30 = min(
-                V_LocalEndsQ30[forward_chunk].y,
+                V_LocalEndsQ30[forward_chunk][column].y,
                 forward_lower_q30 + forward_span_q30);
         }
 
-        backward_upper_q30 = V_LocalEndsQ30[32u - 1u].z;
-        backward_lower_q30 = V_LocalEndsQ30[32u - 1u].w;
+        backward_upper_q30 = V_LocalEndsQ30[8u - 1u][column].z;
+        backward_lower_q30 = V_LocalEndsQ30[8u - 1u][column].w;
         [unroll]
-        for (int backward_chunk = (int)32u - 2;
+        for (int backward_chunk = (int)8u - 2;
              backward_chunk >= 0;
              --backward_chunk) {
-            V_ChunkCarriesQ30[(uint)backward_chunk].zw = int2(
+            V_ChunkCarriesQ30[(uint)backward_chunk][column].zw = int2(
                 backward_upper_q30,
                 backward_lower_q30);
-            uint backward_start = (uint)backward_chunk * BUFFER_HEIGHT / 32u;
-            uint backward_end = ((uint)backward_chunk + 1u) * BUFFER_HEIGHT / 32u;
+            uint backward_start = (uint)backward_chunk * BUFFER_HEIGHT / 8u;
+            uint backward_end = ((uint)backward_chunk + 1u) * BUFFER_HEIGHT / 8u;
             int backward_span_q30 = V_V2LimitDecayQ30(
                 max_step_q30,
                 backward_end - backward_start,
                 max_decay_q30);
             backward_upper_q30 = max(
-                V_LocalEndsQ30[(uint)backward_chunk].z,
+                V_LocalEndsQ30[(uint)backward_chunk][column].z,
                 backward_upper_q30 - backward_span_q30);
             backward_lower_q30 = min(
-                V_LocalEndsQ30[(uint)backward_chunk].w,
+                V_LocalEndsQ30[(uint)backward_chunk][column].w,
                 backward_lower_q30 + backward_span_q30);
         }
     }
     GroupMemoryBarrierWithGroupSync();
+    if (!active) {
+        return;
+    }
 
-    candidate = V_CachedCandidate(x, chunk_start);
-    forward_upper_q30 = V_V2LimitUpperQ30(candidate);
-    forward_lower_q30 = V_V2LimitLowerQ30(candidate);
-    if (lane != 0u) {
-        forward_upper_q30 = max(
-            forward_upper_q30,
-            V_ChunkCarriesQ30[lane].x - max_step_q30);
-        forward_lower_q30 = min(
-            forward_lower_q30,
-            V_ChunkCarriesQ30[lane].y + max_step_q30);
-    }
-    V_ForwardUpperQ30[chunk_start] = forward_upper_q30;
-    V_ForwardLowerQ30[chunk_start] = forward_lower_q30;
+    // One backward traversal completes each texel. With the incoming carries,
+    //   Forward(y) = max(LocalForward(y), carry - decay(y - chunk_start + 1))
+    //   Backward(y) = max(LocalBackward(y), carry - decay(chunk_end - y))
+    // (min/plus for the lower envelope). LocalForward was stored as float; Q30-to-float
+    // conversion is monotonic, so max/min of converted values equals converting the Q30 max/min.
+    // Each thread rereads only texels it wrote itself.
+    int4 carry = V_ChunkCarriesQ30[lane][column];
+    bool forward_carry = lane != 0u;
+    bool backward_carry = lane + 1u != 8u;
     [loop]
-    for (uint replay_forward_y = chunk_start + 1u;
-         replay_forward_y < chunk_end;
-         ++replay_forward_y) {
-        candidate = V_CachedCandidate(x, replay_forward_y);
-        forward_upper_q30 = max(
-            V_V2LimitUpperQ30(candidate),
-            forward_upper_q30 - max_step_q30);
-        forward_lower_q30 = min(
-            V_V2LimitLowerQ30(candidate),
-            forward_lower_q30 + max_step_q30);
-        V_ForwardUpperQ30[replay_forward_y] = forward_upper_q30;
-        V_ForwardLowerQ30[replay_forward_y] = forward_lower_q30;
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    candidate = V_CachedCandidate(x, chunk_end - 1u);
-    backward_upper_q30 = V_V2LimitUpperQ30(candidate);
-    backward_lower_q30 = V_V2LimitLowerQ30(candidate);
-    if (lane + 1u != 32u) {
-        backward_upper_q30 = max(
-            backward_upper_q30,
-            V_ChunkCarriesQ30[lane].z - max_step_q30);
-        backward_lower_q30 = min(
-            backward_lower_q30,
-            V_ChunkCarriesQ30[lane].w + max_step_q30);
-    }
-    uint write_y = chunk_end - 1u;
-    int final_upper_q30 = max(V_ForwardUpperQ30[write_y], backward_upper_q30);
-    int final_lower_q30 = min(V_ForwardLowerQ30[write_y], backward_lower_q30);
-    float final_upper = V_V2LimitFromQ30(final_upper_q30);
-    float final_lower = V_V2LimitFromQ30(final_lower_q30);
-    SunshineHostVerticalMajorantStore[int2(uint2(x, write_y))] = final_upper;
-    SunshineHostVerticalConditionedStore[int2(uint2(x, write_y))] = clamp(
-        V_share_vertical_envelopes(final_upper, final_lower),
-        final_lower,
-        final_upper);
-    [loop]
-    for (int scan_y = (int)chunk_end - 2; scan_y >= (int)chunk_start; --scan_y) {
-        write_y = (uint)scan_y;
-        candidate = V_CachedCandidate(x, write_y);
-        backward_upper_q30 = max(
-            V_V2LimitUpperQ30(candidate),
-            backward_upper_q30 - max_step_q30);
-        backward_lower_q30 = min(
-            V_V2LimitLowerQ30(candidate),
-            backward_lower_q30 + max_step_q30);
-        final_upper_q30 = max(V_ForwardUpperQ30[write_y], backward_upper_q30);
-        final_lower_q30 = min(V_ForwardLowerQ30[write_y], backward_lower_q30);
-        final_upper = V_V2LimitFromQ30(final_upper_q30);
-        final_lower = V_V2LimitFromQ30(final_lower_q30);
+    for (int scan_y = (int)chunk_end - 1; scan_y >= (int)chunk_start; --scan_y) {
+        uint write_y = (uint)scan_y;
+        float candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, write_y)), 0));
+        int upper_q30 = V_V2LimitUpperQ30(candidate);
+        int lower_q30 = V_V2LimitLowerQ30(candidate);
+        if (write_y + 1u == chunk_end) {
+            backward_upper_q30 = upper_q30;
+            backward_lower_q30 = lower_q30;
+        } else {
+            backward_upper_q30 = max(upper_q30, backward_upper_q30 - max_step_q30);
+            backward_lower_q30 = min(lower_q30, backward_lower_q30 + max_step_q30);
+        }
+        int complete_upper_q30 = backward_upper_q30;
+        int complete_lower_q30 = backward_lower_q30;
+        if (backward_carry) {
+            int decay_q30 = V_V2LimitSaturatedDecayQ30(
+                max_step_q30, chunk_end - write_y, saturation_distance, max_decay_q30);
+            complete_upper_q30 = max(complete_upper_q30, carry.z - decay_q30);
+            complete_lower_q30 = min(complete_lower_q30, carry.w + decay_q30);
+        }
+        if (forward_carry) {
+            int decay_q30 = V_V2LimitSaturatedDecayQ30(
+                max_step_q30, write_y - chunk_start + 1u, saturation_distance, max_decay_q30);
+            complete_upper_q30 = max(complete_upper_q30, carry.x - decay_q30);
+            complete_lower_q30 = min(complete_lower_q30, carry.y + decay_q30);
+        }
+        float final_upper = max(
+            SunshineHostVerticalMajorantStore[int2(uint2(x, write_y))],
+            V_V2LimitFromQ30(complete_upper_q30));
+        float final_lower = min(
+            SunshineHostVerticalConditionedStore[int2(uint2(x, write_y))],
+            V_V2LimitFromQ30(complete_lower_q30));
         SunshineHostVerticalMajorantStore[int2(uint2(x, write_y))] = final_upper;
         SunshineHostVerticalConditionedStore[int2(uint2(x, write_y))] = clamp(
             V_share_vertical_envelopes(final_upper, final_lower),
@@ -825,13 +796,11 @@ void SunshineHostVerticalCS(
 }
 
 // Mechanical ReShade binding translation of depth_coordinate_v2_limit_cs.hlsl
-// Original SHA256: d039457f8d5db27a801523dc220ab8610657185d28c399a93690e2f1c187820e
-groupshared int H_LineCandidateQ30[BUFFER_WIDTH];
-groupshared int H_ForwardMajorantQ30[BUFFER_WIDTH];
-// {forward end, backward end}
-groupshared int2 H_LocalEndsQ30[32u];
+// Original SHA256: 8f9330ea245ef46fa4a7e238355b5a365afe419869fcc2c061e6798cc169a572
+// {forward end, backward start}
+groupshared int2 H_LocalEndsQ30[8u][8u];
 // {incoming forward value, incoming backward value}
-groupshared int2 H_ChunkCarriesQ30[32u];
+groupshared int2 H_ChunkCarriesQ30[8u][8u];
 
 int H_V2LimitUpperQ30(float value) {
     value = SunshineCameraFinite(value) ?
@@ -856,6 +825,13 @@ int H_V2LimitDecayQ30(int step_q30, uint distance, int max_decay_q30) {
     int signed_distance = (int)distance;
     return step_q30 > max_decay_q30 / signed_distance ?
         max_decay_q30 : step_q30 * signed_distance;
+}
+
+// Equal to H_V2LimitDecayQ30 for every distance, with saturation_distance = max_decay / step
+// computed once instead of one integer division per texel.
+int H_V2LimitSaturatedDecayQ30(int step_q30, uint distance, uint saturation_distance,
+                             int max_decay_q30) {
+    return distance <= saturation_distance ? step_q30 * (int)distance : max_decay_q30;
 }
 
 float SunshineUIPlaneParallax() {
@@ -903,6 +879,14 @@ float SunshineUIPlaneParallax() {
     return SunshineBoundFinalParallax(parallax);
 }
 
+// UI pinning runs as its own pass after the scene field. For each row it
+// finds the nearest selected-UI texel on either side of every texel.
+groupshared int SunshineUIPinIndex[BUFFER_WIDTH];
+groupshared int SunshineUIPinNearestLeft[BUFFER_WIDTH];
+// {last UI index, first UI index} per chunk, and incoming {left, right}.
+groupshared int2 SunshineUIPinEnds[32u];
+groupshared int2 SunshineUIPinCarries[32u];
+
 void SunshinePinSourceUI(uint x, uint y, int distance_pixels) {
     // No UI exists in this row: leave the original field bit-for-bit intact.
     if (distance_pixels >= BUFFER_WIDTH) return;
@@ -920,15 +904,15 @@ void SunshinePinSourceUISerial(uint y) {
     [loop]
     for (uint x = 0u; x < BUFFER_WIDTH; ++x) {
         bool is_ui = SunshineSourceUI(x, y);
-        H_LineCandidateQ30[x] = is_ui ? (int)x : -1;
+        SunshineUIPinIndex[x] = is_ui ? (int)x : -1;
         if (is_ui) nearest_left = (int)x;
-        H_ForwardMajorantQ30[x] = nearest_left;
+        SunshineUIPinNearestLeft[x] = nearest_left;
     }
     int nearest_right = BUFFER_WIDTH;
     [loop]
     for (int x = (int)BUFFER_WIDTH - 1; x >= 0; --x) {
-        if (H_LineCandidateQ30[(uint)x] >= 0) nearest_right = x;
-        int left = H_ForwardMajorantQ30[(uint)x];
+        if (SunshineUIPinIndex[(uint)x] >= 0) nearest_right = x;
+        int left = SunshineUIPinNearestLeft[(uint)x];
         int distance_left = left >= 0 ? x - left : BUFFER_WIDTH;
         int distance_right = nearest_right < BUFFER_WIDTH ? nearest_right - x : BUFFER_WIDTH;
         SunshinePinSourceUI((uint)x, y, min(distance_left, distance_right));
@@ -936,75 +920,71 @@ void SunshinePinSourceUISerial(uint y) {
 }
 
 void SunshinePinSourceUIParallel(uint y, uint lane, uint chunk_start, uint chunk_end) {
-    // All horizontal conditioning stores/readers must finish before its scratch
-    // arrays are reused. This adds no group memory beyond the original 32 KB
-    // budget; the arrays below now contain pixel indices, never Q30 parallax.
-    AllMemoryBarrierWithGroupSync();
     [loop]
     for (uint x = lane; x < BUFFER_WIDTH; x += 32u)
-        H_LineCandidateQ30[x] = SunshineSourceUI(x, y) ? (int)x : -1;
+        SunshineUIPinIndex[x] = SunshineSourceUI(x, y) ? (int)x : -1;
     GroupMemoryBarrierWithGroupSync();
 
     int first_ui = BUFFER_WIDTH;
     int last_ui = -1;
     [loop]
     for (uint x = chunk_start; x < chunk_end; ++x) {
-        int index = H_LineCandidateQ30[x];
+        int index = SunshineUIPinIndex[x];
         if (index >= 0) {
             first_ui = min(first_ui, index);
             last_ui = index;
         }
     }
-    H_LocalEndsQ30[lane] = int2(last_ui, first_ui);
+    SunshineUIPinEnds[lane] = int2(last_ui, first_ui);
     GroupMemoryBarrierWithGroupSync();
     if (lane == 0u) {
         int left = -1;
         [unroll]
         for (uint chunk = 0u; chunk < 32u; ++chunk) {
-            H_ChunkCarriesQ30[chunk].x = left;
-            left = max(left, H_LocalEndsQ30[chunk].x);
+            SunshineUIPinCarries[chunk].x = left;
+            left = max(left, SunshineUIPinEnds[chunk].x);
         }
         int right = BUFFER_WIDTH;
         [unroll]
         for (int chunk = 31; chunk >= 0; --chunk) {
-            H_ChunkCarriesQ30[(uint)chunk].y = right;
-            right = min(right, H_LocalEndsQ30[(uint)chunk].y);
+            SunshineUIPinCarries[(uint)chunk].y = right;
+            right = min(right, SunshineUIPinEnds[(uint)chunk].y);
         }
     }
     GroupMemoryBarrierWithGroupSync();
-    int nearest_left = H_ChunkCarriesQ30[lane].x;
+    int nearest_left = SunshineUIPinCarries[lane].x;
     [loop]
     for (uint x = chunk_start; x < chunk_end; ++x) {
-        nearest_left = max(nearest_left, H_LineCandidateQ30[x]);
-        H_ForwardMajorantQ30[x] = nearest_left;
+        nearest_left = max(nearest_left, SunshineUIPinIndex[x]);
+        SunshineUIPinNearestLeft[x] = nearest_left;
     }
-    int nearest_right = H_ChunkCarriesQ30[lane].y;
+    int nearest_right = SunshineUIPinCarries[lane].y;
     [loop]
     for (int x = (int)chunk_end - 1; x >= (int)chunk_start; --x) {
-        int index = H_LineCandidateQ30[(uint)x];
+        int index = SunshineUIPinIndex[(uint)x];
         if (index >= 0) nearest_right = min(nearest_right, index);
-        int left = H_ForwardMajorantQ30[(uint)x];
+        int left = SunshineUIPinNearestLeft[(uint)x];
         int distance_left = left >= 0 ? x - left : BUFFER_WIDTH;
         int distance_right = nearest_right < BUFFER_WIDTH ? nearest_right - x : BUFFER_WIDTH;
         SunshinePinSourceUI((uint)x, y, min(distance_left, distance_right));
     }
 }
 
-[numthreads(32, 1, 1)]
+[numthreads(8u, 8u, 1)]
 void SunshineHostHorizontalCS(
     uint3 group_id : SV_GroupID,
     uint3 group_thread_id : SV_GroupThreadID) {
-    uint y = group_id.x;
-    if (y >= BUFFER_HEIGHT) {
-        return;
-    }
+    uint row = group_thread_id.x;
+    uint lane = group_thread_id.y;
+    uint y = group_id.x * 8u + row;
+    // A partial last group keeps its idle threads until the final group barrier.
+    bool active = y < BUFFER_HEIGHT;
 
     float max_step = 0.5 / float(BUFFER_WIDTH);
-    uint lane = group_thread_id.x;
 
     // Preserve the tiny diagnostic/unit-test path exactly and avoid empty chunks.
     if (BUFFER_WIDTH <= 32u) {
-        if (lane == 0u) {
+        if (active && lane == 0u) {
             float value = SunshineHostVerticalConditionedSampler.Load(int3(int2(uint2(0u, y)), 0));
             SunshineHostFinalStore[int2(uint2(0u, y))] = SunshineBoundFinalParallax(value);
             [loop]
@@ -1023,125 +1003,120 @@ void SunshineHostHorizontalCS(
                 SunshineHostFinalStore[int2(position)] = SunshineBoundFinalParallax(value);
             }
         }
-        if (Sunshine_SourceAlphaUI != 0u) {
-            AllMemoryBarrierWithGroupSync();
-            if (lane == 0u) SunshinePinSourceUISerial(y);
-        }
         return;
     }
 
     int max_decay_q30 = 2 * SunshineHostContainerQ;
     uint content_width = BUFFER_WIDTH;
     int max_step_q30 = H_V2LimitStepQ30(content_width, max_decay_q30);
-    [loop]
-    for (uint load_x = lane; load_x < BUFFER_WIDTH; load_x += 32u) {
-        H_LineCandidateQ30[load_x] = H_V2LimitUpperQ30(SunshineHostVerticalConditionedSampler.Load(int3(int2(uint2(load_x, y)), 0)));
-    }
-    GroupMemoryBarrierWithGroupSync();
+    uint saturation_distance = (uint)(max_decay_q30 / max_step_q30);
 
-    uint chunk_start = lane * BUFFER_WIDTH / 32u;
-    uint chunk_end = (lane + 1u) * BUFFER_WIDTH / 32u;
-    int forward_q30 = H_LineCandidateQ30[chunk_start];
-    [loop]
-    for (uint local_forward_x = chunk_start + 1u;
-         local_forward_x < chunk_end;
-         ++local_forward_x) {
-        forward_q30 = max(
-            H_LineCandidateQ30[local_forward_x],
-            forward_q30 - max_step_q30);
+    uint chunk_start = lane * BUFFER_WIDTH / 8u;
+    uint chunk_end = (lane + 1u) * BUFFER_WIDTH / 8u;
+    int forward_q30 = 0;
+    int backward_q30 = 0;
+    if (active) {
+        // One forward traversal stores this chunk's local forward majorant and forms both chunk
+        // ends. The backward value at chunk_start is the closed form
+        // max_s(VerticalShare(s) - decay(s - chunk_start)). Every Q30 input lies in
+        // [-container, container] and the decay saturates at twice that limit, so a saturated
+        // term can never exceed VerticalShare(chunk_start); the serial recurrence gives the same
+        // value.
+        forward_q30 = H_V2LimitUpperQ30(SunshineHostVerticalConditionedSampler.Load(int3(int2(uint2(chunk_start, y)), 0)));
+        backward_q30 = forward_q30;
+        SunshineHostFinalStore[int2(uint2(chunk_start, y))] = H_V2LimitFromQ30(forward_q30);
+        [loop]
+        for (uint local_forward_x = chunk_start + 1u;
+             local_forward_x < chunk_end;
+             ++local_forward_x) {
+            int value_q30 = H_V2LimitUpperQ30(SunshineHostVerticalConditionedSampler.Load(int3(int2(uint2(local_forward_x, y)), 0)));
+            forward_q30 = max(value_q30, forward_q30 - max_step_q30);
+            int decay_q30 = H_V2LimitSaturatedDecayQ30(
+                max_step_q30,
+                local_forward_x - chunk_start,
+                saturation_distance,
+                max_decay_q30);
+            backward_q30 = max(backward_q30, value_q30 - decay_q30);
+            SunshineHostFinalStore[int2(uint2(local_forward_x, y))] = H_V2LimitFromQ30(forward_q30);
+        }
     }
-    int backward_q30 = H_LineCandidateQ30[chunk_end - 1u];
-    [loop]
-    for (int local_backward_x = (int)chunk_end - 2;
-         local_backward_x >= (int)chunk_start;
-         --local_backward_x) {
-        backward_q30 = max(
-            H_LineCandidateQ30[(uint)local_backward_x],
-            backward_q30 - max_step_q30);
-    }
-    H_LocalEndsQ30[lane] = int2(forward_q30, backward_q30);
+    H_LocalEndsQ30[lane][row] = int2(forward_q30, backward_q30);
     GroupMemoryBarrierWithGroupSync();
 
     if (lane == 0u) {
-        forward_q30 = H_LocalEndsQ30[0u].x;
+        forward_q30 = H_LocalEndsQ30[0u][row].x;
         [unroll]
         for (uint forward_chunk = 1u;
-             forward_chunk < 32u;
+             forward_chunk < 8u;
              ++forward_chunk) {
-            H_ChunkCarriesQ30[forward_chunk].x = forward_q30;
-            uint forward_start = forward_chunk * BUFFER_WIDTH / 32u;
-            uint forward_end = (forward_chunk + 1u) * BUFFER_WIDTH / 32u;
+            H_ChunkCarriesQ30[forward_chunk][row].x = forward_q30;
+            uint forward_start = forward_chunk * BUFFER_WIDTH / 8u;
+            uint forward_end = (forward_chunk + 1u) * BUFFER_WIDTH / 8u;
             int forward_span_q30 = H_V2LimitDecayQ30(
                 max_step_q30,
                 forward_end - forward_start,
                 max_decay_q30);
             forward_q30 = max(
-                H_LocalEndsQ30[forward_chunk].x,
+                H_LocalEndsQ30[forward_chunk][row].x,
                 forward_q30 - forward_span_q30);
         }
 
-        backward_q30 = H_LocalEndsQ30[32u - 1u].y;
+        backward_q30 = H_LocalEndsQ30[8u - 1u][row].y;
         [unroll]
-        for (int backward_chunk = (int)32u - 2;
+        for (int backward_chunk = (int)8u - 2;
              backward_chunk >= 0;
              --backward_chunk) {
-            H_ChunkCarriesQ30[(uint)backward_chunk].y = backward_q30;
-            uint backward_start = (uint)backward_chunk * BUFFER_WIDTH / 32u;
-            uint backward_end = ((uint)backward_chunk + 1u) * BUFFER_WIDTH / 32u;
+            H_ChunkCarriesQ30[(uint)backward_chunk][row].y = backward_q30;
+            uint backward_start = (uint)backward_chunk * BUFFER_WIDTH / 8u;
+            uint backward_end = ((uint)backward_chunk + 1u) * BUFFER_WIDTH / 8u;
             int backward_span_q30 = H_V2LimitDecayQ30(
                 max_step_q30,
                 backward_end - backward_start,
                 max_decay_q30);
             backward_q30 = max(
-                H_LocalEndsQ30[(uint)backward_chunk].y,
+                H_LocalEndsQ30[(uint)backward_chunk][row].y,
                 backward_q30 - backward_span_q30);
         }
     }
     GroupMemoryBarrierWithGroupSync();
+    if (!active) {
+        return;
+    }
 
-    forward_q30 = H_LineCandidateQ30[chunk_start];
-    if (lane != 0u) {
-        forward_q30 = max(
-            forward_q30,
-            H_ChunkCarriesQ30[lane].x - max_step_q30);
-    }
-    H_ForwardMajorantQ30[chunk_start] = forward_q30;
+    // One backward traversal completes each texel from the stored local forward majorant, the
+    // local backward recurrence and both incoming carries. Q30-to-float conversion is monotonic,
+    // so max of converted values equals converting the Q30 max. Each thread rereads only texels
+    // it wrote itself.
+    int2 carry = H_ChunkCarriesQ30[lane][row];
+    bool forward_carry = lane != 0u;
+    bool backward_carry = lane + 1u != 8u;
     [loop]
-    for (uint replay_forward_x = chunk_start + 1u;
-         replay_forward_x < chunk_end;
-         ++replay_forward_x) {
-        forward_q30 = max(
-            H_LineCandidateQ30[replay_forward_x],
-            forward_q30 - max_step_q30);
-        H_ForwardMajorantQ30[replay_forward_x] = forward_q30;
+    for (int scan_x = (int)chunk_end - 1; scan_x >= (int)chunk_start; --scan_x) {
+        uint write_x = (uint)scan_x;
+        int value_q30 = H_V2LimitUpperQ30(SunshineHostVerticalConditionedSampler.Load(int3(int2(uint2(write_x, y)), 0)));
+        backward_q30 = write_x + 1u == chunk_end ?
+            value_q30 : max(value_q30, backward_q30 - max_step_q30);
+        int complete_q30 = backward_q30;
+        if (backward_carry) {
+            int decay_q30 = H_V2LimitSaturatedDecayQ30(
+                max_step_q30, chunk_end - write_x, saturation_distance, max_decay_q30);
+            complete_q30 = max(complete_q30, carry.y - decay_q30);
+        }
+        if (forward_carry) {
+            int decay_q30 = H_V2LimitSaturatedDecayQ30(
+                max_step_q30, write_x - chunk_start + 1u, saturation_distance, max_decay_q30);
+            complete_q30 = max(complete_q30, carry.x - decay_q30);
+        }
+        // Game 3D bounds the completed field by its display cap; the stored
+        // forward majorant above is an unbounded intermediate.
+        SunshineHostFinalStore[int2(uint2(write_x, y))] = SunshineBoundFinalParallax(max(
+            SunshineHostFinalStore[int2(uint2(write_x, y))],
+            H_V2LimitFromQ30(complete_q30)));
     }
-    GroupMemoryBarrierWithGroupSync();
-
-    backward_q30 = H_LineCandidateQ30[chunk_end - 1u];
-    if (lane + 1u != 32u) {
-        backward_q30 = max(
-            backward_q30,
-            H_ChunkCarriesQ30[lane].y - max_step_q30);
-    }
-    uint write_x = chunk_end - 1u;
-    int final_q30 = max(H_ForwardMajorantQ30[write_x], backward_q30);
-    SunshineHostFinalStore[int2(uint2(write_x, y))] = SunshineBoundFinalParallax(H_V2LimitFromQ30(final_q30));
-    [loop]
-    for (int scan_x = (int)chunk_end - 2; scan_x >= (int)chunk_start; --scan_x) {
-        write_x = (uint)scan_x;
-        backward_q30 = max(
-            H_LineCandidateQ30[write_x],
-            backward_q30 - max_step_q30);
-        final_q30 = max(H_ForwardMajorantQ30[write_x], backward_q30);
-        SunshineHostFinalStore[int2(uint2(write_x, y))] = SunshineBoundFinalParallax(H_V2LimitFromQ30(final_q30));
-    }
-    if (Sunshine_SourceAlphaUI != 0u)
-        SunshinePinSourceUIParallel(y, lane, chunk_start, chunk_end);
 }
 
-
-// A probe frame conditions the scene with UI disabled, observes it, then runs
-// the exact same UI pinning once. This prevents measuring our own pinned field.
+// UI pinning runs after the scene field is complete. A probe frame observes
+// the unpinned field first, so it never measures its own pinned field.
 [numthreads(32, 1, 1)]
 void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID) {
     uint y = group_id.x, lane = thread_id.x;

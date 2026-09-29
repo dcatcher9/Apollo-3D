@@ -7,9 +7,10 @@
 // The vertical share may raise or lower the immutable candidate, but it already satisfies the
 // vertical shear bound. This pure horizontal majorant preserves that bound, enforces the
 // contractive inverse-warp slope, and avoids the lateral lowering introduced by a horizontal
-// minorant component. One 32-thread group owns a row. Q30 makes chunk transfer composition exact
-// and associative; flooring the step keeps the resulting envelope conservatively inside the
-// authenticated slope bound.
+// minorant component. One group owns V2_LIMITER_GROUP_LINES adjacent rows, each split into
+// V2_LIMITER_LINE_CHUNKS column chunks. Q30 makes chunk transfer composition exact and
+// associative; flooring the step keeps the resulting envelope conservatively inside the
+// authenticated slope bound. The result is bit-identical to the serial Q30 recurrence.
 
 Texture2D<float> VerticalShare : register(t0);
 RWTexture2D<float> FinalOut : register(u0);
@@ -17,21 +18,21 @@ RWTexture2D<float> FinalOut : register(u0);
 #include "include/depth_constants.hlsl"
 #include "include/depth_coordinate_v2.hlsl"
 
-#define V2_LIMIT_THREADS V2_LIMITER_GROUP_THREADS
+#define V2_LIMIT_SERIAL_MAX_LINES V2_LIMITER_SERIAL_MAX_LINES
+#define V2_LIMIT_GROUP_LINES V2_LIMITER_GROUP_LINES
+#define V2_LIMIT_LINE_CHUNKS V2_LIMITER_LINE_CHUNKS
 #define V2_LIMIT_Q30_SCALE V2_LIMITER_Q_SCALE
 #define V2_LIMIT_HORIZONTAL_STEP_Q30_NUMERATOR \
     V2_LIMITER_HORIZONTAL_STEP_Q_NUMERATOR
 // Every authenticated single-high orientation is exactly 2x a calibrated DAV2 profile. Its
-// largest row is therefore twice the generated calibrated maximum (2072). These two int arrays
-// consume about 16 KiB at that derived bound.
+// largest row is therefore twice the generated calibrated maximum (2072). Larger requests are
+// outside the authenticated contract and leave the output unwritten.
 #define V2_LIMIT_MAX_HORIZONTAL_DIMENSION (2u * V2_MODEL_CALIBRATED_MAX_DIMENSION)
 
-groupshared int LineCandidateQ30[V2_LIMIT_MAX_HORIZONTAL_DIMENSION];
-groupshared int ForwardMajorantQ30[V2_LIMIT_MAX_HORIZONTAL_DIMENSION];
-// {forward end, backward end}
-groupshared int2 LocalEndsQ30[V2_LIMIT_THREADS];
+// {forward end, backward start}
+groupshared int2 LocalEndsQ30[V2_LIMIT_LINE_CHUNKS][V2_LIMIT_GROUP_LINES];
 // {incoming forward value, incoming backward value}
-groupshared int2 ChunkCarriesQ30[V2_LIMIT_THREADS];
+groupshared int2 ChunkCarriesQ30[V2_LIMIT_LINE_CHUNKS][V2_LIMIT_GROUP_LINES];
 
 int V2LimitUpperQ30(float value) {
     value = V2Finite(value) ?
@@ -58,22 +59,32 @@ int V2LimitDecayQ30(int step_q30, uint distance, int max_decay_q30) {
         max_decay_q30 : step_q30 * signed_distance;
 }
 
-[numthreads(V2_LIMIT_THREADS, 1, 1)]
+// Equal to V2LimitDecayQ30 for every distance, with saturation_distance = max_decay / step
+// computed once instead of one integer division per texel.
+int V2LimitSaturatedDecayQ30(int step_q30, uint distance, uint saturation_distance,
+                             int max_decay_q30) {
+    return distance <= saturation_distance ? step_q30 * (int)distance : max_decay_q30;
+}
+
+[numthreads(V2_LIMIT_GROUP_LINES, V2_LIMIT_LINE_CHUNKS, 1)]
 void main(
     uint3 group_id : SV_GroupID,
     uint3 group_thread_id : SV_GroupThreadID) {
-    uint y = group_id.x;
-    if (y >= target_h || target_w == 0u || target_h == 0u ||
+    if (target_w == 0u || target_h == 0u ||
         target_w > V2_LIMIT_MAX_HORIZONTAL_DIMENSION) {
         return;
     }
+    uint row = group_thread_id.x;
+    uint lane = group_thread_id.y;
+    uint y = group_id.x * V2_LIMIT_GROUP_LINES + row;
+    // A partial last group keeps its idle threads until the final group barrier.
+    bool active = y < target_h;
 
     float max_step = v2_max_horizontal_slope / DepthAnalysisContentWidthCells();
-    uint lane = group_thread_id.x;
 
     // Preserve the tiny diagnostic/unit-test path exactly and avoid empty chunks.
-    if (target_w <= V2_LIMIT_THREADS) {
-        if (lane == 0u) {
+    if (target_w <= V2_LIMIT_SERIAL_MAX_LINES) {
+        if (active && lane == 0u) {
             float value = VerticalShare[uint2(0u, y)];
             FinalOut[uint2(0u, y)] = value;
             [loop]
@@ -99,106 +110,106 @@ void main(
     uint content_width = analysis_content_right > analysis_content_left ?
         analysis_content_right - analysis_content_left : 1u;
     int max_step_q30 = V2LimitStepQ30(content_width, max_decay_q30);
-    [loop]
-    for (uint load_x = lane; load_x < target_w; load_x += V2_LIMIT_THREADS) {
-        LineCandidateQ30[load_x] = V2LimitUpperQ30(VerticalShare[uint2(load_x, y)]);
-    }
-    GroupMemoryBarrierWithGroupSync();
+    uint saturation_distance = (uint)(max_decay_q30 / max_step_q30);
 
-    uint chunk_start = lane * target_w / V2_LIMIT_THREADS;
-    uint chunk_end = (lane + 1u) * target_w / V2_LIMIT_THREADS;
-    int forward_q30 = LineCandidateQ30[chunk_start];
-    [loop]
-    for (uint local_forward_x = chunk_start + 1u;
-         local_forward_x < chunk_end;
-         ++local_forward_x) {
-        forward_q30 = max(
-            LineCandidateQ30[local_forward_x],
-            forward_q30 - max_step_q30);
+    uint chunk_start = lane * target_w / V2_LIMIT_LINE_CHUNKS;
+    uint chunk_end = (lane + 1u) * target_w / V2_LIMIT_LINE_CHUNKS;
+    int forward_q30 = 0;
+    int backward_q30 = 0;
+    if (active) {
+        // One forward traversal stores this chunk's local forward majorant and forms both chunk
+        // ends. The backward value at chunk_start is the closed form
+        // max_s(VerticalShare(s) - decay(s - chunk_start)). Every Q30 input lies in
+        // [-container, container] and the decay saturates at twice that limit, so a saturated
+        // term can never exceed VerticalShare(chunk_start); the serial recurrence gives the same
+        // value.
+        forward_q30 = V2LimitUpperQ30(VerticalShare[uint2(chunk_start, y)]);
+        backward_q30 = forward_q30;
+        FinalOut[uint2(chunk_start, y)] = V2LimitFromQ30(forward_q30);
+        [loop]
+        for (uint local_forward_x = chunk_start + 1u;
+             local_forward_x < chunk_end;
+             ++local_forward_x) {
+            int value_q30 = V2LimitUpperQ30(VerticalShare[uint2(local_forward_x, y)]);
+            forward_q30 = max(value_q30, forward_q30 - max_step_q30);
+            int decay_q30 = V2LimitSaturatedDecayQ30(
+                max_step_q30,
+                local_forward_x - chunk_start,
+                saturation_distance,
+                max_decay_q30);
+            backward_q30 = max(backward_q30, value_q30 - decay_q30);
+            FinalOut[uint2(local_forward_x, y)] = V2LimitFromQ30(forward_q30);
+        }
     }
-    int backward_q30 = LineCandidateQ30[chunk_end - 1u];
-    [loop]
-    for (int local_backward_x = (int)chunk_end - 2;
-         local_backward_x >= (int)chunk_start;
-         --local_backward_x) {
-        backward_q30 = max(
-            LineCandidateQ30[(uint)local_backward_x],
-            backward_q30 - max_step_q30);
-    }
-    LocalEndsQ30[lane] = int2(forward_q30, backward_q30);
+    LocalEndsQ30[lane][row] = int2(forward_q30, backward_q30);
     GroupMemoryBarrierWithGroupSync();
 
     if (lane == 0u) {
-        forward_q30 = LocalEndsQ30[0u].x;
+        forward_q30 = LocalEndsQ30[0u][row].x;
         [unroll]
         for (uint forward_chunk = 1u;
-             forward_chunk < V2_LIMIT_THREADS;
+             forward_chunk < V2_LIMIT_LINE_CHUNKS;
              ++forward_chunk) {
-            ChunkCarriesQ30[forward_chunk].x = forward_q30;
-            uint forward_start = forward_chunk * target_w / V2_LIMIT_THREADS;
-            uint forward_end = (forward_chunk + 1u) * target_w / V2_LIMIT_THREADS;
+            ChunkCarriesQ30[forward_chunk][row].x = forward_q30;
+            uint forward_start = forward_chunk * target_w / V2_LIMIT_LINE_CHUNKS;
+            uint forward_end = (forward_chunk + 1u) * target_w / V2_LIMIT_LINE_CHUNKS;
             int forward_span_q30 = V2LimitDecayQ30(
                 max_step_q30,
                 forward_end - forward_start,
                 max_decay_q30);
             forward_q30 = max(
-                LocalEndsQ30[forward_chunk].x,
+                LocalEndsQ30[forward_chunk][row].x,
                 forward_q30 - forward_span_q30);
         }
 
-        backward_q30 = LocalEndsQ30[V2_LIMIT_THREADS - 1u].y;
+        backward_q30 = LocalEndsQ30[V2_LIMIT_LINE_CHUNKS - 1u][row].y;
         [unroll]
-        for (int backward_chunk = (int)V2_LIMIT_THREADS - 2;
+        for (int backward_chunk = (int)V2_LIMIT_LINE_CHUNKS - 2;
              backward_chunk >= 0;
              --backward_chunk) {
-            ChunkCarriesQ30[(uint)backward_chunk].y = backward_q30;
-            uint backward_start = (uint)backward_chunk * target_w / V2_LIMIT_THREADS;
-            uint backward_end = ((uint)backward_chunk + 1u) * target_w / V2_LIMIT_THREADS;
+            ChunkCarriesQ30[(uint)backward_chunk][row].y = backward_q30;
+            uint backward_start = (uint)backward_chunk * target_w / V2_LIMIT_LINE_CHUNKS;
+            uint backward_end = ((uint)backward_chunk + 1u) * target_w / V2_LIMIT_LINE_CHUNKS;
             int backward_span_q30 = V2LimitDecayQ30(
                 max_step_q30,
                 backward_end - backward_start,
                 max_decay_q30);
             backward_q30 = max(
-                LocalEndsQ30[(uint)backward_chunk].y,
+                LocalEndsQ30[(uint)backward_chunk][row].y,
                 backward_q30 - backward_span_q30);
         }
     }
     GroupMemoryBarrierWithGroupSync();
+    if (!active) {
+        return;
+    }
 
-    forward_q30 = LineCandidateQ30[chunk_start];
-    if (lane != 0u) {
-        forward_q30 = max(
-            forward_q30,
-            ChunkCarriesQ30[lane].x - max_step_q30);
-    }
-    ForwardMajorantQ30[chunk_start] = forward_q30;
+    // One backward traversal completes each texel from the stored local forward majorant, the
+    // local backward recurrence and both incoming carries. Q30-to-float conversion is monotonic,
+    // so max of converted values equals converting the Q30 max. Each thread rereads only texels
+    // it wrote itself.
+    int2 carry = ChunkCarriesQ30[lane][row];
+    bool forward_carry = lane != 0u;
+    bool backward_carry = lane + 1u != V2_LIMIT_LINE_CHUNKS;
     [loop]
-    for (uint replay_forward_x = chunk_start + 1u;
-         replay_forward_x < chunk_end;
-         ++replay_forward_x) {
-        forward_q30 = max(
-            LineCandidateQ30[replay_forward_x],
-            forward_q30 - max_step_q30);
-        ForwardMajorantQ30[replay_forward_x] = forward_q30;
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    backward_q30 = LineCandidateQ30[chunk_end - 1u];
-    if (lane + 1u != V2_LIMIT_THREADS) {
-        backward_q30 = max(
-            backward_q30,
-            ChunkCarriesQ30[lane].y - max_step_q30);
-    }
-    uint write_x = chunk_end - 1u;
-    int final_q30 = max(ForwardMajorantQ30[write_x], backward_q30);
-    FinalOut[uint2(write_x, y)] = V2LimitFromQ30(final_q30);
-    [loop]
-    for (int scan_x = (int)chunk_end - 2; scan_x >= (int)chunk_start; --scan_x) {
-        write_x = (uint)scan_x;
-        backward_q30 = max(
-            LineCandidateQ30[write_x],
-            backward_q30 - max_step_q30);
-        final_q30 = max(ForwardMajorantQ30[write_x], backward_q30);
-        FinalOut[uint2(write_x, y)] = V2LimitFromQ30(final_q30);
+    for (int scan_x = (int)chunk_end - 1; scan_x >= (int)chunk_start; --scan_x) {
+        uint write_x = (uint)scan_x;
+        int value_q30 = V2LimitUpperQ30(VerticalShare[uint2(write_x, y)]);
+        backward_q30 = write_x + 1u == chunk_end ?
+            value_q30 : max(value_q30, backward_q30 - max_step_q30);
+        int complete_q30 = backward_q30;
+        if (backward_carry) {
+            int decay_q30 = V2LimitSaturatedDecayQ30(
+                max_step_q30, chunk_end - write_x, saturation_distance, max_decay_q30);
+            complete_q30 = max(complete_q30, carry.y - decay_q30);
+        }
+        if (forward_carry) {
+            int decay_q30 = V2LimitSaturatedDecayQ30(
+                max_step_q30, write_x - chunk_start + 1u, saturation_distance, max_decay_q30);
+            complete_q30 = max(complete_q30, carry.x - decay_q30);
+        }
+        FinalOut[uint2(write_x, y)] = max(
+            FinalOut[uint2(write_x, y)],
+            V2LimitFromQ30(complete_q30));
     }
 }

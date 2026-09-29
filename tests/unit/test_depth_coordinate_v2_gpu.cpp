@@ -345,7 +345,7 @@ namespace {
     const std::uint32_t content_width
   ) {
     namespace v2 = models::depth_coordinate_v2;
-    if (width == 0u || height <= v2::limiter_group_threads || content_width == 0u ||
+    if (width == 0u || height <= v2::limiter_serial_max_lines || content_width == 0u ||
         candidate.size() != static_cast<std::size_t>(width) * height) {
       return {};
     }
@@ -396,7 +396,7 @@ namespace {
     const std::uint32_t content_width
   ) {
     namespace v2 = models::depth_coordinate_v2;
-    if (width <= v2::limiter_group_threads || height == 0u || content_width == 0u ||
+    if (width <= v2::limiter_serial_max_lines || height == 0u || content_width == 0u ||
         candidate.size() != static_cast<std::size_t>(width) * height) {
       return {};
     }
@@ -467,7 +467,7 @@ namespace {
     ID3D11ComputeShader *shader,
     const std::uint32_t width,
     const std::uint32_t height,
-    const std::uint32_t dispatch_groups,
+    const std::uint32_t dispatch_lines,
     const std::vector<float> &candidate,
     std::vector<float> &result,
     std::vector<float> *secondary_result = nullptr,
@@ -608,7 +608,13 @@ namespace {
     warp.context->CSSetShaderResources(0u, 1u, srvs);
     warp.context->CSSetUnorderedAccessViews(0u, uav_count, uavs, nullptr);
     warp.context->CSSetConstantBuffers(0u, 2u, constant_buffers);
-    warp.context->Dispatch(dispatch_groups, 1u, 1u);
+    // Each limiter group owns limiter_group_lines adjacent columns or rows.
+    namespace v2 = models::depth_coordinate_v2;
+    warp.context->Dispatch(
+      (dispatch_lines + v2::limiter_group_lines - 1u) / v2::limiter_group_lines,
+      1u,
+      1u
+    );
 
     ID3D11ShaderResourceView *null_srvs[] = {nullptr};
     ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr};
@@ -1343,8 +1349,11 @@ TEST(DepthCoordinateV2GpuTest, ParallelQ30LimitersMatchSerialOracleAtAuthenticat
 
   constexpr std::uint32_t width = 770u;
   constexpr std::uint32_t height = 434u;
-  ASSERT_GT(width, v2::limiter_group_threads);
-  ASSERT_GT(height, v2::limiter_group_threads);
+  ASSERT_GT(width, v2::limiter_serial_max_lines);
+  ASSERT_GT(height, v2::limiter_serial_max_lines);
+  // A partial last group exercises the idle threads that still reach every group barrier.
+  ASSERT_NE(width % v2::limiter_group_lines, 0u);
+  ASSERT_NE(height % v2::limiter_group_lines, 0u);
   ASSERT_TRUE(std::any_of(
     v2::model_calibrated_shapes.begin(),
     v2::model_calibrated_shapes.end(),
@@ -1368,14 +1377,14 @@ TEST(DepthCoordinateV2GpuTest, ParallelQ30LimitersMatchSerialOracleAtAuthenticat
   // catches a wrong carry distance/direction in either parallel pass.
   constexpr std::uint32_t boundary_row = 17u;
   constexpr std::uint32_t boundary_column = 29u;
-  for (std::uint32_t chunk = 1u; chunk < v2::limiter_group_threads; ++chunk) {
-    const std::uint32_t boundary_x = chunk * width / v2::limiter_group_threads;
+  for (std::uint32_t chunk = 1u; chunk < v2::limiter_line_chunks; ++chunk) {
+    const std::uint32_t boundary_x = chunk * width / v2::limiter_line_chunks;
     candidate[static_cast<std::size_t>(boundary_row) * width + boundary_x - 1u] =
       chunk % 2u == 0u ? 0.039f : -0.039f;
     candidate[static_cast<std::size_t>(boundary_row) * width + boundary_x] =
       chunk % 2u == 0u ? -0.039f : 0.039f;
 
-    const std::uint32_t boundary_y = chunk * height / v2::limiter_group_threads;
+    const std::uint32_t boundary_y = chunk * height / v2::limiter_line_chunks;
     candidate[static_cast<std::size_t>(boundary_y - 1u) * width + boundary_column] =
       chunk % 2u == 0u ? -0.039f : 0.039f;
     candidate[static_cast<std::size_t>(boundary_y) * width + boundary_column] =

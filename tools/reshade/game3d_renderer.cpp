@@ -255,7 +255,8 @@ namespace sunshine_game3d {
       if (color == 3 && !pipeline_create(pq, "SunshinePreparePQPS", false, vs)) return false;
       if (width <= 3840 && height <= 3840)
         if (!pipeline_create(candidate, "SunshineHostCandidateCS", true, vs) || !pipeline_create(vertical, "SunshineHostVerticalCS", true, vs) ||
-            !pipeline_create(horizontal, "SunshineHostHorizontalCS", true, vs)) return false;
+            !pipeline_create(horizontal, "SunshineHostHorizontalCS", true, vs) ||
+            !pipeline_create(ui_apply, "SunshineApplyUICS", true, vs)) return false;
       return pipeline_create(eyes, "SunshineRenderEyesPS", false, vs) && pipeline_create(pack, "SunshinePackEyesPS", false, vs);
     }
     bool prepare_nearest_ui() {
@@ -589,7 +590,7 @@ namespace sunshine_game3d {
           !texture_create(ui_conflict_statistics, 16, 32, api::format::r32g32b32a32_uint,
             api::resource_usage::unordered_access | api::resource_usage::copy_source) ||
           !pipeline_create(ui_conflict, "SunshineUIConflictCS", true, {}) ||
-          !pipeline_create(ui_apply, "SunshineApplyUICS", true, {})) return false;
+          !pipelines[ui_apply].handle) return false;
       if (context11.p) {
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = 16; desc.Height = 32;
@@ -937,7 +938,7 @@ namespace sunshine_game3d {
     if (d.width <= 3840 && d.height <= 3840) {
       d.dispatch(cmd, impl::candidate, (d.width + 7) / 8, (d.height + 7) / 8, p, {api::resource_view{}, depth}, {impl::raw});
       d.mark(cmd, impl::mark_candidate);
-      d.dispatch(cmd, impl::vertical, d.width, 1, p, {api::resource_view{}, {}, {}, t[impl::raw].srv}, {impl::vertical_majorant, impl::vertical_field});
+      d.dispatch(cmd, impl::vertical, (d.width + 7) / 8, 1, p, {api::resource_view{}, {}, {}, t[impl::raw].srv}, {impl::vertical_majorant, impl::vertical_field});
       d.mark(cmd, impl::mark_vertical);
       const auto ui_alpha = d.consumed_ui_source.handle ? alpha_source : t[impl::source].srv;
       if (d.source_alpha_ui && plane.mode == ui_plane_mode::depth_midpoint_nearest_ui) {
@@ -948,16 +949,13 @@ namespace sunshine_game3d {
         d.nearest_ui_rendered = true;
       }
       // UI passes read the explicit selected mask channel. Eye RGB stays current.
-      const bool apply_ui = d.source_alpha_ui;
-      if (probe_ui) d.source_alpha_ui = false;
-      d.dispatch(cmd, impl::horizontal, d.height, 1, p,
-        {ui_alpha, {}, {}, {}, t[impl::vertical_field].srv, {}, {}, {}, {},
-          d.nearest_ui_rendered ? t[impl::ui_plane_resolved].srv : api::resource_view{}}, {impl::field});
-      d.source_alpha_ui = apply_ui;
-      if (probe_ui) {
-        d.submit_adaptive_probe(cmd, ui_alpha, p);
-        d.dispatch(cmd, impl::ui_apply, d.height, 1, p, {ui_alpha}, {impl::field});
-      }
+      // Limiter groups own eight adjacent columns or rows. UI pinning follows
+      // as its own pass; a probe observes the unpinned field in between.
+      const std::array<api::resource_view, 15> field_inputs{ui_alpha, {}, {}, {}, t[impl::vertical_field].srv,
+        {}, {}, {}, {}, d.nearest_ui_rendered ? t[impl::ui_plane_resolved].srv : api::resource_view{}};
+      d.dispatch(cmd, impl::horizontal, (d.height + 7) / 8, 1, p, field_inputs, {impl::field});
+      if (probe_ui) d.submit_adaptive_probe(cmd, ui_alpha, p);
+      if (d.source_alpha_ui) d.dispatch(cmd, impl::ui_apply, d.height, 1, p, field_inputs, {impl::field});
     }
     d.mark(cmd, impl::mark_conditioning);
     d.draw(cmd, impl::eyes, d.width, {impl::left, impl::right}, p, {t[impl::source].srv, depth, t[impl::linear].srv, {}, {}, t[impl::field].srv});

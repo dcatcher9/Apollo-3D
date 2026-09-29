@@ -132,9 +132,13 @@ enqueues. At most 512 lines wait, later ones are counted and reported as dropped
 lines are discarded once DLL detach begins. Unit tests that intercept ReShade's log use a
 synchronous build.
 
-The Game 3D copy of the host vertical limit pass keeps each column's candidate depth in group
-memory after its first texture read (for heights up to 2560) and replays its three later scans
-from there; results are identical. At 4K this took the vertical pass from 0.61 to about 0.51 ms.
+The vertical and horizontal limit passes are mechanical translations of the host shaders, whose
+tiling is described in [Host SBS pipeline](host-sbs.md). Each group owns eight adjacent columns or
+rows, so the passes no longer hold whole lines in group memory. UI pinning always runs as its own
+pass (`SunshineApplyUICS`) after the horizontal pass; the adaptive probe observes the unpinned
+field between them, as before. Results are byte-identical. At 4K on an idle GPU the vertical pass
+went from 0.44 to 0.17 ms and the horizontal pass, including the UI pass, from 0.35 to 0.24 ms; the
+whole renderer went from 1.38 to 0.91 ms.
 
 All rendering stays on the runtime's graphics queue. Native passes add no CPU fence wait or full
 frame CPU readback. A completion fence protects replacement of the renderer's working set;

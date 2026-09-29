@@ -12,10 +12,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 77u;
-  inline constexpr std::uint32_t contract_tag = 0x05360D2Fu;
-  inline constexpr std::string_view contract_canonical_sha256 = "9ee049234edda521fb7536c195d055c36099d1d1f006efb4a7118a5584282763";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "05360d2f480b76a0d59c933d955638c362b8f06e1e013aa654e8dd417a22096a";
+  inline constexpr std::uint32_t contract_schema = 78u;
+  inline constexpr std::uint32_t contract_tag = 0xB4221F70u;
+  inline constexpr std::string_view contract_canonical_sha256 = "6560a9bd08f3750ad6daf961302651032d0027bb2e7d6dadd1611d3c28723872";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "b4221f7012b21a6e60e7104824abf0c0282f97c5ed0315ca84414ce79ed9e0b1";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -201,7 +201,9 @@ namespace models::depth_coordinate_v2 {
   inline constexpr float max_vertical_shear = 2.0f;
   inline constexpr float vertical_majorant_share = 0.75f;
   inline constexpr float convergence_curve_default = 0.0f;
-  inline constexpr std::uint32_t limiter_group_threads = 32u;
+  inline constexpr std::uint32_t limiter_serial_max_lines = 32u;
+  inline constexpr std::uint32_t limiter_group_lines = 8u;
+  inline constexpr std::uint32_t limiter_line_chunks = 8u;
   inline constexpr std::uint32_t limiter_q_fraction_bits = 30u;
   inline constexpr std::uint32_t limiter_q_scale = 1073741824u;
   inline constexpr std::int32_t limiter_container_q_limit = 42949672;

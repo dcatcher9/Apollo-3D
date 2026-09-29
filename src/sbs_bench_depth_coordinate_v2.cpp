@@ -1191,7 +1191,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         .candidate = candidate_srv.Get(),
         .vertical_majorant_output = vertical_majorant_uav.Get(),
         .vertical_conditioned_output = vertical_conditioned_uav.Get(),
-        .dispatch = v2_gpu::dispatch_command_t::direct(width, 1u, 1u),
+        .dispatch = v2_gpu::dispatch_command_t::direct(v2_gpu::limiter_groups(width), 1u, 1u),
       };
       if (!v2_gpu::record_vertical(context.Get(), vertical_command)) {
         error = "shared V2 GPU executor rejected replay vertical operands";
@@ -1203,7 +1203,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         .shader = limit_shader.Get(),
         .vertical_conditioned = vertical_conditioned_srv.Get(),
         .final_output = final_uav.Get(),
-        .dispatch = v2_gpu::dispatch_command_t::direct(height, 1u, 1u),
+        .dispatch = v2_gpu::dispatch_command_t::direct(v2_gpu::limiter_groups(height), 1u, 1u),
       };
       if (!v2_gpu::record_horizontal(context.Get(), horizontal_command)) {
         error = "shared V2 GPU executor rejected replay horizontal operands";

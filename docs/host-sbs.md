@@ -61,8 +61,8 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 77/tag `0x05360D2F`, canonical SHA-256
-`9ee049234edda521fb7536c195d055c36099d1d1f006efb4a7118a5584282763`. It binds the
+schema 78/tag `0xB4221F70`, canonical SHA-256
+`6560a9bd08f3750ad6daf961302651032d0027bb2e7d6dadd1611d3c28723872`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -73,14 +73,14 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 18 | `58033bdc70d2370607fcd4a195212deffcab2c28ed5bd516a3d0897b7b0ed02c` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `818382c98ec2e4409232858190731d27c0219982e705b29a81874a85f24317c9` |
-| `near_identical_detector` | 4 | `c81f0ec6488a010b38f63f50ac0d4b21f05dbeea2ffdf428fa167d901520b60a` |
-| `gpu_trace` | 1 | `d898e87d1d0112f52966001772c618aa7702051606a3c87d50f69979b5d0f895` |
-| `parallax_v2_live_renderer` | 2 | `454b1a5cb438981106f5befaa02067816218674997c6fe5b20f9a1972abade40` |
-| `parallax_v2_p010_y` | 1 | `c3d9a41dc90d4b0f6ecf54b726feb2482bcd9c99f1d9fb1ca4a4e6f6643b5088` |
+| `parallax_v2_producer` | 18 | `6f91d6290272ba8a4c9ccb56d654bc5f52f0a88a1fcd02374d075d400e98f6fc` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `bf19e88ff178a11c14da3b42439dd000033093bd53a3b6d171e41f69917fa759` |
+| `near_identical_detector` | 4 | `4285fad7312d630f83fb23e6ea5ec76453d2872f59341d08545e63ddfa032289` |
+| `gpu_trace` | 1 | `2074b01cf769a09fd3ad5001cb1f1c505615d224e4bd9c26e18b677a2934b0f6` |
+| `parallax_v2_live_renderer` | 2 | `020401a4393953a92e4214169b15e9204ef8ece10d9305e755e80356e27b6fdb` |
+| `parallax_v2_p010_y` | 1 | `2f76236d3e48c6b341d4650d052aa568b3a91cc69731ce51fc514da11a8c662f` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `a905b252b3f06185667003f882e0bcf4a893ea34464b6046373f6704e4d12283` |
+| `parallax_v2_live_diagnostic` | 2 | `ccc4dfac1fb7808a555381615f18fcdb9953433f637a928a5836211130a55191` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -590,10 +590,20 @@ continuity. The vertical share limits crown bending without fully flattening the
 trade-off remains visible on severe hair, glass-rim, and small near-object crowns: a large raw cliff
 becomes a wider safe ramp, which can bend real source samples differently in the two eyes.
 
-The production limiters use signed Q30 arithmetic inside one 32-thread group per row or column.
-Upper inputs round outward, lower inputs round downward, and the slope step uses integer division,
-so chunk composition is associative and cannot create a float-only discontinuity at a chunk
-boundary. Lines of 32 cells or fewer retain the serial float recurrence. Schema 51 permits the
+The production limiters use signed Q30 arithmetic. Each group owns eight adjacent columns
+(vertical) or rows (horizontal), and each line is split into eight chunks. Neighboring threads
+therefore read and write neighboring texels. Upper inputs round outward, lower inputs round
+downward, and the slope step uses integer division, so chunk composition is associative and
+cannot create a float-only discontinuity at a chunk boundary. A first pass stores each chunk's
+local forward envelope in the output and forms both chunk ends. A second, backward pass completes
+each texel with the incoming carries. The forward envelope is stored as float; Q30-to-float
+conversion is monotonic, so taking max/min after conversion gives the same bits. Every Q30 input
+lies within the container and the decay saturates at twice that limit, so a saturated carry
+never wins. The result is bit-identical to the serial Q30 recurrence; the schema 78 A/B produced
+byte-identical depth and field artifacts on all 19 core clips. With no full-line arrays in group
+memory, occupancy is not limited by group memory: the two limiter passes went from 0.125-0.136 ms
+to 0.076-0.080 ms (p50, five clips, idle RTX 5080). Lines of 32 cells or fewer retain the serial
+float recurrence. Schema 51 permits the
 limiter field to differ by up to `2e-7` from the former bitwise serial recurrence while the
 container, majorant/minorant ordering, and spatial bounds remain fail-closed requirements.
 

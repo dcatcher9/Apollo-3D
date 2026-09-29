@@ -12,6 +12,9 @@
   // platform includes
   #include <d3d11.h>
 
+  // local includes
+  #include "generated/depth_coordinate_v2_contract.h"
+
 namespace models::host_sbs_v2_gpu {
 
   /** One caller-selected direct or indirect dispatch. */
@@ -91,6 +94,12 @@ namespace models::host_sbs_v2_gpu {
     ID3D11UnorderedAccessView *history_owner_output = nullptr;
     dispatch_command_t dispatch;
   };
+
+  /** Direct group count for a limiter pass over `lines` columns (vertical) or rows (horizontal). */
+  [[nodiscard]] constexpr UINT limiter_groups(const UINT lines) noexcept {
+    constexpr UINT group_lines = depth_coordinate_v2::limiter_group_lines;
+    return (lines + group_lines - 1u) / group_lines;
+  }
 
   struct vertical_command_t {
     base_constants_t constants;
