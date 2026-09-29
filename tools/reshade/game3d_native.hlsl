@@ -135,19 +135,21 @@ float SunshineHUDlessDifference(uint2 xy, out bool valid)
     float scale = BUFFER_COLOR_SPACE == 2 ? max(1.0, max(max(abs(a.r), abs(a.g)), abs(a.b))) : 1.0;
     return max(max(abs(a.r-b.r), abs(a.g-b.g)), abs(a.b-b.b)) / scale;
 }
-groupshared uint4 SunshineUIDetectionCoverage[64];
-groupshared uint4 SunshineUIDetectionInvalid[64];
-groupshared uint4 SunshineUIDetectionDifference[64];
-groupshared uint SunshineUIDetectionLit[64];
-[numthreads(8, 8, 1)]
+// Each of the 16x16 tiles is one group of 256 threads; the integer counts do
+// not depend on how pixels are split among them.
+groupshared uint4 SunshineUIDetectionCoverage[256];
+groupshared uint4 SunshineUIDetectionInvalid[256];
+groupshared uint4 SunshineUIDetectionDifference[256];
+groupshared uint SunshineUIDetectionLit[256];
+[numthreads(16, 16, 1)]
 void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     uint2 first = group.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
     uint2 last = (group.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
     uint4 coverage = 0u, invalid = 0u, difference = 0u;
     uint lit = 0u;
-    [loop] for (uint y = first.y + thread.y; y < last.y; y += 8u)
-    [loop] for (uint x = first.x + thread.x; x < last.x; x += 8u) {
+    [loop] for (uint y = first.y + thread.y; y < last.y; y += 16u)
+    [loop] for (uint x = first.x + thread.x; x < last.x; x += 16u) {
         float4 a = SunshineUIDetectionAlpha(uint2(x,y));
         bool4 okay = isfinite(a) && a >= 0.0 && a <= 1.0;
         coverage += uint4(okay && a > 0.0);
@@ -162,13 +164,13 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         float3 hudless = SunshineHUDless.Load(int3(x, y, 0)).rgb;
         lit += finite && max(max(abs(hudless.r), abs(hudless.g)), abs(hudless.b)) > Sunshine_UIDifferenceThreshold * 8.0 ? 1u : 0u;
     }
-    uint lane = thread.y * 8u + thread.x;
+    uint lane = thread.y * 16u + thread.x;
     SunshineUIDetectionCoverage[lane] = coverage;
     SunshineUIDetectionInvalid[lane] = invalid;
     SunshineUIDetectionDifference[lane] = difference;
     SunshineUIDetectionLit[lane] = lit;
     GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint step = 32u; step; step >>= 1u) {
+    [unroll] for (uint step = 128u; step; step >>= 1u) {
         if (lane < step) {
             SunshineUIDetectionCoverage[lane] += SunshineUIDetectionCoverage[lane+step];
             SunshineUIDetectionInvalid[lane] += SunshineUIDetectionInvalid[lane+step];
@@ -184,20 +186,34 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         SunshineAlphaCoverageStore[group.xy + uint2(0,48)] = uint4(SunshineUIDetectionLit[0], 0u, 0u, 0u);
     }
 }
-[numthreads(1, 1, 1)]
-void SunshineUIDetectionReduceCS(uint3 id : SV_DispatchThreadID)
+// One thread per tile, then an exact group sum; thread 0 decides.
+groupshared uint SunshineUIDetectionMatching[256];
+[numthreads(256, 1, 1)]
+void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
 {
-    uint4 coverage = 0u, invalid = 0u, difference = 0u;
-    uint matching_tiles = 0u, lit = 0u;
-    [loop] for (uint y = 0u; y < 16u; ++y)
-    [loop] for (uint x = 0u; x < 16u; ++x) {
-        coverage += SunshineUIDetectionSampler.Load(int3(x,y,0));
-        invalid += SunshineUIDetectionSampler.Load(int3(x,y+16u,0));
-        uint4 d = SunshineUIDetectionSampler.Load(int3(x,y+32u,0));
-        difference += d;
-        lit += SunshineUIDetectionSampler.Load(int3(x,y+48u,0)).x;
-        matching_tiles += d.w && d.z * 100u >= d.w * 99u ? 1u : 0u;
+    uint lane = thread.x;
+    uint2 tile = uint2(lane % 16u, lane / 16u);
+    uint4 d = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 32u, 0));
+    SunshineUIDetectionCoverage[lane] = SunshineUIDetectionSampler.Load(int3(tile, 0));
+    SunshineUIDetectionInvalid[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 16u, 0));
+    SunshineUIDetectionDifference[lane] = d;
+    SunshineUIDetectionLit[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 48u, 0)).x;
+    SunshineUIDetectionMatching[lane] = d.w && d.z * 100u >= d.w * 99u ? 1u : 0u;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint step = 128u; step; step >>= 1u) {
+        if (lane < step) {
+            SunshineUIDetectionCoverage[lane] += SunshineUIDetectionCoverage[lane+step];
+            SunshineUIDetectionInvalid[lane] += SunshineUIDetectionInvalid[lane+step];
+            SunshineUIDetectionDifference[lane] += SunshineUIDetectionDifference[lane+step];
+            SunshineUIDetectionLit[lane] += SunshineUIDetectionLit[lane+step];
+            SunshineUIDetectionMatching[lane] += SunshineUIDetectionMatching[lane+step];
+        }
+        GroupMemoryBarrierWithGroupSync();
     }
+    if (lane) return;
+    uint4 coverage = SunshineUIDetectionCoverage[0], invalid = SunshineUIDetectionInvalid[0];
+    uint4 difference = SunshineUIDetectionDifference[0];
+    uint matching_tiles = SunshineUIDetectionMatching[0], lit = SunshineUIDetectionLit[0];
     uint source = 0u, covered = 0u;
     [unroll] for (uint candidate = 0u; candidate < 4u; ++candidate) {
         // Reject empty, invalid and nearly full-scene alpha. Re-evaluate even
@@ -234,7 +250,12 @@ void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
     if (id.x >= BUFFER_WIDTH || id.y >= BUFFER_HEIGHT) return;
     uint source = SunshineUIDetectionSampler.Load(int3(0,0,0)).x;
     float mask = 0.0;
-    if (source >= 1u && source <= 4u) mask = SunshineUIDetectionAlpha(id.xy)[source-1u];
+    int3 at = int3(id.xy, 0);
+    // Load only the selected candidate (the same channel SunshineUIDetectionAlpha reads).
+    if (source == 1u) mask = SunshineUIDedicatedAlpha.Load(at).r;
+    else if (source == 2u) mask = SunshineUIColorAlpha.Load(at).a;
+    else if (source == 3u) mask = SunshineUIBackbufferAlpha.Load(at).a;
+    else if (source == 4u) mask = SunshineSourceSampler.Load(at).a;
     else if (source == 6u) mask = 1.0;
     else if (source == 5u) {
         bool finite;

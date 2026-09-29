@@ -310,7 +310,11 @@ image never counts as a scene. HUD-less comparison remains guarded in manual mod
 UI whose color matches the underlying scene. Local motion or other postprocessing differences
 can still resemble UI; live game/headset validation remains necessary.
 
-The native path uses GPU statistics, reduction/selection and mask passes. A bounded asynchronous
+The native path uses GPU statistics, reduction/selection and mask passes. Each of the 16x16
+statistics tiles is one 256-thread group, the reduction sums the 256 tiles in parallel, and the
+mask pass loads only the selected candidate; the integer counts and the mask are unchanged. At 4K
+this took UI detection from about 0.148 to 0.12 ms averaged over the provider fixture, which
+is mostly bound by reading the candidate textures. A bounded asynchronous
 64-byte summary may be read at 100 ms intervals for diagnostics; it never authorizes protection
 and there is no full-frame CPU readback. Besides the decision, it carries the candidate bits the
 shader was offered, each alpha candidate's covered and invalid pixels, and the HUD-less changed,
