@@ -265,9 +265,22 @@ source lifetime, scope, format or pairing requirements, and changing mode does n
 
 For automatic alpha selection, the GPU rejects nonfinite or out-of-range samples, an empty
 mask and a mask covering at least 90% of the image. These are conservative content checks,
-not a claim to recover UI semantics in every game. In particular, Auto may reject a genuine
-full-screen UI. Selection is recomputed from the current frame instead of using an earlier
-CPU decision or latching a startup result.
+not a claim to recover UI semantics in every game. An opaque channel is ambiguous: it is
+either full-screen UI or no UI information at all (Hogwarts Legacy's UIColorAndAlpha is the
+opaque final image during play). Selection is recomputed from the current frame instead of using
+an earlier CPU decision or latching a startup result.
+
+One exception uses session history. Once completed GPU samples have accepted the same alpha
+candidate as a partial UI mask at least three times over at least 2 s, that channel is proven to
+carry UI coverage for the rest of the game session. A later frame with no HUD-less candidate in
+which the proven channel is exactly 1.0 on at least 98% of pixels is full-screen UI and stays flat
+(sampled source 7). A paired HUD-less image, when present, decides full-screen UI itself. Exact
+opacity matters: a channel that is merely above zero almost everywhere can carry other data, such
+as luma. Proof is per candidate, so a presented-color alpha proven with frame generation off does
+not prove the tagged Backbuffer's alpha, and a title screen shown before any gameplay has no proof
+yet. Clair Obscur: Expedition 33 needed it: its alpha covers 2-23% of pixels during play and is
+exactly opaque in full-screen menus, and with frame generation off, or before the first level has
+loaded, it tags no HUD-less image.
 
 The D3D12 adapter captures Streamline UIAlpha (69, red), UIColorAndAlpha (23, alpha),
 Backbuffer (53, alpha) and HUDLessColor (2, RGB) independently of FG being enabled. A fresh
@@ -294,6 +307,10 @@ generation before the Game 3D render. A merely recent snapshot from an earlier p
 not pass. Each generated Present in between shows interpolated scene color, which must not be
 differenced. It copies nothing and reuses the mask the GPU resolved on the preceding real frame,
 for at most three consecutive Presents, and only when that frame compared a HUD-less candidate.
+A real frame whose HUD-less image pairs only by Present counting while FG is on is not exact.
+Directly after an exact decision it keeps that decision and mask the same way, within the same
+three-Present bound. Detecting afresh from the inexact pair would lose full-screen UI on that frame.
+In Expedition 33, 2-10% of menu frames paired this way and flipped the menu between flat and 3D.
 A capture from another queue can still be incomplete or unretired at its own real frame. When
 the newest ready capture belongs to a real frame one or two Presents ago, it is compared with that
 frame's retained color, and the resulting mask protects the current frame. The renderer starts
@@ -325,8 +342,8 @@ at least 98% of pixels changed and at least half of the HUD-less pixels are lit 
 the threshold), the whole frame is UI and stays flat. Hogwarts Legacy's title screen needed it:
 the game keeps rendering its next 3D scene behind the menu and tags that scene's depth and
 HUD-less image, so 99.9% of pixels differed while the depth matched the hidden room. A mismatched
-pair can also change every pixel, so an unverified pair is still rejected, and a black HUD-less
-image never counts as a scene. HUD-less comparison remains guarded in manual modes. Its binary mask identifies changed pixels, not exact compositing opacity, and cannot detect
+pair can also change every pixel, so an unverified pair is still rejected (after an exact
+decision it is held, as described above), and a black HUD-less image never counts as a scene. HUD-less comparison remains guarded in manual modes. Its binary mask identifies changed pixels, not exact compositing opacity, and cannot detect
 UI whose color matches the underlying scene. Local motion or other postprocessing differences
 can still resemble UI; live game/headset validation remains necessary.
 
@@ -335,11 +352,14 @@ statistics tiles is one 256-thread group, the reduction sums the 256 tiles in pa
 mask pass loads only the selected candidate; the integer counts and the mask are unchanged. At 4K
 this took UI detection from about 0.148 to 0.12 ms averaged over the provider fixture, which
 is mostly bound by reading the candidate textures. A bounded asynchronous
-64-byte summary may be read at 100 ms intervals for diagnostics; it never authorizes protection
+96-byte summary may be read at 100 ms intervals for diagnostics; it never authorizes protection
 and there is no full-frame CPU readback. Besides the decision, it carries the candidate bits the
-shader was offered, each alpha candidate's covered and invalid pixels, and the HUD-less changed,
-unchanged, non-finite and lit pixel counts with matching tiles. The `Sunshine UI protection` log
-(`sampled_candidates`, `sampled_alpha_covered`, `sampled_hudless`) and the dump's
+shader was offered, each alpha candidate's covered, invalid and exactly opaque pixels, the
+proven-alpha bits, and the HUD-less changed, unchanged, non-finite and lit pixel counts with
+matching tiles. Recording accepted partial alpha from this summary is the only way it feeds back:
+it proves a channel for later frames and never authorizes the current one. The
+`Sunshine UI protection` log (`sampled_candidates`, `sampled_alpha_covered`,
+`sampled_alpha_opaque`, `proven_alpha`, `sampled_hudless`) and the dump's
 `source_alpha_auto.sampled_evidence` report it, so a rejection names the failing check. Source availability, GPU validation and actual applied
 protection remain separate diagnostic facts. Older startup fields describe a retired heuristic.
 NGX UI resources remain discovery/dump observations; live NGX, FSR and XeSS UI adapters are not

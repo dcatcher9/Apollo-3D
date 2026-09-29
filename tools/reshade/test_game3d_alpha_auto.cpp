@@ -582,6 +582,34 @@ namespace {
     require(resumed.decision(test_start_ms + alpha_initial_window_ms + 1000).probe_interval_ms == alpha_slow_probe_interval_ms,
       "Returning Auto after one minute restarted the frequent stage");
   }
+  void alpha_proof_needs_repeated_samples_over_the_span_per_candidate() {
+    alpha_auto_policy policy;
+    policy.record_alpha_ui(2, 10000);
+    policy.record_alpha_ui(2, 10100);
+    policy.record_alpha_ui(2, 11999);
+    require(!policy.proven_alpha(), "Three samples within 2 s proved a channel");
+    policy.record_alpha_ui(2, 12000);
+    require(policy.proven_alpha() == 4u, "Samples spanning 2 s did not prove exactly their own channel");
+    policy.record_alpha_ui(3, 12000);
+    policy.record_alpha_ui(3, 20000);
+    require(policy.proven_alpha() == 4u, "Two samples proved a channel");
+    policy.record_alpha_ui(3, 20001);
+    require(policy.proven_alpha() == 12u, "A third sample over the span did not prove the channel");
+    policy.record_alpha_ui(7, 30000);
+    policy.record_alpha_ui(4, 30000);
+    require(policy.proven_alpha() == 12u, "An out-of-range candidate changed the proof");
+    policy.set_manual(false);
+    policy.set_automatic(40000);
+    require(policy.proven_alpha() == 12u, "Mode edits forgot what the game session proved");
+    alpha_auto_policy clock;
+    clock.record_alpha_ui(0, 5000);
+    clock.record_alpha_ui(0, 4000); // Earlier than the first: restart the interval.
+    clock.record_alpha_ui(0, 5500);
+    clock.record_alpha_ui(0, 5999);
+    require(!clock.proven_alpha(), "A backwards clock kept the earlier interval");
+    clock.record_alpha_ui(0, 6000);
+    require(clock.proven_alpha() == 1u, "The restarted interval did not prove the channel");
+  }
 } // namespace
 
 int main() {
@@ -605,7 +633,8 @@ int main() {
     sparse_selective_probe_requests_a_frequent_confirmation_burst();
     failed_sparse_candidates_return_to_sparse_without_borrowing_old_evidence();
     sparse_bursts_keep_independent_sources_and_the_original_deadline();
-    std::puts("Startup source alpha: 19 policy groups passed");
+    alpha_proof_needs_repeated_samples_over_the_span_per_candidate();
+    std::puts("Startup source alpha: 20 policy groups passed");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "Startup source alpha failed: %s\n", error.what());

@@ -133,7 +133,7 @@ namespace {
     const auto &evidence = value.coverage.evidence;
     char message[1024];
     std::snprintf(message, sizeof(message),
-      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} status_revision=%llu",
+      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_opaque=%u/%u/%u/%u proven_alpha=0x%x sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} status_revision=%llu",
       static_cast<void *>(runtime), value.mode == sunshine_game3d::source_alpha_mode::automatic ? "auto" :
         value.mode == sunshine_game3d::source_alpha_mode::on ? "on" : "off",
       int(value.rendered), int(value.applied), sunshine_game3d::name(value.input), int(value.retained_alpha_ready),
@@ -142,6 +142,7 @@ namespace {
       sunshine_game3d::ui_qualification::name(value.qualification.candidate.source), value.source_availability(),
       value.coverage.source_kind, value.coverage.covered, value.coverage.pixels, evidence.candidates,
       evidence.alpha_covered[0], evidence.alpha_covered[1], evidence.alpha_covered[2], evidence.alpha_covered[3],
+      evidence.alpha_opaque[0], evidence.alpha_opaque[1], evidence.alpha_opaque[2], evidence.alpha_opaque[3], evidence.proven_alpha,
       evidence.hudless_changed, evidence.hudless_unchanged, evidence.hudless_invalid, evidence.matching_tiles, evidence.hudless_lit,
       static_cast<unsigned long long>(value.qualification.token));
     log(reshade::log::level::info, message);
