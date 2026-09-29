@@ -92,6 +92,15 @@ namespace sunshine_game3d {
       const auto fraction = fraction_mode ? (std::isfinite(f.ui_plane.inverse_depth) ? json(f.ui_plane.inverse_depth) : json(nullptr)) :
         shallow_mode ? json(0.25) : front_mode ? json(1.0) : json(nullptr);
       const auto captured_shader = f.shader_source.empty() ? renderer::shader_source() : f.shader_source;
+      if (captured_shader.find("#define SUNSHINE_PACKED_EYES 1") != std::string_view::npos) {
+        // Both eyes are rendered straight into the side-by-side target.
+        auto &passes = result["passes"];
+        passes.erase(passes.size() - 1);
+        passes.erase(passes.size() - 1);
+        passes.push_back({{"entry", "SunshineRenderPackedPS"}, {"target", "ps_5_0"}, {"enabled", true},
+          {"srvs", {{"t0", "source_color"}, {"t1", "raw_depth"}, {"t2", "linear_color"}, {"t5", "final_field"}}},
+          {"rtvs", {color == 1 ? "sbs:R10G10B10A2_UNORM" : "sbs:RGBA16_FLOAT"}}});
+      }
       if (captured_shader.find("#define SUNSHINE_UI_NEAREST_PLANE 1") != std::string_view::npos) {
         const bool reduced = f.resources.ui_plane_resolved.handle != 0;
         auto &passes = result["passes"];

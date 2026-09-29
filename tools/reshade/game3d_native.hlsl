@@ -20,6 +20,8 @@
 #define SUNSHINE_LINEAR_DISTANCE_DEPTH 1
 // Limiter groups own eight adjacent lines; UI pinning is a separate pass.
 #define SUNSHINE_LIMITER_LINE_GROUPS 8
+// One pass renders both eyes straight into the side-by-side target.
+#define SUNSHINE_PACKED_EYES 1
 //
 // Specialize BUFFER_WIDTH, BUFFER_HEIGHT and BUFFER_COLOR_SPACE at compile time.
 // This preserves the original per-resolution group-memory footprint. Color-space
@@ -74,8 +76,6 @@ Texture2D<float4> SunshineLinearClamp : register(t2);
 Texture2D<float> SunshineHostCandidateSampler : register(t3);
 Texture2D<float> SunshineHostVerticalConditionedSampler : register(t4);
 Texture2D<float> SunshineHostFinalSampler : register(t5);
-Texture2D<float4> SunshineEyeLeftSampler : register(t6);
-Texture2D<float4> SunshineEyeRightSampler : register(t7);
 Texture2D<float> SunshineUIPlaneTilesSampler : register(t8);
 Texture2D<float> SunshineUIPlaneResolvedSampler : register(t9);
 Texture2D<uint4> SunshineUIDetectionSampler : register(t10);
@@ -1249,34 +1249,32 @@ float4 SunshineRenderEye(float2 eyeUV, bool rightEye)
     return SunshineNativeSource(eyeUV);
 #endif
 }
-void SunshineRenderEyesPS(float4 position : SV_Position, float2 texcoord : TEXCOORD0,
-    out float4 left : SV_Target0, out float4 right : SV_Target1)
+float4 SunshineRenderPackedPS(float4 position : SV_Position, float2 texcoord : TEXCOORD0) : SV_Target
 {
-    float2 eyeUV = position.xy / float2(BUFFER_WIDTH, BUFFER_HEIGHT);
-    left = SunshineRenderEye(eyeUV, false);
-    right = SunshineRenderEye(eyeUV, true);
-}
-float4 SunshinePackEyesPS(float4 position : SV_Position, float2 texcoord : TEXCOORD0) : SV_Target
-{
-    // Derive the same pixel center in either half, avoiding packed-UV rounding
-    // and an extra bilinear resample (visible on 4K edges).
     uint packedX = (uint)position.x;
-    float2 eyeUV = float2((packedX % BUFFER_WIDTH) + 0.5, position.y) /
-        float2(BUFFER_WIDTH, BUFFER_HEIGHT);
-    // Missing depth and zero strength export the current source, never stale eyes.
-    if (SunshineAutomaticMono())
-        return SunshineNativeSource(eyeUV);
-    int2 eyePixel = int2(eyeUV * float2(BUFFER_WIDTH, BUFFER_HEIGHT));
+    // Missing depth and zero strength export the current source.
+    if (SunshineAutomaticMono()) {
+        float2 monoUV = float2((packedX % BUFFER_WIDTH) + 0.5, position.y) /
+            float2(BUFFER_WIDTH, BUFFER_HEIGHT);
+        return SunshineNativeSource(monoUV);
+    }
+    // Each branch sees a literal eye, as the former per-eye pass did, so the
+    // compiler folds the pixel-center scale into the warp's first add exactly
+    // as before (one rounding). Subtracting the integer width is exact and
+    // yields that eye's rasterized pixel center.
     float4 color;
-    if (packedX < BUFFER_WIDTH)
-        color = SunshineEyeLeftSampler.Load(int3(eyePixel, 0));
-    else
-        color = SunshineEyeRightSampler.Load(int3(eyePixel, 0));
+    [branch] if (packedX < BUFFER_WIDTH) {
+        color = SunshineRenderEye(position.xy / float2(BUFFER_WIDTH, BUFFER_HEIGHT), false);
+    } else {
+        float2 center = float2(position.x - float(BUFFER_WIDTH), position.y);
+        color = SunshineRenderEye(center / float2(BUFFER_WIDTH, BUFFER_HEIGHT), true);
+    }
 #if BUFFER_COLOR_SPACE == 1
-    // Preserve the former FP16 intermediate before RGB10A2 packing.
+    // Keep the FP16 eye representation the former intermediate held before
+    // RGB10A2 packing.
     return f16tof32(f32tof16(color));
 #else
-    // The HDR export itself rounds to the same FP16 representation.
+    // The HDR export is itself FP16, the representation the eyes held.
     return color;
 #endif
 }

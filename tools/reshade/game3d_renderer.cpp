@@ -55,6 +55,9 @@ namespace sunshine_game3d {
     // caller knows whether an export slot can receive it directly.
     bool pack_owed = false;
     render_parameters pack_parameters;
+    // Packed-eye shaders render both eyes when the side-by-side target is
+    // recorded; the borrowed depth stays leased until the present ends.
+    api::resource_view pack_depth{};
     api::fence completion{};
     uint64_t sequence = 0;
     // Timestamps per presentation: begin, render, source, detection,
@@ -91,6 +94,9 @@ namespace sunshine_game3d {
     // Older embedded replay shaders scan one line per 32-thread group and pin
     // UI inside the horizontal pass.
     bool tiled_limiters = false;
+    // Older embedded replay shaders render two FP16 eye textures and pack them
+    // in a second pass.
+    bool packed_eyes = false;
     bool nearest_ui_supported = false, nearest_ui_rendered = false;
     bool nearest_ui_attempted = false, nearest_ui_ready = false;
     bool front_limit_ui_supported = false, shallow_front_ui_supported = false;
@@ -218,6 +224,7 @@ namespace sunshine_game3d {
       display_fraction_ui_supported = shader_source().find("#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1") != std::string_view::npos;
       mask_channel_supported = shader_source().find("#define SUNSHINE_UI_MASK_CHANNEL 1") != std::string_view::npos;
       tiled_limiters = shader_source().find("#define SUNSHINE_LIMITER_LINE_GROUPS 8") != std::string_view::npos;
+      packed_eyes = shader_source().find("#define SUNSHINE_PACKED_EYES 1") != std::string_view::npos;
       if (!device->create_fence(0, api::fence_flags::none, &completion)) return false;
       if (device->get_api() == api::device_api::d3d12 &&
           (!device->create_resource_view({}, api::resource_usage::shader_resource, api::resource_view_desc(api::format::r32_float), &null_srv) ||
@@ -249,8 +256,9 @@ namespace sunshine_game3d {
       if (width <= 3840 && height <= 3840)
         for (auto id : {raw, vertical_majorant, vertical_field, field})
           if (!texture_create(id, width, height, api::format::r32_float, api::resource_usage::unordered_access)) return false;
-      for (auto id : {left, right})
-        if (!texture_create(id, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target)) return false;
+      if (!packed_eyes)
+        for (auto id : {left, right})
+          if (!texture_create(id, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target)) return false;
       if (!texture_create(packed, width * 2, height, packed_format(),
           api::resource_usage::render_target | api::resource_usage::copy_source)) return false;
       com<ID3DBlob> vs_code;
@@ -261,6 +269,7 @@ namespace sunshine_game3d {
         if (!pipeline_create(candidate, "SunshineHostCandidateCS", true, vs) || !pipeline_create(vertical, "SunshineHostVerticalCS", true, vs) ||
             !pipeline_create(horizontal, "SunshineHostHorizontalCS", true, vs) ||
             (tiled_limiters && !pipeline_create(ui_apply, "SunshineApplyUICS", true, vs))) return false;
+      if (packed_eyes) return pipeline_create(pack, "SunshineRenderPackedPS", false, vs);
       return pipeline_create(eyes, "SunshineRenderEyesPS", false, vs) && pipeline_create(pack, "SunshinePackEyesPS", false, vs);
     }
     bool prepare_nearest_ui() {
@@ -322,11 +331,14 @@ namespace sunshine_game3d {
         const auto written = frame.written;
         frame.written = 0;
         const auto has = [written](unsigned mark) { return (written >> mark & 1u) != 0; };
-        if (!has(mark_render) || !has(mark_eyes)) continue;
+        // Packed-eye frames mark their eyes only when the side-by-side target
+        // is recorded; without a consumer the frame ends after conditioning.
+        if (!has(mark_render) || !has(mark_conditioning)) continue;
         const auto span = [&](unsigned from, unsigned to) {
           return has(from) && has(to) && ticks[to] >= ticks[from] ? double(ticks[to] - ticks[from]) / profile_ticks_per_ms : 0.0;
         };
-        const unsigned first = has(mark_begin) ? mark_begin : mark_render, last = has(mark_pack) ? mark_pack : mark_eyes;
+        const unsigned first = has(mark_begin) ? mark_begin : mark_render,
+          last = has(mark_pack) ? mark_pack : has(mark_eyes) ? mark_eyes : mark_conditioning;
         const std::array<double, gpu_timing::stage_count> ms{span(mark_begin, mark_render), span(mark_render, mark_source),
           span(mark_source, mark_detection), span(mark_detection, mark_linearize), span(mark_linearize, mark_candidate),
           span(mark_candidate, mark_vertical), span(mark_vertical, mark_conditioning), span(mark_conditioning, mark_eyes),
@@ -381,8 +393,12 @@ namespace sunshine_game3d {
     void record_pack(api::command_list *cmd, api::resource target, api::resource_view view, api::resource_usage resting) {
       cmd->barrier(target, resting, api::resource_usage::render_target);
       cmd->bind_pipeline(api::pipeline_stage::all_graphics, pipelines[pack]);
-      bindings(cmd, api::shader_stage::all_graphics, pack_parameters,
-        {textures[source].srv, {}, {}, {}, {}, {}, textures[left].srv, textures[right].srv});
+      if (packed_eyes)
+        bindings(cmd, api::shader_stage::all_graphics, pack_parameters,
+          {textures[source].srv, pack_depth, textures[linear].srv, {}, {}, textures[field].srv});
+      else
+        bindings(cmd, api::shader_stage::all_graphics, pack_parameters,
+          {textures[source].srv, {}, {}, {}, {}, {}, textures[left].srv, textures[right].srv});
       const api::viewport viewport{0, 0, float(width * 2), float(height), 0, 1};
       const api::rect scissor{0, 0, int32_t(width * 2), int32_t(height)};
       cmd->bind_viewports(0, 1, &viewport); cmd->bind_scissor_rects(0, 1, &scissor);
@@ -390,8 +406,9 @@ namespace sunshine_game3d {
       cmd->draw(3, 1, 0, 0);
       cmd->bind_render_targets_and_depth_stencil(0, nullptr);
       cmd->barrier(target, api::resource_usage::render_target, resting);
-      mark(cmd, mark_pack);
+      mark(cmd, packed_eyes ? mark_eyes : mark_pack);
       pack_owed = false;
+      pack_depth = {};
     }
     void draw(api::command_list *cmd, pass id, uint32_t w, std::initializer_list<texture_id> targets,
         const render_parameters &p, const std::array<api::resource_view, 15> &srvs) {
@@ -967,8 +984,12 @@ namespace sunshine_game3d {
       if (pin_apart && apply_ui) d.dispatch(cmd, impl::ui_apply, d.height, 1, p, field_inputs, {impl::field});
     }
     d.mark(cmd, impl::mark_conditioning);
-    d.draw(cmd, impl::eyes, d.width, {impl::left, impl::right}, p, {t[impl::source].srv, depth, t[impl::linear].srv, {}, {}, t[impl::field].srv});
-    d.mark(cmd, impl::mark_eyes);
+    if (!d.packed_eyes) {
+      d.draw(cmd, impl::eyes, d.width, {impl::left, impl::right}, p, {t[impl::source].srv, depth, t[impl::linear].srv, {}, {}, t[impl::field].srv});
+      d.mark(cmd, impl::mark_eyes);
+    }
+    // Without a consumer, a free slot or a dump, no eye is rendered at all.
+    d.pack_depth = depth;
     d.pack_parameters = p;
     d.pack_owed = true;
     if (!defer_pack) d.record_pack(cmd, t[impl::packed].resource, t[impl::packed].rtv, api::resource_usage::shader_resource);

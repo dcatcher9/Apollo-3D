@@ -171,14 +171,12 @@ namespace {
       require(x == entry.x && y == entry.y && z == entry.z, "Native compute group shape changed");
       manifest << "  threads " << x << ' ' << y << ' ' << z << '\n';
     }
-    if (std::string(entry.name) == "SunshineRenderEyesPS") {
-      require(shader.OutputParameters == 2, "Eye pass must retain its two render targets");
-      for (unsigned index = 0; index < shader.OutputParameters; ++index) {
-        D3D11_SIGNATURE_PARAMETER_DESC parameter {};
-        require(SUCCEEDED(reflection->GetOutputParameterDesc(index, &parameter)) &&
-          parameter.SystemValueType == D3D_NAME_TARGET && parameter.SemanticIndex == index && parameter.Mask == 15,
-          "Eye pass MRT signature changed");
-      }
+    if (std::string(entry.name) == "SunshineRenderPackedPS") {
+      require(shader.OutputParameters == 1, "Packed eye pass must write exactly the side-by-side target");
+      D3D11_SIGNATURE_PARAMETER_DESC parameter {};
+      require(SUCCEEDED(reflection->GetOutputParameterDesc(0, &parameter)) &&
+        parameter.SystemValueType == D3D_NAME_TARGET && parameter.SemanticIndex == 0 && parameter.Mask == 15,
+        "Packed eye pass target signature changed");
     }
     std::ofstream binary(output / (std::string(entry.name) + ".cso"), std::ios::binary);
     binary.write(static_cast<const char *>(bytecode->GetBufferPointer()), bytecode->GetBufferSize());
@@ -206,7 +204,7 @@ int main(int argc, char **argv) {
         std::filesystem::create_directories(directory);
         std::ofstream manifest(directory / "bindings.txt");
         std::vector<entry_point> entries {
-          {"PostProcessVS", "vs_5_0"}, {"SunshineRenderEyesPS", "ps_5_0"}, {"SunshinePackEyesPS", "ps_5_0"},
+          {"PostProcessVS", "vs_5_0"}, {"SunshineRenderPackedPS", "ps_5_0"},
           {"SunshineAlphaCoverageCS", "cs_5_0", 8, 8, 1},
         };
         if (color == 3) entries.push_back({"SunshinePreparePQPS", "ps_5_0"});

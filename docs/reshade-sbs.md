@@ -119,8 +119,9 @@ Every Game 3D pass runs inside the game's Present on its graphics queue, so its 
 display latency. A `Sunshine Game 3D timing` log line every 10 seconds reports the present hook's
 CPU time and GPU stage times (mean/max ms: inputs, source copy, UI detection, depth conditioning,
 eyes, pack, total) from timestamp queries read after each frame's completion fence, without a
-wait. Inputs covers the depth and UI captures recorded before rendering; pack is zero on frames
-nothing consumed. The CPU entry also splits the slowest present into setup, depth, UI, render and
+wait. Inputs covers the depth and UI captures recorded before rendering. Eyes is the one pass
+that renders both eyes into the side-by-side target; pack is used only by older embedded replay
+shaders. Both are zero on frames nothing consumed. The CPU entry also splits the slowest present into setup, depth, UI, render and
 export, and a rate-limited `Sunshine Game 3D hitch` warning names any present-thread step that
 takes more than 8 ms.
 
@@ -2654,11 +2655,17 @@ present-thread step in Hogwarts Legacy, and discarded the first.
 
 For each exported frame, the producer claims a slot, writes the final stereo image into it,
 signals its GPU fence, writes the frame sequence, QPC timestamp and matching UI displacement,
-then marks the slot ready. Native Game 3D records its final side-by-side pass directly into the
-claimed slot, so the common path has no full-frame copy. While the ReShade overlay is visible or
-a diagnostic dump is armed, the pass writes the renderer's own SBS image instead, which is then
+then marks the slot ready. Native Game 3D renders both eyes in one pass
+(`SunshineRenderPackedPS`) directly into the claimed slot, so the common path writes no eye
+intermediate and has no full-frame copy. Each half branches on its eye so the compiler folds the
+pixel-center scale into the warp exactly as the former per-eye pass did; the output is
+byte-identical to the former two passes and to the frozen FX reference. At 4K this drops two FP16
+eye textures (~133 MB) and their write/read-back. While the ReShade overlay is visible or a
+diagnostic dump is armed, the pass writes the renderer's own SBS image instead, which is then
 copied into the slot with any overlay composition; reference FX exports always use that copy.
-Without a consumer, a free slot or an armed dump, the side-by-side pass is not recorded at all.
+Without a consumer, a free slot or an armed dump, no eye is rendered at all. The shader declares
+`SUNSHINE_PACKED_EYES`; a dump whose embedded shader predates it replays with the former eye and
+pack passes.
 Slot render-target views are cached for one export generation. The slot rests in the shared
 common state between owners, and the pass reads only the renderer's working set, which the
 renderer's completion fence already retains. Up to three submitted GPU writes may remain unfinished, bounded by

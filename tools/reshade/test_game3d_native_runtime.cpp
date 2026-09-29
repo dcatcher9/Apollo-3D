@@ -1308,8 +1308,10 @@ namespace {
       sunshine_game3d::gpu_timing timing;
       using stage = sunshine_game3d::gpu_timing;
       const bool took = renderer.take_gpu_timing(timing);
+      // The packed-eye pass renders both eyes into the side-by-side target, so
+      // its time is reported as eyes and no separate pack stage remains.
       require(took && timing.frames > 0 && timing.mean_ms[stage::eyes] > 0 &&
-          timing.mean_ms[stage::pack] > 0 && timing.mean_ms[stage::total] >= timing.mean_ms[stage::eyes] &&
+          timing.mean_ms[stage::pack] == 0 && timing.mean_ms[stage::total] >= timing.mean_ms[stage::eyes] &&
           timing.max_ms[stage::total] >= timing.mean_ms[stage::total],
         "Native renderer did not report completed GPU stage timing");
       std::printf("PASS native GPU timing: frames=%u total=%.3f ms eyes=%.3f ms pack=%.3f ms\n", timing.frames,
