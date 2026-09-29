@@ -216,7 +216,7 @@ int main(int argc, char **argv) {
           entries.push_back({"SunshineUINearestTilesCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUINearestReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIConflictCS", "cs_5_0", 8, 8, 1});
-          entries.push_back({"SunshineApplyUICS", "cs_5_0", 32, 1, 1});
+          entries.push_back({"SunshineApplyUICS", "cs_5_0", 8, 8, 1});
           entries.push_back({"SunshineUIDetectionTilesCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUIDetectionReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIDetectionMaskCS", "cs_5_0", 8, 8, 1});

@@ -22,6 +22,8 @@
 #define SUNSHINE_LIMITER_LINE_GROUPS 8
 // One pass renders both eyes straight into the side-by-side target.
 #define SUNSHINE_PACKED_EYES 1
+// UI pinning groups own eight adjacent rows.
+#define SUNSHINE_UI_PIN_LINE_GROUPS 8
 //
 // Specialize BUFFER_WIDTH, BUFFER_HEIGHT and BUFFER_COLOR_SPACE at compile time.
 // This preserves the original per-resolution group-memory footprint. Color-space
@@ -902,15 +904,15 @@ float SunshineUIPlaneParallax() {
     return SunshineBoundFinalParallax(parallax);
 }
 
-// UI pinning runs as its own pass after the scene field. For each row it
-// finds the nearest selected-UI texel on either side of every texel.
-groupshared int SunshineUIPinIndex[BUFFER_WIDTH];
-groupshared int SunshineUIPinNearestLeft[BUFFER_WIDTH];
+// UI pinning runs as its own pass after the scene field. Each group owns
+// eight adjacent rows split into eight chunks; a look-ahead cursor finds the
+// nearest selected-UI texel on either side of every texel, so no row is held
+// in group memory.
 // {last UI index, first UI index} per chunk, and incoming {left, right}.
-groupshared int2 SunshineUIPinEnds[32u];
-groupshared int2 SunshineUIPinCarries[32u];
+groupshared int2 SunshineUIPinEnds[8u][8u];
+groupshared int2 SunshineUIPinCarries[8u][8u];
 
-void SunshinePinSourceUI(uint x, uint y, int distance_pixels) {
+void SunshinePinSourceUI(uint x, uint y, int distance_pixels, float plane) {
     // No UI exists in this row: leave the original field bit-for-bit intact.
     if (distance_pixels >= BUFFER_WIDTH) return;
     // Bilinear color reaches one texel beyond a positive-alpha texel center.
@@ -918,79 +920,14 @@ void SunshinePinSourceUI(uint x, uint y, int distance_pixels) {
     // of an antialiased glyph into otherwise unmasked background.
     float bound = 0.5 * float(max(distance_pixels - 1, 0)) / float(BUFFER_WIDTH);
     float value = SunshineHostFinalStore[int2(uint2(x, y))];
-    float plane = SunshineUIPlaneParallax();
     SunshineHostFinalStore[int2(uint2(x, y))] = distance_pixels <= 1 ? plane : clamp(value, plane - bound, plane + bound);
 }
 
-void SunshinePinSourceUISerial(uint y) {
-    int nearest_left = -1;
+// The first selected-UI texel in [x, end), or end when there is none.
+uint SunshineNextSourceUI(uint x, uint end, uint y) {
     [loop]
-    for (uint x = 0u; x < BUFFER_WIDTH; ++x) {
-        bool is_ui = SunshineSourceUI(x, y);
-        SunshineUIPinIndex[x] = is_ui ? (int)x : -1;
-        if (is_ui) nearest_left = (int)x;
-        SunshineUIPinNearestLeft[x] = nearest_left;
-    }
-    int nearest_right = BUFFER_WIDTH;
-    [loop]
-    for (int x = (int)BUFFER_WIDTH - 1; x >= 0; --x) {
-        if (SunshineUIPinIndex[(uint)x] >= 0) nearest_right = x;
-        int left = SunshineUIPinNearestLeft[(uint)x];
-        int distance_left = left >= 0 ? x - left : BUFFER_WIDTH;
-        int distance_right = nearest_right < BUFFER_WIDTH ? nearest_right - x : BUFFER_WIDTH;
-        SunshinePinSourceUI((uint)x, y, min(distance_left, distance_right));
-    }
-}
-
-void SunshinePinSourceUIParallel(uint y, uint lane, uint chunk_start, uint chunk_end) {
-    [loop]
-    for (uint x = lane; x < BUFFER_WIDTH; x += 32u)
-        SunshineUIPinIndex[x] = SunshineSourceUI(x, y) ? (int)x : -1;
-    GroupMemoryBarrierWithGroupSync();
-
-    int first_ui = BUFFER_WIDTH;
-    int last_ui = -1;
-    [loop]
-    for (uint x = chunk_start; x < chunk_end; ++x) {
-        int index = SunshineUIPinIndex[x];
-        if (index >= 0) {
-            first_ui = min(first_ui, index);
-            last_ui = index;
-        }
-    }
-    SunshineUIPinEnds[lane] = int2(last_ui, first_ui);
-    GroupMemoryBarrierWithGroupSync();
-    if (lane == 0u) {
-        int left = -1;
-        [unroll]
-        for (uint chunk = 0u; chunk < 32u; ++chunk) {
-            SunshineUIPinCarries[chunk].x = left;
-            left = max(left, SunshineUIPinEnds[chunk].x);
-        }
-        int right = BUFFER_WIDTH;
-        [unroll]
-        for (int chunk = 31; chunk >= 0; --chunk) {
-            SunshineUIPinCarries[(uint)chunk].y = right;
-            right = min(right, SunshineUIPinEnds[(uint)chunk].y);
-        }
-    }
-    GroupMemoryBarrierWithGroupSync();
-    int nearest_left = SunshineUIPinCarries[lane].x;
-    [loop]
-    for (uint x = chunk_start; x < chunk_end; ++x) {
-        nearest_left = max(nearest_left, SunshineUIPinIndex[x]);
-        SunshineUIPinNearestLeft[x] = nearest_left;
-    }
-    int nearest_right = SunshineUIPinCarries[lane].y;
-    [loop]
-    for (int x = (int)chunk_end - 1; x >= (int)chunk_start; --x) {
-        int index = SunshineUIPinIndex[(uint)x];
-        if (index >= 0) nearest_right = min(nearest_right, index);
-        int left = SunshineUIPinNearestLeft[(uint)x];
-        int distance_left = left >= 0 ? x - left : BUFFER_WIDTH;
-        int distance_right = nearest_right < BUFFER_WIDTH ? nearest_right - x : BUFFER_WIDTH;
-        SunshinePinSourceUI((uint)x, y, min(distance_left, distance_right));
-    }
+    while (x < end && !SunshineSourceUI(x, y)) ++x;
+    return x;
 }
 
 [numthreads(8u, 8u, 1)]
@@ -1140,15 +1077,58 @@ void SunshineHostHorizontalCS(
 
 // UI pinning runs after the scene field is complete. A probe frame observes
 // the unpinned field first, so it never measures its own pinned field.
-[numthreads(32, 1, 1)]
+[numthreads(8, 8, 1)]
 void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID) {
-    uint y = group_id.x, lane = thread_id.x;
-    if (y >= BUFFER_HEIGHT || Sunshine_SourceAlphaUI == 0u) return;
-    if (BUFFER_WIDTH <= 32u) {
-        if (lane == 0u) SunshinePinSourceUISerial(y);
-    } else {
-        SunshinePinSourceUIParallel(y, lane, lane * BUFFER_WIDTH / 32u,
-            (lane + 1u) * BUFFER_WIDTH / 32u);
+    if (Sunshine_SourceAlphaUI == 0u) return;
+    uint row = thread_id.x, lane = thread_id.y;
+    uint y = group_id.x * 8u + row;
+    // A partial last group keeps its idle threads until the final barrier.
+    bool active = y < BUFFER_HEIGHT;
+    uint chunk_start = lane * BUFFER_WIDTH / 8u;
+    uint chunk_end = (lane + 1u) * BUFFER_WIDTH / 8u;
+    int first_ui = BUFFER_WIDTH, last_ui = -1;
+    if (active) {
+        [loop]
+        for (uint x = chunk_start; x < chunk_end; ++x) {
+            if (SunshineSourceUI(x, y)) {
+                first_ui = min(first_ui, (int)x);
+                last_ui = (int)x;
+            }
+        }
+    }
+    SunshineUIPinEnds[lane][row] = int2(last_ui, first_ui);
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0u) {
+        int left = -1;
+        [unroll]
+        for (uint chunk = 0u; chunk < 8u; ++chunk) {
+            SunshineUIPinCarries[chunk][row].x = left;
+            left = max(left, SunshineUIPinEnds[chunk][row].x);
+        }
+        int right = BUFFER_WIDTH;
+        [unroll]
+        for (int chunk = 7; chunk >= 0; --chunk) {
+            SunshineUIPinCarries[(uint)chunk][row].y = right;
+            right = min(right, SunshineUIPinEnds[(uint)chunk][row].y);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    int2 carry = SunshineUIPinCarries[lane][row];
+    // A row without UI is left bit-for-bit intact.
+    if (!active || (carry.x < 0 && carry.y >= BUFFER_WIDTH && first_ui >= BUFFER_WIDTH)) return;
+    float plane = SunshineUIPlaneParallax();
+    int left = carry.x;
+    int right = first_ui < BUFFER_WIDTH ? first_ui : carry.y;
+    [loop]
+    for (uint x = chunk_start; x < chunk_end; ++x) {
+        if ((int)x == right) {
+            left = right;
+            uint next = SunshineNextSourceUI(x + 1u, chunk_end, y);
+            right = next < chunk_end ? (int)next : carry.y;
+        }
+        int distance_left = left >= 0 ? (int)x - left : BUFFER_WIDTH;
+        int distance_right = right < BUFFER_WIDTH ? right - (int)x : BUFFER_WIDTH;
+        SunshinePinSourceUI(x, y, min(distance_left, distance_right), plane);
     }
 }
 

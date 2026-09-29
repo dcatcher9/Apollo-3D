@@ -149,7 +149,11 @@ The vertical and horizontal limit passes are mechanical translations of the host
 tiling is described in [Host SBS pipeline](host-sbs.md). Each group owns eight adjacent columns or
 rows, so the passes no longer hold whole lines in group memory. UI pinning always runs as its own
 pass (`SunshineApplyUICS`) after the horizontal pass; the adaptive probe observes the unpinned
-field between them, as before. Results are byte-identical. At 4K on an idle GPU the vertical pass
+field between them, as before. That pass is tiled the same way (`SUNSHINE_UI_PIN_LINE_GROUPS`):
+each chunk finds its first and last UI texel, the carries give every chunk the nearest UI texel on
+each side, and a look-ahead cursor yields each texel's distance. Rows without UI are only scanned
+once, and no row is held in group memory. With UI active the pass fell from about 0.1 to 0.02 ms in
+the 4K provider fixture; distances, and therefore the pinned field, are unchanged. Results are byte-identical. At 4K on an idle GPU the vertical pass
 went from 0.44 to 0.17 ms and the horizontal pass, including the UI pass, from 0.35 to 0.24 ms; the
 whole renderer went from 1.38 to 0.91 ms. The shader declares `SUNSHINE_LIMITER_LINE_GROUPS`;
 a dump whose embedded shader predates it replays with one group per line and in-limiter UI

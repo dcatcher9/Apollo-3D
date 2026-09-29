@@ -98,6 +98,8 @@ namespace sunshine_game3d {
     // Older embedded replay shaders render two FP16 eye textures and pack them
     // in a second pass.
     bool packed_eyes = false;
+    // Older embedded replay shaders pin UI with one 32-thread group per row.
+    bool tiled_ui_pin = false;
     bool nearest_ui_supported = false, nearest_ui_rendered = false;
     bool nearest_ui_attempted = false, nearest_ui_ready = false;
     bool front_limit_ui_supported = false, shallow_front_ui_supported = false;
@@ -224,6 +226,7 @@ namespace sunshine_game3d {
       mask_channel_supported = shader_source().find("#define SUNSHINE_UI_MASK_CHANNEL 1") != std::string_view::npos;
       tiled_limiters = shader_source().find("#define SUNSHINE_LIMITER_LINE_GROUPS 8") != std::string_view::npos;
       packed_eyes = shader_source().find("#define SUNSHINE_PACKED_EYES 1") != std::string_view::npos;
+      tiled_ui_pin = shader_source().find("#define SUNSHINE_UI_PIN_LINE_GROUPS 8") != std::string_view::npos;
       if (!device->create_fence(0, api::fence_flags::none, &completion)) return false;
       if (device->get_api() == api::device_api::d3d12 &&
           (!device->create_resource_view({}, api::resource_usage::shader_resource, api::resource_view_desc(api::format::r32_float), &null_srv) ||
@@ -1014,7 +1017,9 @@ namespace sunshine_game3d {
       d.dispatch(cmd, impl::horizontal, (d.height + group_lines - 1) / group_lines, 1, p, field_inputs, {impl::field});
       d.source_alpha_ui = apply_ui;
       if (probe_ui) d.submit_adaptive_probe(cmd, ui_alpha, p);
-      if (pin_apart && apply_ui) d.dispatch(cmd, impl::ui_apply, d.height, 1, p, field_inputs, {impl::field});
+      const uint32_t pin_lines = d.tiled_ui_pin ? 8u : 1u;
+      if (pin_apart && apply_ui)
+        d.dispatch(cmd, impl::ui_apply, (d.height + pin_lines - 1) / pin_lines, 1, p, field_inputs, {impl::field});
     }
     d.mark(cmd, impl::mark_conditioning);
     if (!d.packed_eyes) {
