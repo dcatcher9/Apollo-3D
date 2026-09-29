@@ -580,6 +580,29 @@ int V_V2LimitDecayQ30(int step_q30, uint distance, int max_decay_q30) {
         max_decay_q30 : step_q30 * signed_distance;
 }
 
+// Performance-only deviation from the mechanical translation, with identical
+// results: each lane reads its rows from the texture once and replays its
+// three later passes over them from group memory. A lane only rereads rows it
+// cached itself, so no barrier is added. Tall buffers exceed the 32 KB group
+// budget and read the texture as before.
+#if BUFFER_HEIGHT <= 2560
+groupshared float V_ColumnCandidate[BUFFER_HEIGHT];
+#endif
+float V_FetchCandidate(uint x, uint y) {
+    float value = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, y)), 0));
+#if BUFFER_HEIGHT <= 2560
+    V_ColumnCandidate[y] = value;
+#endif
+    return value;
+}
+float V_CachedCandidate(uint x, uint y) {
+#if BUFFER_HEIGHT <= 2560
+    return V_ColumnCandidate[y];
+#else
+    return SunshineHostCandidateSampler.Load(int3(int2(uint2(x, y)), 0));
+#endif
+}
+
 float V_share_vertical_envelopes(float upper, float lower) {
     // Keep the persisted float32 evaluation order and forbid contraction/reassociation.
     precise float majorant_share = 0.75;
@@ -643,14 +666,14 @@ void SunshineHostVerticalCS(
 
     uint chunk_start = lane * BUFFER_HEIGHT / 32u;
     uint chunk_end = (lane + 1u) * BUFFER_HEIGHT / 32u;
-    float candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, chunk_start)), 0));
+    float candidate = V_FetchCandidate(x, chunk_start);
     int forward_upper_q30 = V_V2LimitUpperQ30(candidate);
     int forward_lower_q30 = V_V2LimitLowerQ30(candidate);
     [loop]
     for (uint local_forward_y = chunk_start + 1u;
          local_forward_y < chunk_end;
          ++local_forward_y) {
-        candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, local_forward_y)), 0));
+        candidate = V_FetchCandidate(x, local_forward_y);
         forward_upper_q30 = max(
             V_V2LimitUpperQ30(candidate),
             forward_upper_q30 - max_step_q30);
@@ -658,14 +681,14 @@ void SunshineHostVerticalCS(
             V_V2LimitLowerQ30(candidate),
             forward_lower_q30 + max_step_q30);
     }
-    candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, chunk_end - 1u)), 0));
+    candidate = V_CachedCandidate(x, chunk_end - 1u);
     int backward_upper_q30 = V_V2LimitUpperQ30(candidate);
     int backward_lower_q30 = V_V2LimitLowerQ30(candidate);
     [loop]
     for (int local_backward_y = (int)chunk_end - 2;
          local_backward_y >= (int)chunk_start;
          --local_backward_y) {
-        candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, (uint)local_backward_y)), 0));
+        candidate = V_CachedCandidate(x, (uint)local_backward_y);
         backward_upper_q30 = max(
             V_V2LimitUpperQ30(candidate),
             backward_upper_q30 - max_step_q30);
@@ -729,7 +752,7 @@ void SunshineHostVerticalCS(
     }
     GroupMemoryBarrierWithGroupSync();
 
-    candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, chunk_start)), 0));
+    candidate = V_CachedCandidate(x, chunk_start);
     forward_upper_q30 = V_V2LimitUpperQ30(candidate);
     forward_lower_q30 = V_V2LimitLowerQ30(candidate);
     if (lane != 0u) {
@@ -746,7 +769,7 @@ void SunshineHostVerticalCS(
     for (uint replay_forward_y = chunk_start + 1u;
          replay_forward_y < chunk_end;
          ++replay_forward_y) {
-        candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, replay_forward_y)), 0));
+        candidate = V_CachedCandidate(x, replay_forward_y);
         forward_upper_q30 = max(
             V_V2LimitUpperQ30(candidate),
             forward_upper_q30 - max_step_q30);
@@ -758,7 +781,7 @@ void SunshineHostVerticalCS(
     }
     GroupMemoryBarrierWithGroupSync();
 
-    candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, chunk_end - 1u)), 0));
+    candidate = V_CachedCandidate(x, chunk_end - 1u);
     backward_upper_q30 = V_V2LimitUpperQ30(candidate);
     backward_lower_q30 = V_V2LimitLowerQ30(candidate);
     if (lane + 1u != 32u) {
@@ -782,7 +805,7 @@ void SunshineHostVerticalCS(
     [loop]
     for (int scan_y = (int)chunk_end - 2; scan_y >= (int)chunk_start; --scan_y) {
         write_y = (uint)scan_y;
-        candidate = SunshineHostCandidateSampler.Load(int3(int2(uint2(x, write_y)), 0));
+        candidate = V_CachedCandidate(x, write_y);
         backward_upper_q30 = max(
             V_V2LimitUpperQ30(candidate),
             backward_upper_q30 - max_step_q30);

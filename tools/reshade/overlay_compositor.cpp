@@ -11,6 +11,7 @@
 #include <imgui.h>
 #include <mutex>
 #include <reshade.hpp>
+#include "async_log.h"
 #include <utility>
 
 static_assert(IMGUI_VERSION_NUM == 19250, "The native GUI callback ABI is pinned to ReShade 6.8.0");
@@ -80,7 +81,7 @@ namespace sunshine::overlay {
         return true;
       }
       if (errors.p) {
-        reshade::log::message(reshade::log::level::error, static_cast<const char *>(errors->GetBufferPointer()));
+        sunshine_log::message(reshade::log::level::error, static_cast<const char *>(errors->GetBufferPointer()));
       }
       return false;
     }

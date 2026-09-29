@@ -16,6 +16,7 @@
 #include <d3d12.h>
 #include <imgui.h>
 #include <reshade.hpp>
+#include "async_log.h"
 #include <mutex>
 #include <shared_mutex>
 #include <vector>
@@ -48,6 +49,7 @@
 #include "streamline_depth_provider.h"
 #include "native_resource_identity.h"
 #include "camera_sample_observation.h"
+#include "game3d_slow_step.h"
 
 using namespace reshade::api;
 
@@ -644,7 +646,7 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 		{
 			if (api <= device_api::d3d12)
 				reinterpret_cast<IUnknown *>(depth_stencil.handle)->Release();
-			reshade::log::message(reshade::log::level::error, "Failed to create backup depth-stencil texture!");
+			sunshine_log::message(reshade::log::level::error, "Failed to create backup depth-stencil texture!");
 
 			return nullptr;
 		}
@@ -823,7 +825,7 @@ struct activity_present_trace
 			out.append(" q%llu@%llx:s%llu@%llx,%ux%u,d%u,w%u,c%d,a%d,b%llu;", r.queue, r.queue_native, r.source, r.handle,
 				r.width, r.height, r.draws, r.writes, r.copied ? 1 : 0, r.ambiguous ? 1 : 0, r.backup);
 		}
-		reshade::log::message(reshade::log::level::info, out.text);
+		sunshine_log::message(reshade::log::level::info, out.text);
 	}
 };
 
@@ -902,7 +904,7 @@ static void trace_activity_effect(effect_runtime *runtime, generic_depth_data &d
 	// the MSVC/MinGW ABI. Back-buffer index is sufficient for this passive trace.
 	out.append(" swap=%llx queue=%llx bb_index=%u", runtime->get_native(), runtime->get_command_queue()->get_native(),
 		runtime->get_current_back_buffer_index());
-	reshade::log::message(reshade::log::level::info, out.text);
+	sunshine_log::message(reshade::log::level::info, out.text);
 }
 
 struct activity_access_trace
@@ -2139,7 +2141,7 @@ static bool on_create_resource(device *device, resource_desc &desc, subresource_
 		if (desc.texture.width <= 512)
 			return false;
 		if (desc.texture.format == format::d32_float || desc.texture.format == format::d32_float_s8_uint)
-			reshade::log::message(reshade::log::level::warning, "Replacing high bit depth depth-stencil format with a lower bit depth format");
+			sunshine_log::message(reshade::log::level::warning, "Replacing high bit depth depth-stencil format with a lower bit depth format");
 		// Replace texture format with special format that supports normal sampling (see https://aras-p.info/texts/D3D9GPUHacks.html#depth)
 		desc.texture.format = format::intz;
 		desc.usage |= resource_usage::shader_resource;
@@ -2248,7 +2250,7 @@ static void on_destroy_resource(device *device, resource resource)
 		{
 			lock.unlock();
 
-			reshade::log::message(reshade::log::level::warning, "A depth-stencil resource was destroyed while still in use.");
+			sunshine_log::message(reshade::log::level::warning, "A depth-stencil resource was destroyed while still in use.");
 
 			// This is bad ... the resource may still be in use by an effect on the GPU and destroying it would crash it
 			// Try to mitigate that somehow by delaying this thread a little to hopefully give the GPU enough time to catch up before the resource memory is deallocated
@@ -3163,25 +3165,37 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	auto &data = *runtime->get_private_data<generic_depth_data>();
 	const bool automatic = s_sunshine_auto && (device->get_api() == device_api::d3d11 || device->get_api() == device_api::d3d12);
 	data.native_access_open = false;
-	auto completed_sample = sunshine_depth::poll(runtime);
-	if (completed_sample && sunshine_streamline::provider::complete(runtime, *completed_sample))
+	using sunshine_game3d::slow_step;
+	auto completed_sample = [&] { const slow_step step("depth sample poll"); return sunshine_depth::poll(runtime); }();
+	if (completed_sample && [&] { const slow_step step("Streamline sample completion");
+			return sunshine_streamline::provider::complete(runtime, *completed_sample); }())
 		completed_sample.reset();
 	// Point classification serves candidate preference only. Established-source
 	// scene controls independently consume authenticated full-image statistics.
-	const auto completed_quality = completed_sample && completed_sample->valid ?
-		sunshine_depth::analyze_depth(completed_sample->values.data(), completed_sample->values.size(), completed_sample->width, completed_sample->height) :
-		sunshine_depth::depth_quality {};
+	const auto completed_quality = [&] {
+		const slow_step step("depth sample analysis");
+		return completed_sample && completed_sample->valid ?
+			sunshine_depth::analyze_depth(completed_sample->values.data(), completed_sample->values.size(), completed_sample->width, completed_sample->height) :
+			sunshine_depth::depth_quality {};
+	}();
 	const bool completed_other_raw_sample = completed_sample && completed_sample->token != data.challenger_id &&
 		completed_sample->capture_id != 0 && completed_sample->capture_id == data.raw_pending_capture_id && data.raw_pending_metadata.depth_ready;
 	if (completed_sample)
 	{
+		const slow_step step("raw depth sample completion");
 		complete_raw_sample(runtime, data, *device_data, *completed_sample);
 		release_sample_reference(runtime, data);
 	}
 	const bool was_streamline = sunshine_streamline::provider::selected(runtime);
-	retire_provided_members(runtime, data, *device_data);
-	const bool api_selected = sunshine_streamline::provider::begin(runtime, cmd_list, device_data->native_present_index,
-		automatic && data.override_depth_stencil == 0 && s_streamline_source_events);
+	{
+		const slow_step step("provided depth retirement");
+		retire_provided_members(runtime, data, *device_data);
+	}
+	const bool api_selected = [&] {
+		const slow_step step("Streamline depth acquisition");
+		return sunshine_streamline::provider::begin(runtime, cmd_list, device_data->native_present_index,
+			automatic && data.override_depth_stencil == 0 && s_streamline_source_events);
+	}();
 	// A native API snapshot needs no Generic work. Shared preservation enables
 	// itself at its first copy above; keep that demand through temporary gaps.
 	// Manual pins and fallback resume capture before entering the selector.
@@ -3283,7 +3297,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		}
 		else
 		{
-			reshade::log::message(reshade::log::level::info, "Sunshine 3D depth: manual buffer was destroyed or recreated; returning to automatic selection.");
+			sunshine_log::message(reshade::log::level::info, "Sunshine 3D depth: manual buffer was destroyed or recreated; returning to automatic selection.");
 			data.override_depth_stencil = { 0 };
 			data.override_identity = 0;
 		}
@@ -3342,7 +3356,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			std::snprintf(message, std::size(message),
 				"Sunshine 3D depth: unused manual source=%llu replaced by freshly confirmed scene source=%llu; returning to automatic selection.",
 				static_cast<unsigned long long>(data.override_identity), static_cast<unsigned long long>(choice.id));
-			reshade::log::message(reshade::log::level::info, message);
+			sunshine_log::message(reshade::log::level::info, message);
 			data.override_depth_stencil = { 0 };
 			data.override_identity = 0;
 			data.manual_recovery = {};
@@ -3589,7 +3603,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			binding_state_name(data.binding_state), static_cast<unsigned long long>(data.selected_identity),
 			data.selected_desc.texture.width, data.selected_desc.texture.height, format_to_string(data.selected_desc.texture.format), manual ? "manual" : "auto",
 			data.selection_reason, data.binding_detail);
-		reshade::log::message(data.binding_state == depth_binding_state::binding_failed ? reshade::log::level::error : reshade::log::level::info, message);
+		sunshine_log::message(data.binding_state == depth_binding_state::binding_failed ? reshade::log::level::error : reshade::log::level::info, message);
 		data.last_logged_id = data.anchor_identity;
 		data.last_logged_manual = manual;
 		data.last_logged_state = data.binding_state;
@@ -4440,7 +4454,7 @@ bool sunshine_depth::initialize(HMODULE addon_module)
 	if (!read_disabled_addons(disabled_addons))
 	{
 		s_status_message = "Depth selection could not read the existing add-on settings. Add Generic Depth to [ADDON] DisabledAddons in ReShade.ini, remove the old SunshineDepth.addon64, and restart the game.";
-		reshade::log::message(reshade::log::level::error, s_status_message);
+		sunshine_log::message(reshade::log::level::error, s_status_message);
 		return false;
 	}
 	const bool builtin_disabled = std::find(disabled_addons.begin(), disabled_addons.end(), "Generic Depth") != disabled_addons.end();
@@ -4463,7 +4477,7 @@ bool sunshine_depth::initialize(HMODULE addon_module)
 		if (value.size() > 65536)
 		{
 			s_status_message = "Depth selection could not update the existing add-on settings. Add Generic Depth to [ADDON] DisabledAddons in ReShade.ini, remove the old SunshineDepth.addon64, and restart the game.";
-			reshade::log::message(reshade::log::level::error, s_status_message);
+			sunshine_log::message(reshade::log::level::error, s_status_message);
 			return false;
 		}
 		// Preserve every existing disabled entry. ReShade checks this current list
@@ -4477,25 +4491,25 @@ bool sunshine_depth::initialize(HMODULE addon_module)
 		// ReShade 6.8 registers its built-ins before calling external AddonInit.
 		// Its public API cannot remove the already registered built-in callbacks.
 		s_status_message = "Depth setup has been updated. Restart the game to enable Sunshine 3D automatic depth selection. Existing ReShade depth selection remains available for this launch.";
-		reshade::log::message(reshade::log::level::warning, s_status_message);
+		sunshine_log::message(reshade::log::level::warning, s_status_message);
 		return false;
 	}
 	if (legacy == legacy_depth_state::unknown)
 	{
 		s_status_message = "Depth selection could not verify the loaded add-ons. Restart the game after removing old Sunshine Depth add-ons; export remains available for this launch.";
-		reshade::log::message(reshade::log::level::warning, s_status_message);
+		sunshine_log::message(reshade::log::level::warning, s_status_message);
 		return false;
 	}
 	if (legacy == legacy_depth_state::present)
 	{
 		s_status_message = "The old Sunshine Depth add-on is already loaded, possibly under a renamed file. Close the game, remove that old add-on, and restart. Keep only the Sunshine 3D add-on; automatic selection will then use its integrated depth selector.";
-		reshade::log::message(reshade::log::level::warning, s_status_message);
+		sunshine_log::message(reshade::log::level::warning, s_status_message);
 		return false;
 	}
 	register_depth_events();
 	s_registered = true;
 	s_status_message = "Depth selection is ready.";
-	reshade::log::message(reshade::log::level::info, "Sunshine 3D depth selector initialized.");
+	sunshine_log::message(reshade::log::level::info, "Sunshine 3D depth selector initialized.");
 	return true;
 }
 
@@ -4921,7 +4935,7 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect
 	const resource target {native_resource};
 	bool ok = true;
 	const auto checkpoint = [&](const char *label) {
-		if (!ok) reshade::log::message(reshade::log::level::error, label);
+		if (!ok) sunshine_log::message(reshade::log::level::error, label);
 		return ok;
 	};
 	for (const auto type : {indirect_command::dispatch, indirect_command::dispatch_rays})
@@ -5203,7 +5217,7 @@ void sunshine_depth::report_camera_observations(effect_runtime *runtime, const s
 		static_cast<unsigned long long>(observation.camera_sequence), observation.frame_kind,
 		static_cast<unsigned long long>(observation.frame_numeric), static_cast<unsigned long long>(observation.frame_generation),
 		static_cast<unsigned long long>(sample.capture_ms), static_cast<unsigned long long>(observation.tick), sample.camera.A, sample.camera.B);
-	reshade::log::message(reshade::log::level::info, text);
+	sunshine_log::message(reshade::log::level::info, text);
 
 	sunshine_streamline::evaluation_snapshot evidence;
 	sunshine_streamline::query_evaluation(selected, evidence);
@@ -5237,7 +5251,7 @@ void sunshine_depth::report_camera_observations(effect_runtime *runtime, const s
 	}
 	if (map_busy)
 	{
-		reshade::log::message(reshade::log::level::info,
+		sunshine_log::message(reshade::log::level::info,
 			"Sunshine camera depth lookup: status=resource-map-busy lookup_available=0 geometry_unchanged=1");
 		return;
 	}
@@ -5250,7 +5264,7 @@ void sunshine_depth::report_camera_observations(effect_runtime *runtime, const s
 			entry.region.x, entry.region.y, entry.region.width, entry.region.height, static_cast<unsigned long long>(entry.layout),
 			static_cast<unsigned long long>(entry.last_frame), entry.current ? 1 : 0, entry.copied ? 1 : 0,
 			entry.ambiguous ? 1 : 0, entry.selected ? 1 : 0);
-		reshade::log::message(reshade::log::level::info, text);
+		sunshine_log::message(reshade::log::level::info, text);
 	}
 }
 

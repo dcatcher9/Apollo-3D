@@ -120,7 +120,21 @@ display latency. A `Sunshine Game 3D timing` log line every 10 seconds reports t
 CPU time and GPU stage times (mean/max ms: inputs, source copy, UI detection, depth conditioning,
 eyes, pack, total) from timestamp queries read after each frame's completion fence, without a
 wait. Inputs covers the depth and UI captures recorded before rendering; pack is zero on frames
-nothing consumed.
+nothing consumed. The CPU entry also splits the slowest present into setup, depth, UI, render and
+export, and a rate-limited `Sunshine Game 3D hitch` warning names any present-thread step that
+takes more than 8 ms.
+
+ReShade writes every log line through to disk synchronously. In Hogwarts Legacy single lines took
+up to ~50 ms while the game streamed assets, and the periodic depth, camera and UI diagnostics were
+written from the game's Present (present-hook spikes of 23-170 ms). The add-on therefore queues its
+log lines in order and writes them from one thread-pool drain; the present thread only formats and
+enqueues. At most 512 lines wait, later ones are counted and reported as dropped, and pending
+lines are discarded once DLL detach begins. Unit tests that intercept ReShade's log use a
+synchronous build.
+
+The Game 3D copy of the host vertical limit pass keeps each column's candidate depth in group
+memory after its first texture read (for heights up to 2560) and replays its three later scans
+from there; results are identical. At 4K this took the vertical pass from 0.61 to about 0.51 ms.
 
 All rendering stays on the runtime's graphics queue. Native passes add no CPU fence wait or full
 frame CPU readback. A completion fence protects replacement of the renderer's working set;
@@ -1682,9 +1696,13 @@ that links it directly exports these symbols. The driver's `_nvngx.dll` core and
 export only Create/Evaluate/Release, so calls Streamline makes through them stay with the
 Streamline adapter. Discovery also runs
 at device initialization, before ordinary feature creation. After that it rescans only when the
-loader reports a newly loaded module (at most every 250 ms), not on a fixed timer: a full export
-scan of about 200 modules measured about 5 ms on the present path. Without loader notifications
-the one-second rescan remains. No game DLL is replaced, no unknown
+loader reports a newly loaded module (at most every 250 ms), not on a fixed timer. Without loader
+notifications the one-second rescan remains. Discovery runs on a thread-pool thread, and each scan
+enables all of its new hooks in one queued MinHook apply. Every MinHook enable/apply first takes
+a system-wide thread snapshot: about 50 ms with ~10,000 system threads, before any thread is
+suspended. Hogwarts Legacy exposes 38 NGX entry points, and enabling them one by one on the present
+thread froze the game for 2.06 s at startup. The export scan itself is about 2 ms. Reports wait
+for a pending scan, so coverage is never reported from its pre-scan state. No game DLL is replaced, no unknown
 C++ parameter vtable is interpreted, and no feature is inferred merely from installed files.
 There is no DLL patch-version or feature-ID allowlist. Every observed successful feature creation
 establishes its handle generation; capture additionally requires valid render dimensions, create
@@ -2621,6 +2639,11 @@ texture name.
 The producer publishes immutable metadata with a seqlock. A new consumer nonce requests a fresh
 generation of textures and a producer-ready fence. Each slot's atomic 64-bit control word binds
 its generation and ownership state, so an old consumer cannot unlock a replacement ring.
+Sunshine detaches whenever the game stops being the covering foreground window and then clears
+its own nonce (compare-exchange, so a replacement receiver's nonce survives). Returning to the
+game therefore builds one generation, for the reattached receiver's new nonce. Previously the
+stale nonce was answered first, so each return built two 7680x2160 generations, each a 24-45 ms
+present-thread step in Hogwarts Legacy, and discarded the first.
 
 For each exported frame, the producer claims a slot, writes the final stereo image into it,
 signals its GPU fence, writes the frame sequence, QPC timestamp and matching UI displacement,

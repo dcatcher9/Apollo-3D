@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "depth_content_sampler.h"
+#include "async_log.h"
 
 #include <algorithm>
 #include <array>
@@ -39,7 +40,7 @@ namespace {
   };
 
   void warning(const char *message) {
-    reshade::log::message(reshade::log::level::warning, message);
+    sunshine_log::message(reshade::log::level::warning, message);
   }
 
   // Integer texel loads avoid filtering across geometry and padded viewport edges.

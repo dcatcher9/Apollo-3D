@@ -49,6 +49,8 @@ namespace sunshine_upscaler_trace {
     // Same native validation/pinning/install route as discovered exports.
     bool install(void *target, operation op, bool d3d11 = false);
     void report_now();
+    // Discovery scheduled by poll() completes on a pool thread.
+    void wait_discovery();
   }
 #endif
 }

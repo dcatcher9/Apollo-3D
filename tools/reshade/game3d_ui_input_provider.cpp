@@ -6,6 +6,7 @@
 #include "streamline_buffer_contract.h"
 #include <d3d12.h>
 #include <reshade.hpp>
+#include "async_log.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
@@ -405,7 +406,7 @@ namespace sunshine_game3d::ui_input {
         unsigned(latest.record_attempted), unsigned(latest.record_completed),
         outcomes[hudless_batch], outcomes[hudless_real], outcomes[hudless_late], outcomes[hudless_generated],
         outcomes[hudless_stale], outcomes[hudless_other], outcomes[hudless_none]);
-      reshade::log::message(reshade::log::level::info, message);
+      sunshine_log::message(reshade::log::level::info, message);
     }
     if (have_diagnostic && latest.latest_boundary.source.sequence) {
       result.status.input_state = source_alpha_input_state::seen;

@@ -2,6 +2,7 @@
 #include "game3d_renderer.h"
 #include "game3d_shader_source.h"
 #include <reshade.hpp>
+#include "async_log.h"
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
@@ -176,7 +177,7 @@ namespace sunshine_game3d {
       const auto source = shader_source();
       const HRESULT result = D3DCompile(source.data(), source.size(),
         "Sunshine Game 3D", defines, nullptr, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code.put(), errors.put());
-      if (FAILED(result) && errors.p) reshade::log::message(reshade::log::level::error, static_cast<const char *>(errors->GetBufferPointer()));
+      if (FAILED(result) && errors.p) sunshine_log::message(reshade::log::level::error, static_cast<const char *>(errors->GetBufferPointer()));
       return SUCCEEDED(result);
     }
     bool pipeline_create(pass id, const char *entry, bool compute, api::shader_desc vs) {
@@ -697,7 +698,7 @@ namespace sunshine_game3d {
           static_cast<unsigned long long>(consumed_adaptive.accepted_mask_sequence),
           static_cast<unsigned long long>(consumed_adaptive.probe_age_ms), unsigned(ui_adaptive::entry_conflict_percent),
           double(ui_adaptive::entry_area_per_mille) / 10.);
-        reshade::log::message(reshade::log::level::info, message);
+        sunshine_log::message(reshade::log::level::info, message);
       }
     }
     bool prepare_adaptive_frame(const render_parameters &p, const ui_adaptive::source *source) {
@@ -819,7 +820,7 @@ namespace sunshine_game3d {
     next->source_override.assign(source_override);
     if (!next->initialize(runtime, desc, c)) return false;
     data_ = std::move(next);
-    reshade::log::message(reshade::log::level::info, "Sunshine Game 3D: add-on GPU renderer ready (no FX file required)");
+    sunshine_log::message(reshade::log::level::info, "Sunshine Game 3D: add-on GPU renderer ready (no FX file required)");
     return true;
   }
   bool renderer::render(api::command_list *cmd, const render_frame_input &input, bool defer_pack) {

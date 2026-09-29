@@ -29,11 +29,13 @@
 #include <memory>
 #include <mutex>
 #include <reshade.hpp>
+#include "async_log.h"
 #include "depth_content_sampler.h"
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <windows.h>
+#include "game3d_slow_step.h"
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   #include "test_overlay_patch.h"
@@ -253,7 +255,7 @@ namespace {
     (void) level;
     std::puts(message);
 #else
-    reshade::log::message(level, message);
+    sunshine_log::message(level, message);
 #endif
   }
 
@@ -868,7 +870,7 @@ namespace {
       renderer->begin_gpu_profile(commands); // Depth and UI input copies follow.
       // The owner brackets the same capture used by the FX reference path. No
       // raw resource pointer is retained once this lease closes.
-      if (!sunshine_depth::begin_native_frame(runtime, commands)) {
+      if (![&] { const sunshine_game3d::slow_step step("native depth frame"); return sunshine_depth::begin_native_frame(runtime, commands); }()) {
         if (diagnostic_owner) debug_dump_.unavailable("The depth owner cannot open this runtime's native render lease.");
         return;
       }
@@ -876,7 +878,10 @@ namespace {
         api::effect_runtime *runtime; api::command_list *commands;
         ~finish_depth() { sunshine_depth::end_native_frame(runtime, commands); }
       } finish{runtime, commands};
-      prepare_native_depth(runtime, commands, rtv);
+      {
+        const sunshine_game3d::slow_step step("native depth preparation");
+        prepare_native_depth(runtime, commands, rtv);
+      }
       timer.mark();
       auto ui_input = sunshine_game3d::ui_input::acquire(runtime, *renderer, source_alpha,
         sunshine_game3d::source_alpha_startup_policy(), diagnostic_owner);
@@ -912,7 +917,10 @@ namespace {
       timer.mark();
       // Export records the owed pack only when a slot receives this frame. Without
       // a consumer, a free slot or a dump, the SBS pack is skipped.
-      if (rendered) frame(runtime, {}, commands, rtv, true);
+      if (rendered) {
+        const sunshine_game3d::slow_step step("stereo export");
+        frame(runtime, {}, commands, rtv, true);
+      }
       {
         std::lock_guard<std::mutex> lock(mutex_);
         auto &proof = runtimes_[runtime];
@@ -1111,12 +1119,16 @@ namespace {
         // The original-derived effect owns its preparation and convergence.
         // Camera diagnostics may inspect capture identity without enabling the
         // independent renderer's percentile calibration or altering uniforms.
+        const sunshine_game3d::slow_step step("depth input query");
         sunshine_game3d::depth_input::query(runtime, depth);
       }
       proof.borrowed_depth = proof.addon_native && depth.ready ? depth.shader_resource : api::resource_view{};
       proof.diagnostic_armed = proof.addon_native && debug_dump_.requested();
       proof.diagnostic_depth = proof.diagnostic_armed ? depth : sunshine_depth::frame_depth{};
-      sunshine_game3d::depth_input::observe(runtime, commands, effects_rtv, depth);
+      {
+        const sunshine_game3d::slow_step step("depth input observation");
+        sunshine_game3d::depth_input::observe(runtime, commands, effects_rtv, depth);
+      }
       const auto now = GetTickCount64();
       frame_decision_t frame;
       frame.depth_ready = depth.ready;
@@ -1138,9 +1150,11 @@ namespace {
         restore_reused_scene(frame, previous_frame, proof.raw_supported);
       } else {
         const bool provided = sunshine_game3d::depth_input::provider_selected(runtime);
+        const sunshine_game3d::slow_step step("scene placement");
         frame.scene = resolve_raw_scene(runtime, proof, depth, game_enabled, provided, now);
       }
       frame.ui_source = resolve_ui_observation(depth, previous_frame.ui_source, frame.scene, proof.raw_basis_epoch, now);
+      const sunshine_game3d::slow_step step("frame publication");
       publish_frame(runtime, proof, std::move(frame));
     }
 

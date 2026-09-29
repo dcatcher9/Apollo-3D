@@ -7,6 +7,7 @@
 #include "streamline_native_observer.h"
 #endif
 #include <reshade.hpp>
+#include "async_log.h"
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -226,7 +227,7 @@ namespace sunshine_ngx {
         name(value.position.state), static_cast<unsigned long long>(value.position.address),
         name(value.world_to_view.state), name(value.view_to_clip.state),
         name(value.inv_view_projection.state), name(value.clip_to_prev_clip.state));
-      reshade::log::message(reshade::log::level::info, message);
+      sunshine_log::message(reshade::log::level::info, message);
     }
     bool valid_dimension(unsigned value) { return value && value <= 16384; }
     bool get_uint(const parameter_api &api, const void *parameters, const char *key, unsigned &out) {
@@ -634,7 +635,7 @@ namespace sunshine_ngx {
       static_cast<unsigned long long>(copy_recorded.load()), static_cast<unsigned long long>(metadata_only.load()),
       static_cast<unsigned long long>(unknown.load()), static_cast<unsigned long long>(missing_parameters.load()),
       static_cast<unsigned long long>(failed.load()), static_cast<unsigned long long>(feature_overflow.load()));
-    reshade::log::message(reshade::log::level::info, message);
+    sunshine_log::message(reshade::log::level::info, message);
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
     const auto rejected_count = rejected_captures.load(std::memory_order_relaxed);
     if (rejected_count != reported_rejections && TryAcquireSRWLockShared(&rejection_lock)) {
@@ -667,7 +668,7 @@ namespace sunshine_ngx {
           static_cast<unsigned long long>(observer.installed), static_cast<unsigned long long>(observer.targets),
           static_cast<unsigned long long>(observer.rejected), static_cast<unsigned long long>(observer.barrier_overflow),
           static_cast<unsigned long long>(observer.submission_overflow), static_cast<unsigned long long>(observer.discovery_contention));
-        reshade::log::message(reshade::log::level::info, rejected);
+        sunshine_log::message(reshade::log::level::info, rejected);
       }
     }
 #endif

@@ -371,6 +371,12 @@ namespace platf::reshade_bridge {
     void detach() {
       reset_resources();
       if (shared_) {
+        // Withdraw this connection so the producer does not build a generation
+        // for a receiver that is gone (for example after a focus change). A
+        // replacement receiver's nonce is left untouched.
+        if (nonce_) {
+          InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&shared_->consumer_nonce), 0, static_cast<LONG64>(nonce_));
+        }
         UnmapViewOfFile(shared_);
         shared_ = nullptr;
       }

@@ -680,8 +680,11 @@ TEST_F(ReShadeBridgeGpu, KeepsExactGameEyesAcrossFullscreenDisplayScalingAndGene
   const auto previous_nonce = state->consumer_nonce;
   --observed.client_screen_rect.right;
   EXPECT_FALSE(bridge->poll(capture, authored_width, render_height));
+  // Detaching withdraws the receiver, so the producer cannot build for a stale nonce.
+  EXPECT_EQ(state->consumer_nonce, 0u);
   observed.client_screen_rect.right = capture.right;
   EXPECT_FALSE(bridge->poll(capture, authored_width, render_height));
+  EXPECT_NE(state->consumer_nonce, 0u);
   EXPECT_NE(state->consumer_nonce, previous_nonce);
   EXPECT_FALSE(bridge->poll(capture, authored_width, render_height));
   ASSERT_TRUE(new_generation(DXGI_FORMAT_R8G8B8A8_UNORM, protocol::transfer::srgb, render_width, render_height));
@@ -737,6 +740,7 @@ TEST_F(ReShadeBridgeGpu, ConsumerRestartRequiresNewNonceAndResourceGeneration) {
   ASSERT_TRUE(previous);
   const auto previous_nonce = state->consumer_nonce;
   bridge.reset();
+  EXPECT_EQ(state->consumer_nonce, 0u);
   bridge = make_receiver();
   EXPECT_FALSE(poll());
   ASSERT_NE(state->consumer_nonce, 0u);
@@ -750,6 +754,12 @@ TEST_F(ReShadeBridgeGpu, ConsumerRestartRequiresNewNonceAndResourceGeneration) {
   EXPECT_EQ(frame->producer_creation_time, previous->producer_creation_time);
   EXPECT_NE(frame->resource_generation, previous->resource_generation);
   expect_pixels(frame->texture);
+
+  // Detaching never withdraws the nonce of a replacement receiver.
+  constexpr std::uint64_t replacement_nonce = 0x5245504c41434521ULL;
+  InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state->consumer_nonce), static_cast<LONG64>(replacement_nonce));
+  bridge.reset();
+  EXPECT_EQ(state->consumer_nonce, replacement_nonce);
 }
 
 TEST_F(ReShadeBridgeGpu, RejectsUnacknowledgedNonceAndMetadataBeingReplaced) {

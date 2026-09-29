@@ -9,6 +9,8 @@
 #include "diagnostic_log_gate.h"
 #include "projection_depth_scale.h"
 #include <reshade.hpp>
+#include "async_log.h"
+#include "game3d_slow_step.h"
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
@@ -242,7 +244,7 @@ namespace sunshine_streamline::provider {
         data.cache.reason(), name(e.action), e.source_reason, e.cache_reason, e.current_observation,
         depth_capture::name(e.consumer.result), depth_capture::name(e.consumer.invalidation),
         u(e.consumer.cookie), unsigned(e.consumer.slot_invalid));
-      reshade::log::message(reshade::log::level::info, text);
+      sunshine_log::message(reshade::log::level::info, text);
       // Repeat the frozen first-loss evidence on recovery, without querying a
       // newer revision or retroactively filling a missing/busy journal entry.
       const auto format_loss = [](const observation_loss_lookup &lookup, char *out, std::size_t size) {
@@ -267,7 +269,7 @@ namespace sunshine_streamline::provider {
         "current_check={%s}; retained_check={%s}; sampled_only={%s}",
         ready ? "recovered" : "lost", u(reinterpret_cast<std::uint64_t>(runtime)), u(loss.present),
         u(data.trace_loss_tick), u(loss.sampled_tick), current_loss, retained_loss, sampled_loss);
-      reshade::log::message(reshade::log::level::info, text);
+      sunshine_log::message(reshade::log::level::info, text);
       data.suppressed_trace_episodes = 0;
       if (ready) data.traced_loss = false;
     }
@@ -440,7 +442,10 @@ namespace sunshine_streamline::provider {
     }
     depth_capture::capture_diagnostic capture_info;
     depth_capture::acquisition_decision acquisition;
-    depth_capture::acquire(runtime->get_command_queue()->get_native(), present, data->frame, acquisition, &capture_info, selection);
+    {
+      const sunshine_game3d::slow_step step("depth capture acquisition");
+      depth_capture::acquire(runtime->get_command_queue()->get_native(), present, data->frame, acquisition, &capture_info, selection);
+    }
     const bool available = acquisition.source_selected;
     evidence.capture = capture_info;
     evidence.available = available;
@@ -473,7 +478,7 @@ namespace sunshine_streamline::provider {
           unsigned(capture_info.producer_recording_retired),
           unsigned(capture_info.finished), unsigned(capture_info.success), unsigned(capture_info.submitted),
           unsigned(capture_info.invalid), depth_capture::name(capture_info.failure));
-        reshade::log::message(reshade::log::level::info, text);
+        sunshine_log::message(reshade::log::level::info, text);
         data->last_status = status;
       }
       data->bound_view = {};
@@ -516,9 +521,11 @@ namespace sunshine_streamline::provider {
     evidence.current_observation = update.current_observation;
     if (available) display = display_status::waiting_capture;
     if (update.action == depth_capture::display_action::copy_fresh &&
-        (display = prepare_display(runtime, *data, data->frame)) == display_status::ready) {
+        (display = [&] { const sunshine_game3d::slow_step step("depth display preparation");
+          return prepare_display(runtime, *data, data->frame); }()) == display_status::ready) {
       const auto &packet = data->frame;
-      copied = sunshine_depth::copy_selected_depth(runtime, commands, packet, data->display_texture, captured, &consumer);
+      copied = [&] { const sunshine_game3d::slow_step step("depth display copy");
+        return sunshine_depth::copy_selected_depth(runtime, commands, packet, data->display_texture, captured, &consumer); }();
       if (!copied) display = display_status::waiting_capture;
       else if (!(packet.metadata.projection.supplied || packet.metadata.projection.direction_supplied) &&
             captured.detected_orientation != sunshine_depth::depth_orientation::automatic) {
@@ -631,7 +638,7 @@ namespace sunshine_streamline::provider {
         static_cast<unsigned long long>(capture_info.newest_sequence), unsigned(update.current_observation),
         static_cast<unsigned long long>(prior_depth_age), unsigned(jitter.supplied),
         double(jitter.x), double(jitter.y), jitter.width, jitter.height);
-      reshade::log::message(reshade::log::level::info, text);
+      sunshine_log::message(reshade::log::level::info, text);
       data->last_status = status;
       data->last_selection = capture_info.selection;
       data->last_capture_failure = capture_info.failure;

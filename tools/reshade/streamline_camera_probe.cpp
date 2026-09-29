@@ -12,6 +12,7 @@
 
 #include <MinHook.h>
 #include <reshade.hpp>
+#include "async_log.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -233,7 +234,7 @@ namespace sunshine_streamline {
     const char *source_name(origin source) {
       return source == origin::local ? "evaluate-local" : source == origin::frame ? "frame-tag" : "global-tag";
     }
-    void message(const char *text) { reshade::log::message(reshade::log::level::info, text); }
+    void message(const char *text) { sunshine_log::message(reshade::log::level::info, text); }
     std::uint64_t lose(loss_diagnostics::reason cause, const char *site, std::uint32_t line,
         loss_diagnostics::context details = loss_context) {
       const auto previous = loss_revision.fetch_add(1, std::memory_order_acq_rel);

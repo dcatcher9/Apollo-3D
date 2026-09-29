@@ -315,19 +315,22 @@ namespace {
     SetLastError(input_error);
     poll();
     require(GetLastError() == input_error, "poll changed LastError");
+    require(testing::counts().reports == 0, "coverage reported before its discovery completed");
+    testing::wait_discovery();
+    poll();
     auto counts = testing::counts();
     require(counts.installed == 4 && counts.ngx_evaluate == 0 && counts.reports == 1,
       "real export discovery or no-call coverage failed");
     require(logged("NGX_evaluate=0") && logged("not API absence") && logged("SL_hook=0"),
       "zero-call report omitted coverage limits");
-    // Discovery walks every module's exports on the present path. With loader
-    // notifications it must not repeat until a module actually loads.
+    // Discovery walks every module's exports. With loader notifications it
+    // must not repeat until a module actually loads.
     require(counts.load_notifications && counts.scans == 1, "initial discovery did not use loader notifications");
-    Sleep(1100); poll();
+    Sleep(1100); poll(); testing::wait_discovery();
     require(testing::counts().scans == 1, "discovery rescanned without a module load");
     const auto added = LoadLibraryExW(L"msimg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     require(added != nullptr, "discovery fixture could not load a system module");
-    Sleep(300); poll();
+    Sleep(300); poll(); testing::wait_discovery();
     require(testing::counts().scans == 2, "a newly loaded module did not trigger discovery");
     FreeLibrary(added);
     create(); evaluate(); evaluate(true);

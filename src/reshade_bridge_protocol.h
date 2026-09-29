@@ -113,6 +113,7 @@ namespace reshade_bridge {
     std::uint32_t shared_bytes = sizeof(shared_state_t);
     // A new receiver writes a nonzero nonce once. The producer creates NEW resources for it;
     // resources with abandoned reading slots are never reused across consumer lifetimes.
+    // A detaching receiver resets its own nonce to zero; zero means no receiver.
     std::uint64_t consumer_nonce = 0;
     metadata_t metadata;
     slot_t slots[slot_count];

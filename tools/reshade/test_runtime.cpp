@@ -669,10 +669,16 @@ technique SuperDepth3D {
       std::printf("PASS partial actual runtime color=%u: present=%u technique=%u finish=%u reload=%u; FX pixels/ABI/color/events/background rejection. Full shared publication SKIPPED.\n", expected_color, observation.presents, observation.techniques, observation.finishes, observation.reloads);
     }
 
+    // The add-on writes its log lines asynchronously; allow the writer a moment.
     bool logged(const char *marker) const {
-      std::ifstream input(output_directory / "ReShade.log");
-      const std::string log((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-      return log.find(marker) != std::string::npos;
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      do {
+        std::ifstream input(output_directory / "ReShade.log");
+        const std::string log((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        if (log.find(marker) != std::string::npos) return true;
+        Sleep(10);
+      } while (std::chrono::steady_clock::now() < deadline);
+      return false;
     }
 
     void run_native_only() {

@@ -6,6 +6,7 @@
 #include <MinHook.h>
 #include <TlHelp32.h>
 #include <reshade.hpp>
+#include "async_log.h"
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -91,10 +92,10 @@ namespace sunshine_upscaler_trace {
     std::uint64_t next_epoch{}, next_poll{}, next_report{}, began{}, reports{};
     unsigned target_count{}, rejected{}, found_modules{}, found_exports{};
     bool minhook_ready{};
-    // A full export scan of ~200 game modules costs ~5 ms. It runs on the
-    // present path, so rescan only after the loader reports a new module.
-    // The notification only counts loads; discovery stays in poll, outside
-    // the loader lock. Without notifications, keep the periodic rescan.
+    // A full export scan of ~200 game modules costs a few ms, so rescan only
+    // after the loader reports a new module. The notification only counts
+    // loads; poll schedules discovery, which runs outside the loader lock.
+    // Without notifications, keep the periodic rescan.
     using loader_notification = void (NTAPI *)(ULONG reason, const void *data, void *context);
     using loader_register = LONG (NTAPI *)(ULONG flags, loader_notification callback, void *context, void **cookie);
     using loader_unregister = LONG (NTAPI *)(void *cookie);
@@ -163,7 +164,7 @@ namespace sunshine_upscaler_trace {
       default: return "SL-evaluate";
       }
     }
-    void message(const char *text) { reshade::log::message(reshade::log::level::info, text); }
+    void message(const char *text) { sunshine_log::message(reshade::log::level::info, text); }
     invocation begin(unsigned index, std::uintptr_t caller) {
       invocation value;
       if (sunshine_addon_lifetime::stopping()) return value;
@@ -300,9 +301,13 @@ namespace sunshine_upscaler_trace {
     const auto evaluate_detours = evaluate_entries(std::make_index_sequence<target_limit>{});
     const auto release_detours = release_entries(std::make_index_sequence<target_limit>{});
 
-    bool install(void *entry, operation op, bool d3d11) {
+    // Creates a new target's detour and queues its enable. Every MinHook
+    // enable or apply first snapshots all threads on the system (~50 ms with
+    // ~10k threads) and then suspends this process's, so a scan commits all
+    // of its new targets in one apply.
+    bool queue(void *entry, operation op, bool d3d11) {
       for (unsigned i = 0; i != target_count; ++i)
-        if (targets[i].entry == entry) return targets[i].op == op && targets[i].d3d11 == d3d11 && targets[i].state.load() == 2;
+        if (targets[i].entry == entry) return false;
       if (target_count == target_limit) { ++rejected; return false; }
       MEMORY_BASIC_INFORMATION memory{};
       HMODULE owner{}, addon{};
@@ -337,14 +342,33 @@ namespace sunshine_upscaler_trace {
         return false;
       }
       hook.original.store(original, std::memory_order_release);
+      if (MH_QueueEnableHook(entry) != MH_OK) {
+        hook.state.store(3);
+        ++rejected;
+        return false;
+      }
       hook.state.store(1, std::memory_order_release);
-      if (MH_EnableHook(entry) != MH_OK) { ++rejected; return false; }
-      hook.state.store(2, std::memory_order_release);
       return true;
+    }
+    // A failed apply leaves the queued targets reported unavailable; any that
+    // were enabled stay pass-through through their retained trampolines.
+    void apply_queued(unsigned first) {
+      if (first == target_count) return;
+      const bool applied = MH_ApplyQueued() == MH_OK;
+      for (unsigned i = first; i != target_count; ++i) {
+        if (targets[i].state.load() != 1) continue;
+        if (applied) targets[i].state.store(2, std::memory_order_release);
+        else ++rejected;
+      }
     }
     void discover() {
       found_modules = found_exports = 0;
       ++scans;
+      const unsigned first = target_count;
+      struct commit {
+        unsigned first;
+        ~commit() { apply_queued(first); }
+      } queued{first};
       HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
       if (snapshot == INVALID_HANDLE_VALUE) return;
       MODULEENTRY32W value{};
@@ -368,13 +392,25 @@ namespace sunshine_upscaler_trace {
               ++found_exports;
               // The _C form changes only the progress callback's pointee
               // signature (bool* vs bool&); our pass-through never invokes it.
-              install(reinterpret_cast<void *>(entry), op == 3 ? operation::evaluate : static_cast<operation>(op), api == 1);
+              queue(reinterpret_cast<void *>(entry), op == 3 ? operation::evaluate : static_cast<operation>(op), api == 1);
             }
           }
         }
         FreeLibrary(retained);
       } while (Module32NextW(snapshot, &value));
       CloseHandle(snapshot);
+    }
+    // Discovery runs on a pool thread, so the present thread neither scans
+    // modules nor waits for MinHook's system-wide thread snapshot; it is
+    // suspended only while new hooks are written. The pool thread holds
+    // poll_lock, and a present-path poll meanwhile skips as on contention.
+    // The add-on is pinned, so a pending callback never outlives its code.
+    std::atomic<bool> discovery_pending{};
+    void CALLBACK discover_on_pool(PTP_CALLBACK_INSTANCE, void *) {
+      AcquireSRWLockExclusive(&poll_lock);
+      if (!sunshine_addon_lifetime::stopping()) discover();
+      discovery_pending.store(false, std::memory_order_release);
+      ReleaseSRWLockExclusive(&poll_lock);
     }
     void location(std::uintptr_t address, char *text, std::size_t size) {
       HMODULE module{};
@@ -489,13 +525,22 @@ namespace sunshine_upscaler_trace {
     const auto now = GetTickCount64();
     const auto loads = module_loads.load(std::memory_order_acquire);
     const bool notified = loader_cookie.load(std::memory_order_acquire) != nullptr;
-    if (now >= next_poll && (!notified || loads != scanned_loads)) {
+    const bool pending = discovery_pending.load(std::memory_order_acquire);
+    if (!pending && now >= next_poll && (!notified || loads != scanned_loads)) {
       // Loads observed during this scan leave the count changed for the next one.
       scanned_loads = loads;
       next_poll = now + (notified ? 250 : 1000);
-      discover();
+      discovery_pending.store(true, std::memory_order_release);
+      if (!TrySubmitThreadpoolCallback(discover_on_pool, nullptr, nullptr)) {
+        discover();
+        discovery_pending.store(false, std::memory_order_release);
+      }
     }
-    if (enabled() && now >= next_report) { next_report = now + 5000; report(); }
+    // Coverage is reported after a scan completes, never from its starting state.
+    if (enabled() && now >= next_report && !discovery_pending.load(std::memory_order_acquire)) {
+      next_report = now + 5000;
+      report();
+    }
     sunshine_ngx::poll();
     ReleaseSRWLockExclusive(&poll_lock);
   }
@@ -561,9 +606,20 @@ namespace sunshine_upscaler_trace {
     }
     bool install(void *target, operation op, bool d3d11) {
       last_error_guard error;
-      return sunshine_upscaler_trace::install(target, static_cast<sunshine_upscaler_trace::operation>(op), d3d11);
+      const auto kind = static_cast<sunshine_upscaler_trace::operation>(op);
+      const unsigned first = target_count;
+      queue(target, kind, d3d11);
+      apply_queued(first);
+      for (unsigned i = 0; i != target_count; ++i)
+        if (targets[i].entry == target) return targets[i].op == kind && targets[i].d3d11 == d3d11 && targets[i].state.load() == 2;
+      return false;
     }
     void report_now() { last_error_guard error; report(); }
+    void wait_discovery() {
+      while (discovery_pending.load(std::memory_order_acquire)) Sleep(1);
+      AcquireSRWLockExclusive(&poll_lock); // The pool thread releases it after clearing pending.
+      ReleaseSRWLockExclusive(&poll_lock);
+    }
   }
 #endif
 }
