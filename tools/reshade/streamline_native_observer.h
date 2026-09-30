@@ -64,7 +64,10 @@ namespace sunshine_streamline::native_observer {
   void observe_command(std::uint64_t command);
   void observe_queue(std::uint64_t queue);
   bool install_pending();
-  bool command_ready(std::uint64_t command);
+  // Enhanced Barrier coverage can be waived only by a caller whose recorded
+  // work touches private resources alone: such barriers cannot name them.
+  // Render-pass coverage is never waived; copies are invalid inside a pass.
+  bool command_ready(std::uint64_t command, bool enhanced_barriers = true);
   bool queue_ready(std::uint64_t queue);
   counters counts();
 

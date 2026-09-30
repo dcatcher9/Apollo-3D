@@ -1942,7 +1942,9 @@ namespace sunshine_streamline::depth_capture {
     if (!query_native(native, IID_ID3D12GraphicsCommandList, checked)) return result(consumer_status::unsupported_interface);
     native = reinterpret_cast<std::uint64_t>(checked.p);
     observe_command(native);
-    if (!native_observer::command_ready(native)) return result(consumer_status::observer_not_ready);
+    // The consumer copies only between private textures. D3D12Core can keep a
+    // list's CommandList7 table in per-object memory that is never hooked.
+    if (!native_observer::command_ready(native, false)) return result(consumer_status::observer_not_ready);
     const auto cookie = native_observer::get_recording_cookie(native);
     if (diagnostic) diagnostic->cookie = cookie;
     if (!cookie) return result(consumer_status::missing_cookie);

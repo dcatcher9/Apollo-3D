@@ -49,6 +49,7 @@ namespace {
     object *queried{};
     unsigned references{1};
     bool cookie_present{true};
+    object *enhanced{};
   };
 #if defined(__GNUC__) && defined(__x86_64__)
   static_assert(offsetof(object, forwarded) == 16);
@@ -97,6 +98,11 @@ namespace {
       return S_OK;
     }
     if (value->queried) value = value->queried;
+    if (value->enhanced && IsEqualGUID(iid, IID_ID3D12GraphicsCommandList7)) {
+      *output = value->enhanced;
+      ++value->enhanced->references;
+      return S_OK;
+    }
     if ((value->kind == object_kind::command && (IsEqualGUID(iid, IID_ID3D12GraphicsCommandList) ||
         (value->extended && (IsEqualGUID(iid, IID_ID3D12GraphicsCommandList4) || IsEqualGUID(iid, IID_ID3D12GraphicsCommandList7))))) ||
         (value->kind == object_kind::queue && IsEqualGUID(iid, IID_ID3D12CommandQueue)) ||
@@ -511,6 +517,20 @@ int main() {
     reinterpret_cast<enhanced_fn>(commands[0].vtable[enhanced_slot])(&commands[0], 1, reinterpret_cast<const D3D12_BARRIER_GROUP *>(1));
     require(GetLastError() == outgoing_error && command_invalidations == 2 && original_enhanced == 1 && observed_cookie == 9999,
       "enhanced Barrier did not invalidate native recording");
+    {
+      // D3D12Core can return CommandList7 as a per-object interface whose
+      // table lives in heap memory. That slot is refused once; producers stay
+      // not ready, while a private-resource consumer may waive it.
+      std::vector<void *> heap_table(commands[0].vtable, commands[0].vtable + enhanced_slot + 1);
+      object torn_off{}; torn_off.vtable = heap_table.data(); torn_off.kind = object_kind::command;
+      object split{}; split.vtable = commands[0].vtable; split.kind = object_kind::command;
+      split.extended = true; split.enhanced = &torn_off; split.cookie = 9999;
+      const auto invalid_before = invalidations;
+      for (unsigned repeat = 0; repeat != 3; ++repeat) observer::observe_command(address(split));
+      require(invalidations == invalid_before + 1 && !observer::command_ready(address(split)) &&
+          observer::command_ready(address(split), false) && split.references == 1 && torn_off.references == 1,
+        "per-object CommandList7 table was not refused once, waived only for consumers, or leaked references");
+    }
     SetLastError(incoming_error);
     reinterpret_cast<begin_pass_fn>(commands[0].vtable[begin_pass_slot])(&commands[0], 0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
     require(GetLastError() == outgoing_error && render_pass_events == 1 && inside_pass && observed_cookie == 9999, "render-pass begin was not observed");

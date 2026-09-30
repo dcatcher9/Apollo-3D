@@ -390,7 +390,7 @@ namespace sunshine_streamline::native_observer {
       if (lost) { ++rejected; invalidate(); }
       return result;
     }
-    bool optional_coverage(std::uint64_t command, bool discover) {
+    bool optional_coverage(std::uint64_t command, bool discover, bool enhanced_barriers = true) {
       const restore_error incoming{GetLastError()};
       auto *object = reinterpret_cast<ID3D12Object *>(command);
       ID3D12GraphicsCommandList4 *version4{};
@@ -407,7 +407,7 @@ namespace sunshine_streamline::native_observer {
       if (SUCCEEDED(result7) && version7) {
         const auto address = reinterpret_cast<std::uintptr_t>(version7);
         if (discover) observe(address, method::enhanced);
-        complete = ready(address, method::enhanced) && complete;
+        complete = (!enhanced_barriers || ready(address, method::enhanced)) && complete;
         version7->lpVtbl->Release(version7);
       } else if (result7 != E_NOINTERFACE) complete = false;
       if (discover && ((FAILED(result4) && result4 != E_NOINTERFACE) || (SUCCEEDED(result4) && !version4) ||
@@ -460,14 +460,14 @@ namespace sunshine_streamline::native_observer {
     observe(reinterpret_cast<std::uintptr_t>(object), method::execute);
     object->lpVtbl->Release(object);
   }
-  bool command_ready(std::uint64_t command) {
+  bool command_ready(std::uint64_t command, bool enhanced_barriers) {
     if (!enabled()) return false;
     const restore_error incoming{GetLastError()};
     auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, false);
     if (!object) return false;
     const auto normalized = reinterpret_cast<std::uintptr_t>(object);
     const bool result = ready(normalized, method::barriers) && ready(normalized, method::reset) && ready(normalized, method::close) &&
-      ready(normalized, method::bundle) && optional_coverage(normalized, false);
+      ready(normalized, method::bundle) && optional_coverage(normalized, false, enhanced_barriers);
     object->lpVtbl->Release(object);
     return result;
   }
