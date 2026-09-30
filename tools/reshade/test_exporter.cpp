@@ -165,6 +165,52 @@ namespace {
         "Unavailable depth remained eligible for adaptive UI observation");
     }
 
+    // DXGI's count below ReShade and Streamline's game-frame count, attributed per FG state.
+    static void present_census_counts() {
+      using namespace sunshine_present_census;
+      const auto present = [](bool fg, std::uint32_t dxgi, std::uint64_t index) {
+        sample value;
+        value.frame_generation = fg;
+        value.dxgi_known = true; value.dxgi_count = dxgi;
+        value.token_calls = index * 2; value.token_index = index; value.token_index_supplied = true;
+        return value;
+      };
+      counter census;
+      totals window[2];
+      // Generated frames presented underneath ReShade: two DXGI Presents per ReShade Present.
+      census.observe(present(true, 100, 50));
+      for (std::uint32_t i = 1; i <= 10; ++i) census.observe(present(true, 100 + 2 * i, 50 + i));
+      census.take(window);
+      require(window[1].reshade == 11 && window[1].dxgi == 20 && window[1].game_frames == 10 &&
+          window[1].dxgi_samples == 10 && window[1].frame_samples == 10 && window[0].reshade == 0,
+        "Present census did not separate DXGI Presents below ReShade");
+      // FG off, with DXGI's 32-bit count wrapping; repeated token requests use the frame index.
+      // The jump to 0xfffffffe reads as a restarted count and only rebases.
+      census.observe(present(false, 0xfffffffeu, 60));
+      census.observe(present(false, 0xffffffffu, 61));
+      census.observe(present(false, 0u, 62));
+      census.take(window);
+      require(window[0].reshade == 3 && window[0].dxgi == 2 && window[0].dxgi_samples == 2 && window[0].game_frames == 2 &&
+          window[1].reshade == 0, "Present census mishandled a wrapped DXGI count or FG-off window");
+      // A new swapchain restarts DXGI's count and an unknown getter result adds nothing.
+      census.observe(present(false, 1000, 63));
+      census.take(window);
+      census.observe(present(false, 5, 64));
+      auto unknown = present(false, 0, 65); unknown.dxgi_known = false;
+      census.observe(unknown);
+      census.observe(present(false, 7, 66));
+      census.take(window);
+      require(window[0].reshade == 3 && window[0].dxgi == 0 && window[0].dxgi_samples == 0 && window[0].game_frames == 3,
+        "Present census counted across a restarted or unknown DXGI count");
+      // Without a supplied index the token requests are the frame count; switching numbering rebases.
+      sample calls;
+      calls.token_calls = 200; census.observe(calls);
+      calls.token_calls = 203; census.observe(calls);
+      census.take(window);
+      require(window[0].game_frames == 3 && window[0].frame_samples == 1 && window[0].dxgi_samples == 0,
+        "Present census did not rebase or count token requests without a frame index");
+    }
+
     static void retained_depth_decision() {
       using namespace sunshine_streamline;
       using action = depth_capture::display_action;
@@ -1492,6 +1538,7 @@ int main(int argc, char **argv) {
       publisher_tests::adaptive_ui_source_provenance();
       publisher_tests::source_alpha_scope_lifetime();
       publisher_tests::retained_depth_decision();
+      publisher_tests::present_census_counts();
       publisher_tests::pending_scene_identity();
       publisher_tests::cached_scene_strength_publication();
       publisher_tests::automatic_raw_and_matrix_resolver();
@@ -1531,6 +1578,7 @@ int main(int argc, char **argv) {
     publisher_tests::source_alpha_scope_lifetime();
     publisher_tests::ui_source_choice_and_runtime_lifetime();
     publisher_tests::retained_depth_decision();
+    publisher_tests::present_census_counts();
     publisher_tests::automatic_ui_lifetime();
     publisher_tests::jitter_publication();
     publisher_tests::cached_scene_strength_publication();

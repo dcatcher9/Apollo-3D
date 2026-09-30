@@ -165,6 +165,9 @@ namespace sunshine_streamline {
     std::atomic<bool> source_requested{};
     std::atomic<std::uint64_t> observation_generation{};
     std::atomic<std::uint64_t> constant_calls{}, tag_calls{}, evaluation_calls{}, dropped{}, invalid{};
+    // Game frames as Streamline numbers them, for the present census.
+    std::atomic<std::uint64_t> token_calls{}, token_index{};
+    std::atomic<bool> token_index_supplied{};
     std::atomic<std::uint64_t> call_sequence{}, loss_revision{};
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
     thread_local bool entry_policy_armed{}, entry_policy_observed{}, entry_path_selected{}, entry_source_admitted{};
@@ -1969,6 +1972,9 @@ namespace sunshine_streamline {
           invalid_observation(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input,
             __func__, __LINE__);
         } else {
+          token_calls.fetch_add(1, std::memory_order_relaxed);
+          if (frame_index) token_index.store(numeric, std::memory_order_relaxed);
+          token_index_supplied.store(frame_index != nullptr, std::memory_order_relaxed);
           auto update = token_metadata.try_write();
           if (!update) {
             if (current(ticket)) dropped_observation(update.failure() == observation::write_failure::storage_busy ?
@@ -2571,6 +2577,15 @@ namespace sunshine_streamline {
       output = {}; return false;
     }
     return true;
+  }
+
+  frame_token_count frame_tokens() {
+    frame_token_count out;
+    if (!observation_ticket()) return out;
+    out.calls = token_calls.load(std::memory_order_relaxed);
+    out.index = token_index.load(std::memory_order_relaxed);
+    out.index_supplied = token_index_supplied.load(std::memory_order_relaxed);
+    return out;
   }
 
   bool query_frame_generation(std::uint32_t viewport, frame_generation_snapshot &output,

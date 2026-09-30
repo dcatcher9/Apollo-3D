@@ -14,6 +14,8 @@
 #include "game3d_ui_input_provider.h"
 #include "game3d_debug_dump.h"
 #include "diagnostic_log_gate.h"
+#include "present_census.h"
+#include "streamline_camera_probe.h"
 #include "src/reshade_bridge_protocol.h"
 
 #include <array>
@@ -692,6 +694,12 @@ namespace {
       std::uint64_t published_fresh_depth = 0, published_reused_depth = 0;
       std::uint64_t published_depth_missing = 0, next_log = 0;
     } fg_output;
+    // Which Presents Game 3D sees, against DXGI's and Streamline's counts (present_census.h).
+    struct {
+      sunshine_present_census::counter counter;
+      std::uint64_t next_log = 0, layer_swapchain = 0;
+      char layer[96] = "unknown";
+    } census;
   };
 
   class publisher_t {
@@ -1471,24 +1479,86 @@ namespace {
     }
 
     void begin_present(std::uint64_t swapchain, api::color_space color) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      bool diagnostic_frame = false;
-      const bool awaiting_diagnostic = debug_dump_.awaiting_capture();
-      for (auto &[runtime, proof] : runtimes_)
-        if (proof.swapchain == swapchain) {
-          ++proof.presentation_ordinal;
-          // A missed finish_present must not leave native rendering wedged.
-          if (proof.renderer) proof.renderer->begin_present();
-          diagnostic_frame = awaiting_diagnostic && static_cast<HWND>(runtime->get_hwnd()) == observed_foreground_window();
-          break;
+      char census[1024]{};
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        bool diagnostic_frame = false;
+        const bool awaiting_diagnostic = debug_dump_.awaiting_capture();
+        for (auto &[runtime, proof] : runtimes_)
+          if (proof.swapchain == swapchain) {
+            ++proof.presentation_ordinal;
+            count_present(runtime, proof, swapchain, census, sizeof(census));
+            // A missed finish_present must not leave native rendering wedged.
+            if (proof.renderer) proof.renderer->begin_present();
+            diagnostic_frame = awaiting_diagnostic && static_cast<HWND>(runtime->get_hwnd()) == observed_foreground_window();
+            break;
+          }
+        debug_dump_.poll(diagnostic_frame);
+        // A preceding Present did not reach finish_present. Retain its copy until a later
+        // matching submission can be fenced, but stop exposing the previous cached image.
+        if (generation_ && generation_->pending_slot != wire::slot_count && generation_->native_swapchain == swapchain) {
+          deactivate(generation_->runtime);
         }
-      debug_dump_.poll(diagnostic_frame);
-      // A preceding Present did not reach finish_present. Retain its copy until a later
-      // matching submission can be fenced, but stop exposing the previous cached image.
-      if (generation_ && generation_->pending_slot != wire::slot_count && generation_->native_swapchain == swapchain) {
-        deactivate(generation_->runtime);
+        colors_[swapchain] = color;
       }
-      colors_[swapchain] = color;
+      if (census[0]) log(reshade::log::level::info, census);
+    }
+
+    // Read-only COM getters and counters; never hooks or changes the swapchain.
+    static void count_present(api::effect_runtime *runtime, runtime_t &proof, std::uint64_t swapchain,
+        char *text, std::size_t size) {
+      const auto backend = runtime->get_device()->get_api();
+      if (backend != api::device_api::d3d11 && backend != api::device_api::d3d12) return;
+      auto *native = reinterpret_cast<IDXGISwapChain *>(swapchain);
+      sunshine_present_census::sample value;
+      UINT count{};
+      value.dxgi_known = native && SUCCEEDED(native->GetLastPresentCount(&count));
+      value.dxgi_count = count;
+      sunshine_streamline::frame_generation_snapshot fg;
+      value.frame_generation = sunshine_streamline::query_frame_generation(UINT32_MAX, fg) && fg.enabled;
+      const auto tokens = sunshine_streamline::frame_tokens();
+      value.token_calls = tokens.calls;
+      value.token_index = tokens.index;
+      value.token_index_supplied = tokens.index_supplied;
+      auto &census = proof.census;
+      census.counter.observe(value);
+      if (native && census.layer_swapchain != swapchain) {
+        // Present (slot 8) resolves to dxgi.dll for the real swapchain, or to the proxy (for
+        // example Streamline's interposer) that ReShade wraps.
+        census.layer_swapchain = swapchain;
+        void *entry = (*reinterpret_cast<void ***>(native))[8];
+        HMODULE module{};
+        char path[MAX_PATH]{};
+        const char *name = "unknown";
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+              reinterpret_cast<LPCWSTR>(entry), &module) &&
+            GetModuleFileNameA(module, path, MAX_PATH)) {
+          const char *slash = std::strrchr(path, '\\');
+          name = slash ? slash + 1 : path;
+        }
+        std::snprintf(census.layer, sizeof(census.layer), "%s", name);
+      }
+      const auto now = GetTickCount64();
+      if (!census.next_log) census.next_log = now + 10000;
+      if (now < census.next_log) return;
+      census.next_log = now + 10000;
+      sunshine_present_census::totals window[2];
+      census.counter.take(window);
+      char known[2][2][24]{};
+      for (unsigned fg_state = 0; fg_state != 2; ++fg_state) {
+        const auto &w = window[fg_state];
+        if (w.dxgi_samples) std::snprintf(known[fg_state][0], sizeof(known[fg_state][0]), "%llu", static_cast<unsigned long long>(w.dxgi));
+        else std::snprintf(known[fg_state][0], sizeof(known[fg_state][0]), "unknown");
+        if (w.frame_samples) std::snprintf(known[fg_state][1], sizeof(known[fg_state][1]), "%llu", static_cast<unsigned long long>(w.game_frames));
+        else std::snprintf(known[fg_state][1], sizeof(known[fg_state][1]), "unknown");
+      }
+      std::snprintf(text, size,
+        "Sunshine present census: FG_on={reshade=%llu dxgi=%s game_frames=%s} FG_off={reshade=%llu dxgi=%s game_frames=%s} below_reshade=%s frame_numbering=%s; "
+        "dxgi counts every Present on the swapchain under ReShade (and under any Streamline proxy). dxgi above reshade = Presents Game 3D never sees, such as frame-generated images; "
+        "reshade above game_frames = generated frames pass through Game 3D",
+        static_cast<unsigned long long>(window[1].reshade), known[1][0], known[1][1],
+        static_cast<unsigned long long>(window[0].reshade), known[0][0], known[0][1],
+        census.layer, tokens.index_supplied ? "game_index" : tokens.calls ? "token_requests" : "unavailable");
     }
 
     void finish_present(std::uint64_t queue, std::uint64_t swapchain) {

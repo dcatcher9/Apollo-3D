@@ -1558,6 +1558,20 @@ unavailable depth. Their disposition is retained with the pending export copy. T
 depth availability, not stereo pixels: diagnostics, zero strength and calibration can change the
 rendered image. Runtime reload/destruction resets these counters.
 
+Game 3D captures color at ReShade's Present event, so it sees exactly the Presents that pass
+through ReShade's swapchain wrapper. Whether frame-generated images are among them depends on how
+the game's Streamline proxy and ReShade are stacked, not on Game 3D. Every ten seconds
+`Sunshine present census` reports, separately for FG requested and not, the runtime's ReShade
+Presents (`reshade`), DXGI's own Present count (`IDXGISwapChain::GetLastPresentCount`) on the
+swapchain object below ReShade (`dxgi`), and Streamline's game frames (`game_frames`, from the
+game's frame index, or from its token requests when it supplies none). `below_reshade` names the
+module implementing that object's Present: `dxgi.dll` for the real swapchain, or a proxy such as
+`sl.interposer.dll`. `dxgi` above `reshade` means Presents Game 3D never sees, such as generated
+images presented underneath ReShade; `reshade` above `game_frames` means generated frames pass
+through Game 3D. The census reads counters and a COM getter only and changes nothing. Dump 3D's
+`render_identity.presentation_ordinal` and Streamline frame numbers advanced one-to-one with FG
+on in The Witcher 3, Expedition 33 and Hogwarts Legacy dumps.
+
 `Sunshine depth readiness: lost/recovered` records the first availability transition of a
 bounded diagnostic episode independently of the one-second status-log gate. At most four loss
 episodes per second are admitted, each with a paired recovery; suppressed episodes are counted.
