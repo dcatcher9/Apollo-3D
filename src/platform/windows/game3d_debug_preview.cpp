@@ -112,6 +112,12 @@ namespace platf::game3d_debug::preview {
       return nullptr;
     }
 
+    bool ui_layer_resource(const std::string &kind) {
+      for (const auto *name : ::game3d_debug::ui_layer_names)
+        if (kind == name) return true;
+      return false;
+    }
+
     bool primary_resource(const std::string &kind) {
       for (const auto *name : {"source_color", "raw_depth", "candidate", "vertical_majorant",
              "vertical_field", "final_field", "sbs", "linear_color", "ui_source_color"})
@@ -358,7 +364,7 @@ namespace platf::game3d_debug::preview {
           if (!optional) throw std::runtime_error(reason);
           optional_errors.push_back({{"kind", image.kind}, {"reason", reason}});
         };
-        if (optional && !optional_resource(image.kind)) {
+        if (optional && !optional_resource(image.kind) && !ui_layer_resource(image.kind)) {
           reject("Unknown optional resource kind");
           continue;
         }
