@@ -1961,13 +1961,23 @@ hooks separately serve the default-on NGX depth adapter described above; the tra
 or disable production capture, choose depth, or change stereo/scale.
 
 The trace logs installed-hook coverage, the observation window, API/feature call counts,
-success/failure, caller module and offset, and a bounded first-call stack. NGX feature identity
+success/failure with the newest NGX failure code (`last_failure`, an `NVSDK_NGX_Result`), caller
+module and offset, and a bounded first-call stack. NGX feature identity
 remains unknown when its creation was not observed. NGX calls nested on the same thread inside
 an observed Streamline evaluation are identified separately from calls outside that scope.
 Outside-scope calls alone do not prove direct integration: unobserved hooks or another thread
 can break that association. Zero calls mean none observed in the reported window, not API absence.
 Use positive call/caller evidence to decide which integration adapter a game needs; DLL presence
 or version alone is insufficient. This diagnostic is independent of the active depth-path label.
+
+`Sunshine Streamline evaluation capture` is logged with the five-second camera report whenever
+the game sets constants. It counts SR/RR evaluations (FG and tag-boundary captures excluded) that
+nominated depth or stopped at a gate: `inactive` (no capture requested), `fg_owned` (confirmed FG
+owns the viewport), `source_rejected` (evidence status, lost observation, stale epoch or frame
+token), `no_admissible_tag` (tag absent, unsupported, lifecycle or `match` result) and
+`capture_rejected` (the capture layer's status). Each gate keeps its newest reason. The Witcher 3
+Remastered showed why this matters: with FG off it tags 1485x835 depth for every Ray
+Reconstruction evaluation (SL feature 1001), yet no depth was nominated.
 
 NGX depth telemetry distinguishes `nominations`, `copy_recorded`, and `metadata_only`.
 A successful metadata nomination can survive a rejected pixel copy and does not establish

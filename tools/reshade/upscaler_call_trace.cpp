@@ -58,6 +58,8 @@ namespace sunshine_upscaler_trace {
       operation op{};
       bool inside_sl{}, used{};
       std::uint64_t calls{}, succeeded{}, failed{};
+      // The newest NGX failure code (NVSDK_NGX_Result); zero before any NGX failure.
+      std::uint32_t last_failure{};
       std::array<void *, stack_limit> stack{};
     };
     struct handle_record {
@@ -206,7 +208,7 @@ namespace sunshine_upscaler_trace {
       return create ? empty : nullptr;
     }
     void record(unsigned index, operation op, const invocation &call, std::uint32_t feature,
-        const void *handle, bool success) {
+        const void *handle, bool success, std::uint32_t failure = 0) {
       if (sunshine_addon_lifetime::stopping() || !call.epoch) return;
       if (call.epoch != active_epoch.load(std::memory_order_acquire)) { ++stale; return; }
       if (!TryAcquireSRWLockExclusive(&records_lock)) {
@@ -239,7 +241,7 @@ namespace sunshine_upscaler_trace {
       }
       if (auto *value = find_event(index, op, call.caller, feature, call.inside_sl)) {
         ++value->calls;
-        if (success) ++value->succeeded; else ++value->failed;
+        if (success) ++value->succeeded; else { ++value->failed; if (failure) value->last_failure = failure; }
         if (call.stack_count) { value->stack = call.stack; value->stack_count = call.stack_count; }
       } else ++dropped;
       ReleaseSRWLockExclusive(&records_lock);
@@ -260,7 +262,7 @@ namespace sunshine_upscaler_trace {
           (!ReadProcessMemory(GetCurrentProcess(), output, &handle, sizeof(handle), &copied) || copied != sizeof(handle)))
         handle = nullptr;
       sunshine_ngx::after_create(targets[Index].owner, handle, creation, succeeded(value));
-      record(Index, operation::create, call, feature, handle, succeeded(value));
+      record(Index, operation::create, call, feature, handle, succeeded(value), value);
       return value;
     }
     template<unsigned Index> SUNSHINE_TRACE_NOINLINE result __cdecl evaluate_hook(void *commands,
@@ -273,7 +275,7 @@ namespace sunshine_upscaler_trace {
       const result value = original(commands, handle, parameters, callback);
       last_error_guard outgoing;
       capture.finish(succeeded(value));
-      record(Index, operation::evaluate, call, unknown_feature, handle, succeeded(value));
+      record(Index, operation::evaluate, call, unknown_feature, handle, succeeded(value), value);
       return value;
     }
     template<unsigned Index> SUNSHINE_TRACE_NOINLINE result __cdecl release_hook(void *handle) {
@@ -285,7 +287,7 @@ namespace sunshine_upscaler_trace {
       const result value = original(handle);
       last_error_guard outgoing;
       sunshine_ngx::after_release(targets[Index].owner, handle, capture_epoch, succeeded(value));
-      record(Index, operation::release, call, unknown_feature, handle, succeeded(value));
+      record(Index, operation::release, call, unknown_feature, handle, succeeded(value), value);
       return value;
     }
     template<std::size_t... Indices> auto create_entries(std::index_sequence<Indices...>) {
@@ -473,10 +475,11 @@ namespace sunshine_upscaler_trace {
         if (value.feature == unknown_feature) std::snprintf(feature, sizeof(feature), "unknown(create not observed)");
         else std::snprintf(feature, sizeof(feature), "%u", value.feature);
         std::snprintf(text, sizeof(text),
-          "Sunshine upscaler trace call: target=%u api=%s feature=%s caller=%s context=%s calls=%llu succeeded=%llu failed=%llu",
+          "Sunshine upscaler trace call: target=%u api=%s feature=%s caller=%s context=%s calls=%llu succeeded=%llu failed=%llu last_failure=0x%08x",
           value.target_index, op_name(value.op), feature, caller,
           value.op == operation::streamline ? "SL" : value.inside_sl ? "inside-observed-SL" : "outside-observed-SL",
-          static_cast<unsigned long long>(value.calls), static_cast<unsigned long long>(value.succeeded), static_cast<unsigned long long>(value.failed));
+          static_cast<unsigned long long>(value.calls), static_cast<unsigned long long>(value.succeeded), static_cast<unsigned long long>(value.failed),
+          value.last_failure);
         message(text);
         for (unsigned frame = previous.stack_count; frame < value.stack_count; ++frame) {
           char entry[320]{};

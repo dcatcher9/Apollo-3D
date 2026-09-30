@@ -1365,7 +1365,8 @@ namespace sunshine_streamline {
       return snapshot.tag_boundary && !snapshot.frame_generation_input &&
         snapshot.frame.kind == frame_identity_kind::unavailable && !snapshot.frame_correlated;
     }
-    bool direct_source_admissible(const evaluation_snapshot &snapshot) {
+    // The first failing source gate, or nullptr when this observation may name a depth source.
+    const char *source_rejection(const evaluation_snapshot &snapshot) {
       // A depth tag names the renderer's source independently of whether its
       // optional camera matrices can supply a scale. Preserve the stricter
       // camera status for diagnostic queries rather than upgrading that evidence.
@@ -1376,39 +1377,58 @@ namespace sunshine_streamline {
         case evidence_status::rejected_constants:
         case evidence_status::invalid_camera: break;
         case evidence_status::untracked_frame:
-          if (!unframed_tag_source(snapshot)) return false;
+          if (!unframed_tag_source(snapshot)) return "untracked_frame";
           break;
-        default: return false;
+        default: return name(snapshot.status);
       }
-      if (!snapshot.epoch || !snapshot.sequence ||
-          (snapshot.tag_boundary && !snapshot.command_buffer) ||
-          snapshot.loss_revision != loss_revision.load(std::memory_order_acquire)) return false;
+      if (!snapshot.epoch || !snapshot.sequence) return "no_observation";
+      if (snapshot.tag_boundary && !snapshot.command_buffer) return "boundary_without_commands";
+      if (snapshot.loss_revision != loss_revision.load(std::memory_order_acquire)) return "observation_lost";
       if (snapshot.frame_correlated && snapshot.decoded == decode_status::ok) {
         const bool current_reset = snapshot.camera.reset == 1 && snapshot.projection.valid() &&
           snapshot.status == evidence_status::camera_reset;
-        if ((snapshot.camera.reset != 0 && !current_reset) ||
-            (snapshot.frame.kind == frame_identity_kind::v1_numeric && snapshot.camera.not_rendering_game_frames != 0)) return false;
+        if (snapshot.camera.reset != 0 && !current_reset) return "camera_reset";
+        if (snapshot.frame.kind == frame_identity_kind::v1_numeric && snapshot.camera.not_rendering_game_frames != 0)
+          return "not_rendering_game_frames";
       }
       auto pin = read_metadata();
-      if (!pin && metadata.has_publication()) return false;
+      if (!pin && metadata.has_publication()) return "metadata_busy";
       static const metadata_state empty;
       const auto &state = pin ? *pin : empty;
-      const bool associated = snapshot.epoch == (pin ? pin->epoch : epoch.load(std::memory_order_acquire)) &&
-        (unframed_tag_source(snapshot) || token_current(state, snapshot.frame));
+      const bool same_epoch = snapshot.epoch == (pin ? pin->epoch : epoch.load(std::memory_order_acquire));
+      const bool framed = unframed_tag_source(snapshot) || token_current(state, snapshot.frame);
       pin.reset();
-      return associated && snapshot.loss_revision == loss_revision.load(std::memory_order_acquire);
+      if (!same_epoch) return "epoch_changed";
+      if (!framed) return "frame_token_not_current";
+      return snapshot.loss_revision == loss_revision.load(std::memory_order_acquire) ? nullptr : "observation_lost";
     }
-    bool direct_tag_admissible(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
-      if (!tag.present || !tag.supported || !buffers::is_depth(tag.value.type)) return false;
-      if (snapshot.tag_boundary && !snapshot.frame_generation_input && tag.value.lifecycle != 0) return false;
+    bool direct_source_admissible(const evaluation_snapshot &snapshot) { return !source_rejection(snapshot); }
+    // The first failing tag gate, or nullptr when the tag can supply this observation's depth.
+    const char *tag_rejection(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
+      if (!tag.present) return "absent";
+      if (!tag.supported) return "unsupported";
+      if (!buffers::is_depth(tag.value.type)) return "not_depth";
+      if (snapshot.tag_boundary && !snapshot.frame_generation_input && tag.value.lifecycle != 0)
+        return "lifecycle_outlives_boundary";
       if (snapshot.frame.kind == frame_identity_kind::v2_constants_call &&
-          (!snapshot.tag_boundary || tag.scope != tag_scope::active_global || tag.value.lifecycle != 0)) return false;
+          (!snapshot.tag_boundary || tag.scope != tag_scope::active_global || tag.value.lifecycle != 0))
+        return "constants_call_frame";
       auto at_evaluation = tag.value;
       // UntilEvaluate is usable at this synchronous boundary only; never
       // promote the published lifetime. OnlyValidNow requires the tag boundary.
       if (at_evaluation.lifecycle == 2 || (snapshot.tag_boundary && at_evaluation.lifecycle == 0)) at_evaluation.lifecycle = 1;
-      return match({snapshot.viewport, snapshot.epoch, 0, false}, at_evaluation) == match_status::same_epoch_only;
+      const auto matched = match({snapshot.viewport, snapshot.epoch, 0, false}, at_evaluation);
+      return matched == match_status::same_epoch_only ? nullptr : name(matched);
     }
+    bool direct_tag_admissible(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
+      return !tag_rejection(snapshot, tag);
+    }
+    // Why SR/RR evaluations did or did not nominate depth; FG and tag boundaries are excluded.
+    // Cumulative, with the latest reason per gate, for the five-second report.
+    struct {
+      std::atomic<std::uint64_t> attempts{}, nominated{}, inactive{}, fg_owned{}, source_rejected{}, no_tag{}, capture_rejected{};
+      std::atomic<const char *> source_reason{"none"}, tag_reason{"none"}, capture_reason{"none"};
+    } evaluation_outcome;
     sunshine_scene_depth::jitter_offset depth_frame_jitter(const evaluation_snapshot &snapshot,
         const evaluated_depth_tag &tag) {
       if (!snapshot.frame_correlated || snapshot.decoded != decode_status::ok || !snapshot.camera.jitter_supplied)
@@ -1509,11 +1529,25 @@ namespace sunshine_streamline {
     }
     std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one, bool *copy_recorded = nullptr) {
       if (copy_recorded) *copy_recorded = false;
-      if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return 0;
+      const bool evaluation = !snapshot.tag_boundary && !snapshot.frame_generation_input;
+      const auto outcome = [&](std::atomic<std::uint64_t> &counter, std::atomic<const char *> *slot = nullptr,
+          const char *reason = nullptr) {
+        if (!evaluation) return;
+        counter.fetch_add(1, std::memory_order_relaxed);
+        if (slot && reason) slot->store(reason, std::memory_order_relaxed);
+      };
+      if (evaluation) evaluation_outcome.attempts.fetch_add(1, std::memory_order_relaxed);
+      if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) {
+        outcome(evaluation_outcome.inactive);
+        return 0;
+      }
       // FG has an explicit lifecycle for its rendered-frame inputs. The same
       // game's SR/RR evaluations remain diagnostics and must not overwrite that
       // viewport's newer FG source with a competing renderer-input watermark.
-      if (!source_path_selected(snapshot)) return 0;
+      if (!source_path_selected(snapshot)) {
+        outcome(evaluation_outcome.fg_owned);
+        return 0;
+      }
       // Observation discovers interfaces; only an accepted submitted capture
       // establishes ownership in the shared capture layer.
       depth_capture::observe_provider(snapshot.command_buffer);
@@ -1522,14 +1556,25 @@ namespace sunshine_streamline {
           sunshine_scene_depth::provider_kind::streamline, snapshot.frame_generation_input ? (1ull << 63) | snapshot.viewport : 0,
           snapshot.frame_generation_input ? 0 : snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : UINT64_MAX);
       };
-      if (!direct_source_admissible(snapshot)) { withdraw_invalid_attempt(); return 0; }
+      if (const char *reason = source_rejection(snapshot)) {
+        outcome(evaluation_outcome.source_rejected, &evaluation_outcome.source_reason, reason);
+        withdraw_invalid_attempt();
+        return 0;
+      }
       // The adapter defines semantic priority; the capture owner tries this
       // ordered set as one evaluation, including its in-progress lifetime.
       std::array<depth_capture::input, depth_priority.size()> candidates;
       std::size_t count = 0;
+      const char *first_tag_rejection = nullptr;
       for (const unsigned index : depth_priority) {
         const auto &tag = snapshot.tags[index];
-        if (!direct_tag_admissible(snapshot, tag) || !tag.direct_source) continue;
+        const char *rejected = tag_rejection(snapshot, tag);
+        if (!rejected && !tag.direct_source) rejected = "source_not_retained";
+        if (rejected) {
+          // Prefer a present tag's reason over an absent optional type.
+          if (!first_tag_rejection || tag.present) first_tag_rejection = rejected;
+          continue;
+        }
         auto &value = candidates[count];
         static_cast<sunshine_scene_depth::frame &>(value) = normalize_depth_frame(snapshot, tag, version_one);
         value.source = tag.direct_source;
@@ -1566,8 +1611,11 @@ namespace sunshine_streamline {
           candidates.data(), count, snapshot.frame_generation_input ? 0 :
             snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : UINT64_MAX, &diagnostic)) {
         if (copy_recorded) *copy_recorded = diagnostic.result == depth_capture::status::recorded;
+        outcome(evaluation_outcome.nominated);
         return ticket;
       }
+      if (count) outcome(evaluation_outcome.capture_rejected, &evaluation_outcome.capture_reason, depth_capture::name(diagnostic.result));
+      else outcome(evaluation_outcome.no_tag, &evaluation_outcome.tag_reason, first_tag_rejection ? first_tag_rejection : "no_depth_tag");
       withdraw_invalid_attempt();
       return 0;
     }
@@ -2740,6 +2788,22 @@ namespace sunshine_streamline {
             "Sunshine Streamline camera availability: constants_calls=%llu cameras=%u recent_valid_projection=%u; NGX_frame_match=unproven; availability does not authorize cross-API scale",
             static_cast<unsigned long long>(calls), cameras, valid_recent);
           message(availability);
+          char outcomes[640]{};
+          std::snprintf(outcomes, sizeof(outcomes),
+            "Sunshine Streamline evaluation capture: attempts=%llu nominated=%llu inactive=%llu fg_owned=%llu "
+            "source_rejected=%llu(last=%s) no_admissible_tag=%llu(last=%s) capture_rejected=%llu(last=%s); "
+            "SR/RR evaluations only, cumulative",
+            static_cast<unsigned long long>(evaluation_outcome.attempts.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(evaluation_outcome.nominated.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(evaluation_outcome.inactive.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(evaluation_outcome.fg_owned.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(evaluation_outcome.source_rejected.load(std::memory_order_relaxed)),
+            evaluation_outcome.source_reason.load(std::memory_order_relaxed),
+            static_cast<unsigned long long>(evaluation_outcome.no_tag.load(std::memory_order_relaxed)),
+            evaluation_outcome.tag_reason.load(std::memory_order_relaxed),
+            static_cast<unsigned long long>(evaluation_outcome.capture_rejected.load(std::memory_order_relaxed)),
+            evaluation_outcome.capture_reason.load(std::memory_order_relaxed));
+          message(outcomes);
           if (camera_sample_tick) {
             char detail[1800]{};
             std::snprintf(detail, sizeof(detail),
