@@ -712,6 +712,12 @@ namespace {
     sunshine_diagnostics::log_gate projection_log;
     // API captures without their own camera that kept the projection scene.
     std::uint64_t camera_missing_holds = 0;
+    // Calibration samples by projection controller outcome (center_status),
+    // and the last reason it was not ready, for the Streamline scale line.
+    // Each sample counts once: the same latest sample is offered every frame.
+    std::array<std::uint64_t, 9> projection_samples{};
+    std::uint64_t projection_sample_id = 0;
+    sunshine_projection_depth::center_status projection_reason = sunshine_projection_depth::center_status::ready;
     bool projection_ready = false;
     sunshine_raw_scene::reentry_transition raw_reentry;
     sunshine_raw_scene::status raw_last_status = sunshine_raw_scene::status::uninitialized;
@@ -1447,7 +1453,10 @@ namespace {
           sample.range_max = measured.range_max;
           sample.moments = measured.moments;
           sample.feedback = measured.metadata.feedback;
-          proof.projection_policy.observe(sample, now);
+          const auto outcome = proof.projection_policy.observe(sample, now);
+          if (sample.id != proof.projection_sample_id && unsigned(outcome) < proof.projection_samples.size())
+            ++proof.projection_samples[unsigned(outcome)];
+          proof.projection_sample_id = sample.id;
         }
         center = proof.projection_policy.evaluate(domain, coefficients, now);
         ready = center.ready;
@@ -1472,15 +1481,18 @@ namespace {
         scene.ui.scale.conversion_offset = -static_cast<double>(coefficients.shader_A) * coefficients.inverseB;
         scene.ui.scale.has_projection_conversion = true;
       }
-      if (proof.projection_log.due(now, ready != proof.projection_ready, false, ready)) {
-        char message[896]{};
+      // Also log a changed reason while not ready, and every 10 s either way:
+      // a controller that never becomes ready must say why.
+      const bool reason_changed = !ready && center.reason != proof.projection_reason;
+      if (proof.projection_log.due(now, ready != proof.projection_ready || reason_changed, false, true)) {
+        char message[1152]{};
         if (!depth.ready) {
           // No coefficients or center were evaluated on this pass. Reporting
           // their default zeros would falsely imply that calibration reset.
           std::snprintf(message, sizeof(message), "Sunshine 3D Streamline scale: waiting_for_depth; viewport=%u; retaining calibration state",
             depth.projection.viewport);
         } else {
-          std::snprintf(message, sizeof(message), "Sunshine 3D Streamline scale: %s; viewport=%u encoding=%s A=%.9g B=%.9g near=%.9g stereo_scale=%.9g target_scale=%.9g q0=%.9g target_q0=%.9g reference_Q=%.9g normalization_L=%.9g reference_valid=%u conversion_scale=%.9g conversion_offset=%.9g samples=%u plane_state=%s feedback_revision=%llu camera_missing_holds=%llu; inverse-distance depth, independent stereo gain and zero plane",
+          std::snprintf(message, sizeof(message), "Sunshine 3D Streamline scale: %s; viewport=%u encoding=%s A=%.9g B=%.9g near=%.9g stereo_scale=%.9g target_scale=%.9g q0=%.9g target_q0=%.9g reference_Q=%.9g normalization_L=%.9g reference_valid=%u conversion_scale=%.9g conversion_offset=%.9g samples=%u plane_state=%s feedback_revision=%llu camera_missing_holds=%llu sample_outcomes={ready=%llu waiting=%llu holding=%llu stale=%llu invalid_domain=%llu invalid_projection=%llu invalid_depth=%llu unsupported=%llu}; inverse-distance depth, independent stereo gain and zero plane",
             ready ? "ready" : projection::name(center.reason), depth.projection.viewport,
             linear ? "linear_distance" : "device",
             depth.projection.A, depth.projection.B, coefficients.near_plane, center.K, center.target_K, center.q0, center.target_q0,
@@ -1488,10 +1500,19 @@ namespace {
             scene.ui.scale.conversion_multiplier, scene.ui.scale.conversion_offset,
             center.calibration_samples, sunshine_scene_gain::name(center.learning),
             static_cast<unsigned long long>(depth.provided.feedback.revision),
-            static_cast<unsigned long long>(proof.camera_missing_holds));
+            static_cast<unsigned long long>(proof.camera_missing_holds),
+            static_cast<unsigned long long>(proof.projection_samples[unsigned(projection::center_status::ready)]),
+            static_cast<unsigned long long>(proof.projection_samples[unsigned(projection::center_status::waiting_for_center)]),
+            static_cast<unsigned long long>(proof.projection_samples[unsigned(projection::center_status::holding)]),
+            static_cast<unsigned long long>(proof.projection_samples[unsigned(projection::center_status::stale_sample)]),
+            static_cast<unsigned long long>(proof.projection_samples[unsigned(projection::center_status::invalid_domain)]),
+            static_cast<unsigned long long>(proof.projection_samples[unsigned(projection::center_status::invalid_projection)]),
+            static_cast<unsigned long long>(proof.projection_samples[unsigned(projection::center_status::invalid_depth)]),
+            static_cast<unsigned long long>(proof.projection_samples[unsigned(projection::center_status::unsupported_shader_domain)]));
         }
         log(reshade::log::level::info, message);
         proof.projection_ready = ready;
+        proof.projection_reason = center.reason;
       }
       scene.ready = ready;
       scene.projection_ms = depth.ready ? now : 0;
