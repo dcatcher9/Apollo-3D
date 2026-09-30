@@ -728,9 +728,11 @@ The source desktop stays at the normal game resolution, including its mouse-coor
 Do not select Raw SBS or manually double the game display width for this setup. The separate
 texture already contains the full-resolution left and right eyes.
 If the game renders its eyes at another size with the same aspect ratio as the stream (within
-0.5%), the host scales both eyes to the stream with linear sampling and logs once per generation
-`ReShade SBS: game eyes WxH are scaled to the stream's W'xH' eyes`. Running the game at the
-stream resolution avoids that resampling. Eyes with a different aspect ratio would distort
+0.5%), the host resamples both eyes to the stream before YUV conversion and logs once per
+generation `ReShade SBS: game eyes WxH are scaled to the stream's W'xH' eyes`. Each output eye
+samples only its own source half, so linear filtering never mixes the eyes, and the exact-texel
+chroma conversion always reads an output-sized raster. Running the game at the stream resolution
+avoids that extra pass and its softening. Eyes with a different aspect ratio would distort
 disparity, so the host keeps the stream in 2D and logs a warning naming both sizes.
 
 Normal installation omits `-ShaderDirectory` and uses the GPU renderer embedded in the add-on.

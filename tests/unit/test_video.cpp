@@ -4052,6 +4052,7 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"},
+    std::tuple {"sbs_packed_resample_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mask_ps", "ps_5_0"},

@@ -160,6 +160,7 @@ namespace platf::dxgi {
   blob_t convert_yuv420_planar_y_vs_hlsl;
   blob_t cursor_ps_hlsl;
   blob_t cursor_ps_normalize_white_hlsl;
+  blob_t sbs_packed_resample_ps_hlsl;
   blob_t rgb_present_linear_to_srgb_ps_hlsl;
   blob_t rgb_present_hdr_to_srgb_ps_hlsl;
   blob_t rgb_present_srgb_to_linear_ps_hlsl;
@@ -742,6 +743,31 @@ namespace platf::dxgi {
                                 << (packed_linear ? "linear HDR" : "SDR") << ").";
                 external_cursor_logged = true;
               }
+            }
+            // The final conversion reads exact output-sized texels. Same-aspect eyes authored at
+            // another size are resampled first, each output eye from its own source half. FP16
+            // keeps linear and encoded values alike; the transfer stays tracked by packed_linear.
+            D3D11_TEXTURE2D_DESC packed_desc {};
+            packed_texture->GetDesc(&packed_desc);
+            if (packed_desc.Width != static_cast<UINT>(std::lround(sbs_viewport.Width)) ||
+                packed_desc.Height != static_cast<UINT>(std::lround(sbs_viewport.Height))) {
+              if (!ensure_sbs_intermediate_storage(true)) {
+                return -1;
+              }
+              const host_sbs_v2_draw_command_t resample_draw {
+                .render_targets = {sbs_intermediate_rtv.get(), nullptr},
+                .vertex_shader = sbs_reprojection_vs.get(),
+                .pixel_shader = sbs_packed_resample_ps.get(),
+                .viewport = sbs_viewport,
+                .sampler = sampler_linear.get(),
+                .shader_resources = {packed_view},
+                .geometry_constants = sbs_reprojection_cbuffer.get(),
+              };
+              if (!record_host_sbs_v2_draw(device_ctx.get(), resample_draw)) {
+                return -1;
+              }
+              packed_texture = sbs_intermediate_texture.get();
+              packed_view = sbs_intermediate_srv.get();
             }
           } else {
             // An unavailable, incompatible, or unfocused publisher never selects Host AI.
@@ -5076,6 +5102,7 @@ namespace platf::dxgi {
       game_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? sbs_debug_dump_request : nullptr);
       sbs_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? nullptr : std::move(sbs_debug_dump_request));
       sbs_flat_identity_ps.reset();
+      sbs_packed_resample_ps.reset();
       sbs_reprojection_v2_live_ps.reset();
       sbs_reprojection_v2_p010_y_ps.reset();
       p010_y_mrt_targets_checked = false;
@@ -5270,6 +5297,7 @@ namespace platf::dxgi {
           BOOST_LOG(error) << "Host SBS flat-identity safety renderer is unavailable."sv;
           return -1;
         }
+        create_pixel_shader_helper(sbs_packed_resample_ps_hlsl, sbs_packed_resample_ps);
       }
       if (ai_on) {
         HRESULT v2_pixel_status = E_FAIL;
@@ -5452,7 +5480,8 @@ namespace platf::dxgi {
         BOOST_LOG(error) << "Packed Host SBS 4:2:0 requires width divisible by four and even height.";
         return -1;
       }
-      // The warp has already fitted/resized each eye into this exact packed raster. The chroma
+      // The warp has already fitted/resized each eye into this exact packed raster, and external
+      // Game 3D eyes of another size are resampled into it before conversion. The chroma
       // shader must load its real texels and clamp each eye separately, regardless of whether
       // capture-to-encode sizing was classified as downscaling earlier in initialization.
       // Ordinary unrotated 1:1 video (including Client SBS input) needs the same transfer-before-
@@ -5851,6 +5880,8 @@ namespace platf::dxgi {
     std::chrono::steady_clock::time_point sbs_telemetry_last_publish_attempt {};
     vs_t sbs_reprojection_vs;
     ps_t sbs_flat_identity_ps;
+    // Resizes same-aspect external full-SBS eyes to the packed output before YUV conversion.
+    ps_t sbs_packed_resample_ps;
     ps_t sbs_reprojection_v2_live_ps;
     ps_t sbs_reprojection_v2_p010_y_ps;
     bool p010_y_mrt_targets_checked = false;
@@ -8281,6 +8312,7 @@ namespace platf::dxgi {
     compile_vertex_shader_helper(convert_yuv420_planar_y_vs);
     compile_pixel_shader_helper(cursor_ps);
     compile_pixel_shader_helper(cursor_ps_normalize_white);
+    compile_pixel_shader_helper(sbs_packed_resample_ps);
     compile_pixel_shader_helper(rgb_present_linear_to_srgb_ps);
     compile_pixel_shader_helper(rgb_present_hdr_to_srgb_ps);
     compile_pixel_shader_helper(rgb_present_srgb_to_linear_ps);

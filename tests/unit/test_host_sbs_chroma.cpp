@@ -6,6 +6,7 @@
 
 #ifdef _WIN32
 
+  #include <algorithm>
   #include <array>
   #include <bit>
   #include <cmath>
@@ -158,9 +159,10 @@ namespace {
       ID3D11Texture2D *source,
       const std::string &shader,
       UINT width,
-      UINT height
+      UINT height,
+      const std::string &vertex_shader = "convert_yuv420_planar_y_vs.hlsl"
     ) {
-      auto vs_code = compile("convert_yuv420_planar_y_vs.hlsl", "main_vs", "vs_5_0");
+      auto vs_code = compile(vertex_shader, "main_vs", "vs_5_0");
       auto ps_code = compile(shader, "main_ps", "ps_5_0");
       if (!vs_code || !ps_code) {
         return {};
@@ -451,6 +453,41 @@ namespace {
       }
       EXPECT_LT(rgb[i][0], 1.0f);
     }
+  }
+
+  TEST_F(HostSbsChromaGpuTest, ScaledGameEyesResampleOnlyFromTheirOwnHalf) {
+    // Game 3D eyes authored at 2/3 of the stream size (the 2560x1440 -> 3840x2160 case). The
+    // exact-texel chroma pass needs an output-sized raster, so the host resamples first.
+    constexpr UINT source_width = 8, source_height = 4, width = 12, height = 6;
+    constexpr std::array<std::uint16_t, 4> ramp {0x3c00, 0x4000, 0x4200, 0x4400};  // 1, 2, 3, 4
+    std::vector<rgba_pixel_t> pixels(source_width * source_height);
+    for (UINT y = 0; y < source_height; ++y) {
+      for (UINT x = 0; x < source_width; ++x) {
+        // Left eye is a red ramp, right eye a blue ramp: any cross-eye light is detectable.
+        pixels[y * source_width + x] = x < 4 ? rgba_pixel_t {ramp[x], 0, 0, 0x3c00} :
+                                               rgba_pixel_t {0, 0, ramp[x - 4], 0x3c00};
+      }
+    }
+    auto source = texture(source_width, source_height, DXGI_FORMAT_R16G16B16A16_FLOAT, pixels.data(), source_width * sizeof(rgba_pixel_t));
+    const auto output = render_float_pixels(source.Get(), "sbs_packed_resample_ps.hlsl", width, height, "sbs_reprojection_vs.hlsl");
+    ASSERT_EQ(output.size(), width * height);
+    for (UINT y = 0; y < height; ++y) {
+      for (UINT x = 0; x < width; ++x) {
+        SCOPED_TRACE(testing::Message() << "pixel " << x << ',' << y);
+        const auto &pixel = output[y * width + x];
+        const bool right = x >= width / 2;
+        EXPECT_EQ(pixel[right ? 0 : 2], 0.0f);  // No light from the other eye.
+        EXPECT_GE(pixel[right ? 2 : 0], 1.0f);
+        EXPECT_LE(pixel[right ? 2 : 0], 4.0f);
+        // Each output eye maps linearly onto its own half: u = (x + 0.5) / 6 of that eye.
+        const float eye_x = (x % (width / 2) + 0.5f) * 4.0f / 6.0f - 0.5f;
+        const float expected = 1.0f + std::clamp(eye_x, 0.0f, 3.0f);
+        EXPECT_NEAR(pixel[right ? 2 : 0], expected, 0.02f);
+      }
+    }
+    // The seam columns keep their own eye's edge texel exactly.
+    EXPECT_EQ(output[width / 2 - 1][0], 4.0f);
+    EXPECT_EQ(output[width / 2][2], 1.0f);
   }
 
   TEST_F(HostSbsChromaGpuTest, LocalSdrToHdrRestoresConfiguredScRgbWhite) {

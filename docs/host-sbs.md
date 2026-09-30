@@ -220,7 +220,9 @@ The model and the rendered color have different color requirements:
   vertical `[1,1]/2` weights. Hardware bilinear sampling of linear light before PQ/OETF would
   change chroma at brightness and color edges. Every horizontal footprint clamps to its own eye,
   and packed width is divisible by four so no chroma cell serves both eyes. This final pass is
-  always 1:1 with the packed intermediate; any source resizing already happened in the warp.
+  always 1:1 with the packed intermediate; any source resizing already happened in the warp, or,
+  for Game 3D eyes authored at another size, in a resample pass that reads each output eye only
+  from its own source half.
   Ordinary unrotated 1:1 host video, including input to Client SBS, uses the same texel-conversion
   filter with whole-texture clamping. Generic 2D scaling or Windows rotation retains its existing
   sampled-source conversion; those paths are outside this exact-raster filtering contract.
