@@ -22,15 +22,16 @@ int main() {
   try {
     const float transparent[4]{}, black[4]{0.f, 0.f, 0.f, 1.f}, tinted[4]{0.f, 0.f, 0.001f, 0.f};
     for (const auto format : {api::format::r8g8b8a8_unorm, api::format::r8g8b8a8_typeless, api::format::b8g8r8a8_unorm_srgb,
-           api::format::r10g10b10a2_unorm, api::format::r16g16b16a16_float, api::format::r32g32b32a32_float})
+           api::format::r16g16b16a16_float, api::format::r32g32b32a32_float})
       require(layer::qualifies(target(format), transparent, 3840, 2160), "A transparent-cleared output-size alpha target did not qualify");
     require(!layer::qualifies(target(api::format::r8g8b8a8_unorm), black, 3840, 2160), "Opaque black is not a transparent clear");
     require(!layer::qualifies(target(api::format::r8g8b8a8_unorm), tinted, 3840, 2160), "A tinted clear qualified");
     require(!layer::qualifies(target(api::format::r8g8b8a8_unorm, 2228, 1256), transparent, 3840, 2160),
       "A render-resolution scene target qualified as an output layer");
     require(!layer::qualifies(target(api::format::r8g8b8a8_unorm), transparent, 0, 0), "No output size must reject everything");
-    for (const auto format : {api::format::r11g11b10_float, api::format::r8_unorm, api::format::r16g16_float, api::format::b8g8r8x8_unorm})
-      require(!layer::qualifies(target(format), transparent, 3840, 2160), "A format without alpha qualified");
+    for (const auto format : {api::format::r11g11b10_float, api::format::r8_unorm, api::format::r16g16_float, api::format::b8g8r8x8_unorm,
+           api::format::r10g10b10a2_unorm, api::format::r10g10b10a2_typeless})
+      require(!layer::qualifies(target(format), transparent, 3840, 2160), "A format without blended alpha qualified");
     auto msaa = target(api::format::r8g8b8a8_unorm); msaa.texture.samples = 4;
     auto mips = target(api::format::r8g8b8a8_unorm); mips.texture.levels = 2;
     auto array = target(api::format::r8g8b8a8_unorm); array.texture.depth_or_layers = 2;

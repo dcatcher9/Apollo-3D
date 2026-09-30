@@ -515,6 +515,39 @@ namespace {
       }
     }
 
+    static void camera_missing_holds_projection_scene() {
+      frame_decision_t previous;
+      previous.depth_ready = previous.scene.ready = previous.scene.owned = true;
+      previous.scene_source = {4, 7, 100, 9};
+      previous.scene.scale = 12.f; previous.scene.blend = .6f;
+      previous.scene.projection = {-2.9e-5f, 5.f};
+      previous.scene.projection_ms = 1000;
+      sunshine_depth::frame_depth depth;
+      depth.ready = true;
+      frame_decision_t frame;
+      frame.depth_ready = true;
+      frame.scene_source = {4, 7, 101, 9}; // A fresh capture of the same source.
+      require(hold_projection_scene(frame, previous, depth, 1100) && frame.scene.scale == 12.f &&
+          frame.scene.blend == .6f && frame.scene.projection == previous.scene.projection && frame.scene.projection_ms == 1000,
+        "A capture without its own camera did not keep the projection scene");
+      const auto refused = [&](auto change, std::uint64_t now, const char *message) {
+        auto f = frame; auto p = previous; auto d = depth;
+        f.scene = {};
+        change(f, p, d);
+        require(!hold_projection_scene(f, p, d, now) && !f.scene.ready, message);
+      };
+      refused([](auto &, auto &, auto &d) { d.projection.supplied = true; }, 1100, "A capture with its own camera was held");
+      refused([](auto &, auto &, auto &d) { d.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance; }, 1100,
+        "Linear depth needs no camera but was held");
+      refused([](auto &, auto &, auto &) {}, 1000 + sunshine_scene_depth::maximum_source_age_ms + 1,
+        "A projection scene older than the source age was held");
+      refused([](auto &, auto &p, auto &) { p.scene.projection_ms = 0; }, 1100, "A raw-placed scene was held");
+      refused([](auto &, auto &p, auto &) { p.depth_ready = false; }, 1100, "A scene was held across a depth gap");
+      refused([](auto &f, auto &, auto &) { ++f.scene_source[1]; }, 1100, "Another source's scene was held");
+      refused([](auto &f, auto &, auto &) { ++f.scene_source[3]; }, 1100, "Another viewport's scene was held");
+      refused([](auto &f, auto &, auto &) { ++f.scene_source[0]; }, 1100, "Another epoch's scene was held");
+    }
+
     static void cached_scene_strength_publication() {
       struct runtime : runtime_fixture::empty_runtime {
         float scale{}, blend{};
@@ -1567,6 +1600,7 @@ int main(int argc, char **argv) {
       publisher_tests::retained_depth_decision();
       publisher_tests::present_census_counts();
       publisher_tests::pending_scene_identity();
+      publisher_tests::camera_missing_holds_projection_scene();
       publisher_tests::cached_scene_strength_publication();
       publisher_tests::automatic_raw_and_matrix_resolver();
       publisher_tests::automatic_raw_and_matrix_resolver(true);
@@ -1610,6 +1644,7 @@ int main(int argc, char **argv) {
     publisher_tests::jitter_publication();
     publisher_tests::cached_scene_strength_publication();
     publisher_tests::pending_scene_identity();
+    publisher_tests::camera_missing_holds_projection_scene();
     publisher_tests::automatic_raw_and_matrix_resolver();
     publisher_tests::automatic_raw_and_matrix_resolver(true);
     publisher_tests::session_teardown_ownership();

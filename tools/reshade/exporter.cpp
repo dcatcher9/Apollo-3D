@@ -544,6 +544,9 @@ namespace {
     // masquerade as an explicit switch to a different placement mode.
     sunshine_game3d::ui_plane_parameters ui_plane{sunshine_game3d::ui_plane_mode::display_fraction, 0.f};
     sunshine_game3d::automatic_status ui;
+    // When the projection controller last resolved this scene from a capture
+    // with its own camera; zero for raw placement. Copies keep the original time.
+    std::uint64_t projection_ms = 0;
   };
   struct frame_decision_t {
     bool prepared = false, depth_ready = false, reused_depth = false;
@@ -653,6 +656,26 @@ namespace {
     }
   }
 
+  // A fresh API capture that arrived without its own camera renders with the
+  // placement the projection controller resolved for the same source within
+  // maximum_source_age_ms, without advancing calibration. Projection
+  // coefficients are camera constants; switching this one frame to the raw
+  // controller instead rendered it mono (raw calibration never completed) and
+  // restarted the 500 ms strength ramp. The Witcher 3 misses the camera of a
+  // few SR evaluations every second.
+  bool hold_projection_scene(frame_decision_t &frame, const frame_decision_t &previous,
+      const sunshine_depth::frame_depth &depth, std::uint64_t now) {
+    const bool own_camera = depth.projection.supplied ||
+      depth.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance;
+    const auto held = previous.scene.projection_ms;
+    if (own_camera || !depth.ready || !previous.depth_ready || !held || now < held ||
+        now - held > sunshine_scene_depth::maximum_source_age_ms || !frame.scene_source[0] ||
+        previous.scene_source[0] != frame.scene_source[0] || previous.scene_source[1] != frame.scene_source[1] ||
+        previous.scene_source[3] != frame.scene_source[3]) return false;
+    frame.scene = previous.scene;
+    return true;
+  }
+
   struct runtime_t {
     bool addon_native = false;
     sunshine_game3d::source_alpha_ui_policy source_alpha_policy;
@@ -684,6 +707,8 @@ namespace {
     sunshine_projection_depth::controller projection_policy;
     sunshine_projection_depth::domain projection_domain;
     sunshine_diagnostics::log_gate projection_log;
+    // API captures without their own camera that kept the projection scene.
+    std::uint64_t camera_missing_holds = 0;
     bool projection_ready = false;
     sunshine_raw_scene::reentry_transition raw_reentry;
     sunshine_raw_scene::status raw_last_status = sunshine_raw_scene::status::uninitialized;
@@ -1200,7 +1225,9 @@ namespace {
       } else {
         const bool provided = sunshine_game3d::depth_input::provider_selected(runtime);
         const sunshine_game3d::slow_step step("scene placement");
-        frame.scene = resolve_raw_scene(runtime, proof, depth, game_enabled, provided, now);
+        if (provided && proof.raw_supported && game_enabled && hold_projection_scene(frame, previous_frame, depth, now))
+          ++proof.camera_missing_holds;
+        else frame.scene = resolve_raw_scene(runtime, proof, depth, game_enabled, provided, now);
       }
       frame.ui_source = resolve_ui_observation(depth, previous_frame.ui_source, frame.scene, proof.raw_basis_epoch, now);
       const sunshine_game3d::slow_step step("frame publication");
@@ -1438,26 +1465,28 @@ namespace {
         scene.ui.scale.has_projection_conversion = true;
       }
       if (proof.projection_log.due(now, ready != proof.projection_ready, false, ready)) {
-        char message[768]{};
+        char message[896]{};
         if (!depth.ready) {
           // No coefficients or center were evaluated on this pass. Reporting
           // their default zeros would falsely imply that calibration reset.
           std::snprintf(message, sizeof(message), "Sunshine 3D Streamline scale: waiting_for_depth; viewport=%u; retaining calibration state",
             depth.projection.viewport);
         } else {
-          std::snprintf(message, sizeof(message), "Sunshine 3D Streamline scale: %s; viewport=%u encoding=%s A=%.9g B=%.9g near=%.9g stereo_scale=%.9g target_scale=%.9g q0=%.9g target_q0=%.9g reference_Q=%.9g normalization_L=%.9g reference_valid=%u conversion_scale=%.9g conversion_offset=%.9g samples=%u plane_state=%s feedback_revision=%llu; inverse-distance depth, independent stereo gain and zero plane",
+          std::snprintf(message, sizeof(message), "Sunshine 3D Streamline scale: %s; viewport=%u encoding=%s A=%.9g B=%.9g near=%.9g stereo_scale=%.9g target_scale=%.9g q0=%.9g target_q0=%.9g reference_Q=%.9g normalization_L=%.9g reference_valid=%u conversion_scale=%.9g conversion_offset=%.9g samples=%u plane_state=%s feedback_revision=%llu camera_missing_holds=%llu; inverse-distance depth, independent stereo gain and zero plane",
             ready ? "ready" : projection::name(center.reason), depth.projection.viewport,
             linear ? "linear_distance" : "device",
             depth.projection.A, depth.projection.B, coefficients.near_plane, center.K, center.target_K, center.q0, center.target_q0,
             scene.ui.scale.reference_inverse, scene.ui.scale.normalization, unsigned(center.has_depth_statistics),
             scene.ui.scale.conversion_multiplier, scene.ui.scale.conversion_offset,
             center.calibration_samples, sunshine_scene_gain::name(center.learning),
-            static_cast<unsigned long long>(depth.provided.feedback.revision));
+            static_cast<unsigned long long>(depth.provided.feedback.revision),
+            static_cast<unsigned long long>(proof.camera_missing_holds));
         }
         log(reshade::log::level::info, message);
         proof.projection_ready = ready;
       }
       scene.ready = ready;
+      scene.projection_ms = depth.ready ? now : 0;
       scene.basis = linear ? 2 : 0;
       scene.projection = {coefficients.shader_A, coefficients.inverseB};
       scene.zero = {projection::reference_zpd, center.q0};

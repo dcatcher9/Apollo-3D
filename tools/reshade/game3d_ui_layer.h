@@ -31,7 +31,7 @@ namespace sunshine_game3d::ui_layer {
   inline constexpr std::uint32_t confirm_clears = 3;
   inline constexpr std::uint64_t max_clear_gap_ms = 250;
 
-  // Formats that can carry UI coverage in alpha.
+  // Formats that can carry blended UI coverage in alpha: 8 bits or more.
   bool alpha_format(api::format format);
   // A single-sample 2D color target at the output size cleared to exactly
   // (0, 0, 0, 0). Callers separately exclude swapchain back buffers.

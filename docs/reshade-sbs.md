@@ -296,8 +296,10 @@ alpha and composites it in the final pass; Unreal does the same with its HDR UI 
 The Witcher 3 Remastered tags Streamline's UI buffers only while FG is on, and its presented alpha
 is opaque, but it draws all UI into such a layer (RGBA8, premultiplied, alpha exactly the UI's
 coverage). A layer is cleared to transparent black every frame, so the add-on observes each clear
-of a single-sample 2D color target that matches the swapchain size, has an alpha channel, is not a
-back buffer and is cleared to exactly (0, 0, 0, 0). Clearing requires the render-target state on
+of a single-sample 2D color target that matches the swapchain size, has an alpha channel of at
+least 8 bits, is not a back buffer and is cleared to exactly (0, 0, 0, 0). A 2-bit alpha
+(R10G10B10A2) cannot hold blended coverage; with FG on The Witcher 3 also clears such a scene
+target, which otherwise became the active layer and claimed the whole frame. Clearing requires the render-target state on
 every API, so a target can be copied just before its clear: the copy shows the previous frame.
 
 A target cleared in at least three frames with gaps under 250 ms is a confirmed layer; of several,
@@ -1553,6 +1555,14 @@ valid camera of the same viewport seen within the source age still supplies the
 direction. Projection, metric scale and jitter continue to require the frame's own camera; an
 invalid or older camera supplies nothing. Without any direction, relative calibration waits for
 clear-value evidence and Game 3D stays mono.
+A capture without its own camera between captures that have one does not switch placement to
+the raw controller. When the projection controller placed the preceding presentation from the same
+source (epoch, source and viewport) within the source age, the capture renders with that scene's
+coefficients, gain and zero plane, advances no calibration and carries no jitter. The Witcher 3
+misses the camera of a few SR evaluations each second: each such frame previously rendered mono,
+because raw calibration never completed there, and restarted the 500 ms strength ramp on return.
+The `Sunshine 3D Streamline scale` line counts these frames as `camera_missing_holds`. A capture
+older than the source age, after a depth gap or from another source still takes the raw controller.
 Reused frames preserve the real capture's sequence/timestamp/projection, skip new depth readback
 and calibration updates, and keep the last matching resolved scene parameters. The strength slider
 still applies. Neither reuse nor a new pending nomination extends the age limit. The overlay marks
