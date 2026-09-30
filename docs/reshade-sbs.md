@@ -727,6 +727,11 @@ the buffer contains the game's scene depth.
 The source desktop stays at the normal game resolution, including its mouse-coordinate space.
 Do not select Raw SBS or manually double the game display width for this setup. The separate
 texture already contains the full-resolution left and right eyes.
+If the game renders its eyes at another size with the same aspect ratio as the stream (within
+0.5%), the host scales both eyes to the stream with linear sampling and logs once per generation
+`ReShade SBS: game eyes WxH are scaled to the stream's W'xH' eyes`. Running the game at the
+stream resolution avoids that resampling. Eyes with a different aspect ratio would distort
+disparity, so the host keeps the stream in 2D and logs a warning naming both sizes.
 
 Normal installation omits `-ShaderDirectory` and uses the GPU renderer embedded in the add-on.
 For comparison testing only, the exporter also accepts annotated SuperDepth3D and independent

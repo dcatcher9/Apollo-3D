@@ -145,6 +145,23 @@ namespace reshade_bridge {
     return valid_metadata(m) && m.packed_width == width && m.packed_height == height;
   }
 
+  // How the authored eyes map onto a requested packed output. Both halves scale by the same
+  // factor, so a matching aspect ratio (within 0.5%) keeps each eye undistorted; a different
+  // aspect would stretch disparity and is never scaled.
+  enum class output_fit { exact, scaled, aspect_mismatch };
+  [[nodiscard]] constexpr output_fit fit_output(const metadata_t &m, std::uint32_t width, std::uint32_t height) {
+    if (m.packed_width == width && m.packed_height == height) {
+      return output_fit::exact;
+    }
+    if (width < 2 || width % 2 || height == 0 || m.packed_width == 0 || m.packed_height == 0) {
+      return output_fit::aspect_mismatch;
+    }
+    const std::uint64_t authored = std::uint64_t(m.packed_width) * height;
+    const std::uint64_t requested = std::uint64_t(width) * m.packed_height;
+    const std::uint64_t difference = authored > requested ? authored - requested : requested - authored;
+    return difference * 200 <= (authored < requested ? authored : requested) ? output_fit::scaled : output_fit::aspect_mismatch;
+  }
+
   static_assert(std::is_standard_layout_v<shared_state_t> && std::is_trivially_copyable_v<shared_state_t>);
   static_assert(sizeof(metadata_t) == 120);
   static_assert(sizeof(slot_t) == 64);

@@ -38,8 +38,9 @@ namespace platf::reshade_bridge {
 
     // Nonblocking. A returned frame is private to this receiver and may be reused while its
     // exact foreground producer remains valid. Pointers live until the next poll/destruction.
-    // Foreground ownership must cover source_rect; the authored raster must match output_width
-    // and output_height exactly. Fullscreen display scaling can make those extents independent.
+    // Foreground ownership must cover source_rect. The returned texture keeps the authored
+    // raster; its per-eye aspect must match output_width/output_height (within 0.5%) and the
+    // consumer scales it. Fullscreen display scaling can make these extents independent.
     std::optional<frame_t> poll(RECT source_rect, int output_width, int output_height);
 
   private:

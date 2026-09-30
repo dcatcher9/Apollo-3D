@@ -105,6 +105,19 @@ TEST(ReShadeBridgeProtocol, RejectsHalfSbsOversizedAndColorIncoherentMetadata) {
   EXPECT_FALSE(valid_metadata(metadata));
 }
 
+TEST(ReShadeBridgeProtocol, ScalesSameAspectEyesAndRejectsDistortingOutputs) {
+  using namespace ::reshade_bridge;
+  const auto metadata = valid_bridge_metadata(); // 1920x1080 eyes.
+  EXPECT_EQ(fit_output(metadata, 3840, 1080), output_fit::exact);
+  EXPECT_EQ(fit_output(metadata, 7680, 2160), output_fit::scaled);
+  EXPECT_EQ(fit_output(metadata, 5120, 1440), output_fit::scaled);
+  EXPECT_EQ(fit_output(metadata, 3838, 1080), output_fit::scaled); // Rounding-sized differences.
+  EXPECT_EQ(fit_output(metadata, 1920, 1080), output_fit::aspect_mismatch); // Half-width SBS.
+  EXPECT_EQ(fit_output(metadata, 6880, 1440), output_fit::aspect_mismatch); // 21:9 eyes.
+  EXPECT_EQ(fit_output(metadata, 3841, 1080), output_fit::aspect_mismatch); // Odd packed width.
+  EXPECT_EQ(fit_output(metadata, 3840, 0), output_fit::aspect_mismatch);
+}
+
 TEST(ReShadeBridgeProtocol, PreservesLegacyLayoutAndTreatsLegacyPaddingAsScreenPlane) {
   using namespace ::reshade_bridge;
   EXPECT_EQ(sizeof(metadata_t), 120u);
@@ -624,20 +637,22 @@ TEST_F(ReShadeBridgeGpu, KeepsExactGameEyesAcrossFullscreenDisplayScalingAndGene
   }
   publish_pixels(1, authored_pixels.data(), authored_width * sizeof(std::uint32_t));
 
-  // Local AR derives its requested eyes from the display and still rejects this smaller export.
-  EXPECT_FALSE(bridge->poll(capture, 4800 * 2, 2700));
-  EXPECT_FALSE(bridge->poll(capture, authored_width - 2, render_height));
-  EXPECT_FALSE(bridge->poll(capture, authored_width, render_height - 2));
+  // Eyes with a different aspect ratio would distort disparity when scaled; they stay unavailable.
+  EXPECT_FALSE(bridge->poll(capture, authored_width, render_height * 2));
+  EXPECT_FALSE(bridge->poll(capture, render_width, render_height));
 
-  const auto await_game_frame = [&]() {
+  const auto await_frame_for = [&](int width, int height) {
     const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
     do {
-      if (auto frame = bridge->poll(capture, authored_width, render_height)) {
+      if (auto frame = bridge->poll(capture, width, height)) {
         return frame;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (bridge_clock_t::now() < deadline);
     return std::optional<receiver::frame_t> {};
+  };
+  const auto await_game_frame = [&]() {
+    return await_frame_for(authored_width, render_height);
   };
   const auto expect_native_eyes = [&](ID3D11Texture2D *texture) {
     D3D11_TEXTURE2D_DESC desc {};
@@ -666,6 +681,14 @@ TEST_F(ReShadeBridgeGpu, KeepsExactGameEyesAcrossFullscreenDisplayScalingAndGene
   const auto scaled_fullscreen = await_game_frame();
   ASSERT_TRUE(scaled_fullscreen);
   expect_native_eyes(scaled_fullscreen->texture);
+
+  // A same-aspect stream of another size receives the native authored eyes; the consumer's
+  // linear sampling scales both halves identically. Rounding-sized differences also scale.
+  for (const auto &[width, height] : std::array<std::pair<int, int>, 3> {{{4800 * 2, 2700}, {authored_width - 2, render_height}, {authored_width, render_height - 2}}}) {
+    const auto scaled = await_frame_for(width, height);
+    ASSERT_TRUE(scaled);
+    expect_native_eyes(scaled->texture);
+  }
 
   // A different desktop aspect still owns the same exact authored 4K eyes; do not stretch them.
   capture.right = capture.left + 5120;

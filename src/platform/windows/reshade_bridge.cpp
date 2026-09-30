@@ -174,9 +174,15 @@ namespace platf::reshade_bridge {
         return std::nullopt;
       }
       // Fullscreen may scale the game's raster to a different desktop extent. Window coverage
-      // proves ownership above; the requested output independently proves exact authored eyes.
-      // Local AR requests twice the display width, retaining its display-size requirement.
-      if (metadata.accepted_consumer_nonce != nonce_ || !wire::matches_output(metadata, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)) || metadata.adapter_luid != adapter_luid_) {
+      // proves ownership above. Eyes authored at another size but the same aspect are scaled
+      // by the consumer's linear sampling; a different aspect stays unavailable.
+      if (metadata.accepted_consumer_nonce != nonce_ || !wire::valid_metadata(metadata) || metadata.adapter_luid != adapter_luid_) {
+        cached_.reset();
+        return std::nullopt;
+      }
+      const auto fit = wire::fit_output(metadata, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
+      report_fit(metadata, fit, width, height);
+      if (fit == wire::output_fit::aspect_mismatch) {
         cached_.reset();
         return std::nullopt;
       }
@@ -266,6 +272,30 @@ namespace platf::reshade_bridge {
     }
 
   private:
+    // Names a size mismatch once per generation and requested output. Without it an
+    // incompatible game resolution silently leaves the stream waiting in 2D.
+    void report_fit(const wire::metadata_t &metadata, wire::output_fit fit, int width, int height) {
+      if (fit == wire::output_fit::exact || (metadata.generation == reported_generation_ &&
+            width == reported_width_ && height == reported_height_)) {
+        return;
+      }
+      reported_generation_ = metadata.generation;
+      reported_width_ = width;
+      reported_height_ = height;
+      const auto game_width = metadata.packed_width / 2, stream_width = static_cast<std::uint32_t>(width) / 2;
+      if (fit == wire::output_fit::scaled) {
+        BOOST_LOG(info) << "ReShade SBS: game eyes " << game_width << 'x' << metadata.packed_height
+                        << " are scaled to the stream's " << stream_width << 'x' << height
+                        << " eyes. Run the game at " << stream_width << 'x' << height << " for native sharpness.";
+      } else {
+        BOOST_LOG(warning) << "ReShade SBS: game eyes " << game_width << 'x' << metadata.packed_height
+                           << " cannot fill the stream's " << stream_width << 'x' << height
+                           << " eyes without distortion (different aspect ratio); staying in 2D. Run the game at "
+                           << stream_width << 'x' << height << " or set the stream resolution to "
+                           << game_width << 'x' << metadata.packed_height << '.';
+      }
+    }
+
     bool identity_matches(const wire::metadata_t &metadata) const {
       return metadata.signature == wire::magic && wire::supported_version(metadata.protocol_version) &&
              metadata.metadata_bytes == sizeof(wire::metadata_t) && metadata.producer_pid == pid_ &&
@@ -407,6 +437,8 @@ namespace platf::reshade_bridge {
     int pending_slot_ = -1;
     std::uint64_t pending_sequence_ = 0, pending_generation_ = 0;
     std::chrono::steady_clock::time_point next_attach_ {};
+    std::uint64_t reported_generation_ = 0;
+    int reported_width_ = 0, reported_height_ = 0;
   };
 
   receiver_t::receiver_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe):
