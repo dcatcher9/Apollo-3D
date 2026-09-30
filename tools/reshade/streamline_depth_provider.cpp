@@ -49,6 +49,8 @@ namespace sunshine_streamline::provider {
       sunshine_diagnostics::log_gate logging;
       depth_capture::status last_status{depth_capture::status::inactive};
       depth_capture::capture_failure last_capture_failure{depth_capture::capture_failure::none};
+      // Observation-loss revision at the previous status line, to report the rate.
+      std::uint64_t logged_loss_revision{};
       depth_capture::selection_reason last_selection{depth_capture::selection_reason::not_attempted};
       display_status last_display{display_status::not_attempted};
       depth_capture::consumer_status last_consumer{depth_capture::consumer_status::not_attempted};
@@ -638,6 +640,20 @@ namespace sunshine_streamline::provider {
         static_cast<unsigned long long>(capture_info.newest_sequence), unsigned(update.current_observation),
         static_cast<unsigned long long>(prior_depth_age), unsigned(jitter.supplied),
         double(jitter.x), double(jitter.y), jitter.width, jitter.height);
+      {
+        // The newest observation loss explains a revoked or missing capture;
+        // an absent journal entry is not evidence that nothing was lost.
+        const auto revision = sunshine_streamline::depth_observation_revision();
+        sunshine_streamline::loss_diagnostics::event loss{};
+        const bool known = revision && sunshine_streamline::query_depth_observation_loss(revision, loss);
+        const auto since = revision >= data->logged_loss_revision ? revision - data->logged_loss_revision : 0;
+        data->logged_loss_revision = revision;
+        const auto tail = std::strlen(text);
+        std::snprintf(text + tail, sizeof(text) - tail, "; last_loss=%s site=%s line=%u age_ms=%llu losses_since_last_line=%llu",
+          known ? sunshine_streamline::loss_diagnostics::name(loss.cause) : "unknown", known && loss.site ? loss.site : "unknown",
+          known ? loss.line : 0u, static_cast<unsigned long long>(known ? GetTickCount64() - loss.tick : 0),
+          static_cast<unsigned long long>(since));
+      }
       sunshine_log::message(reshade::log::level::info, text);
       data->last_status = status;
       data->last_selection = capture_info.selection;
