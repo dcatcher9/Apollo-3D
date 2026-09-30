@@ -1580,6 +1580,7 @@ namespace sunshine_streamline {
         value.source = tag.direct_source;
         value.source_present_generation = tag.source_present_generation;
         value.force_snapshot = snapshot.tag_boundary && tag.value.lifecycle == 0;
+        value.at_tag_call = snapshot.tag_boundary;
         v1_resource_state::read_details state_details;
         const auto state = v1_resource_state::resolve(value.native_state, version_one,
           v1_private_state_ready.load(std::memory_order_acquire) ? reinterpret_cast<IUnknown *>(tag.value.native_resource) : nullptr,

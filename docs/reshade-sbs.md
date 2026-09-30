@@ -1436,8 +1436,13 @@ without writing the source. Full-image asynchronous copy/overwrite tests exposed
 writes with the direct read-only restoration, including in the frozen previous add-on. Original
 write states already provide that ordering boundary; original COPY_SOURCE stays COPY_SOURCE.
 This is a bounded GPU ordering measure, not a claim that a particular game or driver is at fault.
-An independent FG Present cannot expire this synchronous tag-call lifetime. Other lifetime rules,
-recording retirement and the shared consumer-ordering checks above still apply.
+An independent FG Present cannot expire this synchronous tag-call lifetime. The same holds for an
+FG input `ValidUntilPresent` depth tag copied inside its own tag call: Frame Generation presents
+earlier frames on another thread, and a Present landing between reading the tag and recording its
+copy used to refuse that real frame's depth as `unsupported_lifetime`. The Witcher 3 hit this on a
+fraction of real frames with multi frame generation. A tag copied later, at an evaluation or as a
+preservation copy, still expires at the next Present. Other lifetime rules, recording retirement
+and the shared consumer-ordering checks above still apply.
 Known affine `PrecisionInfo` extensions are decoded. For device depth their scale/bias are reflected
 in the texture-space projection coefficients and valid stored-depth range. For tag49 they recover
 positive view distance before reciprocal-depth reconstruction. Changing only the storage encoding

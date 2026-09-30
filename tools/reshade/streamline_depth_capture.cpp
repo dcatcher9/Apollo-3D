@@ -1469,10 +1469,15 @@ namespace sunshine_streamline::depth_capture {
 #endif
 
   static bool source_lifetime_current(const input &value, std::uint64_t current_generation) {
-    // OnlyValidNow is captured synchronously inside the authenticated tag call.
-    // An independent FG Present does not end that API-owned lifetime. This does
-    // not extend UntilPresent tags or authorize a delayed preservation copy.
-    if (value.valid_until == sunshine_scene_depth::lifetime::at_call && value.force_snapshot) return true;
+    // A copy recorded synchronously inside the authenticated tag call that
+    // supplied the resource is current by construction, for OnlyValidNow and
+    // UntilPresent alike: an independent FG Present of an earlier frame cannot
+    // end this call's lifetime. With multi frame generation such Presents land
+    // between reading the tag and recording its copy on a fraction of real
+    // frames. This does not extend a tag to a later evaluation or authorize a
+    // delayed preservation copy; those still require an unchanged generation.
+    if (value.at_tag_call || (value.valid_until == sunshine_scene_depth::lifetime::at_call && value.force_snapshot))
+      return true;
     return value.source_present_generation && value.source_present_generation == current_generation;
   }
 
@@ -2447,6 +2452,13 @@ namespace sunshine_streamline::depth_capture {
       value.force_snapshot = true;
       if (!source_lifetime_current(value, 8)) return false;
       value.force_snapshot = false;
+      if (source_lifetime_current(value, 8)) return false;
+      // The same holds for an UntilPresent tag copied inside its own tag call
+      // (FG input), but not for that tag copied later at an evaluation.
+      value.valid_until = sunshine_scene_depth::lifetime::until_present;
+      value.at_tag_call = true;
+      if (!source_lifetime_current(value, 8)) return false;
+      value.at_tag_call = false;
       if (source_lifetime_current(value, 8)) return false;
       value = {};
       value.epoch = value.sequence = 1;
