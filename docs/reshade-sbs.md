@@ -1679,7 +1679,11 @@ slots. Every later object sharing that slot would be refused identically, so the
 invalidates evidence once instead of on every call; command lists on other slots keep their
 coverage. QueryInterface refusals are per object and are not remembered. The failed-status log
 counts refusals by cause and names the newest refused slot and function with their owning modules
-(`none` means allocated memory).
+(`none` means allocated memory). D3D12Core can return a list's CommandList7 interface with its
+table in per-object heap memory, so its enhanced Barrier slot is refused. Producer recordings still
+require that coverage because observed legacy state validates the game resource. The display-copy
+consumer waives it: it copies only between private textures that no game or add-on barrier can
+name. Render-pass coverage is never waived.
 
 In **Automatic**, stored depth `r` is decoded as `d=r*raw_scale+raw_bias`, then the frame-bound
 projection supplies `q=(d-A)/B`. The identity transform is used without `PrecisionInfo`.
