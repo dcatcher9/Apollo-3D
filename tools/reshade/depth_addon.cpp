@@ -2031,9 +2031,17 @@ static void on_destroy_device(device *device)
 	device->destroy_private_data<generic_depth_device_data>();
 }
 
+// ReShade's own lifecycle for a D3D12 list; see depth_capture::observe_list_event.
+static void list_event(command_list *cmd_list, sunshine_streamline::depth_capture::list_event event)
+{
+	if (cmd_list->get_device()->get_api() == device_api::d3d12)
+		sunshine_streamline::depth_capture::observe_list_event(cmd_list->get_native(), event);
+}
+
 static void on_init_command_list(command_list *cmd_list)
 {
 	cmd_list->create_private_data<state_tracking>(false);
+	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::created);
 	if (cmd_list->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::depth_capture::observe_command(cmd_list->get_native());
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
@@ -2045,6 +2053,7 @@ static void on_init_command_list(command_list *cmd_list)
 }
 static void on_destroy_command_list(command_list *cmd_list)
 {
+	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::destroyed);
 	if (cmd_list->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::depth_capture::command_destroyed(cmd_list->get_native());
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
@@ -2423,6 +2432,7 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 }
 static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint32_t, const render_pass_render_target_desc *, const render_pass_depth_stencil_desc *depth_stencil_desc, render_pass_flags)
 {
+	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_begin);
 	auto &render_state = *cmd_list->get_private_data<state_tracking>();
 	// Load/store actions do not expose a safe ordinary OM binding boundary.
 	// Mark this before synthesizing the clear/bind notifications below.
@@ -2457,6 +2467,7 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 
 static bool on_end_render_pass(command_list *cmd_list)
 {
+	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_end);
 	auto &state = *cmd_list->get_private_data<state_tracking>();
 	state.inside_render_pass = false;
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12 && state.render_pass_depth_uncertain)
@@ -2585,6 +2596,7 @@ static void on_content_barrier(command_list *cmd_list, uint32_t count, const res
 
 static void on_reset(command_list *cmd_list)
 {
+	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::reset);
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
 	{
 		sunshine_streamline::command_reset(cmd_list->get_native(), cmd_list->get_device()->get_native(),
@@ -2596,11 +2608,13 @@ static void on_reset(command_list *cmd_list)
 }
 static void on_close(command_list *cmd_list)
 {
+	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::closed);
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::command_closed(cmd_list->get_native());
 }
 static void on_execute_primary(command_queue *queue, command_list *cmd_list)
 {
+	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::executed);
 	if (s_streamline_probe_events && queue->get_device()->get_api() == device_api::d3d12)
 	{
 		// A missed lifecycle callback revokes old evidence. The independently
@@ -2624,6 +2638,7 @@ static void on_execute_primary(command_queue *queue, command_list *cmd_list)
 }
 static void on_execute_secondary(command_list *cmd_list, command_list *secondary_cmd_list)
 {
+	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::bundle);
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::command_secondary_executed(cmd_list->get_native(), secondary_cmd_list->get_native());
 	auto &target_state = *cmd_list->get_private_data<state_tracking>();
@@ -4272,10 +4287,7 @@ static void register_depth_events()
 	reshade::register_event<reshade::addon_event::resolve_texture_region>(sunshine_addon_lifetime::guarded<on_resolve_texture_region>);
 	reshade::register_event<reshade::addon_event::barrier>(sunshine_addon_lifetime::guarded<on_content_barrier>);
 	reshade::register_event<reshade::addon_event::end_render_pass>(sunshine_addon_lifetime::guarded<on_end_render_pass>);
-	if (s_streamline_probe_events)
-	{
-		reshade::register_event<reshade::addon_event::close_command_list>(sunshine_addon_lifetime::guarded<on_close>);
-	}
+	reshade::register_event<reshade::addon_event::close_command_list>(sunshine_addon_lifetime::guarded<on_close>);
 	reshade::register_event<reshade::addon_event::bind_viewports>(sunshine_addon_lifetime::guarded<on_bind_viewport>);
 	reshade::register_event<reshade::addon_event::begin_render_pass>(sunshine_addon_lifetime::guarded<on_begin_render_pass_with_depth_stencil>);
 	reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(sunshine_addon_lifetime::guarded<on_bind_depth_stencil>);
@@ -4319,10 +4331,7 @@ static void unregister_depth_events()
 	reshade::unregister_event<reshade::addon_event::resolve_texture_region>(sunshine_addon_lifetime::guarded<on_resolve_texture_region>);
 	reshade::unregister_event<reshade::addon_event::barrier>(sunshine_addon_lifetime::guarded<on_content_barrier>);
 	reshade::unregister_event<reshade::addon_event::end_render_pass>(sunshine_addon_lifetime::guarded<on_end_render_pass>);
-	if (s_streamline_probe_events)
-	{
-		reshade::unregister_event<reshade::addon_event::close_command_list>(sunshine_addon_lifetime::guarded<on_close>);
-	}
+	reshade::unregister_event<reshade::addon_event::close_command_list>(sunshine_addon_lifetime::guarded<on_close>);
 	reshade::unregister_event<reshade::addon_event::bind_viewports>(sunshine_addon_lifetime::guarded<on_bind_viewport>);
 	reshade::unregister_event<reshade::addon_event::begin_render_pass>(sunshine_addon_lifetime::guarded<on_begin_render_pass_with_depth_stencil>);
 	reshade::unregister_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(sunshine_addon_lifetime::guarded<on_bind_depth_stencil>);
@@ -4852,6 +4861,14 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestProviderStatus(effect_run
 {
 	if (!s_registered || runtime == nullptr || output == nullptr) return FALSE;
 	*output = describe_streamline_source(runtime);
+	return TRUE;
+}
+
+// Phase-1 shadow counters comparing ReShade's list lifecycle with native hooks.
+extern "C" __declspec(dllexport) BOOL SunshineDepthTestListShadow(sunshine_streamline::depth_capture::list_shadow_counts *output)
+{
+	if (!s_registered || output == nullptr) return FALSE;
+	*output = sunshine_streamline::depth_capture::list_shadow();
 	return TRUE;
 }
 

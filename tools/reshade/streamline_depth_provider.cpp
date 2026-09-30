@@ -12,6 +12,7 @@
 #include "async_log.h"
 #include "game3d_slow_step.h"
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <cstdio>
 
@@ -448,6 +449,31 @@ namespace sunshine_streamline::provider {
     }
     depth_capture::observe_command(commands->get_native());
     depth_capture::observe_queue(runtime->get_command_queue()->get_native());
+    {
+      // Phase-1 shadow: ReShade's list lifecycle versus the native hooks at
+      // capture admission. Observation only; at most one line per 5 s.
+      static std::atomic<std::uint64_t> next_shadow_log{}, logged_admissions{};
+      const auto now = GetTickCount64();
+      auto next = next_shadow_log.load(std::memory_order_relaxed);
+      if (now >= next && next_shadow_log.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
+        const auto c = depth_capture::list_shadow();
+        const auto admissions = c.both + c.hooks_only + c.events_only + c.neither;
+        if (admissions != logged_admissions.exchange(admissions, std::memory_order_relaxed)) {
+          const auto u = [](std::uint64_t value) { return static_cast<unsigned long long>(value); };
+          const auto e = [&](depth_capture::list_event event) { return u(c.events[static_cast<unsigned>(event)]); };
+          using event = depth_capture::list_event;
+          char text[768]{};
+          std::snprintf(text, sizeof(text),
+            "Sunshine list lifecycle shadow: admissions both=%llu hooks_only=%llu events_only=%llu neither=%llu; "
+            "lifecycle_not_open unknown=%llu closed=%llu pass=%llu opaque=%llu; disagree closed=%llu pass=%llu; "
+            "events created=%llu reset=%llu closed=%llu executed=%llu bundle=%llu pass_begin=%llu pass_end=%llu destroyed=%llu; tracked=%llu overflow=%llu",
+            u(c.both), u(c.hooks_only), u(c.events_only), u(c.neither), u(c.unknown), u(c.closed), u(c.pass), u(c.opaque),
+            u(c.closed_disagree), u(c.pass_disagree), e(event::created), e(event::reset), e(event::closed), e(event::executed),
+            e(event::bundle), e(event::pass_begin), e(event::pass_end), e(event::destroyed), u(c.tracked), u(c.overflow));
+          sunshine_log::message(reshade::log::level::info, text);
+        }
+      }
+    }
     frame_generation_snapshot fg_source;
     frame_generation_query_status fg_status;
     query_frame_generation(UINT32_MAX, fg_source, &fg_status);

@@ -1697,6 +1697,18 @@ without coverage stay unavailable. The status line then scans the refused table 
 modules its entries point into, with their first slot indices and the table's offset from the
 consumer list; a copied table keeps the runtime's functions except where its owner patched it.
 
+ReShade reports every command list it wraps (create, Reset, Close, submission, bundle, render
+pass, destroy) from its own proxy, whose dispatch a runtime cannot move. Its `barrier` event
+cannot replace native barrier observation: it drops split flags, subresources and the aliasing
+"before" resource, reports UAV barriers as transitions, and converts enhanced barriers from
+access rather than layout. A shadow comparison is therefore collected first. At every capture
+admission, `Sunshine list lifecycle shadow` (at most every 5 s) counts native hook coverage
+against an open, pass-free list in ReShade's lifecycle: `both`, `hooks_only` (with the lifecycle
+view: `unknown`, `closed`, `pass`, `opaque`), `events_only` (lifecycle coverage where hooks were
+refused) and `neither`, plus hook-covered recordings whose closed or render-pass state
+disagreed. Wrappers resolve to the native lifecycle through a private-data tag, which proxies
+forward. The shadow never admits or rejects a capture.
+
 In **Automatic**, stored depth `r` is decoded as `d=r*raw_scale+raw_bias`, then the frame-bound
 projection supplies `q=(d-A)/B`. The identity transform is used without `PrecisionInfo`.
 Camera reconstruction and scene placement have separate owners. The shared

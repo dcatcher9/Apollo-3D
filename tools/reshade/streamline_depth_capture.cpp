@@ -12,6 +12,7 @@
 #include <cmath>
 #include <mutex>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -44,6 +45,9 @@ namespace sunshine_streamline::depth_capture {
     using copy_state::write_states;
     constexpr GUID source_guid = sunshine_native_identity::resource_guid;
     constexpr GUID queue_guid{0x091eab97, 0xfcc2, 0x47fb, {0x97, 0x3b, 0x02, 0x7c, 0x69, 0xb0, 0xd5, 0x26}};
+    // Tags ReShade's native list with its own address. Proxies forward private
+    // data, so any wrapper of the list resolves to the same lifecycle record.
+    constexpr GUID list_identity_guid{0x5d1f0c7a, 0x3b52, 0x4e8e, {0x9a, 0x61, 0x2c, 0x87, 0x41, 0xd6, 0x0b, 0x93}};
     std::atomic<std::uint64_t> serial{1};
     std::atomic<status> reason{status::inactive};
     constexpr unsigned provider_count = 2;
@@ -1143,6 +1147,82 @@ namespace sunshine_streamline::depth_capture {
     }
     native_observer::observe_command(native);
   }
+  namespace {
+    struct list_record { bool open{}, closed{}, pass{}, opaque{}; };
+    SRWLOCK list_lock = SRWLOCK_INIT;
+    std::unordered_map<std::uint64_t, list_record> list_records; // Guarded by list_lock.
+    list_shadow_counts list_counts;                               // Guarded by list_lock.
+    constexpr std::size_t list_capacity = 8192;
+    void tag_list(std::uint64_t native) {
+      auto *object = reinterpret_cast<ID3D12Object *>(native);
+      std::uint64_t known{}; UINT size = sizeof(known);
+      if (SUCCEEDED(object->GetPrivateData(list_identity_guid, &size, &known)) && size == sizeof(known) && known == native) return;
+      object->SetPrivateData(list_identity_guid, sizeof(native), &native);
+    }
+    enum class list_view { unknown, open, closed, pass, opaque };
+    list_view lifecycle_view(std::uint64_t command) {
+      std::uint64_t native{}; UINT size = sizeof(native);
+      if (!command || FAILED(reinterpret_cast<ID3D12Object *>(command)->GetPrivateData(list_identity_guid, &size, &native)) ||
+          size != sizeof(native) || !native) return list_view::unknown;
+      AcquireSRWLockShared(&list_lock);
+      const auto found = list_records.find(native);
+      const auto view = found == list_records.end() ? list_view::unknown : found->second.opaque ? list_view::opaque :
+        found->second.closed || !found->second.open ? list_view::closed : found->second.pass ? list_view::pass : list_view::open;
+      ReleaseSRWLockShared(&list_lock);
+      return view;
+    }
+    // Shadow comparison at capture admission; the result never changes it.
+    void shadow_admission(std::uint64_t command, bool hooked, const command_state *owner) {
+      const auto view = lifecycle_view(command);
+      AcquireSRWLockExclusive(&list_lock);
+      auto &counts = list_counts;
+      const bool covered = view == list_view::open;
+      ++(hooked ? (covered ? counts.both : counts.hooks_only) : (covered ? counts.events_only : counts.neither));
+      if (!covered) ++(view == list_view::unknown ? counts.unknown : view == list_view::closed ? counts.closed :
+        view == list_view::pass ? counts.pass : counts.opaque);
+      if (owner && view != list_view::unknown) {
+        if (owner->closed != (view == list_view::closed)) ++counts.closed_disagree;
+        if (owner->render_pass != (view == list_view::pass)) ++counts.pass_disagree;
+      }
+      ReleaseSRWLockExclusive(&list_lock);
+    }
+  }
+  void observe_list_event(std::uint64_t native, list_event event) {
+    if (!native || event >= list_event::count) return;
+    if (event == list_event::created || event == list_event::reset) {
+      try { tag_list(native); } catch (...) {}
+    }
+    AcquireSRWLockExclusive(&list_lock);
+    ++list_counts.events[static_cast<unsigned>(event)];
+    try {
+      if (event == list_event::destroyed) list_records.erase(native);
+      else {
+        auto found = list_records.find(native);
+        if (found == list_records.end() && list_records.size() < list_capacity)
+          found = list_records.emplace(native, list_record{}).first;
+        if (found == list_records.end()) ++list_counts.overflow;
+        else {
+          auto &value = found->second;
+          switch (event) {
+            case list_event::created: case list_event::reset: value = {true, false, false, false}; break;
+            case list_event::closed: value.open = false; value.closed = true; break;
+            case list_event::bundle: value.opaque = true; break;
+            case list_event::pass_begin: value.pass = true; break;
+            case list_event::pass_end: value.pass = false; break;
+            default: break;
+          }
+        }
+      }
+    } catch (...) { ++list_counts.overflow; }
+    list_counts.tracked = list_records.size();
+    ReleaseSRWLockExclusive(&list_lock);
+  }
+  list_shadow_counts list_shadow() {
+    AcquireSRWLockShared(&list_lock);
+    const auto out = list_counts;
+    ReleaseSRWLockShared(&list_lock);
+    return out;
+  }
   void command_destroyed(std::uint64_t native) {
     if (!native) return;
     com_ptr<ID3D12GraphicsCommandList> checked;
@@ -1479,7 +1559,10 @@ namespace sunshine_streamline::depth_capture {
     native = reinterpret_cast<std::uint64_t>(checked.p);
     if (diagnostic) diagnostic->command = native;
     observe_command(native);
-    if (!native_observer::command_ready(native)) return reject(status::unavailable, record_stage::observer_coverage);
+    if (!native_observer::command_ready(native)) {
+      shadow_admission(native, false, nullptr);
+      return reject(status::unavailable, record_stage::observer_coverage);
+    }
     auto *list = checked.p;
     const auto command_type = list->GetType();
     if (diagnostic) diagnostic->command_type = command_type;
@@ -1498,6 +1581,7 @@ namespace sunshine_streamline::depth_capture {
     if (!source_lifetime_current(value, current_generation))
       return reject(status::unsupported_lifetime, record_stage::source_lifetime);
     auto owner = command(native, cookie, true);
+    shadow_admission(native, true, owner ? &*owner : nullptr);
     if (!owner) return reject(status::unavailable, record_stage::recording_missing);
     if (diagnostic) {
       diagnostic->loss = owner->invalidation; diagnostic->recording_closed = owner->closed;

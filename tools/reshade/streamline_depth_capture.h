@@ -162,6 +162,24 @@ namespace sunshine_streamline::depth_capture {
   bool active();
   void observe_command(std::uint64_t command);
   void command_destroyed(std::uint64_t command);
+  // ReShade reports every command list it wraps from its own proxy, whose
+  // dispatch no D3D12 runtime change can move (D3D12Core 1.619 moves native
+  // lists to per-object tables at Reset). Phase 1 is a shadow: this lifecycle
+  // is compared with the native hooks at capture admission, never used to
+  // admit or reject. native is ReShade's native object for the list.
+  enum class list_event : unsigned { created, reset, closed, executed, bundle, pass_begin, pass_end, destroyed, count };
+  void observe_list_event(std::uint64_t native, list_event event);
+  struct list_shadow_counts {
+    std::uint64_t events[static_cast<unsigned>(list_event::count)]{};
+    // Capture admission: native hook coverage versus an open, pass-free list
+    // in ReShade's lifecycle. Mismatches name what the lifecycle saw instead.
+    std::uint64_t both{}, hooks_only{}, events_only{}, neither{};
+    std::uint64_t unknown{}, closed{}, pass{}, opaque{};
+    // Hook-covered admissions whose recording state disagreed with ReShade.
+    std::uint64_t closed_disagree{}, pass_disagree{};
+    std::uint64_t tracked{}, overflow{};
+  };
+  list_shadow_counts list_shadow();
   void observe_queue(std::uint64_t queue);
   void retire_queue(std::uint64_t queue);
   void poll();
