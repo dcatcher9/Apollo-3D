@@ -40,9 +40,6 @@ namespace sunshine_streamline::provider {
       depth_capture::input pending_metadata;
       sunshine_depth_statistics::tile_layout pending_grid;
       std::uint64_t pending_id{}, pending_texture{}, next_sample{};
-      // Calibration statistics: due requests skipped because the shared depth
-      // sampler was busy, submitted, and completed with or without a match.
-      std::uint64_t sample_busy{}, sample_requests{}, sample_matched{}, sample_unmatched{};
       bool owns_pass{}, open{}, have_latest{};
       bool shared_preservation{};
       frame_generation_policy source_policy;
@@ -414,7 +411,6 @@ namespace sunshine_streamline::provider {
       value.source_width == data->pending_metadata.resource.width && value.source_height == data->pending_metadata.resource.height &&
       value.viewport_x == data->pending_metadata.resource.area.left && value.viewport_y == data->pending_metadata.resource.area.top &&
       value.viewport_width == data->pending_metadata.resource.area.width && value.viewport_height == data->pending_metadata.resource.area.height;
-    ++(matches ? data->sample_matched : data->sample_unmatched);
     if (matches) {
       data->latest.metadata = data->pending_metadata;
       data->latest.projection = projection(data->pending_metadata);
@@ -669,7 +665,7 @@ namespace sunshine_streamline::provider {
         capture_info.failure != data->last_capture_failure || handoff_changed, !previously_owned, !available)) {
       char text[2560]{};
       if (available)
-        std::snprintf(text, sizeof(text), "Sunshine %s depth: %s; source_selected=1 snapshot_ready=%u final_ready=%u display=%s consumer=%s loss=%s; allocation=%ux%u active=%u,%u,%u,%u source=%u viewport=%u; metadata_projection=%u output_projection=%u; state=0x%x proof=%u; capture=%llu sequence=%llu present=%llu command=0x%llx cookie=%llu device=%llu expected_device=%llu slot_invalid=%u tracked_commands=%u; producer_queue=0x%llx consumer_queue=0x%llx producer_fence=%llu producer_completed=%llu completion_valid=%u producer_retired=%u; transport=%s resource_id=%llu; calibration_samples={requested=%llu sampler_busy=%llu matched=%llu unmatched=%llu}",
+        std::snprintf(text, sizeof(text), "Sunshine %s depth: %s; source_selected=1 snapshot_ready=%u final_ready=%u display=%s consumer=%s loss=%s; allocation=%ux%u active=%u,%u,%u,%u source=%u viewport=%u; metadata_projection=%u output_projection=%u; state=0x%x proof=%u; capture=%llu sequence=%llu present=%llu command=0x%llx cookie=%llu device=%llu expected_device=%llu slot_invalid=%u tracked_commands=%u; producer_queue=0x%llx consumer_queue=0x%llx producer_fence=%llu producer_completed=%llu completion_valid=%u producer_retired=%u; transport=%s resource_id=%llu",
           path_name, depth_capture::name(status), unsigned(data->frame.pixel_ready), unsigned(data->output.ready), name(display), depth_capture::name(consumer.result),
           depth_capture::name(consumer.invalidation),
           data->frame.width, data->frame.height, data->frame.area.left, data->frame.area.top, data->frame.area.width, data->frame.area.height,
@@ -683,9 +679,7 @@ namespace sunshine_streamline::provider {
           static_cast<unsigned long long>(capture_info.queue), static_cast<unsigned long long>(capture_info.consumer_queue),
           static_cast<unsigned long long>(capture_info.producer_fence), static_cast<unsigned long long>(capture_info.producer_completed),
           unsigned(capture_info.producer_completion_valid), unsigned(capture_info.producer_recording_retired),
-          data->frame.shared_preservation ? "ReShade preservation" : "API snapshot", static_cast<unsigned long long>(data->frame.resource_id),
-          static_cast<unsigned long long>(data->sample_requests), static_cast<unsigned long long>(data->sample_busy),
-          static_cast<unsigned long long>(data->sample_matched), static_cast<unsigned long long>(data->sample_unmatched));
+          data->frame.shared_preservation ? "ReShade preservation" : "API snapshot", static_cast<unsigned long long>(data->frame.resource_id));
       else {
         // A failed acquisition has no output packet. Its zeroed fields say
         // nothing about the resource/camera that the provider actually tagged.
@@ -759,9 +753,7 @@ namespace sunshine_streamline::provider {
     data->open = false;
     const auto now = GetTickCount64();
     if (!data->output.ready || data->output.reused_depth) return true;
-    const bool due = now >= data->next_sample, busy = due && sunshine_depth::busy();
-    if (busy) ++data->sample_busy;
-    if (due && !busy) {
+    if (now >= data->next_sample && !sunshine_depth::busy()) {
       sunshine_depth::sample_request request;
       request.collect_range = true;
       // Decode on the GPU with this capture's coefficients. Never retrofit a
@@ -792,7 +784,6 @@ namespace sunshine_streamline::provider {
       request.x = data->frame.area.left; request.y = data->frame.area.top;
       request.width = data->frame.area.width; request.height = data->frame.area.height;
       if (sunshine_depth::submit(runtime, commands, request)) {
-        ++data->sample_requests;
         data->pending_id = request.capture_id;
         data->pending_texture = request.source.handle;
         data->pending_metadata = data->frame.metadata;
