@@ -3,6 +3,7 @@
 
 #include "game3d_diagnostic_metadata.h"
 #include "game3d_ui_capture.h"
+#include "game3d_ui_layer.h"
 #include "scene_gain.h"
 #include "src/game3d_debug_protocol.h"
 #include "src/game3d_debug_formats.h"
@@ -533,6 +534,35 @@ namespace sunshine_game3d {
         }
       }
     };
+
+    // Adds each copied candidate UI layer as an optional artifact and describes
+    // every qualifying target the armed census saw (docs/reshade-sbs.md).
+    nlohmann::json ui_layer_census(capture_batch &batch, api::device *device) {
+      api::device *owner = nullptr;
+      auto layers = ui_layer::take(owner);
+      auto rows = nlohmann::json::array();
+      for (unsigned i = 0; i < layers.size() && i < wire::ui_layer_count; ++i) {
+        auto &c = layers[i];
+        const auto kind = static_cast<wire::artifact>(static_cast<unsigned>(wire::artifact::ui_layer_0) + i);
+        std::string status = c.status;
+        bool added = false;
+        if (c.copy.handle) {
+          added = owner == device && batch.add(kind, c.copy);
+          if (!added) status = owner == device ? "transport_budget_exceeded" : "other_device";
+        }
+        char source[24];
+        std::snprintf(source, sizeof(source), "0x%llx", static_cast<unsigned long long>(c.source));
+        rows.push_back({{"artifact_id", static_cast<unsigned>(kind)}, {"kind", wire::ui_layer_names[i]}, {"captured", added},
+          {"status", status}, {"source", source}, {"width", c.width}, {"height", c.height}, {"dxgi_format", c.format},
+          {"clears_while_armed", c.clears}});
+        // add() holds its own reference; the add-on's handle is released once
+        // any game command list that wrote the copy has executed.
+        ui_layer::retire(owner, c.copy);
+      }
+      return {{"meaning", "Output-resolution color targets the game cleared to transparent black while this request was armed, "
+        "the signature of an offscreen UI layer. Each copy was taken before a clear, so it shows the previous frame's content. "
+        "Candidates only: nothing here is verified UI or used by detection."}, {"candidates", std::move(rows)}};
+    }
   }  // namespace
 
   struct debug_dump::impl {
@@ -612,6 +642,7 @@ namespace sunshine_game3d {
       if (!waiting()) {
         armed_ready = false;
         armed_optional.reset();
+        ui_layer::cancel();
         // Finish callbacks for already recorded optional snapshots must still
         // arrive while their native producer work retires. New copies were
         // stopped by freeze at the main frame boundary.
@@ -626,6 +657,7 @@ namespace sunshine_game3d {
           arm_diagnostic_metadata(false);
           arm_diagnostic_metadata(true);
           armed_optional = std::make_unique<ui_capture_batch>(diagnostic_metadata_generation());
+          ui_layer::arm();
         } else {
           // FG can present several times without a game/vendor evaluation.
           // Observe a real SDK call when possible, while keeping generic/no-API
@@ -690,6 +722,7 @@ namespace sunshine_game3d {
     QueryPerformanceCounter(&qpc);
     next->response.capture_qpc = static_cast<std::uint64_t>(qpc.QuadPart);
     next->response.result = wire::status::unavailable;
+    ui_layer::cancel();
     next->optional = std::move(d.armed_optional);
     if (next->optional) next->optional->freeze();
     next->json = nlohmann::json {{"schema", "sunshine.game3d.gpu-dump.v1"}, {"unavailable", reason}, {"latest_observations", nlohmann::json::parse(diagnostic_metadata_json())}}.dump();
@@ -722,7 +755,7 @@ namespace sunshine_game3d {
       if (!next->initialize(runtime)) {
         throw std::runtime_error("Diagnostic GPU device/fence unavailable");
       }
-      next->json = frame_json(runtime, frame).dump();
+      auto metadata = frame_json(runtime, frame);
       const auto &r = frame.resources;
       if (frame.source_alpha_ui && r.ui_source.handle && !next->add(wire::artifact::ui_source_color, r.ui_source)) {
         throw std::runtime_error("Cannot snapshot the exact consumed UI-alpha source");
@@ -730,6 +763,8 @@ namespace sunshine_game3d {
       if (!r.source.handle || !r.sbs.handle || !next->add(wire::artifact::source_color, r.source) || !next->add(wire::artifact::linear_color, r.linear_color) || !next->add(wire::artifact::candidate, r.candidate) || !next->add(wire::artifact::vertical_majorant, r.vertical_majorant) || !next->add(wire::artifact::vertical_field, r.vertical_field) || !next->add(wire::artifact::final_field, r.final_field) || !next->add(wire::artifact::sbs, r.sbs)) {
         throw std::runtime_error("Cannot allocate the bounded shared diagnostic textures");
       }
+      metadata["ui_layer_census"] = ui_layer_census(*next, runtime->get_device());
+      next->json = metadata.dump();
       const auto &depth = frame.depth;
       if (depth.ready && depth.shader_resource.handle) {
         auto *t = next->create(wire::artifact::raw_depth, depth.width, depth.height, DXGI_FORMAT_R32_FLOAT, true);

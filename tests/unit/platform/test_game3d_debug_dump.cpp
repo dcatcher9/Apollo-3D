@@ -185,10 +185,15 @@ TEST(Game3DDumpProtocol, ConsumedUiAndEntireCatalogFitV3Envelope) {
     const auto index = response.texture_count++;
     response.textures[index] = {static_cast<wire::artifact>(entry.artifact_id), 8, 4, DXGI_FORMAT_R10G10B10A2_UNORM, 2000 + index};
   }
+  for (unsigned layer = 0; layer < wire::ui_layer_count; ++layer) {
+    const auto index = response.texture_count++;
+    response.textures[index] = {static_cast<wire::artifact>(static_cast<unsigned>(wire::artifact::ui_layer_0) + layer), 8, 4,
+      DXGI_FORMAT_R8G8B8A8_UNORM, 3000 + index};
+  }
   response.textures[response.texture_count++] = {wire::artifact::ui_source_color, 8, 4, DXGI_FORMAT_R10G10B10A2_UNORM, 9000};
   EXPECT_EQ(wire::version, 3u);
-  // Primary artifacts, every catalog resource and the consumed UI mask.
-  EXPECT_EQ(response.texture_count, 8u + std::size(sunshine_game3d::ui_resources::catalog) + 1u);
+  // Primary artifacts, every catalog resource, the candidate UI layers and the consumed UI mask.
+  EXPECT_EQ(response.texture_count, 8u + std::size(sunshine_game3d::ui_resources::catalog) + wire::ui_layer_count + 1u);
   EXPECT_LE(response.texture_count, wire::max_textures);
   ASSERT_NE(sunshine_game3d::ui_resources::find_sl(53), nullptr);
   EXPECT_EQ(sunshine_game3d::ui_resources::find_sl(53)->artifact_id, 32u);

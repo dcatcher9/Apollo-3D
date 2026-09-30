@@ -34,7 +34,20 @@ namespace game3d_debug {
     linear_color = 8,
     // Exact RGBA input consumed for UI alpha; optional IDs are in the resource catalog.
     ui_source_color = 33,
+    // Optional: output-resolution targets the game cleared to transparent black,
+    // copied before a clear. Candidate offscreen UI layers, not verified UI.
+    ui_layer_0 = 40,
+    ui_layer_1 = 41,
+    ui_layer_2 = 42,
   };
+  inline constexpr unsigned ui_layer_count = 3;
+  inline constexpr const char *ui_layer_names[ui_layer_count] {"ui_layer_candidate_0", "ui_layer_candidate_1", "ui_layer_candidate_2"};
+  inline constexpr bool ui_layer_artifact(unsigned id) noexcept {
+    return id >= static_cast<unsigned>(artifact::ui_layer_0) && id < static_cast<unsigned>(artifact::ui_layer_0) + ui_layer_count;
+  }
+  inline constexpr const char *ui_layer_name(unsigned id) noexcept {
+    return ui_layer_artifact(id) ? ui_layer_names[id - static_cast<unsigned>(artifact::ui_layer_0)] : nullptr;
+  }
 
   struct texture_t {
     artifact kind {};

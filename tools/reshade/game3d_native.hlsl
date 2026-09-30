@@ -90,7 +90,7 @@ cbuffer SunshineUIDetectionConstants : register(b2)
     uint Sunshine_UICandidates; // bit0..2 captured alpha, bit3 current alpha, bit4 paired HUDless, bit5 exact pair.
     float Sunshine_UIDifferenceThreshold;
     uint Sunshine_UITrustedAlpha; // Bit i: the game session trusts alpha candidate i as UI coverage.
-    uint Sunshine_UIDetectionReserved1;
+    uint Sunshine_UIDetectionFlags; // bit0 UI color+alpha must be premultiplied, bit1 with HDR headroom.
 };
 RWTexture2D<float> SunshineHostCandidateStore : register(u0);
 RWTexture2D<float> SunshineHostVerticalMajorantStore : register(u1);
@@ -157,6 +157,13 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         bool4 okay = isfinite(a) && a >= 0.0 && a <= 1.0;
         coverage += uint4(okay && a > 0.0);
         invalid += uint4(!okay);
+        // An offscreen layer is UI only when blended over transparent black:
+        // no color above its alpha (scRGB UI may be up to 10000 nits).
+        if (Sunshine_UIDetectionFlags & 1u) {
+            float4 layer = SunshineUIColorAlpha.Load(int3(x, y, 0));
+            float headroom = Sunshine_UIDetectionFlags & 2u ? 125.0 : 1.0;
+            invalid.y += max(max(layer.r, layer.g), layer.b) > layer.a * headroom + 4.0 / 255.0 ? 1u : 0u;
+        }
         bool finite;
         float delta = SunshineHUDlessDifference(uint2(x,y), finite);
         difference.x += finite && delta > Sunshine_UIDifferenceThreshold ? 1u : 0u;

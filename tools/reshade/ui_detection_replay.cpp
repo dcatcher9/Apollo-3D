@@ -45,9 +45,12 @@ namespace {
   }
 
   // Candidate slots in shader order: t11 UI alpha (R), t12 UI color (A),
-  // t13 Backbuffer (A), current color alpha (t0 A), t14 HUD-less.
+  // t13 Backbuffer (A), current color alpha (t0 A), t14 HUD-less. An offscreen
+  // UI layer from the census (ui_layer_candidate_N) takes the UI color slot
+  // with the renderer's premultiplied check.
   const std::map<std::string, unsigned> candidate_bits{
     {"sl_ui_alpha", 1u}, {"sl_ui_color_alpha", 2u}, {"sl_backbuffer", 4u}, {"current", 8u}, {"sl_hudless_color", 16u}};
+  bool ui_layer_kind(const std::string &name) { return name.rfind("ui_layer_candidate_", 0) == 0; }
 
   struct device_t {
     ComPtr<ID3D11Device> device;
@@ -130,7 +133,6 @@ namespace {
     const auto manifest = json::parse(read_text(dump / "manifest.json"));
     std::map<std::string, json> artifacts;
     for (const auto &artifact : manifest.at("artifacts")) artifacts[artifact.at("kind").get<std::string>()] = artifact;
-    const auto width = manifest.at("source_width").get<UINT>(), height = manifest.at("source_height").get<UINT>();
     const auto color = manifest.at("producer_metadata").at("color_space").get<unsigned>();
     const auto load = [&](const std::string &kind) {
       const auto found = artifacts.find(kind);
@@ -141,15 +143,23 @@ namespace {
     // candidate: the tagged Backbuffer of a batch pair, else the presented color.
     const auto paired = label.value("paired", std::string("source_color"));
     const auto paired_color = load(paired);
+    // The game's frame size; source_width/height is the host output, which
+    // differs when the host scales the eyes.
+    const auto width = artifacts.at(paired).at("width").get<UINT>(), height = artifacts.at(paired).at("height").get<UINT>();
     std::array<texture_t, 4> inputs{}; // t11..t14
-    unsigned bits = 0;
+    unsigned bits = 0, flags = 0;
     for (const auto &kind : label.at("candidates")) {
       const auto name = kind.get<std::string>();
-      const auto bit = candidate_bits.at(name);
+      const bool layer = ui_layer_kind(name);
+      const auto bit = layer ? 2u : candidate_bits.at(name);
       bits |= bit;
       if (name == "current") continue;
-      const unsigned slot = name == "sl_ui_alpha" ? 0 : name == "sl_ui_color_alpha" ? 1 : name == "sl_backbuffer" ? 2 : 3;
+      const unsigned slot = name == "sl_ui_alpha" ? 0 : name == "sl_ui_color_alpha" || layer ? 1 : name == "sl_backbuffer" ? 2 : 3;
       inputs[slot] = load(name);
+      if (layer) {
+        const auto format = artifacts.at(name).at("dxgi_format").get<unsigned>();
+        flags = format == DXGI_FORMAT_R16G16B16A16_FLOAT || format == DXGI_FORMAT_R32G32B32A32_FLOAT ? 3u : 1u;
+      }
     }
     if (label.value("exact", false) && (bits & 16u)) bits |= 32u;
     unsigned trusted = 0;
@@ -163,10 +173,10 @@ namespace {
     auto decision = target(gpu, 6, 1, DXGI_FORMAT_R32G32B32A32_UINT);
     auto mask = target(gpu, width, height, DXGI_FORMAT_R32_FLOAT);
     // Detection constants b2: candidate bits, difference threshold, trusted
-    // channels. The threshold matches the renderer's per-format choice.
+    // channels, flags. The threshold matches the renderer's per-format choice.
     const float threshold = paired_color.srv && artifacts.at(paired).at("dxgi_format").get<unsigned>() == DXGI_FORMAT_R10G10B10A2_UNORM ?
       4.f / 1023.f : color == 2 ? .005f : 2.f / 255.f;
-    struct { std::uint32_t bits; float threshold; std::uint32_t trusted, padding; } constants{bits, threshold, trusted, 0};
+    struct { std::uint32_t bits; float threshold; std::uint32_t trusted, flags; } constants{bits, threshold, trusted, flags};
     D3D11_BUFFER_DESC buffer{};
     buffer.ByteWidth = sizeof(constants); buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     const D3D11_SUBRESOURCE_DATA initial{&constants, 0, 0};

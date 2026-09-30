@@ -178,6 +178,39 @@ namespace {
       D3D12_PLACED_SUBRESOURCE_FOOTPRINT before_footprint{}, after_footprint{};
       fill_upload(before_upload, desc, expected.data(), before_footprint);
       fill_upload(after_upload, desc, overwritten.data(), after_footprint);
+      // An offscreen UI layer as Frostbite and Unreal's HDR UI composite draw
+      // it: output resolution, cleared to transparent black every frame, then UI.
+      com_ptr<ID3D12Resource> layer, layer_upload;
+      com_ptr<ID3D12DescriptorHeap> layer_heap;
+      auto layer_desc = desc;
+      layer_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      layer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+      checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &layer_desc,
+        D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(layer.put())), "Create offscreen UI layer");
+      D3D12_DESCRIPTOR_HEAP_DESC layer_heap_desc{};
+      layer_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; layer_heap_desc.NumDescriptors = 1;
+      checked(game->CreateDescriptorHeap(&layer_heap_desc, IID_PPV_ARGS(layer_heap.put())), "Create UI layer RTV heap");
+      const auto layer_rtv = layer_heap->GetCPUDescriptorHandleForHeapStart();
+      game->CreateRenderTargetView(layer.p, nullptr, layer_rtv);
+      std::vector<std::uint8_t> layer_pattern(size_t(width) * height * 4);
+      for (unsigned y = height / 8; y < height / 4; ++y) for (unsigned x = width / 8; x < width / 4; ++x) {
+        const auto offset = (size_t(y) * width + x) * 4;
+        layer_pattern[offset] = static_cast<std::uint8_t>((x * 5 + y) & 255);
+        layer_pattern[offset + 1] = 200;
+        layer_pattern[offset + 2] = static_cast<std::uint8_t>((y * 3) & 255);
+        layer_pattern[offset + 3] = 255;
+      }
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT layer_footprint{};
+      fill_upload(layer_upload, layer_desc, layer_pattern.data(), layer_footprint);
+      // The same content with straight alpha: color above its alpha, as in a
+      // scene buffer rather than UI blended over transparent black.
+      auto straight_pattern = layer_pattern;
+      for (size_t offset = 0; offset < straight_pattern.size(); offset += 4)
+        if (straight_pattern[offset + 3]) straight_pattern[offset + 3] = 100;
+      com_ptr<ID3D12Resource> straight_upload;
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT straight_footprint{};
+      fill_upload(straight_upload, layer_desc, straight_pattern.data(), straight_footprint);
+      bool straight_layer = false;
       const auto copy = [&](ID3D12GraphicsCommandList *list, ID3D12Resource *upload,
                             const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint) {
         transition(list, mask.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -192,10 +225,26 @@ namespace {
         std::function<void()> previous;
         ~restore_callback() { target = std::move(previous); }
       } restore{render_tracked_depth, render_tracked_depth};
+      const auto draw_layer = [&] {
+        // The game records through ReShade's command-list proxy, so its clear
+        // event fires; the unwrapped native list would bypass it.
+        auto *game_list = commands.p;
+        const float transparent[4]{};
+        game_list->ClearRenderTargetView(layer_rtv, transparent, 0, nullptr);
+        transition(game_list, layer.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION layer_from{}, layer_to{};
+        layer_from.pResource = straight_layer ? straight_upload.p : layer_upload.p;
+        layer_from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        layer_from.PlacedFootprint = straight_layer ? straight_footprint : layer_footprint;
+        layer_to.pResource = layer.p; layer_to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        game_list->CopyTextureRegion(&layer_to, 0, 0, 0, &layer_from, nullptr);
+        transition(game_list, layer.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      };
       render_tracked_depth = [&] {
         real_frame();
         auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
         copy(list, before_upload.p, before_footprint);
+        draw_layer();
         abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
         resource.type = resource_type; resource.native = mask.p; resource.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         resource.width = width; resource.height = height; resource.native_format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
@@ -270,6 +319,27 @@ namespace {
         optional = true;
       }
       require(optional, "Production dump omitted the observed tag23 capture");
+      // The census copies the layer before its next clear: the previous frame's UI.
+      char layer_source[24];
+      std::snprintf(layer_source, sizeof(layer_source), "0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(layer.p)));
+      unsigned layer_artifact{};
+      for (const auto &entry : metadata.at("ui_layer_census").at("candidates"))
+        if (entry.at("source") == layer_source && entry.at("captured") == true && entry.at("dxgi_format") == 28 &&
+            entry.at("width") == width && entry.at("height") == height && entry.at("clears_while_armed") >= 1)
+          layer_artifact = entry.at("artifact_id");
+      if (!layer_artifact) throw std::runtime_error("Dump census missed the offscreen UI layer: " + metadata.at("ui_layer_census").dump());
+      bool layer_bytes = false;
+      for (unsigned i = 0; i < box.state->response.texture_count; ++i) {
+        const auto &item = box.state->response.textures[i];
+        if (unsigned(item.kind) != layer_artifact) continue;
+        require(item.dxgi_format == DXGI_FORMAT_R8G8B8A8_UNORM && item.width == width && item.height == height,
+          "Offscreen UI layer copy changed format or extent");
+        com_ptr<ID3D12Resource> copied;
+        checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(item.handle), IID_PPV_ARGS(copied.put())), "Open UI layer copy");
+        require(read(copied.p, D3D12_RESOURCE_STATE_COMMON) == layer_pattern, "Offscreen UI layer copy is not the drawn layer");
+        layer_bytes = true;
+      }
+      require(layer_bytes, "Dump omitted the captured offscreen UI layer");
       std::array<com_ptr<ID3D12Resource>, 2> retained;
       std::array<std::vector<std::uint8_t>, 2> retained_bytes;
       unsigned retained_count{};
@@ -309,9 +379,65 @@ namespace {
       for (unsigned i = 0; i != retained_count; ++i)
         require(read(retained[i].p, D3D12_RESOURCE_STATE_COMMON) == retained_bytes[i],
           "Host acknowledgement or later game write changed UI snapshot");
+
+      // Once tag 23 stops, the offscreen layer is the UI color candidate: live
+      // tracking copies it before each clear and Auto admits it premultiplied.
+      render_tracked_depth = [&] { real_frame(); draw_layer(); };
+      // Draws for a second, then dumps; the caller releases the dump.
+      const auto dump_after_layer_frames = [&] {
+        for (const auto until = GetTickCount64() + 1000; GetTickCount64() < until;) { step(); no_effects(); }
+        box.request = box.state->request_id + 1;
+        InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
+        for (const auto until = GetTickCount64() + 10000;
+             std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) != box.request &&
+             GetTickCount64() < until;) { step(); no_effects(); }
+        require(box.state->response_id == box.request && box.state->response.result == dump::status::complete &&
+            box.state->response.json_bytes <= dump::max_json_bytes && box.state->response.texture_count <= dump::max_textures,
+          "Production Dump3D did not complete the offscreen UI layer capture");
+        return nlohmann::json::parse(std::string(box.state->json, box.state->response.json_bytes));
+      };
+      const auto layer_metadata = dump_after_layer_frames();
+      bool layer_offered = false, tag23_offered = false;
+      for (const auto &candidate : layer_metadata.at("ui_source").value("candidates", nlohmann::json::array())) {
+        layer_offered |= candidate.value("source", std::string{}) == "ui_layer" && candidate.at("available_for_detection") == true &&
+          candidate.at("format") == DXGI_FORMAT_R8G8B8A8_UNORM;
+        tag23_offered |= candidate.value("source", std::string{}) == "sl_ui_color_alpha";
+      }
+      if (!layer_offered || tag23_offered)
+        throw std::runtime_error("Auto did not offer the live offscreen UI layer once tag 23 stopped: " + layer_metadata.at("ui_source").dump());
+      bool layer_mask = false;
+      for (unsigned i = 0; i < box.state->response.texture_count; ++i) {
+        const auto &item = box.state->response.textures[i];
+        if (unsigned(item.kind) != unsigned(dump::artifact::ui_source_color)) continue;
+        com_ptr<ID3D12Resource> resolved;
+        checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(item.handle), IID_PPV_ARGS(resolved.put())), "Open layer UI mask");
+        const auto bytes = read(resolved.p, D3D12_RESOURCE_STATE_COMMON);
+        require(item.dxgi_format == DXGI_FORMAT_R32_FLOAT && bytes.size() == layer_pattern.size(), "Layer UI mask changed format or extent");
+        bool exact = true;
+        for (size_t pixel = 0; pixel * 4 < layer_pattern.size(); ++pixel) {
+          float value{}; std::memcpy(&value, bytes.data() + pixel * 4, sizeof(value));
+          exact &= std::abs(value - float(layer_pattern[pixel * 4 + 3]) / 255.f) <= 1e-6f;
+        }
+        require(exact, "Resolved automatic UI mask is not the offscreen layer alpha");
+        layer_mask = true;
+      }
+      require(layer_mask, "Dump omitted the resolved UI mask from the offscreen layer");
+      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
+      step(); no_effects();
+
+      // A layer with straight alpha is still offered but the GPU rejects it.
+      straight_layer = true;
+      const auto straight_metadata = dump_after_layer_frames();
+      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
+      straight_layer = false;
+      step(); no_effects();
+      const auto &sampled = straight_metadata.at("replay").at("source_alpha_auto").at("sampled_evidence");
+      if (!(sampled.at("candidates").get<unsigned>() & 2u) || !sampled.at("alpha_invalid")[1].get<unsigned>())
+        throw std::runtime_error("The GPU admitted an offscreen layer with straight alpha: " + sampled.dump());
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
-        " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 frame_tags=" << bool(frame_tag) << '\n';
+        " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 live_ui_layer_mask=1 frame_tags=" << bool(frame_tag) << '\n';
       std::puts("PASS actual public SL tag23 hook: typeless90 to typed87, automatic GPU mask equals pre-overwrite alpha and optional dump exact before opaque overwrite; host lease immutable");
+      std::puts("PASS live offscreen UI layer: without tag 23, the layer copied before its clear is the automatic UI mask; straight alpha is rejected");
     }
 
     void run_automatic_ui_tags(HMODULE sdk) {

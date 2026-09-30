@@ -38,6 +38,7 @@
 #include <utility>
 #include <windows.h>
 #include "game3d_slow_step.h"
+#include "game3d_ui_layer.h"
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   #include "test_overlay_patch.h"
@@ -2123,6 +2124,7 @@ namespace {
     // Observer metadata releases its source leases while capture/UI owners are
     // still alive; capture keeps any leases required by outstanding GPU work.
     addon_session().end([&] {
+      sunshine_game3d::ui_layer::unregister_events();
       sunshine_game3d::depth_input::shutdown_observers();
       sunshine_depth::shutdown();
       reshade::unregister_addon(addon, reshade);
@@ -2200,6 +2202,7 @@ namespace {
     try {
       if (publisher) {
         publisher->begin_present(swapchain->get_native(), swapchain->get_color_space());
+        sunshine_game3d::ui_layer::observe_output(swapchain);
         publisher->render_present(swapchain);
       }
     } catch (...) {
@@ -2300,6 +2303,7 @@ extern "C" {
       reshade::register_event<reshade::addon_event::finish_present>(sunshine_addon_lifetime::guarded<on_finish_present>);
       reshade::register_event<reshade::addon_event::reshade_open_overlay>(sunshine_addon_lifetime::guarded<on_overlay>);
       reshade::register_event<reshade::addon_event::reshade_overlay>(sunshine_addon_lifetime::guarded<on_draw_overlay>);
+      sunshine_game3d::ui_layer::register_events();
       return true;
     } catch (...) {
       teardown_addon(addon, reshade);

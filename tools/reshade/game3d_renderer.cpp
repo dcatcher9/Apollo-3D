@@ -128,6 +128,9 @@ namespace sunshine_game3d {
     bool detection_exact{};
     // Alpha candidates the game session trusts (Sunshine_UITrustedAlpha).
     uint32_t detection_trusted{};
+    // Sunshine_UIDetectionFlags: bit0 check UI color+alpha is premultiplied,
+    // bit1 with HDR headroom (a float layer).
+    uint32_t detection_flags{};
     // Presented colors kept for late HUD-less captures, created on first need.
     // Each slot records the Present number it holds; zero is empty.
     bool retention_wanted{}, retention_attempted{}, retention_ready{};
@@ -587,8 +590,8 @@ namespace sunshine_game3d {
         std::array<api::resource_view, 8> uavs{}; uavs[output] = t.uav;
         cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[stage]);
         bindings(cmd, api::shader_stage::compute, p, views, uavs);
-        struct constants { uint32_t bits; float threshold; uint32_t trusted, padding; } values{detection_bits, difference_threshold,
-          detection_trusted, 0};
+        struct constants { uint32_t bits; float threshold; uint32_t trusted, flags; } values{detection_bits, difference_threshold,
+          detection_trusted, detection_flags};
         cmd->push_constants(api::shader_stage::compute, layout, 5, 0, 4, &values);
         cmd->dispatch(x, y, 1);
         uavs.fill(null_uav);
@@ -958,9 +961,16 @@ namespace sunshine_game3d {
     const bool hold = !(bits & trusted & 15u) && (candidates.hold_previous || (inexact && d.detection_exact)) &&
       d.detection_mask_ready &&
       d.detection_holds < ui_detection_inputs::max_held_presents;
-    if (hold) bits = d.detection_bits;
-    if (d.detection_bits != bits) d.detection_latest = {};
+    uint32_t flags = 0;
+    if ((bits & 2u) && candidates.color_alpha_premultiplied) {
+      const auto layer = d.device->get_resource_desc(d.device->get_resource_from_view(candidates.masks[1]));
+      const auto typeless = api::format_to_typeless(layer.texture.format);
+      flags = typeless == api::format::r16g16b16a16_typeless || typeless == api::format::r32g32b32a32_typeless ? 3u : 1u;
+    }
+    if (hold) { bits = d.detection_bits; flags = d.detection_flags; }
+    if (d.detection_bits != bits || d.detection_flags != flags) d.detection_latest = {};
     d.detection_bits = bits;
+    d.detection_flags = flags;
     d.detection_trusted = trusted;
     d.difference_threshold = d.source_format == api::format::r10g10b10a2_unorm ? 4.f / 1023.f :
       d.color == 2 ? .005f : 2.f / 255.f;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_ui_input_provider.h"
 #include "game3d_ui_mask.h"
+#include "game3d_ui_layer.h"
 #include "game3d_capture_diagnostic.h"
 #include "streamline_camera_probe.h"
 #include "streamline_buffer_contract.h"
@@ -333,6 +334,31 @@ namespace sunshine_game3d::ui_input {
           source_alpha_input::sl_ui_color_alpha : source_alpha_input::sl_backbuffer_alpha;
         observe_origin(selected, result.kind == ui_input_kind::dedicated_mask);
         if (diagnostic) result.source_metadata = candidates.back().dump();
+      }
+    }
+    // Without a tagged UI color+alpha, the game's offscreen UI layer is that
+    // candidate (game3d_ui_layer.h). Its copy holds the previous frame's UI and
+    // is admitted on the GPU only while premultiplied.
+    ui_layer::live_capture layer;
+    if (status.requested && result.automatic_detection && !result.detection.masks[1].handle &&
+        (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::color_and_alpha)) &&
+        ui_layer::latest(runtime->get_device(), now, layer)) {
+      constexpr std::uint64_t layer_capture = std::uint64_t(1) << 62; // Never a Streamline ticket id.
+      const auto view = renderer.prepare_ui_candidate(1, layer_capture | layer.capture_id, [&](api::resource destination) {
+        commands->barrier(layer.copy, api::resource_usage::shader_resource, api::resource_usage::copy_source);
+        commands->barrier(destination, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
+        commands->copy_resource(layer.copy, destination);
+        commands->barrier(destination, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
+        commands->barrier(layer.copy, api::resource_usage::copy_source, api::resource_usage::shader_resource);
+        return true;
+      }, static_cast<api::format>(layer.format));
+      if (diagnostic) candidates.push_back({{"source", "ui_layer"}, {"channel", "alpha"}, {"format", layer.format},
+        {"available_for_detection", view.handle != 0}, {"association", "previous_frame_offscreen_ui_layer"},
+        {"capture_id", layer.capture_id}, {"age_ms", now >= layer.tick ? now - layer.tick : 0}});
+      if (view.handle) {
+        signature ^= std::uint64_t(1) << 53;
+        result.detection.masks[1] = view; result.detection.color_alpha_premultiplied = true;
+        result.status.retained_alpha_ready = true; available = true;
       }
     }
     const bool current_allowed = status.requested && !status.fg_active() && present_has_alpha(base.output_format) &&

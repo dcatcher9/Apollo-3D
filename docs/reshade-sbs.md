@@ -247,7 +247,8 @@ UI to one global plane selected by the adaptive display-fraction policy below, w
 black keeps scene depth. This is a placement policy, not recovered UI geometry or physical distance.
 Auto detects eligible inputs continuously and validates their current pixels on the GPU. It
 requires no human review, approval, game profile, startup scan or confirmation timer. The
-candidate order is authenticated UI opacity, UI color alpha, captured real-input alpha,
+candidate order is authenticated UI opacity, UI color alpha (the game's own
+offscreen UI layer, described below, when no UI color is tagged), captured real-input alpha,
 current color alpha unless FG is known enabled, then a paired HUD-less/final-color difference. A missing or
 rejected candidate allows the next candidate in that same render. If none passes, UI protection
 is off for that frame; it can recover automatically on a later frame.
@@ -288,6 +289,31 @@ visible scene. The same evidence (three samples over at least 2 s) revokes it, a
 of the channel clears the doubt, and a revoked channel must earn trust again. Trust survives
 manual mode edits. A trusted channel in the current frame decides by itself, so the HUD-less holds
 described below do not apply to that frame.
+
+Some games expose no UI buffer through any vendor API but draw UI into their own offscreen layer.
+Frostbite's HDR pipeline draws UI into an RGBA8 target at backbuffer resolution with premultiplied
+alpha and composites it in the final pass; Unreal does the same with its HDR UI composite mode.
+The Witcher 3 Remastered tags Streamline's UI buffers only while FG is on, and its presented alpha
+is opaque, but it draws all UI into such a layer (RGBA8, premultiplied, alpha exactly the UI's
+coverage). A layer is cleared to transparent black every frame, so the add-on observes each clear
+of a single-sample 2D color target that matches the swapchain size, has an alpha channel, is not a
+back buffer and is cleared to exactly (0, 0, 0, 0). Clearing requires the render-target state on
+every API, so a target can be copied just before its clear: the copy shows the previous frame.
+
+A target cleared in at least three frames with gaps under 250 ms is a confirmed layer; of several,
+the one cleared last in the frame is active, since UI draws last. Transient targets never displace
+a confirmed one. The active layer is copied once per Present, at its first clear, into a persistent
+add-on texture. When no UIColorAndAlpha is tagged, Auto offers the newest copy, if under 250 ms
+old, as the UI color candidate. It is one frame late, which a moving HUD shows only as a one-frame
+edge. The GPU admits it only while premultiplied: any pixel whose color exceeds its alpha by more
+than 4/255 (for a float layer, 125 times its alpha, up to 10000 nits) rejects it for that frame.
+UI blended over transparent black is premultiplied by construction. A scene buffer is not: Dead
+Space's only qualifying target is a post-upscale scene buffer whose luma-like alpha (82% of pixels
+nonzero, mean 11/255) lies below its saturated colors. That buffer was seen in a census dump; its
+rejection has not been observed live.
+The layer then earns trust like any alpha channel: selective coverage during
+play, after which a sign wheel that dims the whole scene or a full-screen menu covers everything and
+stays flat. Games that draw UI straight onto the back buffer have no layer and are unchanged.
 
 The D3D12 adapter captures Streamline UIAlpha (69, red), UIColorAndAlpha (23, alpha),
 Backbuffer (53, alpha) and HUDLessColor (2, RGB) independently of FG being enabled. A fresh
@@ -372,7 +398,8 @@ protection remain separate diagnostic facts. Older startup fields describe a ret
 Detection rule changes are checked offline before a live test. `ui_detection_replay` (built with
 the add-on) compiles the three detection passes from a shader file, binds each Dump 3D package's
 captured candidates by artifact kind (presented color, Backbuffer, UIColorAndAlpha, UIAlpha,
-HUD-less), sets the candidate, exact-pair and trusted bits a label names, and compares the decision
+HUD-less, or a census `ui_layer_candidate_N` in the UI color slot with the premultiplied check),
+sets the candidate, exact-pair and trusted bits a label names, and compares the decision
 and the resulting mask (empty, partial HUD, or flat) with that label:
 
 ```powershell
@@ -854,6 +881,13 @@ and tag 23 was explicitly null. This establishes potential HUDless/no-warp input
 available UI mask or a match to the exported frame. Before using either input to protect UI,
 capture it within its declared resource lifetime and verify frame, extent, color-space and
 pixel semantics. Comparing unsynchronized final and HUDless images is not reliable UI separation.
+
+While a dump request is armed, the first clear of up to three
+[offscreen UI layer](#setup) candidates is also copied as
+optional artifacts `ui_layer_candidate_0` to `_2` (IDs 40-42) with RGB and alpha previews, and
+`ui_layer_census` lists each target's size, format, clears seen while armed and capture status.
+The census shows every qualifying target, whether or not live detection chose it; the dump's
+automatic candidate set names the live one as `ui_layer`.
 
 The request uses diagnostic wire v3 with capacity for 40 textures, independent of streaming SBS v2.
 Host and add-on must agree on this mapping version; incompatible versions fail explicitly.
