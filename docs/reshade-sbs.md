@@ -1563,8 +1563,9 @@ through ReShade's swapchain wrapper. Whether frame-generated images are among th
 the game's Streamline proxy and ReShade are stacked, not on Game 3D. Every ten seconds
 `Sunshine present census` reports, separately for FG requested and not, the runtime's ReShade
 Presents (`reshade`), DXGI's own Present count (`IDXGISwapChain::GetLastPresentCount`) on the
-swapchain object below ReShade (`dxgi`), and Streamline's game frames (`game_frames`, from the
-game's frame index, or from its token requests when it supplies none). `below_reshade` names the
+swapchain object below ReShade (`dxgi`), Streamline's game frames (`game_frames`, from the game's
+frame index, or from its token requests when it supplies none) and all successful frame-token
+requests (`token_requests`; above `game_frames` when the game requests a frame's token again). `below_reshade` names the
 module implementing that object's Present: `dxgi.dll` for the real swapchain, or a proxy such as
 `sl.interposer.dll`. `dxgi` above `reshade` means Presents Game 3D never sees, such as generated
 images presented underneath ReShade; `reshade` above `game_frames` means generated frames pass
@@ -2043,7 +2044,14 @@ an old version. Actual writer collisions and exhaustion of pinned slots remain e
 they do not silently publish partial state or authorize retained depth. This is bounded storage
 and acquisition, not a guarantee that observations can never be lost under arbitrary contention.
 Lifecycle reset closes observation admission before clearing each owner and opening a fresh epoch.
-Recycled token addresses still get a new generation even if the optional numeric index is unchanged.
+A token address returned for a different numeric index is a recycled token and gets a new
+generation. Requesting the same index again returns that frame's token, so it keeps its identity
+and the constants and frame tags already recorded for it; treating such a repeat between tagging
+and evaluation as a new frame orphans that frame's tags. The Witcher 3 Remastered with FG off
+matched this: Dump 3D showed its framed depth tag and Ray Reconstruction evaluation on one frame,
+yet every SR/RR evaluation reported `no_admissible_tag` (last `absent`). The present census's
+`token_requests` shows whether a game repeats requests. Without a numeric index, every request is
+a new frame.
 Camera reset, SDK failures, token-generation checks, resource lifetimes and depth expiry remain
 authoritative. The command/content ledger retains its independent observation contract.
 

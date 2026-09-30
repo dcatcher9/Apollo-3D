@@ -181,7 +181,7 @@ namespace {
       census.observe(present(true, 100, 50));
       for (std::uint32_t i = 1; i <= 10; ++i) census.observe(present(true, 100 + 2 * i, 50 + i));
       census.take(window);
-      require(window[1].reshade == 11 && window[1].dxgi == 20 && window[1].game_frames == 10 &&
+      require(window[1].reshade == 11 && window[1].dxgi == 20 && window[1].game_frames == 10 && window[1].token_requests == 20 &&
           window[1].dxgi_samples == 10 && window[1].frame_samples == 10 && window[0].reshade == 0,
         "Present census did not separate DXGI Presents below ReShade");
       // FG off, with DXGI's 32-bit count wrapping; repeated token requests use the frame index.

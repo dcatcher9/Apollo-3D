@@ -1553,11 +1553,11 @@ namespace {
         else std::snprintf(known[fg_state][1], sizeof(known[fg_state][1]), "unknown");
       }
       std::snprintf(text, size,
-        "Sunshine present census: FG_on={reshade=%llu dxgi=%s game_frames=%s} FG_off={reshade=%llu dxgi=%s game_frames=%s} below_reshade=%s frame_numbering=%s; "
+        "Sunshine present census: FG_on={reshade=%llu dxgi=%s game_frames=%s token_requests=%llu} FG_off={reshade=%llu dxgi=%s game_frames=%s token_requests=%llu} below_reshade=%s frame_numbering=%s; "
         "dxgi counts every Present on the swapchain under ReShade (and under any Streamline proxy). dxgi above reshade = Presents Game 3D never sees, such as frame-generated images; "
         "reshade above game_frames = generated frames pass through Game 3D",
-        static_cast<unsigned long long>(window[1].reshade), known[1][0], known[1][1],
-        static_cast<unsigned long long>(window[0].reshade), known[0][0], known[0][1],
+        static_cast<unsigned long long>(window[1].reshade), known[1][0], known[1][1], static_cast<unsigned long long>(window[1].token_requests),
+        static_cast<unsigned long long>(window[0].reshade), known[0][0], known[0][1], static_cast<unsigned long long>(window[0].token_requests),
         census.layer, tokens.index_supplied ? "game_index" : tokens.calls ? "token_requests" : "unavailable");
     }
 

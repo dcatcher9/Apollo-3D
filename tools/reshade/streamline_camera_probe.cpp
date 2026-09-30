@@ -2035,9 +2035,15 @@ namespace sunshine_streamline {
               if (candidate.frame.token == address) { chosen = &candidate; break; }
               if (!candidate.frame.token || candidate.frame.generation < chosen->frame.generation) chosen = &candidate;
             }
-            // A recycled address is a NEW observer generation. The optional
-            // numeric index is caller-owned; absent means unknown, never zero.
-            if (chosen->frame.token != address || serial > chosen->frame.generation)
+            // A recycled address is a NEW observer generation. Requesting the same
+            // caller-supplied index again returns that frame's token: it is the same
+            // frame, so it keeps its identity and the tags and constants already
+            // recorded for it still reach its evaluation. The optional numeric index
+            // is caller-owned; absent means unknown, never zero.
+            const bool same_frame_again = chosen->frame.token == address && frame_index &&
+              chosen->frame.has_numeric && chosen->frame.numeric == numeric;
+            if (same_frame_again) {}
+            else if (chosen->frame.token != address || serial > chosen->frame.generation)
               chosen->frame = {frame_identity_kind::v2_observed_token, serial, numeric, address, frame_index != nullptr};
             else lose(loss_diagnostics::reason::token_replaced, __func__, __LINE__); // Concurrent out-of-order allocation of the same address.
             if (current(ticket) && !update.commit())

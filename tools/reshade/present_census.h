@@ -26,6 +26,8 @@ namespace sunshine_present_census {
 
   struct totals {
     std::uint64_t reshade = 0, dxgi = 0, game_frames = 0;
+    // All successful frame-token requests; above game_frames, the game requests a frame's token repeatedly.
+    std::uint64_t token_requests = 0;
     // Presents with a DXGI or game-frame delta, so a partly unknown window is not misread as zero.
     std::uint64_t dxgi_samples = 0, frame_samples = 0;
   };
@@ -54,6 +56,9 @@ namespace sunshine_present_census {
         bucket.game_frames += position - last_position;
         ++bucket.frame_samples;
       }
+      if (calls_valid && value.token_calls >= last_calls) bucket.token_requests += value.token_calls - last_calls;
+      calls_valid = true;
+      last_calls = value.token_calls;
       frames_valid = indexed || value.token_calls != 0;
       last_indexed = indexed;
       last_position = position;
@@ -71,7 +76,7 @@ namespace sunshine_present_census {
     totals window[2];
     std::uint32_t last_dxgi = 0;
     bool dxgi_valid = false;
-    std::uint64_t last_position = 0;
-    bool frames_valid = false, last_indexed = false;
+    std::uint64_t last_position = 0, last_calls = 0;
+    bool frames_valid = false, last_indexed = false, calls_valid = false;
   };
 }  // namespace sunshine_present_census

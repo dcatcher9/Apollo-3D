@@ -845,6 +845,33 @@ namespace {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     return done.load(std::memory_order_acquire);
   }
+  // An engine may request the current frame's token again (same index, so Streamline returns the
+  // same token) between tagging and evaluating. That is still one frame: its framed depth tag
+  // must reach the evaluation. A different index at a recycled address is a new frame.
+  void test_repeated_token_request_keeps_frame() {
+    token_source_fixture source;
+    opaque_token next;
+    const std::uint32_t number = 402;
+    mint(next, &number);
+    require(call_v2_constants(source.constants, next.ref(), source.view) == 0 &&
+        call_v2_framed_tag(next.ref(), source.view, &source.tag, 1, nullptr) == 0,
+      "Repeated-token fixture changed native API forwarding");
+    mint(next, &number);
+    require(call_v2_evaluate(0, next.ref(), source.inputs, 1, nullptr) == 0,
+      "Repeated-token evaluation changed native API forwarding");
+    evaluation_snapshot snapshot;
+    require(testing::latest_snapshot(source.view.value, snapshot) &&
+        snapshot.frame.kind == frame_identity_kind::v2_observed_token && snapshot.frame.numeric == number &&
+        snapshot.tags[0].present && snapshot.tags[0].scope == tag_scope::explicit_frame &&
+        snapshot.status == evidence_status::source_associated_evaluation,
+      "Requesting the same frame's token again orphaned that frame's tags and constants");
+    const std::uint32_t following = 403;
+    mint(next, &following);
+    require(call_v2_evaluate(0, next.ref(), source.inputs, 1, nullptr) == 0 &&
+        testing::latest_snapshot(source.view.value, snapshot) && snapshot.frame.numeric == following &&
+        !snapshot.tags[0].present,
+      "A recycled token address for the next frame index inherited the previous frame's tags");
+  }
   void test_token_records_independence(bool shared) {
     token_source_fixture source;
     opaque_token next;
@@ -884,12 +911,22 @@ namespace {
     require(testing::latest_snapshot(source.view.value, initial), "Token fixture omitted initial identity");
     const auto before_remint = depth_observation_revision();
     const auto before_counts = testing::counts();
-    mint(source.token, &source.number); // Same pointer and numeric frame, new generation.
+    // Same pointer and frame index: Streamline returned the current frame's token
+    // again. It remains one frame with its identity and recorded evidence.
+    mint(source.token, &source.number);
     require(depth_observation_revision() == before_remint && testing::counts().dropped == before_counts.dropped &&
-        !source.ready(), "Same-address token remint reused old identity or triggered broad observation loss");
+        source.ready(), "Re-requesting the current frame's token revoked its evidence or caused observation loss");
     const auto reminted = source.publish(source.token);
-    require(reminted.frame.generation > initial.frame.generation && reminted.frame.numeric == initial.frame.numeric,
-      "Same-address token remint failed to establish a distinct exact generation");
+    require(reminted.frame.generation == initial.frame.generation && reminted.frame.numeric == initial.frame.numeric,
+      "Re-requesting the current frame's token changed that frame's identity");
+    // A later index at the same address is a recycled token: a new frame.
+    const std::uint32_t later = source.number + 3;
+    mint(source.token, &later);
+    require(depth_observation_revision() == before_remint && testing::counts().dropped == before_counts.dropped &&
+        !source.ready(), "A recycled token address reused old identity or caused broad observation loss");
+    const auto recycled = source.publish(source.token);
+    require(recycled.frame.generation > initial.frame.generation && recycled.frame.numeric == later,
+      "A recycled token address failed to establish a distinct exact generation");
 
     // An unfinished writer cannot hide the last immutable token publication.
     // Actual lost token registration below must still revoke that identity.
@@ -2182,7 +2219,10 @@ namespace {
         snapshot.tags[0].scope == tag_scope::evaluation_local, "evaluation-local tag did not override frame tag");
     call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
     expect_evidence(selection(&native_a), evidence_status::source_associated_evaluation, "local override leaked into next evaluation");
-    mint(first, &number); // Same address AND same optional numeric index, new generation.
+    // Streamline recycles the address for a later frame index: a new generation. (The
+    // same index returns the same frame's token; see test_repeated_token_request_keeps_frame.)
+    const std::uint32_t recycled_number = number + 3;
+    mint(first, &recycled_number);
     expect_evidence(selection(&native_a), evidence_status::untracked_frame, "token reuse left old frame evidence accepted");
     call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
     expect_evidence(selection(&native_a), evidence_status::missing_constants, "recycled token reused old constants/frame tags");
@@ -3389,6 +3429,9 @@ namespace {
     require(testing::normalized_source(view.value, 1, normalized) && !normalized.source_frame_explicit &&
         normalized.projection.supplied && normalized.resource.kind == sunshine_scene_depth::resource_kind::display_depth,
       "global high-resolution-only FG tag lost camera association");
+    // Streamline recycles a token address for a later frame index; the same
+    // index returns the same frame's token and is not a recycle.
+    ++numeric;
     mint(token, &numeric);
     call_v2_tag(view, &tag, 1, &commands);
     require(testing::latest_snapshot(view.value, snapshot) && snapshot.tag_boundary &&
@@ -3941,6 +3984,7 @@ int main(int argc, char **argv) {
     std::puts("PASS bounded lifecycle lock contention preserves existing resources, records destruction and rejects queued old epochs");
     test_token_records_independence(false);
     test_token_records_independence(true);
+    test_repeated_token_request_keeps_frame();
     test_token_contention_and_remint();
     test_pending_token_lifecycle();
     test_metadata_reader_isolation();
