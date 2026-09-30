@@ -272,15 +272,17 @@ an earlier CPU decision or latching a startup result.
 
 One exception uses session history. Once completed GPU samples have accepted the same alpha
 candidate as a partial UI mask at least three times over at least 2 s, that channel is proven to
-carry UI coverage for the rest of the game session. A later frame with no HUD-less candidate in
-which the proven channel is exactly 1.0 on at least 98% of pixels is full-screen UI and stays flat
-(sampled source 7). A paired HUD-less image, when present, decides full-screen UI itself. Exact
-opacity matters: a channel that is merely above zero almost everywhere can carry other data, such
+carry UI coverage for the rest of the game session. A later frame in which the proven channel is
+exactly 1.0 on at least 98% of pixels is full-screen UI and stays flat (sampled source 7). HUD-less
+checks still decide first: an accepted HUD-less mask or full-screen result wins, and the proven
+channel applies only when they accept nothing. Expedition 33's pause menu with FG on showed why:
+the menu tints the live scene, so 76% of pixels differ from HUD-less, which is neither a HUD mask
+nor full-screen UI, while the proven alpha is opaque. Exact opacity matters: a channel that is merely above zero almost everywhere can carry other data, such
 as luma. Proof is per candidate, so a presented-color alpha proven with frame generation off does
 not prove the tagged Backbuffer's alpha, and a title screen shown before any gameplay has no proof
 yet. Clair Obscur: Expedition 33 needed it: its alpha covers 2-23% of pixels during play and is
-exactly opaque in full-screen menus, and with frame generation off, or before the first level has
-loaded, it tags no HUD-less image.
+exactly opaque in full-screen and pause menus, and with frame generation off, or before the first
+level has loaded, it tags no HUD-less image.
 
 The D3D12 adapter captures Streamline UIAlpha (69, red), UIColorAndAlpha (23, alpha),
 Backbuffer (53, alpha) and HUDLessColor (2, RGB) independently of FG being enabled. A fresh

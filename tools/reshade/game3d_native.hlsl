@@ -247,12 +247,14 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
         difference.x * 100u >= difference.w * 98u && lit * 2u >= difference.w) {
         source = 6u; covered = difference.w;
     }
-    // Without a HUD-less image, an alpha channel that traced partial UI earlier
-    // in this game session and is now exactly opaque on nearly every pixel shows
-    // full-screen UI. An unproven opaque channel may carry no UI at all, and a
-    // channel merely above zero may hold other data (such as luma).
+    // When no HUD-less check accepted the frame, an alpha channel that traced
+    // partial UI earlier in this game session and is now exactly opaque on nearly
+    // every pixel shows full-screen UI. A menu that tints the whole scene changes
+    // too many pixels for a HUD mask and too few for full-screen UI. An unproven
+    // opaque channel may carry no UI at all, and a channel merely above zero may
+    // hold other data (such as luma).
     [unroll] for (uint proven = 0u; proven < 4u; ++proven) {
-        if (!source && !(Sunshine_UICandidates & 16u) && (Sunshine_UICandidates & Sunshine_UIProvenAlpha & (1u << proven)) &&
+        if (!source && (Sunshine_UICandidates & Sunshine_UIProvenAlpha & (1u << proven)) &&
             !invalid[proven] && opaque[proven] * 100u >= difference.w * 98u) {
             source = 7u; covered = difference.w;
         }

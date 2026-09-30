@@ -1890,6 +1890,22 @@ namespace {
     proven_frame(menu, nearly_opaque, {}, {}, expected::empty, "a proven channel merely above zero everywhere is not full-screen UI");
     proven_frame(menu, {}, flattened_ui, {}, expected::empty, "proof belongs to its own candidate");
     proven_frame(final_color, opaque_alpha, {}, correct, expected::hud, "a paired HUD-less image decides instead of proven alpha");
+    // A pause menu that tints the live scene changes too many pixels for a HUD
+    // mask and too few for full-screen UI; the proven opaque channel decides.
+    auto tinted = hudless;
+    for (size_t i = 0; i != pixels * 6 / 10; ++i)
+      for (unsigned byte = 0; byte != 3; ++byte) tinted[i * bpp + byte] ^= 0x80;
+    opaque(tinted);
+    proven_frame(tinted, opaque_alpha, {}, correct, expected::flat, "an inconclusive HUD-less pair defers to the proven channel");
+    proven_frame(tinted, opaque_alpha, {}, correct, expected::flat, "the deferred decision publishes its evidence");
+    {
+      const auto sample = gpu.renderer.consumed_alpha_auto();
+      const auto changed = std::uint64_t(sample.evidence.hudless_changed) * 100u;
+      require(sample.source_kind == 7 && (sample.evidence.candidates & 48u) == 48u &&
+          changed > std::uint64_t(pixels) * 25u && changed < std::uint64_t(pixels) * 98u,
+        "An inconclusive HUD-less pair did not defer to the proven channel");
+    }
+    proven_frame(tinted, nearly_opaque, {}, correct, expected::empty, "an inconclusive pair without a proven opaque channel stays 3D");
     proven_frame(menu, explicit_alpha, {}, {}, expected::hud, "a proven channel still yields its partial mask");
     inputs = {};
     report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 inexact_after_exact_hold=1 proven_alpha_full_frame=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
