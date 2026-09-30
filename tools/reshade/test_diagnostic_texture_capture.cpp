@@ -862,8 +862,8 @@ namespace {
   }
 
   void immediate_consumer_without_list_hooks(fixture &gpu) {
-    // Another tool can swap a consumer list's vtable for a per-object heap
-    // copy that is never hooked (seen in The Witcher 3). A runtime immediate
+    // D3D12Core 1.619 moves a list to a per-object method table inside the
+    // object at its first Reset, which is never hooked. A runtime immediate
     // list needs no list hook: its observed submission and the queue fence
     // retire the read, and nothing is released before that GPU work.
     ComPtr<ID3D12CommandAllocator> allocator;
@@ -897,7 +897,7 @@ namespace {
     };
     require(!copy(false) && diagnostic.result == capture::consumer_status::observer_not_ready,
       "a list with a swapped heap vtable became hook-ready");
-    require(copy(true) && copy(true), "immediate consumer without list hooks was rejected");
+    require(copy(true) && !diagnostic.cookie && copy(true), "immediate consumer without list hooks was rejected");
     readback actual(gpu, target.Get());
     actual.record(list.Get(), target.Get());
     auto target_reference = capture::retain_source(native(target.Get()));
@@ -912,8 +912,37 @@ namespace {
     gpu.queue->ExecuteCommandLists(1, values);
     gpu.wait(); actual.verify(image.width, image.height, 4); gpu.reset(); capture::poll();
     require(target_lifetime.expired(), "the submitted immediate read was not retired by its queue fence");
+    {
+      // A covered immediate list keeps the recording lease, whose checks also
+      // prove it open and outside a render pass: completion alone does not
+      // release it before the recording's Reset.
+      consumer_fixture covered(gpu);
+      auto next = capture::record_local_texture(native(gpu.list.Get()), image.input);
+      require(bool(next), "covered immediate source capture");
+      gpu.submit();
+      capture::finish_diagnostic_texture(next, true);
+      auto output = destination(gpu.device.Get(), DXGI_FORMAT_R10G10B10A2_UNORM);
+      require(capture::acquire_local_texture(next, native(gpu.queue.Get()), pixels) == capture::status::ready &&
+          capture::copy_local_texture(native(covered.list.Get()), native(gpu.queue.Get()), next, native(output.Get()),
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &diagnostic, true) && diagnostic.cookie,
+        "a covered immediate list did not keep its recording lease");
+      readback copied(gpu, output.Get());
+      copied.record(covered.list.Get(), output.Get());
+      auto reference = capture::retain_source(native(output.Get()));
+      std::weak_ptr<const capture::source_reference> output_lifetime = reference;
+      reference = {}; pixels = {};
+      capture::release_diagnostic_texture(next); next = {};
+      output.Reset();
+      check(covered.list->Close(), "covered immediate close");
+      ID3D12CommandList *covered_values[]{covered.list.Get()};
+      gpu.queue->ExecuteCommandLists(1, covered_values);
+      gpu.wait(); copied.verify(image.width, image.height, 4); gpu.reset(); capture::poll();
+      require(!output_lifetime.expired(), "a covered immediate read was released before its recording Reset");
+      covered.reset();
+      require(output_lifetime.expired(), "a covered immediate read outlived its Reset and fence");
+    }
     gpu.check_debug_errors();
-    std::puts("PASS immediate consumer with an unhookable swapped vtable: exact R10 bytes, retained until its observed submission and fence");
+    std::puts("PASS immediate consumer: unhookable swapped vtable uses its observed submission and fence; covered list keeps the recording lease");
   }
 
   void auxiliary_consumer_replay_and_discard(fixture &gpu) {

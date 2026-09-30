@@ -169,6 +169,46 @@ namespace sunshine_streamline::provider {
       std::snprintf(out, sizeof(out), "%s", base ? base + 1 : path);
       return out;
     }
+    // A copied vtable keeps the runtime's functions except the entries its
+    // owner patched, so the owners of its entries name the tool that swapped
+    // it. Reads are fault-safe; the table may already be freed or reused.
+    void describe_refused_table(std::uint64_t table, std::uint64_t command, char *out, std::size_t size) {
+      constexpr unsigned entries = 81; // Through ID3D12GraphicsCommandList7::Barrier.
+      void *values[entries]{};
+      SIZE_T copied{};
+      if (!table || !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void *>(table), values, sizeof(values), &copied) ||
+          copied != sizeof(values)) {
+        std::snprintf(out, size, " refused_table=0x%llx(unreadable)", static_cast<unsigned long long>(table));
+        return;
+      }
+      struct owner { HMODULE module{}; unsigned count{}; unsigned first[4]{}; };
+      owner owners[6]{};
+      unsigned kinds{};
+      for (unsigned i = 0; i != entries; ++i) {
+        HMODULE module{};
+        if (!values[i] || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+              static_cast<LPCSTR>(values[i]), &module)) module = nullptr;
+        unsigned k = 0;
+        while (k != kinds && owners[k].module != module) ++k;
+        if (k == kinds) { if (kinds == std::size(owners)) continue; owners[kinds++].module = module; }
+        if (owners[k].count < std::size(owners[k].first)) owners[k].first[owners[k].count] = i;
+        ++owners[k].count;
+      }
+      const auto offset = table >= command && table - command < 0x10000 ? table - command : 0;
+      int used = std::snprintf(out, size, " refused_table=0x%llx table_offset_from_consumer=0x%llx entries={",
+        static_cast<unsigned long long>(table), static_cast<unsigned long long>(offset));
+      for (unsigned k = 0; k != kinds && used > 0 && std::size_t(used) < size; ++k) {
+        char path[MAX_PATH]{};
+        const char *name = "none";
+        if (owners[k].module && GetModuleFileNameA(owners[k].module, path, sizeof(path))) {
+          const char *base = std::strrchr(path, '\\');
+          name = base ? base + 1 : path;
+        }
+        used += std::snprintf(out + used, size - used, "%s%s:%u@%u,%u,%u,%u", k ? " " : "", name, owners[k].count,
+          owners[k].first[0], owners[k].first[1], owners[k].first[2], owners[k].first[3]);
+      }
+      if (used > 0 && std::size_t(used) < size) std::snprintf(out + used, size - used, "}");
+    }
     const char *name(depth_capture::display_action action) {
       switch (action) {
         case depth_capture::display_action::copy_fresh: return "copy_fresh";
@@ -597,7 +637,7 @@ namespace sunshine_streamline::provider {
       consumer.invalidation != data->last_loss || data->output.ready != data->last_output_ready;
     if (data->logging.due(GetTickCount64(), status != data->last_status ||
         capture_info.failure != data->last_capture_failure || handoff_changed, !previously_owned, !available)) {
-      char text[2048]{};
+      char text[2560]{};
       if (available)
         std::snprintf(text, sizeof(text), "Sunshine %s depth: %s; source_selected=1 snapshot_ready=%u final_ready=%u display=%s consumer=%s loss=%s; allocation=%ux%u active=%u,%u,%u,%u source=%u viewport=%u; metadata_projection=%u output_projection=%u; state=0x%x proof=%u; capture=%llu sequence=%llu present=%llu command=0x%llx cookie=%llu device=%llu expected_device=%llu slot_invalid=%u tracked_commands=%u; producer_queue=0x%llx consumer_queue=0x%llx producer_fence=%llu producer_completed=%llu completion_valid=%u producer_retired=%u; transport=%s resource_id=%llu",
           path_name, depth_capture::name(status), unsigned(data->frame.pixel_ready), unsigned(data->output.ready), name(display), depth_capture::name(consumer.result),
@@ -630,16 +670,23 @@ namespace sunshine_streamline::provider {
           static_cast<unsigned long long>(observer.unreadable), static_cast<unsigned long long>(observer.rejected),
           static_cast<unsigned long long>(observer.barrier_overflow), static_cast<unsigned long long>(observer.submission_overflow),
           static_cast<unsigned long long>(observer.discovery_contention));
+      }
+      {
         // Names why coverage was refused: interface, a slot or function outside
-        // any module (another tool's hook), or too many distinct vtables.
-        char slot_module[64]{}, code_module[64]{};
-        const auto tail = std::strlen(text);
-        std::snprintf(text + tail, sizeof(text) - tail,
-          " refused_interface=%llu refused_discovery=%llu refused_capacity=%llu refused_method=%u refused_slot=0x%llx(%s) refused_code=0x%llx(%s)",
-          static_cast<unsigned long long>(observer.refused_interface), static_cast<unsigned long long>(observer.refused_discovery),
-          static_cast<unsigned long long>(observer.refused_capacity), observer.refused_method,
-          static_cast<unsigned long long>(observer.refused_slot), module_name(observer.refused_slot, slot_module),
-          static_cast<unsigned long long>(observer.refused_code), module_name(observer.refused_code, code_module));
+        // any module (a per-object table or another tool's hook), or too many
+        // distinct vtables.
+        const auto observer = native_observer::counts();
+        if (!available || observer.refused_interface || observer.refused_discovery || observer.refused_capacity) {
+          char slot_module[64]{}, code_module[64]{}, table[512]{};
+          if (observer.refused_discovery) describe_refused_table(observer.refused_table, commands->get_native(), table, sizeof(table));
+          const auto tail = std::strlen(text);
+          std::snprintf(text + tail, sizeof(text) - tail,
+            " refused_interface=%llu refused_discovery=%llu refused_capacity=%llu refused_method=%u refused_slot=0x%llx(%s) refused_code=0x%llx(%s)%s",
+            static_cast<unsigned long long>(observer.refused_interface), static_cast<unsigned long long>(observer.refused_discovery),
+            static_cast<unsigned long long>(observer.refused_capacity), observer.refused_method,
+            static_cast<unsigned long long>(observer.refused_slot), module_name(observer.refused_slot, slot_module),
+            static_cast<unsigned long long>(observer.refused_code), module_name(observer.refused_code, code_module), table);
+        }
       }
       const auto used = std::strlen(text);
       const auto &jitter = data->output.provided.jitter;

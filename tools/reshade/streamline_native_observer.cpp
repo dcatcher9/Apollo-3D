@@ -55,7 +55,7 @@ namespace sunshine_streamline::native_observer {
     std::array<unsigned, method_count> refused_counts{};
     enum class refusal : unsigned { interface_query, discovery, capacity, count };
     std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(refusal::count)> refusals{};
-    std::atomic<std::uintptr_t> last_refused_slot{}, last_refused_code{};
+    std::atomic<std::uintptr_t> last_refused_slot{}, last_refused_code{}, last_refused_table{};
     std::atomic<unsigned> last_refused_method{};
     SRWLOCK targets_lock = SRWLOCK_INIT;
     std::atomic<bool> requested{}, active{};
@@ -294,6 +294,7 @@ namespace sunshine_streamline::native_observer {
     void report_refusal(unsigned method, std::uintptr_t key, refusal cause, std::uintptr_t code) {
       ++refusals[static_cast<unsigned>(cause)];
       last_refused_slot = key; last_refused_code = code; last_refused_method = method;
+      last_refused_table = method == method_count ? key : key - vtable_slots[method] * sizeof(void *);
       ++rejected; invalidate();
     }
     // Reports only a new slot refusal; a full table keeps reporting every one.
@@ -538,7 +539,7 @@ namespace sunshine_streamline::native_observer {
     result.refused_discovery = refusals[static_cast<unsigned>(refusal::discovery)].load();
     result.refused_capacity = refusals[static_cast<unsigned>(refusal::capacity)].load();
     result.refused_slot = last_refused_slot.load(); result.refused_code = last_refused_code.load();
-    result.refused_method = last_refused_method.load();
+    result.refused_method = last_refused_method.load(); result.refused_table = last_refused_table.load();
     if (TryAcquireSRWLockShared(&targets_lock)) {
       for (const auto count : target_counts) result.targets += count;
       ReleaseSRWLockShared(&targets_lock);
@@ -570,7 +571,7 @@ namespace sunshine_streamline::native_observer {
     }
     refused_counts = {};
     for (auto &value : refusals) value = 0;
-    last_refused_slot = last_refused_code = 0; last_refused_method = 0;
+    last_refused_slot = last_refused_code = last_refused_table = 0; last_refused_method = 0;
     calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = 0;
     barrier_overflow = submission_overflow = discovery_contention = 0;
     barrier_callback = nullptr; reset_callback = nullptr; close_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;

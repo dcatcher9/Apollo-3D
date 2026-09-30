@@ -287,7 +287,7 @@ namespace sunshine_streamline::depth_capture {
   // Reset alone never permits reuse. Never adds a queue wait. A ticket cannot
   // switch destination or consumer queue after its first successful copy.
   // immediate: command is the consumer queue's ReShade immediate list (see
-  // copy_current). Its read then needs no command-list hook.
+  // copy_current), which may fall back when its hooks were refused.
   bool copy_diagnostic_texture(std::uint64_t command, std::uint64_t consumer_queue,
     const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
     consumer_diagnostic *diagnostic = nullptr, bool immediate = false);
@@ -315,8 +315,9 @@ namespace sunshine_streamline::depth_capture {
   // An already admitted API capture uses the identical read-lease/copy path.
   // immediate asserts that command is the consumer queue's ReShade immediate
   // list, open outside a render pass: the runtime submits it on that queue and
-  // resets it without replay. Its read is then retired by that observed
-  // submission and the queue fence, without any command-list hook.
+  // resets it without replay. If its hooks were refused, its read is retired by
+  // that observed submission and the queue fence; a covered list keeps the
+  // recording lease, which also verifies it is open and outside a render pass.
   bool copy_current(std::uint64_t command, const packet &value, std::uint64_t destination,
     std::uint32_t destination_state, consumer_diagnostic *diagnostic = nullptr, bool immediate = false);
 

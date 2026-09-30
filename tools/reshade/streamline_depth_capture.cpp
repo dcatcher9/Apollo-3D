@@ -1955,10 +1955,11 @@ namespace sunshine_streamline::depth_capture {
   }
   // An immediate consumer is a ReShade runtime's immediate list, open outside
   // any render pass during its present/effects events. The runtime submits it
-  // on the consumer queue and resets it afterwards, never replaying it. Its
-  // read therefore needs no command-list hook: the lease is released at that
-  // list's next observed submission, followed by the queue fence. Other tools
-  // may swap such a list's vtable for an unhookable per-object copy.
+  // on the consumer queue and resets it afterwards, never replaying it. When
+  // its methods cannot be hooked (D3D12Core 1.619 moves a list to a
+  // per-object table at its first Reset), its read is released at that list's
+  // next observed submission, followed by the queue fence. A covered list
+  // keeps the recording lease and its checks.
   static bool consume_owned(std::uint64_t native, const packet &value, std::uint64_t destination,
       std::uint32_t destination_state, consumer_diagnostic *diagnostic, bool auxiliary = false, bool local_auxiliary = false,
       bool immediate = false) {
@@ -1972,12 +1973,16 @@ namespace sunshine_streamline::depth_capture {
     com_ptr<ID3D12GraphicsCommandList> checked;
     if (!query_native(native, IID_ID3D12GraphicsCommandList, checked)) return result(consumer_status::unsupported_interface);
     native = reinterpret_cast<std::uint64_t>(checked.p);
+    observe_command(native);
+    // The recording lease also proves the list is open and outside a render
+    // pass, so it is used whenever the list is covered. The consumer copies
+    // only between private textures: enhanced barriers cannot change them.
+    // Only an immediate list whose hooks were refused falls back to its
+    // runtime's contract and a submission lease.
+    const bool by_submission = !native_observer::command_ready(native, false);
+    if (by_submission && !immediate) return result(consumer_status::observer_not_ready);
     std::uint64_t cookie{};
-    if (!immediate) {
-      observe_command(native);
-      // The consumer copies only between private textures, so enhanced
-      // barriers elsewhere in the recording cannot change their state.
-      if (!native_observer::command_ready(native, false)) return result(consumer_status::observer_not_ready);
+    if (!by_submission) {
       cookie = native_observer::get_recording_cookie(native);
       if (diagnostic) diagnostic->cookie = cookie;
       if (!cookie) return result(consumer_status::missing_cookie);
@@ -2013,7 +2018,7 @@ namespace sunshine_streamline::depth_capture {
     }
     std::lock_guard lock(mutex);
     command_storage::handle recording;
-    if (!immediate) {
+    if (!by_submission) {
       recording = command(native, cookie, true);
       if (!recording) {
         if (diagnostic) diagnostic->tracked_commands = command_storage::live_count();
@@ -2049,9 +2054,9 @@ namespace sunshine_streamline::depth_capture {
           return result(consumer_status::invalid_destination);
       }
       // One unsubmitted immediate list per slot; repeated reads share it.
-      if (immediate && entry.pending_immediate && entry.pending_immediate != submitted_list)
+      if (by_submission && entry.pending_immediate && entry.pending_immediate != submitted_list)
         return result(consumer_status::ownership_mismatch);
-      for (unsigned i = 0; i != entry.consumers.size(); ++i) if (immediate || !entry.consumers[i] || entry.consumers[i] == cookie) {
+      for (unsigned i = 0; i != entry.consumers.size(); ++i) if (by_submission || !entry.consumers[i] || entry.consumers[i] == cookie) {
         if (!entry.preservation_only && entry.queue != value.queue) {
           // Recheck the actual slot before recording any read. A pending copy
           // must never add a queue dependency to the application's schedule.
@@ -2061,7 +2066,7 @@ namespace sunshine_streamline::depth_capture {
               !progress.valid() || !entry.producer_fence || progress.completed < entry.producer_fence)
             return result(consumer_status::capture_not_ready);
         }
-        if (immediate) entry.pending_immediate = submitted_list;
+        if (by_submission) entry.pending_immediate = submitted_list;
         else { entry.consumers[i] = cookie; entry.consumer_recordings[i] = recording.life(); }
         entry.acquired = true;
         if (auxiliary) {
