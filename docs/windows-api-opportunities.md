@@ -466,7 +466,7 @@ translation within one unchanged authority do not.
 This live route currently authorizes only Desktop Duplication. WGC has no `LastPresentTime`
 equivalent for separating content from cursor-only compositor frames and therefore uses full-frame
 V2. Diagnostics may record the selected frame-bound window region and observer/mapping provenance,
-but that observation is not the live renderer authority by itself. Current Dump 3D schema 40 records
+but that observation is not the live renderer authority by itself. Current Dump 3D schema 41 records
 the ROI-local analysis field, integer tensor-content rectangle, padded-area fraction, fit method,
 authority kind, authoritative full-source placement/collar contract, and exact full-source inverse
 map as distinct evidence. The strict reader accepts only the current schema and identity; historical
@@ -527,7 +527,7 @@ client observer, Chromium-first priority, causal continuity, raw virtual-desktop
 same-output containment, exact-full-source canonicalization, arbitrary-aspect integer contain-fit,
 edge-replicated excluded padding, exact direct-offset DAV2/OCR sampling, authority-specific state,
 full-source rendering, and the outside-only zero-plane collar are implemented. Active ROI frames are
-represented by current Dump 3D schema 40. Strict replay reproduces the integer content plan and
+represented by current Dump 3D schema 41. Strict replay reproduces the integer content plan and
 validates both the ROI-local and full-source coordinate domains; mismatched evidence fails closed.
 
 ---
@@ -710,7 +710,7 @@ depth statistics, cut evidence, history, and OCR. Inspect both disparity signs a
 edges: the ROI interior must remain unchanged, the outside-only collar must respect the production
 slope limits, and the farther surround must be exactly zero. A pure window
 translation must retain scene state; ROI/full, authority, identity, size, and transfer-domain changes
-must reset it. Capture a schema-40 ROI Dump 3D and require its tensor-content rectangle, padding
+must reset it. Capture a schema-41 ROI Dump 3D and require its tensor-content rectangle, padding
 fraction, and fit method to reproduce the integer plan; require its full-source inverse map to be
 identity beyond the conservative collar. The ROI-local final field alone is not sufficient evidence.
 

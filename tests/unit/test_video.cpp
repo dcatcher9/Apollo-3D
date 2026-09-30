@@ -3586,7 +3586,7 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
   );
 }
 
-TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema40Contract) {
+TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema41Contract) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
   );
@@ -3610,7 +3610,7 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema40C
   EXPECT_LT(resolve, condition);
   EXPECT_EQ(resolver.find("condition_prepare_main"), std::string::npos);
 
-  EXPECT_NE(source.find("{\"schema\", 40}"), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 41}"), std::string::npos);
   for (const auto *qualification_key : {
          "{\"qualification_policy\", {",
          "{\"corner_filter_applies_to\", \"non-ribbon-ordinary-cores\"}",
@@ -6275,7 +6275,7 @@ TEST(DirectxShaderSourceTest, LocalRgbPresentationPreservesTheTransferContract) 
     std::string::npos
   );
   EXPECT_NE(
-    display.find("copy_rgb(img_ctx.encoder_texture.get(), input_is_linear)"),
+    display.find("copy_rgb(img_ctx->encoder_texture.get(), input_is_linear)"),
     std::string::npos
   );
 }
