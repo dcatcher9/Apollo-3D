@@ -1487,7 +1487,11 @@ enabled FG the retained copy must belong to that FG scope. Failed consumer copie
 source association (for example FG Off before an ordinary source exists), focus/technique/lifecycle
 changes and expiry invalidate reusable history until a fresh copy succeeds. A nomination gap cannot
 prove an as-yet unknown depth layout; its same-source reuse remains subject to the short bound and
-color dimensions. Source pointers may rotate normally without invalidating the private copied depth.
+color dimensions. Under required FG a present without a nomination still names the FG scope but no
+sequence; that gap holds the retained copy instead of reading as a source change. Before this, The
+Witcher 3 with FG on (one to four generated frames) dropped depth for 94-172 ms whenever one real
+frame's FG tag capture was refused (`status=unsupported_lifetime`, reported as
+`source_changed`). Source pointers may rotate normally without invalidating the private copied depth.
 
 Metadata bookkeeping never discards finished pixels. An SL camera reset, invalid or missing camera
 constants, a null or replaced tag and an observation loss affect only later evaluations: a reset

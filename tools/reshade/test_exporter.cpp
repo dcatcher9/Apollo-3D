@@ -257,6 +257,13 @@ namespace {
       auto fg_pending = pending; fg_pending.source_id = fg.metadata.source_id;
       const depth_capture::selection_policy fg_policy{true, metadata.epoch, metadata.viewport};
       require(held(fg, fg_pending, {}, fg_policy), "FG pending frame discarded its finished input depth");
+      // A present with no FG nomination (for example an unusable tag lifetime) gets the FG
+      // scope without a sequence from classify_acquisition. It contradicts nothing: hold.
+      depth_capture::acquisition_decision fg_gap;
+      fg_gap.epoch = fg_policy.epoch; fg_gap.viewport = fg_policy.viewport; fg_gap.source_id = fg.metadata.source_id;
+      require(held(fg, fg_gap, {}, fg_policy), "A present without an FG nomination discarded finished FG input depth");
+      auto other_scope = fg_gap; ++other_scope.source_id;
+      require(!held(fg, other_scope, {}, fg_policy), "A different FG source without a sequence held old depth");
       require(!held(previous, pending, {}, fg_policy) &&
           std::strcmp(decide(previous, pending, {}, fg_policy).reason, "FG_scope_changed") == 0,
         "Ordinary depth stood in for required FG input");

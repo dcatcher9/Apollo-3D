@@ -27,12 +27,14 @@ namespace sunshine_streamline::depth_capture {
     }
     // Logical source identity survives ordinary rotation of resource pointers.
     // Without any current nomination there is no newer identity to contradict.
+    // Required FG without a nomination names its scope but no sequence (zero):
+    // a different scope still contradicts, a missing sequence does not.
     inline bool same_source(const retained_depth &previous, const acquisition_decision &current) {
       const auto &before = previous.metadata;
       if (!current.epoch) return true;
       return current.provider == before.provider && current.epoch == before.epoch &&
         current.source_id == before.source_id && current.viewport == before.viewport &&
-        current.sequence >= before.sequence;
+        (!current.sequence || current.sequence >= before.sequence);
     }
   }
 
