@@ -106,7 +106,6 @@ namespace platf::game3d_debug {
         case wire::artifact::ui_source_color:
           return "ui_source_color";
         default:
-          if (const auto *layer = wire::ui_layer_name(static_cast<unsigned>(kind))) return layer;
           return sunshine_game3d::ui_resources::artifact_name(static_cast<unsigned>(kind));
       }
     }

@@ -848,20 +848,6 @@ available UI mask or a match to the exported frame. Before using either input to
 capture it within its declared resource lifetime and verify frame, extent, color-space and
 pixel semantics. Comparing unsynchronized final and HUDless images is not reliable UI separation.
 
-Some games expose no UI buffer through any vendor API but draw UI into their own offscreen layer.
-Frostbite's HDR pipeline, which Dead Space (2023) uses, draws UI into an RGBA8 target at backbuffer
-resolution with premultiplied alpha and composites it in the final pass; Unreal does the same with
-its HDR UI composite mode. Such a layer is cleared to transparent black every frame, so while a
-request is armed the add-on records each clear of a single-sample 2D color target that matches the
-swapchain size, has an alpha channel, is not a back buffer and is cleared to exactly (0, 0, 0, 0).
-Clearing requires the render-target state on every API, so the first such clear of each target
-copies it before the clear erases it: the copy shows the previous frame's content. At most three
-targets are copied, as optional artifacts `ui_layer_candidate_0` to `_2` (IDs 40-42) with RGB
-and alpha previews, and `ui_layer_census` lists each target's size, format, clears seen while
-armed and capture status. These are candidates only: nothing verifies them as UI, and live
-detection does not use them. They establish whether a game has a usable offscreen UI layer before
-any such input is admitted. Games that draw UI straight onto the back buffer show no candidate.
-
 The request uses diagnostic wire v3 with capacity for 40 textures, independent of streaming SBS v2.
 Host and add-on must agree on this mapping version; incompatible versions fail explicitly.
 The additive on-disk artifact schema remains `sunshine.game3d.dump.v1`.

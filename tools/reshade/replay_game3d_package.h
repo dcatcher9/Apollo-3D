@@ -46,8 +46,6 @@ namespace sunshine_game3d::replay {
       if (kind == primary[i]) return i + 1;
     for (const auto &entry : ui_resources::catalog)
       if (kind == entry.file_stem) return entry.artifact_id;
-    for (unsigned i = 0; i < game3d_debug::ui_layer_count; ++i)
-      if (kind == game3d_debug::ui_layer_names[i]) return static_cast<unsigned>(game3d_debug::artifact::ui_layer_0) + i;
     return 0;
   }
 
@@ -313,7 +311,7 @@ namespace sunshine_game3d::replay {
       require(entry.at("layout") == "tightly packed rows, top to bottom, native little-endian DXGI pixels", "Unsupported artifact packing");
       total += a.byte_count;
       require(total <= max_package_bytes, "Dump exceeds the capture memory limit");
-      if (ui_resources::is_optional(id) || game3d_debug::ui_layer_artifact(id)) {
+      if (ui_resources::is_optional(id)) {
         // Preserve each optional allocation's own extent/format. Validate it
         // fully even though replay never opens or uploads this diagnostic file.
         p.ignored_optional_artifacts.push_back(a.kind);

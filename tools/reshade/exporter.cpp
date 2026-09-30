@@ -36,7 +36,6 @@
 #include <utility>
 #include <windows.h>
 #include "game3d_slow_step.h"
-#include "game3d_ui_layer.h"
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   #include "test_overlay_patch.h"
@@ -1471,8 +1470,7 @@ namespace {
       proof.frame = std::move(frame);
     }
 
-    // True for the foreground Present of a pending Dump 3D request.
-    bool begin_present(std::uint64_t swapchain, api::color_space color) {
+    void begin_present(std::uint64_t swapchain, api::color_space color) {
       std::lock_guard<std::mutex> lock(mutex_);
       bool diagnostic_frame = false;
       const bool awaiting_diagnostic = debug_dump_.awaiting_capture();
@@ -1491,7 +1489,6 @@ namespace {
         deactivate(generation_->runtime);
       }
       colors_[swapchain] = color;
-      return diagnostic_frame;
     }
 
     void finish_present(std::uint64_t queue, std::uint64_t swapchain) {
@@ -2031,7 +2028,6 @@ namespace {
     // Observer metadata releases its source leases while capture/UI owners are
     // still alive; capture keeps any leases required by outstanding GPU work.
     addon_session().end([&] {
-      sunshine_game3d::ui_layer::unregister_events();
       sunshine_game3d::depth_input::shutdown_observers();
       sunshine_depth::shutdown();
       reshade::unregister_addon(addon, reshade);
@@ -2108,8 +2104,7 @@ namespace {
   void on_begin_present(api::command_queue *, api::swapchain *swapchain, const api::rect *, const api::rect *, std::uint32_t, const api::rect *) {
     try {
       if (publisher) {
-        if (publisher->begin_present(swapchain->get_native(), swapchain->get_color_space()))
-          sunshine_game3d::ui_layer::observe_output(swapchain);
+        publisher->begin_present(swapchain->get_native(), swapchain->get_color_space());
         publisher->render_present(swapchain);
       }
     } catch (...) {
@@ -2210,7 +2205,6 @@ extern "C" {
       reshade::register_event<reshade::addon_event::finish_present>(sunshine_addon_lifetime::guarded<on_finish_present>);
       reshade::register_event<reshade::addon_event::reshade_open_overlay>(sunshine_addon_lifetime::guarded<on_overlay>);
       reshade::register_event<reshade::addon_event::reshade_overlay>(sunshine_addon_lifetime::guarded<on_draw_overlay>);
-      sunshine_game3d::ui_layer::register_events();
       return true;
     } catch (...) {
       teardown_addon(addon, reshade);

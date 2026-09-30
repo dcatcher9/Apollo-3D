@@ -186,18 +186,6 @@ TEST(Game3dDebugPreview, ConsumedUiAlphaIsDistinctFromSourceAndLatestOptionalBac
   EXPECT_THROW(preview::generate(output.path, json::object(), invalid), std::runtime_error);
 }
 
-TEST(Game3dDebugPreview, CandidateUiLayersPreviewCodeValuesAndAlpha) {
-  preview_directory output;
-  const auto layer = bytes<std::uint8_t>({10, 20, 30, 0, 200, 100, 50, 255});
-  const std::array<preview::image_view, 2> inputs {{{"ui_layer_candidate_0", 2, 1, 28, layer}, {"ui_layer_candidate_2", 2, 1, 28, layer}}};
-  const auto report = preview::generate(output.path, json::object(), inputs);
-  EXPECT_TRUE(report.at("optional_errors").empty()) << report.at("optional_errors").dump();
-  for (const char *name : {"ui_layer_candidate_0", "ui_layer_candidate_2"}) {
-    EXPECT_EQ(read_png(output.path / (std::string(name) + ".png")), (std::vector<std::uint8_t>{10, 20, 30, 200, 100, 50}));
-    EXPECT_EQ(read_png(output.path / (std::string(name) + "_alpha.png")), (std::vector<std::uint8_t>{0, 0, 0, 255, 255, 255}));
-  }
-}
-
 TEST(Game3dDebugPreview, OptionalMasksHaveFixedScaleAndColorAlphaHasIndependentUnknownTransfer) {
   preview_directory output;
   auto zero = bytes<std::uint8_t>({0, 0});

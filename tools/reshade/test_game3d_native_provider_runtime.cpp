@@ -178,30 +178,6 @@ namespace {
       D3D12_PLACED_SUBRESOURCE_FOOTPRINT before_footprint{}, after_footprint{};
       fill_upload(before_upload, desc, expected.data(), before_footprint);
       fill_upload(after_upload, desc, overwritten.data(), after_footprint);
-      // An offscreen UI layer as Frostbite and Unreal's HDR UI composite draw
-      // it: output resolution, cleared to transparent black every frame, then UI.
-      com_ptr<ID3D12Resource> layer, layer_upload;
-      com_ptr<ID3D12DescriptorHeap> layer_heap;
-      auto layer_desc = desc;
-      layer_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-      layer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-      checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &layer_desc,
-        D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(layer.put())), "Create offscreen UI layer");
-      D3D12_DESCRIPTOR_HEAP_DESC layer_heap_desc{};
-      layer_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; layer_heap_desc.NumDescriptors = 1;
-      checked(game->CreateDescriptorHeap(&layer_heap_desc, IID_PPV_ARGS(layer_heap.put())), "Create UI layer RTV heap");
-      const auto layer_rtv = layer_heap->GetCPUDescriptorHandleForHeapStart();
-      game->CreateRenderTargetView(layer.p, nullptr, layer_rtv);
-      std::vector<std::uint8_t> layer_pattern(size_t(width) * height * 4);
-      for (unsigned y = height / 8; y < height / 4; ++y) for (unsigned x = width / 8; x < width / 4; ++x) {
-        const auto offset = (size_t(y) * width + x) * 4;
-        layer_pattern[offset] = static_cast<std::uint8_t>((x * 5 + y) & 255);
-        layer_pattern[offset + 1] = 200;
-        layer_pattern[offset + 2] = static_cast<std::uint8_t>((y * 3) & 255);
-        layer_pattern[offset + 3] = 255;
-      }
-      D3D12_PLACED_SUBRESOURCE_FOOTPRINT layer_footprint{};
-      fill_upload(layer_upload, layer_desc, layer_pattern.data(), layer_footprint);
       const auto copy = [&](ID3D12GraphicsCommandList *list, ID3D12Resource *upload,
                             const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint) {
         transition(list, mask.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -220,18 +196,6 @@ namespace {
         real_frame();
         auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
         copy(list, before_upload.p, before_footprint);
-        // The game records through ReShade's command-list proxy, so its clear
-        // event fires; the unwrapped native list above would bypass it.
-        auto *game_list = commands.p;
-        const float transparent[4]{};
-        game_list->ClearRenderTargetView(layer_rtv, transparent, 0, nullptr);
-        transition(game_list, layer.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
-        D3D12_TEXTURE_COPY_LOCATION layer_from{}, layer_to{};
-        layer_from.pResource = layer_upload.p; layer_from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        layer_from.PlacedFootprint = layer_footprint;
-        layer_to.pResource = layer.p; layer_to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        game_list->CopyTextureRegion(&layer_to, 0, 0, 0, &layer_from, nullptr);
-        transition(game_list, layer.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
         abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
         resource.type = resource_type; resource.native = mask.p; resource.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         resource.width = width; resource.height = height; resource.native_format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
@@ -306,27 +270,6 @@ namespace {
         optional = true;
       }
       require(optional, "Production dump omitted the observed tag23 capture");
-      // The census copies the layer before its next clear: the previous frame's UI.
-      char layer_source[24];
-      std::snprintf(layer_source, sizeof(layer_source), "0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(layer.p)));
-      unsigned layer_artifact{};
-      for (const auto &entry : metadata.at("ui_layer_census").at("candidates"))
-        if (entry.at("source") == layer_source && entry.at("captured") == true && entry.at("dxgi_format") == 28 &&
-            entry.at("width") == width && entry.at("height") == height && entry.at("clears_while_armed") >= 1)
-          layer_artifact = entry.at("artifact_id");
-      if (!layer_artifact) throw std::runtime_error("Dump census missed the offscreen UI layer: " + metadata.at("ui_layer_census").dump());
-      bool layer_bytes = false;
-      for (unsigned i = 0; i < box.state->response.texture_count; ++i) {
-        const auto &item = box.state->response.textures[i];
-        if (unsigned(item.kind) != layer_artifact) continue;
-        require(item.dxgi_format == DXGI_FORMAT_R8G8B8A8_UNORM && item.width == width && item.height == height,
-          "Offscreen UI layer copy changed format or extent");
-        com_ptr<ID3D12Resource> copied;
-        checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(item.handle), IID_PPV_ARGS(copied.put())), "Open UI layer copy");
-        require(read(copied.p, D3D12_RESOURCE_STATE_COMMON) == layer_pattern, "Offscreen UI layer copy is not the drawn layer");
-        layer_bytes = true;
-      }
-      require(layer_bytes, "Dump omitted the captured offscreen UI layer");
       std::array<com_ptr<ID3D12Resource>, 2> retained;
       std::array<std::vector<std::uint8_t>, 2> retained_bytes;
       unsigned retained_count{};
@@ -367,7 +310,7 @@ namespace {
         require(read(retained[i].p, D3D12_RESOURCE_STATE_COMMON) == retained_bytes[i],
           "Host acknowledgement or later game write changed UI snapshot");
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
-        " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 frame_tags=" << bool(frame_tag) << '\n';
+        " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 frame_tags=" << bool(frame_tag) << '\n';
       std::puts("PASS actual public SL tag23 hook: typeless90 to typed87, automatic GPU mask equals pre-overwrite alpha and optional dump exact before opaque overwrite; host lease immutable");
     }
 
