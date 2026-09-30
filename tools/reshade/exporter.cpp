@@ -338,7 +338,7 @@ namespace {
   }
 
   // Own native objects rather than ReShade wrappers, which disappear during runtime teardown.
-  // Why a presentation carries no depth, for the FG output counters. unavailable: the
+  // Why a presentation carries no depth, for the SBS output counters. unavailable: the
   // provider had none this Present (source switch, FG toggle, expiry). The reuse reasons
   // are a generated/pending frame the provider did give depth, refused here because the
   // previous presentation had none or resolved its scene for another source.
@@ -363,7 +363,10 @@ namespace {
     std::chrono::steady_clock::time_point inactive_since{};
     // Diagnostic disposition travels with this copy until its slot is actually
     // published. A later effects callback must not relabel an earlier copy.
-    bool pending_fg_output = false, pending_depth_ready = false, pending_reused_depth = false;
+    bool pending_game_output = false, pending_fg_output = false, pending_depth_ready = false, pending_reused_depth = false;
+    // With depth: rendered as the colour frame (scene not placed or strength
+    // blend zero), or still fading in.
+    bool pending_scene_flat = false, pending_scene_fading = false;
     depth_gap pending_depth_gap = depth_gap::none;
     std::array<std::unique_ptr<sunshine::overlay::compositor_t>, wire::slot_count> overlays;
     // A D3D12 command list does not retain the resource referenced by a recorded copy.
@@ -728,12 +731,16 @@ namespace {
     bool proof_checked = false;
     bool rendered_since_present = false;
     frame_decision_t frame;
+    // Every Game 3D publication, with or without frame generation.
     struct {
+      std::uint64_t published = 0, fg = 0;
       std::uint64_t published_fresh_depth = 0, published_reused_depth = 0;
       std::uint64_t published_depth_missing = 0, next_log = 0;
       // published_depth_missing by depth_gap reason.
       std::uint64_t missing_unavailable = 0, missing_reuse_after_gap = 0, missing_reuse_other_source = 0;
-    } fg_output;
+      // Publications with depth that showed the colour frame or were fading in.
+      std::uint64_t scene_flat = 0, scene_fading = 0;
+    } output;
     // Which Presents Game 3D sees, against DXGI's and Streamline's counts (present_census.h).
     struct {
       sunshine_present_census::counter counter;
@@ -1796,7 +1803,14 @@ namespace {
         // The scalar belongs to this exact packed texture, including retained
         // exports. ReShade's own controls and cursor are at screen disparity.
         generation_->pending_ui_parallax_uv = addon_render && !overlay_open(runtime) ? proof.native_ui_parallax_uv : 0.f;
+        generation_->pending_game_output = game;
         generation_->pending_fg_output = game && proof.frame.diagnostics.frame_generation_active;
+        {
+          const auto &scene = proof.frame.scene;
+          const bool placed = scene.ready && scene.blend > 0.f;
+          generation_->pending_scene_flat = scene.owned && proof.frame.depth_ready && !placed;
+          generation_->pending_scene_fading = scene.owned && proof.frame.depth_ready && placed && scene.blend < 1.f;
+        }
         generation_->pending_depth_ready = proof.frame.depth_ready;
         generation_->pending_reused_depth = proof.frame.reused_depth;
         generation_->pending_depth_gap = proof.frame.gap;
@@ -1954,11 +1968,13 @@ namespace {
       }
     }
 
-    void log_fg_output(api::effect_runtime *runtime, runtime_t &proof, std::uint64_t now) {
-      auto &counts = proof.fg_output;
-      if (!proof.frame.diagnostics.frame_generation_active || now < counts.next_log) return;
-      char text[640]{};
-      std::snprintf(text, sizeof(text), "Sunshine SBS FG output: published_fresh_depth=%llu published_reused_depth=%llu published_depth_missing=%llu (unavailable=%llu reuse_after_gap=%llu reuse_other_source=%llu) runtime=0x%llx generation=%llu; new color publications, reused depth is bounded and does not advance calibration; unavailable reasons are in Sunshine depth readiness",
+    void log_output(api::effect_runtime *runtime, runtime_t &proof, std::uint64_t now) {
+      auto &counts = proof.output;
+      if (now < counts.next_log) return;
+      char text[768]{};
+      std::snprintf(text, sizeof(text), "Sunshine SBS output: published=%llu fg=%llu scene_flat=%llu scene_fading=%llu published_fresh_depth=%llu published_reused_depth=%llu published_depth_missing=%llu (unavailable=%llu reuse_after_gap=%llu reuse_other_source=%llu) runtime=0x%llx generation=%llu; cumulative Game 3D publications; scene_flat had depth but showed the colour frame; reused depth is bounded and does not advance calibration; unavailable reasons are in Sunshine depth readiness",
+        static_cast<unsigned long long>(counts.published), static_cast<unsigned long long>(counts.fg),
+        static_cast<unsigned long long>(counts.scene_flat), static_cast<unsigned long long>(counts.scene_fading),
         static_cast<unsigned long long>(counts.published_fresh_depth), static_cast<unsigned long long>(counts.published_reused_depth),
         static_cast<unsigned long long>(counts.published_depth_missing),
         static_cast<unsigned long long>(counts.missing_unavailable), static_cast<unsigned long long>(counts.missing_reuse_after_gap),
@@ -1977,26 +1993,30 @@ namespace {
       slot.cursor_plane_flags = wire::cursor_plane_present;
       slot.ui_parallax_uv = generation_->pending_ui_parallax_uv;
       store_state(slot, generation_->id, wire::slot_state::ready);
-      if (generation_->pending_fg_output) {
+      if (generation_->pending_game_output) {
         const auto found = runtimes_.find(generation_->runtime);
         if (found != runtimes_.end()) {
-          auto &proof = found->second;
+          auto &counts = found->second.output;
+          ++counts.published;
+          if (generation_->pending_fg_output) ++counts.fg;
+          if (generation_->pending_scene_flat) ++counts.scene_flat;
+          if (generation_->pending_scene_fading) ++counts.scene_fading;
           if (generation_->pending_depth_ready) {
-            if (generation_->pending_reused_depth) ++proof.fg_output.published_reused_depth;
-            else ++proof.fg_output.published_fresh_depth;
+            if (generation_->pending_reused_depth) ++counts.published_reused_depth;
+            else ++counts.published_fresh_depth;
           }
           else {
-            ++proof.fg_output.published_depth_missing;
+            ++counts.published_depth_missing;
             switch (generation_->pending_depth_gap) {
-              case depth_gap::reuse_after_gap: ++proof.fg_output.missing_reuse_after_gap; break;
-              case depth_gap::reuse_other_source: ++proof.fg_output.missing_reuse_other_source; break;
-              default: ++proof.fg_output.missing_unavailable; break;
+              case depth_gap::reuse_after_gap: ++counts.missing_reuse_after_gap; break;
+              case depth_gap::reuse_other_source: ++counts.missing_reuse_other_source; break;
+              default: ++counts.missing_unavailable; break;
             }
           }
-          log_fg_output(generation_->runtime, proof, now);
+          log_output(generation_->runtime, found->second, now);
         }
       }
-      generation_->pending_fg_output = false;
+      generation_->pending_game_output = generation_->pending_fg_output = false;
     }
 
     void publish(const wire::metadata_t &metadata, bool reset_slots = false, api::effect_runtime *owner = nullptr) {

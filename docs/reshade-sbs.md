@@ -1608,16 +1608,19 @@ required by source selection, and whether its GPU storage has retired. Metadata-
 retain their existing no-GPU-storage semantics. Neither a GPU fence completing nor logical
 supersession by itself permits recycling a pixel-backed slot.
 
-While FG is active, `Sunshine SBS FG output` reports cumulative per-runtime publication counters
-at most once every five seconds. `published_fresh_depth`, `published_reused_depth` and
+`Sunshine SBS output` reports cumulative per-runtime Game 3D publication counters at most once
+every five seconds, with or without FG: `published` and, of those, `fg` with frame generation
+active. `scene_flat` counts publications that had depth but showed the colour frame because the
+scene was not placed or its strength blend was zero; `scene_fading` counts those still ramping in.
+`published_fresh_depth`, `published_reused_depth` and
 `published_depth_missing` distinguish actual shared-ring publications using fresh, reused or
 unavailable depth. Their disposition is retained with the pending export copy. Missing depth is
 split by reason: `unavailable` (the provider had none this Present, for example a source switch,
 an FG toggle or expiry; `Sunshine depth readiness` names the provider's reason), `reuse_after_gap`
 (a generated or pending frame whose previous presentation had no depth) and `reuse_other_source`
 (its depth belongs to another source than the previous presentation's scene). These classify
-depth availability, not stereo pixels: diagnostics, zero strength and calibration can change the
-rendered image. Runtime reload/destruction resets these counters.
+depth availability; `scene_flat` and `scene_fading` classify placement. Runtime reload/destruction
+resets these counters.
 
 Game 3D captures color at ReShade's Present event, so it sees exactly the Presents that pass
 through ReShade's swapchain wrapper. Whether frame-generated images are among them depends on how
