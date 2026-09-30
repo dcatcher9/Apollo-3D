@@ -1631,6 +1631,22 @@ namespace {
     require(query_depth_source(old_query) == evidence_status::missing_constants,
       "direct source admission changed the existing stricter nomination query");
 
+    // Direction is a fixed viewport convention: a token without its own camera
+    // takes direction, never projection or jitter, from the viewport's recent
+    // valid camera (the invalid one above supplied none).
+    {
+      auto valid = modern_camera(); valid.common.jitter_offset[0] = .25f;
+      mint(token, nullptr); call_v2_constants(valid, token.ref(), view); call_v2_tag(view, &tag, 1, nullptr); evaluate();
+      sunshine_scene_depth::frame framed;
+      require(testing::normalized_source(view.value, 0, framed) && framed.projection.supplied &&
+          framed.projection.direction_supplied && framed.jitter.supplied, "valid camera did not calibrate its own frame");
+      mint(token, nullptr); call_v2_tag(view, &tag, 1, nullptr); evaluate();
+      require(testing::normalized_source(view.value, 0, normalized) && !normalized.projection.supplied &&
+          normalized.projection.direction_supplied && normalized.projection.reversed == framed.projection.reversed &&
+          !normalized.jitter.supplied,
+        "a camera-less frame lost the viewport's direction or borrowed its projection or jitter");
+    }
+
     result_v2 = -1; evaluate(); result_v2 = 0;
     require(!testing::normalized_source(view.value, 0, normalized), "failed evaluation exposed a normalized source");
     call_v2_tag(view, &tag, 1, nullptr); evaluate();

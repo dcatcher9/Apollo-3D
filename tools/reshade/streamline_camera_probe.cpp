@@ -1015,6 +1015,14 @@ namespace sunshine_streamline {
         if (saved->loss != loss) out.status = evidence_status::observation_lost;
         else if (out.decoded != decode_status::ok) out.status = evidence_status::rejected_constants;
       }
+      if (record.has_camera && record.decoded == decode_status::ok && record.camera.depth_inverted <= 1 &&
+          record.camera.reset <= 1 && validate(record.camera).valid()) {
+        const auto now = GetTickCount64();
+        if (now >= record.camera_tick && now - record.camera_tick < sunshine_scene_depth::maximum_source_age_ms) {
+          out.viewport_direction = true;
+          out.viewport_inverted = record.camera.depth_inverted;
+        }
+      }
       // Freeze history continuity with this camera/frame tuple before the native
       // evaluation. It ends at this viewport's reset or at an actual observation
       // loss, which may have hidden a reset. Both counters only increase.
@@ -1442,11 +1450,13 @@ namespace sunshine_streamline {
           snapshot.status == evidence_status::camera_reset) &&
         snapshot.projection.valid() && snapshot.camera.reset <= 1 && tag.present && tag.supported &&
         tag.value.viewport == snapshot.viewport && buffers::is_depth(tag.value.type);
-      const bool direction = snapshot.frame_correlated && snapshot.decoded == decode_status::ok &&
+      const bool correlated_direction = snapshot.frame_correlated && snapshot.decoded == decode_status::ok &&
         snapshot.camera.depth_inverted <= 1;
+      const bool direction = correlated_direction || snapshot.viewport_direction;
+      const auto inverted = correlated_direction ? snapshot.camera.depth_inverted : snapshot.viewport_inverted;
       value.projection = {valid ? snapshot.projection.depth_offset : 0.0,
         valid ? snapshot.projection.depth_scale : 0.0, valid,
-        direction && ((snapshot.camera.depth_inverted != 0) != (tag.precision_scale < 0)), direction};
+        direction && ((inverted != 0) != (tag.precision_scale < 0)), direction};
       value.projection.raw_scale = tag.precision_scale;
       value.projection.raw_bias = tag.precision_bias;
       if (tag.value.type == buffers::linear_depth) {
@@ -1753,7 +1763,8 @@ namespace sunshine_streamline {
         if (!enabled) {
           // A stale camera cannot calibrate this call, but the call still owns
           // its explicit OnlyValidNow depth. Keep that raw-only fallback free
-          // of stale camera, jitter, direction and SDK frame claims.
+          // of stale camera, jitter and SDK frame claims; the viewport's depth
+          // direction convention (viewport_direction) is not a frame claim.
           snapshot.frame = {}; snapshot.camera = {}; snapshot.projection = {};
           snapshot.decoded = decode_status::short_buffer;
           snapshot.camera_tick = snapshot.camera_sequence = 0;

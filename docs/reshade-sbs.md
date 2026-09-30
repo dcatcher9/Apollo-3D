@@ -1493,6 +1493,12 @@ revision is that loss count plus its own resets. The reset feedback discards old
 while retaining established gain and zero placement; it does not force a valid current depth frame
 to render mono. The Witcher 3 exercises both cases: another viewport sends reset constants every
 frame, and the depth tag is cleared after each evaluation.
+Depth direction is a fixed convention of a viewport, unlike its matrices. When a capture has no
+frame-correlated camera (The Witcher 3's FG depth arrives this way while its camera is valid), a
+valid camera of the same viewport seen within the source age still supplies the
+direction. Projection, metric scale and jitter continue to require the frame's own camera; an
+invalid or older camera supplies nothing. Without any direction, relative calibration waits for
+clear-value evidence and Game 3D stays mono.
 Reused frames preserve the real capture's sequence/timestamp/projection, skip new depth readback
 and calibration updates, and keep the last matching resolved scene parameters. The strength slider
 still applies. Neither reuse nor a new pending nomination extends the age limit. The overlay marks

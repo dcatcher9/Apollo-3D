@@ -135,6 +135,11 @@ namespace sunshine_streamline {
     bool successful_evaluation{}, frame_correlated{}, recording_stable{};
     bool tag_boundary{}; // Copied synchronously while an OnlyValidNow tag is valid.
     bool frame_generation_input{}; // An independently observed enabled FG role, not implied by tagging.
+    // Depth direction is a fixed convention of a viewport, unlike its matrices.
+    // Without a frame-correlated camera, a recent valid camera of the same
+    // viewport still supplies direction (never projection or metric scale).
+    bool viewport_direction{};
+    std::uint32_t viewport_inverted{};
   };
   // Returns a value copy, never live pointers or mutable internal storage. Even
   // tracked_content_evaluation is NOT permission to drive geometry: complete
