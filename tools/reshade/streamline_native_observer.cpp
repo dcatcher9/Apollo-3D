@@ -548,6 +548,7 @@ namespace sunshine_streamline::native_observer {
   }
   suppression_scope::suppression_scope() { ++suppression_depth; }
   suppression_scope::~suppression_scope() { --suppression_depth; }
+  bool observation_suppressed() { return suppression_depth != 0; }
 
 #ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
   void reset_after_hooks_removed() {

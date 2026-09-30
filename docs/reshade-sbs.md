@@ -1802,16 +1802,27 @@ modules its entries point into, with their first slot indices and the table's of
 consumer list; a copied table keeps the runtime's functions except where its owner patched it.
 
 ReShade reports every command list it wraps (create, Reset, Close, submission, bundle, render
-pass, destroy) from its own proxy, whose dispatch a runtime cannot move. Its `barrier` event
-cannot replace native barrier observation: it drops split flags, subresources and the aliasing
-"before" resource, reports UAV barriers as transitions, and converts enhanced barriers from
-access rather than layout. A shadow comparison is therefore collected first. At every capture
-admission, `Sunshine list lifecycle shadow` (at most every 5 s) counts native hook coverage
-against an open, pass-free list in ReShade's lifecycle: `both`, `hooks_only` (with the lifecycle
-view: `unknown`, `closed`, `pass`, `opaque`), `events_only` (lifecycle coverage where hooks were
-refused) and `neither`, plus hook-covered recordings whose closed or render-pass state
-disagreed. Wrappers resolve to the native lifecycle through a private-data tag, which proxies
-forward. The shadow never admits or rejects a capture.
+pass, destroy) from its own proxy, whose dispatch a runtime cannot move. That lifecycle decides
+capture coverage: a list is covered while ReShade shows it open and outside a render pass, whether
+or not its native table could be hooked (D3D12Core 1.619 moves lists to per-object tables at
+Reset). For a list whose table the hooks do not cover, the same events drive the recording as the
+hooks would: Reset starts a new recording, Close ends it, render passes and bundles are tracked. A
+hook-covered list keeps its hook-maintained recording. The native hooks also cover lists ReShade
+does not know, and still supply observed resource states: ReShade's `barrier` event
+drops split flags, subresources and the aliasing "before" resource, reports UAV barriers as
+transitions, and converts enhanced barriers from access rather than layout. Wrappers resolve to
+the native lifecycle through a private-data tag, which proxies forward. All four surveyed games
+showed complete agreement in the earlier shadow comparison (no hook-only admissions or
+disagreements).
+
+`Sunshine list lifecycle shadow` (at most every 5 s) counts admissions by hook and lifecycle view:
+`both`, `hooks_only` (with the lifecycle view: `unknown`, `closed`, `pass`, `opaque`),
+`events_only` (lifecycle coverage where hooks were refused) and `neither`, of which `immediate`
+were on a runtime's own immediate list, which ReShade's lifecycle never reports. `barrier_states`
+compares, for each admitted source, ReShade's last reported transition in that recording with the
+hooked one: `agree`, `disagree`, or known to only one side. The capture's own copy barriers and
+UAV barriers are excluded on both sides. This shadow decides whether the hooks can be removed; it
+never chooses a copy state.
 
 In **Automatic**, stored depth `r` is decoded as `d=r*raw_scale+raw_bias`, then the frame-bound
 projection supplies `q=(d-A)/B`. The identity transform is used without `PrecisionInfo`.

@@ -168,11 +168,19 @@ namespace sunshine_streamline::depth_capture {
   void command_destroyed(std::uint64_t command);
   // ReShade reports every command list it wraps from its own proxy, whose
   // dispatch no D3D12 runtime change can move (D3D12Core 1.619 moves native
-  // lists to per-object tables at Reset). Phase 1 is a shadow: this lifecycle
-  // is compared with the native hooks at capture admission, never used to
-  // admit or reject. native is ReShade's native object for the list.
+  // lists to per-object tables at Reset). This lifecycle drives the recording
+  // (Reset, Close, render passes, bundles) alongside the native hooks and
+  // decides capture coverage: a list is covered while it is open and outside a
+  // render pass. The hooks cover only lists ReShade does not wrap, and still
+  // supply observed resource states. native is ReShade's native object.
   enum class list_event : unsigned { created, reset, closed, executed, bundle, pass_begin, pass_end, destroyed, count };
   void observe_list_event(std::uint64_t native, list_event event);
+  // ReShade's barrier event: native resource handles and resource_usage values.
+  // Shadow only: compared at admission with the hooked state, never used.
+  void observe_list_barriers(std::uint64_t native, std::uint32_t count, const std::uint64_t *resources,
+    const std::uint32_t *old_states, const std::uint32_t *new_states);
+  // A runtime's own immediate list, which ReShade's lifecycle never reports.
+  void observe_immediate_list(std::uint64_t native);
   struct list_shadow_counts {
     std::uint64_t events[static_cast<unsigned>(list_event::count)]{};
     // Capture admission: native hook coverage versus an open, pass-free list
@@ -182,6 +190,11 @@ namespace sunshine_streamline::depth_capture {
     // Hook-covered admissions whose recording state disagreed with ReShade.
     std::uint64_t closed_disagree{}, pass_disagree{};
     std::uint64_t tracked{}, overflow{};
+    // Of neither: admissions on a runtime's own immediate list.
+    std::uint64_t neither_immediate{};
+    // Barrier-state shadow at admission: ReShade's last reported state of the
+    // source in this recording versus the hooked one, or only one of them.
+    std::uint64_t barrier_agree{}, barrier_disagree{}, barrier_events_only{}, barrier_hooks_only{};
   };
   list_shadow_counts list_shadow();
   void observe_queue(std::uint64_t queue);

@@ -1148,11 +1148,24 @@ namespace sunshine_streamline::depth_capture {
     native_observer::observe_command(native);
   }
   namespace {
-    struct list_record { bool open{}, closed{}, pass{}, opaque{}; };
+    struct list_record {
+      bool open{}, closed{}, pass{}, opaque{};
+      // ReShade's last reported state per resource in this recording; an alias
+      // or global barrier, or overflow, makes every state unknown.
+      std::vector<std::pair<std::uint64_t, std::uint32_t>> states;
+      bool states_unknown{};
+    };
     SRWLOCK list_lock = SRWLOCK_INIT;
     std::unordered_map<std::uint64_t, list_record> list_records; // Guarded by list_lock.
     list_shadow_counts list_counts;                               // Guarded by list_lock.
-    constexpr std::size_t list_capacity = 8192;
+    std::array<std::uint64_t, 8> immediate_lists{};               // Guarded by list_lock.
+    constexpr std::size_t list_capacity = 8192, list_state_capacity = 64;
+    std::uint64_t list_key(std::uint64_t command) {
+      std::uint64_t native{}; UINT size = sizeof(native);
+      if (!command || FAILED(reinterpret_cast<ID3D12Object *>(command)->GetPrivateData(list_identity_guid, &size, &native)) ||
+          size != sizeof(native)) return 0;
+      return native;
+    }
     void tag_list(std::uint64_t native) {
       auto *object = reinterpret_cast<ID3D12Object *>(native);
       std::uint64_t known{}; UINT size = sizeof(known);
@@ -1161,9 +1174,8 @@ namespace sunshine_streamline::depth_capture {
     }
     enum class list_view { unknown, open, closed, pass, opaque };
     list_view lifecycle_view(std::uint64_t command) {
-      std::uint64_t native{}; UINT size = sizeof(native);
-      if (!command || FAILED(reinterpret_cast<ID3D12Object *>(command)->GetPrivateData(list_identity_guid, &size, &native)) ||
-          size != sizeof(native) || !native) return list_view::unknown;
+      const auto native = list_key(command);
+      if (!native) return list_view::unknown;
       AcquireSRWLockShared(&list_lock);
       const auto found = list_records.find(native);
       const auto view = found == list_records.end() ? list_view::unknown : found->second.opaque ? list_view::opaque :
@@ -1171,13 +1183,17 @@ namespace sunshine_streamline::depth_capture {
       ReleaseSRWLockShared(&list_lock);
       return view;
     }
-    // Shadow comparison at capture admission; the result never changes it.
-    void shadow_admission(std::uint64_t command, bool hooked, const command_state *owner) {
-      const auto view = lifecycle_view(command);
+    // Coverage comparison at capture admission. ReShade's lifecycle decides
+    // (see record_impl); the hook view is counted to show what changed.
+    void shadow_admission(std::uint64_t command, bool hooked, list_view view, const command_state *owner) {
+      const auto key = list_key(command);
       AcquireSRWLockExclusive(&list_lock);
       auto &counts = list_counts;
       const bool covered = view == list_view::open;
       ++(hooked ? (covered ? counts.both : counts.hooks_only) : (covered ? counts.events_only : counts.neither));
+      if (!hooked && !covered && command &&
+          std::find(immediate_lists.begin(), immediate_lists.end(), key ? key : command) != immediate_lists.end())
+        ++counts.neither_immediate;
       if (!covered) ++(view == list_view::unknown ? counts.unknown : view == list_view::closed ? counts.closed :
         view == list_view::pass ? counts.pass : counts.opaque);
       if (owner && view != list_view::unknown) {
@@ -1185,6 +1201,51 @@ namespace sunshine_streamline::depth_capture {
         if (owner->render_pass != (view == list_view::pass)) ++counts.pass_disagree;
       }
       ReleaseSRWLockExclusive(&list_lock);
+    }
+    // D3D12 COMMON (and PRESENT) is ReShade's general usage; other supported
+    // states share their D3D12 bit values.
+    bool same_state(std::uint32_t d3d12, std::uint32_t usage) {
+      constexpr std::uint32_t general = 0x80000000u;
+      if (usage & general) return d3d12 == 0 || d3d12 == (usage & ~general);
+      return d3d12 == usage;
+    }
+    // Barrier-state shadow for one admitted source; never chooses the state.
+    void shadow_barrier_state(std::uint64_t command, std::uint64_t resource, const source_state *hooked) {
+      // Any transition the hooks saw counts, including states a copy cannot
+      // start from (known is only copy support); a blocked source has none.
+      const bool hook_known = hooked && !hooked->blocked;
+      const auto native = list_key(command);
+      AcquireSRWLockExclusive(&list_lock);
+      bool event_known = false;
+      std::uint32_t usage{};
+      if (const auto found = native ? list_records.find(native) : list_records.end(); found != list_records.end() &&
+          !found->second.states_unknown)
+        for (const auto &entry : found->second.states) if (entry.first == resource) { event_known = true; usage = entry.second; break; }
+      auto &counts = list_counts;
+      if (hook_known && event_known) ++(same_state(hooked->value, usage) ? counts.barrier_agree : counts.barrier_disagree);
+      else if (event_known) ++counts.barrier_events_only;
+      else if (hook_known) ++counts.barrier_hooks_only;
+      ReleaseSRWLockExclusive(&list_lock);
+    }
+  }
+  // ReShade's lifecycle drives the recording of a list whose native table the
+  // hooks do not cover, exactly as the hooks would. A covered list keeps its
+  // hook-maintained recording, which avoids doubling that work on every call.
+  static void lifecycle_recording(std::uint64_t native, list_event event) {
+    if (!requested.load()) return;
+    com_ptr<ID3D12GraphicsCommandList> checked;
+    if (!query_native(native, IID_ID3D12GraphicsCommandList, checked)) return;
+    native = reinterpret_cast<std::uint64_t>(checked.p);
+    if (native_observer::command_ready(native)) return;
+    const auto cookie = native_observer::get_recording_cookie(native);
+    switch (event) {
+      case list_event::created: if (!cookie) { std::uint64_t first{}; associate_recording(native, &first); } break;
+      case list_event::reset: reset(native, cookie, S_OK); break;
+      case list_event::closed: close(native, cookie, S_OK); break;
+      case list_event::pass_begin: render_pass(native, cookie, true); break;
+      case list_event::pass_end: render_pass(native, cookie, false); break;
+      case list_event::bundle: invalidated_command(native, cookie); break;
+      default: break;
     }
   }
   void observe_list_event(std::uint64_t native, list_event event) {
@@ -1204,7 +1265,7 @@ namespace sunshine_streamline::depth_capture {
         else {
           auto &value = found->second;
           switch (event) {
-            case list_event::created: case list_event::reset: value = {true, false, false, false}; break;
+            case list_event::created: case list_event::reset: value = {}; value.open = true; break;
             case list_event::closed: value.open = false; value.closed = true; break;
             case list_event::bundle: value.opaque = true; break;
             case list_event::pass_begin: value.pass = true; break;
@@ -1215,6 +1276,42 @@ namespace sunshine_streamline::depth_capture {
       }
     } catch (...) { ++list_counts.overflow; }
     list_counts.tracked = list_records.size();
+    ReleaseSRWLockExclusive(&list_lock);
+    // Outside list_lock: recording updates take the capture mutex, which
+    // admission already holds while it takes list_lock.
+    try { lifecycle_recording(native, event); } catch (...) {}
+  }
+  void observe_list_barriers(std::uint64_t native, std::uint32_t count, const std::uint64_t *resources,
+      const std::uint32_t *old_states, const std::uint32_t *states) {
+    // The capture's own copy barriers are invisible to the native hooks too.
+    if (!native || !count || !resources || !old_states || !states || !requested.load() ||
+        native_observer::observation_suppressed()) return;
+    AcquireSRWLockExclusive(&list_lock);
+    try {
+      if (const auto found = list_records.find(native); found != list_records.end()) {
+        auto &value = found->second;
+        for (std::uint32_t i = 0; i != count; ++i) {
+          if (!resources[i] || !states[i] || !old_states[i]) { value.states.clear(); value.states_unknown = true; continue; }
+          // ReShade reports a UAV barrier as UAV to UAV; like the hooks, record
+          // only transitions.
+          if (old_states[i] == states[i]) continue;
+          const auto entry = std::find_if(value.states.begin(), value.states.end(),
+            [&](const auto &known) { return known.first == resources[i]; });
+          if (entry != value.states.end()) entry->second = states[i];
+          else if (value.states.size() < list_state_capacity) value.states.emplace_back(resources[i], states[i]);
+          else value.states_unknown = true;
+        }
+      }
+    } catch (...) {}
+    ReleaseSRWLockExclusive(&list_lock);
+  }
+  void observe_immediate_list(std::uint64_t native) {
+    if (!native) return;
+    AcquireSRWLockExclusive(&list_lock);
+    if (std::find(immediate_lists.begin(), immediate_lists.end(), native) == immediate_lists.end()) {
+      const auto slot = std::find(immediate_lists.begin(), immediate_lists.end(), 0ull);
+      *(slot != immediate_lists.end() ? slot : immediate_lists.begin()) = native;
+    }
     ReleaseSRWLockExclusive(&list_lock);
   }
   list_shadow_counts list_shadow() {
@@ -1564,8 +1661,12 @@ namespace sunshine_streamline::depth_capture {
     native = reinterpret_cast<std::uint64_t>(checked.p);
     if (diagnostic) diagnostic->command = native;
     observe_command(native);
-    if (!native_observer::command_ready(native)) {
-      shadow_admission(native, false, nullptr);
+    const bool hooked = native_observer::command_ready(native);
+    const auto view = lifecycle_view(native);
+    // ReShade's lifecycle decides coverage for every list it wraps; the native
+    // hooks cover only lists it does not know.
+    if (!(view == list_view::open || (view == list_view::unknown && hooked))) {
+      shadow_admission(native, hooked, view, nullptr);
       return reject(status::unavailable, record_stage::observer_coverage);
     }
     auto *list = checked.p;
@@ -1586,7 +1687,7 @@ namespace sunshine_streamline::depth_capture {
     if (!source_lifetime_current(value, current_generation))
       return reject(status::unsupported_lifetime, record_stage::source_lifetime);
     auto owner = command(native, cookie, true);
-    shadow_admission(native, true, owner ? &*owner : nullptr);
+    shadow_admission(native, hooked, view, owner ? &*owner : nullptr);
     if (!owner) return reject(status::unavailable, record_stage::recording_missing);
     if (diagnostic) {
       diagnostic->loss = owner->invalidation; diagnostic->recording_closed = owner->closed;
@@ -1623,6 +1724,7 @@ namespace sunshine_streamline::depth_capture {
     if (owner->invalid) return reject(status::unavailable, record_stage::recording_invalid);
     if (owner->render_pass) return reject(status::unavailable, record_stage::recording_render_pass);
     const auto *observed = state(*owner, value.source->cookie, false);
+    shadow_barrier_state(native, reinterpret_cast<std::uint64_t>(checked_source.p), observed);
     if (diagnostic && observed) {
       diagnostic->observed = true; diagnostic->observed_state = observed->value; diagnostic->blocked = observed->blocked;
     }

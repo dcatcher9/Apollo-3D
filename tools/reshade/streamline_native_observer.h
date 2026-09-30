@@ -89,6 +89,9 @@ namespace sunshine_streamline::native_observer {
     suppression_scope(const suppression_scope &) = delete;
     suppression_scope &operator=(const suppression_scope &) = delete;
   };
+  // True on this thread inside a suppression scope or observer callback: the
+  // work is the capture's own, which ReShade's events must not report either.
+  bool observation_suppressed();
 
 #ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
   // Fixture only: callbacks are quiescent. Restore only still-owned vtable

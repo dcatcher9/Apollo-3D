@@ -945,9 +945,10 @@ namespace {
     std::puts("PASS immediate consumer: unhookable swapped vtable uses its observed submission and fence; covered list keeps the recording lease");
   }
 
-  void list_lifecycle_shadow(fixture &gpu) {
-    // Phase 1: ReShade's list lifecycle is compared with the native hooks at
-    // capture admission. The comparison never admits or rejects a capture.
+  void list_lifecycle_coverage(fixture &gpu) {
+    // ReShade's list lifecycle decides capture coverage for every list it
+    // wraps and drives the recording like the native hooks; the hooks cover
+    // only lists unknown to it. The hook view is still counted.
     using event = capture::list_event;
     texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
     const auto list = native(gpu.list.Get());
@@ -957,62 +958,93 @@ namespace {
       return bool(ticket);
     };
     auto last = capture::list_shadow();
-    const auto admitted = [&](const char *expected, auto check) {
+    const auto counted = [&](const char *expected, auto check) {
       const auto now = capture::list_shadow();
       require(check(last, now), expected);
       last = now;
     };
     require(record(list), "hooked list without a ReShade lifecycle rejected a capture");
-    admitted("list unknown to ReShade was not counted as hooks-only", [](const auto &a, const auto &b) {
+    counted("list unknown to ReShade was not counted as hooks-only", [](const auto &a, const auto &b) {
       return b.hooks_only == a.hooks_only + 1 && b.unknown == a.unknown + 1 && b.both == a.both; });
     capture::observe_list_event(list, event::created);
     require(record(list), "hooked list with an open lifecycle rejected a capture");
-    admitted("open lifecycle and hooks did not agree", [](const auto &a, const auto &b) {
+    counted("open lifecycle and hooks did not agree", [](const auto &a, const auto &b) {
       return b.both == a.both + 1 && b.hooks_only == a.hooks_only && b.closed_disagree == a.closed_disagree &&
         b.pass_disagree == a.pass_disagree; });
+    // Barrier-state shadow: the construction barrier left the source in
+    // NON_PIXEL_SHADER_RESOURCE in this recording, observed by the hooks.
+    const std::uint64_t source = native(image.source.Get());
+    const std::uint32_t non_pixel = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, pixel = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+      copy_dest = D3D12_RESOURCE_STATE_COPY_DEST, uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    capture::observe_list_barriers(list, 1, &source, &copy_dest, &non_pixel);
+    require(record(list), "a matching ReShade barrier state changed admission");
+    counted("matching barrier states were not counted as agreeing", [](const auto &a, const auto &b) {
+      return b.barrier_agree == a.barrier_agree + 1 && b.barrier_disagree == a.barrier_disagree; });
+    capture::observe_list_barriers(list, 1, &source, &uav, &uav);
+    require(record(list), "a UAV barrier changed admission");
+    counted("a UAV barrier was taken as a transition", [](const auto &a, const auto &b) {
+      return b.barrier_agree == a.barrier_agree + 1; });
+    capture::observe_list_barriers(list, 1, &source, &non_pixel, &pixel);
+    require(record(list), "a mismatched ReShade barrier state changed admission");
+    counted("a mismatched barrier state was not counted", [](const auto &a, const auto &b) {
+      return b.barrier_disagree == a.barrier_disagree + 1 && b.barrier_agree == a.barrier_agree; });
+    const std::uint64_t global = 0;
+    capture::observe_list_barriers(list, 1, &global, &non_pixel, &pixel);
+    require(record(list), "an unknown ReShade barrier state changed admission");
+    counted("a global barrier did not make ReShade's states unknown", [](const auto &a, const auto &b) {
+      return b.barrier_hooks_only == a.barrier_hooks_only + 1; });
     capture::observe_list_event(list, event::pass_begin);
-    require(record(list), "the shadow lifecycle changed capture admission");
-    admitted("a lifecycle render pass was not reported as a disagreement", [](const auto &a, const auto &b) {
-      return b.hooks_only == a.hooks_only + 1 && b.pass == a.pass + 1 && b.pass_disagree == a.pass_disagree + 1; });
+    require(!record(list), "a capture was admitted inside ReShade's render pass");
+    counted("a lifecycle render pass was not counted", [](const auto &a, const auto &b) {
+      return b.hooks_only == a.hooks_only + 1 && b.pass == a.pass + 1; });
     capture::observe_list_event(list, event::pass_end);
+    require(record(list), "the end of ReShade's render pass did not readmit captures");
     capture::observe_list_event(list, event::closed);
-    require(record(list), "the shadow lifecycle changed capture admission");
-    admitted("a lifecycle close was not reported as a disagreement", [](const auto &a, const auto &b) {
-      return b.hooks_only == a.hooks_only + 1 && b.closed == a.closed + 1 && b.closed_disagree == a.closed_disagree + 1; });
+    require(!record(list), "a capture was admitted after ReShade's Close");
+    counted("a lifecycle close was not counted", [](const auto &a, const auto &b) {
+      return b.closed == a.closed + 1; });
     capture::observe_list_event(list, event::reset);
-    require(record(list), "reset lifecycle rejected a capture");
-    admitted("reset lifecycle did not reopen the list", [](const auto &a, const auto &b) { return b.both == a.both + 1; });
+    require(record(list), "ReShade's Reset did not reopen the recording");
+    counted("reset lifecycle did not reopen the list", [](const auto &a, const auto &b) { return b.both == a.both + 1; });
     capture::observe_list_event(list, event::destroyed);
-    require(record(list), "the shadow lifecycle changed capture admission");
-    admitted("a destroyed lifecycle was still tracked", [](const auto &a, const auto &b) {
+    require(record(list), "a list no longer known to ReShade lost its hook coverage");
+    counted("a destroyed lifecycle was still tracked", [](const auto &a, const auto &b) {
       return b.hooks_only == a.hooks_only + 1 && b.unknown == a.unknown + 1; });
     capture::observe_list_event(list, event::created);
     gpu.submit(); gpu.wait(); gpu.reset();
     capture::observe_list_event(list, event::reset);
 
     // A list whose native table cannot be hooked (as after a D3D12Core 1.619
-    // Reset) is still covered by ReShade's lifecycle: events_only.
+    // Reset) is covered by ReShade's lifecycle alone.
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> refused;
-    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "shadow allocator");
+    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "unhookable allocator");
     check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&refused)),
-      "shadow list");
+      "unhookable list");
     auto **object = reinterpret_cast<void ***>(refused.Get());
     void **const original = *object;
     constexpr std::size_t list7_methods = 81;
     std::vector<void *> swapped(original, original + list7_methods);
     *object = swapped.data();
     struct restore_vtable { void ***object; void **table; ~restore_vtable() { *object = table; } } restore{object, original};
-    capture::observe_list_event(native(refused.Get()), event::created);
-    require(!record(native(refused.Get())), "a list without hook coverage admitted a capture during the shadow phase");
-    admitted("a lifecycle-covered unhookable list was not counted as events-only", [](const auto &a, const auto &b) {
+    const auto unhookable = native(refused.Get());
+    capture::observe_list_event(unhookable, event::created);
+    // The first sighting of a refused table revokes recordings open then; the
+    // next recording (ReShade's Reset) is admitted.
+    record(unhookable);
+    capture::observe_list_event(unhookable, event::reset);
+    last = capture::list_shadow();
+    require(record(unhookable), "an unhookable list open in ReShade's lifecycle rejected a capture");
+    counted("an unhookable list was not counted as events-only", [](const auto &a, const auto &b) {
       return b.events_only == a.events_only + 1; });
-    capture::observe_list_event(native(refused.Get()), event::destroyed);
-    check(refused->Close(), "shadow list close");
-    // The first sighting of the refused table revoked recordings open then.
-    check(gpu.list->Close(), "close recording open during shadow refusal"); gpu.reset();
+    capture::observe_list_event(unhookable, event::closed);
+    require(!record(unhookable), "an unhookable list admitted a capture after ReShade's Close");
+    capture::observe_list_event(unhookable, event::destroyed);
+    require(!record(unhookable), "an unhookable list unknown to ReShade admitted a capture");
+    check(refused->Close(), "unhookable list close");
+    check(gpu.list->Close(), "close recording open during refusal"); gpu.reset();
     gpu.check_debug_errors();
-    std::puts("PASS list lifecycle shadow: agreement, unknown/closed/render-pass disagreements and unhookable events-only lists counted without changing admission");
+    std::puts("PASS list lifecycle coverage: ReShade's Reset/Close/render pass decide admission, hooks cover unknown lists, an unhookable list is covered by the lifecycle alone, barrier states compared");
   }
 
   void auxiliary_consumer_replay_and_discard(fixture &gpu) {
@@ -1189,7 +1221,7 @@ int main() {
     ngx_contract_depth_capture(gpu);
     local_same_queue_ordered_capture(gpu);
     immediate_consumer_without_list_hooks(gpu);
-    list_lifecycle_shadow(gpu);
+    list_lifecycle_coverage(gpu);
     for (const bool shared : {false, true}) {
       observed_recording_color_capture(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, shared);
       observed_recording_color_capture(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, shared);
