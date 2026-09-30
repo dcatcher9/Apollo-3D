@@ -1058,7 +1058,9 @@ Look in the game's `ReShade.log` for `Sunshine SBS:` messages:
 - `exporter ready` means the mapping exists and the add-on is waiting for the technique/consumer.
 - `no compatible export annotations` means the current shader definition or color annotations are absent.
 - `generation ..., ... full SBS, DXGI ..., D3D...` means resources were created for a consumer.
-- `export inactive` means focus, technique execution or source proof stopped qualifying.
+- `export inactive (reason)` means focus, technique execution or source proof stopped qualifying;
+  the reason names the gate, for example `not_foreground`, `present_without_render`,
+  `frame_not_prepared`, `no_consumer` or `overlay_capture_failed`.
 - HRESULT messages identify native sharing/fence failures. Repeated allocation failure retries
   are throttled; publication never falls back to CPU readback.
 

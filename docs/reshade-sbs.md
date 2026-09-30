@@ -744,6 +744,9 @@ tooltips and cursor and composes the same panel at the same coordinates in both 
 has no stereo disparity; the game behind transparent controls retains its own depth. Changes to
 add-on settings are visible on subsequent frames, so depth can be adjusted while watching 3D.
 Closing the overlay removes the panel without changing the source generation or stream size.
+The frame prepared just before the close has no controls to capture; it is composed under an
+empty panel and published. It previously withdrew the export, and the host showed the captured
+desktop for two seconds.
 Unrelated shader recompilation and the global effects toggle do not disable native Game 3D.
 Disabling Game 3D itself uses the flat desktop fallback. If overlay capture cannot be prepared, the add-on selects that fallback
 instead of exporting invisible controls.
@@ -1544,7 +1547,11 @@ starts a new temporal history for its own viewport, an invalid camera removes me
 cleared tag removes that kind, and a loss makes metadata recorded before it unusable for new
 captures. None of them revokes an evaluation already captured, its completed snapshot or the
 private display copy. Only a real observation loss (contended or failed hook bookkeeping, a failed
-SDK call or lifecycle) advances the Streamline observation revision; each viewport's feedback
+SDK call or lifecycle) advances the Streamline observation revision. A frame-token request that
+finds another thread writing the token table retries briefly (a few microseconds, still
+non-blocking) before counting as `tokens_busy`: The Witcher 3 requests about 30 tokens a frame
+from several threads, and each collision dropped depth for about five presents and reset UI
+placement, most visibly in its settings menu; each viewport's feedback
 revision is that loss count plus its own resets. The reset feedback discards old scene measurements
 while retaining established gain and zero placement; it does not force a valid current depth frame
 to render mono. The Witcher 3 exercises both cases: another viewport sends reset constants every

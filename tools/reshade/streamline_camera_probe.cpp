@@ -146,6 +146,21 @@ namespace sunshine_streamline {
     };
     using token_owner = observation::snapshot_owner<token_state, 8>;
     token_owner token_metadata;
+    // Another thread requesting a token at the same moment owns the writer only
+    // for a short copy. The Witcher 3 requests about 30 tokens a frame from
+    // several threads; failing at once turned each collision into an
+    // observation loss (depth dropped for ~5 presents, UI placement reset).
+    // A bounded retry keeps the hook non-blocking: a preempted writer still
+    // fails after the bound, as before.
+    token_owner::transaction write_tokens_briefly() {
+      auto update = token_metadata.try_write();
+      for (unsigned attempt = 0; !update && update.failure() == observation::write_failure::owner_busy && attempt < 64; ++attempt) {
+        if (attempt < 48) YieldProcessor();
+        else SwitchToThread();
+        update = token_metadata.try_write();
+      }
+      return update;
+    }
     presentation_record presentations[32]{};
     std::atomic<std::uint64_t> presentation_loss{}, presentation_dropped{}, presentation_generation{};
     std::atomic<bool> pcl_available{};
@@ -2024,7 +2039,7 @@ namespace sunshine_streamline {
           token_calls.fetch_add(1, std::memory_order_relaxed);
           if (frame_index) token_index.store(numeric, std::memory_order_relaxed);
           token_index_supplied.store(frame_index != nullptr, std::memory_order_relaxed);
-          auto update = token_metadata.try_write();
+          auto update = write_tokens_briefly();
           if (!update) {
             if (current(ticket)) dropped_observation(update.failure() == observation::write_failure::storage_busy ?
               loss_diagnostics::reason::metadata_storage_busy : loss_diagnostics::reason::tokens_busy, __func__, __LINE__);

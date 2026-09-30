@@ -570,9 +570,17 @@ namespace sunshine::overlay {
   bool compositor_t::finish() {
     auto &s = *impl_;
     std::lock_guard<std::mutex> lock(s.callback_mutex);
-    if (!s.armed || !s.captured) {
+    if (!s.armed) {
       s.disarm();
       return false;
+    }
+    if (!s.captured) {
+      // The overlay closed after this frame was prepared, so ReShade drew no
+      // controls. Composite the stereo image under an empty layer rather than
+      // withdrawing the export (which showed the desktop for two seconds).
+      const float clear[4] {};
+      if (s.backend == api::device_api::d3d11) s.context11->ClearRenderTargetView(s.layer_rtv11.p, clear);
+      else s.command12->ClearRenderTargetView(s.rtv12[1], clear, 0, nullptr);
     }
     const bool result = s.backend == api::device_api::d3d11 ? s.finish11() : s.finish12();
     s.disarm();

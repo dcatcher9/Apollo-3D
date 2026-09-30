@@ -924,7 +924,7 @@ namespace {
           const bool preparing = renderer->preparing();
           if (diagnostic_owner) debug_dump_.unavailable(preparing ? "The foreground Game 3D renderer is still compiling its shaders." :
             "The foreground Game 3D renderer is unavailable for this swapchain format, extent or transition.");
-          deactivate(runtime);
+          deactivate(runtime, "renderer_unavailable");
           sunshine_game3d::automatic_status unavailable;
           unavailable.phase = preparing ? sunshine_game3d::automatic_phase::renderer_preparing :
             sunshine_game3d::automatic_phase::renderer_unavailable;
@@ -1039,7 +1039,7 @@ namespace {
       if (destroy && current != runtimes_.end() && current->second.renderer)
         current->second.renderer->reset_after_runtime_drain();
       sunshine_game3d::depth_input::invalidate_reuse(runtime);
-      deactivate(runtime);
+      deactivate(runtime, "runtime_reset");
       if (destroy) runtimes_.erase(runtime);
       else {
         // FX reload invalidates FX handles, not the runtime identity or native
@@ -1081,13 +1081,14 @@ namespace {
       const auto found = runtimes_.find(runtime);
       if (published_runtime_ == runtime && (observed_foreground_window() != reinterpret_cast<HWND>(published_metadata_.window) || found == runtimes_.end() || !found->second.rendered_since_present)) {
         sunshine_game3d::depth_input::invalidate_reuse(runtime);
-        deactivate(runtime);
+        deactivate(runtime, observed_foreground_window() != reinterpret_cast<HWND>(published_metadata_.window) ? "not_foreground" :
+          found == runtimes_.end() ? "runtime_gone" : "present_without_render");
       }
       if (generation_ && generation_->owner_runtime == runtime && generation_->pending_slot != wire::slot_count) {
         if (generation_->pending_overlay) {
           generation_->pending_overlay = false;
           if (generation_->runtime && !generation_->overlays[generation_->pending_slot]->finish()) {
-            deactivate(runtime);
+            deactivate(runtime, "overlay_capture_failed");
             retry_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             log(reshade::log::level::warning, "Sunshine SBS: overlay capture unavailable; showing the captured desktop");
           }
@@ -1100,7 +1101,7 @@ namespace {
           if (FAILED(hr)) {
             generation_->signal_failed = true;
             log_hr("D3D11 publication fence signal", hr);
-            deactivate(runtime);
+            deactivate(runtime, "fence_signal_failed");
           } else if (generation_->runtime && published_runtime_ == runtime && read_nonce(*shared_) == generation_->nonce) {
             complete_slot(index, generation_->pending_qpc);
           }
@@ -1549,7 +1550,7 @@ namespace {
         // A preceding Present did not reach finish_present. Retain its copy until a later
         // matching submission can be fenced, but stop exposing the previous cached image.
         if (generation_ && generation_->pending_slot != wire::slot_count && generation_->native_swapchain == swapchain) {
-          deactivate(generation_->runtime);
+          deactivate(generation_->runtime, "present_not_finished");
         }
         colors_[swapchain] = color;
       }
@@ -1627,7 +1628,7 @@ namespace {
       if (FAILED(hr)) {
         generation_->signal_failed = true;
         log_hr("D3D12 publication fence signal", hr);
-        deactivate(generation_->runtime);
+        deactivate(generation_->runtime, "fence_signal_failed");
         return;
       }
       // Reload/focus/nonce changes may have retired this submission after it was recorded.
@@ -1656,14 +1657,14 @@ namespace {
       auto &proof = runtimes_[runtime];
       if (proof.addon_native && !addon_render) return;
       if (game && proof.raw_supported && !proof.frame.prepared) {
-        deactivate(runtime);
+        deactivate(runtime, "frame_not_prepared");
         return;
       }
       // The renamed primary effect wins over accidentally enabled reference
       // effects. Never alternate producers between techniques in one present.
       if (!game && proof.game_technique.handle && runtime->get_technique_state(proof.game_technique)) return;
       if (native && !proof.native_depth_prepared) {
-        deactivate(runtime);
+        deactivate(runtime, "native_depth_unprepared");
         return;
       }
       // Preserve the older independent-over-reference priority when the renamed
@@ -1681,35 +1682,35 @@ namespace {
       GetWindowThreadProcessId(window, &window_pid);
       if (!window || window_pid != identity_.producer_pid || observed_foreground_window() != window) {
         sunshine_game3d::depth_input::invalidate_reuse(runtime);
-        deactivate(runtime);
+        deactivate(runtime, "not_foreground");
         return;
       }
       const auto color = colors_.find(runtime->get_native());
       if (color == colors_.end()) {
-        deactivate(runtime);
+        deactivate(runtime, "swapchain_unknown");
         return;
       }
       // Add-ons may render techniques into deferred lists. Never signal an unrelated queue here.
       auto *queue = runtime->get_command_queue();
       if (!queue || commands != queue->get_immediate_command_list()) {
-        deactivate(runtime);
+        deactivate(runtime, "deferred_command_list");
         return;
       }
       const auto backend = runtime->get_device()->get_api();
       if (backend != api::device_api::d3d11 && backend != api::device_api::d3d12) {
-        deactivate(runtime);
+        deactivate(runtime, "unsupported_api");
         return;
       }
 
       // The compiled input transfer must match the current game swapchain, including PQ to
       // scRGB switches that keep the exported FP16 format and transfer unchanged.
       if ((addon_render ? !proof.native_output.handle : !proof.texture.handle) || !source_color_matches(runtime, proof, color->second)) {
-        deactivate(runtime);
+        deactivate(runtime, "output_unavailable");
         return;
       }
       source_t source;
       if (!describe(runtime, proof, source)) {
-        deactivate(runtime);
+        deactivate(runtime, "source_unavailable");
         return;
       }
       proof.rendered_since_present = true;
@@ -1717,7 +1718,7 @@ namespace {
       const auto nonce = read_nonce(*shared_);
       if (!nonce) {
         if (generation_) {
-          deactivate(generation_->runtime);
+          deactivate(generation_->runtime, "no_consumer");
         }
         wire::metadata_t metadata = identity_;
         set_source(metadata, source);
@@ -1731,7 +1732,7 @@ namespace {
                            !same_ring(generation_->source, source);
       if (replace) {
         if (generation_) {
-          deactivate(generation_->runtime);
+          deactivate(generation_->runtime, "ring_replaced");
         }
         retire_destroyed_generation();
         if (generation_ && !generation_->finished()) {
@@ -1742,7 +1743,7 @@ namespace {
           return;
         }
         if (next_generation_ >= wire::max_generation) {
-          deactivate(runtime);
+          deactivate(runtime, "generation_limit");
           return;
         }
         // An abandoned consumer read of a reused slot finishes within frames;
@@ -1758,7 +1759,7 @@ namespace {
         } else {
           auto next = std::make_unique<generation_t>();
           if (!next->create(runtime, source, nonce, ++next_generation_)) {
-            deactivate(runtime);
+            deactivate(runtime, "ring_creation_failed");
             retry_at_ = now + std::chrono::seconds(2);
             return;
           }
@@ -1782,7 +1783,7 @@ namespace {
       }
       const auto completed = generation_->completed();
       if (completed == UINT64_MAX) {
-        deactivate(runtime);
+        deactivate(runtime, "device_removed");
         return;
       }
       const auto index = acquire_slot(completed);
@@ -1827,7 +1828,7 @@ namespace {
         } else {
           if (renderer) renderer->pack(commands);
           if (!generation_->submit(commands, source.resource, index, sequence)) {
-            deactivate(runtime);
+            deactivate(runtime, "submit_failed");
             return;
           }
         }
@@ -1839,7 +1840,7 @@ namespace {
             overlay = std::make_unique<sunshine::overlay::compositor_t>();
           }
           if (!overlay->prepare(runtime, native_rtv, source.resource, generation_->texture(index), source.width, source.height, source.color.input, source.color.output == wire::transfer::scrgb ? api::color_space::scrgb : api::color_space::srgb)) {
-            deactivate(runtime);
+            deactivate(runtime, "overlay_prepare_failed");
             retry_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             log(reshade::log::level::warning, "Sunshine SBS: cannot prepare stereo overlay; showing the captured desktop");
             return;
@@ -1921,7 +1922,7 @@ namespace {
 
     bool source_color_matches(api::effect_runtime *runtime, const runtime_t &proof, api::color_space current) {
       if (proof.color.input == api::color_space::unknown || proof.color.input != current) {
-        deactivate(runtime);
+        deactivate(runtime, "color_space_changed");
         return false;
       }
       return true;
@@ -1953,13 +1954,16 @@ namespace {
     }
 
     // One-shot invalidation also covers identity metadata published before a host connects.
-    void deactivate(api::effect_runtime *runtime) {
+    // The reason is logged once, when the export actually stops.
+    void deactivate(api::effect_runtime *runtime, const char *reason = "stopped") {
       if (!runtime) {
         return;
       }
       if (published_runtime_ == runtime) {
         publish(identity_);
-        log(reshade::log::level::info, "Sunshine SBS: export inactive; waiting for a valid focused technique");
+        char message[160];
+        std::snprintf(message, sizeof(message), "Sunshine SBS: export inactive (%s); waiting for a valid focused technique", reason);
+        log(reshade::log::level::info, message);
       }
       if (generation_ && generation_->runtime == runtime) {
         for (auto &overlay : generation_->overlays) if (overlay) overlay->cancel();
