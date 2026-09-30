@@ -521,6 +521,26 @@ namespace platf::game3d_debug::preview {
         report["optional_errors"].push_back({{"kind", entry.file_stem}, {"reason", error.what()}});
       }
     }
+    // Candidate offscreen UI layers: premultiplied UI color is typically encoded
+    // SDR and alpha is its coverage, but neither is assumed.
+    for (const auto *name : ::game3d_debug::ui_layer_names) {
+      const auto *image = find(name);
+      if (!image) continue;
+      try {
+        if (channel_count(image->dxgi_format) != 4) throw std::runtime_error("unsupported candidate layer format");
+        const json extra = {{"allocation", "full; no depth crop or jitter applied"}};
+        add((std::string(name) + ".png").c_str(), std::string("Cleared target ") + name + " RGB", image->width, image->height,
+          "Copied before the game cleared it to transparent black; the previous frame's content. RGB code values shown unchanged apart from 8-bit display clipping. This does not prove UI.",
+          [&](unsigned x, unsigned y) { return detail::display_color(detail::sample(*image, x, y), 0); }, extra);
+        auto alpha_extra = extra;
+        alpha_extra.update({{"channel", "A"}, {"black", 0}, {"white", 1}, {"range", scalar_range(*image, 3).describe()}});
+        add((std::string(name) + "_alpha.png").c_str(), std::string("Cleared target ") + name + " alpha", image->width, image->height,
+          "Native A channel: 0 black, 1 white; display-only values outside [0,1] are clipped, nonfinite magenta. An offscreen UI layer shows UI coverage here.",
+          [&](unsigned x, unsigned y) { return detail::scalar_color(detail::sample(*image, x, y)[3], 0, 1); }, alpha_extra);
+      } catch (const std::exception &error) {
+        report["optional_errors"].push_back({{"kind", name}, {"reason", error.what()}});
+      }
+    }
     if (color && depth && parameters.contains("depth_rect") && parameters.contains("jitter_uv")) {
       const auto rect = parameters.at("depth_rect").get<std::array<float, 4>>();
       const auto jitter = parameters.at("jitter_uv").get<std::array<float, 2>>();
