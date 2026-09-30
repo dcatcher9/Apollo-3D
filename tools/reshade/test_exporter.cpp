@@ -491,7 +491,14 @@ namespace {
         missing.depth_ready = false;
         frame.scene = {};
         restore_reused_scene(frame, missing, true);
-        require(!frame.depth_ready && !frame.scene.ready, "A missing previous pair resurrected cached geometry");
+        require(!frame.depth_ready && !frame.scene.ready && frame.gap == depth_gap::reuse_after_gap,
+          "A missing previous pair resurrected cached geometry or lost its reason");
+        auto other = frame;
+        other.depth_ready = true; other.gap = depth_gap::none; other.scene = {};
+        ++other.scene_source[1];
+        restore_reused_scene(other, previous, true);
+        require(!other.depth_ready && other.gap == depth_gap::reuse_other_source,
+          "Reuse refused for another source was not named");
         // The real frame still calibrating its range shows its depth; its generated frames
         // keep that depth and the same not-yet-placed scene instead of turning flat.
         auto calibrating = previous;

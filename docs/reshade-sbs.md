@@ -1567,7 +1567,11 @@ supersession by itself permits recycling a pixel-backed slot.
 While FG is active, `Sunshine SBS FG output` reports cumulative per-runtime publication counters
 at most once every five seconds. `published_fresh_depth`, `published_reused_depth` and
 `published_depth_missing` distinguish actual shared-ring publications using fresh, reused or
-unavailable depth. Their disposition is retained with the pending export copy. These classify
+unavailable depth. Their disposition is retained with the pending export copy. Missing depth is
+split by reason: `unavailable` (the provider had none this Present, for example a source switch,
+an FG toggle or expiry; `Sunshine depth readiness` names the provider's reason), `reuse_after_gap`
+(a generated or pending frame whose previous presentation had no depth) and `reuse_other_source`
+(its depth belongs to another source than the previous presentation's scene). These classify
 depth availability, not stereo pixels: diagnostics, zero strength and calibration can change the
 rendered image. Runtime reload/destruction resets these counters.
 
