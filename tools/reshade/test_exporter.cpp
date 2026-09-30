@@ -492,6 +492,19 @@ namespace {
         frame.scene = {};
         restore_reused_scene(frame, missing, true);
         require(!frame.depth_ready && !frame.scene.ready, "A missing previous pair resurrected cached geometry");
+        // The real frame still calibrating its range shows its depth; its generated frames
+        // keep that depth and the same not-yet-placed scene instead of turning flat.
+        auto calibrating = previous;
+        calibrating.scene.ready = false;
+        calibrating.scene.ui = {sunshine_game3d::automatic_phase::waiting_for_depth, true};
+        frame = {};
+        frame.depth_ready = frame.reused_depth = true;
+        frame.diagnostics.frame_generation_active = generated;
+        frame.scene_source = previous.scene_source;
+        restore_reused_scene(frame, calibrating, true);
+        require(frame.depth_ready && !frame.scene.ready && frame.scene.scale == calibrating.scene.scale &&
+            frame.scene.ui.phase == calibrating.scene.ui.phase,
+          "A generated frame dropped depth that its still-calibrating real frame shows");
       }
     }
 

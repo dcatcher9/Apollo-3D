@@ -1474,7 +1474,11 @@ changes, or at the age bound below.
 Explicit source interruptions advance the existing admission watermark,
 preventing pre-interruption captures from returning.
 Reused real depth retains its applied gain, zero plane, crop and jitter and does not advance
-range learning or gain adaptation. Reducing user strength, including setting zero, applies
+range learning or gain adaptation. It takes the scene exactly as the real frame resolved it,
+placed or still calibrating, so a generated frame shows depth whenever its real frame does.
+Requiring a placed scene used to flatten every generated frame while the real frames kept their
+depth during range calibration (the first second after FG starts) or after a camera cut; with
+multi frame generation that flickered up to four flat frames per real frame. Reducing user strength, including setting zero, applies
 immediately; increasing strength waits for fresh real depth so reused geometry cannot acquire
 more disparity without a fresh placement decision.
 Every pass renders the new effects-input color and publishes a new SBS image; it no longer holds

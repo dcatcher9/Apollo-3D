@@ -630,8 +630,12 @@ namespace {
     // Only the provider can authorize old pixels. Their already resolved scene
     // travels with the exact real capture, for NGX pending copies as well as FG.
     // This path never evaluates calibration or advances its motion clock.
+    // The scene is copied as the real frame left it, placed or still calibrating:
+    // a generated frame must look like its real frame. Dropping its depth while
+    // the real frame still shows depth (range calibration after FG starts, or a
+    // camera cut) flickered generated frames flat at up to four per real frame.
     frame.scene.owned = supported;
-    if (frame.reused_depth && frame.depth_ready && previous.depth_ready && previous.scene.ready &&
+    if (frame.reused_depth && frame.depth_ready && previous.depth_ready &&
         frame.scene_source[0] && frame.scene_source[2] && previous.scene_source == frame.scene_source)
       frame.scene = previous.scene;
     else if (supported) {
