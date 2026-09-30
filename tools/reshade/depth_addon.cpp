@@ -1411,7 +1411,8 @@ bool sunshine_depth::copy_selected_depth(effect_runtime *runtime, command_list *
 	constexpr uint32_t sampled_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 	if (!selection.shared_preservation)
 		return runtime && commands && destination.handle && sunshine_streamline::depth_capture::copy_current(
-			commands->get_native(), selection, destination.handle, sampled_state, diagnostic);
+			commands->get_native(), selection, destination.handle, sampled_state, diagnostic,
+			commands == runtime->get_command_queue()->get_immediate_command_list());
 	const auto &source = selection.metadata;
 	const auto identity = selection.resource_id;
 	if (!runtime || !commands || !identity || !destination.handle) return false;

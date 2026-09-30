@@ -295,7 +295,8 @@ namespace sunshine_game3d::ui_input {
       api::resource_view view{};
       if (admissible) view = renderer.prepare_ui_candidate(slot, selected.ticket.id, [&](api::resource destination) {
         return capture::copy_local_texture(commands->get_native(), queue->get_native(), selected.ticket,
-          destination.handle, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+          destination.handle, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+          nullptr, commands == queue->get_immediate_command_list());
       }, static_cast<api::format>(selected.texture.format));
       if (diagnostic) {
         candidates.push_back(captured_metadata(selected, now, view.handle != 0, pairing.kind == hudless_present::real_frame));

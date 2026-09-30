@@ -286,12 +286,14 @@ namespace sunshine_streamline::depth_capture {
   // source AND destination until recorded consumers and their GPU fences retire;
   // Reset alone never permits reuse. Never adds a queue wait. A ticket cannot
   // switch destination or consumer queue after its first successful copy.
+  // immediate: command is the consumer queue's ReShade immediate list (see
+  // copy_current). Its read then needs no command-list hook.
   bool copy_diagnostic_texture(std::uint64_t command, std::uint64_t consumer_queue,
     const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
-    consumer_diagnostic *diagnostic = nullptr);
+    consumer_diagnostic *diagnostic = nullptr, bool immediate = false);
   bool copy_local_texture(std::uint64_t command, std::uint64_t consumer_queue,
     const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
-    consumer_diagnostic *diagnostic = nullptr);
+    consumer_diagnostic *diagnostic = nullptr, bool immediate = false);
   // Revokes the ticket, never its outstanding GPU obligations. Drop all leases
   // after cancellation/IPC acknowledgement so completed storage can be reclaimed.
   void release_diagnostic_texture(const diagnostic_ticket &ticket);
@@ -311,8 +313,12 @@ namespace sunshine_streamline::depth_capture {
     const preservation_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
     consumer_diagnostic *diagnostic = nullptr);
   // An already admitted API capture uses the identical read-lease/copy path.
+  // immediate asserts that command is the consumer queue's ReShade immediate
+  // list, open outside a render pass: the runtime submits it on that queue and
+  // resets it without replay. Its read is then retired by that observed
+  // submission and the queue fence, without any command-list hook.
   bool copy_current(std::uint64_t command, const packet &value, std::uint64_t destination,
-    std::uint32_t destination_state, consumer_diagnostic *diagnostic = nullptr);
+    std::uint32_t destination_state, consumer_diagnostic *diagnostic = nullptr, bool immediate = false);
 
   // Independent copies require same-queue ordering or a completed private producer
   // fence on the same device with its producing recording retired. Pending foreign

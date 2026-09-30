@@ -236,6 +236,9 @@ namespace sunshine_streamline::depth_capture {
       recording_ref producer_recording;
       std::array<std::uint64_t, 4> consumers{};
       std::array<recording_ref, 4> consumer_recordings;
+      // A runtime immediate list that recorded a read and has not yet been
+      // observed in a submission on consumer_queue. See consume_owned.
+      std::uint64_t pending_immediate{};
       bool finished{}, success{}, acquired{}, invalid{}, producer_submitted{}, retirement_unknown{};
       bool shared_preservation{};
       bool preservation_only{};
@@ -476,12 +479,13 @@ namespace sunshine_streamline::depth_capture {
       bool used = false;
       for (unsigned n = 0; n != count; ++n) {
         const auto cookie = values[n].recording_cookie;
-        // Zero is an unobserved recording, not a producer whose recording was
-        // retired by Reset. It must not change capture state or create a fence.
-        if (!cookie) continue;
         for (unsigned i = 0; i != captures.size(); ++i) {
           auto &value = captures[i];
           if (!value.id) continue;
+          if (value.pending_immediate && value.pending_immediate == values[n].native_command) { consumers[i] = true; used = true; }
+          // Zero is an unobserved recording, not a producer whose recording was
+          // retired by Reset. It must not change capture state or create a fence.
+          if (!cookie) continue;
           if (value.command == cookie) {
             if (value.producer_submitted) invalidate(value, capture_failure::replay); // No replayed old frame.
             producers[i] = true; used = true;
@@ -872,6 +876,12 @@ namespace sunshine_streamline::depth_capture {
       }
       found->queue = native; found->value = std::max(found->value, fence);
     }
+    // The runtime resets its immediate list after submitting it, so this one
+    // observed submission (now followed by the queue fence) carries the read.
+    void submitted_immediate(slot &value, std::uint32_t count, const native_observer::command_identity *values) {
+      for (unsigned n = 0; n != count; ++n)
+        if (value.pending_immediate && values[n].native_command == value.pending_immediate) value.pending_immediate = 0;
+    }
     bool uses_queue(const slot &value, std::uint64_t native) {
       return value.queue == native || value.consumer_queue == native || std::any_of(value.retirements.begin(), value.retirements.end(),
         [native](const auto &point) { return point.queue == native; });
@@ -914,11 +924,15 @@ namespace sunshine_streamline::depth_capture {
           consumer_submitted(value, native, fence, signaled);
           // Keep the recording reference until Reset/destroy. A legal replay of
           // an unchanged command list can consume this texture again.
+          submitted_immediate(value, count, values);
         }
       }
       if (auxiliary_used) for (unsigned i = 0; i != diagnostic_slots.size(); ++i) {
         if (auxiliary_producers[i]) producer_submitted(diagnostic_slots[i], native, fence, signaled);
-        if (auxiliary_consumers[i]) consumer_submitted(diagnostic_slots[i], native, fence, signaled);
+        if (auxiliary_consumers[i]) {
+          consumer_submitted(diagnostic_slots[i], native, fence, signaled);
+          submitted_immediate(diagnostic_slots[i], count, values);
+        }
       }
     }
     bool current_source_nomination(const slot &value) {
@@ -964,6 +978,7 @@ namespace sunshine_streamline::depth_capture {
       if (value.command) return false; // A closed producer may legally replay.
       if (value.texture.use_count() > 1) return false;
       if (std::any_of(value.consumers.begin(), value.consumers.end(), [](auto v) { return v != 0; })) return false;
+      if (value.pending_immediate) return false;
       if (!value.producer_submitted) return value.finished && value.command == 0;
       return gpu_retired(value, [](const fence_point &point) {
         const auto *owner = known_queue(point.queue);
@@ -1137,7 +1152,11 @@ namespace sunshine_streamline::depth_capture {
     // same fence/ownership requirements still protect every captured texture.
     std::lock_guard lock(mutex);
     const auto cookie = native_observer::get_recording_cookie(native);
-    for_each_capture([&](auto &value) { retire_recording(value, cookie); });
+    for_each_capture([&](auto &value) {
+      retire_recording(value, cookie);
+      // Never submitted, so its recorded read can no longer execute.
+      if (value.pending_immediate == native) value.pending_immediate = 0;
+    });
     if (auto owner = command_storage::acquire(checked.p, false)) {
       owner.life()->cookie.store(0, std::memory_order_release);
       owner->closed = true;
@@ -1175,7 +1194,11 @@ namespace sunshine_streamline::depth_capture {
       owner->retiring = true;
       native = reinterpret_cast<std::uint64_t>(owner->queue.p);
       for_each_capture([&](auto &value) {
-        if (uses_queue(value, native)) invalidate(value, capture_failure::queue_retired);
+        if (!uses_queue(value, native)) return;
+        invalidate(value, capture_failure::queue_retired);
+        // The runtime's immediate list is destroyed with its queue; an
+        // unsubmitted read can no longer execute.
+        if (value.consumer_queue == native) value.pending_immediate = 0;
       });
     }
     collect_retired();
@@ -1930,24 +1953,35 @@ namespace sunshine_streamline::depth_capture {
     owner->last_sequence = value.metadata.sequence;
     owner->last_source_tick = value.metadata.tick;
   }
+  // An immediate consumer is a ReShade runtime's immediate list, open outside
+  // any render pass during its present/effects events. The runtime submits it
+  // on the consumer queue and resets it afterwards, never replaying it. Its
+  // read therefore needs no command-list hook: the lease is released at that
+  // list's next observed submission, followed by the queue fence. Other tools
+  // may swap such a list's vtable for an unhookable per-object copy.
   static bool consume_owned(std::uint64_t native, const packet &value, std::uint64_t destination,
-      std::uint32_t destination_state, consumer_diagnostic *diagnostic, bool auxiliary = false, bool local_auxiliary = false) {
+      std::uint32_t destination_state, consumer_diagnostic *diagnostic, bool auxiliary = false, bool local_auxiliary = false,
+      bool immediate = false) {
     if (diagnostic) *diagnostic = {};
     const auto result = [diagnostic](consumer_status why) {
       if (diagnostic) diagnostic->result = why;
       return why == consumer_status::ready;
     };
     if (!native || !value.ownership) return result(consumer_status::missing_input);
+    const auto submitted_list = native;
     com_ptr<ID3D12GraphicsCommandList> checked;
     if (!query_native(native, IID_ID3D12GraphicsCommandList, checked)) return result(consumer_status::unsupported_interface);
     native = reinterpret_cast<std::uint64_t>(checked.p);
-    observe_command(native);
-    // The consumer copies only between private textures. D3D12Core can keep a
-    // list's CommandList7 table in per-object memory that is never hooked.
-    if (!native_observer::command_ready(native, false)) return result(consumer_status::observer_not_ready);
-    const auto cookie = native_observer::get_recording_cookie(native);
-    if (diagnostic) diagnostic->cookie = cookie;
-    if (!cookie) return result(consumer_status::missing_cookie);
+    std::uint64_t cookie{};
+    if (!immediate) {
+      observe_command(native);
+      // The consumer copies only between private textures, so enhanced
+      // barriers elsewhere in the recording cannot change their state.
+      if (!native_observer::command_ready(native, false)) return result(consumer_status::observer_not_ready);
+      cookie = native_observer::get_recording_cookie(native);
+      if (diagnostic) diagnostic->cookie = cookie;
+      if (!cookie) return result(consumer_status::missing_cookie);
+    }
     auto *list = checked.p;
     com_ptr<ID3D12Device> device;
     if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return result(consumer_status::unsupported_command_type);
@@ -1978,15 +2012,18 @@ namespace sunshine_streamline::depth_capture {
       }
     }
     std::lock_guard lock(mutex);
-    auto recording = command(native, cookie, true);
-    if (!recording) {
-      if (diagnostic) diagnostic->tracked_commands = command_storage::live_count();
-      return result(consumer_status::recording_missing);
+    command_storage::handle recording;
+    if (!immediate) {
+      recording = command(native, cookie, true);
+      if (!recording) {
+        if (diagnostic) diagnostic->tracked_commands = command_storage::live_count();
+        return result(consumer_status::recording_missing);
+      }
+      if (diagnostic) diagnostic->invalidation = recording->invalidation;
+      if (recording->closed) return result(consumer_status::recording_closed);
+      if (recording->invalid) return result(consumer_status::recording_invalid);
+      if (recording->render_pass) return result(consumer_status::recording_render_pass);
     }
-    if (diagnostic) diagnostic->invalidation = recording->invalidation;
-    if (recording->closed) return result(consumer_status::recording_closed);
-    if (recording->invalid) return result(consumer_status::recording_invalid);
-    if (recording->render_pass) return result(consumer_status::recording_render_pass);
     bool matching_id = false;
     auto *begin = auxiliary ? diagnostic_slots.data() : slots.data();
     auto *end = begin + (auxiliary ? diagnostic_slots.size() : slots.size());
@@ -2011,7 +2048,10 @@ namespace sunshine_streamline::depth_capture {
         if (entry.auxiliary_destination && entry.auxiliary_destination != retained_target)
           return result(consumer_status::invalid_destination);
       }
-      for (unsigned i = 0; i != entry.consumers.size(); ++i) if (!entry.consumers[i] || entry.consumers[i] == cookie) {
+      // One unsubmitted immediate list per slot; repeated reads share it.
+      if (immediate && entry.pending_immediate && entry.pending_immediate != submitted_list)
+        return result(consumer_status::ownership_mismatch);
+      for (unsigned i = 0; i != entry.consumers.size(); ++i) if (immediate || !entry.consumers[i] || entry.consumers[i] == cookie) {
         if (!entry.preservation_only && entry.queue != value.queue) {
           // Recheck the actual slot before recording any read. A pending copy
           // must never add a queue dependency to the application's schedule.
@@ -2021,7 +2061,8 @@ namespace sunshine_streamline::depth_capture {
               !progress.valid() || !entry.producer_fence || progress.completed < entry.producer_fence)
             return result(consumer_status::capture_not_ready);
         }
-        entry.consumers[i] = cookie; entry.consumer_recordings[i] = recording.life();
+        if (immediate) entry.pending_immediate = submitted_list;
+        else { entry.consumers[i] = cookie; entry.consumer_recordings[i] = recording.life(); }
         entry.acquired = true;
         if (auxiliary) {
           entry.consumer_queue = value.queue;
@@ -2059,16 +2100,16 @@ namespace sunshine_streamline::depth_capture {
     return consume_owned(command, value, 0, 0, diagnostic);
   }
   bool copy_current(std::uint64_t command, const packet &value, std::uint64_t destination,
-      std::uint32_t destination_state, consumer_diagnostic *diagnostic) {
+      std::uint32_t destination_state, consumer_diagnostic *diagnostic, bool immediate) {
     if (!destination || !value.pixel_ready) {
       if (diagnostic) { *diagnostic = {}; diagnostic->result = !destination ? consumer_status::invalid_destination : consumer_status::capture_not_ready; }
       return false;
     }
-    return consume_owned(command, value, destination, destination_state, diagnostic);
+    return consume_owned(command, value, destination, destination_state, diagnostic, false, false, immediate);
   }
   static bool copy_auxiliary_texture(std::uint64_t command, std::uint64_t consumer_queue,
       const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
-      consumer_diagnostic *diagnostic, bool local) {
+      consumer_diagnostic *diagnostic, bool local, bool immediate) {
     const auto reject = [&](consumer_status value) {
       if (diagnostic) { *diagnostic = {}; diagnostic->result = value; }
       return false;
@@ -2097,17 +2138,17 @@ namespace sunshine_streamline::depth_capture {
       selected.device = reinterpret_cast<std::uint64_t>(found->texture->device.p);
       selected.queue = reinterpret_cast<std::uint64_t>(owner->queue.p);
     }
-    return consume_owned(command, selected, destination, destination_state, diagnostic, true, local);
+    return consume_owned(command, selected, destination, destination_state, diagnostic, true, local, immediate);
   }
   bool copy_diagnostic_texture(std::uint64_t command, std::uint64_t consumer_queue,
       const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
-      consumer_diagnostic *diagnostic) {
-    return copy_auxiliary_texture(command, consumer_queue, ticket, destination, destination_state, diagnostic, false);
+      consumer_diagnostic *diagnostic, bool immediate) {
+    return copy_auxiliary_texture(command, consumer_queue, ticket, destination, destination_state, diagnostic, false, immediate);
   }
   bool copy_local_texture(std::uint64_t command, std::uint64_t consumer_queue,
       const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
-      consumer_diagnostic *diagnostic) {
-    return copy_auxiliary_texture(command, consumer_queue, ticket, destination, destination_state, diagnostic, true);
+      consumer_diagnostic *diagnostic, bool immediate) {
+    return copy_auxiliary_texture(command, consumer_queue, ticket, destination, destination_state, diagnostic, true, immediate);
   }
   namespace {
     consumer_status preserved_admission(const slot &value, const preservation_ticket &ticket,

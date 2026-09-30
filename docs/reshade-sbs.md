@@ -1679,11 +1679,17 @@ slots. Every later object sharing that slot would be refused identically, so the
 invalidates evidence once instead of on every call; command lists on other slots keep their
 coverage. QueryInterface refusals are per object and are not remembered. The failed-status log
 counts refusals by cause and names the newest refused slot and function with their owning modules
-(`none` means allocated memory). D3D12Core can return a list's CommandList7 interface with its
-table in per-object heap memory, so its enhanced Barrier slot is refused. Producer recordings still
-require that coverage because observed legacy state validates the game resource. The display-copy
-consumer waives it: it copies only between private textures that no game or add-on barrier can
-name. Render-pass coverage is never waived.
+(`none` means allocated memory). Another tool can swap one object's vtable for a heap copy, which
+leaves every method of that object unhookable; in The Witcher 3 this happened to ReShade's own
+immediate list, while D3D12Core 1.619 itself keeps its tables in the module. Producer recordings
+still require full coverage because observed legacy state validates the game resource.
+A consumer that is the ReShade runtime's immediate list needs no command-list hook. It is open
+outside any render pass during present/effects events, and the runtime submits it on its queue
+and resets it without replay. Its read lease is therefore released at that list's next observed
+submission, followed by the private queue fence; until then the capture storage and destination
+stay retained. Other consumer lists keep recording-based leases and require coverage, except
+enhanced Barrier because their copies touch only private textures. Render-pass coverage is
+never waived for them.
 
 In **Automatic**, stored depth `r` is decoded as `d=r*raw_scale+raw_bias`, then the frame-bound
 projection supplies `q=(d-A)/B`. The identity transform is used without `PrecisionInfo`.

@@ -861,6 +861,61 @@ namespace {
     std::puts("PASS local same-queue pending GPU copy: strict shared/foreign rejection, exact R10 bytes, no wait, fixed consumer/destination and fence retirement");
   }
 
+  void immediate_consumer_without_list_hooks(fixture &gpu) {
+    // Another tool can swap a consumer list's vtable for a per-object heap
+    // copy that is never hooked (seen in The Witcher 3). A runtime immediate
+    // list needs no list hook: its observed submission and the queue fence
+    // retire the read, and nothing is released before that GPU work.
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "immediate allocator");
+    check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list)),
+      "immediate list");
+    auto **object = reinterpret_cast<void ***>(list.Get());
+    void **const original = *object;
+    constexpr std::size_t list7_methods = 81; // ID3D12GraphicsCommandList7::Barrier is slot 80.
+    std::vector<void *> swapped(original, original + list7_methods);
+    *object = swapped.data();
+    struct restore_vtable { void ***object; void **table; ~restore_vtable() { *object = table; } } restore{object, original};
+    // The first sighting reports the refused slots once, revoking recordings
+    // open at that moment. Later recordings and captures persist.
+    capture::observe_command(native(list.Get())); capture::poll();
+    check(gpu.list->Close(), "close recording open during refusal"); gpu.reset();
+    texture_case image(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, 4);
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R10G10B10A2_UNORM);
+    auto local = capture::record_local_texture(native(gpu.list.Get()), image.input);
+    require(bool(local), "immediate consumer source capture");
+    gpu.submit();
+    capture::finish_diagnostic_texture(local, true);
+    capture::diagnostic_texture pixels;
+    capture::consumer_diagnostic diagnostic;
+    require(capture::acquire_local_texture(local, native(gpu.queue.Get()), pixels) == capture::status::ready,
+      "submitted same-queue local snapshot was not readable");
+    const auto copy = [&](bool immediate) {
+      return capture::copy_local_texture(native(list.Get()), native(gpu.queue.Get()), local,
+        native(target.Get()), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &diagnostic, immediate);
+    };
+    require(!copy(false) && diagnostic.result == capture::consumer_status::observer_not_ready,
+      "a list with a swapped heap vtable became hook-ready");
+    require(copy(true) && copy(true), "immediate consumer without list hooks was rejected");
+    readback actual(gpu, target.Get());
+    actual.record(list.Get(), target.Get());
+    auto target_reference = capture::retain_source(native(target.Get()));
+    std::weak_ptr<const capture::source_reference> target_lifetime = target_reference;
+    target_reference = {};
+    pixels = {};
+    capture::release_diagnostic_texture(local); local = {};
+    target.Reset(); capture::poll();
+    require(!target_lifetime.expired(), "an unsubmitted immediate read released its destination");
+    check(list->Close(), "immediate close");
+    ID3D12CommandList *values[]{list.Get()};
+    gpu.queue->ExecuteCommandLists(1, values);
+    gpu.wait(); actual.verify(image.width, image.height, 4); gpu.reset(); capture::poll();
+    require(target_lifetime.expired(), "the submitted immediate read was not retired by its queue fence");
+    gpu.check_debug_errors();
+    std::puts("PASS immediate consumer with an unhookable swapped vtable: exact R10 bytes, retained until its observed submission and fence");
+  }
+
   void auxiliary_consumer_replay_and_discard(fixture &gpu) {
     consumer_fixture consumer(gpu);
     texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
@@ -1034,6 +1089,7 @@ int main() {
     first_recording_depth_capture(gpu);
     ngx_contract_depth_capture(gpu);
     local_same_queue_ordered_capture(gpu);
+    immediate_consumer_without_list_hooks(gpu);
     for (const bool shared : {false, true}) {
       observed_recording_color_capture(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, shared);
       observed_recording_color_capture(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, shared);
