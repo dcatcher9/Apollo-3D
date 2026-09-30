@@ -1568,7 +1568,11 @@ source (epoch, source and viewport) within the source age, the capture renders w
 coefficients, gain and zero plane, advances no calibration and carries no jitter. The Witcher 3
 misses the camera of a few SR evaluations each second: each such frame previously rendered mono,
 because raw calibration never completed there, and restarted the 500 ms strength ramp on return.
-The `Sunshine 3D Streamline scale` line counts these frames as `camera_missing_holds`. A capture
+The `Sunshine 3D Streamline scale` line counts these frames as `camera_missing_holds`. It is
+logged when readiness or the not-ready reason changes and every 10 s, with `sample_outcomes`
+counting each calibration sample once by controller outcome. The `Sunshine Streamline depth` line
+counts calibration statistics requests (`calibration_samples`): submitted, skipped because the
+shared depth sampler was busy, and completed with or without a match. A capture
 older than the source age, after a depth gap or from another source still takes the raw controller.
 Reused frames preserve the real capture's sequence/timestamp/projection, skip new depth readback
 and calibration updates, and keep the last matching resolved scene parameters. The strength slider
