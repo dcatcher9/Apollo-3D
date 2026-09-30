@@ -1170,7 +1170,8 @@ namespace {
     require(GetTickCount64() > snapshot.tick, "source age clock did not advance within fixture deadline");
     require(query_depth_source(snapshot, 0) == evidence_status::stale, "age limit ignored");
     constants.reset = 1; call_v1_constants(constants, 4, 7); call_v1_evaluate(nullptr, 0, 4, 7);
-    query(evidence_status::observation_lost, "reset camera nominated depth tags from the old scene");
+    // A reset ends temporal history, not the still-tagged depth of this frame.
+    query(evidence_status::camera_reset, "reset camera revoked its still-tagged depth");
     constants.reset = 0; call_v1_constants(constants, 5, 7); call_v1_tag(&resource, 0, 7, nullptr); call_v1_evaluate(nullptr, 0, 5, 7);
     resource.native = &other;
     depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&other), 50, 10, true);
@@ -1277,8 +1278,10 @@ namespace {
     high.lifecycle = UINT32_MAX;
     call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(query_depth_source(snapshot) != evidence_status::source_associated_evaluation,
-      "malformed v2 lifecycle inherited the v1 unspecified sentinel");
+    // The malformed kind is unusable; it does not revoke the valid raw tag.
+    require(!testing::normalized_source(view.value, 1, normalized) && testing::normalized_source(view.value, 0, normalized) &&
+        normalized.resource.native == reinterpret_cast<std::uintptr_t>(&native_a),
+      "malformed v2 lifecycle inherited the v1 unspecified sentinel or revoked valid raw depth");
     high.lifecycle = 1; call_v2_constants(constants, token.ref(), view);
     call_v2_tag(view, &raw, 1, nullptr); call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
@@ -1400,10 +1403,12 @@ namespace {
       };
       abi_v2::resource_tag mixed[]{clear_raw, linear};
       if (reverse_order) std::swap(mixed[0], mixed[1]);
+      // A clear is observed, not lost: the earlier evaluation keeps its depth
+      // and only later evaluations see the cleared kind.
       mint(token, nullptr);
-      require(publish(mixed, 2) == 0 && depth_observation_revision() == old_revision + 1 &&
-          !testing::normalized_source(view.value, 0, normalized),
-        "Mixed clear failed to revoke its earlier camera/depth lease");
+      require(publish(mixed, 2) == 0 && depth_observation_revision() == old_revision &&
+          testing::normalized_source(view.value, 0, normalized) && normalized.observation_revision == old_revision,
+        "Mixed clear revoked depth already evaluated for an earlier frame");
       const auto mixed_revision = depth_observation_revision();
       for (unsigned repeat = 0; repeat != 3; ++repeat) {
         if (repeat) { mint(token, nullptr); require(publish(mixed, 2) == 0, "Repeated mixed tag failed"); }
@@ -1411,13 +1416,13 @@ namespace {
             testing::normalized_source(view.value, 2, normalized) && !normalized.projection.supplied &&
             normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
             normalized.observation_revision == mixed_revision && depth_observation_revision() == mixed_revision &&
-            !testing::normalized_source(view.value, 0, normalized) && !testing::normalized_source(view.value, 1, normalized),
-          "Null alternative poisoned fresh linear depth, renewed its revision, or restamped cached depth/camera");
+            !testing::normalized_source(view.value, 0, normalized),
+          "Null alternative poisoned fresh linear depth, changed its revision, or kept the cleared raw depth");
       }
       auto clear_linear = linear; clear_linear.resource_ptr = nullptr;
       const abi_v2::resource_tag full_clear[]{clear_raw, clear_linear};
-      require(publish(full_clear, 2) == 0 && depth_observation_revision() == mixed_revision + 1,
-        "Full depth clear did not revoke the current linear source");
+      require(publish(full_clear, 2) == 0 && depth_observation_revision() == mixed_revision,
+        "Full depth clear was recorded as a lost observation");
       call_v2_evaluate(1001, token.ref(), inputs, 1, &commands);
       require(!testing::normalized_source(view.value, 2, normalized), "Full clear retained a linear source");
 
@@ -1434,8 +1439,8 @@ namespace {
       mint(token, nullptr); publish(&raw, 1);
       const auto before_interruption = depth_observation_revision();
       lose_during_tag_original = true;
-      require(publish(mixed, 2) == 0 && depth_observation_revision() == before_interruption + 2,
-        "Mixed clear did not preserve the intervening loss and its own revocation");
+      require(publish(mixed, 2) == 0 && depth_observation_revision() == before_interruption + 1,
+        "Mixed clear did not preserve the intervening loss");
       call_v2_evaluate(1001, token.ref(), inputs, 1, &commands);
       require(!testing::normalized_source(view.value, 2, normalized), "Mixed clear healed an intervening observation loss");
     }
@@ -1698,8 +1703,11 @@ namespace {
     tag.area.width = 1921;
     call_v2_framed_tag(token.ref(), view, &tag, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(testing::latest_snapshot(view.value, observed) && observed.status != evidence_status::source_associated_evaluation,
-      "UntilEvaluate admission bypassed malformed extent rejection");
+    {
+      sunshine_scene_depth::frame normalized;
+      require(!testing::normalized_source(view.value, 0, normalized),
+        "UntilEvaluate admission bypassed malformed extent rejection");
+    }
     tag.area.width = 1920;
     call_v2_constants(constants, token.ref(), view); call_v2_framed_tag(token.ref(), view, &tag, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr); evaluated();
@@ -1747,16 +1755,19 @@ namespace {
     require(testing::latest_snapshot(1, reset) && reset.feedback.reset &&
         reset.feedback.revision > ordinary.feedback.revision && testing::normalized_source(1, 0, other) &&
         other.feedback.reset && other.feedback.revision == reset.feedback.revision &&
+        other.observation_revision == initial.observation_revision &&
         other.observation_revision == depth_observation_revision() && other.projection.supplied &&
         other.projection.depth_offset == initial.projection.depth_offset &&
         other.projection.depth_scale == initial.projection.depth_scale && other.source_frame_numeric == 3 &&
         other.source_id == initial.source_id,
-      "reset failed to revoke history while admitting its fresh depth and projection");
-    require(!testing::normalized_source(2, 0, other), "reset promoted a pre-reset viewport snapshot to the new revision");
+      "reset failed to start a new history while admitting its fresh depth and projection");
+    require(testing::normalized_source(2, 0, other) && !other.feedback.reset &&
+        other.feedback.revision == initial.feedback.revision,
+      "reset of one viewport revoked or restarted another viewport's history");
     evaluate(4, 1);
     sunshine_scene_depth::frame recovered;
     require(testing::normalized_source(1, 0, recovered) && !recovered.feedback.reset &&
-        recovered.feedback.revision == reset.feedback.revision && recovered.feedback.revision == depth_observation_revision() + 1 &&
+        recovered.feedback.revision == reset.feedback.revision && recovered.feedback.revision == depth_observation_revision() + 2 &&
         recovered.source_id == initial.source_id && recovered.viewport == initial.viewport,
       "fresh post-reset input lost revision or logical source identity");
     require(!initial.feedback.reset && initial.feedback.revision == ordinary.feedback.revision &&
@@ -1784,19 +1795,20 @@ namespace {
     require(entered, "in-flight feedback evaluation did not reach original");
     evaluation_snapshot first;
     sunshine_scene_depth::frame normalized;
+    // The next frame's reset is observed metadata, not lost evidence: the
+    // in-flight frame keeps its own depth and its pre-reset history.
     require(testing::latest_snapshot(1, first) && first.frame.numeric == 1 && !first.feedback.reset &&
-        first.feedback.revision == original_revision && first.feedback.revision < depth_observation_revision() + 1 &&
-        first.status == evidence_status::observation_lost && !testing::normalized_source(1, 0, normalized),
-      "pre-reset completion borrowed newer reset metadata or remained usable");
+        first.feedback.revision == original_revision && depth_observation_revision() + 1 == original_revision &&
+        first.status == evidence_status::source_associated_evaluation &&
+        testing::normalized_source(1, 0, normalized) && normalized.source_frame_numeric == 1 && !normalized.feedback.reset,
+      "a later frame's reset revoked in-flight depth or leaked into its history");
     call_v1_evaluate(nullptr, 0, 2, 1);
     evaluation_snapshot reset;
     require(testing::latest_snapshot(1, reset) && reset.frame.numeric == 2 && reset.feedback.reset &&
-        reset.feedback.revision == depth_observation_revision() + 1 && !testing::normalized_source(1, 0, normalized),
-      "reset evaluation accepted depth tags from before its temporal boundary");
-    call_v1_tag(&resource, 0, 1, nullptr); call_v1_evaluate(nullptr, 0, 2, 1);
-    require(testing::normalized_source(1, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied &&
-        normalized.source_frame_numeric == 2 && normalized.feedback.revision == reset.feedback.revision,
-      "freshly retagged reset frame did not recover without waiting for a non-reset frame");
+        reset.feedback.revision == original_revision + 1 && testing::normalized_source(1, 0, normalized) &&
+        normalized.feedback.reset && normalized.projection.supplied && normalized.source_frame_numeric == 2 &&
+        normalized.feedback.revision == reset.feedback.revision,
+      "reset frame lost its still-tagged depth or did not start a new history");
     constants.reset = 0;
     call_v1_constants(constants, 3, 1); call_v1_tag(&resource, 0, 1, nullptr); call_v1_evaluate(nullptr, 0, 3, 1);
     require(testing::normalized_source(1, 0, normalized) && normalized.source_frame_numeric == 3 &&
@@ -1918,14 +1930,8 @@ namespace {
     next_frame();
     const auto before_reset = depth_observation_revision();
     preserves_last_error(constants, constants_call);
-    require(depth_observation_revision() == before_reset + 1,
-      "Camera reset diagnostic changed the existing single revision increment");
-    const auto reset = event_for(before_reset + 1, loss_diagnostics::reason::camera_reset, GetCurrentThreadId());
-    require(reset.details.viewport == view.value && reset.details.sequence && reset.details.reset == 1,
-      "Camera reset cause omitted its viewport/call/reset context");
-    no_old_source();
+    require(depth_observation_revision() == before_reset, "Camera reset was recorded as a lost observation");
     recover();
-    still_recorded(reset);
     require(first.observation_revision == before_reset && !first.feedback.reset &&
       first.projection.depth_scale == .5, "Later diagnostic activity mutated the earlier normalized value");
 
@@ -1933,12 +1939,7 @@ namespace {
     old.common.clip_to_camera_view.m[0][0] = current.common.clip_to_camera_view.m[0][0] = 2.f;
     const auto before_invalid = depth_observation_revision();
     preserves_last_error(constants, constants_call);
-    require(depth_observation_revision() == before_invalid + 1,
-      "Invalid camera diagnostic changed the existing single revision increment");
-    const auto invalid = event_for(before_invalid + 1, loss_diagnostics::reason::invalid_camera, GetCurrentThreadId());
-    require(invalid.details.viewport == view.value && invalid.details.sequence && invalid.details.reset == 0,
-      "Invalid projection was mislabeled as a game-requested camera reset");
-    no_old_source();
+    require(depth_observation_revision() == before_invalid, "Invalid camera constants were recorded as a lost observation");
     recover();
 
     const auto before_failure = depth_observation_revision();
@@ -1995,7 +1996,7 @@ namespace {
     recover();
 
     const auto recovered_revision = depth_observation_revision();
-    for (const auto &saved : {reset, invalid, failed, busy}) still_recorded(saved);
+    for (const auto &saved : {failed, busy}) still_recorded(saved);
     loss_diagnostics::event missing;
     require(!query_depth_observation_loss(0, missing) &&
       !query_depth_observation_loss(recovered_revision + 1, missing) &&
@@ -2068,18 +2069,20 @@ namespace {
     require(testing::normalized_source(4, 0, before_reset) &&
         before_reset.observation_revision == depth_observation_revision(),
       "v1 normalized depth omitted its source observation revision");
+    // A later frame's reset or invalid camera is observed metadata; it never
+    // revokes the depth already evaluated for an earlier frame.
     constants.reset = 1;
     call_v1_constants(constants, 15, 4);
-    require(depth_observation_revision() != before_reset.observation_revision,
-      "v1 camera reset failed to revoke retained depth before the next tag/evaluation");
-    expect_evidence(selected, evidence_status::observation_lost, "camera reset did not revoke old evidence immediately");
+    require(depth_observation_revision() == before_reset.observation_revision,
+      "v1 camera reset was recorded as a lost observation");
+    expect_evidence(selected, evidence_status::source_associated_evaluation, "camera reset revoked earlier evidence");
     constants.reset = 0;
     call_v1_constants(constants, 16, 4);
     call_v1_tag(&resource, 0, 4, nullptr);
     call_v1_evaluate(nullptr, 0, 16, 4);
     constants.common.clip_to_camera_view.m[0][0] = 2;
     call_v1_constants(constants, 17, 4);
-    expect_evidence(selected, evidence_status::observation_lost, "invalid projection did not revoke old evidence");
+    expect_evidence(selected, evidence_status::source_associated_evaluation, "invalid projection revoked earlier evidence");
     shutdown();
     expect_evidence(selected, evidence_status::inactive, "shutdown left evidence available");
   }
@@ -3208,7 +3211,10 @@ namespace {
     require(testing::latest_snapshot(0, snapshot) && snapshot.sequence == only_valid_now_sequence,
       "Ordinary longer-lived tag invented a synchronous depth opportunity");
     tags[2].lifecycle = 3; tag_now();
-    require(!testing::normalized_source(0, 0, normalized), "Unsupported tag lifetime retained old standalone depth");
+    // The earlier capture already copied its pixels; a later unusable tag is
+    // not a new opportunity and does not revoke that finished capture.
+    require(testing::latest_snapshot(0, snapshot) && snapshot.sequence == only_valid_now_sequence,
+      "Unsupported tag lifetime invented a synchronous depth opportunity or revoked the earlier capture");
   }
 
   void test_frame_generation_tags() {
@@ -3594,20 +3600,22 @@ namespace {
     require(!testing::normalized_source(view.value, 0, normalized), "global FG constants crossed observation loss");
     const auto revision_before_reset = depth_observation_revision();
     constants.reset = 1; call_v2_constants(constants, token.ref(), view);
-    require(depth_observation_revision() != revision_before_reset,
-      "FG camera reset did not revoke retained depth before the next tag");
+    require(depth_observation_revision() == revision_before_reset, "FG camera reset was recorded as a lost observation");
     tag_now();
     require(testing::normalized_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied &&
         normalized.observation_revision == depth_observation_revision() && normalized.frame_generation_input,
-      "valid global FG reset frame lost current depth/projection after retiring older depth");
+      "valid global FG reset frame lost current depth/projection");
     constants.reset = 2; call_v2_constants(constants, token.ref(), view); tag_now();
     require(!testing::normalized_source(view.value, 0, normalized), "malformed reset flag entered global FG capture");
     constants = modern_camera(); constants.reset = 1; constants.common.camera_view_to_clip.m[0][0] = 0;
     call_v2_constants(constants, token.ref(), view); tag_now();
     require(!testing::normalized_source(view.value, 0, normalized), "reset admitted an invalid projection into global FG capture");
+    // The camera is optional for depth: an invalid projection supplies no
+    // metric scale, but never withholds the tagged depth itself.
     constants = modern_camera(); constants.common.camera_view_to_clip.m[0][0] = 0;
     call_v2_constants(constants, token.ref(), view); tag_now();
-    require(!testing::normalized_source(view.value, 0, normalized), "invalid global camera projection entered FG capture");
+    require(testing::normalized_source(view.value, 0, normalized) && !normalized.projection.supplied,
+      "invalid global camera projection supplied FG metric scale or withheld its depth");
     constants = modern_camera(); call_v2_constants(constants, token.ref(), view);
     result_v2 = -1; call_v2_constants(constants, token.ref(), view); result_v2 = 0; tag_now();
     require(!testing::normalized_source(view.value, 0, normalized), "failed constants call retained an applicable camera tuple");

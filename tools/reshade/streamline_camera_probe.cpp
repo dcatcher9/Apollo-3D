@@ -81,6 +81,8 @@ namespace sunshine_streamline {
       frame_identity camera_frame;
       std::uintptr_t camera_token{};
       std::uint64_t camera_tick{}, camera_serial{}, changed{}, evaluation_tick{};
+      // Observed camera resets of this viewport; each starts a new temporal history.
+      std::uint64_t history{};
       std::uint32_t viewport{}, feature{};
       bool used{}, has_camera{};
     };
@@ -99,7 +101,7 @@ namespace sunshine_streamline {
       camera_data camera;
       decode_status decoded{decode_status::short_buffer};
       std::array<tag_record, observed_tag_types.size()> tags{};
-      std::uint64_t camera_serial{}, camera_tick{}, loss{}, changed{};
+      std::uint64_t camera_serial{}, camera_tick{}, loss{}, changed{}, history{};
       std::uint32_t viewport{};
       bool used{}, has_camera{};
     };
@@ -911,15 +913,10 @@ namespace sunshine_streamline {
       auto &state = *update;
       auto &record = slot(state, viewport);
       if (serial < record.camera_serial) return;
-      if (invalid_camera) lose(loss_diagnostics::reason::invalid_camera, __func__, __LINE__, details);
-      else if (camera.reset == 1) {
-        // Reset ends temporal history, not the validity of this frame's depth
-        // or projection. Retire prior leases immediately, then associate this
-        // camera with its own new revision. Never heal unrelated observation
-        // loss that occurred while the original constants call was in flight.
-        const auto previous_loss = lose(loss_diagnostics::reason::camera_reset, __func__, __LINE__, details);
-        if (previous_loss == loss) loss = previous_loss + 1;
-      }
+      // Invalid constants and resets are observed facts, not lost evidence: the
+      // camera is optional for depth. A reset ends only this viewport's
+      // temporal history; it never revokes depth or other viewports.
+      if (!invalid_camera && camera.reset == 1) ++record.history;
       const auto camera_identity = identity.kind == frame_identity_kind::unavailable &&
           installed_abi == abi::v2 && token ?
         frame_identity{frame_identity_kind::v2_constants_call, serial, 0, token, false} : identity;
@@ -939,6 +936,7 @@ namespace sunshine_streamline {
           saved->camera_serial = saved->changed = serial;
           saved->camera_tick = record.camera_tick;
           saved->loss = loss;
+          saved->history = record.history;
           saved->has_camera = true;
         }
       }
@@ -952,44 +950,16 @@ namespace sunshine_streamline {
       if (!update) { if (current(values.observation)) metadata_write_lost(update, __func__, __LINE__, details); return; }
       auto &state = *update;
       auto &record = slot(state, values.viewport);
-      bool revoke_previous = false;
-      for (const auto &tag : values.tags) {
-        if (!tag.present) continue;
-        auto tagged = tag.value;
-        tagged.observation_epoch = state.epoch;
-        // UntilEvaluate is valid at the synchronous copy boundary, but never
-        // promoted to UntilPresent in stored/public metadata. Preserve all of
-        // match()'s other identity/extent checks using a local validation copy.
-        auto at_evaluation = tagged;
-        if (at_evaluation.lifecycle == 0 || at_evaluation.lifecycle == 2) at_evaluation.lifecycle = 1;
-        const auto index = tag_index(tagged.type);
-        if (index < 3 && (!tag.supported || !tagged.native_resource ||
-            match({values.viewport, state.epoch, 0, false}, at_evaluation) != match_status::same_epoch_only)) {
-          const auto &global = record.global_tags[index];
-          const auto &local = record.local_tags[index];
-          const auto &previous = local.serial > global.serial ? local : global;
-          // A successful null tag clears that kind. Repeating the same clear
-          // must not reset an independently supplied linear-depth history.
-          const bool repeated_clear = tag.supported && !tagged.native_resource &&
-            previous.present && previous.supported && !previous.value.native_resource;
-          revoke_previous |= !repeated_clear;
-        }
-      }
-      auto batch_loss = values.loss;
-      if (revoke_previous) {
-        const auto previous = lose(loss_diagnostics::reason::tag_replaced, __func__, __LINE__, details);
-        // Revoke earlier leases, but retain fresh alternatives supplied by this
-        // same successful call. Never heal an intervening observation loss or
-        // restamp cached tags/cameras that were not part of this batch.
-        if (previous == values.loss) batch_loss = previous + 1;
-      }
+      // A null, replaced or unusable tag is itself observed and stored below;
+      // later evaluations read it. Earlier evaluations and their finished
+      // copies keep the tag they were given, so nothing is revoked here.
       for (unsigned i = 0; i < values.count; ++i) {
         auto value = values.tags[i];
         if (!value.present) continue;
         value.value.observation_epoch = state.epoch;
         value.tick = values.tick;
         value.serial = values.serial;
-        value.loss = batch_loss;
+        value.loss = values.loss;
         value.frame = values.frame;
         auto &destination = value.source == origin::local ? record.local_tags : record.global_tags;
         destination[i] = value;
@@ -1045,9 +1015,10 @@ namespace sunshine_streamline {
         if (saved->loss != loss) out.status = evidence_status::observation_lost;
         else if (out.decoded != decode_status::ok) out.status = evidence_status::rejected_constants;
       }
-      // Freeze reset continuity with this camera/frame tuple before the native
-      // evaluation. A later reset revokes older in-flight captures by revision.
-      out.feedback.revision = loss + 1;
+      // Freeze history continuity with this camera/frame tuple before the native
+      // evaluation. It ends at this viewport's reset or at an actual observation
+      // loss, which may have hidden a reset. Both counters only increase.
+      out.feedback.revision = loss + 1 + (out.frame_correlated ? saved->history : record.history);
       out.feedback.reset = out.frame_correlated && out.decoded == decode_status::ok && out.camera.reset == 1;
       bool has_depth = false;
       for (unsigned i = 0; i != out.tags.size(); ++i) {
@@ -1587,12 +1558,11 @@ namespace sunshine_streamline {
       withdraw_invalid_attempt();
       return 0;
     }
-    // A copy survives only a successful SDK call whose observation generation
-    // did not change while the original ran.
-    void finish_capture(std::uint64_t captured, bool successful, std::uint64_t ticket, std::uint64_t loss) {
+    // A copy survives a successful SDK call. Unrelated metadata observed or
+    // lost while the original ran does not change the pixels it copied.
+    void finish_capture(std::uint64_t captured, bool successful, std::uint64_t ticket) {
       if (!captured) return;
-      depth_capture::finish(captured, successful && current(ticket) && loss == loss_revision.load(std::memory_order_acquire),
-        successful ? depth_capture::capture_failure::evaluation_observation_changed : depth_capture::capture_failure::evaluation_failed);
+      depth_capture::finish(captured, successful && current(ticket), depth_capture::capture_failure::evaluation_failed);
     }
     bool hook_evaluate_v1(void *commands, std::uint32_t feature, std::uint32_t frame, std::uint32_t viewport) {
       const DWORD incoming = GetLastError();
@@ -1629,7 +1599,7 @@ namespace sunshine_streamline {
       loss_context.sdk_result = result ? 1 : 0; loss_context.has_sdk_result = true;
       if (sample && diagnostic.session) dump_metadata::observe_sl_evaluation(diagnostic, feature, result);
       call_trace.finish(result);
-      finish_capture(captured, result, ticket, snapshot.loss_revision);
+      finish_capture(captured, result, ticket);
       if (sample) finish_evaluation(snapshot, result, ticket);
       if (present_serial) finish_presentation_marker(viewport, present_serial, result, ticket);
       SetLastError(outgoing);
@@ -1827,7 +1797,7 @@ namespace sunshine_streamline {
       const DWORD outgoing = GetLastError();
       loss_context.sdk_result = result; loss_context.has_sdk_result = true;
       if (diagnostic.session) dump_metadata::finish_sl_call(diagnostic, result == 0);
-      finish_capture(captured, result == 0, ticket, loss);
+      finish_capture(captured, result == 0, ticket);
       if (sample && result == 0 && out.count) store_tags(out);
       else if (sample && (result != 0 || !out.valid_viewport) && current(ticket))
         lose(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input, __func__, __LINE__);
@@ -1958,7 +1928,7 @@ namespace sunshine_streamline {
         dump_metadata::observe_sl_evaluation(diagnostic, feature, result == 0);
       }
       call_trace.finish(result == 0);
-      finish_capture(captured, result == 0, ticket, snapshot.loss_revision);
+      finish_capture(captured, result == 0, ticket);
       if (sample && out.valid_viewport) {
         if (result == 0 && out.count) store_tags(out);
         finish_evaluation(snapshot, result == 0, ticket);

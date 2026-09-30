@@ -47,8 +47,6 @@ namespace sunshine_streamline::depth_capture {
     bool require_frame_generation{};
     std::uint64_t epoch{};
     std::uint32_t viewport{};
-    bool check_streamline_observation{};
-    std::uint64_t streamline_observation_revision{};
     // Lost FG mode evidence revokes FG inputs, not independent ordinary depth.
     bool exclude_unconfirmed_fg{};
   };
@@ -61,7 +59,7 @@ namespace sunshine_streamline::depth_capture {
     none, observer_loss, discarded_recording, close_failed, replay,
     producer_signal_failed, producer_queue_changed, consumer_signal_failed,
     consumer_queue_changed, evaluation_failed,
-    evaluation_observation_changed, queue_retired, consumer_capacity, source_retired
+    queue_retired, consumer_capacity, source_retired
   };
   // Selection evidence only; never grants GPU access to a pending snapshot.
   enum class selection_reason {
@@ -69,7 +67,7 @@ namespace sunshine_streamline::depth_capture {
     pending_nomination, current_capture, current_already_consumed, no_admissible_capture,
     no_completed_snapshot, completed_before_gap, completed_not_older,
     completed_already_consumed, presentation_already_selected, layout_changed,
-    completed_not_readable, completed_snapshot, fg_scope_missing, fg_scope_mismatch, source_observation_changed
+    completed_not_readable, completed_snapshot, fg_scope_missing, fg_scope_mismatch
   };
   // Acquisition authority, frozen under the capture lock. Diagnostics may be
   // omitted or reformatted without changing these source/continuity decisions.
@@ -81,10 +79,6 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t epoch{}, sequence{}, source_id{}, capture_id{};
     std::uint32_t viewport{};
     bool source_valid{}, repeated_frame{}, pending_frame{};
-    // Capture-side proof for the provider's existing one-presentation NGX hold.
-    // Nonzero identifies the exact consumed predecessor; the provider must
-    // still match its private display copy, metadata, shape, age and queue.
-    std::uint64_t pending_ngx_previous_capture{};
   };
   // Observation only. Rendering and source reuse consume acquisition_decision.
   struct capture_diagnostic {

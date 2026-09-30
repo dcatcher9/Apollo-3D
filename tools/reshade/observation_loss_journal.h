@@ -8,8 +8,8 @@
 
 namespace sunshine_streamline::loss_diagnostics {
   enum class reason {
-    records_busy, commands_busy, resource_table_full, invalid_input, invalid_camera,
-    camera_reset, tag_replaced, sdk_failure, token_replaced, lifecycle, test_injected, tokens_busy,
+    records_busy, commands_busy, resource_table_full, invalid_input,
+    sdk_failure, token_replaced, lifecycle, test_injected, tokens_busy,
     metadata_storage_busy
   };
   inline const char *name(reason value) noexcept {
@@ -21,9 +21,6 @@ namespace sunshine_streamline::loss_diagnostics {
       SUNSHINE_LOSS_NAME(commands_busy);
       SUNSHINE_LOSS_NAME(resource_table_full);
       SUNSHINE_LOSS_NAME(invalid_input);
-      SUNSHINE_LOSS_NAME(invalid_camera);
-      SUNSHINE_LOSS_NAME(camera_reset);
-      SUNSHINE_LOSS_NAME(tag_replaced);
       SUNSHINE_LOSS_NAME(sdk_failure);
       SUNSHINE_LOSS_NAME(token_replaced);
       SUNSHINE_LOSS_NAME(lifecycle);

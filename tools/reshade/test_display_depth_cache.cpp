@@ -46,7 +46,6 @@ namespace {
   depth_capture::display_decision hold() {
     depth_capture::display_decision out;
     out.action = depth_capture::display_action::hold;
-    out.hold = depth_capture::hold_kind::frame_generation;
     out.reason = "retained_copy";
     return out;
   }

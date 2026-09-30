@@ -679,24 +679,23 @@ namespace {
       const auto reset_seed_frame = fg_frame;
       render_tracked_depth = {};
       held(reset_seed, "SLFG-cache-reset-before-hold");
+      // A reset ends temporal history, not the finished copy of an earlier
+      // frame: like any gap, the copy is held only within its own source age.
       render_tracked_depth = [&] {
         require(last_token, "Native camera-reset fixture has no existing frame token");
         const auto constants = camera_constants(true);
         require(constants_call(constants, *last_token, viewport) == 0, "Camera reset changed the SDK result");
       };
-      missing("SLFG-cache-camera-reset");
-      require(GetTickCount64() - reset_seed_started < sunshine_scene_depth::maximum_source_age_ms,
-        "Native camera-reset fixture expired before reset could be distinguished from age rejection");
-      // Restore valid camera metadata on the same token, without a depth tag or
-      // evaluation. This must not repair the invalidated copy's observation lease.
+      held(reset_seed, "SLFG-cache-camera-reset-hold");
       render_tracked_depth = [&] {
         const auto constants = camera_constants(false);
         require(constants_call(constants, *last_token, viewport) == 0, "Camera recovery changed the SDK result");
       };
-      missing("SLFG-cache-camera-valid-without-depth");
+      held(reset_seed, "SLFG-cache-camera-valid-without-depth");
+      require(GetTickCount64() - reset_seed_started < sunshine_scene_depth::maximum_source_age_ms,
+        "Native camera-reset fixture expired before its holds were observed");
       render_tracked_depth = {};
-      missing("SLFG-cache-camera-reset-no-revival");
-      require(fg_frame == reset_seed_frame, "Camera-reset no-revival case accidentally produced a new real frame");
+      require(fg_frame == reset_seed_frame, "Camera-reset hold case accidentally produced a new real frame");
       recovered_fresh(reset_seed, "SLFG-cache-camera-reset-fresh-recovery");
 
       const auto mode_seed = settle("SLFG-cache-mode-seed");
@@ -708,9 +707,38 @@ namespace {
       missing("SLFG-cache-mode-on-no-revival");
       require(fg_frame == mode_seed_frame, "FG mode no-revival case accidentally produced a new real frame");
       recovered_fresh(mode_seed, "SLFG-cache-mode-fresh-recovery");
-      std::puts("PASS native FG cache: repeated holds cannot renew capture age; camera reset and FG off/on cannot revive old depth; fresh copies recover all three intervals; no FX");
+      std::puts("PASS native FG cache: repeated holds cannot renew capture age; camera reset keeps the finished copy within its age; FG off/on cannot revive old depth; fresh copies recover all three intervals; no FX");
       for (const std::uint32_t type : {0u, 8u})
         run_ui_hook(real_frame, last_token, viewport, tag_call, global_tag_call, type);
+
+      // The Witcher 3 pattern with FG off: each frame tags depth valid until
+      // present, evaluates, then clears the tag before present, while another
+      // viewport sends reset constants every frame. Neither the clear nor the
+      // foreign reset is lost evidence, so every presentation has fresh depth.
+      configure(false);
+      const abi_v2::viewport foreign_viewport{{nullptr, viewport_guid, 1}, 7};
+      render_tracked_depth = [&] {
+        draw(*decoy); write_depth_pixels();
+        abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
+        require(new_token(token, &frame) == 0 && token, "Until-present SDK did not supply a frame token");
+        last_token = token;
+        require(constants_call(camera_constants(true), *token, foreign_viewport) == 0 &&
+            constants_call(camera_constants(false), *token, viewport) == 0,
+          "Until-present constants observation changed the SDK result");
+        abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
+        resource.type = 8; resource.native = selected->resource.p; resource.state = unsigned(selected->state);
+        resource.width = selected->width; resource.height = selected->height;
+        resource.native_format = DXGI_FORMAT_R32_FLOAT; resource.mip_levels = resource.array_layers = 1;
+        const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
+        const auto command = reinterpret_cast<void *>(game_native_command);
+        require(global_tag_call(viewport, &tag, 1, command) == 0, "Until-present tag observation changed the SDK result");
+        const base_structure *inputs[]{&viewport.base};
+        require(evaluate(0, *token, inputs, 1, command) == 0, "Until-present evaluation changed the SDK result");
+        const abi_v2::resource_tag cleared{{nullptr, tag_guid, 1}, nullptr, 0, 1, {}};
+        require(global_tag_call(viewport, &cleared, 1, command) == 0, "Until-present clear changed the SDK result");
+      };
+      settle("SL-until-present-clear-foreign-reset");
+      std::puts("PASS native SL provider: depth cleared after evaluation and another viewport's per-frame camera reset keep fresh depth every presentation; no FX");
 
       // Use the same public SDK boundary for linear RR depth with no usable
       // camera. The native copy, provider acquisition and GPU moment readback

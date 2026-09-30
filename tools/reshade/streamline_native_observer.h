@@ -35,6 +35,14 @@ namespace sunshine_streamline::native_observer {
     // Overflow now means snapshot allocation/size failure, never exceeding
     // the inline fast path. Valid large batches are observed in full.
     std::uint64_t barrier_overflow{}, submission_overflow{}, discovery_contention{};
+    // Refusals: QueryInterface refused the exact interface (every call), or a
+    // distinct vtable slot or its function is outside a loaded module image
+    // (for example another tool's trampoline), or a method already has eight
+    // vtables. The newest keeps its slot (or vtable for QueryInterface, method 8)
+    // and function address.
+    std::uint64_t refused_interface{}, refused_discovery{}, refused_capacity{};
+    std::uint64_t refused_slot{}, refused_code{};
+    unsigned refused_method{};
   };
 
   // Owner serializes install_pending calls. Initialize only while owner

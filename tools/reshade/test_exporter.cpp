@@ -165,198 +165,95 @@ namespace {
         "Unavailable depth remained eligible for adaptive UI observation");
     }
 
-    static void pending_depth_continuity() {
-      using namespace sunshine_streamline;
-      depth_capture::retained_depth previous;
-      previous.capture_id = 300; previous.real_present = 100;
-      previous.width = 2228; previous.height = 1256;
-      previous.format = 39; previous.area = {0, 0, 2228, 1253};
-      previous.metadata.provider = sunshine_scene_depth::provider_kind::ngx;
-      previous.metadata.epoch = 4; previous.metadata.source_id = 7;
-      previous.metadata.sequence = 200; previous.metadata.tick = 1000;
-      previous.metadata.feedback.revision = 3;
-      previous.metadata.projection.direction_supplied = previous.metadata.projection.reversed = true;
-      depth_capture::packet pending;
-      pending.metadata = {};
-      static_cast<sunshine_scene_depth::frame &>(pending.metadata) = previous.metadata;
-      pending.metadata.sequence = 201; pending.metadata.tick = 1016;
-      pending.width = previous.width; pending.height = previous.height; pending.format = 39;
-      pending.area = previous.area;
-      pending.capture_id = 301;
-      depth_capture::acquisition_decision info;
-      info.source_selected = info.source_valid = true;
-      info.pending_ngx_previous_capture = 300;
-      info.capture_id = pending.capture_id;
-      info.provider = pending.metadata.provider;
-      info.epoch = pending.metadata.epoch; info.source_id = pending.metadata.source_id;
-      info.sequence = pending.metadata.sequence; info.viewport = pending.metadata.viewport;
-      const auto allowed = [&](depth_capture::retained_depth before, const depth_capture::packet &next,
-          const depth_capture::acquisition_decision &proof, std::uint64_t present = 101, std::uint64_t now = 1032,
-          std::uint64_t capture = UINT64_MAX) {
-        if (capture != UINT64_MAX) before.capture_id = capture;
-        const auto result = depth_capture::decide_display(proof, next, before, {}, present, now, 0);
-        return result.action == depth_capture::display_action::hold && result.hold == depth_capture::hold_kind::ngx_pending;
-      };
-      require(allowed(previous, pending, info), "One-presentation completed NGX depth hold rejected");
-      require(allowed(previous, pending, info), "Repeated effects in one held presentation disagreed");
-      // Capture owns success/fence/recording classification. The provider must
-      // additionally bind that authority to this prior copy and pending packet.
-      require(!allowed(previous, pending, info, 100) && !allowed(previous, pending, info, 102),
-        "NGX hold admitted an earlier or second missing presentation");
-      require(!allowed(previous, pending, info, 101, 1250) && !allowed(previous, pending, info, 101, 999),
-        "NGX hold admitted stale depth or a backwards clock");
-      for (unsigned field = 0; field != 36; ++field) {
-        auto before = previous;
-        auto next = pending;
-        auto proof = info;
-        switch (field) {
-          case 0: before.capture_id = 0; break;
-          case 1: before.metadata.feedback.reset = true; break;
-          case 2: next.metadata.feedback.reset = true; break;
-          case 3: ++next.metadata.feedback.revision; break;
-          case 4: next.metadata.feedback.revision = before.metadata.feedback.revision = 0; break;
-          case 5: ++next.metadata.epoch; break;
-          case 6: ++next.metadata.source_id; break;
-          case 7: ++next.metadata.viewport; break;
-          case 8: next.metadata.sequence = before.metadata.sequence; break;
-          case 9: ++next.metadata.observation_revision; break;
-          case 10: next.metadata.provider = sunshine_scene_depth::provider_kind::streamline; break;
-          case 11: next.metadata.frame_generation_input = true; break;
-          case 12: next.metadata.projection.reversed = false; break;
-          case 13: next.metadata.projection.raw_scale = 2; break;
-          case 14: ++next.width; break;
-          case 15: ++next.height; break;
-          case 16: ++next.format; break;
-          case 17: ++next.area.top; break;
-          case 18: --next.area.height; break;
-          case 19: next.metadata.resource.kind = sunshine_scene_depth::resource_kind::display_depth; break;
-          case 20: next.shared_preservation = true; break;
-          case 21: next.pixel_ready = true; break;
-          case 22: proof.source_selected = false; break;
-          case 23: proof.source_valid = false; break;
-          case 24: proof.pending_ngx_previous_capture = 0; break;
-          case 25: --proof.pending_ngx_previous_capture; break;
-          case 26: ++proof.capture_id; break;
-          case 27: proof.provider = sunshine_scene_depth::provider_kind::streamline; break;
-          case 28: ++proof.epoch; break;
-          case 29: ++proof.sequence; break;
-          case 30: ++proof.source_id; break;
-          case 31: ++proof.viewport; break;
-          case 32: before.metadata.source_id = 0; break;
-          case 33: before.metadata.epoch = 0; break;
-          case 34: next.capture_id = 0; break;
-          case 35: next.metadata.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance; break;
-        }
-        require(!allowed(before, next, proof), "Changed, failed, unknown or unsafe NGX input inherited held depth");
-      }
-      require(!allowed(previous, pending, {}), "Absent capture authority inherited held NGX depth");
-      require(!allowed(previous, pending, info, 101, 1032, 0), "Missing prior capture inherited held NGX depth");
-      require(depth_capture::decide_display(info, pending, {}, {}, 101, 1032, 0).action == depth_capture::display_action::invalidate,
-        "A later pending NGX nomination revived an invalidated private copy");
-      auto ready = pending; ready.pixel_ready = true;
-      require(depth_capture::decide_display(info, ready, {}, {}, 101, 1032, 0).action == depth_capture::display_action::copy_fresh,
-        "Fresh NGX pixels could not rearm an empty cache through a copy attempt");
-      auto resumed = previous;
-      resumed.real_present = 102;
-      resumed.metadata.sequence = 201; resumed.metadata.tick = 1032;
-      auto newer = pending;
-      newer.metadata.sequence = 202; newer.metadata.tick = 1048;
-      newer.capture_id = info.capture_id = 302;
-      info.sequence = 202; info.pending_ngx_previous_capture = 301;
-      require(allowed(resumed, newer, info, 103, 1064, 301), "Fresh successful copy did not rearm the next bounded hold");
-    }
-
     static void retained_depth_decision() {
       using namespace sunshine_streamline;
       using action = depth_capture::display_action;
+      using sunshine_scene_depth::provider_kind;
       depth_capture::retained_depth previous;
       previous.capture_id = 500; previous.real_present = 100;
       previous.width = 1920; previous.height = 1080; previous.format = 39;
       previous.area = {0, 0, 1920, 1080};
       auto &metadata = previous.metadata;
-      metadata.provider = sunshine_scene_depth::provider_kind::streamline;
-      metadata.frame_generation_input = true;
-      metadata.epoch = 8; metadata.source_id = (1ull << 63) | 2;
-      metadata.viewport = 2; metadata.sequence = 30; metadata.tick = 1000;
-      metadata.observation_revision = 4;
-      const depth_capture::selection_policy enabled{true, metadata.epoch, metadata.viewport};
-      depth_capture::acquisition_decision current;
-      current.source_valid = true;
-      current.provider = metadata.provider;
-      current.epoch = metadata.epoch; current.source_id = metadata.source_id;
-      current.viewport = metadata.viewport; current.sequence = metadata.sequence;
-      current.capture_id = 500; current.repeated_frame = true;
-      const auto decide = [&](const depth_capture::retained_depth &before,
-          const depth_capture::acquisition_decision &proof, const depth_capture::packet &candidate = {}) {
-        return depth_capture::decide_display(proof, candidate, before, enabled, 101, 1032, 4);
+      metadata.provider = provider_kind::streamline;
+      metadata.epoch = 8; metadata.viewport = 2; metadata.sequence = 30; metadata.tick = 1000;
+      metadata.observation_revision = 4; metadata.feedback.revision = 5;
+      // The next ordinary SR evaluation is still in flight in a pipelined game.
+      depth_capture::acquisition_decision pending;
+      pending.source_valid = pending.pending_frame = true;
+      pending.provider = metadata.provider; pending.epoch = metadata.epoch;
+      pending.source_id = metadata.source_id; pending.viewport = metadata.viewport;
+      pending.sequence = 31; pending.capture_id = 501;
+      const auto decide = [&](const depth_capture::retained_depth &before, const depth_capture::acquisition_decision &proof,
+          const depth_capture::packet &candidate = {}, depth_capture::selection_policy policy = {}, std::uint64_t now = 1032) {
+        return depth_capture::decide_display(proof, candidate, before, policy, now);
       };
-      require(decide(previous, current).action == action::hold &&
-          decide(previous, current).hold == depth_capture::hold_kind::frame_generation,
-        "Repeated successful FG identity required a newly selected packet");
-      auto pending = current;
-      pending.capture_id = 0; pending.sequence = 31;
-      pending.repeated_frame = false; pending.pending_frame = true;
-      require(decide(previous, pending).action == action::hold,
-        "Authoritative pending nomination required an allocated capture");
-      require(decide(previous, {}).action == action::invalidate && decide({}, current).action == action::invalidate,
-        "Absent current or prior authority inherited FG depth");
-      require(decide({}, pending).action == action::invalidate,
-        "A later pending FG nomination revived an invalidated private copy");
-      for (unsigned field = 0; field != 10; ++field) {
+      const auto held = [&](const depth_capture::retained_depth &before, const depth_capture::acquisition_decision &proof,
+          const depth_capture::packet &candidate = {}, depth_capture::selection_policy policy = {}, std::uint64_t now = 1032) {
+        const auto result = decide(before, proof, candidate, policy, now);
+        return result.action == action::hold && std::strcmp(result.reason, "retained_copy") == 0;
+      };
+      require(held(previous, pending), "A pending SR frame discarded the newest finished depth");
+      // Finished pixels outlive newer failures, gaps and metadata bookkeeping.
+      auto failed = pending; failed.source_valid = failed.pending_frame = false;
+      require(held(previous, failed) && held(previous, {}), "A failed or missing newer evaluation discarded finished depth");
+      auto repeated = pending;
+      repeated.sequence = metadata.sequence; repeated.capture_id = previous.capture_id;
+      repeated.pending_frame = false; repeated.repeated_frame = true;
+      require(held(previous, repeated), "A repeated frame discarded its own copy");
+      auto reset = previous;
+      reset.metadata.feedback.reset = true; ++reset.metadata.feedback.revision; ++reset.metadata.observation_revision;
+      require(held(reset, pending), "A camera reset or observation bookkeeping discarded finished depth");
+      auto ngx = previous; ngx.metadata.provider = provider_kind::ngx; ngx.metadata.source_id = 7;
+      auto ngx_pending = pending; ngx_pending.provider = provider_kind::ngx; ngx_pending.source_id = 7;
+      require(held(ngx, ngx_pending, {}, {}, 1100), "NGX was limited to a special one-present hold");
+      auto fg = previous;
+      fg.metadata.frame_generation_input = true; fg.metadata.source_id = (1ull << 63) | 2;
+      auto fg_pending = pending; fg_pending.source_id = fg.metadata.source_id;
+      const depth_capture::selection_policy fg_policy{true, metadata.epoch, metadata.viewport};
+      require(held(fg, fg_pending, {}, fg_policy), "FG pending frame discarded its finished input depth");
+      require(!held(previous, pending, {}, fg_policy) &&
+          std::strcmp(decide(previous, pending, {}, fg_policy).reason, "FG_scope_changed") == 0,
+        "Ordinary depth stood in for required FG input");
+      for (unsigned mismatch = 0; mismatch != 2; ++mismatch) {
+        auto policy = fg_policy;
+        if (mismatch == 0) ++policy.epoch; else ++policy.viewport;
+        require(!held(fg, fg_pending, {}, policy), "A different FG scope held old depth");
+      }
+
+      require(decide({}, pending).action == action::invalidate &&
+          std::strcmp(decide({}, pending).reason, "no_retained_depth") == 0,
+        "An empty cache was revived without fresh pixels");
+      for (unsigned field = 0; field != 6; ++field) {
         auto before = previous;
-        auto changed = pending;
+        auto current = pending;
         switch (field) {
-          case 0: before.metadata.provider = sunshine_scene_depth::provider_kind::ngx; break;
-          case 1: before.metadata.frame_generation_input = false; break;
-          case 2: before.metadata.epoch = 0; break;
-          case 3: before.metadata.source_id = 0; break;
-          case 4: changed.provider = sunshine_scene_depth::provider_kind::ngx; break;
-          case 5: ++changed.epoch; break;
-          case 6: ++changed.source_id; break;
-          case 7: ++changed.viewport; break;
-          case 8: changed.sequence = before.metadata.sequence - 1; break;
-          case 9: changed.source_valid = false; break;
+          case 0: current.provider = provider_kind::ngx; break;
+          case 1: ++current.epoch; break;
+          case 2: ++current.source_id; break;
+          case 3: ++current.viewport; break;
+          case 4: current.sequence = metadata.sequence - 1; break;
+          case 5: before.metadata.epoch = 0; break;
         }
-        require(decide(before, changed).action == action::invalidate,
-          "Changed, failed or missing FG authority inherited retained depth");
+        require(decide(before, current).action == action::invalidate, "A changed or unknown source inherited retained depth");
       }
-      for (unsigned mismatch = 0; mismatch != 3; ++mismatch) {
-        auto policy = enabled;
-        if (mismatch == 0) policy.require_frame_generation = false;
-        if (mismatch == 1) ++policy.epoch;
-        if (mismatch == 2) ++policy.viewport;
-        require(depth_capture::decide_display(pending, {}, previous, policy, 101, 1032, 4).action == action::invalidate,
-          "Disabled or different FG scope held old depth");
-      }
-      auto changed = current; ++changed.capture_id;
-      require(decide(previous, changed).action == action::invalidate, "Repeated FG frame used another capture's private copy");
-      changed = pending; changed.pending_frame = false;
-      require(decide(previous, changed).action == action::invalidate, "Unproven gap inherited FG hold authority");
-      const auto revoked = depth_capture::decide_display(pending, {}, previous, enabled, 101, 1032, 5);
-      require(revoked.action == action::invalidate && revoked.retained_check_revision == 5 &&
-          std::strcmp(revoked.reason, "retained_observation_changed") == 0,
-        "Observation loss retained FG depth or lost its exact checked revision");
       for (const auto now : {999ull, 1250ull}) {
-        const auto expired = depth_capture::decide_display(pending, {}, previous, enabled, 101, now, 4);
+        const auto expired = decide(previous, pending, {}, {}, now);
         require(expired.action == action::invalidate && std::strcmp(expired.reason, "retained_depth_expired") == 0,
-          "FG hold extended the original capture's age or accepted a backwards clock");
+          "Hold extended the original capture's age or accepted a backwards clock");
       }
-      require(depth_capture::decide_display(pending, {}, previous, enabled, 120, 1249, 4).action == action::hold,
-        "FG repeated presentations were incorrectly restricted to the NGX one-present rule");
+      require(held(previous, pending, {}, {}, 1249), "Hold ended before the source age bound");
 
       depth_capture::packet candidate;
       static_cast<sunshine_scene_depth::frame &>(candidate.metadata) = metadata;
       candidate.metadata.sequence = pending.sequence;
       candidate.width = previous.width; candidate.height = previous.height; candidate.format = previous.format;
-      candidate.area = previous.area; candidate.capture_id = 501;
-      pending.source_selected = true; pending.capture_id = candidate.capture_id;
-      require(decide(previous, pending, candidate).action == action::hold,
-        "Selected pending FG snapshot could not retain completed private pixels");
+      candidate.area = previous.area; candidate.capture_id = pending.capture_id;
+      auto selected = pending; selected.source_selected = true;
+      require(held(previous, selected, candidate), "A selected unready snapshot could not retain finished private pixels");
       auto changed_encoding = candidate;
       changed_encoding.metadata.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
-      const auto incompatible = decide(previous, pending, changed_encoding);
-      require(incompatible.action == action::invalidate && std::strcmp(incompatible.reason, "depth_encoding_changed") == 0,
-        "FG retained pixels across a changed depth encoding");
+      require(std::strcmp(decide(previous, selected, changed_encoding).reason, "depth_encoding_changed") == 0,
+        "Retained pixels crossed a changed depth encoding");
       for (unsigned field = 0; field != 7; ++field) {
         auto next = candidate;
         switch (field) {
@@ -368,50 +265,42 @@ namespace {
           case 5: --next.area.width; break;
           case 6: --next.area.height; break;
         }
-        const auto rejected = decide(previous, pending, next);
+        const auto rejected = decide(previous, selected, next);
         require(rejected.action == action::invalidate && std::strcmp(rejected.reason, "depth_shape_changed") == 0,
-          "A changed selected FG layout inherited old private pixels");
+          "A changed selected layout inherited old private pixels");
       }
       candidate.pixel_ready = true;
-      require(decide({}, pending, candidate).action == action::copy_fresh &&
-          decide(previous, pending, candidate).action == action::copy_fresh,
-        "Fresh FG pixels did not take precedence over a held or absent copy");
-      const auto old_observation = depth_capture::decide_display(pending, candidate, previous, enabled, 101, 1032, 5);
-      require(old_observation.action == action::invalidate && old_observation.current_observation == 0 &&
-          old_observation.current_check_revision == 5 && old_observation.retained_check_revision == 5,
-        "Fresh-copy attempt crossed an observation loss or hid its checked revision");
+      require(decide({}, selected, candidate).action == action::copy_fresh &&
+          decide(previous, selected, candidate).action == action::copy_fresh,
+        "Fresh pixels did not take precedence over a held or absent copy");
+      candidate.metadata.feedback.reset = true; ++candidate.metadata.observation_revision;
+      require(decide(previous, selected, candidate).action == action::copy_fresh,
+        "A valid reset frame or later observation could not establish a fresh private copy");
       candidate.pixel_ready = false; candidate.shared_preservation = true;
-      require(decide({}, pending, candidate).action == action::copy_fresh,
+      require(decide({}, selected, candidate).action == action::copy_fresh,
         "Shared preservation lost its separate fresh-copy authorization");
-      candidate.shared_preservation = false; candidate.pixel_ready = true;
-      candidate.metadata.observation_revision = 5; candidate.metadata.feedback.reset = true;
-      require(depth_capture::decide_display(pending, candidate, {}, enabled, 101, 1032, 5).action == action::copy_fresh,
-        "A valid current reset frame could not establish a fresh private copy");
 
       provider::frame_generation_policy source_policy;
-      frame_generation_snapshot fg;
-      fg.known = fg.enabled = true; fg.epoch = metadata.epoch; fg.viewport = metadata.viewport; fg.generated_frames = 1;
-      source_policy.update(frame_generation_query_status::observed, fg);
+      frame_generation_snapshot fg_snapshot;
+      fg_snapshot.known = fg_snapshot.enabled = true; fg_snapshot.epoch = metadata.epoch;
+      fg_snapshot.viewport = metadata.viewport; fg_snapshot.generated_frames = 1;
+      source_policy.update(frame_generation_query_status::observed, fg_snapshot);
       const auto excluded = source_policy.update(frame_generation_query_status::ambiguous, {});
       require(!excluded.require_frame_generation && excluded.exclude_unconfirmed_fg && !excluded.epoch,
         "Ambiguous FG kept a mandatory missing scope or failed to revoke FG input authority");
-      auto unready_fg = candidate;
-      unready_fg.pixel_ready = false; unready_fg.metadata.observation_revision = 4;
-      unready_fg.metadata.feedback.reset = false;
-      require(decide(previous, pending, unready_fg).action == action::hold,
-        "Revocation fixture did not start with an otherwise eligible pending FG hold");
-      require(depth_capture::decide_display(current, {}, previous, excluded, 101, 1032, 4).action == action::invalidate &&
-          depth_capture::decide_display(pending, unready_fg, previous, excluded, 101, 1032, 4).action == action::invalidate,
-        "Ambiguous FG inherited a repeated or pending previous FG display copy");
-      candidate.metadata.observation_revision = 4;
-      require(depth_capture::decide_display(pending, candidate, previous, excluded, 101, 1032, 4).action == action::invalidate &&
-          depth_capture::decide_display(pending, candidate, {}, excluded, 101, 1032, 4).action == action::invalidate,
+      require(!held(fg, fg_pending, {}, excluded), "Ambiguous FG inherited a previous FG display copy");
+      auto fg_candidate = candidate;
+      fg_candidate.shared_preservation = false; fg_candidate.pixel_ready = true;
+      fg_candidate.metadata.frame_generation_input = true; fg_candidate.metadata.source_id = fg.metadata.source_id;
+      auto fg_selected = fg_pending; fg_selected.source_selected = true;
+      require(decide(fg, fg_selected, fg_candidate, excluded).action == action::invalidate &&
+          decide({}, fg_selected, fg_candidate, excluded).action == action::invalidate,
         "Ready old-scope FG pixels bypassed explicit FG exclusion");
 
       depth_capture::packet fallback;
       fallback.capture_id = 900; fallback.pixel_ready = true;
       fallback.width = 1280; fallback.height = 720; fallback.format = 41; fallback.area = {0, 0, 1280, 720};
-      fallback.metadata.provider = sunshine_scene_depth::provider_kind::ngx;
+      fallback.metadata.provider = provider_kind::ngx;
       fallback.metadata.epoch = 17; fallback.metadata.source_id = 99;
       fallback.metadata.sequence = 70; fallback.metadata.tick = 1032;
       fallback.metadata.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
@@ -421,15 +310,16 @@ namespace {
       fresh.provider = fallback.metadata.provider; fresh.epoch = fallback.metadata.epoch;
       fresh.source_id = fallback.metadata.source_id; fresh.sequence = fallback.metadata.sequence;
       fresh.viewport = fallback.metadata.viewport;
-      require(depth_capture::decide_display(fresh, fallback, previous, excluded, 101, 1032, 5).action == action::copy_fresh &&
-          depth_capture::decide_display(fresh, fallback, {}, excluded, 101, 1032, 5).action == action::copy_fresh,
+      require(decide(fg, fresh, fallback, excluded).action == action::copy_fresh &&
+          decide({}, fresh, fallback, excluded).action == action::copy_fresh,
         "Revoked SL FG scope blocked an independently valid fresh NGX linear-depth copy");
       const auto busy_fallback = source_policy.update(frame_generation_query_status::busy, {});
-      require(depth_capture::decide_display(fresh, fallback, previous, busy_fallback, 101, 1032, 5).action == action::copy_fresh,
+      require(decide(fg, fresh, fallback, busy_fallback).action == action::copy_fresh,
         "Busy query disabled independently valid fallback after FG revocation");
       fallback.pixel_ready = false;
-      require(depth_capture::decide_display(fresh, fallback, previous, excluded, 101, 1032, 4).action == action::invalidate,
-        "Pending NGX fallback inherited the former SL FG pixels or encoding");
+      require(decide(fg, fresh, fallback, excluded).action == action::invalidate &&
+          decide(previous, fresh, fallback).action == action::invalidate,
+        "Pending NGX fallback inherited another source's pixels or encoding");
     }
 
     static void copied_depth_provenance() {
@@ -1601,7 +1491,6 @@ int main(int argc, char **argv) {
     if (argc == 2 && std::strcmp(argv[1], "--scene-strength") == 0) {
       publisher_tests::adaptive_ui_source_provenance();
       publisher_tests::source_alpha_scope_lifetime();
-      publisher_tests::pending_depth_continuity();
       publisher_tests::retained_depth_decision();
       publisher_tests::pending_scene_identity();
       publisher_tests::cached_scene_strength_publication();
@@ -1641,7 +1530,6 @@ int main(int argc, char **argv) {
     publisher_tests::normalized_ui_scene_match_only_gates_adaptive_evidence();
     publisher_tests::source_alpha_scope_lifetime();
     publisher_tests::ui_source_choice_and_runtime_lifetime();
-    publisher_tests::pending_depth_continuity();
     publisher_tests::retained_depth_decision();
     publisher_tests::automatic_ui_lifetime();
     publisher_tests::jitter_publication();

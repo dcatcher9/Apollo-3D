@@ -256,7 +256,6 @@ namespace sunshine_streamline::depth_capture {
     struct evaluation_head {
       std::uint64_t epoch{}, sequence{}, tick{}, source_id{};
       std::uint32_t viewport{};
-      std::uint64_t observation_revision{};
     };
     struct evaluation_namespace {
       std::array<evaluation_head, 4> views{};
@@ -684,7 +683,7 @@ namespace sunshine_streamline::depth_capture {
         owner.last_epoch == value->metadata.epoch && value->metadata.sequence > owner.last_sequence;
     }
     acquisition_decision classify_acquisition(const capture_pick &chosen, const queue_state &owner,
-        const queue_progress &progress, bool recording_retired, selection_policy policy) {
+        selection_policy policy) {
       acquisition_decision out;
       out.source_selected = chosen.value != nullptr;
       out.pending_frame = pending_frame(chosen, owner);
@@ -700,15 +699,6 @@ namespace sunshine_streamline::depth_capture {
           chosen.result != status::ambiguous && value->finished && value->success &&
           !value->nomination_invalid && !value->invalid &&
           owner.last_epoch == metadata.epoch && owner.last_sequence == metadata.sequence;
-        // select_capture sets this identity only for the exact eligible completed
-        // predecessor already consumed by this owner. The selection label merely
-        // explains that branch; it is not an input to this continuity proof.
-        if (chosen.value && metadata.provider == provider_kind::ngx && !metadata.frame_generation_input &&
-            chosen.result == status::submitted && value->finished && value->success &&
-            value->producer_submitted && out.source_valid && chosen.consumed_completed_capture &&
-            progress.valid() && value->producer_fence &&
-            (!recording_retired || progress.completed < value->producer_fence))
-          out.pending_ngx_previous_capture = chosen.consumed_completed_capture;
       }
       else if (chosen.pending_nomination) {
         const auto &pending = *chosen.pending_nomination;
@@ -726,8 +716,10 @@ namespace sunshine_streamline::depth_capture {
     // Keep one completed API snapshot while the CPU records its successor.
     // Completion and nomination advance independently for SR as well as FG.
     // Requiring the latest nomination to finish can starve a pipelined game.
+    // Finished pixels stay valid through later metadata events (camera reset,
+    // tag changes, observation loss); only source identity and age bound them.
     slot *completed_snapshot(const input &current, std::uint64_t now) {
-      if (!valid_provider(current.provider) || !current.epoch || current.feedback.reset) return nullptr;
+      if (!valid_provider(current.provider) || !current.epoch) return nullptr;
       slot *best = nullptr;
       for (auto &value : slots) {
         const auto &metadata = value.metadata;
@@ -736,7 +728,6 @@ namespace sunshine_streamline::depth_capture {
             !value.producer_submitted || !producer_recording_retired(value) ||
             metadata.provider != current.provider || metadata.frame_generation_input != current.frame_generation_input ||
             metadata.epoch != current.epoch || metadata.source_id != current.source_id || metadata.viewport != current.viewport ||
-            metadata.observation_revision != current.observation_revision || metadata.feedback.revision != current.feedback.revision ||
             metadata.sequence > current.sequence ||
             !metadata.tick || now < metadata.tick || now - metadata.tick >= sunshine_scene_depth::maximum_source_age_ms) continue;
         const auto progress = producer_progress(value);
@@ -808,13 +799,6 @@ namespace sunshine_streamline::depth_capture {
           chosen.result = status::stale;
           chosen.selection = selection_reason::fg_scope_missing;
           return chosen;
-        }
-        if (policy.check_streamline_observation &&
-            ((source && source->metadata.observation_revision != policy.streamline_observation_revision) ||
-              (chosen.pending_nomination && chosen.pending_nomination->observation_revision != policy.streamline_observation_revision))) {
-          chosen = {};
-          chosen.result = status::stale;
-          chosen.selection = selection_reason::source_observation_changed;
         }
         return chosen;
       };
@@ -1360,7 +1344,7 @@ namespace sunshine_streamline::depth_capture {
       return false;
     if (value.provider != provider_kind::streamline || !value.frame_generation_input || !value.epoch ||
         !value.sequence || !value.source_id || !value.source || !value.resource.native) return false;
-    current.pending_nomination = {value.epoch, value.sequence, GetTickCount64(), value.source_id, value.viewport, value.observation_revision};
+    current.pending_nomination = {value.epoch, value.sequence, GetTickCount64(), value.source_id, value.viewport};
     return true;
   }
 
@@ -1894,12 +1878,11 @@ namespace sunshine_streamline::depth_capture {
     progress = chosen.progress;
     const auto *selected = chosen.value ? chosen.value : chosen.latest;
     if (selected) {
-      // Continuity needs the same completion facts whether or not diagnostics
-      // were requested. This query never changes admission or GPU ordering.
+      // Diagnostic completion facts only; never changes admission or GPU ordering.
       if (selected->queue == native) progress = producer_progress(*selected);
       recording_retired = producer_recording_retired(*selected);
     }
-    decision = classify_acquisition(chosen, *owner, progress, recording_retired, policy);
+    decision = classify_acquisition(chosen, *owner, policy);
     if (diagnostic) {
       diagnostic->selection = chosen.selection;
       diagnostic->consumed_completed_capture = chosen.consumed_completed_capture;
@@ -2180,7 +2163,7 @@ namespace sunshine_streamline::depth_capture {
 #define CASE(x) case capture_failure::x: return #x
     CASE(none); CASE(observer_loss); CASE(discarded_recording); CASE(close_failed); CASE(replay);
     CASE(producer_signal_failed); CASE(producer_queue_changed); CASE(consumer_signal_failed); CASE(consumer_queue_changed);
-    CASE(evaluation_failed); CASE(evaluation_observation_changed); CASE(queue_retired); CASE(consumer_capacity); CASE(source_retired);
+    CASE(evaluation_failed); CASE(queue_retired); CASE(consumer_capacity); CASE(source_retired);
 #undef CASE
     }
     return "unknown";
@@ -2192,7 +2175,7 @@ namespace sunshine_streamline::depth_capture {
     CASE(pending_nomination); CASE(current_capture); CASE(current_already_consumed); CASE(no_admissible_capture);
     CASE(no_completed_snapshot); CASE(completed_before_gap); CASE(completed_not_older);
     CASE(completed_already_consumed); CASE(presentation_already_selected); CASE(layout_changed);
-    CASE(completed_not_readable); CASE(completed_snapshot); CASE(fg_scope_missing); CASE(fg_scope_mismatch); CASE(source_observation_changed);
+    CASE(completed_not_readable); CASE(completed_snapshot); CASE(fg_scope_missing); CASE(fg_scope_mismatch);
 #undef CASE
     }
     return "unknown";
@@ -2469,61 +2452,24 @@ namespace sunshine_streamline::depth_capture {
         picked.value = &next; picked.latest = &next;
         picked.result = status::submitted;
         picked.selection = selection_reason::completed_already_consumed;
-        picked.consumed_completed_capture = 300;
-        queue_progress progress;
-        progress.queried = true; progress.completed = 10;
-        const auto classified = [&](const capture_pick &choice, const queue_progress &gpu,
-            bool retired = true) { return classify_acquisition(choice, owner, gpu, retired, {}); };
-        const auto proof = classified(picked, progress);
-        if (!proof.source_selected || !proof.source_valid || proof.pending_ngx_previous_capture != 300 ||
+        const auto classified = [&](const capture_pick &choice) { return classify_acquisition(choice, owner, {}); };
+        const auto proof = classified(picked);
+        if (!proof.source_selected || !proof.source_valid ||
             proof.provider != next.metadata.provider || proof.capture_id != next.id ||
             proof.epoch != next.metadata.epoch || proof.sequence != next.metadata.sequence ||
             proof.source_id != next.metadata.source_id || proof.viewport != next.metadata.viewport) return false;
-        // The consumed identity is produced only by the selector's precise
-        // predecessor branch. Rewording its explanatory label changes no proof.
-        auto relabeled = picked; relabeled.selection = selection_reason::not_attempted;
-        if (classified(relabeled, progress).pending_ngx_previous_capture != 300) return false;
-        for (unsigned retirement = 0; retirement != 3; ++retirement) {
-          auto base_progress = progress;
-          const bool retired = retirement == 0;
-          if (retirement == 2) base_progress.completed = next.producer_fence;
-          if (classified(picked, base_progress, retired).pending_ngx_previous_capture != 300) return false;
-          for (unsigned condition = 0; condition != 12; ++condition) {
-            auto candidate = next;
-            auto choice = picked; choice.value = &candidate; choice.latest = &candidate;
-            auto gpu = base_progress;
-            switch (condition) {
-              case 0: choice.result = status::failed; break;
-              case 1: candidate.finished = false; break;
-              case 2: candidate.success = false; break;
-              case 3: candidate.producer_submitted = false; break;
-              case 4: candidate.invalid = true; break;
-              case 5: candidate.failure = capture_failure::observer_loss; break;
-              case 6: choice.consumed_completed_capture = 0; break;
-              case 7: candidate.producer_fence = 0; break;
-              case 8: gpu.queried = false; break;
-              case 9: gpu.completed = UINT64_MAX; break;
-              case 10: candidate.metadata.provider = provider_kind::streamline; break;
-              case 11: candidate.metadata.frame_generation_input = true; break;
-            }
-            if (classified(choice, gpu, retired).pending_ngx_previous_capture) return false;
-          }
-        }
-        auto completed = progress; completed.completed = next.producer_fence;
-        if (classified(picked, completed).pending_ngx_previous_capture) return false;
         auto no_selection = picked; no_selection.value = nullptr;
-        if (classified(no_selection, progress).source_selected ||
-            classified(no_selection, progress).pending_ngx_previous_capture) return false;
+        if (classified(no_selection).source_selected) return false;
         owner.last_epoch = next.metadata.epoch; owner.last_sequence = next.metadata.sequence;
-        if (!classified(no_selection, progress).repeated_frame) return false;
+        if (!classified(no_selection).repeated_frame) return false;
         no_selection.result = status::failed;
-        if (classified(no_selection, progress).repeated_frame) return false;
+        if (classified(no_selection).repeated_frame) return false;
         next.finished = next.success = false;
-        if (!classified(picked, progress).source_valid) return false; // Unfinished is not a failed result.
+        if (!classified(picked).source_valid) return false; // Unfinished is not a failed result.
         next.finished = true;
-        if (classified(picked, progress).source_valid) return false;
+        if (classified(picked).source_valid) return false;
         capture_pick absent;
-        const auto missing = classify_acquisition(absent, owner, {}, false, {true, 4, 2});
+        const auto missing = classify_acquisition(absent, owner, {true, 4, 2});
         if (missing.source_selected || missing.source_valid || missing.pending_frame || missing.repeated_frame ||
             missing.epoch != 4 || missing.viewport != 2 || missing.source_id != ((1ull << 63) | 2)) return false;
         owner.last_epoch = owner.last_sequence = 0;
@@ -2651,28 +2597,18 @@ namespace sunshine_streamline::depth_capture {
         if (pick(2).value == &preferred) return false;
         preferred.nomination_only = false; preferred.source_nominated = false;
         if (pick(2).value != &preferred) return false;
+        // Metadata observed after the copy (camera reset, tag change, loss)
+        // never makes a readable SL copy yield to a ready NGX source.
         preferred.metadata.observation_revision = 5;
-        auto &ready_fallback = make(2, provider_kind::ngx, 60, 2, 500);
-        selection_policy current_observation;
-        current_observation.check_streamline_observation = true;
-        current_observation.streamline_observation_revision = 6;
-        // A completed SL copy cannot hide valid NGX after its metadata evidence
-        // was revoked, even though the native slot itself remains readable.
-        if (pick(2, current_observation).value != &ready_fallback) return false;
-        current_observation.streamline_observation_revision = 5;
-        if (pick(2, current_observation).value != &preferred) return false;
+        make(2, provider_kind::ngx, 60, 2, 500);
+        if (pick(2).value != &preferred) return false;
         establish_provider(preferred_owner, preferred, 2);
         preferred_owner.last_epoch = 70; preferred_owner.last_sequence = 1;
         preferred_owner.last_source_tick = preferred.metadata.tick;
         auto &next_fallback = make(2, provider_kind::ngx, 60, 2, 500);
         auto &pending = make(3, provider_kind::streamline, 70, 2, 0); pending.finished = false;
-        pending.metadata.observation_revision = 5;
         auto held = pick(3);
         if (held.value || held.latest != &pending || held.result != status::recorded) return false;
-        current_observation.streamline_observation_revision = 6;
-        if (pick(3, current_observation).value != &next_fallback) return false;
-        current_observation.streamline_observation_revision = 5;
-        if (pick(3, current_observation).latest != &pending) return false;
         preferred_owner.last_source_tick = GetTickCount64() - sunshine_scene_depth::maximum_source_age_ms - 1;
         if (pick(3).value != &next_fallback) return false;
         preferred_owner.last_source_tick = GetTickCount64();
@@ -2721,12 +2657,6 @@ namespace sunshine_streamline::depth_capture {
         if (accepted.value != &fg || accepted.value->metadata.projection.depth_offset != 0 ||
             accepted.value->metadata.projection.depth_scale != 1 ||
             pick(21, {true, fg_epoch + 1, 0}).value || pick(21, {true, fg_epoch, 1}).value) return false;
-        auto revoked_fg = fg_policy;
-        revoked_fg.check_streamline_observation = true;
-        revoked_fg.streamline_observation_revision = fg.metadata.observation_revision + 1;
-        const auto revoked = pick(21, revoked_fg);
-        if (revoked.value || revoked.latest || revoked.pending_nomination || revoked.result != status::stale ||
-            revoked.selection != selection_reason::source_observation_changed) return false;
         // No prior provider: the same policy still beats the earlier NGX ID.
         queue_state fresh;
         if (select_provider(fresh, native, 21, GetTickCount64(), fg_policy).value != &fg) return false;
@@ -2883,7 +2813,6 @@ namespace sunshine_streamline::depth_capture {
         return select_capture(pending_owner, native, 11, provider_kind::streamline, now);
       };
       auto candidate = prepare_pending();
-      candidate.observation_revision = 9;
       if (!begin_nomination(candidate, UINT64_MAX)) return false;
       auto pending = pending_pick();
       if (pending.value || pending.latest || !pending.pending_nomination || pending.result != status::recorded ||
@@ -2892,19 +2821,11 @@ namespace sunshine_streamline::depth_capture {
       selection_policy excluded_pending;
       excluded_pending.exclude_unconfirmed_fg = true;
       if (select_provider(pending_owner, native, 11, GetTickCount64(), excluded_pending).value != &pending_fallback) return false;
-      selection_policy revoked_pending;
-      revoked_pending.check_streamline_observation = true;
-      revoked_pending.streamline_observation_revision = 10;
-      if (select_provider(pending_owner, native, 11, GetTickCount64(), revoked_pending).value != &pending_fallback) return false;
-      revoked_pending.require_frame_generation = true; revoked_pending.epoch = 20;
-      const auto revoked = select_provider(pending_owner, native, 11, GetTickCount64(), revoked_pending);
-      if (revoked.value || revoked.latest || revoked.pending_nomination || revoked.result != status::stale ||
-          revoked.selection != selection_reason::source_observation_changed) return false;
-      const auto pending_decision = classify_acquisition(pending, pending_owner, {}, false, {true, 20, 0});
+      const auto pending_decision = classify_acquisition(pending, pending_owner, {true, 20, 0});
       if (pending_decision.source_selected || !pending_decision.source_valid || !pending_decision.pending_frame ||
           pending_decision.capture_id || pending_decision.epoch != candidate.epoch ||
           pending_decision.sequence != candidate.sequence || pending_decision.source_id != candidate.source_id ||
-          pending_decision.viewport != candidate.viewport || pending_decision.pending_ngx_previous_capture) return false;
+          pending_decision.viewport != candidate.viewport) return false;
       pending_owner.provider_established = false;
       if (pending_pick().pending_nomination || pending_pick().value) return false;
       pending_owner.provider_established = true;
@@ -3868,10 +3789,10 @@ namespace sunshine_streamline::depth_capture {
       // A failed result remains terminal in either ordering.
       for (const bool result_first : {false, true}) {
         restart();
-        if (result_first) finish(value.id, false, capture_failure::evaluation_observation_changed);
+        if (result_first) finish(value.id, false, capture_failure::evaluation_failed);
         producer_submitted(value, native, fence, true);
-        if (!result_first) finish(value.id, false, capture_failure::evaluation_observation_changed);
-        if (!value.invalid || submitted_success(value, native) || value.failure != capture_failure::evaluation_observation_changed) return false;
+        if (!result_first) finish(value.id, false, capture_failure::evaluation_failed);
+        if (!value.invalid || submitted_success(value, native) || value.failure != capture_failure::evaluation_failed) return false;
       }
       restart();
       producer_submitted(value, native, fence, false);

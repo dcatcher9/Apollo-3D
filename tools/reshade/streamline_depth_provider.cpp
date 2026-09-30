@@ -25,7 +25,7 @@ namespace sunshine_streamline::provider {
   };
   struct observation_loss_episode {
     std::uint64_t present{}, sampled_tick{};
-    observation_loss_lookup current_check, retained_check, sampled;
+    observation_loss_lookup sampled;
   };
     struct __declspec(uuid("e82eab46-4d62-4e80-9e02-0e60b7059f36")) state {
       depth_capture::packet frame;
@@ -77,11 +77,10 @@ namespace sunshine_streamline::provider {
       frame_generation_query_status fg_query{frame_generation_query_status::unavailable};
       display_status display{display_status::not_attempted};
       sunshine_scene_depth::provider_kind prior_provider{sunshine_scene_depth::provider_kind::streamline};
-      std::uint64_t present{}, tick{}, current_check_revision{}, retained_check_revision{}, prior_capture{};
+      std::uint64_t present{}, tick{}, prior_capture{};
       bool prior_provider_known{}, prior_output_ready{}, available{}, copied{}, snapshot_ready{};
       depth_capture::display_action action{depth_capture::display_action::invalidate};
       const char *source_reason{"not_checked"}, *cache_reason{"not_checked"};
-      int current_observation{-1};
     };
     readiness_evidence before_decision(const state &data, std::uint64_t present) {
       readiness_evidence out;
@@ -159,6 +158,17 @@ namespace sunshine_streamline::provider {
       }
       return "unknown";
     }
+    // Base name of the loaded module containing address, or "none" for
+    // allocated memory such as another tool's hook trampoline.
+    const char *module_name(std::uint64_t address, char (&out)[64]) {
+      HMODULE module{};
+      char path[MAX_PATH]{};
+      if (!address || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(address), &module) || !GetModuleFileNameA(module, path, sizeof(path))) return "none";
+      const char *base = std::strrchr(path, '\\');
+      std::snprintf(out, sizeof(out), "%s", base ? base + 1 : path);
+      return out;
+    }
     const char *name(depth_capture::display_action action) {
       switch (action) {
         case depth_capture::display_action::copy_fresh: return "copy_fresh";
@@ -189,11 +199,7 @@ namespace sunshine_streamline::provider {
         auto &loss = data.trace_observation_loss;
         loss.present = e.present;
         loss.sampled_tick = GetTickCount64();
-        // Preserve both actual checks: callbacks can advance the revision between
-        // them. The additional sample is only contemporaneous evidence when no
-        // check ran (for example an absent nomination), never a causal verdict.
-        loss.current_check = lookup(e.current_check_revision);
-        loss.retained_check = lookup(e.retained_check_revision);
+        // Contemporaneous evidence only: depth decisions never consult it.
         loss.sampled = lookup(depth_observation_revision());
       } else if (!data.traced_loss) return; // No startup/recovery-only noise.
       const auto age = [now](std::uint64_t tick) -> unsigned long long {
@@ -223,9 +229,9 @@ namespace sunshine_streamline::provider {
         "fence=%llu completed=%llu completion_valid=%u producer_retired=%u; "
         "FG_query=%u FG_known=%u FG_enabled=%u FG_mode=%u FG_generated=%u FG_epoch=%llu FG_viewport=%u require_FG=%u policy_epoch=%llu; "
         "prior_output_ready=%u prior_retained=%u prior_age_ms=%llu prior_present=%llu prior_capture=%llu prior_sequence=%llu prior_epoch=%llu prior_source=%llu "
-        "prior_viewport=%u prior_observation=%llu current_observation=%llu current_check_revision=%llu retained_check_revision=%llu prior_feedback=%llu current_feedback=%llu "
+        "prior_viewport=%u prior_observation=%llu current_observation=%llu prior_feedback=%llu current_feedback=%llu "
         "prior_reset=%u current_reset=%u retained_clear=%s; "
-        "source_action=%s source_reason=%s cache_reason=%s current_observation_ok=%d "
+        "source_action=%s source_reason=%s cache_reason=%s "
         "consumer=%s consumer_loss=%s cookie=%llu slot_invalid=%u",
         ready ? "recovered" : "lost", why, u(reinterpret_cast<std::uint64_t>(runtime)), u(runtime->get_native()), u(e.present),
         ready && now >= data.trace_loss_tick ? u(now - data.trace_loss_tick) : 0ull, u(data.suppressed_trace_episodes),
@@ -241,9 +247,8 @@ namespace sunshine_streamline::provider {
         u(e.fg.epoch), e.fg.viewport, unsigned(e.selection.require_frame_generation), u(e.selection.epoch),
         unsigned(e.prior_output_ready), unsigned(e.prior.ready), age(p.tick), u(e.prior.frame_index), u(e.prior_capture), u(p.sequence), u(p.epoch),
         u(p.source_id), p.viewport, u(p.observation_revision), u(current.observation_revision),
-        u(e.current_check_revision), u(e.retained_check_revision),
         u(p.feedback.revision), u(current.feedback.revision), unsigned(p.feedback.reset), unsigned(current.feedback.reset),
-        data.cache.reason(), name(e.action), e.source_reason, e.cache_reason, e.current_observation,
+        data.cache.reason(), name(e.action), e.source_reason, e.cache_reason,
         depth_capture::name(e.consumer.result), depth_capture::name(e.consumer.invalidation),
         u(e.consumer.cookie), unsigned(e.consumer.slot_invalid));
       sunshine_log::message(reshade::log::level::info, text);
@@ -261,16 +266,14 @@ namespace sunshine_streamline::provider {
           static_cast<unsigned long long>(context.sequence), context.viewport, context.feature,
           unsigned(context.has_sdk_result), context.sdk_result, context.reset);
       };
-      char current_loss[512]{}, retained_loss[512]{}, sampled_loss[512]{};
+      char sampled_loss[512]{};
       const auto &loss = data.trace_observation_loss;
-      format_loss(loss.current_check, current_loss, sizeof(current_loss));
-      format_loss(loss.retained_check, retained_loss, sizeof(retained_loss));
       format_loss(loss.sampled, sampled_loss, sizeof(sampled_loss));
       std::snprintf(text, sizeof(text),
         "Sunshine depth observation evidence: %s runtime=0x%llx loss_present=%llu loss_tick_ms=%llu sampled_tick_ms=%llu origin=episode_start; "
-        "current_check={%s}; retained_check={%s}; sampled_only={%s}",
+        "sampled_only={%s}",
         ready ? "recovered" : "lost", u(reinterpret_cast<std::uint64_t>(runtime)), u(loss.present),
-        u(data.trace_loss_tick), u(loss.sampled_tick), current_loss, retained_loss, sampled_loss);
+        u(data.trace_loss_tick), u(loss.sampled_tick), sampled_loss);
       sunshine_log::message(reshade::log::level::info, text);
       data.suppressed_trace_episodes = 0;
       if (ready) data.traced_loss = false;
@@ -408,9 +411,7 @@ namespace sunshine_streamline::provider {
     frame_generation_snapshot fg_source;
     frame_generation_query_status fg_status;
     query_frame_generation(UINT32_MAX, fg_source, &fg_status);
-    auto selection = data->source_policy.update(fg_status, fg_source);
-    selection.check_streamline_observation = true;
-    selection.streamline_observation_revision = depth_observation_revision();
+    const auto selection = data->source_policy.update(fg_status, fg_source);
     evidence.fg = fg_source;
     evidence.fg_query = fg_status;
     evidence.selection = selection;
@@ -515,12 +516,9 @@ namespace sunshine_streamline::provider {
     const auto prior_depth_age = cached.ready && reuse_tick >= cached.provided.tick ?
       reuse_tick - cached.provided.tick : UINT64_MAX;
     const auto update = depth_capture::decide_display(acquisition, data->frame, data->cache.reference(),
-      selection, present, reuse_tick, depth_observation_revision());
+      selection, reuse_tick);
     evidence.action = update.action;
     evidence.source_reason = update.reason;
-    evidence.current_check_revision = update.current_check_revision;
-    evidence.retained_check_revision = update.retained_check_revision;
-    evidence.current_observation = update.current_observation;
     if (available) display = display_status::waiting_capture;
     if (update.action == depth_capture::display_action::copy_fresh &&
         (display = [&] { const sunshine_game3d::slow_step step("depth display preparation");
@@ -599,7 +597,7 @@ namespace sunshine_streamline::provider {
       consumer.invalidation != data->last_loss || data->output.ready != data->last_output_ready;
     if (data->logging.due(GetTickCount64(), status != data->last_status ||
         capture_info.failure != data->last_capture_failure || handoff_changed, !previously_owned, !available)) {
-      char text[1536]{};
+      char text[2048]{};
       if (available)
         std::snprintf(text, sizeof(text), "Sunshine %s depth: %s; source_selected=1 snapshot_ready=%u final_ready=%u display=%s consumer=%s loss=%s; allocation=%ux%u active=%u,%u,%u,%u source=%u viewport=%u; metadata_projection=%u output_projection=%u; state=0x%x proof=%u; capture=%llu sequence=%llu present=%llu command=0x%llx cookie=%llu device=%llu expected_device=%llu slot_invalid=%u tracked_commands=%u; producer_queue=0x%llx consumer_queue=0x%llx producer_fence=%llu producer_completed=%llu completion_valid=%u producer_retired=%u; transport=%s resource_id=%llu",
           path_name, depth_capture::name(status), unsigned(data->frame.pixel_ready), unsigned(data->output.ready), name(display), depth_capture::name(consumer.result),
@@ -632,12 +630,23 @@ namespace sunshine_streamline::provider {
           static_cast<unsigned long long>(observer.unreadable), static_cast<unsigned long long>(observer.rejected),
           static_cast<unsigned long long>(observer.barrier_overflow), static_cast<unsigned long long>(observer.submission_overflow),
           static_cast<unsigned long long>(observer.discovery_contention));
+        // Names why coverage was refused: interface, a slot or function outside
+        // any module (another tool's hook), or too many distinct vtables.
+        char slot_module[64]{}, code_module[64]{};
+        const auto tail = std::strlen(text);
+        std::snprintf(text + tail, sizeof(text) - tail,
+          " refused_interface=%llu refused_discovery=%llu refused_capacity=%llu refused_method=%u refused_slot=0x%llx(%s) refused_code=0x%llx(%s)",
+          static_cast<unsigned long long>(observer.refused_interface), static_cast<unsigned long long>(observer.refused_discovery),
+          static_cast<unsigned long long>(observer.refused_capacity), observer.refused_method,
+          static_cast<unsigned long long>(observer.refused_slot), module_name(observer.refused_slot, slot_module),
+          static_cast<unsigned long long>(observer.refused_code), module_name(observer.refused_code, code_module));
       }
       const auto used = std::strlen(text);
       const auto &jitter = data->output.provided.jitter;
-      std::snprintf(text + used, sizeof(text) - used, "; selection=%s consumed_completed_capture=%llu newest_sequence=%llu observation_current=%u prior_depth_age_ms=%llu jitter_supplied=%u jitter_px=(%.6g,%.6g) jitter_render=%ux%u",
-        depth_capture::name(capture_info.selection), static_cast<unsigned long long>(capture_info.consumed_completed_capture),
-        static_cast<unsigned long long>(capture_info.newest_sequence), unsigned(update.current_observation),
+      std::snprintf(text + used, sizeof(text) - used, "; selection=%s source_action=%s source_reason=%s consumed_completed_capture=%llu newest_sequence=%llu prior_depth_age_ms=%llu jitter_supplied=%u jitter_px=(%.6g,%.6g) jitter_render=%ux%u",
+        depth_capture::name(capture_info.selection), name(update.action), update.reason,
+        static_cast<unsigned long long>(capture_info.consumed_completed_capture),
+        static_cast<unsigned long long>(capture_info.newest_sequence),
         static_cast<unsigned long long>(prior_depth_age), unsigned(jitter.supplied),
         double(jitter.x), double(jitter.y), jitter.width, jitter.height);
       {

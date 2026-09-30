@@ -46,6 +46,17 @@ namespace sunshine_streamline::native_observer {
     };
     std::array<std::array<target, target_limit>, method_count> targets;
     std::array<unsigned, method_count> target_counts{};
+    // Every later object sharing a refused vtable slot is refused identically.
+    // Report that coverage change once; repeating it would revoke all evidence
+    // on every call. QueryInterface is per object (wrappers share vtables), so
+    // its refusals are never remembered.
+    constexpr unsigned refused_limit = 16;
+    std::array<std::array<std::uintptr_t, refused_limit>, method_count> refused{};
+    std::array<unsigned, method_count> refused_counts{};
+    enum class refusal : unsigned { interface_query, discovery, capacity, count };
+    std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(refusal::count)> refusals{};
+    std::atomic<std::uintptr_t> last_refused_slot{}, last_refused_code{};
+    std::atomic<unsigned> last_refused_method{};
     SRWLOCK targets_lock = SRWLOCK_INIT;
     std::atomic<bool> requested{}, active{};
     std::atomic<std::uint64_t> activation_epoch{};
@@ -274,6 +285,26 @@ namespace sunshine_streamline::native_observer {
       for (unsigned i = 0; i != target_counts[kind]; ++i) if (targets[kind][i].location.address == address) return &targets[kind][i];
       return nullptr;
     }
+    // Caller holds targets_lock.
+    bool refused_before(unsigned row, std::uintptr_t key) {
+      const auto begin = refused[row].begin(), end = begin + refused_counts[row];
+      return std::find(begin, end, key) != end;
+    }
+    // code is the refused function, kept with its slot so the owner can be named.
+    void report_refusal(unsigned method, std::uintptr_t key, refusal cause, std::uintptr_t code) {
+      ++refusals[static_cast<unsigned>(cause)];
+      last_refused_slot = key; last_refused_code = code; last_refused_method = method;
+      ++rejected; invalidate();
+    }
+    // Reports only a new slot refusal; a full table keeps reporting every one.
+    // With locked, the caller's exclusive targets_lock is released here.
+    void refuse(unsigned kind, std::uintptr_t key, refusal cause, std::uintptr_t code, bool locked = false) {
+      if (!locked && !TryAcquireSRWLockExclusive(&targets_lock)) { ++discovery_contention; drop(false); return; }
+      const bool known = refused_before(kind, key);
+      if (!known && refused_counts[kind] != refused_limit) refused[kind][refused_counts[kind]++] = key;
+      ReleaseSRWLockExclusive(&targets_lock);
+      if (!known) report_refusal(kind, key, cause, code);
+    }
     bool read_vtable_entry(std::uint64_t object, std::size_t index, void *&entry) {
       std::uintptr_t vtable{};
       const auto offset = index * sizeof(void *);
@@ -292,7 +323,8 @@ namespace sunshine_streamline::native_observer {
       // offsets. Never inspect or register those offsets until QI establishes
       // the exact interface, and use the returned pointer (which may differ).
       void *query{};
-      if (!read_vtable_entry(address, 0, query)) {
+      std::uintptr_t table{};
+      if (!read_vtable_entry(address, 0, query) || !read(reinterpret_cast<const void *>(address), &table, sizeof(table))) {
         if (discover) drop(true);
         return nullptr;
       }
@@ -300,7 +332,7 @@ namespace sunshine_streamline::native_observer {
       Interface *result{};
       const HRESULT status = object->lpVtbl->QueryInterface(object, iid, reinterpret_cast<void **>(&result));
       if (FAILED(status) || !result) {
-        if (discover) { ++rejected; invalidate(); }
+        if (discover) report_refusal(method_count, table, refusal::interface_query, reinterpret_cast<std::uintptr_t>(query));
         return nullptr;
       }
       return result;
@@ -312,17 +344,23 @@ namespace sunshine_streamline::native_observer {
       void **address{};
       if (!read_slot_address(object, kind, address)) { drop(true); return; }
       if (!TryAcquireSRWLockShared(&targets_lock)) { ++discovery_contention; drop(false); return; }
-      const bool seen = find(kind, address) != nullptr;
+      const auto key = reinterpret_cast<std::uintptr_t>(address);
+      const bool seen = find(kind, address) != nullptr || refused_before(kind, key);
       ReleaseSRWLockShared(&targets_lock);
       if (seen) return;
       sunshine_native_vtable::slot location;
       if (!sunshine_native_vtable::discover(object, vtable_slots[kind], location)) {
-        ++rejected; invalidate(); return;
+        void *code{};
+        read(address, &code, sizeof(code));
+        refuse(kind, key, refusal::discovery, reinterpret_cast<std::uintptr_t>(code));
+        return;
       }
       if (!TryAcquireSRWLockExclusive(&targets_lock)) { sunshine_native_vtable::release(location); ++discovery_contention; drop(false); return; }
       if (find(kind, location.address)) { ReleaseSRWLockExclusive(&targets_lock); sunshine_native_vtable::release(location); return; }
       if (target_counts[kind] == target_limit) {
-        ReleaseSRWLockExclusive(&targets_lock); sunshine_native_vtable::release(location); ++rejected; invalidate(); return;
+        refuse(kind, key, refusal::capacity, reinterpret_cast<std::uintptr_t>(location.original), true);
+        sunshine_native_vtable::release(location);
+        return;
       }
       auto &slot = targets[kind][target_counts[kind]++];
       slot.location = location;
@@ -496,6 +534,11 @@ namespace sunshine_streamline::native_observer {
   counters counts() {
     counters result{calls.load(), observed.load(), unreadable.load(), dropped.load(), 0, installed.load(), rejected.load(), nested.load(), suppressed.load(),
       barrier_overflow.load(), submission_overflow.load(), discovery_contention.load()};
+    result.refused_interface = refusals[static_cast<unsigned>(refusal::interface_query)].load();
+    result.refused_discovery = refusals[static_cast<unsigned>(refusal::discovery)].load();
+    result.refused_capacity = refusals[static_cast<unsigned>(refusal::capacity)].load();
+    result.refused_slot = last_refused_slot.load(); result.refused_code = last_refused_code.load();
+    result.refused_method = last_refused_method.load();
     if (TryAcquireSRWLockShared(&targets_lock)) {
       for (const auto count : target_counts) result.targets += count;
       ReleaseSRWLockShared(&targets_lock);
@@ -525,6 +568,9 @@ namespace sunshine_streamline::native_observer {
       }
       target_counts[kind] = 0;
     }
+    refused_counts = {};
+    for (auto &value : refusals) value = 0;
+    last_refused_slot = last_refused_code = 0; last_refused_method = 0;
     calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = 0;
     barrier_overflow = submission_overflow = discovery_contention = 0;
     barrier_callback = nullptr; reset_callback = nullptr; close_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;

@@ -561,6 +561,16 @@ int main() {
     observer::observe_queue(1);
     for (unsigned i = 2; i != queues.size(); ++i) observer::observe_queue(address(queues[i]));
     require(observer::counts().targets == 19 && observer::counts().rejected >= 2 && !observer::queue_ready(address(queues[9])), "per-method target bounds failed");
+    {
+      // A game submits through the same refused vtable every frame. Repeating
+      // a known refusal must not revoke every capture on every call.
+      const auto rejected_before = observer::counts().rejected;
+      const auto invalid_before = invalidations;
+      for (unsigned repeat = 0; repeat != 3; ++repeat) observer::observe_queue(address(queues[9]));
+      require(observer::counts().rejected == rejected_before && invalidations == invalid_before &&
+          !observer::queue_ready(address(queues[9])),
+        "known refused vtable was reported again or became ready");
+    }
     require(observer::install_pending(), "additional deferred queue hooks failed");
     for (unsigned i = 2; i != queues.size(); ++i) {
       submit(queues[i], 0, nullptr);

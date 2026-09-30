@@ -1225,9 +1225,10 @@ cannot displace usable NGX or authorize stereo pixels; without another usable AP
 explicitly unavailable. Linear depth carries its encoding and precision scale/bias with the resource;
 it reconstructs inverse distance directly and does not require a camera matrix.
 A successful batch may clear an old depth tag and supply an alternate in either order.
-The first clear revokes prior leases; only explicitly supplied entries in that same batch can
-advance across its own revision change. Repeated successful null clears are idempotent.
-Cached tags/cameras, failed SDK calls and intervening observation losses are never revalidated.
+A clear or replacement is an observed fact: later evaluations see the new tag set, while earlier
+evaluations and their copies keep the tags they were given. Repeated successful null clears are
+idempotent. Tags and cameras recorded before a failed SDK call or an observation loss are never
+revalidated for later evaluations.
 The ordered API tags share one pending-evaluation lifetime. An intermediate failed tag cannot
 interrupt that lifetime; after it resolves, a known unsupported capture is not pending GPU work
 and cannot authorize holding historical stereo. Metadata nominations prefer their reserved slots
@@ -1269,9 +1270,9 @@ A validated, successfully evaluated and actually submitted source nomination est
 ownership on the consuming queue independently of display readiness. Between API providers,
 readable SL takes priority over NGX; an SL DLL, metadata-only nomination or pending first copy cannot
 replace working NGX. Once SL has supplied pixels, a valid successor pending for less than 250 ms
-from the last copied source timestamp retains that preference. Failed, unsupported, missing,
-expired or revoked SL evidence permits a ready NGX source to take over. The current SL observation
-revision is checked before arbitration, so an obsolete native copy cannot hide valid NGX.
+from the last copied source timestamp retains that preference. Failed, unsupported, missing
+or expired SL evidence permits a ready NGX source to take over. Metadata observed after a copy
+(camera reset, tag change, observation loss) does not make that finished SL copy obsolete.
 Explicit enabled FG retains its separate mandatory SL scope described below. Provider choice is
 frozen within one presentation, and each packet retains its own encoding, camera and logical source.
 
@@ -1342,9 +1343,9 @@ wait or pending-copy flush. Device removal is not completion, and actual GPU
 completion is still required for allocation retirement. The selected capture stays frozen across
 the pass. While a same-source successor is pending, SL and NGX may advance to the newest unconsumed
 completed snapshot. Its original sequence, timestamp, projection, jitter and feedback travel with
-its pixels. Provider, epoch, logical source, viewport, FG role, observation/reset revision and known
-depth layout must match; reset, failed/missing/ambiguous observations and expiry revoke historical
-eligibility. The pool retains one eligible completed snapshot while recording its successor, so
+its pixels. Provider, epoch, logical source, viewport, FG role and known
+depth layout must match, and the snapshot must be within the source age. Later camera resets and
+observation bookkeeping do not revoke its eligibility. The pool retains one eligible completed snapshot while recording its successor, so
 CPU nomination cannot continually hide or overwrite the newest usable pixels. This selection does
 not repeatedly reuse an already consumed snapshot or prove exact color/depth frame correspondence.
 These ordering proofs enter the same capture owner; choosing SL, NGX or Generic does not create a
@@ -1450,17 +1451,14 @@ evaluation adapters do not also nominate that same viewport; FG's first attempt 
 its old ordinary evaluation observation. Other viewports remain independently ambiguous. No cross-API
 projection borrowing is needed.
 
-When an explicitly enabled FG viewport presents again without a new source frame, or a valid
-new capture from the same logical FG source is awaiting registration/tag-call result/submission/immutability,
-the provider may reuse the last real depth already copied into its private display texture.
-The completed-snapshot selection described above applies to both SR and FG. Reusing the already
-consumed depth in the private display texture is separate. NGX can also hold that display copy
-for exactly one subsequent native presentation when its newer successful snapshot is submitted,
-and its producer recording retirement or GPU completion remains pending. This reads only the
-previous private display copy; copying the new snapshot still requires both conditions to finish.
-The capture selector must confirm that its newest completed snapshot is precisely the consumed capture; source,
-feedback/reset, projection, layout and consumer identity must still match. A second missing
-native presentation stays mono. Both paths obey the same age bound below.
+When a presentation has no newly readable depth (a generated FG frame, a pending, failed or
+missing successor, or an evaluation without depth), the provider holds the last real depth already
+copied into its private display texture. One rule serves SR, FG and NGX. The completed-snapshot
+selection described above supplies newer pixels first; the hold reads only the previous private
+display copy, and copying a new snapshot still requires its ordering conditions. The hold ends when
+the provider names a different source (provider, epoch, logical source, viewport, or an older
+sequence), when a selected snapshot has a different layout or encoding, when the enabled FG scope
+changes, or at the age bound below.
 Explicit source interruptions advance the existing admission watermark,
 preventing pre-interruption captures from returning.
 Reused real depth retains its applied gain, zero plane, crop and jitter and does not advance
@@ -1476,18 +1474,25 @@ The current implementation does not synthesize depth for generated frames.
 
 Nomination, admission of completed snapshots and display-depth reuse share one freshness limit:
 less than 250 ms from the original depth capture timestamp, defined by
-`sunshine_scene_depth::maximum_source_age_ms`. FG display-depth reuse requires the same
-logical source/epoch/viewport, runtime queue and display allocation, unchanged color dimensions
-and any known depth dimensions/crop, and enabled FG. Failed/missing-depth attempts, failed consumer
-copies, observed camera reset/lost observations, FG Off, focus/technique/lifecycle changes and
-expiry invalidate reusable history until a fresh copy succeeds. A nomination gap cannot prove an
-as-yet unknown depth layout; its same-source reuse remains subject to the short bound and color
-dimensions. Source pointers may rotate normally without invalidating the private copied depth.
-An SL camera reset breaks temporal continuity, not the validity of the new frame's depth or
-projection. Fresh tags associated with that reset frame may provide depth and valid camera
-coefficients after the old observation revision is revoked. Pre-reset tags and captures remain
-ineligible. The reset feedback discards old scene measurements while retaining established gain
-and zero placement; it does not force a valid current depth frame to render mono.
+`sunshine_scene_depth::maximum_source_age_ms`. Display-depth reuse also requires the same runtime
+queue and display allocation, unchanged color dimensions and any known depth dimensions/crop; under
+enabled FG the retained copy must belong to that FG scope. Failed consumer copies, loss of the
+source association (for example FG Off before an ordinary source exists), focus/technique/lifecycle
+changes and expiry invalidate reusable history until a fresh copy succeeds. A nomination gap cannot
+prove an as-yet unknown depth layout; its same-source reuse remains subject to the short bound and
+color dimensions. Source pointers may rotate normally without invalidating the private copied depth.
+
+Metadata bookkeeping never discards finished pixels. An SL camera reset, invalid or missing camera
+constants, a null or replaced tag and an observation loss affect only later evaluations: a reset
+starts a new temporal history for its own viewport, an invalid camera removes metric scale, a
+cleared tag removes that kind, and a loss makes metadata recorded before it unusable for new
+captures. None of them revokes an evaluation already captured, its completed snapshot or the
+private display copy. Only a real observation loss (contended or failed hook bookkeeping, a failed
+SDK call or lifecycle) advances the Streamline observation revision; each viewport's feedback
+revision is that loss count plus its own resets. The reset feedback discards old scene measurements
+while retaining established gain and zero placement; it does not force a valid current depth frame
+to render mono. The Witcher 3 exercises both cases: another viewport sends reset constants every
+frame, and the depth tag is cleared after each evaluation.
 Reused frames preserve the real capture's sequence/timestamp/projection, skip new depth readback
 and calibration updates, and keep the last matching resolved scene parameters. The strength slider
 still applies. Neither reuse nor a new pending nomination extends the age limit. The overlay marks
@@ -1510,13 +1515,11 @@ be reused. This uses the existing bounded pool and does not extend capture fresh
 reading expired depth.
 
 Capture acquisition returns source authority separately from the packet's pixel readiness.
-Its typed decision carries the selected identity, valid repeated/pending FG continuity, and
-the eligible consumed predecessor for an NGX pending successor. The capture owner alone
-classifies SDK success, invalidation, recording retirement and producer completion.
+Its typed decision carries the selected identity and repeated/pending continuity. The capture
+owner alone classifies SDK success, invalidation, recording retirement and producer completion.
 `depth_cache_update.h` turns those facts and the last successful copy's value description into
-one source decision: `copy_fresh`, `hold`, or `invalidate`. It owns source identity, FG mode,
-NGX predecessor/presentation limits, depth layout, observation revision and source-age policy.
-One sampled SL observation revision is used coherently for the current and retained checks.
+one source decision: `copy_fresh`, `hold`, or `invalidate`. It owns source identity, FG scope,
+depth layout/encoding and source-age policy; it does not consult observation revisions.
 
 `display_depth_cache.h` owns the sole reusable private depth frame. `copy_fresh` permits a copy
 attempt; only successful copying commits that frame and its capture identity, original timestamp,
@@ -1548,15 +1551,13 @@ episodes per second are admitted, each with a paired recovery; suppressed episod
 The record freezes source and newest-view ages at selection, the prior retained depth identity
 before invalidation, FG scope, reset/observation revisions, copy outcome, source action/reason and
 the cache's final reason. A zero timestamp is unavailable (reported age `UINT64_MAX`), not fresh
-data. An untested current observation is `-1`; a zero check revision means no such check ran.
-Explicit lifecycle/reuse invalidation clears
+data. Explicit lifecycle/reuse invalidation clears
 are also identified. This is read-only evidence: it adds no GPU pass, readback, wait, or extension
 of depth freshness, and does not change source selection or stereo placement.
 
 Each admitted readiness episode also logs `Sunshine depth observation evidence`. Its
-`current_check` and `retained_check` query the exact Streamline observation revisions read by
-those decisions. `sampled_only` is an additional contemporaneous revision sample, useful when
-no decision check ran; it is not proof of what caused the loss. Recovery repeats the frozen
+`sampled_only` entry is a contemporaneous observation-revision sample; depth decisions never
+consult it, and it is not proof of what caused the loss. Recovery repeats the frozen
 first-loss evidence, rather than attributing the interruption to a later callback.
 The observation owner keeps a fixed 64-entry diagnostic journal of revision changes, including
 the reason, call site, tick, thread, call sequence, and known viewport, feature, SDK result and
@@ -1672,6 +1673,13 @@ function between command-list and device methods with incompatible signatures. D
 the exact interface and retains module-owned table storage; installation replaces only that slot
 and readiness requires that it still contains our hook. The same slot mechanism serves optional
 discard diagnostics. Disabled hooks retain a callable original and pass through for process life.
+A slot whose discovery is refused is remembered: its table or original function lies outside a
+loaded module image (for example another tool's trampoline), or its method already has eight
+slots. Every later object sharing that slot would be refused identically, so the refusal
+invalidates evidence once instead of on every call; command lists on other slots keep their
+coverage. QueryInterface refusals are per object and are not remembered. The failed-status log
+counts refusals by cause and names the newest refused slot and function with their owning modules
+(`none` means allocated memory).
 
 In **Automatic**, stored depth `r` is decoded as `d=r*raw_scale+raw_bias`, then the frame-bound
 projection supplies `q=(d-A)/B`. The identity transform is used without `PrecisionInfo`.
@@ -1710,8 +1718,8 @@ clamping scene depth to force a supported encoding.
 One controller follows the logical viewport across rotating physical resources. Its range
 readbacks retain their own projection. A genuine depth-domain reset automatically collects a
 fresh reference and screen plane. Queued old-domain observations cannot reinstall the previous plane.
-Missing range measurements hold established controls. Missing current depth normally returns
-current-color mono, except for bounded FG reuse and the one-presentation confirmed-pending NGX hold below. Without a valid source-associated
+Missing range measurements hold established controls. Missing current depth returns
+current-color mono once the bounded hold of the last real copy described above ends. Without a valid source-associated
 matrix, the relative raw path used by Generic also supplies gain and zero placement for NGX.
 
 For matched non-flat ranges, a positive multiplicative change of depth coordinate changes gain and zero
