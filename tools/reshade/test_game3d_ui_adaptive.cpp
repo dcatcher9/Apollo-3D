@@ -262,7 +262,17 @@ namespace {
     auto provider = source(4000); other = provider; ++other.source_id;
     require(!adaptive::same_scope(provider, other), "Provider feature replacement was treated as buffer rotation");
     other = provider; ++other.revision;
-    require(!adaptive::same_scope(provider, other), "Provider observation loss retained scope");
+    require(adaptive::same_scope(provider, other), "An observation loss started a new placement scope");
+    // Placement survives the loss: the plane neither snaps to the screen nor
+    // restarts its approach, and later samples keep adapting it.
+    adaptive::policy through_loss;
+    settle(through_loss, 2);
+    const auto held = through_loss.current().applied_uv;
+    auto after = required(1300, 2); ++after.provenance.revision;
+    feed(through_loss, after);
+    require(through_loss.current().applied_uv == held && through_loss.current().target_uv == held &&
+        std::string(through_loss.current().status) != "scope_changed",
+      "An observation loss reset the UI plane");
   }
 
   void central_partition_edges_and_malformed_data() {

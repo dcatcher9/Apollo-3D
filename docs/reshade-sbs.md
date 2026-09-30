@@ -345,6 +345,9 @@ for at most three consecutive Presents, and only when that frame compared a HUD-
 A real frame whose HUD-less image pairs only by Present counting while FG is on is not exact.
 Directly after an exact decision it keeps that decision and mask the same way, within the same
 three-Present bound. Detecting afresh from the inexact pair would lose full-screen UI on that frame.
+So does a frame missing a trusted alpha channel that decided the previous frame: an observation
+loss refuses the previous revision's captures until the game tags again, which otherwise left the
+UI unprotected for a frame. A channel missing for longer stops being held after three Presents.
 In Expedition 33, 2-10% of menu frames paired this way and flipped the menu between flat and 3D.
 A capture from another queue can still be incomplete or unretired at its own real frame. When
 the newest ready capture belongs to a real frame one or two Presents ago, it is compared with that
@@ -516,7 +519,9 @@ epochs as that logical scope; normal A/B/C allocation rotation and different per
 epochs preserve placement and pending display-space observations. Every observation still retains
 its physical source/layout, original capture time and global frame sequence. Calibration admission
 must validate the currently selected depth; a changed routing group, basis or runtime revokes the
-old scope. Provider sources keep their existing feature/viewport/observation-revision identity.
+old scope. Provider sources keep their feature/viewport identity; an observation loss (revision)
+keeps placement, because it changes neither the scene nor the UI. Resetting on it snapped the UI to
+the screen at every loss (Hogwarts Legacy: about 20 in 2.5 minutes).
 Alpha On / Off / Auto admission remains separate
 from placement. Live probes require `SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE` so historical relative
 count shaders cannot be misinterpreted as absolute statistics.

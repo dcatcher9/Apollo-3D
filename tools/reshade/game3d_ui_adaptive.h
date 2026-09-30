@@ -46,10 +46,14 @@ namespace sunshine_game3d::ui_adaptive {
   [[nodiscard]] inline bool valid_scope(const source &value) {
     return bool(value.generic_basis_epoch) == bool(value.generic_routing_epoch);
   }
+  // An observation loss (revision) changes neither the scene nor the UI, so it
+  // keeps placement: resetting it snapped the UI to the screen at every loss
+  // (Hogwarts Legacy: about 20 in 2.5 minutes). A new session, viewport or
+  // provider feature still starts again.
   [[nodiscard]] inline bool same_scope(const source &a, const source &b) {
     return valid_scope(a) && valid_scope(b) && a.epoch == b.epoch && a.viewport == b.viewport &&
       a.generic_basis_epoch == b.generic_basis_epoch && a.generic_routing_epoch == b.generic_routing_epoch &&
-      (a.generic_basis_epoch || (a.revision == b.revision && a.source_id == b.source_id));
+      (a.generic_basis_epoch || a.source_id == b.source_id);
   }
   [[nodiscard]] inline bool fresh(const source &value) {
     return value.eligible && valid_scope(value) && value.sequence && value.tick_ms &&

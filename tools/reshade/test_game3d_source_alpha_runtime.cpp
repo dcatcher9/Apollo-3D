@@ -500,7 +500,7 @@ namespace {
     };
     edge_mask();
     gpu.pattern(alpha, true); set_scene(.9f);
-    ++input.revision; last_accepted = 0;
+    ++input.epoch; last_accepted = 0; // A new scope; an observation loss would keep placement.
     ui_adaptive::decision spatial;
     for (unsigned i = 0; i < 4; ++i) spatial = step();
     require(spatial.accepted_sequence && spatial.covered_pixels == 0 && spatial.target_index == 0 &&
@@ -513,7 +513,7 @@ namespace {
     // much larger border mask. There is no absolute minimum conflict count.
     alpha[size_t(gpu.height / 2) * gpu.width + gpu.width / 2] = 1.f;
     gpu.pattern(alpha, true); set_scene(.9f);
-    ++input.revision; last_accepted = 0;
+    ++input.epoch; last_accepted = 0; // A new scope; an observation loss would keep placement.
     for (unsigned i = 0; i < 6; ++i) spatial = step();
     require(spatial.covered_pixels == 1 && spatial.conflict_counts[3] == 1 &&
         spatial.applied_uv == ui_adaptive::comfort_cap_uv && spatial.capped_conflict,
@@ -1898,6 +1898,11 @@ namespace {
       for (unsigned byte = 0; byte != 3; ++byte) tinted[i * bpp + byte] ^= 0x80;
     opaque(tinted);
     trust_frame(tinted, opaque_alpha, {}, correct, expected::flat, "a trusted channel decides a menu that tints the scene");
+    // A trusted channel missing from a frame (an observation loss refuses its
+    // capture until the next tag) holds its decision for up to three presents.
+    trust_frame(tinted, {}, {}, correct, expected::flat, "a missing trusted channel holds its mask");
+    trust_frame(tinted, {}, {}, correct, expected::flat, "a missing trusted channel still holds");
+    trust_frame(tinted, {}, {}, correct, expected::flat, "a third missing frame still holds");
     trust_frame(tinted, {}, {}, correct, expected::empty, "without a trusted channel a tinting menu stays 3D");
     // A full channel while the exact pair shows the scene is a contradiction.
     // It wins at first, then loses trust within the same evidence interval.
@@ -1906,8 +1911,8 @@ namespace {
     require(!(policy.trusted_alpha() & 1u), "An exact pair showing the scene did not revoke trust");
     trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, "after losing trust the HUD-less pair decides");
     inputs = {};
-    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 inexact_after_exact_hold=1 trusted_alpha=1 trust_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
-    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, bounded generated-present hold, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, bounded inexact-frame hold, trusted alpha channels with revocation and manual Off without review");
+    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 inexact_after_exact_hold=1 trusted_alpha=1 trusted_missing_hold=1 trust_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
+    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, bounded generated-present hold, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, bounded inexact-frame hold, trusted alpha channels with a bounded hold when missing and revocation, and manual Off without review");
   }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;

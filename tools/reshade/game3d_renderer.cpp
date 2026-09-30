@@ -958,7 +958,12 @@ namespace sunshine_game3d {
     // A trusted alpha channel in this frame decides by itself; nothing is held.
     const uint32_t trusted = automatic && automatic->session ? automatic->session->trusted_alpha() : 0u;
     const bool inexact = (bits & 48u) == 16u;
-    const bool hold = !(bits & trusted & 15u) && (candidates.hold_previous || (inexact && d.detection_exact)) &&
+    // So does a trusted alpha channel that decided the previous frame and is
+    // missing from this one: an observation loss refuses the previous
+    // revision's captures until the game tags again, which left the UI
+    // unprotected for a frame. A channel gone for longer stops being held.
+    const bool trusted_missing = (d.detection_bits & trusted & 15u & ~bits) != 0;
+    const bool hold = !(bits & trusted & 15u) && (candidates.hold_previous || (inexact && d.detection_exact) || trusted_missing) &&
       d.detection_mask_ready &&
       d.detection_holds < ui_detection_inputs::max_held_presents;
     uint32_t flags = 0;
@@ -1014,7 +1019,8 @@ namespace sunshine_game3d {
         d.poll_detection(observation);
         d.detect_ui(cmd, p, candidates, observation, hudless_color);
         d.detection_holds = 0;
-        d.detection_mask_ready = (bits & 16u) != 0;
+        // The detected mask can be held when HUD-less or a trusted alpha channel made it.
+        d.detection_mask_ready = (bits & 16u) != 0 || (bits & trusted & 15u) != 0;
         d.detection_exact = (bits & 48u) == 48u;
       }
       alpha_source = t[impl::detected_mask].srv;
