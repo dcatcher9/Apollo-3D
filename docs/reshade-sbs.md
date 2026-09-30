@@ -1960,6 +1960,11 @@ CreateFeature, EvaluateFeature and ReleaseFeature exports in already-loaded modu
 the game executable when it exports the NGX SDK. This switch adds diagnostics only. The shared
 hooks separately serve the default-on NGX depth adapter described above; the trace does not enable
 or disable production capture, choose depth, or change stereo/scale.
+Discovery never patches a DLSS Frame Generation module (`dlssg` in its path: `nvngx_dlssg.dll` or
+a driver model under `NGX\models\dlssg`); `skipped_frame_generation` counts them. Frame
+Generation refuses to create its feature once its entry points are patched: The Witcher 3
+Remastered got `FAIL_PlatformError` (`0xBAD00002`) on every attempt while hooked and generated
+frames with the NGX hooks off. It supplies no depth through NGX; Streamline tags carry FG depth.
 
 The trace logs installed-hook coverage, the observation window, API/feature call counts,
 success/failure with the newest NGX failure code (`last_failure`, an `NVSDK_NGX_Result`), caller
@@ -1978,7 +1983,9 @@ owns the viewport), `source_rejected` (evidence status, lost observation, stale 
 token), `no_admissible_tag` (tag absent, unsupported, lifecycle or `match` result) and
 `capture_rejected` (the capture layer's status). Each gate keeps its newest reason. The Witcher 3
 Remastered showed why this matters: with FG off it tags 1485x835 depth for every Ray
-Reconstruction evaluation (SL feature 1001), yet no depth was nominated.
+Reconstruction evaluation (SL feature 1001), yet every evaluation reported `no_admissible_tag`
+(last `absent`) until repeated token requests stopped orphaning the frame's tags (see frame-token
+identity below).
 
 NGX depth telemetry distinguishes `nominations`, `copy_recorded`, and `metadata_only`.
 A successful metadata nomination can survive a rejected pixel copy and does not establish

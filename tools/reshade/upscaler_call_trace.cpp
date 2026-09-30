@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
+#include <string>
 #include <utility>
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -92,7 +93,7 @@ namespace sunshine_upscaler_trace {
     std::atomic<bool> handle_observation_gap{};
     std::atomic<HMODULE> addon_module{};
     std::uint64_t next_epoch{}, next_poll{}, next_report{}, began{}, reports{};
-    unsigned target_count{}, rejected{}, found_modules{}, found_exports{};
+    unsigned target_count{}, rejected{}, found_modules{}, found_exports{}, skipped_frame_generation{};
     bool minhook_ready{};
     // A full export scan of ~200 game modules costs a few ms, so rescan only
     // after the loader reports a new module. The notification only counts
@@ -363,8 +364,13 @@ namespace sunshine_upscaler_trace {
         else ++rejected;
       }
     }
+    bool frame_generation_module(const wchar_t *path) {
+      std::wstring lower(path);
+      for (auto &c : lower) c = static_cast<wchar_t>(towlower(c));
+      return lower.find(L"dlssg") != std::wstring::npos;
+    }
     void discover() {
-      found_modules = found_exports = 0;
+      found_modules = found_exports = skipped_frame_generation = 0;
       ++scans;
       const unsigned first = target_count;
       struct commit {
@@ -378,6 +384,13 @@ namespace sunshine_upscaler_trace {
       unsigned examined = 0;
       if (Module32FirstW(snapshot, &value)) do {
         if (++examined > 1024) break;
+        // DLSS Frame Generation refuses to create its feature once its module's
+        // NGX entry points are patched: The Witcher 3 got NVSDK_NGX_Result
+        // FAIL_PlatformError (0xBAD00002) on every attempt while hooked, and
+        // generated frames once the hooks were off. Frame generation supplies no
+        // depth through NGX (Streamline tags carry it), so never patch its module,
+        // shipped as nvngx_dlssg.dll or as a driver model under NGX\models\dlssg.
+        if (frame_generation_module(value.szExePath)) { ++skipped_frame_generation; continue; }
         // Static SDKs can export NGX from any game/plugin module. Discover by
         // exact public exports, independently of DLL filename or SDK version.
         HMODULE retained{};
@@ -447,9 +460,9 @@ namespace sunshine_upscaler_trace {
       for (unsigned i = 0; i != target_count; ++i) installed += targets[i].state.load() == 2;
       char text[1200]{};
       std::snprintf(text, sizeof(text),
-        "Sunshine upscaler trace: epoch=%llu elapsed_ms=%llu SL_hook=%u modules=%u exports=%u NGX_hooks=%u/%u rejected=%u SL_evaluate=%llu NGX_create=%llu NGX_evaluate=%llu NGX_release=%llu inside_observed_SL=%llu outside_observed_SL=%llu unknown_feature=%llu dropped=%llu stale=%llu; zero means no observed calls in this window, not API absence; outside is not proof of a direct path",
+        "Sunshine upscaler trace: epoch=%llu elapsed_ms=%llu SL_hook=%u modules=%u skipped_frame_generation=%u exports=%u NGX_hooks=%u/%u rejected=%u SL_evaluate=%llu NGX_create=%llu NGX_evaluate=%llu NGX_release=%llu inside_observed_SL=%llu outside_observed_SL=%llu unknown_feature=%llu dropped=%llu stale=%llu; zero means no observed calls in this window, not API absence; outside is not proof of a direct path",
         static_cast<unsigned long long>(active_epoch.load()), static_cast<unsigned long long>(GetTickCount64() - began),
-        streamline_covered.load() ? 1 : 0, found_modules, found_exports, installed, target_count, rejected,
+        streamline_covered.load() ? 1 : 0, found_modules, skipped_frame_generation, found_exports, installed, target_count, rejected,
         static_cast<unsigned long long>(counts[3]), static_cast<unsigned long long>(counts[0]),
         static_cast<unsigned long long>(counts[1]), static_cast<unsigned long long>(counts[2]),
         static_cast<unsigned long long>(inside), static_cast<unsigned long long>(outside),
@@ -576,6 +589,7 @@ namespace sunshine_upscaler_trace {
 
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
   namespace testing {
+    bool frame_generation_module(const wchar_t *path) { return sunshine_upscaler_trace::frame_generation_module(path); }
     summary counts() {
       summary out;
       out.epoch = active_epoch.load();

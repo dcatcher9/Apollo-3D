@@ -51,6 +51,8 @@ namespace sunshine_upscaler_trace {
     void report_now();
     // Discovery scheduled by poll() completes on a pool thread.
     void wait_discovery();
+    // Modules discovery never patches: DLSS Frame Generation refuses a patched module.
+    bool frame_generation_module(const wchar_t *path);
   }
 #endif
 }

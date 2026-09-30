@@ -1453,6 +1453,14 @@ namespace {
 
 int main() {
   try {
+    using sunshine_upscaler_trace::testing::frame_generation_module;
+    require(frame_generation_module(LR"(D:\Games\Game\bin\NVNGX_DLSSG.DLL)") &&
+        frame_generation_module(LR"(C:\ProgramData\NVIDIA\NGX\models\dlssg\versions\1\files\160_E1.bin)") &&
+        !frame_generation_module(LR"(D:\Games\Game\bin\nvngx_dlss.dll)") &&
+        !frame_generation_module(LR"(C:\ProgramData\NVIDIA\NGX\models\dlssd\versions\1\files\160_E1.bin)") &&
+        !frame_generation_module(LR"(C:\Windows\System32\DriverStore\FileRepository\nvddi.inf\_nvngx.dll)"),
+      "NGX discovery would patch a frame-generation module or skip a depth-capable one");
+    std::puts("PASS frame-generation modules are never patched; SR/RR snippets and the NGX core remain discoverable");
     basic_test();
     std::puts("PASS actual export discovery, disabled/no-call coverage, C/C++ evaluate, args/results/LastError, nested SL and feature lifetime");
     epoch_test();
