@@ -118,17 +118,16 @@ namespace sunshine_game3d {
     alpha_auto_decision consumed_auto;
     bool detection_attempted{}, detection_ready{}, detection_active{}, detection_pending{}, detection_awaiting_signal{};
     // Decision, then candidate bits with HUD-less counts, alpha coverage,
-    // invalid alpha, lit HUD-less pixels with the proven-alpha bits, and
-    // exactly opaque alpha.
-    static constexpr uint32_t detection_decision_texels = 6;
+    // invalid alpha, and lit HUD-less pixels with the trusted-alpha bits.
+    static constexpr uint32_t detection_decision_texels = 5;
     // detected_mask holds a HUD-less-capable decision that generated presents
     // may reuse for a bounded number of presents.
     bool detection_mask_ready{};
     uint32_t detection_holds{};
     // The last fresh decision used an exact HUD-less pair.
     bool detection_exact{};
-    // Alpha candidates proven by the game session (Sunshine_UIProvenAlpha).
-    uint32_t detection_proven{};
+    // Alpha candidates the game session trusts (Sunshine_UITrustedAlpha).
+    uint32_t detection_trusted{};
     // Presented colors kept for late HUD-less captures, created on first need.
     // Each slot records the Present number it holds; zero is empty.
     bool retention_wanted{}, retention_attempted{}, retention_ready{};
@@ -476,7 +475,7 @@ namespace sunshine_game3d {
       } else {
         // Current-frame GPU validation chooses the mask. CPU readback is only
         // a bounded status sample, never authority for a later input image;
-        // poll_detection records accepted partial alpha as proof of a channel.
+        // poll_detection only updates which alpha channels the session trusts.
         source_alpha_ui = eligible;
         consumed_auto = detection_latest;
         if (!consumed_auto.sample_tick_ms || automatic->now_ms < consumed_auto.sample_tick_ms ||
@@ -493,7 +492,7 @@ namespace sunshine_game3d {
       if (detection_attempted) return detection_ready;
       detection_attempted = true;
       if (shader_source().find("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") == std::string_view::npos ||
-          !texture_create(detection_statistics, 16, 80, api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
+          !texture_create(detection_statistics, 16, 64, api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
           !texture_create(detection_decision, detection_decision_texels, 1, api::format::r32g32b32a32_uint,
             api::resource_usage::unordered_access | api::resource_usage::copy_source) ||
           !texture_create(detected_mask, width, height, api::format::r32_float, api::resource_usage::unordered_access) ||
@@ -568,12 +567,9 @@ namespace sunshine_game3d {
       std::copy_n(counts.begin() + 8, 4, evidence.alpha_covered.begin());
       std::copy_n(counts.begin() + 12, 4, evidence.alpha_invalid.begin());
       evidence.hudless_lit = counts[16];
-      evidence.proven_alpha = counts[17];
-      std::copy_n(counts.begin() + 20, 4, evidence.alpha_opaque.begin());
+      evidence.trusted_alpha = counts[17];
       detection_latest_source = detection_pending_source;
-      // An accepted partial alpha mask is evidence that its channel carries UI.
-      if (input.session && counts[0] >= 1 && counts[0] <= 4)
-        input.session->record_alpha_ui(counts[0] - 1, detection_pending_source.now_ms);
+      if (input.session) input.session->observe_alpha_channels(evidence, counts[2], detection_pending_source.now_ms);
     }
     void detect_ui(api::command_list *cmd, const render_parameters &p, const ui_detection_inputs &input,
         const alpha_auto_source &observation, api::resource_view paired_color) {
@@ -591,8 +587,8 @@ namespace sunshine_game3d {
         std::array<api::resource_view, 8> uavs{}; uavs[output] = t.uav;
         cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[stage]);
         bindings(cmd, api::shader_stage::compute, p, views, uavs);
-        struct constants { uint32_t bits; float threshold; uint32_t proven, padding; } values{detection_bits, difference_threshold,
-          detection_proven, 0};
+        struct constants { uint32_t bits; float threshold; uint32_t trusted, padding; } values{detection_bits, difference_threshold,
+          detection_trusted, 0};
         cmd->push_constants(api::shader_stage::compute, layout, 5, 0, 4, &values);
         cmd->dispatch(x, y, 1);
         uavs.fill(null_uav);
@@ -956,13 +952,16 @@ namespace sunshine_game3d {
     // So does a real frame whose HUD-less pair is inexact (frame generation on,
     // outside the tag batch) right after an exact decision: detecting again from
     // that pair would flip a full-screen menu between flat and 3D.
+    // A trusted alpha channel in this frame decides by itself; nothing is held.
+    const uint32_t trusted = automatic && automatic->session ? automatic->session->trusted_alpha() : 0u;
     const bool inexact = (bits & 48u) == 16u;
-    const bool hold = (candidates.hold_previous || (inexact && d.detection_exact)) && d.detection_mask_ready &&
+    const bool hold = !(bits & trusted & 15u) && (candidates.hold_previous || (inexact && d.detection_exact)) &&
+      d.detection_mask_ready &&
       d.detection_holds < ui_detection_inputs::max_held_presents;
     if (hold) bits = d.detection_bits;
     if (d.detection_bits != bits) d.detection_latest = {};
     d.detection_bits = bits;
-    d.detection_proven = automatic && automatic->session ? automatic->session->proven_alpha() : 0u;
+    d.detection_trusted = trusted;
     d.difference_threshold = d.source_format == api::format::r10g10b10a2_unorm ? 4.f / 1023.f :
       d.color == 2 ? .005f : 2.f / 255.f;
     const bool needs_detection = auto_mode || ui.kind == ui_input_kind::hudless_difference;

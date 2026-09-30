@@ -154,7 +154,7 @@ namespace sunshine_game3d {
           {"sampled_source", coverage.source_kind},
           {"sampled_evidence", {{"candidates", coverage.evidence.candidates},
             {"alpha_covered", coverage.evidence.alpha_covered}, {"alpha_invalid", coverage.evidence.alpha_invalid},
-            {"alpha_opaque", coverage.evidence.alpha_opaque}, {"proven_alpha", coverage.evidence.proven_alpha},
+            {"trusted_alpha", coverage.evidence.trusted_alpha},
             {"hudless_changed", coverage.evidence.hudless_changed}, {"hudless_unchanged", coverage.evidence.hudless_unchanged},
             {"hudless_invalid", coverage.evidence.hudless_invalid}, {"matching_tiles", coverage.evidence.matching_tiles},
             {"hudless_lit", coverage.evidence.hudless_lit}}},

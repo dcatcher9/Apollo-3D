@@ -16,10 +16,10 @@ namespace sunshine_game3d {
   inline constexpr std::uint64_t alpha_slow_probe_interval_ms = 1000;
   inline constexpr std::uint64_t alpha_selective_stability_ms = 500;
   inline constexpr std::uint64_t alpha_observation_max_age_ms = 500;
-  // Accepted partial-UI samples of one alpha channel, spanning this long, prove
-  // that channel carries UI coverage for the rest of the game session.
-  inline constexpr std::uint32_t alpha_proof_samples = 3;
-  inline constexpr std::uint64_t alpha_proof_span_ms = 2000;
+  // Earning or losing trust in an alpha channel as UI coverage takes this many
+  // detection samples spanning this long (docs/reshade-sbs.md).
+  inline constexpr std::uint32_t alpha_trust_samples = 3;
+  inline constexpr std::uint64_t alpha_trust_span_ms = 2000;
 
   class alpha_auto_policy;
   struct alpha_auto_source {
@@ -59,18 +59,17 @@ namespace sunshine_game3d {
     std::uint64_t window_start_ms{}, accepted_samples{};
     std::uint64_t probe_interval_ms{};
     // Latest completed diagnostic: 1 UI R, 2 UI A, 3 backbuffer A, 4 current A,
-    // 5 HUD-less difference, 6 full-frame UI (HUD-less differs almost everywhere),
-    // 7 full-frame UI (a proven alpha channel is exactly opaque almost everywhere).
+    // 5 HUD-less difference, 6 full-frame UI (HUD-less differs almost everywhere).
     std::uint32_t source_kind{};
     // Inputs of that GPU decision, for diagnosis only: the candidate bits the
     // shader was offered (1, 2, 4, 8 alpha candidates, 16 HUD-less), each alpha
     // candidate's covered and invalid pixels, HUD-less changed, unchanged and
-    // non-finite pixels, and tiles (of 256) whose pixels are 99% unchanged;
-    // each alpha candidate's exactly opaque pixels and the proven-alpha bits.
+    // non-finite pixels, tiles (of 256) whose pixels are 99% unchanged, and
+    // the alpha candidates the game session trusted.
     struct detection_evidence {
       std::uint32_t candidates{}, hudless_changed{}, hudless_unchanged{}, hudless_invalid{}, matching_tiles{}, hudless_lit{};
-      std::array<std::uint32_t, 4> alpha_covered{}, alpha_invalid{}, alpha_opaque{};
-      std::uint32_t proven_alpha{};
+      std::array<std::uint32_t, 4> alpha_covered{}, alpha_invalid{};
+      std::uint32_t trusted_alpha{};
     } evidence;
   };
 
@@ -178,24 +177,37 @@ namespace sunshine_game3d {
       return result_;
     }
 
-    // A completed GPU sample accepted alpha candidate `candidate` (0 UI alpha R,
-    // 1 UI color A, 2 Backbuffer A, 3 current A) as partial UI. Once proven, the
-    // same channel turning exactly opaque on nearly every pixel of a frame with
-    // no HUD-less image means full-screen UI (docs/reshade-sbs.md).
-    void record_alpha_ui(std::uint32_t candidate, std::uint64_t tick_ms) {
-      if (candidate >= alpha_proofs_.size()) return;
+    // One completed GPU detection sample over `pixels` pixels. Alpha candidates
+    // are 0 UI alpha R, 1 UI color A, 2 Backbuffer A and 3 current A. A channel
+    // earns trust as UI coverage by covering some but under 90% of the frame;
+    // a trusted channel then decides the mask whatever it covers. It loses trust
+    // on contradiction: covering at least 90% while an exact HUD-less pair shows
+    // at least 75% of the scene unchanged. A selective sample clears doubt.
+    void observe_alpha_channels(const alpha_auto_decision::detection_evidence &evidence, std::uint32_t pixels,
+        std::uint64_t tick_ms) {
+      if (!pixels) return;
       std::lock_guard<std::mutex> lock(mutex_);
-      auto &proof = alpha_proofs_[candidate];
-      if (!proof.samples || tick_ms < proof.first_tick_ms) proof = {0, tick_ms};
-      ++proof.samples;
-      if (proof.samples >= alpha_proof_samples && tick_ms - proof.first_tick_ms >= alpha_proof_span_ms)
-        proven_alpha_ |= 1u << candidate;
+      const std::uint64_t total = pixels;
+      const bool scene_visible = (evidence.candidates & 48u) == 48u && !evidence.hudless_invalid &&
+        std::uint64_t(evidence.hudless_unchanged) * 100 >= total * 75;
+      for (std::uint32_t channel = 0; channel < 4; ++channel) {
+        const std::uint32_t bit = 1u << channel;
+        if (!(evidence.candidates & bit) || evidence.alpha_invalid[channel]) continue;
+        const std::uint64_t covered = evidence.alpha_covered[channel];
+        if (covered && covered * 10 < total * 9) {
+          doubt_[channel] = {};
+          if (earned_[channel].add(tick_ms)) trusted_alpha_ |= bit;
+        } else if ((trusted_alpha_ & bit) && covered * 10 >= total * 9 && scene_visible && doubt_[channel].add(tick_ms)) {
+          trusted_alpha_ &= ~bit;
+          earned_[channel] = doubt_[channel] = {};
+        }
+      }
     }
 
-    // Bit i: alpha candidate i is proven for this game session.
-    std::uint32_t proven_alpha() {
+    // Bit i: the game session trusts alpha candidate i as UI coverage.
+    std::uint32_t trusted_alpha() {
       std::lock_guard<std::mutex> lock(mutex_);
-      return proven_alpha_;
+      return trusted_alpha_;
     }
 
   private:
@@ -203,9 +215,16 @@ namespace sunshine_game3d {
       std::uint64_t sequence{}, tick_ms{}, streak_start{};
       bool selective{};
     };
-    struct alpha_proof {
+    // Samples of one kind of evidence about one channel.
+    struct evidence_run {
       std::uint32_t samples{};
       std::uint64_t first_tick_ms{};
+      // True once alpha_trust_samples samples span alpha_trust_span_ms.
+      bool add(std::uint64_t tick_ms) {
+        if (!samples || tick_ms < first_tick_ms) *this = {0, tick_ms};
+        ++samples;
+        return samples >= alpha_trust_samples && tick_ms - first_tick_ms >= alpha_trust_span_ms;
+      }
     };
 
     void finish(std::uint64_t now_ms) {
@@ -241,7 +260,7 @@ namespace sunshine_game3d {
     std::unordered_map<std::uint64_t, observation_history> histories_;
     std::uint64_t last_observation_source_{};
     bool qualified_{};
-    std::array<alpha_proof, 4> alpha_proofs_{};
-    std::uint32_t proven_alpha_{};
+    std::array<evidence_run, 4> earned_{}, doubt_{};
+    std::uint32_t trusted_alpha_{};
   };
 }

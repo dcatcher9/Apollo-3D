@@ -86,7 +86,7 @@ namespace {
   constexpr constant detection_constants[] = {
     {"Sunshine_UICandidates", 0, 4, D3D_SVT_UINT},
     {"Sunshine_UIDifferenceThreshold", 4, 4, D3D_SVT_FLOAT},
-    {"Sunshine_UIProvenAlpha", 8, 4, D3D_SVT_UINT},
+    {"Sunshine_UITrustedAlpha", 8, 4, D3D_SVT_UINT},
   };
 
   struct entry_point {

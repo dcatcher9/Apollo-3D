@@ -263,26 +263,31 @@ an all-one alpha channel. An all-one manual mask places the whole frame at the U
 Off always disables protection. Neither manual mode overrides GPU capture ordering,
 source lifetime, scope, format or pairing requirements, and changing mode does not recalibrate depth.
 
-For automatic alpha selection, the GPU rejects nonfinite or out-of-range samples, an empty
-mask and a mask covering at least 90% of the image. These are conservative content checks,
-not a claim to recover UI semantics in every game. An opaque channel is ambiguous: it is
-either full-screen UI or no UI information at all (Hogwarts Legacy's UIColorAndAlpha is the
-opaque final image during play). Selection is recomputed from the current frame instead of using
-an earlier CPU decision or latching a startup result.
+Automatic alpha selection separates two questions. Whether a channel carries UI coverage at all
+is a property of the game, so it is learned once per game session. How much UI the frame shows is
+read from that channel's current pixels on the GPU, whatever the answer: none, a HUD, or a whole
+menu. Nonfinite or out-of-range samples always disqualify a channel for that frame.
 
-One exception uses session history. Once completed GPU samples have accepted the same alpha
-candidate as a partial UI mask at least three times over at least 2 s, that channel is proven to
-carry UI coverage for the rest of the game session. A later frame in which the proven channel is
-exactly 1.0 on at least 98% of pixels is full-screen UI and stays flat (sampled source 7). HUD-less
-checks still decide first: an accepted HUD-less mask or full-screen result wins, and the proven
-channel applies only when they accept nothing. Expedition 33's pause menu with FG on showed why:
-the menu tints the live scene, so 76% of pixels differ from HUD-less, which is neither a HUD mask
-nor full-screen UI, while the proven alpha is opaque. Exact opacity matters: a channel that is merely above zero almost everywhere can carry other data, such
-as luma. Proof is per candidate, so a presented-color alpha proven with frame generation off does
-not prove the tagged Backbuffer's alpha, and a title screen shown before any gameplay has no proof
-yet. Clair Obscur: Expedition 33 needed it: its alpha covers 2-23% of pixels during play and is
-exactly opaque in full-screen and pause menus, and with frame generation off, or before the first
-level has loaded, it tags no HUD-less image.
+A channel is untrusted until completed GPU samples show it covering some but less than 90% of the
+frame at least three times over at least 2 s. Until then it is used only on such selective frames:
+an empty or nearly full-scene channel is ambiguous, because an opaque channel can carry no UI at
+all (Hogwarts Legacy's UIColorAndAlpha is the opaque final image during play). Once trusted, the
+channel is the mask on every frame in which it is offered, ahead of HUD-less comparison, which only
+infers UI from a changed color. A full-screen menu is then simply a channel covering everything,
+and a pause menu that tints the live scene needs no special case. Clair Obscur: Expedition 33
+motivated the model: its alpha covers 2-23% of pixels during play and every pixel in full-screen
+and pause menus, and with FG off, or before its first level loads, it tags no HUD-less image. Its
+pause menu with FG on differs from HUD-less on 76% of pixels, which is neither a HUD mask nor
+full-screen UI. Trust is per candidate: a presented-color alpha trusted with FG off does not make
+the tagged Backbuffer's alpha trusted, and a title screen shown before any selective frame is not
+yet covered.
+
+Trust is lost on contradiction. When a trusted channel covers at least 90% of the frame while an
+exact HUD-less pair shows at least 75% of the scene unchanged, the channel is claiming UI over a
+visible scene. The same evidence (three samples over at least 2 s) revokes it, a selective sample
+of the channel clears the doubt, and a revoked channel must earn trust again. Trust survives
+manual mode edits. A trusted channel in the current frame decides by itself, so the HUD-less holds
+described below do not apply to that frame.
 
 The D3D12 adapter captures Streamline UIAlpha (69, red), UIColorAndAlpha (23, alpha),
 Backbuffer (53, alpha) and HUDLessColor (2, RGB) independently of FG being enabled. A fresh
@@ -354,16 +359,30 @@ statistics tiles is one 256-thread group, the reduction sums the 256 tiles in pa
 mask pass loads only the selected candidate; the integer counts and the mask are unchanged. At 4K
 this took UI detection from about 0.148 to 0.12 ms averaged over the provider fixture, which
 is mostly bound by reading the candidate textures. A bounded asynchronous
-96-byte summary may be read at 100 ms intervals for diagnostics; it never authorizes protection
+80-byte summary may be read at 100 ms intervals for diagnostics; it never authorizes protection
 and there is no full-frame CPU readback. Besides the decision, it carries the candidate bits the
-shader was offered, each alpha candidate's covered, invalid and exactly opaque pixels, the
-proven-alpha bits, and the HUD-less changed, unchanged, non-finite and lit pixel counts with
-matching tiles. Recording accepted partial alpha from this summary is the only way it feeds back:
-it proves a channel for later frames and never authorizes the current one. The
-`Sunshine UI protection` log (`sampled_candidates`, `sampled_alpha_covered`,
-`sampled_alpha_opaque`, `proven_alpha`, `sampled_hudless`) and the dump's
+shader was offered, each alpha candidate's covered and invalid pixels, the trusted-alpha bits, and
+the HUD-less changed, unchanged, non-finite and lit pixel counts with matching tiles. Updating
+channel trust from this summary is the only way it feeds back; it never authorizes the frame it
+describes. The `Sunshine UI protection` log (`sampled_candidates`, `sampled_alpha_covered`,
+`trusted_alpha`, `sampled_hudless`) and the dump's
 `source_alpha_auto.sampled_evidence` report it, so a rejection names the failing check. Source availability, GPU validation and actual applied
 protection remain separate diagnostic facts. Older startup fields describe a retired heuristic.
+
+Detection rule changes are checked offline before a live test. `ui_detection_replay` (built with
+the add-on) compiles the three detection passes from a shader file, binds each Dump 3D package's
+captured candidates by artifact kind (presented color, Backbuffer, UIColorAndAlpha, UIAlpha,
+HUD-less), sets the candidate, exact-pair and trusted bits a label names, and compares the decision
+and the resulting mask (empty, partial HUD, or flat) with that label:
+
+```powershell
+.\ui_detection_replay.exe ..\..\tools\reshade\game3d_native.hlsl E:\ApolloDev\sbs_dump\ui_detection_cases.json
+```
+
+The labels live next to the dumps, which stay outside the repository. A rule change is accepted
+only when every labelled screen of every game still passes; add a label whenever a new screen
+exposes a wrong decision. A dump's HUD-less capture can be later than the frame the live GPU used,
+so HUD-less labels accept either a partial or an empty mask when that pairing is uncertain.
 NGX UI resources remain discovery/dump observations; live NGX, FSR and XeSS UI adapters are not
 implemented. Current presented alpha is excluded while the retained FG mode is known enabled;
 an initial unknown mode alone does not establish that the presented color is generated.

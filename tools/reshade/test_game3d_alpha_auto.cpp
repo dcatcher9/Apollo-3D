@@ -582,33 +582,62 @@ namespace {
     require(resumed.decision(test_start_ms + alpha_initial_window_ms + 1000).probe_interval_ms == alpha_slow_probe_interval_ms,
       "Returning Auto after one minute restarted the frequent stage");
   }
-  void alpha_proof_needs_repeated_samples_over_the_span_per_candidate() {
+  void alpha_trust_is_earned_by_selective_coverage_and_lost_on_contradiction() {
+    const std::uint32_t pixels = 1000;
+    const auto sample = [&](alpha_auto_policy &policy, std::uint32_t candidates, std::array<std::uint32_t, 4> covered,
+        std::uint32_t unchanged, std::uint64_t tick, std::array<std::uint32_t, 4> invalid = {}) {
+      alpha_auto_decision::detection_evidence evidence;
+      evidence.candidates = candidates; evidence.alpha_covered = covered; evidence.alpha_invalid = invalid;
+      evidence.hudless_unchanged = unchanged;
+      policy.observe_alpha_channels(evidence, pixels, tick);
+    };
     alpha_auto_policy policy;
-    policy.record_alpha_ui(2, 10000);
-    policy.record_alpha_ui(2, 10100);
-    policy.record_alpha_ui(2, 11999);
-    require(!policy.proven_alpha(), "Three samples within 2 s proved a channel");
-    policy.record_alpha_ui(2, 12000);
-    require(policy.proven_alpha() == 4u, "Samples spanning 2 s did not prove exactly their own channel");
-    policy.record_alpha_ui(3, 12000);
-    policy.record_alpha_ui(3, 20000);
-    require(policy.proven_alpha() == 4u, "Two samples proved a channel");
-    policy.record_alpha_ui(3, 20001);
-    require(policy.proven_alpha() == 12u, "A third sample over the span did not prove the channel");
-    policy.record_alpha_ui(7, 30000);
-    policy.record_alpha_ui(4, 30000);
-    require(policy.proven_alpha() == 12u, "An out-of-range candidate changed the proof");
+    sample(policy, 4, {0, 0, 200, 0}, 0, 10000);
+    sample(policy, 4, {0, 0, 200, 0}, 0, 11000);
+    sample(policy, 4, {0, 0, 200, 0}, 0, 11999);
+    require(!policy.trusted_alpha(), "Three samples within 2 s earned trust");
+    sample(policy, 4, {0, 0, 200, 0}, 0, 12000);
+    require(policy.trusted_alpha() == 4u, "Selective samples over 2 s did not earn exactly their channel");
+    for (std::uint64_t tick = 13000; tick <= 20000; tick += 1000) {
+      sample(policy, 2 | 8, {0, 1000, 0, 0}, 0, tick);        // Full-scene alpha.
+      sample(policy, 8, {0, 0, 0, 0}, 0, tick);               // Empty alpha.
+      sample(policy, 1, {0, 0, 0, 0}, 0, tick, {5, 0, 0, 0}); // Invalid alpha.
+      sample(policy, 0, {300, 300, 300, 300}, 0, tick);       // Nothing offered.
+    }
+    require(policy.trusted_alpha() == 4u, "Empty, full-scene, invalid or unoffered alpha earned trust");
+    // A full channel over a menu, or without an exact pair, is no contradiction.
+    for (std::uint64_t tick = 21000; tick <= 25000; tick += 1000) {
+      sample(policy, 4 | 16 | 32, {0, 0, 1000, 0}, 100, tick);
+      sample(policy, 4 | 16, {0, 0, 1000, 0}, 900, tick);
+      sample(policy, 4, {0, 0, 1000, 0}, 900, tick);
+    }
+    require(policy.trusted_alpha() == 4u, "A menu or an inexact pair revoked trust");
+    // An exact pair showing 75% of the scene under a full channel revokes it,
+    // after the same evidence interval; a selective sample restarts the doubt.
+    sample(policy, 4 | 48, {0, 0, 1000, 0}, 750, 30000);
+    sample(policy, 4 | 48, {0, 0, 1000, 0}, 750, 31000);
+    sample(policy, 4, {0, 0, 200, 0}, 0, 31500);
+    sample(policy, 4 | 48, {0, 0, 1000, 0}, 750, 32000);
+    sample(policy, 4 | 48, {0, 0, 1000, 0}, 750, 33000);
+    require(policy.trusted_alpha() == 4u, "Doubt survived a selective sample");
+    sample(policy, 4 | 48, {0, 0, 1000, 0}, 750, 34000);
+    require(!policy.trusted_alpha(), "Contradiction over 2 s did not revoke trust");
+    sample(policy, 4, {0, 0, 200, 0}, 0, 35000);
+    sample(policy, 4, {0, 0, 200, 0}, 0, 36000);
+    require(!policy.trusted_alpha(), "Revocation kept earlier selective evidence");
+    sample(policy, 4, {0, 0, 200, 0}, 0, 37000);
+    require(policy.trusted_alpha() == 4u, "A revoked channel could not earn trust again");
     policy.set_manual(false);
     policy.set_automatic(40000);
-    require(policy.proven_alpha() == 12u, "Mode edits forgot what the game session proved");
+    require(policy.trusted_alpha() == 4u, "Mode edits forgot what the game session trusted");
     alpha_auto_policy clock;
-    clock.record_alpha_ui(0, 5000);
-    clock.record_alpha_ui(0, 4000); // Earlier than the first: restart the interval.
-    clock.record_alpha_ui(0, 5500);
-    clock.record_alpha_ui(0, 5999);
-    require(!clock.proven_alpha(), "A backwards clock kept the earlier interval");
-    clock.record_alpha_ui(0, 6000);
-    require(clock.proven_alpha() == 1u, "The restarted interval did not prove the channel");
+    sample(clock, 1, {100, 0, 0, 0}, 0, 5000);
+    sample(clock, 1, {100, 0, 0, 0}, 0, 4000); // Earlier than the first: restart the interval.
+    sample(clock, 1, {100, 0, 0, 0}, 0, 5500);
+    sample(clock, 1, {100, 0, 0, 0}, 0, 5999);
+    require(!clock.trusted_alpha(), "A backwards clock kept the earlier interval");
+    sample(clock, 1, {100, 0, 0, 0}, 0, 6000);
+    require(clock.trusted_alpha() == 1u, "The restarted interval did not earn trust");
   }
 } // namespace
 
@@ -633,7 +662,7 @@ int main() {
     sparse_selective_probe_requests_a_frequent_confirmation_burst();
     failed_sparse_candidates_return_to_sparse_without_borrowing_old_evidence();
     sparse_bursts_keep_independent_sources_and_the_original_deadline();
-    alpha_proof_needs_repeated_samples_over_the_span_per_candidate();
+    alpha_trust_is_earned_by_selective_coverage_and_lost_on_contradiction();
     std::puts("Startup source alpha: 20 policy groups passed");
     return 0;
   } catch (const std::exception &error) {

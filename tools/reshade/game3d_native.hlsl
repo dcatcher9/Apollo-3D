@@ -89,7 +89,7 @@ cbuffer SunshineUIDetectionConstants : register(b2)
 {
     uint Sunshine_UICandidates; // bit0..2 captured alpha, bit3 current alpha, bit4 paired HUDless, bit5 exact pair.
     float Sunshine_UIDifferenceThreshold;
-    uint Sunshine_UIProvenAlpha; // Bit i: alpha candidate i traced partial UI earlier in this game session.
+    uint Sunshine_UITrustedAlpha; // Bit i: the game session trusts alpha candidate i as UI coverage.
     uint Sunshine_UIDetectionReserved1;
 };
 RWTexture2D<float> SunshineHostCandidateStore : register(u0);
@@ -121,8 +121,8 @@ float SunshineSelectedUIAlpha(uint2 coordinate)
 }
 
 // Auto validates each CURRENT pair on the GPU. No prior CPU observation can
-// authorize a changed candidate; accepted partial alpha only proves a channel,
-// whose later full-screen use still needs this frame's own opaque pixels.
+// authorize a changed candidate: session trust only names the channel that
+// carries UI coverage, and this frame's own pixels are the mask.
 float4 SunshineUIDetectionAlpha(uint2 xy)
 {
     int3 at = int3(xy, 0);
@@ -144,13 +144,12 @@ groupshared uint4 SunshineUIDetectionCoverage[256];
 groupshared uint4 SunshineUIDetectionInvalid[256];
 groupshared uint4 SunshineUIDetectionDifference[256];
 groupshared uint SunshineUIDetectionLit[256];
-groupshared uint4 SunshineUIDetectionOpaque[256];
 [numthreads(16, 16, 1)]
 void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     uint2 first = group.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
     uint2 last = (group.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
-    uint4 coverage = 0u, invalid = 0u, difference = 0u, opaque = 0u;
+    uint4 coverage = 0u, invalid = 0u, difference = 0u;
     uint lit = 0u;
     [loop] for (uint y = first.y + thread.y; y < last.y; y += 16u)
     [loop] for (uint x = first.x + thread.x; x < last.x; x += 16u) {
@@ -158,7 +157,6 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         bool4 okay = isfinite(a) && a >= 0.0 && a <= 1.0;
         coverage += uint4(okay && a > 0.0);
         invalid += uint4(!okay);
-        opaque += uint4(okay && a >= 1.0);
         bool finite;
         float delta = SunshineHUDlessDifference(uint2(x,y), finite);
         difference.x += finite && delta > Sunshine_UIDifferenceThreshold ? 1u : 0u;
@@ -174,7 +172,6 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
     SunshineUIDetectionInvalid[lane] = invalid;
     SunshineUIDetectionDifference[lane] = difference;
     SunshineUIDetectionLit[lane] = lit;
-    SunshineUIDetectionOpaque[lane] = opaque;
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint step = 128u; step; step >>= 1u) {
         if (lane < step) {
@@ -182,7 +179,6 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
             SunshineUIDetectionInvalid[lane] += SunshineUIDetectionInvalid[lane+step];
             SunshineUIDetectionDifference[lane] += SunshineUIDetectionDifference[lane+step];
             SunshineUIDetectionLit[lane] += SunshineUIDetectionLit[lane+step];
-            SunshineUIDetectionOpaque[lane] += SunshineUIDetectionOpaque[lane+step];
         }
         GroupMemoryBarrierWithGroupSync();
     }
@@ -191,7 +187,6 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         SunshineAlphaCoverageStore[group.xy + uint2(0,16)] = SunshineUIDetectionInvalid[0];
         SunshineAlphaCoverageStore[group.xy + uint2(0,32)] = SunshineUIDetectionDifference[0];
         SunshineAlphaCoverageStore[group.xy + uint2(0,48)] = uint4(SunshineUIDetectionLit[0], 0u, 0u, 0u);
-        SunshineAlphaCoverageStore[group.xy + uint2(0,64)] = SunshineUIDetectionOpaque[0];
     }
 }
 // One thread per tile, then an exact group sum; thread 0 decides.
@@ -206,7 +201,6 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     SunshineUIDetectionInvalid[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 16u, 0));
     SunshineUIDetectionDifference[lane] = d;
     SunshineUIDetectionLit[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 48u, 0)).x;
-    SunshineUIDetectionOpaque[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 64u, 0));
     SunshineUIDetectionMatching[lane] = d.w && d.z * 100u >= d.w * 99u ? 1u : 0u;
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint step = 128u; step; step >>= 1u) {
@@ -215,19 +209,25 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
             SunshineUIDetectionInvalid[lane] += SunshineUIDetectionInvalid[lane+step];
             SunshineUIDetectionDifference[lane] += SunshineUIDetectionDifference[lane+step];
             SunshineUIDetectionLit[lane] += SunshineUIDetectionLit[lane+step];
-            SunshineUIDetectionOpaque[lane] += SunshineUIDetectionOpaque[lane+step];
             SunshineUIDetectionMatching[lane] += SunshineUIDetectionMatching[lane+step];
         }
         GroupMemoryBarrierWithGroupSync();
     }
     if (lane) return;
     uint4 coverage = SunshineUIDetectionCoverage[0], invalid = SunshineUIDetectionInvalid[0];
-    uint4 difference = SunshineUIDetectionDifference[0], opaque = SunshineUIDetectionOpaque[0];
+    uint4 difference = SunshineUIDetectionDifference[0];
     uint matching_tiles = SunshineUIDetectionMatching[0], lit = SunshineUIDetectionLit[0];
     uint source = 0u, covered = 0u;
+    // A channel the game session trusts as UI coverage is the mask whatever it
+    // covers this frame: nothing is no UI, everything a full-screen menu.
+    [unroll] for (uint trusted = 0u; trusted < 4u; ++trusted) {
+        if (!source && (Sunshine_UICandidates & Sunshine_UITrustedAlpha & (1u << trusted)) && !invalid[trusted]) {
+            source = trusted + 1u; covered = coverage[trusted];
+        }
+    }
+    // An untrusted channel must look selective. Empty and nearly full-scene
+    // alpha are ambiguous: an opaque channel may carry no UI at all.
     [unroll] for (uint candidate = 0u; candidate < 4u; ++candidate) {
-        // Reject empty, invalid and nearly full-scene alpha. Re-evaluate even
-        // after a valid previous frame; a menu cannot latch an all-scene mask.
         if (!source && (Sunshine_UICandidates & (1u << candidate)) && !invalid[candidate] &&
             coverage[candidate] && coverage[candidate] * 10u < difference.w * 9u) {
             source = candidate + 1u; covered = coverage[candidate];
@@ -247,25 +247,12 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
         difference.x * 100u >= difference.w * 98u && lit * 2u >= difference.w) {
         source = 6u; covered = difference.w;
     }
-    // When no HUD-less check accepted the frame, an alpha channel that traced
-    // partial UI earlier in this game session and is now exactly opaque on nearly
-    // every pixel shows full-screen UI. A menu that tints the whole scene changes
-    // too many pixels for a HUD mask and too few for full-screen UI. An unproven
-    // opaque channel may carry no UI at all, and a channel merely above zero may
-    // hold other data (such as luma).
-    [unroll] for (uint proven = 0u; proven < 4u; ++proven) {
-        if (!source && (Sunshine_UICandidates & Sunshine_UIProvenAlpha & (1u << proven)) &&
-            !invalid[proven] && opaque[proven] * 100u >= difference.w * 98u) {
-            source = 7u; covered = difference.w;
-        }
-    }
     SunshineAlphaCoverageStore[uint2(0,0)] = uint4(source, covered, difference.w, matching_tiles);
     // Diagnostic evidence for the CPU readback; nothing reads it on the GPU.
     SunshineAlphaCoverageStore[uint2(1,0)] = uint4(Sunshine_UICandidates, difference.x, difference.z, difference.y);
     SunshineAlphaCoverageStore[uint2(2,0)] = coverage;
     SunshineAlphaCoverageStore[uint2(3,0)] = invalid;
-    SunshineAlphaCoverageStore[uint2(4,0)] = uint4(lit, Sunshine_UIProvenAlpha, 0u, 0u);
-    SunshineAlphaCoverageStore[uint2(5,0)] = opaque;
+    SunshineAlphaCoverageStore[uint2(4,0)] = uint4(lit, Sunshine_UITrustedAlpha, 0u, 0u);
 }
 [numthreads(8, 8, 1)]
 void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
@@ -279,7 +266,7 @@ void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
     else if (source == 2u) mask = SunshineUIColorAlpha.Load(at).a;
     else if (source == 3u) mask = SunshineUIBackbufferAlpha.Load(at).a;
     else if (source == 4u) mask = SunshineSourceSampler.Load(at).a;
-    else if (source == 6u || source == 7u) mask = 1.0;
+    else if (source == 6u) mask = 1.0;
     else if (source == 5u) {
         bool finite;
         mask = SunshineHUDlessDifference(id.xy, finite) > Sunshine_UIDifferenceThreshold && finite ? 1.0 : 0.0;

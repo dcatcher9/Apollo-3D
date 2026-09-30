@@ -1853,10 +1853,11 @@ namespace {
     full_frame(correct, true, true, "the next exact frame decides again");
     full_frame(dark, true, false, "a black HUD-less image never flattens the frame");
     full_frame(correct, false, false, "an inexact frame after an exact empty decision keeps it empty");
-    // Without a HUD-less image, an alpha channel proven as partial UI earlier
-    // in the session shows full-screen UI once it is exactly opaque.
+    // A channel the session trusts as UI coverage is the mask whatever it covers:
+    // nothing, a HUD or a whole menu. Selective coverage earns trust; an exact
+    // HUD-less pair showing the scene under a full channel takes it away.
     enum class expected { empty, flat, hud };
-    const auto proven_frame = [&](const std::vector<unsigned char> &color, api::resource_view alpha0, api::resource_view alpha1,
+    const auto trust_frame = [&](const std::vector<unsigned char> &color, api::resource_view alpha0, api::resource_view alpha1,
         api::resource_view hudless_view, expected want, const char *label) {
       gpu.original = color;
       gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), gpu.width * bpp, 0);
@@ -1870,46 +1871,43 @@ namespace {
       for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
         const auto value = selected.channel(x, y, 0);
         const bool hud = mask[size_t(y) * gpu.width + x] > 0.f;
-        require(std::isfinite(value) && (want == expected::flat ? value == 1.f : want == expected::empty ? value == 0.f :
-          (value > 0.f) == hud), std::string(label) + ": wrong proven-alpha UI mask");
+        require(std::isfinite(value) && (want == expected::flat ? value > 0.f : want == expected::empty ? value == 0.f :
+          (value > 0.f) == hud), std::string(label) + ": wrong trusted-alpha UI mask");
       }
     };
-    const auto nearly_opaque = red_view(std::vector<float>(pixels, .99f));
-    require(!(policy.proven_alpha() & 1u), "The fixture proved the explicit alpha channel too early");
-    proven_frame(menu, opaque_alpha, {}, {}, expected::empty, "an unproven opaque alpha channel is not full-screen UI");
-    for (unsigned frame = 0; frame < 25; ++frame) proven_frame(menu, explicit_alpha, {}, {}, expected::hud, nullptr);
-    require(policy.proven_alpha() == 1u, "Partial UI alpha over 2 s did not prove exactly its channel");
-    proven_frame(menu, opaque_alpha, {}, {}, expected::flat, "a proven channel that turns exactly opaque shows full-screen UI");
-    proven_frame(menu, opaque_alpha, {}, {}, expected::flat, "a proven opaque channel publishes its evidence");
+    const auto nearly_opaque = red_view(std::vector<float>(pixels, .99f)), no_alpha = red_view(std::vector<float>(pixels, 0.f));
+    require(!(policy.trusted_alpha() & 1u), "The fixture trusted the explicit alpha channel too early");
+    trust_frame(menu, opaque_alpha, {}, {}, expected::empty, "an untrusted opaque alpha channel is not full-screen UI");
+    for (unsigned frame = 0; frame < 25; ++frame) trust_frame(menu, explicit_alpha, {}, {}, expected::hud, nullptr);
+    require(policy.trusted_alpha() == 1u, "Selective UI alpha over 2 s did not earn trust for exactly its channel");
+    trust_frame(menu, opaque_alpha, {}, {}, expected::flat, "a trusted channel covering everything is a full-screen menu");
+    trust_frame(menu, opaque_alpha, {}, {}, expected::flat, "a trusted channel publishes its evidence");
     {
       const auto sample = gpu.renderer.consumed_alpha_auto();
-      require(sample.source_kind == 7 && sample.covered == pixels && sample.evidence.proven_alpha == 1u &&
-          sample.evidence.alpha_opaque[0] == pixels && sample.evidence.alpha_covered[0] == pixels,
-        "Proven-alpha evidence does not describe the full-screen decision");
+      require(sample.source_kind == 1 && sample.covered == pixels && sample.evidence.trusted_alpha == 1u &&
+          sample.evidence.alpha_covered[0] == pixels, "Trusted-alpha evidence does not describe the decision");
     }
-    proven_frame(menu, nearly_opaque, {}, {}, expected::empty, "a proven channel merely above zero everywhere is not full-screen UI");
-    proven_frame(menu, {}, flattened_ui, {}, expected::empty, "proof belongs to its own candidate");
-    proven_frame(final_color, opaque_alpha, {}, correct, expected::hud, "a paired HUD-less image decides instead of proven alpha");
+    trust_frame(menu, nearly_opaque, {}, {}, expected::flat, "a trusted channel above zero everywhere is a full-screen menu");
+    trust_frame(menu, no_alpha, {}, {}, expected::empty, "a trusted channel covering nothing means no UI");
+    trust_frame(menu, {}, flattened_ui, {}, expected::empty, "trust belongs to its own candidate");
+    trust_frame(menu, explicit_alpha, {}, {}, expected::hud, "a trusted channel still yields its HUD mask");
     // A pause menu that tints the live scene changes too many pixels for a HUD
-    // mask and too few for full-screen UI; the proven opaque channel decides.
+    // mask and too few for full-screen UI: only a trusted channel can say.
     auto tinted = hudless;
     for (size_t i = 0; i != pixels * 6 / 10; ++i)
       for (unsigned byte = 0; byte != 3; ++byte) tinted[i * bpp + byte] ^= 0x80;
     opaque(tinted);
-    proven_frame(tinted, opaque_alpha, {}, correct, expected::flat, "an inconclusive HUD-less pair defers to the proven channel");
-    proven_frame(tinted, opaque_alpha, {}, correct, expected::flat, "the deferred decision publishes its evidence");
-    {
-      const auto sample = gpu.renderer.consumed_alpha_auto();
-      const auto changed = std::uint64_t(sample.evidence.hudless_changed) * 100u;
-      require(sample.source_kind == 7 && (sample.evidence.candidates & 48u) == 48u &&
-          changed > std::uint64_t(pixels) * 25u && changed < std::uint64_t(pixels) * 98u,
-        "An inconclusive HUD-less pair did not defer to the proven channel");
-    }
-    proven_frame(tinted, nearly_opaque, {}, correct, expected::empty, "an inconclusive pair without a proven opaque channel stays 3D");
-    proven_frame(menu, explicit_alpha, {}, {}, expected::hud, "a proven channel still yields its partial mask");
+    trust_frame(tinted, opaque_alpha, {}, correct, expected::flat, "a trusted channel decides a menu that tints the scene");
+    trust_frame(tinted, {}, {}, correct, expected::empty, "without a trusted channel a tinting menu stays 3D");
+    // A full channel while the exact pair shows the scene is a contradiction.
+    // It wins at first, then loses trust within the same evidence interval.
+    trust_frame(final_color, opaque_alpha, {}, correct, expected::flat, "a trusted channel decides before any contradiction");
+    for (unsigned frame = 0; frame < 25; ++frame) trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, nullptr);
+    require(!(policy.trusted_alpha() & 1u), "An exact pair showing the scene did not revoke trust");
+    trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, "after losing trust the HUD-less pair decides");
     inputs = {};
-    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 inexact_after_exact_hold=1 proven_alpha_full_frame=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
-    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, bounded generated-present hold, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, bounded inexact-frame hold, proven-alpha full-screen UI and manual Off without review");
+    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 inexact_after_exact_hold=1 trusted_alpha=1 trust_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
+    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, bounded generated-present hold, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, bounded inexact-frame hold, trusted alpha channels with revocation and manual Off without review");
   }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;
