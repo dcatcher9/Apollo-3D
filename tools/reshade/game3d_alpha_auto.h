@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <unordered_map>
 
@@ -188,7 +189,43 @@ namespace sunshine_game3d {
     void observe_alpha_channels(const alpha_auto_decision::detection_evidence &evidence, std::uint32_t pixels,
         std::uint64_t tick_ms) {
       if (!pixels) return;
+      std::uint32_t changed_to{};
+      std::function<void(std::uint32_t)> listener;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto before = trusted_alpha_;
+        observe_alpha_channels_locked(evidence, pixels, tick_ms);
+        if (trusted_alpha_ == before || !trust_listener_) return;
+        changed_to = trusted_alpha_;
+        listener = trust_listener_;
+      }
+      // Outside the lock: the owner may persist the new trust.
+      listener(changed_to);
+    }
+
+    // Trust that an earlier session of this game earned (bits as trusted_alpha()).
+    // It is the same claim as earned trust and is revoked by the same contradiction.
+    void restore_trusted_alpha(std::uint32_t remembered) {
       std::lock_guard<std::mutex> lock(mutex_);
+      trusted_alpha_ |= remembered & 15u;
+    }
+
+    // Called with the new trusted bits whenever samples earn or revoke trust,
+    // never for a restore.
+    void on_trust_change(std::function<void(std::uint32_t)> listener) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      trust_listener_ = std::move(listener);
+    }
+
+    // Bit i: the game session trusts alpha candidate i as UI coverage.
+    std::uint32_t trusted_alpha() {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return trusted_alpha_;
+    }
+
+  private:
+    void observe_alpha_channels_locked(const alpha_auto_decision::detection_evidence &evidence, std::uint32_t pixels,
+        std::uint64_t tick_ms) {
       const std::uint64_t total = pixels;
       const bool scene_visible = (evidence.candidates & 48u) == 48u && !evidence.hudless_invalid &&
         std::uint64_t(evidence.hudless_unchanged) * 100 >= total * 75;
@@ -209,13 +246,6 @@ namespace sunshine_game3d {
       }
     }
 
-    // Bit i: the game session trusts alpha candidate i as UI coverage.
-    std::uint32_t trusted_alpha() {
-      std::lock_guard<std::mutex> lock(mutex_);
-      return trusted_alpha_;
-    }
-
-  private:
     struct observation_history {
       std::uint64_t sequence{}, tick_ms{}, streak_start{};
       bool selective{};
@@ -270,5 +300,6 @@ namespace sunshine_game3d {
     bool qualified_{};
     std::array<evidence_run, 4> earned_{}, doubt_{};
     std::uint32_t trusted_alpha_{};
+    std::function<void(std::uint32_t)> trust_listener_;
   };
 }

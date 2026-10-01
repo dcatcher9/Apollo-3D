@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace {
   using namespace sunshine_game3d;
@@ -655,6 +656,35 @@ namespace {
       sample(effects, 1, {tick % 1000 ? 50u : 400u, 0, 0, 0}, 0, tick);
     require(!effects.trusted_alpha(), "Fluctuating coverage earned trust");
   }
+  void remembered_alpha_trust_is_restored_and_every_change_is_reported() {
+    const std::uint32_t pixels = 1000;
+    const auto sample = [&](alpha_auto_policy &policy, std::uint32_t candidates, std::array<std::uint32_t, 4> covered,
+        std::uint32_t unchanged, std::uint64_t tick) {
+      alpha_auto_decision::detection_evidence evidence;
+      evidence.candidates = candidates; evidence.alpha_covered = covered; evidence.hudless_unchanged = unchanged;
+      policy.observe_alpha_channels(evidence, pixels, tick);
+    };
+    alpha_auto_policy policy;
+    std::vector<std::uint32_t> reported;
+    policy.on_trust_change([&](std::uint32_t trusted) { reported.push_back(trusted); });
+    policy.restore_trusted_alpha(4u | 32u);
+    require(policy.trusted_alpha() == 4u, "A remembered channel was not trusted at once, or unknown bits were kept");
+    require(reported.empty(), "Restoring remembered trust was reported as a change");
+    // A title screen or menu before any selective frame is already covered.
+    sample(policy, 4, {0, 0, 1000, 0}, 0, 1000);
+    sample(policy, 4, {0, 0, 200, 0}, 0, 1500);
+    require(policy.trusted_alpha() == 4u && reported.empty(), "Samples of a remembered channel changed or reported trust");
+    // Earning another channel reports the combined trust once.
+    for (const std::uint64_t tick : {2000u, 3000u, 4000u, 5000u})
+      sample(policy, 1 | 4, {200, 0, 200, 0}, 0, tick);
+    require(policy.trusted_alpha() == 5u, "A second channel did not earn trust beside the remembered one");
+    require(reported == std::vector<std::uint32_t> {5u}, "Earning was not reported exactly once");
+    // The same contradiction that revokes earned trust revokes remembered trust.
+    for (const std::uint64_t tick : {10000u, 11000u, 12000u})
+      sample(policy, 4 | 48, {0, 0, 1000, 0}, 750, tick);
+    require(policy.trusted_alpha() == 1u, "Contradiction did not revoke a remembered channel");
+    require(reported == std::vector<std::uint32_t> {5u, 1u}, "Revocation was not reported for persistence");
+  }
 } // namespace
 
 int main() {
@@ -679,6 +709,7 @@ int main() {
     failed_sparse_candidates_return_to_sparse_without_borrowing_old_evidence();
     sparse_bursts_keep_independent_sources_and_the_original_deadline();
     alpha_trust_is_earned_by_selective_coverage_and_lost_on_contradiction();
+    remembered_alpha_trust_is_restored_and_every_change_is_reported();
     std::puts("Startup source alpha: 20 policy groups passed");
     return 0;
   } catch (const std::exception &error) {

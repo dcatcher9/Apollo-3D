@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <reshade.hpp>
+#include "async_log.h" // After imgui.h and reshade.hpp, which emits the ImGui wrappers.
 #include "game3d_ui_input_provider.h"
 #include <unordered_map>
 
@@ -61,9 +62,31 @@ namespace sunshine_game3d {
       ImGui::SetNextItemWidth(-1.f);
     }
 
+    // Whether a channel carries UI coverage is a property of the game, so trust
+    // outlives the session in this game's ReShade.ini (docs/reshade-sbs.md).
+    constexpr const char *trusted_alpha_key = "TrustedUIAlpha";
+
     const std::shared_ptr<alpha_auto_policy> &alpha_session() {
       // Manual On/Off is shared per game; live Auto qualification is per runtime.
-      static const auto session = std::make_shared<alpha_auto_policy>();
+      static const auto session = [] {
+        auto policy = std::make_shared<alpha_auto_policy>();
+        unsigned int remembered = 0;
+        if (reshade::get_config_value(nullptr, config_section, trusted_alpha_key, remembered) && (remembered & 15u)) {
+          policy->restore_trusted_alpha(remembered);
+          char text[160];
+          std::snprintf(text, sizeof(text),
+            "Sunshine UI protection: restored alpha trust 0x%x from an earlier session of this game", remembered & 15u);
+          sunshine_log::message(reshade::log::level::info, text);
+        }
+        policy->on_trust_change([](std::uint32_t trusted) {
+          reshade::set_config_value(nullptr, config_section, trusted_alpha_key, static_cast<unsigned int>(trusted));
+          char text[160];
+          std::snprintf(text, sizeof(text),
+            "Sunshine UI protection: alpha trust is now 0x%x; remembered for later sessions of this game", trusted);
+          sunshine_log::message(reshade::log::level::info, text);
+        });
+        return policy;
+      }();
       return session;
     }
 

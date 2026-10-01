@@ -265,7 +265,7 @@ Off always disables protection. Neither manual mode overrides GPU capture orderi
 source lifetime, scope, format or pairing requirements, and changing mode does not recalibrate depth.
 
 Automatic alpha selection separates two questions. Whether a channel carries UI coverage at all
-is a property of the game, so it is learned once per game session. How much UI the frame shows is
+is a property of the game, so it is learned once and remembered for that game. How much UI the frame shows is
 read from that channel's current pixels on the GPU, whatever the answer: none, a HUD, or a whole
 menu. Nonfinite or out-of-range samples always disqualify a channel for that frame.
 
@@ -282,14 +282,20 @@ motivated the model: its alpha covers 2-23% of pixels during play and every pixe
 and pause menus, and with FG off, or before its first level loads, it tags no HUD-less image. Its
 pause menu with FG on differs from HUD-less on 76% of pixels, which is neither a HUD mask nor
 full-screen UI. Trust is per candidate: a presented-color alpha trusted with FG off does not make
-the tagged Backbuffer's alpha trusted, and a title screen shown before any selective frame is not
-yet covered.
+the tagged Backbuffer's alpha trusted.
+
+Trust is remembered per game. Each earned or revoked change is written to `TrustedUIAlpha` (the
+trusted candidate bits) under `[SUNSHINE_GAME3D]` in that game's `ReShade.ini`, and the next session
+starts with those channels trusted. Without it, a launch's title screen and menus would stay 3D
+until a selective frame had been on screen for 2 s; Expedition 33's first screen covers every pixel,
+and leaving its main menu within 2 s left the Load Game menu unprotected until play. Only the first
+session of a game still has to earn trust. Deleting the key forgets it.
 
 Trust is lost on contradiction. When a trusted channel covers at least 90% of the frame while an
 exact HUD-less pair shows at least 75% of the scene unchanged, the channel is claiming UI over a
 visible scene. The same evidence (three samples over at least 2 s) revokes it, a selective sample
-of the channel clears the doubt, and a revoked channel must earn trust again. Trust survives
-manual mode edits. A trusted channel in the current frame decides by itself, so the HUD-less holds
+of the channel clears the doubt, and a revoked channel must earn trust again. Remembered trust is
+revoked the same way, and the revocation is remembered too. Trust survives manual mode edits. A trusted channel in the current frame decides by itself, so the HUD-less holds
 described below do not apply to that frame.
 
 Some games expose no UI buffer through any vendor API but draw UI into their own offscreen layer.
