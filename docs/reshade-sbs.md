@@ -46,6 +46,30 @@ placement, each eye clips its own cursor, and HDR cursor white follows the displ
 level. This cursor metadata is currently supplied by Desktop Duplication; the WGC fallback does
 not expose it. Install the matching protocol-2 host and add-on together for cursor/UI alignment.
 
+## Rules for new game behaviour
+
+Each new game has so far broken an assumption that held in the games before it. A rule added for
+one game is held to these four tests before it ships, so that the next game starts in a safe state
+instead of a wrong one:
+
+1. **Gate on the API contract, not on observed behaviour.** Admission follows what D3D12,
+   Streamline or NGX require; a rule stricter than the contract fails on the next engine.
+   Treating every aliasing barrier as invalidating the recording blocked all of Resident Evil
+   Requiem's DLSS depth, although an aliasing barrier changes no resource state.
+2. **Treat optional SDK features as optional.** Frame tokens, HUD-less images and UI buffers may be
+   absent; every path has a fallback that does not need them. Resident Evil Requiem's camera has no
+   frame identity, so depth takes the viewport's steady camera constants instead.
+3. **Fail safe, not sideways.** When the best evidence is missing this frame, do nothing (or hold
+   the previous result within its bound) rather than take the next candidate; a fallback must not
+   be able to make the result wrong in a new way. A presented alpha deciding when a trusted UI
+   channel failed flattened most of a scene.
+4. **Anything learned or remembered can be unlearned in every game.** Trust, calibration and
+   remembered state need a contradiction that every game can produce, not only games with a
+   particular buffer.
+
+The [first-run report](../tools/reshade/README.md#first-run-of-a-new-game) checks a new game's
+first session for the failure signatures these rules came from.
+
 ## Native renderer ownership
 
 Game input has a provider boundary shared by depth, camera and UI:

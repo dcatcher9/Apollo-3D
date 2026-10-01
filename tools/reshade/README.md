@@ -422,6 +422,36 @@ This adds no texture copy, rendering pass or GPU wait. It corrects subpixel regi
 not reconstruct hidden background or generated-frame depth, and wide foreground halos remain a
 live quality issue. See the [jitter contract](../../docs/reshade-sbs.md#depth-jitter-registration).
 
+## First run of a new game
+
+Every game so far broke on an assumption that held in the games before it: Resident Evil
+Requiem aliases heap memory every frame, sends a camera without frame identity and offers a
+presented alpha that is not UI; The Witcher 3 moves command lists to per-object method tables and
+requests each frame token about 30 times. A first run therefore covers the paths those differences
+reach, and the report below names each known failure signature:
+
+1. Play about 2 minutes with FG off and 2 minutes with FG on (if the game has it).
+2. Open a full-screen menu and a pause menu.
+3. Take one Dump 3D during play and one in a menu.
+4. Run the report on the game's log, with the host log when Sunshine streamed the session:
+
+```powershell
+python tools\reshade\game3d_log_report.py "D:\Games\<game>" --host-log E:\ApolloDev\config\sunshine.log
+```
+
+It reads existing log lines only and prints PASS, WARN or FAIL per check with the times to look
+at; the exit code is 1 when a check failed. The checks cover: add-on and renderer readiness;
+fresh depth and gaps outside the settle time after FG switches and runtime resets; publications
+that showed the colour frame with depth; capture coverage by the list lifecycle; whether the
+camera projection or only the raw controller places the scene (the latter while a valid camera
+exists is a warning); UI trust, presented alpha deciding over a trusted dedicated UI channel, and
+trusted channels that disagree; observation losses by cause; unusual export pauses; present-thread
+hitches; Game 3D CPU and GPU cost; and, from the host log, the Game 3D link, size fit and encoder
+stalls. A failing check is a bug report: fix the rule at its root (see
+[the generalization rules](../../docs/reshade-sbs.md#rules-for-new-game-behaviour)), then add a
+check here when a new signature appears. Run its tests with
+`python -m unittest tools/reshade/test_game3d_log_report.py`.
+
 ## Additional diagnostics
 
 The separate [Streamline camera probe](../../docs/reshade-sbs.md#streamline-camera-metadata-experiment)
