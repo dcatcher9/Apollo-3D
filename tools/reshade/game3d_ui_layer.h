@@ -20,8 +20,8 @@
 // active layer is copied just before the first clear after each Present: D3D12
 // requires RENDER_TARGET for a clear, so the state is known, and the copy holds
 // the previous frame's UI. UI detection receives the newest copy as its UI
-// color+alpha candidate, admits it only when premultiplied (no RGB above alpha)
-// and trusts it only after selective coverage (see docs/reshade-sbs.md).
+// color+alpha candidate, admits it only when premultiplied (no RGB above twice
+// its alpha) and trusts it only after selective coverage (see docs/reshade-sbs.md).
 //
 // Dump census: while a Dump 3D is armed, qualifying clears are also recorded and
 // copied as diagnostic artifacts.
@@ -34,8 +34,9 @@ namespace sunshine_game3d::ui_layer {
   // Formats that can carry blended UI coverage in alpha: 8 bits or more.
   bool alpha_format(api::format format);
   // Sunshine_UIDetectionFlags for a layer copy of this format. bit0: admit it
-  // only while premultiplied (no color above its alpha, as UI blended over
-  // transparent black always is); bit1: a float layer's HDR headroom.
+  // only while premultiplied (no color above twice its alpha: UI blended over
+  // transparent black, allowing tints brighter than white); bit1: a float
+  // layer's HDR headroom.
   std::uint32_t detection_flags(api::format format);
   // A single-sample 2D color target at the output size cleared to exactly
   // (0, 0, 0, 0). Callers separately exclude swapchain back buffers.

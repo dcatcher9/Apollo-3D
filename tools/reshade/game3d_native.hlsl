@@ -158,10 +158,14 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         coverage += uint4(okay && a > 0.0);
         invalid += uint4(!okay);
         // An offscreen layer is UI only when blended over transparent black:
-        // no color above its alpha (scRGB UI may be up to 10000 nits).
+        // its color stays within a small multiple of its alpha. UI tinted
+        // brighter than white (Stellar Blade's pulsing markers, up to twice
+        // its alpha) qualifies; a scene buffer whose alpha is not coverage
+        // (Dead Space: alpha near 11/255 under saturated color) does not.
+        // scRGB UI may be up to 10000 nits.
         if (Sunshine_UIDetectionFlags & 1u) {
             float4 layer = SunshineUIColorAlpha.Load(int3(x, y, 0));
-            float headroom = Sunshine_UIDetectionFlags & 2u ? 125.0 : 1.0;
+            float headroom = Sunshine_UIDetectionFlags & 2u ? 125.0 : 2.0;
             invalid.y += max(max(layer.r, layer.g), layer.b) > layer.a * headroom + 4.0 / 255.0 ? 1u : 0u;
         }
         bool finite;

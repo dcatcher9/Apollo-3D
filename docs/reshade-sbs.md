@@ -372,9 +372,13 @@ trust once the layer is trusted, or once the tag proves opaque: covering at leas
 while an exact HUD-less pair shows at least half of it unchanged, in three samples over at least
 2 s. A selective sample of the tag clears that proof. A trusted tag keeps the slot. Copies are released through their own device, at the latest when it is
 destroyed. It is one frame late, which a moving HUD shows only as a one-frame
-edge. The GPU admits it only while premultiplied: any pixel whose color exceeds its alpha by more
-than 4/255 (for a float layer, 125 times its alpha, up to 10000 nits) rejects it for that frame.
-UI blended over transparent black is premultiplied by construction. A scene buffer is not: Dead
+edge. The GPU admits it only while premultiplied: any pixel whose color exceeds twice its alpha by
+more than 4/255 (for a float layer, 125 times its alpha, up to 10000 nits) counts as invalid, and the
+usual invalid-pixel limits apply to that frame. UI blended over transparent black is premultiplied by
+construction; the factor two admits UI tinted brighter than white. Stellar Blade's real UI layer
+failed the former limit (alpha plus 4/255) in most samples: its notification dots sat 5-9/255 above
+their nearly opaque alpha, and GPU samples during pulsing markers counted 1,306 and 5,377 such
+pixels, so the untrusted layer could not earn trust during play. A scene buffer is not: Dead
 Space's only qualifying target is a post-upscale scene buffer whose luma-like alpha (82% of pixels
 nonzero, mean 11/255) lies below its saturated colors. That buffer was seen in a census dump; its
 rejection has not been observed live.
@@ -465,7 +469,7 @@ unchanged: beside a trusted alpha channel, which decides alone, a HUD-less pair 
 may come and go. Resident Evil Requiem pairs its HUD-less image on only some Presents with frame
 generation on; discarding the sample on each such change reported "Checking source quality" about
 half the time while its trusted UI color alpha protected the HUD. The `Sunshine UI protection` log (`sampled_candidates`, `sampled_alpha_covered`,
-`trusted_alpha` as slot bits, `sampled_ui_layer` when the UI layer filled the UI color slot,
+`sampled_alpha_invalid`, `trusted_alpha` as slot bits, `sampled_ui_layer` when the UI layer filled the UI color slot,
 `sampled_hudless`) and the dump's
 `source_alpha_auto.sampled_evidence` report it, so a rejection names the failing check. Source availability, GPU validation and actual applied
 protection remain separate diagnostic facts. Older startup fields describe a retired heuristic.

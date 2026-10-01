@@ -38,10 +38,12 @@ SCALE = re.compile(r'Sunshine 3D Streamline scale: (\w+);')
 RAW = re.compile(r'Sunshine 3D raw automation: (\w+);.*?stereo_scale=([0-9.e+-]+)')
 CAMERA = re.compile(r'Sunshine Streamline camera availability: .*recent_valid_projection=(\d+)')
 UI = re.compile(
-    r'Sunshine UI protection: runtime=\S+ .*?detection=(\w+) .*?sampled_source=(\d+) sampled_covered=(\d+) '
-    r'sampled_pixels=(\d+) sampled_candidates=(0x[0-9a-fA-F]+) sampled_alpha_covered=(\d+)/(\d+)/(\d+)/(\d+) '
-    r'trusted_alpha=(0x[0-9a-fA-F]+)(?: sampled_ui_layer=(\d))? '
-    r'sampled_hudless=\{changed=(\d+) unchanged=(\d+) invalid=(\d+)')
+    r'Sunshine UI protection: runtime=\S+ .*?detection=(?P<detection>\w+) .*?sampled_source=(?P<source>\d+) '
+    r'sampled_covered=(?P<covered>\d+) sampled_pixels=(?P<pixels>\d+) '
+    r'sampled_candidates=(?P<candidates>0x[0-9a-fA-F]+) sampled_alpha_covered=(?P<alpha>\d+/\d+/\d+/\d+) '
+    r'(?:sampled_alpha_invalid=(?P<invalid>\d+/\d+/\d+/\d+) )?trusted_alpha=(?P<trusted>0x[0-9a-fA-F]+)'
+    r'(?: sampled_ui_layer=(?P<layer>\d))? '
+    r'sampled_hudless=\{changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) invalid=(?P<hudless_invalid>\d+)')
 TRUST = re.compile(r'Sunshine UI protection: (restored alpha trust|alpha trust is now) (0x[0-9a-fA-F]+)')
 LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
@@ -88,6 +90,7 @@ class UISample(NamedTuple):
     trusted: int  # Slot bits the GPU treated as trusted.
     ui_layer: bool  # Slot 1 held the offscreen UI layer rather than a tagged UI color.
     hudless: tuple[int, ...]  # changed, unchanged, invalid.
+    invalid: tuple[int, ...] | None = None  # Per alpha slot; absent in older logs.
 
     def trust_source(self, slot: int) -> int:
         return UI_LAYER_SOURCE if slot == 1 and self.ui_layer else slot
@@ -199,10 +202,15 @@ def parse(lines) -> Session:
         if found := CAMERA.search(text):
             s.camera_valid |= found.group(1) == '1'
         if found := UI.search(text):
-            g = found.groups()
-            s.ui.append(UISample(t, g[0], int(g[1]), int(g[2]), int(g[3]), int(g[4], 16),
-                                 tuple(int(v) for v in g[5:9]), int(g[9], 16), g[10] == '1',
-                                 tuple(int(v) for v in g[11:14])))
+            g = found.groupdict()
+
+            def counts(text: str) -> tuple[int, ...]:
+                return tuple(int(v) for v in text.split('/'))
+            s.ui.append(UISample(t, g['detection'], int(g['source']), int(g['covered']), int(g['pixels']),
+                                 int(g['candidates'], 16), counts(g['alpha']), int(g['trusted'], 16),
+                                 g['layer'] == '1',
+                                 (int(g['changed']), int(g['unchanged']), int(g['hudless_invalid'])),
+                                 counts(g['invalid']) if g['invalid'] else None))
         if found := TRUST.search(text):
             s.trust_events.append((t, found.group(1), int(found.group(2), 16)))
         if found := LOSS.search(text):
@@ -400,6 +408,22 @@ def ui_checks(s: Session, add) -> None:
             judge(u, f'{clock(u.t)} channel {slot}{" (UI layer)" if u.ui_layer and slot == 1 else ""} covered '
                      f'{100 * u.covered / u.pixels:.0f}% while HUD-less showed {100 * unchanged / u.pixels:.0f}% '
                      f'of the scene', slot, flattened)
+    # A selective dedicated UI channel rejected for invalid pixels (for the UI
+    # layer, color beyond twice its alpha) while no mask protected the frame.
+    rejected = []
+    for u in s.ui:
+        if u.invalid is None or u.source or not u.pixels:
+            continue
+        for c in DEDICATED:
+            if u.candidates & (1 << c) and u.invalid[c] and 0 < u.alpha[c] and u.alpha[c] * 10 < u.pixels * 9:
+                rejected.append(f'{clock(u.t)} channel {c}{" (UI layer)" if u.ui_layer and c == 1 else ""} '
+                                f'{100 * u.alpha[c] / u.pixels:.1f}% covered, {u.invalid[c]} invalid pixels'
+                                f'{", trusted" if u.trusted & (1 << c) else ""}')
+    if any(u.invalid is not None for u in s.ui):
+        add(Check('WARN' if rejected else 'PASS', 'UI channel admission',
+                  f'{len(rejected)} samples left the frame unprotected after rejecting a selective UI channel '
+                  'for invalid pixels' if rejected else 'no selective UI channel rejected for invalid pixels',
+                  rejected[:6]))
     states = Counter(u.detection for u in s.ui)
     add(Check('FAIL' if overrides or flattened else 'WARN' if disputes else 'PASS', 'UI protection',
               ', '.join(f'{k} {v}' for k, v in states.most_common())

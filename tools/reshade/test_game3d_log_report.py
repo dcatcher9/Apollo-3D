@@ -22,13 +22,15 @@ def output(t, published, fg, flat, fresh, missing, runtime='0x1'):
                    f'runtime={runtime} generation=1; cumulative')
 
 
-def ui(t, source, covered, alpha, candidates, trusted, pixels=1000, hudless=(0, 0), layer=0):
+def ui(t, source, covered, alpha, candidates, trusted, pixels=1000, hudless=(0, 0), layer=0, invalid=(0, 0, 0, 0)):
     a = '/'.join(str(v) for v in alpha)
+    i = '/'.join(str(v) for v in invalid)
     return line(t, f'[Sunshine 3D] Sunshine UI protection: runtime=0000000000000001 mode=auto rendered=1 mask_path=1 '
                    f'input=automatic_gpu_mask retained=1 fg=0 fg_known=1 fg_enabled=0 input_state=input_seen '
                    f'detection=detected selected=automatic source=automatic source_availability=detected '
                    f'sampled_source={source} sampled_covered={covered} sampled_pixels={pixels} '
-                   f'sampled_candidates=0x{candidates:x} sampled_alpha_covered={a} trusted_alpha=0x{trusted:x} '
+                   f'sampled_candidates=0x{candidates:x} sampled_alpha_covered={a} sampled_alpha_invalid={i} '
+                   f'trusted_alpha=0x{trusted:x} '
                    f'sampled_ui_layer={layer} sampled_hudless={{changed={hudless[0]} unchanged={hudless[1]} '
                    f'invalid=0 matching_tiles=0 lit=0}} status_revision=1')
 
@@ -86,6 +88,25 @@ class ReadinessReport(unittest.TestCase):
                                   'remembered for later sessions of this game')
         self.assertEqual(run(BASE + [layer, revoke])['UI protection'].status, 'PASS')
         self.assertEqual(run(BASE + [flat, revoke])['UI protection'].status, 'FAIL')
+
+    def test_rejected_selective_ui_channel_warns(self):
+        # Stellar Blade before the factor-two headroom: its real UI layer covered
+        # 1.8% but pulsing markers made it invalid, so no mask protected the HUD.
+        rejected = ui('10:00:12', 0, 0, (0, 18, 0, 1000), 0xa, 0x0, layer=1, invalid=(0, 5, 0, 0))
+        checks = run(BASE + [rejected])
+        self.assertEqual(checks['UI channel admission'].status, 'WARN')
+        self.assertIn('(UI layer)', checks['UI channel admission'].times[0])
+        # A full-frame channel is ambiguous anyway, and another mask may decide.
+        full = ui('10:00:12', 0, 0, (0, 1000, 0, 1000), 0xa, 0x0, invalid=(0, 5, 0, 0))
+        decided = ui('10:00:12', 5, 30, (0, 18, 0, 1000), 0x1a, 0x0, invalid=(0, 5, 0, 0))
+        self.assertEqual(run(BASE + [full, decided])['UI channel admission'].status, 'PASS')
+        # Older logs without invalid counts skip the check.
+        old = line('10:00:12', '[Sunshine 3D] Sunshine UI protection: runtime=0000000000000001 mode=auto '
+                               'detection=no_usable_mask sampled_source=0 sampled_covered=0 sampled_pixels=1000 '
+                               'sampled_candidates=0xa sampled_alpha_covered=0/18/0/1000 trusted_alpha=0x0 '
+                               'sampled_hudless={changed=0 unchanged=0 invalid=0 matching_tiles=0 lit=0}')
+        self.assertNotIn('UI channel admission', run(BASE + [old]))
+        self.assertIn('UI protection', run(BASE + [old]))
 
     def test_raw_placement_with_a_valid_camera_warns(self):
         lines = [x for x in BASE if 'Streamline scale: ready' not in x] + [

@@ -192,21 +192,23 @@ namespace {
       checked(game->CreateDescriptorHeap(&layer_heap_desc, IID_PPV_ARGS(layer_heap.put())), "Create UI layer RTV heap");
       const auto layer_rtv = layer_heap->GetCPUDescriptorHandleForHeapStart();
       game->CreateRenderTargetView(layer.p, nullptr, layer_rtv);
+      // Translucent UI tinted brighter than white: green 200 over alpha 160 lies
+      // above its alpha but within twice it, as Stellar Blade's pulsing markers.
       std::vector<std::uint8_t> layer_pattern(size_t(width) * height * 4);
       for (unsigned y = height / 8; y < height / 4; ++y) for (unsigned x = width / 8; x < width / 4; ++x) {
         const auto offset = (size_t(y) * width + x) * 4;
         layer_pattern[offset] = static_cast<std::uint8_t>((x * 5 + y) & 255);
         layer_pattern[offset + 1] = 200;
         layer_pattern[offset + 2] = static_cast<std::uint8_t>((y * 3) & 255);
-        layer_pattern[offset + 3] = 255;
+        layer_pattern[offset + 3] = 160;
       }
       D3D12_PLACED_SUBRESOURCE_FOOTPRINT layer_footprint{};
       fill_upload(layer_upload, layer_desc, layer_pattern.data(), layer_footprint);
-      // The same content with straight alpha: color above its alpha, as in a
-      // scene buffer rather than UI blended over transparent black.
+      // The same content with straight alpha: color far beyond twice its alpha,
+      // as in a scene buffer rather than UI blended over transparent black.
       auto straight_pattern = layer_pattern;
       for (size_t offset = 0; offset < straight_pattern.size(); offset += 4)
-        if (straight_pattern[offset + 3]) straight_pattern[offset + 3] = 100;
+        if (straight_pattern[offset + 3]) straight_pattern[offset + 3] = 40;
       com_ptr<ID3D12Resource> straight_upload;
       D3D12_PLACED_SUBRESOURCE_FOOTPRINT straight_footprint{};
       fill_upload(straight_upload, layer_desc, straight_pattern.data(), straight_footprint);
@@ -381,7 +383,8 @@ namespace {
           "Host acknowledgement or later game write changed UI snapshot");
 
       // Once tag 23 stops, the offscreen layer is the UI color candidate: live
-      // tracking copies it before each clear and Auto admits it premultiplied.
+      // tracking copies it before each clear and Auto admits it premultiplied,
+      // tint included.
       render_tracked_depth = [&] { real_frame(); draw_layer(); };
       // Draws for a second, then dumps; the caller releases the dump.
       const auto dump_after_layer_frames = [&] {
@@ -437,7 +440,7 @@ namespace {
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
         " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 live_ui_layer_mask=1 frame_tags=" << bool(frame_tag) << '\n';
       std::puts("PASS actual public SL tag23 hook: typeless90 to typed87, automatic GPU mask equals pre-overwrite alpha and optional dump exact before opaque overwrite; host lease immutable");
-      std::puts("PASS live offscreen UI layer: without tag 23, the layer copied before its clear is the automatic UI mask; straight alpha is rejected");
+      std::puts("PASS live offscreen UI layer: without tag 23, the layer copied before its clear is the automatic UI mask, tint within twice its alpha included; straight alpha is rejected");
     }
 
     void run_automatic_ui_tags(HMODULE sdk) {
