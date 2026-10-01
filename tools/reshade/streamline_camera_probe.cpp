@@ -941,8 +941,10 @@ namespace sunshine_streamline {
       if (invalid_camera) record.steady_frames = 0;
       else {
         const auto checked = validate(camera);
-        const bool same = record.steady_frames && checked.depth_offset == record.steady_projection.depth_offset &&
-          checked.depth_scale == record.steady_projection.depth_scale;
+        // Engines that rebuild the matrix every frame differ in the last bits.
+        const auto close = [](double a, double b) { return std::abs(a - b) <= 1e-6 * std::max(std::abs(a), std::abs(b)); };
+        const bool same = record.steady_frames && close(checked.depth_offset, record.steady_projection.depth_offset) &&
+          close(checked.depth_scale, record.steady_projection.depth_scale);
         record.steady_projection = checked;
         record.steady_frames = same ? record.steady_frames + 1 : 1;
       }

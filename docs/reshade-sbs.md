@@ -333,7 +333,10 @@ UIColorAndAlpha) in the same sample, menus included; it earns nothing while it d
 Resident Evil Requiem's UI color covers 0.2% during play while its presented alpha covers
 35-100%, and in menus the UI color covers everything while the presented alpha covers 0.05%. The same evidence (three samples over at least 2 s) revokes it, a selective sample
 of the channel clears the doubt, and a revoked channel must earn trust again. Remembered trust is
-revoked the same way, and the revocation is remembered too. Trust survives manual mode edits. A trusted channel in the current frame decides by itself, so the HUD-less holds
+revoked the same way, and the revocation is remembered too. Trust survives manual mode edits. Trust remembered from an earlier session (TrustedUIAlpha) protects from the first
+frame but is provisional: unless the session earns it again within 60 s of the channel first being
+offered, it lapses and is forgotten, so a wrong remembered claim cannot outlive every session. A
+trusted channel in the current frame decides by itself, so the HUD-less holds
 described below do not apply to that frame. Up to 1% invalid pixels (such as additive glow in a UI
 layer) do not disqualify a trusted channel. While a trusted dedicated UI channel is offered,
 presented alpha never decides: when that channel fails, the frame has no alpha mask rather than
@@ -1767,10 +1770,15 @@ It supports depth-only and packed depth/stencil textures: the pinned DLSS implem
 its cached input state for all subresources, and capture uses that same provider contract while
 transitioning, copying and restoring only depth plane 0. Stencil is neither copied nor modified;
 malformed or missing metadata still requires observed nonzero state on the actual command
-recording. An observed conflicting or incomplete transition always rejects capture. A split
-barrier, or an enhanced (CommandList7) texture barrier whose layout the legacy state model cannot
-read, blocks the affected resource for that recording until Reset; unrelated resources remain
-eligible, and enhanced global or buffer barriers change no texture state. Per-resource state
+recording. An observed conflicting or incomplete transition always rejects capture. An enhanced
+(CommandList7) texture barrier that includes subresource 0 sets that texture's observed state to
+its new layout's legacy equivalent (COMMON, GENERIC_READ, RENDER_TARGET, UNORDERED_ACCESS,
+DEPTH_STENCIL_WRITE/READ, SHADER_RESOURCE as pixel and non-pixel shader resource, COPY_SOURCE/DEST,
+RESOLVE_SOURCE/DEST), exactly as a legacy transition does, so the capture's own legacy copy
+barriers start from it; other subresources keep subresource 0's state. A split barrier, or an
+enhanced barrier into a layout without a legacy equivalent (queue-specific and video layouts),
+blocks the affected resource for that recording until Reset (`incomplete_state`); unrelated
+resources remain eligible, and enhanced global or buffer barriers change no texture state. Per-resource state
 storage grows with the actual command recording and reuses its allocation on Reset; unrelated
 resources cannot invalidate depth by exceeding a fixed entry count. An actual state-storage
 allocation failure conservatively blocks the whole recording.

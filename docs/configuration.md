@@ -1587,9 +1587,11 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
             and VRAM utilization is close to maximum. Disabling this option lowers the priority to high, sidestepping
             the freeze at the cost of reduced capture performance when the GPU is heavily loaded.
             This option applies to Sunshine 3D's native NVENC path. A log line such as
-            `NvEnc: frame ... exceeded the 100 ms completion wait; ... input_producer=done_by_...ms (encoder-side delay)`
-            while streaming a DX12 game with frame generation is that freeze's signature; disable this option to
-            test it. If stalls remain, `nvenc_split_encode` isolates split-frame encoding.
+            `NvEnc: frame ... exceeded the 100 ms completion wait; ... input_producer=done_by_...ms` while streaming
+            a DX12 game with frame generation is consistent with that freeze: the encoder's input was ready by the
+            first check, which comes only after 100 ms, so the delay was in the encoder or earlier upstream work.
+            `pending_at_...ms` or `done_at_...ms` instead show upstream GPU work still running. Disable this option
+            to test it. If stalls remain, `nvenc_split_encode` isolates split-frame encoding.
         </td>
     </tr>
     <tr>

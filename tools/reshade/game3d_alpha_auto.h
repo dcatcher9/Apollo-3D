@@ -13,6 +13,10 @@ namespace sunshine_game3d {
   // detection samples spanning this long (docs/reshade-sbs.md).
   inline constexpr std::uint32_t alpha_trust_samples = 3;
   inline constexpr std::uint64_t alpha_trust_span_ms = 2000;
+  // Trust remembered from an earlier session protects from the first frame but
+  // lapses unless this session earns it again within this long of the channel
+  // first being offered.
+  inline constexpr std::uint64_t alpha_trust_reconfirm_ms = 60000;
 
   class alpha_auto_policy;
   struct alpha_auto_source {
@@ -125,10 +129,14 @@ namespace sunshine_game3d {
     }
 
     // Trust that an earlier session of this game earned (bits as trusted_alpha()).
-    // It is the same claim as earned trust and is revoked by the same contradiction.
+    // It decides from the first frame and is revoked by the same contradiction,
+    // but it is provisional: unless this session earns it again within
+    // alpha_trust_reconfirm_ms of the channel first being offered, it lapses (and
+    // is forgotten), so a wrong remembered claim cannot outlive every session.
     void restore_trusted_alpha(std::uint32_t remembered) {
       std::lock_guard<std::mutex> lock(mutex_);
       trusted_alpha_ |= remembered & 15u;
+      provisional_ |= remembered & 15u;
     }
 
     // Called with the new trusted bits whenever samples earn or revoke trust,
@@ -172,23 +180,31 @@ namespace sunshine_game3d {
         // Presented alpha (2 Backbuffer, 3 current) differing from every such
         // mask by at least 10% of the frame is not UI coverage: it earns nothing,
         // and the usual evidence interval revokes its trust.
+        const auto revoke = [&] {
+          trusted_alpha_ &= ~bit;
+          provisional_ &= ~bit;
+          doubt_[channel] = {};
+        };
+        if ((provisional_ & bit) && !reconfirm_from_[channel]) reconfirm_from_[channel] = tick_ms;
         if (channel >= 2 && dedicated_mask && disagreement(covered) * 10 >= total) {
           earned_[channel] = {};
-          if ((trusted_alpha_ & bit) && doubt_[channel].add(tick_ms)) {
-            trusted_alpha_ &= ~bit;
-            doubt_[channel] = {};
-          }
+          if ((trusted_alpha_ & bit) && doubt_[channel].add(tick_ms)) revoke();
           continue;
         }
         if (covered && covered * 10 < total * 9) {
           doubt_[channel] = {};
-          if (earned_[channel].add(tick_ms, covered)) trusted_alpha_ |= bit;
+          if (earned_[channel].add(tick_ms, covered)) {
+            trusted_alpha_ |= bit;
+            provisional_ &= ~bit;
+          }
         } else if (covered * 10 >= total * 9) {
           earned_[channel] = {};
-          if ((trusted_alpha_ & bit) && scene_visible && doubt_[channel].add(tick_ms)) {
-            trusted_alpha_ &= ~bit;
-            doubt_[channel] = {};
-          }
+          if ((trusted_alpha_ & bit) && scene_visible && doubt_[channel].add(tick_ms)) revoke();
+        }
+        if ((provisional_ & bit) && tick_ms >= reconfirm_from_[channel] &&
+            tick_ms - reconfirm_from_[channel] >= alpha_trust_reconfirm_ms) {
+          earned_[channel] = {};
+          revoke();
         }
       }
     }
@@ -212,6 +228,10 @@ namespace sunshine_game3d {
     std::optional<bool> manual_; // Empty in Auto.
     std::array<evidence_run, 4> earned_{}, doubt_{};
     std::uint32_t trusted_alpha_{};
+    // Remembered bits not yet earned again this session, and when each such
+    // channel was first offered.
+    std::uint32_t provisional_{};
+    std::array<std::uint64_t, 4> reconfirm_from_{};
     std::function<void(std::uint32_t)> trust_listener_;
   };
 }

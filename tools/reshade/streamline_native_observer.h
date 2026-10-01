@@ -10,6 +10,14 @@ namespace sunshine_streamline::native_observer {
   struct command_identity {
     std::uint64_t native_command{}, recording_cookie{};
   };
+  // One texture barrier of an enhanced Barrier call: the texture, its layout
+  // afterwards (D3D12_BARRIER_LAYOUT) and whether the barrier's subresource
+  // range includes subresource 0 (mip 0, array slice 0, plane 0).
+  struct enhanced_texture {
+    ID3D12Resource *resource{};
+    std::uint32_t layout_after{};
+    bool first_subresource{};
+  };
   struct callbacks {
     // All callbacks are synchronous. Neither arrays nor native objects are
     // retained. Barrier fields are the exact native type/flags/state/subresource.
@@ -20,10 +28,10 @@ namespace sunshine_streamline::native_observer {
     // Hook coverage changed, an input could not be snapshotted, or discovery failed.
     // Owner must invalidate evidence without freeing in-flight GPU resources.
     void (*invalidated)(){};
-    // Textures named by an enhanced (CommandList7) texture barrier, after the
-    // native call. Their layouts are outside the legacy state model; global and
-    // buffer barriers change no texture state and are not reported.
-    void (*enhanced_textures)(std::uint64_t command, std::uint64_t cookie, unsigned count, ID3D12Resource *const *textures){};
+    // Texture barriers of an enhanced (CommandList7) Barrier call, after the
+    // native call; global and buffer barriers change no texture state and are
+    // not reported.
+    void (*enhanced_textures)(std::uint64_t command, std::uint64_t cookie, unsigned count, const enhanced_texture *textures){};
     // Called at native operation entry, before forwarding, only for an object
     // without a recording cookie. The owner may authenticate a new recording;
     // post-call evidence freezes its returned identity across any later Reset.

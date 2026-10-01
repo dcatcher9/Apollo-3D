@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <optional>
 #include <cstdio>
 #include <mutex>
 #include <type_traits>
@@ -472,15 +473,48 @@ namespace sunshine_streamline::depth_capture {
         if (value.command == cookie) invalidate(value, capture_failure::close_failed);
       });
     }
-    // An enhanced texture barrier moves that texture into a layout the legacy
-    // state model cannot read, so block it for this recording. Other textures,
-    // and global or buffer barriers, keep their observed states.
-    void enhanced_textures(std::uint64_t native, std::uint64_t cookie, unsigned count, ID3D12Resource *const *textures) {
+    // The legacy state equivalent to an enhanced barrier layout, which the
+    // capture's own legacy copy barriers may then use. Queue-specific and video
+    // layouts have no legacy equivalent.
+    std::optional<std::uint32_t> legacy_state(std::uint32_t layout) {
+      switch (static_cast<D3D12_BARRIER_LAYOUT>(layout)) {
+        case D3D12_BARRIER_LAYOUT_COMMON: return D3D12_RESOURCE_STATE_COMMON;
+        case D3D12_BARRIER_LAYOUT_GENERIC_READ: return D3D12_RESOURCE_STATE_GENERIC_READ;
+        case D3D12_BARRIER_LAYOUT_RENDER_TARGET: return D3D12_RESOURCE_STATE_RENDER_TARGET;
+        case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS: return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE: return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ: return D3D12_RESOURCE_STATE_DEPTH_READ;
+        case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE:
+          return D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        case D3D12_BARRIER_LAYOUT_COPY_SOURCE: return D3D12_RESOURCE_STATE_COPY_SOURCE;
+        case D3D12_BARRIER_LAYOUT_COPY_DEST: return D3D12_RESOURCE_STATE_COPY_DEST;
+        case D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE: return D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+        case D3D12_BARRIER_LAYOUT_RESOLVE_DEST: return D3D12_RESOURCE_STATE_RESOLVE_DEST;
+        default: return std::nullopt;
+      }
+    }
+    // An enhanced texture barrier that includes subresource 0 sets that
+    // texture's state to its new layout's legacy equivalent, exactly as a
+    // legacy transition does; a layout without one blocks the texture for this
+    // recording. Other subresources (a stencil plane) keep subresource 0's state.
+    void enhanced_textures(std::uint64_t native, std::uint64_t cookie, unsigned count,
+        const native_observer::enhanced_texture *textures) {
       std::lock_guard lock(mutex);
       auto owner = command(native, cookie, true);
       if (!owner || owner->closed) return;
-      for (unsigned i = 0; i != count; ++i)
-        if (textures[i]) block_source(*owner, textures[i]);
+      for (unsigned i = 0; i != count; ++i) {
+        const auto &texture = textures[i];
+        if (!texture.resource || !texture.first_subresource) continue;
+        const auto legacy = legacy_state(texture.layout_after);
+        if (!legacy) { block_source(*owner, texture.resource); continue; }
+        const auto identity = observed_source_cookie(texture.resource);
+        if (!identity) { invalidate(*owner, recording_loss::source_identity_unavailable); continue; }
+        auto *known = state(*owner, identity, true);
+        if (!known) { invalidate(*owner, recording_loss::source_state_capacity); continue; }
+        if (known->blocked) continue;
+        known->known = copy_state::supported(*legacy);
+        known->value = *legacy;
+      }
     }
     void render_pass(std::uint64_t native, std::uint64_t cookie, bool inside) {
       std::lock_guard lock(mutex);
@@ -3285,7 +3319,8 @@ namespace sunshine_streamline::depth_capture {
       // A post-call callback carrying the entry's old or zero identity cannot
       // attach to the new recording after Reset. This applies to state, close,
       // render-pass and enhanced-barrier evidence alike.
-      ID3D12Resource *const enhanced_texture = reinterpret_cast<ID3D12Resource *>(&resource);
+      const native_observer::enhanced_texture enhanced_texture{reinterpret_cast<ID3D12Resource *>(&resource),
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE, true};
       for (const auto stale : {std::uint64_t{}, cookie}) {
         barriers(address, stale, 1, &transition);
         close(address, stale, S_OK);
@@ -3296,7 +3331,19 @@ namespace sunshine_streamline::depth_capture {
       render_pass(address, next_cookie, true);
       if (!owner->render_pass) return false;
       render_pass(address, next_cookie, false);
-      // An enhanced texture barrier blocks only the texture it names.
+      // An enhanced texture barrier into a layout with a legacy equivalent sets
+      // the texture's state; one without (queue-specific) blocks only it.
+      const native_observer::enhanced_texture shader_resource{reinterpret_cast<ID3D12Resource *>(&resource),
+        D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, true};
+      enhanced_textures(address, next_cookie, 1, &shader_resource);
+      const auto *mapped = state(*owner, source_cookie(&resource), false);
+      if (owner->render_pass || owner->invalid || !mapped || mapped->blocked || !mapped->known ||
+          mapped->value != (D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
+        return false;
+      const native_observer::enhanced_texture stencil_only{reinterpret_cast<ID3D12Resource *>(&resource),
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE, false};
+      enhanced_textures(address, next_cookie, 1, &stencil_only);
+      if (mapped->blocked) return false;
       enhanced_textures(address, next_cookie, 1, &enhanced_texture);
       const auto *enhanced = state(*owner, source_cookie(&resource), false);
       if (owner->render_pass || owner->invalid || !enhanced || !enhanced->blocked) return false;

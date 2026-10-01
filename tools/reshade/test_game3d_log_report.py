@@ -98,6 +98,15 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(expected['Present hitches'].status, 'PASS')
         self.assertEqual(run(BASE + [line('10:00:12', hitch, 'WARN')])['Present hitches'].status, 'WARN')
 
+    def test_blocked_captures_and_copyless_ngx_are_named(self):
+        checks = run(BASE + [
+            line('10:00:06', '[Sunshine 3D] Sunshine Streamline depth: incomplete_state; source_selected=1'),
+            line('10:00:07', '[Sunshine 3D] Sunshine NGX depth: confirmed_features=1 capture_eligible=1 '
+                             'recovered_features=0 evaluations=40 nominations=40 copy_recorded=0 metadata_only=0 '
+                             'unknown_feature=0')])
+        self.assertIn('blocked', checks['Capture status'].detail)
+        self.assertEqual(checks['NGX depth'].status, 'WARN')
+
     def test_fg_switch_settles_before_flat_counts(self):
         checks = run(BASE + [line('10:00:16', '[Sunshine 3D] Sunshine Streamline frame generation: viewport=0 mode=1'),
                              output('10:00:18', 900, 200, 150, 900, 0)])

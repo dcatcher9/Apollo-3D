@@ -126,6 +126,21 @@ namespace {
     sample(presented, 2 | 8, {0, 20, 0, 30}, 0, 15000);
     sample(presented, 2 | 8, {0, 20, 0, 30}, 0, 16000);
     require(presented.trusted_alpha() == 10u, "Presented alpha agreeing with the UI mask could not earn trust");
+    // Remembered trust lapses unless the session earns it again: a channel that
+    // only ever covers the scene unsteadily loses it after a minute of samples,
+    // while one that earns it again keeps it for good.
+    alpha_auto_policy remembered;
+    remembered.restore_trusted_alpha(8);
+    for (std::uint64_t tick = 1000; tick <= 60000; tick += 1000)
+      sample(remembered, 8, {0, 0, 0, tick % 2000 ? 500u : 50u}, 0, tick);
+    require(remembered.trusted_alpha() == 8u, "Remembered trust lapsed before a minute");
+    sample(remembered, 8, {0, 0, 0, 50}, 0, 61000);
+    require(!remembered.trusted_alpha(), "Unconfirmed remembered trust did not lapse");
+    alpha_auto_policy confirmed;
+    confirmed.restore_trusted_alpha(1);
+    for (std::uint64_t tick = 1000; tick <= 3000; tick += 1000) sample(confirmed, 1, {100, 0, 0, 0}, 0, tick);
+    for (std::uint64_t tick = 4000; tick <= 200000; tick += 1000) sample(confirmed, 1, {0, 0, 0, 0}, 0, tick);
+    require(confirmed.trusted_alpha() == 1u, "Trust earned again in this session lapsed later");
     // An untrusted UI channel (here unsteady, so it never earns trust) is no authority.
     alpha_auto_policy alone;
     alone.restore_trusted_alpha(8);

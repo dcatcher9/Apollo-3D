@@ -54,9 +54,10 @@ namespace {
     );
   }
 
-  // Where a slow picture waited. A producer still pending means the GPU had not finished writing
-  // the input surface, so the encoder was waiting on upstream work; a finished one leaves the
-  // delay inside the encoder.
+  // Where a slow picture waited. A producer still pending at a check means the GPU had not
+  // finished writing the input surface, so the encoder was waiting on upstream work. One already
+  // finished at the first check (which comes only after the 100 ms wait) finished at an unknown
+  // time before it: the delay may be upstream or inside the encoder.
   struct input_producer_progress_t {
     nvenc::input_producer_state state = nvenc::input_producer_state::unknown;
     long long first_observed_ms = -1;
@@ -79,7 +80,7 @@ namespace {
       switch (state) {
         case nvenc::input_producer_state::complete:
           return completed_ms == first_observed_ms ?
-                   std::format("input_producer=done_by_{}ms (encoder-side delay)", completed_ms) :
+                   std::format("input_producer=done_by_{}ms (finished before the first check; encoder or upstream)", completed_ms) :
                    std::format("input_producer=done_at_{}ms (upstream GPU delay)", completed_ms);
         case nvenc::input_producer_state::pending:
           return std::format("input_producer=pending_at_{}ms (upstream GPU delay)", elapsed_ms);

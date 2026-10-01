@@ -45,6 +45,8 @@ LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
 DEPTH_STATUS = re.compile(r'Sunshine Streamline depth: (\w+);')
 HITCH = re.compile(r'Game 3D hitch: (.+?) took ([0-9.]+) ms')
+NGX = re.compile(r'Sunshine NGX depth: .*?evaluations=(\d+) nominations=(\d+) copy_recorded=(\d+) '
+                 r'metadata_only=(\d+)')
 TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-9.]+) max=([0-9.]+)\}'
                     r'.*?gpu_frames=(\d+)'
                     r' gpu_ms mean/max=\{total=([0-9.]+)/([0-9.]+)')
@@ -110,6 +112,7 @@ class Session:
     statuses: Counter = field(default_factory=Counter)
     hitches: list[tuple[float, str, float]] = field(default_factory=list)
     timing: tuple | None = None
+    ngx: tuple[int, ...] | None = None
     warnings: list[tuple[float, str]] = field(default_factory=list)
 
 
@@ -188,6 +191,8 @@ def parse(lines) -> Session:
             s.readiness[found.group(2)] += 1
         if found := DEPTH_STATUS.search(text):
             s.statuses[found.group(1)] += 1
+        if found := NGX.search(text):
+            s.ngx = tuple(int(v) for v in found.groups())
         if found := HITCH.search(text):
             s.hitches.append((t, found.group(1), float(found.group(2))))
         if found := TIMING.search(text):
@@ -290,10 +295,16 @@ def evaluate(s: Session) -> list[Check]:
               'Observation losses', ', '.join(f'{c} {n}' for c, n in sorted(causes.items())) or 'none',
               [f'{clock(t)} {c}' for r, (t, c) in sorted(s.losses.items()) if c != 'lifecycle'][:6]))
 
-    failing = ('conflicting_state', 'failed', 'unsupported_state', 'unsupported_resource', 'unsupported_lifetime')
+    failing = ('conflicting_state', 'incomplete_state', 'missing_state', 'failed', 'unsupported_state',
+               'unsupported_resource', 'unsupported_lifetime')
     conflicts = {k: v for k, v in s.statuses.items() if k in failing}
     if conflicts:
-        add(Check('WARN', 'Capture status', ', '.join(f'{k} {v}' for k, v in sorted(conflicts.items()))))
+        named = ', '.join(f'{k} {v}' for k, v in sorted(conflicts.items()))
+        if 'incomplete_state' in conflicts:
+            named += ' (incomplete_state: the source was blocked by a split barrier or a layout without a legacy state)'
+        add(Check('WARN', 'Capture status', named))
+    if s.ngx and s.ngx[0] and not s.ngx[2] and not s.ngx[3]:
+        add(Check('WARN', 'NGX depth', f'{s.ngx[0]} DLSS evaluations recorded no depth copy'))
     if s.readiness:
         add(Check('INFO', 'Depth losses', ', '.join(f'{k} {v}' for k, v in s.readiness.most_common())))
 

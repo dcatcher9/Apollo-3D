@@ -69,6 +69,8 @@ namespace {
   unsigned enhanced_reports{}, original_bundles{}, original_enhanced{}, original_passes{};
   unsigned observed_texture_count{};
   ID3D12Resource *observed_texture{};
+  std::uint32_t observed_layout{};
+  bool observed_first_subresource{};
   unsigned last_queue_target{};
   HRESULT native_result = S_OK;
   std::uint64_t observed_command{}, observed_cookie{}, observed_queue{};
@@ -266,9 +268,11 @@ namespace {
     SetLastError(0xbadf00d);
   }
   void on_invalidated() { ++invalidations; SetLastError(0xbadf00d); }
-  void on_enhanced_textures(std::uint64_t command, std::uint64_t cookie, unsigned count, ID3D12Resource *const *textures) {
+  void on_enhanced_textures(std::uint64_t command, std::uint64_t cookie, unsigned count, const observer::enhanced_texture *textures) {
     ++enhanced_reports; observed_command = command; observed_cookie = cookie;
-    observed_texture_count = count; observed_texture = count ? textures[0] : nullptr;
+    observed_texture_count = count; observed_texture = count ? textures[0].resource : nullptr;
+    observed_layout = count ? textures[0].layout_after : UINT32_MAX;
+    observed_first_subresource = count && textures[0].first_subresource;
     SetLastError(0xbadf00d);
   }
   void submit(object &queue, UINT count, void *const *commands) {
@@ -511,6 +515,8 @@ int main() {
     int named_texture_storage{};
     D3D12_TEXTURE_BARRIER texture_barrier{};
     texture_barrier.pResource = reinterpret_cast<ID3D12Resource *>(&named_texture_storage);
+    texture_barrier.LayoutAfter = D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ;
+    texture_barrier.Subresources.IndexOrFirstMipLevel = UINT32_MAX; // Every subresource.
     D3D12_GLOBAL_BARRIER global_barrier{};
     D3D12_BARRIER_GROUP groups[2]{};
     groups[0].Type = D3D12_BARRIER_TYPE_GLOBAL; groups[0].NumBarriers = 1; groups[0].pGlobalBarriers = &global_barrier;
@@ -518,8 +524,9 @@ int main() {
     SetLastError(incoming_error);
     enhanced(&commands[0], 2, groups);
     require(GetLastError() == outgoing_error && enhanced_reports == 1 && observed_texture_count == 1 &&
-        observed_texture == texture_barrier.pResource && original_enhanced == 1 && observed_cookie == 9999,
-      "enhanced Barrier did not report exactly its named texture");
+        observed_texture == texture_barrier.pResource && original_enhanced == 1 && observed_cookie == 9999 &&
+        observed_layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ && observed_first_subresource,
+      "enhanced Barrier did not report exactly its named texture, layout and subresource range");
     SetLastError(incoming_error);
     enhanced(&commands[0], 1, groups);
     require(enhanced_reports == 1 && original_enhanced == 2, "a global-only enhanced Barrier reported a texture");

@@ -195,8 +195,9 @@ namespace sunshine_streamline::native_observer {
       invocation call(method::enhanced, slot.status.load(std::memory_order_acquire));
       restore_error outgoing{incoming}; // Restore after snapshot storage is freed.
       // Only texture barriers change a texture's layout. Snapshot the textures
-      // they name before forwarding, as the legacy barrier hook does.
-      batch_snapshot<ID3D12Resource *, inline_barriers> textures;
+      // they name and their new layouts before forwarding, as the legacy
+      // barrier hook does.
+      batch_snapshot<enhanced_texture, inline_barriers> textures;
       std::uint64_t cookie{};
       std::size_t named = 0;
       bool complete = true, allocated = true;
@@ -214,7 +215,16 @@ namespace sunshine_streamline::native_observer {
           batch_snapshot<D3D12_TEXTURE_BARRIER, 16> texture_barriers;
           complete = (allocated = texture_barriers.prepare(group.NumBarriers)) &&
             read_elements(group.pTextureBarriers, 0, group.NumBarriers, texture_barriers.data());
-          for (UINT32 b = 0; complete && b != group.NumBarriers; ++b) textures.data()[at++] = texture_barriers.data()[b].pResource;
+          for (UINT32 b = 0; complete && b != group.NumBarriers; ++b) {
+            const auto &barrier = texture_barriers.data()[b];
+            const auto &range = barrier.Subresources;
+            // 0xffffffff names every subresource; NumMipLevels 0 names one by index.
+            const bool first = range.IndexOrFirstMipLevel == UINT32_MAX ||
+              (range.NumMipLevels == 0 ? range.IndexOrFirstMipLevel == 0 :
+                range.IndexOrFirstMipLevel == 0 && range.FirstArraySlice == 0 && range.FirstPlane == 0 &&
+                range.NumArraySlices != 0 && range.NumPlanes != 0);
+            textures.data()[at++] = {barrier.pResource, static_cast<std::uint32_t>(barrier.LayoutAfter), first};
+          }
         }
       }
       SetLastError(incoming);
@@ -223,7 +233,7 @@ namespace sunshine_streamline::native_observer {
       if (!call.notify()) return;
       if (!complete) { if (!allocated) ++barrier_overflow; drop(allocated); return; }
       if (named) notify(enhanced_textures_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(command),
-        cookie, static_cast<unsigned>(named), static_cast<ID3D12Resource *const *>(textures.data()));
+        cookie, static_cast<unsigned>(named), static_cast<const enhanced_texture *>(textures.data()));
     }
     const std::array<std::array<void *, target_limit>, method_count> detours{{
       {reinterpret_cast<void *>(barrier_detour<0>), reinterpret_cast<void *>(barrier_detour<1>), reinterpret_cast<void *>(barrier_detour<2>), reinterpret_cast<void *>(barrier_detour<3>), reinterpret_cast<void *>(barrier_detour<4>), reinterpret_cast<void *>(barrier_detour<5>), reinterpret_cast<void *>(barrier_detour<6>), reinterpret_cast<void *>(barrier_detour<7>)},

@@ -1099,6 +1099,67 @@ namespace {
     std::puts("PASS list lifecycle coverage: ReShade's created/Reset/Close/submit/render pass decide admission, unreported lists are rejected, a registered runtime list follows its submissions, an unhookable list uses its declared state");
   }
 
+  void enhanced_barrier_capture(fixture &gpu) {
+    // An enhanced (CommandList7) texture barrier sets the texture's state to its
+    // layout's legacy equivalent. The capture's legacy copy barriers start from
+    // that state, restore it, and copy exact pixels.
+    D3D12_FEATURE_DATA_D3D12_OPTIONS12 options{};
+    ComPtr<ID3D12GraphicsCommandList7> list7;
+    if (FAILED(gpu.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &options, sizeof(options))) ||
+        !options.EnhancedBarriersSupported || FAILED(gpu.list.As(&list7))) {
+      std::puts("SKIP enhanced barrier capture: no enhanced barriers on this device or runtime");
+      return;
+    }
+    capture::observe_command(native(gpu.list.Get())); capture::poll();
+    texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4); // Left in NON_PIXEL_SHADER_RESOURCE by a legacy barrier.
+    const auto enhanced = [&](D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_LAYOUT after,
+        D3D12_BARRIER_ACCESS access_before, D3D12_BARRIER_ACCESS access_after) {
+      D3D12_TEXTURE_BARRIER barrier{};
+      barrier.SyncBefore = barrier.SyncAfter = D3D12_BARRIER_SYNC_ALL;
+      barrier.AccessBefore = access_before; barrier.AccessAfter = access_after;
+      barrier.LayoutBefore = before; barrier.LayoutAfter = after;
+      barrier.pResource = image.source.Get();
+      barrier.Subresources.IndexOrFirstMipLevel = UINT32_MAX;
+      D3D12_BARRIER_GROUP group{};
+      group.Type = D3D12_BARRIER_TYPE_TEXTURE; group.NumBarriers = 1; group.pTextureBarriers = &barrier;
+      list7->Barrier(1, &group);
+    };
+    enhanced(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_COPY_DEST,
+      D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_COPY_DEST);
+    enhanced(D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+      D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
+    constexpr auto shader = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    auto input = image.input; input.native_state = shader;
+    capture::record_diagnostic diagnostic;
+    auto ticket = capture::record_local_texture(native(gpu.list.Get()), input, &diagnostic);
+    require(bool(ticket) && diagnostic.observed && !diagnostic.blocked && diagnostic.observed_state == shader &&
+        diagnostic.copy_state_known && diagnostic.copy_state == shader,
+      "an enhanced SHADER_RESOURCE layout did not become the observed legacy state");
+    capture::finish_diagnostic_texture(ticket, true);
+    gpu.submit(); gpu.wait();
+    capture::diagnostic_texture pixels;
+    require(capture::acquire_local_texture(ticket, native(gpu.queue.Get()), pixels) == capture::status::ready,
+      "the enhanced-barrier capture was not readable");
+    {
+      consumer_fixture consumer(gpu);
+      auto output = destination(gpu.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+      capture::consumer_diagnostic copied_diagnostic;
+      require(capture::copy_local_texture(native(consumer.list.Get()), native(gpu.queue.Get()), ticket, native(output.Get()),
+          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &copied_diagnostic, true), "enhanced-barrier capture copy failed");
+      readback copied(gpu, output.Get());
+      copied.record(consumer.list.Get(), output.Get());
+      pixels = {};
+      check(close_list(consumer.list.Get()), "enhanced consumer close");
+      execute(gpu.queue.Get(), consumer.list.Get());
+      gpu.wait(); copied.verify(image.width, image.height, 4);
+      capture::release_diagnostic_texture(ticket); ticket = {};
+      consumer.reset();
+    }
+    gpu.reset(); capture::poll();
+    gpu.check_debug_errors();
+    std::puts("PASS enhanced barrier: a legacy-compatible layout becomes the observed state, with exact pixels");
+  }
+
   void auxiliary_consumer_replay_and_discard(fixture &gpu) {
     consumer_fixture consumer(gpu);
     texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
@@ -1273,6 +1334,7 @@ int main() {
     local_same_queue_ordered_capture(gpu);
     immediate_consumer_without_list_hooks(gpu);
     list_lifecycle_coverage(gpu);
+    enhanced_barrier_capture(gpu);
     for (const bool shared : {false, true}) {
       observed_recording_color_capture(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, shared);
       observed_recording_color_capture(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, shared);

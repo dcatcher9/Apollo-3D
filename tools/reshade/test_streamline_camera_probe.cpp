@@ -1687,7 +1687,13 @@ namespace {
         "a camera-less frame lost the viewport's direction or borrowed an unsteady projection or jitter");
       // Coefficients the viewport's camera repeated in eight consecutive valid
       // frames are camera constants: camera-less depth takes them, never jitter.
-      for (unsigned i = 0; i != 8; ++i) { mint(token, nullptr); call_v2_constants(valid, token.ref(), view); }
+      // Engines that rebuild the matrix every frame differ in the last bits;
+      // that is still the same camera.
+      auto rebuilt = valid;
+      rebuilt.common.camera_view_to_clip.m[3][2] = std::nextafter(valid.common.camera_view_to_clip.m[3][2], 1.f);
+      for (unsigned i = 0; i != 8; ++i) {
+        mint(token, nullptr); call_v2_constants(i % 2 ? valid : rebuilt, token.ref(), view);
+      }
       mint(token, nullptr); call_v2_tag(view, &tag, 1, nullptr); evaluate();
       require(testing::normalized_source(view.value, 0, normalized) && normalized.projection.supplied &&
           normalized.projection.depth_offset == framed.projection.depth_offset &&
