@@ -408,7 +408,7 @@ namespace sunshine_streamline::depth_capture {
           if (value.Transition.Subresource != 0 && value.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) continue;
           // A resource can reach its first SDK nomination after all of its
           // transitions were recorded. Preserve that live object's identity
-          // now, just as split/alias barriers already do. The observed state
+          // now, just as split barriers already do. The observed state
           // remains local to this exact recording; it is never a global hint.
           const auto identity = observed_source_cookie(value.Transition.pResource);
           if (!identity) { invalidate(*owner, recording_loss::source_identity_unavailable); continue; }

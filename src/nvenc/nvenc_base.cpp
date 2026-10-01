@@ -611,7 +611,8 @@ namespace nvenc {
       }
       if (split_frame_encoding) {
         extra += std::format(" split-encode auto-forced ({} engines available)", encoder_engine_count);
-      } else if (!config.split_encode && video::is_packed_mode(client_config.sbs_mode)) {
+      } else if (!config.split_encode && should_force_split_frame_encoding(nvenc_config {}, video::is_packed_mode(client_config.sbs_mode), client_config.videoFormat, encoder_params.width, encoder_engine_count)) {
+        // Only when the option prevented a split this session would otherwise use.
         extra += " split-encode disabled by nvenc_split_encode";
       }
       if (enc_config.rcParams.enableAQ) {
