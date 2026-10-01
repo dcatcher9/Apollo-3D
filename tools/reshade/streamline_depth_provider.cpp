@@ -159,57 +159,6 @@ namespace sunshine_streamline::provider {
       }
       return "unknown";
     }
-    // Base name of the loaded module containing address, or "none" for
-    // allocated memory such as another tool's hook trampoline.
-    const char *module_name(std::uint64_t address, char (&out)[64]) {
-      HMODULE module{};
-      char path[MAX_PATH]{};
-      if (!address || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCSTR>(address), &module) || !GetModuleFileNameA(module, path, sizeof(path))) return "none";
-      const char *base = std::strrchr(path, '\\');
-      std::snprintf(out, sizeof(out), "%s", base ? base + 1 : path);
-      return out;
-    }
-    // A copied vtable keeps the runtime's functions except the entries its
-    // owner patched, so the owners of its entries name the tool that swapped
-    // it. Reads are fault-safe; the table may already be freed or reused.
-    void describe_refused_table(std::uint64_t table, std::uint64_t command, char *out, std::size_t size) {
-      constexpr unsigned entries = 81; // Through ID3D12GraphicsCommandList7::Barrier.
-      void *values[entries]{};
-      SIZE_T copied{};
-      if (!table || !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void *>(table), values, sizeof(values), &copied) ||
-          copied != sizeof(values)) {
-        std::snprintf(out, size, " refused_table=0x%llx(unreadable)", static_cast<unsigned long long>(table));
-        return;
-      }
-      struct owner { HMODULE module{}; unsigned count{}; unsigned first[4]{}; };
-      owner owners[6]{};
-      unsigned kinds{};
-      for (unsigned i = 0; i != entries; ++i) {
-        HMODULE module{};
-        if (!values[i] || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-              static_cast<LPCSTR>(values[i]), &module)) module = nullptr;
-        unsigned k = 0;
-        while (k != kinds && owners[k].module != module) ++k;
-        if (k == kinds) { if (kinds == std::size(owners)) continue; owners[kinds++].module = module; }
-        if (owners[k].count < std::size(owners[k].first)) owners[k].first[owners[k].count] = i;
-        ++owners[k].count;
-      }
-      const auto offset = table >= command && table - command < 0x10000 ? table - command : 0;
-      int used = std::snprintf(out, size, " refused_table=0x%llx table_offset_from_consumer=0x%llx entries={",
-        static_cast<unsigned long long>(table), static_cast<unsigned long long>(offset));
-      for (unsigned k = 0; k != kinds && used > 0 && std::size_t(used) < size; ++k) {
-        char path[MAX_PATH]{};
-        const char *name = "none";
-        if (owners[k].module && GetModuleFileNameA(owners[k].module, path, sizeof(path))) {
-          const char *base = std::strrchr(path, '\\');
-          name = base ? base + 1 : path;
-        }
-        used += std::snprintf(out + used, size - used, "%s%s:%u@%u,%u,%u,%u", k ? " " : "", name, owners[k].count,
-          owners[k].first[0], owners[k].first[1], owners[k].first[2], owners[k].first[3]);
-      }
-      if (used > 0 && std::size_t(used) < size) std::snprintf(out + used, size - used, "}");
-    }
     const char *name(depth_capture::display_action action) {
       switch (action) {
         case depth_capture::display_action::copy_fresh: return "copy_fresh";
@@ -450,31 +399,25 @@ namespace sunshine_streamline::provider {
     depth_capture::observe_command(commands->get_native());
     depth_capture::observe_queue(runtime->get_command_queue()->get_native());
     {
-      // ReShade's list lifecycle (which decides coverage) versus the native
-      // hooks, and the barrier-state shadow, at capture admission. At most one
-      // line per 5 s.
-      static std::atomic<std::uint64_t> next_shadow_log{}, logged_admissions{};
+      // Capture admissions by ReShade's list lifecycle, which decides
+      // coverage, and whether the barrier hooks observed the states. At most
+      // one line per 5 s.
+      static std::atomic<std::uint64_t> next_coverage_log{}, logged_admissions{};
       const auto now = GetTickCount64();
-      auto next = next_shadow_log.load(std::memory_order_relaxed);
-      if (now >= next && next_shadow_log.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
-        const auto c = depth_capture::list_shadow();
-        const auto admissions = c.both + c.hooks_only + c.events_only + c.neither;
+      auto next = next_coverage_log.load(std::memory_order_relaxed);
+      if (now >= next && next_coverage_log.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
+        const auto c = depth_capture::list_coverage();
+        const auto admissions = c.covered + c.unknown + c.closed + c.pass + c.opaque;
         if (admissions != logged_admissions.exchange(admissions, std::memory_order_relaxed)) {
           const auto u = [](std::uint64_t value) { return static_cast<unsigned long long>(value); };
           const auto e = [&](depth_capture::list_event event) { return u(c.events[static_cast<unsigned>(event)]); };
           using event = depth_capture::list_event;
-          char text[1024]{};
+          char text[768]{};
           std::snprintf(text, sizeof(text),
-            "Sunshine list lifecycle shadow: admissions both=%llu hooks_only=%llu events_only=%llu neither=%llu (immediate=%llu); "
-            "barrier_states agree=%llu disagree=%llu (last d3d12=0x%x reshade=0x%x partial=%llu) events_only=%llu hooks_only=%llu (unknown=%llu) blocked_events_known=%llu event_overflow=%llu; "
-            "lifecycle_not_open unknown=%llu closed=%llu pass=%llu opaque=%llu; disagree closed=%llu pass=%llu; "
+            "Sunshine list lifecycle: admissions covered=%llu (states observed=%llu declared=%llu) not_open={unknown=%llu closed=%llu pass=%llu opaque=%llu}; "
             "events created=%llu reset=%llu closed=%llu executed=%llu bundle=%llu pass_begin=%llu pass_end=%llu destroyed=%llu; tracked=%llu overflow=%llu",
-            u(c.both), u(c.hooks_only), u(c.events_only), u(c.neither), u(c.neither_immediate),
-            u(c.barrier_agree), u(c.barrier_disagree), unsigned(c.last_disagree_hooked), unsigned(c.last_disagree_usage),
-            u(c.barrier_disagree_partial), u(c.barrier_events_only), u(c.barrier_hooks_only), u(c.barrier_hooks_only_unknown),
-            u(c.barrier_blocked_events_known), u(c.barrier_event_overflow),
-            u(c.unknown), u(c.closed), u(c.pass), u(c.opaque),
-            u(c.closed_disagree), u(c.pass_disagree), e(event::created), e(event::reset), e(event::closed), e(event::executed),
+            u(c.covered), u(c.states_observed), u(c.states_declared), u(c.unknown), u(c.closed), u(c.pass), u(c.opaque),
+            e(event::created), e(event::reset), e(event::closed), e(event::executed),
             e(event::bundle), e(event::pass_begin), e(event::pass_end), e(event::destroyed), u(c.tracked), u(c.overflow));
           sunshine_log::message(reshade::log::level::info, text);
         }
@@ -702,23 +645,6 @@ namespace sunshine_streamline::provider {
           static_cast<unsigned long long>(observer.unreadable), static_cast<unsigned long long>(observer.rejected),
           static_cast<unsigned long long>(observer.barrier_overflow), static_cast<unsigned long long>(observer.submission_overflow),
           static_cast<unsigned long long>(observer.discovery_contention));
-      }
-      {
-        // Names why coverage was refused: interface, a slot or function outside
-        // any module (a per-object table or another tool's hook), or too many
-        // distinct vtables.
-        const auto observer = native_observer::counts();
-        if (!available || observer.refused_interface || observer.refused_discovery || observer.refused_capacity) {
-          char slot_module[64]{}, code_module[64]{}, table[512]{};
-          if (observer.refused_discovery) describe_refused_table(observer.refused_table, commands->get_native(), table, sizeof(table));
-          const auto tail = std::strlen(text);
-          std::snprintf(text + tail, sizeof(text) - tail,
-            " refused_interface=%llu refused_discovery=%llu refused_capacity=%llu refused_method=%u refused_slot=0x%llx(%s) refused_code=0x%llx(%s)%s",
-            static_cast<unsigned long long>(observer.refused_interface), static_cast<unsigned long long>(observer.refused_discovery),
-            static_cast<unsigned long long>(observer.refused_capacity), observer.refused_method,
-            static_cast<unsigned long long>(observer.refused_slot), module_name(observer.refused_slot, slot_module),
-            static_cast<unsigned long long>(observer.refused_code), module_name(observer.refused_code, code_module), table);
-        }
       }
       const auto used = std::strlen(text);
       const auto &jitter = data->output.provided.jitter;

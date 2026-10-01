@@ -168,49 +168,25 @@ namespace sunshine_streamline::depth_capture {
   void command_destroyed(std::uint64_t command);
   // ReShade reports every command list it wraps from its own proxy, whose
   // dispatch no D3D12 runtime change can move (D3D12Core 1.619 moves native
-  // lists to per-object tables at Reset). This lifecycle drives the recording
-  // (Reset, Close, render passes, bundles) alongside the native hooks and
-  // decides capture coverage: a list is covered while it is open and outside a
-  // render pass. The hooks cover only lists ReShade does not wrap, and still
-  // supply observed resource states. native is ReShade's native object.
+  // lists to per-object tables at Reset). This lifecycle is the only source of
+  // a list's recording (Reset, Close, render passes, bundles) and of capture
+  // coverage: a list is covered while it is open and outside a render pass.
+  // Native barrier hooks supply observed resource states where they see the
+  // list; otherwise the declared state applies. native is ReShade's native
+  // object for the list.
   enum class list_event : unsigned { created, reset, closed, executed, bundle, pass_begin, pass_end, destroyed, count };
   void observe_list_event(std::uint64_t native, list_event event);
-  // ReShade's barrier event: native resource handles and resource_usage values.
-  // Shadow only: compared at admission with the hooked state, never used.
-  void observe_list_barriers(std::uint64_t native, std::uint32_t count, const std::uint64_t *resources,
-    const std::uint32_t *old_states, const std::uint32_t *new_states);
-  // A runtime's own immediate list, which ReShade's lifecycle never reports.
-  void observe_immediate_list(std::uint64_t native);
-  struct list_shadow_counts {
+  struct list_coverage_counts {
     std::uint64_t events[static_cast<unsigned>(list_event::count)]{};
-    // Capture admission: native hook coverage versus an open, pass-free list
-    // in ReShade's lifecycle. Mismatches name what the lifecycle saw instead.
-    std::uint64_t both{}, hooks_only{}, events_only{}, neither{};
-    std::uint64_t unknown{}, closed{}, pass{}, opaque{};
-    // Hook-covered admissions whose recording state disagreed with ReShade.
-    std::uint64_t closed_disagree{}, pass_disagree{};
+    // Capture admissions by ReShade's lifecycle view: covered (open, outside a
+    // render pass) or not, with what the lifecycle saw instead.
+    std::uint64_t covered{}, unknown{}, closed{}, pass{}, opaque{};
+    // Of covered: the barrier hooks observed the list's states, or the game's
+    // declared state applied (refused or moved method tables).
+    std::uint64_t states_observed{}, states_declared{};
     std::uint64_t tracked{}, overflow{};
-    // Of neither: admissions on a runtime's own immediate list.
-    std::uint64_t neither_immediate{};
-    // Barrier-state shadow at admission: ReShade's last reported state of the
-    // source in this recording versus the hooked one, or only one of them.
-    std::uint64_t barrier_agree{}, barrier_disagree{}, barrier_events_only{}, barrier_hooks_only{};
-    // Of barrier_hooks_only: ReShade had made the recording's states unknown
-    // (wildcard alias or overflow) rather than reporting no transition.
-    std::uint64_t barrier_hooks_only_unknown{};
-    // The latest disagreement: hooked D3D12 state and ReShade usage.
-    std::uint32_t last_disagree_hooked{}, last_disagree_usage{};
-    // Of barrier_disagree: another subresource (a stencil plane or mip) was
-    // transitioned after the hooked state; ReShade reports that transition for
-    // the whole resource.
-    std::uint64_t barrier_disagree_partial{};
-    // Sources the hooks hold blocked (split or aliasing barrier) while ReShade
-    // reports a completed transition: unsafe if events alone chose the state.
-    std::uint64_t barrier_blocked_events_known{};
-    // Recordings whose ReShade states exceeded the shadow's capacity.
-    std::uint64_t barrier_event_overflow{};
   };
-  list_shadow_counts list_shadow();
+  list_coverage_counts list_coverage();
   void observe_queue(std::uint64_t queue);
   void retire_queue(std::uint64_t queue);
   void poll();

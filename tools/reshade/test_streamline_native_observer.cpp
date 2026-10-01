@@ -65,11 +65,10 @@ namespace {
   constexpr DWORD incoming_error = 0x12344321, outgoing_error = 0xabcdef01;
   std::atomic<unsigned> original_submissions{}, original_barriers{}, original_resets{}, original_closes{};
   std::atomic<bool> block_original{}, entered{}, release_original{};
-  unsigned barrier_events{}, reset_events{}, close_events{}, submit_events{}, invalidations{};
-  unsigned command_invalidations{}, render_pass_events{}, original_bundles{}, original_enhanced{}, original_passes{};
-  bool inside_pass{};
+  unsigned barrier_events{}, submit_events{}, invalidations{};
+  unsigned command_invalidations{}, original_bundles{}, original_enhanced{}, original_passes{};
   unsigned last_queue_target{};
-  HRESULT native_result = S_OK, observed_result{};
+  HRESULT native_result = S_OK;
   std::uint64_t observed_command{}, observed_cookie{}, observed_queue{};
   std::vector<observer::command_identity> observed_commands;
   std::vector<D3D12_RESOURCE_BARRIER> observed_barriers;
@@ -242,15 +241,6 @@ namespace {
       *cookie = 100000 + association_events;
     SetLastError(0xbadf00d);
   }
-  void on_reset(std::uint64_t command, std::uint64_t cookie, HRESULT result) {
-    ++reset_events; observed_command = command; observed_cookie = cookie; observed_result = result;
-    if (SUCCEEDED(result)) observer::set_recording_cookie(command, cookie + 1);
-    SetLastError(0xbadf00d);
-  }
-  void on_close(std::uint64_t command, std::uint64_t cookie, HRESULT result) {
-    ++close_events; observed_command = command; observed_cookie = cookie; observed_result = result;
-    SetLastError(0xbadf00d);
-  }
   void on_submit(std::uint64_t queue, unsigned count, const observer::command_identity *commands) {
     ++submit_events; observed_queue = queue; observed_count = count;
     if (trace_batch) batch_order.push_back('S');
@@ -276,10 +266,6 @@ namespace {
   void on_invalidated() { ++invalidations; SetLastError(0xbadf00d); }
   void on_invalidated_command(std::uint64_t command, std::uint64_t cookie) {
     ++command_invalidations; observed_command = command; observed_cookie = cookie;
-    SetLastError(0xbadf00d);
-  }
-  void on_render_pass(std::uint64_t command, std::uint64_t cookie, bool inside) {
-    ++render_pass_events; observed_command = command; observed_cookie = cookie; inside_pass = inside;
     SetLastError(0xbadf00d);
   }
   void submit(object &queue, UINT count, void *const *commands) {
@@ -397,7 +383,7 @@ int main() {
     require(barrier_slot == 26 && reset_slot == 10 && close_slot == 9 && execute_slot == 10 && allocator_slot == close_slot,
       "D3D12 COM ABI differs from pinned headers");
     require(MH_Initialize() == MH_OK, "MinHook init failed"); minhook = true;
-    const observer::callbacks callbacks{on_barrier, on_reset, on_close, on_submit, on_invalidated, on_invalidated_command, on_render_pass, on_associate_recording};
+    const observer::callbacks callbacks{on_barrier, on_submit, on_invalidated, on_invalidated_command, on_associate_recording};
     observer::initialize(callbacks);
     static std::array<void *, enhanced_slot + 1> unrelated_table{};
     unrelated_table.fill(reinterpret_cast<void *>(unrelated_method));
@@ -410,7 +396,7 @@ int main() {
     observer::set_active(true);
     SetLastError(incoming_error);
     observer::observe_command(address(unrelated)); observer::observe_queue(address(unrelated));
-    require(GetLastError() == incoming_error && !observer::command_ready(address(unrelated)) && !observer::queue_ready(address(unrelated)) &&
+    require(GetLastError() == incoming_error && !observer::states_ready(address(unrelated)) && !observer::queue_ready(address(unrelated)) &&
         observer::counts().targets == 0 && observer::install_pending() && observer::counts().installed == 0,
       "device IUnknown registered or installed a command-list/queue hook");
     using unrelated_fn = HRESULT (STDMETHODCALLTYPE *)(void *, D3D12_COMMAND_LIST_TYPE, REFIID, void **);
@@ -450,17 +436,19 @@ int main() {
     command_alias.vtable = queue_alias.vtable = unrelated_table.data();
     command_alias.queried = &commands[0]; queue_alias.queried = &queues[0];
     observer::observe_command(address(command_alias)); observer::observe_queue(address(queue_alias));
-    require(observer::counts().targets == 5 && commands[0].references == 1 && queues[0].references == 1,
+    // Command lists hook only ResourceBarrier (and CL7 Barrier); their
+    // lifecycle comes from ReShade's events.
+    require(observer::counts().targets == 2 && commands[0].references == 1 && queues[0].references == 1,
       "discovery did not normalize or release the QI-returned interfaces");
     for (auto &command : commands) observer::observe_command(address(command));
     observer::observe_queue(address(queues[0])); observer::observe_queue(address(queues[1]));
     observer::observe_queue(address(queues[0]));
-    require(observer::counts().targets == 10 && !observer::install_pending(), "inactive discovery duplicated targets or installed hooks");
-    require(!observer::command_ready(address(commands[0])) && !observer::queue_ready(address(queues[0])), "pending hooks reported ready");
+    require(observer::counts().targets == 4 && !observer::install_pending(), "inactive discovery duplicated targets or installed hooks");
+    require(!observer::states_ready(address(commands[0])) && !observer::queue_ready(address(queues[0])), "pending hooks reported ready");
     observer::set_active(true);
-    require(observer::install_pending() && observer::counts().installed == 10, "deferred hook install failed");
-    require(observer::command_ready(address(commands[1])) && observer::queue_ready(address(queues[1])), "installed hooks not ready");
-    require(observer::command_ready(address(command_alias)) && observer::queue_ready(address(queue_alias)) &&
+    require(observer::install_pending() && observer::counts().installed == 4, "deferred hook install failed");
+    require(observer::states_ready(address(commands[1])) && observer::queue_ready(address(queues[1])), "installed hooks not ready");
+    require(observer::states_ready(address(command_alias)) && observer::queue_ready(address(queue_alias)) &&
         commands[0].references == 1 && queues[0].references == 1 && command_alias.references == 1 && queue_alias.references == 1,
       "readiness did not normalize or release the QI-returned interfaces");
     require(reinterpret_cast<unrelated_fn>(command_alias.vtable[allocator_slot])(&command_alias, D3D12_COMMAND_LIST_TYPE_COMPUTE,
@@ -479,16 +467,17 @@ int main() {
     barrier(commands[1], 1, &native_barrier);
     require(barrier_events == 1 && original_barriers == 2 && observed_command == address(commands[0]) && observed_cookie == 1234 &&
         std::memcmp(&observed_barrier, &native_barrier, sizeof(native_barrier)) == 0, "nested barrier lost native fields or notified twice");
+    // Reset and Close are not hooked: ReShade's lifecycle events own the
+    // recording. They pass through unchanged and leave the identity alone.
+    const auto resets_before = original_resets.load(), closes_before = original_closes.load();
     native_result = E_FAIL;
-    require(reset(commands[1]) == E_FAIL && reset_events == 1 && observed_result == E_FAIL && observed_cookie == 1234 &&
-        observer::get_recording_cookie(address(commands[0])) == 1234, "failed Reset changed recording identity or HRESULT");
+    require(reset(commands[1]) == E_FAIL && close(commands[1]) == E_FAIL && barrier_events == 1 &&
+        observer::get_recording_cookie(address(commands[0])) == 1234, "unhooked Reset/Close changed an HRESULT or the identity");
     native_result = S_OK;
-    require(reset(commands[1]) == S_OK && reset_events == 2 && observed_cookie == 1234 &&
-        observer::get_recording_cookie(address(commands[0])) == 1235, "successful Reset callback did not advance native recording once");
-    native_result = E_FAIL;
-    require(close(commands[1]) == E_FAIL && close_events == 1 && observed_result == E_FAIL && observed_cookie == 1235, "Close result or cookie lost");
-    native_result = S_OK;
-    require(close(commands[1]) == S_OK && close_events == 2, "successful Close not forwarded");
+    require(reset(commands[1]) == S_OK && close(commands[1]) == S_OK &&
+        original_resets == resets_before + 4 && original_closes == closes_before + 4 &&
+        observer::get_recording_cookie(address(commands[0])) == 1234, "unhooked Reset/Close were not forwarded through the proxy once each");
+    observer::set_recording_cookie(address(commands[0]), 1235); // As ReShade's reset event would.
     void *submitted_command = &commands[1];
     mutate_cookie = true;
     submit(queues[1], 1, &submitted_command);
@@ -499,44 +488,46 @@ int main() {
     capture_command = &commands[0]; capture_queue = &queues[0]; inject_capture = true;
     submit(queues[0], 1, &submitted_command);
     inject_capture = false;
-    require(submit_events == 2 && original_submissions == 3 && barrier_events == 1 && reset_events == 2 && close_events == 2 &&
-        observer::counts().suppressed >= 4, "capture reentrancy changed source observations");
+    require(submit_events == 2 && original_submissions == 3 && barrier_events == 1 &&
+        observer::counts().suppressed >= 2, "capture reentrancy changed source observations");
     const auto before_scope = submit_events;
     { observer::suppression_scope scope; submit(queues[0], 1, &submitted_command); barrier(commands[0], 1, &native_barrier); }
     require(submit_events == before_scope && barrier_events == 1, "explicit capture suppression failed");
     SetLastError(incoming_error);
     reinterpret_cast<bundle_fn>(commands[1].vtable[bundle_slot])(&commands[1], reinterpret_cast<void *>(1));
-    require(GetLastError() == outgoing_error && command_invalidations == 1 && original_bundles == 2 &&
-        observed_command == address(commands[0]) && observed_cookie == 9999, "ExecuteBundle did not invalidate native recording exactly once");
+    require(GetLastError() == outgoing_error && command_invalidations == 0 && original_bundles == 2,
+      "ExecuteBundle (a ReShade lifecycle event) was hooked or not forwarded through the proxy");
     commands[0].extended = true;
-    require(!observer::command_ready(address(commands[0])), "unobserved supported CL4/CL7 hooks reported ready");
+    require(!observer::states_ready(address(commands[0])), "unobserved supported CL7 Barrier reported ready");
     observer::observe_command(address(commands[0]));
-    require(!observer::command_ready(address(commands[0])) && observer::install_pending() && observer::command_ready(address(commands[0])),
-      "optional interface discovery/readiness did not require deferred coverage");
+    require(!observer::states_ready(address(commands[0])) && observer::install_pending() && observer::states_ready(address(commands[0])),
+      "enhanced Barrier discovery/readiness did not require deferred coverage");
     SetLastError(incoming_error);
     reinterpret_cast<enhanced_fn>(commands[0].vtable[enhanced_slot])(&commands[0], 1, reinterpret_cast<const D3D12_BARRIER_GROUP *>(1));
-    require(GetLastError() == outgoing_error && command_invalidations == 2 && original_enhanced == 1 && observed_cookie == 9999,
+    require(GetLastError() == outgoing_error && command_invalidations == 1 && original_enhanced == 1 && observed_cookie == 9999,
       "enhanced Barrier did not invalidate native recording");
     {
       // D3D12Core can return CommandList7 as a per-object interface whose
-      // table lives in heap memory. That slot is refused once; producers stay
-      // not ready, while a private-resource consumer may waive it.
+      // table lives in heap memory. That slot is refused once, and the list's
+      // states stay unobserved (its declared state applies).
       std::vector<void *> heap_table(commands[0].vtable, commands[0].vtable + enhanced_slot + 1);
       object torn_off{}; torn_off.vtable = heap_table.data(); torn_off.kind = object_kind::command;
       object split{}; split.vtable = commands[0].vtable; split.kind = object_kind::command;
       split.extended = true; split.enhanced = &torn_off; split.cookie = 9999;
       const auto invalid_before = invalidations;
       for (unsigned repeat = 0; repeat != 3; ++repeat) observer::observe_command(address(split));
-      require(invalidations == invalid_before + 1 && !observer::command_ready(address(split)) &&
-          observer::command_ready(address(split), false) && split.references == 1 && torn_off.references == 1,
-        "per-object CommandList7 table was not refused once, waived only for consumers, or leaked references");
+      require(invalidations == invalid_before + 1 && !observer::states_ready(address(split)) &&
+          split.references == 1 && torn_off.references == 1,
+        "per-object CommandList7 table was not refused once, reported observed states, or leaked references");
     }
+    // Render passes are ReShade lifecycle events too: forwarded, never hooked.
     SetLastError(incoming_error);
     reinterpret_cast<begin_pass_fn>(commands[0].vtable[begin_pass_slot])(&commands[0], 0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
-    require(GetLastError() == outgoing_error && render_pass_events == 1 && inside_pass && observed_cookie == 9999, "render-pass begin was not observed");
+    require(GetLastError() == outgoing_error, "render-pass begin changed LastError");
     SetLastError(incoming_error);
     reinterpret_cast<end_pass_fn>(commands[0].vtable[end_pass_slot])(&commands[0]);
-    require(GetLastError() == outgoing_error && render_pass_events == 2 && !inside_pass && original_passes == 2, "render-pass end was not observed");
+    require(GetLastError() == outgoing_error && original_passes == 2 && command_invalidations == 1,
+      "render passes were hooked or not forwarded");
     const auto before_invalid = invalidations;
     const auto barriers_before_invalid = original_barriers.load();
     const auto submissions_before_invalid = original_submissions.load();
@@ -580,7 +571,7 @@ int main() {
     std::puts("PASS first native recording associates before forwarding, freezes identity, and rejects malformed/suppressed/submission bootstrap");
     observer::observe_queue(1);
     for (unsigned i = 2; i != queues.size(); ++i) observer::observe_queue(address(queues[i]));
-    require(observer::counts().targets == 19 && observer::counts().rejected >= 2 && !observer::queue_ready(address(queues[9])), "per-method target bounds failed");
+    require(observer::counts().targets == 11 && observer::counts().rejected >= 2 && !observer::queue_ready(address(queues[9])), "per-method target bounds failed");
     {
       // A game submits through the same refused vtable every frame. Repeating
       // a known refusal must not revoke every capture on every call.
@@ -639,7 +630,7 @@ int main() {
     const bool detach_ok = entered_at_detach && submit_error_preserved && GetLastError() == outgoing_error &&
       original_submissions == detach_submissions + 2 && original_barriers == detach_barriers + 1 &&
       submit_events == detach_events && barrier_events == detach_barrier_events &&
-      !observer::command_ready(address(commands[0])) && !observer::queue_ready(address(queues[0]));
+      !observer::states_ready(address(commands[0])) && !observer::queue_ready(address(queues[0]));
     // Test-only reset: the actual process detach fence is one-way.
     sunshine_addon_lifetime::detaching.store(false, std::memory_order_release);
     require(detach_ok, "process detach observed late native completion or changed cached original forwarding");
@@ -663,31 +654,33 @@ int main() {
     shared_device.vtable = shared_device_table.data(); shared_device.kind = object_kind::device;
     shared_device.forwarded = &unrelated;
     observer::observe_command(address(shared_command));
-    require(observer::install_pending() && observer::command_ready(address(shared_command)),
+    require(observer::install_pending() && observer::states_ready(address(shared_command)),
       "shared-thunk command interface was not observed");
-    const auto shared_close_before = close_events;
+    // Close is no longer hooked, so the shared slot-9 code is never touched:
+    // both the device method and the command-list Close forward unchanged.
+    const auto shared_closes_before = original_closes.load();
     SetLastError(incoming_error);
     require(reinterpret_cast<unrelated_fn>(shared_device.vtable[allocator_slot])(&shared_device, D3D12_COMMAND_LIST_TYPE_COMPUTE,
         IID_ID3D12CommandAllocator, &unrelated_output) == S_FALSE && unrelated_output == &unrelated &&
-        GetLastError() == outgoing_error && close_events == shared_close_before,
-      "shared code interception changed the unrelated device method's signature or notification");
-    require(close(shared_command) == S_OK && close_events == shared_close_before + 1,
-      "scoped Close hook did not preserve the shared thunk's command-list forwarding");
-    const auto retained_close = shared_command_table[close_slot];
+        GetLastError() == outgoing_error && shared_command_table[close_slot] == reinterpret_cast<void *>(shared_slot9),
+      "the shared slot-9 thunk was intercepted or changed the unrelated device method");
+    require(close(shared_command) == S_OK && original_closes == shared_closes_before + 1,
+      "the shared thunk's command-list Close was not forwarded");
+    const auto retained_barrier = shared_command_table[barrier_slot];
     const auto invalidations_before_replacement = invalidations;
-    shared_command_table[close_slot] = reinterpret_cast<void *>(shared_slot9);
-    require(!observer::command_ready(address(shared_command)) && invalidations == invalidations_before_replacement + 1,
-      "a replaced vtable slot incorrectly retained capture evidence");
-    shared_command_table[close_slot] = retained_close;
-    require(!observer::command_ready(address(shared_command)) && invalidations == invalidations_before_replacement + 1,
+    shared_command_table[barrier_slot] = reinterpret_cast<void *>(original_barrier<0>);
+    require(!observer::states_ready(address(shared_command)) && invalidations == invalidations_before_replacement + 1,
+      "a replaced barrier slot incorrectly retained capture evidence");
+    shared_command_table[barrier_slot] = retained_barrier;
+    require(!observer::states_ready(address(shared_command)) && invalidations == invalidations_before_replacement + 1,
       "restoring a replaced slot revived evidence after missed commands");
-    std::puts("PASS shared Streamline slot-9 thunk preserves device allocator arguments and separately observes command Close");
+    std::puts("PASS shared Streamline slot-9 thunk is left untouched; a replaced barrier slot revokes state evidence");
 #endif
     observer::shutdown();
     require(MH_DisableHook(MH_ALL_HOOKS) == MH_OK, "fixture hook disable failed");
     require(MH_Uninitialize() == MH_OK, "fixture MinHook teardown failed"); minhook = false;
     observer::reset_after_hooks_removed();
-    std::puts("PASS required COM interface validation/normalization, native submit order/cookies, nested proxies, barriers/results, bundle/enhanced/pass coverage, suppression, bounds, shutdown and LastError");
+    std::puts("PASS required COM interface validation/normalization, native submit order/cookies, nested proxies, barriers, enhanced coverage, unhooked lifecycle methods, suppression, bounds, shutdown and LastError");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

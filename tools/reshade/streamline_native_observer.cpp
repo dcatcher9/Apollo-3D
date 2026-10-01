@@ -13,30 +13,19 @@
 
 namespace sunshine_streamline::native_observer {
   namespace {
-    enum class method : unsigned { barriers, reset, close, execute, bundle, enhanced, begin_pass, end_pass, count };
+    // Command-list lifecycle (Reset, Close, render passes, bundles) comes from
+    // ReShade's events. The hooks observe only resource states and submission.
+    enum class method : unsigned { barriers, execute, enhanced, count };
     constexpr unsigned method_count = static_cast<unsigned>(method::count);
     constexpr unsigned target_limit = 8, command_chunk = 64, inline_barriers = 256;
     constexpr std::array<std::size_t, method_count> vtable_slots{
       offsetof(ID3D12GraphicsCommandListVtbl, ResourceBarrier) / sizeof(void *),
-      offsetof(ID3D12GraphicsCommandListVtbl, Reset) / sizeof(void *),
-      offsetof(ID3D12GraphicsCommandListVtbl, Close) / sizeof(void *),
       offsetof(ID3D12CommandQueueVtbl, ExecuteCommandLists) / sizeof(void *),
-      offsetof(ID3D12GraphicsCommandListVtbl, ExecuteBundle) / sizeof(void *),
-      offsetof(ID3D12GraphicsCommandList7Vtbl, Barrier) / sizeof(void *),
-      offsetof(ID3D12GraphicsCommandList4Vtbl, BeginRenderPass) / sizeof(void *),
-      offsetof(ID3D12GraphicsCommandList4Vtbl, EndRenderPass) / sizeof(void *)};
-    static_assert(vtable_slots[0] == 26 && vtable_slots[1] == 10 && vtable_slots[2] == 9 && vtable_slots[3] == 10,
-      "Unexpected D3D12 native COM ABI");
-    static_assert(vtable_slots[4] == 27 && vtable_slots[5] == 80 && vtable_slots[6] == 68 && vtable_slots[7] == 69,
-      "Unexpected extended D3D12 native COM ABI");
+      offsetof(ID3D12GraphicsCommandList7Vtbl, Barrier) / sizeof(void *)};
+    static_assert(vtable_slots[0] == 26 && vtable_slots[1] == 10 && vtable_slots[2] == 80, "Unexpected D3D12 native COM ABI");
     using barrier_fn = void (STDMETHODCALLTYPE *)(ID3D12GraphicsCommandList *, UINT, const D3D12_RESOURCE_BARRIER *);
-    using reset_fn = HRESULT (STDMETHODCALLTYPE *)(ID3D12GraphicsCommandList *, ID3D12CommandAllocator *, ID3D12PipelineState *);
-    using close_fn = HRESULT (STDMETHODCALLTYPE *)(ID3D12GraphicsCommandList *);
     using execute_fn = void (STDMETHODCALLTYPE *)(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *);
-    using bundle_fn = void (STDMETHODCALLTYPE *)(ID3D12GraphicsCommandList *, ID3D12GraphicsCommandList *);
     using enhanced_fn = void (STDMETHODCALLTYPE *)(ID3D12GraphicsCommandList7 *, UINT32, const D3D12_BARRIER_GROUP *);
-    using begin_pass_fn = void (STDMETHODCALLTYPE *)(ID3D12GraphicsCommandList4 *, UINT, const D3D12_RENDER_PASS_RENDER_TARGET_DESC *, const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC *, D3D12_RENDER_PASS_FLAGS);
-    using end_pass_fn = void (STDMETHODCALLTYPE *)(ID3D12GraphicsCommandList4 *);
     constexpr GUID recording_guid{0x92c957c6, 0x88de, 0x42b3, {0x9f, 0x3e, 0x31, 0xde, 0x63, 0x05, 0x7b, 0x29}};
     enum class state { empty, pending, installed, rejected };
     struct target {
@@ -53,20 +42,13 @@ namespace sunshine_streamline::native_observer {
     constexpr unsigned refused_limit = 16;
     std::array<std::array<std::uintptr_t, refused_limit>, method_count> refused{};
     std::array<unsigned, method_count> refused_counts{};
-    enum class refusal : unsigned { interface_query, discovery, capacity, count };
-    std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(refusal::count)> refusals{};
-    std::atomic<std::uintptr_t> last_refused_slot{}, last_refused_code{}, last_refused_table{};
-    std::atomic<unsigned> last_refused_method{};
     SRWLOCK targets_lock = SRWLOCK_INIT;
     std::atomic<bool> requested{}, active{};
     std::atomic<std::uint64_t> activation_epoch{};
     std::atomic<decltype(callbacks::barriers)> barrier_callback{};
-    std::atomic<decltype(callbacks::reset)> reset_callback{};
-    std::atomic<decltype(callbacks::close)> close_callback{};
     std::atomic<decltype(callbacks::submitted)> submitted_callback{};
     std::atomic<decltype(callbacks::invalidated)> invalidated_callback{};
     std::atomic<decltype(callbacks::invalidated_command)> invalidated_command_callback{};
-    std::atomic<decltype(callbacks::render_pass)> render_pass_callback{};
     std::atomic<decltype(callbacks::associate_recording)> associate_recording_callback{};
     std::atomic<std::uint64_t> calls{}, observed{}, unreadable{}, dropped{}, installed{}, rejected{}, nested{}, suppressed{};
     std::atomic<std::uint64_t> barrier_overflow{}, submission_overflow{}, discovery_contention{};
@@ -174,29 +156,6 @@ namespace sunshine_streamline::native_observer {
       if (!complete) { if (!allocated) ++barrier_overflow; drop(allocated); return; }
       notify(barrier_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(command), cookie, count, copied.data());
     }
-    template<unsigned Index> HRESULT STDMETHODCALLTYPE reset_detour(ID3D12GraphicsCommandList *command,
-        ID3D12CommandAllocator *allocator, ID3D12PipelineState *initial_state) {
-      const DWORD incoming = GetLastError();
-      auto &slot = targets[static_cast<unsigned>(method::reset)][Index];
-      invocation call(method::reset, slot.status.load(std::memory_order_acquire));
-      const auto cookie = call.eligible ? get_recording_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
-      SetLastError(incoming);
-      const HRESULT result = reinterpret_cast<reset_fn>(slot.original.load(std::memory_order_acquire))(command, allocator, initial_state);
-      const restore_error outgoing{GetLastError()};
-      if (call.notify()) notify(reset_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(command), cookie, result);
-      return result;
-    }
-    template<unsigned Index> HRESULT STDMETHODCALLTYPE close_detour(ID3D12GraphicsCommandList *command) {
-      const DWORD incoming = GetLastError();
-      auto &slot = targets[static_cast<unsigned>(method::close)][Index];
-      invocation call(method::close, slot.status.load(std::memory_order_acquire));
-      const auto cookie = call.eligible ? operation_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
-      SetLastError(incoming);
-      const HRESULT result = reinterpret_cast<close_fn>(slot.original.load(std::memory_order_acquire))(command);
-      const restore_error outgoing{GetLastError()};
-      if (call.notify()) notify(close_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(command), cookie, result);
-      return result;
-    }
     template<unsigned Index> void STDMETHODCALLTYPE execute_detour(ID3D12CommandQueue *queue,
         UINT count, ID3D12CommandList *const *commands) {
       const DWORD incoming = GetLastError();
@@ -230,16 +189,6 @@ namespace sunshine_streamline::native_observer {
       if (!complete) { if (!allocated) ++submission_overflow; drop(allocated); return; }
       notify(submitted_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(queue), count, identities.data());
     }
-    template<unsigned Index> void STDMETHODCALLTYPE bundle_detour(ID3D12GraphicsCommandList *command, ID3D12GraphicsCommandList *bundle) {
-      const DWORD incoming = GetLastError();
-      auto &slot = targets[static_cast<unsigned>(method::bundle)][Index];
-      invocation call(method::bundle, slot.status.load(std::memory_order_acquire));
-      const auto cookie = call.eligible ? operation_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
-      SetLastError(incoming);
-      reinterpret_cast<bundle_fn>(slot.original.load(std::memory_order_acquire))(command, bundle);
-      const restore_error outgoing{GetLastError()};
-      if (call.notify()) notify(invalidated_command_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(command), cookie);
-    }
     template<unsigned Index> void STDMETHODCALLTYPE enhanced_detour(ID3D12GraphicsCommandList7 *command, UINT32 count, const D3D12_BARRIER_GROUP *groups) {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::enhanced)][Index];
@@ -250,36 +199,10 @@ namespace sunshine_streamline::native_observer {
       const restore_error outgoing{GetLastError()};
       if (call.notify()) notify(invalidated_command_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(command), cookie);
     }
-    template<unsigned Index> void STDMETHODCALLTYPE begin_pass_detour(ID3D12GraphicsCommandList4 *command, UINT count,
-        const D3D12_RENDER_PASS_RENDER_TARGET_DESC *render_targets, const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC *depth, D3D12_RENDER_PASS_FLAGS flags) {
-      const DWORD incoming = GetLastError();
-      auto &slot = targets[static_cast<unsigned>(method::begin_pass)][Index];
-      invocation call(method::begin_pass, slot.status.load(std::memory_order_acquire));
-      const auto cookie = call.eligible ? operation_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
-      SetLastError(incoming);
-      reinterpret_cast<begin_pass_fn>(slot.original.load(std::memory_order_acquire))(command, count, render_targets, depth, flags);
-      const restore_error outgoing{GetLastError()};
-      if (call.notify()) notify(render_pass_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(command), cookie, true);
-    }
-    template<unsigned Index> void STDMETHODCALLTYPE end_pass_detour(ID3D12GraphicsCommandList4 *command) {
-      const DWORD incoming = GetLastError();
-      auto &slot = targets[static_cast<unsigned>(method::end_pass)][Index];
-      invocation call(method::end_pass, slot.status.load(std::memory_order_acquire));
-      const auto cookie = call.eligible ? operation_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
-      SetLastError(incoming);
-      reinterpret_cast<end_pass_fn>(slot.original.load(std::memory_order_acquire))(command);
-      const restore_error outgoing{GetLastError()};
-      if (call.notify()) notify(render_pass_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(command), cookie, false);
-    }
     const std::array<std::array<void *, target_limit>, method_count> detours{{
       {reinterpret_cast<void *>(barrier_detour<0>), reinterpret_cast<void *>(barrier_detour<1>), reinterpret_cast<void *>(barrier_detour<2>), reinterpret_cast<void *>(barrier_detour<3>), reinterpret_cast<void *>(barrier_detour<4>), reinterpret_cast<void *>(barrier_detour<5>), reinterpret_cast<void *>(barrier_detour<6>), reinterpret_cast<void *>(barrier_detour<7>)},
-      {reinterpret_cast<void *>(reset_detour<0>), reinterpret_cast<void *>(reset_detour<1>), reinterpret_cast<void *>(reset_detour<2>), reinterpret_cast<void *>(reset_detour<3>), reinterpret_cast<void *>(reset_detour<4>), reinterpret_cast<void *>(reset_detour<5>), reinterpret_cast<void *>(reset_detour<6>), reinterpret_cast<void *>(reset_detour<7>)},
-      {reinterpret_cast<void *>(close_detour<0>), reinterpret_cast<void *>(close_detour<1>), reinterpret_cast<void *>(close_detour<2>), reinterpret_cast<void *>(close_detour<3>), reinterpret_cast<void *>(close_detour<4>), reinterpret_cast<void *>(close_detour<5>), reinterpret_cast<void *>(close_detour<6>), reinterpret_cast<void *>(close_detour<7>)},
       {reinterpret_cast<void *>(execute_detour<0>), reinterpret_cast<void *>(execute_detour<1>), reinterpret_cast<void *>(execute_detour<2>), reinterpret_cast<void *>(execute_detour<3>), reinterpret_cast<void *>(execute_detour<4>), reinterpret_cast<void *>(execute_detour<5>), reinterpret_cast<void *>(execute_detour<6>), reinterpret_cast<void *>(execute_detour<7>)},
-      {reinterpret_cast<void *>(bundle_detour<0>), reinterpret_cast<void *>(bundle_detour<1>), reinterpret_cast<void *>(bundle_detour<2>), reinterpret_cast<void *>(bundle_detour<3>), reinterpret_cast<void *>(bundle_detour<4>), reinterpret_cast<void *>(bundle_detour<5>), reinterpret_cast<void *>(bundle_detour<6>), reinterpret_cast<void *>(bundle_detour<7>)},
-      {reinterpret_cast<void *>(enhanced_detour<0>), reinterpret_cast<void *>(enhanced_detour<1>), reinterpret_cast<void *>(enhanced_detour<2>), reinterpret_cast<void *>(enhanced_detour<3>), reinterpret_cast<void *>(enhanced_detour<4>), reinterpret_cast<void *>(enhanced_detour<5>), reinterpret_cast<void *>(enhanced_detour<6>), reinterpret_cast<void *>(enhanced_detour<7>)},
-      {reinterpret_cast<void *>(begin_pass_detour<0>), reinterpret_cast<void *>(begin_pass_detour<1>), reinterpret_cast<void *>(begin_pass_detour<2>), reinterpret_cast<void *>(begin_pass_detour<3>), reinterpret_cast<void *>(begin_pass_detour<4>), reinterpret_cast<void *>(begin_pass_detour<5>), reinterpret_cast<void *>(begin_pass_detour<6>), reinterpret_cast<void *>(begin_pass_detour<7>)},
-      {reinterpret_cast<void *>(end_pass_detour<0>), reinterpret_cast<void *>(end_pass_detour<1>), reinterpret_cast<void *>(end_pass_detour<2>), reinterpret_cast<void *>(end_pass_detour<3>), reinterpret_cast<void *>(end_pass_detour<4>), reinterpret_cast<void *>(end_pass_detour<5>), reinterpret_cast<void *>(end_pass_detour<6>), reinterpret_cast<void *>(end_pass_detour<7>)}
+      {reinterpret_cast<void *>(enhanced_detour<0>), reinterpret_cast<void *>(enhanced_detour<1>), reinterpret_cast<void *>(enhanced_detour<2>), reinterpret_cast<void *>(enhanced_detour<3>), reinterpret_cast<void *>(enhanced_detour<4>), reinterpret_cast<void *>(enhanced_detour<5>), reinterpret_cast<void *>(enhanced_detour<6>), reinterpret_cast<void *>(enhanced_detour<7>)}
     }};
     target *find(unsigned kind, void **address) {
       for (unsigned i = 0; i != target_counts[kind]; ++i) if (targets[kind][i].location.address == address) return &targets[kind][i];
@@ -290,21 +213,15 @@ namespace sunshine_streamline::native_observer {
       const auto begin = refused[row].begin(), end = begin + refused_counts[row];
       return std::find(begin, end, key) != end;
     }
-    // code is the refused function, kept with its slot so the owner can be named.
-    void report_refusal(unsigned method, std::uintptr_t key, refusal cause, std::uintptr_t code) {
-      ++refusals[static_cast<unsigned>(cause)];
-      last_refused_slot = key; last_refused_code = code; last_refused_method = method;
-      last_refused_table = method == method_count ? key : key - vtable_slots[method] * sizeof(void *);
-      ++rejected; invalidate();
-    }
+    void report_refusal() { ++rejected; invalidate(); }
     // Reports only a new slot refusal; a full table keeps reporting every one.
     // With locked, the caller's exclusive targets_lock is released here.
-    void refuse(unsigned kind, std::uintptr_t key, refusal cause, std::uintptr_t code, bool locked = false) {
+    void refuse(unsigned kind, std::uintptr_t key, bool locked = false) {
       if (!locked && !TryAcquireSRWLockExclusive(&targets_lock)) { ++discovery_contention; drop(false); return; }
       const bool known = refused_before(kind, key);
       if (!known && refused_counts[kind] != refused_limit) refused[kind][refused_counts[kind]++] = key;
       ReleaseSRWLockExclusive(&targets_lock);
-      if (!known) report_refusal(kind, key, cause, code);
+      if (!known) report_refusal();
     }
     bool read_vtable_entry(std::uint64_t object, std::size_t index, void *&entry) {
       std::uintptr_t vtable{};
@@ -333,7 +250,7 @@ namespace sunshine_streamline::native_observer {
       Interface *result{};
       const HRESULT status = object->lpVtbl->QueryInterface(object, iid, reinterpret_cast<void **>(&result));
       if (FAILED(status) || !result) {
-        if (discover) report_refusal(method_count, table, refusal::interface_query, reinterpret_cast<std::uintptr_t>(query));
+        if (discover) report_refusal();
         return nullptr;
       }
       return result;
@@ -350,16 +267,11 @@ namespace sunshine_streamline::native_observer {
       ReleaseSRWLockShared(&targets_lock);
       if (seen) return;
       sunshine_native_vtable::slot location;
-      if (!sunshine_native_vtable::discover(object, vtable_slots[kind], location)) {
-        void *code{};
-        read(address, &code, sizeof(code));
-        refuse(kind, key, refusal::discovery, reinterpret_cast<std::uintptr_t>(code));
-        return;
-      }
+      if (!sunshine_native_vtable::discover(object, vtable_slots[kind], location)) { refuse(kind, key); return; }
       if (!TryAcquireSRWLockExclusive(&targets_lock)) { sunshine_native_vtable::release(location); ++discovery_contention; drop(false); return; }
       if (find(kind, location.address)) { ReleaseSRWLockExclusive(&targets_lock); sunshine_native_vtable::release(location); return; }
       if (target_counts[kind] == target_limit) {
-        refuse(kind, key, refusal::capacity, reinterpret_cast<std::uintptr_t>(location.original), true);
+        refuse(kind, key, true);
         sunshine_native_vtable::release(location);
         return;
       }
@@ -391,28 +303,21 @@ namespace sunshine_streamline::native_observer {
       if (lost) { ++rejected; invalidate(); }
       return result;
     }
-    bool optional_coverage(std::uint64_t command, bool discover, bool enhanced_barriers = true) {
+    // A list that supports CommandList7 can also change states with enhanced
+    // Barrier, which makes the legacy states it observed unusable.
+    bool enhanced_coverage(std::uint64_t command, bool discover) {
       const restore_error incoming{GetLastError()};
       auto *object = reinterpret_cast<ID3D12Object *>(command);
-      ID3D12GraphicsCommandList4 *version4{};
-      const HRESULT result4 = object->lpVtbl->QueryInterface(object, IID_ID3D12GraphicsCommandList4, reinterpret_cast<void **>(&version4));
-      bool complete = result4 == E_NOINTERFACE;
-      if (SUCCEEDED(result4) && version4) {
-        const auto address = reinterpret_cast<std::uintptr_t>(version4);
-        if (discover) { observe(address, method::begin_pass); observe(address, method::end_pass); }
-        complete = ready(address, method::begin_pass) && ready(address, method::end_pass);
-        version4->lpVtbl->Release(version4);
-      }
       ID3D12GraphicsCommandList7 *version7{};
       const HRESULT result7 = object->lpVtbl->QueryInterface(object, IID_ID3D12GraphicsCommandList7, reinterpret_cast<void **>(&version7));
+      bool complete = result7 == E_NOINTERFACE;
       if (SUCCEEDED(result7) && version7) {
         const auto address = reinterpret_cast<std::uintptr_t>(version7);
         if (discover) observe(address, method::enhanced);
-        complete = (!enhanced_barriers || ready(address, method::enhanced)) && complete;
+        complete = ready(address, method::enhanced);
         version7->lpVtbl->Release(version7);
-      } else if (result7 != E_NOINTERFACE) complete = false;
-      if (discover && ((FAILED(result4) && result4 != E_NOINTERFACE) || (SUCCEEDED(result4) && !version4) ||
-          (FAILED(result7) && result7 != E_NOINTERFACE) || (SUCCEEDED(result7) && !version7))) invalidate();
+      }
+      if (discover && ((FAILED(result7) && result7 != E_NOINTERFACE) || (SUCCEEDED(result7) && !version7))) invalidate();
       return complete;
     }
   }
@@ -422,12 +327,9 @@ namespace sunshine_streamline::native_observer {
     active.store(false, std::memory_order_release);
     ++activation_epoch;
     barrier_callback.store(value.barriers, std::memory_order_release);
-    reset_callback.store(value.reset, std::memory_order_release);
-    close_callback.store(value.close, std::memory_order_release);
     submitted_callback.store(value.submitted, std::memory_order_release);
     invalidated_callback.store(value.invalidated, std::memory_order_release);
     invalidated_command_callback.store(value.invalidated_command, std::memory_order_release);
-    render_pass_callback.store(value.render_pass, std::memory_order_release);
     associate_recording_callback.store(value.associate_recording, std::memory_order_release);
     requested.store(true, std::memory_order_release);
   }
@@ -449,8 +351,8 @@ namespace sunshine_streamline::native_observer {
     auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, true);
     if (!object) return;
     const auto normalized = reinterpret_cast<std::uintptr_t>(object);
-    observe(normalized, method::barriers); observe(normalized, method::reset); observe(normalized, method::close); observe(normalized, method::bundle);
-    optional_coverage(normalized, true);
+    observe(normalized, method::barriers);
+    enhanced_coverage(normalized, true);
     object->lpVtbl->Release(object);
   }
   void observe_queue(std::uint64_t queue) {
@@ -461,14 +363,13 @@ namespace sunshine_streamline::native_observer {
     observe(reinterpret_cast<std::uintptr_t>(object), method::execute);
     object->lpVtbl->Release(object);
   }
-  bool command_ready(std::uint64_t command, bool enhanced_barriers) {
+  bool states_ready(std::uint64_t command) {
     if (!enabled()) return false;
     const restore_error incoming{GetLastError()};
     auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, false);
     if (!object) return false;
     const auto normalized = reinterpret_cast<std::uintptr_t>(object);
-    const bool result = ready(normalized, method::barriers) && ready(normalized, method::reset) && ready(normalized, method::close) &&
-      ready(normalized, method::bundle) && optional_coverage(normalized, false, enhanced_barriers);
+    const bool result = ready(normalized, method::barriers) && enhanced_coverage(normalized, false);
     object->lpVtbl->Release(object);
     return result;
   }
@@ -535,11 +436,6 @@ namespace sunshine_streamline::native_observer {
   counters counts() {
     counters result{calls.load(), observed.load(), unreadable.load(), dropped.load(), 0, installed.load(), rejected.load(), nested.load(), suppressed.load(),
       barrier_overflow.load(), submission_overflow.load(), discovery_contention.load()};
-    result.refused_interface = refusals[static_cast<unsigned>(refusal::interface_query)].load();
-    result.refused_discovery = refusals[static_cast<unsigned>(refusal::discovery)].load();
-    result.refused_capacity = refusals[static_cast<unsigned>(refusal::capacity)].load();
-    result.refused_slot = last_refused_slot.load(); result.refused_code = last_refused_code.load();
-    result.refused_method = last_refused_method.load(); result.refused_table = last_refused_table.load();
     if (TryAcquireSRWLockShared(&targets_lock)) {
       for (const auto count : target_counts) result.targets += count;
       ReleaseSRWLockShared(&targets_lock);
@@ -548,7 +444,6 @@ namespace sunshine_streamline::native_observer {
   }
   suppression_scope::suppression_scope() { ++suppression_depth; }
   suppression_scope::~suppression_scope() { --suppression_depth; }
-  bool observation_suppressed() { return suppression_depth != 0; }
 
 #ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
   void reset_after_hooks_removed() {
@@ -571,12 +466,10 @@ namespace sunshine_streamline::native_observer {
       target_counts[kind] = 0;
     }
     refused_counts = {};
-    for (auto &value : refusals) value = 0;
-    last_refused_slot = last_refused_code = last_refused_table = 0; last_refused_method = 0;
     calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = 0;
     barrier_overflow = submission_overflow = discovery_contention = 0;
-    barrier_callback = nullptr; reset_callback = nullptr; close_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;
-    invalidated_command_callback = nullptr; render_pass_callback = nullptr; associate_recording_callback = nullptr;
+    barrier_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;
+    invalidated_command_callback = nullptr; associate_recording_callback = nullptr;
   }
 #endif
 }

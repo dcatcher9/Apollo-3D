@@ -1419,8 +1419,8 @@ reject a device before inspecting command-list slots: its slot 9 creates command
 has a different signature from command-list Close. Unknown submission cookies never match
 retired recording slots.
 Command recording state belongs to the actual native command list through COM private data,
-not a fixed global table. Native-only lists discovered through shared method hooks therefore
-cannot exhaust a 128-entry registry or leave entries behind when ReShade misses destruction.
+not a fixed global table. Lists seen through the shared barrier hooks therefore cannot exhaust a
+128-entry registry or leave entries behind when ReShade misses destruction.
 Reset changes the recording identity and clears its state; closed lists stay closed until Reset.
 A generation counter invalidates earlier recordings when observations are lost. Per-list lifetime
 tokens retire producer/consumer identities on native destruction without taking a callback lock;
@@ -1780,57 +1780,41 @@ discard diagnostics. Disabled hooks retain a callable original and pass through 
 A slot whose discovery is refused is remembered: its table or original function lies outside a
 loaded module image (for example another tool's trampoline), or its method already has eight
 slots. Every later object sharing that slot would be refused identically, so the refusal
-invalidates evidence once instead of on every call; command lists on other slots keep their
-coverage. QueryInterface refusals are per object and are not remembered. The failed-status log
-counts refusals by cause and names the newest refused slot and function with their owning modules
-(`none` means allocated memory). D3D12Core 1.619 (the Agility SDK bundled with The Witcher 3)
-moves each command list to a per-object method table inside the object (offset 0x5c8) at its
-first Reset. After that, none of the list's methods can be hooked through a shared slot; the
-Windows 10.0.26100 D3D12Core keeps module tables. Lists created through Streamline's proxies keep
-the proxy's module table. Producer recordings still require full coverage because observed legacy
-state validates the game resource, so a game submitting its own native lists on such a runtime
-falls back to Generic depth.
-Consumer copies use the recording-based lease whenever the list is covered; its checks also prove
-the list is open and outside a render pass. Coverage excludes enhanced Barrier, because consumer
-copies touch only private textures. Only when a ReShade runtime's immediate list has refused hooks
-does its read fall back to that runtime's contract: the list is open outside any render pass
-during present/effects events, and the runtime submits it on its queue and resets it without
-replay. That read lease is released at the list's next observed submission, followed by the
-private queue fence; until then the capture storage and destination stay retained. Other lists
-without coverage stay unavailable. The status line then scans the refused table and names the
-modules its entries point into, with their first slot indices and the table's offset from the
-consumer list; a copied table keeps the runtime's functions except where its owner patched it.
+invalidates evidence once instead of on every call. QueryInterface refusals are per object and are
+not remembered. D3D12Core 1.619 (the Agility SDK bundled with The Witcher 3) moves each command
+list to a per-object method table inside the object (offset 0x5c8) at its first Reset, so no
+method of such a list can be hooked through a shared slot; the Windows 10.0.26100 D3D12Core keeps
+module tables, and lists created through Streamline's proxies keep the proxy's module table.
 
-ReShade reports every command list it wraps (create, Reset, Close, submission, bundle, render
-pass, destroy) from its own proxy, whose dispatch a runtime cannot move. That lifecycle decides
-capture coverage: a list is covered while ReShade shows it open and outside a render pass, whether
-or not its native table could be hooked (D3D12Core 1.619 moves lists to per-object tables at
-Reset). For a list whose table the hooks do not cover, the same events drive the recording as the
-hooks would: Reset starts a new recording, Close ends it, render passes and bundles are tracked. A
-hook-covered list keeps its hook-maintained recording. The native hooks also cover lists ReShade
-does not know, and still supply observed resource states: ReShade's `barrier` event
-drops split flags, subresources and the aliasing "before" resource, reports UAV barriers as
-transitions, and converts enhanced barriers from access rather than layout. Wrappers resolve to
-the native lifecycle through a private-data tag, which proxies forward. All four surveyed games
-showed complete agreement in the earlier shadow comparison (no hook-only admissions or
-disagreements).
+Command-list work is split by job. ReShade reports every command list it wraps (create, Reset,
+Close, submission, bundle, render pass, destroy) from its own proxy, whose dispatch no runtime can
+move. That lifecycle is the only source of a list's recording and of capture coverage: Reset starts
+a recording, Close ends it, a list is covered while it is open outside a render pass, and a bundle
+makes the rest of the recording opaque. A submitted list stays closed until ReShade reports its
+next Reset, so a native Reset that bypassed ReShade never readmits an old recording. Lists ReShade
+never reported are not covered. Wrappers resolve to the native lifecycle through a private-data
+tag, which proxies forward. Command lists hook only ResourceBarrier and, where supported,
+CommandList7 Barrier: they supply observed resource states when they see the list. Otherwise
+(refused or moved tables) the capture uses the state the game declared on its tag. ReShade's own
+`barrier` event cannot replace these hooks: it reports a transition for the whole resource without
+its subresource (Dead Space transitions the stencil plane of its R32G8X24 depth separately), drops
+split flags, and reports an aliasing barrier as a completed transition of its "after" resource.
+The queue's ExecuteCommandLists hook stays and reports submissions.
 
-`Sunshine list lifecycle shadow` (at most every 5 s) counts admissions by hook and lifecycle view:
-`both`, `hooks_only` (with the lifecycle view: `unknown`, `closed`, `pass`, `opaque`),
-`events_only` (lifecycle coverage where hooks were refused) and `neither`, of which `immediate`
-were on a runtime's own immediate list, which ReShade's lifecycle never reports. `barrier_states`
-compares, for each admitted source, ReShade's last reported transition in that recording with the
-hooked one: `agree`, `disagree` (with the latest pair of values, and `partial`: another
-subresource such as a stencil plane was transitioned after the hooked state; the hooks track
-subresource 0 and ReShade drops the subresource), or known to only one side, where `hooks_only`
-names how many ReShade had made unknown. `blocked_events_known` counts sources the hooks hold
-blocked after a split or aliasing barrier while ReShade reports a completed transition, which
-would be unsafe for an events-only state. ReShade's D3D12 usage keeps every state bit and maps
-only COMMON to `general`. A native Reset seen by the hooks also ends ReShade's shadow states.
-The capture's own copy barriers and
-UAV barriers, including global ones, are excluded on both sides; an aliasing barrier makes its
-named resource unknown, and a wildcard alias every resource in the recording. This shadow decides whether the hooks can be removed; it
-never chooses a copy state.
+Consumer copies of a list open in ReShade's lifecycle use the recording-based lease, whose checks
+also prove the list is open and outside a render pass. A ReShade runtime's own immediate list is
+never reported by that lifecycle and falls back to the runtime's contract: the list is open outside
+any render pass during present/effects events, and the runtime submits it on its queue and resets
+it without replay. That read lease is released at the list's next observed submission, followed by
+the private queue fence; until then the capture storage and destination stay retained. Other lists
+outside the lifecycle stay unavailable.
+
+`Sunshine list lifecycle` (at most every 5 s) counts capture admissions: `covered` (open outside a
+render pass), split into `states observed` by the barrier hooks and `declared`, and `not_open` by
+what the lifecycle showed instead (`unknown`, `closed`, `pass`, `opaque`). It also counts the
+lifecycle events and the tracked lists. Before this split, a comparison of ReShade's barrier event
+with the hooked states agreed in The Witcher 3, Expedition 33 and Hogwarts Legacy; every Dead Space
+mismatch was the separately transitioned stencil plane.
 
 In **Automatic**, stored depth `r` is decoded as `d=r*raw_scale+raw_bias`, then the frame-bound
 projection supplies `q=(d-A)/B`. The identity transform is used without `PrecisionInfo`.
@@ -1975,10 +1959,11 @@ same rectangle; no extra GPU crop pass or illegal partial depth/stencil copy is 
 An older shader without the rectangle uniform must remain mono for cropped input.
 
 A newly created native command list can record transitions before its first Reset or API
-evaluation. The observer associates its first recording at native operation entry, before
-forwarding the operation, so those transitions and any Close, render-pass or opaque-command
-restrictions reach the capture owner. The callback retains that recording identity across the
-original call; a later Reset cannot relabel old evidence as belonging to the new recording.
+evaluation. ReShade's create event associates its first recording; if a hooked barrier arrives
+first, the observer associates it at native operation entry, before forwarding the operation, so
+those transitions reach the capture owner. Close, render-pass and opaque-command restrictions come
+from ReShade's lifecycle. The callback retains that recording identity across the original call; a
+later Reset cannot relabel old evidence as belonging to the new recording.
 Creating the identity supplies no resource state: capture still requires an actual observed
 nonzero transition, and a submission with no observed recording cannot establish ownership.
 

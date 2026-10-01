@@ -27,6 +27,21 @@ namespace {
     T **put() { return &value; }
     std::uint64_t native() const { return reinterpret_cast<std::uint64_t>(value); }
   };
+  // ReShade reports every game list's lifecycle from its proxy, in this order
+  // around the native calls; these stand in for it.
+  using list_event = capture::list_event;
+  HRESULT reset_list(com_ptr<ID3D12GraphicsCommandList> &list, ID3D12CommandAllocator *allocator, ID3D12PipelineState *state) {
+    const auto result = list->Reset(allocator, state);
+    if (SUCCEEDED(result)) capture::observe_list_event(list.native(), list_event::reset);
+    return result;
+  }
+  HRESULT close_list(com_ptr<ID3D12GraphicsCommandList> &list) {
+    capture::observe_list_event(list.native(), list_event::closed);
+    return list->Close();
+  }
+  template<std::size_t N> void submitted(ID3D12CommandList *const (&lists)[N]) {
+    for (auto *value : lists) capture::observe_list_event(reinterpret_cast<std::uint64_t>(value), list_event::executed);
+  }
   void require(bool okay, const char *message) {
     if (!okay) throw std::runtime_error(message);
   }
@@ -100,18 +115,20 @@ namespace {
       capture_initialized = true;
       capture::observe_queue(producer.native());
       capture::observe_queue(consumer.native());
+      capture::observe_list_event(producer_commands.native(), list_event::created);
+      capture::observe_list_event(consumer_commands.native(), list_event::created);
       capture::observe_command(producer_commands.native());
       capture::observe_command(consumer_commands.native());
       capture::poll();
       require(observer::queue_ready(producer.native()) && observer::queue_ready(consumer.native()) &&
-        observer::command_ready(producer_commands.native()) && observer::command_ready(consumer_commands.native()),
+        observer::states_ready(producer_commands.native()) && observer::states_ready(consumer_commands.native()),
         "Production native observer did not establish complete queue/command coverage");
       // Installing coverage invalidates pre-install recordings. Begin fresh,
       // fully observed recordings exactly as a game does at its next Reset.
-      checked(producer_commands->Close(), "Close pre-observer producer recording");
-      checked(consumer_commands->Close(), "Close pre-observer consumer recording");
-      checked(producer_commands->Reset(producer_allocator.value, nullptr), "Start observed producer recording");
-      checked(consumer_commands->Reset(consumer_allocator.value, nullptr), "Start observed consumer recording");
+      checked(close_list(producer_commands), "Close pre-observer producer recording");
+      checked(close_list(consumer_commands), "Close pre-observer consumer recording");
+      checked(reset_list(producer_commands, producer_allocator.value, nullptr), "Start observed producer recording");
+      checked(reset_list(consumer_commands, consumer_allocator.value, nullptr), "Start observed consumer recording");
     }
 
     void drain() {
@@ -173,12 +190,12 @@ namespace {
       capture::name(recorded.result), capture::name(recorded.stage));
     require(ticket && recorded.result == capture::status::recorded, "Production capture rejected the legal producer copy");
     capture::finish(ticket, true);
-    checked(gpu.producer_commands->Close(), "Close producer copy recording");
+    checked(close_list(gpu.producer_commands), "Close producer copy recording");
     ID3D12CommandList *producer_lists[]{gpu.producer_commands.value};
-    gpu.producer->ExecuteCommandLists(1, producer_lists);
+    submitted(producer_lists); gpu.producer->ExecuteCommandLists(1, producer_lists);
     // Resetting the list onto a DIFFERENT allocator is legal while the previous
     // submission runs; that previous allocator is kept alive and never reset.
-    checked(gpu.producer_commands->Reset(gpu.producer_next_allocator.value, nullptr),
+    checked(reset_list(gpu.producer_commands, gpu.producer_next_allocator.value, nullptr),
       "Retire producer recording without resetting its in-flight allocator");
 
     // Earlier consumer work is empty/already submitted. This meets the provider's
@@ -205,9 +222,9 @@ namespace {
         D3D12_RESOURCE_STATE_COPY_DEST, &consumer_result);
       std::printf("copy: accepted=%d status=%s\n", int(copied), capture::name(consumer_result.result));
     }
-    checked(gpu.consumer_commands->Close(), "Close consumer recording");
+    checked(close_list(gpu.consumer_commands), "Close consumer recording");
     ID3D12CommandList *consumer_lists[]{gpu.consumer_commands.value};
-    gpu.consumer->ExecuteCommandLists(1, consumer_lists);
+    submitted(consumer_lists); gpu.consumer->ExecuteCommandLists(1, consumer_lists);
     checked(gpu.consumer->Signal(gpu.game_gate.value, 1), "Queue application's later consumer signal");
     checked(gpu.consumer->Signal(gpu.consumer_done.value, 1), "Fence application consumer progress");
     checked(gpu.producer->Signal(gpu.producer_done.value, 1), "Fence application producer progress");
@@ -229,7 +246,7 @@ namespace {
       // complete. Retry before the ordinary 250 ms freshness window expires;
       // neither metadata timestamps nor evaluation sequence are refreshed here.
       checked(gpu.consumer_allocator->Reset(), "Reset completed consumer allocator");
-      checked(gpu.consumer_commands->Reset(gpu.consumer_allocator.value, nullptr), "Start completion retry recording");
+      checked(reset_list(gpu.consumer_commands, gpu.consumer_allocator.value, nullptr), "Start completion retry recording");
       capture::packet recovered;
       capture::capture_diagnostic recovered_status;
       require(capture::acquire(gpu.consumer.native(), 2, recovered, &recovered_status) && recovered.pixel_ready &&
@@ -239,8 +256,8 @@ namespace {
       require(capture::copy_current(gpu.consumer_commands.native(), recovered, gpu.destination.native(),
         D3D12_RESOURCE_STATE_COPY_DEST, &recovered_copy), "Completed foreign-queue copy was rejected");
       capture::complete_frame(recovered, 2);
-      checked(gpu.consumer_commands->Close(), "Close recovered consumer recording");
-      gpu.consumer->ExecuteCommandLists(1, consumer_lists);
+      checked(close_list(gpu.consumer_commands), "Close recovered consumer recording");
+      submitted(consumer_lists); gpu.consumer->ExecuteCommandLists(1, consumer_lists);
       checked(gpu.consumer->Signal(gpu.consumer_done.value, 3), "Fence completed-depth recovery");
       require(wait_until(gpu.consumer_done.value, 3, 5000), "Recovered depth copy failed to complete");
       std::printf("recovery: same_capture=%llu sequence=%llu pixel_ready=1 producer_completed=%llu\n",
@@ -259,20 +276,20 @@ namespace {
         UINT64_MAX, &recorded);
       require(same_ticket && recorded.result == capture::status::recorded, "Record same-queue source");
       capture::finish(same_ticket, true);
-      checked(gpu.producer_commands->Close(), "Close same-queue producer recording");
-      gpu.producer->ExecuteCommandLists(1, producer_lists);
+      checked(close_list(gpu.producer_commands), "Close same-queue producer recording");
+      submitted(producer_lists); gpu.producer->ExecuteCommandLists(1, producer_lists);
       capture::packet same_queue;
       capture::capture_diagnostic same_status;
       require(capture::acquire(gpu.producer.native(), 3, same_queue, &same_status) && same_queue.pixel_ready &&
         same_queue.capture_id == same_ticket && same_status.producer_completed < same_status.producer_fence,
         "Same-queue capture unnecessarily required CPU-visible producer completion");
       checked(gpu.consumer_allocator->Reset(), "Reset completed consumer allocator for same-queue read");
-      checked(gpu.consumer_commands->Reset(gpu.consumer_allocator.value, nullptr), "Start same-queue consumer recording");
+      checked(reset_list(gpu.consumer_commands, gpu.consumer_allocator.value, nullptr), "Start same-queue consumer recording");
       require(capture::copy_current(gpu.consumer_commands.native(), same_queue, gpu.destination.native(),
         D3D12_RESOURCE_STATE_COPY_DEST), "Same-queue pending copy rejected");
       capture::complete_frame(same_queue, 3);
-      checked(gpu.consumer_commands->Close(), "Close same-queue consumer recording");
-      gpu.producer->ExecuteCommandLists(1, consumer_lists);
+      checked(close_list(gpu.consumer_commands), "Close same-queue consumer recording");
+      submitted(consumer_lists); gpu.producer->ExecuteCommandLists(1, consumer_lists);
       checked(gpu.producer->Signal(gpu.producer_done.value, 4), "Fence same-queue copy");
       checked(gpu.game_gate->Signal(2), "Release intentional same-queue test gate");
       require(wait_until(gpu.producer_done.value, 4, 5000), "Same-queue copy failed to complete");
@@ -336,24 +353,24 @@ namespace {
       return ticket;
     };
     const auto submit = [&](UINT64 completion, ID3D12CommandAllocator *next_allocator, bool wait) {
-      checked(gpu.producer_commands->Close(), "Close pipeline producer");
+      checked(close_list(gpu.producer_commands), "Close pipeline producer");
       ID3D12CommandList *lists[]{gpu.producer_commands.value};
-      gpu.producer->ExecuteCommandLists(1, lists);
+      submitted(lists); gpu.producer->ExecuteCommandLists(1, lists);
       checked(gpu.producer->Signal(gpu.producer_done.value, completion), "Fence pipeline producer");
-      checked(gpu.producer_commands->Reset(next_allocator, nullptr), "Retire pipeline producer recording");
+      checked(reset_list(gpu.producer_commands, next_allocator, nullptr), "Retire pipeline producer recording");
       if (wait) require(wait_until(gpu.producer_done.value, completion, 5000), "Pipeline producer did not finish");
     };
     const auto consume = [&](const capture::packet &packet, UINT64 present) {
       require(capture::copy_current(gpu.consumer_commands.native(), packet, gpu.destination.native(),
         D3D12_RESOURCE_STATE_COPY_DEST), "Copy completed pipeline snapshot");
       capture::complete_frame(packet, present);
-      checked(gpu.consumer_commands->Close(), "Close pipeline consumer");
+      checked(close_list(gpu.consumer_commands), "Close pipeline consumer");
       ID3D12CommandList *lists[]{gpu.consumer_commands.value};
-      gpu.consumer->ExecuteCommandLists(1, lists);
+      submitted(lists); gpu.consumer->ExecuteCommandLists(1, lists);
       checked(gpu.consumer->Signal(gpu.consumer_done.value, present), "Fence pipeline consumer");
       require(wait_until(gpu.consumer_done.value, present, 2000), "Completed snapshot injected a queue wait");
       checked(gpu.consumer_allocator->Reset(), "Reset finished pipeline consumer allocator");
-      checked(gpu.consumer_commands->Reset(gpu.consumer_allocator.value, nullptr), "Restart pipeline consumer");
+      checked(reset_list(gpu.consumer_commands, gpu.consumer_allocator.value, nullptr), "Restart pipeline consumer");
     };
 
     const auto first_ticket = record();
@@ -585,24 +602,24 @@ namespace {
       return ticket;
     };
     const auto submit = [&] {
-      checked(gpu.producer_commands->Close(), "Close reclamation producer");
+      checked(close_list(gpu.producer_commands), "Close reclamation producer");
       ID3D12CommandList *lists[]{gpu.producer_commands.value};
-      gpu.producer->ExecuteCommandLists(1, lists);
+      submitted(lists); gpu.producer->ExecuteCommandLists(1, lists);
       checked(gpu.producer->Signal(gpu.producer_done.value, ++producer_sequence), "Fence reclamation producer");
       require(wait_until(gpu.producer_done.value, producer_sequence, 5000), "Reclamation producer did not finish");
       checked(gpu.producer_allocator->Reset(), "Reset retired reclamation producer allocator");
-      checked(gpu.producer_commands->Reset(gpu.producer_allocator.value, nullptr), "Retire reclamation producer recording");
+      checked(reset_list(gpu.producer_commands, gpu.producer_allocator.value, nullptr), "Retire reclamation producer recording");
     };
     transition(gpu.consumer_commands.value, gpu.destination.value, D3D12_RESOURCE_STATE_DEPTH_WRITE,
       D3D12_RESOURCE_STATE_COPY_DEST);
     const auto submit_consumer = [&] {
-      checked(gpu.consumer_commands->Close(), "Close reclamation consumer");
+      checked(close_list(gpu.consumer_commands), "Close reclamation consumer");
       ID3D12CommandList *lists[]{gpu.consumer_commands.value};
-      gpu.consumer->ExecuteCommandLists(1, lists);
+      submitted(lists); gpu.consumer->ExecuteCommandLists(1, lists);
       checked(gpu.consumer->Signal(gpu.consumer_done.value, ++consumer_sequence), "Fence reclamation consumer");
       require(wait_until(gpu.consumer_done.value, consumer_sequence, 5000), "Reclamation consumer did not finish");
       checked(gpu.consumer_allocator->Reset(), "Reset retired reclamation consumer allocator");
-      checked(gpu.consumer_commands->Reset(gpu.consumer_allocator.value, nullptr), "Retire reclamation consumer recording");
+      checked(reset_list(gpu.consumer_commands, gpu.consumer_allocator.value, nullptr), "Retire reclamation consumer recording");
     };
     const auto consume = [&](capture::packet &packet, UINT64 present, float expected) {
       plane_readback bytes;
@@ -794,11 +811,11 @@ namespace {
       D3D12_RESOURCE_STATE_DEPTH_WRITE);
     gpu.producer_commands->ClearDepthStencilView(source_dsv, D3D12_CLEAR_FLAG_DEPTH, .875f, 0, 0, nullptr);
     transition(gpu.producer_commands.value, gpu.source.value, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    checked(gpu.producer_commands->Close(), "Close API content producer");
+    checked(close_list(gpu.producer_commands), "Close API content producer");
     ID3D12CommandList *producer_lists[]{gpu.producer_commands.value};
-    gpu.producer->ExecuteCommandLists(1, producer_lists);
+    submitted(producer_lists); gpu.producer->ExecuteCommandLists(1, producer_lists);
     checked(gpu.producer->Signal(gpu.producer_done.value, 1), "Fence API content producer");
-    checked(gpu.producer_commands->Reset(gpu.producer_next_allocator.value, nullptr), "Retire API content producer recording");
+    checked(reset_list(gpu.producer_commands, gpu.producer_next_allocator.value, nullptr), "Retire API content producer recording");
     require(wait_until(gpu.producer_done.value, 1, 5000), "API content producer did not finish");
 
     capture::packet packet;
@@ -817,9 +834,9 @@ namespace {
     captured_stencil.record(gpu.device.value, gpu.consumer_commands.value, gpu.destination.value, 1);
     source_depth.record(gpu.device.value, gpu.consumer_commands.value, gpu.source.value, 0);
     source_stencil.record(gpu.device.value, gpu.consumer_commands.value, gpu.source.value, 1);
-    checked(gpu.consumer_commands->Close(), "Close API content consumer");
+    checked(close_list(gpu.consumer_commands), "Close API content consumer");
     ID3D12CommandList *consumer_lists[]{gpu.consumer_commands.value};
-    gpu.consumer->ExecuteCommandLists(1, consumer_lists);
+    submitted(consumer_lists); gpu.consumer->ExecuteCommandLists(1, consumer_lists);
     checked(gpu.consumer->Signal(gpu.consumer_done.value, 1), "Fence API content readbacks");
     require(wait_until(gpu.consumer_done.value, 1, 5000), "API content readbacks did not finish");
 

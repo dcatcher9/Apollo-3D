@@ -13,18 +13,15 @@ namespace sunshine_streamline::native_observer {
     // All callbacks are synchronous. Neither arrays nor native objects are
     // retained. Barrier fields are the exact native type/flags/state/subresource.
     void (*barriers)(std::uint64_t command, std::uint64_t cookie, unsigned count, const D3D12_RESOURCE_BARRIER *values){};
-    void (*reset)(std::uint64_t command, std::uint64_t old_cookie, HRESULT result){};
-    void (*close)(std::uint64_t command, std::uint64_t cookie, HRESULT result){};
     // Identities are frozen BEFORE ExecuteCommandLists; notification occurs only
     // AFTER its native original returns. No GPU completion is implied.
     void (*submitted)(std::uint64_t queue, unsigned count, const command_identity *commands){};
     // Hook coverage changed, an input could not be snapshotted, or discovery failed.
     // Owner must invalidate evidence without freeing in-flight GPU resources.
     void (*invalidated)(){};
-    // ExecuteBundle or enhanced Barrier invalidates the recording's legacy
-    // state proof until Reset; no enhanced-layout interpretation is invented.
+    // Enhanced Barrier invalidates the recording's legacy state proof until
+    // Reset; no enhanced-layout interpretation is invented.
     void (*invalidated_command)(std::uint64_t command, std::uint64_t cookie){};
-    void (*render_pass)(std::uint64_t command, std::uint64_t cookie, bool inside){};
     // Called at native operation entry, before forwarding, only for an object
     // without a recording cookie. The owner may authenticate a new recording;
     // post-call evidence freezes its returned identity across any later Reset.
@@ -35,14 +32,6 @@ namespace sunshine_streamline::native_observer {
     // Overflow now means snapshot allocation/size failure, never exceeding
     // the inline fast path. Valid large batches are observed in full.
     std::uint64_t barrier_overflow{}, submission_overflow{}, discovery_contention{};
-    // Refusals: QueryInterface refused the exact interface (every call), or a
-    // distinct vtable slot or its function is outside a loaded module image
-    // (a per-object table or another tool's trampoline), or a method already has eight
-    // vtables. The newest keeps its slot (or vtable for QueryInterface, method 8)
-    // and function address.
-    std::uint64_t refused_interface{}, refused_discovery{}, refused_capacity{};
-    std::uint64_t refused_slot{}, refused_code{}, refused_table{};
-    unsigned refused_method{};
   };
 
   // Owner serializes install_pending calls. Initialize only while owner
@@ -60,14 +49,15 @@ namespace sunshine_streamline::native_observer {
   // eight native vtable slots. Deferred installation replaces only the exact
   // authenticated slot; shared code used by other interfaces is untouched. Optional CL4/CL7
   // methods are discovered only through successful QueryInterface; readiness
-  // requires coverage of every interface supported by the live object.
+  // requires coverage of every interface supported by the live object. Only
+  // ResourceBarrier and (CL7) enhanced Barrier are hooked on command lists:
+  // their lifecycle comes from ReShade's events.
   void observe_command(std::uint64_t command);
   void observe_queue(std::uint64_t queue);
   bool install_pending();
-  // Enhanced Barrier coverage can be waived only by a caller whose recorded
-  // work touches private resources alone: such barriers cannot name them.
-  // Render-pass coverage is never waived; copies are invalid inside a pass.
-  bool command_ready(std::uint64_t command, bool enhanced_barriers = true);
+  // The list's resource states are observed: its barrier (and, if supported,
+  // enhanced Barrier) hooks are installed.
+  bool states_ready(std::uint64_t command);
   bool queue_ready(std::uint64_t queue);
   counters counts();
 
@@ -89,9 +79,6 @@ namespace sunshine_streamline::native_observer {
     suppression_scope(const suppression_scope &) = delete;
     suppression_scope &operator=(const suppression_scope &) = delete;
   };
-  // True on this thread inside a suppression scope or observer callback: the
-  // work is the capture's own, which ReShade's events must not report either.
-  bool observation_suppressed();
 
 #ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
   // Fixture only: callbacks are quiescent. Restore only still-owned vtable

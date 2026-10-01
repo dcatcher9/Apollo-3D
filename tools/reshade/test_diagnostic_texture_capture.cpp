@@ -20,6 +20,24 @@ namespace {
   namespace observer = sunshine_streamline::native_observer;
   using Microsoft::WRL::ComPtr;
   template<class T> std::uint64_t native(T *value) { return reinterpret_cast<std::uint64_t>(value); }
+  // ReShade reports every game list's lifecycle from its proxy, in this order
+  // around the native calls; these stand in for it. A runtime's own immediate
+  // list is never reported and uses the native calls directly.
+  void created(ID3D12GraphicsCommandList *list) { capture::observe_list_event(native(list), capture::list_event::created); }
+  void destroyed(ID3D12GraphicsCommandList *list) { capture::observe_list_event(native(list), capture::list_event::destroyed); }
+  HRESULT reset_list(ID3D12GraphicsCommandList *list, ID3D12CommandAllocator *allocator) {
+    const auto result = list->Reset(allocator, nullptr);
+    if (SUCCEEDED(result)) capture::observe_list_event(native(list), capture::list_event::reset);
+    return result;
+  }
+  HRESULT close_list(ID3D12GraphicsCommandList *list) {
+    capture::observe_list_event(native(list), capture::list_event::closed);
+    return list->Close();
+  }
+  void execute(ID3D12CommandQueue *queue, ID3D12GraphicsCommandList *list) {
+    capture::observe_list_event(native(list), capture::list_event::executed);
+    ID3D12CommandList *lists[]{list}; queue->ExecuteCommandLists(1, lists);
+  }
   void require(bool value, const char *message) { if (!value) throw std::runtime_error(message); }
   void check(HRESULT value, const char *message) {
     if (FAILED(value)) { char text[256]; std::snprintf(text, sizeof(text), "%s: 0x%08lx", message, static_cast<unsigned long>(value)); throw std::runtime_error(text); }
@@ -70,11 +88,12 @@ namespace {
       require(prior.observed == after.observed && prior.calls == after.calls, "inactive capture touched native observation");
       capture::initialize(true);
       capture::observe_queue(native(queue.Get())); capture::observe_queue(native(foreign_queue.Get()));
+      created(list.Get());
       capture::observe_command(native(list.Get())); capture::poll();
-      require(observer::command_ready(native(list.Get())) && observer::queue_ready(native(queue.Get())), "native observer not ready");
-      check(list->Close(), "initial close");
+      require(observer::states_ready(native(list.Get())) && observer::queue_ready(native(queue.Get())), "native observer not ready");
+      check(close_list(list.Get()), "initial close");
       check(allocator->Reset(), "initial allocator reset");
-      check(list->Reset(allocator.Get(), nullptr), "initial list reset");
+      check(reset_list(list.Get(), allocator.Get()), "initial list reset");
     }
     void wait() {
       check(queue->Signal(fence.Get(), ++completion), "test signal");
@@ -84,10 +103,10 @@ namespace {
       const auto outcome = SUCCEEDED(hr) ? WaitForSingleObject(event, 10000) : WAIT_FAILED;
       CloseHandle(event); require(outcome == WAIT_OBJECT_0, "test GPU completion timeout");
     }
-    void submit() { check(list->Close(), "close"); ID3D12CommandList *lists[]{list.Get()}; queue->ExecuteCommandLists(1, lists); }
+    void submit() { check(close_list(list.Get()), "close"); execute(queue.Get(), list.Get()); }
     void reset() {
       check(next_allocator->Reset(), "spare allocator reset");
-      check(list->Reset(next_allocator.Get(), nullptr), "reset producer recording");
+      check(reset_list(list.Get(), next_allocator.Get()), "reset producer recording");
       std::swap(allocator, next_allocator); capture::poll();
     }
     void check_debug_errors() {
@@ -175,18 +194,20 @@ namespace {
       check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "consumer allocator");
       check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&spare)), "consumer spare allocator");
       check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list)), "consumer list");
+      created(list.Get());
       capture::observe_command(native(list.Get())); capture::poll();
-      check(list->Close(), "consumer initial close");
+      check(close_list(list.Get()), "consumer initial close");
       reset();
     }
+    ~consumer_fixture() { destroyed(list.Get()); }
     void reset() {
       check(spare->Reset(), "consumer allocator reset");
-      check(list->Reset(spare.Get(), nullptr), "consumer recording reset");
+      check(reset_list(list.Get(), spare.Get()), "consumer recording reset");
       std::swap(allocator, spare); capture::poll();
     }
     void submit() {
-      check(list->Close(), "consumer close");
-      ID3D12CommandList *values[]{list.Get()}; gpu.foreign_queue->ExecuteCommandLists(1, values);
+      check(close_list(list.Get()), "consumer close");
+      execute(gpu.foreign_queue.Get(), list.Get());
     }
     void wait() {
       ComPtr<ID3D12Fence> fence;
@@ -262,7 +283,8 @@ namespace {
       "first-resource fixture retained source identity before the observed barrier");
 
     // Hooks are already installed, but these native lists have never been
-    // observed explicitly or Reset. CreateCommandList returns an open recording.
+    // observed explicitly or Reset. CreateCommandList returns an open recording,
+    // which ReShade reports as created.
     ComPtr<ID3D12CommandAllocator> empty_allocator, source_allocator;
     ComPtr<ID3D12GraphicsCommandList> empty_list, source_list;
     const auto fresh_list = [&](ComPtr<ID3D12CommandAllocator> &allocator,
@@ -273,7 +295,8 @@ namespace {
         IID_PPV_ARGS(&list)), "first-recording command list");
       require(observer::get_recording_cookie(native(list.Get())) == 0,
         "fresh native command list already has a recording cookie");
-      require(observer::command_ready(native(list.Get())), "fresh native list did not share installed hooks");
+      require(observer::states_ready(native(list.Get())), "fresh native list did not share installed hooks");
+      created(list.Get());
     };
     fresh_list(empty_allocator, empty_list);
     fresh_list(source_allocator, source_list);
@@ -300,8 +323,8 @@ namespace {
     require(diagnostic.result == capture::status::missing_state && diagnostic.stage == capture::record_stage::missing_state &&
         !diagnostic.observed && !diagnostic.copy_state_known,
       "fresh recording imported NGX state from another command list's source barrier");
-    check(empty_list->Close(), "empty first-recording close");
-    capture::command_destroyed(native(empty_list.Get()));
+    check(close_list(empty_list.Get()), "empty first-recording close");
+    destroyed(empty_list.Get()); capture::command_destroyed(native(empty_list.Get()));
 
     input.sequence = 2; input.tick = GetTickCount64();
     const auto ticket = capture::nominate_evaluation(native(source_list.Get()), input, UINT64_MAX, &diagnostic);
@@ -317,10 +340,10 @@ namespace {
       "NGX nomination lost the first pre-retention resource barrier or replaced its recording identity");
     transition(source_list.Get(), depth.source.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE); // Validate exact source-state restoration.
-    check(source_list->Close(), "first-recording source close");
-    ID3D12CommandList *lists[]{source_list.Get()}; gpu.queue->ExecuteCommandLists(1, lists); gpu.wait();
+    check(close_list(source_list.Get()), "first-recording source close");
+    execute(gpu.queue.Get(), source_list.Get()); gpu.wait();
     check(source_allocator->Reset(), "first-recording completed allocator reset");
-    check(source_list->Reset(source_allocator.Get(), nullptr), "first-recording source retirement");
+    check(reset_list(source_list.Get(), source_allocator.Get()), "first-recording source retirement");
     capture::poll();
 
     capture::packet packet;
@@ -339,7 +362,7 @@ namespace {
     actual.verify(depth.width, depth.height, depth.bpp);
     packet = {};
     capture::retire_source(input.provider, input.epoch, input.source_id);
-    capture::command_destroyed(native(source_list.Get()));
+    destroyed(source_list.Get()); capture::command_destroyed(native(source_list.Get()));
     capture::command_destroyed(native(consumer.list.Get()));
     capture::poll();
     gpu.check_debug_errors();
@@ -777,7 +800,7 @@ namespace {
       require(!capture::record_diagnostic_texture(native(gpu.list.Get()), image.input, &exhausted) && exhausted.result == capture::status::exhausted,
         "pending auxiliary consumer was reclaimed before its queue fence");
       for (auto &next : other) capture::release_diagnostic_texture(next);
-      check(gpu.list->Close(), "cancel auxiliary pool recording"); gpu.reset(); other.clear(); capture::poll();
+      check(close_list(gpu.list.Get()), "cancel auxiliary pool recording"); gpu.reset(); other.clear(); capture::poll();
       delayed.open(); consumer.wait(); actual.verify(image.width, image.height, bpp); capture::poll();
       require((local ? source_lifetime.use_count() == 1 : source_lifetime.expired()) && target_lifetime.expired(),
         "completed auxiliary consumer retained a lease beyond the optional local storage cache");
@@ -844,9 +867,8 @@ namespace {
       require(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(100),
         "local auxiliary admission/copy waited for GPU completion");
       actual.record(consumer.list.Get(), target.Get());
-      check(consumer.list->Close(), "ordered consumer close");
-      ID3D12CommandList *submitted[]{consumer.list.Get()};
-      gpu.queue->ExecuteCommandLists(1, submitted);
+      check(close_list(consumer.list.Get()), "ordered consumer close");
+      execute(gpu.queue.Get(), consumer.list.Get());
       pixels = {};
       capture::release_diagnostic_texture(local); local = {};
       capture::release_diagnostic_texture(shared); shared = {};
@@ -862,10 +884,10 @@ namespace {
   }
 
   void immediate_consumer_without_list_hooks(fixture &gpu) {
-    // D3D12Core 1.619 moves a list to a per-object method table inside the
-    // object at its first Reset, which is never hooked. A runtime immediate
-    // list needs no list hook: its observed submission and the queue fence
-    // retire the read, and nothing is released before that GPU work.
+    // A runtime's immediate list is never reported by ReShade's lifecycle, and
+    // D3D12Core 1.619 can move it to a per-object method table that is never
+    // hooked. Its observed submission and the queue fence retire the read, and
+    // nothing is released before that GPU work.
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> list;
     check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "immediate allocator");
@@ -880,7 +902,7 @@ namespace {
     // The first sighting reports the refused slots once, revoking recordings
     // open at that moment. Later recordings and captures persist.
     capture::observe_command(native(list.Get())); capture::poll();
-    check(gpu.list->Close(), "close recording open during refusal"); gpu.reset();
+    check(close_list(gpu.list.Get()), "close recording open during refusal"); gpu.reset();
     texture_case image(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, 4);
     auto target = destination(gpu.device.Get(), DXGI_FORMAT_R10G10B10A2_UNORM);
     auto local = capture::record_local_texture(native(gpu.list.Get()), image.input);
@@ -896,7 +918,7 @@ namespace {
         native(target.Get()), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &diagnostic, immediate);
     };
     require(!copy(false) && diagnostic.result == capture::consumer_status::observer_not_ready,
-      "a list with a swapped heap vtable became hook-ready");
+      "a list ReShade's lifecycle never reported was read as a game list");
     require(copy(true) && !diagnostic.cookie && copy(true), "immediate consumer without list hooks was rejected");
     readback actual(gpu, target.Get());
     actual.record(list.Get(), target.Get());
@@ -913,9 +935,9 @@ namespace {
     gpu.wait(); actual.verify(image.width, image.height, 4); gpu.reset(); capture::poll();
     require(target_lifetime.expired(), "the submitted immediate read was not retired by its queue fence");
     {
-      // A covered immediate list keeps the recording lease, whose checks also
-      // prove it open and outside a render pass: completion alone does not
-      // release it before the recording's Reset.
+      // A list open in ReShade's lifecycle keeps the recording lease, whose
+      // checks also prove it open and outside a render pass: completion alone
+      // does not release it before the recording's Reset.
       consumer_fixture covered(gpu);
       auto next = capture::record_local_texture(native(gpu.list.Get()), image.input);
       require(bool(next), "covered immediate source capture");
@@ -933,22 +955,22 @@ namespace {
       reference = {}; pixels = {};
       capture::release_diagnostic_texture(next); next = {};
       output.Reset();
-      check(covered.list->Close(), "covered immediate close");
-      ID3D12CommandList *covered_values[]{covered.list.Get()};
-      gpu.queue->ExecuteCommandLists(1, covered_values);
+      check(close_list(covered.list.Get()), "covered immediate close");
+      execute(gpu.queue.Get(), covered.list.Get());
       gpu.wait(); copied.verify(image.width, image.height, 4); gpu.reset(); capture::poll();
       require(!output_lifetime.expired(), "a covered immediate read was released before its recording Reset");
       covered.reset();
       require(output_lifetime.expired(), "a covered immediate read outlived its Reset and fence");
     }
     gpu.check_debug_errors();
-    std::puts("PASS immediate consumer: unhookable swapped vtable uses its observed submission and fence; covered list keeps the recording lease");
+    std::puts("PASS immediate consumer: a runtime list outside ReShade's lifecycle uses its observed submission and fence; a reported list keeps the recording lease");
   }
 
   void list_lifecycle_coverage(fixture &gpu) {
-    // ReShade's list lifecycle decides capture coverage for every list it
-    // wraps and drives the recording like the native hooks; the hooks cover
-    // only lists unknown to it. The hook view is still counted.
+    // ReShade's list lifecycle is the only source of capture coverage: a list
+    // is covered while it is open outside a render pass. The barrier hooks
+    // supply its resource states when they see it; otherwise the declared
+    // state applies.
     using event = capture::list_event;
     texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
     const auto list = native(gpu.list.Get());
@@ -957,105 +979,61 @@ namespace {
       if (ticket) { capture::finish_diagnostic_texture(ticket, false); capture::release_diagnostic_texture(ticket); }
       return bool(ticket);
     };
-    auto last = capture::list_shadow();
+    auto last = capture::list_coverage();
     const auto counted = [&](const char *expected, auto check) {
-      const auto now = capture::list_shadow();
+      const auto now = capture::list_coverage();
       require(check(last, now), expected);
       last = now;
     };
-    require(record(list), "hooked list without a ReShade lifecycle rejected a capture");
-    counted("list unknown to ReShade was not counted as hooks-only", [](const auto &a, const auto &b) {
-      return b.hooks_only == a.hooks_only + 1 && b.unknown == a.unknown + 1 && b.both == a.both; });
-    capture::observe_list_event(list, event::created);
-    require(record(list), "hooked list with an open lifecycle rejected a capture");
-    counted("open lifecycle and hooks did not agree", [](const auto &a, const auto &b) {
-      return b.both == a.both + 1 && b.hooks_only == a.hooks_only && b.closed_disagree == a.closed_disagree &&
-        b.pass_disagree == a.pass_disagree; });
-    // Barrier-state shadow: the construction barrier left the source in
-    // NON_PIXEL_SHADER_RESOURCE in this recording, observed by the hooks.
-    const std::uint64_t source = native(image.source.Get());
-    const std::uint32_t non_pixel = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, pixel = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-      copy_dest = D3D12_RESOURCE_STATE_COPY_DEST, uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    capture::observe_list_barriers(list, 1, &source, &copy_dest, &non_pixel);
-    require(record(list), "a matching ReShade barrier state changed admission");
-    counted("matching barrier states were not counted as agreeing", [](const auto &a, const auto &b) {
-      return b.barrier_agree == a.barrier_agree + 1 && b.barrier_disagree == a.barrier_disagree; });
-    capture::observe_list_barriers(list, 1, &source, &uav, &uav);
-    require(record(list), "a UAV barrier changed admission");
-    counted("a UAV barrier was taken as a transition", [](const auto &a, const auto &b) {
-      return b.barrier_agree == a.barrier_agree + 1; });
-    capture::observe_list_barriers(list, 1, &source, &non_pixel, &pixel);
-    require(record(list), "a mismatched ReShade barrier state changed admission");
-    counted("a mismatched barrier state was not counted with its values", [](const auto &a, const auto &b) {
-      return b.barrier_disagree == a.barrier_disagree + 1 && b.barrier_agree == a.barrier_agree &&
-        b.last_disagree_hooked == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE &&
-        b.last_disagree_usage == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE; });
-    // A global UAV barrier (resource 0, UAV to UAV) is no transition and must
-    // not erase what ReShade reported.
-    const std::uint64_t global = 0;
-    capture::observe_list_barriers(list, 1, &source, &pixel, &non_pixel);
-    capture::observe_list_barriers(list, 1, &global, &uav, &uav);
-    require(record(list), "a global UAV barrier changed admission");
-    counted("a global UAV barrier erased ReShade's states", [](const auto &a, const auto &b) {
-      return b.barrier_agree == a.barrier_agree + 1; });
-    // An alias names only its after-resource: unknown to ReShade from then on.
-    const std::uint32_t undefined = 0;
-    capture::observe_list_barriers(list, 1, &source, &undefined, &non_pixel);
-    require(record(list), "an aliased ReShade barrier state changed admission");
-    counted("an alias did not make the resource unknown to ReShade", [](const auto &a, const auto &b) {
-      return b.barrier_hooks_only == a.barrier_hooks_only + 1; });
-    // A wildcard alias (resource 0) makes every state unknown.
-    capture::observe_list_barriers(list, 1, &source, &pixel, &non_pixel);
-    capture::observe_list_barriers(list, 1, &global, &undefined, &non_pixel);
-    require(record(list), "an unknown ReShade barrier state changed admission");
-    counted("a wildcard alias did not make ReShade's states unknown", [](const auto &a, const auto &b) {
-      return b.barrier_hooks_only == a.barrier_hooks_only + 1 && b.barrier_hooks_only_unknown == a.barrier_hooks_only_unknown + 1; });
+    require(record(list), "an open list rejected a capture");
+    counted("an open hooked list was not counted with observed states", [](const auto &a, const auto &b) {
+      return b.covered == a.covered + 1 && b.states_observed == a.states_observed + 1 && b.states_declared == a.states_declared; });
     capture::observe_list_event(list, event::pass_begin);
     require(!record(list), "a capture was admitted inside ReShade's render pass");
     counted("a lifecycle render pass was not counted", [](const auto &a, const auto &b) {
-      return b.hooks_only == a.hooks_only + 1 && b.pass == a.pass + 1; });
+      return b.pass == a.pass + 1 && b.covered == a.covered; });
     capture::observe_list_event(list, event::pass_end);
     require(record(list), "the end of ReShade's render pass did not readmit captures");
     capture::observe_list_event(list, event::closed);
     require(!record(list), "a capture was admitted after ReShade's Close");
-    counted("a lifecycle close was not counted", [](const auto &a, const auto &b) {
-      return b.closed == a.closed + 1; });
+    counted("a lifecycle close was not counted", [](const auto &a, const auto &b) { return b.closed == a.closed + 1; });
     capture::observe_list_event(list, event::reset);
     require(record(list), "ReShade's Reset did not reopen the recording");
-    counted("reset lifecycle did not reopen the list", [](const auto &a, const auto &b) { return b.both == a.both + 1; });
-    capture::observe_list_event(list, event::destroyed);
-    require(record(list), "a list no longer known to ReShade lost its hook coverage");
-    counted("a destroyed lifecycle was still tracked", [](const auto &a, const auto &b) {
-      return b.hooks_only == a.hooks_only + 1 && b.unknown == a.unknown + 1; });
-    capture::observe_list_event(list, event::created);
-    // A split barrier blocks the source for the hooks, while ReShade's event
-    // drops the split flags and reports a completed transition.
-    {
-      D3D12_RESOURCE_BARRIER split[2]{};
-      for (auto &value : split) {
-        value.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        value.Transition = {image.source.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE};
-      }
-      split[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY; split[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_END_ONLY;
-      gpu.list->ResourceBarrier(1, &split[0]); gpu.list->ResourceBarrier(1, &split[1]);
-      const std::uint32_t copy_source = D3D12_RESOURCE_STATE_COPY_SOURCE;
-      capture::observe_list_barriers(list, 1, &source, &non_pixel, &copy_source);
-      record(list);
-      counted("a blocked source with a ReShade-reported state was not counted", [](const auto &a, const auto &b) {
-        return b.barrier_blocked_events_known == a.barrier_blocked_events_known + 1; });
-      transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    }
-    gpu.submit(); gpu.wait(); gpu.reset();
-    // The hooked native Reset ends ReShade's shadow states for that recording,
-    // even before (or without) ReShade's own reset event.
-    require(record(list), "a reset hooked list rejected a capture");
-    counted("ReShade states survived a native Reset", [](const auto &a, const auto &b) {
-      return b.barrier_events_only == a.barrier_events_only && b.barrier_blocked_events_known == a.barrier_blocked_events_known; });
+    // A submitted list stays closed until ReShade reports its next Reset, so a
+    // native Reset that bypassed ReShade never readmits an old recording.
+    capture::observe_list_event(list, event::executed);
+    require(!record(list), "a capture was admitted after the list was submitted");
+    counted("a submitted list was not counted as closed", [](const auto &a, const auto &b) { return b.closed == a.closed + 1; });
     capture::observe_list_event(list, event::reset);
+    require(record(list), "ReShade's Reset did not reopen a submitted list");
+    capture::observe_list_event(list, event::destroyed);
+    require(!record(list), "a list no longer known to ReShade admitted a capture");
+    counted("a destroyed lifecycle was still tracked", [](const auto &a, const auto &b) { return b.unknown == a.unknown + 1; });
+    capture::observe_list_event(list, event::created);
+    require(record(list), "ReShade's created event did not cover the list");
+    capture::observe_list_event(list, event::bundle);
+    require(!record(list), "a capture was admitted after an opaque bundle");
+    counted("an opaque bundle was not counted", [](const auto &a, const auto &b) { return b.opaque == a.opaque + 1; });
+    capture::observe_list_event(list, event::reset);
+    require(record(list), "ReShade's Reset did not end the opaque recording");
+    gpu.submit(); gpu.wait(); gpu.reset();
+
+    // A game list ReShade never reported is not covered, hooks or not.
+    last = capture::list_coverage();
+    {
+      ComPtr<ID3D12CommandAllocator> allocator;
+      ComPtr<ID3D12GraphicsCommandList> unreported;
+      check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "unreported allocator");
+      check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&unreported)),
+        "unreported list");
+      require(!record(native(unreported.Get())), "a list unknown to ReShade's lifecycle admitted a capture");
+      counted("a list unknown to ReShade was not counted", [](const auto &a, const auto &b) {
+        return b.unknown == a.unknown + 1 && b.covered == a.covered; });
+      check(unreported->Close(), "unreported list close");
+    }
 
     // A list whose native table cannot be hooked (as after a D3D12Core 1.619
-    // Reset) is covered by ReShade's lifecycle alone.
+    // Reset) is covered by ReShade's lifecycle with its declared state.
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> refused;
     check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "unhookable allocator");
@@ -1073,18 +1051,19 @@ namespace {
     // next recording (ReShade's Reset) is admitted.
     record(unhookable);
     capture::observe_list_event(unhookable, event::reset);
-    last = capture::list_shadow();
-    require(record(unhookable), "an unhookable list open in ReShade's lifecycle rejected a capture");
-    counted("an unhookable list was not counted as events-only", [](const auto &a, const auto &b) {
-      return b.events_only == a.events_only + 1; });
+    last = capture::list_coverage();
+    require(!observer::states_ready(unhookable) && record(unhookable),
+      "an unhookable list open in ReShade's lifecycle rejected a capture");
+    counted("an unhookable list was not counted with its declared state", [](const auto &a, const auto &b) {
+      return b.covered == a.covered + 1 && b.states_declared == a.states_declared + 1 && b.states_observed == a.states_observed; });
     capture::observe_list_event(unhookable, event::closed);
     require(!record(unhookable), "an unhookable list admitted a capture after ReShade's Close");
     capture::observe_list_event(unhookable, event::destroyed);
     require(!record(unhookable), "an unhookable list unknown to ReShade admitted a capture");
     check(refused->Close(), "unhookable list close");
-    check(gpu.list->Close(), "close recording open during refusal"); gpu.reset();
+    check(close_list(gpu.list.Get()), "close recording open during refusal"); gpu.reset();
     gpu.check_debug_errors();
-    std::puts("PASS list lifecycle coverage: ReShade's Reset/Close/render pass decide admission, hooks cover unknown lists, an unhookable list is covered by the lifecycle alone, barrier states compared");
+    std::puts("PASS list lifecycle coverage: ReShade's created/Reset/Close/submit/render pass/bundle decide admission, unreported lists are rejected, an unhookable list uses its declared state");
   }
 
   void auxiliary_consumer_replay_and_discard(fixture &gpu) {
@@ -1103,18 +1082,17 @@ namespace {
     auto discarded = capture_ready(); require(copy(discarded), "auxiliary discarded consumer setup");
     std::weak_ptr<const capture::texture_reference> discarded_lifetime = discarded.ownership;
     capture::release_diagnostic_texture(discarded); discarded = {};
-    check(consumer.list->Close(), "unsubmitted consumer close"); consumer.reset(); capture::poll();
+    check(close_list(consumer.list.Get()), "unsubmitted consumer close"); consumer.reset(); capture::poll();
     require(discarded_lifetime.expired(), "unsubmitted consumer Reset invented an unretirable GPU fence");
 
     auto ticket = capture_ready(); require(copy(ticket), "auxiliary replay consumer setup");
     consumer.submit(); consumer.wait();
     std::weak_ptr<const capture::texture_reference> retained = ticket.ownership;
     capture::diagnostic_texture pixels;
-    ID3D12CommandList *values[]{consumer.list.Get()};
-    gpu.foreign_queue->ExecuteCommandLists(1, values); consumer.wait();
+    execute(gpu.foreign_queue.Get(), consumer.list.Get()); consumer.wait();
     require(capture::acquire_diagnostic_texture(ticket, pixels) == capture::status::ready,
       "same-queue replay of immutable auxiliary reads was rejected"); pixels = {};
-    gpu.queue->ExecuteCommandLists(1, values); gpu.wait();
+    execute(gpu.queue.Get(), consumer.list.Get()); gpu.wait();
     require(capture::acquire_diagnostic_texture(ticket, pixels) == capture::status::failed &&
       pixels.failure == capture::capture_failure::consumer_queue_changed,
       "auxiliary consumer replay on a different queue did not invalidate the source"); pixels = {};
@@ -1232,7 +1210,7 @@ namespace {
     capture::finish_diagnostic_texture(ticket, true); gpu.submit(); gpu.wait();
     capture::diagnostic_texture snapshot;
     require(capture::acquire_diagnostic_texture(ticket, snapshot) == capture::status::submitted, "replayable closed recording exposed");
-    ID3D12CommandList *lists[]{gpu.list.Get()}; gpu.queue->ExecuteCommandLists(1, lists); gpu.wait();
+    execute(gpu.queue.Get(), gpu.list.Get()); gpu.wait();
     require(capture::acquire_diagnostic_texture(ticket, snapshot) == capture::status::failed && snapshot.failure == capture::capture_failure::replay,
       "replayed snapshot accepted");
     gpu.reset(); capture::release_diagnostic_texture(ticket); ticket = {}; capture::poll();
@@ -1245,11 +1223,11 @@ namespace {
     require(!capture::record_diagnostic_texture(native(gpu.list.Get()), image.input, &failure) && failure.result == capture::status::exhausted,
       "auxiliary pool exceeded bound");
     for (auto &next : pending) { capture::release_diagnostic_texture(next); capture::finish_diagnostic_texture(next, true); }
-    check(gpu.list->Close(), "discarded recording close"); gpu.reset(); pending.clear(); capture::poll();
+    check(close_list(gpu.list.Get()), "discarded recording close"); gpu.reset(); pending.clear(); capture::poll();
     auto recovered = capture::record_diagnostic_texture(native(gpu.list.Get()), image.input); require(bool(recovered), "canceled pool did not recover");
     capture::finish_diagnostic_texture(recovered, false);
     require(capture::acquire_diagnostic_texture(recovered, snapshot) == capture::status::failed, "failed API call accepted");
-    capture::release_diagnostic_texture(recovered); check(gpu.list->Close(), "canceled final close"); gpu.reset(); recovered = {}; capture::poll();
+    capture::release_diagnostic_texture(recovered); check(close_list(gpu.list.Get()), "canceled final close"); gpu.reset(); recovered = {}; capture::poll();
     std::puts("PASS replay rejection, canceled discarded recording, independent bounded pool and failed API result");
   }
 }

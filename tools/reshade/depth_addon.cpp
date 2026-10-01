@@ -2562,11 +2562,6 @@ static void on_content_barrier(command_list *cmd_list, uint32_t count, const res
 	const resource_usage *old_states, const resource_usage *new_states)
 {
 	if (cmd_list->get_device()->get_api() != device_api::d3d12) return;
-	static_assert(sizeof(resource) == sizeof(uint64_t) && sizeof(resource_usage) == sizeof(uint32_t),
-		"ReShade barrier arrays are forwarded as native handles and usage values");
-	sunshine_streamline::depth_capture::observe_list_barriers(cmd_list->get_native(), count,
-		reinterpret_cast<const uint64_t *>(resources), reinterpret_cast<const uint32_t *>(old_states),
-		reinterpret_cast<const uint32_t *>(new_states));
 	auto &state = *cmd_list->get_private_data<state_tracking>();
 	{
 		std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
@@ -2630,11 +2625,7 @@ static void on_execute_primary(command_queue *queue, command_list *cmd_list)
 	}
 	// Skip merging state when this execution event is just the immediate command list getting flushed
 	if (cmd_list == queue->get_immediate_command_list())
-	{
-		if (queue->get_device()->get_api() == device_api::d3d12)
-			sunshine_streamline::depth_capture::observe_immediate_list(cmd_list->get_native());
 		return;
-	}
 
 	auto &target_state = *queue->get_private_data<state_tracking>();
 	const auto &source_state = *cmd_list->get_private_data<state_tracking>();
@@ -4870,14 +4861,6 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestProviderStatus(effect_run
 {
 	if (!s_registered || runtime == nullptr || output == nullptr) return FALSE;
 	*output = describe_streamline_source(runtime);
-	return TRUE;
-}
-
-// Phase-1 shadow counters comparing ReShade's list lifecycle with native hooks.
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestListShadow(sunshine_streamline::depth_capture::list_shadow_counts *output)
-{
-	if (!s_registered || output == nullptr) return FALSE;
-	*output = sunshine_streamline::depth_capture::list_shadow();
 	return TRUE;
 }
 
