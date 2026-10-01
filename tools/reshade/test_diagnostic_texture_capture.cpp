@@ -589,11 +589,13 @@ namespace {
     gpu.submit(); gpu.wait(); gpu.reset();
     transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, rt);
     D3D12_RESOURCE_BARRIER alias{}; alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
-    gpu.list->ResourceBarrier(1, &alias); // Legal wildcard alias, unknowable affected source set.
-    reject_state(capture::status::unavailable, capture::record_stage::recording_invalid);
-    require(diagnostic.recording_invalid && diagnostic.loss == capture::recording_loss::wildcard_alias,
-      "lost recording evidence was accepted or misreported");
+    gpu.list->ResourceBarrier(1, &alias); // Legal wildcard alias: it changes no resource state.
+    // Capture copies where the SDK consumes its source, which the game keeps
+    // active there, so an earlier alias leaves the observed state admissible.
+    auto aliased = record();
+    require(!diagnostic.recording_invalid, "a wildcard alias invalidated the recording");
     gpu.submit(); gpu.wait(); gpu.reset();
+    capture::release_diagnostic_texture(aliased); aliased = {}; capture::poll();
     gpu.check_debug_errors();
     std::printf("PASS %s observed-state policy format %u->%u flags=%u FG=%u: declared%u/observed%u exact bytes and restoration; strict depth/default, role, missing/COMMON, split and loss guards%s\n",
       shared ? "shared" : "local", unsigned(format), unsigned(snapshot_format), unsigned(flags), unsigned(frame_generation),
@@ -1011,11 +1013,6 @@ namespace {
     counted("a destroyed lifecycle was still tracked", [](const auto &a, const auto &b) { return b.unknown == a.unknown + 1; });
     capture::observe_list_event(list, event::created);
     require(record(list), "ReShade's created event did not cover the list");
-    capture::observe_list_event(list, event::bundle);
-    require(!record(list), "a capture was admitted after an opaque bundle");
-    counted("an opaque bundle was not counted", [](const auto &a, const auto &b) { return b.opaque == a.opaque + 1; });
-    capture::observe_list_event(list, event::reset);
-    require(record(list), "ReShade's Reset did not end the opaque recording");
     gpu.submit(); gpu.wait(); gpu.reset();
 
     // A game list ReShade never reported is not covered, hooks or not.
@@ -1099,7 +1096,7 @@ namespace {
     check(refused->Close(), "unhookable list close");
     check(close_list(gpu.list.Get()), "close recording open during refusal"); gpu.reset();
     gpu.check_debug_errors();
-    std::puts("PASS list lifecycle coverage: ReShade's created/Reset/Close/submit/render pass/bundle decide admission, unreported lists are rejected, a registered runtime list follows its submissions, an unhookable list uses its declared state");
+    std::puts("PASS list lifecycle coverage: ReShade's created/Reset/Close/submit/render pass decide admission, unreported lists are rejected, a registered runtime list follows its submissions, an unhookable list uses its declared state");
   }
 
   void auxiliary_consumer_replay_and_discard(fixture &gpu) {

@@ -66,7 +66,9 @@ namespace {
   std::atomic<unsigned> original_submissions{}, original_barriers{}, original_resets{}, original_closes{};
   std::atomic<bool> block_original{}, entered{}, release_original{};
   unsigned barrier_events{}, submit_events{}, invalidations{};
-  unsigned command_invalidations{}, original_bundles{}, original_enhanced{}, original_passes{};
+  unsigned enhanced_reports{}, original_bundles{}, original_enhanced{}, original_passes{};
+  unsigned observed_texture_count{};
+  ID3D12Resource *observed_texture{};
   unsigned last_queue_target{};
   HRESULT native_result = S_OK;
   std::uint64_t observed_command{}, observed_cookie{}, observed_queue{};
@@ -264,8 +266,9 @@ namespace {
     SetLastError(0xbadf00d);
   }
   void on_invalidated() { ++invalidations; SetLastError(0xbadf00d); }
-  void on_invalidated_command(std::uint64_t command, std::uint64_t cookie) {
-    ++command_invalidations; observed_command = command; observed_cookie = cookie;
+  void on_enhanced_textures(std::uint64_t command, std::uint64_t cookie, unsigned count, ID3D12Resource *const *textures) {
+    ++enhanced_reports; observed_command = command; observed_cookie = cookie;
+    observed_texture_count = count; observed_texture = count ? textures[0] : nullptr;
     SetLastError(0xbadf00d);
   }
   void submit(object &queue, UINT count, void *const *commands) {
@@ -383,7 +386,7 @@ int main() {
     require(barrier_slot == 26 && reset_slot == 10 && close_slot == 9 && execute_slot == 10 && allocator_slot == close_slot,
       "D3D12 COM ABI differs from pinned headers");
     require(MH_Initialize() == MH_OK, "MinHook init failed"); minhook = true;
-    const observer::callbacks callbacks{on_barrier, on_submit, on_invalidated, on_invalidated_command, on_associate_recording};
+    const observer::callbacks callbacks{on_barrier, on_submit, on_invalidated, on_enhanced_textures, on_associate_recording};
     observer::initialize(callbacks);
     static std::array<void *, enhanced_slot + 1> unrelated_table{};
     unrelated_table.fill(reinterpret_cast<void *>(unrelated_method));
@@ -495,17 +498,37 @@ int main() {
     require(submit_events == before_scope && barrier_events == 1, "explicit capture suppression failed");
     SetLastError(incoming_error);
     reinterpret_cast<bundle_fn>(commands[1].vtable[bundle_slot])(&commands[1], reinterpret_cast<void *>(1));
-    require(GetLastError() == outgoing_error && command_invalidations == 0 && original_bundles == 2,
+    require(GetLastError() == outgoing_error && enhanced_reports == 0 && original_bundles == 2,
       "ExecuteBundle (a ReShade lifecycle event) was hooked or not forwarded through the proxy");
     commands[0].extended = true;
     require(!observer::states_ready(address(commands[0])), "unobserved supported CL7 Barrier reported ready");
     observer::observe_command(address(commands[0]));
     require(!observer::states_ready(address(commands[0])) && observer::install_pending() && observer::states_ready(address(commands[0])),
       "enhanced Barrier discovery/readiness did not require deferred coverage");
+    // Only texture barriers can change a texture's layout: the hook reports
+    // exactly the textures they name, never global or buffer barriers.
+    const auto enhanced = reinterpret_cast<enhanced_fn>(commands[0].vtable[enhanced_slot]);
+    int named_texture_storage{};
+    D3D12_TEXTURE_BARRIER texture_barrier{};
+    texture_barrier.pResource = reinterpret_cast<ID3D12Resource *>(&named_texture_storage);
+    D3D12_GLOBAL_BARRIER global_barrier{};
+    D3D12_BARRIER_GROUP groups[2]{};
+    groups[0].Type = D3D12_BARRIER_TYPE_GLOBAL; groups[0].NumBarriers = 1; groups[0].pGlobalBarriers = &global_barrier;
+    groups[1].Type = D3D12_BARRIER_TYPE_TEXTURE; groups[1].NumBarriers = 1; groups[1].pTextureBarriers = &texture_barrier;
     SetLastError(incoming_error);
-    reinterpret_cast<enhanced_fn>(commands[0].vtable[enhanced_slot])(&commands[0], 1, reinterpret_cast<const D3D12_BARRIER_GROUP *>(1));
-    require(GetLastError() == outgoing_error && command_invalidations == 1 && original_enhanced == 1 && observed_cookie == 9999,
-      "enhanced Barrier did not invalidate native recording");
+    enhanced(&commands[0], 2, groups);
+    require(GetLastError() == outgoing_error && enhanced_reports == 1 && observed_texture_count == 1 &&
+        observed_texture == texture_barrier.pResource && original_enhanced == 1 && observed_cookie == 9999,
+      "enhanced Barrier did not report exactly its named texture");
+    SetLastError(incoming_error);
+    enhanced(&commands[0], 1, groups);
+    require(enhanced_reports == 1 && original_enhanced == 2, "a global-only enhanced Barrier reported a texture");
+    // An unreadable barrier array cannot name its textures: fail closed.
+    const auto unreadable_before = invalidations;
+    SetLastError(incoming_error);
+    enhanced(&commands[0], 1, reinterpret_cast<const D3D12_BARRIER_GROUP *>(1));
+    require(invalidations == unreadable_before + 1 && enhanced_reports == 1 && original_enhanced == 3,
+      "an unreadable enhanced Barrier did not fail closed or was not forwarded");
     {
       // D3D12Core can return CommandList7 as a per-object interface whose
       // table lives in heap memory. That slot is refused once, and the list's
@@ -526,7 +549,7 @@ int main() {
     require(GetLastError() == outgoing_error, "render-pass begin changed LastError");
     SetLastError(incoming_error);
     reinterpret_cast<end_pass_fn>(commands[0].vtable[end_pass_slot])(&commands[0]);
-    require(GetLastError() == outgoing_error && original_passes == 2 && command_invalidations == 1,
+    require(GetLastError() == outgoing_error && original_passes == 2 && enhanced_reports == 1,
       "render passes were hooked or not forwarded");
     const auto before_invalid = invalidations;
     const auto barriers_before_invalid = original_barriers.load();

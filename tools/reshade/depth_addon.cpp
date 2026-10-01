@@ -2638,7 +2638,6 @@ static void on_execute_primary(command_queue *queue, command_list *cmd_list)
 }
 static void on_execute_secondary(command_list *cmd_list, command_list *secondary_cmd_list)
 {
-	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::bundle);
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::command_secondary_executed(cmd_list->get_native(), secondary_cmd_list->get_native());
 	auto &target_state = *cmd_list->get_private_data<state_tracking>();

@@ -117,8 +117,8 @@ namespace sunshine_streamline::depth_capture {
     capture_not_ready, invalid_destination
   };
   enum class recording_loss {
-    none, global_observation_loss, wildcard_alias, source_identity_unavailable,
-    source_state_capacity, close_failed, opaque_commands
+    none, global_observation_loss, source_identity_unavailable,
+    source_state_capacity, close_failed
   };
   enum class record_stage {
     not_attempted, inactive, malformed_input, missing_source, unsupported_lifetime, unsupported_proof,
@@ -169,12 +169,12 @@ namespace sunshine_streamline::depth_capture {
   // ReShade reports every command list it wraps from its own proxy, whose
   // dispatch no D3D12 runtime change can move (D3D12Core 1.619 moves native
   // lists to per-object tables at Reset). This lifecycle is the only source of
-  // a list's recording (Reset, Close, render passes, bundles) and of capture
+  // a list's recording (Reset, Close, render passes) and of capture
   // coverage: a list is covered while it is open and outside a render pass.
   // Native barrier hooks supply observed resource states where they see the
   // list; otherwise the declared state applies. native is ReShade's native
   // object for the list.
-  enum class list_event : unsigned { created, reset, closed, bundle, pass_begin, pass_end, destroyed, count };
+  enum class list_event : unsigned { created, reset, closed, pass_begin, pass_end, destroyed, count };
   void observe_list_event(std::uint64_t native, list_event event);
   // ReShade's own immediate list (native) on its queue, which its list events
   // never report. ReShade records it only during present/effects events, open
@@ -186,7 +186,7 @@ namespace sunshine_streamline::depth_capture {
   struct list_coverage_counts {
     // Capture admissions by ReShade's lifecycle view: covered (open, outside a
     // render pass) or not, with what the lifecycle saw instead.
-    std::uint64_t covered{}, unknown{}, closed{}, pass{}, opaque{};
+    std::uint64_t covered{}, unknown{}, closed{}, pass{};
     // Of covered: the barrier hooks observed the list's states, or the game's
     // declared state applied (refused or moved method tables).
     std::uint64_t states_observed{}, states_declared{};

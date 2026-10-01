@@ -181,14 +181,14 @@ namespace sunshine_streamline::depth_capture {
       std::vector<source_state> states;
       bool closed{}, invalid{}, render_pass{};
       // ReShade's lifecycle (or a registered runtime list's observed
-      // submissions) drives this recording, and it executed a bundle.
-      bool reported{}, opaque{};
+      // submissions) drives this recording.
+      bool reported{};
       recording_loss invalidation{recording_loss::none};
       void restart(std::uint64_t next_cookie, std::uint64_t generation) noexcept {
         states.clear();
         cookie = next_cookie; observation_generation = generation;
         native_barrier_calls = native_transition_count = last_barrier_command = 0;
-        closed = invalid = render_pass = reported = opaque = false;
+        closed = invalid = render_pass = reported = false;
         invalidation = recording_loss::none;
       }
     };
@@ -392,12 +392,15 @@ namespace sunshine_streamline::depth_capture {
       owner->last_barrier_command = native;
       for (unsigned n = 0; n != count; ++n) {
         const auto &value = values[n];
-        if (value.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
-          // A named alias affects those resources only. A wildcard can affect
-          // any source, so no later declaration can recover this recording.
-          if (!value.Aliasing.pResourceBefore || !value.Aliasing.pResourceAfter) invalidate(*owner, recording_loss::wildcard_alias);
-          else { block_source(*owner, value.Aliasing.pResourceBefore); block_source(*owner, value.Aliasing.pResourceAfter); }
-        } else if (value.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
+        // An aliasing barrier, named or wildcard (NULL: any placed or reserved
+        // resource), changes no resource state; it only moves heap memory
+        // between overlapping resources. Every capture here copies where the
+        // SDK consumes the source (its tag call or evaluation), so the game
+        // must have that source active and initialized there. Transient-memory
+        // engines (RE Engine) alias every frame; blocking on them refused all
+        // depth. The generic bind-switch preservation copies at no such point
+        // and keeps its own alias rule (depth_addon.cpp).
+        if (value.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
           ++owner->native_transition_count;
           // A split can precede the first tag/cookie. Preserve that source's
           // rejection until Reset without poisoning unrelated captured depth.
@@ -469,23 +472,19 @@ namespace sunshine_streamline::depth_capture {
         if (value.command == cookie) invalidate(value, capture_failure::close_failed);
       });
     }
-    void invalidated_command(std::uint64_t native, std::uint64_t cookie) {
+    // An enhanced texture barrier moves that texture into a layout the legacy
+    // state model cannot read, so block it for this recording. Other textures,
+    // and global or buffer barriers, keep their observed states.
+    void enhanced_textures(std::uint64_t native, std::uint64_t cookie, unsigned count, ID3D12Resource *const *textures) {
       std::lock_guard lock(mutex);
-      if (auto owner = command(native, cookie, true)) invalidate(*owner, recording_loss::opaque_commands);
-      // Already recorded copies retain their pixels. This only denies another
-      // source-state assumption later in the changed recording.
+      auto owner = command(native, cookie, true);
+      if (!owner || owner->closed) return;
+      for (unsigned i = 0; i != count; ++i)
+        if (textures[i]) block_source(*owner, textures[i]);
     }
     void render_pass(std::uint64_t native, std::uint64_t cookie, bool inside) {
       std::lock_guard lock(mutex);
       if (auto owner = command(native, cookie, true)) owner->render_pass = inside;
-    }
-    // A bundle's commands are unobserved: no later capture in this recording.
-    void opaque_commands(std::uint64_t native, std::uint64_t cookie) {
-      std::lock_guard lock(mutex);
-      if (auto owner = command(native, cookie, true)) {
-        owner->opaque = true;
-        invalidate(*owner, recording_loss::opaque_commands);
-      }
     }
     template<std::size_t N> bool identify_submissions(std::array<slot, N> &captures, std::uint32_t count,
         const native_observer::command_identity *values, std::array<bool, N> &producers,
@@ -1123,7 +1122,7 @@ namespace sunshine_streamline::depth_capture {
     native_observer::callbacks callbacks;
     callbacks.barriers = barriers;
     callbacks.submitted = observed_submission; callbacks.invalidated = invalidate_all;
-    callbacks.invalidated_command = invalidated_command;
+    callbacks.enhanced_textures = enhanced_textures;
     callbacks.associate_recording = associate_recording;
     native_observer::initialize(callbacks);
     native_observer::set_active(enabled);
@@ -1163,23 +1162,23 @@ namespace sunshine_streamline::depth_capture {
   namespace {
     // Capture admissions, for the five-second report.
     struct {
-      std::atomic<std::uint64_t> covered{}, unknown{}, closed{}, pass{}, opaque{}, states_observed{}, states_declared{};
+      std::atomic<std::uint64_t> covered{}, unknown{}, closed{}, pass{}, states_observed{}, states_declared{};
     } list_counts;
-    enum class list_view { unknown, open, closed, pass, opaque };
+    enum class list_view { unknown, open, closed, pass };
     // Requires mutex. Coverage: ReShade's lifecycle (or a registered runtime
-    // list's submissions) reports the recording open, outside a render pass
-    // and free of bundled commands.
+    // list's submissions) reports the recording open and outside a render
+    // pass. Bundles cannot record barriers, clears or copies, so executing
+    // one changes no resource state and leaves coverage alone.
     list_view lifecycle_view(const command_state *owner) {
       if (!owner || !owner->reported) return list_view::unknown;
-      return owner->closed ? list_view::closed : owner->render_pass ? list_view::pass :
-        owner->opaque ? list_view::opaque : list_view::open;
+      return owner->closed ? list_view::closed : owner->render_pass ? list_view::pass : list_view::open;
     }
     void count_admission(list_view view, bool states_observed) {
       constexpr auto relaxed = std::memory_order_relaxed;
       auto &c = list_counts;
       if (view == list_view::open) (states_observed ? c.states_observed : c.states_declared).fetch_add(1, relaxed);
       (view == list_view::open ? c.covered : view == list_view::unknown ? c.unknown :
-        view == list_view::closed ? c.closed : view == list_view::pass ? c.pass : c.opaque).fetch_add(1, relaxed);
+        view == list_view::closed ? c.closed : c.pass).fetch_add(1, relaxed);
     }
     // ReShade's own immediate lists, which its list events never report.
     SRWLOCK runtime_lock = SRWLOCK_INIT;
@@ -1220,7 +1219,6 @@ namespace sunshine_streamline::depth_capture {
         case list_event::closed: close(native, cookie, S_OK); break;
         case list_event::pass_begin: render_pass(native, cookie, true); break;
         case list_event::pass_end: render_pass(native, cookie, false); break;
-        case list_event::bundle: opaque_commands(native, cookie); break;
         default: break;
       }
     }
@@ -1262,7 +1260,7 @@ namespace sunshine_streamline::depth_capture {
     list_coverage_counts out;
     const auto &c = list_counts;
     out.covered = c.covered.load(); out.unknown = c.unknown.load(); out.closed = c.closed.load();
-    out.pass = c.pass.load(); out.opaque = c.opaque.load();
+    out.pass = c.pass.load();
     out.states_observed = c.states_observed.load(); out.states_declared = c.states_declared.load();
     return out;
   }
@@ -1271,12 +1269,12 @@ namespace sunshine_streamline::depth_capture {
     auto next = next_log.load(std::memory_order_relaxed);
     if (now_ms < next || !next_log.compare_exchange_strong(next, now_ms + 5000, std::memory_order_relaxed)) return false;
     const auto c = list_coverage();
-    const auto admissions = c.covered + c.unknown + c.closed + c.pass + c.opaque;
+    const auto admissions = c.covered + c.unknown + c.closed + c.pass;
     if (admissions == logged_admissions.exchange(admissions, std::memory_order_relaxed)) return false;
     const auto u = [](std::uint64_t value) { return static_cast<unsigned long long>(value); };
     std::snprintf(out, size,
-      "Sunshine list lifecycle: admissions covered=%llu (states observed=%llu declared=%llu) not_open={unknown=%llu closed=%llu pass=%llu opaque=%llu}",
-      u(c.covered), u(c.states_observed), u(c.states_declared), u(c.unknown), u(c.closed), u(c.pass), u(c.opaque));
+      "Sunshine list lifecycle: admissions covered=%llu (states observed=%llu declared=%llu) not_open={unknown=%llu closed=%llu pass=%llu}",
+      u(c.covered), u(c.states_observed), u(c.states_declared), u(c.unknown), u(c.closed), u(c.pass));
     return true;
   }
   void command_destroyed(std::uint64_t native) {
@@ -1642,7 +1640,7 @@ namespace sunshine_streamline::depth_capture {
       return reject(status::unsupported_lifetime, record_stage::source_lifetime);
     auto owner = command(native, cookie, true);
     // ReShade's lifecycle decides coverage: the recording is open outside a
-    // render pass and free of bundled commands.
+    // render pass.
     const auto view = lifecycle_view(owner ? &*owner : nullptr);
     count_admission(view, states_observed);
     if (view == list_view::unknown) return reject(status::unavailable, record_stage::observer_coverage);
@@ -1657,7 +1655,6 @@ namespace sunshine_streamline::depth_capture {
     }
     if (view == list_view::closed) return reject(status::unavailable, record_stage::recording_closed);
     if (view == list_view::pass) return reject(status::unavailable, record_stage::recording_render_pass);
-    if (view == list_view::opaque) return reject(status::unavailable, record_stage::recording_invalid);
     const auto &desc = value.source->desc;
     copy_region region;
     const auto source_status = source_region(desc, value.resource, region);
@@ -2378,8 +2375,8 @@ namespace sunshine_streamline::depth_capture {
   const char *name(recording_loss value) {
     switch (value) {
 #define CASE(x) case recording_loss::x: return #x
-    CASE(none); CASE(global_observation_loss); CASE(wildcard_alias); CASE(source_identity_unavailable);
-    CASE(source_state_capacity); CASE(close_failed); CASE(opaque_commands);
+    CASE(none); CASE(global_observation_loss); CASE(source_identity_unavailable);
+    CASE(source_state_capacity); CASE(close_failed);
 #undef CASE
     }
     return "unknown";
@@ -3287,21 +3284,24 @@ namespace sunshine_streamline::depth_capture {
           owner->native_barrier_calls || owner->native_transition_count || owner->last_barrier_command) return false;
       // A post-call callback carrying the entry's old or zero identity cannot
       // attach to the new recording after Reset. This applies to state, close,
-      // render-pass and opaque-command evidence alike.
+      // render-pass and enhanced-barrier evidence alike.
+      ID3D12Resource *const enhanced_texture = reinterpret_cast<ID3D12Resource *>(&resource);
       for (const auto stale : {std::uint64_t{}, cookie}) {
         barriers(address, stale, 1, &transition);
         close(address, stale, S_OK);
         render_pass(address, stale, true);
-        invalidated_command(address, stale);
+        enhanced_textures(address, stale, 1, &enhanced_texture);
       }
       if (owner->closed || owner->render_pass || owner->invalid || !owner->states.empty()) return false;
       render_pass(address, next_cookie, true);
       if (!owner->render_pass) return false;
       render_pass(address, next_cookie, false);
-      invalidated_command(address, next_cookie);
-      if (owner->render_pass || !owner->invalid || owner->invalidation != recording_loss::opaque_commands) return false;
+      // An enhanced texture barrier blocks only the texture it names.
+      enhanced_textures(address, next_cookie, 1, &enhanced_texture);
+      const auto *enhanced = state(*owner, source_cookie(&resource), false);
+      if (owner->render_pass || owner->invalid || !enhanced || !enhanced->blocked) return false;
 
-      private_object closed, pass, opaque, malformed, refused, orphan;
+      private_object closed, pass, malformed, refused, orphan;
       std::uint64_t first{};
       associate_recording(native_object(closed), &first); close(native_object(closed), first, S_OK);
       auto closed_owner = command(native_object(closed), first, false);
@@ -3309,9 +3309,6 @@ namespace sunshine_streamline::depth_capture {
       associate_recording(native_object(pass), &first); render_pass(native_object(pass), first, true);
       auto pass_owner = command(native_object(pass), first, false);
       if (!first || !pass_owner || !pass_owner->render_pass) return false;
-      associate_recording(native_object(opaque), &first); invalidated_command(native_object(opaque), first);
-      auto opaque_owner = command(native_object(opaque), first, false);
-      if (!first || !opaque_owner || !opaque_owner->invalid) return false;
       if (!native_observer::set_recording_cookie(native_object(malformed), 0) ||
           native_observer::recording_cookie_absent(native_object(malformed))) return false;
       associate_recording(native_object(malformed), &first);
@@ -3354,7 +3351,7 @@ namespace sunshine_streamline::depth_capture {
         command_population_regression() && retired_recording_regression();
     }
     bool recording_state_growth_regression() {
-      private_object command_object, target, alias_peer;
+      private_object command_object, target;
       std::array<private_object, 160> unrelated;
       const auto native_command = native_object(command_object);
       const auto cookie = ++serial;
@@ -3383,15 +3380,15 @@ namespace sunshine_streamline::depth_capture {
       const auto *selected = state(*recording, target_id, false);
       if (recording->invalid || recording->closed || recording->render_pass || !selected ||
           !selected->known || selected->blocked || selected->value != transition.Transition.StateAfter) return false;
-      D3D12_RESOURCE_BARRIER alias{};
-      alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
-      alias.Aliasing.pResourceBefore = reinterpret_cast<ID3D12Resource *>(&target);
-      alias.Aliasing.pResourceAfter = reinterpret_cast<ID3D12Resource *>(&alias_peer);
-      barriers(native_command, cookie, 1, &alias);
+      // A split barrier blocks the target until Reset, across a later ordinary
+      // transition and further storage growth.
+      auto split = transition;
+      split.Flags = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;
+      barriers(native_command, cookie, 1, &split);
       if (!append_unrelated(80, unsigned(unrelated.size()))) return false;
       barriers(native_command, cookie, 1, &transition);
       selected = state(*recording, target_id, false);
-      if (recording->invalid || !selected || !selected->blocked || recording->states.size() != 162) return false;
+      if (recording->invalid || !selected || !selected->blocked || recording->states.size() != 161) return false;
       const auto capacity = recording->states.capacity();
       const auto *storage = recording->states.data();
       reset(native_command, cookie, S_OK);
@@ -3466,31 +3463,35 @@ namespace sunshine_streamline::depth_capture {
       value.Flags = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;
       value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&unrelated);
       barriers(native_command, cookie, 1, &value);
+      // An alias changes no resource state: it neither registers nor blocks
+      // its resources, and the unrelated split keeps its own block.
       value = {}; value.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
       value.Aliasing.pResourceBefore = reinterpret_cast<ID3D12Resource *>(&unrelated);
       value.Aliasing.pResourceAfter = reinterpret_cast<ID3D12Resource *>(&alias_peer);
       barriers(native_command, cookie, 1, &value);
       const auto *unrelated_state = state(*recording, unrelated.cookie, false);
-      const auto *alias_state = state(*recording, alias_peer.cookie, false);
       selected_state = state(*recording, selected, false);
       if (recording->invalid || selected_state->blocked || !selected_state->known || !unrelated_state ||
-          !unrelated_state->blocked || !alias_state || !alias_state->blocked || capture->invalid) return false;
-      // A named alias touching selected depth blocks it even after a normal transition.
+          !unrelated_state->blocked || alias_peer.cookie || capture->invalid) return false;
+      // Even a named alias of selected depth keeps its observed state: the SDK
+      // consumes the source where it is copied, so the game keeps it active there.
       value.Aliasing.pResourceBefore = reinterpret_cast<ID3D12Resource *>(&native);
       barriers(native_command, cookie, 1, &value);
       value = {}; value.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       value.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&native);
       value.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
       barriers(native_command, cookie, 1, &value);
-      if (recording->invalid || !selected_state->blocked || capture->invalid) return false;
-      // Without exact affected identities or sufficient memory, decline all.
+      selected_state = state(*recording, selected, false);
+      if (recording->invalid || !selected_state || selected_state->blocked || !selected_state->known ||
+          selected_state->value != D3D12_RESOURCE_STATE_UNORDERED_ACCESS || capture->invalid) return false;
+      // Wildcard aliases (NULL before, after or both) likewise leave the recording intact.
       for (unsigned wildcard = 0; wildcard != 3; ++wildcard) {
         restart_case();
         value = {}; value.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
         if (wildcard == 1) value.Aliasing.pResourceBefore = reinterpret_cast<ID3D12Resource *>(&native);
         if (wildcard == 2) value.Aliasing.pResourceAfter = reinterpret_cast<ID3D12Resource *>(&native);
         barriers(native_command, cookie, 1, &value);
-        if (!recording->invalid || capture->invalid) return false;
+        if (recording->invalid || capture->invalid) return false;
       }
       restart_case();
       refused.refuse_write = true;

@@ -48,7 +48,7 @@ namespace sunshine_streamline::native_observer {
     std::atomic<decltype(callbacks::barriers)> barrier_callback{};
     std::atomic<decltype(callbacks::submitted)> submitted_callback{};
     std::atomic<decltype(callbacks::invalidated)> invalidated_callback{};
-    std::atomic<decltype(callbacks::invalidated_command)> invalidated_command_callback{};
+    std::atomic<decltype(callbacks::enhanced_textures)> enhanced_textures_callback{};
     std::atomic<decltype(callbacks::associate_recording)> associate_recording_callback{};
     std::atomic<std::uint64_t> calls{}, observed{}, unreadable{}, dropped{}, installed{}, rejected{}, nested{}, suppressed{};
     std::atomic<std::uint64_t> barrier_overflow{}, submission_overflow{}, discovery_contention{};
@@ -193,11 +193,37 @@ namespace sunshine_streamline::native_observer {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::enhanced)][Index];
       invocation call(method::enhanced, slot.status.load(std::memory_order_acquire));
-      const auto cookie = call.eligible ? operation_cookie(reinterpret_cast<std::uintptr_t>(command)) : 0;
+      restore_error outgoing{incoming}; // Restore after snapshot storage is freed.
+      // Only texture barriers change a texture's layout. Snapshot the textures
+      // they name before forwarding, as the legacy barrier hook does.
+      batch_snapshot<ID3D12Resource *, inline_barriers> textures;
+      std::uint64_t cookie{};
+      std::size_t named = 0;
+      bool complete = true, allocated = true;
+      if (call.eligible) {
+        cookie = operation_cookie(reinterpret_cast<std::uintptr_t>(command));
+        batch_snapshot<D3D12_BARRIER_GROUP, 16> copied;
+        complete = (allocated = copied.prepare(count)) && (!count || read_elements(groups, 0, count, copied.data()));
+        for (UINT32 i = 0; complete && i != count; ++i)
+          if (copied.data()[i].Type == D3D12_BARRIER_TYPE_TEXTURE) named += copied.data()[i].NumBarriers;
+        complete = complete && (allocated = textures.prepare(named));
+        std::size_t at = 0;
+        for (UINT32 i = 0; complete && i != count; ++i) {
+          const auto &group = copied.data()[i];
+          if (group.Type != D3D12_BARRIER_TYPE_TEXTURE || !group.NumBarriers) continue;
+          batch_snapshot<D3D12_TEXTURE_BARRIER, 16> texture_barriers;
+          complete = (allocated = texture_barriers.prepare(group.NumBarriers)) &&
+            read_elements(group.pTextureBarriers, 0, group.NumBarriers, texture_barriers.data());
+          for (UINT32 b = 0; complete && b != group.NumBarriers; ++b) textures.data()[at++] = texture_barriers.data()[b].pResource;
+        }
+      }
       SetLastError(incoming);
       reinterpret_cast<enhanced_fn>(slot.original.load(std::memory_order_acquire))(command, count, groups);
-      const restore_error outgoing{GetLastError()};
-      if (call.notify()) notify(invalidated_command_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(command), cookie);
+      outgoing.value = GetLastError();
+      if (!call.notify()) return;
+      if (!complete) { if (!allocated) ++barrier_overflow; drop(allocated); return; }
+      if (named) notify(enhanced_textures_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(command),
+        cookie, static_cast<unsigned>(named), static_cast<ID3D12Resource *const *>(textures.data()));
     }
     const std::array<std::array<void *, target_limit>, method_count> detours{{
       {reinterpret_cast<void *>(barrier_detour<0>), reinterpret_cast<void *>(barrier_detour<1>), reinterpret_cast<void *>(barrier_detour<2>), reinterpret_cast<void *>(barrier_detour<3>), reinterpret_cast<void *>(barrier_detour<4>), reinterpret_cast<void *>(barrier_detour<5>), reinterpret_cast<void *>(barrier_detour<6>), reinterpret_cast<void *>(barrier_detour<7>)},
@@ -329,7 +355,7 @@ namespace sunshine_streamline::native_observer {
     barrier_callback.store(value.barriers, std::memory_order_release);
     submitted_callback.store(value.submitted, std::memory_order_release);
     invalidated_callback.store(value.invalidated, std::memory_order_release);
-    invalidated_command_callback.store(value.invalidated_command, std::memory_order_release);
+    enhanced_textures_callback.store(value.enhanced_textures, std::memory_order_release);
     associate_recording_callback.store(value.associate_recording, std::memory_order_release);
     requested.store(true, std::memory_order_release);
   }
@@ -469,7 +495,7 @@ namespace sunshine_streamline::native_observer {
     calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = 0;
     barrier_overflow = submission_overflow = discovery_contention = 0;
     barrier_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;
-    invalidated_command_callback = nullptr; associate_recording_callback = nullptr;
+    enhanced_textures_callback = nullptr; associate_recording_callback = nullptr;
   }
 #endif
 }

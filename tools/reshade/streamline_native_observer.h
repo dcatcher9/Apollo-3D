@@ -4,6 +4,7 @@
 #include <cstdint>
 
 struct D3D12_RESOURCE_BARRIER;
+struct ID3D12Resource;
 
 namespace sunshine_streamline::native_observer {
   struct command_identity {
@@ -19,9 +20,10 @@ namespace sunshine_streamline::native_observer {
     // Hook coverage changed, an input could not be snapshotted, or discovery failed.
     // Owner must invalidate evidence without freeing in-flight GPU resources.
     void (*invalidated)(){};
-    // Enhanced Barrier invalidates the recording's legacy state proof until
-    // Reset; no enhanced-layout interpretation is invented.
-    void (*invalidated_command)(std::uint64_t command, std::uint64_t cookie){};
+    // Textures named by an enhanced (CommandList7) texture barrier, after the
+    // native call. Their layouts are outside the legacy state model; global and
+    // buffer barriers change no texture state and are not reported.
+    void (*enhanced_textures)(std::uint64_t command, std::uint64_t cookie, unsigned count, ID3D12Resource *const *textures){};
     // Called at native operation entry, before forwarding, only for an object
     // without a recording cookie. The owner may authenticate a new recording;
     // post-call evidence freezes its returned identity across any later Reset.

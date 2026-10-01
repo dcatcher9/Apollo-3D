@@ -1755,12 +1755,23 @@ It supports depth-only and packed depth/stencil textures: the pinned DLSS implem
 its cached input state for all subresources, and capture uses that same provider contract while
 transitioning, copying and restoring only depth plane 0. Stencil is neither copied nor modified;
 malformed or missing metadata still requires observed nonzero state on the actual command
-recording. An observed conflicting or incomplete transition always rejects capture. A named alias
-or split barrier blocks the affected resource for that recording until Reset; unrelated resources
-remain eligible. Per-resource state storage grows with the actual command recording and reuses its
-allocation on Reset; unrelated resources cannot invalidate depth by exceeding a fixed entry count.
-Wildcard aliases or an actual state-storage allocation failure conservatively block the whole
-recording. Already-owned copies retain their normal lifetime checks. No state is guessed from texture type.
+recording. An observed conflicting or incomplete transition always rejects capture. A split
+barrier, or an enhanced (CommandList7) texture barrier whose layout the legacy state model cannot
+read, blocks the affected resource for that recording until Reset; unrelated resources remain
+eligible, and enhanced global or buffer barriers change no texture state. Per-resource state
+storage grows with the actual command recording and reuses its allocation on Reset; unrelated
+resources cannot invalidate depth by exceeding a fixed entry count. An actual state-storage
+allocation failure conservatively blocks the whole recording.
+
+Admission blocks only what can change the copied resource's state, because every capture copies
+where the SDK consumes its source (the tag call or the evaluation), where the game must keep that
+source active and initialized. Aliasing barriers, named or wildcard (NULL meaning any placed or
+reserved resource), change no resource state; they only move heap memory between overlapping
+resources, so they do not affect admission. Resident Evil Requiem (RE Engine) aliases transient
+memory every frame, and treating a wildcard alias as fatal had refused every DLSS depth capture
+(`loss=wildcard_alias`). Bundles cannot record barriers, clears or copies, so `ExecuteBundle`
+changes no state either. The generic bind-switch preservation copies at no SDK point and keeps its
+own alias rule. Already-owned copies retain their normal lifetime checks. No state is guessed from texture type.
 The [public ABI families](#streamline-abi-compatibility) share these capture checks; broad version
 admission does not broaden the private 1.1.1 resource-state encoding. Resource identity remains
 attached to the native resource when temporary metadata expires, so rotating buffers retain their
@@ -1800,10 +1811,9 @@ method of such a list can be hooked through a shared slot; the Windows 10.0.2610
 module tables, and lists created through Streamline's proxies keep the proxy's module table.
 
 Command-list work is split by job. ReShade reports every command list it wraps (create, Reset,
-Close, submission, bundle, render pass, destroy) from its own proxy, whose dispatch no runtime can
+Close, submission, render pass, destroy) from its own proxy, whose dispatch no runtime can
 move. That lifecycle is the only source of a list's recording and of capture coverage: Reset starts
-a recording, Close ends it, a list is covered while it is open outside a render pass, and a bundle
-makes the rest of the recording opaque. A submitted list stays closed until ReShade reports its
+a recording, Close ends it, and a list is covered while it is open outside a render pass. A submitted list stays closed until ReShade reports its
 next Reset, so a native Reset that bypassed ReShade never readmits an old recording. Lists ReShade
 never reported are not covered, except the runtime's own list described below. Wrappers resolve to the native lifecycle through a private-data
 tag, which proxies forward. Command lists hook only ResourceBarrier and, where supported,
@@ -1828,7 +1838,7 @@ unavailable.
 
 `Sunshine list lifecycle` (at most every 5 s) counts capture admissions: `covered` (open outside a
 render pass), split into `states observed` by the barrier hooks and `declared`, and `not_open` by
-what the lifecycle showed instead (`unknown`, `closed`, `pass`, `opaque`). The lifecycle lives in
+what the lifecycle showed instead (`unknown`, `closed`, `pass`). The lifecycle lives in
 each list's own recording state (COM private data, which proxies forward), beside its observed
 resource states; there is no global list table. A submission is not a lifecycle event (Close
 already ended the recording), and a destroy event retires the recording. Before this split, a comparison of ReShade's barrier event
@@ -1980,7 +1990,7 @@ An older shader without the rectangle uniform must remain mono for cropped input
 A newly created native command list can record transitions before its first Reset or API
 evaluation. ReShade's create event associates its first recording; if a hooked barrier arrives
 first, the observer associates it at native operation entry, before forwarding the operation, so
-those transitions reach the capture owner. Close, render-pass and opaque-command restrictions come
+those transitions reach the capture owner. Close and render-pass restrictions come
 from ReShade's lifecycle. The callback retains that recording identity across the original call; a
 later Reset cannot relabel old evidence as belonging to the new recording.
 Creating the identity supplies no resource state: capture still requires an actual observed
