@@ -1032,6 +1032,42 @@ namespace {
       check(unreported->Close(), "unreported list close");
     }
 
+    // ReShade's own immediate list is never reported by its list events. Once
+    // registered, each observed submission ends its recording and begins the
+    // next, as ReShade resets it right after submitting it.
+    {
+      ComPtr<ID3D12CommandAllocator> allocator, spare;
+      ComPtr<ID3D12GraphicsCommandList> runtime;
+      check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "runtime allocator");
+      check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&spare)), "runtime spare allocator");
+      check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&runtime)),
+        "runtime list");
+      const auto list_native = native(runtime.Get());
+      require(!record(list_native), "an unregistered runtime list admitted a capture");
+      capture::observe_runtime_list(list_native, 0); // No observed queue.
+      require(!record(list_native), "a runtime list without an observed queue was registered");
+      capture::observe_runtime_list(list_native, native(gpu.queue.Get()));
+      last = capture::list_coverage();
+      require(record(list_native), "a registered runtime list rejected a capture");
+      counted("a registered runtime list was not covered", [](const auto &a, const auto &b) {
+        return b.covered == a.covered + 1 && b.events[static_cast<unsigned>(event::created)] == a.events[static_cast<unsigned>(event::created)]; });
+      const auto first = observer::get_recording_cookie(list_native);
+      check(runtime->Close(), "runtime list close");
+      ID3D12CommandList *values[]{runtime.Get()};
+      gpu.queue->ExecuteCommandLists(1, values); gpu.wait();
+      const auto next = observer::get_recording_cookie(list_native);
+      require(first && next && next != first, "an observed runtime submission did not begin the next recording");
+      check(runtime->Reset(spare.Get(), nullptr), "runtime list reset");
+      require(record(list_native), "the next runtime recording was not admitted");
+      // A ReShade event for the same object proves a game list reused it.
+      capture::observe_list_event(list_native, event::created);
+      const auto reported = observer::get_recording_cookie(list_native);
+      check(close_list(runtime.Get()), "reused list close"); execute(gpu.queue.Get(), runtime.Get()); gpu.wait();
+      require(observer::get_recording_cookie(list_native) == reported && !record(list_native),
+        "a reported list kept the runtime list's submission-driven recordings");
+      capture::observe_list_event(list_native, event::destroyed);
+    }
+
     // A list whose native table cannot be hooked (as after a D3D12Core 1.619
     // Reset) is covered by ReShade's lifecycle with its declared state.
     ComPtr<ID3D12CommandAllocator> allocator;
@@ -1063,7 +1099,7 @@ namespace {
     check(refused->Close(), "unhookable list close");
     check(close_list(gpu.list.Get()), "close recording open during refusal"); gpu.reset();
     gpu.check_debug_errors();
-    std::puts("PASS list lifecycle coverage: ReShade's created/Reset/Close/submit/render pass/bundle decide admission, unreported lists are rejected, an unhookable list uses its declared state");
+    std::puts("PASS list lifecycle coverage: ReShade's created/Reset/Close/submit/render pass/bundle decide admission, unreported lists are rejected, a registered runtime list follows its submissions, an unhookable list uses its declared state");
   }
 
   void auxiliary_consumer_replay_and_discard(fixture &gpu) {

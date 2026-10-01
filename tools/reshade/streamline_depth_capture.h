@@ -176,6 +176,13 @@ namespace sunshine_streamline::depth_capture {
   // object for the list.
   enum class list_event : unsigned { created, reset, closed, executed, bundle, pass_begin, pass_end, destroyed, count };
   void observe_list_event(std::uint64_t native, list_event event);
+  // ReShade's own immediate list (native) on its queue, which its list events
+  // never report. ReShade records it only during present/effects events, open
+  // outside any render pass, and resets it right after each submission, so
+  // each submission the queue hook observes ends its recording and begins the
+  // next; it is registered only while that hook is ready. A ReShade event for
+  // the same object proves a game list reused it.
+  void observe_runtime_list(std::uint64_t native, std::uint64_t queue);
   struct list_coverage_counts {
     std::uint64_t events[static_cast<unsigned>(list_event::count)]{};
     // Capture admissions by ReShade's lifecycle view: covered (open, outside a

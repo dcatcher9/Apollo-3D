@@ -1093,6 +1093,9 @@ namespace sunshine_streamline::depth_capture {
     }
   }
 
+  namespace {
+    void observed_submission(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values);
+  }
   void initialize(bool enabled) {
     requested = false;
     {
@@ -1109,7 +1112,7 @@ namespace sunshine_streamline::depth_capture {
     reason = enabled ? status::unavailable : status::inactive;
     native_observer::callbacks callbacks;
     callbacks.barriers = barriers;
-    callbacks.submitted = submitted; callbacks.invalidated = invalidate_all;
+    callbacks.submitted = observed_submission; callbacks.invalidated = invalidate_all;
     callbacks.invalidated_command = invalidated_command;
     callbacks.associate_recording = associate_recording;
     native_observer::initialize(callbacks);
@@ -1153,6 +1156,9 @@ namespace sunshine_streamline::depth_capture {
     std::unordered_map<std::uint64_t, list_record> list_records; // Guarded by list_lock.
     list_coverage_counts list_counts;                             // Guarded by list_lock.
     constexpr std::size_t list_capacity = 8192;
+    // ReShade's own immediate lists, which its list events never report.
+    std::array<std::uint64_t, 8> runtime_lists{};                // Guarded by list_lock.
+    std::atomic<bool> runtime_lists_known{};
     std::uint64_t list_key(std::uint64_t command) {
       std::uint64_t native{}; UINT size = sizeof(native);
       if (!command || FAILED(reinterpret_cast<ID3D12Object *>(command)->GetPrivateData(list_identity_guid, &size, &native)) ||
@@ -1205,41 +1211,80 @@ namespace sunshine_streamline::depth_capture {
       default: break;
     }
   }
-  void observe_list_event(std::uint64_t native, list_event event) {
-    if (!native || event >= list_event::count) return;
-    if (event == list_event::created || event == list_event::reset) {
-      try { tag_list(native); } catch (...) {}
-    }
-    AcquireSRWLockExclusive(&list_lock);
-    ++list_counts.events[static_cast<unsigned>(event)];
-    try {
-      if (event == list_event::destroyed) list_records.erase(native);
-      else {
-        auto found = list_records.find(native);
-        if (found == list_records.end() && list_records.size() < list_capacity)
-          found = list_records.emplace(native, list_record{}).first;
-        if (found == list_records.end()) ++list_counts.overflow;
+  namespace {
+    // reported: the event came from ReShade. ReShade reports only game lists,
+    // so a reported object at a runtime list's address is a game list now.
+    void apply_list_event(std::uint64_t native, list_event event, bool reported) {
+      if (event == list_event::created || event == list_event::reset) {
+        try { tag_list(native); } catch (...) {}
+      }
+      AcquireSRWLockExclusive(&list_lock);
+      if (reported) {
+        ++list_counts.events[static_cast<unsigned>(event)];
+        for (auto &value : runtime_lists) if (value == native) value = 0;
+      }
+      try {
+        if (event == list_event::destroyed) list_records.erase(native);
         else {
-          auto &value = found->second;
-          switch (event) {
-            case list_event::created: case list_event::reset: value = {}; value.open = true; break;
-            // A submitted list was closed. Until ReShade reports its next Reset
-            // it stays closed, so a Reset that bypassed ReShade's wrapper never
-            // leaves an old recording admissible.
-            case list_event::closed: case list_event::executed: value.open = false; value.closed = true; break;
-            case list_event::bundle: value.opaque = true; break;
-            case list_event::pass_begin: value.pass = true; break;
-            case list_event::pass_end: value.pass = false; break;
-            default: break;
+          auto found = list_records.find(native);
+          if (found == list_records.end() && list_records.size() < list_capacity)
+            found = list_records.emplace(native, list_record{}).first;
+          if (found == list_records.end()) ++list_counts.overflow;
+          else {
+            auto &value = found->second;
+            switch (event) {
+              case list_event::created: case list_event::reset: value = {}; value.open = true; break;
+              // A submitted list was closed. Until ReShade reports its next Reset
+              // it stays closed, so a Reset that bypassed ReShade's wrapper never
+              // leaves an old recording admissible.
+              case list_event::closed: case list_event::executed: value.open = false; value.closed = true; break;
+              case list_event::bundle: value.opaque = true; break;
+              case list_event::pass_begin: value.pass = true; break;
+              case list_event::pass_end: value.pass = false; break;
+              default: break;
+            }
           }
         }
-      }
-    } catch (...) { ++list_counts.overflow; }
-    list_counts.tracked = list_records.size();
+      } catch (...) { ++list_counts.overflow; }
+      list_counts.tracked = list_records.size();
+      ReleaseSRWLockExclusive(&list_lock);
+      // Outside list_lock: recording updates take the capture mutex, which
+      // admission already holds while it takes list_lock.
+      try { lifecycle_recording(native, event); } catch (...) {}
+    }
+    bool runtime_list(std::uint64_t native) {
+      if (!native || !runtime_lists_known.load(std::memory_order_acquire)) return false;
+      AcquireSRWLockShared(&list_lock);
+      const bool found = std::find(runtime_lists.begin(), runtime_lists.end(), native) != runtime_lists.end();
+      ReleaseSRWLockShared(&list_lock);
+      return found;
+    }
+    void observed_submission(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values) {
+      submitted(queue, count, values);
+      // ReShade resets its own list right after submitting it: the submitted
+      // recording ends and the next one begins.
+      for (std::uint32_t i = 0; i != count; ++i)
+        if (runtime_list(values[i].native_command)) apply_list_event(values[i].native_command, list_event::reset, false);
+    }
+  }
+  void observe_list_event(std::uint64_t native, list_event event) {
+    if (!native || event >= list_event::count) return;
+    apply_list_event(native, event, true);
+  }
+  void observe_runtime_list(std::uint64_t native, std::uint64_t queue) {
+    if (!native || !requested.load() || runtime_list(native)) return;
+    // Its recordings advance only through submissions observed on its queue.
+    if (!native_observer::queue_ready(queue)) return;
+    com_ptr<ID3D12GraphicsCommandList> checked;
+    if (!query_native(native, IID_ID3D12GraphicsCommandList, checked) || reinterpret_cast<std::uint64_t>(checked.p) != native) return;
+    bool added = false;
+    AcquireSRWLockExclusive(&list_lock);
+    if (std::find(runtime_lists.begin(), runtime_lists.end(), native) == runtime_lists.end())
+      for (auto &value : runtime_lists) if (!value) { value = native; added = true; break; }
+    if (added) runtime_lists_known.store(true, std::memory_order_release);
     ReleaseSRWLockExclusive(&list_lock);
-    // Outside list_lock: recording updates take the capture mutex, which
-    // admission already holds while it takes list_lock.
-    try { lifecycle_recording(native, event); } catch (...) {}
+    // Registered while ReShade records it: its current recording is open.
+    if (added) apply_list_event(native, list_event::created, false);
   }
   list_coverage_counts list_coverage() {
     AcquireSRWLockShared(&list_lock);
@@ -2070,10 +2115,10 @@ namespace sunshine_streamline::depth_capture {
   }
   // An immediate consumer is a ReShade runtime's immediate list, open outside
   // any render pass during its present/effects events. The runtime submits it
-  // on the consumer queue and resets it afterwards, never replaying it.
-  // ReShade's lifecycle never reports it, so its read is released at that
-  // list's next observed submission, followed by the queue fence. A list open
-  // in ReShade's lifecycle keeps the recording lease and its checks.
+  // on the consumer queue and resets it afterwards, never replaying it. Once
+  // registered (observe_runtime_list) it has a lifecycle like any game list.
+  // Unregistered, its read is released at that list's next observed
+  // submission, followed by the queue fence.
   static bool consume_owned(std::uint64_t native, const packet &value, std::uint64_t destination,
       std::uint32_t destination_state, consumer_diagnostic *diagnostic, bool auxiliary = false, bool local_auxiliary = false,
       bool immediate = false) {
@@ -2088,9 +2133,9 @@ namespace sunshine_streamline::depth_capture {
     if (!query_native(native, IID_ID3D12GraphicsCommandList, checked)) return result(consumer_status::unsupported_interface);
     native = reinterpret_cast<std::uint64_t>(checked.p);
     observe_command(native);
-    // A list in ReShade's lifecycle is read under its recording lease, which
-    // also proves it is open and outside a render pass. A runtime's own
-    // immediate list, which that lifecycle never reports, relies on its
+    // A list in ReShade's lifecycle (or a registered runtime list) is read
+    // under its recording lease, which also proves it is open and outside a
+    // render pass. An unregistered runtime immediate list relies on its
     // runtime's contract and a submission lease.
     const bool by_submission = lifecycle_view(native) != list_view::open;
     if (by_submission && !immediate) return result(consumer_status::observer_not_ready);

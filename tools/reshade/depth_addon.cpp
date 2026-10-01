@@ -1320,6 +1320,9 @@ static void preserve_depth_at_effects(effect_runtime *runtime, command_list *cmd
 	const auto api = device->get_api();
 	if (api == device_api::d3d12)
 	{
+		// ReShade's own list records this copy; its list events never report it.
+		sunshine_streamline::depth_capture::observe_runtime_list(
+			runtime->get_command_queue()->get_immediate_command_list()->get_native(), runtime->get_command_queue()->get_native());
 		preserve_d3d12_at_effects(runtime, cmd_list, device_data, source, identity, capture_after, publish);
 		return;
 	}

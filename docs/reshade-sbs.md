@@ -1792,7 +1792,7 @@ move. That lifecycle is the only source of a list's recording and of capture cov
 a recording, Close ends it, a list is covered while it is open outside a render pass, and a bundle
 makes the rest of the recording opaque. A submitted list stays closed until ReShade reports its
 next Reset, so a native Reset that bypassed ReShade never readmits an old recording. Lists ReShade
-never reported are not covered. Wrappers resolve to the native lifecycle through a private-data
+never reported are not covered, except the runtime's own list described below. Wrappers resolve to the native lifecycle through a private-data
 tag, which proxies forward. Command lists hook only ResourceBarrier and, where supported,
 CommandList7 Barrier: they supply observed resource states when they see the list. Otherwise
 (refused or moved tables) the capture uses the state the game declared on its tag. ReShade's own
@@ -1801,13 +1801,17 @@ its subresource (Dead Space transitions the stencil plane of its R32G8X24 depth 
 split flags, and reports an aliasing barrier as a completed transition of its "after" resource.
 The queue's ExecuteCommandLists hook stays and reports submissions.
 
-Consumer copies of a list open in ReShade's lifecycle use the recording-based lease, whose checks
-also prove the list is open and outside a render pass. A ReShade runtime's own immediate list is
-never reported by that lifecycle and falls back to the runtime's contract: the list is open outside
-any render pass during present/effects events, and the runtime submits it on its queue and resets
-it without replay. That read lease is released at the list's next observed submission, followed by
-the private queue fence; until then the capture storage and destination stay retained. Other lists
-outside the lifecycle stay unavailable.
+A ReShade runtime's own immediate list is never reported by those events. ReShade records it only
+during present/effects events, open outside any render pass, and resets it right after each
+submission without replay. The add-on registers that list before Generic depth's end-of-frame copy
+and before the provider's reads; each submission the queue hook observes then ends its recording
+and begins the next, so it is covered like a game list. A ReShade event for the same object proves
+a game list reused the address and ends the registration. Copies into any covered list use the
+recording-based lease, whose checks also prove the list is open and outside a render pass. An
+unregistered runtime list falls back to the runtime's contract for consumer reads: the read lease
+is released at the list's next observed submission, followed by the private queue fence; until
+then the capture storage and destination stay retained. Other lists outside the lifecycle stay
+unavailable.
 
 `Sunshine list lifecycle` (at most every 5 s) counts capture admissions: `covered` (open outside a
 render pass), split into `states observed` by the barrier hooks and `declared`, and `not_open` by

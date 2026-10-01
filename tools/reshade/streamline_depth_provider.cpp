@@ -398,6 +398,8 @@ namespace sunshine_streamline::provider {
     }
     depth_capture::observe_command(commands->get_native());
     depth_capture::observe_queue(runtime->get_command_queue()->get_native());
+    depth_capture::observe_runtime_list(runtime->get_command_queue()->get_immediate_command_list()->get_native(),
+      runtime->get_command_queue()->get_native());
     {
       // Capture admissions by ReShade's list lifecycle, which decides
       // coverage, and whether the barrier hooks observed the states. At most
