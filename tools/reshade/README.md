@@ -476,13 +476,14 @@ reshade_depth_queue_cycle_test.exe --content 3840 2160
 
 The default case checks that a pending foreign producer cannot introduce a reverse GPU queue
 dependency, then verifies natural recovery and same-queue admission. `--pipeline` checks admission
-of an unconsumed completed NGX snapshot while its successor is CPU-recorded or GPU-pending, plus
-rejection across failed/missing input, observation/reset revisions, a reset flag, epoch and layout
-changes. `--foreign-reclaim` retires producer and consumer recordings and releases private
-snapshot leases before allocating an unrelated NGX capture or a Generic preservation copy from
-a separate resource. Its ten cases check that SL FG nomination authority, current depth and
-completed depth beneath a pending successor survive reclamation, while failed/missing input
-still revokes old depth and prevents pre-gap resurrection. Pixel cases use actual GPU readback.
+of an unconsumed completed NGX snapshot while its successor is CPU-recorded or GPU-pending or
+carries new observation/feedback revisions or a reset flag, plus rejection across failed/missing
+input, epoch and layout changes. `--foreign-reclaim` retires producer and consumer recordings and
+releases private snapshot leases before allocating an unrelated NGX capture or a Generic
+preservation copy from a separate resource. Its ten cases check that SL FG nomination authority,
+current depth and completed depth beneath a pending successor survive reclamation, while
+failed/missing input still revokes old depth and prevents pre-gap resurrection. Pixel cases use
+actual GPU readback.
 `--content [width height]` nominates a full patterned packed D32S8 scene through NGX
 while the Generic preservation callback reports availability, then clears that same source after
 the API capture. It checks the snapshot's scene depth byte-for-byte and verifies that depth-plane

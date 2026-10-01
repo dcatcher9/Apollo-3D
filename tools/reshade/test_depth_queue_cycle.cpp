@@ -395,7 +395,12 @@ namespace {
     capture::packet selected;
     capture::capture_diagnostic diagnostic;
     const bool acquired = capture::acquire(gpu.consumer.native(), 2, selected, &diagnostic);
-    const bool allows_completed = scenario == pipeline_case::recorded || scenario == pipeline_case::submitted;
+    // Selection does not consult observation or feedback revisions or the
+    // reset flag: they are bookkeeping, not evidence against finished depth.
+    // A reset starts a new scene-history segment; the depth stays valid.
+    const bool allows_completed = scenario == pipeline_case::recorded || scenario == pipeline_case::submitted ||
+      scenario == pipeline_case::observation_reset || scenario == pipeline_case::feedback_reset ||
+      scenario == pipeline_case::reset_flag;
     std::printf("pipeline %s: selected=%llu newest=%llu ready=%d status=%s\n", name(scenario),
       static_cast<unsigned long long>(selected.metadata.sequence),
       static_cast<unsigned long long>(diagnostic.newest_sequence), int(selected.pixel_ready), capture::name(diagnostic.result));
