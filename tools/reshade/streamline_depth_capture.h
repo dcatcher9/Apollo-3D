@@ -195,6 +195,11 @@ namespace sunshine_streamline::depth_capture {
     // Barrier-state shadow at admission: ReShade's last reported state of the
     // source in this recording versus the hooked one, or only one of them.
     std::uint64_t barrier_agree{}, barrier_disagree{}, barrier_events_only{}, barrier_hooks_only{};
+    // Of barrier_hooks_only: ReShade had made the recording's states unknown
+    // (wildcard alias or overflow) rather than reporting no transition.
+    std::uint64_t barrier_hooks_only_unknown{};
+    // The latest disagreement: hooked D3D12 state and ReShade usage.
+    std::uint32_t last_disagree_hooked{}, last_disagree_usage{};
   };
   list_shadow_counts list_shadow();
   void observe_queue(std::uint64_t queue);

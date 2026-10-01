@@ -1820,7 +1820,9 @@ disagreements).
 `events_only` (lifecycle coverage where hooks were refused) and `neither`, of which `immediate`
 were on a runtime's own immediate list, which ReShade's lifecycle never reports. `barrier_states`
 compares, for each admitted source, ReShade's last reported transition in that recording with the
-hooked one: `agree`, `disagree`, or known to only one side. The capture's own copy barriers and
+hooked one: `agree`, `disagree` (with the latest pair of values), or known to only one side, where
+`hooks_only` names how many ReShade had made unknown. ReShade splits D3D12's vertex-and-constant
+buffer state into two usages; they compare as one. The capture's own copy barriers and
 UAV barriers, including global ones, are excluded on both sides; an aliasing barrier makes its
 named resource unknown, and a wildcard alias every resource in the recording. This shadow decides whether the hooks can be removed; it
 never chooses a copy state.

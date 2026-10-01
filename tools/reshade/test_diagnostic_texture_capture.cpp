@@ -986,8 +986,10 @@ namespace {
       return b.barrier_agree == a.barrier_agree + 1; });
     capture::observe_list_barriers(list, 1, &source, &non_pixel, &pixel);
     require(record(list), "a mismatched ReShade barrier state changed admission");
-    counted("a mismatched barrier state was not counted", [](const auto &a, const auto &b) {
-      return b.barrier_disagree == a.barrier_disagree + 1 && b.barrier_agree == a.barrier_agree; });
+    counted("a mismatched barrier state was not counted with its values", [](const auto &a, const auto &b) {
+      return b.barrier_disagree == a.barrier_disagree + 1 && b.barrier_agree == a.barrier_agree &&
+        b.last_disagree_hooked == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE &&
+        b.last_disagree_usage == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE; });
     // A global UAV barrier (resource 0, UAV to UAV) is no transition and must
     // not erase what ReShade reported.
     const std::uint64_t global = 0;
@@ -1007,7 +1009,7 @@ namespace {
     capture::observe_list_barriers(list, 1, &global, &undefined, &non_pixel);
     require(record(list), "an unknown ReShade barrier state changed admission");
     counted("a wildcard alias did not make ReShade's states unknown", [](const auto &a, const auto &b) {
-      return b.barrier_hooks_only == a.barrier_hooks_only + 1; });
+      return b.barrier_hooks_only == a.barrier_hooks_only + 1 && b.barrier_hooks_only_unknown == a.barrier_hooks_only_unknown + 1; });
     capture::observe_list_event(list, event::pass_begin);
     require(!record(list), "a capture was admitted inside ReShade's render pass");
     counted("a lifecycle render pass was not counted", [](const auto &a, const auto &b) {

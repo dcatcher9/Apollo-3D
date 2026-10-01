@@ -466,11 +466,12 @@ namespace sunshine_streamline::provider {
           char text[1024]{};
           std::snprintf(text, sizeof(text),
             "Sunshine list lifecycle shadow: admissions both=%llu hooks_only=%llu events_only=%llu neither=%llu (immediate=%llu); "
-            "barrier_states agree=%llu disagree=%llu events_only=%llu hooks_only=%llu; "
+            "barrier_states agree=%llu disagree=%llu (last d3d12=0x%x reshade=0x%x) events_only=%llu hooks_only=%llu (unknown=%llu); "
             "lifecycle_not_open unknown=%llu closed=%llu pass=%llu opaque=%llu; disagree closed=%llu pass=%llu; "
             "events created=%llu reset=%llu closed=%llu executed=%llu bundle=%llu pass_begin=%llu pass_end=%llu destroyed=%llu; tracked=%llu overflow=%llu",
             u(c.both), u(c.hooks_only), u(c.events_only), u(c.neither), u(c.neither_immediate),
-            u(c.barrier_agree), u(c.barrier_disagree), u(c.barrier_events_only), u(c.barrier_hooks_only),
+            u(c.barrier_agree), u(c.barrier_disagree), unsigned(c.last_disagree_hooked), unsigned(c.last_disagree_usage),
+            u(c.barrier_events_only), u(c.barrier_hooks_only), u(c.barrier_hooks_only_unknown),
             u(c.unknown), u(c.closed), u(c.pass), u(c.opaque),
             u(c.closed_disagree), u(c.pass_disagree), e(event::created), e(event::reset), e(event::closed), e(event::executed),
             e(event::bundle), e(event::pass_begin), e(event::pass_end), e(event::destroyed), u(c.tracked), u(c.overflow));

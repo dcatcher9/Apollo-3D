@@ -1202,10 +1202,12 @@ namespace sunshine_streamline::depth_capture {
       }
       ReleaseSRWLockExclusive(&list_lock);
     }
-    // D3D12 COMMON (and PRESENT) is ReShade's general usage; other supported
-    // states share their D3D12 bit values.
+    // D3D12 COMMON (and PRESENT) is ReShade's general usage; ReShade splits
+    // VERTEX_AND_CONSTANT_BUFFER (0x1) into vertex_buffer (0x1) and
+    // constant_buffer (0x8000); other states share their D3D12 bit values.
     bool same_state(std::uint32_t d3d12, std::uint32_t usage) {
-      constexpr std::uint32_t general = 0x80000000u;
+      constexpr std::uint32_t general = 0x80000000u, constant_buffer = 0x8000u, vertex_and_constant = 0x1u;
+      if (usage & constant_buffer) usage = (usage & ~constant_buffer) | vertex_and_constant;
       if (usage & general) return d3d12 == 0 || d3d12 == (usage & ~general);
       return d3d12 == usage;
     }
@@ -1216,15 +1218,20 @@ namespace sunshine_streamline::depth_capture {
       const bool hook_known = hooked && !hooked->blocked;
       const auto native = list_key(command);
       AcquireSRWLockExclusive(&list_lock);
-      bool event_known = false;
+      bool event_known = false, events_unknown = false;
       std::uint32_t usage{};
-      if (const auto found = native ? list_records.find(native) : list_records.end(); found != list_records.end() &&
-          !found->second.states_unknown)
-        for (const auto &entry : found->second.states) if (entry.first == resource) { event_known = entry.second != 0; usage = entry.second; break; }
+      if (const auto found = native ? list_records.find(native) : list_records.end(); found != list_records.end()) {
+        events_unknown = found->second.states_unknown;
+        if (!events_unknown)
+          for (const auto &entry : found->second.states) if (entry.first == resource) { event_known = entry.second != 0; usage = entry.second; break; }
+      }
       auto &counts = list_counts;
-      if (hook_known && event_known) ++(same_state(hooked->value, usage) ? counts.barrier_agree : counts.barrier_disagree);
+      if (hook_known && event_known) {
+        if (same_state(hooked->value, usage)) ++counts.barrier_agree;
+        else { ++counts.barrier_disagree; counts.last_disagree_hooked = hooked->value; counts.last_disagree_usage = usage; }
+      }
       else if (event_known) ++counts.barrier_events_only;
-      else if (hook_known) ++counts.barrier_hooks_only;
+      else if (hook_known) { ++counts.barrier_hooks_only; if (events_unknown) ++counts.barrier_hooks_only_unknown; }
       ReleaseSRWLockExclusive(&list_lock);
     }
   }
