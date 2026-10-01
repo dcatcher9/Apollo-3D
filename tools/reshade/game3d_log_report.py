@@ -59,6 +59,7 @@ BENIGN = (
 # Export pauses that are part of normal play rather than faults.
 ROUTINE_INACTIVE = {'not_foreground', 'runtime_reset', 'no_consumer', 'present_without_render', 'runtime_gone'}
 SETTLE_S = 3.0  # Recalibration and holds after an FG switch or runtime reset.
+RESOLVE_S = 10.0  # A trust dispute is handled when that channel's trust is revoked this soon.
 DEDICATED, PRESENTED = (0, 1), (2, 3)
 
 
@@ -93,6 +94,7 @@ class Session:
     generation: str = ''
     intervals: list[Interval] = field(default_factory=list)
     settle: list[float] = field(default_factory=list)
+    overlay: list[float] = field(default_factory=list)
     fg_switches: list[tuple[float, int]] = field(default_factory=list)
     inactive: Counter = field(default_factory=Counter)
     inactive_first: dict[str, float] = field(default_factory=dict)
@@ -134,6 +136,8 @@ def parse(lines) -> Session:
             s.exe = os.path.basename(found.group(1))
         if 'Finished exiting' in text:
             s.exited = True
+        if 'ReShade overlay opened' in text:
+            s.overlay.append(t)
         if 'Registered add-on "Sunshine 3D"' in text:
             s.addon = True
         if 'add-on GPU renderer ready' in text:
@@ -298,12 +302,19 @@ def evaluate(s: Session) -> list[Check]:
               ', '.join(f'{k} {v}' for k, v in s.inactive.most_common()) or 'never paused',
               [f'{clock(s.inactive_first[k])} {k}' for k in unusual]))
 
-    if s.hitches:
-        worst = sorted(s.hitches, key=lambda h: -h[2])[:3]
-        add(Check('WARN', 'Present hitches', f'{len(s.hitches)}, worst {worst[0][2]:.1f} ms',
+    # A runtime reset or FG switch rebuilds the export ring and opening the
+    # ReShade overlay prepares its compositor: one slow present each is expected.
+    expected_marks = s.settle + s.overlay
+    expected = [h for h in s.hitches if any(0 <= h[0] - mark <= SETTLE_S for mark in expected_marks)]
+    unexpected = [h for h in s.hitches if h not in expected]
+    if unexpected:
+        worst = sorted(unexpected, key=lambda h: -h[2])[:3]
+        add(Check('WARN', 'Present hitches', f'{len(unexpected)} outside resets, FG switches and overlay opening, '
+                                             f'worst {worst[0][2]:.1f} ms',
                   [f'{clock(t)} {what} {ms:.1f} ms' for t, what, ms in worst]))
     else:
-        add(Check('PASS', 'Present hitches', 'none'))
+        add(Check('PASS', 'Present hitches', f'{len(expected)} at resets, FG switches or overlay opening' if expected
+                  else 'none'))
 
     if s.timing:
         presents, cpu_mean, cpu_max, gpu_frames, gpu_mean, gpu_max = s.timing
@@ -327,7 +338,12 @@ def ui_checks(s: Session, add) -> None:
         return
     # A presented alpha (sources 3 and 4) must never decide while a trusted
     # dedicated UI channel is offered: that flattens scene as UI.
-    overrides, disputes = [], []
+    overrides, disputes, handled = [], [], []
+
+    def revoked(t: float, channel: int) -> float | None:
+        return next((when for when, _, bits in s.trust_events
+                     if 0 <= when - t <= RESOLVE_S and not bits & (1 << channel)), None)
+
     for t, _, source, covered, pixels, candidates, alpha, trusted in s.ui:
         if not pixels:
             continue
@@ -336,14 +352,17 @@ def ui_checks(s: Session, add) -> None:
             overrides.append(f'{clock(t)} source {source} covered {100 * covered / pixels:.0f}%')
         for c in PRESENTED:
             if dedicated and trusted & (1 << c) and min(abs(alpha[c] - d) for d in dedicated) * 10 >= pixels:
-                disputes.append(f'{clock(t)} channel {c} {100 * alpha[c] / pixels:.0f}% vs UI '
-                                f'{100 * dedicated[0] / pixels:.1f}%')
+                text = f'{clock(t)} channel {c} {100 * alpha[c] / pixels:.0f}% vs UI {100 * dedicated[0] / pixels:.1f}%'
+                when = revoked(t, c)
+                (handled if when is not None else disputes).append(
+                    text + (f', trust revoked {clock(when)}' if when is not None else ''))
     states = Counter(sample[1] for sample in s.ui)
     add(Check('FAIL' if overrides else 'WARN' if disputes else 'PASS', 'UI protection',
               ', '.join(f'{k} {v}' for k, v in states.most_common())
               + ('; presented alpha decided over a trusted UI channel' if overrides else '')
-              + ('; trusted presented alpha disagrees with the UI channel' if disputes else ''),
-              (overrides or disputes)[:6]))
+              + ('; trusted presented alpha disagrees with the UI channel' if disputes else '')
+              + ('; a disagreeing presented alpha lost its trust' if handled and not disputes else ''),
+              (overrides or disputes or handled)[:6]))
 
 
 def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:

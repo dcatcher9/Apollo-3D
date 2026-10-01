@@ -65,6 +65,11 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(checks['UI protection'].status, 'FAIL')
         disputed = run(BASE + [ui('10:00:12', 2, 2, (0, 2, 0, 400), 0xa, 0xa)])
         self.assertEqual(disputed['UI protection'].status, 'WARN')
+        # The same disagreement followed by the revocation it caused is handled.
+        handled = run(BASE + [ui('10:00:12', 2, 2, (0, 2, 0, 400), 0xa, 0xa),
+                              line('10:00:14', '[Sunshine 3D] Sunshine UI protection: alpha trust is now 0x2; '
+                                               'remembered for later sessions of this game')])
+        self.assertEqual(handled['UI protection'].status, 'PASS')
 
     def test_raw_placement_with_a_valid_camera_warns(self):
         lines = [x for x in BASE if 'Streamline scale: ready' not in x] + [
@@ -83,6 +88,15 @@ class ReadinessReport(unittest.TestCase):
         checks = run(BASE + [output('10:00:20', 1000, 0, 0, 750, 250)])
         self.assertEqual(checks['Depth'].status, 'WARN')
         self.assertEqual(checks['Depth'].times, ['10:00:15-10:00:20'])
+
+    def test_hitches_at_resets_and_overlay_are_expected(self):
+        hitch = '[Sunshine 3D] Sunshine Game 3D hitch: stereo export took 43.7 ms on the present thread'
+        expected = run(BASE + [line('10:00:06', '[Sunshine 3D] Sunshine SBS: export inactive (runtime_reset); waiting'),
+                               line('10:00:07', hitch, 'WARN'),
+                               line('10:00:10', '[Sunshine 3D] Sunshine SBS: ReShade overlay opened; composing'),
+                               line('10:00:10', hitch, 'WARN')])
+        self.assertEqual(expected['Present hitches'].status, 'PASS')
+        self.assertEqual(run(BASE + [line('10:00:12', hitch, 'WARN')])['Present hitches'].status, 'WARN')
 
     def test_fg_switch_settles_before_flat_counts(self):
         checks = run(BASE + [line('10:00:16', '[Sunshine 3D] Sunshine Streamline frame generation: viewport=0 mode=1'),
