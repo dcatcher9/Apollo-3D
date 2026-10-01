@@ -1821,7 +1821,8 @@ disagreements).
 were on a runtime's own immediate list, which ReShade's lifecycle never reports. `barrier_states`
 compares, for each admitted source, ReShade's last reported transition in that recording with the
 hooked one: `agree`, `disagree`, or known to only one side. The capture's own copy barriers and
-UAV barriers are excluded on both sides. This shadow decides whether the hooks can be removed; it
+UAV barriers, including global ones, are excluded on both sides; an aliasing barrier makes its
+named resource unknown, and a wildcard alias every resource in the recording. This shadow decides whether the hooks can be removed; it
 never chooses a copy state.
 
 In **Automatic**, stored depth `r` is decoded as `d=r*raw_scale+raw_bias`, then the frame-bound

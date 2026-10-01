@@ -1220,7 +1220,7 @@ namespace sunshine_streamline::depth_capture {
       std::uint32_t usage{};
       if (const auto found = native ? list_records.find(native) : list_records.end(); found != list_records.end() &&
           !found->second.states_unknown)
-        for (const auto &entry : found->second.states) if (entry.first == resource) { event_known = true; usage = entry.second; break; }
+        for (const auto &entry : found->second.states) if (entry.first == resource) { event_known = entry.second != 0; usage = entry.second; break; }
       auto &counts = list_counts;
       if (hook_known && event_known) ++(same_state(hooked->value, usage) ? counts.barrier_agree : counts.barrier_disagree);
       else if (event_known) ++counts.barrier_events_only;
@@ -1291,14 +1291,18 @@ namespace sunshine_streamline::depth_capture {
       if (const auto found = list_records.find(native); found != list_records.end()) {
         auto &value = found->second;
         for (std::uint32_t i = 0; i != count; ++i) {
-          if (!resources[i] || !states[i] || !old_states[i]) { value.states.clear(); value.states_unknown = true; continue; }
-          // ReShade reports a UAV barrier as UAV to UAV; like the hooks, record
-          // only transitions.
+          // ReShade reports a UAV barrier, named or global, as UAV to UAV; like
+          // the hooks, record only transitions.
           if (old_states[i] == states[i]) continue;
+          // A wildcard alias can affect any resource in this recording.
+          if (!resources[i]) { value.states.clear(); value.states_unknown = true; continue; }
+          // An alias names only its after-resource, whose state becomes unknown
+          // (stored as 0); the hooks block that resource as well.
+          const auto state = old_states[i] && states[i] ? states[i] : 0u;
           const auto entry = std::find_if(value.states.begin(), value.states.end(),
             [&](const auto &known) { return known.first == resources[i]; });
-          if (entry != value.states.end()) entry->second = states[i];
-          else if (value.states.size() < list_state_capacity) value.states.emplace_back(resources[i], states[i]);
+          if (entry != value.states.end()) entry->second = state;
+          else if (value.states.size() < list_state_capacity) value.states.emplace_back(resources[i], state);
           else value.states_unknown = true;
         }
       }

@@ -988,10 +988,25 @@ namespace {
     require(record(list), "a mismatched ReShade barrier state changed admission");
     counted("a mismatched barrier state was not counted", [](const auto &a, const auto &b) {
       return b.barrier_disagree == a.barrier_disagree + 1 && b.barrier_agree == a.barrier_agree; });
+    // A global UAV barrier (resource 0, UAV to UAV) is no transition and must
+    // not erase what ReShade reported.
     const std::uint64_t global = 0;
-    capture::observe_list_barriers(list, 1, &global, &non_pixel, &pixel);
+    capture::observe_list_barriers(list, 1, &source, &pixel, &non_pixel);
+    capture::observe_list_barriers(list, 1, &global, &uav, &uav);
+    require(record(list), "a global UAV barrier changed admission");
+    counted("a global UAV barrier erased ReShade's states", [](const auto &a, const auto &b) {
+      return b.barrier_agree == a.barrier_agree + 1; });
+    // An alias names only its after-resource: unknown to ReShade from then on.
+    const std::uint32_t undefined = 0;
+    capture::observe_list_barriers(list, 1, &source, &undefined, &non_pixel);
+    require(record(list), "an aliased ReShade barrier state changed admission");
+    counted("an alias did not make the resource unknown to ReShade", [](const auto &a, const auto &b) {
+      return b.barrier_hooks_only == a.barrier_hooks_only + 1; });
+    // A wildcard alias (resource 0) makes every state unknown.
+    capture::observe_list_barriers(list, 1, &source, &pixel, &non_pixel);
+    capture::observe_list_barriers(list, 1, &global, &undefined, &non_pixel);
     require(record(list), "an unknown ReShade barrier state changed admission");
-    counted("a global barrier did not make ReShade's states unknown", [](const auto &a, const auto &b) {
+    counted("a wildcard alias did not make ReShade's states unknown", [](const auto &a, const auto &b) {
       return b.barrier_hooks_only == a.barrier_hooks_only + 1; });
     capture::observe_list_event(list, event::pass_begin);
     require(!record(list), "a capture was admitted inside ReShade's render pass");
