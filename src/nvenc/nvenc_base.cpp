@@ -396,6 +396,7 @@ namespace nvenc {
                                        get_encoder_cap(NV_ENC_CAPS_NUM_ENCODER_ENGINES) :
                                        0;
     const bool split_frame_encoding = should_force_split_frame_encoding(
+      config,
       video::is_packed_mode(client_config.sbs_mode),
       client_config.videoFormat,
       encoder_params.width,
@@ -610,6 +611,8 @@ namespace nvenc {
       }
       if (split_frame_encoding) {
         extra += std::format(" split-encode auto-forced ({} engines available)", encoder_engine_count);
+      } else if (!config.split_encode && video::is_packed_mode(client_config.sbs_mode)) {
+        extra += " split-encode disabled by nvenc_split_encode";
       }
       if (enc_config.rcParams.enableAQ) {
         extra += " spatial-aq";

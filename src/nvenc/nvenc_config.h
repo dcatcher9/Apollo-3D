@@ -82,6 +82,9 @@ namespace nvenc {
 
     // Replace HEVC P pictures with past-reference-only B pictures for better low-latency compression
     bool hevc_unidirectional_b = true;
+
+    // Split packed Host SBS frames wider than 4096 across the GPU's NVENC engines
+    bool split_encode = true;
   };
 
   constexpr bool should_enable_hevc_unidirectional_b(
@@ -96,13 +99,15 @@ namespace nvenc {
   }
 
   constexpr bool should_force_split_frame_encoding(
+    const nvenc_config &config,
     bool packed_host_sbs,
     int video_format,
     int encode_width,
     int encoder_engine_count
   ) {
     const bool split_capable_codec = video_format == 1 || video_format == 2;
-    return packed_host_sbs &&
+    return config.split_encode &&
+           packed_host_sbs &&
            split_capable_codec &&
            encode_width > 4096 &&
            encoder_engine_count > 1;

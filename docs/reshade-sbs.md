@@ -121,7 +121,12 @@ CPU time and GPU stage times (mean/max ms: inputs, source copy, UI detection, de
 eyes, pack, total) from timestamp queries read after each frame's completion fence, without a
 wait. Inputs covers the depth and UI captures recorded before rendering. Eyes is the one pass
 that renders both eyes into the side-by-side target; pack is used only by older embedded replay
-shaders. Both are zero on frames nothing consumed. The CPU entry also splits the slowest present into setup, depth, UI, render and
+shaders. Both are zero on frames nothing consumed. `gpu_profile` says whether the timestamp
+queries started (`no_timestamp_frequency` and `no_query_heap` name a failed start), and frames
+that did not count are split into `dropped_fence_pending` (the slot was reused before the frame's
+completion fence passed), `dropped_unresolved` (the fence passed but ReShade never made the results
+readable; its D3D12 queries resolve only on the runtime's immediate command list) and
+`incomplete` (render or conditioning marks missing). The CPU entry also splits the slowest present into setup, depth, UI, render and
 export, and a rate-limited `Sunshine Game 3D hitch` warning names any present-thread step that
 takes more than 8 ms.
 

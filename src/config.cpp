@@ -640,6 +640,7 @@ namespace config {
     int_between_f(vars, "nvenc_vbv_increase", video.nv.vbv_percentage_increase, {0, 400});
     bool_f(vars, "nvenc_spatial_aq", video.nv.adaptive_quantization);
     bool_f(vars, "nvenc_hevc_unidirectional_b", video.nv.hevc_unidirectional_b);
+    bool_f(vars, "nvenc_split_encode", video.nv.split_encode);
     generic_f(vars, "nvenc_twopass", video.nv.two_pass, nv::twopass_from_view);
     bool_f(vars, "nvenc_realtime_hags", video.nv_realtime_hags);
     bool_f(vars, "nvenc_opengl_vulkan_on_dxgi", video.nv_opengl_vulkan_on_dxgi);

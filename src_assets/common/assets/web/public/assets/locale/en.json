@@ -200,6 +200,8 @@
     "nvenc_spatial_aq_enabled": "Enabled (slower)",
     "nvenc_hevc_unidirectional_b": "HEVC unidirectional B-frames",
     "nvenc_hevc_unidirectional_b_desc": "Enabled by default. Replaces HEVC P pictures with past-reference-only B pictures for better compression without conventional B-frame reordering delay. Requires GPU support and cannot be combined with weighted prediction.",
+    "nvenc_split_encode": "Split-frame encoding for side-by-side 3D",
+    "nvenc_split_encode_desc": "Enabled by default. Splits packed side-by-side frames wider than 4096 pixels across the GPU's NVENC engines so wide 3D streams keep their frame rate. Disable to test whether encoder stalls follow split encoding; one engine may then not sustain the requested frame rate.",
     "nvenc_twopass": "Two-pass mode",
     "nvenc_twopass_desc": "Adds preliminary encoding pass. This allows to detect more motion vectors, better distribute bitrate across the frame and more strictly adhere to bitrate limits. Disabling it is not recommended since this can lead to occasional bitrate overshoot and subsequent packet loss.",
     "nvenc_twopass_disabled": "Disabled (fastest, not recommended)",

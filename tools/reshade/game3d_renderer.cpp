@@ -78,6 +78,7 @@ namespace sunshine_game3d {
     struct profile_frame { uint64_t fence{}; uint32_t written{}; };
     api::query_heap profile_heap{};
     bool profile_attempted{}, profile_ready{}, profile_open{};
+    gpu_timing::profile_state profile_state = gpu_timing::profile_state::not_started;
     double profile_ticks_per_ms{};
     uint32_t profile_slot{};
     std::array<profile_frame, profile_frames> profile_ring{};
@@ -327,9 +328,16 @@ namespace sunshine_game3d {
       if (profile_attempted) return profile_ready;
       profile_attempted = true;
       const auto frequency = queue->get_timestamp_frequency();
-      if (!frequency || !device->create_query_heap(api::query_type::timestamp, profile_frames * mark_count, &profile_heap))
+      if (!frequency) {
+        profile_state = gpu_timing::profile_state::no_timestamp_frequency;
         return false;
+      }
+      if (!device->create_query_heap(api::query_type::timestamp, profile_frames * mark_count, &profile_heap)) {
+        profile_state = gpu_timing::profile_state::no_query_heap;
+        return false;
+      }
       profile_ticks_per_ms = double(frequency) / 1000.0;
+      profile_state = gpu_timing::profile_state::ready;
       return profile_ready = true;
     }
     // Reads completed frames into the window; never waits on the GPU.
@@ -353,7 +361,7 @@ namespace sunshine_game3d {
         const auto has = [written](unsigned mark) { return (written >> mark & 1u) != 0; };
         // Packed-eye frames mark their eyes only when the side-by-side target
         // is recorded; without a consumer the frame ends after conditioning.
-        if (!has(mark_render) || !has(mark_conditioning)) continue;
+        if (!has(mark_render) || !has(mark_conditioning)) { ++profile_window.incomplete; continue; }
         const auto span = [&](unsigned from, unsigned to) {
           return has(from) && has(to) && ticks[to] >= ticks[from] ? double(ticks[to] - ticks[from]) / profile_ticks_per_ms : 0.0;
         };
@@ -376,6 +384,11 @@ namespace sunshine_game3d {
         // The first mark of a presentation claims the next slot, dropping an
         // unread frame; this presentation's completion signal retires it.
         profile_slot = (profile_slot + 1) % profile_frames;
+        if (const auto &unread = profile_ring[profile_slot]; unread.written) {
+          const auto completed = device->get_completed_fence_value(completion);
+          ++(completed == UINT64_MAX || completed < unread.fence ?
+            profile_window.dropped_fence_pending : profile_window.dropped_unresolved);
+        }
         profile_ring[profile_slot] = {sequence + 1, 0};
         profile_open = true;
       }
@@ -1217,6 +1230,7 @@ namespace sunshine_game3d {
     auto &d = *data_;
     d.collect_profile();
     out = d.profile_window;
+    out.state = d.profile_state;
     for (unsigned s = 0; s != gpu_timing::stage_count; ++s)
       out.mean_ms[s] = out.frames ? d.profile_sum_ms[s] / out.frames : 0.0;
     d.profile_window = {};

@@ -8133,6 +8133,7 @@ TEST(NvencConfigTest, UsesVerifiedStreamingDefaults) {
 
   EXPECT_EQ(config.vbv_percentage_increase, 100);
   EXPECT_TRUE(config.hevc_unidirectional_b);
+  EXPECT_TRUE(config.split_encode);
 }
 
 TEST(NvencConfigTest, GatesHevcUnidirectionalBFrames) {
@@ -8149,13 +8150,16 @@ TEST(NvencConfigTest, GatesHevcUnidirectionalBFrames) {
 }
 
 TEST(NvencConfigTest, ForcesSplitEncodingOnlyForWideModernCodecs) {
-  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(false, 1, 7680, 2));
-  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(true, 0, 7680, 2));
-  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(true, 1, 4096, 2));
-  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(true, 1, 7680, 1));
-  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(true, 3, 7680, 2));
-  EXPECT_TRUE(nvenc::should_force_split_frame_encoding(true, 1, 7680, 2));
-  EXPECT_TRUE(nvenc::should_force_split_frame_encoding(true, 2, 8192, 3));
+  nvenc::nvenc_config config;
+  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(config, false, 1, 7680, 2));
+  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(config, true, 0, 7680, 2));
+  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(config, true, 1, 4096, 2));
+  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(config, true, 1, 7680, 1));
+  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(config, true, 3, 7680, 2));
+  EXPECT_TRUE(nvenc::should_force_split_frame_encoding(config, true, 1, 7680, 2));
+  EXPECT_TRUE(nvenc::should_force_split_frame_encoding(config, true, 2, 8192, 3));
+  config.split_encode = false;
+  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(config, true, 1, 7680, 2));
 }
 
 TEST(NvencConfigTest, DerivesIdenticalCreateAndReconfigureRateControl) {

@@ -130,7 +130,23 @@ namespace sunshine_game3d {
     enum stage { inputs, source, detection, linearize, candidate, vertical, horizontal, eyes, pack, total, stage_count };
     std::uint32_t frames{};
     std::array<double, stage_count> mean_ms{}, max_ms{};
+    // Why marked frames did not count. The profile may never have started;
+    // a frame's slot can be reused before its completion fence passed, or
+    // after it passed with results ReShade never made readable (its D3D12
+    // queries resolve only on the runtime's immediate list); or a read frame
+    // lacked its render and conditioning marks.
+    enum class profile_state : std::uint8_t { not_started, ready, no_timestamp_frequency, no_query_heap };
+    profile_state state = profile_state::not_started;
+    std::uint32_t dropped_fence_pending{}, dropped_unresolved{}, incomplete{};
   };
+  inline const char *name(gpu_timing::profile_state value) {
+    switch (value) {
+      case gpu_timing::profile_state::ready: return "ready";
+      case gpu_timing::profile_state::no_timestamp_frequency: return "no_timestamp_frequency";
+      case gpu_timing::profile_state::no_query_heap: return "no_query_heap";
+      default: return "not_started";
+    }
+  }
 
   struct alpha_probe_counters {
     std::uint64_t submitted = 0, mapped = 0; // Recorded probes and native Map calls.

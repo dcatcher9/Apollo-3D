@@ -1517,6 +1517,32 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
     </tr>
 </table>
 
+### nvenc_split_encode
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Split packed side-by-side Host SBS frames wider than 4096 pixels across the GPU's NVENC engines
+            (NVENC split-frame encoding, HEVC and AV1 only), so a full-SBS stream such as 7680x2160 keeps its
+            requested cadence. Disabling it encodes each frame on one engine, which may not sustain that cadence;
+            use it to test whether encoder stalls follow split encoding. Ordinary streams never split.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            nvenc_split_encode = disabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### nvenc_vbv_increase
 
 <table>
@@ -1560,7 +1586,10 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
             in Windows. Currently, NVIDIA drivers may freeze in encoder when HAGS is enabled, realtime priority is used
             and VRAM utilization is close to maximum. Disabling this option lowers the priority to high, sidestepping
             the freeze at the cost of reduced capture performance when the GPU is heavily loaded.
-            This option applies to Sunshine 3D's native NVENC path.
+            This option applies to Sunshine 3D's native NVENC path. A log line such as
+            `NvEnc: frame ... exceeded the 100 ms completion wait; ... input_producer=done_by_...ms (encoder-side delay)`
+            while streaming a DX12 game with frame generation is that freeze's signature; disable this option to
+            test it. If stalls remain, `nvenc_split_encode` isolates split-frame encoding.
         </td>
     </tr>
     <tr>

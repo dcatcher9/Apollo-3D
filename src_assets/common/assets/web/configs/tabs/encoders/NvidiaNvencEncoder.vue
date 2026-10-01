@@ -53,6 +53,14 @@ const config = ref(props.config)
               default="true"
     ></Checkbox>
 
+    <!-- Split-frame encoding for packed Host SBS -->
+    <Checkbox class="mb-3"
+              id="nvenc_split_encode"
+              locale-prefix="config"
+              v-model="config.nvenc_split_encode"
+              default="true"
+    ></Checkbox>
+
     <!-- VBV/HRD buffer percentage increase -->
     <div class="mb-3">
       <label for="nvenc_vbv_increase" class="form-label">{{ $t('config.nvenc_vbv_increase') }}</label>
