@@ -22,14 +22,15 @@ def output(t, published, fg, flat, fresh, missing, runtime='0x1'):
                    f'runtime={runtime} generation=1; cumulative')
 
 
-def ui(t, source, covered, alpha, candidates, trusted, pixels=1000):
+def ui(t, source, covered, alpha, candidates, trusted, pixels=1000, hudless=(0, 0), layer=0):
     a = '/'.join(str(v) for v in alpha)
     return line(t, f'[Sunshine 3D] Sunshine UI protection: runtime=0000000000000001 mode=auto rendered=1 mask_path=1 '
                    f'input=automatic_gpu_mask retained=1 fg=0 fg_known=1 fg_enabled=0 input_state=input_seen '
                    f'detection=detected selected=automatic source=automatic source_availability=detected '
                    f'sampled_source={source} sampled_covered={covered} sampled_pixels={pixels} '
                    f'sampled_candidates=0x{candidates:x} sampled_alpha_covered={a} trusted_alpha=0x{trusted:x} '
-                   f'sampled_hudless={{changed=0 unchanged=0 invalid=0 matching_tiles=0 lit=0}} status_revision=1')
+                   f'sampled_ui_layer={layer} sampled_hudless={{changed={hudless[0]} unchanged={hudless[1]} '
+                   f'invalid=0 matching_tiles=0 lit=0}} status_revision=1')
 
 
 BASE = [
@@ -70,6 +71,21 @@ class ReadinessReport(unittest.TestCase):
                               line('10:00:14', '[Sunshine 3D] Sunshine UI protection: alpha trust is now 0x2; '
                                                'remembered for later sessions of this game')])
         self.assertEqual(handled['UI protection'].status, 'PASS')
+
+    def test_trusted_channel_flattening_the_visible_scene_fails(self):
+        # Stellar Blade: the opaque tagged UI color inherited the UI layer's trust
+        # and covered the frame while the exact HUD-less pair showed the scene.
+        flat = ui('10:00:12', 2, 1000, (0, 1000, 1000, 1000), 0x36, 0x2, hudless=(400, 600))
+        self.assertEqual(run(BASE + [flat])['UI protection'].status, 'FAIL')
+        # A full-screen menu: the HUD-less pair differs almost everywhere.
+        menu = ui('10:00:12', 2, 1000, (0, 1000, 1000, 1000), 0x36, 0x2, hudless=(950, 50))
+        self.assertEqual(run(BASE + [menu])['UI protection'].status, 'PASS')
+        # Revoking the UI layer's trust (source 4, not slot 1) soon after handles it.
+        layer = ui('10:00:12', 2, 1000, (0, 1000, 1000, 1000), 0x36, 0x2, hudless=(400, 600), layer=1)
+        revoke = line('10:00:14', '[Sunshine 3D] Sunshine UI protection: alpha trust is now 0x2; '
+                                  'remembered for later sessions of this game')
+        self.assertEqual(run(BASE + [layer, revoke])['UI protection'].status, 'PASS')
+        self.assertEqual(run(BASE + [flat, revoke])['UI protection'].status, 'FAIL')
 
     def test_raw_placement_with_a_valid_camera_warns(self):
         lines = [x for x in BASE if 'Streamline scale: ready' not in x] + [

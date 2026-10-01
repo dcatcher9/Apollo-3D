@@ -70,6 +70,9 @@ namespace sunshine_game3d {
       std::uint32_t candidates{}, hudless_changed{}, hudless_unchanged{}, hudless_invalid{}, matching_tiles{}, hudless_lit{};
       std::array<std::uint32_t, 4> alpha_covered{}, alpha_invalid{};
       std::uint32_t trusted_alpha{};
+      // The UI color candidate (bit 2) was the offscreen UI layer, not a tagged
+      // UIColorAndAlpha.
+      bool ui_layer{};
     } evidence;
   };
 
@@ -101,8 +104,24 @@ namespace sunshine_game3d {
       return result;
     }
 
+    // Trust belongs to a source, not to a detection slot: 0 UI alpha, 1 tagged
+    // UI color+alpha, 2 Backbuffer, 3 current color and 4 the offscreen UI
+    // layer. Slot 1 (UI color A) carries either source 1 or the layer
+    // (evidence.ui_layer); Unreal's tagged UI color is the opaque final image
+    // while its UI layer is a real mask, so one must never inherit the other's
+    // trust (Stellar Blade flattened the whole frame for 15 s).
+    static constexpr std::uint32_t source_count = 5, ui_layer_source = 4;
+    static constexpr std::uint32_t source_of(std::uint32_t slot, bool ui_layer) {
+      return slot == 1 && ui_layer ? ui_layer_source : slot;
+    }
+    // Slot-level trust remembered before sources were distinct. Its UI color
+    // bit cannot tell a tagged UIColorAndAlpha (Resident Evil Requiem) from
+    // the UI layer (The Witcher 3, Stellar Blade), so that source earns its
+    // trust again.
+    static constexpr std::uint32_t sources_from_slots(std::uint32_t slots) { return slots & 13u; }
+
     // One completed GPU detection sample over `pixels` pixels. Alpha candidates
-    // are 0 UI alpha R, 1 UI color A, 2 Backbuffer A and 3 current A. A channel
+    // are 0 UI alpha R, 1 UI color A, 2 Backbuffer A and 3 current A. A source
     // earns trust as UI coverage by covering some but under 90% of the frame,
     // steadily (within a factor of two) in consecutive samples: a full-frame
     // sample restarts the run, and fluctuating scene effects do not qualify. A
@@ -135,8 +154,8 @@ namespace sunshine_game3d {
     // is forgotten), so a wrong remembered claim cannot outlive every session.
     void restore_trusted_alpha(std::uint32_t remembered) {
       std::lock_guard<std::mutex> lock(mutex_);
-      trusted_alpha_ |= remembered & 15u;
-      provisional_ |= remembered & 15u;
+      trusted_alpha_ |= remembered & 31u;
+      provisional_ |= remembered & 31u;
     }
 
     // Called with the new trusted bits whenever samples earn or revoke trust,
@@ -146,37 +165,62 @@ namespace sunshine_game3d {
       trust_listener_ = std::move(listener);
     }
 
-    // Bit i: the game session trusts alpha candidate i as UI coverage.
+    // Bit i: the game session trusts alpha source i as UI coverage.
     std::uint32_t trusted_alpha() {
       std::lock_guard<std::mutex> lock(mutex_);
       return trusted_alpha_;
+    }
+
+    // Bit i: the source in detection slot i is trusted (Sunshine_UITrustedAlpha),
+    // with the offscreen UI layer in slot 1 when ui_layer.
+    std::uint32_t trusted_slots(bool ui_layer) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return (trusted_alpha_ & 13u) | ((trusted_alpha_ >> source_of(1, ui_layer)) & 1u) << 1;
+    }
+
+    // The offscreen UI layer should fill the UI color slot instead of a tagged
+    // UIColorAndAlpha the session does not trust: when the layer is trusted, or
+    // when the tagged buffer proved opaque over a visible scene.
+    bool prefer_ui_layer() {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return !(trusted_alpha_ & 2u) && ((trusted_alpha_ >> ui_layer_source & 1u) || ui_color_opaque_);
     }
 
   private:
     void observe_alpha_channels_locked(const alpha_auto_decision::detection_evidence &evidence, std::uint32_t pixels,
         std::uint64_t tick_ms) {
       const std::uint64_t total = pixels;
-      const bool scene_visible = (evidence.candidates & 48u) == 48u && !evidence.hudless_invalid &&
-        std::uint64_t(evidence.hudless_unchanged) * 100 >= total * 75;
-      // A trusted dedicated UI channel (0 UI alpha, 1 UI color) offered with at
-      // most 1% invalid pixels is the game's own UI mask for this sample, menus
-      // included. disagreement(): the distance to the nearest such mask.
+      const bool exact_pair = (evidence.candidates & 48u) == 48u && !evidence.hudless_invalid;
+      const bool scene_visible = exact_pair && std::uint64_t(evidence.hudless_unchanged) * 100 >= total * 75;
+      // A trusted dedicated UI source in slot 0 or 1 (UI alpha, UI color or the
+      // UI layer) offered with at most 1% invalid pixels is the game's own UI
+      // mask for this sample, menus included. disagreement(): the distance to
+      // the nearest such mask.
       const auto disagreement = [&](std::uint64_t covered) {
         std::uint64_t nearest = UINT64_MAX;
-        for (std::uint32_t channel = 0; channel < 2; ++channel) {
-          const std::uint32_t bit = 1u << channel;
-          if (!(evidence.candidates & trusted_alpha_ & bit) ||
-              std::uint64_t(evidence.alpha_invalid[channel]) * 100 > total) continue;
-          const std::uint64_t mask = evidence.alpha_covered[channel];
+        for (std::uint32_t slot = 0; slot < 2; ++slot) {
+          if (!(evidence.candidates & (1u << slot)) || !(trusted_alpha_ >> source_of(slot, evidence.ui_layer) & 1u) ||
+              std::uint64_t(evidence.alpha_invalid[slot]) * 100 > total) continue;
+          const std::uint64_t mask = evidence.alpha_covered[slot];
           nearest = std::min(nearest, covered > mask ? covered - mask : mask - covered);
         }
         return nearest;
       };
       const bool dedicated_mask = disagreement(0) != UINT64_MAX;
-      for (std::uint32_t channel = 0; channel < 4; ++channel) {
+      for (std::uint32_t slot = 0; slot < 4; ++slot) {
+        if (!(evidence.candidates & (1u << slot)) || evidence.alpha_invalid[slot]) continue;
+        const std::uint32_t channel = source_of(slot, evidence.ui_layer);
         const std::uint32_t bit = 1u << channel;
-        if (!(evidence.candidates & bit) || evidence.alpha_invalid[channel]) continue;
-        const std::uint64_t covered = evidence.alpha_covered[channel];
+        const std::uint64_t covered = evidence.alpha_covered[slot];
+        // A tagged UI color covering the whole frame while an exact HUD-less
+        // pair shows most of the scene is the final image, not UI coverage.
+        if (channel == 1 && covered * 100 >= total * 99 && exact_pair &&
+            std::uint64_t(evidence.hudless_unchanged) * 2 >= total) {
+          if (opaque_.add(tick_ms)) ui_color_opaque_ = true;
+        } else if (channel == 1 && covered && covered * 10 < total * 9) {
+          opaque_ = {};
+          ui_color_opaque_ = false;
+        }
         // Presented alpha (2 Backbuffer, 3 current) differing from every such
         // mask by at least 10% of the frame is not UI coverage: it earns nothing,
         // and the usual evidence interval revokes its trust.
@@ -186,7 +230,7 @@ namespace sunshine_game3d {
           doubt_[channel] = {};
         };
         if ((provisional_ & bit) && !reconfirm_from_[channel]) reconfirm_from_[channel] = tick_ms;
-        if (channel >= 2 && dedicated_mask && disagreement(covered) * 10 >= total) {
+        if ((channel == 2 || channel == 3) && dedicated_mask && disagreement(covered) * 10 >= total) {
           earned_[channel] = {};
           if ((trusted_alpha_ & bit) && doubt_[channel].add(tick_ms)) revoke();
           continue;
@@ -226,12 +270,15 @@ namespace sunshine_game3d {
 
     std::mutex mutex_;
     std::optional<bool> manual_; // Empty in Auto.
-    std::array<evidence_run, 4> earned_{}, doubt_{};
+    std::array<evidence_run, source_count> earned_{}, doubt_{};
     std::uint32_t trusted_alpha_{};
     // Remembered bits not yet earned again this session, and when each such
-    // channel was first offered.
+    // source was first offered.
     std::uint32_t provisional_{};
-    std::array<std::uint64_t, 4> reconfirm_from_{};
+    std::array<std::uint64_t, source_count> reconfirm_from_{};
+    // The tagged UI color covered the whole frame over a visible scene.
+    evidence_run opaque_{};
+    bool ui_color_opaque_{};
     std::function<void(std::uint32_t)> trust_listener_;
   };
 }

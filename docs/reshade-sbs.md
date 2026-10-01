@@ -315,12 +315,19 @@ and a pause menu that tints the live scene needs no special case. Clair Obscur: 
 motivated the model: its alpha covers 2-23% of pixels during play and every pixel in full-screen
 and pause menus, and with FG off, or before its first level loads, it tags no HUD-less image. Its
 pause menu with FG on differs from HUD-less on 76% of pixels, which is neither a HUD mask nor
-full-screen UI. Trust is per candidate: a presented-color alpha trusted with FG off does not make
-the tagged Backbuffer's alpha trusted.
+full-screen UI. Trust is per source, not per detection slot: a presented-color alpha trusted with
+FG off does not make the tagged Backbuffer's alpha trusted, and the offscreen UI layer (below) is a
+source of its own beside the tagged UIColorAndAlpha, although either fills the UI color slot.
+Stellar Blade offers its UI layer with FG off and an opaque tagged UIColorAndAlpha with FG on; when
+both shared one trust bit, turning FG on handed the layer's trust to the opaque tag, which flattened
+the whole frame for 15 s until the contradiction below revoked it, and the layer's trust with it.
 
-Trust is remembered per game. Each earned or revoked change is written to `TrustedUIAlpha` (the
-trusted candidate bits) under `[SUNSHINE_GAME3D]` in that game's `ReShade.ini`, and the next session
-starts with those channels trusted. Without it, a launch's title screen and menus would stay 3D
+Trust is remembered per game. Each earned or revoked change is written to `TrustedUISources` (the
+trusted source bits: 1 UIAlpha, 2 UIColorAndAlpha, 4 Backbuffer, 8 current color, 16 UI layer)
+under `[SUNSHINE_GAME3D]` in that game's `ReShade.ini`, and the next session starts with those
+sources trusted. The older `TrustedUIAlpha` key held slot bits; when `TrustedUISources` is absent it
+is read without its UI color bit, which cannot say whether a tag (Resident Evil Requiem) or the UI
+layer (The Witcher 3, Stellar Blade) earned it, so that source earns trust again. Without it, a launch's title screen and menus would stay 3D
 until a selective frame had been on screen for 2 s; Expedition 33's first screen covers every pixel,
 and leaving its main menu within 2 s left the Load Game menu unprotected until play. Only the first
 session of a game still has to earn trust. Deleting the key forgets it.
@@ -333,7 +340,7 @@ UIColorAndAlpha) in the same sample, menus included; it earns nothing while it d
 Resident Evil Requiem's UI color covers 0.2% during play while its presented alpha covers
 35-100%, and in menus the UI color covers everything while the presented alpha covers 0.05%. The same evidence (three samples over at least 2 s) revokes it, a selective sample
 of the channel clears the doubt, and a revoked channel must earn trust again. Remembered trust is
-revoked the same way, and the revocation is remembered too. Trust survives manual mode edits. Trust remembered from an earlier session (TrustedUIAlpha) protects from the first
+revoked the same way, and the revocation is remembered too. Trust survives manual mode edits. Trust remembered from an earlier session protects from the first
 frame but is provisional: unless the session earns it again within 60 s of the channel first being
 offered, it lapses and is forgotten, so a wrong remembered claim cannot outlive every session. A
 trusted channel in the current frame decides by itself, so the HUD-less holds
@@ -360,7 +367,10 @@ a confirmed one. Only the foreground swapchain's Presents drive the tracker. Whi
 asks for the layer (within the last second), the active layer is copied once per Present, at its
 first clear, into a persistent add-on texture; otherwise no copy is recorded into the game's
 frame. When no UIColorAndAlpha is tagged, Auto offers the newest copy, if under 250 ms old, as the
-UI color candidate. Copies are released through their own device, at the latest when it is
+UI color candidate. It is also offered instead of a tagged UIColorAndAlpha that the session does not
+trust once the layer is trusted, or once the tag proves opaque: covering at least 99% of the frame
+while an exact HUD-less pair shows at least half of it unchanged, in three samples over at least
+2 s. A selective sample of the tag clears that proof. A trusted tag keeps the slot. Copies are released through their own device, at the latest when it is
 destroyed. It is one frame late, which a moving HUD shows only as a one-frame
 edge. The GPU admits it only while premultiplied: any pixel whose color exceeds its alpha by more
 than 4/255 (for a float layer, 125 times its alpha, up to 10000 nits) rejects it for that frame.
@@ -455,7 +465,8 @@ unchanged: beside a trusted alpha channel, which decides alone, a HUD-less pair 
 may come and go. Resident Evil Requiem pairs its HUD-less image on only some Presents with frame
 generation on; discarding the sample on each such change reported "Checking source quality" about
 half the time while its trusted UI color alpha protected the HUD. The `Sunshine UI protection` log (`sampled_candidates`, `sampled_alpha_covered`,
-`trusted_alpha`, `sampled_hudless`) and the dump's
+`trusted_alpha` as slot bits, `sampled_ui_layer` when the UI layer filled the UI color slot,
+`sampled_hudless`) and the dump's
 `source_alpha_auto.sampled_evidence` report it, so a rejection names the failing check. Source availability, GPU validation and actual applied
 protection remain separate diagnostic facts. Older startup fields describe a retired heuristic.
 

@@ -248,12 +248,21 @@ namespace sunshine_game3d::ui_input {
     auto hudless_result = hudless_none;
     // The tagged Backbuffer is the game's own final color. Captured in the same
     // tag batch as HUD-less, it is that image's exact pair on any Present.
-    struct { api::resource_view view; std::uint64_t tagged{}, current{}; } backbuffer;
+    struct { api::resource_view view{}; std::uint64_t tagged{}, current{}; } backbuffer;
     const bool capturing = capture_needed(status, runtime->get_device()->get_api());
+    // The offscreen UI layer takes the UI color slot ahead of a tagged
+    // UIColorAndAlpha the session does not trust, once the layer is trusted or
+    // the tagged buffer proved opaque (Unreal's tagged UI color is the final
+    // image in Stellar Blade and Hogwarts Legacy).
+    ui_layer::live_capture layer;
+    const bool layer_wanted = status.requested && result.automatic_detection &&
+      (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::color_and_alpha));
+    const bool layer_first = layer_wanted && session.prefer_ui_layer() && ui_layer::latest(runtime->get_device(), now, layer);
     const bool hudless_wanted = capturing && (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::hudless));
     if (capturing) for (unsigned slot = 0; slot != 4; ++slot) {
       const auto kind = kinds[slot];
       if (!(source_filter(wanted_source) & ui_mask::source_mask(kind))) continue;
+      if (layer_first && kind == ui_mask::source_kind::color_and_alpha) continue;
       ui_mask::selection selected;
       if (!ui_mask::acquire_kind(reinterpret_cast<std::uint64_t>(runtime), kind, selected, now, queue->get_native())) continue;
       const bool hudless = kind == ui_mask::source_kind::hudless;
@@ -336,13 +345,10 @@ namespace sunshine_game3d::ui_input {
         if (diagnostic) result.source_metadata = candidates.back().dump();
       }
     }
-    // Without a tagged UI color+alpha, the game's offscreen UI layer is that
-    // candidate (game3d_ui_layer.h). Its copy holds the previous frame's UI and
-    // is admitted on the GPU only while premultiplied.
-    ui_layer::live_capture layer;
-    if (status.requested && result.automatic_detection && !result.detection.masks[1].handle &&
-        (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::color_and_alpha)) &&
-        ui_layer::latest(runtime->get_device(), now, layer)) {
+    // Without a usable tagged UI color+alpha, the game's offscreen UI layer is
+    // that candidate (game3d_ui_layer.h). Its copy holds the previous frame's UI
+    // and is admitted on the GPU only while premultiplied.
+    if (layer_wanted && !result.detection.masks[1].handle && (layer_first || ui_layer::latest(runtime->get_device(), now, layer))) {
       constexpr std::uint64_t layer_capture = std::uint64_t(1) << 62; // Never a Streamline ticket id.
       const auto view = renderer.prepare_ui_candidate(1, layer_capture | layer.capture_id, [&](api::resource destination) {
         commands->barrier(layer.copy, api::resource_usage::shader_resource, api::resource_usage::copy_source);

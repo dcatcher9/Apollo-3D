@@ -159,7 +159,7 @@ namespace {
     alpha_auto_policy policy;
     std::vector<std::uint32_t> reported;
     policy.on_trust_change([&](std::uint32_t trusted) { reported.push_back(trusted); });
-    policy.restore_trusted_alpha(4u | 32u);
+    policy.restore_trusted_alpha(4u | 64u);
     require(policy.trusted_alpha() == 4u, "A remembered channel was not trusted at once, or unknown bits were kept");
     require(reported.empty(), "Restoring remembered trust was reported as a change");
     // A title screen or menu before any selective frame is already covered.
@@ -178,6 +178,58 @@ namespace {
     require(reported == std::vector<std::uint32_t> {5u, 1u}, "Revocation was not reported for persistence");
   }
 
+  void trust_belongs_to_the_source_that_filled_the_slot() {
+    // Slot 1 holds either the tagged UI color+alpha (source 1) or the offscreen
+    // UI layer (source 4). Stellar Blade offers the layer with frame generation
+    // off and an opaque tagged UI color with it on; the tag must not inherit the
+    // layer's trust, and its contradiction must not revoke the layer.
+    const std::uint32_t pixels = 1000;
+    const auto sample = [&](alpha_auto_policy &policy, bool layer, std::uint32_t candidates,
+        std::array<std::uint32_t, 4> covered, std::uint32_t unchanged, std::uint64_t tick) {
+      alpha_auto_decision::detection_evidence evidence;
+      evidence.candidates = candidates; evidence.alpha_covered = covered; evidence.hudless_unchanged = unchanged;
+      evidence.ui_layer = layer;
+      policy.observe_alpha_channels(evidence, pixels, tick);
+    };
+    alpha_auto_policy policy;
+    for (std::uint64_t tick = 1000; tick <= 3000; tick += 1000) sample(policy, true, 2 | 8, {0, 20, 0, 1000}, 0, tick);
+    require(policy.trusted_alpha() == 16u, "The UI layer did not earn trust as its own source");
+    require(policy.trusted_slots(true) == 2u && !policy.trusted_slots(false), "Slot trust did not follow the slot's source");
+    require(policy.prefer_ui_layer(), "A trusted UI layer was not preferred over an untrusted tag");
+    // The opaque tag over a visible scene (exact HUD-less pair, 80% unchanged)
+    // earns nothing and revokes nothing.
+    for (std::uint64_t tick = 4000; tick <= 10000; tick += 1000)
+      sample(policy, false, 2 | 4 | 48, {0, 1000, 1000, 0}, 800, tick);
+    require(policy.trusted_alpha() == 16u, "The opaque tag revoked the UI layer or earned trust");
+    // A trusted UI layer is the dedicated mask that contradicts presented alpha.
+    policy.restore_trusted_alpha(8);
+    for (std::uint64_t tick = 11000; tick <= 13000; tick += 1000)
+      sample(policy, true, 2 | 8, {0, 20, 0, 400}, 0, tick);
+    require(policy.trusted_alpha() == 16u, "A trusted UI layer did not revoke disagreeing presented alpha");
+
+    // Without layer trust, a tag that proves opaque over a visible scene hands
+    // its slot to the layer; a selective tag sample takes the slot back.
+    alpha_auto_policy opaque;
+    sample(opaque, false, 2 | 48, {0, 1000, 0, 0}, 600, 1000);
+    sample(opaque, false, 2 | 48, {0, 1000, 0, 0}, 600, 2000);
+    require(!opaque.prefer_ui_layer(), "Two samples proved the tag opaque");
+    sample(opaque, false, 2 | 16, {0, 1000, 0, 0}, 600, 2500); // Inexact pair: no evidence either way.
+    sample(opaque, false, 2 | 48, {0, 1000, 0, 0}, 600, 3000);
+    require(opaque.prefer_ui_layer(), "An opaque tag over a visible scene was still preferred");
+    sample(opaque, false, 2 | 48, {0, 30, 0, 0}, 600, 4000);
+    require(!opaque.prefer_ui_layer(), "A selective tag sample did not restore the tag");
+    // A full-screen menu (HUD-less differs almost everywhere) proves nothing.
+    alpha_auto_policy menu;
+    for (std::uint64_t tick = 1000; tick <= 5000; tick += 1000) sample(menu, false, 2 | 48, {0, 1000, 0, 0}, 50, tick);
+    require(!menu.prefer_ui_layer(), "A full-screen menu proved the tag opaque");
+    // A trusted tag keeps its slot even beside a trusted layer.
+    alpha_auto_policy both;
+    both.restore_trusted_alpha(2 | 16);
+    require(!both.prefer_ui_layer() && both.trusted_slots(false) == 2u && both.trusted_slots(true) == 2u,
+      "A trusted tag lost its slot");
+    static_assert(alpha_auto_policy::sources_from_slots(1 | 2 | 4 | 8) == (1 | 4 | 8),
+      "Remembered slot trust kept the ambiguous UI color slot");
+  }
   void only_the_deciding_inputs_key_a_status_sample() {
     // Resident Evil Requiem with FG: trusted UI color alpha (2) and present
     // alpha (8); its HUD-less pair (16) joins on some Presents only.
@@ -207,8 +259,9 @@ int main() {
     mode_is_auto_until_a_manual_edit_and_auto_again_after_it();
     alpha_trust_is_earned_by_selective_coverage_and_lost_on_contradiction();
     remembered_alpha_trust_is_restored_and_every_change_is_reported();
+    trust_belongs_to_the_source_that_filled_the_slot();
     only_the_deciding_inputs_key_a_status_sample();
-    std::puts("Source alpha session: 4 policy groups passed");
+    std::puts("Source alpha session: 5 policy groups passed");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "Source alpha session failed: %s\n", error.what());

@@ -62,24 +62,29 @@ namespace sunshine_game3d {
       ImGui::SetNextItemWidth(-1.f);
     }
 
-    // Whether a channel carries UI coverage is a property of the game, so trust
+    // Whether a source carries UI coverage is a property of the game, so trust
     // outlives the session in this game's ReShade.ini (docs/reshade-sbs.md).
-    constexpr const char *trusted_alpha_key = "TrustedUIAlpha";
+    // TrustedUISources holds alpha_auto_policy source bits; the older
+    // TrustedUIAlpha held detection-slot bits (sources_from_slots).
+    constexpr const char *trusted_sources_key = "TrustedUISources", *trusted_alpha_key = "TrustedUIAlpha";
 
     const std::shared_ptr<alpha_auto_policy> &alpha_session() {
       // Manual On/Off is shared per game; live Auto qualification is per runtime.
       static const auto session = [] {
         auto policy = std::make_shared<alpha_auto_policy>();
-        unsigned int remembered = 0;
-        if (reshade::get_config_value(nullptr, config_section, trusted_alpha_key, remembered) && (remembered & 15u)) {
+        unsigned int remembered = 0, slots = 0;
+        if (!reshade::get_config_value(nullptr, config_section, trusted_sources_key, remembered) &&
+            reshade::get_config_value(nullptr, config_section, trusted_alpha_key, slots))
+          remembered = alpha_auto_policy::sources_from_slots(slots);
+        if (remembered & 31u) {
           policy->restore_trusted_alpha(remembered);
           char text[160];
           std::snprintf(text, sizeof(text),
-            "Sunshine UI protection: restored alpha trust 0x%x from an earlier session of this game", remembered & 15u);
+            "Sunshine UI protection: restored alpha trust 0x%x from an earlier session of this game", remembered & 31u);
           sunshine_log::message(reshade::log::level::info, text);
         }
         policy->on_trust_change([](std::uint32_t trusted) {
-          reshade::set_config_value(nullptr, config_section, trusted_alpha_key, static_cast<unsigned int>(trusted));
+          reshade::set_config_value(nullptr, config_section, trusted_sources_key, static_cast<unsigned int>(trusted));
           char text[160];
           std::snprintf(text, sizeof(text),
             "Sunshine UI protection: alpha trust is now 0x%x; remembered for later sessions of this game", trusted);

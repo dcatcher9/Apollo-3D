@@ -444,8 +444,9 @@ at; the exit code is 1 when a check failed. The checks cover: add-on and rendere
 fresh depth and gaps outside the settle time after FG switches and runtime resets; publications
 that showed the colour frame with depth; capture coverage by the list lifecycle; whether the
 camera projection or only the raw controller places the scene (the latter while a valid camera
-exists is a warning); UI trust, presented alpha deciding over a trusted dedicated UI channel, and
-trusted channels that disagree; observation losses by cause; unusual export pauses; present-thread
+exists is a warning); UI trust, presented alpha deciding over a trusted dedicated UI channel, a
+trusted channel covering the whole frame while an exact HUD-less pair shows the scene, and trusted
+channels that disagree; observation losses by cause; unusual export pauses; present-thread
 hitches; Game 3D CPU and GPU cost; and, from the host log, the Game 3D link, size fit and encoder
 stalls. A failing check is a bug report: fix the rule at its root (see
 [the generalization rules](../../docs/reshade-sbs.md#rules-for-new-game-behaviour)), then add a

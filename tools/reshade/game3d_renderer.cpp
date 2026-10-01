@@ -153,6 +153,7 @@ namespace sunshine_game3d {
     uint64_t present_number{};
     uint32_t detection_bits{};
     uint64_t detection_pending_key{};
+    bool detection_pending_layer{}; // The pending sample's UI color slot held the offscreen UI layer.
     uint64_t detection_key() const { return detection_decision_key(detection_bits, detection_flags, detection_trusted); }
     float difference_threshold = 4.f / 1023.f;
     uint64_t detection_fence{}, detection_last_submit{}, detection_submitted{}, detection_mapped{};
@@ -618,6 +619,7 @@ namespace sunshine_game3d {
       std::copy_n(counts.begin() + 12, 4, evidence.alpha_invalid.begin());
       evidence.hudless_lit = counts[16];
       evidence.trusted_alpha = counts[17];
+      evidence.ui_layer = detection_pending_layer;
       detection_latest_source = detection_pending_source;
       if (input.session) input.session->observe_alpha_channels(evidence, counts[2], detection_pending_source.now_ms);
     }
@@ -671,6 +673,7 @@ namespace sunshine_game3d {
       }
       cmd->barrier(t.resource, api::resource_usage::copy_source, api::resource_usage::shader_resource);
       detection_pending_source = observation; detection_pending_key = detection_key();
+      detection_pending_layer = detection_flags != 0;
       detection_pending = detection_awaiting_signal = true;
       detection_last_submit = observation.now_ms; ++detection_submitted;
     }
@@ -1003,7 +1006,10 @@ namespace sunshine_game3d {
     // outside the tag batch) right after an exact decision: detecting again from
     // that pair would flip a full-screen menu between flat and 3D.
     // A trusted alpha channel in this frame decides by itself; nothing is held.
-    const uint32_t trusted = automatic && automatic->session ? automatic->session->trusted_alpha() : 0u;
+    // Slot-level trust: slot 1 is trusted only for the source that fills it,
+    // or for the one that filled it last when it is missing.
+    const bool layer_slot = (bits & 2u) ? candidates.color_alpha_flags != 0 : d.detection_flags != 0;
+    const uint32_t trusted = automatic && automatic->session ? automatic->session->trusted_slots(layer_slot) : 0u;
     const bool inexact = (bits & 48u) == 16u;
     // So does a trusted alpha channel that decided the previous frame and is
     // missing from this one: an observation loss refuses the previous

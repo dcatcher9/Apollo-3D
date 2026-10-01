@@ -21,6 +21,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 LINE = re.compile(r'^(\d{2}):(\d{2}):(\d{2}):(\d{3}) \[\s*\d+\] \| (\w+)\s*\| (.*)$')
 OUTPUT = re.compile(
@@ -39,7 +40,8 @@ CAMERA = re.compile(r'Sunshine Streamline camera availability: .*recent_valid_pr
 UI = re.compile(
     r'Sunshine UI protection: runtime=\S+ .*?detection=(\w+) .*?sampled_source=(\d+) sampled_covered=(\d+) '
     r'sampled_pixels=(\d+) sampled_candidates=(0x[0-9a-fA-F]+) sampled_alpha_covered=(\d+)/(\d+)/(\d+)/(\d+) '
-    r'trusted_alpha=(0x[0-9a-fA-F]+)')
+    r'trusted_alpha=(0x[0-9a-fA-F]+)(?: sampled_ui_layer=(\d))? '
+    r'sampled_hudless=\{changed=(\d+) unchanged=(\d+) invalid=(\d+)')
 TRUST = re.compile(r'Sunshine UI protection: (restored alpha trust|alpha trust is now) (0x[0-9a-fA-F]+)')
 LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
@@ -63,6 +65,7 @@ ROUTINE_INACTIVE = {'not_foreground', 'runtime_reset', 'no_consumer', 'present_w
 SETTLE_S = 3.0  # Recalibration and holds after an FG switch or runtime reset.
 RESOLVE_S = 10.0  # A trust dispute is handled when that channel's trust is revoked this soon.
 DEDICATED, PRESENTED = (0, 1), (2, 3)
+UI_LAYER_SOURCE = 4  # alpha_auto_policy source of the offscreen UI layer in slot 1.
 
 
 def seconds(h: str, m: str, s: str, ms: str) -> float:
@@ -72,6 +75,22 @@ def seconds(h: str, m: str, s: str, ms: str) -> float:
 def clock(value: float) -> str:
     value %= 86400
     return f'{int(value // 3600):02}:{int(value % 3600 // 60):02}:{int(value % 60):02}'
+
+
+class UISample(NamedTuple):
+    t: float
+    detection: str
+    source: int  # 1-4: alpha slot 0-3 decided, 5: HUD-less difference, 6: full frame flat.
+    covered: int
+    pixels: int
+    candidates: int
+    alpha: tuple[int, ...]
+    trusted: int  # Slot bits the GPU treated as trusted.
+    ui_layer: bool  # Slot 1 held the offscreen UI layer rather than a tagged UI color.
+    hudless: tuple[int, ...]  # changed, unchanged, invalid.
+
+    def trust_source(self, slot: int) -> int:
+        return UI_LAYER_SOURCE if slot == 1 and self.ui_layer else slot
 
 
 @dataclass
@@ -105,7 +124,7 @@ class Session:
     raw_ready: int = 0
     raw_scales: list[float] = field(default_factory=list)
     camera_valid: bool = False
-    ui: list[tuple[float, ...]] = field(default_factory=list)
+    ui: list[UISample] = field(default_factory=list)
     trust_events: list[tuple[float, str, int]] = field(default_factory=list)
     losses: dict[int, tuple[float, str]] = field(default_factory=dict)
     readiness: Counter = field(default_factory=Counter)
@@ -181,8 +200,9 @@ def parse(lines) -> Session:
             s.camera_valid |= found.group(1) == '1'
         if found := UI.search(text):
             g = found.groups()
-            s.ui.append((t, g[0], int(g[1]), int(g[2]), int(g[3]), int(g[4], 16),
-                         tuple(int(v) for v in g[5:9]), int(g[9], 16)))
+            s.ui.append(UISample(t, g[0], int(g[1]), int(g[2]), int(g[3]), int(g[4], 16),
+                                 tuple(int(v) for v in g[5:9]), int(g[9], 16), g[10] == '1',
+                                 tuple(int(v) for v in g[11:14])))
         if found := TRUST.search(text):
             s.trust_events.append((t, found.group(1), int(found.group(2), 16)))
         if found := LOSS.search(text):
@@ -348,32 +368,46 @@ def ui_checks(s: Session, add) -> None:
         add(Check('INFO', 'UI protection', 'no UI protection samples'))
         return
     # A presented alpha (sources 3 and 4) must never decide while a trusted
-    # dedicated UI channel is offered: that flattens scene as UI.
-    overrides, disputes, handled = [], [], []
+    # dedicated UI channel is offered: that flattens scene as UI. Nor may a
+    # trusted channel cover the whole frame while an exact HUD-less pair shows
+    # the scene (Stellar Blade's opaque tagged UI color, before 2026-10).
+    overrides, flattened, disputes, handled = [], [], [], []
 
-    def revoked(t: float, channel: int) -> float | None:
+    def revoked(t: float, source: int) -> float | None:
         return next((when for when, _, bits in s.trust_events
-                     if 0 <= when - t <= RESOLVE_S and not bits & (1 << channel)), None)
+                     if 0 <= when - t <= RESOLVE_S and not bits & (1 << source)), None)
 
-    for t, _, source, covered, pixels, candidates, alpha, trusted in s.ui:
-        if not pixels:
+    def judge(sample: UISample, text: str, slot: int, unresolved: list) -> None:
+        when = revoked(sample.t, sample.trust_source(slot))
+        (handled if when is not None else unresolved).append(
+            text + (f', trust revoked {clock(when)}' if when is not None else ''))
+
+    for u in s.ui:
+        if not u.pixels:
             continue
-        dedicated = [alpha[c] for c in DEDICATED if candidates & trusted & (1 << c)]
-        if dedicated and source in (3, 4):
-            overrides.append(f'{clock(t)} source {source} covered {100 * covered / pixels:.0f}%')
+        dedicated = [u.alpha[c] for c in DEDICATED if u.candidates & u.trusted & (1 << c)]
+        if dedicated and u.source in (3, 4):
+            overrides.append(f'{clock(u.t)} source {u.source} covered {100 * u.covered / u.pixels:.0f}%')
         for c in PRESENTED:
-            if dedicated and trusted & (1 << c) and min(abs(alpha[c] - d) for d in dedicated) * 10 >= pixels:
-                text = f'{clock(t)} channel {c} {100 * alpha[c] / pixels:.0f}% vs UI {100 * dedicated[0] / pixels:.1f}%'
-                when = revoked(t, c)
-                (handled if when is not None else disputes).append(
-                    text + (f', trust revoked {clock(when)}' if when is not None else ''))
-    states = Counter(sample[1] for sample in s.ui)
-    add(Check('FAIL' if overrides else 'WARN' if disputes else 'PASS', 'UI protection',
+            if dedicated and u.trusted & (1 << c) and min(abs(u.alpha[c] - d) for d in dedicated) * 10 >= u.pixels:
+                judge(u, f'{clock(u.t)} channel {c} {100 * u.alpha[c] / u.pixels:.0f}% vs UI '
+                         f'{100 * dedicated[0] / u.pixels:.1f}%', c, disputes)
+        _, unchanged, invalid = u.hudless
+        slot = u.source - 1
+        exact_pair = u.candidates & 48 == 48 and not invalid
+        if (0 <= slot < 4 and u.trusted & (1 << slot) and u.covered * 100 >= u.pixels * 99 and exact_pair
+                and unchanged * 2 >= u.pixels):
+            judge(u, f'{clock(u.t)} channel {slot}{" (UI layer)" if u.ui_layer and slot == 1 else ""} covered '
+                     f'{100 * u.covered / u.pixels:.0f}% while HUD-less showed {100 * unchanged / u.pixels:.0f}% '
+                     f'of the scene', slot, flattened)
+    states = Counter(u.detection for u in s.ui)
+    add(Check('FAIL' if overrides or flattened else 'WARN' if disputes else 'PASS', 'UI protection',
               ', '.join(f'{k} {v}' for k, v in states.most_common())
               + ('; presented alpha decided over a trusted UI channel' if overrides else '')
+              + ('; a trusted UI channel flattened the visible scene' if flattened else '')
               + ('; trusted presented alpha disagrees with the UI channel' if disputes else '')
-              + ('; a disagreeing presented alpha lost its trust' if handled and not disputes else ''),
-              (overrides or disputes or handled)[:6]))
+              + ('; a contradicted channel lost its trust' if handled and not disputes and not flattened else ''),
+              (overrides + flattened or disputes or handled)[:6]))
 
 
 def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:
