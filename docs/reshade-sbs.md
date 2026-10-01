@@ -416,7 +416,11 @@ and there is no full-frame CPU readback. Besides the decision, it carries the ca
 shader was offered, each alpha candidate's covered and invalid pixels, the trusted-alpha bits, and
 the HUD-less changed, unchanged, non-finite and lit pixel counts with matching tiles. Updating
 channel trust from this summary is the only way it feeds back; it never authorizes the frame it
-describes. The `Sunshine UI protection` log (`sampled_candidates`, `sampled_alpha_covered`,
+describes. A sample keeps describing later frames while the inputs that decide the mask are
+unchanged: beside a trusted alpha channel, which decides alone, a HUD-less pair or another channel
+may come and go. Resident Evil Requiem pairs its HUD-less image on only some Presents with frame
+generation on; discarding the sample on each such change reported "Checking source quality" about
+half the time while its trusted UI color alpha protected the HUD. The `Sunshine UI protection` log (`sampled_candidates`, `sampled_alpha_covered`,
 `trusted_alpha`, `sampled_hudless`) and the dump's
 `source_alpha_auto.sampled_evidence` report it, so a rejection names the failing check. Source availability, GPU validation and actual applied
 protection remain separate diagnostic facts. Older startup fields describe a retired heuristic.

@@ -151,7 +151,9 @@ namespace sunshine_game3d {
     uint64_t retention_requested_present{};
     std::array<uint64_t, ui_detection_inputs::max_retained_presents> retained_present{};
     uint64_t present_number{};
-    uint32_t detection_bits{}, detection_pending_bits{};
+    uint32_t detection_bits{};
+    uint64_t detection_pending_key{};
+    uint64_t detection_key() const { return detection_decision_key(detection_bits, detection_flags, detection_trusted); }
     float difference_threshold = 4.f / 1023.f;
     uint64_t detection_fence{}, detection_last_submit{}, detection_submitted{}, detection_mapped{};
     alpha_auto_source detection_pending_source, detection_latest_source;
@@ -576,7 +578,7 @@ namespace sunshine_game3d {
       if (completed == UINT64_MAX) { failed = true; return; }
       if (completed < detection_fence) return;
       if (input.epoch != detection_pending_source.epoch || input.revision != detection_pending_source.revision ||
-          input.viewport != detection_pending_source.viewport || detection_bits != detection_pending_bits ||
+          input.viewport != detection_pending_source.viewport || detection_key() != detection_pending_key ||
           input.now_ms < detection_pending_source.now_ms || input.now_ms - detection_pending_source.now_ms > 500) {
         detection_pending = false; detection_latest = {}; return;
       }
@@ -668,7 +670,7 @@ namespace sunshine_game3d {
         reinterpret_cast<ID3D12GraphicsCommandList *>(cmd->get_native())->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
       }
       cmd->barrier(t.resource, api::resource_usage::copy_source, api::resource_usage::shader_resource);
-      detection_pending_source = observation; detection_pending_bits = detection_bits;
+      detection_pending_source = observation; detection_pending_key = detection_key();
       detection_pending = detection_awaiting_signal = true;
       detection_last_submit = observation.now_ms; ++detection_submitted;
     }
@@ -1013,7 +1015,11 @@ namespace sunshine_game3d {
       d.detection_holds < ui_detection_inputs::max_held_presents;
     uint32_t flags = (bits & 2u) ? candidates.color_alpha_flags : 0u;
     if (hold) { bits = d.detection_bits; flags = d.detection_flags; }
-    if (d.detection_bits != bits || d.detection_flags != flags) d.detection_latest = {};
+    // Only a change in the inputs that decide the mask makes the status sample
+    // stale. Beside a trusted alpha channel, a HUD-less pair that frame
+    // generation pairs on some Presents only otherwise discarded nearly every
+    // sample while the mask stayed applied (Resident Evil Requiem).
+    if (d.detection_key() != detection_decision_key(bits, flags, trusted)) d.detection_latest = {};
     d.detection_bits = bits;
     d.detection_flags = flags;
     d.detection_trusted = trusted;

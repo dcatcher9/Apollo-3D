@@ -130,6 +130,29 @@ namespace {
     require(policy.trusted_alpha() == 1u, "Contradiction did not revoke a remembered channel");
     require(reported == std::vector<std::uint32_t> {5u, 1u}, "Revocation was not reported for persistence");
   }
+
+  void only_the_deciding_inputs_key_a_status_sample() {
+    // Resident Evil Requiem with FG: trusted UI color alpha (2) and present
+    // alpha (8); its HUD-less pair (16) joins on some Presents only.
+    const std::uint32_t trusted = 2u | 8u;
+    require(detection_decision_key(2u, 0u, trusted) == detection_decision_key(2u | 16u, 0u, trusted),
+      "A HUD-less pair beside a trusted channel changed the decision");
+    require(detection_decision_key(2u | 8u, 0u, trusted) == detection_decision_key(2u, 0u, trusted),
+      "A later trusted channel beside the first one changed the decision");
+    require(detection_decision_key(8u, 0u, trusted) != detection_decision_key(2u, 0u, trusted),
+      "A different deciding channel kept the decision");
+    require(detection_decision_key(2u, 1u, trusted) != detection_decision_key(2u, 0u, trusted),
+      "Flags of the deciding UI color channel were ignored");
+    require(detection_decision_key(1u | 2u, 1u, 1u) == detection_decision_key(1u | 2u, 0u, 1u),
+      "UI color flags changed a decision another channel makes");
+    // Without trust every candidate, exactness and trust itself can matter.
+    require(detection_decision_key(2u, 0u, 0u) != detection_decision_key(2u | 16u, 0u, 0u),
+      "A HUD-less candidate without a trusted channel kept the decision");
+    require(detection_decision_key(16u, 0u, 0u) != detection_decision_key(48u, 0u, 0u),
+      "An exact HUD-less pair kept the inexact decision");
+    require(detection_decision_key(2u | 16u, 0u, trusted) != detection_decision_key(2u | 16u, 0u, 0u),
+      "Losing trust kept the decision");
+  }
 } // namespace
 
 int main() {
@@ -137,7 +160,8 @@ int main() {
     mode_is_auto_until_a_manual_edit_and_auto_again_after_it();
     alpha_trust_is_earned_by_selective_coverage_and_lost_on_contradiction();
     remembered_alpha_trust_is_restored_and_every_change_is_reported();
-    std::puts("Source alpha session: 3 policy groups passed");
+    only_the_deciding_inputs_key_a_status_sample();
+    std::puts("Source alpha session: 4 policy groups passed");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "Source alpha session failed: %s\n", error.what());

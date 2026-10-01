@@ -37,6 +37,18 @@ namespace sunshine_game3d {
     }
   }
 
+  // The detection inputs that decide a frame's mask (SunshineUIDetectionReduceCS).
+  // The first trusted alpha channel offered decides alone, whatever else is
+  // offered beside it; otherwise every candidate bit can matter. Flags qualify
+  // only the UI color alpha channel (bit 2). A status sample still describes
+  // later frames while this key is unchanged.
+  inline std::uint64_t detection_decision_key(std::uint32_t candidates, std::uint32_t flags, std::uint32_t trusted) {
+    const auto decisive = candidates & trusted & 15u;
+    if (!decisive) return std::uint64_t(flags) << 32 | candidates;
+    const auto first = decisive & (0u - decisive);
+    return std::uint64_t(first == 2u ? flags : 0u) << 32 | std::uint64_t(first) << 8;
+  }
+
   struct alpha_auto_decision {
     bool enabled{};
     alpha_auto_state state = alpha_auto_state::waiting_for_source;
