@@ -124,9 +124,14 @@ that renders both eyes into the side-by-side target; pack is used only by older 
 shaders. Both are zero on frames nothing consumed. `gpu_profile` says whether the timestamp
 queries started (`no_timestamp_frequency` and `no_query_heap` name a failed start), and frames
 that did not count are split into `dropped_fence_pending` (the slot was reused before the frame's
-completion fence passed), `dropped_unresolved` (the fence passed but ReShade never made the results
-readable; its D3D12 queries resolve only on the runtime's immediate command list) and
-`incomplete` (render or conditioning marks missing). The CPU entry also splits the slowest present into setup, depth, UI, render and
+completion fence passed), `dropped_unresolved` (the fence passed but the results were not
+readable) and `incomplete` (render or conditioning marks missing). Where the device can copy query
+results (D3D12), the renderer resolves each timestamp into its own readback buffer on the command
+list that recorded it, so its completion fence alone decides readiness. ReShade 6.8 reads D3D12
+results through `ID3D12Device15::ResolveQueryData` whenever the game's D3D12 runtime offers it
+(The Witcher 3 ships Agility SDK 1.619), but creates its query heaps without
+`D3D12_QUERY_HEAP_FLAG_CPU_RESOLVE`, so that read fails and every frame there was
+`dropped_unresolved`. D3D11 reads ReShade's results. The CPU entry also splits the slowest present into setup, depth, UI, render and
 export, and a rate-limited `Sunshine Game 3D hitch` warning names any present-thread step that
 takes more than 8 ms.
 

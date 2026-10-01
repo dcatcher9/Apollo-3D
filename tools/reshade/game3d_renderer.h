@@ -132,8 +132,8 @@ namespace sunshine_game3d {
     std::array<double, stage_count> mean_ms{}, max_ms{};
     // Why marked frames did not count. The profile may never have started;
     // a frame's slot can be reused before its completion fence passed, or
-    // after it passed with results ReShade never made readable (its D3D12
-    // queries resolve only on the runtime's immediate list); or a read frame
+    // after it passed with results never readable (a resolve copy that had not
+    // executed, or, on D3D11, results ReShade did not return); or a read frame
     // lacked its render and conditioning marks.
     enum class profile_state : std::uint8_t { not_started, ready, no_timestamp_frequency, no_query_heap };
     profile_state state = profile_state::not_started;

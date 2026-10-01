@@ -77,6 +77,17 @@ namespace sunshine_game3d {
     static constexpr uint32_t profile_frames = 4;
     struct profile_frame { uint64_t fence{}; uint32_t written{}; };
     api::query_heap profile_heap{};
+    // Where the device can copy query results, each timestamp is resolved into
+    // this readback buffer on the command list that recorded it, and the
+    // frame's completion fence alone decides readiness. ReShade 6.8 reads D3D12
+    // results through ID3D12Device15::ResolveQueryData whenever the runtime
+    // offers it (Agility SDK 1.619 in The Witcher 3) but creates its heaps
+    // without D3D12_QUERY_HEAP_FLAG_CPU_RESOLVE, so that read always fails.
+    // D3D11 reads ReShade's results.
+    api::resource profile_readback{};
+    // Each slot's last resolved render tick: an unchanged value is a copy that
+    // has not executed yet, never a new frame.
+    std::array<uint64_t, profile_frames> profile_resolved_render{};
     bool profile_attempted{}, profile_ready{}, profile_open{};
     gpu_timing::profile_state profile_state = gpu_timing::profile_state::not_started;
     double profile_ticks_per_ms{};
@@ -171,6 +182,7 @@ namespace sunshine_game3d {
     }
     ~impl() {
       if (profile_heap.handle) device->destroy_query_heap(profile_heap);
+      if (profile_readback.handle) device->destroy_resource(profile_readback);
       for (auto &[resource, view] : backbuffers) device->destroy_resource_view(view);
       for (auto &[resource, view] : export_views) device->destroy_resource_view(view);
       for (auto &t : textures) {
@@ -336,6 +348,11 @@ namespace sunshine_game3d {
         profile_state = gpu_timing::profile_state::no_query_heap;
         return false;
       }
+      if (device->check_capability(api::device_caps::copy_query_heap_results)) {
+        const api::resource_desc readback(profile_frames * mark_count * sizeof(uint64_t), api::memory_heap::gpu_to_cpu,
+          api::resource_usage::copy_dest);
+        if (!device->create_resource(readback, nullptr, api::resource_usage::copy_dest, &profile_readback)) profile_readback = {};
+      }
       profile_ticks_per_ms = double(frequency) / 1000.0;
       profile_state = gpu_timing::profile_state::ready;
       return profile_ready = true;
@@ -344,21 +361,33 @@ namespace sunshine_game3d {
     void collect_profile() {
       if (!profile_ready) return;
       const auto completed = device->get_completed_fence_value(completion);
+      void *resolved = nullptr;
       for (uint32_t i = 0; i != profile_frames; ++i) {
         auto &frame = profile_ring[i];
         if (!frame.written || completed == UINT64_MAX || completed < frame.fence) continue;
-        // ReShade refuses a range containing a query this frame never wrote,
-        // so read each written timestamp on its own.
+        const auto written = frame.written;
+        const auto has = [written](unsigned mark) { return (written >> mark & 1u) != 0; };
         std::array<uint64_t, mark_count> ticks{};
         bool read = true;
-        for (unsigned m = 0; m != mark_count; ++m)
-          if (frame.written >> m & 1u)
-            read = read && device->get_query_heap_results(profile_heap, api::query_type::timestamp,
-              i * mark_count + m, 1, &ticks[m], sizeof(uint64_t));
+        if (profile_readback.handle) {
+          if (!resolved && !device->map_buffer_region(profile_readback, 0, UINT64_MAX, api::map_access::read_only, &resolved))
+            resolved = nullptr;
+          read = resolved != nullptr;
+          if (read) {
+            std::memcpy(ticks.data(), static_cast<const uint64_t *>(resolved) + i * mark_count, sizeof(ticks));
+            read = !has(mark_render) || ticks[mark_render] > profile_resolved_render[i];
+          }
+        } else {
+          // ReShade refuses a range containing a query this frame never wrote,
+          // so read each written timestamp on its own.
+          for (unsigned m = 0; m != mark_count; ++m)
+            if (has(m))
+              read = read && device->get_query_heap_results(profile_heap, api::query_type::timestamp,
+                i * mark_count + m, 1, &ticks[m], sizeof(uint64_t));
+        }
         if (!read) continue; // Not resolved yet; retry on a later collection.
-        const auto written = frame.written;
+        if (has(mark_render)) profile_resolved_render[i] = ticks[mark_render];
         frame.written = 0;
-        const auto has = [written](unsigned mark) { return (written >> mark & 1u) != 0; };
         // Packed-eye frames mark their eyes only when the side-by-side target
         // is recorded; without a consumer the frame ends after conditioning.
         if (!has(mark_render) || !has(mark_conditioning)) { ++profile_window.incomplete; continue; }
@@ -377,6 +406,7 @@ namespace sunshine_game3d {
           profile_window.max_ms[s] = std::max(profile_window.max_ms[s], ms[s]);
         }
       }
+      if (resolved) device->unmap_buffer_region(profile_readback);
     }
     void mark(api::command_list *cmd, profile_mark which) {
       if (!profile_ready) return;
@@ -393,7 +423,11 @@ namespace sunshine_game3d {
         profile_open = true;
       }
       profile_ring[profile_slot].written |= 1u << which;
-      cmd->end_query(profile_heap, api::query_type::timestamp, profile_slot * mark_count + which);
+      const uint32_t index = profile_slot * mark_count + which;
+      cmd->end_query(profile_heap, api::query_type::timestamp, index);
+      if (profile_readback.handle)
+        cmd->copy_query_heap_results(profile_heap, api::query_type::timestamp, index, 1, profile_readback,
+          uint64_t(index) * sizeof(uint64_t), sizeof(uint64_t));
     }
     bool prepare_retention() {
       if (retention_attempted) return retention_ready;
