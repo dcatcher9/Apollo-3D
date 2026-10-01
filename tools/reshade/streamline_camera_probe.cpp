@@ -83,9 +83,16 @@ namespace sunshine_streamline {
       std::uint64_t camera_tick{}, camera_serial{}, changed{}, evaluation_tick{};
       // Observed camera resets of this viewport; each starts a new temporal history.
       std::uint64_t history{};
+      // The newest valid camera's depth coefficients and how many consecutive
+      // valid cameras of this viewport repeated them exactly.
+      camera_validation steady_projection;
+      std::uint32_t steady_frames{};
       std::uint32_t viewport{}, feature{};
       bool used{}, has_camera{};
     };
+    // Consecutive identical valid cameras before a viewport's depth
+    // coefficients apply to depth without its own frame's camera.
+    constexpr std::uint32_t steady_projection_frames = 8;
     struct targets { void *constants{}, *tag{}, *tag_for_frame{}, *evaluate{}, *new_frame_token{}, *get_feature_function{}; };
     struct batch {
       std::array<tag_record, observed_tag_types.size()> tags{}; // Three depth and six independently tagged UI/color kinds.
@@ -931,6 +938,14 @@ namespace sunshine_streamline {
       // camera is optional for depth. A reset ends only this viewport's
       // temporal history; it never revokes depth or other viewports.
       if (!invalid_camera && camera.reset == 1) ++record.history;
+      if (invalid_camera) record.steady_frames = 0;
+      else {
+        const auto checked = validate(camera);
+        const bool same = record.steady_frames && checked.depth_offset == record.steady_projection.depth_offset &&
+          checked.depth_scale == record.steady_projection.depth_scale;
+        record.steady_projection = checked;
+        record.steady_frames = same ? record.steady_frames + 1 : 1;
+      }
       const auto camera_identity = identity.kind == frame_identity_kind::unavailable &&
           installed_abi == abi::v2 && token ?
         frame_identity{frame_identity_kind::v2_constants_call, serial, 0, token, false} : identity;
@@ -1035,6 +1050,10 @@ namespace sunshine_streamline {
         if (now >= record.camera_tick && now - record.camera_tick < sunshine_scene_depth::maximum_source_age_ms) {
           out.viewport_direction = true;
           out.viewport_inverted = record.camera.depth_inverted;
+          if (record.steady_frames >= steady_projection_frames && record.steady_projection.valid()) {
+            out.viewport_projection_ready = true;
+            out.viewport_projection = record.steady_projection;
+          }
         }
       }
       // Freeze history continuity with this camera/frame tuple before the native
@@ -1478,12 +1497,17 @@ namespace sunshine_streamline {
           snapshot.status == evidence_status::camera_reset) &&
         snapshot.projection.valid() && snapshot.camera.reset <= 1 && tag.present && tag.supported &&
         tag.value.viewport == snapshot.viewport && buffers::is_depth(tag.value.type);
+      // Without the frame's own camera, the viewport's steady depth coefficients
+      // (see evaluation_snapshot::viewport_projection_ready).
+      const bool steady = !valid && !snapshot.frame_correlated && snapshot.viewport_projection_ready &&
+        tag.present && tag.supported && tag.value.viewport == snapshot.viewport && buffers::is_depth(tag.value.type);
+      const auto &coefficients = valid ? snapshot.projection : snapshot.viewport_projection;
       const bool correlated_direction = snapshot.frame_correlated && snapshot.decoded == decode_status::ok &&
         snapshot.camera.depth_inverted <= 1;
       const bool direction = correlated_direction || snapshot.viewport_direction;
       const auto inverted = correlated_direction ? snapshot.camera.depth_inverted : snapshot.viewport_inverted;
-      value.projection = {valid ? snapshot.projection.depth_offset : 0.0,
-        valid ? snapshot.projection.depth_scale : 0.0, valid,
+      value.projection = {valid || steady ? coefficients.depth_offset : 0.0,
+        valid || steady ? coefficients.depth_scale : 0.0, valid || steady,
         direction && ((inverted != 0) != (tag.precision_scale < 0)), direction};
       value.projection.raw_scale = tag.precision_scale;
       value.projection.raw_bias = tag.precision_bias;
@@ -1793,7 +1817,7 @@ namespace sunshine_streamline {
           // A stale camera cannot calibrate this call, but the call still owns
           // its explicit OnlyValidNow depth. Keep that raw-only fallback free
           // of stale camera, jitter and SDK frame claims; the viewport's depth
-          // direction convention (viewport_direction) is not a frame claim.
+          // direction and steady coefficients are not frame claims.
           snapshot.frame = {}; snapshot.camera = {}; snapshot.projection = {};
           snapshot.decoded = decode_status::short_buffer;
           snapshot.camera_tick = snapshot.camera_sequence = 0;

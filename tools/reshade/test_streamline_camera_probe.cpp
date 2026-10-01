@@ -1684,7 +1684,22 @@ namespace {
       require(testing::normalized_source(view.value, 0, normalized) && !normalized.projection.supplied &&
           normalized.projection.direction_supplied && normalized.projection.reversed == framed.projection.reversed &&
           !normalized.jitter.supplied,
-        "a camera-less frame lost the viewport's direction or borrowed its projection or jitter");
+        "a camera-less frame lost the viewport's direction or borrowed an unsteady projection or jitter");
+      // Coefficients the viewport's camera repeated in eight consecutive valid
+      // frames are camera constants: camera-less depth takes them, never jitter.
+      for (unsigned i = 0; i != 8; ++i) { mint(token, nullptr); call_v2_constants(valid, token.ref(), view); }
+      mint(token, nullptr); call_v2_tag(view, &tag, 1, nullptr); evaluate();
+      require(testing::normalized_source(view.value, 0, normalized) && normalized.projection.supplied &&
+          normalized.projection.depth_offset == framed.projection.depth_offset &&
+          normalized.projection.depth_scale == framed.projection.depth_scale &&
+          normalized.projection.direction_supplied && !normalized.jitter.supplied,
+        "a camera-less frame did not take the viewport's steady projection, or borrowed jitter");
+      // A changed camera restarts the count.
+      auto zoomed = valid; set_camera_near(zoomed.common, valid.common.camera_near * 2.f);
+      mint(token, nullptr); call_v2_constants(zoomed, token.ref(), view);
+      mint(token, nullptr); call_v2_tag(view, &tag, 1, nullptr); evaluate();
+      require(testing::normalized_source(view.value, 0, normalized) && !normalized.projection.supplied,
+        "a changed camera kept the previous steady projection");
     }
 
     result_v2 = -1; evaluate(); result_v2 = 0;

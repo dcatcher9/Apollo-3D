@@ -226,16 +226,24 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     uint matching_tiles = SunshineUIDetectionMatching[0], lit = SunshineUIDetectionLit[0];
     uint source = 0u, covered = 0u;
     // A channel the game session trusts as UI coverage is the mask whatever it
-    // covers this frame: nothing is no UI, everything a full-screen menu.
+    // covers this frame: nothing is no UI, everything a full-screen menu. A few
+    // invalid pixels (at most 1%, such as additive glow in a UI layer) do not
+    // disqualify a trusted channel. While a trusted dedicated UI channel (0 UI
+    // alpha, 1 UI color) is offered, presented alpha (2 Backbuffer, 3 current)
+    // never decides: when that channel fails, this frame has no alpha mask
+    // rather than a scene-wide one.
+    bool dedicated = false;
     [unroll] for (uint trusted = 0u; trusted < 4u; ++trusted) {
-        if (!source && (Sunshine_UICandidates & Sunshine_UITrustedAlpha & (1u << trusted)) && !invalid[trusted]) {
+        const bool offered = (Sunshine_UICandidates & Sunshine_UITrustedAlpha & (1u << trusted)) != 0u;
+        if (!source && offered && !(dedicated && trusted >= 2u) && invalid[trusted] * 100u <= difference.w) {
             source = trusted + 1u; covered = coverage[trusted];
         }
+        if (offered && trusted < 2u) dedicated = true;
     }
     // An untrusted channel must look selective. Empty and nearly full-scene
     // alpha are ambiguous: an opaque channel may carry no UI at all.
     [unroll] for (uint candidate = 0u; candidate < 4u; ++candidate) {
-        if (!source && (Sunshine_UICandidates & (1u << candidate)) && !invalid[candidate] &&
+        if (!source && !(dedicated && candidate >= 2u) && (Sunshine_UICandidates & (1u << candidate)) && !invalid[candidate] &&
             coverage[candidate] && coverage[candidate] * 10u < difference.w * 9u) {
             source = candidate + 1u; covered = coverage[candidate];
         }

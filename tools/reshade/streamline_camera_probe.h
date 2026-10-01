@@ -135,11 +135,16 @@ namespace sunshine_streamline {
     bool successful_evaluation{}, frame_correlated{}, recording_stable{};
     bool tag_boundary{}; // Copied synchronously while an OnlyValidNow tag is valid.
     bool frame_generation_input{}; // An independently observed enabled FG role, not implied by tagging.
-    // Depth direction is a fixed convention of a viewport, unlike its matrices.
-    // Without a frame-correlated camera, a recent valid camera of the same
-    // viewport still supplies direction (never projection or metric scale).
-    bool viewport_direction{};
+    // Depth direction is a fixed convention of a viewport. Without a
+    // frame-correlated camera, a recent valid camera of the same viewport still
+    // supplies direction. Its depth coefficients (near/far; not FOV, jitter or
+    // pose) are camera constants: once the viewport's camera repeated them in
+    // steady_projection_frames consecutive valid frames they supply this
+    // depth's projection too. Jitter and any per-frame claim still require the
+    // frame's own camera.
+    bool viewport_direction{}, viewport_projection_ready{};
     std::uint32_t viewport_inverted{};
+    camera_validation viewport_projection;
   };
   // Returns a value copy, never live pointers or mutable internal storage. Even
   // tracked_content_evaluation is NOT permission to drive geometry: complete

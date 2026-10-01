@@ -100,6 +100,34 @@ namespace {
     for (std::uint64_t tick = 1000; tick <= 20000; tick += 500)
       sample(effects, 1, {tick % 1000 ? 50u : 400u, 0, 0, 0}, 0, tick);
     require(!effects.trusted_alpha(), "Fluctuating coverage earned trust");
+    // A trusted dedicated UI channel contradicts presented alpha that claims
+    // much more of the frame (Resident Evil Requiem: UI color 0.2%, presented
+    // alpha 35-100% during play). A full-screen menu is no contradiction, and
+    // without a trusted dedicated channel the presented alpha keeps its trust.
+    alpha_auto_policy presented;
+    presented.restore_trusted_alpha(2 | 8);
+    for (std::uint64_t tick = 1000; tick <= 4000; tick += 1000)
+      sample(presented, 2 | 8, {0, 1000, 0, 600}, 0, tick);    // Menu: UI color everywhere.
+    require(presented.trusted_alpha() == 10u, "A full-screen menu contradicted presented alpha");
+    sample(presented, 2 | 8, {0, 2, 0, 999}, 0, 5000);
+    sample(presented, 2 | 8, {0, 0, 0, 400}, 0, 6000);
+    require(presented.trusted_alpha() == 10u, "Two samples revoked trust");
+    sample(presented, 2 | 8, {0, 2, 0, 350}, 0, 7000);
+    require(presented.trusted_alpha() == 2u, "A dedicated UI mask did not revoke presented alpha that covers the scene");
+    sample(presented, 2 | 8, {0, 2, 0, 300}, 0, 8000);
+    sample(presented, 2 | 8, {0, 2, 0, 300}, 0, 9000);
+    sample(presented, 2 | 8, {0, 2, 0, 300}, 0, 10000);
+    require(presented.trusted_alpha() == 2u, "Contradicted presented alpha earned trust again");
+    sample(presented, 2 | 8, {0, 20, 0, 30}, 0, 11000);
+    sample(presented, 2 | 8, {0, 20, 0, 30}, 0, 12000);
+    sample(presented, 2 | 8, {0, 20, 0, 30}, 0, 13000);
+    require(presented.trusted_alpha() == 10u, "Presented alpha agreeing with the UI mask could not earn trust");
+    // An untrusted UI channel (here unsteady, so it never earns trust) is no authority.
+    alpha_auto_policy alone;
+    alone.restore_trusted_alpha(8);
+    for (std::uint64_t tick = 1000; tick <= 8000; tick += 1000)
+      sample(alone, 2 | 8, {0, tick % 2000 ? 2u : 40u, 0, 400}, 0, tick);
+    require(alone.trusted_alpha() == 8u, "An untrusted UI channel revoked presented alpha");
   }
   void remembered_alpha_trust_is_restored_and_every_change_is_reported() {
     const std::uint32_t pixels = 1000;
