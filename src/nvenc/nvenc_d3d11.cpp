@@ -123,5 +123,38 @@ namespace nvenc {
     owned_flush_event.reset();
   }
 
+  void nvenc_d3d11::mark_input_producer_end() {
+    producer_marked = false;
+    if (producer_query_unavailable || !device || device_type != NV_ENC_DEVICE_TYPE_DIRECTX) {
+      return;
+    }
+    if (!producer_query) {
+      auto d3d_device = static_cast<ID3D11Device *>(device);
+      const D3D11_QUERY_DESC desc {D3D11_QUERY_EVENT, 0};
+      if (FAILED(d3d_device->CreateQuery(&desc, &producer_query)) || !producer_query) {
+        producer_query_unavailable = true;
+        producer_query = nullptr;
+        BOOST_LOG(warning) << "NvEnc: input producer diagnostics unavailable; slow pictures cannot name where they waited";
+        return;
+      }
+      d3d_device->GetImmediateContext(&producer_context);
+    }
+    producer_context->End(producer_query);
+    producer_marked = true;
+  }
+
+  input_producer_state nvenc_d3d11::poll_input_producer() {
+    if (!producer_marked || !producer_query || !producer_context) {
+      return input_producer_state::unknown;
+    }
+    // Only a slow picture reaches this. Flags 0 may flush a still-queued marker so that
+    // "pending" means unfinished GPU work rather than commands the CPU never submitted.
+    const auto status = producer_context->GetData(producer_query, nullptr, 0, 0);
+    if (status == S_OK) {
+      return input_producer_state::complete;
+    }
+    return status == S_FALSE ? input_producer_state::pending : input_producer_state::unknown;
+  }
+
 }  // namespace nvenc
 #endif

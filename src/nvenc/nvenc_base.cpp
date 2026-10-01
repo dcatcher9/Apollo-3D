@@ -54,6 +54,41 @@ namespace {
     );
   }
 
+  // Where a slow picture waited. A producer still pending means the GPU had not finished writing
+  // the input surface, so the encoder was waiting on upstream work; a finished one leaves the
+  // delay inside the encoder.
+  struct input_producer_progress_t {
+    nvenc::input_producer_state state = nvenc::input_producer_state::unknown;
+    long long first_observed_ms = -1;
+    long long completed_ms = -1;
+
+    void observe(nvenc::input_producer_state current, long long elapsed_ms) {
+      if (state == nvenc::input_producer_state::complete) {
+        return;
+      }
+      if (first_observed_ms < 0) {
+        first_observed_ms = elapsed_ms;
+      }
+      state = current;
+      if (current == nvenc::input_producer_state::complete) {
+        completed_ms = elapsed_ms;
+      }
+    }
+
+    std::string describe(long long elapsed_ms) const {
+      switch (state) {
+        case nvenc::input_producer_state::complete:
+          return completed_ms == first_observed_ms ?
+                   std::format("input_producer=done_by_{}ms (encoder-side delay)", completed_ms) :
+                   std::format("input_producer=done_at_{}ms (upstream GPU delay)", completed_ms);
+        case nvenc::input_producer_state::pending:
+          return std::format("input_producer=pending_at_{}ms (upstream GPU delay)", elapsed_ms);
+        default:
+          return "input_producer=unknown";
+      }
+    }
+  };
+
   [[noreturn]] void retain_failed_encoder_until_exit() {
     BOOST_LOG(error) << "NvEnc: bounded cleanup retries exhausted; retaining the failed session "
                         "without further driver calls. Restart the host to recover.";
@@ -797,11 +832,19 @@ namespace nvenc {
     using namespace std::chrono_literals;
     const auto started = async_wait_clock_now();
     const auto deadline = started + 250ms;
+    const auto elapsed_ms = [&] {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(async_wait_clock_now() - started).count();
+    };
     auto result = wait_for_async_event(100);
     const bool soft_timeout = result.status == nvenc_event_wait_status::timeout && !device_removed(result);
+    input_producer_progress_t producer;
+    if (soft_timeout) {
+      producer.observe(poll_input_producer(), elapsed_ms());
+    }
     if (soft_timeout && async_wait_clock_now() < deadline) {
       BOOST_LOG(warning) << "NvEnc: frame " << frame_index
-                         << " exceeded the 100 ms completion wait; allowing up to 250 ms total";
+                         << " exceeded the 100 ms completion wait; allowing up to 250 ms total; "
+                         << producer.describe(elapsed_ms());
       // Stay in this encode call with exactly one mapped/submitted input. Returning to the
       // caller here would let conversion overwrite the texture still owned by NVENC.
       while (result.status == nvenc_event_wait_status::timeout && !device_removed(result)) {
@@ -811,17 +854,21 @@ namespace nvenc {
         }
         const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
         result = wait_for_async_event(static_cast<std::uint32_t>(std::min(remaining, 25ms).count()));
+        if (producer.state == input_producer_state::pending) {
+          producer.observe(poll_input_producer(), elapsed_ms());
+        }
       }
     }
     if (result.status == nvenc_event_wait_status::ready) {
       if (soft_timeout) {
+        const auto elapsed = elapsed_ms();
         BOOST_LOG(info) << "NvEnc: frame " << frame_index << " completed after soft timeout in "
-                        << std::chrono::duration_cast<std::chrono::milliseconds>(async_wait_clock_now() - started).count() << " ms";
+                        << elapsed << " ms; " << producer.describe(elapsed);
       }
       return true;
     }
 
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(async_wait_clock_now() - started).count();
+    const auto elapsed = elapsed_ms();
     if (result.status == nvenc_event_wait_status::failed) {
       BOOST_LOG(error) << "NvEnc: frame " << frame_index << " completion event wait failed after "
                        << elapsed << " ms; " << event_wait_diagnostics(result);
@@ -830,7 +877,8 @@ namespace nvenc {
                        << elapsed << " ms; " << event_wait_diagnostics(result);
     } else {
       BOOST_LOG(error) << "NvEnc: frame " << frame_index << " encode wait timeout after "
-                       << elapsed << " ms (250 ms budget); " << event_wait_diagnostics(result);
+                       << elapsed << " ms (250 ms budget); " << event_wait_diagnostics(result)
+                       << "; " << producer.describe(elapsed);
     }
     return false;
   }
@@ -894,6 +942,9 @@ namespace nvenc {
         hdr_metadata.content_light_level ? &*hdr_metadata.content_light_level : nullptr;
     }
 
+    if (async_event_handle) {
+      mark_input_producer_end();
+    }
     if (stage_diagnostics) {
       stage_diagnostics->submit.first_point_now();
     }

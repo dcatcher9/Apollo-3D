@@ -38,6 +38,13 @@ namespace nvenc {
     std::optional<std::int32_t> device_removed_reason;
   };
 
+  /** Whether the GPU finished the work that wrote a submitted picture's input surface. */
+  enum class input_producer_state {
+    unknown,
+    pending,
+    complete
+  };
+
   /** Last per-codec width capability reported by the active NVENC driver probe. */
   std::optional<int> max_encode_width_for_codec(int video_format);
 
@@ -153,6 +160,20 @@ namespace nvenc {
      */
     virtual nvenc_event_wait_result wait_for_async_event(uint32_t timeout_ms) {
       return {};
+    }
+
+    /**
+     * @brief Optional. Mark the end of the GPU work that writes the input surface, immediately
+     *        before an asynchronous picture is submitted. Diagnostics only: never wait or flush.
+     */
+    virtual void mark_input_producer_end() {}
+
+    /**
+     * @brief Optional. Non-blocking check of the point marked above. Polled only after a slow
+     *        picture, to separate a late input producer from a slow encoder.
+     */
+    virtual input_producer_state poll_input_producer() {
+      return input_producer_state::unknown;
     }
 
     /** Monotonic clock shared by the frame's initial wait and its bounded grace period. */

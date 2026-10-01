@@ -184,6 +184,8 @@ namespace {
     int flush_timeouts_remaining = 0;
     std::optional<nvenc::nvenc_event_wait_result> next_frame_wait_result;
     std::chrono::milliseconds extra_frame_timeout_elapsed {0};
+    // States returned by successive input-producer polls; the last one repeats.
+    std::vector<nvenc::input_producer_state> producer_states;
 
   protected:
     bool init_library() override {
@@ -212,6 +214,27 @@ namespace {
     std::chrono::steady_clock::time_point async_wait_clock_now() const override {
       std::lock_guard lock(mutex);
       return fake_now;
+    }
+
+    void mark_input_producer_end() override {
+      std::lock_guard lock(mutex);
+      EXPECT_TRUE(input_mapped);
+      EXPECT_FALSE(picture_pending);
+      operations.emplace_back("producer-mark");
+    }
+
+    nvenc::input_producer_state poll_input_producer() override {
+      std::lock_guard lock(mutex);
+      EXPECT_TRUE(picture_pending);
+      operations.emplace_back("producer-poll");
+      if (producer_states.empty()) {
+        return nvenc::input_producer_state::unknown;
+      }
+      const auto state = producer_states.front();
+      if (producer_states.size() > 1) {
+        producer_states.erase(producer_states.begin());
+      }
+      return state;
     }
 
     nvenc::nvenc_event_wait_result wait_for_async_event(std::uint32_t timeout_ms) override {
@@ -797,6 +820,46 @@ TEST(NvencLifecycleTest, CompletionCanArriveAfterSeveralSoftTimeoutSlicesWithout
   EXPECT_EQ(completed.lock_calls, 1);
   EXPECT_EQ(completed.unmap_calls, 1);
   EXPECT_FALSE(completed.input_mapped);
+  EXPECT_FALSE(completed.picture_pending);
+}
+
+TEST(NvencLifecycleTest, OnTimePictureMarksItsInputProducerWithoutPollingIt) {
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.producer_states = {nvenc::input_producer_state::pending};
+
+  ASSERT_FALSE(probe.encode_frame(1, true).data.empty());
+  ASSERT_FALSE(probe.encode_frame(2, false).data.empty());
+  const auto completed = probe.snapshot();
+  const auto &ops = completed.operations;
+  EXPECT_EQ(std::count(ops.begin(), ops.end(), "producer-mark"), 2);
+  EXPECT_EQ(std::count(ops.begin(), ops.end(), "producer-poll"), 0);
+  const auto mark = std::find(ops.begin(), ops.end(), "producer-mark");
+  const auto submit = std::find(ops.begin(), ops.end(), "submit");
+  ASSERT_NE(mark, ops.end());
+  ASSERT_NE(submit, ops.end());
+  EXPECT_LT(mark, submit);
+}
+
+TEST(NvencLifecycleTest, SlowPicturePollsItsInputProducerOnlyUntilItFinishes) {
+  nvenc_lifecycle_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.frame_timeouts_remaining = 3;
+  probe.producer_states = {
+    nvenc::input_producer_state::pending,
+    nvenc::input_producer_state::pending,
+    nvenc::input_producer_state::complete,
+  };
+
+  ASSERT_FALSE(probe.encode_frame(1, true).data.empty());
+  const auto completed = probe.snapshot();
+  const auto &ops = completed.operations;
+  EXPECT_EQ(completed.frame_wait_timeouts, (std::vector<std::uint32_t> {100, 25, 25, 25}));
+  EXPECT_EQ(std::count(ops.begin(), ops.end(), "producer-poll"), 3);
+  const auto ready = std::find(ops.begin(), ops.end(), "frame-ready");
+  ASSERT_NE(ready, ops.end());
+  EXPECT_EQ(std::find(ready, ops.end(), "producer-poll"), ops.end());
+  EXPECT_EQ(completed.submit_calls, 1);
   EXPECT_FALSE(completed.picture_pending);
 }
 
