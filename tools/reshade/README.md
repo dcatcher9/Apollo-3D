@@ -523,7 +523,8 @@ checking that this unrelated repeated failure cannot erase the independent UI in
 fixture's foreground override applies only to dump ownership; it does not change desktop focus.
 See the [canonical capture diagnostics](../../docs/reshade-sbs.md) for the gate and request fields.
 Run these functional cases serially when they share resources or output directories; their timing
-is not performance evidence. The effect-based fixtures documented below remain in the repository,
+is not performance evidence. The NGX and preservation-mode-2 runtime fixtures below use the same
+zero-FX native lifecycle. The other effect-based fixtures documented below remain in the repository,
 but their shader-uniform and shared-preservation expectations are historical and do not replace
 these native capture gates.
 
@@ -574,46 +575,51 @@ last. Each case checks current shader pixels and source stencil, then failure/re
 snapshot and checks current, missing/last-valid and manual-override source reporting. Without that
 flag an older control DLL lacking the getter can still run the GPU capture comparison.
 
-`reshade_ngx_depth_runtime_test` is the historical effect-based fixture for named NGX entry points,
-depth controls and HDR shader output. It does not observe the current no-FX native lifecycle
-reliably, including when supplied frozen FX sources. Its archived invocation uses `SUNSHINE_GAME3D_AUTOMATIC=1`,
-`SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST=1`, and `SUNSHINE_DEPTH3D_EFFECT=SunshineGame3D`:
+`reshade_ngx_depth_runtime_test` exercises named NGX entry points through the native lifecycle.
+Like the native provider fixture, it loads the supplied shaders only to initialize the runtime and
+then removes every FX technique. Each present is observed through the test add-on's provider
+status and Automatic/scale queries. Current output is read from the production export ring.
+Production Dump 3D captures supply consumed depth, render constants and SBS at checkpoints. Run it with
+`SUNSHINE_GAME3D_AUTOMATIC=1`, `SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST=1` and
+`SUNSHINE_DEPTH3D_EFFECT=SunshineGame3D`:
 
 ```text
 reshade_ngx_depth_runtime_test.exe <ReShade64.dll> <Depth3D/Shaders> <SunshineSBSTest.addon64> <fresh-output-directory> 3840 2160
 ```
 
+Failed and invalid-extent evaluations must not take ownership from Generic. A valid evaluation
+whose recording observed no source state is admitted through the DLSS input-state contract. The
+default case checks exact full-allocation depth, poisoned padding and active-rectangle render
+constants through rotation, recreation and a packed D32S8 crop with unchanged stencil.
+Failed, missing and silent frames hold the newest completed copy until its source age bound,
+then render current-color mono. Screen-plane refinement keeps readiness. Recalibration twice
+gives an identical fresh reference, and 0/50/100 strength is proportional. A released feature
+returns ownership to Generic; a normal-depth feature gets a new logical source.
+`ngx-depth-trajectory.csv` records every present and `native-renders.jsonl` every captured render.
+
 Set `SUNSHINE_NGX_CROSS_QUEUE_TEST=1` and `SUNSHINE_NGX_CROSS_QUEUE_COMPLETED_TEST=1`
 for the deterministic separate-queue regression. The fixture executes depth production on
 another real queue, retires its submitted recording, and waits for its actual completion before presenting. This test-only wait
-is not add-on behavior. The fixture checks changing depth and HDR pixels, unfinished-producer
-mono without blocking, missing-frame recovery, and producer queue recreation. The frozen old
-add-on must fail the named `NGX-completed-separate-producer` admission check. Omit the completed
-flag for asynchronous coverage, where current depth is verified when admitted and pending work
-may remain mono. These are functional checks, not performance evidence; an idle GPU is not required.
+is not add-on behavior. The fixture checks changing depth and HDR output. A still-replayable
+recording's copy is never displayed; its predecessor may be admitted once the next reset retires it.
+An unfinished producer is never displayed and adds no CPU wait. The case also covers
+missing-frame hold and recovery and four producer queue lifetimes. Omit the completed flag for
+asynchronous coverage, where admitted copies are verified and pending work may hold or remain
+mono. These are functional checks, not performance evidence; an idle GPU is not required.
 Run cases serially with separate output directories. `SUNSHINE_NGX_STATE_PRESSURE_TEST=1`
 is a separate case and must not be combined with the cross-queue flags.
 
-The legacy `SUNSHINE_NGX_TRACKED_SOURCE_TEST=1` case assumes API nominations reuse Generic
-preservation and that DSV/UAV transport changes toggle Generic capture demand. Those assumptions
-conflict with the current API-boundary snapshot contract, so this case is not a current regression
-gate. It remains available for historical binaries; its mode-2 variant uses
-`SUNSHINE_DEPTH_BIND_SWITCH_TEST=1`. Use the current `--content` owner test and native provider
-runtime above for this change, not a passing legacy effect-based result.
+The former effect-callback NGX cases are retired and exit with code 2. These cover
+`SUNSHINE_NGX_FRAME_GENERATION_TEST`, `SUNSHINE_SL_TAG_FALLBACK_TEST`, the `SUNSHINE_FG_*` variants,
+`SUNSHINE_NGX_TRACKED_SOURCE_TEST`, `SUNSHINE_CAPTURE_DEMAND_TEST`, `SUNSHINE_NGX_PENDING_CONTINUITY_TEST`
+and the NGX `SUNSHINE_DEPTH_BIND_SWITCH_TEST` variant. Native SL FG coverage is the native provider
+fixture above. CTest `reshade_streamline_camera_probe` covers tag-48/tag-0 selection; no current
+GPU fixture repeats the unsupported-capture tag fallback.
 
 The retired generic-nomination adapter and its metadata-injection fixture are removed. Current
 validation combines the native owner/provider gates above with the actual-hook CPU tests.
 The generic selector retains its separate policy and runtime tests. No synthetic fixture alone
 establishes a particular game's hook order or final depth/color jitter alignment.
-
-For SL tag priority and capture-failure recovery, run `reshade_ngx_depth_runtime_test` with
-`SUNSHINE_NGX_FRAME_GENERATION_TEST=1` and `SUNSHINE_SL_TAG_FALLBACK_TEST=1`. The real SL
-entry points nominate both tag48 and tag0: an unsupported high-tag texture must not block the
-usable ordinary depth, a usable high tag must retain priority, and two unsupported captures must
-retain SL ownership while publishing current-color mono. Recovery checks the actual shader
-binding and copied depth pixels. Add `SUNSHINE_FG_LIVE_COMPAT_TEST=1` for global tags with
-zero-initialized resource wrappers; omit it for typed resources and explicit frame tokens.
-Use a fresh output directory and keep these functional GPU runs serial.
 
 Native Game 3D records its GPU passes and export on the runtime's immediate queue. It borrows
 the selected depth only within the capture owner's open pass and supplies frame-associated
@@ -813,27 +819,26 @@ reshade_adaptive_raw_runtime_test.exe <ReShade64.dll> <Depth3D/Shaders> <Sunshin
 Set `SUNSHINE_DEPTH_RELOAD_TEST=1` to also reload the real effect while depth is absent,
 rediscover its new resources, and require fresh readiness, calibration and HDR stereo after
 depth returns. `reshade_depth_ready_uniform_cache_tests` covers reflection reuse and change-only
-publication by the shared Generic/API readiness owner. The legacy NGX runtime fixture's
-`SUNSHINE_CAPTURE_DEMAND_TEST=1` and `SUNSHINE_NGX_TRACKED_SOURCE_TEST=1` combination expects
-shared-preservation bootstrap and DSV/UAV demand handovers. Those are historical expectations,
-not current acceptance criteria: API snapshots keep Generic capture dormant for both resource
-types, while manual pins still enable Generic capture.
+publication by the shared Generic/API readiness owner.
 
 The fixture requires the separate test add-on for the real pin/unpin/**Recenter**
 actions. It checks native depth pixels, shader preparation and exported HDR pixels
 as well as the control trajectory. The production package excludes these test exports.
 
 `reshade_depth_bind_switch_runtime_test` exercises preservation mode 2 with real
-D3D12 D32S8 draws. Use the three environment settings above plus
+D3D12 D32S8 draws through native Game 3D. Use the three environment settings above plus
 `SUNSHINE_DEPTH_BIND_SWITCH_TEST=1`; its arguments are only the runtime DLL,
-shader directory, test add-on and fresh output directory. It runs 4K scRGB with
+shader directory, test add-on and fresh output directory. Like the NGX fixture, it removes every
+FX technique after initialization. It reads readiness from the Automatic/scale queries on every present.
+Production Dump 3D captures supply the consumed depth, render constants and SBS. It runs 4K scRGB with
 2228×1256 scene depth, first unbinding each buffer to null, then switching directly
 from scene depth to another depth target. Changing depth patterns reject stale
-copies. Same-binding, clear-only, missing-depth and transition-away cases verify
-capture admission; fresh recalibration and rendered stereo verify recovery. Run
-the identical fixture against the old and candidate add-ons: the old direct-switch
-path must fail after passing the null-unbind control. Like the other native GPU
-fixtures, execution is opt-in and serial, outside CTest.
+copies. Same-binding, clear-only, missing-depth, transition-away and unknown-alias cases verify
+capture admission: a refused case must stay unready on every present and render current-color
+mono. Fresh recalibration and rendered stereo verify recovery. Each refused case differs from
+the passing direct-switch control only by its clear, transition, alias barrier or missing draw;
+a build without the generic alias rule fails at `unknown-alias-before-B`. Like the other native GPU fixtures, execution is opt-in and serial,
+outside CTest. `bind-switch-trajectory.csv` and `native-renders.jsonl` record the evidence.
 Add `SUNSHINE_DEPTH_GENERIC_ONLY_TEST=1` to disable both API sources, camera diagnostics and
 call tracing before initialization. The fixture verifies those settings and runs the same
 preservation and HDR checks, proving that shared capture does not depend on API discovery.

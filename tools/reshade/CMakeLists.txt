@@ -507,8 +507,9 @@ if(BUILD_TESTING)
     endif()
 
     add_executable(reshade_ngx_depth_runtime_test test_ngx_depth_runtime.cpp)
-    # Loaded only by the opt-in frame-generation scenario, under its isolated
-    # output directory. The version resource exercises normal SDK discovery.
+    # Loaded only by the native provider's opt-in frame-generation scenarios,
+    # under its isolated output directory. The version resource exercises
+    # normal SDK discovery.
     enable_language(RC)
     add_library(reshade_frame_generation_interposer SHARED test_frame_generation_interposer.cpp test_frame_generation_interposer.rc)
     target_compile_features(reshade_frame_generation_interposer PRIVATE cxx_std_17)
@@ -519,10 +520,9 @@ if(BUILD_TESTING)
     target_compile_features(reshade_legacy_v2_interposer PRIVATE cxx_std_17)
     target_compile_definitions(reshade_legacy_v2_interposer PRIVATE SUNSHINE_SL_LEGACY_V2_FIXTURE)
     set_target_properties(reshade_legacy_v2_interposer PROPERTIES PREFIX "" OUTPUT_NAME "legacy_v2_interposer")
-    add_dependencies(reshade_ngx_depth_runtime_test reshade_frame_generation_interposer)
     target_compile_features(reshade_ngx_depth_runtime_test PRIVATE cxx_std_17)
     target_include_directories(reshade_ngx_depth_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
-    target_link_libraries(reshade_ngx_depth_runtime_test PRIVATE d3d12 dxgi dxguid d3dcompiler user32)
+    target_link_libraries(reshade_ngx_depth_runtime_test PRIVATE nlohmann_json::nlohmann_json d3d12 dxgi dxguid d3dcompiler user32)
     if(MINGW)
       target_link_options(reshade_ngx_depth_runtime_test PRIVATE -static)
       target_link_options(reshade_frame_generation_interposer PRIVATE -static)
@@ -547,7 +547,7 @@ if(BUILD_TESTING)
     add_executable(reshade_depth_bind_switch_runtime_test test_depth_bind_switch_runtime.cpp)
     target_compile_features(reshade_depth_bind_switch_runtime_test PRIVATE cxx_std_17)
     target_include_directories(reshade_depth_bind_switch_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
-    target_link_libraries(reshade_depth_bind_switch_runtime_test PRIVATE d3d12 dxgi dxguid d3dcompiler user32)
+    target_link_libraries(reshade_depth_bind_switch_runtime_test PRIVATE nlohmann_json::nlohmann_json d3d12 dxgi dxguid d3dcompiler user32)
     if(MINGW)
       target_link_options(reshade_depth_bind_switch_runtime_test PRIVATE -static)
     endif()

@@ -52,7 +52,10 @@ namespace {
       do { step(); } while (GetTickCount64() < until);
     }
     std::vector<std::uint8_t> check_current_mono() {
-      const auto pixels = read(exported.p);
+      return check_current_mono(read(exported.p));
+    }
+    // Packed SBS from an FX export or a native render capture share one layout.
+    std::vector<std::uint8_t> check_current_mono(std::vector<std::uint8_t> pixels) {
       std::map<std::uint32_t, sunshine_depth3d_color::rgb> pq_cache;
       double maximum = 0;
       for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {

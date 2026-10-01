@@ -1707,34 +1707,11 @@ are documented in [source and submission validation](../tools/reshade/README.md#
 They check capture timing and native lifecycle independently; neither proves a real game's
 generated-color/depth correspondence.
 
-Historical effect-based FG validation uses
-`SUNSHINE_NGX_FRAME_GENERATION_TEST=1`, `SUNSHINE_FG_LIVE_COMPAT_TEST=1`,
-`SUNSHINE_NGX_CROSS_QUEUE_TEST=1`, `SUNSHINE_NGX_CROSS_QUEUE_COMPLETED_TEST=1`, and
-`SUNSHINE_FG_PENDING_PRODUCER_TEST=1`. The completed-producer option applies to warmup; eight
-gated cases deliberately keep the producer unfinished until effect observation. They require
-explicit previous-depth reuse and fresh current-color HDR output within the age bound, then mono
-after expiry, without CPU blocking. Completed recovery checks byte-exact depth against an
-independent producer copy, whose every pixel is also checked against the generated scene. The test includes
-unsubmitted/replayable recordings, overlapping original SDK calls, success/failure/missing tags,
-FG Off/On and expiry. Run at normal and 4K output resolution. The normal CPU/CTest suite or a GPU
-run that only completes producers before presentation does not cover this contract. These legacy
-FX fixtures do not observe the current native renderer lifecycle reliably and are not current
-acceptance gates; retain them for historical comparisons. Diagnostic
-oracle-only, fresh-allocator and contiguous-copy variants isolate faults and are not substitutes
-for the default source-state regression. `SUNSHINE_FG_SUSTAINED_PRODUCER_TEST=1` adds a separate
-continuous pipeline regression: sixteen consecutive pending newest captures while each previous
-real capture has completed before its successor is recorded, without intervening settled warmups.
-It checks exact previous-depth pixels, advancing real capture identity, current-color stereo,
-stable calibration, and continued readiness beyond a single reuse lifetime. None of these fixtures establishes a real game's FG
-intermediate-color correspondence.
-
-Also enable `SUNSHINE_FG_PUBLICATION_GAP_TEST=1` to pause nomination before a capture slot exists.
-This checks actual exported Normal Depth pixels, both-eye equality and previous-depth/current-color
-publication through the gap, then fresh-depth recovery, failure, expiry and FG Off. A control binary
-needs the identical test-only pause seam; a missing test export is a setup failure, not evidence
-of the production bug. `SUNSHINE_FG_SCALE_UI_TEST=1` additionally compares the panel's scale with
-the shader's applied coefficient, checks its stability through FG holds, and verifies the change
-from camera-depth adaptive gain to raw-depth adaptive gain after FG is disabled.
+The effect-based FG cases of `reshade_ngx_depth_runtime_test` are retired; their
+`SUNSHINE_NGX_FRAME_GENERATION_TEST` and `SUNSHINE_FG_*` selectors now exit as setup failures.
+That fixture and its separate-queue NGX regression run on native rendering with no installed FX;
+see [source and submission validation](../tools/reshade/README.md#source-and-submission-validation).
+None of these fixtures establishes a real game's FG intermediate-color correspondence.
 
 Version-specific adapters translate to one plain scene-depth contract: provider and logical source
 identity, optional validated projection, depth direction, resource extent, optional state hints and

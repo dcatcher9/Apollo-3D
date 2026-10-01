@@ -1,28 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Preserve-mode2 actual D3D12 A->B switching. No depth/readiness/camera injection.
+// Preserve-mode2 actual D3D12 A->B switching through native Game 3D with no
+// installed FX. No depth/readiness/camera injection.
 #include "test_raw_runtime_fixture.h"
-#include "depth_addon.h"
+#include "test_game3d_native_observation.h"
 
 namespace {
-  using frame_query_t = BOOL (*)(api::effect_runtime *, sunshine_depth::frame_depth *);
-  frame_query_t query_frame = nullptr;
-  sunshine_depth::frame_depth captured_frame;
-  bool captured_ready = false;
-  unsigned captured_render = 0;
-  void observe_switch_depth(api::effect_runtime *runtime, api::effect_technique technique,
-      api::command_list *, api::resource_view, api::resource_view) {
-    char name[256] {}; runtime->get_technique_name(technique, name);
-    if (!named(name, technique_name)) return;
-    captured_frame = {}; captured_ready = query_frame && query_frame(runtime, &captured_frame) && captured_frame.ready;
-    captured_render = observed.renders;
-  }
-
   struct bind_switch_fixture : raw_runtime_fixture {
     enum class sequence { null_unbind, direct_switch, same_bind, no_work, transitioned, unknown_alias, missing };
     sequence order = sequence::null_unbind;
-    using action_t = BOOL (*)(api::effect_runtime *);
-    action_t recalibrate = nullptr;
+    native_game3d_observer game3d{*this};
     std::ofstream trace;
+    unsigned presents = 0;
 
     void render_depth() {
       if (order == sequence::missing) return;
@@ -49,35 +37,38 @@ namespace {
       if (order == sequence::transitioned)
         transition(commands.p, scene->texture.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     }
-    bool current_a() const {
-      return captured_render == observed.renders && captured_ready &&
-        captured_frame.source_resource.handle == reinterpret_cast<std::uint64_t>(scene->texture.p) &&
-        captured_frame.width == scene->width && captured_frame.height == scene->height;
+    bool current_a(const native_render &frame) const {
+      return frame.depth_ready && frame.source_resource == reinterpret_cast<std::uint64_t>(scene->texture.p) &&
+        frame.width == scene->width && frame.height == scene->height && !frame.x && !frame.y &&
+        frame.active_width == scene->width && frame.active_height == scene->height;
     }
-    void tick(const char *phase) {
-      step();
-      trace << phase << ',' << GetTickCount64() << ',' << observed.renders << ',' << captured_frame.source_id << ','
-        << captured_frame.frame_index << ',' << captured_ready << ',' << ready() << ','
-        << scalar("Sunshine_CameraDepthScale") << ',' << zero()[1] << ',' << scalar("Sunshine_CameraStrengthBlend") << '\n';
+    automatic_status tick(const char *phase) {
+      step(); game3d.no_effects();
+      const auto status = game3d.automatic();
+      trace << phase << ',' << GetTickCount64() << ',' << ++presents << ",present," << status.ready() << ',' << status.scale_state << ','
+        << status.scale << ",,,,,,,,\n";
       require(trace.good(), "Cannot record bind-switch trajectory");
+      return status;
     }
-    void verify_pattern(unsigned pattern) {
-      require(current_a(), "Current rendered A has no ready preserved depth copy");
-      const auto selected = selected_binding();
-      require(selected.handle != 0, "Captured A has no shader-visible depth binding");
-      auto *resource = reinterpret_cast<ID3D12Resource *>(observed.runtime->get_device()->get_resource_from_view(selected).handle);
-      require(resource, "Captured A has no native depth resource");
-      const auto desc = resource->GetDesc();
-      require(desc.Width == scene->width && desc.Height == scene->height &&
-        (desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS || desc.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT),
-        "Bind-switch oracle lost actual D32S8 geometry/format");
-      // Subresource0 is the actual float depth plane; existing read() validates
-      // its native footprint and row size instead of assuming packed stencil.
-      const auto bytes = read(resource, D3D12_RESOURCE_STATE_COPY_DEST);
-      require(bytes.size() == size_t(scene->width) * scene->height * sizeof(float), "Unexpected D32S8 depth-plane size");
+    // One captured native render, presenting through tick() until it completes.
+    native_render inspect(const char *phase, bool sbs = false, const std::function<void(const automatic_status &)> &each = {}) {
+      const auto frame = game3d.capture(phase, sbs, [&] { const auto status = tick(phase); if (each) each(status); });
+      trace << phase << ',' << GetTickCount64() << ',' << presents << ",render,,,," << frame.source_resource << ',' << frame.source_id << ','
+        << frame.frame_index << ',' << frame.depth_ready << ',' << frame.camera_ready << ',' << frame.depth_scale << ','
+        << frame.convergence[1] << ',' << frame.strength_blend << '\n';
+      require(trace.good(), "Cannot record bind-switch trajectory");
+      return frame;
+    }
+    void verify_pattern(const native_render &frame, unsigned pattern) {
+      require(current_a(frame), "Current rendered A has no ready preserved depth copy");
+      // The renderer's SRV covers the preserved D32S8 allocation; its artifact
+      // is the unfiltered depth plane, never packed stencil or a B resource.
+      require(frame.allocation_format == unsigned(api::format::r32_g8_typeless) ||
+        frame.allocation_format == unsigned(api::format::d32_float_s8_uint), "Bind-switch oracle lost actual D32S8 geometry/format");
+      require(frame.raw_depth.size() == size_t(scene->width) * scene->height * sizeof(float), "Unexpected D32S8 depth-plane size");
       for (unsigned y = 0; y < 18; ++y) for (unsigned x = 0; x < 32; ++x) {
         const unsigned px = (2*x+1)*scene->width/64, py = (2*y+1)*scene->height/36;
-        float raw = 0; std::memcpy(&raw, bytes.data() + (size_t(py)*scene->width+px)*4, 4);
+        const float raw = frame.depth(px, py);
         const float u = (px+.5f)/scene->width, v = (py+.5f)/scene->height;
         float expected = .01f + .02f*(pattern == 9 ? 1.f-u : u) + .015f*v;
         if (pattern == 14) {
@@ -88,32 +79,42 @@ namespace {
           "Preserved A contains a stale pattern, B depth, or invalid native depth");
       }
     }
-    void settle(const char *phase, unsigned limit_ms = 12000) {
+    native_render settle(const char *phase, bool sbs = false, unsigned limit_ms = 12000) {
       const auto until = GetTickCount64()+limit_ms;
-      do { tick(phase); } while ((!current_a() || !ready() || scalar("Sunshine_CameraStrengthBlend") != 1.f) && GetTickCount64()<until);
-      require(current_a() && ready() && scalar("Sunshine_CameraStrengthBlend") == 1.f, "Bind-switch source did not reach full Automatic readiness");
+      do {
+        if (!tick(phase).ready()) continue;
+        // Readiness alone is not the full-strength re-entry; inspect the render.
+        auto frame = inspect(phase, sbs);
+        if (current_a(frame) && frame.camera_ready && frame.strength_blend == 1.f) return frame;
+      } while (GetTickCount64()<until);
+      throw std::runtime_error("Bind-switch source did not reach full Automatic readiness");
     }
     void dynamic_copies(const char *phase, sequence next) {
       order = next;
       for (unsigned i=0; i<8; ++i) {
         scene->pattern = i%2 ? 9 : 1;
-        tick(phase);
-        require(current_a(), "Continuous A rendering lost capture at a DSV binding boundary");
-        require(ready(), "Continuous captured A interrupted Automatic calibration/readiness");
-        verify_pattern(scene->pattern);
+        const auto frame = inspect(phase, false, [](const automatic_status &status) {
+          require(status.ready(), "Continuous captured A interrupted Automatic calibration/readiness");
+        });
+        require(current_a(frame), "Continuous A rendering lost capture at a DSV binding boundary");
+        require(frame.camera_ready && frame.strength_blend == 1.f, "Continuous captured A interrupted Automatic calibration/readiness");
+        verify_pattern(frame, scene->pattern);
       }
       std::printf("PASS %s: eight changing actual D32S8 depth patterns captured from current A\n", phase);
     }
     void unavailable(const char *phase, sequence next) {
       order = next;
-      for (unsigned i=0; i<3; ++i) {
-        tick(phase);
-        require(!current_a() && !ready() && scalar("Sunshine_CameraStrengthBlend") == 0.f,
-          "No-work/missing/transitioned A falsely authorized current depth or stereo");
-      }
-      check_current_mono();
+      const auto refuse = [](const automatic_status &status) {
+        require(!status.ready(), "No-work/missing/transitioned/aliased A falsely authorized current depth or stereo");
+      };
+      for (unsigned i=0; i<3; ++i) refuse(tick(phase));
+      const auto frame = inspect(phase, true, refuse);
+      require(!current_a(frame) && !frame.camera_ready && frame.strength_blend == 0.f,
+        "No-work/missing/transitioned/aliased A falsely authorized current depth or stereo");
+      check_current_mono(frame.sbs);
+      std::printf("PASS %s: no current A; native output is current-color mono\n", phase);
       order = sequence::direct_switch; scene->pattern=14;
-      settle("valid-direct-recovery"); verify_pattern(14);
+      verify_pattern(settle("valid-direct-recovery"), 14);
     }
     void run() {
       create_pipeline(); normal=false;
@@ -121,7 +122,7 @@ namespace {
       decoy=target(640,360,1,0,true,false);
       render_tracked_depth=[&]{render_depth();};
       trace.open(runtime_directory/"bind-switch-trajectory.csv");
-      trace << std::setprecision(17) << "phase,wall_ms,render,source,frame,capture_ready,automatic_ready,H,t0,blend\n";
+      trace << std::setprecision(17) << "phase,wall_ms,present,kind,automatic_ready,scale_state,K,source,source_id,frame,capture_ready,camera_ready,H,t0,blend\n";
       const auto until=GetTickCount64()+45000;
       while ((!observed.runtime || !observed.renders) && GetTickCount64()<until) step();
       require(observed.runtime && observed.renders && !observed.inject, "Actual bind-switch fixture did not initialize");
@@ -137,15 +138,14 @@ namespace {
         }
         std::puts("PASS Generic-only configuration: Streamline, NGX, camera probe and call trace disabled before initialization");
       }
-      const auto module=GetModuleHandleW(L"SunshineSBSTest.addon64");
-      query_frame=reinterpret_cast<frame_query_t>(GetProcAddress(module,"SunshineDepthTestFrame"));
-      recalibrate=reinterpret_cast<action_t>(GetProcAddress(module,"SunshineGame3DTestRecalibrate"));
-      require(query_frame && recalibrate,"Bind-switch fixture requires current-frame and recalibration test adapters");
-      reshade::register_event<reshade::addon_event::reshade_render_technique>(observe_switch_depth);
-      set_int("Depth_Map_View",0);set_float("Depth_Adjustment",100);set_float("Sharpen_Power",0);
-      find_texture("DoubleTex",exported,width*2,DXGI_FORMAT_R16G16B16A16_FLOAT);
-      settle("null-unbind-startup");verify_pattern(14);
-      require(scalar("Sunshine_CameraDepthScale")==8.f && zero()[1]==.125f,"Null-unbind baseline did not initialize from actual center depth");
+      game3d.start();
+      game3d.set_strength(100);
+      const auto baseline=settle("null-unbind-startup");verify_pattern(baseline,14);
+      const auto baseline_scale=game3d.automatic();
+      std::printf("MEASURE null-unbind baseline H=%.9g t0=%.9g K=%.9g basis=%u\n",baseline.depth_scale,baseline.convergence[1],baseline_scale.scale,baseline_scale.basis);
+      require(baseline.coordinate_basis==1 && baseline_scale.basis==unsigned(sunshine_game3d::automatic_scale_basis::relative_depth) &&
+        baseline_scale.active_scale() && std::isfinite(baseline.depth_scale) && baseline.depth_scale>0.f,
+        "Null-unbind baseline did not initialize a relative-depth scale from actual depth");
       dynamic_copies("null-unbind-control",sequence::null_unbind);
       dynamic_copies("direct-A-to-B",sequence::direct_switch);
       dynamic_copies("same-A-then-B",sequence::same_bind);
@@ -157,28 +157,34 @@ namespace {
       unavailable("unknown-alias-before-B",sequence::unknown_alias);
       unavailable("actual-missing-depth",sequence::missing);
       order=sequence::direct_switch;scene->pattern=14;
-      require(recalibrate(observed.runtime),"Cannot request real Automatic recalibration");
-      const auto started=GetTickCount64(); bool saw_unready=false;
-      do {
-        tick("direct-switch-fresh-reference");
-        require(current_a(),"Direct-switch reference lost current native A");
-        saw_unready |= !ready();
-        if (GetTickCount64()-started<650) require(!ready(),"Direct-switch recalibration reused the old reference");
-      } while (!ready() && GetTickCount64()-started<1400);
-      require(saw_unready && ready() && scalar("Sunshine_CameraDepthScale")==8.f && zero()[1]==.125f,
-        "Direct-switch Automatic reference never initialized from fresh actual depth");
-      settle("direct-switch-final");verify_pattern(14);
-      set_float("Depth_Adjustment",0);tick("current-mono");const auto mono=check_current_mono();
+      require(game3d.recalibrate(),"Cannot request real Automatic recalibration");
+      const auto started=GetTickCount64(); bool saw_unready=false, ready_during=false;
+      const auto refreshing=[&](const automatic_status &status) {
+        saw_unready |= !status.ready(); ready_during |= status.ready();
+        if (GetTickCount64()-started<650) require(!status.ready(),"Direct-switch recalibration reused the old reference");
+      };
+      const auto fresh=inspect("direct-switch-fresh-reference",false,refreshing);
+      require(current_a(fresh),"Direct-switch reference lost current native A");
+      require(ready_during || !fresh.camera_ready,"Direct-switch recalibration rendered the old reference");
+      automatic_status status=game3d.automatic();
+      while (!status.ready() && GetTickCount64()-started<1400) { status=tick("direct-switch-fresh-reference"); refreshing(status); }
+      std::printf("MEASURE direct-switch recalibration ready_after_ms=%llu\n",static_cast<unsigned long long>(GetTickCount64()-started));
+      require(saw_unready && status.ready(),"Direct-switch Automatic reference never initialized from fresh actual depth");
+      const auto final_frame=settle("direct-switch-final");verify_pattern(final_frame,14);
+      std::printf("MEASURE direct-switch reference H=%.9g t0=%.9g\n",final_frame.depth_scale,final_frame.convergence[1]);
+      require(final_frame.depth_scale==baseline.depth_scale && final_frame.convergence==baseline.convergence,
+        "Direct-switch fresh reference differs from the null-unbind reference for identical actual depth");
+      game3d.set_strength(0);
+      const auto mono=check_current_mono(inspect("current-mono",true).sbs);
       // The complete CPU mono/color check can exceed the presentation-gap limit.
       // Resume actual frames through the normal fresh-target/full-blend recovery
       // before asserting stereo; never bypass the add-on's pause protection.
-      set_float("Depth_Adjustment",100);settle("restored-stereo");const auto stereo=read(exported.p);
+      game3d.set_strength(100);const auto stereo=settle("restored-stereo",true).sbs;
       require(image_difference(mono,stereo)>.002f,"Ready direct-switch camera did not produce actual stereo");
       for(unsigned y=0;y<height;++y) for(unsigned x=0;x<width*2;++x) for(unsigned c=0;c<4;++c)
         require(std::isfinite(channel(stereo,x,y,c)),"Direct-switch stereo contains nonfinite RGBA");
-      std::puts("PASS real preserve2 A-to-B: changing current D32S8 copies, null control, same binding, no-work/state/alias/missing guards, fresh Automatic reference and HDR stereo");
+      std::puts("PASS real preserve2 A-to-B through native Game 3D: changing current D32S8 copies, null control, same binding, no-work/state/alias/missing guards, fresh Automatic reference and HDR stereo; no FX");
       render_tracked_depth={};
-      reshade::unregister_event<reshade::addon_event::reshade_render_technique>(observe_switch_depth);
     }
   };
 }
