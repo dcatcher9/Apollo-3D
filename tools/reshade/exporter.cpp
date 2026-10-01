@@ -34,6 +34,7 @@
 #include "depth_content_sampler.h"
 #include <string>
 #include <unordered_map>
+#include <optional>
 #include <utility>
 #include <windows.h>
 #include "game3d_slow_step.h"
@@ -336,12 +337,21 @@ namespace {
       a.color.input == b.color.input && a.color.output == b.color.output && a.window == b.window;
   }
 
-  // Own native objects rather than ReShade wrappers, which disappear during runtime teardown.
   // Why a presentation carries no depth, for the SBS output counters. unavailable: the
   // provider had none this Present (source switch, FG toggle, expiry). The reuse reasons
   // are a generated/pending frame the provider did give depth, refused here because the
   // previous presentation had none or resolved its scene for another source.
   enum class depth_gap : unsigned char { none, unavailable, reuse_after_gap, reuse_other_source };
+  // One Game 3D publication's contribution to the SBS output counters.
+  struct output_sample {
+    bool fg = false;
+    // With depth: rendered as the colour frame (scene not placed or strength
+    // blend zero), or still fading in.
+    bool scene_flat = false, scene_fading = false;
+    bool depth_ready = false, reused_depth = false;
+    depth_gap gap = depth_gap::none;
+  };
+  // Own native objects rather than ReShade wrappers, which disappear during runtime teardown.
   struct generation_t {
     api::device_api backend = api::device_api::d3d11;
     api::effect_runtime *runtime = nullptr;
@@ -362,11 +372,7 @@ namespace {
     std::chrono::steady_clock::time_point inactive_since{};
     // Diagnostic disposition travels with this copy until its slot is actually
     // published. A later effects callback must not relabel an earlier copy.
-    bool pending_game_output = false, pending_fg_output = false, pending_depth_ready = false, pending_reused_depth = false;
-    // With depth: rendered as the colour frame (scene not placed or strength
-    // blend zero), or still fading in.
-    bool pending_scene_flat = false, pending_scene_fading = false;
-    depth_gap pending_depth_gap = depth_gap::none;
+    std::optional<output_sample> pending_output;
     std::array<std::unique_ptr<sunshine::overlay::compositor_t>, wire::slot_count> overlays;
     // A D3D12 command list does not retain the resource referenced by a recorded copy.
     // Hold the source across effect reload/destruction until submission is completed.
@@ -665,6 +671,19 @@ namespace {
   // controller instead rendered it mono (raw calibration never completed) and
   // restarted the 500 ms strength ramp. The Witcher 3 misses the camera of a
   // few SR evaluations every second.
+  output_sample classify_output(const frame_decision_t &frame) {
+    const auto &scene = frame.scene;
+    const bool placed = scene.ready && scene.blend > 0.f;
+    output_sample out;
+    out.fg = frame.diagnostics.frame_generation_active;
+    out.scene_flat = scene.owned && frame.depth_ready && !placed;
+    out.scene_fading = scene.owned && frame.depth_ready && placed && scene.blend < 1.f;
+    out.depth_ready = frame.depth_ready;
+    out.reused_depth = frame.reused_depth;
+    out.gap = frame.gap;
+    return out;
+  }
+
   bool hold_projection_scene(frame_decision_t &frame, const frame_decision_t &previous,
       const sunshine_depth::frame_depth &depth, std::uint64_t now) {
     const bool own_camera = depth.projection.supplied ||
@@ -739,6 +758,19 @@ namespace {
       std::uint64_t missing_unavailable = 0, missing_reuse_after_gap = 0, missing_reuse_other_source = 0;
       // Publications with depth that showed the colour frame or were fading in.
       std::uint64_t scene_flat = 0, scene_fading = 0;
+      void add(const output_sample &sample) {
+        ++published;
+        if (sample.fg) ++fg;
+        if (sample.scene_flat) ++scene_flat;
+        if (sample.scene_fading) ++scene_fading;
+        if (sample.depth_ready) {
+          ++(sample.reused_depth ? published_reused_depth : published_fresh_depth);
+          return;
+        }
+        ++published_depth_missing;
+        ++(sample.gap == depth_gap::reuse_after_gap ? missing_reuse_after_gap :
+          sample.gap == depth_gap::reuse_other_source ? missing_reuse_other_source : missing_unavailable);
+      }
     } output;
   };
 
@@ -957,7 +989,7 @@ namespace {
       }
       timer.mark();
       auto ui_input = sunshine_game3d::ui_input::acquire(runtime, *renderer, source_alpha,
-        sunshine_game3d::source_alpha_startup_policy(), diagnostic_owner);
+        sunshine_game3d::source_alpha_session(), diagnostic_owner);
       timer.mark();
       // Publish what this render actually consumes, not the saved preference or
       // a later SDK observation. No RGB from the retained input is displayed.
@@ -1735,17 +1767,7 @@ namespace {
         // The scalar belongs to this exact packed texture, including retained
         // exports. ReShade's own controls and cursor are at screen disparity.
         generation_->pending_ui_parallax_uv = addon_render && !overlay_open(runtime) ? proof.native_ui_parallax_uv : 0.f;
-        generation_->pending_game_output = game;
-        generation_->pending_fg_output = game && proof.frame.diagnostics.frame_generation_active;
-        {
-          const auto &scene = proof.frame.scene;
-          const bool placed = scene.ready && scene.blend > 0.f;
-          generation_->pending_scene_flat = scene.owned && proof.frame.depth_ready && !placed;
-          generation_->pending_scene_fading = scene.owned && proof.frame.depth_ready && placed && scene.blend < 1.f;
-        }
-        generation_->pending_depth_ready = proof.frame.depth_ready;
-        generation_->pending_reused_depth = proof.frame.reused_depth;
-        generation_->pending_depth_gap = proof.frame.gap;
+        generation_->pending_output = game ? std::optional(classify_output(proof.frame)) : std::nullopt;
         // The owed native pack renders straight into the slot. The overlay and
         // dumps read the internal SBS image, so they pack it and copy it here.
         auto *renderer = addon_render ? proof.renderer.get() : nullptr;
@@ -1928,30 +1950,13 @@ namespace {
       slot.cursor_plane_flags = wire::cursor_plane_present;
       slot.ui_parallax_uv = generation_->pending_ui_parallax_uv;
       store_state(slot, generation_->id, wire::slot_state::ready);
-      if (generation_->pending_game_output) {
+      if (const auto sample = std::exchange(generation_->pending_output, std::nullopt)) {
         const auto found = runtimes_.find(generation_->runtime);
         if (found != runtimes_.end()) {
-          auto &counts = found->second.output;
-          ++counts.published;
-          if (generation_->pending_fg_output) ++counts.fg;
-          if (generation_->pending_scene_flat) ++counts.scene_flat;
-          if (generation_->pending_scene_fading) ++counts.scene_fading;
-          if (generation_->pending_depth_ready) {
-            if (generation_->pending_reused_depth) ++counts.published_reused_depth;
-            else ++counts.published_fresh_depth;
-          }
-          else {
-            ++counts.published_depth_missing;
-            switch (generation_->pending_depth_gap) {
-              case depth_gap::reuse_after_gap: ++counts.missing_reuse_after_gap; break;
-              case depth_gap::reuse_other_source: ++counts.missing_reuse_other_source; break;
-              default: ++counts.missing_unavailable; break;
-            }
-          }
+          found->second.output.add(*sample);
           log_output(generation_->runtime, found->second, now);
         }
       }
-      generation_->pending_game_output = generation_->pending_fg_output = false;
     }
 
     void publish(const wire::metadata_t &metadata, bool reset_slots = false, api::effect_runtime *owner = nullptr) {

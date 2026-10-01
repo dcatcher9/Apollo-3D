@@ -88,9 +88,9 @@ namespace {
     sunshine_game3d::alpha_auto_policy mode;
     mode.set_manual(false);
     session a,b; a.observe(candidate());
-    require(!mode.decision(1000).enabled && !b.snapshot().available, "Source observation changed mode or another runtime");
+    require(!mode.decision().enabled && !b.snapshot().available, "Source observation changed mode or another runtime");
     mode.set_manual(true); a.clear();
-    require(mode.decision(1000).enabled, "Source invalidation changed manual On");
+    require(mode.decision().enabled, "Source invalidation changed manual On");
   }
 }
 int main() {

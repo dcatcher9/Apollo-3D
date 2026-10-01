@@ -12,7 +12,6 @@
 #include "async_log.h"
 #include "game3d_slow_step.h"
 #include <algorithm>
-#include <atomic>
 #include <cstring>
 #include <cstdio>
 
@@ -401,29 +400,10 @@ namespace sunshine_streamline::provider {
     depth_capture::observe_runtime_list(runtime->get_command_queue()->get_immediate_command_list()->get_native(),
       runtime->get_command_queue()->get_native());
     {
-      // Capture admissions by ReShade's list lifecycle, which decides
-      // coverage, and whether the barrier hooks observed the states. At most
-      // one line per 5 s.
-      static std::atomic<std::uint64_t> next_coverage_log{}, logged_admissions{};
-      const auto now = GetTickCount64();
-      auto next = next_coverage_log.load(std::memory_order_relaxed);
-      if (now >= next && next_coverage_log.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
-        const auto c = depth_capture::list_coverage();
-        const auto admissions = c.covered + c.unknown + c.closed + c.pass + c.opaque;
-        if (admissions != logged_admissions.exchange(admissions, std::memory_order_relaxed)) {
-          const auto u = [](std::uint64_t value) { return static_cast<unsigned long long>(value); };
-          const auto e = [&](depth_capture::list_event event) { return u(c.events[static_cast<unsigned>(event)]); };
-          using event = depth_capture::list_event;
-          char text[768]{};
-          std::snprintf(text, sizeof(text),
-            "Sunshine list lifecycle: admissions covered=%llu (states observed=%llu declared=%llu) not_open={unknown=%llu closed=%llu pass=%llu opaque=%llu}; "
-            "events created=%llu reset=%llu closed=%llu executed=%llu bundle=%llu pass_begin=%llu pass_end=%llu destroyed=%llu",
-            u(c.covered), u(c.states_observed), u(c.states_declared), u(c.unknown), u(c.closed), u(c.pass), u(c.opaque),
-            e(event::created), e(event::reset), e(event::closed), e(event::executed),
-            e(event::bundle), e(event::pass_begin), e(event::pass_end), e(event::destroyed));
-          sunshine_log::message(reshade::log::level::info, text);
-        }
-      }
+      // Capture admissions by ReShade's list lifecycle, which decides coverage.
+      char text[256];
+      if (depth_capture::list_coverage_report(GetTickCount64(), text, sizeof(text)))
+        sunshine_log::message(reshade::log::level::info, text);
     }
     frame_generation_snapshot fg_source;
     frame_generation_query_status fg_status;

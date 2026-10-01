@@ -2000,40 +2000,43 @@ namespace sunshine_streamline {
         } else {
           const auto address = reinterpret_cast<std::uintptr_t>(returned);
           // Requesting the same caller-supplied index again returns that frame's
-          // token and changes nothing, so it takes no writer. The Witcher 3 repeats
-          // each request about 30 times a frame from several threads.
+          // token: it is the same frame, so it keeps its identity and the tags and
+          // constants already recorded for it still reach its evaluation. The
+          // optional numeric index is caller-owned; absent means unknown, never zero.
+          const auto same_frame = [&](const frame_identity &frame) {
+            return frame_index && frame.token == address && frame.has_numeric && frame.numeric == numeric;
+          };
+          // Such a repeat changes nothing, so it takes no writer. The Witcher 3
+          // repeats each request about 30 times a frame from several threads.
           const bool repeated = frame_index && [&] {
             const auto pin = token_metadata.read();
             if (!pin || pin->observation != ticket) return false;
             for (const auto &candidate : pin->tokens)
-              if (candidate.frame.token == address) return candidate.frame.has_numeric && candidate.frame.numeric == numeric;
+              if (candidate.frame.token == address) return same_frame(candidate.frame);
             return false;
           }();
-          auto update = repeated ? token_owner::transaction{} : write_tokens_briefly();
-          if (repeated) {}
-          else if (!update) {
-            if (current(ticket)) dropped_observation(update.failure() == observation::write_failure::storage_busy ?
-              loss_diagnostics::reason::metadata_storage_busy : loss_diagnostics::reason::tokens_busy, __func__, __LINE__);
-          } else if (current(ticket)) {
-            update->observation = ticket;
-            auto *chosen = &update->tokens[0];
-            for (auto &candidate : update->tokens) {
-              if (candidate.frame.token == address) { chosen = &candidate; break; }
-              if (!candidate.frame.token || candidate.frame.generation < chosen->frame.generation) chosen = &candidate;
+          if (!repeated) {
+            auto update = write_tokens_briefly();
+            if (!update) {
+              if (current(ticket)) dropped_observation(update.failure() == observation::write_failure::storage_busy ?
+                loss_diagnostics::reason::metadata_storage_busy : loss_diagnostics::reason::tokens_busy, __func__, __LINE__);
+            } else if (current(ticket)) {
+              update->observation = ticket;
+              auto *chosen = &update->tokens[0];
+              for (auto &candidate : update->tokens) {
+                if (candidate.frame.token == address) { chosen = &candidate; break; }
+                if (!candidate.frame.token || candidate.frame.generation < chosen->frame.generation) chosen = &candidate;
+              }
+              // A recycled address is a NEW observer generation. The same frame
+              // can still arrive here when its repeat raced the read above.
+              if (!same_frame(chosen->frame)) {
+                if (chosen->frame.token != address || serial > chosen->frame.generation)
+                  chosen->frame = {frame_identity_kind::v2_observed_token, serial, numeric, address, frame_index != nullptr};
+                else lose(loss_diagnostics::reason::token_replaced, __func__, __LINE__); // Concurrent out-of-order allocation of the same address.
+              }
+              if (current(ticket) && !update.commit())
+                dropped_observation(loss_diagnostics::reason::metadata_storage_busy, __func__, __LINE__);
             }
-            // A recycled address is a NEW observer generation. Requesting the same
-            // caller-supplied index again returns that frame's token: it is the same
-            // frame, so it keeps its identity and the tags and constants already
-            // recorded for it still reach its evaluation. The optional numeric index
-            // is caller-owned; absent means unknown, never zero.
-            const bool same_frame_again = chosen->frame.token == address && frame_index &&
-              chosen->frame.has_numeric && chosen->frame.numeric == numeric;
-            if (same_frame_again) {}
-            else if (chosen->frame.token != address || serial > chosen->frame.generation)
-              chosen->frame = {frame_identity_kind::v2_observed_token, serial, numeric, address, frame_index != nullptr};
-            else lose(loss_diagnostics::reason::token_replaced, __func__, __LINE__); // Concurrent out-of-order allocation of the same address.
-            if (current(ticket) && !update.commit())
-              dropped_observation(loss_diagnostics::reason::metadata_storage_busy, __func__, __LINE__);
           }
         }
       }

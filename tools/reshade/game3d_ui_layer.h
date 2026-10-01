@@ -33,6 +33,10 @@ namespace sunshine_game3d::ui_layer {
 
   // Formats that can carry blended UI coverage in alpha: 8 bits or more.
   bool alpha_format(api::format format);
+  // Sunshine_UIDetectionFlags for a layer copy of this format. bit0: admit it
+  // only while premultiplied (no color above its alpha, as UI blended over
+  // transparent black always is); bit1: a float layer's HDR headroom.
+  std::uint32_t detection_flags(api::format format);
   // A single-sample 2D color target at the output size cleared to exactly
   // (0, 0, 0, 0). Callers separately exclude swapchain back buffers.
   bool qualifies(const api::resource_desc &desc, const float color[4], std::uint32_t width, std::uint32_t height);
@@ -77,6 +81,7 @@ namespace sunshine_game3d::ui_layer {
     std::uint64_t source{};  // Game resource handle, identity only.
     std::uint32_t width{}, height{}, format{}; // DXGI format of the copy.
     std::uint32_t clears{};  // Qualifying clears seen while armed.
+    bool active{};           // The live tracker's layer when the census was taken.
     const char *status = "observed";
   };
 

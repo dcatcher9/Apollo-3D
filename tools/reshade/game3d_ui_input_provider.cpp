@@ -357,7 +357,8 @@ namespace sunshine_game3d::ui_input {
         {"capture_id", layer.capture_id}, {"age_ms", now >= layer.tick ? now - layer.tick : 0}});
       if (view.handle) {
         signature ^= std::uint64_t(1) << 53;
-        result.detection.masks[1] = view; result.detection.color_alpha_premultiplied = true;
+        result.detection.masks[1] = view;
+        result.detection.color_alpha_flags = ui_layer::detection_flags(static_cast<api::format>(layer.format));
         result.status.retained_alpha_ready = true; available = true;
       }
     }
@@ -493,6 +494,6 @@ namespace sunshine_game3d::ui_input {
   void frame::complete(const renderer &renderer, bool rendered) {
     status.rendered = rendered; status.applied = rendered && renderer.consumed_source_alpha_ui();
     status.automatic = true;
-    status.coverage = rendered ? renderer.consumed_alpha_auto() : observation.session->decision(observation.now_ms);
+    status.coverage = rendered ? renderer.consumed_alpha_auto() : observation.session->decision();
   }
 }

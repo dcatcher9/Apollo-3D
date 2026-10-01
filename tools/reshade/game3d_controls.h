@@ -19,8 +19,6 @@ namespace sunshine_game3d {
     bool enabled = true;
     source_alpha_mode ui_protection = source_alpha_mode::automatic;
     bool source_alpha_ui = false;
-    bool source_alpha_monitoring = false;
-    std::uint64_t source_alpha_probe_interval_ms = 0;
   };
 
   // Present alpha is a game-specific convention, not an FG output contract.
@@ -128,8 +126,9 @@ namespace sunshine_game3d {
   // Edits persist in ReShade configuration; UI protection uses the per-game
   // global file so all of the game's runtimes share the saved choice.
   render_settings query_render_settings(reshade::api::effect_runtime *runtime);
-  // Shared manual-mode state. Live Auto checks source quality independently.
-  alpha_auto_policy &source_alpha_startup_policy();
+  // The game process's UI protection mode and alpha trust. Live Auto checks
+  // source quality independently on the GPU.
+  alpha_auto_policy &source_alpha_session();
 
   enum class automatic_phase { unavailable, waiting_for_depth, calibrating, ready, suspended, unsupported_resolution, renderer_unavailable, renderer_preparing };
   enum class automatic_scale_basis { unknown, camera_matrix, relative_depth, linear_distance };

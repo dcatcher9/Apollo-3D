@@ -35,7 +35,6 @@ namespace {
     return list->Close();
   }
   void execute(ID3D12CommandQueue *queue, ID3D12GraphicsCommandList *list) {
-    capture::observe_list_event(native(list), capture::list_event::executed);
     ID3D12CommandList *lists[]{list}; queue->ExecuteCommandLists(1, lists);
   }
   void require(bool value, const char *message) { if (!value) throw std::runtime_error(message); }
@@ -999,10 +998,10 @@ namespace {
     counted("a lifecycle close was not counted", [](const auto &a, const auto &b) { return b.closed == a.closed + 1; });
     capture::observe_list_event(list, event::reset);
     require(record(list), "ReShade's Reset did not reopen the recording");
-    // A closed and submitted list stays closed until ReShade reports its next
-    // Reset, so a native Reset that bypassed ReShade never readmits it.
+    // A closed list stays closed through its submission (not a lifecycle event)
+    // until ReShade reports its next Reset, so a native Reset that bypassed
+    // ReShade never readmits it.
     capture::observe_list_event(list, event::closed);
-    capture::observe_list_event(list, event::executed);
     require(!record(list), "a capture was admitted after the list was submitted");
     counted("a submitted list was not counted as closed", [](const auto &a, const auto &b) { return b.closed == a.closed + 1; });
     capture::observe_list_event(list, event::reset);
@@ -1051,7 +1050,7 @@ namespace {
       last = capture::list_coverage();
       require(record(list_native), "a registered runtime list rejected a capture");
       counted("a registered runtime list was not covered", [](const auto &a, const auto &b) {
-        return b.covered == a.covered + 1 && b.events[static_cast<unsigned>(event::created)] == a.events[static_cast<unsigned>(event::created)]; });
+        return b.covered == a.covered + 1; });
       const auto first = observer::get_recording_cookie(list_native);
       check(runtime->Close(), "runtime list close");
       ID3D12CommandList *values[]{runtime.Get()};

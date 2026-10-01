@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <mutex>
 #include <type_traits>
 #include <utility>
@@ -1160,9 +1161,8 @@ namespace sunshine_streamline::depth_capture {
     native_observer::observe_command(native);
   }
   namespace {
-    // Capture admissions and ReShade list events, for the five-second report.
+    // Capture admissions, for the five-second report.
     struct {
-      std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(list_event::count)> events{};
       std::atomic<std::uint64_t> covered{}, unknown{}, closed{}, pass{}, opaque{}, states_observed{}, states_declared{};
     } list_counts;
     enum class list_view { unknown, open, closed, pass, opaque };
@@ -1235,9 +1235,7 @@ namespace sunshine_streamline::depth_capture {
   }
   void observe_list_event(std::uint64_t native, list_event event) {
     if (!native || event >= list_event::count) return;
-    list_counts.events[static_cast<unsigned>(event)].fetch_add(1, std::memory_order_relaxed);
     switch (event) {
-      case list_event::executed: return; // Its Close already ended the recording.
       case list_event::destroyed: command_destroyed(native); return;
       case list_event::created: forget_runtime_list(native); break;
       default: break;
@@ -1263,11 +1261,23 @@ namespace sunshine_streamline::depth_capture {
   list_coverage_counts list_coverage() {
     list_coverage_counts out;
     const auto &c = list_counts;
-    for (unsigned i = 0; i != c.events.size(); ++i) out.events[i] = c.events[i].load(std::memory_order_relaxed);
     out.covered = c.covered.load(); out.unknown = c.unknown.load(); out.closed = c.closed.load();
     out.pass = c.pass.load(); out.opaque = c.opaque.load();
     out.states_observed = c.states_observed.load(); out.states_declared = c.states_declared.load();
     return out;
+  }
+  bool list_coverage_report(std::uint64_t now_ms, char *out, std::size_t size) {
+    static std::atomic<std::uint64_t> next_log{}, logged_admissions{};
+    auto next = next_log.load(std::memory_order_relaxed);
+    if (now_ms < next || !next_log.compare_exchange_strong(next, now_ms + 5000, std::memory_order_relaxed)) return false;
+    const auto c = list_coverage();
+    const auto admissions = c.covered + c.unknown + c.closed + c.pass + c.opaque;
+    if (admissions == logged_admissions.exchange(admissions, std::memory_order_relaxed)) return false;
+    const auto u = [](std::uint64_t value) { return static_cast<unsigned long long>(value); };
+    std::snprintf(out, size,
+      "Sunshine list lifecycle: admissions covered=%llu (states observed=%llu declared=%llu) not_open={unknown=%llu closed=%llu pass=%llu opaque=%llu}",
+      u(c.covered), u(c.states_observed), u(c.states_declared), u(c.unknown), u(c.closed), u(c.pass), u(c.opaque));
+    return true;
   }
   void command_destroyed(std::uint64_t native) {
     if (!native) return;
@@ -1671,7 +1681,6 @@ namespace sunshine_streamline::depth_capture {
       return ticket;
     }
     if (owner->invalid) return reject(status::unavailable, record_stage::recording_invalid);
-    if (owner->render_pass) return reject(status::unavailable, record_stage::recording_render_pass);
     // Unobserved lists (refused or moved method tables) use the declared state.
     const auto *observed = states_observed ? state(*owner, value.source->cookie, false) : nullptr;
     if (diagnostic && observed) {

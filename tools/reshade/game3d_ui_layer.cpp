@@ -7,7 +7,6 @@
 #include <dxgi.h>
 
 #include <algorithm>
-#include <atomic>
 #include <mutex>
 
 namespace sunshine_game3d::ui_layer {
@@ -49,6 +48,10 @@ namespace sunshine_game3d::ui_layer {
   }
 
   namespace {
+    bool transparent_black(const float color[4]) {
+      return color[0] == 0.f && color[1] == 0.f && color[2] == 0.f && color[3] == 0.f;
+    }
+
     // A copy recorded into a game command list may execute a frame or more
     // later; a withdrawn copy is destroyed only after this long.
     constexpr std::uint64_t retire_delay_ms = 2000;
@@ -73,7 +76,7 @@ namespace sunshine_game3d::ui_layer {
 
     struct state_t {
       std::mutex mutex;
-      std::atomic<bool> armed{false};
+      bool armed{};
       std::uint64_t demand_ms{};
       api::device *device{};
       std::uint32_t width{}, height{};
@@ -99,6 +102,22 @@ namespace sunshine_game3d::ui_layer {
       s.graveyard.erase(keep, s.graveyard.end());
     }
 
+    // Requires the state lock. Retires census copies that no dump took.
+    void drop_candidates(state_t &s) {
+      for (auto &c : s.candidates)
+        if (c.copy.handle) s.graveyard.push_back({s.device, c.copy, GetTickCount64()});
+      s.candidates.clear();
+    }
+
+    // Records the target's previous-frame content into copy (in copy_dest
+    // state), leaving copy shader-readable and the target as the clear needs it.
+    void record_copy(api::command_list *commands, api::resource target, api::resource copy) {
+      commands->barrier(target, api::resource_usage::render_target, api::resource_usage::copy_source);
+      commands->copy_resource(target, copy);
+      commands->barrier(target, api::resource_usage::copy_source, api::resource_usage::render_target);
+      commands->barrier(copy, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
+    }
+
     // Requires the state lock. Copies the active layer's previous-frame content
     // into the add-on's persistent texture, before the game's clear.
     void capture_live(state_t &s, api::command_list *commands, api::device *device, api::resource resource,
@@ -119,10 +138,7 @@ namespace sunshine_game3d::ui_layer {
         live.width = desc.texture.width; live.height = desc.texture.height; live.format = typed;
       }
       commands->barrier(live.copy, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
-      commands->barrier(resource, api::resource_usage::render_target, api::resource_usage::copy_source);
-      commands->copy_resource(resource, live.copy);
-      commands->barrier(resource, api::resource_usage::copy_source, api::resource_usage::render_target);
-      commands->barrier(live.copy, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
+      record_copy(commands, resource, live.copy);
       ++live.capture_id;
       live.tick = GetTickCount64();
     }
@@ -147,10 +163,7 @@ namespace sunshine_game3d::ui_layer {
       const api::resource_desc copy_desc(c.width, c.height, 1, 1, typed, 1, api::memory_heap::default_,
         api::resource_usage::copy_dest | api::resource_usage::shader_resource);
       if (device->create_resource(copy_desc, nullptr, api::resource_usage::copy_dest, &c.copy)) {
-        commands->barrier(resource, api::resource_usage::render_target, api::resource_usage::copy_source);
-        commands->copy_resource(resource, c.copy);
-        commands->barrier(resource, api::resource_usage::copy_source, api::resource_usage::render_target);
-        commands->barrier(c.copy, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
+        record_copy(commands, resource, c.copy);
         c.status = "captured_before_clear";
       } else {
         c.copy = {};
@@ -162,7 +175,7 @@ namespace sunshine_game3d::ui_layer {
     bool on_clear(api::command_list *commands, api::resource_view view, const float color[4], std::uint32_t, const api::rect *) {
       auto &s = state();
       // Cheap rejection before any lock: only exact transparent black qualifies.
-      if (color[0] != 0.f || color[1] != 0.f || color[2] != 0.f || color[3] != 0.f) return false;
+      if (!transparent_black(color)) return false;
       try {
         auto *device = commands->get_device();
         const auto resource = device->get_resource_from_view(view);
@@ -177,7 +190,7 @@ namespace sunshine_game3d::ui_layer {
         const auto now = GetTickCount64();
         if (s.live.tracker.clear(resource.handle, now) && s.demand_ms && now - s.demand_ms <= demand_window_ms)
           capture_live(s, commands, device, resource, desc);
-        if (s.armed.load(std::memory_order_relaxed)) census(s, commands, device, resource, desc);
+        if (s.armed) census(s, commands, device, resource, desc);
       } catch (...) {
         // A failure never propagates into the game's command recording.
       }
@@ -200,11 +213,15 @@ namespace sunshine_game3d::ui_layer {
     }
   }
 
+  std::uint32_t detection_flags(api::format format) {
+    const auto typeless = api::format_to_typeless(format);
+    return typeless == api::format::r16g16b16a16_typeless || typeless == api::format::r32g32b32a32_typeless ? 3u : 1u;
+  }
+
   bool qualifies(const api::resource_desc &desc, const float color[4], std::uint32_t width, std::uint32_t height) {
     return width && height && desc.type == api::resource_type::texture_2d && desc.texture.width == width &&
       desc.texture.height == height && desc.texture.samples == 1 && desc.texture.levels == 1 &&
-      desc.texture.depth_or_layers == 1 && alpha_format(desc.texture.format) &&
-      color[0] == 0.f && color[1] == 0.f && color[2] == 0.f && color[3] == 0.f;
+      desc.texture.depth_or_layers == 1 && alpha_format(desc.texture.format) && transparent_black(color);
   }
 
   bool latest(api::device *device, std::uint64_t now_ms, live_capture &out) {
@@ -275,7 +292,7 @@ namespace sunshine_game3d::ui_layer {
     std::lock_guard<std::mutex> lock(s.mutex);
     // Every retired copy's device is alive: on_destroy_device releases its own.
     reap(s);
-    if (s.armed.load(std::memory_order_relaxed) && s.device && s.device != device) return;
+    if (s.armed && s.device && s.device != device) return;
     if (s.live.copy.handle && (s.device != device || s.width != desc.BufferDesc.Width || s.height != desc.BufferDesc.Height)) {
       s.graveyard.push_back({s.device, s.live.copy, now});
       s.live = {};
@@ -290,17 +307,17 @@ namespace sunshine_game3d::ui_layer {
   void arm() {
     auto &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    for (auto &c : s.candidates)
-      if (c.copy.handle) s.graveyard.push_back({s.device, c.copy, GetTickCount64()});
-    s.candidates.clear();
-    s.armed.store(true, std::memory_order_release);
+    drop_candidates(s);
+    s.armed = true;
   }
 
   std::vector<candidate> take(api::device *&device) {
     auto &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    s.armed.store(false, std::memory_order_release);
+    s.armed = false;
     device = s.device;
+    // The live tracker's choice is what UI detection reads; the others are candidates only.
+    for (auto &c : s.candidates) c.active = c.source && c.source == s.live.tracker.active();
     std::vector<candidate> result;
     result.swap(s.candidates);
     return result;
@@ -316,9 +333,7 @@ namespace sunshine_game3d::ui_layer {
   void cancel() {
     auto &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    s.armed.store(false, std::memory_order_release);
-    for (auto &c : s.candidates)
-      if (c.copy.handle) s.graveyard.push_back({s.device, c.copy, GetTickCount64()});
-    s.candidates.clear();
+    s.armed = false;
+    drop_candidates(s);
   }
 }

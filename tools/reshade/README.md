@@ -44,8 +44,9 @@ SL v1 without a lifecycle keeps its existing synchronous behavior.
 The copy restores the selected state; shared dump storage stays immutable and local retired
 storage may be reused. Depth captures retain their existing declaration/proof checks. NGX depth
 uses the SDK's documented `NON_PIXEL_SHADER_RESOURCE` input contract only when the evaluating
-recording has no state entry for the resource; an observed state still takes precedence. UI protection offers per-game, persistent On / Off / Auto choices. Auto rejects invalid,
-empty and nearly full alpha and tests the next candidate in the same render. HUD-less comparison
+recording has no state entry for the resource; an observed state still takes precedence. UI protection offers per-game, persistent On / Off / Auto choices. Auto rejects invalid
+alpha, and empty or nearly full alpha unless the game's channel has earned trust (remembered per
+game), and tests the next candidate in the same render. HUD-less comparison
 requires a matching queue/presentation generation and spatial scene-agreement checks. Capture
 works with FG off or unknown; there is no startup deadline or confirmation timer. The panel
 separates source availability, automatic validation and actual application;

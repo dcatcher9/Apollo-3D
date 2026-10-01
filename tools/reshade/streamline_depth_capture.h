@@ -174,7 +174,7 @@ namespace sunshine_streamline::depth_capture {
   // Native barrier hooks supply observed resource states where they see the
   // list; otherwise the declared state applies. native is ReShade's native
   // object for the list.
-  enum class list_event : unsigned { created, reset, closed, executed, bundle, pass_begin, pass_end, destroyed, count };
+  enum class list_event : unsigned { created, reset, closed, bundle, pass_begin, pass_end, destroyed, count };
   void observe_list_event(std::uint64_t native, list_event event);
   // ReShade's own immediate list (native) on its queue, which its list events
   // never report. ReShade records it only during present/effects events, open
@@ -184,7 +184,6 @@ namespace sunshine_streamline::depth_capture {
   // the same object proves a game list reused it.
   void observe_runtime_list(std::uint64_t native, std::uint64_t queue);
   struct list_coverage_counts {
-    std::uint64_t events[static_cast<unsigned>(list_event::count)]{};
     // Capture admissions by ReShade's lifecycle view: covered (open, outside a
     // render pass) or not, with what the lifecycle saw instead.
     std::uint64_t covered{}, unknown{}, closed{}, pass{}, opaque{};
@@ -193,6 +192,9 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t states_observed{}, states_declared{};
   };
   list_coverage_counts list_coverage();
+  // These counts as one log line, at most every 5 s and only after they
+  // changed; false when there is nothing to log.
+  bool list_coverage_report(std::uint64_t now_ms, char *out, std::size_t size);
   void observe_queue(std::uint64_t queue);
   void retire_queue(std::uint64_t queue);
   void poll();

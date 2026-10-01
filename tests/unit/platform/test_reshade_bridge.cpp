@@ -85,8 +85,7 @@ TEST(ReShadeBridgeProtocol, RequiresVersionedIdentityAndCompleteSynchronizationH
 TEST(ReShadeBridgeProtocol, RejectsHalfSbsOversizedAndColorIncoherentMetadata) {
   using namespace ::reshade_bridge;
   auto metadata = valid_bridge_metadata();
-  EXPECT_TRUE(matches_output(metadata, 3840, 1080));
-  EXPECT_FALSE(matches_output(metadata, 1920, 1080));
+  EXPECT_TRUE(valid_metadata(metadata));
   metadata.packed_width = metadata.source_width;
   EXPECT_FALSE(valid_metadata(metadata));
   metadata = valid_bridge_metadata();
@@ -100,7 +99,7 @@ TEST(ReShadeBridgeProtocol, RejectsHalfSbsOversizedAndColorIncoherentMetadata) {
   metadata.color_transfer = transfer::scrgb;
   EXPECT_FALSE(valid_metadata(metadata));
   metadata.dxgi_format = 10;
-  EXPECT_TRUE(matches_output(metadata, 3840, 1080));
+  EXPECT_TRUE(valid_metadata(metadata));
   metadata.color_transfer = static_cast<transfer>(3);
   EXPECT_FALSE(valid_metadata(metadata));
 }
@@ -127,7 +126,7 @@ TEST(ReShadeBridgeProtocol, PreservesLegacyLayoutAndTreatsLegacyPaddingAsScreenP
   auto metadata = valid_bridge_metadata();
   metadata.protocol_version = screen_plane_version;
   ASSERT_TRUE(valid_metadata(metadata));
-  ASSERT_TRUE(matches_output(metadata, 3840, 1080));
+  ASSERT_EQ(fit_output(metadata, 3840, 1080), output_fit::exact);
 
   slot_t legacy;
   legacy.cursor_plane_flags = UINT32_MAX;

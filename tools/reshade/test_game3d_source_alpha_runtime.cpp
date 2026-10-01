@@ -1648,7 +1648,7 @@ namespace {
     require(exact(gpu.render(true, 1, false, false, true, selective, {}, {}, nullptr, &source), off[0]) &&
         gpu.renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off,
       "Manual Off did not suppress automatically detected retained UI");
-    policy.set_automatic(source.now_ms);
+    policy.set_automatic();
     require(exact(gpu.render(true, 1, false, false, true, selective, {}, {}, nullptr, &source), on[1]),
       "Returning to Auto required review or lost an available selective mask");
     source.retained = source.dedicated_mask = false;
@@ -1786,7 +1786,7 @@ namespace {
     run(false, "manual Off wins over a valid pair", false);
     require(gpu.renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off,
       "HUDless detection changed the user's manual Off setting");
-    policy.set_automatic(source.now_ms);
+    policy.set_automatic();
     run(true, "Auto resumes without review");
     // A HUD-less capture from another queue can complete after its own frame
     // was presented. It pairs with that frame's retained color, never with the

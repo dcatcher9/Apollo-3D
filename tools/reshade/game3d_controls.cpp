@@ -296,12 +296,10 @@ namespace sunshine_game3d {
     const auto data = get_state(runtime);
     auto result = data->values;
     result.source_alpha_ui = result.ui_protection == source_alpha_mode::on;
-    result.source_alpha_monitoring = false;
-    result.source_alpha_probe_interval_ms = 0;
     return result;
   }
 
-  alpha_auto_policy &source_alpha_startup_policy() { return *alpha_session(); }
+  alpha_auto_policy &source_alpha_session() { return *alpha_session(); }
 
   bool draw(api::effect_runtime *runtime) {
     if (!runtime) return false;
@@ -326,7 +324,7 @@ namespace sunshine_game3d {
         int choice = data->values.ui_protection == source_alpha_mode::on ? 0 : data->values.ui_protection == source_alpha_mode::off ? 1 : 2;
         record_control_position(2);
         if (ImGui::Combo("##UIProtection", &choice, "On\0Off\0Auto\0")) {
-          if (edit_source_alpha_mode(*data, modes[choice], config, GetTickCount64()))
+          if (edit_source_alpha_mode(*data, modes[choice], config))
             process_alpha_mode = data->values.ui_protection;
         }
         ImGui::SetItemTooltip("On and Off are saved per game. Auto finds a compatible UI source and checks its quality automatically. Frame Generation requires submitted usable input pixels.");

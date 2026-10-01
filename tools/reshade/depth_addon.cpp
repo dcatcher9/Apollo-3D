@@ -2615,7 +2615,6 @@ static void on_close(command_list *cmd_list)
 }
 static void on_execute_primary(command_queue *queue, command_list *cmd_list)
 {
-	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::executed);
 	if (s_streamline_probe_events && queue->get_device()->get_api() == device_api::d3d12)
 	{
 		// A missed lifecycle callback revokes old evidence. The independently

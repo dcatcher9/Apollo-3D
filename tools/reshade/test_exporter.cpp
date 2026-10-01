@@ -1002,15 +1002,15 @@ namespace {
       using namespace sunshine_game3d;
       source_alpha_ui_policy policy;
       render_settings settings;
-      alpha_auto_policy session(1000);
-      const auto generic = session.decision(1000 + alpha_startup_window_ms);
-      require(generic.state == alpha_auto_state::automatic_off && !generic.enabled,
-        "Normalized UI fixture did not begin with generic Auto Off");
+      alpha_auto_policy session;
+      const auto generic = session.decision();
+      require(generic.state == alpha_auto_state::waiting_for_source && !generic.enabled,
+        "Normalized UI fixture did not begin with an Auto session that detected nothing");
       ui_input::presentation observed{{true, true, false, 1, 11, 7, 41}, true};
       ui_input::frame input;
       input.status = ui_input::resolve(policy, settings, observed);
       input.observation.session = &session;
-      input.observation.now_ms = 1001 + alpha_startup_window_ms;
+      input.observation.now_ms = 1001;
       ui_plane_parameters plane;
       ui_adaptive::source scene;
       require(input.status.requested && input.status.fg_active() &&
@@ -1052,8 +1052,8 @@ namespace {
       render_input = input.for_render(plane, scene);
       require(render_input.available() && render_input.kind == ui_input_kind::dedicated_mask &&
         render_input.channel == ui_mask_channel::red && render_input.view.handle == 123 &&
-        session.decision(input.observation.now_ms).state == alpha_auto_state::automatic_off,
-        "Dedicated input was blocked by Auto Off or contaminated generic alpha qualification");
+        session.decision().state == alpha_auto_state::waiting_for_source,
+        "Dedicated input was blocked by an undetected Auto session or changed its mode");
       input.view = {};
       require(!input.for_render(plane, scene).available(),
         "Failed captured-mask materialization fell back to current color");
@@ -1077,7 +1077,7 @@ namespace {
       renderer unconfigured;
       input.complete(unconfigured, false);
       require(!input.status.rendered && !input.status.applied &&
-        input.status.coverage.state == alpha_auto_state::automatic_off,
+        input.status.coverage.state == alpha_auto_state::waiting_for_source,
         "Failed rendering published an applied input or changed the shared Auto decision");
     }
 

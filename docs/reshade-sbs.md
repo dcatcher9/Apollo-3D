@@ -584,8 +584,8 @@ provider identity. Dump/replay records the effective switch as `replay.source_al
 request as `source_alpha_ui_requested`, and the reason as `source_alpha_ui_status`. `source_alpha_auto`
 records automatic/manual state separately from the current render. New `ui_source_detection`
 metadata replaces session qualification and carries no approval flag. Its asynchronous summary
-may describe an earlier frame and is diagnostic only. Historical monitoring, timer and coverage
-fields remain readable in older packages but do not authorize live UI. Offline replay uses the
+may describe an earlier frame and is diagnostic only. Older packages also carry monitoring,
+window and probe-interval fields; current packages omit them, and none authorizes live UI. Offline replay uses the
 frozen effective value and mask without reclassification; explicit replay
 overrides still honor entirely white masks. It uses the separate 16-byte `b1` UI constants; the 80-byte geometry `b0` ABI
 is unchanged. `source_alpha_ui_fg_mode` records the retained mode and its observation provenance.
@@ -907,8 +907,8 @@ While a dump request is armed, the first clear of up to three
 [offscreen UI layer](#setup) candidates is also copied as
 optional artifacts `ui_layer_candidate_0` to `_2` (IDs 40-42) with RGB and alpha previews, and
 `ui_layer_census` lists each target's size, format, clears seen while armed and capture status.
-The census shows every qualifying target, whether or not live detection chose it; the dump's
-automatic candidate set names the live one as `ui_layer`.
+The census shows every qualifying target; `active` marks the one the live tracker chose, which the
+dump's automatic candidate set names as `ui_layer`.
 
 The request uses diagnostic wire v3 with capacity for 40 textures, independent of streaming SBS v2.
 Host and add-on must agree on this mapping version; incompatible versions fail explicitly.
@@ -1818,11 +1818,10 @@ unavailable.
 
 `Sunshine list lifecycle` (at most every 5 s) counts capture admissions: `covered` (open outside a
 render pass), split into `states observed` by the barrier hooks and `declared`, and `not_open` by
-what the lifecycle showed instead (`unknown`, `closed`, `pass`, `opaque`). It also counts the
-lifecycle events. The lifecycle lives in each list's own recording state (COM private data, which
-proxies forward), beside its observed resource states; there is no global list table. Submission
-events change nothing (Close already ended the recording), and a destroy event retires the
-recording. Before this split, a comparison of ReShade's barrier event
+what the lifecycle showed instead (`unknown`, `closed`, `pass`, `opaque`). The lifecycle lives in
+each list's own recording state (COM private data, which proxies forward), beside its observed
+resource states; there is no global list table. A submission is not a lifecycle event (Close
+already ended the recording), and a destroy event retires the recording. Before this split, a comparison of ReShade's barrier event
 with the hooked states agreed in The Witcher 3, Expedition 33 and Hogwarts Legacy; every Dead Space
 mismatch was the separately transitioned stencil plane.
 

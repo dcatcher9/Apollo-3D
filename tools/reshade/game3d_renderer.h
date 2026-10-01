@@ -57,10 +57,10 @@ namespace sunshine_game3d {
     // counting without frame generation). Only then may a difference covering
     // the whole frame mean full-screen UI rather than a mismatched pair.
     bool hudless_exact = false;
-    // masks[1] is an offscreen UI layer found by its clears rather than a
-    // tagged buffer. It is admitted only while premultiplied: no color above
-    // its alpha, as UI blended over transparent black always is.
-    bool color_alpha_premultiplied = false;
+    // Sunshine_UIDetectionFlags for masks[1] when it is an offscreen UI layer
+    // found by its clears rather than a tagged buffer (ui_layer::detection_flags);
+    // zero for a tagged buffer.
+    std::uint32_t color_alpha_flags = 0;
   };
   struct ui_render_input {
     ui_input_kind kind = ui_input_kind::unavailable;

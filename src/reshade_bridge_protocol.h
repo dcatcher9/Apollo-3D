@@ -139,12 +139,6 @@ namespace reshade_bridge {
     return true;
   }
 
-  [[nodiscard]] constexpr bool matches_output(const metadata_t &m, std::uint32_t width, std::uint32_t height) {
-    // Source color is explicit metadata, independent of the display/stream's HDR setting.
-    // The final presenter or encoder converts this source to its negotiated output color.
-    return valid_metadata(m) && m.packed_width == width && m.packed_height == height;
-  }
-
   // How the authored eyes map onto a requested packed output. Both halves scale by the same
   // factor, so a matching aspect ratio (within 0.5%) keeps each eye undistorted; a different
   // aspect would stretch disparity and is never scaled.

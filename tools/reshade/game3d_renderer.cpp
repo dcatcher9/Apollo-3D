@@ -471,7 +471,7 @@ namespace sunshine_game3d {
         consumed_auto.state = source_alpha_ui ? alpha_auto_state::manual_on : alpha_auto_state::manual_off;
         return;
       }
-      const auto requested = automatic->session->decision(automatic->now_ms).state;
+      const auto requested = automatic->session->decision().state;
       if (requested == alpha_auto_state::manual_on || requested == alpha_auto_state::manual_off) {
         consumed_auto.state = requested;
         source_alpha_ui = eligible && requested == alpha_auto_state::manual_on;
@@ -486,7 +486,6 @@ namespace sunshine_game3d {
           consumed_auto = {};
           consumed_auto.state = eligible ? alpha_auto_state::collecting : alpha_auto_state::waiting_for_source;
         }
-        consumed_auto.monitoring = true;
         return;
       }
       consumed_auto.enabled = source_alpha_ui;
@@ -562,7 +561,6 @@ namespace sunshine_game3d {
       detection_latest.sample_sequence = detection_submitted;
       detection_latest.sample_tick_ms = detection_pending_source.now_ms;
       detection_latest.accepted_samples = detection_submitted;
-      detection_latest.monitoring = true;
       auto &evidence = detection_latest.evidence;
       evidence.matching_tiles = counts[3];
       evidence.candidates = counts[4]; evidence.hudless_changed = counts[5];
@@ -919,7 +917,7 @@ namespace sunshine_game3d {
     const auto channel = source_alpha_ui ? ui.channel : ui_mask_channel::alpha;
     if (!data_ || data_->failed || data_->pending) return false;
     auto &d = *data_;
-    const auto mode = automatic && automatic->session ? automatic->session->decision(automatic->now_ms).state : alpha_auto_state::manual_off;
+    const auto mode = automatic && automatic->session ? automatic->session->decision().state : alpha_auto_state::manual_off;
     const bool auto_mode = automatic && automatic->session && mode != alpha_auto_state::manual_on && mode != alpha_auto_state::manual_off;
     ui_detection_inputs candidates;
     candidates.current_color = ui.kind == ui_input_kind::current_color_alpha;
@@ -966,12 +964,7 @@ namespace sunshine_game3d {
     const bool hold = !(bits & trusted & 15u) && (candidates.hold_previous || (inexact && d.detection_exact) || trusted_missing) &&
       d.detection_mask_ready &&
       d.detection_holds < ui_detection_inputs::max_held_presents;
-    uint32_t flags = 0;
-    if ((bits & 2u) && candidates.color_alpha_premultiplied) {
-      const auto layer = d.device->get_resource_desc(d.device->get_resource_from_view(candidates.masks[1]));
-      const auto typeless = api::format_to_typeless(layer.texture.format);
-      flags = typeless == api::format::r16g16b16a16_typeless || typeless == api::format::r32g32b32a32_typeless ? 3u : 1u;
-    }
+    uint32_t flags = (bits & 2u) ? candidates.color_alpha_flags : 0u;
     if (hold) { bits = d.detection_bits; flags = d.detection_flags; }
     if (d.detection_bits != bits || d.detection_flags != flags) d.detection_latest = {};
     d.detection_bits = bits;

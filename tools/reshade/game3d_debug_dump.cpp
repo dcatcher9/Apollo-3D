@@ -148,8 +148,7 @@ namespace sunshine_game3d {
         f.source_alpha_decision.automatic ? name(f.source_alpha_decision.coverage.state) : "disabled";
       if (f.source_alpha_decision.automatic) {
         const auto &coverage = f.source_alpha_decision.coverage;
-        result["source_alpha_auto"] = {{"state", name(coverage.state)}, {"enabled", coverage.enabled}, {"monitoring", coverage.monitoring},
-          {"window_started", coverage.window_started}, {"window_start_ms", coverage.window_start_ms}, {"probe_interval_ms", coverage.probe_interval_ms}, {"accepted_samples", coverage.accepted_samples},
+        result["source_alpha_auto"] = {{"state", name(coverage.state)}, {"enabled", coverage.enabled}, {"accepted_samples", coverage.accepted_samples},
           {"covered_pixels", coverage.covered}, {"total_pixels", coverage.pixels},
           {"sample_sequence", coverage.sample_sequence}, {"sample_tick_ms", coverage.sample_tick_ms},
           {"sampled_source", coverage.source_kind},
@@ -554,14 +553,16 @@ namespace sunshine_game3d {
         std::snprintf(source, sizeof(source), "0x%llx", static_cast<unsigned long long>(c.source));
         rows.push_back({{"artifact_id", static_cast<unsigned>(kind)}, {"kind", wire::ui_layer_names[i]}, {"captured", added},
           {"status", status}, {"source", source}, {"width", c.width}, {"height", c.height}, {"dxgi_format", c.format},
-          {"clears_while_armed", c.clears}});
+          {"clears_while_armed", c.clears}, {"active", c.active}});
         // add() holds its own reference; the add-on's handle is released once
         // any game command list that wrote the copy has executed.
         ui_layer::retire(owner, c.copy);
       }
       return {{"meaning", "Output-resolution color targets the game cleared to transparent black while this request was armed, "
         "the signature of an offscreen UI layer. Each copy was taken before a clear, so it shows the previous frame's content. "
-        "Candidates only: nothing here is verified UI or used by detection."}, {"candidates", std::move(rows)}};
+        "active marks the target the live tracker chose; without a tagged UI buffer its copy is UI detection's color+alpha "
+        "candidate, admitted only while premultiplied. The others are candidates only, and none is verified UI."},
+        {"candidates", std::move(rows)}};
     }
   }  // namespace
 

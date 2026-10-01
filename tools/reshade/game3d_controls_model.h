@@ -65,14 +65,14 @@ namespace sunshine_game3d {
   }
 
   template<class Backend>
-  bool edit_source_alpha_mode(settings_state &settings, source_alpha_mode value, Backend &config, std::uint64_t now_ms) {
+  bool edit_source_alpha_mode(settings_state &settings, source_alpha_mode value, Backend &config) {
     if (!settings.alive || int(value) < 0 || int(value) > 2 || value == settings.values.ui_protection) return false;
     config.write("SourceAlphaUIMode", int(value));
     if (!settings.alive) return false;
     settings.values.ui_protection = value;
     settings.values.source_alpha_ui = value == source_alpha_mode::on;
     if (settings.alpha_session) {
-      if (value == source_alpha_mode::automatic) settings.alpha_session->set_automatic(now_ms);
+      if (value == source_alpha_mode::automatic) settings.alpha_session->set_automatic();
       else settings.alpha_session->set_manual(value == source_alpha_mode::on);
     }
     return true;

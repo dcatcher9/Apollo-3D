@@ -272,7 +272,7 @@ namespace {
       session.set_manual(false);
       verify(mask, true, false, false);
       require(renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off, "D3D12 Manual Off was lost");
-      session.set_automatic(input.now_ms);
+      session.set_automatic();
       verify(mask, true, mask == 1);
     }
     input.session = nullptr;
@@ -413,7 +413,7 @@ namespace {
     inputs.hudless = views[0]; run(true, "D3D12 all opaque alpha candidates did not fall through to HUDless");
     policy.set_manual(false); run(false, "D3D12 Manual Off did not override valid HUDless", false);
     require(renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off, "D3D12 HUDless lost Manual Off state");
-    policy.set_automatic(observation.now_ms); run(true, "D3D12 Auto resume required manual review");
+    policy.set_automatic(); run(true, "D3D12 Auto resume required manual review");
     queue->wait_idle();
     for (const auto view : views) device->destroy_resource_view(view);
     upload_source(original); write_native_source(fixture, backbuffer);
@@ -1039,7 +1039,7 @@ namespace {
           common ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
       }, directory / dump_name);
       const auto resources = renderer.diagnostics();
-      const auto mode = automatic && automatic->session ? automatic->session->decision(automatic->now_ms).state : alpha_auto_state::manual_off;
+      const auto mode = automatic && automatic->session ? automatic->session->decision().state : alpha_auto_state::manual_off;
       const bool detecting = automatic && automatic->session && mode != alpha_auto_state::manual_on && mode != alpha_auto_state::manual_off;
       require(renderer.consumed_ui_channel() == (detecting ? ui_mask_channel::red : channel),
         "D3D12 UI channel metadata differs from the consumed mask");
@@ -1183,7 +1183,7 @@ namespace {
       }
       require(renderer.prepare_ui_source(10000 + case_index, copy, static_cast<api::format>(format)).handle == selected.handle && copies == 1,
         "Repeated immutable UI capture performed another copy or changed its allocation");
-      alpha_auto_policy session(1);
+      alpha_auto_policy session;
       alpha_auto_source observation;
       observation.now_ms = observation.tick_ms = 400000 + case_index * 1000;
       observation.sequence = 1; observation.epoch = 300 + case_index; observation.revision = 1;
@@ -1213,7 +1213,7 @@ namespace {
       session.set_manual(false);
       equal(render(true, selected, channel, &observation), reference_off,
         "Automatic typed UI ignored explicit Manual Off");
-      session.set_automatic(observation.now_ms);
+      session.set_automatic();
       equal(render(true, selected, channel, &observation), selective ? reference_on : reference_off,
         "Automatic typed UI resume required manual review");
       ++case_index;
