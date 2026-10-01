@@ -104,9 +104,9 @@ namespace sunshine_game3d {
     // sample restarts the run, and fluctuating scene effects do not qualify. A
     // trusted channel then decides the mask whatever it covers. It loses trust
     // on contradiction: covering at least 90% while an exact HUD-less pair shows
-    // at least 75% of the scene unchanged, or, for presented alpha, covering at
-    // least 10% of the frame more than a trusted dedicated UI channel that is
-    // below full screen in the same sample. A selective sample clears doubt.
+    // at least 75% of the scene unchanged, or, for presented alpha, differing by
+    // at least 10% of the frame from every trusted dedicated UI channel in the
+    // same sample, menus included. A selective sample clears doubt.
     void observe_alpha_channels(const alpha_auto_decision::detection_evidence &evidence, std::uint32_t pixels,
         std::uint64_t tick_ms) {
       if (!pixels) return;
@@ -151,27 +151,28 @@ namespace sunshine_game3d {
       const bool scene_visible = (evidence.candidates & 48u) == 48u && !evidence.hudless_invalid &&
         std::uint64_t(evidence.hudless_unchanged) * 100 >= total * 75;
       // A trusted dedicated UI channel (0 UI alpha, 1 UI color) offered with at
-      // most 1% invalid pixels and below full-screen coverage is the game's own
-      // UI mask for this sample (the most generous one when both are).
-      bool dedicated_mask = false, dedicated_full = false;
-      std::uint64_t dedicated_covered = 0;
-      for (std::uint32_t channel = 0; channel < 2; ++channel) {
-        const std::uint32_t bit = 1u << channel;
-        if (!(evidence.candidates & trusted_alpha_ & bit) || std::uint64_t(evidence.alpha_invalid[channel]) * 100 > total) continue;
-        const std::uint64_t covered = evidence.alpha_covered[channel];
-        dedicated_mask = true;
-        dedicated_full |= covered * 10 >= total * 9;
-        dedicated_covered = std::max(dedicated_covered, covered);
-      }
-      dedicated_mask &= !dedicated_full;
+      // most 1% invalid pixels is the game's own UI mask for this sample, menus
+      // included. disagreement(): the distance to the nearest such mask.
+      const auto disagreement = [&](std::uint64_t covered) {
+        std::uint64_t nearest = UINT64_MAX;
+        for (std::uint32_t channel = 0; channel < 2; ++channel) {
+          const std::uint32_t bit = 1u << channel;
+          if (!(evidence.candidates & trusted_alpha_ & bit) ||
+              std::uint64_t(evidence.alpha_invalid[channel]) * 100 > total) continue;
+          const std::uint64_t mask = evidence.alpha_covered[channel];
+          nearest = std::min(nearest, covered > mask ? covered - mask : mask - covered);
+        }
+        return nearest;
+      };
+      const bool dedicated_mask = disagreement(0) != UINT64_MAX;
       for (std::uint32_t channel = 0; channel < 4; ++channel) {
         const std::uint32_t bit = 1u << channel;
         if (!(evidence.candidates & bit) || evidence.alpha_invalid[channel]) continue;
         const std::uint64_t covered = evidence.alpha_covered[channel];
-        // Presented alpha (2 Backbuffer, 3 current) covering at least 10% of the
-        // frame more than that UI mask claims scene as UI: it earns nothing, and
-        // the usual evidence interval revokes its trust.
-        if (channel >= 2 && dedicated_mask && covered * 10 >= dedicated_covered * 10 + total) {
+        // Presented alpha (2 Backbuffer, 3 current) differing from every such
+        // mask by at least 10% of the frame is not UI coverage: it earns nothing,
+        // and the usual evidence interval revokes its trust.
+        if (channel >= 2 && dedicated_mask && disagreement(covered) * 10 >= total) {
           earned_[channel] = {};
           if ((trusted_alpha_ & bit) && doubt_[channel].add(tick_ms)) {
             trusted_alpha_ &= ~bit;

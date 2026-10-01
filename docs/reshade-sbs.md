@@ -327,10 +327,11 @@ session of a game still has to earn trust. Deleting the key forgets it.
 
 Trust is lost on contradiction. When a trusted channel covers at least 90% of the frame while an
 exact HUD-less pair shows at least 75% of the scene unchanged, the channel is claiming UI over a
-visible scene. A presented alpha (Backbuffer or current color) is also contradicted when it covers
-at least 10% of the frame more than a trusted dedicated UI channel (UIAlpha or UIColorAndAlpha)
-that is below full screen in the same sample: Resident Evil Requiem's UI color covers 0.2% during
-play while its presented alpha covers 35-100%. The same evidence (three samples over at least 2 s) revokes it, a selective sample
+visible scene. A presented alpha (Backbuffer or current color) is also contradicted when it
+differs by at least 10% of the frame from every trusted dedicated UI channel (UIAlpha or
+UIColorAndAlpha) in the same sample, menus included; it earns nothing while it disagrees.
+Resident Evil Requiem's UI color covers 0.2% during play while its presented alpha covers
+35-100%, and in menus the UI color covers everything while the presented alpha covers 0.05%. The same evidence (three samples over at least 2 s) revokes it, a selective sample
 of the channel clears the doubt, and a revoked channel must earn trust again. Remembered trust is
 revoked the same way, and the revocation is remembered too. Trust survives manual mode edits. A trusted channel in the current frame decides by itself, so the HUD-less holds
 described below do not apply to that frame. Up to 1% invalid pixels (such as additive glow in a UI

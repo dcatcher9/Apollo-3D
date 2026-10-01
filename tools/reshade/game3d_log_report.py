@@ -334,11 +334,10 @@ def ui_checks(s: Session, add) -> None:
         dedicated = [alpha[c] for c in DEDICATED if candidates & trusted & (1 << c)]
         if dedicated and source in (3, 4):
             overrides.append(f'{clock(t)} source {source} covered {100 * covered / pixels:.0f}%')
-        if dedicated and max(dedicated) * 10 < pixels * 9:
-            for c in PRESENTED:
-                if trusted & (1 << c) and alpha[c] * 10 >= max(dedicated) * 10 + pixels:
-                    disputes.append(f'{clock(t)} channel {c} {100 * alpha[c] / pixels:.0f}% vs UI '
-                                    f'{100 * max(dedicated) / pixels:.1f}%')
+        for c in PRESENTED:
+            if dedicated and trusted & (1 << c) and min(abs(alpha[c] - d) for d in dedicated) * 10 >= pixels:
+                disputes.append(f'{clock(t)} channel {c} {100 * alpha[c] / pixels:.0f}% vs UI '
+                                f'{100 * dedicated[0] / pixels:.1f}%')
     states = Counter(sample[1] for sample in s.ui)
     add(Check('FAIL' if overrides else 'WARN' if disputes else 'PASS', 'UI protection',
               ', '.join(f'{k} {v}' for k, v in states.most_common())

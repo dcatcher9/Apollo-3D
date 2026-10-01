@@ -100,15 +100,16 @@ namespace {
     for (std::uint64_t tick = 1000; tick <= 20000; tick += 500)
       sample(effects, 1, {tick % 1000 ? 50u : 400u, 0, 0, 0}, 0, tick);
     require(!effects.trusted_alpha(), "Fluctuating coverage earned trust");
-    // A trusted dedicated UI channel contradicts presented alpha that claims
-    // much more of the frame (Resident Evil Requiem: UI color 0.2%, presented
-    // alpha 35-100% during play). A full-screen menu is no contradiction, and
-    // without a trusted dedicated channel the presented alpha keeps its trust.
+    // A trusted dedicated UI channel contradicts presented alpha that differs
+    // from it by 10% of the frame or more (Resident Evil Requiem: UI color 0.2%,
+    // presented alpha 35-100% during play; in menus UI color 100%, presented
+    // alpha 0.05%). Agreement is no contradiction, and without a trusted
+    // dedicated channel the presented alpha keeps its trust.
     alpha_auto_policy presented;
     presented.restore_trusted_alpha(2 | 8);
     for (std::uint64_t tick = 1000; tick <= 4000; tick += 1000)
-      sample(presented, 2 | 8, {0, 1000, 0, 600}, 0, tick);    // Menu: UI color everywhere.
-    require(presented.trusted_alpha() == 10u, "A full-screen menu contradicted presented alpha");
+      sample(presented, 2 | 8, {0, 1000, 0, 950}, 0, tick);    // Menu: both cover the screen.
+    require(presented.trusted_alpha() == 10u, "Presented alpha agreeing with a full-screen menu was contradicted");
     sample(presented, 2 | 8, {0, 2, 0, 999}, 0, 5000);
     sample(presented, 2 | 8, {0, 0, 0, 400}, 0, 6000);
     require(presented.trusted_alpha() == 10u, "Two samples revoked trust");
@@ -118,9 +119,12 @@ namespace {
     sample(presented, 2 | 8, {0, 2, 0, 300}, 0, 9000);
     sample(presented, 2 | 8, {0, 2, 0, 300}, 0, 10000);
     require(presented.trusted_alpha() == 2u, "Contradicted presented alpha earned trust again");
-    sample(presented, 2 | 8, {0, 20, 0, 30}, 0, 11000);
-    sample(presented, 2 | 8, {0, 20, 0, 30}, 0, 12000);
-    sample(presented, 2 | 8, {0, 20, 0, 30}, 0, 13000);
+    // Menu: the UI channel covers the screen, presented alpha nearly nothing.
+    for (std::uint64_t tick = 10500; tick <= 13500; tick += 500) sample(presented, 2 | 8, {0, 1000, 0, 4}, 0, tick);
+    require(presented.trusted_alpha() == 2u, "Presented alpha re-earned trust in a menu its UI channel covers");
+    sample(presented, 2 | 8, {0, 20, 0, 30}, 0, 14000);
+    sample(presented, 2 | 8, {0, 20, 0, 30}, 0, 15000);
+    sample(presented, 2 | 8, {0, 20, 0, 30}, 0, 16000);
     require(presented.trusted_alpha() == 10u, "Presented alpha agreeing with the UI mask could not earn trust");
     // An untrusted UI channel (here unsteady, so it never earns trust) is no authority.
     alpha_auto_policy alone;
