@@ -1073,12 +1073,15 @@ namespace {
     testing::unpin_tokens();
     // Eight distinct retained versions exhaust the fixed bank, not a mutable
     // metadata lock. Native API forwarding survives, but lost identity revokes.
+    // Each version is a new frame: a repeated request for one frame writes nothing.
+    std::uint32_t frame = source.number + 1000;
     for (unsigned i = 0; i != 8; ++i) {
       require(testing::pin_tokens(i), "Token pressure fixture lost a published version");
-      if (i != 7) mint(next, &source.number);
+      if (i != 7) { ++frame; mint(next, &frame); }
     }
     const auto exhausted = depth_observation_revision();
-    mint(next, &source.number);
+    ++frame;
+    mint(next, &frame);
     loss_diagnostics::event loss;
     require(depth_observation_revision() == exhausted + 1 && !source.ready() &&
         query_depth_observation_loss(exhausted + 1, loss) && loss.cause == loss_diagnostics::reason::metadata_storage_busy,

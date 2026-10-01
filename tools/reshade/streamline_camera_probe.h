@@ -184,14 +184,6 @@ namespace sunshine_streamline {
   presentation_status query_current_presentation(presentation_snapshot &output, std::uint32_t max_age_ms = 250);
   const char *name(presentation_status value);
 
-  // Streamline's game-frame numbering: successful slGetNewFrameToken calls and the newest
-  // game-supplied frame index. A game may request one frame's token more than once.
-  struct frame_token_count {
-    std::uint64_t calls{}, index{};
-    bool index_supplied{};
-  };
-  frame_token_count frame_tokens();
-
   struct frame_generation_snapshot {
     std::uint64_t epoch{}, sequence{}, tick{}, loss_revision{};
     std::uint32_t viewport{}, mode{}, generated_frames{};

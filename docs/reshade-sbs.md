@@ -269,8 +269,10 @@ is a property of the game, so it is learned once per game session. How much UI t
 read from that channel's current pixels on the GPU, whatever the answer: none, a HUD, or a whole
 menu. Nonfinite or out-of-range samples always disqualify a channel for that frame.
 
-A channel is untrusted until completed GPU samples show it covering some but less than 90% of the
-frame at least three times over at least 2 s. Until then it is used only on such selective frames:
+A channel is untrusted until consecutive completed GPU samples show it covering some but less than
+90% of the frame at least three times over at least 2 s, each within a factor of two of the others.
+A full-frame sample restarts that run, and coverage that swings more (scene effects such as
+particles in a transparent target) never earns trust. Until then it is used only on such selective frames:
 an empty or nearly full-scene channel is ambiguous, because an opaque channel can carry no UI at
 all (Hogwarts Legacy's UIColorAndAlpha is the opaque final image during play). Once trusted, the
 channel is the mask on every frame in which it is offered, ahead of HUD-less comparison, which only
@@ -304,9 +306,12 @@ every API, so a target can be copied just before its clear: the copy shows the p
 
 A target cleared in at least three frames with gaps under 250 ms is a confirmed layer; of several,
 the one cleared last in the frame is active, since UI draws last. Transient targets never displace
-a confirmed one. The active layer is copied once per Present, at its first clear, into a persistent
-add-on texture. When no UIColorAndAlpha is tagged, Auto offers the newest copy, if under 250 ms
-old, as the UI color candidate. It is one frame late, which a moving HUD shows only as a one-frame
+a confirmed one. Only the foreground swapchain's Presents drive the tracker. While UI detection
+asks for the layer (within the last second), the active layer is copied once per Present, at its
+first clear, into a persistent add-on texture; otherwise no copy is recorded into the game's
+frame. When no UIColorAndAlpha is tagged, Auto offers the newest copy, if under 250 ms old, as the
+UI color candidate. Copies are released through their own device, at the latest when it is
+destroyed. It is one frame late, which a moving HUD shows only as a one-frame
 edge. The GPU admits it only while premultiplied: any pixel whose color exceeds its alpha by more
 than 4/255 (for a float layer, 125 times its alpha, up to 10000 nits) rejects it for that frame.
 UI blended over transparent black is premultiplied by construction. A scene buffer is not: Dead
@@ -1636,17 +1641,9 @@ resets these counters.
 
 Game 3D captures color at ReShade's Present event, so it sees exactly the Presents that pass
 through ReShade's swapchain wrapper. Whether frame-generated images are among them depends on how
-the game's Streamline proxy and ReShade are stacked, not on Game 3D. Every ten seconds
-`Sunshine present census` reports, separately for FG requested and not, the runtime's ReShade
-Presents (`reshade`), DXGI's own Present count (`IDXGISwapChain::GetLastPresentCount`) on the
-swapchain object below ReShade (`dxgi`), Streamline's game frames (`game_frames`, from the game's
-frame index, or from its token requests when it supplies none) and all successful frame-token
-requests (`token_requests`; above `game_frames` when the game requests a frame's token again). `below_reshade` names the
-module implementing that object's Present: `dxgi.dll` for the real swapchain, or a proxy such as
-`sl.interposer.dll`. `dxgi` above `reshade` means Presents Game 3D never sees, such as generated
-images presented underneath ReShade; `reshade` above `game_frames` means generated frames pass
-through Game 3D. The census reads counters and a COM getter only and changes nothing. Dump 3D's
-`render_identity.presentation_ordinal` and Streamline frame numbers advanced one-to-one with FG
+the game's Streamline proxy and ReShade are stacked, not on Game 3D. A census of ReShade, DXGI and
+Streamline frame counts (since removed) showed generated frames passing through ReShade in The
+Witcher 3 once its DLSS-G modules were left unpatched. Dump 3D's `render_identity.presentation_ordinal` and Streamline frame numbers advanced one-to-one with FG
 on in The Witcher 3, Expedition 33 and Hogwarts Legacy dumps.
 
 `Sunshine depth readiness: lost/recovered` records the first availability transition of a
@@ -1816,7 +1813,10 @@ unavailable.
 `Sunshine list lifecycle` (at most every 5 s) counts capture admissions: `covered` (open outside a
 render pass), split into `states observed` by the barrier hooks and `declared`, and `not_open` by
 what the lifecycle showed instead (`unknown`, `closed`, `pass`, `opaque`). It also counts the
-lifecycle events and the tracked lists. Before this split, a comparison of ReShade's barrier event
+lifecycle events. The lifecycle lives in each list's own recording state (COM private data, which
+proxies forward), beside its observed resource states; there is no global list table. Submission
+events change nothing (Close already ended the recording), and a destroy event retires the
+recording. Before this split, a comparison of ReShade's barrier event
 with the hooked states agreed in The Witcher 3, Expedition 33 and Hogwarts Legacy; every Dead Space
 mismatch was the separately transitioned stencil plane.
 
@@ -2060,89 +2060,18 @@ can break that association. Zero calls mean none observed in the reported window
 Use positive call/caller evidence to decide which integration adapter a game needs; DLL presence
 or version alone is insufficient. This diagnostic is independent of the active depth-path label.
 
-`Sunshine Streamline evaluation capture` is logged with the five-second camera report whenever
-the game sets constants. It counts SR/RR evaluations (FG and tag-boundary captures excluded) that
-nominated depth or stopped at a gate: `inactive` (no capture requested), `fg_owned` (confirmed FG
-owns the viewport), `source_rejected` (evidence status, lost observation, stale epoch or frame
-token), `no_admissible_tag` (tag absent, unsupported, lifecycle or `match` result) and
-`capture_rejected` (the capture layer's status). Each gate keeps its newest reason. The Witcher 3
-Remastered showed why this matters: with FG off it tags 1485x835 depth for every Ray
-Reconstruction evaluation (SL feature 1001), yet every evaluation reported `no_admissible_tag`
-(last `absent`) until repeated token requests stopped orphaning the frame's tags (see frame-token
-identity below).
+The Witcher 3 Remastered with FG off tags 1485x835 depth for every Ray Reconstruction evaluation
+(SL feature 1001), yet no SR/RR evaluation found its depth tag until repeated token requests
+stopped orphaning the frame's tags (see frame-token identity below).
 
-NGX depth telemetry distinguishes `nominations`, `copy_recorded`, and `metadata_only`.
-A successful metadata nomination can survive a rejected pixel copy and does not establish
-readable depth. Rejection details are retained even when that nomination has a nonzero ticket;
-`observed` and `observed_state` distinguish absent state evidence from observed COMMON/zero.
-Recording a copy still does not establish GPU completion or a successful consumer handoff.
-
-Diagnostic callbacks only record bounded in-memory observations. Discovery, module-name resolution and
-throttled logging run from the existing serialized effect callback. Process-pinned hooks become
-pass-through when disabled. Set the option back to `0` and restart after the diagnostic session.
-Full `StreamlineCameraProbe` command/content tracking stays disabled unless separately requested.
-
-### Streamline camera metadata experiment
-
-The add-on includes an optional passive camera-metadata probe using the same
-[Streamline ABI families](#streamline-abi-compatibility) as the production depth adapter. It observes
-only an already-loaded `sl.interposer.dll`; it does not load or replace game middleware. One shared
-adapter handles each supported interface, without game-name profiles. Unknown ABI majors remain
-unobserved. Camera constants and tagged depth resources are copied for validation; original call
-arguments and results are passed through unchanged.
-
-It is **disabled by default**. To opt into a diagnostic session, set `StreamlineCameraProbe=1`
-under `[SUNSHINE_DEPTH]` in the game's `ReShade.ini`, then restart the game. Omit the setting or
-set it to `0` for ordinary play. With it disabled, no probe-only barrier, end-render-pass or command-close callbacks are
-registered. Shared raster/mesh/copy/resolve depth-activity callbacks remain active, but skip detailed
-metadata tracking and native discard discovery. The lightweight depth-source mode above can still
-observe middleware constants, tags, evaluations and resource lifetimes. If both modes and the
-independent call-route diagnostic and NGX capture are disabled, middleware discovery and polling are inactive.
-This removes unused diagnostic work; it is not a
-measured frame-rate claim.
-
-This is an acquisition experiment. Diagnostic camera metadata does not independently authorize
-shader inputs or change the independent reference calibration. Production
-direct capture and projection-based scale are the separately bounded use described above.
-ReShade's log records projection/depth-encoding checks, viewport
-and source-resource matches, freshness evidence, and reasons for unavailable or rejected data.
-The bounded five-second report includes the immutable evaluation's A/B coefficients, frame identity,
-selected source/layout, depth tag and association status. The separate latest-camera line must not
-be joined to selected-depth evidence by timestamp. Internal camera snapshots omit unused pose
-metadata but retain optional jitter for capture-bound registration. The SDK wire structures retain
-their original fields and binary layout. Missing or invalid optional jitter does not invalidate
-otherwise valid projection coefficients.
-Compare valid A/B coefficients, near/far/FOV and reset flags within each viewport, alongside
-the existing source/frame association reports. Five-second snapshots can establish sampled
-stability, not rule out shorter projection changes or provide dense point correspondences.
-Matching a camera matrix and resource does not prove that a captured depth copy contains the same
-scene or that game-space units represent meters. Same-observation evidence is distinguished from
-an explicit frame identity; an opaque Streamline frame-token address alone is not a frame number.
-
-Camera, tag, frame history, evaluation and FG-option metadata are published as coherent immutable
-versions. Every callback, renderer, panel and diagnostic reader pins a completed version without
-owning the mutation flag. The synchronous tag camera selection and evaluation capture use one pin,
-so they cannot splice different metadata versions. Presentation markers retain their separate
-owner. The v2 token table uses a separate instance of the same publication mechanism, so neither
-unrelated metadata reads nor token-generation reads can lock out SDK token registration.
-
-Each owner has eight fixed slots. A nonblocking writer reserves an unpinned slot, copies the
-latest completed state, mutates its private candidate and publishes only after lifecycle checks.
-Publication tickets include a monotonically increasing generation to reject address-reuse ABA.
-Readers can retain old values; they do not grant old observation generations authority. Retired
-source leases are destroyed outside mutation ownership, including when the final reader releases
-an old version. Actual writer collisions and exhaustion of pinned slots remain explicit losses;
-they do not silently publish partial state or authorize retained depth. This is bounded storage
-and acquisition, not a guarantee that observations can never be lost under arbitrary contention.
-Lifecycle reset closes observation admission before clearing each owner and opening a fresh epoch.
 A token address returned for a different numeric index is a recycled token and gets a new
 generation. Requesting the same index again returns that frame's token, so it keeps its identity
 and the constants and frame tags already recorded for it; treating such a repeat between tagging
 and evaluation as a new frame orphans that frame's tags. The Witcher 3 Remastered with FG off
 matched this: Dump 3D showed its framed depth tag and Ray Reconstruction evaluation on one frame,
-yet every SR/RR evaluation reported `no_admissible_tag` (last `absent`). The present census's
-`token_requests` shows whether a game repeats requests. Without a numeric index, every request is
-a new frame.
+yet no SR/RR evaluation found its framed tag. A repeated request for the same index changes
+nothing and takes no writer, so the about 30 requests a frame from several threads in The Witcher
+3 no longer contend for the token store. Without a numeric index, every request is a new frame.
 Camera reset, SDK failures, token-generation checks, resource lifetimes and depth expiry remain
 authoritative. The command/content ledger retains its independent observation contract.
 

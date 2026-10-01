@@ -364,10 +364,14 @@ namespace sunshine_upscaler_trace {
         else ++rejected;
       }
     }
+    // nvngx_dlssg*.dll, or a driver model under an NGX models\dlssg directory;
+    // never a folder that merely contains "dlssg" in its name.
     bool frame_generation_module(const wchar_t *path) {
       std::wstring lower(path);
       for (auto &c : lower) c = static_cast<wchar_t>(towlower(c));
-      return lower.find(L"dlssg") != std::wstring::npos;
+      const auto slash = lower.find_last_of(L"\\/");
+      const auto name = slash == std::wstring::npos ? lower : lower.substr(slash + 1);
+      return name.rfind(L"nvngx_dlssg", 0) == 0 || lower.find(L"\\ngx\\models\\dlssg\\") != std::wstring::npos;
     }
     void discover() {
       found_modules = found_exports = skipped_frame_generation = 0;

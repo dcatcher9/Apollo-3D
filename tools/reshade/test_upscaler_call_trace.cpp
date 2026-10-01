@@ -1457,6 +1457,7 @@ int main() {
     require(frame_generation_module(LR"(D:\Games\Game\bin\NVNGX_DLSSG.DLL)") &&
         frame_generation_module(LR"(C:\ProgramData\NVIDIA\NGX\models\dlssg\versions\1\files\160_E1.bin)") &&
         !frame_generation_module(LR"(D:\Games\Game\bin\nvngx_dlss.dll)") &&
+        !frame_generation_module(LR"(D:\Games\dlssg-mods\bin\nvngx_dlss.dll)") &&
         !frame_generation_module(LR"(C:\ProgramData\NVIDIA\NGX\models\dlssd\versions\1\files\160_E1.bin)") &&
         !frame_generation_module(LR"(C:\Windows\System32\DriverStore\FileRepository\nvddi.inf\_nvngx.dll)"),
       "NGX discovery would patch a frame-generation module or skip a depth-capable one");

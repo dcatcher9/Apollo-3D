@@ -999,8 +999,9 @@ namespace {
     counted("a lifecycle close was not counted", [](const auto &a, const auto &b) { return b.closed == a.closed + 1; });
     capture::observe_list_event(list, event::reset);
     require(record(list), "ReShade's Reset did not reopen the recording");
-    // A submitted list stays closed until ReShade reports its next Reset, so a
-    // native Reset that bypassed ReShade never readmits an old recording.
+    // A closed and submitted list stays closed until ReShade reports its next
+    // Reset, so a native Reset that bypassed ReShade never readmits it.
+    capture::observe_list_event(list, event::closed);
     capture::observe_list_event(list, event::executed);
     require(!record(list), "a capture was admitted after the list was submitted");
     counted("a submitted list was not counted as closed", [](const auto &a, const auto &b) { return b.closed == a.closed + 1; });

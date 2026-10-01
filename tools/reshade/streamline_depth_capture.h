@@ -191,7 +191,6 @@ namespace sunshine_streamline::depth_capture {
     // Of covered: the barrier hooks observed the list's states, or the game's
     // declared state applied (refused or moved method tables).
     std::uint64_t states_observed{}, states_declared{};
-    std::uint64_t tracked{}, overflow{};
   };
   list_coverage_counts list_coverage();
   void observe_queue(std::uint64_t queue);

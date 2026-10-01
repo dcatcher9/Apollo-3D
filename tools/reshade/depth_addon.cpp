@@ -2056,9 +2056,7 @@ static void on_init_command_list(command_list *cmd_list)
 }
 static void on_destroy_command_list(command_list *cmd_list)
 {
-	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::destroyed);
-	if (cmd_list->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_capture::command_destroyed(cmd_list->get_native());
+	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::destroyed); // Retires its recording.
 	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::command_destroyed(cmd_list->get_native());
 	cmd_list->destroy_private_data<state_tracking>();

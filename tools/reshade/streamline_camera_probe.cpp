@@ -146,12 +146,11 @@ namespace sunshine_streamline {
     };
     using token_owner = observation::snapshot_owner<token_state, 8>;
     token_owner token_metadata;
-    // Another thread requesting a token at the same moment owns the writer only
-    // for a short copy. The Witcher 3 requests about 30 tokens a frame from
-    // several threads; failing at once turned each collision into an
-    // observation loss (depth dropped for ~5 presents, UI placement reset).
-    // A bounded retry keeps the hook non-blocking: a preempted writer still
-    // fails after the bound, as before.
+    // Another thread requesting a new frame's token at the same moment owns the
+    // writer only for a short copy (repeated requests for a frame never write).
+    // Failing at once turned each collision into an observation loss (depth
+    // dropped for ~5 presents, UI placement reset). A bounded retry keeps the
+    // hook non-blocking: a preempted writer still fails after the bound.
     token_owner::transaction write_tokens_briefly() {
       auto update = token_metadata.try_write();
       for (unsigned attempt = 0; !update && update.failure() == observation::write_failure::owner_busy && attempt < 64; ++attempt) {
@@ -180,9 +179,6 @@ namespace sunshine_streamline {
     std::atomic<bool> source_requested{};
     std::atomic<std::uint64_t> observation_generation{};
     std::atomic<std::uint64_t> constant_calls{}, tag_calls{}, evaluation_calls{}, dropped{}, invalid{};
-    // Game frames as Streamline numbers them, for the present census.
-    std::atomic<std::uint64_t> token_calls{}, token_index{};
-    std::atomic<bool> token_index_supplied{};
     std::atomic<std::uint64_t> call_sequence{}, loss_revision{};
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
     thread_local bool entry_policy_armed{}, entry_policy_observed{}, entry_path_selected{}, entry_source_admitted{};
@@ -1438,12 +1434,6 @@ namespace sunshine_streamline {
     bool direct_tag_admissible(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag) {
       return !tag_rejection(snapshot, tag);
     }
-    // Why SR/RR evaluations did or did not nominate depth; FG and tag boundaries are excluded.
-    // Cumulative, with the latest reason per gate, for the five-second report.
-    struct {
-      std::atomic<std::uint64_t> attempts{}, nominated{}, inactive{}, fg_owned{}, source_rejected{}, no_tag{}, capture_rejected{};
-      std::atomic<const char *> source_reason{"none"}, tag_reason{"none"}, capture_reason{"none"};
-    } evaluation_outcome;
     sunshine_scene_depth::jitter_offset depth_frame_jitter(const evaluation_snapshot &snapshot,
         const evaluated_depth_tag &tag) {
       if (!snapshot.frame_correlated || snapshot.decoded != decode_status::ok || !snapshot.camera.jitter_supplied)
@@ -1544,25 +1534,11 @@ namespace sunshine_streamline {
     }
     std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one, bool *copy_recorded = nullptr) {
       if (copy_recorded) *copy_recorded = false;
-      const bool evaluation = !snapshot.tag_boundary && !snapshot.frame_generation_input;
-      const auto outcome = [&](std::atomic<std::uint64_t> &counter, std::atomic<const char *> *slot = nullptr,
-          const char *reason = nullptr) {
-        if (!evaluation) return;
-        counter.fetch_add(1, std::memory_order_relaxed);
-        if (slot && reason) slot->store(reason, std::memory_order_relaxed);
-      };
-      if (evaluation) evaluation_outcome.attempts.fetch_add(1, std::memory_order_relaxed);
-      if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) {
-        outcome(evaluation_outcome.inactive);
-        return 0;
-      }
+      if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return 0;
       // FG has an explicit lifecycle for its rendered-frame inputs. The same
       // game's SR/RR evaluations remain diagnostics and must not overwrite that
       // viewport's newer FG source with a competing renderer-input watermark.
-      if (!source_path_selected(snapshot)) {
-        outcome(evaluation_outcome.fg_owned);
-        return 0;
-      }
+      if (!source_path_selected(snapshot)) return 0;
       // Observation discovers interfaces; only an accepted submitted capture
       // establishes ownership in the shared capture layer.
       depth_capture::observe_provider(snapshot.command_buffer);
@@ -1571,25 +1547,14 @@ namespace sunshine_streamline {
           sunshine_scene_depth::provider_kind::streamline, snapshot.frame_generation_input ? (1ull << 63) | snapshot.viewport : 0,
           snapshot.frame_generation_input ? 0 : snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : UINT64_MAX);
       };
-      if (const char *reason = source_rejection(snapshot)) {
-        outcome(evaluation_outcome.source_rejected, &evaluation_outcome.source_reason, reason);
-        withdraw_invalid_attempt();
-        return 0;
-      }
+      if (!direct_source_admissible(snapshot)) { withdraw_invalid_attempt(); return 0; }
       // The adapter defines semantic priority; the capture owner tries this
       // ordered set as one evaluation, including its in-progress lifetime.
       std::array<depth_capture::input, depth_priority.size()> candidates;
       std::size_t count = 0;
-      const char *first_tag_rejection = nullptr;
       for (const unsigned index : depth_priority) {
         const auto &tag = snapshot.tags[index];
-        const char *rejected = tag_rejection(snapshot, tag);
-        if (!rejected && !tag.direct_source) rejected = "source_not_retained";
-        if (rejected) {
-          // Prefer a present tag's reason over an absent optional type.
-          if (!first_tag_rejection || tag.present) first_tag_rejection = rejected;
-          continue;
-        }
+        if (!direct_tag_admissible(snapshot, tag) || !tag.direct_source) continue;
         auto &value = candidates[count];
         static_cast<sunshine_scene_depth::frame &>(value) = normalize_depth_frame(snapshot, tag, version_one);
         value.source = tag.direct_source;
@@ -1627,11 +1592,8 @@ namespace sunshine_streamline {
           candidates.data(), count, snapshot.frame_generation_input ? 0 :
             snapshot.tag_boundary ? (1ull << 63) | snapshot.viewport : UINT64_MAX, &diagnostic)) {
         if (copy_recorded) *copy_recorded = diagnostic.result == depth_capture::status::recorded;
-        outcome(evaluation_outcome.nominated);
         return ticket;
       }
-      if (count) outcome(evaluation_outcome.capture_rejected, &evaluation_outcome.capture_reason, depth_capture::name(diagnostic.result));
-      else outcome(evaluation_outcome.no_tag, &evaluation_outcome.tag_reason, first_tag_rejection ? first_tag_rejection : "no_depth_tag");
       withdraw_invalid_attempt();
       return 0;
     }
@@ -2036,16 +1998,24 @@ namespace sunshine_streamline {
           invalid_observation(result != 0 ? loss_diagnostics::reason::sdk_failure : loss_diagnostics::reason::invalid_input,
             __func__, __LINE__);
         } else {
-          token_calls.fetch_add(1, std::memory_order_relaxed);
-          if (frame_index) token_index.store(numeric, std::memory_order_relaxed);
-          token_index_supplied.store(frame_index != nullptr, std::memory_order_relaxed);
-          auto update = write_tokens_briefly();
-          if (!update) {
+          const auto address = reinterpret_cast<std::uintptr_t>(returned);
+          // Requesting the same caller-supplied index again returns that frame's
+          // token and changes nothing, so it takes no writer. The Witcher 3 repeats
+          // each request about 30 times a frame from several threads.
+          const bool repeated = frame_index && [&] {
+            const auto pin = token_metadata.read();
+            if (!pin || pin->observation != ticket) return false;
+            for (const auto &candidate : pin->tokens)
+              if (candidate.frame.token == address) return candidate.frame.has_numeric && candidate.frame.numeric == numeric;
+            return false;
+          }();
+          auto update = repeated ? token_owner::transaction{} : write_tokens_briefly();
+          if (repeated) {}
+          else if (!update) {
             if (current(ticket)) dropped_observation(update.failure() == observation::write_failure::storage_busy ?
               loss_diagnostics::reason::metadata_storage_busy : loss_diagnostics::reason::tokens_busy, __func__, __LINE__);
           } else if (current(ticket)) {
             update->observation = ticket;
-            const auto address = reinterpret_cast<std::uintptr_t>(returned);
             auto *chosen = &update->tokens[0];
             for (auto &candidate : update->tokens) {
               if (candidate.frame.token == address) { chosen = &candidate; break; }
@@ -2649,15 +2619,6 @@ namespace sunshine_streamline {
     return true;
   }
 
-  frame_token_count frame_tokens() {
-    frame_token_count out;
-    if (!observation_ticket()) return out;
-    out.calls = token_calls.load(std::memory_order_relaxed);
-    out.index = token_index.load(std::memory_order_relaxed);
-    out.index_supplied = token_index_supplied.load(std::memory_order_relaxed);
-    return out;
-  }
-
   bool query_frame_generation(std::uint32_t viewport, frame_generation_snapshot &output,
       frame_generation_query_status *status) {
     output = {};
@@ -2810,22 +2771,6 @@ namespace sunshine_streamline {
             "Sunshine Streamline camera availability: constants_calls=%llu cameras=%u recent_valid_projection=%u; NGX_frame_match=unproven; availability does not authorize cross-API scale",
             static_cast<unsigned long long>(calls), cameras, valid_recent);
           message(availability);
-          char outcomes[640]{};
-          std::snprintf(outcomes, sizeof(outcomes),
-            "Sunshine Streamline evaluation capture: attempts=%llu nominated=%llu inactive=%llu fg_owned=%llu "
-            "source_rejected=%llu(last=%s) no_admissible_tag=%llu(last=%s) capture_rejected=%llu(last=%s); "
-            "SR/RR evaluations only, cumulative",
-            static_cast<unsigned long long>(evaluation_outcome.attempts.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(evaluation_outcome.nominated.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(evaluation_outcome.inactive.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(evaluation_outcome.fg_owned.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(evaluation_outcome.source_rejected.load(std::memory_order_relaxed)),
-            evaluation_outcome.source_reason.load(std::memory_order_relaxed),
-            static_cast<unsigned long long>(evaluation_outcome.no_tag.load(std::memory_order_relaxed)),
-            evaluation_outcome.tag_reason.load(std::memory_order_relaxed),
-            static_cast<unsigned long long>(evaluation_outcome.capture_rejected.load(std::memory_order_relaxed)),
-            evaluation_outcome.capture_reason.load(std::memory_order_relaxed));
-          message(outcomes);
           if (camera_sample_tick) {
             char detail[1800]{};
             std::snprintf(detail, sizeof(detail),

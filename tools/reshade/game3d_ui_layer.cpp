@@ -67,9 +67,14 @@ namespace sunshine_game3d::ui_layer {
       std::uint64_t capture_id{}, tick{};
     };
 
+    // The live copy is recorded only while UI detection asked for the layer
+    // this recently (latest() is called on every Present that wants it).
+    constexpr std::uint64_t demand_window_ms = 1000;
+
     struct state_t {
       std::mutex mutex;
       std::atomic<bool> armed{false};
+      std::uint64_t demand_ms{};
       api::device *device{};
       std::uint32_t width{}, height{};
       std::vector<std::uint64_t> back_buffers;
@@ -88,7 +93,7 @@ namespace sunshine_game3d::ui_layer {
       const auto now = GetTickCount64();
       auto keep = s.graveyard.begin();
       for (auto &r : s.graveyard) {
-        if (now - r.tick >= retire_delay_ms) r.device->destroy_resource(r.copy);
+        if (now - r.tick >= retire_delay_ms) { if (r.device) r.device->destroy_resource(r.copy); }
         else *keep++ = r;
       }
       s.graveyard.erase(keep, s.graveyard.end());
@@ -169,7 +174,8 @@ namespace sunshine_game3d::ui_layer {
         if (!qualifies(desc, color, s.width, s.height)) return false;
         // Clearing requires the render-target state on every API, so the
         // previous frame's layer can be copied here before the clear erases it.
-        if (s.live.tracker.clear(resource.handle, GetTickCount64()))
+        const auto now = GetTickCount64();
+        if (s.live.tracker.clear(resource.handle, now) && s.demand_ms && now - s.demand_ms <= demand_window_ms)
           capture_live(s, commands, device, resource, desc);
         if (s.armed.load(std::memory_order_relaxed)) census(s, commands, device, resource, desc);
       } catch (...) {
@@ -205,6 +211,7 @@ namespace sunshine_game3d::ui_layer {
     out = {};
     auto &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
+    s.demand_ms = now_ms;
     const auto &live = s.live;
     if (!device || device != s.device || !live.copy.handle || !live.capture_id || !live.tracker.active() ||
         now_ms < live.tick || now_ms - live.tick > max_clear_gap_ms) return false;
@@ -212,12 +219,36 @@ namespace sunshine_game3d::ui_layer {
     return true;
   }
 
+  namespace {
+    // Copies are destroyed through their own device while it still exists.
+    void on_destroy_device(api::device *device) {
+      auto &s = state();
+      std::lock_guard<std::mutex> lock(s.mutex);
+      auto keep = s.graveyard.begin();
+      for (auto &r : s.graveyard) {
+        if (r.device == device) device->destroy_resource(r.copy);
+        else *keep++ = r;
+      }
+      s.graveyard.erase(keep, s.graveyard.end());
+      for (auto &c : s.candidates) if (s.device == device && c.copy.handle) device->destroy_resource(c.copy);
+      if (s.device == device) {
+        if (s.live.copy.handle) device->destroy_resource(s.live.copy);
+        s.live = {};
+        s.candidates.clear();
+        s.back_buffers.clear();
+        s.device = nullptr;
+      }
+    }
+  }
+
   void register_events() {
     reshade::register_event<reshade::addon_event::clear_render_target_view>(sunshine_addon_lifetime::guarded<on_clear>);
+    reshade::register_event<reshade::addon_event::destroy_device>(sunshine_addon_lifetime::guarded<on_destroy_device>);
   }
 
   void unregister_events() {
     reshade::unregister_event<reshade::addon_event::clear_render_target_view>(sunshine_addon_lifetime::guarded<on_clear>);
+    reshade::unregister_event<reshade::addon_event::destroy_device>(sunshine_addon_lifetime::guarded<on_destroy_device>);
     cancel();
   }
 
@@ -242,17 +273,13 @@ namespace sunshine_game3d::ui_layer {
     }
     const auto now = GetTickCount64();
     std::lock_guard<std::mutex> lock(s.mutex);
-    // A copy owned by another (possibly destroyed) device is dropped, never
-    // released through a stale device pointer.
-    s.graveyard.erase(std::remove_if(s.graveyard.begin(), s.graveyard.end(),
-      [device](const retired &r) { return r.device != device; }), s.graveyard.end());
+    // Every retired copy's device is alive: on_destroy_device releases its own.
     reap(s);
     if (s.armed.load(std::memory_order_relaxed) && s.device && s.device != device) return;
-    if (s.device != device) s.live = {};
-    else if (s.live.copy.handle && (s.width != desc.BufferDesc.Width || s.height != desc.BufferDesc.Height)) {
-      s.graveyard.push_back({device, s.live.copy, now});
+    if (s.live.copy.handle && (s.device != device || s.width != desc.BufferDesc.Width || s.height != desc.BufferDesc.Height)) {
+      s.graveyard.push_back({s.device, s.live.copy, now});
       s.live = {};
-    }
+    } else if (s.device != device) s.live = {};
     s.device = device;
     s.width = desc.BufferDesc.Width;
     s.height = desc.BufferDesc.Height;

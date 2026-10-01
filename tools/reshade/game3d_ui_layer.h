@@ -68,7 +68,8 @@ namespace sunshine_game3d::ui_layer {
     std::uint32_t format{};     // Typed format of the copy.
   };
   // The active layer's newest copy on this device, recorded less than
-  // max_clear_gap_ms ago.
+  // max_clear_gap_ms ago. Each call also asks for the next copies: the layer is
+  // copied only while UI detection keeps asking.
   bool latest(api::device *device, std::uint64_t now_ms, live_capture &out);
 
   struct candidate {
@@ -81,8 +82,8 @@ namespace sunshine_game3d::ui_layer {
 
   void register_events();
   void unregister_events();
-  // Every Present of the foreground swapchain: output size, back buffers and
-  // the live tracker's frame boundary.
+  // Every Present of the foreground swapchain only: output size, back buffers
+  // and the live tracker's frame boundary.
   void observe_output(api::swapchain *swapchain);
   void arm();
   // Stops the census and hands over its candidates. Each copy stays valid

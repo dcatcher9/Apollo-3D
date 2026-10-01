@@ -638,6 +638,22 @@ namespace {
     require(!clock.trusted_alpha(), "A backwards clock kept the earlier interval");
     sample(clock, 1, {100, 0, 0, 0}, 0, 6000);
     require(clock.trusted_alpha() == 1u, "The restarted interval did not earn trust");
+    // Earning needs consecutive, steady samples: a full-frame sample restarts
+    // the run, and coverage that swings beyond a factor of two (scene effects
+    // such as particles in a transparent target) never earns trust.
+    alpha_auto_policy run;
+    sample(run, 1, {200, 0, 0, 0}, 0, 1000);
+    sample(run, 1, {200, 0, 0, 0}, 0, 2000);
+    sample(run, 1, {1000, 0, 0, 0}, 0, 2500);
+    sample(run, 1, {200, 0, 0, 0}, 0, 3000);
+    require(!run.trusted_alpha(), "A full-frame sample did not restart the earning run");
+    sample(run, 1, {300, 0, 0, 0}, 0, 4000);
+    sample(run, 1, {250, 0, 0, 0}, 0, 5000);
+    require(run.trusted_alpha() == 1u, "Consecutive steady samples did not earn trust");
+    alpha_auto_policy effects;
+    for (std::uint64_t tick = 1000; tick <= 20000; tick += 500)
+      sample(effects, 1, {tick % 1000 ? 50u : 400u, 0, 0, 0}, 0, tick);
+    require(!effects.trusted_alpha(), "Fluctuating coverage earned trust");
   }
 } // namespace
 

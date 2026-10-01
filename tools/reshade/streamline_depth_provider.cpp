@@ -417,10 +417,10 @@ namespace sunshine_streamline::provider {
           char text[768]{};
           std::snprintf(text, sizeof(text),
             "Sunshine list lifecycle: admissions covered=%llu (states observed=%llu declared=%llu) not_open={unknown=%llu closed=%llu pass=%llu opaque=%llu}; "
-            "events created=%llu reset=%llu closed=%llu executed=%llu bundle=%llu pass_begin=%llu pass_end=%llu destroyed=%llu; tracked=%llu overflow=%llu",
+            "events created=%llu reset=%llu closed=%llu executed=%llu bundle=%llu pass_begin=%llu pass_end=%llu destroyed=%llu",
             u(c.covered), u(c.states_observed), u(c.states_declared), u(c.unknown), u(c.closed), u(c.pass), u(c.opaque),
             e(event::created), e(event::reset), e(event::closed), e(event::executed),
-            e(event::bundle), e(event::pass_begin), e(event::pass_end), e(event::destroyed), u(c.tracked), u(c.overflow));
+            e(event::bundle), e(event::pass_begin), e(event::pass_end), e(event::destroyed));
           sunshine_log::message(reshade::log::level::info, text);
         }
       }

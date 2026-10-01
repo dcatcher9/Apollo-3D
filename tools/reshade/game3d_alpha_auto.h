@@ -179,8 +179,10 @@ namespace sunshine_game3d {
 
     // One completed GPU detection sample over `pixels` pixels. Alpha candidates
     // are 0 UI alpha R, 1 UI color A, 2 Backbuffer A and 3 current A. A channel
-    // earns trust as UI coverage by covering some but under 90% of the frame;
-    // a trusted channel then decides the mask whatever it covers. It loses trust
+    // earns trust as UI coverage by covering some but under 90% of the frame,
+    // steadily (within a factor of two) in consecutive samples: a full-frame
+    // sample restarts the run, and fluctuating scene effects do not qualify. A
+    // trusted channel then decides the mask whatever it covers. It loses trust
     // on contradiction: covering at least 90% while an exact HUD-less pair shows
     // at least 75% of the scene unchanged. A selective sample clears doubt.
     void observe_alpha_channels(const alpha_auto_decision::detection_evidence &evidence, std::uint32_t pixels,
@@ -196,10 +198,13 @@ namespace sunshine_game3d {
         const std::uint64_t covered = evidence.alpha_covered[channel];
         if (covered && covered * 10 < total * 9) {
           doubt_[channel] = {};
-          if (earned_[channel].add(tick_ms)) trusted_alpha_ |= bit;
-        } else if ((trusted_alpha_ & bit) && covered * 10 >= total * 9 && scene_visible && doubt_[channel].add(tick_ms)) {
-          trusted_alpha_ &= ~bit;
-          earned_[channel] = doubt_[channel] = {};
+          if (earned_[channel].add(tick_ms, covered)) trusted_alpha_ |= bit;
+        } else if (covered * 10 >= total * 9) {
+          earned_[channel] = {};
+          if ((trusted_alpha_ & bit) && scene_visible && doubt_[channel].add(tick_ms)) {
+            trusted_alpha_ &= ~bit;
+            doubt_[channel] = {};
+          }
         }
       }
     }
@@ -215,13 +220,16 @@ namespace sunshine_game3d {
       std::uint64_t sequence{}, tick_ms{}, streak_start{};
       bool selective{};
     };
-    // Samples of one kind of evidence about one channel.
+    // Consecutive samples of one kind of evidence about one channel.
     struct evidence_run {
       std::uint32_t samples{};
-      std::uint64_t first_tick_ms{};
-      // True once alpha_trust_samples samples span alpha_trust_span_ms.
-      bool add(std::uint64_t tick_ms) {
-        if (!samples || tick_ms < first_tick_ms) *this = {0, tick_ms};
+      std::uint64_t first_tick_ms{}, low{}, high{};
+      // True once alpha_trust_samples samples span alpha_trust_span_ms. A value
+      // outside a factor of two of the run's others starts a new run with it.
+      bool add(std::uint64_t tick_ms, std::uint64_t value = 0) {
+        const auto lo = samples ? std::min(low, value) : value, hi = samples ? std::max(high, value) : value;
+        if (!samples || tick_ms < first_tick_ms || hi > lo * 2) *this = {0, tick_ms, value, value};
+        else { low = lo; high = hi; }
         ++samples;
         return samples >= alpha_trust_samples && tick_ms - first_tick_ms >= alpha_trust_span_ms;
       }
