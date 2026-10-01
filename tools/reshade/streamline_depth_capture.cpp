@@ -83,6 +83,13 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t retain_source_cookie(ID3D12Object *value) {
       return sunshine_native_identity::resource_cookie(value, true);
     }
+    // The identity of a resource that already has one; never creates one.
+    std::uint64_t existing_source_cookie(ID3D12Object *value) {
+      if (!value) return 0;
+      std::uint64_t identity{}; UINT size = sizeof(identity);
+      return SUCCEEDED(value->GetPrivateData(sunshine_native_identity::resource_guid, &size, &identity)) &&
+        size == sizeof(identity) ? identity : 0;
+    }
     std::uint64_t observed_source_cookie(ID3D12Object *value) {
       // Most transitions concern existing identities. Avoid the creation lock
       // on that hot path, and never overwrite malformed data or driver errors.
@@ -174,7 +181,8 @@ namespace sunshine_streamline::depth_capture {
       if (!supported_description(desc)) { out = {}; return status::unsupported_resource; }
       return source_region(desc, resource, out);
     }
-    struct source_state { std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}; };
+    // partial (diagnostic only): another subresource was transitioned after value.
+    struct source_state { std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}, partial{}; };
     struct command_state {
       std::uint64_t cookie{};
       std::uint64_t observation_generation{};
@@ -307,6 +315,7 @@ namespace sunshine_streamline::depth_capture {
       return entry;
     }
     void invalidate(command_state &owner, recording_loss why);
+    void clear_list_states(std::uint64_t native);
     void associate_recording(std::uint64_t native, std::uint64_t *out_cookie) {
       if (!out_cookie) return;
       *out_cookie = 0;
@@ -402,7 +411,13 @@ namespace sunshine_streamline::depth_capture {
           // A split can precede the first tag/cookie. Preserve that source's
           // rejection until Reset without poisoning unrelated captured depth.
           if (value.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) { block_source(*owner, value.Transition.pResource); continue; }
-          if (value.Transition.Subresource != 0 && value.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) continue;
+          if (value.Transition.Subresource != 0 && value.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
+            // Another plane or mip keeps subresource 0's state. Diagnostic only:
+            // ReShade's barrier event reports it for the whole resource.
+            if (const auto identity = existing_source_cookie(value.Transition.pResource))
+              if (auto *known = state(*owner, identity, false)) known->partial = true;
+            continue;
+          }
           // A resource can reach its first SDK nomination after all of its
           // transitions were recorded. Preserve that live object's identity
           // now, just as split/alias barriers already do. The observed state
@@ -414,6 +429,7 @@ namespace sunshine_streamline::depth_capture {
           if (known->blocked) continue;
           known->known = value.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE && copy_state::supported(value.Transition.StateAfter);
           known->value = value.Transition.StateAfter;
+          known->partial = false;
         }
       }
     }
@@ -456,6 +472,9 @@ namespace sunshine_streamline::depth_capture {
       }
       owner->restart(cookie, command_generation);
       owner.life()->cookie.store(cookie, std::memory_order_release);
+      // A native Reset ends the recording for ReShade's shadow states too, even
+      // when it bypassed ReShade's wrapper and no reset event follows.
+      clear_list_states(native);
     }
     void close(std::uint64_t native, std::uint64_t cookie, HRESULT result) {
       std::lock_guard lock(mutex);
@@ -1150,16 +1169,16 @@ namespace sunshine_streamline::depth_capture {
   namespace {
     struct list_record {
       bool open{}, closed{}, pass{}, opaque{};
-      // ReShade's last reported state per resource in this recording; an alias
-      // or global barrier, or overflow, makes every state unknown.
-      std::vector<std::pair<std::uint64_t, std::uint32_t>> states;
+      // ReShade's last reported state per resource in this recording (0: an
+      // alias made it unknown); a wildcard alias or overflow makes all unknown.
+      std::unordered_map<std::uint64_t, std::uint32_t> states;
       bool states_unknown{};
     };
     SRWLOCK list_lock = SRWLOCK_INIT;
     std::unordered_map<std::uint64_t, list_record> list_records; // Guarded by list_lock.
     list_shadow_counts list_counts;                               // Guarded by list_lock.
     std::array<std::uint64_t, 8> immediate_lists{};               // Guarded by list_lock.
-    constexpr std::size_t list_capacity = 8192, list_state_capacity = 64;
+    constexpr std::size_t list_capacity = 8192, list_state_capacity = 16384;
     std::uint64_t list_key(std::uint64_t command) {
       std::uint64_t native{}; UINT size = sizeof(native);
       if (!command || FAILED(reinterpret_cast<ID3D12Object *>(command)->GetPrivateData(list_identity_guid, &size, &native)) ||
@@ -1202,14 +1221,11 @@ namespace sunshine_streamline::depth_capture {
       }
       ReleaseSRWLockExclusive(&list_lock);
     }
-    // D3D12 COMMON (and PRESENT) is ReShade's general usage; ReShade splits
-    // VERTEX_AND_CONSTANT_BUFFER (0x1) into vertex_buffer (0x1) and
-    // constant_buffer (0x8000); other states share their D3D12 bit values.
+    // ReShade's D3D12 conversion keeps every state bit and maps only COMMON
+    // (also PRESENT) to general (d3d12_impl_type_convert.cpp).
     bool same_state(std::uint32_t d3d12, std::uint32_t usage) {
-      constexpr std::uint32_t general = 0x80000000u, constant_buffer = 0x8000u, vertex_and_constant = 0x1u;
-      if (usage & constant_buffer) usage = (usage & ~constant_buffer) | vertex_and_constant;
-      if (usage & general) return d3d12 == 0 || d3d12 == (usage & ~general);
-      return d3d12 == usage;
+      constexpr std::uint32_t general = 0x80000000u;
+      return usage == general ? d3d12 == 0 : d3d12 == usage;
     }
     // Barrier-state shadow for one admitted source; never chooses the state.
     void shadow_barrier_state(std::uint64_t command, std::uint64_t resource, const source_state *hooked) {
@@ -1223,15 +1239,29 @@ namespace sunshine_streamline::depth_capture {
       if (const auto found = native ? list_records.find(native) : list_records.end(); found != list_records.end()) {
         events_unknown = found->second.states_unknown;
         if (!events_unknown)
-          for (const auto &entry : found->second.states) if (entry.first == resource) { event_known = entry.second != 0; usage = entry.second; break; }
+          if (const auto entry = found->second.states.find(resource); entry != found->second.states.end()) {
+            event_known = entry->second != 0; usage = entry->second;
+          }
       }
       auto &counts = list_counts;
+      if (hooked && hooked->blocked && event_known) ++counts.barrier_blocked_events_known;
       if (hook_known && event_known) {
         if (same_state(hooked->value, usage)) ++counts.barrier_agree;
-        else { ++counts.barrier_disagree; counts.last_disagree_hooked = hooked->value; counts.last_disagree_usage = usage; }
+        else {
+          ++counts.barrier_disagree; counts.last_disagree_hooked = hooked->value; counts.last_disagree_usage = usage;
+          if (hooked->partial) ++counts.barrier_disagree_partial;
+        }
       }
       else if (event_known) ++counts.barrier_events_only;
       else if (hook_known) { ++counts.barrier_hooks_only; if (events_unknown) ++counts.barrier_hooks_only_unknown; }
+      ReleaseSRWLockExclusive(&list_lock);
+    }
+    void clear_list_states(std::uint64_t native) {
+      const auto key = list_key(native);
+      AcquireSRWLockExclusive(&list_lock);
+      if (const auto found = list_records.find(key ? key : native); found != list_records.end()) {
+        found->second.states.clear(); found->second.states_unknown = false;
+      }
       ReleaseSRWLockExclusive(&list_lock);
     }
   }
@@ -1306,11 +1336,9 @@ namespace sunshine_streamline::depth_capture {
           // An alias names only its after-resource, whose state becomes unknown
           // (stored as 0); the hooks block that resource as well.
           const auto state = old_states[i] && states[i] ? states[i] : 0u;
-          const auto entry = std::find_if(value.states.begin(), value.states.end(),
-            [&](const auto &known) { return known.first == resources[i]; });
-          if (entry != value.states.end()) entry->second = state;
-          else if (value.states.size() < list_state_capacity) value.states.emplace_back(resources[i], state);
-          else value.states_unknown = true;
+          if (const auto entry = value.states.find(resources[i]); entry != value.states.end()) entry->second = state;
+          else if (value.states.size() < list_state_capacity) value.states.emplace(resources[i], state);
+          else { value.states.clear(); value.states_unknown = true; ++list_counts.barrier_event_overflow; }
         }
       }
     } catch (...) {}

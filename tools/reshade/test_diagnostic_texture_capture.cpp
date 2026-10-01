@@ -1028,7 +1028,30 @@ namespace {
     counted("a destroyed lifecycle was still tracked", [](const auto &a, const auto &b) {
       return b.hooks_only == a.hooks_only + 1 && b.unknown == a.unknown + 1; });
     capture::observe_list_event(list, event::created);
+    // A split barrier blocks the source for the hooks, while ReShade's event
+    // drops the split flags and reports a completed transition.
+    {
+      D3D12_RESOURCE_BARRIER split[2]{};
+      for (auto &value : split) {
+        value.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        value.Transition = {image.source.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE};
+      }
+      split[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY; split[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_END_ONLY;
+      gpu.list->ResourceBarrier(1, &split[0]); gpu.list->ResourceBarrier(1, &split[1]);
+      const std::uint32_t copy_source = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      capture::observe_list_barriers(list, 1, &source, &non_pixel, &copy_source);
+      record(list);
+      counted("a blocked source with a ReShade-reported state was not counted", [](const auto &a, const auto &b) {
+        return b.barrier_blocked_events_known == a.barrier_blocked_events_known + 1; });
+      transition(gpu.list.Get(), image.source.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
     gpu.submit(); gpu.wait(); gpu.reset();
+    // The hooked native Reset ends ReShade's shadow states for that recording,
+    // even before (or without) ReShade's own reset event.
+    require(record(list), "a reset hooked list rejected a capture");
+    counted("ReShade states survived a native Reset", [](const auto &a, const auto &b) {
+      return b.barrier_events_only == a.barrier_events_only && b.barrier_blocked_events_known == a.barrier_blocked_events_known; });
     capture::observe_list_event(list, event::reset);
 
     // A list whose native table cannot be hooked (as after a D3D12Core 1.619
