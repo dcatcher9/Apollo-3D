@@ -77,6 +77,20 @@ namespace proc {
              std::abs(static_cast<std::int64_t>(mode.dmDisplayFrequency) * 1000 - fps_millihz) < 1000;
     }
 
+    // The edge rule for live display modes. A live request carries the client's source size and a
+    // refresh rate in 0.01 Hz steps. The session records that size scaled like launch and resume,
+    // and a launch or resume may carry any millihertz rate. Compare in the session's units at the
+    // wire's precision, so a client repeating its mode is never mistaken for a mode change.
+    bool live_request_repeats_session_mode(
+      const rtsp_stream::launch_session_t &session,
+      const render_size_t &requested,
+      int fps_millihz
+    ) {
+      return static_cast<std::uint32_t>(session.width) == requested.width &&
+             static_cast<std::uint32_t>(session.height) == requested.height &&
+             (static_cast<std::int64_t>(session.fps) + 5) / 10 == (static_cast<std::int64_t>(fps_millihz) + 5) / 10;
+    }
+
     // Topology removal outlives the proc_t configuration object that initiated it. Keep the
     // display owner here so refresh() cannot discard it while replacing proc.
     std::recursive_mutex retired_virtual_display_mutex;
@@ -934,12 +948,12 @@ namespace proc {
     }
     for (int attempt = 0; attempt < 20; ++attempt) {
       if (_display_session.refresh() && !_display_session.binding().display_name.empty()) {
+        set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
   #ifdef SUNSHINE_TESTS
         if (_display_topology_test_hook) {
-          return true;
+          return true;  // Tests publish the binding but never map a test name to an output.
         }
   #endif
-        set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
         config::video.output_name = display_device::map_display_name(display_name);
         return !config::video.output_name.empty();
       }
@@ -1494,6 +1508,7 @@ namespace proc {
       if (!display_mode_changed) {
         // The game may have changed the owned display during exclusive fullscreen. The retained
         // topology restores that actual mode, while our remembered launch contract is unchanged.
+        // Unlike a repeated live request, a resume is a new start and applies the requested mode.
         const auto current = query_virtual_display_mode();
         if (!current) {
           BOOST_LOG(warning) << "Could not verify the retained virtual-display mode after reactivation; retry the resume."sv;
@@ -1771,6 +1786,8 @@ namespace proc {
       _display_session.update_mode(launch_session->width, launch_session->height, launch_session->fps);
       _display_session.commit_resume();
     }
+    // A resume is a new start that has proven the display's mode, HDR state, and topology again.
+    _live_display_unproven = false;
     virtual_display_policy_rollback.disable();
 #endif
     primary_rollback.disable();
@@ -1887,15 +1904,19 @@ namespace proc {
     if (!_virtual_display || !_launch_session) {
       return false;
     }
-    if (_launch_session->width != width || _launch_session->height != height ||
-        _launch_session->fps != fps_millihz) {
+    // The apply path answers every request on an unproven display with a reconnect.
+    if (_live_display_unproven || width <= 0 || height <= 0) {
       return true;
     }
-    const auto previous_name = _display_session.binding().display_name;
-    const auto current = query_virtual_display_mode();
-    // A renamed binding also needs the apply path to publish the capture target.
-    return !current || previous_name != _display_session.binding().display_name ||
-           !live_display_mode_matches(*current, width, height, fps_millihz);
+    // Display modes follow edges of the client's requested mode. A request that repeats it never
+    // changes the display mode, even if an application or Windows has since changed it.
+    const auto requested = calculate_render_size(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), _launch_session->scale_factor);
+    if (!requested || !live_request_repeats_session_mode(*_launch_session, *requested, fps_millihz)) {
+      return true;
+    }
+    // A capture target that differs from the exact owned binding, because Windows renamed the
+    // display or the binding is unresolved, still needs the apply path to publish it.
+    return !_display_session.refresh() || platf::to_utf8(_display_session.binding().display_name) != display_name;
 #else
     return false;
 #endif
@@ -1921,6 +1942,22 @@ namespace proc {
     if (!_virtual_display || !_display_session.owns_display()) {
       return live_video_mode_result_e::needs_reconnect;
     }
+    // An earlier transaction touched the display without proving its outcome and told the client
+    // to reconnect. No live request is acknowledged until a resume proves the display again.
+    if (_live_display_unproven) {
+      BOOST_LOG(warning) << "The virtual display is unproven since a failed live mode change; the client must reconnect."sv;
+      return live_video_mode_result_e::needs_reconnect;
+    }
+
+    // A live request carries the client's source size. The display renders it at the session's
+    // scale exactly like launch and resume, so the edge rule and every mode set use that size.
+    const auto render_size = calculate_render_size(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), _launch_session->scale_factor);
+    if (!render_size) {
+      return live_video_mode_result_e::needs_reconnect;
+    }
+    const bool repeated = live_request_repeats_session_mode(*_launch_session, *render_size, fps_millihz);
+    width = static_cast<int>(render_size->width);
+    height = static_cast<int>(render_size->height);
 
     const auto old_width = static_cast<std::uint32_t>(_launch_session->width);
     const auto old_height = static_cast<std::uint32_t>(_launch_session->height);
@@ -1933,28 +1970,13 @@ namespace proc {
       return live_video_mode_result_e::failed;
     }
 
-    // A cadence change must update the owned desktop too: a 30 Hz desktop cannot provide
+    // Live display modes are edge-triggered: a repeated request is acknowledged without querying or
+    // restoring the display mode. An exclusive-fullscreen application may have chosen another mode;
+    // reapplying the session mode would push it out of fullscreen, and its re-entry would change the
+    // mode again. A cadence change does update the owned desktop: a 30 Hz desktop cannot provide
     // 60 unique composited frames merely because the encoder now requests 60 fps.
-    if (old_width == static_cast<std::uint32_t>(width) && old_height == static_cast<std::uint32_t>(height) && old_fps == fps_millihz) {
-      const auto current = query_virtual_display_mode();
-      if (!current) {
-        BOOST_LOG(warning) << "Could not verify the current virtual-display mode; retrying the live request is required."sv;
-        return live_video_mode_result_e::failed;
-      }
-      if (live_display_mode_matches(*current, width, height, fps_millihz)) {
-        // The mode query can resolve another Windows renumbering after the
-        // first publication. Publish that current binding before a no-op ack.
-        return refresh_virtual_display_binding() ? live_video_mode_result_e::unchanged :
-                                                   live_video_mode_result_e::failed;
-      }
-      // Hypothesis under live validation: an application that requests an unspecified fullscreen
-      // rate receives a mode Windows saved earlier. The host cannot see what the application asked
-      // for, so the line reports the drifted rate neutrally together with the save state.
-      BOOST_LOG(info) << "Restoring the requested virtual-display mode after external drift from "sv
-                      << current->dmPelsWidth << 'x' << current->dmPelsHeight << " @ "sv
-                      << current->dmDisplayFrequency << " Hz (set by an application or by Windows); session mode saved as default: "sv
-                      << (_saved_virtual_display_mode == session_display_mode_t {width, height, fps_millihz} ? "yes"sv : "no"sv)
-                      << '.';
+    if (repeated) {
+      return live_video_mode_result_e::unchanged;
     }
 
     // A locked session or an unreachable display-configuration API is transient, not a property of
@@ -1979,6 +2001,9 @@ namespace proc {
       return live_video_mode_result_e::needs_reconnect;
     }
 
+    // From here the transaction touches the display. Until it commits or proves its rollback, the
+    // live presentation state is unproven and every later live request requires a reconnect.
+    _live_display_unproven = true;
     // The worker must not query or mutate a DISPLAY name while Windows is switching its mode.
     stop_hdr_worker();
     _hdr_worker_state.reset();
@@ -2033,6 +2058,8 @@ namespace proc {
         BOOST_LOG(error) << "Could not verify the virtual-only topology after rolling back a live mode change."sv;
         restored = false;
       }
+      // Only a proven rollback restores the previous contract and keeps later requests retryable.
+      _live_display_unproven = !restored;
       return restored;
     };
 
@@ -2081,6 +2108,7 @@ namespace proc {
     _launch_session->height = height;
     _launch_session->fps = fps_millihz;
     _display_session.update_mode(width, height, fps_millihz);
+    _live_display_unproven = false;
     BOOST_LOG(info) << "Virtual display resized live to "sv << width << 'x' << height
                     << " @ "sv << (static_cast<double>(fps_millihz) / 1000.0) << " Hz."sv;
     // The display is promoted for the whole live session, so its mode stays temporary here.
@@ -2398,6 +2426,7 @@ namespace proc {
     _virtual_display_retirement_handed_off = false;
     _remote_virtual_display_lease.reset();
     _virtual_display_only = false;
+    _live_display_unproven = false;  // A new launch creates and proves its own display.
     _hdr_worker_state.reset();
 #endif
     _virtual_display = false;

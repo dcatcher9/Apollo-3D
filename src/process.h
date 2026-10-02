@@ -172,7 +172,7 @@ namespace proc {
    */
   enum class live_video_mode_result_e : int {
     applied,  ///< The desktop now presents the requested mode.
-    unchanged,  ///< Nothing had to change; the encoder may rebuild immediately.
+    unchanged,  ///< The request repeats the session's requested mode; the display mode was left as is.
     needs_reconnect,  ///< A fresh launch is required; the live desktop may no longer be proven.
     failed,  ///< Attempted and rolled back; the session keeps its previous mode.
   };
@@ -231,9 +231,15 @@ namespace proc {
      * Resize the session's virtual desktop in place for a live 0x3007 mode change. The streaming
      * session, its capture pipeline and its RTSP session all survive. Never recreates the monitor:
      * recreation retires it from the Windows topology and would kill the in-flight capture.
-     * @param width Requested desktop width in pixels.
-     * @param height Requested desktop height in pixels.
-     * @param fps_millihz Requested refresh rate in millihertz, matching launch_session_t::fps.
+     * Edge-triggered: only a width, height or refresh that differs from the session's requested
+     * mode changes the display. A repeated request returns `unchanged` without querying or
+     * restoring the display mode, so an application-chosen mode such as exclusive fullscreen at
+     * another rate stays in place; the client is acknowledged once the encoder rebuilds, and the
+     * exact binding is re-resolved and republished when Windows renamed it. After a change that
+     * could not prove its outcome, every request returns `needs_reconnect` until a resume.
+     * @param width Requested client source width; the display renders it at the session's scale.
+     * @param height Requested client source height; the display renders it at the session's scale.
+     * @param fps_millihz Requested refresh rate in millihertz, compared at the wire's 0.01 Hz.
      * @param expected_launch_session_id Session identity captured with the control request. A
      * stale worker must never resize a replacement session's desktop.
      */
@@ -245,11 +251,12 @@ namespace proc {
     );
     /**
      * Hint for the serialized live-mode worker: would `apply_live_video_mode` have
-     * real topology work to do? An unchanged mode skips DisplayConfig only when
-     * Windows still reports the requested desktop geometry and refresh. A bitrate-only change
-     * remains ordered behind any active encoder transaction. This never waits on the process lock;
-     * a transition already in flight conservatively answers "yes". Windows identity and mode
-     * queries run on that worker, not the input/control thread.
+     * real work to do? Only a changed requested mode, an unproven display, or a published capture
+     * target that differs from the exact owned binding answers "yes"; the display mode itself is
+     * never queried.
+     * A bitrate-only change remains ordered behind any active encoder transaction. This never
+     * waits on the process lock; a transition already in flight conservatively answers "yes".
+     * The Windows identity query runs on that worker, not the input/control thread.
      */
     bool live_video_mode_needs_display_change(int width, int height, int fps_millihz);
     /** Adopt the remote streaming session's virtual-display lease before platform startup. */
@@ -305,6 +312,10 @@ namespace proc {
     bool _virtual_display_retirement_handed_off = false;
     // Client-owned policy for the active launch or resume.
     bool _virtual_display_only = false;
+    // Set while a live mode change that touched the display has not proven its outcome, which told
+    // the client to reconnect. Every live request then requires a reconnect until a resume or a new
+    // launch proves the display again. It is never inferred from the observed display mode.
+    bool _live_display_unproven = false;
   #ifdef SUNSHINE_TESTS
     // Process tests replace display/HDR side effects while preserving resume/teardown control flow.
     display_topology_test_hook_t _display_topology_test_hook;

@@ -361,9 +361,11 @@ namespace stream {
   live_video_mode_ack_e live_video_mode_ack_status(proc::live_video_mode_result_e result) {
     switch (result) {
       case proc::live_video_mode_result_e::applied:
-      // "Unchanged" means the desktop already presented the requested geometry, so the mode the
-      // client asked for is live once the encoder rebuilds. From the client's point of view that
-      // is indistinguishable from a real transition, and it must not be reported as a failure.
+      // "Unchanged" means the request repeats the session's requested mode, which the last proven
+      // display transaction applied; an application may since have chosen another display mode,
+      // and the host leaves that in place. The requested mode is live once the encoder rebuilds.
+      // From the client's point of view that is indistinguishable from a real transition, and it
+      // must not be reported as a failure.
       case proc::live_video_mode_result_e::unchanged:
         return live_video_mode_ack_e::applied;
       case proc::live_video_mode_result_e::needs_reconnect:

@@ -29,7 +29,7 @@
 
 namespace proc {
   // A retained desktop fixture with no real process, display, or HDR worker. The successful
-  // same-mode apply uses an injected observed mode, exercising transport admission itself.
+  // same-mode apply needs only the injected display binding, exercising transport admission itself.
   struct process_test_access {
     static void retain(proc_t &process, const std::shared_ptr<rtsp_stream::launch_session_t> &launch) {
       process._app = {};
@@ -88,6 +88,7 @@ namespace proc {
       };
       process._display_session = VDISPLAY::session_t {std::move(io)};
       process._virtual_display = enabled;
+      process.display_name.clear();
       process._display_mode_query_test_hook = {};
       process._display_mode_change_test_hook = {};
       process._display_mode_record_test_hook = {};
@@ -129,6 +130,8 @@ namespace proc {
           spec.guid = process._launch_session->display_guid;
         }
         process._display_session.adopt(std::move(spec), std::move(binding));
+        // Like adopt_virtual_display(), a bound display publishes its capture target.
+        process.display_name = "test-only-display";
       }
     }
 
@@ -302,54 +305,83 @@ TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
 }
 
 #ifdef _WIN32
-TEST(ProcessTest, SameLiveRequestVerifiesObservedModeInsteadOfCachedLaunchMode) {
+TEST(ProcessTest, RepeatedLiveRequestLeavesAnApplicationChosenDisplayModeAlone) {
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto launch = std::make_shared<rtsp_stream::launch_session_t>();
   launch->id = 41;
   launch->width = 3840;
   launch->height = 2160;
   launch->fps = 90000;
+  launch->scale_factor = 100;
   proc::process_test_access::retain(process, launch);
   auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
   proc::process_test_access::mark_virtual(process, true);
   proc::process_test_access::set_display_topology_hook(process, [](auto, bool) { return true; });
 
+  // An exclusive-fullscreen game moved the session display from 90 Hz to 72 Hz, and the client
+  // reconfirms its unchanged 90 Hz request after the host rebuilt its encoder.
+  int queries = 0;
   DEVMODEW observed {};
   observed.dmPelsWidth = 3840;
   observed.dmPelsHeight = 2160;
   observed.dmDisplayFrequency = 72;
-  proc::process_test_access::observe_display_mode(process, observed);
-  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
-  EXPECT_EQ(launch->fps, 90000);  // The game never changed the accepted client request.
-
-  observed.dmDisplayFrequency = 90;
-  proc::process_test_access::observe_display_mode(process, observed);
+  proc::process_test_access::observe_display_mode(process, [&](std::wstring_view) {
+    ++queries;
+    return std::optional {observed};
+  });
+  std::vector<std::pair<bool, int>> mode_requests;
+  proc::process_test_access::configure_display_mode(process, [&](std::wstring_view, int, int, int fps, bool probe) {
+    mode_requests.emplace_back(probe, fps);
+    return DISP_CHANGE_SUCCESSFUL;
+  });
   EXPECT_FALSE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
   EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::unchanged);
+  // Neither the hint nor the apply queries, probes, or applies a display mode.
+  EXPECT_EQ(queries, 0);
+  EXPECT_TRUE(mode_requests.empty());
+  EXPECT_EQ(launch->fps, 90000);  // The game never changed the accepted client request.
 
+  // The request alone decides: another drifted geometry is left alone too.
   observed.dmPelsWidth = 1920;
-  proc::process_test_access::observe_display_mode(process, observed);
-  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
-  proc::process_test_access::observe_display_mode(process, std::nullopt);
-  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
-  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::failed);
+  EXPECT_FALSE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::unchanged);
   EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 40), proc::live_video_mode_result_e::needs_reconnect);
+  EXPECT_EQ(queries, 0);
+  EXPECT_TRUE(mode_requests.empty());
 
+  // Refresh rates are compared at the live wire's 0.01 Hz: any wire rate that differs is a real
+  // change, while a launch rate finer than the wire is repeated by its nearest wire rate.
   launch->fps = 59940;
-  observed.dmPelsWidth = 3840;
-  observed.dmDisplayFrequency = 60;
-  proc::process_test_access::observe_display_mode(process, observed);
   EXPECT_FALSE(process.live_video_mode_needs_display_change(3840, 2160, 59940));
   EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 59940, 41), proc::live_video_mode_result_e::unchanged);
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 60000));
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(1920, 2160, 59940));
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 1080, 59940));
+  for (const auto &[launch_fps, wire_fps] : {std::pair {59997, 60000}, std::pair {23976, 23980}, std::pair {119880, 119880}}) {
+    SCOPED_TRACE(launch_fps);
+    launch->fps = launch_fps;
+    EXPECT_FALSE(process.live_video_mode_needs_display_change(3840, 2160, wire_fps));
+    EXPECT_EQ(process.apply_live_video_mode(3840, 2160, wire_fps, 41), proc::live_video_mode_result_e::unchanged);
+    EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, wire_fps + 10));
+    EXPECT_EQ(launch->fps, launch_fps);
+  }
+  EXPECT_EQ(queries, 0);
+  EXPECT_TRUE(mode_requests.empty());
 }
 
-TEST(ProcessTest, LiveModeResolvesOwnedIdentityBeforeReadingRenamedOrReusedDisplayNames) {
+TEST(ProcessTest, LiveModeResolvesOwnedIdentityBeforeUsingRenamedOrReusedDisplayNames) {
+  const auto saved_output = config::video.output_name;
+  auto restore_config = util::fail_guard([&]() {
+    config::video.output_name = saved_output;
+  });
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto launch = std::make_shared<rtsp_stream::launch_session_t>();
   launch->id = 41;
   launch->width = 3840;
   launch->height = 2160;
   launch->fps = 90000;
+  launch->scale_factor = 100;
   proc::process_test_access::retain(process, launch);
   auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
   bool owned_present = true;
@@ -374,27 +406,58 @@ TEST(ProcessTest, LiveModeResolvesOwnedIdentityBeforeReadingRenamedOrReusedDispl
     mode.dmDisplayFrequency = name == owned_name ? owned_hz : 90;
     return mode;
   });
-  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
-  EXPECT_EQ(observed_queries, 1u);
-  owned_hz = 90;
-  EXPECT_FALSE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
-  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::unchanged);
+  std::vector<std::wstring> configured_names;
+  proc::process_test_access::configure_display_mode(process, [&](std::wstring_view name, int, int, int fps, bool probe) {
+    configured_names.emplace_back(name);
+    if (!probe && name == owned_name) {
+      owned_hz = static_cast<DWORD>(fps / 1000);
+    }
+    return DISP_CHANGE_SUCCESSFUL;
+  });
 
-  // Even matching settings do not acknowledge a vanished/unresolved owned
-  // identity or probe a different requested mode through its stale GDI name.
+  // Windows renumbered the owned display. The hint resolves the new name, but a stale transport's
+  // request is refused before publishing it; the published capture target stays stale.
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 40), proc::live_video_mode_result_e::needs_reconnect);
+  EXPECT_EQ(process.get_display_name(), "test-only-display");
+  // The next repeated request still differs from the published target, so it publishes the
+  // resolved binding without reading or setting a mode through either name.
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::unchanged);
+  EXPECT_EQ(process.get_display_name(), "renamed-owned-display");
+  EXPECT_FALSE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(observed_queries, 0u);
+  EXPECT_TRUE(configured_names.empty());
+  EXPECT_EQ(owned_hz, 72u);
+
+  // A changed request probes, applies, and verifies only through the resolved owned name.
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 60000));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 60000, 41), proc::live_video_mode_result_e::applied);
+  EXPECT_EQ(configured_names, (std::vector<std::wstring> {owned_name, owned_name}));
+  EXPECT_GT(observed_queries, 0u);
+  EXPECT_EQ(owned_hz, 60u);
+  EXPECT_EQ(launch->fps, 60000);
+
+  // Neither a repeated nor a changed request is acknowledged or probed through the stale GDI name
+  // of a vanished/unresolved owned identity.
   owned_present = false;
   const auto prior_queries = observed_queries;
-  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
-  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::failed);
+  configured_names.clear();
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 60000));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 60000, 41), proc::live_video_mode_result_e::failed);
   EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 41), proc::live_video_mode_result_e::failed);
   EXPECT_EQ(observed_queries, prior_queries);
+  EXPECT_TRUE(configured_names.empty());
 
   // A later resolution of the same exact owner may recover under another name.
   owned_present = true;
   owned_name = L"renamed-again-owned-display";
-  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 90000));
-  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 90000, 41), proc::live_video_mode_result_e::unchanged);
-  EXPECT_EQ(launch->fps, 90000);
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 60000));
+  EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 60000, 41), proc::live_video_mode_result_e::unchanged);
+  EXPECT_EQ(process.get_display_name(), "renamed-again-owned-display");
+  EXPECT_EQ(observed_queries, prior_queries);
+  EXPECT_TRUE(configured_names.empty());
+  EXPECT_EQ(launch->fps, 60000);
 }
 
 namespace {
@@ -792,7 +855,7 @@ TEST_F(RetainedDisplayPauseTest, SessionTopologyOrRejectedSaveKeepsResumeTempora
   EXPECT_FALSE(proc::process_test_access::saved_session_mode(process_));
 }
 
-TEST_F(RetainedDisplayPauseTest, LiveChangeAndDriftRestoreKeepThePromotedDisplayModeTemporary) {
+TEST_F(RetainedDisplayPauseTest, LiveModeChangesFollowRequestEdgesAndStayTemporary) {
   original_->width = 3840;
   original_->height = 2160;
   original_->fps = 90000;
@@ -801,8 +864,10 @@ TEST_F(RetainedDisplayPauseTest, LiveChangeAndDriftRestoreKeepThePromotedDisplay
   current.dmPelsWidth = 3840;
   current.dmPelsHeight = 2160;
   current.dmDisplayFrequency = 90;
+  int queries = 0;
   proc::process_test_access::observe_display_mode(process_, [&](std::wstring_view name) {
     EXPECT_EQ(name, L"test-only-display");
+    ++queries;
     return std::optional {current};
   });
   std::vector<std::pair<bool, int>> mode_requests;
@@ -827,28 +892,42 @@ TEST_F(RetainedDisplayPauseTest, LiveChangeAndDriftRestoreKeepThePromotedDisplay
   });
   using result_e = proc::live_video_mode_result_e;
   const std::vector<std::pair<bool, int>> applied_72 {{true, 72000}, {false, 72000}};
+  const std::vector<std::pair<bool, int>> applied_90 {{true, 90000}, {false, 90000}};
 
   // The headset panel moved to 72 Hz: a verified temporary apply on the promoted display.
+  EXPECT_TRUE(process_.live_video_mode_needs_display_change(3840, 2160, 72000));
   EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::applied);
   EXPECT_EQ(mode_requests, applied_72);
+  EXPECT_EQ(original_->fps, 72000);
 
-  // An exclusive-fullscreen application moved the display to another rate; the repeated request
-  // restores the session mode, again temporarily.
+  // An exclusive-fullscreen application then moved the display to another rate. The client's
+  // repeated request is not a mode change: it is acknowledged without querying, probing, or
+  // applying a mode, and the application keeps the mode it chose.
   current.dmDisplayFrequency = 60;
   mode_requests.clear();
-  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::applied);
-  EXPECT_EQ(mode_requests, applied_72);
-  EXPECT_EQ(current.dmDisplayFrequency, 72u);
+  queries = 0;
+  operations_.clear();
+  EXPECT_FALSE(process_.live_video_mode_needs_display_change(3840, 2160, 72000));
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::unchanged);
+  EXPECT_TRUE(mode_requests.empty());
+  EXPECT_EQ(queries, 0);
+  EXPECT_EQ(current.dmDisplayFrequency, 60u);
+  EXPECT_EQ(original_->fps, 72000);
+  // Only the exact binding is refreshed: no HDR request or topology promotion either.
+  EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::refresh_binding, operation_e::refresh_binding}));
+
+  // A real change applies as before, from whatever mode the application left in place.
+  EXPECT_TRUE(process_.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 90000, 11), result_e::applied);
+  EXPECT_EQ(mode_requests, applied_90);
+  EXPECT_EQ(current.dmDisplayFrequency, 90u);
+  EXPECT_EQ(original_->fps, 90000);
   // The promoted display's mode is never saved: not even the topology gate is consulted.
   EXPECT_EQ(saves, 0);
   EXPECT_FALSE(proc::process_test_access::saved_session_mode(process_));
 
-  // An unchanged request neither applies nor saves anything.
+  // A locked session keeps a real change retryable and leaves the display untouched.
   mode_requests.clear();
-  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::unchanged);
-  EXPECT_TRUE(mode_requests.empty());
-
-  // A locked session is retryable and leaves the drifted display untouched.
   current.dmDisplayFrequency = 60;
   proc::process_test_access::observe_display_settings_unavailable(process_, [] {
     return true;
@@ -856,9 +935,172 @@ TEST_F(RetainedDisplayPauseTest, LiveChangeAndDriftRestoreKeepThePromotedDisplay
   EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::failed);
   EXPECT_TRUE(mode_requests.empty());
   EXPECT_EQ(current.dmDisplayFrequency, 60u);
+  EXPECT_EQ(original_->fps, 90000);
   EXPECT_EQ(saves, 0);
   EXPECT_EQ(std::ranges::count(operations_, operation_e::restore), 0);
   EXPECT_EQ(std::ranges::count(operations_, operation_e::retire), 0);
+}
+
+TEST_F(RetainedDisplayPauseTest, ResumeRestoresTheRequestedModeThatRepeatedLiveRequestsLeaveAlone) {
+  original_->width = 3840;
+  original_->height = 2160;
+  original_->fps = 90000;
+  proc::process_test_access::retain(process_, original_);
+  DEVMODEW current {};
+  current.dmPelsWidth = 3840;
+  current.dmPelsHeight = 2160;
+  current.dmDisplayFrequency = 72;  // An exclusive-fullscreen game chose 72 Hz.
+  proc::process_test_access::observe_display_mode(process_, [&](std::wstring_view) {
+    return std::optional {current};
+  });
+  std::vector<std::pair<bool, int>> mode_requests;
+  proc::process_test_access::configure_display_mode(process_, [&](std::wstring_view, int width, int height, int fps, bool probe) {
+    mode_requests.emplace_back(probe, fps);
+    if (!probe) {
+      current.dmPelsWidth = width;
+      current.dmPelsHeight = height;
+      current.dmDisplayFrequency = fps / 1000;
+    }
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+
+  // Live: the client's repeated 90 Hz request does not push the game out of its mode.
+  EXPECT_FALSE(process_.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 90000, 11), proc::live_video_mode_result_e::unchanged);
+  EXPECT_TRUE(mode_requests.empty());
+  EXPECT_EQ(current.dmDisplayFrequency, 72u);
+
+  // A resume is a new start: the same requested mode is applied to the drifted display.
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  auto resumed = make_launch(22);
+  resumed->width = 3840;
+  resumed->height = 2160;
+  resumed->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  EXPECT_EQ(mode_requests, (std::vector<std::pair<bool, int>> {{true, 90000}, {false, 90000}}));
+  EXPECT_EQ(current.dmDisplayFrequency, 90u);
+  EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
+}
+
+TEST_F(RetainedDisplayPauseTest, UnprovenLiveChangeRequiresReconnectForEveryRequestUntilResume) {
+  original_->width = 3840;
+  original_->height = 2160;
+  original_->fps = 90000;
+  proc::process_test_access::retain(process_, original_);
+  DEVMODEW current {};
+  current.dmPelsWidth = 3840;
+  current.dmPelsHeight = 2160;
+  current.dmDisplayFrequency = 90;
+  int queries = 0;
+  proc::process_test_access::observe_display_mode(process_, [&](std::wstring_view) {
+    ++queries;
+    return std::optional {current};
+  });
+  std::vector<int> failing_sets;
+  std::vector<std::pair<bool, int>> mode_requests;
+  proc::process_test_access::configure_display_mode(process_, [&](std::wstring_view, int width, int height, int fps, bool probe) {
+    mode_requests.emplace_back(probe, fps);
+    if (probe) {
+      return DISP_CHANGE_SUCCESSFUL;
+    }
+    if (std::ranges::find(failing_sets, fps) != failing_sets.end()) {
+      return DISP_CHANGE_FAILED;
+    }
+    current.dmPelsWidth = width;
+    current.dmPelsHeight = height;
+    current.dmDisplayFrequency = fps / 1000;
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+  using result_e = proc::live_video_mode_result_e;
+
+  // A failed change with a proven rollback stays retryable, and the edge rule still applies.
+  failing_sets = {72000};
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::failed);
+  EXPECT_EQ(mode_requests, (std::vector<std::pair<bool, int>> {{true, 72000}, {false, 72000}, {false, 90000}}));
+  mode_requests.clear();
+  EXPECT_FALSE(process_.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 90000, 11), result_e::unchanged);
+  EXPECT_TRUE(mode_requests.empty());
+
+  // Windows accepts the probe but neither the 72 Hz set nor the rollback to 90 Hz: the display is
+  // unproven, the session keeps its requested mode, and the client is told to reconnect.
+  failing_sets = {72000, 90000};
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::needs_reconnect);
+  EXPECT_EQ(mode_requests, (std::vector<std::pair<bool, int>> {{true, 72000}, {false, 72000}, {false, 90000}}));
+  EXPECT_EQ(original_->fps, 90000);
+
+  // Neither a repeated request of the session's mode nor a changed one is acknowledged on that
+  // display, and neither queries, probes, nor sets a mode.
+  mode_requests.clear();
+  queries = 0;
+  EXPECT_TRUE(process_.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 90000, 11), result_e::needs_reconnect);
+  EXPECT_TRUE(process_.live_video_mode_needs_display_change(3840, 2160, 60000));
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 60000, 11), result_e::needs_reconnect);
+  EXPECT_TRUE(mode_requests.empty());
+  EXPECT_EQ(queries, 0);
+
+  // The client reconnects. The resume proves the display again, and the edge rule resumes.
+  failing_sets.clear();
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  auto resumed = make_launch(22);
+  resumed->width = 3840;
+  resumed->height = 2160;
+  resumed->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  mode_requests.clear();
+  EXPECT_FALSE(process_.live_video_mode_needs_display_change(3840, 2160, 90000));
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 90000, 22), result_e::unchanged);
+  EXPECT_TRUE(mode_requests.empty());
+}
+
+TEST_F(RetainedDisplayPauseTest, LiveRequestsUseTheSessionRenderScaleAndWirePrecision) {
+  // The client streams 2560x1440 at a 150% render scale, and its launch rate is finer than the
+  // live wire's 0.01 Hz.
+  original_->width = 3840;
+  original_->height = 2160;
+  original_->fps = 59997;
+  original_->scale_factor = 150;
+  proc::process_test_access::retain(process_, original_);
+  DEVMODEW current {};
+  current.dmPelsWidth = 3840;
+  current.dmPelsHeight = 2160;
+  current.dmDisplayFrequency = 60;
+  proc::process_test_access::observe_display_mode(process_, [&](std::wstring_view) {
+    return std::optional {current};
+  });
+  std::vector<std::array<int, 4>> mode_requests;
+  proc::process_test_access::configure_display_mode(process_, [&](std::wstring_view, int width, int height, int fps, bool probe) {
+    mode_requests.push_back({probe ? 1 : 0, width, height, fps});
+    if (!probe) {
+      current.dmPelsWidth = width;
+      current.dmPelsHeight = height;
+      current.dmDisplayFrequency = fps / 1000;
+    }
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+  using result_e = proc::live_video_mode_result_e;
+
+  // The client's reconfirm of its stream mode repeats the session's requested mode.
+  EXPECT_FALSE(process_.live_video_mode_needs_display_change(2560, 1440, 60000));
+  EXPECT_EQ(process_.apply_live_video_mode(2560, 1440, 60000, 11), result_e::unchanged);
+  EXPECT_TRUE(mode_requests.empty());
+  EXPECT_EQ(original_->width, 3840);
+  EXPECT_EQ(original_->fps, 59997);
+
+  // A real change renders at the same scale: a 1920x1080 stream gets a 2880x1620 display.
+  EXPECT_TRUE(process_.live_video_mode_needs_display_change(1920, 1080, 60000));
+  EXPECT_EQ(process_.apply_live_video_mode(1920, 1080, 60000, 11), result_e::applied);
+  EXPECT_EQ(mode_requests, (std::vector<std::array<int, 4>> {{1, 2880, 1620, 60000}, {0, 2880, 1620, 60000}}));
+  EXPECT_EQ(original_->width, 2880);
+  EXPECT_EQ(original_->height, 1620);
+  EXPECT_EQ(original_->fps, 60000);
+
+  // Its own reconfirm is again a repeat.
+  mode_requests.clear();
+  EXPECT_FALSE(process_.live_video_mode_needs_display_change(1920, 1080, 60000));
+  EXPECT_EQ(process_.apply_live_video_mode(1920, 1080, 60000, 11), result_e::unchanged);
+  EXPECT_TRUE(mode_requests.empty());
 }
 
 TEST_F(RetainedDisplayPauseTest, UnverifiedSessionModeIsNeverSaved) {
@@ -924,6 +1166,14 @@ TEST(ProcessDisplayModeContract, SessionModeIsSavedOnlyBeforePromotionAndModeSet
   ASSERT_NE(live, std::string::npos);
   ASSERT_NE(live_end, std::string::npos);
   EXPECT_EQ(source.substr(live, live_end - live).find(save_call), std::string::npos);
+
+  // Live requests are edge-triggered: neither the hint nor the apply restores a drifted mode. Only
+  // a resume, which is a new start, reports restoring the requested mode after drift.
+  const auto hint = source.find("bool proc_t::live_video_mode_needs_display_change(");
+  ASSERT_NE(hint, std::string::npos);
+  ASSERT_LT(hint, live);
+  EXPECT_EQ(source.substr(hint, live_end - hint).find("Restoring the requested"), std::string::npos);
+  EXPECT_NE(source.substr(resume, hint - resume).find("Restoring the requested virtual-display mode on resume"), std::string::npos);
 
   // Exactly those two call sites plus the definition exist.
   std::size_t save_mentions = 0;
@@ -1489,6 +1739,7 @@ TEST(ProcessTest, FailedPhysicalHdrResumeRestoresPreviousHdrAndTransportIdentity
   original->width = 1920;
   original->height = 1080;
   original->fps = 60000;
+  original->scale_factor = 100;
   proc::process_test_access::retain(process, original);
   auto cleanup = util::fail_guard([&]() {
     proc::process_test_access::clear(process);

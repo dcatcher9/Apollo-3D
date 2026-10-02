@@ -87,12 +87,31 @@ disconnect or teardown.
 
 ## Display mode changes
 
-When a client sends a live mode request, the host resolves its exact owned display and verifies
-Windows' actual resolution and refresh rate before treating a repeated request as unchanged. If
-the game changed the display from the requested 90 Hz to 72 Hz, a subsequent 90 Hz request reapplies
-90 Hz through the existing verified mode transaction. The host does not enforce an earlier refresh
-rate without a client mode request; topology repair therefore cannot fight an explicit new mode
-change. Physical monitors and local AR hardware remain under their existing owners.
+Live display-mode changes are edge-triggered by the client's requested mode. A live mode request
+carries the client's stream size and a refresh rate in 0.01 Hz steps. The host scales that size by
+the client's render scale exactly as launch and resume do, and compares refresh rates at the
+request's 0.01 Hz precision. The request changes the virtual display only when its scaled
+resolution or its refresh rate differs from the session's current requested mode; the change then
+runs through the verified mode transaction. A request that repeats the current requested mode, such
+as a client reconfirming its presentation after an encoder rebuild, is acknowledged as applied once
+the encoder rebuilds. The exact owned display binding is re-resolved and republished when Windows
+renamed it, but the host does not query, verify, or restore the display mode. If a game in
+exclusive fullscreen changed the display from the requested 90 Hz to 72 Hz, a repeated 90 Hz
+request therefore leaves 72 Hz in place: reapplying 90 Hz would push the game out of exclusive
+fullscreen, and its re-entry would change the mode again. The display keeps the game's mode until
+the client requests a different mode or reconnects. The host also does not enforce an earlier
+refresh rate without a client mode change; topology repair therefore cannot fight an explicit new
+mode change.
+
+A repeated request relies on the display having received the requested mode. When a live change
+fails and the host cannot prove that its rollback restored the previous mode, HDR state, and
+topology, it asks the client to reconnect. It answers every later live request, repeated or
+changed, the same way until a resume or a new launch proves the display again.
+
+A new session creates the display at its requested mode. A resume is also a new start: it compares
+the current Windows mode as well as the remembered requested mode and applies the requested mode
+(see [Display restoration](#display-restoration)), so a reconnect restores 90 Hz. Physical monitors
+and local AR hardware remain under their existing owners.
 
 The host applies every remote virtual-display mode temporarily. It never asks Windows to save the
 active display configuration (`SDC_SAVE_TO_DATABASE`), because a saved configuration contains the
@@ -111,14 +130,14 @@ display, after creation and after a mode-changing resume, and only while the des
 user's own topology: every output in the [restoration](#display-restoration) record is active and
 the original primary is at the desktop origin. When Windows has already restored a remembered
 session topology, the host logs and skips the save. It does not repeat a save of the same mode.
-Live changes and drift restores run on the promoted display, so their modes stay temporary. A failed
-save is logged and leaves the temporary mode in place.
+Live changes run on the promoted display, so their modes stay temporary. A failed save is logged
+and leaves the temporary mode in place.
 
-Each drift log line reports the drifted rate, which an application or Windows may have chosen, and
-whether the session mode is the saved default. A drift with `saved as default: yes` shows which
-store Windows reads only when the application is known to have requested an unspecified rate, for
-example from its ReShade or DXGI log. Both the effect and the scope of the save still need live
-validation: on a test machine, export
+Only a resume restores drift. Its log line reports the drifted rate, which an application or Windows
+may have chosen, and whether the session mode is the saved default. A drift with
+`saved as default: yes` shows which store Windows reads only when the application is known to have
+requested an unspecified rate, for example from its ReShade or DXGI log. Both the effect and the
+scope of the save still need live validation: on a test machine, export
 `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration` from an elevated shell before
 and after a session, and confirm that no entry with physical displays inactive or the virtual
 display primary was added.
