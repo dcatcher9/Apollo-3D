@@ -6,6 +6,7 @@
 #include "test_game3d_render_input.h"
 #include "test_game3d_debug_dump_runtime.h"
 #include "test_game3d_budget.h"
+#include "test_game3d_ui_pin_band.h"
 #include <atomic>
 
 namespace {
@@ -1002,6 +1003,46 @@ namespace {
       << " churn_scans=" << submissions - before_churn << " pending_discarded=" << discarded_pending
       << " minimum_submission_interval_ms=100 frozen_plane_pixels=1\n";
 
+    // The conflict probe counts only texels the mask pins exactly, at or above
+    // the soft pin knee; fainter UI blends toward scene depth and never places
+    // the plane. PQ's two-bit presented alpha has no value below the knee.
+    if (fixture.color != 3) {
+      ++input.epoch;
+      fixture.source_bytes = original;
+      covered = 0;
+      // Four levels in diagonal stripes: opaque, the 8-bit code or half just
+      // below the knee 1/gain, the first one at or above it, and faint.
+      const float gain = float(sunshine_game3d::shader_marker(sunshine_game3d::renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"));
+      const auto knee_code = std::uint8_t(std::ceil(255.f / gain));
+      const float knee = 1.f / gain;
+      std::uint32_t knee_bits;
+      std::memcpy(&knee_bits, &knee, sizeof(knee_bits));
+      // The least half at or above 1/gain (a normal half for any gain up to 2^14).
+      const auto knee_half = std::uint16_t((((knee_bits >> 23 & 255u) - 112u) << 10 | (knee_bits & 0x7fffffu) >> 13) +
+        ((knee_bits & 0x1fffu) != 0));
+      const std::uint8_t codes[]{255, std::uint8_t(knee_code - 1), knee_code, 8};
+      const std::uint16_t halves[]{0x3400, std::uint16_t(knee_half - 1), knee_half, 0x2c00}; // 1/4 and 1/16 outside.
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const bool ui = x >= width / 3 && x < width / 2 && y >= height / 4 && y < height * 3 / 4;
+        const unsigned level = (x + y) % 4;
+        covered += ui && level % 2 == 0 && central(x, y);
+        const auto pixel = size_t(y) * width + x;
+        if (fixture.color == 1) fixture.source_bytes[pixel * 4 + 3] = ui ? codes[level] : 0;
+        else {
+          const std::uint16_t alpha = ui ? halves[level] : 0;
+          std::memcpy(fixture.source_bytes.data() + pixel * 8 + 6, &alpha, sizeof(alpha));
+        }
+      }
+      upload();
+      ui_x = (width / 3 + width / 2) / 2; ui_y = height / 2;
+      ui_x += (4 - (ui_x + ui_y) % 4) % 4; // An exactly pinned (opaque) texel.
+      current = sample(11000);
+      require(current.decision.covered_pixels == covered && covered > 0,
+        "D3D12 conflict probe miscounted UI around the soft pin knee");
+      report << "adaptive-ui soft-knee D3D12 covered=" << covered << " knee_code=" << unsigned(knee_code)
+        << " knee_half=0x" << std::hex << knee_half << std::dec << " below_knee_uncounted=1\n";
+    }
+
     std::vector<float> restored(size_t(width) * height);
     require(original_depth.size() == restored.size() * sizeof(float), "Adaptive fixture depth extent changed");
     std::memcpy(restored.data(), original_depth.data(), original_depth.size()); fixture.upload_depth(restored);
@@ -1068,7 +1109,7 @@ namespace {
       for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
         const auto pixel = size_t(y) * width + x;
         const bool ui = covered_at(x, y); covered += ui;
-        const std::uint16_t half = ui ? 0x3400 : 0; // Soft alpha > 0 is still covered.
+        const std::uint16_t half = ui ? 0x3400 : 0; // Alpha 0.25 is above the soft pin knee: pinned exactly.
         if (stride == 1) mask_bytes[pixel] = ui ? 64 : 0;
         else if (stride == 2) std::memcpy(mask_bytes.data() + pixel * stride, &half, 2);
         else if (byte_color_mask) {
@@ -1077,7 +1118,9 @@ namespace {
           if (format == DXGI_FORMAT_B8G8R8A8_UNORM) {
             // Exercise Hogwarts' typed snapshot format with independently
             // varying B/G/R and sparse soft/full alpha, never inferred RGB.
-            const std::uint8_t alpha_levels[]{1, 64, 255};
+            // Every level pins exactly (at or above 32/255, the soft pin knee),
+            // as the opaque presented-alpha reference does.
+            const std::uint8_t alpha_levels[]{32, 64, 255};
             auto *bgra = mask_bytes.data() + pixel * stride;
             bgra[0] = static_cast<std::uint8_t>((x * 3 + y * 7 + 17) & 255);
             bgra[1] = static_cast<std::uint8_t>((x * 11 + y * 5 + 31) & 255);
@@ -1230,6 +1273,71 @@ namespace {
     fixture.source_upload->Unmap(0, nullptr); write_native_source(fixture, backbuffer);
     report << "typed-ui D3D12 R8_selective=1 R16_white=1 R32_black=1 RGBA_alpha_not_red=1 RGBA8_alpha=1 BGRA8_alpha=1 exact_frozen_pixels=1 copy_once=1 automatic_selective_without_review=1 full_empty_rejected=1 resolved_mask_checked=1 manual_modes=1 typed_red_v7_dump=1 typed_bgra_v7_dump=1 selective_alpha_binary_exact=1 source_immutable_after_dump=1\n";
     std::puts("PASS D3D12 typed UI masks: R8/R16/R32/RGBA/BGRA, explicit channels, automatic selective admission and full/empty rejection, exact field/SBS parity");
+  }
+
+  // The soft UI pin band on actual D3D12 GPU fields, through an R32 red mask.
+  void check_ui_pin_band_d3d12(fixture_t &fixture, sunshine_game3d::renderer &renderer, std::ostream &report) {
+    using namespace sunshine_game3d;
+    auto *queue = observed.runtime->get_command_queue();
+    auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
+    const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+    const auto original_depth = fixture.read(fixture.depth.p);
+    auto parameters = native_cases().front().parameters;
+    parameters.strength = 100;
+    const ui_plane_parameters plane{ui_plane_mode::display_fraction, .25f};
+    com_ptr<ID3D12Resource> mask;
+    fixture.texture(mask, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    std::uint64_t capture = 20000;
+    sunshine_game3d_test::ui_pin_band_fixture band;
+    band.width = width; band.height = height;
+    band.gain = float(shader_marker(renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"));
+    band.depth = [&](bool structured) {
+      std::vector<float> depth(size_t(width) * height, 0.f);
+      if (structured) for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const bool foreground = x > width / 3 && x < width / 2 && y > height / 5 && y < height * 4 / 5;
+        depth[size_t(y) * width + x] = foreground ? .085f : .0005f + .016f * float(x) / width;
+      }
+      fixture.upload_depth(depth);
+    };
+    band.render = [&](const std::vector<float> *alpha) {
+      api::resource_view view{};
+      if (alpha) {
+        com_ptr<ID3D12Resource> upload;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        fixture.fill_upload(upload, mask->GetDesc(), alpha->data(), footprint);
+        fixture.begin_commands();
+        transition(fixture.commands.p, mask.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+        from.pResource = upload.p; from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; from.PlacedFootprint = footprint;
+        to.pResource = mask.p; to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        fixture.commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        transition(fixture.commands.p, mask.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        fixture.submit();
+        view = renderer.prepare_ui_source(++capture, [&](api::resource destination) {
+          auto *target = reinterpret_cast<ID3D12Resource *>(destination.handle);
+          auto *commands = reinterpret_cast<ID3D12GraphicsCommandList *>(queue->get_immediate_command_list()->get_native());
+          transition(commands, mask.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+          transition(commands, target, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+          commands->CopyResource(target, mask.p);
+          transition(commands, target, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+          transition(commands, mask.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+          return true;
+        }, api::format::r32_float);
+        require(view.handle, "UI pin band D3D12 mask unavailable");
+      }
+      write_native_source(fixture, backbuffer);
+      require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), source, fixture.depth_view,
+        parameters, alpha != nullptr, view, plane, nullptr, nullptr, ui_mask_channel::red), "UI pin band D3D12 render failed");
+      queue->flush_immediate_command_list(); renderer.finish_present(); queue->wait_idle();
+      const auto bytes = fixture.read(reinterpret_cast<ID3D12Resource *>(renderer.diagnostics().final_field.handle));
+      std::vector<float> field(bytes.size() / sizeof(float));
+      std::memcpy(field.data(), bytes.data(), field.size() * sizeof(float));
+      return field;
+    };
+    sunshine_game3d_test::check_ui_pin_band(band, report, "D3D12");
+    std::vector<float> restored(size_t(width) * height);
+    std::memcpy(restored.data(), original_depth.data(), original_depth.size()); fixture.upload_depth(restored);
+    write_native_source(fixture, backbuffer);
   }
 
   void check_native_parity(fixture_t &fixture, const fs::path &directory) {
@@ -1773,6 +1881,7 @@ namespace {
     check_automatic_hudless_d3d12(fixture, renderer, report);
     check_adaptive_ui_d3d12(fixture, renderer, dump, report, directory);
     check_typed_ui_masks_d3d12(fixture, renderer, dump, report, directory);
+    check_ui_pin_band_d3d12(fixture, renderer, report);
     std::puts("PASS nearest-UI D3D12 current GPU scalar, corner coverage, both depth directions, floor/strength and v3 dump bindings");
     require(observed.renders == effect_renders, "An FX technique ran during native parity");
     owner_queue->wait_idle();

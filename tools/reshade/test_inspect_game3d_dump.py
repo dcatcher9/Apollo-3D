@@ -306,7 +306,8 @@ class GameDumpReaderTest(unittest.TestCase):
         self.assertAlmostEqual(metrics["flattening_px_per_pixel"], 10 * 0.64 / (width * 8), places=6)
         # Moved glyph bodies land off the plane; a move out of the frame tears nothing.
         self.assertEqual(metrics["torn_glyph_pixels"],
-                         {"up_1": 10, "up_2": 10, "up_4": 10, "down_4": 0, "right_16": 10})
+                         {"up_1": 10, "up_2": 10, "up_4": 10, "down_4": 0, "right_4": 4, "up_8": 0, "down_8": 0,
+                          "right_8": 8, "up_8_right_8": 0, "right_16": 10})
 
     def test_pin_metrics_measure_a_replayed_field(self):
         self.pin_dump()
@@ -329,6 +330,58 @@ class GameDumpReaderTest(unittest.TestCase):
         field = self.root / "collar.bin"
         field.write_bytes(final.tobytes())
         self.assertEqual(reader.pin_metrics(self.root, field=field)["bands"][0]["max_new_step_columns"], 0)
+
+    def late_layer_dump(self, record=False, recorded_margin=2):
+        """pin_dump with a consumed mask that is the layer's alpha with a 2-texel late-layer margin, pinned rows 2-6."""
+        width, plane = self.pin_dump()
+        manifest = json.loads((self.root / "manifest.json").read_text(encoding="utf-8"))
+        layer = np.fromfile(self.root / "ui_layer_candidate_0.bin", np.uint8).reshape(8, width, 4)
+        mask = reader.late_layer_mask(layer[:, :, 3] / np.float32(255), 2)
+        self.assertEqual(mask[:, 0].tolist(), [0, 0, 1, 1, 1, 1, 1, 0])
+        self.assertEqual(mask[2, :14].tolist(), [1] * 12 + [0, 0])
+        (self.root / "ui_source_color.bin").write_bytes(mask.tobytes())
+        final = np.fromfile(self.root / "final_field.bin", np.float32).reshape(8, width)
+        final[2:7, :10] = plane
+        (self.root / "final_field.bin").write_bytes(final.tobytes())
+        detection = dict(flags=7, late_margin=recorded_margin)
+        if record:
+            manifest["ui_detection_replay_mask"] = detection
+        else:
+            manifest["producer_metadata"]["replay"].update(
+                ui_detection=dict(flags=detection["flags"]), ui_pin=dict(late_margin=recorded_margin))
+        (self.root / "manifest.json").write_text(json.dumps(manifest))
+        return width, plane
+
+    def test_pin_metrics_count_late_layer_margin_as_scene(self):
+        texture = 10 / 1023
+        for record in (False, True):
+            with self.subTest(record=record):
+                width, plane = self.late_layer_dump(record)
+                metrics = reader.pin_metrics(self.root)
+                self.assertEqual((metrics["alpha"], metrics["late_margin"]), ("ui_layer_candidate_0", 2))
+                # The margin rows' outer edges tear scene, and their 4 x 10 pinned pixels are flattened scene.
+                margin_px = float(plane) * width
+                self.assertAlmostEqual(metrics["scene_tear"], (20 * 0.64 + 20 * margin_px) * texture, places=5)
+                self.assertAlmostEqual(metrics["flattening_px_per_pixel"], (10 * 0.64 + 40 * margin_px) / (width * 8),
+                                       places=6)
+        # A margin that does not reproduce the consumed mask leaves it as the alpha: margin rows count as UI.
+        width, _ = self.late_layer_dump(recorded_margin=1)
+        metrics = reader.pin_metrics(self.root)
+        self.assertEqual(metrics["alpha"], "ui_source_color")
+        self.assertAlmostEqual(metrics["scene_tear"], 20 * 0.64 * texture, places=5)
+        self.assertAlmostEqual(metrics["flattening_px_per_pixel"], 10 * 0.64 / (width * 8), places=6)
+
+    def test_late_layer_mask_follows_the_shader_value_rule(self):
+        alpha = np.array([[np.nan], [np.inf], [-1], [1e-40], [2.5], [0.25], [0]], np.float32)
+        self.assertEqual(reader.late_layer_mask(alpha, 0)[:, 0].tolist(), [0, 0, 0, 0, 1, 0.25, 0])
+        self.assertEqual(reader.late_layer_mask(alpha, 1)[:, 0].tolist(), [0, 0, 0, 1, 1, 1, 0.25])
+        # The margin is a square: rows and columns, clipped at the frame edges.
+        square = np.zeros((5, 6), np.float32)
+        square[2, 1] = 0.5
+        expected = np.zeros((5, 6), np.float32)
+        expected[1:4, 0:3] = 0.5
+        np.testing.assert_array_equal(reader.late_layer_mask(square, 1), expected)
+        np.testing.assert_array_equal(reader.late_layer_mask(square.T, 1), expected.T)
 
     def test_cli_reports_pin_metrics(self):
         self.pin_dump()

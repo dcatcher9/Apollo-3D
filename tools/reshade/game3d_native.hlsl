@@ -24,6 +24,11 @@
 #define SUNSHINE_PACKED_EYES 1
 // UI pinning groups own eight adjacent rows.
 #define SUNSHINE_UI_PIN_LINE_GROUPS 8
+// UI mask alpha pins with weight saturate(gain * alpha) through a soft band;
+// the one-frame-late UI layer's mask is its alpha dilated by this many texels
+// in rows and in columns (docs/reshade-sbs.md, UI pin band).
+#define SUNSHINE_UI_SOFT_PIN_GAIN 8
+#define SUNSHINE_UI_LATE_MARGIN 6
 // Automatic UI detection writes this many decision texels; its statistics
 // rows hold this many scene-evidence images (docs/reshade-sbs.md, UI
 // detection flags and decision texels).
@@ -93,7 +98,8 @@ Texture2D<float4> SunshineHUDless : register(t14);
 // Sunshine_UIDetectionFlags (docs/reshade-sbs.md, UI detection flags and
 // decision texels), mirrored from game3d_ui_detection_contract.h. Stored bits
 // describe the UI color slot's source: it must be premultiplied, with a float
-// layer's HDR headroom, and is the one-frame-late offscreen UI layer.
+// layer's HDR headroom, and is the one-frame-late offscreen UI layer (whose
+// selected mask gets SUNSHINE_UI_LATE_MARGIN texels of motion margin per axis).
 // Per-frame bits ride in one render's pushed word only.
 #define SUNSHINE_UI_STORED_PREMULTIPLIED 0x1u
 #define SUNSHINE_UI_STORED_HDR_HEADROOM 0x2u
@@ -290,15 +296,76 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     SunshineAlphaCoverageStore[uint2(3,0)] = invalid;
     SunshineAlphaCoverageStore[uint2(4,0)] = uint4(lit, Sunshine_UITrustedAlpha, 0u, 0u);
 }
-[numthreads(8, 8, 1)]
-void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
+#if SUNSHINE_UI_LATE_MARGIN > 0
+// The offscreen UI layer is copied before the game clears it, so its UI is one
+// frame late, and it may have moved in any direction since. Its mask is the
+// alpha dilated by SUNSHINE_UI_LATE_MARGIN texels in rows and in columns (the
+// maximum over a square window), so UI moving by up to that much per frame in
+// each axis stays pinned. Finite positive alpha counts up to one and anything
+// else as zero, so the margin never pins less than the raw alpha would. The
+// tiles above read raw alpha: coverage, invalid counts and trust never see the
+// margin. Each group stages its texels plus the margin on every side once,
+// then takes the maximum along rows and then along columns.
+#define SUNSHINE_UI_LATE_APRON (8 + 2 * SUNSHINE_UI_LATE_MARGIN)
+// One lane per staged apron row: the 64 lanes cover a margin of at most 28.
+#if SUNSHINE_UI_LATE_APRON > 64
+#error SUNSHINE_UI_LATE_MARGIN exceeds the 64 staged apron rows of an 8x8 group
+#endif
+groupshared float SunshineUILateLayerApron[SUNSHINE_UI_LATE_APRON][SUNSHINE_UI_LATE_APRON];
+groupshared float SunshineUILateLayerRowMax[SUNSHINE_UI_LATE_APRON][8];
+float SunshineUILateLayerAlpha(int x, int y)
 {
-    if (id.x >= BUFFER_WIDTH || id.y >= BUFFER_HEIGHT) return;
+    // A clamped texel repeats an edge texel that every window there already holds.
+    int2 texel = clamp(int2(x, y), 0, int2(BUFFER_WIDTH, BUFFER_HEIGHT) - 1);
+    float alpha = SunshineUIColorAlpha.Load(int3(texel, 0)).a;
+    return SunshineCameraFinite(alpha) && alpha > 0.0 ? min(alpha, 1.0) : 0.0;
+}
+#endif
+[numthreads(8, 8, 1)]
+void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID, uint3 thread : SV_GroupThreadID)
+{
+    // No early return: the late-layer margin synchronizes the whole group.
+    bool active = id.x < BUFFER_WIDTH && id.y < BUFFER_HEIGHT;
     uint source = SunshineUIDetectionSampler.Load(int3(0,0,0)).x;
     float mask = 0.0;
     int3 at = int3(id.xy, 0);
     // Load only the selected candidate (the same channel SunshineUIDetectionAlpha reads).
     if (source == 1u) mask = SunshineUIDedicatedAlpha.Load(at).r;
+#if SUNSHINE_UI_LATE_MARGIN > 0
+    // One decision texel and the constants: uniform across the group.
+    else if (source == 2u && (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_LATE_LAYER)) {
+        int2 corner = int2(id.xy - thread.xy) - SUNSHINE_UI_LATE_MARGIN;
+        uint lane = thread.y * 8u + thread.x;
+        [unroll]
+        for (uint fill = 0u; fill < (SUNSHINE_UI_LATE_APRON * SUNSHINE_UI_LATE_APRON + 63u) / 64u; ++fill) {
+            uint texel = lane + fill * 64u;
+            uint2 staged = uint2(texel % SUNSHINE_UI_LATE_APRON, texel / SUNSHINE_UI_LATE_APRON);
+            if (texel < SUNSHINE_UI_LATE_APRON * SUNSHINE_UI_LATE_APRON)
+                SunshineUILateLayerApron[staged.y][staged.x] = SunshineUILateLayerAlpha(corner.x + int(staged.x), corner.y + int(staged.y));
+        }
+        GroupMemoryBarrierWithGroupSync();
+        // One thread per staged row takes its 8 window maxima from registers,
+        // which reads group memory far less than a window per texel.
+        if (lane < SUNSHINE_UI_LATE_APRON) {
+            float staged_row[SUNSHINE_UI_LATE_APRON];
+            [unroll]
+            for (uint column = 0u; column < SUNSHINE_UI_LATE_APRON; ++column)
+                staged_row[column] = SunshineUILateLayerApron[lane][column];
+            [unroll]
+            for (uint output = 0u; output < 8u; ++output) {
+                float widest = 0.0;
+                [unroll]
+                for (uint reach = 0u; reach <= 2u * SUNSHINE_UI_LATE_MARGIN; ++reach)
+                    widest = max(widest, staged_row[output + reach]);
+                SunshineUILateLayerRowMax[lane][output] = widest;
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+        [unroll]
+        for (uint offset = 0u; offset <= 2u * SUNSHINE_UI_LATE_MARGIN; ++offset)
+            mask = max(mask, SunshineUILateLayerRowMax[thread.y + offset][thread.x]);
+    }
+#endif
     else if (source == 2u) mask = SunshineUIColorAlpha.Load(at).a;
     else if (source == 3u) mask = SunshineUIBackbufferAlpha.Load(at).a;
     else if (source == 4u) mask = SunshineSourceSampler.Load(at).a;
@@ -307,7 +374,7 @@ void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
         bool finite;
         mask = SunshineHUDlessDifference(id.xy, finite) > Sunshine_UIDifferenceThreshold && finite ? 1.0 : 0.0;
     }
-    SunshineHostCandidateStore[id.xy] = mask;
+    if (active) SunshineHostCandidateStore[id.xy] = mask;
 }
 
 // Fixed-size exact coverage observation. Every source texel participates; the
@@ -514,6 +581,13 @@ bool SunshineHostWarpActive()
 bool SunshineSourceUI(uint x, uint y) {
     float alpha = SunshineSelectedUIAlpha(uint2(x, y));
     return SunshineCameraFinite(alpha) && alpha > 0.0;
+}
+
+// How firmly a texel pins: zero exactly where SunshineSourceUI is false, one
+// from alpha 1/SUNSHINE_UI_SOFT_PIN_GAIN up, in proportion below.
+float SunshineUIPinWeight(uint x, uint y) {
+    float alpha = SunshineSelectedUIAlpha(uint2(x, y));
+    return SunshineCameraFinite(alpha) && alpha > 0.0 ? saturate(alpha * SUNSHINE_UI_SOFT_PIN_GAIN) : 0.0;
 }
 
 bool SunshineUINearestActive() {
@@ -948,30 +1022,49 @@ float SunshineUIPlaneParallax() {
     return SunshineBoundFinalParallax(parallax);
 }
 
-// UI pinning runs as its own pass after the scene field. Each group owns
-// eight adjacent rows split into eight chunks; a look-ahead cursor finds the
-// nearest selected-UI texel on either side of every texel, so no row is held
-// in group memory.
-// {last UI index, first UI index} per chunk, and incoming {left, right}.
-groupshared int2 SunshineUIPinEnds[8u][8u];
-groupshared int2 SunshineUIPinCarries[8u][8u];
+// UI pinning runs as its own pass after the scene field h. Each texel u with
+// pin weight w(u) > 0 has slack r(u) = (1 - w(u))|h(u) - p| around the UI plane
+// p, and the field becomes clamp(h, p - b, p + b) with
+// b(x) = min_u r(u) + 0.5*max(|x - u| - 1, 0)/W (docs/reshade-sbs.md, UI pin
+// band). Bilinear color reaches one texel beyond a positive-alpha texel
+// center, so its neighbors (the collar) share its slack, and a neighboring
+// output cannot pull a faint copy of an antialiased glyph into otherwise
+// unmasked background. A bound is kept as an anchor texel a and a slack r and
+// evaluated in closed form, r + 0.5*|x - a|/W, so a binary mask reproduces the
+// distance rule 0.5*max(d - 1, 0)/W exactly.
+// Each group owns eight adjacent rows split into eight chunks; no row is held
+// in group memory. Per chunk: the anchor and slack reaching furthest right and
+// left, then the incoming {left, right} anchors and slacks; slack -1 is none.
+groupshared int2 SunshineUIPinAnchors[8u][8u];
+groupshared float2 SunshineUIPinSlack[8u][8u];
+groupshared int2 SunshineUIPinCarryAnchors[8u][8u];
+groupshared float2 SunshineUIPinCarrySlack[8u][8u];
 
-void SunshinePinSourceUI(uint x, uint y, int distance_pixels, float plane) {
-    // No UI exists in this row: leave the original field bit-for-bit intact.
-    if (distance_pixels >= BUFFER_WIDTH) return;
-    // Bilinear color reaches one texel beyond a positive-alpha texel center.
-    // Pin that support too, so a neighboring output cannot pull a faint copy
-    // of an antialiased glyph into otherwise unmasked background.
-    float bound = 0.5 * float(max(distance_pixels - 1, 0)) / float(BUFFER_WIDTH);
-    float value = SunshineHostFinalStore[int2(uint2(x, y))];
-    SunshineHostFinalStore[int2(uint2(x, y))] = distance_pixels <= 1 ? plane : clamp(value, plane - bound, plane + bound);
+float SunshineUIPinRamp(uint distance) {
+    return 0.5 * float(distance) / float(BUFFER_WIDTH);
 }
 
-// The first selected-UI texel in [x, end), or end when there is none.
-uint SunshineNextSourceUI(uint x, uint end, uint y) {
-    [loop]
-    while (x < end && !SunshineSourceUI(x, y)) ++x;
-    return x;
+// The bound an anchor with this slack puts on a texel this far away.
+float SunshineUIPinBound(float slack, uint distance) {
+    return slack + SunshineUIPinRamp(distance);
+}
+
+// The smaller of two slacks, either of which may be none.
+float SunshineUIPinMinSlack(float a, float b) {
+    return a < 0.0 ? b : b < 0.0 ? a : min(a, b);
+}
+
+// Zero slack is the binary distance rule in its own arithmetic, so a binary
+// mask pins bit for bit as before; a zero bound is the plane itself.
+float SunshineUIPinClamp(float value, float plane, float slack, uint distance) {
+    float ramp = SunshineUIPinRamp(distance);
+    if (slack <= 0.0) return distance == 0u ? plane : clamp(value, plane - ramp, plane + ramp);
+    return clamp(value, (plane - slack) - ramp, (plane + slack) + ramp);
+}
+
+// The slack of one texel of the original field, or -1 without UI.
+float SunshineUIPinSlackOf(float value, float weight, float plane) {
+    return weight > 0.0 ? (1.0 - weight) * abs(value - plane) : -1.0;
 }
 
 [numthreads(8u, 8u, 1)]
@@ -1130,56 +1223,138 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
     bool active = y < BUFFER_HEIGHT;
     uint chunk_start = lane * BUFFER_WIDTH / 8u;
     uint chunk_end = (lane + 1u) * BUFFER_WIDTH / 8u;
-    int first_ui = BUFFER_WIDTH, last_ui = -1;
+    float plane = SunshineUIPlaneParallax();
+    // Beyond its chunk a texel u bounds the field from its collar: anchor u + 1
+    // to the right and u - 1 to the left. Keep the one with the least bound
+    // where the next chunk starts and where the previous one ends.
+    int2 anchors = int2(0, 0);
+    float2 slack = float2(-1.0, -1.0), reach = float2(0.0, 0.0);
     if (active) {
         [loop]
         for (uint x = chunk_start; x < chunk_end; ++x) {
-            if (SunshineSourceUI(x, y)) {
-                first_ui = min(first_ui, (int)x);
-                last_ui = (int)x;
+            float weight = SunshineUIPinWeight(x, y);
+            if (weight <= 0.0) continue;
+            // Fully weighted UI has no slack whatever the field.
+            float r = weight >= 1.0 ? 0.0 : SunshineUIPinSlackOf(SunshineHostFinalStore[int2(uint2(x, y))], weight, plane);
+            float right = SunshineUIPinBound(r, chunk_end - 1u - x);
+            if (slack.x < 0.0 || right <= reach.x) { anchors.x = (int)x + 1; slack.x = r; reach.x = right; }
+            float left = SunshineUIPinBound(r, x - chunk_start);
+            if (slack.y < 0.0 || left < reach.y) { anchors.y = (int)x - 1; slack.y = r; reach.y = left; }
+        }
+    }
+    SunshineUIPinAnchors[lane][row] = anchors;
+    SunshineUIPinSlack[lane][row] = slack;
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0u) {
+        // Each chunk's left carry is the best rightward anchor of the chunks
+        // before it, compared where it starts; ties keep the nearer anchor.
+        int anchor = 0;
+        float best = -1.0;
+        [unroll]
+        for (uint chunk = 0u; chunk < 8u; ++chunk) {
+            SunshineUIPinCarryAnchors[chunk][row].x = anchor;
+            SunshineUIPinCarrySlack[chunk][row].x = best;
+            int next = (int)((chunk + 1u) * BUFFER_WIDTH / 8u);
+            int offered_anchor = SunshineUIPinAnchors[chunk][row].x;
+            float offered = SunshineUIPinSlack[chunk][row].x;
+            if (offered >= 0.0 && (best < 0.0 ||
+                    SunshineUIPinBound(offered, (uint)(next - offered_anchor)) <= SunshineUIPinBound(best, (uint)(next - anchor)))) {
+                anchor = offered_anchor; best = offered;
+            }
+        }
+        // The right carry: the best leftward anchor of the chunks after it,
+        // compared at its last texel.
+        anchor = 0; best = -1.0;
+        [unroll]
+        for (int chunk = 7; chunk >= 0; --chunk) {
+            SunshineUIPinCarryAnchors[(uint)chunk][row].y = anchor;
+            SunshineUIPinCarrySlack[(uint)chunk][row].y = best;
+            int previous = (int)((uint)chunk * BUFFER_WIDTH / 8u) - 1;
+            int offered_anchor = SunshineUIPinAnchors[(uint)chunk][row].y;
+            float offered = SunshineUIPinSlack[(uint)chunk][row].y;
+            if (offered >= 0.0 && (best < 0.0 ||
+                    SunshineUIPinBound(offered, (uint)(offered_anchor - previous)) <= SunshineUIPinBound(best, (uint)(anchor - previous)))) {
+                anchor = offered_anchor; best = offered;
             }
         }
     }
-    SunshineUIPinEnds[lane][row] = int2(last_ui, first_ui);
     GroupMemoryBarrierWithGroupSync();
-    if (lane == 0u) {
-        int left = -1;
-        [unroll]
-        for (uint chunk = 0u; chunk < 8u; ++chunk) {
-            SunshineUIPinCarries[chunk][row].x = left;
-            left = max(left, SunshineUIPinEnds[chunk][row].x);
-        }
-        int right = BUFFER_WIDTH;
-        [unroll]
-        for (int chunk = 7; chunk >= 0; --chunk) {
-            SunshineUIPinCarries[(uint)chunk][row].y = right;
-            right = min(right, SunshineUIPinEnds[(uint)chunk][row].y);
-        }
-    }
-    GroupMemoryBarrierWithGroupSync();
-    int2 carry = SunshineUIPinCarries[lane][row];
+    int2 carry_anchor = SunshineUIPinCarryAnchors[lane][row];
+    float2 carry_slack = SunshineUIPinCarrySlack[lane][row];
     // A row without UI is left bit-for-bit intact.
-    if (!active || (carry.x < 0 && carry.y >= BUFFER_WIDTH && first_ui >= BUFFER_WIDTH)) return;
-    float plane = SunshineUIPlaneParallax();
-    int left = carry.x;
-    int right = first_ui < BUFFER_WIDTH ? first_ui : carry.y;
+    if (!active || (carry_slack.x < 0.0 && carry_slack.y < 0.0 && slack.x < 0.0)) return;
+    // The same plane again: FXC marks everything evaluated before this precise
+    // arithmetic precise, and the clamps below must stay the multiply-adds of
+    // the binary distance rule.
+    plane = SunshineUIPlaneParallax();
+
+    // Backward: bound each texel by the best anchor at or right of it. In the
+    // chunk a texel's collar slack is the least slack of itself and its
+    // neighbors; neighbors in other chunks arrive through the carries.
+    int anchor = carry_anchor.y;
+    float best = carry_slack.y;
+    float value = 0.0, r_here = -1.0, r_next = -1.0;
+    bool flat = true;
+    if (chunk_start < chunk_end) {
+        value = SunshineHostFinalStore[int2(uint2(chunk_end - 1u, y))];
+        r_here = SunshineUIPinSlackOf(value, SunshineUIPinWeight(chunk_end - 1u, y), plane);
+    }
+    [loop]
+    for (int scan_x = (int)chunk_end - 1; scan_x >= (int)chunk_start; --scan_x) {
+        uint x = (uint)scan_x;
+        float previous = 0.0, r_previous = -1.0;
+        if (x > chunk_start) {
+            previous = SunshineHostFinalStore[int2(uint2(x - 1u, y))];
+            r_previous = SunshineUIPinSlackOf(previous, SunshineUIPinWeight(x - 1u, y), plane);
+        }
+        float collar = SunshineUIPinMinSlack(SunshineUIPinMinSlack(r_previous, r_here), r_next);
+        if (collar >= 0.0 && (best < 0.0 || collar <= SunshineUIPinBound(best, (uint)(anchor - scan_x)))) {
+            anchor = scan_x; best = collar;
+        }
+        flat = flat && best == 0.0 && anchor == scan_x;
+        if (best >= 0.0) {
+            float pinned = SunshineUIPinClamp(value, plane, best, (uint)(anchor - scan_x));
+            if (asuint(pinned) != asuint(value)) SunshineHostFinalStore[int2(uint2(x, y))] = pinned;
+        }
+        r_next = r_here; r_here = r_previous; value = previous;
+    }
+    // A chunk that is the plane throughout has nothing left to bound.
+    if (flat) return;
+
+    // Forward: bound each texel by the best anchor at or left of it. The left
+    // carry was taken from the original field. The backward pass replaced the
+    // field in this chunk, so a collar texel offers |pinned - p|, never more
+    // than its collar slack; whatever it adds beyond that is no tighter than
+    // the backward bound or than h itself (h changes by at most 0.5/W a texel).
+    anchor = carry_anchor.x;
+    best = carry_slack.x;
+    float w_previous = 0.0, w_here = chunk_start < chunk_end ? SunshineUIPinWeight(chunk_start, y) : 0.0;
     [loop]
     for (uint x = chunk_start; x < chunk_end; ++x) {
-        if ((int)x == right) {
-            left = right;
-            uint next = SunshineNextSourceUI(x + 1u, chunk_end, y);
-            right = next < chunk_end ? (int)next : carry.y;
+        float w_next = x + 1u < chunk_end ? SunshineUIPinWeight(x + 1u, y) : 0.0;
+        bool collar = w_previous > 0.0 || w_here > 0.0 || w_next > 0.0;
+        // Next to fully weighted UI the backward pass left the plane itself.
+        if (max(max(w_previous, w_here), w_next) >= 1.0) {
+            anchor = (int)x; best = 0.0;
+        } else if (collar || best >= 0.0) {
+            float current = SunshineHostFinalStore[int2(uint2(x, y))];
+            if (collar) {
+                float offered = abs(current - plane);
+                if (best < 0.0 || offered <= SunshineUIPinBound(best, (uint)((int)x - anchor))) { anchor = (int)x; best = offered; }
+            }
+            float pinned = SunshineUIPinClamp(current, plane, best, (uint)((int)x - anchor));
+            if (asuint(pinned) != asuint(current)) SunshineHostFinalStore[int2(uint2(x, y))] = pinned;
         }
-        int distance_left = left >= 0 ? (int)x - left : BUFFER_WIDTH;
-        int distance_right = right < BUFFER_WIDTH ? right - (int)x : BUFFER_WIDTH;
-        SunshinePinSourceUI(x, y, min(distance_left, distance_right), plane);
+        w_previous = w_here; w_here = w_next;
     }
 }
 
 // Exact tile counts from the selected mask and the unprotected, conditioned
-// scene. Each tile writes two uint4 rows: coverage, invalid, five conflict
-// counts, and pixel count. The absolute candidate planes remain within half
-// the current scene cap. All 16x16 tiles fit in an 8 KiB statistics texture.
+// scene. Only texels the mask pins exactly (pin weight one) count: fainter
+// tails blend toward scene depth and never place the plane. Each tile writes
+// two uint4 rows: coverage, invalid, five conflict counts, and pixel count.
+// The absolute candidate planes remain within half the current scene cap.
+// All 16x16 tiles fit in an 8 KiB statistics texture.
 // Edge tiles publish only their pixel partition; placement evidence and source
 // reads are restricted to the exact central 75% rectangle.
 groupshared uint4 SunshineUIConflictA[64];
@@ -1205,9 +1380,8 @@ void SunshineUIConflictCS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_Grou
     for (uint y = first.y + thread_id.y; y < last.y; y += 8u) {
         [loop]
         for (uint x = first.x + thread_id.x; x < last.x; x += 8u) {
-            float alpha = SunshineSelectedUIAlpha(uint2(x, y));
             b.w += 1u;
-            if (!SunshineCameraFinite(alpha) || alpha <= 0.0) continue;
+            if (SunshineUIPinWeight(x, y) < 1.0) continue;
             a.x += 1u;
             float p = SunshineHostFinalSampler.Load(int3(int2(x, y), 0));
             if (!active || !SunshineCameraFinite(p) || cap <= 0.0) { a.y += 1u; continue; }

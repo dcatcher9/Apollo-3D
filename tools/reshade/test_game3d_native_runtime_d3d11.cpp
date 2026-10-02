@@ -7,6 +7,7 @@
 #include "test_game3d_render_input.h"
 #include "test_game3d_debug_dump_runtime.h"
 #include "test_game3d_budget.h"
+#include "test_game3d_ui_pin_band.h"
 
 namespace {
   struct native11_case {
@@ -177,6 +178,44 @@ namespace {
         fixture.read(reinterpret_cast<ID3D11Texture2D *>(diagnostics.final_field.handle)), report);
       require(fixture.read(fixture.depth.p) == original_depth, "D3D11 budget renderer changed raw source depth");
       require(fixture.read(fixture.backbuffer.p) == source, "D3D11 budget renderer changed mono source color");
+    }
+    {
+      // The soft UI pin band on actual D3D11 GPU fields, through an R32 red mask.
+      using namespace sunshine_game3d;
+      auto band_parameters = p;
+      band_parameters.strength = 100; band_parameters.depth_view = 0; band_parameters.depth_ready = 1;
+      const ui_plane_parameters plane{ui_plane_mode::display_fraction, .25f};
+      std::uint64_t capture = 20000;
+      sunshine_game3d_test::ui_pin_band_fixture band;
+      band.width = width; band.height = height;
+      band.gain = float(shader_marker(renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"));
+      band.depth = [&](bool structured) {
+        std::vector<float> depth(size_t(width) * height, 0.f);
+        if (structured) depth = raw;
+        fixture.context->UpdateSubresource(fixture.depth.p, 0, nullptr, depth.data(), width * sizeof(float), 0);
+      };
+      band.render = [&](const std::vector<float> *alpha) {
+        api::resource_view view{};
+        if (alpha) {
+          view = renderer.prepare_ui_source(++capture, [&](api::resource texture) {
+            fixture.context->UpdateSubresource(reinterpret_cast<ID3D11Resource *>(texture.handle), 0, nullptr, alpha->data(),
+              width * sizeof(float), 0);
+            return true;
+          }, api::format::r32_float);
+          require(view.handle, "UI pin band D3D11 mask unavailable");
+        }
+        fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
+        require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), backbuffer, observed.depth_view,
+          band_parameters, alpha != nullptr, view, plane, nullptr, nullptr, ui_mask_channel::red), "UI pin band D3D11 render failed");
+        queue->flush_immediate_command_list(); renderer.finish_present(); queue->wait_idle();
+        const auto bytes = fixture.read(reinterpret_cast<ID3D11Texture2D *>(renderer.diagnostics().final_field.handle));
+        std::vector<float> field(bytes.size() / sizeof(float));
+        std::memcpy(field.data(), bytes.data(), field.size() * sizeof(float));
+        return field;
+      };
+      sunshine_game3d_test::check_ui_pin_band(band, report, "D3D11");
+      fixture.context->UpdateSubresource(fixture.depth.p, 0, nullptr, raw.data(), width * sizeof(float), 0);
+      require(fixture.read(fixture.depth.p) == original_depth, "D3D11 UI pin band fixture did not restore raw depth");
     }
     require(observed.renders == effects, "An FX technique ran during native D3D11 phase");
     queue->wait_idle(); renderer.reset_after_runtime_drain();

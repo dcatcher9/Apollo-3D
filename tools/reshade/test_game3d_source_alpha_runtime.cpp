@@ -895,12 +895,15 @@ namespace {
         "nearest-UI tile reduction dimensions are incomplete");
       return scalar.channel(0, 0, 0);
     };
+    // Alpha at or above the soft pin knee pins exactly. A fainter texel (the
+    // 1/64 corner) still places the plane but pins only in proportion.
+    const float knee = 1.f / float(sunshine_game3d::shader_marker(sunshine_game3d::renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"));
     const auto pinned = [&](const result &value, float inverse, const sunshine_game3d::render_parameters &parameters,
         const std::vector<float> &coverage) {
       const double expected = plane_parallax(gpu, parameters, {ui_plane_mode::depth_midpoint, inverse});
       bool seen = false; float first{};
       for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
-        if (!std::isfinite(coverage[at(x, y)]) || coverage[at(x, y)] <= 0.f) continue;
+        if (!std::isfinite(coverage[at(x, y)]) || coverage[at(x, y)] < knee) continue;
         const float actual = value.field.channel(x, y, 0);
         require(std::abs(double(actual) - expected) <= 8 * float_spacing(expected),
           "UI pixels were not pinned to the resolved global near plane");
@@ -1420,6 +1423,9 @@ namespace {
     gpu.pattern(alpha);
     const auto flat = gpu.render(false, 1, true);
     const bool empty = std::none_of(alpha.begin(), alpha.end(), [](float a) { return std::isfinite(a) && a > 0; });
+    const float gain = float(sunshine_game3d::shader_marker(sunshine_game3d::renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"));
+    const bool binary = std::all_of(alpha.begin(), alpha.end(),
+      [gain](float a) { return !(std::isfinite(a) && a > 0) || a * gain >= 1.f; });
     const double color_tolerance = gpu.color == 2 ? .0021 : 1.01 / 1023;
     // Only a distance-bound oracle, never a reproduction of the GPU warp.
     std::vector<unsigned> distances(alpha.size(), gpu.width);
@@ -1446,6 +1452,21 @@ namespace {
       }
       const auto on = gpu.render(true, sign);
       if (empty) require(on.field.bytes == off.field.bytes && on.output.bytes == off.output.bytes, label + ": all-clear protection is not bit-exact");
+      // A mask without finite alpha below the soft pin knee keeps the binary
+      // distance rule's field bit for bit. The screen plane hides the rule's
+      // rounding, so compare on a display-fraction plane; a power-of-two width
+      // makes 0.5/W exact and hides it too (use, for example, 250x142).
+      if (binary && gpu.has_control &&
+          gpu.control_renderer.active_shader_source().find("Sunshine_UIPlaneMode == 5u") != std::string_view::npos) {
+        const sunshine_game3d::ui_plane_parameters plane{sunshine_game3d::ui_plane_mode::display_fraction, .25f};
+        const auto current = gpu.render(true, sign, false, false, false, {}, {}, plane);
+        const auto frozen = gpu.render(true, sign, false, true, false, {}, {}, plane);
+        require(current.field.bytes != off.field.bytes || empty, label + ": the display-fraction plane did not pin");
+        require(current.field.bytes == frozen.field.bytes && current.output.bytes == frozen.output.bytes,
+          label + ": a binary UI mask differs from the frozen control shader");
+        std::printf("PASS %s sign=%d binary mask matches the frozen control on a display-fraction plane%s\n", label.c_str(), sign,
+          gpu.width & (gpu.width - 1) ? "" : " (power-of-two width: rounding not exercised)");
+      }
       // Every UI pixel below must have exactly zero displacement and match
       // native mono RGB within export quantization. Native mono bypasses the
       // FP16 eye targets, so whole-buffer byte equality is not its contract.
@@ -1958,28 +1979,57 @@ namespace {
     ui_render_input ui;
     ui.automatic = &source; ui.detection = &inputs;
     const auto expected_flags = ui_detection::layer_detection_flags(gpu.color == 2);
-    const auto check = [&](std::uint32_t flags, const fs::path &dump, const char *label) {
+    // The one-frame-late layer's mask is its alpha dilated by the shader's
+    // late-layer margin; a same-frame tagged UI color's is its raw alpha.
+    const auto embedded_margin = shader_marker(renderer::shader_source(), "SUNSHINE_UI_LATE_MARGIN");
+    require(embedded_margin > 0 && embedded_margin < gpu.height / 4 && embedded_margin < gpu.width / 3,
+      "The native shader lost its late-layer margin");
+    const auto check = [&](std::uint32_t flags, const fs::path &dump, const char *label, renderer &active, unsigned margin) {
       source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
-      gpu.render(true, 1, false, false, false, {}, dump, {}, nullptr, nullptr, nullptr, nullptr, &ui);
-      const auto consumed = gpu.renderer.consumed_detection();
+      gpu.render(true, 1, false, false, false, {}, dump, {}, nullptr, nullptr, nullptr, &active, &ui);
+      const auto consumed = active.consumed_detection();
       require(consumed.state == ui_detection_snapshot::run_state::ran && consumed.candidates == 2u &&
           consumed.flags == flags && consumed.stored_flags == flags && !(consumed.stored_flags & ui_detection::per_frame_mask),
         std::string(label) + ": wrong detection constants");
-      const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
-      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x)
-        require(selected.channel(x, y, 0) == hud[size_t(y) * gpu.width + x], std::string(label) + ": mask is not the slot's alpha");
+      const auto selected = gpu.read(active.diagnostics().ui_source);
+      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
+        float expected = 0.f;
+        const unsigned texels = flags & ui_detection::stored_late_layer ? margin : 0;
+        for (unsigned row = y >= texels ? y - texels : 0; row <= std::min(gpu.height - 1, y + texels); ++row)
+          for (unsigned column = x >= texels ? x - texels : 0; column <= std::min(gpu.width - 1, x + texels); ++column)
+            expected = std::max(expected, hud[size_t(row) * gpu.width + column]);
+        require(selected.channel(x, y, 0) == expected, std::string(label) + ": mask is not the slot's alpha with its margin");
+      }
     };
-    check(expected_flags, directory, "offscreen UI layer");
+    check(expected_flags, directory, "offscreen UI layer", gpu.renderer, embedded_margin);
+    // Setting the marker to 0 drops the margin: the layer's mask is its raw alpha.
+    {
+      std::string shader(renderer::shader_source());
+      const std::string marker = "#define SUNSHINE_UI_LATE_MARGIN ";
+      const auto at = shader.find(marker);
+      require(at != std::string::npos, "Cannot find the late-layer margin marker");
+      shader.replace(at + marker.size(), std::to_string(embedded_margin).size(), "0");
+      renderer unmargined;
+      require(unmargined.configure(observed_runtime, {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())},
+        static_cast<api::color_space>(gpu.color), shader), "configure the margin-free renderer");
+      check(expected_flags, {}, "offscreen UI layer without a margin", unmargined, 0);
+      gpu.drain_render();
+      unmargined.reset_after_runtime_drain();
+    }
     std::ifstream stored(directory / "manifest.json");
     const auto manifest = nlohmann::json::parse(stored);
     const auto &replay = manifest.at("producer_metadata").at("replay");
     require(replay.at("ui_detection").at("flags") == expected_flags && replay.at("ui_detection").at("ran_or_held") == "ran" &&
         replay.at("ui_detection").at("candidates") == 2u && replay.at("ui_pin").at("decision_texels") == 5u &&
         replay.at("ui_pin").at("evidence_images") == 0u, "Dump lost the layer's detection constants or pin markers");
+    require(replay.at("ui_pin").at("late_margin") == embedded_margin &&
+        replay.at("ui_pin").at("soft_pin_gain") == shader_marker(renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"),
+      "Dump lost the soft pin gain or the late-layer margin");
     inputs.color_alpha_flags = 0;
-    check(0u, {}, "tagged UIColorAndAlpha");
-    report << "layer-detection-dump flags=" << expected_flags << " tagged_flags=0 ran=1 held_reported=1\n";
-    std::puts("PASS D3D11 UI detection constants: the UI layer fills the UI color slot with stored flags only, a tagged UI color with none, and Dump 3D records them with the pin markers");
+    check(0u, {}, "tagged UIColorAndAlpha", gpu.renderer, embedded_margin);
+    report << "layer-detection-dump flags=" << expected_flags << " tagged_flags=0 ran=1 held_reported=1 late_margin=" <<
+      embedded_margin << " margin_zero_raw=1\n";
+    std::puts("PASS D3D11 UI detection constants: the UI layer fills the UI color slot with stored flags only and its mask gets the late-layer margin (none with the marker at 0), a tagged UI color with none, and Dump 3D records them with the pin markers");
   }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;

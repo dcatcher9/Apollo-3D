@@ -154,7 +154,7 @@ namespace sunshine_game3d {
         {"held_presents", detection.held_presents},
         {"meaning", "b2 constants of the automatic UI detection run whose mask this render consumed: it ran in this render, was held from the last run (held_presents Presents in a row), or was inactive (all zero). flags is the full pushed Sunshine_UIDetectionFlags word, per-frame bits included; threshold_bits is the float32 difference threshold. ui_detection_replay reruns detection from the package's candidates."}};
       result["ui_pin"] = {{"soft_pin_gain", shader_marker(captured_shader, "SUNSHINE_UI_SOFT_PIN_GAIN")},
-        {"late_margin_rows", shader_marker(captured_shader, "SUNSHINE_UI_LATE_MARGIN_ROWS")},
+        {"late_margin", shader_marker(captured_shader, "SUNSHINE_UI_LATE_MARGIN")},
         {"decision_texels", shader_marker(captured_shader, ui_detection::decision_texels_marker)},
         {"evidence_images", shader_marker(captured_shader, ui_detection::scene_evidence_images_marker)},
         {"meaning", "Markers of the captured shader; 0 means absent: binary pinning, no late-layer margin, and the 5-texel detection decision without scene-evidence images."}};
@@ -215,7 +215,7 @@ namespace sunshine_game3d {
         {"inverse_depth_role", fraction_mode || shallow_mode || front_mode || f.ui_plane.mode == ui_plane_mode::screen ? "unused" : nearest_mode ? "midpoint_floor" : "explicit_plane"},
         {"word2_role", fraction_mode ? "front_limit_fraction" : "inverse_depth"},
         {"front_limit_fraction", fraction},
-        {"meaning", "When source_alpha_ui is enabled, alpha from ui_alpha_source supplies UI coverage. The UI pinning pass (SunshineApplyUICS, or the horizontal pass of older shaders) reads that input at t0; eye RGB remains current source_color. Mode 4 pins UI at one quarter of the current positive display bound after strength, stereo blend and warp-readiness guards. Mode 3 uses that full bound. Both fixed modes ignore scene depth/gain/zero and their inverse-depth word is unused. Screen mode pins at zero disparity. Mode 1 uses the submitted independent depth. Mode 2 reduces max(submitted midpoint floor, nearest valid decoded depth under finite positive alpha). Both depth modes use b0 geometry. The horizontal protection includes one bilinear-support pixel. With protection enabled all-white masks are entirely UI; all-black masks have no UI constraints."}};
+        {"meaning", "When source_alpha_ui is enabled, alpha from ui_alpha_source supplies UI coverage. The UI pinning pass (SunshineApplyUICS, or the horizontal pass of older shaders) reads that input at t0; eye RGB remains current source_color. Mode 4 pins UI at one quarter of the current positive display bound after strength, stereo blend and warp-readiness guards. Mode 3 uses that full bound. Both fixed modes ignore scene depth/gain/zero and their inverse-depth word is unused. Screen mode pins at zero disparity. Mode 1 uses the submitted independent depth. Mode 2 reduces max(submitted midpoint floor, nearest valid decoded depth under finite positive alpha). Both depth modes use b0 geometry. Pinning is a band around the UI plane: mask alpha at or above 1/replay.ui_pin.soft_pin_gain pins exactly, fainter alpha in proportion, with a one-texel collar for the bilinear color footprint and a 0.5/source_width ramp beyond it; a shader without that marker pins every finite positive alpha exactly. With protection enabled all-white masks are entirely UI; all-black masks have no UI constraints."}};
       if (fraction_mode) {
         auto &binding = result["ui_constant_binding"];
         binding.erase("inverse_depth");
@@ -300,7 +300,7 @@ namespace sunshine_game3d {
       if (f.source_alpha_ui && f.resources.ui_source.handle) {
         result["ui_source_allocation"] = allocation_json(device->get_resource_desc(f.resources.ui_source));
         result["ui_source"] = f.ui_source_metadata.empty() ? nlohmann::json::object() : nlohmann::json::parse(f.ui_source_metadata);
-        result["artifact_semantics"]["ui_source_color"] = "Exact typed texture consumed for UI coverage. b1 word3 selects alpha (RGBA) or red (single-channel mask). Other channels never replace current source_color for eye rendering. This does not prove same-game-frame pairing.";
+        result["artifact_semantics"]["ui_source_color"] = "Exact typed texture consumed for UI coverage. b1 word3 selects alpha (RGBA) or red (single-channel mask). An automatic mask from the one-frame-late offscreen UI layer (replay.ui_detection.flags bit 0x4) is that layer's alpha clamped and dilated: each texel is the largest min(alpha, 1) within replay.ui_pin.late_margin rows and columns of it, with NaN, infinite, negative, zero and subnormal alpha as 0 (docs/reshade-sbs.md, offscreen UI layer). Other channels never replace current source_color for eye rendering. This does not prove same-game-frame pairing.";
       }
       if (d.ready && d.shader_resource.handle) {
         const auto resource = device->get_resource_from_view(d.shader_resource);

@@ -6,7 +6,10 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -96,6 +99,78 @@ namespace {
     unsigned x = 0, y = 0, z = 0;
   };
 
+  std::string disassembly(ID3DBlob *bytecode) {
+    ComPtr<ID3DBlob> text;
+    require(SUCCEEDED(D3DDisassemble(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), 0, nullptr, &text)),
+      "Shader disassembly failed");
+    return std::string(static_cast<const char *>(text->GetBufferPointer()), text->GetBufferSize());
+  }
+
+  // Group-shared bytes the compiled shader declares, from its disassembly.
+  unsigned groupshared_bytes(ID3DBlob *bytecode) {
+    const auto listing = disassembly(bytecode);
+    unsigned total = 0;
+    for (size_t at = listing.find("dcl_tgsm_"); at != std::string::npos; at = listing.find("dcl_tgsm_", at + 1)) {
+      unsigned slot = 0, stride = 0, count = 0;
+      if (std::sscanf(listing.c_str() + at, "dcl_tgsm_structured g%u, %u, %u", &slot, &stride, &count) == 3) total += stride * count;
+      else if (std::sscanf(listing.c_str() + at, "dcl_tgsm_raw g%u, %u", &slot, &stride) == 2) total += stride;
+      else throw std::runtime_error("Unrecognized group-shared declaration");
+    }
+    return total;
+  }
+
+  // The pin bound of a texel without slack must stay the UI plane -/+
+  // distance * 0.5/W, each one non-precise multiply-add, as in the binary
+  // distance rule the soft band replaced: binary masks then keep their fields
+  // bit for bit on any device. FXC marks arithmetic precise once a precise
+  // result feeds it, and a precise multiply-add rounds twice; reassociating
+  // the slack in, or dropping the zero-slack clamp, also changes the
+  // rounding. Returns the -/+ pairs found, one per scan direction.
+  unsigned pin_bound_pairs(ID3DBlob *bytecode, unsigned width) {
+    const auto listing = disassembly(bytecode);
+    // FXC prints a literal operand as l(x) with six decimals.
+    const auto ramp = [width](const std::string &operand) {
+      double value = 0;
+      return std::sscanf(operand.c_str(), "l(%lf)", &value) == 1 && std::abs(value - .5 / width) <= 5.01e-7;
+    };
+    struct multiply_add { std::string factor, addend; };
+    std::vector<multiply_add> bounds;
+    size_t ramp_uses = 0;
+    for (size_t begin = 0, end; begin < listing.size(); begin = end + 1) {
+      end = std::min(listing.find('\n', begin), listing.size());
+      std::string line = listing.substr(begin, end - begin);
+      const auto first = line.find_first_not_of(" \t");
+      if (first == std::string::npos || !line.compare(first, 2, "//")) continue;
+      auto at = line.find(' ', first);
+      if (at == std::string::npos) continue;
+      const auto op = line.substr(first, at - first);
+      at = line.find_first_not_of(' ', at);
+      const bool precise = at != std::string::npos && !line.compare(at, 8, "[precise");
+      if (precise) at = line.find(']', at) + 1;
+      // Operands, split at top-level commas: l(a, b, c, d) is one operand.
+      std::vector<std::string> operands(1);
+      for (int depth = 0; at < line.size(); ++at) {
+        const char c = line[at];
+        depth += c == '(' ? 1 : c == ')' ? -1 : 0;
+        if (c == ',' && !depth) operands.emplace_back();
+        else if (c != ' ' && c != '\r') operands.back() += c;
+      }
+      bool uses_ramp = false;
+      for (size_t i = 1; i < operands.size(); ++i) uses_ramp = uses_ramp || ramp(operands[i]);
+      if (!uses_ramp) continue;
+      ++ramp_uses;
+      require(!precise, "SunshineApplyUICS computes a pin ramp bound with precise arithmetic: " + line);
+      if (op == "mad" && operands.size() == 4 && ramp(operands[2])) bounds.push_back({operands[1], operands[3]});
+    }
+    unsigned pairs = 0;
+    for (const auto &low : bounds)
+      for (const auto &high : bounds)
+        pairs += low.factor == '-' + high.factor && low.addend == high.addend;
+    // Precise arithmetic divides by W instead of multiplying by this literal.
+    require(ramp_uses > 0, "SunshineApplyUICS no longer multiplies distances by the 0.5/W pin ramp literal");
+    return pairs;
+  }
+
   void compile(const std::string &source, const std::string &source_name,
       const std::filesystem::path &output, unsigned width, unsigned height,
       unsigned color, const entry_point &entry, std::ostream &manifest) {
@@ -173,6 +248,15 @@ namespace {
       reflection->GetThreadGroupSize(&x, &y, &z);
       require(x == entry.x && y == entry.y && z == entry.z, "Native compute group shape changed");
       manifest << "  threads " << x << ' ' << y << ' ' << z << '\n';
+      // Shader Model 5.0 compute shaders have 32 KiB of group-shared memory.
+      const auto shared = groupshared_bytes(bytecode.Get());
+      require(shared <= 32768, std::string(entry.name) + " exceeds 32 KiB of group-shared memory");
+      manifest << "  groupshared " << shared << '\n';
+    }
+    if (std::string(entry.name) == "SunshineApplyUICS") {
+      const auto pairs = pin_bound_pairs(bytecode.Get(), width);
+      require(pairs >= 2, "SunshineApplyUICS lost the binary pin bound's multiply-adds in a scan direction");
+      manifest << "  pin_bound_multiply_add_pairs " << pairs << '\n';
     }
     if (std::string(entry.name) == "SunshineRenderPackedPS") {
       require(shader.OutputParameters == 1, "Packed eye pass must write exactly the side-by-side target");
@@ -205,6 +289,11 @@ int main(int argc, char **argv) {
       return unsigned(std::stoul(source.substr(at + key.size())));
     };
     const unsigned limiter_lines = marker("SUNSHINE_LIMITER_LINE_GROUPS"), pin_lines = marker("SUNSHINE_UI_PIN_LINE_GROUPS");
+    // Dump 3D records the soft pin gain and the late-layer margin, and
+    // ui_detection_replay's mask reference reads the margin from the shader.
+    require(marker("SUNSHINE_UI_SOFT_PIN_GAIN") >= 1, "UI soft pin gain must be at least one");
+    // Its mask pass stages (8 + 2 * margin)^2 texels in group memory.
+    require(marker("SUNSHINE_UI_LATE_MARGIN") <= 28, "UI late-layer margin out of range");
     // UI detection sizes its decision texels and statistics rows from these
     // markers, and its flag bits mirror game3d_ui_detection_contract.h.
     namespace detection = sunshine_game3d::ui_detection;

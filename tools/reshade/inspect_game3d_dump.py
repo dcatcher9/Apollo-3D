@@ -143,10 +143,45 @@ def save_preview(pixels, path, optional, result):
 # counting.
 PIN_STEP_PX = 0.5 + 1e-4
 # Synthetic moves of the solid layer glyph bodies against the pin computed from
-# the unmoved, one-frame-late layer: (rows, columns), negative rows move up.
-PIN_MOVES = {"up_1": (-1, 0), "up_2": (-2, 0), "up_4": (-4, 0), "down_4": (4, 0), "right_16": (0, 16)}
+# the unmoved, one-frame-late layer: (rows, columns), negative rows move up. The
+# 8-texel moves exceed the shader's late-layer margin.
+PIN_MOVES = {"up_1": (-1, 0), "up_2": (-2, 0), "up_4": (-4, 0), "down_4": (4, 0), "right_4": (0, 4), "up_8": (-8, 0),
+             "down_8": (8, 0), "right_8": (0, 8), "up_8_right_8": (-8, 8), "right_16": (0, 16)}
 BT709 = np.array([0.2126, 0.7152, 0.0722])
 BT2020 = np.array([0.2627, 0.678, 0.0593])
+# The UI color slot holds the one-frame-late offscreen UI layer (stored_late_layer in
+# game3d_ui_detection_contract.h).
+UI_STORED_LATE_LAYER = 0x4
+
+
+def late_layer_mask(alpha, margin):
+    """The shader's mask of the one-frame-late UI layer: alpha from FLT_MIN up, capped at one (any other value
+    counts as zero), the maximum over the texels within margin rows and margin columns, inside the frame."""
+    alpha = np.asarray(alpha, dtype=np.float32)
+    with np.errstate(invalid="ignore"):
+        clamped = np.where(np.isfinite(alpha) & (alpha >= np.finfo(np.float32).tiny), np.minimum(alpha, 1), 0)
+    mask = clamped.astype(np.float32)
+    for axis in (1, 0):
+        source = mask.copy()
+        for offset in range(1, min(margin, mask.shape[axis] - 1) + 1):
+            near, far = [slice(None)] * 2, [slice(None)] * 2
+            near[axis], far[axis] = slice(offset, None), slice(None, -offset)
+            np.maximum(mask[tuple(near)], source[tuple(far)], out=mask[tuple(near)])
+            np.maximum(mask[tuple(far)], source[tuple(near)], out=mask[tuple(far)])
+    return mask
+
+
+def late_margin(manifest, metadata):
+    """Texels of late-layer margin in rows and columns the consumed mask may carry: zero without the layer flag. A
+    --write-mask copy's record describes its replaced mask, a capture's replay metadata the captured one."""
+    record = manifest.get("ui_detection_replay_mask")
+    if record is not None:
+        flags, margin = record.get("flags", 0), record.get("late_margin", 0)
+    else:
+        replay = metadata.get("replay", {})
+        flags = replay.get("ui_detection", {}).get("flags", 0)
+        margin = replay.get("ui_pin", {}).get("late_margin", 0)
+    return int(margin) if int(flags) & UI_STORED_LATE_LAYER else 0
 
 
 def unpinned_field(vertical):
@@ -279,10 +314,18 @@ def pin_metrics(root, field=None, bands=None, layer=None):
         census = metadata.get("ui_layer_census", {}).get("candidates", [])
         active = [entry.get("kind") for entry in census if entry.get("active") and entry.get("kind") in artifacts]
         layer = active[0] if active else "ui_layer_candidate_0" if "ui_layer_candidate_0" in artifacts else None
+    alpha_source, margin = source, late_margin(manifest, metadata)
     if layer is not None:
-        codes = np.rint(read_artifact(root, artifacts[layer]).astype(np.float64) * 255)
-        if codes.shape[:2] != h.shape:
+        layer_color = read_artifact(root, artifacts[layer])
+        if layer_color.shape[:2] != h.shape:
             raise ValueError("The UI layer differs from the field's extent")
+        # The late-layer margin pins texels that show scene: when the consumed mask is the layer's alpha with that
+        # margin, the layer's own alpha weighs visibility, UI rows and flattening.
+        if source == "ui_source_color" and margin:
+            raw = late_layer_mask(layer_color[:, :, 3], 0)
+            if np.array_equal(late_layer_mask(raw, margin), mask):
+                alpha, alpha_source = raw.astype(np.float64), layer
+        codes = np.rint(layer_color.astype(np.float64) * 255)
         light = (codes[:, :, :3].max(-1) > 4) & (codes[:, :, 3] > 0)
         body = light & (codes[:, :, 3] >= 128)
     else:
@@ -312,6 +355,7 @@ def pin_metrics(root, field=None, bands=None, layer=None):
         torn = {name: int((off_plane & shifted(body, *move)).sum()) for name, move in PIN_MOVES.items()}
     return {
         "width": width, "height": height, "plane_uv": plane, "plane_px": plane * width, "layer": layer,
+        "alpha": alpha_source, "late_margin": margin,
         "field": str(field) if field is not None else "final_field",
         "bands": result_bands,
         "scene_tear": float((new * texture * visible)[tear].sum()),
@@ -322,7 +366,9 @@ def pin_metrics(root, field=None, bands=None, layer=None):
                     "scene_tear: new steps above 0.5 px outside UI rows, times horizontal scene luma texture and "
                     "scene visibility (1 - alpha). flattening: mean (1 - alpha)|F - h| in px. torn_glyph_pixels: "
                     "solid light layer glyph bodies (alpha >= 128/255) moved against the pin of the unmoved layer "
-                    "that lie more than 0.5 px off the UI plane."),
+                    "that lie more than 0.5 px off the UI plane. alpha names the artifact whose alpha weighs scene "
+                    "visibility, UI rows and flattening: the consumed mask, or the UI layer itself when the consumed "
+                    "mask is the layer's alpha with late_margin texels of late-layer margin, which show scene."),
     }
 
 

@@ -419,23 +419,62 @@ namespace {
       if (layer_detection.at("ran_or_held") == "inactive" || !(layer_detection.at("candidates").get<unsigned>() & 2u) ||
           layer_detection.at("flags") != 5u || !layer_metadata.at("replay").contains("ui_pin"))
         throw std::runtime_error("The offscreen UI layer did not reach detection with flags 5: " + layer_detection.dump());
+      // The layer is one frame late, so its mask is its alpha dilated by the
+      // shader's late-layer margin: the 160/255 rectangle grows by that many
+      // rows above and below and columns left and right.
+      const auto &pin = layer_metadata.at("replay").at("ui_pin");
+      const auto margin = pin.at("late_margin").get<unsigned>();
+      if (!margin || !pin.at("soft_pin_gain").get<unsigned>())
+        throw std::runtime_error("The native shader lost its soft pin or late-layer margin markers: " + pin.dump());
+      // The largest alpha within the margin in columns, then in rows.
+      std::vector<float> widest(size_t(width) * height, 0.f), dilated(widest.size(), 0.f);
+      for (unsigned y = 0; y < height; ++y)
+        for (unsigned x = 0; x < width; ++x)
+          for (unsigned column = x >= margin ? x - margin : 0; column <= std::min(width - 1, x + margin); ++column)
+            widest[size_t(y) * width + x] = std::max(widest[size_t(y) * width + x],
+              float(layer_pattern[(size_t(y) * width + column) * 4 + 3]) / 255.f);
+      for (unsigned y = 0; y < height; ++y)
+        for (unsigned row = y >= margin ? y - margin : 0; row <= std::min(height - 1, y + margin); ++row)
+          for (unsigned x = 0; x < width; ++x)
+            dilated[size_t(y) * width + x] = std::max(dilated[size_t(y) * width + x], widest[size_t(row) * width + x]);
       bool layer_mask = false;
+      std::vector<float> layer_field;
       for (unsigned i = 0; i < box.state->response.texture_count; ++i) {
         const auto &item = box.state->response.textures[i];
-        if (unsigned(item.kind) != unsigned(dump::artifact::ui_source_color)) continue;
+        const bool resolved_mask = unsigned(item.kind) == unsigned(dump::artifact::ui_source_color);
+        if (!resolved_mask && unsigned(item.kind) != unsigned(dump::artifact::final_field)) continue;
         com_ptr<ID3D12Resource> resolved;
-        checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(item.handle), IID_PPV_ARGS(resolved.put())), "Open layer UI mask");
+        checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(item.handle), IID_PPV_ARGS(resolved.put())), "Open layer UI mask or field");
         const auto bytes = read(resolved.p, D3D12_RESOURCE_STATE_COMMON);
-        require(item.dxgi_format == DXGI_FORMAT_R32_FLOAT && bytes.size() == layer_pattern.size(), "Layer UI mask changed format or extent");
+        require(item.dxgi_format == DXGI_FORMAT_R32_FLOAT && bytes.size() == layer_pattern.size(), "Layer UI mask or field changed format or extent");
+        if (!resolved_mask) {
+          layer_field.resize(bytes.size() / sizeof(float));
+          std::memcpy(layer_field.data(), bytes.data(), bytes.size());
+          continue;
+        }
         bool exact = true;
         for (size_t pixel = 0; pixel * 4 < layer_pattern.size(); ++pixel) {
           float value{}; std::memcpy(&value, bytes.data() + pixel * 4, sizeof(value));
-          exact &= std::abs(value - float(layer_pattern[pixel * 4 + 3]) / 255.f) <= 1e-6f;
+          exact &= std::abs(value - dilated[pixel]) <= 1e-6f;
         }
-        require(exact, "Resolved automatic UI mask is not the offscreen layer alpha");
+        require(exact, "Resolved automatic UI mask is not the offscreen layer alpha with its late-layer margin");
         layer_mask = true;
       }
-      require(layer_mask, "Dump omitted the resolved UI mask from the offscreen layer");
+      require(layer_mask && !layer_field.empty(), "Dump omitted the resolved UI mask or final field from the offscreen layer");
+      // UI that moved up to the margin in rows or columns since the copied
+      // frame lies on the UI plane; just beyond the margin in rows the scene
+      // keeps its own depth (in columns the pin's collar and slope reach on).
+      const unsigned left = width / 8 - margin, right = width / 4 + margin, top = height / 8 - margin, bottom = height / 4 + margin;
+      const float plane = layer_field[size_t(height * 3 / 16) * width + width * 3 / 16];
+      unsigned off_plane{}, scene_beyond{};
+      for (unsigned x = left; x < right; ++x) {
+        for (unsigned y = top; y < bottom; ++y) off_plane += std::abs(layer_field[size_t(y) * width + x] - plane) * width > .5f;
+        for (const unsigned y : {top - 1, bottom}) scene_beyond += std::abs(layer_field[size_t(y) * width + x] - plane) * width > .5f;
+      }
+      if (off_plane || !scene_beyond)
+        throw std::runtime_error("The late-layer margin did not keep moved UI on the plane against an off-plane scene: off_plane=" +
+          std::to_string(off_plane) + " scene_beyond=" + std::to_string(scene_beyond));
+      evidence << "late-layer-margin texels=" << margin << " moved_glyph_off_plane=" << off_plane << " scene_beyond_margin=" << scene_beyond << '\n';
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
       step(); no_effects();
 
@@ -451,7 +490,7 @@ namespace {
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
         " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 live_ui_layer_mask=1 frame_tags=" << bool(frame_tag) << '\n';
       std::puts("PASS actual public SL tag23 hook: typeless90 to typed87, automatic GPU mask equals pre-overwrite alpha and optional dump exact before opaque overwrite; host lease immutable");
-      std::puts("PASS live offscreen UI layer: without tag 23, the layer copied before its clear is the automatic UI mask, tint within twice its alpha included; straight alpha is rejected");
+      std::puts("PASS live offscreen UI layer: without tag 23, the layer copied before its clear is the automatic UI mask with its late-layer margin, tint within twice its alpha included, UI moved within the margin stays on the plane; straight alpha is rejected");
     }
 
     void run_automatic_ui_tags(HMODULE sdk) {
