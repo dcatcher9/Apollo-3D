@@ -256,15 +256,22 @@ namespace sunshine_raw_scene {
       invalidate(now_ms);
     }
 
-  private:
-    static bool known_direction(orientation value) noexcept {
-      return value == orientation::normal || value == orientation::reversed;
-    }
+    // Exact logical identity and admissible geometry; the retained provided-raw
+    // set keys and admits its encodings with these same rules.
     static bool valid_source(const selected_frame &value) noexcept {
       const auto &v = value.source;
       return value.layout_epoch && v.native && v.lifetime && v.width && v.height &&
         v.extent_width && v.extent_height && v.left < v.width && v.top < v.height &&
         v.extent_width <= v.width - v.left && v.extent_height <= v.height - v.top;
+    }
+    static bool same_basis(const selected_frame &a, const selected_frame &b) noexcept {
+      return a.source == b.source && a.layout_epoch == b.layout_epoch &&
+        a.convention_epoch == b.convention_epoch && a.direction == b.direction;
+    }
+
+  private:
+    static bool known_direction(orientation value) noexcept {
+      return value == orientation::normal || value == orientation::reversed;
     }
     static status admission(const selected_frame &value) noexcept {
       if (!valid_source(value)) return status::invalid_source;
@@ -273,10 +280,6 @@ namespace sunshine_raw_scene {
       if (value.copy_ambiguous) return status::ambiguous_copy;
       if (!value.aligned_viewport_assumed) return status::alignment_unavailable;
       return status::ready;
-    }
-    static bool same_basis(const selected_frame &a, const selected_frame &b) noexcept {
-      return a.source == b.source && a.layout_epoch == b.layout_epoch &&
-        a.convention_epoch == b.convention_epoch && a.direction == b.direction;
     }
     bool fresh_packet(const sample &value, const frame_key &observed_frame, std::uint64_t now_ms) const noexcept {
       if (!value.id || value.metadata.basis_epoch != epoch_ || !same_basis(value.metadata, basis_) ||
@@ -297,7 +300,8 @@ namespace sunshine_raw_scene {
       // Frame and sample counters belong to the selected encoding domain. SL
       // and NGX have independent sequences, so the previous owner's watermarks
       // cannot constrain this one. same_basis and the rebind capture floor still
-      // reject delayed packets from the old owner or an earlier visit.
+      // reject delayed packets from the old owner or an earlier visit. Production
+      // provided sources keep one policy per encoding (retained_policy) instead.
       current_frame_ = last_sample_frame_ = target_frame_ = {};
       last_id_ = last_capture_ms_ = 0;
       gain_.reset();

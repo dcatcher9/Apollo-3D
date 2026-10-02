@@ -792,6 +792,110 @@ namespace {
         require(!handoff.ready && !(proof.projection_domain == logical_domain),
           "New feature generation inherited another source's inverse-distance calibration");
       }
+      // FG switches: NGX keeps its raw reference across a Streamline present
+      // without depth and across the projection path, but renders again only
+      // after a target captured after its return.
+      {
+        using phase = sunshine_game3d::automatic_phase;
+        runtime_t fg;
+        fg.addon_native = native_cropped;
+        fg.frame_strength = 37.f;
+        fg.width = 1920; fg.height = 1080;
+        fg.raw_supported = true;
+        fg.raw_basis_epoch = 78;
+        require(fg.provided_raw_policy.reset(fg.raw_basis_epoch, 10000),
+          "FG round-trip fixture could not initialize its raw reference");
+        sunshine_depth::frame_depth ngx;
+        ngx.ready = true;
+        ngx.provided.provider = sunshine_scene_depth::provider_kind::ngx;
+        ngx.provided.epoch = 3;
+        ngx.provided.source_id = 9;
+        ngx.provided.sequence = 40843;
+        ngx.provided.feedback.revision = 4;
+        ngx.provided.projection.direction_supplied = ngx.provided.projection.reversed = true;
+        sunshine_depth::frame_depth sl;
+        sl.provided.provider = sunshine_scene_depth::provider_kind::streamline;
+        sl.provided.epoch = 4;
+        sl.provided.viewport = 1;
+        sl.provided.source_id = (std::uint64_t{1} << 63) | 1;
+        sl.provided.sequence = 13247;
+        sl.provided.projection.direction_supplied = sl.provided.projection.reversed = true;
+        auto camera = ngx;
+        camera.projection.supplied = true;
+        camera.projection.epoch = 3;
+        camera.projection.A = -.01;
+        camera.projection.B = .2;
+        const auto fg_sample = [&](float value, std::uint64_t now) {
+          for (size_t i = 0; i < raw.size(); ++i) raw[i] = value * (i % 2 ? 1.5f : .5f);
+          ++ngx.provided.sequence;
+          ngx.provided.tick = now;
+          const auto current = sunshine_provided_raw::selected(ngx.provided, fg.raw_basis_epoch, true);
+          auto sample = sunshine_provided_raw::measured(ngx.provided, ngx.provided.sequence, fg.raw_basis_epoch, raw);
+          sample.range_supplied = sample.range_valid = true;
+          sample.range_min = value * .5f; sample.range_max = value * 1.5f;
+          sample.moments.supplied = sample.moments.valid = true;
+          sample.moments.count = 1920u * 1080u;
+          sample.moments.sum = double(sample.moments.count) * value;
+          sample.moments.sum_squares = double(sample.moments.count) * value * value * 1.25;
+          sample.moments.tiles_x = 32; sample.moments.tiles_y = 18;
+          fg.provided_raw_policy.update(current, &sample, now);
+        };
+        const auto resolve = [&](sunshine_depth::frame_depth &d, std::uint64_t now) {
+          ++d.provided.sequence;
+          d.provided.tick = now;
+          return publisher.resolve_raw_scene(&runtime, fg, d, true, true, now);
+        };
+        // The return is resolved before any packet captured after it completes.
+        const auto expect_retained = [&](const scene_parameters_t &back, float scale, const char *message) {
+          require(!back.ready && back.blend == 0.f && back.scale == scale && scale > 0.f &&
+              back.ui.phase == phase::waiting_for_depth, message);
+        };
+        resolve(ngx, 10000); // Binds NGX and applies the current render budget.
+        for (unsigned i = 0; i != 4; ++i) fg_sample(.25f, 10000 + i * 250);
+        const auto retained = publisher.resolve_raw_scene(&runtime, fg, ngx, true, true, 10750);
+        require(retained.ready && std::abs(retained.scale - initial_L / .375) < 1e-5,
+          "FG round-trip fixture did not calibrate NGX");
+
+        // FG on: the first Streamline present carries no depth yet.
+        const auto fg_on = resolve(sl, 11000);
+        require(!fg_on.ready && fg_on.ui.phase == phase::waiting_for_depth,
+          "Streamline present without depth rendered raw stereo");
+        // FG off 35 s later with a newer NGX revision.
+        ngx.provided.sequence += 9000;
+        ngx.provided.feedback.revision = 5;
+        expect_retained(resolve(ngx, 46000), retained.scale,
+          "Returning NGX rendered without a fresh target or lost its retained reference");
+        fg_sample(.125f, 46010);
+        auto resumed = publisher.resolve_raw_scene(&runtime, fg, ngx, true, true, 46010);
+        require(resumed.ready && resumed.ui.phase == phase::ready && resumed.scale == retained.scale && resumed.blend == 0.f,
+          "First fresh NGX target restarted calibration, credited the absence or skipped the re-entry fade");
+        fg_sample(.125f, 46110);
+        resumed = publisher.resolve_raw_scene(&runtime, fg, ngx, true, true, 46110);
+        require(resumed.ready && resumed.scale > retained.scale &&
+            resumed.scale <= retained.scale * std::exp2(.1) * (1. + 1e-6) && resumed.blend == .2f,
+          "Retained NGX reference did not resume bounded adaptation and the 0.5 s fade");
+
+        // FG on again, with every FG present on the projection path (no raw SL frame).
+        camera.provided.sequence = ngx.provided.sequence;
+        require(!resolve(camera, 46200).ready, "Projection fixture was ready without calibration");
+        ngx.provided.sequence += 9000;
+        expect_retained(resolve(ngx, 81200), resumed.scale,
+          "Return from the projection path rendered NGX's old target");
+        fg_sample(.125f, 81210);
+        const auto after_projection = publisher.resolve_raw_scene(&runtime, fg, ngx, true, true, 81210);
+        require(after_projection.ready && after_projection.scale == resumed.scale && after_projection.blend == 0.f,
+          "Return from the projection path did not resume from a fresh target");
+
+        // A fixture Recenter on the projection path discards retained raw encodings.
+        publish_automatic_ui(&runtime, {phase::ready, true});
+        require(sunshine_game3d::recalibrate_automatic(&runtime), "FG round-trip fixture could not queue Recenter");
+        camera.provided.sequence = ngx.provided.sequence;
+        resolve(camera, 81300);
+        const auto recentered = resolve(ngx, 81400);
+        require(!recentered.ready && recentered.scale == 0.f && recentered.ui.phase == phase::calibrating,
+          "Projection-path Recenter kept a retained raw reference");
+        clear_automatic_ui(&runtime);
+      }
     }
 
     static void session_teardown_ownership() {

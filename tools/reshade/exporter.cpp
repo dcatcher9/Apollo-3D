@@ -745,7 +745,9 @@ namespace {
     bool raw_supported = false;
     std::uint64_t raw_basis_epoch = 0;
     sunshine_raw_scene::pool raw_policy;
-    sunshine_raw_scene::policy provided_raw_policy;
+    // One retained reference per API-provided logical encoding, so FG switches
+    // do not repeat the startup window when a source returns.
+    sunshine_provided_raw::retained_policy provided_raw_policy;
     sunshine_projection_depth::controller projection_policy;
     sunshine_projection_depth::domain projection_domain;
     sunshine_diagnostics::log_gate projection_log;
@@ -1319,6 +1321,7 @@ namespace {
             proof.projection_policy.reset(domain, now);
           }
           proof.projection_policy.reset_reference(domain, now);
+          proof.provided_raw_policy.discard(now);
           proof.raw_reentry = {};
           log(reshade::log::level::info, "Sunshine 3D Streamline: user requested Recenter; acquiring a fresh nearest-depth gain reference and screen plane");
         } else {
@@ -1353,6 +1356,8 @@ namespace {
         return scene; // An older shader must not sample allocation padding as scene depth.
       }
       if (projection_provided) {
+        // A raw encoding returning from here must see a fresh target first.
+        proof.provided_raw_policy.leave();
         resolve_projection_scene(runtime, proof, depth, now, budget, scene);
         return scene;
       }

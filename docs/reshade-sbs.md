@@ -2228,7 +2228,9 @@ not match. The normal UI labels the fallback **relative depth (assumed infinite
 far plane)**; it does not imply recovered distance. Automatic uses no per-game presets or hidden
 percentile calibration. Camera and raw API controllers also retain separate
 reference histories. They share one reference policy, but switching to a branch with a different
-history is not guaranteed to be jump-free. Generic physical buffers retain separate references
+history is not guaranteed to be jump-free. Raw API encodings retain theirs per logical encoding
+across provider and frame generation switches, as described under
+[direct NGX depth selection](#direct-ngx-depth-selection). Generic physical buffers retain separate references
 unless their encoding equivalence is established; matching resolution alone is not such proof.
 Switching numeric bases restarts the existing 0.5-second stereo reentry; it never blends old
 pixels or unrelated camera coefficients.
@@ -2351,9 +2353,24 @@ the shared raw-scene controller with the infinite-far assumption above. Explicit
 uses reciprocal depth directly without that assumption or an invented camera matrix.
 Calibration is keyed to the provider, logical feature generation and depth convention, rather than physical texture addresses or
 dynamic render sizes. Rotating textures retain the reference; a new feature/convention starts a
-fresh one. Frame and sample ordering is scoped to that logical encoding: switching between SL and
-NGX resets their independent sequence watermarks, while capture-time floors and exact identity
-continue rejecting delayed packets from the previous source. Immutable exact-range readbacks drive
+fresh one. API-provided raw sources keep a bounded least-recently-used set of exact logical
+encodings (provider, logical source generation, viewport, layout and convention epochs, and
+direction). Each encoding has its own reference and its own frame and sample watermarks, so SL
+and NGX sequences never constrain each other, while capture-time floors and exact identity
+continue rejecting delayed packets from another encoding or an earlier visit. A returning
+encoding therefore does not repeat its startup window after a frame generation switch. Inactive
+encodings receive no packets, so re-entry, whether after another raw encoding was bound or after
+the projection path took the present, keeps gain and zero but renders only after a fresh target
+captured after the return; until then a held reference reports `no_target`, not `holding_reference`. A
+returning encoding's DLSS reset or feedback revision revokes that evidence, not the reference,
+as it does for a continuously bound encoding. A provider identity change (for example a
+recreated NGX feature, a new Streamline observation epoch, viewport or direction), eviction from
+the set, a new raw basis epoch and a runtime reset discard it. There is no age cap; one short
+enough to bound the reference would also expire it across ordinary frame generation intervals.
+Production has no recenter; the test-fixture recalibration hook also discards retained
+encodings on the projection path. A Generic interlude or a present without a known identity is
+not an absence from the provided path, so the encoding keeps the current hold, and NGX/Generic
+selection flicker or brief depth loss cannot starve it of fresh targets. Immutable exact-range readbacks drive
 the same independent gain and contrast-midpoint zero trial as Generic; this is
 not percentile clipping or a separate NGX strength formula. Rendering still requires current depth.
 
