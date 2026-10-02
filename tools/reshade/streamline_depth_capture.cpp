@@ -16,6 +16,9 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+#include "depth_cache_update.h" // Selection regressions apply the provider's display policy.
+#endif
 
 namespace sunshine_streamline::depth_capture {
   namespace {
@@ -649,6 +652,11 @@ namespace sunshine_streamline::depth_capture {
       std::uint64_t consumed_completed_capture{};
       queue_progress progress;
     };
+    // The shared source age bounds nomination, completed-snapshot admission and
+    // liveness alike. A zero tick is unavailable, never age zero.
+    bool within_source_age(std::uint64_t tick, std::uint64_t now) {
+      return tick && now >= tick && now - tick < sunshine_scene_depth::maximum_source_age_ms;
+    }
     capture_pick select_latest_capture(const queue_state &owner, std::uint64_t native,
         std::uint64_t present, provider_kind provider, std::uint64_t now) {
       capture_pick out;
@@ -802,7 +810,10 @@ namespace sunshine_streamline::depth_capture {
       if (completed.id <= owner.admission_after) return selection_reason::completed_before_gap;
       if (completed.metadata.sequence >= latest.metadata.sequence) return selection_reason::completed_not_older;
       if (!same_depth_layout(completed.metadata, latest.metadata)) return selection_reason::layout_changed;
-      if (owner.last_epoch == completed.metadata.epoch && completed.metadata.sequence <= owner.last_sequence)
+      // The consumed watermark belongs to the owner's provider; sequences of
+      // another provider's namespace are not comparable with it.
+      if (owner.provider == completed.metadata.provider && owner.last_epoch == completed.metadata.epoch &&
+          completed.metadata.sequence <= owner.last_sequence)
         return selection_reason::completed_already_consumed;
       if (owner.present == present && owner.present_capture && owner.present_capture != completed.id)
         return selection_reason::presentation_already_selected;
@@ -812,13 +823,15 @@ namespace sunshine_streamline::depth_capture {
         std::uint64_t present, provider_kind provider, std::uint64_t now) {
       auto chosen = select_latest_capture(owner, native, present, provider, now);
       const auto *latest = chosen.latest;
-      // Missing/failed/ambiguous nominations still revoke depth. Only a known
-      // pending snapshot from the established API source permits older pixels.
+      // Missing/failed/ambiguous/expired nominations still revoke depth. A live
+      // source whose newest snapshot is pending may use its own newest completed
+      // one; completed_snapshot matches its identity. Ownership does not gate
+      // this: a pipelined source is otherwise never readable, so it could never
+      // (re)establish itself after a reset, a source change or another
+      // provider's expired capture.
       if (!latest || (chosen.result != status::recorded && chosen.result != status::submitted) ||
           latest->invalid || latest->nomination_invalid || latest->nomination_only ||
-          (latest->finished && !latest->success) || !owner.provider_established || owner.provider != provider ||
-          owner.nominated_epoch != latest->metadata.epoch || owner.source_id != latest->metadata.source_id ||
-          owner.viewport != latest->metadata.viewport) return chosen;
+          (latest->finished && !latest->success) || !within_source_age(latest->metadata.tick, now)) return chosen;
       auto *completed = completed_snapshot(latest->metadata, now);
       if (!completed) { chosen.selection = selection_reason::no_completed_snapshot; return chosen; }
       chosen.selection = completed_fallback_reason(owner, present, *latest, *completed);
@@ -875,24 +888,74 @@ namespace sunshine_streamline::depth_capture {
       if (owner.provider_established && owner.present == present && owner.present_capture)
         return owner.provider == provider_kind::streamline ? select_sl() : select_capture(owner, native, present, owner.provider, now);
       auto sl = select_sl();
-      const auto readable = [](const capture_pick &value) { return value.value && value.result == status::ready; };
-      if (readable(sl)) return sl;
-      if (owner.provider_established && owner.provider == provider_kind::streamline &&
-          owner.last_source_tick && now >= owner.last_source_tick &&
-          now - owner.last_source_tick < sunshine_scene_depth::maximum_source_age_ms) {
-        const auto *pending = sl.latest;
-        const bool same_pending_source = pending && !pending->nomination_only && !pending->invalid && !pending->nomination_invalid &&
-          (!pending->finished || pending->success) && pending->metadata.epoch == owner.nominated_epoch &&
-          pending->metadata.source_id == owner.source_id && pending->metadata.viewport == owner.viewport;
-        // A short pipeline delay must not alternate providers every frame.
-        // This preserves selection only: display-cache rules still govern old
-        // pixels. Missing/failed/unsupported SL permits immediate NGX fallback.
-        if (sl.pending_nomination || (same_pending_source &&
-            (sl.result == status::recorded || sl.result == status::submitted))) return sl;
-      }
       auto ngx = select_capture(owner, native, present, provider_kind::ngx, now);
+      const auto readable = [](const capture_pick &value) { return value.value && value.result == status::ready; };
+      // Expired: no active view, or a newest nomination older than the source
+      // age. A pick without any slot (an attempt rejected before its capture
+      // existed) is not expired while its view is active.
+      const auto expired = [&](const capture_pick &value) {
+        return value.result == status::stale || (value.latest && !within_source_age(value.latest->metadata.tick, now));
+      };
+      // A source is live while its newest nomination is within the source age.
+      // Readable implies live; liveness never extends that age.
+      const auto live = [&](const capture_pick &value) {
+        return value.pending_nomination || (value.latest && !expired(value));
+      };
+      // A live source whose newest valid snapshot is still on its way. Unlike a
+      // failed, unsupported or ambiguous pick, it moves no gap watermark in
+      // acquire(), so its completed snapshot can become readable.
+      const auto pending = [&](const capture_pick &value) {
+        const auto *latest = value.latest;
+        return value.pending_nomination || (live(value) && !latest->nomination_only && !latest->invalid &&
+          !latest->nomination_invalid && (!latest->finished || latest->success) &&
+          (value.result == status::recorded || value.result == status::submitted));
+      };
+      // Ownership only arbitrates between live sources. Only a delivering owner
+      // (one frame copied within the source age) keeps its own live source:
+      // while that source is readable, or while its real successor is pending,
+      // so a short pipeline delay does not alternate providers every frame. Its
+      // already copied frame is not a successor. This preserves selection only;
+      // display-cache rules still govern old pixels. Failed, unsupported,
+      // missing, replaced, expired or undelivered owner evidence never holds
+      // against a readable source.
+      const auto protected_owner = [&](const capture_pick &value) {
+        const auto *source = value.value ? value.value : value.latest;
+        if (source) {
+          if (source->metadata.epoch != owner.nominated_epoch || source->metadata.source_id != owner.source_id ||
+              source->metadata.viewport != owner.viewport) return false;
+        } else if (!value.pending_nomination) return false; // Already bound to the owner's exact source.
+        if (!within_source_age(owner.last_source_tick, now)) return false;
+        if (readable(value) || value.pending_nomination) return true;
+        return pending(value) && (value.latest->metadata.epoch != owner.last_epoch ||
+          value.latest->metadata.sequence > owner.last_sequence);
+      };
+      const auto *own = owner.provider_established ? owner.provider == provider_kind::streamline ? &sl : &ngx : nullptr;
+      if (own && protected_owner(*own)) return *own;
+      // No protected owner: readable SL is preferred over readable NGX. This
+      // includes an established SL owner whose readable frames are never copied
+      // (failed display preparation or copy): it is not delivering, yet keeps
+      // that preference until its source is revoked or stops being readable.
+      if (readable(sl)) return sl;
       if (readable(ngx)) return ngx;
-      if (owner.provider_established) return owner.provider == provider_kind::streamline ? sl : ngx;
+      // Neither provider is readable. A delivering owner keeps any pick that
+      // has not expired: after one rejected, failed or ambiguous attempt, also
+      // one rejected before its capture slot existed, the display may hold its
+      // last copied frame, and the other provider's pixel-less pending capture,
+      // such as a nested NGX evaluation still in flight, takes no authority. A
+      // persistently failing owner stops delivering within the source age and
+      // so cannot lock out a pending source. Otherwise a pending live pick ranks
+      // above a failing live one, which would mark a gap at every Present and
+      // so keep the pending source's completed snapshots unreadable, and any
+      // live pick ranks above an expired one. An owner that has stopped
+      // delivering keeps its provider only while the other provider does not
+      // rank higher.
+      const auto rank = [&](const capture_pick &value) { return pending(value) ? 2 : live(value) ? 1 : 0; };
+      if (own) {
+        if (!expired(*own) && within_source_age(owner.last_source_tick, now)) return *own;
+        const auto &other = own == &sl ? ngx : sl;
+        return rank(other) > rank(*own) ? other : *own;
+      }
+      if (rank(sl) != rank(ngx)) return rank(sl) > rank(ngx) ? sl : ngx;
       // Preserve pending/failure diagnostics when neither provider is ready.
       // Pending SL cannot block a subsequently readable NGX source.
       if (sl.value || (!ngx.value && (sl.latest || !evaluations[provider_index(provider_kind::ngx)].sequence))) return sl;
@@ -2757,9 +2820,12 @@ namespace sunshine_streamline::depth_capture {
       if (!owner.provider_established || owner.provider != provider_kind::ngx || owner.source_id != 99) return false;
       // Acquisition without a successful copy must not consume this frame.
       if (select(2).value != &ngx) return false;
+      // complete_frame() bookkeeping for a successful copy.
       owner.last_epoch = ngx.metadata.epoch; owner.last_sequence = ngx.metadata.sequence;
-      // A ready SL source takes priority on the next presentation; repeated
-      // effects within the already-selected presentation remain on NGX.
+      owner.last_source_tick = ngx.metadata.tick;
+      // NGX's already copied frame is not a pending successor, so a ready SL
+      // source takes priority on the next presentation; repeated effects
+      // within the already-selected presentation remain on NGX.
       make(1, provider_kind::streamline, 1, 101, 0);
       if (select(1).value != &ngx || select(2).value != &slots[1]) return false;
       slots[1].metadata.frame_generation_input = true;
@@ -2817,12 +2883,22 @@ namespace sunshine_streamline::depth_capture {
         preferred_owner.device_identity = 17;
         if (pick(2).value == &preferred) return false;
         preferred.nomination_only = false; preferred.source_nominated = false;
+        // The owner's already copied frame is not a pending successor; it does
+        // not hold a readable capture from the other provider.
+        if (pick(2).value != &preferred) return false;
+        // A live owner that is still delivering keeps its source while its real
+        // successor is pending: the other provider does not make selection alternate.
+        make(2, provider_kind::ngx, 60, 2, 500).finished = false;
+        if (pick(2).value == &preferred) return false;
+        // An owner without a recently copied frame holds nothing.
+        preferred_owner.last_source_tick = GetTickCount64() - sunshine_scene_depth::maximum_source_age_ms - 1;
         if (pick(2).value != &preferred) return false;
         // Metadata observed after the copy (camera reset, tag change, loss)
         // never makes a readable SL copy yield to a ready NGX source.
         preferred.metadata.observation_revision = 5;
         make(2, provider_kind::ngx, 60, 2, 500);
-        if (pick(2).value != &preferred) return false;
+        queue_state unowned; unowned.device_identity = preferred_owner.device_identity;
+        if (select_provider(unowned, native, 2, GetTickCount64()).value != &preferred) return false;
         establish_provider(preferred_owner, preferred, 2);
         preferred_owner.last_epoch = 70; preferred_owner.last_sequence = 1;
         preferred_owner.last_source_tick = preferred.metadata.tick;
@@ -2932,7 +3008,10 @@ namespace sunshine_streamline::depth_capture {
         }
         fallback.success = false;
         const auto unavailable = pick(31, excluded);
-        if (unavailable.value || unavailable.latest || unavailable.pending_nomination) return false;
+        // The live failed NGX attempt is reported in front of the excluded FG
+        // scope. It supplies no source and never reveals the excluded FG input.
+        if (unavailable.value || unavailable.pending_nomination || unavailable.latest != &fallback ||
+            unavailable.result != status::failed) return false;
         fallback.success = true;
         auto &pending_fg = make(3, provider_kind::streamline, fg_epoch, 2, fg_id);
         pending_fg.metadata.frame_generation_input = true; pending_fg.finished = false;
@@ -3156,6 +3235,477 @@ namespace sunshine_streamline::depth_capture {
       const auto recycled = record_nomination(candidate, candidate.resource.native, 0, {});
       if (!recycled || slots[pixel_slot_limit].id != recycled ||
           slots[pixel_slot_limit - 1].id != overflow) return false;
+      return true;
+    }
+    bool live_source_admission_regression() {
+      // A pipelined game's newest nomination is still in flight at every
+      // Present, so its pixels come only from the source's own newest
+      // completed snapshot. Drive the production selector together with the
+      // watermark, establishment and consumption bookkeeping of acquire() and
+      // complete_frame(); only the producer fences are supplied by the CPU.
+      struct cleanup {
+        std::array<slot, slot_limit> saved_slots{slots};
+        std::array<evaluation_namespace, provider_count> saved_evaluations{evaluations};
+        std::array<status, provider_count> saved_attempts{attempt_status[0].load(), attempt_status[1].load()};
+        bool saved_requested{requested.load()};
+        status saved_reason{reason.load()};
+        std::uint64_t saved_serial{serial.load()};
+        ~cleanup() {
+          slots = saved_slots; evaluations = saved_evaluations;
+          for (unsigned i = 0; i != provider_count; ++i) attempt_status[i] = saved_attempts[i];
+          requested = saved_requested; reason = saved_reason; serial = saved_serial;
+        }
+      } restore;
+      requested = true;
+      struct completion_fence final : ID3D12Fence {
+        UINT64 completed{};
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
+        ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+        ULONG STDMETHODCALLTYPE Release() override { return 1; }
+        HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT *, void *) override { return E_NOTIMPL; }
+        HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void *) override { return E_NOTIMPL; }
+        HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown *) override { return E_NOTIMPL; }
+        HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override { return E_NOTIMPL; }
+        HRESULT STDMETHODCALLTYPE GetDevice(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
+        UINT64 STDMETHODCALLTYPE GetCompletedValue() override { return completed; }
+        HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64, HANDLE) override { return E_NOTIMPL; }
+        HRESULT STDMETHODCALLTYPE Signal(UINT64) override { return E_NOTIMPL; }
+      };
+      // Registered queue timelines. Selection only compares a queue's identity
+      // and reads its private fence; it never calls the queue.
+      struct producer_queue {
+        completion_fence fence;
+        std::uint64_t signaled{};
+        std::unique_ptr<queue_state> *entry{};
+        std::uint64_t native() const { return reinterpret_cast<std::uint64_t>(this); }
+        ~producer_queue() {
+          if (!entry || !*entry) return;
+          (*entry)->queue.p = nullptr; (*entry)->fence.p = nullptr; entry->reset();
+        }
+      };
+      constexpr std::uint64_t device = 41;
+      // Two producer timelines (SL, NGX) and the effects queue, which owns the
+      // provider selection exactly as in acquire(), so retire_source sees it.
+      std::array<producer_queue, 3> producers;
+      for (auto &value : producers) {
+        const auto entry = std::find_if(queues.begin(), queues.end(), [](const auto &item) { return !item; });
+        if (entry == queues.end()) return false;
+        *entry = std::make_unique<queue_state>();
+        value.entry = &*entry;
+        (*entry)->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&value);
+        (*entry)->fence.p = &value.fence;
+        (*entry)->device_identity = device;
+      }
+      const auto consumer = producers[2].native();
+      const auto fresh_owner = [&]() -> queue_state & {
+        auto &value = **producers[2].entry;
+        value.provider_established = false; value.provider = provider_kind::streamline;
+        value.source_id = value.last_epoch = value.last_sequence = value.last_source_tick = value.nominated_epoch = 0;
+        value.present = value.present_capture = value.admission_after = 0; value.viewport = 0;
+        return value;
+      };
+      const auto layout = [&](unsigned width, unsigned height) {
+        auto value = std::make_shared<source_reference>();
+        value->device_identity = device;
+        value->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        value->desc.Width = width; value->desc.Height = height; value->desc.Format = DXGI_FORMAT_R32_TYPELESS;
+        return value;
+      };
+      struct pipeline {
+        provider_kind provider{};
+        std::uint64_t epoch{}, source_id{};
+        source_ref source;
+        producer_queue *queue{};
+        unsigned first{};
+        std::uint64_t sequence{};
+        bool frame_generation{};
+        unsigned written{};
+        slot *pending{};
+      };
+      // The game records its next evaluation, still in flight at the next
+      // Present, while its previous one completes on the GPU.
+      const auto advance = [&](pipeline &p) -> slot & {
+        if (p.pending) p.queue->fence.completed = std::max<UINT64>(p.queue->fence.completed, p.pending->producer_fence);
+        auto &value = slots[p.first + p.written++ % 4];
+        value = {};
+        value.id = ++serial; value.queue = p.queue->native(); value.producer_fence = ++p.queue->signaled;
+        value.texture = std::make_shared<texture_reference>();
+        value.finished = value.success = value.producer_submitted = value.source_nominated = true;
+        value.metadata.provider = p.provider; value.metadata.epoch = p.epoch; value.metadata.sequence = ++p.sequence;
+        value.metadata.source_id = p.source_id; value.metadata.source = p.source;
+        value.metadata.frame_generation_input = p.frame_generation;
+        value.metadata.tick = GetTickCount64();
+        begin_evaluation(p.epoch, p.sequence, 0, p.provider, p.source_id);
+        p.pending = &value;
+        return value;
+      };
+      const auto finish_gpu = [](pipeline &p) {
+        p.queue->fence.completed = std::max<UINT64>(p.queue->fence.completed, p.pending->producer_fence);
+      };
+      // An attempt rejected before its capture slot exists (observer coverage,
+      // a closed recording or render pass, proof, lifetime or identity checks):
+      // the provider's sequence and view advance, its previous capture
+      // completes, and only the attempt status remains.
+      const auto reject_without_slot = [&](pipeline &p) {
+        if (p.pending) finish_gpu(p);
+        begin_evaluation(p.epoch, ++p.sequence, 0, p.provider, p.source_id);
+        attempt_status[provider_index(p.provider)] = status::unsupported_state;
+      };
+      // Time passes for a source that stopped evaluating, including the last
+      // frame the queue copied from it.
+      const auto expire = [&](const pipeline &p, queue_state &queue) {
+        constexpr auto age = sunshine_scene_depth::maximum_source_age_ms + 1;
+        for (auto &view : evaluations[provider_index(p.provider)].views)
+          if (view.source_id == p.source_id && view.tick > age) view.tick -= age;
+        for (auto &value : slots)
+          if (value.id && value.metadata.provider == p.provider && value.metadata.source_id == p.source_id &&
+              value.metadata.tick > age) value.metadata.tick -= age;
+        if (queue.provider == p.provider && queue.source_id == p.source_id && queue.last_source_tick > age)
+          queue.last_source_tick -= age;
+      };
+      // The provider's view of each Present: acquire() classifies the pick
+      // before establishment, and only a successful copy replaces the
+      // retained display frame. Test snapshots own no resource, so packets
+      // are described through their source allocation, as nominations are.
+      acquisition_decision decided;
+      retained_depth retained;
+      const auto describe = [&](const slot &value, status result) {
+        auto view = value; view.nomination_only = true;
+        packet out; describe_packet(view, consumer, out);
+        out.pixel_ready = !value.nomination_only && result == status::ready;
+        return out;
+      };
+      // acquire() followed, for ready pixels, by a successful copy and
+      // complete_frame(): the same watermark, establishment and consumption.
+      // copied=false models a failed display preparation or copy: no complete_frame().
+      const auto present_frame = [&](queue_state &queue, std::uint64_t present, selection_policy policy = {},
+          bool copied = true) {
+        const auto chosen = select_provider(queue, consumer, present, GetTickCount64(), policy);
+        decided = classify_acquisition(chosen, queue, policy);
+        if (queue.provider_established && chosen.result != status::ready && chosen.result != status::recorded &&
+            chosen.result != status::submitted) queue.admission_after = serial.load();
+        if (chosen.value) {
+          establish_provider(queue, *chosen.value, present);
+          if (chosen.result == status::ready && copied) {
+            queue.last_epoch = chosen.value->metadata.epoch;
+            queue.last_sequence = chosen.value->metadata.sequence;
+            queue.last_source_tick = chosen.value->metadata.tick;
+            const auto copy = describe(*chosen.value, chosen.result);
+            retained = {copy.metadata, copy.capture_id, present, copy.width, copy.height, copy.format, copy.area};
+          }
+        }
+        return chosen;
+      };
+      // decide_display() for the last Present against the retained frame.
+      const auto display = [&](const capture_pick &chosen) {
+        const auto candidate = chosen.value ? describe(*chosen.value, chosen.result) : packet{};
+        return decide_display(decided, candidate, retained, {}, GetTickCount64());
+      };
+      const auto pending_result = [](const capture_pick &value) {
+        return value.result == status::recorded || value.result == status::submitted;
+      };
+      const auto completed_pick = [](const capture_pick &value, const slot *expected) {
+        return value.value == expected && value.result == status::ready && value.selection == selection_reason::completed_snapshot;
+      };
+      // One add-on epoch can number both providers; their sequences are
+      // separate namespaces and must never be compared with each other.
+      constexpr std::uint64_t epoch = 4;
+      const auto render = layout(1280, 720);
+      const auto streamline = [&](std::uint64_t source_id = 0) {
+        return pipeline{provider_kind::streamline, epoch, source_id, render, &producers[0], 0, 31635};
+      };
+      const auto ngx = [&](std::uint64_t source_id = 9, source_ref source = {}) {
+        return pipeline{provider_kind::ngx, epoch, source_id, source ? source : render, &producers[1], 8, 4686};
+      };
+      const auto restart = [&] {
+        slots = {}; evaluations = {}; decided = {}; retained = {};
+        for (auto &value : producers) { value.fence.completed = value.signaled = 0; }
+      };
+      // Establish a pipelined source as the delivering owner.
+      const auto deliver = [&](queue_state &queue, pipeline &p, std::uint64_t &present) {
+        advance(p);
+        for (unsigned frame = 0; frame != 3; ++frame) {
+          auto &completed = *p.pending;
+          advance(p);
+          if (!completed_pick(present_frame(queue, ++present), &completed)) return false;
+        }
+        return queue.provider_established && queue.provider == p.provider && queue.source_id == p.source_id;
+      };
+      std::uint64_t present = 0;
+
+      // (a)+(f) A late SL capture took ownership and SL then stopped. Its
+      // expired source must neither hide pipelined NGX nor mark a gap.
+      {
+        restart();
+        auto &owner = fresh_owner();
+        auto sl = streamline();
+        auto ngx_source = ngx();
+        auto &late = advance(sl); finish_gpu(sl);
+        if (present_frame(owner, ++present).value != &late || owner.provider != provider_kind::streamline ||
+            owner.last_sequence != late.metadata.sequence) return false;
+        expire(sl, owner);
+        advance(ngx_source);
+        const auto first = present_frame(owner, ++present);
+        if (first.latest != ngx_source.pending || !pending_result(first) || owner.admission_after) return false;
+        auto &completed = *ngx_source.pending;
+        advance(ngx_source);
+        if (!completed_pick(present_frame(owner, ++present), &completed) || owner.provider != provider_kind::ngx) return false;
+        for (unsigned frame = 0; frame != 4; ++frame) {
+          auto &next = *ngx_source.pending;
+          advance(ngx_source);
+          if (!completed_pick(present_frame(owner, ++present), &next)) return false;
+        }
+        // Without an owner, the expired SL capture is still not reported in
+        // front of a live NGX source that has no completed snapshot yet.
+        restart();
+        auto &fresh = fresh_owner();
+        auto stale = streamline(); auto pending = ngx();
+        advance(stale); finish_gpu(stale);
+        expire(stale, fresh);
+        advance(pending).producer_submitted = false; // CPU-recorded only: no source value yet.
+        const auto front = select_provider(fresh, consumer, ++present, GetTickCount64());
+        if (front.value || front.latest != pending.pending || front.result != status::recorded) return false;
+      }
+      // (b) No owner (runtime reset or new generation): a source that is only
+      // ever CPU-recorded at Present establishes from its completed snapshot.
+      {
+        restart();
+        auto &owner = fresh_owner();
+        auto source = ngx();
+        advance(source).producer_submitted = false;
+        const auto recorded = present_frame(owner, ++present);
+        if (recorded.value || recorded.result != status::recorded || owner.provider_established) return false;
+        auto &completed = *source.pending; completed.producer_submitted = true;
+        advance(source).producer_submitted = false;
+        if (!completed_pick(present_frame(owner, ++present), &completed) || !owner.provider_established ||
+            owner.provider != provider_kind::ngx || owner.source_id != 9) return false;
+      }
+      // (c) A DLSS quality change re-creates the NGX feature at a new render
+      // resolution: a new source identity whose newest capture is in flight,
+      // already submitted or still only CPU-recorded at each Present.
+      for (const bool observed_release : {true, false}) for (const bool submitted_newest : {true, false}) {
+        restart();
+        auto &owner = fresh_owner();
+        auto old_feature = ngx(9);
+        if (!deliver(owner, old_feature, present)) return false;
+        if (observed_release) {
+          retire_source(provider_kind::ngx, epoch, 9);
+          if (owner.provider_established) return false;
+        } else expire(old_feature, owner); // The settings change outlasts the source age.
+        auto feature = ngx(10, layout(1706, 960));
+        feature.sequence = old_feature.sequence; feature.first = 12;
+        advance(feature).producer_submitted = submitted_newest;
+        const auto changing = present_frame(owner, ++present);
+        if ((changing.value && changing.value->metadata.source_id != 10) || changing.latest != feature.pending ||
+            !pending_result(changing)) return false;
+        auto &completed = *feature.pending; completed.producer_submitted = true;
+        advance(feature).producer_submitted = submitted_newest;
+        if (!completed_pick(present_frame(owner, ++present), &completed) || owner.source_id != 10 ||
+            owner.provider != provider_kind::ngx) return false;
+      }
+      // (d) The mirror case: NGX stops and pipelined SL takes over.
+      {
+        restart();
+        auto &owner = fresh_owner();
+        auto old_source = ngx();
+        if (!deliver(owner, old_source, present)) return false;
+        expire(old_source, owner);
+        auto sl = streamline();
+        advance(sl);
+        const auto first = present_frame(owner, ++present);
+        if (first.latest != sl.pending || !pending_result(first) || owner.admission_after) return false;
+        auto &completed = *sl.pending;
+        advance(sl);
+        if (!completed_pick(present_frame(owner, ++present), &completed) || owner.provider != provider_kind::streamline) return false;
+      }
+      // (e) A delivering owner keeps its live source while the other provider
+      // is live and readable every frame, including over a pending Present.
+      for (const auto owner_kind : {provider_kind::ngx, provider_kind::streamline}) {
+        restart();
+        auto &owner = fresh_owner();
+        auto own = owner_kind == provider_kind::ngx ? ngx() : streamline();
+        auto other = owner_kind == provider_kind::ngx ? streamline() : ngx();
+        if (!deliver(owner, own, present)) return false;
+        for (unsigned frame = 0; frame != 6; ++frame) {
+          const bool owner_advances = frame % 3 != 2; // Every third Present has no new completion.
+          if (owner_advances) advance(own);
+          advance(other); finish_gpu(other);
+          const auto chosen = present_frame(owner, ++present);
+          if ((chosen.value && chosen.value->metadata.provider != owner_kind) ||
+              (owner_advances ? chosen.result != status::ready : !pending_result(chosen)) ||
+              owner.provider != owner_kind || owner.admission_after) return false;
+        }
+        // Ownership is revocable: a failed owner attempt, or no copied owner
+        // frame within the source age, lets the readable live source take over.
+        auto &failed = advance(own);
+        finish(failed.id, false);
+        advance(other); finish_gpu(other);
+        const auto failover = present_frame(owner, ++present);
+        if (!failover.value || failover.value->metadata.provider == owner_kind || failover.result != status::ready) return false;
+      }
+      {
+        restart();
+        auto &owner = fresh_owner();
+        auto own = ngx(); auto other = streamline();
+        if (!deliver(owner, own, present)) return false;
+        present_frame(owner, ++present); // Consumes nothing new: the pipeline did not advance.
+        owner.last_source_tick -= sunshine_scene_depth::maximum_source_age_ms + 1;
+        advance(other); finish_gpu(other);
+        const auto takeover = present_frame(owner, ++present);
+        if (takeover.value != other.pending || takeover.result != status::ready ||
+            owner.provider != provider_kind::streamline) return false;
+      }
+      // A readable owner whose frames are never copied (failed display
+      // preparation or copy, so no complete_frame) is not delivering: once its
+      // last copied frame is older than the source age, readable SL takes over.
+      {
+        restart();
+        auto &owner = fresh_owner();
+        auto own = ngx(); auto other = streamline();
+        if (!deliver(owner, own, present)) return false;
+        auto &uncopied = *own.pending;
+        advance(own);
+        if (!completed_pick(present_frame(owner, ++present, {}, false), &uncopied)) return false;
+        owner.last_source_tick -= sunshine_scene_depth::maximum_source_age_ms + 1;
+        advance(own); advance(other); finish_gpu(other);
+        const auto revoked = present_frame(owner, ++present);
+        if (revoked.value != other.pending || revoked.result != status::ready ||
+            owner.provider != provider_kind::streamline) return false;
+      }
+      // An owner's already copied frame is not a pending successor. A one-frame
+      // stray owner therefore does not hold a readable live source of the other
+      // provider for the source age.
+      for (const auto owner_kind : {provider_kind::ngx, provider_kind::streamline}) {
+        restart();
+        auto &owner = fresh_owner();
+        auto stray = owner_kind == provider_kind::ngx ? ngx() : streamline();
+        auto other = owner_kind == provider_kind::ngx ? streamline() : ngx();
+        advance(stray); finish_gpu(stray);
+        if (present_frame(owner, ++present).value != stray.pending || owner.provider != owner_kind) return false;
+        for (unsigned frame = 0; frame != 2; ++frame) {
+          advance(other); finish_gpu(other);
+          const auto chosen = present_frame(owner, ++present);
+          if (chosen.value != other.pending || chosen.result != status::ready || owner.provider == owner_kind) return false;
+        }
+      }
+      // The nested fallback in a pipelined game: one owner copy is rejected
+      // (a metadata-only nomination, or an attempt rejected before its capture
+      // slot exists), so the other provider's inner evaluation is captured and
+      // is still in flight at that Present. The delivering owner keeps
+      // selection and the display holds its last copied frame. The pixel-less
+      // inner capture takes no authority, so the held depth is not invalidated
+      // as a source change and selection does not flip to the other provider
+      // and back.
+      for (const auto owner_kind : {provider_kind::streamline, provider_kind::ngx})
+      for (const bool slotless : {false, true}) {
+        restart();
+        auto &owner = fresh_owner();
+        auto own = owner_kind == provider_kind::ngx ? ngx() : streamline();
+        auto nested = owner_kind == provider_kind::ngx ? streamline() : ngx();
+        if (!deliver(owner, own, present)) return false;
+        const auto copied = retained.capture_id;
+        // A pick without any capture names no source (epoch zero), so it
+        // cannot contradict the retained one.
+        const auto owned = [&] {
+          return owner.provider_established && owner.provider == owner_kind && owner.source_id == own.source_id &&
+            (!decided.epoch || (decided.provider == owner_kind && decided.source_id == own.source_id));
+        };
+        const auto holds = [&](const capture_pick &chosen) {
+          const auto update = display(chosen);
+          return update.action == display_action::hold && retained.capture_id == copied;
+        };
+        slot *rejected{};
+        if (slotless) reject_without_slot(own);
+        else {
+          rejected = &advance(own);
+          rejected->nomination_only = true; rejected->pixel_failure = status::unsupported_resource;
+        }
+        advance(nested);
+        const auto held = present_frame(owner, ++present);
+        if (held.value != rejected || (slotless && (held.latest || held.pending_nomination)) ||
+            held.result != (slotless ? status::unsupported_state : status::unsupported_resource) ||
+            !owned() || !holds(held)) return false;
+        // The owner resumes; the inner evaluation stops and its capture completes.
+        finish_gpu(nested);
+        auto &resumed = advance(own);
+        const auto pending_owner = present_frame(owner, ++present);
+        if (pending_owner.result == status::ready || !owned() || !holds(pending_owner)) return false;
+        advance(own);
+        const auto fresh = present_frame(owner, ++present);
+        if (!completed_pick(fresh, &resumed) || !owned() || display(fresh).action != display_action::copy_fresh ||
+            retained.capture_id != resumed.id) return false;
+      }
+      // A live owner whose attempts fail (rejected nomination-only copies,
+      // failed evaluations, a concurrently evaluated second view, or attempts
+      // rejected before a capture slot exists) keeps selection only while it
+      // is delivering. Once its last copied frame is
+      // older than the source age, it holds nothing in front of a pipelined
+      // source of the other provider: returning the failing owner would mark a
+      // gap at every Present and keep the other source's completed snapshots
+      // unreadable. The pending source is reported instead (its submitted
+      // nomination may carry source authority, never pixels), so its first
+      // completed snapshot after the gap is selected, whether it started while
+      // the owner was still delivering or only after it stopped.
+      for (const auto owner_kind : {provider_kind::streamline, provider_kind::ngx})
+      for (unsigned failure = 0; failure != 4; ++failure)
+      for (const bool other_first : {true, false}) {
+        restart();
+        auto &owner = fresh_owner();
+        auto own = owner_kind == provider_kind::ngx ? ngx() : streamline();
+        auto other = owner_kind == provider_kind::ngx ? streamline() : ngx();
+        auto second_view = owner_kind == provider_kind::ngx ? ngx(11) : streamline(2);
+        second_view.first = 16;
+        if (!deliver(owner, own, present)) return false;
+        const auto fail = [&] {
+          if (failure == 3) { reject_without_slot(own); return; }
+          auto &value = advance(own);
+          if (failure == 0) { value.nomination_only = true; value.pixel_failure = status::unsupported_resource; }
+          else if (failure == 1) finish(value.id, false);
+          else { second_view.sequence = own.sequence; advance(second_view); own.sequence = second_view.sequence; }
+        };
+        // While delivering, the failing owner keeps selection and marks the gap.
+        // A slot-less owner pick names no capture; the other provider's pick
+        // would name its pending one.
+        for (unsigned frame = 0; frame != 2; ++frame) {
+          fail();
+          if (other_first) advance(other);
+          const auto kept = present_frame(owner, ++present);
+          const auto *source = kept.value ? kept.value : kept.latest;
+          if ((source ? source->metadata.provider != owner_kind : failure != 3 || kept.pending_nomination) ||
+              kept.result == status::ready || pending_result(kept) ||
+              owner.provider != owner_kind || !owner.admission_after) return false;
+        }
+        // No owner frame was copied within the source age.
+        owner.last_source_tick -= sunshine_scene_depth::maximum_source_age_ms + 1;
+        const auto gap = owner.admission_after;
+        fail(); advance(other);
+        const auto handover = present_frame(owner, ++present);
+        if ((handover.value && handover.value != other.pending) || handover.latest != other.pending ||
+            !pending_result(handover) || owner.admission_after != gap) return false;
+        for (unsigned frame = 0; frame != 2; ++frame) {
+          auto &completed = *other.pending;
+          fail(); advance(other);
+          if (!completed_pick(present_frame(owner, ++present), &completed) ||
+              owner.provider == owner_kind || owner.admission_after != gap) return false;
+        }
+      }
+      // Required FG keeps its mandatory SL scope: a pipelined FG source uses
+      // its own completed snapshot, and NGX is never substituted meanwhile.
+      {
+        restart();
+        auto &owner = fresh_owner();
+        auto fg = streamline((1ull << 63) | 0); fg.frame_generation = true;
+        auto readable_ngx = ngx();
+        const selection_policy policy{true, epoch, 0};
+        advance(fg);
+        advance(readable_ngx); finish_gpu(readable_ngx);
+        const auto waiting = present_frame(owner, ++present, policy);
+        if ((waiting.value && !waiting.value->metadata.frame_generation_input) || waiting.latest != fg.pending ||
+            !pending_result(waiting)) return false;
+        auto &completed = *fg.pending;
+        advance(fg);
+        if (!completed_pick(present_frame(owner, ++present, policy), &completed) || owner.provider != provider_kind::streamline) return false;
+      }
       return true;
     }
     namespace {

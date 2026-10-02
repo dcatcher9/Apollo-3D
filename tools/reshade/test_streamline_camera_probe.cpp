@@ -3965,6 +3965,9 @@ int main(int argc, char **argv) {
     std::puts("PASS newly created command recording keeps first barrier/close/pass/opaque evidence without Reset; stale callbacks remain rejected");
     require(depth_capture::testing::submission_completion_regression(), "submission ordering invalidated pending completion or admitted an unfinished/failed capture");
     require(depth_capture::testing::provider_admission_regression(), "provider ownership admitted unusable or cross-provider depth");
+    require(depth_capture::testing::live_source_admission_regression(),
+      "a pipelined live source was locked out by an expired, absent or replaced owner, or a delivering owner alternated or lost selection to a pixel-less capture");
+    std::puts("PASS live pipelined sources use their own completed snapshots after owner expiry, reset or source change; delivering owners are kept through rejected attempts and stay revocable");
     require(depth_capture::testing::crop_region_regression(), "native depth crop admitted an unsupported copy or rejected a valid extent");
     require(depth_capture::testing::record_diagnostic_regression(), "record diagnostics changed admission or were overwritten by another attempt");
     std::puts("PASS pending evaluation is unavailable until success in either submission order; failure, Signal loss and queue change remain terminal");

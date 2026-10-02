@@ -366,14 +366,19 @@ owns selection. One D3D12 capture owner handles
 both Generic preservation boundaries and API evaluation opportunities, including snapshot storage,
 submission, consumer leases and retirement. API capture snapshots the nominated resource at the
 middleware call, including tracked depth-stencil resources; matching a Generic backup's resource
-identity cannot authenticate its contents. While a same-source successor is pending, acquisition
-may advance to an unconsumed completed snapshot with its own sequence and metadata under the
-contract's ordering, freshness and interruption checks. When neither API supplies readable pixels,
-an established API selection can remain unavailable and return mono. Readable SL takes priority over NGX;
-an unsupported or pending first SL copy cannot displace working NGX. Established SL retains that
-preference during a valid short pending interval, bounded by 250 ms from its last copied source.
-Missing, failed, stale or revoked SL evidence permits ready NGX fallback. Selection stays fixed
-within a presentation and never pairs another provider's camera with its depth.
+identity cannot authenticate its contents. While a live source's successor is pending, acquisition
+may advance to that source's unconsumed completed snapshot with its own sequence and metadata under
+the contract's ordering, freshness and interruption checks, whether or not it already owns selection.
+When neither API supplies readable pixels, an established API selection can remain unavailable and
+return mono. A live owner that copied a frame within 250 ms keeps its source while readable or while
+a successor of that frame is pending. Otherwise readable SL takes priority over NGX, also for an
+established SL owner whose frames fail display preparation or copy; an unsupported or pending first
+SL copy cannot displace working NGX. When neither provider is readable, that delivering owner also
+keeps selection through a failed, rejected (even before its capture existed), replaced or ambiguous
+attempt, so another provider's pixel-less capture takes no authority. Expired or revoked owner
+evidence, or an owner that has not delivered for 250 ms, permits the other live source; an expired
+owner, or a failing one that stopped delivering, never hides a pending live one.
+Selection stays fixed within a presentation and never pairs another provider's camera with its depth.
 Automatic reconstructs inverse depth from the exact current projection, without smoothing its
 coefficients. The independent gain and screen plane follow the measured-range policy above. Current depth and
 zero-plane values must fit the shader domain. Unsupported encodings stay mono without clamping depth.

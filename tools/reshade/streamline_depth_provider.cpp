@@ -487,7 +487,11 @@ namespace sunshine_streamline::provider {
     }
     auto kind = available ? data->frame.metadata.provider : data->source_metadata.provider;
     std::uint64_t established_source{};
-    if (!available && !selection.require_frame_generation)
+    // Name the provider of the reported capture: selection can report the
+    // other provider's pending capture in front of the owner. Only an empty
+    // diagnostic falls back to the established owner.
+    if (!available && (capture_info.capture_id || capture_info.sequence)) kind = capture_info.provider;
+    else if (!available && !selection.require_frame_generation)
       depth_capture::provider_identity(runtime->get_command_queue()->get_native(), kind, established_source);
     const char *path_name = kind == sunshine_scene_depth::provider_kind::ngx ? "NGX" : "Streamline";
     data->owns_pass = data->open = true;

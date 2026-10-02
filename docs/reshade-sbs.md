@@ -1665,25 +1665,53 @@ source references and the current registry entry prevent address reuse from matc
 source. Identity retention does not require that the capture owner support the resource's format.
 
 A validated, successfully evaluated and actually submitted source nomination establishes API
-ownership on the consuming queue independently of display readiness. Between API providers,
-readable SL takes priority over NGX; an SL DLL, metadata-only nomination or pending first copy cannot
-replace working NGX. Once SL has supplied pixels, a valid successor pending for less than 250 ms
-from the last copied source timestamp retains that preference. Failed, unsupported, missing
-or expired SL evidence permits a ready NGX source to take over. Metadata observed after a copy
-(camera reset, tag change, observation loss) does not make that finished SL copy obsolete.
+ownership on the consuming queue independently of display readiness. A source is identified by
+provider, epoch, logical source and viewport. It is live while its newest nomination is younger
+than the source age below (250 ms). Ownership arbitrates only between live sources, and only a
+delivering owner, one whose last copied frame is younger than 250 ms, keeps its own live source:
+while that source is readable, or while a valid successor of its last copied frame is pending. A
+short pipeline delay, or a stray readable capture from the other provider, therefore does not
+alternate selection; the owner's already copied frame is not a successor. Otherwise readable SL is
+preferred over readable NGX, and the selected source becomes the owner; an SL DLL, metadata-only
+nomination or pending first copy cannot replace working NGX. That preference also covers an
+established SL owner whose readable frames are never copied (failed display preparation or copy):
+it is not delivering, yet keeps selection over readable NGX until its source is revoked or stops
+being readable. When neither provider is readable, a delivering owner keeps selection unless its own
+newest evidence has expired, even when its current attempt failed, was rejected (also before a
+capture existed), names a replaced source or is ambiguous: the display may hold its last copied
+frame, and the other provider's capture without readable pixels, such as an inner NGX evaluation
+still in flight, takes no authority. Once the owner has not delivered for 250 ms, or when no owner
+is established, a live source whose newest snapshot is pending is reported in front of a failing
+(failed, unsupported or ambiguous) one, and any live source in front of an expired one; an expired
+owner is never reported in front of a live source. A failing owner that has stopped delivering, or
+an expired one, would otherwise mark an interruption at every Present and so keep the pending
+source's completed snapshots unreadable. Expired or undelivered owner evidence therefore holds
+nothing; failed, rejected, missing, replaced (a new logical source of the same provider) or
+ambiguous evidence holds only a delivering owner's selection, and only while the other provider is
+not readable. Metadata observed after a copy (camera reset, tag change, observation loss) does not
+make that finished copy obsolete.
 Explicit enabled FG retains its separate mandatory SL scope described below. Provider choice is
 frozen within one presentation, and each packet retains its own encoding, camera and logical source.
 
-When no alternative API source is usable, unsupported format/state or failed display creation
-produces mono while retaining the established API selection. A pending snapshot can use the newest
-unconsumed completed snapshot from the same source under the ordering, freshness and interruption
-rules below; otherwise it also produces mono. Neither case starts Generic ranking or scene-derived
-recalibration. Invalid pointers,
+When no alternative API source is usable, or while the SL preference above retains a non-delivering
+SL owner, unsupported format/state or failed display creation produces mono while retaining the
+established API selection. A live source whose newest snapshot is pending can use its own newest
+unconsumed completed snapshot under the ordering, freshness and interruption rules below; otherwise
+it also produces mono. Neither case starts Generic ranking or scene-derived recalibration.
+Ownership is not a precondition for that completed snapshot: in a pipelined game the newest capture
+is still in flight at every Present, so the completed snapshot is the only way such a source becomes
+readable and is established. Requiring an established owner first would lock such a source out
+while another provider's expired capture holds ownership, when no owner is established (after a
+reset or a new generation), and when the same provider changes source identity, for example when a
+DLSS quality change re-creates the NGX feature at a new render resolution. Stellar Blade showed the
+first case: one late SL capture took ownership after FG Off, expired, and left its pipelined NGX
+depth unavailable for minutes. Invalid pointers,
 device/extent/lifetime mismatches and an unsuccessful or unsubmitted first evaluation cannot
 establish authority. A loaded DLL alone cannot establish it either. Once established, temporary
 missing or failed observations retain ownership. Explicit source release, disable or lifecycle
-teardown ends it; a silence timeout does not. Disabling DLSS without an observed teardown can
-therefore require disabling its source option and restarting to use Generic fallback.
+teardown ends it; a silence timeout does not, although a silent owner never blocks another live API
+source. Disabling DLSS without an observed teardown can therefore require disabling its source
+option and restarting to use Generic fallback.
 
 One native D3D12 capture owner serves both API-selected and Generic-selected sources. It owns the
 snapshot pool, recording/submission identities, source and snapshot leases, consumer registration
@@ -2309,10 +2337,13 @@ a valid native copy, or when SL has confirmed enabled FG authority for that view
 resource, metadata-only ticket or rejected native attempt does not block a usable inner NGX input.
 Pending recorded copies retain deduplication authority; all nonzero tickets still receive completion.
 SL and NGX observations remain separate, so malformed input from one cannot invalidate the other's
-usable frame. The shared selector prefers readable SL and uses ready NGX when ordinary SL is
-unusable, with the bounded established-SL pending interval and explicit FG scope described above.
+usable frame. The shared selector applies the delivering-owner rule above, so an inner NGX capture
+still in flight does not displace a delivering SL owner after a rejected copy, including a native
+attempt rejected before its capture existed. Otherwise it prefers readable SL over ready NGX, with
+the bounded pending interval and explicit FG scope described above.
 An explicit successful release of its feature ends NGX ownership and permits automatic fallback;
-silence alone does not. Manual pins continue to override the automatic provider.
+silence alone does not, although an expired owner never blocks another live API source.
+Manual pins continue to override the automatic provider.
 Concurrent ambiguous NGX feature/view evaluations remain mono; the add-on does not infer which
 unrelated viewport is the final game camera.
 
