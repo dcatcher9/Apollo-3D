@@ -226,6 +226,118 @@ class GameDumpReaderTest(unittest.TestCase):
                 self.assertIn("ui_discovery", report)
                 self.assertFalse((self.root / "previews").exists())
 
+    def image(self, kind, values, fmt):
+        array = np.asarray(values, dtype=reader.FORMATS[fmt][0])
+        (self.root / (kind + ".bin")).write_bytes(array.tobytes())
+        return dict(kind=kind, file=kind + ".bin", dxgi_format=fmt, width=array.shape[1], height=array.shape[0],
+                    row_bytes=array.nbytes // array.shape[0], byte_count=array.nbytes)
+
+    @staticmethod
+    def pin_metadata(mode=5, fraction=0.5, ready=1, strength=100.0, limit_uv=0.04, rect=(0.0, 0.0, 1.0, 1.0)):
+        # b0: strength, depth_view, depth_ready, camera_ready, basis, depth_scale, blend, limit_uv, projection
+        # (A, 1/B), raw depth range, convergence (reference ZPD, zero inverse distance), jitter, depth rect.
+        parameters = struct.pack("<fiIIifff2f2f2f2f4f", strength, 0, ready, ready, 0, 1.0, 1.0, limit_uv,
+                                 0.0, 1.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, *rect)
+        word2, = struct.unpack("<I", struct.pack("<f", fraction))
+        return dict(color_space=3, replay=dict(
+            parameter_hex=parameters.hex(), ui_alpha_source="ui_source_color",
+            ui_constant_binding=dict(uint32=[1, mode, word2, 1], mask_channel="red")),
+            ui_layer_census=dict(candidates=[dict(kind="ui_layer_candidate_0", active=True)]))
+
+    def pin_dump(self):
+        """A 64x8 HDR10 frame: a light glyph pinned on row 4, and a scene step the pin did not cause on row 1."""
+        width, height = 64, 8
+        plane = np.float32(0.5) * np.float32(0.04)
+        final = np.zeros((height, width), np.float32)
+        final[4, :10] = plane
+        final[1, 20:30] = 0.01  # 0.64 px; the unpinned field is zero everywhere.
+        mask = np.zeros((height, width), np.float32)
+        mask[4, :10] = 1
+        layer = np.zeros((height, width, 4), np.uint8)
+        layer[4, :10] = 255
+        layer[4, 40] = (2, 2, 2, 255)  # Dark UI is neither light nor a glyph body.
+        codes = np.repeat(np.arange(width, dtype=np.uint32)[None, :] * 10, height, axis=0)
+        color = codes | codes << 10 | codes << 20 | np.uint32(3) << 30
+        artifacts = [self.image("vertical_field", np.zeros((height, width)), 41), self.image("final_field", final, 41),
+                     self.image("ui_source_color", mask, 41), self.image("ui_layer_candidate_0", layer, 28),
+                     self.image("source_color", color, 24)]
+        (self.root / "manifest.json").write_text(json.dumps(dict(
+            schema="sunshine.game3d.dump.v1", status="complete", artifacts=artifacts,
+            producer_metadata=self.pin_metadata())))
+        return width, plane
+
+    def test_unpinned_field_is_the_horizontal_limiter(self):
+        vertical = np.zeros((1, 8))
+        vertical[0, 3] = 0.2
+        # 0.5/W is exactly 2**26 in Q30 at W = 8.
+        expected = [0.0125, 0.075, 0.1375, 0.2, 0.1375, 0.075, 0.0125, 0]
+        np.testing.assert_allclose(reader.unpinned_field(vertical)[0], expected, rtol=0, atol=1e-15)
+
+    def test_ui_plane_follows_the_shader_modes(self):
+        bound = np.float32(0.04) * np.float32(100) * np.float32(0.01) * np.float32(1)
+        self.assertEqual(reader.ui_plane_uv(self.pin_metadata(5, 0.5)), float(np.float32(0.5) * bound))
+        self.assertEqual(reader.ui_plane_uv(self.pin_metadata(4)), float(np.float32(0.25) * bound))
+        self.assertEqual(reader.ui_plane_uv(self.pin_metadata(3)), float(bound))
+        for metadata in (self.pin_metadata(0), self.pin_metadata(5, 0.8), self.pin_metadata(5, ready=0),
+                         self.pin_metadata(5, strength=0.0)):
+            self.assertEqual(reader.ui_plane_uv(metadata), 0.0)
+        # SunshineCameraActive rejects a display limit outside (0, 0.04] and a depth rect outside the
+        # allocation, which pins UI to the screen plane rather than to a clamped limit.
+        for metadata in (self.pin_metadata(3, limit_uv=0.05), self.pin_metadata(3, limit_uv=0.0),
+                         self.pin_metadata(3, limit_uv=float("nan")), self.pin_metadata(3, rect=(0.5, 0.0, 0.6, 1.0)),
+                         self.pin_metadata(3, rect=(0.0, 0.0, 0.0, 1.0))):
+            self.assertEqual(reader.ui_plane_uv(metadata), 0.0)
+        smaller = np.float32(0.02) * np.float32(100) * np.float32(0.01) * np.float32(1)
+        self.assertEqual(reader.ui_plane_uv(self.pin_metadata(3, limit_uv=0.02)), float(smaller))
+        with self.assertRaises(ValueError):
+            reader.ui_plane_uv(self.pin_metadata(2))
+
+    def test_pin_metrics_count_new_steps_tear_flattening_and_torn_glyphs(self):
+        width, plane = self.pin_dump()
+        metrics = reader.pin_metrics(self.root, bands=[(0, 2), (3, 5)])
+        self.assertEqual(metrics["layer"], "ui_layer_candidate_0")
+        self.assertAlmostEqual(metrics["plane_px"], float(plane) * width)
+        # Each edge of the glyph row and of the scene step is a new step in 10 columns.
+        self.assertEqual(metrics["bands"], [{"rows": [0, 2], "max_new_step_columns": 10, "row": 0},
+                                            {"rows": [3, 5], "max_new_step_columns": 10, "row": 3}])
+        # Only the scene step tears: 20 pairs of 0.64 px times luma texture 10/1023.
+        self.assertAlmostEqual(metrics["scene_tear"], 20 * 0.64 * 10 / 1023, places=5)
+        # Masked UI pixels are not flattened scene: 10 scene pixels moved 0.64 px.
+        self.assertAlmostEqual(metrics["flattening_px_per_pixel"], 10 * 0.64 / (width * 8), places=6)
+        # Moved glyph bodies land off the plane; a move out of the frame tears nothing.
+        self.assertEqual(metrics["torn_glyph_pixels"],
+                         {"up_1": 10, "up_2": 10, "up_4": 10, "down_4": 0, "right_16": 10})
+
+    def test_pin_metrics_measure_a_replayed_field(self):
+        self.pin_dump()
+        unpinned = self.root / "replayed_final_field.bin"
+        unpinned.write_bytes(np.zeros((8, 64), "<f4").tobytes())
+        metrics = reader.pin_metrics(self.root, field=unpinned)
+        self.assertEqual(metrics["bands"][0]["max_new_step_columns"], 0)
+        self.assertEqual(metrics["scene_tear"], 0)
+        self.assertEqual(metrics["torn_glyph_pixels"]["up_1"], 10)
+        unpinned.write_bytes(np.zeros((8, 63), "<f4").tobytes())
+        with self.assertRaises(ValueError):
+            reader.pin_metrics(self.root, field=unpinned)
+
+    def test_pin_metrics_exclude_half_pixel_float32_rounding(self):
+        width, _ = self.pin_dump()
+        # The pin collar's own bound, 0.5 px from the plane, rounded to float32.
+        final = np.zeros((8, width), np.float32)
+        final[5, :] = np.nextafter(np.float32(0.5 / width), np.float32(1))
+        self.assertGreater(float(final[5, 0]) * width, 0.5)
+        field = self.root / "collar.bin"
+        field.write_bytes(final.tobytes())
+        self.assertEqual(reader.pin_metrics(self.root, field=field)["bands"][0]["max_new_step_columns"], 0)
+
+    def test_cli_reports_pin_metrics(self):
+        self.pin_dump()
+        command = [sys.executable, str(Path(reader.__file__)), str(self.root), "--pin-metrics", "--pin-band", "3:5"]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metrics = json.loads(result.stdout)["pin_metrics"]
+        self.assertEqual(metrics["bands"], [{"rows": [3, 5], "max_new_step_columns": 10, "row": 3}])
+
     def test_cli_creates_review_and_report_without_overwriting_evidence(self):
         source = self.artifact("source_color", [1, 2, 3, 0, 4, 5, 6, 255], fmt=28, channels=4)
         (self.root / "manifest.json").write_text(json.dumps(dict(

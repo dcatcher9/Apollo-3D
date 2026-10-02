@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // CPU-only compile/reflection validation of the native Game 3D shader ABI.
+#include "game3d_ui_detection_contract.h"
+
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
@@ -203,6 +205,20 @@ int main(int argc, char **argv) {
       return unsigned(std::stoul(source.substr(at + key.size())));
     };
     const unsigned limiter_lines = marker("SUNSHINE_LIMITER_LINE_GROUPS"), pin_lines = marker("SUNSHINE_UI_PIN_LINE_GROUPS");
+    // UI detection sizes its decision texels and statistics rows from these
+    // markers, and its flag bits mirror game3d_ui_detection_contract.h.
+    namespace detection = sunshine_game3d::ui_detection;
+    const unsigned decision_texels = marker(std::string(detection::decision_texels_marker)),
+      evidence_images = marker(std::string(detection::scene_evidence_images_marker));
+    require(decision_texels >= detection::min_decision_texels && decision_texels <= detection::max_decision_texels &&
+        evidence_images <= detection::max_scene_evidence_images, "UI detection size markers out of range");
+    for (const auto &[name, value] : detection::hlsl_flag_defines) {
+      const auto key = "#define " + std::string(name) + ' ';
+      const auto at = source.find(key);
+      require(at != std::string::npos, "Missing UI detection flag " + std::string(name));
+      require(std::stoul(source.substr(at + key.size(), 16), nullptr, 0) == value,
+        std::string(name) + " differs from game3d_ui_detection_contract.h");
+    }
     unsigned compiled = 0;
     for (const auto [width, height] : std::array<std::array<unsigned, 2>, 6> {{
       {16, 8}, {64, 36}, {1920, 1080}, {3840, 2160}, {2160, 3840}, {4800, 2700},

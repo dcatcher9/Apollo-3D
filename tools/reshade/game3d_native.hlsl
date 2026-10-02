@@ -24,6 +24,11 @@
 #define SUNSHINE_PACKED_EYES 1
 // UI pinning groups own eight adjacent rows.
 #define SUNSHINE_UI_PIN_LINE_GROUPS 8
+// Automatic UI detection writes this many decision texels; its statistics
+// rows hold this many scene-evidence images (docs/reshade-sbs.md, UI
+// detection flags and decision texels).
+#define SUNSHINE_UI_DECISION_TEXELS 5
+#define SUNSHINE_UI_SCENE_EVIDENCE_IMAGES 0
 //
 // Specialize BUFFER_WIDTH, BUFFER_HEIGHT and BUFFER_COLOR_SPACE at compile time.
 // This preserves the original per-resolution group-memory footprint. Color-space
@@ -85,12 +90,24 @@ Texture2D<float4> SunshineUIDedicatedAlpha : register(t11);
 Texture2D<float4> SunshineUIColorAlpha : register(t12);
 Texture2D<float4> SunshineUIBackbufferAlpha : register(t13);
 Texture2D<float4> SunshineHUDless : register(t14);
+// Sunshine_UIDetectionFlags (docs/reshade-sbs.md, UI detection flags and
+// decision texels), mirrored from game3d_ui_detection_contract.h. Stored bits
+// describe the UI color slot's source: it must be premultiplied, with a float
+// layer's HDR headroom, and is the one-frame-late offscreen UI layer.
+// Per-frame bits ride in one render's pushed word only.
+#define SUNSHINE_UI_STORED_PREMULTIPLIED 0x1u
+#define SUNSHINE_UI_STORED_HDR_HEADROOM 0x2u
+#define SUNSHINE_UI_STORED_LATE_LAYER 0x4u
+#define SUNSHINE_UI_STORED_STAGE2 0x8u
+#define SUNSHINE_UI_PER_FRAME_SCENE_HOLD 0x10000u
+#define SUNSHINE_UI_PER_FRAME_SAMPLE 0x20000u
+#define SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT 0x40000u
 cbuffer SunshineUIDetectionConstants : register(b2)
 {
     uint Sunshine_UICandidates; // bit0..2 captured alpha, bit3 current alpha, bit4 paired HUDless, bit5 exact pair.
     float Sunshine_UIDifferenceThreshold;
     uint Sunshine_UITrustedAlpha; // Bit i: the game session trusts alpha candidate i as UI coverage.
-    uint Sunshine_UIDetectionFlags; // bit0 UI color+alpha must be premultiplied, bit1 with HDR headroom.
+    uint Sunshine_UIDetectionFlags; // SUNSHINE_UI_STORED_* and SUNSHINE_UI_PER_FRAME_* bits.
 };
 RWTexture2D<float> SunshineHostCandidateStore : register(u0);
 RWTexture2D<float> SunshineHostVerticalMajorantStore : register(u1);
@@ -163,9 +180,9 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         // its alpha) qualifies; a scene buffer whose alpha is not coverage
         // (Dead Space: alpha near 11/255 under saturated color) does not.
         // scRGB UI may be up to 10000 nits.
-        if (Sunshine_UIDetectionFlags & 1u) {
+        if (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_PREMULTIPLIED) {
             float4 layer = SunshineUIColorAlpha.Load(int3(x, y, 0));
-            float headroom = Sunshine_UIDetectionFlags & 2u ? 125.0 : 2.0;
+            float headroom = Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_HDR_HEADROOM ? 125.0 : 2.0;
             invalid.y += max(max(layer.r, layer.g), layer.b) > layer.a * headroom + 4.0 / 255.0 ? 1u : 0u;
         }
         bool finite;

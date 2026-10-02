@@ -135,6 +135,202 @@ def save_preview(pixels, path, optional, result):
         result.setdefault("preview_errors", []).append(str(error))
 
 
+# UI pin metrics compare a final field F with the unpinned scene field h, both
+# in source pixels. A new vertical step is a row-to-row change of F that differs
+# from h's by more than half a pixel: an edge the UI pinning added. Fields are
+# compared in double precision; the tolerance keeps the float32 rounding of a
+# field exactly half a pixel from the plane (the pin collar's own bound) from
+# counting.
+PIN_STEP_PX = 0.5 + 1e-4
+# Synthetic moves of the solid layer glyph bodies against the pin computed from
+# the unmoved, one-frame-late layer: (rows, columns), negative rows move up.
+PIN_MOVES = {"up_1": (-1, 0), "up_2": (-2, 0), "up_4": (-4, 0), "down_4": (4, 0), "right_16": (0, 16)}
+BT709 = np.array([0.2126, 0.7152, 0.0722])
+BT2020 = np.array([0.2627, 0.678, 0.0593])
+
+
+def unpinned_field(vertical):
+    """The horizontal scene limiter on the vertical field: h(x) = max_u v(u) - |x-u|*step, step 0.5/W in Q30."""
+    field = np.array(vertical, dtype=np.float64)
+    width = field.shape[1]
+    step = (2 ** 29 // width) / 2 ** 30
+    for x in range(1, width):
+        np.maximum(field[:, x], field[:, x - 1] - step, out=field[:, x])
+    for x in range(width - 2, -1, -1):
+        np.maximum(field[:, x], field[:, x + 1] - step, out=field[:, x])
+    return field
+
+
+def camera_active(parameters):
+    """SunshineCameraActive on the 80-byte b0, in float32."""
+    f32, finite = np.float32, np.isfinite
+    camera_ready, = np.frombuffer(parameters, "<u4", 1, 12)
+    basis, = np.frombuffer(parameters, "<i4", 1, 16)
+    words = np.frombuffer(parameters, "<f4", 20)
+    scale, limit_uv = words[5], words[7]
+    a, inverse_b, raw_range, zpd, zero_inverse = words[8], words[9], words[10:12], words[12], words[13]
+    rect = words[16:20]
+    if not camera_ready or not finite(limit_uv) or not f32(0) < limit_uv <= f32(0.04):
+        return False
+    if not finite(rect).all() or (rect[:2] < 0).any() or (rect[2:] <= 0).any() or \
+            (rect[:2] + rect[2:] > f32(1.000001)).any():
+        return False
+    if basis not in (0, 1, 2) or (basis == 1 and (a, inverse_b) not in ((0, 1), (1, -1))):
+        return False
+    if not all(finite(value) for value in (a, inverse_b, scale, zpd, zero_inverse)):
+        return False
+    if inverse_b == 0 or scale <= 0 or zpd <= 0 or zpd > 1 or zero_inverse < 0:
+        return False
+    with np.errstate(all="ignore"):
+        gain = zpd * scale
+        if basis == 2:
+            return bool(finite(gain) and finite(gain * zero_inverse))
+        if basis == 1 or (raw_range == 0).all():
+            raw_range = np.array([0, 1], f32)
+        if not finite(raw_range).all() or raw_range[0] >= raw_range[1]:
+            return False
+        endpoints = (raw_range - a) * inverse_b
+        largest = endpoints.max()
+        if not finite(endpoints).all() or not (endpoints >= 0).all() or largest <= 0:
+            return False
+        return bool(finite(gain) and finite(gain * zero_inverse) and finite(gain * (zero_inverse - largest)))
+
+
+def ui_plane_uv(metadata):
+    """UI plane parallax in source U for the fixed and display-fraction modes, in the shader's float32 order."""
+    replay = metadata.get("replay", {})
+    words = replay.get("ui_constant_binding", {}).get("uint32", [0, 0, 0, 0])
+    mode = words[1]
+    parameters = bytes.fromhex(replay["parameter_hex"])
+    strength, = np.frombuffer(parameters, "<f4", 1, 0)
+    depth_ready, = np.frombuffer(parameters, "<u4", 1, 8)
+    blend, limit_uv = np.frombuffer(parameters, "<f4", 2, 24)
+    if mode in (1, 2):
+        raise ValueError("Depth-placed UI planes need the GPU; use a fixed or display-fraction mode")
+    # SunshineHostWarpActive.
+    warp = depth_ready and camera_active(parameters) and np.isfinite(strength) and np.isfinite(blend)
+    if mode not in (3, 4, 5) or not (warp and strength > 0 and blend > 0):
+        return 0.0
+    f32 = np.float32
+    with np.errstate(all="ignore"):
+        # SunshineBoundFinalParallax(SunshineHostContainer).
+        bound = f32(np.clip(limit_uv, 0, f32(0.04))) * f32(np.clip(strength, 0, 100)) * f32(0.01)
+        bound = bound * f32(np.clip(blend, 0, 1))
+        bound = min(f32(0.04), bound)
+        if mode == 5:
+            fraction, = np.frombuffer(np.array(words[2], "<u4").tobytes(), "<f4")
+            return float(fraction * bound) if np.isfinite(fraction) and 0 <= fraction <= 0.75 else 0.0
+    return float(f32(0.25) * bound if mode == 4 else bound)
+
+
+def shifted(values, rows, columns):
+    """values moved down by rows and right by columns; uncovered texels are False/zero."""
+    out = np.zeros_like(values)
+    height, width = values.shape[:2]
+    out[max(rows, 0):height + min(rows, 0), max(columns, 0):width + min(columns, 0)] = \
+        values[max(-rows, 0):height + min(-rows, 0), max(-columns, 0):width + min(-columns, 0)]
+    return out
+
+
+def scene_luma(color, transfer):
+    """Perceptual luma for texture strength: PQ code luma for HDR10, sRGB code luma for SDR, PQ of scRGB luminance."""
+    rgb = np.nan_to_num(np.asarray(color[:, :, :3], dtype=np.float64), nan=0, posinf=0, neginf=0)
+    if transfer == 3:
+        return rgb @ BT2020
+    if transfer == 2:
+        nits = np.clip(rgb @ BT709 * 80, 0, 10000) / 10000
+        power = nits ** 0.1593017578125
+        return ((0.8359375 + 18.8515625 * power) / (1 + 18.6875 * power)) ** 78.84375
+    return np.clip(rgb, 0, 1) @ BT709
+
+
+def pin_metrics(root, field=None, bands=None, layer=None):
+    """Metrics of a dump's UI pinning, or of a replayed final_field.bin of the same extent."""
+    root = Path(root)
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    metadata = manifest.get("producer_metadata", {})
+    artifacts = {artifact["kind"]: artifact for artifact in manifest.get("artifacts", [])}
+    for kind in ("vertical_field", "final_field", "source_color"):
+        if kind not in artifacts:
+            raise ValueError(f"Pin metrics need the {kind} artifact")
+    h = unpinned_field(read_artifact(root, artifacts["vertical_field"])[:, :, 0])
+    height, width = h.shape
+    if field is None:
+        final = read_artifact(root, artifacts["final_field"])[:, :, 0].astype(np.float64)
+    else:
+        final = np.fromfile(field, dtype="<f4").astype(np.float64)
+        if final.size != h.size:
+            raise ValueError("The replayed field differs from the dump's extent")
+        final = final.reshape(height, width)
+    replay = metadata.get("replay", {})
+    source = replay.get("ui_alpha_source", "none")
+    if source == "ui_source_color" and "ui_source_color" in artifacts:
+        consumed = read_artifact(root, artifacts["ui_source_color"])
+        red = replay.get("ui_constant_binding", {}).get("mask_channel") == "red"
+        mask = consumed[:, :, 0 if red else 3]
+    elif source == "source_color":
+        mask = read_artifact(root, artifacts["source_color"])[:, :, 3]
+    else:
+        mask = np.zeros((height, width), dtype=np.float32)
+    alpha = np.clip(np.nan_to_num(mask.astype(np.float64), nan=0, posinf=0, neginf=0), 0, 1)
+    if alpha.shape != h.shape:
+        raise ValueError("The consumed UI mask differs from the field's extent")
+    if layer is None:
+        census = metadata.get("ui_layer_census", {}).get("candidates", [])
+        active = [entry.get("kind") for entry in census if entry.get("active") and entry.get("kind") in artifacts]
+        layer = active[0] if active else "ui_layer_candidate_0" if "ui_layer_candidate_0" in artifacts else None
+    if layer is not None:
+        codes = np.rint(read_artifact(root, artifacts[layer]).astype(np.float64) * 255)
+        if codes.shape[:2] != h.shape:
+            raise ValueError("The UI layer differs from the field's extent")
+        light = (codes[:, :, :3].max(-1) > 4) & (codes[:, :, 3] > 0)
+        body = light & (codes[:, :, 3] >= 128)
+    else:
+        light = body = np.zeros(h.shape, dtype=bool)
+    plane = ui_plane_uv(metadata)
+    luma = scene_luma(read_artifact(root, artifacts["source_color"]), metadata.get("color_space", 1))
+
+    final_step = np.diff(final, axis=0) * width
+    new = np.abs(final_step - np.diff(h, axis=0) * width)
+    # Rows that both show light UI move rigidly with it.
+    steps = (np.abs(final_step) > PIN_STEP_PX) & (new > PIN_STEP_PX) & ~(light[1:] & light[:-1])
+    result_bands = []
+    for first, last in bands or [(0, height - 1)]:
+        if not 0 <= first < last < height:
+            raise ValueError(f"Band {first}:{last} is outside rows 0..{height - 1}")
+        columns = steps[first:last].sum(axis=1)
+        result_bands.append({"rows": [first, last], "max_new_step_columns": int(columns.max()),
+                             "row": first + int(columns.argmax())})
+    texture = np.abs(np.gradient(luma, axis=1))
+    texture = np.maximum(texture[1:], texture[:-1])
+    visible = np.minimum(1 - alpha[1:], 1 - alpha[:-1])
+    ui_rows = light[1:] | light[:-1] | (np.maximum(alpha[1:], alpha[:-1]) >= 0.5)
+    tear = (new > PIN_STEP_PX) & ~ui_rows
+    torn = None
+    if layer is not None:
+        off_plane = np.abs(final - plane) * width > PIN_STEP_PX
+        torn = {name: int((off_plane & shifted(body, *move)).sum()) for name, move in PIN_MOVES.items()}
+    return {
+        "width": width, "height": height, "plane_uv": plane, "plane_px": plane * width, "layer": layer,
+        "field": str(field) if field is not None else "final_field",
+        "bands": result_bands,
+        "scene_tear": float((new * texture * visible)[tear].sum()),
+        "flattening_px_per_pixel": float(((1 - alpha) * np.abs(final - h) * width).mean()),
+        "torn_glyph_pixels": torn,
+        "meaning": ("h is the horizontal limiter applied to vertical_field. bands: the most columns in one row pair "
+                    "(row, row+1) with a new vertical step above 0.5 px, light layer UI on both rows excluded. "
+                    "scene_tear: new steps above 0.5 px outside UI rows, times horizontal scene luma texture and "
+                    "scene visibility (1 - alpha). flattening: mean (1 - alpha)|F - h| in px. torn_glyph_pixels: "
+                    "solid light layer glyph bodies (alpha >= 128/255) moved against the pin of the unmoved layer "
+                    "that lie more than 0.5 px off the UI plane."),
+    }
+
+
+def band(text):
+    first, _, last = text.partition(":")
+    return int(first), int(last)
+
+
 def inspect(root, previews=False, ui_review=None):
     root = Path(root)
     manifest_bytes = (root / "manifest.json").read_bytes()
@@ -265,9 +461,18 @@ if __name__ == "__main__":
                         help="create an unreviewed UI qualification template; never overwrite a file")
     parser.add_argument("--ui-report", type=Path,
                         help="create a readable Markdown UI discovery report; never overwrite a file")
+    parser.add_argument("--pin-metrics", action="store_true",
+                        help="report UI pin metrics: new vertical steps per band, scene tear, flattening, torn glyphs")
+    parser.add_argument("--pin-field", type=Path,
+                        help="measure this replayed final_field.bin instead of the dump's final field")
+    parser.add_argument("--pin-band", type=band, action="append", metavar="FIRST:LAST",
+                        help="image rows of a band for new-step columns; repeatable; default all rows")
+    parser.add_argument("--pin-layer", help="layer artifact kind for light UI and glyph bodies; default the active one")
     args = parser.parse_args()
     review = json.loads(args.ui_review.read_text(encoding="utf-8")) if args.ui_review else None
     report = inspect(args.dump, args.previews, review)
+    if args.pin_metrics:
+        report["pin_metrics"] = pin_metrics(args.dump, args.pin_field, args.pin_band, args.pin_layer)
     if args.write_ui_review:
         with args.write_ui_review.open("x", encoding="utf-8") as output:
             json.dump(review_template(report["ui_discovery"]), output, indent=2, allow_nan=False)

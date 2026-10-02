@@ -25,6 +25,8 @@ namespace sunshine_game3d {
     // Latest live input attempt observed at this render, separate from the
     // exact provenance of a retained alpha texture actually consumed above.
     std::string ui_capture_attempt_metadata;
+    // The detection constants behind the consumed automatic mask.
+    ui_detection_snapshot ui_detection;
     automatic_status scene_status;
     sunshine_depth::frame_depth depth;
     diagnostic_resources resources;

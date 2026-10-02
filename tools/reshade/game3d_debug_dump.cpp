@@ -3,6 +3,7 @@
 
 #include "game3d_diagnostic_metadata.h"
 #include "game3d_ui_capture.h"
+#include "game3d_ui_detection_contract.h"
 #include "game3d_ui_layer.h"
 #include "scene_gain.h"
 #include "src/game3d_debug_protocol.h"
@@ -119,11 +120,44 @@ namespace sunshine_game3d {
           {"resolved_value", nullptr},
           {"resolved_value_note", fraction_mode ? "Replay freezes the exact consumed front-limit fraction, including ramp values, and does not rerun the temporal adaptive classifier or its observational probe. The shader multiplies a finite fraction in [0,0.75] by the authoritative current positive display bound; invalid values fall back to screen disparity." : shallow_mode ? "No depth reduction. UI parallax is one quarter of the current positive b0 display bound after strength, stereo blend and warp-readiness guards; depth/gain/zero do not place this plane." : front_mode ? "No depth reduction. UI parallax is the current positive b0 display bound times strength and stereo blend when warp is active; depth/gain/zero do not place this plane." : nearest_mode ? "GPU result; no CPU readback in the live producer. Replay recomputes it from the exact captured depth, alpha, crop/jitter and constants." : "No depth reduction. Replay uses the exact captured UI mode and inverse-depth word."}};
       }
-      if (external_ui) {
+      // Shaders with limiter line groups pin UI in SunshineApplyUICS after the
+      // complete scene field, so the horizontal limiter reads no UI input; older
+      // ones pin inside the horizontal pass. A mode-5 probe frame observes the
+      // unpinned field in between.
+      const auto ui_input = external_ui ? "ui_source_color" : "source_color";
+      if (shader_marker(captured_shader, "SUNSHINE_LIMITER_LINE_GROUPS")) {
+        auto &passes = result["passes"];
+        for (auto pass = passes.begin(); pass != passes.end(); ++pass) {
+          if ((*pass)["entry"] != "SunshineHostHorizontalCS") continue;
+          auto apply = json {{"entry", "SunshineApplyUICS"}, {"target", "cs_5_0"}, {"enabled", conditioning && f.source_alpha_ui},
+            {"srvs", {{"t0", ui_input}}}, {"uavs", {{"u3", "final_field:R32_FLOAT (pinned in place)"}}}};
+          if ((*pass)["srvs"].contains("t9")) apply["srvs"]["t9"] = (*pass)["srvs"]["t9"];
+          (*pass)["srvs"].erase("t0");
+          (*pass)["srvs"].erase("t9");
+          auto next = passes.insert(pass + 1, apply);
+          if (captured_shader.find("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1") != std::string_view::npos)
+            passes.insert(next, json {{"entry", "SunshineUIConflictCS"}, {"target", "cs_5_0"},
+              {"enabled", conditioning && f.source_alpha_ui && fraction_mode},
+              {"frequency", "mode-5 probe frames only; replay freezes the fraction and does not run it"},
+              {"srvs", {{"t0", ui_input}, {"t5", "final_field before UI pinning"}}},
+              {"uavs", {{"u7", "ui_conflict_statistics:R32G32B32A32_UINT 16x32, live readback only"}}}});
+          break;
+        }
+      } else if (external_ui) {
         for (auto &pass : result["passes"]) {
           if (pass["entry"] == "SunshineHostHorizontalCS") pass["srvs"]["t0"] = "ui_source_color";
         }
       }
+      const auto &detection = f.ui_detection;
+      result["ui_detection"] = {{"ran_or_held", name(detection.state)}, {"candidates", detection.candidates},
+        {"threshold_bits", detection.threshold_bits}, {"trusted", detection.trusted}, {"flags", detection.flags},
+        {"held_presents", detection.held_presents},
+        {"meaning", "b2 constants of the automatic UI detection run whose mask this render consumed: it ran in this render, was held from the last run (held_presents Presents in a row), or was inactive (all zero). flags is the full pushed Sunshine_UIDetectionFlags word, per-frame bits included; threshold_bits is the float32 difference threshold. ui_detection_replay reruns detection from the package's candidates."}};
+      result["ui_pin"] = {{"soft_pin_gain", shader_marker(captured_shader, "SUNSHINE_UI_SOFT_PIN_GAIN")},
+        {"late_margin_rows", shader_marker(captured_shader, "SUNSHINE_UI_LATE_MARGIN_ROWS")},
+        {"decision_texels", shader_marker(captured_shader, ui_detection::decision_texels_marker)},
+        {"evidence_images", shader_marker(captured_shader, ui_detection::scene_evidence_images_marker)},
+        {"meaning", "Markers of the captured shader; 0 means absent: binary pinning, no late-layer margin, and the 5-texel detection decision without scene-evidence images."}};
       result["source_alpha_ui_requested"] = f.source_alpha_decision.requested;
       result["source_alpha_input_state"] = name(f.source_alpha_decision.input_state);
       const auto &review = f.source_alpha_decision.qualification;
@@ -181,7 +215,7 @@ namespace sunshine_game3d {
         {"inverse_depth_role", fraction_mode || shallow_mode || front_mode || f.ui_plane.mode == ui_plane_mode::screen ? "unused" : nearest_mode ? "midpoint_floor" : "explicit_plane"},
         {"word2_role", fraction_mode ? "front_limit_fraction" : "inverse_depth"},
         {"front_limit_fraction", fraction},
-        {"meaning", "When source_alpha_ui is enabled, alpha from ui_alpha_source supplies UI coverage. Horizontal-pass t0 uses that input; eye RGB remains current source_color. Mode 4 pins UI at one quarter of the current positive display bound after strength, stereo blend and warp-readiness guards. Mode 3 uses that full bound. Both fixed modes ignore scene depth/gain/zero and their inverse-depth word is unused. Screen mode pins at zero disparity. Mode 1 uses the submitted independent depth. Mode 2 reduces max(submitted midpoint floor, nearest valid decoded depth under finite positive alpha). Both depth modes use b0 geometry. The horizontal protection includes one bilinear-support pixel. With protection enabled all-white masks are entirely UI; all-black masks have no UI constraints."}};
+        {"meaning", "When source_alpha_ui is enabled, alpha from ui_alpha_source supplies UI coverage. The UI pinning pass (SunshineApplyUICS, or the horizontal pass of older shaders) reads that input at t0; eye RGB remains current source_color. Mode 4 pins UI at one quarter of the current positive display bound after strength, stereo blend and warp-readiness guards. Mode 3 uses that full bound. Both fixed modes ignore scene depth/gain/zero and their inverse-depth word is unused. Screen mode pins at zero disparity. Mode 1 uses the submitted independent depth. Mode 2 reduces max(submitted midpoint floor, nearest valid decoded depth under finite positive alpha). Both depth modes use b0 geometry. The horizontal protection includes one bilinear-support pixel. With protection enabled all-white masks are entirely UI; all-black masks have no UI constraints."}};
       if (fraction_mode) {
         auto &binding = result["ui_constant_binding"];
         binding.erase("inverse_depth");

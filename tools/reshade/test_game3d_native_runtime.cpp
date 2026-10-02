@@ -1579,15 +1579,18 @@ namespace {
             replay.at("ui_plane_resolution").at("reduction_ran") == true &&
             replay.at("ui_plane_resolution").at("resolved_value").is_null(),
           "Nearest-UI D3D12 dump confused submitted floor with asynchronous GPU result");
-        bool tile_pass = false, reduce_pass = false, field_pass = false;
+        bool tile_pass = false, reduce_pass = false, field_pass = false, pin_pass = false;
         for (const auto &pass : replay.at("passes")) {
           if (pass.at("entry") == "SunshineUINearestTilesCS") tile_pass = pass.at("enabled") == true &&
             pass.at("uavs").at("u4") == "ui_plane_tiles:R32_FLOAT";
           if (pass.at("entry") == "SunshineUINearestReduceCS") reduce_pass = pass.at("enabled") == true &&
             pass.at("srvs").at("t8") == "ui_plane_tiles" && pass.at("uavs").at("u5") == "ui_plane_resolved:R32_FLOAT";
-          if (pass.at("entry") == "SunshineHostHorizontalCS") field_pass = pass.at("srvs").at("t9") == "ui_plane_resolved";
+          // The scene limiter reads no UI input; the separate pin pass reads the resolved plane.
+          if (pass.at("entry") == "SunshineHostHorizontalCS") field_pass = !pass.at("srvs").contains("t9");
+          if (pass.at("entry") == "SunshineApplyUICS") pin_pass = pass.at("enabled") == true &&
+            pass.at("srvs").at("t9") == "ui_plane_resolved";
         }
-        require(tile_pass && reduce_pass && field_pass, "Nearest-UI D3D12 dump lost actual u4/u5/t8/t9 bindings");
+        require(tile_pass && reduce_pass && field_pass && pin_pass, "Nearest-UI D3D12 dump lost actual u4/u5/t8/t9 bindings");
       }
       require(fixture.read(fixture.depth.p) == frozen_depth, "Nearest-UI reduction changed source depth");
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,

@@ -1820,6 +1820,7 @@ namespace {
       if (frame.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction)
         frame.ui_adaptive = proof.renderer->consumed_ui_adaptive();
       frame.source_alpha_ui = proof.renderer->consumed_source_alpha_ui();
+      frame.ui_detection = proof.renderer->consumed_detection();
       frame.source_alpha_decision = proof.frame.source_alpha;
       frame.ui_source_metadata = proof.diagnostic_ui_source;
       frame.ui_capture_attempt_metadata = proof.diagnostic_ui_capture_attempt;

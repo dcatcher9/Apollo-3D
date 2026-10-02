@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include "game3d_debug_dump.h"
+#include "game3d_ui_detection_contract.h"
 #include "scene_gain.h"
 #include "src/game3d_debug_protocol.h"
 
@@ -112,6 +113,7 @@ namespace sunshine_game3d_test {
       frame_ = {};
       frame_.parameters = renderer.consumed_parameters();
       frame_.source_alpha_ui = renderer.consumed_source_alpha_ui();
+      frame_.ui_detection = renderer.consumed_detection();
       frame_.ui_plane = renderer.consumed_ui_plane();
       frame_.ui_channel = renderer.consumed_ui_channel();
       if (frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction)
@@ -332,6 +334,31 @@ namespace sunshine_game3d_test {
         check(hex[i * 2] == digits[constant_bytes[i] >> 4] && hex[i * 2 + 1] == digits[constant_bytes[i] & 15], "Replay constants differ from the exact GPU buffer bytes");
       }
       check(replay.at("shader_source") == frame_.shader_source && json.at("pairing_evidence").at("same_game_frame") == "unverified", "Replay source or temporal pairing evidence is incorrect");
+      const auto &detection = replay.at("ui_detection");
+      const auto &consumed = frame_.ui_detection;
+      check(detection.at("ran_or_held") == sunshine_game3d::name(consumed.state) && detection.at("candidates") == consumed.candidates &&
+          detection.at("threshold_bits") == consumed.threshold_bits && detection.at("trusted") == consumed.trusted &&
+          detection.at("flags") == consumed.flags && detection.at("held_presents") == consumed.held_presents &&
+          !(consumed.stored_flags & sunshine_game3d::ui_detection::per_frame_mask),
+        "Dump lost the detection constants behind the consumed mask");
+      const auto &pin = replay.at("ui_pin");
+      const auto marker = [&](std::string_view name) { return sunshine_game3d::shader_marker(frame_.shader_source, name); };
+      check(pin.at("soft_pin_gain") == marker("SUNSHINE_UI_SOFT_PIN_GAIN") && pin.at("late_margin_rows") == marker("SUNSHINE_UI_LATE_MARGIN_ROWS") &&
+          pin.at("decision_texels") == marker(sunshine_game3d::ui_detection::decision_texels_marker) &&
+          pin.at("evidence_images") == marker(sunshine_game3d::ui_detection::scene_evidence_images_marker),
+        "Dump UI pin markers differ from the captured shader");
+      bool apply_ui = false;
+      for (const auto &pass : replay.at("passes")) {
+        if (pass.at("entry") == "SunshineHostHorizontalCS" && marker("SUNSHINE_LIMITER_LINE_GROUPS"))
+          check(!pass.at("srvs").contains("t0"), "Dump claims the horizontal limiter reads UI");
+        if (pass.at("entry") == "SunshineApplyUICS") {
+          apply_ui = true;
+          check(pass.at("enabled") == (frame_.source_alpha_ui && frame_.resources.final_field.handle != 0) &&
+              pass.at("srvs").at("t0") == (frame_.source_alpha_ui && frame_.resources.ui_source.handle ? "ui_source_color" : "source_color"),
+            "Dump UI pinning pass differs from the render");
+        }
+      }
+      check(apply_ui == (marker("SUNSHINE_LIMITER_LINE_GROUPS") != 0), "Dump pass table omitted UI pinning");
       std::vector<Microsoft::WRL::ComPtr<IUnknown>> held;
       std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> held_d3d11;
       std::vector<std::vector<std::uint8_t>> bytes;

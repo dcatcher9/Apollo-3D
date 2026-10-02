@@ -57,9 +57,9 @@ namespace sunshine_game3d {
     // counting without frame generation). Only then may a difference covering
     // the whole frame mean full-screen UI rather than a mismatched pair.
     bool hudless_exact = false;
-    // Sunshine_UIDetectionFlags for masks[1] when it is an offscreen UI layer
-    // found by its clears rather than a tagged buffer (ui_layer::detection_flags);
-    // zero for a tagged buffer.
+    // Stored Sunshine_UIDetectionFlags for masks[1]: ui_layer::detection_flags
+    // when it is an offscreen UI layer found by its clears, zero for a tagged
+    // buffer (game3d_ui_detection_contract.h).
     std::uint32_t color_alpha_flags = 0;
   };
   struct ui_render_input {
@@ -148,6 +148,25 @@ namespace sunshine_game3d {
     }
   }
 
+  // The UI detection constants (b2) behind the mask a render consumed, for
+  // Dump 3D replay. A held mask reports the run that made it.
+  struct ui_detection_snapshot {
+    enum class run_state : std::uint8_t { inactive, ran, held };
+    run_state state = run_state::inactive;
+    std::uint32_t candidates{}, threshold_bits{}, trusted{};
+    // flags is the full pushed Sunshine_UIDetectionFlags word; stored_flags is
+    // the part the renderer keeps and keys samples with, never a per-frame bit.
+    std::uint32_t flags{}, stored_flags{};
+    std::uint32_t held_presents{}; // Consecutive Presents that reused the mask.
+  };
+  inline const char *name(ui_detection_snapshot::run_state value) {
+    switch (value) {
+      case ui_detection_snapshot::run_state::ran: return "ran";
+      case ui_detection_snapshot::run_state::held: return "held";
+      default: return "inactive";
+    }
+  }
+
   struct alpha_probe_counters {
     std::uint64_t submitted = 0, mapped = 0; // Recorded probes and native Map calls.
   };
@@ -224,6 +243,7 @@ namespace sunshine_game3d {
     // The caller keeps automatic->session alive for this render; the renderer
     // owns only bounded GPU observation storage, never the detection deadline.
     alpha_auto_decision consumed_alpha_auto() const;
+    ui_detection_snapshot consumed_detection() const;
     alpha_probe_counters alpha_probe_activity() const;
     // Value copy: policy evidence for the fraction consumed by this render.
     // Explicit mode-5 replay reports the supplied fraction with status frozen.

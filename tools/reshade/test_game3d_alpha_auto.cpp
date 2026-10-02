@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_alpha_auto.h"
+#include "game3d_ui_detection_contract.h"
 
 #include <array>
 #include <cstdio>
@@ -244,6 +245,19 @@ namespace {
       "Flags of the deciding UI color channel were ignored");
     require(detection_decision_key(1u | 2u, 1u, 1u) == detection_decision_key(1u | 2u, 0u, 1u),
       "UI color flags changed a decision another channel makes");
+    // The offscreen UI layer's stored flags (5 for 8 bits) key its decision
+    // apart from a tagged UIColorAndAlpha (0), and the same layer keeps its
+    // key frame after frame.
+    const auto layer = ui_detection::layer_detection_flags(false);
+    require(detection_decision_key(2u, layer, 0u) != detection_decision_key(2u, 0u, 0u),
+      "The UI layer and a tagged UI color shared a decision key");
+    require(detection_decision_key(2u, layer, 0u) == detection_decision_key(2u, 5u, 0u) &&
+        detection_decision_key(2u | 8u, layer, 2u) == detection_decision_key(2u, 5u, 2u),
+      "A repeated layer frame changed its decision key");
+    require(detection_decision_key(1u | 2u, layer, 1u) == detection_decision_key(1u | 2u, 0u, 1u),
+      "Layer flags changed a decision the trusted UI alpha channel makes");
+    require(detection_decision_key(2u, layer | ui_detection::stored_hdr_headroom, 0u) != detection_decision_key(2u, layer, 0u),
+      "A float layer kept an 8-bit layer's decision");
     // Without trust every candidate, exactness and trust itself can matter.
     require(detection_decision_key(2u, 0u, 0u) != detection_decision_key(2u | 16u, 0u, 0u),
       "A HUD-less candidate without a trusted channel kept the decision");

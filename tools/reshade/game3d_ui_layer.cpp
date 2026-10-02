@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_ui_layer.h"
 #include "addon_lifetime.h"
+#include "game3d_ui_detection_contract.h"
 
 #include <d3d11.h>
 #include <d3d12.h>
@@ -214,8 +215,7 @@ namespace sunshine_game3d::ui_layer {
   }
 
   std::uint32_t detection_flags(api::format format) {
-    const auto typeless = api::format_to_typeless(format);
-    return typeless == api::format::r16g16b16a16_typeless || typeless == api::format::r32g32b32a32_typeless ? 3u : 1u;
+    return ui_detection::layer_detection_flags(ui_detection::float_layer_format(static_cast<std::uint32_t>(format)));
   }
 
   bool qualifies(const api::resource_desc &desc, const float color[4], std::uint32_t width, std::uint32_t height) {

@@ -4,11 +4,11 @@
 #include <reshade.hpp>
 #include "async_log.h"
 #include "game3d_shader_cache.h"
+#include "game3d_ui_detection_contract.h"
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <algorithm>
-#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -25,14 +25,6 @@ namespace sunshine_game3d {
       T *operator->() const { return p; }
     };
     api::format typed(api::format f) { return api::format_to_default_typed(f, 0); }
-    // Value of an integer capability marker "#define NAME value"; zero when absent.
-    uint32_t shader_marker(std::string_view source, std::string_view name) {
-      const std::string key = "#define " + std::string(name) + ' ';
-      const auto at = source.find(key);
-      uint32_t value = 0;
-      if (at != std::string_view::npos) std::from_chars(source.data() + at + key.size(), source.data() + source.size(), value);
-      return value;
-    }
   }
   struct renderer::impl {
     api::device *device = nullptr;
@@ -130,8 +122,11 @@ namespace sunshine_game3d {
     alpha_auto_decision consumed_auto;
     bool detection_attempted{}, detection_ready{}, detection_active{}, detection_pending{}, detection_awaiting_signal{};
     // Decision, then candidate bits with HUD-less counts, alpha coverage,
-    // invalid alpha, and lit HUD-less pixels with the trusted-alpha bits.
-    static constexpr uint32_t detection_decision_texels = 5;
+    // invalid alpha, and lit HUD-less pixels with the trusted-alpha bits. The
+    // shader's markers size the decision texels and statistics rows
+    // (docs/reshade-sbs.md, UI detection flags and decision texels).
+    uint32_t detection_decision_texels = ui_detection::default_decision_texels;
+    uint32_t detection_statistics_rows = ui_detection::statistics_rows(ui_detection::default_scene_evidence_images);
     // detected_mask holds a HUD-less-capable decision that generated presents
     // may reuse for a bounded number of presents.
     bool detection_mask_ready{};
@@ -140,9 +135,12 @@ namespace sunshine_game3d {
     bool detection_exact{};
     // Alpha candidates the game session trusts (Sunshine_UITrustedAlpha).
     uint32_t detection_trusted{};
-    // Sunshine_UIDetectionFlags: bit0 check UI color+alpha is premultiplied,
-    // bit1 with HDR headroom (a float layer).
+    // Stored Sunshine_UIDetectionFlags of the UI color slot's source
+    // (game3d_ui_detection_contract.h). Per-frame bits are only ever pushed.
     uint32_t detection_flags{};
+    // The constants of the last detection run, and the run this render's mask
+    // came from (fresh or held).
+    ui_detection_snapshot detection_run, consumed_detection;
     // Presented colors kept for late HUD-less captures, created on first need.
     // Each slot records the Present number it holds; zero is empty.
     bool retention_wanted{}, retention_attempted{}, retention_ready{};
@@ -261,6 +259,11 @@ namespace sunshine_game3d {
       limiter_lines = shader_marker(shader_source(), "SUNSHINE_LIMITER_LINE_GROUPS");
       packed_eyes = shader_source().find("#define SUNSHINE_PACKED_EYES 1") != std::string_view::npos;
       pin_lines = shader_marker(shader_source(), "SUNSHINE_UI_PIN_LINE_GROUPS");
+      const auto texels = shader_marker(shader_source(), ui_detection::decision_texels_marker);
+      const auto images = shader_marker(shader_source(), ui_detection::scene_evidence_images_marker);
+      detection_decision_texels = texels ? texels : ui_detection::default_decision_texels;
+      // An out-of-range marker leaves automatic detection unavailable (prepare_detection).
+      detection_statistics_rows = ui_detection::statistics_rows(std::min(images, ui_detection::max_scene_evidence_images + 1));
       if (!device->create_fence(0, api::fence_flags::none, &completion)) return false;
       if (device->get_api() == api::device_api::d3d12 &&
           (!device->create_resource_view({}, api::resource_usage::shader_resource, api::resource_view_desc(api::format::r32_float), &null_srv) ||
@@ -544,7 +547,11 @@ namespace sunshine_game3d {
       if (detection_attempted) return detection_ready;
       detection_attempted = true;
       if (shader_source().find("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") == std::string_view::npos ||
-          !texture_create(detection_statistics, 16, 64, api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
+          detection_decision_texels < ui_detection::min_decision_texels ||
+          detection_decision_texels > ui_detection::max_decision_texels ||
+          detection_statistics_rows > ui_detection::statistics_rows(ui_detection::max_scene_evidence_images) ||
+          !texture_create(detection_statistics, 16, detection_statistics_rows, api::format::r32g32b32a32_uint,
+            api::resource_usage::unordered_access) ||
           !texture_create(detection_decision, detection_decision_texels, 1, api::format::r32g32b32a32_uint,
             api::resource_usage::unordered_access | api::resource_usage::copy_source) ||
           !texture_create(detected_mask, width, height, api::format::r32_float, api::resource_usage::unordered_access) ||
@@ -583,7 +590,8 @@ namespace sunshine_game3d {
           input.now_ms < detection_pending_source.now_ms || input.now_ms - detection_pending_source.now_ms > 500) {
         detection_pending = false; detection_latest = {}; return;
       }
-      std::array<uint32_t, 4 * detection_decision_texels> counts{};
+      std::vector<uint32_t> counts(4 * size_t(detection_decision_texels));
+      const auto bytes = counts.size() * sizeof(uint32_t);
       bool read = false;
       ++detection_mapped;
       if (context11.p) {
@@ -591,37 +599,38 @@ namespace sunshine_game3d {
         const auto result = context11->Map(detection_readback11.p, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
         if (result == DXGI_ERROR_WAS_STILL_DRAWING) return;
         if (SUCCEEDED(result)) {
-          std::memcpy(counts.data(), mapped.pData, sizeof(counts));
+          std::memcpy(counts.data(), mapped.pData, bytes);
           context11->Unmap(detection_readback11.p, 0); read = true;
         }
       } else {
         void *mapped{}; const D3D12_RANGE range{0, SIZE_T(detection_readback_bytes)};
         if (SUCCEEDED(detection_readback12->Map(0, &range, &mapped))) {
-          std::memcpy(counts.data(), static_cast<const unsigned char *>(mapped) + detection_footprint.Offset, sizeof(counts));
+          std::memcpy(counts.data(), static_cast<const unsigned char *>(mapped) + detection_footprint.Offset, bytes);
           const D3D12_RANGE written{0, 0}; detection_readback12->Unmap(0, &written); read = true;
         }
       }
       detection_pending = false;
       detection_latest = {};
       if (!read) return;
-      detection_latest.source_kind = counts[0];
-      detection_latest.enabled = counts[0] != 0;
-      detection_latest.state = counts[0] ? alpha_auto_state::automatic_on : alpha_auto_state::automatic_off;
-      detection_latest.covered = counts[1]; detection_latest.pixels = counts[2];
+      namespace word = ui_detection::decision_word;
+      detection_latest.source_kind = counts[word::source];
+      detection_latest.enabled = counts[word::source] != 0;
+      detection_latest.state = counts[word::source] ? alpha_auto_state::automatic_on : alpha_auto_state::automatic_off;
+      detection_latest.covered = counts[word::covered]; detection_latest.pixels = counts[word::pixels];
       detection_latest.sample_sequence = detection_submitted;
       detection_latest.sample_tick_ms = detection_pending_source.now_ms;
       detection_latest.accepted_samples = detection_submitted;
       auto &evidence = detection_latest.evidence;
-      evidence.matching_tiles = counts[3];
-      evidence.candidates = counts[4]; evidence.hudless_changed = counts[5];
-      evidence.hudless_unchanged = counts[6]; evidence.hudless_invalid = counts[7];
-      std::copy_n(counts.begin() + 8, 4, evidence.alpha_covered.begin());
-      std::copy_n(counts.begin() + 12, 4, evidence.alpha_invalid.begin());
-      evidence.hudless_lit = counts[16];
-      evidence.trusted_alpha = counts[17];
+      evidence.matching_tiles = counts[word::matching_tiles];
+      evidence.candidates = counts[word::candidates]; evidence.hudless_changed = counts[word::hudless_changed];
+      evidence.hudless_unchanged = counts[word::hudless_unchanged]; evidence.hudless_invalid = counts[word::hudless_invalid];
+      std::copy_n(counts.begin() + word::alpha_covered, 4, evidence.alpha_covered.begin());
+      std::copy_n(counts.begin() + word::alpha_invalid, 4, evidence.alpha_invalid.begin());
+      evidence.hudless_lit = counts[word::hudless_lit];
+      evidence.trusted_alpha = counts[word::trusted];
       evidence.ui_layer = detection_pending_layer;
       detection_latest_source = detection_pending_source;
-      if (input.session) input.session->observe_alpha_channels(evidence, counts[2], detection_pending_source.now_ms);
+      if (input.session) input.session->observe_alpha_channels(evidence, counts[word::pixels], detection_pending_source.now_ms);
     }
     void detect_ui(api::command_list *cmd, const render_parameters &p, const ui_detection_inputs &input,
         const alpha_auto_source &observation, api::resource_view paired_color) {
@@ -633,14 +642,20 @@ namespace sunshine_game3d {
       views[0] = paired_color.handle ? paired_color : textures[source].srv;
       for (unsigned i = 0; i != 3; ++i) views[11+i] = input.masks[i];
       views[14] = input.hudless;
+      // The b2 constants of every detection pass. A per-frame bit would join
+      // the pushed flags only, never detection_flags or its key.
+      uint32_t threshold_bits;
+      std::memcpy(&threshold_bits, &difference_threshold, sizeof(threshold_bits));
+      detection_run = {ui_detection_snapshot::run_state::ran, detection_bits, threshold_bits, detection_trusted,
+        detection_flags, detection_flags};
       const auto dispatch_stage = [&](pass stage, texture_id target, unsigned output, unsigned x, unsigned y) {
         auto &t = textures[target];
         cmd->barrier(t.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
         std::array<api::resource_view, 8> uavs{}; uavs[output] = t.uav;
         cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[stage]);
         bindings(cmd, api::shader_stage::compute, p, views, uavs);
-        struct constants { uint32_t bits; float threshold; uint32_t trusted, flags; } values{detection_bits, difference_threshold,
-          detection_trusted, detection_flags};
+        struct constants { uint32_t bits; float threshold; uint32_t trusted, flags; } values{detection_run.candidates,
+          difference_threshold, detection_run.trusted, detection_run.flags};
         cmd->push_constants(api::shader_stage::compute, layout, 5, 0, 4, &values);
         cmd->dispatch(x, y, 1);
         uavs.fill(null_uav);
@@ -673,7 +688,7 @@ namespace sunshine_game3d {
       }
       cmd->barrier(t.resource, api::resource_usage::copy_source, api::resource_usage::shader_resource);
       detection_pending_source = observation; detection_pending_key = detection_key();
-      detection_pending_layer = detection_flags != 0;
+      detection_pending_layer = (detection_flags & ui_detection::stored_late_layer) != 0;
       detection_pending = detection_awaiting_signal = true;
       detection_last_submit = observation.now_ms; ++detection_submitted;
     }
@@ -1008,7 +1023,7 @@ namespace sunshine_game3d {
     // A trusted alpha channel in this frame decides by itself; nothing is held.
     // Slot-level trust: slot 1 is trusted only for the source that fills it,
     // or for the one that filled it last when it is missing.
-    const bool layer_slot = (bits & 2u) ? candidates.color_alpha_flags != 0 : d.detection_flags != 0;
+    const bool layer_slot = (((bits & 2u) ? candidates.color_alpha_flags : d.detection_flags) & ui_detection::stored_late_layer) != 0;
     const uint32_t trusted = automatic && automatic->session ? automatic->session->trusted_slots(layer_slot) : 0u;
     const bool inexact = (bits & 48u) == 16u;
     // So does a trusted alpha channel that decided the previous frame and is
@@ -1062,14 +1077,20 @@ namespace sunshine_game3d {
     if (!depth.handle) { depth = t[impl::empty_depth].srv; p.depth_ready = p.camera_ready = 0; }
     d.consumed = p;
     d.consumed_plane = plane;
+    d.consumed_detection = {};
     if (d.detection_active) {
       if (!observation.now_ms) observation.now_ms = observation.tick_ms = GetTickCount64();
       if (observation.epoch != d.detection_latest_source.epoch || observation.revision != d.detection_latest_source.revision ||
           observation.viewport != d.detection_latest_source.viewport) d.detection_latest = {};
-      if (hold) ++d.detection_holds;
-      else {
+      if (hold) {
+        ++d.detection_holds;
+        d.consumed_detection = d.detection_run;
+        d.consumed_detection.state = ui_detection_snapshot::run_state::held;
+        d.consumed_detection.held_presents = d.detection_holds;
+      } else {
         d.poll_detection(observation);
         d.detect_ui(cmd, p, candidates, observation, hudless_color);
+        d.consumed_detection = d.detection_run;
         d.detection_holds = 0;
         // The detected mask can be held when HUD-less or a trusted alpha channel made it.
         d.detection_mask_ready = (bits & 16u) != 0 || (bits & trusted & 15u) != 0;
@@ -1233,6 +1254,7 @@ namespace sunshine_game3d {
   bool renderer::consumed_source_alpha_ui() const { return data_ && data_->source_alpha_ui; }
   ui_mask_channel renderer::consumed_ui_channel() const { return data_ ? data_->consumed_channel : ui_mask_channel::alpha; }
   alpha_auto_decision renderer::consumed_alpha_auto() const { return data_ ? data_->consumed_auto : alpha_auto_decision{}; }
+  ui_detection_snapshot renderer::consumed_detection() const { return data_ ? data_->consumed_detection : ui_detection_snapshot{}; }
   alpha_probe_counters renderer::alpha_probe_activity() const {
     return data_ ? alpha_probe_counters{data_->detection_submitted, data_->detection_mapped} : alpha_probe_counters{};
   }

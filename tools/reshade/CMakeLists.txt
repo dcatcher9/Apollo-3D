@@ -331,7 +331,9 @@ if(BUILD_TESTING)
   add_executable(reshade_game3d_ui_layer_tests test_game3d_ui_layer.cpp game3d_ui_layer.cpp)
   target_compile_features(reshade_game3d_ui_layer_tests PRIVATE cxx_std_17)
   target_include_directories(reshade_game3d_ui_layer_tests SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
-  target_compile_definitions(reshade_game3d_ui_layer_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  # The detection contract check reads the shader source in place.
+  target_compile_definitions(reshade_game3d_ui_layer_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+    SUNSHINE_GAME3D_NATIVE_HLSL="${CMAKE_CURRENT_SOURCE_DIR}/game3d_native.hlsl")
   if(MINGW)
     target_link_options(reshade_game3d_ui_layer_tests PRIVATE -static)
   endif()

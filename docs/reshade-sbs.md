@@ -474,16 +474,82 @@ half the time while its trusted UI color alpha protected the HUD. The `Sunshine 
 `source_alpha_auto.sampled_evidence` report it, so a rejection names the failing check. Source availability, GPU validation and actual applied
 protection remain separate diagnostic facts. Older startup fields describe a retired heuristic.
 
+**UI detection flags and decision texels.** `tools/reshade/game3d_ui_detection_contract.h` names
+these values and the decision words for the renderer, Dump 3D and the replay tools;
+`game3d_native.hlsl` mirrors the flags as `SUNSHINE_UI_STORED_*` and `SUNSHINE_UI_PER_FRAME_*`
+defines, and the `reshade_game3d_ui_layer` unit test fails when the two disagree or the size markers
+below leave the supported range. `Sunshine_UIDetectionFlags` (`b2` word 3) has stored and per-frame
+bits:
+
+| Value | Kind | Meaning |
+| --- | --- | --- |
+| `0x1` | stored | The UI color slot is admitted only while premultiplied (offscreen UI layer). |
+| `0x2` | stored | With a float layer's HDR headroom. |
+| `0x4` | stored | The UI color slot holds the one-frame-late offscreen UI layer. |
+| `0x8` | stored | Reserved. |
+| `0x10000` | per-frame | The CPU holds a recent full-frame scene decision. |
+| `0x20000` | per-frame | This frame's decision is sampled for readback. |
+| `0x40000` | per-frame | The consumed depth is not this frame's (reused or held). |
+
+An 8-bit layer stores 5, a layer in the `R16G16B16A16` or `R32G32B32A32` typeless family (UNORM
+included) 7 and a tagged UIColorAndAlpha 0; the renderer recognizes the layer by `0x4`. Stored bits
+belong to the UI color slot's source: the renderer keeps them between frames, and they are part of
+the key that keeps a status sample describing later frames.
+Per-frame bits ride only in one render's pushed word, are never stored and never enter that key.
+No per-frame bit is pushed yet, and no shader pass reads one.
+
+The decision texture has `SUNSHINE_UI_DECISION_TEXELS` `R32G32B32A32_UINT` texels (5 without the
+marker), and the bounded summary above is that whole texture, so it stays 80 bytes while the
+count is 5:
+
+| Texel | x | y | z | w |
+| --- | --- | --- | --- | --- |
+| 0 | Source | Covered pixels | Pixels | Matching tiles |
+| 1 | Candidate bits | HUD-less changed | HUD-less unchanged | HUD-less non-finite |
+| 2 | Covered pixels of alpha candidate 0 | 1 | 2 | 3 |
+| 3 | Invalid pixels of alpha candidate 0 | 1 | 2 | 3 |
+| 4 | Lit HUD-less pixels | Trusted-alpha bits | 0 | 0 |
+
+No shader writes texel 6 yet. It is reserved for the presented image's hidden-scene statistic
+{`n`, `asuint(kinterp)`, `asuint(koct)`, `valid | held << 1 | verdict << 2`}, where the verdict is
+0 none, 1 hidden, 2 ambiguous or 3 visible; `ui_detection_replay` checks `expect.scene` against it.
+
+The statistics texture has 16 columns and `64 + 96 * images + (images ? 1 : 0)` rows, where
+`images` is `SUNSHINE_UI_SCENE_EVIDENCE_IMAGES` (0 without the marker): rows 0-15 hold each
+tile's alpha coverage, 16-31 its invalid alpha, 32-47 its HUD-less difference counts and 48-63
+its lit HUD-less pixels. The renderer sizes both textures, the readback and its parse from the
+markers, and makes automatic detection unavailable for a shader whose markers are out of range.
+
 Detection rule changes are checked offline before a live test. `ui_detection_replay` (built with
 the add-on) compiles the three detection passes from a shader file, binds each Dump 3D package's
 captured candidates by artifact kind (presented color, Backbuffer, UIColorAndAlpha, UIAlpha,
-HUD-less, or a census `ui_layer_candidate_N` in the UI color slot with the premultiplied check),
+HUD-less, or a census `ui_layer_candidate_N` in the UI color slot with the layer's stored flags),
 sets the candidate, exact-pair and trusted bits a label names, and compares the decision
 and the resulting mask (empty, partial HUD, or flat) with that label:
 
 ```powershell
 .\ui_detection_replay.exe ..\..\tools\reshade\game3d_native.hlsl E:\ApolloDev\sbs_dump\ui_detection_cases.json
 ```
+
+It also pushes the exact 80-byte `b0` from `replay.parameter_hex`, as every renderer compute pass
+receives it, and binds the raw depth artifact at `t1` and the presented color at `t6` (`t0` stays
+the color HUD-less is paired with) for the scene-evidence passes that will read them. The
+renderer's detection passes bind neither today, and no detection pass reads them. Without a raw depth artifact
+`t1` is a 1x1 placeholder and depth and camera readiness are cleared, as in a render without depth.
+A label's `scene_hold`, `sample` and `depth_not_current` set the per-frame bits. It sizes the
+statistics and decision textures from the shader's markers, but never below 80 rows and 6 texels,
+so retired shader revisions still replay. `expect.mask_exact` compares the resolved R32 mask bit for
+bit with a CPU reference: the selected candidate's raw alpha (red for UIAlpha), all zeros without a
+source, or all ones for a full-frame decision; a HUD-less difference has no reference and fails the
+check. `expect.scene` (`verdict`, one name or a list, and inclusive `[min, max]` bounds for `kinterp`
+and `koct`) checks decision texel 6 and fails as `no-reference` for a shader without it.
+`--write-mask <new-dir>` copies each labelled package that consumed an automatic R32 mask of the
+detection extent to `<new-dir>/<NN>_<dump>`, where `NN` is the case's position in the cases file,
+with its `ui_source_color` replaced by the mask this replay resolved, for
+`replay_game3d_dump --shader`; any other package fails its case, and the captured package is never
+changed. `--verbose` prints every decision word. A label whose dump directory no longer exists is
+reported as SKIP and does not fail the run; a directory without its manifest fails, a `dump_root`
+that is not a directory stops the run, and a run in which every case was skipped fails.
 
 The labels live next to the dumps, which stay outside the repository. A rule change is accepted
 only when every labelled screen of every game still passes; add a label whenever a new screen
@@ -702,6 +768,15 @@ For automatic detection this artifact is the resolved full-resolution `R32_FLOAT
 through its red channel. It includes an all-zero result when every candidate was rejected;
 the enabled mask path does not by itself imply any protected pixels. Replay uses these frozen
 values and does not run candidate selection again. Optional candidate metadata remains separate.
+`replay.ui_detection` records the detection constants behind that mask: `candidates`,
+`threshold_bits` (the float32 difference threshold), `trusted`, `flags` (the full pushed word,
+per-frame bits included), `ran_or_held` (`ran` this render, `held` from the last run, or
+`inactive`) and `held_presents`. `replay.ui_pin` records the captured shader's
+`soft_pin_gain`, `late_margin_rows`, `decision_texels` and `evidence_images` markers; 0 means absent
+(binary pinning, no late-layer margin and the 5-texel decision of older packages). In the pass
+table, the horizontal limiter of a shader with limiter line groups reads no UI input;
+`SunshineApplyUICS` pins the selected mask into `final_field` after it, and on mode-5 probe frames
+`SunshineUIConflictCS` observes the unpinned field in between.
 RGBA sources retain their native color format; red-channel masks additionally accept R8_UNORM,
 R16_UNORM, R16_FLOAT and R32_FLOAT. No conversion pass or color-space interpretation is applied.
 `ui_source_alpha.png` shows an alpha-channel input and `ui_source_mask.png` shows a red-channel input.
@@ -1042,7 +1117,18 @@ are explicit one-shot actions, not a continuous recording.
 `preview_game3d_dump.exe <package>` generates the same human views for an older package, using
 the host's preview implementation. `tools/reshade/inspect_game3d_dump.py <package>` additionally
 reports numeric statistics offline (NumPy required); its optional `--previews` writes
-artifact PNGs in a `previews` subdirectory (Pillow required).
+artifact PNGs in a `previews` subdirectory (Pillow required). `--pin-metrics` measures UI pinning
+in the package, or in a replayed `final_field.bin` given with `--pin-field`, against the unpinned
+field (the horizontal limiter applied to `vertical_field`): for each `--pin-band FIRST:LAST`, the
+most columns in one row pair with a new vertical step above 0.5 px; the scene tear (new steps
+outside UI rows, weighted by horizontal luma texture and scene visibility); the flattening, mean
+`(1 - alpha)|F - h|` in pixels; and the torn glyph pixels when the solid light bodies of the
+one-frame-late UI layer move 1, 2 or 4 rows up, 4 rows down or 16 columns right against the
+unmoved pin. Fields are compared in double precision, and a 1e-4 px tolerance keeps float32
+rounding of the pin collar's exact half-pixel bound from counting, so figures computed in float32
+with a strict 0.5 px threshold can differ slightly. It supports the fixed and display-fraction UI
+planes, which sit on the screen plane whenever the shader's camera admission rejects the frame's
+constants.
 
 ### UI source discovery and snapshot qualification
 

@@ -310,6 +310,11 @@ namespace {
           replay.at("source_alpha_ui") == true && replay.at("ui_alpha_source") == "ui_source_color" &&
           replay.at("ui_constant_binding").at("uint32")[3] == 1,
         "Public UI hook did not offer the actual tag23 alpha source to automatic detection");
+      // A tagged UIColorAndAlpha fills the UI color slot without layer flags.
+      const auto &tag_detection = replay.at("ui_detection");
+      if (tag_detection.at("ran_or_held") == "inactive" || !(tag_detection.at("candidates").get<unsigned>() & 2u) ||
+          tag_detection.at("flags") != 0u)
+        throw std::runtime_error("A tagged UIColorAndAlpha did not reach detection without flags: " + tag_detection.dump());
       bool optional = false;
       for (const auto &entry : metadata.at("optional_captures")) if (entry.at("artifact_id") == 10) {
         if (entry.value("status", std::string{}) != "captured" || !entry.contains("capture_diagnostic"))
@@ -408,6 +413,12 @@ namespace {
       }
       if (!layer_offered || tag23_offered)
         throw std::runtime_error("Auto did not offer the live offscreen UI layer once tag 23 stopped: " + layer_metadata.at("ui_source").dump());
+      // An 8-bit layer forwards its stored flags: the late-layer identity and
+      // the premultiplied check (5).
+      const auto &layer_detection = layer_metadata.at("replay").at("ui_detection");
+      if (layer_detection.at("ran_or_held") == "inactive" || !(layer_detection.at("candidates").get<unsigned>() & 2u) ||
+          layer_detection.at("flags") != 5u || !layer_metadata.at("replay").contains("ui_pin"))
+        throw std::runtime_error("The offscreen UI layer did not reach detection with flags 5: " + layer_detection.dump());
       bool layer_mask = false;
       for (unsigned i = 0; i < box.state->response.texture_count; ++i) {
         const auto &item = box.state->response.textures[i];

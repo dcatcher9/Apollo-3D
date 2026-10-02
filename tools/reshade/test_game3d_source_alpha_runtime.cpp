@@ -4,6 +4,8 @@
 #include "test_game3d_render_input.h"
 #include "game3d_controls.h"
 #include "test_game3d_debug_dump_runtime.h"
+#include "game3d_ui_detection_contract.h"
+#include "game3d_ui_layer.h"
 #include <reshade.hpp>
 #include <d3d11.h>
 #include <dxgi1_4.h>
@@ -1767,12 +1769,21 @@ namespace {
     // its real frame. They hold the real frame's mask instead of differencing.
     inputs.hudless = {}; inputs.hold_previous = true;
     run(true, "generated present holds the real frame's HUD-less mask");
+    {
+      // A held mask reports the detection run that made it.
+      const auto held = gpu.renderer.consumed_detection();
+      require(held.state == ui_detection_snapshot::run_state::held && held.held_presents == 1 &&
+          held.candidates == (2u | 8u | 16u) && held.flags == 0u && held.stored_flags == 0u,
+        "A held HUD-less mask lost the detection constants that made it");
+    }
     run(true, "second generated present still holds");
     run(true, "third generated present still holds");
     run(false, "holding is bounded to three generated presents");
     run(false, "a hold needs a preceding HUD-less decision");
     inputs.hold_previous = false; inputs.hudless = correct;
     run(true, "the next real frame detects again");
+    require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::ran &&
+        !gpu.renderer.consumed_detection().held_presents, "A fresh detection reported a held mask");
     inputs.hudless = shifted;
     run(false, "all candidates unsuitable");
     inputs.masks[0] = explicit_alpha;
@@ -1914,6 +1925,62 @@ namespace {
     report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 inexact_after_exact_hold=1 trusted_alpha=1 trusted_missing_hold=1 trust_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
     std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, bounded generated-present hold, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, bounded inexact-frame hold, trusted alpha channels with a bounded hold when missing and revocation, and manual Off without review");
   }
+  // An offscreen UI layer fills the UI color slot with its stored flags, never
+  // a per-frame bit; a tagged UIColorAndAlpha carries none. Dump 3D records
+  // the detection constants behind the consumed mask and the pin markers.
+  void verify_layer_detection_dump(fixture &gpu, std::ostream &report, const fs::path &directory) {
+    using namespace sunshine_game3d;
+    const auto pixels = size_t(gpu.width) * gpu.height;
+    std::vector<float> hud(pixels, 0.f);
+    for (unsigned y = gpu.height / 4; y < gpu.height * 3 / 4; ++y)
+      for (unsigned x = gpu.width / 3; x < gpu.width / 2; ++x) hud[size_t(y) * gpu.width + x] = 1.f;
+    gpu.pattern(hud, true);
+    // White UI blended over transparent black: premultiplied.
+    const auto bpp = gpu.color == 2 ? 8u : 4u;
+    std::vector<unsigned char> bytes(pixels * bpp);
+    for (size_t i = 0; i != pixels; ++i)
+      for (unsigned c = 0; c != 4; ++c) {
+        if (gpu.color == 2) { const auto half = half_bits(hud[i]); std::memcpy(bytes.data() + i * bpp + c * 2, &half, 2); }
+        else bytes[i * bpp + c] = hud[i] > 0.f ? 255 : 0;
+      }
+    D3D11_TEXTURE2D_DESC desc{}; gpu.source->GetDesc(&desc); desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA data{bytes.data(), gpu.width * bpp, 0};
+    ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> view;
+    checked(gpu.device->CreateTexture2D(&desc, &data, &texture), "UI layer texture");
+    checked(gpu.device->CreateShaderResourceView(texture.Get(), nullptr, &view), "UI layer view");
+    alpha_auto_policy policy;
+    alpha_auto_source source;
+    source.session = &policy; source.now_ms = source.tick_ms = 1000;
+    source.epoch = 31; source.revision = 1; source.sequence = 1;
+    ui_detection_inputs inputs;
+    inputs.masks[1] = {reinterpret_cast<std::uint64_t>(view.Get())};
+    inputs.color_alpha_flags = ui_layer::detection_flags(static_cast<api::format>(desc.Format));
+    ui_render_input ui;
+    ui.automatic = &source; ui.detection = &inputs;
+    const auto expected_flags = ui_detection::layer_detection_flags(gpu.color == 2);
+    const auto check = [&](std::uint32_t flags, const fs::path &dump, const char *label) {
+      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+      gpu.render(true, 1, false, false, false, {}, dump, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      const auto consumed = gpu.renderer.consumed_detection();
+      require(consumed.state == ui_detection_snapshot::run_state::ran && consumed.candidates == 2u &&
+          consumed.flags == flags && consumed.stored_flags == flags && !(consumed.stored_flags & ui_detection::per_frame_mask),
+        std::string(label) + ": wrong detection constants");
+      const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
+      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x)
+        require(selected.channel(x, y, 0) == hud[size_t(y) * gpu.width + x], std::string(label) + ": mask is not the slot's alpha");
+    };
+    check(expected_flags, directory, "offscreen UI layer");
+    std::ifstream stored(directory / "manifest.json");
+    const auto manifest = nlohmann::json::parse(stored);
+    const auto &replay = manifest.at("producer_metadata").at("replay");
+    require(replay.at("ui_detection").at("flags") == expected_flags && replay.at("ui_detection").at("ran_or_held") == "ran" &&
+        replay.at("ui_detection").at("candidates") == 2u && replay.at("ui_pin").at("decision_texels") == 5u &&
+        replay.at("ui_pin").at("evidence_images") == 0u, "Dump lost the layer's detection constants or pin markers");
+    inputs.color_alpha_flags = 0;
+    check(0u, {}, "tagged UIColorAndAlpha");
+    report << "layer-detection-dump flags=" << expected_flags << " tagged_flags=0 ran=1 held_reported=1\n";
+    std::puts("PASS D3D11 UI detection constants: the UI layer fills the UI color slot with stored flags only, a tagged UI color with none, and Dump 3D records them with the pin markers");
+  }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;
     std::vector<float> selective(size_t(gpu.width) * gpu.height, 0.f);
@@ -2052,6 +2119,7 @@ int main(int argc, char **argv) {
     verify_retained_fg_alpha(gpu, report, directory / "retained-alpha-dump");
     verify_automatic_source_alpha(gpu, report);
     verify_automatic_hudless(gpu, report);
+    verify_layer_detection_dump(gpu, report, directory / "layer-detection-dump");
     verify_normalized_ui_input(gpu, report);
     verify_mask_upload_recovery(gpu);
     require(report.good(), "cannot write evidence");

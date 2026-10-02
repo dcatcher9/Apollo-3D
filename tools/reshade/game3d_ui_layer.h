@@ -33,10 +33,11 @@ namespace sunshine_game3d::ui_layer {
 
   // Formats that can carry blended UI coverage in alpha: 8 bits or more.
   bool alpha_format(api::format format);
-  // Sunshine_UIDetectionFlags for a layer copy of this format. bit0: admit it
+  // Sunshine_UIDetectionFlags for a layer copy of this format
+  // (ui_detection::layer_detection_flags): the late-layer identity, admission
   // only while premultiplied (no color above twice its alpha: UI blended over
-  // transparent black, allowing tints brighter than white); bit1: a float
-  // layer's HDR headroom.
+  // transparent black, allowing tints brighter than white) and, for a float
+  // layer, HDR headroom.
   std::uint32_t detection_flags(api::format format);
   // A single-sample 2D color target at the output size cleared to exactly
   // (0, 0, 0, 0). Callers separately exclude swapchain back buffers.
