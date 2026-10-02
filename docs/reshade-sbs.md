@@ -67,6 +67,12 @@ instead of a wrong one:
    remembered state need a contradiction that every game can produce, not only games with a
    particular buffer.
 
+The hidden-scene check of UI protection (**Hidden-scene evidence** under Setup) follows rules 2
+to 4: its evidence needs only the presented colour and the consumed depth, a UI layer or
+HUD-less image serves only as its gate, without fresh evidence its bounded hold lapses and
+nothing changes, and a visible verdict, which every game can produce, refutes an opaque layer's
+claim to hide the scene. It never selects depth, changes calibration or earns trust.
+
 The [first-run report](../tools/reshade/README.md#first-run-of-a-new-game) checks a new game's
 first session for the failure signatures these rules came from.
 
@@ -480,15 +486,120 @@ decision it is held, as described above), and a black HUD-less image never count
 UI whose color matches the underlying scene. Local motion or other postprocessing differences
 can still resemble UI; live game/headset validation remains necessary.
 
+**Hidden-scene evidence.** Some full-screen UI hides a 3D scene that the game keeps rendering and
+whose depth it keeps tagging, without any input the rules above accept as full-frame UI. Stellar
+Blade draws its notice and SHIFT UP splashes into its offscreen UI layer, fully opaque over the next
+scene; in a first session the layer is untrusted, and an untrusted channel covering the frame is
+ambiguous. Hogwarts Legacy's title screen with FG on pairs its HUD-less image only by Present
+counting, so the exact-pair rule cannot apply. In both the presented frame lacks the consumed
+depth's edges, which is what this check measures.
+
+The statistic D compares the presented colour (and a HUD-less image when one is offered) with the
+consumed depth on a frame-relative grid of 256 x 144 cells: output pixel x lies in cell column
+`floor(x * 256 / width)` and row y in cell row `floor(y * 144 / height)` (15 pixels at 4K, 10 at
+1440p, 7.5 at 1080p). Each cell holds the area mean of perceptual-code luma (PQ code for HDR10, read
+before PQ linearization; sRGB code for SDR; PQ of luminance for scRGB) and of the strength-1
+parallax, decoded as the scene candidate pass decodes it but independent of the strength and blend
+controls, clamped at the disparity limit, from depth texel `floor(uv * size)`. A cell is a depth
+edge when its mean parallax steps by at least 4 pixels per 2160 output rows to the cell on its
+right or below; its activity is the same right or lower step of its mean luma. Each edge cell's
+activity is compared with the activity at four null cells, offset by (5, 3), (-7, 4), (8, -2) and
+(-4, -6) cells and wrapped around the grid: D = (wins - losses) / (4 n) over n edge cells, ties
+counting 0, so a black or flat image reads 0. D is 0 in expectation for unrelated colour and depth
+and near 1 when the colour shows the depth's silhouettes. Evidence is valid with at least 128 edge
+cells, depth and camera ready, depth captured for this frame (not reused or behind a generated
+Present) and a frame of at least 256 x 144 pixels, so that no cell is empty. Valid evidence reads
+hidden below 0.15, visible from 0.25 and ambiguous between. Sums are fixed point (2^-20 luma,
+2^-12 pixel) and cell means round half away from zero, so the GPU result does not depend on
+summation order and `inspect_game3d_dump.py --scene-evidence` reproduces it. The shader measures
+frames up to 3840 x 3840, the renderer's detection bound, within which every cell sum fits 32 bits,
+and compares parallax steps with a precomputed integer bound. The evidence also counts the
+presented image's decided comparisons, wins plus losses: a black or flat frame decides none.
+
+The bounds come from the labelled dumps and an offline stress study. Real hidden scenes read at most
+0.039 (Stellar Blade splashes -0.044 and -0.056, The Witcher 3 graphics settings -0.022 and -0.006,
+Hogwarts Legacy title 0.039, Expedition 33 settings -0.024 and -0.002); matched frames at least
+0.260 (Dead Space's dimmed pause; then 0.278 to 0.87). Blur, depth of field, motion blur, grain,
+darkening, 8-pixel shifts and scaling of 23 matched frames left all of them at or above 0.161;
+unrelated colour and depth pairs across games read at most 0.211 (99th percentile 0.140). The
+weakest case is a dark, low-contrast scene under heavy grain, which drifts toward hidden; only an
+open gate below lets that act, and a layer route whose slot a visible verdict refuted cannot.
+All labelled dumps are 16:9. Cropped to their centre 21:9, 32:9 or 4:3, where the fixed grid's
+cells are 1.31, 1.78 and 0.75 times as wide as tall, hidden scenes read at most 0.109 and matched
+frames at least 0.193, except Dead Space's dimmed pause cropped to 4:3 (0.112): with square cells
+the same crop reads 0.111, so the crop removed its scene rather than the cells' shape changing the
+verdict. Real output in other aspect ratios is unvalidated.
+
+Two gates, computed from the detection counts on every frame, decide whether a verdict may act:
+
+- **Layer route.** No source 1-6 decided, and an untrusted UIAlpha or an untrusted offscreen UI
+  layer (stored flag `0x4`; never a tagged UIColorAndAlpha, which in Hogwarts Legacy is the opaque
+  final image) has alpha of at least 254/255 on at least 99% of pixels and no invalid pixel.
+- **HUD-less route.** No source 1-6 decided, a HUD-less image is offered, exact or not, and at
+  least 90% of pixels differ from the colour it is paired with.
+
+254/255 is one 8-bit code below opaque: an 8-bit layer must be fully opaque, and a float layer
+blended to within that of 1 still counts. 99% is the share at which the opaque-tag proof above
+treats a channel as covering the frame, and 90% the share at which a trusted channel claims the
+whole frame in trust's contradiction rule; it leaves room for parts of a full-screen menu that do
+not change, and the route also needs the HUD-less image itself to read visible.
+
+An always-opaque buffer would hold the layer route's gate open on every frame: a scene render
+target that the layer census took for the UI layer, or a UIAlpha tagged all ones. A valid visible
+verdict while a slot opened the layer route refutes that slot, since the presented frame then shows
+the depth's edges through it. A refuted slot never holds the layer route again until a sample
+offers it below 99% opaque, which shows it to be an overlay. A buffer that never reads visible is
+never refuted, so a dark scene buffer at the start of a session remains possible. Requiring
+transparency before the route may act was rejected: Stellar Blade's splash layer covered every
+pixel from its first logged sample of a first session, so its splashes would have stayed 3D.
+
+The CPU owns the verdict. When a sample's gate was open and its evidence is valid and hidden, the
+renderer holds that route until the sample's tick plus 500 ms; the HUD-less route also needs the
+HUD-less image's D to read visible. A valid visible verdict releases both routes, and invalid
+evidence never renews a hold. Holds clear on an epoch, revision or viewport change, when the
+routes' inputs change (alpha slots 0 and 1, their trust or the UI colour slot's stored flags) and
+when detection is inactive, and a sample pending across a clear cannot renew them. Refutations
+clear with the inputs and when detection is inactive. A HUD-less image that frame generation pairs
+on some Presents only clears nothing; each frame's own gate decides. On each frame a held route
+whose gate is open on that frame is full-frame UI: source 8 for the layer route, 9 for the HUD-less
+route, and the mask pass writes 1.0 for both, as for source 6. Every existing source, the
+exact-pair rule included, keeps precedence, and sources 8 and 9 never earn or revoke trust or
+prove a tagged UI colour opaque. Entry takes two samples (the first shows the open gate, the next
+measures), about 200 ms; release takes one. Only evidence measured because the previous sample's
+gate was open or a hold was active sets, releases or refutes, so the first-run shadow below does
+not change that timing.
+
+The evidence passes only measure: cell sums into their own 256 x 144 texture, a 16 x 16-cell
+comparison per group into nine statistics rows, and their sum into decision texels 5 and 6. They
+run after detection on sample frames only (the 100 ms readback cadence), and only while the latest
+sample's gate was open, a hold is active or the first-run shadow measures; otherwise nothing is
+dispatched. At 3840 x 2160 on an idle RTX 5080 an evaluated frame cost 0.060-0.077 ms (cells
+0.054-0.070 ms, comparison and sum 0.009-0.010 ms; HDR10 and scRGB, with and without a HUD-less
+image, the most for an SDR frame with one); the detection tiles and reduce kept their cost.
+
+A game whose session started without remembered UI trust (no `TrustedUISources` or
+`TrustedUIAlpha`) runs a first-run shadow for the whole session: the evidence passes run on every
+sample frame whatever the gates, the result is logged, and no decision changes. The log's
+`shadow_hidden_ms` reports runs of consecutive samples reading the presented frame hidden while no
+source decided. A sample with fewer decided comparisons than the 128 edge cells valid evidence
+needs is blank, such as black or a flat fade, and ends a run: it reads hidden from ties alone and
+has nothing to protect. Stellar Blade's splashes decided 304 and 228. Known first-session gaps
+stay open by design and the shadow logs them: Expedition 33 settings with FG off and The Witcher 3
+settings without a UI layer offer only presented alpha, which flattens from the second session
+through remembered trust; Stellar Blade with FG on offers its opaque tagged UI colour instead of
+its layer, so in a first session only the HUD-less route can act.
+
 The native path uses GPU statistics, reduction/selection and mask passes. Each of the 16x16
 statistics tiles is one 256-thread group, the reduction sums the 256 tiles in parallel, and the
 mask pass loads only the selected candidate; the integer counts and the mask are unchanged. At 4K
 this took UI detection from about 0.148 to 0.12 ms averaged over the provider fixture, which
 is mostly bound by reading the candidate textures. A bounded asynchronous
-80-byte summary may be read at 100 ms intervals for diagnostics; it never authorizes protection
+112-byte summary may be read at 100 ms intervals for diagnostics; it never authorizes protection
 and there is no full-frame CPU readback. Besides the decision, it carries the candidate bits the
 shader was offered, each alpha candidate's covered and invalid pixels, the trusted-alpha bits, and
-the HUD-less changed, unchanged, non-finite and lit pixel counts with matching tiles. Updating
+the HUD-less changed, unchanged, non-finite and lit pixel counts with matching tiles, the nearly
+opaque pixels of alpha candidates 0 and 1, and, on samples that measured it, the hidden-scene
+evidence. Updating
 channel trust from this summary is the only way it feeds back; it never authorizes the frame it
 describes. A sample keeps describing later frames while the inputs that decide the mask are
 unchanged: beside a trusted alpha channel, which decides alone, a HUD-less pair or another channel
@@ -496,9 +607,20 @@ may come and go. Resident Evil Requiem pairs its HUD-less image on only some Pre
 generation on; discarding the sample on each such change reported "Checking source quality" about
 half the time while its trusted UI color alpha protected the HUD. The `Sunshine UI protection` log (`sampled_candidates`, `sampled_alpha_covered`,
 `sampled_alpha_invalid`, `trusted_alpha` as slot bits, `sampled_ui_layer` when the UI layer filled the UI color slot,
-`sampled_hudless`) and the dump's
-`source_alpha_auto.sampled_evidence` report it, so a rejection names the failing check. Source availability, GPU validation and actual applied
-protection remain separate diagnostic facts. Older startup fields describe a retired heuristic.
+`sampled_hudless`, `sampled_alpha_opaque` for alpha candidates 0 and 1, `sampled_scene` with the
+presented image's `n`, `d`, `valid`, `ran` and `verdict`, `sampled_hudless_scene` with the HUD-less
+image's `n`, `d` and `valid`, then `scene_hold` (1 layer route, 2 HUD-less route held by that
+render), `shadow` (the first-run shadow) and `shadow_hidden_ms`, the longest hidden run without a
+decided source since the previous line) and the dump's
+`source_alpha_auto.sampled_evidence` (`alpha_opaque`, `scene` with the presented image's
+`decided` comparisons, `hudless_scene` and the current run's `shadow_hidden_ms`, with the render's
+`scene_hold` and `scene_shadow` beside it) report it, so a rejection names the failing check. A
+presented verdict entering or leaving hidden logs within a second, like a change of source; turns
+between ambiguous and visible, frequent near the visible bound, wait for the next periodic line.
+Source availability, GPU validation and actual applied protection remain separate diagnostic
+facts. Older startup fields describe a retired heuristic.
+Sampled source 8 or 9 is full-frame UI over a hidden scene (**Hidden-scene evidence** above); 7 is
+retired and never reused (Dump 59540_032 still records it).
 
 **UI detection flags and decision texels.** `tools/reshade/game3d_ui_detection_contract.h` names
 these values and the decision words for the renderer, Dump 3D and the replay tools;
@@ -513,20 +635,21 @@ bits:
 | `0x2` | stored | With a float layer's HDR headroom. |
 | `0x4` | stored | The UI color slot holds the one-frame-late offscreen UI layer, whose mask gets the late-layer margin. |
 | `0x8` | stored | Reserved. |
-| `0x10000` | per-frame | The CPU holds a recent full-frame scene decision. |
-| `0x20000` | per-frame | This frame's decision is sampled for readback. |
-| `0x40000` | per-frame | The consumed depth is not this frame's (reused or held). |
+| `0x10000` | per-frame | The CPU holds the layer route's hidden-scene verdict (source 8). |
+| `0x20000` | per-frame | Reserved; no render pushes it. |
+| `0x40000` | per-frame | The consumed depth is not this frame's (reused, or behind a generated Present). |
+| `0x80000` | per-frame | The CPU holds the HUD-less route's hidden-scene verdict (source 9). |
 
 An 8-bit layer stores 5, a layer in the `R16G16B16A16` or `R32G32B32A32` typeless family (UNORM
 included) 7 and a tagged UIColorAndAlpha 0; the renderer recognizes the layer by `0x4`. Stored bits
 belong to the UI color slot's source: the renderer keeps them between frames, and they are part of
 the key that keeps a status sample describing later frames.
 Per-frame bits ride only in one render's pushed word, are never stored and never enter that key.
-No per-frame bit is pushed yet, and no shader pass reads one.
+The detection reduce reads the two hold bits and the evidence sum reads `0x40000`; a dump's
+`replay.ui_detection.flags` records the pushed word.
 
 The decision texture has `SUNSHINE_UI_DECISION_TEXELS` `R32G32B32A32_UINT` texels (5 without the
-marker), and the bounded summary above is that whole texture, so it stays 80 bytes while the
-count is 5:
+marker, 7 with scene evidence), and the bounded summary above is that whole texture, 112 bytes:
 
 | Texel | x | y | z | w |
 | --- | --- | --- | --- | --- |
@@ -534,20 +657,27 @@ count is 5:
 | 1 | Candidate bits | HUD-less changed | HUD-less unchanged | HUD-less non-finite |
 | 2 | Covered pixels of alpha candidate 0 | 1 | 2 | 3 |
 | 3 | Invalid pixels of alpha candidate 0 | 1 | 2 | 3 |
-| 4 | Lit HUD-less pixels | Trusted-alpha bits | 0 | 0 |
+| 4 | Lit HUD-less pixels | Trusted-alpha bits | Pixels of alpha candidate 0 at least 254/255 | Of candidate 1 |
+| 5 | Presented `n` | `asuint(D)` | `valid \| ran << 1 \| verdict << 2` | Presented decided comparisons |
+| 6 | HUD-less `n` | `asuint(D)` | `valid \| ran << 1` | 0 |
 
-No shader writes texel 6 yet. It is reserved for the presented image's hidden-scene statistic
-{`n`, `asuint(kinterp)`, `asuint(koct)`, `valid | held << 1 | verdict << 2`}, where the verdict is
-0 none, 1 hidden, 2 ambiguous or 3 visible; `ui_detection_replay` checks `expect.scene` against it.
+The verdict is 0 none, 1 hidden, 2 ambiguous or 3 visible. The detection reduce writes texels 5
+and 6 as zero on every frame and the evidence passes overwrite them when they run, so a sample
+never carries an earlier frame's evidence; texel 6 stays zero without a HUD-less image.
 
-The statistics texture has 16 columns and `64 + 96 * images + (images ? 1 : 0)` rows, where
-`images` is `SUNSHINE_UI_SCENE_EVIDENCE_IMAGES` (0 without the marker): rows 0-15 hold each
-tile's alpha coverage, 16-31 its invalid alpha, 32-47 its HUD-less difference counts and 48-63
-its lit HUD-less pixels. The renderer sizes both textures, the readback and its parse from the
+`SUNSHINE_UI_SCENE_EVIDENCE_IMAGES` (0 without the marker) is 2 when the shader measures the
+presented and HUD-less images. The statistics texture has 16 columns and 64 rows, plus 9 with
+scene evidence: rows 0-15 hold each tile's alpha coverage, 16-31 its invalid alpha, 32-47 its
+HUD-less difference counts and 48-63 its lit HUD-less pixels with the nearly opaque pixels of
+alpha candidates 0 and 1; rows 64-72 hold each 16x16-cell comparison group's {n, wins - losses of
+each image, the presented image's decided comparisons}. The 256 x 144 cell sums have their own
+texture, because a pass cannot read the texture it writes. `SUNSHINE_UI_SCENE_*` defines mirror
+the statistic's constants. The renderer sizes the textures, the readback and its parse from the
 markers, and makes automatic detection unavailable for a shader whose markers are out of range.
 
 Detection rule changes are checked offline before a live test. `ui_detection_replay` (built with
-the add-on) compiles the three detection passes from a shader file, binds each Dump 3D package's
+the add-on) compiles the three detection passes from a shader file, and its three scene-evidence
+passes when the shader has them, binds each Dump 3D package's
 captured candidates by artifact kind (presented color, Backbuffer, UIColorAndAlpha, UIAlpha,
 HUD-less, or a census `ui_layer_candidate_N` in the UI color slot with the layer's stored flags),
 sets the candidate, exact-pair and trusted bits a label names, and compares the decision
@@ -559,17 +689,23 @@ and the resulting mask (empty, partial HUD, or flat) with that label:
 
 It also pushes the exact 80-byte `b0` from `replay.parameter_hex`, as every renderer compute pass
 receives it, and binds the raw depth artifact at `t1` and the presented color at `t6` (`t0` stays
-the color HUD-less is paired with) for the scene-evidence passes that will read them. The
-renderer's detection passes bind neither today, and no detection pass reads them. Without a raw depth artifact
+the color HUD-less is paired with) for the scene-evidence passes, which it runs after the decision
+as on a sample frame; they write only decision texels 5 and 6. Without a raw depth artifact
 `t1` is a 1x1 placeholder and depth and camera readiness are cleared, as in a render without depth.
-A label's `scene_hold`, `sample` and `depth_not_current` set the per-frame bits. It sizes the
-statistics and decision textures from the shader's markers, but never below 80 rows and 6 texels,
-so retired shader revisions still replay. `expect.mask_exact` compares the resolved R32 mask bit for
-bit with a CPU reference: the selected candidate's raw alpha (red for UIAlpha), for the offscreen
-UI layer that alpha with the shader's late-layer margin, all zeros without a source, or all ones
-for a full-frame decision; a HUD-less difference has no reference and fails the
-check. `expect.scene` (`verdict`, one name or a list, and inclusive `[min, max]` bounds for `kinterp`
-and `koct`) checks decision texel 6 and fails as `no-reference` for a shader without it.
+A label's `scene_hold`, `scene_hold_hudless`, `sample` and `depth_not_current` set the per-frame
+bits, so `scene_hold` stands for the CPU's held layer-route verdict and `scene_hold_hudless` for the
+HUD-less route's. It sizes the statistics and decision textures from the shader's markers, but
+never below 80 rows and 6 texels, so retired shader revisions still replay. `expect.mask_exact`
+compares the resolved R32 mask bit for bit with a CPU reference: the selected candidate's raw alpha
+(red for UIAlpha), for the offscreen UI layer that alpha with the shader's late-layer margin, all
+zeros without a source, or all ones for a full-frame decision (sources 6, 8 and 9); a HUD-less
+difference has no reference and fails the check. `expect.scene` checks the presented image's
+hidden-scene evidence in decision texel 5 and `expect.hudless_scene` the HUD-less image's in texel
+6: `verdict` is one name or a list (none, hidden, ambiguous or visible; the HUD-less verdict is
+visible when its valid D reaches the visible bound, else none) and `d_min` and `d_max` bound D
+inclusively. Evidence that did not run, as with a shader without scene evidence, fails the check.
+On the labelled dumps the GPU's D equals the CPU oracle `inspect_game3d_dump.py --scene-evidence`
+within 0.0012.
 `--write-mask <new-dir>` copies each labelled package that consumed an automatic R32 mask of the
 detection extent to `<new-dir>/<NN>_<dump>`, where `NN` is the case's position in the cases file,
 with its `ui_source_color` replaced by the mask this replay resolved, for
@@ -807,7 +943,8 @@ input was consumed, required artifact 33 (`ui_source_color.bin`) preserves its e
 For automatic detection this artifact is the resolved full-resolution `R32_FLOAT` mask, consumed
 through its red channel; for the offscreen UI layer it is that layer's alpha clamped and dilated
 by the late-layer margin (its value rule is with the offscreen UI layer above; `late_margin`
-below). It includes an all-zero result when every candidate was rejected;
+below), and for a full-frame decision (sources 6, 8 and 9) it is all 1.0. It includes an all-zero
+result when every candidate was rejected;
 the enabled mask path does not by itself imply any protected pixels. Replay uses these frozen
 values and does not run candidate selection again. Optional candidate metadata remains separate.
 `replay.ui_detection` records the detection constants behind that mask: `candidates`,

@@ -446,7 +446,13 @@ that showed the colour frame with depth; capture coverage by the list lifecycle;
 camera projection or only the raw controller places the scene (the latter while a valid camera
 exists is a warning); UI trust, presented alpha deciding over a trusted dedicated UI channel, a
 trusted channel covering the whole frame while an exact HUD-less pair shows the scene, and trusted
-channels that disagree; observation losses by cause; unusual export pauses; present-thread
+channels that disagree; how many samples were full-frame UI over a hidden scene (source 8 or 9)
+and how many of those were a route's exit, whose own evidence read the presented frame visible
+(each hidden scene that ends shows one, so they are counted rather than judged); a warning when the
+presented frame read hidden, not blank, for at least 500 ms while no UI source decided
+(`shadow_hidden_ms`, which a game's first session measures with its first-run shadow even where
+nothing could act, such as a game whose only UI signal is presented alpha); observation losses by
+cause; unusual export pauses; present-thread
 hitches; Game 3D CPU and GPU cost; and, from the host log, the Game 3D link, size fit and encoder
 stalls. A failing check is a bug report: fix the rule at its root (see
 [the generalization rules](../../docs/reshade-sbs.md#rules-for-new-game-behaviour)), then add a

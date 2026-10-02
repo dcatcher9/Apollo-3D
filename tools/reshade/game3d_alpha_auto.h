@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "game3d_ui_detection_contract.h"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -59,8 +61,20 @@ namespace sunshine_game3d {
     std::uint32_t covered{}, pixels{};
     std::uint64_t sample_sequence{}, sample_tick_ms{}, accepted_samples{};
     // Latest completed diagnostic: 1 UI R, 2 UI A, 3 backbuffer A, 4 current A,
-    // 5 HUD-less difference, 6 full-frame UI (HUD-less differs almost everywhere).
+    // 5 HUD-less difference, 6 full-frame UI (HUD-less differs almost
+    // everywhere), 8 full-frame UI over a hidden scene by the layer route, 9
+    // by the HUD-less route. 7 is retired and never reused.
     std::uint32_t source_kind{};
+    // Hidden-scene evidence of one image (docs/reshade-sbs.md, hidden-scene
+    // evidence): edge cells n and D, whether the passes ran and the evidence
+    // is valid, and the presented image's verdict and decided (untied)
+    // comparisons.
+    struct scene_evidence {
+      std::uint32_t n{}, decided{};
+      float d{};
+      bool valid{}, ran{};
+      ui_detection::scene_verdict verdict = ui_detection::scene_verdict::none;
+    };
     // Inputs of that GPU decision, for diagnosis only: the candidate bits the
     // shader was offered (1, 2, 4, 8 alpha candidates, 16 HUD-less), each alpha
     // candidate's covered and invalid pixels, HUD-less changed, unchanged and
@@ -73,7 +87,18 @@ namespace sunshine_game3d {
       // The UI color candidate (bit 2) was the offscreen UI layer, not a tagged
       // UIColorAndAlpha.
       bool ui_layer{};
+      // Pixels of alpha candidates 0 and 1 with alpha of at least 254/255.
+      std::array<std::uint32_t, 2> alpha_opaque{};
+      scene_evidence scene, hudless_scene;
+      // How long consecutive samples have read the presented frame hidden
+      // while no source decided, not blank, ending with this one; zero otherwise.
+      std::uint64_t shadow_hidden_ms{};
     } evidence;
+    // This render's state, not the sample's: the routes whose hidden-scene
+    // verdict the renderer holds (1 layer, 2 HUD-less), and whether the
+    // first-run shadow evaluates the evidence with the gates closed.
+    std::uint32_t scene_hold{};
+    bool scene_shadow{};
   };
 
   // UI protection mode and alpha-channel trust for one game process. Live Auto
@@ -156,6 +181,18 @@ namespace sunshine_game3d {
       std::lock_guard<std::mutex> lock(mutex_);
       trusted_alpha_ |= remembered & 31u;
       provisional_ |= remembered & 31u;
+    }
+
+    // A game whose session started without remembered trust runs the
+    // hidden-scene evidence as a first-run shadow: on sample frames whatever
+    // the gates, logged only; it never changes a decision.
+    void set_first_run(bool first_run) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      first_run_ = first_run;
+    }
+    bool first_run() {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return first_run_;
     }
 
     // Called with the new trusted bits whenever samples earn or revoke trust,
@@ -279,6 +316,7 @@ namespace sunshine_game3d {
     // The tagged UI color covered the whole frame over a visible scene.
     evidence_run opaque_{};
     bool ui_color_opaque_{};
+    bool first_run_{};
     std::function<void(std::uint32_t)> trust_listener_;
   };
 }

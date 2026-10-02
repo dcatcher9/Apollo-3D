@@ -41,6 +41,7 @@ namespace {
     {"SunshineHostVerticalConditionedSampler", D3D_SIT_TEXTURE, 4},
     {"SunshineHostFinalSampler", D3D_SIT_TEXTURE, 5},
     {"SunshineEyeLeftSampler", D3D_SIT_TEXTURE, 6},
+    {"SunshinePresentedColor", D3D_SIT_TEXTURE, 6},
     {"SunshineEyeRightSampler", D3D_SIT_TEXTURE, 7},
     {"SunshineUIPlaneTilesSampler", D3D_SIT_TEXTURE, 8},
     {"SunshineUIPlaneResolvedSampler", D3D_SIT_TEXTURE, 9},
@@ -301,13 +302,20 @@ int main(int argc, char **argv) {
       evidence_images = marker(std::string(detection::scene_evidence_images_marker));
     require(decision_texels >= detection::min_decision_texels && decision_texels <= detection::max_decision_texels &&
         evidence_images <= detection::max_scene_evidence_images, "UI detection size markers out of range");
-    for (const auto &[name, value] : detection::hlsl_flag_defines) {
-      const auto key = "#define " + std::string(name) + ' ';
-      const auto at = source.find(key);
-      require(at != std::string::npos, "Missing UI detection flag " + std::string(name));
-      require(std::stoul(source.substr(at + key.size(), 16), nullptr, 0) == value,
-        std::string(name) + " differs from game3d_ui_detection_contract.h");
-    }
+    const auto mirrored = [&source](const auto &defines) {
+      for (const auto &[name, value] : defines) {
+        const auto key = "#define " + std::string(name) + ' ';
+        const auto at = source.find(key);
+        require(at != std::string::npos, "Missing UI detection define " + std::string(name));
+        require(std::stoul(source.substr(at + key.size(), 16), nullptr, 0) == value,
+          std::string(name) + " differs from game3d_ui_detection_contract.h");
+      }
+    };
+    mirrored(detection::hlsl_flag_defines);
+    mirrored(detection::hlsl_scene_defines);
+    // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
+    require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
+      "The native shader lost its hidden-scene evidence markers");
     unsigned compiled = 0;
     for (const auto [width, height] : std::array<std::array<unsigned, 2>, 6> {{
       {16, 8}, {64, 36}, {1920, 1080}, {3840, 2160}, {2160, 3840}, {4800, 2700},
@@ -334,6 +342,9 @@ int main(int argc, char **argv) {
           entries.push_back({"SunshineUIDetectionTilesCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUIDetectionReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIDetectionMaskCS", "cs_5_0", 8, 8, 1});
+          entries.push_back({"SunshineSceneCellsCS", "cs_5_0", 16, 16, 1});
+          entries.push_back({"SunshineSceneCompareCS", "cs_5_0", 16, 16, 1});
+          entries.push_back({"SunshineSceneEvidenceCS", "cs_5_0", 16, 16, 1});
         }
         for (const auto &entry : entries) {
           compile(source, source_path.string(), directory, width, height, color, entry, manifest);

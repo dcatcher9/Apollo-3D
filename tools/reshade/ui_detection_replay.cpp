@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Offline check of Game 3D automatic UI detection. Runs the production
-// SunshineUIDetection{Tiles,Reduce,Mask}CS passes of a shader file on the
-// candidate textures saved in Dump 3D packages and compares each decision with
-// a labelled expectation. It replaces live trial and error when a detection
+// SunshineUIDetection{Tiles,Reduce,Mask}CS passes of a shader file, and its
+// SunshineScene{Cells,Compare,Evidence}CS hidden-scene evidence when it has them, on
+// the candidate textures saved in Dump 3D packages and compares each decision
+// with a labelled expectation. It replaces live trial and error when a detection
 // rule changes: every labelled screen of every game is judged at once.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -192,7 +193,7 @@ namespace {
   }
 
   struct shaders_t {
-    ComPtr<ID3D11ComputeShader> tiles, reduce, mask;
+    ComPtr<ID3D11ComputeShader> tiles, reduce, mask, cells, compare, evidence;
   };
 
   ComPtr<ID3D11ComputeShader> compile(device_t &gpu, const std::string &source, const char *entry, UINT width, UINT height, unsigned color) {
@@ -209,17 +210,20 @@ namespace {
 
   // Resource sizes from the shader's markers. Retired revisions without them
   // wrote opaque counts to statistics rows 64-79 and decision texel 5, so
-  // every revision fits 80 rows and 6 texels.
+  // every revision fits 80 rows and 6 texels. A shader with scene evidence
+  // measures both images and writes decision texels 5 and 6.
   struct sizes_t {
     UINT statistics_rows, decision_texels;
+    bool scene;
   };
   sizes_t detection_sizes(const std::string &source) {
     auto texels = sunshine_game3d::shader_marker(source, contract::decision_texels_marker);
     const auto images = sunshine_game3d::shader_marker(source, contract::scene_evidence_images_marker);
     if (!texels) texels = contract::default_decision_texels;
-    if (texels > contract::max_decision_texels || images > contract::max_scene_evidence_images)
+    const bool scene = images == contract::max_scene_evidence_images && texels >= contract::scene_decision_texels;
+    if (texels > contract::max_decision_texels || (images && !scene))
       throw std::runtime_error("unsupported detection size markers in the shader");
-    return {std::max(80u, contract::statistics_rows(images)), std::max(6u, texels)};
+    return {std::max(80u, contract::statistics_rows(images)), std::max(6u, texels), scene};
   }
 
   struct outcome {
@@ -251,12 +255,12 @@ namespace {
   std::string mask_exact(const outcome &result, const std::array<const artifact_t *, 4> &inputs, const artifact_t &paired,
       std::uint32_t late_margin) {
     // Raw selected alpha, the late UI layer's alpha with the shader's
-    // margin, or a whole-frame flat; a HUD-less difference has no CPU
-    // reference here.
+    // margin, or a whole-frame flat (sources 6, 8 and 9); a HUD-less
+    // difference has no CPU reference here.
     const auto source = result.decision.at(word::source);
     std::vector<float> reference;
     if (!source) reference.assign(result.mask.size(), 0.f);
-    else if (source == 6u) reference.assign(result.mask.size(), 1.f);
+    else if (source == 6u || source == 8u || source == 9u) reference.assign(result.mask.size(), 1.f);
     else if (source <= 4u) {
       const auto *input = source == 4u ? &paired : inputs[source - 1];
       if (!input) return "no-reference(missing candidate)";
@@ -324,6 +328,7 @@ namespace {
     if (label.value("scene_hold", false)) flags |= contract::per_frame_scene_hold;
     if (label.value("sample", false)) flags |= contract::per_frame_sample;
     if (label.value("depth_not_current", false)) flags |= contract::per_frame_depth_not_current;
+    if (label.value("scene_hold_hudless", false)) flags |= contract::per_frame_scene_hold_hudless;
 
     // b0: the exact 80 bytes the render consumed. Without a raw depth
     // artifact, t1 is a 1x1 placeholder and depth is not ready, as in render().
@@ -344,11 +349,18 @@ namespace {
       std::memset(parameters.data() + 8, 0, 8); // depth_ready, camera_ready
     }
 
+    const auto sizes = detection_sizes(shader_source);
     shaders_t shaders{compile(gpu, shader_source, "SunshineUIDetectionTilesCS", width, height, color),
       compile(gpu, shader_source, "SunshineUIDetectionReduceCS", width, height, color),
       compile(gpu, shader_source, "SunshineUIDetectionMaskCS", width, height, color)};
-    const auto sizes = detection_sizes(shader_source);
+    if (sizes.scene) {
+      shaders.cells = compile(gpu, shader_source, "SunshineSceneCellsCS", width, height, color);
+      shaders.compare = compile(gpu, shader_source, "SunshineSceneCompareCS", width, height, color);
+      shaders.evidence = compile(gpu, shader_source, "SunshineSceneEvidenceCS", width, height, color);
+    }
     auto statistics = target(gpu, 16, sizes.statistics_rows, DXGI_FORMAT_R32G32B32A32_UINT);
+    texture_t cells;
+    if (sizes.scene) cells = target(gpu, contract::scene::cells_x, contract::scene::cells_y, DXGI_FORMAT_R32G32B32A32_UINT);
     auto decision = target(gpu, sizes.decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT);
     auto mask = target(gpu, width, height, DXGI_FORMAT_R32_FLOAT);
     // Detection constants b2: candidate bits, difference threshold, trusted
@@ -389,6 +401,13 @@ namespace {
     stage(shaders.tiles.Get(), nullptr, 6, statistics.uav.Get(), 16, 16);
     stage(shaders.reduce.Get(), statistics.srv.Get(), 6, decision.uav.Get(), 1, 1);
     stage(shaders.mask.Get(), decision.srv.Get(), 0, mask.uav.Get(), (width + 7) / 8, (height + 7) / 8);
+    // The hidden-scene evidence of a sample frame: measured after the
+    // decision, it writes decision texels 5 and 6 only.
+    if (sizes.scene) {
+      stage(shaders.cells.Get(), nullptr, 6, cells.uav.Get(), contract::scene::cells_x / 16, contract::scene::cells_y);
+      stage(shaders.compare.Get(), cells.srv.Get(), 6, statistics.uav.Get(), contract::scene::cells_x / 16, contract::scene::cells_y / 16);
+      stage(shaders.evidence.Get(), statistics.srv.Get(), 6, decision.uav.Get(), 1, 1);
+    }
 
     outcome result;
     result.decision = download<std::uint32_t>(gpu, decision);
@@ -412,31 +431,35 @@ namespace {
     return o.ui_pixels == 0 ? "empty" : o.ui_pixels == o.pixels ? "flat" : "partial";
   }
 
-  // expect.scene: the presented image's hidden-scene statistic in decision
-  // texel 6. "verdict" is one name or a list; "kinterp" and "koct" are
-  // inclusive [min, max] bounds. A shader without that texel fails the check.
-  bool scene_matches(const std::vector<std::uint32_t> &d, const json &expected, std::string &text) {
-    if (d.size() <= word::scene_state) {
+  // expect.scene: the presented image's hidden-scene evidence in decision
+  // texel 5; expect.hudless_scene: the HUD-less image's in texel 6. "verdict"
+  // is one name or a list (the HUD-less texel's verdict is visible when its
+  // valid D reaches the visible bound, else none); "d_min" and "d_max" bound D
+  // inclusively. Evidence that did not run, as from a shader without scene
+  // evidence, fails the check.
+  bool scene_matches(const std::vector<std::uint32_t> &d, const json &expected, bool hudless, std::string &text) {
+    if (d.size() <= word::hudless_scene_state) {
       text = "no-reference(" + std::to_string(d.size() / 4) + " decision texels)";
       return false;
     }
-    static constexpr const char *verdicts[]{"none", "hidden", "ambiguous", "visible"};
-    const auto *verdict = verdicts[unsigned(contract::scene_state_verdict(d[word::scene_state]))];
-    float kinterp, koct;
-    std::memcpy(&kinterp, &d[word::scene_kinterp], 4); std::memcpy(&koct, &d[word::scene_koct], 4);
-    bool okay = true;
+    const auto n = d[hudless ? word::hudless_scene_n : word::scene_n], state = d[hudless ? word::hudless_scene_state : word::scene_state];
+    float value;
+    std::memcpy(&value, &d[hudless ? word::hudless_scene_d : word::scene_d], 4);
+    const bool valid = contract::scene_state_valid(state), ran = contract::scene_state_ran(state);
+    const auto *verdict = hudless ? (valid && contract::scene_visible(value) ? "visible" : "none") :
+      contract::name(contract::scene_state_verdict(state));
+    bool okay = ran;
     if (expected.contains("verdict")) {
       bool any = false;
       for (const auto &wanted : expected.at("verdict").is_array() ? expected.at("verdict") : json::array({expected.at("verdict")}))
         any = any || wanted.get<std::string>() == verdict;
-      okay = any;
+      okay = okay && any;
     }
-    for (const auto &[name, value] : {std::pair<const char *, float>{"kinterp", kinterp}, {"koct", koct}})
-      if (expected.contains(name))
-        okay = okay && value >= expected.at(name).at(0).get<float>() && value <= expected.at(name).at(1).get<float>();
+    if (expected.contains("d_min")) okay = okay && value >= expected.at("d_min").get<float>();
+    if (expected.contains("d_max")) okay = okay && value <= expected.at("d_max").get<float>();
     char buffer[128];
-    std::snprintf(buffer, sizeof(buffer), "%s(%s n=%u kinterp=%.3f koct=%.3f valid=%u held=%u)", okay ? "match" : "differs",
-      verdict, d[word::scene_n], double(kinterp), double(koct), d[word::scene_state] & 1u, (d[word::scene_state] >> 1) & 1u);
+    std::snprintf(buffer, sizeof(buffer), "%s(%s n=%u d=%.4f valid=%u ran=%u)", okay ? "match" : "differs", verdict, n,
+      double(value), unsigned(valid), unsigned(ran));
     text = buffer;
     return okay;
   }
@@ -487,13 +510,15 @@ int main(int argc, char **argv) {
     if (positional.size() != 2) {
       std::fprintf(stderr, "Usage: ui_detection_replay <game3d_native.hlsl> <cases.json> [--write-mask <new-dir>] [--verbose]\n"
         "cases.json: {\"dump_root\": dir, \"cases\": [{\"dump\", \"label\", \"candidates\": [kinds|\"current\"], "
-        "\"paired\": kind, \"exact\": bool, \"trusted\": [candidate indices], \"scene_hold\": bool, \"sample\": bool, "
-        "\"depth_not_current\": bool, \"expect\": {\"mask\", \"source\": [ids], \"mask_exact\": bool, "
-        "\"scene\": {\"verdict\", \"kinterp\": [min, max], \"koct\": [min, max]}}}]}\n"
+        "\"paired\": kind, \"exact\": bool, \"trusted\": [candidate indices], \"scene_hold\": bool, \"scene_hold_hudless\": bool, "
+        "\"sample\": bool, \"depth_not_current\": bool, \"expect\": {\"mask\", \"source\": [ids], \"mask_exact\": bool, "
+        "\"scene\": {\"verdict\", \"d_min\", \"d_max\"}, \"hudless_scene\": {\"verdict\", \"d_min\", \"d_max\"}}}]}\n"
         "Binds each dump's candidates (t0 paired color, t11-t14), raw depth (t1; a 1x1 placeholder without it), presented\n"
-        "color (t6) and its exact 80-byte b0. A case whose dump directory is gone is skipped; the run fails when no case ran.\n"
+        "color (t6) and its exact 80-byte b0, and runs the shader's scene evidence passes as on a sample frame. A case\n"
+        "whose dump directory is gone is skipped; the run fails when no case ran.\n"
         "mask_exact compares the resolved mask with the selected raw alpha (an offscreen UI layer's dilated by the shader's\n"
-        "SUNSHINE_UI_LATE_MARGIN), all zeros or all ones; scene checks decision texel 6. --write-mask copies each dump\n"
+        "SUNSHINE_UI_LATE_MARGIN), all zeros or all ones; scene and hudless_scene check the hidden-scene evidence that\n"
+        "the shader's evidence passes write to decision texels 5 and 6. --write-mask copies each dump\n"
         "that consumed an automatic R32 mask into <new-dir>/<NN>_<dump> (NN: the case's position in cases.json) with\n"
         "ui_source_color replaced by the resolved mask, for replay_game3d_dump --shader; any other dump fails its case.\n"
         "--verbose prints every decision word.\n");
@@ -546,8 +571,9 @@ int main(int argc, char **argv) {
         okay = okay && any;
       }
       okay = okay && (result.mask_exact.empty() || result.mask_exact == "match");
-      std::string scene;
-      if (expect.contains("scene")) okay = scene_matches(d, expect.at("scene"), scene) && okay;
+      std::string scene, hudless_scene;
+      if (expect.contains("scene")) okay = scene_matches(d, expect.at("scene"), false, scene) && okay;
+      if (expect.contains("hudless_scene")) okay = scene_matches(d, expect.at("hudless_scene"), true, hudless_scene) && okay;
       // A mask that cannot be written fails its case once.
       std::string written;
       if (write_masks) {
@@ -565,13 +591,13 @@ int main(int argc, char **argv) {
       }
       (okay ? passed : failed) += 1;
       std::printf("%s %-44s source=%u covered=%u/%u ui=%.2f%% mask=%s (want %s) candidates=0x%x trusted=0x%x "
-        "alpha_covered=%u/%u/%u/%u hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u}%s%s%s%s\n",
+        "alpha_covered=%u/%u/%u/%u hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u}%s%s%s%s%s%s\n",
         okay ? "PASS" : "FAIL", name.c_str(), d[word::source], d[word::covered], d[word::pixels],
         100.0 * double(result.ui_pixels) / double(result.pixels), mask_class(result).c_str(), wanted_mask.c_str(),
         d[word::candidates], d[word::trusted], d[word::alpha_covered], d[word::alpha_covered + 1], d[word::alpha_covered + 2],
         d[word::alpha_covered + 3], d[word::hudless_changed], d[word::hudless_unchanged], d[word::hudless_invalid],
         d[word::matching_tiles], d[word::hudless_lit], result.mask_exact.empty() ? "" : " mask_exact=", result.mask_exact.c_str(),
-        scene.empty() ? "" : " scene=", scene.c_str());
+        scene.empty() ? "" : " scene=", scene.c_str(), hudless_scene.empty() ? "" : " hudless_scene=", hudless_scene.c_str());
       if (verbose) {
         std::printf("  words=");
         for (size_t i = 0; i < d.size(); ++i) std::printf("%u%s", d[i], i + 1 < d.size() ? "," : "");

@@ -44,6 +44,11 @@ UI = re.compile(
     r'(?:sampled_alpha_invalid=(?P<invalid>\d+/\d+/\d+/\d+) )?trusted_alpha=(?P<trusted>0x[0-9a-fA-F]+)'
     r'(?: sampled_ui_layer=(?P<layer>\d))? '
     r'sampled_hudless=\{changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) invalid=(?P<hudless_invalid>\d+)')
+# Hidden-scene fields of the same line, absent from older logs.
+SCENE = re.compile(
+    r'sampled_alpha_opaque=(?P<opaque>\d+/\d+) sampled_scene=\{n=(?P<n>\d+) d=(?P<d>-?[0-9.]+) valid=(?P<valid>\d) '
+    r'ran=(?P<ran>\d) verdict=(?P<verdict>\w+)\} sampled_hudless_scene=\{n=\d+ d=(?P<hudless_d>-?[0-9.]+) '
+    r'valid=(?P<hudless_valid>\d)\} scene_hold=(?P<hold>\d+) shadow=(?P<shadow>\d) shadow_hidden_ms=(?P<hidden_ms>\d+)')
 TRUST = re.compile(r'Sunshine UI protection: (restored alpha trust|alpha trust is now) (0x[0-9a-fA-F]+)')
 LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
@@ -68,6 +73,9 @@ SETTLE_S = 3.0  # Recalibration and holds after an FG switch or runtime reset.
 RESOLVE_S = 10.0  # A trust dispute is handled when that channel's trust is revoked this soon.
 DEDICATED, PRESENTED = (0, 1), (2, 3)
 UI_LAYER_SOURCE = 4  # alpha_auto_policy source of the offscreen UI layer in slot 1.
+# Hidden-scene evidence (docs/reshade-sbs.md): a hidden run without a decided source this long is an uncovered hidden
+# scene.
+SHADOW_HIDDEN_WARN_MS = 500
 
 
 def seconds(h: str, m: str, s: str, ms: str) -> float:
@@ -79,10 +87,27 @@ def clock(value: float) -> str:
     return f'{int(value // 3600):02}:{int(value % 3600 // 60):02}:{int(value % 60):02}'
 
 
+class Scene(NamedTuple):
+    """A sample's hidden-scene evidence and the render's holds (docs/reshade-sbs.md, hidden-scene evidence)."""
+    opaque: tuple[int, ...]  # Alpha slots 0 and 1 at least 254/255.
+    n: int
+    d: float
+    valid: bool
+    ran: bool
+    verdict: str  # Presented image: none, hidden, ambiguous or visible.
+    hudless_d: float
+    hudless_valid: bool
+    hold: int  # Routes held by the render that logged: 1 layer (source 8), 2 HUD-less (source 9).
+    shadow: bool  # First-run shadow measuring with the gates closed.
+    hidden_ms: int  # Longest hidden run without a decided source since the previous line.
+
+
 class UISample(NamedTuple):
     t: float
     detection: str
-    source: int  # 1-4: alpha slot 0-3 decided, 5: HUD-less difference, 6: full frame flat.
+    # 1-4: alpha slot 0-3 decided, 5: HUD-less difference, 6: full frame flat (exact pair), 8: full frame over a
+    # hidden scene by the layer route, 9: by the HUD-less route. 7 is retired.
+    source: int
     covered: int
     pixels: int
     candidates: int
@@ -91,6 +116,7 @@ class UISample(NamedTuple):
     ui_layer: bool  # Slot 1 held the offscreen UI layer rather than a tagged UI color.
     hudless: tuple[int, ...]  # changed, unchanged, invalid.
     invalid: tuple[int, ...] | None = None  # Per alpha slot; absent in older logs.
+    scene: Scene | None = None  # Absent in older logs.
 
     def trust_source(self, slot: int) -> int:
         return UI_LAYER_SOURCE if slot == 1 and self.ui_layer else slot
@@ -206,11 +232,17 @@ def parse(lines) -> Session:
 
             def counts(text: str) -> tuple[int, ...]:
                 return tuple(int(v) for v in text.split('/'))
+            scene = None
+            if evidence := SCENE.search(text):
+                e = evidence.groupdict()
+                scene = Scene(counts(e['opaque']), int(e['n']), float(e['d']), e['valid'] == '1', e['ran'] == '1',
+                              e['verdict'], float(e['hudless_d']), e['hudless_valid'] == '1', int(e['hold']),
+                              e['shadow'] == '1', int(e['hidden_ms']))
             s.ui.append(UISample(t, g['detection'], int(g['source']), int(g['covered']), int(g['pixels']),
                                  int(g['candidates'], 16), counts(g['alpha']), int(g['trusted'], 16),
                                  g['layer'] == '1',
                                  (int(g['changed']), int(g['unchanged']), int(g['hudless_invalid'])),
-                                 counts(g['invalid']) if g['invalid'] else None))
+                                 counts(g['invalid']) if g['invalid'] else None, scene))
         if found := TRUST.search(text):
             s.trust_events.append((t, found.group(1), int(found.group(2), 16)))
         if found := LOSS.search(text):
@@ -432,6 +464,29 @@ def ui_checks(s: Session, add) -> None:
               + ('; trusted presented alpha disagrees with the UI channel' if disputes else '')
               + ('; a contradicted channel lost its trust' if handled and not disputes and not flattened else ''),
               (overrides + flattened or disputes or handled)[:6]))
+    scene_checks(s, add)
+
+
+def scene_checks(s: Session, add) -> None:
+    """Hidden-scene evidence: how often full-frame UI covered a hidden scene, and runs of the presented frame
+    reading hidden while no UI source decided, which nothing protected (the first-run shadow reports them).
+
+    A sample whose frame was full-frame UI (8 or 9) and whose own evidence read the presented frame visible is a
+    route's exit: that verdict releases the hold at once, so each hidden scene that ends shows one, and a false
+    hidden verdict shows one too. Exits are counted, not judged; many short episodes deserve a look."""
+    scenes = [u for u in s.ui if u.scene]
+    if not scenes:
+        return
+    covered = Counter(u.source for u in scenes if u.source in (8, 9))
+    exits = sum(1 for u in scenes if u.source in (8, 9) and u.scene.valid and u.scene.verdict == 'visible')
+    uncovered = [f'{clock(u.t)} {u.scene.hidden_ms} ms{" (first-run shadow)" if u.scene.shadow else ""}'
+                 for u in scenes if not u.source and u.scene.hidden_ms >= SHADOW_HIDDEN_WARN_MS]
+    detail = (f'layer route (8) in {covered[8]} samples, HUD-less route (9) in {covered[9]}, '
+              f'{exits} released by a visible verdict; {sum(u.scene.ran for u in scenes)} of {len(scenes)} '
+              'samples measured')
+    if uncovered:
+        detail += f'; the presented frame read hidden for at least {SHADOW_HIDDEN_WARN_MS} ms with no UI source'
+    add(Check('WARN' if uncovered else 'INFO', 'Hidden scene', detail, uncovered[:6]))
 
 
 def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:

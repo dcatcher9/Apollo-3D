@@ -76,6 +76,9 @@ namespace sunshine_game3d {
         if (!reshade::get_config_value(nullptr, config_section, trusted_sources_key, remembered) &&
             reshade::get_config_value(nullptr, config_section, trusted_alpha_key, slots))
           remembered = alpha_auto_policy::sources_from_slots(slots);
+        // Without remembered trust this is the game's first session: hidden-scene
+        // evidence runs as a logged first-run shadow (docs/reshade-sbs.md).
+        policy->set_first_run(!(remembered & 31u));
         if (remembered & 31u) {
           policy->restore_trusted_alpha(remembered);
           char text[160];

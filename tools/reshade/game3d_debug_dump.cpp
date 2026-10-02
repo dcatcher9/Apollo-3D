@@ -71,6 +71,16 @@ namespace sunshine_game3d {
       return encoded;
     }
 
+    // One image's hidden-scene evidence (docs/reshade-sbs.md, hidden-scene evidence).
+    nlohmann::json scene_json(const alpha_auto_decision::scene_evidence &scene, bool verdict) {
+      nlohmann::json result{{"n", scene.n}, {"d", scene.d}, {"valid", scene.valid}, {"ran", scene.ran}};
+      if (verdict) {
+        result["verdict"] = ui_detection::name(scene.verdict);
+        result["decided"] = scene.decided;
+      }
+      return result;
+    }
+
     nlohmann::json allocation_json(const api::resource_desc &desc) {
       return {{"api_type", static_cast<unsigned>(desc.type)}, {"width", desc.texture.width}, {"height", desc.texture.height}, {"depth_or_layers", desc.texture.depth_or_layers}, {"levels", desc.texture.levels}, {"samples", desc.texture.samples}, {"api_format", static_cast<unsigned>(desc.texture.format)}, {"heap", static_cast<unsigned>(desc.heap)}, {"usage", static_cast<unsigned>(desc.usage)}, {"flags", static_cast<unsigned>(desc.flags)}};
     }
@@ -152,12 +162,12 @@ namespace sunshine_game3d {
       result["ui_detection"] = {{"ran_or_held", name(detection.state)}, {"candidates", detection.candidates},
         {"threshold_bits", detection.threshold_bits}, {"trusted", detection.trusted}, {"flags", detection.flags},
         {"held_presents", detection.held_presents},
-        {"meaning", "b2 constants of the automatic UI detection run whose mask this render consumed: it ran in this render, was held from the last run (held_presents Presents in a row), or was inactive (all zero). flags is the full pushed Sunshine_UIDetectionFlags word, per-frame bits included; threshold_bits is the float32 difference threshold. ui_detection_replay reruns detection from the package's candidates."}};
+        {"meaning", "b2 constants of the automatic UI detection run whose mask this render consumed: it ran in this render, was held from the last run (held_presents Presents in a row), or was inactive (all zero). flags is the full pushed Sunshine_UIDetectionFlags word, per-frame bits included (0x10000 and 0x80000: the CPU held the layer or HUD-less route's hidden-scene verdict; 0x40000: the depth was not this frame's); threshold_bits is the float32 difference threshold. ui_detection_replay reruns detection from the package's candidates."}};
       result["ui_pin"] = {{"soft_pin_gain", shader_marker(captured_shader, "SUNSHINE_UI_SOFT_PIN_GAIN")},
         {"late_margin", shader_marker(captured_shader, "SUNSHINE_UI_LATE_MARGIN")},
         {"decision_texels", shader_marker(captured_shader, ui_detection::decision_texels_marker)},
         {"evidence_images", shader_marker(captured_shader, ui_detection::scene_evidence_images_marker)},
-        {"meaning", "Markers of the captured shader; 0 means absent: binary pinning, no late-layer margin, and the 5-texel detection decision without scene-evidence images."}};
+        {"meaning", "Markers of the captured shader; 0 means absent: binary pinning, no late-layer margin, and the 5-texel detection decision without scene-evidence images. A shader with 7 decision texels and 2 evidence images writes the presented and HUD-less hidden-scene evidence in texels 5 and 6 (docs/reshade-sbs.md)."}};
       result["source_alpha_ui_requested"] = f.source_alpha_decision.requested;
       result["source_alpha_input_state"] = name(f.source_alpha_decision.input_state);
       const auto &review = f.source_alpha_decision.qualification;
@@ -191,8 +201,11 @@ namespace sunshine_game3d {
             {"trusted_alpha", coverage.evidence.trusted_alpha}, {"ui_layer", coverage.evidence.ui_layer},
             {"hudless_changed", coverage.evidence.hudless_changed}, {"hudless_unchanged", coverage.evidence.hudless_unchanged},
             {"hudless_invalid", coverage.evidence.hudless_invalid}, {"matching_tiles", coverage.evidence.matching_tiles},
-            {"hudless_lit", coverage.evidence.hudless_lit}}},
-          {"meaning", "Auto selects and validates current-frame candidates on the GPU without review. These bounded asynchronous statistics describe a completed earlier detection sample and never authorize current pixels. ui_source_color contains the actual resolved red-channel mask for this frame, possibly empty. Replay uses that frozen mask without rerunning detection."}};
+            {"hudless_lit", coverage.evidence.hudless_lit}, {"alpha_opaque", coverage.evidence.alpha_opaque},
+            {"scene", scene_json(coverage.evidence.scene, true)}, {"hudless_scene", scene_json(coverage.evidence.hudless_scene, false)},
+            {"shadow_hidden_ms", coverage.evidence.shadow_hidden_ms}}},
+          {"scene_hold", coverage.scene_hold}, {"scene_shadow", coverage.scene_shadow},
+          {"meaning", "Auto selects and validates current-frame candidates on the GPU without review. These bounded asynchronous statistics describe a completed earlier detection sample and never authorize current pixels. ui_source_color contains the actual resolved red-channel mask for this frame, possibly empty. Replay uses that frozen mask without rerunning detection. sampled_source 8 and 9 are full-frame UI over a hidden scene (layer and HUD-less route). sampled_evidence.alpha_opaque counts alpha of at least 254/255 in alpha candidates 0 and 1; scene and hudless_scene are that sample's hidden-scene evidence (n edge cells, D, valid, ran, and the presented verdict with its decided, untied comparisons), and shadow_hidden_ms how long consecutive samples up to it read the presented frame hidden while no source decided and the frame was not blank (at least 128 decided comparisons). scene_hold (1 layer, 2 HUD-less route) and scene_shadow describe this render: the hidden-scene verdicts the renderer holds, and the first-run shadow that measures with the gates closed (docs/reshade-sbs.md, hidden-scene evidence)."}};
       }
       const auto &fg = f.source_alpha_decision.fg;
       result["source_alpha_ui_fg_mode"] = {{"known", fg.known}, {"enabled", fg.enabled},
@@ -300,7 +313,7 @@ namespace sunshine_game3d {
       if (f.source_alpha_ui && f.resources.ui_source.handle) {
         result["ui_source_allocation"] = allocation_json(device->get_resource_desc(f.resources.ui_source));
         result["ui_source"] = f.ui_source_metadata.empty() ? nlohmann::json::object() : nlohmann::json::parse(f.ui_source_metadata);
-        result["artifact_semantics"]["ui_source_color"] = "Exact typed texture consumed for UI coverage. b1 word3 selects alpha (RGBA) or red (single-channel mask). An automatic mask from the one-frame-late offscreen UI layer (replay.ui_detection.flags bit 0x4) is that layer's alpha clamped and dilated: each texel is the largest min(alpha, 1) within replay.ui_pin.late_margin rows and columns of it, with NaN, infinite, negative, zero and subnormal alpha as 0 (docs/reshade-sbs.md, offscreen UI layer). Other channels never replace current source_color for eye rendering. This does not prove same-game-frame pairing.";
+        result["artifact_semantics"]["ui_source_color"] = "Exact typed texture consumed for UI coverage. b1 word3 selects alpha (RGBA) or red (single-channel mask). An automatic mask from the one-frame-late offscreen UI layer (replay.ui_detection.flags bit 0x4) is that layer's alpha clamped and dilated: each texel is the largest min(alpha, 1) within replay.ui_pin.late_margin rows and columns of it, with NaN, infinite, negative, zero and subnormal alpha as 0 (docs/reshade-sbs.md, offscreen UI layer). A full-frame decision (sources 6, 8 and 9) is all 1.0. Other channels never replace current source_color for eye rendering. This does not prove same-game-frame pairing.";
       }
       if (d.ready && d.shader_resource.handle) {
         const auto resource = device->get_resource_from_view(d.shader_resource);

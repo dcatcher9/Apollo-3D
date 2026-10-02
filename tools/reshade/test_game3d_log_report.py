@@ -22,9 +22,18 @@ def output(t, published, fg, flat, fresh, missing, runtime='0x1'):
                    f'runtime={runtime} generation=1; cumulative')
 
 
-def ui(t, source, covered, alpha, candidates, trusted, pixels=1000, hudless=(0, 0), layer=0, invalid=(0, 0, 0, 0)):
+def ui(t, source, covered, alpha, candidates, trusted, pixels=1000, hudless=(0, 0), layer=0, invalid=(0, 0, 0, 0),
+       scene=None):
     a = '/'.join(str(v) for v in alpha)
     i = '/'.join(str(v) for v in invalid)
+    # scene: (d, verdict, hold, shadow, hidden_ms) of a log with hidden-scene evidence.
+    evidence = ''
+    if scene:
+        d, verdict, hold, shadow, hidden_ms = scene
+        evidence = (f'sampled_alpha_opaque=0/{pixels} '
+                    f'sampled_scene={{n=400 d={d:.3f} valid=1 ran=1 verdict={verdict}}} '
+                    f'sampled_hudless_scene={{n=0 d=0.000 valid=0}} scene_hold={hold} shadow={shadow} '
+                    f'shadow_hidden_ms={hidden_ms} ')
     return line(t, f'[Sunshine 3D] Sunshine UI protection: runtime=0000000000000001 mode=auto rendered=1 mask_path=1 '
                    f'input=automatic_gpu_mask retained=1 fg=0 fg_known=1 fg_enabled=0 input_state=input_seen '
                    f'detection=detected selected=automatic source=automatic source_availability=detected '
@@ -32,7 +41,7 @@ def ui(t, source, covered, alpha, candidates, trusted, pixels=1000, hudless=(0, 
                    f'sampled_candidates=0x{candidates:x} sampled_alpha_covered={a} sampled_alpha_invalid={i} '
                    f'trusted_alpha=0x{trusted:x} '
                    f'sampled_ui_layer={layer} sampled_hudless={{changed={hudless[0]} unchanged={hudless[1]} '
-                   f'invalid=0 matching_tiles=0 lit=0}} status_revision=1')
+                   f'invalid=0 matching_tiles=0 lit=0}} {evidence}status_revision=1')
 
 
 BASE = [
@@ -107,6 +116,37 @@ class ReadinessReport(unittest.TestCase):
                                'sampled_hudless={changed=0 unchanged=0 invalid=0 matching_tiles=0 lit=0}')
         self.assertNotIn('UI channel admission', run(BASE + [old]))
         self.assertIn('UI protection', run(BASE + [old]))
+
+    def test_hidden_scene_routes_and_uncovered_hidden_runs(self):
+        # Stellar Blade's notice splash: an opaque untrusted UI layer over a scene its picture hides.
+        splash = ui('10:00:12', 8, 1000, (0, 1000, 0, 1000), 0xa, 0x0, layer=1, scene=(-0.044, 'hidden', 1, 0, 0))
+        checks = run(BASE + [splash])
+        self.assertEqual(checks['UI protection'].status, 'PASS')
+        self.assertEqual(checks['Hidden scene'].status, 'INFO')
+        self.assertIn('layer route (8) in 1 samples', checks['Hidden scene'].detail)
+        # The splash closes: the frame the visible verdict was read on is still 8, and that verdict releases the
+        # hold at once. Each hidden scene that ends shows one such exit; they are counted, never judged.
+        closing = ui('10:00:13', 8, 1000, (0, 1000, 0, 1000), 0xa, 0x0, layer=1, scene=(0.6, 'visible', 0, 0, 0))
+        checks = run(BASE + [splash, closing])
+        self.assertEqual((checks['UI protection'].status, checks['Hidden scene'].status), ('PASS', 'INFO'))
+        self.assertIn('1 released by a visible verdict', checks['Hidden scene'].detail)
+        # The verdict word decides, not D rounded to three places: 0.2496 prints as 0.250 but is ambiguous.
+        rounded = ui('10:00:13', 9, 1000, (0, 0, 0, 1000), 0x18, 0x0, hudless=(950, 50),
+                     scene=(0.2496, 'ambiguous', 2, 0, 0))
+        checks = run(BASE + [rounded])
+        self.assertEqual(checks['UI protection'].status, 'PASS')
+        self.assertIn('0 released by a visible verdict', checks['Hidden scene'].detail)
+        # The first-run shadow: the presented frame read hidden for 600 ms while no UI source decided.
+        uncovered = ui('10:00:14', 0, 0, (0, 0, 0, 1000), 0x8, 0x0, scene=(0.01, 'hidden', 0, 1, 600))
+        checks = run(BASE + [uncovered])
+        self.assertEqual(checks['Hidden scene'].status, 'WARN')
+        self.assertEqual(checks['Hidden scene'].times, ['10:00:14 600 ms (first-run shadow)'])
+        brief = ui('10:00:14', 0, 0, (0, 0, 0, 1000), 0x8, 0x0, scene=(0.01, 'hidden', 0, 1, 400))
+        self.assertEqual(run(BASE + [brief])['Hidden scene'].status, 'INFO')
+        # A decided source covers the run; older logs have no hidden-scene check.
+        decided = ui('10:00:14', 2, 20, (0, 20, 0, 1000), 0xa, 0x2, scene=(0.01, 'hidden', 0, 0, 900))
+        self.assertEqual(run(BASE + [decided])['Hidden scene'].status, 'INFO')
+        self.assertNotIn('Hidden scene', run(BASE + [ui('10:00:12', 2, 5, (0, 5, 0, 0), 0x2, 0x2)]))
 
     def test_raw_placement_with_a_valid_camera_warns(self):
         lines = [x for x in BASE if 'Streamline scale: ready' not in x] + [

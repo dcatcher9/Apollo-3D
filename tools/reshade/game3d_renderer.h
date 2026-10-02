@@ -85,6 +85,9 @@ namespace sunshine_game3d {
     // controls; readiness belongs to this frame, never to an SDK capability.
     render_parameters scene;
     ui_render_input ui;
+    // The depth was captured for this frame rather than reused from an
+    // earlier one. Hidden-scene evidence is valid only for current depth.
+    bool depth_current = true;
   };
 
   // Current positive display bound after strength and blend. Scene admission
@@ -169,6 +172,7 @@ namespace sunshine_game3d {
 
   struct alpha_probe_counters {
     std::uint64_t submitted = 0, mapped = 0; // Recorded probes and native Map calls.
+    std::uint64_t scene_evidence = 0; // Recorded hidden-scene evidence passes (one per evaluated sample).
   };
 
   // One runtime owns its GPU working set. All passes run on ReShade's graphics

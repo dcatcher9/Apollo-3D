@@ -60,6 +60,9 @@ namespace {
     sunshine_game3d::source_alpha_ui_decision source_alpha;
     sunshine_game3d::source_alpha_ui_decision logged_source_alpha;
     sunshine_diagnostics::log_gate source_alpha_log;
+    // The longest run of hidden samples without a decided source since the
+    // last log line: the renderer reports only the current run.
+    std::uint64_t shadow_hidden_max_ms = 0;
 #if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
     // Explicit resets exist only for controlled regression fixtures.
     bool recalibrate = false;
@@ -118,25 +121,39 @@ namespace {
   void publish_source_alpha_ui(api::effect_runtime *runtime, sunshine_game3d::source_alpha_ui_decision value) {
     const auto now = GetTickCount64();
     bool write_log = false;
+    std::uint64_t shadow_hidden_ms = 0;
     {
       std::lock_guard<std::mutex> lock(automatic_ui_mutex);
       auto &entry = automatic_ui[runtime];
       entry.source_alpha = value;
+      entry.shadow_hidden_max_ms = std::max(entry.shadow_hidden_max_ms, value.coverage.evidence.shadow_hidden_ms);
       const auto &last = entry.logged_source_alpha;
+      // Of the hidden-scene verdict only entering or leaving hidden counts: the
+      // first-run shadow measures every sample, and matched scenes near the
+      // visible bound turn between ambiguous and visible.
+      const auto hidden = [](const sunshine_game3d::source_alpha_ui_decision &decision) {
+        return decision.coverage.evidence.scene.verdict == sunshine_game3d::ui_detection::scene_verdict::hidden;
+      };
       const bool changed = value.mode != last.mode || value.rendered != last.rendered || value.applied != last.applied ||
         value.input != last.input || value.input_state != last.input_state || value.fg.known != last.fg.known ||
         value.fg.enabled != last.fg.enabled || value.qualification.selected != last.qualification.selected ||
         value.qualification.available != last.qualification.available ||
         value.coverage.state != last.coverage.state || value.qualification.token != last.qualification.token ||
-        value.coverage.source_kind != last.coverage.source_kind;
+        value.coverage.source_kind != last.coverage.source_kind ||
+        hidden(value) != hidden(last);
       write_log = entry.source_alpha_log.due(now, changed, false, true);
-      if (write_log) entry.logged_source_alpha = value;
+      if (write_log) {
+        entry.logged_source_alpha = value;
+        shadow_hidden_ms = entry.shadow_hidden_max_ms;
+        entry.shadow_hidden_max_ms = 0;
+      }
     }
     if (!write_log) return;
     const auto &evidence = value.coverage.evidence;
-    char message[1024];
+    const auto &scene = evidence.scene, &hudless_scene = evidence.hudless_scene;
+    char message[1536];
     std::snprintf(message, sizeof(message),
-      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u trusted_alpha=0x%x sampled_ui_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} status_revision=%llu",
+      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u trusted_alpha=0x%x sampled_ui_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_hudless_scene={n=%u d=%.3f valid=%d} scene_hold=%u shadow=%d shadow_hidden_ms=%llu status_revision=%llu",
       static_cast<void *>(runtime), value.mode == sunshine_game3d::source_alpha_mode::automatic ? "auto" :
         value.mode == sunshine_game3d::source_alpha_mode::on ? "on" : "off",
       int(value.rendered), int(value.applied), sunshine_game3d::name(value.input), int(value.retained_alpha_ready),
@@ -148,6 +165,9 @@ namespace {
       evidence.alpha_invalid[0], evidence.alpha_invalid[1], evidence.alpha_invalid[2], evidence.alpha_invalid[3],
       evidence.trusted_alpha, int(evidence.ui_layer),
       evidence.hudless_changed, evidence.hudless_unchanged, evidence.hudless_invalid, evidence.matching_tiles, evidence.hudless_lit,
+      evidence.alpha_opaque[0], evidence.alpha_opaque[1], scene.n, double(scene.d), int(scene.valid), int(scene.ran),
+      sunshine_game3d::ui_detection::name(scene.verdict), hudless_scene.n, double(hudless_scene.d), int(hudless_scene.valid),
+      value.coverage.scene_hold, int(value.coverage.scene_shadow), static_cast<unsigned long long>(shadow_hidden_ms),
       static_cast<unsigned long long>(value.qualification.token));
     log(reshade::log::level::info, message);
   }
@@ -1010,8 +1030,9 @@ namespace {
         proof.diagnostic_ui_capture_attempt = std::move(ui_input.capture_metadata);
         const auto ui_observation = ui_input.match_scene(proof.frame.ui_source,
           proof.frame.prepared && proof.frame.depth_ready && scene.ready);
+        // Reused depth belongs to an earlier frame: no hidden-scene evidence.
         const sunshine_game3d::render_frame_input input{backbuffer, proof.borrowed_depth, p,
-          ui_input.for_render(scene.ui_plane, ui_observation)};
+          ui_input.for_render(scene.ui_plane, ui_observation), !proof.frame.reused_depth};
         rendered = proof.frame.prepared && renderer->render(commands, input, true);
         ui_input.complete(*renderer, rendered);
         source_alpha = ui_input.status;

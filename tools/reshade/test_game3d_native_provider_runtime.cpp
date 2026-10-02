@@ -5,6 +5,7 @@
 #define SUNSHINE_DIRECT_RUNTIME_FIXTURE_ONLY
 #include "test_streamline_direct_runtime.cpp"
 #include "game3d_controls.h"
+#include "game3d_ui_detection_contract.h"
 #include "../../src/game3d_debug_protocol.h"
 #include <nlohmann/json.hpp>
 
@@ -213,6 +214,13 @@ namespace {
       D3D12_PLACED_SUBRESOURCE_FOOTPRINT straight_footprint{};
       fill_upload(straight_upload, layer_desc, straight_pattern.data(), straight_footprint);
       bool straight_layer = false;
+      // The same content opaque everywhere, as a splash drawn into the layer.
+      auto opaque_pattern = layer_pattern;
+      for (size_t offset = 3; offset < opaque_pattern.size(); offset += 4) opaque_pattern[offset] = 255;
+      com_ptr<ID3D12Resource> opaque_upload;
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT opaque_footprint{};
+      fill_upload(opaque_upload, layer_desc, opaque_pattern.data(), opaque_footprint);
+      bool opaque_layer = false;
       const auto copy = [&](ID3D12GraphicsCommandList *list, ID3D12Resource *upload,
                             const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint) {
         transition(list, mask.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -235,9 +243,9 @@ namespace {
         game_list->ClearRenderTargetView(layer_rtv, transparent, 0, nullptr);
         transition(game_list, layer.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
         D3D12_TEXTURE_COPY_LOCATION layer_from{}, layer_to{};
-        layer_from.pResource = straight_layer ? straight_upload.p : layer_upload.p;
+        layer_from.pResource = opaque_layer ? opaque_upload.p : straight_layer ? straight_upload.p : layer_upload.p;
         layer_from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        layer_from.PlacedFootprint = straight_layer ? straight_footprint : layer_footprint;
+        layer_from.PlacedFootprint = opaque_layer ? opaque_footprint : straight_layer ? straight_footprint : layer_footprint;
         layer_to.pResource = layer.p; layer_to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         game_list->CopyTextureRegion(&layer_to, 0, 0, 0, &layer_from, nullptr);
         transition(game_list, layer.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -387,10 +395,6 @@ namespace {
         require(read(retained[i].p, D3D12_RESOURCE_STATE_COMMON) == retained_bytes[i],
           "Host acknowledgement or later game write changed UI snapshot");
 
-      // Once tag 23 stops, the offscreen layer is the UI color candidate: live
-      // tracking copies it before each clear and Auto admits it premultiplied,
-      // tint included.
-      render_tracked_depth = [&] { real_frame(); draw_layer(); };
       // Draws for a second, then dumps; the caller releases the dump.
       const auto dump_after_layer_frames = [&] {
         for (const auto until = GetTickCount64() + 1000; GetTickCount64() < until;) { step(); no_effects(); }
@@ -404,6 +408,89 @@ namespace {
           "Production Dump3D did not complete the offscreen UI layer capture");
         return nlohmann::json::parse(std::string(box.state->json, box.state->response.json_bytes));
       };
+      // D3D12 reads back all seven decision texels: the tagged UI color's
+      // nearly opaque pixels (texel 4) and, in this first session without
+      // remembered trust, the first-run shadow's hidden-scene evidence of the
+      // presented and HUD-less images (texels 5 and 6), which changes nothing.
+      {
+        unsigned opaque{};
+        for (size_t offset = 3; offset < expected.size(); offset += 4) opaque += expected[offset] == 255;
+        const auto tagged_metadata = dump_after_layer_frames();
+        InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
+        step(); no_effects();
+        const auto &automatic = tagged_metadata.at("replay").at("source_alpha_auto");
+        const auto &sampled = automatic.at("sampled_evidence");
+        const auto &scene = sampled.at("scene");
+        if (!(sampled.at("candidates").get<unsigned>() & 2u) || sampled.at("alpha_opaque").size() != 2 ||
+            sampled.at("alpha_opaque")[1] != opaque || sampled.at("alpha_opaque")[0] != 0u || !opaque ||
+            automatic.at("scene_shadow") != true || automatic.at("scene_hold") != 0u || scene.at("ran") != true ||
+            !scene.contains("verdict") || !scene.contains("n") || !scene.contains("d") || !sampled.at("hudless_scene").contains("valid") ||
+            automatic.at("sampled_source") == 8u || automatic.at("sampled_source") == 9u)
+          throw std::runtime_error("D3D12 lost a decision texel or the first-run shadow changed a decision: " + automatic.dump());
+        evidence << "d3d12-decision-texels opaque_ui_color=" << opaque << " shadow_scene_n=" << scene.at("n") << " shadow_scene_d=" <<
+          scene.at("d") << " verdict=" << scene.at("verdict").get<std::string>() << '\n';
+      }
+      // Once tag 23 stops, the offscreen layer is the UI color candidate: live
+      // tracking copies it before each clear and Auto admits it premultiplied,
+      // tint included.
+      render_tracked_depth = [&] { real_frame(); draw_layer(); };
+      // The layer route on D3D12 (docs/reshade-sbs.md, hidden-scene evidence):
+      // before any selective frame could earn it trust, the layer is opaque
+      // everywhere over a flat presented frame that shows none of the depth's
+      // edges, as a splash. The CPU holds the hidden verdict and the frame is
+      // full-frame UI (8).
+      {
+        const auto pixel_bytes = source_bytes.size() / (size_t(width) * height);
+        std::vector<std::uint8_t> flat_bytes(source_bytes.size());
+        for (size_t offset = 0; offset < flat_bytes.size(); offset += pixel_bytes)
+          std::memcpy(flat_bytes.data() + offset, source_bytes.data(), pixel_bytes);
+        com_ptr<ID3D12Resource> flat_upload;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT flat_footprint{};
+        fill_upload(flat_upload, backbuffers[0]->GetDesc(), flat_bytes.data(), flat_footprint);
+        struct presented_scope {
+          com_ptr<ID3D12Resource> &upload, &other;
+          D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint, &other_footprint;
+          bool &opaque;
+          presented_scope(com_ptr<ID3D12Resource> &u, com_ptr<ID3D12Resource> &o, D3D12_PLACED_SUBRESOURCE_FOOTPRINT &f,
+              D3D12_PLACED_SUBRESOURCE_FOOTPRINT &of, bool &layer): upload(u), other(o), footprint(f), other_footprint(of), opaque(layer) {
+            std::swap(upload.p, other.p); std::swap(footprint, other_footprint); opaque = true;
+          }
+          ~presented_scope() { std::swap(upload.p, other.p); std::swap(footprint, other_footprint); opaque = false; }
+        } flat_frame{source_upload, flat_upload, source_footprint, flat_footprint, opaque_layer};
+        const auto hidden_metadata = dump_after_layer_frames();
+        const auto &automatic = hidden_metadata.at("replay").at("source_alpha_auto");
+        const auto &hidden_sample = automatic.at("sampled_evidence");
+        const auto &scene = hidden_sample.at("scene");
+        bool full_frame = false;
+        for (unsigned i = 0; i < box.state->response.texture_count; ++i) {
+          const auto &item = box.state->response.textures[i];
+          if (unsigned(item.kind) != unsigned(dump::artifact::ui_source_color)) continue;
+          com_ptr<ID3D12Resource> resolved;
+          checked(game->OpenSharedHandle(reinterpret_cast<HANDLE>(item.handle), IID_PPV_ARGS(resolved.put())), "Open hidden-scene UI mask");
+          const auto bytes = read(resolved.p, D3D12_RESOURCE_STATE_COMMON);
+          full_frame = bytes.size() == size_t(width) * height * sizeof(float);
+          for (size_t pixel = 0; full_frame && pixel * 4 < bytes.size(); ++pixel) {
+            float value{}; std::memcpy(&value, bytes.data() + pixel * 4, sizeof(value));
+            full_frame = value == 1.f;
+          }
+        }
+        InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
+        step(); no_effects();
+        // A layer that earned trust in an earlier pass of this hook decides by
+        // itself (source 2), and no route is held.
+        const bool trusted_layer = hidden_sample.at("trusted_alpha").get<unsigned>() & 2u;
+        const auto flags = hidden_metadata.at("replay").at("ui_detection").at("flags").get<unsigned>();
+        if (!full_frame || hidden_sample.at("alpha_opaque")[1] != size_t(width) * height || (trusted_layer ?
+              automatic.at("sampled_source") != 2u || automatic.at("scene_hold") != 0u :
+              automatic.at("sampled_source") != 8u || automatic.at("scene_hold") != 1u || scene.at("valid") != true ||
+              scene.at("verdict") != "hidden" ||
+              (flags & (sunshine_game3d::ui_detection::stored_mask | sunshine_game3d::ui_detection::per_frame_scene_hold)) !=
+                (5u | sunshine_game3d::ui_detection::per_frame_scene_hold)))
+          throw std::runtime_error("D3D12 did not take the layer route over a hidden scene: " + automatic.dump() +
+            " full_frame=" + std::to_string(full_frame));
+        evidence << "d3d12-layer-route trusted_layer=" << trusted_layer << " sampled_source=" << automatic.at("sampled_source") <<
+          " scene_hold=" << automatic.at("scene_hold") << " scene_n=" << scene.at("n") << " scene_d=" << scene.at("d") << '\n';
+      }
       const auto layer_metadata = dump_after_layer_frames();
       bool layer_offered = false, tag23_offered = false;
       for (const auto &candidate : layer_metadata.at("ui_source").value("candidates", nlohmann::json::array())) {
@@ -490,7 +577,7 @@ namespace {
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
         " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 live_ui_layer_mask=1 frame_tags=" << bool(frame_tag) << '\n';
       std::puts("PASS actual public SL tag23 hook: typeless90 to typed87, automatic GPU mask equals pre-overwrite alpha and optional dump exact before opaque overwrite; host lease immutable");
-      std::puts("PASS live offscreen UI layer: without tag 23, the layer copied before its clear is the automatic UI mask with its late-layer margin, tint within twice its alpha included, UI moved within the margin stays on the plane; straight alpha is rejected");
+      std::puts("PASS live offscreen UI layer: without tag 23, the layer copied before its clear is the automatic UI mask with its late-layer margin, tint within twice its alpha included, UI moved within the margin stays on the plane; straight alpha is rejected; opaque everywhere over a flat presented frame it is full-frame UI by the layer route (8)");
     }
 
     void run_automatic_ui_tags(HMODULE sdk) {

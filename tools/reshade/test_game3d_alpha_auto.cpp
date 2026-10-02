@@ -266,6 +266,81 @@ namespace {
     require(detection_decision_key(2u | 16u, 0u, trusted) != detection_decision_key(2u | 16u, 0u, 0u),
       "Losing trust kept the decision");
   }
+  // Hidden-scene gates (docs/reshade-sbs.md, hidden-scene evidence) open only
+  // when no source 1-6 decided, for an untrusted UIAlpha or offscreen UI layer
+  // nearly opaque without an invalid pixel, or a HUD-less image differing on
+  // at least 90% of the frame. A sample that decided 8 or 9 still shows them.
+  void hidden_scene_gates_and_samples_that_flatten_learn_nothing() {
+    namespace detection = ui_detection;
+    const std::uint32_t pixels = 1000;
+    const std::array<std::uint32_t, 4> clean{};
+    const auto gates = [&](std::uint32_t source, std::uint32_t candidates, std::uint32_t trusted, std::uint32_t flags,
+        std::array<std::uint32_t, 2> opaque, std::uint32_t changed, std::array<std::uint32_t, 4> invalid = {}) {
+      return detection::scene_gates_of(source, candidates, trusted, flags, pixels, invalid, opaque, changed);
+    };
+    const auto layer = detection::layer_detection_flags(false);
+    require(gates(0, 2, 0, layer, {0, 990}, 0).layer && gates(8, 2, 0, layer, {0, 1000}, 0).layer,
+      "An untrusted opaque layer did not open the layer route");
+    require(!gates(0, 2, 0, layer, {0, 989}, 0).layer, "A layer under 99% opaque opened the layer route");
+    require(!gates(0, 2, 0, 0u, {0, 1000}, 0).layer, "A tagged UI color opened the layer route");
+    require(!gates(0, 2, 2, layer, {0, 1000}, 0).layer, "A trusted layer opened the layer route");
+    require(!gates(0, 2, 0, layer, {0, 1000}, 0, {0, 1, 0, 0}).layer, "A layer with an invalid pixel opened the layer route");
+    require(gates(0, 1, 0, 0u, {1000, 0}, 0).layer && !gates(0, 1, 1, 0u, {1000, 0}, 0).layer,
+      "UIAlpha did not open the layer route only while untrusted");
+    require(!gates(0, 4 | 8, 0, 0u, {1000, 1000}, 0).layer, "Presented alpha opened the layer route");
+    for (const std::uint32_t decided : {1u, 2u, 3u, 4u, 5u, 6u})
+      require(!gates(decided, 2 | 16, 0, layer, {0, 1000}, 1000).layer && !gates(decided, 16, 0, 0u, {}, 1000).hudless,
+        "A decided frame opened a hidden-scene route");
+    require(gates(0, 16, 0, 0u, {}, 900).hudless && gates(9, 48, 0, 0u, {}, 1000).hudless && !gates(0, 16, 0, 0u, {}, 899).hudless &&
+        !gates(0, 0, 0, 0u, {}, 1000).hudless, "The HUD-less route did not open at 90% changed pixels exactly");
+    require(detection::scene_visible(.25f) && !detection::scene_visible(.2499f), "The visible bound moved");
+    // Per slot: the slots that opened the layer route, and the route's inputs
+    // offered below that opacity, which shows them to be overlays (a slot a
+    // visible verdict refuted needs one), whatever source decided.
+    require(gates(0, 3, 0, layer, {1000, 989}, 0).layer_slots == 1u && gates(0, 3, 0, layer, {1000, 989}, 0).overlay_slots == 2u,
+      "The layer route's slots were not told apart");
+    require(gates(2, 2, 0, layer, {0, 100}, 0).overlay_slots == 2u && !gates(2, 2, 0, layer, {0, 100}, 0).layer_slots,
+      "A layer that decided its own selective mask was not shown an overlay");
+    require(!gates(0, 2, 0, 0u, {0, 100}, 0).overlay_slots && !gates(0, 4 | 8, 0, 0u, {0, 0}, 0).overlay_slots,
+      "A tagged UI color or presented alpha counted as a layer-route input");
+    // Holds and refutations follow the routes' inputs, not a HUD-less pairing.
+    require(detection::scene_route_key(2, layer, 0) == detection::scene_route_key(2 | 16, layer, 0) &&
+        detection::scene_route_key(2 | 16, layer, 0) == detection::scene_route_key(2 | 48, layer, 0) &&
+        detection::scene_route_key(2 | 4 | 8, layer, 0) == detection::scene_route_key(2, layer, 0),
+      "A HUD-less pairing or presented alpha changed the routes' inputs");
+    require(detection::scene_route_key(2, layer, 0) != detection::scene_route_key(2, layer, 2) &&
+        detection::scene_route_key(2, layer, 0) != detection::scene_route_key(2, 0u, 0) &&
+        detection::scene_route_key(2, layer, 0) != detection::scene_route_key(0, 0u, 0) &&
+        detection::scene_route_key(1, 0u, 0) != detection::scene_route_key(1, 0u, 1),
+      "Trust, a slot's source or its stored flags did not change the routes' inputs");
+
+    // The counts of a sample that decided 8 or 9 cover the whole frame with an
+    // untrusted channel: they never earn or revoke trust and never prove a
+    // tagged UI color opaque, so the layer is still preferred only by trust.
+    alpha_auto_policy policy;
+    alpha_auto_decision::detection_evidence evidence;
+    evidence.candidates = 2 | 16; evidence.ui_layer = true;
+    evidence.alpha_covered = {0, pixels, 0, 0}; evidence.alpha_opaque = {0, pixels};
+    evidence.hudless_changed = pixels;
+    for (std::uint64_t tick = 1000; tick <= 6000; tick += 100) policy.observe_alpha_channels(evidence, pixels, tick);
+    evidence.candidates = 1 | 8 | 48; evidence.ui_layer = false; evidence.alpha_covered = {pixels, 0, 0, pixels};
+    for (std::uint64_t tick = 7000; tick <= 12000; tick += 100) policy.observe_alpha_channels(evidence, pixels, tick);
+    require(!policy.trusted_alpha() && !policy.prefer_ui_layer(), "A full-frame hidden-scene sample earned trust or proved a UI color opaque");
+    alpha_auto_policy trusting;
+    trusting.restore_trusted_alpha(1u << alpha_auto_policy::ui_layer_source);
+    evidence.candidates = 2 | 16; evidence.ui_layer = true; evidence.alpha_covered = {0, pixels, 0, 0};
+    for (std::uint64_t tick = 1000; tick <= 6000; tick += 100) trusting.observe_alpha_channels(evidence, pixels, tick);
+    require(trusting.trusted_alpha() == 1u << alpha_auto_policy::ui_layer_source,
+      "A full-frame sample without a visible scene revoked trust");
+    // Only a session without remembered trust runs the first-run shadow; the
+    // caller says which, and nothing learned later changes it.
+    alpha_auto_policy first;
+    require(!first.first_run(), "A policy started as a first run without its owner saying so");
+    first.set_first_run(true);
+    evidence.candidates = 2; evidence.alpha_covered = {0, 100, 0, 0};
+    for (std::uint64_t tick = 1000; tick <= 4000; tick += 500) first.observe_alpha_channels(evidence, pixels, tick);
+    require(first.first_run() && first.trusted_alpha(), "Earning trust ended the first-run shadow");
+  }
 } // namespace
 
 int main() {
@@ -275,7 +350,8 @@ int main() {
     remembered_alpha_trust_is_restored_and_every_change_is_reported();
     trust_belongs_to_the_source_that_filled_the_slot();
     only_the_deciding_inputs_key_a_status_sample();
-    std::puts("Source alpha session: 5 policy groups passed");
+    hidden_scene_gates_and_samples_that_flatten_learn_nothing();
+    std::puts("Source alpha session: 6 policy groups passed");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "Source alpha session failed: %s\n", error.what());

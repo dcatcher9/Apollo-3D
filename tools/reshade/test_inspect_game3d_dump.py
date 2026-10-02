@@ -391,6 +391,100 @@ class GameDumpReaderTest(unittest.TestCase):
         metrics = json.loads(result.stdout)["pin_metrics"]
         self.assertEqual(metrics["bands"], [{"rows": [3, 5], "max_new_step_columns": 10, "row": 3}])
 
+    # Hidden-scene statistic D: a 512x288 frame (2x2 pixels per cell) whose depth has two discs nearer than the
+    # background by 100 pixels of parallax per 2160 rows.
+    SCENE_SIZE = (288, 512)
+
+    @staticmethod
+    def scene_parameters(camera_ready=1):
+        return struct.pack("<fiIIifff8f4f", 100.0, 0, 1, camera_ready, 1, 100000.0, 1.0, .04,
+                           0.0, 1.0, 0.0, 1.0, .05, .03, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0)
+
+    def scene_inputs(self):
+        height, width = self.SCENE_SIZE
+        y, x = np.mgrid[0:height, 0:width]
+        discs = (((x - .3 * width) ** 2 + (y - .5 * height) ** 2 <= (.25 * height) ** 2) |
+                 ((x - .72 * width) ** 2 + (y - .45 * height) ** 2 <= (.18 * height) ** 2))
+        return np.where(discs, np.float32(.0302), np.float32(.03)), discs
+
+    def scene(self, *colors, transfer=1, depth=None, parameters=None):
+        height, width = self.SCENE_SIZE
+        raw, _ = self.scene_inputs()
+        parameters = parameters or self.scene_parameters()
+        parallax = reader.scene_parallax(raw if depth is None else depth, parameters, width, height)
+        active = reader.camera_active(parameters)
+        return reader.scene_evidence(parallax, [reader.scene_code_luma(color, transfer) for color in colors], active)
+
+    def test_scene_evidence_reads_whether_color_shows_the_depth_edges(self):
+        _, discs = self.scene_inputs()
+        silhouette = np.repeat(np.where(discs, .75, .25)[..., None], 3, axis=-1).astype(np.float32)
+        noise = np.random.default_rng(7).random((*self.SCENE_SIZE, 3), dtype=np.float32)
+        black = np.zeros_like(silhouette)
+        visible, hidden, unrelated, faint = self.scene(silhouette, black, noise, silhouette * .01)
+        self.assertGreaterEqual(visible["n"], reader.SCENE_MIN_EDGES)
+        self.assertTrue(all(result["valid"] and result["n"] == visible["n"] for result in (hidden, unrelated, faint)))
+        self.assertEqual(visible["verdict"], "visible")
+        self.assertGreater(visible["d"], .9)
+        # Black has no activity anywhere: every comparison ties, so D is exactly 0 and nothing is decided.
+        self.assertEqual((hidden["verdict"], hidden["d"], hidden["decided"]), ("hidden", 0.0, 0))
+        self.assertLess(abs(unrelated["d"]), .1)
+        self.assertGreaterEqual(unrelated["decided"], reader.SCENE_MIN_EDGES)
+        self.assertEqual(unrelated["verdict"], "hidden")
+        # A dimmed picture keeps its verdict.
+        self.assertEqual(faint["verdict"], "visible")
+        self.assertGreater(faint["d"], .9)
+        for transfer in (2, 3):
+            with self.subTest(transfer=transfer):
+                bright, dark = self.scene(silhouette, black, transfer=transfer)
+                self.assertEqual((bright["verdict"], dark["verdict"], dark["d"]), ("visible", "hidden", 0.0))
+
+    def test_scene_evidence_needs_depth_edges_and_a_ready_camera(self):
+        _, discs = self.scene_inputs()
+        silhouette = np.repeat(np.where(discs, .75, .25)[..., None], 3, axis=-1).astype(np.float32)
+        flat, = self.scene(silhouette, depth=np.full(self.SCENE_SIZE, .03, np.float32))
+        self.assertEqual((flat["n"], flat["valid"], flat["verdict"]), (0, False, "none"))
+        unready, = self.scene(silhouette, parameters=self.scene_parameters(camera_ready=0))
+        self.assertEqual((unready["n"], unready["valid"], unready["verdict"]), (0, False, "none"))
+        # A frame smaller than the grid leaves cells without a pixel; the shader measures none beyond 3840.
+        small, = reader.scene_evidence(np.zeros((142, 250), np.float32), [np.zeros((142, 250), np.float32)])
+        self.assertEqual((small["n"], small["valid"]), (0, False))
+        steps = np.tile((np.arange(3842) // 15 % 2).astype(np.float32) * 100, (144, 1))
+        wide, = reader.scene_evidence(steps, [np.zeros_like(steps)])
+        self.assertEqual((wide["n"], wide["valid"]), (0, False))
+
+    def test_scene_cells_map_pixels_by_floor_and_round_means_half_away_from_zero(self):
+        # 300 pixels over 256 columns: cell c holds pixels floor(c * 300 / 256) up to the next cell's first pixel.
+        values = np.tile(np.arange(300, dtype=np.float32), (144, 1)) / 4096
+        means = reader.scene_cell_means(values, reader.SCENE_PARALLAX_SCALE)
+        columns = np.arange(300) * 256 // 300
+        expected = [round(np.arange(300)[columns == c].mean() + 1e-9) for c in range(256)]
+        self.assertEqual(means[0].tolist(), expected)
+        # Two pixels per cell of 1 and 2 (or -1 and -2) units: a mean of 1.5 rounds to 2 (-2).
+        pairs = np.tile(np.array([1, 2], np.float32), (144, 256)) / 4096
+        self.assertEqual(reader.scene_cell_means(pairs, 4096)[0, 0], 2)
+        self.assertEqual(reader.scene_cell_means(-pairs, 4096)[0, 0], -2)
+
+    def test_cli_reports_scene_evidence(self):
+        height, width = self.SCENE_SIZE
+        raw, discs = self.scene_inputs()
+        gray = np.where(discs, 192, 64)[..., None]
+        color = (gray * np.array([1, 1, 1, 0]) + np.array([0, 0, 0, 255])).astype(np.uint8)
+        artifacts = []
+        for kind, payload, fmt in (("raw_depth", raw.astype("<f4").tobytes(), 41),
+                                   ("source_color", color.tobytes(), 28)):
+            (self.root / (kind + ".bin")).write_bytes(payload)
+            artifacts.append(dict(kind=kind, file=kind + ".bin", dxgi_format=fmt, width=width, height=height,
+                                  row_bytes=len(payload) // height, byte_count=len(payload)))
+        metadata = dict(color_space=1, replay=dict(parameter_hex=self.scene_parameters().hex()))
+        (self.root / "manifest.json").write_text(json.dumps(dict(
+            schema="sunshine.game3d.dump.v1", status="complete", artifacts=artifacts, producer_metadata=metadata)))
+        result = subprocess.run([sys.executable, str(Path(reader.__file__)), str(self.root), "--scene-evidence"],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        presented = json.loads(result.stdout)["scene_evidence"]["presented"]
+        self.assertEqual(presented["verdict"], "visible")
+        self.assertGreaterEqual(presented["n"], reader.SCENE_MIN_EDGES)
+
     def test_cli_creates_review_and_report_without_overwriting_evidence(self):
         source = self.artifact("source_color", [1, 2, 3, 0, 4, 5, 6, 255], fmt=28, channels=4)
         (self.root / "manifest.json").write_text(json.dumps(dict(

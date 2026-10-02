@@ -80,12 +80,16 @@ int main() {
       std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);
       require(input.good(), "Cannot read game3d_native.hlsl");
       const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-      for (const auto &[name, value] : detection::hlsl_flag_defines) {
-        const auto key = "#define " + std::string(name) + ' ';
-        const auto at = source.find(key);
-        const auto message = std::string(name) + " is missing from game3d_native.hlsl or differs from game3d_ui_detection_contract.h";
-        require(at != std::string::npos && std::stoul(source.substr(at + key.size(), 16), nullptr, 0) == value, message.c_str());
-      }
+      const auto mirrored = [&source](const auto &defines) {
+        for (const auto &[name, value] : defines) {
+          const auto key = "#define " + std::string(name) + ' ';
+          const auto at = source.find(key);
+          const auto message = std::string(name) + " is missing from game3d_native.hlsl or differs from game3d_ui_detection_contract.h";
+          require(at != std::string::npos && std::stoul(source.substr(at + key.size(), 16), nullptr, 0) == value, message.c_str());
+        }
+      };
+      mirrored(detection::hlsl_flag_defines);
+      mirrored(detection::hlsl_scene_defines);
       const auto texels = sunshine_game3d::shader_marker(source, detection::decision_texels_marker);
       const auto images = sunshine_game3d::shader_marker(source, detection::scene_evidence_images_marker);
       require(source.find("#define " + std::string(detection::scene_evidence_images_marker) + ' ') != std::string::npos &&

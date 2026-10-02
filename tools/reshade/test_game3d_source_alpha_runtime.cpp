@@ -18,6 +18,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -90,6 +91,8 @@ namespace {
     sunshine_game3d::renderer renderer, control_renderer;
     std::uint64_t mask_capture = 0;
     bool has_control{};
+    // Whether a UI-detection render's depth is this frame's (render_frame_input::depth_current).
+    bool depth_current = true;
     std::vector<unsigned char> original;
     fixture(const fs::path &runtime, const fs::path &directory, unsigned c, unsigned w, unsigned h, const fs::path &control): width(w), height(h), color(c) {
       require(width >= 8 && width <= 3840 && height >= 8 && height <= 2160, "test dimensions out of bounds");
@@ -255,7 +258,7 @@ namespace {
         sunshine_game3d::render_frame_input frame;
         frame.color = {reinterpret_cast<std::uint64_t>(backbuffer.Get())};
         frame.depth = {reinterpret_cast<std::uint64_t>(depth_view.Get())};
-        frame.scene = p; frame.ui = *ui_override;
+        frame.scene = p; frame.ui = *ui_override; frame.depth_current = depth_current;
         require(active.render(queue->get_immediate_command_list(), frame), "production UI detection render failed");
       } else {
         require(sunshine_game3d::test::render_frame(active, queue->get_immediate_command_list(), {reinterpret_cast<std::uint64_t>(backbuffer.Get())},
@@ -2020,8 +2023,10 @@ namespace {
     const auto manifest = nlohmann::json::parse(stored);
     const auto &replay = manifest.at("producer_metadata").at("replay");
     require(replay.at("ui_detection").at("flags") == expected_flags && replay.at("ui_detection").at("ran_or_held") == "ran" &&
-        replay.at("ui_detection").at("candidates") == 2u && replay.at("ui_pin").at("decision_texels") == 5u &&
-        replay.at("ui_pin").at("evidence_images") == 0u, "Dump lost the layer's detection constants or pin markers");
+        replay.at("ui_detection").at("candidates") == 2u &&
+        replay.at("ui_pin").at("decision_texels") == ui_detection::scene_decision_texels &&
+        replay.at("ui_pin").at("evidence_images") == ui_detection::max_scene_evidence_images,
+      "Dump lost the layer's detection constants or pin markers");
     require(replay.at("ui_pin").at("late_margin") == embedded_margin &&
         replay.at("ui_pin").at("soft_pin_gain") == shader_marker(renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"),
       "Dump lost the soft pin gain or the late-layer margin");
@@ -2030,6 +2035,384 @@ namespace {
     report << "layer-detection-dump flags=" << expected_flags << " tagged_flags=0 ran=1 held_reported=1 late_margin=" <<
       embedded_margin << " margin_zero_raw=1\n";
     std::puts("PASS D3D11 UI detection constants: the UI layer fills the UI color slot with stored flags only and its mask gets the late-layer margin (none with the marker at 0), a tagged UI color with none, and Dump 3D records them with the pin markers");
+  }
+  // Hidden-scene evidence (docs/reshade-sbs.md, hidden-scene evidence). Full-
+  // frame UI over a hidden scene (sources 8 and 9) needs this frame's gate,
+  // valid evidence that the presented frame lacks the consumed depth's edges,
+  // and the CPU's hold of that verdict; nothing else changes a decision. The
+  // evidence passes run on sample frames only, while the latest sample's gate
+  // was open, a hold is active or the first-run shadow measures.
+  void verify_hidden_scene(fixture &gpu, std::ostream &report) {
+    using namespace sunshine_game3d;
+    using ui_detection::scene_verdict;
+    const unsigned width = gpu.width, height = gpu.height;
+    const auto pixels = size_t(width) * height;
+    const auto bpp = gpu.color == 2 ? 8u : 4u;
+    // Depth: two discs nearer than a flat background (parallax 0 there, 100
+    // pixels per 2160 rows on the discs), or the flat background alone.
+    const auto inside = [&](unsigned x, unsigned y) {
+      const auto disc = [&](double cx, double cy, double r) {
+        const double dx = ((x + .5) / width - cx) * width / height, dy = (y + .5) / height - cy;
+        return dx * dx + dy * dy <= r * r;
+      };
+      return disc(.3, .5, .25) || disc(.72, .45, .18);
+    };
+    std::vector<float> silhouette_depth(pixels, .03f), flat_depth(pixels, .03f);
+    for (unsigned y = 0; y < height; ++y)
+      for (unsigned x = 0; x < width; ++x)
+        if (inside(x, y)) silhouette_depth[size_t(y) * width + x] = .0302f;
+    std::vector<ComPtr<ID3D11Texture2D>> textures;
+    std::vector<ComPtr<ID3D11ShaderResourceView>> views;
+    const auto view_of = [&](const void *bytes, unsigned pitch, DXGI_FORMAT format) {
+      D3D11_TEXTURE2D_DESC desc{}; gpu.source->GetDesc(&desc);
+      desc.Format = format; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      const D3D11_SUBRESOURCE_DATA data{bytes, pitch, 0};
+      ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> view;
+      checked(gpu.device->CreateTexture2D(&desc, &data, &texture), "hidden-scene texture");
+      checked(gpu.device->CreateShaderResourceView(texture.Get(), nullptr, &view), "hidden-scene view");
+      textures.push_back(texture); views.push_back(view);
+      return view;
+    };
+    const auto silhouette = view_of(silhouette_depth.data(), width * 4u, DXGI_FORMAT_R32_FLOAT),
+      flat = view_of(flat_depth.data(), width * 4u, DXGI_FORMAT_R32_FLOAT);
+    struct restore_depth {
+      fixture &gpu; ComPtr<ID3D11ShaderResourceView> view;
+      ~restore_depth() { gpu.depth_view = view; gpu.depth_current = true; }
+    } restore{gpu, gpu.depth_view};
+    gpu.depth_view = silhouette;
+    // Gray premultiplied color: value * alpha, alpha. Values are multiples of 1/64.
+    D3D11_TEXTURE2D_DESC color_desc{}; gpu.source->GetDesc(&color_desc);
+    const auto make = [&](const std::function<float(unsigned, unsigned)> &value,
+        const std::function<float(unsigned, unsigned)> &alpha) {
+      std::vector<unsigned char> bytes(pixels * bpp);
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const size_t i = size_t(y) * width + x;
+        const float a = alpha(x, y), v = value(x, y) * a, values[4]{v, v, v, a};
+        if (gpu.color == 2) for (unsigned c = 0; c != 4; ++c) { const auto half = half_bits(values[c]); std::memcpy(bytes.data() + i * bpp + c * 2, &half, 2); }
+        else for (unsigned c = 0; c != 4; ++c) bytes[i * bpp + c] = static_cast<unsigned char>(std::lround(std::clamp(values[c], 0.f, 1.f) * 255));
+      }
+      return bytes;
+    };
+    const auto opaque = [](unsigned, unsigned) { return 1.f; };
+    // A logo away from the discs, the discs' own picture, a flat menu with the
+    // logo, and black.
+    const auto logo = [&](unsigned x, unsigned y) {
+      return x >= width / 20 && x < width / 5 && y >= height / 20 && y < height / 6 && (x / 2) % 3 != 0;
+    };
+    const auto logo_value = [&](unsigned x, unsigned y) { return logo(x, y) ? .75f : 0.f; };
+    const auto logo_color = make(logo_value, opaque);
+    const auto scene_color = make([&](unsigned x, unsigned y) { return inside(x, y) ? .75f : .25f; }, opaque);
+    const auto menu_color = make([&](unsigned x, unsigned y) { return logo(x, y) ? .75f : .5f; }, opaque);
+    const auto black_color = make([](unsigned, unsigned) { return 0.f; }, opaque);
+    // Hidden but not blank: stripes one scene cell wide, flat within three
+    // cells of each disc's edge, so every edge cell is quieter than the
+    // striped cells around it (D < 0) and most comparisons are decided.
+    const auto near_edge = [&](unsigned x, unsigned y) {
+      const auto ring = [&](double cx, double cy, double r) {
+        const double dx = ((x + .5) / width - cx) * width / height, dy = (y + .5) / height - cy;
+        return std::abs(std::sqrt(dx * dx + dy * dy) - r) * ui_detection::scene::cells_y <= 3.;
+      };
+      return ring(.3, .5, .25) || ring(.72, .45, .18);
+    };
+    const auto banded_color = make([&](unsigned x, unsigned y) {
+      return near_edge(x, y) ? .5f : (x * ui_detection::scene::cells_x / width) % 2 ? .75f : .25f;
+    }, opaque);
+    const auto as_view = [](const ComPtr<ID3D11ShaderResourceView> &view) { return api::resource_view{reinterpret_cast<std::uint64_t>(view.Get())}; };
+    const auto color_view = [&](const std::vector<unsigned char> &bytes) { return as_view(view_of(bytes.data(), width * bpp, color_desc.Format)); };
+    const auto layer_view = [&](const std::function<float(unsigned, unsigned)> &alpha) {
+      const auto bytes = make(logo_value, alpha);
+      return color_view(bytes);
+    };
+    const auto opaque_layer = color_view(logo_color);
+    // 98.9% opaque; half transparent everywhere; one pixel brighter than its
+    // zero alpha allows (not premultiplied).
+    const auto nearly_opaque_layer = layer_view([&](unsigned x, unsigned y) { return (size_t(y) * width + x) % 90 ? 1.f : 0.f; });
+    const auto half_layer = layer_view([](unsigned, unsigned) { return .5f; });
+    const auto logo_layer = layer_view([&](unsigned x, unsigned y) { return logo(x, y) ? 1.f : 0.f; });
+    auto straight_bytes = logo_color;
+    if (gpu.color == 2) { const auto zero = half_bits(0.f), one = half_bits(1.f); for (unsigned c = 0; c != 3; ++c) std::memcpy(straight_bytes.data() + c * 2, &one, 2); std::memcpy(straight_bytes.data() + 6, &zero, 2); }
+    else { straight_bytes[0] = straight_bytes[1] = straight_bytes[2] = 255; straight_bytes[3] = 0; }
+    const auto straight_layer = color_view(straight_bytes);
+    const auto scene_view = color_view(scene_color), black_view = color_view(black_color);
+    const std::vector<float> ones(pixels, 1.f);
+    const auto opaque_ui_alpha = as_view(view_of(ones.data(), width * 4u, DXGI_FORMAT_R32_FLOAT));
+    const auto layer_flags = ui_layer::detection_flags(static_cast<api::format>(color_desc.Format));
+    require(layer_flags & ui_detection::stored_late_layer, "The fixture layer lost its late-layer identity");
+
+    alpha_auto_policy policy;
+    alpha_auto_source source;
+    source.session = &policy; source.now_ms = source.tick_ms = 1000;
+    source.epoch = 41; source.revision = 1; source.sequence = 1;
+    ui_detection_inputs inputs;
+    ui_render_input ui;
+    ui.automatic = &source; ui.detection = &inputs;
+    struct outcome { bool flat, empty, held; std::uint64_t evidence; alpha_auto_decision sample; result pixels; };
+    const auto frame = [&](const std::vector<unsigned char> &color, const render_parameters *parameters = nullptr) {
+      gpu.original = color;
+      gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), width * bpp, 0);
+      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+      const auto before = gpu.renderer.alpha_probe_activity().scene_evidence;
+      gpu.renderer.begin_present();
+      const auto rendered = gpu.render(true, 1, false, false, false, {}, {}, {}, parameters, nullptr, nullptr, nullptr, &ui);
+      const auto mask = gpu.read(gpu.renderer.diagnostics().ui_source);
+      bool all_ones = true, all_zero = true;
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const auto value = mask.channel(x, y, 0);
+        all_ones = all_ones && value == 1.f; all_zero = all_zero && value == 0.f;
+      }
+      const auto flags = gpu.renderer.consumed_detection().flags;
+      return outcome{all_ones, all_zero, (flags & (ui_detection::per_frame_scene_hold | ui_detection::per_frame_scene_hold_hudless)) != 0,
+        gpu.renderer.alpha_probe_activity().scene_evidence - before, gpu.renderer.consumed_alpha_auto(), rendered};
+    };
+    // Frames until the first flat one, at most limit; each must be held exactly when flat.
+    const auto frames_to_flat = [&](const std::vector<unsigned char> &color, unsigned limit, const char *label) {
+      for (unsigned count = 1; count <= limit; ++count) {
+        const auto o = frame(color);
+        require(o.flat == o.held, std::string(label) + ": a held route did not flatten exactly the held frame");
+        if (o.flat) return count;
+      }
+      return 0u;
+    };
+    const auto never_flat = [&](const std::vector<unsigned char> &color, unsigned count, const char *label,
+        const render_parameters *parameters = nullptr) {
+      // The sample read by a frame describes the frame before it.
+      outcome last{};
+      for (unsigned i = 0; i != count; ++i) {
+        last = frame(color, parameters);
+        require(!last.flat && (!i || (last.sample.source_kind != 8u && last.sample.source_kind != 9u)),
+          std::string(label) + ": full-frame UI without its hidden-scene evidence");
+      }
+      return last;
+    };
+
+    // A frame smaller than the grid has cells without a pixel: no evidence,
+    // so nothing ever takes a route.
+    if (width < ui_detection::scene::cells_x || height < ui_detection::scene::cells_y) {
+      inputs.masks[1] = opaque_layer; inputs.color_alpha_flags = layer_flags;
+      const auto small = never_flat(logo_color, 4, "frame smaller than the scene grid");
+      require(small.sample.evidence.scene.ran && !small.sample.evidence.scene.valid && !small.sample.evidence.scene.n,
+        "A frame smaller than the scene grid gave hidden-scene evidence");
+      inputs = {};
+      report << "hidden-scene D3D11 below_grid=" << width << 'x' << height << " no_evidence=1\n";
+      std::puts("PASS D3D11 hidden scene: a frame smaller than the scene grid gives no evidence and takes no route");
+      return;
+    }
+    // (a) An untrusted opaque offscreen layer over a scene its picture hides:
+    // the first sample shows the gate, the second measures, its hidden verdict
+    // holds the layer route, and the frame pins flat at one plane.
+    inputs.masks[1] = opaque_layer; inputs.color_alpha_flags = layer_flags;
+    const auto first = frame(logo_color);
+    require(!first.flat && !first.evidence, "Evidence ran or flattened before any sample showed an open gate");
+    const auto second = frame(logo_color);
+    require(!second.flat && second.evidence == 1, "An open gate did not measure the next sample frame");
+    const auto entered = frame(logo_color);
+    const auto &measured = entered.sample.evidence.scene;
+    require(entered.flat && entered.held && measured.ran && measured.valid && measured.verdict == scene_verdict::hidden &&
+        measured.n >= ui_detection::scene::min_edges && measured.d < .15f && entered.sample.evidence.alpha_opaque[1] == pixels,
+      "An opaque layer over a hidden scene did not become full-frame UI from valid hidden evidence");
+    {
+      float plane{}; bool uniform = true;
+      std::memcpy(&plane, entered.pixels.field.bytes.data(), sizeof(plane));
+      for (size_t i = 0; i != pixels; ++i) { float value; std::memcpy(&value, entered.pixels.field.bytes.data() + i * 4, 4); uniform = uniform && value == plane; }
+      require(uniform, "Full-frame UI over a hidden scene left a non-uniform field");
+    }
+    const auto confirmed = frame(logo_color);
+    require(confirmed.flat && confirmed.sample.source_kind == 8u && confirmed.sample.covered == pixels,
+      "The layer route's decision did not report source 8 over the whole frame");
+    // (b) A presented frame showing the depth's edges reads visible and
+    // releases the hold; only the frame already decided before that sample
+    // stays flat.
+    frame(scene_color);
+    const auto released = frame(scene_color);
+    require(!released.flat && !released.held && released.sample.evidence.scene.verdict == scene_verdict::visible &&
+        released.sample.evidence.scene.d >= .25f, "A visible scene did not release the layer route");
+    never_flat(scene_color, 2, "presented frame showing the depth's edges");
+    // That visible verdict refuted the opaque layer as hiding the scene: like
+    // a scene buffer the census took for a layer, it takes no route again
+    // until it is offered below opaque. A selective layer is an overlay again,
+    // and the opaque one then re-enters as from a closed gate.
+    never_flat(logo_color, 4, "refuted opaque layer");
+    inputs.masks[1] = logo_layer;
+    const auto selective = frame(logo_color);
+    require(!selective.flat && !selective.empty && !selective.held, "A selective layer did not decide its own mask");
+    inputs.masks[1] = opaque_layer;
+    require(frames_to_flat(logo_color, 4, "re-entry") == 3, "A layer shown transparent again did not re-enter the route");
+    // (c) Invalid evidence never renews a hold: over flat depth the hold
+    // expires hold_ms after the last valid hidden sample's tick.
+    frame(logo_color);
+    gpu.depth_view = flat;
+    unsigned held_frames = 0;
+    for (outcome o = frame(logo_color); o.flat; o = frame(logo_color)) {
+      // The first held frame reads the last sample over the silhouette.
+      ++held_frames;
+      require((held_frames == 1 || !o.sample.evidence.scene.valid) && o.sample.evidence.scene.ran && held_frames <= 6,
+        "Invalid evidence renewed the hold");
+    }
+    require(held_frames == 5, "A hold did not last exactly hold_ms after its last valid sample: " + std::to_string(held_frames));
+    never_flat(logo_color, 3, "flat depth without edge cells");
+    // (d) Depth that is not this frame's gives no evidence.
+    gpu.depth_view = silhouette;
+    gpu.depth_current = false;
+    const auto stale = never_flat(logo_color, 4, "reused depth");
+    require(stale.sample.evidence.scene.ran && !stale.sample.evidence.scene.valid &&
+        stale.sample.evidence.scene.n >= ui_detection::scene::min_edges, "Reused depth gave valid hidden-scene evidence");
+    gpu.depth_current = true;
+    require(frames_to_flat(logo_color, 3, "current depth again") == 2, "Current depth did not restore the layer route");
+    // (e) An epoch or revision change, detection turning inactive and trust
+    // gained by a route's slot clear the hold at once; a HUD-less image that
+    // frame generation pairs on some Presents only does not.
+    ++source.epoch;
+    never_flat(logo_color, 1, "epoch change");
+    require(frames_to_flat(logo_color, 4, "after the epoch change") == 2, "The layer route did not re-enter after an epoch change");
+    ++source.revision;
+    never_flat(logo_color, 1, "revision change");
+    require(frames_to_flat(logo_color, 4, "after the revision change") == 2, "The layer route did not re-enter after a revision change");
+    {
+      // One frame with automatic UI protection off: detection is inactive.
+      const auto parameters = gpu.renderer.consumed_parameters();
+      policy.set_manual(false);
+      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+      gpu.renderer.begin_present();
+      gpu.context->CopyResource(gpu.backbuffer.Get(), gpu.source.Get());
+      sunshine_game3d::render_frame_input off;
+      off.color = {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())};
+      off.depth = {reinterpret_cast<std::uint64_t>(gpu.depth_view.Get())};
+      off.scene = parameters; off.ui = ui;
+      gpu.renderer.render(observed_runtime->get_command_queue()->get_immediate_command_list(), off);
+      require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::inactive,
+        "Manual Off left detection active");
+      policy.set_automatic();
+    }
+    // The sample pending from before cannot renew the hold; the next one does.
+    require(frames_to_flat(logo_color, 4, "after inactive detection") == 2, "Inactive detection did not clear the layer route's hold");
+    // HUD-less present on alternate Presents only: the hold stays.
+    for (unsigned i = 0; i != 4; ++i) {
+      inputs.hudless = i % 2 ? api::resource_view{} : scene_view;
+      const auto paired = frame(logo_color);
+      require(paired.flat && paired.held, "A HUD-less pairing that comes and goes cleared the layer route's hold");
+    }
+    inputs.hudless = {};
+    {
+      // The layer earns trust while held: it decides by itself (source 2) and the hold is gone.
+      alpha_auto_policy trusting;
+      trusting.restore_trusted_alpha(1u << alpha_auto_policy::ui_layer_source);
+      source.session = &trusting;
+      const auto gained = frame(logo_color);
+      require(!gained.held && frame(logo_color).sample.source_kind == 2u, "Trust gained by the layer kept its hidden-scene hold");
+      source.session = &policy;
+    }
+    never_flat(logo_color, 1, "trust lost again");
+    // (f) Without a ready camera there is no evidence.
+    render_parameters no_camera = gpu.renderer.consumed_parameters();
+    no_camera.camera_ready = 0;
+    ++source.epoch;
+    const auto unready = never_flat(logo_color, 4, "camera not ready", &no_camera);
+    require(unready.sample.evidence.scene.ran && !unready.sample.evidence.scene.valid && !unready.sample.evidence.scene.n,
+      "Depth without a ready camera was measured");
+    // (g) A closed gate never flattens, even with a hold active, and once a
+    // sample shows it closed no evidence pass runs.
+    const auto closed_gate = [&](api::resource_view layer, std::uint32_t flags, const char *label) {
+      // After an epoch change the first sample shows the gate, the second measures.
+      ++source.epoch;
+      inputs = {}; inputs.masks[1] = opaque_layer; inputs.color_alpha_flags = layer_flags;
+      require(frames_to_flat(logo_color, 4, label) == 3, std::string(label) + ": the open gate did not enter");
+      // The hold outlives the open gate by at most hold_ms and flattens nothing.
+      inputs.masks[1] = layer; inputs.color_alpha_flags = flags;
+      never_flat(logo_color, 5, label);
+      std::uint64_t runs = 0;
+      for (unsigned i = 0; i != 3; ++i) {
+        const auto quiet = frame(logo_color);
+        require(!quiet.flat && !quiet.held, std::string(label) + ": a closed gate flattened or kept a hold");
+        runs += quiet.evidence;
+      }
+      require(!runs, std::string(label) + ": evidence passes ran with the gate closed and no first-run shadow");
+    };
+    closed_gate(nearly_opaque_layer, layer_flags, "98.9% opaque layer");
+    closed_gate(half_layer, layer_flags, "layer at alpha 0.5 over the whole frame");
+    closed_gate(straight_layer, layer_flags, "layer with an invalid pixel");
+    closed_gate(opaque_layer, 0u, "opaque tagged UIColorAndAlpha");
+    ++source.epoch;
+    inputs = {}; inputs.masks[2] = opaque_layer;
+    never_flat(logo_color, 4, "opaque Backbuffer alpha only");
+    inputs = {}; inputs.current_color = true;
+    never_flat(logo_color, 4, "opaque current alpha only");
+    // (h) An untrusted UIAlpha that is opaque everywhere takes the layer route too.
+    ++source.epoch;
+    inputs = {}; inputs.masks[0] = opaque_ui_alpha;
+    require(frames_to_flat(logo_color, 3, "UIAlpha") == 3, "An opaque UIAlpha over a hidden scene did not take the layer route");
+    require(frame(logo_color).sample.source_kind == 8u, "The UIAlpha route did not report source 8");
+    // (i) The HUD-less route: an inexact HUD-less image that shows the
+    // depth's edges while the presented menu does not.
+    ++source.epoch;
+    inputs = {}; inputs.current_color = true; inputs.hudless = scene_view;
+    require(frames_to_flat(menu_color, 3, "HUD-less route") == 3, "A HUD-less image showing the hidden scene did not take its route");
+    const auto hudless_decided = frame(menu_color);
+    require(hudless_decided.flat && hudless_decided.sample.source_kind == 9u &&
+        hudless_decided.sample.evidence.hudless_scene.valid && hudless_decided.sample.evidence.hudless_scene.d >= .25f &&
+        (gpu.renderer.consumed_detection().flags & ui_detection::per_frame_scene_hold_hudless),
+      "The HUD-less route did not report source 9 from its own hold");
+    ++source.epoch;
+    inputs.hudless = black_view;
+    const auto dark = never_flat(menu_color, 4, "black HUD-less image");
+    require(dark.sample.evidence.hudless_scene.valid && dark.sample.evidence.hudless_scene.d < .25f,
+      "A black HUD-less image read visible");
+    ++source.epoch;
+    inputs.hudless = scene_view;
+    never_flat(scene_color, 4, "presented frame showing the scene beside its HUD-less image");
+    // An exact pair differing nearly everywhere over a lit scene stays rule 6.
+    ++source.epoch;
+    inputs.hudless_exact = true;
+    const auto exact = frame(menu_color);
+    require(exact.flat && !exact.held && frame(menu_color).sample.source_kind == 6u, "An exact full-frame pair lost rule 6");
+    // (j) A trusted layer decides by itself (source 2), whatever the evidence.
+    {
+      alpha_auto_policy trusting;
+      trusting.restore_trusted_alpha(1u << alpha_auto_policy::ui_layer_source);
+      ++source.epoch; source.session = &trusting;
+      inputs = {}; inputs.masks[1] = opaque_layer; inputs.color_alpha_flags = layer_flags;
+      for (unsigned i = 0; i != 3; ++i) frame(logo_color);
+      const auto trusted = frame(logo_color);
+      require(trusted.sample.source_kind == 2u && !trusted.held && !trusted.evidence, "A trusted layer lost its own decision");
+      source.session = &policy;
+    }
+    // (k) The first-run shadow measures on sample frames with the gate closed,
+    // never changes a decision, and reports how long the hidden run lasts.
+    ++source.epoch;
+    inputs = {}; inputs.current_color = true;
+    never_flat(logo_color, 2, "closed gate before the shadow");
+    require(!never_flat(logo_color, 2, "closed gate before the shadow").evidence, "Evidence ran with the gate closed");
+    policy.set_first_run(true);
+    outcome shadow{};
+    for (unsigned i = 0; i != 8; ++i) {
+      shadow = never_flat(banded_color, 1, "first-run shadow");
+      require(shadow.empty && shadow.evidence == 1 && shadow.sample.scene_shadow && !shadow.sample.scene_hold,
+        "The first-run shadow changed a decision or skipped a sample frame");
+    }
+    require(shadow.sample.evidence.scene.verdict == scene_verdict::hidden && !shadow.sample.source_kind &&
+        shadow.sample.evidence.scene.decided >= ui_detection::scene::min_edges &&
+        shadow.sample.evidence.shadow_hidden_ms >= 500, "The first-run shadow did not report its uncovered hidden run");
+    // A blank frame reads hidden too, with nothing decided: it is not an
+    // uncovered hidden scene and ends the run.
+    const auto blank_shadow = never_flat(logo_color, 2, "first-run shadow over a blank frame");
+    require(blank_shadow.sample.evidence.scene.verdict == scene_verdict::hidden &&
+        blank_shadow.sample.evidence.scene.decided < ui_detection::scene::min_edges &&
+        !blank_shadow.sample.evidence.shadow_hidden_ms, "A blank frame extended the uncovered hidden run");
+    const auto visible_shadow = never_flat(scene_color, 2, "first-run shadow over a visible scene");
+    require(!visible_shadow.sample.evidence.shadow_hidden_ms && visible_shadow.sample.evidence.scene.verdict == scene_verdict::visible,
+      "A visible sample did not end the hidden run");
+    // With the gate open, only evidence the gate or a hold asked for acts: the
+    // layer route enters after the same samples as without the shadow, though
+    // the shadow measured the first sample that showed the gate.
+    inputs = {}; inputs.masks[1] = opaque_layer; inputs.color_alpha_flags = layer_flags;
+    require(frames_to_flat(logo_color, 4, "first-run shadow with the gate open") == 3,
+      "The first-run shadow changed when the layer route enters");
+    policy.set_first_run(false);
+    inputs = {};
+    report << "hidden-scene D3D11 layer_route=1 visible_release=1 refuted_layer_quiet=1 hold_expiry_frames=" << held_frames
+      << " reused_depth_blocks=1 camera_blocks=1 epoch_revision_inactive_trust_clear=1 alternating_hudless_keeps_hold=1"
+      " closed_gates_quiet=1 ui_alpha_route=1 hudless_route=1 black_hudless_rejected=1 rule6_precedence=1"
+      " trusted_layer_decides=1 first_run_shadow=1 blank_frames_end_run=1 shadow_entry_unchanged=1\n";
+    std::puts("PASS D3D11 hidden scene: an opaque untrusted layer or UIAlpha (8) and an inexact HUD-less image (9) flatten only through their gate, valid hidden evidence and the CPU hold; holds expire after hold_ms and clear on visible evidence, epoch, revision, inactive detection and trust changes but not on a HUD-less pairing that comes and goes; a visible verdict refutes an opaque layer until it shows itself transparent; reused depth, an unready camera, closed gates, tagged UI color, presented alpha and a trusted layer never take a route; closed gates dispatch no evidence; the first-run shadow only measures, ignores blank frames and leaves route entry unchanged");
   }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;
@@ -2170,6 +2553,7 @@ int main(int argc, char **argv) {
     verify_automatic_source_alpha(gpu, report);
     verify_automatic_hudless(gpu, report);
     verify_layer_detection_dump(gpu, report, directory / "layer-detection-dump");
+    verify_hidden_scene(gpu, report);
     verify_normalized_ui_input(gpu, report);
     verify_mask_upload_recovery(gpu);
     require(report.good(), "cannot write evidence");

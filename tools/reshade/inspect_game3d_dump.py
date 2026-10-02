@@ -279,6 +279,154 @@ def scene_luma(color, transfer):
     return np.clip(rgb, 0, 1) @ BT709
 
 
+# Hidden-scene evidence (docs/reshade-sbs.md, hidden-scene evidence): the CPU oracle of SunshineSceneCellsCS and
+# SunshineSceneEvidenceCS, with the shader's constants (game3d_ui_detection_contract.h). Output pixel x lies in cell
+# column floor(x * 256 / width), y in cell row floor(y * 144 / height). Each cell holds the sums of the images'
+# perceptual luma and of the strength-1 parallax in the shader's fixed point, and its pixel count; cell means round
+# half away from zero, so every comparison below is an exact integer one.
+SCENE_CELLS = (144, 256)  # Rows, columns.
+SCENE_EDGE_PX = 4  # A depth edge: a cell-mean parallax step of at least this many pixels per 2160 output rows.
+SCENE_MIN_EDGES = 128
+SCENE_HIDDEN_PERCENT, SCENE_VISIBLE_PERCENT = 15, 25  # D < 0.15 hidden, D >= 0.25 visible.
+SCENE_NULLS = ((5, 3), (-7, 4), (8, -2), (-4, -6))  # Null cells (columns, rows), wrapped around the grid.
+SCENE_LUMA_SCALE, SCENE_PARALLAX_SCALE = 1 << 20, 1 << 12
+SCENE_MAX_EXTENT = 3840  # The renderer's detection bound, within which every cell sum fits 32 bits.
+SCENE_VERDICTS = ("none", "hidden", "ambiguous", "visible")
+
+
+def scene_code_luma(color, transfer):
+    """SunshineSceneLuma in float32: PQ code luma for HDR10, sRGB code luma for SDR, PQ of scRGB luminance; a
+    non-finite component counts as zero."""
+    f32 = np.float32
+    rgb = np.asarray(color[..., :3], dtype=f32)
+    with np.errstate(invalid="ignore", over="ignore"):
+        rgb = np.where(np.isfinite(rgb), rgb, f32(0))
+        if transfer == 3:
+            return rgb @ BT2020.astype(f32)
+        if transfer != 2:
+            return rgb @ BT709.astype(f32)
+        nits = np.clip(rgb @ BT709.astype(f32) * f32(80), 0, 10000).astype(f32)
+        power = (nits / f32(10000)) ** f32(0.1593017578125)
+        code = ((f32(0.8359375) + f32(18.8515625) * power) / (f32(1) + f32(18.6875) * power)) ** f32(78.84375)
+        return code.astype(f32)
+
+
+def scene_parallax(raw, parameters, width, height):
+    """Strength-1 parallax in output pixels at every output pixel: the depth texel SunshineCameraDepthCoordinates
+    picks, decoded as SunshineHostCandidateCS decodes it at strength and blend one and clamped at the disparity limit
+    (zero where depth does not decode), in float32."""
+    f32 = np.float32
+    words, integers = np.frombuffer(parameters, "<f4", 20), np.frombuffer(parameters, "<i4", 20)
+    basis, scale, limit_uv = int(integers[4]), words[5], words[7]
+    a, inverse_b, zpd, zero = words[8], words[9], words[12], words[13]
+    jitter, rect = words[14:16], words[16:20]
+    raw = np.asarray(raw, dtype=f32)
+    with np.errstate(all="ignore"):
+        q = (raw - a) * inverse_b
+        tiny = np.finfo(f32).tiny
+        if basis == 2:
+            ok = np.isfinite(raw) & np.isfinite(q) & (q > 0) & (q >= tiny)
+            q = f32(1) / np.where(ok, q, f32(1))
+            ok &= np.isfinite(q) & (q > 0) & (q >= tiny)
+            gain = zpd * scale
+            displacement = (np.clip(zero - q, f32(-1.5) / gain, f32(2.5) / gain) * gain if gain > 0 else
+                            np.zeros_like(q))
+        else:
+            ok = np.ones(q.shape, dtype=bool)
+            displacement = zpd * scale * (zero - q)
+        ok &= np.isfinite(displacement)
+        limit = limit_uv * f32(width)
+        texel = np.clip(-np.clip(displacement, f32(-1.5), f32(2.5)) * f32(height / 2160.0 * 100.0), -limit, limit)
+        texel = np.where(ok, texel, f32(0)).astype(f32)
+        rows, columns = raw.shape
+        u = rect[0] + (np.arange(width, dtype=f32) + f32(0.5)) / f32(width) * rect[2] + jitter[0]
+        v = rect[1] + (np.arange(height, dtype=f32) + f32(0.5)) / f32(height) * rect[3] + jitter[1]
+        u = np.clip(u, rect[0] + f32(0.5) / f32(columns), rect[0] + rect[2] - f32(0.5) / f32(columns))
+        v = np.clip(v, rect[1] + f32(0.5) / f32(rows), rect[1] + rect[3] - f32(0.5) / f32(rows))
+    tx = np.clip(np.floor(u * f32(columns)).astype(np.int64), 0, columns - 1)
+    ty = np.clip(np.floor(v * f32(rows)).astype(np.int64), 0, rows - 1)
+    return texel[ty[:, None], tx[None, :]]
+
+
+def scene_cell_means(values, scale):
+    """Cell means of values quantized to 1/scale (round half up per pixel, then the sum's mean rounded half away from
+    zero), as integers; zero for a cell without pixels."""
+    height, width = values.shape
+    rows, columns = SCENE_CELLS
+    with np.errstate(invalid="ignore"):
+        quantized = np.floor(np.asarray(values, dtype=np.float32) * np.float32(scale) + np.float32(0.5))
+    quantized = quantized.astype(np.int64)
+    cell = ((np.arange(height) * rows // height)[:, None] * columns + (np.arange(width) * columns // width)[None, :])
+    sums = np.bincount(cell.ravel(), weights=quantized.ravel().astype(np.float64), minlength=rows * columns)
+    counts = np.bincount(cell.ravel(), minlength=rows * columns)
+    sums = np.rint(sums).astype(np.int64)
+    safe = np.maximum(counts, 1)
+    means = np.sign(sums) * ((np.abs(sums) + safe // 2) // safe)
+    return np.where(counts > 0, means, 0).reshape(rows, columns)
+
+
+def scene_steps(means):
+    """The larger cell-mean step to the right and to the lower cell; the last column and row lack that neighbour."""
+    steps = np.zeros_like(means)
+    steps[:, :-1] = np.abs(means[:, 1:] - means[:, :-1])
+    steps[:-1, :] = np.maximum(steps[:-1, :], np.abs(means[1:, :] - means[:-1, :]))
+    return steps
+
+
+def scene_evidence(parallax, lumas, depth_active=True):
+    """D for each luma image over the depth edges of the parallax image: at every edge cell its activity against the
+    activity at each null cell, D = (wins - losses) / (4 n). Valid with at least SCENE_MIN_EDGES edge cells, active
+    depth and a frame no smaller than the grid nor larger than SCENE_MAX_EXTENT; hidden below SCENE_HIDDEN_PERCENT,
+    visible from SCENE_VISIBLE_PERCENT. decided counts the comparisons that did not tie (wins + losses)."""
+    height, width = parallax.shape
+    rows, columns = SCENE_CELLS
+    # A frame smaller than the grid would leave cells without a pixel; the shader measures no larger frame.
+    depth_active = depth_active and rows <= height <= SCENE_MAX_EXTENT and columns <= width <= SCENE_MAX_EXTENT
+    edges = scene_steps(scene_cell_means(parallax, SCENE_PARALLAX_SCALE)) * 2160 >= \
+        SCENE_EDGE_PX * SCENE_PARALLAX_SCALE * height
+    ey, ex = np.nonzero(edges & depth_active)
+    n = int(ey.size)
+    valid = bool(depth_active) and n >= SCENE_MIN_EDGES
+    results = []
+    for luma in lumas:
+        activity = scene_steps(scene_cell_means(np.clip(luma, 0, 1), SCENE_LUMA_SCALE))
+        at = activity[ey, ex]
+        balance = decided = 0
+        for dx, dy in SCENE_NULLS:
+            other = activity[(ey + dy) % rows, (ex + dx) % columns]
+            balance += int((at > other).sum()) - int((at < other).sum())
+            decided += int((at != other).sum())
+        verdict = "none" if not valid else "hidden" if balance * 100 < SCENE_HIDDEN_PERCENT * 4 * n else \
+            "visible" if balance * 100 >= SCENE_VISIBLE_PERCENT * 4 * n else "ambiguous"
+        results.append({"n": n, "d": balance / (4 * n) if n else 0.0, "balance": balance, "decided": decided,
+                        "valid": valid, "verdict": verdict})
+    return results
+
+
+def dump_scene_evidence(root):
+    """The hidden-scene statistic of a dump's presented color and, when captured at its extent, its HUD-less image."""
+    root = Path(root)
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    metadata = manifest.get("producer_metadata", {})
+    artifacts = {artifact["kind"]: artifact for artifact in manifest.get("artifacts", [])}
+    for kind in ("source_color", "raw_depth"):
+        if kind not in artifacts:
+            raise ValueError(f"Scene evidence needs the {kind} artifact")
+    color = read_artifact(root, artifacts["source_color"])
+    height, width = color.shape[:2]
+    parameters = bytes.fromhex(metadata["replay"]["parameter_hex"])
+    depth_ready, = np.frombuffer(parameters, "<u4", 1, 8)
+    parallax = scene_parallax(read_artifact(root, artifacts["raw_depth"])[:, :, 0], parameters, width, height)
+    transfer = metadata.get("color_space", 1)
+    images = {"presented": color}
+    hudless = artifacts.get("sl_hudless_color")
+    if hudless and (hudless["width"], hudless["height"]) == (width, height):
+        images["hudless"] = read_artifact(root, hudless)
+    results = scene_evidence(parallax, [scene_code_luma(image, transfer) for image in images.values()],
+                             bool(depth_ready) and camera_active(parameters))
+    return dict(zip(images, results))
+
+
 def pin_metrics(root, field=None, bands=None, layer=None):
     """Metrics of a dump's UI pinning, or of a replayed final_field.bin of the same extent."""
     root = Path(root)
@@ -514,11 +662,15 @@ if __name__ == "__main__":
     parser.add_argument("--pin-band", type=band, action="append", metavar="FIRST:LAST",
                         help="image rows of a band for new-step columns; repeatable; default all rows")
     parser.add_argument("--pin-layer", help="layer artifact kind for light UI and glyph bodies; default the active one")
+    parser.add_argument("--scene-evidence", action="store_true",
+                        help="report the hidden-scene statistic D of the presented and HUD-less images (CPU oracle)")
     args = parser.parse_args()
     review = json.loads(args.ui_review.read_text(encoding="utf-8")) if args.ui_review else None
     report = inspect(args.dump, args.previews, review)
     if args.pin_metrics:
         report["pin_metrics"] = pin_metrics(args.dump, args.pin_field, args.pin_band, args.pin_layer)
+    if args.scene_evidence:
+        report["scene_evidence"] = dump_scene_evidence(args.dump)
     if args.write_ui_review:
         with args.write_ui_review.open("x", encoding="utf-8") as output:
             json.dump(review_template(report["ui_discovery"]), output, indent=2, allow_nan=False)
