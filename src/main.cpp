@@ -332,6 +332,8 @@ namespace {
 LRESULT CALLBACK SessionMonitorWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
   switch (uMsg) {
     case WM_DISPLAYCHANGE:
+      // Capture failover reads this as evidence that a restart was caused by a mode change.
+      platf::note_display_change();
       if (config::sunshine.diagnostics_enabled) {
         BOOST_LOG(info) << "Windows display-change notification: primary=" << LOWORD(lParam)
                         << 'x' << HIWORD(lParam) << " bits=" << wParam;

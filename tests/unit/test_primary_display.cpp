@@ -734,6 +734,74 @@ TEST(PrimaryDisplay, BindIsIdempotentForRetainedTargetAndCompletedJournal) {
   EXPECT_TRUE(manager.bind_pending(L"virtual"));
 }
 
+TEST(PrimaryDisplay, BaselineTopologyGateAcceptsOnlyTheUsersOwnDesktop) {
+  const layout_t physical {{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}};
+  for (const bool exclusive : {false, true}) {
+    SCOPED_TRACE(exclusive);
+    fake_io_t fake;
+    fake.current = make_snapshot(physical);
+    manager_t manager(fake.io());
+    ASSERT_TRUE(manager.prepare(exclusive));
+    fake.current = make_snapshot(baseline);
+    EXPECT_FALSE(manager.baseline_topology_active(L"virtual")) << "An unbound record proves no identity";
+    ASSERT_TRUE(manager.bind_pending(L"virtual"));
+    // Bound and extended beside the untouched physical desktop.
+    EXPECT_TRUE(manager.baseline_topology_active(L"virtual"));
+    EXPECT_FALSE(manager.baseline_topology_active(L"unrelated"));
+
+    // Promotion makes the virtual display primary and, when exclusive, disables physical outputs.
+    ASSERT_TRUE(manager.promote(L"virtual", exclusive));
+    EXPECT_FALSE(manager.baseline_topology_active(L"virtual"));
+
+    // Unreadable state fails safe.
+    ASSERT_TRUE(manager.restore(L"virtual"));
+    fake.load_ok = false;
+    EXPECT_FALSE(manager.baseline_topology_active(L"virtual"));
+    fake.load_ok = true;
+    fake.failed_queries.insert(fake.query_count + 1);
+    EXPECT_FALSE(manager.baseline_topology_active(L"virtual"));
+  }
+}
+
+TEST(PrimaryDisplay, BaselineTopologyGateRejectsTopologiesWindowsRememberedDuringAdd) {
+  // Windows restored an earlier virtual-primary arrangement inside Add.
+  fake_io_t primary_only;
+  primary_only.current = make_snapshot({{L"physical-primary", 0, 0}});
+  manager_t primary_manager(primary_only.io());
+  ASSERT_TRUE(primary_manager.prepare());
+  primary_only.current = make_snapshot({{L"physical-primary", -1920, 0}, {L"virtual", 0, 0}});
+  ASSERT_TRUE(primary_manager.bind_pending(L"virtual"));
+  EXPECT_FALSE(primary_manager.baseline_topology_active(L"virtual"));
+
+  // Windows restored an earlier virtual-only arrangement inside Add.
+  fake_io_t exclusive;
+  exclusive.current = make_snapshot({{L"physical-primary", 0, 0}});
+  manager_t exclusive_manager(exclusive.io());
+  ASSERT_TRUE(exclusive_manager.prepare(true));
+  exclusive.current = make_snapshot({{L"virtual", 0, 0}});
+  ASSERT_TRUE(exclusive_manager.bind_pending(L"virtual"));
+  EXPECT_FALSE(exclusive_manager.baseline_topology_active(L"virtual"));
+}
+
+TEST(PrimaryDisplay, BaselineTopologyGateWithoutRecoveryRecord) {
+  fake_io_t fake;
+  manager_t manager(fake.io());
+  // No host topology is applied: an extended display is the user's own desktop.
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", 1920, 0}});
+  EXPECT_TRUE(manager.baseline_topology_active(L"virtual"));
+  // A headless host's sole virtual output.
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  EXPECT_TRUE(manager.baseline_topology_active(L"virtual"));
+  // A primary virtual display beside other outputs is never the user's baseline.
+  fake.current = make_snapshot({{L"physical-primary", -1920, 0}, {L"virtual", 0, 0}});
+  EXPECT_FALSE(manager.baseline_topology_active(L"virtual"));
+  // An inactive display has no topology to save.
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  EXPECT_FALSE(manager.baseline_topology_active(L"virtual"));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+  EXPECT_EQ(std::ranges::count(fake.events, "save"), 0);
+}
+
 TEST(PrimaryDisplay, HeadlessPreparationNeedsNoOriginalPrimaryRecord) {
   fake_io_t fake;
   fake.current = {};

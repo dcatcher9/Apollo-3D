@@ -118,6 +118,8 @@ namespace platf::display_config {
     legacy_fallback_e fallback = legacy_fallback_e::unsupported_modern_api
   );
 
+  // Every HDR, WCG, and legacy Advanced Color request below advances platf::display_change_epoch()
+  // before and after the call, because the change restarts Desktop Duplication.
   bool set_hdr_state(
     const LUID &adapter_id,
     UINT32 target_id,

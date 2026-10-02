@@ -44,7 +44,9 @@ leaving the retained game export untouched. Hidden Windows cursors skip this pas
 already rendered by the game remain in the export. Fullscreen display scaling applies to cursor
 placement, each eye clips its own cursor, and HDR cursor white follows the display's SDR white
 level. This cursor metadata is currently supplied by Desktop Duplication; the WGC fallback does
-not expose it. Install the matching protocol-2 host and add-on together for cursor/UI alignment.
+not expose it. Capture restarts explained by display-mode changes do not trigger that fallback;
+see [Display mode changes](virtual-desktop.md#display-mode-changes). Install the matching
+protocol-2 host and add-on together for cursor/UI alignment.
 
 ## Rules for new game behaviour
 

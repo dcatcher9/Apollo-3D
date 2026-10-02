@@ -264,7 +264,9 @@ Local capture follows the physical output's requested refresh in exact millihert
 slightly above a whole number. It does not apply the remote client's whole-FPS fallback or round-trip
 the rate through the network's hundredths-of-a-frame representation. A successful capture-backend
 fallback also survives supported 2D/SBS mode switches and presenter restarts for the retained virtual
-source, so those transitions do not retry a backend already rejected in that session.
+source, so those transitions do not retry a backend already rejected in that session. Restarts
+explained by display-mode changes do not count toward that switch; see
+[Display mode changes](virtual-desktop.md#display-mode-changes).
 Source mode changes use active Windows display-configuration readback and bounded in-place retries.
 Source repair accepts a positive measured rate within 0.02% of the requested rate before setting a
 mode or after a setting takes effect. This avoids repeated mode changes for small clock differences

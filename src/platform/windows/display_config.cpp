@@ -4,9 +4,23 @@
  */
 #include "display_config.h"
 
+#include "src/platform/common.h"
+
 #include <algorithm>
 
 namespace platf::display_config {
+
+  namespace {
+    // An Advanced Color change invalidates Desktop Duplication as a mode change does. Record it
+    // before and after the request, as VDISPLAY::changeDisplaySettings does for mode sets, so
+    // capture failover can attribute the restart without depending on a Windows notification.
+    bool set_color_device_info(const device_info_api_t &api, DISPLAYCONFIG_DEVICE_INFO_HEADER &header) {
+      platf::note_display_change();
+      const bool accepted = api.set(&header) == ERROR_SUCCESS;
+      platf::note_display_change();
+      return accepted;
+    }
+  }  // namespace
 
   std::optional<display_target_t> find_display_target(
     const std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
@@ -204,7 +218,7 @@ namespace platf::display_config {
     state.header.adapterId = adapter_id;
     state.header.id = target_id;
     state.enableHdr = enabled;
-    return api.set(&state.header) == ERROR_SUCCESS;
+    return set_color_device_info(api, state.header);
   }
 
   bool set_hdr_state(
@@ -230,7 +244,7 @@ namespace platf::display_config {
     state.header.adapterId = adapter_id;
     state.header.id = target_id;
     state.enableWcg = enabled;
-    return api.set(&state.header) == ERROR_SUCCESS;
+    return set_color_device_info(api, state.header);
   }
 
   bool set_wcg_state(
@@ -256,7 +270,7 @@ namespace platf::display_config {
     state.header.adapterId = adapter_id;
     state.header.id = target_id;
     state.enableAdvancedColor = enabled;
-    return api.set(&state.header) == ERROR_SUCCESS;
+    return set_color_device_info(api, state.header);
   }
 
   bool set_hdr_state_with_legacy_fallback(

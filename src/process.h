@@ -310,7 +310,20 @@ namespace proc {
     display_topology_test_hook_t _display_topology_test_hook;
     std::function<std::optional<DEVMODEW>(std::wstring_view)> _display_mode_query_test_hook;
     std::function<LONG(std::wstring_view, int, int, int, bool)> _display_mode_change_test_hook;
+    std::function<LONG(std::wstring_view, const VDISPLAY::session_mode_record_t &)> _display_mode_record_test_hook;
+    std::function<bool(std::wstring_view)> _display_baseline_test_hook;
+    std::function<bool()> _display_settings_unavailable_test_hook;
   #endif
+    struct session_display_mode_t {
+      int width;
+      int height;
+      int fps_millihz;
+
+      bool operator==(const session_display_mode_t &) const = default;
+    };
+
+    // The session mode last saved as the virtual monitor's default mode; empty when unsaved.
+    std::optional<session_display_mode_t> _saved_virtual_display_mode;
     std::optional<std::uint64_t> _remote_virtual_display_lease;
     VDISPLAY::session_t create_retained_virtual_display(
       std::uint32_t width,
@@ -332,6 +345,20 @@ namespace proc {
     void clear_virtual_display_binding();
     bool refresh_virtual_display_binding();
     std::optional<DEVMODEW> query_virtual_display_mode();
+    /** Test (`probe`) or temporarily apply a mode on the virtual display; never saves topology. */
+    LONG configure_virtual_display_mode(const wchar_t *name, int width, int height, int fps_millihz, bool probe);
+    /** True while Windows cannot change display settings (locked session or no CCD access). */
+    bool display_settings_unavailable();
+    /** True while the desktop is still the user's own topology around the bound virtual display. */
+    bool virtual_display_baseline_topology_active();
+    /**
+     * Save the verified session mode as the virtual monitor's default mode, so an application
+     * that requests an unspecified fullscreen refresh rate can receive the session rate. Callers
+     * save before topology promotion; the save is skipped unless the user's own topology is still
+     * active, and is not repeated for an already saved mode. A failure is logged and leaves the
+     * temporary session mode in place.
+     */
+    bool save_virtual_display_session_mode(int width, int height, int fps_millihz);
     bool prepare_retained_display_for_resume();
     bool promote_virtual_display(
       bool enable_hdr,

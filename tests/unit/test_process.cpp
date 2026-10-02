@@ -90,10 +90,24 @@ namespace proc {
       process._virtual_display = enabled;
       process._display_mode_query_test_hook = {};
       process._display_mode_change_test_hook = {};
+      process._display_mode_record_test_hook = {};
+      process._display_baseline_test_hook = {};
+      process._display_settings_unavailable_test_hook = {};
+      process._saved_virtual_display_mode.reset();
       if (enabled) {
         if (!process._display_topology_test_hook) {
           process._display_topology_test_hook = [](auto, bool) { return true; };
         }
+        // Fixtures never read or write Windows display settings; tests inspect saves explicitly.
+        process._display_mode_record_test_hook = [](std::wstring_view, const auto &) {
+          return DISP_CHANGE_SUCCESSFUL;
+        };
+        process._display_baseline_test_hook = [](std::wstring_view) {
+          return true;
+        };
+        process._display_settings_unavailable_test_hook = [] {
+          return false;
+        };
         process._display_mode_query_test_hook = [&process](std::wstring_view) -> std::optional<DEVMODEW> {
           if (!process._launch_session) {
             return std::nullopt;
@@ -156,6 +170,33 @@ namespace proc {
       proc_t &process, std::function<LONG(std::wstring_view, int, int, int, bool)> configure
     ) {
       process._display_mode_change_test_hook = std::move(configure);
+    }
+
+    static void record_session_mode(
+      proc_t &process,
+      std::function<LONG(std::wstring_view, const VDISPLAY::session_mode_record_t &)> record
+    ) {
+      process._display_mode_record_test_hook = std::move(record);
+    }
+
+    static void observe_baseline_topology(proc_t &process, std::function<bool(std::wstring_view)> query) {
+      process._display_baseline_test_hook = std::move(query);
+    }
+
+    static void observe_display_settings_unavailable(proc_t &process, std::function<bool()> query) {
+      process._display_settings_unavailable_test_hook = std::move(query);
+    }
+
+    static bool save_session_mode(proc_t &process, int width, int height, int fps_millihz) {
+      return process.save_virtual_display_session_mode(width, height, fps_millihz);
+    }
+
+    static std::optional<std::array<int, 3>> saved_session_mode(const proc_t &process) {
+      if (!process._saved_virtual_display_mode) {
+        return std::nullopt;
+      }
+      const auto &mode = *process._saved_virtual_display_mode;
+      return std::array<int, 3> {mode.width, mode.height, mode.fps_millihz};
     }
 
     static void set_display_topology_hook(
@@ -596,6 +637,313 @@ TEST_F(RetainedDisplayPauseTest, UnobservableUnchangedModeKeepsResumeRetryableWi
   EXPECT_TRUE(proc::process_test_access::has_virtual_identity(process_));
   EXPECT_EQ(process_.get_host_session_id(), 1234U);
   EXPECT_EQ(std::ranges::count(operations_, operation_e::retire), 0);
+}
+
+namespace {
+  struct saved_session_mode_t {
+    std::wstring display_name;
+    VDISPLAY::session_mode_record_t record;
+  };
+
+  void expect_virtual_display_only_record(const saved_session_mode_t &saved, DWORD width, DWORD height, DWORD refresh_hz) {
+    // One device, resolution and refresh only: no position/primary, no other display, no apply.
+    EXPECT_EQ(saved.display_name, L"test-only-display");
+    EXPECT_EQ(saved.record.width, width);
+    EXPECT_EQ(saved.record.height, height);
+    EXPECT_EQ(saved.record.refresh_hz, refresh_hz);
+    EXPECT_EQ(saved.record.fields, static_cast<DWORD>(DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY));
+    EXPECT_EQ(saved.record.flags, static_cast<DWORD>(CDS_UPDATEREGISTRY | CDS_GLOBAL | CDS_NORESET));
+  }
+}  // namespace
+
+TEST_F(RetainedDisplayPauseTest, ResumeSavesTheSessionModeBeforePromotionForTheVirtualDisplayOnly) {
+  original_->width = 3840;
+  original_->height = 2160;
+  original_->fps = 90000;
+  DEVMODEW current {};
+  current.dmPelsWidth = 3840;
+  current.dmPelsHeight = 2160;
+  current.dmDisplayFrequency = 72;  // A fullscreen game left another rate in place.
+  proc::process_test_access::observe_display_mode(process_, [&](std::wstring_view) {
+    return std::optional {current};
+  });
+  std::vector<bool> mode_requests;
+  proc::process_test_access::configure_display_mode(process_, [&](std::wstring_view, int width, int height, int fps, bool probe) {
+    mode_requests.push_back(probe);
+    if (!probe) {
+      current.dmPelsWidth = width;
+      current.dmPelsHeight = height;
+      current.dmDisplayFrequency = fps / 1000;
+    }
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+  std::vector<std::wstring> baseline_checks;
+  proc::process_test_access::observe_baseline_topology(process_, [&](std::wstring_view device_path) {
+    baseline_checks.emplace_back(device_path);
+    return true;
+  });
+  std::vector<saved_session_mode_t> saves;
+  std::vector<std::ptrdiff_t> promotions_before_save;
+  proc::process_test_access::record_session_mode(process_, [&](std::wstring_view name, const VDISPLAY::session_mode_record_t &record) {
+    saves.push_back({std::wstring {name}, record});
+    promotions_before_save.push_back(std::ranges::count(operations_, operation_e::promote));
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  operations_.clear();
+  auto resumed = make_launch(22);
+  resumed->width = 3840;
+  resumed->height = 2160;
+  resumed->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  EXPECT_EQ(mode_requests, (std::vector<bool> {true, false}));
+  ASSERT_EQ(saves.size(), 1u);
+  expect_virtual_display_only_record(saves.front(), 3840, 2160, 90);
+  // Saved while the reactivated display still extended the user's own desktop.
+  EXPECT_EQ(promotions_before_save, (std::vector<std::ptrdiff_t> {0}));
+  EXPECT_EQ(baseline_checks, (std::vector<std::wstring> {L"test-only-monitor-path"}));
+  EXPECT_EQ(proc::process_test_access::saved_session_mode(process_), (std::array<int, 3> {3840, 2160, 90000}));
+  // Saving is not a topology operation: resume asked the topology owner only for its own steps.
+  EXPECT_EQ(std::ranges::count(operations_, operation_e::promote), 1);
+  EXPECT_EQ(std::ranges::count(operations_, operation_e::restore), 0);
+  EXPECT_EQ(std::ranges::count(operations_, operation_e::retire), 0);
+
+  // A later drift is repaired on resume without rewriting the already saved default.
+  saves.clear();
+  baseline_checks.clear();
+  mode_requests.clear();
+  current.dmDisplayFrequency = 72;
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  auto drifted = make_launch(33);
+  drifted->width = 3840;
+  drifted->height = 2160;
+  drifted->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(drifted), 0);
+  EXPECT_EQ(mode_requests, (std::vector<bool> {true, false}));
+  EXPECT_EQ(current.dmDisplayFrequency, 90u);
+  EXPECT_TRUE(saves.empty());
+  EXPECT_TRUE(baseline_checks.empty());
+
+  // An unchanged resume verifies the mode but does not save.
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  auto unchanged = make_launch(44);
+  unchanged->width = 3840;
+  unchanged->height = 2160;
+  unchanged->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(unchanged), 0);
+  EXPECT_TRUE(saves.empty());
+}
+
+TEST_F(RetainedDisplayPauseTest, SessionTopologyOrRejectedSaveKeepsResumeTemporaryAndNonFatal) {
+  original_->width = 3840;
+  original_->height = 2160;
+  original_->fps = 90000;
+  DEVMODEW current {};
+  current.dmPelsWidth = 3840;
+  current.dmPelsHeight = 2160;
+  current.dmDisplayFrequency = 72;
+  proc::process_test_access::observe_display_mode(process_, [&](std::wstring_view) {
+    return std::optional {current};
+  });
+  proc::process_test_access::configure_display_mode(process_, [&](std::wstring_view, int width, int height, int fps, bool probe) {
+    if (!probe) {
+      current.dmPelsWidth = width;
+      current.dmPelsHeight = height;
+      current.dmDisplayFrequency = fps / 1000;
+    }
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+  bool user_topology = false;
+  proc::process_test_access::observe_baseline_topology(process_, [&](std::wstring_view) {
+    return user_topology;
+  });
+  int writes = 0;
+  LONG save_status = DISP_CHANGE_SUCCESSFUL;
+  proc::process_test_access::record_session_mode(process_, [&](std::wstring_view, const auto &) {
+    ++writes;
+    return save_status;
+  });
+
+  // Windows restored a remembered session topology (virtual primary or physical outputs off):
+  // nothing is written, and the resume still applies its temporary mode.
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  auto first = make_launch(22);
+  first->width = 3840;
+  first->height = 2160;
+  first->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(first), 0);
+  EXPECT_EQ(current.dmDisplayFrequency, 90u);
+  EXPECT_EQ(writes, 0);
+  EXPECT_FALSE(proc::process_test_access::saved_session_mode(process_));
+
+  // Windows rejects the write: it is logged, and the resume still succeeds at the session mode.
+  user_topology = true;
+  save_status = DISP_CHANGE_NOTUPDATED;
+  current.dmDisplayFrequency = 72;
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  auto second = make_launch(33);
+  second->width = 3840;
+  second->height = 2160;
+  second->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(second), 0);
+  EXPECT_EQ(current.dmDisplayFrequency, 90u);
+  EXPECT_EQ(writes, 1);
+  EXPECT_FALSE(proc::process_test_access::saved_session_mode(process_));
+}
+
+TEST_F(RetainedDisplayPauseTest, LiveChangeAndDriftRestoreKeepThePromotedDisplayModeTemporary) {
+  original_->width = 3840;
+  original_->height = 2160;
+  original_->fps = 90000;
+  proc::process_test_access::retain(process_, original_);
+  DEVMODEW current {};
+  current.dmPelsWidth = 3840;
+  current.dmPelsHeight = 2160;
+  current.dmDisplayFrequency = 90;
+  proc::process_test_access::observe_display_mode(process_, [&](std::wstring_view name) {
+    EXPECT_EQ(name, L"test-only-display");
+    return std::optional {current};
+  });
+  std::vector<std::pair<bool, int>> mode_requests;
+  proc::process_test_access::configure_display_mode(process_, [&](std::wstring_view name, int width, int height, int fps, bool probe) {
+    EXPECT_EQ(name, L"test-only-display");
+    mode_requests.emplace_back(probe, fps);
+    if (!probe) {
+      current.dmPelsWidth = width;
+      current.dmPelsHeight = height;
+      current.dmDisplayFrequency = fps / 1000;
+    }
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+  int saves = 0;
+  proc::process_test_access::observe_baseline_topology(process_, [&](std::wstring_view) {
+    ++saves;
+    return true;
+  });
+  proc::process_test_access::record_session_mode(process_, [&](std::wstring_view, const auto &) {
+    ++saves;
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+  using result_e = proc::live_video_mode_result_e;
+  const std::vector<std::pair<bool, int>> applied_72 {{true, 72000}, {false, 72000}};
+
+  // The headset panel moved to 72 Hz: a verified temporary apply on the promoted display.
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::applied);
+  EXPECT_EQ(mode_requests, applied_72);
+
+  // An exclusive-fullscreen application moved the display to another rate; the repeated request
+  // restores the session mode, again temporarily.
+  current.dmDisplayFrequency = 60;
+  mode_requests.clear();
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::applied);
+  EXPECT_EQ(mode_requests, applied_72);
+  EXPECT_EQ(current.dmDisplayFrequency, 72u);
+  // The promoted display's mode is never saved: not even the topology gate is consulted.
+  EXPECT_EQ(saves, 0);
+  EXPECT_FALSE(proc::process_test_access::saved_session_mode(process_));
+
+  // An unchanged request neither applies nor saves anything.
+  mode_requests.clear();
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::unchanged);
+  EXPECT_TRUE(mode_requests.empty());
+
+  // A locked session is retryable and leaves the drifted display untouched.
+  current.dmDisplayFrequency = 60;
+  proc::process_test_access::observe_display_settings_unavailable(process_, [] {
+    return true;
+  });
+  EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::failed);
+  EXPECT_TRUE(mode_requests.empty());
+  EXPECT_EQ(current.dmDisplayFrequency, 60u);
+  EXPECT_EQ(saves, 0);
+  EXPECT_EQ(std::ranges::count(operations_, operation_e::restore), 0);
+  EXPECT_EQ(std::ranges::count(operations_, operation_e::retire), 0);
+}
+
+TEST_F(RetainedDisplayPauseTest, UnverifiedSessionModeIsNeverSaved) {
+  int saves = 0;
+  proc::process_test_access::record_session_mode(process_, [&](std::wstring_view, const auto &) {
+    ++saves;
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+  DEVMODEW current {};
+  current.dmPelsWidth = 3840;
+  current.dmPelsHeight = 2160;
+  current.dmDisplayFrequency = 60;
+  proc::process_test_access::observe_display_mode(process_, std::optional {current});
+  EXPECT_FALSE(proc::process_test_access::save_session_mode(process_, 3840, 2160, 90000));
+  proc::process_test_access::observe_display_mode(process_, std::nullopt);
+  EXPECT_FALSE(proc::process_test_access::save_session_mode(process_, 3840, 2160, 90000));
+  // DEVMODE frequency 1 means "hardware default", which is not a session rate.
+  current.dmDisplayFrequency = 1;
+  proc::process_test_access::observe_display_mode(process_, std::optional {current});
+  EXPECT_FALSE(proc::process_test_access::save_session_mode(process_, 3840, 2160, 1000));
+  EXPECT_EQ(saves, 0);
+  EXPECT_FALSE(proc::process_test_access::saved_session_mode(process_));
+
+  current.dmDisplayFrequency = 90;
+  proc::process_test_access::observe_display_mode(process_, std::optional {current});
+  EXPECT_TRUE(proc::process_test_access::save_session_mode(process_, 3840, 2160, 90000));
+  EXPECT_EQ(saves, 1);
+  // The same verified mode is already the saved default.
+  EXPECT_TRUE(proc::process_test_access::save_session_mode(process_, 3840, 2160, 90000));
+  EXPECT_EQ(saves, 1);
+}
+
+TEST(ProcessDisplayModeContract, SessionModeIsSavedOnlyBeforePromotionAndModeSetsStayTemporary) {
+  std::ifstream input(SUNSHINE_SOURCE_DIR "/src/process.cpp", std::ios::binary);
+  ASSERT_TRUE(input.is_open());
+  const std::string source {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+  constexpr std::string_view save_call = "save_virtual_display_session_mode(";
+
+  // Creation saves the verified session mode right after applying it, before topology promotion.
+  const auto created = source.find("Virtual Display created at");
+  ASSERT_NE(created, std::string::npos);
+  const auto applied = source.find("VDISPLAY::changeDisplaySettings(created_display.display_name.c_str()", created);
+  const auto saved = source.find("save_virtual_display_session_mode(render_width, render_height, target_fps);", created);
+  const auto promoted = source.find("promote_virtual_display(launch_session->enable_hdr)", created);
+  ASSERT_NE(applied, std::string::npos);
+  ASSERT_NE(saved, std::string::npos);
+  ASSERT_NE(promoted, std::string::npos);
+  EXPECT_LT(applied, saved);
+  EXPECT_LT(saved, promoted);
+
+  // Resume saves a changed mode before its own promotion.
+  const auto resume = source.find("int proc_t::reconfigure_retained_session(");
+  ASSERT_NE(resume, std::string::npos);
+  const auto resume_save = source.find(save_call, resume);
+  const auto resume_promote = source.find("promote_virtual_display(launch_session->enable_hdr, 1500ms)", resume);
+  ASSERT_NE(resume_save, std::string::npos);
+  ASSERT_NE(resume_promote, std::string::npos);
+  EXPECT_LT(resume_save, resume_promote);
+
+  // Live changes run on the promoted display and never save.
+  const auto live = source.find("live_video_mode_result_e proc_t::apply_live_video_mode(");
+  const auto live_end = source.find("bool proc_t::activate_remote_virtual_display_lease(", live);
+  ASSERT_NE(live, std::string::npos);
+  ASSERT_NE(live_end, std::string::npos);
+  EXPECT_EQ(source.substr(live, live_end - live).find(save_call), std::string::npos);
+
+  // Exactly those two call sites plus the definition exist.
+  std::size_t save_mentions = 0;
+  for (auto at = source.find(save_call); at != std::string::npos; at = source.find(save_call, at + 1)) {
+    ++save_mentions;
+  }
+  EXPECT_EQ(save_mentions, 3u);
+
+  // Every host mode set is temporary: SDC_SAVE_TO_DATABASE would save the whole topology,
+  // including physical displays disabled by a virtual-display-only session.
+  std::size_t mode_sets = 0;
+  for (auto call = source.find("VDISPLAY::changeDisplaySettings("); call != std::string::npos; call = source.find("VDISPLAY::changeDisplaySettings(", call + 1)) {
+    ++mode_sets;
+    const auto end = source.find(')', source.find("fps", call));
+    ASSERT_NE(end, std::string::npos);
+    EXPECT_EQ(source.substr(end - 7, 8), ", false)") << source.substr(call, end - call + 1);
+  }
+  EXPECT_EQ(mode_sets, 2u);
+  EXPECT_EQ(source.find("SDC_SAVE_TO_DATABASE"), std::string::npos);
+  EXPECT_EQ(source.find("CDS_UPDATEREGISTRY"), std::string::npos);
 }
 
 TEST_F(RetainedDisplayPauseTest, FailedPhysicalRestorePreventsReactivationHdrAndTransportCommit) {

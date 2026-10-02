@@ -77,6 +77,13 @@ namespace platf::primary_display {
    */
   void restore_retained_cursor(const retained_display_ptr &retained);
 
+  /** True while the active desktop is still the user's own topology around this bound display:
+   * every recorded original output is active and the original primary is at the desktop origin.
+   * Without a recovery record no host topology is applied; the display must then not be primary
+   * unless it is the only active output. Unreadable or unexpected state returns false. Read-only.
+   */
+  bool baseline_topology_active(std::wstring_view device_path);
+
   /** Recover an interrupted transaction on startup, before creating another virtual display. */
   bool recover();
 
@@ -233,6 +240,7 @@ namespace platf::primary_display {
       bool pause(std::wstring_view device_path, retained_display_ptr &retained, std::wstring_view local_sink = {});
       bool reactivate(const retained_display_ptr &retained, bool exclusive);
       void restore_retained_cursor(const retained_display_ptr &retained);
+      bool baseline_topology_active(std::wstring_view device_path);
       bool reconcile_active_exclusive(std::wstring_view device_path);
       bool recover_inactive_exclusive();
 

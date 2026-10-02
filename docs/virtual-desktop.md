@@ -55,20 +55,8 @@ preserved physical outputs keep their stricter mode checks. Windows still contro
 application returns from a reactivated monitor or remains minimized. This repair applies only while
 the exclusive session is active; disconnect restoration still preserves user-arranged layouts.
 
-When a client sends a live mode request, the host resolves its exact owned display and verifies
-Windows' actual resolution and refresh rate before treating a repeated request as unchanged. If
-the game changed the display from the requested 90 Hz to 72 Hz, a subsequent 90 Hz request reapplies
-90 Hz through the existing verified mode transaction. The host does not enforce an earlier refresh
-rate without a client mode request; topology repair therefore cannot fight an explicit new mode
-change. Physical monitors and local AR hardware remain under their existing owners.
-
-After a display-mode change invalidates capture, the capture worker releases the old device and
-uses the same serialized topology repair before probing replacement outputs. Active repair retries
-use the existing 1.5-second/31-attempt limit and observe stream cancellation and owner-generation
-changes. An exhausted repair
-returns to ordinary capture recovery; it does not introduce an indefinite display wait. Windows
-mode switches and encoder teardown can still interrupt presentation, so this is not a seamless
-fullscreen-exit guarantee.
+Mode changes, fullscreen drift, and their effect on capture are described in
+[Display mode changes](#display-mode-changes).
 
 Windows does not provide a general active-but-hidden state for a normal monitor: an active display
 path participates in the desktop. A black overlay or a powered-off panel would still leave that
@@ -96,6 +84,65 @@ an active boundary after virtual-display resizing, display hotplug, and foregrou
 and checks it periodically. An application that continuously replaces the shared boundary can
 briefly win until the next repair. The host releases its ownership before restoring the desktop on
 disconnect or teardown.
+
+## Display mode changes
+
+When a client sends a live mode request, the host resolves its exact owned display and verifies
+Windows' actual resolution and refresh rate before treating a repeated request as unchanged. If
+the game changed the display from the requested 90 Hz to 72 Hz, a subsequent 90 Hz request reapplies
+90 Hz through the existing verified mode transaction. The host does not enforce an earlier refresh
+rate without a client mode request; topology repair therefore cannot fight an explicit new mode
+change. Physical monitors and local AR hardware remain under their existing owners.
+
+The host applies every remote virtual-display mode temporarily. It never asks Windows to save the
+active display configuration (`SDC_SAVE_TO_DATABASE`), because a saved configuration contains the
+whole topology; during a virtual-display-only session that topology has the physical displays
+disabled.
+
+On 2026-10-02 a game entering exclusive fullscreen with an unspecified refresh rate moved a 90 Hz
+session display to 72 Hz. Microsoft documents only that DXGI resolves an unspecified rate toward the
+output's desktop values. The working hypothesis is that Windows used a mode an earlier session had
+saved instead of the temporary session mode. The host therefore saves the verified resolution and
+whole-Hz refresh of that one virtual monitor as its default mode, using a `ChangeDisplaySettingsEx`
+registry update with `CDS_NORESET`: nothing is applied, and the record holds no position, primary
+state, or color depth. Windows does not document whether that update also records the active
+topology in its configuration database. The host therefore saves only before it promotes the
+display, after creation and after a mode-changing resume, and only while the desktop is still the
+user's own topology: every output in the [restoration](#display-restoration) record is active and
+the original primary is at the desktop origin. When Windows has already restored a remembered
+session topology, the host logs and skips the save. It does not repeat a save of the same mode.
+Live changes and drift restores run on the promoted display, so their modes stay temporary. A failed
+save is logged and leaves the temporary mode in place.
+
+Each drift log line reports the drifted rate, which an application or Windows may have chosen, and
+whether the session mode is the saved default. A drift with `saved as default: yes` shows which
+store Windows reads only when the application is known to have requested an unspecified rate, for
+example from its ReShade or DXGI log. Both the effect and the scope of the save still need live
+validation: on a test machine, export
+`HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration` from an elevated shell before
+and after a session, and confirm that no entry with physical displays inactive or the virtual
+display primary was added.
+
+After a display-mode change invalidates capture, the capture worker releases the old device and
+uses the same serialized topology repair before probing replacement outputs. Active repair retries
+use the existing 1.5-second/31-attempt limit and observe stream cancellation and owner-generation
+changes. An exhausted repair
+returns to ordinary capture recovery; it does not introduce an indefinite display wait. Windows
+mode switches and encoder teardown can still interrupt presentation, so this is not a seamless
+fullscreen-exit guarantee.
+
+Desktop Duplication restarts on every display-mode change. Capture switches to
+Windows.Graphics.Capture for the rest of a capture session only after two consecutive Desktop
+Duplication attempts fail before a stable tenure (2 s with frames, or 120 frames) and no display-mode
+change explains either failure. A Windows display-change notification, a host-applied
+virtual-display mode change, or a host HDR, WCG, or Advanced Color request observed while an
+attempt's display is open explains that attempt's failure. Windows can deliver the notification
+after Desktop Duplication has reported the loss, so a change observed before the following attempt
+ends also explains the earlier failure. A stable tenure clears the evidence, and choosing another
+display starts a new capture session. Remote streaming and local AR apply the same
+rule; local AR keeps it for its retained virtual source. Windows.Graphics.Capture supplies no cursor
+metadata, so a switch removes the separately composited Game 3D cursor (see
+[Game 3D](reshade-sbs.md)).
 
 ## Display restoration
 

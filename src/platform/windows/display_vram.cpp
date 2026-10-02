@@ -6820,6 +6820,8 @@ namespace platf::dxgi {
     const auto preferred_capture_backend = config.capture_failover ?
                                              config.capture_failover->preferred_backend() :
                                              capture_backend_e::ddup;
+    // A display-mode change after this point invalidates the duplication opened below.
+    const auto display_epoch_at_open = platf::display_change_epoch();
     auto display = platf::display(
       config.source_display_name,
       capture_config,
@@ -7395,18 +7397,16 @@ namespace platf::dxgi {
     if (config.on_quiesced) {
       config.on_quiesced();
     }
-    if (config.capture_failover) {
-      const auto previous_preference = config.capture_failover->preferred_backend();
-      config.capture_failover->note_capture_result(
-        capture_backend,
-        capture_status,
-        capture_attempt_frames,
-        std::chrono::steady_clock::now() - capture_started
-      );
-      if (previous_preference != config.capture_failover->preferred_backend()) {
-        BOOST_LOG(warning) << "Local AR Desktop Duplication failed repeatedly before stable capture; "sv
-                              "using Windows.Graphics.Capture for the rest of this session."sv;
-      }
+    if (config.capture_failover && config.capture_failover->note_capture_result({
+                                     capture_backend,
+                                     capture_status,
+                                     capture_attempt_frames,
+                                     std::chrono::steady_clock::now() - capture_started,
+                                     display_epoch_at_open,
+                                     platf::display_change_epoch(),
+                                   })) {
+      BOOST_LOG(warning) << "Local AR Desktop Duplication failed repeatedly before stable capture without a "sv
+                            "display-mode change; using Windows.Graphics.Capture for the rest of this session."sv;
     }
     if (presentation_reinit_requested && !stop_token.stop_requested()) {
       return local_presenter_result_e::reinit;

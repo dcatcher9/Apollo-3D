@@ -3,8 +3,10 @@
  * @brief Tests for shared Windows CCD and Advanced Color adapters.
  */
 #include "../tests_common.h"
+#include "src/platform/common.h"
 #include "src/platform/windows/display_config.h"
 
+#include <cstdint>
 #include <cwchar>
 #include <vector>
 
@@ -97,6 +99,7 @@ namespace {
     unsigned int modern_get_calls = 0;
     unsigned int legacy_get_calls = 0;
     std::vector<DISPLAYCONFIG_DEVICE_INFO_TYPE> set_types;
+    std::vector<std::uint64_t> set_epochs;
   } fake_color_state;
 
   LONG WINAPI fake_get_device_info(DISPLAYCONFIG_DEVICE_INFO_HEADER *header) {
@@ -133,6 +136,7 @@ namespace {
 
   LONG WINAPI fake_set_device_info(DISPLAYCONFIG_DEVICE_INFO_HEADER *header) {
     fake_color_state.set_types.push_back(header->type);
+    fake_color_state.set_epochs.push_back(platf::display_change_epoch());
     if (header->type == DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE || header->type == DISPLAYCONFIG_DEVICE_INFO_SET_WCG_STATE) {
       return fake_color_state.modern_set_status;
     }
@@ -290,4 +294,29 @@ TEST(DisplayConfigColorTest, HdrSetterFallsBackToLegacyAfterModernFailure) {
     fake_color_state.set_types[1],
     DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE
   );
+}
+
+TEST(DisplayConfigColorTest, ColorRequestsRecordADisplayChangeBeforeAndAfterTheCall) {
+  // Advanced Color changes restart Desktop Duplication; capture failover reads this epoch.
+  fake_color_state = {};
+  fake_color_state.modern_set_status = ERROR_NOT_SUPPORTED;
+  const auto before = platf::display_change_epoch();
+  EXPECT_TRUE(platf::display_config::set_hdr_state_with_legacy_fallback(LUID {}, 11, true, fake_device_info_api()));
+  ASSERT_EQ(fake_color_state.set_epochs.size(), 2u);
+  // Each request, accepted or rejected, is bracketed by its own changes.
+  EXPECT_GT(fake_color_state.set_epochs[0], before);
+  EXPECT_GT(fake_color_state.set_epochs[1], fake_color_state.set_epochs[0]);
+  EXPECT_GT(platf::display_change_epoch(), fake_color_state.set_epochs[1]);
+
+  // A rejected WCG request is bracketed too: Windows may have applied part of it.
+  const auto before_wcg = platf::display_change_epoch();
+  EXPECT_FALSE(platf::display_config::set_wcg_state(LUID {}, 11, false, fake_device_info_api()));
+  ASSERT_EQ(fake_color_state.set_epochs.size(), 3u);
+  EXPECT_GT(fake_color_state.set_epochs[2], before_wcg);
+  EXPECT_GT(platf::display_change_epoch(), fake_color_state.set_epochs[2]);
+
+  // Without a setter no request is made, so no change is recorded.
+  const auto unchanged = platf::display_change_epoch();
+  EXPECT_FALSE(platf::display_config::set_hdr_state(LUID {}, 11, true, {fake_get_device_info, nullptr}));
+  EXPECT_EQ(platf::display_change_epoch(), unchanged);
 }

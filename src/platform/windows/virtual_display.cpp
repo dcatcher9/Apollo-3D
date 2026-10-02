@@ -2,6 +2,7 @@
 
 #include "display_config.h"
 #include "src/logging.h"
+#include "src/platform/common.h"
 
 #include <algorithm>
 #include <chrono>
@@ -645,6 +646,8 @@ LONG testDisplaySettings(const wchar_t *deviceName, int width, int height, int r
 }
 
 LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate, bool persist_settings) {
+  // Capture attempts open across this call restart because the host changed the mode.
+  platf::note_display_change();
   const auto refreshRates = baselineRefreshRates(refresh_rate);
   wprintf(L"[SUDOVDA] Applying baseline display mode [%dx%dx%d] for %ls.\n", width, height, refreshRates.preferred, deviceName);
   const auto baselineStatus = changeBaselineDisplaySettings(
@@ -661,7 +664,34 @@ LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int
   }
 
   // Apply the exact fractional refresh rate through DisplayConfig.
-  return applyDisplaySettings(deviceName, width, height, refresh_rate, persist_settings);
+  const auto status = applyDisplaySettings(deviceName, width, height, refresh_rate, persist_settings);
+  platf::note_display_change();
+  return status;
+}
+
+std::optional<session_mode_record_t> sessionModeRecord(const DEVMODEW &active) {
+  // DEVMODE reserves frequencies 0 and 1 for the hardware default; never save that as a session.
+  if (active.dmPelsWidth == 0 || active.dmPelsHeight == 0 || active.dmDisplayFrequency <= 1) {
+    return std::nullopt;
+  }
+  return session_mode_record_t {
+    active.dmPelsWidth,
+    active.dmPelsHeight,
+    active.dmDisplayFrequency,
+    DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY,
+    // The host may run under another account than the application, so save for all users.
+    CDS_UPDATEREGISTRY | CDS_GLOBAL | CDS_NORESET,
+  };
+}
+
+LONG saveSessionModeRecord(const wchar_t *deviceName, const session_mode_record_t &record) {
+  DEVMODEW devMode {};
+  devMode.dmSize = sizeof(devMode);
+  devMode.dmFields = record.fields;
+  devMode.dmPelsWidth = record.width;
+  devMode.dmPelsHeight = record.height;
+  devMode.dmDisplayFrequency = record.refresh_hz;
+  return ChangeDisplaySettingsExW(deviceName, &devMode, nullptr, record.flags, nullptr);
 }
 
 bool findDisplayIds(const wchar_t *displayName, LUID &adapterId, uint32_t &targetId) {

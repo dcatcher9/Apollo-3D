@@ -35,6 +35,7 @@
   #include <d3d11.h>
   #include <d3dcompiler.h>
   #include <src/nvenc/nvenc_d3d11.h>
+  #include <src/platform/windows/display_config.h>
   #include <wrl/client.h>
 
 namespace platf::dxgi {
@@ -8461,70 +8462,236 @@ TEST(NvencBitrateReconfigureTest, PreservesRateControlStateAndDoesNotForceIdr) {
   EXPECT_LT(driver_call, cached_commit);
 }
 
+namespace {
+  // An early attempt: no stable frame count or tenure. Equal epochs mean no mode change was seen.
+  video::capture_attempt_t early_attempt(
+    std::uint64_t display_epoch_at_open,
+    std::uint64_t display_epoch_at_end,
+    platf::capture_e result = platf::capture_e::reinit,
+    platf::capture_backend_e backend = platf::capture_backend_e::ddup
+  ) {
+    return {backend, result, 1, std::chrono::milliseconds(100), display_epoch_at_open, display_epoch_at_end};
+  }
+}  // namespace
+
 TEST(CaptureBackendFailoverTest, RepeatedEarlyDdupFailuresLatchWgc) {
   video::capture_backend_failover_t failover;
 
-  failover.note_capture_result(
-    platf::capture_backend_e::ddup,
-    platf::capture_e::reinit,
-    0,
-    std::chrono::milliseconds(100)
-  );
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(7, 7)));
   EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
 
-  failover.note_capture_result(
-    platf::capture_backend_e::ddup,
-    platf::capture_e::error,
-    1,
-    std::chrono::milliseconds(100)
-  );
+  EXPECT_TRUE(failover.note_capture_result(early_attempt(7, 7, platf::capture_e::error)));
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::wgc);
+
+  // The latch is reported once; later results cannot report or undo it.
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(7, 7)));
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(7, 7)));
   EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::wgc);
 }
 
 TEST(CaptureBackendFailoverTest, StableDdupTenureForgivesOneOffReinit) {
   video::capture_backend_failover_t failover;
-  failover.note_capture_result(
-    platf::capture_backend_e::ddup,
-    platf::capture_e::reinit,
-    0,
-    std::chrono::milliseconds(100)
-  );
-  failover.note_capture_result(
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(1, 1)));
+  EXPECT_FALSE(failover.note_capture_result({
     platf::capture_backend_e::ddup,
     platf::capture_e::reinit,
     1,
-    std::chrono::seconds(3)
-  );
-  failover.note_capture_result(
-    platf::capture_backend_e::ddup,
-    platf::capture_e::error,
-    0,
-    std::chrono::milliseconds(100)
-  );
+    std::chrono::seconds(3),
+    1,
+    1,
+  }));
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(1, 1, platf::capture_e::error)));
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
 
+  // A frame-count-stable tenure also clears the pending failure.
+  EXPECT_FALSE(failover.note_capture_result({
+    platf::capture_backend_e::ddup,
+    platf::capture_e::reinit,
+    120,
+    std::chrono::milliseconds(500),
+    1,
+    1,
+  }));
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(1, 1)));
   EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
 }
 
 TEST(CaptureBackendFailoverTest, WgcSelectionDoesNotOscillate) {
   video::capture_backend_failover_t failover;
   failover.note_backend_opened(platf::capture_backend_e::wgc);
-  failover.note_capture_result(
-    platf::capture_backend_e::wgc,
-    platf::capture_e::error,
-    0,
-    std::chrono::milliseconds(10)
-  );
-  failover.note_capture_result(
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(0, 0, platf::capture_e::error, platf::capture_backend_e::wgc)));
+  EXPECT_FALSE(failover.note_capture_result({
     platf::capture_backend_e::ddup,
     platf::capture_e::reinit,
     240,
-    std::chrono::seconds(3)
-  );
+    std::chrono::seconds(3),
+    0,
+    0,
+  }));
 
   EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::wgc);
 
   failover.reset();
   EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
+}
+
+TEST(CaptureBackendFailoverTest, RestartsExplainedByDisplayModeChangesNeverLatch) {
+  video::capture_backend_failover_t failover;
+  // A game re-entering exclusive fullscreen at another rate, then the host restoring the session
+  // rate, restarts every short duplication. Each attempt observed its own mode change.
+  std::uint64_t epoch = 40;
+  for (int restart = 0; restart < 12; ++restart) {
+    const auto opened = epoch;
+    epoch += restart % 2 ? 2 : 1;  // A host-applied change notes before and after its mode set.
+    EXPECT_FALSE(failover.note_capture_result(early_attempt(opened, epoch, restart % 3 ? platf::capture_e::reinit : platf::capture_e::error)));
+    EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
+  }
+
+  // Explained restarts do not count toward the pair either: two later unexplained ones still latch.
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(epoch, epoch)));
+  EXPECT_TRUE(failover.note_capture_result(early_attempt(epoch, epoch)));
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::wgc);
+}
+
+TEST(CaptureBackendFailoverTest, LateDisplayChangeNotificationExplainsTheEarlierFailure) {
+  video::capture_backend_failover_t failover;
+  // DDUP reported the loss before Windows delivered WM_DISPLAYCHANGE; it arrived during reopen.
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(5, 5)));
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(6, 6)));
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
+
+  // The second failure is now the unexplained candidate; an unbroken successor latches.
+  EXPECT_TRUE(failover.note_capture_result(early_attempt(6, 6)));
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::wgc);
+}
+
+TEST(CaptureBackendFailoverTest, ExplainedRestartClearsAPendingUnexplainedFailure) {
+  video::capture_backend_failover_t failover;
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(3, 3)));
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(3, 4)));
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(4, 4)));
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
+
+  // Unrelated outcomes neither count nor clear the evidence.
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(4, 4, platf::capture_e::timeout)));
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(4, 4, platf::capture_e::reinit, platf::capture_backend_e::wgc)));
+  EXPECT_TRUE(failover.note_capture_result(early_attempt(4, 4)));
+
+  // Choosing another display starts a new capture session's evidence.
+  failover.reset();
+  EXPECT_FALSE(failover.note_capture_result(early_attempt(4, 4)));
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
+}
+
+TEST(CaptureBackendFailoverTest, LocalArSharedFailoverReadsTheProcessDisplayChangeEpoch) {
+  // Local AR keeps one failover across presenter restarts for its retained source and samples the
+  // process-wide epoch before opening and after capture, exactly as the remote capture loop does.
+  const auto failover = std::make_shared<video::capture_backend_failover_t>();
+  const auto presenter_attempt = [&](bool display_mode_changed) {
+    const auto display_epoch_at_open = platf::display_change_epoch();
+    if (display_mode_changed) {
+      platf::note_display_change();  // WM_DISPLAYCHANGE or a host-applied source refresh.
+    }
+    return failover->note_capture_result({
+      platf::capture_backend_e::ddup,
+      platf::capture_e::reinit,
+      0,
+      std::chrono::milliseconds(50),
+      display_epoch_at_open,
+      platf::display_change_epoch(),
+    });
+  };
+
+  for (int restart = 0; restart < 6; ++restart) {
+    EXPECT_FALSE(presenter_attempt(true));
+  }
+  EXPECT_EQ(failover->preferred_backend(), platf::capture_backend_e::ddup);
+
+  EXPECT_FALSE(presenter_attempt(false));
+  EXPECT_TRUE(presenter_attempt(false));
+  EXPECT_EQ(failover->preferred_backend(), platf::capture_backend_e::wgc);
+}
+
+#ifdef _WIN32
+namespace {
+  LONG WINAPI accept_color_request(DISPLAYCONFIG_DEVICE_INFO_HEADER *) {
+    return ERROR_SUCCESS;
+  }
+}  // namespace
+
+TEST(CaptureBackendFailoverTest, HostAppliedHdrChangeExplainsTheRestart) {
+  // HDR and other Advanced Color requests restart Desktop Duplication without a mode change, and
+  // Windows does not document a WM_DISPLAYCHANGE for them. The setter records the change itself.
+  video::capture_backend_failover_t failover;
+  const platf::display_config::device_info_api_t api {nullptr, accept_color_request};
+  const auto attempt = [&](const std::function<void()> &during_capture) {
+    const auto display_epoch_at_open = platf::display_change_epoch();
+    during_capture();
+    return failover.note_capture_result({
+      platf::capture_backend_e::ddup,
+      platf::capture_e::reinit,
+      0,
+      std::chrono::milliseconds(50),
+      display_epoch_at_open,
+      platf::display_change_epoch(),
+    });
+  };
+
+  EXPECT_FALSE(attempt([] {}));
+  // The second early restart would latch, but a host HDR toggle during it explains it.
+  EXPECT_FALSE(attempt([&] {
+    EXPECT_TRUE(platf::display_config::set_hdr_state_with_legacy_fallback(LUID {}, 1, true, api));
+  }));
+  EXPECT_FALSE(attempt([&] {
+    EXPECT_TRUE(platf::display_config::set_wcg_state(LUID {}, 1, false, api));
+  }));
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
+
+  EXPECT_FALSE(attempt([] {}));
+  EXPECT_TRUE(attempt([] {}));
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::wgc);
+}
+#endif
+
+TEST(CaptureBackendFailoverTest, CaptureLoopsBracketEachAttemptWithDisplayChangeEvidence) {
+  // Both capture owners sample before opening the display and after capture returns; host mode
+  // changes and Windows notifications advance the same process-wide epoch.
+  const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
+  const auto capture_thread = video_source.find("void captureThread(");
+  ASSERT_NE(capture_thread, std::string::npos);
+  const auto initial_epoch = video_source.find("display_epoch_at_open = platf::display_change_epoch();", capture_thread);
+  const auto initial_open = video_source.find("disp = platf::display(", capture_thread);
+  const auto reopen_epoch = video_source.find("display_epoch_at_open = platf::display_change_epoch();", initial_open);
+  const auto reopen = video_source.find("reset_display(", reopen_epoch);
+  ASSERT_NE(initial_epoch, std::string::npos);
+  ASSERT_NE(reopen_epoch, std::string::npos);
+  EXPECT_LT(initial_epoch, initial_open);
+  EXPECT_LT(reopen_epoch, reopen);
+
+  const auto display_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  const auto local_epoch = display_source.find("const auto display_epoch_at_open = platf::display_change_epoch();");
+  const auto local_open = display_source.find("auto display = platf::display(", local_epoch);
+  const auto local_note = display_source.find("config.capture_failover->note_capture_result(", local_open);
+  ASSERT_NE(local_epoch, std::string::npos);
+  ASSERT_NE(local_open, std::string::npos);
+  ASSERT_NE(local_note, std::string::npos);
+  EXPECT_NE(display_source.find("display_epoch_at_open,", local_note), std::string::npos);
+
+  const auto vdisplay_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/virtual_display.cpp");
+  const auto change = vdisplay_source.find("LONG changeDisplaySettings(");
+  const auto change_end = vdisplay_source.find("std::optional<session_mode_record_t> sessionModeRecord(", change);
+  ASSERT_NE(change, std::string::npos);
+  ASSERT_NE(change_end, std::string::npos);
+  const auto body = vdisplay_source.substr(change, change_end - change);
+  const auto before = body.find("platf::note_display_change();");
+  ASSERT_NE(before, std::string::npos);
+  EXPECT_LT(before, body.find("changeBaselineDisplaySettings("));
+  EXPECT_GT(body.rfind("platf::note_display_change();"), body.find("applyDisplaySettings("));
+
+  const auto main_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/main.cpp");
+  const auto display_change = main_source.find("case WM_DISPLAYCHANGE:");
+  ASSERT_NE(display_change, std::string::npos);
+  EXPECT_LT(main_source.find("platf::note_display_change();", display_change), main_source.find("return 0;", display_change));
 }
 
 struct FramerateX100Test: testing::TestWithParam<std::tuple<std::int32_t, video::rational_t>> {};

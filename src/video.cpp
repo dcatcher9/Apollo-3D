@@ -305,7 +305,7 @@ namespace video {
 
   void capture_backend_failover_t::reset() noexcept {
     preferred_backend_ = platf::capture_backend_e::ddup;
-    early_ddup_failures_ = 0;
+    unexplained_failure_epoch_.reset();
   }
 
   void capture_backend_failover_t::note_backend_opened(platf::capture_backend_e backend) noexcept {
@@ -314,28 +314,33 @@ namespace video {
     }
   }
 
-  void capture_backend_failover_t::note_capture_result(
-    platf::capture_backend_e backend,
-    platf::capture_e result,
-    std::uint64_t captured_frames,
-    std::chrono::steady_clock::duration lifetime
-  ) noexcept {
-    if (backend != platf::capture_backend_e::ddup || (result != platf::capture_e::reinit && result != platf::capture_e::error)) {
-      return;
+  bool capture_backend_failover_t::note_capture_result(const capture_attempt_t &attempt) noexcept {
+    if (attempt.backend != platf::capture_backend_e::ddup || (attempt.result != platf::capture_e::reinit && attempt.result != platf::capture_e::error)) {
+      return false;
     }
 
     constexpr auto stable_lifetime = 2s;
     constexpr std::uint64_t stable_frame_count = 120;
-    const bool stable = captured_frames >= stable_frame_count ||
-                        (captured_frames > 0 && lifetime >= stable_lifetime);
-    if (stable) {
-      early_ddup_failures_ = 0;
-      return;
+    const bool stable = attempt.captured_frames >= stable_frame_count ||
+                        (attempt.captured_frames > 0 && attempt.lifetime >= stable_lifetime);
+    // A mode change while this attempt was open explains its restart and any earlier pending one.
+    const bool explained = attempt.display_epoch_at_end != attempt.display_epoch_at_open;
+    if (stable || explained) {
+      unexplained_failure_epoch_.reset();
+      return false;
     }
 
-    if (++early_ddup_failures_ >= 2) {
-      preferred_backend_ = platf::capture_backend_e::wgc;
+    // A change between the earlier failure and this attempt's open explains the earlier failure,
+    // whose notification arrived late. Only an unbroken pair of unexplained failures latches.
+    if (!unexplained_failure_epoch_ || *unexplained_failure_epoch_ != attempt.display_epoch_at_open) {
+      unexplained_failure_epoch_ = attempt.display_epoch_at_end;
+      return false;
     }
+
+    unexplained_failure_epoch_.reset();
+    const bool latched = preferred_backend_ != platf::capture_backend_e::wgc;
+    preferred_backend_ = platf::capture_backend_e::wgc;
+    return latched;
   }
 
   config::depth_model_info host_sbs_v2_depth_model() {
@@ -661,6 +666,8 @@ namespace video {
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
     capture_backend_failover_t capture_failover;
+    // Display-change evidence starts before a duplication opens: a change after open invalidates it.
+    auto display_epoch_at_open = platf::display_change_epoch();
     std::string active_display_name;
     const auto initial_display_name = proc::proc.get_display_name();
     if (!initial_display_name.empty()) {
@@ -820,16 +827,16 @@ namespace video {
       const auto backend = disp->capture_backend();
       const auto capture_started = std::chrono::steady_clock::now();
       auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &capture_cursor);
-      const auto previous_preference = capture_failover.preferred_backend();
-      capture_failover.note_capture_result(
-        backend,
-        status,
-        captured_frames,
-        std::chrono::steady_clock::now() - capture_started
-      );
-      if (previous_preference != capture_failover.preferred_backend()) {
-        BOOST_LOG(warning) << "Desktop Duplication failed repeatedly before stable capture; "sv
-                              "using Windows.Graphics.Capture for the rest of this session."sv;
+      if (capture_failover.note_capture_result({
+            backend,
+            status,
+            captured_frames,
+            std::chrono::steady_clock::now() - capture_started,
+            display_epoch_at_open,
+            platf::display_change_epoch(),
+          })) {
+        BOOST_LOG(warning) << "Desktop Duplication failed repeatedly before stable capture without a "sv
+                              "display-mode change; using Windows.Graphics.Capture for the rest of this session."sv;
       }
 
       switch (status) {
@@ -903,6 +910,7 @@ namespace video {
               BOOST_LOG(warning) << "Exclusive display topology is still settling; continuing normal capture recovery."sv;
             }
 #endif
+            display_epoch_at_open = platf::display_change_epoch();
             while (capture_ctx_queue->running()) {
               // Release the display before reenumerating displays, since some capture backends
               // only support a single display session per device/application.

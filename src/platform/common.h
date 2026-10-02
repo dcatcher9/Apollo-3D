@@ -6,8 +6,10 @@
 
 // standard includes
 #include <array>
+#include <atomic>
 #include <bitset>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -503,6 +505,25 @@ namespace platf {
     ddup,
     wgc,
   };
+
+  namespace detail {
+    inline std::atomic<std::uint64_t> display_change_epoch {0};
+  }  // namespace detail
+
+  /**
+   * Count of display-mode changes this process has observed: Windows display-change
+   * notifications, host-applied virtual-display mode changes, and host Advanced Color (HDR/WCG)
+   * requests, which restart Desktop Duplication without a mode change. Two samples bracket a
+   * capture attempt; a different value means such a change can explain that attempt's restart.
+   */
+  [[nodiscard]] inline std::uint64_t display_change_epoch() noexcept {
+    return detail::display_change_epoch.load(std::memory_order_acquire);
+  }
+
+  /** Record one observed or host-applied display-mode change. */
+  inline void note_display_change() noexcept {
+    detail::display_change_epoch.fetch_add(1, std::memory_order_acq_rel);
+  }
 
   class display_t {
   public:

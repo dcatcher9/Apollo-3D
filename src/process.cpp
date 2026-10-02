@@ -920,6 +920,7 @@ namespace proc {
   void proc_t::clear_virtual_display_binding() {
     stop_hdr_worker();
     _hdr_worker_state.reset();
+    _saved_virtual_display_mode.reset();  // A replacement monitor has its own saved default.
     // Resource ownership has already moved to retirement. Never discard a live driver identity.
     if (!_display_session.owns_display() && !_display_session.prepared()) {
       _display_session = VDISPLAY::session_t {};
@@ -1144,6 +1145,7 @@ namespace proc {
         spec.adapter_name = platf::from_utf8(config::video.adapter_name);
         spec.exclusive = _virtual_display_only;
         // The owner saves the baseline before Add, and records Add identity before binding.
+        _saved_virtual_display_mode.reset();
         const bool acquired = _display_session.acquire(std::move(spec));
         const auto &created_display = _display_session.binding();
         launch_session->virtual_display = _display_session.owns_display();
@@ -1163,6 +1165,7 @@ namespace proc {
               BOOST_LOG(error) << "Windows did not accept the requested virtual-display mode."sv;
               return 503;
             }
+            save_virtual_display_session_mode(render_width, render_height, target_fps);
           }
 
           // Set virtual_display to true when everything went fine
@@ -1479,13 +1482,7 @@ namespace proc {
 
 #ifdef _WIN32
     auto configure_display_mode = [&](const wchar_t *name, int width, int height, int fps, bool probe) {
-  #ifdef SUNSHINE_TESTS
-      if (_display_mode_change_test_hook) {
-        return _display_mode_change_test_hook(name, width, height, fps, probe);
-      }
-  #endif
-      return probe ? VDISPLAY::testDisplaySettings(name, width, height, fps) :
-                     VDISPLAY::changeDisplaySettings(name, width, height, fps, false);
+      return configure_virtual_display_mode(name, width, height, fps, probe);
     };
     bool hdr_configured_by_recreation = false;
     if (_virtual_display) {
@@ -1504,11 +1501,19 @@ namespace proc {
         }
         display_mode_changed = !live_display_mode_matches(*current, render_size->width, render_size->height, launch_session->fps);
         if (display_mode_changed) {
+          const session_display_mode_t requested {
+            static_cast<int>(render_size->width),
+            static_cast<int>(render_size->height),
+            launch_session->fps,
+          };
+          // The host cannot tell whether the application or Windows chose the drifted mode.
           BOOST_LOG(info) << "Restoring the requested virtual-display mode on resume after external drift from "sv
                           << current->dmPelsWidth << 'x' << current->dmPelsHeight << " @ "sv
-                          << current->dmDisplayFrequency << " Hz to "sv
+                          << current->dmDisplayFrequency << " Hz (set by an application or by Windows) to "sv
                           << render_size->width << 'x' << render_size->height << " @ "sv
-                          << static_cast<double>(launch_session->fps) / 1000.0 << " Hz."sv;
+                          << static_cast<double>(launch_session->fps) / 1000.0
+                          << " Hz; session mode saved as default: "sv
+                          << (_saved_virtual_display_mode == requested ? "yes"sv : "no"sv) << '.';
         }
       }
 
@@ -1714,6 +1719,11 @@ namespace proc {
       }
       return 503;
     }
+    // Save a changed session mode while the reactivated display still extends the user's own
+    // desktop; promotion below makes it primary and may disable the physical displays.
+    if (_virtual_display && display_mode_changed) {
+      save_virtual_display_session_mode(static_cast<int>(render_size->width), static_cast<int>(render_size->height), launch_session->fps);
+    }
     // Failed reconfiguration/rollback paths above leave the disconnected desktop restored.
     // Promote only a successful reconnect, before capture starts using the new topology.
     // Windows can briefly publish incomplete CCD readback after restore; the durable display
@@ -1782,6 +1792,85 @@ namespace proc {
     DEVMODEW mode {};
     return VDISPLAY::getDeviceSettings(_display_session.binding().display_name.c_str(), mode) ?
              std::optional<DEVMODEW> {mode} : std::nullopt;
+  }
+
+  LONG proc_t::configure_virtual_display_mode(const wchar_t *name, int width, int height, int fps_millihz, bool probe) {
+  #ifdef SUNSHINE_TESTS
+    if (_display_mode_change_test_hook) {
+      return _display_mode_change_test_hook(name, width, height, fps_millihz, probe);
+    }
+  #endif
+    return probe ? VDISPLAY::testDisplaySettings(name, width, height, fps_millihz) :
+                   VDISPLAY::changeDisplaySettings(name, width, height, fps_millihz, false);
+  }
+
+  bool proc_t::display_settings_unavailable() {
+  #ifdef SUNSHINE_TESTS
+    if (_display_settings_unavailable_test_hook) {
+      return _display_settings_unavailable_test_hook();
+    }
+  #endif
+    return is_changing_settings_going_to_fail();
+  }
+
+  bool proc_t::virtual_display_baseline_topology_active() {
+    const auto &device_path = _display_session.binding().device_path;
+  #ifdef SUNSHINE_TESTS
+    if (_display_baseline_test_hook) {
+      return _display_baseline_test_hook(device_path);
+    }
+  #endif
+    return !device_path.empty() && platf::primary_display::baseline_topology_active(device_path);
+  }
+
+  bool proc_t::save_virtual_display_session_mode(int width, int height, int fps_millihz) {
+    const session_display_mode_t requested {width, height, fps_millihz};
+    // Save only what Windows verifiably presents for this session, in Windows' own whole-Hz form.
+    const auto active = query_virtual_display_mode();
+    const auto record = active && live_display_mode_matches(*active, width, height, fps_millihz) ?
+                          VDISPLAY::sessionModeRecord(*active) :
+                          std::nullopt;
+    if (!record) {
+      BOOST_LOG(warning) << "The virtual display is not verifiably at its session mode "sv << width << 'x' << height
+                         << " @ "sv << (static_cast<double>(fps_millihz) / 1000.0)
+                         << " Hz; its default mode was not saved."sv;
+      return false;
+    }
+    if (_saved_virtual_display_mode == requested) {
+      return true;  // Already this monitor's saved default; rewriting it adds nothing.
+    }
+    // Windows does not document whether this registry save also records the active topology.
+    // Write it only while that topology is still the user's own: never after promotion makes the
+    // virtual display primary or disables physical outputs.
+    if (!virtual_display_baseline_topology_active()) {
+      BOOST_LOG(warning) << "The virtual display's session mode "sv << record->width << 'x' << record->height
+                         << " @ "sv << record->refresh_hz
+                         << " Hz was not saved as its default mode: a session display topology is active."sv;
+      return false;
+    }
+
+    const auto &name = _display_session.binding().display_name;
+    LONG status;
+  #ifdef SUNSHINE_TESTS
+    if (_display_mode_record_test_hook) {
+      status = _display_mode_record_test_hook(name, *record);
+    } else
+  #endif
+    {
+      status = VDISPLAY::saveSessionModeRecord(name.c_str(), *record);
+    }
+    if (status != DISP_CHANGE_SUCCESSFUL) {
+      _saved_virtual_display_mode.reset();  // A rejected write may leave any saved value.
+      BOOST_LOG(warning) << "Could not save the virtual display's session mode "sv << record->width << 'x' << record->height
+                         << " @ "sv << record->refresh_hz << " Hz as its default mode (status "sv << status
+                         << "); the session keeps its temporary mode."sv;
+      return false;
+    }
+
+    _saved_virtual_display_mode = requested;
+    BOOST_LOG(info) << "Saved the virtual display's session mode "sv << record->width << 'x' << record->height
+                    << " @ "sv << record->refresh_hz << " Hz as its default mode."sv;
+    return true;
   }
 
 #endif
@@ -1858,15 +1947,20 @@ namespace proc {
         return refresh_virtual_display_binding() ? live_video_mode_result_e::unchanged :
                                                    live_video_mode_result_e::failed;
       }
+      // Hypothesis under live validation: an application that requests an unspecified fullscreen
+      // rate receives a mode Windows saved earlier. The host cannot see what the application asked
+      // for, so the line reports the drifted rate neutrally together with the save state.
       BOOST_LOG(info) << "Restoring the requested virtual-display mode after external drift from "sv
                       << current->dmPelsWidth << 'x' << current->dmPelsHeight << " @ "sv
-                      << current->dmDisplayFrequency << " Hz."sv;
+                      << current->dmDisplayFrequency << " Hz (set by an application or by Windows); session mode saved as default: "sv
+                      << (_saved_virtual_display_mode == session_display_mode_t {width, height, fps_millihz} ? "yes"sv : "no"sv)
+                      << '.';
     }
 
     // A locked session or an unreachable display-configuration API is transient, not a property of
     // the requested mode. Report it as retryable so the client is not sent off to reconnect for a
     // mode this display could deliver a moment later.
-    if (is_changing_settings_going_to_fail()) {
+    if (display_settings_unavailable()) {
       BOOST_LOG(warning) << "Cannot resize the virtual display right now (the session is locked or "
                             "the display-configuration API is unavailable)."sv;
       return live_video_mode_result_e::failed;
@@ -1878,7 +1972,7 @@ namespace proc {
     if (!_display_session.refresh()) {
       return live_video_mode_result_e::failed;
     }
-    if (VDISPLAY::testDisplaySettings(_display_session.binding().display_name.c_str(), width, height, fps_millihz) != DISP_CHANGE_SUCCESSFUL) {
+    if (configure_virtual_display_mode(_display_session.binding().display_name.c_str(), width, height, fps_millihz, true) != DISP_CHANGE_SUCCESSFUL) {
       BOOST_LOG(info) << "The virtual display does not advertise "sv << width << 'x' << height
                       << " @ "sv << (static_cast<double>(fps_millihz) / 1000.0)
                       << " Hz; the client must reconnect to obtain it."sv;
@@ -1914,6 +2008,11 @@ namespace proc {
     auto republish_display = [&]() {
       set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
       config::video.output_name = display_device::map_display_name(display_name);
+  #ifdef SUNSHINE_TESTS
+      if (_display_topology_test_hook) {
+        return;  // The test owns HDR state through request_hdr_state().
+      }
+  #endif
       start_hdr_worker(enable_hdr);
     };
 
@@ -1923,7 +2022,7 @@ namespace proc {
       }
       // changeDisplaySettings() reports the DisplayConfig status, so verify the applied geometry
       // rather than trusting the return code on its own.
-      bool restored = VDISPLAY::changeDisplaySettings(_display_session.binding().display_name.c_str(), old_width, old_height, old_fps, false) == ERROR_SUCCESS &&
+      bool restored = configure_virtual_display_mode(_display_session.binding().display_name.c_str(), old_width, old_height, old_fps, false) == ERROR_SUCCESS &&
                       settle_at(old_width, old_height, old_fps);
       republish_display();
       if (!request_hdr_state(enable_hdr, 6s)) {
@@ -1942,7 +2041,7 @@ namespace proc {
       // that worker; a retryable no-op must not leave it permanently stopped.
       return live_video_mode_result_e::needs_reconnect;
     }
-    const auto change_status = VDISPLAY::changeDisplaySettings(_display_session.binding().display_name.c_str(), width, height, fps_millihz, false);
+    const auto change_status = configure_virtual_display_mode(_display_session.binding().display_name.c_str(), width, height, fps_millihz, false);
     if (change_status != ERROR_SUCCESS || !settle_at(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), fps_millihz)) {
       BOOST_LOG(error) << "The virtual display did not settle at the requested live mode "sv
                        << width << 'x' << height << "; rolling back."sv;
@@ -1984,6 +2083,7 @@ namespace proc {
     _display_session.update_mode(width, height, fps_millihz);
     BOOST_LOG(info) << "Virtual display resized live to "sv << width << 'x' << height
                     << " @ "sv << (static_cast<double>(fps_millihz) / 1000.0) << " Hz."sv;
+    // The display is promoted for the whole live session, so its mode stays temporary here.
     return live_video_mode_result_e::applied;
 #else
     return live_video_mode_result_e::needs_reconnect;

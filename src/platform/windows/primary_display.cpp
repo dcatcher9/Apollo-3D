@@ -1573,6 +1573,33 @@ namespace platf::primary_display {
       return valid_journal(bound) && io_.save(bound);
     }
 
+    bool manager_t::baseline_topology_active(std::wstring_view device_path) {
+      const auto loaded = io_.load();
+      if (!loaded.success) {
+        return false;
+      }
+      const auto snapshot = io_.query();
+      const auto current = snapshot ? inspect(*snapshot) : std::nullopt;
+      const auto *target = current ? find_position(*current, device_path) : nullptr;
+      if (!target) {
+        return false;
+      }
+      if (!loaded.journal) {
+        // Every host topology change is journaled before it is applied, so none is active. Windows
+        // can still make an added display primary itself; accept that only for a sole output.
+        return current->size() == 1 || target->x != 0 || target->y != 0;
+      }
+      const auto &journal = *loaded.journal;
+      if (!valid_journal(journal) || journal.prepared || !same_device(journal.promoted_primary, device_path)) {
+        return false;
+      }
+      const auto *primary = find_position(*current, journal.original_primary);
+      return primary && primary->x == 0 && primary->y == 0 &&
+             std::ranges::all_of(journal.original, [&](const auto &entry) {
+               return find_position(*current, entry.device_path) != nullptr;
+             });
+    }
+
     bool manager_t::apply_verified(const snapshot_t &before, const layout_t &desired) {
       const auto baseline = inspect(before);
       auto latest = io_.query();
@@ -3242,6 +3269,16 @@ namespace platf::primary_display {
       return bound;
     } catch (const std::exception &exception) {
       BOOST_LOG(error) << "Could not bind primary-display recovery identity: " << exception.what();
+      return false;
+    }
+  }
+
+  bool baseline_topology_active(std::wstring_view device_path) {
+    std::lock_guard lock(transaction_mutex);
+    try {
+      return acquire_ownership() && manager().baseline_topology_active(device_path);
+    } catch (const std::exception &exception) {
+      BOOST_LOG(warning) << "Could not inspect the active display topology: " << exception.what();
       return false;
     }
   }

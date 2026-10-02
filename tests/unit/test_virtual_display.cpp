@@ -1187,4 +1187,42 @@ TEST(VirtualDisplayRetirement, StableAbsenceEvidenceResetsOnInvalidationOrNonAbs
   );
 }
 
+TEST(VirtualDisplaySessionMode, SavesOnlyResolutionAndRefreshWithoutApplyingAnything) {
+  DEVMODEW active {};
+  active.dmPelsWidth = 3840;
+  active.dmPelsHeight = 2160;
+  active.dmDisplayFrequency = 90;
+  // Fields Windows reports for a primary display must not become part of the saved record.
+  active.dmPosition = {0, 0};
+  active.dmBitsPerPel = 32;
+  active.dmFields = DM_POSITION | DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+
+  const auto record = VDISPLAY::sessionModeRecord(active);
+  ASSERT_TRUE(record);
+  EXPECT_EQ(record->width, 3840u);
+  EXPECT_EQ(record->height, 2160u);
+  EXPECT_EQ(record->refresh_hz, 90u);
+  EXPECT_EQ(record->fields, static_cast<DWORD>(DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY));
+  EXPECT_EQ(record->fields & (DM_POSITION | DM_BITSPERPEL | DM_DISPLAYFLAGS), 0u);
+  // Saved for all users, never applied, and never promoted to primary.
+  EXPECT_EQ(record->flags, static_cast<DWORD>(CDS_UPDATEREGISTRY | CDS_GLOBAL | CDS_NORESET));
+  EXPECT_EQ(record->flags & (CDS_SET_PRIMARY | CDS_RESET | CDS_FULLSCREEN), 0u);
+}
+
+TEST(VirtualDisplaySessionMode, RejectsIncompleteOrHardwareDefaultModes) {
+  DEVMODEW active {};
+  active.dmPelsWidth = 3840;
+  active.dmPelsHeight = 2160;
+  for (const DWORD hardware_default : {0u, 1u}) {
+    active.dmDisplayFrequency = hardware_default;
+    EXPECT_FALSE(VDISPLAY::sessionModeRecord(active));
+  }
+  active.dmDisplayFrequency = 60;
+  active.dmPelsWidth = 0;
+  EXPECT_FALSE(VDISPLAY::sessionModeRecord(active));
+  active.dmPelsWidth = 3840;
+  active.dmPelsHeight = 0;
+  EXPECT_FALSE(VDISPLAY::sessionModeRecord(active));
+}
+
 #endif

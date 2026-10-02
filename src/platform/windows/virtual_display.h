@@ -72,7 +72,36 @@ namespace VDISPLAY {
 	LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode);
 	LONG testDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
   // Remote sessions use temporary modes so a live resize cannot persist their primary display.
+  // Every call is recorded with platf::note_display_change() before and after the mode set.
   LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate, bool persist_settings = true);
+
+  /**
+   * One virtual monitor's verified session mode, saved as that device's registry (default) mode.
+   * Hypothesis under live validation: applications that request an unspecified fullscreen refresh
+   * rate resolve it from saved display settings rather than the temporary mode a session applies.
+   */
+  struct session_mode_record_t {
+    DWORD width = 0;
+    DWORD height = 0;
+    DWORD refresh_hz = 0;
+    DWORD fields = 0;  ///< DEVMODE fields written: resolution and refresh only.
+    DWORD flags = 0;  ///< ChangeDisplaySettingsEx flags: save for all users without applying.
+  };
+
+  /**
+   * Build the record from the mode Windows reports for the virtual display. It never records
+   * position, primary state, or color depth, and it names no other display. Returns nullopt for
+   * an incomplete mode or the hardware-default refresh values 0 and 1.
+   */
+  std::optional<session_mode_record_t> sessionModeRecord(const DEVMODEW &active);
+
+  /**
+   * Save the record for this device name. CDS_NORESET stores it without a mode set or a topology
+   * apply, and it does not use SetDisplayConfig's SDC_SAVE_TO_DATABASE. Windows does not document
+   * whether the registry update also records the active topology in its configuration database,
+   * so callers save only while the user's own topology is active (before session promotion).
+   */
+  LONG saveSessionModeRecord(const wchar_t *deviceName, const session_mode_record_t &record);
   std::optional<bool> queryDisplayHDRByName(const wchar_t* displayName);
 
   // Stable-target variants avoid resolving a recyclable GDI name during restoration.

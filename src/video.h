@@ -544,25 +544,38 @@ namespace video {
     int height;
   };
 
+  /** One finished capture attempt and the display-change evidence that brackets it. */
+  struct capture_attempt_t {
+    platf::capture_backend_e backend;
+    platf::capture_e result;
+    std::uint64_t captured_frames;
+    std::chrono::steady_clock::duration lifetime;
+    /** platf::display_change_epoch() sampled before the capture display was opened. */
+    std::uint64_t display_epoch_at_open;
+    /** platf::display_change_epoch() sampled after capture returned. */
+    std::uint64_t display_epoch_at_end;
+  };
+
   /**
-   * Keep DDUP as the fast path, but latch WGC after repeated failures before DDUP has
-   * demonstrated a stable capture tenure. This state belongs to one capture session.
+   * Keep DDUP as the fast path, but latch WGC after two consecutive early DDUP failures that no
+   * display-mode change explains. A mode change invalidates every duplication by design, so a
+   * change observed while an attempt was open explains its restart. Windows may report the change
+   * after DDUP has already failed; a change observed before the next attempt ends therefore also
+   * explains the earlier failure. A stable tenure clears the evidence. This state belongs to one
+   * capture session.
    */
   class capture_backend_failover_t {
   public:
     [[nodiscard]] platf::capture_backend_e preferred_backend() const noexcept;
     void reset() noexcept;
     void note_backend_opened(platf::capture_backend_e backend) noexcept;
-    void note_capture_result(
-      platf::capture_backend_e backend,
-      platf::capture_e result,
-      std::uint64_t captured_frames,
-      std::chrono::steady_clock::duration lifetime
-    ) noexcept;
+    /** @return True when this attempt latched Windows.Graphics.Capture for the session. */
+    bool note_capture_result(const capture_attempt_t &attempt) noexcept;
 
   private:
     platf::capture_backend_e preferred_backend_ = platf::capture_backend_e::ddup;
-    unsigned early_ddup_failures_ = 0;
+    // Display epoch at the end of an early DDUP failure that no mode change has explained yet.
+    std::optional<std::uint64_t> unexplained_failure_epoch_;
   };
 
   /**
