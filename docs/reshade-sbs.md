@@ -203,9 +203,8 @@ scan left the whole chunk on the plane. Rows without UI are only scanned once, a
 in group memory. Timed alone at 3840x2160 on dumped inputs (with Sunshine running), the band pass
 took 0.26 ms on a Stellar Blade menu and 0.25 ms on its HUD, where the distance scan it replaced
 took 0.31 and 0.35 ms, and 0.20 ms against 0.15 ms with an all-ones mask, its worst case. The
-late-layer margin (13x13 texels) takes the mask pass from 0.063 to 0.10 ms on those layers (0.030
-to 0.046 ms at 2560x1440 on The Witcher 3's notice board), so mask and band passes together take
-0.37 and 0.36 ms where the mask pass and distance scan took 0.38 and 0.41 ms. When the limiters were tiled,
+mask pass, one load of the selected alpha per texel, took 0.063 ms on those layers (0.030 ms at
+2560x1440 on The Witcher 3's notice board). When the limiters were tiled,
 the 4K vertical pass went from 0.44 to 0.17 ms on an idle GPU and the horizontal pass, including
 the UI pass, from 0.35 to 0.24 ms; the whole renderer went from 1.38 to 0.91 ms. The shader declares the lines per group as
 `SUNSHINE_LIMITER_LINE_GROUPS` and `SUNSHINE_UI_PIN_LINE_GROUPS`; the renderer sizes its dispatches
@@ -389,23 +388,24 @@ UI color candidate. It is also offered instead of a tagged UIColorAndAlpha that 
 trust once the layer is trusted, or once the tag proves opaque: covering at least 99% of the frame
 while an exact HUD-less pair shows at least half of it unchanged, in three samples over at least
 2 s. A selective sample of the tag clears that proof. A trusted tag keeps the slot. Copies are released through their own device, at the latest when it is
-destroyed. It is one frame late, and its UI may have moved in any direction since, so its consumed
-mask is its alpha dilated by 6 texels in rows and in columns (stored flag `0x4`,
-`SUNSHINE_UI_LATE_MARGIN`): UI that moves by up to 6 rows and 6 columns a frame stays on the UI
-plane. Each texel of that mask is the largest `min(a, 1)` over the alpha `a` of the 13x13 texels
-within 6 rows and 6 columns of it, clipped at the frame edges, where NaN, infinite, negative, zero
-and subnormal alpha count as 0. The margin therefore never pins less than the raw alpha, but even
-at offset 0 the mask is not the raw alpha where that exceeds 1 or is not finite. Motion beyond the
-margin shows a one-frame edge, and on a layer with faint halos it can tear more than the binary pin
-did, because the **UI pin band** (below) no longer pins those halos fully. Replayed with glyphs moved
-against the unmoved layer (`--pin-metrics` below), a 4-row margin in rows only tore 3 to 4 times
-more glyph pixels than the binary pin on Stellar Blade's HUD for 8-row, 8-column and diagonal
-moves. With the 6-texel margin, moves of up to 16 rows, 32 columns or 8 rows and columns tore no
-more than the binary pin on that HUD, its equipment menu and The Witcher 3's notice board, while the
-pin flattened less of their scene than the binary pin on the Stellar Blade frames and about a
-quarter more on the notice board; larger moves and other halos are unmeasured. Tagged sources
-belong to the presented frame and get no margin; setting the marker to 0 removes it. Detection,
-coverage and trust read the raw alpha. The GPU admits it only while premultiplied: any pixel whose color exceeds twice its alpha by
+destroyed. It is one frame late (stored flag `0x4`), and its UI may have moved since, but its
+consumed mask is its raw alpha, exactly like every other source; the **UI pin band** (below) pins
+only finite positive alpha. UI that moves in the layer can therefore show a one-frame edge or tear.
+A motion margin, the alpha dilated by 6 texels in rows and in columns, was removed on 2026-10-02
+after a live Stellar Blade test: its 13x13 window flattened a band of scene about 13 texels wide
+around thin UI strokes in both axes, most visibly around horizontal lines. Replaying Stellar
+Blade's equipment menu, its HUD and The Witcher 3's notice board with both shaders
+(`--pin-metrics` below, glyphs moved against the unmoved layer), the raw alpha flattened 17%, 47%
+and 29% less scene than the margin and less than the binary pin on all three. Its scene tear
+stayed below the binary pin's (286, 273 and 392 against 467, 576 and 540), though on the menu it
+rose from the margin's 206. The cost is torn glyphs. Moves of 1 to 4 rows or 4 columns, which the
+margin tore not at all, tore about 1.2 to 1.4 times the binary pin on the menu, up to about 600
+times on the HUD, whose faint halos the binary pin had pinned fully, and up to 429 pixels on the
+notice board, where the binary pin tore 0 to 95. Moves of 8 to 16 texels tore about 1.1 to 11
+times the binary pin. These are rigid shifts of the whole layer, so real exposure is limited to
+UI that animates, such as scrolling lists, slide-ins and compasses; how often the tear is visible
+in play is unmeasured. Tagged sources belong to the presented frame and never had a margin. Detection,
+coverage and trust read the same raw alpha. The GPU admits it only while premultiplied: any pixel whose color exceeds twice its alpha by
 more than 4/255 (for a float layer, 125 times its alpha, up to 10000 nits) counts as invalid, and the
 usual invalid-pixel limits apply to that frame. UI blended over transparent black is premultiplied by
 construction; the factor two admits UI tinted brighter than white. Stellar Blade's real UI layer
@@ -635,7 +635,7 @@ bits:
 | --- | --- | --- |
 | `0x1` | stored | The UI color slot is admitted only while premultiplied (offscreen UI layer). |
 | `0x2` | stored | With a float layer's HDR headroom. |
-| `0x4` | stored | The UI color slot holds the one-frame-late offscreen UI layer, whose mask gets the late-layer margin. |
+| `0x4` | stored | The UI color slot holds the one-frame-late offscreen UI layer: it selects the hidden-scene layer route and per-source trust. Its mask is the raw alpha. |
 | `0x8` | stored | Reserved. |
 | `0x10000` | per-frame | The CPU holds the layer route's hidden-scene verdict (source 8). |
 | `0x20000` | per-frame | Reserved; no render pushes it. |
@@ -699,9 +699,10 @@ bits, so `scene_hold` stands for the CPU's held layer-route verdict and `scene_h
 HUD-less route's. It sizes the statistics and decision textures from the shader's markers, but
 never below 80 rows and 6 texels, so retired shader revisions still replay. `expect.mask_exact`
 compares the resolved R32 mask bit for bit with a CPU reference: the selected candidate's raw alpha
-(red for UIAlpha), for the offscreen UI layer that alpha with the shader's late-layer margin, all
-zeros without a source, or all ones for a full-frame decision (sources 6, 8 and 9); a HUD-less
-difference has no reference and fails the check. `expect.scene` checks the presented image's
+(red for UIAlpha, the offscreen UI layer included), all zeros without a source, or all ones for a
+full-frame decision (sources 6, 8 and 9); a HUD-less difference has no reference and fails the
+check. The brief shader revision with the late-layer margin (2026-10-02) dilates an offscreen UI
+layer's mask, so such a case reports `differs` with that shader. `expect.scene` checks the presented image's
 hidden-scene evidence in decision texel 5 and `expect.hudless_scene` the HUD-less image's in texel
 6: `verdict` is one name or a list (none, hidden, ambiguous or visible; the HUD-less verdict is
 visible when its valid D reaches the visible bound, else none) and `d_min` and `d_max` bound D
@@ -712,8 +713,8 @@ within 0.0012.
 detection extent to `<new-dir>/<NN>_<dump>`, where `NN` is the case's position in the cases file,
 with its `ui_source_color` replaced by the mask this replay resolved, for
 `replay_game3d_dump --shader`; any other package fails its case, and the captured package is never
-changed. The copy's `ui_detection_replay_mask` records the decision, the detection `flags` this
-replay pushed and the shader's `late_margin`, which describe the replaced mask. `--verbose`
+changed. The copy's `ui_detection_replay_mask` records the decision and the detection `flags` this
+replay pushed, which describe the replaced mask. `--verbose`
 prints every decision word. A label whose dump directory no longer exists is
 reported as SKIP and does not fail the run; a directory without its manifest fails, a `dump_root`
 that is not a directory stops the run, and a run in which every case was skipped fails.
@@ -943,9 +944,8 @@ Live rendering never waits to read it back.
 `replay.ui_alpha_source` identifies `none`, `source_color`, or `ui_source_color`. When a retained
 input was consumed, required artifact 33 (`ui_source_color.bin`) preserves its exact typed pixels.
 For automatic detection this artifact is the resolved full-resolution `R32_FLOAT` mask, consumed
-through its red channel; for the offscreen UI layer it is that layer's alpha clamped and dilated
-by the late-layer margin (its value rule is with the offscreen UI layer above; `late_margin`
-below), and for a full-frame decision (sources 6, 8 and 9) it is all 1.0. It includes an all-zero
+through its red channel: the selected source's raw alpha, the offscreen UI layer's included, and
+for a full-frame decision (sources 6, 8 and 9) all 1.0. It includes an all-zero
 result when every candidate was rejected;
 the enabled mask path does not by itself imply any protected pixels. Replay uses these frozen
 values and does not run candidate selection again. Optional candidate metadata remains separate.
@@ -953,9 +953,12 @@ values and does not run candidate selection again. Optional candidate metadata r
 `threshold_bits` (the float32 difference threshold), `trusted`, `flags` (the full pushed word,
 per-frame bits included), `ran_or_held` (`ran` this render, `held` from the last run, or
 `inactive`) and `held_presents`. `replay.ui_pin` records the captured shader's
-`soft_pin_gain`, `late_margin`, `decision_texels` and `evidence_images` markers; 0 means absent
-(binary pinning, no late-layer margin and the 5-texel decision of older packages, which replay
-that way with their embedded shader unless `--shader` is given). In the pass
+`soft_pin_gain`, `decision_texels` and `evidence_images` markers; 0 means absent
+(binary pinning and the 5-texel decision of older packages, which replay
+that way with their embedded shader unless `--shader` is given). Packages captured while the shader
+had the late-layer margin, briefly on 2026-10-02, also carry `late_margin`, the texels by which
+that shader dilated the offscreen UI layer's mask in rows and columns; `--pin-metrics` counts those
+margin texels as UI. In the pass
 table, the horizontal limiter of a shader with limiter line groups reads no UI input;
 `SunshineApplyUICS` pins the selected mask into `final_field` after it, and on mode-5 probe frames
 `SunshineUIConflictCS` observes the unpinned field in between.
@@ -1305,17 +1308,13 @@ field (the horizontal limiter applied to `vertical_field`): for each `--pin-band
 most columns in one row pair with a new vertical step above 0.5 px; the scene tear (new steps
 outside UI rows, weighted by horizontal luma texture and scene visibility); the flattening, mean
 `(1 - alpha)|F - h|` in pixels; and the torn glyph pixels when the solid light bodies of the
-one-frame-late UI layer move against the unmoved pin: within the late-layer margin, 1, 2 or 4 rows
-up, 4 rows down or 4 columns right; beyond it, 8 rows up or down, 8 or 16 columns right, or 8 rows
-up and 8 columns right. Fields are compared in double precision, and a 1e-4 px tolerance keeps float32
+one-frame-late UI layer move against the unmoved pin by 1, 2, 4 or 8 rows up, 4 or 8 rows down, 4,
+8 or 16 columns right, or 8 rows up and 8 columns right. Fields are compared in double precision, and a 1e-4 px tolerance keeps float32
 rounding of the pin collar's exact half-pixel bound from counting, so figures computed in float32
 with a strict 0.5 px threshold can differ slightly. It supports the fixed and display-fraction UI
 planes, which sit on the screen plane whenever the shader's camera admission rejects the frame's
-constants. Visibility, UI rows and flattening weigh by the consumed mask's alpha, except when that
-mask is the UI layer's alpha with the late-layer margin (flag `0x4` and `late_margin` in
-`replay.ui_detection` and `replay.ui_pin`, or in a `--write-mask` copy's record): then they use the
-layer candidate's own alpha, provided its margin reproduces the consumed mask exactly, so margin
-texels count as scene. The report's `alpha` names the artifact used.
+constants. Visibility, UI rows and flattening weigh by the consumed mask's alpha, which the
+report's `alpha` names.
 
 ### UI source discovery and snapshot qualification
 

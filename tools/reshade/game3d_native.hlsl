@@ -24,11 +24,9 @@
 #define SUNSHINE_PACKED_EYES 1
 // UI pinning groups own eight adjacent rows.
 #define SUNSHINE_UI_PIN_LINE_GROUPS 8
-// UI mask alpha pins with weight saturate(gain * alpha) through a soft band;
-// the one-frame-late UI layer's mask is its alpha dilated by this many texels
-// in rows and in columns (docs/reshade-sbs.md, UI pin band).
+// UI mask alpha pins with weight saturate(gain * alpha) through a soft band
+// (docs/reshade-sbs.md, UI pin band).
 #define SUNSHINE_UI_SOFT_PIN_GAIN 8
-#define SUNSHINE_UI_LATE_MARGIN 6
 // Automatic UI detection writes this many decision texels; its statistics
 // rows hold the cells of this many scene-evidence images (docs/reshade-sbs.md,
 // UI detection flags and decision texels).
@@ -117,8 +115,8 @@ Texture2D<float4> SunshineHUDless : register(t14);
 // Sunshine_UIDetectionFlags (docs/reshade-sbs.md, UI detection flags and
 // decision texels), mirrored from game3d_ui_detection_contract.h. Stored bits
 // describe the UI color slot's source: it must be premultiplied, with a float
-// layer's HDR headroom, and is the one-frame-late offscreen UI layer (whose
-// selected mask gets SUNSHINE_UI_LATE_MARGIN texels of motion margin per axis).
+// layer's HDR headroom, and is the one-frame-late offscreen UI layer (which
+// selects the hidden-scene layer route and is trusted per source).
 // Per-frame bits ride in one render's pushed word only: the CPU holds a
 // hidden-scene verdict for the layer or the HUD-less route, or the consumed
 // depth is not this frame's.
@@ -347,78 +345,18 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     SunshineAlphaCoverageStore[uint2(5,0)] = 0u;
     SunshineAlphaCoverageStore[uint2(6,0)] = 0u;
 }
-#if SUNSHINE_UI_LATE_MARGIN > 0
-// The offscreen UI layer is copied before the game clears it, so its UI is one
-// frame late, and it may have moved in any direction since. Its mask is the
-// alpha dilated by SUNSHINE_UI_LATE_MARGIN texels in rows and in columns (the
-// maximum over a square window), so UI moving by up to that much per frame in
-// each axis stays pinned. Finite positive alpha counts up to one and anything
-// else as zero, so the margin never pins less than the raw alpha would. The
-// tiles above read raw alpha: coverage, invalid counts and trust never see the
-// margin. Each group stages its texels plus the margin on every side once,
-// then takes the maximum along rows and then along columns.
-#define SUNSHINE_UI_LATE_APRON (8 + 2 * SUNSHINE_UI_LATE_MARGIN)
-// One lane per staged apron row: the 64 lanes cover a margin of at most 28.
-#if SUNSHINE_UI_LATE_APRON > 64
-#error SUNSHINE_UI_LATE_MARGIN exceeds the 64 staged apron rows of an 8x8 group
-#endif
-groupshared float SunshineUILateLayerApron[SUNSHINE_UI_LATE_APRON][SUNSHINE_UI_LATE_APRON];
-groupshared float SunshineUILateLayerRowMax[SUNSHINE_UI_LATE_APRON][8];
-float SunshineUILateLayerAlpha(int x, int y)
-{
-    // A clamped texel repeats an edge texel that every window there already holds.
-    int2 texel = clamp(int2(x, y), 0, int2(BUFFER_WIDTH, BUFFER_HEIGHT) - 1);
-    float alpha = SunshineUIColorAlpha.Load(int3(texel, 0)).a;
-    return SunshineCameraFinite(alpha) && alpha > 0.0 ? min(alpha, 1.0) : 0.0;
-}
-#endif
 [numthreads(8, 8, 1)]
-void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID, uint3 thread : SV_GroupThreadID)
+void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
 {
-    // No early return: the late-layer margin synchronizes the whole group.
-    bool active = id.x < BUFFER_WIDTH && id.y < BUFFER_HEIGHT;
+    if (id.x >= BUFFER_WIDTH || id.y >= BUFFER_HEIGHT) return;
     uint source = SunshineUIDetectionSampler.Load(int3(0,0,0)).x;
     float mask = 0.0;
     int3 at = int3(id.xy, 0);
-    // Full-frame UI: the whole frame pins, before and apart from any margin.
+    // Full-frame UI: the whole frame pins.
     if (source == 6u || source == 8u || source == 9u) mask = 1.0;
-    // Otherwise load only the selected candidate (the same channel SunshineUIDetectionAlpha reads).
+    // Otherwise load only the selected candidate's raw mask (the same channel
+    // SunshineUIDetectionAlpha reads), the offscreen UI layer included.
     else if (source == 1u) mask = SunshineUIDedicatedAlpha.Load(at).r;
-#if SUNSHINE_UI_LATE_MARGIN > 0
-    // One decision texel and the constants: uniform across the group.
-    else if (source == 2u && (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_LATE_LAYER)) {
-        int2 corner = int2(id.xy - thread.xy) - SUNSHINE_UI_LATE_MARGIN;
-        uint lane = thread.y * 8u + thread.x;
-        [unroll]
-        for (uint fill = 0u; fill < (SUNSHINE_UI_LATE_APRON * SUNSHINE_UI_LATE_APRON + 63u) / 64u; ++fill) {
-            uint texel = lane + fill * 64u;
-            uint2 staged = uint2(texel % SUNSHINE_UI_LATE_APRON, texel / SUNSHINE_UI_LATE_APRON);
-            if (texel < SUNSHINE_UI_LATE_APRON * SUNSHINE_UI_LATE_APRON)
-                SunshineUILateLayerApron[staged.y][staged.x] = SunshineUILateLayerAlpha(corner.x + int(staged.x), corner.y + int(staged.y));
-        }
-        GroupMemoryBarrierWithGroupSync();
-        // One thread per staged row takes its 8 window maxima from registers,
-        // which reads group memory far less than a window per texel.
-        if (lane < SUNSHINE_UI_LATE_APRON) {
-            float staged_row[SUNSHINE_UI_LATE_APRON];
-            [unroll]
-            for (uint column = 0u; column < SUNSHINE_UI_LATE_APRON; ++column)
-                staged_row[column] = SunshineUILateLayerApron[lane][column];
-            [unroll]
-            for (uint output = 0u; output < 8u; ++output) {
-                float widest = 0.0;
-                [unroll]
-                for (uint reach = 0u; reach <= 2u * SUNSHINE_UI_LATE_MARGIN; ++reach)
-                    widest = max(widest, staged_row[output + reach]);
-                SunshineUILateLayerRowMax[lane][output] = widest;
-            }
-        }
-        GroupMemoryBarrierWithGroupSync();
-        [unroll]
-        for (uint offset = 0u; offset <= 2u * SUNSHINE_UI_LATE_MARGIN; ++offset)
-            mask = max(mask, SunshineUILateLayerRowMax[thread.y + offset][thread.x]);
-    }
-#endif
     else if (source == 2u) mask = SunshineUIColorAlpha.Load(at).a;
     else if (source == 3u) mask = SunshineUIBackbufferAlpha.Load(at).a;
     else if (source == 4u) mask = SunshineSourceSampler.Load(at).a;
@@ -426,7 +364,7 @@ void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID, uint3 thread : SV
         bool finite;
         mask = SunshineHUDlessDifference(id.xy, finite) > Sunshine_UIDifferenceThreshold && finite ? 1.0 : 0.0;
     }
-    if (active) SunshineHostCandidateStore[id.xy] = mask;
+    SunshineHostCandidateStore[id.xy] = mask;
 }
 
 // Fixed-size exact coverage observation. Every source texel participates; the

@@ -343,7 +343,7 @@ namespace sunshine_game3d_test {
         "Dump lost the detection constants behind the consumed mask");
       const auto &pin = replay.at("ui_pin");
       const auto marker = [&](std::string_view name) { return sunshine_game3d::shader_marker(frame_.shader_source, name); };
-      check(pin.at("soft_pin_gain") == marker("SUNSHINE_UI_SOFT_PIN_GAIN") && pin.at("late_margin") == marker("SUNSHINE_UI_LATE_MARGIN") &&
+      check(pin.at("soft_pin_gain") == marker("SUNSHINE_UI_SOFT_PIN_GAIN") && !pin.contains("late_margin") &&
           pin.at("decision_texels") == marker(sunshine_game3d::ui_detection::decision_texels_marker) &&
           pin.at("evidence_images") == marker(sunshine_game3d::ui_detection::scene_evidence_images_marker),
         "Dump UI pin markers differ from the captured shader");

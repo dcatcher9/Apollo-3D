@@ -235,28 +235,9 @@ namespace {
     std::uint32_t flags = 0; // The pushed detection flags.
   };
 
-  // The one-frame-late UI layer's mask: finite positive alpha up to one (zero
-  // otherwise, denormals flushed as on the GPU), the maximum over the texels
-  // within margin rows and margin columns, inside the frame.
-  std::vector<float> late_layer_margin(const std::vector<float> &alpha, size_t width, size_t height, size_t margin) {
-    std::vector<float> clamped(alpha.size()), widest(alpha.size(), 0.f), result(alpha.size(), 0.f);
-    for (size_t i = 0; i < alpha.size(); ++i)
-      clamped[i] = std::fpclassify(alpha[i]) == FP_NORMAL && alpha[i] > 0.f ? std::min(alpha[i], 1.f) : 0.f;
-    for (size_t y = 0; y < height; ++y)
-      for (size_t x = 0; x < width; ++x)
-        for (size_t column = x >= margin ? x - margin : 0; column <= std::min(width - 1, x + margin); ++column)
-          widest[y * width + x] = std::max(widest[y * width + x], clamped[y * width + column]);
-    for (size_t y = 0; y < height; ++y)
-      for (size_t row = y >= margin ? y - margin : 0; row <= std::min(height - 1, y + margin); ++row)
-        for (size_t x = 0; x < width; ++x) result[y * width + x] = std::max(result[y * width + x], widest[row * width + x]);
-    return result;
-  }
-
-  std::string mask_exact(const outcome &result, const std::array<const artifact_t *, 4> &inputs, const artifact_t &paired,
-      std::uint32_t late_margin) {
-    // Raw selected alpha, the late UI layer's alpha with the shader's
-    // margin, or a whole-frame flat (sources 6, 8 and 9); a HUD-less
-    // difference has no CPU reference here.
+  std::string mask_exact(const outcome &result, const std::array<const artifact_t *, 4> &inputs, const artifact_t &paired) {
+    // Raw selected alpha, or a whole-frame flat (sources 6, 8 and 9); a
+    // HUD-less difference has no CPU reference here.
     const auto source = result.decision.at(word::source);
     std::vector<float> reference;
     if (!source) reference.assign(result.mask.size(), 0.f);
@@ -266,9 +247,6 @@ namespace {
       if (!input) return "no-reference(missing candidate)";
       reference = component(*input, source == 1u ? 0 : 3);
       if (reference.empty()) return "no-reference(format " + input->descriptor.at("dxgi_format").dump() + ")";
-      if (source == 2u && (result.flags & contract::stored_late_layer) && late_margin &&
-          reference.size() == result.mask.size())
-        reference = late_layer_margin(reference, result.width, result.height, late_margin);
     } else return "no-reference(source " + std::to_string(source) + ")";
     if (reference.size() != result.mask.size()) return "differs(extent)";
     std::uint64_t different = 0;
@@ -421,9 +399,7 @@ namespace {
       std::memcpy(&word, &value, sizeof(word));
       result.mask_hash = (result.mask_hash ^ word) * 1099511628211ull;
     }
-    if (label.at("expect").value("mask_exact", false))
-      result.mask_exact = mask_exact(result, inputs, paired_color,
-        sunshine_game3d::shader_marker(shader_source, "SUNSHINE_UI_LATE_MARGIN"));
+    if (label.at("expect").value("mask_exact", false)) result.mask_exact = mask_exact(result, inputs, paired_color);
     return result;
   }
 
@@ -467,7 +443,7 @@ namespace {
   // A copy of the dump whose consumed mask is the one this replay resolved,
   // for replay_game3d_dump --shader. The captured package is never modified.
   void write_mask(const fs::path &directory, const fs::path &dump, const std::string &name, const outcome &result,
-      const fs::path &shader, std::uint32_t late_margin) {
+      const fs::path &shader) {
     auto manifest = json::parse(read_text(dump / "manifest.json"));
     const auto &record = manifest.at("producer_metadata").at("replay");
     json *consumed = nullptr;
@@ -486,11 +462,9 @@ namespace {
       else fs::copy_file(dump / file, directory / file);
     }
     manifest["ui_detection_replay_mask"] = {{"source_dump", dump.string()}, {"label", name}, {"shader", shader.string()},
-      {"decision", result.decision}, {"flags", result.flags}, {"late_margin", late_margin},
+      {"decision", result.decision}, {"flags", result.flags},
       {"meaning", "ui_source_color is the R32 mask ui_detection_replay resolved with this shader; every other artifact and the "
-        "metadata are the captured ones. flags are the detection flags it pushed and late_margin the shader's "
-        "SUNSHINE_UI_LATE_MARGIN: with flag 0x4 a mask from the UI layer (decision source 2) is its alpha with the "
-        "late-layer margin (docs/reshade-sbs.md)."}};
+        "metadata are the captured ones. flags are the detection flags it pushed."}};
     const auto text = manifest.dump(2) + '\n';
     write_bytes(directory / "manifest.json", text.data(), text.size());
   }
@@ -516,12 +490,11 @@ int main(int argc, char **argv) {
         "Binds each dump's candidates (t0 paired color, t11-t14), raw depth (t1; a 1x1 placeholder without it), presented\n"
         "color (t6) and its exact 80-byte b0, and runs the shader's scene evidence passes as on a sample frame. A case\n"
         "whose dump directory is gone is skipped; the run fails when no case ran.\n"
-        "mask_exact compares the resolved mask with the selected raw alpha (an offscreen UI layer's dilated by the shader's\n"
-        "SUNSHINE_UI_LATE_MARGIN), all zeros or all ones; scene and hudless_scene check the hidden-scene evidence that\n"
-        "the shader's evidence passes write to decision texels 5 and 6. --write-mask copies each dump\n"
-        "that consumed an automatic R32 mask into <new-dir>/<NN>_<dump> (NN: the case's position in cases.json) with\n"
-        "ui_source_color replaced by the resolved mask, for replay_game3d_dump --shader; any other dump fails its case.\n"
-        "--verbose prints every decision word.\n");
+        "mask_exact compares the resolved mask with the selected raw alpha, all zeros or all ones; scene and hudless_scene\n"
+        "check the hidden-scene evidence that the shader's evidence passes write to decision texels 5 and 6. --write-mask\n"
+        "copies each dump that consumed an automatic R32 mask into <new-dir>/<NN>_<dump> (NN: the case's position in\n"
+        "cases.json) with ui_source_color replaced by the resolved mask, for replay_game3d_dump --shader; any other dump\n"
+        "fails its case. --verbose prints every decision word.\n");
       return 2;
     }
     const auto shader_path = fs::absolute(positional[0]);
@@ -581,8 +554,7 @@ int main(int argc, char **argv) {
         std::snprintf(prefix, sizeof(prefix), "%02u_", index);
         const auto directory = *write_masks / (prefix + dump.filename().string());
         try {
-          write_mask(directory, dump, name, result, shader_path,
-            sunshine_game3d::shader_marker(shader_source, "SUNSHINE_UI_LATE_MARGIN"));
+          write_mask(directory, dump, name, result, shader_path);
           written = "  mask written: " + directory.string();
         } catch (const std::exception &error) {
           okay = false;

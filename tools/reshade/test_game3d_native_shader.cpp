@@ -290,11 +290,10 @@ int main(int argc, char **argv) {
       return unsigned(std::stoul(source.substr(at + key.size())));
     };
     const unsigned limiter_lines = marker("SUNSHINE_LIMITER_LINE_GROUPS"), pin_lines = marker("SUNSHINE_UI_PIN_LINE_GROUPS");
-    // Dump 3D records the soft pin gain and the late-layer margin, and
-    // ui_detection_replay's mask reference reads the margin from the shader.
+    // Dump 3D records the soft pin gain. Every automatic mask, the late
+    // offscreen layer's included, is its source's raw alpha: no margin marker.
     require(marker("SUNSHINE_UI_SOFT_PIN_GAIN") >= 1, "UI soft pin gain must be at least one");
-    // Its mask pass stages (8 + 2 * margin)^2 texels in group memory.
-    require(marker("SUNSHINE_UI_LATE_MARGIN") <= 28, "UI late-layer margin out of range");
+    require(source.find("SUNSHINE_UI_LATE_MARGIN") == std::string::npos, "UI late-layer margin must stay removed");
     // UI detection sizes its decision texels and statistics rows from these
     // markers, and its flag bits mirror game3d_ui_detection_contract.h.
     namespace detection = sunshine_game3d::ui_detection;

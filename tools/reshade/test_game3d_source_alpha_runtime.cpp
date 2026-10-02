@@ -1982,43 +1982,21 @@ namespace {
     ui_render_input ui;
     ui.automatic = &source; ui.detection = &inputs;
     const auto expected_flags = ui_detection::layer_detection_flags(gpu.color == 2);
-    // The one-frame-late layer's mask is its alpha dilated by the shader's
-    // late-layer margin; a same-frame tagged UI color's is its raw alpha.
-    const auto embedded_margin = shader_marker(renderer::shader_source(), "SUNSHINE_UI_LATE_MARGIN");
-    require(embedded_margin > 0 && embedded_margin < gpu.height / 4 && embedded_margin < gpu.width / 3,
-      "The native shader lost its late-layer margin");
-    const auto check = [&](std::uint32_t flags, const fs::path &dump, const char *label, renderer &active, unsigned margin) {
+    // Every automatic mask is its source's raw alpha: the one-frame-late layer
+    // (stored flag 0x4) exactly like a same-frame tagged UI color.
+    require(expected_flags & ui_detection::stored_late_layer, "The offscreen UI layer lost its late-layer flag");
+    const auto check = [&](std::uint32_t flags, const fs::path &dump, const char *label) {
       source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
-      gpu.render(true, 1, false, false, false, {}, dump, {}, nullptr, nullptr, nullptr, &active, &ui);
-      const auto consumed = active.consumed_detection();
+      gpu.render(true, 1, false, false, false, {}, dump, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      const auto consumed = gpu.renderer.consumed_detection();
       require(consumed.state == ui_detection_snapshot::run_state::ran && consumed.candidates == 2u &&
           consumed.flags == flags && consumed.stored_flags == flags && !(consumed.stored_flags & ui_detection::per_frame_mask),
         std::string(label) + ": wrong detection constants");
-      const auto selected = gpu.read(active.diagnostics().ui_source);
-      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
-        float expected = 0.f;
-        const unsigned texels = flags & ui_detection::stored_late_layer ? margin : 0;
-        for (unsigned row = y >= texels ? y - texels : 0; row <= std::min(gpu.height - 1, y + texels); ++row)
-          for (unsigned column = x >= texels ? x - texels : 0; column <= std::min(gpu.width - 1, x + texels); ++column)
-            expected = std::max(expected, hud[size_t(row) * gpu.width + column]);
-        require(selected.channel(x, y, 0) == expected, std::string(label) + ": mask is not the slot's alpha with its margin");
-      }
+      const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
+      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x)
+        require(selected.channel(x, y, 0) == hud[size_t(y) * gpu.width + x], std::string(label) + ": mask is not the slot's raw alpha");
     };
-    check(expected_flags, directory, "offscreen UI layer", gpu.renderer, embedded_margin);
-    // Setting the marker to 0 drops the margin: the layer's mask is its raw alpha.
-    {
-      std::string shader(renderer::shader_source());
-      const std::string marker = "#define SUNSHINE_UI_LATE_MARGIN ";
-      const auto at = shader.find(marker);
-      require(at != std::string::npos, "Cannot find the late-layer margin marker");
-      shader.replace(at + marker.size(), std::to_string(embedded_margin).size(), "0");
-      renderer unmargined;
-      require(unmargined.configure(observed_runtime, {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())},
-        static_cast<api::color_space>(gpu.color), shader), "configure the margin-free renderer");
-      check(expected_flags, {}, "offscreen UI layer without a margin", unmargined, 0);
-      gpu.drain_render();
-      unmargined.reset_after_runtime_drain();
-    }
+    check(expected_flags, directory, "offscreen UI layer");
     std::ifstream stored(directory / "manifest.json");
     const auto manifest = nlohmann::json::parse(stored);
     const auto &replay = manifest.at("producer_metadata").at("replay");
@@ -2027,14 +2005,13 @@ namespace {
         replay.at("ui_pin").at("decision_texels") == ui_detection::scene_decision_texels &&
         replay.at("ui_pin").at("evidence_images") == ui_detection::max_scene_evidence_images,
       "Dump lost the layer's detection constants or pin markers");
-    require(replay.at("ui_pin").at("late_margin") == embedded_margin &&
+    require(!replay.at("ui_pin").contains("late_margin") &&
         replay.at("ui_pin").at("soft_pin_gain") == shader_marker(renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"),
-      "Dump lost the soft pin gain or the late-layer margin");
+      "Dump lost the soft pin gain or still records a late-layer margin");
     inputs.color_alpha_flags = 0;
-    check(0u, {}, "tagged UIColorAndAlpha", gpu.renderer, embedded_margin);
-    report << "layer-detection-dump flags=" << expected_flags << " tagged_flags=0 ran=1 held_reported=1 late_margin=" <<
-      embedded_margin << " margin_zero_raw=1\n";
-    std::puts("PASS D3D11 UI detection constants: the UI layer fills the UI color slot with stored flags only and its mask gets the late-layer margin (none with the marker at 0), a tagged UI color with none, and Dump 3D records them with the pin markers");
+    check(0u, {}, "tagged UIColorAndAlpha");
+    report << "layer-detection-dump flags=" << expected_flags << " tagged_flags=0 ran=1 held_reported=1 layer_raw_alpha=1\n";
+    std::puts("PASS D3D11 UI detection constants: the UI layer fills the UI color slot with stored flags only, a tagged UI color with none, both masks are the slot's raw alpha, and Dump 3D records them with the pin markers");
   }
   // Hidden-scene evidence (docs/reshade-sbs.md, hidden-scene evidence). Full-
   // frame UI over a hidden scene (sources 8 and 9) needs this frame's gate,
