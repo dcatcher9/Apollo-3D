@@ -189,6 +189,120 @@ class ReadinessReport(unittest.TestCase):
                              output('10:00:18', 900, 200, 150, 900, 0)])
         self.assertEqual(checks['Placement flat'].status, 'PASS')
 
+    def test_depth_gaps_name_the_addons_own_loss_episodes(self):
+        # Stellar Blade 2026-10-02: the counter interval read 13:27:29-13:27:34; the add-on lost depth at
+        # 32.988 because the game supplied no depth view and recovered 1859 ms later.
+        lost = line('10:00:17', '[Sunshine 3D] Sunshine depth readiness: lost reason=retained_depth_expired '
+                                'runtime=0x1 present=10 unavailable_ms=0 suppressed_episodes=0; provider=NGX '
+                                'prior_provider=NGX selected=0 display=not_attempted selection=inactive_views '
+                                'status=stale')
+        recovered = line('10:00:18', '[Sunshine 3D] Sunshine depth readiness: recovered reason=fresh_copy runtime=0x1 '
+                                     'present=20 unavailable_ms=1859 suppressed_episodes=0; provider=NGX '
+                                     'prior_provider=NGX selected=1 display=ready selection=completed_snapshot')
+        checks = run(BASE + [lost, recovered, output('10:00:20', 1000, 0, 0, 750, 250)])
+        self.assertEqual(checks['Depth'].status, 'WARN')
+        self.assertEqual(checks['Depth'].times, [
+            '10:00:17.000-10:00:18.000 (1859 ms) retained_depth_expired, NGX selection=inactive_views '
+            '(the game supplied no depth)'])
+        self.assertEqual(checks['Depth losses'].detail, 'retained_depth_expired 1')
+        # A loss inside a clean interval is counted but names no window; one never recovered says so.
+        quiet = run(BASE + [lost, recovered])
+        self.assertEqual((quiet['Depth'].status, quiet['Depth'].times), ('PASS', []))
+        open_loss = run(BASE + [lost, output('10:00:20', 1000, 0, 0, 750, 250)])
+        self.assertTrue(open_loss['Depth'].times[0].endswith('until the log ended'))
+
+    def test_nothing_counts_while_the_export_is_inactive(self):
+        # The game in the background: no output is streamed from 'export inactive' to the next generation,
+        # so its depth losses are not losses the viewer saw.
+        inactive = line('10:00:16', '[Sunshine 3D] Sunshine SBS: export inactive (not_foreground); waiting')
+        lost = line('10:00:17', '[Sunshine 3D] Sunshine depth readiness: lost reason=no_retained_depth runtime=0x1 '
+                                'unavailable_ms=0; provider=Streamline prior_provider=Streamline '
+                                'selection=fg_scope_mismatch')
+        resumed = line('10:00:19', '[Sunshine 3D] Sunshine SBS: generation 2, 7680x2160 full SBS, DXGI 10, D3D12, '
+                                   'scRGB (source color 3)')
+        checks = run(BASE + [inactive, lost, lost, resumed, line('10:00:20', 'Finished exiting.')])
+        self.assertNotIn('Depth losses', checks)
+        session = report.parse(BASE + [inactive, lost, resumed, lost])
+        self.assertEqual(session.readiness['no_retained_depth'], 1)
+        # A loss open when the export pauses ends there.
+        paused = report.parse(BASE + [lost, inactive])
+        self.assertEqual((paused.depth_episodes[0].end, paused.depth_episodes[0].ending),
+                         (report.seconds('10', '00', '16', '000'), 'paused'))
+
+    def test_depth_episodes_pair_within_each_runtime(self):
+        # Each runtime traces its own loss and recovery, so another runtime's recovery cannot close it, and a
+        # session crossing midnight keeps its order.
+        def readiness(t, kind, runtime):
+            return line(t, f'[Sunshine 3D] Sunshine depth readiness: {kind} reason=x runtime={runtime} '
+                           f'unavailable_ms=0; provider=NGX selection=inactive_views')
+        start = [line('23:59:58', '[Sunshine 3D] Sunshine SBS: generation 1, 7680x2160 full SBS, DXGI 10, D3D12, '
+                                  'scRGB (source color 3)')]
+        paused = line('00:00:02', '[Sunshine 3D] Sunshine SBS: export inactive (not_foreground)')
+        session = report.parse(start + [readiness('23:59:59', 'lost', '0x1'), readiness('00:00:00', 'lost', '0x2'),
+                                        readiness('00:00:01', 'recovered', '0x1'), paused])
+        self.assertEqual([(report.clock(e.start, True), report.clock(e.end, True), e.ending)
+                          for e in session.depth_episodes],
+                         [('23:59:59.000', '00:00:01.000', 'recovered'), ('00:00:00.000', '00:00:02.000', 'paused')])
+
+    def test_short_calibration_after_a_provider_switch_is_info(self):
+        # Stellar Blade 2026-10-02: FG on at 13:27:37 covered too little of the 5 s interval for the settle
+        # rule, but its projection controller calibrated within a second of the switch to Streamline depth.
+        def readiness(t, kind, provider, prior):
+            return line(t, f'[Sunshine 3D] Sunshine depth readiness: {kind} reason=x runtime=0x1 unavailable_ms=0; '
+                           f'provider={provider} prior_provider={prior} selection=completed_snapshot')
+        switch = [
+            readiness('10:00:05', 'lost', 'NGX', 'NGX'), readiness('10:00:05', 'recovered', 'NGX', 'NGX'),
+            line('10:00:06', '[Sunshine 3D] Sunshine 3D raw automation: ready; source=3; samples=4 stereo_scale=5'),
+            readiness('10:00:16', 'lost', 'Streamline', 'NGX'),
+            line('10:00:16', '[Sunshine 3D] Sunshine 3D raw automation: depth_unavailable; source=0; samples=0'),
+            readiness('10:00:16', 'recovered', 'Streamline', 'Streamline'),
+            line('10:00:16', '[Sunshine 3D] Sunshine 3D Streamline scale: waiting_for_depth; viewport=1; retaining'),
+            line('10:00:17', '[Sunshine 3D] Sunshine 3D Streamline scale: ready; viewport=1 encoding=device'),
+            output('10:00:20', 1000, 0, 150, 1000, 0)]
+        checks = run(BASE + switch)
+        self.assertEqual(checks['Placement flat'].status, 'PASS')
+        self.assertEqual(checks['Placement calibration'].status, 'INFO')
+        self.assertEqual(checks['Placement calibration'].times,
+                         ['10:00:16.000-10:00:17.000 after provider switch (NGX to Streamline)'])
+        # A calibration that had depth for longer than the settle time is a fault, and names its state.
+        slow = [x.replace('10:00:17', '10:00:20') if 'scale: ready' in x else x for x in switch]
+        checks = run(BASE + slow)
+        self.assertEqual(checks['Placement flat'].status, 'WARN')
+        self.assertNotIn('Placement calibration', checks)
+        self.assertEqual(checks['Placement flat'].times,
+                         ['10:00:15-10:00:20, projection waiting_for_depth 10:00:16-10:00:20 (4.0 s with depth)'])
+        # Depth time adds up across losses: two 2 s attempts are 4 s of flat output with depth. A loss that
+        # began after the run did not start it.
+        flicker = switch[:3] + [
+            line('10:00:16', '[Sunshine 3D] Sunshine 3D raw automation: calibrating; source=3; samples=0'),
+            readiness('10:00:18', 'lost', 'NGX', 'NGX'), readiness('10:00:19', 'recovered', 'NGX', 'NGX'),
+            output('10:00:20', 1000, 0, 150, 1000, 0),
+            line('10:00:21', '[Sunshine 3D] Sunshine 3D raw automation: ready; source=3; samples=4 stereo_scale=5')]
+        self.assertEqual(run(BASE + flicker)['Placement flat'].times,
+                         ['10:00:15-10:00:20, raw calibrating 10:00:16-10:00:21 (4.0 s with depth, no switch, '
+                          'depth loss or export start before it)'])
+        # A short run that nothing in the log started is not a designed calibration: placement fell back
+        # on its own, so it warns however briefly it lasted.
+        unexplained = switch[:3] + [
+            line('10:00:18', '[Sunshine 3D] Sunshine 3D raw automation: calibrating; source=3; samples=0'),
+            line('10:00:19', '[Sunshine 3D] Sunshine 3D raw automation: ready; source=3; samples=4 stereo_scale=5'),
+            output('10:00:20', 1000, 0, 150, 1000, 0)]
+        checks = run(BASE + unexplained)
+        self.assertNotIn('Placement calibration', checks)
+        self.assertEqual(checks['Placement flat'].times,
+                         ['10:00:15-10:00:20, raw calibrating 10:00:18-10:00:19 (1.0 s with depth, no switch, '
+                          'depth loss or export start before it)'])
+        # The same run is designed when an FG switch began it, up to the add-on's one-second log gate earlier.
+        fg = line('10:00:18', '[Sunshine 3D] Sunshine Streamline frame generation: viewport=1 mode=1 '
+                              'generated_frames=2 supported=1 success=1')
+        checks = run(BASE + unexplained[:3] + [fg] + unexplained[3:])
+        self.assertEqual(checks['Placement calibration'].times,
+                         ['10:00:18.000-10:00:19.000 after frame generation switch'])
+        # Flat output while placement claimed ready has no calibration in progress.
+        placed = run(BASE + switch[:3] + [output('10:00:20', 1000, 0, 150, 1000, 0)])
+        self.assertEqual((placed['Placement flat'].status, placed['Placement flat'].times),
+                         ('WARN', ['10:00:15-10:00:20']))
+
     def test_host_lines_from_another_session_are_not_counted(self):
         with TemporaryDirectory() as folder:
             host = Path(folder) / 'sunshine.log'

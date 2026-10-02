@@ -52,6 +52,12 @@ SCENE = re.compile(
 TRUST = re.compile(r'Sunshine UI protection: (restored alpha trust|alpha trust is now) (0x[0-9a-fA-F]+)')
 LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
+UNAVAILABLE_MS = re.compile(r'\bunavailable_ms=(\d+)')
+PROVIDER = re.compile(r'\bprovider=(\w+)')
+SELECTION = re.compile(r'\bselection=(\w+)')
+RUNTIME = re.compile(r'\bruntime=(0x[0-9a-fA-F]+)')
+# Either placement controller; the first word after the colon is its state.
+PLACEMENT = re.compile(r'Sunshine 3D (raw automation|Streamline scale): (\w+);')
 DEPTH_STATUS = re.compile(r'Sunshine Streamline depth: (\w+);')
 HITCH = re.compile(r'Game 3D hitch: (.+?) took ([0-9.]+) ms')
 NGX = re.compile(r'Sunshine NGX depth: .*?evaluations=(\d+) nominations=(\d+) copy_recorded=(\d+) '
@@ -70,6 +76,10 @@ BENIGN = (
 # Export pauses that are part of normal play rather than faults.
 ROUTINE_INACTIVE = {'not_foreground', 'runtime_reset', 'no_consumer', 'present_without_render', 'runtime_gone'}
 SETTLE_S = 3.0  # Recalibration and holds after an FG switch or runtime reset.
+LOG_GATE_S = 1.0  # A changed controller state waits this long after its previous line (diagnostic_log_gate.h).
+RAW_PLACED = ('ready', 'holding_reference')  # Raw automation states that place the scene (raw_scene_policy.h).
+# A depth selection that names a game-side cause.
+SELECTION_HINTS = {'inactive_views': 'the game supplied no depth'}
 RESOLVE_S = 10.0  # A trust dispute is handled when that channel's trust is revoked this soon.
 DEDICATED, PRESENTED = (0, 1), (2, 3)
 UI_LAYER_SOURCE = 4  # alpha_auto_policy source of the offscreen UI layer in slot 1.
@@ -82,9 +92,10 @@ def seconds(h: str, m: str, s: str, ms: str) -> float:
     return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
 
 
-def clock(value: float) -> str:
-    value %= 86400
-    return f'{int(value // 3600):02}:{int(value % 3600 // 60):02}:{int(value % 60):02}'
+def clock(value: float, ms: bool = False) -> str:
+    millis = round(value * 1000) % 86_400_000 if ms else int(value % 86400) * 1000
+    text = f'{millis // 3_600_000:02}:{millis // 60_000 % 60:02}:{millis // 1000 % 60:02}'
+    return f'{text}.{millis % 1000:03}' if ms else text
 
 
 class Scene(NamedTuple):
@@ -134,6 +145,50 @@ class Interval:
 
 
 @dataclass
+class DepthEpisode:
+    """One 'Sunshine depth readiness' loss while the export streamed, to its recovery."""
+    start: float
+    reason: str
+    provider: str
+    selection: str
+    end: float | None = None
+    ending: str = 'open'  # recovered, paused (export inactive) or open (the log ended).
+    unavailable_ms: int | None = None  # The add-on's own duration, from its recovered line.
+
+
+@dataclass
+class Unplaced:
+    """A run of placement-controller lines that did not place the scene, to the next line that did.
+
+    Its lines can be held up to a second by the add-on's diagnostic log gate, so its ends are approximate."""
+    start: float
+    end: float
+    before: str  # Depth provider when placement was last ready, or '' when unknown.
+    after: str = ''  # Depth provider when this run ended placed, or '' when unknown or it never did.
+    states: list[tuple[float, str]] = field(default_factory=list)  # Each line's time and controller state.
+    with_depth: list[tuple[float, float]] = field(default_factory=list)  # Parts streamed with depth available.
+    cause: str = ''  # The switch, loss or export start that began it, or '' when the log names none.
+
+    def depth_s(self) -> float:
+        return sum(b - a for a, b in self.with_depth)
+
+    def long(self) -> bool:
+        """Longer with depth than the designed recalibration after a switch."""
+        return self.depth_s() > SETTLE_S
+
+    def calibration(self) -> bool:
+        """The designed recalibration: it followed a named cause and had depth for at most SETTLE_S."""
+        return bool(self.with_depth and self.cause) and not self.long()
+
+    def state(self) -> str:
+        """The state its lines reported for the longest time."""
+        held = Counter()
+        for (t, state), (until, _) in zip(self.states, self.states[1:] + [(self.end, '')]):
+            held[state] += until - t
+        return held.most_common(1)[0][0]
+
+
+@dataclass
 class Session:
     exe: str = ''
     first: float | None = None
@@ -156,7 +211,10 @@ class Session:
     ui: list[UISample] = field(default_factory=list)
     trust_events: list[tuple[float, str, int]] = field(default_factory=list)
     losses: dict[int, tuple[float, str]] = field(default_factory=dict)
-    readiness: Counter = field(default_factory=Counter)
+    readiness: Counter = field(default_factory=Counter)  # Losses while the export streamed.
+    depth_episodes: list[DepthEpisode] = field(default_factory=list)
+    streamed: list[list] = field(default_factory=list)  # From a generation to the next export inactive.
+    placement: list[tuple[float, bool, str, str]] = field(default_factory=list)  # t, placed, state, provider.
     statuses: Counter = field(default_factory=Counter)
     hitches: list[tuple[float, str, float]] = field(default_factory=list)
     timing: tuple | None = None
@@ -169,6 +227,16 @@ def parse(lines) -> Session:
     previous_output: dict[str, tuple] = {}
     offset = 0.0
     last_raw = None
+    provider = ''
+    open_episodes: dict[str, DepthEpisode] = {}  # Each runtime traces its own loss and recovery.
+
+    def pause(t: float, ending: str) -> None:
+        if s.streamed and s.streamed[-1][1] is None:
+            s.streamed[-1][1] = t
+        for episode in open_episodes.values():
+            episode.end, episode.ending = t, ending
+        open_episodes.clear()
+
     for line in lines:
         m = LINE.match(line.rstrip('\n'))
         if not m:
@@ -197,7 +265,10 @@ def parse(lines) -> Session:
             width, height, api, color = found.group(2), found.group(3), found.group(5), found.group(6)
             s.generation = f'{width}x{height} {color} {api} (generation {found.group(1)})'
             s.settle.append(t)
+            if not s.streamed or s.streamed[-1][1] is not None:
+                s.streamed.append([t, None])
         if found := INACTIVE.search(text):
+            pause(t, 'paused')  # Nothing is streamed from here until the next generation.
             reason = found.group(1)
             s.inactive[reason] += 1
             s.inactive_first.setdefault(reason, t)
@@ -247,8 +318,27 @@ def parse(lines) -> Session:
             s.trust_events.append((t, found.group(1), int(found.group(2), 16)))
         if found := LOSS.search(text):
             s.losses.setdefault(int(found.group(1)), (t, found.group(2)))
-        if (found := READINESS.search(text)) and found.group(1) == 'lost':
-            s.readiness[found.group(2)] += 1
+        if found := READINESS.search(text):
+            named = PROVIDER.search(text)
+            if named and named.group(1) != 'unknown':
+                provider = named.group(1)
+            runtime = RUNTIME.search(text)
+            key = runtime.group(1).lower() if runtime else ''
+            if found.group(1) == 'lost' and s.streamed and s.streamed[-1][1] is None:
+                s.readiness[found.group(2)] += 1
+                selection = SELECTION.search(text)
+                if key not in open_episodes:
+                    open_episodes[key] = DepthEpisode(t, found.group(2), named.group(1) if named else 'unknown',
+                                                      selection.group(1) if selection else 'unknown')
+                    s.depth_episodes.append(open_episodes[key])
+            elif found.group(1) == 'recovered' and (episode := open_episodes.pop(key, None)):
+                unavailable = UNAVAILABLE_MS.search(text)
+                episode.end, episode.ending = t, 'recovered'
+                episode.unavailable_ms = int(unavailable.group(1)) if unavailable else None
+        if found := PLACEMENT.search(text):
+            state, raw = found.group(2), found.group(1) == 'raw automation'
+            s.placement.append((t, state in RAW_PLACED if raw else state == 'ready',
+                                ('raw ' if raw else 'projection ') + state, provider))
         if found := DEPTH_STATUS.search(text):
             s.statuses[found.group(1)] += 1
         if found := NGX.search(text):
@@ -258,7 +348,58 @@ def parse(lines) -> Session:
         if found := TIMING.search(text):
             s.timing = (int(found.group(1)), float(found.group(2)), float(found.group(3)),
                         int(found.group(4)), float(found.group(5)), float(found.group(6)))
+    if s.last is not None:
+        pause(s.last, 'open')
     return s
+
+
+def unplaced(s: Session) -> list[Unplaced]:
+    """Runs without placement, each with the parts that streamed while depth was available."""
+    runs: list[Unplaced] = []
+    current: Unplaced | None = None
+    ready_provider = ''
+    for t, placed, state, provider in s.placement:
+        if not placed:
+            current = current or Unplaced(t, t, ready_provider)
+            current.states.append((t, state))
+        else:
+            if current:
+                current.end, current.after = t, provider
+                runs.append(current)
+                current = None
+            ready_provider = provider
+    if current and s.last is not None:
+        current.end = s.last
+        runs.append(current)
+    episodes = sorted(s.depth_episodes, key=lambda e: e.start)
+    for run in runs:
+        for a, b in s.streamed:
+            a, b = max(a, run.start), min(b, run.end)
+            for e in episodes:
+                if e.start < b and e.end > a:
+                    if e.start > a:
+                        run.with_depth.append((a, e.start))
+                    a = max(a, e.end)
+            if b > a:
+                run.with_depth.append((a, b))
+        run.cause = cause(s, run)
+    return runs
+
+
+def cause(s: Session, run: Unplaced) -> str:
+    """What the log names as starting a run: a depth-provider or FG switch, a depth loss or the export starting.
+
+    The controller line that opened the run may have been held for LOG_GATE_S, so the cause may lead it by that."""
+    lead = run.start - LOG_GATE_S
+    if run.before and run.after and run.before != run.after:
+        return f'after provider switch ({run.before} to {run.after})'
+    if any(lead <= t <= run.start for t, _ in s.fg_switches):
+        return 'after frame generation switch'
+    if any(e.start <= run.start and e.end >= lead for e in s.depth_episodes):
+        return 'after depth loss'
+    if any(lead <= a < run.end for a, _ in s.streamed):
+        return 'after the export started'
+    return ''
 
 
 @dataclass
@@ -280,7 +421,7 @@ def settled(s: Session, interval: Interval) -> bool:
     return covered * 2 < interval.end - interval.start
 
 
-def windows(s: Session, predicate) -> list[str]:
+def windows(s: Session, predicate) -> list[list[float]]:
     """Time ranges of consecutive settled intervals matching predicate."""
     ranges: list[list[float]] = []
     for interval in s.intervals:
@@ -290,7 +431,27 @@ def windows(s: Session, predicate) -> list[str]:
             ranges[-1][1] = interval.end
         else:
             ranges.append([interval.start, interval.end])
-    return [f'{clock(a)}-{clock(b)}' for a, b in ranges]
+    return ranges
+
+
+def span(a: float, b: float, ms: bool = False) -> str:
+    return f'{clock(a, ms)}-{clock(b, ms)}'
+
+
+def depth_gaps(s: Session, ranges: list[list[float]]) -> list[str]:
+    """Each gap window as the add-on's own loss episodes inside it, or the window when it logged none."""
+    times = []
+    for a, b in ranges:
+        inside = [e for e in s.depth_episodes if e.start < b and e.end > a]
+        if not inside:
+            times.append(span(a, b))
+        for e in inside:
+            hint = SELECTION_HINTS.get(e.selection)
+            took = f' ({e.unavailable_ms} ms)' if e.unavailable_ms is not None else ''
+            times.append(f'{span(e.start, e.end, True)}{took} {e.reason}, {e.provider} selection={e.selection}'
+                         + (f' ({hint})' if hint else '')
+                         + {'paused': ', until the export paused', 'open': ', until the log ended'}.get(e.ending, ''))
+    return times
 
 
 def evaluate(s: Session) -> list[Check]:
@@ -313,16 +474,42 @@ def evaluate(s: Session) -> list[Check]:
         after = [i for i in s.intervals if i.start >= depth_start.start]
         pub = sum(i.published for i in after) or 1
         missing = sum(i.missing for i in after)
-        gaps = windows(s, lambda i: i.start >= depth_start.start and i.missing * 10 > i.published)
+        gaps = depth_gaps(s, windows(s, lambda i: i.start >= depth_start.start and i.missing * 10 > i.published))
         add(Check('WARN' if gaps else 'PASS', 'Depth',
                   f'fresh from {clock(depth_start.start)}; '
                   f'{100 * missing / pub:.1f}% of later publications without depth'
                   + ('; gaps outside FG switches and resets' if gaps else ''), gaps))
-        flats = windows(s, lambda i: i.start >= depth_start.start and i.flat * 4 > i.published)
+        # Flat output is depth without placement. Within runs without placement that each followed a named
+        # cause and had depth for at most SETTLE_S in total it is the designed calibration; a longer or
+        # unexplained run, or flat output while placed, warns.
+        runs = [r for r in unplaced(s) if r.with_depth]
+
+        def calibrating(i: Interval) -> bool:
+            found = [r for r in runs if r.start < i.end and r.end > i.start]
+            return bool(found) and all(r.calibration() for r in found)
+
+        def flagged(i: Interval) -> bool:
+            return i.start >= depth_start.start and i.flat * 4 > i.published
+
+        def why(r: Unplaced) -> str:
+            unexplained = '' if r.cause else ', no switch, depth loss or export start before it'
+            return f'{r.state()} {span(r.start, r.end)} ({r.depth_s():.1f} s with depth{unexplained})'
+
+        flats = windows(s, lambda i: flagged(i) and not calibrating(i))
+        calibrations = windows(s, lambda i: flagged(i) and calibrating(i))
         flat = sum(i.flat for i in after)
         add(Check('WARN' if flats else 'PASS', 'Placement flat',
                   f'{100 * flat / pub:.1f}% of publications showed the colour frame with depth'
-                  + ('; flat windows outside FG switches and resets' if flats else ''), flats))
+                  + ('; flat windows outside FG switches and resets' if flats else ''),
+                  [span(a, b) + ''.join(f', {why(r)}' for r in runs
+                                        if not r.calibration() and r.start < b and r.end > a) for a, b in flats]))
+        if calibrations:
+            seen = [r for r in runs if any(r.start < b and r.end > a for a, b in calibrations)]
+            add(Check('INFO', 'Placement calibration',
+                      ('1 flat window was a calibration' if len(calibrations) == 1 else
+                       f'{len(calibrations)} flat windows were calibrations')
+                      + f' with depth for at most {SETTLE_S:g} s',
+                      [f'{span(r.start, r.end, True)} {r.cause}' for r in seen][:6]))
 
     if s.coverage:
         covered, observed, declared, unknown, closed, passes = s.coverage

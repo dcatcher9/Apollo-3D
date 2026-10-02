@@ -459,7 +459,23 @@ presented frame read hidden, not blank, for at least 500 ms while no UI source d
 nothing could act, such as a game whose only UI signal is presented alpha); observation losses by
 cause; unusual export pauses; present-thread
 hitches; Game 3D CPU and GPU cost; and, from the host log, the Game 3D link, size fit and encoder
-stalls. A failing check is a bug report: fix the rule at its root (see
+stalls.
+
+The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
+the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`
+loss inside it, paired with the same runtime's recovery, with its exact start, `unavailable_ms`,
+reason, provider and selection (`inactive_views` means the game supplied no depth view). A flat
+window is reported as INFO `Placement calibration` only when every placement-controller run
+without placement inside it (raw automation other than `ready`/`holding_reference`, or
+Streamline scale other than `ready`) followed a cause the log names (a depth-provider or frame
+generation switch, a depth loss, or the export starting) and had depth for no longer in total
+than the report's settle time. A longer or unexplained run, or flat output while placement was
+ready, stays a warning that names the controller's state. The add-on's diagnostic log gate can
+hold a controller line, so run ends are approximate and a cause may lead its run by that gate.
+From `Sunshine SBS: export inactive` until the next `Sunshine SBS: generation` nothing is
+streamed, and depth losses there are not counted.
+
+A failing check is a bug report: fix the rule at its root (see
 [the generalization rules](../../docs/reshade-sbs.md#rules-for-new-game-behaviour)), then add a
 check here when a new signature appears. Run its tests with
 `python -m unittest tools/reshade/test_game3d_log_report.py`.
