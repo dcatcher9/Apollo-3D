@@ -83,7 +83,7 @@ try {
   }
   if (-not (Test-Path -LiteralPath $testExecutable -PathType Leaf)) { throw "Build the host test binary first: $testExecutable" }
   $nativeFilter = @(
-    'Offline*', 'GpuWorkloadArbiter.*', 'Rtsp*', 'NvHttpLaunchParsingTest.*', 'Input*', 'ProcessTest.*',
+    'Offline*', 'GpuWorkloadArbiter.*', 'Rtsp*', 'NvHttpLaunchParsingTest.*', 'StreamGamma*.*', 'Input*', 'ProcessTest.*',
     'IdleProcessLifecycleTest.*', 'RetainedDisplayPauseTest.*', 'PlatformLaunchGuardTest.*', 'PrimaryDisplay*', 'VirtualDisplay*', 'DisplayConfigTarget.*', 'SessionResumeLifecycle.*',
     'SessionWorker*Test.*', 'AtomicPresentation*', 'WindowsQpc*', 'WindowsDdup*',
     'GameSource*', 'ReShadeProviderDimensions.*', 'ReShadeBridgeProtocol.*', 'ReShadeBridgeGpu.*',
@@ -99,6 +99,10 @@ try {
     '-m', 'unittest', 'test_adaptive_state_contract', 'test_host_sbs_shader_manifest',
     'test_depth_coordinate_v2_contract', 'test_compare_runs', 'test_eval_parallel', 'test_report_parallel'
   ) (Join-Path $HostRoot 'tools/sbsbench')
+  $gammaPatch = Join-Path $ClientRoot 'app/src/main/jni/moonlight-core/stream-gamma-core.patch'
+  if (Test-Path -LiteralPath $gammaPatch -PathType Leaf) {
+    Invoke-GateStage 'client-gamma-prepare' $gradle @(':app:prepareStreamGammaCore', '--console=plain') $ClientRoot
+  }
   $commonC = Join-Path $ClientRoot 'app/src/main/jni/moonlight-core/moonlight-common-c'
   $packetTest = Join-Path $resultsDirectory 'video-packet-size-test.exe'
   Invoke-GateStage 'client-packet-build' $cCompiler @(
@@ -126,11 +130,27 @@ try {
     '-lwinmm', '-lws2_32', '-o', $controlTest
   ) $HostRoot
   Invoke-GateStage 'client-control' $controlTest @() $HostRoot
+  $gammaFixture = Join-Path $ClientRoot 'app/src/test/native/StreamGammaControlTest.c'
+  if (Test-Path -LiteralPath $gammaFixture -PathType Leaf) {
+    $gammaControlTest = Join-Path $resultsDirectory 'stream-gamma-control-test.exe'
+    Invoke-GateStage 'client-gamma-build' $cCompiler @(
+      '-std=c11', '-O2', '-flto', '-DLC_DEBUG', '-DHAS_SOCKLEN_T',
+      '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
+      '-I', (Join-Path $commonC 'src'), '-I', (Join-Path $commonC 'reedsolomon'),
+      '-I', (Join-Path $commonC 'enet/include'),
+      $gammaFixture, (Join-Path $commonC 'src/ByteBuffer.c'),
+      '-lwinmm', '-lws2_32', '-o', $gammaControlTest
+    ) $HostRoot
+    Invoke-GateStage 'client-gamma' $gammaControlTest @() $HostRoot
+  }
   $clientArguments = @(':app:testNonRoot_gameDebugUnitTest', '--console=plain')
   foreach ($testClass in @(
     'com.limelight.nvstream.http.NvHTTP*Test',
     'com.limelight.nvstream.NvConnection*Test',
+    'com.limelight.nvstream.StreamGamma*Test',
+    'com.limelight.ui.xrcontrols.StreamGamma*Test',
     'com.limelight.GameReconnectLifecycleTest',
+    'com.limelight.GameXrSettingsAutoApplyTest',
     'com.limelight.GameTransportReconnectTest',
     'com.limelight.TransportReconnectPolicyTest',
     'com.limelight.GameXrDisconnectTest',
@@ -140,6 +160,7 @@ try {
     'com.limelight.utils.Stereo3DRendererAsyncLifecycleTest',
     'com.limelight.utils.Stereo3DRendererEntryFailureTest',
     'com.limelight.ui.XrStreamPresenterTransitionTest',
+    'com.limelight.ui.XrStreamPresenterViewTest',
     'com.limelight.ui.XrStreamPresenterVideoModeAckTest',
     'com.limelight.ui.XrStreamPresenterControlTransportTeardownTest',
     'com.limelight.ui.XrClientPanelRefreshRateIntegrationTest',
@@ -152,6 +173,7 @@ try {
     'com.limelight.ui.ClientSbsEglBackendTest',
     'com.limelight.binding.video.*Test',
     'com.limelight.preferences.XrSessionSettingsControllerTest',
+    'com.limelight.preferences.XrChoiceGroupSegmentedTest',
     'com.limelight.preferences.session.SessionSettingsStoreTest',
     'com.limelight.ui.xrcontrols.*Test'
   )) { $clientArguments += @('--tests', $testClass) }

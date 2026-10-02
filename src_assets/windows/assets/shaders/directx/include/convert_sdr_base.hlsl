@@ -1,4 +1,5 @@
 #include "include/common.hlsl"
+#include "include/stream_gamma.hlsl"
 
 cbuffer sdr_color_transform_cbuffer : register(b1) {
     uint target_bt2020;

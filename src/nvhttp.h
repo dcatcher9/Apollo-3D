@@ -46,6 +46,7 @@ namespace nvhttp {
     scale_factor,
     app_id,
     sbs_mode,
+    stream_gamma,
   };
 
   struct launch_display_options_t {

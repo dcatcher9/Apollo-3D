@@ -1,7 +1,7 @@
 # Joint workflow tests
 
 The local gate runs Sunshine 3D native workflow tests, evaluator contract/provenance tests,
-Moonlight 3D native packet/FEC and control tests, and JVM tests in sequence. It checks connection ownership, permissions, mode transitions,
+Moonlight 3D native packet/FEC, control, and stream-gamma tests, and JVM tests in sequence. It checks connection ownership, permissions, mode transitions,
 offline job/transport bounds, and capture/presentation timing without opening the host or using a
 headset. Local AR lifecycle, shared local/remote scheduling ownership, immutable DDup image delivery,
 and client reconnect intent/settings transitions are included.
@@ -32,8 +32,16 @@ implementations with the host's configured C compiler. It checks first, interior
 loss at three packet sizes for HEVC and AV1 through the decoder callback.
 The control test compiles the production control writer, parser and callback queue through
 `ControlTelemetryTest.c`, checking Game provider capability negotiation, exact mode-request bytes,
-provider-status validation and delivery, and telemetry subscription bounds and coalescing. Both native
-client tests are compiled into the evidence directory on every run, including with `-SkipBuild`.
+provider-status validation and delivery, and telemetry subscription bounds and coalescing. When the
+client's tracked stream-gamma core patch is present, the gate prepares it with the idempotent Gradle
+task before compiling native fixtures. The gamma fixture exercises the production request writer
+and acknowledgement dispatcher, including capability gating, exact bytes, and invalid proof rejection.
+All native client fixtures are compiled into the evidence directory on every run, including with
+`-SkipBuild`. Host stream-gamma tests execute the real HLSL through WARP and verify the default
+conversion, shadow curves, reference white, and preserved neutral HDR highlights; client tests cover
+desired versus proven state, reconnect, and the shared session setting.
+Automatic-setting coverage checks debounce, request serialization, pane reopening, deliberate
+retry, rapid mode cancellation, and ownership-bound reconnects without an Apply button.
 
 Game 3D coverage includes host provider discovery, source revisions and presentation generations,
 full-resolution SBS limits, and the ReShade receiver's resource identity, shared fences, HDR transfer,

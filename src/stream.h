@@ -353,6 +353,28 @@ namespace stream {
   constexpr std::uint8_t GAME_SOURCE_STATUS_VERSION = 1;
   constexpr std::size_t GAME_SOURCE_STATUS_PAYLOAD_SIZE = 20;
 
+  // Encrypted stream gamma v1: client request 0x300C and reliable host ACK 0x300D.
+  constexpr std::uint8_t STREAM_GAMMA_VERSION = 1;
+  constexpr std::size_t STREAM_GAMMA_REQUEST_PAYLOAD_SIZE = 8;
+  constexpr std::size_t STREAM_GAMMA_ACK_PAYLOAD_SIZE = 16;
+  constexpr std::uint32_t STREAM_GAMMA_QUEUE_LIMIT = video::stream_gamma_queue_limit;
+
+  enum class stream_gamma_request_decode_e {
+    ok,
+    invalid,
+    unsupported_version,
+  };
+
+  [[nodiscard]] stream_gamma_request_decode_e decode_stream_gamma_request_payload(
+    std::string_view payload,
+    video::stream_gamma_request_t &request
+  ) noexcept;
+
+  [[nodiscard]] bool encode_stream_gamma_ack_payload(
+    const video::stream_gamma_ack_t &ack,
+    std::uint8_t (&out)[STREAM_GAMMA_ACK_PAYLOAD_SIZE]
+  ) noexcept;
+
   [[nodiscard]] constexpr bool is_valid_live_video_sbs_mode(int mode, bool game_provider_negotiated) noexcept {
     return mode == video::SBS_OFF || mode == video::SBS_AI ||
            (game_provider_negotiated && video::is_game_mode(mode));

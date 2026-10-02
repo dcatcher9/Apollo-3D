@@ -26,6 +26,7 @@
 // local includes
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/stream_gamma.h"
 #include "src/thread_safe.h"
 #include "src/utility.h"
 #include "src/video_colorspace.h"
@@ -436,6 +437,19 @@ namespace platf {
     virtual ~encode_device_t() = default;
 
     virtual int convert(platf::img_t &img) = 0;
+
+    // Only the encoder thread changes stream color. Unsupported devices keep identity.
+    virtual bool set_stream_gamma(video::stream_gamma_mode_e mode) {
+      return mode == video::stream_gamma_mode_e::windows_default;
+    }
+
+    virtual video::stream_gamma_mode_e stream_gamma_mode() const {
+      return video::stream_gamma_mode_e::windows_default;
+    }
+
+    virtual float stream_gamma_white_nits() const {
+      return 203.0f;
+    }
 
     /** Convert one captured frame with an encode-cadence target owned by the video loop.
      *

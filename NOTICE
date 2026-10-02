@@ -2,6 +2,13 @@
 registered trademarks of Valve Corporation in the U.S. and/or other countries. All
 rights reserved.
 
+Gloam gamma reference
+---------------------
+
+The HDR stream gamma curve follows Gloam's MIT-licensed gamma-only implementation
+at revision 79d4c471bc5e8802fd4288712014776af023b4d2. Its copyright and permission
+notice are installed at assets/licenses/Gloam-MIT.txt.
+
 PP-OCRv6 tiny text detector model
 ---------------------------------
 

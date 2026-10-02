@@ -1236,6 +1236,7 @@ namespace rtsp_stream {
 
     // Tell the client about our supported features
     ss << "a=x-ss-general.featureFlags:" << (uint32_t) platf::get_capabilities() << std::endl;
+    ss << "a=x-ss-video.streamGammaVersion:" << static_cast<int>(stream::STREAM_GAMMA_VERSION) << std::endl;
 
     // Modern Artemis encrypts control, audio, and video. Apollo has no plaintext media mode.
     uint32_t encryption_flags_supported = SS_ENC_CONTROL_V2 | SS_ENC_AUDIO | SS_ENC_VIDEO;
@@ -1472,6 +1473,13 @@ namespace rtsp_stream {
       }
       config.client_supports_source_frame_id_v1 =
         (client_features & stream::CLIENT_FEATURE_SOURCE_FRAME_ID_V1) != 0;
+      if (const auto gamma_version = args.find("x-ml-video.streamGammaVersion"sv); gamma_version != args.end()) {
+        const auto parsed = util::from_view_checked<int>(gamma_version->second);
+        if (!parsed || (*parsed != 0 && *parsed != stream::STREAM_GAMMA_VERSION)) {
+          throw std::invalid_argument("x-ml-video.streamGammaVersion");
+        }
+        config.monitor.stream_gamma_supported = *parsed == stream::STREAM_GAMMA_VERSION;
+      }
       if ((client_features & ::client_features::client_authored_pcm) && (client_features & ::client_features::client_authored_ir_v2)) {
         throw std::invalid_argument("Only one authored haptics format can be selected");
       }
@@ -1536,6 +1544,9 @@ namespace rtsp_stream {
       }
 
       config.monitor.sbs_mode = session.sbs_mode;
+      config.monitor.stream_gamma = config.monitor.stream_gamma_supported ?
+                                      session.stream_gamma :
+                                      video::stream_gamma_mode_e::windows_default;
       if (config.monitor.sbs_mode == video::SBS_GAME_SBS || (video::is_game_mode(config.monitor.sbs_mode) && !config.client_supports_game_provider_v1)) {
         throw std::invalid_argument("Game startup requires negotiated provider v1 in mono mode");
       }

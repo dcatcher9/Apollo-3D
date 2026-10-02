@@ -12,7 +12,7 @@ float3 CONVERT_FUNCTION(float3 input)
     if (target_is_hdr) {
         // An SDR game (or WGC SDR frame) may feed an HDR stream. Restore its configured
         // reference white in absolute scRGB before encoding Rec.2020/ST2084.
-        converted = scRGBTo2100PQ(RemoveSRGBCurve(input) * source_sdr_white_scrgb);
+        converted = StreamGammaScRGBToPQ(RemoveSRGBCurve(input) * source_sdr_white_scrgb);
     } else if (!target_bt2020) {
         converted = SRGBCodeToBT709Code(input);
     } else {
