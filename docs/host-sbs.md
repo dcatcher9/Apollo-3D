@@ -204,6 +204,10 @@ embedding branch. Dump 3D records it as the canonical full-source analysis domai
 
 ## Color and HDR
 
+Remote-session [stream gamma](stream-gamma.md) is applied only in the final encoder conversion.
+It leaves the native warp and Host AI model preprocessing unchanged; its owning document defines
+the curve, reference white, live acknowledgement, and optional luma-MRT selection.
+
 The model and the rendered color have different color requirements:
 
 - BGRA8 SDR capture is interpreted as display-referred sRGB for model preprocessing.

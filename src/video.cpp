@@ -407,6 +407,22 @@ namespace video {
       return device && device->needs_conversion_poll();
     }
 
+    bool set_stream_gamma(stream_gamma_mode_e mode) {
+      return device && device->set_stream_gamma(mode);
+    }
+
+    stream_gamma_mode_e stream_gamma_mode() const {
+      return device ? device->stream_gamma_mode() : stream_gamma_mode_e::windows_default;
+    }
+
+    float stream_gamma_white_nits() const {
+      return device ? device->stream_gamma_white_nits() : 203.0f;
+    }
+
+    bool stream_is_hdr() const {
+      return device && colorspace_is_hdr(device->colorspace);
+    }
+
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const override {
       return device ? device->rendered_content_timestamp() : std::nullopt;
     }
@@ -1088,6 +1104,37 @@ namespace video {
     auto video_mode_applied_queue =
       mail->queue<video_mode_applied_t>(mail::video_mode_applied);
     auto depth_pipeline_ready_event = config.sbs_depth_pipeline_ready_event;
+    auto stream_gamma_requests = mail->queue<stream_gamma_request_t>(mail::stream_gamma, stream_gamma_queue_limit);
+    auto stream_gamma_acks = mail->queue<stream_gamma_ack_t>(mail::stream_gamma_ack, 2 * stream_gamma_queue_limit);
+    const auto queue_gamma_ack = [&](const stream_gamma_ack_t &ack) {
+      const auto result = stream_gamma_acks->raise_with_overflow_policy(false, ack);
+      if (result.dropped != 0) {
+        BOOST_LOG(error) << "Stream gamma acknowledgement queue exceeded its session bound"sv;
+        shutdown_event->raise(true);
+      }
+    };
+    // SDR bypass must not replace the user's selection. Retry that selection when a rebuilt
+    // capture/encoder becomes HDR again, while keeping its applied proof separate.
+    const auto initial_gamma = config.stream_gamma_state ? config.stream_gamma_state->requested_mode() : config.stream_gamma;
+    const bool initial_gamma_accepted = session->set_stream_gamma(initial_gamma);
+    const auto gamma_rejection_status = [&](stream_gamma_mode_e requested) {
+      return !session->stream_is_hdr() && requested != stream_gamma_mode_e::windows_default ?
+               stream_gamma_status_e::rejected_unsupported :
+               stream_gamma_status_e::failed;
+    };
+    // The black startup dummy does not prove that real source pixels used the new transform.
+    std::optional<stream_gamma_request_t> pending_gamma {stream_gamma_request_t {initial_gamma, 0}};
+    auto pending_gamma_status = initial_gamma_accepted ? stream_gamma_status_e::applied : gamma_rejection_status(initial_gamma);
+    auto fail_pending_gamma = util::fail_guard([&] {
+      if (pending_gamma && pending_gamma->request_id != 0 && config.stream_gamma_supported) {
+        queue_gamma_ack({
+          stream_gamma_status_e::failed,
+          pending_gamma->mode,
+          pending_gamma->request_id,
+          config.stream_gamma_state->current(),
+        });
+      }
+    });
 
     {
       // Load a dummy image into the encoder input to ensure we have something to encode
@@ -1261,6 +1308,28 @@ namespace video {
         break;
       }
 
+      // Only this encode thread mutates the converter. A setting is acknowledged after a real
+      // conversion and successful encode, including retained-source conversion on a static desktop.
+      if (!pending_gamma) {
+        if (auto request = stream_gamma_requests->pop(0ms)) {
+          // The control decoder admits only valid modes. Retain even an unsupported/failed
+          // choice so a later capable encoder can apply it; an explicit default replaces it.
+          if (config.stream_gamma_state) {
+            config.stream_gamma_state->set_requested_mode(request->mode);
+          }
+          const bool accepted = session->set_stream_gamma(request->mode);
+          if (!accepted) {
+            queue_gamma_ack({
+              gamma_rejection_status(request->mode), request->mode, request->request_id,
+              config.stream_gamma_state->current(),
+            });
+          } else {
+            pending_gamma = *request;
+            pending_gamma_status = stream_gamma_status_e::applied;
+          }
+        }
+      }
+
       bool requested_idr_frame = false;
 
       while (invalidate_ref_frames_events->peek()) {
@@ -1286,7 +1355,7 @@ namespace video {
       // Idle keepalives preserve static image quality. Pending retained-source conversion is
       // serviced at the requested cadence instead of waiting for that slower heartbeat.
       if (!requested_idr_frame || images->peek()) {
-        const bool conversion_poll_pending = last_img && session->needs_conversion_poll();
+        const bool conversion_poll_pending = last_img && (pending_gamma || session->needs_conversion_poll());
         if (auto img = detail::wait_for_encode_image(*images, max_frametime, encode_frame_threshold, static_cast<bool>(last_img), depth_pipeline_ready_event && depth_pipeline_ready_event->peek(), conversion_poll_pending, source.remaining_wait(std::chrono::steady_clock::now(), encode_frame_timestamp, independent_provider && conversion_poll_pending))) {
           source.observe(std::move(img));
           frame_timestamp = last_img->frame_timestamp;
@@ -1375,6 +1444,19 @@ namespace video {
         }
       }
 
+      if (!converted_frame && pending_gamma && last_img) {
+        if (lifecycle_change_requested()) {
+          break;
+        }
+        frame_timestamp = std::chrono::steady_clock::now();
+        if (convert_frame(*last_img)) {
+          BOOST_LOG(error) << "Could not convert the retained source with stream gamma"sv;
+          break;
+        }
+        converted_frame = true;
+        source.converted();
+      }
+
       // Host SBS initializes only its per-stream D3D/CUDA resources in the background; the model
       // engine and execution context are already process-resident. If initialization completes
       // while the desktop is static, reconvert the retained source once so the ready pipeline is
@@ -1454,6 +1536,33 @@ namespace video {
       if (publish_result.failed) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         break;
+      }
+      if (converted_frame && session->rendered_content_timestamp() && config.stream_gamma_state) {
+        const auto actual_mode = session->stream_gamma_mode();
+        const auto actual_white = session->stream_gamma_white_nits();
+        const auto proven = config.stream_gamma_state->current();
+        if (pending_gamma || proven.generation == 0 || actual_mode != proven.mode || actual_white != proven.white_nits) {
+          const auto applied = config.stream_gamma_state->publish(actual_mode, actual_white);
+          const auto requested_mode = config.stream_gamma_state->requested_mode();
+          const auto status = pending_gamma ? pending_gamma_status :
+                              actual_mode == requested_mode ? stream_gamma_status_e::applied :
+                                                              gamma_rejection_status(requested_mode);
+          BOOST_LOG(info) << "Stream gamma encoder proof: requested="sv
+                          << static_cast<int>(requested_mode)
+                          << " applied="sv << static_cast<int>(actual_mode)
+                          << " white="sv << actual_white << " nits generation="sv
+                          << applied.generation << " request="sv
+                          << (pending_gamma ? pending_gamma->request_id : 0);
+          if (config.stream_gamma_supported) {
+            queue_gamma_ack({
+              status,
+              requested_mode,
+              pending_gamma ? pending_gamma->request_id : 0,
+              applied,
+            });
+          }
+          pending_gamma.reset();
+        }
       }
       first_encoder_output = false;
       if (publish_result.dropped_packets > 0) {

@@ -88,6 +88,12 @@ namespace platf::dxgi {
     std::uint32_t target_is_hdr;
   };
 
+  struct alignas(16) stream_gamma_transform_t {
+    std::uint32_t mode;
+    float white_scrgb;
+    float padding[2] {};
+  };
+
   template<class T>
   buf_t make_buffer(device_t::pointer device, const T &t) {
     static_assert(sizeof(T) % 16 == 0, "Buffer needs to be aligned on a 16-byte alignment");
@@ -488,6 +494,9 @@ namespace platf::dxgi {
     }
 
     bool needs_conversion_poll() const {
+      if (stream_gamma_conversion_pending || (stream_gamma_mode_ != ::video::stream_gamma_mode_e::windows_default && std::chrono::steady_clock::now() >= stream_gamma_white_query_at)) {
+        return true;
+      }
       // ReShade publishes independently of desktop presents. The existing bounded owner loop
       // polls it even while DDup/WGC retains a static desktop frame.
       if (reshade_receiver || ::video::is_game_mode(sbs_mode)) {
@@ -548,6 +557,15 @@ namespace platf::dxgi {
         std::nullopt
     ) {
       auto &img = (img_d3d_t &) img_base;
+      // Reference white belongs to the captured Windows display, not its EDID peak or
+      // the headset. Poll at most once a second, including when the desktop is static.
+      const auto gamma_now = std::chrono::steady_clock::now();
+      if (stream_gamma_mode_ != ::video::stream_gamma_mode_e::windows_default && gamma_now >= stream_gamma_white_query_at) {
+        stream_gamma_white_query_at = gamma_now + 1s;
+        if (!set_stream_gamma(stream_gamma_mode_)) {
+          return -1;
+        }
+      }
       if (::video::is_game_mode(sbs_mode)) {
         // Missing depth/exports are diagnostic use cases too. Poll before the blank-image
         // guard and without sharing the AI dumper's request/retry ownership.
@@ -624,6 +642,8 @@ namespace platf::dxgi {
           // Bind all converter constants for every shader variant. Other passes use their own
           // PS constant-buffer slots, so never rely on stale context state between SBS/RGB draws.
           device_ctx->PSSetConstantBuffers(0, 3, converter_buffers);
+          ID3D11Buffer *gamma_constants = stream_gamma_transform.get();
+          device_ctx->PSSetConstantBuffers(4, 1, &gamma_constants);
 
           // The optional HDR Host-SBS MRT has already populated luma while producing the packed
           // RGB raster. Every other path retains the established standalone Y/YUV draw.
@@ -2096,7 +2116,8 @@ namespace platf::dxgi {
                 format == DXGI_FORMAT_P010,
                 rgb_present_target == nullptr,
                 snapshot_debug_inputs,
-                sbs_reprojection_v2_p010_y_ps != nullptr,
+                sbs_reprojection_v2_p010_y_ps != nullptr &&
+                  stream_gamma_mode_ == ::video::stream_gamma_mode_e::windows_default,
                 out_Y_or_YUV_rtv != nullptr
               );
             const bool p010_y_mrt_selected =
@@ -2526,11 +2547,72 @@ namespace platf::dxgi {
         ID3D11ShaderResourceView *emptyShaderResourceView = nullptr;
         device_ctx->PSSetShaderResources(0, 1, &emptyShaderResourceView);
         rendered_content_timestamp_ = converted_content_timestamp;
+        stream_gamma_conversion_pending = false;
       } else {
         rendered_content_timestamp_.reset();
       }
 
       return 0;
+    }
+
+    bool set_stream_gamma(::video::stream_gamma_mode_e mode) {
+      if (!::video::valid_stream_gamma_mode(static_cast<std::uint8_t>(mode)) || (!output_is_hdr && mode != ::video::stream_gamma_mode_e::windows_default)) {
+        return false;
+      }
+      if (stream_gamma_transform && mode == ::video::stream_gamma_mode_e::windows_default && stream_gamma_mode_ == mode) {
+        return true;
+      }
+      float white_nits = 203.0f;
+      if (display) {
+        const auto queried = display->get_sdr_white_nits();
+        if (queried && std::isfinite(*queried) && *queried > 0.0f) {
+          white_nits = std::clamp(*queried, 40.0f, 1000.0f);
+        }
+      }
+      stream_gamma_white_query_at = std::chrono::steady_clock::now() + 1s;
+      if (stream_gamma_transform && mode == stream_gamma_mode_ && white_nits == stream_gamma_white_nits_) {
+        return true;
+      }
+      const stream_gamma_transform_t gamma_constants {
+        static_cast<std::uint32_t>(mode),
+        white_nits / 80.0f,
+      };
+      auto gamma_buffer = make_buffer(device.get(), gamma_constants);
+      if (!gamma_buffer) {
+        return false;
+      }
+      // BGRA SDR frames in an HDR stream need the same current white used by the
+      // correction. FP16 scRGB already contains absolute light and needs no rescaling.
+      auto transform = source_color_transform;
+      transform.source_sdr_white_scrgb = mode == ::video::stream_gamma_mode_e::windows_default ?
+                                           default_source_sdr_white_scrgb :
+                                           white_nits / 80.0f;
+      auto sdr_buffer = make_buffer(device.get(), transform);
+      auto external_transform = transform;
+      external_transform.source_is_hdr = !output_is_hdr;
+      auto external_buffer = make_buffer(device.get(), external_transform);
+      if (!sdr_buffer || !external_buffer) {
+        return false;
+      }
+      stream_gamma_transform = std::move(gamma_buffer);
+      sdr_color_transform = std::move(sdr_buffer);
+      external_color_transform = std::move(external_buffer);
+      source_color_transform = transform;
+      stream_gamma_mode_ = mode;
+      stream_gamma_white_nits_ = white_nits;
+      stream_gamma_conversion_pending = true;
+      // The native warp remains reusable, but its cached encoder Y/UV planes carry
+      // the previous gamma. Force only the final conversion on a packed repeat.
+      host_sbs_encoder_input_state.reset();
+      return true;
+    }
+
+    ::video::stream_gamma_mode_e stream_gamma_mode() const {
+      return stream_gamma_mode_;
+    }
+
+    float stream_gamma_white_nits() const {
+      return stream_gamma_white_nits_;
     }
 
     bool apply_colorspace(const ::video::sunshine_colorspace_t &colorspace) {
@@ -2560,7 +2642,7 @@ namespace platf::dxgi {
       float sdr_white_nits = fallback_sdr_white_nits;
       if (display_is_hdr) {
         const auto queried_sdr_white_nits = display->get_sdr_white_nits();
-        if (queried_sdr_white_nits && *queried_sdr_white_nits > 0.0f) {
+        if (queried_sdr_white_nits && std::isfinite(*queried_sdr_white_nits) && *queried_sdr_white_nits > 0.0f) {
           sdr_white_nits = *queried_sdr_white_nits;
         } else {
           BOOST_LOG(warning)
@@ -2594,6 +2676,17 @@ namespace platf::dxgi {
       device_ctx->PSSetConstantBuffers(0, 1, &color_matrix);
       this->color_matrix = std::move(color_matrix);
       this->sdr_color_transform = std::move(sdr_color_transform);
+      source_color_transform = transform;
+      default_source_sdr_white_scrgb = transform.source_sdr_white_scrgb;
+      stream_gamma_white_nits_ = std::clamp(sdr_white_nits, 40.0f, 1000.0f);
+      const stream_gamma_transform_t gamma_constants {
+        0,
+        stream_gamma_white_nits_ / 80.0f,
+      };
+      stream_gamma_transform = make_buffer(device.get(), gamma_constants);
+      if (!stream_gamma_transform) {
+        return false;
+      }
       output_black_y = color_vectors->color_vec_y[3];
       output_neutral_uv = color_vectors->color_vec_u[3];
       return true;
@@ -5792,6 +5885,13 @@ namespace platf::dxgi {
     buf_t color_matrix;
     buf_t sdr_color_transform;
     buf_t external_color_transform;
+    buf_t stream_gamma_transform;
+    sdr_color_transform_t source_color_transform {};
+    float default_source_sdr_white_scrgb = 203.0f / 80.0f;
+    ::video::stream_gamma_mode_e stream_gamma_mode_ = ::video::stream_gamma_mode_e::windows_default;
+    float stream_gamma_white_nits_ = 203.0f;
+    bool stream_gamma_conversion_pending = false;
+    std::chrono::steady_clock::time_point stream_gamma_white_query_at {};
     float output_black_y = 0.0f;
     float output_neutral_uv = 0.5f;
 
@@ -7393,6 +7493,18 @@ namespace platf::dxgi {
 
     int convert(platf::img_t &img_base) override {
       return base.convert(img_base);
+    }
+
+    bool set_stream_gamma(::video::stream_gamma_mode_e mode) override {
+      return base.set_stream_gamma(mode);
+    }
+
+    ::video::stream_gamma_mode_e stream_gamma_mode() const override {
+      return base.stream_gamma_mode();
+    }
+
+    float stream_gamma_white_nits() const override {
+      return base.stream_gamma_white_nits();
     }
 
     int convert_with_encode_target(

@@ -23,6 +23,7 @@
 #include "host_sbs_telemetry_perf.h"
 #include "input.h"
 #include "platform/common.h"
+#include "stream_gamma.h"
 #include "thread_safe.h"
 #include "video_colorspace.h"
 #include "video_encode_pacing.h"
@@ -510,6 +511,10 @@ namespace video {
     bool game_source_transport_supported = false;
     int game_source_width = 0;
     int game_source_height = 0;
+    // APPEND-ONLY. Selection is local to this stream and applied at the final GPU conversion.
+    stream_gamma_mode_e stream_gamma = stream_gamma_mode_e::windows_default;
+    std::shared_ptr<stream_gamma_publisher_t> stream_gamma_state;
+    bool stream_gamma_supported = false;
   };
 
   // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.

@@ -55,6 +55,8 @@ namespace mail {
   MAIL(video_mode);
   MAIL(video_mode_applied);
   MAIL(live_video_mode_ack);
+  MAIL(stream_gamma);
+  MAIL(stream_gamma_ack);
 #undef MAIL
 
 }  // namespace mail

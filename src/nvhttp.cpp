@@ -606,6 +606,9 @@ namespace nvhttp {
         // Game always starts mono. Packed output requires a negotiated live transaction.
         valid = *parsed >= video::SBS_OFF && *parsed <= video::SBS_GAME_MONO;
         break;
+      case launch_int_field::stream_gamma:
+        valid = *parsed >= 0 && *parsed <= 2;
+        break;
     }
 
     return valid ? parsed : std::nullopt;
@@ -785,6 +788,7 @@ namespace nvhttp {
     const auto host_audio = parse_launch_int(launch_int_field::binary_option, get_arg(args, "localAudioPlayMode"));
     const auto surround_info = parse_launch_int(launch_int_field::surround_info, get_arg(args, "surroundAudioInfo"));
     const auto enable_hdr = parse_launch_int(launch_int_field::binary_option, get_arg(args, "hdrMode", "0"));
+    const auto stream_gamma = parse_launch_int(launch_int_field::stream_gamma, get_arg(args, "streamGamma", "0"));
     // These Apollo display extensions are optional for encrypted clients that implement the base
     // GameStream launch contract. Missing values use conservative defaults, while explicit invalid
     // values are still rejected.
@@ -794,7 +798,7 @@ namespace nvhttp {
       find_arg(args, "sbsMode"),
       find_arg(args, "virtualDisplayOnly")
     );
-    if (!enable_sops || !host_audio || !surround_info || !enable_hdr || !display_options) {
+    if (!enable_sops || !host_audio || !surround_info || !enable_hdr || !display_options || !stream_gamma) {
       BOOST_LOG(warning) << "Rejecting invalid launch options for client ["sv << named_cert_p->name << ']';
       return nullptr;
     }
@@ -824,6 +828,7 @@ namespace nvhttp {
     launch_session->virtual_display_only = display_options->virtual_display_only;
     launch_session->scale_factor = display_options->scale_factor;
     launch_session->sbs_mode = display_options->sbs_mode;
+    launch_session->stream_gamma = static_cast<video::stream_gamma_mode_e>(*stream_gamma);
 
     if (!proc::calculate_render_size(launch_session->width, launch_session->height, launch_session->scale_factor)) {
       BOOST_LOG(warning) << "Rejecting a launch whose scaled display dimensions are invalid."sv;
@@ -1341,6 +1346,7 @@ namespace nvhttp {
       tree.put("root.VirtualDisplayCapable", true);
       tree.put("root.VirtualDisplayOnlySupported", 1);
       tree.put("root.GameProviderV1Supported", 1);
+      tree.put("root.StreamGammaV1Supported", 1);
       if (!!(named_cert_p->perm & PERM::_all_actions)) {
         tree.put("root.VirtualDisplayDriverReady", proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK);
       } else {

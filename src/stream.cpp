@@ -93,6 +93,8 @@ namespace stream {
     constexpr std::uint16_t sbs_telemetry_subscription = 0x3009;
     constexpr std::uint16_t sbs_telemetry_state = 0x300A;
     constexpr std::uint16_t game_source_status = 0x300B;
+    constexpr std::uint16_t set_stream_gamma = 0x300C;
+    constexpr std::uint16_t stream_gamma_ack = 0x300D;
   }  // namespace control_packet
 
   enum class socket_e : int {
@@ -270,6 +272,11 @@ namespace stream {
     std::uint8_t body[GAME_SOURCE_STATUS_PAYLOAD_SIZE];
   };
 
+  struct control_stream_gamma_ack_t {
+    control_header_v2 header;
+    std::uint8_t body[STREAM_GAMMA_ACK_PAYLOAD_SIZE];
+  };
+
 #pragma pack(pop)
 
   typedef struct control_encrypted_t {
@@ -292,6 +299,64 @@ namespace stream {
   };
 
 #pragma pack(pop)
+
+  stream_gamma_request_decode_e decode_stream_gamma_request_payload(
+    std::string_view payload,
+    video::stream_gamma_request_t &request
+  ) noexcept {
+    request = {};
+    if (payload.size() != STREAM_GAMMA_REQUEST_PAYLOAD_SIZE) {
+      return stream_gamma_request_decode_e::invalid;
+    }
+    const auto *bytes = reinterpret_cast<const std::uint8_t *>(payload.data());
+    if (!video::valid_stream_gamma_mode(bytes[1])) {
+      return stream_gamma_request_decode_e::invalid;
+    }
+    video::stream_gamma_request_t decoded;
+    decoded.mode = static_cast<video::stream_gamma_mode_e>(bytes[1]);
+    for (unsigned i = 0; i < 4; ++i) {
+      decoded.request_id |= static_cast<std::uint32_t>(bytes[4 + i]) << (i * 8);
+    }
+    if (decoded.request_id == 0) {
+      return stream_gamma_request_decode_e::invalid;
+    }
+    request = decoded;
+    if (bytes[0] != STREAM_GAMMA_VERSION) {
+      return stream_gamma_request_decode_e::unsupported_version;
+    }
+    return bytes[2] == 0 && bytes[3] == 0 ?
+             stream_gamma_request_decode_e::ok :
+             stream_gamma_request_decode_e::invalid;
+  }
+
+  bool encode_stream_gamma_ack_payload(
+    const video::stream_gamma_ack_t &ack,
+    std::uint8_t (&out)[STREAM_GAMMA_ACK_PAYLOAD_SIZE]
+  ) noexcept {
+    if (static_cast<std::uint8_t>(ack.status) > 3 ||
+        !video::valid_stream_gamma_mode(static_cast<std::uint8_t>(ack.requested_mode)) ||
+        !video::valid_stream_gamma_mode(static_cast<std::uint8_t>(ack.applied.mode)) ||
+        ack.applied.generation == 0 || !std::isfinite(ack.applied.white_nits) ||
+        ack.applied.white_nits < 40.0f || ack.applied.white_nits > 1000.0f ||
+        (ack.status == video::stream_gamma_status_e::applied && ack.requested_mode != ack.applied.mode)) {
+      return false;
+    }
+    std::uint8_t encoded[STREAM_GAMMA_ACK_PAYLOAD_SIZE] {};
+    encoded[0] = STREAM_GAMMA_VERSION;
+    encoded[1] = static_cast<std::uint8_t>(ack.status);
+    encoded[2] = static_cast<std::uint8_t>(ack.requested_mode);
+    encoded[3] = static_cast<std::uint8_t>(ack.applied.mode);
+    const auto put_u32 = [&](std::size_t offset, std::uint32_t value) {
+      for (unsigned i = 0; i < 4; ++i) {
+        encoded[offset + i] = static_cast<std::uint8_t>(value >> (i * 8));
+      }
+    };
+    put_u32(4, ack.request_id);
+    put_u32(8, ack.applied.generation);
+    put_u32(12, std::bit_cast<std::uint32_t>(ack.applied.white_nits));
+    std::copy(std::begin(encoded), std::end(encoded), std::begin(out));
+    return true;
+  }
 
   live_video_mode_ack_e live_video_mode_ack_status(proc::live_video_mode_result_e result) {
     switch (result) {
@@ -848,6 +913,10 @@ namespace stream {
       // session lifetime so worker/encode-thread replies cannot disappear between raise() and
       // the control thread's next drain.
       safe::mail_raw_t::queue_t<live_video_mode_ack_t> live_video_mode_ack_queue;
+      safe::mail_raw_t::queue_t<video::stream_gamma_request_t> stream_gamma_queue;
+      safe::mail_raw_t::queue_t<video::stream_gamma_ack_t> stream_gamma_ack_queue;
+      std::vector<video::stream_gamma_ack_t> deferred_stream_gamma_acks;
+      unsigned outstanding_stream_gamma_requests = 0;
       // A syntactically valid v2 control message can arrive just before the initial encoder has
       // published generation 1. Preserve any immediate validation refusal and correlate it once
       // a complete applied state exists; v2 never emits an unproven generation-zero ACK.
@@ -2010,6 +2079,21 @@ namespace stream {
     return 0;
   }
 
+  int send_stream_gamma_ack(session_t &session, const video::stream_gamma_ack_t &ack) {
+    if (!session.control.peer) {
+      return -1;
+    }
+    control_stream_gamma_ack_t plaintext {};
+    plaintext.header.type = control_packet::stream_gamma_ack;
+    plaintext.header.payloadLength = STREAM_GAMMA_ACK_PAYLOAD_SIZE;
+    if (!encode_stream_gamma_ack_payload(ack, plaintext.body)) {
+      BOOST_LOG(error) << "Refusing unproven stream gamma acknowledgement"sv;
+      session::stop(session);
+      return -1;
+    }
+    return send_control_packet(&session, session.broadcast_ref->control_server, plaintext);
+  }
+
   void send_game_source_status(session_t &session) {
     auto &event = session.control.game_source_status_event;
     if (!event->peek()) {
@@ -2124,6 +2208,37 @@ namespace stream {
 
   void controlBroadcastThread(control_server_t *server) {
     server->map(control_packet::periodic_ping, [](session_t *, const std::string_view &) {
+    });
+
+    server->map(control_packet::set_stream_gamma, [](session_t *session, const std::string_view &payload) {
+      if (!session->config.monitor.stream_gamma_supported) {
+        return;
+      }
+      video::stream_gamma_request_t request;
+      const auto decoded = decode_stream_gamma_request_payload(payload, request);
+      // No trustworthy correlation is available for a runt, unknown mode or reserved zero ID.
+      if (request.request_id == 0) {
+        BOOST_LOG(warning) << "Dropping malformed stream gamma request"sv;
+        return;
+      }
+      if (session->control.outstanding_stream_gamma_requests >= STREAM_GAMMA_QUEUE_LIMIT) {
+        BOOST_LOG(error) << "Stream gamma request queue exceeded its session bound"sv;
+        session::stop(*session);
+        return;
+      }
+      ++session->control.outstanding_stream_gamma_requests;
+      if (decoded != stream_gamma_request_decode_e::ok) {
+        session->control.stream_gamma_ack_queue->raise(video::stream_gamma_ack_t {
+          decoded == stream_gamma_request_decode_e::unsupported_version ?
+            video::stream_gamma_status_e::rejected_unsupported :
+            video::stream_gamma_status_e::rejected_invalid,
+          request.mode,
+          request.request_id,
+          session->config.monitor.stream_gamma_state->current(),
+        });
+      } else {
+        session->control.stream_gamma_queue->raise(request);
+      }
     });
 
     // Moonlight sends these per-frame/per-FEC-block reception reports. Apollo does not currently
@@ -2624,6 +2739,39 @@ namespace stream {
                 }
                 session->control.deferred_live_video_mode_acks.clear();
               }
+            }
+            auto &gamma_acks = session->control.stream_gamma_ack_queue;
+            while (server->_session->peer && gamma_acks->peek()) {
+              if (auto ack = gamma_acks->pop(0ms)) {
+                if (ack->applied.generation == 0) {
+                  if (ack->status == video::stream_gamma_status_e::applied) {
+                    BOOST_LOG(error) << "An applied stream gamma acknowledgement has no encoder proof"sv;
+                    session::stop(*session);
+                    break;
+                  }
+                  if (session->control.deferred_stream_gamma_acks.size() >= STREAM_GAMMA_QUEUE_LIMIT) {
+                    session::stop(*session);
+                    break;
+                  }
+                  session->control.deferred_stream_gamma_acks.push_back(*ack);
+                } else {
+                  send_stream_gamma_ack(*session, *ack);
+                  if (ack->request_id != 0 && session->control.outstanding_stream_gamma_requests > 0) {
+                    --session->control.outstanding_stream_gamma_requests;
+                  }
+                }
+              }
+            }
+            const auto gamma_proven = session->config.monitor.stream_gamma_state->current();
+            if (server->_session->peer && gamma_proven.generation != 0) {
+              for (auto &ack : session->control.deferred_stream_gamma_acks) {
+                ack.applied = gamma_proven;
+                send_stream_gamma_ack(*session, ack);
+                if (ack.request_id != 0 && session->control.outstanding_stream_gamma_requests > 0) {
+                  --session->control.outstanding_stream_gamma_requests;
+                }
+              }
+              session->control.deferred_stream_gamma_acks.clear();
             }
             // Readiness describes the encoder-proven generation, after any queued mode ACK.
             send_game_source_status(*session);
@@ -4445,6 +4593,9 @@ namespace stream {
       );
       session->config.monitor.sbs_telemetry_subscription =
         std::make_shared<video::sbs_telemetry_subscription_t>();
+      session->config.monitor.stream_gamma_state = std::make_shared<video::stream_gamma_publisher_t>(
+        session->config.monitor.stream_gamma
+      );
 
       session->video = std::make_shared<video_channel_t>();
       session->video->packet_size = config.packetsize;
@@ -4470,6 +4621,12 @@ namespace stream {
       session->control.live_video_mode_ack_queue = mail->queue<live_video_mode_ack_t>(
         mail::live_video_mode_ack,
         LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT
+      );
+      session->control.stream_gamma_queue = mail->queue<video::stream_gamma_request_t>(
+        mail::stream_gamma, STREAM_GAMMA_QUEUE_LIMIT
+      );
+      session->control.stream_gamma_ack_queue = mail->queue<video::stream_gamma_ack_t>(
+        mail::stream_gamma_ack, 2 * STREAM_GAMMA_QUEUE_LIMIT
       );
       session->control.sbs_telemetry_event =
         mail->event<video::sbs_telemetry_snapshot_t>(mail::sbs_telemetry);

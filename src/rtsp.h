@@ -21,6 +21,7 @@
 #include "crypto.h"
 #include "gpu_workload_arbiter.h"
 #include "microphone.h"
+#include "stream_gamma.h"
 #include "thread_safe.h"
 
 #ifdef _WIN32
@@ -110,6 +111,7 @@ namespace rtsp_stream {
     bool virtual_display_only = false;  ///< Client-owned preference for this launch or resume.
     uint32_t scale_factor;
     int sbs_mode = 0;
+    video::stream_gamma_mode_e stream_gamma = video::stream_gamma_mode_e::windows_default;
 
     // SETUP owns the dormant receiver until a validated ANNOUNCE transfers it.
     // Revocation closes it even when a copied RTSP socket retains this launch.
