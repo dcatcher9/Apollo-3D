@@ -3,8 +3,9 @@
 // Automatic UI detection contract shared by the renderer, Dump 3D and the
 // offline replay tools. docs/reshade-sbs.md (UI detection flags and decision
 // texels) owns the layout; game3d_native.hlsl mirrors the flag values as
-// SUNSHINE_UI_STORED_* and SUNSHINE_UI_PER_FRAME_* defines and the candidate
-// layout as SUNSHINE_UI_CANDIDATE_* and SUNSHINE_UI_SOURCE_* defines, and
+// SUNSHINE_UI_STORED_* and SUNSHINE_UI_PER_FRAME_* defines, the T1 hold store
+// as SUNSHINE_UI_HOLD_* and SUNSHINE_UI_FRAME_REASON_* defines and the
+// candidate layout as SUNSHINE_UI_CANDIDATE_* and SUNSHINE_UI_SOURCE_* defines, and
 // test_game3d_ui_layer fails when the two disagree. Retired flag values stay
 // reserved so that dumps and replay cases keep their meaning.
 // game3d_ui_selection.h owns the selection predicate over these counts. No
@@ -66,11 +67,14 @@ namespace sunshine_game3d::ui_detection {
   }};
 
   // Sunshine_UIDetectionFlags, b2 word 3. Stored bits describe the offscreen
-  // UI layer slot (t7): the renderer keeps them between frames and they are
-  // part of detection_decision_key.
+  // UI layer slot (t7) and the renderer keeps them between frames. They key
+  // no decision and no status (F1); only the hidden-scene route key reads
+  // them (scene_route_key, until H1 lands in S2b).
   inline constexpr std::uint32_t stored_premultiplied = 0x1u; // The layer must pass the premultiplied bound (V1).
   inline constexpr std::uint32_t stored_hdr_headroom = 0x2u;  // With a float layer's HDR headroom.
-  inline constexpr std::uint32_t stored_late_layer = 0x4u;    // The layer is the one-frame-late copy.
+  // The layer is the one-frame-late copy: inexact evidence (E2) that may
+  // decide but never meets the one-way test (A2).
+  inline constexpr std::uint32_t stored_late_layer = 0x4u;
   // 0x8u is reserved (a retired stage-2 bit) and never reused.
   inline constexpr std::uint32_t stored_mask = 0xffffu;
   // Per-frame bits ride in the pushed flags word of one render only. They are
@@ -79,16 +83,51 @@ namespace sunshine_game3d::ui_detection {
   // 0x20000u is reserved (a retired sample-frame bit the shader never read) and never reused.
   inline constexpr std::uint32_t per_frame_depth_not_current = 0x40000u;  // The consumed depth is reused or generated.
   inline constexpr std::uint32_t per_frame_scene_hold_hudless = 0x80000u; // The CPU holds the HUD-less route's verdict.
+  // T1: an accepted candidate that the previously adopted real frame offered
+  // is missing from this real frame, so this frame has no decision of its own.
+  inline constexpr std::uint32_t per_frame_accepted_missing = 0x100000u;
+  // T1: there is no previous real decision in this chain (first detection, a
+  // scope change, an inactive frame or a Present without a mask since), so
+  // the GPU hold store reads as hold::none.
+  inline constexpr std::uint32_t per_frame_hold_reset = 0x200000u;
   inline constexpr std::uint32_t per_frame_mask = 0xffff0000u;
   static_assert((stored_mask & per_frame_mask) == 0 && (stored_mask | per_frame_mask) == 0xffffffffu);
   // The game3d_native.hlsl define mirroring each flag.
-  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 6> hlsl_flag_defines{{
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 8> hlsl_flag_defines{{
     {"SUNSHINE_UI_STORED_PREMULTIPLIED", stored_premultiplied},
     {"SUNSHINE_UI_STORED_HDR_HEADROOM", stored_hdr_headroom},
     {"SUNSHINE_UI_STORED_LATE_LAYER", stored_late_layer},
     {"SUNSHINE_UI_PER_FRAME_SCENE_HOLD", per_frame_scene_hold},
     {"SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT", per_frame_depth_not_current},
     {"SUNSHINE_UI_PER_FRAME_SCENE_HOLD_HUDLESS", per_frame_scene_hold_hudless},
+    {"SUNSHINE_UI_PER_FRAME_ACCEPTED_MISSING", per_frame_accepted_missing},
+    {"SUNSHINE_UI_PER_FRAME_HOLD_RESET", per_frame_hold_reset},
+  }};
+
+  // The T1 grace's GPU state (SunshineUIHoldStore, u5 of the detection reduce
+  // only): store_texels R32_UINT texels holding {state, applied source,
+  // applied covered} of the last real detection. own: that frame had a
+  // decision of its own, which the next real frame without one reuses once;
+  // spent: it had none (or reused one), so the next has no mask. An unbound
+  // store, as in offline replay, reads none.
+  namespace hold {
+    inline constexpr std::uint32_t none = 0u, own = 1u, spent = 2u, store_texels = 3u;
+    namespace word {
+      inline constexpr std::uint32_t state = 0u, source = 1u, covered = 2u;
+    }
+  }
+  // Decision word frame_reason: bits 0-7 the ui_no_mask index of the frame's
+  // own decision, or frame_reason_decided when it decided a source; bit 16
+  // set when the T1 grace reused the previous real frame's decision.
+  inline constexpr std::uint32_t frame_reason_decided = 0xffu, frame_reason_reason_mask = 0xffu,
+    frame_reason_reused = 0x10000u;
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 6> hlsl_hold_defines{{
+    {"SUNSHINE_UI_HOLD_NONE", hold::none},
+    {"SUNSHINE_UI_HOLD_OWN", hold::own},
+    {"SUNSHINE_UI_HOLD_SPENT", hold::spent},
+    {"SUNSHINE_UI_HOLD_STORE_TEXELS", hold::store_texels},
+    {"SUNSHINE_UI_FRAME_REASON_DECIDED", frame_reason_decided},
+    {"SUNSHINE_UI_FRAME_REASON_REUSED", frame_reason_reused},
   }};
 
   // Flags for an offscreen UI layer copy in the layer slot; the tags have none.
@@ -110,11 +149,12 @@ namespace sunshine_game3d::ui_detection {
   inline constexpr std::string_view decision_texels_marker = "SUNSHINE_UI_DECISION_TEXELS";
   inline constexpr std::string_view scene_evidence_images_marker = "SUNSHINE_UI_SCENE_EVIDENCE_IMAGES";
   inline constexpr std::uint32_t default_decision_texels = 5, default_scene_evidence_images = 0;
-  // The CPU parses decision texels 0-4, 5-6 when the shader writes them, and
-  // the layer's texel 7 from candidate layout 2. A statistics cell holds the
-  // luma of two images (presented, HUD-less).
+  // The CPU parses decision texels 0-4, 5-6 when the shader writes them, the
+  // layer's texel 7 from candidate layout 2, and the one-way judgment and
+  // frame reason texels 8-9 from selection revision 2. A statistics cell
+  // holds the luma of two images (presented, HUD-less).
   inline constexpr std::uint32_t min_decision_texels = 5, max_decision_texels = 16, max_scene_evidence_images = 2;
-  inline constexpr std::uint32_t scene_decision_texels = 7, layer_decision_texels = 8;
+  inline constexpr std::uint32_t scene_decision_texels = 7, layer_decision_texels = 8, judgment_decision_texels = 10;
 
   // Hidden-scene evidence D (docs/reshade-sbs.md, hidden-scene evidence),
   // mirrored by game3d_native.hlsl and inspect_game3d_dump.py: a grid of
@@ -133,19 +173,23 @@ namespace sunshine_game3d::ui_detection {
     inline constexpr std::uint64_t hold_ms = 500;
   }
 
-  // Statistics texture, 16 columns: 80 rows of per-tile counts (rows 0-63 the
-  // alpha coverage, alpha invalid, HUD-less difference and lit/opaque groups;
-  // rows 64-79 the offscreen UI layer's covered, invalid and opaque pixels),
-  // then, with scene evidence, from scene_partial_row the sums of each
-  // 16x16-cell compare group, one row per 16 cell rows. The cells have a
-  // texture of their own, cells_x by cells_y.
-  inline constexpr std::uint32_t layer_statistics_row = 64u, scene_partial_row = 80u;
+  // Statistics texture, 16 columns: 112 rows of per-tile counts (rows 0-63
+  // the alpha coverage, alpha invalid, HUD-less difference and lit/opaque
+  // groups; rows 64-79 the offscreen UI layer's covered, invalid and opaque
+  // pixels; from judgment_statistics_row the one-way judgment (A2) of the
+  // layer, Backbuffer and current alpha: rows 80-95 their strong pixels,
+  // alpha of at least 1/2, and rows 96-111 the strong pixels where an exact
+  // pair's HUD-less image is lit and unchanged), then, with scene evidence,
+  // from scene_partial_row the sums of each 16x16-cell compare group, one row
+  // per 16 cell rows. The cells have a texture of their own, cells_x by
+  // cells_y.
+  inline constexpr std::uint32_t layer_statistics_row = 64u, judgment_statistics_row = 80u, scene_partial_row = 112u;
   constexpr std::uint32_t statistics_rows(std::uint32_t images) {
     return scene_partial_row + (images ? scene::cells_y / 16u : 0u);
   }
   static_assert(scene::cells_x == 16u * 16u && scene::cells_y % 16u == 0u, "Compare groups must fill the 16 statistics columns");
-  static_assert(statistics_rows(0) == 80u && statistics_rows(2) == 89u);
-  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 11> hlsl_scene_defines{{
+  static_assert(judgment_statistics_row + 32u == scene_partial_row && statistics_rows(0) == 112u && statistics_rows(2) == 121u);
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 12> hlsl_scene_defines{{
     {"SUNSHINE_UI_SCENE_CELLS_X", scene::cells_x},
     {"SUNSHINE_UI_SCENE_CELLS_Y", scene::cells_y},
     {"SUNSHINE_UI_SCENE_EDGE_PX", scene::edge_px},
@@ -157,6 +201,7 @@ namespace sunshine_game3d::ui_detection {
     {"SUNSHINE_UI_SCENE_OPAQUE_PERCENT", scene::opaque_percent},
     {"SUNSHINE_UI_SCENE_HUDLESS_CHANGED_PERCENT", scene::hudless_changed_percent},
     {"SUNSHINE_UI_SCENE_PARTIAL_ROW", scene_partial_row},
+    {"SUNSHINE_UI_JUDGMENT_ROW", judgment_statistics_row},
   }};
 
   // Words of the decision readback (the decision texel table): texel t,
@@ -180,9 +225,17 @@ namespace sunshine_game3d::ui_detection {
     // range or beyond the premultiplied bound) and opaque pixels, and the
     // offered candidates that passed V1/V2, in candidate-bit positions.
     inline constexpr std::size_t layer_covered = 28, layer_invalid = 29, layer_opaque = 30, valid_bits = 31;
+    // Texels 8 and 9 (selection revision 2): the one-way judgment counts (A2)
+    // of the layer, Backbuffer and current alpha (strong: alpha of at least
+    // 1/2; contradicted: strong where an offered exact pair's HUD-less image
+    // is lit and unchanged; the late layer counts none), the refused
+    // candidate bit of the own decision (F1, zero when it decided), and the
+    // frame reason word (frame_reason_decided, frame_reason_reused).
+    inline constexpr std::size_t strong = 32, refused = 35, contradicted = 36, frame_reason = 39;
   }
   static_assert(decision_word::alpha_opaque + 1 < 4 * min_decision_texels &&
-    decision_word::hudless_scene_state < 4 * scene_decision_texels && decision_word::valid_bits < 4 * layer_decision_texels);
+    decision_word::hudless_scene_state < 4 * scene_decision_texels && decision_word::valid_bits < 4 * layer_decision_texels &&
+    decision_word::frame_reason == 4 * judgment_decision_texels - 1);
   enum class scene_verdict : std::uint32_t { none = 0, hidden = 1, ambiguous = 2, visible = 3 };
   inline const char *name(scene_verdict value) {
     switch (value) {

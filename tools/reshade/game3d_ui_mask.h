@@ -44,12 +44,15 @@ namespace sunshine_game3d::ui_mask {
   };
   // HUD-less color belongs to its tag's real frame: the Present one after the
   // tag, or generated_frames + 1 after it under frame generation, which
-  // presents the generated frames first. Generated presents in between see
-  // interpolated color and reuse the preceding real frame's mask. A capture
-  // from another queue may complete after its real frame was presented; it
-  // then pairs with that frame's retained color, a bounded number of Presents ago.
+  // presents the generated frames first (one generated frame while frame
+  // generation is active and its count unknown). Generated presents in between
+  // see interpolated color and show the real frame's decision (UI framework
+  // T1). No multiplier constant bounds the reported count: T1's tag bound keeps
+  // a wrong count fail-safe, because a Present classified generated that shows
+  // neither the decided real frame nor the next one has no mask. A capture from
+  // another queue may complete after its real frame was presented; it then
+  // pairs with that frame's retained color, a bounded number of Presents ago.
   enum class hudless_present { unpaired, real_frame, generated_frame, earlier_real_frame };
-  inline constexpr std::uint32_t max_generated_frames = 3; // DLSS 4 multi-frame generation.
   inline constexpr std::uint32_t max_late_presents = 2;
   struct hudless_pairing {
     hudless_present kind = hudless_present::unpaired;
@@ -58,14 +61,36 @@ namespace sunshine_game3d::ui_mask {
   constexpr hudless_pairing pair_hudless_present(std::uint64_t tagged, std::uint64_t current,
       bool fg_active, std::uint32_t generated_frames) {
     if (!tagged || tagged == UINT64_MAX || current <= tagged) return {};
-    const std::uint64_t generated = !fg_active ? 0u : !generated_frames ? 1u :
-      generated_frames > max_generated_frames ? max_generated_frames : generated_frames;
+    const std::uint64_t generated = !fg_active ? 0u : !generated_frames ? 1u : generated_frames;
     const auto after = current - tagged, real = generated + 1;
     if (after == real) return {hudless_present::real_frame};
     if (after < real) return {hudless_present::generated_frame};
     if (after - real > max_late_presents) return {};
     return {hudless_present::earlier_real_frame, static_cast<std::uint32_t>(after - real)};
   }
+  // Present counting without a HUD-less pairing (UI framework T1, until S3
+  // stamps real frames). Under frame generation a game may tag its UI inputs
+  // (UIAlpha, the UI color tag, the Backbuffer) for real frames only, and a
+  // generated Present may then offer none of them: Expedition 33's Backbuffer
+  // at 2x, 3x or 4x. Such a Present within the reported generated count (one
+  // while the count is unknown) of the last Present that offered one shows
+  // that Present's real frame, so it is generated and shows that decision.
+  // Presents are numbered by the caller, one per render; zero is none. A
+  // Present that offers an input, or one without frame generation or beyond
+  // the count, is real, and when it misses an accepted input the T1 grace
+  // reuses the previous real decision once. No multiplier constant: a count
+  // reported too high holds only Presents without input of their own, and one
+  // too low leaves the later ones to the grace.
+  constexpr bool generated_without_input(std::uint64_t present, std::uint64_t input_present, bool fg_active,
+      std::uint32_t generated_frames) {
+    if (!fg_active || !input_present || present <= input_present) return false;
+    const std::uint64_t generated = !generated_frames ? 1u : generated_frames;
+    return present - input_present <= generated;
+  }
+  static_assert(generated_without_input(11, 10, true, 3) && generated_without_input(13, 10, true, 3) &&
+    !generated_without_input(14, 10, true, 3) && generated_without_input(11, 10, true, 0) &&
+    !generated_without_input(12, 10, true, 0) && !generated_without_input(11, 10, false, 3) &&
+    !generated_without_input(11, 0, true, 3) && !generated_without_input(10, 10, true, 3));
   // Two captures belong to one tag batch (one game frame) when both were made
   // in the same Present interval. Each source keeps its own Present counter, so
   // compare Presents since each tag rather than the raw counter values.

@@ -6,7 +6,10 @@
 // with a labelled expectation. It replaces live trial and error when a detection
 // rule changes: every labelled screen of every game is judged at once. With a
 // shader of the current candidate layout and selection revision, each decision
-// is also checked against ui_selection::decide (mirror=match).
+// is also checked against ui_selection::decide (mirror=match). A replay is a
+// single real frame without a previous decision: nothing is bound at the T1
+// hold store (u5), so the reduce reads none and never reuses, and a dump taken
+// on a reused frame replays as its own decision.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -233,7 +236,9 @@ namespace {
   // wrote opaque counts to statistics rows 64-79 and decision texel 5, so
   // every revision fits 80 rows and 6 texels. A shader with scene evidence
   // measures both images and writes decision texels 5 and 6; candidate layout
-  // 2 adds the layer's statistics rows 64-79 and decision texel 7.
+  // 2 adds the layer's statistics rows 64-79 and decision texel 7, and
+  // selection revision 2 the one-way judgment rows 80-111 (the scene rows
+  // follow from 112, 121 rows in all) and decision texels 8 and 9.
   struct sizes_t {
     UINT statistics_rows, decision_texels;
     bool scene;
@@ -565,20 +570,22 @@ namespace {
   }
 
   // ui_selection::decide on the counts the GPU wrote, with the pushed
-  // candidate bits, accepted mask and flags: "match" when the GPU's source,
-  // coverage, accepted word and valid bits agree, "n/a" for a shader of
-  // another candidate layout or selection revision.
+  // candidate bits, accepted mask and flags and no previous decision (the
+  // hold store unbound): "match" when the GPU's source, coverage, accepted
+  // word, valid bits, refused candidate and frame reason agree, "n/a" for a
+  // shader of another candidate layout or selection revision.
   std::string mirror_of(const outcome &result, bool mirrored) {
     const auto &d = result.decision;
-    if (!mirrored || d.size() <= word::valid_bits) return "n/a";
+    if (!mirrored || d.size() <= word::frame_reason) return "n/a";
     const auto expected = selection::decide(selection::counts_from_words(d.data(), d.size()), result.offered, result.accepted,
-      result.flags);
+      result.flags, selection::hold_state{});
     if (expected.source == d[word::source] && expected.covered == d[word::covered] && expected.valid_bits == d[word::valid_bits] &&
-        d[word::accepted] == result.accepted && d[word::candidates] == result.offered)
+        d[word::accepted] == result.accepted && d[word::candidates] == result.offered && expected.refused == d[word::refused] &&
+        selection::frame_reason_word(expected) == d[word::frame_reason])
       return "match";
-    char text[160];
-    std::snprintf(text, sizeof(text), "differs(decide source=%u covered=%u valid=0x%x)", expected.source, expected.covered,
-      expected.valid_bits);
+    char text[200];
+    std::snprintf(text, sizeof(text), "differs(decide source=%u covered=%u valid=0x%x refused=0x%x frame_reason=0x%x)",
+      expected.source, expected.covered, expected.valid_bits, expected.refused, selection::frame_reason_word(expected));
     return text;
   }
 
@@ -639,7 +646,8 @@ int main(int argc, char **argv) {
         "its case. A HUD-less image not comparable with its pair (ui_selection::comparable, from the two artifact formats\n"
         "and the manifest color_space) is not offered, and the pair's threshold comes from the same function. With a\n"
         "shader of the current layout and selection revision, every decision is checked against ui_selection::decide on\n"
-        "the GPU's counts (mirror=match); a mirror that differs fails its case. A case\n"
+        "the GPU's counts with no previous decision, as nothing is bound at the T1 hold store (mirror=match); a\n"
+        "mirror that differs fails its case. A case\n"
         "whose dump directory is gone, or whose needs_dump names what its dump lacks, is skipped; the run fails when no\n"
         "case ran. A \"sample\" key is accepted and ignored: its flag 0x20000 is reserved.\n"
         "A case with xfail is a known-wrong cell: expect holds the target outcome, xfail.stage the roadmap stage (S1, S2a,\n"
@@ -652,7 +660,9 @@ int main(int argc, char **argv) {
         "check the hidden-scene evidence that the shader's evidence passes write to decision texels 5 and 6. --write-mask\n"
         "copies each dump that consumed an automatic R32 mask into <new-dir>/<NN>_<dump> (NN: the case's position in\n"
         "cases.json) with ui_source_color replaced by the resolved mask, for replay_game3d_dump --shader; any other dump\n"
-        "fails its case. --verbose prints every decision word.\n");
+        "fails its case. Each line shows the frame reason, the refused candidate and the one-way judgment counts\n"
+        "(strong/contradicted pixels of the layer, Backbuffer and current alpha) from selection revision 2.\n"
+        "--verbose prints every decision word.\n");
       return 2;
     }
     const auto shader_path = fs::absolute(positional[0]);
@@ -748,12 +758,23 @@ int main(int argc, char **argv) {
       if (d.size() > word::valid_bits)
         std::snprintf(layer, sizeof(layer), " layer={covered=%u invalid=%u opaque=%u} valid=0x%x", d[word::layer_covered],
           d[word::layer_invalid], d[word::layer_opaque], d[word::valid_bits]);
+      // The frame reason, refused candidate and one-way counts from
+      // selection revision 2 (texels 8 and 9).
+      char judgment[200] = "";
+      if (d.size() > word::frame_reason) {
+        const auto reason = selection::frame_reason_name(d[word::frame_reason]);
+        const auto refused = selection::candidate_name(d[word::refused]);
+        std::snprintf(judgment, sizeof(judgment), " reason=%.*s%s refused=%.*s one_way={strong=%u/%u/%u contradicted=%u/%u/%u}",
+          int(reason.size()), reason.data(), (d[word::frame_reason] & contract::frame_reason_reused) ? "(reused)" : "",
+          int(refused.size()), refused.data(), d[word::strong], d[word::strong + 1], d[word::strong + 2], d[word::contradicted],
+          d[word::contradicted + 1], d[word::contradicted + 2]);
+      }
       std::printf("%s %-44s source=%u covered=%u/%u ui=%.2f%% mask=%s (want %s) candidates=0x%x accepted=0x%x "
-        "alpha_covered=%u/%u/%u/%u%s hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u} mirror=%s%s%s%s%s%s%s\n",
+        "alpha_covered=%u/%u/%u/%u%s%s hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u} mirror=%s%s%s%s%s%s%s\n",
         status, name.c_str(), d[word::source], d[word::covered], d[word::pixels],
         100.0 * double(result.ui_pixels) / double(result.pixels), mask_class(result).c_str(), wanted.c_str(),
         d[word::candidates], d[word::accepted], d[word::alpha_covered], d[word::alpha_covered + 1], d[word::alpha_covered + 2],
-        d[word::alpha_covered + 3], layer, d[word::hudless_changed], d[word::hudless_unchanged], d[word::hudless_invalid],
+        d[word::alpha_covered + 3], layer, judgment, d[word::hudless_changed], d[word::hudless_unchanged], d[word::hudless_invalid],
         d[word::matching_tiles], d[word::hudless_lit], mirror.c_str(), result.mask_exact.empty() ? "" : " mask_exact=",
         result.mask_exact.c_str(), scene.empty() ? "" : " scene=", scene.c_str(), hudless_scene.empty() ? "" : " hudless_scene=",
         hudless_scene.c_str());

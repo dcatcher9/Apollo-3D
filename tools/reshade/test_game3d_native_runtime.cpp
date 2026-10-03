@@ -287,7 +287,7 @@ namespace {
           counts.decided(4) == current && counts.decided(0) == frames - current &&
           !counts[ui_counter::untrusted_inferred] && current && frames > current &&
           counts[ui_counter::none + ui_no_mask::unaccepted] == frames - current && !counts.held() && !counts.inactive() &&
-          !counts[ui_counter::trusted_full] && !counts[ui_counter::presented_over_dedicated] &&
+          !counts[ui_counter::contradicted] && !counts[ui_counter::reused] && !counts[ui_counter::presented_over_dedicated] &&
           counts[ui_counter::trust_restored] == 1 && session.stored() == current_key,
         "D3D12 exact UI counters differ from the scripted Auto frames");
       std::printf("PASS D3D12 exact UI counters: %llu Auto frames through %llu ms reconcile; decided 4=%llu 0=%llu, unaccepted no-mask frames exact and no inferred source decided unaccepted\n",
@@ -299,7 +299,17 @@ namespace {
     if (renderer.take_gpu_timing(timing))
       std::printf("MEASURE D3D12 automatic detection GPU: frames=%u detection_mean=%.4f ms detection_max=%.4f ms total_mean=%.4f ms\n",
         timing.frames, timing.mean_ms[gpu_timing::detection], timing.max_ms[gpu_timing::detection], timing.mean_ms[gpu_timing::total]);
-    verify(1, false, false, false);
+    // T1: a real frame that offers nothing while the accepted current alpha of
+    // the previous real frame is missing has no decision of its own. It runs
+    // the reduce and mask passes only, reuses that frame's decision once and
+    // submits no sample; the next such frame has no mask.
+    const auto submitted = renderer.alpha_probe_activity().submitted;
+    verify(1, false, true, false);
+    require(renderer.consumed_detection().state == ui_detection_snapshot::run_state::ran &&
+        !renderer.consumed_detection().candidates &&
+        (renderer.consumed_detection().flags & ui_detection::per_frame_accepted_missing) &&
+        renderer.alpha_probe_activity().submitted == submitted,
+      "D3D12 zero-offer frame did not run the T1 grace alone, or submitted a sample");
     input.retained = true; // No captured view: Auto cannot manufacture availability.
     verify(1, true, false, false);
     input.retained = false;
@@ -453,7 +463,11 @@ namespace {
       }
     };
     run(true, "D3D12 matching final/HUDless differs from explicit protection");
-    ui.view = views[1]; run(false, "D3D12 mismatched scene retained preceding HUD protection");
+    // T1: the accepted pair invalid in a real frame leaves it without a
+    // decision of its own; it reuses the previous real frame's once, and the
+    // next such frame has no mask.
+    ui.view = views[1]; run(true, "D3D12 a mismatched scene did not reuse the preceding decision once");
+    run(false, "D3D12 mismatched scene retained preceding HUD protection");
     ui.view = views[2]; run(false, "D3D12 identical final/HUDless invented a mask");
     ui.view = views[0]; run(true, "D3D12 matching pair did not recover without review");
     ui_detection_inputs inputs;
@@ -461,7 +475,8 @@ namespace {
     inputs.masks[1] = inputs.masks[2] = views[2]; inputs.hudless = views[0];
     ui.detection = &inputs;
     run(true, "D3D12 unaccepted opaque UI/backbuffer candidates prevented HUDless fallback");
-    inputs.hudless = views[1]; run(false, "D3D12 all-unsuitable candidates did not produce Off");
+    inputs.hudless = views[1]; run(true, "D3D12 an invalid accepted pair did not reuse the preceding decision once");
+    run(false, "D3D12 all-unsuitable candidates did not produce Off");
     inputs.masks[0] = views[4]; run(false, "D3D12 an unaccepted opaque R32 UIAlpha decided");
     inputs.hudless = views[0]; run(true, "D3D12 an unaccepted opaque R32 UIAlpha blocked the HUD-less pair");
     require(policy.restore(key(ui_selection::kind::ui_alpha, DXGI_FORMAT_R32_FLOAT)).restored == 1,
@@ -476,8 +491,8 @@ namespace {
     for (const auto view : views) device->destroy_resource_view(view);
     upload_source(original); write_native_source(fixture, backbuffer);
     require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == original, "D3D12 HUDless fixture did not restore source");
-    report << "automatic-hudless D3D12 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_mismatch_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 all_candidate_descriptors=1 unaccepted_never_blocks=1 accepted_ui_alpha_decides=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
-    std::puts("PASS D3D12 automatic HUDless: exact paired HUD mask from an accepted pair, immediate mismatched/empty rejection, all native candidate descriptors, unaccepted candidates never block, an accepted R32 UIAlpha decides, and Manual Off");
+    report << "automatic-hudless D3D12 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_mismatch_rejected=1 t1_grace_once=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 all_candidate_descriptors=1 unaccepted_never_blocks=1 accepted_ui_alpha_decides=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
+    std::puts("PASS D3D12 automatic HUDless: exact paired HUD mask from an accepted pair, mismatched/empty rejection after the T1 grace reuses the previous real frame's decision once, all native candidate descriptors, unaccepted candidates never block, an accepted R32 UIAlpha decides, and Manual Off");
   }
 
   void check_adaptive_ui_d3d12(fixture_t &fixture, sunshine_game3d::renderer &renderer,

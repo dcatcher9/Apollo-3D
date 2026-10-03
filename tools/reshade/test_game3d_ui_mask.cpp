@@ -551,10 +551,19 @@ namespace {
     static_assert(kind(3725, 3728, true, 1) == present::earlier_real_frame && ago(3725, 3728, true, 1) == 1);
     // Enabled FG with an unreported count means one generated frame.
     static_assert(kind(5, 7, true, 0) == present::real_frame);
-    // Multi-frame generation, bounded to what the renderer can hold.
+    // Multi-frame generation follows the reported count without a multiplier
+    // constant (T1's tag bound keeps a wrong count fail-safe).
     static_assert(kind(5, 8, true, 3) == present::generated_frame);
     static_assert(kind(5, 9, true, 3) == present::real_frame);
-    static_assert(kind(5, 9, true, 7) == present::real_frame);
+    static_assert(kind(5, 9, true, 7) == present::generated_frame);
+    static_assert(kind(5, 13, true, 7) == present::real_frame);
+    static_assert(kind(5, 14, true, 7) == present::earlier_real_frame && ago(5, 14, true, 7) == 1);
+    // 6x: five generated Presents, then the real frame, then late pairs.
+    static_assert(kind(5, 6, true, 5) == present::generated_frame && kind(5, 10, true, 5) == present::generated_frame);
+    static_assert(kind(5, 11, true, 5) == present::real_frame);
+    static_assert(kind(5, 12, true, 5) == present::earlier_real_frame && ago(5, 12, true, 5) == 1);
+    static_assert(kind(5, 13, true, 5) == present::earlier_real_frame && ago(5, 13, true, 5) == 2);
+    static_assert(kind(5, 14, true, 5) == present::unpaired);
     // FG status only moves the real frame when it is known enabled.
     static_assert(kind(5, 6, false, 1) == present::real_frame && kind(5, 7, false, 1) == present::earlier_real_frame);
     // Unknown, sentinel and reversed generations never pair.

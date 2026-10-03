@@ -8,6 +8,7 @@ left/right image for its local glasses presenter or Game 3D stream. Follow the
 
 The Game 3D panel keeps **Enable Game 3D**, **3D strength**, and **UI protection** above its tabs.
 Strength defaults to **50%**; **Reset** stays in place and is disabled at the default value.
+The UI protection row's **Forget** clears the UI sources Auto accepted for this game.
 Existing saved values, including zero strength, are preserved until an explicit edit/reset.
 **Status**, **Troubleshooting**, and **Calibration** separate live information from source/preview
 controls and detailed measurements. Wrapped status text stays in its own scroll area and cannot
@@ -449,21 +450,25 @@ at; the exit code is 1 when a check failed. The checks cover: add-on and rendere
 fresh depth and gaps outside the settle time after FG switches and runtime resets; publications
 that showed the colour frame with depth; capture coverage by the list lifecycle; whether the
 camera projection or only the raw controller places the scene (the latter while a valid camera
-exists is a warning); UI acceptance changes, inferred alpha deciding beside an accepted UIAlpha or
-UI color tag, an accepted source covering the whole frame while an exact HUD-less pair shows the
-scene, and accepted sources that disagree (by the selection and dispute rules of
+exists is a warning); UI acceptance changes, Forget and the first-run shadow; inferred alpha
+deciding beside an accepted UIAlpha or UI color tag; an accepted inferred alpha that a valid exact
+HUD-less pair contradicted one way three times within 2 s without a revocation (in logs before S2a,
+an accepted source covering the whole frame while an exact pair shows the scene; shorter
+contradictions, which A2 never revokes, are noted); and accepted sources that disagree as often,
+with the revocation that resolved them named by its kind (by the selection and A2 revocation rules of
 [UI protection](../../docs/reshade-sbs.md#setup)); selective UI channels rejected for invalid pixels;
 `UI protection gaps`, the streamed time
 outside settle times in which Auto rendered frames without a UI mask (no UI source offered, or no
 usable mask while no UI channel was offered clean and empty, which means no UI on screen), so HUD
 and menus took the scene's depth, with each window's time and the reason each offered channel gave
-no mask (gaps shorter than the overlay warning's minimum, defined in the
+no mask, and in logs since S2a the add-on's own reason and refused candidate (gaps shorter than the overlay warning's minimum, defined in the
 [UI protection panel](../../docs/reshade-sbs.md#setup), are counted, not listed); how many samples were
 full-frame UI over a hidden scene (source 8 or 9)
 and how many of those were a route's exit, whose own evidence read the presented frame visible
 (each hidden scene that ends shows one, so they are counted rather than judged); a warning when the
 presented frame read hidden, not blank, for at least 500 ms while no UI source decided
-(`shadow_hidden_ms`, which a game's first session measures with its first-run shadow even where
+(`shadow_hidden_ms`, which the first-run shadow measures in a game's first session after install, or
+whenever `UISceneShadow=1`, even where
 nothing could act, such as a game whose only UI signal is presented alpha); observation losses by
 cause; unusual export pauses; present-thread
 hitches; Game 3D CPU and GPU cost; and, from the host log, the Game 3D link, size fit and encoder
@@ -473,9 +478,14 @@ Logs that contain `Sunshine UI counters` lines carry the add-on's exact per-fram
 [UI counters](../../docs/reshade-sbs.md#setup). For these logs the report decides the UI
 invariants from the last counter line, not from the 100 ms samples. It reports these checks:
 
-- `UI counters`: the add-on's own accounting.
-- `UI protection`: inferred alpha beside an accepted declared UI channel, and accepted full coverage
-  of a visible scene that no revocation of that source resolved.
+- `UI counters`: the add-on's own accounting (Auto frames are detection frames, generated Presents
+  that held a real frame's decision or had none, and frames without detection).
+- `UI protection`: inferred alpha beside an accepted declared UI channel, and the frames in which a
+  valid exact pair contradicted a deciding accepted inferred alpha one way (`contradicted`), which
+  fail only with a sampled run of three such contradictions within 2 s that no revocation followed:
+  A2 never revokes shorter ones, and the counter cannot tell them apart. Counter lines logged
+  before S2a keep the older rule: accepted full coverage of a visible scene (`trusted_full`) that no
+  revocation of that source resolved.
 - `UI full frame`: full-frame samples whose scene read visible. Each release of a held hidden-scene
   route (8 or 9) counts one, so this is a warning when such a route decided. An exact full
   change-set (6) over a visible scene is intended for an accepted exact pair (P1), so with no held
@@ -487,10 +497,15 @@ invariants from the last counter line, not from the 100 ms samples. It reports t
   candidates do since S1 (a warning on counter lines logged before S1).
 - `UI inexact difference`: a warning that names the
   [roadmap stage](../../docs/reshade-sbs.md#ui-decision-framework) that fixes it.
-- `UI holds`, `UI no mask` and `UI trust events`: exact totals.
+- `UI holds`, `UI no mask` and `UI trust events`: exact totals. Holds are the generated Presents
+  that showed a real frame's decision or had none, and the real frames that reused the previous
+  real frame's decision once (T1); frames without a mask also list the sampled reasons with the
+  candidate each refused; trust events include one-way and declared-coverage revocations and
+  Forget.
 
-Logs without counter lines use the sampled checks above. The report reads the UI lines of logs
-written before S1 too, with their UI layer read as the layer candidate.
+Logs without counter lines use the sampled checks above. The report reads the UI and counter lines
+of logs written before S2a and before S1 too, each with the checks of its time; a UI layer logged
+before S1 is read as the layer candidate.
 
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
 the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`
@@ -533,7 +548,9 @@ ctest --test-dir cmake-build-relwithdebinfo/reshade-addon -R reshade_game3d_ui_s
 
 Its `KNOWN_TODAY <stage> <rule>` lines name today's known-wrong outcomes by
 [UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework) stage and rule ID (such as
-`S2a T1`). They do not fail the test. A replay `xfail` reason names the same rule IDs.
+`S3 T1/E2`). They do not fail the test. Since S2a it ends with
+`PASS UI sequence replay: 24 groups, 5 KNOWN_TODAY`: two for S3 (T1/E2) and three for S2b (H1). A
+replay `xfail` reason names the same rule IDs.
 
 ## Additional diagnostics
 

@@ -143,8 +143,8 @@ namespace sunshine_game3d {
   // while unprotected, cleared by a decided rendered frame (a mask, or a clean
   // empty UI channel showing no UI), a manual mode, UI protection off or Game
   // 3D off. Neither a Present that rendered nothing nor one whose status
-  // sample is still pending (collecting after a decision key, revision or
-  // viewport change) starts or ends the run, so depth gaps and sample churn do
+  // sample is still pending (collecting after a change of the winning source,
+  // revision or viewport) starts or ends the run, so depth gaps and sample churn do
   // not restart it.
   inline std::uint64_t next_unprotected_since(const source_alpha_ui_decision &value, bool game3d_enabled,
       std::uint64_t previous, std::uint64_t now_ms) {

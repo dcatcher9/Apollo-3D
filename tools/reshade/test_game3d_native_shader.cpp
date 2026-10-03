@@ -62,6 +62,7 @@ namespace {
     {"SunshineAlphaCoverageStore", D3D_SIT_UAV_RWTYPED, 6},
     {"SunshineUIConflictStore", D3D_SIT_UAV_RWTYPED, 7},
     {"SunshineUICountersStore", D3D_SIT_UAV_RWTYPED, 7}, // Detection reduce only.
+    {"SunshineUIHoldStore", D3D_SIT_UAV_RWTYPED, 5}, // Detection reduce only.
     {"SunshinePointClamp", D3D_SIT_SAMPLER, 0},
     {"SunshineLinearClampState", D3D_SIT_SAMPLER, 1},
     {"SunshinePointBorder", D3D_SIT_SAMPLER, 2},
@@ -258,18 +259,25 @@ namespace {
       require(shared <= 32768, std::string(entry.name) + " exceeds 32 KiB of group-shared memory");
       manifest << "  groupshared " << shared << '\n';
     }
-    // The exact UI counters share u7 with the conflict probe's statistics: only
-    // the detection reduce adds to them, and no entry binds both.
+    // The exact UI counters share u7 with the conflict probe's statistics, and
+    // the T1 hold store shares u5 with the resolved UI plane: only the
+    // detection reduce binds the counters and the hold store, and no entry
+    // binds both resources of one register.
     {
-      bool counters = false, conflict = false;
+      bool counters = false, conflict = false, hold = false, plane = false;
       for (unsigned index = 0; index < shader.BoundResources; ++index) {
         D3D11_SHADER_INPUT_BIND_DESC actual {};
         require(SUCCEEDED(reflection->GetResourceBindingDesc(index, &actual)), "Binding reflection failed");
         counters |= std::string(actual.Name) == "SunshineUICountersStore";
         conflict |= std::string(actual.Name) == "SunshineUIConflictStore";
+        hold |= std::string(actual.Name) == "SunshineUIHoldStore";
+        plane |= std::string(actual.Name) == "SunshineUIPlaneResolvedStore";
       }
-      require(counters == (std::string(entry.name) == "SunshineUIDetectionReduceCS") && !(counters && conflict),
+      const bool reduce = std::string(entry.name) == "SunshineUIDetectionReduceCS";
+      require(counters == reduce && !(counters && conflict),
         std::string(entry.name) + ": only the detection reduce may add to the UI counters at u7");
+      require(hold == reduce && !(hold && plane),
+        std::string(entry.name) + ": only the detection reduce may bind the UI hold store at u5");
     }
     if (std::string(entry.name) == "SunshineApplyUICS") {
       const auto pairs = pin_bound_pairs(bytecode.Get(), width);
@@ -331,10 +339,12 @@ int main(int argc, char **argv) {
     mirrored(detection::hlsl_scene_defines);
     mirrored(sunshine_game3d::hlsl_counter_defines);
     mirrored(detection::hlsl_candidate_defines);
+    mirrored(detection::hlsl_hold_defines);
     // The reduce ports ui_selection::decide of this revision.
     require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision,
       "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision");
-    require(decision_texels >= detection::layer_decision_texels, "Candidate layout 2 needs the layer's decision texel 7");
+    require(decision_texels >= detection::judgment_decision_texels,
+      "Selection revision 2 needs the one-way judgment and frame reason decision texels 8 and 9");
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");

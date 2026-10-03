@@ -260,6 +260,77 @@ namespace {
       "An automatically detected source with lost pixels was still described as available");
   }
 
+  // F1: a sample without a mask names its reason and refused candidate.
+  void ui_protection_status_names_the_reason() {
+    namespace candidate = ui_detection::candidate;
+    source_alpha_ui_decision value;
+    value.qualification.available = true;
+    value.coverage.state = alpha_auto_state::automatic_off;
+    const auto text = [&](std::size_t reason, std::uint32_t refused) {
+      value.coverage.evidence.frame_reason = std::uint32_t(reason);
+      value.coverage.evidence.refused = refused;
+      return source_alpha_detection_text(value.qualification, value);
+    };
+    check(text(ui_no_mask::unaccepted, candidate::layer) == "No usable UI mask (learning the UI layer)" &&
+        text(ui_no_mask::unaccepted, candidate::hudless) == "No usable UI mask (learning the HUD-less difference)" &&
+        text(ui_no_mask::ambiguous, candidate::ui_color) == "No usable UI mask (the UI color tag shows no UI or the whole frame)" &&
+        text(ui_no_mask::trusted_invalid, candidate::ui_alpha) == "No usable UI mask (the UI alpha tag is unusable in this frame)" &&
+        text(ui_no_mask::presented_blocked, candidate::backbuffer) ==
+          "No usable UI mask (the UI tag is unusable in this frame and holds back the real-input alpha)" &&
+        text(ui_no_mask::layer_aside, candidate::layer) == "No usable UI mask (the UI layer holds no UI alpha)" &&
+        text(ui_no_mask::difference_failed, candidate::hudless) ==
+          "No usable UI mask (the HUD-less difference does not isolate UI)" &&
+        text(ui_no_mask::gate_no_hold, candidate::layer) ==
+          "No usable UI mask (checking whether a full-screen menu hides the scene)" &&
+        text(ui_no_mask::no_candidate, 0) == "No usable UI mask (no UI source offered)" &&
+        text(ui_no_mask::other, 0) == "No usable UI mask (no UI source qualifies)" &&
+        text(ui_no_mask::unaccepted, candidate::current) == "No usable UI mask (learning the current color alpha)",
+      "A no-mask reason or refused candidate was not named");
+    check(text(ui_no_mask::unaccepted, 0) == "No usable UI mask (learning the UI source)",
+      "A reason without a refused candidate was not named generically");
+    // No reason read (fewer than 40 decision words): the plain text.
+    check(text(ui_detection::frame_reason_decided, 0) == "No usable UI mask detected", "A missing reason was invented");
+    // A decided frame, a reused one included, names no reason.
+    value.coverage.source_kind = 3;
+    check(ui_protection_reason_text(value.coverage).empty(), "A decided sample named a no-mask reason");
+  }
+
+  // A3 Forget, and the first-run shadow toggle (UISceneShadow).
+  void forget_and_scene_shadow_are_per_game() {
+    settings_state settings;
+    check(!forget_learned_ui_sources(settings), "Forget without a session cleared something");
+    settings.alpha_session = std::make_shared<alpha_auto_policy>();
+    std::vector<std::string> heard;
+    settings.alpha_session->on_change([&](const std::string &stored) { heard.push_back(stored); });
+    std::string cleared = "unchanged";
+    check(settings.alpha_session->stored().empty() && !forget_learned_ui_sources(settings, &cleared) && cleared.empty() &&
+        heard.empty(), "Forget with nothing accepted (a disabled button) cleared or reported something");
+    settings.alpha_session->restore("ui_color:87:srgb,ui_layer:10:pq");
+    check(!settings.alpha_session->stored().empty() && forget_learned_ui_sources(settings, &cleared) &&
+        cleared == "ui_color:87:srgb,ui_layer:10:pq" && settings.alpha_session->stored().empty() &&
+        heard == std::vector<std::string>{""} && settings.alpha_session->counters()[ui_counter::trust_forgotten] == 2,
+      "Forget did not clear, persist an empty TrustedUISources or count the accepted keys");
+    settings.alive = false;
+    settings.alpha_session->restore("ui_color:87:srgb");
+    check(!forget_learned_ui_sources(settings) && !settings.alpha_session->stored().empty(),
+      "Forget acted on a destroyed runtime's settings");
+
+    fake_config absent;
+    check(load_scene_shadow(absent) == scene_shadow_setting::absent && scene_shadow_runs(scene_shadow_setting::absent) &&
+        absent.writes == std::vector<std::string>{"UISceneShadow"} && std::get<int>(absent.values.at("UISceneShadow")) == 0,
+      "An absent UISceneShadow did not run this session and write 0");
+    check(load_scene_shadow(absent) == scene_shadow_setting::never && absent.writes.size() == 1,
+      "The next session after the first ran the shadow or rewrote the key");
+    fake_config always;
+    always.values["UISceneShadow"] = 1;
+    check(load_scene_shadow(always) == scene_shadow_setting::always && scene_shadow_runs(scene_shadow_setting::always) &&
+        always.writes.empty(), "UISceneShadow=1 did not run the shadow, or was rewritten");
+    fake_config never;
+    never.values["UISceneShadow"] = 0;
+    check(load_scene_shadow(never) == scene_shadow_setting::never && !scene_shadow_runs(scene_shadow_setting::never) &&
+        never.writes.empty(), "UISceneShadow=0 ran the shadow, or was rewritten");
+  }
+
   void ui_protection_warning_follows_unprotected_rendered_frames() {
     // Stellar Blade in SDR without FG: its UI layer holds the scene image (no
     // alpha, color on 60%, so V1-invalid) and current alpha covers
@@ -717,6 +788,8 @@ int main() {
     source_alpha_mode_edits_control_the_session();
     source_alpha_fg_mode_survives_observation_gaps();
     source_alpha_selection_reports_capture_prerequisite();
+    ui_protection_status_names_the_reason();
+    forget_and_scene_shadow_are_per_game();
     ui_protection_warning_follows_unprotected_rendered_frames();
     source_alpha_applied_status_is_transient_and_mode_scoped();
     persistence_survives_runtime_recreation();
@@ -726,7 +799,7 @@ int main() {
     measured_statistics_follow_applied_and_held_scale_ownership();
     positive_flat_zero_target_does_not_invent_gain_tracking();
     projection_conversion_is_independent_and_retained_with_its_reference();
-    std::puts("PASS native Game 3D controls: defaults, automatic persistence, independent resets, runtime lifetime, output status, UI protection warning and scale/conversion");
+    std::puts("PASS native Game 3D controls: defaults, automatic persistence, independent resets, runtime lifetime, output status, UI protection warning, reason, Forget and shadow toggle, and scale/conversion");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

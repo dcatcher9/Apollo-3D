@@ -52,10 +52,16 @@ namespace sunshine_game3d {
     candidate_signatures signatures;
     reshade::api::resource_view hudless{};
     bool current_color = false;
-    // A generated present between a HUD-less tag and its real frame. Reuse the
-    // real frame's detected mask rather than differencing interpolated color.
+    // A generated present between a HUD-less tag and its real frame, or,
+    // without a HUD-less pairing, one that offers nothing within the reported
+    // generated count of the last Present that offered a UI tag, by Present
+    // counting (UI framework T1, until S3 stamps real frames). It
+    // never detects: it shows the decision of the real frame it shows, or has
+    // no mask (ui_temporal::detection_state::arbitrate).
     bool hold_previous = false;
-    static constexpr std::uint32_t max_held_presents = 3;
+    // The T1 real-frame id: the HUD-less tag's present generation, on
+    // generated and paired Presents alike; zero without a HUD-less capture.
+    std::uint64_t real_frame = 0;
     // The game's own final color from the HUD-less image's tag batch (Streamline
     // Backbuffer). When present, HUD-less is compared with it exactly, and
     // hudless_presents_ago is not used.
@@ -161,7 +167,8 @@ namespace sunshine_game3d {
   }
 
   // The UI detection constants (b2) behind the mask a render consumed, for
-  // Dump 3D replay. A held mask reports the run that made it.
+  // Dump 3D replay. A held mask (a generated Present showing a real frame's
+  // decision, T1) reports the run that made it.
   struct ui_detection_snapshot {
     enum class run_state : std::uint8_t { inactive, ran, held };
     run_state state = run_state::inactive;
@@ -169,9 +176,9 @@ namespace sunshine_game3d {
     // accepted candidates in candidate-bit positions.
     std::uint32_t candidates{}, threshold_bits{}, accepted{};
     // flags is the full pushed Sunshine_UIDetectionFlags word; stored_flags is
-    // the part the renderer keeps and keys samples with, never a per-frame bit.
+    // the offscreen UI layer slot's stored part, never a per-frame bit.
     std::uint32_t flags{}, stored_flags{};
-    std::uint32_t held_presents{}; // Consecutive Presents that reused the mask.
+    std::uint32_t held_presents{}; // Consecutive generated Presents that applied the mask.
   };
   inline const char *name(ui_detection_snapshot::run_state value) {
     switch (value) {

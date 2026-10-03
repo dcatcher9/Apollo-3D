@@ -2,13 +2,16 @@
 #pragma once
 // The selection side of the UI decision framework (docs/reshade-sbs.md, UI
 // decision framework): candidate kinds, per-frame validity (V1 opacity, V2
-// change sets), the S1 selection predicate, pair comparability (V2) and the
-// acceptance signature key (A1). decide() is the whole decision of
-// SunshineUIDetectionReduceCS thread 0, which game3d_native.hlsl ports line
-// for line with the same uint32 arithmetic: test_game3d_ui_selection_contract
-// runs the real reduce against it, ui_detection_replay checks every replay
-// case (mirror=match), and the shader's SUNSHINE_UI_SELECTION_REVISION must
-// equal revision. Counts stay within the 3840 x 3840 detection domain, so no
+// change sets), the S1 selection predicate, the one-way judgment counts and
+// judges the acceptance ledger reads (A2), the T1 grace of a real frame
+// without a decision of its own, the named no-mask reason and refused
+// candidate (F1), pair comparability (V2) and the acceptance signature key
+// (A1). decide() is the whole decision of SunshineUIDetectionReduceCS thread
+// 0, the hold store included, which game3d_native.hlsl ports line for line
+// with the same uint32 arithmetic: test_game3d_ui_selection_contract runs the
+// real reduce against it, ui_detection_replay checks every replay case
+// (mirror=match), and the shader's SUNSHINE_UI_SELECTION_REVISION must equal
+// revision. Counts stay within the 3840 x 3840 detection domain, so no
 // product below overflows 32 bits. No ReShade dependency.
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
@@ -24,7 +27,9 @@
 #include <tuple>
 
 namespace sunshine_game3d::ui_selection {
-  inline constexpr std::uint32_t revision = 1;
+  // 2 (S2a): the T1 grace with the hold store, the one-way judgment counts
+  // (texels 8-9), the refused candidate and the frame reason word.
+  inline constexpr std::uint32_t revision = 2;
   inline constexpr std::string_view revision_marker = "SUNSHINE_UI_SELECTION_REVISION";
 
   // Candidate kinds. Declared sources are the game's own UI contract (the
@@ -89,7 +94,50 @@ namespace sunshine_game3d::ui_selection {
   static_assert(bit(kind::ui_layer) == 0x40u && source_id(kind::ui_layer) == 10u && declared(kind::hudless) &&
     !declared(kind::ui_layer) && alpha_index(kind::current) == 4 && kind_named("ui_color") == kind::ui_color);
 
-  // One detection's counts as the reduce sums them (decision texels 0-4, 7).
+  // The first candidate of a bit set in draw order, zero when none.
+  constexpr std::uint32_t first_in_draw_order(std::uint32_t bits) {
+    for (const auto k : draw_order)
+      if (bits & bit(k)) return bit(k);
+    return 0u;
+  }
+  // The kind name of one candidate bit (a refused candidate), "none" for zero
+  // or anything else.
+  constexpr std::string_view candidate_name(std::uint32_t candidate_bit) {
+    for (const auto k : draw_order)
+      if (candidate_bit == bit(k)) return name(k);
+    return "none";
+  }
+  static_assert(first_in_draw_order(0x5cu) == 0x40u && first_in_draw_order(0x1cu) == 0x4u && !first_in_draw_order(0x20u) &&
+    candidate_name(0x40u) == "ui_layer" && candidate_name(0u) == "none" && candidate_name(0x3u) == "none");
+
+  // A2: the kinds the one-way test judges (inferred alpha), in the order of
+  // counts::strong and counts::contradicted and of decision texels 8 and 9.
+  inline constexpr std::array<kind, 3> judged_kinds{kind::ui_layer, kind::backbuffer, kind::current};
+  // A2 judge (a): an exact change set, valid this frame (V2), partial or full;
+  // acceptance is not required. offered and valid_bits in candidate bits.
+  constexpr bool exact_judge(std::uint32_t offered, std::uint32_t valid_bits) {
+    return (offered & (candidate::hudless | candidate::exact)) == (candidate::hudless | candidate::exact) &&
+      (valid_bits & candidate::hudless) != 0u;
+  }
+  // A2, the one-way lit-pixel disagreement: at least a tenth of a judged
+  // source's strong pixels (alpha of at least 1/2) lie where the exact
+  // HUD-less image is lit and unchanged. Dims and tints over dark or changed
+  // pixels never meet it.
+  constexpr bool one_way_contradicted(std::uint32_t strong, std::uint32_t contradicted) {
+    return strong && std::uint64_t(contradicted) * 10u >= strong;
+  }
+  // A2 judge (b): a declared alpha's coverage and an inferred alpha's differ
+  // by at least a tenth of the frame.
+  constexpr bool coverage_disagrees(std::uint32_t declared_covered, std::uint32_t inferred_covered, std::uint32_t pixels) {
+    const std::uint64_t difference = declared_covered > inferred_covered ? declared_covered - inferred_covered :
+      inferred_covered - declared_covered;
+    return pixels && difference * 10u >= pixels;
+  }
+  static_assert(exact_judge(0x34u, 0x14u) && !exact_judge(0x14u, 0x14u) && !exact_judge(0x34u, 0x4u) &&
+    one_way_contradicted(1000u, 100u) && !one_way_contradicted(1000u, 99u) && !one_way_contradicted(0u, 0u) &&
+    coverage_disagrees(0u, 100u, 1000u) && !coverage_disagrees(150u, 51u, 1000u) && !coverage_disagrees(0u, 0u, 0u));
+
+  // One detection's counts as the reduce sums them (decision texels 0-4, 7-9).
   struct counts {
     std::uint32_t pixels{};
     // Alpha kinds in alpha_index order: UIAlpha, UI color tag, UI layer,
@@ -100,9 +148,14 @@ namespace sunshine_game3d::ui_selection {
     // The HUD-less pair: changed, unchanged (within half the threshold) and
     // non-finite pixels, lit HUD-less pixels, tiles at least 99% matching.
     std::uint32_t changed{}, unchanged{}, nonfinite{}, lit{}, matching_tiles{};
+    // A2, in judged_kinds order: pixels with alpha of at least 1/2, and those
+    // of them where an offered exact pair's HUD-less image is lit and
+    // unchanged (neither for the one-frame-late layer, E2).
+    std::array<std::uint32_t, 3> strong{}, contradicted{};
   };
   // Counts from decision words (texel t, component c is word 4 t + c); the
-  // layer's (texel 7) read zero from fewer than 32 words.
+  // layer's (texel 7) read zero from fewer than 32 words, the one-way counts
+  // (texels 8-9) from fewer than 40.
   inline counts counts_from_words(const std::uint32_t *words, std::size_t n) {
     namespace word = ui_detection::decision_word;
     const auto at = [&](std::size_t i) { return i < n ? words[i] : 0u; };
@@ -120,6 +173,11 @@ namespace sunshine_game3d::ui_selection {
     c.opaque_ui_alpha = at(word::alpha_opaque);
     c.opaque_ui_color = at(word::alpha_opaque + 1);
     c.opaque_layer = at(word::layer_opaque);
+    if (n >= 4u * ui_detection::judgment_decision_texels)
+      for (std::size_t i = 0; i != judged_kinds.size(); ++i) {
+        c.strong[i] = words[word::strong + i];
+        c.contradicted[i] = words[word::contradicted + i];
+      }
     return c;
   }
 
@@ -141,15 +199,52 @@ namespace sunshine_game3d::ui_selection {
     return exact && !c.nonfinite && c.changed * 100u >= c.pixels * 98u && c.lit * 2u >= c.pixels;
   }
 
+  // T1: the GPU hold store of the last real detection (ui_detection::hold):
+  // whether it decided on its own (own) or not (spent), and the decision it
+  // applied. Default: none, as with nothing bound at u5.
+  struct hold_state {
+    std::uint32_t state{}, source{}, covered{};
+  };
+
   struct decision {
+    // The applied decision: the frame's own, or under the T1 grace (reused)
+    // the previous real frame's from the hold store.
     std::uint32_t source{}, covered{};
+    // The frame's own decision (S1).
+    std::uint32_t own_source{}, own_covered{};
     // Offered candidates that passed V1/V2 this frame, in candidate-bit positions.
     std::uint32_t valid_bits{};
-    std::size_t none_reason = ui_no_mask::other; // Meaningful when source is 0.
+    // The own decision's reason when it decided no source (F1).
+    std::size_t none_reason = ui_no_mask::other;
+    // The own decision's refused candidate bit (F1): the first candidate in
+    // draw order matching none_reason; zero when it decided or none matches.
+    std::uint32_t refused{};
+    // Decision word frame_reason: none_reason, or frame_reason_decided when
+    // the own decision decided a source.
+    std::uint32_t frame_reason{};
+    // Judged kinds (layer, Backbuffer, current; offered and V1-valid) that a
+    // valid exact pair contradicts in the one-way test this frame (A2).
+    std::uint32_t contradicted_bits{};
+    // T1: the frame had no decision of its own and applied the previous real
+    // frame's own decision.
+    bool reused{};
+    // The hold store this detection writes.
+    hold_state next{};
     // Counter words (game3d_ui_counters.h); untrusted_inferred and
     // presented_over_dedicated are invariants, zero by construction.
-    bool untrusted_inferred{}, presented_over_dedicated{}, inexact_difference{}, trusted_full{}, full_alpha{};
+    // full_alpha is of the applied decision, the others of the own decision.
+    bool untrusted_inferred{}, presented_over_dedicated{}, inexact_difference{}, contradicted{}, full_alpha{};
   };
+  // Decision word frame_reason of a decision (texel 9 .w).
+  constexpr std::uint32_t frame_reason_word(const decision &d) {
+    return d.frame_reason | (d.reused ? ui_detection::frame_reason_reused : 0u);
+  }
+  // The frame reason's name: a ui_no_mask name, or "decided".
+  inline std::string_view frame_reason_name(std::uint32_t word) {
+    const auto reason = word & ui_detection::frame_reason_reason_mask;
+    if (reason == ui_detection::frame_reason_decided) return "decided";
+    return reason < ui_no_mask::count ? ui_no_mask::names[reason] : std::string_view("other");
+  }
 
   // S1: among offered, accepted and valid candidates the first in draw order
   // decides, at any coverage (P1). An unaccepted or invalid candidate never
@@ -158,7 +253,13 @@ namespace sunshine_game3d::ui_selection {
   // invalid itself. A change set decides as source 5 when partial and as 6
   // when full from an exact pair. Otherwise the hidden-scene routes act on
   // unaccepted inputs under the CPU's held verdicts (8 layer, 9 HUD-less).
-  inline decision decide(const counts &c, std::uint32_t offered, std::uint32_t accepted, std::uint32_t flags) {
+  // T1: a real frame that decided no source while an accepted candidate is
+  // missing (per_frame_accepted_missing) or offered but invalid has no
+  // decision of its own; it applies the previous real frame's own decision
+  // once (reused), unless per_frame_hold_reset says there is none, and then
+  // no mask. previous is the hold store as the last detection wrote it.
+  inline decision decide(const counts &c, std::uint32_t offered, std::uint32_t accepted, std::uint32_t flags,
+      const hold_state &previous = {}) {
     decision d;
     const std::uint32_t pixels = c.pixels;
     std::uint32_t valid = 0u, selective_bits = 0u;
@@ -175,57 +276,95 @@ namespace sunshine_game3d::ui_selection {
     d.valid_bits = valid;
     const bool block = (offered & accepted & declared_alpha_bits) != 0u;
     const std::uint32_t eligible = offered & accepted & valid & (block ? ~inferred_alpha_bits : ~0u);
+    std::uint32_t source = 0u, covered = 0u;
     for (const auto k : draw_order) {
       if (!alpha_kind(k) || !(eligible & bit(k))) continue;
-      d.source = source_id(k);
-      d.covered = c.covered[alpha_index(k)];
+      source = source_id(k);
+      covered = c.covered[alpha_index(k)];
       break;
     }
-    if (!d.source && (eligible & candidate::hudless)) {
+    if (!source && (eligible & candidate::hudless)) {
       if (partial_set) {
-        d.source = 5u;
-        d.covered = c.changed;
+        source = 5u;
+        covered = c.changed;
       } else {
-        d.source = 6u;
-        d.covered = pixels;
+        source = 6u;
+        covered = pixels;
       }
     }
-    const auto gates = ui_detection::scene_gates_of(d.source, offered, accepted, pixels,
+    const auto gates = ui_detection::scene_gates_of(source, offered, accepted, pixels,
       {c.invalid[alpha_index(kind::ui_alpha)], c.invalid[alpha_index(kind::ui_layer)]}, {c.opaque_ui_alpha, c.opaque_layer},
       c.changed);
-    if (!d.source && gates.layer && (flags & ui_detection::per_frame_scene_hold)) {
-      d.source = 8u;
-      d.covered = pixels;
-    } else if (!d.source && gates.hudless && (flags & ui_detection::per_frame_scene_hold_hudless)) {
-      d.source = 9u;
-      d.covered = pixels;
+    if (!source && gates.layer && (flags & ui_detection::per_frame_scene_hold)) {
+      source = 8u;
+      covered = pixels;
+    } else if (!source && gates.hudless && (flags & ui_detection::per_frame_scene_hold_hudless)) {
+      source = 9u;
+      covered = pixels;
     }
     const std::uint32_t unaccepted = offered & ~accepted;
-    if (!d.source) {
-      d.none_reason = gates.layer || gates.hudless ? ui_no_mask::gate_no_hold :
-        block && (offered & accepted & valid & inferred_alpha_bits) ? ui_no_mask::presented_blocked :
-        (offered & accepted & alpha_bits & ~valid) ? ui_no_mask::trusted_invalid :
-        (offered & candidate::layer) && !(valid & candidate::layer) ? ui_no_mask::layer_aside :
-        (unaccepted & valid & selective_bits) ? ui_no_mask::unaccepted :
-        (offered & candidate::hudless) ? ui_no_mask::difference_failed :
-        (unaccepted & valid & alpha_bits & ~selective_bits) ? ui_no_mask::ambiguous :
-        !(offered & alpha_bits) ? ui_no_mask::no_candidate : ui_no_mask::other;
+    // F1: the reason, in priority order, and the refused candidate it names.
+    if (!source) {
+      if (gates.layer || gates.hudless) {
+        d.none_reason = ui_no_mask::gate_no_hold;
+        d.refused = (gates.layer_slots & 1u) ? candidate::ui_alpha : gates.layer ? candidate::layer : candidate::hudless;
+      } else if (block && (offered & accepted & valid & inferred_alpha_bits)) {
+        d.none_reason = ui_no_mask::presented_blocked;
+        d.refused = first_in_draw_order(offered & accepted & valid & inferred_alpha_bits);
+      } else if (offered & accepted & alpha_bits & ~valid) {
+        d.none_reason = ui_no_mask::trusted_invalid;
+        d.refused = first_in_draw_order(offered & accepted & alpha_bits & ~valid);
+      } else if ((offered & candidate::layer) && !(valid & candidate::layer)) {
+        d.none_reason = ui_no_mask::layer_aside;
+        d.refused = candidate::layer;
+      } else if (unaccepted & valid & selective_bits) {
+        d.none_reason = ui_no_mask::unaccepted;
+        d.refused = first_in_draw_order(unaccepted & valid & selective_bits);
+      } else if (offered & candidate::hudless) {
+        d.none_reason = ui_no_mask::difference_failed;
+        d.refused = candidate::hudless;
+      } else if (unaccepted & valid & alpha_bits & ~selective_bits) {
+        d.none_reason = ui_no_mask::ambiguous;
+        d.refused = first_in_draw_order(unaccepted & valid & alpha_bits & ~selective_bits);
+      } else {
+        d.none_reason = !(offered & alpha_bits) ? ui_no_mask::no_candidate : ui_no_mask::other;
+      }
     }
-    const bool inferred = d.source == 3u || d.source == 4u || d.source == ui_detection::source_layer;
-    const bool alpha = (d.source >= 1u && d.source <= 4u) || d.source == ui_detection::source_layer;
-    const std::uint32_t inferred_bit = d.source == 3u ? candidate::backbuffer : d.source == 4u ? candidate::current :
+    d.frame_reason = source ? ui_detection::frame_reason_decided : std::uint32_t(d.none_reason);
+    // A2: the judged kinds a valid exact pair contradicts this frame.
+    if (exact_judge(offered, valid))
+      for (std::size_t i = 0; i != judged_kinds.size(); ++i)
+        if ((valid & bit(judged_kinds[i])) && one_way_contradicted(c.strong[i], c.contradicted[i]))
+          d.contradicted_bits |= bit(judged_kinds[i]);
+    // T1: no decision of its own, so the previous real frame's own decision
+    // once; per_frame_hold_reset means there is none in this chain.
+    const bool no_own = !source && ((flags & ui_detection::per_frame_accepted_missing) ||
+      (offered & accepted & candidate_bits & ~valid));
+    const std::uint32_t prior = (flags & ui_detection::per_frame_hold_reset) ? ui_detection::hold::none : previous.state;
+    d.reused = no_own && prior == ui_detection::hold::own;
+    d.own_source = source;
+    d.own_covered = covered;
+    d.source = d.reused ? previous.source : source;
+    d.covered = d.reused ? previous.covered : covered;
+    d.next = {no_own ? ui_detection::hold::spent : ui_detection::hold::own, d.source, d.covered};
+    // Counter words: the own decision's invariants and judgments, the applied
+    // decision's whole-frame alpha.
+    const bool inferred = source == 3u || source == 4u || source == ui_detection::source_layer;
+    const std::uint32_t inferred_bit = source == 3u ? candidate::backbuffer : source == 4u ? candidate::current :
       candidate::layer;
     d.untrusted_inferred = inferred && !(accepted & inferred_bit);
     d.presented_over_dedicated = inferred && block;
-    d.inexact_difference = (d.source == 5u || d.source == 9u) &&
+    d.inexact_difference = (source == 5u || source == 9u) &&
       (offered & (candidate::hudless | candidate::exact)) == candidate::hudless;
+    d.contradicted = inferred && (accepted & inferred_bit) && (d.contradicted_bits & inferred_bit);
+    const bool alpha = (d.source >= 1u && d.source <= 4u) || d.source == ui_detection::source_layer;
     d.full_alpha = alpha && d.covered * 100u >= pixels * 99u;
-    d.trusted_full = d.full_alpha && (offered & (candidate::hudless | candidate::exact)) == (candidate::hudless | candidate::exact) &&
-      !c.nonfinite && c.unchanged * 2u >= pixels;
     return d;
   }
 
-  // The adds one detection frame makes to the GPU counter words.
+  // The adds one detection frame makes to the GPU counter words: the applied
+  // decision (detection frame, decided source, reused, whole-frame alpha,
+  // depth), and the own decision's reason without a mask and judgments.
   inline std::array<std::uint32_t, ui_counter_word::count> counter_adds(const decision &d, std::uint32_t flags) {
     std::array<std::uint32_t, ui_counter_word::count> adds{};
     adds[ui_counter_word::detection_frames] = 1;
@@ -234,9 +373,10 @@ namespace sunshine_game3d::ui_selection {
     adds[ui_counter_word::untrusted_inferred] = d.untrusted_inferred;
     adds[ui_counter_word::inexact_difference] = d.inexact_difference;
     adds[ui_counter_word::depth_not_current] = (flags & ui_detection::per_frame_depth_not_current) != 0u;
-    adds[ui_counter_word::trusted_full] = d.trusted_full;
+    adds[ui_counter_word::contradicted] = d.contradicted;
     adds[ui_counter_word::presented_over_dedicated] = d.presented_over_dedicated;
     adds[ui_counter_word::full_alpha] = d.full_alpha;
+    adds[ui_counter_word::reused] = d.reused;
     return adds;
   }
 

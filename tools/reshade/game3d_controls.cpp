@@ -82,14 +82,28 @@ namespace sunshine_game3d {
       return value;
     }
 
+    // Per-game keys of the global ReShade.ini, shared by the game's runtimes.
+    struct global_config_backend {
+      template<class T> void read(const char *key, T &value) { reshade::get_config_value(nullptr, config_section, key, value); }
+      template<class T> void write(const char *key, T value) { reshade::set_config_value(nullptr, config_section, key, value); }
+    };
+
     const std::shared_ptr<alpha_auto_policy> &alpha_session() {
       // Manual On/Off is shared per game; live Auto qualification is per runtime.
       static const auto session = [] {
         auto policy = std::make_shared<alpha_auto_policy>();
         const auto restored = policy->restore(read_accepted_sources());
-        // Without restored acceptance this is the game's first session: hidden-
-        // scene evidence runs as a logged first-run shadow (docs/reshade-sbs.md).
-        policy->set_first_run(!restored.restored);
+        // The first-run shadow of hidden-scene evidence is a diagnostics
+        // toggle, independent of acceptance (docs/reshade-sbs.md): it runs in
+        // the session that finds UISceneShadow absent, then whenever it is 1.
+        global_config_backend global;
+        const auto shadow = load_scene_shadow(global);
+        policy->set_first_run(scene_shadow_runs(shadow));
+        if (scene_shadow_runs(shadow)) {
+          const auto message = std::string("Sunshine UI protection: first-run shadow measures this session (") +
+            scene_shadow_key + '=' + (shadow == scene_shadow_setting::absent ? "absent" : "1") + ')';
+          sunshine_log::message(reshade::log::level::info, message.c_str());
+        }
         if (restored.discarded) {
           const auto message = "Sunshine UI protection: discarded " + std::to_string(restored.discarded) +
             " legacy UI trust entries (" + restored.discarded_text +
@@ -352,12 +366,29 @@ namespace sunshine_game3d {
         // Display order is On / Off / Auto; persisted enum values stay stable.
         const source_alpha_mode modes[]{source_alpha_mode::on, source_alpha_mode::off, source_alpha_mode::automatic};
         int choice = data->values.ui_protection == source_alpha_mode::on ? 0 : data->values.ui_protection == source_alpha_mode::off ? 1 : 2;
+        const float forget_width = reserve_reset_button();
         record_control_position(2);
         if (ImGui::Combo("##UIProtection", &choice, "On\0Off\0Auto\0")) {
           if (edit_source_alpha_mode(*data, modes[choice], config))
             process_alpha_mode = data->values.ui_protection;
         }
         ImGui::SetItemTooltip("On and Off are saved per game. Auto finds a compatible UI source and checks its quality automatically. Frame Generation requires submitted usable input pixels.");
+        if (data->alive) {
+          // Forget learned UI sources (A3), laid out like the Reset buttons
+          // so the recorded control positions do not move.
+          ImGui::SameLine();
+          ImGui::BeginDisabled(!data->alpha_session || data->alpha_session->stored().empty());
+          if (ImGui::Button("Forget##UIProtection", ImVec2(forget_width, 0))) {
+            std::string cleared;
+            if (forget_learned_ui_sources(*data, &cleared)) {
+              const auto message = "Sunshine UI protection: forgot learned UI sources " + cleared +
+                " for this game; each source is accepted again by its own evidence";
+              sunshine_log::message(reshade::log::level::info, message.c_str());
+            }
+          }
+          ImGui::SetItemTooltip("Forget learned UI sources: clears the UI sources Auto accepted for this game, in this session and in TrustedUISources. Auto learns them again from the game's evidence.");
+          ImGui::EndDisabled();
+        }
       }
       ImGui::EndTable();
     }
@@ -382,7 +413,7 @@ namespace sunshine_game3d {
       ImGui::TextUnformatted("UI protection: off");
     const bool dedicated_ui = source_alpha.dedicated_ui_active(data->values.ui_protection, data->values.enabled);
     if (data->values.enabled && data->values.ui_protection == source_alpha_mode::automatic)
-      ImGui::TextWrapped("UI protection: %s", source_alpha_detection_text(source, source_alpha));
+      ImGui::TextWrapped("UI protection: %s", source_alpha_detection_text(source, source_alpha).c_str());
     else if (data->values.enabled && data->values.ui_protection == source_alpha_mode::on)
       if (const auto blocked = source_alpha_capture_block_text(source_alpha_capture_block_for(source.selected, fg)))
         ImGui::TextWrapped("UI protection: %s", blocked);

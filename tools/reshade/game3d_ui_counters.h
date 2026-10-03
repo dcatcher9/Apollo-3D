@@ -10,7 +10,7 @@
 // through the last committed sample (through_ms): frames rendered after it,
 // at most one sample interval plus the pending copy, are counted by a later
 // commit, or lost when their renderer is destroyed first. At every commit
-//   auto_frames == detection_frames + held + inactive.
+//   auto_frames == detection_frames + held.generated + held.none + inactive.
 // game3d_native.hlsl mirrors the GPU word indices as SUNSHINE_UI_COUNTER_*
 // defines and test_game3d_ui_layer fails when they disagree. This header owns
 // the log text after "Sunshine UI counters: ". No ReShade dependency.
@@ -56,34 +56,42 @@ namespace sunshine_game3d {
     inline constexpr std::size_t inexact_difference = 13;
     // The consumed depth was not this frame's (per_frame_depth_not_current).
     inline constexpr std::size_t depth_not_current = 14;
-    // An accepted alpha source (1-4, 10) covering at least 99% while an exact
-    // pair shows at least half of the scene unchanged.
-    inline constexpr std::size_t trusted_full = 15;
+    // The frame's own decision was an accepted inferred alpha (Backbuffer 3,
+    // current 4 or the offscreen UI layer 10) that the same frame's valid
+    // exact pair contradicts in the one-way test (A2): at least a tenth of its
+    // pixels with alpha of at least 1/2 lie where the HUD-less image is lit
+    // and unchanged. The acceptance ledger revokes it from such samples.
+    inline constexpr std::size_t contradicted = 15;
     // An inferred alpha (3, 4, 10) decided while an accepted declared alpha
     // (UIAlpha or the UI color tag) was offered. Zero by construction since
     // S1 (the declared-alpha block); kept as an invariant.
     inline constexpr std::size_t presented_over_dedicated = 16;
     // One word per ui_no_mask reason.
     inline constexpr std::size_t none = 17;
-    // An alpha source (1-4, 10) decided covering at least 99% of pixels: a
-    // whole-frame mask from alpha, whatever the HUD-less pair showed.
+    // An alpha source (1-4, 10) was applied covering at least 99% of pixels:
+    // a whole-frame mask from alpha, whatever the HUD-less pair showed.
     inline constexpr std::size_t full_alpha = none + ui_no_mask::count;
-    inline constexpr std::size_t count = full_alpha + 1;
+    // The T1 grace: a real frame without a decision of its own (an accepted
+    // candidate missing or invalid) applied the previous real frame's
+    // decision, once, from the GPU hold store.
+    inline constexpr std::size_t reused = full_alpha + 1;
+    inline constexpr std::size_t count = reused + 1;
   }
   static_assert(ui_counter_word::decided + ui_counter_word::decided_count == ui_counter_word::untrusted_inferred &&
-    ui_counter_word::full_alpha == 26 && ui_counter_word::count == 27);
+    ui_counter_word::full_alpha == 26 && ui_counter_word::reused == 27 && ui_counter_word::count == 28);
   // The game3d_native.hlsl define mirroring each GPU word index.
-  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 19> hlsl_counter_defines{{
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 20> hlsl_counter_defines{{
     {"SUNSHINE_UI_COUNTER_WORDS", std::uint32_t(ui_counter_word::count)},
     {"SUNSHINE_UI_COUNTER_DETECTION_FRAMES", std::uint32_t(ui_counter_word::detection_frames)},
     {"SUNSHINE_UI_COUNTER_DECIDED", std::uint32_t(ui_counter_word::decided)},
     {"SUNSHINE_UI_COUNTER_UNTRUSTED_INFERRED", std::uint32_t(ui_counter_word::untrusted_inferred)},
     {"SUNSHINE_UI_COUNTER_INEXACT_DIFFERENCE", std::uint32_t(ui_counter_word::inexact_difference)},
     {"SUNSHINE_UI_COUNTER_DEPTH_NOT_CURRENT", std::uint32_t(ui_counter_word::depth_not_current)},
-    {"SUNSHINE_UI_COUNTER_TRUSTED_FULL", std::uint32_t(ui_counter_word::trusted_full)},
+    {"SUNSHINE_UI_COUNTER_CONTRADICTED", std::uint32_t(ui_counter_word::contradicted)},
     {"SUNSHINE_UI_COUNTER_PRESENTED_OVER_DEDICATED", std::uint32_t(ui_counter_word::presented_over_dedicated)},
     {"SUNSHINE_UI_COUNTER_NONE", std::uint32_t(ui_counter_word::none)},
     {"SUNSHINE_UI_COUNTER_FULL_ALPHA", std::uint32_t(ui_counter_word::full_alpha)},
+    {"SUNSHINE_UI_COUNTER_REUSED", std::uint32_t(ui_counter_word::reused)},
     {"SUNSHINE_UI_NONE_LAYER_ASIDE", std::uint32_t(ui_no_mask::layer_aside)},
     {"SUNSHINE_UI_NONE_TRUSTED_INVALID", std::uint32_t(ui_no_mask::trusted_invalid)},
     {"SUNSHINE_UI_NONE_PRESENTED_BLOCKED", std::uint32_t(ui_no_mask::presented_blocked)},
@@ -96,11 +104,15 @@ namespace sunshine_game3d {
   }};
 
   // Indices of ui_counters::value. Renderer CPU counts: renders that requested
-  // GPU detection (Auto, or an explicit HUD-less difference input), those that
-  // held the previous mask by ui_temporal::hold_kind, those that wanted a hold
-  // past max_held_presents and detected instead (cap, not part of held), and
-  // those without detection by reason: no usable candidate bits, a frame
-  // larger than 3840, or detection resources that could not be prepared.
+  // GPU detection (Auto, or an explicit HUD-less difference input), the
+  // Presents without detection of their own by T1 (ui_temporal::hold_kind):
+  // generated Presents that applied the decision of the real frame they show
+  // (held.generated) and those with no mask because no such decision exists
+  // in their scope (held.none), and those without detection by reason: no
+  // usable candidate bits, a frame larger than 3840, or detection resources
+  // that could not be prepared. reused counts detection frames whose GPU
+  // reduce applied the previous real frame's decision (the T1 grace); they
+  // are detection frames, not holds.
   // full_d: per committed sample that decided a full-frame source (6, 8, 9),
   // the hidden-scene verdict that same sample measured: invalid when the
   // evidence was not valid or not measured. full_alpha_d: the same for a
@@ -108,26 +120,27 @@ namespace sunshine_game3d {
   // evidence the renderer measures only as a diagnostic, from the sample
   // after one that decided it. These are sample counts, not frame counts.
   // Trust events are the session acceptance ledger's (alpha_auto_policy):
-  // signatures earned, revoked by a full claim or by presented-alpha
-  // disagreement, lapsed, restored from an earlier session, and legacy
-  // TrustedUISources entries discarded.
+  // signatures earned, revoked (A2) by an exact change set's one-way test or
+  // by a declared alpha's coverage, lapsed, restored from an earlier session,
+  // legacy TrustedUISources entries discarded, and accepted signatures the
+  // overlay's Forget cleared.
   namespace ui_counter {
     inline constexpr std::size_t auto_frames = 0, detection_frames = 1;
-    inline constexpr std::size_t held_generated = 2, held_inexact_after_exact = 3, held_trusted_missing = 4, held_cap = 5;
-    inline constexpr std::size_t inactive_no_candidates = 6, inactive_size = 7, inactive_unprepared = 8;
-    inline constexpr std::size_t decided = 9; // Eleven counters, sources 0-10.
+    inline constexpr std::size_t held_generated = 2, held_none = 3, reused = 4;
+    inline constexpr std::size_t inactive_no_candidates = 5, inactive_size = 6, inactive_unprepared = 7;
+    inline constexpr std::size_t decided = 8; // Eleven counters, sources 0-10.
     inline constexpr std::size_t none = decided + ui_counter_word::decided_count; // ui_no_mask order.
     inline constexpr std::size_t depth_not_current = none + ui_no_mask::count;
     inline constexpr std::size_t full_d_hidden = depth_not_current + 1, full_d_ambiguous = full_d_hidden + 1,
       full_d_visible = full_d_hidden + 2, full_d_invalid = full_d_hidden + 3;
     inline constexpr std::size_t untrusted_inferred = full_d_invalid + 1, inexact_difference = untrusted_inferred + 1,
-      trusted_full = untrusted_inferred + 2, presented_over_dedicated = untrusted_inferred + 3;
+      contradicted = untrusted_inferred + 2, presented_over_dedicated = untrusted_inferred + 3;
     inline constexpr std::size_t full_alpha = presented_over_dedicated + 1, full_alpha_d_hidden = full_alpha + 1,
       full_alpha_d_ambiguous = full_alpha + 2, full_alpha_d_visible = full_alpha + 3, full_alpha_d_invalid = full_alpha + 4;
-    inline constexpr std::size_t trust_earned = full_alpha_d_invalid + 1, trust_revoked_full = trust_earned + 1,
-      trust_revoked_presented = trust_earned + 2, trust_lapsed = trust_earned + 3, trust_restored = trust_earned + 4,
-      trust_discarded = trust_earned + 5;
-    inline constexpr std::size_t samples = trust_discarded + 1;
+    inline constexpr std::size_t trust_earned = full_alpha_d_invalid + 1, trust_revoked_exact = trust_earned + 1,
+      trust_revoked_declared = trust_earned + 2, trust_lapsed = trust_earned + 3, trust_restored = trust_earned + 4,
+      trust_discarded = trust_earned + 5, trust_forgotten = trust_earned + 6;
+    inline constexpr std::size_t samples = trust_forgotten + 1;
     inline constexpr std::size_t count = samples + 1;
   }
 
@@ -142,10 +155,8 @@ namespace sunshine_game3d {
     std::uint64_t decided(std::uint32_t source) const {
       return source < ui_counter_word::decided_count ? value[ui_counter::decided + source] : 0;
     }
-    std::uint64_t held() const {
-      return value[ui_counter::held_generated] + value[ui_counter::held_inexact_after_exact] +
-        value[ui_counter::held_trusted_missing];
-    }
+    // Presents without detection of their own (T1).
+    std::uint64_t held() const { return value[ui_counter::held_generated] + value[ui_counter::held_none]; }
     std::uint64_t inactive() const {
       return value[ui_counter::inactive_no_candidates] + value[ui_counter::inactive_size] +
         value[ui_counter::inactive_unprepared];
@@ -176,9 +187,10 @@ namespace sunshine_game3d {
       value[ui_counter::depth_not_current] += delta(ui_counter_word::depth_not_current);
       value[ui_counter::untrusted_inferred] += delta(ui_counter_word::untrusted_inferred);
       value[ui_counter::inexact_difference] += delta(ui_counter_word::inexact_difference);
-      value[ui_counter::trusted_full] += delta(ui_counter_word::trusted_full);
+      value[ui_counter::contradicted] += delta(ui_counter_word::contradicted);
       value[ui_counter::presented_over_dedicated] += delta(ui_counter_word::presented_over_dedicated);
       value[ui_counter::full_alpha] += delta(ui_counter_word::full_alpha);
+      value[ui_counter::reused] += delta(ui_counter_word::reused);
     }
   };
 
@@ -201,10 +213,9 @@ namespace sunshine_game3d {
     field("detection_frames", c[n::detection_frames]);
     group("held", [&] {
       field("generated", c[n::held_generated]);
-      field("inexact_after_exact", c[n::held_inexact_after_exact]);
-      field("trusted_missing", c[n::held_trusted_missing]);
-      field("cap", c[n::held_cap]);
+      field("none", c[n::held_none]);
     });
+    field("reused", c[n::reused]);
     group("inactive", [&] {
       field("no_candidates", c[n::inactive_no_candidates]);
       field("size", c[n::inactive_size]);
@@ -231,7 +242,7 @@ namespace sunshine_game3d {
     });
     field("untrusted_inferred", c[n::untrusted_inferred]);
     field("inexact_difference", c[n::inexact_difference]);
-    field("trusted_full", c[n::trusted_full]);
+    field("contradicted", c[n::contradicted]);
     field("presented_over_dedicated", c[n::presented_over_dedicated]);
     field("full_alpha", c[n::full_alpha]);
     group("full_alpha_d", [&] {
@@ -242,11 +253,12 @@ namespace sunshine_game3d {
     });
     group("trust", [&] {
       field("earned", c[n::trust_earned]);
-      field("revoked_full", c[n::trust_revoked_full]);
-      field("revoked_presented", c[n::trust_revoked_presented]);
+      field("revoked_exact", c[n::trust_revoked_exact]);
+      field("revoked_declared", c[n::trust_revoked_declared]);
       field("lapsed", c[n::trust_lapsed]);
       field("restored", c[n::trust_restored]);
       field("discarded", c[n::trust_discarded]);
+      field("forgotten", c[n::trust_forgotten]);
     });
     field("samples", c[n::samples]);
     field("through_ms", c.through_ms);

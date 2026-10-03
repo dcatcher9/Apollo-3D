@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// GPU contract of the UI selection predicate (UI framework S1): runs the real
-// SunshineUIDetectionReduceCS of game3d_native.hlsl on synthetic per-tile
-// statistics and detection constants, and compares every decision word and
-// counter add with ui_selection::decide (game3d_ui_selection.h). The tiles
-// pass's alpha and layer counts are checked against a CPU count of V1 on edge
-// values. Also checks the predicate's intended behaviour, pair comparability
-// (V2) and the acceptance key (A1). Uses a hardware D3D11 device, else WARP.
+// GPU contract of the UI selection predicate (UI framework S1, S2a): runs the
+// real SunshineUIDetectionReduceCS of game3d_native.hlsl on synthetic
+// per-tile statistics, detection constants and T1 hold stores, and compares
+// every decision word, the written hold store and every counter add with
+// ui_selection::decide (game3d_ui_selection.h). The tiles pass's alpha,
+// layer, HUD-less difference and one-way judgment counts are checked against
+// a CPU count of V1, V2 and A2 on edge values. Also checks the predicate's
+// intended behaviour (selection, the T1 grace, F1 reasons and refused
+// candidates), pair comparability (V2) and the acceptance key (A1). Uses a
+// hardware D3D11 device, else WARP.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -52,7 +55,7 @@ namespace {
   // Per-tile statistics rows as SunshineUIDetectionTilesCS writes them, one
   // texel per 16x16 tile (lane = row * 16 + column).
   struct tiles {
-    std::array<texel, 256> coverage{}, invalid{}, difference{}, lit{}, layer{};
+    std::array<texel, 256> coverage{}, invalid{}, difference{}, lit{}, layer{}, strong{}, contradicted{};
   };
 
   // What the reduce sums from the tiles, exactly as it does.
@@ -69,6 +72,8 @@ namespace {
       for (std::size_t k = 0; k != 3; ++k) {
         lit[k] += t.lit[i][k];
         layer[k] += t.layer[i][k];
+        c.strong[k] += t.strong[i][k];
+        c.contradicted[k] += t.contradicted[i][k];
       }
       const auto &d = t.difference[i];
       c.matching_tiles += d[3] && d[2] * 100u >= d[3] * 99u ? 1u : 0u;
@@ -90,6 +95,9 @@ namespace {
     std::string name;
     tiles statistics;
     std::uint32_t offered{}, accepted{}, flags{};
+    // The hold store before the reduce; none keeps what the previous case's
+    // reduce wrote (a chained real frame).
+    std::optional<selection::hold_state> previous = selection::hold_state{};
   };
 
   // An even split of every pixel over the tiles.
@@ -132,11 +140,13 @@ namespace {
   struct gpu_t {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
-    ComPtr<ID3D11Texture2D> statistics, decision, counters, decision_staging, counters_staging;
+    ComPtr<ID3D11Texture2D> statistics, decision, counters, hold, decision_staging, counters_staging, hold_staging;
     ComPtr<ID3D11ShaderResourceView> statistics_view;
-    ComPtr<ID3D11UnorderedAccessView> decision_view, counters_view;
+    ComPtr<ID3D11UnorderedAccessView> decision_view, counters_view, hold_view;
     ComPtr<ID3D11Buffer> constants;
     std::string adapter;
+    // The hold store as the last reduce wrote it.
+    selection::hold_state hold_written{};
   };
 
   gpu_t create_gpu() {
@@ -159,7 +169,7 @@ namespace {
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.statistics), "statistics");
     checked(gpu.device->CreateShaderResourceView(gpu.statistics.Get(), nullptr, &gpu.statistics_view), "statistics view");
-    desc.Width = detection::layer_decision_texels;
+    desc.Width = detection::judgment_decision_texels;
     desc.Height = 1;
     desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.decision), "decision");
@@ -179,6 +189,17 @@ namespace {
     desc.Usage = D3D11_USAGE_STAGING;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.counters_staging), "counters staging");
+    // The T1 hold store, R32_UINT like the renderer's.
+    desc.Width = detection::hold::store_texels;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.CPUAccessFlags = 0;
+    desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.hold), "hold store");
+    checked(gpu.device->CreateUnorderedAccessView(gpu.hold.Get(), nullptr, &gpu.hold_view), "hold store view");
+    desc.BindFlags = 0;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.hold_staging), "hold store staging");
     D3D11_BUFFER_DESC buffer{};
     buffer.ByteWidth = 16;
     buffer.Usage = D3D11_USAGE_DEFAULT;
@@ -220,7 +241,7 @@ namespace {
 
   // Runs one case and compares it; returns the decision for the semantic checks.
   selection::decision run(gpu_t &gpu, ID3D11ComputeShader *reduce, const case_t &test, const char *space) {
-    std::array<texel, 16 * 80> rows{};
+    std::array<texel, 16 * detection::scene_partial_row> rows{};
     for (std::size_t lane = 0; lane != 256; ++lane) {
       const std::size_t column = lane % 16, row = lane / 16;
       rows[row * 16 + column] = test.statistics.coverage[lane];
@@ -228,6 +249,8 @@ namespace {
       rows[(row + 32) * 16 + column] = test.statistics.difference[lane];
       rows[(row + 48) * 16 + column] = test.statistics.lit[lane];
       rows[(row + detection::layer_statistics_row) * 16 + column] = test.statistics.layer[lane];
+      rows[(row + detection::judgment_statistics_row) * 16 + column] = test.statistics.strong[lane];
+      rows[(row + detection::judgment_statistics_row + 16) * 16 + column] = test.statistics.contradicted[lane];
     }
     gpu.context->UpdateSubresource(gpu.statistics.Get(), 0, nullptr, rows.data(), 16 * sizeof(texel), 0);
     struct {
@@ -240,23 +263,34 @@ namespace {
     gpu.context->ClearUnorderedAccessViewUint(gpu.decision_view.Get(), sentinel.data());
     const std::array<std::uint32_t, 4> zero{};
     gpu.context->ClearUnorderedAccessViewUint(gpu.counters_view.Get(), zero.data());
+    // The hold store this real frame finds: the case's, or the previous one's.
+    const auto previous = test.previous ? *test.previous : gpu.hold_written;
+    if (test.previous) {
+      const std::array<std::uint32_t, detection::hold::store_texels> store{previous.state, previous.source, previous.covered};
+      gpu.context->UpdateSubresource(gpu.hold.Get(), 0, nullptr, store.data(), UINT(sizeof(store)), 0);
+    }
     gpu.context->CSSetShader(reduce, nullptr, 0);
     ID3D11ShaderResourceView *views[11]{};
     views[10] = gpu.statistics_view.Get();
     gpu.context->CSSetShaderResources(0, 11, views);
     ID3D11Buffer *buffers[3]{nullptr, nullptr, gpu.constants.Get()};
     gpu.context->CSSetConstantBuffers(0, 3, buffers);
-    ID3D11UnorderedAccessView *uavs[2]{gpu.decision_view.Get(), gpu.counters_view.Get()};
-    gpu.context->CSSetUnorderedAccessViews(6, 2, uavs, nullptr);
+    // u5 the hold store, u6 the decision texels, u7 the counters.
+    ID3D11UnorderedAccessView *uavs[3]{gpu.hold_view.Get(), gpu.decision_view.Get(), gpu.counters_view.Get()};
+    gpu.context->CSSetUnorderedAccessViews(5, 3, uavs, nullptr);
     gpu.context->Dispatch(1, 1, 1);
-    ID3D11UnorderedAccessView *none[2]{};
-    gpu.context->CSSetUnorderedAccessViews(6, 2, none, nullptr);
-    const auto words = read<std::uint32_t>(gpu, gpu.decision.Get(), gpu.decision_staging.Get(), 4 * detection::layer_decision_texels);
+    ID3D11UnorderedAccessView *none[3]{};
+    gpu.context->CSSetUnorderedAccessViews(5, 3, none, nullptr);
+    const auto words = read<std::uint32_t>(gpu, gpu.decision.Get(), gpu.decision_staging.Get(),
+      4 * detection::judgment_decision_texels);
     const auto counters = read<std::uint32_t>(gpu, gpu.counters.Get(), gpu.counters_staging.Get(), count);
+    const auto store = read<std::uint32_t>(gpu, gpu.hold.Get(), gpu.hold_staging.Get(), detection::hold::store_texels);
+    gpu.hold_written = {store[detection::hold::word::state], store[detection::hold::word::source],
+      store[detection::hold::word::covered]};
 
     const auto c = sums(test.statistics);
-    const auto d = selection::decide(c, test.offered, test.accepted, test.flags);
-    std::array<std::uint32_t, 4 * detection::layer_decision_texels> want{};
+    const auto d = selection::decide(c, test.offered, test.accepted, test.flags, previous);
+    std::array<std::uint32_t, 4 * detection::judgment_decision_texels> want{};
     want[word::source] = d.source;
     want[word::covered] = d.covered;
     want[word::pixels] = c.pixels;
@@ -281,18 +315,33 @@ namespace {
     want[word::layer_invalid] = c.invalid[2];
     want[word::layer_opaque] = c.opaque_layer;
     want[word::valid_bits] = d.valid_bits;
+    for (std::size_t i = 0; i != selection::judged_kinds.size(); ++i) {
+      want[word::strong + i] = c.strong[i];
+      want[word::contradicted + i] = c.contradicted[i];
+    }
+    want[word::refused] = d.refused;
+    want[word::frame_reason] = selection::frame_reason_word(d);
     // decide() reads its counts back from the words it is compared with.
     const auto back = selection::counts_from_words(want.data(), want.size());
     require(back.covered == c.covered && back.invalid == c.invalid && back.pixels == c.pixels &&
-        back.matching_tiles == c.matching_tiles && back.opaque_layer == c.opaque_layer,
+        back.matching_tiles == c.matching_tiles && back.opaque_layer == c.opaque_layer && back.strong == c.strong &&
+        back.contradicted == c.contradicted,
       test.name + ": counts_from_words does not invert the decision words");
     for (std::size_t i = 0; i != want.size(); ++i)
       if (words[i] != want[i]) {
-        char text[200];
-        std::snprintf(text, sizeof(text), " (%s): word %zu is %u on the GPU, decide() gives %u (offered 0x%x accepted 0x%x flags 0x%x)",
-          space, i, words[i], want[i], test.offered, test.accepted, test.flags);
+        char text[240];
+        std::snprintf(text, sizeof(text), " (%s): word %zu is %u on the GPU, decide() gives %u (offered 0x%x accepted 0x%x flags 0x%x "
+          "hold %u/%u/%u)", space, i, words[i], want[i], test.offered, test.accepted, test.flags, previous.state, previous.source,
+          previous.covered);
         throw std::runtime_error(test.name + text);
       }
+    if (gpu.hold_written.state != d.next.state || gpu.hold_written.source != d.next.source ||
+        gpu.hold_written.covered != d.next.covered) {
+      char text[200];
+      std::snprintf(text, sizeof(text), " (%s): the GPU wrote hold %u/%u/%u, decide() gives %u/%u/%u", space,
+        gpu.hold_written.state, gpu.hold_written.source, gpu.hold_written.covered, d.next.state, d.next.source, d.next.covered);
+      throw std::runtime_error(test.name + text);
+    }
     const auto adds = selection::counter_adds(d, test.flags);
     for (std::size_t i = 0; i != count; ++i)
       if (counters[i] != adds[i]) {
@@ -323,6 +372,14 @@ namespace {
       case selection::kind::ui_layer: t.layer[0] = {covered, invalid, opaque, 0}; break;
       default: break;
     }
+  }
+  // Sets one judged kind's one-way counts (A2, in tile 0).
+  void judgment(case_t &test, selection::kind k, std::uint32_t strong, std::uint32_t contradicted) {
+    for (std::size_t i = 0; i != selection::judged_kinds.size(); ++i)
+      if (selection::judged_kinds[i] == k) {
+        test.statistics.strong[0][i] = strong;
+        test.statistics.contradicted[0][i] = contradicted;
+      }
   }
 
   std::vector<case_t> crafted() {
@@ -428,6 +485,91 @@ namespace {
       auto test = alpha_case("depth not current", p, 0, 0, detection::per_frame_depth_not_current);
       cases.push_back(test);
     }
+    // A2: an accepted full Backbuffer over a valid exact pair, contradicted by
+    // a tenth of its strong pixels or just not; the same over an inexact pair
+    // or a middle-band pair, which never judge; and the layer and current
+    // alpha judged together.
+    for (const std::uint32_t contradicted : {3686u, 3687u, 0u})
+      for (const std::uint32_t pair : {unsigned(candidate::hudless | candidate::exact), unsigned(candidate::hudless)})
+        for (const bool middle : {false, true})
+          for (const std::uint32_t accepted : {unsigned(candidate::backbuffer), unsigned(candidate::backbuffer | candidate::layer)}) {
+            auto test = alpha_case("one-way judgment, " + std::to_string(contradicted) + " contradicted", p,
+              candidate::backbuffer | candidate::layer | candidate::current | pair, accepted);
+            difference_rows(test.statistics, p, middle ? 0 : 128, 100, middle ? 500 : 900);
+            alpha(test, k::backbuffer, p, 0);
+            alpha(test, k::ui_layer, 3000, 0);
+            alpha(test, k::current, 2000, 0);
+            judgment(test, k::backbuffer, 36864, contradicted);
+            judgment(test, k::ui_layer, 2000, 200);
+            judgment(test, k::current, 1000, 99);
+            cases.push_back(test);
+          }
+    // T1: an accepted Backbuffer invalid this frame has no decision of its
+    // own: it reuses the previous own decision once, then has no mask; a
+    // reset never reuses, and a frame that decides itself stores own.
+    const selection::hold_state own_full{detection::hold::own, 3u, p}, own_partial{detection::hold::own, 10u, 900u};
+    {
+      auto test = alpha_case("T1 grace, invalid accepted Backbuffer", p, candidate::backbuffer, candidate::backbuffer);
+      alpha(test, k::backbuffer, 400, 2000);
+      test.previous = own_partial;
+      cases.push_back(test);
+      test.name = "T1 grace spent";
+      test.previous = std::nullopt;
+      cases.push_back(test);
+      test.name = "T1 reset";
+      test.previous = own_partial;
+      test.flags = detection::per_frame_hold_reset;
+      cases.push_back(test);
+      auto decided = alpha_case("T1 own decision after a spent grace", p, candidate::backbuffer, candidate::backbuffer);
+      alpha(decided, k::backbuffer, 400, 0);
+      decided.previous = selection::hold_state{detection::hold::spent, 3u, 5u};
+      cases.push_back(decided);
+    }
+    // T1 with zero offers: an accepted candidate is missing (E33 FG on), so
+    // the previous full Backbuffer applies once, a whole-frame alpha.
+    for (const std::uint32_t reset : {0u, unsigned(detection::per_frame_hold_reset)}) {
+      auto test = alpha_case("T1 accepted missing, zero offers", p, 0, candidate::backbuffer,
+        detection::per_frame_accepted_missing | reset);
+      test.previous = own_full;
+      cases.push_back(test);
+    }
+    // An unaccepted candidate missing is not T1: decided frames store own.
+    {
+      auto test = alpha_case("T1 nothing accepted", p, candidate::current, 0);
+      alpha(test, k::current, 400, 0);
+      test.previous = own_full;
+      cases.push_back(test);
+    }
+    // F1: every no-mask reason with its refused candidate.
+    {
+      auto blocked = alpha_case("F1 presented_blocked", p, candidate::ui_color | candidate::layer | candidate::current,
+        candidate::ui_color | candidate::layer | candidate::current);
+      alpha(blocked, k::ui_color, 0, p);
+      alpha(blocked, k::current, 300, 0);
+      alpha(blocked, k::ui_layer, 300, 0);
+      cases.push_back(blocked);
+      auto invalid = alpha_case("F1 trusted_invalid", p, candidate::current | candidate::backbuffer, candidate::current |
+        candidate::backbuffer);
+      alpha(invalid, k::current, 0, 1000);
+      alpha(invalid, k::backbuffer, 0, 1000);
+      cases.push_back(invalid);
+      auto aside = alpha_case("F1 layer_aside", p, candidate::layer | candidate::current, 0);
+      alpha(aside, k::ui_layer, 0, 1000);
+      cases.push_back(aside);
+      auto unaccepted = alpha_case("F1 unaccepted", p, candidate::ui_color | candidate::backbuffer, candidate::ui_alpha);
+      alpha(unaccepted, k::ui_color, 0, 0);
+      alpha(unaccepted, k::backbuffer, 300, 0);
+      cases.push_back(unaccepted);
+      case_t failed{"F1 difference_failed", {}, candidate::hudless, candidate::hudless};
+      difference_rows(failed.statistics, p, 0, 500, 500);
+      cases.push_back(failed);
+      auto ambiguous = alpha_case("F1 ambiguous", p, candidate::backbuffer | candidate::current, 0);
+      alpha(ambiguous, k::backbuffer, p, 0);
+      cases.push_back(ambiguous);
+      auto other = alpha_case("F1 other", p, candidate::backbuffer, 0);
+      alpha(other, k::backbuffer, 0, 1000);
+      cases.push_back(other);
+    }
     return cases;
   }
 
@@ -458,11 +600,21 @@ namespace {
       case 1: test.accepted = test.offered & selection::candidate_bits; break;
       default: test.accepted = std::uniform_int_distribution<std::uint32_t>(0, 0x7f)(random) & selection::candidate_bits;
     }
-    static constexpr std::array<std::uint32_t, 3> per_frame{detection::per_frame_scene_hold,
-      detection::per_frame_scene_hold_hudless, detection::per_frame_depth_not_current};
+    static constexpr std::array<std::uint32_t, 5> per_frame{detection::per_frame_scene_hold,
+      detection::per_frame_scene_hold_hudless, detection::per_frame_depth_not_current, detection::per_frame_accepted_missing,
+      detection::per_frame_hold_reset};
     for (const auto bit : per_frame)
       if (random() & 1u) test.flags |= bit;
     test.flags |= random() & 7u;
+    // The previous real frame's hold store, or (one case in eight) whatever
+    // the previous case's reduce wrote.
+    if (random() % 8u) {
+      const std::uint32_t state = std::uniform_int_distribution<std::uint32_t>(0, 3)(random);
+      const std::uint32_t source = std::uniform_int_distribution<std::uint32_t>(0, 10)(random);
+      test.previous = selection::hold_state{state == 3 ? std::uint32_t(random()) : state, source, pick(random, p)};
+    } else {
+      test.previous = std::nullopt;
+    }
     auto &t = test.statistics;
     for (std::size_t k = 0; k != 4; ++k) {
       spread(t.coverage, k, pick(random, p), random);
@@ -473,6 +625,20 @@ namespace {
     spread(t.lit, 0, pick(random, p), random);
     spread(t.lit, 1, pick(random, p), random);
     spread(t.lit, 2, pick(random, p), random);
+    // One-way counts near the tenth bound.
+    for (std::size_t k = 0; k != 3; ++k) {
+      const std::uint32_t strong = pick(random, p);
+      std::uint32_t contradicted = 0;
+      switch (std::uniform_int_distribution<int>(0, 4)(random)) {
+        case 0: contradicted = strong / 10u; break;
+        case 1: contradicted = (strong + 9u) / 10u; break;
+        case 2: contradicted = (strong + 9u) / 10u ? (strong + 9u) / 10u - 1u : 0u; break;
+        case 3: contradicted = std::uniform_int_distribution<std::uint32_t>(0, strong)(random); break;
+        default: contradicted = pick(random, p);
+      }
+      spread(t.strong, k, strong, random);
+      spread(t.contradicted, k, contradicted, random);
+    }
     // The difference rows decide the matching tiles, so they keep per-tile
     // structure: a matching share of clean tiles and the rest at one ratio.
     const std::uint32_t matching = std::uniform_int_distribution<std::uint32_t>(0, 3)(random) == 0 ?
@@ -503,31 +669,46 @@ namespace {
     return view;
   }
 
-  // The tiles pass's alpha and layer statistics (rows 0-31, the opaque
-  // components of rows 48-63, and the layer's rows 64-79) on images of edge
-  // values, against a CPU count of the V1 rules: covered is in (0, 1],
-  // invalid is non-finite or out of range, opaque at least 254/255, and the
-  // layer alone also fails beyond the premultiplied bound of its flags.
-  void check_tiles(gpu_t &gpu, ID3D11ComputeShader *tiles, std::uint32_t flags, const char *space) {
+  // The tiles pass's statistics (rows 0-111: alpha coverage and invalid
+  // pixels, the HUD-less difference, lit and opaque pixels, the layer's
+  // counts and the one-way judgment counts) on images of edge values, against
+  // a CPU count of the rules: covered is in (0, 1], invalid is non-finite or
+  // out of range, opaque at least 254/255, and the layer alone also fails
+  // beyond the premultiplied bound of its flags (V1); changed beyond the
+  // threshold, unchanged within half of it, lit beyond eight times it (V2);
+  // strong is alpha in [1/2, 1], contradicted a strong pixel where an offered
+  // exact pair's HUD-less image is lit and unchanged, neither for the late
+  // layer (A2, E2).
+  void check_tiles(gpu_t &gpu, ID3D11ComputeShader *tiles, std::uint32_t flags, std::uint32_t offered, const char *space) {
     const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
-    const std::array<float, 12> alphas{0.f, -0.f, 1e-30f, .5f, 1.f, 1.5f, -.5f, nan, inf, .999f, .99f, .25f};
-    const std::array<std::array<float, 4>, 9> layers{{{0.f, 0.f, 0.f, 0.f}, {.5f, .5f, .5f, .5f}, {1.f, 1.f, 1.f, .1f},
+    const std::array<float, 14> alphas{0.f, -0.f, 1e-30f, .5f, 1.f, 1.5f, -.5f, nan, inf, .999f, .99f, .25f, .49999997f, -inf};
+    const std::array<std::array<float, 4>, 12> layers{{{0.f, 0.f, 0.f, 0.f}, {.5f, .5f, .5f, .5f}, {1.f, 1.f, 1.f, .1f},
       {.3f, 0.f, 0.f, 0.f}, {nan, 0.f, 0.f, .2f}, {0.f, 0.f, 0.f, -0.f}, {20.f, 0.f, 0.f, .5f}, {.2f, .2f, .2f, .999f},
-      {0.f, 0.f, 0.f, nan}}};
-    std::array<std::vector<std::array<float, 4>>, 5> images; // t11, t12, t13, t0, t7
+      {0.f, 0.f, 0.f, nan}, {0.f, 0.f, 0.f, inf}, {.1f, .1f, .1f, 1.f}, {0.f, 0.f, 0.f, .49999997f}}};
+    // The current color (t0) and HUD-less (t14) rgb: lit or dark, equal,
+    // changed or non-finite.
+    const std::array<float, 4> colors{.5f, .01f, 0.f, .25f};
+    const std::array<float, 4> offsets{0.f, .5f, nan, .001f};
+    std::array<std::vector<std::array<float, 4>>, 6> images; // t11, t12, t13, t0, t7, t14
     for (auto &image : images) image.resize(256 * 144);
     for (std::uint32_t y = 0; y != 144; ++y)
       for (std::uint32_t x = 0; x != 256; ++x) {
         const auto i = y * 256 + x;
+        const float color = colors[(x * 5 + y * 3) % colors.size()], offset = offsets[(x + y * 7) % offsets.size()];
         images[0][i] = {alphas[(x + y) % alphas.size()], 0.f, 0.f, 1.f};
         images[1][i] = {0.f, 0.f, 0.f, alphas[(x * 3 + y) % alphas.size()]};
         images[2][i] = {0.f, 0.f, 0.f, alphas[(x + 5 * y) % alphas.size()]};
-        images[3][i] = {.5f, .5f, .5f, alphas[(x * 7 + y * 2) % alphas.size()]};
+        images[3][i] = {color, color, color, alphas[(x * 7 + y * 2) % alphas.size()]};
         images[4][i] = layers[(x + 2 * y) % layers.size()];
+        images[5][i] = {color + offset, color, color, 1.f};
       }
     const auto okay = [](float a) { return std::isfinite(a) && a >= 0.f && a <= 1.f; };
+    const auto strong = [](float a) { return a >= .5f && a <= 1.f; };
     const float opaque = 254.f / 255.f, headroom = (flags & detection::stored_hdr_headroom) ? 125.f : 2.f;
-    std::array<texel, 256> coverage{}, invalid{}, lit{}, layer{};
+    const float threshold = 2.f / 255.f;
+    const bool exact = (offered & (candidate::hudless | candidate::exact)) == (candidate::hudless | candidate::exact);
+    const bool late = (flags & detection::stored_late_layer) != 0u;
+    std::array<texel, 256> coverage{}, invalid{}, difference{}, lit{}, layer{}, strong_counts{}, contradicted{};
     for (std::uint32_t y = 0; y != 144; ++y)
       for (std::uint32_t x = 0; x != 256; ++x) {
         const auto i = y * 256 + x, tile = (y / 9) * 16 + x / 16;
@@ -543,8 +724,27 @@ namespace {
         layer[tile][0] += okay(l[3]) && l[3] > 0.f;
         layer[tile][1] += !okay(l[3]) || bound;
         layer[tile][2] += okay(l[3]) && l[3] >= opaque;
+        // SunshineHUDlessDifference without the scRGB scale (sRGB and PQ).
+        const auto &current = images[3][i], &hudless = images[5][i];
+        const bool finite = std::isfinite(current[0]) && std::isfinite(current[1]) && std::isfinite(current[2]) &&
+          std::isfinite(hudless[0]) && std::isfinite(hudless[1]) && std::isfinite(hudless[2]);
+        const float delta = std::max({std::abs(current[0] - hudless[0]), std::abs(current[1] - hudless[1]),
+          std::abs(current[2] - hudless[2])});
+        const bool unchanged = finite && delta <= threshold * .5f;
+        const bool lit_pixel = finite && std::max({std::abs(hudless[0]), std::abs(hudless[1]), std::abs(hudless[2])}) > threshold * 8.f;
+        difference[tile][0] += finite && delta > threshold;
+        difference[tile][1] += !finite;
+        difference[tile][2] += unchanged;
+        difference[tile][3] += 1u;
+        lit[tile][0] += lit_pixel;
+        const bool judged[3]{!late && strong(l[3]), strong(a[2]), strong(a[3])};
+        const bool shown = exact && lit_pixel && unchanged;
+        for (std::size_t k = 0; k != 3; ++k) {
+          strong_counts[tile][k] += judged[k];
+          contradicted[tile][k] += judged[k] && shown;
+        }
       }
-    std::array<ComPtr<ID3D11ShaderResourceView>, 5> views;
+    std::array<ComPtr<ID3D11ShaderResourceView>, 6> views;
     for (std::size_t k = 0; k != views.size(); ++k) views[k] = float_image(gpu, images[k]);
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = 16;
@@ -564,7 +764,7 @@ namespace {
       std::uint32_t offered;
       float threshold;
       std::uint32_t accepted, flags;
-    } constants{0x4fu, 2.f / 255.f, 0u, flags};
+    } constants{offered, threshold, 0u, flags};
     gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
     ID3D11ShaderResourceView *bound[15]{};
     bound[0] = views[3].Get();
@@ -572,6 +772,7 @@ namespace {
     bound[11] = views[0].Get();
     bound[12] = views[1].Get();
     bound[13] = views[2].Get();
+    bound[14] = views[5].Get();
     gpu.context->CSSetShader(tiles, nullptr, 0);
     gpu.context->CSSetShaderResources(0, 15, bound);
     ID3D11Buffer *buffers[3]{nullptr, nullptr, gpu.constants.Get()};
@@ -584,23 +785,28 @@ namespace {
     ID3D11ShaderResourceView *cleared[15]{};
     gpu.context->CSSetShaderResources(0, 15, cleared);
     const auto rows = read<texel>(gpu, statistics.Get(), staging.Get(), 16 * detection::statistics_rows(0));
+    std::uint32_t total_contradicted = 0;
     for (std::size_t lane = 0; lane != 256; ++lane) {
       const std::size_t column = lane % 16, row = lane / 16;
-      const auto &got_lit = rows[(row + 48) * 16 + column];
       const auto at = [&](const char *what, const texel &got, const texel &want, std::size_t first, std::size_t last) {
         for (std::size_t k = first; k != last; ++k)
           if (got[k] != want[k]) {
-            char text[160];
-            std::snprintf(text, sizeof(text), "tiles pass (%s, flags 0x%x): tile %zu %s[%zu] is %u, the V1 count %u", space, flags,
-              lane, what, k, got[k], want[k]);
+            char text[200];
+            std::snprintf(text, sizeof(text), "tiles pass (%s, flags 0x%x, offered 0x%x): tile %zu %s[%zu] is %u, the CPU count %u",
+              space, flags, offered, lane, what, k, got[k], want[k]);
             throw std::runtime_error(text);
           }
       };
       at("coverage", rows[row * 16 + column], coverage[lane], 0, 4);
       at("invalid", rows[(row + 16) * 16 + column], invalid[lane], 0, 4);
-      at("opaque", got_lit, lit[lane], 1, 3);
+      at("difference", rows[(row + 32) * 16 + column], difference[lane], 0, 4);
+      at("lit and opaque", rows[(row + 48) * 16 + column], lit[lane], 0, 3);
       at("layer", rows[(row + detection::layer_statistics_row) * 16 + column], layer[lane], 0, 3);
+      at("strong", rows[(row + detection::judgment_statistics_row) * 16 + column], strong_counts[lane], 0, 3);
+      at("contradicted", rows[(row + detection::judgment_statistics_row + 16) * 16 + column], contradicted[lane], 0, 3);
+      for (std::size_t k = 0; k != 3; ++k) total_contradicted += contradicted[lane][k];
     }
+    require(!exact || total_contradicted, "check_tiles: the images exercise no contradicted pixel");
   }
 }
 
@@ -667,6 +873,113 @@ int main() {
     }
     std::puts("PASS UI selection (S1): accepted valid candidates only, the declared-alpha block, P1 at any coverage");
 
+    // F1: the reason and the refused candidate it names.
+    {
+      using sunshine_game3d::ui_no_mask::names;
+      selection::counts c;
+      c.pixels = 1000;
+      const auto refusal = [&](std::uint32_t offered, std::uint32_t accepted, std::size_t reason, std::uint32_t refused,
+                             const char *what) {
+        const auto d = selection::decide(c, offered, accepted, 0);
+        require(!d.source && d.none_reason == reason && d.refused == refused && d.frame_reason == reason &&
+            selection::frame_reason_name(selection::frame_reason_word(d)) == names[reason],
+          std::string("F1 ") + what + ": reason " + std::string(names[d.none_reason]) + " refused 0x" + std::to_string(d.refused));
+      };
+      c.covered = {0, 0, 300, 300, 300};
+      c.invalid = {0, 1000, 0, 0, 0};
+      refusal(0x4e, 0x4e, sunshine_game3d::ui_no_mask::presented_blocked, candidate::layer, "presented_blocked");
+      c.invalid = {0, 0, 0, 20, 20};
+      refusal(0x0c, 0x0c, sunshine_game3d::ui_no_mask::trusted_invalid, candidate::backbuffer, "trusted_invalid");
+      c.invalid = {0, 0, 20, 0, 0};
+      refusal(0x48, 0x00, sunshine_game3d::ui_no_mask::layer_aside, candidate::layer, "layer_aside");
+      c.invalid = {};
+      refusal(0x0a, 0x00, sunshine_game3d::ui_no_mask::unaccepted, candidate::current, "unaccepted");
+      c.covered = {0, 0, 0, 1000, 0};
+      refusal(0x0c, 0x00, sunshine_game3d::ui_no_mask::ambiguous, candidate::backbuffer, "ambiguous");
+      refusal(0x10, 0x10, sunshine_game3d::ui_no_mask::difference_failed, candidate::hudless, "difference_failed");
+      refusal(0x00, 0x04, sunshine_game3d::ui_no_mask::no_candidate, 0u, "no_candidate");
+      c.invalid = {0, 0, 0, 20, 0};
+      refusal(0x04, 0x00, sunshine_game3d::ui_no_mask::other, 0u, "other");
+      // The gates: an unaccepted opaque UIAlpha before the layer, else HUD-less.
+      c.invalid = {};
+      c.covered = {1000, 0, 1000, 0, 0};
+      c.opaque_ui_alpha = c.opaque_layer = 1000;
+      refusal(0x41, 0x00, sunshine_game3d::ui_no_mask::gate_no_hold, candidate::ui_alpha, "UIAlpha gate");
+      refusal(0x40, 0x00, sunshine_game3d::ui_no_mask::gate_no_hold, candidate::layer, "layer gate");
+      c.covered = {};
+      c.changed = 950;
+      refusal(0x10, 0x00, sunshine_game3d::ui_no_mask::gate_no_hold, candidate::hudless, "HUD-less gate");
+      const auto decided = selection::decide(c, 0x10, 0x00, detection::per_frame_scene_hold_hudless);
+      require(decided.source == 9 && !decided.refused && decided.frame_reason == detection::frame_reason_decided &&
+          selection::frame_reason_name(selection::frame_reason_word(decided)) == "decided",
+        "F1: a decided frame must name no refused candidate and the decided frame reason");
+    }
+    std::puts("PASS UI no-mask reasons (F1): every reason names the first refused candidate in draw order");
+
+    // A2: the one-way judgment needs a valid exact pair and a tenth of the
+    // judged source's strong pixels; the counter counts an own decision only.
+    {
+      selection::counts c;
+      c.pixels = 1000;
+      c.covered = {0, 0, 0, 1000, 0};
+      c.changed = 100;
+      c.unchanged = 900;
+      c.matching_tiles = 200;
+      c.strong = {0, 1000, 0};
+      c.contradicted = {0, 100, 0};
+      auto d = selection::decide(c, 0x34, 0x04, 0);
+      require(d.source == 3 && d.contradicted_bits == candidate::backbuffer && d.contradicted &&
+          selection::counter_adds(d, 0)[sunshine_game3d::ui_counter_word::contradicted] == 1,
+        "A2: a full Backbuffer over lit unchanged exact-pair pixels was not contradicted");
+      c.contradicted[1] = 99;
+      require(!selection::decide(c, 0x34, 0x04, 0).contradicted_bits, "A2: fewer than a tenth of strong pixels contradicted");
+      c.contradicted[1] = 1000;
+      require(!selection::decide(c, 0x14, 0x04, 0).contradicted_bits, "A2: an inexact pair judged");
+      c.matching_tiles = 0;
+      require(!selection::decide(c, 0x34, 0x04, 0).contradicted_bits, "A2: a middle-band (V2-invalid) pair judged");
+      c.matching_tiles = 200;
+      d = selection::decide(c, 0x34, 0x00, 0);
+      require(d.contradicted_bits == candidate::backbuffer && !d.contradicted,
+        "A2: an unaccepted judged source must be contradicted without the decided counter");
+    }
+    std::puts("PASS UI one-way judgment (A2): an exact valid pair, a tenth of strong pixels lit and unchanged");
+
+    // T1: a real frame without a decision of its own reuses the previous own
+    // decision once, then has no mask; a reset never reuses.
+    {
+      namespace hold = detection::hold;
+      namespace counter = sunshine_game3d::ui_counter_word;
+      selection::counts c;
+      c.pixels = 1000;
+      c.covered = {0, 0, 0, 300, 0};
+      c.invalid = {0, 0, 0, 20, 0};
+      const selection::hold_state own{hold::own, 3u, 1000u};
+      auto d = selection::decide(c, 0x04, 0x04, 0, own);
+      require(d.reused && d.source == 3 && d.covered == 1000 && !d.own_source && d.full_alpha && d.next.state == hold::spent &&
+          d.next.source == 3 && d.none_reason == sunshine_game3d::ui_no_mask::trusted_invalid &&
+          selection::frame_reason_word(d) == (sunshine_game3d::ui_no_mask::trusted_invalid | detection::frame_reason_reused),
+        "T1: an invalid accepted Backbuffer did not reuse the previous own decision");
+      const auto adds = selection::counter_adds(d, 0);
+      require(adds[counter::reused] == 1 && adds[counter::decided + 3] == 1 && adds[counter::full_alpha] == 1 &&
+          !adds[counter::none + sunshine_game3d::ui_no_mask::trusted_invalid],
+        "T1: a reused frame must count the applied decision");
+      d = selection::decide(c, 0x04, 0x04, 0, d.next);
+      require(!d.reused && !d.source && d.next.state == hold::spent, "T1: the grace was not spent after one reuse");
+      require(!selection::decide(c, 0x04, 0x04, detection::per_frame_hold_reset, own).reused, "T1: a reset reused");
+      require(!selection::decide(c, 0x04, 0x00, 0, own).reused, "T1: an unaccepted invalid candidate reused");
+      const selection::counts empty;
+      d = selection::decide(empty, 0, 0x04, detection::per_frame_accepted_missing, own);
+      require(d.reused && d.source == 3 && d.none_reason == sunshine_game3d::ui_no_mask::no_candidate,
+        "T1: a missing accepted candidate with zero offers did not reuse");
+      d = selection::decide(empty, 0, 0x04, 0, own);
+      require(!d.reused && d.next.state == hold::own, "T1: a frame offering nothing without accepted_missing has its own decision");
+      c.invalid = {};
+      d = selection::decide(c, 0x04, 0x04, detection::per_frame_accepted_missing, {hold::spent, 0u, 0u});
+      require(d.source == 3 && d.covered == 300 && !d.reused && d.next.state == hold::own,
+        "T1: a frame that decides itself must store own whatever is missing");
+    }
+    std::puts("PASS UI hold grace (T1): one reuse of the previous own decision, then no mask; a reset never reuses");
+
     std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);
     require(input.good(), "Cannot read game3d_native.hlsl");
     const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
@@ -679,24 +992,32 @@ int main() {
     std::mt19937 random(0x5131u);
     for (unsigned i = 0; i != 6000; ++i) cases.push_back(random_case(random, i));
     std::array<unsigned, detection::source_count> sources{};
+    unsigned reused = 0;
     for (const unsigned color : {1u, 3u}) {
       const auto reduce = compile_pass(gpu, source, color);
       const char *space = color == 1 ? "sRGB" : "PQ";
       const auto tiles = compile_pass(gpu, source, color, "SunshineUIDetectionTilesCS");
       for (const std::uint32_t flags : {0u, detection::layer_detection_flags(false), detection::layer_detection_flags(true)})
-        check_tiles(gpu, tiles.Get(), flags, space);
+        for (const std::uint32_t offered : {0x5fu, 0x7fu}) check_tiles(gpu, tiles.Get(), flags, offered, space);
+      gpu.hold_written = {};
+      const std::array<std::uint32_t, detection::hold::store_texels> zero{};
+      gpu.context->UpdateSubresource(gpu.hold.Get(), 0, nullptr, zero.data(), UINT(sizeof(zero)), 0);
       for (const auto &test : cases) {
         const auto d = run(gpu, reduce.Get(), test, space);
-        if (color == 1) ++sources[d.source];
+        if (color == 1) {
+          ++sources[d.source < sources.size() ? d.source : 7];
+          reused += d.reused;
+        }
       }
     }
-    std::printf("PASS UI detection tiles (V1): alpha and layer counts on edge values match the CPU count for layer flags 0, 5 "
-      "and 7 in two color spaces\n");
+    std::printf("PASS UI detection tiles (V1, V2, A2): alpha, layer, difference and one-way counts on edge values match the CPU "
+      "count for layer flags 0, 5 and 7, with and without an exact pair, in two color spaces\n");
     std::printf("PASS UI selection GPU contract (%s): %zu crafted and %zu random cases in two color spaces match decide() in every "
-      "decision word and counter add; sources", gpu.adapter.c_str(), crafted_count, cases.size() - crafted_count);
+      "decision word, hold store write and counter add; %u reused; applied sources", gpu.adapter.c_str(), crafted_count,
+      cases.size() - crafted_count, reused);
     for (std::size_t s = 0; s != sources.size(); ++s)
       if (s != 7) std::printf(" %zu=%u", s, sources[s]);
-    std::printf("\n");
+    std::printf(" other=%u\n", sources[7]);
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

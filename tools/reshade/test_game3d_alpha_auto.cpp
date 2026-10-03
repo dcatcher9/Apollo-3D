@@ -61,9 +61,42 @@ namespace {
       e.hudless_lit = pixels;
       return *this;
     }
+    // A2's one-way counts of a judged kind (layer, Backbuffer, current):
+    // pixels with alpha of at least 1/2, and those of them where the HUD-less
+    // image is lit and unchanged.
+    sample &one_way(kind k, std::uint32_t strong, std::uint32_t contradicted) {
+      for (std::size_t i = 0; i != ui_selection::judged_kinds.size(); ++i)
+        if (ui_selection::judged_kinds[i] == k) {
+          e.strong[i] = strong;
+          e.contradicted[i] = contradicted;
+        }
+      return *this;
+    }
+    // The offered layer was the one-frame-late copy (stored flag 0x4), for
+    // which the GPU counts no strong pixel.
+    sample &late() {
+      e.late_layer = true;
+      return *this;
+    }
   };
+  // The offered candidates that pass V1/V2, as the GPU reports them in the
+  // sample (ui_selection::decide).
+  std::uint32_t valid_bits_of(const alpha_auto_decision::detection_evidence &e) {
+    ui_selection::counts c;
+    c.pixels = pixels;
+    c.covered = {e.alpha_covered[0], e.alpha_covered[1], e.layer_covered, e.alpha_covered[2], e.alpha_covered[3]};
+    c.invalid = {e.alpha_invalid[0], e.alpha_invalid[1], e.layer_invalid, e.alpha_invalid[2], e.alpha_invalid[3]};
+    c.changed = e.hudless_changed;
+    c.unchanged = e.hudless_unchanged;
+    c.nonfinite = e.hudless_invalid;
+    c.lit = e.hudless_lit;
+    c.matching_tiles = e.matching_tiles;
+    return ui_selection::decide(c, e.candidates, 0u, 0u).valid_bits;
+  }
   void feed(alpha_auto_policy &policy, const sample &s, std::uint64_t tick, std::uint32_t color_space = 1) {
-    policy.observe(s.e, pixels, tick, signatures(color_space));
+    auto evidence = s.e;
+    evidence.valid_bits = valid_bits_of(evidence);
+    policy.observe(evidence, pixels, tick, signatures(color_space));
   }
 
   void mode_is_auto_until_a_manual_edit_and_auto_again_after_it() {
@@ -168,10 +201,13 @@ namespace {
     // completes it.
     feed(policy, sample().alpha(kind::backbuffer, 200), 9100);
     require(accepts(policy, kind::backbuffer), "A void sample restarted the earning run");
-    // Revocation still evaluates void samples.
+    // Revocation still evaluates void samples: a valid exact pair one-way
+    // contradicts the full Backbuffer claim.
     for (const std::uint64_t tick : {10000u, 11000u, 12000u})
-      feed(policy, sample().alpha(kind::backbuffer, 1000).alpha(kind::ui_color, 0, 600).pair(10, 900), tick);
-    require(!accepts(policy, kind::backbuffer), "A full claim over a visible scene in void samples was not revoked");
+      feed(policy, sample().alpha(kind::backbuffer, 1000).alpha(kind::ui_color, 0, 600).pair(10, 900)
+        .one_way(kind::backbuffer, 1000, 800), tick);
+    require(!accepts(policy, kind::backbuffer) && policy.counters()[ui_counter::trust_revoked_exact] == 1,
+      "A one-way contradiction in void samples was not revoked");
   }
 
   // A1 key: kind, typed format and the swapchain color space; FG mode is not
@@ -201,9 +237,10 @@ namespace {
       require(!ui_selection::signature::parse(legacy), "A legacy or malformed entry parsed as a signature");
   }
 
-  // A3 (as before S2a) and the legacy discard: restored entries decide at once
-  // but lapse unless earned again within alpha_trust_reconfirm_ms of first
-  // being offered valid; anything that is not a key is discarded and counted.
+  // A3 and the legacy discard: restored entries decide at once but lapse
+  // unless earned again within alpha_trust_reconfirm_ms of first being
+  // offered valid, a clock that pauses while a declared source is offered but
+  // invalid; anything that is not a key is discarded and counted.
   void restore_is_provisional_and_legacy_entries_are_discarded() {
     alpha_auto_policy legacy;
     for (const char *stored : {"4", "16", "0x1f"}) {
@@ -256,11 +293,100 @@ namespace {
     for (std::uint64_t tick = 2000; tick <= 200000; tick += 1000) feed(confirmed, sample().alpha(kind::ui_alpha, 0), tick);
     require(accepts(confirmed, kind::ui_alpha) && confirmed.counters()[ui_counter::trust_earned] == 1,
       "Acceptance earned again in this session lapsed later, or was not counted");
+
+    // A restored declared tag offered but invalid (Resident Evil Requiem's
+    // rejected-tag frames) for longer than the lapse pauses its clock, from
+    // the first invalid offer to the next valid one: it lapses once its valid
+    // offers have run the clock for a minute in total.
+    alpha_auto_policy rejected;
+    rejected.restore("ui_color:87:srgb");
+    feed(rejected, sample().alpha(kind::ui_color, 1000), 1000);
+    for (std::uint64_t tick = 2000; tick <= 100000; tick += 1000)
+      feed(rejected, sample().alpha(kind::ui_color, 0, 600).alpha(kind::current, 400), tick);
+    require(accepts(rejected, kind::ui_color) && !rejected.counters()[ui_counter::trust_lapsed],
+      "A restored tag lapsed while it was offered but invalid");
+    feed(rejected, sample().alpha(kind::ui_color, 1000), 100500);
+    feed(rejected, sample().alpha(kind::ui_color, 1000), 159499);
+    require(accepts(rejected, kind::ui_color), "The paused clock did not resume at the next valid offer");
+    feed(rejected, sample().alpha(kind::ui_color, 1000), 159500);
+    require(!accepts(rejected, kind::ui_color) && rejected.counters()[ui_counter::trust_lapsed] == 1,
+      "The paused clock never lapsed");
+    // Invalid offers never extend the clock: a tag invalid every other
+    // second lapses after 60 s of valid offers in total.
+    alpha_auto_policy alternating;
+    alternating.restore("ui_color:87:srgb");
+    for (std::uint64_t tick = 1000; tick <= 120000; tick += 1000)
+      feed(alternating, (tick / 1000) % 2 ? sample().alpha(kind::ui_color, 1000) : sample().alpha(kind::ui_color, 0, 600), tick);
+    require(accepts(alternating, kind::ui_color), "An alternating tag lapsed before 60 s of valid offers");
+    feed(alternating, sample().alpha(kind::ui_color, 1000), 121000);
+    require(!accepts(alternating, kind::ui_color) && alternating.counters()[ui_counter::trust_lapsed] == 1,
+      "Invalid offers kept restarting the clock of a tag that never confirmed");
+    alpha_auto_policy recovered;
+    recovered.restore("ui_color:87:srgb");
+    feed(recovered, sample().alpha(kind::ui_color, 1000), 1000);
+    for (std::uint64_t tick = 2000; tick <= 100000; tick += 1000) feed(recovered, sample().alpha(kind::ui_color, 0, 600), tick);
+    feed(recovered, sample().alpha(kind::ui_color, 30), 100500);
+    for (std::uint64_t tick = 101000; tick <= 300000; tick += 1000) feed(recovered, sample().alpha(kind::ui_color, 1000), tick);
+    require(accepts(recovered, kind::ui_color) && recovered.counters()[ui_counter::trust_earned] == 1,
+      "A tag that confirmed after its invalid run was not kept");
+    // A restored HUD-less pair offered without its valid bit (a middle-band
+    // change set) is invalid the same way.
+    alpha_auto_policy pair;
+    pair.restore("hudless:24:srgb");
+    feed(pair, sample().pair(980, 10), 1000);
+    for (std::uint64_t tick = 2000; tick <= 100000; tick += 1000) feed(pair, sample().pair(500, 500), tick);
+    require(accepts(pair, kind::hudless), "A restored HUD-less pair lapsed while it was invalid");
+    feed(pair, sample().pair(980, 10), 100500);
+    feed(pair, sample().pair(980, 10), 160500);
+    require(!accepts(pair, kind::hudless), "A restored HUD-less pair never lapsed after its invalid run");
+    // Inferred entries keep the clock: invalid samples do not re-arm it.
+    alpha_auto_policy inferred;
+    inferred.restore("current:24:srgb");
+    feed(inferred, sample().alpha(kind::current, 1000), 1000);
+    for (std::uint64_t tick = 2000; tick <= 60000; tick += 1000) feed(inferred, sample().alpha(kind::current, 0, 600), tick);
+    feed(inferred, sample().alpha(kind::current, 1000), 61000);
+    require(!accepts(inferred, kind::current), "Invalid samples re-armed an inferred entry's clock");
   }
 
-  // A2 as before S2a, per signature: a full claim while an exact pair shows
-  // at least 75% of the scene, and presented alpha disagreeing by at least
-  // 10% of the frame with every accepted, valid UIAlpha, tag or layer.
+  // Forget (A3): clears every entry of the game, accepted, provisional,
+  // earning and in doubt; the listener hears "" and trust.forgotten counts
+  // the accepted signatures. Each source then earns again by its own rule.
+  void forget_clears_the_ledger() {
+    alpha_auto_policy policy;
+    std::vector<std::string> heard;
+    policy.on_change([&](const std::string &stored) { heard.push_back(stored); });
+    require(policy.forget().empty() && heard.empty() && !policy.counters()[ui_counter::trust_forgotten],
+      "Forgetting nothing was reported");
+    policy.restore("ui_layer:10:srgb");
+    feed(policy, sample().alpha(kind::ui_color, 30), 1000);
+    feed(policy, sample().alpha(kind::current, 200), 1000);
+    feed(policy, sample().alpha(kind::current, 200), 2000);
+    require(policy.stored() == "ui_color:87:srgb,ui_layer:10:srgb", "The ledger did not hold the earned and restored keys");
+    heard.clear();
+    require(policy.forget() == "ui_color:87:srgb,ui_layer:10:srgb" && heard == std::vector<std::string>{""} &&
+        policy.counters()[ui_counter::trust_forgotten] == 2 && policy.stored().empty() &&
+        !policy.accepted(0x5fu, signatures()), "Forget did not clear, report or count the accepted keys");
+    // The earning run was cleared too: one more sample does not complete it.
+    feed(policy, sample().alpha(kind::current, 200), 3000);
+    require(!accepts(policy, kind::current), "Forget kept an earning run");
+    // Each source earns again by its own rule.
+    feed(policy, sample().alpha(kind::ui_color, 30), 4000);
+    require(accepts(policy, kind::ui_color) && heard.back() == "ui_color:87:srgb", "A forgotten tag could not earn again");
+    feed(policy, sample().alpha(kind::current, 200), 4000);
+    feed(policy, sample().alpha(kind::current, 200), 5000);
+    require(accepts(policy, kind::current), "A forgotten inferred source could not earn again by its run");
+    // Forget leaves the mode and the first-run shadow alone.
+    policy.set_first_run(true);
+    policy.set_manual(true);
+    policy.forget();
+    require(policy.first_run() && policy.decision().state == alpha_auto_state::manual_on && policy.stored().empty(),
+      "Forget changed the mode or the first-run shadow");
+  }
+
+  // A2: an accepted source is revoked only by same-sample evidence of
+  // stronger provenance, whatever the drawing rank: a V2-valid exact change
+  // set's one-way test, or the coverage of an accepted, valid declared
+  // alpha, over the A1 evidence interval. Per signature.
   void revocation_is_per_signature() {
     alpha_auto_policy policy;
     std::vector<std::string> heard;
@@ -269,25 +395,59 @@ namespace {
     feed(policy, sample().alpha(kind::backbuffer, 200), 3000, 3);
     require(accepts(policy, kind::backbuffer) && heard == std::vector<std::string>{"backbuffer:24:srgb"},
       "Earning was not reported exactly once");
-    // A full claim over a menu, or without an exact pair, is no contradiction.
-    for (std::uint64_t tick = 4000; tick <= 8000; tick += 1000) {
-      feed(policy, sample().alpha(kind::backbuffer, 1000).pair(900, 100), tick);
-      feed(policy, sample().alpha(kind::backbuffer, 1000).pair(100, 900, false), tick);
-      feed(policy, sample().alpha(kind::backbuffer, 1000), tick);
+    // No contradiction: a full claim over a middle-band (V2-invalid) pair, an
+    // inexact pair or no pair is unjudged; over a valid exact pair whose lit
+    // unchanged pixels it does not cover (a dim or tint over dark or changed
+    // pixels: the Expedition 33 pause, The Witcher 3 sign wheel) or covers
+    // with less than a tenth of its strong pixels, it is judged and agrees.
+    for (std::uint64_t tick = 4000; tick <= 9000; tick += 1000) {
+      feed(policy, sample().alpha(kind::backbuffer, 1000).pair(500, 500).one_way(kind::backbuffer, 1000, 1000), tick);
+      feed(policy, sample().alpha(kind::backbuffer, 1000).pair(100, 900, false).one_way(kind::backbuffer, 1000, 900), tick);
+      feed(policy, sample().alpha(kind::backbuffer, 1000).one_way(kind::backbuffer, 1000, 0), tick);
+      feed(policy, sample().alpha(kind::backbuffer, 1000).pair(100, 900).one_way(kind::backbuffer, 1000, 0), tick);
+      feed(policy, sample().alpha(kind::backbuffer, 1000).pair(100, 900).one_way(kind::backbuffer, 1000, 99), tick);
     }
-    require(accepts(policy, kind::backbuffer), "A menu or an inexact pair revoked acceptance");
-    // The same evidence interval revokes; a selective sample restarts the doubt.
-    feed(policy, sample().alpha(kind::backbuffer, 1000).pair(250, 750), 10000);
-    feed(policy, sample().alpha(kind::backbuffer, 1000).pair(250, 750), 11000);
-    feed(policy, sample().alpha(kind::backbuffer, 200), 11500);
-    feed(policy, sample().alpha(kind::backbuffer, 1000).pair(250, 750), 12000);
-    feed(policy, sample().alpha(kind::backbuffer, 1000).pair(250, 750), 13000);
-    require(accepts(policy, kind::backbuffer), "Doubt survived a selective sample");
-    // The same claim in another color space doubts only that signature.
-    feed(policy, sample().alpha(kind::backbuffer, 1000).pair(250, 750), 13500, 3);
-    feed(policy, sample().alpha(kind::backbuffer, 1000).pair(250, 750), 14000);
-    require(!accepts(policy, kind::backbuffer) && policy.counters()[ui_counter::trust_revoked_full] == 1 &&
-        heard.back().empty(), "A full claim over a visible scene was not revoked and reported");
+    require(accepts(policy, kind::backbuffer) && !policy.counters()[ui_counter::trust_revoked_exact],
+      "A middle-band or inexact pair, or a dim over unlit or changed pixels, revoked acceptance");
+    // Three contradictions within 2 s revoke; older ones drop out, and
+    // agreeing or unjudged samples between them change nothing, nor does a
+    // judged source without strong pixels. (The exact selective pairs earn
+    // the HUD-less pair meanwhile.)
+    const auto contradicted = sample().alpha(kind::backbuffer, 1000).pair(100, 900).one_way(kind::backbuffer, 1000, 800);
+    feed(policy, contradicted, 10000);
+    feed(policy, contradicted, 12001);
+    require(accepts(policy, kind::backbuffer), "Contradictions more than 2 s apart revoked acceptance");
+    feed(policy, sample().alpha(kind::backbuffer, 1000).pair(100, 900).one_way(kind::backbuffer, 1000, 0), 12500);
+    feed(policy, sample().alpha(kind::backbuffer, 1000).pair(100, 900).one_way(kind::backbuffer, 0, 0), 12600);
+    feed(policy, sample().alpha(kind::backbuffer, 1000), 13000);
+    // The same contradiction in another color space doubts only that signature.
+    feed(policy, contradicted, 13500, 3);
+    feed(policy, contradicted, 13999, 3);
+    feed(policy, contradicted, 14000);
+    require(accepts(policy, kind::backbuffer), "Two contradictions within 2 s revoked acceptance");
+    feed(policy, contradicted, 14001);
+    require(!accepts(policy, kind::backbuffer) && policy.counters()[ui_counter::trust_revoked_exact] == 1 &&
+        !policy.counters()[ui_counter::trust_revoked_declared] && heard.back() == "hudless:24:srgb,hudless:24:pq",
+      "Three one-way contradictions within 2 s were not revoked, counted and reported");
+    // A contradicted sample earns nothing and restarts the earning run.
+    const auto selective_contradicted = sample().alpha(kind::backbuffer, 200).pair(100, 900).one_way(kind::backbuffer, 200, 150);
+    for (std::uint64_t tick = 15000; tick <= 20000; tick += 500) {
+      feed(policy, sample().alpha(kind::backbuffer, 200), tick);
+      feed(policy, selective_contradicted, tick + 250);
+    }
+    require(!accepts(policy, kind::backbuffer), "A contradicted source earned acceptance again");
+    for (const std::uint64_t tick : {21000u, 22000u, 23000u}) feed(policy, sample().alpha(kind::backbuffer, 200), tick);
+    require(accepts(policy, kind::backbuffer), "An uncontradicted run did not earn acceptance again");
+    // The one-frame-late layer copy is not same-sample evidence (E2): the GPU
+    // counts no strong pixel of it, and neither judge reads it, not even a
+    // disagreeing accepted UIAlpha.
+    alpha_auto_policy late;
+    late.restore("ui_layer:10:srgb,ui_alpha:61:srgb");
+    for (std::uint64_t tick = 1000; tick <= 6000; tick += 500)
+      feed(late, sample().alpha(kind::ui_layer, 1000).alpha(kind::ui_alpha, 20).pair(100, 900).late(), tick);
+    require(accepts(late, kind::ui_layer) && !late.counters()[ui_counter::trust_revoked_exact] &&
+        !late.counters()[ui_counter::trust_revoked_declared], "The late layer was judged");
+
     // Presented alpha disagreeing with an accepted UIAlpha (Resident Evil
     // Requiem: tag 0.2%, presented alpha 35-100% in play; menus agree).
     alpha_auto_policy presented;
@@ -300,30 +460,44 @@ namespace {
     require(accepts(presented, kind::current), "Two samples revoked acceptance");
     feed(presented, sample().alpha(kind::ui_alpha, 2).alpha(kind::current, 350), 7000);
     require(!accepts(presented, kind::current) && accepts(presented, kind::ui_alpha) &&
-        presented.counters()[ui_counter::trust_revoked_presented] == 1,
-      "A dedicated UI mask did not revoke presented alpha that covers the scene");
+        presented.counters()[ui_counter::trust_revoked_declared] == 1 && !presented.counters()[ui_counter::trust_revoked_exact],
+      "A declared UI mask did not revoke presented alpha that covers the scene");
     for (std::uint64_t tick = 8000; tick <= 13500; tick += 500)
       feed(presented, sample().alpha(kind::ui_alpha, tick < 10500 ? 2u : 1000u).alpha(kind::current, tick < 10500 ? 300u : 4u), tick);
     require(!accepts(presented, kind::current), "Contradicted presented alpha earned acceptance again");
     for (const std::uint64_t tick : {14000u, 15000u, 16000u})
       feed(presented, sample().alpha(kind::ui_alpha, 20).alpha(kind::current, 30), tick);
     require(accepts(presented, kind::current), "Presented alpha agreeing with the UI mask could not earn acceptance");
-    // An accepted layer is such a mask; an unaccepted or invalid one is none.
+    // The layer is inferred: an accepted UIAlpha judges it by coverage, and
+    // it judges nothing itself.
     alpha_auto_policy layer;
-    layer.restore("ui_layer:10:srgb,backbuffer:24:srgb");
+    layer.restore("ui_alpha:61:srgb,ui_layer:10:srgb");
     for (const std::uint64_t tick : {1000u, 2000u, 3000u})
-      feed(layer, sample().alpha(kind::ui_layer, 20, 600).alpha(kind::backbuffer, 400), tick);
-    require(accepts(layer, kind::backbuffer), "An invalid layer revoked presented alpha");
-    for (const std::uint64_t tick : {4000u, 5000u, 6000u})
-      feed(layer, sample().alpha(kind::ui_layer, 20).alpha(kind::backbuffer, 400), tick);
-    require(!accepts(layer, kind::backbuffer) && accepts(layer, kind::ui_layer),
-      "An accepted layer did not revoke disagreeing presented alpha");
+      feed(layer, sample().alpha(kind::ui_alpha, 20).alpha(kind::ui_layer, 400), tick);
+    require(!accepts(layer, kind::ui_layer) && accepts(layer, kind::ui_alpha) &&
+        layer.counters()[ui_counter::trust_revoked_declared] == 1, "An accepted UIAlpha did not judge the layer");
+    alpha_auto_policy judge;
+    judge.restore("ui_layer:10:srgb,backbuffer:24:srgb");
+    for (std::uint64_t tick = 1000; tick <= 6000; tick += 1000)
+      feed(judge, sample().alpha(kind::ui_layer, 20).alpha(kind::backbuffer, 400), tick);
+    require(accepts(judge, kind::backbuffer) && accepts(judge, kind::ui_layer), "The inferred layer judged presented alpha");
+    // An invalid or unaccepted declared alpha judges nothing: a full UIAlpha
+    // is never selective, so never accepted.
     alpha_auto_policy alone;
     alone.restore("current:24:srgb");
-    for (std::uint64_t tick = 1000; tick <= 8000; tick += 1000)
-      feed(alone, sample().alpha(kind::ui_layer, tick % 2000 ? 2u : 40u).alpha(kind::current, 400), tick);
-    require(accepts(alone, kind::current) && !accepts(alone, kind::ui_layer),
-      "An unaccepted UI layer revoked presented alpha");
+    for (std::uint64_t tick = 1000; tick <= 8000; tick += 1000) {
+      feed(alone, sample().alpha(kind::ui_alpha, 1000).alpha(kind::current, 400), tick);
+      feed(alone, sample().alpha(kind::ui_color, 20, 600).alpha(kind::current, 400), tick + 500);
+    }
+    require(accepts(alone, kind::current) && !accepts(alone, kind::ui_alpha),
+      "An unaccepted or invalid declared alpha revoked presented alpha");
+    // Declared sources are never judged: an accepted UIAlpha beside a valid
+    // exact pair and disagreeing presented alpha stays accepted.
+    alpha_auto_policy declared;
+    declared.restore("ui_alpha:61:srgb");
+    for (std::uint64_t tick = 1000; tick <= 6000; tick += 500)
+      feed(declared, sample().alpha(kind::ui_alpha, 1000).alpha(kind::current, 100).pair(100, 900), tick);
+    require(accepts(declared, kind::ui_alpha), "A declared source was judged");
   }
 
   // A HUD-less change set is declared: accepted by its first selective
@@ -351,73 +525,76 @@ namespace {
     require(policy.accepted(0x7fu, signatures()) == ui_selection::candidate_bits, "Manual On did not accept the offered candidates");
     for (std::uint64_t tick = 1000; tick <= 70000; tick += 500) {
       feed(policy, sample().alpha(kind::current, 200).alpha(kind::ui_color, 30).pair(50, 900), tick);
-      feed(policy, sample().alpha(kind::backbuffer, 1000).pair(250, 750), tick);
+      feed(policy, sample().alpha(kind::backbuffer, 1000).pair(100, 900).one_way(kind::backbuffer, 1000, 800), tick);
     }
     policy.set_manual(false);
     require(!policy.accepted(0x7fu, signatures()), "Manual Off accepted a candidate");
     policy.set_automatic();
     require(policy.stored() == "backbuffer:24:srgb" && heard.empty() && !policy.counters()[ui_counter::trust_earned] &&
-        !policy.counters()[ui_counter::trust_revoked_full] && !policy.counters()[ui_counter::trust_lapsed],
+        !policy.counters()[ui_counter::trust_revoked_exact] && !policy.counters()[ui_counter::trust_lapsed],
       "Manual On earned, revoked, lapsed or persisted");
     require(policy.accepted(0x7fu, signatures()) == candidate::backbuffer, "Auto lost the ledger after manual On");
   }
 
-  void only_the_deciding_inputs_key_a_status_sample() {
+  // F1: the status is keyed on (scope, winner): the first offered and
+  // accepted candidate in draw order of the adopted inputs. A sample is
+  // discarded only under another scope or stale on arrival; a change of the
+  // other inputs keeps it, and the status shows it only under its winner.
+  void status_follows_the_winner_and_scope() {
+    namespace temporal = ui_temporal;
+    const auto layer = ui_detection::layer_detection_flags(false);
+    temporal::detection_state state;
+    require(!state.status_key(), "A state without adopted inputs had a winner");
     // Resident Evil Requiem with FG: an accepted UI color tag (2) and current
     // alpha (8); its HUD-less pair (16) joins on some Presents only.
-    const std::uint32_t accepted = candidate::ui_color | candidate::current;
-    require(detection_decision_key(2u, 0u, accepted) == detection_decision_key(2u | 16u, 0u, accepted) &&
-        detection_decision_key(2u | 16u, 0u, accepted) == detection_decision_key(2u | 48u, 0u, accepted),
-      "A HUD-less pair beside an accepted candidate changed the decision");
-    // The accepted declared tag blocks inferred alpha, so a presented channel
-    // offered on some Presents only (Stellar Blade in SDR with FG tags the
-    // Backbuffer with real Presents) does not change the key.
-    require(detection_decision_key(2u | 8u, 0u, accepted) == detection_decision_key(2u, 0u, accepted) &&
-        detection_decision_key(2u | 4u, 0u, 2u | 4u) == detection_decision_key(2u, 0u, 2u | 4u),
-      "Inferred alpha beside an accepted declared alpha changed the decision");
-    require(detection_decision_key(8u, 0u, accepted) != detection_decision_key(2u, 0u, accepted),
-      "A different deciding candidate kept the decision");
-    // The layer's stored flags key its decision while it is offered, and only then.
-    const auto layer = ui_detection::layer_detection_flags(false);
-    require(detection_decision_key(0x40u, layer, 0u) != detection_decision_key(0x40u, 0u, 0u) &&
-        detection_decision_key(0x40u, layer, 0x40u) != detection_decision_key(0x40u, 0u, 0x40u) &&
-        detection_decision_key(0x40u, layer | ui_detection::stored_hdr_headroom, 0x40u) !=
-          detection_decision_key(0x40u, layer, 0x40u), "The layer's stored flags did not key its decision");
-    require(detection_decision_key(2u, layer, 2u) == detection_decision_key(2u, 0u, 2u) &&
-        detection_decision_key(2u, layer, 0u) == detection_decision_key(2u, 0u, 0u),
-      "Stored flags keyed a decision without the layer");
-    // The tag and the layer have their own bits: one never keys as the other.
-    require(detection_decision_key(0x40u, layer, 0x40u) != detection_decision_key(2u, layer, 2u),
-      "The UI layer and a tagged UI color shared a decision key");
-    // An accepted layer keys alone: neither unaccepted candidates and pairings
-    // nor an accepted Backbuffer that frame generation tags on real Presents
-    // only change its key.
-    require(detection_decision_key(0x40u | 4u, layer, 0x40u) == detection_decision_key(0x40u | 4u | 48u, layer, 0x40u) &&
-        detection_decision_key(0x40u | 2u, layer, 0x40u) == detection_decision_key(0x40u, layer, 0x40u) &&
-        detection_decision_key(0x40u | 4u, layer, 0x44u) == detection_decision_key(0x40u, layer, 0x44u),
-      "A candidate beside an accepted layer changed its key");
-    // An accepted HUD-less pair beside an accepted alpha that decides first in
-    // draw order: the pair, joining on some Presents only, keys nothing
-    // (Resident Evil Requiem and The Witcher 3 with FG after an exact pair
-    // was accepted with FG off).
-    for (const std::uint32_t alpha : {1u, 2u}) {
-      const std::uint32_t both = alpha | 16u;
-      require(detection_decision_key(alpha, 0u, both) == detection_decision_key(alpha | 16u, 0u, both) &&
-          detection_decision_key(alpha | 16u, 0u, both) == detection_decision_key(alpha | 48u, 0u, both),
-        "An accepted HUD-less pair beside an accepted alpha changed the key");
-    }
-    require(detection_decision_key(1u | 2u, 0u, 3u) == detection_decision_key(1u, 0u, 3u) &&
-        detection_decision_key(1u | 2u, 0u, 3u) != detection_decision_key(2u, 0u, 3u),
-      "The first accepted alpha in draw order did not key alone");
-    // An accepted HUD-less pair: its exactness decides a full change set.
-    require(detection_decision_key(16u, 0u, 16u) != detection_decision_key(48u, 0u, 16u) &&
-        detection_decision_key(16u | 8u, 0u, 16u) == detection_decision_key(16u, 0u, 16u),
-      "An accepted HUD-less pair lost its exactness, or an unaccepted candidate keyed it");
-    // Without an accepted candidate every bit, exactness and acceptance matter.
-    require(detection_decision_key(2u, 0u, 0u) != detection_decision_key(2u | 16u, 0u, 0u) &&
-        detection_decision_key(16u, 0u, 0u) != detection_decision_key(48u, 0u, 0u) &&
-        detection_decision_key(2u | 16u, 0u, 2u) != detection_decision_key(2u | 16u, 0u, 0u),
-      "An unaccepted decision ignored a candidate, exactness or acceptance");
+    state.adopt(2u, 0u, 2u | 8u);
+    const auto tag = state.status_key();
+    state.adopt(2u | 8u | 16u, 0u, 2u | 8u);
+    require(tag == candidate::ui_color && state.status_key() == tag, "A pairing or inferred alpha beside the tag moved the winner");
+    state.adopt(2u | 48u, 0u, 2u | 8u | 16u);
+    require(state.status_key() == candidate::ui_color, "An accepted HUD-less pair beside the tag won");
+    // The first accepted candidate in draw order wins, whatever is offered
+    // beside it; unaccepted candidates and stored flags never key it.
+    state.adopt(0x40u | 4u | 48u, layer, 0x40u | 4u);
+    require(state.status_key() == candidate::layer, "The accepted layer did not win before Backbuffer");
+    state.adopt(0x40u | 4u, layer | ui_detection::stored_hdr_headroom, 4u);
+    require(state.status_key() == candidate::backbuffer, "An unaccepted layer won");
+    state.adopt(16u | 32u, 0u, 16u);
+    require(state.status_key() == candidate::hudless, "An accepted HUD-less pair did not win alone");
+    state.adopt(2u | 4u | 16u, 0u, 0u);
+    require(!state.status_key(), "Nothing accepted had a winner");
+    // Adoption keeps the latest sample: status_fresh decides what it describes.
+    alpha_auto_source scope;
+    scope.epoch = 3; scope.revision = 4; scope.viewport = 5; scope.now_ms = 1200;
+    state.adopt(2u, 0u, 2u);
+    state.latest.sample_tick_ms = 1000;
+    state.latest_source = scope;
+    state.latest_key = candidate::ui_color;
+    state.adopt(2u | 8u | 16u, 0u, 2u | 8u);
+    require(state.latest.sample_tick_ms == 1000 && state.status_fresh(scope), "A pairing beside the winner dropped or staled the sample");
+    state.adopt(8u, 0u, 8u);
+    require(state.latest.sample_tick_ms == 1000 && !state.status_fresh(scope), "A sample described another winner");
+    state.adopt(2u, 0u, 2u);
+    auto later = scope;
+    later.now_ms = 1501;
+    require(state.status_fresh(scope) && !state.status_fresh(later), "The status freshness bound moved");
+    auto other = scope;
+    ++other.revision;
+    require(!state.status_fresh(other), "A sample described another scope");
+    // A sample describes frames within 500 ms of its tick, and is discarded
+    // only under another scope or when stale on arrival.
+    require(!temporal::sample_stale(1000, 1500) && temporal::sample_stale(1000, 1501) && temporal::sample_stale(0, 10),
+      "The sample freshness bound moved");
+    alpha_auto_source now, pending;
+    now.now_ms = 1200; pending.now_ms = 1000;
+    require(!temporal::sample_discarded(now, pending), "A sample in scope was discarded");
+    now.now_ms = 1501;
+    require(temporal::sample_discarded(now, pending), "A sample stale on arrival was kept");
+    now.now_ms = 999;
+    require(temporal::sample_discarded(now, pending), "A sample from the future was kept");
+    now.now_ms = 1200;
+    ++now.viewport;
+    require(temporal::sample_discarded(now, pending), "A sample from another viewport was kept");
   }
 
   // Hidden-scene gates (docs/reshade-sbs.md, hidden-scene evidence) open only
@@ -483,104 +660,115 @@ namespace {
     for (std::uint64_t tick = 1000; tick <= 6000; tick += 100)
       feed(accepting, sample().alpha(kind::ui_layer, pixels).pair(pixels, 0, false), tick);
     require(accepts(accepting, kind::ui_layer), "A full-frame sample without a visible scene revoked acceptance");
-    // Only a session without restored acceptance runs the first-run shadow;
-    // the caller says which, and nothing learned later changes it.
+    // The first-run shadow is its owner's toggle (UISceneShadow), independent
+    // of acceptance: restoring, earning, revoking or forgetting never changes it.
     alpha_auto_policy first;
     require(!first.first_run(), "A policy started as a first run without its owner saying so");
+    first.restore("ui_layer:10:srgb");
+    require(!first.first_run(), "Restored acceptance set the first-run shadow");
     first.set_first_run(true);
     feed(first, sample().alpha(kind::ui_alpha, 100), 1000);
     require(first.first_run() && accepts(first, kind::ui_alpha), "Earning acceptance ended the first-run shadow");
+    first.forget();
+    require(first.first_run(), "Forget ended the first-run shadow");
   }
 
-  // The renderer's temporal state (game3d_ui_temporal.h): which render holds
-  // the previous mask and why, which inputs a sample still describes, and the
-  // CPU-held hidden-scene verdicts. The runtime tests prove the renderer
-  // calls it as before; these pin its rules without a GPU.
+  // T1 (game3d_ui_temporal.h): a generated Present shows the decision of the
+  // real frame it shows, within the tag bound and the scope, else no mask; a
+  // real Present always detects and pushes its per-frame bits. The CPU-held
+  // hidden-scene verdicts. The runtime tests prove the renderer calls it;
+  // these pin its rules without a GPU.
   void temporal_state_holds_and_scene_verdicts() {
     namespace temporal = ui_temporal;
     using temporal::hold_kind;
-    constexpr std::uint32_t max_held = 3;
+    using temporal::present_identity;
+    alpha_auto_source scope;
+    scope.epoch = 1; scope.revision = 2; scope.viewport = 3;
     temporal::detection_state state;
-    // Nothing decided yet: nothing to hold.
-    require(!state.arbitrate(0u, 0u, true, max_held).hold, "A generated Present held a mask no decision made");
-    // A HUD-less decision makes the mask holdable; a generated Present then
-    // holds it for at most max_held Presents.
-    state.adopt(16u | 32u, 0u, 0u);
-    state.detected();
-    require(state.mask_ready && state.exact, "An exact HUD-less decision was not holdable");
-    for (std::uint32_t i = 0; i != max_held; ++i) {
-      const auto hold = state.arbitrate(0u, 0u, true, max_held);
-      require(hold.hold && hold.kind == hold_kind::generated && !hold.cap_reached, "A generated Present did not hold");
-      state.held();
+    // Nothing decided yet: a generated Present has no mask, a real one
+    // detects from a new chain.
+    const auto none = state.arbitrate(present_identity{true, 5}, scope, 0u);
+    require(none.kind == hold_kind::unavailable && !none.hold && !none.detect && !none.adopt && !none.per_frame,
+      "A generated Present held a mask no decision made");
+    const auto first = state.arbitrate(present_identity{false, 5}, scope, 16u | 32u);
+    require(first.detect && !first.hold && first.kind == hold_kind::none && first.adopt &&
+        first.per_frame == ui_detection::per_frame_hold_reset, "The first real Present did not detect from a new chain");
+    state.adopt(16u | 32u, 0u, 16u);
+    state.detected(scope, present_identity{false, 5});
+    // Generated Presents of that real frame and of the next one hold, as many
+    // as come (no multiplier constant); a third real frame does not.
+    for (std::uint32_t i = 0; i != 5; ++i) {
+      const auto hold = state.arbitrate(present_identity{true, 5}, scope, 0u);
+      require(hold.hold && hold.kind == hold_kind::generated && !hold.detect && !hold.adopt && !hold.per_frame,
+        "A generated Present of the decided real frame did not hold");
+      state.held(present_identity{true, 5});
     }
-    const auto capped = state.arbitrate(0u, 0u, true, max_held);
-    require(!capped.hold && capped.cap_reached && capped.kind == hold_kind::generated, "A hold past the cap was not reported");
-    // A fresh decision restarts the count; an inexact pair right after an
-    // exact decision holds, and a generated Present names the hold first.
-    state.detected();
-    require(!state.holds, "A fresh decision kept the hold count");
-    const auto inexact = state.arbitrate(16u, 0u, false, max_held);
-    require(inexact.hold && inexact.kind == hold_kind::inexact_after_exact, "An inexact pair after an exact one did not hold");
-    require(state.arbitrate(16u, 0u, true, max_held).kind == hold_kind::generated, "Hold kinds lost their priority");
-    require(!state.arbitrate(48u, 0u, false, max_held).hold, "An exact pair was held");
-    // An accepted candidate that decided and is missing holds; offered, it decides.
+    require(state.holds == 5 && !state.next_frame, "Holds of the decided real frame set the next frame");
+    require(state.arbitrate(present_identity{true, 6}, scope, 0u).hold, "A generated Present of the next real frame did not hold");
+    state.held(present_identity{true, 6});
+    require(state.next_frame == 6 && state.arbitrate(present_identity{true, 5}, scope, 0u).hold &&
+        state.arbitrate(present_identity{true, 6}, scope, 0u).hold, "The tag bound lost the decided or the next real frame");
+    const auto beyond = state.arbitrate(present_identity{true, 7}, scope, 0u);
+    require(!beyond.hold && beyond.kind == hold_kind::unavailable, "A generated Present beyond the next real frame held");
+    require(state.arbitrate(present_identity{true, 0}, scope, 0u).hold, "A generated Present without a HUD-less tag did not hold");
+    // A generated Present under another identity scope has no mask, and a
+    // real one there starts a new chain.
+    auto recreated = scope;
+    ++recreated.epoch;
+    require(state.arbitrate(present_identity{true, 5}, recreated, 0u).kind == hold_kind::unavailable &&
+        state.arbitrate(present_identity{false, 6}, recreated, 48u).per_frame == ui_detection::per_frame_hold_reset,
+      "A hold crossed an epoch change");
+    // An observation revision alone (a depth observation loss) is a missing
+    // input, not another identity: a generated Present holds, and a real one
+    // missing the accepted pair reuses the previous decision once (T1).
+    auto lost = scope;
+    ++lost.revision;
+    require(state.arbitrate(present_identity{true, 5}, lost, 0u).hold &&
+        state.arbitrate(present_identity{false, 6}, lost, 0u).per_frame == ui_detection::per_frame_accepted_missing,
+      "An observation revision reset the hold chain");
+    auto resized = scope;
+    ++resized.viewport;
+    require(!state.arbitrate(present_identity{true, 5}, resized, 0u).hold &&
+        state.arbitrate(present_identity{false, 6}, resized, 48u).per_frame == ui_detection::per_frame_hold_reset,
+      "A hold crossed a viewport change");
+    // The next real frame in scope detects without per-frame bits and adopts.
+    const auto next = state.arbitrate(present_identity{false, 6}, scope, 48u);
+    require(next.detect && next.adopt && !next.per_frame, "A real frame in the chain pushed per-frame bits");
+    state.detected(scope, present_identity{false, 6});
+    require(!state.holds && !state.next_frame && state.decision_frame == 6, "A real decision kept the hold count or next frame");
+    // A Present without a mask ends the chain: generated Presents then have
+    // no mask, and the next real detection starts a new chain.
+    state.unavailable();
+    require(state.arbitrate(present_identity{true, 6}, scope, 0u).kind == hold_kind::unavailable &&
+        state.arbitrate(present_identity{false, 7}, scope, 48u).per_frame == ui_detection::per_frame_hold_reset,
+      "A Present without a mask kept the chain");
+    // An accepted candidate the last adopting real frame offered and this one
+    // misses: accepted_missing, and the frame adopts nothing. Acceptance is
+    // never inherited: an unaccepted current alpha offered instead changes
+    // nothing, and an unaccepted missing candidate is no such frame.
     temporal::detection_state accepted;
     accepted.adopt(4u, 0u, 4u);
-    accepted.detected();
-    require(accepted.mask_ready && !accepted.exact, "An accepted Backbuffer decision was not holdable");
-    const auto missing = accepted.arbitrate(0u, 4u, false, max_held);
-    require(missing.hold && missing.kind == hold_kind::trusted_missing, "A missing accepted candidate was not held");
-    require(!accepted.arbitrate(4u, 4u, true, max_held).hold, "An accepted candidate in this frame did not decide by itself");
-    // Acceptance is never inherited: an offered, unaccepted tag does not
-    // stand in for the missing accepted layer.
-    temporal::detection_state layer_state;
-    const auto layer = ui_detection::layer_detection_flags(false);
-    layer_state.adopt(0x40u, layer, 0x40u);
-    layer_state.detected();
-    const auto tag_only = layer_state.arbitrate(2u, 0u, false, max_held);
-    require(tag_only.hold && tag_only.kind == hold_kind::trusted_missing, "An unaccepted tag stood in for the missing layer");
-    require(!layer_state.arbitrate(2u, 2u, false, max_held).hold, "An accepted valid tag did not decide by itself");
-    // Unaccepted alpha never makes a holdable mask.
+    accepted.detected(scope, present_identity{});
+    const auto missing = accepted.arbitrate(present_identity{}, scope, 0u);
+    require(missing.detect && !missing.adopt && missing.per_frame == ui_detection::per_frame_accepted_missing,
+      "A missing accepted candidate was not flagged, or the frame adopted");
+    require(accepted.arbitrate(present_identity{}, scope, 8u).per_frame == ui_detection::per_frame_accepted_missing,
+      "An unaccepted current alpha stood in for the missing Backbuffer");
+    require(!accepted.arbitrate(present_identity{}, scope, 4u | 8u).per_frame && accepted.arbitrate(present_identity{}, scope, 4u).adopt,
+      "An offered accepted candidate was flagged missing");
     temporal::detection_state unaccepted;
-    unaccepted.adopt(4u, 0u, 0u);
-    unaccepted.detected();
-    require(!unaccepted.mask_ready && !unaccepted.arbitrate(0u, 0u, true, max_held).hold, "An unaccepted mask was held");
-    // An accepted candidate the latest sample read V1-invalid does not stop the
-    // hold of the mask another candidate made (V1 generalises the old
-    // set-aside layer).
-    temporal::detection_state aside;
-    aside.adopt(0x40u | 4u, layer, 0x40u | 4u);
-    aside.detected();
-    aside.latest.pixels = 1000; aside.latest.evidence.candidates = 0x40u | 4u; aside.latest.evidence.layer_invalid = 600;
-    require(aside.arbitrate(0x40u, 0x40u | 4u, true, max_held).hold, "An invalid accepted layer stopped the hold");
-    aside.latest.evidence.layer_invalid = 10;
-    require(!aside.arbitrate(0x40u, 0x40u | 4u, true, max_held).hold, "A valid accepted layer did not decide by itself");
-    aside.latest.evidence.candidates = 2u | 4u; aside.latest.evidence.alpha_invalid = {0, 600, 0, 0};
-    require(aside.arbitrate(2u, 2u | 4u, true, max_held).hold, "An invalid accepted tag stopped the hold");
-    // A change of the deciding inputs drops the sample; a HUD-less pairing
-    // beside an accepted candidate does not, and neither changes the route.
-    temporal::detection_state keyed;
-    keyed.adopt(4u, 0u, 4u);
-    keyed.latest.sample_tick_ms = 1000;
-    keyed.scene_hold_until = {1500, 0};
-    keyed.adopt(4u | 16u, 0u, 4u);
-    require(keyed.latest.sample_tick_ms == 1000 && keyed.scene_hold_until[0] == 1500, "A HUD-less pairing dropped a sample or a hold");
-    keyed.adopt(4u | 16u, 0u, 0u);
-    require(!keyed.latest.sample_tick_ms && keyed.scene_hold_until[0] == 1500, "Losing acceptance kept the sample or cleared the route");
-    keyed.adopt(0x40u, layer, 0u);
-    require(!keyed.scene_hold_until[0], "A new route kept its hold");
-    // A sample describes frames within 500 ms of its tick, and is discarded
-    // under another scope or decision key.
-    require(!temporal::sample_stale(1000, 1500) && temporal::sample_stale(1000, 1501) && temporal::sample_stale(0, 10),
-      "The sample freshness bound moved");
-    alpha_auto_source now, pending;
-    now.now_ms = 1200; pending.now_ms = 1000;
-    require(!temporal::sample_discarded(now, pending, 7, 7) && temporal::sample_discarded(now, pending, 7, 8),
-      "A sample under the same inputs was discarded, or one under other inputs kept");
-    ++now.revision;
-    require(temporal::sample_discarded(now, pending, 7, 7), "A sample from another revision was kept");
+    unaccepted.adopt(4u | 0x40u, ui_detection::layer_detection_flags(false), 0x40u);
+    unaccepted.detected(scope, present_identity{});
+    require(!unaccepted.arbitrate(present_identity{}, scope, 0x40u).per_frame &&
+        unaccepted.arbitrate(present_identity{}, scope, 4u).per_frame == ui_detection::per_frame_accepted_missing,
+      "Missing candidates were flagged by the wrong acceptance");
+    // A generated Present never flags or adopts, whatever it offers.
+    const auto generated = accepted.arbitrate(present_identity{true, 0}, scope, 1u);
+    require(generated.hold && !generated.per_frame && !generated.adopt, "A generated Present detected or adopted");
+
     // One valid hidden sample holds the layer route for hold_ms from its tick;
     // a visible one releases it and refutes the input until it is an overlay.
+    const auto layer = ui_detection::layer_detection_flags(false);
     temporal::detection_state scene;
     scene.adopt(0x40u, layer, 0u);
     alpha_auto_decision sample;
@@ -609,20 +797,32 @@ namespace {
     sample.sample_tick_ms = 2600; sample.evidence.scene.valid = false;
     scene.observe_scene(sample, true);
     require(scene.scene_holds(2900) && !scene.scene_holds(2901), "Invalid evidence renewed or released a hold");
+    // A HUD-less pairing or acceptance beside the route keeps its hold; a
+    // new route drops it (scene_route_key, S2b).
+    scene.adopt(0x40u | 16u, layer, 0u);
+    require(scene.scene_holds(2900), "A HUD-less pairing dropped the route's hold");
+    scene.adopt(0x40u, layer, 0x40u);
+    require(!scene.scene_holds(2900), "A new route kept its hold");
     // An accepted layer opens no route.
     temporal::detection_state accepted_layer;
     auto decided = sample;
     decided.evidence.accepted = 0x40u; decided.evidence.scene.valid = true;
     accepted_layer.observe_scene(decided, true);
     require(!accepted_layer.scene_gate_open && !accepted_layer.scene_holds(2600), "An accepted layer opened the layer route");
-    // A scope change and an inactive render clear the holds.
-    scene.latest_source.epoch = 1;
-    scene.enter_scope(now);
+    // A scope change and an inactive render clear the holds; an inactive
+    // render also ends the T1 chain.
+    scene.scene_hold_until = {3000, 3000};
+    alpha_auto_source moved;
+    moved.epoch = 1;
+    scene.enter_scope(moved);
     require(!scene.scene_holds(2500), "A new scope kept a hold");
-    scene.scene_hold_until = {3000, 3000}; scene.scene_refuted_slots = 2u; scene.mask_ready = scene.exact = true;
+    scene.scene_hold_until = {3000, 3000}; scene.scene_refuted_slots = 2u;
+    scene.detected(scope, present_identity{false, 9});
     scene.inactive();
-    require(!scene.scene_holds(2500) && !scene.scene_refuted_slots && !scene.mask_ready && !scene.exact,
-      "An inactive render kept a hold, refutation or holdable mask");
+    require(!scene.scene_holds(2500) && !scene.scene_refuted_slots && !scene.have_decision &&
+        scene.arbitrate(present_identity{true, 9}, scope, 0u).kind == hold_kind::unavailable &&
+        scene.arbitrate(present_identity{false, 10}, scope, 0u).per_frame == ui_detection::per_frame_hold_reset,
+      "An inactive render kept a hold, refutation or decision");
   }
 
   // Exact UI counters (game3d_ui_counters.h): the log text, the accounting
@@ -631,24 +831,28 @@ namespace {
     namespace n = ui_counter;
     ui_counters c;
     c[n::auto_frames] = 10; c[n::detection_frames] = 6;
-    c[n::held_generated] = 2; c[n::held_inexact_after_exact] = 1; c[n::held_cap] = 1;
+    c[n::held_generated] = 2; c[n::held_none] = 1; c[n::reused] = 1;
     c[n::inactive_no_candidates] = 1;
     c[n::decided + 0] = 2; c[n::decided + 5] = 3; c[n::decided + 6] = 1; c[n::decided + 10] = 4;
     c[n::none + ui_no_mask::difference_failed] = 1; c[n::none + ui_no_mask::gate_no_hold] = 1;
     c[n::none + ui_no_mask::unaccepted] = 2;
     c[n::depth_not_current] = 1; c[n::full_d_hidden] = 1; c[n::inexact_difference] = 3; c[n::trust_earned] = 1;
-    c[n::trust_discarded] = 2;
+    c[n::trust_discarded] = 2; c[n::trust_revoked_exact] = 1; c[n::trust_forgotten] = 3; c[n::contradicted] = 2;
     c[n::full_alpha] = 2; c[n::full_alpha_d_visible] = 1;
     c[n::samples] = 4; c.through_ms = 12345;
     require(c.reconciled() && c.held() == 3 && c.inactive() == 1, "The counters' accounting identity is wrong");
+    // reused frames are detection frames, not holds.
+    ++c[n::reused];
+    require(c.reconciled(), "A reused frame changed the accounting identity");
+    --c[n::reused];
     require(format_ui_counters(c) ==
-        "auto_frames=10 detection_frames=6 held={generated=2 inexact_after_exact=1 trusted_missing=0 cap=1} "
+        "auto_frames=10 detection_frames=6 held={generated=2 none=1} reused=1 "
         "inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 9=0 10=4} "
         "none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 gate_no_hold=1 "
         "no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 9=0 depth_not_current=1} full_d={hidden=1 ambiguous=0 visible=0 invalid=0} "
-        "untrusted_inferred=0 inexact_difference=3 trusted_full=0 presented_over_dedicated=0 full_alpha=2 "
-        "full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=0} trust={earned=1 revoked_full=0 "
-        "revoked_presented=0 lapsed=0 restored=0 discarded=2} samples=4 through_ms=12345",
+        "untrusted_inferred=0 inexact_difference=3 contradicted=2 presented_over_dedicated=0 full_alpha=2 "
+        "full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=0} trust={earned=1 revoked_exact=1 "
+        "revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3} samples=4 through_ms=12345",
       "The UI counters log text changed");
     ++c[n::auto_frames];
     require(!c.reconciled(), "An unaccounted frame reconciled");
@@ -660,11 +864,13 @@ namespace {
     now[ui_counter_word::none + ui_no_mask::ambiguous] = 5u; now[ui_counter_word::none + ui_no_mask::unaccepted] = 3u;
     now[ui_counter_word::untrusted_inferred] = 2u;
     now[ui_counter_word::full_alpha] = 4u;
+    now[ui_counter_word::contradicted] = 7u; now[ui_counter_word::reused] = 8u;
     ui_counters gpu;
     gpu.add_gpu_delta(now, before);
     require(gpu[n::detection_frames] == 3 && gpu.decided(4) == 2 && gpu.decided(10) == 6 &&
         gpu[n::none + ui_no_mask::ambiguous] == 5 && gpu[n::none + ui_no_mask::unaccepted] == 3 &&
-        gpu[n::untrusted_inferred] == 2 && gpu[n::full_alpha] == 4 && !gpu.decided(0), "GPU counter deltas are wrong");
+        gpu[n::untrusted_inferred] == 2 && gpu[n::full_alpha] == 4 && gpu[n::contradicted] == 7 && gpu[n::reused] == 8 &&
+        !gpu.decided(0), "GPU counter deltas are wrong");
     // A session sums every commit and keeps the latest tick.
     alpha_auto_policy session;
     ui_counters first, second;
@@ -676,15 +882,15 @@ namespace {
     require(total[n::auto_frames] == 5 && total[n::detection_frames] == 3 && total[n::held_generated] == 2 &&
         total.through_ms == 500 && total.reconciled(), "The session did not sum its committed counters");
 
-    // Earned once, however many samples confirm it; revoked by a full claim
-    // over a visible scene.
+    // Earned once, however many samples confirm it; revoked by an exact
+    // pair's one-way contradiction.
     alpha_auto_policy earned;
     for (std::uint64_t tick = 10000; tick <= 13000; tick += 1000) feed(earned, sample().alpha(kind::backbuffer, 200), tick);
     require(accepts(earned, kind::backbuffer) && earned.counters()[n::trust_earned] == 1, "Earning was not counted once");
     for (std::uint64_t tick = 14000; tick <= 16000; tick += 1000)
-      feed(earned, sample().alpha(kind::backbuffer, pixels).pair(100, 900), tick);
-    require(!accepts(earned, kind::backbuffer) && earned.counters()[n::trust_revoked_full] == 1 &&
-        !earned.counters()[n::trust_revoked_presented], "A full claim over a visible scene was not counted as its revocation");
+      feed(earned, sample().alpha(kind::backbuffer, pixels).pair(100, 900).one_way(kind::backbuffer, pixels, 800), tick);
+    require(!accepts(earned, kind::backbuffer) && earned.counters()[n::trust_revoked_exact] == 1 &&
+        !earned.counters()[n::trust_revoked_declared], "A one-way contradiction was not counted as its revocation");
     // Presented alpha disagreeing with an accepted UIAlpha.
     alpha_auto_policy presented;
     for (std::uint64_t tick = 10000; tick <= 12000; tick += 1000)
@@ -694,7 +900,8 @@ namespace {
     for (std::uint64_t tick = 13000; tick <= 15000; tick += 1000)
       feed(presented, sample().alpha(kind::ui_alpha, 100).alpha(kind::backbuffer, 300), tick);
     require(accepts(presented, kind::ui_alpha) && !accepts(presented, kind::backbuffer) &&
-        presented.counters()[n::trust_revoked_presented] == 1, "A presented-alpha disagreement was not counted as its revocation");
+        presented.counters()[n::trust_revoked_declared] == 1 && !presented.counters()[n::trust_revoked_exact],
+      "A declared-coverage disagreement was not counted as its revocation");
     // Restored acceptance lapses unless this session earns it again, and an
     // earn that confirms it counts.
     alpha_auto_policy lapsing;
@@ -715,7 +922,7 @@ namespace {
   // counts it commits and when a sample frame measures the scene.
   void sample_decode_and_commit_are_shared() {
     namespace word = ui_detection::decision_word;
-    std::array<std::uint32_t, 4 * ui_detection::layer_decision_texels> t{};
+    std::array<std::uint32_t, 4 * ui_detection::judgment_decision_texels> t{};
     t[word::source] = 10; t[word::covered] = 995; t[word::pixels] = 1000; t[word::matching_tiles] = 7;
     t[word::candidates] = 0x7a; t[word::hudless_changed] = 9; t[word::hudless_unchanged] = 900;
     t[word::hudless_invalid] = 1; t[word::hudless_lit] = 800; t[word::accepted] = 0x42;
@@ -727,6 +934,9 @@ namespace {
     t[word::hudless_scene_n] = 300; std::memcpy(&t[word::hudless_scene_d], &hudless_d, sizeof(hudless_d));
     t[word::hudless_scene_state] = 3u;
     t[word::layer_covered] = 995; t[word::layer_invalid] = 2; t[word::layer_opaque] = 990; t[word::valid_bits] = 0x4a;
+    for (std::uint32_t i = 0; i != 3; ++i) { t[word::strong + i] = 40 + i; t[word::contradicted + i] = 50 + i; }
+    t[word::refused] = candidate::backbuffer;
+    t[word::frame_reason] = std::uint32_t(ui_no_mask::unaccepted) | ui_detection::frame_reason_reused;
     const auto sample = ui_temporal::decode_detection_sample(t.data(), t.size(), 1500, 9, true);
     const auto &e = sample.evidence;
     require(sample.source_kind == 10 && sample.enabled && sample.state == alpha_auto_state::automatic_on &&
@@ -736,6 +946,13 @@ namespace {
         e.alpha_covered[3] == 13 && e.alpha_invalid[0] == 20 && e.alpha_opaque[1] == 31 && e.layer_covered == 995 &&
         e.layer_invalid == 2 && e.layer_opaque == 990 && e.valid_bits == 0x4a,
       "The decision texels did not decode");
+    require(e.strong == std::array<std::uint32_t, 3>{40, 41, 42} && e.contradicted == std::array<std::uint32_t, 3>{50, 51, 52} &&
+        e.refused == candidate::backbuffer && e.frame_reason == ui_no_mask::unaccepted && e.reused,
+      "The one-way counts, refused candidate or frame reason did not decode");
+    const auto layer_only = ui_temporal::decode_detection_sample(t.data(), 4 * ui_detection::layer_decision_texels, 1500, 9, true);
+    require(layer_only.evidence.valid_bits == 0x4a && !layer_only.evidence.strong[0] && !layer_only.evidence.refused &&
+        layer_only.evidence.frame_reason == ui_detection::frame_reason_decided && !layer_only.evidence.reused,
+      "Texels 8 and 9 decoded from fewer than 40 words");
     require(e.scene.n == 400 && e.scene.d == .5f && e.scene.valid && e.scene.ran &&
         e.scene.verdict == ui_detection::scene_verdict::visible && e.scene.decided == 600 && e.hudless_scene.n == 300 &&
         e.hudless_scene.d == .3f && e.hudless_scene.valid && e.hudless_scene.ran, "The scene texels did not decode");
@@ -794,15 +1011,16 @@ int main() {
     an_invalid_declared_alpha_voids_earning();
     acceptance_is_per_signature();
     restore_is_provisional_and_legacy_entries_are_discarded();
+    forget_clears_the_ledger();
     revocation_is_per_signature();
     exact_change_sets_earn();
     manual_on_is_a_session_override();
-    only_the_deciding_inputs_key_a_status_sample();
+    status_follows_the_winner_and_scope();
     hidden_scene_gates_and_samples_that_flatten_learn_nothing();
     temporal_state_holds_and_scene_verdicts();
     ui_counters_are_formatted_and_trust_events_counted();
     sample_decode_and_commit_are_shared();
-    std::puts("Source alpha session: 14 policy groups passed");
+    std::puts("Source alpha session: 15 policy groups passed");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "Source alpha session failed: %s\n", error.what());

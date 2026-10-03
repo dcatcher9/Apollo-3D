@@ -17,8 +17,6 @@
 #include <utility>
 
 namespace sunshine_game3d::ui_input {
-  static_assert(ui_detection_inputs::max_held_presents == ui_mask::max_generated_frames,
-    "The renderer must be able to hold a mask across every generated present");
   static_assert(ui_detection_inputs::max_retained_presents == ui_mask::max_late_presents,
     "The renderer must retain the color of every admitted late HUD-less frame");
   namespace api = reshade::api;
@@ -39,6 +37,11 @@ namespace sunshine_game3d::ui_input {
       std::uint64_t native_device{}, device_identity{};
       // HUD-less pairing outcomes since the last gate log.
       std::array<std::uint32_t, hudless_outcome_count> hudless_outcomes{};
+      // T1 Present counting without a HUD-less pairing: the frame_sequence of
+      // the last render that offered a Streamline UI tag, in this epoch and
+      // viewport (ui_mask::generated_without_input).
+      std::uint64_t input_present{}, input_epoch{};
+      std::uint32_t input_viewport{};
       bool suspended{};
     };
     std::mutex source_mutex;
@@ -214,13 +217,15 @@ namespace sunshine_game3d::ui_input {
     result.detection.current_color = false;
     ui_qualification::scope base;
     ui_qualification::status before;
-    std::uint64_t instance{}, frame_sequence{};
+    std::uint64_t instance{}, frame_sequence{}, input_present{};
     {
       std::lock_guard<std::mutex> lock(source_mutex);
       const auto found = sources.find(runtime);
       if (found != sources.end()) {
-        base = found->second.base; before = found->second.selection.snapshot();
-        instance = found->second.instance; frame_sequence = ++found->second.frame_sequence;
+        const auto &entry = found->second;
+        base = entry.base; before = entry.selection.snapshot();
+        instance = entry.instance; frame_sequence = ++found->second.frame_sequence;
+        if (entry.input_epoch == base.epoch && entry.input_viewport == base.viewport) input_present = entry.input_present;
       }
     }
     const auto now = GetTickCount64();
@@ -285,13 +290,15 @@ namespace sunshine_game3d::ui_input {
         tagged && tagged != UINT64_MAX && current > tagged ? hudless_stale : hudless_other;
       if (hudless && !batch && pairing.kind == hudless_present::generated_frame) {
         // Interpolated color cannot be differenced against this tag's scene.
-        // Nothing is copied; the renderer reuses the preceding real frame's mask.
+        // Nothing is copied; the renderer shows the decision of the real frame
+        // this Present shows (T1), identified by the tag's present generation.
         if (diagnostic) {
           candidates.push_back(captured_metadata(selected, now, false, false));
           candidates.back()["held_for_generated_present"] = true;
         }
         result.status.retained_alpha_ready = true;
         result.detection.hold_previous = true;
+        result.detection.real_frame = tagged;
         available = true;
         if (manual) explicit_captures[slot] = {true, selected, {}, diagnostic ? candidates.back().dump() : std::string{}};
         continue;
@@ -324,6 +331,9 @@ namespace sunshine_game3d::ui_input {
         // showed FG-on Present pairs that belonged to another frame.
         result.detection.hudless_exact = batch || !status.fg_active();
         result.detection.hudless = view;
+        // T1 identifies the real frame by the HUD-less tag's present
+        // generation until S3 stamps real frames.
+        result.detection.real_frame = tagged;
       } else result.detection.masks[slot] = view;
       signatures.set(slot_kinds[slot], typed_format(selected.texture.format));
       result.status.retained_alpha_ready = true;
@@ -357,6 +367,22 @@ namespace sunshine_game3d::ui_input {
         signatures.set(ui_selection::kind::ui_layer, typed_format(layer.format));
         result.status.retained_alpha_ready = true; available = true;
       }
+    }
+    // T1 by Present counting without a HUD-less pairing: a render that offers
+    // nothing, within the reported generated count of the last one that
+    // offered a Streamline UI tag, is a generated Present and shows that
+    // real frame's decision. It carries no real-frame id (no tag bound); the
+    // count bounds it.
+    const bool tag_offered = result.detection.masks[0].handle || result.detection.masks[1].handle ||
+      result.detection.masks[2].handle;
+    if (capturing && !available && !result.detection.hold_previous &&
+        ui_mask::generated_without_input(frame_sequence, input_present, status.fg_active(), status.fg.generated_frames)) {
+      if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},
+        {"association", "present_count_after_last_ui_tag"}, {"presents_since_ui_tag", frame_sequence - input_present}});
+      result.status.retained_alpha_ready = true;
+      result.detection.hold_previous = true;
+      result.detection.real_frame = 0;
+      available = true;
     }
     const bool current_allowed = status.requested && !status.fg_active() && present_has_alpha(base.output_format) &&
       (wanted_source == choice::automatic || wanted_source == choice::current_color);
@@ -423,6 +449,9 @@ namespace sunshine_game3d::ui_input {
       if (found != sources.end()) {
         auto &entry = found->second;
         if (hudless_wanted) ++entry.hudless_outcomes[hudless_result];
+        if (tag_offered) {
+          entry.input_present = frame_sequence; entry.input_epoch = base.epoch; entry.input_viewport = base.viewport;
+        }
         const bool matches = entry.instance == instance && !entry.suspended && entry.base == base &&
           entry.selection.snapshot().choice_revision == before.choice_revision;
         if (matches && available) {

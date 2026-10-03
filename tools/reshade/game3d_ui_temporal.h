@@ -1,39 +1,68 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
-// The CPU-side temporal state of live automatic UI detection: which decision
-// inputs a render adopts, when it holds the previous frame's mask instead of
-// detecting, when a completed status sample still describes the frame, and
-// the CPU-owned hidden-scene verdict of each route, plus the decode of a
-// completed sample's decision texels and the counts it commits.
-// docs/reshade-sbs.md (UI protection, hidden-scene evidence, UI counters, UI
-// decision framework) owns the rules. The renderer keeps only the GPU and
-// resource work; the sequence replay test (test_game3d_ui_sequence.cpp)
+// The CPU-side temporal state of live automatic UI detection: which Presents
+// detect and which show the decision of the real frame they show (T1), which
+// inputs a real frame adopts, when a completed status sample still describes
+// the frame (F1), and the CPU-owned hidden-scene verdict of each route, plus
+// the decode of a completed sample's decision texels and the counts it
+// commits. docs/reshade-sbs.md (UI protection, hidden-scene evidence, UI
+// counters, UI decision framework) owns the rules. The renderer keeps only the
+// GPU and resource work; the sequence replay test (test_game3d_ui_sequence.cpp)
 // drives the same calls without a GPU, in the same order:
 //
 //   render (one Present; Auto, or manual On through detection):
 //     1. bits: the offered candidate bits (ui_detection::candidate), and the
-//        candidate_signatures of the offered kinds;
+//        candidate_signatures of the offered kinds; identity: the provider's
+//        present_identity, {hold_previous, real_frame} (Present counting until
+//        S3 stamps real frames: generated from the HUD-less pairing, or,
+//        without one, a Present that offers nothing within the reported
+//        generated count of the last one that offered a UI tag
+//        (ui_mask::generated_without_input); the HUD-less tag's present
+//        generation as the real-frame id, 0 without a HUD-less capture);
 //     2. accepted = session.accepted(bits, signatures) (manual On: every
 //        offered candidate, without the ledger);
-//     3. hold = state.arbitrate(bits, accepted, hold_previous, max_held);
-//     4. when hold.hold, bits, flags and accepted become state.bits,
-//        state.flags and state.accepted (the held inputs); otherwise flags
-//        are the layer's stored flags when bits has candidate::layer, else 0;
-//     5. state.adopt(bits, flags, accepted);
-//     6. with detection: state.enter_scope, scene_holds and measure_scene;
-//        then state.held() for a hold, or detection with state.accepted
-//        pushed in b2 word 2 and state.detected(); without detection
-//        state.inactive(). A sample keeps the signatures it was submitted
-//        with.
+//     3. t = state.arbitrate(identity, observation, bits);
+//     4. flags are the layer's stored flags when bits has candidate::layer,
+//        else 0; when t.adopt, state.adopt(bits, flags, accepted);
+//     5. detection runs when it is requested, the frame fits and its resources
+//        are prepared, and either t.hold, or t.detect with bits != 0 or
+//        t.per_frame & per_frame_accepted_missing (a zero-offer real frame:
+//        the reduce and mask passes only, no tiles pass and no sample). A
+//        generated hold and a zero-offer frame apply the mask even while no
+//        UI input is available:
+//        - t.hold (kind generated): apply the detected mask as it is (the
+//          decision of the real frame shown), count held.generated, then
+//          state.held(identity); no poll and no sample;
+//        - t.kind unavailable (a generated Present with no such decision): no
+//          mask, count held.none, then state.unavailable();
+//        - t.detect: state.enter_scope(observation), poll_detection,
+//          scene_holds and measure_scene; then detection with this frame's
+//          own bits, accepted and flags pushed (b2), flags | per_frame where
+//          per_frame = scene hold bits | t.per_frame | depth_not_current,
+//          and the hold store bound at u5 for the reduce; then
+//          state.detected(observation, identity). A sample keeps the
+//          signatures and pushed flags it was submitted with, and its status
+//          key is state.status_key() at submission;
+//        otherwise inactive.* and state.inactive().
 //   poll_detection (a completed sample):
-//     7. sample_discarded() drops it unread; otherwise
-//        sample = decode_detection_sample(words, count, tick, sequence, scene);
-//     8. state.observe_scene(sample, state.pending_scene_actionable);
-//     9. session.observe(sample.evidence, sample.pixels, tick, submitted
+//     6. sample_discarded(input, pending source) drops it unread (another
+//        scope, or stale on arrival); otherwise
+//        sample = decode_detection_sample(words, count, tick, sequence, scene,
+//        pushed flags),
+//        state.latest = sample, state.latest_source = the pending source and
+//        state.latest_key = the status key at submission;
+//     7. state.observe_scene(sample, state.pending_scene_actionable);
+//     8. session.observe(sample.evidence, sample.pixels, tick, submitted
 //        signatures); a session in a manual mode ignores it;
-//    10. sample_counters() commits the counts.
+//     9. sample_counters() commits the counts.
+//   status (after render):
+//    10. state.latest describes the frame only while
+//        state.status_fresh(observation); otherwise the status is collecting.
 //
-// No ReShade dependency.
+// The GPU owns the T1 grace of a real frame without a decision of its own
+// (ui_selection::decide, the hold store): this state only names the Presents
+// that detect, the per-frame bits a detection pushes, and the Presents that
+// show a real frame's decision. No ReShade dependency.
 #include "game3d_alpha_auto.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
@@ -54,25 +83,40 @@ namespace sunshine_game3d::ui_temporal {
   }
   static_assert(sample_stale(0, 0) && !sample_stale(1000, 1500) && sample_stale(1000, 1501) && sample_stale(1000, 999));
 
-  // The inputs that identify a detection's scope: a sample or a held route
-  // from another epoch, revision or viewport is no evidence for this one.
+  // The inputs that identify a detection's scope: a sample, a decision or a
+  // held route from another epoch, revision or viewport is no evidence for
+  // this one.
   inline bool scope_changed(const alpha_auto_source &a, const alpha_auto_source &b) {
     return a.epoch != b.epoch || a.revision != b.revision || a.viewport != b.viewport;
   }
-  // A completed sample is discarded unread when its scope or decision key no
-  // longer matches the current inputs, or when it is stale on arrival.
-  inline bool sample_discarded(const alpha_auto_source &input, const alpha_auto_source &pending, std::uint64_t key,
-      std::uint64_t pending_key) {
-    return scope_changed(input, pending) || key != pending_key || input.now_ms < pending.now_ms ||
-      input.now_ms - pending.now_ms > sample_fresh_ms;
+  // The identity part of that scope (M1: a recreated swapchain or device, or
+  // another viewport), which clears T1 holds. An observation revision alone
+  // (a depth observation loss) is a missing input, not another identity: the
+  // last real decision still describes the same output, so a generated
+  // Present holds it and the next real frame without a decision of its own
+  // reuses it once.
+  inline bool hold_scope_changed(const alpha_auto_source &a, const alpha_auto_source &b) {
+    return a.epoch != b.epoch || a.viewport != b.viewport;
+  }
+  // A completed sample is discarded unread only when its scope no longer
+  // matches, or when it is stale on arrival (F1). A change of accepted or
+  // offered candidates does not discard it: every sample in scope is
+  // evidence for the ledger, and the status shows it only under the winner
+  // it was taken for (detection_state::status_fresh).
+  inline bool sample_discarded(const alpha_auto_source &input, const alpha_auto_source &pending) {
+    return scope_changed(input, pending) || input.now_ms < pending.now_ms || input.now_ms - pending.now_ms > sample_fresh_ms;
   }
 
   // The status sample poll_detection reads from the decision texels `words`
   // (4 per texel, at least min_decision_texels; with scene, the evidence
   // texels 5 and 6 too; the offscreen UI layer's texel 7 when there are
-  // layer_decision_texels). sequence numbers the submitted samples.
+  // layer_decision_texels; the one-way judgment counts, the refused candidate
+  // and the frame reason of texels 8 and 9 when there are
+  // judgment_decision_texels). sequence numbers the submitted samples, and
+  // flags are the Sunshine_UIDetectionFlags the detection pushed (whether an
+  // offered layer was the one-frame-late copy).
   inline alpha_auto_decision decode_detection_sample(const std::uint32_t *words, std::size_t count,
-      std::uint64_t tick_ms, std::uint64_t sequence, bool scene) {
+      std::uint64_t tick_ms, std::uint64_t sequence, bool scene, std::uint32_t flags = 0) {
     namespace word = ui_detection::decision_word;
     alpha_auto_decision sample;
     if (count < 4 * ui_detection::min_decision_texels ||
@@ -93,11 +137,20 @@ namespace sunshine_game3d::ui_temporal {
     evidence.hudless_lit = words[word::hudless_lit];
     evidence.accepted = words[word::accepted];
     evidence.alpha_opaque = {words[word::alpha_opaque], words[word::alpha_opaque + 1]};
+    evidence.late_layer = (evidence.candidates & ui_detection::candidate::layer) &&
+      (flags & ui_detection::stored_late_layer);
     if (count >= 4 * ui_detection::layer_decision_texels) {
       evidence.layer_covered = words[word::layer_covered];
       evidence.layer_invalid = words[word::layer_invalid];
       evidence.layer_opaque = words[word::layer_opaque];
       evidence.valid_bits = words[word::valid_bits];
+    }
+    if (count >= 4 * ui_detection::judgment_decision_texels) {
+      std::copy_n(words + word::strong, evidence.strong.size(), evidence.strong.begin());
+      std::copy_n(words + word::contradicted, evidence.contradicted.size(), evidence.contradicted.begin());
+      evidence.refused = words[word::refused];
+      evidence.frame_reason = words[word::frame_reason] & ui_detection::frame_reason_reason_mask;
+      evidence.reused = (words[word::frame_reason] & ui_detection::frame_reason_reused) != 0;
     }
     if (scene) {
       const auto decode = [&](std::size_t n, std::size_t d, std::size_t state) {
@@ -159,26 +212,39 @@ namespace sunshine_game3d::ui_temporal {
     bool run{}, actionable{};
   };
 
-  // Why a render holds the previous frame's decision and mask. When several
-  // reasons apply the first one names the hold: a generated Present, then a
-  // real frame whose HUD-less pair is inexact right after an exact decision,
-  // then an accepted alpha candidate that the previous render adopted and is
-  // missing from this one.
-  enum class hold_kind : std::uint8_t { none, generated, inexact_after_exact, trusted_missing };
+  // T1 identity of one Present (M6), by Present counting until S3 stamps real
+  // frames: whether the HUD-less pairing, or without one the count since the
+  // last Present that offered a UI tag, classified it as generated
+  // (hold_previous), and the real frame it shows, as the HUD-less tag's
+  // present generation (0 without a HUD-less capture: no tag bound).
+  struct present_identity {
+    bool generated{};
+    std::uint64_t real_frame{};
+  };
+
+  // What a Present does under T1: a real Present detects (none: no hold); a
+  // generated Present shows the decision of the real frame it shows
+  // (generated, counted held.generated) or, when no such decision exists in
+  // its scope, has no mask (unavailable, counted held.none).
+  enum class hold_kind : std::uint8_t { none, generated, unavailable };
   inline const char *name(hold_kind value) {
     switch (value) {
       case hold_kind::generated: return "generated";
-      case hold_kind::inexact_after_exact: return "inexact_after_exact";
-      case hold_kind::trusted_missing: return "trusted_missing";
+      case hold_kind::unavailable: return "unavailable";
       default: return "none";
     }
   }
   struct hold_decision {
-    bool hold{};
     hold_kind kind = hold_kind::none;
-    // A hold was wanted (kind names why) but max_held_presents consecutive
-    // Presents already reused the mask, so this one detects again.
-    bool cap_reached{};
+    // A real Present: it runs detection. A generated Present showing a real
+    // frame's decision: it applies the detected mask without detecting.
+    bool detect{}, hold{};
+    // A real Present whose inputs become the adopted ones (the status key,
+    // the hidden-scene route and the accepted-missing reference).
+    bool adopt{};
+    // The per-frame bits T1 pushes with a detection
+    // (ui_detection::per_frame_hold_reset, per_frame_accepted_missing).
+    std::uint32_t per_frame{};
   };
 
   // One renderer's detection state across frames. Candidate bits are
@@ -188,17 +254,25 @@ namespace sunshine_game3d::ui_temporal {
   // Sunshine_UIDetectionFlags; accepted the session's accepted candidates
   // (alpha_auto_policy::accepted), in the same bit positions.
   struct detection_state {
-    // The inputs the last render adopted, and whether its decided mask may be
-    // held: a HUD-less image or an accepted alpha candidate made it.
+    // The inputs the last adopting real frame offered (adopt): they key the
+    // status (status_key), the hidden-scene routes (scene_route_key, S2b) and
+    // the accepted-missing reference.
     std::uint32_t bits{}, flags{}, accepted{};
-    bool mask_ready{};
-    // Consecutive Presents that reused the mask.
+    // T1 (M6): whether a real decision exists in this chain, its scope and
+    // real-frame id, the first other real-frame id a generated Present
+    // showed since (the next real frame; zero before), and whether the next
+    // detection starts a new chain (per_frame_hold_reset).
+    bool have_decision{};
+    alpha_auto_source decision_scope;
+    std::uint64_t decision_frame{}, next_frame{};
+    bool reset_pending = true;
+    // Consecutive generated Presents that applied the detected mask.
     std::uint32_t holds{};
-    // The last fresh decision used an exact HUD-less pair.
-    bool exact{};
-    // The latest completed status sample and the inputs it was taken for.
+    // The latest completed status sample, the inputs it was taken for and its
+    // status key at submission (status_key()).
     alpha_auto_decision latest;
     alpha_auto_source latest_source;
+    std::uint32_t latest_key{};
     // Hidden-scene verdicts the CPU holds: 0 layer route (source 8), 1
     // HUD-less route (source 9), each until this tick, zero when not held.
     std::array<std::uint64_t, 2> scene_hold_until{};
@@ -215,48 +289,49 @@ namespace sunshine_game3d::ui_temporal {
     std::uint64_t scene_route{};
     std::uint32_t scene_refuted_slots{};
 
-    std::uint64_t key() const { return detection_decision_key(bits, flags, accepted); }
-
-    // A generated Present keeps the preceding real frame's decision and mask.
-    // So does a real frame whose HUD-less pair is inexact (frame generation on,
-    // outside the tag batch) right after an exact decision: detecting again
-    // from that pair would flip a full-screen menu between flat and 3D. So does
-    // an accepted alpha candidate that the previous render adopted and is
-    // missing from this one: an observation loss refuses the previous
-    // revision's captures until the game tags again. Acceptance belongs to
-    // each candidate; a missing one is never inherited by another. An
-    // accepted alpha candidate in this frame decides by itself, so nothing is
-    // held, unless the latest sample read it V1-invalid (more than 1% invalid
-    // pixels, such as a layer holding color without alpha): it then decides
-    // nothing by itself and does not stop holding the mask another candidate
-    // made. Holds are bounded to max_held consecutive Presents.
-    hold_decision arbitrate(std::uint32_t offered, std::uint32_t accepted_now, bool hold_previous,
-        std::uint32_t max_held) const {
-      namespace candidate = ui_detection::candidate;
-      const bool inexact = (offered & (candidate::hudless | candidate::exact)) == candidate::hudless;
-      const bool accepted_missing = (bits & accepted & ui_selection::alpha_bits & ~offered) != 0;
-      const std::uint32_t invalid = invalid_alpha_bits(latest.evidence, latest.pixels);
+    // T1: a generated Present never detects. It shows the decision of the
+    // real frame it shows: the last detection's (detected_mask) while it is
+    // in the same identity scope (hold_scope_changed: an observation
+    // revision alone keeps it) and the Present shows that real frame or the
+    // next one
+    // (its real-frame id equals the decision's, or is the first other id a
+    // generated Present showed since; 0, no HUD-less capture, is no bound).
+    // Otherwise it has no mask and the chain ends. No multiplier constant and
+    // no time bound: a wrong frame-generation count fails safe. A real
+    // Present always detects; its detection pushes per_frame_hold_reset when
+    // no real decision exists in this chain (the first detection, an
+    // identity scope change, an inactive frame or a Present without a mask
+    // since), and
+    // per_frame_accepted_missing when an accepted candidate the last adopting
+    // real frame offered is missing now, in which case the GPU reuses the
+    // previous real frame's decision once (ui_selection::decide) and the
+    // frame adopts nothing. After an observation loss the previous
+    // revision's captures are refused until the game tags again, so that
+    // real frame is flagged too.
+    hold_decision arbitrate(const present_identity &identity, const alpha_auto_source &scope, std::uint32_t offered) const {
       hold_decision result;
-      result.kind = hold_previous ? hold_kind::generated : inexact && exact ? hold_kind::inexact_after_exact :
-        accepted_missing ? hold_kind::trusted_missing : hold_kind::none;
-      const bool deciding = (offered & accepted_now & ui_selection::alpha_bits & ~invalid) != 0;
-      const bool wanted = !deciding && result.kind != hold_kind::none && mask_ready;
-      result.hold = wanted && holds < max_held;
-      result.cap_reached = wanted && !result.hold;
-      if (!wanted) result.kind = hold_kind::none;
+      const bool same_scope = have_decision && !hold_scope_changed(scope, decision_scope);
+      if (identity.generated) {
+        const bool shows = !identity.real_frame || identity.real_frame == decision_frame || !next_frame ||
+          identity.real_frame == next_frame;
+        result.hold = same_scope && shows;
+        result.kind = result.hold ? hold_kind::generated : hold_kind::unavailable;
+        return result;
+      }
+      result.detect = true;
+      if (!have_decision || reset_pending || !same_scope) result.per_frame |= ui_detection::per_frame_hold_reset;
+      else if (bits & accepted & ui_selection::candidate_bits & ~offered)
+        result.per_frame |= ui_detection::per_frame_accepted_missing;
+      result.adopt = !(result.per_frame & ui_detection::per_frame_accepted_missing);
       return result;
     }
 
-    // Adopts this render's decision inputs (the held ones when it holds). Only
-    // a change in the inputs that decide the mask (detection_decision_key)
-    // makes the status sample stale. Beside an accepted alpha candidate, a
-    // HUD-less pair that frame generation pairs on some Presents only
-    // otherwise discarded nearly every sample while the mask stayed applied
-    // (Resident Evil Requiem). Hidden-scene holds and refutations belong to
-    // their routes' inputs (ui_detection::scene_route_key), not to such a
-    // pairing or to a UI color tag.
+    // Adopts a real frame's inputs. A change of them does not discard the
+    // status sample (F1: status_fresh compares the winner). Hidden-scene holds
+    // and refutations belong to their routes' inputs
+    // (ui_detection::scene_route_key), not to a HUD-less pairing or to a UI
+    // color tag.
     void adopt(std::uint32_t new_bits, std::uint32_t new_flags, std::uint32_t new_accepted) {
-      if (key() != detection_decision_key(new_bits, new_flags, new_accepted)) latest = {};
       if (const auto route = ui_detection::scene_route_key(new_bits, new_flags, new_accepted); route != scene_route) {
         scene_route = route;
         scene_refuted_slots = 0;
@@ -265,6 +340,17 @@ namespace sunshine_game3d::ui_temporal {
       bits = new_bits;
       flags = new_flags;
       accepted = new_accepted;
+    }
+
+    // F1: the status key, the winner of the adopted inputs: the first offered
+    // and accepted candidate bit in draw order (alpha kinds, then HUD-less),
+    // zero when none. The scope is compared apart (status_fresh).
+    std::uint32_t status_key() const { return ui_selection::first_in_draw_order(bits & accepted & ui_selection::candidate_bits); }
+    // The latest sample describes this frame: fresh, taken under the current
+    // winner and in this scope.
+    bool status_fresh(const alpha_auto_source &observation) const {
+      return !sample_stale(latest.sample_tick_ms, observation.now_ms) && latest_key == status_key() &&
+        !scope_changed(observation, latest_source);
     }
 
     // An active detection under another scope discards the sample and the
@@ -276,18 +362,30 @@ namespace sunshine_game3d::ui_temporal {
       }
     }
 
-    // A render that reused the mask, and one that detected afresh from the
-    // adopted inputs.
-    void held() { ++holds; }
-    void detected() {
-      holds = 0;
-      namespace candidate = ui_detection::candidate;
-      mask_ready = (bits & candidate::hudless) != 0 || (bits & accepted & ui_selection::alpha_bits) != 0;
-      exact = (bits & (candidate::hudless | candidate::exact)) == (candidate::hudless | candidate::exact);
+    // A generated Present that applied the detected mask: the first other
+    // real-frame id it shows becomes the next real frame.
+    void held(const present_identity &identity) {
+      ++holds;
+      if (identity.real_frame != decision_frame && !next_frame) next_frame = identity.real_frame;
     }
-    // A render without detection keeps no mask, verdict or refutation.
+    // A real Present that detected: its decision is the chain's.
+    void detected(const alpha_auto_source &scope, const present_identity &identity) {
+      have_decision = true;
+      decision_scope = scope;
+      decision_frame = identity.real_frame;
+      next_frame = 0;
+      holds = 0;
+      reset_pending = false;
+    }
+    // A generated Present without a mask ends the chain.
+    void unavailable() {
+      have_decision = false;
+      reset_pending = true;
+      holds = 0;
+    }
+    // A render without detection keeps no decision, verdict or refutation.
     void inactive() {
-      mask_ready = exact = false;
+      unavailable();
       scene_refuted_slots = 0;
       clear_scene_holds();
     }

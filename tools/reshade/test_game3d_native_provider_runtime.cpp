@@ -438,7 +438,9 @@ namespace {
             !(sampled.at("candidates").get<unsigned>() & candidate::layer) || !sampled.at("layer").contains("opaque") ||
             automatic.at("scene_shadow") != true || automatic.at("scene_hold") != 0u || scene.at("ran") != true ||
             !scene.contains("verdict") || !scene.contains("n") || !scene.contains("d") || !sampled.at("hudless_scene").contains("valid") ||
-            automatic.at("sampled_source") == 8u || automatic.at("sampled_source") == 9u)
+            automatic.at("sampled_source") == 8u || automatic.at("sampled_source") == 9u ||
+            !sampled.at("one_way").contains("strong") || !sampled.at("one_way").contains("contradicted") ||
+            sampled.at("reason") != "decided" || sampled.at("refused") != "none" || sampled.at("reused") != false)
           throw std::runtime_error("D3D12 lost a decision texel or the first-run shadow changed a decision: " + automatic.dump());
         evidence << "d3d12-decision-texels opaque_ui_color=" << opaque << " shadow_scene_n=" << scene.at("n") << " shadow_scene_d=" <<
           scene.at("d") << " verdict=" << scene.at("verdict").get<std::string>() << '\n';

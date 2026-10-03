@@ -5,8 +5,10 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace sunshine_game3d {
   inline constexpr const char *config_section = "SUNSHINE_GAME3D";
@@ -88,7 +90,74 @@ namespace sunshine_game3d {
     }
   }
 
-  inline const char *source_alpha_detection_text(const ui_qualification::status &source, const source_alpha_ui_decision &decision) {
+  // Forget learned UI sources (the overlay's Forget, A3): clears the UI
+  // sources Auto accepted for this game, in this session and, through the
+  // session's change listener, in TrustedUISources. Returns whether anything
+  // was accepted; `cleared` receives the keys for the caller's log line.
+  inline bool forget_learned_ui_sources(settings_state &settings, std::string *cleared = nullptr) {
+    if (!settings.alive || !settings.alpha_session) return false;
+    auto keys = settings.alpha_session->forget();
+    const bool any = !keys.empty();
+    if (cleared) *cleared = std::move(keys);
+    return any;
+  }
+
+  // The first-run shadow (docs/reshade-sbs.md, hidden-scene evidence) is a
+  // diagnostics toggle, independent of acceptance: ReShade.ini UISceneShadow
+  // absent means this session measures and the key is written 0, so only the
+  // game's first session after install does; 1 always, 0 (or anything else)
+  // never.
+  enum class scene_shadow_setting { absent, always, never };
+  inline constexpr const char *scene_shadow_key = "UISceneShadow";
+  template<class Backend>
+  scene_shadow_setting load_scene_shadow(Backend &config) {
+    int value = -1;
+    config.read(scene_shadow_key, value);
+    if (value == -1) {
+      config.write(scene_shadow_key, 0);
+      return scene_shadow_setting::absent;
+    }
+    return value == 1 ? scene_shadow_setting::always : scene_shadow_setting::never;
+  }
+  inline bool scene_shadow_runs(scene_shadow_setting setting) { return setting != scene_shadow_setting::never; }
+
+  // The overlay name of a candidate bit (ui_detection::candidate), empty for
+  // none.
+  inline const char *ui_source_name(std::uint32_t candidate_bit) {
+    namespace candidate = ui_detection::candidate;
+    switch (candidate_bit) {
+      case candidate::ui_alpha: return "UI alpha tag";
+      case candidate::ui_color: return "UI color tag";
+      case candidate::layer: return "UI layer";
+      case candidate::backbuffer: return "real-input alpha";
+      case candidate::current: return "current color alpha";
+      case candidate::hudless: return "HUD-less difference";
+      default: return "";
+    }
+  }
+
+  // F1: why a sample decided no UI mask, from its own decision's reason and
+  // refused candidate (decision texel 9); empty when it decided a source or
+  // carries no reason.
+  inline std::string ui_protection_reason_text(const alpha_auto_decision &decision) {
+    const auto &evidence = decision.evidence;
+    if (decision.source_kind || evidence.frame_reason >= ui_no_mask::count) return {};
+    const std::string source = ui_source_name(evidence.refused);
+    const auto the = [&](const char *fallback) { return "the " + (source.empty() ? std::string(fallback) : source); };
+    switch (evidence.frame_reason) {
+      case ui_no_mask::unaccepted: return "learning " + the("UI source");
+      case ui_no_mask::ambiguous: return the("UI source") + " shows no UI or the whole frame";
+      case ui_no_mask::trusted_invalid: return the("UI source") + " is unusable in this frame";
+      case ui_no_mask::presented_blocked: return "the UI tag is unusable in this frame and holds back " + the("inferred alpha");
+      case ui_no_mask::layer_aside: return "the UI layer holds no UI alpha";
+      case ui_no_mask::difference_failed: return "the HUD-less difference does not isolate UI";
+      case ui_no_mask::gate_no_hold: return "checking whether a full-screen menu hides the scene";
+      case ui_no_mask::no_candidate: return "no UI source offered";
+      default: return "no UI source qualifies";
+    }
+  }
+
+  inline std::string source_alpha_detection_text(const ui_qualification::status &source, const source_alpha_ui_decision &decision) {
     if (const auto blocked = source_alpha_capture_block_text(source_alpha_capture_block_for(source.selected, decision.fg))) return blocked;
     if (!source.available) return "Finding a usable UI source; protection off";
     // A source edit can happen before the next rendered decision. Never label
@@ -96,8 +165,10 @@ namespace sunshine_game3d {
     if (source.selected != decision.qualification.selected || source.candidate != decision.qualification.candidate)
       return "Checking source quality";
     if (decision.coverage.enabled) return "UI source detected automatically";
-    if (decision.coverage.state == alpha_auto_state::automatic_off)
-      return "No usable UI mask detected";
+    if (decision.coverage.state == alpha_auto_state::automatic_off) {
+      const auto reason = ui_protection_reason_text(decision.coverage);
+      return reason.empty() ? std::string("No usable UI mask detected") : "No usable UI mask (" + reason + ")";
+    }
     return "Checking source quality";
   }
 

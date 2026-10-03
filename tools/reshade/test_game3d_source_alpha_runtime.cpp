@@ -1658,18 +1658,24 @@ namespace {
     const ui_selection::kind kinds[]{ui_selection::kind::current, ui_selection::kind::backbuffer, ui_selection::kind::ui_color};
     for (unsigned kind = 0; kind != 3; ++kind) {
       source.retained = kind != 0; source.dedicated_mask = kind == 2;
-      ++source.revision;
+      ++source.epoch;
       const auto signature = *ui_selection::signature::parse(gpu.key(kinds[kind]));
       const auto retained = [&](unsigned mask) { return kind ? gpu.retain_mask(masks[mask]) : api::resource_view{}; };
       require(!policy.accepts(signature), "The fixture accepted a source before its evidence");
-      // A frame without protection ends the previous kind's mask: an accepted
-      // candidate missing from a frame would otherwise hold it (T1).
-      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
-      gpu.render(false, 1, false, false, false, {}, {}, {}, nullptr, &source);
+      // No decision crosses the epoch (identity) change (T1; an observation
+      // revision alone would keep the chain): the first frame of each
+      // kind starts a new chain, so the previous kind's accepted source, now
+      // missing, is never reused.
+      const auto starts_chain = [&] {
+        require((gpu.renderer.consumed_detection().flags & ui_detection::per_frame_hold_reset) &&
+            !(gpu.renderer.consumed_detection().flags & ui_detection::per_frame_accepted_missing),
+          "The first frame after a scope change did not start a new T1 chain");
+      };
       if (kind == 1) {
         // Acceptance an earlier session earned decides from the first frame.
         gpu.pattern(masks[1], true);
         verify(1, retained(1), false);
+        starts_chain();
         require(policy.restore(gpu.key(kinds[kind])).restored == 1, "The Backbuffer signature was not restored");
       } else {
         // Earned live: the declared tag by its first valid selective sample,
@@ -1682,6 +1688,7 @@ namespace {
           const auto mask = retained(1);
           gpu.pattern(masks[1], true);
           verify(1, mask, false);
+          if (frames == 1) starts_chain();
         }
         require(kind == 2 ? frames == 2 : source.now_ms - first >= alpha_trust_span_ms,
           "A source earned acceptance from too little evidence: " + std::to_string(frames) + " frames");
@@ -1702,16 +1709,22 @@ namespace {
     }
     if (gpu.color == 2) {
       // More than 1% of malformed pixels makes accepted alpha V1-invalid: it
-      // decides nothing that frame.
+      // decides nothing that frame. The first such frame (the accepted tag
+      // of the previous real frame is missing too) has no decision of its own
+      // and reuses that frame's selective tag decision once (T1); the next
+      // ones have no mask.
       source.retained = source.dedicated_mask = false;
+      bool first = true;
       for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
           std::numeric_limits<float>::infinity(), -1.f, 2.f}) {
         auto malformed = masks[1];
         std::fill_n(malformed.begin(), 3 * gpu.width, invalid);
         gpu.pattern(malformed, true);
         source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
-        require(exact(gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, &source), off[1]),
-          "Automatic alpha accepted nonfinite or out-of-range input as a valid UI mask");
+        require(exact(gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, &source), first ? on[1] : off[1]),
+          first ? "The first V1-invalid frame did not reuse the previous real frame's decision once" :
+            "Automatic alpha accepted nonfinite or out-of-range input as a valid UI mask");
+        first = false;
       }
     }
     // A usable retained candidate wins over unusable presented alpha, while
@@ -1799,23 +1812,20 @@ namespace {
     ui_render_input ui;
     ui.kind = ui_input_kind::hudless_difference; ui.view = correct; ui.automatic = &source;
     // Exact counters (game3d_ui_counters.h): every render below, whether it
-    // requested detection, how it ran, and the hold it would name: generated
-    // with hold_previous, else inexact with an inexact HUD-less pair, else a
-    // missing trusted channel.
+    // requested detection, how it ran, and whether it was a generated Present
+    // (T1: it either shows the real frame's decision, held.generated, or has
+    // no mask, held.none).
     struct counted_frame {
       std::uint64_t tick;
       bool requested;
       ui_detection_snapshot::run_state state;
-      ui_temporal::hold_kind kind;
+      bool generated;
     };
     std::vector<counted_frame> counted;
     const auto note = [&] {
       const auto *in = ui.detection;
-      const auto kind = !in ? ui_temporal::hold_kind::none : in->hold_previous ? ui_temporal::hold_kind::generated :
-        in->hudless.handle && !in->hudless_exact ? ui_temporal::hold_kind::inexact_after_exact :
-        ui_temporal::hold_kind::trusted_missing;
       counted.push_back({source.now_ms, policy.decision().state != alpha_auto_state::manual_off,
-        gpu.renderer.consumed_detection().state, kind});
+        gpu.renderer.consumed_detection().state, in && in->hold_previous});
     };
     const auto run = [&](bool accepted, const char *label, bool inspect_mask = true) {
       source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
@@ -1851,14 +1861,17 @@ namespace {
     run(false, "acceptance applies from the render after its sample is read");
     require(policy.accepts(hudless_signature), "A valid selective exact HUD-less sample did not accept the pair");
     ui.detection = nullptr;
-    // A frame without protection ends the exact decision, which an inexact
-    // frame right after it would otherwise hold (T1).
+    // A frame without protection ends the decision chain (T1).
     source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
     gpu.render(false, 1, false, false, false, {}, {}, {}, nullptr, &source);
     // An accepted change set decides from an inexact pair too (counted as
     // inexact_difference) until frame identity is exact (E2).
     run(true, "matching final/HUDless");
+    // T1: an accepted HUD-less pair that is invalid this frame leaves the
+    // real frame without a decision of its own. It reuses the previous real
+    // frame's decision and mask once, and then has no mask.
     ui.view = shifted;
+    run(true, "a scene-wide camera shift after a good pair reuses its decision once");
     run(false, "scene-wide camera shift after a good pair");
     ui.view = flattened_ui;
     run(false, "identical final/HUDless has no separator");
@@ -1883,11 +1896,14 @@ namespace {
     // same frame instead of letting that unusable higher candidate win.
     ui_detection_inputs inputs;
     inputs.masks[1] = flattened_ui; inputs.hudless = correct; inputs.current_color = true;
+    inputs.real_frame = 7;
     ui.detection = &inputs;
     run(true, "flattened explicit UI falls through to HUDless");
     // Frame generation presents interpolated frames between a HUD-less tag and
-    // its real frame. They hold the real frame's mask instead of differencing.
-    inputs.hudless = {}; inputs.hold_previous = true;
+    // its real frame. They never detect (T1): each shows the decision of the
+    // real frame it shows, the decided one or the next, by the HUD-less tag's
+    // present generation, without a multiplier cap.
+    inputs.hudless = {}; inputs.hold_previous = true; inputs.real_frame = 8;
     run(true, "generated present holds the real frame's HUD-less mask");
     {
       // A held mask reports the detection run that made it.
@@ -1898,13 +1914,24 @@ namespace {
     }
     run(true, "second generated present still holds");
     run(true, "third generated present still holds");
-    run(false, "holding is bounded to three generated presents");
-    run(false, "a hold needs a preceding HUD-less decision");
-    inputs.hold_previous = false; inputs.hudless = correct;
+    run(true, "a fourth generated present still holds: no multiplier cap");
+    // A Present classified generated that shows neither the decided real
+    // frame nor the next one has no mask, and the chain ends (fail safe).
+    inputs.real_frame = 9;
+    run(false, "a generated present beyond the next real frame has no mask", false);
+    require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::inactive,
+      "A generated present beyond the T1 tag bound reported a held mask");
+    inputs.real_frame = 8;
+    run(false, "a generated present after the chain ended has no mask", false);
+    inputs.hold_previous = false; inputs.hudless = correct; inputs.real_frame = 10;
     run(true, "the next real frame detects again");
     require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::ran &&
-        !gpu.renderer.consumed_detection().held_presents, "A fresh detection reported a held mask");
+        !gpu.renderer.consumed_detection().held_presents &&
+        (gpu.renderer.consumed_detection().flags & ui_detection::per_frame_hold_reset),
+      "A fresh detection after the chain ended reported a held mask or no hold reset");
+    inputs.real_frame = 0;
     inputs.hudless = shifted;
+    run(true, "the first unsuitable frame reuses the previous real frame's decision once");
     run(false, "all candidates unsuitable");
     // An unaccepted UIAlpha neither decides nor blocks (S1), and a full one
     // never earns acceptance (A1).
@@ -1939,16 +1966,25 @@ namespace {
           std::string(label) + ": late HUD-less mask does not match its own frame's HUD");
       }
     };
-    late(final_color, 1, false, "late HUD-less before any color is retained");
+    // A real frame whose accepted HUD-less pair is missing or invalid reuses
+    // the previous real frame's decision once (T1); the second such frame
+    // shows the pairing's own outcome.
+    late(final_color, 1, true, "late HUD-less before any color is retained reuses the previous decision once");
+    require(!(gpu.renderer.consumed_detection().candidates & ui_detection::candidate::hudless) &&
+        (gpu.renderer.consumed_detection().flags & ui_detection::per_frame_accepted_missing),
+      "A late HUD-less image without retained color was offered, or its accepted pair was not missing");
     late(moved_scene, 1, true, "late HUD-less pairs with the previous frame's retained color");
     late(moved_scene, 2, true, "two Presents late still pairs within retained history");
+    late(moved_scene, 3, true, "a frame no longer retained reuses the previous decision once");
     late(moved_scene, 3, false, "a frame no longer retained is unpaired");
     late(final_color, 0, true, "an on-time capture still uses the current color");
+    late(moved_scene, 0, true, "a mismatched on-time pair reuses the previous decision once");
     late(moved_scene, 0, false, "an on-time capture never pairs with an earlier color");
     // The game's tagged Backbuffer from the HUD-less image's own batch is its
     // exact pair on any Present, whatever the current frame shows.
     late(moved_scene, 0, true, "HUD-less pairs exactly with its batch's tagged Backbuffer", flattened_ui);
     late(moved_scene, 2, true, "a batch pair takes precedence over Present counting", flattened_ui);
+    late(final_color, 0, true, "a mismatched batch image reuses the previous decision once", shifted);
     late(final_color, 0, false, "a mismatched batch image is rejected", shifted);
     // A menu or title screen covers the whole frame while the game still renders
     // its scene: HUD-less shows that scene, nearly every pixel differs, and the
@@ -1976,25 +2012,25 @@ namespace {
     full_frame(correct, false, false, "an unverified pair differing everywhere is rejected, not flattened");
     full_frame(correct, true, true, "a full-frame menu over a lit scene stays flat");
     // With frame generation on, a real frame outside the tag batch pairs only by
-    // Present counting. Right after an exact decision it keeps that decision
-    // instead of flipping the menu to 3D, within the generated-present bound.
-    full_frame(correct, false, true, "an inexact real frame keeps the exact full-frame decision");
-    full_frame(correct, false, true, "a second inexact frame still holds");
-    full_frame(correct, false, true, "a third inexact frame still holds");
-    full_frame(correct, false, false, "holding an exact decision is bounded to three presents");
+    // Present counting. Right after an exact decision the T1 grace reuses that
+    // decision once instead of flipping the menu to 3D; the next such frame
+    // has no mask.
+    full_frame(correct, false, true, "an inexact real frame reuses the exact full-frame decision once");
+    full_frame(correct, false, false, "the grace is spent: a second inexact frame has no mask");
     full_frame(correct, false, false, "an inexact frame after an inexact decision is rejected");
-    full_frame(correct, true, true, "the next exact frame decides again");
     full_frame(dark, true, false, "a black HUD-less image never flattens the frame");
-    full_frame(correct, false, false, "an inexact frame after an exact empty decision keeps it empty");
+    full_frame(correct, true, true, "the next exact frame decides again");
+    full_frame(dark, true, true, "a black HUD-less frame right after it reuses the exact decision once");
+    full_frame(correct, false, false, "an inexact frame after a spent grace stays empty");
     // A channel the session trusts as UI coverage is the mask whatever it covers:
     // nothing, a HUD or a whole menu. Selective coverage earns trust; an exact
     // HUD-less pair showing the scene under a full channel takes it away.
     enum class expected { empty, flat, hud };
     const auto trust_frame = [&](const std::vector<unsigned char> &color, api::resource_view alpha0, api::resource_view alpha1,
-        api::resource_view hudless_view, expected want, const char *label) {
+        api::resource_view hudless_view, expected want, const char *label, api::resource_view alpha2 = {}) {
       gpu.original = color;
       gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), gpu.width * bpp, 0);
-      inputs = {}; inputs.masks[0] = alpha0; inputs.masks[1] = alpha1;
+      inputs = {}; inputs.masks[0] = alpha0; inputs.masks[1] = alpha1; inputs.masks[2] = alpha2;
       inputs.hudless = hudless_view; inputs.hudless_exact = hudless_view.handle != 0;
       source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
       gpu.renderer.begin_present();
@@ -2030,7 +2066,8 @@ namespace {
     trust_frame(menu, nearly_opaque, {}, {}, expected::flat, "an accepted channel above zero everywhere is a full-screen menu");
     trust_frame(menu, no_alpha, {}, {}, expected::empty, "an accepted channel covering nothing means no UI");
     // Acceptance belongs to its own candidate: an unaccepted tag in its place
-    // decides nothing, and the missing UIAlpha holds its empty decision.
+    // decides nothing, and the T1 grace reuses the missing UIAlpha's empty
+    // decision once.
     trust_frame(menu, {}, flattened_ui, {}, expected::empty, "acceptance belongs to its own candidate");
     trust_frame(menu, explicit_alpha, {}, {}, expected::hud, "an accepted channel still yields its HUD mask");
     // A pause menu that tints the live scene changes too many pixels for a HUD
@@ -2041,39 +2078,46 @@ namespace {
     opaque(tinted);
     trust_frame(tinted, opaque_alpha, {}, correct, expected::flat, "an accepted channel decides a menu that tints the scene");
     // An accepted channel missing from a frame (an observation loss refuses its
-    // capture until the next tag) holds its decision for up to three presents.
-    trust_frame(tinted, {}, {}, correct, expected::flat, "a missing accepted channel holds its mask");
-    trust_frame(tinted, {}, {}, correct, expected::flat, "a missing accepted channel still holds");
-    trust_frame(tinted, {}, {}, correct, expected::flat, "a third missing frame still holds");
+    // capture until the next tag) leaves the real frame without a decision of
+    // its own: the T1 grace reuses the previous one once, then no mask.
+    trust_frame(tinted, {}, {}, correct, expected::flat, "a missing accepted channel reuses its mask once");
+    trust_frame(tinted, {}, {}, correct, expected::empty, "the grace is spent: a second missing frame has no mask");
     trust_frame(tinted, {}, {}, correct, expected::empty, "without an accepted channel a tinting menu stays 3D");
-    // A full channel while the exact pair shows the scene is a contradiction.
-    // It wins at first, then loses trust within the same evidence interval.
-    trust_frame(final_color, opaque_alpha, {}, correct, expected::flat, "an accepted channel decides before any contradiction");
-    for (unsigned frame = 0; frame < 25; ++frame) trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, nullptr);
-    require(!policy.accepts(ui_alpha_signature), "An exact pair showing the scene did not revoke acceptance");
-    trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, "after losing trust the HUD-less pair decides");
-    trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, "the HUD-less pair keeps deciding");
+    // A2: a declared source is never judged. A full accepted UIAlpha keeps
+    // deciding while an exact pair shows the lit scene under it (P1).
+    for (unsigned frame = 0; frame < 25; ++frame)
+      trust_frame(final_color, opaque_alpha, {}, correct, expected::flat,
+        frame ? nullptr : "a declared full UIAlpha keeps deciding");
+    require(policy.accepts(ui_alpha_signature), "A declared UIAlpha was judged by an exact pair");
+    // A2: a full accepted inferred alpha (the Backbuffer) while a valid exact
+    // pair shows the lit scene unchanged under it is contradicted one way. It
+    // wins at first, then loses acceptance 2 s into the contradicting run.
+    const auto backbuffer_signature = *ui_selection::signature::parse(gpu.key(ui_selection::kind::backbuffer));
+    require(policy.restore(gpu.key(ui_selection::kind::backbuffer)).restored == 1, "The Backbuffer key was not restored");
+    trust_frame(final_color, {}, {}, correct, expected::flat, "an accepted Backbuffer decides before any contradiction",
+      flattened_ui);
+    for (unsigned frame = 0; frame < 25; ++frame)
+      trust_frame(final_color, {}, {}, correct, expected::hud, nullptr, flattened_ui);
+    require(!policy.accepts(backbuffer_signature), "An exact pair showing the lit scene did not revoke the Backbuffer");
+    trust_frame(final_color, {}, {}, correct, expected::hud, "after losing acceptance the HUD-less pair decides",
+      flattened_ui);
+    trust_frame(final_color, {}, {}, correct, expected::hud, "the HUD-less pair keeps deciding", flattened_ui);
     {
       // Between the window's two commits every render is one of the frames
-      // noted above: Auto frames detect, hold by kind (a hold past three
-      // Presents detects and counts as capped) or have no detection.
+      // noted above: Auto frames detect (the T1 grace included), generated
+      // Presents show a real frame's decision (held.generated) or have no
+      // mask (held.none), or nothing ran.
       const auto end = policy.counters();
       const auto delta = end - window_start;
       ui_counters expected;
-      unsigned consecutive_holds = 0;
       for (const auto &frame : counted) {
-        const bool held = frame.requested && frame.state == ui_detection_snapshot::run_state::held;
         if (frame.tick > window_start.through_ms && frame.tick <= end.through_ms && frame.requested) {
           ++expected[ui_counter::auto_frames];
-          if (held) ++expected[frame.kind == ui_temporal::hold_kind::generated ? ui_counter::held_generated :
-            frame.kind == ui_temporal::hold_kind::inexact_after_exact ? ui_counter::held_inexact_after_exact :
-            ui_counter::held_trusted_missing];
-          else if (frame.state == ui_detection_snapshot::run_state::ran) {
-            ++expected[ui_counter::detection_frames];
-            if (consecutive_holds == ui_detection_inputs::max_held_presents) ++expected[ui_counter::held_cap];
-          } else ++expected[ui_counter::inactive_no_candidates];
+          if (frame.state == ui_detection_snapshot::run_state::held) ++expected[ui_counter::held_generated];
+          else if (frame.state == ui_detection_snapshot::run_state::ran) ++expected[ui_counter::detection_frames];
+          else if (frame.generated) ++expected[ui_counter::held_none];
+          else ++expected[ui_counter::inactive_no_candidates];
         }
-        consecutive_holds = held ? consecutive_holds + 1 : 0;
       }
       std::uint64_t decided = 0, none = 0;
       for (std::uint32_t source_kind = 0; source_kind != ui_counter_word::decided_count; ++source_kind)
@@ -2083,30 +2127,30 @@ namespace {
           delta[ui_counter::auto_frames] == expected[ui_counter::auto_frames] &&
           delta[ui_counter::detection_frames] == expected[ui_counter::detection_frames] &&
           delta[ui_counter::held_generated] == expected[ui_counter::held_generated] &&
-          delta[ui_counter::held_inexact_after_exact] == expected[ui_counter::held_inexact_after_exact] &&
-          delta[ui_counter::held_trusted_missing] == expected[ui_counter::held_trusted_missing] &&
-          delta[ui_counter::held_cap] == expected[ui_counter::held_cap] && delta.inactive() == expected.inactive(),
+          delta[ui_counter::held_none] == expected[ui_counter::held_none] && delta.inactive() == expected.inactive(),
         "D3D11 exact UI counters differ from the noted renders");
-      require(expected[ui_counter::held_generated] >= 3 && expected[ui_counter::held_inexact_after_exact] >= 3 &&
-          expected[ui_counter::held_trusted_missing] >= 3 && expected[ui_counter::held_cap] >= 3,
-        "The D3D11 counter window lost a scripted hold");
+      require(expected[ui_counter::held_generated] >= 4 && expected[ui_counter::held_none] >= 2,
+        "The D3D11 counter window lost a scripted generated Present");
+      // Every reused frame is a detection frame that applied the previous real
+      // frame's decision; the reused count is exact on the GPU.
       require(decided == delta[ui_counter::detection_frames] && none == delta.decided(0) && delta.decided(1) &&
-          delta.decided(5) && delta.decided(6) && delta[ui_counter::trusted_full] && delta[ui_counter::inexact_difference] &&
+          delta.decided(3) && delta.decided(5) && delta.decided(6) && delta[ui_counter::contradicted] &&
+          delta[ui_counter::inexact_difference] && delta[ui_counter::reused] >= 8 &&
+          delta[ui_counter::reused] < delta[ui_counter::detection_frames] &&
           !delta[ui_counter::presented_over_dedicated] && !delta[ui_counter::untrusted_inferred] &&
           delta[ui_counter::none + ui_no_mask::unaccepted] && end[ui_counter::trust_earned] >= 2 &&
-          end[ui_counter::trust_revoked_full] >= 1,
-        "D3D11 exact UI counters lost a decided source, a no-mask reason or a trust event");
-      std::printf("PASS D3D11 exact UI counters: %llu Auto frames through %llu ms reconcile; holds generated=%llu "
-        "inexact_after_exact=%llu trusted_missing=%llu cap=%llu by frame; decisions and no-mask reasons sum exactly\n",
+          end[ui_counter::trust_revoked_exact] >= 1 && !delta[ui_counter::trust_revoked_declared],
+        "D3D11 exact UI counters lost a decided source, a no-mask reason, a reuse or a trust event");
+      std::printf("PASS D3D11 exact UI counters: %llu Auto frames through %llu ms reconcile; held generated=%llu none=%llu "
+        "reused=%llu by frame; decisions and no-mask reasons sum exactly\n",
         static_cast<unsigned long long>(delta[ui_counter::auto_frames]), static_cast<unsigned long long>(end.through_ms),
         static_cast<unsigned long long>(delta[ui_counter::held_generated]),
-        static_cast<unsigned long long>(delta[ui_counter::held_inexact_after_exact]),
-        static_cast<unsigned long long>(delta[ui_counter::held_trusted_missing]),
-        static_cast<unsigned long long>(delta[ui_counter::held_cap]));
+        static_cast<unsigned long long>(delta[ui_counter::held_none]),
+        static_cast<unsigned long long>(delta[ui_counter::reused]));
     }
     inputs = {};
-    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 inexact_after_exact_hold=1 hudless_earned_exact=1 accepted_alpha=1 trusted_missing_hold=1 trust_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
-    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, bounded generated-present hold, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, bounded inexact-frame hold, acceptance earned from one selective sample (an exact HUD-less pair, UIAlpha) before anything decides, accepted alpha channels with a bounded hold when missing and revocation, and manual Off without review");
+    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 t1_tag_bound=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 t1_grace_once=1 hudless_earned_exact=1 accepted_alpha=1 declared_never_judged=1 one_way_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
+    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, generated Presents showing the real frame's decision within the T1 tag bound and without a cap, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, the T1 grace reusing a real frame's decision once for a missing or invalid accepted source, acceptance earned from one selective sample (an exact HUD-less pair, UIAlpha) before anything decides, a declared UIAlpha never judged, one-way revocation of a full accepted Backbuffer, and manual Off without review");
   }
   // V1 and S1 for the offscreen UI layer (docs/reshade-sbs.md, UI decision
   // framework). Stellar Blade draws its SDR scene image into the cleared
@@ -2253,8 +2297,9 @@ namespace {
     alpha_auto_policy f;
     layout(f, {kind::ui_layer, kind::backbuffer}, {scene_layer, {}, opaque_backbuffer, false});
     twice("an accepted opaque Backbuffer beside an invalid layer pins flat", all, 3);
-    // A generated Present without the tagged Backbuffer holds its mask: the
-    // accepted layer the latest sample read V1-invalid does not decide by itself.
+    // A generated Present without the tagged Backbuffer shows the real frame's
+    // decision (T1): it never detects, so the accepted V1-invalid layer it
+    // still offers cannot stop it.
     inputs.masks[2] = {}; inputs.hold_previous = true;
     frame("a generated Present holds the flat Backbuffer mask", &all);
     require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::held,
@@ -2267,12 +2312,15 @@ namespace {
     frame("the accepted Backbuffer keeps deciding", &hud, 3);
     // From no sample (a new epoch discards it), as frame generation presents:
     // the tagged Backbuffer comes with real Presents only. Every generated
-    // Present holds the Backbuffer mask instead of dropping to no mask, and
-    // the held inputs keep the decision key, so samples complete.
+    // Present shows the real frame's Backbuffer mask instead of dropping to
+    // no mask (T1), whatever key the samples carry (F1). No decision crosses
+    // the epoch: the first real Present starts a new chain.
     ++source.epoch;
     for (unsigned i = 0; i != 6; ++i) {
       inputs.masks[2] = backbuffer; inputs.hold_previous = false;
       frame("a real Present with the Backbuffer decides", &hud);
+      require(!i == ((gpu.renderer.consumed_detection().flags & ui_detection::per_frame_hold_reset) != 0),
+        "Only the first real Present after an epoch change starts a new T1 chain");
       inputs.masks[2] = {}; inputs.hold_previous = true;
       frame("an alternating generated Present holds the Backbuffer mask", &hud);
       require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::held,
@@ -2327,35 +2375,41 @@ namespace {
     // Every automatic mask is its source's raw alpha: the one-frame-late layer
     // (stored flag 0x4) exactly like a same-frame tagged UI color.
     require(expected_flags & ui_detection::stored_late_layer, "The offscreen UI layer lost its late-layer flag");
-    const auto check = [&](std::uint32_t candidate, std::uint32_t flags, const fs::path &dump, const char *label) {
+    // per_frame: the T1 bits this detection pushes beside the stored flags.
+    const auto check = [&](std::uint32_t candidate, std::uint32_t flags, std::uint32_t per_frame, const fs::path &dump,
+        const char *label) {
       source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
       gpu.render(true, 1, false, false, false, {}, dump, {}, nullptr, nullptr, nullptr, nullptr, &ui);
       const auto consumed = gpu.renderer.consumed_detection();
       require(consumed.state == ui_detection_snapshot::run_state::ran && consumed.candidates == candidate &&
-          consumed.accepted == candidate && consumed.flags == flags && consumed.stored_flags == flags &&
+          consumed.accepted == candidate && consumed.flags == (flags | per_frame) && consumed.stored_flags == flags &&
           !(consumed.stored_flags & ui_detection::per_frame_mask),
         std::string(label) + ": wrong detection constants");
       const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
       for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x)
         require(selected.channel(x, y, 0) == hud[size_t(y) * gpu.width + x], std::string(label) + ": mask is not the slot's raw alpha");
     };
-    check(ui_detection::candidate::layer, expected_flags, directory, "offscreen UI layer");
+    // The first detection in this epoch starts a T1 chain (hold reset).
+    check(ui_detection::candidate::layer, expected_flags, ui_detection::per_frame_hold_reset, directory, "offscreen UI layer");
     std::ifstream stored(directory / "manifest.json");
     const auto manifest = nlohmann::json::parse(stored);
     const auto &replay = manifest.at("producer_metadata").at("replay");
-    require(replay.at("ui_detection").at("flags") == expected_flags && replay.at("ui_detection").at("ran_or_held") == "ran" &&
+    require(replay.at("ui_detection").at("flags") == (expected_flags | ui_detection::per_frame_hold_reset) &&
+        replay.at("ui_detection").at("ran_or_held") == "ran" &&
         replay.at("ui_detection").at("candidates") == ui_detection::candidate::layer &&
         replay.at("ui_detection").at("accepted") == ui_detection::candidate::layer &&
         replay.at("ui_detection").at("candidate_layout") == ui_detection::candidate_layout &&
-        replay.at("ui_pin").at("decision_texels") == ui_detection::layer_decision_texels &&
+        replay.at("ui_pin").at("decision_texels") == ui_detection::judgment_decision_texels &&
         replay.at("ui_pin").at("evidence_images") == ui_detection::max_scene_evidence_images,
       "Dump lost the layer's detection constants or pin markers");
     require(!replay.at("ui_pin").contains("late_margin") &&
         replay.at("ui_pin").at("soft_pin_gain") == shader_marker(renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"),
       "Dump lost the soft pin gain or still records a late-layer margin");
+    // The accepted layer the previous real frame offered is missing now (T1):
+    // the tag decides by itself, so nothing is reused.
     inputs = {};
     inputs.masks[1] = layer_view;
-    check(ui_detection::candidate::ui_color, 0u, {}, "tagged UIColorAndAlpha");
+    check(ui_detection::candidate::ui_color, 0u, ui_detection::per_frame_accepted_missing, {}, "tagged UIColorAndAlpha");
     report << "layer-detection-dump flags=" << expected_flags << " tagged_flags=0 own_slots=1 ran=1 held_reported=1 layer_raw_alpha=1\n";
     std::puts("PASS D3D11 UI detection constants: the UI layer has its own slot with stored flags only, a tagged UI color the UI color slot with none, both accepted masks are their slot's raw alpha, and Dump 3D records them with the accepted candidates and pin markers");
   }

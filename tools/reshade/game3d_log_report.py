@@ -47,7 +47,13 @@ UI = re.compile(
     r'(?:accepted=(?P<accepted>0x[0-9a-fA-F]+) sampled_layer=\{covered=(?P<layer_covered>\d+) '
     r'invalid=(?P<layer_invalid>\d+) opaque=\d+\}'
     r'|trusted_alpha=(?P<trusted>0x[0-9a-fA-F]+)(?: sampled_ui_layer=(?P<layer>\d))?) '
-    r'sampled_hudless=\{changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) invalid=(?P<hudless_invalid>\d+)')
+    # Since S2a the one-way judgment counts of the layer, Backbuffer and current alpha (A2), the sample's own-decision
+    # reason, the candidate it refused and whether the T1 grace reused the previous real frame's decision (F1).
+    r'(?:sampled_one_way=\{strong=(?P<strong>\d+/\d+/\d+) contradicted=(?P<contradicted>\d+/\d+/\d+)\} '
+    r'sampled_reason=(?P<reason>\w+) sampled_refused=(?P<refused>\w+) sampled_reused=(?P<reused>\d) '
+    r'(?:sampled_late_layer=(?P<late>\d) )?)?'
+    r'sampled_hudless=\{changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) invalid=(?P<hudless_invalid>\d+)'
+    r'(?: matching_tiles=(?P<tiles>\d+) lit=(?P<lit>\d+))?')
 # Hidden-scene fields of the same line, absent from older logs.
 SCENE = re.compile(
     r'sampled_alpha_opaque=(?P<opaque>\d+/\d+) sampled_scene=\{n=(?P<n>\d+) d=(?P<d>-?[0-9.]+) valid=(?P<valid>\d) '
@@ -64,6 +70,9 @@ UI_AVAILABILITY = re.compile(r'\bsource_availability=(\w+)')
 TRUST = re.compile(r'Sunshine UI protection: (restored accepted UI sources|accepted UI sources are now|'
                    r'restored alpha trust|alpha trust is now) ([^\s;]+)')
 LEGACY_TRUST = re.compile(r'Sunshine UI protection: discarded (\d+) legacy UI trust entries')
+# Since S2a: the panel's Forget action (A3) and the first-run shadow toggle (F1, UISceneShadow).
+FORGET = re.compile(r'Sunshine UI protection: forgot learned UI sources (\S+) for this game')
+SHADOW = re.compile(r'Sunshine UI protection: first-run shadow measures this session \(UISceneShadow=(\w+)\)')
 # The session's cumulative exact UI counters (docs/reshade-sbs.md, UI counters), absent from older logs.
 COUNTERS = re.compile(r'Sunshine UI counters: (.*)$')
 COUNTER_FIELD = re.compile(r'(\w+)=(?:\{([^}]*)\}|(\S+))')
@@ -98,6 +107,9 @@ RAW_PLACED = ('ready', 'holding_reference')  # Raw automation states that place 
 # A depth selection that names a game-side cause.
 SELECTION_HINTS = {'inactive_views': 'the game supplied no depth'}
 RESOLVE_S = 10.0  # A dispute is handled when that source's acceptance is revoked this soon.
+# A2 revokes an accepted source by this many contradicting samples within this span (alpha_trust_samples and
+# alpha_trust_span_ms in game3d_alpha_auto.h); shorter contradictions are never revoked, by design.
+A2_SAMPLES, A2_SPAN_S = 3, 2.0
 # Alpha candidates in UISample order: UIAlpha, the UI colour tag, Backbuffer and current alpha (the log's
 # sampled_alpha_covered), then the offscreen UI layer (sampled_layer); their candidate bits (ui_detection::candidate),
 # acceptance kinds (ui_selection::kind) and the source each decides as.
@@ -111,6 +123,12 @@ DEDICATED, PRESENTED = (0, 1, 4), (2, 3)  # UI channels, whose clean empty pixel
 # Trusted source bits of logs before S1, by acceptance kind.
 LEGACY_TRUST_KINDS = {0x1: 'ui_alpha', 0x2: 'ui_color', 0x4: 'backbuffer', 0x8: 'current', 0x10: 'ui_layer'}
 HUDLESS_PAIR = 48  # Candidate bits of the HUD-less pair.
+HUDLESS = 0x10  # The HUD-less candidate bit; 0x20 marks the pair exact.
+# The inferred alpha kinds the one-way test judges (A2), in the order of sampled_one_way (ui_selection::judged_kinds):
+# the UI layer, Backbuffer and current alpha, by their index in ALPHA_NAMES.
+JUDGED = (4, 2, 3)
+# Candidate kind names of sampled_refused (ui_selection::kind_names) and how the report names them.
+KIND_NAMES = dict(zip(ALPHA_KINDS, ALPHA_NAMES)) | {'hudless': 'HUD-less difference'}
 # Unprotected time shorter than this is counted, not listed: alpha_trust_span_ms (game3d_alpha_auto.h), the span over
 # which detection itself earns or loses confidence.
 UNPROTECTED_MIN_S = 2.0
@@ -124,7 +142,10 @@ SOURCE_NAMES = {0: 'no mask', 1: 'UI alpha', 2: 'UI colour', 3: 'Backbuffer alph
                 9: 'full frame (HUD-less route)', 10: 'UI layer'}
 NO_MASK_REASONS = ('layer_aside', 'trusted_invalid', 'presented_blocked', 'ambiguous', 'difference_failed',
                    'gate_no_hold', 'no_candidate', 'other', 'unaccepted')
-HOLD_KINDS = ('generated', 'inexact_after_exact', 'trusted_missing')
+# Held frames by kind: since S2a a generated Present showing a real frame's decision, or one without such a decision
+# (T1); before it three hold kinds and a cap of three Presents.
+HOLD_KINDS = ('generated', 'none')
+S1_HOLD_KINDS = ('generated', 'inexact_after_exact', 'trusted_missing')
 INACTIVE_REASONS = ('no_candidates', 'size', 'unprepared')
 
 
@@ -201,6 +222,45 @@ class UISample(NamedTuple):
     availability: str = ''  # source_availability; absent in older logs.
     fg: bool = False  # Frame generation active.
     legacy: bool = False  # Logged before S1, when a trusted UI channel, the layer included, kept presented alpha out.
+    # Since S2a (absent before): strong and one-way contradicted pixels in JUDGED order (A2), the own decision's
+    # ui_no_mask reason or 'decided', the refused candidate's kind or 'none', and whether the T1 grace reused the
+    # previous real frame's decision (then source and covered are that decision's).
+    strong: tuple[int, ...] | None = None
+    contradicted: tuple[int, ...] | None = None
+    reason: str = ''
+    refused: str = ''
+    reused: bool = False
+    tiles: int = 0  # HUD-less matching tiles and lit pixels (V2).
+    lit: int = 0
+    # The offered layer was the one-frame-late copy, which no A2 judge reads (E2); since S2a, absent before.
+    late_layer: bool = False
+
+    @property
+    def s2a(self) -> bool:
+        """Logged since S2a, whose ledger judges by provenance (A2)."""
+        return self.strong is not None
+
+    def change_set_valid(self) -> bool:
+        """V2 from the logged HUD-less counts, as ui_selection::change_set_selective and change_set_full."""
+        changed, unchanged, nonfinite = self.hudless
+        if nonfinite or not self.candidates & HUDLESS:
+            return False
+        selective = changed and changed * 4 < self.pixels and unchanged * 100 >= self.pixels * 75 and self.tiles >= 128
+        full = (self.candidates & HUDLESS_PAIR == HUDLESS_PAIR and changed * 100 >= self.pixels * 98
+                and self.lit * 2 >= self.pixels)
+        return bool(selective or full)
+
+    def exact_judge(self) -> bool:
+        """A2 judge (a): an offered exact pair whose change set is valid this sample (ui_selection::exact_judge)."""
+        return self.candidates & HUDLESS_PAIR == HUDLESS_PAIR and self.change_set_valid()
+
+    def one_way(self, c: int) -> bool:
+        """A2: at least a tenth of judged alpha c's strong pixels lie where the exact pair's HUD-less image is lit and
+        unchanged (ui_selection::one_way_contradicted); only with a valid exact pair."""
+        if not self.s2a or c not in JUDGED or not self.exact_judge():
+            return False
+        strong, contradicted = self.strong[JUDGED.index(c)], self.contradicted[JUDGED.index(c)]
+        return bool(strong) and contradicted * 10 >= strong
 
     def offered(self, c: int) -> bool:
         return bool(self.candidates & ALPHA_BITS[c])
@@ -280,7 +340,14 @@ class UISample(NamedTuple):
                              + ('' if self.is_accepted(c) else ' (not accepted)'))
         if self.candidates & HUDLESS_PAIR == HUDLESS_PAIR:
             parts.append('HUD-less difference rejected')
-        return f'{fg}: ' + '; '.join(parts)
+        return f'{fg}: ' + '; '.join(parts) + self.named_reason()
+
+    def named_reason(self) -> str:
+        """The add-on's own reason for a sample without a mask and the candidate it refused (F1), since S2a."""
+        if not self.s2a or self.reason in ('', 'decided'):
+            return ''
+        refused = KIND_NAMES.get(self.refused)
+        return f' (reason {self.reason.replace("_", " ")}' + (f': {refused})' if refused else ')')
 
 
 def ui_sample(t: float, text: str, g: dict[str, str | None], scene: Scene | None) -> UISample:
@@ -310,10 +377,14 @@ def ui_sample(t: float, text: str, g: dict[str, str | None], scene: Scene | None
         accepted = int(g['trusted'], 16)
         alpha += (0,)
         invalid = invalid + (0,) if invalid is not None else None
+    s2a = g['strong'] is not None
     return UISample(t, g['detection'], source, int(g['covered']), int(g['pixels']), candidates, alpha, accepted,
                     (int(g['changed']), int(g['unchanged']), int(g['hudless_invalid'])), invalid, scene,
                     field_of(UI_RUNTIME, ''), field_of(UI_MODE, 'auto'), field_of(UI_RENDERED, '1') == '1',
-                    field_of(UI_AVAILABILITY, ''), field_of(UI_FG, '0') == '1', legacy)
+                    field_of(UI_AVAILABILITY, ''), field_of(UI_FG, '0') == '1', legacy,
+                    counts(g['strong']) if s2a else None, counts(g['contradicted']) if s2a else None,
+                    g['reason'] or '', g['refused'] or '', g['reused'] == '1', int(g['tiles'] or 0),
+                    int(g['lit'] or 0), g['late'] == '1')
 
 
 @dataclass
@@ -393,7 +464,9 @@ class Session:
     camera_valid: bool = False
     ui: list[UISample] = field(default_factory=list)
     # Time, logged event, logged value and the accepted source keys after it (None for a discard of legacy entries).
+    # A Forget is listed with None too: the acceptance line that follows it records the change.
     trust_events: list[tuple[float, str, str, tuple[str, ...] | None]] = field(default_factory=list)
+    shadow: list[tuple[float, str]] = field(default_factory=list)  # First-run shadow sessions and their UISceneShadow.
     # The last 'Sunshine UI counters' line: the session's totals are cumulative over all its runtimes.
     counters: dict[str, int] | None = None
     losses: dict[int, tuple[float, str]] = field(default_factory=dict)
@@ -496,6 +569,10 @@ def parse(lines) -> Session:
             s.trust_events.append((t, found.group(1), found.group(2), accepted_keys(found.group(2))))
         if found := LEGACY_TRUST.search(text):
             s.trust_events.append((t, 'discarded legacy UI trust entries', found.group(1), None))
+        if found := FORGET.search(text):
+            s.trust_events.append((t, 'forgot learned UI sources', found.group(1), None))
+        if found := SHADOW.search(text):
+            s.shadow.append((t, found.group(1)))
         if (found := COUNTERS.search(text)) and 'auto_frames' in (values := counter_fields(found.group(1))):
             s.counters = values
         if found := LOSS.search(text):
@@ -773,13 +850,18 @@ def evaluate(s: Session) -> list[Check]:
 def ui_checks(s: Session, add) -> None:
     for t, kind, value, _ in s.trust_events:
         add(Check('INFO', 'UI trust', f'{clock(t)} {kind} {value}'))
+    for t, setting in s.shadow:
+        add(Check('INFO', 'UI first-run shadow', f'{clock(t)} measures this session (UISceneShadow={setting}'
+                  + (': the first session since the key was written' if setting == 'absent' else '') + ')'))
     if not s.ui and s.counters is None:
         add(Check('INFO', 'UI protection', 'no UI protection samples'))
         return
     # Inferred alpha (Backbuffer, current alpha and the UI layer) must never decide while an accepted declared UI
     # channel is offered (S1): that flattens scene as UI. Nor may an accepted alpha cover the whole frame while an
-    # exact HUD-less pair shows the scene (Stellar Blade's opaque tagged UI color, before 2026-10).
-    overrides, flattened, disputes, handled = [], [], [], []
+    # exact HUD-less pair shows the scene (Stellar Blade's opaque tagged UI color, before 2026-10); since S2a, nor may
+    # an accepted inferred alpha stay accepted once contradictions met A2's revocation condition.
+    overrides, flattened, contradicted, disputes, handled, short = [], [], [], [], [], []
+    s2a = any(u.s2a for u in s.ui)
 
     def revoked(t: float, kind: str) -> float | None:
         """When an acceptance change within RESOLVE_S after t left fewer accepted sources of this kind."""
@@ -798,18 +880,41 @@ def ui_checks(s: Session, add) -> None:
             before = n
         return None
 
-    def judge(sample: UISample, text: str, c: int, unresolved: list) -> None:
+    def judge(sample: UISample, text: str, c: int, unresolved: list, a2: str = '') -> None:
+        """A revocation within RESOLVE_S handles the sample; since S2a it names the A2 contradiction kind."""
         when = revoked(sample.t, ALPHA_KINDS[c])
         (handled if when is not None else unresolved).append(
-            text + (f', acceptance revoked {clock(when)}' if when is not None else ''))
+            text + (f', acceptance revoked {clock(when)}' + (f' ({a2})' if a2 else '') if when is not None else ''))
 
+    # Since S2a each accepted inferred alpha's sampled contradictions, as the ledger judges them (A2): (time, text,
+    # judge, one way).
+    a2: dict[int, list[tuple[float, str, str, bool]]] = {c: [] for c in INFERRED}
     for u in s.ui:
         if not u.pixels:
             continue
         if u.blocking(admitted=True) and u.source in tuple(ALPHA_SOURCES[c] for c in u.kept_out()):
             overrides.append(f'{clock(u.t)} source {u.source} covered {100 * u.covered / u.pixels:.0f}%')
-        # As the ledger's disagreement (A2): only an accepted UI channel with at most 1% invalid pixels and clean
-        # accepted presented alpha dispute.
+        if u.s2a:
+            # A2 as the ledger judges it since S2a: an accepted, V1-valid inferred alpha (the layer, Backbuffer or
+            # current alpha; never the one-frame-late layer copy, E2) offered in the sample, contradicted (a) one way
+            # by a valid exact pair or (b) by coverage differing by at least 10% of the frame from every accepted,
+            # valid UIAlpha or UI color tag offered in the same sample.
+            masks = [u.alpha[c] for c in DECLARED if u.offered(c) and u.is_accepted(c) and u.valid(c)]
+            for c in INFERRED:
+                if not (u.offered(c) and u.is_accepted(c) and u.valid(c)) or (c == 4 and u.late_layer):
+                    continue
+                if u.one_way(c):
+                    strong, against = u.strong[JUDGED.index(c)], u.contradicted[JUDGED.index(c)]
+                    state = 'decided' if u.source == ALPHA_SOURCES[c] and not u.reused else 'accepted'
+                    a2[c].append((u.t, f'{clock(u.t)} {ALPHA_NAMES[c]} {state} while an exact HUD-less pair showed '
+                                  f'{percent(against, strong)} of its strong pixels as lit, unchanged scene',
+                                  'A2, one-way by an exact pair', True))
+                elif masks and min(abs(u.alpha[c] - d) for d in masks) * 10 >= u.pixels:
+                    a2[c].append((u.t, f'{clock(u.t)} {ALPHA_NAMES[c]} {100 * u.alpha[c] / u.pixels:.0f}% vs declared '
+                                  f'UI {100 * masks[0] / u.pixels:.1f}%', 'A2, declared coverage', False))
+            continue
+        # As the ledger's disagreement before S2a (A2): only an accepted UI channel with at most 1% invalid pixels
+        # and clean accepted presented alpha dispute.
         masks = [u.alpha[c] for c in DEDICATED if u.offered(c) and u.is_accepted(c) and u.valid(c)]
         for c in PRESENTED:
             if (masks and u.offered(c) and u.is_accepted(c) and (u.invalid is None or not u.invalid[c])
@@ -823,6 +928,35 @@ def ui_checks(s: Session, add) -> None:
             if u.is_accepted(c) and u.covered * 100 >= u.pixels * 99 and exact_pair and unchanged * 2 >= u.pixels:
                 judge(u, f'{clock(u.t)} {ALPHA_NAMES[c]} covered {100 * u.covered / u.pixels:.0f}% while HUD-less '
                          f'showed {100 * unchanged / u.pixels:.0f}% of the scene', c, flattened)
+    # A2 revokes on its third contradiction within 2 s, so only such a run of sampled contradictions (a subset of the
+    # ledger's samples) that no revocation of the kind followed is a defect: FAIL when it holds a one-way
+    # contradiction, WARN for declared coverage alone. A contradiction a revocation followed is handled; a shorter one
+    # is by design and only noted.
+    for c, events in a2.items():
+        events.sort(key=lambda e: e[0])
+        in_run = [False] * len(events)
+        for i in range(A2_SAMPLES - 1, len(events)):
+            if events[i][0] - events[i - A2_SAMPLES + 1][0] <= A2_SPAN_S:
+                for j in range(i - A2_SAMPLES + 1, i + 1):
+                    in_run[j] = True
+        i = 0
+        while i < len(events):
+            j = i + 1
+            if in_run[i]:
+                while j < len(events) and in_run[j] and events[j][0] - events[j - 1][0] <= A2_SPAN_S:
+                    j += 1
+            run_events = events[i:j]
+            when = revoked(run_events[0][0], ALPHA_KINDS[c])
+            if when is not None:
+                handled.extend(f'{text}, acceptance revoked {clock(when)} ({a2_kind})'
+                               for _, text, a2_kind, _ in run_events)
+            elif in_run[i]:
+                (contradicted if any(one for *_, one in run_events) else disputes).extend(
+                    text + f' ({a2_kind}, {len(run_events)} contradictions within {A2_SPAN_S:.0f} s, not revoked)'
+                    for _, text, a2_kind, _ in run_events)
+            else:
+                short.extend(text for _, text, _, _ in run_events)
+            i = j
     # A selective UI channel rejected for invalid pixels (for the UI layer, colour beyond its alpha headroom) while
     # no mask protected the frame. A channel without alpha carried no UI to reject (a UI layer with colour but no
     # alpha); the time such frames went unprotected is 'UI protection gaps'.
@@ -839,37 +973,56 @@ def ui_checks(s: Session, add) -> None:
                   f'{len(rejected)} samples left the frame unprotected after rejecting a selective UI channel '
                   'for invalid pixels' if rejected else 'no selective UI channel rejected for invalid pixels',
                   rejected[:6]))
+    dispute_text = ('; accepted inferred alpha disagreed with an accepted UI alpha or UI color tag 3 times within 2 s '
+                    'without a revocation (A2)' if s2a else
+                    '; accepted presented alpha disagrees with an accepted UI channel')
+    short_text = (f'; {len(short)} sampled A2 contradictions shorter than the revocation condition (3 within 2 s) '
+                  'were not revoked, as designed' if short else '')
     if s.counters is not None:
-        counter_checks(s.counters, add, overrides, flattened, disputes, handled)
+        counter_checks(s.counters, add, overrides, flattened, contradicted, disputes, handled, dispute_text,
+                       refusals(s), short, short_text)
         gap_checks(s, add)
         scene_checks(s, add)
         return
     states = Counter(u.detection for u in s.ui)
-    add(Check('FAIL' if overrides or flattened else 'WARN' if disputes else 'PASS', 'UI protection',
+    add(Check('FAIL' if overrides or flattened or contradicted else 'WARN' if disputes else 'PASS', 'UI protection',
               ', '.join(f'{k} {v}' for k, v in states.most_common())
               + ('; inferred alpha decided beside an accepted declared UI channel' if overrides else '')
               + ('; an accepted UI source flattened the visible scene' if flattened else '')
-              + ('; accepted presented alpha disagrees with an accepted UI channel' if disputes else '')
-              + ('; a contradicted source lost its acceptance' if handled and not disputes and not flattened else ''),
-              (overrides + flattened or disputes or handled)[:6]))
+              + ('; an exact HUD-less pair contradicted an accepted inferred alpha one way 3 times within 2 s without '
+                 'a revocation (A2)' if contradicted else '')
+              + (dispute_text if disputes else '') + short_text
+              + ('; a contradicted source lost its acceptance'
+                 if handled and not disputes and not flattened and not contradicted else ''),
+              (overrides + flattened + contradicted or disputes or handled or short)[:6]))
     gap_checks(s, add)
     scene_checks(s, add)
 
 
+def refusals(s: Session) -> Counter:
+    """Sampled Auto samples without a mask by the add-on's own reason and refused candidate (F1), since S2a."""
+    return Counter((u.reason, u.refused) for u in s.ui
+                   if u.s2a and u.mode == 'auto' and not u.source and u.reason not in ('', 'decided'))
+
+
 def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flattened_sampled: list[str],
-                   disputes: list[str], handled: list[str]) -> None:
+                   contradicted_sampled: list[str], disputes: list[str], handled: list[str], dispute_text: str,
+                   refused: Counter, short: list[str] = (), short_text: str = '') -> None:
     """Checks from the add-on's exact per-frame UI counters (docs/reshade-sbs.md, UI counters).
 
     They replace the sampled invariants: every Auto frame is counted, not one per 100 ms sample. Sampled lines still
-    give the times of examples, acceptance disputes, which no counter records, whether an accepted full-frame claim
-    over the scene was resolved by a revocation, and the time-based gap and scene checks. Stages (S1-S6) and rule IDs
-    (such as H1 and P1) named in the output are the UI decision framework's (docs/reshade-sbs.md, UI decision
-    framework)."""
+    give the times of examples, acceptance disputes, which no counter records, whether a contradicted accepted source
+    (since S2a one-way by an exact pair, before it a full-frame claim over the scene) was resolved by a revocation,
+    the refused candidates, and the time-based gap and scene checks. Stages (S1-S6) and rule IDs (such as H1 and P1)
+    named in the output are the UI decision framework's (docs/reshade-sbs.md, UI decision framework)."""
     def get(key: str) -> int:
         return c.get(key, 0)
 
+    # Counter lines since S2a hold held={generated none}, reused and contradicted (T1, A2); before it three hold kinds
+    # with a cap and trusted_full.
+    s2a = 'held.none' in c
     auto, detected = get('auto_frames'), get('detection_frames')
-    held = sum(get(f'held.{k}') for k in HOLD_KINDS)
+    held = sum(get(f'held.{k}') for k in (HOLD_KINDS if s2a else S1_HOLD_KINDS))
     inactive = sum(get(f'inactive.{k}') for k in INACTIVE_REASONS)
     reconciled = auto == detected + held + inactive
     add(Check('PASS' if reconciled else 'FAIL', 'UI counters',
@@ -878,24 +1031,39 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
               + ('' if reconciled else f"; the add-on's own accounting does not reconcile ({auto} Auto frames, "
                                        f'{detected + held + inactive} detected, held or inactive)')))
 
-    overrides, flattened = get('presented_over_dedicated'), get('trusted_full')
-    # An accepted alpha covering the frame over an exact pair that shows the scene keeps deciding until repeated
-    # contradictions revoke its acceptance (about 2 s), so a handled case counts trusted_full frames first. Such
-    # frames fail only when a sample of them was not resolved by a revocation, or when no full claim was revoked.
-    revoked = get('trust.revoked_full')
-    unresolved = flattened and (flattened_sampled or not revoked)
+    # A contradicted accepted source keeps deciding until repeated contradictions revoke its acceptance, so a handled
+    # case counts its frames first. Since S2a the counter is contradicted: an accepted inferred alpha (3, 4 or 10)
+    # decided by itself while the same frame's valid exact pair contradicted it one way. A2 revokes on the third
+    # contradiction within 2 s and, by design, never on shorter ones, which the counter cannot tell apart; so the
+    # counted frames only fail with a sampled run of three within 2 s that no revocation followed. Before S2a
+    # trusted_full: an accepted alpha covering the frame over an exact pair that showed the scene, failing when a
+    # sample of them was not resolved by a revocation (trust.revoked_full), or when nothing of that kind was revoked.
+    overrides = get('presented_over_dedicated')
+    if s2a:
+        flattened, revoked, sampled = get('contradicted'), get('trust.revoked_exact'), contradicted_sampled
+        contradiction = (f'; an exact HUD-less pair contradicted a deciding accepted inferred alpha one way (A2) in '
+                         f'{flattened} frames')
+        resolution = (f' before {revoked} one-way revocations' if revoked else
+                      ', no sampled run reaching the revocation condition (3 within 2 s)')
+        unresolved = bool(sampled)
+    else:
+        flattened, revoked, sampled = get('trusted_full'), get('trust.revoked_full'), flattened_sampled
+        contradiction = (f'; an accepted UI source covered the frame while an exact HUD-less pair showed the scene in '
+                         f'{flattened} frames')
+        resolution = f' before {revoked} revocations of such a source'
+        unresolved = flattened and (sampled or not revoked)
     sources = [(source, get(f'decided.{source}')) for source in SOURCE_NAMES]
     add(Check('FAIL' if overrides or unresolved else 'WARN' if disputes else 'PASS', 'UI protection',
               'decided ' + (', '.join(f'{SOURCE_NAMES[k]} ({k}) {percent(n, detected)}' for k, n in sources if n)
                             or 'nothing') + ' of detection frames'
               + (f'; inferred alpha decided beside an accepted declared UI channel in {overrides} frames'
                  if overrides else '')
-              + (f'; an accepted UI source covered the frame while an exact HUD-less pair showed the scene in '
-                 f'{flattened} frames' + ('' if unresolved else f' before {revoked} revocations of such a source')
-                 if flattened else '')
-              + ('; accepted presented alpha disagrees with an accepted UI channel' if disputes else '')
+              + (contradiction + ('' if unresolved else resolution) if flattened else
+                 '; an exact HUD-less pair contradicted an accepted inferred alpha one way 3 times within 2 s without '
+                 'a revocation (A2)' if sampled else '')
+              + (dispute_text if disputes else '') + short_text
               + ('; a contradicted source lost its acceptance' if handled and not disputes and not unresolved else ''),
-              (overrides_sampled + flattened_sampled or disputes or handled)[:6]))
+              (overrides_sampled + sampled or disputes or handled or list(short))[:6]))
 
     full = {k: get(f'decided.{k}') for k in (6, 8, 9)}
     visible, routes = get('full_d.visible'), full[8] + full[9]
@@ -922,8 +1090,9 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
     # A whole-frame mask from alpha (an accepted source 1-4 or 10 covering at least 99%; only accepted sources decide)
     # pins the frame flat even over a visible scene: an accepted source's pin weight is saturate(8 alpha) at any
     # coverage (P1, the opacity ruling), so it is reported, not warned. The wrong cases have their own checks: an
-    # accepted full claim over an exact pair that shows the scene and no revocation resolved (UI protection), and
-    # unaccepted inferred alpha (UI inferred alpha). The add-on measures D as a diagnostic on the samples after one that
+    # accepted source an exact pair contradicts and no revocation resolved (UI protection; one way since S2a, a full
+    # claim over the scene before it), and unaccepted inferred alpha (UI inferred alpha). Dims and tints over dark or
+    # changed pixels never meet the one-way test. The add-on measures D as a diagnostic on the samples after one that
     # decided it, so the first sample of each episode is unmeasured.
     full_alpha, alpha_visible = get('full_alpha'), get('full_alpha_d.visible')
     if full_alpha:
@@ -951,24 +1120,46 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
               'from an inexact pair; expected until S3' if inexact else
               'no HUD-less difference decided from an inexact pair'))
 
-    add(Check('INFO', 'UI holds',
-              ', '.join(f'{k.replace("_", " ")} {get(f"held.{k}")}' for k in HOLD_KINDS)
-              + f' ({percent(held, auto)} of Auto frames); {get("held.cap")} frames wanted a hold past the cap'))
+    if s2a:
+        # T1: a generated Present shows the decision of the real frame it shows (generated) or has none (none); a real
+        # frame without a decision of its own reuses the previous real frame's once, counted as a detection frame.
+        reused = get('reused')
+        add(Check('INFO', 'UI holds',
+                  f'generated {get("held.generated")}, none {get("held.none")} ({percent(held, auto)} of Auto frames); '
+                  f'{reused} detection frames ({percent(reused, detected)}) reused the previous real frame\'s decision '
+                  '(T1)'))
+    else:
+        add(Check('INFO', 'UI holds',
+                  ', '.join(f'{k.replace("_", " ")} {get(f"held.{k}")}' for k in S1_HOLD_KINDS)
+                  + f' ({percent(held, auto)} of Auto frames); {get("held.cap")} frames wanted a hold past the cap'))
     none = [(reason.replace('_', ' '), get(f'none.{reason}')) for reason in NO_MASK_REASONS]
     skipped = [(reason.replace('_', ' '), get(f'inactive.{reason}')) for reason in INACTIVE_REASONS]
+    unheld = [('generated Presents without a decision', get('held.none'))] if s2a else []
 
     def shares(parts: list[tuple[str, int]]) -> str:
         return ', '.join(f'{name} {percent(n, auto)}' for name, n in parts if n)
+    # Since S2a the sampled lines name each own decision's refused candidate (F1); the counters count reasons only.
+    named = ', '.join(f'{reason.replace("_", " ")}' + (f' ({KIND_NAMES[kind]})' if kind in KIND_NAMES else '')
+                      + f' {n}' for (reason, kind), n in refused.most_common(6))
     add(Check('INFO', 'UI no mask',
-              f'{percent(sum(n for _, n in none + skipped), auto)} of Auto frames had no mask'
+              f'{percent(sum(n for _, n in none + skipped + unheld), auto)} of Auto frames had no mask'
               + (f'; decided none: {shares(none)}' if shares(none) else '')
-              + (f'; without detection: {shares(skipped)}' if shares(skipped) else '')))
-    add(Check('INFO', 'UI trust events',
-              f'earned {get("trust.earned")}, revoked by a full claim over the scene {get("trust.revoked_full")}, '
-              f'revoked by presented disagreement {get("trust.revoked_presented")}, lapsed {get("trust.lapsed")}, '
-              f'restored {get("trust.restored")}, '
-              + (f'legacy entries discarded {get("trust.discarded")}' if 'trust.discarded' in c else
-                 f'opaque proof set {get("trust.opaque_set")} and cleared {get("trust.opaque_cleared")}')))
+              + (f'; without detection: {shares(skipped)}' if shares(skipped) else '')
+              + (f'; {shares(unheld)}' if shares(unheld) else '')
+              + (f'; sampled reasons with the refused candidate: {named}' if named else '')))
+    if s2a:
+        add(Check('INFO', 'UI trust events',
+                  f'earned {get("trust.earned")}, revoked one way by an exact pair {get("trust.revoked_exact")}, '
+                  f'revoked by a declared alpha\'s coverage {get("trust.revoked_declared")}, lapsed '
+                  f'{get("trust.lapsed")}, restored {get("trust.restored")}, legacy entries discarded '
+                  f'{get("trust.discarded")}, forgotten {get("trust.forgotten")}'))
+    else:
+        add(Check('INFO', 'UI trust events',
+                  f'earned {get("trust.earned")}, revoked by a full claim over the scene {get("trust.revoked_full")}, '
+                  f'revoked by presented disagreement {get("trust.revoked_presented")}, lapsed {get("trust.lapsed")}, '
+                  f'restored {get("trust.restored")}, '
+                  + (f'legacy entries discarded {get("trust.discarded")}' if 'trust.discarded' in c else
+                     f'opaque proof set {get("trust.opaque_set")} and cleared {get("trust.opaque_cleared")}')))
 
 
 def outside_settle(s: Session, a: float, b: float) -> list[tuple[float, float]]:
