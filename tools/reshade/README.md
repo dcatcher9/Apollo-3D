@@ -451,7 +451,15 @@ that showed the colour frame with depth; capture coverage by the list lifecycle;
 camera projection or only the raw controller places the scene (the latter while a valid camera
 exists is a warning); UI trust, presented alpha deciding over a trusted dedicated UI channel, a
 trusted channel covering the whole frame while an exact HUD-less pair shows the scene, and trusted
-channels that disagree; how many samples were full-frame UI over a hidden scene (source 8 or 9)
+channels that disagree (by the dispute and set-aside-layer rules of
+[UI protection](../../docs/reshade-sbs.md#setup)); selective UI channels rejected for invalid pixels;
+`UI protection gaps`, the streamed time
+outside settle times in which Auto rendered frames without a UI mask (no UI source offered, or no
+usable mask while no UI channel was offered clean and empty, which means no UI on screen), so HUD
+and menus took the scene's depth, with each window's time and the reason each offered channel gave
+no mask (gaps shorter than the overlay warning's minimum, defined in the
+[UI protection panel](../../docs/reshade-sbs.md#setup), are counted, not listed); how many samples were
+full-frame UI over a hidden scene (source 8 or 9)
 and how many of those were a route's exit, whose own evidence read the presented frame visible
 (each hidden scene that ends shows one, so they are counted rather than judged); a warning when the
 presented frame read hidden, not blank, for at least 500 ms while no UI source decided

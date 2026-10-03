@@ -49,6 +49,12 @@ SCENE = re.compile(
     r'sampled_alpha_opaque=(?P<opaque>\d+/\d+) sampled_scene=\{n=(?P<n>\d+) d=(?P<d>-?[0-9.]+) valid=(?P<valid>\d) '
     r'ran=(?P<ran>\d) verdict=(?P<verdict>\w+)\} sampled_hudless_scene=\{n=\d+ d=(?P<hudless_d>-?[0-9.]+) '
     r'valid=(?P<hudless_valid>\d)\} scene_hold=(?P<hold>\d+) shadow=(?P<shadow>\d) shadow_hidden_ms=(?P<hidden_ms>\d+)')
+# Presentation fields of the same line; older logs lack some of them.
+UI_RUNTIME = re.compile(r'Sunshine UI protection: runtime=(\S+)')
+UI_MODE = re.compile(r'\bmode=(\w+)')
+UI_RENDERED = re.compile(r'\brendered=(\d)')
+UI_FG = re.compile(r'\bfg=(\d)')
+UI_AVAILABILITY = re.compile(r'\bsource_availability=(\w+)')
 TRUST = re.compile(r'Sunshine UI protection: (restored alpha trust|alpha trust is now) (0x[0-9a-fA-F]+)')
 LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
@@ -83,6 +89,12 @@ SELECTION_HINTS = {'inactive_views': 'the game supplied no depth'}
 RESOLVE_S = 10.0  # A trust dispute is handled when that channel's trust is revoked this soon.
 DEDICATED, PRESENTED = (0, 1), (2, 3)
 UI_LAYER_SOURCE = 4  # alpha_auto_policy source of the offscreen UI layer in slot 1.
+ALPHA_NAMES = ('UI alpha', 'UI colour', 'Backbuffer alpha', 'current alpha')  # Alpha slots 0-3.
+HUDLESS_PAIR = 48  # Candidate bits of the HUD-less pair.
+# Unprotected time shorter than this is counted, not listed: alpha_trust_span_ms (game3d_alpha_auto.h), the span over
+# which detection itself earns or loses confidence.
+UNPROTECTED_MIN_S = 2.0
+UI_LINE_PERIOD_S = 10.0  # An unchanged UI protection state is logged again this often while presenting (exporter.cpp).
 # Hidden-scene evidence (docs/reshade-sbs.md): a hidden run without a decided source this long is an uncovered hidden
 # scene.
 SHADOW_HIDDEN_WARN_MS = 500
@@ -96,6 +108,11 @@ def clock(value: float, ms: bool = False) -> str:
     millis = round(value * 1000) % 86_400_000 if ms else int(value % 86400) * 1000
     text = f'{millis // 3_600_000:02}:{millis // 60_000 % 60:02}:{millis // 1000 % 60:02}'
     return f'{text}.{millis % 1000:03}' if ms else text
+
+
+def percent(n: int, total: int) -> str:
+    value = 100 * n / total if total else 0.0
+    return f'{value:.0f}%' if value >= 10 or not value else f'{value:.1f}%' if value >= 1 else f'{value:.2f}%'
 
 
 class Scene(NamedTuple):
@@ -128,9 +145,81 @@ class UISample(NamedTuple):
     hudless: tuple[int, ...]  # changed, unchanged, invalid.
     invalid: tuple[int, ...] | None = None  # Per alpha slot; absent in older logs.
     scene: Scene | None = None  # Absent in older logs.
+    runtime: str = ''
+    mode: str = 'auto'
+    rendered: bool = True
+    availability: str = ''  # source_availability; absent in older logs.
+    fg: bool = False  # Frame generation active.
 
     def trust_source(self, slot: int) -> int:
         return UI_LAYER_SOURCE if slot == 1 and self.ui_layer else slot
+
+    def name(self, slot: int) -> str:
+        return 'UI layer' if slot == 1 and self.ui_layer else ALPHA_NAMES[slot]
+
+    def layer_without_alpha(self) -> bool:
+        """An offscreen UI layer with no alpha anywhere but colour on more than 1% of pixels is no UI layer this
+        frame: premultiplied UI over transparent black cannot have colour without alpha. Mirrors
+        ui_detection::layer_without_alpha (game3d_ui_detection_contract.h)."""
+        return (self.ui_layer and self.invalid is not None and not self.alpha[1]
+                and self.invalid[1] * 100 > self.pixels)
+
+    def admitted(self) -> int:
+        """The candidates detection decides from: a layer without alpha is set aside (admitted_candidates)."""
+        return self.candidates & ~2 if self.layer_without_alpha() else self.candidates
+
+    def shows_no_ui(self, slot: int) -> bool:
+        """Dedicated slot offered clean and empty: the game's UI channel says there is no UI on screen."""
+        if not self.candidates & (1 << slot) or self.alpha[slot]:
+            return False
+        if self.invalid is not None:
+            return not self.invalid[slot]
+        # Older logs lack invalid counts. A clean trusted slot at 0 decides, so with no source it was rejected.
+        return not self.trusted & (1 << slot)
+
+    def unprotected(self) -> bool:
+        """Auto rendered this frame without a UI mask, and no UI channel of the game showed that there was no UI.
+        Mirrors source_alpha_ui_decision::unprotected() (game3d_controls.h): a source that decides, even empty, is a
+        mask, also when source_availability, which names a missing source first, reads source_unavailable;
+        'checking', unrendered frames and manual modes are not unprotected."""
+        if self.mode != 'auto' or not self.rendered or self.detection == 'detected':
+            return False
+        if self.availability == 'source_unavailable':
+            return True
+        return self.detection == 'no_usable_mask' and not any(self.shows_no_ui(c) for c in DEDICATED)
+
+    def pending(self) -> bool:
+        """Auto rendered while its status sample was still collected or a source searched: as next_unprotected_since
+        (game3d_controls.h), such a line neither starts nor ends an unprotected run."""
+        return (self.mode == 'auto' and self.rendered and self.detection in ('checking', 'searching')
+                and not self.unprotected())
+
+    def why_unprotected(self) -> str:
+        """Each offered candidate and why it gave no mask."""
+        fg = 'FG on' if self.fg else 'FG off'
+        if self.availability == 'source_unavailable' or not self.candidates:
+            return f'{fg}: no UI source offered'
+        # A trusted dedicated channel offered keeps presented alpha out (SunshineUIDetectionReduceCS).
+        blocking = any(self.candidates & self.trusted & (1 << c) for c in DEDICATED)
+        parts = []
+        for c in range(4):
+            if not self.candidates & (1 << c):
+                continue
+            covered, trusted = self.alpha[c], self.trusted & (1 << c)
+            invalid = self.invalid[c] if self.invalid is not None else 0
+            if c == 1 and self.layer_without_alpha():
+                parts.append(f'UI layer has colour but no alpha ({percent(invalid, self.pixels)} of pixels)')
+            elif invalid:
+                parts.append(f'{self.name(c)} rejected ({percent(covered, self.pixels)} covered, '
+                             f'{percent(invalid, self.pixels)} invalid)')
+            elif c in PRESENTED and blocking and covered * 10 < self.pixels * 9:
+                parts.append(f'{self.name(c)} kept out beside a trusted UI channel')
+            else:
+                parts.append(f'{self.name(c)} covers {percent(covered, self.pixels)}'
+                             + ('' if trusted else ' (untrusted)'))
+        if self.candidates & HUDLESS_PAIR == HUDLESS_PAIR:
+            parts.append('HUD-less difference rejected')
+        return f'{fg}: ' + '; '.join(parts)
 
 
 @dataclass
@@ -303,6 +392,9 @@ def parse(lines) -> Session:
 
             def counts(text: str) -> tuple[int, ...]:
                 return tuple(int(v) for v in text.split('/'))
+
+            def field_of(pattern: re.Pattern, default: str) -> str:
+                return hit.group(1) if (hit := pattern.search(text)) else default
             scene = None
             if evidence := SCENE.search(text):
                 e = evidence.groupdict()
@@ -313,7 +405,10 @@ def parse(lines) -> Session:
                                  int(g['candidates'], 16), counts(g['alpha']), int(g['trusted'], 16),
                                  g['layer'] == '1',
                                  (int(g['changed']), int(g['unchanged']), int(g['hudless_invalid'])),
-                                 counts(g['invalid']) if g['invalid'] else None, scene))
+                                 counts(g['invalid']) if g['invalid'] else None, scene,
+                                 field_of(UI_RUNTIME, ''), field_of(UI_MODE, 'auto'),
+                                 field_of(UI_RENDERED, '1') == '1', field_of(UI_AVAILABILITY, ''),
+                                 field_of(UI_FG, '0') == '1'))
         if found := TRUST.search(text):
             s.trust_events.append((t, found.group(1), int(found.group(2), 16)))
         if found := LOSS.search(text):
@@ -612,13 +707,17 @@ def ui_checks(s: Session, add) -> None:
     for u in s.ui:
         if not u.pixels:
             continue
-        dedicated = [u.alpha[c] for c in DEDICATED if u.candidates & u.trusted & (1 << c)]
+        # A UI layer without alpha is no UI layer, so presented alpha may decide beside it.
+        dedicated = [c for c in DEDICATED if u.admitted() & u.trusted & (1 << c)]
         if dedicated and u.source in (3, 4):
             overrides.append(f'{clock(u.t)} source {u.source} covered {100 * u.covered / u.pixels:.0f}%')
+        # As the CPU's disagreement(): only a clean UI channel (at most 1% invalid) and clean presented alpha dispute.
+        masks = [u.alpha[c] for c in dedicated if u.invalid is None or u.invalid[c] * 100 <= u.pixels]
         for c in PRESENTED:
-            if dedicated and u.trusted & (1 << c) and min(abs(u.alpha[c] - d) for d in dedicated) * 10 >= u.pixels:
+            if (masks and u.trusted & (1 << c) and (u.invalid is None or not u.invalid[c])
+                    and min(abs(u.alpha[c] - d) for d in masks) * 10 >= u.pixels):
                 judge(u, f'{clock(u.t)} channel {c} {100 * u.alpha[c] / u.pixels:.0f}% vs UI '
-                         f'{100 * dedicated[0] / u.pixels:.1f}%', c, disputes)
+                         f'{100 * masks[0] / u.pixels:.1f}%', c, disputes)
         _, unchanged, invalid = u.hudless
         slot = u.source - 1
         exact_pair = u.candidates & 48 == 48 and not invalid
@@ -628,7 +727,10 @@ def ui_checks(s: Session, add) -> None:
                      f'{100 * u.covered / u.pixels:.0f}% while HUD-less showed {100 * unchanged / u.pixels:.0f}% '
                      f'of the scene', slot, flattened)
     # A selective dedicated UI channel rejected for invalid pixels (for the UI
-    # layer, color beyond twice its alpha) while no mask protected the frame.
+    # layer, colour beyond its alpha headroom) while no mask protected the
+    # frame. A channel without alpha carried no UI to reject (a UI layer with
+    # colour but no alpha is no layer, layer_without_alpha); the time such
+    # frames went unprotected is 'UI protection gaps'.
     rejected = []
     for u in s.ui:
         if u.invalid is None or u.source or not u.pixels:
@@ -651,7 +753,76 @@ def ui_checks(s: Session, add) -> None:
               + ('; trusted presented alpha disagrees with the UI channel' if disputes else '')
               + ('; a contradicted channel lost its trust' if handled and not disputes and not flattened else ''),
               (overrides + flattened or disputes or handled)[:6]))
+    gap_checks(s, add)
     scene_checks(s, add)
+
+
+def outside_settle(s: Session, a: float, b: float) -> list[tuple[float, float]]:
+    """The parts of a..b outside the settle time after each FG switch, runtime reset and export start."""
+    parts = [(a, b)]
+    for mark in s.settle:
+        parts = [(p, q) for x, y in parts for p, q in ((x, min(y, mark)), (max(x, mark + SETTLE_S), y)) if q > p]
+    return parts
+
+
+@dataclass
+class Gap:
+    start: float
+    end: float
+    reasons: Counter = field(default_factory=Counter)  # Seconds each description held.
+
+
+def unprotected_gaps(s: Session) -> list[Gap]:
+    """Streamed time in which Auto left rendered frames without a UI mask, outside settle times.
+
+    A UI protection line's state holds until that runtime's next line (written on a change, at most once per
+    LOG_GATE_S, else every UI_LINE_PERIOD_S), so its ends are approximate by up to a second. Gaps less than a
+    second apart merge, as windows() merges counter intervals. Lines whose status sample was pending continue a
+    run with its reason, as the overlay's run does."""
+    runtimes: dict[str, list[UISample]] = {}
+    for u in s.ui:
+        runtimes.setdefault(u.runtime, []).append(u)
+    pieces = []
+    for samples in runtimes.values():
+        reason = ''
+        for u, following in zip(samples, samples[1:] + [None]):
+            if u.unprotected():
+                reason = u.why_unprotected()
+            elif not (reason and u.pending()):
+                reason = ''
+                continue
+            end = min(following.t if following else s.last, u.t + UI_LINE_PERIOD_S + LOG_GATE_S)
+            for a, b in s.streamed:
+                pieces += [(p, q, reason) for p, q in outside_settle(s, max(a, u.t), min(b, end))]
+    gaps: list[Gap] = []
+    for a, b, reason in sorted(pieces):
+        if not gaps or a - gaps[-1].end >= 1.0:
+            gaps.append(Gap(a, b))
+        gaps[-1].end = max(gaps[-1].end, b)
+        gaps[-1].reasons[reason] += b - a
+    return gaps
+
+
+def gap_checks(s: Session, add) -> None:
+    """Warn where Auto left streamed frames without a UI mask: HUD and menus then take the scene's depth."""
+    if not any(u.mode == 'auto' and u.rendered for u in s.ui):
+        add(Check('INFO', 'UI protection gaps', 'no rendered Auto samples'))
+        return
+    gaps = unprotected_gaps(s)
+    listed = [g for g in gaps if g.end - g.start >= UNPROTECTED_MIN_S]
+    brief = [g for g in gaps if g.end - g.start < UNPROTECTED_MIN_S]
+    note = (f'{len(brief)} {"gap" if len(brief) == 1 else "gaps"} shorter than {UNPROTECTED_MIN_S:g} s '
+            f'({sum(g.end - g.start for g in brief):.1f} s)') if brief else ''
+    if not listed:
+        add(Check('PASS', 'UI protection gaps', 'every streamed Auto frame had a UI mask or a UI channel showing no UI'
+                  + (f' except {note}' if note else '')))
+        return
+    total = sum(g.end - g.start for g in listed)
+    add(Check('WARN', 'UI protection gaps',
+              f'no usable UI mask for {total:.0f} s in {len(listed)} {"window" if len(listed) == 1 else "windows"}; '
+              "HUD and menus took the scene's depth there" + (f'; {note} not listed' if note else ''),
+              [f'{span(g.start, g.end)} ({g.end - g.start:.0f} s) {g.reasons.most_common(1)[0][0]}'
+               for g in listed][:6]))
 
 
 def scene_checks(s: Session, add) -> None:

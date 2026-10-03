@@ -23,7 +23,9 @@ def output(t, published, fg, flat, fresh, missing, runtime='0x1'):
 
 
 def ui(t, source, covered, alpha, candidates, trusted, pixels=1000, hudless=(0, 0), layer=0, invalid=(0, 0, 0, 0),
-       scene=None):
+       scene=None, detection=None, availability=None, mode='auto', rendered=1, fg=0, runtime='0000000000000001'):
+    detection = detection or ('detected' if source else 'no_usable_mask')
+    availability = availability or ('detected' if source else 'quality_rejected')
     a = '/'.join(str(v) for v in alpha)
     i = '/'.join(str(v) for v in invalid)
     # scene: (d, verdict, hold, shadow, hidden_ms) of a log with hidden-scene evidence.
@@ -34,9 +36,10 @@ def ui(t, source, covered, alpha, candidates, trusted, pixels=1000, hudless=(0, 
                     f'sampled_scene={{n=400 d={d:.3f} valid=1 ran=1 verdict={verdict}}} '
                     f'sampled_hudless_scene={{n=0 d=0.000 valid=0}} scene_hold={hold} shadow={shadow} '
                     f'shadow_hidden_ms={hidden_ms} ')
-    return line(t, f'[Sunshine 3D] Sunshine UI protection: runtime=0000000000000001 mode=auto rendered=1 mask_path=1 '
-                   f'input=automatic_gpu_mask retained=1 fg=0 fg_known=1 fg_enabled=0 input_state=input_seen '
-                   f'detection=detected selected=automatic source=automatic source_availability=detected '
+    return line(t, f'[Sunshine 3D] Sunshine UI protection: runtime={runtime} mode={mode} rendered={rendered} '
+                   f'mask_path=1 input=automatic_gpu_mask retained=1 fg={fg} fg_known=1 fg_enabled={fg} '
+                   f'input_state=input_seen detection={detection} selected=automatic source=automatic '
+                   f'source_availability={availability} '
                    f'sampled_source={source} sampled_covered={covered} sampled_pixels={pixels} '
                    f'sampled_candidates=0x{candidates:x} sampled_alpha_covered={a} sampled_alpha_invalid={i} '
                    f'trusted_alpha=0x{trusted:x} '
@@ -116,6 +119,104 @@ class ReadinessReport(unittest.TestCase):
                                'sampled_hudless={changed=0 unchanged=0 invalid=0 matching_tiles=0 lit=0}')
         self.assertNotIn('UI channel admission', run(BASE + [old]))
         self.assertIn('UI protection', run(BASE + [old]))
+        # Stellar Blade SDR: the cleared layer target held the scene image, colour without any alpha. That is no UI
+        # layer, so admission rejected no UI; 'UI protection gaps' reports the unprotected time.
+        colour_only = ui('10:00:12', 0, 0, (0, 0, 0, 1000), 0xa, 0x2, layer=1, invalid=(0, 600, 0, 0))
+        self.assertEqual(run(BASE + [colour_only])['UI channel admission'].status, 'PASS')
+
+    def test_set_aside_ui_layer_does_not_count_as_a_trusted_channel(self):
+        # Stellar Blade SDR with FG on: the trusted layer had colour but no alpha, so the trusted Backbuffer decided.
+        decided = ui('10:00:12', 3, 2, (0, 0, 2, 1000), 0x6, 0x6, layer=1, invalid=(0, 996, 0, 0), fg=1)
+        self.assertEqual(run(BASE + [decided])['UI protection'].status, 'PASS')
+        # A layer with alpha is a UI layer still: presented alpha deciding beside it fails.
+        beside = ui('10:00:12', 3, 2, (0, 5, 2, 1000), 0x6, 0x6, layer=1, fg=1)
+        self.assertEqual(run(BASE + [beside])['UI protection'].status, 'FAIL')
+        # As the CPU's disagreement(), a UI channel rejected for more than 1% invalid pixels disputes nothing.
+        ambiguous = ui('10:00:12', 0, 0, (0, 300, 900, 1000), 0x6, 0x6, layer=1, invalid=(0, 50, 0, 0))
+        self.assertEqual(run(BASE + [ambiguous])['UI protection'].status, 'PASS')
+        clean = ui('10:00:12', 2, 300, (0, 300, 900, 1000), 0x6, 0x6, layer=1)
+        self.assertEqual(run(BASE + [clean])['UI protection'].status, 'WARN')
+
+    def test_unprotected_streamed_time_warns_with_its_reason(self):
+        protected = ui('10:00:12', 2, 5, (0, 5, 0, 0), 0x2, 0x2)
+        # Stellar Blade SDR with FG off: the layer held the scene image and current alpha was opaque.
+        colour_only = ui('10:00:06', 0, 0, (0, 0, 0, 1000), 0xa, 0x2, layer=1, invalid=(0, 600, 0, 0))
+        checks = run(BASE + [colour_only, protected])
+        self.assertEqual(checks['UI protection gaps'].status, 'WARN')
+        self.assertEqual(checks['UI protection gaps'].times,
+                         ['10:00:06-10:00:12 (6 s) FG off: UI layer has colour but no alpha (60% of pixels); '
+                          'current alpha covers 100% (untrusted)'])
+        # FG on: the trusted layer kept the selective Backbuffer alpha out.
+        fg_on = ui('10:00:06', 0, 0, (0, 0, 3, 1000), 0x6, 0x6, layer=1, invalid=(0, 996, 0, 0), fg=1)
+        self.assertEqual(run(BASE + [fg_on, protected])['UI protection gaps'].times,
+                         ['10:00:06-10:00:12 (6 s) FG on: UI layer has colour but no alpha (100% of pixels); '
+                          'Backbuffer alpha kept out beside a trusted UI channel'])
+        # No candidate offered while rendering.
+        searching = ui('10:00:06', 0, 0, (0, 0, 0, 0), 0x0, 0x0, pixels=0, detection='searching',
+                       availability='source_unavailable')
+        self.assertEqual(run(BASE + [searching, protected])['UI protection gaps'].times,
+                         ['10:00:06-10:00:12 (6 s) FG off: no UI source offered'])
+        # A rejected UI channel names its coverage and invalid share.
+        rejected = ui('10:00:06', 0, 0, (0, 18, 0, 1000), 0xa, 0x0, layer=1, invalid=(0, 5, 0, 0))
+        self.assertIn('UI layer rejected (1.8% covered, 0.50% invalid)',
+                      run(BASE + [rejected, protected])['UI protection gaps'].times[0])
+
+    def test_no_ui_on_screen_is_protected(self):
+        protected = ui('10:00:12', 2, 5, (0, 5, 0, 0), 0x2, 0x2)
+        # A clean empty UI channel says there is no UI, whether or not it is trusted.
+        empty = ui('10:00:06', 0, 0, (0, 0, 0, 1000), 0xa, 0x0, layer=1)
+        self.assertEqual(run(BASE + [empty, protected])['UI protection gaps'].status, 'PASS')
+        # A trusted channel that decides with no coverage is a mask.
+        decided = ui('10:00:06', 2, 0, (0, 0, 0, 1000), 0xa, 0x2, layer=1)
+        self.assertEqual(run(BASE + [decided, protected])['UI protection gaps'].status, 'PASS')
+        # A decided mask is protection even where source_availability names a missing source first.
+        unavailable = ui('10:00:06', 2, 5, (0, 5, 0, 1000), 0xa, 0x2, layer=1, availability='source_unavailable')
+        self.assertEqual(run(BASE + [unavailable, protected])['UI protection gaps'].status, 'PASS')
+
+        # Older logs lack invalid counts: an untrusted empty channel showed no UI, but a trusted one at 0 would have
+        # decided, so with no source it was rejected.
+        def old(t, trusted):
+            return line(t, '[Sunshine 3D] Sunshine UI protection: runtime=0000000000000001 mode=auto rendered=1 '
+                           'detection=no_usable_mask source_availability=quality_rejected sampled_source=0 '
+                           'sampled_covered=0 sampled_pixels=1000 sampled_candidates=0xa '
+                           f'sampled_alpha_covered=0/0/0/1000 trusted_alpha=0x{trusted:x} '
+                           'sampled_hudless={changed=0 unchanged=0 invalid=0 matching_tiles=0 lit=0}')
+        self.assertEqual(run(BASE + [old('10:00:06', 0x0), protected])['UI protection gaps'].status, 'PASS')
+        self.assertEqual(run(BASE + [old('10:00:06', 0x2), protected])['UI protection gaps'].status, 'WARN')
+
+    def test_unprotected_time_counts_only_while_streamed_settled_and_long(self):
+        protected = ui('10:00:12', 2, 5, (0, 5, 0, 0), 0x2, 0x2)
+        bare = ui('10:00:06', 0, 0, (0, 0, 0, 1000), 0x8, 0x0)
+        # The settle time after an FG switch is not counted.
+        fg = line('10:00:06', '[Sunshine 3D] Sunshine Streamline frame generation: viewport=0 mode=1')
+        self.assertEqual(run(BASE + [fg, bare, protected])['UI protection gaps'].times,
+                         ['10:00:09-10:00:12 (3 s) FG off: current alpha covers 100% (untrusted)'])
+        # The export pausing ends it.
+        inactive = line('10:00:09', '[Sunshine 3D] Sunshine SBS: export inactive (not_foreground); waiting')
+        self.assertEqual(run(BASE + [bare, inactive, protected])['UI protection gaps'].times[0][:23],
+                         '10:00:06-10:00:09 (3 s)')
+        # Manual modes, unrendered frames and gaps shorter than 2 s do not warn; short gaps are counted.
+        for quiet in (ui('10:00:06', 0, 0, (0, 0, 0, 1000), 0x8, 0x0, mode='off'),
+                      ui('10:00:06', 0, 0, (0, 0, 0, 1000), 0x8, 0x0, rendered=0)):
+            self.assertEqual(run(BASE + [quiet, protected])['UI protection gaps'].detail,
+                             'every streamed Auto frame had a UI mask or a UI channel showing no UI')
+        brief = run(BASE + [bare, ui('10:00:07', 2, 5, (0, 5, 0, 0), 0x2, 0x2)])['UI protection gaps']
+        self.assertEqual(brief.status, 'PASS')
+        self.assertTrue(brief.detail.endswith('except 1 gap shorter than 2 s (1.0 s)'), brief.detail)
+        # Each runtime's state holds until that runtime's next line.
+        other = ui('10:00:08', 2, 5, (0, 5, 0, 0), 0x2, 0x2, runtime='0000000000000002')
+        self.assertEqual(run(BASE + [bare, other, protected])['UI protection gaps'].times[0][:23],
+                         '10:00:06-10:00:12 (6 s)')
+        manual = ui('10:00:06', 0, 0, (0, 0, 0, 1000), 0x8, 0x0, mode='on')
+        self.assertEqual(run(BASE + [manual])['UI protection gaps'].status, 'INFO')
+        # A pending status sample neither starts nor ends a run, as the overlay's run (next_unprotected_since).
+        checking = ui('10:00:07', 0, 0, (0, 0, 0, 0), 0x0, 0x0, pixels=0, detection='checking',
+                      availability='checking_quality')
+        self.assertEqual(run(BASE + [bare, checking, ui('10:00:08', 0, 0, (0, 0, 0, 1000), 0x8, 0x0), protected])
+                         ['UI protection gaps'].times,
+                         ['10:00:06-10:00:12 (6 s) FG off: current alpha covers 100% (untrusted)'])
+        self.assertEqual(run(BASE + [checking, protected])['UI protection gaps'].detail,
+                         'every streamed Auto frame had a UI mask or a UI channel showing no UI')
 
     def test_hidden_scene_routes_and_uncovered_hidden_runs(self):
         # Stellar Blade's notice splash: an opaque untrusted UI layer over a scene its picture hides.
