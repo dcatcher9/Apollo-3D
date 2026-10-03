@@ -4,7 +4,9 @@
 // offline replay tools. docs/reshade-sbs.md (UI detection flags and decision
 // texels) owns the layout; game3d_native.hlsl mirrors the flag values as
 // SUNSHINE_UI_STORED_* and SUNSHINE_UI_PER_FRAME_* defines, the T1 hold store
-// as SUNSHINE_UI_HOLD_* and SUNSHINE_UI_FRAME_REASON_* defines and the
+// as SUNSHINE_UI_HOLD_* and SUNSHINE_UI_FRAME_REASON_* defines, the H1 claim
+// words as SUNSHINE_UI_CLAIM_PRE_UI, SUNSHINE_UI_H1_APPLIED and
+// SUNSHINE_UI_PRE_UI_IMAGE_* defines and the
 // candidate layout as SUNSHINE_UI_CANDIDATE_* and SUNSHINE_UI_SOURCE_* defines, and
 // test_game3d_ui_layer fails when the two disagree. Retired flag values stay
 // reserved so that dumps and replay cases keep their meaning.
@@ -47,8 +49,9 @@ namespace sunshine_game3d::ui_detection {
     inline constexpr std::uint32_t layer = 0x40u;     // t7 .a: the offscreen UI layer copy.
   }
   // Decision sources: 0 no mask, 1 UIAlpha, 2 UI color tag, 3 Backbuffer, 4
-  // current, 5 HUD-less change set, 6 full change set, 8 layer route, 9
-  // HUD-less route, 10 offscreen UI layer; 7 is retired and never reused.
+  // current, 5 HUD-less change set, 6 full change set, 8 full-frame UI over a
+  // hidden scene (H1), 10 offscreen UI layer; 7 and 9 (the HUD-less route
+  // before S2b) are retired and never reused.
   inline constexpr std::uint32_t source_layer = 10u, source_count = 11u;
   inline constexpr std::string_view candidate_layout_marker = "SUNSHINE_UI_CANDIDATE_LAYOUT";
   inline constexpr std::uint32_t candidate_layout = 2u, legacy_candidate_layout = 1u;
@@ -67,9 +70,9 @@ namespace sunshine_game3d::ui_detection {
   }};
 
   // Sunshine_UIDetectionFlags, b2 word 3. Stored bits describe the offscreen
-  // UI layer slot (t7) and the renderer keeps them between frames. They key
-  // no decision and no status (F1); only the hidden-scene route key reads
-  // them (scene_route_key, until H1 lands in S2b).
+  // UI layer slot (t7) and the renderer keeps them between frames. Only the
+  // tiles pass reads them; they key no decision, no status (F1) and no
+  // hidden-scene state, and nothing on the CPU reads them back.
   inline constexpr std::uint32_t stored_premultiplied = 0x1u; // The layer must pass the premultiplied bound (V1).
   inline constexpr std::uint32_t stored_hdr_headroom = 0x2u;  // With a float layer's HDR headroom.
   // The layer is the one-frame-late copy: inexact evidence (E2) that may
@@ -78,11 +81,11 @@ namespace sunshine_game3d::ui_detection {
   // 0x8u is reserved (a retired stage-2 bit) and never reused.
   inline constexpr std::uint32_t stored_mask = 0xffffu;
   // Per-frame bits ride in the pushed flags word of one render only. They are
-  // never stored in the renderer's detection flags and never key a decision.
-  inline constexpr std::uint32_t per_frame_scene_hold = 0x10000u;         // The CPU holds the layer route's hidden-scene verdict.
+  // never stored in the renderer's detection flags.
+  // 0x10000u is reserved (the layer route's hold before S2b) and never reused.
   // 0x20000u is reserved (a retired sample-frame bit the shader never read) and never reused.
-  inline constexpr std::uint32_t per_frame_depth_not_current = 0x40000u;  // The consumed depth is reused or generated.
-  inline constexpr std::uint32_t per_frame_scene_hold_hudless = 0x80000u; // The CPU holds the HUD-less route's verdict.
+  inline constexpr std::uint32_t per_frame_depth_not_current = 0x40000u; // The consumed depth is reused or generated.
+  // 0x80000u is reserved (the HUD-less route's hold before S2b) and never reused.
   // T1: an accepted candidate that the previously adopted real frame offered
   // is missing from this real frame, so this frame has no decision of its own.
   inline constexpr std::uint32_t per_frame_accepted_missing = 0x100000u;
@@ -90,18 +93,56 @@ namespace sunshine_game3d::ui_detection {
   // scope change, an inactive frame or a Present without a mask since), so
   // the GPU hold store reads as hold::none.
   inline constexpr std::uint32_t per_frame_hold_reset = 0x200000u;
+  // H1 (M5, game3d_scene_guard.h): the CPU holds a hidden verdict of D on
+  // the presented frame, and its samples read the pre-UI scene image visible.
+  inline constexpr std::uint32_t per_frame_scene_hidden = 0x400000u;
+  inline constexpr std::uint32_t per_frame_pre_ui_visible = 0x800000u;
+  // H1: the candidate bits whose source signature a visible verdict refuted,
+  // shifted into bits 24-30; a refuted full claim is not acting.
+  inline constexpr std::uint32_t per_frame_refuted_shift = 24u, per_frame_refuted_mask = 0x5f000000u;
+  // H1 (d): the evidence passes measure the offscreen UI layer as the pre-UI
+  // scene image although a HUD-less image is offered, so that the scene guard
+  // can prove the layer is the presented frame without its UI (bit 29, where
+  // the exact bit, never a refuted candidate, would shift to).
+  inline constexpr std::uint32_t per_frame_pre_ui_layer = 0x20000000u;
   inline constexpr std::uint32_t per_frame_mask = 0xffff0000u;
   static_assert((stored_mask & per_frame_mask) == 0 && (stored_mask | per_frame_mask) == 0xffffffffu);
+  static_assert(((candidate::ui_alpha | candidate::ui_color | candidate::backbuffer | candidate::current | candidate::hudless |
+    candidate::layer) << per_frame_refuted_shift) == per_frame_refuted_mask && (per_frame_refuted_mask & ~per_frame_mask) == 0 &&
+    (per_frame_refuted_mask & (per_frame_scene_hidden | per_frame_pre_ui_visible | per_frame_hold_reset)) == 0 &&
+    (per_frame_pre_ui_layer & (per_frame_refuted_mask | ~per_frame_mask)) == 0);
   // The game3d_native.hlsl define mirroring each flag.
-  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 8> hlsl_flag_defines{{
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 10> hlsl_flag_defines{{
     {"SUNSHINE_UI_STORED_PREMULTIPLIED", stored_premultiplied},
     {"SUNSHINE_UI_STORED_HDR_HEADROOM", stored_hdr_headroom},
     {"SUNSHINE_UI_STORED_LATE_LAYER", stored_late_layer},
-    {"SUNSHINE_UI_PER_FRAME_SCENE_HOLD", per_frame_scene_hold},
     {"SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT", per_frame_depth_not_current},
-    {"SUNSHINE_UI_PER_FRAME_SCENE_HOLD_HUDLESS", per_frame_scene_hold_hudless},
     {"SUNSHINE_UI_PER_FRAME_ACCEPTED_MISSING", per_frame_accepted_missing},
     {"SUNSHINE_UI_PER_FRAME_HOLD_RESET", per_frame_hold_reset},
+    {"SUNSHINE_UI_PER_FRAME_SCENE_HIDDEN", per_frame_scene_hidden},
+    {"SUNSHINE_UI_PER_FRAME_PRE_UI_VISIBLE", per_frame_pre_ui_visible},
+    {"SUNSHINE_UI_PER_FRAME_REFUTED_SHIFT", per_frame_refuted_shift},
+    {"SUNSHINE_UI_PER_FRAME_PRE_UI_LAYER", per_frame_pre_ui_layer},
+  }};
+
+  // H1 (docs/reshade-sbs.md, hidden-scene evidence): the informative full
+  // claims of one detection are candidate bits plus claim_pre_ui, a pre-UI
+  // scene image (the HUD-less image when offered, else the offscreen UI
+  // layer's colour) that the depth may describe instead of the presented
+  // frame. Decision word h1: bits 0-7 the S1 winner's source, h1_applied
+  // when H1 overrode it with source 8. Decision word pre_ui_scene_image: the
+  // image texel 6 measured.
+  inline constexpr std::uint32_t claim_pre_ui = 0x80u, h1_applied = 0x100u, h1_winner_mask = 0xffu;
+  static_assert((claim_pre_ui & (candidate::ui_alpha | candidate::ui_color | candidate::backbuffer | candidate::current |
+    candidate::hudless | candidate::exact | candidate::layer)) == 0 && (h1_applied & h1_winner_mask) == 0);
+  namespace pre_ui_image {
+    inline constexpr std::uint32_t none = 0u, hudless = 1u, layer = 2u;
+  }
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 4> hlsl_h1_defines{{
+    {"SUNSHINE_UI_CLAIM_PRE_UI", claim_pre_ui},
+    {"SUNSHINE_UI_H1_APPLIED", h1_applied},
+    {"SUNSHINE_UI_PRE_UI_IMAGE_HUDLESS", pre_ui_image::hudless},
+    {"SUNSHINE_UI_PRE_UI_IMAGE_LAYER", pre_ui_image::layer},
   }};
 
   // The T1 grace's GPU state (SunshineUIHoldStore, u5 of the detection reduce
@@ -150,11 +191,13 @@ namespace sunshine_game3d::ui_detection {
   inline constexpr std::string_view scene_evidence_images_marker = "SUNSHINE_UI_SCENE_EVIDENCE_IMAGES";
   inline constexpr std::uint32_t default_decision_texels = 5, default_scene_evidence_images = 0;
   // The CPU parses decision texels 0-4, 5-6 when the shader writes them, the
-  // layer's texel 7 from candidate layout 2, and the one-way judgment and
-  // frame reason texels 8-9 from selection revision 2. A statistics cell
-  // holds the luma of two images (presented, HUD-less).
+  // layer's texel 7 from candidate layout 2, the one-way judgment and frame
+  // reason texels 8-9 from selection revision 2, and the H1 texel 10 from
+  // selection revision 3. A statistics cell holds the luma of two images
+  // (presented, and the pre-UI scene image: HUD-less, else the UI layer).
   inline constexpr std::uint32_t min_decision_texels = 5, max_decision_texels = 16, max_scene_evidence_images = 2;
-  inline constexpr std::uint32_t scene_decision_texels = 7, layer_decision_texels = 8, judgment_decision_texels = 10;
+  inline constexpr std::uint32_t scene_decision_texels = 7, layer_decision_texels = 8, judgment_decision_texels = 10,
+    h1_decision_texels = 11;
 
   // Hidden-scene evidence D (docs/reshade-sbs.md, hidden-scene evidence),
   // mirrored by game3d_native.hlsl and inspect_game3d_dump.py: a grid of
@@ -167,16 +210,22 @@ namespace sunshine_game3d::ui_detection {
     inline constexpr std::uint32_t cells_x = 256, cells_y = 144, edge_px = 4, min_edges = 128;
     inline constexpr std::uint32_t hidden_percent = 15, visible_percent = 25;
     inline constexpr std::uint32_t luma_scale = 1u << 20, parallax_scale = 1u << 12;
-    // The hidden-scene gates' opacity and difference shares, in percent, and
-    // how long one valid hidden verdict holds its route.
+    // H1's opaque-full share (alpha of at least 254/255 on this percent of
+    // pixels) and the HUD-less pre-UI claim's changed share, in percent, and
+    // how long one hidden sample of a held verdict renews it (M5).
     inline constexpr std::uint32_t opaque_percent = 99, hudless_changed_percent = 90;
     inline constexpr std::uint64_t hold_ms = 500;
+    // CPU only (game3d_scene_guard.h): the offscreen layer is proven the
+    // presented frame without its UI by a sample whose presented frame does
+    // not read hidden and whose two D differ by at most this many hundredths.
+    inline constexpr std::uint32_t pre_ui_proof_percent = 3;
   }
 
   // Statistics texture, 16 columns: 112 rows of per-tile counts (rows 0-63
   // the alpha coverage, alpha invalid, HUD-less difference and lit/opaque
-  // groups; rows 64-79 the offscreen UI layer's covered, invalid and opaque
-  // pixels; from judgment_statistics_row the one-way judgment (A2) of the
+  // groups, row 48 .w the Backbuffer's opaque pixels; rows 64-79 the
+  // offscreen UI layer's covered, invalid and opaque pixels and .w the
+  // current alpha's opaque pixels; from judgment_statistics_row the one-way judgment (A2) of the
   // layer, Backbuffer and current alpha: rows 80-95 their strong pixels,
   // alpha of at least 1/2, and rows 96-111 the strong pixels where an exact
   // pair's HUD-less image is lit and unchanged), then, with scene evidence,
@@ -218,9 +267,10 @@ namespace sunshine_game3d::ui_detection {
     inline constexpr std::size_t alpha_opaque = 18;
     // Texel 5, the presented image's hidden-scene evidence {n, asuint(D),
     // valid | ran << 1 | verdict << 2, decided comparisons (wins + losses)},
-    // and texel 6, the HUD-less image's {n, asuint(D), valid | ran << 1, 0}.
+    // and texel 6, the pre-UI scene image's {n, asuint(D), valid | ran << 1,
+    // image (pre_ui_image)}, all zero when no pre-UI image is offered.
     inline constexpr std::size_t scene_n = 20, scene_d = 21, scene_state = 22, scene_decided = 23;
-    inline constexpr std::size_t hudless_scene_n = 24, hudless_scene_d = 25, hudless_scene_state = 26;
+    inline constexpr std::size_t pre_ui_scene_n = 24, pre_ui_scene_d = 25, pre_ui_scene_state = 26, pre_ui_scene_image = 27;
     // Texel 7 (layout 2): the offscreen UI layer's covered, invalid (out of
     // range or beyond the premultiplied bound) and opaque pixels, and the
     // offered candidates that passed V1/V2, in candidate-bit positions.
@@ -232,10 +282,16 @@ namespace sunshine_game3d::ui_detection {
     // candidate bit of the own decision (F1, zero when it decided), and the
     // frame reason word (frame_reason_decided, frame_reason_reused).
     inline constexpr std::size_t strong = 32, refused = 35, contradicted = 36, frame_reason = 39;
+    // Texel 10 (selection revision 3, H1): pixels with alpha of at least
+    // 254/255 in the Backbuffer and the current alpha, the raw informative
+    // claims before refutation (candidate bits | claim_pre_ui), and the h1
+    // word (the S1 winner's source | h1_applied).
+    inline constexpr std::size_t opaque_backbuffer = 40, opaque_current = 41, claims = 42, h1 = 43;
   }
   static_assert(decision_word::alpha_opaque + 1 < 4 * min_decision_texels &&
-    decision_word::hudless_scene_state < 4 * scene_decision_texels && decision_word::valid_bits < 4 * layer_decision_texels &&
-    decision_word::frame_reason == 4 * judgment_decision_texels - 1);
+    decision_word::pre_ui_scene_image < 4 * scene_decision_texels && decision_word::valid_bits < 4 * layer_decision_texels &&
+    decision_word::frame_reason == 4 * judgment_decision_texels - 1 && decision_word::h1 == 4 * h1_decision_texels - 1 &&
+    h1_decision_texels <= max_decision_texels);
   enum class scene_verdict : std::uint32_t { none = 0, hidden = 1, ambiguous = 2, visible = 3 };
   inline const char *name(scene_verdict value) {
     switch (value) {
@@ -248,68 +304,15 @@ namespace sunshine_game3d::ui_detection {
   constexpr bool scene_state_valid(std::uint32_t state) { return (state & 1u) != 0; }
   constexpr bool scene_state_ran(std::uint32_t state) { return (state & 2u) != 0; }
   constexpr scene_verdict scene_state_verdict(std::uint32_t state) { return scene_verdict((state >> 2) & 3u); }
-  // Whether a D value, valid evidence, reads visible: the HUD-less route's
-  // test, which its texel carries no verdict for.
+  // Whether a D value, valid evidence, reads visible: the test of the pre-UI
+  // scene image, whose texel carries no verdict.
   constexpr bool scene_visible(float d) { return d * 100.f >= float(scene::visible_percent); }
-
-  // The hidden-scene gates of one detection, from its counts, as
-  // SunshineUIDetectionReduceCS opens them: no source 1-6 or 10 decided
-  // (sources 8 and 9 are these gates acting), and an unaccepted UIAlpha or
-  // offscreen UI layer whose alpha is at least 254/255 on opaque_percent of
-  // pixels without an invalid pixel (layer route), or a HUD-less image
-  // differing from the frame on hudless_changed_percent of pixels (HUD-less
-  // route). The inputs are the offered UIAlpha (candidate::ui_alpha) and layer
-  // (candidate::layer); invalid and opaque hold their counts in that order.
-  // Per slot (bit 1 UIAlpha, bit 2 UI layer), layer_slots are the slots that
-  // opened the layer route, and overlay_slots the V1-valid inputs below that
-  // opacity: transparent somewhere, so an overlay rather than a scene buffer.
-  // An invalid layer, such as the SDR scene image Stellar Blade draws into its
-  // cleared UI target, is neither.
-  struct scene_gates {
-    bool layer{}, hudless{};
-    std::uint32_t layer_slots{}, overlay_slots{};
-  };
-  constexpr scene_gates scene_gates_of(std::uint32_t source, std::uint32_t offered, std::uint32_t accepted,
-      std::uint64_t pixels, const std::array<std::uint32_t, 2> &invalid, const std::array<std::uint32_t, 2> &opaque,
-      std::uint64_t hudless_changed) {
-    if (!pixels) return {};
-    const std::uint32_t inputs = ((offered & candidate::ui_alpha) ? 1u : 0u) | ((offered & candidate::layer) ? 2u : 0u);
-    const std::uint32_t unaccepted = ((accepted & candidate::ui_alpha) ? 0u : 1u) | ((accepted & candidate::layer) ? 0u : 2u);
-    std::uint32_t opaque_slots = 0, valid_slots = 0, clean_slots = 0;
-    for (std::uint32_t slot = 0; slot != 2; ++slot) {
-      if (std::uint64_t(opaque[slot]) * 100u >= pixels * scene::opaque_percent) opaque_slots |= 1u << slot;
-      if (std::uint64_t(invalid[slot]) * 100u <= pixels) valid_slots |= 1u << slot;
-      if (!invalid[slot]) clean_slots |= 1u << slot;
-    }
-    scene_gates gates;
-    gates.overlay_slots = inputs & valid_slots & ~opaque_slots;
-    if (source && source != 8u && source != 9u) return gates;
-    gates.layer_slots = inputs & unaccepted & opaque_slots & clean_slots;
-    gates.layer = gates.layer_slots != 0;
-    gates.hudless = (offered & candidate::hudless) && hudless_changed * 100u >= pixels * scene::hudless_changed_percent;
-    return gates;
+  // The verdict of a D value of valid evidence, as SunshineSceneEvidenceCS
+  // reads the presented image's.
+  constexpr scene_verdict scene_verdict_of(float d) {
+    return d * 100.f < float(scene::hidden_percent) ? scene_verdict::hidden :
+      scene_visible(d) ? scene_verdict::visible : scene_verdict::ambiguous;
   }
-  static_assert(scene_gates_of(0, 0x40, 0, 100, {}, {0, 99}, 0).layer && !scene_gates_of(0, 2, 0, 100, {}, {0, 100}, 0).layer &&
-    !scene_gates_of(0, 0x40, 0x40, 100, {}, {0, 100}, 0).layer && !scene_gates_of(10, 0x40, 0, 100, {}, {0, 100}, 0).layer &&
-    !scene_gates_of(0, 0x40, 0, 100, {0, 1}, {0, 100}, 0).layer && scene_gates_of(0, 1, 0, 100, {}, {99, 0}, 0).layer &&
-    scene_gates_of(9, 16, 0, 100, {}, {}, 90).hudless && !scene_gates_of(0, 16, 0, 100, {}, {}, 89).hudless &&
-    scene_gates_of(0, 0x41, 0, 100, {}, {100, 98}, 0).layer_slots == 1u &&
-    scene_gates_of(2, 0x41, 0x41, 100, {}, {100, 98}, 0).overlay_slots == 2u &&
-    scene_gates_of(0, 0x40, 0, 100, {0, 2}, {0, 0}, 0).overlay_slots == 0u &&
-    scene_gates_of(0, 0x40, 0, 100, {0, 1}, {0, 0}, 0).overlay_slots == 2u);
-
-  // What identifies the hidden-scene routes' inputs: the offered UIAlpha and
-  // layer candidates, their acceptance and the layer slot's stored flags. A
-  // held route clears when they change. A UI color tag, or a HUD-less image
-  // that frame generation pairs on some Presents only, changes nothing here;
-  // each frame's own gate still decides whether a held route acts on it.
-  constexpr std::uint64_t scene_route_key(std::uint32_t offered, std::uint32_t stored_flags, std::uint32_t accepted) {
-    constexpr std::uint32_t inputs = candidate::ui_alpha | candidate::layer;
-    return std::uint64_t(stored_flags & stored_mask) << 32 | std::uint64_t(accepted & inputs) << 8 | (offered & inputs);
-  }
-  static_assert(scene_route_key(0x40u | 16u, 5u, 0u) == scene_route_key(0x40u | 48u, 5u, 0u) &&
-    scene_route_key(0x40u | 2u, 5u, 0u) == scene_route_key(0x40u, 5u, 0u) &&
-    scene_route_key(0x40u, 5u, 0u) != scene_route_key(0x40u, 5u, 0x40u) &&
-    scene_route_key(0x40u, 5u, 0u) != scene_route_key(0x40u, 0u, 0u) &&
-    scene_route_key(1u, 0u, 0u) != scene_route_key(1u, 0u, 1u) && scene_route_key(1u, 0u, 2u) == scene_route_key(1u, 0u, 0u));
+  static_assert(scene_verdict_of(.149f) == scene_verdict::hidden && scene_verdict_of(.15f) == scene_verdict::ambiguous &&
+    scene_verdict_of(.25f) == scene_verdict::visible && scene_verdict_of(-1.f) == scene_verdict::hidden);
 }

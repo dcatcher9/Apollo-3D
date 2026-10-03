@@ -468,6 +468,47 @@ class GameDumpReaderTest(unittest.TestCase):
         self.assertEqual(presented["verdict"], "visible")
         self.assertGreaterEqual(presented["n"], reader.SCENE_MIN_EDGES)
 
+    def test_scene_evidence_reads_the_pre_ui_image_beside_the_presented_frame(self):
+        # A settings menu presented over a hidden scene: the presented frame is a flat panel, while the cleared UI
+        # layer still holds the pre-UI scene at alpha 0 (Stellar Blade SDR) or a HUD-less image shows it.
+        height, width = self.SCENE_SIZE
+        raw, discs = self.scene_inputs()
+        gray = np.where(discs, 192, 64)[..., None]
+        scene = (gray * np.array([1, 1, 1, 0])).astype(np.uint8)
+        menu = np.full((height, width, 4), (90, 90, 90, 255), np.uint8)
+
+        def write(kind, payload, fmt):
+            (self.root / (kind + ".bin")).write_bytes(payload)
+            return dict(kind=kind, file=kind + ".bin", dxgi_format=fmt, width=width, height=height,
+                        row_bytes=len(payload) // height, byte_count=len(payload))
+
+        census = dict(candidates=[dict(kind="ui_layer_candidate_0", active=True, dxgi_format=87)])
+        metadata = dict(color_space=1, replay=dict(parameter_hex=self.scene_parameters().hex()), ui_layer_census=census)
+        base = [write("raw_depth", raw.astype("<f4").tobytes(), 41), write("source_color", menu.tobytes(), 28),
+                write("ui_layer_candidate_0", scene[:, :, [2, 1, 0, 3]].tobytes(), 87)]
+        for artifacts, image, artifact in ((base, "layer", "ui_layer_candidate_0"),
+                                           (base + [write("sl_hudless_color", scene.tobytes(), 28)], "hudless",
+                                            "sl_hudless_color")):
+            with self.subTest(image=image):
+                (self.root / "manifest.json").write_text(json.dumps(dict(
+                    schema="sunshine.game3d.dump.v1", status="complete", artifacts=artifacts,
+                    producer_metadata=metadata)))
+                evidence = reader.dump_scene_evidence(self.root)
+                self.assertEqual(evidence["presented"]["verdict"], "hidden")
+                self.assertEqual((evidence["pre_ui"]["image"], evidence["pre_ui"]["artifact"]), (image, artifact))
+                self.assertEqual(evidence["pre_ui"]["verdict"], "visible")
+                self.assertGreater(evidence["pre_ui"]["d"], .9)
+                # The HUD-less key stays for compatibility, only when the HUD-less image is the pre-UI image.
+                self.assertEqual("hudless" in evidence, image == "hudless")
+                if image == "hudless":
+                    self.assertEqual(evidence["hudless"]["d"], evidence["pre_ui"]["d"])
+                    self.assertNotIn("image", evidence["hudless"])
+        # Without a HUD-less image or an active census layer there is no pre-UI image.
+        (self.root / "manifest.json").write_text(json.dumps(dict(
+            schema="sunshine.game3d.dump.v1", status="complete", artifacts=base[:2],
+            producer_metadata=dict(metadata, ui_layer_census=dict(candidates=[])))))
+        self.assertEqual(set(reader.dump_scene_evidence(self.root)), {"presented"})
+
     def test_cli_creates_review_and_report_without_overwriting_evidence(self):
         source = self.artifact("source_color", [1, 2, 3, 0, 4, 5, 6, 255], fmt=28, channels=4)
         (self.root / "manifest.json").write_text(json.dumps(dict(

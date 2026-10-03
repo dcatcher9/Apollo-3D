@@ -29,17 +29,17 @@
 // Automatic UI detection writes this many decision texels; its statistics
 // rows hold the cells of this many scene-evidence images (docs/reshade-sbs.md,
 // UI detection flags and decision texels).
-#define SUNSHINE_UI_DECISION_TEXELS 10
+#define SUNSHINE_UI_DECISION_TEXELS 11
 #define SUNSHINE_UI_SCENE_EVIDENCE_IMAGES 2
 // Candidate layout 2 (UI framework S1, E1), mirrored from
 // game3d_ui_detection_contract.h: every candidate has its own slot and bit in
 // Sunshine_UICandidates and Sunshine_UIAcceptedCandidates; the offscreen UI
 // layer (t7) never shares the UI color tag's slot (t12) and decides as source
 // 10. SunshineUIDetectionReduceCS ports ui_selection::decide
-// (game3d_ui_selection.h) line for line, the T1 grace and its hold store
-// included; this revision must equal ui_selection::revision.
+// (game3d_ui_selection.h) line for line, the T1 grace and its hold store and
+// the H1 override included; this revision must equal ui_selection::revision.
 #define SUNSHINE_UI_CANDIDATE_LAYOUT 2
-#define SUNSHINE_UI_SELECTION_REVISION 2
+#define SUNSHINE_UI_SELECTION_REVISION 3
 #define SUNSHINE_UI_CANDIDATE_UI_ALPHA 0x1u
 #define SUNSHINE_UI_CANDIDATE_UI_COLOR 0x2u
 #define SUNSHINE_UI_CANDIDATE_BACKBUFFER 0x4u
@@ -52,8 +52,8 @@
 // mirrored from game3d_ui_detection_contract.h: a grid of cells over the
 // frame, the parallax step of a depth edge in pixels per 2160 rows, the edge
 // cells valid evidence needs, the hidden and visible bounds of D in percent,
-// the fixed point of the cell sums, and the gates' shares of nearly opaque
-// and of changed pixels in percent.
+// the fixed point of the cell sums, and H1's shares of nearly opaque pixels
+// (opaque-full) and of changed pixels (a HUD-less pre-UI claim) in percent.
 #define SUNSHINE_UI_SCENE_CELLS_X 256
 #define SUNSHINE_UI_SCENE_CELLS_Y 144
 #define SUNSHINE_UI_SCENE_EDGE_PX 4
@@ -151,7 +151,7 @@ Texture2D<float> SunshineHostFinalSampler : register(t5);
 // the color a HUD-less image is paired with. Read by scene evidence only.
 Texture2D<float4> SunshinePresentedColor : register(t6);
 // The offscreen UI layer candidate (SUNSHINE_UI_CANDIDATE_LAYER); read by
-// automatic detection only.
+// automatic detection and, as a pre-UI scene image, by scene evidence only.
 Texture2D<float4> SunshineUILayer : register(t7);
 Texture2D<float> SunshineUIPlaneTilesSampler : register(t8);
 Texture2D<float> SunshineUIPlaneResolvedSampler : register(t9);
@@ -164,20 +164,34 @@ Texture2D<float4> SunshineHUDless : register(t14);
 // decision texels), mirrored from game3d_ui_detection_contract.h. Stored bits
 // describe the offscreen UI layer slot (t7): it must pass the premultiplied
 // bound, with a float layer's HDR headroom, and is the one-frame-late copy.
-// Per-frame bits ride in one render's pushed word only: the CPU holds a
-// hidden-scene verdict for the layer or the HUD-less route, the consumed
-// depth is not this frame's, an accepted candidate of the previous real
-// frame is missing (T1), or no previous real decision exists in this chain,
-// so the hold store reads as none (T1).
+// Per-frame bits ride in one render's pushed word only: the consumed depth
+// is not this frame's, an accepted candidate of the previous real frame is
+// missing (T1), no previous real decision exists in this chain, so the hold
+// store reads as none (T1), the CPU holds a hidden verdict of D on the
+// presented frame (H1), its samples read the pre-UI scene image visible
+// (H1), and, from bit SUNSHINE_UI_PER_FRAME_REFUTED_SHIFT, the candidate
+// bits whose full claims a visible verdict refuted (H1); the evidence passes
+// measure the layer as the pre-UI image beside an offered HUD-less image
+// (H1 d, the CPU's proof of the layer).
 #define SUNSHINE_UI_STORED_PREMULTIPLIED 0x1u
 #define SUNSHINE_UI_STORED_HDR_HEADROOM 0x2u
 #define SUNSHINE_UI_STORED_LATE_LAYER 0x4u
-// 0x8u (stored) and 0x20000u (per-frame) are reserved and never reused.
-#define SUNSHINE_UI_PER_FRAME_SCENE_HOLD 0x10000u
+// 0x8u (stored), 0x10000u, 0x20000u and 0x80000u (per-frame) are reserved
+// and never reused.
 #define SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT 0x40000u
-#define SUNSHINE_UI_PER_FRAME_SCENE_HOLD_HUDLESS 0x80000u
 #define SUNSHINE_UI_PER_FRAME_ACCEPTED_MISSING 0x100000u
 #define SUNSHINE_UI_PER_FRAME_HOLD_RESET 0x200000u
+#define SUNSHINE_UI_PER_FRAME_SCENE_HIDDEN 0x400000u
+#define SUNSHINE_UI_PER_FRAME_PRE_UI_VISIBLE 0x800000u
+#define SUNSHINE_UI_PER_FRAME_REFUTED_SHIFT 24
+#define SUNSHINE_UI_PER_FRAME_PRE_UI_LAYER 0x20000000u
+// H1, mirrored from game3d_ui_detection_contract.h: the pre-UI scene image's
+// claim bit beside the candidate bits, the h1 word's applied bit above the
+// S1 winner's source, and the pre-UI image of decision texel 6 .w.
+#define SUNSHINE_UI_CLAIM_PRE_UI 0x80u
+#define SUNSHINE_UI_H1_APPLIED 0x100u
+#define SUNSHINE_UI_PRE_UI_IMAGE_HUDLESS 1
+#define SUNSHINE_UI_PRE_UI_IMAGE_LAYER 2
 // The T1 hold store (SunshineUIHoldStore), mirrored from
 // game3d_ui_detection_contract.h: texels {state, applied source, applied
 // covered} of the last real detection, state none, own or spent; and the
@@ -259,10 +273,12 @@ float SunshineHUDlessDifference(uint2 xy, out bool valid)
 groupshared uint4 SunshineUIDetectionCoverage[256];
 groupshared uint4 SunshineUIDetectionInvalid[256];
 groupshared uint4 SunshineUIDetectionDifference[256];
-// Lit HUD-less pixels, then nearly opaque pixels of UIAlpha and the UI color tag.
-groupshared uint3 SunshineUIDetectionLit[256];
-// The offscreen UI layer's covered, invalid and nearly opaque pixels.
-groupshared uint3 SunshineUIDetectionLayer[256];
+// Lit HUD-less pixels, then nearly opaque pixels of UIAlpha, the UI color tag
+// and the Backbuffer.
+groupshared uint4 SunshineUIDetectionLit[256];
+// The offscreen UI layer's covered, invalid and nearly opaque pixels, then
+// the current alpha's nearly opaque pixels.
+groupshared uint4 SunshineUIDetectionLayer[256];
 // The one-way judgment (A2) of the layer, Backbuffer and current alpha:
 // strong pixels (alpha of at least 1/2), and those where an offered exact
 // pair's HUD-less image is lit and unchanged; neither for the one-frame-late
@@ -274,8 +290,8 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
 {
     uint2 first = group.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
     uint2 last = (group.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
-    uint4 coverage = 0u, invalid = 0u, difference = 0u;
-    uint3 lit = 0u, layerCounts = 0u, strong = 0u, contradicted = 0u;
+    uint4 coverage = 0u, invalid = 0u, difference = 0u, lit = 0u, layerCounts = 0u;
+    uint3 strong = 0u, contradicted = 0u;
     // An offscreen layer is UI only when blended over transparent black: its
     // color stays within a small multiple of its alpha (V1's premultiplied
     // bound, cleared layers only). UI tinted brighter than white (Stellar
@@ -297,9 +313,11 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         bool4 okay = isfinite(a) && a >= 0.0 && a <= 1.0;
         coverage += uint4(okay && a > 0.0);
         invalid += uint4(!okay);
-        // The hidden-scene gate's opacity and the overlay test: UIAlpha or
-        // UI color alpha of at least 254/255.
-        lit.yz += uint2(okay.xy && a.xy >= 254.0 / 255.0);
+        // H1's opaque-full test: UIAlpha, UI color, Backbuffer and current
+        // alpha of at least 254/255 (finite and in range).
+        uint4 opaque = uint4(okay && a >= 254.0 / 255.0);
+        lit.yzw += opaque.xyz;
+        layerCounts.w += opaque.w;
         float4 layer = SunshineUILayer.Load(int3(x, y, 0));
         bool layerOkay = isfinite(layer.a) && layer.a >= 0.0 && layer.a <= 1.0;
         bool layerBound = premultiplied && max(max(layer.r, layer.g), layer.b) > layer.a * headroom + 4.0 / 255.0;
@@ -356,8 +374,8 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         SunshineAlphaCoverageStore[group.xy] = SunshineUIDetectionCoverage[0];
         SunshineAlphaCoverageStore[group.xy + uint2(0,16)] = SunshineUIDetectionInvalid[0];
         SunshineAlphaCoverageStore[group.xy + uint2(0,32)] = SunshineUIDetectionDifference[0];
-        SunshineAlphaCoverageStore[group.xy + uint2(0,48)] = uint4(SunshineUIDetectionLit[0], 0u);
-        SunshineAlphaCoverageStore[group.xy + uint2(0,64)] = uint4(SunshineUIDetectionLayer[0], 0u);
+        SunshineAlphaCoverageStore[group.xy + uint2(0,48)] = SunshineUIDetectionLit[0];
+        SunshineAlphaCoverageStore[group.xy + uint2(0,64)] = SunshineUIDetectionLayer[0];
         SunshineAlphaCoverageStore[group.xy + uint2(0,SUNSHINE_UI_JUDGMENT_ROW)] = uint4(SunshineUIDetectionStrong[0], 0u);
         SunshineAlphaCoverageStore[group.xy + uint2(0,SUNSHINE_UI_JUDGMENT_ROW + 16u)] =
             uint4(SunshineUIDetectionContradicted[0], 0u);
@@ -388,8 +406,8 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     SunshineUIDetectionCoverage[lane] = SunshineUIDetectionSampler.Load(int3(tile, 0));
     SunshineUIDetectionInvalid[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 16u, 0));
     SunshineUIDetectionDifference[lane] = d;
-    SunshineUIDetectionLit[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 48u, 0)).xyz;
-    SunshineUIDetectionLayer[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 64u, 0)).xyz;
+    SunshineUIDetectionLit[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 48u, 0));
+    SunshineUIDetectionLayer[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 64u, 0));
     SunshineUIDetectionStrong[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + SUNSHINE_UI_JUDGMENT_ROW, 0)).xyz;
     SunshineUIDetectionContradicted[lane] =
         SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + SUNSHINE_UI_JUDGMENT_ROW + 16u, 0)).xyz;
@@ -413,7 +431,9 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     uint4 difference = SunshineUIDetectionDifference[0];
     uint matching_tiles = SunshineUIDetectionMatching[0], lit = SunshineUIDetectionLit[0].x;
     uint2 opaque = SunshineUIDetectionLit[0].yz;
-    uint3 layer = SunshineUIDetectionLayer[0]; // covered, invalid, opaque
+    uint3 layer = SunshineUIDetectionLayer[0].xyz; // covered, invalid, opaque
+    // Nearly opaque pixels of the Backbuffer and the current alpha (H1).
+    const uint opaque_backbuffer = SunshineUIDetectionLit[0].w, opaque_current = SunshineUIDetectionLayer[0].w;
     // A2 one-way counts of the layer, Backbuffer and current alpha.
     uint3 strong = SunshineUIDetectionStrong[0], contradicted = SunshineUIDetectionContradicted[0];
     const uint pixels = difference.w;
@@ -459,43 +479,75 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // scene-wide one.
     const bool block = (offered & accepted & declared_alpha_bits) != 0u;
     const uint eligible = offered & accepted & valid & (block ? ~inferred_alpha_bits : 0xffffffffu);
-    uint source = 0u, covered = 0u;
-    if (eligible & SUNSHINE_UI_CANDIDATE_UI_ALPHA) { source = 1u; covered = coverage.x; }
-    else if (eligible & SUNSHINE_UI_CANDIDATE_UI_COLOR) { source = 2u; covered = coverage.y; }
-    else if (eligible & SUNSHINE_UI_CANDIDATE_LAYER) { source = SUNSHINE_UI_SOURCE_LAYER; covered = layer.x; }
-    else if (eligible & SUNSHINE_UI_CANDIDATE_BACKBUFFER) { source = 3u; covered = coverage.z; }
-    else if (eligible & SUNSHINE_UI_CANDIDATE_CURRENT) { source = 4u; covered = coverage.w; }
+    uint source = 0u, covered = 0u, winner_opaque = 0u;
+    if (eligible & SUNSHINE_UI_CANDIDATE_UI_ALPHA) { source = 1u; covered = coverage.x; winner_opaque = opaque.x; }
+    else if (eligible & SUNSHINE_UI_CANDIDATE_UI_COLOR) { source = 2u; covered = coverage.y; winner_opaque = opaque.y; }
+    else if (eligible & SUNSHINE_UI_CANDIDATE_LAYER) {
+        source = SUNSHINE_UI_SOURCE_LAYER; covered = layer.x; winner_opaque = layer.z;
+    }
+    else if (eligible & SUNSHINE_UI_CANDIDATE_BACKBUFFER) { source = 3u; covered = coverage.z; winner_opaque = opaque_backbuffer; }
+    else if (eligible & SUNSHINE_UI_CANDIDATE_CURRENT) { source = 4u; covered = coverage.w; winner_opaque = opaque_current; }
     else if (eligible & SUNSHINE_UI_CANDIDATE_HUDLESS) {
         if (partial_set) { source = 5u; covered = difference.x; }
         else { source = 6u; covered = pixels; }
     }
-    // A hidden scene (docs/reshade-sbs.md, hidden-scene evidence). When no
-    // source decided, an unaccepted UIAlpha or offscreen UI layer nearly
-    // opaque almost everywhere without an invalid pixel opens the layer
-    // route, and a HUD-less image differing from the frame almost everywhere
-    // the HUD-less route. Either is full-frame UI only while the CPU holds
-    // that route's verdict that the presented frame lacks the depth's edges
-    // (8 layer, 9 HUD-less). The evidence passes only measure; this frame's
-    // own gate still has to be open.
-    const uint unaccepted = offered & ~accepted;
-    const bool alpha_gate = !source && (unaccepted & SUNSHINE_UI_CANDIDATE_UI_ALPHA) && !invalid.x &&
-        opaque.x * 100u >= pixels * SUNSHINE_UI_SCENE_OPAQUE_PERCENT;
-    const bool layer_gate = alpha_gate || (!source && (unaccepted & SUNSHINE_UI_CANDIDATE_LAYER) && !layer.y &&
-        layer.z * 100u >= pixels * SUNSHINE_UI_SCENE_OPAQUE_PERCENT);
-    const bool hudless_gate = !source && (offered & SUNSHINE_UI_CANDIDATE_HUDLESS) &&
-        difference.x * 100u >= pixels * SUNSHINE_UI_SCENE_HUDLESS_CHANGED_PERCENT;
-    if (layer_gate && (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_SCENE_HOLD)) {
-        source = 8u; covered = pixels;
-    } else if (hudless_gate && (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_SCENE_HOLD_HUDLESS)) {
-        source = 9u; covered = pixels;
+    // H1, a hidden scene (docs/reshade-sbs.md, hidden-scene evidence): the
+    // informative full claims of this frame are (a) an alpha S1 may select
+    // (eligible: accepted, valid and not kept out by the declared-alpha
+    // block) that is opaque-full (alpha of at least 254/255 on 99% of
+    // pixels), (b)
+    // the valid, opaque-full offscreen UI layer, a target proven cleared to
+    // transparent, accepted or not, (c) an exact full change set, accepted or
+    // not, and (d) a pre-UI scene image: the HUD-less image changed on 90% of
+    // pixels, or else a V1-invalid layer (colour without alpha, the scene the
+    // UI is drawn over). An unaccepted UIAlpha, UI color tag, Backbuffer or
+    // current alpha is never informative. A claim acts unless the CPU refuted
+    // its signature, and (d) only while the CPU's samples read the pre-UI
+    // image visible (for the layer, only once it proved to be the presented
+    // frame without its UI). While the CPU holds a hidden verdict of D on the
+    // presented frame and the depth is this frame's, an acting claim shows
+    // the frame flat (source 8), whatever S1 selected, unless the S1 winner
+    // is already flat everywhere (source 6, or an alpha winner opaque on
+    // every pixel). The evidence passes only measure.
+    const uint s1_source = source;
+    const uint opaque_needed = pixels * SUNSHINE_UI_SCENE_OPAQUE_PERCENT;
+    uint claims = 0u;
+    if (pixels) {
+        if ((eligible & SUNSHINE_UI_CANDIDATE_UI_ALPHA) && opaque.x * 100u >= opaque_needed)
+            claims |= SUNSHINE_UI_CANDIDATE_UI_ALPHA;
+        if ((eligible & SUNSHINE_UI_CANDIDATE_UI_COLOR) && opaque.y * 100u >= opaque_needed)
+            claims |= SUNSHINE_UI_CANDIDATE_UI_COLOR;
+        if ((valid & SUNSHINE_UI_CANDIDATE_LAYER) && layer.z * 100u >= opaque_needed) claims |= SUNSHINE_UI_CANDIDATE_LAYER;
+        if ((eligible & SUNSHINE_UI_CANDIDATE_BACKBUFFER) && opaque_backbuffer * 100u >= opaque_needed)
+            claims |= SUNSHINE_UI_CANDIDATE_BACKBUFFER;
+        if ((eligible & SUNSHINE_UI_CANDIDATE_CURRENT) && opaque_current * 100u >= opaque_needed)
+            claims |= SUNSHINE_UI_CANDIDATE_CURRENT;
     }
+    if (full_set && (valid & SUNSHINE_UI_CANDIDATE_HUDLESS)) claims |= SUNSHINE_UI_CANDIDATE_HUDLESS;
+    const uint image = (offered & SUNSHINE_UI_CANDIDATE_HUDLESS) ? SUNSHINE_UI_PRE_UI_IMAGE_HUDLESS :
+        (offered & SUNSHINE_UI_CANDIDATE_LAYER) ? SUNSHINE_UI_PRE_UI_IMAGE_LAYER : 0u;
+    if (pixels && ((image == SUNSHINE_UI_PRE_UI_IMAGE_HUDLESS &&
+            difference.x * 100u >= pixels * SUNSHINE_UI_SCENE_HUDLESS_CHANGED_PERCENT) ||
+            (image == SUNSHINE_UI_PRE_UI_IMAGE_LAYER && !(valid & SUNSHINE_UI_CANDIDATE_LAYER))))
+        claims |= SUNSHINE_UI_CLAIM_PRE_UI;
+    const uint refuted = (Sunshine_UIDetectionFlags >> SUNSHINE_UI_PER_FRAME_REFUTED_SHIFT) & candidate_bits;
+    const uint acting = (claims & candidate_bits & ~refuted) |
+        ((Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_PRE_UI_VISIBLE) ? (claims & SUNSHINE_UI_CLAIM_PRE_UI) : 0u);
+    const bool alpha_winner = (source >= 1u && source <= 4u) || source == SUNSHINE_UI_SOURCE_LAYER;
+    const bool winner_full = source == 6u || (alpha_winner && pixels && winner_opaque == pixels);
+    const bool h1 = acting && (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_SCENE_HIDDEN) &&
+        !(Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT) && !winner_full;
+    if (h1) { source = 8u; covered = pixels; }
+    const uint unaccepted = offered & ~accepted;
     // F1: without a source, the first reason that applies and the candidate
-    // it refused, the first in draw order that matches it.
+    // it refused, the first in draw order that matches it. An acting claim
+    // that H1 did not apply refuses its first claimant, the pre-UI image
+    // alone its image (HUD-less when offered, else the layer).
     uint none_reason = SUNSHINE_UI_NONE_OTHER, refused = 0u;
-    if (layer_gate || hudless_gate) {
+    if (acting) {
         none_reason = SUNSHINE_UI_NONE_GATE_NO_HOLD;
-        refused = alpha_gate ? SUNSHINE_UI_CANDIDATE_UI_ALPHA : layer_gate ? SUNSHINE_UI_CANDIDATE_LAYER :
-            SUNSHINE_UI_CANDIDATE_HUDLESS;
+        refused = SunshineUIFirstCandidate(acting & candidate_bits);
+        if (!refused) refused = (offered & SUNSHINE_UI_CANDIDATE_HUDLESS) ? SUNSHINE_UI_CANDIDATE_HUDLESS : SUNSHINE_UI_CANDIDATE_LAYER;
     } else if (block && (offered & accepted & valid & inferred_alpha_bits)) {
         none_reason = SUNSHINE_UI_NONE_PRESENTED_BLOCKED;
         refused = SunshineUIFirstCandidate(offered & accepted & valid & inferred_alpha_bits);
@@ -561,7 +613,7 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     if (!applied) InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_NONE + none_reason, 0u)], 1u);
     if (inferred && !(accepted & inferred_bit))
         InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_UNTRUSTED_INFERRED, 0u)], 1u);
-    if ((source == 5u || source == 9u) && (offered & pair_bits) == SUNSHINE_UI_CANDIDATE_HUDLESS)
+    if (source == 5u && (offered & pair_bits) == SUNSHINE_UI_CANDIDATE_HUDLESS)
         InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_INEXACT_DIFFERENCE, 0u)], 1u);
     if (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT)
         InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DEPTH_NOT_CURRENT, 0u)], 1u);
@@ -587,6 +639,10 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     SunshineAlphaCoverageStore[uint2(8,0)] = uint4(strong, refused);
     // The mask pass keeps the previous real frame's mask when reused.
     SunshineAlphaCoverageStore[uint2(9,0)] = uint4(contradicted, frame_reason | (reused ? SUNSHINE_UI_FRAME_REASON_REUSED : 0u));
+    // H1: the opaque Backbuffer and current counts, the raw claims before
+    // refutation, and the S1 winner with the applied bit.
+    SunshineAlphaCoverageStore[uint2(10,0)] = uint4(opaque_backbuffer, opaque_current, claims,
+        s1_source | (h1 ? SUNSHINE_UI_H1_APPLIED : 0u));
 }
 [numthreads(8, 8, 1)]
 void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
@@ -598,8 +654,8 @@ void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
     uint source = SunshineUIDetectionSampler.Load(int3(0,0,0)).x;
     float mask = 0.0;
     int3 at = int3(id.xy, 0);
-    // Full-frame UI: the whole frame pins.
-    if (source == 6u || source == 8u || source == 9u) mask = 1.0;
+    // Full-frame UI (a full change set, or H1): the whole frame pins.
+    if (source == 6u || source == 8u) mask = 1.0;
     // Otherwise load only the selected candidate's raw mask (the same channel
     // the tiles pass reads).
     else if (source == 1u) mask = SunshineUIDedicatedAlpha.Load(at).r;
@@ -727,12 +783,13 @@ float SunshineCameraDepth(float rawDepth)
 }
 
 // Hidden-scene evidence (docs/reshade-sbs.md, hidden-scene evidence). It
-// measures whether the presented color, and a HUD-less image when one is
-// offered, show the consumed depth's edges; it never decides a mask. The
-// renderer dispatches these passes after detection on sample frames only, the
-// CPU owns the verdict, and SunshineUIDetectionReduceCS acts on a held verdict
-// while its gate is open. inspect_game3d_dump.py holds the same statistic as
-// a CPU oracle.
+// measures whether the presented color, and the pre-UI scene image (a
+// HUD-less image when one is offered, else the offscreen UI layer's colour),
+// show the consumed depth's edges; it never decides a mask. The renderer
+// dispatches these passes after detection on sample frames only, the CPU
+// holds the verdict (game3d_scene_guard.h), and SunshineUIDetectionReduceCS
+// applies H1 under a held verdict while an informative claim acts.
+// inspect_game3d_dump.py holds the same statistic as a CPU oracle.
 //
 // Output pixel x lies in cell column floor(x * 256 / width), row y in cell row
 // floor(y * 144 / height). Each cell sums its pixels' perceptual luma and
@@ -796,11 +853,23 @@ int SunshineSceneParallax(uint2 xy)
     float parallax = clamp(-clamp(displacement, -1.5, 2.5) * (BUFFER_HEIGHT / 2160.0 * 100.0), -limit, limit);
     return int(floor(parallax * SUNSHINE_UI_SCENE_PARALLAX_SCALE + 0.5));
 }
-// Cell sums {presented luma, HUD-less luma, parallax, pixels} in fixed point,
-// one texel per cell of the scene cell texture (u6 here, t10 when compared).
-// A group sums sixteen cells of one cell row with sixteen lanes per cell: lane
-// i sums column i of its cell (and every sixteenth column after it), so
-// neighbouring lanes read neighbouring pixels.
+// The pre-UI scene image the evidence measures beside the presented colour
+// (H1 d): the HUD-less image (t14) when one is offered, else the offscreen UI
+// layer's colour (t7), else none; the layer beside a HUD-less image when the
+// CPU pushes SUNSHINE_UI_PER_FRAME_PRE_UI_LAYER to prove it
+// (ui_selection::measured_pre_ui_image).
+uint SunshinePreUIImage()
+{
+    if ((Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_PRE_UI_LAYER) && (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER))
+        return SUNSHINE_UI_PRE_UI_IMAGE_LAYER;
+    return (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_HUDLESS) ? SUNSHINE_UI_PRE_UI_IMAGE_HUDLESS :
+        (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) ? SUNSHINE_UI_PRE_UI_IMAGE_LAYER : 0u;
+}
+// Cell sums {presented luma, pre-UI image luma, parallax, pixels} in fixed
+// point, one texel per cell of the scene cell texture (u6 here, t10 when
+// compared). A group sums sixteen cells of one cell row with sixteen lanes
+// per cell: lane i sums column i of its cell (and every sixteenth column
+// after it), so neighbouring lanes read neighbouring pixels.
 groupshared uint3 SunshineSceneCellSums[16][16];
 [numthreads(16, 16, 1)]
 void SunshineSceneCellsCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
@@ -811,13 +880,14 @@ void SunshineSceneCellsCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThrea
     // The first pixel of this cell and of the next: ceil(cell * size / cells).
     const uint2 first = (cell * size + cells - 1u) / cells, last = ((cell + 1u) * size + cells - 1u) / cells;
     const bool active = SunshineSceneDepthActive();
-    const bool hudless = (Sunshine_UICandidates & 16u) != 0u;
+    const uint image = SunshinePreUIImage();
     uint3 sums = 0u; // Parallax adds as two's complement bits.
     if (active) {
         [loop] for (uint y = first.y; y < last.y; ++y)
         [loop] for (uint x = first.x + thread.x; x < last.x; x += 16u) {
             sums.x += SunshineSceneLuma(SunshinePresentedColor.Load(int3(x, y, 0)).rgb);
-            if (hudless) sums.y += SunshineSceneLuma(SunshineHUDless.Load(int3(x, y, 0)).rgb);
+            if (image == SUNSHINE_UI_PRE_UI_IMAGE_HUDLESS) sums.y += SunshineSceneLuma(SunshineHUDless.Load(int3(x, y, 0)).rgb);
+            else if (image == SUNSHINE_UI_PRE_UI_IMAGE_LAYER) sums.y += SunshineSceneLuma(SunshineUILayer.Load(int3(x, y, 0)).rgb);
             sums.z += asuint(SunshineSceneParallax(uint2(x, y)));
         }
     }
@@ -830,7 +900,8 @@ void SunshineSceneCellsCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThrea
     const uint2 extent = last - first;
     if (active && !thread.x) SunshineAlphaCoverageStore[cell] = uint4(SunshineSceneCellSums[thread.y][0], extent.x * extent.y);
 }
-// Cell means, rounded half away from zero: luma of both images, parallax.
+// Cell means, rounded half away from zero: luma of both images (presented,
+// pre-UI), parallax.
 void SunshineSceneCellMeans(uint2 cell, out uint2 luma, out int parallax)
 {
     uint4 sums = SunshineUIDetectionSampler.Load(int3(cell, 0));
@@ -867,7 +938,7 @@ static const int2 SunshineSceneNulls[4] = {int2(5, 3), int2(-7, 4), int2(8, -2),
 groupshared int SunshineSceneTotals[4];
 // One thread per cell, one group per 16x16 cells: at each edge cell, each
 // image's activity against its activity at the null cells. The group's sums
-// {n, wins - losses presented, HUD-less, presented decided} go to statistics
+// {n, wins - losses presented, pre-UI image, presented decided} go to statistics
 // texel (group.x, SUNSHINE_UI_SCENE_PARTIAL_ROW + group.y).
 [numthreads(16, 16, 1)]
 void SunshineSceneCompareCS(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
@@ -906,8 +977,8 @@ void SunshineSceneCompareCS(uint3 id : SV_DispatchThreadID, uint3 group : SV_Gro
 }
 // Sums the compare groups' partial sums: D = (wins - losses) / (4 n); ties
 // count 0, so a black or flat image reads as hidden. Writes decision texels 5
-// (presented, with its verdict and decided comparisons) and 6 (HUD-less, when
-// offered).
+// (presented, with its verdict and decided comparisons) and 6 (the pre-UI
+// scene image, with which image it is, when one is offered).
 [numthreads(16, 16, 1)]
 void SunshineSceneEvidenceCS(uint3 thread : SV_GroupThreadID)
 {
@@ -937,8 +1008,8 @@ void SunshineSceneEvidenceCS(uint3 thread : SV_GroupThreadID)
     // of the presented image's comparisons were decided rather than tied.
     SunshineAlphaCoverageStore[uint2(5, 0)] =
         uint4(uint(n), asuint(d.x), uint(valid) | 2u | verdict << 2, uint(SunshineSceneTotals[3]));
-    SunshineAlphaCoverageStore[uint2(6, 0)] = (Sunshine_UICandidates & 16u) ?
-        uint4(uint(n), asuint(d.y), uint(valid) | 2u, 0u) : 0u;
+    const uint image = SunshinePreUIImage();
+    SunshineAlphaCoverageStore[uint2(6, 0)] = image ? uint4(uint(n), asuint(d.y), uint(valid) | 2u, image) : 0u;
 }
 
 #if BUFFER_COLOR_SPACE == 3

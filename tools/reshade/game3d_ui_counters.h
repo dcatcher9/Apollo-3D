@@ -24,8 +24,9 @@
 namespace sunshine_game3d {
   // Why a detection frame decided no mask (source 0). Exactly one reason per
   // such frame, the first that applies in this order (ui_selection::decide):
-  // a full-frame gate was open without the CPU's hidden-scene hold
-  // (gate_no_hold); an offered, accepted declared alpha blocked an accepted,
+  // an informative full claim acted but H1 did not apply, because the CPU
+  // holds no hidden verdict or the depth is not this frame's (gate_no_hold,
+  // the name kept for log compatibility); an offered, accepted declared alpha blocked an accepted,
   // valid inferred alpha (presented_blocked: every such declared alpha was
   // V1-invalid, since a valid one decides); an offered, accepted alpha was
   // V1-invalid (trusted_invalid); the offered offscreen UI
@@ -46,13 +47,13 @@ namespace sunshine_game3d {
   // detection frames.
   namespace ui_counter_word {
     inline constexpr std::size_t detection_frames = 0;
-    // One word per decided source 0-10 (7 is retired and stays zero).
+    // One word per decided source 0-10 (7 and 9 are retired and stay zero).
     inline constexpr std::size_t decided = 1, decided_count = 11;
     // An inferred source (the offscreen UI layer 10, Backbuffer 3 or current
     // 4) decided without being accepted. Zero by construction since S1, where
     // only accepted candidates decide; kept as an invariant.
     inline constexpr std::size_t untrusted_inferred = 12;
-    // A HUD-less difference (5, or the HUD-less route 9) from an inexact pair.
+    // A HUD-less difference (5) from an inexact pair.
     inline constexpr std::size_t inexact_difference = 13;
     // The consumed depth was not this frame's (per_frame_depth_not_current).
     inline constexpr std::size_t depth_not_current = 14;
@@ -113,12 +114,17 @@ namespace sunshine_game3d {
   // that could not be prepared. reused counts detection frames whose GPU
   // reduce applied the previous real frame's decision (the T1 grace); they
   // are detection frames, not holds.
-  // full_d: per committed sample that decided a full-frame source (6, 8, 9),
-  // the hidden-scene verdict that same sample measured: invalid when the
-  // evidence was not valid or not measured. full_alpha_d: the same for a
-  // sample that decided a whole-frame alpha (ui_temporal::full_alpha), whose
-  // evidence the renderer measures only as a diagnostic, from the sample
-  // after one that decided it. These are sample counts, not frame counts.
+  // full_d: per committed sample that decided H1 (source 8, a full-frame UI
+  // over a hidden scene), the hidden-scene verdict that same sample
+  // measured: invalid when the evidence was not valid or not measured.
+  // full_alpha_d: the same for a sample that decided an accepted whole-frame
+  // decision (ui_temporal::whole_frame: an alpha covering at least 99%, or
+  // the exact full change set 6), whose evidence the renderer measures only
+  // as a diagnostic, from the sample after one that decided it. scene: the
+  // hidden-scene guard's observations of committed samples
+  // (game3d_scene_guard.h): its hidden hold entered, a hold released by a
+  // visible sample (every visible H1 sample is one), and source signatures
+  // newly refuted. These are sample counts, not frame counts.
   // Trust events are the session acceptance ledger's (alpha_auto_policy):
   // signatures earned, revoked (A2) by an exact change set's one-way test or
   // by a declared alpha's coverage, lapsed, restored from an earlier session,
@@ -141,7 +147,8 @@ namespace sunshine_game3d {
       trust_revoked_declared = trust_earned + 2, trust_lapsed = trust_earned + 3, trust_restored = trust_earned + 4,
       trust_discarded = trust_earned + 5, trust_forgotten = trust_earned + 6;
     inline constexpr std::size_t samples = trust_forgotten + 1;
-    inline constexpr std::size_t count = samples + 1;
+    inline constexpr std::size_t scene_entered = samples + 1, scene_released = samples + 2, scene_refuted = samples + 3;
+    inline constexpr std::size_t count = scene_refuted + 1;
   }
 
   struct ui_counters {
@@ -223,7 +230,7 @@ namespace sunshine_game3d {
     });
     group("decided", [&] {
       for (std::uint32_t source = 0; source != ui_counter_word::decided_count; ++source)
-        if (source != 7) field(std::to_string(source), c.decided(source));
+        if (source != 7 && source != 9) field(std::to_string(source), c.decided(source));
     });
     group("none", [&] {
       for (std::size_t reason = 0; reason != ui_no_mask::count; ++reason) field(ui_no_mask::names[reason], c[n::none + reason]);
@@ -231,7 +238,6 @@ namespace sunshine_game3d {
     group("full", [&] {
       field("6", c.decided(6));
       field("8", c.decided(8));
-      field("9", c.decided(9));
       field("depth_not_current", c[n::depth_not_current]);
     });
     group("full_d", [&] {
@@ -239,6 +245,11 @@ namespace sunshine_game3d {
       field("ambiguous", c[n::full_d_ambiguous]);
       field("visible", c[n::full_d_visible]);
       field("invalid", c[n::full_d_invalid]);
+    });
+    group("scene", [&] {
+      field("entered", c[n::scene_entered]);
+      field("released", c[n::scene_released]);
+      field("refuted", c[n::scene_refuted]);
     });
     field("untrusted_inferred", c[n::untrusted_inferred]);
     field("inexact_difference", c[n::inexact_difference]);

@@ -3,31 +3,33 @@
 // (docs/reshade-sbs.md, UI protection and UI decision framework). Per-frame
 // decision streams drive the production state machines without a GPU: the
 // game session's acceptance ledger (alpha_auto_policy), the renderer's T1
-// arbitration, status samples and CPU-owned hidden-scene verdicts
-// (ui_temporal::detection_state), the sample decode and counter commit
-// (ui_temporal::decode_detection_sample, sample_counters), Present pairing
-// and counting under frame generation (ui_mask::pair_hudless_present,
-// generated_without_input) and the exact
-// counters (ui_counters). A stream's GPU input is what one detection counts:
-// decision texels 0-9 that ui_detection_replay --verbose recorded on labelled
-// dumps with the S2a shader, or synthetic counts. Every decision is
-// ui_selection::decide, the C++ mirror of SunshineUIDetectionReduceCS (the T1
-// hold store included) that test_game3d_ui_selection_contract proves equal to
+// arbitration and status samples (ui_temporal::detection_state), the
+// hidden-scene guard that holds the CPU's verdicts of D and refutes claims
+// per signature (scene_guard::state, M5), the sample decode and counter
+// commit (ui_temporal::decode_detection_sample, sample_counters), Present
+// pairing and counting under frame generation (ui_mask::pair_hudless_present,
+// generated_without_input) and the exact counters (ui_counters). A stream's
+// GPU input is what one detection counts: decision texels 0-10 that
+// ui_detection_replay --verbose recorded on labelled dumps with the S2b
+// shader, or synthetic counts. Every decision is ui_selection::decide, the
+// C++ mirror of SunshineUIDetectionReduceCS (the T1 hold store and the H1
+// override included) that test_game3d_ui_selection_contract proves equal to
 // the shader's reduce; every recorded decision must equal it.
 //
-// It asserts the rules through stage S2a strictly. An outcome that a later
+// It asserts the rules through stage S2b strictly. An outcome that a later
 // stage of the UI decision framework (docs/reshade-sbs.md, UI decision
 // framework: stages S0-S6; rules E1, E2, V1, V2, A1-A3, S1, S2, H1, P1, T1,
 // F1) changes prints "KNOWN_TODAY <stage> <rule>: <text>" and does not fail;
-// that stage turns it into a strict assertion. Five remain after S2a: S2b H1
-// (three) and S3 T1/E2 (two). Outcomes the rules already call correct, such
-// as an accepted source pinning a whole-frame alpha flat over a visible scene
-// (P1, the opacity ruling), are asserted strictly.
+// that stage turns it into a strict assertion. Two remain after S2b, both S3
+// T1/E2. Outcomes the rules already call correct, such as an accepted source
+// pinning a whole-frame alpha flat over a visible scene (P1, the opacity
+// ruling), are asserted strictly.
 //
 // Informational, not in ctest: --log <ReShade.log>... replays the logged
 // "Sunshine UI protection" samples through alpha_auto_policy and prints the
 // predicted acceptance transitions beside the logged ones.
 #include "game3d_alpha_auto.h"
+#include "game3d_scene_guard.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_mask.h"
@@ -39,6 +41,7 @@
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -130,10 +133,11 @@ namespace {
 
   // ---------------------------------------------------------------- decision texels
 
-  // Decision texels 0-9 as the renderer reads them back.
-  constexpr std::size_t texel_words = 4 * ui_detection::judgment_decision_texels;
+  // Decision texels 0-10 as the renderer reads them back (selection revision 3).
+  constexpr std::size_t texel_words = 4 * ui_detection::h1_decision_texels;
   using texels = std::array<std::uint32_t, texel_words>;
-  // Texels 5 and 6: the hidden-scene evidence, written only by the evidence pass.
+  // Texels 5 and 6: the hidden-scene evidence of the presented frame and of
+  // the pre-UI scene image, written only by the evidence pass.
   constexpr std::size_t scene_texels_begin = 4 * 5, scene_texels_end = 4 * ui_detection::scene_decision_texels;
 
   texels parse_texels(std::string_view csv) {
@@ -152,7 +156,7 @@ namespace {
       }
     }
     if (count != result.size() || at != end) {
-      throw std::runtime_error("Recorded texels are not 40 words");
+      throw std::runtime_error("Recorded texels are not 44 words");
     }
     return result;
   }
@@ -168,11 +172,24 @@ namespace {
     return (valid ? 1u : 0u) | 2u | std::uint32_t(verdict) << 2;
   }
 
+  // Texel 6, the pre-UI scene image's evidence as the evidence pass writes
+  // it: n, D, valid | ran, and the image (the HUD-less image when offered,
+  // else the offscreen UI layer's colour, or the layer beside a HUD-less
+  // image when the guard pushes per_frame_pre_ui_layer); all zero without
+  // an image. The CPU reads the image's verdict from D.
+  void pre_ui_evidence(texels &t, std::uint32_t offered, std::uint32_t flags, std::uint32_t n, float d, bool valid) {
+    const auto image = ui_selection::measured_pre_ui_image(offered, flags);
+    t[word::pre_ui_scene_n] = image ? n : 0u;
+    t[word::pre_ui_scene_d] = image ? float_bits(d) : 0u;
+    t[word::pre_ui_scene_state] = image ? (valid ? 1u : 0u) | 2u : 0u;
+    t[word::pre_ui_scene_image] = image;
+  }
+
   // What one frame's detection reads: the frame's own inputs, the per-frame
   // bits and the hold store (game3d_renderer.cpp, detect_ui's b2 constants:
-  // the candidates, the layer's stored flags with the per-frame bits, the
-  // accepted candidates; the T1 hold store at u5, as the previous detection
-  // wrote it).
+  // the candidates, the layer's stored flags with the per-frame bits of T1,
+  // the scene guard and the depth, the accepted candidates; the T1 hold store
+  // at u5, as the previous detection wrote it).
   struct gpu_inputs {
     std::uint32_t bits {}, flags {}, accepted {}, per_frame {};
     std::uint64_t now_ms {};
@@ -188,7 +205,8 @@ namespace {
 
   // The counts of `t` with the words the reduce writes for these inputs:
   // texel 0 the applied decision, the refused candidate and the frame reason
-  // (F1, with the T1 reused bit).
+  // (F1, with the T1 reused bit), and texel 10's informative claims and h1
+  // word (the S1 winner, and whether H1 overrode it).
   texels decision_words(texels t, const gpu_inputs &in) {
     const auto d = decide(t, in);
     t[word::source] = d.source;
@@ -198,6 +216,8 @@ namespace {
     t[word::valid_bits] = d.valid_bits;
     t[word::refused] = d.refused;
     t[word::frame_reason] = ui_selection::frame_reason_word(d);
+    t[word::claims] = d.claims;
+    t[word::h1] = ui_selection::h1_word(d);
     return t;
   }
 
@@ -207,68 +227,74 @@ namespace {
     std::uint32_t per_frame {};
   };
 
-  // Recorded decision texels: ui_detection_replay --verbose with the S2a
-  // shader on E:/ApolloDev/sbs_dump (selection revision 2, nothing bound at
+  // Recorded decision texels: ui_detection_replay --verbose with the S2b
+  // shader on E:/ApolloDev/sbs_dump (selection revision 3, nothing bound at
   // the hold store). Words 4 and 17 hold the candidate bits and the accepted
-  // candidates the frame was decided with; words 32-39 the one-way judgment
-  // counts, the refused candidate and the frame reason. Each names its dump
-  // and the replay case of the same inputs in ui_detection_cases.json
-  // (scratchpad s2a/p1/replay_s2a_verbose.txt); the acceptance combinations
-  // those cases do not hold were replayed alone (scratchpad
-  // s1/p4/cases_p4.json, replayed by the S2a binary into
-  // s2a/p1/replay_p4_cases_verbose.txt).
+  // candidates the frame was decided with; words 20-27 the hidden-scene
+  // evidence of the presented frame and of the pre-UI scene image (texel 6:
+  // n, D, valid | ran, image); words 32-39 the one-way judgment counts, the
+  // refused candidate and the frame reason; words 40-43 the opaque Backbuffer
+  // and current pixels, the informative claims and the h1 word. Each names
+  // its dump and the replay case of the same inputs in
+  // ui_detection_cases.json; every recording was replayed alone from
+  // scratchpad s2b/p3/cases_p3.json (the S1 cases_p4.json with the S2b
+  // labels, plus the Stellar Blade SDR menu and gameplay) by the S2b binary
+  // into s2b/p3/replay_p3_verbose.txt.
   namespace recorded {
-    constexpr std::uint32_t scene_hold = ui_detection::per_frame_scene_hold;
-    constexpr std::uint32_t scene_hold_hudless = ui_detection::per_frame_scene_hold_hudless;
+    // The scene guard's per-frame bits (H1): a held hidden verdict, and its
+    // samples reading the pre-UI scene image visible.
+    constexpr std::uint32_t scene_hidden = ui_detection::per_frame_scene_hidden;
+    constexpr std::uint32_t pre_ui_visible = ui_detection::per_frame_pre_ui_visible;
     // The Witcher 3 Remastered, FG off, graphics settings over a hidden scene
     // (game3d_46312_198402901901355): a full opaque offscreen layer (0x40)
     // beside current alpha, unaccepted, without a CPU hold and held ("W3
-    // graphics settings, layer hidden-scene hold").
-    constexpr recording w3_settings {"0,0,3686400,59,72,2059821,1626579,0,0,0,0,3686400,0,0,0,0,0,0,0,0,1565,3165951781,7,3596,0,0,0,0,3686400,0,3686400,72,3686400,0,3686400,64,0,0,0,5"};
-    constexpr recording w3_settings_held {"8,3686400,3686400,59,72,2059821,1626579,0,0,0,0,3686400,0,0,0,0,0,0,0,0,1565,3165951781,7,3596,0,0,0,0,3686400,0,3686400,72,3686400,0,3686400,0,0,0,0,255", scene_hold};
+    // graphics settings, layer hidden-scene hold": H1 claim (b), the cleared
+    // layer opaque-full).
+    constexpr recording w3_settings {"0,0,3686400,59,72,2059821,1626579,0,0,0,0,3686400,0,0,0,0,0,0,0,0,1565,3165951781,7,3596,1565,3166123306,3,2,3686400,0,3686400,72,0,0,3686400,64,0,0,0,5,0,3686400,64,0"};
+    constexpr recording w3_settings_held {"8,3686400,3686400,59,72,2059821,1626579,0,0,0,0,3686400,0,0,0,0,0,0,0,0,1565,3165951781,7,3596,1565,3166123306,3,2,3686400,0,3686400,72,0,0,3686400,0,0,0,0,255,0,3686400,64,256", scene_hidden};
     // W3 FG off, notice board (game3d_46312_198402901901363): layer 12.48%,
     // unaccepted and accepted ("W3 notice board FG off, trusted layer, hold").
-    constexpr recording w3_notice {"0,0,3686400,0,72,3643197,43203,0,0,0,0,3686400,0,0,0,0,0,0,0,0,2029,1049969278,15,8116,0,0,0,0,460125,0,100337,72,281087,0,3686400,64,0,0,0,8"};
-    constexpr recording w3_notice_accepted {"10,460125,3686400,0,72,3643197,43203,0,0,0,0,3686400,0,0,0,0,0,64,0,0,2029,1049969278,15,8116,0,0,0,0,460125,0,100337,72,281087,0,3686400,0,0,0,0,255"};
+    constexpr recording w3_notice {"0,0,3686400,0,72,3643197,43203,0,0,0,0,3686400,0,0,0,0,0,0,0,0,2029,1049969278,15,8116,2029,977390662,3,2,460125,0,100337,72,0,0,3686400,64,0,0,0,8,0,3507790,0,0"};
+    constexpr recording w3_notice_accepted {"10,460125,3686400,0,72,3643197,43203,0,0,0,0,3686400,0,0,0,0,0,64,0,0,2029,1049969278,15,8116,2029,977390662,3,2,460125,0,100337,72,0,0,3686400,0,0,0,0,255,0,3507790,0,10"};
     // W3 FG off, sign wheel over a visible scene (game3d_46312_198402901901353):
     // a full layer, unaccepted and accepted ("W3 sign wheel FG off, trusted
     // layer, hold").
-    constexpr recording w3_wheel {"0,0,3686400,0,72,3686120,280,0,0,0,0,3686400,0,0,0,0,0,0,0,0,564,1057143089,15,2256,0,0,0,0,3686400,0,145726,72,3686400,0,3686400,64,0,0,0,3"};
-    constexpr recording w3_wheel_accepted {"10,3686400,3686400,0,72,3686120,280,0,0,0,0,3686400,0,0,0,0,0,64,0,0,564,1057143089,15,2256,0,0,0,0,3686400,0,145726,72,3686400,0,3686400,0,0,0,0,255"};
+    constexpr recording w3_wheel {"0,0,3686400,0,72,3686120,280,0,0,0,0,3686400,0,0,0,0,0,0,0,0,564,1057143089,15,2256,564,3173571040,3,2,3686400,0,145726,72,0,0,3686400,64,0,0,0,3,0,236987,0,0"};
+    constexpr recording w3_wheel_accepted {"10,3686400,3686400,0,72,3686120,280,0,0,0,0,3686400,0,0,0,0,0,64,0,0,564,1057143089,15,2256,564,3173571040,3,2,3686400,0,145726,72,0,0,3686400,0,0,0,0,255,0,236987,0,10"};
     // W3 FG on, HUD (game3d_46312_198402901901357): UIAlpha 5.23% with an
     // inexact HUD-less pair, unaccepted ("W3 HUD FG on, not yet accepted
     // UIAlpha, hold") and accepted ("W3 HUD FG on, trusted UIAlpha, hold").
-    constexpr recording w3_hud_fg {"0,0,3686400,1,25,2124039,1186939,0,192930,0,0,3686400,0,0,0,0,3686400,0,103614,0,472,1056573614,15,1888,472,1056964608,3,0,0,0,0,9,0,0,3686400,1,0,0,0,8"};
-    constexpr recording w3_hud_fg_accepted {"1,192930,3686400,1,25,2124039,1186939,0,192930,0,0,3686400,0,0,0,0,3686400,1,103614,0,472,1056573614,15,1888,472,1056964608,3,0,0,0,0,9,0,0,3686400,0,0,0,0,255"};
+    constexpr recording w3_hud_fg {"0,0,3686400,1,25,2124039,1186939,0,192930,0,0,3686400,0,0,0,0,3686400,0,103614,0,472,1056573614,15,1888,472,1056964608,3,1,0,0,0,9,0,0,3686400,1,0,0,0,8,0,3686400,0,0"};
+    constexpr recording w3_hud_fg_accepted {"1,192930,3686400,1,25,2124039,1186939,0,192930,0,0,3686400,0,0,0,0,3686400,1,103614,0,472,1056573614,15,1888,472,1056964608,3,1,0,0,0,9,0,0,3686400,0,0,0,0,255,0,3686400,0,1"};
     // W3 FG on, sign wheel (game3d_46312_198402901901359): a full UIAlpha,
     // unaccepted and accepted ("W3 sign wheel FG on, ... UIAlpha, hold").
-    constexpr recording w3_wheel_fg {"0,0,3686400,0,25,3686398,0,0,3686400,0,0,3686400,0,0,0,0,3686400,0,149627,0,462,1056020436,15,1848,462,1057709052,3,0,0,0,0,9,0,0,3686400,16,0,0,0,5"};
-    constexpr recording w3_wheel_fg_accepted {"1,3686400,3686400,0,25,3686398,0,0,3686400,0,0,3686400,0,0,0,0,3686400,1,149627,0,462,1056020436,15,1848,462,1057709052,3,0,0,0,0,9,0,0,3686400,0,0,0,0,255"};
+    constexpr recording w3_wheel_fg {"0,0,3686400,0,25,3686398,0,0,3686400,0,0,3686400,0,0,0,0,3686400,0,149627,0,462,1056020436,15,1848,462,1057709052,3,1,0,0,0,9,0,0,3686400,16,0,0,0,4,0,3686400,128,0"};
+    constexpr recording w3_wheel_fg_accepted {"1,3686400,3686400,0,25,3686398,0,0,3686400,0,0,3686400,0,0,0,0,3686400,1,149627,0,462,1056020436,15,1848,462,1057709052,3,1,0,0,0,9,0,0,3686400,0,0,0,0,255,0,3686400,128,1"};
     // Clair Obscur: Expedition 33, FG on, title over a visible scene
     // (game3d_31636_135749029986373): Backbuffer alpha 2.38%, unaccepted and
     // accepted ("E33 title FG on, untrusted/trusted backbuffer, hold").
-    constexpr recording e33_title {"0,0,8294400,19,4,4139412,3333766,0,0,0,197797,197797,0,0,0,0,0,0,0,0,1680,1061468492,15,6720,0,0,0,0,0,0,0,4,0,178867,178867,4,0,0,0,8"};
-    constexpr recording e33_title_accepted {"3,197797,8294400,19,4,4139412,3333766,0,0,0,197797,197797,0,0,0,0,0,4,0,0,1680,1061468492,15,6720,0,0,0,0,0,0,0,4,0,178867,178867,0,0,0,0,255"};
+    constexpr recording e33_title {"0,0,8294400,19,4,4139412,3333766,0,0,0,197797,197797,0,0,0,0,0,0,0,0,1680,1061468492,15,6720,0,0,0,0,0,0,0,4,0,178867,178867,4,0,0,0,8,155808,155808,0,0"};
+    constexpr recording e33_title_accepted {"3,197797,8294400,19,4,4139412,3333766,0,0,0,197797,197797,0,0,0,0,0,4,0,0,1680,1061468492,15,6720,0,0,0,0,0,0,0,4,0,178867,178867,0,0,0,0,255,155808,155808,0,3"};
     // E33 FG on, Load Game over a hidden scene (game3d_59540_257918763574026):
     // a full Backbuffer alpha ("E33 load game FG on, untrusted / trusted
     // backbuffer").
-    constexpr recording e33_load {"0,0,8294400,0,4,8138474,84306,0,0,0,8294400,8294400,0,0,0,0,0,0,0,0,1753,1000268529,7,6942,0,0,0,0,0,0,0,4,0,8294400,8294400,4,0,0,0,3"};
-    constexpr recording e33_load_accepted {"3,8294400,8294400,0,4,8138474,84306,0,0,0,8294400,8294400,0,0,0,0,0,4,0,0,1753,1000268529,7,6942,0,0,0,0,0,0,0,4,0,8294400,8294400,0,0,0,0,255"};
+    constexpr recording e33_load {"0,0,8294400,0,4,8138474,84306,0,0,0,8294400,8294400,0,0,0,0,0,0,0,0,1753,1000268529,7,6942,0,0,0,0,0,0,0,4,0,8294400,8294400,4,0,0,0,3,8294382,8294382,0,0"};
+    constexpr recording e33_load_accepted {"3,8294400,8294400,0,4,8138474,84306,0,0,0,8294400,8294400,0,0,0,0,0,4,0,0,1753,1000268529,7,6942,0,0,0,0,0,0,0,4,0,8294400,8294400,0,0,0,0,255,8294382,8294382,4,3"};
     // Resident Evil Requiem, dark room (game3d_52696_225539427440975): the
     // offscreen layer 0.18% beside a full presented alpha and an inexact pair,
     // unaccepted ("RE9 dark room, untrusted layer, inexact pair, hold") and
     // accepted.
-    constexpr recording re9_room {"0,0,8294400,31,88,2568733,4352259,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,386,1058855305,15,1544,386,1057529644,3,0,14611,0,3540,72,8475,0,8294400,64,0,0,0,8"};
-    constexpr recording re9_room_accepted {"10,14611,8294400,31,88,2568733,4352259,0,0,0,0,8294400,0,0,0,0,8294400,64,0,0,386,1058855305,15,1544,386,1057529644,3,0,14611,0,3540,72,8475,0,8294400,0,0,0,0,255"};
+    constexpr recording re9_room {"0,0,8294400,31,88,2568733,4352259,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,386,1058855305,15,1544,386,1057529644,3,1,14611,0,3540,72,0,0,8294400,64,0,0,0,8,0,8294400,0,0"};
+    constexpr recording re9_room_accepted {"10,14611,8294400,31,88,2568733,4352259,0,0,0,0,8294400,0,0,0,0,8294400,64,0,0,386,1058855305,15,1544,386,1057529644,3,1,14611,0,3540,72,0,0,8294400,0,0,0,0,255,0,8294400,0,10"};
     // Stellar Blade in SDR, FG on (game3d_69460_296226962143478): the tagged
     // UIColorAndAlpha (0.26%), the scene image in the cleared UI layer (V1
     // invalid) and the Backbuffer alpha; nothing accepted, the tag, the tag
     // and the Backbuffer ("SB SDR FG on, accepted tag beside the scene layer
     // and the Backbuffer"), and the Backbuffer of a Present without the tag.
-    constexpr recording sb_sdr {"0,0,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,0,0,6885,1088,1052816565,15,4352,0,0,0,0,0,8261496,0,6,0,15296,8294400,64,0,0,0,0"};
-    constexpr recording sb_sdr_tag {"2,21283,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,2,0,6885,1088,1052816565,15,4352,0,0,0,0,0,8261496,0,6,0,15296,8294400,0,0,0,0,255"};
-    constexpr recording sb_sdr_tag_backbuffer {"2,21283,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,6,0,6885,1088,1052816565,15,4352,0,0,0,0,0,8261496,0,6,0,15296,8294400,0,0,0,0,255"};
-    constexpr recording sb_sdr_backbuffer {"3,21283,8294400,0,68,8294319,41,0,0,0,21283,8294400,0,0,0,0,0,4,0,0,1088,1052816565,15,4352,0,0,0,0,0,8261496,0,4,0,15296,8294400,0,0,0,0,255"};
+    constexpr recording sb_sdr {"0,0,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,0,0,6885,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,6,0,15296,8294400,64,0,0,0,0,6885,8294400,128,0"};
+    constexpr recording sb_sdr_tag {"2,21283,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,2,0,6885,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,6,0,15296,8294400,0,0,0,0,255,6885,8294400,128,2"};
+    constexpr recording sb_sdr_tag_backbuffer {"2,21283,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,6,0,6885,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,6,0,15296,8294400,0,0,0,0,255,6885,8294400,128,2"};
+    constexpr recording sb_sdr_backbuffer {"3,21283,8294400,0,68,8294319,41,0,0,0,21283,8294400,0,0,0,0,0,4,0,0,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,4,0,15296,8294400,0,0,0,0,255,6885,8294400,128,3"};
     // Stellar Blade in HDR, FG on (game3d_69460_296226962143474): the opaque
     // final-image tag, the offscreen layer 0.18%, a full Backbuffer alpha and
     // an exact pair; nothing accepted, the layer accepted ("SB HDR FG on HUD,
@@ -276,39 +302,54 @@ namespace {
     // tag without the layer ("SB HDR FG on HUD, opaque tag, backbuffer and
     // exact pair"). Manual On accepts every offered candidate, with and without
     // a source filter that leaves the tag out.
-    constexpr recording sb_hdr {"0,0,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,0,0,8294400,538,1057510335,15,2152,538,1057588296,3,0,14519,0,206,70,6267,8294400,8294400,64,0,5561801,5561801,8"};
-    constexpr recording sb_hdr_layer {"10,14519,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,64,0,8294400,538,1057510335,15,2152,538,1057588296,3,0,14519,0,206,70,6267,8294400,8294400,0,0,5561801,5561801,255"};
-    constexpr recording sb_hdr_tag_only {"0,0,8294400,3,54,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,0,0,8294400,538,1057510335,15,2152,538,1057588296,3,0,0,0,0,6,0,8294400,8294400,16,0,5561801,5561801,4"};
-    constexpr recording sb_hdr_manual {"2,8294400,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,86,0,8294400,538,1057510335,15,2152,538,1057588296,3,0,14519,0,206,70,6267,8294400,8294400,0,0,5561801,5561801,255"};
-    constexpr recording sb_hdr_manual_filtered {"10,14519,8294400,3,116,1996036,5562279,0,0,0,8294400,8294400,0,0,0,0,8258352,84,0,0,538,1057510335,15,2152,538,1057588296,3,0,14519,0,206,68,6267,8294400,8294400,0,0,5561801,5561801,255"};
-    constexpr recording sb_hdr_filtered {"0,0,8294400,3,116,1996036,5562279,0,0,0,8294400,8294400,0,0,0,0,8258352,0,0,0,538,1057510335,15,2152,538,1057588296,3,0,14519,0,206,68,6267,8294400,8294400,64,0,5561801,5561801,8"};
+    constexpr recording sb_hdr {"0,0,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,0,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,70,0,8294400,8294400,64,0,5561801,5561801,8,8294400,8294400,0,0"};
+    constexpr recording sb_hdr_layer {"10,14519,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,64,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,70,0,8294400,8294400,0,0,5561801,5561801,255,8294400,8294400,0,10"};
+    constexpr recording sb_hdr_tag_only {"0,0,8294400,3,54,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,0,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,0,0,0,6,0,8294400,8294400,16,0,5561801,5561801,4,8294400,8294400,0,0"};
+    constexpr recording sb_hdr_manual {"2,8294400,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,86,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,70,0,8294400,8294400,0,0,5561801,5561801,255,8294400,8294400,2,2"};
+    constexpr recording sb_hdr_manual_filtered {"10,14519,8294400,3,116,1996036,5562279,0,0,0,8294400,8294400,0,0,0,0,8258352,84,0,0,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,68,0,8294400,8294400,0,0,5561801,5561801,255,8294400,8294400,4,10"};
+    constexpr recording sb_hdr_filtered {"0,0,8294400,3,116,1996036,5562279,0,0,0,8294400,8294400,0,0,0,0,8258352,0,0,0,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,68,0,8294400,8294400,64,0,5561801,5561801,8,8294400,8294400,0,0"};
     // Hogwarts Legacy, FG off, title screen (game3d_50196_216992971069363): an
     // exact HUD-less pair differing almost everywhere over a hidden scene;
     // unaccepted ("HL title screen FG off, HUD-less not yet accepted"), under
-    // the HUD-less route's hold, and accepted ("HL title screen FG off").
-    constexpr recording hl_title {"0,0,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,511,1025396520,7,2041,511,1057900324,3,0,0,0,0,24,0,0,8294400,16,0,0,1,5"};
-    constexpr recording hl_title_held {"9,8294400,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,511,1025396520,7,2041,511,1057900324,3,0,0,0,0,24,0,0,8294400,0,0,0,1,255", scene_hold_hudless};
-    constexpr recording hl_title_accepted {"6,8294400,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,16,0,0,511,1025396520,7,2041,511,1057900324,3,0,0,0,0,24,0,0,8294400,0,0,0,1,255"};
+    // H1 (the held hidden verdict and pre-UI image; the unaccepted exact full
+    // change set is claim (c)), and accepted ("HL title screen FG off").
+    constexpr recording hl_title {"0,0,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,511,1025396520,7,2041,511,1057900324,3,1,0,0,0,24,0,0,8294400,16,0,0,1,5,0,8294400,144,0"};
+    constexpr recording hl_title_held {"8,8294400,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,511,1025396520,7,2041,511,1057900324,3,1,0,0,0,24,0,0,8294400,0,0,0,1,255,0,8294400,144,256", scene_hidden | pre_ui_visible};
+    constexpr recording hl_title_accepted {"6,8294400,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,16,0,0,511,1025396520,7,2041,511,1057900324,3,1,0,0,0,24,0,0,8294400,0,0,0,1,255,0,8294400,144,6"};
     // Hogwarts Legacy, FG off, gameplay HUD (game3d_40404_173061335442886):
     // an exact pair whose change set is the HUD (3.98%); unaccepted ("HL
     // gameplay HUD FG off (b), HUD-less not yet accepted") and accepted ("HL
     // gameplay HUD FG off (b)").
-    constexpr recording hl_hud {"0,0,8294400,224,56,329969,7962406,0,0,0,0,8294400,0,0,0,0,8293872,0,0,0,397,1061190608,15,1588,397,1061190608,3,0,0,0,0,24,0,0,8294400,16,0,0,7961885,8"};
-    constexpr recording hl_hud_accepted {"5,329969,8294400,224,56,329969,7962406,0,0,0,0,8294400,0,0,0,0,8293872,16,0,0,397,1061190608,15,1588,397,1061190608,3,0,0,0,0,24,0,0,8294400,0,0,0,7961885,255"};
+    constexpr recording hl_hud {"0,0,8294400,224,56,329969,7962406,0,0,0,0,8294400,0,0,0,0,8293872,0,0,0,397,1061190608,15,1588,397,1061190608,3,1,0,0,0,24,0,0,8294400,16,0,0,7961885,8,0,8294400,0,0"};
+    constexpr recording hl_hud_accepted {"5,329969,8294400,224,56,329969,7962406,0,0,0,0,8294400,0,0,0,0,8293872,16,0,0,397,1061190608,15,1588,397,1061190608,3,1,0,0,0,24,0,0,8294400,0,0,0,7961885,255,0,8294400,0,5"};
+    // Stellar Blade in SDR, the settings menu with frame generation set to 2x
+    // but suspended by the game while a menu is open, so no Streamline tag
+    // (game3d_50264_218658377782962, "SB SDR settings FG suspended, no hold"
+    // and "..., H1 pre-UI layer, holds"): the cleared output target holds the pre-UI scene image
+    // (BGRA8, alpha 0: V1-invalid, claim (d)) beside an opaque current
+    // alpha. The presented frame reads hidden (D 0.031) and the pre-UI image
+    // visible (D 0.588); unbound, and under H1 (both held bits).
+    constexpr recording sb_sdr_menu {"0,0,8294400,0,72,8238793,1209,0,0,0,0,8294400,0,0,0,0,0,0,0,0,914,1023465244,7,3655,914,1058442251,3,2,0,4684873,0,8,0,0,8294400,64,0,0,0,0,0,8294400,128,0"};
+    constexpr recording sb_sdr_menu_held {"8,8294400,8294400,0,72,8238793,1209,0,0,0,0,8294400,0,0,0,0,0,0,0,0,914,1023465244,7,3655,914,1058442251,3,2,0,4684873,0,8,0,0,8294400,0,0,0,0,255,0,8294400,128,256", scene_hidden | pre_ui_visible};
+    // Stellar Blade SDR gameplay (game3d_69460_296226962143470, "SB SDR FG
+    // off gameplay, both images visible, measured"): the same inputs, both
+    // images visible (presented 0.515, pre-UI layer 0.518).
+    constexpr recording sb_sdr_play {"0,0,8294400,0,72,8289048,500,0,0,0,0,8294400,0,0,0,0,0,0,0,0,546,1057210428,15,2184,546,1057271883,3,2,0,8221955,0,8,0,0,8294400,64,0,0,0,0,0,8294400,128,0"};
   }  // namespace recorded
 
   // The recorded counts with exactly these candidate bits and accepted
   // candidates decide by ui_selection::decide under this frame's hold bits; a
   // stream that asks for any other combination fails rather than guess the
-  // dump's counts. Every recording must equal decide() under its own hold bits.
+  // dump's counts. Every recording must equal decide() under its own hold bits
+  // (the scene guard's held verdicts and refuted candidates).
   gpu_model recorded_frames(std::vector<recording> frames) {
-    constexpr std::uint32_t holds = ui_detection::per_frame_scene_hold | ui_detection::per_frame_scene_hold_hudless;
+    constexpr std::uint32_t holds = ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible | ui_detection::per_frame_refuted_mask;
     std::vector<std::pair<texels, std::uint32_t>> parsed;
     for (const auto &frame : frames) {
       const auto t = parse_texels(frame.words);
       const gpu_inputs own {t[word::candidates], 0, t[word::accepted], frame.per_frame};
       const auto d = decide(t, own);
-      require(d.source == t[word::source] && d.covered == t[word::covered] && d.valid_bits == t[word::valid_bits] && d.refused == t[word::refused] && ui_selection::frame_reason_word(d) == t[word::frame_reason], "The recording for candidates " + hex(own.bits) + " accepted " + hex(own.accepted) + " differs from ui_selection::decide");
+      require(d.source == t[word::source] && d.covered == t[word::covered] && d.valid_bits == t[word::valid_bits] && d.refused == t[word::refused] && ui_selection::frame_reason_word(d) == t[word::frame_reason] && d.claims == t[word::claims] && ui_selection::h1_word(d) == t[word::h1], "The recording for candidates " + hex(own.bits) + " accepted " + hex(own.accepted) + " differs from ui_selection::decide");
       parsed.emplace_back(t, frame.per_frame & holds);
     }
     return [parsed](const gpu_inputs &in) {
@@ -344,10 +385,14 @@ namespace {
   // what a stream's GPU counted, and decide() decides from them.
   struct synthetic {
     ui_selection::counts c;
+    // The presented frame's hidden-scene evidence (texel 5).
     bool scene_valid {};
     scene_verdict verdict = scene_verdict::none;
     float d {};
     std::uint32_t n {}, decided_edges {};
+    // The pre-UI scene image's (texel 6), written when the offer has one.
+    bool pre_ui_valid {};
+    float pre_ui_d {};
 
     synthetic() {
       c.pixels = 1000;
@@ -371,6 +416,42 @@ namespace {
 
     synthetic &lit(std::uint32_t pixels) {
       c.lit = pixels;
+      return *this;
+    }
+
+    // Pixels of an alpha kind with alpha of at least 254/255 (H1's
+    // opaque-full claims need 99%).
+    synthetic &opaque(kind k, std::uint32_t pixels) {
+      switch (k) {
+        case kind::ui_alpha:
+          c.opaque_ui_alpha = pixels;
+          break;
+        case kind::ui_color:
+          c.opaque_ui_color = pixels;
+          break;
+        case kind::ui_layer:
+          c.opaque_layer = pixels;
+          break;
+        case kind::backbuffer:
+          c.opaque_backbuffer = pixels;
+          break;
+        default:
+          c.opaque_current = pixels;
+          break;
+      }
+      return *this;
+    }
+
+    // Valid hidden-scene evidence of the presented frame and, when valid_pre_ui,
+    // of the pre-UI scene image; each verdict follows from its D.
+    synthetic &scene(float presented, float pre_ui, bool valid_pre_ui = true) {
+      scene_valid = true;
+      verdict = ui_detection::scene_verdict_of(presented);
+      d = presented;
+      n = 300;
+      decided_edges = 600;
+      pre_ui_valid = valid_pre_ui;
+      pre_ui_d = pre_ui;
       return *this;
     }
 
@@ -412,10 +493,13 @@ namespace {
       t[word::alpha_opaque] = c.opaque_ui_alpha;
       t[word::alpha_opaque + 1] = c.opaque_ui_color;
       t[word::layer_opaque] = c.opaque_layer;
+      t[word::opaque_backbuffer] = c.opaque_backbuffer;
+      t[word::opaque_current] = c.opaque_current;
       t[word::scene_n] = n;
       t[word::scene_d] = float_bits(d);
       t[word::scene_state] = scene_state(scene_valid, verdict);
       t[word::scene_decided] = decided_edges;
+      pre_ui_evidence(t, in.bits, in.flags | in.per_frame, n, pre_ui_d, pre_ui_valid);
       for (std::size_t i = 0; i != ui_selection::judged_kinds.size(); ++i) {
         t[word::strong + i] = c.strong[i];
         t[word::contradicted + i] = c.contradicted[i];
@@ -474,7 +558,9 @@ namespace {
     ui_selection::decision decision;
     // The mask this frame applies: the detected or the held one, or none.
     std::uint32_t source {}, covered {}, pixels {};
-    std::uint32_t scene_hold_bits {};
+    // The scene guard's bits pushed with this detection (H1): the held hidden
+    // verdict, the held pre-UI image and the refuted offered candidates.
+    std::uint32_t scene_bits {};
     // update_alpha_auto's status for this frame.
     alpha_auto_decision consumed;
 
@@ -485,26 +571,31 @@ namespace {
 
   // One renderer's temporal bookkeeping, calling the production code in the
   // order game3d_renderer.cpp does (game3d_ui_temporal.h, its header
-  // comment):
+  // comment; game3d_scene_guard.h):
   //   render():           bits and signatures, accepted (session),
   //                       arbitrate(identity, observation, bits), the
-  //                       layer's flags and adopt when t.adopt; then
-  //                       held() (t.hold, held.generated), unavailable()
-  //                       (held.none), enter_scope + poll_detection +
-  //                       scene_holds + detect_ui + detected() (t.detect with
-  //                       bits, or a zero-offer real frame flagged
-  //                       accepted_missing), or inactive();
+  //                       layer's flags and adopt(bits, accepted) when
+  //                       t.adopt; then held() (t.hold, held.generated),
+  //                       unavailable() (held.none), enter_scope and the
+  //                       scene guard's enter_scope(epoch, viewport) +
+  //                       poll_detection + the guard's per_frame + detect_ui +
+  //                       detected() (t.detect with bits, or a zero-offer
+  //                       real frame flagged accepted_missing), or inactive()
+  //                       (the guard keeps its state);
   //   end of render:      the detection fence is signaled (detection_awaiting_signal);
   //   update_alpha_auto:  the latest sample only while status_fresh;
   //   poll_detection:     sample_discarded (scope, stale on arrival),
-  //                       decode_detection_sample, latest_key,
-  //                       observe_scene, session.observe with the signatures
-  //                       the sample was submitted with, commit_counters
-  //                       (sample_counters);
+  //                       decode_detection_sample, latest_key, the guard's
+  //                       observe(sample_of(words), the pending actionable,
+  //                       the submitted signatures by kind) and the shadow
+  //                       run, session.observe with the signatures the
+  //                       sample was submitted with, commit_counters
+  //                       (sample_counters with the guard's observation);
   //   detect_ui:          the reduce with the hold store (u5) and, except on
   //                       a zero-offer frame, the tiles pass and the 100 ms
-  //                       sample cadence, scene evidence by measure_scene,
-  //                       the counter and CPU snapshot and the status key.
+  //                       sample cadence, scene evidence by the guard's
+  //                       measure(now, shadow, whole_frame(latest)), the
+  //                       counter and CPU snapshot and the status key.
   // The frame size, resource preparation and depth are not modelled.
   class sequence {
   public:
@@ -521,8 +612,13 @@ namespace {
     // Edits a submitted sample's texels: (texels, tick, scene evidence ran).
     std::function<void(texels &, std::uint64_t, bool)> sample_edit;
     ui_temporal::detection_state temporal;
+    // The hidden-scene guard (M5), owned by the depth path.
+    scene_guard::state guard;
     std::vector<frame_result> frames;
-    std::vector<alpha_auto_decision> samples;  // Every sample read, after observe_scene.
+    std::vector<alpha_auto_decision> samples;  // Every sample read, after the guard observed it.
+    std::vector<scene_guard::observation> observed;  // The guard's observation of each sample read.
+    // The guard's observations of committed samples (the scene counters).
+    std::uint64_t scene_entered {}, scene_released {}, scene_refuted {};
 
     struct transition {
       std::uint64_t tick;
@@ -556,7 +652,7 @@ namespace {
       r.hold = temporal.arbitrate(identity, observation, bits);
       const std::uint32_t flags = (bits & candidate::layer) ? p.layer_flags : 0u;
       if (r.hold.adopt) {
-        temporal.adopt(bits, flags, accepted);
+        temporal.adopt(bits, accepted);
       }
       ++cpu[ui_counter::auto_frames];
       const bool missing = (r.hold.per_frame & ui_detection::per_frame_accepted_missing) != 0;
@@ -573,10 +669,11 @@ namespace {
         r.active = r.detected = true;
         r.grace = !bits;
         temporal.enter_scope(observation);
+        guard.enter_scope(observation.epoch, observation.viewport);
         const bool shadow = session.first_run();
         poll(observation, r);
-        r.scene_hold_bits = temporal.scene_holds(p.now_ms);
-        const std::uint32_t per_frame = r.scene_hold_bits | r.hold.per_frame | (!p.depth_current ? ui_detection::per_frame_depth_not_current : 0u);
+        r.scene_bits = guard.per_frame(p.now_ms, bits, p.signatures.by_kind());
+        const std::uint32_t per_frame = r.scene_bits | r.hold.per_frame | (!p.depth_current ? ui_detection::per_frame_depth_not_current : 0u);
         detect(observation, bits, flags, accepted, p.signatures, per_frame, shadow, index, r);
         temporal.detected(observation, identity);
         invariants.generated_detections += p.hold_previous ? 1 : 0;
@@ -618,12 +715,14 @@ namespace {
       latest = ui_temporal::decode_detection_sample(pending_texels.data(), pending_texels.size(), pending_source.now_ms, submitted, true, pending_flags);
       temporal.latest_source = pending_source;
       temporal.latest_key = pending_key;
-      temporal.observe_scene(latest, temporal.pending_scene_actionable);
+      const auto observation = guard.observe(scene_guard::sample_of(pending_texels.data(), pending_texels.size(), pending_source.now_ms, true), pending_actionable, pending_signatures.by_kind());
+      latest.evidence.shadow_hidden_ms = observation.shadow_hidden_ms;
       session.observe(latest.evidence, latest.pixels, pending_source.now_ms, pending_signatures);
-      commit(latest);
+      commit(latest, observation);
       counters_pending = false;
       r.polled = true;
       samples.push_back(latest);
+      observed.push_back(observation);
       auto now_accepted = session.stored();
       if (now_accepted != last_accepted) {
         trust.push_back({latest.sample_tick_ms, now_accepted});
@@ -660,11 +759,11 @@ namespace {
       if (r.grace || pending || (last_submit && now >= last_submit && now - last_submit < sample_interval_ms)) {
         return;
       }
-      const auto measure = temporal.measure_scene(now, shadow);
-      temporal.pending_scene_actionable = false;
+      const auto measure = guard.measure(now, shadow, ui_temporal::whole_frame(temporal.latest));
+      pending_actionable = false;
       const bool evidence = measure.run;
       if (evidence) {
-        temporal.pending_scene_actionable = measure.actionable;
+        pending_actionable = measure.actionable;
       }
       // The reduce zeroes texels 5 and 6; only the evidence pass writes them.
       else {
@@ -689,12 +788,16 @@ namespace {
     }
 
     // commit_counters: ui_temporal::sample_counters of the CPU counts
-    // snapshotted at submission and the GPU words copied under its fence.
-    void commit(const alpha_auto_decision &sample) {
+    // snapshotted at submission, the GPU words copied under its fence and the
+    // scene guard's observation of the sample.
+    void commit(const alpha_auto_decision &sample, const scene_guard::observation &observation) {
       if (!counters_pending) {
         return;
       }
-      const auto delta = ui_temporal::sample_counters(sample, pending_cpu, committed_cpu, pending_words, committed_words, pending_source.now_ms);
+      const auto delta = ui_temporal::sample_counters(sample, pending_cpu, committed_cpu, pending_words, committed_words, pending_source.now_ms, observation);
+      scene_entered += observation.entered ? 1 : 0;
+      scene_released += observation.released ? 1 : 0;
+      scene_refuted += observation.refuted;
       committed_cpu = pending_cpu;
       committed_words = pending_words;
       committed_frames = pending_frame + 1;
@@ -705,6 +808,9 @@ namespace {
     ui_counters cpu, pending_cpu, committed_cpu;
     std::array<std::uint32_t, ui_counter_word::count> gpu_words {}, pending_words {}, committed_words {};
     bool pending {}, awaiting {}, counters_pending {};
+    // Whether the pending sample's scene evidence is actionable (the guard's
+    // measure when it was submitted).
+    bool pending_actionable {};
     std::size_t ready_frame {}, pending_frame {};
     std::uint64_t last_submit {}, submitted {};
     std::uint32_t pending_key {};
@@ -765,6 +871,11 @@ namespace {
       require(totals[ui_counter::none + reason] == expected[ui_counter::none + reason], what + ": none." + std::string(ui_no_mask::names[reason]) + " differs");
     }
     require(!totals[ui_counter::untrusted_inferred] && !totals[ui_counter::presented_over_dedicated], what + ": an unaccepted inferred alpha decided, or an inferred alpha beside an accepted declared one");
+    // The scene group counts the guard's observations of committed samples,
+    // and every visible sample that decided H1 released a hold.
+    require(totals[ui_counter::scene_entered] == s.scene_entered && totals[ui_counter::scene_released] == s.scene_released && totals[ui_counter::scene_refuted] == s.scene_refuted, what + ": the scene counters differ from the guard's observations");
+    require(totals[ui_counter::full_d_visible] <= totals[ui_counter::scene_released], what + ": an H1 decision over a visible scene released no hold");
+    require(!totals.decided(7) && !totals.decided(9), what + ": a retired source decided");
   }
 
   void run(sequence &s, present p, std::uint64_t from, std::uint64_t to, std::uint64_t interval = 16) {
@@ -1378,27 +1489,36 @@ namespace {
       check_counters(s, "Hogwarts HUD");
     }
     {
-      // Title screen before acceptance: the full change set never decides
-      // (route 6 needs an accepted pair); the HUD-less route (9) flattens only
-      // under its CPU-held verdict (H1). Then the gameplay HUD earns the pair,
-      // and back on the title the accepted pair decides it flat (6).
+      // Title screen before acceptance: the unaccepted full change set never
+      // decides 6 (S1 needs an accepted pair), but it is an informative full
+      // claim (H1 (c)), as is the HUD-less pre-UI image (d). The first sample
+      // shows the claim; the next two measure the presented frame hidden (D
+      // 0.039) and the pre-UI image visible, and from the poll of the second
+      // the held verdict flattens the title as source 8. Then the gameplay HUD
+      // earns the pair and its first sample, visible, releases the hold
+      // without refuting anything (the HUD claims nothing); back on the title
+      // the accepted pair decides it flat (6), which H1 never overrides
+      // although the guard holds the hidden verdict again.
       alpha_auto_policy session;
       const auto title = recorded_frames({recorded::hl_title, recorded::hl_title_held, recorded::hl_title_accepted});
       sequence s(session, phased({{12000, title}, {13000, recorded_frames({recorded::hl_hud, recorded::hl_hud_accepted})}, {UINT64_MAX, title}}));
       run(s, p, 10000, 14000);
-      std::size_t route = 0;
-      for (const auto &f : s.frames) {
-        const bool held = (f.gpu.per_frame & ui_detection::per_frame_scene_hold_hudless) != 0;
+      require(s.samples.size() > 3 && !s.samples[0].evidence.scene.ran && s.samples[1].evidence.scene.ran && s.samples[2].sample_tick_ms - s.samples[1].sample_tick_ms <= ui_detection::scene::hold_ms, "The title's first samples did not open the gate and measure");
+      const auto entry = poll_of(s, s.samples[2].sample_tick_ms);
+      require(s.observed[2].entered && s.frames[entry].scene_bits == (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible), "The title did not enter both holds at its second measured hidden sample");
+      for (std::size_t i = 0; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
         if (f.now_ms < 12000) {
-          require(f.source != 6, "The unaccepted title pair decided route 6");
-          require(f.source == (held ? 9u : 0u), "The title's route 9 did not follow its CPU-held verdict");
-          route += f.source == 9 ? 1 : 0;
+          require(f.source != 6, "The unaccepted title pair decided 6");
+          require(f.source == (i >= entry ? 8u : 0u) && f.decision.h1 == (i >= entry), "The title did not go flat (H1) exactly from the poll of its second measured hidden sample");
+          require(i >= entry || (f.decision.none_reason == ui_no_mask::gate_no_hold && f.decision.refused == candidate::hudless), "The title before the hold did not name its acting claim");
         } else if (f.now_ms >= 13000) {
-          require(f.flat() && f.source == 6, "The accepted pair did not decide the title flat");
+          require(f.flat() && f.source == 6 && !f.decision.h1, "The accepted pair did not decide the title flat");
         }
       }
-      require(route > 0, "The title never took the HUD-less route");
       require(s.trust.size() == 1 && s.trust[0].tick == first_sample_from(s, 12000) && s.trust[0].accepted == hudless, "The gameplay HUD did not accept the pair by its first sample");
+      const auto c = session.counters();
+      require(c[ui_counter::scene_entered] == 2 && c[ui_counter::scene_released] == 1 && !c[ui_counter::scene_refuted] && c[ui_counter::full_d_hidden] > 0 && !c[ui_counter::full_d_visible], "The title's H1 hold was not counted entered twice and released once");
       check_counters(s, "Hogwarts title");
     }
   }
@@ -1694,7 +1814,11 @@ namespace {
       const char *what;
     };
 
-    for (const auto &v : {variant {990, ui_no_mask::gate_no_hold, "an inexact full change set"}, variant {500, ui_no_mask::difference_failed, "an inexact middle-band change set"}}) {
+    // Both name difference_failed: an inexact pair that changed 90% or more
+    // is a pre-UI image claim (H1 (d)), which acts only while the scene
+    // guard holds the pre-UI image visible, so it is not gate_no_hold
+    // without that hold (F1 under H1).
+    for (const auto &v : {variant {990, ui_no_mask::difference_failed, "an inexact full change set"}, variant {500, ui_no_mask::difference_failed, "an inexact middle-band change set"}}) {
       // An exact full change set decides 6; an inexact pair of the same
       // frames is invalid (V2), so the accepted HUD-less pair has no decision
       // of its own. From 10200 inexact partial pairs decide 5 themselves.
@@ -1924,13 +2048,16 @@ namespace {
         require(r.held && !r.detected && r.hold.kind == hold_kind::generated && r.source == real_source && r.covered == real_covered, "A generated E33 Present did not show its real frame's decision (" + name + ")");
         ++(real_source ? held_accepted : held_unaccepted);
       } else if (r.detected) {
-        require(r.grace && !r.submitted && (r.gpu.per_frame & ui_detection::per_frame_accepted_missing) && (r.decision.reused ? r.source == 3 : !r.source), "A zero-offer Present beyond the reported count did not reuse the accepted mask at most once (" + name + ")");
+        require(r.grace && !r.submitted && (r.gpu.per_frame & ui_detection::per_frame_accepted_missing) && (r.decision.reused ? r.source == 3 || r.source == 8 : !r.source), "A zero-offer Present beyond the reported count did not reuse the accepted mask at most once (" + name + ")");
         ++(r.decision.reused ? reused : lost);
       } else {
         require(!r.active && !r.source && !real_source, "A zero-offer Present beyond the reported count held a mask decided before acceptance (" + name + ")");
       }
+      // Load Game is flat from the accepted Backbuffer (3), and from H1 (8)
+      // once the guard holds its hidden verdict: the Backbuffer is opaque on
+      // 99.9998% of pixels, not on every one.
       if (now >= 14100 && c.actual == c.reported) {
-        require(r.flat() && r.source == 3, "Load Game over a hidden scene was not flat with the accepted Backbuffer alpha (" + name + ")");
+        require(r.flat() && (r.source == 3 || r.source == 8), "Load Game over a hidden scene was not flat with the accepted Backbuffer alpha (" + name + ")");
       }
     }
     const auto first = s.samples.front().sample_tick_ms;
@@ -1947,9 +2074,9 @@ namespace {
       require(reused && lost && reused >= lost && reused <= lost + 1, "A count reported too low did not fall back to the T1 grace (" + name + ")");
     }
     // Load Game is a whole-frame alpha from the accepted Backbuffer, pinned
-    // flat (P1) over a hidden scene: the counters measure it hidden, never
-    // visible.
-    require(counted[ui_counter::full_alpha] > 0 && counted[ui_counter::full_alpha_d_hidden] > 0 && !counted[ui_counter::full_alpha_d_visible], "The counters did not record Load Game's whole-frame alpha over a hidden scene (" + name + ")");
+    // flat (P1) over a hidden scene until H1 takes it over: the counters
+    // measure it hidden, never visible.
+    require(counted[ui_counter::full_alpha] > 0 && counted[ui_counter::full_alpha_d_hidden] > 0 && !counted[ui_counter::full_alpha_d_visible] && counted[ui_counter::full_d_hidden] > 0 && !counted[ui_counter::full_d_visible], "The counters did not record Load Game's whole-frame alpha over a hidden scene (" + name + ")");
     check_counters(s, "E33 title and Load Game " + name);
   }
 
@@ -2104,22 +2231,27 @@ namespace {
   // ---------------------------------------------------------------- H1 hidden scene
 
   void hidden_scene_layer_route() {
-    // W3 graphics settings: an opaque unaccepted layer over a hidden scene.
-    // Phases by sample tick: hidden, invalid, hidden, visible, hidden while
-    // refuted, an overlay sample (the layer below opaque), hidden again.
+    // The Witcher 3 graphics settings: an opaque, unaccepted cleared layer
+    // over a hidden scene, an informative full claim (H1 (b)). Phases by
+    // sample tick: hidden, invalid, hidden, one visible sample, hidden while
+    // the layer's signature is refuted, overlay samples (the layer below
+    // opaque, which restore it), hidden again.
     const auto w3 = recorded_frames({recorded::w3_settings, recorded::w3_settings_held});
     alpha_auto_policy session;
     sequence s(session, [&](const gpu_inputs &in) {
       require(in.bits == (candidate::layer | candidate::current) && !in.accepted, "The W3 settings stream offered other inputs");
-      return w3(in);
+      auto t = w3(in);
+      // Overlay frames: the GPU counts the layer below opaque, so no claim.
+      if (in.now_ms >= 16000 && in.now_ms < 16200) {
+        t[word::layer_opaque] = 0;
+        t = decision_words(t, in);
+      }
+      return t;
     });
-    // Synthetic edits of the recorded sample: invalid evidence, one visible
-    // sample (D 0.5), and overlay samples (the layer below opaque).
+    // Synthetic edits of the recorded evidence: invalid samples, and one
+    // visible sample (D 0.5).
     bool visible_sent = false;
     s.sample_edit = [&visible_sent](texels &t, std::uint64_t tick, bool evidence) {
-      if (tick >= 16000 && tick < 16200) {
-        t[word::layer_opaque] = 0;
-      }
       if (!evidence) {
         return;
       }
@@ -2135,75 +2267,77 @@ namespace {
     present p;
     p.offered = candidate::layer | candidate::current;
     p.layer_flags = ui_detection::layer_detection_flags(false);
-    std::uint64_t entry_poll = 0, first_hidden = 0;
-    std::size_t visible_releases = 0;
+    const auto layer = p.signatures.of(kind::ui_layer);
+    require(layer.key() == "ui_layer:28:srgb", "The W3 layer signature moved");
+    std::vector<std::size_t> entries;
+    std::size_t visible_releases = 0, visible_poll = 0, restore_poll = 0;
     for (std::uint64_t now = 10000; now < 17500; now += 16) {
       p.now_ms = now;
-      const auto before = s.temporal.scene_hold_until;
+      const auto before = s.guard.hidden;
       const auto &r = s.step(p);
+      const auto index = s.frames.size() - 1;
       if (r.polled) {
         const auto &sample = s.samples.back();
         const auto &scene = sample.evidence.scene;
-        const bool hidden = scene.valid && scene.verdict == scene_verdict::hidden;
-        const bool refuted = s.temporal.scene_refuted_slots != 0;
-        if (hidden && !refuted && sample.evidence.layer_opaque) {
-          require(s.temporal.scene_hold_until[0] == sample.sample_tick_ms + ui_detection::scene::hold_ms, "A valid hidden sample did not hold the layer route for 500 ms from its tick");
-          if (!first_hidden) {
-            first_hidden = sample.sample_tick_ms;
-            entry_poll = now;
-          }
-        }
-        if (scene.valid && scene.verdict == scene_verdict::visible) {
-          require(!s.temporal.scene_hold_until[0] && !s.temporal.scene_hold_until[1] && s.temporal.scene_refuted_slots == 2u, "A visible sample did not release the routes and refute the layer");
-          ++visible_releases;
-        }
+        const auto &observed = s.observed.back();
+        const auto tick = sample.sample_tick_ms;
         if (!scene.valid) {
-          require(s.temporal.scene_hold_until == before, "Invalid evidence changed a hold");
+          require(s.guard.hidden.until == before.until && s.guard.hidden.last == before.last, "Invalid evidence changed a hold");
+        } else if (scene.verdict == scene_verdict::visible) {
+          require(!s.guard.hidden.until && observed.released && observed.refuted == 1 && s.guard.refuted(layer), "A visible sample did not release the hold and refute the layer's signature");
+          ++visible_releases;
+          visible_poll = index;
+        } else if (scene.verdict == scene_verdict::hidden && scene.ran && !s.guard.refuted(layer)) {
+          // H1: each valid hidden sample renews a held verdict to its tick
+          // plus 500 ms; one that follows another within 500 ms enters it.
+          if (before.held(tick) || observed.entered) {
+            require(s.guard.hidden.until == tick + ui_detection::scene::hold_ms, "A valid hidden sample did not hold for 500 ms from its tick");
+          }
+          require(observed.entered == (!before.held(tick) && before.last && tick - before.last <= ui_detection::scene::hold_ms), "A hidden sample entered without a second sample within 500 ms, or did not enter with one");
+        }
+        if (observed.entered) {
+          entries.push_back(index);
+        }
+        if (tick >= 16000 && tick < 16200 && !restore_poll) {
+          require(!s.guard.refuted(layer), "A sample showing the layer below opaque did not restore its signature");
+          restore_poll = index;
         }
       }
-      // The mask follows the held verdict exactly.
-      const bool hold = s.temporal.scene_hold_until[0] && now <= s.temporal.scene_hold_until[0];
-      require(r.source == (hold ? 8u : 0u), "The frame's mask did not follow the CPU-held verdict at " + std::to_string(now));
-      if (now >= 15000 && now < 16000) {
-        require(!r.source, "A refuted layer held its route");
+      // The mask follows the held verdict and the refutation exactly.
+      require(bool(r.scene_bits & ui_detection::per_frame_scene_hidden) == s.guard.hidden.held(now) && bool(r.scene_bits & (candidate::layer << ui_detection::per_frame_refuted_shift)) == s.guard.refuted(layer), "The pushed bits did not follow the guard at " + std::to_string(now));
+      const bool overlay = now >= 16000 && now < 16200;
+      const bool flat = s.guard.hidden.held(now) && !s.guard.refuted(layer) && !overlay;
+      require(r.source == (flat ? 8u : 0u) && r.decision.h1 == flat, "The frame's mask did not follow the CPU-held verdict at " + std::to_string(now));
+      if (!flat && !overlay && !s.guard.refuted(layer)) {
+        require(r.decision.none_reason == ui_no_mask::gate_no_hold && r.decision.refused == candidate::layer, "A frame with the layer's acting claim and no hold did not name gate_no_hold");
       }
     }
-    require(first_hidden && s.samples.front().evidence.scene.ran == false && s.samples[1].evidence.scene.ran, "The first sample ran scene evidence before a gate was seen open");
-    std::size_t flat_before = 0;
-    for (const auto &f : s.frames) {
-      if (f.now_ms < entry_poll && f.source) {
-        ++flat_before;
-      }
+    // Entry: the first sample opens the gate unmeasured, and the poll of the
+    // second measured hidden sample within 500 ms is the first flat frame.
+    require(!s.samples[0].evidence.scene.ran && s.samples[1].evidence.scene.ran && s.samples[2].evidence.scene.ran && s.samples[2].sample_tick_ms - s.samples[1].sample_tick_ms <= ui_detection::scene::hold_ms, "The first samples did not open the gate and measure");
+    require(!entries.empty() && entries[0] == poll_of(s, s.samples[2].sample_tick_ms), "The hold did not enter at the poll of the second measured hidden sample");
+    for (std::size_t i = 0; i != entries[0]; ++i) {
+      require(!s.frames[i].source, "A frame was flat before the hold entered");
     }
-    require(!flat_before && s.frames[(entry_poll - 10000) / 16].source == 8u, "The route did not enter on the first hidden read");
-    known_today("S2b", "H1",
-                "one valid hidden sample enters the full-frame layer route (W3 graphics settings, flat from the "
-                "poll of the sample taken at +" +
-                  std::to_string(first_hidden - 10000) + " ms); H1 wants 2");
-    bool rearmed = false;
-    for (const auto &f : s.frames) {
-      if (f.now_ms >= 16200 && f.source == 8u) {
-        rearmed = true;
-      }
+    // A refuted layer never flattens until a sample shows it below opaque;
+    // then it re-arms (the gate, then two hidden samples).
+    require(visible_releases == 1 && visible_poll && restore_poll > visible_poll, "The visible release or the restore did not happen once, in order");
+    for (std::size_t i = visible_poll; i != restore_poll; ++i) {
+      require(!s.frames[i].source, "A refuted layer flattened");
     }
-    require(visible_releases == 1 && rearmed, "A refuted slot did not re-arm after an overlay sample");
+    require(entries.size() == 3 && entries[1] < visible_poll && entries[2] > restore_poll && s.frames.back().source == 8u, "The hold did not re-enter after the invalid run and re-arm after the restore");
     const auto c = session.counters();
-    require(c[ui_counter::full_d_visible] == 1, "The releasing sample was not counted as full while visible");
+    require(c[ui_counter::full_d_visible] == 1 && c[ui_counter::scene_released] == 1 && c[ui_counter::scene_refuted] == 1 && c[ui_counter::scene_entered] == 3, "The visible release was not counted once as full_d.visible, released and refuted");
     require(session.stored().empty(), "The full opaque layer was accepted");
     check_counters(s, "W3 layer route");
   }
 
   void hidden_scene_shadow_and_clears() {
-    // A gate-open, hidden synthetic stream (an opaque unaccepted layer).
+    // A hidden synthetic stream with an opaque, unaccepted cleared layer: an
+    // informative full claim (H1 (b)).
     const auto hidden_layer = [](const gpu_inputs &in) {
       synthetic f;
-      f.alpha(kind::ui_layer, 1000);
-      f.c.opaque_layer = 1000;
-      f.scene_valid = true;
-      f.verdict = scene_verdict::hidden;
-      f.d = -.02f;
-      f.n = 300;
-      f.decided_edges = 600;
+      f.alpha(kind::ui_layer, 1000).opaque(kind::ui_layer, 1000).scene(-.02f, -.02f);
       return f.words(in);
     };
     const auto layer_flags = ui_detection::layer_detection_flags(false);
@@ -2227,20 +2361,22 @@ namespace {
       for (const auto &sample : s.samples) {
         require(sample.evidence.scene.ran && sample.evidence.shadow_hidden_ms == sample.sample_tick_ms - first, "The first-run shadow did not measure every sample");
       }
-      require(!s.temporal.scene_hold_until[0] && !s.temporal.scene_hold_until[1], "The shadow held a route");
+      require(!s.guard.hidden.until && !s.guard.hidden.last, "The shadow held a verdict");
+      // With a claim, the shadow's own first sample holds nothing either:
+      // the next two actionable samples enter the hold.
       alpha_auto_policy gated;
       gated.set_first_run(true);
       sequence g(gated, hidden_layer);
       p.offered = candidate::layer | candidate::current;
       p.layer_flags = layer_flags;
       std::size_t polls = 0;
-      for (std::uint64_t now = 10000; now < 11000 && polls < 2; now += 16) {
+      for (std::uint64_t now = 10000; now < 11000 && polls < 3; now += 16) {
         p.now_ms = now;
         if (!g.step(p).polled) {
           continue;
         }
         ++polls;
-        require(polls == 1 ? !g.temporal.scene_hold_until[0] : g.temporal.scene_hold_until[0] != 0, "A shadow-only sample held, or the next actionable one did not");
+        require(g.samples.back().evidence.scene.ran && (polls == 3) == g.guard.hidden.held(now) && (polls == 1) == !g.guard.hidden.last, "A shadow-only sample held, or the next two actionable ones did not enter");
       }
     }
     alpha_auto_policy session;
@@ -2248,62 +2384,108 @@ namespace {
     present p;
     p.offered = candidate::layer | candidate::current;
     p.layer_flags = layer_flags;
+    const auto layer = p.signatures.of(kind::ui_layer);
     std::uint64_t now = 10000;
     const auto establish = [&] {
       for (const auto until = now + 1000; now < until; now += 16) {
         p.now_ms = now;
-        if (s.step(p).scene_hold_bits) {
+        if (s.step(p).scene_bits & ui_detection::per_frame_scene_hidden) {
+          require(s.frames.back().source == 8u, "The held verdict did not flatten the layer's claim");
           return;
         }
       }
-      throw std::runtime_error("The layer route did not hold");
+      throw std::runtime_error("The hidden verdict did not hold");
     };
+    const auto held = [&] {
+      return s.guard.hidden.held(now);
+    };
+    // H1: D state clears only on an identity change (epoch or viewport).
     const auto cleared = [&](const char *what) {
-      require(!s.temporal.scene_hold_until[0] && !s.temporal.scene_hold_until[1] && !s.temporal.scene_holds(now), std::string(what) + " kept a hidden-scene hold");
+      require(!s.guard.hidden.until && !s.guard.hidden.last && !s.guard.pre_ui.until && !s.guard.refuted_count && !s.guard.per_frame(now, p.offered, p.signatures.by_kind()), std::string(what) + " kept hidden-scene state");
     };
-    const auto step = [&](present q) {
+    const auto step = [&](present q) -> const frame_result & {
       q.now_ms = now += 16;
       return s.step(q);
     };
     establish();
-    auto route = p;
-    route.offered = candidate::ui_alpha | candidate::layer | candidate::current;  // UIAlpha appears: the routes' inputs change.
-    step(route);
-    cleared("A route-key change");
-    for (const auto &[field, what] : {std::pair {0, "An epoch change"}, std::pair {1, "A revision change"}, std::pair {2, "A viewport change"}}) {
+    // UIAlpha appearing changes the offered inputs, not the identity: the
+    // held verdict stays and the layer's claim keeps the frame flat.
+    const auto with_alpha = [&p] {
+      auto q = p;
+      q.offered = candidate::ui_alpha | candidate::layer | candidate::current;
+      return q;
+    };
+    for (const auto until = now + 300; now < until;) {
+      const auto &r = step(with_alpha());
+      require(held() && r.source == 8u, "UIAlpha appearing cleared the held verdict");
+    }
+    for (const auto &[field, what] : {std::pair {0, "An epoch change"}, std::pair {2, "A viewport change"}}) {
       establish();
       if (field == 0) {
         ++p.epoch;
-      } else if (field == 1) {
-        ++p.revision;
       } else {
         ++p.viewport;
       }
       const auto &r = step(p);
       cleared(what);
-      require(r.consumed.state == alpha_auto_state::collecting, std::string(what) + " kept the previous scope's sample");
+      require(!r.source && r.consumed.state == alpha_auto_state::collecting, std::string(what) + " kept the previous scope's mask or sample");
     }
-    establish();
-    auto inactive = p;
-    inactive.available = false;
-    step(inactive);
-    cleared("An inactive frame");
-    require(!s.temporal.have_decision && s.temporal.reset_pending, "An inactive frame kept a decision to hold or reuse");
-    // A visible sample refutes the slot; a route change clears the refutation.
+    {
+      // A revision change (a depth observation loss) discards the pending
+      // sample unread but keeps the guard's holds.
+      establish();
+      while (!step(p).submitted) {}
+      ++p.revision;
+      const auto &r = step(p);
+      require(r.discarded && held() && r.source == 8u && r.consumed.state == alpha_auto_state::collecting, "A revision change did not discard the pending sample, or cleared the held verdict");
+    }
+    {
+      // An inactive frame clears T1's chain, not the guard: the next frame is
+      // flat at once.
+      establish();
+      auto inactive = p;
+      inactive.available = false;
+      const auto &off = step(inactive);
+      require(!off.active && !s.temporal.have_decision && s.temporal.reset_pending && held(), "An inactive frame kept a T1 decision, or cleared the held verdict");
+      require(step(p).source == 8u, "The frame after an inactive one was not flat under the held verdict");
+    }
+    {
+      // Acceptance changes never clear D state: the layer accepted mid-hold
+      // decides itself (opaque on every pixel, never overridden) and stays
+      // flat; forgotten again, H1 flattens it at once.
+      establish();
+      restore(session, layer.key(), 1);
+      for (const auto until = now + 300; now < until;) {
+        const auto &r = step(p);
+        require(held() && r.flat() && r.source == ui_detection::source_layer && !r.decision.h1 && (r.scene_bits & ui_detection::per_frame_scene_hidden), "The layer accepted mid-hold did not stay flat as itself, or cleared the held verdict");
+      }
+      require(s.forget() == layer.key(), "Forget did not clear the accepted layer");
+      const auto &r = step(p);
+      require(held() && r.flat() && r.source == 8u && r.decision.h1, "Forgetting the layer mid-hold did not return to H1 at once");
+    }
+    // A visible sample releases the hold and refutes the layer's signature;
+    // UIAlpha appearing keeps the refutation, and only an identity change
+    // clears it.
     s.sample_edit = [](texels &t, std::uint64_t, bool evidence) {
       if (evidence) {
         t[word::scene_state] = scene_state(true, scene_verdict::visible);
+        t[word::scene_d] = float_bits(.5f);
       }
     };
     for (const auto until = now + 500; now < until;) {
       step(p);
     }
-    require(s.temporal.scene_refuted_slots == 2u, "A visible sample did not refute the layer slot");
-    step(route);
-    require(!s.temporal.scene_refuted_slots, "A route change kept a refutation");
-    known_today("S2b", "H1",
-                "a route-key change (UIAlpha offered) clears the held hidden-scene verdict and the slot's refutation; "
-                "H1 clears D state only on a scope change and refutes per signature until it shows below 99% opaque");
+    require(s.guard.refuted(layer) && !held() && !s.frames.back().source, "A visible sample did not release the hold and refute the layer");
+    s.sample_edit = nullptr;
+    for (const auto until = now + 1000; now < until;) {
+      const auto &r = step(with_alpha());
+      require(!r.source && (r.scene_bits & (candidate::layer << ui_detection::per_frame_refuted_shift)), "UIAlpha appearing cleared the layer's refutation");
+    }
+    require(s.guard.refuted(layer), "The refutation did not last");
+    ++p.epoch;
+    step(p);
+    cleared("An epoch change after a refutation");
+    check_counters(s, "scope clears");
   }
 
   // ---------------------------------------------------------------- recorded acceptance streams
@@ -2539,7 +2721,9 @@ namespace {
       check_counters(s, "bloom");
     }
     // A dark grainy scene under a full unaccepted layer claim (the W3
-    // settings frames): one valid hidden sample, then valid but ambiguous ones.
+    // settings frames): one valid hidden (or visible) sample, then valid but
+    // ambiguous ones. H1 enters only on two valid hidden samples within
+    // 500 ms, and an ambiguous sample breaks the run: nothing flattens.
     for (const auto verdict : {scene_verdict::hidden, scene_verdict::visible}) {
       alpha_auto_policy session;
       sequence s(session, recorded_frames({recorded::w3_settings, recorded::w3_settings_held}));
@@ -2562,18 +2746,400 @@ namespace {
       run(s, p, 10000, 13000);
       std::size_t flat = 0;
       for (const auto &f : s.frames) {
-        if (f.source != 8) {
-          continue;
+        flat += f.source ? 1 : 0;
+      }
+      require(first_tick && evidence_samples > (verdict == scene_verdict::hidden ? 2u : 0u) && !flat && !s.guard.hidden.until && !s.scene_entered, std::string("A dark grainy scene flattened on one valid ") + (verdict == scene_verdict::hidden ? "hidden" : "visible") + " sample");
+      check_counters(s, "dark grainy");
+    }
+  }
+
+  // ---------------------------------------------------------------- H1 (S2b) streams
+
+  void h1_stellar_blade_sdr_menu_visits() {
+    // Stellar Blade in SDR with frame generation suspended while a menu is
+    // open: no Streamline tag, so the offer is the cleared output target and
+    // current alpha. The target holds the pre-UI scene image (alpha 0,
+    // V1-invalid), a pre-UI image claim (H1 (d)) on every frame, so every
+    // sample measures. Gameplay reads both images visible; the settings menu
+    // reads the presented frame hidden and the pre-UI image visible: the
+    // depth describes the pre-UI image, not the menu shown. Gameplay ->
+    // settings -> gameplay, three visits: each goes flat (8) from the poll of
+    // its second measured sample and is released by the first gameplay
+    // sample, which decided 8 and reads visible. Nothing is accepted.
+    const auto play = recorded_frames({recorded::sb_sdr_play});
+    const auto menu = recorded_frames({recorded::sb_sdr_menu, recorded::sb_sdr_menu_held});
+    constexpr std::array<std::pair<std::uint64_t, std::uint64_t>, 3> visits {{{11000, 12500}, {14000, 15000}, {16500, 18000}}};
+    const auto in_menu = [&visits](std::uint64_t tick) {
+      return std::any_of(visits.begin(), visits.end(), [tick](const auto &visit) {
+        return tick >= visit.first && tick < visit.second;
+      });
+    };
+    alpha_auto_policy session;
+    sequence s(session, [&](const gpu_inputs &in) {
+      return in_menu(in.now_ms) ? menu(in) : play(in);
+    });
+    present p;
+    p.offered = candidate::layer | candidate::current;
+    p.layer_flags = ui_detection::layer_detection_flags(false);
+    p.signatures.set(kind::ui_layer, 87);  // DXGI_FORMAT_B8G8R8A8_UNORM.
+    run(s, p, 10000, 19500);
+    require(!s.discards && !s.samples.front().evidence.scene.ran, "The first sample measured before the gate was seen open, or a sample was discarded");
+    for (std::size_t i = 1; i != s.samples.size(); ++i) {
+      const auto &sample = s.samples[i];
+      const auto &pre_ui = sample.evidence.pre_ui_scene;
+      require(sample.evidence.scene.ran && sample.evidence.scene.valid && pre_ui.valid && sample.evidence.pre_ui_image == ui_detection::pre_ui_image::layer && (sample.evidence.claims & ui_detection::claim_pre_ui), "A sample after the first did not measure both images");
+      require(in_menu(sample.sample_tick_ms) ? sample.evidence.scene.verdict == scene_verdict::hidden && pre_ui.verdict == scene_verdict::visible : sample.evidence.scene.verdict == scene_verdict::visible && pre_ui.verdict == scene_verdict::visible, "A sample's verdicts do not match its recording");
+    }
+    // Each visit's flat run: from the poll of its second sample to the poll
+    // of the first gameplay sample after it.
+    std::vector<std::pair<std::size_t, std::size_t>> flat_runs;
+    for (const auto &[open, close] : visits) {
+      std::vector<std::size_t> menu_samples;
+      std::size_t release = 0;
+      for (std::size_t i = 0; i != s.samples.size(); ++i) {
+        const auto tick = s.samples[i].sample_tick_ms;
+        if (tick >= open && tick < close) {
+          menu_samples.push_back(i);
+        } else if (tick >= close && !release) {
+          release = i;
         }
-        ++flat;
-        require(f.now_ms <= first_tick + ui_detection::scene::hold_ms, "Ambiguous evidence renewed the hold");
       }
-      if (verdict == scene_verdict::visible) {
-        require(!flat, "A visible dark scene flattened");
-      } else {
-        require(flat > 0, "One hidden sample did not flatten");
-        known_today("S2b", "H1", "a dark grainy scene under a full unaccepted layer claim flattens " + std::to_string(flat) + " frames on one valid hidden sample; H1 wants 2");
+      require(menu_samples.size() > 2 && release, "A visit had too few samples");
+      const auto entered = menu_samples[1];
+      require(!s.observed[menu_samples[0]].entered && s.observed[entered].entered && s.samples[entered].sample_tick_ms - s.samples[menu_samples[0]].sample_tick_ms <= ui_detection::scene::hold_ms, "A visit did not enter at its second hidden sample");
+      const auto entry = poll_of(s, s.samples[entered].sample_tick_ms);
+      require(s.frames[entry].scene_bits == (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible), "A visit did not hold both verdicts from its entry");
+      const auto exit = poll_of(s, s.samples[release].sample_tick_ms);
+      require(s.observed[release].released && s.samples[release].source_kind == 8u && !s.frames[exit].scene_bits, "The first gameplay sample after a visit did not release it");
+      // The exit latency the pre-UI layer claim implies (it stays true in
+      // gameplay): at most one sample interval plus the readback frame.
+      require(s.frames[exit].now_ms - close <= sample_interval_ms + 2 * 16, "A visit's release came later than one sample interval after the menu closed");
+      flat_runs.emplace_back(entry, exit);
+    }
+    for (std::size_t i = 0; i != s.frames.size(); ++i) {
+      const auto &f = s.frames[i];
+      const bool flat = std::any_of(flat_runs.begin(), flat_runs.end(), [i](const auto &run) {
+        return i >= run.first && i < run.second;
+      });
+      require(f.source == (flat ? 8u : 0u) && f.flat() == flat && f.decision.h1 == flat, "A Stellar Blade SDR frame at " + std::to_string(f.now_ms) + " was flat outside a visit's held verdict, or not flat inside it");
+      require(flat || (f.decision.none_reason == ui_no_mask::layer_aside && f.decision.refused == candidate::layer), "A frame without the held verdict did not set the pre-UI layer aside");
+    }
+    const auto c = session.counters();
+    require(c[ui_counter::scene_entered] == 3 && c[ui_counter::scene_released] == 3 && c[ui_counter::full_d_visible] == 3 && c[ui_counter::full_d_visible] <= c[ui_counter::scene_released] && !c[ui_counter::scene_refuted], "The three visits were not counted entered and released three times");
+    require(session.stored().empty() && s.trust.empty(), "A Stellar Blade SDR source was accepted");
+    for (const auto event : {ui_counter::trust_earned, ui_counter::trust_revoked_exact, ui_counter::trust_revoked_declared, ui_counter::trust_lapsed, ui_counter::trust_restored, ui_counter::trust_discarded, ui_counter::trust_forgotten}) {
+      require(!c[event], "The Stellar Blade SDR stream counted an acceptance event");
+    }
+    check_counters(s, "Stellar Blade SDR menu visits");
+  }
+
+  void h1_stellar_blade_sdr_fg_suspended() {
+    // Stellar Blade in SDR with FG set to 2x: gameplay offers the HUD-less
+    // tag (an inexact pair whose change set is the HUD) beside the cleared
+    // output target (the scene image, V1-invalid) and current alpha. The
+    // HUD-less image is the offer's pre-UI image, so a sample frame measures
+    // the layer only because the guard pushes per_frame_pre_ui_layer while
+    // the layer is set aside: gameplay reads the two within 0.004 (dumps
+    // 296226962143476 and 478: 0.504 and 0.508, 0.376 and 0.375), which
+    // proves the layer. The settings menu suspends FG, so it offers the
+    // layer and current alpha only (the recorded game3d_50264_218658377782962
+    // counts): flat from the poll of its second hidden sample, released by
+    // the first gameplay sample. A session that opens the menu before any
+    // gameplay sample stays 3D (the layer is unproven).
+    const auto menu = recorded_frames({recorded::sb_sdr_menu, recorded::sb_sdr_menu_held});
+    const auto play = [](const gpu_inputs &in) {
+      synthetic f;
+      f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).change_set(12).scene(.504f, .508f);
+      return f.words(in);
+    };
+    present fg_on, suspended;
+    fg_on.offered = candidate::layer | candidate::current | candidate::hudless;
+    fg_on.layer_flags = suspended.layer_flags = ui_detection::layer_detection_flags(false);
+    suspended.offered = candidate::layer | candidate::current;
+    fg_on.signatures.set(kind::ui_layer, 87);  // DXGI_FORMAT_B8G8R8A8_UNORM.
+    suspended.signatures = fg_on.signatures;
+    const auto layer = fg_on.signatures.of(kind::ui_layer);
+    {
+      alpha_auto_policy session;
+      sequence s(session, [&](const gpu_inputs &in) {
+        return (in.bits & candidate::hudless) ? play(in) : menu(in);
+      });
+      run(s, fg_on, 10000, 11000);
+      require(s.guard.proven(layer), "FG-on gameplay did not prove the layer beside the HUD-less image");
+      std::size_t layer_samples = 0;
+      for (const auto &sample : s.samples) {
+        layer_samples += sample.evidence.scene.ran && sample.evidence.pre_ui_image == ui_detection::pre_ui_image::layer ? 1 : 0;
+        require(!(sample.evidence.claims & ui_detection::claim_pre_ui) && !sample.source_kind, "FG-on gameplay claimed or decided");
       }
+      require(layer_samples + 1 >= s.samples.size() && layer_samples > 2, "FG-on gameplay did not measure the layer for its proof");
+      const std::size_t menu_from = s.frames.size();
+      run(s, suspended, 11000, 12500);
+      const std::size_t play_from = s.frames.size();
+      run(s, fg_on, 12500, 14000);
+      std::size_t entry = 0, exit = 0;
+      for (std::size_t i = 0; i != s.samples.size(); ++i) {
+        if (s.observed[i].entered && !entry) {
+          entry = poll_of(s, s.samples[i].sample_tick_ms);
+        }
+        if (s.observed[i].released && !exit) {
+          exit = poll_of(s, s.samples[i].sample_tick_ms);
+        }
+      }
+      require(entry > menu_from && exit > play_from && s.frames[entry].scene_bits == (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible), "The FG-suspended menu did not hold both verdicts");
+      require(s.frames[entry].now_ms - 11000 <= 3 * sample_interval_ms + 2 * 16, "The FG-suspended menu entered later than its second hidden sample");
+      for (std::size_t i = 0; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
+        // Back in FG-on gameplay the offer's pre-UI image is the HUD-less
+        // image, which changed on far fewer than 90% of pixels: no claim, so
+        // 3D from the first gameplay frame although the release comes later.
+        const bool flat = i >= entry && i < play_from;
+        require(f.source == (flat ? 8u : 0u) && f.flat() == flat, "An FG-suspended menu frame at " + std::to_string(f.now_ms) + " was flat outside its held verdict, or not flat inside it");
+      }
+      require(s.guard.proven(layer) && !s.discards, "The menu visit withdrew the proof, or a sample was discarded");
+      check_counters(s, "Stellar Blade SDR FG suspended");
+    }
+    {
+      // Booted into the settings menu: no gameplay sample proved the layer.
+      alpha_auto_policy session;
+      sequence s(session, menu);
+      run(s, suspended, 10000, 13000);
+      for (const auto &f : s.frames) {
+        require(!f.source && !(f.scene_bits & ui_detection::per_frame_pre_ui_visible), "An unproven layer flattened the menu");
+      }
+      require(s.scene_entered == 1 && !s.guard.proven(layer) && !s.guard.pre_ui.until, "The unproven menu did not hold the hidden verdict alone");
+      check_counters(s, "Stellar Blade SDR menu before gameplay");
+    }
+  }
+
+  void h1_dark_gameplay_never_flat() {
+    present p;
+    p.offered = candidate::layer | candidate::current;
+    p.layer_flags = ui_detection::layer_detection_flags(false);
+    const auto never_flat = [](const sequence &s, const char *what) {
+      for (const auto &f : s.frames) {
+        require(!f.flat() && !f.source && !(f.scene_bits & ui_detection::per_frame_pre_ui_visible), std::string(what) + " flattened, or held the pre-UI image visible");
+      }
+      require(!s.guard.pre_ui.until, std::string(what) + " entered the pre-UI hold");
+    };
+    {
+      // A dark scene behind a V1-invalid cleared layer (the Stellar Blade SDR
+      // inputs): the presented frame and the pre-UI image both read hidden
+      // for 10 s. The hidden hold enters, but the pre-UI claim never acts.
+      alpha_auto_policy session;
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(-.01f, .05f);
+        return f.words(in);
+      });
+      run(s, p, 10000, 20000);
+      never_flat(s, "A dark scene with both images hidden");
+      require(s.scene_entered == 1 && s.guard.hidden.held(s.frames.back().now_ms), "The dark scene's presented frame did not hold hidden");
+      check_counters(s, "dark gameplay");
+    }
+    {
+      // Correlated grain: the pre-UI image reads within 0.05 of the presented
+      // frame, which reads between 0.10 and 0.30. A pre-UI image visible
+      // (0.25 or more) beside a hidden presented frame (below 0.15) needs a
+      // contradiction of 0.10, so the pre-UI claim never acts.
+      alpha_auto_policy session;
+      lcg random {2024};
+      std::uint32_t hidden_samples = 0;
+      sequence s(session, [&random](const gpu_inputs &in) {
+        const float presented = .10f + float(random.next(2001)) / 10000.f;
+        const float pre_ui = presented + (float(random.next(1001)) - 500.f) / 10000.f;
+        synthetic f;
+        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(presented, pre_ui);
+        return f.words(in);
+      });
+      run(s, p, 10000, 40000);
+      for (const auto &sample : s.samples) {
+        hidden_samples += sample.evidence.scene.valid && sample.evidence.scene.verdict == scene_verdict::hidden ? 1 : 0;
+      }
+      never_flat(s, "Correlated grain");
+      require(hidden_samples > 20 && s.scene_entered > 0, "The grain stream never read the presented frame hidden");
+      check_counters(s, "correlated grain");
+    }
+    {
+      // A scene buffer from before fog or grain (V1-invalid, colour without
+      // alpha), proven in clear gameplay where both read 0.5: fog sets in and
+      // the presented frame drifts to 0.05 over 3 s while the buffer stays at
+      // 0.5. The first sample with a gap over 0.03 withdraws the proof, so
+      // the pre-UI hold never enters. A buffer behind grain that never agrees
+      // within 0.03 (presented 0.05 below it) is never proven.
+      for (const float offset : {0.f, .05f}) {
+        alpha_auto_policy session;
+        sequence s(session, [offset](const gpu_inputs &in) {
+          const float fade = in.now_ms < 12000 ? 0.f : std::min(1.f, float(in.now_ms - 12000) / 3000.f);
+          const float buffer = .5f, presented = buffer - offset - fade * (.45f - offset);
+          synthetic f;
+          f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(presented, buffer);
+          return f.words(in);
+        });
+        run(s, p, 10000, 20000);
+        never_flat(s, offset ? "A scene buffer behind grain" : "Fog after a proven scene buffer");
+        require(s.scene_entered > 0 && !s.guard.proven(p.signatures.of(kind::ui_layer)), "The fog stream never read hidden, or kept the proof");
+        check_counters(s, "fog after the scene buffer");
+      }
+    }
+    {
+      // Resident Evil Requiem: an accepted UI color tag deciding a partial
+      // HUD beside accepted presented alpha that is opaque everywhere. The
+      // declared-alpha block keeps the presented alpha out of S1 and of claim
+      // (a), so a dark room where every sample reads hidden for 10 s holds
+      // the hidden verdict and stays 3D with the tag's mask.
+      alpha_auto_policy session;
+      const auto signatures = signatures_in(srgb);
+      restore(session, stored_of({signatures.of(kind::ui_color), signatures.of(kind::current)}), 2);
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.alpha(kind::ui_color, 15).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(.05f, .05f);
+        return f.words(in);
+      });
+      present q;
+      q.offered = candidate::ui_color | candidate::current;
+      run(s, q, 10000, 20000);
+      for (const auto &f : s.frames) {
+        require(f.source == 2 && f.covered == 15 && !f.decision.h1 && !f.decision.claims, "Dark gameplay with an accepted tag and opaque presented alpha flattened or claimed");
+      }
+      for (const auto &sample : s.samples) {
+        require(!sample.evidence.scene.ran, "Dark gameplay without a claim measured");
+      }
+      check_counters(s, "accepted tag beside opaque presented alpha");
+    }
+    for (const bool shadow : {false, true}) {
+      // Dead Space-like: diegetic UI only, so no informative claim (an
+      // unaccepted current alpha over the whole frame, not opaque), with D
+      // near the verdict bounds. Without the first-run shadow nothing
+      // measures; with it every sample measures but none is actionable.
+      alpha_auto_policy session;
+      session.set_first_run(shadow);
+      lcg random {77};
+      sequence s(session, [&random](const gpu_inputs &in) {
+        constexpr float near_bounds[] {.14f, .16f, .24f, .26f};
+        const float d = near_bounds[random.next(4)];
+        synthetic f;
+        f.alpha(kind::current, 1000).opaque(kind::current, 500).scene(d, d);
+        return f.words(in);
+      });
+      present q;
+      q.offered = candidate::current;
+      run(s, q, 10000, 20000);
+      for (const auto &sample : s.samples) {
+        require(sample.evidence.claims == 0 && sample.evidence.scene.ran == shadow, "The Dead Space-like stream claimed, or measured without the shadow");
+      }
+      never_flat(s, "The Dead Space-like stream");
+      require(!s.guard.hidden.until && !s.guard.hidden.last && !s.scene_entered, "The Dead Space-like stream acted on evidence");
+      check_counters(s, shadow ? "Dead Space-like, shadow" : "Dead Space-like");
+    }
+  }
+
+  void h1_overrides_a_partial_winner() {
+    const auto signatures = signatures_in(srgb);
+    const auto layer = signatures.of(kind::ui_layer);
+    {
+      // An accepted UIAlpha decides 0.25% (the HUD) while an unaccepted,
+      // V1-valid cleared layer covers the frame opaque (a full menu, claim
+      // (b)). Over a hidden scene the held verdict overrides the partial
+      // winner (H1 has no '!source' gate): 1 -> 8 from the poll of the second
+      // measured hidden sample. One visible sample releases it and refutes
+      // the layer's signature: back to 1. Samples showing the layer at 50%
+      // opaque restore it, and the next hidden samples override again.
+      alpha_auto_policy session;
+      restore(session, signatures.of(kind::ui_alpha).key(), 1);
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.c.pixels = 4000;
+        const bool overlay = in.now_ms >= 13000 && in.now_ms < 13300;
+        f.alpha(kind::ui_alpha, 10).alpha(kind::ui_layer, 4000).opaque(kind::ui_layer, overlay ? 2000 : 4000).scene(-.02f, -.02f);
+        return f.words(in);
+      });
+      bool visible_sent = false;
+      s.sample_edit = [&visible_sent](texels &t, std::uint64_t tick, bool evidence) {
+        if (evidence && tick >= 11500 && !visible_sent) {
+          visible_sent = true;
+          t[word::scene_state] = scene_state(true, scene_verdict::visible);
+          t[word::scene_d] = float_bits(.5f);
+        }
+      };
+      present p;
+      p.offered = candidate::ui_alpha | candidate::layer | candidate::current;
+      p.layer_flags = ui_detection::layer_detection_flags(false);
+      run(s, p, 10000, 15000);
+      std::size_t visible = 0, restored = 0;
+      for (std::size_t i = 0; i != s.samples.size(); ++i) {
+        if (s.samples[i].evidence.scene.valid && s.samples[i].evidence.scene.verdict == scene_verdict::visible) {
+          visible = i;
+        }
+        if (!restored && s.samples[i].sample_tick_ms >= 13000) {
+          restored = i;
+        }
+      }
+      const auto entry = poll_of(s, s.samples[2].sample_tick_ms), release = poll_of(s, s.samples[visible].sample_tick_ms), restore_poll = poll_of(s, s.samples[restored].sample_tick_ms);
+      require(s.observed[2].entered && visible > 2 && s.observed[visible].released && s.observed[visible].refuted == 1 && restored > visible, "The override did not enter, release and restore in order");
+      std::size_t rearmed = 0;
+      for (std::size_t i = 0; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
+        require(f.decision.s1_source == 1 && f.gpu.accepted == candidate::ui_alpha, "The accepted UIAlpha was not the S1 winner");
+        if (i < entry || (i >= release && i < restore_poll)) {
+          require(f.source == 1 && f.covered == 10 && !f.decision.h1, "The partial winner was overridden without an acting held verdict");
+        } else if (i < release) {
+          require(f.flat() && f.source == 8 && f.decision.h1, "H1 did not override the accepted partial winner");
+        } else if (f.source == 8) {
+          rearmed = rearmed ? rearmed : i;
+        }
+        if (i >= release && i < restore_poll) {
+          require(f.scene_bits & (candidate::layer << ui_detection::per_frame_refuted_shift), "The refuted layer was not pushed as refuted");
+        }
+      }
+      require(rearmed > restore_poll && s.frames.back().source == 8 && !s.guard.refuted(layer), "The restored layer did not override again");
+      const auto c = session.counters();
+      require(c[ui_counter::full_d_visible] == 1 && c[ui_counter::scene_released] == 1 && c[ui_counter::scene_refuted] == 1 && c[ui_counter::scene_entered] == 2 && !session.accepts(layer), "The override's release and refutation were not counted once, or the layer was accepted");
+      check_counters(s, "partial winner overridden");
+    }
+    {
+      // An accepted opaque-full winner that is not opaque on every pixel:
+      // E33 Load Game's accepted Backbuffer (99.9998% opaque) over a hidden
+      // scene is flat from P1, then from H1 (8) from the poll of the second
+      // hidden sample, so no pixel of it is warped by the hidden depth.
+      alpha_auto_policy session;
+      restore(session, signatures.of(kind::backbuffer).key(), 1);
+      sequence s(session, recorded_frames({recorded::e33_load_accepted}));
+      present p;
+      p.offered = candidate::backbuffer;
+      run(s, p, 10000, 13000);
+      require(s.scene_entered == 1 && (s.frames.back().scene_bits & ui_detection::per_frame_scene_hidden), "The accepted Load Game Backbuffer's hidden scene was not held");
+      std::size_t entry = 0;
+      for (std::size_t i = 0; i != s.samples.size(); ++i) {
+        if (s.observed[i].entered) {
+          entry = poll_of(s, s.samples[i].sample_tick_ms);
+        }
+      }
+      for (std::size_t i = 0; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
+        require(f.flat() && f.decision.s1_source == 3 && f.decision.claims == candidate::backbuffer && f.source == (i < entry ? 3u : 8u) && f.decision.h1 == (i >= entry), "H1 did not take over an accepted winner with transparent pixels from its entry");
+      }
+      const auto c = session.counters();
+      require(c[ui_counter::full_alpha_d_hidden] > 0 && c[ui_counter::full_d_hidden] > 0 && !c[ui_counter::full_d_visible], "Load Game's samples were not counted as whole-frame alpha, then as H1");
+      check_counters(s, "accepted opaque-full winner");
+    }
+    {
+      // An accepted alpha winner opaque on every pixel is flat already: H1
+      // holds the hidden verdict but never overrides it.
+      alpha_auto_policy session;
+      restore(session, signatures.of(kind::backbuffer).key(), 1);
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.alpha(kind::backbuffer, 1000).opaque(kind::backbuffer, 1000).scene(.03f, .03f);
+        return f.words(in);
+      });
+      present p;
+      p.offered = candidate::backbuffer;
+      run(s, p, 10000, 13000);
+      require(s.scene_entered == 1, "The opaque winner's hidden scene was not held");
+      for (const auto &f : s.frames) {
+        require(f.flat() && f.source == 3 && !f.decision.h1 && f.decision.claims == candidate::backbuffer, "H1 overrode an accepted winner opaque on every pixel");
+      }
+      check_counters(s, "accepted winner opaque everywhere");
     }
   }
 
@@ -2594,7 +3160,8 @@ namespace {
   // 100 ms one), and a log names no candidate format, so the signatures are
   // those of the restored keys or placeholders (format 0, sRGB); the
   // prediction is a sketch, never a gate. Lines of earlier versions (trusted
-  // slots, the legacy trust bitmask) are read as far as they map.
+  // slots, the legacy trust bitmask, the HUD-less route's evidence and
+  // scene_hold before S2b) are read as far as they map.
   std::string field_text(const std::string &line, const std::string &key) {
     for (const char before : {' ', '{'}) {
       const auto at = line.find(std::string(1, before) + key + "=");
@@ -2652,7 +3219,7 @@ namespace {
       candidate_signatures signatures;
       signatures.color_space = srgb;
       std::string predicted;
-      std::uint32_t fed = 0, logged = 0;
+      std::uint32_t fed = 0, logged = 0, held_hidden = 0, h1 = 0;
       std::uint64_t day = 0, last_ms = 0;
       std::map<std::string, std::string> last_sample;  // Per runtime.
       std::printf("== %s\n", path.c_str());
@@ -2769,6 +3336,39 @@ namespace {
         }
         evidence.reused = field_text(line, "sampled_reused") == "1";
         evidence.late_layer = field_text(line, "sampled_late_layer") == "1";
+        // S2b: texel 10 (the opaque Backbuffer and current pixels, the
+        // informative claims and the h1 word) and the pre-UI scene image's
+        // evidence; before S2b, the HUD-less image's (sampled_hudless_scene).
+        if (const auto inferred = field_text(line, "sampled_inferred_opaque"); !inferred.empty()) {
+          const auto opaque_counts = field_quad(inferred);
+          evidence.inferred_opaque = {opaque_counts[0], opaque_counts[1]};
+        }
+        evidence.claims = field_number(field_text(line, "sampled_claims"), 16);
+        if (const auto h1_word = field_group(line, "sampled_h1"); !h1_word.empty()) {
+          evidence.s1_source = field_number(field_text(h1_word, "winner"));
+          evidence.h1_applied = field_text(h1_word, "applied") == "1";
+        }
+        const auto pre_ui = field_group(line, "sampled_pre_ui_scene"), hudless_scene = field_group(line, "sampled_hudless_scene");
+        if (const auto &group = pre_ui.empty() ? hudless_scene : pre_ui; !group.empty()) {
+          evidence.pre_ui_scene.n = field_number(field_text(group, "n"));
+          evidence.pre_ui_scene.d = std::strtof(field_text(group, "d").c_str(), nullptr);
+          evidence.pre_ui_scene.valid = field_text(group, "valid") == "1";
+          const auto image = field_text(group, "image");
+          evidence.pre_ui_image = ui_detection::pre_ui_image::none;
+          if (pre_ui.empty() || image == "hudless") {
+            evidence.pre_ui_image = ui_detection::pre_ui_image::hudless;
+          } else if (image == "layer") {
+            evidence.pre_ui_image = ui_detection::pre_ui_image::layer;
+          }
+        }
+        // This render's guard state, not the sample's: scene_guard since S2b,
+        // scene_hold (the held routes) before.
+        if (const auto guard = field_group(line, "scene_guard"); !guard.empty()) {
+          held_hidden += field_text(guard, "hidden") == "1" ? 1 : 0;
+        } else {
+          held_hidden += field_number(field_text(line, "scene_hold")) ? 1 : 0;
+        }
+        h1 += evidence.h1_applied ? 1 : 0;
         // A log names no validity bits: V1 and V2 follow from the logged counts.
         {
           ui_selection::counts c;
@@ -2797,6 +3397,7 @@ namespace {
         }
       }
       std::printf("%u logged samples fed, %u logged acceptance changes, predicted acceptance at the end %s\n", fed, logged, predicted.empty() ? "none" : predicted.c_str());
+      std::printf("%u fed samples logged under a held hidden verdict, %u decided H1 (source 8)\n", held_hidden, h1);
     }
     return 0;
   }
@@ -2834,6 +3435,10 @@ int main(int argc, char **argv) {
     {"H1 shadow and scope clears", hidden_scene_shadow_and_clears},
     {"P1/A1/S1 recorded menus", recorded_menus_after_acceptance},
     {"A1/S1 adversaries", adversaries},
+    {"H1 Stellar Blade SDR menu visits", h1_stellar_blade_sdr_menu_visits},
+    {"H1 Stellar Blade SDR with FG suspended", h1_stellar_blade_sdr_fg_suspended},
+    {"H1 dark gameplay never flat", h1_dark_gameplay_never_flat},
+    {"H1 overrides a partial winner", h1_overrides_a_partial_winner},
     {"S1/T1 invariants", s1_invariants},
   };
   try {

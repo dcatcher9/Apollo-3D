@@ -463,13 +463,18 @@ usable mask while no UI channel was offered clean and empty, which means no UI o
 and menus took the scene's depth, with each window's time and the reason each offered channel gave
 no mask, and in logs since S2a the add-on's own reason and refused candidate (gaps shorter than the overlay warning's minimum, defined in the
 [UI protection panel](../../docs/reshade-sbs.md#setup), are counted, not listed); how many samples were
-full-frame UI over a hidden scene (source 8 or 9)
-and how many of those were a route's exit, whose own evidence read the presented frame visible
-(each hidden scene that ends shows one, so they are counted rather than judged); a warning when the
+full-frame UI over a hidden scene (H1, source 8; in logs before S2b source 8 or 9), by the pre-UI
+scene image whose claim acted (HUD-less image or UI layer), with the hidden-scene guard's entered,
+released and refuted counts from the last counter line, and how many hidden samples had a pre-UI
+layer that no gameplay sample had yet proven the presented frame without its UI (in logs before S2b, how many were a
+route's exit, whose own evidence read the presented frame visible: each hidden scene that ends
+shows one, so they are counted rather than judged); a warning when the
 presented frame read hidden, not blank, for at least 500 ms while no UI source decided
 (`shadow_hidden_ms`, which the first-run shadow measures in a game's first session after install, or
 whenever `UISceneShadow=1`, even where
-nothing could act, such as a game whose only UI signal is presented alpha); observation losses by
+nothing could act, such as a game whose only UI signal is presented alpha; since S2b H1 covers
+Stellar Blade's SDR menus, which the shadow logged this way while frame generation was suspended);
+observation losses by
 cause; unusual export pauses; present-thread
 hitches; Game 3D CPU and GPU cost; and, from the host log, the Game 3D link, size fit and encoder
 stalls.
@@ -486,11 +491,15 @@ invariants from the last counter line, not from the 100 ms samples. It reports t
   A2 never revokes shorter ones, and the counter cannot tell them apart. Counter lines logged
   before S2a keep the older rule: accepted full coverage of a visible scene (`trusted_full`) that no
   revocation of that source resolved.
-- `UI full frame`: full-frame samples whose scene read visible. Each release of a held hidden-scene
-  route (8 or 9) counts one, so this is a warning when such a route decided. An exact full
-  change-set (6) over a visible scene is intended for an accepted exact pair (P1), so with no held
-  route it is INFO.
-- `UI full alpha`: a whole-frame mask from alpha, and whether its samples read the scene visible.
+- `UI full frame`: H1 samples (8) whose scene read visible, against the hidden-scene guard's
+  releases (`scene={entered released refuted}`, since S2b). The sample that releases a held hidden
+  verdict decided 8 and read visible, and counts as a release, so this passes while
+  `full_d.visible` is at most `scene.released` and warns that an H1 hold acted over a visible
+  scene otherwise. Counter lines logged before S2b keep the older rule: each release of a held
+  route (8 or 9) counted one, so it warns when such a route decided, and an exact full change-set
+  (6) alone is INFO.
+- `UI full alpha`: accepted whole-frame decisions, a whole-frame mask from alpha or (since S2b) an
+  exact full change-set (6), and whether their samples read the scene visible.
   It is INFO: an accepted source pins its alpha at any coverage, so a full one is flat even over a
   visible scene, as the [opacity ruling](../../docs/reshade-sbs.md#ui-decision-framework) intends.
 - `UI inferred alpha`: a failure when an unaccepted inferred alpha decided, which only accepted
@@ -504,8 +513,12 @@ invariants from the last counter line, not from the 100 ms samples. It reports t
   Forget.
 
 Logs without counter lines use the sampled checks above. The report reads the UI and counter lines
-of logs written before S2a and before S1 too, each with the checks of its time; a UI layer logged
-before S1 is read as the layer candidate.
+of logs written before S2b, before S2a and before S1 too, each with the checks of its time; a UI
+layer logged before S1 is read as the layer candidate. UI lines since S2b carry the pre-UI scene
+image's evidence (`sampled_pre_ui_scene`), the informative claims and the H1 word
+(`sampled_claims`, `sampled_h1`) and the guard's pushed verdicts and layer proof (`scene_guard`) in place of
+`sampled_hudless_scene` and `scene_hold`; [UI protection](../../docs/reshade-sbs.md#setup) defines
+them.
 
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
 the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`
@@ -539,7 +552,7 @@ It ends with
 cell is XFAIL while it keeps today's recorded outcome, and XPASS once it meets its target.
 `--strict` also fails on an XPASS, so that its xfail gets removed.
 
-The second gate is the sequence test of the temporal rules (trust, holds, hidden-scene verdicts).
+The second gate is the sequence test of the temporal rules (trust, holds, the hidden-scene guard).
 It runs with the other tests:
 
 ```bash
@@ -548,8 +561,8 @@ ctest --test-dir cmake-build-relwithdebinfo/reshade-addon -R reshade_game3d_ui_s
 
 Its `KNOWN_TODAY <stage> <rule>` lines name today's known-wrong outcomes by
 [UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework) stage and rule ID (such as
-`S3 T1/E2`). They do not fail the test. Since S2a it ends with
-`PASS UI sequence replay: 24 groups, 5 KNOWN_TODAY`: two for S3 (T1/E2) and three for S2b (H1). A
+`S3 T1/E2`). They do not fail the test. Since S2b it ends with
+`PASS UI sequence replay: 27 groups, 2 KNOWN_TODAY`: both for S3 (T1/E2). A
 replay `xfail` reason names the same rule IDs.
 
 ## Additional diagnostics

@@ -2399,7 +2399,7 @@ namespace {
         replay.at("ui_detection").at("candidates") == ui_detection::candidate::layer &&
         replay.at("ui_detection").at("accepted") == ui_detection::candidate::layer &&
         replay.at("ui_detection").at("candidate_layout") == ui_detection::candidate_layout &&
-        replay.at("ui_pin").at("decision_texels") == ui_detection::judgment_decision_texels &&
+        replay.at("ui_pin").at("decision_texels") == ui_detection::h1_decision_texels &&
         replay.at("ui_pin").at("evidence_images") == ui_detection::max_scene_evidence_images,
       "Dump lost the layer's detection constants or pin markers");
     require(!replay.at("ui_pin").contains("late_margin") &&
@@ -2413,12 +2413,15 @@ namespace {
     report << "layer-detection-dump flags=" << expected_flags << " tagged_flags=0 own_slots=1 ran=1 held_reported=1 layer_raw_alpha=1\n";
     std::puts("PASS D3D11 UI detection constants: the UI layer has its own slot with stored flags only, a tagged UI color the UI color slot with none, both accepted masks are their slot's raw alpha, and Dump 3D records them with the accepted candidates and pin markers");
   }
-  // Hidden-scene evidence (docs/reshade-sbs.md, hidden-scene evidence). Full-
-  // frame UI over a hidden scene (sources 8 and 9) needs this frame's gate,
-  // valid evidence that the presented frame lacks the consumed depth's edges,
-  // and the CPU's hold of that verdict; nothing else changes a decision. The
-  // evidence passes run on sample frames only, while the latest sample's gate
-  // was open, a hold is active or the first-run shadow measures.
+  // Hidden-scene evidence (docs/reshade-sbs.md, hidden-scene evidence). H1,
+  // full-frame UI over a hidden scene (source 8), needs this frame's
+  // informative full claim, current depth, and the scene guard's hold of a
+  // hidden verdict (two valid hidden samples within hold_ms) of the
+  // presented frame lacking the consumed depth's edges, and for a pre-UI
+  // image's claim also that image reading visible on those samples; nothing
+  // else changes a decision. The evidence passes run on sample frames only,
+  // after a sample with an acting-capable claim, while a hold is active, for
+  // the first-run shadow or after an accepted whole-frame decision.
   void verify_hidden_scene(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;
     using ui_detection::scene_verdict;
@@ -2538,14 +2541,15 @@ namespace {
         all_ones = all_ones && value == 1.f; all_zero = all_zero && value == 0.f;
       }
       const auto flags = gpu.renderer.consumed_detection().flags;
-      return outcome{all_ones, all_zero, (flags & (ui_detection::per_frame_scene_hold | ui_detection::per_frame_scene_hold_hudless)) != 0,
+      return outcome{all_ones, all_zero, (flags & ui_detection::per_frame_scene_hidden) != 0,
         gpu.renderer.alpha_probe_activity().scene_evidence - before, gpu.renderer.consumed_alpha_auto(), rendered};
     };
-    // Frames until the first flat one, at most limit; each must be held exactly when flat.
+    // Frames until the first flat one, at most limit; each must hold the
+    // hidden verdict exactly when flat.
     const auto frames_to_flat = [&](const std::vector<unsigned char> &color, unsigned limit, const char *label) {
       for (unsigned count = 1; count <= limit; ++count) {
         const auto o = frame(color);
-        require(o.flat == o.held, std::string(label) + ": a held route did not flatten exactly the held frame");
+        require(o.flat == o.held, std::string(label) + ": the held hidden verdict did not flatten exactly the held frame");
         if (o.flat) return count;
       }
       return 0u;
@@ -2556,7 +2560,7 @@ namespace {
       outcome last{};
       for (unsigned i = 0; i != count; ++i) {
         last = frame(color, parameters);
-        require(!last.flat && (!i || (last.sample.source_kind != 8u && last.sample.source_kind != 9u)),
+        require(!last.flat && (!i || last.sample.source_kind != 8u),
           std::string(label) + ": full-frame UI without its hidden-scene evidence");
       }
       return last;
@@ -2567,7 +2571,7 @@ namespace {
     source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
     gpu.render(false, 1, false, false, false, {}, {}, {}, nullptr, &source);
     // A frame smaller than the grid has cells without a pixel: no evidence,
-    // so nothing ever takes a route.
+    // so nothing ever holds a verdict.
     if (width < ui_detection::scene::cells_x || height < ui_detection::scene::cells_y) {
       inputs.layer = opaque_layer; inputs.layer_flags = layer_flags;
       const auto small = never_flat(logo_color, 4, "frame smaller than the scene grid");
@@ -2575,22 +2579,26 @@ namespace {
         "A frame smaller than the scene grid gave hidden-scene evidence");
       inputs = {};
       report << "hidden-scene D3D11 below_grid=" << width << 'x' << height << " no_evidence=1\n";
-      std::puts("PASS D3D11 hidden scene: a frame smaller than the scene grid gives no evidence and takes no route");
+      std::puts("PASS D3D11 hidden scene: a frame smaller than the scene grid gives no evidence and never flattens");
       return;
     }
-    // (a) An unaccepted opaque offscreen layer over a scene its picture hides:
-    // the first sample shows the gate, the second measures, its hidden verdict
-    // holds the layer route, and the frame pins flat at one plane.
+    // (a) An unaccepted opaque offscreen layer over a scene its picture hides
+    // (claim (b): a cleared target, V1-valid and opaque-full): the first
+    // sample shows the claim, the next two measure, the second valid hidden
+    // verdict enters the hold (H1), and the frame pins flat at one plane.
     inputs.layer = opaque_layer; inputs.layer_flags = layer_flags;
     const auto first = frame(logo_color);
-    require(!first.flat && !first.evidence, "Evidence ran or flattened before any sample showed an open gate");
+    require(!first.flat && !first.evidence, "Evidence ran or flattened before any sample showed a claim");
     const auto second = frame(logo_color);
-    require(!second.flat && second.evidence == 1, "An open gate did not measure the next sample frame");
+    require(!second.flat && second.evidence == 1, "A claim did not measure the next sample frame");
+    const auto one_sample = frame(logo_color);
+    require(!one_sample.flat && !one_sample.held && one_sample.evidence == 1 &&
+        one_sample.sample.evidence.scene.verdict == scene_verdict::hidden, "One hidden sample entered the hold");
     const auto entered = frame(logo_color);
     const auto &measured = entered.sample.evidence.scene;
     require(entered.flat && entered.held && measured.ran && measured.valid && measured.verdict == scene_verdict::hidden &&
         measured.n >= ui_detection::scene::min_edges && measured.d < .15f && entered.sample.evidence.layer_opaque == pixels,
-      "An opaque layer over a hidden scene did not become full-frame UI from valid hidden evidence");
+      "An opaque layer over a hidden scene did not become full-frame UI from two valid hidden samples");
     {
       float plane{}; bool uniform = true;
       std::memcpy(&plane, entered.pixels.field.bytes.data(), sizeof(plane));
@@ -2598,28 +2606,32 @@ namespace {
       require(uniform, "Full-frame UI over a hidden scene left a non-uniform field");
     }
     const auto confirmed = frame(logo_color);
-    require(confirmed.flat && confirmed.sample.source_kind == 8u && confirmed.sample.covered == pixels,
-      "The layer route's decision did not report source 8 over the whole frame");
+    require(confirmed.flat && confirmed.sample.source_kind == 8u && confirmed.sample.covered == pixels &&
+        confirmed.sample.evidence.h1_applied && !confirmed.sample.evidence.s1_source &&
+        (confirmed.sample.evidence.claims & ui_detection::candidate::layer) &&
+        confirmed.sample.scene_guard.hidden && !confirmed.sample.scene_guard.pre_ui,
+      "H1 over the layer's claim did not report source 8 over the whole frame");
     // (b) A presented frame showing the depth's edges reads visible and
     // releases the hold; only the frame already decided before that sample
     // stays flat.
     frame(scene_color);
     const auto released = frame(scene_color);
     require(!released.flat && !released.held && released.sample.evidence.scene.verdict == scene_verdict::visible &&
-        released.sample.evidence.scene.d >= .25f, "A visible scene did not release the layer route");
+        released.sample.evidence.scene.d >= .25f && released.sample.scene_guard.refuted == 1,
+      "A visible scene did not release the hold and refute the layer");
     never_flat(scene_color, 2, "presented frame showing the depth's edges");
-    // That visible verdict refuted the opaque layer as hiding the scene: like
-    // a scene buffer the census took for a layer, it takes no route again
-    // until it is offered below opaque. A selective layer is an overlay again
-    // (unaccepted, it decides nothing itself), and the opaque one then
-    // re-enters as from a closed gate.
+    // That visible verdict refuted the layer's signature: like a scene buffer
+    // the census took for a layer, its claim acts no more until it is offered
+    // below 99% opaque. A selective layer is an overlay again (unaccepted, it
+    // decides nothing itself), and the opaque one then re-enters from its
+    // claim.
     never_flat(logo_color, 4, "refuted opaque layer");
     inputs.layer = logo_layer;
     const auto selective = frame(logo_color);
     require(!selective.flat && selective.empty && !selective.held,
       "A selective unaccepted layer decided a mask or kept the hidden-scene hold");
     inputs.layer = opaque_layer;
-    require(frames_to_flat(logo_color, 4, "re-entry") == 3, "A layer shown transparent again did not re-enter the route");
+    require(frames_to_flat(logo_color, 5, "re-entry") == 4, "A layer shown transparent again did not re-enter");
     // (c) Invalid evidence never renews a hold: over flat depth the hold
     // expires hold_ms after the last valid hidden sample's tick.
     frame(logo_color);
@@ -2633,23 +2645,26 @@ namespace {
     }
     require(held_frames == 5, "A hold did not last exactly hold_ms after its last valid sample: " + std::to_string(held_frames));
     never_flat(logo_color, 3, "flat depth without edge cells");
-    // (d) Depth that is not this frame's gives no evidence.
+    // (d) Depth that is not this frame's gives no evidence and disables H1.
     gpu.depth_view = silhouette;
     gpu.depth_current = false;
     const auto stale = never_flat(logo_color, 4, "reused depth");
     require(stale.sample.evidence.scene.ran && !stale.sample.evidence.scene.valid &&
         stale.sample.evidence.scene.n >= ui_detection::scene::min_edges, "Reused depth gave valid hidden-scene evidence");
     gpu.depth_current = true;
-    require(frames_to_flat(logo_color, 3, "current depth again") == 2, "Current depth did not restore the layer route");
-    // (e) An epoch or revision change, detection turning inactive and
-    // acceptance gained by a route's input clear the hold at once; a HUD-less image that
-    // frame generation pairs on some Presents only does not.
+    require(frames_to_flat(logo_color, 4, "current depth again") == 3, "Current depth did not re-enter after two hidden samples");
+    // (e) Only an identity change (epoch or viewport) clears the guard. An
+    // observation revision, detection turning inactive, acceptance changes
+    // and a HUD-less image that frame generation pairs on some Presents only
+    // keep the hold.
     ++source.epoch;
     never_flat(logo_color, 1, "epoch change");
-    require(frames_to_flat(logo_color, 4, "after the epoch change") == 2, "The layer route did not re-enter after an epoch change");
+    require(frames_to_flat(logo_color, 4, "after the epoch change") == 3, "The hold did not re-enter after an epoch change");
     ++source.revision;
-    never_flat(logo_color, 1, "revision change");
-    require(frames_to_flat(logo_color, 4, "after the revision change") == 2, "The layer route did not re-enter after a revision change");
+    for (unsigned i = 0; i != 3; ++i) {
+      const auto kept = frame(logo_color);
+      require(kept.flat && kept.held, "A revision change cleared the hidden-scene hold");
+    }
     {
       // One frame with automatic UI protection off: detection is inactive.
       const auto parameters = gpu.renderer.consumed_parameters();
@@ -2666,27 +2681,33 @@ namespace {
         "Manual Off left detection active");
       policy.set_automatic();
     }
-    // The sample pending from before cannot renew the hold; the next one does.
-    require(frames_to_flat(logo_color, 4, "after inactive detection") == 2, "Inactive detection did not clear the layer route's hold");
+    // The guard outlives the inactive frame: the next detecting frame is flat.
+    require(frames_to_flat(logo_color, 4, "after inactive detection") == 1, "Inactive detection cleared the hidden-scene hold");
     // HUD-less present on alternate Presents only: the hold stays.
     for (unsigned i = 0; i != 4; ++i) {
       inputs.hudless = i % 2 ? api::resource_view{} : scene_view;
       const auto paired = frame(logo_color);
-      require(paired.flat && paired.held, "A HUD-less pairing that comes and goes cleared the layer route's hold");
+      require(paired.flat && paired.held, "A HUD-less pairing that comes and goes cleared the hold");
     }
     inputs.hudless = {};
     {
-      // The layer is accepted while held: it decides by itself (source 10,
-      // flat at any coverage) and the hold is gone.
+      // The layer accepted while held keeps the hold (acceptance never clears
+      // D) and decides by itself: a winner opaque on every pixel (source 10,
+      // flat at any coverage) that H1 never overrides.
       alpha_auto_policy trusting;
       require(trusting.restore(gpu.key(ui_selection::kind::ui_layer)).restored == 1, "The layer key was not restored");
       source.session = &trusting;
       const auto gained = frame(logo_color);
-      require(!gained.held && frame(logo_color).sample.source_kind == ui_detection::source_layer,
-        "Acceptance gained by the layer kept its hidden-scene hold");
+      const auto decided = frame(logo_color);
+      require(gained.held && gained.flat && decided.held && decided.sample.source_kind == ui_detection::source_layer &&
+          !decided.sample.evidence.h1_applied && decided.sample.evidence.s1_source == ui_detection::source_layer,
+        "Acceptance gained by the layer cleared the hold, or H1 overrode its whole-frame decision");
       source.session = &policy;
     }
-    never_flat(logo_color, 1, "acceptance lost again");
+    // Acceptance lost again: the unaccepted layer's claim acts under the same
+    // hold at once.
+    const auto lost = frame(logo_color);
+    require(lost.flat && lost.held, "Acceptance lost again cleared the hidden-scene hold");
     // (f) Without a ready camera there is no evidence.
     render_parameters no_camera = gpu.renderer.consumed_parameters();
     no_camera.camera_ready = 0;
@@ -2694,66 +2715,98 @@ namespace {
     const auto unready = never_flat(logo_color, 4, "camera not ready", &no_camera);
     require(unready.sample.evidence.scene.ran && !unready.sample.evidence.scene.valid && !unready.sample.evidence.scene.n,
       "Depth without a ready camera was measured");
-    // (g) A closed gate never flattens, even with a hold active, and once a
-    // sample shows it closed no evidence pass runs.
-    // A tagged UIColorAndAlpha has a slot of its own and is never a route input.
+    // (g) Without an informative claim nothing flattens, even under a held
+    // hidden verdict, which renews while the presented frame reads hidden.
+    // Once a visible sample releases it, no evidence pass runs. A tagged
+    // UIColorAndAlpha has a slot of its own and is unaccepted here, so it is
+    // never informative.
     const auto closed_gate = [&](api::resource_view layer, bool tag, const char *label) {
-      // After an epoch change the first sample shows the gate, the second measures.
+      // After an epoch change the first sample shows the claim, two measure.
       ++source.epoch;
       inputs = {}; inputs.layer = opaque_layer; inputs.layer_flags = layer_flags;
-      require(frames_to_flat(logo_color, 4, label) == 3, std::string(label) + ": the open gate did not enter");
-      // The hold outlives the open gate by at most hold_ms and flattens nothing.
+      require(frames_to_flat(logo_color, 5, label) == 4, std::string(label) + ": the layer's claim did not enter");
       if (tag) { inputs.layer = {}; inputs.layer_flags = 0; inputs.masks[1] = layer; }
       else inputs.layer = layer;
+      // Each frame decides from its own claims: the held hidden verdict alone
+      // flattens nothing.
       never_flat(logo_color, 5, label);
+      // The presented frame showing the scene releases the hold.
+      frame(scene_color);
+      never_flat(scene_color, 1, label);
       std::uint64_t runs = 0;
       for (unsigned i = 0; i != 3; ++i) {
         const auto quiet = frame(logo_color);
-        require(!quiet.flat && !quiet.held, std::string(label) + ": a closed gate flattened or kept a hold");
+        require(!quiet.flat && !quiet.held, std::string(label) + ": no claim flattened or held");
         runs += quiet.evidence;
       }
-      require(!runs, std::string(label) + ": evidence passes ran with the gate closed and no first-run shadow");
+      require(!runs, std::string(label) + ": evidence passes ran without a claim, a hold or the first-run shadow");
     };
     closed_gate(nearly_opaque_layer, false, "98.9% opaque layer");
     closed_gate(half_layer, false, "layer at alpha 0.5 over the whole frame");
-    closed_gate(straight_layer, false, "layer with an invalid pixel");
     closed_gate(opaque_layer, true, "opaque tagged UIColorAndAlpha");
+    // V1 tolerates up to 1% invalid pixels: a layer with one pixel beyond the
+    // premultiplied bound is still V1-valid and opaque-full, so its claim
+    // acts like the opaque layer's.
+    ++source.epoch;
+    inputs = {}; inputs.layer = straight_layer; inputs.layer_flags = layer_flags;
+    require(frames_to_flat(logo_color, 5, "layer with one invalid pixel") == 4,
+      "A V1-valid opaque-full layer with one invalid pixel did not claim");
     ++source.epoch;
     inputs = {}; inputs.masks[2] = opaque_layer;
     never_flat(logo_color, 4, "opaque Backbuffer alpha only");
     inputs = {}; inputs.current_color = true;
     never_flat(logo_color, 4, "opaque current alpha only");
-    // (h) An unaccepted UIAlpha that is opaque everywhere takes the layer route too.
+    // (h) An unaccepted UIAlpha that is opaque everywhere is no informative
+    // claim (H1): it never flattens and runs no evidence. Accepted, it pins
+    // flat by itself as source 1 (the opacity ruling, P1).
     ++source.epoch;
     inputs = {}; inputs.masks[0] = opaque_ui_alpha;
-    require(frames_to_flat(logo_color, 3, "UIAlpha") == 3, "An opaque UIAlpha over a hidden scene did not take the layer route");
-    require(frame(logo_color).sample.source_kind == 8u, "The UIAlpha route did not report source 8");
-    // (i) The HUD-less route: an inexact HUD-less image that shows the
-    // depth's edges while the presented menu does not.
+    never_flat(logo_color, 4, "unaccepted opaque UIAlpha");
+    require(!never_flat(logo_color, 2, "unaccepted opaque UIAlpha").evidence, "An unaccepted UIAlpha ran evidence");
+    {
+      alpha_auto_policy trusting;
+      require(trusting.restore(gpu.key(ui_selection::kind::ui_alpha, DXGI_FORMAT_R32_FLOAT)).restored == 1,
+        "The UIAlpha key was not restored");
+      ++source.epoch; source.session = &trusting;
+      const auto pinned = frame(logo_color);
+      const auto decided = frame(logo_color);
+      require(pinned.flat && decided.flat && decided.sample.source_kind == 1u && !decided.sample.evidence.h1_applied,
+        "An accepted opaque UIAlpha did not pin flat by itself as source 1");
+      source.session = &policy;
+    }
+    // (i) The pre-UI HUD-less image (claim (d)): an inexact HUD-less image
+    // that shows the depth's edges while the presented menu does not. Two
+    // samples read the presented frame hidden and the HUD-less image visible.
     ++source.epoch;
     inputs = {}; inputs.current_color = true; inputs.hudless = scene_view;
-    require(frames_to_flat(menu_color, 3, "HUD-less route") == 3, "A HUD-less image showing the hidden scene did not take its route");
+    require(frames_to_flat(menu_color, 5, "pre-UI HUD-less image") == 4,
+      "A HUD-less image showing the hidden scene did not flatten under H1");
     const auto hudless_decided = frame(menu_color);
-    require(hudless_decided.flat && hudless_decided.sample.source_kind == 9u &&
-        hudless_decided.sample.evidence.hudless_scene.valid && hudless_decided.sample.evidence.hudless_scene.d >= .25f &&
-        (gpu.renderer.consumed_detection().flags & ui_detection::per_frame_scene_hold_hudless),
-      "The HUD-less route did not report source 9 from its own hold");
+    const auto &pre_ui = hudless_decided.sample.evidence.pre_ui_scene;
+    require(hudless_decided.flat && hudless_decided.sample.source_kind == 8u && pre_ui.valid && pre_ui.d >= .25f &&
+        hudless_decided.sample.evidence.pre_ui_image == ui_detection::pre_ui_image::hudless &&
+        hudless_decided.sample.evidence.claims == ui_detection::claim_pre_ui && hudless_decided.sample.scene_guard.pre_ui &&
+        (gpu.renderer.consumed_detection().flags & (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible)) ==
+          (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible),
+      "The pre-UI HUD-less image did not report source 8 with both held verdicts");
     ++source.epoch;
     inputs.hudless = black_view;
     const auto dark = never_flat(menu_color, 4, "black HUD-less image");
-    require(dark.sample.evidence.hudless_scene.valid && dark.sample.evidence.hudless_scene.d < .25f,
+    require(dark.sample.evidence.pre_ui_scene.valid && dark.sample.evidence.pre_ui_scene.d < .25f,
       "A black HUD-less image read visible");
     ++source.epoch;
     inputs.hudless = scene_view;
     never_flat(scene_color, 4, "presented frame showing the scene beside its HUD-less image");
-    // Before its acceptance an exact pair differing nearly everywhere is no
-    // full change set (route 6 needs an accepted pair): only the HUD-less
-    // route under its hold flattens it.
+    // Before its acceptance an exact pair differing nearly everywhere does not
+    // decide 6 (only an accepted pair decides), but it is an informative
+    // full claim (c): under two hidden samples H1 flattens it as 8.
     ++source.epoch;
     inputs.hudless_exact = true;
-    require(frames_to_flat(menu_color, 4, "unaccepted exact full-frame pair") == 3,
-      "An unaccepted exact full-frame pair flattened without the HUD-less route's hold");
-    require(frame(menu_color).sample.source_kind == 9u, "An unaccepted exact full-frame pair decided rule 6");
+    require(frames_to_flat(menu_color, 5, "unaccepted exact full-frame pair") == 4,
+      "An unaccepted exact full-frame pair did not flatten under H1");
+    const auto exact_h1 = frame(menu_color);
+    require(exact_h1.sample.source_kind == 8u && (exact_h1.sample.evidence.claims & ui_detection::candidate::hudless),
+      "An unaccepted exact full-frame pair decided 6, or H1 did not name its claim");
     {
       // Accepted, the same exact pair over a lit scene is rule 6 at once.
       alpha_auto_policy accepting;
@@ -2763,9 +2816,67 @@ namespace {
       require(exact.flat && !exact.held && frame(menu_color).sample.source_kind == 6u, "An accepted exact full-frame pair lost rule 6");
       source.session = &policy;
     }
-    // (j) An accepted layer decides by itself (source 10), whatever the evidence.
-    // Its whole-frame alpha makes the next sample frames measure the scene for
-    // the full_alpha_d counters only: that evidence holds nothing.
+    // (j) Stellar Blade SDR (dump 50264_218658377782962): frame generation
+    // suspended in the settings menu, so no tag; the game's cleared output
+    // target holds the scene drawn before the UI at alpha 0 (V1-invalid:
+    // colour without alpha) while the presented frame is the opaque menu.
+    // The depth describes the pre-UI image, not the frame shown (claim (d)).
+    const auto alpha_zero = [&](std::vector<unsigned char> bytes) {
+      for (size_t i = 0; i != pixels; ++i) {
+        if (gpu.color == 2) { const auto zero = half_bits(0.f); std::memcpy(bytes.data() + i * bpp + 6, &zero, 2); }
+        else bytes[i * bpp + 3] = 0;
+      }
+      return color_view(bytes);
+    };
+    const auto scene_layer = alpha_zero(scene_color);
+    // Dark but beyond the premultiplied bound at alpha 0 (4/255).
+    const auto dark_layer = alpha_zero(make([](unsigned, unsigned) { return 3.f / 64.f; }, opaque));
+    // Its layer acts only once proven the presented frame without its UI
+    // (game3d_scene_guard.h): a menu before any gameplay sample holds the
+    // hidden verdict and stays 3D.
+    ++source.epoch;
+    inputs = {}; inputs.current_color = true; inputs.layer = scene_layer; inputs.layer_flags = layer_flags;
+    const auto unproven = never_flat(menu_color, 5, "Stellar Blade SDR settings before gameplay (layer unproven)");
+    require(unproven.held && !unproven.sample.scene_guard.pre_ui && !unproven.sample.scene_guard.proven &&
+        unproven.sample.evidence.pre_ui_scene.valid && unproven.sample.evidence.pre_ui_scene.d >= .25f,
+      "The unproven SDR scene layer acted, or was not measured");
+    // Gameplay shows the scene the layer holds: both D agree, which proves
+    // the layer and releases the hidden verdict.
+    const auto proving = never_flat(scene_color, 3, "SDR gameplay proving the scene layer");
+    require(!proving.held && proving.sample.scene_guard.proven, "SDR gameplay did not prove the scene layer");
+    require(frames_to_flat(menu_color, 4, "Stellar Blade SDR settings") == 3,
+      "The SDR settings menu over its proven pre-UI layer did not flatten at its second hidden sample");
+    const auto sb_menu = frame(menu_color);
+    require(sb_menu.flat && sb_menu.sample.source_kind == 8u && sb_menu.sample.evidence.claims == ui_detection::claim_pre_ui &&
+        sb_menu.sample.evidence.pre_ui_image == ui_detection::pre_ui_image::layer && sb_menu.sample.evidence.pre_ui_scene.valid &&
+        sb_menu.sample.evidence.pre_ui_scene.d >= .25f && sb_menu.sample.evidence.scene.verdict == scene_verdict::hidden &&
+        sb_menu.sample.evidence.frame_reason == ui_detection::frame_reason_decided &&
+        sb_menu.sample.scene_guard.hidden && sb_menu.sample.scene_guard.pre_ui && sb_menu.sample.scene_guard.proven,
+      "The SDR settings menu did not report H1 from its pre-UI layer");
+    // Gameplay again: the presented frame shows the scene, reads visible and
+    // releases both holds; the pre-UI claim stays true but never acts alone,
+    // and is never refuted, so the next menu visit enters again.
+    frame(scene_color);
+    const auto sb_released = frame(scene_color);
+    require(!sb_released.flat && !sb_released.held && !sb_released.sample.scene_guard.refuted,
+      "SDR gameplay did not release the menu's holds, or refuted the pre-UI claim");
+    const auto sb_gameplay = never_flat(scene_color, 4, "SDR gameplay, presented and pre-UI image both visible");
+    require(sb_gameplay.evidence == 1 && sb_gameplay.sample.evidence.pre_ui_scene.d >= .25f &&
+        sb_gameplay.sample.evidence.scene.verdict == scene_verdict::visible,
+      "SDR gameplay did not measure both images visible on every sample");
+    require(frames_to_flat(menu_color, 4, "Stellar Blade SDR settings again") == 3,
+      "The next SDR menu visit did not enter at its second hidden sample");
+    // Dark gameplay: the pre-UI image reads hidden too, so its hold never
+    // enters and nothing flattens, though the presented frame reads hidden.
+    ++source.epoch;
+    inputs.layer = dark_layer;
+    const auto sb_dark = never_flat(black_color, 6, "SDR dark gameplay, both images hidden");
+    require(sb_dark.sample.evidence.pre_ui_scene.valid && sb_dark.sample.evidence.pre_ui_scene.d < .25f &&
+        sb_dark.held && !sb_dark.sample.scene_guard.pre_ui, "A dark pre-UI image entered the pre-UI hold");
+    // (k) An accepted layer decides by itself (source 10), whatever the
+    // evidence: its opaque-full claim measures, and the hidden verdict it
+    // enters is held, but H1 never overrides a winner opaque on every pixel. Its
+    // samples count as accepted whole-frame decisions (full_alpha_d).
     {
       alpha_auto_policy trusting;
       require(trusting.restore(gpu.key(ui_selection::kind::ui_layer)).restored == 1, "The layer key was not restored");
@@ -2776,33 +2887,32 @@ namespace {
         "Evidence ran before a whole-frame alpha sample");
       for (unsigned i = 0; i != 2; ++i) frame(logo_color);
       const auto trusted = frame(logo_color);
-      require(trusted.flat && trusted.sample.source_kind == ui_detection::source_layer && !trusted.held && trusted.evidence == 1 &&
-          !trusted.sample.scene_hold && !(gpu.renderer.consumed_detection().flags &
-            (ui_detection::per_frame_scene_hold | ui_detection::per_frame_scene_hold_hudless)),
-        "An accepted layer lost its own decision, or its diagnostic evidence held a route");
+      require(trusted.flat && trusted.sample.source_kind == ui_detection::source_layer && trusted.held && trusted.evidence == 1 &&
+          !trusted.sample.evidence.h1_applied && trusted.sample.evidence.s1_source == ui_detection::source_layer,
+        "An accepted layer lost its own decision, or H1 overrode it");
       const auto counted = trusting.counters();
       require(counted[ui_counter::full_alpha] >= 3 && counted[ui_counter::full_alpha_d_hidden] +
           counted[ui_counter::full_alpha_d_ambiguous] + counted[ui_counter::full_alpha_d_visible] >= 1 &&
-          !counted[ui_counter::full_d_hidden] && !counted[ui_counter::full_d_visible],
-        "The whole-frame layer's frames or measured samples were not counted as full_alpha");
+          !counted[ui_counter::full_d_hidden] && !counted[ui_counter::full_d_visible] && counted[ui_counter::scene_entered] == 1,
+        "The whole-frame layer's frames or measured samples were not counted as full_alpha, or its entry not counted");
       source.session = &policy;
     }
-    // (k) The first-run shadow measures on sample frames with the gate closed,
-    // never changes a decision, and reports how long the hidden run lasts.
-    // A frame without protection first ends the accepted layer's flat mask,
-    // which its absence would otherwise hold (T1).
+    // (l) The first-run shadow measures on sample frames without a claim,
+    // never changes a decision or a hold, and reports how long the hidden run
+    // lasts. A frame without protection first ends the accepted layer's flat
+    // mask, which its absence would otherwise hold (T1).
     ++source.epoch;
     source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
     gpu.render(false, 1, false, false, false, {}, {}, {}, nullptr, &source);
     inputs = {}; inputs.current_color = true;
-    never_flat(logo_color, 2, "closed gate before the shadow");
-    require(!never_flat(logo_color, 2, "closed gate before the shadow").evidence, "Evidence ran with the gate closed");
+    never_flat(logo_color, 2, "no claim before the shadow");
+    require(!never_flat(logo_color, 2, "no claim before the shadow").evidence, "Evidence ran without a claim");
     policy.set_first_run(true);
     outcome shadow{};
     for (unsigned i = 0; i != 8; ++i) {
       shadow = never_flat(banded_color, 1, "first-run shadow");
-      require(shadow.empty && shadow.evidence == 1 && shadow.sample.scene_shadow && !shadow.sample.scene_hold,
-        "The first-run shadow changed a decision or skipped a sample frame");
+      require(shadow.empty && shadow.evidence == 1 && shadow.sample.scene_shadow && !shadow.held &&
+          !shadow.sample.scene_guard.hidden, "The first-run shadow changed a decision or a hold, or skipped a sample frame");
     }
     require(shadow.sample.evidence.scene.verdict == scene_verdict::hidden && !shadow.sample.source_kind &&
         shadow.sample.evidence.scene.decided >= ui_detection::scene::min_edges &&
@@ -2816,19 +2926,21 @@ namespace {
     const auto visible_shadow = never_flat(scene_color, 2, "first-run shadow over a visible scene");
     require(!visible_shadow.sample.evidence.shadow_hidden_ms && visible_shadow.sample.evidence.scene.verdict == scene_verdict::visible,
       "A visible sample did not end the hidden run");
-    // With the gate open, only evidence the gate or a hold asked for acts: the
-    // layer route enters after the same samples as without the shadow, though
-    // the shadow measured the first sample that showed the gate.
+    // With a claim, only evidence the claim or a hold asked for acts: H1
+    // enters after the same samples as without the shadow, though the shadow
+    // measured the first sample that showed the claim.
     inputs = {}; inputs.layer = opaque_layer; inputs.layer_flags = layer_flags;
-    require(frames_to_flat(logo_color, 4, "first-run shadow with the gate open") == 3,
-      "The first-run shadow changed when the layer route enters");
+    require(frames_to_flat(logo_color, 5, "first-run shadow with a claim") == 4,
+      "The first-run shadow changed when H1 enters");
     policy.set_first_run(false);
     inputs = {};
-    report << "hidden-scene D3D11 layer_route=1 visible_release=1 refuted_layer_quiet=1 hold_expiry_frames=" << held_frames
-      << " reused_depth_blocks=1 camera_blocks=1 epoch_revision_inactive_acceptance_clear=1 alternating_hudless_keeps_hold=1"
-      " closed_gates_quiet=1 ui_alpha_route=1 hudless_route=1 black_hudless_rejected=1 unaccepted_exact_pair_route9=1"
-      " rule6_accepted=1 accepted_layer_decides=1 first_run_shadow=1 blank_frames_end_run=1 shadow_entry_unchanged=1\n";
-    std::puts("PASS D3D11 hidden scene: an opaque unaccepted layer or UIAlpha (8) and an inexact HUD-less image (9) flatten only through their gate, valid hidden evidence and the CPU hold; holds expire after hold_ms and clear on visible evidence, epoch, revision, inactive detection and acceptance changes but not on a HUD-less pairing that comes and goes; a visible verdict refutes an opaque layer until it shows itself transparent; reused depth, an unready camera, closed gates, tagged UI color, presented alpha and an accepted layer never take a route; an exact full-frame pair is rule 6 only once accepted; closed gates dispatch no evidence; a whole-frame alpha measures only for its counters; the first-run shadow only measures, ignores blank frames and leaves route entry unchanged");
+    report << "hidden-scene D3D11 layer_claim=1 two_sample_entry=1 visible_release=1 refuted_layer_quiet=1 hold_expiry_frames="
+      << held_frames << " reused_depth_blocks=1 camera_blocks=1 epoch_clears=1 revision_inactive_acceptance_keep=1"
+      " alternating_hudless_keeps_hold=1 no_claim_quiet=1 one_invalid_pixel_claims=1 unaccepted_ui_alpha_quiet=1"
+      " accepted_ui_alpha_source1=1 pre_ui_hudless=1 black_hudless_rejected=1 unaccepted_exact_pair_h1=1 rule6_accepted=1"
+      " sdr_pre_ui_layer=1 sdr_gameplay_visible=1 sdr_dark_never_flat=1 accepted_layer_not_overridden=1 first_run_shadow=1"
+      " blank_frames_end_run=1 shadow_entry_unchanged=1\n";
+    std::puts("PASS D3D11 hidden scene (H1): an informative full claim (an unaccepted opaque layer, an unaccepted exact full change set, or a pre-UI image: an inexact HUD-less image or Stellar Blade SDR's V1-invalid cleared target reading visible while the presented frame reads hidden) flattens as 8 only after two valid hidden samples and while the depth is this frame's; holds expire after hold_ms, release on visible evidence and clear only on an epoch change, not on a revision, inactive detection, acceptance or a HUD-less pairing that comes and goes; a visible verdict refutes the layer's claim until it shows itself transparent; reused depth, an unready camera, no claim, a tagged UI color, presented alpha and an unaccepted UIAlpha never flatten, while an accepted UIAlpha or layer decides by itself and is never overridden; an exact full-frame pair is rule 6 once accepted; SDR gameplay (both images visible) and dark gameplay (both hidden) never flatten; evidence runs only for a claim, a hold, the shadow or a whole-frame decision; the first-run shadow only measures, ignores blank frames and leaves entry unchanged");
   }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;

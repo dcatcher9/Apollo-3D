@@ -205,11 +205,13 @@ namespace {
     require(((shader.Version >> 4) & 0xfu) == 5 && (shader.Version & 0xfu) == 0,
       "Native shader is not Shader Model 5.0");
     manifest << "entry " << entry.name << ' ' << entry.profile << '\n';
-    bool has_ui_binding = false;
+    bool has_ui_binding = false, reads_layer = false, reads_hudless = false;
     for (unsigned index = 0; index < shader.BoundResources; ++index) {
       D3D11_SHADER_INPUT_BIND_DESC actual {};
       require(SUCCEEDED(reflection->GetResourceBindingDesc(index, &actual)), "Binding reflection failed");
       has_ui_binding |= std::string(actual.Name) == "SunshineUIConstants";
+      reads_layer |= std::string(actual.Name) == "SunshineUILayer";
+      reads_hudless |= std::string(actual.Name) == "SunshineHUDless";
       bool known = false;
       for (const auto &expected : bindings) {
         if (std::string(actual.Name) != expected.name) continue;
@@ -224,6 +226,11 @@ namespace {
     if (std::string(entry.name) == "SunshineApplyUICS" ||
         std::string(entry.name) == "SunshineUINearestTilesCS" || std::string(entry.name) == "SunshineUINearestReduceCS")
       require(has_ui_binding, "UI plane pass lost its independent b1 binding");
+    // The scene cells read the pre-UI scene image: the HUD-less image (t14),
+    // else the offscreen UI layer's colour (t7), on frames the 256 x 144
+    // grid fits (smaller ones compile the evidence away).
+    if (std::string(entry.name) == "SunshineSceneCellsCS" && width >= 256 && height >= 144)
+      require(reads_layer && reads_hudless, "The scene cells pass must read the pre-UI images at t7 and t14");
     // UI pinning is its own pass after the scene field; the limiter never reads UI state.
     if (std::string(entry.name) == "SunshineHostHorizontalCS")
       require(!has_ui_binding, "Scene limiter must not pin UI");
@@ -340,11 +347,13 @@ int main(int argc, char **argv) {
     mirrored(sunshine_game3d::hlsl_counter_defines);
     mirrored(detection::hlsl_candidate_defines);
     mirrored(detection::hlsl_hold_defines);
+    mirrored(detection::hlsl_h1_defines);
     // The reduce ports ui_selection::decide of this revision.
-    require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision,
-      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision");
-    require(decision_texels >= detection::judgment_decision_texels,
-      "Selection revision 2 needs the one-way judgment and frame reason decision texels 8 and 9");
+    require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision &&
+        sunshine_game3d::ui_selection::revision == 3u,
+      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 3");
+    require(decision_texels == detection::h1_decision_texels && decision_texels == 11u,
+      "Selection revision 3 writes the H1 decision texel 10: 11 decision texels");
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");

@@ -370,7 +370,10 @@ def scene_evidence(parallax, lumas, depth_active=True):
 
 
 def dump_scene_evidence(root):
-    """The hidden-scene statistic of a dump's presented color and, when captured at its extent, its HUD-less image."""
+    """The hidden-scene statistic of a dump's presented color and of its pre-UI scene image (H1 d), when captured at its
+    extent: the HUD-less image when there is one, else the active census UI layer's colour, as SunshineSceneCellsCS
+    chooses between t14 and t7. The pre_ui entry names the image (hudless or layer) and its artifact; a HUD-less
+    image is also reported under hudless, as before."""
     root = Path(root)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     metadata = manifest.get("producer_metadata", {})
@@ -385,12 +388,26 @@ def dump_scene_evidence(root):
     parallax = scene_parallax(read_artifact(root, artifacts["raw_depth"])[:, :, 0], parameters, width, height)
     transfer = metadata.get("color_space", 1)
     images = {"presented": color}
-    hudless = artifacts.get("sl_hudless_color")
-    if hudless and (hudless["width"], hudless["height"]) == (width, height):
-        images["hudless"] = read_artifact(root, hudless)
+    pre_ui = None
+    if "sl_hudless_color" in artifacts:
+        pre_ui = ("hudless", "sl_hudless_color")
+    else:
+        census = metadata.get("ui_layer_census", {}).get("candidates", [])
+        active = [entry.get("kind") for entry in census if entry.get("active") and entry.get("kind") in artifacts]
+        if active:
+            pre_ui = ("layer", active[0])
+    if pre_ui and (artifacts[pre_ui[1]]["width"], artifacts[pre_ui[1]]["height"]) != (width, height):
+        pre_ui = None
+    if pre_ui:
+        images["pre_ui"] = read_artifact(root, artifacts[pre_ui[1]])
     results = scene_evidence(parallax, [scene_code_luma(image, transfer) for image in images.values()],
                              bool(depth_ready) and camera_active(parameters))
-    return dict(zip(images, results))
+    report = dict(zip(images, results))
+    if pre_ui:
+        if pre_ui[0] == "hudless":
+            report["hudless"] = dict(report["pre_ui"])
+        report["pre_ui"].update(image=pre_ui[0], artifact=pre_ui[1])
+    return report
 
 
 def pin_metrics(root, field=None, bands=None, layer=None):
@@ -620,7 +637,7 @@ if __name__ == "__main__":
                         help="image rows of a band for new-step columns; repeatable; default all rows")
     parser.add_argument("--pin-layer", help="layer artifact kind for light UI and glyph bodies; default the active one")
     parser.add_argument("--scene-evidence", action="store_true",
-                        help="report the hidden-scene statistic D of the presented and HUD-less images (CPU oracle)")
+                        help="report the hidden-scene statistic D of the presented and pre-UI images (CPU oracle)")
     args = parser.parse_args()
     review = json.loads(args.ui_review.read_text(encoding="utf-8")) if args.ui_review else None
     report = inspect(args.dump, args.previews, review)

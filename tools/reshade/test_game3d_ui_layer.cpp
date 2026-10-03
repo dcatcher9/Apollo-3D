@@ -96,6 +96,10 @@ int main() {
       mirrored(sunshine_game3d::hlsl_counter_defines);
       mirrored(detection::hlsl_candidate_defines);
       mirrored(detection::hlsl_hold_defines);
+      mirrored(detection::hlsl_h1_defines);
+      // The hidden-scene routes' per-frame bits (0x10000, 0x80000) are retired.
+      require(source.find("SUNSHINE_UI_PER_FRAME_SCENE_HOLD") == std::string::npos,
+        "game3d_native.hlsl still defines a retired hidden-scene route bit");
       require(sunshine_game3d::shader_marker(source, detection::candidate_layout_marker) == detection::candidate_layout &&
           sunshine_game3d::shader_marker(source, sunshine_game3d::ui_selection::revision_marker) ==
             sunshine_game3d::ui_selection::revision,
@@ -103,12 +107,15 @@ int main() {
       const auto texels = sunshine_game3d::shader_marker(source, detection::decision_texels_marker);
       const auto images = sunshine_game3d::shader_marker(source, detection::scene_evidence_images_marker);
       require(source.find("#define " + std::string(detection::scene_evidence_images_marker) + ' ') != std::string::npos &&
-          texels >= detection::judgment_decision_texels && texels <= detection::max_decision_texels &&
+          texels >= detection::h1_decision_texels && texels <= detection::max_decision_texels &&
           images <= detection::max_scene_evidence_images,
         "game3d_native.hlsl's UI detection size markers are missing or outside the contract's range");
     }
-    std::puts("PASS UI detection contract: game3d_native.hlsl mirrors every flag, candidate bit, counter word, hold store value "
-      "and the selection revision, and sizes detection within range");
+    // Selection revision 3 (H1) writes texel 10; retired route defines stay gone.
+    require(sunshine_game3d::ui_selection::revision == 3u && detection::h1_decision_texels == 11u &&
+        detection::decision_word::h1 == 43u, "The H1 decision layout is not selection revision 3 with 11 texels");
+    std::puts("PASS UI detection contract: game3d_native.hlsl mirrors every flag, candidate bit, counter word, hold store value, "
+      "H1 claim word and the selection revision, and sizes detection within range");
 
     // One game frame: each target cleared in order, then Present.
     const auto frame = [](layer::layer_tracker &tracker, std::initializer_list<std::uint64_t> clears, std::uint64_t now) {

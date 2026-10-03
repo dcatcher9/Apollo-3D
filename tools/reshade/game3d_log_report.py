@@ -54,11 +54,21 @@ UI = re.compile(
     r'(?:sampled_late_layer=(?P<late>\d) )?)?'
     r'sampled_hudless=\{changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) invalid=(?P<hudless_invalid>\d+)'
     r'(?: matching_tiles=(?P<tiles>\d+) lit=(?P<lit>\d+))?')
-# Hidden-scene fields of the same line, absent from older logs.
+# Hidden-scene fields of the same line, absent from older logs. Before S2b the HUD-less image's D and the held routes
+# (scene_hold); since S2b (SCENE_S2B) the Backbuffer and current alpha's opaque pixels, the informative full claims, the
+# H1 word, the pre-UI scene image's D and the scene guard's holds (docs/reshade-sbs.md, hidden-scene evidence).
 SCENE = re.compile(
     r'sampled_alpha_opaque=(?P<opaque>\d+/\d+) sampled_scene=\{n=(?P<n>\d+) d=(?P<d>-?[0-9.]+) valid=(?P<valid>\d) '
     r'ran=(?P<ran>\d) verdict=(?P<verdict>\w+)\} sampled_hudless_scene=\{n=\d+ d=(?P<hudless_d>-?[0-9.]+) '
     r'valid=(?P<hudless_valid>\d)\} scene_hold=(?P<hold>\d+) shadow=(?P<shadow>\d) shadow_hidden_ms=(?P<hidden_ms>\d+)')
+SCENE_S2B = re.compile(
+    r'sampled_alpha_opaque=(?P<opaque>\d+/\d+) sampled_inferred_opaque=(?P<inferred>\d+/\d+) '
+    r'sampled_claims=(?P<claims>0x[0-9a-fA-F]+) sampled_h1=\{applied=(?P<applied>\d) winner=(?P<winner>\d+)\} '
+    r'sampled_scene=\{n=(?P<n>\d+) d=(?P<d>-?[0-9.]+) valid=(?P<valid>\d) ran=(?P<ran>\d) verdict=(?P<verdict>\w+)\} '
+    r'sampled_pre_ui_scene=\{image=(?P<image>\w+) n=\d+ d=(?P<pre_ui_d>-?[0-9.]+) valid=(?P<pre_ui_valid>\d)\} '
+    r'scene_guard=\{hidden=(?P<hidden>\d) pre_ui=(?P<pre_ui>\d) refuted=(?P<refuted>\d+)(?: proven=(?P<proven>\d))?\} '
+    r'shadow=(?P<shadow>\d) '
+    r'shadow_hidden_ms=(?P<hidden_ms>\d+)')
 # Presentation fields of the same line; older logs lack some of them.
 UI_RUNTIME = re.compile(r'Sunshine UI protection: runtime=(\S+)')
 UI_MODE = re.compile(r'\bmode=(\w+)')
@@ -136,10 +146,13 @@ UI_LINE_PERIOD_S = 10.0  # An unchanged UI protection state is logged again this
 # Hidden-scene evidence (docs/reshade-sbs.md): a hidden run without a decided source this long is an uncovered hidden
 # scene.
 SHADOW_HIDDEN_WARN_MS = 500
-# Decided sources by number (decision texel 0, docs/reshade-sbs.md); 7 is retired.
+# Decided sources by number (decision texel 0, docs/reshade-sbs.md); 7 is retired. Before S2b 8 and 9 were the
+# hidden-scene layer and HUD-less routes; since S2b 8 is H1 and 9 is retired.
 SOURCE_NAMES = {0: 'no mask', 1: 'UI alpha', 2: 'UI colour', 3: 'Backbuffer alpha', 4: 'current alpha',
                 5: 'HUD-less difference', 6: 'full frame (exact pair)', 8: 'full frame (layer route)',
-                9: 'full frame (HUD-less route)', 10: 'UI layer'}
+                9: 'HUD-less route (before S2b)', 10: 'UI layer'}
+S2B_SOURCE_NAMES = SOURCE_NAMES | {8: 'full frame over a hidden scene (H1)'}
+CLAIM_PRE_UI = 0x80  # The pre-UI scene image's informative claim (ui_detection::claim_pre_ui), since S2b.
 NO_MASK_REASONS = ('layer_aside', 'trusted_invalid', 'presented_blocked', 'ambiguous', 'difference_failed',
                    'gate_no_hold', 'no_candidate', 'other', 'unaccepted')
 # Held frames by kind: since S2a a generated Present showing a real frame's decision, or one without such a decision
@@ -194,11 +207,32 @@ class Scene(NamedTuple):
     valid: bool
     ran: bool
     verdict: str  # Presented image: none, hidden, ambiguous or visible.
-    hudless_d: float
+    hudless_d: float  # The second image's D: before S2b the HUD-less image's, since S2b the pre-UI scene image's.
     hudless_valid: bool
-    hold: int  # Routes held by the render that logged: 1 layer (source 8), 2 HUD-less (source 9).
+    hold: int  # Before S2b the routes held by the render that logged: 1 layer (source 8), 2 HUD-less (source 9).
     shadow: bool  # First-run shadow measuring with the gates closed.
     hidden_ms: int  # Longest hidden run without a decided source since the previous line.
+    # Since S2b (absent before): the scene guard's holds this render (hidden, pre-UI) and its refuted signatures, the
+    # pre-UI scene image (none, hudless or layer), the informative full claims (candidate bits, 0x80 the pre-UI
+    # image), whether H1 applied over the S1 winner and that winner's source, and the Backbuffer and current alpha's
+    # opaque pixels.
+    guard: tuple[int, int, int] | None = None
+    pre_ui_image: str = ''
+    claims: int = 0
+    h1: bool = False
+    winner: int = 0
+    inferred_opaque: tuple[int, ...] = ()
+    # Whether the offered layer was proven the presented frame without its UI, so that its pre-UI image may act
+    # (H1 d); None on lines without the field.
+    proven: bool | None = None
+
+    @property
+    def s2b(self) -> bool:
+        return self.guard is not None
+
+    def pre_ui_claim(self) -> bool:
+        """The pre-UI image's claim could act: claimed this sample while the scene guard held its pre-UI hold."""
+        return bool(self.claims & CLAIM_PRE_UI) and bool(self.guard and self.guard[1])
 
 
 class UISample(NamedTuple):
@@ -564,6 +598,15 @@ def parse(lines) -> Session:
                 scene = Scene(tuple(int(v) for v in e['opaque'].split('/')), int(e['n']), float(e['d']),
                               e['valid'] == '1', e['ran'] == '1', e['verdict'], float(e['hudless_d']),
                               e['hudless_valid'] == '1', int(e['hold']), e['shadow'] == '1', int(e['hidden_ms']))
+            elif evidence := SCENE_S2B.search(text):
+                e = evidence.groupdict()
+                scene = Scene(tuple(int(v) for v in e['opaque'].split('/')), int(e['n']), float(e['d']),
+                              e['valid'] == '1', e['ran'] == '1', e['verdict'], float(e['pre_ui_d']),
+                              e['pre_ui_valid'] == '1', 0, e['shadow'] == '1', int(e['hidden_ms']),
+                              (int(e['hidden']), int(e['pre_ui']), int(e['refuted'])), e['image'],
+                              int(e['claims'], 16), e['applied'] == '1', int(e['winner']),
+                              tuple(int(v) for v in e['inferred'].split('/')),
+                              None if e['proven'] is None else e['proven'] == '1')
             s.ui.append(ui_sample(t, text, found.groupdict(), scene))
         if found := TRUST.search(text):
             s.trust_events.append((t, found.group(1), found.group(2), accepted_keys(found.group(2))))
@@ -1019,8 +1062,8 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
         return c.get(key, 0)
 
     # Counter lines since S2a hold held={generated none}, reused and contradicted (T1, A2); before it three hold kinds
-    # with a cap and trusted_full.
-    s2a = 'held.none' in c
+    # with a cap and trusted_full. Since S2b they hold the scene guard's group scene={entered released refuted} (H1).
+    s2a, s2b = 'held.none' in c, 'scene.entered' in c
     auto, detected = get('auto_frames'), get('detection_frames')
     held = sum(get(f'held.{k}') for k in (HOLD_KINDS if s2a else S1_HOLD_KINDS))
     inactive = sum(get(f'inactive.{k}') for k in INACTIVE_REASONS)
@@ -1052,9 +1095,10 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                          f'{flattened} frames')
         resolution = f' before {revoked} revocations of such a source'
         unresolved = flattened and (sampled or not revoked)
-    sources = [(source, get(f'decided.{source}')) for source in SOURCE_NAMES]
+    names = S2B_SOURCE_NAMES if s2b else SOURCE_NAMES
+    sources = [(source, get(f'decided.{source}')) for source in names]
     add(Check('FAIL' if overrides or unresolved else 'WARN' if disputes else 'PASS', 'UI protection',
-              'decided ' + (', '.join(f'{SOURCE_NAMES[k]} ({k}) {percent(n, detected)}' for k, n in sources if n)
+              'decided ' + (', '.join(f'{names[k]} ({k}) {percent(n, detected)}' for k, n in sources if n)
                             or 'nothing') + ' of detection frames'
               + (f'; inferred alpha decided beside an accepted declared UI channel in {overrides} frames'
                  if overrides else '')
@@ -1065,27 +1109,30 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
               + ('; a contradicted source lost its acceptance' if handled and not disputes and not unresolved else ''),
               (overrides_sampled + sampled or disputes or handled or list(short))[:6]))
 
-    full = {k: get(f'decided.{k}') for k in (6, 8, 9)}
-    visible, routes = get('full_d.visible'), full[8] + full[9]
-    # full_d counts the exact full change-set (6) with the held routes (8, 9). An exact full set decides without a
-    # hold, and over a visible scene it is intended for an accepted exact pair (P1); it is wrong only before the
-    # pair's first selective sample, which is an open question of the framework. So visible samples warn only when a
-    # held route decided: the sample that releases a held route decided under the hold before its own evidence read
-    # the scene visible, so each release counts one, and the counters cannot tell a release from a held route over a
-    # visible scene (H1) until S2b counts releases.
-    exact_note = ('an exact full change-set (6) over a visible scene is intended for an accepted exact pair (P1); '
-                  'whether a pair decides one before its first selective sample is an open question')
-    add(Check('WARN' if visible and routes else 'INFO' if visible else 'PASS', 'UI full frame',
-              f'{sum(full.values())} full-frame frames (6: {full[6]}, 8: {full[8]}, 9: {full[9]}); samples that '
-              f'decided one read the scene hidden {get("full_d.hidden")}, ambiguous {get("full_d.ambiguous")}, '
-              f'visible {visible}, invalid or unmeasured {get("full_d.invalid")}; depth not current on '
-              f'{get("full.depth_not_current")} detection frames'
-              + ('' if not visible else
-                 f'; {visible} full-frame samples read the scene visible: each release of a held hidden-scene '
-                 'route (8, 9) shows one, more than one per hidden scene is a held route over a visible scene (H1); '
-                 'releases are counted apart from S2b' + (f'; samples of source 6 are counted with them, and '
-                                                          f'{exact_note}' if full[6] else '')
-                 if routes else f'; {visible} samples of source 6 read the scene visible: {exact_note}')))
+    if s2b:
+        full_frame_s2b(c, add, detected)
+    else:
+        full = {k: get(f'decided.{k}') for k in (6, 8, 9)}
+        visible, routes = get('full_d.visible'), full[8] + full[9]
+        # Before S2b full_d counts the exact full change-set (6) with the held routes (8, 9). An exact full set decides
+        # without a hold, and over a visible scene it is intended for an accepted exact pair (P1); it is wrong only
+        # before the pair's first selective sample, which was an open question of the framework. So visible samples
+        # warn only when a held route decided: the sample that releases a held route decided under the hold before its
+        # own evidence read the scene visible, so each release counts one, and these counters cannot tell a release
+        # from a held route over a visible scene (H1); only since S2b are releases counted.
+        exact_note = ('an exact full change-set (6) over a visible scene is intended for an accepted exact pair (P1); '
+                      'whether a pair decides one before its first selective sample is an open question')
+        add(Check('WARN' if visible and routes else 'INFO' if visible else 'PASS', 'UI full frame',
+                  f'{sum(full.values())} full-frame frames (6: {full[6]}, 8: {full[8]}, 9: {full[9]}); samples that '
+                  f'decided one read the scene hidden {get("full_d.hidden")}, ambiguous {get("full_d.ambiguous")}, '
+                  f'visible {visible}, invalid or unmeasured {get("full_d.invalid")}; depth not current on '
+                  f'{get("full.depth_not_current")} detection frames'
+                  + ('' if not visible else
+                     f'; {visible} full-frame samples read the scene visible: each release of a held hidden-scene '
+                     'route (8, 9) shows one, more than one per hidden scene is a held route over a visible scene '
+                     '(H1); logs before S2b do not count releases' + (f'; samples of source 6 are counted with them, '
+                                                                      f'and {exact_note}' if full[6] else '')
+                     if routes else f'; {visible} samples of source 6 read the scene visible: {exact_note}')))
 
     # A whole-frame mask from alpha (an accepted source 1-4 or 10 covering at least 99%; only accepted sources decide)
     # pins the frame flat even over a visible scene: an accepted source's pin weight is saturate(8 alpha) at any
@@ -1093,9 +1140,20 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
     # accepted source an exact pair contradicts and no revocation resolved (UI protection; one way since S2a, a full
     # claim over the scene before it), and unaccepted inferred alpha (UI inferred alpha). Dims and tints over dark or
     # changed pixels never meet the one-way test. The add-on measures D as a diagnostic on the samples after one that
-    # decided it, so the first sample of each episode is unmeasured.
+    # decided it, so the first sample of each episode is unmeasured. Since S2b an accepted exact full change-set (6)
+    # decides only for an accepted pair and is counted with these accepted whole-frame decisions (full_alpha_d).
     full_alpha, alpha_visible = get('full_alpha'), get('full_alpha_d.visible')
-    if full_alpha:
+    exact = get('decided.6') if s2b else 0
+    if s2b and full_alpha + exact:
+        add(Check('INFO', 'UI full alpha',
+                  f'{full_alpha} frames decided a whole-frame alpha and {exact} an exact full change-set (6) '
+                  f'({percent(full_alpha + exact, detected)} of detection frames); samples of these accepted '
+                  'whole-frame decisions (alpha, or exact full change-set 6) read the scene hidden '
+                  f'{get("full_alpha_d.hidden")}, ambiguous {get("full_alpha_d.ambiguous")}, visible {alpha_visible}, '
+                  f'invalid or unmeasured {get("full_alpha_d.invalid")}'
+                  + (f'; {alpha_visible} samples pinned an accepted whole-frame decision flat over a visible scene, '
+                     'as intended (P1)' if alpha_visible else '')))
+    elif full_alpha:
         add(Check('INFO', 'UI full alpha',
                   f'{full_alpha} frames ({percent(full_alpha, detected)} of detection frames) decided a whole-frame '
                   f'alpha; samples that decided one read the scene hidden {get("full_alpha_d.hidden")}, ambiguous '
@@ -1104,7 +1162,8 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                   + (f'; {alpha_visible} samples pinned an accepted whole-frame alpha flat over a visible scene, as '
                      'intended (P1)' if alpha_visible else '')))
     elif 'full_alpha' in c:
-        add(Check('PASS', 'UI full alpha', 'no frame decided a whole-frame alpha'))
+        add(Check('PASS', 'UI full alpha', 'no frame decided a whole-frame alpha'
+                  + (' or an exact full change-set (6)' if s2b else '')))
 
     # Since S1 only accepted candidates decide, so the word is zero by construction: a count is a defect. Counters
     # from before S1 (trust.opaque_set rather than trust.discarded) still let the untrusted pass decide.
@@ -1160,6 +1219,30 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                   f'restored {get("trust.restored")}, '
                   + (f'legacy entries discarded {get("trust.discarded")}' if 'trust.discarded' in c else
                      f'opaque proof set {get("trust.opaque_set")} and cleared {get("trust.opaque_cleared")}')))
+
+
+def full_frame_s2b(c: dict[str, int], add, detected: int) -> None:
+    """'UI full frame' from counter lines since S2b: H1 (source 8) and its scene guard (docs/reshade-sbs.md, UI
+    decision framework, H1 and M5).
+
+    full_d counts H1 samples only. H1 shows the frame flat only under a held hidden verdict, and one valid visible
+    sample releases that hold at once: the releasing sample decided 8 under the hold before its own evidence read the
+    scene visible, and the guard counts it as a release (scene.released). So full_d.visible never exceeds
+    scene.released unless an H1 hold acted over a visible scene. An accepted exact full change-set (6) decides without
+    D (P1) and is reported with the accepted whole-frame decisions (UI full alpha)."""
+    def get(key: str) -> int:
+        return c.get(key, 0)
+    h1, exact = get('decided.8'), get('decided.6')
+    visible, released = get('full_d.visible'), get('scene.released')
+    acted = visible > released
+    add(Check('WARN' if acted else 'PASS', 'UI full frame',
+              f'{h1 + exact} full-frame frames (6: {exact}, 8: {h1}; {percent(h1 + exact, detected)} of detection '
+              f'frames); H1 samples (8) read the scene hidden {get("full_d.hidden")}, ambiguous '
+              f'{get("full_d.ambiguous")}, visible {visible}, invalid or unmeasured {get("full_d.invalid")}; scene '
+              f'guard entered {get("scene.entered")}, released {released}, refuted {get("scene.refuted")}; depth not '
+              f'current on {get("full.depth_not_current")} detection frames'
+              + (f'; an H1 hold acted over a visible scene: {visible} visible H1 samples for {released} releases'
+                 if acted else '')))
 
 
 def outside_settle(s: Session, a: float, b: float) -> list[tuple[float, float]]:
@@ -1234,19 +1317,38 @@ def scene_checks(s: Session, add) -> None:
     """Hidden-scene evidence: how often full-frame UI covered a hidden scene, and runs of the presented frame
     reading hidden while no UI source decided, which nothing protected (the first-run shadow reports them).
 
-    A sample whose frame was full-frame UI (8 or 9) and whose own evidence read the presented frame visible is a
-    route's exit: that verdict releases the hold at once, so each hidden scene that ends shows one, and a false
-    hidden verdict shows one too. Exits are counted, not judged; many short episodes deserve a look."""
+    Before S2b a sample whose frame was full-frame UI (8 or 9) and whose own evidence read the presented frame
+    visible is a route's exit: that verdict releases the hold at once, so each hidden scene that ends shows one, and a
+    false hidden verdict shows one too. Exits are counted, not judged; many short episodes deserve a look. Since S2b
+    the H1 samples (8) are listed with the pre-UI scene image whose claim acted (H1 (d)), and the scene guard's
+    entries, releases and refutations come from the counter line (M5); hidden samples whose layer pre-UI claim could
+    not act because no gameplay sample had proven the layer are counted."""
     scenes = [u for u in s.ui if u.scene]
     if not scenes:
         return
-    covered = Counter(u.source for u in scenes if u.source in (8, 9))
-    exits = sum(1 for u in scenes if u.source in (8, 9) and u.scene.valid and u.scene.verdict == 'visible')
     uncovered = [f'{clock(u.t)} {u.scene.hidden_ms} ms{" (first-run shadow)" if u.scene.shadow else ""}'
                  for u in scenes if not u.source and u.scene.hidden_ms >= SHADOW_HIDDEN_WARN_MS]
-    detail = (f'layer route (8) in {covered[8]} samples, HUD-less route (9) in {covered[9]}, '
-              f'{exits} released by a visible verdict; {sum(u.scene.ran for u in scenes)} of {len(scenes)} '
-              'samples measured')
+    guarded = [u for u in scenes if u.scene.s2b]
+    if guarded:
+        h1 = [u for u in guarded if u.source == 8]
+        pre_ui = Counter(u.scene.pre_ui_image for u in h1 if u.scene.pre_ui_claim())
+        c = s.counters if s.counters is not None and 'scene.entered' in s.counters else None
+        guard = (f'entered {c["scene.entered"]}, released {c["scene.released"]}, refuted {c["scene.refuted"]}' if c
+                 else f'hidden hold held in {sum(1 for u in guarded if u.scene.guard[0])} samples (no counter line)')
+        detail = (f'H1 hidden scene (8) in {len(h1)} samples (pre-UI image: hudless {pre_ui["hudless"]}, layer '
+                  f'{pre_ui["layer"]}), {guard}; {sum(u.scene.ran for u in scenes)} of {len(scenes)} samples '
+                  'measured')
+        unproven = sum(1 for u in guarded if u.scene.claims & CLAIM_PRE_UI and u.scene.pre_ui_image == 'layer' and
+                       u.scene.proven is False and u.scene.valid and u.scene.verdict == 'hidden')
+        if unproven:
+            detail += (f'; {unproven} hidden samples had an unproven pre-UI layer (no gameplay sample had read it '
+                       'within 0.03 of the presented frame)')
+    else:
+        covered = Counter(u.source for u in scenes if u.source in (8, 9))
+        exits = sum(1 for u in scenes if u.source in (8, 9) and u.scene.valid and u.scene.verdict == 'visible')
+        detail = (f'layer route (8) in {covered[8]} samples, HUD-less route (9) in {covered[9]}, '
+                  f'{exits} released by a visible verdict; {sum(u.scene.ran for u in scenes)} of {len(scenes)} '
+                  'samples measured')
     if uncovered:
         detail += f'; the presented frame read hidden for at least {SHADOW_HIDDEN_WARN_MS} ms with no UI source'
     add(Check('WARN' if uncovered else 'INFO', 'Hidden scene', detail, uncovered[:6]))

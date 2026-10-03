@@ -93,6 +93,38 @@ def ui2(t, source, covered, alpha, candidates, accepted, pixels=1000, hudless=(0
                    f'status_revision=1')
 
 
+def ui3(t, source, covered, alpha, candidates, accepted, pixels=1000, layer=(0, 0), invalid=(0, 0, 0, 0),
+        reason=None, refused='none', scene=(0.6, 'visible'), claims=0, h1=0, winner=None, pre_ui=('none', 0.0, 0),
+        guard=(0, 0, 0), ran=1, shadow=0, hidden_ms=0, detection=None, fg=0):
+    """A 'Sunshine UI protection' line since S2b (exporter.cpp): the S2a fields, then the Backbuffer and current
+    alpha's opaque pixels, the informative full claims, the H1 word, the presented frame's D, the pre-UI scene image's
+    D (image, d, valid) and the scene guard's holds (hidden, pre-UI, refuted signatures)."""
+    detection = detection or ('detected' if source else 'no_usable_mask')
+    reason = reason or ('decided' if source else 'unaccepted')
+    winner = source if winner is None else winner
+    a = '/'.join(str(v) for v in alpha)
+    i = '/'.join(str(v) for v in invalid)
+    d, verdict = scene
+    image, pre_ui_d, pre_ui_valid = pre_ui
+    return line(t, f'[Sunshine 3D] Sunshine UI protection: runtime=0000000000000001 mode=auto rendered=1 '
+                   f'mask_path=1 input=automatic_gpu_mask retained=0 fg={fg} fg_known=1 fg_enabled={fg} '
+                   f'input_state=input_seen detection={detection} selected=automatic source=automatic '
+                   f'source_availability={"detected" if source else "quality_rejected"} '
+                   f'sampled_source={source} sampled_covered={covered} sampled_pixels={pixels} '
+                   f'sampled_candidates=0x{candidates:x} sampled_alpha_covered={a} sampled_alpha_invalid={i} '
+                   f'accepted=0x{accepted:x} sampled_layer={{covered={layer[0]} invalid={layer[1]} opaque=0}} '
+                   f'sampled_one_way={{strong=0/0/0 contradicted=0/0/0}} sampled_reason={reason} '
+                   f'sampled_refused={refused} sampled_reused=0 sampled_late_layer=0 '
+                   f'sampled_hudless={{changed=0 unchanged=0 invalid=0 matching_tiles=0 lit=0}} '
+                   f'sampled_alpha_opaque=0/0 sampled_inferred_opaque=0/{alpha[3]} sampled_claims=0x{claims:x} '
+                   f'sampled_h1={{applied={h1} winner={winner}}} '
+                   f'sampled_scene={{n=463 d={d:.3f} valid=1 ran={ran} verdict={verdict}}} '
+                   f'sampled_pre_ui_scene={{image={image} n={463 if pre_ui_valid else 0} d={pre_ui_d:.3f} '
+                   f'valid={pre_ui_valid}}} scene_guard={{hidden={guard[0]} pre_ui={guard[1]} refuted={guard[2]}'
+                   f'{f" proven={guard[3]}" if len(guard) > 3 else ""}}} '
+                   f'shadow={shadow} shadow_hidden_ms={hidden_ms} status_revision=1')
+
+
 def accepted_now(t, value):
     return line(t, f'[Sunshine 3D] Sunshine UI protection: accepted UI sources are now {value}; remembered for later '
                    'sessions of this game')
@@ -114,6 +146,11 @@ COUNTER_GROUPS = (
     ('trust', ('earned', 'revoked_exact', 'revoked_declared', 'lapsed', 'restored', 'discarded', 'forgotten')),
     ('samples', None), ('through_ms', None),
 )
+# The same since S2b: decided and full omit the retired 9, and the scene guard's group follows full_d.
+S2B_COUNTER_GROUPS = tuple(
+    group for key, inner in COUNTER_GROUPS
+    for group in ((key, tuple(k for k in inner if k != '9') if key in ('decided', 'full') else inner),)
+    + ((('scene', ('entered', 'released', 'refuted')),) if key == 'full_d' else ()))
 # The same in S1: three hold kinds and the cap, no reused, trusted_full and the S1 trust events.
 S1_COUNTER_GROUPS = tuple(
     ('held', ('generated', 'inexact_after_exact', 'trusted_missing', 'cap')) if key == 'held' else
@@ -849,7 +886,7 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(checks['UI full frame'].status, 'WARN')
         self.assertIn('H1', checks['UI full frame'].detail)
         self.assertIn('each release of a held hidden-scene route (8, 9) shows one', checks['UI full frame'].detail)
-        self.assertIn('S2b', checks['UI full frame'].detail)
+        self.assertIn('logs before S2b do not count releases', checks['UI full frame'].detail)
         self.assertNotIn('source 6', checks['UI full frame'].detail)
         # An exact full change-set (6) decides without a hold; over a visible scene it is intended for an accepted
         # exact pair (P1), so with no held route its visible samples are reported, not warned.
@@ -864,6 +901,114 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(checks['UI full frame'].status, 'WARN')
         self.assertIn('H1', checks['UI full frame'].detail)
         self.assertIn('samples of source 6 are counted with them', checks['UI full frame'].detail)
+        self.assertIn('full frame (exact pair) (6) 12%, HUD-less route (before S2b) (9) 6.2%',
+                      checks['UI protection'].detail)
+
+    def test_s2b_counter_lines_check_the_h1_release_invariant(self):
+        # The text test_game3d_alpha_auto pins for format_ui_counters since S2b: decided and full omit 9, and the
+        # scene guard's group follows full_d.
+        text = ('auto_frames=10 detection_frames=6 held={generated=2 none=1} reused=1 '
+                'inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 10=4} '
+                'none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 '
+                'gate_no_hold=1 no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 depth_not_current=1} '
+                'full_d={hidden=1 ambiguous=0 visible=0 invalid=0} scene={entered=1 released=1 refuted=2} '
+                'untrusted_inferred=0 inexact_difference=3 contradicted=2 presented_over_dedicated=0 full_alpha=2 '
+                'full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=0} trust={earned=1 revoked_exact=1 '
+                'revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3} samples=4 through_ms=12345')
+        fields = report.counter_fields('runtime=0000000000000001 ' + text)
+        self.assertEqual((fields['scene.entered'], fields['scene.released'], fields['scene.refuted'],
+                          'decided.9' in fields, 'full.9' in fields), (1, 1, 2, False, False))
+        self.assertEqual(report.counter_fields(report.COUNTERS.search(
+            counters('10:00:00', fields, groups=S2B_COUNTER_GROUPS)).group(1)), fields)
+        # Stellar Blade SDR settings, FG suspended: H1 holds two menu visits flat, each released by one visible
+        # sample that decided 8 under the hold. Visible H1 samples up to the releases are those releases.
+        menus = {**CLEAN_COUNTERS, 'decided.10': 40, 'decided.8': 20, 'full_d.hidden': 6, 'full_d.visible': 2,
+                 'scene.entered': 2, 'scene.released': 2}
+        checks = run(BASE + [counters('10:00:12', menus, groups=S2B_COUNTER_GROUPS)])
+        self.assertTrue(all(c.status in ('PASS', 'INFO') for c in checks.values()), checks)
+        self.assertEqual(checks['UI full frame'].detail,
+                         '20 full-frame frames (6: 0, 8: 20; 25% of detection frames); H1 samples (8) read the scene '
+                         'hidden 6, ambiguous 0, visible 2, invalid or unmeasured 0; scene guard entered 2, released '
+                         '2, refuted 0; depth not current on 0 detection frames')
+        self.assertIn('full frame over a hidden scene (H1) (8) 25%', checks['UI protection'].detail)
+        # More visible H1 samples than releases: an H1 hold acted over a visible scene.
+        checks = run(BASE + [counters('10:00:12', {**menus, 'full_d.visible': 3}, groups=S2B_COUNTER_GROUPS)])
+        self.assertEqual(checks['UI full frame'].status, 'WARN')
+        self.assertTrue(checks['UI full frame'].detail.endswith(
+            '; an H1 hold acted over a visible scene: 3 visible H1 samples for 2 releases'), checks['UI full frame'])
+        # An accepted exact full change-set (6) is an accepted whole-frame decision (P1): its samples are counted in
+        # full_alpha_d, and over a visible scene it is reported, not warned.
+        exact = {**CLEAN_COUNTERS, 'decided.10': 50, 'decided.6': 10, 'full_alpha_d.visible': 2}
+        checks = run(BASE + [counters('10:00:12', exact, groups=S2B_COUNTER_GROUPS)])
+        self.assertEqual((checks['UI full frame'].status, checks['UI full alpha'].status), ('PASS', 'INFO'))
+        self.assertEqual(checks['UI full alpha'].detail,
+                         '0 frames decided a whole-frame alpha and 10 an exact full change-set (6) (12% of detection '
+                         'frames); samples of these accepted whole-frame decisions (alpha, or exact full change-set '
+                         '6) read the scene hidden 0, ambiguous 0, visible 2, invalid or unmeasured 0; 2 samples '
+                         'pinned an accepted whole-frame decision flat over a visible scene, as intended (P1)')
+        clean = run(BASE + [counters('10:00:12', CLEAN_COUNTERS, groups=S2B_COUNTER_GROUPS)])
+        self.assertEqual(clean['UI full alpha'].detail,
+                         'no frame decided a whole-frame alpha or an exact full change-set (6)')
+
+    def test_s2b_lines_parse_the_pre_ui_scene_and_the_scene_guard(self):
+        # Stellar Blade SDR settings with FG suspended: the cleared output target holds the pre-UI scene (colour
+        # without alpha, V1-invalid) and reads visible while the presented menu reads hidden; under both held
+        # verdicts H1 (d) decides 8 over the S1 winner (no mask).
+        menu = ui3('10:00:12', 8, 1000, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 600), invalid=(0, 0, 0, 0),
+                   scene=(0.031, 'hidden'), claims=0x80, h1=1, winner=0, pre_ui=('layer', 0.588, 1), guard=(1, 1, 0))
+        u = report.parse(BASE + [menu]).ui[0]
+        self.assertTrue(u.scene.s2b)
+        self.assertEqual((u.source, u.scene.verdict, u.scene.d, u.scene.pre_ui_image, u.scene.hudless_d,
+                          u.scene.hudless_valid, u.scene.claims, u.scene.h1, u.scene.winner, u.scene.guard,
+                          u.scene.inferred_opaque, u.scene.pre_ui_claim()),
+                         (8, 'hidden', 0.031, 'layer', 0.588, True, 0x80, True, 0, (1, 1, 0), (0, 1000), True))
+        # Older lines have no scene guard.
+        old = report.parse(BASE + [ui('10:00:12', 0, 0, (0, 0, 0, 1000), 0x8, 0x0,
+                                      scene=(0.01, 'hidden', 0, 1, 0))]).ui[0]
+        self.assertEqual((old.scene.s2b, old.scene.guard, old.scene.pre_ui_claim()), (False, None, False))
+        # The hidden-scene check lists H1 samples by the pre-UI image whose claim acted, and the guard's entries,
+        # releases and refutations from the counter line. A layer claim (b) acting without the pre-UI hold is H1 but
+        # not a pre-UI sample.
+        release = ui3('10:00:13', 8, 1000, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 600), claims=0x80, h1=1, winner=0,
+                      pre_ui=('layer', 0.575, 1), guard=(1, 1, 0))
+        splash = ui3('10:00:14', 8, 1000, (0, 0, 0, 1000), 0x48, 0x0, layer=(1000, 0), scene=(-0.044, 'hidden'),
+                     claims=0x40, h1=1, winner=0, pre_ui=('layer', -0.04, 1), guard=(1, 0, 0))
+        gameplay = ui3('10:00:15', 0, 0, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 600), reason='layer_aside',
+                       refused='ui_layer', claims=0x80, pre_ui=('layer', 0.518, 1), scene=(0.515, 'visible'))
+        guard = {**CLEAN_COUNTERS, 'decided.8': 3, 'full_d.hidden': 2, 'full_d.visible': 1, 'scene.entered': 2,
+                 'scene.released': 1, 'scene.refuted': 1}
+        checks = run(BASE + [menu, release, splash, gameplay, counters('10:00:15', guard, groups=S2B_COUNTER_GROUPS)])
+        self.assertEqual((checks['Hidden scene'].status, checks['UI full frame'].status), ('INFO', 'PASS'))
+        self.assertEqual(checks['Hidden scene'].detail,
+                         'H1 hidden scene (8) in 3 samples (pre-UI image: hudless 0, layer 2), entered 2, released 1, '
+                         'refuted 1; 4 of 4 samples measured')
+        # H1 is a mask: it leaves no protection gap.
+        self.assertEqual(checks['UI protection gaps'].status, 'PASS')
+        # Without a counter line the guard's holds are counted from the samples.
+        self.assertIn('hidden hold held in 3 samples (no counter line)',
+                      run(BASE + [menu, release, splash, gameplay])['Hidden scene'].detail)
+        # A hidden run with no decided source still warns, as before S2b.
+        dark = ui3('10:00:16', 0, 0, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 600), reason='layer_aside',
+                   refused='ui_layer', scene=(0.02, 'hidden'), claims=0x80, pre_ui=('layer', 0.03, 1),
+                   guard=(1, 0, 0), shadow=1, hidden_ms=900)
+        checks = run(BASE + [dark, counters('10:00:16', guard, groups=S2B_COUNTER_GROUPS)])
+        self.assertEqual((checks['Hidden scene'].status, checks['Hidden scene'].times),
+                         ('WARN', ['10:00:16 900 ms (first-run shadow)']))
+        self.assertIn('H1 hidden scene (8) in 0 samples', checks['Hidden scene'].detail)
+        self.assertNotIn('unproven', checks['Hidden scene'].detail)
+        # Since the layer proof: a settings menu opened before any gameplay sample proved the scene layer reads hidden
+        # with the layer visible, and stays 3D; the report counts it and parses proven.
+        unproven = ui3('10:00:17', 0, 0, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 600), reason='layer_aside',
+                       refused='ui_layer', scene=(0.031, 'hidden'), claims=0x80, pre_ui=('layer', 0.588, 1),
+                       guard=(1, 0, 0, 0))
+        proven = ui3('10:00:18', 8, 1000, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 600), scene=(0.031, 'hidden'),
+                     claims=0x80, h1=1, winner=0, pre_ui=('layer', 0.588, 1), guard=(1, 1, 0, 1))
+        parsed = report.parse(BASE + [unproven, proven]).ui
+        self.assertEqual([u.scene.proven for u in parsed], [False, True])
+        self.assertIsNone(report.parse(BASE + [menu]).ui[0].scene.proven)
+        detail = run(BASE + [unproven, proven])['Hidden scene'].detail
+        self.assertIn('1 hidden samples had an unproven pre-UI layer', detail)
+        self.assertIn('pre-UI image: hudless 0, layer 1', detail)
 
     def test_counted_whole_frame_alpha_over_a_visible_scene_is_reported(self):
         # The Witcher 3 sign wheel: a trusted layer covers the frame without an exact pair, so contradicted stays 0;

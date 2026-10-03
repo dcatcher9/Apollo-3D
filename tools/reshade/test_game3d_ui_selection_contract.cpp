@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// GPU contract of the UI selection predicate (UI framework S1, S2a): runs the
+// GPU contract of the UI selection predicate (UI framework S1, S2a, S2b): runs the
 // real SunshineUIDetectionReduceCS of game3d_native.hlsl on synthetic
 // per-tile statistics, detection constants and T1 hold stores, and compares
 // every decision word, the written hold store and every counter add with
@@ -7,7 +7,8 @@
 // layer, HUD-less difference and one-way judgment counts are checked against
 // a CPU count of V1, V2 and A2 on edge values. Also checks the predicate's
 // intended behaviour (selection, the T1 grace, F1 reasons and refused
-// candidates), pair comparability (V2) and the acceptance key (A1). Uses a
+// candidates, the H1 override of a hidden scene and its informative claims),
+// pair comparability (V2) and the acceptance key (A1). Uses a
 // hardware D3D11 device, else WARP.
 #include <windows.h>
 #include <d3d11.h>
@@ -62,16 +63,16 @@ namespace {
   selection::counts sums(const tiles &t) {
     selection::counts c;
     std::array<std::uint32_t, 4> coverage{}, invalid{}, difference{};
-    std::array<std::uint32_t, 3> lit{}, layer{};
+    std::array<std::uint32_t, 4> lit{}, layer{};
     for (std::size_t i = 0; i != 256; ++i) {
       for (std::size_t k = 0; k != 4; ++k) {
         coverage[k] += t.coverage[i][k];
         invalid[k] += t.invalid[i][k];
         difference[k] += t.difference[i][k];
-      }
-      for (std::size_t k = 0; k != 3; ++k) {
         lit[k] += t.lit[i][k];
         layer[k] += t.layer[i][k];
+      }
+      for (std::size_t k = 0; k != 3; ++k) {
         c.strong[k] += t.strong[i][k];
         c.contradicted[k] += t.contradicted[i][k];
       }
@@ -88,6 +89,8 @@ namespace {
     c.covered = {coverage[0], coverage[1], layer[0], coverage[2], coverage[3]};
     c.invalid = {invalid[0], invalid[1], layer[1], invalid[2], invalid[3]};
     c.opaque_layer = layer[2];
+    c.opaque_backbuffer = lit[3];
+    c.opaque_current = layer[3];
     return c;
   }
 
@@ -169,7 +172,7 @@ namespace {
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.statistics), "statistics");
     checked(gpu.device->CreateShaderResourceView(gpu.statistics.Get(), nullptr, &gpu.statistics_view), "statistics view");
-    desc.Width = detection::judgment_decision_texels;
+    desc.Width = detection::h1_decision_texels;
     desc.Height = 1;
     desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.decision), "decision");
@@ -282,7 +285,7 @@ namespace {
     ID3D11UnorderedAccessView *none[3]{};
     gpu.context->CSSetUnorderedAccessViews(5, 3, none, nullptr);
     const auto words = read<std::uint32_t>(gpu, gpu.decision.Get(), gpu.decision_staging.Get(),
-      4 * detection::judgment_decision_texels);
+      4 * detection::h1_decision_texels);
     const auto counters = read<std::uint32_t>(gpu, gpu.counters.Get(), gpu.counters_staging.Get(), count);
     const auto store = read<std::uint32_t>(gpu, gpu.hold.Get(), gpu.hold_staging.Get(), detection::hold::store_texels);
     gpu.hold_written = {store[detection::hold::word::state], store[detection::hold::word::source],
@@ -290,7 +293,7 @@ namespace {
 
     const auto c = sums(test.statistics);
     const auto d = selection::decide(c, test.offered, test.accepted, test.flags, previous);
-    std::array<std::uint32_t, 4 * detection::judgment_decision_texels> want{};
+    std::array<std::uint32_t, 4 * detection::h1_decision_texels> want{};
     want[word::source] = d.source;
     want[word::covered] = d.covered;
     want[word::pixels] = c.pixels;
@@ -321,11 +324,18 @@ namespace {
     }
     want[word::refused] = d.refused;
     want[word::frame_reason] = selection::frame_reason_word(d);
+    // Texel 10 (H1); the reduce zeroes the scene evidence texels 5 and 6.
+    want[word::opaque_backbuffer] = c.opaque_backbuffer;
+    want[word::opaque_current] = c.opaque_current;
+    want[word::claims] = d.claims;
+    want[word::h1] = selection::h1_word(d);
     // decide() reads its counts back from the words it is compared with.
     const auto back = selection::counts_from_words(want.data(), want.size());
     require(back.covered == c.covered && back.invalid == c.invalid && back.pixels == c.pixels &&
         back.matching_tiles == c.matching_tiles && back.opaque_layer == c.opaque_layer && back.strong == c.strong &&
-        back.contradicted == c.contradicted,
+        back.contradicted == c.contradicted && back.opaque_ui_alpha == c.opaque_ui_alpha &&
+        back.opaque_ui_color == c.opaque_ui_color && back.opaque_backbuffer == c.opaque_backbuffer &&
+        back.opaque_current == c.opaque_current,
       test.name + ": counts_from_words does not invert the decision words");
     for (std::size_t i = 0; i != want.size(); ++i)
       if (words[i] != want[i]) {
@@ -367,9 +377,13 @@ namespace {
     switch (k) {
       case selection::kind::ui_alpha: t.coverage[0][0] = covered; t.invalid[0][0] = invalid; t.lit[0][1] = opaque; break;
       case selection::kind::ui_color: t.coverage[0][1] = covered; t.invalid[0][1] = invalid; t.lit[0][2] = opaque; break;
-      case selection::kind::backbuffer: t.coverage[0][2] = covered; t.invalid[0][2] = invalid; break;
-      case selection::kind::current: t.coverage[0][3] = covered; t.invalid[0][3] = invalid; break;
-      case selection::kind::ui_layer: t.layer[0] = {covered, invalid, opaque, 0}; break;
+      case selection::kind::backbuffer: t.coverage[0][2] = covered; t.invalid[0][2] = invalid; t.lit[0][3] = opaque; break;
+      case selection::kind::current: t.coverage[0][3] = covered; t.invalid[0][3] = invalid; t.layer[0][3] = opaque; break;
+      case selection::kind::ui_layer:
+        t.layer[0][0] = covered;
+        t.layer[0][1] = invalid;
+        t.layer[0][2] = opaque;
+        break;
       default: break;
     }
   }
@@ -386,7 +400,8 @@ namespace {
     std::vector<case_t> cases;
     const std::uint32_t p = small_pixels;
     using k = selection::kind;
-    const auto hold = detection::per_frame_scene_hold, hold_hudless = detection::per_frame_scene_hold_hudless;
+    const auto hidden = detection::per_frame_scene_hidden, pre_ui = detection::per_frame_pre_ui_visible;
+    const auto refuted = [](std::uint32_t bits) { return bits << detection::per_frame_refuted_shift; };
     // V1: 1% invalid is valid, one more pixel is not (p / 100 = 368.64).
     for (const std::uint32_t invalid : {368u, 369u}) {
       auto test = alpha_case("V1 bound, " + std::to_string(invalid) + " invalid", p, candidate::backbuffer, candidate::backbuffer);
@@ -419,10 +434,10 @@ namespace {
       cases.push_back(test);
     }
     // 98% changed full sets from an exact pair, lit; accepted and not, with
-    // and without the HUD-less hold, and inexact.
+    // and without the H1 holds and the HUD-less refuted, and inexact.
     for (const std::uint32_t permille : {979u, 980u, 1000u})
       for (const std::uint32_t accepted : {0u, unsigned(candidate::hudless)})
-        for (const std::uint32_t flags : {0u, hold_hudless})
+        for (const std::uint32_t flags : {0u, hidden, hidden | pre_ui, hidden | refuted(candidate::hudless)})
           for (const std::uint32_t exact : {0u, unsigned(candidate::exact)}) {
             case_t test{"full change set " + std::to_string(permille), {}, candidate::hudless | exact, accepted, flags};
             difference_rows(test.statistics, p, 0, permille, 0);
@@ -467,13 +482,15 @@ namespace {
       alpha(test, k::backbuffer, 95, 0);
       cases.push_back(test);
     }
-    // Every route flag over each gate input, accepted or not.
+    // Every H1 flag over each opacity claimant, accepted or not, beside a
+    // HUD-less image changed on 90% of pixels (a pre-UI claim).
     for (const std::uint32_t offered : {unsigned(candidate::ui_alpha), unsigned(candidate::layer),
            unsigned(candidate::ui_alpha | candidate::layer), unsigned(candidate::ui_color)})
       for (const std::uint32_t accepted : {0u, offered})
-        for (const std::uint32_t flags : {0u, hold, hold_hudless, hold | hold_hudless})
+        for (const std::uint32_t flags : {0u, hidden, pre_ui, hidden | pre_ui, hidden | refuted(offered),
+               hidden | pre_ui | detection::per_frame_depth_not_current})
           for (const std::uint32_t invalid : {0u, 1u}) {
-            auto test = alpha_case("route gate", p, offered | candidate::hudless, accepted, flags);
+            auto test = alpha_case("H1 claim", p, offered | candidate::hudless, accepted, flags);
             alpha(test, k::ui_alpha, p, invalid, 36496);
             alpha(test, k::ui_color, p, invalid, 36496);
             alpha(test, k::ui_layer, p, invalid, 36495);
@@ -484,6 +501,77 @@ namespace {
     {
       auto test = alpha_case("depth not current", p, 0, 0, detection::per_frame_depth_not_current);
       cases.push_back(test);
+    }
+    // H1 at the opaque-full bound (0.99 p = 36495.36): an unaccepted layer
+    // (b), an accepted Backbuffer and current beside an accepted partial
+    // UIAlpha winner (the declared block keeps them out of S1 and of claim
+    // (a)), an accepted UI color tag beside it (a), and an unaccepted
+    // UIAlpha and UI color tag, which never claim.
+    for (const std::uint32_t opaque : {36495u, 36496u})
+      for (const std::uint32_t flags : {hidden, hidden | refuted(candidate::layer | candidate::backbuffer)}) {
+        auto layer = alpha_case("H1 (b) unaccepted layer, " + std::to_string(opaque) + " opaque", p,
+          candidate::layer | candidate::current, 0, flags);
+        alpha(layer, k::ui_layer, p, 0, opaque);
+        alpha(layer, k::current, p, 0, p);
+        cases.push_back(layer);
+        auto inferred = alpha_case("H1 blocked accepted Backbuffer and current beside a partial UIAlpha winner", p,
+          candidate::ui_alpha | candidate::backbuffer | candidate::current,
+          candidate::ui_alpha | candidate::backbuffer | candidate::current, flags);
+        alpha(inferred, k::ui_alpha, 92, 0, 10);
+        alpha(inferred, k::backbuffer, p, 0, opaque);
+        alpha(inferred, k::current, p, 0, opaque);
+        cases.push_back(inferred);
+        auto tag = alpha_case("H1 (a) accepted UI color tag beside a partial UIAlpha winner", p,
+          candidate::ui_alpha | candidate::ui_color, candidate::ui_alpha | candidate::ui_color, flags);
+        alpha(tag, k::ui_alpha, 92, 0, 10);
+        alpha(tag, k::ui_color, p, 0, opaque);
+        cases.push_back(tag);
+        auto declared = alpha_case("H1 unaccepted opaque UIAlpha and UI color tag", p,
+          candidate::ui_alpha | candidate::ui_color, 0, flags);
+        alpha(declared, k::ui_alpha, p, 0, opaque);
+        alpha(declared, k::ui_color, p, 0, opaque);
+        cases.push_back(declared);
+        // An accepted opaque-full winner is overridden unless it is opaque on
+        // every pixel.
+        for (const std::uint32_t winner_opaque : {opaque, p}) {
+          auto winner = alpha_case("H1 accepted opaque-full Backbuffer winner", p, candidate::backbuffer, candidate::backbuffer,
+            flags);
+          alpha(winner, k::backbuffer, p, 0, winner_opaque);
+          cases.push_back(winner);
+        }
+      }
+    // H1 (d): a V1-invalid layer (colour without alpha), with and without the
+    // pre-UI hold, the hidden hold and current depth; and a HUD-less image
+    // changed on 90% of pixels or on fewer (0.9 p = 33177.6).
+    for (const std::uint32_t flags : {0u, hidden, pre_ui, hidden | pre_ui, hidden | pre_ui | detection::per_frame_depth_not_current,
+           hidden | pre_ui | refuted(candidate::layer)})
+      for (const std::uint32_t accepted : {0u, unsigned(candidate::layer)}) {
+        auto test = alpha_case("H1 (d) V1-invalid layer", p, candidate::layer | candidate::current, accepted, flags);
+        alpha(test, k::ui_layer, 2000, 30000, 0);
+        alpha(test, k::current, p, 0, p);
+        cases.push_back(test);
+        for (const std::uint32_t changed : {33177u, 33178u}) {
+          case_t hudless{"H1 (d) HUD-less image, " + std::to_string(changed) + " changed", {},
+            candidate::hudless | candidate::layer, accepted, flags};
+          difference_rows(hudless.statistics, p, 0, 0, 0);
+          hudless.statistics.difference[0][0] = changed;
+          alpha(hudless, k::ui_layer, 0, 30000, 0);
+          cases.push_back(hudless);
+        }
+      }
+    // H1 over a stored decision: a frame without its own decision reuses a
+    // stored 8 once, and an H1 frame stores its own 8.
+    {
+      auto test = alpha_case("H1 stored 8 reused", p, candidate::backbuffer, candidate::backbuffer, hidden);
+      alpha(test, k::backbuffer, 400, 2000);
+      test.previous = selection::hold_state{detection::hold::own, 8u, p};
+      cases.push_back(test);
+      auto stored = alpha_case("H1 decides and stores 8", p, candidate::layer | candidate::backbuffer, candidate::backbuffer,
+        hidden);
+      alpha(stored, k::ui_layer, p, 0, p);
+      alpha(stored, k::backbuffer, 400, 2000);
+      stored.previous = selection::hold_state{detection::hold::own, 3u, 77u};
+      cases.push_back(stored);
     }
     // A2: an accepted full Backbuffer over a valid exact pair, contradicted by
     // a tenth of its strong pixels or just not; the same over an inexact pair
@@ -600,11 +688,14 @@ namespace {
       case 1: test.accepted = test.offered & selection::candidate_bits; break;
       default: test.accepted = std::uniform_int_distribution<std::uint32_t>(0, 0x7f)(random) & selection::candidate_bits;
     }
-    static constexpr std::array<std::uint32_t, 5> per_frame{detection::per_frame_scene_hold,
-      detection::per_frame_scene_hold_hudless, detection::per_frame_depth_not_current, detection::per_frame_accepted_missing,
-      detection::per_frame_hold_reset};
+    // Every per-frame bit, the retired ones (0x10000, 0x80000) included, and
+    // refuted candidate bits in bits 24-30.
+    static constexpr std::array<std::uint32_t, 7> per_frame{detection::per_frame_scene_hidden,
+      detection::per_frame_pre_ui_visible, detection::per_frame_depth_not_current, detection::per_frame_accepted_missing,
+      detection::per_frame_hold_reset, 0x10000u, 0x80000u};
     for (const auto bit : per_frame)
       if (random() & 1u) test.flags |= bit;
+    if (random() & 1u) test.flags |= (std::uint32_t(random()) & 0x7fu) << detection::per_frame_refuted_shift;
     test.flags |= random() & 7u;
     // The previous real frame's hold store, or (one case in eight) whatever
     // the previous case's reduce wrote.
@@ -620,11 +711,9 @@ namespace {
       spread(t.coverage, k, pick(random, p), random);
       spread(t.invalid, k, pick(random, p) / ((random() & 3u) ? 64u : 1u), random);
     }
-    for (std::size_t k = 0; k != 3; ++k) spread(t.layer, k, k == 1 ? pick(random, p) / ((random() & 3u) ? 64u : 1u) :
+    for (std::size_t k = 0; k != 4; ++k) spread(t.layer, k, k == 1 ? pick(random, p) / ((random() & 3u) ? 64u : 1u) :
       pick(random, p), random);
-    spread(t.lit, 0, pick(random, p), random);
-    spread(t.lit, 1, pick(random, p), random);
-    spread(t.lit, 2, pick(random, p), random);
+    for (std::size_t k = 0; k != 4; ++k) spread(t.lit, k, pick(random, p), random);
     // One-way counts near the tenth bound.
     for (std::size_t k = 0; k != 3; ++k) {
       const std::uint32_t strong = pick(random, p);
@@ -673,7 +762,8 @@ namespace {
   // pixels, the HUD-less difference, lit and opaque pixels, the layer's
   // counts and the one-way judgment counts) on images of edge values, against
   // a CPU count of the rules: covered is in (0, 1], invalid is non-finite or
-  // out of range, opaque at least 254/255, and the layer alone also fails
+  // out of range, opaque at least 254/255 (every alpha kind: rows 48 .yzw and
+  // 64 .zw), and the layer alone also fails
   // beyond the premultiplied bound of its flags (V1); changed beyond the
   // threshold, unchanged within half of it, lit beyond eight times it (V2);
   // strong is alpha in [1/2, 1], contradicted a strong pixel where an offered
@@ -681,7 +771,8 @@ namespace {
   // layer (A2, E2).
   void check_tiles(gpu_t &gpu, ID3D11ComputeShader *tiles, std::uint32_t flags, std::uint32_t offered, const char *space) {
     const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
-    const std::array<float, 14> alphas{0.f, -0.f, 1e-30f, .5f, 1.f, 1.5f, -.5f, nan, inf, .999f, .99f, .25f, .49999997f, -inf};
+    const std::array<float, 15> alphas{0.f, -0.f, 1e-30f, .5f, 1.f, 1.5f, -.5f, nan, inf, .999f, .99f, .25f, .49999997f, -inf,
+      254.f / 255.f};
     const std::array<std::array<float, 4>, 12> layers{{{0.f, 0.f, 0.f, 0.f}, {.5f, .5f, .5f, .5f}, {1.f, 1.f, 1.f, .1f},
       {.3f, 0.f, 0.f, 0.f}, {nan, 0.f, 0.f, .2f}, {0.f, 0.f, 0.f, -0.f}, {20.f, 0.f, 0.f, .5f}, {.2f, .2f, .2f, .999f},
       {0.f, 0.f, 0.f, nan}, {0.f, 0.f, 0.f, inf}, {.1f, .1f, .1f, 1.f}, {0.f, 0.f, 0.f, .49999997f}}};
@@ -719,11 +810,13 @@ namespace {
         }
         lit[tile][1] += okay(a[0]) && a[0] >= opaque;
         lit[tile][2] += okay(a[1]) && a[1] >= opaque;
+        lit[tile][3] += okay(a[2]) && a[2] >= opaque;
         const auto &l = images[4][i];
         const bool bound = (flags & detection::stored_premultiplied) && std::max({l[0], l[1], l[2]}) > l[3] * headroom + 4.f / 255.f;
         layer[tile][0] += okay(l[3]) && l[3] > 0.f;
         layer[tile][1] += !okay(l[3]) || bound;
         layer[tile][2] += okay(l[3]) && l[3] >= opaque;
+        layer[tile][3] += okay(a[3]) && a[3] >= opaque;
         // SunshineHUDlessDifference without the scRGB scale (sRGB and PQ).
         const auto &current = images[3][i], &hudless = images[5][i];
         const bool finite = std::isfinite(current[0]) && std::isfinite(current[1]) && std::isfinite(current[2]) &&
@@ -800,8 +893,8 @@ namespace {
       at("coverage", rows[row * 16 + column], coverage[lane], 0, 4);
       at("invalid", rows[(row + 16) * 16 + column], invalid[lane], 0, 4);
       at("difference", rows[(row + 32) * 16 + column], difference[lane], 0, 4);
-      at("lit and opaque", rows[(row + 48) * 16 + column], lit[lane], 0, 3);
-      at("layer", rows[(row + detection::layer_statistics_row) * 16 + column], layer[lane], 0, 3);
+      at("lit and opaque", rows[(row + 48) * 16 + column], lit[lane], 0, 4);
+      at("layer and opaque current", rows[(row + detection::layer_statistics_row) * 16 + column], layer[lane], 0, 4);
       at("strong", rows[(row + detection::judgment_statistics_row) * 16 + column], strong_counts[lane], 0, 3);
       at("contradicted", rows[(row + detection::judgment_statistics_row + 16) * 16 + column], contradicted[lane], 0, 3);
       for (std::size_t k = 0; k != 3; ++k) total_contradicted += contradicted[lane][k];
@@ -867,9 +960,9 @@ int main() {
       full.changed = 990;
       full.lit = 900;
       require(selection::decide(full, 0x30, 0x10, 0).source == 6 && !selection::decide(full, 0x30, 0, 0).source &&
-          selection::decide(full, 0x30, 0, detection::per_frame_scene_hold_hudless).source == 9 &&
+          selection::decide(full, 0x30, 0, detection::per_frame_scene_hidden).source == 8 &&
           !selection::decide(full, 0x10, 0x10, 0).source,
-        "A full change set must need an accepted exact pair, else the held HUD-less route");
+        "A full change set must need an accepted exact pair, else H1 under a hidden verdict");
     }
     std::puts("PASS UI selection (S1): accepted valid candidates only, the declared-alpha block, P1 at any coverage");
 
@@ -900,17 +993,26 @@ int main() {
       refusal(0x00, 0x04, sunshine_game3d::ui_no_mask::no_candidate, 0u, "no_candidate");
       c.invalid = {0, 0, 0, 20, 0};
       refusal(0x04, 0x00, sunshine_game3d::ui_no_mask::other, 0u, "other");
-      // The gates: an unaccepted opaque UIAlpha before the layer, else HUD-less.
+      // An acting H1 claim without a held hidden verdict: the first claimant
+      // in draw order; an unaccepted opaque UIAlpha never claims.
       c.invalid = {};
       c.covered = {1000, 0, 1000, 0, 0};
       c.opaque_ui_alpha = c.opaque_layer = 1000;
-      refusal(0x41, 0x00, sunshine_game3d::ui_no_mask::gate_no_hold, candidate::ui_alpha, "UIAlpha gate");
-      refusal(0x40, 0x00, sunshine_game3d::ui_no_mask::gate_no_hold, candidate::layer, "layer gate");
+      refusal(0x41, 0x00, sunshine_game3d::ui_no_mask::gate_no_hold, candidate::layer, "layer claim beside UIAlpha");
+      refusal(0x40, 0x00, sunshine_game3d::ui_no_mask::gate_no_hold, candidate::layer, "layer claim");
+      require(selection::decide(c, 0x01, 0x00, 0).none_reason == sunshine_game3d::ui_no_mask::ambiguous,
+        "F1: an unaccepted opaque UIAlpha must not be an H1 claim");
       c.covered = {};
+      c.opaque_ui_alpha = c.opaque_layer = 0;
       c.changed = 950;
-      refusal(0x10, 0x00, sunshine_game3d::ui_no_mask::gate_no_hold, candidate::hudless, "HUD-less gate");
-      const auto decided = selection::decide(c, 0x10, 0x00, detection::per_frame_scene_hold_hudless);
-      require(decided.source == 9 && !decided.refused && decided.frame_reason == detection::frame_reason_decided &&
+      // A pre-UI HUD-less claim acts only under the pre-UI hold.
+      refusal(0x10, 0x00, sunshine_game3d::ui_no_mask::difference_failed, candidate::hudless, "pre-UI claim without its hold");
+      const auto refused = selection::decide(c, 0x10, 0x00, detection::per_frame_pre_ui_visible);
+      require(!refused.source && refused.none_reason == sunshine_game3d::ui_no_mask::gate_no_hold &&
+          refused.refused == candidate::hudless, "F1: an acting pre-UI claim without the hidden hold must refuse its image");
+      const auto decided = selection::decide(c, 0x10, 0x00,
+        detection::per_frame_scene_hidden | detection::per_frame_pre_ui_visible);
+      require(decided.source == 8 && !decided.refused && decided.frame_reason == detection::frame_reason_decided &&
           selection::frame_reason_name(selection::frame_reason_word(decided)) == "decided",
         "F1: a decided frame must name no refused candidate and the decided frame reason");
     }
@@ -980,6 +1082,115 @@ int main() {
     }
     std::puts("PASS UI hold grace (T1): one reuse of the previous own decision, then no mask; a reset never reuses");
 
+    // H1: an informative full claim under a held hidden verdict shows the
+    // frame flat (8) whatever S1 selected, unless the winner is flat on every
+    // pixel already.
+    {
+      namespace hold = detection::hold;
+      const auto hidden = detection::per_frame_scene_hidden, pre_ui = detection::per_frame_pre_ui_visible;
+      const auto refuted = [](std::uint32_t bits) { return bits << detection::per_frame_refuted_shift; };
+      const auto flat = [](const selection::decision &d) { return d.source == 8u && d.covered == 1000u && d.h1; };
+      selection::counts c;
+      c.pixels = 1000;
+      // (a) An accepted opaque-full UI color tag beside an accepted partial
+      // UIAlpha winner (a 0.25% HUD over a full menu): overridden.
+      c.covered = {3, 1000, 0, 0, 0};
+      c.opaque_ui_color = 990;
+      auto d = selection::decide(c, 0x03, 0x03, hidden);
+      require(flat(d) && d.s1_source == 1u && d.claims == candidate::ui_color &&
+          selection::h1_word(d) == (1u | detection::h1_applied) && d.next.source == 8u,
+        "H1 (a): an accepted opaque-full UI color tag did not override the partial UIAlpha winner");
+      require(selection::decide(c, 0x03, 0x03, 0).source == 1u, "H1: without a hidden verdict S1 must decide");
+      require(selection::decide(c, 0x03, 0x01, hidden).source == 1u, "H1: an unaccepted UI color tag must never claim");
+      c.opaque_ui_color = 989;
+      require(selection::decide(c, 0x03, 0x03, hidden).source == 1u, "H1: a UI color tag below 99% opaque claimed");
+      // (a) only for alpha S1 may select: an accepted opaque-full Backbuffer
+      // or current alpha that an accepted declared alpha keeps out of S1
+      // (Resident Evil Requiem's presented alpha beside its tag) never claims.
+      c = {};
+      c.pixels = 1000;
+      c.covered = {0, 3, 0, 1000, 1000};
+      c.opaque_backbuffer = c.opaque_current = 995;
+      d = selection::decide(c, 0x0e, 0x0e, hidden);
+      require(d.source == 2u && !d.h1 && !d.claims, "H1 (a): a blocked accepted opaque-full inferred alpha claimed");
+      d = selection::decide(c, 0x0c, 0x0c, hidden);
+      require(flat(d) && d.claims == (candidate::backbuffer | candidate::current) && d.s1_source == 3u,
+        "H1 (a): an accepted opaque-full inferred alpha without a declared one did not claim");
+      // An accepted alpha winner opaque on every pixel, and source 6, are
+      // flat already; one opaque-full on 99.9% gives way to H1.
+      c = {};
+      c.pixels = 1000;
+      c.covered = {0, 0, 0, 1000, 0};
+      c.opaque_backbuffer = 1000;
+      d = selection::decide(c, 0x04, 0x04, hidden);
+      require(d.source == 3u && !d.h1 && d.claims == candidate::backbuffer, "H1: an accepted winner opaque everywhere was overridden");
+      c.opaque_backbuffer = 999;
+      d = selection::decide(c, 0x04, 0x04, hidden);
+      require(flat(d) && d.s1_source == 3u && d.claims == candidate::backbuffer,
+        "H1: an accepted winner with transparent pixels was not shown flat");
+      // (b) An unaccepted, valid, opaque-full layer; refuted, or over reused
+      // depth, it does not act.
+      c = {};
+      c.pixels = 1000;
+      c.covered = {0, 0, 1000, 0, 1000};
+      c.opaque_layer = 990;
+      c.opaque_current = 1000;
+      require(flat(selection::decide(c, 0x48, 0x00, hidden)), "H1 (b): an unaccepted opaque layer did not flatten");
+      d = selection::decide(c, 0x48, 0x00, hidden | refuted(candidate::layer));
+      require(!d.source && d.claims == candidate::layer && d.none_reason != sunshine_game3d::ui_no_mask::gate_no_hold,
+        "H1: a refuted layer claim acted");
+      d = selection::decide(c, 0x48, 0x00, hidden | detection::per_frame_depth_not_current);
+      require(!d.source && d.none_reason == sunshine_game3d::ui_no_mask::gate_no_hold && d.refused == candidate::layer,
+        "H1: depth that is not this frame's must not apply H1");
+      // An unaccepted opaque UIAlpha or UI color tag is never informative.
+      c = {};
+      c.pixels = 1000;
+      c.covered = {1000, 1000, 0, 0, 0};
+      c.opaque_ui_alpha = c.opaque_ui_color = 1000;
+      d = selection::decide(c, 0x03, 0x00, hidden | pre_ui);
+      require(!d.source && !d.claims, "H1: an unaccepted opaque UIAlpha or UI color tag claimed");
+      require(selection::decide(c, 0x01, 0x01, hidden).source == 1u, "H1: an accepted opaque UIAlpha must still pin (P1)");
+      // (c) An exact full change set, accepted or not.
+      c = {};
+      c.pixels = 1000;
+      c.changed = 990;
+      c.lit = 900;
+      require(flat(selection::decide(c, 0x30, 0x00, hidden)) && selection::decide(c, 0x30, 0x10, hidden).source == 6u,
+        "H1 (c): an unaccepted exact full change set did not flatten, or an accepted one did not stay 6");
+      // (d) The pre-UI image: a HUD-less image changed on 90% of pixels or a
+      // V1-invalid layer, acting only under the pre-UI hold.
+      c.lit = 0;
+      c.changed = 900;
+      d = selection::decide(c, 0x10, 0x00, hidden | pre_ui);
+      require(flat(d) && d.claims == detection::claim_pre_ui, "H1 (d): a HUD-less pre-UI image did not flatten");
+      require(!selection::decide(c, 0x10, 0x00, hidden).source, "H1 (d): a pre-UI claim acted without the pre-UI hold");
+      c.changed = 899;
+      require(!selection::decide(c, 0x10, 0x00, hidden | pre_ui).source, "H1 (d): a HUD-less image below 90% claimed");
+      c = {};
+      c.pixels = 1000;
+      c.covered = {0, 0, 300, 0, 1000};
+      c.invalid = {0, 0, 600, 0, 0};
+      d = selection::decide(c, 0x48, 0x40, hidden | pre_ui);
+      require(flat(d) && d.claims == detection::claim_pre_ui, "H1 (d): a V1-invalid layer did not flatten under both holds");
+      d = selection::decide(c, 0x48, 0x40, hidden);
+      require(!d.source && d.none_reason == sunshine_game3d::ui_no_mask::trusted_invalid,
+        "H1 (d): a V1-invalid layer without the pre-UI hold must stay as today");
+      d = selection::decide(c, 0x48, 0x40, pre_ui);
+      require(!d.source && d.none_reason == sunshine_game3d::ui_no_mask::gate_no_hold && d.refused == candidate::layer,
+        "F1: a pre-UI layer claim without the hidden hold must refuse the layer");
+      c.invalid = {};
+      require(!selection::decide(c, 0x48, 0x00, hidden | pre_ui).claims, "H1 (d): a V1-valid layer is no pre-UI image");
+      // T1 reuses a stored 8 once, like any own decision.
+      c = {};
+      c.pixels = 1000;
+      c.covered = {0, 0, 0, 300, 0};
+      c.invalid = {0, 0, 0, 20, 0};
+      d = selection::decide(c, 0x04, 0x04, 0, {hold::own, 8u, 1000u});
+      require(d.reused && d.source == 8u && !d.h1 && !d.full_alpha, "H1: a stored 8 was not reused by the T1 grace");
+    }
+    std::puts("PASS UI hidden scene (H1): informative claims (a)-(d) flatten under a held hidden verdict whatever S1 selected; "
+      "refuted, reused-depth, unaccepted declared and blocked inferred claims never do");
+
     std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);
     require(input.good(), "Cannot read game3d_native.hlsl");
     const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
@@ -992,7 +1203,7 @@ int main() {
     std::mt19937 random(0x5131u);
     for (unsigned i = 0; i != 6000; ++i) cases.push_back(random_case(random, i));
     std::array<unsigned, detection::source_count> sources{};
-    unsigned reused = 0;
+    unsigned reused = 0, h1 = 0, gate_no_hold = 0, own_retired = 0;
     for (const unsigned color : {1u, 3u}) {
       const auto reduce = compile_pass(gpu, source, color);
       const char *space = color == 1 ? "sRGB" : "PQ";
@@ -1007,16 +1218,20 @@ int main() {
         if (color == 1) {
           ++sources[d.source < sources.size() ? d.source : 7];
           reused += d.reused;
+          h1 += d.h1;
+          own_retired += d.own_source == 7u || d.own_source == 9u;
+          gate_no_hold += !d.own_source && d.none_reason == sunshine_game3d::ui_no_mask::gate_no_hold;
         }
       }
     }
+    require(!own_retired && h1 && gate_no_hold, "The contract cases decided a retired source (7, 9), or never exercised H1");
     std::printf("PASS UI detection tiles (V1, V2, A2): alpha, layer, difference and one-way counts on edge values match the CPU "
       "count for layer flags 0, 5 and 7, with and without an exact pair, in two color spaces\n");
     std::printf("PASS UI selection GPU contract (%s): %zu crafted and %zu random cases in two color spaces match decide() in every "
-      "decision word, hold store write and counter add; %u reused; applied sources", gpu.adapter.c_str(), crafted_count,
-      cases.size() - crafted_count, reused);
+      "decision word, hold store write and counter add; %u reused, %u H1, %u gate_no_hold; applied sources", gpu.adapter.c_str(),
+      crafted_count, cases.size() - crafted_count, reused, h1, gate_no_hold);
     for (std::size_t s = 0; s != sources.size(); ++s)
-      if (s != 7) std::printf(" %zu=%u", s, sources[s]);
+      if (s != 7 && s != 9) std::printf(" %zu=%u", s, sources[s]);
     std::printf(" other=%u\n", sources[7]);
     return 0;
   } catch (const std::exception &error) {

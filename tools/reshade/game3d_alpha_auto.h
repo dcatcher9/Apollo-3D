@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "game3d_scene_guard.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
@@ -61,8 +62,8 @@ namespace sunshine_game3d {
     std::uint64_t sample_sequence{}, sample_tick_ms{}, accepted_samples{};
     // Latest completed diagnostic: 1 UI R, 2 UI color tag A, 3 backbuffer A, 4
     // current A, 5 HUD-less difference, 6 full-frame UI (HUD-less differs
-    // almost everywhere), 8 full-frame UI over a hidden scene by the layer
-    // route, 9 by the HUD-less route, 10 the offscreen UI layer A. 7 is
+    // almost everywhere), 8 full-frame UI over a hidden scene (H1), 10 the
+    // offscreen UI layer A. 7 and 9 (the HUD-less route before S2b) are
     // retired and never reused.
     std::uint32_t source_kind{};
     // Hidden-scene evidence of one image (docs/reshade-sbs.md, hidden-scene
@@ -87,9 +88,19 @@ namespace sunshine_game3d {
       std::array<std::uint32_t, 4> alpha_covered{}, alpha_invalid{};
       std::uint32_t layer_covered{}, layer_invalid{}, layer_opaque{};
       std::uint32_t accepted{}, valid_bits{};
-      // Pixels of UIAlpha and the UI color tag with alpha of at least 254/255.
-      std::array<std::uint32_t, 2> alpha_opaque{};
-      scene_evidence scene, hudless_scene;
+      // Pixels of UIAlpha and the UI color tag with alpha of at least 254/255,
+      // and of Backbuffer and current alpha (inferred_opaque, texel 10).
+      std::array<std::uint32_t, 2> alpha_opaque{}, inferred_opaque{};
+      // The presented frame's evidence (texel 5) and the pre-UI scene
+      // image's (texel 6), whose verdict the CPU reads from D, and the image
+      // texel 6 measured (ui_detection::pre_ui_image).
+      scene_evidence scene, pre_ui_scene;
+      std::uint32_t pre_ui_image{};
+      // H1, texel 10 (selection revision 3): the raw informative full claims
+      // before refutation (candidate bits | ui_detection::claim_pre_ui), the
+      // S1 winner's source, and whether H1 overrode it with source 8.
+      std::uint32_t claims{}, s1_source{};
+      bool h1_applied{};
       // How long consecutive samples have read the presented frame hidden
       // while no source decided, not blank, ending with this one; zero otherwise.
       std::uint64_t shadow_hidden_ms{};
@@ -111,10 +122,17 @@ namespace sunshine_game3d {
       std::uint32_t refused{}, frame_reason = ui_detection::frame_reason_decided;
       bool reused{};
     } evidence;
-    // This render's state, not the sample's: the routes whose hidden-scene
-    // verdict the renderer holds (1 layer, 2 HUD-less), and whether the
-    // first-run shadow evaluates the evidence with the gates closed.
-    std::uint32_t scene_hold{};
+    // This render's state, not the sample's: the hidden-scene guard's
+    // verdicts pushed with this render (game3d_scene_guard.h: a held hidden
+    // verdict, its samples reading the pre-UI image visible) and how many
+    // source signatures a visible verdict refuted, whether the offered layer
+    // is proven the presented frame without its UI (H1 d), and whether the
+    // first-run shadow evaluates the evidence without an acting claim.
+    struct scene_guard_state {
+      bool hidden{}, pre_ui{};
+      std::uint32_t refuted{};
+      bool proven{};
+    } scene_guard;
     bool scene_shadow{};
   };
 
@@ -152,6 +170,12 @@ namespace sunshine_game3d {
     std::uint32_t color_space{};
 
     ui_selection::signature of(ui_selection::kind k) const { return {k, format[std::size_t(k)], color_space}; }
+    // Every kind's signature, as the hidden-scene guard reads them.
+    scene_guard::kind_signatures by_kind() const {
+      scene_guard::kind_signatures result{};
+      for (std::size_t i = 0; i != result.size(); ++i) result[i] = of(ui_selection::kind(i));
+      return result;
+    }
     candidate_signatures &set(ui_selection::kind k, std::uint32_t typed_format) {
       format[std::size_t(k)] = typed_format;
       return *this;
