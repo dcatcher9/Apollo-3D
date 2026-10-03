@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // CPU-only compile/reflection validation of the native Game 3D shader ABI.
+#include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 
 #include <d3d11shader.h>
@@ -58,6 +59,7 @@ namespace {
     {"SunshineUIPlaneResolvedStore", D3D_SIT_UAV_RWTYPED, 5},
     {"SunshineAlphaCoverageStore", D3D_SIT_UAV_RWTYPED, 6},
     {"SunshineUIConflictStore", D3D_SIT_UAV_RWTYPED, 7},
+    {"SunshineUICountersStore", D3D_SIT_UAV_RWTYPED, 7}, // Detection reduce only.
     {"SunshinePointClamp", D3D_SIT_SAMPLER, 0},
     {"SunshineLinearClampState", D3D_SIT_SAMPLER, 1},
     {"SunshinePointBorder", D3D_SIT_SAMPLER, 2},
@@ -254,6 +256,19 @@ namespace {
       require(shared <= 32768, std::string(entry.name) + " exceeds 32 KiB of group-shared memory");
       manifest << "  groupshared " << shared << '\n';
     }
+    // The exact UI counters share u7 with the conflict probe's statistics: only
+    // the detection reduce adds to them, and no entry binds both.
+    {
+      bool counters = false, conflict = false;
+      for (unsigned index = 0; index < shader.BoundResources; ++index) {
+        D3D11_SHADER_INPUT_BIND_DESC actual {};
+        require(SUCCEEDED(reflection->GetResourceBindingDesc(index, &actual)), "Binding reflection failed");
+        counters |= std::string(actual.Name) == "SunshineUICountersStore";
+        conflict |= std::string(actual.Name) == "SunshineUIConflictStore";
+      }
+      require(counters == (std::string(entry.name) == "SunshineUIDetectionReduceCS") && !(counters && conflict),
+        std::string(entry.name) + ": only the detection reduce may add to the UI counters at u7");
+    }
     if (std::string(entry.name) == "SunshineApplyUICS") {
       const auto pairs = pin_bound_pairs(bytecode.Get(), width);
       require(pairs >= 2, "SunshineApplyUICS lost the binary pin bound's multiply-adds in a scan direction");
@@ -312,6 +327,7 @@ int main(int argc, char **argv) {
     };
     mirrored(detection::hlsl_flag_defines);
     mirrored(detection::hlsl_scene_defines);
+    mirrored(sunshine_game3d::hlsl_counter_defines);
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");
@@ -326,7 +342,6 @@ int main(int argc, char **argv) {
         std::ofstream manifest(directory / "bindings.txt");
         std::vector<entry_point> entries {
           {"PostProcessVS", "vs_5_0"}, {"SunshineRenderPackedPS", "ps_5_0"},
-          {"SunshineAlphaCoverageCS", "cs_5_0", 8, 8, 1},
         };
         if (color == 3) entries.push_back({"SunshinePreparePQPS", "ps_5_0"});
         if (width <= 3840 && height <= 3840) {

@@ -39,7 +39,6 @@ namespace sunshine_game3d::ui_input {
     alpha_auto_source observation;
     ui_detection_inputs detection;
     bool automatic_detection{};
-    std::uint64_t candidate_signature{};
     std::string source_metadata, capture_metadata;
 
     ui_adaptive::source match_scene(ui_adaptive::source source, bool scene_ready) const;

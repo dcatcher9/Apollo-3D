@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_ui_layer.h"
+#include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 
 #include <cstdio>
@@ -69,7 +70,8 @@ int main() {
         require(detection::float_layer_format(value) ==
             (typeless == api::format::r16g16b16a16_typeless || typeless == api::format::r32g32b32a32_typeless),
           "The contract's float layer formats differ from the renderer's typeless families");
-      require(!(layer::detection_flags(format) & (detection::per_frame_mask | detection::stored_stage2)),
+      // 0x8u is the reserved stored bit (game3d_ui_detection_contract.h).
+      require(!(layer::detection_flags(format) & (detection::per_frame_mask | 0x8u)),
         "Layer flags set a per-frame or reserved bit");
     }
     std::puts("PASS UI layer detection flags: 5 for 8-bit and 7 for float layers, typeless included; no per-frame bits");
@@ -90,6 +92,7 @@ int main() {
       };
       mirrored(detection::hlsl_flag_defines);
       mirrored(detection::hlsl_scene_defines);
+      mirrored(sunshine_game3d::hlsl_counter_defines);
       const auto texels = sunshine_game3d::shader_marker(source, detection::decision_texels_marker);
       const auto images = sunshine_game3d::shader_marker(source, detection::scene_evidence_images_marker);
       require(source.find("#define " + std::string(detection::scene_evidence_images_marker) + ' ') != std::string::npos &&
@@ -97,7 +100,7 @@ int main() {
           images <= detection::max_scene_evidence_images,
         "game3d_native.hlsl's UI detection size markers are missing or outside the contract's range");
     }
-    std::puts("PASS UI detection contract: game3d_native.hlsl mirrors every flag and sizes detection within range");
+    std::puts("PASS UI detection contract: game3d_native.hlsl mirrors every flag and counter word and sizes detection within range");
 
     // One game frame: each target cleared in order, then Present.
     const auto frame = [](layer::layer_tracker &tracker, std::initializer_list<std::uint64_t> clears, std::uint64_t now) {

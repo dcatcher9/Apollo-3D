@@ -200,7 +200,7 @@ namespace sunshine_game3d::ui_input {
       entry.native_device = base.device; entry.device_identity = device_identity;
     }
     ui_mask::set_request({reinterpret_cast<std::uint64_t>(runtime), device_identity,
-      observed.epoch, observed.revision, observed.viewport, desc.texture.width, desc.texture.height, true, 0, true, filter});
+      observed.epoch, observed.revision, observed.viewport, desc.texture.width, desc.texture.height, true, filter});
   }
   frame acquire(api::effect_runtime *runtime, renderer &renderer, source_alpha_ui_decision status,
       alpha_auto_policy &session, bool diagnostic) {
@@ -225,7 +225,6 @@ namespace sunshine_game3d::ui_input {
     const auto wanted_source = before.selected;
     auto candidate = base;
     bool available = false;
-    std::uint64_t signature = base.epoch ^ (base.revision << 1) ^ (std::uint64_t(base.viewport) << 32);
     nlohmann::json candidates = nlohmann::json::array();
     auto *queue = runtime->get_command_queue();
     auto *commands = queue->get_immediate_command_list();
@@ -241,9 +240,6 @@ namespace sunshine_game3d::ui_input {
       input.retained = true; input.dedicated_mask = dedicated_mask;
       input.epoch = source.epoch; input.revision = source.observation_revision;
       input.viewport = source.viewport; input.sequence = source.sequence; input.tick_ms = source.tick;
-    };
-    const auto sign = [&](unsigned slot, const ui_mask::selection &selected) {
-      signature ^= (std::uint64_t(1) << (slot + 48)) ^ (selected.origin.source.source_id * (slot + 1));
     };
     auto hudless_result = hudless_none;
     // The tagged Backbuffer is the game's own final color. Captured in the same
@@ -286,7 +282,6 @@ namespace sunshine_game3d::ui_input {
           candidates.push_back(captured_metadata(selected, now, false, false));
           candidates.back()["held_for_generated_present"] = true;
         }
-        sign(slot, selected);
         result.status.retained_alpha_ready = true;
         result.detection.hold_previous = true;
         if (result.automatic_detection) available = true;
@@ -326,7 +321,6 @@ namespace sunshine_game3d::ui_input {
         // showed FG-on Present pairs that belonged to another frame.
         result.detection.hudless_exact = batch || !status.fg_active();
       }
-      sign(slot, selected);
       result.status.retained_alpha_ready = true;
       if (result.automatic_detection) {
         if (hudless) result.detection.hudless = view;
@@ -362,7 +356,6 @@ namespace sunshine_game3d::ui_input {
         {"available_for_detection", view.handle != 0}, {"association", "previous_frame_offscreen_ui_layer"},
         {"capture_id", layer.capture_id}, {"age_ms", now >= layer.tick ? now - layer.tick : 0}});
       if (view.handle) {
-        signature ^= std::uint64_t(1) << 53;
         result.detection.masks[1] = view;
         result.detection.color_alpha_flags = ui_layer::detection_flags(static_cast<api::format>(layer.format));
         result.status.retained_alpha_ready = true; available = true;
@@ -371,7 +364,6 @@ namespace sunshine_game3d::ui_input {
     const bool current_allowed = status.requested && !status.fg_active() && present_has_alpha(base.output_format) &&
       (wanted_source == choice::automatic || wanted_source == choice::current_color);
     if (current_allowed) {
-      signature ^= std::uint64_t(1) << 52;
       if (diagnostic) candidates.push_back({{"source", "current_color"}, {"available_for_detection", true},
         {"association", "current_color_allocation"}, {"format", base.output_format}});
       if (result.automatic_detection) { result.detection.current_color = true; available = true; }
@@ -391,7 +383,6 @@ namespace sunshine_game3d::ui_input {
         {"meaning", "Current render validates all admitted candidates and produces its mask on the GPU. Delayed quality statistics do not identify the exact current winner or authorize pixels."},
         {"candidates", candidates}}.dump();
     }
-    result.candidate_signature = signature;
     {
       std::lock_guard<std::mutex> lock(source_mutex);
       const auto found = sources.find(runtime);
@@ -477,7 +468,6 @@ namespace sunshine_game3d::ui_input {
     source.now_ms = observation.now_ms; source.eligible = source.eligible && scene_ready;
     if (automatic_detection) {
       source.mask_sequence = observation.sequence;
-      source.revision ^= candidate_signature;
     } else if (observation.retained) {
       source.mask_sequence = observation.sequence; source.tick_ms = std::min(source.tick_ms, observation.tick_ms);
       source.eligible = source.eligible && observation.epoch == source.epoch &&

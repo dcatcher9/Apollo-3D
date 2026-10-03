@@ -4,7 +4,9 @@
 #include <reshade.hpp>
 #include "async_log.h"
 #include "game3d_shader_cache.h"
+#include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
+#include "game3d_ui_temporal.h"
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
@@ -46,7 +48,7 @@ namespace sunshine_game3d {
     struct texture { api::resource resource{}; api::resource_view srv{}, uav{}, rtv{}; };
     enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field,
       ui_plane_tiles, ui_plane_resolved, left, right, packed, ui_source, ui_source_second, ui_source_third,
-      ui_conflict_statistics, detection_statistics, detection_decision, detected_mask, scene_cell_sums,
+      ui_conflict_statistics, detection_statistics, detection_decision, detected_mask, scene_cell_sums, ui_counter_words,
       retained_color, retained_color_last = retained_color + ui_detection_inputs::max_retained_presents - 1, texture_count };
     std::array<texture, texture_count> textures{};
     std::vector<std::pair<api::resource, api::resource_view>> backbuffers;
@@ -136,41 +138,14 @@ namespace sunshine_game3d {
         detection_decision_texels >= ui_detection::scene_decision_texels;
     }
     uint64_t scene_evidence_runs{};
-    bool scene_gate_open{};
-    // The pending sample measured because the gate was open or a hold active,
-    // not for the first-run shadow alone: only such evidence changes a route.
-    bool detection_pending_scene_actionable{};
-    // The CPU owns each route's verdict: 0 layer (source 8), 1 HUD-less
-    // (source 9). A route holds until this tick, zero when it does not.
-    std::array<uint64_t, 2> scene_hold_until{};
     uint32_t scene_hold_bits{}; // This render's pushed hold bits (per_frame_scene_hold*).
     bool scene_shadow{};
-    // The first sample tick of the current run of hidden samples without a
-    // decided source; zero without a run.
-    uint64_t shadow_run_start{};
-    // The routes' inputs (ui_detection::scene_route_key), and the layer-route
-    // slots (1 UIAlpha, 2 UI layer) refuted as hiding the scene: nearly opaque
-    // while valid evidence read the presented frame visible. A refuted slot
-    // never holds the layer route until it is offered below that opacity.
-    uint64_t scene_route{};
-    uint32_t scene_refuted_slots{};
-    // A sample still pending from before a clear cannot renew a hold.
-    void clear_scene_holds() {
-      scene_hold_until = {};
-      scene_gate_open = detection_pending_scene_actionable = false;
-      shadow_run_start = 0;
-    }
-    // detected_mask holds a HUD-less-capable decision that generated presents
-    // may reuse for a bounded number of presents.
-    bool detection_mask_ready{};
-    uint32_t detection_holds{};
-    // The last fresh decision used an exact HUD-less pair.
-    bool detection_exact{};
-    // Alpha candidates the game session trusts (Sunshine_UITrustedAlpha).
-    uint32_t detection_trusted{};
-    // Stored Sunshine_UIDetectionFlags of the UI color slot's source
-    // (game3d_ui_detection_contract.h). Per-frame bits are only ever pushed.
-    uint32_t detection_flags{};
+    // The CPU-side temporal state (game3d_ui_temporal.h): the adopted decision
+    // inputs (stored Sunshine_UIDetectionFlags of the UI color slot's source,
+    // never a per-frame bit, and the trusted slots), the hold of detected_mask
+    // across a bounded number of presents, the latest status sample and the
+    // CPU-owned hidden-scene verdicts.
+    ui_temporal::detection_state temporal;
     // The constants of the last detection run, and the run this render's mask
     // came from (fresh or held).
     ui_detection_snapshot detection_run, consumed_detection;
@@ -182,18 +157,28 @@ namespace sunshine_game3d {
     uint64_t retention_requested_present{};
     std::array<uint64_t, ui_detection_inputs::max_retained_presents> retained_present{};
     uint64_t present_number{};
-    uint32_t detection_bits{};
     uint64_t detection_pending_key{};
     bool detection_pending_layer{}; // The pending sample's UI color slot held the offscreen UI layer.
-    uint64_t detection_key() const { return detection_decision_key(detection_bits, detection_flags, detection_trusted); }
     float difference_threshold = 4.f / 1023.f;
     uint64_t detection_fence{}, detection_last_submit{}, detection_submitted{}, detection_mapped{};
-    alpha_auto_source detection_pending_source, detection_latest_source;
-    alpha_auto_decision detection_latest;
+    alpha_auto_source detection_pending_source;
     com<ID3D11Texture2D> detection_readback11;
     com<ID3D12Resource> detection_readback12;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT detection_footprint{};
     uint64_t detection_readback_bytes{};
+    // Exact UI counters (game3d_ui_counters.h). The reduce adds every detection
+    // frame to the ui_counter_words texture; a sample frame copies it beside the
+    // decision texels and snapshots this renderer's CPU counts, and the sample's
+    // read commits both deltas to the session. Zero words: a shader without
+    // counters, or resources that could not be made (counting is diagnostic).
+    uint32_t counter_words{};
+    bool counters_cleared{}, counters_pending{};
+    com<ID3D11Texture2D> counters_readback11;
+    com<ID3D12Resource> counters_readback12;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT counters_footprint{};
+    uint64_t counters_readback_bytes{};
+    ui_counters cpu_counts, pending_counts, committed_counts;
+    std::array<uint32_t, ui_counter_word::count> committed_words{};
     // Adaptive placement has its own observation slot and lifecycle. It never
     // changes UI qualification, depth admission or capture ownership.
     ui_adaptive::policy adaptive_policy;
@@ -297,6 +282,8 @@ namespace sunshine_game3d {
       detection_decision_texels = texels ? texels : ui_detection::default_decision_texels;
       // An out-of-range marker leaves automatic detection unavailable (prepare_detection).
       detection_statistics_images = images;
+      counter_words = shader_marker(shader_source(), "SUNSHINE_UI_COUNTER_WORDS") == ui_counter_word::count ?
+        uint32_t(ui_counter_word::count) : 0u;
       if (!device->create_fence(0, api::fence_flags::none, &completion)) return false;
       if (device->get_api() == api::device_api::d3d12 &&
           (!device->create_resource_view({}, api::resource_usage::shader_resource, api::resource_view_desc(api::format::r32_float), &null_srv) ||
@@ -566,9 +553,8 @@ namespace sunshine_game3d {
         // a bounded status sample, never authority for a later input image;
         // poll_detection only updates which alpha channels the session trusts.
         source_alpha_ui = eligible;
-        consumed_auto = detection_latest;
-        if (!consumed_auto.sample_tick_ms || automatic->now_ms < consumed_auto.sample_tick_ms ||
-            automatic->now_ms - consumed_auto.sample_tick_ms > 500) {
+        consumed_auto = temporal.latest;
+        if (ui_temporal::sample_stale(consumed_auto.sample_tick_ms, automatic->now_ms)) {
           consumed_auto = {};
           consumed_auto.state = eligible ? alpha_auto_state::collecting : alpha_auto_state::waiting_for_source;
         }
@@ -619,20 +605,69 @@ namespace sunshine_game3d {
         if (FAILED(native->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(detection_readback12.put())))) return false;
       }
+      if (counter_words && !prepare_counters()) counter_words = 0;
       detection_ready = true;
       return true;
+    }
+    bool prepare_counters() {
+      if (!texture_create(ui_counter_words, counter_words, 1, api::format::r32_uint,
+          api::resource_usage::unordered_access | api::resource_usage::copy_source)) return false;
+      if (context11.p) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = counter_words;
+        desc.Height = desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+        desc.Format = DXGI_FORMAT_R32_UINT;
+        desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        return SUCCEEDED(reinterpret_cast<ID3D11Device *>(device->get_native())->CreateTexture2D(&desc, nullptr,
+          counters_readback11.put()));
+      }
+      auto *native = reinterpret_cast<ID3D12Device *>(device->get_native());
+      const auto desc = reinterpret_cast<ID3D12Resource *>(textures[ui_counter_words].resource.handle)->GetDesc();
+      native->GetCopyableFootprints(&desc, 0, 1, 0, &counters_footprint, nullptr, nullptr, &counters_readback_bytes);
+      D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_READBACK;
+      D3D12_RESOURCE_DESC buffer{}; buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+      buffer.Width = counters_readback_bytes; buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+      buffer.SampleDesc.Count = 1; buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      return SUCCEEDED(native->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(counters_readback12.put())));
+    }
+    // The GPU words of the sample just completed; false when not readable now
+    // (the totals are cumulative, so a later sample catches up).
+    bool read_counters(std::array<uint32_t, ui_counter_word::count> &words) {
+      const auto bytes = words.size() * sizeof(uint32_t);
+      if (context11.p) {
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(context11->Map(counters_readback11.p, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped))) return false;
+        std::memcpy(words.data(), mapped.pData, bytes);
+        context11->Unmap(counters_readback11.p, 0);
+        return true;
+      }
+      void *mapped{}; const D3D12_RANGE range{0, SIZE_T(counters_readback_bytes)};
+      if (FAILED(counters_readback12->Map(0, &range, &mapped))) return false;
+      std::memcpy(words.data(), static_cast<const unsigned char *>(mapped) + counters_footprint.Offset, bytes);
+      const D3D12_RANGE written{0, 0}; counters_readback12->Unmap(0, &written);
+      return true;
+    }
+    // Commits a completed sample's counts (ui_temporal::sample_counters).
+    void commit_counters(const alpha_auto_decision &sample, alpha_auto_policy *session) {
+      std::array<uint32_t, ui_counter_word::count> words{};
+      if (!counters_pending || !read_counters(words)) return;
+      const auto delta = ui_temporal::sample_counters(sample, pending_counts, committed_counts, words, committed_words,
+        detection_pending_source.now_ms);
+      committed_counts = pending_counts;
+      committed_words = words;
+      if (session) session->add_counters(delta);
     }
     void poll_detection(const alpha_auto_source &input) {
       if (!detection_pending || detection_awaiting_signal || !detection_fence) return;
       const auto completed = device->get_completed_fence_value(completion);
       if (completed == UINT64_MAX) { failed = true; return; }
       if (completed < detection_fence) return;
-      if (input.epoch != detection_pending_source.epoch || input.revision != detection_pending_source.revision ||
-          input.viewport != detection_pending_source.viewport || detection_key() != detection_pending_key ||
-          input.now_ms < detection_pending_source.now_ms || input.now_ms - detection_pending_source.now_ms > 500) {
+      if (ui_temporal::sample_discarded(input, detection_pending_source, temporal.key(), detection_pending_key)) {
         // A sample from other inputs is no evidence for these ones. Holds
-        // clear with the inputs that identify their route (render()).
-        detection_pending = false; detection_latest = {};
+        // clear with the inputs that identify their route (render()). Its
+        // counts are cumulative: the next committed sample includes them.
+        detection_pending = counters_pending = false; temporal.latest = {};
         return;
       }
       std::vector<uint32_t> counts(4 * size_t(detection_decision_texels));
@@ -655,87 +690,16 @@ namespace sunshine_game3d {
         }
       }
       detection_pending = false;
-      detection_latest = {};
-      if (!read) return;
-      namespace word = ui_detection::decision_word;
-      detection_latest.source_kind = counts[word::source];
-      detection_latest.enabled = counts[word::source] != 0;
-      detection_latest.state = counts[word::source] ? alpha_auto_state::automatic_on : alpha_auto_state::automatic_off;
-      detection_latest.covered = counts[word::covered]; detection_latest.pixels = counts[word::pixels];
-      detection_latest.sample_sequence = detection_submitted;
-      detection_latest.sample_tick_ms = detection_pending_source.now_ms;
-      detection_latest.accepted_samples = detection_submitted;
-      auto &evidence = detection_latest.evidence;
-      evidence.matching_tiles = counts[word::matching_tiles];
-      evidence.candidates = counts[word::candidates]; evidence.hudless_changed = counts[word::hudless_changed];
-      evidence.hudless_unchanged = counts[word::hudless_unchanged]; evidence.hudless_invalid = counts[word::hudless_invalid];
-      std::copy_n(counts.begin() + word::alpha_covered, 4, evidence.alpha_covered.begin());
-      std::copy_n(counts.begin() + word::alpha_invalid, 4, evidence.alpha_invalid.begin());
-      evidence.hudless_lit = counts[word::hudless_lit];
-      evidence.trusted_alpha = counts[word::trusted];
-      evidence.ui_layer = detection_pending_layer;
-      evidence.alpha_opaque = {counts[word::alpha_opaque], counts[word::alpha_opaque + 1]};
-      if (scene_evidence_supported()) {
-        const auto scene = [&](std::size_t n, std::size_t d, std::size_t state) {
-          alpha_auto_decision::scene_evidence result;
-          result.n = counts[n];
-          std::memcpy(&result.d, &counts[d], sizeof(result.d));
-          result.valid = ui_detection::scene_state_valid(counts[state]);
-          result.ran = ui_detection::scene_state_ran(counts[state]);
-          result.verdict = ui_detection::scene_state_verdict(counts[state]);
-          return result;
-        };
-        evidence.scene = scene(word::scene_n, word::scene_d, word::scene_state);
-        evidence.scene.decided = counts[word::scene_decided];
-        evidence.hudless_scene = scene(word::hudless_scene_n, word::hudless_scene_d, word::hudless_scene_state);
-      }
-      detection_latest_source = detection_pending_source;
-      observe_scene(detection_latest, detection_pending_scene_actionable);
-      if (input.session) input.session->observe_alpha_channels(evidence, counts[word::pixels], detection_pending_source.now_ms);
-    }
-    // The CPU owns the hidden-scene verdict (docs/reshade-sbs.md, hidden-scene
-    // evidence). A sample whose gate was open and whose presented evidence is
-    // valid and hidden holds that route until its tick plus hold_ms; the
-    // HUD-less route also needs its HUD-less image to read visible, and the
-    // layer route a slot no visible verdict refuted. A valid visible verdict
-    // releases both routes and refutes the slots that opened the layer route.
-    // Invalid evidence renews nothing, and evidence the first-run shadow alone
-    // measured (actionable false) changes nothing.
-    void observe_scene(alpha_auto_decision &sample, bool actionable) {
-      using ui_detection::scene_verdict;
-      auto &evidence = sample.evidence;
-      // As the shader decided: a layer without alpha is no layer, so it is no
-      // overlay either.
-      const auto layer_flags = evidence.ui_layer ? ui_detection::stored_late_layer : 0u;
-      const auto candidates = ui_detection::admitted_candidates(evidence.candidates, layer_flags, evidence.alpha_covered[1],
-        evidence.alpha_invalid[1], sample.pixels);
-      const auto gates = ui_detection::scene_gates_of(sample.source_kind, candidates, evidence.trusted_alpha,
-        layer_flags, sample.pixels, evidence.alpha_invalid, evidence.alpha_opaque, evidence.hudless_changed);
-      scene_gate_open = gates.layer || gates.hudless;
-      // A slot offered below opaque is an overlay again.
-      scene_refuted_slots &= ~gates.overlay_slots;
-      const auto &scene = evidence.scene, &hudless = evidence.hudless_scene;
-      const auto until = sample.sample_tick_ms + ui_detection::scene::hold_ms;
-      if (actionable && scene.valid && scene.verdict == scene_verdict::visible) {
-        scene_hold_until = {};
-        scene_refuted_slots |= gates.layer_slots;
-      } else if (actionable && scene.valid && scene.verdict == scene_verdict::hidden) {
-        if (gates.layer && !(gates.layer_slots & scene_refuted_slots)) scene_hold_until[0] = until;
-        if (gates.hudless && hudless.valid && ui_detection::scene_visible(hudless.d)) scene_hold_until[1] = until;
-      }
-      // An uncovered hidden scene: consecutive hidden samples while no source
-      // decided. The first-run shadow measures it with the gates closed. A
-      // sample with fewer decided comparisons than valid evidence needs edge
-      // cells is blank (black, or a flat fade), with nothing to protect.
-      if (scene.valid && scene.verdict == scene_verdict::hidden && !sample.source_kind &&
-          scene.decided >= ui_detection::scene::min_edges) {
-        if (!shadow_run_start || sample.sample_tick_ms < shadow_run_start) shadow_run_start = sample.sample_tick_ms;
-        evidence.shadow_hidden_ms = sample.sample_tick_ms - shadow_run_start;
-      } else shadow_run_start = 0;
-    }
-    uint32_t scene_holds(uint64_t now_ms) const {
-      return (scene_hold_until[0] && now_ms <= scene_hold_until[0] ? ui_detection::per_frame_scene_hold : 0u) |
-        (scene_hold_until[1] && now_ms <= scene_hold_until[1] ? ui_detection::per_frame_scene_hold_hudless : 0u);
+      auto &latest = temporal.latest;
+      latest = {};
+      if (!read) { counters_pending = false; return; }
+      latest = ui_temporal::decode_detection_sample(counts.data(), counts.size(), detection_pending_source.now_ms,
+        detection_submitted, detection_pending_layer, scene_evidence_supported());
+      temporal.latest_source = detection_pending_source;
+      temporal.observe_scene(latest, temporal.pending_scene_actionable);
+      if (input.session) input.session->observe_alpha_channels(latest.evidence, latest.pixels, detection_pending_source.now_ms);
+      commit_counters(latest, input.session);
+      counters_pending = false;
     }
     void detect_ui(api::command_list *cmd, const render_parameters &p, const ui_detection_inputs &input,
         const alpha_auto_source &observation, api::resource_view paired_color, api::resource_view depth,
@@ -752,12 +716,24 @@ namespace sunshine_game3d {
       // pushed flags only, never detection_flags or its key.
       uint32_t threshold_bits;
       std::memcpy(&threshold_bits, &difference_threshold, sizeof(threshold_bits));
-      detection_run = {ui_detection_snapshot::run_state::ran, detection_bits, threshold_bits, detection_trusted,
-        detection_flags | per_frame, detection_flags};
-      const auto dispatch_stage = [&](pass stage, texture_id target, unsigned output, unsigned x, unsigned y) {
+      detection_run = {ui_detection_snapshot::run_state::ran, temporal.bits, threshold_bits, temporal.trusted,
+        temporal.flags | per_frame, temporal.flags};
+      // The reduce also adds this frame to the exact counters at u7.
+      auto &counter_texture = textures[ui_counter_words];
+      if (counter_words && !counters_cleared) {
+        const uint32_t zero[4]{};
+        cmd->barrier(counter_texture.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
+        cmd->clear_unordered_access_view_uint(counter_texture.uav, zero);
+        cmd->barrier(counter_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
+        counters_cleared = true;
+      }
+      const auto dispatch_stage = [&](pass stage, texture_id target, unsigned output, unsigned x, unsigned y, bool count = false) {
         auto &t = textures[target];
+        count = count && counter_words;
         cmd->barrier(t.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
+        if (count) cmd->barrier(counter_texture.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
         std::array<api::resource_view, 8> uavs{}; uavs[output] = t.uav;
+        if (count) uavs[7] = counter_texture.uav;
         cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[stage]);
         bindings(cmd, api::shader_stage::compute, p, views, uavs);
         struct constants { uint32_t bits; float threshold; uint32_t trusted, flags; } values{detection_run.candidates,
@@ -768,22 +744,24 @@ namespace sunshine_game3d {
         cmd->push_descriptors(api::shader_stage::compute, layout, 3,
           {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
         cmd->barrier(t.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
+        if (count) cmd->barrier(counter_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
       };
       dispatch_stage(detection_tiles, detection_statistics, 6, 16, 16);
       views[10] = textures[detection_statistics].srv;
-      dispatch_stage(detection_reduce, detection_decision, 6, 1, 1);
+      dispatch_stage(detection_reduce, detection_decision, 6, 1, 1, true);
       views[10] = textures[detection_decision].srv;
       dispatch_stage(detection_mask, detected_mask, 0, (width+7)/8, (height+7)/8);
       if (detection_pending || (detection_last_submit && observation.now_ms >= detection_last_submit &&
           observation.now_ms - detection_last_submit < 100)) return;
       // A sample frame. Hidden-scene evidence only measures this frame for the
       // CPU and writes decision texels 5 and 6 after the decision and mask;
-      // without an open gate, a hold or the first-run shadow nothing runs.
-      const bool scene_actionable = scene_gate_open || scene_holds(observation.now_ms);
-      detection_pending_scene_actionable = false;
-      if (scene_evidence_supported() && (scene_actionable || scene_shadow)) {
+      // without an open gate, a hold, the first-run shadow or a whole-frame
+      // alpha in the latest sample nothing runs (ui_temporal::measure_scene).
+      const auto measure = temporal.measure_scene(observation.now_ms, scene_shadow);
+      temporal.pending_scene_actionable = false;
+      if (scene_evidence_supported() && measure.run) {
         namespace scene = ui_detection::scene;
-        detection_pending_scene_actionable = scene_actionable;
+        temporal.pending_scene_actionable = measure.actionable;
         views[1] = depth;
         views[6] = textures[source].srv;
         views[10] = {};
@@ -811,8 +789,25 @@ namespace sunshine_game3d {
         reinterpret_cast<ID3D12GraphicsCommandList *>(cmd->get_native())->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
       }
       cmd->barrier(t.resource, api::resource_usage::copy_source, api::resource_usage::shader_resource);
-      detection_pending_source = observation; detection_pending_key = detection_key();
-      detection_pending_layer = (detection_flags & ui_detection::stored_late_layer) != 0;
+      // The counters through this frame, under the same fence, with the CPU
+      // counts of every render recorded so far.
+      counters_pending = counter_words != 0;
+      if (counters_pending) {
+        cmd->barrier(counter_texture.resource, api::resource_usage::shader_resource, api::resource_usage::copy_source);
+        if (context11.p) context11->CopyResource(counters_readback11.p, reinterpret_cast<ID3D11Resource *>(counter_texture.resource.handle));
+        else {
+          D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+          source.pResource = reinterpret_cast<ID3D12Resource *>(counter_texture.resource.handle);
+          source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+          destination.pResource = counters_readback12.p; destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+          destination.PlacedFootprint = counters_footprint;
+          reinterpret_cast<ID3D12GraphicsCommandList *>(cmd->get_native())->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        }
+        cmd->barrier(counter_texture.resource, api::resource_usage::copy_source, api::resource_usage::shader_resource);
+        pending_counts = cpu_counts;
+      }
+      detection_pending_source = observation; detection_pending_key = temporal.key();
+      detection_pending_layer = (temporal.flags & ui_detection::stored_late_layer) != 0;
       detection_pending = detection_awaiting_signal = true;
       detection_last_submit = observation.now_ms; ++detection_submitted;
     }
@@ -1144,53 +1139,25 @@ namespace sunshine_game3d {
     if (hudless_color.handle && !compatible(hudless_color, true)) { candidates.hudless = {}; hudless_color = {}; }
     if (compatible(candidates.hudless, true)) bits |= candidates.hudless_exact ? 48u : 16u;
     else { candidates.hudless = {}; hudless_color = {}; }
-    // A generated present keeps the preceding real frame's decision and mask.
-    // So does a real frame whose HUD-less pair is inexact (frame generation on,
-    // outside the tag batch) right after an exact decision: detecting again from
-    // that pair would flip a full-screen menu between flat and 3D.
-    // A trusted alpha channel in this frame decides by itself; nothing is held.
-    // Slot-level trust: slot 1 is trusted only for the source that fills it,
-    // or for the one that filled it last when it is missing.
-    const bool layer_slot = (((bits & 2u) ? candidates.color_alpha_flags : d.detection_flags) & ui_detection::stored_late_layer) != 0;
+    // Holding the previous decision and mask (ui_temporal::detection_state::
+    // arbitrate). Slot-level trust: slot 1 is trusted only for the source that
+    // fills it, or for the one that filled it last when it is missing.
+    const bool layer_slot = d.temporal.layer_slot(bits, candidates.color_alpha_flags);
     const uint32_t trusted = automatic && automatic->session ? automatic->session->trusted_slots(layer_slot) : 0u;
-    const bool inexact = (bits & 48u) == 16u;
-    // So does a trusted alpha channel that decided the previous frame and is
-    // missing from this one: an observation loss refuses the previous
-    // revision's captures until the game tags again, which left the UI
-    // unprotected for a frame. A channel gone for longer stops being held.
-    const bool trusted_missing = (d.detection_bits & trusted & 15u & ~bits) != 0;
-    // A trusted layer in the UI color slot that the latest sample set aside (a
-    // layer without alpha, ui_detection::admitted_candidates) decides nothing
-    // by itself, so it does not stop holding the mask another channel made.
-    const auto &latest = d.detection_latest;
-    const uint32_t admitted = ui_detection::admitted_candidates(15u,
-      layer_slot && latest.evidence.ui_layer ? ui_detection::stored_late_layer : 0u,
-      latest.evidence.alpha_covered[1], latest.evidence.alpha_invalid[1], latest.pixels);
-    const bool hold = !(bits & trusted & admitted) && (candidates.hold_previous || (inexact && d.detection_exact) || trusted_missing) &&
-      d.detection_mask_ready &&
-      d.detection_holds < ui_detection_inputs::max_held_presents;
+    const auto arbitration = d.temporal.arbitrate(bits, trusted, layer_slot, candidates.hold_previous,
+      ui_detection_inputs::max_held_presents);
+    const bool hold = arbitration.hold;
     uint32_t flags = (bits & 2u) ? candidates.color_alpha_flags : 0u;
-    if (hold) { bits = d.detection_bits; flags = d.detection_flags; }
-    // Only a change in the inputs that decide the mask makes the status sample
-    // stale. Beside a trusted alpha channel, a HUD-less pair that frame
-    // generation pairs on some Presents only otherwise discarded nearly every
-    // sample while the mask stayed applied (Resident Evil Requiem).
-    if (d.detection_key() != detection_decision_key(bits, flags, trusted)) d.detection_latest = {};
-    // Hidden-scene holds and refutations belong to their route's inputs, not
-    // to a HUD-less pairing that frame generation offers on some Presents only.
-    if (const auto route = ui_detection::scene_route_key(bits, flags, trusted); route != d.scene_route) {
-      d.scene_route = route;
-      d.scene_refuted_slots = 0;
-      d.clear_scene_holds();
-    }
-    d.detection_bits = bits;
-    d.detection_flags = flags;
-    d.detection_trusted = trusted;
+    if (hold) { bits = d.temporal.bits; flags = d.temporal.flags; }
+    d.temporal.adopt(bits, flags, trusted);
     d.difference_threshold = d.source_format == api::format::r10g10b10a2_unorm ? 4.f / 1023.f :
       d.color == 2 ? .005f : 2.f / 255.f;
     const bool needs_detection = auto_mode || ui.kind == ui_input_kind::hudless_difference;
     const bool detection_requested = needs_detection && (!automatic || mode != alpha_auto_state::manual_off);
     d.detection_active = detection_requested && source_alpha_ui && bits && d.width <= 3840 && d.height <= 3840 && d.prepare_detection();
+    // Why a render that requested detection has none (ui_counter::inactive_*).
+    const std::size_t inactive_reason = !source_alpha_ui || !bits ? ui_counter::inactive_no_candidates :
+      d.width > 3840 || d.height > 3840 ? ui_counter::inactive_size : ui_counter::inactive_unprepared;
     if (channel != ui_mask_channel::alpha && channel != ui_mask_channel::red) return false;
     if (channel == ui_mask_channel::red && (!alpha_source.handle || !d.mask_channel_supported)) return false;
     d.consumed_channel = d.detection_active ? ui_mask_channel::red : channel;
@@ -1222,39 +1189,37 @@ namespace sunshine_game3d {
     d.consumed_detection = {};
     d.scene_hold_bits = 0;
     d.scene_shadow = false;
+    if (detection_requested) ++d.cpu_counts[ui_counter::auto_frames];
     if (d.detection_active) {
       if (!observation.now_ms) observation.now_ms = observation.tick_ms = GetTickCount64();
-      if (observation.epoch != d.detection_latest_source.epoch || observation.revision != d.detection_latest_source.revision ||
-          observation.viewport != d.detection_latest_source.viewport) {
-        d.detection_latest = {};
-        d.clear_scene_holds();
-      }
+      d.temporal.enter_scope(observation);
       d.scene_shadow = automatic && automatic->session && automatic->session->first_run();
-      d.scene_hold_bits = d.scene_holds(observation.now_ms);
+      d.scene_hold_bits = d.temporal.scene_holds(observation.now_ms);
       if (hold) {
-        ++d.detection_holds;
+        ++d.cpu_counts[arbitration.kind == ui_temporal::hold_kind::generated ? ui_counter::held_generated :
+          arbitration.kind == ui_temporal::hold_kind::inexact_after_exact ? ui_counter::held_inexact_after_exact :
+          ui_counter::held_trusted_missing];
+        d.temporal.held();
         d.consumed_detection = d.detection_run;
         d.consumed_detection.state = ui_detection_snapshot::run_state::held;
-        d.consumed_detection.held_presents = d.detection_holds;
+        d.consumed_detection.held_presents = d.temporal.holds;
       } else {
+        if (arbitration.cap_reached) ++d.cpu_counts[ui_counter::held_cap];
         d.poll_detection(observation);
         // Per-frame bits: each route's CPU-held hidden-scene verdict, and depth
         // that is not this frame's (reused, or behind a generated Present).
-        d.scene_hold_bits = d.scene_holds(observation.now_ms); // The sample just read may hold or release.
+        d.scene_hold_bits = d.temporal.scene_holds(observation.now_ms); // The sample just read may hold or release.
         const uint32_t per_frame = d.scene_hold_bits |
           (!input.depth_current || candidates.hold_previous ? ui_detection::per_frame_depth_not_current : 0u);
         d.detect_ui(cmd, p, candidates, observation, hudless_color, depth, per_frame);
         d.consumed_detection = d.detection_run;
-        d.detection_holds = 0;
         // The detected mask can be held when HUD-less or a trusted alpha channel made it.
-        d.detection_mask_ready = (bits & 16u) != 0 || (bits & trusted & 15u) != 0;
-        d.detection_exact = (bits & 48u) == 48u;
+        d.temporal.detected();
       }
       alpha_source = t[impl::detected_mask].srv;
     } else {
-      d.detection_mask_ready = d.detection_exact = false;
-      d.scene_refuted_slots = 0;
-      d.clear_scene_holds();
+      if (detection_requested) ++d.cpu_counts[inactive_reason];
+      d.temporal.inactive();
     }
     d.retain_color(cmd);
     d.mark(cmd, impl::mark_detection);

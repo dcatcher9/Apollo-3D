@@ -47,6 +47,42 @@ def ui(t, source, covered, alpha, candidates, trusted, pixels=1000, hudless=(0, 
                    f'invalid=0 matching_tiles=0 lit=0}} {evidence}status_revision=1')
 
 
+# The groups and keys of format_ui_counters (game3d_ui_counters.h), in its order.
+COUNTER_GROUPS = (
+    ('auto_frames', None), ('detection_frames', None),
+    ('held', ('generated', 'inexact_after_exact', 'trusted_missing', 'cap')),
+    ('inactive', ('no_candidates', 'size', 'unprepared')),
+    ('decided', ('0', '1', '2', '3', '4', '5', '6', '8', '9')),
+    ('none', ('layer_aside', 'trusted_invalid', 'presented_blocked', 'ambiguous', 'difference_failed',
+              'gate_no_hold', 'no_candidate', 'other')),
+    ('full', ('6', '8', '9', 'depth_not_current')),
+    ('full_d', ('hidden', 'ambiguous', 'visible', 'invalid')),
+    ('untrusted_inferred', None), ('inexact_difference', None), ('trusted_full', None),
+    ('presented_over_dedicated', None), ('full_alpha', None),
+    ('full_alpha_d', ('hidden', 'ambiguous', 'visible', 'invalid')),
+    ('trust', ('earned', 'revoked_full', 'revoked_presented', 'lapsed', 'restored', 'opaque_set', 'opaque_cleared')),
+    ('samples', None), ('through_ms', None),
+)
+
+
+def counters(t, values, runtime='0000000000000001'):
+    """A 'Sunshine UI counters' line; values maps 'key' or 'group.key' to a count, every other field is 0."""
+    fields = []
+    for key, inner in COUNTER_GROUPS:
+        if inner is None:
+            fields.append(f'{key}={values.get(key, 0)}')
+        else:
+            fields.append(f'{key}={{' + ' '.join(f'{k}={values.get(f"{key}.{k}", 0)}' for k in inner) + '}')
+    return line(t, f'[Sunshine 3D] Sunshine UI counters: runtime={runtime} ' + ' '.join(fields))
+
+
+# 100 Auto frames: 80 detected (60 by the UI layer, 20 without a mask, all for an ambiguous channel), 15 held and 5
+# without a candidate, over 30 committed samples.
+CLEAN_COUNTERS = {'auto_frames': 100, 'detection_frames': 80, 'held.generated': 10, 'held.inexact_after_exact': 3,
+                  'held.trusted_missing': 2, 'inactive.no_candidates': 5, 'decided.2': 60, 'decided.0': 20,
+                  'none.ambiguous': 20, 'trust.earned': 1, 'samples': 30, 'through_ms': 3000}
+
+
 BASE = [
     line('10:00:00', "Initializing crosire's ReShade version '6.8' loaded from 'D:\\G\\dxgi.dll' "
                      "into 'D:\\G\\game.exe' ..."),
@@ -403,6 +439,140 @@ class ReadinessReport(unittest.TestCase):
         placed = run(BASE + switch[:3] + [output('10:00:20', 1000, 0, 150, 1000, 0)])
         self.assertEqual((placed['Placement flat'].status, placed['Placement flat'].times),
                          ('WARN', ['10:00:15-10:00:20']))
+
+    def test_counter_line_is_parsed_and_the_last_one_counts(self):
+        text = ('auto_frames=7 detection_frames=5 held={generated=1 inexact_after_exact=0 trusted_missing=1 cap=2} '
+                'inactive={no_candidates=0 size=0 unprepared=0} decided={0=1 1=0 2=4 3=0 4=0 5=0 6=0 8=0 9=0} '
+                'none={layer_aside=1 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=0 '
+                'gate_no_hold=0 no_candidate=0 other=0} full={6=0 8=0 9=0 depth_not_current=3} '
+                'full_d={hidden=0 ambiguous=0 visible=0 invalid=0} untrusted_inferred=0 inexact_difference=0 '
+                'trusted_full=0 presented_over_dedicated=0 full_alpha=2 '
+                'full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=1} trust={earned=1 revoked_full=0 '
+                'revoked_presented=0 lapsed=0 restored=2 opaque_set=0 opaque_cleared=0} samples=4 through_ms=1234')
+        fields = report.counter_fields('runtime=0000000000000001 ' + text)
+        self.assertEqual((fields['auto_frames'], fields['held.cap'], fields['decided.2'], fields['none.layer_aside'],
+                          fields['full.depth_not_current'], fields['full_alpha'], fields['full_alpha_d.visible'],
+                          fields['trust.restored'], fields['through_ms']),
+                         (7, 2, 4, 1, 3, 2, 1, 2, 1234))
+        self.assertNotIn('runtime', fields)
+        # The helper writes the same grammar.
+        self.assertEqual(report.counter_fields(report.COUNTERS.search(counters('10:00:00', fields)).group(1)), fields)
+        # Totals are cumulative: the last line of the log is the session's.
+        session = report.parse(BASE + [counters('10:00:12', {'auto_frames': 1, 'detection_frames': 1}),
+                                       counters('10:00:13', CLEAN_COUNTERS, runtime='0000000000000002')])
+        self.assertEqual(session.counters['auto_frames'], 100)
+
+    def test_counters_replace_the_sampled_invariants(self):
+        sample = ui('10:00:12', 2, 5, (0, 5, 0, 0), 0x2, 0x2)
+        checks = run(BASE + [sample, counters('10:00:12', CLEAN_COUNTERS), line('10:00:20', 'Finished exiting.')])
+        self.assertTrue(all(c.status in ('PASS', 'INFO') for c in checks.values()), checks)
+        self.assertEqual(checks['UI counters'].detail, '100 Auto frames through the last of 30 committed samples: '
+                                                       '80 detected, 15 held, 5 without detection')
+        self.assertIn('UI colour or layer (2) 75%', checks['UI protection'].detail)
+        self.assertEqual(checks['UI holds'].detail, 'generated 10, inexact after exact 3, trusted missing 2 '
+                                                    '(15% of Auto frames); 0 frames wanted a hold past the cap')
+        self.assertEqual(checks['UI no mask'].detail,
+                         '25% of Auto frames had no mask; decided none: ambiguous 20%; '
+                         'without detection: no candidates 5.0%')
+        self.assertIn('earned 1,', checks['UI trust events'].detail)
+        # Without counters (older logs) none of these checks exists and the sampled ones decide.
+        sampled = run(BASE + [sample])
+        for name in ('UI counters', 'UI full frame', 'UI inferred alpha', 'UI inexact difference', 'UI holds',
+                     'UI no mask', 'UI trust events'):
+            self.assertNotIn(name, sampled)
+        self.assertEqual(sampled['UI protection'].detail, 'detected 1')
+
+    def test_counters_that_do_not_reconcile_fail(self):
+        checks = run(BASE + [counters('10:00:12', {**CLEAN_COUNTERS, 'auto_frames': 101})])
+        self.assertEqual(checks['UI counters'].status, 'FAIL')
+        self.assertIn('does not reconcile', checks['UI counters'].detail)
+        # A frame that wanted a hold past the cap detected instead: it is a detection frame, not a held one.
+        capped = {**CLEAN_COUNTERS, 'held.cap': 4}
+        self.assertEqual(run(BASE + [counters('10:00:12', capped)])['UI counters'].status, 'PASS')
+
+    def test_counted_invariant_breaks_fail_without_a_sample(self):
+        clean = ui('10:00:12', 2, 5, (0, 5, 0, 0), 0x2, 0x2)
+        for key in ('presented_over_dedicated', 'trusted_full'):
+            checks = run(BASE + [clean, counters('10:00:12', {**CLEAN_COUNTERS, key: 1})])
+            self.assertEqual(checks['UI protection'].status, 'FAIL', key)
+        # The counters are exact: a sampled flattening the counted frames do not confirm is only an example.
+        flat = ui('10:00:12', 2, 1000, (0, 1000, 1000, 1000), 0x36, 0x2, hudless=(400, 600))
+        self.assertEqual(run(BASE + [flat])['UI protection'].status, 'FAIL')
+        checks = run(BASE + [flat, counters('10:00:12', {**CLEAN_COUNTERS, 'trusted_full': 2})])
+        self.assertEqual((checks['UI protection'].status, len(checks['UI protection'].times)), ('FAIL', 1))
+        self.assertIn('in 2 frames', checks['UI protection'].detail)
+        self.assertEqual(run(BASE + [flat, counters('10:00:12', CLEAN_COUNTERS)])['UI protection'].status, 'PASS')
+
+    def test_counted_full_claim_resolved_by_revocation_passes(self):
+        # The designed safety net: a trusted channel covering the frame over an exact pair that shows the scene
+        # keeps deciding until repeated contradictions revoke its trust, so its frames count as trusted_full first.
+        layer = ui('10:00:12', 2, 1000, (0, 1000, 1000, 1000), 0x36, 0x2, hudless=(400, 600), layer=1)
+        revoke = line('10:00:14', '[Sunshine 3D] Sunshine UI protection: alpha trust is now 0x2; '
+                                  'remembered for later sessions of this game')
+        resolved = {**CLEAN_COUNTERS, 'trusted_full': 120, 'trust.revoked_full': 1}
+        checks = run(BASE + [layer, revoke, counters('10:00:15', resolved)])
+        self.assertEqual(checks['UI protection'].status, 'PASS')
+        self.assertIn('in 120 frames before 1 revocations of such a channel', checks['UI protection'].detail)
+        self.assertIn('a contradicted channel lost its trust', checks['UI protection'].detail)
+        # Without a sample, a revocation of a full claim also resolves the counted frames.
+        self.assertEqual(run(BASE + [counters('10:00:15', resolved)])['UI protection'].status, 'PASS')
+        # A sample no revocation resolved still fails, whatever else was revoked.
+        flat = ui('10:00:12', 2, 1000, (0, 1000, 1000, 1000), 0x36, 0x2, hudless=(400, 600))
+        self.assertEqual(run(BASE + [flat, revoke, counters('10:00:15', resolved)])['UI protection'].status, 'FAIL')
+
+    def test_counted_full_frame_over_a_visible_scene_warns(self):
+        full = {**CLEAN_COUNTERS, 'decided.2': 50, 'decided.8': 10, 'full_d.hidden': 3}
+        self.assertEqual(run(BASE + [counters('10:00:12', full)])['UI full frame'].status, 'PASS')
+        # The sample releasing a held route decided under the hold, so a visible one is not by itself a fault.
+        checks = run(BASE + [counters('10:00:12', {**full, 'full_d.visible': 1})])
+        self.assertEqual(checks['UI full frame'].status, 'WARN')
+        self.assertIn('H1', checks['UI full frame'].detail)
+        self.assertIn('each release of a held hidden-scene route (8, 9) shows one', checks['UI full frame'].detail)
+        self.assertIn('S2b', checks['UI full frame'].detail)
+        self.assertNotIn('source 6', checks['UI full frame'].detail)
+        # An exact full change-set (6) decides without a hold; over a visible scene it is intended for an accepted
+        # exact pair (P1), so with no held route its visible samples are reported, not warned.
+        exact = {**CLEAN_COUNTERS, 'decided.2': 50, 'decided.6': 10, 'full_d.visible': 2}
+        checks = run(BASE + [counters('10:00:12', exact)])
+        self.assertEqual(checks['UI full frame'].status, 'INFO')
+        self.assertIn('2 samples of source 6 read the scene visible', checks['UI full frame'].detail)
+        self.assertIn('intended for an accepted exact pair (P1)', checks['UI full frame'].detail)
+        self.assertIn('open question', checks['UI full frame'].detail)
+        # With a held route as well, the shared counter still warns and says what source 6 contributes.
+        checks = run(BASE + [counters('10:00:12', {**exact, 'decided.9': 5})])
+        self.assertEqual(checks['UI full frame'].status, 'WARN')
+        self.assertIn('H1', checks['UI full frame'].detail)
+        self.assertIn('samples of source 6 are counted with them', checks['UI full frame'].detail)
+
+    def test_counted_whole_frame_alpha_over_a_visible_scene_is_reported(self):
+        # The Witcher 3 sign wheel: a trusted layer covers the frame without an exact pair, so trusted_full stays 0;
+        # its samples after the first measure the visible scene beneath it. Pinning it flat is intended (P1, the
+        # opacity ruling), so it is reported, not warned.
+        wheel = {**CLEAN_COUNTERS, 'full_alpha': 40, 'full_alpha_d.visible': 3, 'full_alpha_d.invalid': 1}
+        checks = run(BASE + [counters('10:00:12', wheel)])
+        self.assertEqual((checks['UI full alpha'].status, checks['UI protection'].status), ('INFO', 'PASS'))
+        self.assertIn('40 frames (50% of detection frames) decided a whole-frame alpha', checks['UI full alpha'].detail)
+        self.assertIn('visible 3, invalid or unmeasured 1', checks['UI full alpha'].detail)
+        self.assertIn('3 samples pinned a trusted whole-frame alpha flat over a visible scene, as intended (P1)',
+                      checks['UI full alpha'].detail)
+        # A trusted full claim over an exact pair that shows the scene, unresolved by any revocation, still fails.
+        unresolved = {**wheel, 'trusted_full': 40}
+        self.assertEqual(run(BASE + [counters('10:00:12', unresolved)])['UI protection'].status, 'FAIL')
+        # Clair Obscur Load Game: a whole-frame alpha over a hidden scene is reported, not warned.
+        load = {**CLEAN_COUNTERS, 'full_alpha': 40, 'full_alpha_d.hidden': 3, 'full_alpha_d.invalid': 1}
+        self.assertEqual(run(BASE + [counters('10:00:12', load)])['UI full alpha'].status, 'INFO')
+        self.assertEqual(run(BASE + [counters('10:00:12', CLEAN_COUNTERS)])['UI full alpha'].status, 'PASS')
+
+    def test_counted_known_wrong_cells_warn_with_their_stage(self):
+        checks = run(BASE + [counters('10:00:12', {**CLEAN_COUNTERS, 'untrusted_inferred': 8,
+                                                   'inexact_difference': 4})])
+        self.assertEqual(checks['UI inferred alpha'].status, 'WARN')
+        self.assertIn('8 frames (10% of detection frames)', checks['UI inferred alpha'].detail)
+        self.assertIn('expected until S2a', checks['UI inferred alpha'].detail)
+        self.assertEqual(checks['UI inexact difference'].status, 'WARN')
+        self.assertIn('until S3', checks['UI inexact difference'].detail)
+        clean = run(BASE + [counters('10:00:12', CLEAN_COUNTERS)])
+        self.assertEqual((clean['UI inferred alpha'].status, clean['UI inexact difference'].status), ('PASS', 'PASS'))
 
     def test_host_lines_from_another_session_are_not_counted(self):
         with TemporaryDirectory() as folder:

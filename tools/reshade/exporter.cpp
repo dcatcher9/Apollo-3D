@@ -12,6 +12,7 @@
 #include "game3d_renderer.h"
 #include "game3d_depth_input.h"
 #include "game3d_ui_input_provider.h"
+#include "game3d_ui_counters.h"
 #include "game3d_debug_dump.h"
 #include "diagnostic_log_gate.h"
 #include "streamline_camera_probe.h"
@@ -63,6 +64,11 @@ namespace {
     // The longest run of hidden samples without a decided source since the
     // last log line: the renderer reports only the current run.
     std::uint64_t shadow_hidden_max_ms = 0;
+    // The game session whose UI counters this runtime's lines carry, known
+    // once a render acquired it; counters_logged once a line carried them, so
+    // the runtime's reset or destruction ends the log with the session totals.
+    sunshine_game3d::alpha_auto_policy *ui_session = nullptr;
+    bool counters_logged = false;
 #if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
     // Explicit resets exist only for controlled regression fixtures.
     bool recalibrate = false;
@@ -102,9 +108,25 @@ namespace {
   auto &automatic_ui_mutex = addon_session().ui_mutex;
   auto &automatic_ui = addon_session().ui;
 
-  void clear_automatic_ui(api::effect_runtime *runtime) {
+  // Returns the session whose UI counters the runtime had logged, if any.
+  sunshine_game3d::alpha_auto_policy *clear_automatic_ui(api::effect_runtime *runtime) {
     std::lock_guard<std::mutex> lock(automatic_ui_mutex);
-    automatic_ui.erase(runtime);
+    const auto found = automatic_ui.find(runtime);
+    if (found == automatic_ui.end()) return nullptr;
+    const auto session = found->second.counters_logged ? found->second.ui_session : nullptr;
+    automatic_ui.erase(found);
+    return session;
+  }
+
+  // The game session's cumulative exact UI counters (docs/reshade-sbs.md, UI
+  // counters), written with each UI protection line and once more when a
+  // runtime that wrote them resets. Callers hold no lock: the snapshot takes
+  // only the session's own mutex.
+  void log_ui_counters(api::effect_runtime *runtime, sunshine_game3d::alpha_auto_policy &session) {
+    char prefix[64];
+    std::snprintf(prefix, sizeof(prefix), "Sunshine UI counters: runtime=%p ", static_cast<void *>(runtime));
+    const auto message = prefix + sunshine_game3d::format_ui_counters(session.counters());
+    log(reshade::log::level::info, message.c_str());
   }
 
   void publish_automatic_ui(api::effect_runtime *runtime, sunshine_game3d::automatic_status status) {
@@ -119,13 +141,15 @@ namespace {
   }
 
   void publish_source_alpha_ui(api::effect_runtime *runtime, sunshine_game3d::source_alpha_ui_decision value,
-      bool game3d_enabled = true) {
+      bool game3d_enabled = true, sunshine_game3d::alpha_auto_policy *ui_session = nullptr) {
     const auto now = GetTickCount64();
     bool write_log = false;
     std::uint64_t shadow_hidden_ms = 0;
+    sunshine_game3d::alpha_auto_policy *counters_session = nullptr;
     {
       std::lock_guard<std::mutex> lock(automatic_ui_mutex);
       auto &entry = automatic_ui[runtime];
+      if (ui_session) entry.ui_session = ui_session;
       value.unprotected_since_ms =
         sunshine_game3d::next_unprotected_since(value, game3d_enabled, entry.source_alpha.unprotected_since_ms, now);
       entry.source_alpha = value;
@@ -147,6 +171,8 @@ namespace {
       write_log = entry.source_alpha_log.due(now, changed, false, true);
       if (write_log) {
         entry.logged_source_alpha = value;
+        counters_session = entry.ui_session;
+        entry.counters_logged |= counters_session != nullptr;
         shadow_hidden_ms = entry.shadow_hidden_max_ms;
         entry.shadow_hidden_max_ms = 0;
       }
@@ -173,6 +199,7 @@ namespace {
       value.coverage.scene_hold, int(value.coverage.scene_shadow), static_cast<unsigned long long>(shadow_hidden_ms),
       static_cast<unsigned long long>(value.qualification.token));
     log(reshade::log::level::info, message);
+    if (counters_session) log_ui_counters(runtime, *counters_session);
   }
 
 #if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
@@ -926,7 +953,8 @@ namespace {
         api::effect_runtime *runtime;
         const sunshine_game3d::source_alpha_ui_decision &value;
         bool game3d_enabled;
-        ~publish_alpha_decision() { publish_source_alpha_ui(runtime, value, game3d_enabled); }
+        sunshine_game3d::alpha_auto_policy *ui_session = nullptr;
+        ~publish_alpha_decision() { publish_source_alpha_ui(runtime, value, game3d_enabled, ui_session); }
       } publish_alpha{runtime, source_alpha, settings.enabled};
       if (!settings.enabled) {
         sunshine_game3d::ui_input::suspend(runtime);
@@ -1018,8 +1046,9 @@ namespace {
         prepare_native_depth(runtime, commands, rtv);
       }
       timer.mark();
-      auto ui_input = sunshine_game3d::ui_input::acquire(runtime, *renderer, source_alpha,
-        sunshine_game3d::source_alpha_session(), diagnostic_owner);
+      auto &ui_session = sunshine_game3d::source_alpha_session();
+      publish_alpha.ui_session = &ui_session;
+      auto ui_input = sunshine_game3d::ui_input::acquire(runtime, *renderer, source_alpha, ui_session, diagnostic_owner);
       timer.mark();
       // Publish what this render actually consumes, not the saved preference or
       // a later SDK observation. No RGB from the retained input is displayed.
@@ -1075,6 +1104,15 @@ namespace {
     }
 
     void invalidate(api::effect_runtime *runtime, bool destroy, std::uint64_t native_swapchain = 0) {
+      // A runtime that logged the UI counters ends with the session totals,
+      // written after the lock below is released.
+      struct final_ui_counters {
+        api::effect_runtime *runtime;
+        sunshine_game3d::alpha_auto_policy *session = nullptr;
+        ~final_ui_counters() {
+          if (session) log_ui_counters(runtime, *session);
+        }
+      } final_counters{runtime};
       // Terminal lifecycle events cannot be dropped: the runtime address may be reused.
       // The lock never encloses a CPU/GPU fence wait.
       std::lock_guard<std::mutex> lock(mutex_);
@@ -1109,7 +1147,7 @@ namespace {
         proof.renderer = std::move(renderer);
         proof.source_alpha_policy = source_alpha_policy;
       }
-      clear_automatic_ui(runtime);
+      final_counters.session = clear_automatic_ui(runtime);
       if (generation_ && generation_->owner_runtime == runtime) {
         generation_->owner_destroyed |= destroy;
         if (generation_->finished()) {

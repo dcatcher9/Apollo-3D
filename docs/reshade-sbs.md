@@ -630,8 +630,10 @@ not change that timing.
 The evidence passes only measure: cell sums into their own 256 x 144 texture, a 16 x 16-cell
 comparison per group into nine statistics rows, and their sum into decision texels 5 and 6. They
 run after detection on sample frames only (the 100 ms readback cadence), and only while the latest
-sample's gate was open, a hold is active or the first-run shadow measures; otherwise nothing is
-dispatched. At 3840 x 2160 on an idle RTX 5080 an evaluated frame cost 0.060-0.077 ms (cells
+sample's gate was open, a hold is active, the first-run shadow measures, or the latest sample decided
+a whole-frame alpha (a source 1-4 covering at least 99% of pixels); otherwise nothing is dispatched.
+The last case is a diagnostic for the `full_alpha_d` UI counters: like the shadow's, that evidence
+sets, renews, releases and refutes nothing. At 3840 x 2160 on an idle RTX 5080 an evaluated frame cost 0.060-0.077 ms (cells
 0.054-0.070 ms, comparison and sum 0.009-0.010 ms; HDR10 and scRGB, with and without a HUD-less
 image, the most for an SDR frame with one); the detection tiles and reduce kept their cost.
 
@@ -699,9 +701,9 @@ bits:
 | `0x1` | stored | The UI color slot is admitted only while premultiplied (offscreen UI layer). |
 | `0x2` | stored | With a float layer's HDR headroom. |
 | `0x4` | stored | The UI color slot holds the one-frame-late offscreen UI layer: it selects the hidden-scene layer route and per-source trust. Its mask is the raw alpha. |
-| `0x8` | stored | Reserved. |
+| `0x8` | stored | Reserved and never reused; the shader defines nothing for it. |
 | `0x10000` | per-frame | The CPU holds the layer route's hidden-scene verdict (source 8). |
-| `0x20000` | per-frame | Reserved; no render pushes it. |
+| `0x20000` | per-frame | Reserved and never reused; no render pushes it and the shader defines nothing for it. |
 | `0x40000` | per-frame | The consumed depth is not this frame's (reused, or behind a generated Present). |
 | `0x80000` | per-frame | The CPU holds the HUD-less route's hidden-scene verdict (source 9). |
 
@@ -740,6 +742,78 @@ texture, because a pass cannot read the texture it writes. `SUNSHINE_UI_SCENE_*`
 the statistic's constants. The renderer sizes the textures, the readback and its parse from the
 markers, and makes automatic detection unavailable for a shader whose markers are out of range.
 
+**UI counters.** Each `Sunshine UI protection` line describes the latest 100 ms status sample;
+the UI counters count every frame. `tools/reshade/game3d_ui_counters.h` owns their names, the GPU
+word indices and the log text. On every detection frame thread 0 of `SunshineUIDetectionReduceCS` adds
+the frame's outcome to a 25-word `R32_UINT` texture, `SunshineUICountersStore` at `u7`, which is
+bound for the reduce only. `SUNSHINE_UI_COUNTER_*` defines mirror the word indices, and
+`reshade_game3d_ui_layer` fails when they disagree. The renderer zero-clears the texture once and
+copies it beside the decision texels on sample frames, under the same fence. It then adds the
+uint32 wrap-safe change since its previous read to the game session's totals, together with its own
+CPU counts as they stood when that sample was submitted. That is one locked call per committed
+sample. The renderer and the sequence replay decode the sample and assemble its counts with the
+same functions in `tools/reshade/game3d_ui_temporal.h` (`decode_detection_sample`,
+`sample_counters`). Counting adds no per-frame CPU wait, lock or GPU synchronization. The renderer counts only
+with a shader whose `SUNSHINE_UI_COUNTER_WORDS` is 25, and the offline replay binds nothing at
+`u7`, so its adds are dropped.
+
+| Field | Counts |
+| --- | --- |
+| `auto_frames` | Renders that requested GPU detection: Auto, or an explicit HUD-less difference input outside manual Off. |
+| `detection_frames` | Frames on which the detection passes ran. |
+| `held.generated`, `held.inexact_after_exact`, `held.trusted_missing` | Frames that reused the previous decision, by the first reason that applies in this order: a generated Present, an inexact pair after an exact one, or a trusted channel of the previous frame missing from this one. |
+| `held.cap` | Frames that wanted a hold past `max_held_presents` and ran detection instead. They are part of `detection_frames`, not of the held frames. |
+| `inactive.no_candidates`, `inactive.size`, `inactive.unprepared` | Requested renders without detection: no usable candidate, a frame larger than 3840, or detection resources that could not be prepared. |
+| `decided.N` | Detection frames by decided source 0-9. 7 is retired and not logged. |
+| `none.R` | Frames that decided source 0, each by the first reason that applies: `gate_no_hold` (a full-frame gate was open without the CPU's hidden-scene hold), `trusted_invalid` (a trusted channel had more than 1% invalid pixels), `presented_blocked` (presented alpha beside a trusted dedicated channel), `layer_aside` (a layer without alpha), `difference_failed`, `ambiguous` (an untrusted channel empty or nearly full), `no_candidate`, then `other`. |
+| `full.6`, `full.8`, `full.9` | Repeat `decided.6`, `.8` and `.9`. |
+| `full.depth_not_current` | Detection frames pushed with `0x40000`, whatever they decided. |
+| `full_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Committed samples that decided source 6, 8 or 9, by the hidden-scene verdict measured on that same sample. `invalid` includes evidence that was not measured. These count samples, not frames. |
+| `untrusted_inferred` | Frames decided by the untrusted pass from an inferred source: Backbuffer or current alpha (3, 4), or the offscreen UI layer (2 with stored `0x4`). |
+| `inexact_difference` | Source 5 or 9 decided from an inexact HUD-less pair. |
+| `trusted_full` | A trusted alpha source 1-4 covered at least 99% of pixels while an exact pair without invalid pixels left at least half of the frame unchanged. |
+| `presented_over_dedicated` | Presented alpha (3, 4) decided while a trusted dedicated channel was offered and not set aside. The reduce's own guard keeps this 0, so it checks later rule changes. |
+| `full_alpha` | An alpha source 1-4 decided covering at least 99% of pixels: a whole-frame mask from alpha, with or without a HUD-less pair. Only a trusted channel decides at that coverage today. |
+| `full_alpha_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Committed samples that decided such a whole-frame alpha, by the hidden-scene verdict measured on that same sample, as `full_d`. Evidence runs for them only from the sample after one that decided it, so the first sample of each episode counts as `invalid`. |
+| `trust.earned`, `.revoked_full`, `.revoked_presented`, `.lapsed`, `.restored`, `.opaque_set`, `.opaque_cleared` | Session trust events. `earned`: a source trusted, or a restored one confirmed, by this session's samples. `revoked_full`: revoked by a full claim over a visible exact pair. `revoked_presented`: revoked because presented alpha disagreed with a trusted dedicated channel. `lapsed`: a provisional restore lapsed. `restored`: restored source bits. `opaque_set` and `opaque_cleared`: the tagged UI color's opaque proof was set or cleared. |
+| `samples`, `through_ms` | Committed samples, and the sample tick through which the totals are exact. |
+
+The totals are exact per frame through the last committed sample. A frame rendered after it (at most
+one sample interval plus the pending copy) is counted by a later commit, or lost when its renderer
+is destroyed first. A discarded or unreadable sample commits nothing; the next commit catches up.
+At every commit `auto_frames` equals `detection_frames` plus the three held kinds plus the three
+inactive reasons. The totals sum all runtimes of the game session.
+
+The add-on writes `Sunshine UI counters: runtime=<runtime> <fields>` after each `Sunshine UI
+protection` status line once a render of that runtime has reached UI detection, whether the line
+was written for a change or periodically. It writes one more when a runtime that wrote one resets
+or is destroyed, so the session's totals end the log. Fields are space-separated `key=value` in
+the order of the table above, and a group is written `key={key=value ...}`. The values are
+cumulative, so the last line holds the session's totals.
+
+**Readiness-report invariants.** When a log has counter lines,
+`tools/reshade/game3d_log_report.py` reads the last one instead of the sampled lines:
+
+| Check | Status |
+| --- | --- |
+| The accounting identity above does not hold | FAIL |
+| `presented_over_dedicated` is above zero | FAIL |
+| `trusted_full` is above zero | FAIL when a sampled line shows such a frame that no revocation of that channel resolved within 10 s, or when `trust.revoked_full` is 0. Otherwise PASS: a trusted channel covering the frame over an exact pair that shows the scene keeps deciding until repeated contradictions revoke it (about 2 s), so each handled case counts `trusted_full` frames first. |
+| `full_alpha` is above zero | INFO, with the hidden-scene verdicts of its samples. A trusted source's whole-frame alpha pins flat even over a visible scene, as the [opacity ruling](#ui-decision-framework) intends (P1); its wrong cases are counted by `trusted_full` and `untrusted_inferred`. |
+| `full_d.visible` is above zero | WARN when the layer or HUD-less route (8 or 9) decided. The sample that releases a held hidden-scene route decided under the hold before its own evidence read the scene visible, so each release counts one. More than one per hidden scene would be a held route over a visible scene (H1). The counters cannot tell the two apart until S2b counts releases. INFO when only source 6 decided: an exact full change-set decides without a hold, and over a visible scene it is intended for an accepted exact pair (P1); only a pair deciding before its first selective sample is in question (open questions below). |
+| `untrusted_inferred` is above zero | WARN, expected until S2a |
+| `inexact_difference` is above zero | WARN, expected until S3 |
+| Holds by kind and cap | INFO |
+| Frames without a mask by reason, as a share of `auto_frames` | INFO |
+| Trust events | INFO |
+
+The trust-dispute and time-based checks (`UI protection gaps`, hidden scene) still read the sampled
+lines. Logs without counter lines keep the sampled checks unchanged.
+
+Stage (S0-S6) and rule IDs (E1, E2, V1, V2, A1-A3, S1, S2, H1, P1, T1, F1) in report output,
+replay labels and sequence cases are those of the [UI decision framework](#ui-decision-framework). Each stage that changes a decision
+updates the affected replay labels and sequence cases.
+
 Detection rule changes are checked offline before a live test. `ui_detection_replay` (built with
 the add-on) compiles the three detection passes from a shader file, and its three scene-evidence
 passes when the shader has them, binds each Dump 3D package's
@@ -757,9 +831,10 @@ receives it, and binds the raw depth artifact at `t1` and the presented color at
 the color HUD-less is paired with) for the scene-evidence passes, which it runs after the decision
 as on a sample frame; they write only decision texels 5 and 6. Without a raw depth artifact
 `t1` is a 1x1 placeholder and depth and camera readiness are cleared, as in a render without depth.
-A label's `scene_hold`, `scene_hold_hudless`, `sample` and `depth_not_current` set the per-frame
-bits, so `scene_hold` stands for the CPU's held layer-route verdict and `scene_hold_hudless` for the
-HUD-less route's. It sizes the statistics and decision textures from the shader's markers, but
+A label's `scene_hold`, `scene_hold_hudless` and `depth_not_current` set the per-frame bits, so
+`scene_hold` stands for the CPU's held layer-route verdict and `scene_hold_hudless` for the HUD-less
+route's. A `sample` key is accepted and ignored, because `0x20000` is reserved. It sizes the
+statistics and decision textures from the shader's markers, but
 never below 80 rows and 6 texels, so retired shader revisions still replay. `expect.mask_exact`
 compares the resolved R32 mask bit for bit with a CPU reference: the selected candidate's raw alpha
 (red for UIAlpha, the offscreen UI layer included), all zeros without a source, or all ones for a
@@ -781,6 +856,47 @@ replay pushed, which describe the replaced mask. `--verbose`
 prints every decision word. A label whose dump directory no longer exists is
 reported as SKIP and does not fail the run; a directory without its manifest fails, a `dump_root`
 that is not a directory stops the run, and a run in which every case was skipped fails.
+
+A label can record a known-wrong cell. Its `expect` then holds the target outcome, and its `xfail`
+holds three fields:
+
+- `stage`: the [roadmap stage](#ui-decision-framework) expected to fix the cell, one of S1, S2a,
+  S2b, S3, S4, S5 or S6.
+- `reason`: text that names the [rule](#ui-decision-framework) that fixes it, as a standalone ID
+  (E1, E2, V1, V2, A1, A2, A3, S1, S2, H1, P1, T1 or F1).
+- `today`: the outcome the current shader gives, with the fields of `expect`. `mask` and a
+  non-empty `source` list are required.
+
+Such a case reports XPASS when the target is met (remove its xfail), XFAIL when today's outcome is
+met, and FAIL otherwise, so an unexpected change is never green. A malformed xfail fails its case.
+A label with `needs_dump: "<what is missing>"` is skipped with that reason, for a dump that lacks a
+needed artifact. The run ends with
+
+```text
+PASS|FAIL UI detection replay: N passed, X xfailed, Y xpassed, F failed, S skipped
+```
+
+It fails on any FAIL and when no case ran. `--strict` also fails on an XPASS.
+
+Temporal rules are checked by `reshade_game3d_ui_sequence`, a ctest executable. The renderer's hold
+arbiter, hidden-scene verdict holder, scope clears, sample decode and counter commit are pure
+functions in `tools/reshade/game3d_ui_temporal.h` (`ui_temporal::detection_state`,
+`decode_detection_sample`, `sample_counters`), called by `render()`, `detect_ui()` and
+`poll_detection()` in a fixed order. The test drives per-frame decision streams through those
+functions, `alpha_auto_policy` trust and the Present pairing in exactly that order. The GPU
+decisions are inputs: synthetic, or taken from replay output of labelled dumps. The test asserts
+today's behaviour, including synthetic adversaries: RE9-like presented alpha, a premultiplied
+bloom-like layer, a dark grainy scene under a full claim, and frame generation whose presented
+cadence differs from the multiplier the provider reports (lagging, leading, or changed in the middle
+of a real frame). Each stream also checks that the committed UI counters reconcile with its own
+per-frame tally. An outcome a roadmap stage will change is marked
+`KNOWN_TODAY <stage> <rule>: <text>`, which prints and does not fail; that stage turns it into a
+strict assertion. An outcome the rules already call correct, such as an accepted source pinning a
+whole-frame alpha flat over a visible scene, is asserted strictly. The run ends with
+`PASS UI sequence replay: <groups> groups, <n> KNOWN_TODAY`.
+The single-frame replay remains the gate for decisions. `--log <ReShade.log>`, outside ctest,
+replays logged samples through the trust policy and prints its predicted transitions beside the
+logged ones; logged samples are sparse, so this is informational only.
 
 The labels live next to the dumps, which stay outside the repository. A rule change is accepted
 only when every labelled screen of every game still passes; add a label whenever a new screen
@@ -1175,6 +1291,71 @@ SunshineDepth3D reference exports. These require an explicit `-ShaderDirectory` 
 sources; the installer disables native Game 3D and enables only the selected reference technique.
 To return to native rendering, rerun the installer without `-ShaderDirectory`, then enable Game 3D
 in the add-on panel if it was previously disabled. Existing native preferences are preserved.
+
+### UI decision framework
+
+The target model for automatic UI protection, and the staged roadmap toward it. Replay `xfail`
+labels, `KNOWN_TODAY` sequence cases and readiness-report checks name the stage that changes an
+outcome and the rule ID it applies; thresholds and validation evidence stay in the sections above.
+
+UI is what is drawn on top of the finished scene. **Opacity ruling.** One rule serves every game:
+for the best accepted source, each pixel's pin weight is `saturate(8 * a)` at any coverage. A
+semi-transparent backdrop (the Witcher 3 sign wheel's backdrop under its solid wheel) and an opaque
+full alpha from an accepted source (Expedition 33 menus) therefore pin flat, whatever D reads: the
+UI is not distorted and the scene behind it is flat. A source that has only ever been opaque is
+never accepted. UI distortion is the priority.
+
+Eight modules each own one question, and data flows one way: capture, per-frame validity,
+acceptance and selection, hidden-scene guard, hold, pin weight. Diagnostics only read.
+
+| Module | Owns |
+| --- | --- |
+| M1 Evidence capture and identity | Snapshots with proof, real-frame identity, exactness, encoding and source signature; one slot per signature. Reads no trust. |
+| M2 Producers | Each candidate's coverage image, per-frame validity and class; pair comparability; pairwise judgments. Reads no trust or history. |
+| M3 Acceptance ledger | One accepted bit per game and source signature: earning, revocation, provisional persistence, Forget and the manual override. |
+| M4 Selector | Which accepted, valid candidate draws the mask this frame. |
+| M5 Hidden-scene guard | The depth path's held D verdict: whether this frame's depth describes the image. |
+| M6 Temporal hold | The decision a Present without its own reuses. |
+| M7 Pin weighting | The pin weight of the selected coverage, or flat. |
+| M8 Diagnostics | Status, warning, counters, report and replays; feeds nothing back. |
+
+| Rule | Requires |
+| --- | --- |
+| E1 Proof and identity (M1) | A candidate exists only as a snapshot with proven state, boundary, real-frame identity, encoding (typed format and swapchain colour space) and signature; otherwise there is no candidate and a recorded reason. Each cleared target or declared resource is its own signature in its own slot. Over budget, a spare slot rotates across unseen signatures and records a budget refusal. |
+| E2 Exactness (M1) | FG off: the same real Present. FG on: only same-batch Streamline tags, with the same-batch Backbuffer tag (or the real frame's own Present once frame identity exists) as the final-image reference. Without a frame token while any FG interposer is loaded, Present-time evidence is inexact. The one-frame-late layer copy is inexact opacity evidence: it may draw, but never judges or pairs. |
+| V1 Opacity validity (M2) | Finite, in-range alpha with at most 1% invalid pixels, at any bit depth; a cleared layer must also pass the premultiplied bound. Presented and Backbuffer alpha are checked for range only. The tolerance does not depend on trust. |
+| V2 Change-set validity (M2) | A difference is evidence only from an exact pair, with the threshold from the two snapshots' own encodings. The HUD-less image is lit, and the changed set passes the tile test above when partial or is nearly the whole frame; the middle band and noisy pairs are invalid. |
+| A1 Earning (M3) | Acceptance is keyed by game and source signature (with the swapchain colour space), not by FG mode. A declared source (UI alpha or color tag, or an exact HUD-less pair) is accepted by its first valid selective sample; an inferred source needs the steady selective run above. A source that is never selective is never accepted. A sample does not count while a declared alpha is offered but invalid. Holds and manual inputs never earn. |
+| A2 Revocation (M3) | Repeated contradiction by valid same-sample evidence of stronger provenance (an accepted declared alpha or an exact change-set), whatever the drawing rank: one-way disagreement on lit pixels, or declared-versus-inferred coverage disagreement. Forget also revokes. Ambiguous or invalid samples never revoke. |
+| A3 Persistence (M3) | Restored acceptance is provisional and lapses unless earned again in time, except while that declared source is offered but invalid. Legacy per-kind entries are discarded; Forget clears the game's entries. |
+| S1 Selection (M4) | Among accepted, valid candidates the first in draw order wins: opacity before change-set, then declared before inferred. An unaccepted or invalid candidate never blocks another, except that an offered, accepted declared alpha blocks inferred alpha (when it is invalid, T1 applies). Nothing qualifies: no mask, with the reason of the highest-ranked refused candidate. |
+| S2 Manual (M3) | Off offers nothing; the filter restricts offers; On accepts the filtered valid candidates for this session only, without persisting, earning or revoking. |
+| H1 Hidden scene (M5) | With valid depth, a held hidden D verdict (two hidden samples enter, renewals extend, a visible sample releases) and an informative full claim (from an accepted source, a layer proven cleared transparent this frame, or an exact full change-set), the frame is flat whatever M4 selected. A visible verdict refutes that signature's full claim until it shows below 99% opaque. Invalid D acts on nothing; only a scope change clears D state. |
+| P1 Pin weight (M7) | `saturate(8 * c)` of the selected coverage at any coverage (binary for change-sets); 1 everywhere when H1 says flat. |
+| T1 Hold (M6) | A Present without its own fresh decision uses the decision of the real frame it shows; a real frame without one reuses the previous real frame's decision once, then has no mask. No multiplier constant and no time bound; until S3, real frames are identified by Present counting. |
+| F1 Fail safe and diagnostics (M8) | No qualifying source gives no mask with a named reason, the panel warning and exact counters. Diagnostics feed nothing back. |
+
+Scope (runtime, device, epoch, viewport, size, colour mode and encoding, but not the FG multiplier)
+is an M1 identity property: changing it drops snapshots, pairs, holds and D state. Cost is a
+constraint, not a rule: given the ledger state a frame's decision does not depend on the sampling
+cadence, snapshot memory and copies have fixed budgets, and a new capture boundary is enabled only
+after a Present-interval A/B shows no frame-time cost.
+
+Open questions that may move labels: whether an exact HUD-less pair decides a full change-set
+before its first selective sample (today's full-frame pair route, source 6); whether a wrongly
+accepted inferred source with no declared or exact judge needs more than Forget and the provisional
+lapse; and whether the premultiplied bound also applies to declared UI color tags.
+
+| Stage | Scope | Validation |
+| --- | --- | --- |
+| S0 | Behaviour-neutral: strict replay labels with xfail cells, the sequence replay, exact UI counters with the report reading them, dead-code removal. | Replay identical, sequence replay passing on today's code, counters reconciling. |
+| S1 | Decision structure: one slot per signature (E1), the S1 selection predicate with the declared-alpha block, A1's acceptance key, and comparable pairs from the pair's own encodings (V2). | No cross-signature or cross-colour-space acceptance in the sequence replay; acceptance stable across HDR/SDR and FG switches. |
+| S2a | Acceptance for every deciding source with the earning void (A1), provenance revocation and Forget (A2), provisional persistence (A3), the manual override (S2), the identity hold (T1) and refusal reasons (F1). | `untrusted_inferred` at 0; earning, revocation and hold cases in the sequence replay. |
+| S2b | The hidden-scene guard H1 in the depth path replaces the full-frame routes (sources 6, 8 and 9), with informative claims and per-signature refutation. | No held route over a scene D reads visible (`full_d.visible` counts releases and accepted exact full change-sets only); accepted whole-frame alpha and exact full change-sets unchanged (P1). |
+| S3 | Snapshot identity and exactness (E2, T1): one capture ticket with execute-time or Streamline frame stamps; under FG, pairs against the same-batch Backbuffer tag. | Single-frame and sequence replay A/B; exact-pair rate before and after. |
+| S4 | Same-frame cleared target: the offscreen UI layer at its write end (D3D12) or at Present (D3D11), replacing the one-frame-late copy. | No one-frame tear on moving HUD; Present-interval A/B. |
+| S5 | Back-buffer pre-UI snapshot, evidence-gated. | Census and shadow logs per affected title; bounded added cost. |
+| S6 | Evidence sweep, no code: every game in each colour mode and FG mode, scRGB, non-16:9, FMV and a first boot into a menu. | Every cell has a labelled dump and a report without FAIL counters. |
 
 ### Dump 3D diagnostics
 

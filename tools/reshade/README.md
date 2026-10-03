@@ -469,6 +469,26 @@ cause; unusual export pauses; present-thread
 hitches; Game 3D CPU and GPU cost; and, from the host log, the Game 3D link, size fit and encoder
 stalls.
 
+Logs that contain `Sunshine UI counters` lines carry the add-on's exact per-frame
+[UI counters](../../docs/reshade-sbs.md#setup). For these logs the report decides the UI
+invariants from the last counter line, not from the 100 ms samples. It reports these checks:
+
+- `UI counters`: the add-on's own accounting.
+- `UI protection`: presented alpha over a trusted channel, and trusted full coverage of a visible
+  scene that no revocation of that channel resolved.
+- `UI full frame`: full-frame samples whose scene read visible. Each release of a held hidden-scene
+  route (8 or 9) counts one, so this is a warning when such a route decided. An exact full
+  change-set (6) over a visible scene is intended for an accepted exact pair (P1), so with no held
+  route it is INFO.
+- `UI full alpha`: a whole-frame mask from alpha, and whether its samples read the scene visible.
+  It is INFO: a trusted source pins its alpha at any coverage, so a full one is flat even over a
+  visible scene, as the [opacity ruling](../../docs/reshade-sbs.md#ui-decision-framework) intends.
+- `UI inferred alpha` and `UI inexact difference`: warnings that name the
+  [roadmap stage](../../docs/reshade-sbs.md#ui-decision-framework) that fixes them.
+- `UI holds`, `UI no mask` and `UI trust events`: exact totals.
+
+Logs without counter lines use the sampled checks above.
+
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
 the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`
 loss inside it, paired with the same runtime's recovery, with its exact start, `unavailable_ms`,
@@ -487,6 +507,30 @@ A failing check is a bug report: fix the rule at its root (see
 [the generalization rules](../../docs/reshade-sbs.md#rules-for-new-game-behaviour)), then add a
 check here when a new signature appears. Run its tests with
 `python -m unittest tools/reshade/test_game3d_log_report.py`.
+
+UI decision changes have two offline gates; [UI protection](../../docs/reshade-sbs.md#setup)
+owns their contracts. The first is the single-frame replay of the labelled dumps. Run it from
+`cmake-build-relwithdebinfo/reshade-addon`:
+
+```powershell
+.\ui_detection_replay.exe ..\..\tools\reshade\game3d_native.hlsl E:\ApolloDev\sbs_dump\ui_detection_cases.json
+```
+
+It ends with
+`PASS|FAIL UI detection replay: N passed, X xfailed, Y xpassed, F failed, S skipped`. A known-wrong
+cell is XFAIL while it keeps today's recorded outcome, and XPASS once it meets its target.
+`--strict` also fails on an XPASS, so that its xfail gets removed.
+
+The second gate is the sequence test of the temporal rules (trust, holds, hidden-scene verdicts).
+It runs with the other tests:
+
+```bash
+ctest --test-dir cmake-build-relwithdebinfo/reshade-addon -R reshade_game3d_ui_sequence --output-on-failure
+```
+
+Its `KNOWN_TODAY <stage> <rule>` lines name today's known-wrong outcomes by
+[UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework) stage and rule ID (such as
+`S2a A1/S1`). They do not fail the test. A replay `xfail` reason names the same rule IDs.
 
 ## Additional diagnostics
 

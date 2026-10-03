@@ -5,16 +5,15 @@
 // Ported from the frozen 2026-09-18 three-file Game 3D source. Geometry authority:
 // docs/host-sbs.md and the Depth Coordinate V2 vertical/horizontal limit shaders.
 // Optional source-alpha UI pinning reuses the horizontal pass after conditioning.
-// Live UI selection uses bounded alpha-coverage observations; explicit replay
-// retains its captured selection. Neither path adds color-layer blending.
+// Live Auto selects each frame's UI mask on the GPU (SunshineUIDetection*CS);
+// explicit replay retains its captured selection. Neither path adds color-layer
+// blending.
 // Nearest-covered-depth mode first resolves one global UI plane on this queue.
 #define SUNSHINE_UI_NEAREST_PLANE 1
 #define SUNSHINE_UI_FRONT_LIMIT_PLANE 1
 #define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1
 #define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1
-#define SUNSHINE_UI_CONFLICT_PROBE 1
 #define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1
-#define SUNSHINE_UI_ALPHA_COVERAGE 1
 #define SUNSHINE_UI_MASK_CHANNEL 1
 #define SUNSHINE_UI_AUTOMATIC_DETECTION 1
 #define SUNSHINE_LINEAR_DISTANCE_DEPTH 1
@@ -48,6 +47,28 @@
 #define SUNSHINE_UI_SCENE_PARALLAX_SCALE 4096
 #define SUNSHINE_UI_SCENE_OPAQUE_PERCENT 99
 #define SUNSHINE_UI_SCENE_HUDLESS_CHANGED_PERCENT 90
+// Exact per-session UI counters (docs/reshade-sbs.md, UI counters), mirrored
+// from game3d_ui_counters.h: the detection reduce adds every detection frame
+// to these words of SunshineUICountersStore. The no-mask reasons are offsets
+// from SUNSHINE_UI_COUNTER_NONE.
+#define SUNSHINE_UI_COUNTER_WORDS 25
+#define SUNSHINE_UI_COUNTER_DETECTION_FRAMES 0
+#define SUNSHINE_UI_COUNTER_DECIDED 1
+#define SUNSHINE_UI_COUNTER_UNTRUSTED_INFERRED 11
+#define SUNSHINE_UI_COUNTER_INEXACT_DIFFERENCE 12
+#define SUNSHINE_UI_COUNTER_DEPTH_NOT_CURRENT 13
+#define SUNSHINE_UI_COUNTER_TRUSTED_FULL 14
+#define SUNSHINE_UI_COUNTER_PRESENTED_OVER_DEDICATED 15
+#define SUNSHINE_UI_COUNTER_NONE 16
+#define SUNSHINE_UI_COUNTER_FULL_ALPHA 24
+#define SUNSHINE_UI_NONE_LAYER_ASIDE 0
+#define SUNSHINE_UI_NONE_TRUSTED_INVALID 1
+#define SUNSHINE_UI_NONE_PRESENTED_BLOCKED 2
+#define SUNSHINE_UI_NONE_AMBIGUOUS 3
+#define SUNSHINE_UI_NONE_DIFFERENCE_FAILED 4
+#define SUNSHINE_UI_NONE_GATE_NO_HOLD 5
+#define SUNSHINE_UI_NONE_NO_CANDIDATE 6
+#define SUNSHINE_UI_NONE_OTHER 7
 //
 // Specialize BUFFER_WIDTH, BUFFER_HEIGHT and BUFFER_COLOR_SPACE at compile time.
 // This preserves the original per-resolution group-memory footprint. Color-space
@@ -123,9 +144,8 @@ Texture2D<float4> SunshineHUDless : register(t14);
 #define SUNSHINE_UI_STORED_PREMULTIPLIED 0x1u
 #define SUNSHINE_UI_STORED_HDR_HEADROOM 0x2u
 #define SUNSHINE_UI_STORED_LATE_LAYER 0x4u
-#define SUNSHINE_UI_STORED_STAGE2 0x8u
+// 0x8u (stored) and 0x20000u (per-frame) are reserved and never reused.
 #define SUNSHINE_UI_PER_FRAME_SCENE_HOLD 0x10000u
-#define SUNSHINE_UI_PER_FRAME_SAMPLE 0x20000u
 #define SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT 0x40000u
 #define SUNSHINE_UI_PER_FRAME_SCENE_HOLD_HUDLESS 0x80000u
 cbuffer SunshineUIDetectionConstants : register(b2)
@@ -143,6 +163,9 @@ RWTexture2D<float> SunshineUIPlaneTilesStore : register(u4);
 RWTexture2D<float> SunshineUIPlaneResolvedStore : register(u5);
 RWTexture2D<uint4> SunshineAlphaCoverageStore : register(u6);
 RWTexture2D<uint4> SunshineUIConflictStore : register(u7);
+// Bound at u7 for the detection reduce only (SunshineUIConflictCS binds its
+// statistics there); unbound, as in offline replay, its adds are dropped.
+RWTexture2D<uint> SunshineUICountersStore : register(u7);
 SamplerState SunshinePointClamp : register(s0);
 SamplerState SunshineLinearClampState : register(s1);
 SamplerState SunshinePointBorder : register(s2);
@@ -297,12 +320,13 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     const bool aside = (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_LATE_LAYER) && !coverage.y &&
         invalid.y * 100u > difference.w;
     if (aside) candidates &= ~2u;
-    bool dedicated = false;
+    bool dedicated = false, trusted_decided = false;
     [unroll] for (uint trusted = 0u; trusted < 4u; ++trusted) {
         const bool offered = (candidates & Sunshine_UITrustedAlpha & (1u << trusted)) != 0u;
         if (!source && offered && !(dedicated && trusted >= 2u) && invalid[trusted] * 100u <= difference.w &&
             !(aside && trusted >= 2u && coverage[trusted] * 10u >= difference.w * 9u)) {
             source = trusted + 1u; covered = coverage[trusted];
+            trusted_decided = true;
         }
         if (offered && trusted < 2u) dedicated = true;
     }
@@ -349,6 +373,42 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     } else if (hudless_gate && (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_SCENE_HOLD_HUDLESS)) {
         source = 9u; covered = pixels;
     }
+    // Exact per-session counters (game3d_ui_counters.h): this detection frame,
+    // its decision and, without one, the first reason that applies. Counting
+    // only; nothing on the GPU reads them.
+    bool trusted_invalid = false, ambiguous = false;
+    [unroll] for (uint channel = 0u; channel < 4u; ++channel) {
+        const bool usable = (candidates & (1u << channel)) != 0u && !(dedicated && channel >= 2u);
+        const bool channel_trusted = (Sunshine_UITrustedAlpha & (1u << channel)) != 0u;
+        trusted_invalid = trusted_invalid || (usable && channel_trusted && invalid[channel] * 100u > pixels);
+        ambiguous = ambiguous || (usable && !channel_trusted && !invalid[channel] &&
+            (!coverage[channel] || coverage[channel] * 10u >= pixels * 9u));
+    }
+    uint none_reason = SUNSHINE_UI_NONE_OTHER;
+    if (layer_gate || hudless_gate) none_reason = SUNSHINE_UI_NONE_GATE_NO_HOLD;
+    else if (trusted_invalid) none_reason = SUNSHINE_UI_NONE_TRUSTED_INVALID;
+    else if (dedicated && (candidates & 12u)) none_reason = SUNSHINE_UI_NONE_PRESENTED_BLOCKED;
+    else if (aside) none_reason = SUNSHINE_UI_NONE_LAYER_ASIDE;
+    else if (Sunshine_UICandidates & 16u) none_reason = SUNSHINE_UI_NONE_DIFFERENCE_FAILED;
+    else if (ambiguous) none_reason = SUNSHINE_UI_NONE_AMBIGUOUS;
+    else if (!(candidates & 15u)) none_reason = SUNSHINE_UI_NONE_NO_CANDIDATE;
+    InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DETECTION_FRAMES, 0u)], 1u);
+    InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DECIDED + source, 0u)], 1u);
+    if (!source) InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_NONE + none_reason, 0u)], 1u);
+    if (!trusted_decided && (source == 3u || source == 4u ||
+            (source == 2u && (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_LATE_LAYER))))
+        InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_UNTRUSTED_INFERRED, 0u)], 1u);
+    if ((source == 5u || source == 9u) && (Sunshine_UICandidates & 48u) == 16u)
+        InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_INEXACT_DIFFERENCE, 0u)], 1u);
+    if (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT)
+        InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DEPTH_NOT_CURRENT, 0u)], 1u);
+    if (trusted_decided && covered * 100u >= pixels * 99u && (Sunshine_UICandidates & 48u) == 48u && !difference.y &&
+            difference.z * 2u >= pixels)
+        InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_TRUSTED_FULL, 0u)], 1u);
+    if ((source == 3u || source == 4u) && dedicated)
+        InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_PRESENTED_OVER_DEDICATED, 0u)], 1u);
+    if (source >= 1u && source <= 4u && covered * 100u >= pixels * 99u)
+        InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_FULL_ALPHA, 0u)], 1u);
     SunshineAlphaCoverageStore[uint2(0,0)] = uint4(source, covered, difference.w, matching_tiles);
     // Diagnostic evidence for the CPU readback; nothing reads it on the GPU.
     SunshineAlphaCoverageStore[uint2(1,0)] = uint4(Sunshine_UICandidates, difference.x, difference.z, difference.y);
@@ -379,37 +439,6 @@ void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
         mask = SunshineHUDlessDifference(id.xy, finite) > Sunshine_UIDifferenceThreshold && finite ? 1.0 : 0.0;
     }
     SunshineHostCandidateStore[id.xy] = mask;
-}
-
-// Fixed-size exact coverage observation. Every source texel participates; the
-// small result is read asynchronously, independently of whether UI is enabled.
-groupshared uint4 SunshineAlphaCoverageScratch[64];
-[numthreads(8, 8, 1)]
-void SunshineAlphaCoverageCS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID)
-{
-    uint2 first = group_id.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
-    uint2 last = (group_id.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
-    uint4 counts = 0u;
-    [loop]
-    for (uint y = first.y + thread_id.y; y < last.y; y += 8u) {
-        [loop]
-        for (uint x = first.x + thread_id.x; x < last.x; x += 8u) {
-            float alpha = SunshineSelectedUIAlpha(uint2(x, y));
-            bool finite = SunshineCameraFinite(alpha);
-            counts.x += finite && alpha > 0.0 ? 1u : 0u;
-            counts.y += 1u;
-            counts.z += finite ? 0u : 1u;
-        }
-    }
-    uint lane = thread_id.y * 8u + thread_id.x;
-    SunshineAlphaCoverageScratch[lane] = counts;
-    GroupMemoryBarrierWithGroupSync();
-    [unroll]
-    for (uint step = 32u; step != 0u; step >>= 1u) {
-        if (lane < step) SunshineAlphaCoverageScratch[lane] += SunshineAlphaCoverageScratch[lane + step];
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (lane == 0u) SunshineAlphaCoverageStore[int2(group_id.xy)] = SunshineAlphaCoverageScratch[0];
 }
 
 float2 SunshineCameraRawDepthRange()

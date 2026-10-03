@@ -6,6 +6,7 @@
 #include "test_game3d_debug_dump_runtime.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_layer.h"
+#include "game3d_ui_temporal.h"
 #include <reshade.hpp>
 #include <d3d11.h>
 #include <dxgi1_4.h>
@@ -1746,9 +1747,29 @@ namespace {
     source.epoch = 29; source.revision = 1; source.sequence = 1;
     ui_render_input ui;
     ui.kind = ui_input_kind::hudless_difference; ui.view = correct; ui.automatic = &source;
+    // Exact counters (game3d_ui_counters.h): every render below, whether it
+    // requested detection, how it ran, and the hold it would name: generated
+    // with hold_previous, else inexact with an inexact HUD-less pair, else a
+    // missing trusted channel.
+    struct counted_frame {
+      std::uint64_t tick;
+      bool requested;
+      ui_detection_snapshot::run_state state;
+      ui_temporal::hold_kind kind;
+    };
+    std::vector<counted_frame> counted;
+    const auto note = [&] {
+      const auto *in = ui.detection;
+      const auto kind = !in ? ui_temporal::hold_kind::none : in->hold_previous ? ui_temporal::hold_kind::generated :
+        in->hudless.handle && !in->hudless_exact ? ui_temporal::hold_kind::inexact_after_exact :
+        ui_temporal::hold_kind::trusted_missing;
+      counted.push_back({source.now_ms, policy.decision().state != alpha_auto_state::manual_off,
+        gpu.renderer.consumed_detection().state, kind});
+    };
     const auto run = [&](bool accepted, const char *label, bool inspect_mask = true) {
       source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
       const auto actual = gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      note();
       require(exact(actual, accepted ? protected_reference : off_reference),
         std::string(label) + ": HUDless detection changed RGB, missed HUD or flattened mismatched scene");
       if (inspect_mask) {
@@ -1782,6 +1803,9 @@ namespace {
           evidence.hudless_unchanged * 4u >= sample.pixels * 3u && evidence.matching_tiles >= 128u,
         "HUD-less detection evidence does not describe the accepted decision");
     }
+    // The counters' window starts after the first commits, which may also
+    // carry an earlier test's last Auto frame.
+    const auto window_start = policy.counters();
     // Reproduce the useful part of Hogwarts' discovery: a transport-valid
     // UIColorAndAlpha can be an opaque full scene. Continue to HUDless in the
     // same frame instead of letting that unusable higher candidate win.
@@ -1835,6 +1859,7 @@ namespace {
       source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
       gpu.renderer.begin_present();
       gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      note();
       const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
       for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
         const auto value = selected.channel(x, y, 0);
@@ -1869,6 +1894,7 @@ namespace {
       source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
       gpu.renderer.begin_present();
       gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      note();
       const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
       for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
         const auto value = selected.channel(x, y, 0);
@@ -1901,6 +1927,7 @@ namespace {
       source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
       gpu.renderer.begin_present();
       gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      note();
       if (!label) return;
       const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
       for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
@@ -1945,6 +1972,56 @@ namespace {
     for (unsigned frame = 0; frame < 25; ++frame) trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, nullptr);
     require(!(policy.trusted_alpha() & 1u), "An exact pair showing the scene did not revoke trust");
     trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, "after losing trust the HUD-less pair decides");
+    trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, "the HUD-less pair keeps deciding");
+    {
+      // Between the window's two commits every render is one of the frames
+      // noted above: Auto frames detect, hold by kind (a hold past three
+      // Presents detects and counts as capped) or have no detection.
+      const auto end = policy.counters();
+      const auto delta = end - window_start;
+      ui_counters expected;
+      unsigned consecutive_holds = 0;
+      for (const auto &frame : counted) {
+        const bool held = frame.requested && frame.state == ui_detection_snapshot::run_state::held;
+        if (frame.tick > window_start.through_ms && frame.tick <= end.through_ms && frame.requested) {
+          ++expected[ui_counter::auto_frames];
+          if (held) ++expected[frame.kind == ui_temporal::hold_kind::generated ? ui_counter::held_generated :
+            frame.kind == ui_temporal::hold_kind::inexact_after_exact ? ui_counter::held_inexact_after_exact :
+            ui_counter::held_trusted_missing];
+          else if (frame.state == ui_detection_snapshot::run_state::ran) {
+            ++expected[ui_counter::detection_frames];
+            if (consecutive_holds == ui_detection_inputs::max_held_presents) ++expected[ui_counter::held_cap];
+          } else ++expected[ui_counter::inactive_no_candidates];
+        }
+        consecutive_holds = held ? consecutive_holds + 1 : 0;
+      }
+      std::uint64_t decided = 0, none = 0;
+      for (std::uint32_t source_kind = 0; source_kind != 10; ++source_kind) decided += delta.decided(source_kind);
+      for (std::size_t reason = 0; reason != ui_no_mask::count; ++reason) none += delta[ui_counter::none + reason];
+      require(end.reconciled() && end.through_ms + 200 >= source.now_ms &&
+          delta[ui_counter::auto_frames] == expected[ui_counter::auto_frames] &&
+          delta[ui_counter::detection_frames] == expected[ui_counter::detection_frames] &&
+          delta[ui_counter::held_generated] == expected[ui_counter::held_generated] &&
+          delta[ui_counter::held_inexact_after_exact] == expected[ui_counter::held_inexact_after_exact] &&
+          delta[ui_counter::held_trusted_missing] == expected[ui_counter::held_trusted_missing] &&
+          delta[ui_counter::held_cap] == expected[ui_counter::held_cap] && delta.inactive() == expected.inactive(),
+        "D3D11 exact UI counters differ from the noted renders");
+      require(expected[ui_counter::held_generated] >= 3 && expected[ui_counter::held_inexact_after_exact] >= 3 &&
+          expected[ui_counter::held_trusted_missing] >= 3 && expected[ui_counter::held_cap] >= 3,
+        "The D3D11 counter window lost a scripted hold");
+      require(decided == delta[ui_counter::detection_frames] && none == delta.decided(0) && delta.decided(1) &&
+          delta.decided(5) && delta.decided(6) && delta[ui_counter::trusted_full] && delta[ui_counter::inexact_difference] &&
+          !delta[ui_counter::presented_over_dedicated] && end[ui_counter::trust_earned] >= 1 &&
+          end[ui_counter::trust_revoked_full] >= 1,
+        "D3D11 exact UI counters lost a decided source, a no-mask reason or a trust event");
+      std::printf("PASS D3D11 exact UI counters: %llu Auto frames through %llu ms reconcile; holds generated=%llu "
+        "inexact_after_exact=%llu trusted_missing=%llu cap=%llu by frame; decisions and no-mask reasons sum exactly\n",
+        static_cast<unsigned long long>(delta[ui_counter::auto_frames]), static_cast<unsigned long long>(end.through_ms),
+        static_cast<unsigned long long>(delta[ui_counter::held_generated]),
+        static_cast<unsigned long long>(delta[ui_counter::held_inexact_after_exact]),
+        static_cast<unsigned long long>(delta[ui_counter::held_trusted_missing]),
+        static_cast<unsigned long long>(delta[ui_counter::held_cap]));
+    }
     inputs = {};
     report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 inexact_after_exact_hold=1 trusted_alpha=1 trusted_missing_hold=1 trust_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
     std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, bounded generated-present hold, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, bounded inexact-frame hold, trusted alpha channels with a bounded hold when missing and revocation, and manual Off without review");
@@ -2501,14 +2578,26 @@ namespace {
     const auto exact = frame(menu_color);
     require(exact.flat && !exact.held && frame(menu_color).sample.source_kind == 6u, "An exact full-frame pair lost rule 6");
     // (j) A trusted layer decides by itself (source 2), whatever the evidence.
+    // Its whole-frame alpha makes the next sample frames measure the scene for
+    // the full_alpha_d counters only: that evidence holds nothing.
     {
       alpha_auto_policy trusting;
       trusting.restore_trusted_alpha(1u << alpha_auto_policy::ui_layer_source);
       ++source.epoch; source.session = &trusting;
       inputs = {}; inputs.masks[1] = opaque_layer; inputs.color_alpha_flags = layer_flags;
-      for (unsigned i = 0; i != 3; ++i) frame(logo_color);
+      const auto first = frame(logo_color);
+      require(first.sample.source_kind != 2u || !first.evidence, "Evidence ran before a whole-frame alpha sample");
+      for (unsigned i = 0; i != 2; ++i) frame(logo_color);
       const auto trusted = frame(logo_color);
-      require(trusted.sample.source_kind == 2u && !trusted.held && !trusted.evidence, "A trusted layer lost its own decision");
+      require(trusted.flat && trusted.sample.source_kind == 2u && !trusted.held && trusted.evidence == 1 &&
+          !trusted.sample.scene_hold && !(gpu.renderer.consumed_detection().flags &
+            (ui_detection::per_frame_scene_hold | ui_detection::per_frame_scene_hold_hudless)),
+        "A trusted layer lost its own decision, or its diagnostic evidence held a route");
+      const auto counted = trusting.counters();
+      require(counted[ui_counter::full_alpha] >= 3 && counted[ui_counter::full_alpha_d_hidden] +
+          counted[ui_counter::full_alpha_d_ambiguous] + counted[ui_counter::full_alpha_d_visible] >= 1 &&
+          !counted[ui_counter::full_d_hidden] && !counted[ui_counter::full_d_visible],
+        "The whole-frame layer's frames or measured samples were not counted as full_alpha");
       source.session = &policy;
     }
     // (k) The first-run shadow measures on sample frames with the gate closed,
@@ -2548,7 +2637,7 @@ namespace {
       << " reused_depth_blocks=1 camera_blocks=1 epoch_revision_inactive_trust_clear=1 alternating_hudless_keeps_hold=1"
       " closed_gates_quiet=1 ui_alpha_route=1 hudless_route=1 black_hudless_rejected=1 rule6_precedence=1"
       " trusted_layer_decides=1 first_run_shadow=1 blank_frames_end_run=1 shadow_entry_unchanged=1\n";
-    std::puts("PASS D3D11 hidden scene: an opaque untrusted layer or UIAlpha (8) and an inexact HUD-less image (9) flatten only through their gate, valid hidden evidence and the CPU hold; holds expire after hold_ms and clear on visible evidence, epoch, revision, inactive detection and trust changes but not on a HUD-less pairing that comes and goes; a visible verdict refutes an opaque layer until it shows itself transparent; reused depth, an unready camera, closed gates, tagged UI color, presented alpha and a trusted layer never take a route; closed gates dispatch no evidence; the first-run shadow only measures, ignores blank frames and leaves route entry unchanged");
+    std::puts("PASS D3D11 hidden scene: an opaque untrusted layer or UIAlpha (8) and an inexact HUD-less image (9) flatten only through their gate, valid hidden evidence and the CPU hold; holds expire after hold_ms and clear on visible evidence, epoch, revision, inactive detection and trust changes but not on a HUD-less pairing that comes and goes; a visible verdict refutes an opaque layer until it shows itself transparent; reused depth, an unready camera, closed gates, tagged UI color, presented alpha and a trusted layer never take a route; closed gates dispatch no evidence; a whole-frame alpha measures only for its counters; the first-run shadow only measures, ignores blank frames and leaves route entry unchanged");
   }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;

@@ -21,8 +21,6 @@ namespace sunshine_game3d::ui_mask {
       request wanted;
       std::uint64_t generation{}, latest_sequence{};
       unsigned latest_kinds{};
-      std::uint64_t last_capture_tick{};
-      bool captured{};
       std::array<slot, snapshot_capacity> snapshots;
       diagnostic_snapshot diagnostic;
       std::uint64_t diagnostic_reservation{};
@@ -55,8 +53,6 @@ namespace sunshine_game3d::ui_mask {
       for (auto &item : value.snapshots) retire(item, values, count);
       value.latest_sequence = 0;
       value.latest_kinds = 0;
-      value.last_capture_tick = 0;
-      value.captured = false;
       value.generation = ++owner().serial;
       value.diagnostic = {};
       value.diagnostic_reservation = 0;
@@ -171,12 +167,6 @@ namespace sunshine_game3d::ui_mask {
     if (selected && !same(selected->wanted, wanted)) {
       clear(*selected, old, count);
       selected->wanted = wanted.enabled ? wanted : request{};
-    } else if (selected) {
-      selected->wanted.min_capture_interval_ms = wanted.min_capture_interval_ms;
-      selected->wanted.capture_backbuffer = wanted.capture_backbuffer;
-      if (!wanted.capture_backbuffer)
-        for (auto &snapshot : selected->snapshots)
-          if (snapshot.origin.kind == source_kind::backbuffer) retire(snapshot, old, count);
     }
     ReleaseSRWLockExclusive(&state.lock);
     release(old);
@@ -277,7 +267,6 @@ namespace sunshine_game3d::ui_mask {
     AcquireSRWLockShared(&state.lock);
     for (const auto &item : state.entries) if (matches(item.wanted, source.epoch, source.observation_revision, source.viewport)) {
       if (!(item.wanted.allowed_kinds & source_mask(where.kind))) continue;
-      if (where.kind == source_kind::backbuffer && !item.wanted.capture_backbuffer) continue;
       if (!newer(item)) { ReleaseSRWLockShared(&state.lock); return {}; }
       runtime = item.wanted.runtime; ++matches_count;
     }
@@ -290,7 +279,6 @@ namespace sunshine_game3d::ui_mask {
     for (auto &item : state.entries) if (item.wanted.runtime == runtime &&
         matches(item.wanted, source.epoch, source.observation_revision, source.viewport) && newer(item)) {
       if (!(item.wanted.allowed_kinds & source_mask(where.kind))) break;
-      if (where.kind == source_kind::backbuffer && !item.wanted.capture_backbuffer) break;
       if (source.sequence != item.latest_sequence) item.latest_kinds = 0;
       item.latest_sequence = source.sequence;
       item.latest_kinds |= kind_bit;
@@ -310,8 +298,7 @@ namespace sunshine_game3d::ui_mask {
       if (!where.command || !source.resource.native || !input.source || !shape ||
           source.valid_until == sunshine_scene_depth::lifetime::unsupported) {
         for (auto &snapshot : item.snapshots) if (snapshot.origin.kind == where.kind) retire(snapshot, old, count);
-      } else if (where.kind != source_kind::backbuffer || !item.wanted.min_capture_interval_ms || !item.captured ||
-          (source.tick >= item.last_capture_tick && source.tick - item.last_capture_tick >= item.wanted.min_capture_interval_ms)) {
+      } else {
         // Two reservations per semantic source prevent a full-scene alpha
         // candidate from starving HUD-less comparison. The shared native owner
         // additionally enforces its global snapshot and allocation-byte limits.
@@ -322,13 +309,6 @@ namespace sunshine_game3d::ui_mask {
           snapshot.reservation = result.reservation; snapshot.origin = where;
           snapshot.origin.source_present_generation = input.source_present_generation;
           snapshot.source = input.source;
-          // Reserve the cadence together with the slot, before native recording
-          // can reenter this owner. Skipped tags still finish their SDK call and
-          // revoke older pixels on failure, exactly like a capacity skip.
-          if (where.kind == source_kind::backbuffer) {
-            item.last_capture_tick = source.tick;
-            item.captured = true;
-          }
           item.diagnostic_reservation = result.reservation;
           item.diagnostic.record_attempted = true;
           break;

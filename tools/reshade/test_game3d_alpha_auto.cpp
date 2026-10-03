@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_alpha_auto.h"
 #include "game3d_ui_detection_contract.h"
+#include "game3d_ui_temporal.h"
 
 #include <array>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -387,6 +389,277 @@ namespace {
     for (std::uint64_t tick = 1000; tick <= 4000; tick += 500) first.observe_alpha_channels(evidence, pixels, tick);
     require(first.first_run() && first.trusted_alpha(), "Earning trust ended the first-run shadow");
   }
+  // The renderer's temporal state (game3d_ui_temporal.h): which render holds
+  // the previous mask and why, which inputs a sample still describes, and the
+  // CPU-held hidden-scene verdicts. The runtime tests prove the renderer
+  // calls it as before; these pin its rules without a GPU.
+  void temporal_state_holds_and_scene_verdicts() {
+    namespace temporal = ui_temporal;
+    using temporal::hold_kind;
+    constexpr std::uint32_t max_held = 3;
+    temporal::detection_state state;
+    // Nothing decided yet: nothing to hold.
+    require(!state.arbitrate(0u, 0u, false, true, max_held).hold, "A generated Present held a mask no decision made");
+    // A HUD-less decision makes the mask holdable; a generated Present then
+    // holds it for at most max_held Presents.
+    state.adopt(16u | 32u, 0u, 0u);
+    state.detected();
+    require(state.mask_ready && state.exact, "An exact HUD-less decision was not holdable");
+    for (std::uint32_t i = 0; i != max_held; ++i) {
+      const auto hold = state.arbitrate(0u, 0u, false, true, max_held);
+      require(hold.hold && hold.kind == hold_kind::generated && !hold.cap_reached, "A generated Present did not hold");
+      state.held();
+    }
+    const auto capped = state.arbitrate(0u, 0u, false, true, max_held);
+    require(!capped.hold && capped.cap_reached && capped.kind == hold_kind::generated, "A hold past the cap was not reported");
+    // A fresh decision restarts the count; an inexact pair right after an
+    // exact decision holds, and a generated Present names the hold first.
+    state.detected();
+    require(!state.holds, "A fresh decision kept the hold count");
+    const auto inexact = state.arbitrate(16u, 0u, false, false, max_held);
+    require(inexact.hold && inexact.kind == hold_kind::inexact_after_exact, "An inexact pair after an exact one did not hold");
+    require(state.arbitrate(16u, 0u, false, true, max_held).kind == hold_kind::generated, "Hold kinds lost their priority");
+    require(!state.arbitrate(48u, 0u, false, false, max_held).hold, "An exact pair was held");
+    // A trusted channel that decided and is missing holds; offered, it decides.
+    temporal::detection_state trusted;
+    trusted.adopt(4u, 0u, 4u);
+    trusted.detected();
+    require(trusted.mask_ready && !trusted.exact, "A trusted Backbuffer decision was not holdable");
+    const auto missing = trusted.arbitrate(0u, 4u, false, false, max_held);
+    require(missing.hold && missing.kind == hold_kind::trusted_missing, "A missing trusted channel was not held");
+    require(!trusted.arbitrate(4u, 4u, false, true, max_held).hold, "A trusted channel in this frame did not decide by itself");
+    // Untrusted alpha never makes a holdable mask.
+    temporal::detection_state untrusted;
+    untrusted.adopt(4u, 0u, 0u);
+    untrusted.detected();
+    require(!untrusted.mask_ready && !untrusted.arbitrate(0u, 0u, false, true, max_held).hold, "An untrusted mask was held");
+    // A trusted layer the latest sample set aside does not stop the hold of
+    // the Backbuffer's mask.
+    const auto layer = ui_detection::layer_detection_flags(false);
+    temporal::detection_state aside;
+    aside.adopt(2u | 4u, layer, 2u | 4u);
+    aside.detected();
+    aside.latest.pixels = 1000; aside.latest.evidence.ui_layer = true; aside.latest.evidence.alpha_invalid = {0, 600, 0, 0};
+    require(aside.layer_slot(2u, layer) && aside.layer_slot(0u, 0u) && !aside.layer_slot(2u, 0u), "The UI color slot's source was lost");
+    require(aside.arbitrate(2u, 2u | 4u, true, true, max_held).hold, "A set-aside trusted layer stopped the hold");
+    aside.latest.evidence.alpha_invalid = {};
+    require(!aside.arbitrate(2u, 2u | 4u, true, true, max_held).hold, "A trusted layer with alpha did not decide by itself");
+    // A change of the deciding inputs drops the sample; a HUD-less pairing
+    // beside a trusted channel does not, and neither changes the route.
+    temporal::detection_state keyed;
+    keyed.adopt(4u, 0u, 4u);
+    keyed.latest.sample_tick_ms = 1000;
+    keyed.scene_hold_until = {1500, 0};
+    keyed.adopt(4u | 16u, 0u, 4u);
+    require(keyed.latest.sample_tick_ms == 1000 && keyed.scene_hold_until[0] == 1500, "A HUD-less pairing dropped a sample or a hold");
+    keyed.adopt(4u | 16u, 0u, 0u);
+    require(!keyed.latest.sample_tick_ms && keyed.scene_hold_until[0] == 1500, "Losing trust kept the sample or cleared the route");
+    keyed.adopt(2u, layer, 0u);
+    require(!keyed.scene_hold_until[0], "A new route kept its hold");
+    // A sample describes frames within 500 ms of its tick, and is discarded
+    // under another scope or decision key.
+    require(!temporal::sample_stale(1000, 1500) && temporal::sample_stale(1000, 1501) && temporal::sample_stale(0, 10),
+      "The sample freshness bound moved");
+    alpha_auto_source now, pending;
+    now.now_ms = 1200; pending.now_ms = 1000;
+    require(!temporal::sample_discarded(now, pending, 7, 7) && temporal::sample_discarded(now, pending, 7, 8),
+      "A sample under the same inputs was discarded, or one under other inputs kept");
+    ++now.revision;
+    require(temporal::sample_discarded(now, pending, 7, 7), "A sample from another revision was kept");
+    // One valid hidden sample holds the layer route for hold_ms from its tick;
+    // a visible one releases it and refutes the slot until it is an overlay.
+    temporal::detection_state scene;
+    scene.adopt(2u, layer, 0u);
+    alpha_auto_decision sample;
+    sample.pixels = 1000; sample.sample_tick_ms = 2000;
+    sample.evidence.candidates = 2u; sample.evidence.ui_layer = true; sample.evidence.alpha_opaque = {0, 1000};
+    sample.evidence.scene.valid = true; sample.evidence.scene.verdict = ui_detection::scene_verdict::hidden;
+    scene.observe_scene(sample, true);
+    require(scene.scene_gate_open && scene.scene_holds(2500) == ui_detection::per_frame_scene_hold && !scene.scene_holds(2501),
+      "One hidden sample did not hold the layer route for hold_ms");
+    auto shadow = sample;
+    shadow.sample_tick_ms = 2100; shadow.evidence.scene.verdict = ui_detection::scene_verdict::visible;
+    scene.observe_scene(shadow, false);
+    require(scene.scene_holds(2500), "Shadow-only evidence changed a route");
+    sample.sample_tick_ms = 2200; sample.evidence.scene.verdict = ui_detection::scene_verdict::visible;
+    scene.observe_scene(sample, true);
+    require(!scene.scene_holds(2300) && scene.scene_refuted_slots == 2u, "A visible sample did not release and refute");
+    sample.sample_tick_ms = 2300; sample.evidence.scene.verdict = ui_detection::scene_verdict::hidden;
+    scene.observe_scene(sample, true);
+    require(!scene.scene_holds(2400), "A refuted slot held the layer route");
+    sample.evidence.alpha_opaque = {0, 500};
+    scene.observe_scene(sample, true);
+    require(!scene.scene_refuted_slots, "A slot offered as an overlay stayed refuted");
+    sample.evidence.alpha_opaque = {0, 1000}; sample.sample_tick_ms = 2400;
+    scene.observe_scene(sample, true);
+    require(scene.scene_holds(2900), "A slot shown an overlay could not hold the route again");
+    sample.sample_tick_ms = 2600; sample.evidence.scene.valid = false;
+    scene.observe_scene(sample, true);
+    require(scene.scene_holds(2900) && !scene.scene_holds(2901), "Invalid evidence renewed or released a hold");
+    // A scope change and an inactive render clear the holds.
+    scene.latest_source.epoch = 1;
+    scene.enter_scope(now);
+    require(!scene.scene_holds(2500), "A new scope kept a hold");
+    scene.scene_hold_until = {3000, 3000}; scene.scene_refuted_slots = 2u; scene.mask_ready = scene.exact = true;
+    scene.inactive();
+    require(!scene.scene_holds(2500) && !scene.scene_refuted_slots && !scene.mask_ready && !scene.exact,
+      "An inactive render kept a hold, refutation or holdable mask");
+  }
+  // Exact UI counters (game3d_ui_counters.h): the log text, the accounting
+  // identity, wrap-safe GPU deltas, session totals and trust events.
+  void ui_counters_are_formatted_and_trust_events_counted() {
+    namespace n = ui_counter;
+    ui_counters c;
+    c[n::auto_frames] = 10; c[n::detection_frames] = 6;
+    c[n::held_generated] = 2; c[n::held_inexact_after_exact] = 1; c[n::held_cap] = 1;
+    c[n::inactive_no_candidates] = 1;
+    c[n::decided + 0] = 2; c[n::decided + 5] = 3; c[n::decided + 6] = 1;
+    c[n::none + ui_no_mask::difference_failed] = 1; c[n::none + ui_no_mask::gate_no_hold] = 1;
+    c[n::depth_not_current] = 1; c[n::full_d_hidden] = 1; c[n::inexact_difference] = 3; c[n::trust_earned] = 1;
+    c[n::full_alpha] = 2; c[n::full_alpha_d_visible] = 1;
+    c[n::samples] = 4; c.through_ms = 12345;
+    require(c.reconciled() && c.held() == 3 && c.inactive() == 1, "The counters' accounting identity is wrong");
+    require(format_ui_counters(c) ==
+        "auto_frames=10 detection_frames=6 held={generated=2 inexact_after_exact=1 trusted_missing=0 cap=1} "
+        "inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 9=0} "
+        "none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 gate_no_hold=1 "
+        "no_candidate=0 other=0} full={6=1 8=0 9=0 depth_not_current=1} full_d={hidden=1 ambiguous=0 visible=0 invalid=0} "
+        "untrusted_inferred=0 inexact_difference=3 trusted_full=0 presented_over_dedicated=0 full_alpha=2 "
+        "full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=0} trust={earned=1 revoked_full=0 "
+        "revoked_presented=0 lapsed=0 restored=0 opaque_set=0 opaque_cleared=0} samples=4 through_ms=12345",
+      "The UI counters log text changed");
+    ++c[n::auto_frames];
+    require(!c.reconciled(), "An unaccounted frame reconciled");
+    // GPU words are uint32 totals: their change survives a wrap.
+    std::array<std::uint32_t, ui_counter_word::count> before{}, now{};
+    before[ui_counter_word::detection_frames] = 0xfffffffeu; now[ui_counter_word::detection_frames] = 1u;
+    before[ui_counter_word::decided + 4] = 7u; now[ui_counter_word::decided + 4] = 9u;
+    now[ui_counter_word::none + ui_no_mask::ambiguous] = 5u; now[ui_counter_word::untrusted_inferred] = 2u;
+    now[ui_counter_word::full_alpha] = 4u;
+    ui_counters gpu;
+    gpu.add_gpu_delta(now, before);
+    require(gpu[n::detection_frames] == 3 && gpu.decided(4) == 2 && gpu[n::none + ui_no_mask::ambiguous] == 5 &&
+        gpu[n::untrusted_inferred] == 2 && gpu[n::full_alpha] == 4 && !gpu.decided(0), "GPU counter deltas are wrong");
+    // A session sums every commit and keeps the latest tick.
+    alpha_auto_policy session;
+    ui_counters first, second;
+    first[n::auto_frames] = first[n::detection_frames] = 3; first.through_ms = 500;
+    second[n::auto_frames] = second[n::held_generated] = 2; second.through_ms = 400;
+    session.add_counters(first);
+    session.add_counters(second);
+    const auto total = session.counters();
+    require(total[n::auto_frames] == 5 && total[n::detection_frames] == 3 && total[n::held_generated] == 2 &&
+        total.through_ms == 500 && total.reconciled(), "The session did not sum its committed counters");
+
+    const std::uint32_t pixels = 1000;
+    const auto sample = [&](alpha_auto_policy &policy, std::uint32_t candidates, std::array<std::uint32_t, 4> covered,
+        std::uint32_t unchanged, std::uint64_t tick) {
+      alpha_auto_decision::detection_evidence evidence;
+      evidence.candidates = candidates; evidence.alpha_covered = covered; evidence.hudless_unchanged = unchanged;
+      policy.observe_alpha_channels(evidence, pixels, tick);
+    };
+    // Earned once, however many samples confirm it; revoked by a full claim
+    // over a visible scene.
+    alpha_auto_policy earned;
+    for (std::uint64_t tick = 10000; tick <= 13000; tick += 1000) sample(earned, 4, {0, 0, 200, 0}, 0, tick);
+    require(earned.trusted_alpha() == 4u && earned.counters()[n::trust_earned] == 1, "Earning trust was not counted once");
+    for (std::uint64_t tick = 14000; tick <= 16000; tick += 1000) sample(earned, 4 | 16 | 32, {0, 0, pixels, 0}, 900, tick);
+    require(!earned.trusted_alpha() && earned.counters()[n::trust_revoked_full] == 1 &&
+        !earned.counters()[n::trust_revoked_presented], "A full claim over a visible scene was not counted as its revocation");
+    // Presented alpha disagreeing with a trusted UI alpha channel.
+    alpha_auto_policy presented;
+    for (std::uint64_t tick = 10000; tick <= 12000; tick += 1000) sample(presented, 1 | 4, {100, 0, 100, 0}, 0, tick);
+    require(presented.trusted_alpha() == 5u && presented.counters()[n::trust_earned] == 2, "Two sources did not earn trust");
+    for (std::uint64_t tick = 13000; tick <= 15000; tick += 1000) sample(presented, 1 | 4, {100, 0, 300, 0}, 0, tick);
+    require(presented.trusted_alpha() == 1u && presented.counters()[n::trust_revoked_presented] == 1,
+      "A presented-alpha disagreement was not counted as its revocation");
+    // Restored trust lapses unless this session earns it again, and an earn
+    // that confirms it counts.
+    alpha_auto_policy lapsing;
+    lapsing.restore_trusted_alpha(4u);
+    sample(lapsing, 4, {0, 0, pixels, 0}, 0, 1000);
+    sample(lapsing, 4, {0, 0, pixels, 0}, 0, 61000);
+    require(!lapsing.trusted_alpha() && lapsing.counters()[n::trust_restored] == 1 && lapsing.counters()[n::trust_lapsed] == 1,
+      "A restore or a provisional lapse was not counted");
+    alpha_auto_policy confirmed;
+    confirmed.restore_trusted_alpha(4u | 8u);
+    for (std::uint64_t tick = 1000; tick <= 3000; tick += 1000) sample(confirmed, 4, {0, 0, 200, 0}, 0, tick);
+    require(confirmed.counters()[n::trust_restored] == 2 && confirmed.counters()[n::trust_earned] == 1,
+      "Confirming a restored source was not counted as earned");
+    // The tagged UI color's opaque proof, set once and cleared by a selective sample.
+    alpha_auto_policy opaque;
+    for (std::uint64_t tick = 1000; tick <= 4000; tick += 1000) sample(opaque, 2 | 16 | 32, {0, pixels, 0, 0}, 600, tick);
+    require(opaque.prefer_ui_layer() && opaque.counters()[n::trust_opaque_set] == 1, "The opaque proof was not counted once");
+    sample(opaque, 2, {0, 100, 0, 0}, 0, 5000);
+    require(!opaque.prefer_ui_layer() && opaque.counters()[n::trust_opaque_cleared] == 1, "Clearing the opaque proof was not counted");
+  }
+  // The pure pieces the renderer and the sequence replay share
+  // (game3d_ui_temporal.h): the decode of a sample's decision texels, the
+  // counts it commits and when a sample frame measures the scene.
+  void sample_decode_and_commit_are_shared() {
+    namespace word = ui_detection::decision_word;
+    std::array<std::uint32_t, 4 * ui_detection::scene_decision_texels> t{};
+    t[word::source] = 2; t[word::covered] = 995; t[word::pixels] = 1000; t[word::matching_tiles] = 7;
+    t[word::candidates] = 0x3a; t[word::hudless_changed] = 9; t[word::hudless_unchanged] = 900;
+    t[word::hudless_invalid] = 1; t[word::hudless_lit] = 800; t[word::trusted] = 2;
+    for (std::uint32_t i = 0; i != 4; ++i) { t[word::alpha_covered + i] = 10 + i; t[word::alpha_invalid + i] = 20 + i; }
+    t[word::alpha_opaque] = 30; t[word::alpha_opaque + 1] = 31;
+    const float d = .5f, hudless_d = .3f;
+    t[word::scene_n] = 400; std::memcpy(&t[word::scene_d], &d, sizeof(d));
+    t[word::scene_state] = 1u | 2u | std::uint32_t(ui_detection::scene_verdict::visible) << 2; t[word::scene_decided] = 600;
+    t[word::hudless_scene_n] = 300; std::memcpy(&t[word::hudless_scene_d], &hudless_d, sizeof(hudless_d));
+    t[word::hudless_scene_state] = 3u;
+    const auto sample = ui_temporal::decode_detection_sample(t.data(), t.size(), 1500, 9, true, true);
+    const auto &e = sample.evidence;
+    require(sample.source_kind == 2 && sample.enabled && sample.state == alpha_auto_state::automatic_on &&
+        sample.covered == 995 && sample.pixels == 1000 && sample.sample_tick_ms == 1500 && sample.sample_sequence == 9 &&
+        sample.accepted_samples == 9 && e.matching_tiles == 7 && e.candidates == 0x3a && e.hudless_changed == 9 &&
+        e.hudless_unchanged == 900 && e.hudless_invalid == 1 && e.hudless_lit == 800 && e.trusted_alpha == 2 &&
+        e.ui_layer && e.alpha_covered[3] == 13 && e.alpha_invalid[0] == 20 && e.alpha_opaque[1] == 31,
+      "The decision texels did not decode");
+    require(e.scene.n == 400 && e.scene.d == .5f && e.scene.valid && e.scene.ran &&
+        e.scene.verdict == ui_detection::scene_verdict::visible && e.scene.decided == 600 && e.hudless_scene.n == 300 &&
+        e.hudless_scene.d == .3f && e.hudless_scene.valid && e.hudless_scene.ran, "The scene texels did not decode");
+    const auto unsupported = ui_temporal::decode_detection_sample(t.data(), t.size(), 1500, 9, false, false);
+    require(!unsupported.evidence.scene.ran && !unsupported.evidence.scene.n && !unsupported.evidence.ui_layer,
+      "Scene texels decoded without scene evidence");
+    require(!ui_temporal::decode_detection_sample(t.data(), 4, 1500, 9, false, false).pixels,
+      "Too few texels decoded");
+    // 995 of 1000 pixels from alpha source 2 is a whole-frame alpha; its
+    // measured verdict is counted apart from the full-frame routes'.
+    namespace n = ui_counter;
+    require(ui_temporal::full_alpha(sample), "A 99.5% alpha decision was not whole-frame");
+    std::array<std::uint32_t, ui_counter_word::count> before{}, after{};
+    after[ui_counter_word::detection_frames] = 3; after[ui_counter_word::full_alpha] = 2;
+    ui_counters cpu_then, cpu_now;
+    cpu_now[n::auto_frames] = 4; cpu_now[n::held_generated] = 1;
+    auto delta = ui_temporal::sample_counters(sample, cpu_now, cpu_then, after, before, 1500);
+    require(delta[n::auto_frames] == 4 && delta[n::detection_frames] == 3 && delta[n::full_alpha] == 2 &&
+        delta[n::full_alpha_d_visible] == 1 && !delta[n::full_d_visible] && delta[n::samples] == 1 &&
+        delta.through_ms == 1500 && delta.reconciled(), "A whole-frame alpha sample did not commit its counts");
+    auto route = sample;
+    route.source_kind = 8;
+    delta = ui_temporal::sample_counters(route, cpu_now, cpu_then, after, before, 1500);
+    require(delta[n::full_d_visible] == 1 && !delta[n::full_alpha_d_visible], "A route sample was counted as alpha");
+    auto partial = sample;
+    partial.covered = 980;
+    partial.evidence.scene.valid = false;
+    delta = ui_temporal::sample_counters(partial, cpu_now, cpu_then, after, before, 1500);
+    require(!ui_temporal::full_alpha(partial) && !delta[n::full_alpha_d_invalid] && !delta[n::full_d_invalid],
+      "A 98% alpha sample was counted as whole-frame");
+    // After a whole-frame alpha sample the next sample frame measures, but
+    // what it measures is not actionable.
+    ui_temporal::detection_state state;
+    require(!state.measure_scene(1000, false).run && state.measure_scene(1000, true).run &&
+        !state.measure_scene(1000, true).actionable, "The shadow alone measured as actionable");
+    state.latest = sample;
+    const auto measure = state.measure_scene(1000, false);
+    require(measure.run && !measure.actionable, "A whole-frame alpha sample did not measure the next one, or held");
+    state.latest = partial;
+    state.scene_gate_open = true;
+    require(state.measure_scene(1000, false).run && state.measure_scene(1000, false).actionable,
+      "An open gate did not measure actionably");
+  }
 } // namespace
 
 int main() {
@@ -397,7 +670,10 @@ int main() {
     trust_belongs_to_the_source_that_filled_the_slot();
     only_the_deciding_inputs_key_a_status_sample();
     hidden_scene_gates_and_samples_that_flatten_learn_nothing();
-    std::puts("Source alpha session: 6 policy groups passed");
+    temporal_state_holds_and_scene_verdicts();
+    ui_counters_are_formatted_and_trust_events_counted();
+    sample_decode_and_commit_are_shared();
+    std::puts("Source alpha session: 9 policy groups passed");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "Source alpha session failed: %s\n", error.what());

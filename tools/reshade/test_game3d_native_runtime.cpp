@@ -214,10 +214,15 @@ namespace {
     alpha_auto_source input;
     input.epoch = 17; input.revision = 23; input.viewport = 1;
     input.now_ms = input.tick_ms = 1000; input.sequence = 1; input.session = &session;
+    // Exact counters (game3d_ui_counters.h): each Auto frame's tick and the
+    // source its pattern decides (4 selective current alpha, 0 otherwise).
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> counted;
+    bool counting = true;
     const auto verify = [&](unsigned mask, bool eligible, bool enabled, bool inspect_mask = true) {
       pattern(mask);
       input.now_ms += 100; input.tick_ms = input.now_ms; ++input.sequence;
       render(eligible, &input);
+      if (counting) counted.emplace_back(input.now_ms, mask == 1 ? 4u : 0u);
       equal(enabled ? on[mask] : off[mask], "D3D12 automatic mask differs from explicit field/SBS reference");
       if (inspect_mask) {
         const auto resource = renderer.diagnostics().ui_source;
@@ -236,6 +241,8 @@ namespace {
     };
     // Alternate good/bad inputs without review or a CPU policy observation.
     // An asynchronous status from the previous frame may never authorize pixels.
+    sunshine_game3d::gpu_timing timing;
+    renderer.take_gpu_timing(timing); // Time the automatic frames alone.
     for (const unsigned mask : {1u, 0u, 2u, 1u}) verify(mask, true, mask == 1);
     verify(1, true, true);
     require(renderer.consumed_alpha_auto().enabled && renderer.consumed_alpha_auto().source_kind == 4 &&
@@ -254,6 +261,31 @@ namespace {
       require(renderer.consumed_alpha_auto().enabled && renderer.consumed_alpha_auto().source_kind == 4,
         "D3D12 new source scope did not acquire its own status sample");
     }
+    counting = false;
+    {
+      // The session's totals are exact through the last committed sample: every
+      // frame up to it detected, decided as its pattern says, and an untrusted
+      // current alpha decided as inferred coverage; nothing was held.
+      const auto counts = session.counters();
+      std::uint64_t frames = 0, current = 0;
+      for (const auto &[tick, decided] : counted)
+        if (tick <= counts.through_ms) { ++frames; current += decided == 4u; }
+      require(counts.reconciled() && frames + 1 >= counted.size() && counts[ui_counter::samples] &&
+          counts[ui_counter::auto_frames] == frames && counts[ui_counter::detection_frames] == frames &&
+          counts.decided(4) == current && counts.decided(0) == frames - current &&
+          counts[ui_counter::untrusted_inferred] == current &&
+          counts[ui_counter::none + ui_no_mask::ambiguous] == frames - current && !counts.held() && !counts.inactive() &&
+          !counts[ui_counter::trusted_full] && !counts[ui_counter::presented_over_dedicated] && !session.trusted_alpha(),
+        "D3D12 exact UI counters differ from the scripted Auto frames");
+      std::printf("PASS D3D12 exact UI counters: %llu Auto frames through %llu ms reconcile; decided 4=%llu 0=%llu, untrusted inferred and ambiguous no-mask frames exact\n",
+        static_cast<unsigned long long>(frames), static_cast<unsigned long long>(counts.through_ms),
+        static_cast<unsigned long long>(current), static_cast<unsigned long long>(frames - current));
+    }
+    // Evidence only: the detection stage's GPU time (tiles, reduce, mask and
+    // the sample's readback copies) on these frames.
+    if (renderer.take_gpu_timing(timing))
+      std::printf("MEASURE D3D12 automatic detection GPU: frames=%u detection_mean=%.4f ms detection_max=%.4f ms total_mean=%.4f ms\n",
+        timing.frames, timing.mean_ms[gpu_timing::detection], timing.max_ms[gpu_timing::detection], timing.mean_ms[gpu_timing::total]);
     verify(1, false, false, false);
     input.retained = true; // No captured view: Auto cannot manufacture availability.
     verify(1, true, false, false);

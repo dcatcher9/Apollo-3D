@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -304,7 +305,8 @@ namespace {
     for (const auto &index : label.value("trusted", json::array())) trusted |= 1u << index.get<unsigned>();
     // Per-frame bits a label names; they never select a candidate.
     if (label.value("scene_hold", false)) flags |= contract::per_frame_scene_hold;
-    if (label.value("sample", false)) flags |= contract::per_frame_sample;
+    // A "sample" key is accepted and ignored: its flag 0x20000 is reserved and
+    // the shader never read it.
     if (label.value("depth_not_current", false)) flags |= contract::per_frame_depth_not_current;
     if (label.value("scene_hold_hudless", false)) flags |= contract::per_frame_scene_hold_hudless;
 
@@ -399,7 +401,9 @@ namespace {
       std::memcpy(&word, &value, sizeof(word));
       result.mask_hash = (result.mask_hash ^ word) * 1099511628211ull;
     }
-    if (label.at("expect").value("mask_exact", false)) result.mask_exact = mask_exact(result, inputs, paired_color);
+    const bool exact_today = label.contains("xfail") && label.at("xfail").is_object() && label.at("xfail").contains("today") &&
+      label.at("xfail").at("today").is_object() && label.at("xfail").at("today").value("mask_exact", false);
+    if (label.at("expect").value("mask_exact", false) || exact_today) result.mask_exact = mask_exact(result, inputs, paired_color);
     return result;
   }
 
@@ -440,6 +444,64 @@ namespace {
     return okay;
   }
 
+  // One expectation: a case's "expect", or the "today" outcome of its xfail.
+  struct judged_t {
+    bool okay = false;
+    std::string wanted_mask, scene, hudless_scene;
+  };
+  judged_t judge(const outcome &result, const json &expect) {
+    const auto &d = result.decision;
+    judged_t judged;
+    // "mask" is one class or a list of acceptable classes.
+    for (const auto &wanted : expect.at("mask").is_array() ? expect.at("mask") : json::array({expect.at("mask")})) {
+      judged.wanted_mask += (judged.wanted_mask.empty() ? "" : "|") + wanted.get<std::string>();
+      judged.okay = judged.okay || mask_class(result) == wanted.get<std::string>();
+    }
+    if (expect.contains("source")) {
+      bool any = false;
+      for (const auto &source : expect.at("source")) any = any || source.get<std::uint32_t>() == d[word::source];
+      judged.okay = judged.okay && any;
+    }
+    if (expect.value("mask_exact", false)) judged.okay = judged.okay && result.mask_exact == "match";
+    if (expect.contains("scene")) judged.okay = scene_matches(d, expect.at("scene"), false, judged.scene) && judged.okay;
+    if (expect.contains("hudless_scene"))
+      judged.okay = scene_matches(d, expect.at("hudless_scene"), true, judged.hudless_scene) && judged.okay;
+    return judged;
+  }
+
+  // A known-wrong cell: "expect" holds the target outcome and "xfail" the
+  // roadmap stage that reaches it, the rule it applies and today's outcome.
+  // Returns the schema error, empty when the case is well formed.
+  std::string xfail_error(const json &label) {
+    if (label.contains("needs_dump") && (!label.at("needs_dump").is_string() || label.at("needs_dump").get<std::string>().empty()))
+      return "needs_dump must name what the dump is missing";
+    if (!label.contains("xfail")) return {};
+    const auto &xfail = label.at("xfail");
+    if (!xfail.is_object()) return "xfail must be an object";
+    static const std::array<const char *, 7> stages{"S1", "S2a", "S2b", "S3", "S4", "S5", "S6"};
+    const auto stage = xfail.value("stage", std::string{});
+    if (std::none_of(stages.begin(), stages.end(), [&](const char *name) { return stage == name; }))
+      return "xfail.stage must be one of S1, S2a, S2b, S3, S4, S5, S6";
+    const auto reason = xfail.contains("reason") && xfail.at("reason").is_string() ? xfail.at("reason").get<std::string>() : "";
+    // The reason names a framework rule the stage applies, as a standalone ID
+    // (stages and rules: docs/reshade-sbs.md, UI decision framework).
+    static const std::array<const char *, 13> rules{"E1", "E2", "V1", "V2", "A1", "A2", "A3", "S1", "S2", "H1", "P1", "T1", "F1"};
+    bool rule = false;
+    for (size_t i = 0; i < reason.size() && !rule; ++i) {
+      if (i && std::isalnum(static_cast<unsigned char>(reason[i - 1]))) continue;
+      size_t end = i;
+      while (end < reason.size() && std::isalnum(static_cast<unsigned char>(reason[end]))) ++end;
+      const auto word = reason.substr(i, end - i);
+      rule = std::any_of(rules.begin(), rules.end(), [&](const char *id) { return word == id; });
+    }
+    if (!rule) return "xfail.reason must name a rule (E1, E2, V1, V2, A1-A3, S1, S2, H1, P1, T1 or F1) that fixes the cell";
+    if (!xfail.contains("today") || !xfail.at("today").is_object()) return "xfail.today must be an object";
+    const auto &today = xfail.at("today");
+    if (!today.contains("mask") || !today.contains("source") || !today.at("source").is_array() || today.at("source").empty())
+      return "xfail.today needs a mask and a non-empty source list";
+    return {};
+  }
+
   // A copy of the dump whose consumed mask is the one this replay resolved,
   // for replay_game3d_dump --shader. The captured package is never modified.
   void write_mask(const fs::path &directory, const fs::path &dump, const std::string &name, const outcome &result,
@@ -473,23 +535,33 @@ namespace {
 int main(int argc, char **argv) {
   try {
     std::optional<fs::path> write_masks;
-    bool verbose = false;
+    bool verbose = false, strict = false;
     std::vector<std::string> positional;
     for (int i = 1; i < argc; ++i) {
       const std::string argument = argv[i];
       if (argument == "--write-mask" && i + 1 < argc && !write_masks) write_masks = fs::absolute(argv[++i]);
       else if (argument == "--verbose") verbose = true;
+      else if (argument == "--strict") strict = true;
       else positional.push_back(argument);
     }
     if (positional.size() != 2) {
-      std::fprintf(stderr, "Usage: ui_detection_replay <game3d_native.hlsl> <cases.json> [--write-mask <new-dir>] [--verbose]\n"
+      std::fprintf(stderr, "Usage: ui_detection_replay <game3d_native.hlsl> <cases.json> [--write-mask <new-dir>] [--verbose] "
+        "[--strict]\n"
         "cases.json: {\"dump_root\": dir, \"cases\": [{\"dump\", \"label\", \"candidates\": [kinds|\"current\"], "
         "\"paired\": kind, \"exact\": bool, \"trusted\": [candidate indices], \"scene_hold\": bool, \"scene_hold_hudless\": bool, "
-        "\"sample\": bool, \"depth_not_current\": bool, \"expect\": {\"mask\", \"source\": [ids], \"mask_exact\": bool, "
-        "\"scene\": {\"verdict\", \"d_min\", \"d_max\"}, \"hudless_scene\": {\"verdict\", \"d_min\", \"d_max\"}}}]}\n"
+        "\"depth_not_current\": bool, \"expect\": {\"mask\", \"source\": [ids], \"mask_exact\": bool, "
+        "\"scene\": {\"verdict\", \"d_min\", \"d_max\"}, \"hudless_scene\": {\"verdict\", \"d_min\", \"d_max\"}}, "
+        "\"xfail\": {\"stage\", \"reason\", \"today\": {expect fields}}, \"needs_dump\": text}]}\n"
         "Binds each dump's candidates (t0 paired color, t11-t14), raw depth (t1; a 1x1 placeholder without it), presented\n"
         "color (t6) and its exact 80-byte b0, and runs the shader's scene evidence passes as on a sample frame. A case\n"
-        "whose dump directory is gone is skipped; the run fails when no case ran.\n"
+        "whose dump directory is gone, or whose needs_dump names what its dump lacks, is skipped; the run fails when no\n"
+        "case ran. A \"sample\" key is accepted and ignored: its flag 0x20000 is reserved.\n"
+        "A case with xfail is a known-wrong cell: expect holds the target outcome, xfail.stage the roadmap stage (S1, S2a,\n"
+        "S2b, S3-S6) that reaches it, xfail.reason the rule it applies (E1, E2, V1, V2, A1-A3, S1, S2, H1, P1, T1, F1)\n"
+        "and xfail.today the outcome it has now\n"
+        "(mask and source required); docs/reshade-sbs.md (UI decision framework) defines the stages and rules.\n"
+        "Meeting the target is XPASS (remove the xfail), else meeting today is XFAIL, else\n"
+        "FAIL; a malformed xfail fails. The run fails on any FAIL, and with --strict also on any XPASS.\n"
         "mask_exact compares the resolved mask with the selected raw alpha, all zeros or all ones; scene and hudless_scene\n"
         "check the hidden-scene evidence that the shader's evidence passes write to decision texels 5 and 6. --write-mask\n"
         "copies each dump that consumed an automatic R32 mask into <new-dir>/<NN>_<dump> (NN: the case's position in\n"
@@ -509,11 +581,22 @@ int main(int argc, char **argv) {
     const D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
     checked(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, &level, 1, D3D11_SDK_VERSION,
       &gpu.device, nullptr, &gpu.context), "D3D11CreateDevice");
-    unsigned passed = 0, failed = 0, skipped = 0, index = 0;
+    unsigned passed = 0, xfailed = 0, xpassed = 0, failed = 0, skipped = 0, index = 0;
     for (const auto &label : document.at("cases")) {
       ++index;
       const auto dump = root / label.at("dump").get<std::string>();
       const auto name = label.value("label", dump.filename().string());
+      if (const auto error = xfail_error(label); !error.empty()) {
+        ++failed;
+        std::printf("FAIL %-44s %s\n", name.c_str(), error.c_str());
+        continue;
+      }
+      // A dump known to lack an artifact the case needs (a re-dump is due).
+      if (label.contains("needs_dump")) {
+        ++skipped;
+        std::printf("SKIP %-44s needs a dump with %s\n", name.c_str(), label.at("needs_dump").get<std::string>().c_str());
+        continue;
+      }
       // Dumps live outside the repository and may be deleted; that is not a
       // detection failure. A directory without its manifest still fails.
       if (!fs::exists(dump)) {
@@ -530,23 +613,13 @@ int main(int argc, char **argv) {
         continue;
       }
       const auto &d = result.decision;
-      const auto &expect = label.at("expect");
-      // "mask" is one class or a list of acceptable classes.
-      std::string wanted_mask;
-      bool okay = false;
-      for (const auto &wanted : expect.at("mask").is_array() ? expect.at("mask") : json::array({expect.at("mask")})) {
-        wanted_mask += (wanted_mask.empty() ? "" : "|") + wanted.get<std::string>();
-        okay = okay || mask_class(result) == wanted.get<std::string>();
-      }
-      if (expect.contains("source")) {
-        bool any = false;
-        for (const auto &source : expect.at("source")) any = any || source.get<std::uint32_t>() == d[word::source];
-        okay = okay && any;
-      }
-      okay = okay && (result.mask_exact.empty() || result.mask_exact == "match");
-      std::string scene, hudless_scene;
-      if (expect.contains("scene")) okay = scene_matches(d, expect.at("scene"), false, scene) && okay;
-      if (expect.contains("hudless_scene")) okay = scene_matches(d, expect.at("hudless_scene"), true, hudless_scene) && okay;
+      const auto target = judge(result, label.at("expect"));
+      const json *xfail = label.contains("xfail") ? &label.at("xfail") : nullptr;
+      // A known-wrong cell is XPASS at its target, XFAIL at today's outcome
+      // and FAIL at anything else: an unexpected change is never green.
+      const auto today = xfail ? judge(result, xfail->at("today")) : judged_t{};
+      const char *status = target.okay ? (xfail ? "XPASS" : "PASS") : xfail && today.okay ? "XFAIL" : "FAIL";
+      bool okay = target.okay || (xfail && today.okay);
       // A mask that cannot be written fails its case once.
       std::string written;
       if (write_masks) {
@@ -558,14 +631,25 @@ int main(int argc, char **argv) {
           written = "  mask written: " + directory.string();
         } catch (const std::exception &error) {
           okay = false;
+          status = "FAIL";
           written = std::string("  --write-mask failed: ") + error.what();
         }
       }
-      (okay ? passed : failed) += 1;
+      if (!okay) ++failed;
+      else if (!xfail) ++passed;
+      else (target.okay ? xpassed : xfailed) += 1;
+      // The scene evidence shown is the target's check, else today's.
+      const auto &scene = target.scene.empty() ? today.scene : target.scene;
+      const auto &hudless_scene = target.hudless_scene.empty() ? today.hudless_scene : target.hudless_scene;
+      auto wanted = target.wanted_mask;
+      if (xfail) {
+        wanted += ", today " + today.wanted_mask + "; " + xfail->at("stage").get<std::string>() + ": " +
+          xfail->at("reason").get<std::string>() + (target.okay ? "; remove xfail" : "");
+      }
       std::printf("%s %-44s source=%u covered=%u/%u ui=%.2f%% mask=%s (want %s) candidates=0x%x trusted=0x%x "
         "alpha_covered=%u/%u/%u/%u hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u}%s%s%s%s%s%s\n",
-        okay ? "PASS" : "FAIL", name.c_str(), d[word::source], d[word::covered], d[word::pixels],
-        100.0 * double(result.ui_pixels) / double(result.pixels), mask_class(result).c_str(), wanted_mask.c_str(),
+        status, name.c_str(), d[word::source], d[word::covered], d[word::pixels],
+        100.0 * double(result.ui_pixels) / double(result.pixels), mask_class(result).c_str(), wanted.c_str(),
         d[word::candidates], d[word::trusted], d[word::alpha_covered], d[word::alpha_covered + 1], d[word::alpha_covered + 2],
         d[word::alpha_covered + 3], d[word::hudless_changed], d[word::hudless_unchanged], d[word::hudless_invalid],
         d[word::matching_tiles], d[word::hudless_lit], result.mask_exact.empty() ? "" : " mask_exact=", result.mask_exact.c_str(),
@@ -578,10 +662,11 @@ int main(int argc, char **argv) {
       if (!written.empty()) std::printf("%s\n", written.c_str());
     }
     // Every case skipped means nothing was checked, never a pass.
-    const bool none = passed + failed == 0;
-    std::printf("%s UI detection replay: %u passed, %u failed, %u skipped%s\n", failed || none ? "FAIL" : "PASS", passed, failed,
-      skipped, none ? " (no case ran)" : "");
-    return failed || none ? 1 : 0;
+    const bool none = passed + xfailed + xpassed + failed == 0, bad = failed || none || (strict && xpassed);
+    std::printf("%s UI detection replay: %u passed, %u xfailed, %u xpassed, %u failed, %u skipped%s%s\n", bad ? "FAIL" : "PASS",
+      passed, xfailed, xpassed, failed, skipped, none ? " (no case ran)" : "",
+      strict && xpassed ? " (--strict: remove the xfail of each XPASS)" : "");
+    return bad ? 1 : 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());
     return 2;

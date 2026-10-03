@@ -31,10 +31,6 @@ namespace sunshine_game3d::ui_mask {
     std::uint64_t runtime{}, device_identity{}, epoch{}, revision{};
     std::uint32_t viewport{}, width{}, height{};
     bool enabled{};
-    // Probe-only captures may be sparse. Zero preserves continuous real-input
-    // capture; changing cadence never revokes completed or pending pixels.
-    std::uint64_t min_capture_interval_ms{};
-    bool capture_backbuffer = true; // Auto-Off still admits explicitly tagged UI resources.
     // Active candidates constrain capture before source ranking.
     // Changing this set revokes all completed and in-flight work in the scope.
     std::uint32_t allowed_kinds = all_sources;

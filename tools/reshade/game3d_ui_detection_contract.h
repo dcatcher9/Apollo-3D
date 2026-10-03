@@ -4,7 +4,9 @@
 // offline replay tools. docs/reshade-sbs.md (UI detection flags and decision
 // texels) owns the layout; game3d_native.hlsl mirrors the flag values as
 // SUNSHINE_UI_STORED_* and SUNSHINE_UI_PER_FRAME_* defines, and
-// test_game3d_ui_layer fails when the two disagree. No ReShade dependency.
+// test_game3d_ui_layer fails when the two disagree. Retired flag values stay
+// reserved so that dumps and replay cases keep their meaning. No ReShade
+// dependency.
 #include <array>
 #include <charconv>
 #include <cstddef>
@@ -32,24 +34,22 @@ namespace sunshine_game3d::ui_detection {
   inline constexpr std::uint32_t stored_premultiplied = 0x1u; // Admit UI color+alpha only while premultiplied.
   inline constexpr std::uint32_t stored_hdr_headroom = 0x2u;  // With a float layer's HDR headroom.
   inline constexpr std::uint32_t stored_late_layer = 0x4u;    // The slot holds the one-frame-late offscreen UI layer.
-  inline constexpr std::uint32_t stored_stage2 = 0x8u;        // Reserved.
+  // 0x8u is reserved (a retired stage-2 bit) and never reused.
   inline constexpr std::uint32_t stored_mask = 0xffffu;
   // Per-frame bits ride in the pushed flags word of one render only. They are
   // never stored in the renderer's detection flags and never key a decision.
   inline constexpr std::uint32_t per_frame_scene_hold = 0x10000u;         // The CPU holds the layer route's hidden-scene verdict.
-  inline constexpr std::uint32_t per_frame_sample = 0x20000u;             // Reserved: no render pushes it.
+  // 0x20000u is reserved (a retired sample-frame bit the shader never read) and never reused.
   inline constexpr std::uint32_t per_frame_depth_not_current = 0x40000u;  // The consumed depth is reused or generated.
   inline constexpr std::uint32_t per_frame_scene_hold_hudless = 0x80000u; // The CPU holds the HUD-less route's verdict.
   inline constexpr std::uint32_t per_frame_mask = 0xffff0000u;
   static_assert((stored_mask & per_frame_mask) == 0 && (stored_mask | per_frame_mask) == 0xffffffffu);
   // The game3d_native.hlsl define mirroring each flag.
-  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 8> hlsl_flag_defines{{
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 6> hlsl_flag_defines{{
     {"SUNSHINE_UI_STORED_PREMULTIPLIED", stored_premultiplied},
     {"SUNSHINE_UI_STORED_HDR_HEADROOM", stored_hdr_headroom},
     {"SUNSHINE_UI_STORED_LATE_LAYER", stored_late_layer},
-    {"SUNSHINE_UI_STORED_STAGE2", stored_stage2},
     {"SUNSHINE_UI_PER_FRAME_SCENE_HOLD", per_frame_scene_hold},
-    {"SUNSHINE_UI_PER_FRAME_SAMPLE", per_frame_sample},
     {"SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT", per_frame_depth_not_current},
     {"SUNSHINE_UI_PER_FRAME_SCENE_HOLD_HUDLESS", per_frame_scene_hold_hudless},
   }};

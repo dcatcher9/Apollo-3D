@@ -56,6 +56,9 @@ UI_RENDERED = re.compile(r'\brendered=(\d)')
 UI_FG = re.compile(r'\bfg=(\d)')
 UI_AVAILABILITY = re.compile(r'\bsource_availability=(\w+)')
 TRUST = re.compile(r'Sunshine UI protection: (restored alpha trust|alpha trust is now) (0x[0-9a-fA-F]+)')
+# The session's cumulative exact UI counters (docs/reshade-sbs.md, UI counters), absent from older logs.
+COUNTERS = re.compile(r'Sunshine UI counters: (.*)$')
+COUNTER_FIELD = re.compile(r'(\w+)=(?:\{([^}]*)\}|(\S+))')
 LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
 UNAVAILABLE_MS = re.compile(r'\bunavailable_ms=(\d+)')
@@ -98,6 +101,14 @@ UI_LINE_PERIOD_S = 10.0  # An unchanged UI protection state is logged again this
 # Hidden-scene evidence (docs/reshade-sbs.md): a hidden run without a decided source this long is an uncovered hidden
 # scene.
 SHADOW_HIDDEN_WARN_MS = 500
+# Decided sources by number (decision texel 0, docs/reshade-sbs.md); 7 is retired.
+SOURCE_NAMES = {0: 'no mask', 1: 'UI alpha', 2: 'UI colour or layer', 3: 'Backbuffer alpha', 4: 'current alpha',
+                5: 'HUD-less difference', 6: 'full frame (exact pair)', 8: 'full frame (layer route)',
+                9: 'full frame (HUD-less route)'}
+NO_MASK_REASONS = ('layer_aside', 'trusted_invalid', 'presented_blocked', 'ambiguous', 'difference_failed',
+                   'gate_no_hold', 'no_candidate', 'other')
+HOLD_KINDS = ('generated', 'inexact_after_exact', 'trusted_missing')
+INACTIVE_REASONS = ('no_candidates', 'size', 'unprepared')
 
 
 def seconds(h: str, m: str, s: str, ms: str) -> float:
@@ -113,6 +124,19 @@ def clock(value: float, ms: bool = False) -> str:
 def percent(n: int, total: int) -> str:
     value = 100 * n / total if total else 0.0
     return f'{value:.0f}%' if value >= 10 or not value else f'{value:.1f}%' if value >= 1 else f'{value:.2f}%'
+
+
+def counter_fields(text: str) -> dict[str, int]:
+    """The numeric fields of a 'Sunshine UI counters' line, a group's fields as 'group.key'."""
+    values: dict[str, int] = {}
+    for key, group, value in COUNTER_FIELD.findall(text):
+        if group:
+            for inner, _, number in COUNTER_FIELD.findall(group):
+                if number.isdigit():
+                    values[f'{key}.{inner}'] = int(number)
+        elif value.isdigit() and key != 'runtime':
+            values[key] = int(value)
+    return values
 
 
 class Scene(NamedTuple):
@@ -299,6 +323,8 @@ class Session:
     camera_valid: bool = False
     ui: list[UISample] = field(default_factory=list)
     trust_events: list[tuple[float, str, int]] = field(default_factory=list)
+    # The last 'Sunshine UI counters' line: the session's totals are cumulative over all its runtimes.
+    counters: dict[str, int] | None = None
     losses: dict[int, tuple[float, str]] = field(default_factory=dict)
     readiness: Counter = field(default_factory=Counter)  # Losses while the export streamed.
     depth_episodes: list[DepthEpisode] = field(default_factory=list)
@@ -411,6 +437,8 @@ def parse(lines) -> Session:
                                  field_of(UI_FG, '0') == '1'))
         if found := TRUST.search(text):
             s.trust_events.append((t, found.group(1), int(found.group(2), 16)))
+        if (found := COUNTERS.search(text)) and 'auto_frames' in (values := counter_fields(found.group(1))):
+            s.counters = values
         if found := LOSS.search(text):
             s.losses.setdefault(int(found.group(1)), (t, found.group(2)))
         if found := READINESS.search(text):
@@ -686,7 +714,7 @@ def evaluate(s: Session) -> list[Check]:
 def ui_checks(s: Session, add) -> None:
     for t, kind, bits in s.trust_events:
         add(Check('INFO', 'UI trust', f'{clock(t)} {kind} 0x{bits:x}'))
-    if not s.ui:
+    if not s.ui and s.counters is None:
         add(Check('INFO', 'UI protection', 'no UI protection samples'))
         return
     # A presented alpha (sources 3 and 4) must never decide while a trusted
@@ -745,6 +773,11 @@ def ui_checks(s: Session, add) -> None:
                   f'{len(rejected)} samples left the frame unprotected after rejecting a selective UI channel '
                   'for invalid pixels' if rejected else 'no selective UI channel rejected for invalid pixels',
                   rejected[:6]))
+    if s.counters is not None:
+        counter_checks(s.counters, add, overrides, flattened, disputes, handled)
+        gap_checks(s, add)
+        scene_checks(s, add)
+        return
     states = Counter(u.detection for u in s.ui)
     add(Check('FAIL' if overrides or flattened else 'WARN' if disputes else 'PASS', 'UI protection',
               ', '.join(f'{k} {v}' for k, v in states.most_common())
@@ -755,6 +788,115 @@ def ui_checks(s: Session, add) -> None:
               (overrides + flattened or disputes or handled)[:6]))
     gap_checks(s, add)
     scene_checks(s, add)
+
+
+def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flattened_sampled: list[str],
+                   disputes: list[str], handled: list[str]) -> None:
+    """Checks from the add-on's exact per-frame UI counters (docs/reshade-sbs.md, UI counters).
+
+    They replace the sampled invariants: every Auto frame is counted, not one per 100 ms sample. Sampled lines still
+    give the times of examples, trust disputes, which no counter records, whether a trusted full-frame claim over the
+    scene was resolved by a revocation, and the time-based gap and scene checks. Stages (S1-S6) and rule IDs (such as
+    H1 and P1) named in the output are the UI decision framework's (docs/reshade-sbs.md, UI decision framework)."""
+    def get(key: str) -> int:
+        return c.get(key, 0)
+
+    auto, detected = get('auto_frames'), get('detection_frames')
+    held = sum(get(f'held.{k}') for k in HOLD_KINDS)
+    inactive = sum(get(f'inactive.{k}') for k in INACTIVE_REASONS)
+    reconciled = auto == detected + held + inactive
+    add(Check('PASS' if reconciled else 'FAIL', 'UI counters',
+              f'{auto} Auto frames through the last of {get("samples")} committed samples: {detected} detected, '
+              f'{held} held, {inactive} without detection'
+              + ('' if reconciled else f"; the add-on's own accounting does not reconcile ({auto} Auto frames, "
+                                       f'{detected + held + inactive} detected, held or inactive)')))
+
+    overrides, flattened = get('presented_over_dedicated'), get('trusted_full')
+    # A trusted channel covering the frame over an exact pair that shows the scene keeps deciding until repeated
+    # contradictions revoke its trust (about 2 s), so a handled case counts trusted_full frames first. Such frames
+    # fail only when a sample of them was not resolved by a revocation, or when no full claim was ever revoked.
+    revoked = get('trust.revoked_full')
+    unresolved = flattened and (flattened_sampled or not revoked)
+    sources = [(source, get(f'decided.{source}')) for source in SOURCE_NAMES]
+    add(Check('FAIL' if overrides or unresolved else 'WARN' if disputes else 'PASS', 'UI protection',
+              'decided ' + (', '.join(f'{SOURCE_NAMES[k]} ({k}) {percent(n, detected)}' for k, n in sources if n)
+                            or 'nothing') + ' of detection frames'
+              + (f'; presented alpha decided over a trusted UI channel in {overrides} frames' if overrides else '')
+              + (f'; a trusted UI channel covered the frame while an exact HUD-less pair showed the scene in '
+                 f'{flattened} frames' + ('' if unresolved else f' before {revoked} revocations of such a channel')
+                 if flattened else '')
+              + ('; trusted presented alpha disagrees with the UI channel' if disputes else '')
+              + ('; a contradicted channel lost its trust' if handled and not disputes and not unresolved else ''),
+              (overrides_sampled + flattened_sampled or disputes or handled)[:6]))
+
+    full = {k: get(f'decided.{k}') for k in (6, 8, 9)}
+    visible, routes = get('full_d.visible'), full[8] + full[9]
+    # full_d counts the exact full change-set (6) with the held routes (8, 9). An exact full set decides without a
+    # hold, and over a visible scene it is intended for an accepted exact pair (P1); it is wrong only before the
+    # pair's first selective sample, which is an open question of the framework. So visible samples warn only when a
+    # held route decided: the sample that releases a held route decided under the hold before its own evidence read
+    # the scene visible, so each release counts one, and the counters cannot tell a release from a held route over a
+    # visible scene (H1) until S2b counts releases.
+    exact_note = ('an exact full change-set (6) over a visible scene is intended for an accepted exact pair (P1); '
+                  'whether a pair decides one before its first selective sample is an open question')
+    add(Check('WARN' if visible and routes else 'INFO' if visible else 'PASS', 'UI full frame',
+              f'{sum(full.values())} full-frame frames (6: {full[6]}, 8: {full[8]}, 9: {full[9]}); samples that '
+              f'decided one read the scene hidden {get("full_d.hidden")}, ambiguous {get("full_d.ambiguous")}, '
+              f'visible {visible}, invalid or unmeasured {get("full_d.invalid")}; depth not current on '
+              f'{get("full.depth_not_current")} detection frames'
+              + ('' if not visible else
+                 f'; {visible} full-frame samples read the scene visible: each release of a held hidden-scene '
+                 'route (8, 9) shows one, more than one per hidden scene is a held route over a visible scene (H1); '
+                 'releases are counted apart from S2b' + (f'; samples of source 6 are counted with them, and '
+                                                          f'{exact_note}' if full[6] else '')
+                 if routes else f'; {visible} samples of source 6 read the scene visible: {exact_note}')))
+
+    # A whole-frame mask from alpha (a trusted source 1-4 covering at least 99%; only a trusted channel decides at that
+    # coverage) pins the frame flat even over a visible scene: an accepted source's pin weight is saturate(8 alpha) at
+    # any coverage (P1, the opacity ruling), so it is reported, not warned. The wrong cases have their own checks: a
+    # trusted full claim over an exact pair that shows the scene and no revocation resolved (UI protection), and
+    # untrusted inferred alpha (UI inferred alpha). The add-on measures D as a diagnostic on the samples after one that
+    # decided it, so the first sample of each episode is unmeasured.
+    full_alpha, alpha_visible = get('full_alpha'), get('full_alpha_d.visible')
+    if full_alpha:
+        add(Check('INFO', 'UI full alpha',
+                  f'{full_alpha} frames ({percent(full_alpha, detected)} of detection frames) decided a whole-frame '
+                  f'alpha; samples that decided one read the scene hidden {get("full_alpha_d.hidden")}, ambiguous '
+                  f'{get("full_alpha_d.ambiguous")}, visible {alpha_visible}, invalid or unmeasured '
+                  f'{get("full_alpha_d.invalid")}'
+                  + (f'; {alpha_visible} samples pinned a trusted whole-frame alpha flat over a visible scene, as '
+                     'intended (P1)' if alpha_visible else '')))
+    elif 'full_alpha' in c:
+        add(Check('PASS', 'UI full alpha', 'no frame decided a whole-frame alpha'))
+
+    inferred = get('untrusted_inferred')
+    add(Check('WARN' if inferred else 'PASS', 'UI inferred alpha',
+              f'{inferred} frames ({percent(inferred, detected)} of detection frames) decided from untrusted inferred '
+              'alpha (UI layer, Backbuffer or current alpha); expected until S2a' if inferred else
+              'no frame decided from untrusted inferred alpha'))
+    inexact = get('inexact_difference')
+    add(Check('WARN' if inexact else 'PASS', 'UI inexact difference',
+              f'{inexact} frames ({percent(inexact, detected)} of detection frames) decided a HUD-less difference '
+              'from an inexact pair; expected until S3' if inexact else
+              'no HUD-less difference decided from an inexact pair'))
+
+    add(Check('INFO', 'UI holds',
+              ', '.join(f'{k.replace("_", " ")} {get(f"held.{k}")}' for k in HOLD_KINDS)
+              + f' ({percent(held, auto)} of Auto frames); {get("held.cap")} frames wanted a hold past the cap'))
+    none = [(reason.replace('_', ' '), get(f'none.{reason}')) for reason in NO_MASK_REASONS]
+    skipped = [(reason.replace('_', ' '), get(f'inactive.{reason}')) for reason in INACTIVE_REASONS]
+
+    def shares(parts: list[tuple[str, int]]) -> str:
+        return ', '.join(f'{name} {percent(n, auto)}' for name, n in parts if n)
+    add(Check('INFO', 'UI no mask',
+              f'{percent(sum(n for _, n in none + skipped), auto)} of Auto frames had no mask'
+              + (f'; decided none: {shares(none)}' if shares(none) else '')
+              + (f'; without detection: {shares(skipped)}' if shares(skipped) else '')))
+    add(Check('INFO', 'UI trust events',
+              f'earned {get("trust.earned")}, revoked by a full claim over the scene {get("trust.revoked_full")}, '
+              f'revoked by presented disagreement {get("trust.revoked_presented")}, lapsed {get("trust.lapsed")}, '
+              f'restored {get("trust.restored")}, opaque proof set {get("trust.opaque_set")} and cleared '
+              f'{get("trust.opaque_cleared")}'))
 
 
 def outside_settle(s: Session, a: float, b: float) -> list[tuple[float, float]]:

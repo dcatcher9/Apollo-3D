@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 
 #include <algorithm>
@@ -191,6 +192,23 @@ namespace sunshine_game3d {
       std::lock_guard<std::mutex> lock(mutex_);
       trusted_alpha_ |= remembered & 31u;
       provisional_ |= remembered & 31u;
+      for (std::uint32_t bits = remembered & 31u; bits; bits &= bits - 1) ++counters_[ui_counter::trust_restored];
+    }
+
+    // Exact UI protection counters (game3d_ui_counters.h). Renderers commit
+    // each completed sample's counts, at most ten times a second each; the
+    // session counts its own trust events: a source earned (or a restored one
+    // confirmed) by this session's samples, revoked by a full claim over a
+    // visible scene or by presented alpha disagreeing with a trusted dedicated
+    // channel, lapsed while provisional, restored, and the tagged UI color's
+    // opaque proof set and cleared.
+    void add_counters(const ui_counters &delta) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      counters_ += delta;
+    }
+    ui_counters counters() {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return counters_;
     }
 
     // A game whose session started without remembered trust runs the
@@ -263,39 +281,45 @@ namespace sunshine_game3d {
         // pair shows most of the scene is the final image, not UI coverage.
         if (channel == 1 && covered * 100 >= total * 99 && exact_pair &&
             std::uint64_t(evidence.hudless_unchanged) * 2 >= total) {
-          if (opaque_.add(tick_ms)) ui_color_opaque_ = true;
+          if (opaque_.add(tick_ms)) {
+            if (!ui_color_opaque_) ++counters_[ui_counter::trust_opaque_set];
+            ui_color_opaque_ = true;
+          }
         } else if (channel == 1 && covered && covered * 10 < total * 9) {
           opaque_ = {};
+          if (ui_color_opaque_) ++counters_[ui_counter::trust_opaque_cleared];
           ui_color_opaque_ = false;
         }
         // Presented alpha (2 Backbuffer, 3 current) differing from every such
         // mask by at least 10% of the frame is not UI coverage: it earns nothing,
         // and the usual evidence interval revokes its trust.
-        const auto revoke = [&] {
+        const auto revoke = [&](std::size_t event) {
           trusted_alpha_ &= ~bit;
           provisional_ &= ~bit;
           doubt_[channel] = {};
+          ++counters_[event];
         };
         if ((provisional_ & bit) && !reconfirm_from_[channel]) reconfirm_from_[channel] = tick_ms;
         if ((channel == 2 || channel == 3) && dedicated_mask && disagreement(covered) * 10 >= total) {
           earned_[channel] = {};
-          if ((trusted_alpha_ & bit) && doubt_[channel].add(tick_ms)) revoke();
+          if ((trusted_alpha_ & bit) && doubt_[channel].add(tick_ms)) revoke(ui_counter::trust_revoked_presented);
           continue;
         }
         if (covered && covered * 10 < total * 9) {
           doubt_[channel] = {};
           if (earned_[channel].add(tick_ms, covered)) {
+            if (!(trusted_alpha_ & bit) || (provisional_ & bit)) ++counters_[ui_counter::trust_earned];
             trusted_alpha_ |= bit;
             provisional_ &= ~bit;
           }
         } else if (covered * 10 >= total * 9) {
           earned_[channel] = {};
-          if ((trusted_alpha_ & bit) && scene_visible && doubt_[channel].add(tick_ms)) revoke();
+          if ((trusted_alpha_ & bit) && scene_visible && doubt_[channel].add(tick_ms)) revoke(ui_counter::trust_revoked_full);
         }
         if ((provisional_ & bit) && tick_ms >= reconfirm_from_[channel] &&
             tick_ms - reconfirm_from_[channel] >= alpha_trust_reconfirm_ms) {
           earned_[channel] = {};
-          revoke();
+          revoke(ui_counter::trust_lapsed);
         }
       }
     }
@@ -328,5 +352,6 @@ namespace sunshine_game3d {
     bool ui_color_opaque_{};
     bool first_run_{};
     std::function<void(std::uint32_t)> trust_listener_;
+    ui_counters counters_;
   };
 }
