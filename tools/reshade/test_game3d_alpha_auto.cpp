@@ -224,6 +224,18 @@ namespace {
     for (std::uint64_t tick = 1000; tick <= 5000; tick += 1000) sample(menu, false, 2 | 48, {0, 1000, 0, 0}, 50, tick);
     require(!menu.prefer_ui_layer(), "A full-screen menu proved the tag opaque");
     // A trusted tag keeps its slot even beside a trusted layer.
+    // A trusted layer without alpha is no dedicated mask: it neither revokes
+    // nor shields selective presented alpha, which earns trust over 2 s, and
+    // its own trust is untouched.
+    alpha_auto_policy aside;
+    aside.restore_trusted_alpha(16);
+    for (std::uint64_t tick = 1000; tick <= 3000; tick += 1000) {
+      alpha_auto_decision::detection_evidence evidence;
+      evidence.candidates = 2 | 4; evidence.ui_layer = true;
+      evidence.alpha_covered = {0, 0, 3, 0}; evidence.alpha_invalid = {0, 600, 0, 0};
+      aside.observe_alpha_channels(evidence, pixels, tick);
+    }
+    require(aside.trusted_alpha() == (16u | 4u), "A layer without alpha shielded or revoked selective presented alpha");
     alpha_auto_policy both;
     both.restore_trusted_alpha(2 | 16);
     require(!both.prefer_ui_layer() && both.trusted_slots(false) == 2u && both.trusted_slots(true) == 2u,
@@ -252,8 +264,30 @@ namespace {
     require(detection_decision_key(2u, layer, 0u) != detection_decision_key(2u, 0u, 0u),
       "The UI layer and a tagged UI color shared a decision key");
     require(detection_decision_key(2u, layer, 0u) == detection_decision_key(2u, 5u, 0u) &&
-        detection_decision_key(2u | 8u, layer, 2u) == detection_decision_key(2u, 5u, 2u),
+        detection_decision_key(2u | 8u, layer, 2u) == detection_decision_key(2u | 8u | 16u, layer, 2u) &&
+        detection_decision_key(2u | 8u | 16u, layer, 2u) == detection_decision_key(2u | 8u | 48u, layer, 2u),
       "A repeated layer frame changed its decision key");
+    // A trusted layer does not decide alone: a layer without alpha is set aside
+    // by its own pixels, and presented alpha then decides by its trust. Its key
+    // holds the alpha channels' trust, never which presented channels a Present
+    // offers (Stellar Blade with FG tags the Backbuffer on real Presents only;
+    // a key that changed with it starved the generated-Present hold of the
+    // sample it reads) nor a HUD-less pairing.
+    require(detection_decision_key(2u | 4u, layer, 2u | 4u) != detection_decision_key(4u, 0u, 2u | 4u) &&
+        detection_decision_key(2u | 4u, layer, 2u | 4u) != detection_decision_key(4u, 0u, 4u),
+      "A trusted layer beside the Backbuffer shared the Backbuffer's decision key");
+    require(detection_decision_key(2u | 4u, layer, 2u | 4u) != detection_decision_key(2u, layer, 2u) &&
+        detection_decision_key(2u | 8u, layer, 2u) != detection_decision_key(2u | 8u, layer, 2u | 8u),
+      "Presented alpha's trust beside a trusted layer kept the layer-alone decision key");
+    require(detection_decision_key(2u | 4u, layer, 2u | 4u) == detection_decision_key(2u, layer, 2u | 4u) &&
+        detection_decision_key(2u | 8u, layer, 2u) == detection_decision_key(2u, layer, 2u),
+      "A presented channel offered on some Presents only changed a trusted layer's decision key");
+    require(detection_decision_key(2u | 4u | 16u, layer, 2u | 4u) == detection_decision_key(2u | 4u | 48u, layer, 2u | 4u) &&
+        detection_decision_key(2u | 4u, layer, 2u | 4u) == detection_decision_key(2u | 4u | 48u, layer, 2u | 4u),
+      "A HUD-less pairing beside a trusted layer changed the decision key");
+    require(detection_decision_key(2u | 4u, 0u, 2u | 4u) == detection_decision_key(2u, 0u, 2u) &&
+        detection_decision_key(2u | 4u | 16u, 0u, 2u | 4u) == detection_decision_key(2u, 0u, 2u | 4u),
+      "A trusted tagged UI color stopped deciding alone");
     require(detection_decision_key(1u | 2u, layer, 1u) == detection_decision_key(1u | 2u, 0u, 1u),
       "Layer flags changed a decision the trusted UI alpha channel makes");
     require(detection_decision_key(2u, layer | ui_detection::stored_hdr_headroom, 0u) != detection_decision_key(2u, layer, 0u),
@@ -303,6 +337,18 @@ namespace {
       "A layer that decided its own selective mask was not shown an overlay");
     require(!gates(0, 2, 0, 0u, {0, 100}, 0).overlay_slots && !gates(0, 4 | 8, 0, 0u, {0, 0}, 0).overlay_slots,
       "A tagged UI color or presented alpha counted as a layer-route input");
+    // A layer without alpha (Stellar Blade's SDR scene image: no alpha, color
+    // on 60% of pixels) is no layer: fed the admitted candidates, it is no
+    // overlay, so it cannot clear a refuted slot.
+    const std::array<std::uint32_t, 4> color_only{0, 600, 0, 0};
+    const auto admitted = detection::admitted_candidates(2 | 4, layer, 0, color_only[1], pixels);
+    require(admitted == 4u && gates(0, 2 | 4, 0, layer, {0, 0}, 0, color_only).overlay_slots == 2u &&
+        !gates(0, admitted, 0, layer, {0, 0}, 0, color_only).overlay_slots,
+      "A layer without alpha counted as an overlay");
+    require(detection::admitted_candidates(2 | 4, layer, 0, 10, pixels) == (2u | 4u) &&
+        detection::admitted_candidates(2 | 4, layer, 1, 600, pixels) == (2u | 4u) &&
+        detection::admitted_candidates(2 | 4, 0u, 0, 600, pixels) == (2u | 4u),
+      "A layer with alpha, at most 1% invalid, or a tagged UI color was set aside");
     // Holds and refutations follow the routes' inputs, not a HUD-less pairing.
     require(detection::scene_route_key(2, layer, 0) == detection::scene_route_key(2 | 16, layer, 0) &&
         detection::scene_route_key(2 | 16, layer, 0) == detection::scene_route_key(2 | 48, layer, 0) &&

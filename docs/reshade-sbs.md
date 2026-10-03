@@ -304,6 +304,27 @@ current color alpha unless FG is known enabled, then a paired HUD-less/final-col
 rejected candidate allows the next candidate in that same render. If none passes, UI protection
 is off for that frame; it can recover automatically on a later frame.
 
+The Status tab warns, in amber under the UI protection line, when Auto has rendered without a UI
+mask for at least 2 s (`alpha_trust_span_ms`, the span over which detection earns or loses
+trust): "No UI mask in this game mode: HUD and menus take the scene's depth." A rendered frame is
+unprotected when no source decided and either no UI source was offered or no dedicated UI channel
+(UIAlpha, UI color or the UI layer) was offered clean and empty. A clean empty dedicated channel
+means no UI on screen, and a trusted channel deciding an empty mask protects, so neither warns.
+`source_alpha_ui_decision::unprotected()` owns this definition and the log report's
+`UI protection gaps` check mirrors it with the same 2 s minimum. The exporter keeps the start of
+the current unprotected run: a decided rendered frame (a mask, or a clean empty UI channel), a
+manual mode, protection Off or Game 3D off clears it. A Present that rendered nothing, or whose
+status sample is still being collected after a decision-key, revision or viewport change, neither
+starts nor ends it. The warning is hidden in On
+and Off, in 2D, in depth preview, at zero strength and while an FG capture block has its own
+text. Hints follow the evidence: "Try HDR output" only for an SDR swapchain whose latest sample
+set aside an offscreen UI layer that had color but no alpha (below), and "Try Frame Generation"
+only when the game reports FG off. Neither names a game, and Sunshine changes no game setting.
+Stellar Blade in SDR with FG off shows both: its layer then holds the scene image, current alpha
+covers every pixel and its same-frame HUD-less differs from the final frame on about 2% of pixels
+along edges and rain, so no mask is possible. Its full-screen SDR menus with FG on also stay 3D
+when the Backbuffer alpha covers nearly the whole frame (below).
+
 The **Troubleshooting → UI mask source** selector offers automatic discovery and explicit source overrides,
 including HUD-less difference. It is useful for diagnosis; normal use needs no source choice.
 UIAlpha is admitted to Auto when the hooked interposer's version lies in the surveyed header
@@ -335,8 +356,8 @@ pause menu with FG on differs from HUD-less on 76% of pixels, which is neither a
 full-screen UI. Trust is per source, not per detection slot: a presented-color alpha trusted with
 FG off does not make the tagged Backbuffer's alpha trusted, and the offscreen UI layer (below) is a
 source of its own beside the tagged UIColorAndAlpha, although either fills the UI color slot.
-Stellar Blade offers its UI layer with FG off and an opaque tagged UIColorAndAlpha with FG on; when
-both shared one trust bit, turning FG on handed the layer's trust to the opaque tag, which flattened
+Stellar Blade in HDR offers its UI layer with FG off and an opaque tagged UIColorAndAlpha with FG
+on (in SDR the tag is real UI, below); when both shared one trust bit, turning FG on handed the layer's trust to the opaque tag, which flattened
 the whole frame for 15 s until the contradiction below revoked it, and the layer's trust with it.
 
 Trust is remembered per game. Each earned or revoked change is written to `TrustedUISources` (the
@@ -361,7 +382,9 @@ revoked the same way, and the revocation is remembered too. Trust survives manua
 frame but is provisional: unless the session earns it again within 60 s of the channel first being
 offered, it lapses and is forgotten, so a wrong remembered claim cannot outlive every session. A
 trusted channel in the current frame decides by itself, so the HUD-less holds
-described below do not apply to that frame. Up to 1% invalid pixels (such as additive glow in a UI
+described below do not apply to that frame. A trusted UI layer that the latest completed sample set
+aside as a layer without alpha (below) does not count as deciding: generated-Present,
+inexact-pair and missing-channel holds of the mask another channel made still apply. Up to 1% invalid pixels (such as additive glow in a UI
 layer) do not disqualify a trusted channel. While a trusted dedicated UI channel is offered,
 presented alpha never decides: when that channel fails, the frame has no alpha mask rather than
 falling back to a channel that may cover the scene.
@@ -415,6 +438,39 @@ pixels, so the untrusted layer could not earn trust during play. A scene buffer 
 Space's only qualifying target is a post-upscale scene buffer whose luma-like alpha (82% of pixels
 nonzero, mean 11/255) lies below its saturated colors. That buffer was seen in a census dump; its
 rejection has not been observed live.
+
+A layer without alpha is no layer. Premultiplied UI over transparent black cannot have color
+without alpha, so a layer copy (stored flag `0x4`) with no alpha anywhere but color beyond its
+alpha on more than 1% of pixels, the trusted-channel tolerance, is set aside for that frame:
+detection proceeds exactly as if no layer were offered. It neither decides, blocks presented alpha,
+opens the layer route nor counts as an overlay that clears a refuted slot.
+`ui_detection::layer_without_alpha` in `game3d_ui_detection_contract.h` owns the rule; the shader
+applies it and the renderer's route, refutation and hold bookkeeping and the overlay hint call the
+same definition. Stellar Blade (Unreal) clears the same BGRA8 output-size target to (0, 0, 0, 0)
+every frame in both output modes. In HDR it holds the UI (HUD icons, alpha on 0.18-0.71% of
+pixels); in SDR it holds the scene image without UI: alpha 0 everywhere and color on 56-99% of
+pixels, in gameplay and in the settings menu. The trusted layer then blocked presented alpha
+every frame, so SDR with FG on had no mask although the tagged Backbuffer's alpha marked exactly
+the UI (0.26% of pixels, the same pixels as the tagged UIColorAndAlpha, which in SDR is real UI).
+With the layer set aside the Backbuffer alpha decides there. Beside a set-aside layer, presented
+alpha (Backbuffer or current color) decides only below the full-frame bound, 90% of pixels, even
+when trusted; at or above it the frame has no mask. Stellar Blade's Backbuffer earns trust in SDR
+with FG on but is opaque in HDR, so a color-only HDR layer (glow while the HUD is hidden) must not
+let it flatten the scene. Trusted channels keep the 1% invalid tolerance and untrusted ones the
+selective test. A layer with alpha somewhere still decides or blocks as before (an HDR sample with
+1.5% invalid pixels covered 20% and still blocks), and a cleared layer with no UI stays a clean
+empty channel. Tagged UI colors keep the stricter rule: Resident Evil Requiem with FG off offers a
+trusted tag at coverage 0 with more than 1% invalid pixels beside presented alpha covering 64-80%,
+which must not decide. The layer copy is still taken in SDR, at the same cost as in HDR, and the
+rule needs no state: the first copy with alpha is a layer again. Known limits: in a game whose
+trusted layer goes color-only, a selective but wrong presented alpha now competes as if there
+were no layer, ahead of the HUD-less difference route (not observed: Hogwarts Legacy's presented
+alpha covers every pixel, so it is never selective). A real layer whose only UI is additive color
+without alpha on more than 1% of pixels would be set aside for that frame; this breaks the
+premultiplied contract and has not been observed. Stellar Blade's Backbuffer trust is earned in
+SDR with FG on and revoked in HDR by disagreement with the layer, and each change rewrites
+`TrustedUISources`; that already happened before this rule. While the Backbuffer is untrusted,
+SDR with FG on still decides its selective HUD frames, but full-screen SDR menus stay 3D.
 The layer then earns trust like any alpha channel: selective coverage during
 play, after which a sign wheel that dims the whole scene or a full-screen menu covers everything and
 stays flat. That holds for any uniform dim at or above 1/8; a fainter dim flattens the scene
@@ -588,8 +644,8 @@ needs is blank, such as black or a flat fade, and ends a run: it reads hidden fr
 has nothing to protect. Stellar Blade's splashes decided 304 and 228. Known first-session gaps
 stay open by design and the shadow logs them: Expedition 33 settings with FG off and The Witcher 3
 settings without a UI layer offer only presented alpha, which flattens from the second session
-through remembered trust; Stellar Blade with FG on offers its opaque tagged UI colour instead of
-its layer, so in a first session only the HUD-less route can act.
+through remembered trust; Stellar Blade in HDR with FG on offers its opaque tagged UI colour
+instead of its layer, so in a first session only the HUD-less route can act.
 
 The native path uses GPU statistics, reduction/selection and mask passes. Each of the 16x16
 statistics tiles is one 256-thread group, the reduction sums the 256 tiles in parallel, and the
@@ -607,7 +663,14 @@ describes. A sample keeps describing later frames while the inputs that decide t
 unchanged: beside a trusted alpha channel, which decides alone, a HUD-less pair or another channel
 may come and go. Resident Evil Requiem pairs its HUD-less image on only some Presents with frame
 generation on; discarding the sample on each such change reported "Checking source quality" about
-half the time while its trusted UI color alpha protected the HUD. The `Sunshine UI protection` log (`sampled_candidates`, `sampled_alpha_covered`,
+half the time while its trusted UI color alpha protected the HUD. A trusted UI layer does not
+decide alone, since its own pixels may set it aside and presented alpha then decides by its trust:
+beside it, the alpha channels' trust keys the sample, but neither which presented channels a
+Present offers nor a HUD-less pairing does. Stellar Blade with FG tags its Backbuffer on real
+Presents only; a key that changed with it discarded every sample, so generated Presents never saw
+the sample that set the layer aside and lost the Backbuffer mask at the FG rate. A status sample
+taken with the Backbuffer can therefore describe a generated Present without it, which holds that
+mask. The candidate bits in the summary are those offered, a set-aside layer included. The `Sunshine UI protection` log (`sampled_candidates`, `sampled_alpha_covered`,
 `sampled_alpha_invalid`, `trusted_alpha` as slot bits, `sampled_ui_layer` when the UI layer filled the UI color slot,
 `sampled_hudless`, `sampled_alpha_opaque` for alpha candidates 0 and 1, `sampled_scene` with the
 presented image's `n`, `d`, `valid`, `ran` and `verdict`, `sampled_hudless_scene` with the HUD-less

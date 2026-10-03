@@ -22,6 +22,9 @@
 // the previous frame's UI. UI detection receives the newest copy as its UI
 // color+alpha candidate, admits it only when premultiplied (no RGB above twice
 // its alpha) and trusts it only after selective coverage (see docs/reshade-sbs.md).
+// The same cleared target can hold a scene image instead (Stellar Blade in SDR:
+// color nearly everywhere, alpha nowhere). A copy without alpha is no layer
+// for that frame (ui_detection::layer_without_alpha): detection sets it aside.
 //
 // Dump census: while a Dump 3D is armed, qualifying clears are also recorded and
 // copied as diagnostic artifacts.
@@ -37,7 +40,8 @@ namespace sunshine_game3d::ui_layer {
   // (ui_detection::layer_detection_flags): the late-layer identity, admission
   // only while premultiplied (no color above twice its alpha: UI blended over
   // transparent black, allowing tints brighter than white) and, for a float
-  // layer, HDR headroom.
+  // layer, HDR headroom. A copy with color but no alpha is set aside
+  // (ui_detection::admitted_candidates).
   std::uint32_t detection_flags(api::format format);
   // A single-sample 2D color target at the output size cleared to exactly
   // (0, 0, 0, 0). Callers separately exclude swapchain back buffers.

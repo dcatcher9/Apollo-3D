@@ -364,6 +364,18 @@ namespace sunshine_game3d {
     else if (data->values.enabled && data->values.ui_protection == source_alpha_mode::on)
       if (const auto blocked = source_alpha_capture_block_text(source_alpha_capture_block_for(source.selected, fg)))
         ImGui::TextWrapped("UI protection: %s", blocked);
+    // Auto without a usable UI mask for a while: say what the user sees, and
+    // which game settings commonly provide one when the evidence fits.
+    if (const auto warning = ui_protection_warning_for(source_alpha, data->values, automatic.phase, GetTickCount64()); warning.show) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+      ImGui::BeginGroup();
+      ImGui::TextWrapped("%s", ui_protection_warning_text);
+      if (warning.try_hdr) ImGui::TextWrapped("%s", ui_protection_hdr_hint);
+      if (warning.try_fg) ImGui::TextWrapped("%s", ui_protection_fg_hint);
+      ImGui::EndGroup();
+      ImGui::PopStyleColor();
+      ImGui::SetItemTooltip("%s", ui_protection_warning_tooltip());
+    }
     if (source.candidate.source != ui_qualification::choice::automatic)
       ImGui::TextWrapped("Candidate: %s", ui_qualification::name(source.candidate.source));
     if (source.selected == ui_qualification::choice::sl_ui_alpha && data->values.ui_protection == source_alpha_mode::automatic &&

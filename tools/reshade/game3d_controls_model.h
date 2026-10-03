@@ -4,7 +4,9 @@
 #include "game3d_controls.h"
 
 #include <cmath>
+#include <cstdio>
 #include <memory>
+#include <string>
 
 namespace sunshine_game3d {
   inline constexpr const char *config_section = "SUNSHINE_GAME3D";
@@ -97,6 +99,43 @@ namespace sunshine_game3d {
     if (decision.coverage.state == alpha_auto_state::automatic_off)
       return "No usable UI mask detected";
     return "Checking source quality";
+  }
+
+  // The Status tab's UI protection warning (docs/reshade-sbs.md, UI
+  // protection): Auto has rendered without a UI mask for alpha_trust_span_ms,
+  // the span over which detection itself earns or loses confidence, while the
+  // game shows 3D. Hints name the game settings that commonly provide a mask,
+  // only where the evidence fits them: HDR when the SDR frame's offscreen UI
+  // layer held color without alpha, Frame Generation when the game reports it
+  // off. A blocked FG capture has its own text.
+  struct ui_protection_warning {
+    bool show = false, try_hdr = false, try_fg = false;
+  };
+  inline constexpr const char *ui_protection_warning_text = "No UI mask in this game mode: HUD and menus take the scene's depth.";
+  inline constexpr const char *ui_protection_hdr_hint = "Try HDR output: some games draw their UI on a separate layer only in HDR.";
+  inline constexpr const char *ui_protection_fg_hint = "Try Frame Generation: some games provide their UI buffers only while it is on.";
+  // The tooltip states the span from alpha_trust_span_ms, its one owner.
+  inline const char *ui_protection_warning_tooltip() {
+    static const std::string text = [] {
+      char span[32];
+      std::snprintf(span, sizeof(span), "%g", double(alpha_trust_span_ms) / 1000.0);
+      return std::string("Sunshine keeps UI flat only with a usable UI mask from the game: a Streamline UI buffer, an "
+                         "offscreen UI layer or alpha that marks UI. None has been usable for ") +
+        span + " s. Protection resumes by itself when one appears. Sunshine does not change game settings.";
+    }();
+    return text.c_str();
+  }
+  inline ui_protection_warning ui_protection_warning_for(const source_alpha_ui_decision &decision, const render_settings &settings,
+      automatic_phase phase, std::uint64_t now_ms) {
+    ui_protection_warning result;
+    result.show = settings.enabled && settings.ui_protection == source_alpha_mode::automatic &&
+      decision.mode == source_alpha_mode::automatic && phase == automatic_phase::ready && settings.depth_view == 0 &&
+      std::isfinite(settings.strength) && settings.strength > 0.f && !decision.blocked_by_fg() &&
+      decision.unprotected_since_ms && now_ms >= decision.unprotected_since_ms &&
+      now_ms - decision.unprotected_since_ms >= alpha_trust_span_ms;
+    result.try_hdr = result.show && decision.sdr_output && decision.layer_set_aside();
+    result.try_fg = result.show && decision.fg.known && !decision.fg.enabled;
+    return result;
   }
 
   inline const char *output_status_text(const automatic_status &status, const render_settings &settings) {

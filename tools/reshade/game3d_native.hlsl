@@ -284,10 +284,24 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // alpha, 1 UI color) is offered, presented alpha (2 Backbuffer, 3 current)
     // never decides: when that channel fails, this frame has no alpha mask
     // rather than a scene-wide one.
+    // A layer without alpha is no layer (game3d_ui_detection_contract.h,
+    // layer_without_alpha): an offscreen UI layer copy with no alpha anywhere
+    // but color on more than 1% of pixels (Stellar Blade's SDR scene image in
+    // its cleared UI target) is set aside. It neither decides, blocks presented
+    // alpha, opens the layer route nor counts as an overlay. Tagged UI colors
+    // keep blocking: their failure must not let presented alpha flatten the
+    // scene. Beside a set-aside layer, presented alpha decides only below the
+    // full-frame bound, so a channel trusted in another output mode cannot
+    // flatten the frame while the layer holds only glow.
+    uint candidates = Sunshine_UICandidates;
+    const bool aside = (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_LATE_LAYER) && !coverage.y &&
+        invalid.y * 100u > difference.w;
+    if (aside) candidates &= ~2u;
     bool dedicated = false;
     [unroll] for (uint trusted = 0u; trusted < 4u; ++trusted) {
-        const bool offered = (Sunshine_UICandidates & Sunshine_UITrustedAlpha & (1u << trusted)) != 0u;
-        if (!source && offered && !(dedicated && trusted >= 2u) && invalid[trusted] * 100u <= difference.w) {
+        const bool offered = (candidates & Sunshine_UITrustedAlpha & (1u << trusted)) != 0u;
+        if (!source && offered && !(dedicated && trusted >= 2u) && invalid[trusted] * 100u <= difference.w &&
+            !(aside && trusted >= 2u && coverage[trusted] * 10u >= difference.w * 9u)) {
             source = trusted + 1u; covered = coverage[trusted];
         }
         if (offered && trusted < 2u) dedicated = true;
@@ -295,7 +309,7 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // An untrusted channel must look selective. Empty and nearly full-scene
     // alpha are ambiguous: an opaque channel may carry no UI at all.
     [unroll] for (uint candidate = 0u; candidate < 4u; ++candidate) {
-        if (!source && !(dedicated && candidate >= 2u) && (Sunshine_UICandidates & (1u << candidate)) && !invalid[candidate] &&
+        if (!source && !(dedicated && candidate >= 2u) && (candidates & (1u << candidate)) && !invalid[candidate] &&
             coverage[candidate] && coverage[candidate] * 10u < difference.w * 9u) {
             source = candidate + 1u; covered = coverage[candidate];
         }
@@ -323,7 +337,7 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // the depth's edges (8 layer, 9 HUD-less). The evidence passes only
     // measure; this frame's own gate still has to be open.
     const uint pixels = difference.w;
-    const uint untrusted = Sunshine_UICandidates & ~Sunshine_UITrustedAlpha;
+    const uint untrusted = candidates & ~Sunshine_UITrustedAlpha;
     const bool layer_gate = !source &&
         (((untrusted & 1u) && !invalid.x && opaque.x * 100u >= pixels * SUNSHINE_UI_SCENE_OPAQUE_PERCENT) ||
          ((untrusted & 2u) && (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_LATE_LAYER) &&

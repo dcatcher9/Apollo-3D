@@ -1273,6 +1273,41 @@ namespace {
       require(!destroyed.fg.known && !destroyed.rendered && !destroyed.applied &&
         destroyed.input == sunshine_game3d::source_alpha_input::none && publisher.runtimes_.empty(),
         "Runtime destruction retained FG mode or its UI status");
+      // The exporter owns the unprotected run behind the overlay's warning: it
+      // starts once, survives Presents that rendered nothing or still collect
+      // their status sample, and ends on a protected rendered frame, a manual
+      // mode or Game 3D off.
+      auto unprotected = presented;
+      unprotected.input = sunshine_game3d::source_alpha_input::automatic_mask;
+      unprotected.coverage = {}; unprotected.coverage.state = sunshine_game3d::alpha_auto_state::automatic_off;
+      unprotected.coverage.pixels = 1000; unprotected.qualification.available = true;
+      auto &evidence = unprotected.coverage.evidence;
+      evidence.candidates = 2 | 8; evidence.ui_layer = true;
+      evidence.alpha_covered = {0, 0, 0, 1000}; evidence.alpha_invalid = {0, 600, 0, 0};
+      unprotected.sdr_output = true;
+      require(unprotected.unprotected(), "The fixture frame was protected");
+      publish_source_alpha_ui(owner(), unprotected);
+      const auto first = sunshine_game3d::query_source_alpha_ui(owner());
+      require(first.unprotected_since_ms && first.sdr_output, "An unprotected frame did not start the run or lost its output mode");
+      Sleep(20);
+      publish_source_alpha_ui(owner(), unprotected);
+      auto skipped = unprotected; skipped.rendered = skipped.applied = false;
+      publish_source_alpha_ui(owner(), skipped);
+      auto collecting = unprotected; collecting.coverage = {};
+      collecting.coverage.state = sunshine_game3d::alpha_auto_state::collecting;
+      publish_source_alpha_ui(owner(), collecting);
+      publish_source_alpha_ui(owner(), unprotected);
+      require(sunshine_game3d::query_source_alpha_ui(owner()).unprotected_since_ms == first.unprotected_since_ms,
+        "Unprotected, unrendered or collecting Presents restarted the run");
+      publish_source_alpha_ui(owner(), skipped, false);
+      require(!sunshine_game3d::query_source_alpha_ui(owner()).unprotected_since_ms, "Game 3D off kept the run");
+      publish_source_alpha_ui(owner(), presented);
+      require(!sunshine_game3d::query_source_alpha_ui(owner()).unprotected_since_ms, "A protected rendered frame kept the run");
+      publish_source_alpha_ui(owner(), unprotected);
+      auto manual = skipped; manual.mode = sunshine_game3d::source_alpha_mode::on;
+      publish_source_alpha_ui(owner(), manual);
+      require(!sunshine_game3d::query_source_alpha_ui(owner()).unprotected_since_ms, "A manual mode kept the run");
+      clear_automatic_ui(owner());
     }
 
     static void ui_source_choice_and_runtime_lifetime() {

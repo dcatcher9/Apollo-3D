@@ -69,6 +69,31 @@ namespace sunshine_game3d::ui_detection {
   static_assert(float_layer_format(10u) && float_layer_format(11u) && float_layer_format(2u) &&
     !float_layer_format(28u) && !float_layer_format(87u) && !float_layer_format(24u));
 
+  // A layer without alpha is no layer (docs/reshade-sbs.md, UI detection):
+  // premultiplied UI over transparent black cannot have color without alpha,
+  // so an offscreen UI layer copy (stored_late_layer, never a tagged UI color)
+  // with no alpha anywhere but color beyond its alpha on more than 1% of
+  // pixels, the trusted-channel tolerance, is not this frame's UI layer.
+  // Stellar Blade draws its scene into that cleared target in SDR. Detection
+  // then proceeds as if no layer were offered: admitted_candidates clears the
+  // UI color bit. game3d_native.hlsl (SunshineUIDetectionReduceCS) applies the
+  // rule; the renderer's route, refutation and hold bookkeeping and the
+  // overlay warning call this one definition.
+  constexpr bool layer_without_alpha(std::uint32_t stored_flags, std::uint32_t covered, std::uint32_t invalid,
+      std::uint64_t pixels) {
+    return (stored_flags & stored_late_layer) && !covered && std::uint64_t(invalid) * 100u > pixels;
+  }
+  // The candidate bits detection acts on: the offered bits, without a layer
+  // that has no alpha (slot 1's covered and invalid pixels).
+  constexpr std::uint32_t admitted_candidates(std::uint32_t candidates, std::uint32_t stored_flags, std::uint32_t covered1,
+      std::uint32_t invalid1, std::uint64_t pixels) {
+    return layer_without_alpha(stored_flags, covered1, invalid1, pixels) ? candidates & ~2u : candidates;
+  }
+  static_assert(admitted_candidates(6u, layer_detection_flags(false), 0, 2, 100) == 4u &&
+    admitted_candidates(6u, layer_detection_flags(false), 0, 1, 100) == 6u &&
+    admitted_candidates(6u, layer_detection_flags(true), 1, 2, 100) == 6u &&
+    admitted_candidates(6u, 0u, 0, 2, 100) == 6u && admitted_candidates(6u, layer_detection_flags(false), 0, 0, 0) == 6u);
+
   // Shader markers sizing the detection resources, and their values for
   // shaders without them.
   inline constexpr std::string_view decision_texels_marker = "SUNSHINE_UI_DECISION_TEXELS";
@@ -157,7 +182,8 @@ namespace sunshine_game3d::ui_detection {
   // hudless_changed_percent of pixels (HUD-less route). Per slot (bit 1
   // UIAlpha, bit 2 UI layer), layer_slots are the slots that opened the layer
   // route, and overlay_slots those offered as its input below that opacity:
-  // transparent somewhere, so an overlay rather than a scene buffer.
+  // transparent somewhere, so an overlay rather than a scene buffer. Callers
+  // pass admitted_candidates: a layer without alpha is no overlay.
   struct scene_gates {
     bool layer{}, hudless{};
     std::uint32_t layer_slots{}, overlay_slots{};

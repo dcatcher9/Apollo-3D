@@ -260,6 +260,108 @@ namespace {
       "An automatically detected source with lost pixels was still described as available");
   }
 
+  void ui_protection_warning_follows_unprotected_rendered_frames() {
+    // Stellar Blade in SDR without FG: its UI layer holds the scene image (no
+    // alpha, color on 60%) and current alpha covers everything, so no source
+    // decides and no dedicated channel shows no UI.
+    source_alpha_ui_decision value;
+    value.requested = value.rendered = true;
+    value.mode = source_alpha_mode::automatic;
+    value.qualification.available = true;
+    value.coverage.state = alpha_auto_state::automatic_off;
+    value.coverage.pixels = 1000;
+    auto &evidence = value.coverage.evidence;
+    evidence.candidates = 2 | 8; evidence.ui_layer = true;
+    evidence.alpha_covered = {0, 0, 0, 1000}; evidence.alpha_invalid = {0, 600, 0, 0};
+    check(value.unprotected() && value.layer_set_aside(), "A layer without alpha beside full current alpha was protected");
+    auto searching = value;
+    searching.qualification.available = false; searching.coverage.state = alpha_auto_state::waiting_for_source;
+    check(searching.unprotected(), "No UI source offered was protected");
+    auto clean = value;
+    clean.coverage.evidence.alpha_invalid = {};
+    check(!clean.unprotected() && !clean.layer_set_aside(), "A clean empty UI layer (no UI on screen) was unprotected");
+    clean.coverage.evidence.ui_layer = false;
+    check(!clean.unprotected(), "A clean empty tagged UI color (no UI on screen) was unprotected");
+    auto decided = value;
+    decided.coverage.state = alpha_auto_state::automatic_on; decided.coverage.enabled = true;
+    decided.coverage.evidence.alpha_covered = {};
+    check(!decided.unprotected(), "A trusted channel deciding no UI was unprotected");
+    auto checking = value;
+    checking.coverage.state = alpha_auto_state::collecting;
+    check(!checking.unprotected(), "Checking a source counted as unprotected");
+    for (const auto mode : {source_alpha_mode::on, source_alpha_mode::off}) {
+      auto manual = value; manual.mode = mode;
+      check(!manual.unprotected(), "A manual mode counted as unprotected");
+    }
+    auto skipped = value; skipped.rendered = false;
+    check(!skipped.unprotected(), "A Present that rendered nothing counted as unprotected");
+
+    // The run starts with the first unprotected rendered frame, survives
+    // Presents that rendered nothing or still collect their status sample, and
+    // ends on a decided rendered frame, a manual mode, UI protection off or
+    // Game 3D off.
+    check(next_unprotected_since(value, true, 0, 5000) == 5000 && next_unprotected_since(value, true, 4000, 5000) == 4000,
+      "An unprotected frame did not start or keep the run");
+    check(next_unprotected_since(skipped, true, 4000, 5000) == 4000 && !next_unprotected_since(skipped, true, 0, 5000),
+      "A Present that rendered nothing started or ended the run");
+    auto searching_sample = value;
+    searching_sample.coverage.state = alpha_auto_state::waiting_for_source;
+    check(next_unprotected_since(checking, true, 4000, 5000) == 4000 && !next_unprotected_since(checking, true, 0, 5000) &&
+        next_unprotected_since(searching_sample, true, 4000, 5000) == 4000,
+      "A Present whose status sample was pending started or ended the run");
+    check(!next_unprotected_since(decided, true, 4000, 5000) && !next_unprotected_since(clean, true, 4000, 5000),
+      "A protected rendered frame did not end the run");
+    auto off = skipped; off.mode = source_alpha_mode::off;
+    auto unrequested = skipped; unrequested.requested = false;
+    check(!next_unprotected_since(off, true, 4000, 5000) && !next_unprotected_since(unrequested, true, 4000, 5000),
+      "A mode change did not end the run");
+    check(!next_unprotected_since(skipped, false, 4000, 5000) && !next_unprotected_since(value, false, 4000, 5000),
+      "Game 3D off kept the run");
+
+    // Shown after alpha_trust_span_ms of the run, while the game shows 3D in Auto.
+    render_settings settings;
+    value.unprotected_since_ms = 10000;
+    value.sdr_output = true;
+    value.fg.known = true;
+    const auto at = [&](std::uint64_t now, const source_alpha_ui_decision &decision, const render_settings &edited,
+        automatic_phase phase = automatic_phase::ready) {
+      return ui_protection_warning_for(decision, edited, phase, now);
+    };
+    check(!at(11999, value, settings).show && at(12000, value, settings).show, "The warning ignored the 2 s span");
+    auto fresh = value; fresh.unprotected_since_ms = 0;
+    check(!at(20000, fresh, settings).show, "A protected frame showed the warning");
+    const auto sdr = at(12000, value, settings);
+    check(sdr.try_hdr && sdr.try_fg, "SDR with a layer without alpha and FG off did not hint at HDR and FG");
+    auto hdr = value; hdr.sdr_output = false; hdr.fg.enabled = true; hdr.retained_alpha_ready = true;
+    const auto hdr_fg = at(12000, hdr, settings);
+    check(hdr_fg.show && !hdr_fg.try_hdr && !hdr_fg.try_fg, "HDR with FG on hinted at HDR or FG");
+    auto opaque_scene = value; // SDR without a layer (Dead Space): HDR would not help.
+    opaque_scene.coverage.evidence.ui_layer = false;
+    opaque_scene.coverage.evidence.candidates = 8;
+    opaque_scene.coverage.evidence.alpha_invalid = {};
+    check(!at(12000, opaque_scene, settings).try_hdr, "SDR without a layer set aside hinted at HDR");
+    auto unknown_fg = value; unknown_fg.fg.known = false;
+    check(!at(12000, unknown_fg, settings).try_fg, "Unknown FG hinted at FG");
+    auto blocked = value;
+    blocked.fg.enabled = true; blocked.retained_alpha_ready = false;
+    check(blocked.blocked_by_fg() && !at(12000, blocked, settings).show, "A blocked FG capture showed this warning too");
+    auto edited = settings;
+    edited.depth_view = 1;
+    check(!at(12000, value, edited).show, "Depth preview showed the warning");
+    edited = settings; edited.strength = 0.f;
+    check(!at(12000, value, edited).show, "2D at zero strength showed the warning");
+    edited = settings; edited.enabled = false;
+    check(!at(12000, value, edited).show, "Disabled Game 3D showed the warning");
+    edited = settings; edited.ui_protection = source_alpha_mode::on;
+    check(!at(12000, value, edited).show, "Manual On showed the warning");
+    check(!at(12000, value, settings, automatic_phase::calibrating).show, "A 2D phase showed the warning");
+    const std::string_view headline = ui_protection_warning_text;
+    char span[32];
+    std::snprintf(span, sizeof(span), "for %g s.", double(alpha_trust_span_ms) / 1000.0);
+    check(headline.find("HUD") != std::string_view::npos && std::string_view(ui_protection_warning_tooltip()).find(span) != std::string_view::npos,
+      "The warning text lost what the user sees or its span");
+  }
+
   void source_alpha_applied_status_is_transient_and_mode_scoped() {
     alpha_auto_policy session;
     const auto generic = session.decision();
@@ -594,6 +696,7 @@ int main() {
     source_alpha_mode_edits_control_the_session();
     source_alpha_fg_mode_survives_observation_gaps();
     source_alpha_selection_reports_capture_prerequisite();
+    ui_protection_warning_follows_unprotected_rendered_frames();
     source_alpha_applied_status_is_transient_and_mode_scoped();
     persistence_survives_runtime_recreation();
     config_failure_and_lifetime_do_not_commit_stale_values();
@@ -602,7 +705,7 @@ int main() {
     measured_statistics_follow_applied_and_held_scale_ownership();
     positive_flat_zero_target_does_not_invent_gain_tracking();
     projection_conversion_is_independent_and_retained_with_its_reference();
-    std::puts("PASS native Game 3D controls: defaults, automatic persistence, independent resets, runtime lifetime, output status and scale/conversion");
+    std::puts("PASS native Game 3D controls: defaults, automatic persistence, independent resets, runtime lifetime, output status, UI protection warning and scale/conversion");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

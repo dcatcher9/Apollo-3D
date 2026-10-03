@@ -47,11 +47,21 @@ namespace sunshine_game3d {
   // The first trusted alpha channel offered decides alone, whatever else is
   // offered beside it; otherwise every candidate bit can matter. Flags qualify
   // only the UI color alpha channel (bit 2). A status sample still describes
-  // later frames while this key is unchanged.
+  // later frames while this key is unchanged. A trusted offscreen UI layer
+  // does not decide alone: by its own pixels it decides, blocks presented
+  // alpha or is set aside (ui_detection::admitted_candidates), and a set-aside
+  // layer releases presented alpha by its trust, so its key holds the trust
+  // of every alpha channel. Not which presented channels a Present offers:
+  // with frame generation the tagged Backbuffer comes with real Presents only,
+  // and a key that changed with it discarded every sample, so the generated
+  // Present's hold never saw the sample that set the layer aside (Stellar
+  // Blade in SDR). Those Presents hold the previous inputs instead.
   inline std::uint64_t detection_decision_key(std::uint32_t candidates, std::uint32_t flags, std::uint32_t trusted) {
     const auto decisive = candidates & trusted & 15u;
     if (!decisive) return std::uint64_t(flags) << 32 | candidates;
     const auto first = decisive & (0u - decisive);
+    if (first == 2u && (flags & ui_detection::stored_late_layer))
+      return std::uint64_t(flags) << 32 | std::uint64_t(trusted & 15u) << 16 | std::uint64_t(first) << 8;
     return std::uint64_t(first == 2u ? flags : 0u) << 32 | std::uint64_t(first) << 8;
   }
 

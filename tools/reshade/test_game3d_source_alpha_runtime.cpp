@@ -1949,6 +1949,165 @@ namespace {
     report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 inexact_after_exact_hold=1 trusted_alpha=1 trusted_missing_hold=1 trust_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
     std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, bounded generated-present hold, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, bounded inexact-frame hold, trusted alpha channels with a bounded hold when missing and revocation, and manual Off without review");
   }
+  // A layer without alpha is no layer (game3d_ui_detection_contract.h,
+  // layer_without_alpha). Stellar Blade draws its SDR scene image into the
+  // cleared target that holds its UI layer in HDR: color everywhere, alpha
+  // nowhere. Detection proceeds as if no layer were offered, while a tagged UI
+  // color keeps blocking presented alpha and a layer with alpha, or with color
+  // on at most 1% of pixels, still decides or blocks.
+  void verify_layer_without_alpha(fixture &gpu, std::ostream &report) {
+    using namespace sunshine_game3d;
+    const auto pixels = size_t(gpu.width) * gpu.height;
+    const auto bpp = gpu.color == 2 ? 8u : 4u;
+    std::vector<float> hud(pixels, 0.f), none(pixels, 0.f);
+    for (unsigned y = gpu.height / 4; y < gpu.height * 3 / 4; ++y)
+      for (unsigned x = gpu.width / 3; x < gpu.width / 2; ++x) hud[size_t(y) * gpu.width + x] = 1.f;
+    // The presented frame: the scene with HUD alpha, as current color and as
+    // the tagged Backbuffer; an opaque copy is a Backbuffer without UI alpha.
+    gpu.pattern(hud);
+    const auto presented = gpu.original;
+    auto opaque = presented, scene = presented;
+    for (size_t i = 0; i != pixels; ++i) {
+      if (gpu.color == 2) {
+        const auto one = half_bits(1.f), zero = half_bits(0.f);
+        std::memcpy(opaque.data() + i * bpp + 6, &one, 2);
+        std::memcpy(scene.data() + i * bpp + 6, &zero, 2);
+      } else {
+        opaque[i * bpp + 3] = 255;
+        scene[i * bpp + 3] = 0;
+      }
+    }
+    std::vector<ComPtr<ID3D11Texture2D>> textures;
+    std::vector<ComPtr<ID3D11ShaderResourceView>> views;
+    const auto view_of = [&](const std::vector<unsigned char> &bytes) {
+      D3D11_TEXTURE2D_DESC desc{}; gpu.source->GetDesc(&desc); desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      D3D11_SUBRESOURCE_DATA data{bytes.data(), gpu.width * bpp, 0};
+      ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> view;
+      checked(gpu.device->CreateTexture2D(&desc, &data, &texture), "layer-without-alpha texture");
+      checked(gpu.device->CreateShaderResourceView(texture.Get(), nullptr, &view), "layer-without-alpha view");
+      const api::resource_view result{reinterpret_cast<std::uint64_t>(view.Get())};
+      textures.push_back(std::move(texture)); views.push_back(std::move(view)); return result;
+    };
+    // A layer of gray color and alpha per pixel in the fixture's format.
+    const auto layer_of = [&](const std::function<std::array<float, 2>(size_t)> &value) {
+      std::vector<unsigned char> bytes(pixels * bpp);
+      for (size_t i = 0; i != pixels; ++i) {
+        const auto pixel = value(i);
+        const float channels[4]{pixel[0], pixel[0], pixel[0], pixel[1]};
+        for (unsigned c = 0; c != 4; ++c) {
+          if (gpu.color == 2) { const auto half = half_bits(channels[c]); std::memcpy(bytes.data() + i * bpp + c * 2, &half, 2); }
+          else bytes[i * bpp + c] = static_cast<unsigned char>(std::lround(std::clamp(channels[c], 0.f, 1.f) * 255));
+        }
+      }
+      return view_of(bytes);
+    };
+    // The scene image with zero alpha: color on every pixel, alpha nowhere.
+    const auto scene_layer = view_of(scene);
+    const auto backbuffer = view_of(presented), opaque_backbuffer = view_of(opaque);
+    const size_t speck = pixels / 200; // 0.5% of pixels.
+    const auto speck_layer = layer_of([&](size_t i) { return std::array<float, 2>{i < speck ? 1.f : 0.f, 0.f}; });
+    // HUD alpha with color beside it on the top eighth of the frame: ambiguous.
+    const auto ambiguous_layer = layer_of([&](size_t i) {
+      return std::array<float, 2>{hud[i] > 0.f || i < pixels / 8 ? 1.f : 0.f, hud[i]};
+    });
+    const auto empty_layer = layer_of([](size_t) { return std::array<float, 2>{0.f, 0.f}; });
+    const auto layer_flags = ui_detection::layer_detection_flags(gpu.color == 2);
+
+    alpha_auto_source source;
+    source.now_ms = source.tick_ms = 1000;
+    source.epoch = 37; source.revision = 1; source.sequence = 1;
+    ui_detection_inputs inputs;
+    ui_render_input ui;
+    ui.automatic = &source; ui.detection = &inputs;
+    gpu.original = presented;
+    gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), gpu.width * bpp, 0);
+    const auto frame = [&](const char *label, const std::vector<float> *want, std::uint32_t source_kind = ~0u) {
+      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+      gpu.renderer.begin_present();
+      gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      if (!want) return;
+      const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
+      for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x) {
+        const auto value = selected.channel(x, y, 0);
+        require(std::isfinite(value) && (value > 0.f) == ((*want)[size_t(y) * gpu.width + x] > 0.f),
+          std::string(label) + ": wrong UI mask");
+      }
+      // The sample read this frame is the previous frame's, of the same inputs.
+      const auto decided = gpu.renderer.consumed_alpha_auto().source_kind;
+      if (source_kind != ~0u)
+        require(decided == source_kind, std::string(label) + ": wrong deciding source " + std::to_string(decided));
+    };
+    const auto twice = [&](const char *label, const std::vector<float> &want, std::uint32_t source_kind) {
+      frame(nullptr, nullptr);
+      frame(label, &want, source_kind);
+    };
+    const auto layout = [&](alpha_auto_policy &policy, std::uint32_t trusted, api::resource_view slot1, std::uint32_t flags,
+        api::resource_view slot2, bool current) {
+      policy.restore_trusted_alpha(trusted);
+      source.session = &policy;
+      inputs = {}; inputs.masks[1] = slot1; inputs.color_alpha_flags = flags;
+      inputs.masks[2] = slot2; inputs.current_color = current;
+    };
+    const std::uint32_t layer_trust = 1u << alpha_auto_policy::ui_layer_source;
+    // (a) A trusted layer without alpha blocks nothing: untrusted current alpha
+    // with a HUD decides.
+    alpha_auto_policy a;
+    layout(a, layer_trust, scene_layer, layer_flags, {}, true);
+    twice("a trusted layer without alpha lets current alpha decide", hud, 4);
+    // (b) The same pixels as a trusted tagged UI color: presented alpha stays
+    // out, so a tag's failure never lets presented alpha decide.
+    alpha_auto_policy b;
+    layout(b, 2u, scene_layer, 0u, {}, true);
+    twice("a trusted tagged UI color without alpha keeps presented alpha out", none, 2);
+    // (c) Color without alpha on at most 1% of pixels is glow: the trusted
+    // layer still decides, here no UI.
+    alpha_auto_policy c;
+    layout(c, layer_trust, speck_layer, layer_flags, {}, true);
+    twice("a trusted layer with sparse glow still decides", none, 2);
+    // (d) A trusted layer with UI alpha and more than 1% invalid pixels is
+    // ambiguous: no mask, and presented alpha stays out.
+    alpha_auto_policy d;
+    layout(d, layer_trust, ambiguous_layer, layer_flags, {}, true);
+    twice("an ambiguous trusted layer still blocks presented alpha", none, 0);
+    // (e) A clean empty trusted layer means no UI.
+    alpha_auto_policy e;
+    layout(e, layer_trust, empty_layer, layer_flags, {}, true);
+    twice("a clean empty trusted layer decides no UI", none, 2);
+    // (f) Beside a set-aside layer, presented alpha decides only below the
+    // full-frame bound, even when trusted: no mask rather than a flat frame.
+    alpha_auto_policy f;
+    layout(f, layer_trust | 4u, scene_layer, layer_flags, opaque_backbuffer, false);
+    twice("a trusted opaque Backbuffer beside a layer without alpha flattens nothing", none, 0);
+    // Stellar Blade in SDR with FG: the trusted Backbuffer's HUD alpha decides.
+    alpha_auto_policy g;
+    layout(g, layer_trust | 4u, scene_layer, layer_flags, backbuffer, false);
+    twice("a trusted Backbuffer beside a layer without alpha decides", hud, 3);
+    frame("the trusted Backbuffer keeps deciding", &hud, 3);
+    // (g) A generated Present without the tagged Backbuffer holds its mask: the
+    // trusted layer the latest sample set aside does not decide by itself.
+    inputs.masks[2] = {}; inputs.hold_previous = true;
+    frame("a generated Present holds the Backbuffer mask", &hud);
+    require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::held,
+      "A trusted layer without alpha stopped the generated-present hold");
+    // From no sample (a new epoch discards it), as frame generation presents:
+    // the tagged Backbuffer comes with real Presents only. Its absence keeps
+    // the decision key, so a sample completes and every later generated
+    // Present holds the Backbuffer mask instead of dropping to no mask.
+    ++source.epoch;
+    for (unsigned i = 0; i != 6; ++i) {
+      inputs.masks[2] = backbuffer; inputs.hold_previous = false;
+      frame("a real Present with the Backbuffer decides", &hud);
+      inputs.masks[2] = {}; inputs.hold_previous = true;
+      if (i < 2) { frame(nullptr, nullptr); continue; }
+      frame("an alternating generated Present holds the Backbuffer mask", &hud);
+      require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::held,
+        "Alternating generated Presents never held the Backbuffer mask beside a layer without alpha");
+    }
+    inputs = {};
+    report << "layer-without-alpha D3D11 current_alpha_decides=1 tag_blocks=1 sparse_glow_decides=1 ambiguous_blocks=1 "
+              "empty_decides=1 full_frame_guard=1 backbuffer_decides=1 hold_kept=1 alternating_hold=1\n";
+    std::puts("PASS D3D11 layer without alpha: a trusted layer with color but no alpha is set aside so presented alpha decides below the full-frame bound and holds stay; a tagged UI color, a layer with sparse glow, an ambiguous layer and a clean empty layer keep their decisions");
+  }
   // An offscreen UI layer fills the UI color slot with its stored flags, never
   // a per-frame bit; a tagged UIColorAndAlpha carries none. Dump 3D records
   // the detection constants behind the consumed mask and the pin markers.
@@ -2530,6 +2689,7 @@ int main(int argc, char **argv) {
     verify_automatic_source_alpha(gpu, report);
     verify_automatic_hudless(gpu, report);
     verify_layer_detection_dump(gpu, report, directory / "layer-detection-dump");
+    verify_layer_without_alpha(gpu, report);
     verify_hidden_scene(gpu, report);
     verify_normalized_ui_input(gpu, report);
     verify_mask_upload_recovery(gpu);

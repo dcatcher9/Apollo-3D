@@ -118,13 +118,16 @@ namespace {
     entry.status = status;
   }
 
-  void publish_source_alpha_ui(api::effect_runtime *runtime, sunshine_game3d::source_alpha_ui_decision value) {
+  void publish_source_alpha_ui(api::effect_runtime *runtime, sunshine_game3d::source_alpha_ui_decision value,
+      bool game3d_enabled = true) {
     const auto now = GetTickCount64();
     bool write_log = false;
     std::uint64_t shadow_hidden_ms = 0;
     {
       std::lock_guard<std::mutex> lock(automatic_ui_mutex);
       auto &entry = automatic_ui[runtime];
+      value.unprotected_since_ms =
+        sunshine_game3d::next_unprotected_since(value, game3d_enabled, entry.source_alpha.unprotected_since_ms, now);
       entry.source_alpha = value;
       entry.shadow_hidden_max_ms = std::max(entry.shadow_hidden_max_ms, value.coverage.evidence.shadow_hidden_ms);
       const auto &last = entry.logged_source_alpha;
@@ -922,14 +925,17 @@ namespace {
       struct publish_alpha_decision {
         api::effect_runtime *runtime;
         const sunshine_game3d::source_alpha_ui_decision &value;
-        ~publish_alpha_decision() { publish_source_alpha_ui(runtime, value); }
-      } publish_alpha{runtime, source_alpha};
+        bool game3d_enabled;
+        ~publish_alpha_decision() { publish_source_alpha_ui(runtime, value, game3d_enabled); }
+      } publish_alpha{runtime, source_alpha, settings.enabled};
       if (!settings.enabled) {
         sunshine_game3d::ui_input::suspend(runtime);
         if (diagnostic_owner) debug_dump_.unavailable("The add-on Game 3D renderer is disabled for this foreground game.");
         sunshine_depth::set_raw_scene_request(runtime, 0, false);
         return;
       }
+      // For the overlay's UI protection hints; published with the decision.
+      source_alpha.sdr_output = swapchain->get_color_space() == api::color_space::srgb;
       // Everything below runs inside the game's Present, so it is latency.
       struct present_timer {
         publisher_t &self; api::effect_runtime *runtime;

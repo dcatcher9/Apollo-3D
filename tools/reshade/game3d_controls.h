@@ -3,6 +3,7 @@
 
 #include "game3d_alpha_auto.h"
 #include "game3d_ui_qualification.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -85,6 +86,11 @@ namespace sunshine_game3d {
     source_alpha_mode mode = source_alpha_mode::automatic;
     source_alpha_input input = source_alpha_input::none;
     bool rendered = false, applied = false;
+    // The swapchain presents SDR (sRGB), for the overlay's hints only.
+    bool sdr_output = false;
+    // Since when (GetTickCount64) consecutive rendered frames were unprotected;
+    // zero while protected. The exporter owns it (next_unprotected_since).
+    std::uint64_t unprotected_since_ms = 0;
     bool fg_active() const { return fg.known && fg.enabled; }
     bool effective() const { return source_alpha_ui_for_present(requested, fg_active(), retained_alpha_ready) && (!automatic || coverage.enabled); }
     bool blocked_by_fg() const { return requested && fg_active() && !retained_alpha_ready; }
@@ -102,7 +108,45 @@ namespace sunshine_game3d {
       if (coverage.enabled) return "detected";
       return coverage.state == alpha_auto_state::automatic_off ? "quality_rejected" : "checking_quality";
     }
+    // Auto rendered this frame without a UI mask while UI may be on screen: no
+    // source decided (coverage.enabled), and either no UI source was offered
+    // or no dedicated UI channel (0 UI alpha, 1 UI color or UI layer) was
+    // offered clean and empty, which would mean no UI on screen. A trusted
+    // channel deciding empty is detected, not unprotected.
+    // tools/reshade/game3d_log_report.py mirrors this definition
+    // (docs/reshade-sbs.md, UI protection).
+    bool unprotected() const {
+      if (mode != source_alpha_mode::automatic || !requested || !rendered || coverage.enabled) return false;
+      if (!qualification.available) return true;
+      if (coverage.state != alpha_auto_state::automatic_off) return false;
+      const auto &evidence = coverage.evidence;
+      for (std::uint32_t slot = 0; slot != 2; ++slot)
+        if ((evidence.candidates >> slot & 1u) && !evidence.alpha_covered[slot] && !evidence.alpha_invalid[slot]) return false;
+      return true;
+    }
+    // The latest sample's offscreen UI layer had color but no alpha, so
+    // detection set it aside (ui_detection::layer_without_alpha).
+    bool layer_set_aside() const {
+      const auto &evidence = coverage.evidence;
+      return evidence.ui_layer && (evidence.candidates & 2u) &&
+        ui_detection::layer_without_alpha(ui_detection::stored_late_layer, evidence.alpha_covered[1], evidence.alpha_invalid[1],
+          coverage.pixels);
+    }
   };
+  // The start of the current unprotected run after publishing `value`: kept
+  // while unprotected, cleared by a decided rendered frame (a mask, or a clean
+  // empty UI channel showing no UI), a manual mode, UI protection off or Game
+  // 3D off. Neither a Present that rendered nothing nor one whose status
+  // sample is still pending (collecting after a decision key, revision or
+  // viewport change) starts or ends the run, so depth gaps and sample churn do
+  // not restart it.
+  inline std::uint64_t next_unprotected_since(const source_alpha_ui_decision &value, bool game3d_enabled,
+      std::uint64_t previous, std::uint64_t now_ms) {
+    if (!game3d_enabled || value.mode != source_alpha_mode::automatic || !value.requested) return 0;
+    if (value.unprotected()) return previous ? previous : std::max<std::uint64_t>(now_ms, 1);
+    if (!value.rendered) return previous;
+    return value.coverage.enabled || value.coverage.state == alpha_auto_state::automatic_off ? 0 : previous;
+  }
   struct source_alpha_ui_policy {
     source_alpha_ui_decision update(bool requested, frame_generation_mode observed, bool observer_active) {
       // Contention or ambiguous/lost observations cannot turn a known FG mode

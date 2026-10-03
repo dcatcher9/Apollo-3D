@@ -704,9 +704,13 @@ namespace sunshine_game3d {
     void observe_scene(alpha_auto_decision &sample, bool actionable) {
       using ui_detection::scene_verdict;
       auto &evidence = sample.evidence;
-      const auto gates = ui_detection::scene_gates_of(sample.source_kind, evidence.candidates, evidence.trusted_alpha,
-        evidence.ui_layer ? ui_detection::stored_late_layer : 0u, sample.pixels, evidence.alpha_invalid,
-        evidence.alpha_opaque, evidence.hudless_changed);
+      // As the shader decided: a layer without alpha is no layer, so it is no
+      // overlay either.
+      const auto layer_flags = evidence.ui_layer ? ui_detection::stored_late_layer : 0u;
+      const auto candidates = ui_detection::admitted_candidates(evidence.candidates, layer_flags, evidence.alpha_covered[1],
+        evidence.alpha_invalid[1], sample.pixels);
+      const auto gates = ui_detection::scene_gates_of(sample.source_kind, candidates, evidence.trusted_alpha,
+        layer_flags, sample.pixels, evidence.alpha_invalid, evidence.alpha_opaque, evidence.hudless_changed);
       scene_gate_open = gates.layer || gates.hudless;
       // A slot offered below opaque is an overlay again.
       scene_refuted_slots &= ~gates.overlay_slots;
@@ -1155,7 +1159,14 @@ namespace sunshine_game3d {
     // revision's captures until the game tags again, which left the UI
     // unprotected for a frame. A channel gone for longer stops being held.
     const bool trusted_missing = (d.detection_bits & trusted & 15u & ~bits) != 0;
-    const bool hold = !(bits & trusted & 15u) && (candidates.hold_previous || (inexact && d.detection_exact) || trusted_missing) &&
+    // A trusted layer in the UI color slot that the latest sample set aside (a
+    // layer without alpha, ui_detection::admitted_candidates) decides nothing
+    // by itself, so it does not stop holding the mask another channel made.
+    const auto &latest = d.detection_latest;
+    const uint32_t admitted = ui_detection::admitted_candidates(15u,
+      layer_slot && latest.evidence.ui_layer ? ui_detection::stored_late_layer : 0u,
+      latest.evidence.alpha_covered[1], latest.evidence.alpha_invalid[1], latest.pixels);
+    const bool hold = !(bits & trusted & admitted) && (candidates.hold_previous || (inexact && d.detection_exact) || trusted_missing) &&
       d.detection_mask_ready &&
       d.detection_holds < ui_detection_inputs::max_held_presents;
     uint32_t flags = (bits & 2u) ? candidates.color_alpha_flags : 0u;
