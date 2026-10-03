@@ -339,6 +339,18 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME reshade_game3d_ui_layer COMMAND reshade_game3d_ui_layer_tests)
   set_tests_properties(reshade_game3d_ui_layer PROPERTIES TIMEOUT 15)
+  # The S1 selection contract: the real detection reduce on a D3D11 device
+  # (WARP when no hardware adapter) against ui_selection::decide.
+  add_executable(reshade_game3d_ui_selection_contract_tests test_game3d_ui_selection_contract.cpp)
+  target_compile_features(reshade_game3d_ui_selection_contract_tests PRIVATE cxx_std_17)
+  target_compile_definitions(reshade_game3d_ui_selection_contract_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+    SUNSHINE_GAME3D_NATIVE_HLSL="${CMAKE_CURRENT_SOURCE_DIR}/game3d_native.hlsl")
+  target_link_libraries(reshade_game3d_ui_selection_contract_tests PRIVATE d3d11 d3dcompiler)
+  if(MINGW)
+    target_link_options(reshade_game3d_ui_selection_contract_tests PRIVATE -static)
+  endif()
+  add_test(NAME reshade_game3d_ui_selection_contract COMMAND reshade_game3d_ui_selection_contract_tests)
+  set_tests_properties(reshade_game3d_ui_selection_contract PROPERTIES TIMEOUT 60)
   add_executable(reshade_game3d_shader_cache_tests test_game3d_shader_cache.cpp)
   target_compile_features(reshade_game3d_shader_cache_tests PRIVATE cxx_std_17)
   target_include_directories(reshade_game3d_shader_cache_tests SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")

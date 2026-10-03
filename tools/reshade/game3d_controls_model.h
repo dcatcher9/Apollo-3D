@@ -106,7 +106,7 @@ namespace sunshine_game3d {
   // the span over which detection itself earns or loses confidence, while the
   // game shows 3D. Hints name the game settings that commonly provide a mask,
   // only where the evidence fits them: HDR when the SDR frame's offscreen UI
-  // layer held color without alpha, Frame Generation when the game reports it
+  // layer had color but no alpha, Frame Generation when the game reports it
   // off. A blocked FG capture has its own text.
   struct ui_protection_warning {
     bool show = false, try_hdr = false, try_fg = false;
@@ -133,7 +133,7 @@ namespace sunshine_game3d {
       std::isfinite(settings.strength) && settings.strength > 0.f && !decision.blocked_by_fg() &&
       decision.unprotected_since_ms && now_ms >= decision.unprotected_since_ms &&
       now_ms - decision.unprotected_since_ms >= alpha_trust_span_ms;
-    result.try_hdr = result.show && decision.sdr_output && decision.layer_set_aside();
+    result.try_hdr = result.show && decision.sdr_output && decision.layer_without_alpha();
     result.try_fg = result.show && decision.fg.known && !decision.fg.enabled;
     return result;
   }

@@ -4,6 +4,7 @@
 #include "game3d_controls.h"
 #include "game3d_renderer.h"
 #include "game3d_ui_qualification.h"
+#include <optional>
 #include <string>
 
 namespace sunshine_game3d::ui_input {
@@ -37,6 +38,10 @@ namespace sunshine_game3d::ui_input {
     reshade::api::resource_view view{};
     ui_mask_channel channel = ui_mask_channel::alpha;
     alpha_auto_source observation;
+    // Manual On's explicit first filtered capture (S2): its own provenance,
+    // which the adaptive scene match keeps, since the renderer applies that
+    // capture directly where detection cannot run. Empty otherwise.
+    std::optional<alpha_auto_source> explicit_origin;
     ui_detection_inputs detection;
     bool automatic_detection{};
     std::string source_metadata, capture_metadata;

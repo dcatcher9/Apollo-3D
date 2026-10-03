@@ -214,15 +214,19 @@ namespace {
     alpha_auto_source input;
     input.epoch = 17; input.revision = 23; input.viewport = 1;
     input.now_ms = input.tick_ms = 1000; input.sequence = 1; input.session = &session;
+    // The acceptance key (A1) of this fixture's current color alpha.
+    const auto current_key = ui_selection::signature{ui_selection::kind::current,
+      std::uint32_t(api::format_to_default_typed(static_cast<api::format>(fixture.source_format), 0)), fixture.color}.key();
     // Exact counters (game3d_ui_counters.h): each Auto frame's tick and the
-    // source its pattern decides (4 selective current alpha, 0 otherwise).
+    // source it decides: 4 once current alpha is accepted, whatever its
+    // coverage (S1, P1), and 0 before.
     std::vector<std::pair<std::uint64_t, std::uint32_t>> counted;
-    bool counting = true;
+    bool counting = true, accepted = false;
     const auto verify = [&](unsigned mask, bool eligible, bool enabled, bool inspect_mask = true) {
       pattern(mask);
       input.now_ms += 100; input.tick_ms = input.now_ms; ++input.sequence;
       render(eligible, &input);
-      if (counting) counted.emplace_back(input.now_ms, mask == 1 ? 4u : 0u);
+      if (counting) counted.emplace_back(input.now_ms, accepted ? 4u : 0u);
       equal(enabled ? on[mask] : off[mask], "D3D12 automatic mask differs from explicit field/SBS reference");
       if (inspect_mask) {
         const auto resource = renderer.diagnostics().ui_source;
@@ -233,17 +237,25 @@ namespace {
         require(bytes.size() == size_t(width) * height * sizeof(float), "D3D12 automatic mask size differs");
         for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
           float value{}; std::memcpy(&value, bytes.data() + (size_t(y) * width + x) * sizeof(float), sizeof(float));
-          const bool wanted = enabled && mask == 1 && x >= width / 3 && x < width / 2 &&
-            y >= height / 4 && y < height * 3 / 4;
+          const bool wanted = enabled && (mask == 0 || (mask == 1 && x >= width / 3 && x < width / 2 &&
+            y >= height / 4 && y < height * 3 / 4));
           require(value == (wanted ? 1.f : 0.f), "D3D12 current GPU mask retained an unsuitable frame");
         }
       }
     };
-    // Alternate good/bad inputs without review or a CPU policy observation.
-    // An asynchronous status from the previous frame may never authorize pixels.
+    // Before acceptance nothing decides, however selective (S1). Acceptance an
+    // earlier session earned is restored by its key and decides from the
+    // first frame. Then alternate inputs without review or a CPU policy
+    // observation: the accepted source decides each frame's own coverage,
+    // flat when full. An asynchronous status from the previous frame may never
+    // authorize pixels.
     sunshine_game3d::gpu_timing timing;
     renderer.take_gpu_timing(timing); // Time the automatic frames alone.
-    for (const unsigned mask : {1u, 0u, 2u, 1u}) verify(mask, true, mask == 1);
+    verify(1, true, false);
+    verify(1, true, false);
+    require(session.restore(current_key).restored == 1, "D3D12 current-alpha key was not restored");
+    accepted = true;
+    for (const unsigned mask : {1u, 0u, 2u, 1u}) verify(mask, true, mask != 2);
     verify(1, true, true);
     require(renderer.consumed_alpha_auto().enabled && renderer.consumed_alpha_auto().source_kind == 4 &&
         renderer.consumed_alpha_auto().pixels == size_t(width) * height,
@@ -264,8 +276,8 @@ namespace {
     counting = false;
     {
       // The session's totals are exact through the last committed sample: every
-      // frame up to it detected, decided as its pattern says, and an untrusted
-      // current alpha decided as inferred coverage; nothing was held.
+      // frame up to it detected and decided as scripted, unaccepted current
+      // alpha never as inferred coverage; nothing was held.
       const auto counts = session.counters();
       std::uint64_t frames = 0, current = 0;
       for (const auto &[tick, decided] : counted)
@@ -273,11 +285,12 @@ namespace {
       require(counts.reconciled() && frames + 1 >= counted.size() && counts[ui_counter::samples] &&
           counts[ui_counter::auto_frames] == frames && counts[ui_counter::detection_frames] == frames &&
           counts.decided(4) == current && counts.decided(0) == frames - current &&
-          counts[ui_counter::untrusted_inferred] == current &&
-          counts[ui_counter::none + ui_no_mask::ambiguous] == frames - current && !counts.held() && !counts.inactive() &&
-          !counts[ui_counter::trusted_full] && !counts[ui_counter::presented_over_dedicated] && !session.trusted_alpha(),
+          !counts[ui_counter::untrusted_inferred] && current && frames > current &&
+          counts[ui_counter::none + ui_no_mask::unaccepted] == frames - current && !counts.held() && !counts.inactive() &&
+          !counts[ui_counter::trusted_full] && !counts[ui_counter::presented_over_dedicated] &&
+          counts[ui_counter::trust_restored] == 1 && session.stored() == current_key,
         "D3D12 exact UI counters differ from the scripted Auto frames");
-      std::printf("PASS D3D12 exact UI counters: %llu Auto frames through %llu ms reconcile; decided 4=%llu 0=%llu, untrusted inferred and ambiguous no-mask frames exact\n",
+      std::printf("PASS D3D12 exact UI counters: %llu Auto frames through %llu ms reconcile; decided 4=%llu 0=%llu, unaccepted no-mask frames exact and no inferred source decided unaccepted\n",
         static_cast<unsigned long long>(frames), static_cast<unsigned long long>(counts.through_ms),
         static_cast<unsigned long long>(current), static_cast<unsigned long long>(frames - current));
     }
@@ -306,7 +319,7 @@ namespace {
       verify(mask, true, false, false);
       require(renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off, "D3D12 Manual Off was lost");
       session.set_automatic();
-      verify(mask, true, mask == 1);
+      verify(mask, true, mask != 2);
     }
     input.session = nullptr;
     verify(1, true, false, false);
@@ -319,7 +332,7 @@ namespace {
     require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == original,
       "D3D12 alpha regression failed to restore its original source");
     report << "automatic-ui D3D12 full_scene_rejected=1 empty_rejected=1 selective_without_review=1 immediate_bad_frame_rejection=1 resolved_gpu_mask_checked=1 missing_capture_rejected=1 renderer_recreation=1 manual_override=1 explicit_field_and_sbs_parity=1 asynchronous_readback=1\n";
-    std::puts("PASS D3D12 automatic UI: full/empty rejected immediately, selective exact GPU mask and field/SBS without review, native readback, manual modes and replay parity");
+    std::puts("PASS D3D12 automatic UI: nothing decides before acceptance, then the restored source decides each frame's coverage (selective, flat or empty) with the exact GPU mask and field/SBS without review, native readback, manual modes and replay parity");
   }
 
   void check_automatic_hudless_d3d12(fixture_t &fixture, sunshine_game3d::renderer &renderer, std::ostream &report) {
@@ -409,7 +422,15 @@ namespace {
     create_candidate(3, DXGI_FORMAT_R32_FLOAT, mask.data());
     const std::vector<float> full(count, 1.f);
     create_candidate(4, DXGI_FORMAT_R32_FLOAT, full.data());
+    // The fixture's HUD-less pair is accepted as an earlier session earned it
+    // (A1); only accepted candidates decide (S1).
+    const auto key = [&](ui_selection::kind kind, DXGI_FORMAT format) {
+      return ui_selection::signature{kind, std::uint32_t(api::format_to_default_typed(static_cast<api::format>(format), 0)),
+        fixture.color}.key();
+    };
     alpha_auto_policy policy;
+    require(policy.restore(key(ui_selection::kind::hudless, fixture.source_format)).restored == 1,
+      "D3D12 HUD-less key was not restored");
     alpha_auto_source observation;
     observation.session = &policy; observation.now_ms = observation.tick_ms = 40000;
     observation.sequence = 1; observation.epoch = 81; observation.revision = 1;
@@ -439,11 +460,15 @@ namespace {
     inputs.current_color = true;
     inputs.masks[1] = inputs.masks[2] = views[2]; inputs.hudless = views[0];
     ui.detection = &inputs;
-    run(true, "D3D12 opaque UI/backbuffer candidates prevented HUDless fallback");
+    run(true, "D3D12 unaccepted opaque UI/backbuffer candidates prevented HUDless fallback");
     inputs.hudless = views[1]; run(false, "D3D12 all-unsuitable candidates did not produce Off");
-    inputs.masks[0] = views[3]; run(true, "D3D12 explicit R32 alpha did not take priority over unsuitable RGB inputs");
-    inputs.masks[0] = views[4]; run(false, "D3D12 opaque R32 alpha was accepted");
-    inputs.hudless = views[0]; run(true, "D3D12 all opaque alpha candidates did not fall through to HUDless");
+    inputs.masks[0] = views[4]; run(false, "D3D12 an unaccepted opaque R32 UIAlpha decided");
+    inputs.hudless = views[0]; run(true, "D3D12 an unaccepted opaque R32 UIAlpha blocked the HUD-less pair");
+    require(policy.restore(key(ui_selection::kind::ui_alpha, DXGI_FORMAT_R32_FLOAT)).restored == 1,
+      "D3D12 UIAlpha key was not restored");
+    inputs.masks[0] = views[3]; inputs.hudless = views[1];
+    run(true, "D3D12 accepted R32 UIAlpha did not decide its HUD over unsuitable RGB inputs");
+    inputs.masks[0] = {}; inputs.hudless = views[0];
     policy.set_manual(false); run(false, "D3D12 Manual Off did not override valid HUDless", false);
     require(renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off, "D3D12 HUDless lost Manual Off state");
     policy.set_automatic(); run(true, "D3D12 Auto resume required manual review");
@@ -451,8 +476,8 @@ namespace {
     for (const auto view : views) device->destroy_resource_view(view);
     upload_source(original); write_native_source(fixture, backbuffer);
     require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == original, "D3D12 HUDless fixture did not restore source");
-    report << "automatic-hudless D3D12 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_mismatch_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 all_candidate_descriptors=1 flattened_explicit_fallback=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
-    std::puts("PASS D3D12 automatic HUDless: exact paired HUD mask, immediate mismatched/empty rejection, all native candidate descriptors, priority/fallback and Manual Off");
+    report << "automatic-hudless D3D12 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_mismatch_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 all_candidate_descriptors=1 unaccepted_never_blocks=1 accepted_ui_alpha_decides=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
+    std::puts("PASS D3D12 automatic HUDless: exact paired HUD mask from an accepted pair, immediate mismatched/empty rejection, all native candidate descriptors, unaccepted candidates never block, an accepted R32 UIAlpha decides, and Manual Off");
   }
 
   void check_adaptive_ui_d3d12(fixture_t &fixture, sunshine_game3d::renderer &renderer,
@@ -1263,9 +1288,19 @@ namespace {
       observation.now_ms = observation.tick_ms = 400000 + case_index * 1000;
       observation.sequence = 1; observation.epoch = 300 + case_index; observation.revision = 1;
       observation.retained = observation.dedicated_mask = true; observation.session = &session;
-      const bool selective = covered > 0 && covered < size_t(width) * height;
-      equal(render(true, selected, channel, &observation), selective ? reference_on : reference_off,
-        "Automatic typed UI did not immediately accept selective or reject full/empty coverage");
+      // Before acceptance nothing decides (S1). Accepted by the key an earlier
+      // session earned (A1), the typed source decides its own coverage, a full
+      // one as a flat frame (P1).
+      const auto key = [&](ui_selection::kind kind) {
+        return ui_selection::signature{kind, std::uint32_t(api::format_to_default_typed(static_cast<api::format>(format), 0)),
+          fixture.color}.key();
+      };
+      equal(render(true, selected, channel, &observation), reference_off, "Automatic typed UI decided before acceptance");
+      const auto restored = session.restore(channel == ui_mask_channel::red ? key(ui_selection::kind::ui_alpha) :
+        key(ui_selection::kind::ui_color) + ',' + key(ui_selection::kind::backbuffer));
+      require(restored.restored == (channel == ui_mask_channel::red ? 1u : 2u), "Typed UI keys were not restored");
+      equal(render(true, selected, channel, &observation), reference_on,
+        "Accepted automatic typed UI did not decide its own coverage at once");
       require(renderer.consumed_source_alpha_ui(), "Automatic typed UI did not arm its current-frame mask path");
       auto *resolved = reinterpret_cast<ID3D12Resource *>(renderer.diagnostics().ui_source.handle);
       require(resolved && resolved->GetDesc().Format == DXGI_FORMAT_R32_FLOAT, "Automatic typed UI did not expose R32 mask");
@@ -1274,7 +1309,7 @@ namespace {
       for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
         float value{}; std::memcpy(&value, selected_bytes.data() + (size_t(y) * width + x) * sizeof(float), sizeof(float));
         require(std::isfinite(value) && value >= 0.f && value <= 1.f &&
-            (value > 0.f) == (selective && covered_at(x, y)), "Automatic typed mask has incorrect selected-channel support");
+            (value > 0.f) == covered_at(x, y), "Automatic typed mask has incorrect selected-channel support");
       }
       if (color_mask) {
         observation.dedicated_mask = false;
@@ -1289,7 +1324,7 @@ namespace {
       equal(render(true, selected, channel, &observation), reference_off,
         "Automatic typed UI ignored explicit Manual Off");
       session.set_automatic();
-      equal(render(true, selected, channel, &observation), selective ? reference_on : reference_off,
+      equal(render(true, selected, channel, &observation), reference_on,
         "Automatic typed UI resume required manual review");
       ++case_index;
     }
@@ -1303,8 +1338,8 @@ namespace {
       std::memcpy(static_cast<std::uint8_t *>(mapped) + fixture.source_footprint.Offset +
         size_t(y) * fixture.source_footprint.Footprint.RowPitch, original.data() + size_t(y) * row, row);
     fixture.source_upload->Unmap(0, nullptr); write_native_source(fixture, backbuffer);
-    report << "typed-ui D3D12 R8_selective=1 R16_white=1 R32_black=1 RGBA_alpha_not_red=1 RGBA8_alpha=1 BGRA8_alpha=1 exact_frozen_pixels=1 copy_once=1 automatic_selective_without_review=1 full_empty_rejected=1 resolved_mask_checked=1 manual_modes=1 typed_red_v7_dump=1 typed_bgra_v7_dump=1 selective_alpha_binary_exact=1 source_immutable_after_dump=1\n";
-    std::puts("PASS D3D12 typed UI masks: R8/R16/R32/RGBA/BGRA, explicit channels, automatic selective admission and full/empty rejection, exact field/SBS parity");
+    report << "typed-ui D3D12 R8_selective=1 R16_white=1 R32_black=1 RGBA_alpha_not_red=1 RGBA8_alpha=1 BGRA8_alpha=1 exact_frozen_pixels=1 copy_once=1 unaccepted_decides_nothing=1 accepted_any_coverage=1 resolved_mask_checked=1 manual_modes=1 typed_red_v7_dump=1 typed_bgra_v7_dump=1 selective_alpha_binary_exact=1 source_immutable_after_dump=1\n";
+    std::puts("PASS D3D12 typed UI masks: R8/R16/R32/RGBA/BGRA, explicit channels, nothing automatic before acceptance and accepted coverage at any extent, exact field/SBS parity");
   }
 
   // The soft UI pin band on actual D3D12 GPU fields, through an R32 red mask.

@@ -110,27 +110,33 @@ namespace sunshine_game3d {
     }
     // Auto rendered this frame without a UI mask while UI may be on screen: no
     // source decided (coverage.enabled), and either no UI source was offered
-    // or no dedicated UI channel (0 UI alpha, 1 UI color or UI layer) was
-    // offered clean and empty, which would mean no UI on screen. A trusted
-    // channel deciding empty is detected, not unprotected.
-    // tools/reshade/game3d_log_report.py mirrors this definition
+    // or no dedicated UI candidate (UIAlpha, the UI color tag or the
+    // offscreen UI layer) was offered clean and empty, which would mean no UI
+    // on screen. An accepted candidate deciding empty is detected, not
+    // unprotected. tools/reshade/game3d_log_report.py mirrors this definition
     // (docs/reshade-sbs.md, UI protection).
     bool unprotected() const {
       if (mode != source_alpha_mode::automatic || !requested || !rendered || coverage.enabled) return false;
       if (!qualification.available) return true;
       if (coverage.state != alpha_auto_state::automatic_off) return false;
       const auto &evidence = coverage.evidence;
-      for (std::uint32_t slot = 0; slot != 2; ++slot)
-        if ((evidence.candidates >> slot & 1u) && !evidence.alpha_covered[slot] && !evidence.alpha_invalid[slot]) return false;
+      using ui_selection::kind;
+      for (const auto k : {kind::ui_alpha, kind::ui_color, kind::ui_layer}) {
+        const auto counts = alpha_counts_of(evidence, k);
+        if ((evidence.candidates & ui_selection::bit(k)) && !counts.covered && !counts.invalid) return false;
+      }
       return true;
     }
-    // The latest sample's offscreen UI layer had color but no alpha, so
-    // detection set it aside (ui_detection::layer_without_alpha).
-    bool layer_set_aside() const {
+    // The latest sample's offscreen UI layer had color but no alpha: no alpha
+    // anywhere and more than 1% of its pixels beyond the premultiplied bound.
+    // V1 then rejects it, so it neither decides nor blocks; in SDR, Stellar
+    // Blade draws its scene image there. A V1-invalid layer with some alpha
+    // (a scene buffer's luma-like alpha, glow beyond the bound) is not this:
+    // HDR output would not change it.
+    bool layer_without_alpha() const {
       const auto &evidence = coverage.evidence;
-      return evidence.ui_layer && (evidence.candidates & 2u) &&
-        ui_detection::layer_without_alpha(ui_detection::stored_late_layer, evidence.alpha_covered[1], evidence.alpha_invalid[1],
-          coverage.pixels);
+      return (evidence.candidates & ui_detection::candidate::layer) && !evidence.layer_covered &&
+        !ui_selection::alpha_valid(evidence.layer_invalid, coverage.pixels);
     }
   };
   // The start of the current unprotected run after publishing `value`: kept

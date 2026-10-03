@@ -1224,6 +1224,26 @@ namespace {
       const auto current = input.match_scene(scene, true);
       require(current.eligible && current.tick_ms == scene.tick_ms && !current.mask_sequence,
         "Current-color alpha invented a retained-mask association or rejected unrelated provider metadata");
+      // Manual On offers its candidates to detection (automatic_detection) but
+      // keeps its explicit capture's provenance: the renderer applies that
+      // capture directly where detection cannot run (over 3840, unprepared).
+      ui_input::frame manual;
+      manual.automatic_detection = true;
+      manual.observation.now_ms = manual.observation.tick_ms = 1200;
+      manual.observation.epoch = 7; manual.observation.revision = 4; manual.observation.viewport = 11;
+      manual.observation.sequence = 500;
+      scene.epoch = 7; scene.revision = 4; scene.viewport = 11; scene.tick_ms = 1150;
+      const auto detected = manual.match_scene(scene, true);
+      require(detected.eligible && detected.mask_sequence == 500 && detected.tick_ms == 1150,
+        "An automatic detection was not matched as current-frame GPU output");
+      manual.explicit_origin = manual.observation;
+      manual.explicit_origin->retained = true;
+      manual.explicit_origin->revision = 3; manual.explicit_origin->tick_ms = 1100; manual.explicit_origin->sequence = 101;
+      const auto earlier = manual.match_scene(scene, true);
+      require(!earlier.eligible && earlier.tick_ms == 1100 && earlier.mask_sequence == 101,
+        "Manual On matched a capture of an earlier scene revision as current");
+      manual.explicit_origin->revision = 4;
+      require(manual.match_scene(scene, true).eligible, "Manual On rejected its capture of the current scene");
     }
 
     static void source_alpha_scope_lifetime() {
@@ -1282,8 +1302,10 @@ namespace {
       unprotected.coverage = {}; unprotected.coverage.state = sunshine_game3d::alpha_auto_state::automatic_off;
       unprotected.coverage.pixels = 1000; unprotected.qualification.available = true;
       auto &evidence = unprotected.coverage.evidence;
-      evidence.candidates = 2 | 8; evidence.ui_layer = true;
-      evidence.alpha_covered = {0, 0, 0, 1000}; evidence.alpha_invalid = {0, 600, 0, 0};
+      // A V1-invalid offscreen UI layer (0x40) beside a full current alpha.
+      evidence.candidates = 0x40 | 8;
+      evidence.layer_invalid = 600;
+      evidence.alpha_covered = {0, 0, 0, 1000}; evidence.alpha_invalid = {0, 0, 0, 0};
       unprotected.sdr_output = true;
       require(unprotected.unprotected(), "The fixture frame was protected");
       publish_source_alpha_ui(owner(), unprotected);

@@ -180,9 +180,9 @@ namespace {
     if (!write_log) return;
     const auto &evidence = value.coverage.evidence;
     const auto &scene = evidence.scene, &hudless_scene = evidence.hudless_scene;
-    char message[1536];
+    char message[2048];
     std::snprintf(message, sizeof(message),
-      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u trusted_alpha=0x%x sampled_ui_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_hudless_scene={n=%u d=%.3f valid=%d} scene_hold=%u shadow=%d shadow_hidden_ms=%llu status_revision=%llu",
+      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u accepted=0x%x sampled_layer={covered=%u invalid=%u opaque=%u} sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_hudless_scene={n=%u d=%.3f valid=%d} scene_hold=%u shadow=%d shadow_hidden_ms=%llu status_revision=%llu",
       static_cast<void *>(runtime), value.mode == sunshine_game3d::source_alpha_mode::automatic ? "auto" :
         value.mode == sunshine_game3d::source_alpha_mode::on ? "on" : "off",
       int(value.rendered), int(value.applied), sunshine_game3d::name(value.input), int(value.retained_alpha_ready),
@@ -192,7 +192,7 @@ namespace {
       value.coverage.source_kind, value.coverage.covered, value.coverage.pixels, evidence.candidates,
       evidence.alpha_covered[0], evidence.alpha_covered[1], evidence.alpha_covered[2], evidence.alpha_covered[3],
       evidence.alpha_invalid[0], evidence.alpha_invalid[1], evidence.alpha_invalid[2], evidence.alpha_invalid[3],
-      evidence.trusted_alpha, int(evidence.ui_layer),
+      evidence.accepted, evidence.layer_covered, evidence.layer_invalid, evidence.layer_opaque,
       evidence.hudless_changed, evidence.hudless_unchanged, evidence.hudless_invalid, evidence.matching_tiles, evidence.hudless_lit,
       evidence.alpha_opaque[0], evidence.alpha_opaque[1], scene.n, double(scene.d), int(scene.valid), int(scene.ran),
       sunshine_game3d::ui_detection::name(scene.verdict), hudless_scene.n, double(hudless_scene.d), int(hudless_scene.valid),

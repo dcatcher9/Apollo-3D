@@ -449,9 +449,9 @@ at; the exit code is 1 when a check failed. The checks cover: add-on and rendere
 fresh depth and gaps outside the settle time after FG switches and runtime resets; publications
 that showed the colour frame with depth; capture coverage by the list lifecycle; whether the
 camera projection or only the raw controller places the scene (the latter while a valid camera
-exists is a warning); UI trust, presented alpha deciding over a trusted dedicated UI channel, a
-trusted channel covering the whole frame while an exact HUD-less pair shows the scene, and trusted
-channels that disagree (by the dispute and set-aside-layer rules of
+exists is a warning); UI acceptance changes, inferred alpha deciding beside an accepted UIAlpha or
+UI color tag, an accepted source covering the whole frame while an exact HUD-less pair shows the
+scene, and accepted sources that disagree (by the selection and dispute rules of
 [UI protection](../../docs/reshade-sbs.md#setup)); selective UI channels rejected for invalid pixels;
 `UI protection gaps`, the streamed time
 outside settle times in which Auto rendered frames without a UI mask (no UI source offered, or no
@@ -474,20 +474,23 @@ Logs that contain `Sunshine UI counters` lines carry the add-on's exact per-fram
 invariants from the last counter line, not from the 100 ms samples. It reports these checks:
 
 - `UI counters`: the add-on's own accounting.
-- `UI protection`: presented alpha over a trusted channel, and trusted full coverage of a visible
-  scene that no revocation of that channel resolved.
+- `UI protection`: inferred alpha beside an accepted declared UI channel, and accepted full coverage
+  of a visible scene that no revocation of that source resolved.
 - `UI full frame`: full-frame samples whose scene read visible. Each release of a held hidden-scene
   route (8 or 9) counts one, so this is a warning when such a route decided. An exact full
   change-set (6) over a visible scene is intended for an accepted exact pair (P1), so with no held
   route it is INFO.
 - `UI full alpha`: a whole-frame mask from alpha, and whether its samples read the scene visible.
-  It is INFO: a trusted source pins its alpha at any coverage, so a full one is flat even over a
+  It is INFO: an accepted source pins its alpha at any coverage, so a full one is flat even over a
   visible scene, as the [opacity ruling](../../docs/reshade-sbs.md#ui-decision-framework) intends.
-- `UI inferred alpha` and `UI inexact difference`: warnings that name the
-  [roadmap stage](../../docs/reshade-sbs.md#ui-decision-framework) that fixes them.
+- `UI inferred alpha`: a failure when an unaccepted inferred alpha decided, which only accepted
+  candidates do since S1 (a warning on counter lines logged before S1).
+- `UI inexact difference`: a warning that names the
+  [roadmap stage](../../docs/reshade-sbs.md#ui-decision-framework) that fixes it.
 - `UI holds`, `UI no mask` and `UI trust events`: exact totals.
 
-Logs without counter lines use the sampled checks above.
+Logs without counter lines use the sampled checks above. The report reads the UI lines of logs
+written before S1 too, with their UI layer read as the layer candidate.
 
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
 the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`
@@ -530,7 +533,7 @@ ctest --test-dir cmake-build-relwithdebinfo/reshade-addon -R reshade_game3d_ui_s
 
 Its `KNOWN_TODAY <stage> <rule>` lines name today's known-wrong outcomes by
 [UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework) stage and rule ID (such as
-`S2a A1/S1`). They do not fail the test. A replay `xfail` reason names the same rule IDs.
+`S2a T1`). They do not fail the test. A replay `xfail` reason names the same rule IDs.
 
 ## Additional diagnostics
 

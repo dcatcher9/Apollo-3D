@@ -2,6 +2,7 @@
 // CPU-only compile/reflection validation of the native Game 3D shader ABI.
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
+#include "game3d_ui_selection.h"
 
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
@@ -44,6 +45,7 @@ namespace {
     {"SunshineEyeLeftSampler", D3D_SIT_TEXTURE, 6},
     {"SunshinePresentedColor", D3D_SIT_TEXTURE, 6},
     {"SunshineEyeRightSampler", D3D_SIT_TEXTURE, 7},
+    {"SunshineUILayer", D3D_SIT_TEXTURE, 7},
     {"SunshineUIPlaneTilesSampler", D3D_SIT_TEXTURE, 8},
     {"SunshineUIPlaneResolvedSampler", D3D_SIT_TEXTURE, 9},
     {"SunshineUIDetectionSampler", D3D_SIT_TEXTURE, 10},
@@ -94,7 +96,7 @@ namespace {
   constexpr constant detection_constants[] = {
     {"Sunshine_UICandidates", 0, 4, D3D_SVT_UINT},
     {"Sunshine_UIDifferenceThreshold", 4, 4, D3D_SVT_FLOAT},
-    {"Sunshine_UITrustedAlpha", 8, 4, D3D_SVT_UINT},
+    {"Sunshine_UIAcceptedCandidates", 8, 4, D3D_SVT_UINT},
   };
 
   struct entry_point {
@@ -328,6 +330,11 @@ int main(int argc, char **argv) {
     mirrored(detection::hlsl_flag_defines);
     mirrored(detection::hlsl_scene_defines);
     mirrored(sunshine_game3d::hlsl_counter_defines);
+    mirrored(detection::hlsl_candidate_defines);
+    // The reduce ports ui_selection::decide of this revision.
+    require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision,
+      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision");
+    require(decision_texels >= detection::layer_decision_texels, "Candidate layout 2 needs the layer's decision texel 7");
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");

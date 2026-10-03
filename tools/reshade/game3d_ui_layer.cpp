@@ -202,7 +202,9 @@ namespace sunshine_game3d::ui_layer {
   bool alpha_format(api::format format) {
     // A 2-bit alpha (R10G10B10A2) cannot hold blended UI coverage. The Witcher
     // 3 clears such a scene target with FG on; taken as its UI layer it
-    // claimed the whole frame.
+    // claimed the whole frame. While the layer is one candidate (the tracker's
+    // active choice) this refusal stays: a 2-bit target chosen as the layer
+    // would displace the real UI layer from its slot.
     switch (api::format_to_typeless(format)) {
       case api::format::r8g8b8a8_typeless:
       case api::format::b8g8r8a8_typeless:

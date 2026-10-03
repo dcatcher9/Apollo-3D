@@ -4,7 +4,9 @@
 // SunshineScene{Cells,Compare,Evidence}CS hidden-scene evidence when it has them, on
 // the candidate textures saved in Dump 3D packages and compares each decision
 // with a labelled expectation. It replaces live trial and error when a detection
-// rule changes: every labelled screen of every game is judged at once.
+// rule changes: every labelled screen of every game is judged at once. With a
+// shader of the current candidate layout and selection revision, each decision
+// is also checked against ui_selection::decide (mirror=match).
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -14,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include "game3d_ui_detection_contract.h"
+#include "game3d_ui_selection.h"
 
 #include <algorithm>
 #include <array>
@@ -36,6 +39,8 @@ namespace {
   namespace fs = std::filesystem;
   namespace contract = sunshine_game3d::ui_detection;
   namespace word = contract::decision_word;
+  namespace selection = sunshine_game3d::ui_selection;
+  namespace candidate = contract::candidate;
   using Microsoft::WRL::ComPtr;
   using json = nlohmann::json;
 
@@ -60,13 +65,28 @@ namespace {
     if (!output) throw std::runtime_error("cannot write " + path.string());
   }
 
-  // Candidate slots in shader order: t11 UI alpha (R), t12 UI color (A),
-  // t13 Backbuffer (A), current color alpha (t0 A), t14 HUD-less. An offscreen
-  // UI layer from the census (ui_layer_candidate_N) takes the UI color slot
-  // with the renderer's layer flags.
-  const std::map<std::string, unsigned> candidate_bits{
-    {"sl_ui_alpha", 1u}, {"sl_ui_color_alpha", 2u}, {"sl_backbuffer", 4u}, {"current", 8u}, {"sl_hudless_color", 16u}};
+  // Candidate kinds by artifact name and their bits in candidate layout 2:
+  // t11 UI alpha (R), t12 UI color tag (A), t13 Backbuffer (A), current color
+  // alpha (t0 A), t14 HUD-less, and an offscreen UI layer from the census
+  // (ui_layer_candidate_N) at t7 with the renderer's layer flags. Layout 1
+  // shaders (no SUNSHINE_UI_CANDIDATE_LAYOUT marker) take the layer in the UI
+  // color slot (t12, bit 0x2) and trusted slot indices in b2 word 2.
+  const std::map<std::string, unsigned> candidate_bits{{"sl_ui_alpha", candidate::ui_alpha},
+    {"sl_ui_color_alpha", candidate::ui_color}, {"sl_backbuffer", candidate::backbuffer}, {"current", candidate::current},
+    {"sl_hudless_color", candidate::hudless}};
   bool ui_layer_kind(const std::string &name) { return name.rfind("ui_layer_candidate_", 0) == 0; }
+  // A candidate name's bit in the given layout; zero when unknown.
+  unsigned candidate_bit(const std::string &name, std::uint32_t layout) {
+    if (ui_layer_kind(name)) return layout >= contract::candidate_layout ? candidate::layer : candidate::ui_color;
+    const auto found = candidate_bits.find(name);
+    return found == candidate_bits.end() ? 0u : found->second;
+  }
+  // An accepted name's bit in b2 word 2: its candidate bit in layout 2, its
+  // trusted alpha slot in layout 1 (where a HUD-less pair had no trust).
+  unsigned accepted_bit(const std::string &name, std::uint32_t layout) {
+    const auto bit = candidate_bit(name, layout);
+    return layout >= contract::candidate_layout ? bit : bit & 15u;
+  }
 
   struct device_t {
     ComPtr<ID3D11Device> device;
@@ -212,7 +232,8 @@ namespace {
   // Resource sizes from the shader's markers. Retired revisions without them
   // wrote opaque counts to statistics rows 64-79 and decision texel 5, so
   // every revision fits 80 rows and 6 texels. A shader with scene evidence
-  // measures both images and writes decision texels 5 and 6.
+  // measures both images and writes decision texels 5 and 6; candidate layout
+  // 2 adds the layer's statistics rows 64-79 and decision texel 7.
   struct sizes_t {
     UINT statistics_rows, decision_texels;
     bool scene;
@@ -233,18 +254,21 @@ namespace {
     std::string mask_exact; // Empty unless the label asks for it.
     std::vector<float> mask;
     UINT width = 0, height = 0;
-    std::uint32_t flags = 0; // The pushed detection flags.
+    // The candidate layout, and the pushed candidate bits, accepted mask and
+    // detection flags.
+    std::uint32_t layout = 0, offered = 0, accepted = 0, flags = 0;
   };
 
-  std::string mask_exact(const outcome &result, const std::array<const artifact_t *, 4> &inputs, const artifact_t &paired) {
+  std::string mask_exact(const outcome &result, const std::array<const artifact_t *, 4> &inputs, const artifact_t *layer,
+      const artifact_t &paired) {
     // Raw selected alpha, or a whole-frame flat (sources 6, 8 and 9); a
     // HUD-less difference has no CPU reference here.
     const auto source = result.decision.at(word::source);
     std::vector<float> reference;
     if (!source) reference.assign(result.mask.size(), 0.f);
     else if (source == 6u || source == 8u || source == 9u) reference.assign(result.mask.size(), 1.f);
-    else if (source <= 4u) {
-      const auto *input = source == 4u ? &paired : inputs[source - 1];
+    else if (source <= 4u || source == contract::source_layer) {
+      const auto *input = source == 4u ? &paired : source == contract::source_layer ? layer : inputs[source - 1];
       if (!input) return "no-reference(missing candidate)";
       reference = component(*input, source == 1u ? 0 : 3);
       if (reference.empty()) return "no-reference(format " + input->descriptor.at("dxgi_format").dump() + ")";
@@ -288,21 +312,48 @@ namespace {
     // The game's frame size; source_width/height is the host output, which
     // differs when the host scales the eyes.
     const auto width = artifacts.at(paired).at("width").get<UINT>(), height = artifacts.at(paired).at("height").get<UINT>();
+    auto layout = sunshine_game3d::shader_marker(shader_source, contract::candidate_layout_marker);
+    if (!layout) layout = contract::legacy_candidate_layout;
     std::array<const artifact_t *, 4> inputs{}; // t11..t14
+    const artifact_t *layer_input = nullptr;    // t7 (layout 2)
     unsigned bits = 0, flags = 0;
     for (const auto &kind : label.at("candidates")) {
       const auto name = kind.get<std::string>();
       const bool layer = ui_layer_kind(name);
-      const auto bit = layer ? 2u : candidate_bits.at(name);
+      const auto bit = candidate_bit(name, layout);
+      if (!bit) throw std::runtime_error("unknown candidate " + name);
+      if (bits & bit)
+        throw std::runtime_error("two candidates share bit " + std::to_string(bit) + " in candidate layout " + std::to_string(layout));
       bits |= bit;
       if (name == "current") continue;
-      const unsigned slot = name == "sl_ui_alpha" ? 0 : name == "sl_ui_color_alpha" || layer ? 1 : name == "sl_backbuffer" ? 2 : 3;
-      inputs[slot] = &load(name);
+      if (layer && layout >= contract::candidate_layout) layer_input = &load(name);
+      else {
+        const unsigned slot = name == "sl_ui_alpha" ? 0 : bit == candidate::ui_color ? 1 : name == "sl_backbuffer" ? 2 : 3;
+        inputs[slot] = &load(name);
+      }
       if (layer) flags = contract::layer_detection_flags(contract::float_layer_format(artifacts.at(name).at("dxgi_format").get<unsigned>()));
     }
-    if (label.value("exact", false) && (bits & 16u)) bits |= 32u;
-    unsigned trusted = 0;
-    for (const auto &index : label.value("trusted", json::array())) trusted |= 1u << index.get<unsigned>();
+    // V2: the threshold from the pair's own encodings, and a HUD-less image
+    // that is not comparable with its pair is not offered. Without one, the
+    // paired color's own encoding sizes the difference tests, as before.
+    const auto encoding_of = [&](const std::string &kind) {
+      return selection::encoding{artifacts.at(kind).at("dxgi_format").get<std::uint32_t>(), color};
+    };
+    std::optional<float> pair_threshold;
+    if (bits & candidate::hudless) {
+      pair_threshold = selection::comparable(encoding_of("sl_hudless_color"), encoding_of(paired));
+      if (!pair_threshold) {
+        bits &= ~candidate::hudless;
+        inputs[3] = nullptr;
+      }
+    }
+    if (label.value("exact", false) && (bits & candidate::hudless)) bits |= candidate::exact;
+    unsigned accepted = 0;
+    for (const auto &kind : label.value("accepted", json::array())) {
+      const auto name = kind.get<std::string>();
+      if (!candidate_bit(name, layout)) throw std::runtime_error("unknown accepted kind " + name);
+      accepted |= accepted_bit(name, layout);
+    }
     // Per-frame bits a label names; they never select a candidate.
     if (label.value("scene_hold", false)) flags |= contract::per_frame_scene_hold;
     // A "sample" key is accepted and ignored: its flag 0x20000 is reserved and
@@ -343,11 +394,11 @@ namespace {
     if (sizes.scene) cells = target(gpu, contract::scene::cells_x, contract::scene::cells_y, DXGI_FORMAT_R32G32B32A32_UINT);
     auto decision = target(gpu, sizes.decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT);
     auto mask = target(gpu, width, height, DXGI_FORMAT_R32_FLOAT);
-    // Detection constants b2: candidate bits, difference threshold, trusted
-    // channels, flags. The threshold matches the renderer's per-format choice.
-    const float threshold = artifacts.at(paired).at("dxgi_format").get<unsigned>() == DXGI_FORMAT_R10G10B10A2_UNORM ?
-      4.f / 1023.f : color == 2 ? .005f : 2.f / 255.f;
-    struct { std::uint32_t bits; float threshold; std::uint32_t trusted, flags; } constants{bits, threshold, trusted, flags};
+    // Detection constants b2: candidate bits, difference threshold, accepted
+    // candidates (layout 1: trusted slots), flags.
+    const float threshold = pair_threshold ? *pair_threshold :
+      selection::comparable(encoding_of(paired), encoding_of(paired)).value_or(2.f / 255.f);
+    struct { std::uint32_t bits; float threshold; std::uint32_t accepted, flags; } constants{bits, threshold, accepted, flags};
     const auto constant_buffer = [&](const void *bytes, UINT size) {
       D3D11_BUFFER_DESC buffer{};
       buffer.ByteWidth = size; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -365,6 +416,7 @@ namespace {
       views[0] = paired_color.gpu.srv.Get();
       views[1] = depth.srv.Get();
       views[6] = presented.gpu.srv.Get();
+      views[7] = layer_input ? layer_input->gpu.srv.Get() : nullptr;
       views[10] = t10;
       for (unsigned i = 0; i < 4; ++i) views[11 + i] = inputs[i] ? inputs[i]->gpu.srv.Get() : nullptr;
       context.CSSetShader(shader, nullptr, 0);
@@ -393,7 +445,7 @@ namespace {
     result.decision = download<std::uint32_t>(gpu, decision);
     result.mask = download<float>(gpu, mask);
     result.width = width; result.height = height;
-    result.flags = flags;
+    result.layout = layout; result.offered = bits; result.accepted = accepted; result.flags = flags;
     result.pixels = result.mask.size();
     for (const float value : result.mask) {
       result.ui_pixels += value > 0.f ? 1u : 0u;
@@ -403,7 +455,8 @@ namespace {
     }
     const bool exact_today = label.contains("xfail") && label.at("xfail").is_object() && label.at("xfail").contains("today") &&
       label.at("xfail").at("today").is_object() && label.at("xfail").at("today").value("mask_exact", false);
-    if (label.at("expect").value("mask_exact", false) || exact_today) result.mask_exact = mask_exact(result, inputs, paired_color);
+    if (label.at("expect").value("mask_exact", false) || exact_today)
+      result.mask_exact = mask_exact(result, inputs, layer_input, paired_color);
     return result;
   }
 
@@ -475,6 +528,15 @@ namespace {
   std::string xfail_error(const json &label) {
     if (label.contains("needs_dump") && (!label.at("needs_dump").is_string() || label.at("needs_dump").get<std::string>().empty()))
       return "needs_dump must name what the dump is missing";
+    // Acceptance is named by candidate kind (UI framework S1); slot indices
+    // meant different sources in different layouts.
+    if (label.contains("trusted")) return "trusted is retired: use accepted with candidate kind names";
+    if (label.contains("accepted")) {
+      if (!label.at("accepted").is_array()) return "accepted must be a list of candidate kind names";
+      for (const auto &kind : label.at("accepted"))
+        if (!kind.is_string() || !candidate_bit(kind.get<std::string>(), contract::candidate_layout))
+          return "accepted names an unknown candidate kind";
+    }
     if (!label.contains("xfail")) return {};
     const auto &xfail = label.at("xfail");
     if (!xfail.is_object()) return "xfail must be an object";
@@ -500,6 +562,24 @@ namespace {
     if (!today.contains("mask") || !today.contains("source") || !today.at("source").is_array() || today.at("source").empty())
       return "xfail.today needs a mask and a non-empty source list";
     return {};
+  }
+
+  // ui_selection::decide on the counts the GPU wrote, with the pushed
+  // candidate bits, accepted mask and flags: "match" when the GPU's source,
+  // coverage, accepted word and valid bits agree, "n/a" for a shader of
+  // another candidate layout or selection revision.
+  std::string mirror_of(const outcome &result, bool mirrored) {
+    const auto &d = result.decision;
+    if (!mirrored || d.size() <= word::valid_bits) return "n/a";
+    const auto expected = selection::decide(selection::counts_from_words(d.data(), d.size()), result.offered, result.accepted,
+      result.flags);
+    if (expected.source == d[word::source] && expected.covered == d[word::covered] && expected.valid_bits == d[word::valid_bits] &&
+        d[word::accepted] == result.accepted && d[word::candidates] == result.offered)
+      return "match";
+    char text[160];
+    std::snprintf(text, sizeof(text), "differs(decide source=%u covered=%u valid=0x%x)", expected.source, expected.covered,
+      expected.valid_bits);
+    return text;
   }
 
   // A copy of the dump whose consumed mask is the one this replay resolved,
@@ -548,12 +628,18 @@ int main(int argc, char **argv) {
       std::fprintf(stderr, "Usage: ui_detection_replay <game3d_native.hlsl> <cases.json> [--write-mask <new-dir>] [--verbose] "
         "[--strict]\n"
         "cases.json: {\"dump_root\": dir, \"cases\": [{\"dump\", \"label\", \"candidates\": [kinds|\"current\"], "
-        "\"paired\": kind, \"exact\": bool, \"trusted\": [candidate indices], \"scene_hold\": bool, \"scene_hold_hudless\": bool, "
+        "\"paired\": kind, \"exact\": bool, \"accepted\": [kinds], \"scene_hold\": bool, \"scene_hold_hudless\": bool, "
         "\"depth_not_current\": bool, \"expect\": {\"mask\", \"source\": [ids], \"mask_exact\": bool, "
         "\"scene\": {\"verdict\", \"d_min\", \"d_max\"}, \"hudless_scene\": {\"verdict\", \"d_min\", \"d_max\"}}, "
         "\"xfail\": {\"stage\", \"reason\", \"today\": {expect fields}}, \"needs_dump\": text}]}\n"
-        "Binds each dump's candidates (t0 paired color, t11-t14), raw depth (t1; a 1x1 placeholder without it), presented\n"
-        "color (t6) and its exact 80-byte b0, and runs the shader's scene evidence passes as on a sample frame. A case\n"
+        "Binds each dump's candidates (t0 paired color, t11-t14, and a census ui_layer_candidate_N at t7 with the layer\n"
+        "flags; a shader without SUNSHINE_UI_CANDIDATE_LAYOUT takes the layer at t12), raw depth (t1; a 1x1 placeholder\n"
+        "without it), presented color (t6) and its exact 80-byte b0, and runs the shader's scene evidence passes as on a\n"
+        "sample frame. accepted names the candidate kinds the game session accepts (A1); the retired trusted key fails\n"
+        "its case. A HUD-less image not comparable with its pair (ui_selection::comparable, from the two artifact formats\n"
+        "and the manifest color_space) is not offered, and the pair's threshold comes from the same function. With a\n"
+        "shader of the current layout and selection revision, every decision is checked against ui_selection::decide on\n"
+        "the GPU's counts (mirror=match); a mirror that differs fails its case. A case\n"
         "whose dump directory is gone, or whose needs_dump names what its dump lacks, is skipped; the run fails when no\n"
         "case ran. A \"sample\" key is accepted and ignored: its flag 0x20000 is reserved.\n"
         "A case with xfail is a known-wrong cell: expect holds the target outcome, xfail.stage the roadmap stage (S1, S2a,\n"
@@ -571,6 +657,11 @@ int main(int argc, char **argv) {
     }
     const auto shader_path = fs::absolute(positional[0]);
     const auto shader_source = read_text(shader_path);
+    // Shaders of the current candidate layout and selection revision are
+    // checked against ui_selection::decide.
+    const bool mirrored =
+      sunshine_game3d::shader_marker(shader_source, contract::candidate_layout_marker) == contract::candidate_layout &&
+      sunshine_game3d::shader_marker(shader_source, selection::revision_marker) == selection::revision;
     const auto cases_path = fs::absolute(positional[1]);
     const auto document = json::parse(read_text(cases_path));
     fs::path root = document.value("dump_root", cases_path.parent_path().string());
@@ -620,6 +711,12 @@ int main(int argc, char **argv) {
       const auto today = xfail ? judge(result, xfail->at("today")) : judged_t{};
       const char *status = target.okay ? (xfail ? "XPASS" : "PASS") : xfail && today.okay ? "XFAIL" : "FAIL";
       bool okay = target.okay || (xfail && today.okay);
+      // The GPU decision against ui_selection::decide on the GPU's own counts.
+      const auto mirror = mirror_of(result, mirrored);
+      if (mirror.rfind("differs", 0) == 0) {
+        okay = false;
+        status = "FAIL";
+      }
       // A mask that cannot be written fails its case once.
       std::string written;
       if (write_masks) {
@@ -646,14 +743,20 @@ int main(int argc, char **argv) {
         wanted += ", today " + today.wanted_mask + "; " + xfail->at("stage").get<std::string>() + ": " +
           xfail->at("reason").get<std::string>() + (target.okay ? "; remove xfail" : "");
       }
-      std::printf("%s %-44s source=%u covered=%u/%u ui=%.2f%% mask=%s (want %s) candidates=0x%x trusted=0x%x "
-        "alpha_covered=%u/%u/%u/%u hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u}%s%s%s%s%s%s\n",
+      // The layer's own counts exist from candidate layout 2 (texel 7).
+      char layer[96] = "";
+      if (d.size() > word::valid_bits)
+        std::snprintf(layer, sizeof(layer), " layer={covered=%u invalid=%u opaque=%u} valid=0x%x", d[word::layer_covered],
+          d[word::layer_invalid], d[word::layer_opaque], d[word::valid_bits]);
+      std::printf("%s %-44s source=%u covered=%u/%u ui=%.2f%% mask=%s (want %s) candidates=0x%x accepted=0x%x "
+        "alpha_covered=%u/%u/%u/%u%s hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u} mirror=%s%s%s%s%s%s%s\n",
         status, name.c_str(), d[word::source], d[word::covered], d[word::pixels],
         100.0 * double(result.ui_pixels) / double(result.pixels), mask_class(result).c_str(), wanted.c_str(),
-        d[word::candidates], d[word::trusted], d[word::alpha_covered], d[word::alpha_covered + 1], d[word::alpha_covered + 2],
-        d[word::alpha_covered + 3], d[word::hudless_changed], d[word::hudless_unchanged], d[word::hudless_invalid],
-        d[word::matching_tiles], d[word::hudless_lit], result.mask_exact.empty() ? "" : " mask_exact=", result.mask_exact.c_str(),
-        scene.empty() ? "" : " scene=", scene.c_str(), hudless_scene.empty() ? "" : " hudless_scene=", hudless_scene.c_str());
+        d[word::candidates], d[word::accepted], d[word::alpha_covered], d[word::alpha_covered + 1], d[word::alpha_covered + 2],
+        d[word::alpha_covered + 3], layer, d[word::hudless_changed], d[word::hudless_unchanged], d[word::hudless_invalid],
+        d[word::matching_tiles], d[word::hudless_lit], mirror.c_str(), result.mask_exact.empty() ? "" : " mask_exact=",
+        result.mask_exact.c_str(), scene.empty() ? "" : " scene=", scene.c_str(), hudless_scene.empty() ? "" : " hudless_scene=",
+        hudless_scene.c_str());
       if (verbose) {
         std::printf("  words=");
         for (size_t i = 0; i < d.size(); ++i) std::printf("%u%s", d[i], i + 1 < d.size() ? "," : "");

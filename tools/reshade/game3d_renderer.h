@@ -36,8 +36,20 @@ namespace sunshine_game3d {
   // captured view is unavailable; it must never fall back to current color.
   enum class ui_input_kind { unavailable, current_color_alpha, captured_color_alpha, dedicated_mask, hudless_difference };
   struct ui_detection_inputs {
-    // Provider-admitted, current native captures. Ordering is semantic priority.
-    std::array<reshade::api::resource_view, 3> masks{}; // UI alpha R, UI color A, backbuffer A.
+    // Provider-admitted, current native captures, each candidate in its own
+    // slot (UI framework E1): masks are the UIAlpha tag (R), the tagged
+    // UIColorAndAlpha (A, never the offscreen UI layer) and the Backbuffer tag
+    // (A); layer is the offscreen UI layer copy (A). Selection among them is
+    // the shader's (ui_selection::decide), not this order.
+    std::array<reshade::api::resource_view, 3> masks{}; // UI alpha R, UI color tag A, backbuffer A.
+    reshade::api::resource_view layer{};
+    // Stored Sunshine_UIDetectionFlags of the layer slot: ui_layer::detection_flags
+    // of the offered layer (game3d_ui_detection_contract.h).
+    std::uint32_t layer_flags = 0;
+    // The acceptance signature of each offered kind (A1): its typed DXGI format
+    // and the swapchain color space. A kind left at format zero, or a zero color
+    // space, takes the renderer's own view format and color space.
+    candidate_signatures signatures;
     reshade::api::resource_view hudless{};
     bool current_color = false;
     // A generated present between a HUD-less tag and its real frame. Reuse the
@@ -57,10 +69,6 @@ namespace sunshine_game3d {
     // counting without frame generation). Only then may a difference covering
     // the whole frame mean full-screen UI rather than a mismatched pair.
     bool hudless_exact = false;
-    // Stored Sunshine_UIDetectionFlags for masks[1]: ui_layer::detection_flags
-    // when it is an offscreen UI layer found by its clears, zero for a tagged
-    // buffer (game3d_ui_detection_contract.h).
-    std::uint32_t color_alpha_flags = 0;
   };
   struct ui_render_input {
     ui_input_kind kind = ui_input_kind::unavailable;
@@ -75,7 +83,8 @@ namespace sunshine_game3d {
         ((kind == ui_input_kind::captured_color_alpha || kind == ui_input_kind::dedicated_mask ||
           kind == ui_input_kind::hudless_difference) && view.handle) ||
         (detection && (detection->current_color || detection->hudless.handle || detection->hold_previous ||
-          detection->masks[0].handle || detection->masks[1].handle || detection->masks[2].handle));
+          detection->masks[0].handle || detection->masks[1].handle || detection->masks[2].handle ||
+          detection->layer.handle));
     }
   };
   struct render_frame_input {
@@ -156,7 +165,9 @@ namespace sunshine_game3d {
   struct ui_detection_snapshot {
     enum class run_state : std::uint8_t { inactive, ran, held };
     run_state state = run_state::inactive;
-    std::uint32_t candidates{}, threshold_bits{}, trusted{};
+    // accepted: the pushed Sunshine_UIAcceptedCandidates (b2 word 2), the
+    // accepted candidates in candidate-bit positions.
+    std::uint32_t candidates{}, threshold_bits{}, accepted{};
     // flags is the full pushed Sunshine_UIDetectionFlags word; stored_flags is
     // the part the renderer keeps and keys samples with, never a per-frame bit.
     std::uint32_t flags{}, stored_flags{};
@@ -281,7 +292,7 @@ namespace sunshine_game3d {
     struct impl;
     std::unique_ptr<impl> data_;
     std::uint64_t ui_source_capture_ = 0;
-    std::array<std::uint64_t, 4> ui_candidate_captures_{};
+    std::array<std::uint64_t, 5> ui_candidate_captures_{};
     bool preparing_ = false;
   };
 }

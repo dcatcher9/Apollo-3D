@@ -337,7 +337,9 @@ namespace sunshine_game3d_test {
       const auto &detection = replay.at("ui_detection");
       const auto &consumed = frame_.ui_detection;
       check(detection.at("ran_or_held") == sunshine_game3d::name(consumed.state) && detection.at("candidates") == consumed.candidates &&
-          detection.at("threshold_bits") == consumed.threshold_bits && detection.at("trusted") == consumed.trusted &&
+          detection.at("threshold_bits") == consumed.threshold_bits && detection.at("accepted") == consumed.accepted &&
+          !detection.contains("trusted") &&
+          detection.at("candidate_layout") == sunshine_game3d::ui_detection::candidate_layout &&
           detection.at("flags") == consumed.flags && detection.at("held_presents") == consumed.held_presents &&
           !(consumed.stored_flags & sunshine_game3d::ui_detection::per_frame_mask),
         "Dump lost the detection constants behind the consumed mask");

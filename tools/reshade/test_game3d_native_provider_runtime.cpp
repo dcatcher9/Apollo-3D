@@ -265,6 +265,10 @@ namespace {
         copy(list, after_upload.p, after_footprint);
       };
       for (unsigned i = 0; i < 8; ++i) { step(); no_effects(); }
+      // The tag is a declared source: its first valid selective sample accepts
+      // it (A1), from the render after that sample is read. A few sample
+      // intervals pass before the dump.
+      for (const auto until = GetTickCount64() + 500; GetTickCount64() < until;) { step(); no_effects(); }
 
       struct mailbox {
         HANDLE handle{};
@@ -318,11 +322,16 @@ namespace {
           replay.at("source_alpha_ui") == true && replay.at("ui_alpha_source") == "ui_source_color" &&
           replay.at("ui_constant_binding").at("uint32")[3] == 1,
         "Public UI hook did not offer the actual tag23 alpha source to automatic detection");
-      // A tagged UIColorAndAlpha fills the UI color slot without layer flags.
+      // The tagged UIColorAndAlpha and the offscreen UI layer are offered side
+      // by side from the first frame, each in its own slot (E1): the stored
+      // flags describe the layer slot (5), and the accepted tag decides.
+      namespace candidate = sunshine_game3d::ui_detection::candidate;
       const auto &tag_detection = replay.at("ui_detection");
-      if (tag_detection.at("ran_or_held") == "inactive" || !(tag_detection.at("candidates").get<unsigned>() & 2u) ||
-          tag_detection.at("flags") != 0u)
-        throw std::runtime_error("A tagged UIColorAndAlpha did not reach detection without flags: " + tag_detection.dump());
+      if (tag_detection.at("ran_or_held") == "inactive" ||
+          (tag_detection.at("candidates").get<unsigned>() & (candidate::ui_color | candidate::layer)) !=
+            (candidate::ui_color | candidate::layer) ||
+          !(tag_detection.at("accepted").get<unsigned>() & candidate::ui_color) || tag_detection.at("flags") != 5u)
+        throw std::runtime_error("A tagged UIColorAndAlpha did not reach detection accepted beside the layer: " + tag_detection.dump());
       bool optional = false;
       for (const auto &entry : metadata.at("optional_captures")) if (entry.at("artifact_id") == 10) {
         if (entry.value("status", std::string{}) != "captured" || !entry.contains("capture_diagnostic"))
@@ -395,9 +404,10 @@ namespace {
         require(read(retained[i].p, D3D12_RESOURCE_STATE_COMMON) == retained_bytes[i],
           "Host acknowledgement or later game write changed UI snapshot");
 
-      // Draws for a second, then dumps; the caller releases the dump.
-      const auto dump_after_layer_frames = [&] {
-        for (const auto until = GetTickCount64() + 1000; GetTickCount64() < until;) { step(); no_effects(); }
+      // Draws for a while (a second by default), then dumps; the caller
+      // releases the dump.
+      const auto dump_after_layer_frames = [&](std::uint64_t draw_ms = 1000) {
+        for (const auto until = GetTickCount64() + draw_ms; GetTickCount64() < until;) { step(); no_effects(); }
         box.request = box.state->request_id + 1;
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
         for (const auto until = GetTickCount64() + 10000;
@@ -408,10 +418,11 @@ namespace {
           "Production Dump3D did not complete the offscreen UI layer capture");
         return nlohmann::json::parse(std::string(box.state->json, box.state->response.json_bytes));
       };
-      // D3D12 reads back all seven decision texels: the tagged UI color's
-      // nearly opaque pixels (texel 4) and, in this first session without
-      // remembered trust, the first-run shadow's hidden-scene evidence of the
-      // presented and HUD-less images (texels 5 and 6), which changes nothing.
+      // D3D12 reads back all eight decision texels: the tagged UI color's
+      // nearly opaque pixels (texel 4), in this first session without
+      // remembered acceptance the first-run shadow's hidden-scene evidence of
+      // the presented and HUD-less images (texels 5 and 6), which changes
+      // nothing, and the layer's own counts (texel 7).
       {
         unsigned opaque{};
         for (size_t offset = 3; offset < expected.size(); offset += 4) opaque += expected[offset] == 255;
@@ -421,8 +432,10 @@ namespace {
         const auto &automatic = tagged_metadata.at("replay").at("source_alpha_auto");
         const auto &sampled = automatic.at("sampled_evidence");
         const auto &scene = sampled.at("scene");
-        if (!(sampled.at("candidates").get<unsigned>() & 2u) || sampled.at("alpha_opaque").size() != 2 ||
+        if (!(sampled.at("candidates").get<unsigned>() & candidate::ui_color) || sampled.at("alpha_opaque").size() != 2 ||
             sampled.at("alpha_opaque")[1] != opaque || sampled.at("alpha_opaque")[0] != 0u || !opaque ||
+            !(sampled.at("accepted").get<unsigned>() & candidate::ui_color) || automatic.at("sampled_source") != 2u ||
+            !(sampled.at("candidates").get<unsigned>() & candidate::layer) || !sampled.at("layer").contains("opaque") ||
             automatic.at("scene_shadow") != true || automatic.at("scene_hold") != 0u || scene.at("ran") != true ||
             !scene.contains("verdict") || !scene.contains("n") || !scene.contains("d") || !sampled.at("hudless_scene").contains("valid") ||
             automatic.at("sampled_source") == 8u || automatic.at("sampled_source") == 9u)
@@ -430,15 +443,15 @@ namespace {
         evidence << "d3d12-decision-texels opaque_ui_color=" << opaque << " shadow_scene_n=" << scene.at("n") << " shadow_scene_d=" <<
           scene.at("d") << " verdict=" << scene.at("verdict").get<std::string>() << '\n';
       }
-      // Once tag 23 stops, the offscreen layer is the UI color candidate: live
-      // tracking copies it before each clear and Auto admits it premultiplied,
-      // tint included.
+      // Once tag 23 stops, the offscreen layer is the remaining candidate: live
+      // tracking copies it before each clear, and once accepted it decides
+      // while premultiplied (V1), tint included.
       render_tracked_depth = [&] { real_frame(); draw_layer(); };
       // The layer route on D3D12 (docs/reshade-sbs.md, hidden-scene evidence):
-      // before any selective frame could earn it trust, the layer is opaque
-      // everywhere over a flat presented frame that shows none of the depth's
-      // edges, as a splash. The CPU holds the hidden verdict and the frame is
-      // full-frame UI (8).
+      // unless its selective frames already earned it acceptance, the layer is
+      // opaque everywhere over a flat presented frame that shows none of the
+      // depth's edges, as a splash. The CPU holds the hidden verdict and the
+      // frame is full-frame UI (8).
       {
         const auto pixel_bytes = source_bytes.size() / (size_t(width) * height);
         std::vector<std::uint8_t> flat_bytes(source_bytes.size());
@@ -476,22 +489,25 @@ namespace {
         }
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
         step(); no_effects();
-        // A layer that earned trust in an earlier pass of this hook decides by
-        // itself (source 2), and no route is held.
-        const bool trusted_layer = hidden_sample.at("trusted_alpha").get<unsigned>() & 2u;
+        // An accepted layer (earned by its selective frames, here or in an
+        // earlier pass of this hook) decides by itself, flat at any coverage
+        // (source 10), and no route is held.
+        const bool accepted_layer = hidden_sample.at("accepted").get<unsigned>() & candidate::layer;
         const auto flags = hidden_metadata.at("replay").at("ui_detection").at("flags").get<unsigned>();
-        if (!full_frame || hidden_sample.at("alpha_opaque")[1] != size_t(width) * height || (trusted_layer ?
-              automatic.at("sampled_source") != 2u || automatic.at("scene_hold") != 0u :
+        if (!full_frame || hidden_sample.at("layer").at("opaque") != size_t(width) * height || (accepted_layer ?
+              automatic.at("sampled_source") != sunshine_game3d::ui_detection::source_layer || automatic.at("scene_hold") != 0u :
               automatic.at("sampled_source") != 8u || automatic.at("scene_hold") != 1u || scene.at("valid") != true ||
               scene.at("verdict") != "hidden" ||
               (flags & (sunshine_game3d::ui_detection::stored_mask | sunshine_game3d::ui_detection::per_frame_scene_hold)) !=
                 (5u | sunshine_game3d::ui_detection::per_frame_scene_hold)))
           throw std::runtime_error("D3D12 did not take the layer route over a hidden scene: " + automatic.dump() +
             " full_frame=" + std::to_string(full_frame));
-        evidence << "d3d12-layer-route trusted_layer=" << trusted_layer << " sampled_source=" << automatic.at("sampled_source") <<
+        evidence << "d3d12-layer-route accepted_layer=" << accepted_layer << " sampled_source=" << automatic.at("sampled_source") <<
           " scene_hold=" << automatic.at("scene_hold") << " scene_n=" << scene.at("n") << " scene_d=" << scene.at("d") << '\n';
       }
-      const auto layer_metadata = dump_after_layer_frames();
+      // An inferred source: the layer is accepted by valid selective samples
+      // over at least 2 s (A1), so it draws selectively for longer first.
+      const auto layer_metadata = dump_after_layer_frames(2500);
       bool layer_offered = false, tag23_offered = false;
       for (const auto &candidate : layer_metadata.at("ui_source").value("candidates", nlohmann::json::array())) {
         layer_offered |= candidate.value("source", std::string{}) == "ui_layer" && candidate.at("available_for_detection") == true &&
@@ -500,12 +516,13 @@ namespace {
       }
       if (!layer_offered || tag23_offered)
         throw std::runtime_error("Auto did not offer the live offscreen UI layer once tag 23 stopped: " + layer_metadata.at("ui_source").dump());
-      // An 8-bit layer forwards its stored flags: the late-layer identity and
-      // the premultiplied check (5).
+      // An 8-bit layer forwards its stored flags in its own slot: the
+      // late-layer identity and the premultiplied bound (5).
       const auto &layer_detection = layer_metadata.at("replay").at("ui_detection");
-      if (layer_detection.at("ran_or_held") == "inactive" || !(layer_detection.at("candidates").get<unsigned>() & 2u) ||
+      if (layer_detection.at("ran_or_held") == "inactive" || !(layer_detection.at("candidates").get<unsigned>() & candidate::layer) ||
+          !(layer_detection.at("accepted").get<unsigned>() & candidate::layer) ||
           layer_detection.at("flags") != 5u || !layer_metadata.at("replay").contains("ui_pin"))
-        throw std::runtime_error("The offscreen UI layer did not reach detection with flags 5: " + layer_detection.dump());
+        throw std::runtime_error("The offscreen UI layer did not reach detection accepted with flags 5: " + layer_detection.dump());
       // The layer is one frame late, but its mask is its raw alpha like every
       // other source: exactly the 160/255 rectangle, never a texel beyond it.
       const auto &pin = layer_metadata.at("replay").at("ui_pin");
@@ -557,19 +574,22 @@ namespace {
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
       step(); no_effects();
 
-      // A layer with straight alpha is still offered but the GPU rejects it.
+      // A layer with straight alpha is still offered but V1-invalid: it
+      // neither decides nor blocks.
       straight_layer = true;
       const auto straight_metadata = dump_after_layer_frames();
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
       straight_layer = false;
       step(); no_effects();
       const auto &sampled = straight_metadata.at("replay").at("source_alpha_auto").at("sampled_evidence");
-      if (!(sampled.at("candidates").get<unsigned>() & 2u) || !sampled.at("alpha_invalid")[1].get<unsigned>())
+      if (!(sampled.at("candidates").get<unsigned>() & candidate::layer) || !sampled.at("layer").at("invalid").get<unsigned>() ||
+          (sampled.at("valid_bits").get<unsigned>() & candidate::layer) ||
+          straight_metadata.at("replay").at("source_alpha_auto").at("sampled_source") == sunshine_game3d::ui_detection::source_layer)
         throw std::runtime_error("The GPU admitted an offscreen layer with straight alpha: " + sampled.dump());
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
         " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 live_ui_layer_mask=1 frame_tags=" << bool(frame_tag) << '\n';
       std::puts("PASS actual public SL tag23 hook: typeless90 to typed87, automatic GPU mask equals pre-overwrite alpha and optional dump exact before opaque overwrite; host lease immutable");
-      std::puts("PASS live offscreen UI layer: without tag 23, the layer copied before its clear is the automatic UI mask exactly as its raw alpha, tint within twice its alpha included, the UI on the plane and the scene rows beside it off it; straight alpha is rejected; opaque everywhere over a flat presented frame it is full-frame UI by the layer route (8)");
+      std::puts("PASS live offscreen UI layer: offered in its own slot beside tag 23 from the first frame; without tag 23 and once accepted, the layer copied before its clear is the automatic UI mask exactly as its raw alpha, tint within twice its alpha included, the UI on the plane and the scene rows beside it off it; straight alpha is V1-invalid; opaque everywhere over a flat presented frame it is full-frame UI (by the layer route 8 before acceptance, by itself after)");
     }
 
     void run_automatic_ui_tags(HMODULE sdk) {

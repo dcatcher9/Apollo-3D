@@ -6,6 +6,7 @@
 #include "game3d_shader_cache.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
+#include "game3d_ui_selection.h"
 #include "game3d_ui_temporal.h"
 #include <d3d11_1.h>
 #include <d3d12.h>
@@ -14,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -103,8 +105,11 @@ namespace sunshine_game3d {
     std::array<api::format, 3> ui_source_formats{};
     std::array<bool, 3> ui_source_failed{};
     unsigned ui_source_active{};
-    std::array<texture, 4> ui_candidates{};
-    std::array<api::format, 4> ui_candidate_formats{};
+    // Candidate slots: 0 UIAlpha, 1 UI color tag, 2 Backbuffer, 3 HUD-less, 4
+    // the offscreen UI layer (UI framework E1: the tag and the layer never
+    // share a slot).
+    std::array<texture, 5> ui_candidates{};
+    std::array<api::format, 5> ui_candidate_formats{};
     ui_mask_channel consumed_channel = ui_mask_channel::alpha;
     bool mask_channel_supported = false;
     // Lines per limiter group, from SUNSHINE_LIMITER_LINE_GROUPS. Zero for older
@@ -124,7 +129,8 @@ namespace sunshine_game3d {
     alpha_auto_decision consumed_auto;
     bool detection_attempted{}, detection_ready{}, detection_active{}, detection_pending{}, detection_awaiting_signal{};
     // Decision, then candidate bits with HUD-less counts, alpha coverage,
-    // invalid alpha, and lit HUD-less pixels with the trusted-alpha bits. The
+    // invalid alpha, lit HUD-less pixels with the accepted candidates, and the
+    // offscreen UI layer's counts with the valid candidates (texel 7). The
     // shader's markers size the decision texels and statistics rows
     // (docs/reshade-sbs.md, UI detection flags and decision texels).
     uint32_t detection_decision_texels = ui_detection::default_decision_texels;
@@ -141,8 +147,8 @@ namespace sunshine_game3d {
     uint32_t scene_hold_bits{}; // This render's pushed hold bits (per_frame_scene_hold*).
     bool scene_shadow{};
     // The CPU-side temporal state (game3d_ui_temporal.h): the adopted decision
-    // inputs (stored Sunshine_UIDetectionFlags of the UI color slot's source,
-    // never a per-frame bit, and the trusted slots), the hold of detected_mask
+    // inputs (stored Sunshine_UIDetectionFlags of the offscreen UI layer slot,
+    // never a per-frame bit, and the accepted candidates), the hold of detected_mask
     // across a bounded number of presents, the latest status sample and the
     // CPU-owned hidden-scene verdicts.
     ui_temporal::detection_state temporal;
@@ -158,7 +164,9 @@ namespace sunshine_game3d {
     std::array<uint64_t, ui_detection_inputs::max_retained_presents> retained_present{};
     uint64_t present_number{};
     uint64_t detection_pending_key{};
-    bool detection_pending_layer{}; // The pending sample's UI color slot held the offscreen UI layer.
+    // The acceptance signatures the pending sample was submitted with; its
+    // read earns or revokes acceptance for exactly these (A1).
+    candidate_signatures detection_pending_signatures;
     float difference_threshold = 4.f / 1023.f;
     uint64_t detection_fence{}, detection_last_submit{}, detection_submitted{}, detection_mapped{};
     alpha_auto_source detection_pending_source;
@@ -545,32 +553,43 @@ namespace sunshine_game3d {
         return;
       }
       const auto requested = automatic->session->decision().state;
-      if (requested == alpha_auto_state::manual_on || requested == alpha_auto_state::manual_off) {
+      const bool manual_on = requested == alpha_auto_state::manual_on;
+      if ((manual_on && !detection_active) || requested == alpha_auto_state::manual_off) {
+        // Manual Off, or manual On through the explicit first filtered
+        // candidate where detection cannot run.
         consumed_auto.state = requested;
-        source_alpha_ui = eligible && requested == alpha_auto_state::manual_on;
-      } else {
-        // Current-frame GPU validation chooses the mask. CPU readback is only
-        // a bounded status sample, never authority for a later input image;
-        // poll_detection only updates which alpha channels the session trusts.
-        source_alpha_ui = eligible;
-        consumed_auto = temporal.latest;
-        if (ui_temporal::sample_stale(consumed_auto.sample_tick_ms, automatic->now_ms)) {
-          consumed_auto = {};
-          consumed_auto.state = eligible ? alpha_auto_state::collecting : alpha_auto_state::waiting_for_source;
-        }
-        consumed_auto.scene_hold = (scene_hold_bits & ui_detection::per_frame_scene_hold ? 1u : 0u) |
-          (scene_hold_bits & ui_detection::per_frame_scene_hold_hudless ? 2u : 0u);
-        consumed_auto.scene_shadow = scene_shadow;
+        source_alpha_ui = eligible && manual_on;
+        consumed_auto.enabled = source_alpha_ui;
         return;
       }
-      consumed_auto.enabled = source_alpha_ui;
+      // Current-frame GPU validation chooses the mask. CPU readback is only
+      // a bounded status sample, never authority for a later input image;
+      // poll_detection only updates which sources the session accepts.
+      // Manual On through detection reports the same sample as manual_on.
+      source_alpha_ui = eligible;
+      consumed_auto = temporal.latest;
+      if (ui_temporal::sample_stale(consumed_auto.sample_tick_ms, automatic->now_ms)) {
+        consumed_auto = {};
+        consumed_auto.state = eligible ? alpha_auto_state::collecting : alpha_auto_state::waiting_for_source;
+      }
+      if (manual_on) {
+        consumed_auto.state = alpha_auto_state::manual_on;
+        consumed_auto.enabled = source_alpha_ui;
+      }
+      consumed_auto.scene_hold = (scene_hold_bits & ui_detection::per_frame_scene_hold ? 1u : 0u) |
+        (scene_hold_bits & ui_detection::per_frame_scene_hold_hudless ? 2u : 0u);
+      consumed_auto.scene_shadow = scene_shadow;
     }
     bool prepare_detection() {
       if (detection_attempted) return detection_ready;
       detection_attempted = true;
-      // A shader either measures both images' scene evidence or none.
+      // A shader either measures both images' scene evidence or none. Live
+      // detection binds candidate layout 2 (the offscreen UI layer at t7 and the
+      // accepted mask in b2 word 2); a shader of another layout, such as an
+      // older embedded replay shader, would misread both, so it gets none.
       if (shader_source().find("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") == std::string_view::npos ||
-          detection_decision_texels < ui_detection::min_decision_texels ||
+          shader_marker(shader_source(), ui_detection::candidate_layout_marker) != ui_detection::candidate_layout ||
+          detection_decision_texels < ui_detection::layer_decision_texels ||
           detection_decision_texels > ui_detection::max_decision_texels ||
           (detection_statistics_images && !scene_evidence_supported()) ||
           !texture_create(detection_statistics, 16, ui_detection::statistics_rows(detection_statistics_images),
@@ -694,10 +713,13 @@ namespace sunshine_game3d {
       latest = {};
       if (!read) { counters_pending = false; return; }
       latest = ui_temporal::decode_detection_sample(counts.data(), counts.size(), detection_pending_source.now_ms,
-        detection_submitted, detection_pending_layer, scene_evidence_supported());
+        detection_submitted, scene_evidence_supported());
       temporal.latest_source = detection_pending_source;
       temporal.observe_scene(latest, temporal.pending_scene_actionable);
-      if (input.session) input.session->observe_alpha_channels(latest.evidence, latest.pixels, detection_pending_source.now_ms);
+      // Earns or revokes acceptance of the signatures this sample was taken
+      // for; a session in a manual mode ignores it (S2).
+      if (input.session)
+        input.session->observe(latest.evidence, latest.pixels, detection_pending_source.now_ms, detection_pending_signatures);
       commit_counters(latest, input.session);
       counters_pending = false;
     }
@@ -710,13 +732,15 @@ namespace sunshine_game3d {
       // reads that color's alpha for the present-alpha candidate; eye rendering
       // stays current.
       views[0] = paired_color.handle ? paired_color : textures[source].srv;
+      // Candidate layout 2: the offscreen UI layer in its own slot (t7).
+      views[7] = input.layer;
       for (unsigned i = 0; i != 3; ++i) views[11+i] = input.masks[i];
       views[14] = input.hudless;
       // The b2 constants of every detection pass. Per-frame bits join the
       // pushed flags only, never detection_flags or its key.
       uint32_t threshold_bits;
       std::memcpy(&threshold_bits, &difference_threshold, sizeof(threshold_bits));
-      detection_run = {ui_detection_snapshot::run_state::ran, temporal.bits, threshold_bits, temporal.trusted,
+      detection_run = {ui_detection_snapshot::run_state::ran, temporal.bits, threshold_bits, temporal.accepted,
         temporal.flags | per_frame, temporal.flags};
       // The reduce also adds this frame to the exact counters at u7.
       auto &counter_texture = textures[ui_counter_words];
@@ -736,8 +760,8 @@ namespace sunshine_game3d {
         if (count) uavs[7] = counter_texture.uav;
         cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[stage]);
         bindings(cmd, api::shader_stage::compute, p, views, uavs);
-        struct constants { uint32_t bits; float threshold; uint32_t trusted, flags; } values{detection_run.candidates,
-          difference_threshold, detection_run.trusted, detection_run.flags};
+        struct constants { uint32_t bits; float threshold; uint32_t accepted, flags; } values{detection_run.candidates,
+          difference_threshold, detection_run.accepted, detection_run.flags};
         cmd->push_constants(api::shader_stage::compute, layout, 5, 0, 4, &values);
         cmd->dispatch(x, y, 1);
         uavs.fill(null_uav);
@@ -807,7 +831,7 @@ namespace sunshine_game3d {
         pending_counts = cpu_counts;
       }
       detection_pending_source = observation; detection_pending_key = temporal.key();
-      detection_pending_layer = (temporal.flags & ui_detection::stored_late_layer) != 0;
+      detection_pending_signatures = input.signatures;
       detection_pending = detection_awaiting_signal = true;
       detection_last_submit = observation.now_ms; ++detection_submitted;
     }
@@ -1109,24 +1133,35 @@ namespace sunshine_game3d {
     auto &d = *data_;
     const auto mode = automatic && automatic->session ? automatic->session->decision().state : alpha_auto_state::manual_off;
     const bool auto_mode = automatic && automatic->session && mode != alpha_auto_state::manual_on && mode != alpha_auto_state::manual_off;
+    // Manual On validates the provider's filtered candidates through detection,
+    // each accepted for this session only (S2); where detection cannot run it
+    // keeps the explicit first filtered candidate.
+    const bool manual_detection = automatic && automatic->session && mode == alpha_auto_state::manual_on && ui.detection;
+    namespace candidate = ui_detection::candidate;
+    using ui_selection::kind;
     ui_detection_inputs candidates;
     candidates.current_color = ui.kind == ui_input_kind::current_color_alpha;
     if (ui.detection) candidates = *ui.detection;
     else if (ui.kind == ui_input_kind::hudless_difference) candidates.hudless = ui.view;
     else if (ui.kind == ui_input_kind::captured_color_alpha) candidates.masks[2] = ui.view;
     else if (ui.kind == ui_input_kind::dedicated_mask) candidates.masks[channel == ui_mask_channel::red ? 0 : 1] = ui.view;
-    const auto compatible = [&](api::resource_view view, bool paired_color) {
+    const auto compatible = [&](api::resource_view view) {
       if (!view.handle) return false;
       const auto desc = d.device->get_resource_desc(d.device->get_resource_from_view(view));
       return desc.type == api::resource_type::texture_2d && desc.texture.width == d.width && desc.texture.height == d.height &&
-        desc.texture.samples == 1 && desc.texture.depth_or_layers == 1 &&
-        (!paired_color || typed(desc.texture.format) == d.source_format);
+        desc.texture.samples == 1 && desc.texture.depth_or_layers == 1;
     };
-    uint32_t bits = candidates.current_color ? 8u : 0u;
+    const auto format_of = [&](api::resource_view view) {
+      return uint32_t(typed(d.device->get_resource_desc(d.device->get_resource_from_view(view)).texture.format));
+    };
+    uint32_t bits = candidates.current_color ? candidate::current : 0u;
+    constexpr std::array<uint32_t, 3> mask_bits{candidate::ui_alpha, candidate::ui_color, candidate::backbuffer};
     for (unsigned i = 0; i < candidates.masks.size(); ++i) {
-      if (compatible(candidates.masks[i], false)) bits |= 1u << i;
+      if (compatible(candidates.masks[i])) bits |= mask_bits[i];
       else candidates.masks[i] = {};
     }
+    if (compatible(candidates.layer)) bits |= candidate::layer;
+    else { candidates.layer = {}; candidates.layer_flags = 0; }
     api::resource_view hudless_color{};
     if (candidates.hudless.handle && candidates.hudless_pair.handle) {
       hudless_color = candidates.hudless_pair; // Same tag batch: an exact pair.
@@ -1136,25 +1171,53 @@ namespace sunshine_game3d {
       hudless_color = d.retained_view(candidates.hudless_presents_ago);
       if (!hudless_color.handle) candidates.hudless = {};
     }
-    if (hudless_color.handle && !compatible(hudless_color, true)) { candidates.hudless = {}; hudless_color = {}; }
-    if (compatible(candidates.hudless, true)) bits |= candidates.hudless_exact ? 48u : 16u;
+    // V2: a HUD-less image pairs only with color of the same transfer, from
+    // the two snapshots' own encodings; the pair's difference threshold
+    // follows from them. Without a HUD-less image the threshold is the
+    // presented color's own, as the replay computes it.
+    const ui_selection::encoding presented{uint32_t(d.source_format), d.color};
+    std::optional<float> pair_threshold;
+    if (hudless_color.handle && !compatible(hudless_color)) { candidates.hudless = {}; hudless_color = {}; }
+    if (compatible(candidates.hudless))
+      pair_threshold = ui_selection::comparable({format_of(candidates.hudless), d.color},
+        hudless_color.handle ? ui_selection::encoding{format_of(hudless_color), d.color} : presented);
+    if (pair_threshold) bits |= candidates.hudless_exact ? candidate::hudless | candidate::exact : candidate::hudless;
     else { candidates.hudless = {}; hudless_color = {}; }
+    // The acceptance signature of each offered kind (A1): the provider's, or
+    // the bound view's typed format and the swapchain color space.
+    auto &signatures = candidates.signatures;
+    if (!signatures.color_space) signatures.color_space = d.color;
+    const auto sign = [&](kind k, api::resource_view view) {
+      if ((bits & ui_selection::bit(k)) && !signatures.format[std::size_t(k)]) signatures.set(k, format_of(view));
+    };
+    sign(kind::ui_alpha, candidates.masks[0]);
+    sign(kind::ui_color, candidates.masks[1]);
+    sign(kind::backbuffer, candidates.masks[2]);
+    sign(kind::ui_layer, candidates.layer);
+    sign(kind::hudless, candidates.hudless);
+    if ((bits & candidate::current) && !signatures.format[std::size_t(kind::current)])
+      signatures.set(kind::current, uint32_t(d.source_format));
+    // Only accepted candidates decide (S1): the session's ledger in Auto,
+    // every offered candidate in manual On, none in manual Off. Explicit
+    // offline input without a session is already a resolved choice.
+    uint32_t accepted = automatic && automatic->session ? automatic->session->accepted(bits, signatures) :
+      bits & ui_selection::candidate_bits;
     // Holding the previous decision and mask (ui_temporal::detection_state::
-    // arbitrate). Slot-level trust: slot 1 is trusted only for the source that
-    // fills it, or for the one that filled it last when it is missing.
-    const bool layer_slot = d.temporal.layer_slot(bits, candidates.color_alpha_flags);
-    const uint32_t trusted = automatic && automatic->session ? automatic->session->trusted_slots(layer_slot) : 0u;
-    const auto arbitration = d.temporal.arbitrate(bits, trusted, layer_slot, candidates.hold_previous,
+    // arbitrate), in the call order game3d_ui_temporal.h documents.
+    const auto arbitration = d.temporal.arbitrate(bits, accepted, candidates.hold_previous,
       ui_detection_inputs::max_held_presents);
     const bool hold = arbitration.hold;
-    uint32_t flags = (bits & 2u) ? candidates.color_alpha_flags : 0u;
-    if (hold) { bits = d.temporal.bits; flags = d.temporal.flags; }
-    d.temporal.adopt(bits, flags, trusted);
-    d.difference_threshold = d.source_format == api::format::r10g10b10a2_unorm ? 4.f / 1023.f :
-      d.color == 2 ? .005f : 2.f / 255.f;
-    const bool needs_detection = auto_mode || ui.kind == ui_input_kind::hudless_difference;
+    uint32_t flags = (bits & candidate::layer) ? candidates.layer_flags : 0u;
+    if (hold) { bits = d.temporal.bits; flags = d.temporal.flags; accepted = d.temporal.accepted; }
+    d.temporal.adopt(bits, flags, accepted);
+    d.difference_threshold = pair_threshold ? *pair_threshold : ui_selection::comparable(presented, presented).value_or(2.f / 255.f);
+    const bool needs_detection = auto_mode || manual_detection || ui.kind == ui_input_kind::hudless_difference;
     const bool detection_requested = needs_detection && (!automatic || mode != alpha_auto_state::manual_off);
     d.detection_active = detection_requested && source_alpha_ui && bits && d.width <= 3840 && d.height <= 3840 && d.prepare_detection();
+    // Manual On without detection (a frame larger than 3840, or resources that
+    // could not be prepared) keeps the explicit first filtered candidate.
+    const bool explicit_fallback = manual_detection && !d.detection_active &&
+      ui.kind != ui_input_kind::unavailable && ui.kind != ui_input_kind::hudless_difference;
     // Why a render that requested detection has none (ui_counter::inactive_*).
     const std::size_t inactive_reason = !source_alpha_ui || !bits ? ui_counter::inactive_no_candidates :
       d.width > 3840 || d.height > 3840 ? ui_counter::inactive_size : ui_counter::inactive_unprepared;
@@ -1213,7 +1276,7 @@ namespace sunshine_game3d {
           (!input.depth_current || candidates.hold_previous ? ui_detection::per_frame_depth_not_current : 0u);
         d.detect_ui(cmd, p, candidates, observation, hudless_color, depth, per_frame);
         d.consumed_detection = d.detection_run;
-        // The detected mask can be held when HUD-less or a trusted alpha channel made it.
+        // The detected mask can be held when HUD-less or an accepted alpha candidate made it.
         d.temporal.detected();
       }
       alpha_source = t[impl::detected_mask].srv;
@@ -1225,7 +1288,7 @@ namespace sunshine_game3d {
     d.mark(cmd, impl::mark_detection);
     // A captured input's RGB never replaces current eye color. Auto consumes a
     // freshly derived mask; explicit manual/replay inputs retain their meaning.
-    d.update_alpha_auto(source_alpha_ui && ui_mode_supported && (!needs_detection || d.detection_active) &&
+    d.update_alpha_auto(source_alpha_ui && ui_mode_supported && (!needs_detection || d.detection_active || explicit_fallback) &&
       (!automatic || !automatic->retained || alpha_source.handle), automatic);
     const bool probe_ui = d.prepare_adaptive_frame(p, adaptive);
     d.nearest_ui_rendered = false;

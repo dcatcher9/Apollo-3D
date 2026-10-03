@@ -41,8 +41,12 @@ UI = re.compile(
     r'Sunshine UI protection: runtime=\S+ .*?detection=(?P<detection>\w+) .*?sampled_source=(?P<source>\d+) '
     r'sampled_covered=(?P<covered>\d+) sampled_pixels=(?P<pixels>\d+) '
     r'sampled_candidates=(?P<candidates>0x[0-9a-fA-F]+) sampled_alpha_covered=(?P<alpha>\d+/\d+/\d+/\d+) '
-    r'(?:sampled_alpha_invalid=(?P<invalid>\d+/\d+/\d+/\d+) )?trusted_alpha=(?P<trusted>0x[0-9a-fA-F]+)'
-    r'(?: sampled_ui_layer=(?P<layer>\d))? '
+    r'(?:sampled_alpha_invalid=(?P<invalid>\d+/\d+/\d+/\d+) )?'
+    # Since S1 the accepted candidate bits and the offscreen UI layer's own counts; before it the trusted alpha slot
+    # bits, with the layer in the UI colour slot when sampled_ui_layer=1.
+    r'(?:accepted=(?P<accepted>0x[0-9a-fA-F]+) sampled_layer=\{covered=(?P<layer_covered>\d+) '
+    r'invalid=(?P<layer_invalid>\d+) opaque=\d+\}'
+    r'|trusted_alpha=(?P<trusted>0x[0-9a-fA-F]+)(?: sampled_ui_layer=(?P<layer>\d))?) '
     r'sampled_hudless=\{changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) invalid=(?P<hudless_invalid>\d+)')
 # Hidden-scene fields of the same line, absent from older logs.
 SCENE = re.compile(
@@ -55,7 +59,11 @@ UI_MODE = re.compile(r'\bmode=(\w+)')
 UI_RENDERED = re.compile(r'\brendered=(\d)')
 UI_FG = re.compile(r'\bfg=(\d)')
 UI_AVAILABILITY = re.compile(r'\bsource_availability=(\w+)')
-TRUST = re.compile(r'Sunshine UI protection: (restored alpha trust|alpha trust is now) (0x[0-9a-fA-F]+)')
+# Acceptance changes: since S1 the accepted source signatures (docs/reshade-sbs.md, UI decision framework, A1), before
+# it trusted source bits.
+TRUST = re.compile(r'Sunshine UI protection: (restored accepted UI sources|accepted UI sources are now|'
+                   r'restored alpha trust|alpha trust is now) ([^\s;]+)')
+LEGACY_TRUST = re.compile(r'Sunshine UI protection: discarded (\d+) legacy UI trust entries')
 # The session's cumulative exact UI counters (docs/reshade-sbs.md, UI counters), absent from older logs.
 COUNTERS = re.compile(r'Sunshine UI counters: (.*)$')
 COUNTER_FIELD = re.compile(r'(\w+)=(?:\{([^}]*)\}|(\S+))')
@@ -89,10 +97,19 @@ LOG_GATE_S = 1.0  # A changed controller state waits this long after its previou
 RAW_PLACED = ('ready', 'holding_reference')  # Raw automation states that place the scene (raw_scene_policy.h).
 # A depth selection that names a game-side cause.
 SELECTION_HINTS = {'inactive_views': 'the game supplied no depth'}
-RESOLVE_S = 10.0  # A trust dispute is handled when that channel's trust is revoked this soon.
-DEDICATED, PRESENTED = (0, 1), (2, 3)
-UI_LAYER_SOURCE = 4  # alpha_auto_policy source of the offscreen UI layer in slot 1.
-ALPHA_NAMES = ('UI alpha', 'UI colour', 'Backbuffer alpha', 'current alpha')  # Alpha slots 0-3.
+RESOLVE_S = 10.0  # A dispute is handled when that source's acceptance is revoked this soon.
+# Alpha candidates in UISample order: UIAlpha, the UI colour tag, Backbuffer and current alpha (the log's
+# sampled_alpha_covered), then the offscreen UI layer (sampled_layer); their candidate bits (ui_detection::candidate),
+# acceptance kinds (ui_selection::kind) and the source each decides as.
+ALPHA_NAMES = ('UI alpha', 'UI colour', 'Backbuffer alpha', 'current alpha', 'UI layer')
+ALPHA_BITS = (0x1, 0x2, 0x4, 0x8, 0x40)
+ALPHA_KINDS = ('ui_alpha', 'ui_color', 'backbuffer', 'current', 'ui_layer')
+ALPHA_SOURCES = (1, 2, 3, 4, 10)
+DRAW_ORDER = (0, 1, 4, 2, 3)  # S1: declared before inferred (ui_selection::draw_order).
+DECLARED, INFERRED = (0, 1), (2, 3, 4)  # The game's own UI contract, and guesses.
+DEDICATED, PRESENTED = (0, 1, 4), (2, 3)  # UI channels, whose clean empty pixels show no UI, and presented alpha.
+# Trusted source bits of logs before S1, by acceptance kind.
+LEGACY_TRUST_KINDS = {0x1: 'ui_alpha', 0x2: 'ui_color', 0x4: 'backbuffer', 0x8: 'current', 0x10: 'ui_layer'}
 HUDLESS_PAIR = 48  # Candidate bits of the HUD-less pair.
 # Unprotected time shorter than this is counted, not listed: alpha_trust_span_ms (game3d_alpha_auto.h), the span over
 # which detection itself earns or loses confidence.
@@ -102,11 +119,11 @@ UI_LINE_PERIOD_S = 10.0  # An unchanged UI protection state is logged again this
 # scene.
 SHADOW_HIDDEN_WARN_MS = 500
 # Decided sources by number (decision texel 0, docs/reshade-sbs.md); 7 is retired.
-SOURCE_NAMES = {0: 'no mask', 1: 'UI alpha', 2: 'UI colour or layer', 3: 'Backbuffer alpha', 4: 'current alpha',
+SOURCE_NAMES = {0: 'no mask', 1: 'UI alpha', 2: 'UI colour', 3: 'Backbuffer alpha', 4: 'current alpha',
                 5: 'HUD-less difference', 6: 'full frame (exact pair)', 8: 'full frame (layer route)',
-                9: 'full frame (HUD-less route)'}
+                9: 'full frame (HUD-less route)', 10: 'UI layer'}
 NO_MASK_REASONS = ('layer_aside', 'trusted_invalid', 'presented_blocked', 'ambiguous', 'difference_failed',
-                   'gate_no_hold', 'no_candidate', 'other')
+                   'gate_no_hold', 'no_candidate', 'other', 'unaccepted')
 HOLD_KINDS = ('generated', 'inexact_after_exact', 'trusted_missing')
 INACTIVE_REASONS = ('no_candidates', 'size', 'unprepared')
 
@@ -124,6 +141,15 @@ def clock(value: float, ms: bool = False) -> str:
 def percent(n: int, total: int) -> str:
     value = 100 * n / total if total else 0.0
     return f'{value:.0f}%' if value >= 10 or not value else f'{value:.1f}%' if value >= 1 else f'{value:.2f}%'
+
+
+def accepted_keys(value: str) -> tuple[str, ...]:
+    """The accepted source keys of a logged acceptance value: since S1 'kind:format:space' signatures joined by
+    commas, or 'none'; before it trusted source bits, read as their kinds."""
+    if value.startswith('0x'):
+        bits = int(value, 16)
+        return tuple(kind for bit, kind in LEGACY_TRUST_KINDS.items() if bits & bit)
+    return () if value == 'none' else tuple(value.split(','))
 
 
 def counter_fields(text: str) -> dict[str, int]:
@@ -157,49 +183,61 @@ class Scene(NamedTuple):
 class UISample(NamedTuple):
     t: float
     detection: str
-    # 1-4: alpha slot 0-3 decided, 5: HUD-less difference, 6: full frame flat (exact pair), 8: full frame over a
-    # hidden scene by the layer route, 9: by the HUD-less route. 7 is retired.
+    # 1-4: UI alpha, UI colour tag, Backbuffer or current alpha decided, 10: the UI layer, 5: HUD-less difference, 6:
+    # full frame flat (exact pair), 8: full frame over a hidden scene by the layer route, 9: by the HUD-less route. 7
+    # is retired. Before S1 the layer decided as 2; parse() reads it as 10.
     source: int
     covered: int
     pixels: int
-    candidates: int
-    alpha: tuple[int, ...]
-    trusted: int  # Slot bits the GPU treated as trusted.
-    ui_layer: bool  # Slot 1 held the offscreen UI layer rather than a tagged UI color.
+    candidates: int  # Candidate bits (ui_detection::candidate), the layer as 0x40 also before S1.
+    alpha: tuple[int, ...]  # Covered pixels in ALPHA_NAMES order.
+    accepted: int  # Accepted candidate bits pushed with the detection; before S1 the trusted alpha channels.
     hudless: tuple[int, ...]  # changed, unchanged, invalid.
-    invalid: tuple[int, ...] | None = None  # Per alpha slot; absent in older logs.
+    invalid: tuple[int, ...] | None = None  # In ALPHA_NAMES order; absent in older logs.
     scene: Scene | None = None  # Absent in older logs.
     runtime: str = ''
     mode: str = 'auto'
     rendered: bool = True
     availability: str = ''  # source_availability; absent in older logs.
     fg: bool = False  # Frame generation active.
+    legacy: bool = False  # Logged before S1, when a trusted UI channel, the layer included, kept presented alpha out.
 
-    def trust_source(self, slot: int) -> int:
-        return UI_LAYER_SOURCE if slot == 1 and self.ui_layer else slot
+    def offered(self, c: int) -> bool:
+        return bool(self.candidates & ALPHA_BITS[c])
 
-    def name(self, slot: int) -> str:
-        return 'UI layer' if slot == 1 and self.ui_layer else ALPHA_NAMES[slot]
+    def is_accepted(self, c: int) -> bool:
+        return bool(self.accepted & ALPHA_BITS[c])
+
+    def valid(self, c: int) -> bool:
+        """V1: at most 1% invalid pixels (unknown in older logs)."""
+        return self.invalid is None or self.invalid[c] * 100 <= self.pixels
 
     def layer_without_alpha(self) -> bool:
-        """An offscreen UI layer with no alpha anywhere but colour on more than 1% of pixels is no UI layer this
-        frame: premultiplied UI over transparent black cannot have colour without alpha. Mirrors
-        ui_detection::layer_without_alpha (game3d_ui_detection_contract.h)."""
-        return (self.ui_layer and self.invalid is not None and not self.alpha[1]
-                and self.invalid[1] * 100 > self.pixels)
+        """An offscreen UI layer with no alpha anywhere but colour on more than 1% of pixels: premultiplied UI over
+        transparent black cannot have colour without alpha, so V1 rejects it (Stellar Blade's SDR scene image).
+        Mirrors source_alpha_ui_decision::layer_without_alpha (game3d_controls.h)."""
+        return self.offered(4) and self.invalid is not None and not self.alpha[4] and not self.valid(4)
 
-    def admitted(self) -> int:
-        """The candidates detection decides from: a layer without alpha is set aside (admitted_candidates)."""
-        return self.candidates & ~2 if self.layer_without_alpha() else self.candidates
+    def blocking(self, admitted: bool = False) -> bool:
+        """An offered, accepted declared alpha keeps inferred alpha out (S1). Before S1 any trusted UI channel did;
+        a layer without alpha was then set aside, and with admitted it does not count."""
+        if not self.legacy:
+            return any(self.offered(c) and self.is_accepted(c) for c in DECLARED)
+        return any(self.offered(c) and self.is_accepted(c) and not (admitted and c == 4 and self.layer_without_alpha())
+                   for c in DEDICATED)
 
-    def shows_no_ui(self, slot: int) -> bool:
-        """Dedicated slot offered clean and empty: the game's UI channel says there is no UI on screen."""
-        if not self.candidates & (1 << slot) or self.alpha[slot]:
+    def kept_out(self) -> tuple[int, ...]:
+        """The alpha candidates a blocking UI channel keeps out."""
+        return PRESENTED if self.legacy else INFERRED
+
+    def shows_no_ui(self, c: int) -> bool:
+        """A UI channel offered clean and empty: the game's UI channel says there is no UI on screen."""
+        if not self.offered(c) or self.alpha[c]:
             return False
         if self.invalid is not None:
-            return not self.invalid[slot]
-        # Older logs lack invalid counts. A clean trusted slot at 0 decides, so with no source it was rejected.
-        return not self.trusted & (1 << slot)
+            return not self.invalid[c]
+        # Older logs lack invalid counts. A clean accepted channel at 0 decides, so with no source it was rejected.
+        return not self.is_accepted(c)
 
     def unprotected(self) -> bool:
         """Auto rendered this frame without a UI mask, and no UI channel of the game showed that there was no UI.
@@ -219,31 +257,63 @@ class UISample(NamedTuple):
                 and not self.unprotected())
 
     def why_unprotected(self) -> str:
-        """Each offered candidate and why it gave no mask."""
+        """Each offered candidate, in draw order, and why it gave no mask."""
         fg = 'FG on' if self.fg else 'FG off'
         if self.availability == 'source_unavailable' or not self.candidates:
             return f'{fg}: no UI source offered'
-        # A trusted dedicated channel offered keeps presented alpha out (SunshineUIDetectionReduceCS).
-        blocking = any(self.candidates & self.trusted & (1 << c) for c in DEDICATED)
+        blocking = self.blocking()
         parts = []
-        for c in range(4):
-            if not self.candidates & (1 << c):
+        for c in DRAW_ORDER:
+            if not self.offered(c):
                 continue
-            covered, trusted = self.alpha[c], self.trusted & (1 << c)
+            covered, name = self.alpha[c], ALPHA_NAMES[c]
             invalid = self.invalid[c] if self.invalid is not None else 0
-            if c == 1 and self.layer_without_alpha():
+            if c == 4 and self.layer_without_alpha():
                 parts.append(f'UI layer has colour but no alpha ({percent(invalid, self.pixels)} of pixels)')
             elif invalid:
-                parts.append(f'{self.name(c)} rejected ({percent(covered, self.pixels)} covered, '
+                parts.append(f'{name} rejected ({percent(covered, self.pixels)} covered, '
                              f'{percent(invalid, self.pixels)} invalid)')
-            elif c in PRESENTED and blocking and covered * 10 < self.pixels * 9:
-                parts.append(f'{self.name(c)} kept out beside a trusted UI channel')
+            elif c in self.kept_out() and blocking and (not self.legacy or covered * 10 < self.pixels * 9):
+                parts.append(f'{name} kept out beside an accepted UI channel')
             else:
-                parts.append(f'{self.name(c)} covers {percent(covered, self.pixels)}'
-                             + ('' if trusted else ' (untrusted)'))
+                parts.append(f'{name} covers {percent(covered, self.pixels)}'
+                             + ('' if self.is_accepted(c) else ' (not accepted)'))
         if self.candidates & HUDLESS_PAIR == HUDLESS_PAIR:
             parts.append('HUD-less difference rejected')
         return f'{fg}: ' + '; '.join(parts)
+
+
+def ui_sample(t: float, text: str, g: dict[str, str | None], scene: Scene | None) -> UISample:
+    """One 'Sunshine UI protection' line; a line logged before S1 is normalized to the S1 candidates."""
+    def counts(value: str) -> tuple[int, ...]:
+        return tuple(int(v) for v in value.split('/'))
+
+    def field_of(pattern: re.Pattern, default: str) -> str:
+        return hit.group(1) if (hit := pattern.search(text)) else default
+    alpha = counts(g['alpha'])
+    invalid = counts(g['invalid']) if g['invalid'] else None
+    candidates, source = int(g['candidates'], 16), int(g['source'])
+    legacy = g['accepted'] is None
+    if not legacy:
+        accepted = int(g['accepted'], 16)
+        alpha += (int(g['layer_covered']),)
+        invalid = invalid + (int(g['layer_invalid']),) if invalid is not None else None
+    elif g['layer'] == '1':
+        # Before S1 the layer filled the UI colour slot: slot 1, candidate bit 2, source 2.
+        def moved(bits: int) -> int:
+            return bits & ~0x2 | (0x40 if bits & 0x2 else 0)
+        alpha = (alpha[0], 0, alpha[2], alpha[3], alpha[1])
+        invalid = (invalid[0], 0, invalid[2], invalid[3], invalid[1]) if invalid is not None else None
+        candidates, accepted = moved(candidates), moved(int(g['trusted'], 16))
+        source = 10 if source == 2 else source
+    else:
+        accepted = int(g['trusted'], 16)
+        alpha += (0,)
+        invalid = invalid + (0,) if invalid is not None else None
+    return UISample(t, g['detection'], source, int(g['covered']), int(g['pixels']), candidates, alpha, accepted,
+                    (int(g['changed']), int(g['unchanged']), int(g['hudless_invalid'])), invalid, scene,
+                    field_of(UI_RUNTIME, ''), field_of(UI_MODE, 'auto'), field_of(UI_RENDERED, '1') == '1',
+                    field_of(UI_AVAILABILITY, ''), field_of(UI_FG, '0') == '1', legacy)
 
 
 @dataclass
@@ -322,7 +392,8 @@ class Session:
     raw_scales: list[float] = field(default_factory=list)
     camera_valid: bool = False
     ui: list[UISample] = field(default_factory=list)
-    trust_events: list[tuple[float, str, int]] = field(default_factory=list)
+    # Time, logged event, logged value and the accepted source keys after it (None for a discard of legacy entries).
+    trust_events: list[tuple[float, str, str, tuple[str, ...] | None]] = field(default_factory=list)
     # The last 'Sunshine UI counters' line: the session's totals are cumulative over all its runtimes.
     counters: dict[str, int] | None = None
     losses: dict[int, tuple[float, str]] = field(default_factory=dict)
@@ -414,29 +485,17 @@ def parse(lines) -> Session:
         if found := CAMERA.search(text):
             s.camera_valid |= found.group(1) == '1'
         if found := UI.search(text):
-            g = found.groupdict()
-
-            def counts(text: str) -> tuple[int, ...]:
-                return tuple(int(v) for v in text.split('/'))
-
-            def field_of(pattern: re.Pattern, default: str) -> str:
-                return hit.group(1) if (hit := pattern.search(text)) else default
             scene = None
             if evidence := SCENE.search(text):
                 e = evidence.groupdict()
-                scene = Scene(counts(e['opaque']), int(e['n']), float(e['d']), e['valid'] == '1', e['ran'] == '1',
-                              e['verdict'], float(e['hudless_d']), e['hudless_valid'] == '1', int(e['hold']),
-                              e['shadow'] == '1', int(e['hidden_ms']))
-            s.ui.append(UISample(t, g['detection'], int(g['source']), int(g['covered']), int(g['pixels']),
-                                 int(g['candidates'], 16), counts(g['alpha']), int(g['trusted'], 16),
-                                 g['layer'] == '1',
-                                 (int(g['changed']), int(g['unchanged']), int(g['hudless_invalid'])),
-                                 counts(g['invalid']) if g['invalid'] else None, scene,
-                                 field_of(UI_RUNTIME, ''), field_of(UI_MODE, 'auto'),
-                                 field_of(UI_RENDERED, '1') == '1', field_of(UI_AVAILABILITY, ''),
-                                 field_of(UI_FG, '0') == '1'))
+                scene = Scene(tuple(int(v) for v in e['opaque'].split('/')), int(e['n']), float(e['d']),
+                              e['valid'] == '1', e['ran'] == '1', e['verdict'], float(e['hudless_d']),
+                              e['hudless_valid'] == '1', int(e['hold']), e['shadow'] == '1', int(e['hidden_ms']))
+            s.ui.append(ui_sample(t, text, found.groupdict(), scene))
         if found := TRUST.search(text):
-            s.trust_events.append((t, found.group(1), int(found.group(2), 16)))
+            s.trust_events.append((t, found.group(1), found.group(2), accepted_keys(found.group(2))))
+        if found := LEGACY_TRUST.search(text):
+            s.trust_events.append((t, 'discarded legacy UI trust entries', found.group(1), None))
         if (found := COUNTERS.search(text)) and 'auto_frames' in (values := counter_fields(found.group(1))):
             s.counters = values
         if found := LOSS.search(text):
@@ -712,62 +771,69 @@ def evaluate(s: Session) -> list[Check]:
 
 
 def ui_checks(s: Session, add) -> None:
-    for t, kind, bits in s.trust_events:
-        add(Check('INFO', 'UI trust', f'{clock(t)} {kind} 0x{bits:x}'))
+    for t, kind, value, _ in s.trust_events:
+        add(Check('INFO', 'UI trust', f'{clock(t)} {kind} {value}'))
     if not s.ui and s.counters is None:
         add(Check('INFO', 'UI protection', 'no UI protection samples'))
         return
-    # A presented alpha (sources 3 and 4) must never decide while a trusted
-    # dedicated UI channel is offered: that flattens scene as UI. Nor may a
-    # trusted channel cover the whole frame while an exact HUD-less pair shows
-    # the scene (Stellar Blade's opaque tagged UI color, before 2026-10).
+    # Inferred alpha (Backbuffer, current alpha and the UI layer) must never decide while an accepted declared UI
+    # channel is offered (S1): that flattens scene as UI. Nor may an accepted alpha cover the whole frame while an
+    # exact HUD-less pair shows the scene (Stellar Blade's opaque tagged UI color, before 2026-10).
     overrides, flattened, disputes, handled = [], [], [], []
 
-    def revoked(t: float, source: int) -> float | None:
-        return next((when for when, _, bits in s.trust_events
-                     if 0 <= when - t <= RESOLVE_S and not bits & (1 << source)), None)
+    def revoked(t: float, kind: str) -> float | None:
+        """When an acceptance change within RESOLVE_S after t left fewer accepted sources of this kind."""
+        before = None
+        for when, _, _, keys in s.trust_events:
+            if keys is None:
+                continue
+            n = sum(1 for key in keys if key.split(':')[0] == kind)
+            if when < t:
+                before = n
+                continue
+            if when - t > RESOLVE_S:
+                break
+            if not n or (before is not None and n < before):
+                return when
+            before = n
+        return None
 
-    def judge(sample: UISample, text: str, slot: int, unresolved: list) -> None:
-        when = revoked(sample.t, sample.trust_source(slot))
+    def judge(sample: UISample, text: str, c: int, unresolved: list) -> None:
+        when = revoked(sample.t, ALPHA_KINDS[c])
         (handled if when is not None else unresolved).append(
-            text + (f', trust revoked {clock(when)}' if when is not None else ''))
+            text + (f', acceptance revoked {clock(when)}' if when is not None else ''))
 
     for u in s.ui:
         if not u.pixels:
             continue
-        # A UI layer without alpha is no UI layer, so presented alpha may decide beside it.
-        dedicated = [c for c in DEDICATED if u.admitted() & u.trusted & (1 << c)]
-        if dedicated and u.source in (3, 4):
+        if u.blocking(admitted=True) and u.source in tuple(ALPHA_SOURCES[c] for c in u.kept_out()):
             overrides.append(f'{clock(u.t)} source {u.source} covered {100 * u.covered / u.pixels:.0f}%')
-        # As the CPU's disagreement(): only a clean UI channel (at most 1% invalid) and clean presented alpha dispute.
-        masks = [u.alpha[c] for c in dedicated if u.invalid is None or u.invalid[c] * 100 <= u.pixels]
+        # As the ledger's disagreement (A2): only an accepted UI channel with at most 1% invalid pixels and clean
+        # accepted presented alpha dispute.
+        masks = [u.alpha[c] for c in DEDICATED if u.offered(c) and u.is_accepted(c) and u.valid(c)]
         for c in PRESENTED:
-            if (masks and u.trusted & (1 << c) and (u.invalid is None or not u.invalid[c])
+            if (masks and u.offered(c) and u.is_accepted(c) and (u.invalid is None or not u.invalid[c])
                     and min(abs(u.alpha[c] - d) for d in masks) * 10 >= u.pixels):
-                judge(u, f'{clock(u.t)} channel {c} {100 * u.alpha[c] / u.pixels:.0f}% vs UI '
+                judge(u, f'{clock(u.t)} {ALPHA_NAMES[c]} {100 * u.alpha[c] / u.pixels:.0f}% vs UI '
                          f'{100 * masks[0] / u.pixels:.1f}%', c, disputes)
         _, unchanged, invalid = u.hudless
-        slot = u.source - 1
-        exact_pair = u.candidates & 48 == 48 and not invalid
-        if (0 <= slot < 4 and u.trusted & (1 << slot) and u.covered * 100 >= u.pixels * 99 and exact_pair
-                and unchanged * 2 >= u.pixels):
-            judge(u, f'{clock(u.t)} channel {slot}{" (UI layer)" if u.ui_layer and slot == 1 else ""} covered '
-                     f'{100 * u.covered / u.pixels:.0f}% while HUD-less showed {100 * unchanged / u.pixels:.0f}% '
-                     f'of the scene', slot, flattened)
-    # A selective dedicated UI channel rejected for invalid pixels (for the UI
-    # layer, colour beyond its alpha headroom) while no mask protected the
-    # frame. A channel without alpha carried no UI to reject (a UI layer with
-    # colour but no alpha is no layer, layer_without_alpha); the time such
-    # frames went unprotected is 'UI protection gaps'.
+        exact_pair = u.candidates & HUDLESS_PAIR == HUDLESS_PAIR and not invalid
+        if u.source in ALPHA_SOURCES:
+            c = ALPHA_SOURCES.index(u.source)
+            if u.is_accepted(c) and u.covered * 100 >= u.pixels * 99 and exact_pair and unchanged * 2 >= u.pixels:
+                judge(u, f'{clock(u.t)} {ALPHA_NAMES[c]} covered {100 * u.covered / u.pixels:.0f}% while HUD-less '
+                         f'showed {100 * unchanged / u.pixels:.0f}% of the scene', c, flattened)
+    # A selective UI channel rejected for invalid pixels (for the UI layer, colour beyond its alpha headroom) while
+    # no mask protected the frame. A channel without alpha carried no UI to reject (a UI layer with colour but no
+    # alpha); the time such frames went unprotected is 'UI protection gaps'.
     rejected = []
     for u in s.ui:
         if u.invalid is None or u.source or not u.pixels:
             continue
         for c in DEDICATED:
-            if u.candidates & (1 << c) and u.invalid[c] and 0 < u.alpha[c] and u.alpha[c] * 10 < u.pixels * 9:
-                rejected.append(f'{clock(u.t)} channel {c}{" (UI layer)" if u.ui_layer and c == 1 else ""} '
-                                f'{100 * u.alpha[c] / u.pixels:.1f}% covered, {u.invalid[c]} invalid pixels'
-                                f'{", trusted" if u.trusted & (1 << c) else ""}')
+            if u.offered(c) and u.invalid[c] and 0 < u.alpha[c] and u.alpha[c] * 10 < u.pixels * 9:
+                rejected.append(f'{clock(u.t)} {ALPHA_NAMES[c]} {100 * u.alpha[c] / u.pixels:.1f}% covered, '
+                                f'{u.invalid[c]} invalid pixels{", accepted" if u.is_accepted(c) else ""}')
     if any(u.invalid is not None for u in s.ui):
         add(Check('WARN' if rejected else 'PASS', 'UI channel admission',
                   f'{len(rejected)} samples left the frame unprotected after rejecting a selective UI channel '
@@ -781,10 +847,10 @@ def ui_checks(s: Session, add) -> None:
     states = Counter(u.detection for u in s.ui)
     add(Check('FAIL' if overrides or flattened else 'WARN' if disputes else 'PASS', 'UI protection',
               ', '.join(f'{k} {v}' for k, v in states.most_common())
-              + ('; presented alpha decided over a trusted UI channel' if overrides else '')
-              + ('; a trusted UI channel flattened the visible scene' if flattened else '')
-              + ('; trusted presented alpha disagrees with the UI channel' if disputes else '')
-              + ('; a contradicted channel lost its trust' if handled and not disputes and not flattened else ''),
+              + ('; inferred alpha decided beside an accepted declared UI channel' if overrides else '')
+              + ('; an accepted UI source flattened the visible scene' if flattened else '')
+              + ('; accepted presented alpha disagrees with an accepted UI channel' if disputes else '')
+              + ('; a contradicted source lost its acceptance' if handled and not disputes and not flattened else ''),
               (overrides + flattened or disputes or handled)[:6]))
     gap_checks(s, add)
     scene_checks(s, add)
@@ -795,9 +861,10 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
     """Checks from the add-on's exact per-frame UI counters (docs/reshade-sbs.md, UI counters).
 
     They replace the sampled invariants: every Auto frame is counted, not one per 100 ms sample. Sampled lines still
-    give the times of examples, trust disputes, which no counter records, whether a trusted full-frame claim over the
-    scene was resolved by a revocation, and the time-based gap and scene checks. Stages (S1-S6) and rule IDs (such as
-    H1 and P1) named in the output are the UI decision framework's (docs/reshade-sbs.md, UI decision framework)."""
+    give the times of examples, acceptance disputes, which no counter records, whether an accepted full-frame claim
+    over the scene was resolved by a revocation, and the time-based gap and scene checks. Stages (S1-S6) and rule IDs
+    (such as H1 and P1) named in the output are the UI decision framework's (docs/reshade-sbs.md, UI decision
+    framework)."""
     def get(key: str) -> int:
         return c.get(key, 0)
 
@@ -812,21 +879,22 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                                        f'{detected + held + inactive} detected, held or inactive)')))
 
     overrides, flattened = get('presented_over_dedicated'), get('trusted_full')
-    # A trusted channel covering the frame over an exact pair that shows the scene keeps deciding until repeated
-    # contradictions revoke its trust (about 2 s), so a handled case counts trusted_full frames first. Such frames
-    # fail only when a sample of them was not resolved by a revocation, or when no full claim was ever revoked.
+    # An accepted alpha covering the frame over an exact pair that shows the scene keeps deciding until repeated
+    # contradictions revoke its acceptance (about 2 s), so a handled case counts trusted_full frames first. Such
+    # frames fail only when a sample of them was not resolved by a revocation, or when no full claim was revoked.
     revoked = get('trust.revoked_full')
     unresolved = flattened and (flattened_sampled or not revoked)
     sources = [(source, get(f'decided.{source}')) for source in SOURCE_NAMES]
     add(Check('FAIL' if overrides or unresolved else 'WARN' if disputes else 'PASS', 'UI protection',
               'decided ' + (', '.join(f'{SOURCE_NAMES[k]} ({k}) {percent(n, detected)}' for k, n in sources if n)
                             or 'nothing') + ' of detection frames'
-              + (f'; presented alpha decided over a trusted UI channel in {overrides} frames' if overrides else '')
-              + (f'; a trusted UI channel covered the frame while an exact HUD-less pair showed the scene in '
-                 f'{flattened} frames' + ('' if unresolved else f' before {revoked} revocations of such a channel')
+              + (f'; inferred alpha decided beside an accepted declared UI channel in {overrides} frames'
+                 if overrides else '')
+              + (f'; an accepted UI source covered the frame while an exact HUD-less pair showed the scene in '
+                 f'{flattened} frames' + ('' if unresolved else f' before {revoked} revocations of such a source')
                  if flattened else '')
-              + ('; trusted presented alpha disagrees with the UI channel' if disputes else '')
-              + ('; a contradicted channel lost its trust' if handled and not disputes and not unresolved else ''),
+              + ('; accepted presented alpha disagrees with an accepted UI channel' if disputes else '')
+              + ('; a contradicted source lost its acceptance' if handled and not disputes and not unresolved else ''),
               (overrides_sampled + flattened_sampled or disputes or handled)[:6]))
 
     full = {k: get(f'decided.{k}') for k in (6, 8, 9)}
@@ -851,11 +919,11 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                                                           f'{exact_note}' if full[6] else '')
                  if routes else f'; {visible} samples of source 6 read the scene visible: {exact_note}')))
 
-    # A whole-frame mask from alpha (a trusted source 1-4 covering at least 99%; only a trusted channel decides at that
-    # coverage) pins the frame flat even over a visible scene: an accepted source's pin weight is saturate(8 alpha) at
-    # any coverage (P1, the opacity ruling), so it is reported, not warned. The wrong cases have their own checks: a
-    # trusted full claim over an exact pair that shows the scene and no revocation resolved (UI protection), and
-    # untrusted inferred alpha (UI inferred alpha). The add-on measures D as a diagnostic on the samples after one that
+    # A whole-frame mask from alpha (an accepted source 1-4 or 10 covering at least 99%; only accepted sources decide)
+    # pins the frame flat even over a visible scene: an accepted source's pin weight is saturate(8 alpha) at any
+    # coverage (P1, the opacity ruling), so it is reported, not warned. The wrong cases have their own checks: an
+    # accepted full claim over an exact pair that shows the scene and no revocation resolved (UI protection), and
+    # unaccepted inferred alpha (UI inferred alpha). The add-on measures D as a diagnostic on the samples after one that
     # decided it, so the first sample of each episode is unmeasured.
     full_alpha, alpha_visible = get('full_alpha'), get('full_alpha_d.visible')
     if full_alpha:
@@ -864,16 +932,19 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                   f'alpha; samples that decided one read the scene hidden {get("full_alpha_d.hidden")}, ambiguous '
                   f'{get("full_alpha_d.ambiguous")}, visible {alpha_visible}, invalid or unmeasured '
                   f'{get("full_alpha_d.invalid")}'
-                  + (f'; {alpha_visible} samples pinned a trusted whole-frame alpha flat over a visible scene, as '
+                  + (f'; {alpha_visible} samples pinned an accepted whole-frame alpha flat over a visible scene, as '
                      'intended (P1)' if alpha_visible else '')))
     elif 'full_alpha' in c:
         add(Check('PASS', 'UI full alpha', 'no frame decided a whole-frame alpha'))
 
-    inferred = get('untrusted_inferred')
-    add(Check('WARN' if inferred else 'PASS', 'UI inferred alpha',
-              f'{inferred} frames ({percent(inferred, detected)} of detection frames) decided from untrusted inferred '
-              'alpha (UI layer, Backbuffer or current alpha); expected until S2a' if inferred else
-              'no frame decided from untrusted inferred alpha'))
+    # Since S1 only accepted candidates decide, so the word is zero by construction: a count is a defect. Counters
+    # from before S1 (trust.opaque_set rather than trust.discarded) still let the untrusted pass decide.
+    inferred, s1 = get('untrusted_inferred'), 'trust.discarded' in c
+    add(Check(('FAIL' if s1 else 'WARN') if inferred else 'PASS', 'UI inferred alpha',
+              f'{inferred} frames ({percent(inferred, detected)} of detection frames) decided from unaccepted inferred '
+              'alpha (UI layer, Backbuffer or current alpha)'
+              + ('; only accepted candidates decide since S1' if s1 else '; expected before S1') if inferred else
+              'no frame decided from unaccepted inferred alpha'))
     inexact = get('inexact_difference')
     add(Check('WARN' if inexact else 'PASS', 'UI inexact difference',
               f'{inexact} frames ({percent(inexact, detected)} of detection frames) decided a HUD-less difference '
@@ -895,8 +966,9 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
     add(Check('INFO', 'UI trust events',
               f'earned {get("trust.earned")}, revoked by a full claim over the scene {get("trust.revoked_full")}, '
               f'revoked by presented disagreement {get("trust.revoked_presented")}, lapsed {get("trust.lapsed")}, '
-              f'restored {get("trust.restored")}, opaque proof set {get("trust.opaque_set")} and cleared '
-              f'{get("trust.opaque_cleared")}'))
+              f'restored {get("trust.restored")}, '
+              + (f'legacy entries discarded {get("trust.discarded")}' if 'trust.discarded' in c else
+                 f'opaque proof set {get("trust.opaque_set")} and cleared {get("trust.opaque_cleared")}')))
 
 
 def outside_settle(s: Session, a: float, b: float) -> list[tuple[float, float]]:

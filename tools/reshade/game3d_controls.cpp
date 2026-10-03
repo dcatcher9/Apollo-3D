@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <reshade.hpp>
+#include <string>
 #include "async_log.h" // After imgui.h and reshade.hpp, which emits the ImGui wrappers.
 #include "game3d_ui_input_provider.h"
 #include <unordered_map>
@@ -62,36 +63,57 @@ namespace sunshine_game3d {
       ImGui::SetNextItemWidth(-1.f);
     }
 
-    // Whether a source carries UI coverage is a property of the game, so trust
-    // outlives the session in this game's ReShade.ini (docs/reshade-sbs.md).
-    // TrustedUISources holds alpha_auto_policy source bits; the older
-    // TrustedUIAlpha held detection-slot bits (sources_from_slots).
-    constexpr const char *trusted_sources_key = "TrustedUISources", *trusted_alpha_key = "TrustedUIAlpha";
+    // Whether a source carries UI coverage is a property of the game, so
+    // acceptance outlives the session in this game's ReShade.ini
+    // (docs/reshade-sbs.md): TrustedUISources holds the accepted signature
+    // keys (alpha_auto_policy::stored), which ReShade keeps as an array. The
+    // integer bitmasks of earlier versions in it, and the older TrustedUIAlpha
+    // key, are no longer read as acceptance: each source earns it again.
+    constexpr const char *accepted_sources_key = "TrustedUISources";
+
+    // The stored value: ReShade returns an array's elements separated by '\0'.
+    std::string read_accepted_sources() {
+      size_t size = 0;
+      if (!reshade::get_config_value(nullptr, config_section, accepted_sources_key, nullptr, &size)) return {};
+      if (!size) size = 1024;
+      std::string value(size + 1, '\0');
+      size = value.size();
+      if (!reshade::get_config_value(nullptr, config_section, accepted_sources_key, value.data(), &size)) return {};
+      return value;
+    }
 
     const std::shared_ptr<alpha_auto_policy> &alpha_session() {
       // Manual On/Off is shared per game; live Auto qualification is per runtime.
       static const auto session = [] {
         auto policy = std::make_shared<alpha_auto_policy>();
-        unsigned int remembered = 0, slots = 0;
-        if (!reshade::get_config_value(nullptr, config_section, trusted_sources_key, remembered) &&
-            reshade::get_config_value(nullptr, config_section, trusted_alpha_key, slots))
-          remembered = alpha_auto_policy::sources_from_slots(slots);
-        // Without remembered trust this is the game's first session: hidden-scene
-        // evidence runs as a logged first-run shadow (docs/reshade-sbs.md).
-        policy->set_first_run(!(remembered & 31u));
-        if (remembered & 31u) {
-          policy->restore_trusted_alpha(remembered);
-          char text[160];
-          std::snprintf(text, sizeof(text),
-            "Sunshine UI protection: restored alpha trust 0x%x from an earlier session of this game", remembered & 31u);
-          sunshine_log::message(reshade::log::level::info, text);
+        const auto restored = policy->restore(read_accepted_sources());
+        // Without restored acceptance this is the game's first session: hidden-
+        // scene evidence runs as a logged first-run shadow (docs/reshade-sbs.md).
+        policy->set_first_run(!restored.restored);
+        if (restored.discarded) {
+          const auto message = "Sunshine UI protection: discarded " + std::to_string(restored.discarded) +
+            " legacy UI trust entries (" + restored.discarded_text +
+            "); each source is accepted again by its own evidence";
+          sunshine_log::message(reshade::log::level::info, message.c_str());
         }
-        policy->on_trust_change([](std::uint32_t trusted) {
-          reshade::set_config_value(nullptr, config_section, trusted_sources_key, static_cast<unsigned int>(trusted));
-          char text[160];
-          std::snprintf(text, sizeof(text),
-            "Sunshine UI protection: alpha trust is now 0x%x; remembered for later sessions of this game", trusted);
-          sunshine_log::message(reshade::log::level::info, text);
+        if (restored.restored) {
+          const auto message = "Sunshine UI protection: restored accepted UI sources " + policy->stored() +
+            " from an earlier session of this game";
+          sunshine_log::message(reshade::log::level::info, message.c_str());
+        }
+        policy->on_change([](const std::string &accepted) {
+          // Written as a ReShade array, one NUL-terminated element per key: a
+          // single string holding commas is saved with them escaped as ",,".
+          if (accepted.empty()) {
+            reshade::set_config_value(nullptr, config_section, accepted_sources_key, "");
+          } else {
+            std::string elements = accepted + ',';
+            std::replace(elements.begin(), elements.end(), ',', '\0');
+            reshade::set_config_value(nullptr, config_section, accepted_sources_key, elements.data(), elements.size());
+          }
+          const auto message = "Sunshine UI protection: accepted UI sources are now " +
+            (accepted.empty() ? std::string("none") : accepted) + "; remembered for later sessions of this game";
+          sunshine_log::message(reshade::log::level::info, message.c_str());
         });
         return policy;
       }();

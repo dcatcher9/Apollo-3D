@@ -95,6 +95,12 @@ namespace {
     // Whether a UI-detection render's depth is this frame's (render_frame_input::depth_current).
     bool depth_current = true;
     std::vector<unsigned char> original;
+    // The acceptance key (A1) of a fixture candidate: its typed DXGI format,
+    // the source color's by default, in the fixture's color space.
+    std::string key(sunshine_game3d::ui_selection::kind kind, DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN) const {
+      if (format == DXGI_FORMAT_UNKNOWN) format = color == 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+      return sunshine_game3d::ui_selection::signature{kind, std::uint32_t(format), color}.key();
+    }
     fixture(const fs::path &runtime, const fs::path &directory, unsigned c, unsigned w, unsigned h, const fs::path &control): width(w), height(h), color(c) {
       require(width >= 8 && width <= 3840 && height >= 8 && height <= 2160, "test dimensions out of bounds");
       require(!fs::exists(directory), "use a fresh evidence directory");
@@ -1621,12 +1627,18 @@ namespace {
     alpha_auto_source source;
     source.session = &policy; source.now_ms = source.tick_ms = 1000;
     source.epoch = 17; source.revision = 1; source.sequence = 1;
-    const auto verify = [&](unsigned mask, api::resource_view retained, bool eligible = true) {
+    // Only an accepted candidate decides, and then at any coverage (S1, P1):
+    // a selective mask protects its pixels, a full one pins the frame flat and
+    // an empty one protects nothing. An unaccepted one decides nothing.
+    const auto verify = [&](unsigned mask, api::resource_view retained, bool decides = true) {
       source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
-      const auto actual = gpu.render(eligible, 1, false, false, source.retained, retained, {}, {}, nullptr, &source);
-      const bool protected_pixels = eligible && mask == 1;
+      const auto actual = gpu.render(true, 1, false, false, source.retained, retained, {}, {}, nullptr, &source);
+      const bool protected_pixels = decides && mask != 2;
       require(exact(actual, protected_pixels ? on[mask] : off[mask]),
-        "Automatic alpha detection changed exact field/SBS or accepted a full-scene mask");
+        "Automatic alpha detection changed exact field/SBS, decided unaccepted or ignored accepted coverage (mask " +
+        std::to_string(mask) + (decides ? ", accepted" : ", unaccepted") + ", candidates " +
+        std::to_string(gpu.renderer.consumed_detection().candidates) + ", accepted " +
+        std::to_string(gpu.renderer.consumed_detection().accepted) + ", stored " + policy.stored() + ")");
       const auto resolved = gpu.renderer.diagnostics().ui_source;
       require(resolved.handle, "Auto did not expose its actual resolved GPU mask");
       const auto selected = gpu.read(resolved);
@@ -1636,27 +1648,66 @@ namespace {
         const auto value = selected.channel(x, y, 0);
         const bool wanted = protected_pixels && masks[mask][size_t(y) * gpu.width + x] > 0.f;
         require(std::isfinite(value) && value >= 0.f && value <= 1.f && (value > 0.f) == wanted,
-          "Auto mask retained full-scene/old coverage or lost selective UI pixels");
+          "Auto mask decided without acceptance, retained old coverage or lost accepted UI pixels");
       }
     };
     // All decisions come from the real GPU inputs. No review, provider approval
     // mutation or injected CPU coverage statistics are used by this fixture.
+    // Current color alpha and the Backbuffer are inferred sources, the tagged
+    // UI color a declared one (A1).
+    const ui_selection::kind kinds[]{ui_selection::kind::current, ui_selection::kind::backbuffer, ui_selection::kind::ui_color};
     for (unsigned kind = 0; kind != 3; ++kind) {
       source.retained = kind != 0; source.dedicated_mask = kind == 2;
       ++source.revision;
-      // Switching from selective directly to opaque/empty tests current-frame
-      // rejection: yesterday's valid UI may not flatten today's whole scene.
+      const auto signature = *ui_selection::signature::parse(gpu.key(kinds[kind]));
+      const auto retained = [&](unsigned mask) { return kind ? gpu.retain_mask(masks[mask]) : api::resource_view{}; };
+      require(!policy.accepts(signature), "The fixture accepted a source before its evidence");
+      // A frame without protection ends the previous kind's mask: an accepted
+      // candidate missing from a frame would otherwise hold it (T1).
+      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+      gpu.render(false, 1, false, false, false, {}, {}, {}, nullptr, &source);
+      if (kind == 1) {
+        // Acceptance an earlier session earned decides from the first frame.
+        gpu.pattern(masks[1], true);
+        verify(1, retained(1), false);
+        require(policy.restore(gpu.key(kinds[kind])).restored == 1, "The Backbuffer signature was not restored");
+      } else {
+        // Earned live: the declared tag by its first valid selective sample,
+        // current alpha by alpha_trust_samples samples over alpha_trust_span_ms.
+        // Until the render after that sample's read nothing decides.
+        const auto first = source.now_ms + 100;
+        unsigned frames = 0;
+        while (!policy.accepts(signature)) {
+          require(++frames <= 40, "A valid selective source never earned acceptance");
+          const auto mask = retained(1);
+          gpu.pattern(masks[1], true);
+          verify(1, mask, false);
+        }
+        require(kind == 2 ? frames == 2 : source.now_ms - first >= alpha_trust_span_ms,
+          "A source earned acceptance from too little evidence: " + std::to_string(frames) + " frames");
+      }
+      // Switching from selective directly to opaque/empty: an accepted source
+      // decides each frame's own coverage, a full one as a flat frame.
       for (const unsigned mask : {1u, 0u, 2u, 1u}) {
-        const auto retained = kind ? gpu.retain_mask(masks[mask]) : api::resource_view{};
+        const auto view = retained(mask);
         gpu.pattern(masks[mask], true);
-        verify(mask, retained);
+        verify(mask, view);
       }
     }
+    {
+      const auto counted = policy.counters();
+      require(counted[ui_counter::none + ui_no_mask::unaccepted] && !counted[ui_counter::untrusted_inferred] &&
+          counted[ui_counter::trust_earned] >= 2 && counted[ui_counter::trust_restored] == 1,
+        "Selective sources before acceptance were not counted as unaccepted, or an inferred source decided unaccepted");
+    }
     if (gpu.color == 2) {
+      // More than 1% of malformed pixels makes accepted alpha V1-invalid: it
+      // decides nothing that frame.
       source.retained = source.dedicated_mask = false;
       for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
           std::numeric_limits<float>::infinity(), -1.f, 2.f}) {
-        auto malformed = masks[1]; malformed.front() = invalid;
+        auto malformed = masks[1];
+        std::fill_n(malformed.begin(), 3 * gpu.width, invalid);
         gpu.pattern(malformed, true);
         source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
         require(exact(gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, &source), off[1]),
@@ -1687,8 +1738,8 @@ namespace {
       gpu.pattern(masks[mask], true);
       require(exact(gpu.render(true, 1), on[mask]), "Automatic detection changed explicit replay rendering");
     }
-    report << "automatic-ui D3D11 current_captured_dedicated=1 full_scene_rejected=1 empty_rejected=1 selective_without_review=1 immediate_bad_frame_rejection=1 resolved_gpu_mask_checked=1 current_RGB_preserved=1 renderer_recreation=1 manual_off_wins=1 explicit_field_and_sbs_parity=1\n";
-    std::puts("PASS D3D11 automatic UI: full-scene/empty rejected immediately, selective exact field/SBS without review, current RGB and manual Off preserved");
+    report << "automatic-ui D3D11 current_captured_dedicated=1 unaccepted_decides_nothing=1 declared_one_sample=1 inferred_two_seconds=1 restored_acceptance=1 accepted_full_flat=1 accepted_empty=1 selective_without_review=1 immediate_bad_frame_rejection=1 resolved_gpu_mask_checked=1 current_RGB_preserved=1 renderer_recreation=1 manual_off_wins=1 explicit_field_and_sbs_parity=1\n";
+    std::puts("PASS D3D11 automatic UI: nothing decides before acceptance (a tag after one sample, presented alpha after 2 s, or restored), then each frame's own coverage decides (selective, flat or empty) with exact field/SBS, current RGB and manual Off preserved");
   }
   void verify_automatic_hudless(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;
@@ -1785,6 +1836,27 @@ namespace {
         }
       }
     };
+    // A1: a HUD-less pair is a declared source. Its first valid selective
+    // sample from an exact pair accepts it; an inexact pair never earns, and
+    // before acceptance it decides nothing (S1).
+    const auto hudless_signature = *ui_selection::signature::parse(gpu.key(ui_selection::kind::hudless));
+    ui_detection_inputs earning;
+    earning.hudless = correct;
+    ui.detection = &earning;
+    run(false, "an unaccepted inexact HUD-less pair decides nothing");
+    run(false, "an inexact HUD-less pair never earns acceptance");
+    require(!policy.accepts(hudless_signature), "An inexact HUD-less pair earned acceptance");
+    earning.hudless_exact = true;
+    run(false, "an unaccepted exact HUD-less pair decides nothing yet");
+    run(false, "acceptance applies from the render after its sample is read");
+    require(policy.accepts(hudless_signature), "A valid selective exact HUD-less sample did not accept the pair");
+    ui.detection = nullptr;
+    // A frame without protection ends the exact decision, which an inexact
+    // frame right after it would otherwise hold (T1).
+    source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+    gpu.render(false, 1, false, false, false, {}, {}, {}, nullptr, &source);
+    // An accepted change set decides from an inexact pair too (counted as
+    // inexact_difference) until frame identity is exact (E2).
     run(true, "matching final/HUDless");
     ui.view = shifted;
     run(false, "scene-wide camera shift after a good pair");
@@ -1834,12 +1906,12 @@ namespace {
         !gpu.renderer.consumed_detection().held_presents, "A fresh detection reported a held mask");
     inputs.hudless = shifted;
     run(false, "all candidates unsuitable");
-    inputs.masks[0] = explicit_alpha;
-    run(true, "explicit single-channel alpha wins over unsuitable color inputs");
+    // An unaccepted UIAlpha neither decides nor blocks (S1), and a full one
+    // never earns acceptance (A1).
     inputs.masks[0] = opaque_alpha;
-    run(false, "full-scene explicit alpha cannot override unsuitable inputs");
+    run(false, "an unaccepted full-scene UIAlpha is no full-screen UI");
     inputs.hudless = correct;
-    run(true, "full-scene explicit alpha falls through to HUDless");
+    run(true, "an unaccepted full-scene UIAlpha falls through to HUDless");
     inputs.masks[0] = {};
     policy.set_manual(false);
     run(false, "manual Off wins over a valid pair", false);
@@ -1938,39 +2010,47 @@ namespace {
       }
     };
     const auto nearly_opaque = red_view(std::vector<float>(pixels, .99f)), no_alpha = red_view(std::vector<float>(pixels, 0.f));
-    require(!(policy.trusted_alpha() & 1u), "The fixture trusted the explicit alpha channel too early");
-    trust_frame(menu, opaque_alpha, {}, {}, expected::empty, "an untrusted opaque alpha channel is not full-screen UI");
-    for (unsigned frame = 0; frame < 25; ++frame) trust_frame(menu, explicit_alpha, {}, {}, expected::hud, nullptr);
-    require(policy.trusted_alpha() == 1u, "Selective UI alpha over 2 s did not earn trust for exactly its channel");
-    trust_frame(menu, opaque_alpha, {}, {}, expected::flat, "a trusted channel covering everything is a full-screen menu");
-    trust_frame(menu, opaque_alpha, {}, {}, expected::flat, "a trusted channel publishes its evidence");
+    const auto ui_alpha_signature = *ui_selection::signature::parse(gpu.key(ui_selection::kind::ui_alpha, DXGI_FORMAT_R32_FLOAT));
+    require(!policy.accepts(ui_alpha_signature), "The fixture accepted the UIAlpha channel too early");
+    trust_frame(menu, opaque_alpha, {}, {}, expected::empty, "an unaccepted opaque UIAlpha is not full-screen UI");
+    // UIAlpha is a declared source: its first valid selective sample accepts
+    // it (A1), and it decides from the render after that sample is read.
+    trust_frame(menu, explicit_alpha, {}, {}, expected::empty, "an unaccepted selective UIAlpha decides nothing");
+    trust_frame(menu, explicit_alpha, {}, {}, expected::empty, "acceptance waits for its sample to be read");
+    require(policy.accepts(ui_alpha_signature), "A selective UIAlpha sample did not accept exactly its channel");
+    trust_frame(menu, explicit_alpha, {}, {}, expected::hud, "an accepted UIAlpha yields its HUD mask");
+    trust_frame(menu, opaque_alpha, {}, {}, expected::flat, "an accepted channel covering everything is a full-screen menu");
+    trust_frame(menu, opaque_alpha, {}, {}, expected::flat, "an accepted channel publishes its evidence");
     {
       const auto sample = gpu.renderer.consumed_alpha_auto();
-      require(sample.source_kind == 1 && sample.covered == pixels && sample.evidence.trusted_alpha == 1u &&
-          sample.evidence.alpha_covered[0] == pixels, "Trusted-alpha evidence does not describe the decision");
+      require(sample.source_kind == 1 && sample.covered == pixels && sample.evidence.accepted == ui_detection::candidate::ui_alpha &&
+          (sample.evidence.valid_bits & ui_detection::candidate::ui_alpha) && sample.evidence.alpha_covered[0] == pixels,
+        "Accepted-alpha evidence does not describe the decision");
     }
-    trust_frame(menu, nearly_opaque, {}, {}, expected::flat, "a trusted channel above zero everywhere is a full-screen menu");
-    trust_frame(menu, no_alpha, {}, {}, expected::empty, "a trusted channel covering nothing means no UI");
-    trust_frame(menu, {}, flattened_ui, {}, expected::empty, "trust belongs to its own candidate");
-    trust_frame(menu, explicit_alpha, {}, {}, expected::hud, "a trusted channel still yields its HUD mask");
+    trust_frame(menu, nearly_opaque, {}, {}, expected::flat, "an accepted channel above zero everywhere is a full-screen menu");
+    trust_frame(menu, no_alpha, {}, {}, expected::empty, "an accepted channel covering nothing means no UI");
+    // Acceptance belongs to its own candidate: an unaccepted tag in its place
+    // decides nothing, and the missing UIAlpha holds its empty decision.
+    trust_frame(menu, {}, flattened_ui, {}, expected::empty, "acceptance belongs to its own candidate");
+    trust_frame(menu, explicit_alpha, {}, {}, expected::hud, "an accepted channel still yields its HUD mask");
     // A pause menu that tints the live scene changes too many pixels for a HUD
-    // mask and too few for full-screen UI: only a trusted channel can say.
+    // mask and too few for full-screen UI: only an accepted channel can say.
     auto tinted = hudless;
     for (size_t i = 0; i != pixels * 6 / 10; ++i)
       for (unsigned byte = 0; byte != 3; ++byte) tinted[i * bpp + byte] ^= 0x80;
     opaque(tinted);
-    trust_frame(tinted, opaque_alpha, {}, correct, expected::flat, "a trusted channel decides a menu that tints the scene");
-    // A trusted channel missing from a frame (an observation loss refuses its
+    trust_frame(tinted, opaque_alpha, {}, correct, expected::flat, "an accepted channel decides a menu that tints the scene");
+    // An accepted channel missing from a frame (an observation loss refuses its
     // capture until the next tag) holds its decision for up to three presents.
-    trust_frame(tinted, {}, {}, correct, expected::flat, "a missing trusted channel holds its mask");
-    trust_frame(tinted, {}, {}, correct, expected::flat, "a missing trusted channel still holds");
+    trust_frame(tinted, {}, {}, correct, expected::flat, "a missing accepted channel holds its mask");
+    trust_frame(tinted, {}, {}, correct, expected::flat, "a missing accepted channel still holds");
     trust_frame(tinted, {}, {}, correct, expected::flat, "a third missing frame still holds");
-    trust_frame(tinted, {}, {}, correct, expected::empty, "without a trusted channel a tinting menu stays 3D");
+    trust_frame(tinted, {}, {}, correct, expected::empty, "without an accepted channel a tinting menu stays 3D");
     // A full channel while the exact pair shows the scene is a contradiction.
     // It wins at first, then loses trust within the same evidence interval.
-    trust_frame(final_color, opaque_alpha, {}, correct, expected::flat, "a trusted channel decides before any contradiction");
+    trust_frame(final_color, opaque_alpha, {}, correct, expected::flat, "an accepted channel decides before any contradiction");
     for (unsigned frame = 0; frame < 25; ++frame) trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, nullptr);
-    require(!(policy.trusted_alpha() & 1u), "An exact pair showing the scene did not revoke trust");
+    require(!policy.accepts(ui_alpha_signature), "An exact pair showing the scene did not revoke acceptance");
     trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, "after losing trust the HUD-less pair decides");
     trust_frame(final_color, opaque_alpha, {}, correct, expected::hud, "the HUD-less pair keeps deciding");
     {
@@ -1996,7 +2076,8 @@ namespace {
         consecutive_holds = held ? consecutive_holds + 1 : 0;
       }
       std::uint64_t decided = 0, none = 0;
-      for (std::uint32_t source_kind = 0; source_kind != 10; ++source_kind) decided += delta.decided(source_kind);
+      for (std::uint32_t source_kind = 0; source_kind != ui_counter_word::decided_count; ++source_kind)
+        decided += delta.decided(source_kind);
       for (std::size_t reason = 0; reason != ui_no_mask::count; ++reason) none += delta[ui_counter::none + reason];
       require(end.reconciled() && end.through_ms + 200 >= source.now_ms &&
           delta[ui_counter::auto_frames] == expected[ui_counter::auto_frames] &&
@@ -2011,7 +2092,8 @@ namespace {
         "The D3D11 counter window lost a scripted hold");
       require(decided == delta[ui_counter::detection_frames] && none == delta.decided(0) && delta.decided(1) &&
           delta.decided(5) && delta.decided(6) && delta[ui_counter::trusted_full] && delta[ui_counter::inexact_difference] &&
-          !delta[ui_counter::presented_over_dedicated] && end[ui_counter::trust_earned] >= 1 &&
+          !delta[ui_counter::presented_over_dedicated] && !delta[ui_counter::untrusted_inferred] &&
+          delta[ui_counter::none + ui_no_mask::unaccepted] && end[ui_counter::trust_earned] >= 2 &&
           end[ui_counter::trust_revoked_full] >= 1,
         "D3D11 exact UI counters lost a decided source, a no-mask reason or a trust event");
       std::printf("PASS D3D11 exact UI counters: %llu Auto frames through %llu ms reconcile; holds generated=%llu "
@@ -2023,16 +2105,18 @@ namespace {
         static_cast<unsigned long long>(delta[ui_counter::held_cap]));
     }
     inputs = {};
-    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 inexact_after_exact_hold=1 trusted_alpha=1 trusted_missing_hold=1 trust_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
-    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, bounded generated-present hold, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, bounded inexact-frame hold, trusted alpha channels with a bounded hold when missing and revocation, and manual Off without review");
+    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 bounded_hold=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 inexact_after_exact_hold=1 hudless_earned_exact=1 accepted_alpha=1 trusted_missing_hold=1 trust_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
+    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, bounded generated-present hold, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, bounded inexact-frame hold, acceptance earned from one selective sample (an exact HUD-less pair, UIAlpha) before anything decides, accepted alpha channels with a bounded hold when missing and revocation, and manual Off without review");
   }
-  // A layer without alpha is no layer (game3d_ui_detection_contract.h,
-  // layer_without_alpha). Stellar Blade draws its SDR scene image into the
-  // cleared target that holds its UI layer in HDR: color everywhere, alpha
-  // nowhere. Detection proceeds as if no layer were offered, while a tagged UI
-  // color keeps blocking presented alpha and a layer with alpha, or with color
-  // on at most 1% of pixels, still decides or blocks.
-  void verify_layer_without_alpha(fixture &gpu, std::ostream &report) {
+  // V1 and S1 for the offscreen UI layer (docs/reshade-sbs.md, UI decision
+  // framework). Stellar Blade draws its SDR scene image into the cleared
+  // target that holds its UI layer in HDR: color everywhere, alpha nowhere.
+  // Such a layer fails the premultiplied bound on more than 1% of its pixels,
+  // so it is V1-invalid: it neither decides nor blocks, whether accepted or
+  // not, and only accepted candidates decide. A tagged UI color is checked for
+  // range only and, accepted, blocks presented alpha; a layer with color on at
+  // most 1% of pixels is valid and decides.
+  void verify_layer_validity(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;
     const auto pixels = size_t(gpu.width) * gpu.height;
     const auto bpp = gpu.color == 2 ? 8u : 4u;
@@ -2118,76 +2202,94 @@ namespace {
       frame(nullptr, nullptr);
       frame(label, &want, source_kind);
     };
-    const auto layout = [&](alpha_auto_policy &policy, std::uint32_t trusted, api::resource_view slot1, std::uint32_t flags,
-        api::resource_view slot2, bool current) {
-      policy.restore_trusted_alpha(trusted);
-      source.session = &policy;
-      inputs = {}; inputs.masks[1] = slot1; inputs.color_alpha_flags = flags;
-      inputs.masks[2] = slot2; inputs.current_color = current;
+    // Each case restores acceptance of exactly the listed kinds, then offers
+    // the offscreen UI layer in its own slot (t7, 0x40), a tagged UI color, the
+    // Backbuffer and current color alpha as given.
+    struct offer {
+      api::resource_view layer{}, tag{}, backbuffer{};
+      bool current{};
     };
-    const std::uint32_t layer_trust = 1u << alpha_auto_policy::ui_layer_source;
-    // (a) A trusted layer without alpha blocks nothing: untrusted current alpha
-    // with a HUD decides.
+    const auto layout = [&](alpha_auto_policy &policy, std::initializer_list<ui_selection::kind> accepted, const offer &offered) {
+      for (const auto kind : accepted) require(policy.restore(gpu.key(kind)).restored == 1, "A fixture key was not restored");
+      source.session = &policy;
+      inputs = {};
+      inputs.layer = offered.layer; inputs.layer_flags = offered.layer.handle ? layer_flags : 0u;
+      inputs.masks[1] = offered.tag; inputs.masks[2] = offered.backbuffer; inputs.current_color = offered.current;
+    };
+    using ui_selection::kind;
+    const std::vector<float> all(pixels, 1.f);
+    // (a) An accepted layer holding the scene without alpha is V1-invalid: it
+    // neither decides nor blocks. Unaccepted current alpha decides nothing;
+    // accepted current alpha decides its HUD.
     alpha_auto_policy a;
-    layout(a, layer_trust, scene_layer, layer_flags, {}, true);
-    twice("a trusted layer without alpha lets current alpha decide", hud, 4);
-    // (b) The same pixels as a trusted tagged UI color: presented alpha stays
-    // out, so a tag's failure never lets presented alpha decide.
+    layout(a, {kind::ui_layer}, {scene_layer, {}, {}, true});
+    twice("an accepted invalid layer and unaccepted current alpha decide nothing", none, 0);
+    alpha_auto_policy a2;
+    layout(a2, {kind::ui_layer, kind::current}, {scene_layer, {}, {}, true});
+    twice("an accepted invalid layer lets accepted current alpha decide", hud, 4);
+    // (b) The same pixels as an accepted tagged UI color: the tag is checked
+    // for range only, so it is a valid empty mask that decides no UI and, as a
+    // declared alpha, keeps accepted presented alpha out.
     alpha_auto_policy b;
-    layout(b, 2u, scene_layer, 0u, {}, true);
-    twice("a trusted tagged UI color without alpha keeps presented alpha out", none, 2);
-    // (c) Color without alpha on at most 1% of pixels is glow: the trusted
-    // layer still decides, here no UI.
+    layout(b, {kind::ui_color, kind::current}, {{}, scene_layer, {}, true});
+    twice("an accepted valid empty tag decides no UI and keeps presented alpha out", none, 2);
+    // (c) Color without alpha on at most 1% of pixels is glow: the accepted
+    // layer is valid and decides, here no UI.
     alpha_auto_policy c;
-    layout(c, layer_trust, speck_layer, layer_flags, {}, true);
-    twice("a trusted layer with sparse glow still decides", none, 2);
-    // (d) A trusted layer with UI alpha and more than 1% invalid pixels is
-    // ambiguous: no mask, and presented alpha stays out.
+    layout(c, {kind::ui_layer, kind::current}, {speck_layer, {}, {}, true});
+    twice("an accepted layer with sparse glow decides", none, ui_detection::source_layer);
+    // (d) A layer with UI alpha and more than 1% invalid pixels is invalid as
+    // well: it neither decides nor blocks accepted presented alpha.
     alpha_auto_policy d;
-    layout(d, layer_trust, ambiguous_layer, layer_flags, {}, true);
-    twice("an ambiguous trusted layer still blocks presented alpha", none, 0);
-    // (e) A clean empty trusted layer means no UI.
+    layout(d, {kind::ui_layer, kind::current}, {ambiguous_layer, {}, {}, true});
+    twice("an accepted ambiguous layer blocks nothing", hud, 4);
+    // (e) A clean empty accepted layer means no UI.
     alpha_auto_policy e;
-    layout(e, layer_trust, empty_layer, layer_flags, {}, true);
-    twice("a clean empty trusted layer decides no UI", none, 2);
-    // (f) Beside a set-aside layer, presented alpha decides only below the
-    // full-frame bound, even when trusted: no mask rather than a flat frame.
+    layout(e, {kind::ui_layer}, {empty_layer, {}, {}, true});
+    twice("a clean empty accepted layer decides no UI", none, ui_detection::source_layer);
+    // (f) An accepted opaque Backbuffer beside an invalid layer pins the frame
+    // flat (P1): acceptance, not a full-frame bound, decides that (A1 keys it
+    // by color space).
     alpha_auto_policy f;
-    layout(f, layer_trust | 4u, scene_layer, layer_flags, opaque_backbuffer, false);
-    twice("a trusted opaque Backbuffer beside a layer without alpha flattens nothing", none, 0);
-    // Stellar Blade in SDR with FG: the trusted Backbuffer's HUD alpha decides.
-    alpha_auto_policy g;
-    layout(g, layer_trust | 4u, scene_layer, layer_flags, backbuffer, false);
-    twice("a trusted Backbuffer beside a layer without alpha decides", hud, 3);
-    frame("the trusted Backbuffer keeps deciding", &hud, 3);
-    // (g) A generated Present without the tagged Backbuffer holds its mask: the
-    // trusted layer the latest sample set aside does not decide by itself.
+    layout(f, {kind::ui_layer, kind::backbuffer}, {scene_layer, {}, opaque_backbuffer, false});
+    twice("an accepted opaque Backbuffer beside an invalid layer pins flat", all, 3);
+    // A generated Present without the tagged Backbuffer holds its mask: the
+    // accepted layer the latest sample read V1-invalid does not decide by itself.
     inputs.masks[2] = {}; inputs.hold_previous = true;
-    frame("a generated Present holds the Backbuffer mask", &hud);
+    frame("a generated Present holds the flat Backbuffer mask", &all);
     require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::held,
-      "A trusted layer without alpha stopped the generated-present hold");
+      "An accepted V1-invalid layer stopped the generated-present hold");
+    // Stellar Blade in SDR with FG: the scene image in the cleared target never
+    // earns acceptance, and the accepted Backbuffer's HUD alpha decides.
+    alpha_auto_policy g;
+    layout(g, {kind::backbuffer}, {scene_layer, {}, backbuffer, false});
+    twice("an accepted Backbuffer beside an invalid layer decides", hud, 3);
+    frame("the accepted Backbuffer keeps deciding", &hud, 3);
     // From no sample (a new epoch discards it), as frame generation presents:
-    // the tagged Backbuffer comes with real Presents only. Its absence keeps
-    // the decision key, so a sample completes and every later generated
-    // Present holds the Backbuffer mask instead of dropping to no mask.
+    // the tagged Backbuffer comes with real Presents only. Every generated
+    // Present holds the Backbuffer mask instead of dropping to no mask, and
+    // the held inputs keep the decision key, so samples complete.
     ++source.epoch;
     for (unsigned i = 0; i != 6; ++i) {
       inputs.masks[2] = backbuffer; inputs.hold_previous = false;
       frame("a real Present with the Backbuffer decides", &hud);
       inputs.masks[2] = {}; inputs.hold_previous = true;
-      if (i < 2) { frame(nullptr, nullptr); continue; }
       frame("an alternating generated Present holds the Backbuffer mask", &hud);
       require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::held,
-        "Alternating generated Presents never held the Backbuffer mask beside a layer without alpha");
+        "Alternating generated Presents never held the Backbuffer mask beside an invalid layer");
     }
+    require(!g.accepts(*ui_selection::signature::parse(gpu.key(kind::ui_layer))),
+      "The scene image in the layer's cleared target earned acceptance");
     inputs = {};
-    report << "layer-without-alpha D3D11 current_alpha_decides=1 tag_blocks=1 sparse_glow_decides=1 ambiguous_blocks=1 "
-              "empty_decides=1 full_frame_guard=1 backbuffer_decides=1 hold_kept=1 alternating_hold=1\n";
-    std::puts("PASS D3D11 layer without alpha: a trusted layer with color but no alpha is set aside so presented alpha decides below the full-frame bound and holds stay; a tagged UI color, a layer with sparse glow, an ambiguous layer and a clean empty layer keep their decisions");
+    report << "layer-validity D3D11 invalid_layer_neither_decides_nor_blocks=1 unaccepted_current_decides_nothing=1 "
+              "accepted_current_decides=1 valid_empty_tag_decides=1 sparse_glow_decides=1 ambiguous_blocks_nothing=1 "
+              "empty_decides=1 accepted_full_flat=1 hold_kept=1 backbuffer_decides=1 alternating_hold=1\n";
+    std::puts("PASS D3D11 layer validity (V1/S1): an invalid offscreen UI layer neither decides nor blocks, so only accepted presented alpha decides, at any coverage; a valid empty tag, a layer with sparse glow and a clean empty layer decide; holds stay beside an invalid layer");
   }
-  // An offscreen UI layer fills the UI color slot with its stored flags, never
-  // a per-frame bit; a tagged UIColorAndAlpha carries none. Dump 3D records
-  // the detection constants behind the consumed mask and the pin markers.
+  // An offscreen UI layer has its own slot (t7, candidate 0x40) with its
+  // stored flags, never a per-frame bit; a tagged UIColorAndAlpha has the UI
+  // color slot and no flags (E1). Dump 3D records the detection constants
+  // behind the consumed mask, the accepted candidates and the pin markers.
   void verify_layer_detection_dump(fixture &gpu, std::ostream &report, const fs::path &directory) {
     using namespace sunshine_game3d;
     const auto pixels = size_t(gpu.width) * gpu.height;
@@ -2208,46 +2310,54 @@ namespace {
     ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> view;
     checked(gpu.device->CreateTexture2D(&desc, &data, &texture), "UI layer texture");
     checked(gpu.device->CreateShaderResourceView(texture.Get(), nullptr, &view), "UI layer view");
+    // Both are accepted, so each decides its own raw alpha (S1).
     alpha_auto_policy policy;
+    require(policy.restore(gpu.key(ui_selection::kind::ui_layer) + ',' + gpu.key(ui_selection::kind::ui_color)).restored == 2,
+      "The layer and tag keys were not restored");
     alpha_auto_source source;
     source.session = &policy; source.now_ms = source.tick_ms = 1000;
     source.epoch = 31; source.revision = 1; source.sequence = 1;
     ui_detection_inputs inputs;
-    inputs.masks[1] = {reinterpret_cast<std::uint64_t>(view.Get())};
-    inputs.color_alpha_flags = ui_layer::detection_flags(static_cast<api::format>(desc.Format));
+    const api::resource_view layer_view{reinterpret_cast<std::uint64_t>(view.Get())};
+    inputs.layer = layer_view;
+    inputs.layer_flags = ui_layer::detection_flags(static_cast<api::format>(desc.Format));
     ui_render_input ui;
     ui.automatic = &source; ui.detection = &inputs;
     const auto expected_flags = ui_detection::layer_detection_flags(gpu.color == 2);
     // Every automatic mask is its source's raw alpha: the one-frame-late layer
     // (stored flag 0x4) exactly like a same-frame tagged UI color.
     require(expected_flags & ui_detection::stored_late_layer, "The offscreen UI layer lost its late-layer flag");
-    const auto check = [&](std::uint32_t flags, const fs::path &dump, const char *label) {
+    const auto check = [&](std::uint32_t candidate, std::uint32_t flags, const fs::path &dump, const char *label) {
       source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
       gpu.render(true, 1, false, false, false, {}, dump, {}, nullptr, nullptr, nullptr, nullptr, &ui);
       const auto consumed = gpu.renderer.consumed_detection();
-      require(consumed.state == ui_detection_snapshot::run_state::ran && consumed.candidates == 2u &&
-          consumed.flags == flags && consumed.stored_flags == flags && !(consumed.stored_flags & ui_detection::per_frame_mask),
+      require(consumed.state == ui_detection_snapshot::run_state::ran && consumed.candidates == candidate &&
+          consumed.accepted == candidate && consumed.flags == flags && consumed.stored_flags == flags &&
+          !(consumed.stored_flags & ui_detection::per_frame_mask),
         std::string(label) + ": wrong detection constants");
       const auto selected = gpu.read(gpu.renderer.diagnostics().ui_source);
       for (unsigned y = 0; y < gpu.height; ++y) for (unsigned x = 0; x < gpu.width; ++x)
         require(selected.channel(x, y, 0) == hud[size_t(y) * gpu.width + x], std::string(label) + ": mask is not the slot's raw alpha");
     };
-    check(expected_flags, directory, "offscreen UI layer");
+    check(ui_detection::candidate::layer, expected_flags, directory, "offscreen UI layer");
     std::ifstream stored(directory / "manifest.json");
     const auto manifest = nlohmann::json::parse(stored);
     const auto &replay = manifest.at("producer_metadata").at("replay");
     require(replay.at("ui_detection").at("flags") == expected_flags && replay.at("ui_detection").at("ran_or_held") == "ran" &&
-        replay.at("ui_detection").at("candidates") == 2u &&
-        replay.at("ui_pin").at("decision_texels") == ui_detection::scene_decision_texels &&
+        replay.at("ui_detection").at("candidates") == ui_detection::candidate::layer &&
+        replay.at("ui_detection").at("accepted") == ui_detection::candidate::layer &&
+        replay.at("ui_detection").at("candidate_layout") == ui_detection::candidate_layout &&
+        replay.at("ui_pin").at("decision_texels") == ui_detection::layer_decision_texels &&
         replay.at("ui_pin").at("evidence_images") == ui_detection::max_scene_evidence_images,
       "Dump lost the layer's detection constants or pin markers");
     require(!replay.at("ui_pin").contains("late_margin") &&
         replay.at("ui_pin").at("soft_pin_gain") == shader_marker(renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"),
       "Dump lost the soft pin gain or still records a late-layer margin");
-    inputs.color_alpha_flags = 0;
-    check(0u, {}, "tagged UIColorAndAlpha");
-    report << "layer-detection-dump flags=" << expected_flags << " tagged_flags=0 ran=1 held_reported=1 layer_raw_alpha=1\n";
-    std::puts("PASS D3D11 UI detection constants: the UI layer fills the UI color slot with stored flags only, a tagged UI color with none, both masks are the slot's raw alpha, and Dump 3D records them with the pin markers");
+    inputs = {};
+    inputs.masks[1] = layer_view;
+    check(ui_detection::candidate::ui_color, 0u, {}, "tagged UIColorAndAlpha");
+    report << "layer-detection-dump flags=" << expected_flags << " tagged_flags=0 own_slots=1 ran=1 held_reported=1 layer_raw_alpha=1\n";
+    std::puts("PASS D3D11 UI detection constants: the UI layer has its own slot with stored flags only, a tagged UI color the UI color slot with none, both accepted masks are their slot's raw alpha, and Dump 3D records them with the accepted candidates and pin markers");
   }
   // Hidden-scene evidence (docs/reshade-sbs.md, hidden-scene evidence). Full-
   // frame UI over a hidden scene (sources 8 and 9) needs this frame's gate,
@@ -2398,10 +2508,14 @@ namespace {
       return last;
     };
 
+    // A frame without protection ends any mask an earlier section left: an
+    // accepted candidate missing from a frame would otherwise hold it (T1).
+    source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+    gpu.render(false, 1, false, false, false, {}, {}, {}, nullptr, &source);
     // A frame smaller than the grid has cells without a pixel: no evidence,
     // so nothing ever takes a route.
     if (width < ui_detection::scene::cells_x || height < ui_detection::scene::cells_y) {
-      inputs.masks[1] = opaque_layer; inputs.color_alpha_flags = layer_flags;
+      inputs.layer = opaque_layer; inputs.layer_flags = layer_flags;
       const auto small = never_flat(logo_color, 4, "frame smaller than the scene grid");
       require(small.sample.evidence.scene.ran && !small.sample.evidence.scene.valid && !small.sample.evidence.scene.n,
         "A frame smaller than the scene grid gave hidden-scene evidence");
@@ -2410,10 +2524,10 @@ namespace {
       std::puts("PASS D3D11 hidden scene: a frame smaller than the scene grid gives no evidence and takes no route");
       return;
     }
-    // (a) An untrusted opaque offscreen layer over a scene its picture hides:
+    // (a) An unaccepted opaque offscreen layer over a scene its picture hides:
     // the first sample shows the gate, the second measures, its hidden verdict
     // holds the layer route, and the frame pins flat at one plane.
-    inputs.masks[1] = opaque_layer; inputs.color_alpha_flags = layer_flags;
+    inputs.layer = opaque_layer; inputs.layer_flags = layer_flags;
     const auto first = frame(logo_color);
     require(!first.flat && !first.evidence, "Evidence ran or flattened before any sample showed an open gate");
     const auto second = frame(logo_color);
@@ -2421,7 +2535,7 @@ namespace {
     const auto entered = frame(logo_color);
     const auto &measured = entered.sample.evidence.scene;
     require(entered.flat && entered.held && measured.ran && measured.valid && measured.verdict == scene_verdict::hidden &&
-        measured.n >= ui_detection::scene::min_edges && measured.d < .15f && entered.sample.evidence.alpha_opaque[1] == pixels,
+        measured.n >= ui_detection::scene::min_edges && measured.d < .15f && entered.sample.evidence.layer_opaque == pixels,
       "An opaque layer over a hidden scene did not become full-frame UI from valid hidden evidence");
     {
       float plane{}; bool uniform = true;
@@ -2442,13 +2556,15 @@ namespace {
     never_flat(scene_color, 2, "presented frame showing the depth's edges");
     // That visible verdict refuted the opaque layer as hiding the scene: like
     // a scene buffer the census took for a layer, it takes no route again
-    // until it is offered below opaque. A selective layer is an overlay again,
-    // and the opaque one then re-enters as from a closed gate.
+    // until it is offered below opaque. A selective layer is an overlay again
+    // (unaccepted, it decides nothing itself), and the opaque one then
+    // re-enters as from a closed gate.
     never_flat(logo_color, 4, "refuted opaque layer");
-    inputs.masks[1] = logo_layer;
+    inputs.layer = logo_layer;
     const auto selective = frame(logo_color);
-    require(!selective.flat && !selective.empty && !selective.held, "A selective layer did not decide its own mask");
-    inputs.masks[1] = opaque_layer;
+    require(!selective.flat && selective.empty && !selective.held,
+      "A selective unaccepted layer decided a mask or kept the hidden-scene hold");
+    inputs.layer = opaque_layer;
     require(frames_to_flat(logo_color, 4, "re-entry") == 3, "A layer shown transparent again did not re-enter the route");
     // (c) Invalid evidence never renews a hold: over flat depth the hold
     // expires hold_ms after the last valid hidden sample's tick.
@@ -2471,8 +2587,8 @@ namespace {
         stale.sample.evidence.scene.n >= ui_detection::scene::min_edges, "Reused depth gave valid hidden-scene evidence");
     gpu.depth_current = true;
     require(frames_to_flat(logo_color, 3, "current depth again") == 2, "Current depth did not restore the layer route");
-    // (e) An epoch or revision change, detection turning inactive and trust
-    // gained by a route's slot clear the hold at once; a HUD-less image that
+    // (e) An epoch or revision change, detection turning inactive and
+    // acceptance gained by a route's input clear the hold at once; a HUD-less image that
     // frame generation pairs on some Presents only does not.
     ++source.epoch;
     never_flat(logo_color, 1, "epoch change");
@@ -2506,15 +2622,17 @@ namespace {
     }
     inputs.hudless = {};
     {
-      // The layer earns trust while held: it decides by itself (source 2) and the hold is gone.
+      // The layer is accepted while held: it decides by itself (source 10,
+      // flat at any coverage) and the hold is gone.
       alpha_auto_policy trusting;
-      trusting.restore_trusted_alpha(1u << alpha_auto_policy::ui_layer_source);
+      require(trusting.restore(gpu.key(ui_selection::kind::ui_layer)).restored == 1, "The layer key was not restored");
       source.session = &trusting;
       const auto gained = frame(logo_color);
-      require(!gained.held && frame(logo_color).sample.source_kind == 2u, "Trust gained by the layer kept its hidden-scene hold");
+      require(!gained.held && frame(logo_color).sample.source_kind == ui_detection::source_layer,
+        "Acceptance gained by the layer kept its hidden-scene hold");
       source.session = &policy;
     }
-    never_flat(logo_color, 1, "trust lost again");
+    never_flat(logo_color, 1, "acceptance lost again");
     // (f) Without a ready camera there is no evidence.
     render_parameters no_camera = gpu.renderer.consumed_parameters();
     no_camera.camera_ready = 0;
@@ -2524,13 +2642,15 @@ namespace {
       "Depth without a ready camera was measured");
     // (g) A closed gate never flattens, even with a hold active, and once a
     // sample shows it closed no evidence pass runs.
-    const auto closed_gate = [&](api::resource_view layer, std::uint32_t flags, const char *label) {
+    // A tagged UIColorAndAlpha has a slot of its own and is never a route input.
+    const auto closed_gate = [&](api::resource_view layer, bool tag, const char *label) {
       // After an epoch change the first sample shows the gate, the second measures.
       ++source.epoch;
-      inputs = {}; inputs.masks[1] = opaque_layer; inputs.color_alpha_flags = layer_flags;
+      inputs = {}; inputs.layer = opaque_layer; inputs.layer_flags = layer_flags;
       require(frames_to_flat(logo_color, 4, label) == 3, std::string(label) + ": the open gate did not enter");
       // The hold outlives the open gate by at most hold_ms and flattens nothing.
-      inputs.masks[1] = layer; inputs.color_alpha_flags = flags;
+      if (tag) { inputs.layer = {}; inputs.layer_flags = 0; inputs.masks[1] = layer; }
+      else inputs.layer = layer;
       never_flat(logo_color, 5, label);
       std::uint64_t runs = 0;
       for (unsigned i = 0; i != 3; ++i) {
@@ -2540,16 +2660,16 @@ namespace {
       }
       require(!runs, std::string(label) + ": evidence passes ran with the gate closed and no first-run shadow");
     };
-    closed_gate(nearly_opaque_layer, layer_flags, "98.9% opaque layer");
-    closed_gate(half_layer, layer_flags, "layer at alpha 0.5 over the whole frame");
-    closed_gate(straight_layer, layer_flags, "layer with an invalid pixel");
-    closed_gate(opaque_layer, 0u, "opaque tagged UIColorAndAlpha");
+    closed_gate(nearly_opaque_layer, false, "98.9% opaque layer");
+    closed_gate(half_layer, false, "layer at alpha 0.5 over the whole frame");
+    closed_gate(straight_layer, false, "layer with an invalid pixel");
+    closed_gate(opaque_layer, true, "opaque tagged UIColorAndAlpha");
     ++source.epoch;
     inputs = {}; inputs.masks[2] = opaque_layer;
     never_flat(logo_color, 4, "opaque Backbuffer alpha only");
     inputs = {}; inputs.current_color = true;
     never_flat(logo_color, 4, "opaque current alpha only");
-    // (h) An untrusted UIAlpha that is opaque everywhere takes the layer route too.
+    // (h) An unaccepted UIAlpha that is opaque everywhere takes the layer route too.
     ++source.epoch;
     inputs = {}; inputs.masks[0] = opaque_ui_alpha;
     require(frames_to_flat(logo_color, 3, "UIAlpha") == 3, "An opaque UIAlpha over a hidden scene did not take the layer route");
@@ -2572,27 +2692,40 @@ namespace {
     ++source.epoch;
     inputs.hudless = scene_view;
     never_flat(scene_color, 4, "presented frame showing the scene beside its HUD-less image");
-    // An exact pair differing nearly everywhere over a lit scene stays rule 6.
+    // Before its acceptance an exact pair differing nearly everywhere is no
+    // full change set (route 6 needs an accepted pair): only the HUD-less
+    // route under its hold flattens it.
     ++source.epoch;
     inputs.hudless_exact = true;
-    const auto exact = frame(menu_color);
-    require(exact.flat && !exact.held && frame(menu_color).sample.source_kind == 6u, "An exact full-frame pair lost rule 6");
-    // (j) A trusted layer decides by itself (source 2), whatever the evidence.
+    require(frames_to_flat(menu_color, 4, "unaccepted exact full-frame pair") == 3,
+      "An unaccepted exact full-frame pair flattened without the HUD-less route's hold");
+    require(frame(menu_color).sample.source_kind == 9u, "An unaccepted exact full-frame pair decided rule 6");
+    {
+      // Accepted, the same exact pair over a lit scene is rule 6 at once.
+      alpha_auto_policy accepting;
+      require(accepting.restore(gpu.key(ui_selection::kind::hudless)).restored == 1, "The HUD-less key was not restored");
+      ++source.epoch; source.session = &accepting;
+      const auto exact = frame(menu_color);
+      require(exact.flat && !exact.held && frame(menu_color).sample.source_kind == 6u, "An accepted exact full-frame pair lost rule 6");
+      source.session = &policy;
+    }
+    // (j) An accepted layer decides by itself (source 10), whatever the evidence.
     // Its whole-frame alpha makes the next sample frames measure the scene for
     // the full_alpha_d counters only: that evidence holds nothing.
     {
       alpha_auto_policy trusting;
-      trusting.restore_trusted_alpha(1u << alpha_auto_policy::ui_layer_source);
+      require(trusting.restore(gpu.key(ui_selection::kind::ui_layer)).restored == 1, "The layer key was not restored");
       ++source.epoch; source.session = &trusting;
-      inputs = {}; inputs.masks[1] = opaque_layer; inputs.color_alpha_flags = layer_flags;
+      inputs = {}; inputs.layer = opaque_layer; inputs.layer_flags = layer_flags;
       const auto first = frame(logo_color);
-      require(first.sample.source_kind != 2u || !first.evidence, "Evidence ran before a whole-frame alpha sample");
+      require(first.sample.source_kind != ui_detection::source_layer || !first.evidence,
+        "Evidence ran before a whole-frame alpha sample");
       for (unsigned i = 0; i != 2; ++i) frame(logo_color);
       const auto trusted = frame(logo_color);
-      require(trusted.flat && trusted.sample.source_kind == 2u && !trusted.held && trusted.evidence == 1 &&
+      require(trusted.flat && trusted.sample.source_kind == ui_detection::source_layer && !trusted.held && trusted.evidence == 1 &&
           !trusted.sample.scene_hold && !(gpu.renderer.consumed_detection().flags &
             (ui_detection::per_frame_scene_hold | ui_detection::per_frame_scene_hold_hudless)),
-        "A trusted layer lost its own decision, or its diagnostic evidence held a route");
+        "An accepted layer lost its own decision, or its diagnostic evidence held a route");
       const auto counted = trusting.counters();
       require(counted[ui_counter::full_alpha] >= 3 && counted[ui_counter::full_alpha_d_hidden] +
           counted[ui_counter::full_alpha_d_ambiguous] + counted[ui_counter::full_alpha_d_visible] >= 1 &&
@@ -2602,7 +2735,11 @@ namespace {
     }
     // (k) The first-run shadow measures on sample frames with the gate closed,
     // never changes a decision, and reports how long the hidden run lasts.
+    // A frame without protection first ends the accepted layer's flat mask,
+    // which its absence would otherwise hold (T1).
     ++source.epoch;
+    source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+    gpu.render(false, 1, false, false, false, {}, {}, {}, nullptr, &source);
     inputs = {}; inputs.current_color = true;
     never_flat(logo_color, 2, "closed gate before the shadow");
     require(!never_flat(logo_color, 2, "closed gate before the shadow").evidence, "Evidence ran with the gate closed");
@@ -2628,16 +2765,16 @@ namespace {
     // With the gate open, only evidence the gate or a hold asked for acts: the
     // layer route enters after the same samples as without the shadow, though
     // the shadow measured the first sample that showed the gate.
-    inputs = {}; inputs.masks[1] = opaque_layer; inputs.color_alpha_flags = layer_flags;
+    inputs = {}; inputs.layer = opaque_layer; inputs.layer_flags = layer_flags;
     require(frames_to_flat(logo_color, 4, "first-run shadow with the gate open") == 3,
       "The first-run shadow changed when the layer route enters");
     policy.set_first_run(false);
     inputs = {};
     report << "hidden-scene D3D11 layer_route=1 visible_release=1 refuted_layer_quiet=1 hold_expiry_frames=" << held_frames
-      << " reused_depth_blocks=1 camera_blocks=1 epoch_revision_inactive_trust_clear=1 alternating_hudless_keeps_hold=1"
-      " closed_gates_quiet=1 ui_alpha_route=1 hudless_route=1 black_hudless_rejected=1 rule6_precedence=1"
-      " trusted_layer_decides=1 first_run_shadow=1 blank_frames_end_run=1 shadow_entry_unchanged=1\n";
-    std::puts("PASS D3D11 hidden scene: an opaque untrusted layer or UIAlpha (8) and an inexact HUD-less image (9) flatten only through their gate, valid hidden evidence and the CPU hold; holds expire after hold_ms and clear on visible evidence, epoch, revision, inactive detection and trust changes but not on a HUD-less pairing that comes and goes; a visible verdict refutes an opaque layer until it shows itself transparent; reused depth, an unready camera, closed gates, tagged UI color, presented alpha and a trusted layer never take a route; closed gates dispatch no evidence; a whole-frame alpha measures only for its counters; the first-run shadow only measures, ignores blank frames and leaves route entry unchanged");
+      << " reused_depth_blocks=1 camera_blocks=1 epoch_revision_inactive_acceptance_clear=1 alternating_hudless_keeps_hold=1"
+      " closed_gates_quiet=1 ui_alpha_route=1 hudless_route=1 black_hudless_rejected=1 unaccepted_exact_pair_route9=1"
+      " rule6_accepted=1 accepted_layer_decides=1 first_run_shadow=1 blank_frames_end_run=1 shadow_entry_unchanged=1\n";
+    std::puts("PASS D3D11 hidden scene: an opaque unaccepted layer or UIAlpha (8) and an inexact HUD-less image (9) flatten only through their gate, valid hidden evidence and the CPU hold; holds expire after hold_ms and clear on visible evidence, epoch, revision, inactive detection and acceptance changes but not on a HUD-less pairing that comes and goes; a visible verdict refutes an opaque layer until it shows itself transparent; reused depth, an unready camera, closed gates, tagged UI color, presented alpha and an accepted layer never take a route; an exact full-frame pair is rule 6 only once accepted; closed gates dispatch no evidence; a whole-frame alpha measures only for its counters; the first-run shadow only measures, ignores blank frames and leaves route entry unchanged");
   }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;
@@ -2778,7 +2915,7 @@ int main(int argc, char **argv) {
     verify_automatic_source_alpha(gpu, report);
     verify_automatic_hudless(gpu, report);
     verify_layer_detection_dump(gpu, report, directory / "layer-detection-dump");
-    verify_layer_without_alpha(gpu, report);
+    verify_layer_validity(gpu, report);
     verify_hidden_scene(gpu, report);
     verify_normalized_ui_input(gpu, report);
     verify_mask_upload_recovery(gpu);

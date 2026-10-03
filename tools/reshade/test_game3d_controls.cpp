@@ -262,8 +262,8 @@ namespace {
 
   void ui_protection_warning_follows_unprotected_rendered_frames() {
     // Stellar Blade in SDR without FG: its UI layer holds the scene image (no
-    // alpha, color on 60%) and current alpha covers everything, so no source
-    // decides and no dedicated channel shows no UI.
+    // alpha, color on 60%, so V1-invalid) and current alpha covers
+    // everything, so no source decides and no dedicated candidate shows no UI.
     source_alpha_ui_decision value;
     value.requested = value.rendered = true;
     value.mode = source_alpha_mode::automatic;
@@ -271,17 +271,37 @@ namespace {
     value.coverage.state = alpha_auto_state::automatic_off;
     value.coverage.pixels = 1000;
     auto &evidence = value.coverage.evidence;
-    evidence.candidates = 2 | 8; evidence.ui_layer = true;
-    evidence.alpha_covered = {0, 0, 0, 1000}; evidence.alpha_invalid = {0, 600, 0, 0};
-    check(value.unprotected() && value.layer_set_aside(), "A layer without alpha beside full current alpha was protected");
+    evidence.candidates = 0x40 | 8;
+    evidence.alpha_covered = {0, 0, 0, 1000}; evidence.layer_invalid = 600;
+    check(value.unprotected() && value.layer_without_alpha(), "A layer without alpha beside full current alpha was protected");
+    auto tolerated = value;
+    tolerated.coverage.evidence.layer_invalid = 10;
+    check(!tolerated.layer_without_alpha(), "A layer with 1% invalid pixels was reported without alpha");
+    auto with_alpha = value; // Dead Space in SDR: a scene buffer whose luma-like alpha sits below its color.
+    with_alpha.coverage.evidence.layer_covered = 900;
+    check(with_alpha.unprotected() && !with_alpha.layer_without_alpha(), "An invalid layer with alpha was reported without alpha");
+    auto unoffered = value;
+    unoffered.coverage.evidence.candidates = 8;
+    check(!unoffered.layer_without_alpha(), "A layer that was not offered was reported without alpha");
     auto searching = value;
     searching.qualification.available = false; searching.coverage.state = alpha_auto_state::waiting_for_source;
     check(searching.unprotected(), "No UI source offered was protected");
     auto clean = value;
-    clean.coverage.evidence.alpha_invalid = {};
-    check(!clean.unprotected() && !clean.layer_set_aside(), "A clean empty UI layer (no UI on screen) was unprotected");
-    clean.coverage.evidence.ui_layer = false;
-    check(!clean.unprotected(), "A clean empty tagged UI color (no UI on screen) was unprotected");
+    clean.coverage.evidence.layer_invalid = 0;
+    check(!clean.unprotected() && !clean.layer_without_alpha(), "A clean empty UI layer (no UI on screen) was unprotected");
+    auto tolerant = value;
+    tolerant.coverage.evidence.layer_invalid = 1;
+    check(tolerant.unprotected(), "An empty UI layer with invalid pixels showed that no UI was on screen");
+    for (const std::uint32_t tag : {1u, 2u}) {
+      auto declared = value;
+      declared.coverage.evidence.candidates = tag | 8u;
+      check(!declared.unprotected(), "A clean empty UIAlpha or UI color tag (no UI on screen) was unprotected");
+      declared.coverage.evidence.alpha_invalid[tag - 1] = 1;
+      check(declared.unprotected(), "An empty UIAlpha or UI color tag with invalid pixels showed that no UI was on screen");
+    }
+    auto presented = value;
+    presented.coverage.evidence.candidates = 4u | 8u; presented.coverage.evidence.alpha_covered = {};
+    check(presented.unprotected(), "Empty presented alpha showed that no UI was on screen");
     auto decided = value;
     decided.coverage.state = alpha_auto_state::automatic_on; decided.coverage.enabled = true;
     decided.coverage.evidence.alpha_covered = {};
@@ -336,10 +356,11 @@ namespace {
     const auto hdr_fg = at(12000, hdr, settings);
     check(hdr_fg.show && !hdr_fg.try_hdr && !hdr_fg.try_fg, "HDR with FG on hinted at HDR or FG");
     auto opaque_scene = value; // SDR without a layer (Dead Space): HDR would not help.
-    opaque_scene.coverage.evidence.ui_layer = false;
     opaque_scene.coverage.evidence.candidates = 8;
-    opaque_scene.coverage.evidence.alpha_invalid = {};
-    check(!at(12000, opaque_scene, settings).try_hdr, "SDR without a layer set aside hinted at HDR");
+    check(!at(12000, opaque_scene, settings).try_hdr, "SDR without a layer hinted at HDR");
+    auto scene_layer = value; // An SDR layer with alpha but V1-invalid (glow or a scene buffer): HDR would not help.
+    scene_layer.coverage.evidence.layer_covered = 900;
+    check(at(12000, scene_layer, settings).show && !at(12000, scene_layer, settings).try_hdr, "An invalid layer with alpha hinted at HDR");
     auto unknown_fg = value; unknown_fg.fg.known = false;
     check(!at(12000, unknown_fg, settings).try_fg, "Unknown FG hinted at FG");
     auto blocked = value;

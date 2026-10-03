@@ -19,12 +19,15 @@
 // several, the one cleared last in the frame (UI draws last) is active. The
 // active layer is copied just before the first clear after each Present: D3D12
 // requires RENDER_TARGET for a clear, so the state is known, and the copy holds
-// the previous frame's UI. UI detection receives the newest copy as its UI
-// color+alpha candidate, admits it only when premultiplied (no RGB above twice
-// its alpha) and trusts it only after selective coverage (see docs/reshade-sbs.md).
-// The same cleared target can hold a scene image instead (Stellar Blade in SDR:
-// color nearly everywhere, alpha nowhere). A copy without alpha is no layer
-// for that frame (ui_detection::layer_without_alpha): detection sets it aside.
+// the previous frame's UI. UI detection receives the newest copy as the
+// offscreen UI layer candidate, in a slot of its own beside any tagged
+// UIColorAndAlpha (UI framework E1, candidate bit 0x40 at t7). It decides only
+// once accepted by its own evidence (A1) and only in a frame where it is valid
+// (V1): at most 1% of pixels out of range or above the premultiplied bound (no
+// RGB above twice its alpha). The same cleared target can hold a scene image
+// instead (Stellar Blade in SDR: color nearly everywhere, alpha nowhere); such
+// a copy is V1-invalid, so it neither decides nor blocks another candidate
+// (see docs/reshade-sbs.md, UI decision framework).
 //
 // Dump census: while a Dump 3D is armed, qualifying clears are also recorded and
 // copied as diagnostic artifacts.
@@ -36,12 +39,12 @@ namespace sunshine_game3d::ui_layer {
 
   // Formats that can carry blended UI coverage in alpha: 8 bits or more.
   bool alpha_format(api::format format);
-  // Sunshine_UIDetectionFlags for a layer copy of this format
-  // (ui_detection::layer_detection_flags): the late-layer identity, admission
-  // only while premultiplied (no color above twice its alpha: UI blended over
+  // Sunshine_UIDetectionFlags of the layer slot for a copy of this format
+  // (ui_detection::layer_detection_flags): the late-layer identity, the
+  // premultiplied bound of V1 (no color above twice its alpha: UI blended over
   // transparent black, allowing tints brighter than white) and, for a float
-  // layer, HDR headroom. A copy with color but no alpha is set aside
-  // (ui_detection::admitted_candidates).
+  // layer, HDR headroom. A copy with color but no alpha fails that bound
+  // nearly everywhere and is V1-invalid for that frame.
   std::uint32_t detection_flags(api::format format);
   // A single-sample 2D color target at the output size cleared to exactly
   // (0, 0, 0, 0). Callers separately exclude swapchain back buffers.

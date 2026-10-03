@@ -2,6 +2,7 @@
 #include "game3d_ui_layer.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
+#include "game3d_ui_selection.h"
 
 #include <cstdio>
 #include <fstream>
@@ -45,9 +46,9 @@ int main() {
       require(!layer::qualifies(desc, transparent, 3840, 2160), "A multisampled, mipped, layered or 3D target qualified");
     std::puts("PASS UI layer census qualification: output-size single-sample 2D alpha targets cleared to transparent black only");
 
-    // A layer copy in the UI color slot carries the late-layer identity with
-    // the premultiplied check; float layers add HDR headroom. Typeless
-    // allocations are named by their typeless format.
+    // A layer copy in its own slot (candidate layout 2) carries the
+    // late-layer identity with the premultiplied check; float layers add HDR
+    // headroom. Typeless allocations are named by their typeless format.
     namespace detection = sunshine_game3d::ui_detection;
     for (const auto format : {api::format::r8g8b8a8_unorm, api::format::r8g8b8a8_unorm_srgb, api::format::r8g8b8a8_typeless,
            api::format::b8g8r8a8_unorm, api::format::b8g8r8a8_unorm_srgb, api::format::b8g8r8a8_typeless})
@@ -93,14 +94,20 @@ int main() {
       mirrored(detection::hlsl_flag_defines);
       mirrored(detection::hlsl_scene_defines);
       mirrored(sunshine_game3d::hlsl_counter_defines);
+      mirrored(detection::hlsl_candidate_defines);
+      require(sunshine_game3d::shader_marker(source, detection::candidate_layout_marker) == detection::candidate_layout &&
+          sunshine_game3d::shader_marker(source, sunshine_game3d::ui_selection::revision_marker) ==
+            sunshine_game3d::ui_selection::revision,
+        "game3d_native.hlsl's candidate layout or selection revision differs from the contract");
       const auto texels = sunshine_game3d::shader_marker(source, detection::decision_texels_marker);
       const auto images = sunshine_game3d::shader_marker(source, detection::scene_evidence_images_marker);
       require(source.find("#define " + std::string(detection::scene_evidence_images_marker) + ' ') != std::string::npos &&
-          texels >= detection::min_decision_texels && texels <= detection::max_decision_texels &&
+          texels >= detection::layer_decision_texels && texels <= detection::max_decision_texels &&
           images <= detection::max_scene_evidence_images,
         "game3d_native.hlsl's UI detection size markers are missing or outside the contract's range");
     }
-    std::puts("PASS UI detection contract: game3d_native.hlsl mirrors every flag and counter word and sizes detection within range");
+    std::puts("PASS UI detection contract: game3d_native.hlsl mirrors every flag, candidate bit, counter word and the selection "
+      "revision, and sizes detection within range");
 
     // One game frame: each target cleared in order, then Present.
     const auto frame = [](layer::layer_tracker &tracker, std::initializer_list<std::uint64_t> clears, std::uint64_t now) {

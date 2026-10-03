@@ -95,8 +95,11 @@ namespace sunshine_game3d::ui_input {
     }
     nlohmann::json captured_metadata(const ui_mask::selection &selected, std::uint64_t now, bool admitted, bool paired) {
       const auto &origin = selected.origin; const auto &source = origin.source; const auto &copy = selected.texture;
+      const std::uint32_t candidate_bit = origin.kind == ui_mask::source_kind::alpha ? ui_detection::candidate::ui_alpha :
+        origin.kind == ui_mask::source_kind::color_and_alpha ? ui_detection::candidate::ui_color :
+        origin.kind == ui_mask::source_kind::hudless ? ui_detection::candidate::hudless : ui_detection::candidate::backbuffer;
       return {
-        {"source", ui_qualification::name(choice_for(origin.kind))},
+        {"source", ui_qualification::name(choice_for(origin.kind))}, {"candidate_bit", candidate_bit},
         {"tag_type", static_cast<std::uint32_t>(origin.kind)}, {"tag_scope", origin.tag_scope},
         {"channel", origin.kind == ui_mask::source_kind::hudless ? "rgb_difference" : origin.kind == ui_mask::source_kind::alpha ? "red" : "alpha"}, {"format", copy.format},
         {"available_for_detection", admitted}, {"current_present_pair", paired},
@@ -205,7 +208,9 @@ namespace sunshine_game3d::ui_input {
   frame acquire(api::effect_runtime *runtime, renderer &renderer, source_alpha_ui_decision status,
       alpha_auto_policy &session, bool diagnostic) {
     frame result;
-    result.status = status; result.automatic_detection = status.mode == source_alpha_mode::automatic;
+    // Auto and manual On both offer the filtered candidates through detection
+    // (S2); only Off requests none.
+    result.status = status; result.automatic_detection = status.mode != source_alpha_mode::off;
     result.detection.current_color = false;
     ui_qualification::scope base;
     ui_qualification::status before;
@@ -234,31 +239,34 @@ namespace sunshine_game3d::ui_input {
     // (2.11.x: 68, 2.12+: 69). Outside the surveyed range it stays manual-only.
     const bool alpha_authenticated =
       sunshine_streamline::buffers::ui_alpha_authenticated(sunshine_streamline::buffers::active());
-    // A manual choice observes its selected capture's own provenance.
-    const auto observe_origin = [&](const ui_mask::selection &selected, bool dedicated_mask) {
-      const auto &source = selected.origin.source;
-      input.retained = true; input.dedicated_mask = dedicated_mask;
-      input.epoch = source.epoch; input.revision = source.observation_revision;
-      input.viewport = source.viewport; input.sequence = source.sequence; input.tick_ms = source.tick;
-    };
     auto hudless_result = hudless_none;
     // The tagged Backbuffer is the game's own final color. Captured in the same
     // tag batch as HUD-less, it is that image's exact pair on any Present.
     struct { api::resource_view view{}; std::uint64_t tagged{}, current{}; } backbuffer;
     const bool capturing = capture_needed(status, runtime->get_device()->get_api());
-    // The offscreen UI layer takes the UI color slot ahead of a tagged
-    // UIColorAndAlpha the session does not trust, once the layer is trusted or
-    // the tagged buffer proved opaque (Unreal's tagged UI color is the final
-    // image in Stellar Blade and Hogwarts Legacy).
-    ui_layer::live_capture layer;
-    const bool layer_wanted = status.requested && result.automatic_detection &&
-      (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::color_and_alpha));
-    const bool layer_first = layer_wanted && session.prefer_ui_layer() && ui_layer::latest(runtime->get_device(), now, layer);
+    // Manual On offers the same filtered candidates through detection, each
+    // accepted for this session only (S2). Its explicit first filtered
+    // candidate, in draw order, remains the reported manual input and the
+    // renderer's fallback where detection cannot run.
+    const bool manual = status.mode != source_alpha_mode::automatic;
+    struct explicit_capture {
+      bool set{};
+      ui_mask::selection selected;
+      api::resource_view view{};
+      std::string metadata;
+    };
+    std::array<explicit_capture, 4> explicit_captures{}; // Capture slot order.
+    auto &signatures = result.detection.signatures;
+    signatures.color_space = base.color_space;
+    const auto typed_format = [](std::uint32_t format) {
+      return static_cast<std::uint32_t>(api::format_to_default_typed(static_cast<api::format>(format), 0));
+    };
+    constexpr ui_selection::kind slot_kinds[]{ui_selection::kind::ui_alpha, ui_selection::kind::ui_color,
+      ui_selection::kind::backbuffer, ui_selection::kind::hudless};
     const bool hudless_wanted = capturing && (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::hudless));
     if (capturing) for (unsigned slot = 0; slot != 4; ++slot) {
       const auto kind = kinds[slot];
       if (!(source_filter(wanted_source) & ui_mask::source_mask(kind))) continue;
-      if (layer_first && kind == ui_mask::source_kind::color_and_alpha) continue;
       ui_mask::selection selected;
       if (!ui_mask::acquire_kind(reinterpret_cast<std::uint64_t>(runtime), kind, selected, now, queue->get_native())) continue;
       const bool hudless = kind == ui_mask::source_kind::hudless;
@@ -284,19 +292,14 @@ namespace sunshine_game3d::ui_input {
         }
         result.status.retained_alpha_ready = true;
         result.detection.hold_previous = true;
-        if (result.automatic_detection) available = true;
-        else if (!available) {
-          available = true; candidate = captured_scope(base, selected);
-          result.kind = ui_input_kind::hudless_difference; result.view = {};
-          result.status.input = source_alpha_input::sl_hudless_difference;
-          observe_origin(selected, false);
-        }
+        available = true;
+        if (manual) explicit_captures[slot] = {true, selected, {}, diagnostic ? candidates.back().dump() : std::string{}};
         continue;
       }
       // An unauthenticated UIAlpha tag cannot hide independently usable
-      // lower-priority candidates; an authenticated one is validated on the GPU.
-      const bool admissible = (!result.automatic_detection || kind != ui_mask::source_kind::alpha || alpha_authenticated) &&
-        (!hudless || paired);
+      // lower-priority candidates in Auto; an authenticated one is validated on
+      // the GPU. A manual choice may use it.
+      const bool admissible = (manual || kind != ui_mask::source_kind::alpha || alpha_authenticated) && (!hudless || paired);
       api::resource_view view{};
       if (admissible) view = renderer.prepare_ui_candidate(slot, selected.ticket.id, [&](api::resource destination) {
         return capture::copy_local_texture(commands->get_native(), queue->get_native(), selected.ticket,
@@ -313,38 +316,30 @@ namespace sunshine_game3d::ui_input {
       if (!view.handle) continue;
       if (kind == ui_mask::source_kind::backbuffer) backbuffer = {view, tagged, current};
       // A manual HUD-less choice captures the Backbuffer only as its pair.
-      if (!result.automatic_detection && wanted_source == choice::sl_hudless && !hudless) continue;
+      if (manual && wanted_source == choice::sl_hudless && !hudless) continue;
       if (hudless) {
         if (batch) result.detection.hudless_pair = backbuffer.view;
         else result.detection.hudless_presents_ago = pairing.presents_ago;
         // Present counting is exact only without frame generation; Hogwarts
         // showed FG-on Present pairs that belonged to another frame.
         result.detection.hudless_exact = batch || !status.fg_active();
-      }
+        result.detection.hudless = view;
+      } else result.detection.masks[slot] = view;
+      signatures.set(slot_kinds[slot], typed_format(selected.texture.format));
       result.status.retained_alpha_ready = true;
-      if (result.automatic_detection) {
-        if (hudless) result.detection.hudless = view;
-        else result.detection.masks[slot] = view;
-        available = true;
-      } else if (!available) {
-        available = true; candidate = captured_scope(base, selected); result.view = view;
-        if (hudless) result.detection.hudless = view;
-        result.kind = hudless ? ui_input_kind::hudless_difference : kind == ui_mask::source_kind::backbuffer ?
-          ui_input_kind::captured_color_alpha : ui_input_kind::dedicated_mask;
-        result.channel = kind == ui_mask::source_kind::alpha ? ui_mask_channel::red : ui_mask_channel::alpha;
-        result.status.input = hudless ? source_alpha_input::sl_hudless_difference : kind == ui_mask::source_kind::alpha ?
-          source_alpha_input::sl_ui_alpha : kind == ui_mask::source_kind::color_and_alpha ?
-          source_alpha_input::sl_ui_color_alpha : source_alpha_input::sl_backbuffer_alpha;
-        observe_origin(selected, result.kind == ui_input_kind::dedicated_mask);
-        if (diagnostic) result.source_metadata = candidates.back().dump();
-      }
+      available = true;
+      if (manual) explicit_captures[slot] = {true, selected, view, diagnostic ? candidates.back().dump() : std::string{}};
     }
-    // Without a usable tagged UI color+alpha, the game's offscreen UI layer is
-    // that candidate (game3d_ui_layer.h). Its copy holds the previous frame's UI
-    // and is admitted on the GPU only while premultiplied.
-    if (layer_wanted && !result.detection.masks[1].handle && (layer_first || ui_layer::latest(runtime->get_device(), now, layer))) {
+    // The game's offscreen UI layer (game3d_ui_layer.h) is a candidate of its
+    // own beside any tagged UIColorAndAlpha (E1), in renderer slot 4. Its copy
+    // holds the previous frame's UI; detection reads it only while V1-valid,
+    // premultiplied included.
+    ui_layer::live_capture layer;
+    const bool layer_wanted = status.requested &&
+      (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::color_and_alpha));
+    if (layer_wanted && ui_layer::latest(runtime->get_device(), now, layer)) {
       constexpr std::uint64_t layer_capture = std::uint64_t(1) << 62; // Never a Streamline ticket id.
-      const auto view = renderer.prepare_ui_candidate(1, layer_capture | layer.capture_id, [&](api::resource destination) {
+      const auto view = renderer.prepare_ui_candidate(4, layer_capture | layer.capture_id, [&](api::resource destination) {
         commands->barrier(layer.copy, api::resource_usage::shader_resource, api::resource_usage::copy_source);
         commands->barrier(destination, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
         commands->copy_resource(layer.copy, destination);
@@ -353,36 +348,75 @@ namespace sunshine_game3d::ui_input {
         return true;
       }, static_cast<api::format>(layer.format));
       if (diagnostic) candidates.push_back({{"source", "ui_layer"}, {"channel", "alpha"}, {"format", layer.format},
-        {"available_for_detection", view.handle != 0}, {"association", "previous_frame_offscreen_ui_layer"},
-        {"capture_id", layer.capture_id}, {"age_ms", now >= layer.tick ? now - layer.tick : 0}});
+        {"candidate_bit", ui_detection::candidate::layer}, {"available_for_detection", view.handle != 0},
+        {"association", "previous_frame_offscreen_ui_layer"}, {"capture_id", layer.capture_id},
+        {"age_ms", now >= layer.tick ? now - layer.tick : 0}});
       if (view.handle) {
-        result.detection.masks[1] = view;
-        result.detection.color_alpha_flags = ui_layer::detection_flags(static_cast<api::format>(layer.format));
+        result.detection.layer = view;
+        result.detection.layer_flags = ui_layer::detection_flags(static_cast<api::format>(layer.format));
+        signatures.set(ui_selection::kind::ui_layer, typed_format(layer.format));
         result.status.retained_alpha_ready = true; available = true;
       }
     }
     const bool current_allowed = status.requested && !status.fg_active() && present_has_alpha(base.output_format) &&
       (wanted_source == choice::automatic || wanted_source == choice::current_color);
     if (current_allowed) {
-      if (diagnostic) candidates.push_back({{"source", "current_color"}, {"available_for_detection", true},
-        {"association", "current_color_allocation"}, {"format", base.output_format}});
-      if (result.automatic_detection) { result.detection.current_color = true; available = true; }
-      else if (!available) {
-        candidate.source = choice::current_color; available = true;
+      if (diagnostic) candidates.push_back({{"source", "current_color"}, {"candidate_bit", ui_detection::candidate::current},
+        {"available_for_detection", true}, {"association", "current_color_allocation"}, {"format", base.output_format}});
+      result.detection.current_color = true; available = true;
+      signatures.set(ui_selection::kind::current, typed_format(base.output_format));
+    }
+    // A manual choice observes its selected capture's own provenance.
+    const auto observe_origin = [&](const ui_mask::selection &selected, bool dedicated_mask) {
+      const auto &source = selected.origin.source;
+      auto origin = input;
+      origin.retained = true; origin.dedicated_mask = dedicated_mask;
+      origin.epoch = source.epoch; origin.revision = source.observation_revision;
+      origin.viewport = source.viewport; origin.sequence = source.sequence; origin.tick_ms = source.tick;
+      result.explicit_origin = origin;
+    };
+    if (manual) {
+      // The explicit first filtered candidate in draw order: UIAlpha, UI color
+      // tag, Backbuffer, current color, then HUD-less (which needs detection).
+      bool chosen = false;
+      for (unsigned slot = 0; slot != 3 && !chosen; ++slot) {
+        const auto &pick = explicit_captures[slot];
+        if (!pick.set) continue;
+        const auto kind = kinds[slot];
+        candidate = captured_scope(base, pick.selected); result.view = pick.view;
+        result.kind = kind == ui_mask::source_kind::backbuffer ? ui_input_kind::captured_color_alpha : ui_input_kind::dedicated_mask;
+        result.channel = kind == ui_mask::source_kind::alpha ? ui_mask_channel::red : ui_mask_channel::alpha;
+        result.status.input = kind == ui_mask::source_kind::alpha ? source_alpha_input::sl_ui_alpha :
+          kind == ui_mask::source_kind::color_and_alpha ? source_alpha_input::sl_ui_color_alpha : source_alpha_input::sl_backbuffer_alpha;
+        result.source_metadata = pick.metadata;
+        observe_origin(pick.selected, result.kind == ui_input_kind::dedicated_mask);
+        chosen = true;
+      }
+      if (!chosen && current_allowed) {
+        candidate.source = choice::current_color; chosen = true;
         result.kind = ui_input_kind::current_color_alpha; result.status.input = source_alpha_input::present_alpha;
       }
-    }
-    if (result.automatic_detection) {
+      if (!chosen && explicit_captures[3].set) {
+        const auto &pick = explicit_captures[3];
+        candidate = captured_scope(base, pick.selected); result.view = pick.view;
+        result.kind = ui_input_kind::hudless_difference;
+        result.status.input = source_alpha_input::sl_hudless_difference;
+        result.source_metadata = pick.metadata;
+        observe_origin(pick.selected, false);
+        chosen = true;
+      }
+      if (!chosen) result.status.input = source_alpha_input::none;
+    } else {
       candidate.source = wanted_source;
       result.status.input = available ? source_alpha_input::automatic_mask : source_alpha_input::none;
-      // The derived mask is current-frame GPU output. Delayed CPU quality
-      // feedback must never be promoted into exact current-winner provenance.
-      input.retained = false; input.tick_ms = now; input.sequence = frame_sequence;
-      if (diagnostic) result.source_metadata = nlohmann::json{
-        {"source", "automatic_candidate_set"}, {"association", "current_render_gpu_validation"},
-        {"meaning", "Current render validates all admitted candidates and produces its mask on the GPU. Delayed quality statistics do not identify the exact current winner or authorize pixels."},
-        {"candidates", candidates}}.dump();
     }
+    // The derived mask is current-frame GPU output. Delayed CPU quality
+    // feedback must never be promoted into exact current-winner provenance.
+    input.retained = false; input.tick_ms = now; input.sequence = frame_sequence;
+    if (diagnostic && !manual) result.source_metadata = nlohmann::json{
+      {"source", "automatic_candidate_set"}, {"association", "current_render_gpu_validation"},
+      {"meaning", "Current render validates all admitted candidates and produces its mask on the GPU. Delayed quality statistics do not identify the exact current winner or authorize pixels."},
+      {"candidates", candidates}}.dump();
     {
       std::lock_guard<std::mutex> lock(source_mutex);
       const auto found = sources.find(runtime);
@@ -400,7 +434,7 @@ namespace sunshine_game3d::ui_input {
       } else available = false;
     }
     if (!available) {
-      result.kind = ui_input_kind::unavailable; result.view = {};
+      result.kind = ui_input_kind::unavailable; result.view = {}; result.explicit_origin.reset();
       result.detection = {}; result.detection.current_color = false;
       result.status.retained_alpha_ready = false; result.status.input = source_alpha_input::none;
     }
@@ -466,12 +500,17 @@ namespace sunshine_game3d::ui_input {
   }
   ui_adaptive::source frame::match_scene(ui_adaptive::source source, bool scene_ready) const {
     source.now_ms = observation.now_ms; source.eligible = source.eligible && scene_ready;
-    if (automatic_detection) {
+    // A retained capture, Manual On's explicit one included (the renderer
+    // applies it directly where detection cannot run), matches only its own
+    // scope and is no fresher than its capture.
+    const auto *retained = explicit_origin ? &*explicit_origin :
+      !automatic_detection && observation.retained ? &observation : nullptr;
+    if (retained) {
+      source.mask_sequence = retained->sequence; source.tick_ms = std::min(source.tick_ms, retained->tick_ms);
+      source.eligible = source.eligible && retained->epoch == source.epoch &&
+        retained->revision == source.revision && retained->viewport == source.viewport;
+    } else if (automatic_detection) {
       source.mask_sequence = observation.sequence;
-    } else if (observation.retained) {
-      source.mask_sequence = observation.sequence; source.tick_ms = std::min(source.tick_ms, observation.tick_ms);
-      source.eligible = source.eligible && observation.epoch == source.epoch &&
-        observation.revision == source.revision && observation.viewport == source.viewport;
     }
     return source;
   }
