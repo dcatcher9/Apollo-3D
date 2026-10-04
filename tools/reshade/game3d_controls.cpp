@@ -458,17 +458,19 @@ namespace sunshine_game3d {
     else if (!fg.enabled) ImGui::TextUnformatted("Frame Generation: off");
     if (fg.known && fg.enabled) {
       const char *automatic_mode = fg.automatic ? " (Auto)" : "";
-      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+      // 2x is the preferred mode: its tags give UI protection and depth in
+      // every colour mode, so only a multiplier above 2x gets a hint.
       if (fg.generated_frames >= 2) {
         const auto multiplier = static_cast<unsigned long long>(fg.generated_frames) + 1;
-        ImGui::TextWrapped("Frame Generation %llux%s: use Off or 2x to reduce artifacts and stutter.", multiplier, automatic_mode);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+        ImGui::TextWrapped("Frame Generation %llux%s: use 2x to reduce artifacts and stutter.", multiplier, automatic_mode);
+        ImGui::PopStyleColor();
       } else if (fg.generated_frames == 1) {
-        ImGui::TextWrapped("Frame Generation 2x%s: turn off if artifacts or stutter appear.", automatic_mode);
+        ImGui::Text("Frame Generation: 2x%s", automatic_mode);
       } else {
-        ImGui::TextWrapped("Frame Generation enabled%s: turn off if artifacts or stutter appear.", automatic_mode);
+        ImGui::Text("Frame Generation: on%s", automatic_mode);
       }
       ImGui::SetItemTooltip("Change Frame Generation in the game's settings. DLSS Super Resolution can stay on. This is the game's requested setting, not a measurement of generated frames. Sunshine does not change it automatically.");
-      ImGui::PopStyleColor();
     }
     namespace buffers = sunshine_streamline::buffers;
     if (const auto contract = buffers::active(); contract.known) {
