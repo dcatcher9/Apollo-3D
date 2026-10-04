@@ -449,11 +449,11 @@ int main(int argc, char **argv) {
           // Fix 3's change-set shadow: a word of 32 pixels on 8 rows, then one group per tile.
           entries.push_back({"SunshineUIDetectionChangeSetBitsCS", "cs_5_0", 32, 8, 1});
           entries.push_back({"SunshineUIDetectionChangeSetCountCS", "cs_5_0", 16, 16, 1});
-          // Fix 4's darkening: a word of 32 pixels on 8 rows, one group per
-          // 16x16 tile, the region pass's one group, one per detection
-          // tile, then one group.
+          // Fix 4's darkening: a word of 32 pixels on 8 rows, one group of
+          // 64 threads per 16x16 tile (four pixels each), the region pass's
+          // one group, one per detection tile, then one group.
           entries.push_back({"SunshineUIDarkeningBitsCS", "cs_5_0", 32, 8, 1});
-          entries.push_back({"SunshineUIDarkeningTilesCS", "cs_5_0", 16, 16, 1});
+          entries.push_back({"SunshineUIDarkeningTilesCS", "cs_5_0", 16, 4, 1});
           entries.push_back({"SunshineUIDarkeningRegionCS", "cs_5_0", 1024, 1, 1});
           entries.push_back({"SunshineUIDarkeningCountCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUIDarkeningFinishCS", "cs_5_0", 256, 1, 1});

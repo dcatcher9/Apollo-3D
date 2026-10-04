@@ -1075,56 +1075,88 @@ void SunshineUIDarkeningBitsCS(uint3 group : SV_GroupID, uint3 thread : SV_Group
 // through the outlines between them; they still count in the regression,
 // where a tint over a textured scene (kept, its opacity steps with the
 // scene) shows its colour and rings its neighbours.
+//
+// Cost (docs/reshade-sbs.md, fix 4): 64 threads, four pixels each (rows
+// y, y + 4, y + 8 and y + 12). Each pixel's terms are stored as one of 256
+// and the sums reduce in the order of a 256-lane tree: a thread adds its
+// four terms as the tree's first two levels, (p + p[+128]) + (p[+64] +
+// p[+192]), and six more levels follow, so every sum is bit for bit the
+// 256-lane tree's. The tile's DARK and kept rows come first; source 12's
+// fitting pixels are its DARK pixels, so a tile with fewer than
+// SUNSHINE_UI_DARKENING_TILE_MIN_PIXELS of them has no verdict and returns
+// before it loads a pixel, and only its DARK pixels load their pair.
 groupshared float3 SunshineDarkeningTileSums[256];
-groupshared uint SunshineDarkeningTileDark;
 groupshared uint SunshineDarkeningTileKept[16];
-[numthreads(16, 16, 1)]
+groupshared uint SunshineDarkeningTileRows[16];
+// The first two levels of the 256-lane tree at lane (below 64).
+float3 SunshineDarkeningTilePartial(uint lane)
+{
+    precise float3 low = SunshineDarkeningTileSums[lane] + SunshineDarkeningTileSums[lane + 128u];
+    precise float3 high = SunshineDarkeningTileSums[lane + 64u] + SunshineDarkeningTileSums[lane + 192u];
+    precise float3 sum = low + high;
+    return sum;
+}
+[numthreads(16, 4, 1)]
 void SunshineUIDarkeningTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     const uint source = SunshineDarkeningSource();
     if (source != 5u && source != SUNSHINE_UI_SOURCE_PRE_UI) return;
     const uint lane = thread.y * 16u + thread.x;
-    const uint2 xy = group.xy * SUNSHINE_UI_DARKENING_TILE + thread.xy;
     const float t = Sunshine_UIDifferenceThreshold;
-    float3 x = 0.0, y = 0.0;
-    float n = 0.0;
-    if (!lane) SunshineDarkeningTileDark = 0u;
-    // The tile's 16 rows of kept pixels (STRUCT and the 3x3 rule, from the
-    // store), each a half word.
+    // The tile's 16 rows of DARK pixels and of kept pixels (STRUCT and the
+    // 3x3 rule), from the store, each a half word.
     [branch] if (lane < 16u) {
         const int word = int(group.x / 2u), row = int(group.y * SUNSHINE_UI_DARKENING_TILE + lane);
+        const uint shift = (group.x % 2u) * 16u;
         const uint kept = SunshineChangeSetKeptWord(true, SUNSHINE_UI_CHANGE_SET_PLANE_STRUCT,
             SunshineChangeSetPlaneWord(true, SUNSHINE_UI_CHANGE_SET_PLANE_STRUCT, word, row), word, row);
-        SunshineDarkeningTileKept[lane] = (group.x % 2u) ? kept >> 16u : kept & 0xffffu;
+        SunshineDarkeningTileKept[lane] = (kept >> shift) & 0xffffu;
+        SunshineDarkeningTileRows[lane] =
+            (SunshineChangeSetPlaneWord(true, SUNSHINE_UI_CHANGE_SET_PLANE_DARK, word, row) >> shift) & 0xffffu;
     }
     GroupMemoryBarrierWithGroupSync();
-    [branch] if (xy.x < BUFFER_WIDTH && xy.y < BUFFER_HEIGHT) {
-        float3 final, pre;
-        SunshineChangeSetPair(int3(xy, 0), final, pre);
-        // DARK, as the bits pass wrote it, and whether structure keeps it.
-        const bool dark = ((SunshineUIChangeSetPlanesStore[uint2(SUNSHINE_UI_CHANGE_SET_PLANE_DARK * SUNSHINE_UI_CHANGE_SET_WORDS +
-            xy.x / 32u, xy.y)] >> (xy.x % 32u)) & 1u) != 0u;
-        const bool kept = ((SunshineDarkeningTileKept[thread.y] >> thread.x) & 1u) != 0u;
-        if (dark && !kept) SunshineDarkeningTileDark = 1u;
-        bool fits = dark;
-        [branch] if (source != SUNSHINE_UI_SOURCE_PRE_UI) {
-            float2 opacity;
-            const uint flags = SunshineDarkeningChangeSet(final, pre, t, SunshineChangeSetThreshold(), opacity);
-            fits = (flags & (SUNSHINE_DARK_UI | SUNSHINE_DARK_FITS)) == (SUNSHINE_DARK_UI | SUNSHINE_DARK_FITS);
-        }
-        if (fits) {
-            x = SunshineDarkeningFit(pre);
-            y = SunshineDarkeningFit(final);
-            n = 1.0;
-        }
+    uint darkPixels = 0u, candidate = 0u;
+    [unroll] for (uint r = 0u; r < 16u; ++r) {
+        darkPixels += countbits(SunshineDarkeningTileRows[r]);
+        candidate |= SunshineDarkeningTileRows[r] & ~SunshineDarkeningTileKept[r];
     }
-    SunshineDarkeningTileSums[lane] = float3(n, x.r + x.g + x.b, y.r + y.g + y.b);
-    GroupMemoryBarrierWithGroupSync();
     const uint word = SUNSHINE_UI_CHANGE_SET_PLANE_TILE * SUNSHINE_UI_CHANGE_SET_WORDS;
     uint ignored;
-    if (!lane && SunshineDarkeningTileDark)
+    if (!lane && candidate)
         InterlockedOr(SunshineUIChangeSetPlanesStore[uint2(word + group.x / 32u, 3u * group.y + 2u)], 1u << (group.x % 32u), ignored);
-    [unroll] for (uint half_step = 128u; half_step; half_step >>= 1u) {
+    if (source == SUNSHINE_UI_SOURCE_PRE_UI && darkPixels < SUNSHINE_UI_DARKENING_TILE_MIN_PIXELS) return;
+    float3 x[4], y[4];
+    float n[4];
+    [unroll] for (uint k = 0u; k < 4u; ++k) {
+        const uint row = thread.y + 4u * k;
+        const uint2 xy = group.xy * SUNSHINE_UI_DARKENING_TILE + uint2(thread.x, row);
+        x[k] = 0.0;
+        y[k] = 0.0;
+        n[k] = 0.0;
+        [branch] if (xy.x < BUFFER_WIDTH && xy.y < BUFFER_HEIGHT) {
+            bool fits = ((SunshineDarkeningTileRows[row] >> thread.x) & 1u) != 0u;
+            float3 final = 0.0, pre = 0.0;
+            [branch] if (source != SUNSHINE_UI_SOURCE_PRE_UI) {
+                SunshineChangeSetPair(int3(xy, 0), final, pre);
+                float2 opacity;
+                const uint flags = SunshineDarkeningChangeSet(final, pre, t, SunshineChangeSetThreshold(), opacity);
+                fits = (flags & (SUNSHINE_DARK_UI | SUNSHINE_DARK_FITS)) == (SUNSHINE_DARK_UI | SUNSHINE_DARK_FITS);
+            } else [branch] if (fits) {
+                SunshineChangeSetPair(int3(xy, 0), final, pre);
+            }
+            if (fits) {
+                x[k] = SunshineDarkeningFit(pre);
+                y[k] = SunshineDarkeningFit(final);
+                n[k] = 1.0;
+            }
+        }
+        SunshineDarkeningTileSums[lane + 64u * k] =
+            float3(n[k], x[k].r + x[k].g + x[k].b, y[k].r + y[k].g + y[k].b);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    SunshineDarkeningTileSums[lane] = SunshineDarkeningTilePartial(lane);
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint half_step = 32u; half_step; half_step >>= 1u) {
         if (lane < half_step) SunshineDarkeningTileSums[lane] += SunshineDarkeningTileSums[lane + half_step];
         GroupMemoryBarrierWithGroupSync();
     }
@@ -1132,10 +1164,14 @@ void SunshineUIDarkeningTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
     const float meanX = samples > 0.0 ? SunshineDarkeningTileSums[0].y / samples : 0.0;
     const float meanY = samples > 0.0 ? SunshineDarkeningTileSums[0].z / samples : 0.0;
     GroupMemoryBarrierWithGroupSync();
-    precise float3 dx = x - meanX, dy = y - meanY;
-    SunshineDarkeningTileSums[lane] = n > 0.0 ? float3(dot(dx, dx), dot(dx, dy), 0.0) : 0.0;
+    [unroll] for (uint c = 0u; c < 4u; ++c) {
+        precise float3 dx = x[c] - meanX, dy = y[c] - meanY;
+        SunshineDarkeningTileSums[lane + 64u * c] = n[c] > 0.0 ? float3(dot(dx, dx), dot(dx, dy), 0.0) : 0.0;
+    }
     GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint centred_step = 128u; centred_step; centred_step >>= 1u) {
+    SunshineDarkeningTileSums[lane] = SunshineDarkeningTilePartial(lane);
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint centred_step = 32u; centred_step; centred_step >>= 1u) {
         if (lane < centred_step) SunshineDarkeningTileSums[lane] += SunshineDarkeningTileSums[lane + centred_step];
         GroupMemoryBarrierWithGroupSync();
     }
@@ -1163,9 +1199,9 @@ void SunshineUIDarkeningTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
 // The region pass (one group of 1024 threads, after the tiles pass; planes
 // at u4). A change set: its darkening regions are the 8-connected tiles with
 // a darkening pixel (TILE row 3 ty + 2). Two floods within them run together
-// in group-shared memory, one thread per row of tiles: the poison from the
-// tiles with a colour verdict in their 3x3 ring (row 3 ty) and the proof
-// from the proven tiles (row 3 ty + 1, darkening, and no ring). Each
+// in group-shared memory, one thread per row of tiles of each: the poison
+// from the tiles with a colour verdict in their 3x3 ring (row 3 ty) and the
+// proof from the proven tiles (row 3 ty + 1, darkening, and no ring). Each
 // iteration seeds a row from the 8 neighbours of its rows above and below
 // and fills it along its runs of tiles; the floods settle when an iteration
 // changes nothing. Row 3 ty + 2 then holds the tiles whose region has a
@@ -1190,61 +1226,66 @@ uint SunshineDarkeningRegionAt(uint set, int r, int w)
     return r < 0 || w < 0 || r >= SUNSHINE_UI_DARKENING_TILES_Y || w >= SUNSHINE_UI_DARKENING_TILE_WORDS ? 0u :
         SunshineDarkeningRegionSets[set * SUNSHINE_UI_DARKENING_REGION_WORDS + uint(r) * SUNSHINE_UI_DARKENING_TILE_WORDS + uint(w)];
 }
-// A word's set bits g spread along the runs of mask m toward higher bits
-// (up) or lower bits (down): Kogge-Stone occluded fills.
+// A word's seeds g (within its mask m) spread along the runs of m toward
+// higher bits (up) or lower bits (down): adding the seeds to the mask
+// carries through each run from its seed up to the run's end. A run that
+// reaches bit 31 (up) or bit 0 (down) carries into the next word.
 uint SunshineDarkeningFillUp(uint g, uint m)
 {
-    uint p = m;
-    g |= p & (g << 1u); p &= p << 1u;
-    g |= p & (g << 2u); p &= p << 2u;
-    g |= p & (g << 4u); p &= p << 4u;
-    g |= p & (g << 8u); p &= p << 8u;
-    return g | (p & (g << 16u));
+    return g | (((m + (g & m)) ^ m) & m);
 }
 uint SunshineDarkeningFillDown(uint g, uint m)
 {
-    uint p = m;
-    g |= p & (g >> 1u); p &= p >> 1u;
-    g |= p & (g >> 2u); p &= p >> 2u;
-    g |= p & (g >> 4u); p &= p >> 4u;
-    g |= p & (g >> 8u); p &= p >> 8u;
-    return g | (p & (g >> 16u));
+    return reversebits(SunshineDarkeningFillUp(reversebits(g), reversebits(m)));
 }
-// One flood step of tile row r: seeds from the 8 neighbours in the rows
-// above and below, then fills along the row; returns whether it changed.
-// The rows beside it may change meanwhile; the floods only grow, so a stale
-// read only delays a seed to the next iteration.
-bool SunshineDarkeningRegionRow(uint set, uint r)
+// One flood step of tile row r of a flood (set 0 poison, 1 proof): seeds
+// from the 8 neighbours in the rows above and below, then fills along the
+// row; returns whether it changed. One thread runs each row of each flood:
+// the row's mask m and its own words (own, which only its thread writes)
+// stay in registers, each neighbour word is read once, and only a changed
+// word is written. The rows beside it may change meanwhile; the floods only
+// grow, so a stale read only delays a seed to the next iteration.
+bool SunshineDarkeningRegionRow(uint set, uint r, uint m[SUNSHINE_UI_DARKENING_TILE_WORDS],
+    inout uint own[SUNSHINE_UI_DARKENING_TILE_WORDS])
 {
-    const uint base = set * SUNSHINE_UI_DARKENING_REGION_WORDS + r * SUNSHINE_UI_DARKENING_TILE_WORDS;
-    bool changed = false;
-    [loop] for (uint w = 0u; w < SUNSHINE_UI_DARKENING_TILE_WORDS; ++w) {
-        const uint v = SunshineDarkeningRegionAt(set, int(r) - 1, int(w)) | SunshineDarkeningRegionAt(set, int(r) + 1, int(w));
-        const uint below = SunshineDarkeningRegionAt(set, int(r) - 1, int(w) - 1) | SunshineDarkeningRegionAt(set, int(r) + 1, int(w) - 1);
-        const uint above = SunshineDarkeningRegionAt(set, int(r) - 1, int(w) + 1) | SunshineDarkeningRegionAt(set, int(r) + 1, int(w) + 1);
-        const uint near = v | (v << 1u) | (v >> 1u) | (below >> 31u) | (above << 31u);
-        const uint old = SunshineDarkeningRegionSets[base + w];
-        const uint seeded = old | (SunshineDarkeningRegionMask[r * SUNSHINE_UI_DARKENING_TILE_WORDS + w] & near);
-        changed = changed || seeded != old;
-        SunshineDarkeningRegionSets[base + w] = seeded;
+    // near[w + 1] holds word w of the rows above and below; near[0] and
+    // near[words + 1] are the zero words beside the row.
+    uint near[SUNSHINE_UI_DARKENING_TILE_WORDS + 2], row[SUNSHINE_UI_DARKENING_TILE_WORDS];
+    near[0] = 0u;
+    near[SUNSHINE_UI_DARKENING_TILE_WORDS + 1] = 0u;
+    [unroll] for (uint w = 0u; w < SUNSHINE_UI_DARKENING_TILE_WORDS; ++w)
+        near[w + 1u] = SunshineDarkeningRegionAt(set, int(r) - 1, int(w)) | SunshineDarkeningRegionAt(set, int(r) + 1, int(w));
+    [unroll] for (uint seed = 0u; seed < SUNSHINE_UI_DARKENING_TILE_WORDS; ++seed) {
+        const uint v = near[seed + 1u], below = near[seed], above = near[seed + 2u];
+        row[seed] = own[seed] | (m[seed] & (v | (v << 1u) | (v >> 1u) | (below >> 31u) | (above << 31u)));
+    }
+    // Each word fills on its own in both directions; then the runs that
+    // leave a word carry into its neighbours, a carry filling the next
+    // word's run from its edge (the run of its first or last mask bit).
+    uint up[SUNSHINE_UI_DARKENING_TILE_WORDS], down[SUNSHINE_UI_DARKENING_TILE_WORDS];
+    [unroll] for (uint fill = 0u; fill < SUNSHINE_UI_DARKENING_TILE_WORDS; ++fill) {
+        up[fill] = SunshineDarkeningFillUp(row[fill], m[fill]);
+        down[fill] = SunshineDarkeningFillDown(row[fill], m[fill]);
     }
     uint carry = 0u;
-    [loop] for (uint up = 0u; up < SUNSHINE_UI_DARKENING_TILE_WORDS; ++up) {
-        const uint m = SunshineDarkeningRegionMask[r * SUNSHINE_UI_DARKENING_TILE_WORDS + up];
-        const uint old = SunshineDarkeningRegionSets[base + up];
-        const uint filled = SunshineDarkeningFillUp(old | (carry & m & 1u), m);
-        changed = changed || filled != old;
-        SunshineDarkeningRegionSets[base + up] = filled;
-        carry = filled >> 31u;
+    [unroll] for (uint upward = 0u; upward < SUNSHINE_UI_DARKENING_TILE_WORDS; ++upward) {
+        if (carry) up[upward] = up[upward] | SunshineDarkeningFillUp(1u & m[upward], m[upward]);
+        carry = up[upward] >> 31u;
     }
     carry = 0u;
-    [loop] for (uint down = SUNSHINE_UI_DARKENING_TILE_WORDS; down > 0u; --down) {
-        const uint m = SunshineDarkeningRegionMask[r * SUNSHINE_UI_DARKENING_TILE_WORDS + down - 1u];
-        const uint old = SunshineDarkeningRegionSets[base + down - 1u];
-        const uint filled = SunshineDarkeningFillDown(old | ((carry << 31u) & m), m);
-        changed = changed || filled != old;
-        SunshineDarkeningRegionSets[base + down - 1u] = filled;
-        carry = filled & 1u;
+    [unroll] for (uint downward = SUNSHINE_UI_DARKENING_TILE_WORDS; downward > 0u; --downward) {
+        const uint d = downward - 1u;
+        if (carry) down[d] = down[d] | SunshineDarkeningFillDown(0x80000000u & m[d], m[d]);
+        carry = down[d] & 1u;
+    }
+    bool changed = false;
+    [unroll] for (uint both = 0u; both < SUNSHINE_UI_DARKENING_TILE_WORDS; ++both) {
+        const uint filled = up[both] | down[both];
+        [branch] if (filled != own[both]) {
+            changed = true;
+            own[both] = filled;
+            SunshineDarkeningRegionSets[set * SUNSHINE_UI_DARKENING_REGION_WORDS + r * SUNSHINE_UI_DARKENING_TILE_WORDS + both] = filled;
+        }
     }
     return changed;
 }
@@ -1282,21 +1323,29 @@ void SunshineUIDarkeningRegionCS(uint3 thread : SV_GroupThreadID)
         if (!lane && BUFFER_HEIGHT > 1) SunshineUIChangeSetPlanesStore[uint2(tileWord, 1u)] = SunshineDarkeningRegionFlag;
         return;
     }
-    // Every iteration syncs (cs_5_0 cannot leave a synced loop on a shared
-    // value); once settled, an iteration only syncs. The flag is a stamp,
-    // not a cleared flag: a thread that reads the next iteration's stamp
-    // also continues, and after an iteration that changed nothing no thread
-    // writes again.
+    // The flag is a stamp, not a cleared flag: the iteration that last
+    // changed a row. Every thread reads it between two syncs, so all leave
+    // the loop together after the first iteration that changed nothing (cs_5_0
+    // leaves a synchronized loop on a shared value only behind a sync after
+    // the read).
     bool settled = false;
+    // Lane set * tiles_y + r runs row r of flood set.
+    const uint set = lane < SUNSHINE_UI_DARKENING_TILES_Y ? 0u : 1u, r = lane - set * SUNSHINE_UI_DARKENING_TILES_Y;
+    const bool runs = fits && lane < 2u * SUNSHINE_UI_DARKENING_TILES_Y;
+    uint m[SUNSHINE_UI_DARKENING_TILE_WORDS], own[SUNSHINE_UI_DARKENING_TILE_WORDS];
+    [unroll] for (uint w = 0u; w < SUNSHINE_UI_DARKENING_TILE_WORDS; ++w) {
+        const uint at = min(r, SUNSHINE_UI_DARKENING_TILES_Y - 1u) * SUNSHINE_UI_DARKENING_TILE_WORDS + w;
+        m[w] = runs ? SunshineDarkeningRegionMask[at] : 0u;
+        own[w] = runs ? SunshineDarkeningRegionSets[set * SUNSHINE_UI_DARKENING_REGION_WORDS + at] : 0u;
+    }
     [loop] for (uint iteration = 1u; iteration <= (fits ? SUNSHINE_UI_DARKENING_REGION_ITERATIONS : 0u); ++iteration) {
         bool changed = false;
-        [branch] if (!settled && lane < SUNSHINE_UI_DARKENING_TILES_Y) {
-            changed = SunshineDarkeningRegionRow(0u, lane);
-            changed = SunshineDarkeningRegionRow(1u, lane) || changed;
-        }
+        [branch] if (runs) changed = SunshineDarkeningRegionRow(set, r, m, own);
         if (changed) SunshineDarkeningRegionFlag = iteration;
         GroupMemoryBarrierWithGroupSync();
-        settled = settled || SunshineDarkeningRegionFlag < iteration;
+        settled = SunshineDarkeningRegionFlag < iteration;
+        GroupMemoryBarrierWithGroupSync();
+        if (settled) break;
     }
     [loop] for (uint i = lane; i < SUNSHINE_UI_DARKENING_TILE_WORDS * SUNSHINE_UI_DARKENING_TILES_Y; i += 1024u) {
         const uint ty = i / SUNSHINE_UI_DARKENING_TILE_WORDS, w = i % SUNSHINE_UI_DARKENING_TILE_WORDS;
