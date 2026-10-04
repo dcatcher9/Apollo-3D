@@ -20,9 +20,10 @@
 
 namespace sunshine_game3d {
   // An inferred source earns acceptance as UI coverage by this many valid
-  // selective detection samples spanning this long (A1); an accepted source is
-  // revoked by this many contradicting samples within this long (A2)
-  // (docs/reshade-sbs.md, UI decision framework).
+  // selective detection samples spanning this long (A1), and a layer
+  // signature its pre-UI proof by this many matching samples (H1 d); an
+  // accepted source is revoked by this many contradicting samples within this
+  // long (A2) (docs/reshade-sbs.md, UI decision framework).
   inline constexpr std::uint32_t alpha_trust_samples = 3;
   inline constexpr std::uint64_t alpha_trust_span_ms = 2000;
   // Acceptance remembered from an earlier session protects from the first
@@ -121,13 +122,22 @@ namespace sunshine_game3d {
       // real frame's decision instead.
       std::uint32_t refused{}, frame_reason = ui_detection::frame_reason_decided;
       bool reused{};
+      // H1 (d), texel 11 (selection revision 4): the offscreen UI layer
+      // against the presented frame at 8 times their pair threshold: pixels
+      // whose colours match, lit layer pixels, lit presented pixels, and lit
+      // presented pixels that differ from the layer. The first two prove the
+      // layer the pre-UI scene image (ui_selection::pre_ui_match); the last two
+      // are shadow statistics nothing acts on. All zero without a layer or a
+      // comparable pair.
+      std::uint32_t pre_ui_match{}, pre_ui_image_lit{}, presented_lit{}, presented_lit_differs{};
     } evidence;
     // This render's state, not the sample's: the hidden-scene guard's
     // verdicts pushed with this render (game3d_scene_guard.h: a held hidden
     // verdict, its samples reading the pre-UI image visible) and how many
-    // source signatures a visible verdict refuted, whether the offered layer
-    // is proven the presented frame without its UI (H1 d), and whether the
-    // first-run shadow evaluates the evidence without an acting claim.
+    // source signatures a visible verdict refuted, whether the offered layer's
+    // signature is proven the pre-UI scene image (H1 d: the ledger's key
+    // pre_ui:<format>:<space>, alpha_auto_policy::pre_ui_proven), and whether
+    // the first-run shadow evaluates the evidence without an acting claim.
     struct scene_guard_state {
       bool hidden{}, pre_ui{};
       std::uint32_t refuted{};
@@ -189,8 +199,11 @@ namespace sunshine_game3d {
   // UI protection mode and the acceptance ledger for one game process (M3,
   // docs/reshade-sbs.md, UI decision framework). Live Auto validates each
   // frame's inputs on the GPU; this holds only the mode and one accepted bit
-  // per source signature that those samples earn. It knows nothing about
-  // slots, holds, D or FG mode.
+  // per source signature that those samples earn, and per offscreen layer
+  // signature the proof that it holds the pre-UI scene image (H1 d, the
+  // ledger-only kind ui_selection::kind::pre_ui). It knows nothing about
+  // slots, holds or FG mode, and reads the presented frame's D verdict only
+  // as the gate of that proof's reconfirm clock.
   class alpha_auto_policy {
   public:
     void set_manual(bool enabled) {
@@ -235,6 +248,15 @@ namespace sunshine_game3d {
       return accepts_locked(signature);
     }
 
+    // H1 (d): whether an offscreen layer of this signature is proven the
+    // pre-UI scene image (its key ui_selection::pre_ui_key is accepted,
+    // provisional included). Manual modes neither earn nor lapse the proof
+    // but honour it.
+    bool pre_ui_proven(const ui_selection::signature &layer) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return accepts_locked(ui_selection::pre_ui_key(layer));
+    }
+
     // One completed GPU detection sample over `pixels` pixels, taken for
     // candidates of these signatures (those at submission). Manual modes
     // never earn or revoke. A1 earning: a declared source (UIAlpha, the UI
@@ -269,6 +291,17 @@ namespace sunshine_game3d {
     // (UIAlpha, the UI color tag, a HUD-less pair) is offered but invalid,
     // from its first invalid offer to its next valid one, so it never lapses
     // during an invalid run and invalid offers never extend it.
+    // H1 (d), fix 1: an offered layer without coverage (layer_covered zero)
+    // earns its signature's pre-UI proof (key ui_selection::pre_ui_key) like
+    // an inferred source: alpha_trust_samples samples spanning
+    // alpha_trust_span_ms whose layer equals the presented frame
+    // (ui_selection::pre_ui_match), not necessarily consecutive. A mismatch
+    // never withdraws it and never restarts the run (UI over the scene is a
+    // mismatch); no A2 judge reads it and a void sample still counts. A
+    // restored proof's reconfirm clock runs only on testable samples (the
+    // layer offered without coverage while the presented frame's evidence is
+    // valid and visible) and pauses on every other sample, so it lapses after
+    // alpha_trust_reconfirm_ms of testable time without a match.
     void observe(const alpha_auto_decision::detection_evidence &evidence, std::uint32_t pixels, std::uint64_t tick_ms,
         const candidate_signatures &signatures) {
       if (!pixels) return;
@@ -560,6 +593,21 @@ namespace sunshine_game3d {
         }
         lapse_if_due(e, tick_ms);
       }
+      // H1 (d): the offered layer's pre-UI proof; every other proof's
+      // reconfirm clock pauses.
+      std::optional<ui_selection::signature> tested;
+      if ((offered & candidate::layer) && !evidence.layer_covered) {
+        tested = ui_selection::pre_ui_key(signatures.of(kind::ui_layer));
+        auto &e = at(*tested);
+        const bool testable = evidence.scene.valid && evidence.scene.verdict == ui_detection::scene_verdict::visible;
+        if (testable) reconfirm_offered(e, tick_ms);
+        else reconfirm_paused(e, tick_ms);
+        if (ui_selection::pre_ui_match(evidence.pre_ui_match, evidence.pre_ui_image_lit, pixels) && e.earned.add(tick_ms))
+          accept(e);
+        lapse_if_due(e, tick_ms);
+      }
+      for (auto &e : entries_)
+        if (e.signature.source_kind == kind::pre_ui && (!tested || e.signature != *tested)) reconfirm_paused(e, tick_ms);
       // A HUD-less change set earns only from an exact pair (V2) whose partial
       // change set is valid; an inexact pair never earns. Offered without its
       // valid bit, it is invalid this sample (A3).

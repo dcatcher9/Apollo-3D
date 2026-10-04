@@ -2,28 +2,31 @@
 // Sequence replay of live automatic UI detection's temporal rules
 // (docs/reshade-sbs.md, UI protection and UI decision framework). Per-frame
 // decision streams drive the production state machines without a GPU: the
-// game session's acceptance ledger (alpha_auto_policy), the renderer's T1
+// game session's acceptance ledger (alpha_auto_policy, the offscreen
+// layer's pre-UI proof of H1 (d) included), the renderer's T1
 // arbitration and status samples (ui_temporal::detection_state), the
 // hidden-scene guard that holds the CPU's verdicts of D and refutes claims
 // per signature (scene_guard::state, M5), the sample decode and counter
 // commit (ui_temporal::decode_detection_sample, sample_counters), Present
 // pairing and counting under frame generation (ui_mask::pair_hudless_present,
 // generated_without_input) and the exact counters (ui_counters). A stream's
-// GPU input is what one detection counts: decision texels 0-10 that
-// ui_detection_replay --verbose recorded on labelled dumps with the S2b
+// GPU input is what one detection counts: decision texels 0-11 that
+// ui_detection_replay --verbose recorded on labelled dumps with the fix-1
 // shader, or synthetic counts. Every decision is ui_selection::decide, the
 // C++ mirror of SunshineUIDetectionReduceCS (the T1 hold store and the H1
 // override included) that test_game3d_ui_selection_contract proves equal to
 // the shader's reduce; every recorded decision must equal it.
 //
-// It asserts the rules through stage S2b strictly. An outcome that a later
+// It asserts the rules through stage S2b and fix 1 (the pre-UI proof by
+// pixels) strictly. An outcome that a later
 // stage of the UI decision framework (docs/reshade-sbs.md, UI decision
 // framework: stages S0-S6; rules E1, E2, V1, V2, A1-A3, S1, S2, H1, P1, T1,
 // F1) changes prints "KNOWN_TODAY <stage> <rule>: <text>" and does not fail;
 // that stage turns it into a strict assertion. Two remain after S2b, both S3
 // T1/E2. Outcomes the rules already call correct, such as an accepted source
 // pinning a whole-frame alpha flat over a visible scene (P1, the opacity
-// ruling), are asserted strictly.
+// ruling), are asserted strictly, and so is the risk the approved pre-UI
+// proof accepts (h1_dark_gameplay_never_flat, a proven pre-fog buffer).
 //
 // Informational, not in ctest: --log <ReShade.log>... replays the logged
 // "Sunshine UI protection" samples through alpha_auto_policy and prints the
@@ -39,6 +42,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -133,13 +137,15 @@ namespace {
 
   // ---------------------------------------------------------------- decision texels
 
-  // Decision texels 0-10 as the renderer reads them back (selection revision 3).
-  constexpr std::size_t texel_words = 4 * ui_detection::h1_decision_texels;
+  // Decision texels 0-11 as the renderer reads them back (selection revision 4).
+  constexpr std::size_t texel_words = 4 * ui_detection::pre_ui_decision_texels;
   using texels = std::array<std::uint32_t, texel_words>;
   // Texels 5 and 6: the hidden-scene evidence of the presented frame and of
   // the pre-UI scene image, written only by the evidence pass.
   constexpr std::size_t scene_texels_begin = 4 * 5, scene_texels_end = 4 * ui_detection::scene_decision_texels;
 
+  // A recording of 48 words, or of 44 (texels 0-10, recorded before
+  // selection revision 4: texel 11 reads zero).
   texels parse_texels(std::string_view csv) {
     texels result {};
     std::size_t count = 0;
@@ -155,8 +161,8 @@ namespace {
         ++at;
       }
     }
-    if (count != result.size() || at != end) {
-      throw std::runtime_error("Recorded texels are not 44 words");
+    if ((count != result.size() && count != 4 * ui_detection::h1_decision_texels) || at != end) {
+      throw std::runtime_error("Recorded texels are not 44 or 48 words");
     }
     return result;
   }
@@ -174,11 +180,10 @@ namespace {
 
   // Texel 6, the pre-UI scene image's evidence as the evidence pass writes
   // it: n, D, valid | ran, and the image (the HUD-less image when offered,
-  // else the offscreen UI layer's colour, or the layer beside a HUD-less
-  // image when the guard pushes per_frame_pre_ui_layer); all zero without
-  // an image. The CPU reads the image's verdict from D.
-  void pre_ui_evidence(texels &t, std::uint32_t offered, std::uint32_t flags, std::uint32_t n, float d, bool valid) {
-    const auto image = ui_selection::measured_pre_ui_image(offered, flags);
+  // else the offscreen UI layer's colour); all zero without an image. The
+  // CPU reads the image's verdict from D.
+  void pre_ui_evidence(texels &t, std::uint32_t offered, std::uint32_t n, float d, bool valid) {
+    const auto image = ui_selection::pre_ui_image_of(offered);
     t[word::pre_ui_scene_n] = image ? n : 0u;
     t[word::pre_ui_scene_d] = image ? float_bits(d) : 0u;
     t[word::pre_ui_scene_state] = image ? (valid ? 1u : 0u) | 2u : 0u;
@@ -227,74 +232,81 @@ namespace {
     std::uint32_t per_frame {};
   };
 
-  // Recorded decision texels: ui_detection_replay --verbose with the S2b
-  // shader on E:/ApolloDev/sbs_dump (selection revision 3, nothing bound at
+  // Recorded decision texels: ui_detection_replay --verbose with the fix-1
+  // shader on E:/ApolloDev/sbs_dump (selection revision 4, nothing bound at
   // the hold store). Words 4 and 17 hold the candidate bits and the accepted
   // candidates the frame was decided with; words 20-27 the hidden-scene
   // evidence of the presented frame and of the pre-UI scene image (texel 6:
   // n, D, valid | ran, image); words 32-39 the one-way judgment counts, the
   // refused candidate and the frame reason; words 40-43 the opaque Backbuffer
-  // and current pixels, the informative claims and the h1 word. Each names
-  // its dump and the replay case of the same inputs in
-  // ui_detection_cases.json; every recording was replayed alone from
-  // scratchpad s2b/p3/cases_p3.json (the S1 cases_p4.json with the S2b
-  // labels, plus the Stellar Blade SDR menu and gameplay) by the S2b binary
-  // into s2b/p3/replay_p3_verbose.txt.
+  // and current pixels, the informative claims and the h1 word; words 44-47
+  // the offscreen UI layer against the presented frame (texel 11: matching
+  // pixels, lit layer pixels, lit presented pixels and lit presented pixels
+  // that differ; zero without a layer). Each names its dump and the replay
+  // case of the same inputs in ui_detection_cases.json; every recording was
+  // replayed alone from scratchpad fix1/p2/cases_p2.json (the S2b recordings,
+  // plus the proven and unproven Stellar Blade SDR variants and FG-on
+  // gameplay) by the fix-1 binary into fix1/p2/replay_p2_verbose.txt. Against
+  // the S2b recordings only the claims word changed, where an unproven
+  // V1-invalid layer had claimed the pre-UI image (0x80).
   namespace recorded {
-    // The scene guard's per-frame bits (H1): a held hidden verdict, and its
-    // samples reading the pre-UI scene image visible.
+    // The scene guard's per-frame bits (H1): a held hidden verdict, its
+    // samples reading the pre-UI scene image visible, and the offered
+    // layer's signature proven the pre-UI scene image (the ledger's answer).
     constexpr std::uint32_t scene_hidden = ui_detection::per_frame_scene_hidden;
     constexpr std::uint32_t pre_ui_visible = ui_detection::per_frame_pre_ui_visible;
+    constexpr std::uint32_t pre_ui_proven = ui_detection::per_frame_pre_ui_proven;
     // The Witcher 3 Remastered, FG off, graphics settings over a hidden scene
     // (game3d_46312_198402901901355): a full opaque offscreen layer (0x40)
     // beside current alpha, unaccepted, without a CPU hold and held ("W3
     // graphics settings, layer hidden-scene hold": H1 claim (b), the cleared
     // layer opaque-full).
-    constexpr recording w3_settings {"0,0,3686400,59,72,2059821,1626579,0,0,0,0,3686400,0,0,0,0,0,0,0,0,1565,3165951781,7,3596,1565,3166123306,3,2,3686400,0,3686400,72,0,0,3686400,64,0,0,0,5,0,3686400,64,0"};
-    constexpr recording w3_settings_held {"8,3686400,3686400,59,72,2059821,1626579,0,0,0,0,3686400,0,0,0,0,0,0,0,0,1565,3165951781,7,3596,1565,3166123306,3,2,3686400,0,3686400,72,0,0,3686400,0,0,0,0,255,0,3686400,64,256", scene_hidden};
+    constexpr recording w3_settings {"0,0,3686400,59,72,2059821,1626579,0,0,0,0,3686400,0,0,0,0,0,0,0,0,1565,3165951781,7,3596,1565,3166123306,3,2,3686400,0,3686400,72,0,0,3686400,64,0,0,0,5,0,3686400,64,0,3038675,145526,1280396,647725"};
+    constexpr recording w3_settings_held {"8,3686400,3686400,59,72,2059821,1626579,0,0,0,0,3686400,0,0,0,0,0,0,0,0,1565,3165951781,7,3596,1565,3166123306,3,2,3686400,0,3686400,72,0,0,3686400,0,0,0,0,255,0,3686400,64,256,3038675,145526,1280396,647725", scene_hidden};
     // W3 FG off, notice board (game3d_46312_198402901901363): layer 12.48%,
     // unaccepted and accepted ("W3 notice board FG off, trusted layer, hold").
-    constexpr recording w3_notice {"0,0,3686400,0,72,3643197,43203,0,0,0,0,3686400,0,0,0,0,0,0,0,0,2029,1049969278,15,8116,2029,977390662,3,2,460125,0,100337,72,0,0,3686400,64,0,0,0,8,0,3507790,0,0"};
-    constexpr recording w3_notice_accepted {"10,460125,3686400,0,72,3643197,43203,0,0,0,0,3686400,0,0,0,0,0,64,0,0,2029,1049969278,15,8116,2029,977390662,3,2,460125,0,100337,72,0,0,3686400,0,0,0,0,255,0,3507790,0,10"};
+    constexpr recording w3_notice {"0,0,3686400,0,72,3643197,43203,0,0,0,0,3686400,0,0,0,0,0,0,0,0,2029,1049969278,15,8116,2029,977390662,3,2,460125,0,100337,72,0,0,3686400,64,0,0,0,8,0,3507790,0,0,61929,50899,3631720,3624471"};
+    constexpr recording w3_notice_accepted {"10,460125,3686400,0,72,3643197,43203,0,0,0,0,3686400,0,0,0,0,0,64,0,0,2029,1049969278,15,8116,2029,977390662,3,2,460125,0,100337,72,0,0,3686400,0,0,0,0,255,0,3507790,0,10,61929,50899,3631720,3624471"};
     // W3 FG off, sign wheel over a visible scene (game3d_46312_198402901901353):
     // a full layer, unaccepted and accepted ("W3 sign wheel FG off, trusted
     // layer, hold").
-    constexpr recording w3_wheel {"0,0,3686400,0,72,3686120,280,0,0,0,0,3686400,0,0,0,0,0,0,0,0,564,1057143089,15,2256,564,3173571040,3,2,3686400,0,145726,72,0,0,3686400,64,0,0,0,3,0,236987,0,0"};
-    constexpr recording w3_wheel_accepted {"10,3686400,3686400,0,72,3686120,280,0,0,0,0,3686400,0,0,0,0,0,64,0,0,564,1057143089,15,2256,564,3173571040,3,2,3686400,0,145726,72,0,0,3686400,0,0,0,0,255,0,236987,0,10"};
+    constexpr recording w3_wheel {"0,0,3686400,0,72,3686120,280,0,0,0,0,3686400,0,0,0,0,0,0,0,0,564,1057143089,15,2256,564,3173571040,3,2,3686400,0,145726,72,0,0,3686400,64,0,0,0,3,0,236987,0,0,91823,121543,3626905,3594577"};
+    constexpr recording w3_wheel_accepted {"10,3686400,3686400,0,72,3686120,280,0,0,0,0,3686400,0,0,0,0,0,64,0,0,564,1057143089,15,2256,564,3173571040,3,2,3686400,0,145726,72,0,0,3686400,0,0,0,0,255,0,236987,0,10,91823,121543,3626905,3594577"};
     // W3 FG on, HUD (game3d_46312_198402901901357): UIAlpha 5.23% with an
     // inexact HUD-less pair, unaccepted ("W3 HUD FG on, not yet accepted
     // UIAlpha, hold") and accepted ("W3 HUD FG on, trusted UIAlpha, hold").
-    constexpr recording w3_hud_fg {"0,0,3686400,1,25,2124039,1186939,0,192930,0,0,3686400,0,0,0,0,3686400,0,103614,0,472,1056573614,15,1888,472,1056964608,3,1,0,0,0,9,0,0,3686400,1,0,0,0,8,0,3686400,0,0"};
-    constexpr recording w3_hud_fg_accepted {"1,192930,3686400,1,25,2124039,1186939,0,192930,0,0,3686400,0,0,0,0,3686400,1,103614,0,472,1056573614,15,1888,472,1056964608,3,1,0,0,0,9,0,0,3686400,0,0,0,0,255,0,3686400,0,1"};
+    constexpr recording w3_hud_fg {"0,0,3686400,1,25,2124039,1186939,0,192930,0,0,3686400,0,0,0,0,3686400,0,103614,0,472,1056573614,15,1888,472,1056964608,3,1,0,0,0,9,0,0,3686400,1,0,0,0,8,0,3686400,0,0,0,0,0,0"};
+    constexpr recording w3_hud_fg_accepted {"1,192930,3686400,1,25,2124039,1186939,0,192930,0,0,3686400,0,0,0,0,3686400,1,103614,0,472,1056573614,15,1888,472,1056964608,3,1,0,0,0,9,0,0,3686400,0,0,0,0,255,0,3686400,0,1,0,0,0,0"};
     // W3 FG on, sign wheel (game3d_46312_198402901901359): a full UIAlpha,
     // unaccepted and accepted ("W3 sign wheel FG on, ... UIAlpha, hold").
-    constexpr recording w3_wheel_fg {"0,0,3686400,0,25,3686398,0,0,3686400,0,0,3686400,0,0,0,0,3686400,0,149627,0,462,1056020436,15,1848,462,1057709052,3,1,0,0,0,9,0,0,3686400,16,0,0,0,4,0,3686400,128,0"};
-    constexpr recording w3_wheel_fg_accepted {"1,3686400,3686400,0,25,3686398,0,0,3686400,0,0,3686400,0,0,0,0,3686400,1,149627,0,462,1056020436,15,1848,462,1057709052,3,1,0,0,0,9,0,0,3686400,0,0,0,0,255,0,3686400,128,1"};
+    constexpr recording w3_wheel_fg {"0,0,3686400,0,25,3686398,0,0,3686400,0,0,3686400,0,0,0,0,3686400,0,149627,0,462,1056020436,15,1848,462,1057709052,3,1,0,0,0,9,0,0,3686400,16,0,0,0,4,0,3686400,128,0,0,0,0,0"};
+    constexpr recording w3_wheel_fg_accepted {"1,3686400,3686400,0,25,3686398,0,0,3686400,0,0,3686400,0,0,0,0,3686400,1,149627,0,462,1056020436,15,1848,462,1057709052,3,1,0,0,0,9,0,0,3686400,0,0,0,0,255,0,3686400,128,1,0,0,0,0"};
     // Clair Obscur: Expedition 33, FG on, title over a visible scene
     // (game3d_31636_135749029986373): Backbuffer alpha 2.38%, unaccepted and
     // accepted ("E33 title FG on, untrusted/trusted backbuffer, hold").
-    constexpr recording e33_title {"0,0,8294400,19,4,4139412,3333766,0,0,0,197797,197797,0,0,0,0,0,0,0,0,1680,1061468492,15,6720,0,0,0,0,0,0,0,4,0,178867,178867,4,0,0,0,8,155808,155808,0,0"};
-    constexpr recording e33_title_accepted {"3,197797,8294400,19,4,4139412,3333766,0,0,0,197797,197797,0,0,0,0,0,4,0,0,1680,1061468492,15,6720,0,0,0,0,0,0,0,4,0,178867,178867,0,0,0,0,255,155808,155808,0,3"};
+    constexpr recording e33_title {"0,0,8294400,19,4,4139412,3333766,0,0,0,197797,197797,0,0,0,0,0,0,0,0,1680,1061468492,15,6720,0,0,0,0,0,0,0,4,0,178867,178867,4,0,0,0,8,155808,155808,0,0,0,0,0,0"};
+    constexpr recording e33_title_accepted {"3,197797,8294400,19,4,4139412,3333766,0,0,0,197797,197797,0,0,0,0,0,4,0,0,1680,1061468492,15,6720,0,0,0,0,0,0,0,4,0,178867,178867,0,0,0,0,255,155808,155808,0,3,0,0,0,0"};
     // E33 FG on, Load Game over a hidden scene (game3d_59540_257918763574026):
     // a full Backbuffer alpha ("E33 load game FG on, untrusted / trusted
     // backbuffer").
-    constexpr recording e33_load {"0,0,8294400,0,4,8138474,84306,0,0,0,8294400,8294400,0,0,0,0,0,0,0,0,1753,1000268529,7,6942,0,0,0,0,0,0,0,4,0,8294400,8294400,4,0,0,0,3,8294382,8294382,0,0"};
-    constexpr recording e33_load_accepted {"3,8294400,8294400,0,4,8138474,84306,0,0,0,8294400,8294400,0,0,0,0,0,4,0,0,1753,1000268529,7,6942,0,0,0,0,0,0,0,4,0,8294400,8294400,0,0,0,0,255,8294382,8294382,4,3"};
+    constexpr recording e33_load {"0,0,8294400,0,4,8138474,84306,0,0,0,8294400,8294400,0,0,0,0,0,0,0,0,1753,1000268529,7,6942,0,0,0,0,0,0,0,4,0,8294400,8294400,4,0,0,0,3,8294382,8294382,0,0,0,0,0,0"};
+    constexpr recording e33_load_accepted {"3,8294400,8294400,0,4,8138474,84306,0,0,0,8294400,8294400,0,0,0,0,0,4,0,0,1753,1000268529,7,6942,0,0,0,0,0,0,0,4,0,8294400,8294400,0,0,0,0,255,8294382,8294382,4,3,0,0,0,0"};
     // Resident Evil Requiem, dark room (game3d_52696_225539427440975): the
     // offscreen layer 0.18% beside a full presented alpha and an inexact pair,
     // unaccepted ("RE9 dark room, untrusted layer, inexact pair, hold") and
     // accepted.
-    constexpr recording re9_room {"0,0,8294400,31,88,2568733,4352259,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,386,1058855305,15,1544,386,1057529644,3,1,14611,0,3540,72,0,0,8294400,64,0,0,0,8,0,8294400,0,0"};
-    constexpr recording re9_room_accepted {"10,14611,8294400,31,88,2568733,4352259,0,0,0,0,8294400,0,0,0,0,8294400,64,0,0,386,1058855305,15,1544,386,1057529644,3,1,14611,0,3540,72,0,0,8294400,0,0,0,0,255,0,8294400,0,10"};
+    constexpr recording re9_room {"0,0,8294400,31,88,2568733,4352259,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,386,1058855305,15,1544,386,1057529644,3,1,14611,0,3540,72,0,0,8294400,64,0,0,0,8,0,8294400,0,0,2911709,7417,5385198,5382691"};
+    constexpr recording re9_room_accepted {"10,14611,8294400,31,88,2568733,4352259,0,0,0,0,8294400,0,0,0,0,8294400,64,0,0,386,1058855305,15,1544,386,1057529644,3,1,14611,0,3540,72,0,0,8294400,0,0,0,0,255,0,8294400,0,10,2911709,7417,5385198,5382691"};
     // Stellar Blade in SDR, FG on (game3d_69460_296226962143478): the tagged
     // UIColorAndAlpha (0.26%), the scene image in the cleared UI layer (V1
-    // invalid) and the Backbuffer alpha; nothing accepted, the tag, the tag
+    // invalid; it equals the presented frame on 99.32% of pixels and is lit
+    // on 90.4%) and the Backbuffer alpha; nothing accepted, the tag, the tag
     // and the Backbuffer ("SB SDR FG on, accepted tag beside the scene layer
     // and the Backbuffer"), and the Backbuffer of a Present without the tag.
-    constexpr recording sb_sdr {"0,0,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,0,0,6885,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,6,0,15296,8294400,64,0,0,0,0,6885,8294400,128,0"};
-    constexpr recording sb_sdr_tag {"2,21283,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,2,0,6885,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,6,0,15296,8294400,0,0,0,0,255,6885,8294400,128,2"};
-    constexpr recording sb_sdr_tag_backbuffer {"2,21283,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,6,0,6885,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,6,0,15296,8294400,0,0,0,0,255,6885,8294400,128,2"};
-    constexpr recording sb_sdr_backbuffer {"3,21283,8294400,0,68,8294319,41,0,0,0,21283,8294400,0,0,0,0,0,4,0,0,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,4,0,15296,8294400,0,0,0,0,255,6885,8294400,128,3"};
+    constexpr recording sb_sdr {"0,0,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,0,0,6885,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,6,0,15296,8294400,64,0,0,0,0,6885,8294400,0,0,8238176,7496745,7474537,54650"};
+    constexpr recording sb_sdr_tag {"2,21283,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,2,0,6885,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,6,0,15296,8294400,0,0,0,0,255,6885,8294400,0,2,8238176,7496745,7474537,54650"};
+    constexpr recording sb_sdr_tag_backbuffer {"2,21283,8294400,0,70,8294319,41,0,0,21283,21283,8294400,0,0,0,0,0,6,0,6885,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,6,0,15296,8294400,0,0,0,0,255,6885,8294400,0,2,8238176,7496745,7474537,54650"};
+    constexpr recording sb_sdr_backbuffer {"3,21283,8294400,0,68,8294319,41,0,0,0,21283,8294400,0,0,0,0,0,4,0,0,1088,1052816565,15,4352,1088,1052754884,3,2,0,8261496,0,4,0,15296,8294400,0,0,0,0,255,6885,8294400,0,3,8238176,7496745,7474537,54650"};
     // Stellar Blade in HDR, FG on (game3d_69460_296226962143474): the opaque
     // final-image tag, the offscreen layer 0.18%, a full Backbuffer alpha and
     // an exact pair; nothing accepted, the layer accepted ("SB HDR FG on HUD,
@@ -302,48 +314,72 @@ namespace {
     // tag without the layer ("SB HDR FG on HUD, opaque tag, backbuffer and
     // exact pair"). Manual On accepts every offered candidate, with and without
     // a source filter that leaves the tag out.
-    constexpr recording sb_hdr {"0,0,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,0,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,70,0,8294400,8294400,64,0,5561801,5561801,8,8294400,8294400,0,0"};
-    constexpr recording sb_hdr_layer {"10,14519,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,64,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,70,0,8294400,8294400,0,0,5561801,5561801,255,8294400,8294400,0,10"};
-    constexpr recording sb_hdr_tag_only {"0,0,8294400,3,54,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,0,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,0,0,0,6,0,8294400,8294400,16,0,5561801,5561801,4,8294400,8294400,0,0"};
-    constexpr recording sb_hdr_manual {"2,8294400,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,86,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,70,0,8294400,8294400,0,0,5561801,5561801,255,8294400,8294400,2,2"};
-    constexpr recording sb_hdr_manual_filtered {"10,14519,8294400,3,116,1996036,5562279,0,0,0,8294400,8294400,0,0,0,0,8258352,84,0,0,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,68,0,8294400,8294400,0,0,5561801,5561801,255,8294400,8294400,4,10"};
-    constexpr recording sb_hdr_filtered {"0,0,8294400,3,116,1996036,5562279,0,0,0,8294400,8294400,0,0,0,0,8258352,0,0,0,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,68,0,8294400,8294400,64,0,5561801,5561801,8,8294400,8294400,0,0"};
+    constexpr recording sb_hdr {"0,0,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,0,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,70,0,8294400,8294400,64,0,5561801,5561801,8,8294400,8294400,0,0,129958,6435,8164495,8164442"};
+    constexpr recording sb_hdr_layer {"10,14519,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,64,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,70,0,8294400,8294400,0,0,5561801,5561801,255,8294400,8294400,0,10,129958,6435,8164495,8164442"};
+    constexpr recording sb_hdr_tag_only {"0,0,8294400,3,54,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,0,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,0,0,0,6,0,8294400,8294400,16,0,5561801,5561801,4,8294400,8294400,0,0,0,0,0,0"};
+    constexpr recording sb_hdr_manual {"2,8294400,8294400,3,118,1996036,5562279,0,0,8294400,8294400,8294400,0,0,0,0,8258352,86,0,8294400,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,70,0,8294400,8294400,0,0,5561801,5561801,255,8294400,8294400,2,2,129958,6435,8164495,8164442"};
+    constexpr recording sb_hdr_manual_filtered {"10,14519,8294400,3,116,1996036,5562279,0,0,0,8294400,8294400,0,0,0,0,8258352,84,0,0,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,68,0,8294400,8294400,0,0,5561801,5561801,255,8294400,8294400,4,10,129958,6435,8164495,8164442"};
+    constexpr recording sb_hdr_filtered {"0,0,8294400,3,116,1996036,5562279,0,0,0,8294400,8294400,0,0,0,0,8258352,0,0,0,538,1057510335,15,2152,538,1057588296,3,1,14519,0,206,68,0,8294400,8294400,64,0,5561801,5561801,8,8294400,8294400,0,0,129958,6435,8164495,8164442"};
     // Hogwarts Legacy, FG off, title screen (game3d_50196_216992971069363): an
     // exact HUD-less pair differing almost everywhere over a hidden scene;
     // unaccepted ("HL title screen FG off, HUD-less not yet accepted"), under
     // H1 (the held hidden verdict and pre-UI image; the unaccepted exact full
     // change set is claim (c)), and accepted ("HL title screen FG off").
-    constexpr recording hl_title {"0,0,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,511,1025396520,7,2041,511,1057900324,3,1,0,0,0,24,0,0,8294400,16,0,0,1,5,0,8294400,144,0"};
-    constexpr recording hl_title_held {"8,8294400,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,511,1025396520,7,2041,511,1057900324,3,1,0,0,0,24,0,0,8294400,0,0,0,1,255,0,8294400,144,256", scene_hidden | pre_ui_visible};
-    constexpr recording hl_title_accepted {"6,8294400,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,16,0,0,511,1025396520,7,2041,511,1057900324,3,1,0,0,0,24,0,0,8294400,0,0,0,1,255,0,8294400,144,6"};
+    constexpr recording hl_title {"0,0,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,511,1025396520,7,2041,511,1057900324,3,1,0,0,0,24,0,0,8294400,16,0,0,1,5,0,8294400,144,0,0,0,0,0"};
+    constexpr recording hl_title_held {"8,8294400,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,0,0,0,511,1025396520,7,2041,511,1057900324,3,1,0,0,0,24,0,0,8294400,0,0,0,1,255,0,8294400,144,256,0,0,0,0", scene_hidden | pre_ui_visible};
+    constexpr recording hl_title_accepted {"6,8294400,8294400,0,56,8294395,1,0,0,0,0,8294400,0,0,0,0,8294400,16,0,0,511,1025396520,7,2041,511,1057900324,3,1,0,0,0,24,0,0,8294400,0,0,0,1,255,0,8294400,144,6,0,0,0,0"};
     // Hogwarts Legacy, FG off, gameplay HUD (game3d_40404_173061335442886):
     // an exact pair whose change set is the HUD (3.98%); unaccepted ("HL
     // gameplay HUD FG off (b), HUD-less not yet accepted") and accepted ("HL
     // gameplay HUD FG off (b)").
-    constexpr recording hl_hud {"0,0,8294400,224,56,329969,7962406,0,0,0,0,8294400,0,0,0,0,8293872,0,0,0,397,1061190608,15,1588,397,1061190608,3,1,0,0,0,24,0,0,8294400,16,0,0,7961885,8,0,8294400,0,0"};
-    constexpr recording hl_hud_accepted {"5,329969,8294400,224,56,329969,7962406,0,0,0,0,8294400,0,0,0,0,8293872,16,0,0,397,1061190608,15,1588,397,1061190608,3,1,0,0,0,24,0,0,8294400,0,0,0,7961885,255,0,8294400,0,5"};
+    constexpr recording hl_hud {"0,0,8294400,224,56,329969,7962406,0,0,0,0,8294400,0,0,0,0,8293872,0,0,0,397,1061190608,15,1588,397,1061190608,3,1,0,0,0,24,0,0,8294400,16,0,0,7961885,8,0,8294400,0,0,0,0,0,0"};
+    constexpr recording hl_hud_accepted {"5,329969,8294400,224,56,329969,7962406,0,0,0,0,8294400,0,0,0,0,8293872,16,0,0,397,1061190608,15,1588,397,1061190608,3,1,0,0,0,24,0,0,8294400,0,0,0,7961885,255,0,8294400,0,5,0,0,0,0"};
     // Stellar Blade in SDR, the settings menu with frame generation set to 2x
     // but suspended by the game while a menu is open, so no Streamline tag
     // (game3d_50264_218658377782962, "SB SDR settings FG suspended, no hold"
-    // and "..., H1 pre-UI layer, holds"): the cleared output target holds the pre-UI scene image
-    // (BGRA8, alpha 0: V1-invalid, claim (d)) beside an opaque current
-    // alpha. The presented frame reads hidden (D 0.031) and the pre-UI image
-    // visible (D 0.588); unbound, and under H1 (both held bits).
-    constexpr recording sb_sdr_menu {"0,0,8294400,0,72,8238793,1209,0,0,0,0,8294400,0,0,0,0,0,0,0,0,914,1023465244,7,3655,914,1058442251,3,2,0,4684873,0,8,0,0,8294400,64,0,0,0,0,0,8294400,128,0"};
-    constexpr recording sb_sdr_menu_held {"8,8294400,8294400,0,72,8238793,1209,0,0,0,0,8294400,0,0,0,0,0,0,0,0,914,1023465244,7,3655,914,1058442251,3,2,0,4684873,0,8,0,0,8294400,0,0,0,0,255,0,8294400,128,256", scene_hidden | pre_ui_visible};
+    // and "..., H1 pre-UI layer, holds"): the cleared output target holds the
+    // pre-UI scene image (BGRA8, alpha 0: V1-invalid; claim (d) once its
+    // signature is proven) beside an opaque current alpha. The presented
+    // frame reads hidden (D 0.031) and the pre-UI image visible (D 0.588);
+    // the layer equals the presented frame on 35.28% of pixels (the menu).
+    // Unbound, and under H1 (both held bits with the proof).
+    constexpr recording sb_sdr_menu {"0,0,8294400,0,72,8238793,1209,0,0,0,0,8294400,0,0,0,0,0,0,0,0,914,1023465244,7,3655,914,1058442251,3,2,0,4684873,0,8,0,0,8294400,64,0,0,0,0,0,8294400,0,0,2925933,2157057,5638262,4930313"};
+    constexpr recording sb_sdr_menu_held {"8,8294400,8294400,0,72,8238793,1209,0,0,0,0,8294400,0,0,0,0,0,0,0,0,914,1023465244,7,3655,914,1058442251,3,2,0,4684873,0,8,0,0,8294400,0,0,0,0,255,0,8294400,128,256,2925933,2157057,5638262,4930313", scene_hidden | pre_ui_visible | pre_ui_proven};
+    // The same menu with the layer proven but no hold ("..., H1 measured,
+    // layer proven" before its sample): claim (d), which acts only under the
+    // held verdicts; and both held bits without the proof ("..., holds, layer
+    // unproven"): no claim, so nothing acts.
+    constexpr recording sb_sdr_menu_proven {"0,0,8294400,0,72,8238793,1209,0,0,0,0,8294400,0,0,0,0,0,0,0,0,914,1023465244,7,3655,914,1058442251,3,2,0,4684873,0,8,0,0,8294400,64,0,0,0,0,0,8294400,128,0,2925933,2157057,5638262,4930313", pre_ui_proven};
+    constexpr recording sb_sdr_menu_held_unproven {"0,0,8294400,0,72,8238793,1209,0,0,0,0,8294400,0,0,0,0,0,0,0,0,914,1023465244,7,3655,914,1058442251,3,2,0,4684873,0,8,0,0,8294400,64,0,0,0,0,0,8294400,0,0,2925933,2157057,5638262,4930313", scene_hidden | pre_ui_visible};
     // Stellar Blade SDR gameplay (game3d_69460_296226962143470, "SB SDR FG
     // off gameplay, both images visible, measured"): the same inputs, both
-    // images visible (presented 0.515, pre-UI layer 0.518).
-    constexpr recording sb_sdr_play {"0,0,8294400,0,72,8289048,500,0,0,0,0,8294400,0,0,0,0,0,0,0,0,546,1057210428,15,2184,546,1057271883,3,2,0,8221955,0,8,0,0,8294400,64,0,0,0,0,0,8294400,128,0"};
+    // images visible (presented 0.515, pre-UI layer 0.518); the layer equals
+    // the presented frame on 99.79% of pixels (lit 88.9%) despite its copy
+    // being one frame late. Unproven and proven ("..., layer proven,
+    // measured").
+    constexpr recording sb_sdr_play {"0,0,8294400,0,72,8289048,500,0,0,0,0,8294400,0,0,0,0,0,0,0,0,546,1057210428,15,2184,546,1057271883,3,2,0,8221955,0,8,0,0,8294400,64,0,0,0,0,0,8294400,0,0,8277322,7375372,7357573,17048"};
+    constexpr recording sb_sdr_play_proven {"0,0,8294400,0,72,8289048,500,0,0,0,0,8294400,0,0,0,0,0,0,0,0,546,1057210428,15,2184,546,1057271883,3,2,0,8221955,0,8,0,0,8294400,64,0,0,0,0,0,8294400,128,0,8277322,7375372,7357573,17048", pre_ui_proven};
+    // Stellar Blade SDR, FG on without the tag (game3d_69460_296226962143476,
+    // "SB SDR FG on gameplay with HUD-less, measured"): the cleared target,
+    // current alpha and the HUD-less tag (an inexact pair whose change set is
+    // the HUD). The HUD-less image is the offer's pre-UI image, so nothing
+    // claims, proven or not; the layer equals the presented frame on 99.82%
+    // of pixels (lit 88.8%). The same offer in dump 296226962143478: 99.32%
+    // (lit 90.4%).
+    constexpr recording sb_sdr_fg_play {"0,0,8294400,0,88,710096,5413855,0,0,0,0,8294400,0,0,0,0,7349439,0,0,0,527,1057028279,15,2108,527,1057155620,3,1,0,8224538,0,8,0,0,8294400,64,0,0,0,0,0,8294400,0,0,8279361,7369429,7374379,15014"};
+    constexpr recording sb_sdr_fg_play_proven {"0,0,8294400,0,88,710096,5413855,0,0,0,0,8294400,0,0,0,0,7349439,0,0,0,527,1057028279,15,2108,527,1057155620,3,1,0,8224538,0,8,0,0,8294400,64,0,0,0,0,0,8294400,0,0,8279361,7369429,7374379,15014", pre_ui_proven};
+    constexpr recording sb_sdr_fg_play_478 {"0,0,8294400,0,88,1227340,4761669,0,0,0,0,8294400,0,0,0,0,7461445,0,0,0,1088,1052816565,15,4352,1088,1052724043,3,1,0,8261496,0,8,0,0,8294400,64,0,0,0,0,0,8294400,0,0,8238176,7496745,7474537,54650"};
+    constexpr recording sb_sdr_fg_play_478_proven {"0,0,8294400,0,88,1227340,4761669,0,0,0,0,8294400,0,0,0,0,7461445,0,0,0,1088,1052816565,15,4352,1088,1052724043,3,1,0,8261496,0,8,0,0,8294400,64,0,0,0,0,0,8294400,0,0,8238176,7496745,7474537,54650", pre_ui_proven};
   }  // namespace recorded
 
   // The recorded counts with exactly these candidate bits and accepted
   // candidates decide by ui_selection::decide under this frame's hold bits; a
   // stream that asks for any other combination fails rather than guess the
   // dump's counts. Every recording must equal decide() under its own hold bits
-  // (the scene guard's held verdicts and refuted candidates).
+  // (the scene guard's held verdicts, refuted candidates and the layer's
+  // pre-UI proof).
   gpu_model recorded_frames(std::vector<recording> frames) {
-    constexpr std::uint32_t holds = ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible | ui_detection::per_frame_refuted_mask;
+    constexpr std::uint32_t holds = ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible | ui_detection::per_frame_refuted_mask | ui_detection::per_frame_pre_ui_proven;
     std::vector<std::pair<texels, std::uint32_t>> parsed;
     for (const auto &frame : frames) {
       const auto t = parse_texels(frame.words);
@@ -393,6 +429,11 @@ namespace {
     // The pre-UI scene image's (texel 6), written when the offer has one.
     bool pre_ui_valid {};
     float pre_ui_d {};
+    // Texel 11: the offscreen UI layer against the presented frame (matching
+    // pixels, lit layer pixels, lit presented pixels, lit presented pixels
+    // that differ), written when a layer is offered (the reduce writes zeros
+    // otherwise).
+    std::array<std::uint32_t, 4> pre_ui_counts {};
 
     synthetic() {
       c.pixels = 1000;
@@ -455,6 +496,13 @@ namespace {
       return *this;
     }
 
+    // The layer's pre-UI pixel counts (texel 11, fix 1): the ledger proves
+    // its signature from samples matching on 90% of pixels while lit on half.
+    synthetic &pre_ui_pixels(std::uint32_t matched, std::uint32_t image_lit, std::uint32_t presented_lit, std::uint32_t differs) {
+      pre_ui_counts = {matched, image_lit, presented_lit, differs};
+      return *this;
+    }
+
     // A2, the one-way counts of a judged kind (the layer, Backbuffer or
     // current alpha): pixels with alpha of at least 1/2, and those of them
     // where an offered exact pair's HUD-less image is lit and unchanged.
@@ -499,7 +547,13 @@ namespace {
       t[word::scene_d] = float_bits(d);
       t[word::scene_state] = scene_state(scene_valid, verdict);
       t[word::scene_decided] = decided_edges;
-      pre_ui_evidence(t, in.bits, in.flags | in.per_frame, n, pre_ui_d, pre_ui_valid);
+      pre_ui_evidence(t, in.bits, n, pre_ui_d, pre_ui_valid);
+      if (in.bits & candidate::layer) {
+        t[word::pre_ui_match] = pre_ui_counts[0];
+        t[word::pre_ui_image_lit] = pre_ui_counts[1];
+        t[word::presented_lit] = pre_ui_counts[2];
+        t[word::presented_lit_differs] = pre_ui_counts[3];
+      }
       for (std::size_t i = 0; i != ui_selection::judged_kinds.size(); ++i) {
         t[word::strong + i] = c.strong[i];
         t[word::contradicted + i] = c.contradicted[i];
@@ -559,8 +613,11 @@ namespace {
     // The mask this frame applies: the detected or the held one, or none.
     std::uint32_t source {}, covered {}, pixels {};
     // The scene guard's bits pushed with this detection (H1): the held hidden
-    // verdict, the held pre-UI image and the refuted offered candidates.
+    // verdict, the held pre-UI image, the refuted offered candidates and the
+    // offered layer's pre-UI proof; layer_proven: the session ledger's answer
+    // for the offered layer's signature, read after the poll.
     std::uint32_t scene_bits {};
+    bool layer_proven {};
     // update_alpha_auto's status for this frame.
     alpha_auto_decision consumed;
 
@@ -578,7 +635,9 @@ namespace {
   //                       t.adopt; then held() (t.hold, held.generated),
   //                       unavailable() (held.none), enter_scope and the
   //                       scene guard's enter_scope(epoch, viewport) +
-  //                       poll_detection + the guard's per_frame + detect_ui +
+  //                       poll_detection + the session's pre-UI proof of
+  //                       the offered layer's signature (layer_proven) + the
+  //                       guard's per_frame(..., layer_proven) + detect_ui +
   //                       detected() (t.detect with bits, or a zero-offer
   //                       real frame flagged accepted_missing), or inactive()
   //                       (the guard keeps its state);
@@ -594,7 +653,8 @@ namespace {
   //   detect_ui:          the reduce with the hold store (u5) and, except on
   //                       a zero-offer frame, the tiles pass and the 100 ms
   //                       sample cadence, scene evidence by the guard's
-  //                       measure(now, shadow, whole_frame(latest)), the
+  //                       measure(now, shadow, whole_frame(latest), a
+  //                       proven layer that is the offer's pre-UI image), the
   //                       counter and CPU snapshot and the status key.
   // The frame size, resource preparation and depth are not modelled.
   class sequence {
@@ -672,7 +732,10 @@ namespace {
         guard.enter_scope(observation.epoch, observation.viewport);
         const bool shadow = session.first_run();
         poll(observation, r);
-        r.scene_bits = guard.per_frame(p.now_ms, bits, p.signatures.by_kind());
+        // H1 (d): the ledger's pre-UI proof of the offered layer's signature,
+        // read after the poll, so a sample that just earned it counts at once.
+        r.layer_proven = (bits & candidate::layer) && session.pre_ui_proven(p.signatures.of(kind::ui_layer));
+        r.scene_bits = guard.per_frame(p.now_ms, bits, p.signatures.by_kind(), r.layer_proven);
         const std::uint32_t per_frame = r.scene_bits | r.hold.per_frame | (!p.depth_current ? ui_detection::per_frame_depth_not_current : 0u);
         detect(observation, bits, flags, accepted, p.signatures, per_frame, shadow, index, r);
         temporal.detected(observation, identity);
@@ -759,7 +822,8 @@ namespace {
       if (r.grace || pending || (last_submit && now >= last_submit && now - last_submit < sample_interval_ms)) {
         return;
       }
-      const auto measure = guard.measure(now, shadow, ui_temporal::whole_frame(temporal.latest));
+      const bool proven_image = r.layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
+      const auto measure = guard.measure(now, shadow, ui_temporal::whole_frame(temporal.latest), proven_image);
       pending_actionable = false;
       const bool evidence = measure.run;
       if (evidence) {
@@ -1438,7 +1502,10 @@ namespace {
     // declared tag is accepted by its first valid selective sample and decides
     // from the render after that sample's poll; the Backbuffer earns by its run
     // but never decides while the accepted tag is offered (S1, the declared
-    // block); the invalid layer (V1) never earns or blocks.
+    // block); the invalid layer (V1) never earns or blocks. Its colour equals
+    // the presented frame (99.32% of pixels, lit 90.4%), so by the same
+    // sample its signature earns the pre-UI proof (H1 (d), fix 1), which is
+    // no UI coverage.
     alpha_auto_policy session;
     sequence s(session, recorded_frames({recorded::sb_sdr, recorded::sb_sdr_tag, recorded::sb_sdr_tag_backbuffer, recorded::sb_sdr_backbuffer}));
     present p;
@@ -1448,8 +1515,9 @@ namespace {
     const auto tag = p.signatures.of(kind::ui_color), backbuffer = p.signatures.of(kind::backbuffer);
     const auto first = s.samples.front().sample_tick_ms;
     require(s.trust.size() == 2 && s.trust[0].tick == first && s.trust[0].accepted == tag.key(), "The tag was not accepted by its first sample");
-    require(s.trust[1].tick == first_sample_from(s, first + alpha_trust_span_ms) && s.trust[1].accepted == stored_of({tag, backbuffer}), "The Backbuffer was not accepted 2 s into its run");
-    require(!session.accepts(p.signatures.of(kind::ui_layer)), "The scene image in the UI layer was accepted");
+    const auto proof = ui_selection::pre_ui_key(p.signatures.of(kind::ui_layer));
+    require(s.trust[1].tick == first_sample_from(s, first + alpha_trust_span_ms) && s.trust[1].accepted == stored_of({tag, backbuffer, proof}), "The Backbuffer and the layer's pre-UI proof were not earned 2 s into their runs");
+    require(!session.accepts(p.signatures.of(kind::ui_layer)) && session.pre_ui_proven(p.signatures.of(kind::ui_layer)), "The scene image in the UI layer was accepted as UI coverage, or not proven the pre-UI image");
     const auto poll = poll_of(s, first);
     for (std::size_t i = 0; i != s.frames.size(); ++i) {
       const auto &f = s.frames[i];
@@ -2401,7 +2469,7 @@ namespace {
     };
     // H1: D state clears only on an identity change (epoch or viewport).
     const auto cleared = [&](const char *what) {
-      require(!s.guard.hidden.until && !s.guard.hidden.last && !s.guard.pre_ui.until && !s.guard.refuted_count && !s.guard.per_frame(now, p.offered, p.signatures.by_kind()), std::string(what) + " kept hidden-scene state");
+      require(!s.guard.hidden.until && !s.guard.hidden.last && !s.guard.pre_ui.until && !s.guard.refuted_count && !s.guard.per_frame(now, p.offered, p.signatures.by_kind(), session.pre_ui_proven(p.signatures.of(kind::ui_layer))), std::string(what) + " kept hidden-scene state");
     };
     const auto step = [&](present q) -> const frame_result & {
       q.now_ms = now += 16;
@@ -2755,41 +2823,90 @@ namespace {
 
   // ---------------------------------------------------------------- H1 (S2b) streams
 
+  // Stellar Blade in SDR (fix 1): the cleared output target is BGRA8
+  // (DXGI_FORMAT_B8G8R8A8_UNORM); its pre-UI proof's ledger key.
+  candidate_signatures sb_sdr_signatures() {
+    auto s = signatures_in(srgb);
+    s.set(kind::ui_layer, 87);
+    return s;
+  }
+
+  std::string sb_sdr_proof() {
+    const auto proof = ui_selection::pre_ui_key(sb_sdr_signatures().of(kind::ui_layer)).key();
+    require(proof == "pre_ui:87:srgb", "The Stellar Blade SDR pre-UI proof key moved");
+    return proof;
+  }
+
+  // A Stellar Blade SDR Present offering these candidates on this viewport
+  // (1: depth from Streamline with frame generation on; 0: from NGX while a
+  // menu suspends it).
+  present sb_sdr_present(std::uint32_t offered, std::uint32_t viewport = 1) {
+    present p;
+    p.offered = offered;
+    p.layer_flags = ui_detection::layer_detection_flags(false);
+    p.signatures = sb_sdr_signatures();
+    p.viewport = viewport;
+    return p;
+  }
+
+  // Whether a sample counts toward the offered layer's pre-UI proof: a layer
+  // without coverage that equals the presented frame (texel 11).
+  bool pre_ui_matching(const alpha_auto_decision &sample) {
+    const auto &e = sample.evidence;
+    return (e.candidates & candidate::layer) && !e.layer_covered && ui_selection::pre_ui_match(e.pre_ui_match, e.pre_ui_image_lit, sample.pixels);
+  }
+
   void h1_stellar_blade_sdr_menu_visits() {
-    // Stellar Blade in SDR with frame generation suspended while a menu is
-    // open: no Streamline tag, so the offer is the cleared output target and
-    // current alpha. The target holds the pre-UI scene image (alpha 0,
-    // V1-invalid), a pre-UI image claim (H1 (d)) on every frame, so every
-    // sample measures. Gameplay reads both images visible; the settings menu
-    // reads the presented frame hidden and the pre-UI image visible: the
-    // depth describes the pre-UI image, not the menu shown. Gameplay ->
-    // settings -> gameplay, three visits: each goes flat (8) from the poll of
-    // its second measured sample and is released by the first gameplay
-    // sample, which decided 8 and reads visible. Nothing is accepted.
-    const auto play = recorded_frames({recorded::sb_sdr_play});
-    const auto menu = recorded_frames({recorded::sb_sdr_menu, recorded::sb_sdr_menu_held});
-    constexpr std::array<std::pair<std::uint64_t, std::uint64_t>, 3> visits {{{11000, 12500}, {14000, 15000}, {16500, 18000}}};
+    // Stellar Blade in SDR with frame generation off: no Streamline tag, so
+    // the offer is the cleared output target and current alpha. The target
+    // holds the pre-UI scene image (colour, alpha 0: V1-invalid). Gameplay
+    // shows that image: the layer equals the presented frame on 99.79% of
+    // pixels and is lit on 88.9% (dump 470, texel 11), so the session ledger
+    // proves its signature (pre_ui:87:srgb) by the first sample 2 s into
+    // gameplay, three matching samples (H1 (d), fix 1), without any D. Before
+    // the proof nothing claims and no sample measures; from it every sample
+    // measures (a proven layer is the offer's pre-UI image). Gameplay reads
+    // both images visible; the settings menu (dump 962) reads the presented
+    // frame hidden and the pre-UI image visible: the depth describes the
+    // pre-UI image, not the menu shown. Gameplay -> settings -> gameplay,
+    // three visits: each goes flat (8) from the poll of its second measured
+    // sample and is released by the first gameplay sample, which decided 8
+    // and reads visible. The menu's samples mismatch (35.28%) and never
+    // withdraw the proof; the session ends with it as its only key.
+    const auto play = recorded_frames({recorded::sb_sdr_play, recorded::sb_sdr_play_proven});
+    const auto menu = recorded_frames({recorded::sb_sdr_menu, recorded::sb_sdr_menu_proven, recorded::sb_sdr_menu_held, recorded::sb_sdr_menu_held_unproven});
+    constexpr std::array<std::pair<std::uint64_t, std::uint64_t>, 3> visits {{{13000, 14500}, {16000, 17000}, {18500, 20000}}};
     const auto in_menu = [&visits](std::uint64_t tick) {
       return std::any_of(visits.begin(), visits.end(), [tick](const auto &visit) {
         return tick >= visit.first && tick < visit.second;
       });
     };
     alpha_auto_policy session;
+    std::vector<std::string> heard;
+    session.on_change([&](const std::string &accepted) {
+      heard.push_back(accepted);
+    });
     sequence s(session, [&](const gpu_inputs &in) {
       return in_menu(in.now_ms) ? menu(in) : play(in);
     });
-    present p;
-    p.offered = candidate::layer | candidate::current;
-    p.layer_flags = ui_detection::layer_detection_flags(false);
-    p.signatures.set(kind::ui_layer, 87);  // DXGI_FORMAT_B8G8R8A8_UNORM.
-    run(s, p, 10000, 19500);
-    require(!s.discards && !s.samples.front().evidence.scene.ran, "The first sample measured before the gate was seen open, or a sample was discarded");
-    for (std::size_t i = 1; i != s.samples.size(); ++i) {
-      const auto &sample = s.samples[i];
+    const auto p = sb_sdr_present(candidate::layer | candidate::current);
+    run(s, p, 10000, 21500);
+    const auto proof = sb_sdr_proof();
+    const auto first = s.samples.front().sample_tick_ms;
+    const auto earned = first_sample_from(s, first + alpha_trust_span_ms);
+    require(!s.discards && s.trust.size() == 1 && s.trust[0].tick == earned && s.trust[0].accepted == proof && heard == std::vector<std::string> {proof} && earned < visits[0].first, "Gameplay did not prove the layer by its pixels 2 s in, before the first visit");
+    for (const auto &sample : s.samples) {
       const auto &pre_ui = sample.evidence.pre_ui_scene;
-      require(sample.evidence.scene.ran && sample.evidence.scene.valid && pre_ui.valid && sample.evidence.pre_ui_image == ui_detection::pre_ui_image::layer && (sample.evidence.claims & ui_detection::claim_pre_ui), "A sample after the first did not measure both images");
-      require(in_menu(sample.sample_tick_ms) ? sample.evidence.scene.verdict == scene_verdict::hidden && pre_ui.verdict == scene_verdict::visible : sample.evidence.scene.verdict == scene_verdict::visible && pre_ui.verdict == scene_verdict::visible, "A sample's verdicts do not match its recording");
+      const bool menu_sample = in_menu(sample.sample_tick_ms);
+      require(pre_ui_matching(sample) == !menu_sample, "A sample's pixel match does not follow its recording");
+      if (sample.sample_tick_ms <= earned) {
+        require(!sample.evidence.scene.ran && !sample.evidence.claims, "A sample before the proof claimed or measured");
+        continue;
+      }
+      require(sample.evidence.scene.ran && sample.evidence.scene.valid && pre_ui.valid && sample.evidence.pre_ui_image == ui_detection::pre_ui_image::layer && sample.evidence.claims == ui_detection::claim_pre_ui, "A sample after the proof did not measure both images");
+      require(menu_sample ? sample.evidence.scene.verdict == scene_verdict::hidden && pre_ui.verdict == scene_verdict::visible : sample.evidence.scene.verdict == scene_verdict::visible && pre_ui.verdict == scene_verdict::visible, "A sample's verdicts do not match its recording");
     }
+    const auto proven_from = poll_of(s, earned);
     // Each visit's flat run: from the poll of its second sample to the poll
     // of the first gameplay sample after it.
     std::vector<std::pair<std::size_t, std::size_t>> flat_runs;
@@ -2808,9 +2925,9 @@ namespace {
       const auto entered = menu_samples[1];
       require(!s.observed[menu_samples[0]].entered && s.observed[entered].entered && s.samples[entered].sample_tick_ms - s.samples[menu_samples[0]].sample_tick_ms <= ui_detection::scene::hold_ms, "A visit did not enter at its second hidden sample");
       const auto entry = poll_of(s, s.samples[entered].sample_tick_ms);
-      require(s.frames[entry].scene_bits == (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible), "A visit did not hold both verdicts from its entry");
+      require(s.frames[entry].scene_bits == (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible | ui_detection::per_frame_pre_ui_proven), "A visit did not hold both verdicts with the proof from its entry");
       const auto exit = poll_of(s, s.samples[release].sample_tick_ms);
-      require(s.observed[release].released && s.samples[release].source_kind == 8u && !s.frames[exit].scene_bits, "The first gameplay sample after a visit did not release it");
+      require(s.observed[release].released && s.samples[release].source_kind == 8u && s.frames[exit].scene_bits == ui_detection::per_frame_pre_ui_proven, "The first gameplay sample after a visit did not release it");
       // The exit latency the pre-UI layer claim implies (it stays true in
       // gameplay): at most one sample interval plus the readback frame.
       require(s.frames[exit].now_ms - close <= sample_interval_ms + 2 * 16, "A visit's release came later than one sample interval after the menu closed");
@@ -2821,61 +2938,52 @@ namespace {
       const bool flat = std::any_of(flat_runs.begin(), flat_runs.end(), [i](const auto &run) {
         return i >= run.first && i < run.second;
       });
+      require(f.layer_proven == (i >= proven_from), "The frame at " + std::to_string(f.now_ms) + " did not read the proof as the ledger held it");
       require(f.source == (flat ? 8u : 0u) && f.flat() == flat && f.decision.h1 == flat, "A Stellar Blade SDR frame at " + std::to_string(f.now_ms) + " was flat outside a visit's held verdict, or not flat inside it");
       require(flat || (f.decision.none_reason == ui_no_mask::layer_aside && f.decision.refused == candidate::layer), "A frame without the held verdict did not set the pre-UI layer aside");
     }
     const auto c = session.counters();
     require(c[ui_counter::scene_entered] == 3 && c[ui_counter::scene_released] == 3 && c[ui_counter::full_d_visible] == 3 && c[ui_counter::full_d_visible] <= c[ui_counter::scene_released] && !c[ui_counter::scene_refuted], "The three visits were not counted entered and released three times");
-    require(session.stored().empty() && s.trust.empty(), "A Stellar Blade SDR source was accepted");
-    for (const auto event : {ui_counter::trust_earned, ui_counter::trust_revoked_exact, ui_counter::trust_revoked_declared, ui_counter::trust_lapsed, ui_counter::trust_restored, ui_counter::trust_discarded, ui_counter::trust_forgotten}) {
-      require(!c[event], "The Stellar Blade SDR stream counted an acceptance event");
+    require(session.stored() == proof && session.pre_ui_proven(p.signatures.of(kind::ui_layer)) && !session.accepts(p.signatures.of(kind::ui_layer)) && c[ui_counter::trust_earned] == 1, "The session did not end with the layer's proof as its only key");
+    for (const auto event : {ui_counter::trust_revoked_exact, ui_counter::trust_revoked_declared, ui_counter::trust_lapsed, ui_counter::trust_restored, ui_counter::trust_discarded, ui_counter::trust_forgotten}) {
+      require(!c[event], "The Stellar Blade SDR stream counted an acceptance event other than the proof");
     }
     check_counters(s, "Stellar Blade SDR menu visits");
   }
 
   void h1_stellar_blade_sdr_fg_suspended() {
-    // Stellar Blade in SDR with FG set to 2x: gameplay offers the HUD-less
-    // tag (an inexact pair whose change set is the HUD) beside the cleared
-    // output target (the scene image, V1-invalid) and current alpha. The
-    // HUD-less image is the offer's pre-UI image, so a sample frame measures
-    // the layer only because the guard pushes per_frame_pre_ui_layer while
-    // the layer is set aside: gameplay reads the two within 0.004 (dumps
-    // 296226962143476 and 478: 0.504 and 0.508, 0.376 and 0.375), which
-    // proves the layer. The settings menu suspends FG, so it offers the
-    // layer and current alpha only (the recorded game3d_50264_218658377782962
-    // counts): flat from the poll of its second hidden sample, released by
-    // the first gameplay sample. A session that opens the menu before any
-    // gameplay sample stays 3D (the layer is unproven).
-    const auto menu = recorded_frames({recorded::sb_sdr_menu, recorded::sb_sdr_menu_held});
-    const auto play = [](const gpu_inputs &in) {
-      synthetic f;
-      f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).change_set(12).scene(.504f, .508f);
-      return f.words(in);
-    };
-    present fg_on, suspended;
-    fg_on.offered = candidate::layer | candidate::current | candidate::hudless;
-    fg_on.layer_flags = suspended.layer_flags = ui_detection::layer_detection_flags(false);
-    suspended.offered = candidate::layer | candidate::current;
-    fg_on.signatures.set(kind::ui_layer, 87);  // DXGI_FORMAT_B8G8R8A8_UNORM.
-    suspended.signatures = fg_on.signatures;
+    // Stellar Blade in SDR with FG set to 2x, on one identity (the FG session
+    // below adds the viewport change): gameplay offers the HUD-less tag (an
+    // inexact pair whose change set is the HUD) beside the cleared output
+    // target (the scene image, V1-invalid) and current alpha (dump 476). The
+    // HUD-less image is the offer's pre-UI image, so nothing claims and no
+    // sample measures D; the layer equals the presented frame on 99.82% of
+    // pixels (texel 11), which proves its signature 2 s into gameplay. The
+    // settings menu suspends FG, so it offers the layer and current alpha
+    // only (the recorded game3d_50264_218658377782962 counts): flat from the
+    // poll of its second hidden sample; FG-on gameplay is 3D from its first
+    // frame (no claim), and its first measured sample, visible, releases the
+    // holds. A session that opens the menu before any gameplay stays 3D: the
+    // layer is unproven, so nothing claims and nothing measures (S2b held the
+    // hidden verdict there from the V1-invalid layer's own claim).
+    const auto menu = recorded_frames({recorded::sb_sdr_menu, recorded::sb_sdr_menu_proven, recorded::sb_sdr_menu_held, recorded::sb_sdr_menu_held_unproven});
+    const auto play = recorded_frames({recorded::sb_sdr_fg_play, recorded::sb_sdr_fg_play_proven});
+    const auto fg_on = sb_sdr_present(candidate::layer | candidate::current | candidate::hudless), suspended = sb_sdr_present(candidate::layer | candidate::current);
     const auto layer = fg_on.signatures.of(kind::ui_layer);
     {
       alpha_auto_policy session;
       sequence s(session, [&](const gpu_inputs &in) {
         return (in.bits & candidate::hudless) ? play(in) : menu(in);
       });
-      run(s, fg_on, 10000, 11000);
-      require(s.guard.proven(layer), "FG-on gameplay did not prove the layer beside the HUD-less image");
-      std::size_t layer_samples = 0;
+      run(s, fg_on, 10000, 12500);
+      require(session.pre_ui_proven(layer) && session.stored() == sb_sdr_proof(), "FG-on gameplay did not prove the layer by its pixels");
       for (const auto &sample : s.samples) {
-        layer_samples += sample.evidence.scene.ran && sample.evidence.pre_ui_image == ui_detection::pre_ui_image::layer ? 1 : 0;
-        require(!(sample.evidence.claims & ui_detection::claim_pre_ui) && !sample.source_kind, "FG-on gameplay claimed or decided");
+        require(!sample.evidence.scene.ran && !sample.evidence.claims && !sample.source_kind && pre_ui_matching(sample), "FG-on gameplay claimed, measured or decided, or its layer did not match");
       }
-      require(layer_samples + 1 >= s.samples.size() && layer_samples > 2, "FG-on gameplay did not measure the layer for its proof");
       const std::size_t menu_from = s.frames.size();
-      run(s, suspended, 11000, 12500);
+      run(s, suspended, 12500, 14000);
       const std::size_t play_from = s.frames.size();
-      run(s, fg_on, 12500, 14000);
+      run(s, fg_on, 14000, 15500);
       std::size_t entry = 0, exit = 0;
       for (std::size_t i = 0; i != s.samples.size(); ++i) {
         if (s.observed[i].entered && !entry) {
@@ -2885,8 +2993,8 @@ namespace {
           exit = poll_of(s, s.samples[i].sample_tick_ms);
         }
       }
-      require(entry > menu_from && exit > play_from && s.frames[entry].scene_bits == (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible), "The FG-suspended menu did not hold both verdicts");
-      require(s.frames[entry].now_ms - 11000 <= 3 * sample_interval_ms + 2 * 16, "The FG-suspended menu entered later than its second hidden sample");
+      require(entry > menu_from && exit > play_from && s.frames[entry].scene_bits == (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible | ui_detection::per_frame_pre_ui_proven), "The FG-suspended menu did not hold both verdicts with the proof");
+      require(s.frames[entry].now_ms - 12500 <= 3 * sample_interval_ms + 2 * 16, "The FG-suspended menu entered later than its second hidden sample");
       for (std::size_t i = 0; i != s.frames.size(); ++i) {
         const auto &f = s.frames[i];
         // Back in FG-on gameplay the offer's pre-UI image is the HUD-less
@@ -2895,7 +3003,7 @@ namespace {
         const bool flat = i >= entry && i < play_from;
         require(f.source == (flat ? 8u : 0u) && f.flat() == flat, "An FG-suspended menu frame at " + std::to_string(f.now_ms) + " was flat outside its held verdict, or not flat inside it");
       }
-      require(s.guard.proven(layer) && !s.discards, "The menu visit withdrew the proof, or a sample was discarded");
+      require(session.pre_ui_proven(layer) && s.trust.size() == 1 && !s.discards, "The menu visit withdrew the proof, or a sample was discarded");
       check_counters(s, "Stellar Blade SDR FG suspended");
     }
     {
@@ -2904,10 +3012,435 @@ namespace {
       sequence s(session, menu);
       run(s, suspended, 10000, 13000);
       for (const auto &f : s.frames) {
-        require(!f.source && !(f.scene_bits & ui_detection::per_frame_pre_ui_visible), "An unproven layer flattened the menu");
+        require(!f.source && !f.layer_proven && !(f.scene_bits & (ui_detection::per_frame_pre_ui_visible | ui_detection::per_frame_pre_ui_proven)), "An unproven layer flattened the menu, or was pushed as proven");
       }
-      require(s.scene_entered == 1 && !s.guard.proven(layer) && !s.guard.pre_ui.until, "The unproven menu did not hold the hidden verdict alone");
+      for (const auto &sample : s.samples) {
+        require(!sample.evidence.scene.ran && !sample.evidence.claims && !pre_ui_matching(sample), "The unproven menu claimed, measured or matched");
+      }
+      require(!s.scene_entered && !session.pre_ui_proven(layer) && session.stored().empty() && !s.guard.pre_ui.until, "The unproven menu held a verdict or earned the proof");
       check_counters(s, "Stellar Blade SDR menu before gameplay");
+    }
+  }
+
+  void h1_stellar_blade_sdr_fg_session() {
+    // The live failure fix 1 answers (S2b build, Stellar Blade SDR, FG set to
+    // 2x, 07:19-07:21): the game suspends frame generation while a menu is
+    // open. FG-on gameplay offers the layer, current alpha and the HUD-less
+    // tag on real Presents (viewport 1: depth from Streamline), and generated
+    // Presents hold. Nothing claims, so no sample measures D (the log's
+    // evidence was invalid on its samples), yet the layer equals the
+    // presented frame on 99.82% of pixels (dump 476, texel 11): the ledger
+    // proves pre_ui:87:srgb by the first sample 2 s in. A menu suspends FG:
+    // the offer is the layer and current alpha, and the depth moves to NGX
+    // (viewport 0), an identity change that clears the scene guard but not
+    // the proof. Each visit's first sample is a fade-in that reads the
+    // presented frame visible (D 0.453) beside the layer (0.538) while their
+    // pixels mismatch (35.28%): nothing changes. The next two read the
+    // presented frame hidden and the layer visible: flat (8) from the poll of
+    // the second hidden sample. Visits 1 and 2 end with FG on again (viewport
+    // 1): 3D from the first gameplay frame, whose pre-UI image is the
+    // HUD-less image again. Visit 3 ends with a moment of FG-off gameplay on
+    // viewport 0 (dump 470), released by its first visible sample. Under S2b
+    // the identity change cleared the layer's D proof and the fade-in
+    // withdrew it, so no visit went flat.
+    const auto fg_play = recorded_frames({recorded::sb_sdr_fg_play, recorded::sb_sdr_fg_play_proven});
+    const auto play = recorded_frames({recorded::sb_sdr_play, recorded::sb_sdr_play_proven});
+    const auto menu = recorded_frames({recorded::sb_sdr_menu, recorded::sb_sdr_menu_proven, recorded::sb_sdr_menu_held, recorded::sb_sdr_menu_held_unproven});
+
+    struct visit {
+      std::uint64_t open, close;
+      bool fg_off_exit;
+    };
+
+    constexpr std::array<visit, 3> visits {{{12600, 14000, false}, {15500, 16800, false}, {18300, 19600, true}}};
+    constexpr std::uint64_t fg_off_until = 19900, end = 21000;
+    const auto visit_at = [&visits](std::uint64_t tick) -> const visit * {
+      for (const auto &v : visits) {
+        if (tick >= v.open && tick < v.close) {
+          return &v;
+        }
+      }
+      return nullptr;
+    };
+    alpha_auto_policy session;
+    std::vector<std::string> heard;
+    session.on_change([&](const std::string &accepted) {
+      heard.push_back(accepted);
+    });
+    const auto proof = sb_sdr_proof();
+    sequence s(session, [&](const gpu_inputs &in) {
+      if (in.bits & candidate::hudless) {
+        return fg_play(in);
+      }
+      return visit_at(in.now_ms) ? menu(in) : play(in);
+    });
+    // The fade-in: each visit's first measured sample reads the presented
+    // frame visible beside the layer.
+    std::vector<std::uint64_t> fade_ins;
+    s.sample_edit = [&](texels &t, std::uint64_t tick, bool evidence) {
+      const auto *v = visit_at(tick);
+      if (!v || !evidence || (!fade_ins.empty() && fade_ins.back() >= v->open)) {
+        return;
+      }
+      fade_ins.push_back(tick);
+      t[word::scene_state] = scene_state(true, scene_verdict::visible);
+      t[word::scene_d] = float_bits(.453f);
+      t[word::pre_ui_scene_d] = float_bits(.538f);
+    };
+    const auto fg_on = sb_sdr_present(candidate::layer | candidate::current | candidate::hudless, 1);
+    const auto suspended = sb_sdr_present(candidate::layer | candidate::current, 0);
+    fg_pacer pacer(1);
+    std::size_t generated = 0;
+    for (std::uint64_t now = 10000; now < end;) {
+      if (visit_at(now) || (now >= visits[2].close && now < fg_off_until)) {
+        auto p = suspended;
+        p.now_ms = now;
+        s.step(p);
+        now += 16;
+        continue;
+      }
+      const auto kind = pacer.next(true, 1);
+      auto p = fg_present(kind, fg_on, candidate::layer | candidate::current, pacer.tag);
+      p.now_ms = now;
+      const auto &r = s.step(p);
+      if (kind == ui_mask::hudless_present::generated_frame) {
+        ++generated;
+        require(!r.detected && !r.flat(), "A generated FG-on Present detected or was flat");
+      }
+      now += 8;
+    }
+    const auto first = s.samples.front().sample_tick_ms;
+    const auto earned = first_sample_from(s, first + alpha_trust_span_ms);
+    require(generated > 100 && s.trust.size() == 1 && s.trust[0].tick == earned && s.trust[0].accepted == proof && heard == std::vector<std::string> {proof} && earned < visits[0].open, "FG-on gameplay did not prove the layer by its pixels 2 s in, before the first menu");
+    for (const auto &sample : s.samples) {
+      if (sample.evidence.candidates & candidate::hudless) {
+        require(!sample.evidence.scene.ran && !sample.evidence.claims && pre_ui_matching(sample), "FG-on gameplay claimed, measured D or did not match");
+      }
+    }
+    const auto proven_from = poll_of(s, earned);
+    for (std::size_t i = 0; i != s.frames.size(); ++i) {
+      require(!s.frames[i].detected || s.frames[i].layer_proven == (i >= proven_from), "A detection did not read the proof as the ledger held it");
+    }
+    require(fade_ins.size() == visits.size(), "A visit had no fade-in sample");
+    std::vector<std::pair<std::size_t, std::size_t>> flat_runs;
+    for (std::size_t k = 0; k != visits.size(); ++k) {
+      const auto &v = visits[k];
+      std::vector<std::size_t> menu_samples;
+      for (std::size_t i = 0; i != s.samples.size(); ++i) {
+        const auto tick = s.samples[i].sample_tick_ms;
+        if (tick >= v.open && tick < v.close) {
+          menu_samples.push_back(i);
+        }
+      }
+      require(menu_samples.size() > 3 && s.samples[menu_samples[0]].sample_tick_ms == fade_ins[k], "A visit's first sample was not its fade-in");
+      const auto &fade = s.samples[menu_samples[0]];
+      const auto &fade_observed = s.observed[menu_samples[0]];
+      require(fade.evidence.scene.valid && fade.evidence.scene.verdict == scene_verdict::visible && fade.evidence.pre_ui_scene.valid && fade.evidence.claims == ui_detection::claim_pre_ui && !pre_ui_matching(fade) && !fade_observed.entered && !fade_observed.released && !fade_observed.refuted, "A visit's fade-in sample changed something, or matched");
+      require(s.samples[menu_samples[1]].evidence.scene.verdict == scene_verdict::hidden && !s.observed[menu_samples[1]].entered && s.samples[menu_samples[2]].evidence.scene.verdict == scene_verdict::hidden && s.observed[menu_samples[2]].entered, "A visit did not enter at its second hidden sample");
+      const auto entry = poll_of(s, s.samples[menu_samples[2]].sample_tick_ms);
+      require(s.frames[entry].scene_bits == (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible | ui_detection::per_frame_pre_ui_proven), "A visit did not hold both verdicts with the proof from its entry");
+      std::size_t exit = 0;
+      if (!v.fg_off_exit) {
+        // FG on again, viewport 1: the guard clears and the HUD-less image is
+        // the pre-UI image, so 3D from the first gameplay frame.
+        for (std::size_t i = entry; i != s.frames.size() && !exit; ++i) {
+          exit = s.frames[i].now_ms >= v.close ? i : 0;
+        }
+        require(exit, "FG-on gameplay did not follow a visit");
+      } else {
+        std::size_t release = 0;
+        for (std::size_t i = 0; i != s.samples.size() && !release; ++i) {
+          release = s.samples[i].sample_tick_ms >= v.close ? i : 0;
+        }
+        require(release && s.samples[release].sample_tick_ms < fg_off_until && s.observed[release].released && s.samples[release].source_kind == 8u && s.samples[release].evidence.scene.verdict == scene_verdict::visible, "The first FG-off gameplay sample did not release the visit");
+        exit = poll_of(s, s.samples[release].sample_tick_ms);
+        require(s.frames[exit].now_ms - v.close <= sample_interval_ms + 2 * 16 && s.frames[exit].scene_bits == ui_detection::per_frame_pre_ui_proven, "The FG-off release came later than one sample interval after the menu closed");
+      }
+      flat_runs.emplace_back(entry, exit);
+    }
+    for (std::size_t i = 0; i != s.frames.size(); ++i) {
+      const auto &f = s.frames[i];
+      const bool flat = std::any_of(flat_runs.begin(), flat_runs.end(), [i](const auto &run) {
+        return i >= run.first && i < run.second;
+      });
+      require(f.flat() == flat && (!flat || (f.source == 8u && f.decision.h1)), "A frame at " + std::to_string(f.now_ms) + " was flat outside a visit's held verdicts, or not flat inside them");
+    }
+    const auto c = session.counters();
+    require(c[ui_counter::scene_entered] == 3 && c[ui_counter::scene_released] == 1 && c[ui_counter::full_d_visible] == 1 && !c[ui_counter::scene_refuted], "The visits were not counted entered three times and released once by a sample");
+    require(session.stored() == proof && c[ui_counter::trust_earned] == 1 && !c[ui_counter::trust_lapsed] && !c[ui_counter::trust_forgotten], "The proof was withdrawn, or earned more than once");
+    check_counters(s, "Stellar Blade SDR FG session");
+  }
+
+  // Synthetic Stellar Blade SDR gameplay the layer does not show (its pixels
+  // equal the presented frame on half the frame): the layer without
+  // coverage (V1-invalid) beside opaque current alpha, the presented frame
+  // visible with valid evidence (testable for a restored proof's clock) or
+  // with invalid evidence.
+  texels sb_mismatching_play(const gpu_inputs &in, bool valid) {
+    synthetic f;
+    f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).pre_ui_pixels(500, 1000, 1000, 500);
+    if (valid) {
+      f.scene(.5f, .5f);
+    }
+    return f.words(in);
+  }
+
+  // The tick of the sample at which a restored pre-UI proof lapses (A3, fix
+  // 1), zero when none does: its reconfirm clock runs from a testable sample
+  // (the layer offered without coverage while the presented frame's evidence
+  // is valid and visible) to the next sample that is not, and the proof
+  // lapses at the testable sample by which the clock has run
+  // alpha_trust_reconfirm_ms. The stream must not re-earn it.
+  std::uint64_t pre_ui_lapse_tick(const sequence &s, std::uint64_t from) {
+    std::uint64_t elapsed = 0, running = 0;
+    for (const auto &sample : s.samples) {
+      if (sample.sample_tick_ms < from) {
+        continue;
+      }
+      const auto &e = sample.evidence;
+      const bool testable = (e.candidates & candidate::layer) && !e.layer_covered && e.scene.valid && e.scene.verdict == scene_verdict::visible;
+      if (!testable) {
+        elapsed += running ? sample.sample_tick_ms - running : 0;
+        running = 0;
+        continue;
+      }
+      running = running ? running : sample.sample_tick_ms;
+      if (elapsed + (sample.sample_tick_ms - running) >= alpha_trust_reconfirm_ms) {
+        return sample.sample_tick_ms;
+      }
+    }
+    return 0;
+  }
+
+  void h1_pre_ui_proof_across_sessions() {
+    // The proof is a ledger key (pre_ui:87:srgb) that TrustedUISources keeps
+    // with the other keys. A second session restores it provisionally: a
+    // menu opened before any gameplay goes flat at its second hidden sample.
+    // It lapses after 60 s of testable time (the layer offered without
+    // coverage while the presented frame reads visible with valid evidence)
+    // without a matching sample, never while only menus or samples with
+    // invalid evidence arrive; 3 matching samples over 2 s confirm it, after
+    // which it no longer lapses. Forget clears it, the listener hears the
+    // change, and the next menu stays 3D until gameplay earns it again.
+    const auto proof = sb_sdr_proof();
+    const auto layer = sb_sdr_signatures().of(kind::ui_layer);
+    const auto menu = recorded_frames({recorded::sb_sdr_menu, recorded::sb_sdr_menu_proven, recorded::sb_sdr_menu_held, recorded::sb_sdr_menu_held_unproven});
+    const auto play = recorded_frames({recorded::sb_sdr_play, recorded::sb_sdr_play_proven});
+    enum class showing {
+      menu,
+      play,
+      mismatch,
+      mismatch_invalid
+    };
+    auto shown = showing::menu;
+    const gpu_model model = [&](const gpu_inputs &in) {
+      switch (shown) {
+        case showing::menu:
+          return menu(in);
+        case showing::play:
+          return play(in);
+        default:
+          return sb_mismatching_play(in, shown == showing::mismatch);
+      }
+    };
+    // Menus on viewport 0 (FG suspended), gameplay on viewport 1: each change
+    // is an identity change. Returns the index of the phase's first frame.
+    const auto show = [&](sequence &s, showing what, std::uint64_t from, std::uint64_t to) {
+      shown = what;
+      const auto first = s.frames.size();
+      run(s, sb_sdr_present(candidate::layer | candidate::current, what == showing::menu ? 0u : 1u), from, to);
+      return first;
+    };
+    // A menu from frame `first`: 3D until the poll of its second sample, flat
+    // (8) from there.
+    const auto menu_goes_flat = [](const sequence &s, std::size_t first, const char *what) {
+      std::vector<std::uint64_t> ticks;
+      for (const auto &sample : s.samples) {
+        if (sample.sample_tick_ms >= s.frames[first].now_ms) {
+          ticks.push_back(sample.sample_tick_ms);
+        }
+      }
+      require(ticks.size() > 2, std::string(what) + ": too few samples");
+      const auto entry = poll_of(s, ticks[1]);
+      for (std::size_t i = first; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
+        require(f.layer_proven && f.flat() == (i >= entry) && f.source == (i >= entry ? 8u : 0u), std::string(what) + ": not flat exactly from the poll of its second hidden sample");
+      }
+    };
+    const auto menu_stays_3d = [](const sequence &s, std::size_t first, const char *what) {
+      for (std::size_t i = first; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
+        require(!f.flat() && !f.source && !f.layer_proven && !(f.scene_bits & (ui_detection::per_frame_pre_ui_visible | ui_detection::per_frame_pre_ui_proven)), std::string(what) + ": flattened, or pushed the proof");
+      }
+    };
+    {
+      alpha_auto_policy session;
+      std::vector<std::string> heard;
+      session.on_change([&](const std::string &accepted) {
+        heard.push_back(accepted);
+      });
+      restore(session, proof, 1);
+      require(session.pre_ui_proven(layer) && !session.accepts(layer) && heard.empty(), "The restored proof did not read as proven, or was heard");
+      sequence s(session, model);
+      menu_goes_flat(s, show(s, showing::menu, 10000, 11000), "A menu before any gameplay under the restored proof");
+      // 70 s of gameplay whose evidence is invalid, then a menu: no testable
+      // time, so no lapse.
+      show(s, showing::mismatch_invalid, 11000, 81000);
+      menu_goes_flat(s, show(s, showing::menu, 81000, 82000), "A menu after 70 s without testable time");
+      require(session.stored() == proof && !session.counters()[ui_counter::trust_lapsed], "The restored proof lapsed without testable time");
+      // Testable gameplay that never matches: 30 s, a 10 s menu (paused),
+      // then until the clock has run 60 s.
+      show(s, showing::mismatch, 82000, 112000);
+      menu_goes_flat(s, show(s, showing::menu, 112000, 122000), "A menu after 30 s of testable time");
+      require(session.stored() == proof, "The restored proof lapsed after 30 s of testable time");
+      show(s, showing::mismatch, 122000, 160000);
+      const auto lapsed = pre_ui_lapse_tick(s, 82000);
+      require(lapsed > 150000 && lapsed < 154000, "The testable time did not reach 60 s about 30 s into the second testable run");
+      const auto c = session.counters();
+      require(s.trust.size() == 1 && s.trust[0].tick == lapsed && s.trust[0].accepted.empty() && heard == std::vector<std::string> {""} && c[ui_counter::trust_lapsed] == 1 && c[ui_counter::trust_restored] == 1 && !c[ui_counter::trust_earned], "The restored proof did not lapse at 60 s of testable time, or was not heard and counted once");
+      // Lapsed, the next menu stays 3D: nothing claims, nothing measures.
+      menu_stays_3d(s, show(s, showing::menu, 160000, 161000), "The menu after the lapse");
+      check_counters(s, "restored pre-UI proof lapsing");
+    }
+    {
+      alpha_auto_policy session;
+      std::vector<std::string> heard;
+      session.on_change([&](const std::string &accepted) {
+        heard.push_back(accepted);
+      });
+      restore(session, proof, 1);
+      sequence s(session, model);
+      menu_goes_flat(s, show(s, showing::menu, 10000, 11000), "A menu before any gameplay under the restored proof");
+      // Gameplay showing the layer confirms the proof: the provisional entry
+      // becomes earned (heard by nobody: stored() is unchanged).
+      const auto before = s.samples.size();
+      show(s, showing::play, 11000, 14000);
+      const auto confirmed = first_sample_from(s, s.samples.at(before).sample_tick_ms + alpha_trust_span_ms);
+      require(confirmed && confirmed < 14000 && s.trust.empty() && heard.empty() && session.stored() == proof && session.counters()[ui_counter::trust_earned] == 1, "Matching gameplay did not confirm the restored proof, or was heard");
+      // Confirmed, it no longer lapses: 70 s of testable gameplay that never
+      // matches.
+      show(s, showing::mismatch, 14000, 84000);
+      require(session.stored() == proof && !session.counters()[ui_counter::trust_lapsed], "The confirmed proof lapsed");
+      // Forget clears it, persists none and counts it once.
+      require(s.forget() == proof && session.stored().empty() && !session.pre_ui_proven(layer) && heard == std::vector<std::string> {""} && session.counters()[ui_counter::trust_forgotten] == 1, "Forget did not clear the proof, persist none or count it");
+      menu_stays_3d(s, show(s, showing::menu, 84000, 85000), "The menu after Forget");
+      const auto again = s.samples.size();
+      show(s, showing::play, 85000, 88000);
+      const auto reearned = first_sample_from(s, s.samples.at(again).sample_tick_ms + alpha_trust_span_ms);
+      require(s.trust.size() == 1 && s.trust[0].tick == reearned && s.trust[0].accepted == proof && heard == std::vector<std::string> {"", proof} && session.counters()[ui_counter::trust_earned] == 2, "Gameplay after Forget did not earn the proof again 2 s in");
+      menu_goes_flat(s, show(s, showing::menu, 88000, 89000), "A menu after the proof was earned again");
+      check_counters(s, "confirmed pre-UI proof and Forget");
+    }
+  }
+
+  void h1_effects_target_is_never_proven() {
+    // A bloom or effects target the census took for the layer: cleared,
+    // colour without alpha (no coverage, V1-invalid), reading D visible and
+    // within 0.03 of the presented frame in gameplay (0.50 and 0.51: the S2b
+    // D proof accepted such a target), but equal to the presented frame on
+    // only 60% of pixels in every sample. It is never proven, so it never
+    // claims, and a hidden menu over it (presented D -0.01, the target 0.55)
+    // stays 3D. The first-run shadow measures every sample to show the D
+    // agreement, and acts on none.
+    alpha_auto_policy session;
+    session.set_first_run(true);
+    sequence s(session, [](const gpu_inputs &in) {
+      const bool menu = in.now_ms >= 20000 && in.now_ms < 25000;
+      synthetic f;
+      f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000);
+      if (menu) {
+        f.scene(-.01f, .55f).pre_ui_pixels(300, 1000, 1000, 700);
+      } else {
+        f.scene(.5f, .51f).pre_ui_pixels(600, 1000, 1000, 400);
+      }
+      return f.words(in);
+    });
+    const auto p = sb_sdr_present(candidate::layer | candidate::current);
+    run(s, p, 10000, 30000);
+    std::size_t agreeing = 0, hidden = 0;
+    for (const auto &sample : s.samples) {
+      const auto &e = sample.evidence;
+      require(e.scene.ran && !e.claims && !pre_ui_matching(sample), "The effects target claimed, matched, or a sample was not measured by the shadow");
+      agreeing += e.scene.valid && e.scene.verdict == scene_verdict::visible && std::fabs(e.scene.d - e.pre_ui_scene.d) <= .03f ? 1 : 0;
+      hidden += e.scene.valid && e.scene.verdict == scene_verdict::hidden ? 1 : 0;
+    }
+    require(agreeing > 50 && hidden > 20, "The effects stream did not agree with the presented D in gameplay, or never read the menu hidden");
+    for (const auto &f : s.frames) {
+      require(!f.flat() && !f.source && !f.layer_proven && !(f.scene_bits & (ui_detection::per_frame_pre_ui_visible | ui_detection::per_frame_pre_ui_proven)), "The effects target was proven or flattened");
+    }
+    require(session.stored().empty() && !session.pre_ui_proven(p.signatures.of(kind::ui_layer)) && !s.guard.pre_ui.until && !s.scene_entered, "The effects target earned the proof, or a shadow-only sample held");
+    check_counters(s, "effects target");
+  }
+
+  void h1_pre_ui_proof_keys() {
+    // Only a lit layer without coverage that equals the presented frame
+    // proves its signature, and each format and colour space is a key of its
+    // own.
+    const auto layer = sb_sdr_signatures().of(kind::ui_layer);
+    {
+      // Black frames over a transparent real UI layer (V1-valid, alpha 0
+      // everywhere): equal on every pixel, lit on none. Never proven.
+      alpha_auto_policy session;
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.alpha(kind::current, 1000).opaque(kind::current, 1000).pre_ui_pixels(1000, 0, 0, 0);
+        return f.words(in);
+      });
+      run(s, sb_sdr_present(candidate::layer | candidate::current), 10000, 20000);
+      for (const auto &sample : s.samples) {
+        require((sample.evidence.valid_bits & candidate::layer) && !sample.evidence.layer_covered && sample.evidence.pre_ui_match == sample.pixels && !sample.evidence.pre_ui_image_lit && !pre_ui_matching(sample), "The black stream's layer is not a valid transparent layer equal to the frame");
+      }
+      require(session.stored().empty() && !session.pre_ui_proven(layer), "Black frames over a transparent UI layer proved it");
+      check_counters(s, "black frames over a transparent layer");
+    }
+    {
+      // A layer with coverage (a selective HUD), equal to the presented frame
+      // elsewhere: its own run accepts it as UI coverage (A1); it is never
+      // the pre-UI scene image.
+      alpha_auto_policy session;
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.alpha(kind::ui_layer, 50).alpha(kind::current, 1000).opaque(kind::current, 1000).pre_ui_pixels(990, 900, 900, 5);
+        return f.words(in);
+      });
+      run(s, sb_sdr_present(candidate::layer | candidate::current), 10000, 14000);
+      require(session.stored() == layer.key() && !session.pre_ui_proven(layer), "A layer with coverage earned a pre-UI proof, or its own run was not accepted");
+      check_counters(s, "layer with coverage");
+    }
+    {
+      // The same lit, matching layer in SDR and then in PQ (an HDR switch:
+      // a new epoch and colour space): each colour space earns its own key,
+      // and another format is another key again.
+      alpha_auto_policy session;
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(.5f, .5f).pre_ui_pixels(990, 900, 900, 5);
+        return f.words(in);
+      });
+      const auto sdr = sb_sdr_present(candidate::layer | candidate::current);
+      run(s, sdr, 10000, 13000);
+      const auto srgb_key = ui_selection::pre_ui_key(layer);
+      require(session.stored() == srgb_key.key() && session.pre_ui_proven(layer), "SDR gameplay did not earn the SDR key");
+      auto hdr = sdr;
+      hdr.epoch = 2;
+      hdr.signatures.color_space = pq;
+      const auto hdr_layer = hdr.signatures.of(kind::ui_layer);
+      hdr.now_ms = 13000;
+      const auto &crossed = s.step(hdr);
+      require(crossed.detected && !crossed.layer_proven && !(crossed.gpu.per_frame & ui_detection::per_frame_pre_ui_proven), "The SDR proof crossed into PQ");
+      run(s, hdr, 13016, 16000);
+      require(session.pre_ui_proven(hdr_layer) && session.stored() == stored_of({srgb_key, ui_selection::pre_ui_key(hdr_layer)}) && session.stored() == "pre_ui:87:srgb,pre_ui:87:pq", "PQ gameplay did not earn its own key beside the SDR one");
+      auto other = sdr;
+      other.epoch = 3;
+      other.signatures.set(kind::ui_layer, 28);
+      other.now_ms = 16000;
+      require(!s.step(other).layer_proven, "Another layer format read the proof of format 87");
+      auto back = sdr;
+      back.epoch = 4;
+      back.now_ms = 16016;
+      const auto &returned = s.step(back);
+      require(returned.layer_proven && (returned.gpu.per_frame & ui_detection::per_frame_pre_ui_proven), "Back in SDR the SDR proof did not apply from the first frame");
+      check_counters(s, "pre-UI proof keys");
     }
   }
 
@@ -2915,6 +3448,8 @@ namespace {
     present p;
     p.offered = candidate::layer | candidate::current;
     p.layer_flags = ui_detection::layer_detection_flags(false);
+    // The layer's pre-UI proof as an earlier session left it (provisional).
+    const auto proof = ui_selection::pre_ui_key(p.signatures.of(kind::ui_layer)).key();
     const auto never_flat = [](const sequence &s, const char *what) {
       for (const auto &f : s.frames) {
         require(!f.flat() && !f.source && !(f.scene_bits & ui_detection::per_frame_pre_ui_visible), std::string(what) + " flattened, or held the pre-UI image visible");
@@ -2922,33 +3457,41 @@ namespace {
       require(!s.guard.pre_ui.until, std::string(what) + " entered the pre-UI hold");
     };
     {
-      // A dark scene behind a V1-invalid cleared layer (the Stellar Blade SDR
-      // inputs): the presented frame and the pre-UI image both read hidden
-      // for 10 s. The hidden hold enters, but the pre-UI claim never acts.
+      // A dark scene behind a V1-invalid cleared layer whose signature an
+      // earlier session proved (the Stellar Blade SDR inputs): the presented
+      // frame and the pre-UI image both read hidden for 10 s. The layer
+      // equals the presented frame but is lit on no pixel, so it never
+      // confirms the proof, and no sample reads visible, so its clock never
+      // runs. The hidden hold enters, but the pre-UI claim never acts.
       alpha_auto_policy session;
+      restore(session, proof, 1);
       sequence s(session, [](const gpu_inputs &in) {
         synthetic f;
-        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(-.01f, .05f);
+        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(-.01f, .05f).pre_ui_pixels(1000, 0, 0, 0);
         return f.words(in);
       });
       run(s, p, 10000, 20000);
       never_flat(s, "A dark scene with both images hidden");
-      require(s.scene_entered == 1 && s.guard.hidden.held(s.frames.back().now_ms), "The dark scene's presented frame did not hold hidden");
+      const auto c = session.counters();
+      require(s.scene_entered == 1 && s.guard.hidden.held(s.frames.back().now_ms) && s.frames.back().layer_proven, "The dark scene's presented frame did not hold hidden beside the proven layer");
+      require(session.stored() == proof && !c[ui_counter::trust_earned] && !c[ui_counter::trust_lapsed], "The dark image confirmed the proof, or its clock ran");
       check_counters(s, "dark gameplay");
     }
     {
-      // Correlated grain: the pre-UI image reads within 0.05 of the presented
-      // frame, which reads between 0.10 and 0.30. A pre-UI image visible
-      // (0.25 or more) beside a hidden presented frame (below 0.15) needs a
-      // contradiction of 0.10, so the pre-UI claim never acts.
+      // Correlated grain behind the proven layer, which equals the presented
+      // frame (and confirms the proof): the pre-UI image reads within 0.05
+      // of the presented frame, which reads between 0.10 and 0.30. A pre-UI
+      // image visible (0.25 or more) beside a hidden presented frame (below
+      // 0.15) needs a contradiction of 0.10, so the pre-UI claim never acts.
       alpha_auto_policy session;
+      restore(session, proof, 1);
       lcg random {2024};
       std::uint32_t hidden_samples = 0;
       sequence s(session, [&random](const gpu_inputs &in) {
         const float presented = .10f + float(random.next(2001)) / 10000.f;
         const float pre_ui = presented + (float(random.next(1001)) - 500.f) / 10000.f;
         synthetic f;
-        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(presented, pre_ui);
+        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(presented, pre_ui).pre_ui_pixels(990, 900, 900, 5);
         return f.words(in);
       });
       run(s, p, 10000, 40000);
@@ -2956,29 +3499,64 @@ namespace {
         hidden_samples += sample.evidence.scene.valid && sample.evidence.scene.verdict == scene_verdict::hidden ? 1 : 0;
       }
       never_flat(s, "Correlated grain");
-      require(hidden_samples > 20 && s.scene_entered > 0, "The grain stream never read the presented frame hidden");
+      require(hidden_samples > 20 && s.scene_entered > 0 && session.counters()[ui_counter::trust_earned] == 1, "The grain stream never read the presented frame hidden, or did not confirm the proof");
       check_counters(s, "correlated grain");
     }
     {
       // A scene buffer from before fog or grain (V1-invalid, colour without
-      // alpha), proven in clear gameplay where both read 0.5: fog sets in and
-      // the presented frame drifts to 0.05 over 3 s while the buffer stays at
-      // 0.5. The first sample with a gap over 0.03 withdraws the proof, so
-      // the pre-UI hold never enters. A buffer behind grain that never agrees
-      // within 0.03 (presented 0.05 below it) is never proven.
-      for (const float offset : {0.f, .05f}) {
+      // alpha) while fog drifts the presented frame down to 0.05 over 3 s and
+      // lifts after 5 s, the buffer staying at 0.5. Behind grain that
+      // keeps its pixels from the presented frame (60% equal) it is never
+      // proven, so it never claims and nothing measures or flattens.
+      // ACCEPTED RISK of the approved pixel proof (fix 1): the same buffer
+      // before the fog sets in equals the presented frame (99%), so it is
+      // proven 2 s in, and a mismatch never withdraws the proof; once the fog
+      // reads the presented frame hidden beside the visible buffer, H1 (d)
+      // flattens from the poll of the second hidden sample until the first
+      // visible sample after the fog lifts. Its mitigations are the
+      // two-sample entry, the release on a visible sample, a restored proof's
+      // 60 s lapse and Forget.
+      for (const bool grain : {true, false}) {
         alpha_auto_policy session;
-        sequence s(session, [offset](const gpu_inputs &in) {
-          const float fade = in.now_ms < 12000 ? 0.f : std::min(1.f, float(in.now_ms - 12000) / 3000.f);
-          const float buffer = .5f, presented = buffer - offset - fade * (.45f - offset);
+        sequence s(session, [grain](const gpu_inputs &in) {
+          const float in_fog = in.now_ms < 12000 ? 0.f : std::min(1.f, float(in.now_ms - 12000) / 3000.f);
+          const float fade = in.now_ms < 20000 ? in_fog : std::max(0.f, 1.f - float(in.now_ms - 20000) / 1000.f);
+          const float buffer = .5f, offset = grain ? .05f : 0.f, presented = buffer - offset - fade * (.45f - offset);
+          const auto matched = grain ? 600u : std::uint32_t(990.f - 700.f * fade);
           synthetic f;
-          f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(presented, buffer);
+          f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(presented, buffer).pre_ui_pixels(matched, 1000, 1000, 1000 - matched);
           return f.words(in);
         });
-        run(s, p, 10000, 20000);
-        never_flat(s, offset ? "A scene buffer behind grain" : "Fog after a proven scene buffer");
-        require(s.scene_entered > 0 && !s.guard.proven(p.signatures.of(kind::ui_layer)), "The fog stream never read hidden, or kept the proof");
-        check_counters(s, "fog after the scene buffer");
+        run(s, p, 10000, 23000);
+        if (grain) {
+          never_flat(s, "A scene buffer behind grain");
+          for (const auto &sample : s.samples) {
+            require(!sample.evidence.scene.ran && !sample.evidence.claims, "The unproven buffer behind grain claimed or measured");
+          }
+          require(!s.scene_entered && session.stored().empty(), "The buffer behind grain was proven, or a verdict held");
+          check_counters(s, "scene buffer behind grain");
+          continue;
+        }
+        require(session.stored() == proof && s.trust.size() == 1 && s.trust[0].tick < 12500, "The pre-fog buffer was not proven by its pixels 2 s in");
+        std::size_t entered = 0, released = 0, hidden_seen = 0;
+        for (std::size_t i = 0; i != s.samples.size(); ++i) {
+          const auto &e = s.samples[i].evidence;
+          hidden_seen += e.scene.valid && e.scene.verdict == scene_verdict::hidden ? 1 : 0;
+          if (s.observed[i].entered && !entered) {
+            entered = i;
+            require(hidden_seen == 2, "The fog entered on other than its second hidden sample");
+          }
+          if (s.observed[i].released && !released) {
+            released = i;
+          }
+        }
+        require(entered && released > entered && s.samples[released].sample_tick_ms >= 20000, "The fog did not enter H1 (d), or the lifting fog did not release it");
+        const auto entry = poll_of(s, s.samples[entered].sample_tick_ms), exit = poll_of(s, s.samples[released].sample_tick_ms);
+        for (std::size_t i = 0; i != s.frames.size(); ++i) {
+          const bool flat = i >= entry && i < exit;
+          require(s.frames[i].flat() == flat && (!flat || s.frames[i].source == 8u), "The proven pre-fog buffer flattened other than from the second hidden sample to the release");
+        }
+        check_counters(s, "fog after a proven scene buffer (accepted risk)");
       }
     }
     {
@@ -3161,7 +3739,8 @@ namespace {
   // those of the restored keys or placeholders (format 0, sRGB); the
   // prediction is a sketch, never a gate. Lines of earlier versions (trusted
   // slots, the legacy trust bitmask, the HUD-less route's evidence and
-  // scene_hold before S2b) are read as far as they map.
+  // scene_hold before S2b, no pre-UI pixel counts before fix 1) are read as
+  // far as they map.
   std::string field_text(const std::string &line, const std::string &key) {
     for (const char before : {' ', '{'}) {
       const auto at = line.find(std::string(1, before) + key + "=");
@@ -3249,6 +3828,10 @@ namespace {
             if (const auto parsed = ui_selection::signature::parse(std::string_view(keys).substr(from, end - from))) {
               signatures.set(parsed->source_kind, parsed->format);
               signatures.color_space = parsed->color_space;
+              // A layer's pre-UI proof names the layer's format.
+              if (parsed->source_kind == kind::pre_ui && !signatures.format[std::size_t(kind::ui_layer)]) {
+                signatures.set(kind::ui_layer, parsed->format);
+              }
             }
             from = end + 1;
           }
@@ -3361,6 +3944,23 @@ namespace {
             evidence.pre_ui_image = ui_detection::pre_ui_image::layer;
           }
         }
+        // Fix 1: the presented frame's verdict (the pre-UI proof's reconfirm
+        // clock) and texel 11 (the proof's pixel counts).
+        if (const auto scene = field_group(line, "sampled_scene"); !scene.empty()) {
+          evidence.scene.valid = field_text(scene, "valid") == "1";
+          evidence.scene.ran = field_text(scene, "ran") == "1";
+          for (const auto verdict : {scene_verdict::hidden, scene_verdict::ambiguous, scene_verdict::visible}) {
+            if (field_text(scene, "verdict") == ui_detection::name(verdict)) {
+              evidence.scene.verdict = verdict;
+            }
+          }
+        }
+        if (const auto pre_ui_pixels = field_group(line, "sampled_pre_ui_pixels"); !pre_ui_pixels.empty()) {
+          evidence.pre_ui_match = field_number(field_text(pre_ui_pixels, "match"));
+          evidence.pre_ui_image_lit = field_number(field_text(pre_ui_pixels, "image_lit"));
+          evidence.presented_lit = field_number(field_text(pre_ui_pixels, "presented_lit"));
+          evidence.presented_lit_differs = field_number(field_text(pre_ui_pixels, "presented_lit_differs"));
+        }
         // This render's guard state, not the sample's: scene_guard since S2b,
         // scene_hold (the held routes) before.
         if (const auto guard = field_group(line, "scene_guard"); !guard.empty()) {
@@ -3437,6 +4037,10 @@ int main(int argc, char **argv) {
     {"A1/S1 adversaries", adversaries},
     {"H1 Stellar Blade SDR menu visits", h1_stellar_blade_sdr_menu_visits},
     {"H1 Stellar Blade SDR with FG suspended", h1_stellar_blade_sdr_fg_suspended},
+    {"H1 Stellar Blade SDR FG session (fix 1)", h1_stellar_blade_sdr_fg_session},
+    {"H1/A3 pre-UI proof across sessions", h1_pre_ui_proof_across_sessions},
+    {"H1 effects target never proven", h1_effects_target_is_never_proven},
+    {"H1/A1 pre-UI proof keys", h1_pre_ui_proof_keys},
     {"H1 dark gameplay never flat", h1_dark_gameplay_never_flat},
     {"H1 overrides a partial winner", h1_overrides_a_partial_winner},
     {"S1/T1 invariants", s1_invariants},

@@ -2399,7 +2399,7 @@ namespace {
         replay.at("ui_detection").at("candidates") == ui_detection::candidate::layer &&
         replay.at("ui_detection").at("accepted") == ui_detection::candidate::layer &&
         replay.at("ui_detection").at("candidate_layout") == ui_detection::candidate_layout &&
-        replay.at("ui_pin").at("decision_texels") == ui_detection::h1_decision_texels &&
+        replay.at("ui_pin").at("decision_texels") == ui_detection::pre_ui_decision_texels &&
         replay.at("ui_pin").at("evidence_images") == ui_detection::max_scene_evidence_images,
       "Dump lost the layer's detection constants or pin markers");
     require(!replay.at("ui_pin").contains("late_margin") &&
@@ -2821,38 +2821,117 @@ namespace {
     // target holds the scene drawn before the UI at alpha 0 (V1-invalid:
     // colour without alpha) while the presented frame is the opaque menu.
     // The depth describes the pre-UI image, not the frame shown (claim (d)).
-    const auto alpha_zero = [&](std::vector<unsigned char> bytes) {
+    // The layer's claim needs its signature proven the pre-UI scene image by
+    // the session's acceptance ledger (game3d_alpha_auto.h, fix 1): three
+    // samples over 2 s whose layer equals the presented colour (8 times the
+    // pair threshold) on 90% of pixels while lit on half (texel 11). A
+    // session of its own keeps the proof out of the later sections.
+    const auto zero_alpha = [&](std::vector<unsigned char> bytes) {
       for (size_t i = 0; i != pixels; ++i) {
         if (gpu.color == 2) { const auto zero = half_bits(0.f); std::memcpy(bytes.data() + i * bpp + 6, &zero, 2); }
         else bytes[i * bpp + 3] = 0;
       }
-      return color_view(bytes);
+      return bytes;
     };
-    const auto scene_layer = alpha_zero(scene_color);
+    const auto scene_layer_bytes = zero_alpha(scene_color), menu_layer_bytes = zero_alpha(menu_color);
     // Dark but beyond the premultiplied bound at alpha 0 (4/255).
-    const auto dark_layer = alpha_zero(make([](unsigned, unsigned) { return 3.f / 64.f; }, opaque));
-    // Its layer acts only once proven the presented frame without its UI
-    // (game3d_scene_guard.h): a menu before any gameplay sample holds the
-    // hidden verdict and stays 3D.
+    const auto dark_layer_bytes = zero_alpha(make([](unsigned, unsigned) { return 3.f / 64.f; }, opaque));
+    const auto scene_layer = color_view(scene_layer_bytes), mismatch_layer = color_view(menu_layer_bytes),
+      dark_layer = color_view(dark_layer_bytes);
+    // Texel 11 as SunshinePreUIPixel counts it from the pushed pair threshold
+    // (b2 word 4): matching pixels, lit layer pixels, lit presented pixels
+    // and lit presented pixels that differ, at 8 times the threshold (scRGB
+    // relative above one).
+    using pre_ui_pixels = std::array<std::uint32_t, 4>;
+    const auto channel_of = [&](const std::vector<unsigned char> &bytes, size_t i, unsigned c) {
+      if (gpu.color != 2) return bytes[i * bpp + c] / 255.f;
+      std::uint16_t half; std::memcpy(&half, bytes.data() + i * bpp + c * 2, 2); return half_float(half);
+    };
+    const auto expected_pixels = [&](const std::vector<unsigned char> &presented, const std::vector<unsigned char> &layer) {
+      float threshold{};
+      const auto threshold_bits = gpu.renderer.consumed_detection().pre_ui_threshold_bits;
+      std::memcpy(&threshold, &threshold_bits, sizeof(threshold));
+      require(threshold > 0.f, "The layer and the presented colour got no pair threshold");
+      const float coarse = threshold * 8.f;
+      pre_ui_pixels counts{};
+      for (size_t i = 0; i != pixels; ++i) {
+        float presented_peak = 0.f, layer_peak = 0.f, delta = 0.f;
+        for (unsigned c = 0; c != 3; ++c) {
+          const float p = channel_of(presented, i, c), l = channel_of(layer, i, c);
+          presented_peak = std::max(presented_peak, std::abs(p)); layer_peak = std::max(layer_peak, std::abs(l));
+          delta = std::max(delta, std::abs(p - l));
+        }
+        delta /= gpu.color == 2 ? std::max(1.f, presented_peak) : 1.f;
+        const bool match = delta <= coarse, lit = presented_peak > coarse;
+        counts[0] += match; counts[1] += layer_peak > coarse; counts[2] += lit; counts[3] += lit && !match;
+      }
+      return counts;
+    };
+    const auto counted = [](const alpha_auto_decision &sample) {
+      const auto &e = sample.evidence;
+      return pre_ui_pixels{e.pre_ui_match, e.pre_ui_image_lit, e.presented_lit, e.presented_lit_differs};
+    };
+    const auto all_pixels = std::uint32_t(pixels);
+    const auto proven_pushed = [&] { return (gpu.renderer.consumed_detection().flags & ui_detection::per_frame_pre_ui_proven) != 0; };
+    alpha_auto_policy sdr;
+    source.session = &sdr;
+    const auto layer_signature = *ui_selection::signature::parse(gpu.key(ui_selection::kind::ui_layer));
     ++source.epoch;
     inputs = {}; inputs.current_color = true; inputs.layer = scene_layer; inputs.layer_flags = layer_flags;
+    // Unproven, the layer claims nothing: the menu stays 3D and no sample
+    // frame measures, so not even the hidden verdict is held (S2b held it
+    // from the V1-invalid layer's own claim). Its pixels mismatch.
     const auto unproven = never_flat(menu_color, 5, "Stellar Blade SDR settings before gameplay (layer unproven)");
-    require(unproven.held && !unproven.sample.scene_guard.pre_ui && !unproven.sample.scene_guard.proven &&
-        unproven.sample.evidence.pre_ui_scene.valid && unproven.sample.evidence.pre_ui_scene.d >= .25f,
-      "The unproven SDR scene layer acted, or was not measured");
-    // Gameplay shows the scene the layer holds: both D agree, which proves
-    // the layer and releases the hidden verdict.
-    const auto proving = never_flat(scene_color, 3, "SDR gameplay proving the scene layer");
-    require(!proving.held && proving.sample.scene_guard.proven, "SDR gameplay did not prove the scene layer");
+    const auto menu_pixels = expected_pixels(menu_color, scene_layer_bytes);
+    require(!unproven.held && !unproven.evidence && !unproven.sample.evidence.claims && !unproven.sample.scene_guard.proven &&
+        !proven_pushed() && counted(unproven.sample) == menu_pixels && menu_pixels[0] * 10u < all_pixels * 9u &&
+        !sdr.pre_ui_proven(layer_signature),
+      "The unproven SDR scene layer acted or measured, or its pixel counts are not exact");
+    // Gameplay shows the scene the layer holds: equal on every pixel and lit,
+    // so the third matching sample 2 s after the first proves the layer
+    // without any D (nothing claims before the proof). A frame reads the
+    // previous frame's sample, 100 ms apart: the 22nd gameplay frame reads
+    // the sample 2 s after the first.
+    const auto play_pixels = expected_pixels(scene_color, scene_layer_bytes);
+    require(play_pixels == pre_ui_pixels{all_pixels, all_pixels, all_pixels, 0u}, "The fixture's gameplay layer does not equal the presented colour");
+    unsigned proving_frames = 0;
+    outcome proving{};
+    while (!sdr.pre_ui_proven(layer_signature) && proving_frames != 30) {
+      proving = frame(scene_color);
+      ++proving_frames;
+      require(!proving.flat && (proving_frames == 1 || counted(proving.sample) == play_pixels) &&
+          (sdr.pre_ui_proven(layer_signature) || !proving.evidence),
+        "SDR gameplay before the proof flattened or measured, or its pixel counts are not exact");
+    }
+    require(proving_frames == 22 && proving.sample.scene_guard.proven && proving.evidence == 1 && proven_pushed(),
+      "SDR gameplay did not prove the scene layer by its pixels at the sample 2 s after the first: " + std::to_string(proving_frames));
+    // A visible sample whose layer differs from the presented frame never
+    // withdraws the proof (UI over the scene looks the same).
+    inputs.layer = mismatch_layer;
+    frame(scene_color);
+    const auto mismatched = frame(scene_color);
+    require(mismatched.evidence == 1 && mismatched.sample.evidence.scene.verdict == scene_verdict::visible &&
+        counted(mismatched.sample) == expected_pixels(scene_color, menu_layer_bytes) &&
+        !ui_selection::pre_ui_match(mismatched.sample.evidence.pre_ui_match, mismatched.sample.evidence.pre_ui_image_lit, all_pixels) &&
+        mismatched.sample.scene_guard.proven && sdr.pre_ui_proven(layer_signature),
+      "A mismatching visible sample withdrew the proof, or was not measured");
+    inputs.layer = scene_layer;
+    // The menu suspends frame generation and the depth moves to another
+    // provider: another viewport, an identity change that clears the scene
+    // guard but not the ledger's proof. Flat at its second hidden sample.
+    ++source.viewport;
     require(frames_to_flat(menu_color, 4, "Stellar Blade SDR settings") == 3,
-      "The SDR settings menu over its proven pre-UI layer did not flatten at its second hidden sample");
+      "The SDR settings menu over its proven pre-UI layer did not flatten at its second hidden sample after the identity change");
     const auto sb_menu = frame(menu_color);
     require(sb_menu.flat && sb_menu.sample.source_kind == 8u && sb_menu.sample.evidence.claims == ui_detection::claim_pre_ui &&
         sb_menu.sample.evidence.pre_ui_image == ui_detection::pre_ui_image::layer && sb_menu.sample.evidence.pre_ui_scene.valid &&
         sb_menu.sample.evidence.pre_ui_scene.d >= .25f && sb_menu.sample.evidence.scene.verdict == scene_verdict::hidden &&
-        sb_menu.sample.evidence.frame_reason == ui_detection::frame_reason_decided &&
-        sb_menu.sample.scene_guard.hidden && sb_menu.sample.scene_guard.pre_ui && sb_menu.sample.scene_guard.proven,
-      "The SDR settings menu did not report H1 from its pre-UI layer");
+        sb_menu.sample.evidence.frame_reason == ui_detection::frame_reason_decided && counted(sb_menu.sample) == menu_pixels &&
+        sb_menu.sample.scene_guard.hidden && sb_menu.sample.scene_guard.pre_ui && sb_menu.sample.scene_guard.proven &&
+        (gpu.renderer.consumed_detection().flags & (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible |
+          ui_detection::per_frame_pre_ui_proven)) == (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible |
+          ui_detection::per_frame_pre_ui_proven),
+      "The SDR settings menu did not report H1 from its proven pre-UI layer");
     // Gameplay again: the presented frame shows the scene, reads visible and
     // releases both holds; the pre-UI claim stays true but never acts alone,
     // and is never refuted, so the next menu visit enters again.
@@ -2862,17 +2941,37 @@ namespace {
       "SDR gameplay did not release the menu's holds, or refuted the pre-UI claim");
     const auto sb_gameplay = never_flat(scene_color, 4, "SDR gameplay, presented and pre-UI image both visible");
     require(sb_gameplay.evidence == 1 && sb_gameplay.sample.evidence.pre_ui_scene.d >= .25f &&
-        sb_gameplay.sample.evidence.scene.verdict == scene_verdict::visible,
+        sb_gameplay.sample.evidence.scene.verdict == scene_verdict::visible && counted(sb_gameplay.sample) == play_pixels,
       "SDR gameplay did not measure both images visible on every sample");
+    // A real frame within 100 ms of the previous sample is not a detection
+    // sample: it pushes no pre-UI threshold, so its passes skip the pre-UI
+    // counts the CPU never reads; the next sample frame counts them again.
+    {
+      ++source.sequence;
+      gpu.renderer.begin_present();
+      gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      const auto between = gpu.renderer.consumed_detection();
+      require(between.state == ui_detection_snapshot::run_state::ran && (between.candidates & ui_detection::candidate::layer) &&
+          !between.pre_ui_threshold_bits, "A frame that is not a detection sample pushed the pre-UI threshold");
+      const auto next = frame(scene_color);
+      require(gpu.renderer.consumed_detection().pre_ui_threshold_bits && !next.flat && counted(next.sample) == play_pixels,
+        "The sample frame after a skipped one lost its pre-UI threshold or its exact counts");
+    }
     require(frames_to_flat(menu_color, 4, "Stellar Blade SDR settings again") == 3,
       "The next SDR menu visit did not enter at its second hidden sample");
     // Dark gameplay: the pre-UI image reads hidden too, so its hold never
     // enters and nothing flattens, though the presented frame reads hidden.
+    // The dark layer is lit nowhere (sRGB) or differs (scRGB): no match.
     ++source.epoch;
     inputs.layer = dark_layer;
     const auto sb_dark = never_flat(black_color, 6, "SDR dark gameplay, both images hidden");
     require(sb_dark.sample.evidence.pre_ui_scene.valid && sb_dark.sample.evidence.pre_ui_scene.d < .25f &&
-        sb_dark.held && !sb_dark.sample.scene_guard.pre_ui, "A dark pre-UI image entered the pre-UI hold");
+        sb_dark.held && !sb_dark.sample.scene_guard.pre_ui && counted(sb_dark.sample) == expected_pixels(black_color, dark_layer_bytes) &&
+        !ui_selection::pre_ui_match(sb_dark.sample.evidence.pre_ui_match, sb_dark.sample.evidence.pre_ui_image_lit, all_pixels) &&
+        sdr.pre_ui_proven(layer_signature), "A dark pre-UI image entered the pre-UI hold, matched, or withdrew the proof");
+    require(sdr.stored() == ui_selection::pre_ui_key(layer_signature).key(), "The SDR session did not keep the layer's proof as its only key");
+    source.session = &policy;
+    std::printf("PASS D3D11 Stellar Blade SDR pre-UI proof (fix 1): an unproven layer without alpha claims and measures nothing; %u gameplay frames prove it by exact texel 11 pixel counts (3 matching samples over 2 s, no D), counted on sample frames only; a mismatching visible sample and an identity change keep the proof; the menu flattens at its second hidden sample and a dark pre-UI image never enters the pre-UI hold\n", proving_frames);
     // (k) An accepted layer decides by itself (source 10), whatever the
     // evidence: its opaque-full claim measures, and the hidden verdict it
     // enters is held, but H1 never overrides a winner opaque on every pixel. Its
@@ -2938,9 +3037,11 @@ namespace {
       << held_frames << " reused_depth_blocks=1 camera_blocks=1 epoch_clears=1 revision_inactive_acceptance_keep=1"
       " alternating_hudless_keeps_hold=1 no_claim_quiet=1 one_invalid_pixel_claims=1 unaccepted_ui_alpha_quiet=1"
       " accepted_ui_alpha_source1=1 pre_ui_hudless=1 black_hudless_rejected=1 unaccepted_exact_pair_h1=1 rule6_accepted=1"
-      " sdr_pre_ui_layer=1 sdr_gameplay_visible=1 sdr_dark_never_flat=1 accepted_layer_not_overridden=1 first_run_shadow=1"
+      " sdr_unproven_quiet=1 sdr_proof_frames=" << proving_frames << " sdr_proof_kept_mismatch=1 sdr_proof_kept_identity=1"
+      " sdr_pre_ui_pixels_exact=1 sdr_pre_ui_sample_only=1 sdr_pre_ui_layer=1 sdr_gameplay_visible=1 sdr_dark_never_flat=1 accepted_layer_not_overridden=1"
+      " first_run_shadow=1"
       " blank_frames_end_run=1 shadow_entry_unchanged=1\n";
-    std::puts("PASS D3D11 hidden scene (H1): an informative full claim (an unaccepted opaque layer, an unaccepted exact full change set, or a pre-UI image: an inexact HUD-less image or Stellar Blade SDR's V1-invalid cleared target reading visible while the presented frame reads hidden) flattens as 8 only after two valid hidden samples and while the depth is this frame's; holds expire after hold_ms, release on visible evidence and clear only on an epoch change, not on a revision, inactive detection, acceptance or a HUD-less pairing that comes and goes; a visible verdict refutes the layer's claim until it shows itself transparent; reused depth, an unready camera, no claim, a tagged UI color, presented alpha and an unaccepted UIAlpha never flatten, while an accepted UIAlpha or layer decides by itself and is never overridden; an exact full-frame pair is rule 6 once accepted; SDR gameplay (both images visible) and dark gameplay (both hidden) never flatten; evidence runs only for a claim, a hold, the shadow or a whole-frame decision; the first-run shadow only measures, ignores blank frames and leaves entry unchanged");
+    std::puts("PASS D3D11 hidden scene (H1): an informative full claim (an unaccepted opaque layer, an unaccepted exact full change set, or a pre-UI image: an inexact HUD-less image, or Stellar Blade SDR's cleared target without alpha once the session ledger proved it the pre-UI image by its pixels (three matching samples over 2 s, kept across a mismatching sample and an identity change), reading visible while the presented frame reads hidden) flattens as 8 only after two valid hidden samples and while the depth is this frame's; holds expire after hold_ms, release on visible evidence and clear only on an epoch change, not on a revision, inactive detection, acceptance or a HUD-less pairing that comes and goes; a visible verdict refutes the layer's claim until it shows itself transparent; reused depth, an unready camera, no claim, a tagged UI color, presented alpha and an unaccepted UIAlpha never flatten, while an accepted UIAlpha or layer decides by itself and is never overridden; an exact full-frame pair is rule 6 once accepted; SDR gameplay (both images visible) and dark gameplay (both hidden) never flatten; evidence runs only for a claim, a hold, the shadow or a whole-frame decision; the first-run shadow only measures, ignores blank frames and leaves entry unchanged");
   }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;

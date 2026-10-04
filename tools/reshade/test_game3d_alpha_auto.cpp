@@ -793,27 +793,27 @@ namespace {
     scene_guard::state g;
     g.enter_scope(1, 1);
     auto observed = g.observe(scene_sample(1000, H), true, sigs);
-    require(!observed.entered && !g.per_frame(1000, candidate::layer, sigs), "One hidden sample entered a hold");
+    require(!observed.entered && !g.per_frame(1000, candidate::layer, sigs, false), "One hidden sample entered a hold");
     observed = g.observe(scene_sample(1100, H), true, sigs);
-    require(observed.entered && g.per_frame(1100, candidate::layer, sigs) == hidden_bit &&
-        g.per_frame(1600, candidate::layer, sigs) == hidden_bit && !g.per_frame(1601, candidate::layer, sigs),
+    require(observed.entered && g.per_frame(1100, candidate::layer, sigs, false) == hidden_bit &&
+        g.per_frame(1600, candidate::layer, sigs, false) == hidden_bit && !g.per_frame(1601, candidate::layer, sigs, false),
       "Two hidden samples did not enter a hold of hold_ms");
     // Each further hidden sample renews it without entering again.
     observed = g.observe(scene_sample(1500, H), true, sigs);
-    require(!observed.entered && g.per_frame(2000, candidate::layer, sigs) == hidden_bit && !g.per_frame(2001, candidate::layer, sigs),
+    require(!observed.entered && g.per_frame(2000, candidate::layer, sigs, false) == hidden_bit && !g.per_frame(2001, candidate::layer, sigs, false),
       "A hidden sample did not renew the hold");
     // An ambiguous sample breaks no held hold; invalid evidence and evidence
     // that is not actionable change nothing.
     g.observe(scene_sample(1700, A), true, sigs);
     g.observe(scene_sample(1800, none), true, sigs);
     g.observe(scene_sample(1900, V), false, sigs);
-    require(g.per_frame(2000, candidate::layer, sigs) == hidden_bit && !g.refuted_count,
+    require(g.per_frame(2000, candidate::layer, sigs, false) == hidden_bit && !g.refuted_count,
       "An ambiguous, invalid or shadow-only sample released or refuted");
     // One valid visible sample releases the hold and refutes the signature of
     // every candidate whose full claim it carried.
     observed = g.observe(scene_sample(1950, V), true, sigs);
-    require(observed.released && observed.refuted == 1 && !g.per_frame(1950, 0u, sigs) &&
-        g.refuted(signatures().of(kind::ui_layer)) && g.per_frame(1950, candidate::layer, sigs) == layer_refuted,
+    require(observed.released && observed.refuted == 1 && !g.per_frame(1950, 0u, sigs, false) &&
+        g.refuted(signatures().of(kind::ui_layer)) && g.per_frame(1950, candidate::layer, sigs, false) == layer_refuted,
       "A visible sample did not release the hold and refute the layer");
     observed = g.observe(scene_sample(2000, V), true, sigs);
     require(!observed.released && !observed.refuted && g.refuted_count == 1, "A refuted signature was refuted again");
@@ -840,7 +840,7 @@ namespace {
     shadow_only.enter_scope(1, 1);
     shadow_only.observe(scene_sample(1000, H), false, sigs);
     shadow_only.observe(scene_sample(1100, H), false, sigs);
-    require(!shadow_only.per_frame(1100, candidate::layer, sigs), "Evidence that was not actionable entered a hold");
+    require(!shadow_only.per_frame(1100, candidate::layer, sigs, false), "Evidence that was not actionable entered a hold");
     // A visible sample that decided H1 counts as a release even without a
     // hold at its tick (samples in flight).
     scene_guard::state late;
@@ -851,124 +851,95 @@ namespace {
 
     // The pre-UI hold: the samples that hit the hidden hold while carrying
     // the pre-UI claim read the pre-UI image visible (Stellar Blade SDR
-    // settings: presented .031, layer .588), once a gameplay sample proved
-    // the layer the presented frame without its UI (presented .515, layer
-    // .518).
+    // settings: presented .031, layer .588). The layer's claim exists only
+    // while the acceptance ledger proves its signature (layer_proven); the
+    // guard neither gives nor withdraws that proof.
     scene_guard::state sb;
     sb.enter_scope(1, 1);
     const std::uint32_t sb_offer = candidate::layer | candidate::current;
-    auto proof = pre_ui_sample(900, V, .518f);
-    proof.presented.d = .515f;
-    require(sb.observe(proof, true, sigs).proved && sb.proven(signatures().of(kind::ui_layer)),
-      "A gameplay sample with both images agreeing did not prove the layer");
+    constexpr std::uint32_t proven_bit = ui_detection::per_frame_pre_ui_proven;
     sb.observe(pre_ui_sample(1000, H, .588f), true, sigs);
-    require(!sb.per_frame(1000, sb_offer, sigs), "One pre-UI sample held");
+    require(sb.per_frame(1000, sb_offer, sigs, true) == proven_bit, "One pre-UI sample held");
     sb.observe(pre_ui_sample(1100, H, .588f), true, sigs);
-    require(sb.per_frame(1100, sb_offer, sigs) == (hidden_bit | pre_ui_bit), "Two pre-UI samples did not hold both verdicts");
+    require(sb.per_frame(1100, sb_offer, sigs, true) == (hidden_bit | pre_ui_bit | proven_bit) &&
+        sb.per_frame(1100, sb_offer, sigs, false) == hidden_bit,
+      "Two pre-UI samples did not hold both verdicts for a proven layer alone");
+    // The proven bit names an offered layer only, whatever the pre-UI image.
+    require(sb.per_frame(1100, candidate::current, sigs, true) == (hidden_bit | pre_ui_bit) &&
+        sb.per_frame(1100, candidate::layer | candidate::hudless, sigs, true) == (hidden_bit | pre_ui_bit | proven_bit),
+      "The proven bit was pushed without an offered layer");
     // Absent pre-UI evidence, or evidence of another image, changes nothing.
     sb.observe(pre_ui_sample(1200, H, -1.f), true, sigs);
     auto other_image = pre_ui_sample(1300, H, .05f);
     other_image.pre_ui_image = ui_detection::pre_ui_image::hudless;
     sb.observe(other_image, true, sigs);
-    require(sb.per_frame(1600, sb_offer, sigs) == (hidden_bit | pre_ui_bit), "Absent or mismatched pre-UI evidence changed a hold");
+    require(sb.per_frame(1600, sb_offer, sigs, true) == (hidden_bit | pre_ui_bit | proven_bit),
+      "Absent or mismatched pre-UI evidence changed a hold");
     // A pre-UI image that does not read visible releases the pre-UI hold only.
     sb.observe(pre_ui_sample(1400, H, .2f), true, sigs);
-    require(sb.per_frame(1400, sb_offer, sigs) == hidden_bit, "A non-visible pre-UI image kept the pre-UI hold");
+    require(sb.per_frame(1400, sb_offer, sigs, true) == (hidden_bit | proven_bit), "A non-visible pre-UI image kept the pre-UI hold");
     // Leaving the menu: the presented frame reads visible and releases both;
     // the pre-UI claim is never refuted.
     observed = sb.observe(pre_ui_sample(1500, V, .5f), true, sigs);
-    require(observed.released && !observed.refuted && !sb.per_frame(1500, sb_offer, sigs) && !sb.refuted_count,
+    require(observed.released && !observed.refuted && sb.per_frame(1500, sb_offer, sigs, true) == proven_bit && !sb.refuted_count,
       "Leaving the menu did not release both holds, or refuted the pre-UI claim");
     // Dark or foggy gameplay: both images read hidden, so the pre-UI hold
     // never enters (the hidden hold alone makes no claim act).
     scene_guard::state dark;
     dark.enter_scope(1, 1);
     for (std::uint64_t tick = 1000; tick <= 3000; tick += 100) dark.observe(pre_ui_sample(tick, H, .05f), true, sigs);
-    require(dark.per_frame(3000, sb_offer, sigs) == hidden_bit, "A dark scene entered the pre-UI hold");
+    require(dark.per_frame(3000, sb_offer, sigs, true) == (hidden_bit | proven_bit), "A dark scene entered the pre-UI hold");
     // Gameplay: both images visible, nothing held.
     scene_guard::state gameplay;
     gameplay.enter_scope(1, 1);
     for (std::uint64_t tick = 1000; tick <= 2000; tick += 100) gameplay.observe(pre_ui_sample(tick, V, .518f), true, sigs);
-    require(!gameplay.per_frame(2000, sb_offer, sigs) && gameplay.proven(signatures().of(kind::ui_layer)),
-      "Visible gameplay held a verdict, or did not prove the layer");
+    require(gameplay.per_frame(2000, sb_offer, sigs, true) == proven_bit, "Visible gameplay held a verdict");
 
-    // The pre-UI proof. An unproven layer never enters the pre-UI hold: a
-    // menu before any gameplay sample, or a scene buffer whose D never
-    // agreed with the presented frame's.
+    // An unproven layer makes no pre-UI claim (the GPU's claim (d) needs the
+    // proven bit), so its samples never enter the pre-UI hold, and a pre-UI
+    // hold held for the layer is not pushed while it is unproven.
     scene_guard::state unproven;
     unproven.enter_scope(1, 1);
-    for (std::uint64_t tick = 1000; tick <= 1300; tick += 100) unproven.observe(pre_ui_sample(tick, H, .588f), true, sigs);
-    require(unproven.per_frame(1300, sb_offer, sigs) == hidden_bit && !unproven.pre_ui.until &&
-        !unproven.proven(signatures().of(kind::ui_layer)), "An unproven layer entered the pre-UI hold");
-    // A presented frame that reads hidden neither proves nor withdraws; one
-    // that reads ambiguous proves within 0.03 and withdraws beyond it.
-    auto close = pre_ui_sample(1400, A, .22f);
-    require(unproven.observe(close, true, sigs).proved, "Agreeing D over an ambiguous presented frame did not prove the layer");
-    auto apart = pre_ui_sample(1500, A, .26f);
-    require(unproven.observe(apart, true, sigs).withdrawn && !unproven.proven(signatures().of(kind::ui_layer)),
-      "A gap of 0.06 over an ambiguous presented frame did not withdraw the proof");
-    // Fog or grain after the scene buffer: proven in clear gameplay, the
-    // presented frame then drifts through ambiguous while the buffer stays
-    // visible, which withdraws the proof before the presented frame reads
-    // hidden; the pre-UI hold never enters.
-    scene_guard::state fog;
-    fog.enter_scope(1, 1);
-    fog.observe(pre_ui_sample(1000, V, .5f), true, sigs);
-    std::uint64_t tick = 1100;
-    for (const float presented : {.40f, .30f, .22f, .16f, .12f, .08f, .05f, .05f, .05f}) {
-      auto drift = pre_ui_sample(tick, ui_detection::scene_verdict_of(presented), .5f);
-      drift.presented.d = presented;
-      fog.observe(drift, true, sigs);
-      tick += 100;
+    for (std::uint64_t tick = 1000; tick <= 1300; tick += 100) {
+      auto no_claim = pre_ui_sample(tick, H, .588f);
+      no_claim.claims = 0;
+      unproven.observe(no_claim, unproven.measure(tick, false, false, false).actionable, sigs);
     }
-    require(fog.per_frame(tick, sb_offer, sigs) == hidden_bit && !fog.pre_ui.until && !fog.proven(signatures().of(kind::ui_layer)),
-      "Fog over a proven scene buffer entered the pre-UI hold");
-    // A withdrawn proof releases a held pre-UI hold; the proof is per layer
-    // signature.
-    scene_guard::state withdrawn;
-    withdrawn.enter_scope(1, 1);
-    withdrawn.observe(pre_ui_sample(900, V, .5f), true, sigs);
-    withdrawn.observe(pre_ui_sample(1000, H, .588f), true, sigs);
-    withdrawn.observe(pre_ui_sample(1100, H, .588f), true, sigs);
+    require(!unproven.per_frame(1300, sb_offer, sigs, false) && !unproven.pre_ui.until && !unproven.hidden.until,
+      "An unproven layer without a claim held a verdict");
+    // A proven layer that is the offer's pre-UI image measures actionably
+    // without a claim or a hold, so that the first hidden sample after an
+    // identity change already counts; beside a HUD-less image it does not.
+    scene_guard::state fresh_guard;
+    fresh_guard.enter_scope(1, 1);
+    const auto proven_measure = fresh_guard.measure(1000, false, false, true),
+      unproven_measure = fresh_guard.measure(1000, false, false, false);
+    require(proven_measure.run && proven_measure.actionable && !unproven_measure.run && !unproven_measure.actionable,
+      "A proven pre-UI layer did not measure actionably");
+    // The 07:20 Stellar Blade session: FG suspended for the menu changes the
+    // depth provider's viewport, an identity change that clears every hold
+    // but not the ledger's proof; the menu holds both verdicts at its second
+    // hidden sample.
+    scene_guard::state suspended;
+    suspended.enter_scope(1, 1);
+    for (std::uint64_t tick = 1000; tick <= 2000; tick += 100) suspended.observe(pre_ui_sample(tick, V, .36f), true, sigs);
+    suspended.enter_scope(1, 0);
+    // A fade-in sample: presented visible (0.453), the layer 0.538.
+    auto fade = pre_ui_sample(2100, V, .538f);
+    fade.presented.d = .453f;
+    suspended.observe(fade, suspended.measure(2100, false, false, true).actionable, sigs);
+    suspended.observe(pre_ui_sample(2200, H, .544f), suspended.measure(2200, false, false, true).actionable, sigs);
+    require(suspended.per_frame(2200, sb_offer, sigs, true) == proven_bit, "The first hidden menu sample held");
+    suspended.observe(pre_ui_sample(2300, H, .569f), suspended.measure(2300, false, false, true).actionable, sigs);
+    require(suspended.per_frame(2300, sb_offer, sigs, true) == (hidden_bit | pre_ui_bit | proven_bit),
+      "The second hidden menu sample after an identity change did not hold both verdicts");
+    // The pre-UI hold is per offer, the proof per signature (the caller's
+    // ledger query): an unproven signature's per-frame bits carry no pre-UI
+    // verdict.
     auto other_layer = signatures();
     other_layer.set(kind::ui_layer, 28);
-    require(withdrawn.per_frame(1100, sb_offer, sigs) == (hidden_bit | pre_ui_bit) &&
-        withdrawn.per_frame(1100, sb_offer, other_layer.by_kind()) == hidden_bit,
-      "The pre-UI hold did not act for the proven signature alone");
-    auto disagree = pre_ui_sample(1200, A, .5f);
-    require(withdrawn.observe(disagree, true, sigs).withdrawn && !withdrawn.pre_ui.until &&
-        withdrawn.per_frame(1200, sb_offer, sigs) == hidden_bit, "A withdrawn proof kept the pre-UI hold");
-    // Proof samples: while the latest sample set a layer aside, every sample
-    // frame measures (not actionably), and beside an offered HUD-less image
-    // the layer is the measured image unless the sample carried the pre-UI
-    // claim (Stellar Blade SDR with FG on: the gameplay that precedes a menu
-    // whose FG the game suspends).
-    scene_guard::state aside;
-    aside.enter_scope(1, 1);
-    const std::uint32_t fg_offer = candidate::layer | candidate::current | candidate::hudless;
-    auto fg_gameplay = scene_sample(1000, V, fg_offer, 0u);
-    fg_gameplay.valid_bits = candidate::current | candidate::hudless;
-    aside.observe(fg_gameplay, false, sigs);
-    const auto aside_measure = aside.measure(1100, false, false);
-    require(aside.layer_aside && aside_measure.run && !aside_measure.actionable &&
-        aside.per_frame(1100, fg_offer, sigs) == ui_detection::per_frame_pre_ui_layer &&
-        !aside.per_frame(1100, sb_offer, sigs) && ui_selection::measured_pre_ui_image(fg_offer, ui_detection::per_frame_pre_ui_layer) ==
-          ui_detection::pre_ui_image::layer, "A layer set aside beside a HUD-less image was not measured for its proof");
-    auto measured_layer = pre_ui_sample(1100, V, .508f);
-    measured_layer.offered = fg_offer;
-    measured_layer.valid_bits = candidate::current | candidate::hudless;
-    measured_layer.claims = 0;
-    measured_layer.presented.d = .504f;
-    require(aside.observe(measured_layer, false, sigs).proved, "The measured layer beside a HUD-less image was not proven");
-    auto full_change = fg_gameplay;
-    full_change.claims = ui_detection::claim_pre_ui;
-    aside.observe(full_change, true, sigs);
-    require(!(aside.per_frame(1200, fg_offer, sigs) & ui_detection::per_frame_pre_ui_layer),
-      "The layer was measured while the HUD-less image carried the pre-UI claim");
-    auto valid_layer = scene_sample(1300, V, fg_offer, 0u);
-    aside.observe(valid_layer, false, sigs);
-    require(!aside.layer_aside && !aside.measure(1400, false, false).run && !aside.per_frame(1400, fg_offer, sigs),
-      "A V1-valid layer was measured for a pre-UI proof");
+    require(suspended.per_frame(2300, sb_offer, other_layer.by_kind(), false) == hidden_bit,
+      "The pre-UI hold acted for an unproven signature");
 
     // Restore: a refuted candidate offered, valid and below 99% opaque is an
     // overlay again; opaque-full, invalid, or a sample without texel 10 does
@@ -988,7 +959,7 @@ namespace {
     auto overlay = scene_sample(2400, A, candidate::layer, 0u);
     overlay.opaque[ui_selection::alpha_index(kind::ui_layer)] = pixels / 2;
     g.observe(overlay, true, sigs);
-    require(!g.refuted_count && !g.per_frame(2400, candidate::layer, sigs), "A layer shown as an overlay stayed refuted");
+    require(!g.refuted_count && !g.per_frame(2400, candidate::layer, sigs, false), "A layer shown as an overlay stayed refuted");
     // A HUD-less signature: refuted by a visible sample of its exact full
     // change set, restored by an exact pair without the full claim.
     scene_guard::state pair;
@@ -996,7 +967,7 @@ namespace {
     const std::uint32_t exact_pair = candidate::hudless | candidate::exact;
     pair.observe(scene_sample(1000, V, exact_pair, candidate::hudless), true, sigs);
     require(pair.refuted(signatures().of(kind::hudless)) &&
-        pair.per_frame(1000, exact_pair, sigs) == (candidate::hudless << ui_detection::per_frame_refuted_shift),
+        pair.per_frame(1000, exact_pair, sigs, false) == (candidate::hudless << ui_detection::per_frame_refuted_shift),
       "A visible full change set did not refute the HUD-less signature");
     pair.observe(scene_sample(1100, A, candidate::hudless, 0u), true, sigs);
     require(pair.refuted(signatures().of(kind::hudless)), "An inexact pair restored the HUD-less signature");
@@ -1017,52 +988,53 @@ namespace {
         many.refuted(last.of(kind::ui_layer)) && !many.refuted(signatures().of(kind::ui_layer)),
       "Refutations were not a bounded FIFO per signature");
 
-    // per_frame composes the held verdicts and the refuted offered candidates
-    // only.
+    // per_frame composes the held verdicts, the refuted offered candidates
+    // and the proven offered layer only.
     scene_guard::state composed;
     composed.enter_scope(1, 1);
     composed.observe(scene_sample(1000, V, candidate::layer | candidate::backbuffer, candidate::layer | candidate::backbuffer), true, sigs);
     composed.observe(pre_ui_sample(1050, V, .5f), true, sigs);
     composed.observe(pre_ui_sample(1100, H, .6f), true, sigs);
     composed.observe(pre_ui_sample(1200, H, .6f), true, sigs);
-    require(composed.per_frame(1200, candidate::layer, sigs) == (hidden_bit | pre_ui_bit | layer_refuted) &&
-        composed.per_frame(1200, candidate::backbuffer | candidate::current, sigs) ==
+    require(composed.per_frame(1200, candidate::layer, sigs, true) == (hidden_bit | pre_ui_bit | layer_refuted | proven_bit) &&
+        composed.per_frame(1200, candidate::layer, sigs, false) == (hidden_bit | layer_refuted) &&
+        composed.per_frame(1200, candidate::backbuffer | candidate::current, sigs, true) ==
           (hidden_bit | pre_ui_bit | (candidate::backbuffer << ui_detection::per_frame_refuted_shift)) &&
-        composed.per_frame(1200, 0u, sigs) == (hidden_bit | pre_ui_bit),
-      "The per-frame bits were not the held verdicts and the refuted offered candidates");
+        composed.per_frame(1200, 0u, sigs, false) == (hidden_bit | pre_ui_bit),
+      "The per-frame bits were not the held verdicts, the refuted offered candidates and the proven layer");
 
     // Measurement: nothing runs without an acting-capable claim, a held
-    // verdict, the shadow, the whole-frame diagnostic or a layer set aside
-    // (above); only the first two are actionable.
+    // verdict, a proven pre-UI layer (above), the shadow or the whole-frame
+    // diagnostic; only the first three are actionable.
     scene_guard::state measured;
     measured.enter_scope(1, 1);
-    const auto idle = measured.measure(1000, false, false), shadow = measured.measure(1000, true, false),
-      whole = measured.measure(1000, false, true);
+    const auto idle = measured.measure(1000, false, false, false), shadow = measured.measure(1000, true, false, false),
+      whole = measured.measure(1000, false, true, false);
     require(!idle.run && !idle.actionable && shadow.run && !shadow.actionable && whole.run && !whole.actionable,
       "The shadow or the whole-frame diagnostic measured actionably, or nothing measured");
     measured.observe(scene_sample(1000, none), false, sigs);
-    require(measured.gate_open && measured.measure(1100, false, false).run && measured.measure(1100, false, false).actionable,
+    require(measured.gate_open && measured.measure(1100, false, false, false).run && measured.measure(1100, false, false, false).actionable,
       "A sample with a claim did not open the gate");
     measured.observe(scene_sample(1100, V), true, sigs);
-    require(!measured.gate_open && !measured.measure(1200, false, false).run,
+    require(!measured.gate_open && !measured.measure(1200, false, false, false).run,
       "A claim refuted by the same sample left the gate open");
     measured.observe(scene_sample(1200, none, candidate::layer | candidate::current, ui_detection::claim_pre_ui), false, sigs);
     require(measured.gate_open, "The pre-UI claim did not open the gate");
     measured.observe(scene_sample(1300, none, candidate::layer, candidate::layer), false, sigs);
     require(!measured.gate_open, "A refuted claim opened the gate");
-    require(composed.measure(1200, false, false).actionable, "A held verdict did not measure actionably");
+    require(composed.measure(1200, false, false, false).actionable, "A held verdict did not measure actionably");
 
     // Only an identity change (epoch or viewport) clears the guard; a scope
     // entered again with the same identity (an observation revision, an
     // inactive frame, acceptance changes) keeps it.
     composed.enter_scope(1, 1);
-    require(composed.per_frame(1200, candidate::layer, sigs) == (hidden_bit | pre_ui_bit | layer_refuted),
+    require(composed.per_frame(1200, candidate::layer, sigs, true) == (hidden_bit | pre_ui_bit | layer_refuted | proven_bit),
       "The same identity cleared the guard");
     auto epoch = composed, viewport = composed;
     epoch.enter_scope(2, 1);
     viewport.enter_scope(1, 2);
-    require(!epoch.per_frame(1200, candidate::layer, sigs) && !epoch.refuted_count && !epoch.gate_open &&
-        !viewport.per_frame(1200, candidate::layer, sigs) && !viewport.refuted_count,
+    require(!epoch.per_frame(1200, candidate::layer, sigs, false) && !epoch.refuted_count && !epoch.gate_open &&
+        !viewport.per_frame(1200, candidate::layer, sigs, false) && !viewport.refuted_count,
       "An epoch or viewport change kept the guard's state");
 
     // The first-run shadow's uncovered hidden run: consecutive valid hidden
@@ -1104,6 +1076,156 @@ namespace {
     const auto older = scene_guard::sample_of(t.data(), 4 * ui_detection::judgment_decision_texels, 1234, false);
     require(!older.complete && !older.claims && !older.presented.valid && !older.pre_ui_image,
       "The scene guard decoded texel 10 or evidence it was not given");
+  }
+  // H1 (d), fix 1: Stellar Blade SDR's cleared output target, an offered
+  // layer without coverage (BGRA8, V1-invalid: colour beyond the
+  // premultiplied bound) and its pre-UI pixel counts against the presented
+  // frame (decision texel 11), under the presented frame's D verdict.
+  candidate_signatures sb_signatures(std::uint32_t format = 87, std::uint32_t color_space = 1) {
+    candidate_signatures result;
+    result.color_space = color_space;
+    result.set(kind::ui_layer, format).set(kind::current, 24);
+    return result;
+  }
+  alpha_auto_decision::detection_evidence sb_layer(std::uint32_t match, std::uint32_t lit,
+      ui_detection::scene_verdict presented = ui_detection::scene_verdict::visible, std::uint32_t covered = 0) {
+    alpha_auto_decision::detection_evidence e;
+    e.candidates = candidate::layer | candidate::current;
+    e.layer_covered = covered;
+    e.layer_invalid = pixels;
+    e.valid_bits = candidate::current;
+    e.pre_ui_match = match;
+    e.pre_ui_image_lit = lit;
+    e.presented_lit = lit;
+    e.presented_lit_differs = pixels - match;
+    e.scene.valid = presented != ui_detection::scene_verdict::none;
+    e.scene.ran = true;
+    e.scene.verdict = presented;
+    e.scene.n = 400;
+    e.scene.d = presented == ui_detection::scene_verdict::hidden ? .02f : .4f;
+    return e;
+  }
+
+  // The ledger's pre-UI proof (H1 d): earned like an inferred source by
+  // matching samples, never withdrawn by a mismatch, keyed by the layer's
+  // format and colour space, remembered, lapsing only over testable time,
+  // cleared by Forget, and never a candidate's acceptance.
+  void pre_ui_proof_is_earned_by_pixels() {
+    using ui_detection::scene_verdict;
+    namespace n = ui_counter;
+    const auto sb = sb_signatures();
+    const auto layer = sb.of(kind::ui_layer);
+    const auto match = sb_layer(995, 900), mismatch = sb_layer(350, 900), menu = sb_layer(330, 260, scene_verdict::hidden);
+    require(ui_selection::pre_ui_key(layer).key() == "pre_ui:87:srgb", "The pre-UI key text changed");
+
+    // Three matching samples over 2 s earn it; two over 2 s do not.
+    alpha_auto_policy earning;
+    std::string heard;
+    earning.on_change([&](const std::string &stored) { heard = stored; });
+    earning.observe(match, pixels, 1000, sb);
+    earning.observe(match, pixels, 3000, sb);
+    require(!earning.pre_ui_proven(layer), "Two matching samples over 2 s proved the layer");
+    earning.observe(match, pixels, 3100, sb);
+    require(earning.pre_ui_proven(layer) && earning.stored() == "pre_ui:87:srgb" && heard == "pre_ui:87:srgb" &&
+        earning.counters()[n::trust_earned] == 1, "Three matching samples over 2 s did not prove the layer");
+    alpha_auto_policy quick;
+    for (std::uint64_t tick = 1000; tick <= 2900; tick += 100) quick.observe(match, pixels, tick, sb);
+    require(!quick.pre_ui_proven(layer), "Matching samples within less than 2 s proved the layer");
+    // Never a candidate's acceptance: no candidate bit, and the layer itself
+    // stays unaccepted.
+    require(!earning.accepted(candidate::layer | candidate::current, sb) && !earning.accepts(layer),
+      "The pre-UI proof was accepted as a candidate");
+    // A mismatch (UI over the scene, a menu) never withdraws it.
+    for (std::uint64_t tick = 4000; tick <= 90000; tick += 500) earning.observe(tick % 1000 ? mismatch : menu, pixels, tick, sb);
+    require(earning.pre_ui_proven(layer) && earning.counters()[n::trust_earned] == 1, "A mismatch withdrew the proof");
+    // Nor does a mismatch restart the earning run.
+    alpha_auto_policy interrupted;
+    interrupted.observe(match, pixels, 1000, sb);
+    interrupted.observe(mismatch, pixels, 1500, sb);
+    interrupted.observe(match, pixels, 2000, sb);
+    interrupted.observe(menu, pixels, 2500, sb);
+    interrupted.observe(match, pixels, 3000, sb);
+    require(interrupted.pre_ui_proven(layer), "A mismatch restarted the earning run");
+
+    // A dark image (lit on less than half the pixels: a transparent black UI
+    // layer equals a black frame) and a layer with coverage never earn.
+    alpha_auto_policy dark, covered;
+    for (std::uint64_t tick = 1000; tick <= 9000; tick += 500) {
+      dark.observe(sb_layer(pixels, 499), pixels, tick, sb);
+      covered.observe(sb_layer(pixels, pixels, scene_verdict::visible, 10), pixels, tick, sb);
+    }
+    require(!dark.pre_ui_proven(layer) && !covered.pre_ui_proven(layer) && dark.stored().empty() && covered.stored().empty(),
+      "A dark image or a layer with coverage was proven");
+
+    // Another format or colour space is another key.
+    alpha_auto_policy keys;
+    for (std::uint64_t tick = 1000; tick <= 3000; tick += 1000) keys.observe(match, pixels, tick, sb_signatures(87, 3));
+    require(keys.pre_ui_proven(sb_signatures(87, 3).of(kind::ui_layer)) && !keys.pre_ui_proven(layer) &&
+        !keys.pre_ui_proven(sb_signatures(28).of(kind::ui_layer)) && keys.stored() == "pre_ui:87:pq",
+      "The proof was not keyed by format and colour space");
+
+    // Remembered: the key round-trips through stored() and restore(); a
+    // restored proof is provisional, confirmed by three matches over 2 s.
+    alpha_auto_policy restored;
+    require(restored.restore(earning.stored()).restored == 1 && restored.pre_ui_proven(layer) &&
+        restored.stored() == "pre_ui:87:srgb" && !restored.pre_ui_proven(sb_signatures(87, 3).of(kind::ui_layer)),
+      "The pre-UI key did not round-trip");
+    for (std::uint64_t tick = 1000; tick <= 3000; tick += 1000) restored.observe(match, pixels, tick, sb);
+    require(restored.counters()[n::trust_earned] == 1 && restored.counters()[n::trust_restored] == 1,
+      "Matching samples did not confirm a restored proof");
+    for (std::uint64_t tick = 4000; tick <= 200000; tick += 1000) restored.observe(mismatch, pixels, tick, sb);
+    require(restored.pre_ui_proven(layer) && !restored.counters()[n::trust_lapsed], "A confirmed proof lapsed");
+
+    // A provisional proof lapses after 60 s of testable time (layer offered
+    // without coverage, presented evidence valid and visible) without a match.
+    alpha_auto_policy lapsing;
+    lapsing.restore("pre_ui:87:srgb");
+    for (std::uint64_t tick = 1000; tick <= 60000; tick += 1000) lapsing.observe(mismatch, pixels, tick, sb);
+    require(lapsing.pre_ui_proven(layer), "A provisional proof lapsed before 60 s of testable time");
+    lapsing.observe(mismatch, pixels, 61000, sb);
+    require(!lapsing.pre_ui_proven(layer) && lapsing.stored().empty() && lapsing.counters()[n::trust_lapsed] == 1,
+      "A provisional proof did not lapse after 60 s of testable time");
+    // The clock pauses on every sample that is not testable: the presented
+    // frame hidden or its evidence invalid, the layer missing, covered or of
+    // another signature.
+    alpha_auto_policy paused;
+    paused.restore("pre_ui:87:srgb");
+    for (std::uint64_t tick = 1000; tick <= 30000; tick += 1000) paused.observe(mismatch, pixels, tick, sb);
+    alpha_auto_decision::detection_evidence no_layer;
+    no_layer.candidates = candidate::current;
+    std::uint64_t tick = 31000;
+    for (; tick <= 200000; tick += 1000) {
+      switch ((tick / 1000) % 5) {
+        case 0: paused.observe(menu, pixels, tick, sb); break;
+        case 1: paused.observe(sb_layer(350, 900, scene_verdict::none), pixels, tick, sb); break;
+        case 2: paused.observe(no_layer, pixels, tick, sb); break;
+        case 3: paused.observe(sb_layer(350, 900, scene_verdict::visible, 10), pixels, tick, sb); break;
+        default: paused.observe(mismatch, pixels, tick, sb_signatures(28)); break;
+      }
+    }
+    require(paused.pre_ui_proven(layer), "A provisional proof lapsed while its clock was paused");
+    // 30 s ran before the pause (1000 to the first paused sample at 31000);
+    // 30 more testable seconds lapse it.
+    for (tick = 201000; tick <= 230000; tick += 1000) paused.observe(mismatch, pixels, tick, sb);
+    require(paused.pre_ui_proven(layer), "A paused clock was charged with untestable time");
+    paused.observe(mismatch, pixels, 231000, sb);
+    require(!paused.pre_ui_proven(layer), "A provisional proof did not lapse after 60 s of testable time in all");
+
+    // Forget clears it and reports it; the next menu needs it earned again.
+    std::string forgotten = "unset";
+    earning.on_change([&](const std::string &stored) { forgotten = stored; });
+    require(earning.forget() == "pre_ui:87:srgb" && forgotten.empty() && !earning.pre_ui_proven(layer) &&
+        earning.counters()[n::trust_forgotten] == 1, "Forget did not clear the pre-UI proof");
+
+    // Manual modes never earn it, but honour it.
+    alpha_auto_policy manual;
+    manual.set_manual(true);
+    for (std::uint64_t t = 1000; t <= 5000; t += 1000) manual.observe(match, pixels, t, sb);
+    require(!manual.pre_ui_proven(layer), "A manual mode earned the pre-UI proof");
+    manual.set_automatic();
+    for (std::uint64_t t = 6000; t <= 8000; t += 1000) manual.observe(match, pixels, t, sb);
+    manual.set_manual(true);
+    require(manual.pre_ui_proven(layer), "A manual mode did not honour an earned proof");
   }
   // Exact UI counters (game3d_ui_counters.h): the log text, the accounting
   // identity, wrap-safe GPU deltas, session totals and acceptance events.
@@ -1203,7 +1325,7 @@ namespace {
   // counts it commits.
   void sample_decode_and_commit_are_shared() {
     namespace word = ui_detection::decision_word;
-    std::array<std::uint32_t, 4 * ui_detection::h1_decision_texels> t{};
+    std::array<std::uint32_t, 4 * ui_detection::pre_ui_decision_texels> t{};
     t[word::source] = 10; t[word::covered] = 995; t[word::pixels] = 1000; t[word::matching_tiles] = 7;
     t[word::candidates] = 0x7a; t[word::hudless_changed] = 9; t[word::hudless_unchanged] = 900;
     t[word::hudless_invalid] = 1; t[word::hudless_lit] = 800; t[word::accepted] = 0x42;
@@ -1220,6 +1342,7 @@ namespace {
     for (std::uint32_t i = 0; i != 3; ++i) { t[word::strong + i] = 40 + i; t[word::contradicted + i] = 50 + i; }
     t[word::refused] = candidate::backbuffer;
     t[word::frame_reason] = std::uint32_t(ui_no_mask::unaccepted) | ui_detection::frame_reason_reused;
+    t[word::pre_ui_match] = 960; t[word::pre_ui_image_lit] = 880; t[word::presented_lit] = 890; t[word::presented_lit_differs] = 7;
     const auto sample = ui_temporal::decode_detection_sample(t.data(), t.size(), 1500, 9, true);
     const auto &e = sample.evidence;
     require(sample.source_kind == 10 && sample.enabled && sample.state == alpha_auto_state::automatic_on &&
@@ -1234,6 +1357,11 @@ namespace {
       "The one-way counts, refused candidate or frame reason did not decode");
     require(e.inferred_opaque == std::array<std::uint32_t, 2>{997, 998} && e.claims == 0xc0u && e.s1_source == 10 &&
         e.h1_applied, "Texel 10 did not decode");
+    require(e.pre_ui_match == 960 && e.pre_ui_image_lit == 880 && e.presented_lit == 890 && e.presented_lit_differs == 7,
+      "Texel 11 did not decode");
+    const auto revision3 = ui_temporal::decode_detection_sample(t.data(), 4 * ui_detection::h1_decision_texels, 1500, 9, true);
+    require(revision3.evidence.h1_applied && !revision3.evidence.pre_ui_match && !revision3.evidence.presented_lit_differs,
+      "Texel 11 decoded from fewer than 48 words");
     const auto revision2 = ui_temporal::decode_detection_sample(t.data(), 4 * ui_detection::judgment_decision_texels, 1500, 9, true);
     require(revision2.evidence.reused && !revision2.evidence.claims && !revision2.evidence.h1_applied &&
         !revision2.evidence.inferred_opaque[0], "Texel 10 decoded from fewer than 44 words");
@@ -1321,9 +1449,10 @@ int main() {
     samples_that_flatten_learn_nothing();
     temporal_state_holds();
     scene_guard_holds_refutes_and_scopes();
+    pre_ui_proof_is_earned_by_pixels();
     ui_counters_are_formatted_and_trust_events_counted();
     sample_decode_and_commit_are_shared();
-    std::puts("Source alpha session: 16 policy groups passed");
+    std::puts("Source alpha session: 17 policy groups passed");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "Source alpha session failed: %s\n", error.what());

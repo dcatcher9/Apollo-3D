@@ -179,6 +179,11 @@ namespace sunshine_game3d {
     // the offscreen UI layer slot's stored part, never a per-frame bit.
     std::uint32_t flags{}, stored_flags{};
     std::uint32_t held_presents{}; // Consecutive generated Presents that applied the mask.
+    // b2 word 4 (Sunshine_UIPreUIThreshold, float32 bits): the offscreen UI
+    // layer's pair threshold with the presented color, zero without a layer,
+    // when the two are not comparable or on a frame that is not a detection
+    // sample (H1 d).
+    std::uint32_t pre_ui_threshold_bits{};
   };
   inline const char *name(ui_detection_snapshot::run_state value) {
     switch (value) {

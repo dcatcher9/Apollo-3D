@@ -341,8 +341,18 @@ namespace sunshine_game3d_test {
           !detection.contains("trusted") &&
           detection.at("candidate_layout") == sunshine_game3d::ui_detection::candidate_layout &&
           detection.at("flags") == consumed.flags && detection.at("held_presents") == consumed.held_presents &&
+          detection.at("pre_ui_threshold_bits") == consumed.pre_ui_threshold_bits &&
           !(consumed.stored_flags & sunshine_game3d::ui_detection::per_frame_mask),
         "Dump lost the detection constants behind the consumed mask");
+      // H1 (d): the sample's pre-UI pixel counts (decision texel 11).
+      if (replay.contains("source_alpha_auto")) {
+        const auto &pre_ui = replay.at("source_alpha_auto").at("sampled_evidence").at("pre_ui_pixels");
+        const auto &evidence = frame_.source_alpha_decision.coverage.evidence;
+        check(pre_ui.at("match") == evidence.pre_ui_match && pre_ui.at("image_lit") == evidence.pre_ui_image_lit &&
+            pre_ui.at("presented_lit") == evidence.presented_lit &&
+            pre_ui.at("presented_lit_differs") == evidence.presented_lit_differs,
+          "Dump lost the sampled pre-UI pixel counts");
+      }
       const auto &pin = replay.at("ui_pin");
       const auto marker = [&](std::string_view name) { return sunshine_game3d::shader_marker(frame_.shader_source, name); };
       check(pin.at("soft_pin_gain") == marker("SUNSHINE_UI_SOFT_PIN_GAIN") && !pin.contains("late_margin") &&

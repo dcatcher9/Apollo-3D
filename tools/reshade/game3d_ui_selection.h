@@ -33,14 +33,22 @@ namespace sunshine_game3d::ui_selection {
   // (texels 8-9), the refused candidate and the frame reason word. 3 (S2b):
   // H1 replaces the hidden-scene routes 8 and 9, with the informative claims,
   // the opaque Backbuffer and current counts and the h1 word (texel 10) and
-  // the pre-UI scene image's evidence in texel 6.
-  inline constexpr std::uint32_t revision = 3;
+  // the pre-UI scene image's evidence in texel 6. 4 (fix 1): the layer's claim
+  // (d) needs a layer without alpha whose signature the ledger proved the
+  // pre-UI scene image by pixels (per_frame_pre_ui_proven) instead of a
+  // V1-invalid layer, with the layer-against-presented pixel counts of texel
+  // 11 that prove it (b2 word 4, the layer's pair threshold).
+  inline constexpr std::uint32_t revision = 4;
   inline constexpr std::string_view revision_marker = "SUNSHINE_UI_SELECTION_REVISION";
 
   // Candidate kinds. Declared sources are the game's own UI contract (the
   // UIAlpha and UIColorAndAlpha tags, a HUD-less pair); inferred sources are
   // guesses (the offscreen UI layer, Backbuffer and current color alpha).
-  enum class kind : std::uint8_t { ui_alpha, ui_color, ui_layer, backbuffer, current, hudless };
+  // pre_ui is a ledger-only kind, never a candidate: the acceptance ledger's
+  // proof that a layer signature holds the pre-UI scene image (H1 d, key
+  // pre_ui:<layer format>:<space>, game3d_alpha_auto.h). It has no candidate
+  // bit, source, slot or draw rank.
+  enum class kind : std::uint8_t { ui_alpha, ui_color, ui_layer, backbuffer, current, hudless, pre_ui };
   // S1 draw order: opacity before change sets, declared before inferred.
   inline constexpr std::array<kind, 6> draw_order{kind::ui_alpha, kind::ui_color, kind::ui_layer, kind::backbuffer,
     kind::current, kind::hudless};
@@ -61,7 +69,8 @@ namespace sunshine_game3d::ui_selection {
       case kind::ui_layer: return candidate::layer;
       case kind::backbuffer: return candidate::backbuffer;
       case kind::current: return candidate::current;
-      default: return candidate::hudless;
+      case kind::hudless: return candidate::hudless;
+      default: return 0u; // pre_ui: not a candidate.
     }
   }
   // The decision source a kind decides as; a full change set from an exact
@@ -73,11 +82,12 @@ namespace sunshine_game3d::ui_selection {
       case kind::ui_layer: return ui_detection::source_layer;
       case kind::backbuffer: return 3u;
       case kind::current: return 4u;
-      default: return 5u;
+      case kind::hudless: return 5u;
+      default: return 0u; // pre_ui: decides nothing.
     }
   }
   constexpr bool declared(kind k) { return k == kind::ui_alpha || k == kind::ui_color || k == kind::hudless; }
-  constexpr bool alpha_kind(kind k) { return k != kind::hudless; }
+  constexpr bool alpha_kind(kind k) { return k != kind::hudless && k != kind::pre_ui; }
   // Index in counts::covered and counts::invalid (alpha kinds only).
   constexpr std::size_t alpha_index(kind k) {
     switch (k) {
@@ -88,8 +98,8 @@ namespace sunshine_game3d::ui_selection {
       default: return 4;
     }
   }
-  inline constexpr std::array<std::string_view, 6> kind_names{"ui_alpha", "ui_color", "ui_layer", "backbuffer", "current",
-    "hudless"};
+  inline constexpr std::array<std::string_view, 7> kind_names{"ui_alpha", "ui_color", "ui_layer", "backbuffer", "current",
+    "hudless", "pre_ui"};
   constexpr std::string_view name(kind k) { return kind_names[std::size_t(k)]; }
   constexpr std::optional<kind> kind_named(std::string_view text) {
     for (std::size_t i = 0; i != kind_names.size(); ++i)
@@ -98,6 +108,9 @@ namespace sunshine_game3d::ui_selection {
   }
   static_assert(bit(kind::ui_layer) == 0x40u && source_id(kind::ui_layer) == 10u && declared(kind::hudless) &&
     !declared(kind::ui_layer) && alpha_index(kind::current) == 4 && kind_named("ui_color") == kind::ui_color);
+  static_assert(bit(kind::hudless) == 0x10u && source_id(kind::hudless) == 5u && !bit(kind::pre_ui) && !source_id(kind::pre_ui) &&
+    !alpha_kind(kind::pre_ui) && !declared(kind::pre_ui) && kind_named("pre_ui") == kind::pre_ui &&
+    std::size_t(kind::pre_ui) == draw_order.size() && kind_names.size() == draw_order.size() + 1);
 
   // The first candidate of a bit set in draw order, zero when none.
   constexpr std::uint32_t first_in_draw_order(std::uint32_t bits) {
@@ -157,11 +170,17 @@ namespace sunshine_game3d::ui_selection {
     // of them where an offered exact pair's HUD-less image is lit and
     // unchanged (neither for the one-frame-late layer, E2).
     std::array<std::uint32_t, 3> strong{}, contradicted{};
+    // Texel 11 (revision 4): the offscreen UI layer against the presented
+    // frame at 8 times their pair threshold: matching pixels, lit layer
+    // pixels, lit presented pixels, lit presented pixels that differ. No
+    // decision reads them; the acceptance ledger proves the layer from them.
+    std::uint32_t pre_ui_match{}, pre_ui_lit{}, presented_lit{}, presented_lit_differs{};
   };
   // Counts from decision words (texel t, component c is word 4 t + c); the
   // layer's (texel 7) read zero from fewer than 32 words, the one-way counts
   // (texels 8-9) from fewer than 40, the opaque Backbuffer and current counts
-  // (texel 10) from fewer than 44.
+  // (texel 10) from fewer than 44, the pre-UI pixel counts (texel 11) from
+  // fewer than 48.
   inline counts counts_from_words(const std::uint32_t *words, std::size_t n) {
     namespace word = ui_detection::decision_word;
     const auto at = [&](std::size_t i) { return i < n ? words[i] : 0u; };
@@ -188,6 +207,12 @@ namespace sunshine_game3d::ui_selection {
       c.opaque_backbuffer = words[word::opaque_backbuffer];
       c.opaque_current = words[word::opaque_current];
     }
+    if (n >= 4u * ui_detection::pre_ui_decision_texels) {
+      c.pre_ui_match = words[word::pre_ui_match];
+      c.pre_ui_lit = words[word::pre_ui_image_lit];
+      c.presented_lit = words[word::presented_lit];
+      c.presented_lit_differs = words[word::presented_lit_differs];
+    }
     return c;
   }
   // Pixels with alpha of at least 254/255 of one alpha kind.
@@ -212,16 +237,8 @@ namespace sunshine_game3d::ui_selection {
     return (offered & candidate::hudless) ? ui_detection::pre_ui_image::hudless :
       (offered & candidate::layer) ? ui_detection::pre_ui_image::layer : ui_detection::pre_ui_image::none;
   }
-  // The image the scene evidence measures in texel 6 (SunshinePreUIImage):
-  // the offer's pre-UI image, or the offered layer beside a HUD-less image
-  // when the scene guard pushes per_frame_pre_ui_layer to prove the layer.
-  constexpr std::uint32_t measured_pre_ui_image(std::uint32_t offered, std::uint32_t flags) {
-    return (flags & ui_detection::per_frame_pre_ui_layer) && (offered & candidate::layer) ? ui_detection::pre_ui_image::layer :
-      pre_ui_image_of(offered);
-  }
   static_assert(opaque_full(99u, 100u) && !opaque_full(98u, 100u) && !opaque_full(0u, 0u) && pre_ui_image_of(0x50u) == 1u &&
-    pre_ui_image_of(0x48u) == 2u && pre_ui_image_of(0x2fu) == 0u && measured_pre_ui_image(0x50u, 0x20000000u) == 2u &&
-    measured_pre_ui_image(0x10u, 0x20000000u) == 1u && measured_pre_ui_image(0x50u, 0u) == 1u);
+    pre_ui_image_of(0x48u) == 2u && pre_ui_image_of(0x2fu) == 0u);
 
   // V1: at most 1% invalid pixels (non-finite, outside [0, 1], or, for the
   // layer, beyond the premultiplied bound), whether or not accepted.
@@ -229,6 +246,18 @@ namespace sunshine_game3d::ui_selection {
   // Some coverage but less than 90% of the frame; full is 90% or more.
   constexpr bool selective(std::uint32_t covered, std::uint32_t pixels) { return covered && covered * 10u < pixels * 9u; }
   constexpr bool full(std::uint32_t covered, std::uint32_t pixels) { return covered * 10u >= pixels * 9u; }
+  // H1 (d), fix 1: a sample proving an offscreen layer without alpha the
+  // pre-UI scene image. Its colour equals the presented frame (8 times the
+  // pair threshold) on a full share of the pixels (full: 90%) while it is lit
+  // on at least half of them, as change_set_full requires of a HUD-less image
+  // (a black image is no scene: a transparent black UI layer equals a black
+  // presented frame everywhere). The caller also requires a layer without
+  // coverage.
+  constexpr bool pre_ui_match(std::uint32_t matched, std::uint32_t lit, std::uint32_t pixels) {
+    return pixels && full(matched, pixels) && lit * 2u >= pixels;
+  }
+  static_assert(pre_ui_match(90u, 50u, 100u) && !pre_ui_match(89u, 100u, 100u) && !pre_ui_match(100u, 49u, 100u) &&
+    !pre_ui_match(0u, 0u, 0u));
   // V2, a partial change set: changed pixels within broad unchanged scene
   // evidence in clean tiles (decides as source 5).
   constexpr bool change_set_selective(const counts &c) {
@@ -308,13 +337,14 @@ namespace sunshine_game3d::ui_selection {
   // proven cleared to transparent, V1-valid and opaque-full whether accepted
   // or not, (c) an exact full change set whether accepted or not, or (d) a
   // pre-UI scene image (claim_pre_ui): the HUD-less image changed on at least
-  // 90% of pixels, or a V1-invalid layer (colour without alpha, the scene
-  // drawn before the UI). An unaccepted UIAlpha, UI color tag, Backbuffer or
-  // current alpha is never informative, nor is an accepted inferred one the
-  // block keeps out. A claim acts unless the CPU refuted its signature
-  // (per_frame_refuted_mask), and (d) only while the CPU's held samples read
-  // the pre-UI image visible (per_frame_pre_ui_visible; for the layer, only
-  // once the guard proved it the presented frame without its UI). While the
+  // 90% of pixels, or else an offered layer without coverage (alpha zero on
+  // every pixel) whose signature the acceptance ledger proved the pre-UI
+  // scene image by pixels (per_frame_pre_ui_proven, fix 1). An unaccepted
+  // UIAlpha, UI color tag, Backbuffer or current alpha is never informative,
+  // nor is an accepted inferred one the block keeps out. A claim acts unless
+  // the CPU refuted its signature (per_frame_refuted_mask), and (d) only
+  // while the CPU's held samples read the pre-UI image visible
+  // (per_frame_pre_ui_visible). While the
   // CPU holds a hidden verdict (per_frame_scene_hidden) and the depth is
   // this frame's, an acting claim shows the frame flat as source 8, whatever
   // S1 selected, unless the S1 winner is already flat everywhere (source 6,
@@ -370,7 +400,8 @@ namespace sunshine_game3d::ui_selection {
     const std::uint32_t image = pre_ui_image_of(offered);
     if (pixels && ((image == ui_detection::pre_ui_image::hudless &&
                      c.changed * 100u >= pixels * ui_detection::scene::hudless_changed_percent) ||
-                    (image == ui_detection::pre_ui_image::layer && !(valid & candidate::layer))))
+                    (image == ui_detection::pre_ui_image::layer && !c.covered[alpha_index(kind::ui_layer)] &&
+                      (flags & ui_detection::per_frame_pre_ui_proven))))
       claims |= ui_detection::claim_pre_ui;
     const std::uint32_t refuted = (flags >> ui_detection::per_frame_refuted_shift) & candidate_bits;
     const std::uint32_t acting = (claims & candidate_bits & ~refuted) |
@@ -508,7 +539,8 @@ namespace sunshine_game3d::ui_selection {
   }
 
   // A1: the acceptance key of one source, "<kind>:<dxgi decimal>:<space>".
-  // FG mode is not part of it.
+  // FG mode is not part of it. The ledger-only kind pre_ui keys a layer
+  // signature's pre-UI proof (pre_ui_key).
   inline constexpr std::array<std::string_view, 5> color_space_names{"unknown", "srgb", "scrgb", "pq", "hlg"};
   struct signature {
     kind source_kind{};
@@ -549,6 +581,12 @@ namespace sunshine_game3d::ui_selection {
       return std::tie(a.source_kind, a.format, a.color_space) < std::tie(b.source_kind, b.format, b.color_space);
     }
   };
+  // H1 (d), fix 1: the ledger key of a layer signature's pre-UI proof,
+  // "pre_ui:<layer format>:<space>": another format or colour space is
+  // another key.
+  constexpr signature pre_ui_key(const signature &layer) { return {kind::pre_ui, layer.format, layer.color_space}; }
+  static_assert(pre_ui_key({kind::ui_layer, 87u, 1u}).source_kind == kind::pre_ui &&
+    pre_ui_key({kind::ui_layer, 87u, 1u}).format == 87u && pre_ui_key({kind::ui_layer, 87u, 3u}).color_space == 3u);
 }
 
 template<> struct std::hash<sunshine_game3d::ui_selection::signature> {

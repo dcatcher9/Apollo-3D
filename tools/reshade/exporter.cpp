@@ -187,14 +187,17 @@ namespace {
     // whether the offered layer was the one-frame-late copy (unjudged, A2).
     const auto reason = sunshine_game3d::ui_selection::frame_reason_name(evidence.frame_reason);
     const auto refused = sunshine_game3d::ui_selection::candidate_name(evidence.refused);
-    // H1 (texels 6 and 10): the pre-UI scene image texel 6 measured.
+    // H1 (texels 6 and 10): the pre-UI scene image texel 6 measured. H1 (d),
+    // texel 11: the offscreen UI layer against the presented frame (matching
+    // and lit layer pixels prove it the pre-UI scene image; lit presented
+    // pixels and those that differ are shadow statistics only).
     namespace pre_ui_image = sunshine_game3d::ui_detection::pre_ui_image;
     const char *const pre_ui_name = evidence.pre_ui_image == pre_ui_image::hudless ? "hudless" :
       evidence.pre_ui_image == pre_ui_image::layer ? "layer" : "none";
     const auto &guard = value.coverage.scene_guard;
     char message[3072];
     std::snprintf(message, sizeof(message),
-      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u accepted=0x%x sampled_layer={covered=%u invalid=%u opaque=%u} sampled_one_way={strong=%u/%u/%u contradicted=%u/%u/%u} sampled_reason=%.*s sampled_refused=%.*s sampled_reused=%d sampled_late_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_inferred_opaque=%u/%u sampled_claims=0x%x sampled_h1={applied=%d winner=%u} sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_pre_ui_scene={image=%s n=%u d=%.3f valid=%d} scene_guard={hidden=%d pre_ui=%d refuted=%u proven=%d} shadow=%d shadow_hidden_ms=%llu status_revision=%llu",
+      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u accepted=0x%x sampled_layer={covered=%u invalid=%u opaque=%u} sampled_one_way={strong=%u/%u/%u contradicted=%u/%u/%u} sampled_reason=%.*s sampled_refused=%.*s sampled_reused=%d sampled_late_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_inferred_opaque=%u/%u sampled_claims=0x%x sampled_h1={applied=%d winner=%u} sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_pre_ui_scene={image=%s n=%u d=%.3f valid=%d} scene_guard={hidden=%d pre_ui=%d refuted=%u proven=%d} shadow=%d shadow_hidden_ms=%llu sampled_pre_ui_pixels={match=%u image_lit=%u presented_lit=%u presented_lit_differs=%u} status_revision=%llu",
       static_cast<void *>(runtime), value.mode == sunshine_game3d::source_alpha_mode::automatic ? "auto" :
         value.mode == sunshine_game3d::source_alpha_mode::on ? "on" : "off",
       int(value.rendered), int(value.applied), sunshine_game3d::name(value.input), int(value.retained_alpha_ready),
@@ -213,8 +216,8 @@ namespace {
       evidence.claims, int(evidence.h1_applied), evidence.s1_source, scene.n, double(scene.d), int(scene.valid), int(scene.ran),
       sunshine_game3d::ui_detection::name(scene.verdict), pre_ui_name, pre_ui_scene.n, double(pre_ui_scene.d),
       int(pre_ui_scene.valid), int(guard.hidden), int(guard.pre_ui), guard.refuted, int(guard.proven), int(value.coverage.scene_shadow),
-      static_cast<unsigned long long>(shadow_hidden_ms),
-      static_cast<unsigned long long>(value.qualification.token));
+      static_cast<unsigned long long>(shadow_hidden_ms), evidence.pre_ui_match, evidence.pre_ui_image_lit,
+      evidence.presented_lit, evidence.presented_lit_differs, static_cast<unsigned long long>(value.qualification.token));
     log(reshade::log::level::info, message);
     if (counters_session) log_ui_counters(runtime, *counters_session);
   }

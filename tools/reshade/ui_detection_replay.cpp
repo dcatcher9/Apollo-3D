@@ -11,7 +11,9 @@
 // hold store (u5), so the reduce reads none and never reuses, and a dump taken
 // on a reused frame replays as its own decision. A label pushes the
 // hidden-scene guard's per-frame bits (H1) itself, or has the guard
-// (game3d_scene_guard.h) derive them from the frame's own measured evidence.
+// (game3d_scene_guard.h) derive them from the frame's own measured evidence;
+// pre_ui_proven stands for the acceptance ledger's pre-UI proof of the offered
+// layer's signature (H1 d).
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -249,9 +251,11 @@ namespace {
   // wrote opaque counts to statistics rows 64-79 and decision texel 5, so
   // every revision fits 80 rows and 6 texels. A shader with scene evidence
   // measures both images and writes decision texels 5 and 6; candidate layout
-  // 2 adds the layer's statistics rows 64-79 and decision texel 7, and
+  // 2 adds the layer's statistics rows 64-79 and decision texel 7,
   // selection revision 2 the one-way judgment rows 80-111 (the scene rows
-  // follow from 112, 121 rows in all) and decision texels 8 and 9.
+  // follow from 112, 121 rows in all) and decision texels 8 and 9, and
+  // selection revision 4 (12 decision texels) the pre-UI pixel rows 128-143
+  // (144 rows in all) and decision texel 11.
   struct sizes_t {
     UINT statistics_rows, decision_texels;
     bool scene;
@@ -263,7 +267,7 @@ namespace {
     const bool scene = images == contract::max_scene_evidence_images && texels >= contract::scene_decision_texels;
     if (texels > contract::max_decision_texels || (images && !scene))
       throw std::runtime_error("unsupported detection size markers in the shader");
-    return {std::max(80u, contract::statistics_rows(images)), std::max(6u, texels), scene};
+    return {std::max(80u, contract::statistics_rows(images, texels)), std::max(6u, texels), scene};
   }
 
   struct outcome {
@@ -389,11 +393,15 @@ namespace {
     // true: the CPU holds a hidden verdict (H1); "measured": the scene guard
     // derives the bits from this frame's own evidence. pre_ui_visible: the
     // held samples read the pre-UI image visible. refuted: candidate kinds
-    // whose signatures a visible verdict refuted.
+    // whose signatures a visible verdict refuted. pre_ui_proven: the
+    // acceptance ledger proved the offered layer's signature the pre-UI scene
+    // image (per_frame_pre_ui_proven, pushed on every pass as the renderer
+    // does, and the guard's layer_proven when measured).
     bool measured = false;
     const bool pre_ui_proven = label.value("pre_ui_proven", false);
     if (pre_ui_proven && !(bits & contract::candidate::layer))
       throw std::runtime_error("pre_ui_proven needs an offered layer");
+    if (pre_ui_proven) flags |= contract::per_frame_pre_ui_proven;
     if (label.contains("scene_hold")) {
       const auto &hold = label.at("scene_hold");
       if (hold.is_string() && hold.get<std::string>() == "measured") measured = true;
@@ -432,7 +440,6 @@ namespace {
 
     const auto sizes = detection_sizes(shader_source);
     if (measured && !sizes.scene) throw std::runtime_error("scene_hold \"measured\" needs a shader with scene evidence");
-    if (pre_ui_proven && !measured) throw std::runtime_error("pre_ui_proven needs scene_hold \"measured\"");
     shaders_t shaders{compile(gpu, shader_source, "SunshineUIDetectionTilesCS", width, height, color),
       compile(gpu, shader_source, "SunshineUIDetectionReduceCS", width, height, color),
       compile(gpu, shader_source, "SunshineUIDetectionMaskCS", width, height, color)};
@@ -447,10 +454,24 @@ namespace {
     auto decision = target(gpu, sizes.decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT);
     auto mask = target(gpu, width, height, DXGI_FORMAT_R32_FLOAT);
     // Detection constants b2: candidate bits, difference threshold, accepted
-    // candidates (layout 1: trusted slots), flags.
+    // candidates (layout 1: trusted slots), flags, and (selection revision 4)
+    // the offscreen UI layer's pair threshold with the presented color, from
+    // the two artifacts' own encodings (zero without a layer or when not
+    // comparable), padded to the 16-byte constant buffer granularity.
     const float threshold = pair_threshold ? *pair_threshold :
       selection::comparable(encoding_of(paired), encoding_of(paired)).value_or(2.f / 255.f);
-    struct { std::uint32_t bits; float threshold; std::uint32_t accepted, flags; } constants{bits, threshold, accepted, flags};
+    float pre_ui_threshold = 0.f;
+    for (const auto &kind : label.at("candidates"))
+      if (ui_layer_kind(kind.get<std::string>()) && layer_input)
+        pre_ui_threshold =
+          selection::comparable(encoding_of(kind.get<std::string>()), encoding_of("source_color")).value_or(0.f);
+    struct {
+      std::uint32_t bits;
+      float threshold;
+      std::uint32_t accepted, flags;
+      float pre_ui_threshold;
+      std::uint32_t padding[3];
+    } constants{bits, threshold, accepted, flags, pre_ui_threshold, {}};
     const auto constant_buffer = [&](const void *bytes, UINT size) {
       D3D11_BUFFER_DESC buffer{};
       buffer.ByteWidth = size; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -494,33 +515,22 @@ namespace {
     }
     // scene_hold "measured": the scene guard observes this frame's sample as
     // the renderer would three consecutive samples of a static screen: at
-    // tick 900 (not actionable: the sample that shows a claim first opens the
-    // gate), then 1000 and 1100, each actionable as measure() says. The bits
-    // it pushes at 1100 drive a second reduce, mask and evidence pass over
-    // the same statistics. It proves the single-sample relation only; the
-    // sequence replay owns temporal behaviour. pre_ui_proven: first, at tick
-    // 800, an earlier in-scope gameplay sample proved the offered layer the
-    // presented frame without its UI (both images visible at D 0.5).
+    // tick 900 (not actionable unless a proven layer is the offer's pre-UI
+    // image: otherwise the sample that shows a claim first opens the gate),
+    // then 1000 and 1100, each actionable as measure() says. The bits it
+    // pushes at 1100 drive a second reduce, mask and evidence pass over the
+    // same statistics. It proves the single-sample relation only; the
+    // sequence replay owns temporal behaviour.
     std::uint32_t guard_bits = 0;
     if (measured) {
       const auto words = download<std::uint32_t>(gpu, decision);
       sunshine_game3d::scene_guard::state guard;
       guard.enter_scope(1, 0);
-      if (pre_ui_proven) {
-        sunshine_game3d::scene_guard::sample proof;
-        proof.tick = 800;
-        proof.pixels = words[contract::decision_word::pixels];
-        proof.offered = bits;
-        proof.valid_bits = words[contract::decision_word::valid_bits];
-        proof.presented = {300, .5f, true, true, contract::scene_verdict::visible, 600};
-        proof.pre_ui = {300, .5f, true, true, contract::scene_verdict::visible, 0};
-        proof.pre_ui_image = contract::pre_ui_image::layer;
-        if (!guard.observe(proof, false, signatures).proved) throw std::runtime_error("pre_ui_proven did not prove the layer");
-      }
+      const bool proven_image = pre_ui_proven && selection::pre_ui_image_of(bits) == contract::pre_ui_image::layer;
       for (const std::uint64_t tick : {900u, 1000u, 1100u})
         guard.observe(sunshine_game3d::scene_guard::sample_of(words.data(), words.size(), tick, true),
-          guard.measure(tick, false, false).actionable, signatures);
-      guard_bits = guard.per_frame(1100, bits, signatures);
+          guard.measure(tick, false, false, proven_image).actionable, signatures);
+      guard_bits = guard.per_frame(1100, bits, signatures, pre_ui_proven);
       flags |= guard_bits;
       constants.flags = flags;
       cb = constant_buffer(&constants, sizeof(constants));
@@ -593,10 +603,27 @@ namespace {
     return okay;
   }
 
+  // expect.pre_ui_match: whether this sample would count toward the
+  // acceptance ledger's pre-UI proof of the offered layer (H1 d): the layer
+  // without coverage and ui_selection::pre_ui_match on decision texel 11.
+  // A shader without texel 11 fails the check.
+  bool pre_ui_match_matches(const std::vector<std::uint32_t> &d, bool expected, std::string &text) {
+    if (d.size() <= word::presented_lit_differs) {
+      text = "no-reference(" + std::to_string(d.size() / 4) + " decision texels)";
+      return false;
+    }
+    const bool match = !d[word::layer_covered] &&
+      selection::pre_ui_match(d[word::pre_ui_match], d[word::pre_ui_image_lit], d[word::pixels]);
+    char buffer[96];
+    std::snprintf(buffer, sizeof(buffer), "%s(%s)", match == expected ? "match" : "differs", match ? "true" : "false");
+    text = buffer;
+    return match == expected;
+  }
+
   // One expectation: a case's "expect", or the "today" outcome of its xfail.
   struct judged_t {
     bool okay = false;
-    std::string wanted_mask, scene, pre_ui_scene;
+    std::string wanted_mask, scene, pre_ui_scene, pre_ui_match;
   };
   judged_t judge(const outcome &result, const json &expect) {
     const auto &d = result.decision;
@@ -615,6 +642,8 @@ namespace {
     if (expect.contains("scene")) judged.okay = scene_matches(d, expect.at("scene"), false, judged.scene) && judged.okay;
     if (expect.contains("pre_ui_scene"))
       judged.okay = scene_matches(d, expect.at("pre_ui_scene"), true, judged.pre_ui_scene) && judged.okay;
+    if (expect.contains("pre_ui_match"))
+      judged.okay = pre_ui_match_matches(d, expect.at("pre_ui_match").get<bool>(), judged.pre_ui_match) && judged.okay;
     return judged;
   }
 
@@ -748,7 +777,7 @@ int main(int argc, char **argv) {
         "\"pre_ui_visible\": bool, \"pre_ui_proven\": bool, \"refuted\": [kinds], \"depth_not_current\": bool, "
         "\"expect\": {\"mask\", "
         "\"source\": [ids], \"mask_exact\": bool, \"scene\": {\"verdict\", \"d_min\", \"d_max\"}, "
-        "\"pre_ui_scene\": {\"image\", \"verdict\", \"d_min\", \"d_max\"}}, "
+        "\"pre_ui_scene\": {\"image\", \"verdict\", \"d_min\", \"d_max\"}, \"pre_ui_match\": bool}, "
         "\"xfail\": {\"stage\", \"reason\", \"today\": {expect fields}}, \"needs_dump\": text}]}\n"
         "Binds each dump's candidates (t0 paired color, t11-t14, and a census ui_layer_candidate_N at t7 with the layer\n"
         "flags; a shader without SUNSHINE_UI_CANDIDATE_LAYOUT takes the layer at t12), raw depth (t1; a 1x1 placeholder\n"
@@ -758,8 +787,9 @@ int main(int argc, char **argv) {
         "pre_ui_visible its held visible pre-UI image, refuted the named kinds' refuted signatures; scene_hold \"measured\"\n"
         "has game3d_scene_guard.h observe this frame's own sample at ticks 900, 1000 and 1100 (signatures from the\n"
         "artifact formats and the manifest color_space) and reruns the reduce, mask and evidence passes with the bits it\n"
-        "pushes; with pre_ui_proven an earlier gameplay sample at tick 800 proved the offered layer the presented frame\n"
-        "without its UI. The retired scene_hold_hudless and hudless_scene keys fail their case.\n"
+        "pushes. pre_ui_proven stands for the acceptance ledger's pre-UI proof of the offered layer's signature (H1 d):\n"
+        "it pushes per_frame_pre_ui_proven with any scene_hold form and, when measured, is the guard's layer_proven.\n"
+        "The retired scene_hold_hudless and hudless_scene keys fail their case.\n"
         "A HUD-less image not comparable with its pair (ui_selection::comparable, from the two artifact formats\n"
         "and the manifest color_space) is not offered, and the pair's threshold comes from the same function. With a\n"
         "shader of the current layout and selection revision, every decision is checked against ui_selection::decide on\n"
@@ -775,12 +805,15 @@ int main(int argc, char **argv) {
         "FAIL; a malformed xfail fails. The run fails on any FAIL, and with --strict also on any XPASS.\n"
         "mask_exact compares the resolved mask with the selected raw alpha, all zeros or all ones (sources 6 and 8); scene\n"
         "and pre_ui_scene check the hidden-scene evidence that the shader's evidence passes write to decision texels 5 and\n"
-        "6 (the pre-UI image: HUD-less when offered, else the UI layer). --write-mask\n"
+        "6 (the pre-UI image: HUD-less when offered, else the UI layer); pre_ui_match checks whether the sample would\n"
+        "count toward the layer's pre-UI proof (a layer without coverage and ui_selection::pre_ui_match on texel 11: its\n"
+        "colour within 8 times the layer/presented pair threshold on 90% of pixels, lit on half). --write-mask\n"
         "copies each dump that consumed an automatic R32 mask into <new-dir>/<NN>_<dump> (NN: the case's position in\n"
         "cases.json) with ui_source_color replaced by the resolved mask, for replay_game3d_dump --shader; any other dump\n"
         "fails its case. Each line shows the frame reason, the refused candidate and the one-way judgment counts\n"
         "(strong/contradicted pixels of the layer, Backbuffer and current alpha) from selection revision 2, and the H1\n"
-        "claims and h1 word (applied, S1 winner) from selection revision 3.\n"
+        "claims and h1 word (applied, S1 winner) from selection revision 3, and the layer's pre-UI pixel counts\n"
+        "(texel 11: match, image_lit, presented_lit, presented_lit_differs) from selection revision 4.\n"
         "--verbose prints every decision word.\n");
       return 2;
     }
@@ -867,6 +900,7 @@ int main(int argc, char **argv) {
       // The scene evidence shown is the target's check, else today's.
       const auto &scene = target.scene.empty() ? today.scene : target.scene;
       const auto &pre_ui_scene = target.pre_ui_scene.empty() ? today.pre_ui_scene : target.pre_ui_scene;
+      const auto &pre_ui_match = target.pre_ui_match.empty() ? today.pre_ui_match : target.pre_ui_match;
       auto wanted = target.wanted_mask;
       if (xfail) {
         wanted += ", today " + today.wanted_mask + "; " + xfail->at("stage").get<std::string>() + ": " +
@@ -897,15 +931,24 @@ int main(int argc, char **argv) {
           (d[word::h1] & contract::h1_applied) ? 1 : 0, d[word::h1] & contract::h1_winner_mask);
       char guard[64] = "";
       if (result.measured) std::snprintf(guard, sizeof(guard), " measured(per_frame=0x%x)", result.guard_bits);
+      // H1 (d) from selection revision 4 (texel 11): the layer against the
+      // presented frame.
+      char pre_ui_pixels[128] = "";
+      if (d.size() > word::presented_lit_differs)
+        std::snprintf(pre_ui_pixels, sizeof(pre_ui_pixels),
+          " pre_ui_pixels={match=%u image_lit=%u presented_lit=%u presented_lit_differs=%u}", d[word::pre_ui_match],
+          d[word::pre_ui_image_lit], d[word::presented_lit], d[word::presented_lit_differs]);
       std::printf("%s %-44s source=%u covered=%u/%u ui=%.2f%% mask=%s (want %s) candidates=0x%x accepted=0x%x "
-        "alpha_covered=%u/%u/%u/%u%s%s%s%s hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u} mirror=%s%s%s%s%s%s%s\n",
+        "alpha_covered=%u/%u/%u/%u%s%s%s%s%s hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u} "
+        "mirror=%s%s%s%s%s%s%s%s%s\n",
         status, name.c_str(), d[word::source], d[word::covered], d[word::pixels],
         100.0 * double(result.ui_pixels) / double(result.pixels), mask_class(result).c_str(), wanted.c_str(),
         d[word::candidates], d[word::accepted], d[word::alpha_covered], d[word::alpha_covered + 1], d[word::alpha_covered + 2],
-        d[word::alpha_covered + 3], layer, judgment, h1, guard, d[word::hudless_changed], d[word::hudless_unchanged],
-        d[word::hudless_invalid], d[word::matching_tiles], d[word::hudless_lit], mirror.c_str(),
+        d[word::alpha_covered + 3], layer, judgment, h1, guard, pre_ui_pixels, d[word::hudless_changed],
+        d[word::hudless_unchanged], d[word::hudless_invalid], d[word::matching_tiles], d[word::hudless_lit], mirror.c_str(),
         result.mask_exact.empty() ? "" : " mask_exact=", result.mask_exact.c_str(), scene.empty() ? "" : " scene=", scene.c_str(),
-        pre_ui_scene.empty() ? "" : " pre_ui_scene=", pre_ui_scene.c_str());
+        pre_ui_scene.empty() ? "" : " pre_ui_scene=", pre_ui_scene.c_str(), pre_ui_match.empty() ? "" : " pre_ui_match=",
+        pre_ui_match.c_str());
       if (verbose) {
         std::printf("  words=");
         for (size_t i = 0; i < d.size(); ++i) std::printf("%u%s", d[i], i + 1 < d.size() ? "," : "");

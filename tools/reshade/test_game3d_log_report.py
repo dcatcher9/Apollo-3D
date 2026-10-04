@@ -95,10 +95,11 @@ def ui2(t, source, covered, alpha, candidates, accepted, pixels=1000, hudless=(0
 
 def ui3(t, source, covered, alpha, candidates, accepted, pixels=1000, layer=(0, 0), invalid=(0, 0, 0, 0),
         reason=None, refused='none', scene=(0.6, 'visible'), claims=0, h1=0, winner=None, pre_ui=('none', 0.0, 0),
-        guard=(0, 0, 0), ran=1, shadow=0, hidden_ms=0, detection=None, fg=0):
+        guard=(0, 0, 0), ran=1, shadow=0, hidden_ms=0, detection=None, fg=0, pre_ui_pixels=None):
     """A 'Sunshine UI protection' line since S2b (exporter.cpp): the S2a fields, then the Backbuffer and current
     alpha's opaque pixels, the informative full claims, the H1 word, the presented frame's D, the pre-UI scene image's
-    D (image, d, valid) and the scene guard's holds (hidden, pre-UI, refuted signatures)."""
+    D (image, d, valid) and the scene guard's holds (hidden, pre-UI, refuted signatures). Since fix 1 pre_ui_pixels
+    (match, image lit, presented lit, presented lit and different) follows shadow_hidden_ms."""
     detection = detection or ('detected' if source else 'no_usable_mask')
     reason = reason or ('decided' if source else 'unaccepted')
     winner = source if winner is None else winner
@@ -122,7 +123,11 @@ def ui3(t, source, covered, alpha, candidates, accepted, pixels=1000, layer=(0, 
                    f'sampled_pre_ui_scene={{image={image} n={463 if pre_ui_valid else 0} d={pre_ui_d:.3f} '
                    f'valid={pre_ui_valid}}} scene_guard={{hidden={guard[0]} pre_ui={guard[1]} refuted={guard[2]}'
                    f'{f" proven={guard[3]}" if len(guard) > 3 else ""}}} '
-                   f'shadow={shadow} shadow_hidden_ms={hidden_ms} status_revision=1')
+                   f'shadow={shadow} shadow_hidden_ms={hidden_ms} '
+                   + ('' if pre_ui_pixels is None else
+                      'sampled_pre_ui_pixels={{match={} image_lit={} presented_lit={} presented_lit_differs={}}} '
+                      .format(*pre_ui_pixels))
+                   + 'status_revision=1')
 
 
 def accepted_now(t, value):
@@ -206,6 +211,28 @@ BASE = [
 def run(lines):
     session = report.parse(lines)
     return {c.name: c for c in report.evaluate(session)}
+
+
+# A real S2b line: Stellar Blade's SDR settings page with FG suspended (session 2026-10-03 07:20:31). The presented
+# frame reads hidden, the cleared output target (the layer, colour without alpha) visible, and the layer is unproven,
+# so H1 does not apply.
+SB_S2B_SETTINGS = (
+    '07:20:31:065 [71908] | INFO  | [Sunshine 3D] Sunshine UI protection: runtime=0000000102c619a0 mode=auto '
+    'rendered=1 mask_path=1 input=automatic_gpu_mask retained=1 fg=0 fg_known=1 fg_enabled=0 '
+    'input_state=not_observed detection=no_usable_mask selected=automatic source=automatic '
+    'source_availability=quality_rejected sampled_source=0 sampled_covered=0 sampled_pixels=8294400 '
+    'sampled_candidates=0x48 sampled_alpha_covered=0/0/0/8294400 sampled_alpha_invalid=0/0/0/0 accepted=0x0 '
+    'sampled_layer={covered=0 invalid=4690222 opaque=0} sampled_one_way={strong=0/0/8294400 contradicted=0/0/0} '
+    'sampled_reason=layer_aside sampled_refused=ui_layer sampled_reused=0 sampled_late_layer=1 '
+    'sampled_hudless={changed=8239431 unchanged=1089 invalid=0 matching_tiles=0 lit=0} sampled_alpha_opaque=0/0 '
+    'sampled_inferred_opaque=0/8294400 sampled_claims=0x80 sampled_h1={applied=0 winner=0} '
+    'sampled_scene={n=911 d=-0.001 valid=1 ran=1 verdict=hidden} sampled_pre_ui_scene={image=layer n=911 d=0.544 '
+    'valid=1} scene_guard={hidden=1 pre_ui=0 refuted=0 proven=0} shadow=1 shadow_hidden_ms=656 status_revision=17')
+# The same sample as fix 1 logs it: an unproven layer no longer claims (0x80), and texel 11 follows shadow_hidden_ms
+# (the counts of settings dump 468: 32.8% matching, 25.9% lit layer).
+SB_FIX1_SETTINGS = SB_S2B_SETTINGS.replace('sampled_claims=0x80', 'sampled_claims=0x0').replace(
+    'shadow_hidden_ms=656 ', 'shadow_hidden_ms=656 sampled_pre_ui_pixels={match=2719720 image_lit=2148784 '
+    'presented_lit=5994692 presented_lit_differs=5238234} ')
 
 
 class ReadinessReport(unittest.TestCase):
@@ -1009,6 +1036,107 @@ class ReadinessReport(unittest.TestCase):
         detail = run(BASE + [unproven, proven])['Hidden scene'].detail
         self.assertIn('1 hidden samples had an unproven pre-UI layer', detail)
         self.assertIn('pre-UI image: hudless 0, layer 1', detail)
+
+    def test_fix1_lines_parse_the_pre_ui_pixels_and_keep_s2b_lines(self):
+        # A real S2b line parses as before: no pixel counts, and its unproven layer claim is named by the S2b proof.
+        old = report.parse([SB_S2B_SETTINGS]).ui[0]
+        self.assertEqual((old.scene.s2b, old.scene.fix1, old.scene.pre_ui_pixels, old.scene.proven, old.scene.claims,
+                          old.scene.pre_ui_image, old.scene.hudless_d),
+                         (True, False, None, False, 0x80, 'layer', 0.544))
+        detail = run(BASE + [SB_S2B_SETTINGS])['Hidden scene'].detail
+        self.assertIn('1 hidden samples had an unproven pre-UI layer (no gameplay sample had read it within 0.03 of '
+                      'the presented frame, the proof of S2b lines)', detail)
+        # Since fix 1 the same sample carries texel 11 and no claim; an offered layer without coverage whose signature
+        # has no proof yet is still counted, named by the pixel rule.
+        new = report.parse([SB_FIX1_SETTINGS]).ui[0]
+        self.assertEqual((new.scene.fix1, new.scene.pre_ui_pixels, new.scene.claims, new.scene.proven,
+                          new.scene.hidden_ms, new.bare_layer(), new.hidden()),
+                         (True, (2719720, 2148784, 5994692, 5238234), 0, False, 656, True, True))
+        detail = run(BASE + [SB_FIX1_SETTINGS])['Hidden scene'].detail
+        self.assertIn('1 hidden samples had an unproven pre-UI layer (no proof yet: 3 samples over 2 s whose layer '
+                      'equals the presented frame on at least 90% of pixels and is lit on at least half)', detail)
+        self.assertNotIn('0.03', detail)
+        # A proven layer is not counted, nor a layer with coverage (a real UI layer, as in HDR) or a visible frame.
+        for line_text in (SB_FIX1_SETTINGS.replace('proven=0', 'proven=1'),
+                          SB_FIX1_SETTINGS.replace('sampled_layer={covered=0', 'sampled_layer={covered=14519'),
+                          SB_FIX1_SETTINGS.replace('verdict=hidden', 'verdict=visible')):
+            self.assertNotIn('unproven', run(BASE + [line_text])['Hidden scene'].detail)
+        # The fixture helper writes the same field.
+        flat = ui3('10:00:12', 8, 1000, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 600), scene=(0.031, 'hidden'),
+                   claims=0x80, h1=1, winner=0, pre_ui=('layer', 0.588, 1), guard=(1, 1, 0, 1),
+                   pre_ui_pixels=(330, 260, 600, 520))
+        self.assertEqual(report.parse(BASE + [flat]).ui[0].scene.pre_ui_pixels, (330, 260, 600, 520))
+        self.assertEqual(run(BASE + [flat])['Hidden scene'].detail,
+                         'H1 hidden scene (8) in 1 samples (pre-UI image: hudless 0, layer 1), hidden hold held in 1 '
+                         'samples (no counter line); 1 of 1 samples measured')
+
+    def test_fix1_pre_ui_proof_keys_are_reported_and_are_no_coverage_source(self):
+        restored = line('10:00:01', '[Sunshine 3D] Sunshine UI protection: restored accepted UI sources '
+                                    'ui_color:87:srgb,pre_ui:87:srgb from an earlier session of this game')
+        session = report.parse(BASE + [restored, accepted_now('10:00:20', 'ui_color:87:srgb'),
+                                       accepted_now('10:00:30', 'ui_color:87:srgb,pre_ui:87:srgb,pre_ui:87:pq')])
+        self.assertEqual(session.trust_events[0][3], ('ui_color:87:srgb', 'pre_ui:87:srgb'))
+        self.assertEqual(report.pre_ui_proofs(session),
+                         [(36001.0, 'restored', 'pre_ui:87:srgb'), (36020.0, 'lapsed', 'pre_ui:87:srgb'),
+                          (36030.0, 'earned', 'pre_ui:87:pq'), (36030.0, 'earned', 'pre_ui:87:srgb')])
+        proofs = [c for c in report.evaluate(session) if c.name == 'Pre-UI proof']
+        self.assertTrue(all(c.status == 'INFO' for c in proofs))
+        self.assertEqual([c.detail for c in proofs], [
+            '10:00:01 pre_ui:87:srgb restored from an earlier session, provisional: 3 samples over 2 s whose layer '
+            'equals the presented frame on at least 90% of pixels and is lit on at least half confirm it, and it '
+            'lapses after 60 s of testable time (the layer offered without coverage while the presented frame reads '
+            'visible) without them',
+            '10:00:20 pre_ui:87:srgb lapsed: restored and not confirmed within 60 s of testable time',
+            '10:00:30 pre_ui:87:pq earned by 3 samples over 2 s whose layer equals the presented frame on at least 90% '
+            'of pixels and is lit on at least half',
+            '10:00:30 pre_ui:87:srgb earned by 3 samples over 2 s whose layer equals the presented frame on at least '
+            '90% of pixels and is lit on at least half'])
+        # Forget logs the acceptance change, then the Forget line naming the cleared keys.
+        forget = line('10:00:40', '[Sunshine 3D] Sunshine UI protection: forgot learned UI sources '
+                                  'ui_color:87:srgb,pre_ui:87:srgb for this game; each source is accepted again by its '
+                                  'own evidence')
+        session = report.parse(BASE + [accepted_now('10:00:30', 'ui_color:87:srgb,pre_ui:87:srgb'),
+                                       accepted_now('10:00:40', 'none'), forget])
+        self.assertEqual(report.pre_ui_proofs(session)[1:], [(36040.0, 'forgotten', 'pre_ui:87:srgb')])
+        # S2b logs have no proof keys, and so no such line.
+        self.assertNotIn('Pre-UI proof', run(BASE + [restored.replace(',pre_ui:87:srgb', '')]))
+
+        # A pre-UI proof key is not a UI coverage source: a layer acceptance revoked beside a proof of the same
+        # format resolves the layer's dispute, and a proof that lapses alone resolves nothing.
+        def disagreeing(t):
+            return ui2(t, 1, 20, (20, 0, 0, 0), 0x41, 0x41, layer=(400, 0))
+        samples = [disagreeing(t) for t in ('10:00:12', '10:00:13', '10:00:14')]
+        start = accepted_now('10:00:10', 'ui_alpha:61:srgb,ui_layer:28:srgb,pre_ui:28:srgb')
+        handled = run(BASE + [start] + samples + [accepted_now('10:00:15', 'ui_alpha:61:srgb,pre_ui:28:srgb')])
+        self.assertEqual(handled['UI protection'].status, 'PASS')
+        self.assertIn('acceptance revoked 10:00:15', handled['UI protection'].times[0])
+        unresolved = run(BASE + [start] + samples + [accepted_now('10:00:15', 'ui_alpha:61:srgb,ui_layer:28:srgb')])
+        self.assertEqual(unresolved['UI protection'].status, 'WARN')
+
+    def test_fix1_dark_pre_ui_image_is_a_shadow_statistic(self):
+        # Stellar Blade's SDR loading screen after the layer was proven: the presented frame reads hidden, the layer
+        # (no coverage) is an almost black scene image whose D is weak, so H1 (d) does not apply. The report only
+        # summarizes the shadow statistics, INFO.
+        def loading(t, image_lit, presented_lit, differs, proven=1, verdict='hidden', covered=0):
+            return ui3(t, 0, 0, (0, 0, 0, 1000), 0x48, 0x0, layer=(covered, 30), reason='ambiguous',
+                       refused='current', scene=(-0.04, verdict), pre_ui=('layer', 0.18, 1),
+                       guard=(1, 0, 0, proven), pre_ui_pixels=(990, image_lit, presented_lit, differs))
+        dark = [loading('10:00:12', 2, 30, 28), loading('10:00:13', 40, 60, 25), loading('10:00:14', 12, 45, 40)]
+        checks = run(BASE + dark)
+        shadow = checks['Dark pre-UI image (shadow)']
+        self.assertEqual(shadow.status, 'INFO')
+        self.assertEqual(shadow.detail,
+                         '3 samples read the presented frame hidden over a proven but dark pre-UI layer (lit on less '
+                         'than half of the pixels): presented lit 3.0%-6.0%, layer lit 0.20%-4.0%, presented lit and '
+                         'different from the layer 2.5%-4.0% of pixels; shadow statistics for a future dark pre-UI '
+                         'image rule (loading screens), nothing acts on them')
+        self.assertEqual(shadow.times[0], '10:00:12 presented lit 3.0%, layer lit 0.20%, differing 2.8%')
+        # Not about an unproven, lit or covered layer, a frame that did not read hidden, or S2b lines.
+        for lines in ([loading('10:00:12', 2, 30, 28, proven=0)], [loading('10:00:12', 500, 600, 20)],
+                      [loading('10:00:12', 2, 30, 28, covered=10)], [loading('10:00:12', 2, 30, 28, verdict='visible')],
+                      [ui3('10:00:12', 0, 0, (0, 0, 0, 1000), 0x48, 0x0, scene=(-0.04, 'hidden'),
+                           pre_ui=('layer', 0.18, 1), guard=(1, 0, 0, 1))]):
+            self.assertNotIn('Dark pre-UI image (shadow)', run(BASE + lines))
 
     def test_counted_whole_frame_alpha_over_a_visible_scene_is_reported(self):
         # The Witcher 3 sign wheel: a trusted layer covers the frame without an exact pair, so contradicted stays 0;

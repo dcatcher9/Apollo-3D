@@ -466,14 +466,20 @@ no mask, and in logs since S2a the add-on's own reason and refused candidate (ga
 full-frame UI over a hidden scene (H1, source 8; in logs before S2b source 8 or 9), by the pre-UI
 scene image whose claim acted (HUD-less image or UI layer), with the hidden-scene guard's entered,
 released and refuted counts from the last counter line, and how many hidden samples had a pre-UI
-layer that no gameplay sample had yet proven the presented frame without its UI (in logs before S2b, how many were a
+layer whose signature was not yet proven the pre-UI scene image (since fix 1 by matching pixels, in
+S2b logs by D; in logs before S2b, how many were a
 route's exit, whose own evidence read the presented frame visible: each hidden scene that ends
 shows one, so they are counted rather than judged); a warning when the
 presented frame read hidden, not blank, for at least 500 ms while no UI source decided
 (`shadow_hidden_ms`, which the first-run shadow measures in a game's first session after install, or
 whenever `UISceneShadow=1`, even where
 nothing could act, such as a game whose only UI signal is presented alpha; since S2b H1 covers
-Stellar Blade's SDR menus, which the shadow logged this way while frame generation was suspended);
+Stellar Blade's SDR menus, which the shadow logged this way while frame generation was suspended,
+once their layer is proven); in logs since fix 1, `Pre-UI proof` for each layer proof key
+(`pre_ui:<format>:<space>`) restored, earned, lapsed or forgotten, and the INFO-only
+`Dark pre-UI image (shadow)`, which summarizes hidden samples over a proven but dark layer (a
+loading screen) for a future rule that nothing acts on yet
+([hidden-scene evidence](../../docs/reshade-sbs.md#setup) defines both);
 observation losses by
 cause; unusual export pauses; present-thread
 hitches; Game 3D CPU and GPU cost; and, from the host log, the Game 3D link, size fit and encoder
@@ -517,8 +523,9 @@ of logs written before S2b, before S2a and before S1 too, each with the checks o
 layer logged before S1 is read as the layer candidate. UI lines since S2b carry the pre-UI scene
 image's evidence (`sampled_pre_ui_scene`), the informative claims and the H1 word
 (`sampled_claims`, `sampled_h1`) and the guard's pushed verdicts and layer proof (`scene_guard`) in place of
-`sampled_hudless_scene` and `scene_hold`; [UI protection](../../docs/reshade-sbs.md#setup) defines
-them.
+`sampled_hudless_scene` and `scene_hold`; UI lines since fix 1 add the layer's pixels against the
+presented frame (`sampled_pre_ui_pixels`), and lines without them read as before;
+[UI protection](../../docs/reshade-sbs.md#setup) defines them.
 
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
 the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`
@@ -561,8 +568,9 @@ ctest --test-dir cmake-build-relwithdebinfo/reshade-addon -R reshade_game3d_ui_s
 
 Its `KNOWN_TODAY <stage> <rule>` lines name today's known-wrong outcomes by
 [UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework) stage and rule ID (such as
-`S3 T1/E2`). They do not fail the test. Since S2b it ends with
-`PASS UI sequence replay: 27 groups, 2 KNOWN_TODAY`: both for S3 (T1/E2). A
+`S3 T1/E2`). They do not fail the test. It ends with
+`PASS UI sequence replay: <groups> groups, 2 KNOWN_TODAY`, both for S3 (T1/E2); the
+[UI protection](../../docs/reshade-sbs.md#setup) contract gives the current group count. A
 replay `xfail` reason names the same rule IDs.
 
 ## Additional diagnostics

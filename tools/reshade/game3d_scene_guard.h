@@ -7,9 +7,10 @@
 // computes each frame's informative full claims and applies H1 from the bits
 // this guard pushes; the guard holds the verdicts of the statistic D across
 // samples and refutes claims per source signature. It reads only decision
-// words and signatures, never acceptance, slots, layer flags or the T1 hold,
-// so the single-frame replay (ui_detection_replay) and the sequence replay
-// (test_game3d_ui_sequence) drive it exactly as the renderer does. No
+// words, signatures and whether the offered layer is proven (from the
+// acceptance ledger, below), never acceptance, slots, layer flags or the T1
+// hold, so the single-frame replay (ui_detection_replay) and the sequence
+// replay (test_game3d_ui_sequence) drive it exactly as the renderer does. No
 // ReShade dependency.
 //
 // Call order, per renderer (one state each):
@@ -17,11 +18,13 @@
 //     viewport); only an identity change (another epoch or viewport, as
 //     ui_temporal::hold_scope_changed) clears the state. An observation
 //     revision, an inactive frame, acceptance changes and Forget never do;
-//   - before detection: per_frame(now, offered, signatures) is ORed into the
-//     pushed flags (it also chooses the image texel 6 measures), and
-//     measure(now, shadow, whole_frame) says whether this sample frame runs
-//     the evidence passes and whether what they measure is actionable (kept
-//     with the pending sample);
+//   - before detection: per_frame(now, offered, signatures, layer_proven) is
+//     ORed into the pushed flags, and measure(now, shadow, whole_frame,
+//     proven_image) says whether this sample frame runs the evidence passes
+//     and whether what they measure is actionable (kept with the pending
+//     sample). layer_proven: the offered layer's signature is proven the
+//     pre-UI scene image (alpha_auto_policy::pre_ui_proven of its signature);
+//     proven_image: that layer is also the offer's pre-UI image;
 //   - at poll, for a completed sample in scope: observe(sample_of(words, n,
 //     tick, scene), actionable, the signatures it was submitted with), before
 //     the acceptance ledger observes it.
@@ -40,21 +43,19 @@
 // Pre-UI proof (H1 d): the declared HUD-less image is the scene without its
 // UI by contract; an offscreen layer holding colour without alpha is only
 // inferred to be, and might be a scene buffer from before fog, grade, grain
-// or vignette, whose D stays visible while the presented frame's drifts
-// hidden. The layer's image enters the pre-UI hold only while its signature
-// is proven: a valid sample that measured it while the presented frame did
-// not read hidden, with the two D within scene::pre_ui_proof_percent
-// hundredths, proves it; such a sample with a larger gap withdraws the proof
-// and releases the pre-UI hold. While the latest sample set a layer aside
-// (offered, V1-invalid) every sample frame runs the evidence passes, so that
-// gameplay proves it, and beside an offered HUD-less image they measure the
-// layer (per_frame_pre_ui_layer) unless that sample carried the pre-UI
-// claim. Only an identity change clears the proof.
+// or vignette. Its claim (d) exists only while its signature is proven the
+// pre-UI scene image, which the acceptance ledger owns (game3d_alpha_auto.h,
+// key pre_ui:<format>:<space>: earned by samples whose layer equals the
+// presented frame nearly everywhere, remembered across sessions, cleared by
+// Forget only). The guard never gives or withdraws it and no identity change
+// clears it; the caller passes the ledger's answer as layer_proven, which
+// per_frame pushes as per_frame_pre_ui_proven. While a proven layer is the
+// offer's pre-UI image every sample frame's evidence is actionable, so the
+// first hidden samples after an identity change already count.
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
 
 #include <array>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -158,10 +159,9 @@ namespace sunshine_game3d::scene_guard {
 
   // What one observation did: the hidden hold entered, a hold was released
   // by a visible sample (or a sample that decided H1 read visible), how many
-  // signatures it newly refuted, and the first-run shadow's run length;
-  // proved and withdrawn: the layer's pre-UI proof was newly given or taken.
+  // signatures it newly refuted, and the first-run shadow's run length.
   struct observation {
-    bool entered{}, released{}, proved{}, withdrawn{};
+    bool entered{}, released{};
     std::uint32_t refuted{};
     std::uint64_t shadow_hidden_ms{};
   };
@@ -187,13 +187,6 @@ namespace sunshine_game3d::scene_guard {
     // The latest sample had an acting-capable claim (a claim not refuted, or
     // the pre-UI claim).
     bool gate_open{};
-    // The layer signature proven to be the presented frame without its UI
-    // (the pre-UI proof, above), when pre_ui_proven.
-    ui_selection::signature pre_ui_proof{};
-    bool pre_ui_proven{};
-    // The latest sample set an offered layer aside (V1-invalid), and it
-    // carried the pre-UI claim.
-    bool layer_aside{}, latest_pre_ui_claim{};
     // The first sample tick of the current run of hidden samples without a
     // decided source (the first-run shadow); zero without a run.
     std::uint64_t shadow_run_start{};
@@ -224,36 +217,32 @@ namespace sunshine_game3d::scene_guard {
       return bits;
     }
 
-    // Whether the layer of this signature is proven the presented frame
-    // without its UI.
-    bool proven(const ui_selection::signature &layer) const { return pre_ui_proven && pre_ui_proof == layer; }
-
     // The per-frame bits of a detection at now: the held verdicts (the
     // pre-UI image's only while the offer's image is the HUD-less image or a
-    // proven layer), the refuted offered candidates, and the layer as the
-    // measured pre-UI image beside a HUD-less image while the latest sample
-    // set the layer aside without a pre-UI claim.
-    std::uint32_t per_frame(std::uint64_t now, std::uint32_t offered, const kind_signatures &signatures) const {
+    // proven layer), the refuted offered candidates, and
+    // per_frame_pre_ui_proven while the offered layer is proven
+    // (layer_proven, the acceptance ledger's answer for its signature).
+    std::uint32_t per_frame(std::uint64_t now, std::uint32_t offered, const kind_signatures &signatures,
+        bool layer_proven) const {
+      const bool layer_offered = (offered & ui_detection::candidate::layer) != 0u;
+      const bool proven = layer_offered && layer_proven;
       const bool layer_image = ui_selection::pre_ui_image_of(offered) == ui_detection::pre_ui_image::layer;
-      const bool pre_ui_visible =
-        pre_ui.held(now) && (!layer_image || proven(signatures[std::size_t(ui_selection::kind::ui_layer)]));
-      const bool both = (offered & ui_detection::candidate::hudless) && (offered & ui_detection::candidate::layer);
+      const bool pre_ui_visible = pre_ui.held(now) && (!layer_image || proven);
       return (hidden.held(now) ? ui_detection::per_frame_scene_hidden : 0u) |
         (pre_ui_visible ? ui_detection::per_frame_pre_ui_visible : 0u) |
         (refuted_bits(offered, signatures) << ui_detection::per_frame_refuted_shift) |
-        (both && layer_aside && !latest_pre_ui_claim ? ui_detection::per_frame_pre_ui_layer : 0u);
+        (proven ? ui_detection::per_frame_pre_ui_proven : 0u);
     }
 
     // A sample frame runs the evidence passes when the latest sample had an
-    // acting-capable claim or a hold is active (actionable), for the
-    // first-run shadow (shadow), and as a diagnostic after a whole-frame
-    // decision (whole_frame: an accepted alpha covering 99% or source 6),
-    // and while the latest sample set a layer aside (its pre-UI proof). Only
-    // actionable evidence holds, releases or refutes; any valid evidence
-    // gives or withdraws the proof.
-    measurement measure(std::uint64_t now, bool shadow, bool whole_frame) const {
-      const bool actionable = gate_open || hidden.held(now) || pre_ui.held(now);
-      return {actionable || shadow || whole_frame || layer_aside, actionable};
+    // acting-capable claim, a hold is active or a proven layer is the offer's
+    // pre-UI image (proven_image) (actionable), for the first-run shadow
+    // (shadow), and as a diagnostic after a whole-frame decision
+    // (whole_frame: an accepted alpha covering 99% or source 6). Only
+    // actionable evidence holds, releases or refutes.
+    measurement measure(std::uint64_t now, bool shadow, bool whole_frame, bool proven_image) const {
+      const bool actionable = gate_open || hidden.held(now) || pre_ui.held(now) || proven_image;
+      return {actionable || shadow || whole_frame, actionable};
     }
 
     observation observe(const sample &s, bool actionable, const kind_signatures &signatures) {
@@ -270,21 +259,6 @@ namespace sunshine_game3d::scene_guard {
           if (overlay) restore(signatures[std::size_t(k)]);
         }
       const auto &presented = s.presented;
-      const auto &layer = signatures[std::size_t(ui_selection::kind::ui_layer)];
-      // The layer's pre-UI proof, from any valid sample that measured it
-      // while the presented frame did not read hidden.
-      if (s.pre_ui_image == ui_detection::pre_ui_image::layer && (s.offered & ui_detection::candidate::layer) &&
-          presented.valid && s.pre_ui.valid && presented.verdict != scene_verdict::hidden) {
-        if (std::fabs(s.pre_ui.d - presented.d) * 100.f <= float(ui_detection::scene::pre_ui_proof_percent)) {
-          result.proved = !proven(layer);
-          pre_ui_proof = layer;
-          pre_ui_proven = true;
-        } else if (proven(layer)) {
-          result.withdrawn = true;
-          pre_ui_proven = false;
-          pre_ui.release();
-        }
-      }
       if (actionable && presented.valid) {
         if (presented.verdict == scene_verdict::visible) {
           result.released = hidden.held(s.tick) || pre_ui.held(s.tick) || s.source == 8u;
@@ -295,11 +269,10 @@ namespace sunshine_game3d::scene_guard {
         } else if (presented.verdict == scene_verdict::hidden) {
           result.entered = hidden.hit(s.tick);
           // The pre-UI image's own evidence, read only for the image the
-          // claim names and, for the layer, only while it is proven; invalid
-          // evidence changes nothing.
+          // claim names (a layer's claim exists only while it is proven);
+          // invalid evidence changes nothing.
           if ((s.claims & ui_detection::claim_pre_ui) && s.pre_ui_image &&
-              s.pre_ui_image == ui_selection::pre_ui_image_of(s.offered) && s.pre_ui.valid &&
-              (s.pre_ui_image != ui_detection::pre_ui_image::layer || proven(layer))) {
+              s.pre_ui_image == ui_selection::pre_ui_image_of(s.offered) && s.pre_ui.valid) {
             if (ui_detection::scene_visible(s.pre_ui.d)) pre_ui.hit(s.tick);
             else pre_ui.release();
           }
@@ -310,8 +283,6 @@ namespace sunshine_game3d::scene_guard {
       }
       gate_open = (s.claims & ui_selection::candidate_bits & ~refuted_bits(s.offered, signatures)) != 0u ||
         (s.claims & ui_detection::claim_pre_ui) != 0u;
-      layer_aside = (s.offered & ui_detection::candidate::layer) && !(s.valid_bits & ui_detection::candidate::layer);
-      latest_pre_ui_claim = (s.claims & ui_detection::claim_pre_ui) != 0u;
       // An uncovered hidden scene: consecutive hidden samples while no source
       // decided. The first-run shadow measures it. A sample with fewer decided
       // comparisons than valid evidence needs edge cells is blank (black, or a

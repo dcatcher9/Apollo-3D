@@ -56,7 +56,10 @@ UI = re.compile(
     r'(?: matching_tiles=(?P<tiles>\d+) lit=(?P<lit>\d+))?')
 # Hidden-scene fields of the same line, absent from older logs. Before S2b the HUD-less image's D and the held routes
 # (scene_hold); since S2b (SCENE_S2B) the Backbuffer and current alpha's opaque pixels, the informative full claims, the
-# H1 word, the pre-UI scene image's D and the scene guard's holds (docs/reshade-sbs.md, hidden-scene evidence).
+# H1 word, the pre-UI scene image's D and the scene guard's holds (docs/reshade-sbs.md, hidden-scene evidence); since
+# fix 1 (selection revision 4) also the offscreen UI layer against the presented frame (decision texel 11): matching and
+# lit layer pixels, which prove the layer's signature the pre-UI scene image, and lit presented pixels and those that
+# differ from the layer, shadow statistics nothing acts on.
 SCENE = re.compile(
     r'sampled_alpha_opaque=(?P<opaque>\d+/\d+) sampled_scene=\{n=(?P<n>\d+) d=(?P<d>-?[0-9.]+) valid=(?P<valid>\d) '
     r'ran=(?P<ran>\d) verdict=(?P<verdict>\w+)\} sampled_hudless_scene=\{n=\d+ d=(?P<hudless_d>-?[0-9.]+) '
@@ -68,7 +71,9 @@ SCENE_S2B = re.compile(
     r'sampled_pre_ui_scene=\{image=(?P<image>\w+) n=\d+ d=(?P<pre_ui_d>-?[0-9.]+) valid=(?P<pre_ui_valid>\d)\} '
     r'scene_guard=\{hidden=(?P<hidden>\d) pre_ui=(?P<pre_ui>\d) refuted=(?P<refuted>\d+)(?: proven=(?P<proven>\d))?\} '
     r'shadow=(?P<shadow>\d) '
-    r'shadow_hidden_ms=(?P<hidden_ms>\d+)')
+    r'shadow_hidden_ms=(?P<hidden_ms>\d+)'
+    r'(?: sampled_pre_ui_pixels=\{match=(?P<match>\d+) image_lit=(?P<image_lit>\d+) '
+    r'presented_lit=(?P<presented_lit>\d+) presented_lit_differs=(?P<differs>\d+)\})?')
 # Presentation fields of the same line; older logs lack some of them.
 UI_RUNTIME = re.compile(r'Sunshine UI protection: runtime=(\S+)')
 UI_MODE = re.compile(r'\bmode=(\w+)')
@@ -79,6 +84,9 @@ UI_AVAILABILITY = re.compile(r'\bsource_availability=(\w+)')
 # it trusted source bits.
 TRUST = re.compile(r'Sunshine UI protection: (restored accepted UI sources|accepted UI sources are now|'
                    r'restored alpha trust|alpha trust is now) ([^\s;]+)')
+# Since fix 1 the same ledger also holds, per offscreen layer signature, the proof that the layer is the pre-UI scene
+# image (H1 d): the key 'pre_ui:<format>:<space>', listed with the accepted sources but never a UI coverage source.
+PRE_UI_KIND = 'pre_ui'
 LEGACY_TRUST = re.compile(r'Sunshine UI protection: discarded (\d+) legacy UI trust entries')
 # Since S2a: the panel's Forget action (A3) and the first-run shadow toggle (F1, UISceneShadow).
 FORGET = re.compile(r'Sunshine UI protection: forgot learned UI sources (\S+) for this game')
@@ -146,6 +154,13 @@ UI_LINE_PERIOD_S = 10.0  # An unchanged UI protection state is logged again this
 # Hidden-scene evidence (docs/reshade-sbs.md): a hidden run without a decided source this long is an uncovered hidden
 # scene.
 SHADOW_HIDDEN_WARN_MS = 500
+# Since fix 1 an offscreen layer without coverage is proven the pre-UI scene image by A2_SAMPLES samples over A2_SPAN_S
+# (alpha_trust_samples and alpha_trust_span_ms) in which it equals the presented frame on at least 90% of pixels
+# (ui_selection::full) and is lit on at least half (ui_selection::pre_ui_match); a restored proof lapses after
+# alpha_trust_reconfirm_ms of testable time without one (game3d_alpha_auto.h).
+PRE_UI_PROOF_RULE = ('3 samples over 2 s whose layer equals the presented frame on at least 90% of pixels and is lit '
+                     'on at least half')
+PRE_UI_RECONFIRM_S = 60
 # Decided sources by number (decision texel 0, docs/reshade-sbs.md); 7 is retired. Before S2b 8 and 9 were the
 # hidden-scene layer and HUD-less routes; since S2b 8 is H1 and 9 is retired.
 SOURCE_NAMES = {0: 'no mask', 1: 'UI alpha', 2: 'UI colour', 3: 'Backbuffer alpha', 4: 'current alpha',
@@ -223,12 +238,21 @@ class Scene(NamedTuple):
     winner: int = 0
     inferred_opaque: tuple[int, ...] = ()
     # Whether the offered layer was proven the presented frame without its UI, so that its pre-UI image may act
-    # (H1 d); None on lines without the field.
+    # (H1 d): in S2b by the scene guard's D similarity, since fix 1 the ledger's key pre_ui:<format>:<space>; None on
+    # lines without the field.
     proven: bool | None = None
+    # Since fix 1 (absent before): the layer against the presented frame (decision texel 11): matching pixels, lit
+    # layer pixels, lit presented pixels and lit presented pixels that differ from the layer.
+    pre_ui_pixels: tuple[int, int, int, int] | None = None
 
     @property
     def s2b(self) -> bool:
         return self.guard is not None
+
+    @property
+    def fix1(self) -> bool:
+        """Logged since fix 1, whose layer proof is by pixels and a ledger key."""
+        return self.pre_ui_pixels is not None
 
     def pre_ui_claim(self) -> bool:
         """The pre-UI image's claim could act: claimed this sample while the scene guard held its pre-UI hold."""
@@ -376,6 +400,21 @@ class UISample(NamedTuple):
             parts.append('HUD-less difference rejected')
         return f'{fg}: ' + '; '.join(parts) + self.named_reason()
 
+    def bare_layer(self) -> bool:
+        """The offscreen UI layer offered without coverage: the layer a pre-UI proof can be about (H1 d)."""
+        return self.offered(4) and not self.alpha[4]
+
+    def hidden(self) -> bool:
+        """The presented frame's valid evidence read hidden."""
+        return bool(self.scene and self.scene.valid and self.scene.verdict == 'hidden')
+
+    def dark_pre_ui(self) -> bool:
+        """Since fix 1: the presented frame read hidden while a proven layer without coverage was dark (lit on less
+        than half of the pixels): a loading screen over a near-black pre-UI image, which the shadow statistics measure
+        for a future rule and nothing acts on."""
+        return bool(self.scene and self.scene.fix1 and self.scene.proven and self.hidden() and self.bare_layer()
+                    and self.scene.pre_ui_pixels[1] * 2 < self.pixels)
+
     def named_reason(self) -> str:
         """The add-on's own reason for a sample without a mask and the candidate it refused (F1), since S2a."""
         if not self.s2a or self.reason in ('', 'decided'):
@@ -498,7 +537,7 @@ class Session:
     camera_valid: bool = False
     ui: list[UISample] = field(default_factory=list)
     # Time, logged event, logged value and the accepted source keys after it (None for a discard of legacy entries).
-    # A Forget is listed with None too: the acceptance line that follows it records the change.
+    # A Forget is listed with None too: the acceptance line logged just before it records the change.
     trust_events: list[tuple[float, str, str, tuple[str, ...] | None]] = field(default_factory=list)
     shadow: list[tuple[float, str]] = field(default_factory=list)  # First-run shadow sessions and their UISceneShadow.
     # The last 'Sunshine UI counters' line: the session's totals are cumulative over all its runtimes.
@@ -606,7 +645,9 @@ def parse(lines) -> Session:
                               (int(e['hidden']), int(e['pre_ui']), int(e['refuted'])), e['image'],
                               int(e['claims'], 16), e['applied'] == '1', int(e['winner']),
                               tuple(int(v) for v in e['inferred'].split('/')),
-                              None if e['proven'] is None else e['proven'] == '1')
+                              None if e['proven'] is None else e['proven'] == '1',
+                              None if e['match'] is None else
+                              tuple(int(e[k]) for k in ('match', 'image_lit', 'presented_lit', 'differs')))
             s.ui.append(ui_sample(t, text, found.groupdict(), scene))
         if found := TRUST.search(text):
             s.trust_events.append((t, found.group(1), found.group(2), accepted_keys(found.group(2))))
@@ -893,6 +934,14 @@ def evaluate(s: Session) -> list[Check]:
 def ui_checks(s: Session, add) -> None:
     for t, kind, value, _ in s.trust_events:
         add(Check('INFO', 'UI trust', f'{clock(t)} {kind} {value}'))
+    for t, change, key in pre_ui_proofs(s):
+        add(Check('INFO', 'Pre-UI proof', f'{clock(t)} {key} ' + {
+            'restored': f'restored from an earlier session, provisional: {PRE_UI_PROOF_RULE} confirm it, and it lapses '
+                        f'after {PRE_UI_RECONFIRM_S} s of testable time (the layer offered without coverage while the '
+                        'presented frame reads visible) without them',
+            'earned': f'earned by {PRE_UI_PROOF_RULE}',
+            'lapsed': f'lapsed: restored and not confirmed within {PRE_UI_RECONFIRM_S} s of testable time',
+            'forgotten': 'forgotten by Forget'}[change]))
     for t, setting in s.shadow:
         add(Check('INFO', 'UI first-run shadow', f'{clock(t)} measures this session (UISceneShadow={setting}'
                   + (': the first session since the key was written' if setting == 'absent' else '') + ')'))
@@ -1040,6 +1089,26 @@ def ui_checks(s: Session, add) -> None:
               (overrides + flattened + contradicted or disputes or handled or short)[:6]))
     gap_checks(s, add)
     scene_checks(s, add)
+
+
+def pre_ui_proofs(s: Session) -> list[tuple[float, str, str]]:
+    """Since fix 1: each pre-UI proof key (pre_ui:<format>:<space>) that the logged acceptance changes restored,
+    added (earned) or removed (lapsed, or forgotten when the Forget line beside the change names it: Forget logs the
+    change first, then the cleared keys)."""
+    held: set[str] = set()
+    events = []
+    for t, kind, _, keys in s.trust_events:
+        if keys is None:
+            continue
+        now = {key for key in keys if key.split(':')[0] == PRE_UI_KIND}
+        restored = kind.startswith('restored')
+        events += [(t, 'restored' if restored else 'earned', key) for key in sorted(now - held)]
+        for key in sorted(held - now):
+            forgot = any(event == 'forgot learned UI sources' and abs(when - t) <= LOG_GATE_S
+                         and key in value.split(',') for when, event, value, _ in s.trust_events)
+            events.append((t, 'forgotten' if forgot else 'lapsed', key))
+        held = now
+    return events
 
 
 def refusals(s: Session) -> Counter:
@@ -1322,7 +1391,10 @@ def scene_checks(s: Session, add) -> None:
     false hidden verdict shows one too. Exits are counted, not judged; many short episodes deserve a look. Since S2b
     the H1 samples (8) are listed with the pre-UI scene image whose claim acted (H1 (d)), and the scene guard's
     entries, releases and refutations come from the counter line (M5); hidden samples whose layer pre-UI claim could
-    not act because no gameplay sample had proven the layer are counted."""
+    not act because the layer was not proven are counted: in S2b lines a layer claim (0x80) without the guard's D
+    proof, since fix 1 an offered layer without coverage whose signature has no ledger proof yet (an unproven layer no
+    longer claims). Since fix 1 also 'Dark pre-UI image (shadow)', INFO only: hidden samples over a proven but dark
+    layer (a loading screen), measured for a future rule that nothing acts on yet."""
     scenes = [u for u in s.ui if u.scene]
     if not scenes:
         return
@@ -1338,11 +1410,14 @@ def scene_checks(s: Session, add) -> None:
         detail = (f'H1 hidden scene (8) in {len(h1)} samples (pre-UI image: hudless {pre_ui["hudless"]}, layer '
                   f'{pre_ui["layer"]}), {guard}; {sum(u.scene.ran for u in scenes)} of {len(scenes)} samples '
                   'measured')
-        unproven = sum(1 for u in guarded if u.scene.claims & CLAIM_PRE_UI and u.scene.pre_ui_image == 'layer' and
-                       u.scene.proven is False and u.scene.valid and u.scene.verdict == 'hidden')
-        if unproven:
-            detail += (f'; {unproven} hidden samples had an unproven pre-UI layer (no gameplay sample had read it '
-                       'within 0.03 of the presented frame)')
+        unproven = [u for u in guarded if u.scene.pre_ui_image == 'layer' and u.scene.proven is False and u.hidden()
+                    and (u.bare_layer() if u.scene.fix1 else u.scene.claims & CLAIM_PRE_UI)]
+        fix1 = sum(1 for u in unproven if u.scene.fix1)
+        if fix1:
+            detail += (f'; {fix1} hidden samples had an unproven pre-UI layer (no proof yet: {PRE_UI_PROOF_RULE})')
+        if len(unproven) > fix1:
+            detail += (f'; {len(unproven) - fix1} hidden samples had an unproven pre-UI layer (no gameplay sample had '
+                       'read it within 0.03 of the presented frame, the proof of S2b lines)')
     else:
         covered = Counter(u.source for u in scenes if u.source in (8, 9))
         exits = sum(1 for u in scenes if u.source in (8, 9) and u.scene.valid and u.scene.verdict == 'visible')
@@ -1352,6 +1427,30 @@ def scene_checks(s: Session, add) -> None:
     if uncovered:
         detail += f'; the presented frame read hidden for at least {SHADOW_HIDDEN_WARN_MS} ms with no UI source'
     add(Check('WARN' if uncovered else 'INFO', 'Hidden scene', detail, uncovered[:6]))
+    dark_pre_ui_checks(scenes, add)
+
+
+def dark_pre_ui_checks(scenes: list[UISample], add) -> None:
+    """Shadow statistics for a future 'dark pre-UI image' rule (since fix 1): samples whose presented frame read
+    hidden while the offered layer, without coverage and proven the pre-UI scene image, was lit on less than half of
+    the pixels, such as a loading screen over a near-black scene image. H1 (d) needs that image to read visible, so
+    these stay 3D; nothing acts on the counts, which are reported as shares of the frame, INFO only."""
+    dark = [u for u in scenes if u.dark_pre_ui()]
+    if not dark:
+        return
+
+    def shares(index: int) -> str:
+        ordered = sorted(dark, key=lambda u: u.scene.pre_ui_pixels[index] / u.pixels)
+        low, high = (percent(u.scene.pre_ui_pixels[index], u.pixels) for u in (ordered[0], ordered[-1]))
+        return low if low == high else f'{low}-{high}'
+    add(Check('INFO', 'Dark pre-UI image (shadow)',
+              f'{len(dark)} samples read the presented frame hidden over a proven but dark pre-UI layer (lit on less '
+              f'than half of the pixels): presented lit {shares(2)}, layer lit {shares(1)}, presented lit and '
+              f'different from the layer {shares(3)} of pixels; shadow statistics for a future dark pre-UI image rule '
+              '(loading screens), nothing acts on them',
+              [f'{clock(u.t)} presented lit {percent(u.scene.pre_ui_pixels[2], u.pixels)}, layer lit '
+               f'{percent(u.scene.pre_ui_pixels[1], u.pixels)}, differing '
+               f'{percent(u.scene.pre_ui_pixels[3], u.pixels)}' for u in dark][:6]))
 
 
 def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:

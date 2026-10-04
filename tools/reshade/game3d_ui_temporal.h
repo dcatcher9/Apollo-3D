@@ -124,7 +124,9 @@ namespace sunshine_game3d::ui_temporal {
   // and the frame reason of texels 8 and 9 when there are
   // judgment_decision_texels; the H1 texel 10, the opaque Backbuffer and
   // current counts, the claims and the h1 word, when there are
-  // h1_decision_texels). sequence numbers the submitted samples, and
+  // h1_decision_texels; the pre-UI pixel counts of texel 11, the layer
+  // against the presented frame, when there are pre_ui_decision_texels).
+  // sequence numbers the submitted samples, and
   // flags are the Sunshine_UIDetectionFlags the detection pushed (whether an
   // offered layer was the one-frame-late copy).
   inline alpha_auto_decision decode_detection_sample(const std::uint32_t *words, std::size_t count,
@@ -169,6 +171,12 @@ namespace sunshine_game3d::ui_temporal {
       evidence.claims = words[word::claims];
       evidence.s1_source = words[word::h1] & ui_detection::h1_winner_mask;
       evidence.h1_applied = (words[word::h1] & ui_detection::h1_applied) != 0;
+    }
+    if (count >= 4 * ui_detection::pre_ui_decision_texels) {
+      evidence.pre_ui_match = words[word::pre_ui_match];
+      evidence.pre_ui_image_lit = words[word::pre_ui_image_lit];
+      evidence.presented_lit = words[word::presented_lit];
+      evidence.presented_lit_differs = words[word::presented_lit_differs];
     }
     if (scene) {
       const auto decode = [&](std::size_t n, std::size_t d, std::size_t state) {
