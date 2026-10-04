@@ -4,6 +4,7 @@
 #include <reshade.hpp>
 #include "async_log.h"
 #include "game3d_shader_cache.h"
+#include "game3d_still_screen.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
@@ -17,6 +18,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace sunshine_game3d {
@@ -51,8 +53,8 @@ namespace sunshine_game3d {
     enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field,
       ui_plane_tiles, ui_plane_resolved, left, right, packed, ui_source, ui_source_second, ui_source_third,
       ui_conflict_statistics, detection_statistics, detection_decision, detected_mask, scene_cell_sums, ui_counter_words,
-      detection_hold, retained_color, retained_color_last = retained_color + ui_detection_inputs::max_retained_presents - 1,
-      texture_count };
+      detection_hold, scene_previous_luma, retained_color,
+      retained_color_last = retained_color + ui_detection_inputs::max_retained_presents - 1, texture_count };
     std::array<texture, texture_count> textures{};
     std::vector<std::pair<api::resource, api::resource_view>> backbuffers;
     // Render-target views of the current export generation's slot textures.
@@ -134,18 +136,19 @@ namespace sunshine_game3d {
     // offscreen UI layer's counts with the valid candidates (texel 7), and the
     // one-way judgment counts with the refused candidate and the frame reason
     // (texels 8 and 9), the H1 texel 10 (the opaque Backbuffer and current
-    // counts, the claims and the h1 word), and texel 11 (the layer's pre-UI
-    // pixel counts, H1 d). The shader's markers size the
-    // decision texels and statistics rows (docs/reshade-sbs.md, UI detection
-    // flags and decision texels).
+    // counts, the claims and the h1 word), texel 11 (the layer's pre-UI
+    // pixel counts, H1 d) and texel 12 (H2's still and compared cells). The
+    // shader's markers size the decision texels and statistics rows
+    // (docs/reshade-sbs.md, UI detection flags and decision texels).
     uint32_t detection_decision_texels = ui_detection::default_decision_texels;
     uint32_t detection_statistics_images = ui_detection::default_scene_evidence_images;
     // Hidden-scene evidence (docs/reshade-sbs.md, hidden-scene evidence): the
-    // shader writes decision texels 5 and 6 with its evidence passes. They run
-    // on sample frames only, and only when the scene guard measures
+    // shader writes decision texels 5, 6 and 12 with its evidence passes.
+    // They run on sample frames only, and only when the scene guard measures
     // (scene_guard::state::measure: an acting-capable claim in the latest
-    // sample, a held verdict, the first-run shadow, or the whole-frame
-    // diagnostic).
+    // sample, a held verdict, the first-run shadow, the whole-frame
+    // diagnostic, or H2 in its scope while no source other than 11
+    // decided).
     bool scene_evidence_supported() const {
       return detection_statistics_images == ui_detection::max_scene_evidence_images &&
         detection_decision_texels >= ui_detection::scene_decision_texels;
@@ -173,6 +176,21 @@ namespace sunshine_game3d {
     // actionable), not for the first-run shadow or diagnostic alone.
     bool detection_pending_actionable{};
     bool hold_cleared{};
+    // H2 (game3d_still_screen.h): this render is in its scope (SDR Auto) and
+    // the session enables flattening (UIFlattenStillScreens); the pending
+    // sample was submitted in scope, and its evidence passes ran for H2 alone
+    // (kept from the acceptance ledger, ui_temporal::ledger_evidence); the
+    // previous presented-luma cell means (textures[scene_previous_luma], u5
+    // of the compare pass only) were cleared to none; and the current
+    // episode pushed still::flatten.
+    bool still_scope{}, still_enabled{}, detection_pending_still_scope{}, detection_pending_h2_only{},
+      previous_luma_cleared{}, still_flattened{};
+    // H2: the longest run that ended before it entered since the last
+    // status (update_alpha_auto publishes it once as the status's
+    // evidence.still_short_ms), whatever ended it: a sample, a scope or
+    // identity change or an unmeasured render, so that the UI line's
+    // short_max_ms covers every run still.short counts.
+    uint64_t still_short_unpublished_ms{};
     // The constants of the last detection run, and the run this render's mask
     // came from (fresh, or held on a generated Present).
     ui_detection_snapshot detection_run, consumed_detection;
@@ -339,7 +357,7 @@ namespace sunshine_game3d {
         api::descriptor_range{0, 0, 0, 15, api::shader_stage::all, 1, api::descriptor_type::shader_resource_view},
         api::descriptor_range{0, 0, 0, 8, api::shader_stage::compute, 1, api::descriptor_type::unordered_access_view},
         api::constant_range{0, 1, 0, 4, api::shader_stage::compute},
-        api::constant_range{0, 2, 0, 5, api::shader_stage::compute}};
+        api::constant_range{0, 2, 0, 6, api::shader_stage::compute}};
       if (!device->create_pipeline_layout(uint32_t(std::size(params)), params, &layout)) return false;
       for (unsigned i = 0; i < samplers.size(); ++i) {
         api::sampler_desc sampler;
@@ -574,12 +592,14 @@ namespace sunshine_game3d {
     }
     void update_alpha_auto(bool eligible, const alpha_auto_source *automatic) {
       consumed_auto = {};
+      const auto still_short_ms = std::exchange(still_short_unpublished_ms, uint64_t{});
       if (!automatic || !automatic->session) {
         // Explicit offline/replay input is already a resolved choice. An
         // incomplete live observation never acquires that authority.
         source_alpha_ui = !automatic && eligible;
         consumed_auto.enabled = source_alpha_ui;
         consumed_auto.state = source_alpha_ui ? alpha_auto_state::manual_on : alpha_auto_state::manual_off;
+        consumed_auto.evidence.still_short_ms = still_short_ms;
         return;
       }
       const auto requested = automatic->session->decision().state;
@@ -590,6 +610,7 @@ namespace sunshine_game3d {
         consumed_auto.state = requested;
         source_alpha_ui = eligible && manual_on;
         consumed_auto.enabled = source_alpha_ui;
+        consumed_auto.evidence.still_short_ms = still_short_ms;
         return;
       }
       // Current-frame GPU validation chooses the mask. CPU readback is only
@@ -611,6 +632,43 @@ namespace sunshine_game3d {
       consumed_auto.scene_guard = {(scene_bits & ui_detection::per_frame_scene_hidden) != 0,
         (scene_bits & ui_detection::per_frame_pre_ui_visible) != 0, uint32_t(guard.refuted_count), scene_layer_proven};
       consumed_auto.scene_shadow = scene_shadow;
+      consumed_auto.still = {still_scope, still_enabled, guard.still.state(), guard.still.run_ms()};
+      consumed_auto.evidence.still_short_ms = std::max(consumed_auto.evidence.still_short_ms, still_short_ms);
+    }
+    // H2: logs what a run's observation or end did, records a run that ended
+    // before it entered for the status, and counts the ends the guard's
+    // sample observations do not (a scope or identity change, an unmeasured
+    // render): counted says whether a committed sample counts this one.
+    void still_log(const still_screen::observation &o, bool counted) {
+      char text[256];
+      if (o.entered) {
+        const auto &run = guard.still.current();
+        std::snprintf(text, sizeof(text),
+          "Sunshine UI still screen: %s (UIFlattenStillScreens=%d) after run_ms=%llu samples=%u d=[%.3f,%.3f] "
+          "still_min=%.3f", still_enabled ? "flattening" : "would flatten", still_enabled ? 1 : 0,
+          static_cast<unsigned long long>(run.duration_ms()), run.samples, run.d_min, run.d_max, run.share_min);
+        sunshine_log::message(reshade::log::level::info, text);
+        still_flattened = false;
+      }
+      if (o.ended) {
+        const auto &run = o.ended_episode;
+        std::snprintf(text, sizeof(text),
+          "Sunshine UI still screen: episode ended reason=%s duration_ms=%llu samples=%u d=[%.3f,%.3f] still_min=%.3f "
+          "flattened=%d", std::string(still_screen::name(o.reason)).c_str(), static_cast<unsigned long long>(run.duration_ms()),
+          run.samples, run.d_min, run.d_max, run.share_min, still_flattened ? 1 : 0);
+        sunshine_log::message(reshade::log::level::info, text);
+        still_flattened = false;
+        if (!counted) ++cpu_counts[ui_counter::still_released];
+      }
+      if (o.short_run) {
+        still_short_unpublished_ms = std::max(still_short_unpublished_ms, o.short_ms);
+        if (!counted) ++cpu_counts[ui_counter::still_short];
+      }
+    }
+    // H2: a render in scope that cannot be sampled (no offered candidate)
+    // ends the run, so that no frame is flattened by a run nothing measures.
+    void still_unmeasured() {
+      if (still_scope) still_log(guard.still.leave(still_screen::end_reason::unmeasured), false);
     }
     bool prepare_detection() {
       if (detection_attempted) return detection_ready;
@@ -619,11 +677,13 @@ namespace sunshine_game3d {
       // detection binds candidate layout 2 (the offscreen UI layer at t7 and the
       // accepted mask in b2 word 2); a shader of another layout, such as an
       // older embedded replay shader, would misread both, so it gets none.
-      // Selection revision 4 (the T1 grace with its hold store at u5, the
+      // Selection revision 5 (the T1 grace with its hold store at u5, the
       // one-way judgment and the F1 reason words in texels 8 and 9, H1 with
-      // its texel 10, and the layer's pre-UI pixel counts in texel 11 from
-      // the statistics rows at pre_ui_statistics_row with b2 word 4) is the
-      // only one this renderer drives.
+      // its texel 10, the layer's pre-UI pixel counts in texel 11 from the
+      // statistics rows at pre_ui_statistics_row with b2 word 4, and H2 with
+      // b2 word 5, the stillness counts of texel 12 from the rows at
+      // still_statistics_row and the previous cell means at u5 of the
+      // compare pass) is the only one this renderer drives.
       if (shader_source().find("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") == std::string_view::npos ||
           shader_marker(shader_source(), ui_detection::candidate_layout_marker) != ui_detection::candidate_layout ||
           shader_marker(shader_source(), ui_selection::revision_marker) != ui_selection::revision ||
@@ -638,11 +698,14 @@ namespace sunshine_game3d {
           !texture_create(detected_mask, width, height, api::format::r32_float, api::resource_usage::unordered_access) ||
           !texture_create(detection_hold, ui_detection::hold::store_texels, 1, api::format::r32_uint,
             api::resource_usage::unordered_access) ||
+          detection_decision_texels < ui_detection::still_decision_texels ||
           !pipeline_create(detection_tiles, "SunshineUIDetectionTilesCS", true, {}) ||
           !pipeline_create(detection_reduce, "SunshineUIDetectionReduceCS", true, {}) ||
           !pipeline_create(detection_mask, "SunshineUIDetectionMaskCS", true, {}) ||
           (scene_evidence_supported() && (!texture_create(scene_cell_sums, ui_detection::scene::cells_x,
               ui_detection::scene::cells_y, api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
+            !texture_create(scene_previous_luma, ui_detection::scene::cells_x, ui_detection::scene::cells_y,
+              api::format::r32_uint, api::resource_usage::unordered_access) ||
             !pipeline_create(scene_cells, "SunshineSceneCellsCS", true, {}) ||
             !pipeline_create(scene_compare, "SunshineSceneCompareCS", true, {}) ||
             !pipeline_create(scene_evidence, "SunshineSceneEvidenceCS", true, {})))) return false;
@@ -761,13 +824,21 @@ namespace sunshine_game3d {
       temporal.latest_key = detection_pending_status_key;
       // The scene guard reads the sample's decision words before the
       // acceptance ledger observes it (game3d_scene_guard.h).
+      // H2 reads it as in scope only while this render still is: a sample in
+      // flight when the render left scope must not start a run.
       const auto observed = guard.observe(scene_guard::sample_of(counts.data(), counts.size(), detection_pending_source.now_ms,
-        scene_evidence_supported()), detection_pending_actionable, detection_pending_signatures.by_kind());
+        scene_evidence_supported()), detection_pending_actionable, detection_pending_signatures.by_kind(),
+        detection_pending_still_scope && still_scope);
       latest.evidence.shadow_hidden_ms = observed.shadow_hidden_ms;
+      latest.evidence.still_short_ms = observed.still.short_ms;
+      // H2: the episode log; the committed sample counts its observation.
+      still_log(observed.still, true);
       // Earns or revokes acceptance of the signatures this sample was taken
-      // for; a session in a manual mode ignores it (S2).
+      // for; a session in a manual mode ignores it (S2). Evidence measured for
+      // H2 alone never reaches it.
       if (input.session)
-        input.session->observe(latest.evidence, latest.pixels, detection_pending_source.now_ms, detection_pending_signatures);
+        input.session->observe(ui_temporal::ledger_evidence(latest.evidence, detection_pending_h2_only), latest.pixels,
+          detection_pending_source.now_ms, detection_pending_signatures);
       commit_counters(latest, input.session, observed);
       counters_pending = false;
     }
@@ -779,7 +850,7 @@ namespace sunshine_game3d {
     // previous frame's, which the reduce masks off with offered zero.
     void detect_ui(api::command_list *cmd, const render_parameters &p, const ui_detection_inputs &input,
         const alpha_auto_source &observation, api::resource_view paired_color, api::resource_view depth,
-        uint32_t bits, uint32_t accepted, uint32_t flags, uint32_t per_frame) {
+        uint32_t bits, uint32_t accepted, uint32_t flags, uint32_t per_frame, uint32_t still_bits) {
       std::array<api::resource_view, 15> views{};
       // A HUD-less image is compared with the color of the frame it belongs to:
       // its batch's tagged Backbuffer or a retained Present. Detection then also
@@ -808,6 +879,8 @@ namespace sunshine_game3d {
       std::memcpy(&pre_ui_threshold_bits, &pushed_pre_ui_threshold, sizeof(pre_ui_threshold_bits));
       detection_run = {ui_detection_snapshot::run_state::ran, bits, threshold_bits, accepted, flags | per_frame, flags};
       detection_run.pre_ui_threshold_bits = pre_ui_threshold_bits;
+      detection_run.still_bits = still_bits;
+      if (still_bits) still_flattened = true;
       // The reduce also adds this frame to the exact counters at u7.
       auto &counter_texture = textures[ui_counter_words];
       if (counter_words && !counters_cleared) {
@@ -827,18 +900,31 @@ namespace sunshine_game3d {
         cmd->barrier(hold_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
         hold_cleared = true;
       }
-      // The reduce (reduce true) also binds the hold store at u5, which no
-      // other detection pass reads.
+      // H2's previous cell means start at none (nothing compared).
+      auto &previous_texture = textures[scene_previous_luma];
+      if (previous_texture.uav.handle && !previous_luma_cleared) {
+        const uint32_t zero[4]{};
+        cmd->barrier(previous_texture.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
+        cmd->clear_unordered_access_view_uint(previous_texture.uav, zero);
+        cmd->barrier(previous_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
+        previous_luma_cleared = true;
+      }
+      // The reduce (reduce true) also binds the hold store at u5, and the
+      // scene compare pass (previous true) H2's previous cell means; no other
+      // detection pass reads either.
       const auto dispatch_stage = [&](pass stage, texture_id target, unsigned output, unsigned x, unsigned y,
-          bool count = false, bool reduce = false) {
+          bool count = false, bool reduce = false, bool previous = false) {
         auto &t = textures[target];
         count = count && counter_words;
         cmd->barrier(t.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
         if (count) cmd->barrier(counter_texture.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
         if (reduce) cmd->barrier(hold_texture.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
+        if (previous)
+          cmd->barrier(previous_texture.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
         std::array<api::resource_view, 8> uavs{}; uavs[output] = t.uav;
         if (count) uavs[7] = counter_texture.uav;
         if (reduce) uavs[5] = hold_texture.uav;
+        if (previous) uavs[5] = previous_texture.uav;
         cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[stage]);
         bindings(cmd, api::shader_stage::compute, p, views, uavs);
         struct constants {
@@ -846,10 +932,11 @@ namespace sunshine_game3d {
           float threshold;
           uint32_t accepted, flags;
           float pre_ui_threshold;
+          uint32_t still;
         } values{detection_run.candidates, difference_threshold, detection_run.accepted, detection_run.flags,
-          pushed_pre_ui_threshold};
-        static_assert(sizeof(values) == 5 * sizeof(uint32_t));
-        cmd->push_constants(api::shader_stage::compute, layout, 5, 0, 5, &values);
+          pushed_pre_ui_threshold, detection_run.still_bits};
+        static_assert(sizeof(values) == 6 * sizeof(uint32_t));
+        cmd->push_constants(api::shader_stage::compute, layout, 5, 0, 6, &values);
         cmd->dispatch(x, y, 1);
         uavs.fill(null_uav);
         cmd->push_descriptors(api::shader_stage::compute, layout, 3,
@@ -857,6 +944,8 @@ namespace sunshine_game3d {
         cmd->barrier(t.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
         if (count) cmd->barrier(counter_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
         if (reduce) cmd->barrier(hold_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
+        if (previous)
+          cmd->barrier(previous_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
       };
       if (bits) dispatch_stage(detection_tiles, detection_statistics, 6, 16, 16);
       views[10] = textures[detection_statistics].srv;
@@ -871,15 +960,21 @@ namespace sunshine_game3d {
       // without an acting-capable claim in the latest sample, a held verdict,
       // the first-run shadow or an accepted whole-frame decision in the latest
       // sample nothing runs (scene_guard::state::measure; a proven layer that
-      // is the offer's pre-UI image always measures). The cells pass reads
+      // is the offer's pre-UI image always measures, and H2 measures in its
+      // scope unless the latest sample decided a source other than 11). The
+      // compare pass also counts H2's still cells. The cells pass reads
       // the pre-UI scene image the b2 constants name: the HUD-less image
       // (t14) when offered, else the offscreen UI layer's colour (t7), both
       // still bound from the detection passes above, beside the presented
       // color (t6).
       const bool proven_image = scene_layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
-      const auto measure =
-        guard.measure(observation.now_ms, scene_shadow, ui_temporal::whole_frame(temporal.latest), proven_image);
+      const bool whole_frame = ui_temporal::whole_frame(temporal.latest);
+      const auto measure = guard.measure(observation.now_ms, scene_shadow, whole_frame, proven_image,
+        still_scope && guard.still.wants_measure());
       detection_pending_actionable = false;
+      // Whether the passes run for H2 alone, whose measurements the
+      // acceptance ledger never observes (ui_temporal::ledger_evidence).
+      detection_pending_h2_only = measure.run && !guard.measure(observation.now_ms, scene_shadow, whole_frame, proven_image).run;
       if (scene_evidence_supported() && measure.run) {
         namespace scene = ui_detection::scene;
         detection_pending_actionable = measure.actionable;
@@ -887,7 +982,7 @@ namespace sunshine_game3d {
         views[10] = {};
         dispatch_stage(scene_cells, scene_cell_sums, 6, scene::cells_x / 16, scene::cells_y);
         views[10] = textures[scene_cell_sums].srv;
-        dispatch_stage(scene_compare, detection_statistics, 6, scene::cells_x / 16, scene::cells_y / 16);
+        dispatch_stage(scene_compare, detection_statistics, 6, scene::cells_x / 16, scene::cells_y / 16, false, false, true);
         views[10] = textures[detection_statistics].srv;
         dispatch_stage(scene_evidence, detection_decision, 6, 1, 1);
         ++scene_evidence_runs;
@@ -929,6 +1024,7 @@ namespace sunshine_game3d {
       detection_pending_source = observation; detection_pending_status_key = temporal.status_key();
       detection_pending_signatures = input.signatures;
       detection_pending_flags = detection_run.flags;
+      detection_pending_still_scope = still_scope;
       detection_pending = detection_awaiting_signal = true;
       detection_last_submit = observation.now_ms; ++detection_submitted;
     }
@@ -1371,6 +1467,11 @@ namespace sunshine_game3d {
     d.consumed_detection = {};
     d.scene_bits = 0;
     d.scene_shadow = d.scene_layer_proven = false;
+    // H2 (game3d_still_screen.h): Auto on SDR output only; a render outside
+    // that scope ends the run at once.
+    d.still_scope = auto_mode && still_screen::sdr_output(d.color, uint32_t(d.source_format));
+    d.still_enabled = d.still_scope && automatic->session->still_flatten();
+    if (!d.still_scope) d.still_log(d.guard.still.leave(still_screen::end_reason::scope), false);
     if (detection_requested) ++d.cpu_counts[ui_counter::auto_frames];
     if (d.detection_active) {
       if (!observation.now_ms) observation.now_ms = observation.tick_ms = GetTickCount64();
@@ -1396,7 +1497,7 @@ namespace sunshine_game3d {
         d.consumed_detection.held_presents = d.temporal.holds;
       } else {
         d.temporal.enter_scope(observation);
-        d.guard.enter_scope(observation.epoch, observation.viewport);
+        d.still_log(d.guard.enter_scope(observation.epoch, observation.viewport), false);
         d.poll_detection(observation);
         // Per-frame bits: the scene guard's held verdicts and refuted
         // candidates (H1), T1's hold reset or accepted-missing bit, and depth
@@ -1405,7 +1506,13 @@ namespace sunshine_game3d {
         d.scene_bits = d.guard.per_frame(observation.now_ms, bits, candidates.signatures.by_kind(), d.scene_layer_proven);
         const uint32_t per_frame = d.scene_bits | arbitration.per_frame |
           (!input.depth_current ? ui_detection::per_frame_depth_not_current : 0u);
-        d.detect_ui(cmd, p, candidates, observation, hudless_color, depth, bits, accepted, flags, per_frame);
+        // H2: a still screen without a UI source flattens only while its run
+        // is active and the session enables it; the shadow pushes nothing. A
+        // zero-offer frame (the T1 grace) is never sampled, so it ends the
+        // run instead.
+        if (!bits) d.still_unmeasured();
+        const uint32_t still_bits = d.still_enabled && d.guard.still_flatten() ? ui_detection::still::flatten : 0u;
+        d.detect_ui(cmd, p, candidates, observation, hudless_color, depth, bits, accepted, flags, per_frame, still_bits);
         d.consumed_detection = d.detection_run;
         d.temporal.detected(observation, identity);
       }
@@ -1415,9 +1522,11 @@ namespace sunshine_game3d {
       // chain without a mask.
       ++d.cpu_counts[ui_counter::held_none];
       d.temporal.unavailable();
+      d.still_unmeasured();
     } else {
       if (detection_requested) ++d.cpu_counts[inactive_reason];
       d.temporal.inactive();
+      d.still_unmeasured();
     }
     d.retain_color(cmd);
     d.mark(cmd, impl::mark_detection);

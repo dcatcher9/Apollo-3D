@@ -121,6 +121,42 @@ namespace sunshine_game3d {
   }
   inline bool scene_shadow_runs(scene_shadow_setting setting) { return setting != scene_shadow_setting::never; }
 
+  // Rule H2 (docs/reshade-sbs.md, still screens without a UI source;
+  // game3d_still_screen.h) flattens a still screen without a UI source only
+  // when ReShade.ini UIFlattenStillScreens is 1; absent writes 0 so the key is
+  // discoverable, and 0 (or anything else) keeps the default shadow, which
+  // only logs the screens it would flatten. ReShade.ini is per game.
+  inline constexpr const char *still_flatten_key = "UIFlattenStillScreens";
+  template<class Backend>
+  bool load_still_flatten(Backend &config) {
+    int value = -1;
+    config.read(still_flatten_key, value);
+    if (value == -1) {
+      config.write(still_flatten_key, 0);
+      return false;
+    }
+    return value == 1;
+  }
+  // The panel's checkbox: saves the key, then switches the game's session.
+  template<class Backend>
+  bool edit_still_flatten(settings_state &settings, bool value, Backend &config) {
+    if (!settings.alive || !settings.alpha_session || value == settings.alpha_session->still_flatten()) return false;
+    config.write(still_flatten_key, value ? 1 : 0);
+    if (!settings.alive) return false;
+    settings.alpha_session->set_still_flatten(value);
+    return true;
+  }
+  // The session log line, at session start and on every edit.
+  inline std::string still_flatten_log_text(bool enabled) {
+    return enabled ? "Sunshine UI protection: still screens with no UI source are flattened (UIFlattenStillScreens=1)" :
+                     "Sunshine UI protection: still screens with no UI source are only logged (UIFlattenStillScreens=0)";
+  }
+  inline constexpr const char *still_flatten_label = "Flatten still screens with no UI source (SDR only)";
+  inline constexpr const char *still_flatten_tooltip =
+    "Off (default): Auto only logs screens it would flatten. On: in SDR, when no UI source decides, a screen that does "
+    "not show the scene depth's edges and stays still for 2 s is shown flat until it changes. Saved per game "
+    "(UIFlattenStillScreens).";
+
   // The overlay name of a candidate bit (ui_detection::candidate), empty for
   // none.
   inline const char *ui_source_name(std::uint32_t candidate_bit) {
@@ -141,7 +177,16 @@ namespace sunshine_game3d {
   // carries no reason.
   inline std::string ui_protection_reason_text(const alpha_auto_decision &decision) {
     const auto &evidence = decision.evidence;
-    if (decision.source_kind || evidence.frame_reason >= ui_no_mask::count) return {};
+    if (decision.source_kind) return {};
+    // H2 (game3d_still_screen.h): a still screen's run, while no source
+    // decides. Enabled, it flattens once the run spans 2 s; the shadow only
+    // logs it.
+    using still_phase = still_screen::phase;
+    if (decision.still.enabled && decision.still.phase != still_phase::none)
+      return "checking whether a still screen hides the scene";
+    if (!decision.still.enabled && decision.still.phase == still_phase::active)
+      return "still screen; flattening is off";
+    if (evidence.frame_reason >= ui_no_mask::count) return {};
     const std::string source = ui_source_name(evidence.refused);
     const auto the = [&](const char *fallback) { return "the " + (source.empty() ? std::string(fallback) : source); };
     switch (evidence.frame_reason) {
@@ -164,6 +209,7 @@ namespace sunshine_game3d {
     // the replacement using quality evidence from the previous source.
     if (source.selected != decision.qualification.selected || source.candidate != decision.qualification.candidate)
       return "Checking source quality";
+    if (decision.coverage.source_kind == ui_detection::source_still) return "Still screen without a UI source shown flat";
     if (decision.coverage.enabled) return "UI source detected automatically";
     if (decision.coverage.state == alpha_auto_state::automatic_off) {
       const auto reason = ui_protection_reason_text(decision.coverage);

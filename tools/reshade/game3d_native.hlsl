@@ -29,7 +29,7 @@
 // Automatic UI detection writes this many decision texels; its statistics
 // rows hold the cells of this many scene-evidence images (docs/reshade-sbs.md,
 // UI detection flags and decision texels).
-#define SUNSHINE_UI_DECISION_TEXELS 12
+#define SUNSHINE_UI_DECISION_TEXELS 13
 #define SUNSHINE_UI_SCENE_EVIDENCE_IMAGES 2
 // Candidate layout 2 (UI framework S1, E1), mirrored from
 // game3d_ui_detection_contract.h: every candidate has its own slot and bit in
@@ -37,9 +37,10 @@
 // layer (t7) never shares the UI color tag's slot (t12) and decides as source
 // 10. SunshineUIDetectionReduceCS ports ui_selection::decide
 // (game3d_ui_selection.h) line for line, the T1 grace and its hold store and
-// the H1 override included; this revision must equal ui_selection::revision.
+// the H1 and H2 overrides included; this revision must equal
+// ui_selection::revision.
 #define SUNSHINE_UI_CANDIDATE_LAYOUT 2
-#define SUNSHINE_UI_SELECTION_REVISION 4
+#define SUNSHINE_UI_SELECTION_REVISION 5
 #define SUNSHINE_UI_CANDIDATE_UI_ALPHA 0x1u
 #define SUNSHINE_UI_CANDIDATE_UI_COLOR 0x2u
 #define SUNSHINE_UI_CANDIDATE_BACKBUFFER 0x4u
@@ -48,6 +49,17 @@
 #define SUNSHINE_UI_CANDIDATE_EXACT 0x20u
 #define SUNSHINE_UI_CANDIDATE_LAYER 0x40u
 #define SUNSHINE_UI_SOURCE_LAYER 10
+// H2 (fix 2), mirrored from game3d_ui_detection_contract.h: a still screen
+// without a UI source decides as source 11 (flat) while the CPU pushes
+// SUNSHINE_UI_STILL_FLATTEN in Sunshine_UIStillScreen; a cell is still when
+// its presented-luma mean stays within SUNSHINE_UI_STILL_TOLERANCE (1/255 of
+// code luma in luma fixed point) of the previous measured sample's, and the
+// compare groups' stillness counts start at statistics row
+// SUNSHINE_UI_STILL_ROW.
+#define SUNSHINE_UI_SOURCE_STILL 11
+#define SUNSHINE_UI_STILL_FLATTEN 0x1u
+#define SUNSHINE_UI_STILL_TOLERANCE 4112
+#define SUNSHINE_UI_STILL_ROW 144
 // Hidden-scene evidence D (docs/reshade-sbs.md, hidden-scene evidence),
 // mirrored from game3d_ui_detection_contract.h: a grid of cells over the
 // frame, the parallax step of a depth edge in pixels per 2160 rows, the edge
@@ -76,17 +88,17 @@
 // from game3d_ui_counters.h: the detection reduce adds every detection frame
 // to these words of SunshineUICountersStore. The no-mask reasons are offsets
 // from SUNSHINE_UI_COUNTER_NONE.
-#define SUNSHINE_UI_COUNTER_WORDS 28
+#define SUNSHINE_UI_COUNTER_WORDS 29
 #define SUNSHINE_UI_COUNTER_DETECTION_FRAMES 0
 #define SUNSHINE_UI_COUNTER_DECIDED 1
-#define SUNSHINE_UI_COUNTER_UNTRUSTED_INFERRED 12
-#define SUNSHINE_UI_COUNTER_INEXACT_DIFFERENCE 13
-#define SUNSHINE_UI_COUNTER_DEPTH_NOT_CURRENT 14
-#define SUNSHINE_UI_COUNTER_CONTRADICTED 15
-#define SUNSHINE_UI_COUNTER_PRESENTED_OVER_DEDICATED 16
-#define SUNSHINE_UI_COUNTER_NONE 17
-#define SUNSHINE_UI_COUNTER_FULL_ALPHA 26
-#define SUNSHINE_UI_COUNTER_REUSED 27
+#define SUNSHINE_UI_COUNTER_UNTRUSTED_INFERRED 13
+#define SUNSHINE_UI_COUNTER_INEXACT_DIFFERENCE 14
+#define SUNSHINE_UI_COUNTER_DEPTH_NOT_CURRENT 15
+#define SUNSHINE_UI_COUNTER_CONTRADICTED 16
+#define SUNSHINE_UI_COUNTER_PRESENTED_OVER_DEDICATED 17
+#define SUNSHINE_UI_COUNTER_NONE 18
+#define SUNSHINE_UI_COUNTER_FULL_ALPHA 27
+#define SUNSHINE_UI_COUNTER_REUSED 28
 #define SUNSHINE_UI_NONE_LAYER_ASIDE 0
 #define SUNSHINE_UI_NONE_TRUSTED_INVALID 1
 #define SUNSHINE_UI_NONE_PRESENTED_BLOCKED 2
@@ -223,6 +235,11 @@ cbuffer SunshineUIDetectionConstants : register(b2)
     // two are not comparable or on a frame that is not a detection sample
     // (H1 d, the pre-UI pixel counts, which the CPU reads from samples only).
     float Sunshine_UIPreUIThreshold;
+    // H2: SUNSHINE_UI_STILL_FLATTEN while the CPU's run of still samples that
+    // read the presented frame hidden is active and the session enables it;
+    // zero otherwise (the shadow default, HDR, manual modes, generated
+    // Presents).
+    uint Sunshine_UIStillScreen;
 };
 RWTexture2D<float> SunshineHostCandidateStore : register(u0);
 RWTexture2D<float> SunshineHostVerticalMajorantStore : register(u1);
@@ -240,6 +257,12 @@ RWTexture2D<uint> SunshineUICountersStore : register(u7);
 // resolved UI plane there); unbound, as in offline replay, it reads
 // SUNSHINE_UI_HOLD_NONE and its writes are dropped.
 RWTexture2D<uint> SunshineUIHoldStore : register(u5);
+// H2's previous presented-luma cell means, an R32_UINT texel per cell of the
+// D grid (0 none, else 0x80000000 | the mean of the last measured sample),
+// bound at u5 for the scene compare pass only; unbound, as in offline
+// replay, every cell reads none (nothing compared) and its writes are
+// dropped.
+RWTexture2D<uint> SunshineScenePreviousLumaStore : register(u5);
 SamplerState SunshinePointClamp : register(s0);
 SamplerState SunshineLinearClampState : register(s1);
 SamplerState SunshinePointBorder : register(s2);
@@ -666,10 +689,15 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
         SunshineUIHoldStore[uint2(0u, 0u)];
     const uint stored_source = SunshineUIHoldStore[uint2(1u, 0u)], stored_covered = SunshineUIHoldStore[uint2(2u, 0u)];
     const bool reused = no_own && prior == SUNSHINE_UI_HOLD_OWN;
-    const uint applied = reused ? stored_source : source, applied_covered = reused ? stored_covered : covered;
+    const uint held = reused ? stored_source : source, held_covered = reused ? stored_covered : covered;
     SunshineUIHoldStore[uint2(0u, 0u)] = no_own ? SUNSHINE_UI_HOLD_SPENT : SUNSHINE_UI_HOLD_OWN;
-    SunshineUIHoldStore[uint2(1u, 0u)] = applied;
-    SunshineUIHoldStore[uint2(2u, 0u)] = applied_covered;
+    SunshineUIHoldStore[uint2(1u, 0u)] = held;
+    SunshineUIHoldStore[uint2(2u, 0u)] = held_covered;
+    // H2 (fix 2): a frame applying no source that T1 did not reuse is shown
+    // flat (source 11) while the CPU pushes SUNSHINE_UI_STILL_FLATTEN; the
+    // hold store above keeps the decision before it.
+    const bool still = !held && !reused && (Sunshine_UIStillScreen & SUNSHINE_UI_STILL_FLATTEN);
+    const uint applied = still ? SUNSHINE_UI_SOURCE_STILL : held, applied_covered = still ? pixels : held_covered;
     // Exact per-session counters (game3d_ui_counters.h): this detection frame,
     // its applied decision and, without one, the own decision's reason; the
     // own decision's invariants and judgments. Counting only; nothing on the
@@ -680,7 +708,8 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     const bool alpha = (applied >= 1u && applied <= 4u) || applied == SUNSHINE_UI_SOURCE_LAYER;
     const bool full_alpha = alpha && applied_covered * 100u >= pixels * 99u;
     InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DETECTION_FRAMES, 0u)], 1u);
-    if (applied < 11u) InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DECIDED + applied, 0u)], 1u);
+    if (applied <= SUNSHINE_UI_SOURCE_STILL)
+        InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DECIDED + applied, 0u)], 1u);
     if (!applied) InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_NONE + none_reason, 0u)], 1u);
     if (inferred && !(accepted & inferred_bit))
         InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_UNTRUSTED_INFERRED, 0u)], 1u);
@@ -703,9 +732,11 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     SunshineAlphaCoverageStore[uint2(2,0)] = coverage;
     SunshineAlphaCoverageStore[uint2(3,0)] = invalid;
     SunshineAlphaCoverageStore[uint2(4,0)] = uint4(lit, accepted, opaque);
-    // No scene evidence unless the evidence passes run after this one.
+    // No scene evidence, and no stillness counts (H2), unless the evidence
+    // passes run after this one.
     SunshineAlphaCoverageStore[uint2(5,0)] = 0u;
     SunshineAlphaCoverageStore[uint2(6,0)] = 0u;
+    SunshineAlphaCoverageStore[uint2(12,0)] = 0u;
     SunshineAlphaCoverageStore[uint2(7,0)] = uint4(layer, valid);
     SunshineAlphaCoverageStore[uint2(8,0)] = uint4(strong, refused);
     // The mask pass keeps the previous real frame's mask when reused.
@@ -728,8 +759,9 @@ void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
     uint source = SunshineUIDetectionSampler.Load(int3(0,0,0)).x;
     float mask = 0.0;
     int3 at = int3(id.xy, 0);
-    // Full-frame UI (a full change set, or H1): the whole frame pins.
-    if (source == 6u || source == 8u) mask = 1.0;
+    // Full-frame UI (a full change set, H1, or H2's still screen): the whole
+    // frame pins.
+    if (source == 6u || source == 8u || source == SUNSHINE_UI_SOURCE_STILL) mask = 1.0;
     // Otherwise load only the selected candidate's raw mask (the same channel
     // the tiles pass reads).
     else if (source == 1u) mask = SunshineUIDedicatedAlpha.Load(at).r;
@@ -871,7 +903,9 @@ float SunshineCameraDepth(float rawDepth)
 // are exact integers whatever order the pixels were added in. Three passes:
 // cell sums into their own texture, per-block comparisons into the statistics
 // rows below the detection tiles (from SUNSHINE_UI_SCENE_PARTIAL_ROW), and
-// their sum into decision texels 5 and 6.
+// their sum into decision texels 5 and 6. The compare pass also counts H2's
+// still cells against the previous measured sample (statistics rows from
+// SUNSHINE_UI_STILL_ROW, summed into decision texel 12).
 // A depth edge's cell-mean parallax step in fixed point: SUNSHINE_UI_SCENE_EDGE_PX
 // pixels per 2160 output rows, rounded up, so the integer test is exact and
 // cannot overflow.
@@ -1006,18 +1040,36 @@ static const int2 SunshineSceneNulls[4] = {int2(5, 3), int2(-7, 4), int2(8, -2),
 // Edge cells, wins - losses of each image, and the presented image's decided
 // (untied) comparisons.
 groupshared int SunshineSceneTotals[4];
+// H2: still and compared cells.
+groupshared uint SunshineSceneStill[2];
 // One thread per cell, one group per 16x16 cells: at each edge cell, each
 // image's activity against its activity at the null cells. The group's sums
 // {n, wins - losses presented, pre-UI image, presented decided} go to statistics
-// texel (group.x, SUNSHINE_UI_SCENE_PARTIAL_ROW + group.y).
+// texel (group.x, SUNSHINE_UI_SCENE_PARTIAL_ROW + group.y). H2: every cell's
+// presented-luma mean is compared with the previous measured sample's (a
+// cell with a stored mean is compared, and still within
+// SUNSHINE_UI_STILL_TOLERANCE) and then stored; the group's {still,
+// compared, 0, 0} go to statistics texel (group.x, SUNSHINE_UI_STILL_ROW +
+// group.y).
 [numthreads(16, 16, 1)]
 void SunshineSceneCompareCS(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     const uint lane = thread.y * 16u + thread.x;
     const bool active = SunshineSceneDepthActive();
     if (lane < 4u) SunshineSceneTotals[lane] = 0;
+    if (lane < 2u) SunshineSceneStill[lane] = 0u;
     GroupMemoryBarrierWithGroupSync();
     if (active && all(id.xy < uint2(SUNSHINE_UI_SCENE_CELLS_X, SUNSHINE_UI_SCENE_CELLS_Y))) {
+        uint2 mean;
+        int unusedParallax;
+        SunshineSceneCellMeans(id.xy, mean, unusedParallax);
+        const uint previous = SunshineScenePreviousLumaStore[id.xy];
+        if (previous & 0x80000000u) {
+            const uint stored = previous & 0x7fffffffu;
+            InterlockedAdd(SunshineSceneStill[1], 1u);
+            if (max(mean.x, stored) - min(mean.x, stored) <= SUNSHINE_UI_STILL_TOLERANCE) InterlockedAdd(SunshineSceneStill[0], 1u);
+        }
+        SunshineScenePreviousLumaStore[id.xy] = 0x80000000u | mean.x;
         uint2 activity;
         uint depthStep;
         SunshineSceneSteps(id.xy, activity, depthStep);
@@ -1040,21 +1092,26 @@ void SunshineSceneCompareCS(uint3 id : SV_DispatchThreadID, uint3 group : SV_Gro
         }
     }
     GroupMemoryBarrierWithGroupSync();
-    if (active && !lane)
+    if (active && !lane) {
         SunshineAlphaCoverageStore[uint2(group.x, SUNSHINE_UI_SCENE_PARTIAL_ROW + group.y)] =
             uint4(asuint(SunshineSceneTotals[0]), asuint(SunshineSceneTotals[1]), asuint(SunshineSceneTotals[2]),
                 asuint(SunshineSceneTotals[3]));
+        SunshineAlphaCoverageStore[uint2(group.x, SUNSHINE_UI_STILL_ROW + group.y)] =
+            uint4(SunshineSceneStill[0], SunshineSceneStill[1], 0u, 0u);
+    }
 }
 // Sums the compare groups' partial sums: D = (wins - losses) / (4 n); ties
 // count 0, so a black or flat image reads as hidden. Writes decision texels 5
 // (presented, with its verdict and decided comparisons) and 6 (the pre-UI
-// scene image, with which image it is, when one is offered).
+// scene image, with which image it is, when one is offered), and H2's still
+// and compared cells in texel 12 (zero when inactive).
 [numthreads(16, 16, 1)]
 void SunshineSceneEvidenceCS(uint3 thread : SV_GroupThreadID)
 {
     const uint lane = thread.y * 16u + thread.x;
     const bool active = SunshineSceneDepthActive();
     if (lane < 4u) SunshineSceneTotals[lane] = 0;
+    if (lane < 2u) SunshineSceneStill[lane] = 0u;
     GroupMemoryBarrierWithGroupSync();
     if (active && thread.y < SUNSHINE_UI_SCENE_CELLS_Y / 16u) {
         int4 partial = asint(SunshineUIDetectionSampler.Load(int3(thread.x, SUNSHINE_UI_SCENE_PARTIAL_ROW + thread.y, 0)));
@@ -1062,6 +1119,9 @@ void SunshineSceneEvidenceCS(uint3 thread : SV_GroupThreadID)
         InterlockedAdd(SunshineSceneTotals[1], partial.y);
         InterlockedAdd(SunshineSceneTotals[2], partial.z);
         InterlockedAdd(SunshineSceneTotals[3], partial.w);
+        const uint2 still = SunshineUIDetectionSampler.Load(int3(thread.x, SUNSHINE_UI_STILL_ROW + thread.y, 0)).xy;
+        InterlockedAdd(SunshineSceneStill[0], still.x);
+        InterlockedAdd(SunshineSceneStill[1], still.y);
     }
     GroupMemoryBarrierWithGroupSync();
     if (lane) return;
@@ -1080,6 +1140,9 @@ void SunshineSceneEvidenceCS(uint3 thread : SV_GroupThreadID)
         uint4(uint(n), asuint(d.x), uint(valid) | 2u | verdict << 2, uint(SunshineSceneTotals[3]));
     const uint image = SunshinePreUIImage();
     SunshineAlphaCoverageStore[uint2(6, 0)] = image ? uint4(uint(n), asuint(d.y), uint(valid) | 2u, image) : 0u;
+    // H2: the stillness counts, whatever the depth's currency (the warp of
+    // this frame uses the same depth); the CPU reads them with D.
+    SunshineAlphaCoverageStore[uint2(12, 0)] = active ? uint4(SunshineSceneStill[0], SunshineSceneStill[1], 0u, 0u) : 0u;
 }
 
 #if BUFFER_COLOR_SPACE == 3

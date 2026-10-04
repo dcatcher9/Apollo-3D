@@ -6,7 +6,8 @@
 // SUNSHINE_UI_STORED_* and SUNSHINE_UI_PER_FRAME_* defines, the T1 hold store
 // as SUNSHINE_UI_HOLD_* and SUNSHINE_UI_FRAME_REASON_* defines, the H1 claim
 // words as SUNSHINE_UI_CLAIM_PRE_UI, SUNSHINE_UI_H1_APPLIED and
-// SUNSHINE_UI_PRE_UI_IMAGE_* defines and the
+// SUNSHINE_UI_PRE_UI_IMAGE_* defines, the H2 still-screen words as
+// SUNSHINE_UI_SOURCE_STILL and SUNSHINE_UI_STILL_* defines and the
 // candidate layout as SUNSHINE_UI_CANDIDATE_* and SUNSHINE_UI_SOURCE_* defines, and
 // test_game3d_ui_layer fails when the two disagree. Retired flag values stay
 // reserved so that dumps and replay cases keep their meaning.
@@ -50,9 +51,10 @@ namespace sunshine_game3d::ui_detection {
   }
   // Decision sources: 0 no mask, 1 UIAlpha, 2 UI color tag, 3 Backbuffer, 4
   // current, 5 HUD-less change set, 6 full change set, 8 full-frame UI over a
-  // hidden scene (H1), 10 offscreen UI layer; 7 and 9 (the HUD-less route
+  // hidden scene (H1), 10 offscreen UI layer, 11 a still screen without a UI
+  // source (H2, fix 2: shown flat like 6 and 8); 7 and 9 (the HUD-less route
   // before S2b) are retired and never reused.
-  inline constexpr std::uint32_t source_layer = 10u, source_count = 11u;
+  inline constexpr std::uint32_t source_layer = 10u, source_still = 11u, source_count = 12u;
   inline constexpr std::string_view candidate_layout_marker = "SUNSHINE_UI_CANDIDATE_LAYOUT";
   inline constexpr std::uint32_t candidate_layout = 2u, legacy_candidate_layout = 1u;
   // The game3d_native.hlsl define mirroring each candidate bit, the layer's
@@ -198,9 +200,10 @@ namespace sunshine_game3d::ui_detection {
   // selection revision 3, and the pre-UI pixel counts of texel 11 from
   // selection revision 4. A statistics cell holds the luma of two images
   // (presented, and the pre-UI scene image: HUD-less, else the UI layer).
+  // From selection revision 5 (fix 2) texel 12 holds H2's stillness counts.
   inline constexpr std::uint32_t min_decision_texels = 5, max_decision_texels = 16, max_scene_evidence_images = 2;
   inline constexpr std::uint32_t scene_decision_texels = 7, layer_decision_texels = 8, judgment_decision_texels = 10,
-    h1_decision_texels = 11, pre_ui_decision_texels = 12;
+    h1_decision_texels = 11, pre_ui_decision_texels = 12, still_decision_texels = 13;
 
   // Hidden-scene evidence D (docs/reshade-sbs.md, hidden-scene evidence),
   // mirrored by game3d_native.hlsl and inspect_game3d_dump.py: a grid of
@@ -220,6 +223,29 @@ namespace sunshine_game3d::ui_detection {
     inline constexpr std::uint64_t hold_ms = 500;
   }
 
+  // H2 (M5, fix 2; docs/reshade-sbs.md, still screens without a UI source):
+  // in SDR Auto, a real frame without a UI source decision (applied source 0,
+  // not reused by T1) is shown flat as source_still once consecutive samples
+  // spanning run_ms read the presented frame's D at most d_percent / 100 and
+  // keep at least still_percent of all the D grid's cells still: a cell's
+  // presented-luma mean (scene::luma_scale fixed point) within tolerance,
+  // 1/255 of code luma, of the previous measured sample's. The predicate,
+  // the run and its release live on the CPU (game3d_still_screen.h); the GPU
+  // counts still and compared cells (statistics rows from
+  // still_statistics_row, decision texel 12) and applies the flag the CPU
+  // pushes in b2 word 5 (Sunshine_UIStillScreen): flatten. A run that has not
+  // entered restarts when its next sample comes more than max_gap_ms after
+  // its last, five of the renderer's 100 ms sample intervals: the 2 s rests
+  // on samples about 100 ms apart (gameplay runs of at most 547 ms, real
+  // screens of at least 4.2 s), so a stall must not bridge it.
+  namespace still {
+    inline constexpr std::uint32_t d_percent = 5, still_percent = 95;
+    inline constexpr std::uint32_t tolerance = scene::luma_scale / 255u;
+    inline constexpr std::uint64_t run_ms = 2000, max_gap_ms = 500;
+    inline constexpr std::uint32_t flatten = 0x1u;
+  }
+  static_assert(still::tolerance == 4112u && still::d_percent < scene::hidden_percent && still::max_gap_ms < still::run_ms);
+
   // Statistics texture, 16 columns: 112 rows of per-tile counts (rows 0-63
   // the alpha coverage, alpha invalid, HUD-less difference and lit/opaque
   // groups, row 48 .w the Backbuffer's opaque pixels; rows 64-79 the
@@ -233,21 +259,28 @@ namespace sunshine_game3d::ui_detection {
   // texels pre_ui_decision_texels) rows 128-143 from pre_ui_statistics_row:
   // per tile, the offscreen UI layer against the presented frame {matching
   // pixels, lit layer pixels, lit presented pixels, lit presented pixels that
-  // differ} (decision texel 11). The cells have a texture of their own,
-  // cells_x by cells_y.
+  // differ} (decision texel 11), and from selection revision 5 (decision
+  // texels still_decision_texels) rows 144-152 from still_statistics_row:
+  // per 16x16-cell compare group, H2's {still cells, compared cells, 0, 0}
+  // (decision texel 12), 160 rows in all. The cells have a texture of their
+  // own, cells_x by cells_y, and so do H2's previous presented-luma cell
+  // means (R32_UINT, u5 of the compare pass only).
   inline constexpr std::uint32_t layer_statistics_row = 64u, judgment_statistics_row = 80u, scene_partial_row = 112u,
-    pre_ui_statistics_row = 128u;
+    pre_ui_statistics_row = 128u, still_statistics_row = 144u;
   // The statistics rows of a shader with these markers (images: its
   // SUNSHINE_UI_SCENE_EVIDENCE_IMAGES, decision_texels: its
   // SUNSHINE_UI_DECISION_TEXELS).
-  constexpr std::uint32_t statistics_rows(std::uint32_t images, std::uint32_t decision_texels = pre_ui_decision_texels) {
-    return decision_texels >= pre_ui_decision_texels ? pre_ui_statistics_row + 16u :
+  constexpr std::uint32_t statistics_rows(std::uint32_t images, std::uint32_t decision_texels = still_decision_texels) {
+    return decision_texels >= still_decision_texels ? still_statistics_row + 16u :
+      decision_texels >= pre_ui_decision_texels ? pre_ui_statistics_row + 16u :
       scene_partial_row + (images ? scene::cells_y / 16u : 0u);
   }
   static_assert(scene::cells_x == 16u * 16u && scene::cells_y % 16u == 0u, "Compare groups must fill the 16 statistics columns");
   static_assert(judgment_statistics_row + 32u == scene_partial_row && statistics_rows(0, h1_decision_texels) == 112u &&
     statistics_rows(2, h1_decision_texels) == 121u && scene_partial_row + scene::cells_y / 16u <= pre_ui_statistics_row &&
-    statistics_rows(2) == 144u && statistics_rows(0) == 144u);
+    statistics_rows(2, pre_ui_decision_texels) == 144u && statistics_rows(0, pre_ui_decision_texels) == 144u &&
+    pre_ui_statistics_row + 16u == still_statistics_row && still_statistics_row + scene::cells_y / 16u <= statistics_rows(2) &&
+    statistics_rows(2) == 160u && statistics_rows(0) == 160u);
   inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 13> hlsl_scene_defines{{
     {"SUNSHINE_UI_SCENE_CELLS_X", scene::cells_x},
     {"SUNSHINE_UI_SCENE_CELLS_Y", scene::cells_y},
@@ -262,6 +295,15 @@ namespace sunshine_game3d::ui_detection {
     {"SUNSHINE_UI_SCENE_PARTIAL_ROW", scene_partial_row},
     {"SUNSHINE_UI_JUDGMENT_ROW", judgment_statistics_row},
     {"SUNSHINE_UI_PRE_UI_ROW", pre_ui_statistics_row},
+  }};
+  // H2: the still-screen source, the flag of b2 word 5, the stillness
+  // tolerance in luma fixed point and the first statistics row of the
+  // compare groups' stillness counts.
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 4> hlsl_still_defines{{
+    {"SUNSHINE_UI_SOURCE_STILL", source_still},
+    {"SUNSHINE_UI_STILL_FLATTEN", still::flatten},
+    {"SUNSHINE_UI_STILL_TOLERANCE", still::tolerance},
+    {"SUNSHINE_UI_STILL_ROW", still_statistics_row},
   }};
 
   // Words of the decision readback (the decision texel table): texel t,
@@ -307,12 +349,19 @@ namespace sunshine_game3d::ui_detection {
     // (ui_selection::pre_ui_match); the last two are shadow statistics that
     // nothing acts on.
     inline constexpr std::size_t pre_ui_match = 44, pre_ui_image_lit = 45, presented_lit = 46, presented_lit_differs = 47;
+    // Texel 12 (selection revision 5, H2): of the D grid's cells, those whose
+    // presented-luma mean stayed within still::tolerance of the previous
+    // measured sample's, and those compared (a previous mean existed); zero
+    // when the evidence passes did not run or the depth was inactive.
+    inline constexpr std::size_t still_cells = 48, still_compared = 49;
   }
   static_assert(decision_word::alpha_opaque + 1 < 4 * min_decision_texels &&
     decision_word::pre_ui_scene_image < 4 * scene_decision_texels && decision_word::valid_bits < 4 * layer_decision_texels &&
     decision_word::frame_reason == 4 * judgment_decision_texels - 1 && decision_word::h1 == 4 * h1_decision_texels - 1 &&
     decision_word::pre_ui_match == 4 * h1_decision_texels &&
-    decision_word::presented_lit_differs == 4 * pre_ui_decision_texels - 1 && pre_ui_decision_texels <= max_decision_texels);
+    decision_word::presented_lit_differs == 4 * pre_ui_decision_texels - 1 &&
+    decision_word::still_cells == 4 * pre_ui_decision_texels && decision_word::still_compared == decision_word::still_cells + 1 &&
+    decision_word::still_cells + 4 == 4 * still_decision_texels && still_decision_texels <= max_decision_texels);
   enum class scene_verdict : std::uint32_t { none = 0, hidden = 1, ambiguous = 2, visible = 3 };
   inline const char *name(scene_verdict value) {
     switch (value) {

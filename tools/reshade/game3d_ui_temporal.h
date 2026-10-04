@@ -41,17 +41,30 @@
 //          scene_guard.enter_scope(epoch, viewport) (game3d_scene_guard.h:
 //          only an identity change clears it), then poll_detection; then
 //          per_frame = scene_guard.per_frame(now, bits, signatures) |
-//          t.per_frame | depth_not_current, and detection with this frame's
-//          own bits, accepted and flags pushed (b2), flags | per_frame, and
-//          the hold store bound at u5 for the reduce. A sample frame runs the
-//          evidence passes when measure = scene_guard.measure(now, shadow,
-//          whole_frame(state.latest)) says run, and keeps measure.actionable
-//          with the pending sample. Then state.detected(observation,
-//          identity). A sample keeps the signatures and pushed flags it was
-//          submitted with, and its status key is state.status_key() at
-//          submission;
+//          t.per_frame | depth_not_current, still = still::flatten when
+//          still_scope (SDR Auto, still_screen::sdr_output), the session's
+//          still_flatten(), scene_guard.still_flatten() and bits != 0, else
+//          0 (a zero-offer frame first ends H2's run with
+//          scene_guard.still.leave(unmeasured) when in still_scope), and
+//          detection with this frame's own bits, accepted and flags pushed
+//          (b2), flags | per_frame, still as b2 word 5, and the hold store
+//          bound at u5 for the reduce. A sample frame runs the evidence
+//          passes when measure = scene_guard.measure(now, shadow,
+//          whole_frame(state.latest), proven_image, still_scope &&
+//          scene_guard.still.wants_measure()) says run, and keeps
+//          measure.actionable, still_scope and whether the passes ran for H2
+//          alone (measure.run without the still argument does not run) with
+//          the pending sample. Then
+//          state.detected(observation, identity). A sample keeps the
+//          signatures and pushed flags it was submitted with, and its status
+//          key is state.status_key() at submission. Before any of this, a
+//          render outside still_scope ends H2's run with
+//          scene_guard.still.leave(scope), and what enter_scope or leave
+//          ended is counted in the renderer's own counts (still.released or
+//          still.short);
 //        otherwise inactive.* and state.inactive() (the scene guard keeps
-//        its state).
+//        its state; in still_scope an unavailable or inactive render ends
+//        H2's run with scene_guard.still.leave(unmeasured)).
 //   poll_detection (a completed sample):
 //     6. sample_discarded(input, pending source) drops it unread (another
 //        scope, or stale on arrival); otherwise
@@ -60,10 +73,14 @@
 //        state.latest = sample, state.latest_source = the pending source and
 //        state.latest_key = the status key at submission;
 //     7. obs = scene_guard.observe(scene_guard::sample_of(words, count, tick,
-//        scene), the pending actionable, the submitted signatures by kind),
-//        then sample.evidence.shadow_hidden_ms = obs.shadow_hidden_ms;
+//        scene), the pending actionable, the submitted signatures by kind,
+//        the pending still_scope and this render's still_scope), then
+//        sample.evidence.shadow_hidden_ms = obs.shadow_hidden_ms and
+//        sample.evidence.still_short_ms = obs.still.short_ms;
 //     8. session.observe(sample.evidence, sample.pixels, tick, submitted
-//        signatures); a session in a manual mode ignores it;
+//        signatures), its scene evidence (scene and pre_ui_scene) cleared
+//        when the passes ran for H2 alone, so that H2's measurements never
+//        reach the ledger; a session in a manual mode ignores it;
 //     9. sample_counters(..., obs) commits the counts.
 //   status (after render):
 //    10. state.latest describes the frame only while
@@ -125,7 +142,9 @@ namespace sunshine_game3d::ui_temporal {
   // judgment_decision_texels; the H1 texel 10, the opaque Backbuffer and
   // current counts, the claims and the h1 word, when there are
   // h1_decision_texels; the pre-UI pixel counts of texel 11, the layer
-  // against the presented frame, when there are pre_ui_decision_texels).
+  // against the presented frame, when there are pre_ui_decision_texels; H2's
+  // still and compared cells of texel 12 when there are
+  // still_decision_texels).
   // sequence numbers the submitted samples, and
   // flags are the Sunshine_UIDetectionFlags the detection pushed (whether an
   // offered layer was the one-frame-late copy).
@@ -178,6 +197,10 @@ namespace sunshine_game3d::ui_temporal {
       evidence.presented_lit = words[word::presented_lit];
       evidence.presented_lit_differs = words[word::presented_lit_differs];
     }
+    if (count >= 4 * ui_detection::still_decision_texels) {
+      evidence.still_cells = words[word::still_cells];
+      evidence.still_compared = words[word::still_compared];
+    }
     if (scene) {
       const auto decode = [&](std::size_t n, std::size_t d, std::size_t state) {
         alpha_auto_decision::scene_evidence result;
@@ -213,12 +236,27 @@ namespace sunshine_game3d::ui_temporal {
   // every pixel (ui_selection::decide).
   inline bool whole_frame(const alpha_auto_decision &sample) { return full_alpha(sample) || sample.source_kind == 6; }
 
+  // The evidence the acceptance ledger observes of a sample (step 8): its own,
+  // except that when its evidence passes ran for rule H2 alone (h2_only:
+  // measure.run, but not without H2's still argument), the scene evidence
+  // is cleared. H2 measures every SDR Auto sample frame where no source
+  // decides and never acts on what it measures, so its measurements must not
+  // run a pre-UI proof's reconfirm clock (alpha_auto_policy::observe) that
+  // was paused before fix 2: the shadow leaves every decision unchanged.
+  inline alpha_auto_decision::detection_evidence ledger_evidence(const alpha_auto_decision::detection_evidence &evidence,
+      bool h2_only) {
+    auto result = evidence;
+    if (h2_only) result.scene = result.pre_ui_scene = {};
+    return result;
+  }
+
   // The counts a completed sample commits (game3d_ui_counters.h): the CPU
   // counts snapshotted when it was submitted and the GPU words copied under
   // its fence, each as the change since the previous commit; when it decided
   // H1 (source 8) or an accepted whole-frame decision (whole_frame), the
   // hidden-scene verdict that same sample measured; and what the
-  // hidden-scene guard's observation of it did (scene).
+  // hidden-scene guard's observation of it did (scene, and H2's still
+  // group, added to the renderer's own ends of a run in its CPU counts).
   inline ui_counters sample_counters(const alpha_auto_decision &sample, const ui_counters &cpu,
       const ui_counters &committed_cpu, const std::array<std::uint32_t, ui_counter_word::count> &words,
       const std::array<std::uint32_t, ui_counter_word::count> &committed_words, std::uint64_t through_ms,
@@ -241,6 +279,9 @@ namespace sunshine_game3d::ui_temporal {
     delta[ui_counter::scene_entered] = observed.entered;
     delta[ui_counter::scene_released] = observed.released;
     delta[ui_counter::scene_refuted] = observed.refuted;
+    delta[ui_counter::still_entered] += observed.still.entered;
+    delta[ui_counter::still_released] += observed.still.ended;
+    delta[ui_counter::still_short] += observed.still.short_run;
     delta[ui_counter::samples] = 1;
     delta.through_ms = through_ms;
     return delta;

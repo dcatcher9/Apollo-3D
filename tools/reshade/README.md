@@ -9,6 +9,10 @@ left/right image for its local glasses presenter or Game 3D stream. Follow the
 The Game 3D panel keeps **Enable Game 3D**, **3D strength**, and **UI protection** above its tabs.
 Strength defaults to **50%**; **Reset** stays in place and is disabled at the default value.
 The UI protection row's **Forget** clears the UI sources Auto accepted for this game.
+The row below it, **Flatten still screens with no UI source (SDR only)**, saved per game as
+`UIFlattenStillScreens`, lets Auto show still SDR screens that no UI source covers flat; it is off
+by default, when Auto only logs them (rule H2,
+[still screens without a UI source](../../docs/reshade-sbs.md#setup)).
 Existing saved values, including zero strength, are preserved until an explicit edit/reset.
 **Status**, **Troubleshooting**, and **Calibration** separate live information from source/preview
 controls and detailed measurements. Wrapped status text stays in its own scroll area and cannot
@@ -479,7 +483,11 @@ once their layer is proven); in logs since fix 1, `Pre-UI proof` for each layer 
 (`pre_ui:<format>:<space>`) restored, earned, lapsed or forgotten, and the INFO-only
 `Dark pre-UI image (shadow)`, which summarizes hidden samples over a proven but dark layer (a
 loading screen) for a future rule that nothing acts on yet
-([hidden-scene evidence](../../docs/reshade-sbs.md#setup) defines both);
+([hidden-scene evidence](../../docs/reshade-sbs.md#setup) defines both); in logs since fix 2,
+`UI still screen`, which lists rule H2's still screens without a UI source: a warning when the
+default shadow only logged them (review them before turning the panel switch on), INFO when they
+were shown flat, always with the gameplay-safety evidence of the runs that reset before entering
+([still screens without a UI source](../../docs/reshade-sbs.md#setup) defines them);
 observation losses by
 cause; unusual export pauses; present-thread
 hitches; Game 3D CPU and GPU cost; and, from the host log, the Game 3D link, size fit and encoder
@@ -524,7 +532,8 @@ layer logged before S1 is read as the layer candidate. UI lines since S2b carry 
 image's evidence (`sampled_pre_ui_scene`), the informative claims and the H1 word
 (`sampled_claims`, `sampled_h1`) and the guard's pushed verdicts and layer proof (`scene_guard`) in place of
 `sampled_hudless_scene` and `scene_hold`; UI lines since fix 1 add the layer's pixels against the
-presented frame (`sampled_pre_ui_pixels`), and lines without them read as before;
+presented frame (`sampled_pre_ui_pixels`), UI lines since fix 2 add rule H2's `still` group and
+counter lines its `still` group and `decided.11`, and lines without them read as before;
 [UI protection](../../docs/reshade-sbs.md#setup) defines them.
 
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name

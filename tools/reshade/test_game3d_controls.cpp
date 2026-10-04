@@ -331,6 +331,90 @@ namespace {
         never.writes.empty(), "UISceneShadow=0 ran the shadow, or was rewritten");
   }
 
+  // Rule H2's switch (UIFlattenStillScreens): per game in the global
+  // ReShade.ini, absent writes 0 (the shadow), 1 enables flattening, anything
+  // else is the shadow; the panel's edit saves the key and switches the
+  // session; and the F1 status names a still screen's run and its flat frames.
+  void still_flatten_is_per_game_and_named() {
+    fake_config absent;
+    check(!load_still_flatten(absent) && absent.writes == std::vector<std::string>{"UIFlattenStillScreens"} &&
+        std::get<int>(absent.values.at("UIFlattenStillScreens")) == 0,
+      "An absent UIFlattenStillScreens did not write 0 and stay a shadow");
+    check(!load_still_flatten(absent) && absent.writes.size() == 1, "The written 0 enabled flattening or was rewritten");
+    fake_config enabled;
+    enabled.values["UIFlattenStillScreens"] = 1;
+    check(load_still_flatten(enabled) && enabled.writes.empty(), "UIFlattenStillScreens=1 did not enable flattening, or was rewritten");
+    for (const int other : {0, 2, -7}) {
+      fake_config shadow;
+      shadow.values["UIFlattenStillScreens"] = other;
+      check(!load_still_flatten(shadow) && shadow.writes.empty(), "A UIFlattenStillScreens other than 1 enabled flattening");
+    }
+    check(still_flatten_log_text(true) ==
+          "Sunshine UI protection: still screens with no UI source are flattened (UIFlattenStillScreens=1)" &&
+        still_flatten_log_text(false) ==
+          "Sunshine UI protection: still screens with no UI source are only logged (UIFlattenStillScreens=0)",
+      "The session's still-screen line changed");
+
+    // The checkbox: saves the key through the backend it is given (the
+    // global, per-game file) and switches the game's session; acceptance,
+    // Forget and the mode leave the switch alone.
+    fake_config global;
+    settings_state settings;
+    check(!edit_still_flatten(settings, true, global) && global.writes.empty(), "The switch acted without a session");
+    settings.alpha_session = std::make_shared<alpha_auto_policy>();
+    settings.alpha_session->set_still_flatten(load_still_flatten(global));
+    check(!settings.alpha_session->still_flatten() && global.writes.size() == 1, "A new game did not start as a shadow");
+    check(edit_still_flatten(settings, true, global) && settings.alpha_session->still_flatten() &&
+        global.writes.size() == 2 && std::get<int>(global.values.at("UIFlattenStillScreens")) == 1,
+      "Checking the box did not save 1 and enable the session");
+    check(!edit_still_flatten(settings, true, global) && global.writes.size() == 2, "An unchanged switch saved again");
+    settings.alpha_session->restore("ui_color:87:srgb");
+    settings.alpha_session->forget();
+    settings.alpha_session->set_manual(true);
+    settings.alpha_session->set_automatic();
+    check(settings.alpha_session->still_flatten(), "Acceptance, Forget or a mode change reset the still-screen switch");
+    fake_config other_game;
+    check(!load_still_flatten(other_game), "Another game inherited the switch");
+    check(edit_still_flatten(settings, false, global) && !settings.alpha_session->still_flatten() &&
+        std::get<int>(global.values.at("UIFlattenStillScreens")) == 0, "Clearing the box did not save 0 and return to the shadow");
+    global.on_write = [&] { settings.alive = false; };
+    check(!edit_still_flatten(settings, true, global) && !settings.alpha_session->still_flatten(),
+      "The switch committed after the runtime was destroyed");
+
+    // F1: a still screen shown flat (source 11) is a detected mask with its
+    // own text; a run without a source names the check (enabled) or the shadow
+    // (an active run, flattening off).
+    source_alpha_ui_decision value;
+    value.qualification.available = true;
+    value.coverage.state = alpha_auto_state::automatic_on;
+    value.coverage.enabled = true;
+    value.coverage.source_kind = ui_detection::source_still;
+    check(source_alpha_detection_text(value.qualification, value) == "Still screen without a UI source shown flat" &&
+        ui_protection_reason_text(value.coverage).empty(), "A flat still screen was not named");
+    value.coverage = {};
+    value.coverage.state = alpha_auto_state::automatic_off;
+    value.coverage.evidence.frame_reason = ui_no_mask::unaccepted;
+    value.coverage.evidence.refused = ui_detection::candidate::layer;
+    value.coverage.still = {true, true, still_screen::phase::pending, 900};
+    check(source_alpha_detection_text(value.qualification, value) ==
+        "No usable UI mask (checking whether a still screen hides the scene)", "An enabled pending run was not named");
+    value.coverage.still = {true, false, still_screen::phase::active, 2400};
+    check(source_alpha_detection_text(value.qualification, value) == "No usable UI mask (still screen; flattening is off)",
+      "An active shadow run was not named");
+    value.coverage.still = {true, false, still_screen::phase::pending, 900};
+    check(source_alpha_detection_text(value.qualification, value) == "No usable UI mask (learning the UI layer)",
+      "A pending shadow run replaced the sample's own reason");
+    // A flat still screen is protected: the warning's unprotected run ends.
+    value.mode = source_alpha_mode::automatic;
+    value.requested = value.rendered = true;
+    value.coverage = {};
+    value.coverage.state = alpha_auto_state::automatic_on;
+    value.coverage.enabled = true;
+    value.coverage.source_kind = ui_detection::source_still;
+    check(!value.unprotected() && !next_unprotected_since(value, true, 5000, 9000),
+      "A frame shown flat as a still screen counted as unprotected");
+  }
+
   void ui_protection_warning_follows_unprotected_rendered_frames() {
     // Stellar Blade in SDR without FG: its UI layer holds the scene image (no
     // alpha, color on 60%, so V1-invalid) and current alpha covers
@@ -790,6 +874,7 @@ int main() {
     source_alpha_selection_reports_capture_prerequisite();
     ui_protection_status_names_the_reason();
     forget_and_scene_shadow_are_per_game();
+    still_flatten_is_per_game_and_named();
     ui_protection_warning_follows_unprotected_rendered_frames();
     source_alpha_applied_status_is_transient_and_mode_scoped();
     persistence_survives_runtime_recreation();
@@ -799,7 +884,7 @@ int main() {
     measured_statistics_follow_applied_and_held_scale_ownership();
     positive_flat_zero_target_does_not_invent_gain_tracking();
     projection_conversion_is_independent_and_retained_with_its_reference();
-    std::puts("PASS native Game 3D controls: defaults, automatic persistence, independent resets, runtime lifetime, output status, UI protection warning, reason, Forget and shadow toggle, and scale/conversion");
+    std::puts("PASS native Game 3D controls: defaults, automatic persistence, independent resets, runtime lifetime, output status, UI protection warning, reason, Forget, shadow and still-screen toggles, and scale/conversion");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

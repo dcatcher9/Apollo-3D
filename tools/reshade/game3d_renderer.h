@@ -184,6 +184,10 @@ namespace sunshine_game3d {
     // when the two are not comparable or on a frame that is not a detection
     // sample (H1 d).
     std::uint32_t pre_ui_threshold_bits{};
+    // b2 word 5 (Sunshine_UIStillScreen): ui_detection::still::flatten while
+    // H2's run is active in SDR Auto and the session enables it
+    // (UIFlattenStillScreens), zero otherwise (game3d_still_screen.h).
+    std::uint32_t still_bits{};
   };
   inline const char *name(ui_detection_snapshot::run_state value) {
     switch (value) {

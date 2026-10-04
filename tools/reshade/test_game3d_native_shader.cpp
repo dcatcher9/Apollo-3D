@@ -63,6 +63,7 @@ namespace {
     {"SunshineUIConflictStore", D3D_SIT_UAV_RWTYPED, 7},
     {"SunshineUICountersStore", D3D_SIT_UAV_RWTYPED, 7}, // Detection reduce only.
     {"SunshineUIHoldStore", D3D_SIT_UAV_RWTYPED, 5}, // Detection reduce only.
+    {"SunshineScenePreviousLumaStore", D3D_SIT_UAV_RWTYPED, 5}, // Scene compare only (H2).
     {"SunshinePointClamp", D3D_SIT_SAMPLER, 0},
     {"SunshineLinearClampState", D3D_SIT_SAMPLER, 1},
     {"SunshinePointBorder", D3D_SIT_SAMPLER, 2},
@@ -101,6 +102,8 @@ namespace {
     {"Sunshine_UIDetectionFlags", 12, 4, D3D_SVT_UINT},
     // Selection revision 4: the layer's pair threshold with the presented color.
     {"Sunshine_UIPreUIThreshold", 16, 4, D3D_SVT_FLOAT},
+    // Selection revision 5: H2's still-screen flag.
+    {"Sunshine_UIStillScreen", 20, 4, D3D_SVT_UINT},
   };
 
   struct entry_point {
@@ -245,7 +248,7 @@ namespace {
       const bool detection = std::string(description.Name) == "SunshineUIDetectionConstants";
       require((ui && description.Size == 16) || (detection && description.Size == 32) ||
           (std::string(description.Name) == "SunshineGame3DConstants" && description.Size == 80),
-        "Native constants must retain the 80-byte b0, the 16-byte b1 and the five-word (32-byte) b2");
+        "Native constants must retain the 80-byte b0, the 16-byte b1 and the six-word (32-byte) b2");
       const constant *begin = detection ? std::begin(detection_constants) : ui ? std::begin(ui_constants) : std::begin(constants);
       const constant *end = detection ? std::end(detection_constants) : ui ? std::end(ui_constants) : std::end(constants);
       for (auto item = begin; item != end; ++item) {
@@ -351,12 +354,13 @@ int main(int argc, char **argv) {
     mirrored(detection::hlsl_candidate_defines);
     mirrored(detection::hlsl_hold_defines);
     mirrored(detection::hlsl_h1_defines);
+    mirrored(detection::hlsl_still_defines);
     // The reduce ports ui_selection::decide of this revision.
     require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision &&
-        sunshine_game3d::ui_selection::revision == 4u,
-      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 4");
-    require(decision_texels == detection::pre_ui_decision_texels && decision_texels == 12u,
-      "Selection revision 4 writes the pre-UI pixel counts in decision texel 11: 12 decision texels");
+        sunshine_game3d::ui_selection::revision == 5u,
+      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 5");
+    require(decision_texels == detection::still_decision_texels && decision_texels == 13u,
+      "Selection revision 5 writes H2's stillness counts in decision texel 12: 13 decision texels");
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");

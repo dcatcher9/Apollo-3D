@@ -97,6 +97,7 @@ int main() {
       mirrored(detection::hlsl_candidate_defines);
       mirrored(detection::hlsl_hold_defines);
       mirrored(detection::hlsl_h1_defines);
+      mirrored(detection::hlsl_still_defines);
       // The hidden-scene routes' per-frame bits (0x10000, 0x80000) and the
       // layer's D proof bit (0x20000000) are retired; fix 1's proven bit and
       // the pre-UI statistics row are mirrored.
@@ -113,20 +114,28 @@ int main() {
       const auto texels = sunshine_game3d::shader_marker(source, detection::decision_texels_marker);
       const auto images = sunshine_game3d::shader_marker(source, detection::scene_evidence_images_marker);
       require(source.find("#define " + std::string(detection::scene_evidence_images_marker) + ' ') != std::string::npos &&
-          texels >= detection::pre_ui_decision_texels && texels <= detection::max_decision_texels &&
+          texels >= detection::still_decision_texels && texels <= detection::max_decision_texels &&
           images <= detection::max_scene_evidence_images,
         "game3d_native.hlsl's UI detection size markers are missing or outside the contract's range");
     }
     // Selection revision 4 (fix 1) writes the pre-UI pixel counts in texel
-    // 11 after the H1 texel 10; retired route defines stay gone.
-    require(sunshine_game3d::ui_selection::revision == 4u && detection::h1_decision_texels == 11u &&
+    // 11 after the H1 texel 10, and revision 5 (fix 2) H2's stillness counts
+    // in texel 12 from statistics rows 144-152 (160 rows), with source 11,
+    // b2 word 5's flatten bit and a 1/255 tolerance; retired route defines
+    // stay gone.
+    require(sunshine_game3d::ui_selection::revision == 5u && detection::h1_decision_texels == 11u &&
         detection::decision_word::h1 == 43u && detection::pre_ui_decision_texels == 12u &&
         detection::decision_word::pre_ui_match == 44u && detection::decision_word::presented_lit_differs == 47u &&
         detection::per_frame_pre_ui_proven == 0x80000000u && detection::pre_ui_statistics_row == 128u &&
-        detection::statistics_rows(detection::max_scene_evidence_images) == 144u,
-      "The decision layout is not selection revision 4 with 12 texels");
+        detection::still_decision_texels == 13u && detection::decision_word::still_cells == 48u &&
+        detection::decision_word::still_compared == 49u && detection::still_statistics_row == 144u &&
+        detection::statistics_rows(detection::max_scene_evidence_images) == 160u && detection::source_still == 11u &&
+        detection::source_count == 12u && detection::still::flatten == 1u && detection::still::tolerance == 4112u &&
+        sunshine_game3d::ui_counter_word::decided_count == 12u && sunshine_game3d::ui_counter_word::count == 29u,
+      "The decision layout is not selection revision 5 with 13 texels");
     std::puts("PASS UI detection contract: game3d_native.hlsl mirrors every flag, candidate bit, counter word, hold store value, "
-      "H1 claim word, the pre-UI statistics row and the selection revision, and sizes detection within range");
+      "H1 claim word, H2 still-screen word, the pre-UI and still statistics rows and the selection revision, and sizes "
+      "detection within range");
 
     // One game frame: each target cleared in order, then Present.
     const auto frame = [](layer::layer_tracker &tracker, std::initializer_list<std::uint64_t> clears, std::uint64_t now) {

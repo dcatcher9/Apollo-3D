@@ -442,7 +442,14 @@ namespace {
             !sampled.at("pre_ui_scene").contains("image") || !sampled.contains("inferred_opaque") || !sampled.contains("claims") ||
             sampled.at("h1").at("applied") != false || sampled.at("h1").at("winner") != 2u || automatic.at("sampled_source") == 8u ||
             !sampled.at("one_way").contains("strong") || !sampled.at("one_way").contains("contradicted") ||
-            sampled.at("reason") != "decided" || sampled.at("refused") != "none" || sampled.at("reused") != false)
+            sampled.at("reason") != "decided" || sampled.at("refused") != "none" || sampled.at("reused") != false ||
+            // Rule H2's fields (fix 2): an accepted tag decides, so no still
+            // screen runs and nothing flattens as source 11.
+            !automatic.contains("still_screen") || !sampled.contains("still_short_ms") ||
+            automatic.at("still_screen").at("phase") != "none" || automatic.at("still_screen").at("enabled") != false ||
+            !automatic.at("still_screen").contains("scope") || !automatic.at("still_screen").contains("run_ms") ||
+            !automatic.at("still_screen").contains("sampled_still") || !automatic.at("still_screen").contains("sampled_compared") ||
+            tagged_metadata.at("replay").at("ui_detection").at("still_bits") != 0u)
           throw std::runtime_error("D3D12 lost a decision texel or the first-run shadow changed a decision: " + automatic.dump());
         evidence << "d3d12-decision-texels opaque_ui_color=" << opaque << " shadow_scene_n=" << scene.at("n") << " shadow_scene_d=" <<
           scene.at("d") << " verdict=" << scene.at("verdict").get<std::string>() << '\n';

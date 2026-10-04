@@ -47,28 +47,29 @@ namespace sunshine_game3d {
   // detection frames.
   namespace ui_counter_word {
     inline constexpr std::size_t detection_frames = 0;
-    // One word per decided source 0-10 (7 and 9 are retired and stay zero).
-    inline constexpr std::size_t decided = 1, decided_count = 11;
+    // One word per decided source 0-11 (7 and 9 are retired and stay zero;
+    // 11, H2's still screen, since fix 2 shifted every later word by one).
+    inline constexpr std::size_t decided = 1, decided_count = 12;
     // An inferred source (the offscreen UI layer 10, Backbuffer 3 or current
     // 4) decided without being accepted. Zero by construction since S1, where
     // only accepted candidates decide; kept as an invariant.
-    inline constexpr std::size_t untrusted_inferred = 12;
+    inline constexpr std::size_t untrusted_inferred = 13;
     // A HUD-less difference (5) from an inexact pair.
-    inline constexpr std::size_t inexact_difference = 13;
+    inline constexpr std::size_t inexact_difference = 14;
     // The consumed depth was not this frame's (per_frame_depth_not_current).
-    inline constexpr std::size_t depth_not_current = 14;
+    inline constexpr std::size_t depth_not_current = 15;
     // The frame's own decision was an accepted inferred alpha (Backbuffer 3,
     // current 4 or the offscreen UI layer 10) that the same frame's valid
     // exact pair contradicts in the one-way test (A2): at least a tenth of its
     // pixels with alpha of at least 1/2 lie where the HUD-less image is lit
     // and unchanged. The acceptance ledger revokes it from such samples.
-    inline constexpr std::size_t contradicted = 15;
+    inline constexpr std::size_t contradicted = 16;
     // An inferred alpha (3, 4, 10) decided while an accepted declared alpha
     // (UIAlpha or the UI color tag) was offered. Zero by construction since
     // S1 (the declared-alpha block); kept as an invariant.
-    inline constexpr std::size_t presented_over_dedicated = 16;
+    inline constexpr std::size_t presented_over_dedicated = 17;
     // One word per ui_no_mask reason.
-    inline constexpr std::size_t none = 17;
+    inline constexpr std::size_t none = 18;
     // An alpha source (1-4, 10) was applied covering at least 99% of pixels:
     // a whole-frame mask from alpha, whatever the HUD-less pair showed.
     inline constexpr std::size_t full_alpha = none + ui_no_mask::count;
@@ -79,7 +80,7 @@ namespace sunshine_game3d {
     inline constexpr std::size_t count = reused + 1;
   }
   static_assert(ui_counter_word::decided + ui_counter_word::decided_count == ui_counter_word::untrusted_inferred &&
-    ui_counter_word::full_alpha == 26 && ui_counter_word::reused == 27 && ui_counter_word::count == 28);
+    ui_counter_word::full_alpha == 27 && ui_counter_word::reused == 28 && ui_counter_word::count == 29);
   // The game3d_native.hlsl define mirroring each GPU word index.
   inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 20> hlsl_counter_defines{{
     {"SUNSHINE_UI_COUNTER_WORDS", std::uint32_t(ui_counter_word::count)},
@@ -124,7 +125,13 @@ namespace sunshine_game3d {
   // hidden-scene guard's observations of committed samples
   // (game3d_scene_guard.h): its hidden hold entered, a hold released by a
   // visible sample (every visible H1 sample is one), and source signatures
-  // newly refuted. These are sample counts, not frame counts.
+  // newly refuted. These are sample counts, not frame counts. still: rule H2
+  // (game3d_still_screen.h), counted from the guard's observation of
+  // committed samples and from the renderer's own ends of a run (a scope or
+  // identity change): a still screen without a UI source entered (would
+  // flatten, or flattened when enabled), an entered episode ended, and a run
+  // of passing samples that ended before still::run_ms (a short run, the
+  // gameplay-safety evidence).
   // Trust events are the session acceptance ledger's (alpha_auto_policy):
   // signatures earned, revoked (A2) by an exact change set's one-way test or
   // by a declared alpha's coverage, lapsed, restored from an earlier session,
@@ -134,7 +141,7 @@ namespace sunshine_game3d {
     inline constexpr std::size_t auto_frames = 0, detection_frames = 1;
     inline constexpr std::size_t held_generated = 2, held_none = 3, reused = 4;
     inline constexpr std::size_t inactive_no_candidates = 5, inactive_size = 6, inactive_unprepared = 7;
-    inline constexpr std::size_t decided = 8; // Eleven counters, sources 0-10.
+    inline constexpr std::size_t decided = 8; // Twelve counters, sources 0-11.
     inline constexpr std::size_t none = decided + ui_counter_word::decided_count; // ui_no_mask order.
     inline constexpr std::size_t depth_not_current = none + ui_no_mask::count;
     inline constexpr std::size_t full_d_hidden = depth_not_current + 1, full_d_ambiguous = full_d_hidden + 1,
@@ -148,7 +155,9 @@ namespace sunshine_game3d {
       trust_discarded = trust_earned + 5, trust_forgotten = trust_earned + 6;
     inline constexpr std::size_t samples = trust_forgotten + 1;
     inline constexpr std::size_t scene_entered = samples + 1, scene_released = samples + 2, scene_refuted = samples + 3;
-    inline constexpr std::size_t count = scene_refuted + 1;
+    inline constexpr std::size_t still_entered = scene_refuted + 1, still_released = scene_refuted + 2,
+      still_short = scene_refuted + 3;
+    inline constexpr std::size_t count = still_short + 1;
   }
 
   struct ui_counters {
@@ -250,6 +259,11 @@ namespace sunshine_game3d {
       field("entered", c[n::scene_entered]);
       field("released", c[n::scene_released]);
       field("refuted", c[n::scene_refuted]);
+    });
+    group("still", [&] {
+      field("entered", c[n::still_entered]);
+      field("released", c[n::still_released]);
+      field("short", c[n::still_short]);
     });
     field("untrusted_inferred", c[n::untrusted_inferred]);
     field("inexact_difference", c[n::inexact_difference]);

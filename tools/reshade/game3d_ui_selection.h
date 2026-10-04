@@ -6,8 +6,10 @@
 // judges the acceptance ledger reads (A2), the T1 grace of a real frame
 // without a decision of its own, the named no-mask reason and refused
 // candidate (F1), pair comparability (V2) and the acceptance signature key
-// (A1), and the H1 override of a full-frame UI over a hidden scene (its CPU
-// hold lives in game3d_scene_guard.h). decide() is the whole decision of
+// (A1), the H1 override of a full-frame UI over a hidden scene (its CPU
+// hold lives in game3d_scene_guard.h) and the H2 override of a still screen
+// without a UI source (its CPU run lives in game3d_still_screen.h). decide()
+// is the whole decision of
 // SunshineUIDetectionReduceCS thread 0, the hold store included, which
 // game3d_native.hlsl ports line for line with the same uint32 arithmetic:
 // test_game3d_ui_selection_contract runs the real reduce against it,
@@ -37,8 +39,11 @@ namespace sunshine_game3d::ui_selection {
   // (d) needs a layer without alpha whose signature the ledger proved the
   // pre-UI scene image by pixels (per_frame_pre_ui_proven) instead of a
   // V1-invalid layer, with the layer-against-presented pixel counts of texel
-  // 11 that prove it (b2 word 4, the layer's pair threshold).
-  inline constexpr std::uint32_t revision = 4;
+  // 11 that prove it (b2 word 4, the layer's pair threshold). 5 (fix 2): H2,
+  // a frame without a UI source decision shown flat as source 11 while the
+  // CPU's run of still hidden samples pushes still::flatten (b2 word 5), with
+  // the stillness counts of texel 12.
+  inline constexpr std::uint32_t revision = 5;
   inline constexpr std::string_view revision_marker = "SUNSHINE_UI_SELECTION_REVISION";
 
   // Candidate kinds. Declared sources are the game's own UI contract (the
@@ -310,6 +315,11 @@ namespace sunshine_game3d::ui_selection {
     // overrode it with source 8.
     std::uint32_t claims{}, s1_source{};
     bool h1{};
+    // H2: the applied decision had no source and was not reused, and the
+    // CPU pushed still::flatten, so the frame is shown flat as source 11.
+    // The hold store (next), the frame reason and the refused candidate keep
+    // the decision before H2.
+    bool still{};
   };
   // Decision word h1 of a decision (texel 10 .w).
   constexpr std::uint32_t h1_word(const decision &d) { return d.s1_source | (d.h1 ? ui_detection::h1_applied : 0u); }
@@ -354,8 +364,14 @@ namespace sunshine_game3d::ui_selection {
   // decision of its own; it applies the previous real frame's own decision
   // once (reused), unless per_frame_hold_reset says there is none, and then
   // no mask. previous is the hold store as the last detection wrote it.
+  // H2 (M5, fix 2): an applied decision without a source that T1 did not
+  // reuse is shown flat as source 11 while the CPU pushes still::flatten in
+  // still (b2 word 5): its run of still samples that read the presented
+  // frame hidden (game3d_still_screen.h). It runs after S1, H1 and T1, so an
+  // accepted source deciding (even an empty mask) and H1 always win, and the
+  // hold store keeps the decision before it.
   inline decision decide(const counts &c, std::uint32_t offered, std::uint32_t accepted, std::uint32_t flags,
-      const hold_state &previous = {}) {
+      const hold_state &previous = {}, std::uint32_t still = 0u) {
     decision d;
     const std::uint32_t pixels = c.pixels;
     std::uint32_t valid = 0u, selective_bits = 0u;
@@ -466,6 +482,12 @@ namespace sunshine_game3d::ui_selection {
     d.source = d.reused ? previous.source : source;
     d.covered = d.reused ? previous.covered : covered;
     d.next = {no_own ? ui_detection::hold::spent : ui_detection::hold::own, d.source, d.covered};
+    // H2: after T1, a frame applying no source of its own shows flat.
+    if (!d.source && !d.reused && (still & ui_detection::still::flatten)) {
+      d.source = ui_detection::source_still;
+      d.covered = pixels;
+      d.still = true;
+    }
     // Counter words: the own decision's invariants and judgments, the applied
     // decision's whole-frame alpha.
     const bool inferred = source == 3u || source == 4u || source == ui_detection::source_layer;

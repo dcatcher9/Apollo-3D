@@ -10,24 +10,39 @@
 // words, signatures and whether the offered layer is proven (from the
 // acceptance ledger, below), never acceptance, slots, layer flags or the T1
 // hold, so the single-frame replay (ui_detection_replay) and the sequence
-// replay (test_game3d_ui_sequence) drive it exactly as the renderer does. No
-// ReShade dependency.
+// replay (test_game3d_ui_sequence) drive it exactly as the renderer does. It
+// also holds the run of rule H2 (still screens without a UI source,
+// game3d_still_screen.h), fed by the same samples and cleared by the same
+// identity rule. No ReShade dependency.
 //
 // Call order, per renderer (one state each):
+//   - on every render that requested detection: still_scope = Auto and
+//     still_screen::sdr_output(swapchain colour space, format); without it,
+//     still.leave(scope) ends any H2 run (the renderer logs and counts what
+//     it ended), and so does still.leave(unmeasured) on a render in scope
+//     that cannot be sampled (a zero-offer frame, an inactive or unavailable
+//     detection);
 //   - on every detecting frame, before anything else here: enter_scope(epoch,
 //     viewport); only an identity change (another epoch or viewport, as
-//     ui_temporal::hold_scope_changed) clears the state. An observation
-//     revision, an inactive frame, acceptance changes and Forget never do;
+//     ui_temporal::hold_scope_changed) clears the state, and returns what it
+//     ended of the H2 run (reason identity). An observation revision, an
+//     inactive frame, acceptance changes and Forget never do;
 //   - before detection: per_frame(now, offered, signatures, layer_proven) is
-//     ORed into the pushed flags, and measure(now, shadow, whole_frame,
-//     proven_image) says whether this sample frame runs the evidence passes
-//     and whether what they measure is actionable (kept with the pending
-//     sample). layer_proven: the offered layer's signature is proven the
-//     pre-UI scene image (alpha_auto_policy::pre_ui_proven of its signature);
-//     proven_image: that layer is also the offer's pre-UI image;
+//     ORed into the pushed flags; still::flatten is pushed in b2 word 5 when
+//     still_scope, the session enables it (UIFlattenStillScreens) and
+//     still_flatten(); and measure(now, shadow, whole_frame, proven_image,
+//     still_scope && still.wants_measure()) says whether this sample frame
+//     runs the evidence passes and whether what they measure is actionable
+//     (kept with the pending sample, as are still_scope and whether the
+//     passes run for H2 alone, which keeps their evidence from the ledger:
+//     ui_temporal::ledger_evidence). layer_proven: the
+//     offered layer's signature is proven the pre-UI scene image
+//     (alpha_auto_policy::pre_ui_proven of its signature); proven_image: that
+//     layer is also the offer's pre-UI image;
 //   - at poll, for a completed sample in scope: observe(sample_of(words, n,
-//     tick, scene), actionable, the signatures it was submitted with), before
-//     the acceptance ledger observes it.
+//     tick, scene), actionable, the signatures it was submitted with, its
+//     still_scope while this render is still in scope), before the
+//     acceptance ledger observes it.
 //
 // Holds (run_hold): two valid hidden samples within hold_ms enter a hold,
 // each further one renews it to its tick plus hold_ms, one valid visible
@@ -52,6 +67,7 @@
 // per_frame pushes as per_frame_pre_ui_proven. While a proven layer is the
 // offer's pre-UI image every sample frame's evidence is actionable, so the
 // first hidden samples after an identity change already count.
+#include "game3d_still_screen.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
 
@@ -89,11 +105,18 @@ namespace sunshine_game3d::scene_guard {
     std::uint32_t pre_ui_image{};
     // Texel 10 exists (selection revision 3), so every opaque count is known.
     bool complete{};
+    // H2: the T1 grace reused the previous real frame's decision (texel 9),
+    // and the still and compared cells of texel 12 (selection revision 5).
+    bool reused{};
+    std::uint32_t still_cells{}, still_compared{};
   };
 
   // Decodes a sample from the decision words (texel t, component c is word
   // 4 t + c): texels 0, 1, 4 and 7, the evidence texels 5 and 6 when scene
-  // evidence ran (scene), and texel 10 when there are h1_decision_texels.
+  // evidence ran (scene), the reused bit of texel 9 when there are
+  // judgment_decision_texels, texel 10 when there are h1_decision_texels and
+  // texel 12 (zero unless the evidence passes ran) when there are
+  // still_decision_texels.
   inline sample sample_of(const std::uint32_t *words, std::size_t n, std::uint64_t tick, bool scene) {
     namespace word = ui_detection::decision_word;
     sample s;
@@ -113,6 +136,12 @@ namespace sunshine_game3d::scene_guard {
       s.opaque[ui_selection::alpha_index(ui_selection::kind::current)] = words[word::opaque_current];
       s.claims = words[word::claims];
       s.complete = true;
+    }
+    if (n >= 4u * ui_detection::judgment_decision_texels)
+      s.reused = (words[word::frame_reason] & ui_detection::frame_reason_reused) != 0u;
+    if (n >= 4u * ui_detection::still_decision_texels) {
+      s.still_cells = words[word::still_cells];
+      s.still_compared = words[word::still_compared];
     }
     if (scene && n >= 4u * ui_detection::scene_decision_texels) {
       const auto decode = [&](std::size_t first) {
@@ -159,11 +188,14 @@ namespace sunshine_game3d::scene_guard {
 
   // What one observation did: the hidden hold entered, a hold was released
   // by a visible sample (or a sample that decided H1 read visible), how many
-  // signatures it newly refuted, and the first-run shadow's run length.
+  // signatures it newly refuted, and the first-run shadow's run length; and
+  // what it did to H2's run (still: it entered, an entered episode ended, or
+  // a run ended before it entered, with its length).
   struct observation {
     bool entered{}, released{};
     std::uint32_t refuted{};
     std::uint64_t shadow_hidden_ms{};
+    still_screen::observation still;
   };
 
   // Whether a sample frame runs the evidence passes, and whether what they
@@ -190,19 +222,28 @@ namespace sunshine_game3d::scene_guard {
     // The first sample tick of the current run of hidden samples without a
     // decided source (the first-run shadow); zero without a run.
     std::uint64_t shadow_run_start{};
+    // H2's run of still samples that read the presented frame hidden while
+    // no source decided (game3d_still_screen.h).
+    still_screen::run still;
     // The identity this state belongs to.
     std::uint64_t epoch{};
     std::uint32_t viewport{};
     bool scoped{};
 
-    // Only an identity change clears the guard.
-    void enter_scope(std::uint64_t new_epoch, std::uint32_t new_viewport) {
-      if (scoped && new_epoch == epoch && new_viewport == viewport) return;
+    // Only an identity change clears the guard; it returns what that ended
+    // of H2's run (reason identity), empty otherwise.
+    still_screen::observation enter_scope(std::uint64_t new_epoch, std::uint32_t new_viewport) {
+      if (scoped && new_epoch == epoch && new_viewport == viewport) return {};
+      const auto ended = still.leave(still_screen::end_reason::identity);
       *this = state{};
       scoped = true;
       epoch = new_epoch;
       viewport = new_viewport;
+      return ended;
     }
+    // H2 is active: the renderer pushes still::flatten when the session
+    // enables it.
+    bool still_flatten() const { return still.active(); }
 
     bool refuted(const ui_selection::signature &signature) const {
       for (std::size_t i = 0; i != refuted_count; ++i)
@@ -237,15 +278,17 @@ namespace sunshine_game3d::scene_guard {
     // A sample frame runs the evidence passes when the latest sample had an
     // acting-capable claim, a hold is active or a proven layer is the offer's
     // pre-UI image (proven_image) (actionable), for the first-run shadow
-    // (shadow), and as a diagnostic after a whole-frame decision
-    // (whole_frame: an accepted alpha covering 99% or source 6). Only
-    // actionable evidence holds, releases or refutes.
-    measurement measure(std::uint64_t now, bool shadow, bool whole_frame, bool proven_image) const {
+    // (shadow), as a diagnostic after a whole-frame decision (whole_frame: an
+    // accepted alpha covering 99% or source 6), and for H2 (still: in scope
+    // and still.wants_measure()). Only actionable evidence holds, releases or
+    // refutes; H2 reads every sample whatever its actionability.
+    measurement measure(std::uint64_t now, bool shadow, bool whole_frame, bool proven_image, bool still_scope = false) const {
       const bool actionable = gate_open || hidden.held(now) || pre_ui.held(now) || proven_image;
-      return {actionable || shadow || whole_frame, actionable};
+      return {actionable || shadow || whole_frame || still_scope, actionable};
     }
 
-    observation observe(const sample &s, bool actionable, const kind_signatures &signatures) {
+    // still_scope: the sample was submitted in H2's scope (SDR Auto).
+    observation observe(const sample &s, bool actionable, const kind_signatures &signatures, bool still_scope = false) {
       observation result;
       // A refuted candidate offered, valid and below 99% opaque (or an exact
       // pair without a full change set) is an overlay again.
@@ -292,6 +335,10 @@ namespace sunshine_game3d::scene_guard {
         if (!shadow_run_start || s.tick < shadow_run_start) shadow_run_start = s.tick;
         result.shadow_hidden_ms = s.tick - shadow_run_start;
       } else shadow_run_start = 0;
+      // H2: every completed sample extends or ends the run of still hidden
+      // samples without a decided source.
+      result.still = still.observe({s.tick, still_scope, s.source, s.reused, presented.ran, presented.n, presented.d,
+        s.still_cells, s.still_compared});
       return result;
     }
 

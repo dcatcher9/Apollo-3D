@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// GPU contract of the UI selection predicate (UI framework S1, S2a, S2b, fix 1): runs the
+// GPU contract of the UI selection predicate (UI framework S1, S2a, S2b, fix 1, fix 2): runs the
 // real SunshineUIDetectionReduceCS of game3d_native.hlsl on synthetic
 // per-tile statistics, detection constants and T1 hold stores, and compares
 // every decision word, the written hold store and every counter add with
 // ui_selection::decide (game3d_ui_selection.h). The tiles pass's alpha,
 // layer, HUD-less difference, one-way judgment and pre-UI pixel counts are
 // checked against a CPU count of V1, V2, A2 and the layer's pre-UI comparison
-// (H1 d) on edge values. Also checks the predicate's
+// (H1 d) on edge values, and the scene compare and evidence passes' H2
+// stillness counts (statistics rows 144-152, decision texel 12, the previous
+// cell means at u5) against a CPU oracle. Also checks the predicate's
 // intended behaviour (selection, the T1 grace, F1 reasons and refused
-// candidates, the H1 override of a hidden scene and its informative claims),
-// pair comparability (V2) and the acceptance key (A1). Uses a
-// hardware D3D11 device, else WARP.
+// candidates, the H1 override of a hidden scene and its informative claims,
+// the H2 override of a still screen without a UI source), pair
+// comparability (V2) and the acceptance key (A1). Uses a hardware D3D11
+// device, else WARP.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -112,6 +115,9 @@ namespace {
     // b2 word 4: the renderer pushes the pre-UI threshold on sample frames
     // only; zero skips the pre-UI sums and writes texel 11 as zero.
     float pre_ui_threshold = 2.f / 255.f;
+    // b2 word 5: H2's still-screen flag (still::flatten while the CPU's run
+    // is active and enabled).
+    std::uint32_t still{};
   };
 
   // An even split of every pixel over the tiles.
@@ -183,7 +189,7 @@ namespace {
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.statistics), "statistics");
     checked(gpu.device->CreateShaderResourceView(gpu.statistics.Get(), nullptr, &gpu.statistics_view), "statistics view");
-    desc.Width = detection::pre_ui_decision_texels;
+    desc.Width = detection::still_decision_texels;
     desc.Height = 1;
     desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.decision), "decision");
@@ -215,7 +221,7 @@ namespace {
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.hold_staging), "hold store staging");
     D3D11_BUFFER_DESC buffer{};
-    buffer.ByteWidth = 32; // b2: five words, padded to 16 bytes.
+    buffer.ByteWidth = 32; // b2: six words, padded to 16 bytes.
     buffer.Usage = D3D11_USAGE_DEFAULT;
     buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     checked(gpu.device->CreateBuffer(&buffer, nullptr, &gpu.constants), "constants");
@@ -253,14 +259,16 @@ namespace {
     return result;
   }
 
-  // b2 as the renderer pushes it (five words), padded to the buffer's 32 bytes.
+  // b2 as the renderer pushes it (six words), padded to the buffer's 32 bytes.
   struct detection_constants {
     std::uint32_t offered;
     float threshold;
     std::uint32_t accepted, flags;
     float pre_ui_threshold;
-    std::uint32_t padding[3];
+    std::uint32_t still;
+    std::uint32_t padding[2];
   };
+  static_assert(sizeof(detection_constants) == 32);
 
   // Runs one case and compares it; returns the decision for the semantic checks.
   selection::decision run(gpu_t &gpu, ID3D11ComputeShader *reduce, const case_t &test, const char *space) {
@@ -278,7 +286,8 @@ namespace {
     }
     gpu.context->UpdateSubresource(gpu.statistics.Get(), 0, nullptr, rows.data(), 16 * sizeof(texel), 0);
     // The reduce reads b2 word 4 only as zero or not (texel 11 sums or zero).
-    const detection_constants constants{test.offered, 2.f / 255.f, test.accepted, test.flags, test.pre_ui_threshold, {}};
+    const detection_constants constants{test.offered, 2.f / 255.f, test.accepted, test.flags, test.pre_ui_threshold, test.still,
+      {}};
     gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
     const std::array<std::uint32_t, 4> sentinel{0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu};
     gpu.context->ClearUnorderedAccessViewUint(gpu.decision_view.Get(), sentinel.data());
@@ -303,15 +312,17 @@ namespace {
     ID3D11UnorderedAccessView *none[3]{};
     gpu.context->CSSetUnorderedAccessViews(5, 3, none, nullptr);
     const auto words = read<std::uint32_t>(gpu, gpu.decision.Get(), gpu.decision_staging.Get(),
-      4 * detection::pre_ui_decision_texels);
+      4 * detection::still_decision_texels);
     const auto counters = read<std::uint32_t>(gpu, gpu.counters.Get(), gpu.counters_staging.Get(), count);
     const auto store = read<std::uint32_t>(gpu, gpu.hold.Get(), gpu.hold_staging.Get(), detection::hold::store_texels);
     gpu.hold_written = {store[detection::hold::word::state], store[detection::hold::word::source],
       store[detection::hold::word::covered]};
 
     const auto c = sums(test.statistics);
-    const auto d = selection::decide(c, test.offered, test.accepted, test.flags, previous);
-    std::array<std::uint32_t, 4 * detection::pre_ui_decision_texels> want{};
+    const auto d = selection::decide(c, test.offered, test.accepted, test.flags, previous, test.still);
+    // Texel 12 (H2's stillness counts) reads zero: the reduce clears it for
+    // the evidence passes.
+    std::array<std::uint32_t, 4 * detection::still_decision_texels> want{};
     want[word::source] = d.source;
     want[word::covered] = d.covered;
     want[word::pixels] = c.pixels;
@@ -368,8 +379,8 @@ namespace {
       if (words[i] != want[i]) {
         char text[240];
         std::snprintf(text, sizeof(text), " (%s): word %zu is %u on the GPU, decide() gives %u (offered 0x%x accepted 0x%x flags 0x%x "
-          "hold %u/%u/%u)", space, i, words[i], want[i], test.offered, test.accepted, test.flags, previous.state, previous.source,
-          previous.covered);
+          "still 0x%x hold %u/%u/%u)", space, i, words[i], want[i], test.offered, test.accepted, test.flags, test.still,
+          previous.state, previous.source, previous.covered);
         throw std::runtime_error(test.name + text);
       }
     if (gpu.hold_written.state != d.next.state || gpu.hold_written.source != d.next.source ||
@@ -702,6 +713,57 @@ namespace {
       alpha(other, k::backbuffer, 0, 1000);
       cases.push_back(other);
     }
+    // H2 (fix 2): a frame applying no source that T1 did not reuse shows flat
+    // (11) under still::flatten; the hold store keeps the decision before it.
+    {
+      const auto flatten = detection::still::flatten;
+      // Stellar Blade SDR loading: the bare cleared layer (V1-invalid) and
+      // the unaccepted current alpha decide nothing.
+      auto loading = alpha_case("H2 still screen without a UI source", p, candidate::layer | candidate::current, 0);
+      alpha(loading, k::ui_layer, 0, 2000);
+      loading.still = flatten;
+      cases.push_back(loading);
+      loading.name = "H2 shadow (no flag)";
+      loading.still = 0;
+      cases.push_back(loading);
+      loading.name = "H2 other b2 word 5 bits";
+      loading.still = ~flatten;
+      cases.push_back(loading);
+      // E33 SDR: an accepted current alpha deciding an empty mask is respected.
+      auto empty = alpha_case("H2 accepted empty decision", p, candidate::current, candidate::current);
+      empty.still = flatten;
+      cases.push_back(empty);
+      // H1 wins over H2.
+      auto h1 = alpha_case("H2 under H1", p, candidate::layer, 0, hidden);
+      alpha(h1, k::ui_layer, p, 0, p);
+      h1.still = flatten;
+      cases.push_back(h1);
+      // A T1-reused decision, even a stored no-mask one, is never H2's.
+      auto reused = alpha_case("H2 on a reused decision", p, candidate::backbuffer, candidate::backbuffer);
+      alpha(reused, k::backbuffer, 400, 2000);
+      reused.previous = selection::hold_state{detection::hold::own, 0u, 0u};
+      reused.still = flatten;
+      cases.push_back(reused);
+      reused.name = "H2 on a reused source";
+      reused.previous = own_partial;
+      cases.push_back(reused);
+      // Reused depth does not stop H2 (unlike H1).
+      auto stale = alpha_case("H2 on reused depth", p, candidate::layer | candidate::current, 0,
+        detection::per_frame_depth_not_current);
+      alpha(stale, k::ui_layer, 0, 2000);
+      stale.still = flatten;
+      cases.push_back(stale);
+      // The next real frame finds the hold store the H2 frame wrote: its
+      // own decision (none), not 11.
+      auto chained = alpha_case("H2 then an invalid accepted Backbuffer", p, candidate::backbuffer, candidate::backbuffer);
+      alpha(chained, k::backbuffer, 400, 2000);
+      auto first = loading;
+      first.name = "H2 before a chained frame";
+      first.still = flatten;
+      cases.push_back(first);
+      chained.previous = std::nullopt;
+      cases.push_back(chained);
+    }
     return cases;
   }
 
@@ -785,7 +847,180 @@ namespace {
       default: difference_rows(t, p, matching, std::uniform_int_distribution<std::uint32_t>(0, 1000)(random), 0);
     }
     if (!(random() % 8u)) t.difference[random() % 256u][1] = 1u;
+    // H2's flag in half the cases, other bits of b2 word 5 now and then.
+    if (random() & 1u) test.still = detection::still::flatten | ((random() % 8u) ? 0u : std::uint32_t(random()) & ~1u);
     return test;
+  }
+
+  // H2's stillness counts (fix 2): the scene compare pass compares every
+  // cell's presented-luma mean (the cell sums at t10) with the previous
+  // measured sample's (u5: 0 none, else 0x80000000 | mean), counts compared
+  // and still cells (within still::tolerance) per 16x16-cell group into
+  // statistics rows 144-152 and stores the new means; the evidence pass sums
+  // them into decision texel 12. Inactive depth writes nothing and texel 12
+  // zero. Compared with a CPU oracle at the compiled 256 x 144 (one pixel per
+  // cell), sRGB.
+  void check_stillness(gpu_t &gpu, const std::string &source) {
+    namespace scene = detection::scene;
+    constexpr std::uint32_t cells_x = scene::cells_x, cells_y = scene::cells_y, cells = cells_x * cells_y;
+    const auto compare = compile_pass(gpu, source, 1, "SunshineSceneCompareCS");
+    const auto evidence = compile_pass(gpu, source, 1, "SunshineSceneEvidenceCS");
+    const auto texture = [&](UINT width, UINT height, DXGI_FORMAT format, UINT bind, const void *initial, UINT pitch,
+                           ComPtr<ID3D11Texture2D> &result, ComPtr<ID3D11Texture2D> &staging) {
+      D3D11_TEXTURE2D_DESC desc{};
+      desc.Width = width;
+      desc.Height = height;
+      desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+      desc.Format = format;
+      desc.BindFlags = bind;
+      const D3D11_SUBRESOURCE_DATA data{initial, pitch, 0};
+      checked(gpu.device->CreateTexture2D(&desc, initial ? &data : nullptr, &result), "stillness texture");
+      desc.BindFlags = 0;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      checked(gpu.device->CreateTexture2D(&desc, nullptr, &staging), "stillness staging");
+    };
+    // Cell sums {presented luma, pre-UI luma, parallax, pixels}: one pixel
+    // per cell, so a cell's mean is its luma; no parallax, so no edge cell.
+    std::vector<texel> sums(cells);
+    std::vector<std::uint32_t> means(cells), previous(cells);
+    std::mt19937 random(0x5711u);
+    std::uint32_t expected_compared = 0, expected_still = 0;
+    std::vector<texel> expected_rows(16 * 9);
+    for (std::uint32_t i = 0; i != cells; ++i) {
+      const std::uint32_t mean = std::uniform_int_distribution<std::uint32_t>(10000u, scene::luma_scale - 10000u)(random);
+      means[i] = mean;
+      sums[i] = {mean, 0u, 0u, 1u};
+      // none, equal, +tolerance, -(tolerance + 1), -tolerance, +(tolerance + 1)
+      const auto t = detection::still::tolerance;
+      std::uint32_t stored = 0;
+      switch (i % 6u) {
+        case 0: stored = 0u; break;
+        case 1: stored = mean; break;
+        case 2: stored = mean + t; break;
+        case 3: stored = mean - t - 1u; break;
+        case 4: stored = mean - t; break;
+        default: stored = mean + t + 1u;
+      }
+      previous[i] = i % 6u ? 0x80000000u | stored : 0u;
+      const bool compared = i % 6u != 0u, still = compared && (i % 6u == 1u || i % 6u == 2u || i % 6u == 4u);
+      const std::uint32_t x = i % cells_x, y = i / cells_x, group = (y / 16u) * 16u + x / 16u;
+      expected_rows[group][0] += still;
+      expected_rows[group][1] += compared;
+      expected_compared += compared;
+      expected_still += still;
+    }
+    ComPtr<ID3D11Texture2D> cell_sums, cell_staging, previous_store, previous_staging, statistics, statistics_staging, decision,
+      decision_staging;
+    texture(cells_x, cells_y, DXGI_FORMAT_R32G32B32A32_UINT, D3D11_BIND_SHADER_RESOURCE, sums.data(), cells_x * sizeof(texel),
+      cell_sums, cell_staging);
+    texture(cells_x, cells_y, DXGI_FORMAT_R32_UINT, D3D11_BIND_UNORDERED_ACCESS, previous.data(), cells_x * sizeof(std::uint32_t),
+      previous_store, previous_staging);
+    const std::uint32_t rows = detection::statistics_rows(detection::max_scene_evidence_images);
+    const std::vector<texel> sentinel_rows(16 * rows, texel{0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu});
+    texture(16, rows, DXGI_FORMAT_R32G32B32A32_UINT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+      sentinel_rows.data(), 16 * sizeof(texel), statistics, statistics_staging);
+    texture(detection::still_decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT, D3D11_BIND_UNORDERED_ACCESS, nullptr, 0, decision,
+      decision_staging);
+    ComPtr<ID3D11ShaderResourceView> cells_view, statistics_view;
+    ComPtr<ID3D11UnorderedAccessView> previous_view, statistics_uav, decision_view;
+    checked(gpu.device->CreateShaderResourceView(cell_sums.Get(), nullptr, &cells_view), "cells view");
+    checked(gpu.device->CreateShaderResourceView(statistics.Get(), nullptr, &statistics_view), "statistics view");
+    checked(gpu.device->CreateUnorderedAccessView(previous_store.Get(), nullptr, &previous_view), "previous view");
+    checked(gpu.device->CreateUnorderedAccessView(statistics.Get(), nullptr, &statistics_uav), "statistics uav");
+    checked(gpu.device->CreateUnorderedAccessView(decision.Get(), nullptr, &decision_view), "decision uav");
+    // b0: depth ready with a valid camera (SunshineSceneDepthActive), or not.
+    struct geometry {
+      float depth_adjustment;
+      std::int32_t depth_map_view;
+      std::uint32_t depth_ready, camera_ready;
+      std::int32_t basis;
+      float depth_scale, strength_blend, disparity_limit;
+      float projection[2], raw_range[2], convergence[2], jitter[2], rect[4];
+    };
+    static_assert(sizeof(geometry) == 80);
+    D3D11_BUFFER_DESC buffer{};
+    buffer.ByteWidth = 80;
+    buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    ComPtr<ID3D11Buffer> b0;
+    checked(gpu.device->CreateBuffer(&buffer, nullptr, &b0), "b0");
+    const detection_constants constants{0u, 2.f / 255.f, 0u, 0u, 0.f, 0u, {}};
+    gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
+    const auto pass = [&](bool active) {
+      const geometry g{1.f, 0, active ? 1u : 0u, active ? 1u : 0u, 0, 1.f, 1.f, .02f, {0.f, 1.f}, {0.f, 0.f}, {.5f, .1f},
+        {0.f, 0.f}, {0.f, 0.f, 1.f, 1.f}};
+      gpu.context->UpdateSubresource(b0.Get(), 0, nullptr, &g, 0, 0);
+      const std::array<std::uint32_t, 4> sentinel{0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu};
+      gpu.context->ClearUnorderedAccessViewUint(decision_view.Get(), sentinel.data());
+      ID3D11Buffer *buffers[3]{b0.Get(), nullptr, gpu.constants.Get()};
+      gpu.context->CSSetConstantBuffers(0, 3, buffers);
+      // Compare: cell sums at t10, the previous means at u5, statistics at u6.
+      ID3D11ShaderResourceView *views[11]{};
+      views[10] = cells_view.Get();
+      gpu.context->CSSetShader(compare.Get(), nullptr, 0);
+      gpu.context->CSSetShaderResources(0, 11, views);
+      ID3D11UnorderedAccessView *uavs[2]{previous_view.Get(), statistics_uav.Get()};
+      gpu.context->CSSetUnorderedAccessViews(5, 2, uavs, nullptr);
+      gpu.context->Dispatch(cells_x / 16, cells_y / 16, 1);
+      ID3D11UnorderedAccessView *none[2]{};
+      gpu.context->CSSetUnorderedAccessViews(5, 2, none, nullptr);
+      // Evidence: statistics at t10, decision texels at u6.
+      views[10] = statistics_view.Get();
+      gpu.context->CSSetShader(evidence.Get(), nullptr, 0);
+      gpu.context->CSSetShaderResources(0, 11, views);
+      ID3D11UnorderedAccessView *decision_uav = decision_view.Get();
+      gpu.context->CSSetUnorderedAccessViews(6, 1, &decision_uav, nullptr);
+      gpu.context->Dispatch(1, 1, 1);
+      gpu.context->CSSetUnorderedAccessViews(6, 1, none, nullptr);
+      ID3D11ShaderResourceView *cleared[11]{};
+      gpu.context->CSSetShaderResources(0, 11, cleared);
+    };
+    namespace word = detection::decision_word;
+    // Inactive depth: nothing stored or counted, texel 12 zero.
+    pass(false);
+    auto stored = read<std::uint32_t>(gpu, previous_store.Get(), previous_staging.Get(), cells);
+    auto statistics_rows = read<texel>(gpu, statistics.Get(), statistics_staging.Get(), 16 * rows);
+    auto words = read<std::uint32_t>(gpu, decision.Get(), decision_staging.Get(), 4 * detection::still_decision_texels);
+    require(stored == previous && statistics_rows[16 * detection::still_statistics_row][0] == 0xdeadbeefu &&
+        !words[word::still_cells] && !words[word::still_compared] && words[word::still_compared + 1] == 0u,
+      "H2 stillness: inactive depth stored or counted cells, or texel 12 is not zero");
+    // Active: per-group counts, the stored means and texel 12.
+    pass(true);
+    stored = read<std::uint32_t>(gpu, previous_store.Get(), previous_staging.Get(), cells);
+    statistics_rows = read<texel>(gpu, statistics.Get(), statistics_staging.Get(), 16 * rows);
+    words = read<std::uint32_t>(gpu, decision.Get(), decision_staging.Get(), 4 * detection::still_decision_texels);
+    for (std::uint32_t i = 0; i != cells; ++i)
+      if (stored[i] != (0x80000000u | means[i]))
+        throw std::runtime_error("H2 stillness: cell " + std::to_string(i) + " stored " + std::to_string(stored[i]) +
+          ", not its mean with the stored bit");
+    for (std::uint32_t group = 0; group != 16u * 9u; ++group) {
+      const auto &got = statistics_rows[(detection::still_statistics_row + group / 16u) * 16u + group % 16u];
+      if (got[0] != expected_rows[group][0] || got[1] != expected_rows[group][1] || got[2] || got[3])
+        throw std::runtime_error("H2 stillness: group " + std::to_string(group) + " counted " + std::to_string(got[0]) + '/' +
+          std::to_string(got[1]) + ", the CPU oracle " + std::to_string(expected_rows[group][0]) + '/' +
+          std::to_string(expected_rows[group][1]));
+    }
+    require(words[word::still_cells] == expected_still && words[word::still_compared] == expected_compared &&
+        !words[word::still_compared + 1] && !words[word::still_compared + 2] && expected_still * 5u == expected_compared * 3u &&
+        expected_compared * 6u == cells * 5u, "H2 stillness: texel 12 does not sum the groups");
+    // The next sample of the same image: every cell compared and still.
+    pass(true);
+    words = read<std::uint32_t>(gpu, decision.Get(), decision_staging.Get(), 4 * detection::still_decision_texels);
+    require(words[word::still_cells] == cells && words[word::still_compared] == cells,
+      "H2 stillness: an unchanged image did not read every cell still");
+    // A uniform change of exactly the tolerance is still; one more is not.
+    for (const std::uint32_t delta : {detection::still::tolerance, detection::still::tolerance + 1u}) {
+      for (std::uint32_t i = 0; i != cells; ++i) sums[i][0] = means[i] + (delta == detection::still::tolerance ? delta : 0u);
+      if (delta != detection::still::tolerance)
+        for (std::uint32_t i = 0; i != cells; ++i) sums[i][0] = means[i] + detection::still::tolerance + delta;
+      gpu.context->UpdateSubresource(cell_sums.Get(), 0, nullptr, sums.data(), cells_x * sizeof(texel), 0);
+      pass(true);
+      words = read<std::uint32_t>(gpu, decision.Get(), decision_staging.Get(), 4 * detection::still_decision_texels);
+      const bool still = delta == detection::still::tolerance;
+      require(words[word::still_compared] == cells && words[word::still_cells] == (still ? cells : 0u),
+        still ? "H2 stillness: a change of exactly the tolerance was not still" :
+                "H2 stillness: a change beyond the tolerance was still");
+    }
   }
 
   ComPtr<ID3D11ShaderResourceView> float_image(gpu_t &gpu, const std::vector<std::array<float, 4>> &texels) {
@@ -1285,6 +1520,56 @@ int main() {
     std::puts("PASS UI hidden scene (H1): informative claims (a)-(d) flatten under a held hidden verdict whatever S1 selected; "
       "refuted, reused-depth, unaccepted declared and blocked inferred claims never do");
 
+    // H2 (fix 2): a frame applying no source that T1 did not reuse is flat
+    // (11) under still::flatten; S1 (even an empty accepted decision), H1 and
+    // T1 win, and the hold store, frame reason and refused candidate keep
+    // the decision before it.
+    {
+      namespace hold = detection::hold;
+      namespace counter = sunshine_game3d::ui_counter_word;
+      const auto flatten = detection::still::flatten;
+      selection::counts c;
+      c.pixels = 1000;
+      c.covered = {0, 0, 0, 0, 0};
+      c.invalid = {0, 0, 600, 0, 0};
+      auto d = selection::decide(c, 0x48, 0x00, 0, {}, flatten);
+      require(d.source == detection::source_still && d.covered == 1000 && d.still && !d.own_source && !d.h1 &&
+          d.next.state == hold::own && d.next.source == 0 && d.next.covered == 0 &&
+          d.none_reason == sunshine_game3d::ui_no_mask::layer_aside && d.refused == candidate::layer &&
+          selection::frame_reason_word(d) == sunshine_game3d::ui_no_mask::layer_aside,
+        "H2: a frame without a UI source was not flat as 11 with its own reason and hold store");
+      const auto adds = selection::counter_adds(d, 0);
+      require(adds[counter::decided + detection::source_still] == 1 &&
+          !adds[counter::none + sunshine_game3d::ui_no_mask::layer_aside] && !adds[counter::full_alpha],
+        "H2: counter adds must count decided 11 and no no-mask reason");
+      require(!selection::decide(c, 0x48, 0x00, 0, {}, 0).source && !selection::decide(c, 0x48, 0x00, 0, {}, ~flatten).source,
+        "H2: decided without its flag");
+      require(selection::decide(c, 0x48, 0x00, detection::per_frame_depth_not_current, {}, flatten).source ==
+          detection::source_still, "H2: reused depth stopped the still screen");
+      selection::counts empty;
+      empty.pixels = 1000;
+      d = selection::decide(empty, 0x08, 0x08, 0, {}, flatten);
+      require(d.source == 4 && !d.covered && !d.still, "H2: an accepted empty decision was overridden");
+      c.covered = {0, 0, 1000, 0, 0};
+      c.invalid = {};
+      c.opaque_layer = 1000;
+      d = selection::decide(c, 0x40, 0x00, detection::per_frame_scene_hidden, {}, flatten);
+      require(d.source == 8 && d.h1 && !d.still, "H2: H1 was overridden");
+      selection::counts invalid;
+      invalid.pixels = 1000;
+      invalid.covered = {0, 0, 0, 300, 0};
+      invalid.invalid = {0, 0, 0, 20, 0};
+      d = selection::decide(invalid, 0x04, 0x04, 0, {hold::own, 0u, 0u}, flatten);
+      require(d.reused && !d.source && !d.still, "H2: a reused no-mask decision was shown flat");
+      d = selection::decide(invalid, 0x04, 0x04, 0, {hold::own, 3u, 400u}, flatten);
+      require(d.reused && d.source == 3 && !d.still, "H2: a reused source was overridden");
+      d = selection::decide(invalid, 0x04, 0x04, 0, d.next, flatten);
+      require(!d.reused && d.source == detection::source_still && d.next.state == hold::spent && d.next.source == 0,
+        "H2: a spent grace without a decision was not flat, or stored 11");
+    }
+    std::puts("PASS UI still screen (H2): a frame applying no source and not reused is flat (11) under the flag; S1, H1 and T1 "
+      "win; the hold store, reason and refused candidate keep the decision before it; reused depth does not stop it");
+
     std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);
     require(input.good(), "Cannot read game3d_native.hlsl");
     const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
@@ -1297,7 +1582,10 @@ int main() {
     std::mt19937 random(0x5131u);
     for (unsigned i = 0; i != 6000; ++i) cases.push_back(random_case(random, i));
     std::array<unsigned, detection::source_count> sources{};
-    unsigned reused = 0, h1 = 0, gate_no_hold = 0, own_retired = 0;
+    unsigned reused = 0, h1 = 0, gate_no_hold = 0, own_retired = 0, still = 0;
+    check_stillness(gpu, source);
+    std::puts("PASS UI still screen stillness (H2): the compare pass counts compared and still cells (within 1/255 of code luma) "
+      "per group, stores each cell's mean, and the evidence pass sums them into texel 12; inactive depth writes nothing");
     // The tiles pass in scRGB (relative tolerances above one), the pre-UI
     // counts at the .005 float pair threshold and without a comparable pair.
     {
@@ -1323,17 +1611,19 @@ int main() {
           reused += d.reused;
           h1 += d.h1;
           own_retired += d.own_source == 7u || d.own_source == 9u;
+          still += d.still;
           gate_no_hold += !d.own_source && d.none_reason == sunshine_game3d::ui_no_mask::gate_no_hold;
         }
       }
     }
-    require(!own_retired && h1 && gate_no_hold, "The contract cases decided a retired source (7, 9), or never exercised H1");
+    require(!own_retired && h1 && gate_no_hold && still, "The contract cases decided a retired source (7, 9), or never exercised H1 "
+      "or H2");
     std::printf("PASS UI detection tiles (V1, V2, A2, H1 d): alpha, layer, difference, one-way and pre-UI pixel counts on edge "
       "values match the CPU count for layer flags 0, 5 and 7, with and without an exact pair and a comparable layer, in sRGB, PQ "
       "and scRGB\n");
     std::printf("PASS UI selection GPU contract (%s): %zu crafted and %zu random cases in two color spaces match decide() in every "
-      "decision word, hold store write and counter add; %u reused, %u H1, %u gate_no_hold; applied sources", gpu.adapter.c_str(),
-      crafted_count, cases.size() - crafted_count, reused, h1, gate_no_hold);
+      "decision word, hold store write and counter add; %u reused, %u H1, %u H2, %u gate_no_hold; applied sources",
+      gpu.adapter.c_str(), crafted_count, cases.size() - crafted_count, reused, h1, still, gate_no_hold);
     for (std::size_t s = 0; s != sources.size(); ++s)
       if (s != 7 && s != 9) std::printf(" %zu=%u", s, sources[s]);
     std::printf(" other=%u\n", sources[7]);

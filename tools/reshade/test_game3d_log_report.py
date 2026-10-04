@@ -95,11 +95,12 @@ def ui2(t, source, covered, alpha, candidates, accepted, pixels=1000, hudless=(0
 
 def ui3(t, source, covered, alpha, candidates, accepted, pixels=1000, layer=(0, 0), invalid=(0, 0, 0, 0),
         reason=None, refused='none', scene=(0.6, 'visible'), claims=0, h1=0, winner=None, pre_ui=('none', 0.0, 0),
-        guard=(0, 0, 0), ran=1, shadow=0, hidden_ms=0, detection=None, fg=0, pre_ui_pixels=None):
+        guard=(0, 0, 0), ran=1, shadow=0, hidden_ms=0, detection=None, fg=0, pre_ui_pixels=None, still=None):
     """A 'Sunshine UI protection' line since S2b (exporter.cpp): the S2a fields, then the Backbuffer and current
     alpha's opaque pixels, the informative full claims, the H1 word, the presented frame's D, the pre-UI scene image's
     D (image, d, valid) and the scene guard's holds (hidden, pre-UI, refuted signatures). Since fix 1 pre_ui_pixels
-    (match, image lit, presented lit, presented lit and different) follows shadow_hidden_ms."""
+    (match, image lit, presented lit, presented lit and different) follows shadow_hidden_ms, and since fix 2 still
+    (scope, enabled, phase, run_ms, still cells, compared cells, short_max_ms), rule H2's group, follows it."""
     detection = detection or ('detected' if source else 'no_usable_mask')
     reason = reason or ('decided' if source else 'unaccepted')
     winner = source if winner is None else winner
@@ -127,6 +128,8 @@ def ui3(t, source, covered, alpha, candidates, accepted, pixels=1000, layer=(0, 
                    + ('' if pre_ui_pixels is None else
                       'sampled_pre_ui_pixels={{match={} image_lit={} presented_lit={} presented_lit_differs={}}} '
                       .format(*pre_ui_pixels))
+                   + ('' if still is None else
+                      'still={{scope={} enabled={} phase={} run_ms={} sampled={}/{} short_max_ms={}}} '.format(*still))
                    + 'status_revision=1')
 
 
@@ -156,6 +159,11 @@ S2B_COUNTER_GROUPS = tuple(
     group for key, inner in COUNTER_GROUPS
     for group in ((key, tuple(k for k in inner if k != '9') if key in ('decided', 'full') else inner),)
     + ((('scene', ('entered', 'released', 'refuted')),) if key == 'full_d' else ()))
+# The same since fix 2: decided adds 11 (H2's still screen), and H2's group follows the scene guard's.
+FIX2_COUNTER_GROUPS = tuple(
+    group for key, inner in S2B_COUNTER_GROUPS
+    for group in ((key, inner + ('11',) if key == 'decided' else inner),)
+    + ((('still', ('entered', 'released', 'short')),) if key == 'scene' else ()))
 # The same in S1: three hold kinds and the cap, no reused, trusted_full and the S1 trust events.
 S1_COUNTER_GROUPS = tuple(
     ('held', ('generated', 'inexact_after_exact', 'trusted_missing', 'cap')) if key == 'held' else
@@ -1137,6 +1145,135 @@ class ReadinessReport(unittest.TestCase):
                       [ui3('10:00:12', 0, 0, (0, 0, 0, 1000), 0x48, 0x0, scene=(-0.04, 'hidden'),
                            pre_ui=('layer', 0.18, 1), guard=(1, 0, 0, 1))]):
             self.assertNotIn('Dark pre-UI image (shadow)', run(BASE + lines))
+
+    def test_fix2_counter_lines_parse_decided_11_and_the_still_group(self):
+        # The text test_game3d_alpha_auto pins for format_ui_counters since fix 2: decided adds 11 and H2's group
+        # follows the scene guard's.
+        text = ('auto_frames=15 detection_frames=11 held={generated=2 none=1} reused=1 '
+                'inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 10=4 11=5} '
+                'none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 '
+                'gate_no_hold=1 no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 depth_not_current=1} '
+                'full_d={hidden=1 ambiguous=0 visible=0 invalid=0} scene={entered=1 released=1 refuted=2} '
+                'still={entered=2 released=1 short=7} untrusted_inferred=0 inexact_difference=3 contradicted=2 '
+                'presented_over_dedicated=0 full_alpha=2 full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=0} '
+                'trust={earned=1 revoked_exact=1 revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3} '
+                'samples=4 through_ms=12345')
+        fields = report.counter_fields('runtime=0000000000000001 ' + text)
+        self.assertEqual((fields['decided.11'], fields['still.entered'], fields['still.released'],
+                          fields['still.short'], fields['scene.refuted']), (5, 2, 1, 7, 2))
+        self.assertEqual(report.counter_fields(report.COUNTERS.search(
+            counters('10:00:00', fields, groups=FIX2_COUNTER_GROUPS)).group(1)), fields)
+        # H2 frames are named among the decided sources and keep the accounting identity.
+        flat = {**CLEAN_COUNTERS, 'decided.0': 10, 'decided.11': 10, 'none.ambiguous': 10, 'still.entered': 1,
+                'still.released': 1}
+        checks = run(BASE + [counters('10:00:12', flat, groups=FIX2_COUNTER_GROUPS)])
+        self.assertEqual(checks['UI counters'].status, 'PASS')
+        self.assertIn('UI layer (10) 75%, still screen without a UI source (H2) (11) 12%',
+                      checks['UI protection'].detail)
+        # Without episodes the check says so, with the safety evidence of the counter line.
+        self.assertEqual((checks['UI still screen'].status, checks['UI still screen'].detail),
+                         ('INFO', 'no still screen without a UI source; entered 1, released 1; longest run that reset '
+                                  'before 2 s: 0 ms (0 short runs)'))
+
+    def test_fix2_still_screen_episodes_warn_in_the_shadow(self):
+        # Stellar Blade's SDR loading screen (2026-10-03 07:19:57-07:20:06): the cleared output target (0x48) and
+        # current alpha are offered, neither accepted, so no source decides; the presented frame reads hidden (D
+        # -0.014 to -0.068) and still. In the default shadow H2 only logs that it would flatten it.
+        def loading(t, phase, run_ms, short_ms=0):
+            return ui3(t, 0, 0, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 4), reason='ambiguous', refused='current',
+                       scene=(-0.04, 'hidden'), shadow=1, hidden_ms=run_ms,
+                       still=(1, 0, phase, run_ms, 36864, 36864, short_ms))
+        switch = line('10:00:01', '[Sunshine 3D] Sunshine UI protection: still screens with no UI source are only '
+                                  'logged (UIFlattenStillScreens=0)')
+        start = line('10:00:12', '[Sunshine 3D] Sunshine UI still screen: would flatten (UIFlattenStillScreens=0) '
+                                 'after run_ms=2000 samples=21 d=[-0.068,-0.014] still_min=1.000')
+        end = line('10:00:19', '[Sunshine 3D] Sunshine UI still screen: episode ended reason=moving duration_ms=7000 '
+                               'samples=71 d=[-0.068,-0.014] still_min=0.990 flattened=0')
+        totals = {**CLEAN_COUNTERS, 'still.entered': 1, 'still.released': 1, 'still.short': 3}
+        lines = BASE + [switch, loading('10:00:11', 'pending', 900, 547), loading('10:00:12', 'shadow', 2000), start,
+                        loading('10:00:18', 'shadow', 6000), end,
+                        counters('10:00:19', totals, groups=FIX2_COUNTER_GROUPS)]
+        session = report.parse(lines)
+        self.assertEqual(session.still_switch, [(36001.0, False)])
+        self.assertEqual(session.ui[1].still, report.Still(True, False, 'shadow', 2000, 36864, 36864, 0))
+        episode = session.still_episodes[0]
+        self.assertEqual((episode.flatten, episode.run_ms, episode.end, episode.reason, episode.duration_ms,
+                          episode.d, episode.still_min, episode.flattened),
+                         (False, 2000, 36019.0, 'moving', 7000, (-0.068, -0.014), 0.99, False))
+        checks = run(lines)
+        still = checks['UI still screen']
+        self.assertEqual(still.status, 'WARN')
+        self.assertEqual(still.detail,
+                         '1 still screen without a UI source would have been flattened (shadow): the presented frame '
+                         'read hidden (D at most 0.05) and still for 2 s while no UI source decided; review each one '
+                         '(a Dump 3D taken during one shows the screen) before turning on "Flatten still screens with '
+                         'no UI source"; UIFlattenStillScreens=0; entered 1, released 1; longest run that reset before '
+                         '2 s: 547 ms (3 short runs)')
+        self.assertEqual(still.times, ['10:00:12.000 would flatten after 2000 ms, ended 10:00:19.000 (moving) after '
+                                       '7000 ms; D -0.068 to -0.014, still at least 99.0% of cells'])
+        # Its hidden run still warns as an uncovered hidden scene, as the first-run shadow logged it before fix 2.
+        self.assertEqual(checks['Hidden scene'].status, 'WARN')
+        # Without a counter line the short runs are not counted, and an episode the log ended in stays open.
+        still = run(BASE + [switch, loading('10:00:11', 'pending', 900, 547), start])['UI still screen']
+        self.assertTrue(still.detail.endswith('; UIFlattenStillScreens=0; longest run that reset before 2 s: 547 ms '
+                                              '(short runs not counted without a counter line)'), still.detail)
+        self.assertEqual(still.times, ['10:00:12.000 would flatten after 2000 ms, still active when the log ended; D '
+                                       '-0.068 to -0.014, still at least 100.0% of cells'])
+
+    def test_fix2_flattened_still_screens_are_info_and_protected(self):
+        # With "Flatten still screens with no UI source" on, the same screen is H2's source 11: a mask, so no gap.
+        def flat(t, run_ms):
+            return ui3(t, 11, 1000, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 4), reason='ambiguous', refused='current',
+                       scene=(-0.04, 'hidden'), winner=0, still=(1, 1, 'flat', run_ms, 36864, 36864, 0))
+        switch = line('10:00:01', '[Sunshine 3D] Sunshine UI protection: still screens with no UI source are '
+                                  'flattened (UIFlattenStillScreens=1)')
+        start = line('10:00:06', '[Sunshine 3D] Sunshine UI still screen: flattening (UIFlattenStillScreens=1) after '
+                                 'run_ms=2000 samples=21 d=[-0.068,-0.014] still_min=1.000')
+        end = line('10:00:19', '[Sunshine 3D] Sunshine UI still screen: episode ended reason=not_hidden '
+                               'duration_ms=13000 samples=131 d=[-0.068,-0.010] still_min=0.995 flattened=1')
+        totals = {**CLEAN_COUNTERS, 'decided.10': 30, 'decided.11': 30, 'still.entered': 1, 'still.released': 1,
+                  'still.short': 2}
+        lines = BASE + [switch, start] + [flat(f'10:00:{s:02}', 2000 + 1000 * (s - 6)) for s in range(6, 19)] + [
+            end, counters('10:00:19', totals, groups=FIX2_COUNTER_GROUPS), line('10:00:20', 'Finished exiting.')]
+        checks = run(lines)
+        still = checks['UI still screen']
+        self.assertEqual((still.status, still.detail),
+                         ('INFO', '1 still screen without a UI source shown flat (H2, source 11); '
+                                  'UIFlattenStillScreens=1; entered 1, released 1; longest run that reset before 2 s: '
+                                  '0 ms (2 short runs)'))
+        self.assertEqual(still.times, ['10:00:06.000 flattened after 2000 ms, ended 10:00:19.000 (not_hidden) after '
+                                       '13000 ms; D -0.068 to -0.010, still at least 99.5% of cells'])
+        self.assertEqual(checks['UI protection gaps'].status, 'PASS')
+        self.assertIn('still screen without a UI source (H2) (11) 38%', checks['UI protection'].detail)
+        # A flat sample is decided: no uncovered hidden run.
+        self.assertEqual(checks['Hidden scene'].status, 'INFO')
+        # Shadow episodes beside flattened ones still warn.
+        shadow = line('10:00:30', '[Sunshine 3D] Sunshine UI still screen: would flatten (UIFlattenStillScreens=0) '
+                                  'after run_ms=2000 samples=21 d=[0.010,0.040] still_min=0.970')
+        mixed = run(lines + [shadow])['UI still screen']
+        self.assertEqual(mixed.status, 'WARN')
+        self.assertIn('1 still screen without a UI source would have been flattened (shadow)', mixed.detail)
+        self.assertIn('; 1 still screen shown flat; ', mixed.detail)
+        self.assertEqual(len(mixed.times), 2)
+
+    def test_fix2_logs_before_it_have_no_still_screen_check(self):
+        # Lines and counters logged before fix 2 parse as before and add no check.
+        for lines in ([SB_S2B_SETTINGS], [SB_FIX1_SETTINGS],
+                      [counters('10:00:12', CLEAN_COUNTERS, groups=S2B_COUNTER_GROUPS)]):
+            session = report.parse(BASE + lines)
+            self.assertEqual((session.still_switch, session.still_episodes), ([], []))
+            self.assertTrue(all(u.still is None for u in session.ui))
+            self.assertNotIn('UI still screen', run(BASE + lines))
+        # The same real line with fix 2's group parses it and reports the safety evidence.
+        fix2 = SB_FIX1_SETTINGS.replace(' status_revision=17', ' still={scope=1 enabled=0 phase=pending run_ms=1200 '
+                                        'sampled=36700/36864 short_max_ms=325} status_revision=17')
+        u = report.parse([fix2]).ui[0]
+        self.assertEqual((u.still, u.scene.pre_ui_pixels, u.source, u.reason),
+                         (report.Still(True, False, 'pending', 1200, 36700, 36864, 325),
+                          (2719720, 2148784, 5994692, 5238234), 0, 'layer_aside'))
+        self.assertEqual(run(BASE + [fix2])['UI still screen'].detail,
+                         'no still screen without a UI source; longest run that reset before 2 s: 325 ms (short runs '
+                         'not counted without a counter line)')
 
     def test_counted_whole_frame_alpha_over_a_visible_scene_is_reported(self):
         # The Witcher 3 sign wheel: a trusted layer covers the frame without an exact pair, so contradicted stays 0;

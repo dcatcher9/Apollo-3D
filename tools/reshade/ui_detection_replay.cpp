@@ -13,7 +13,9 @@
 // hidden-scene guard's per-frame bits (H1) itself, or has the guard
 // (game3d_scene_guard.h) derive them from the frame's own measured evidence;
 // pre_ui_proven stands for the acceptance ledger's pre-UI proof of the offered
-// layer's signature (H1 d).
+// layer's signature (H1 d). H2's still-screen flag (b2 word 5) is the dump's
+// own (replay.ui_detection.still_bits, zero when absent); a single frame has
+// no previous cell means, so its stillness counts read nothing compared.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -255,7 +257,9 @@ namespace {
   // selection revision 2 the one-way judgment rows 80-111 (the scene rows
   // follow from 112, 121 rows in all) and decision texels 8 and 9, and
   // selection revision 4 (12 decision texels) the pre-UI pixel rows 128-143
-  // (144 rows in all) and decision texel 11.
+  // (144 rows in all) and decision texel 11, and selection revision 5 (13
+  // decision texels) H2's stillness rows from 144 (160 rows in all) and
+  // decision texel 12.
   struct sizes_t {
     UINT statistics_rows, decision_texels;
     bool scene;
@@ -276,9 +280,9 @@ namespace {
     std::string mask_exact; // Empty unless the label asks for it.
     std::vector<float> mask;
     UINT width = 0, height = 0;
-    // The candidate layout, and the pushed candidate bits, accepted mask and
-    // detection flags (of the second pass when measured).
-    std::uint32_t layout = 0, offered = 0, accepted = 0, flags = 0;
+    // The candidate layout, and the pushed candidate bits, accepted mask,
+    // detection flags (of the second pass when measured) and H2's b2 word 5.
+    std::uint32_t layout = 0, offered = 0, accepted = 0, flags = 0, still = 0;
     // scene_hold "measured": the per-frame bits the scene guard derived.
     bool measured = false;
     std::uint32_t guard_bits = 0;
@@ -286,12 +290,12 @@ namespace {
 
   std::string mask_exact(const outcome &result, const std::array<const artifact_t *, 4> &inputs, const artifact_t *layer,
       const artifact_t &paired) {
-    // Raw selected alpha, or a whole-frame flat (sources 6 and 8); a
+    // Raw selected alpha, or a whole-frame flat (sources 6, 8 and 11); a
     // HUD-less difference has no CPU reference here.
     const auto source = result.decision.at(word::source);
     std::vector<float> reference;
     if (!source) reference.assign(result.mask.size(), 0.f);
-    else if (source == 6u || source == 8u) reference.assign(result.mask.size(), 1.f);
+    else if (source == 6u || source == 8u || source == contract::source_still) reference.assign(result.mask.size(), 1.f);
     else if (source <= 4u || source == contract::source_layer) {
       const auto *input = source == 4u ? &paired : source == contract::source_layer ? layer : inputs[source - 1];
       if (!input) return "no-reference(missing candidate)";
@@ -454,10 +458,11 @@ namespace {
     auto decision = target(gpu, sizes.decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT);
     auto mask = target(gpu, width, height, DXGI_FORMAT_R32_FLOAT);
     // Detection constants b2: candidate bits, difference threshold, accepted
-    // candidates (layout 1: trusted slots), flags, and (selection revision 4)
+    // candidates (layout 1: trusted slots), flags, (selection revision 4)
     // the offscreen UI layer's pair threshold with the presented color, from
     // the two artifacts' own encodings (zero without a layer or when not
-    // comparable), padded to the 16-byte constant buffer granularity.
+    // comparable), and (selection revision 5) H2's still-screen flag as the
+    // dump recorded it, padded to the 16-byte constant buffer granularity.
     const float threshold = pair_threshold ? *pair_threshold :
       selection::comparable(encoding_of(paired), encoding_of(paired)).value_or(2.f / 255.f);
     float pre_ui_threshold = 0.f;
@@ -465,13 +470,18 @@ namespace {
       if (ui_layer_kind(kind.get<std::string>()) && layer_input)
         pre_ui_threshold =
           selection::comparable(encoding_of(kind.get<std::string>()), encoding_of("source_color")).value_or(0.f);
+    std::uint32_t still = 0;
+    if (const auto &replay = metadata.at("replay"); replay.contains("ui_detection") &&
+        replay.at("ui_detection").contains("still_bits"))
+      still = replay.at("ui_detection").at("still_bits").get<std::uint32_t>();
     struct {
       std::uint32_t bits;
       float threshold;
       std::uint32_t accepted, flags;
       float pre_ui_threshold;
-      std::uint32_t padding[3];
-    } constants{bits, threshold, accepted, flags, pre_ui_threshold, {}};
+      std::uint32_t still;
+      std::uint32_t padding[2];
+    } constants{bits, threshold, accepted, flags, pre_ui_threshold, still, {}};
     const auto constant_buffer = [&](const void *bytes, UINT size) {
       D3D11_BUFFER_DESC buffer{};
       buffer.ByteWidth = size; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -545,7 +555,7 @@ namespace {
     result.decision = download<std::uint32_t>(gpu, decision);
     result.mask = download<float>(gpu, mask);
     result.width = width; result.height = height;
-    result.layout = layout; result.offered = bits; result.accepted = accepted; result.flags = flags;
+    result.layout = layout; result.offered = bits; result.accepted = accepted; result.flags = flags; result.still = still;
     result.pixels = result.mask.size();
     for (const float value : result.mask) {
       result.ui_pixels += value > 0.f ? 1u : 0u;
@@ -704,8 +714,9 @@ namespace {
   }
 
   // ui_selection::decide on the counts the GPU wrote, with the pushed
-  // candidate bits, accepted mask and flags and no previous decision (the
-  // hold store unbound): "match" when the GPU's source, coverage, accepted
+  // candidate bits, accepted mask, flags and still-screen flag and no
+  // previous decision (the hold store unbound): "match" when the GPU's
+  // source, coverage, accepted
   // word, valid bits, refused candidate, frame reason, claims and h1 word
   // agree, "n/a" for a shader of another candidate layout or selection
   // revision.
@@ -713,7 +724,7 @@ namespace {
     const auto &d = result.decision;
     if (!mirrored || d.size() <= word::h1) return "n/a";
     const auto expected = selection::decide(selection::counts_from_words(d.data(), d.size()), result.offered, result.accepted,
-      result.flags, selection::hold_state{});
+      result.flags, selection::hold_state{}, result.still);
     if (expected.source == d[word::source] && expected.covered == d[word::covered] && expected.valid_bits == d[word::valid_bits] &&
         d[word::accepted] == result.accepted && d[word::candidates] == result.offered && expected.refused == d[word::refused] &&
         selection::frame_reason_word(expected) == d[word::frame_reason] && expected.claims == d[word::claims] &&

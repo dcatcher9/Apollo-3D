@@ -9,16 +9,20 @@
 // per signature (scene_guard::state, M5), the sample decode and counter
 // commit (ui_temporal::decode_detection_sample, sample_counters), Present
 // pairing and counting under frame generation (ui_mask::pair_hudless_present,
-// generated_without_input) and the exact counters (ui_counters). A stream's
-// GPU input is what one detection counts: decision texels 0-11 that
-// ui_detection_replay --verbose recorded on labelled dumps with the fix-1
-// shader, or synthetic counts. Every decision is ui_selection::decide, the
-// C++ mirror of SunshineUIDetectionReduceCS (the T1 hold store and the H1
-// override included) that test_game3d_ui_selection_contract proves equal to
+// generated_without_input) and the exact counters (ui_counters), and rule
+// H2's run of still screens without a UI source (still_screen::run, fix 2)
+// with the renderer's scope and switch. A stream's GPU input is what one
+// detection counts: decision texels 0-11 that ui_detection_replay --verbose
+// recorded on labelled dumps with the fix-1 shader, or synthetic counts;
+// texel 12, the compare pass's still and compared cells, is modelled from
+// each Present's still share (a recording's texel 12 is zero). Every
+// decision is ui_selection::decide, the C++ mirror of
+// SunshineUIDetectionReduceCS (the T1 hold store and the H1 and H2
+// overrides included) that test_game3d_ui_selection_contract proves equal to
 // the shader's reduce; every recorded decision must equal it.
 //
-// It asserts the rules through stage S2b and fix 1 (the pre-UI proof by
-// pixels) strictly. An outcome that a later
+// It asserts the rules through stage S2b, fix 1 (the pre-UI proof by
+// pixels) and fix 2 (H2) strictly. An outcome that a later
 // stage of the UI decision framework (docs/reshade-sbs.md, UI decision
 // framework: stages S0-S6; rules E1, E2, V1, V2, A1-A3, S1, S2, H1, P1, T1,
 // F1) changes prints "KNOWN_TODAY <stage> <rule>: <text>" and does not fail;
@@ -137,15 +141,20 @@ namespace {
 
   // ---------------------------------------------------------------- decision texels
 
-  // Decision texels 0-11 as the renderer reads them back (selection revision 4).
-  constexpr std::size_t texel_words = 4 * ui_detection::pre_ui_decision_texels;
+  // Decision texels 0-12 as the renderer reads them back (selection revision 5).
+  constexpr std::size_t texel_words = 4 * ui_detection::still_decision_texels;
   using texels = std::array<std::uint32_t, texel_words>;
   // Texels 5 and 6: the hidden-scene evidence of the presented frame and of
-  // the pre-UI scene image, written only by the evidence pass.
+  // the pre-UI scene image, and texel 12, H2's still and compared cells,
+  // written only by the evidence passes.
   constexpr std::size_t scene_texels_begin = 4 * 5, scene_texels_end = 4 * ui_detection::scene_decision_texels;
+  constexpr std::size_t still_texel_begin = 4 * ui_detection::pre_ui_decision_texels;
+  // The cells of the D grid the compare pass compares (H2).
+  constexpr std::uint32_t still_cells = ui_detection::scene::cells_x * ui_detection::scene::cells_y;
 
   // A recording of 48 words, or of 44 (texels 0-10, recorded before
-  // selection revision 4: texel 11 reads zero).
+  // selection revision 4: texel 11 reads zero); texel 12 (selection revision
+  // 5) reads zero.
   texels parse_texels(std::string_view csv) {
     texels result {};
     std::size_t count = 0;
@@ -161,7 +170,7 @@ namespace {
         ++at;
       }
     }
-    if ((count != result.size() && count != 4 * ui_detection::h1_decision_texels) || at != end) {
+    if ((count != 4 * ui_detection::pre_ui_decision_texels && count != 4 * ui_detection::h1_decision_texels) || at != end) {
       throw std::runtime_error("Recorded texels are not 44 or 48 words");
     }
     return result;
@@ -194,18 +203,19 @@ namespace {
   // bits and the hold store (game3d_renderer.cpp, detect_ui's b2 constants:
   // the candidates, the layer's stored flags with the per-frame bits of T1,
   // the scene guard and the depth, the accepted candidates; the T1 hold store
-  // at u5, as the previous detection wrote it).
+  // at u5, as the previous detection wrote it; H2's still word, b2 word 5).
   struct gpu_inputs {
     std::uint32_t bits {}, flags {}, accepted {}, per_frame {};
     std::uint64_t now_ms {};
     ui_selection::hold_state hold {};
+    std::uint32_t still {};
   };
 
   using gpu_model = std::function<texels(const gpu_inputs &)>;
 
   // The reduce's decision of these counts and inputs (ui_selection::decide).
   ui_selection::decision decide(const texels &t, const gpu_inputs &in) {
-    return ui_selection::decide(ui_selection::counts_from_words(t.data(), t.size()), in.bits, in.accepted, in.flags | in.per_frame, in.hold);
+    return ui_selection::decide(ui_selection::counts_from_words(t.data(), t.size()), in.bits, in.accepted, in.flags | in.per_frame, in.hold, in.still);
   }
 
   // The counts of `t` with the words the reduce writes for these inputs:
@@ -594,6 +604,12 @@ namespace {
     bool depth_current = true;
     std::uint64_t epoch = 1, revision = 1;
     std::uint32_t viewport = 1;
+    // The swapchain's typed DXGI format; with signatures.color_space it says
+    // whether the output is SDR (still_screen::sdr_output, H2's scope).
+    std::uint32_t output_format = 24;
+    // H2: the share of the D grid's cells whose presented-luma mean stays
+    // within the tolerance of the previous measured sample's (texel 12).
+    float still_share = 1.f;
   };
 
   struct frame_result {
@@ -618,6 +634,9 @@ namespace {
     // for the offered layer's signature, read after the poll.
     std::uint32_t scene_bits {};
     bool layer_proven {};
+    // H2: this render's scope (SDR Auto) and the still word it pushed.
+    bool still_scope {};
+    std::uint32_t still_bits {};
     // update_alpha_auto's status for this frame.
     alpha_auto_decision consumed;
 
@@ -632,30 +651,45 @@ namespace {
   //   render():           bits and signatures, accepted (session),
   //                       arbitrate(identity, observation, bits), the
   //                       layer's flags and adopt(bits, accepted) when
-  //                       t.adopt; then held() (t.hold, held.generated),
-  //                       unavailable() (held.none), enter_scope and the
-  //                       scene guard's enter_scope(epoch, viewport) +
+  //                       t.adopt; H2's still_scope (Auto and SDR output)
+  //                       and switch, a render outside scope ending its run
+  //                       (still.leave(scope)); then held() (t.hold,
+  //                       held.generated), unavailable() (held.none, and
+  //                       in scope still.leave(unmeasured)),
+  //                       enter_scope and the scene guard's
+  //                       enter_scope(epoch, viewport) (what it ends of H2's
+  //                       run counted as the renderer's own) +
   //                       poll_detection + the session's pre-UI proof of
   //                       the offered layer's signature (layer_proven) + the
-  //                       guard's per_frame(..., layer_proven) + detect_ui +
-  //                       detected() (t.detect with bits, or a zero-offer
-  //                       real frame flagged accepted_missing), or inactive()
-  //                       (the guard keeps its state);
+  //                       guard's per_frame(..., layer_proven) + on a
+  //                       zero-offer frame in scope still.leave(unmeasured)
+  //                       + the still word (the switch and
+  //                       still_flatten()) + detect_ui + detected()
+  //                       (t.detect with bits, or a zero-offer real frame
+  //                       flagged accepted_missing), or inactive() (the
+  //                       guard keeps its state; in scope
+  //                       still.leave(unmeasured));
   //   end of render:      the detection fence is signaled (detection_awaiting_signal);
   //   update_alpha_auto:  the latest sample only while status_fresh;
   //   poll_detection:     sample_discarded (scope, stale on arrival),
   //                       decode_detection_sample, latest_key, the guard's
   //                       observe(sample_of(words), the pending actionable,
-  //                       the submitted signatures by kind) and the shadow
-  //                       run, session.observe with the signatures the
+  //                       the submitted signatures by kind, the pending
+  //                       still_scope while this render is in scope) and
+  //                       the shadow and H2 runs, session.observe of
+  //                       ui_temporal::ledger_evidence (no scene evidence
+  //                       measured for H2 alone) with the signatures the
   //                       sample was submitted with, commit_counters
   //                       (sample_counters with the guard's observation);
   //   detect_ui:          the reduce with the hold store (u5) and, except on
   //                       a zero-offer frame, the tiles pass and the 100 ms
   //                       sample cadence, scene evidence by the guard's
   //                       measure(now, shadow, whole_frame(latest), a
-  //                       proven layer that is the offer's pre-UI image), the
-  //                       counter and CPU snapshot and the status key.
+  //                       proven layer that is the offer's pre-UI image,
+  //                       still_scope and still.wants_measure()) with the
+  //                       compare pass's previous cell means (u5, texel
+  //                       12), the counter and CPU snapshot and the status
+  //                       key.
   // The frame size, resource preparation and depth are not modelled.
   class sequence {
   public:
@@ -677,8 +711,24 @@ namespace {
     std::vector<frame_result> frames;
     std::vector<alpha_auto_decision> samples;  // Every sample read, after the guard observed it.
     std::vector<scene_guard::observation> observed;  // The guard's observation of each sample read.
+    // Whether each sample read ran the evidence passes for rule H2 alone (in
+    // SDR Auto, where it measures without acting; fix 2).
+    std::vector<bool> h2_only;
     // The guard's observations of committed samples (the scene counters).
     std::uint64_t scene_entered {}, scene_released {}, scene_refuted {};
+    // H2: every observation of the run (a sample's, or an end by a scope or
+    // identity change, counted by the renderer itself), as the renderer logs
+    // them; and the still counters the committed samples carry.
+    struct still_event {
+      std::size_t frame;
+      std::uint64_t now_ms;
+      still_screen::observation what;
+      // The run as it entered (entered only).
+      still_screen::episode run;
+      bool counted;
+    };
+    std::vector<still_event> still_events;
+    std::uint64_t still_committed_entered {}, still_committed_released {}, still_committed_short {};
 
     struct transition {
       std::uint64_t tick;
@@ -700,6 +750,8 @@ namespace {
       frame_result r;
       r.now_ms = p.now_ms;
       const auto index = frames.size();
+      current_frame = index;
+      current_now = p.now_ms;
       const std::uint32_t bits = p.available ? p.offered : 0u;
       const std::uint32_t accepted = session.accepted(bits, p.signatures);
       alpha_auto_source observation;
@@ -714,6 +766,16 @@ namespace {
       if (r.hold.adopt) {
         temporal.adopt(bits, accepted);
       }
+      // H2 (game3d_still_screen.h): Auto on SDR output only; a render outside
+      // that scope ends the run at once.
+      const auto state = session.decision().state;
+      const bool auto_mode = state != alpha_auto_state::manual_on && state != alpha_auto_state::manual_off;
+      still_scope = auto_mode && still_screen::sdr_output(p.signatures.color_space, p.output_format);
+      const bool still_enabled = still_scope && session.still_flatten();
+      r.still_scope = still_scope;
+      if (!still_scope) {
+        still_end(guard.still.leave(still_screen::end_reason::scope), false);
+      }
       ++cpu[ui_counter::auto_frames];
       const bool missing = (r.hold.per_frame & ui_detection::per_frame_accepted_missing) != 0;
       if (r.hold.hold) {
@@ -725,11 +787,12 @@ namespace {
         ++cpu[ui_counter::held_none];
         temporal.unavailable();
         r.unavailable = true;
+        still_unmeasured();
       } else if (r.hold.detect && (bits || missing)) {
         r.active = r.detected = true;
         r.grace = !bits;
         temporal.enter_scope(observation);
-        guard.enter_scope(observation.epoch, observation.viewport);
+        still_end(guard.enter_scope(observation.epoch, observation.viewport), false);
         const bool shadow = session.first_run();
         poll(observation, r);
         // H1 (d): the ledger's pre-UI proof of the offered layer's signature,
@@ -737,12 +800,20 @@ namespace {
         r.layer_proven = (bits & candidate::layer) && session.pre_ui_proven(p.signatures.of(kind::ui_layer));
         r.scene_bits = guard.per_frame(p.now_ms, bits, p.signatures.by_kind(), r.layer_proven);
         const std::uint32_t per_frame = r.scene_bits | r.hold.per_frame | (!p.depth_current ? ui_detection::per_frame_depth_not_current : 0u);
+        // H2: flat only while its run is active and the session enables it;
+        // a zero-offer frame is never sampled and ends the run instead.
+        if (r.grace) {
+          still_unmeasured();
+        }
+        r.still_bits = still_enabled && guard.still_flatten() ? ui_detection::still::flatten : 0u;
+        still_share = p.still_share;
         detect(observation, bits, flags, accepted, p.signatures, per_frame, shadow, index, r);
         temporal.detected(observation, identity);
         invariants.generated_detections += p.hold_previous ? 1 : 0;
       } else {
         ++cpu[ui_counter::inactive_no_candidates];
         temporal.inactive();
+        still_unmeasured();
       }
       if (r.active) {
         r.source = mask_source;
@@ -758,11 +829,51 @@ namespace {
       } else {
         r.consumed.state = alpha_auto_state::collecting;
       }
+      r.consumed.still = {still_scope, still_enabled, guard.still.state(), guard.still.run_ms()};
+      // update_alpha_auto: the longest run that ended before it entered since
+      // the previous status, whatever ended it, published once.
+      r.consumed.evidence.still_short_ms = std::max(r.consumed.evidence.still_short_ms, std::exchange(still_short_unpublished_ms, std::uint64_t {}));
       frames.push_back(r);
       return frames.back();
     }
 
+    // The still counters the session's committed totals must carry: the
+    // guard's observations of committed samples and the renderer's own ends
+    // of a run counted before the last committed submission.
+    std::array<std::uint64_t, 3> still_committed() const {
+      return {still_committed_entered + committed_cpu[ui_counter::still_entered],
+        still_committed_released + committed_cpu[ui_counter::still_released],
+        still_committed_short + committed_cpu[ui_counter::still_short]};
+    }
+
   private:
+    // H2: the renderer's still_log. It records what a run's observation or
+    // end did and counts the ends the guard's sample observations do not (a
+    // scope or identity change): counted says whether a committed sample
+    // counts this one.
+    void still_end(const still_screen::observation &o, bool counted) {
+      if (o.entered || o.ended || o.short_run) {
+        still_events.push_back({current_frame, current_now, o, o.entered ? guard.still.current() : still_screen::episode {}, counted});
+      }
+      if (o.ended && !counted) {
+        ++cpu[ui_counter::still_released];
+      }
+      if (o.short_run) {
+        still_short_unpublished_ms = std::max(still_short_unpublished_ms, o.short_ms);
+        if (!counted) {
+          ++cpu[ui_counter::still_short];
+        }
+      }
+    }
+
+    // The renderer's still_unmeasured: a render in scope that cannot be
+    // sampled ends H2's run.
+    void still_unmeasured() {
+      if (still_scope) {
+        still_end(guard.still.leave(still_screen::end_reason::unmeasured), false);
+      }
+    }
+
     void poll(const alpha_auto_source &input, frame_result &r) {
       if (!pending || awaiting || frames.size() < ready_frame) {
         return;
@@ -778,14 +889,19 @@ namespace {
       latest = ui_temporal::decode_detection_sample(pending_texels.data(), pending_texels.size(), pending_source.now_ms, submitted, true, pending_flags);
       temporal.latest_source = pending_source;
       temporal.latest_key = pending_key;
-      const auto observation = guard.observe(scene_guard::sample_of(pending_texels.data(), pending_texels.size(), pending_source.now_ms, true), pending_actionable, pending_signatures.by_kind());
+      // H2 reads it as in scope only while this render still is.
+      const auto observation = guard.observe(scene_guard::sample_of(pending_texels.data(), pending_texels.size(), pending_source.now_ms, true), pending_actionable, pending_signatures.by_kind(), pending_still_scope && still_scope);
       latest.evidence.shadow_hidden_ms = observation.shadow_hidden_ms;
-      session.observe(latest.evidence, latest.pixels, pending_source.now_ms, pending_signatures);
+      latest.evidence.still_short_ms = observation.still.short_ms;
+      // H2: the episode log; the committed sample counts its observation.
+      still_end(observation.still, true);
+      session.observe(ui_temporal::ledger_evidence(latest.evidence, pending_h2_only), latest.pixels, pending_source.now_ms, pending_signatures);
       commit(latest, observation);
       counters_pending = false;
       r.polled = true;
       samples.push_back(latest);
       observed.push_back(observation);
+      h2_only.push_back(pending_h2_only);
       auto now_accepted = session.stored();
       if (now_accepted != last_accepted) {
         trust.push_back({latest.sample_tick_ms, now_accepted});
@@ -794,7 +910,7 @@ namespace {
     }
 
     void detect(const alpha_auto_source &observation, std::uint32_t bits, std::uint32_t flags, std::uint32_t accepted, const candidate_signatures &signatures, std::uint32_t per_frame, bool shadow, std::size_t index, frame_result &r) {
-      r.gpu = {bits, flags, accepted, per_frame, observation.now_ms, gpu_hold};
+      r.gpu = {bits, flags, accepted, per_frame, observation.now_ms, gpu_hold, r.still_bits};
       // A zero-offer frame runs no tiles pass: the reduce reads the
       // statistics rows the previous tiles pass left (with nothing offered,
       // they decide nothing of their own).
@@ -823,15 +939,24 @@ namespace {
         return;
       }
       const bool proven_image = r.layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
-      const auto measure = guard.measure(now, shadow, ui_temporal::whole_frame(temporal.latest), proven_image);
+      const auto measure = guard.measure(now, shadow, ui_temporal::whole_frame(temporal.latest), proven_image, still_scope && guard.still.wants_measure());
+      pending_h2_only = measure.run && !guard.measure(now, shadow, ui_temporal::whole_frame(temporal.latest), proven_image).run;
       pending_actionable = false;
       const bool evidence = measure.run;
       if (evidence) {
         pending_actionable = measure.actionable;
+        // The compare pass compares every cell with the mean the previous
+        // compare pass stored (none before the first), then stores its own.
+        const std::uint32_t compared = previous_luma ? still_cells : 0u;
+        t[word::still_cells] = std::uint32_t(std::lround(double(still_share) * compared));
+        t[word::still_compared] = compared;
+        previous_luma = true;
       }
-      // The reduce zeroes texels 5 and 6; only the evidence pass writes them.
+      // The reduce zeroes texels 5, 6 and 12; only the evidence passes write
+      // them.
       else {
         std::fill(t.begin() + scene_texels_begin, t.begin() + scene_texels_end, 0u);
+        std::fill(t.begin() + still_texel_begin, t.end(), 0u);
       }
       if (sample_edit) {
         sample_edit(t, now, evidence);
@@ -839,6 +964,7 @@ namespace {
       pending_texels = t;
       pending_signatures = signatures;
       pending_flags = r.gpu.flags | per_frame;
+      pending_still_scope = still_scope;
       counters_pending = true;
       pending_words = gpu_words;
       pending_cpu = cpu;
@@ -862,6 +988,9 @@ namespace {
       scene_entered += observation.entered ? 1 : 0;
       scene_released += observation.released ? 1 : 0;
       scene_refuted += observation.refuted;
+      still_committed_entered += observation.still.entered ? 1 : 0;
+      still_committed_released += observation.still.ended ? 1 : 0;
+      still_committed_short += observation.still.short_run ? 1 : 0;
       committed_cpu = pending_cpu;
       committed_words = pending_words;
       committed_frames = pending_frame + 1;
@@ -875,6 +1004,14 @@ namespace {
     // Whether the pending sample's scene evidence is actionable (the guard's
     // measure when it was submitted).
     bool pending_actionable {};
+    // H2: this render's scope, the pending sample's, the Present's still
+    // share, and whether the compare pass stored previous cell means (u5).
+    bool still_scope {}, pending_still_scope {}, previous_luma {}, pending_h2_only {};
+    // The renderer's still_short_unpublished_ms.
+    std::uint64_t still_short_unpublished_ms {};
+    float still_share = 1.f;
+    std::size_t current_frame {};
+    std::uint64_t current_now {};
     std::size_t ready_frame {}, pending_frame {};
     std::uint64_t last_submit {}, submitted {};
     std::uint32_t pending_key {};
@@ -889,6 +1026,15 @@ namespace {
     std::uint32_t mask_source {}, mask_covered {}, mask_pixels {};
     std::string last_accepted;
   };
+
+  // Whether a sample's evidence passes ran for a rule other than H2, which
+  // measures every SDR Auto sample frame while no source other than 11
+  // decided and never acts on what it measures (fix 2).
+  bool measured(const sequence &s, const alpha_auto_decision &sample) {
+    const auto i = std::size_t(&sample - s.samples.data());
+    require(i < s.samples.size(), "Not a sample of this stream");
+    return sample.evidence.scene.ran && !s.h2_only[i];
+  }
 
   bool alpha_source(std::uint32_t source) {
     return (source >= 1 && source <= 4) || source == ui_detection::source_layer;
@@ -940,6 +1086,10 @@ namespace {
     require(totals[ui_counter::scene_entered] == s.scene_entered && totals[ui_counter::scene_released] == s.scene_released && totals[ui_counter::scene_refuted] == s.scene_refuted, what + ": the scene counters differ from the guard's observations");
     require(totals[ui_counter::full_d_visible] <= totals[ui_counter::scene_released], what + ": an H1 decision over a visible scene released no hold");
     require(!totals.decided(7) && !totals.decided(9), what + ": a retired source decided");
+    // The still group counts the guard's observations of committed samples
+    // and the renderer's own ends of a run (H2).
+    const auto still = s.still_committed();
+    require(totals[ui_counter::still_entered] == still[0] && totals[ui_counter::still_released] == still[1] && totals[ui_counter::still_short] == still[2], what + ": the still counters differ from the run's observations");
   }
 
   void run(sequence &s, present p, std::uint64_t from, std::uint64_t to, std::uint64_t interval = 16) {
@@ -1571,7 +1721,7 @@ namespace {
       const auto title = recorded_frames({recorded::hl_title, recorded::hl_title_held, recorded::hl_title_accepted});
       sequence s(session, phased({{12000, title}, {13000, recorded_frames({recorded::hl_hud, recorded::hl_hud_accepted})}, {UINT64_MAX, title}}));
       run(s, p, 10000, 14000);
-      require(s.samples.size() > 3 && !s.samples[0].evidence.scene.ran && s.samples[1].evidence.scene.ran && s.samples[2].sample_tick_ms - s.samples[1].sample_tick_ms <= ui_detection::scene::hold_ms, "The title's first samples did not open the gate and measure");
+      require(s.samples.size() > 3 && !measured(s, s.samples[0]) && s.samples[1].evidence.scene.ran && s.samples[2].sample_tick_ms - s.samples[1].sample_tick_ms <= ui_detection::scene::hold_ms, "The title's first samples did not open the gate and measure");
       const auto entry = poll_of(s, s.samples[2].sample_tick_ms);
       require(s.observed[2].entered && s.frames[entry].scene_bits == (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible), "The title did not enter both holds at its second measured hidden sample");
       for (std::size_t i = 0; i != s.frames.size(); ++i) {
@@ -2382,7 +2532,7 @@ namespace {
     }
     // Entry: the first sample opens the gate unmeasured, and the poll of the
     // second measured hidden sample within 500 ms is the first flat frame.
-    require(!s.samples[0].evidence.scene.ran && s.samples[1].evidence.scene.ran && s.samples[2].evidence.scene.ran && s.samples[2].sample_tick_ms - s.samples[1].sample_tick_ms <= ui_detection::scene::hold_ms, "The first samples did not open the gate and measure");
+    require(!measured(s, s.samples[0]) && s.samples[1].evidence.scene.ran && s.samples[2].evidence.scene.ran && s.samples[2].sample_tick_ms - s.samples[1].sample_tick_ms <= ui_detection::scene::hold_ms, "The first samples did not open the gate and measure");
     require(!entries.empty() && entries[0] == poll_of(s, s.samples[2].sample_tick_ms), "The hold did not enter at the poll of the second measured hidden sample");
     for (std::size_t i = 0; i != entries[0]; ++i) {
       require(!s.frames[i].source, "A frame was flat before the hold entered");
@@ -2900,7 +3050,7 @@ namespace {
       const bool menu_sample = in_menu(sample.sample_tick_ms);
       require(pre_ui_matching(sample) == !menu_sample, "A sample's pixel match does not follow its recording");
       if (sample.sample_tick_ms <= earned) {
-        require(!sample.evidence.scene.ran && !sample.evidence.claims, "A sample before the proof claimed or measured");
+        require(!measured(s, sample) && !sample.evidence.claims, "A sample before the proof claimed or measured");
         continue;
       }
       require(sample.evidence.scene.ran && sample.evidence.scene.valid && pre_ui.valid && sample.evidence.pre_ui_image == ui_detection::pre_ui_image::layer && sample.evidence.claims == ui_detection::claim_pre_ui, "A sample after the proof did not measure both images");
@@ -2978,7 +3128,7 @@ namespace {
       run(s, fg_on, 10000, 12500);
       require(session.pre_ui_proven(layer) && session.stored() == sb_sdr_proof(), "FG-on gameplay did not prove the layer by its pixels");
       for (const auto &sample : s.samples) {
-        require(!sample.evidence.scene.ran && !sample.evidence.claims && !sample.source_kind && pre_ui_matching(sample), "FG-on gameplay claimed, measured or decided, or its layer did not match");
+        require(!measured(s, sample) && !sample.evidence.claims && !sample.source_kind && pre_ui_matching(sample), "FG-on gameplay claimed, measured or decided, or its layer did not match");
       }
       const std::size_t menu_from = s.frames.size();
       run(s, suspended, 12500, 14000);
@@ -3015,7 +3165,7 @@ namespace {
         require(!f.source && !f.layer_proven && !(f.scene_bits & (ui_detection::per_frame_pre_ui_visible | ui_detection::per_frame_pre_ui_proven)), "An unproven layer flattened the menu, or was pushed as proven");
       }
       for (const auto &sample : s.samples) {
-        require(!sample.evidence.scene.ran && !sample.evidence.claims && !pre_ui_matching(sample), "The unproven menu claimed, measured or matched");
+        require(!measured(s, sample) && !sample.evidence.claims && !pre_ui_matching(sample), "The unproven menu claimed, measured or matched");
       }
       require(!s.scene_entered && !session.pre_ui_proven(layer) && session.stored().empty() && !s.guard.pre_ui.until, "The unproven menu held a verdict or earned the proof");
       check_counters(s, "Stellar Blade SDR menu before gameplay");
@@ -3114,7 +3264,7 @@ namespace {
     require(generated > 100 && s.trust.size() == 1 && s.trust[0].tick == earned && s.trust[0].accepted == proof && heard == std::vector<std::string> {proof} && earned < visits[0].open, "FG-on gameplay did not prove the layer by its pixels 2 s in, before the first menu");
     for (const auto &sample : s.samples) {
       if (sample.evidence.candidates & candidate::hudless) {
-        require(!sample.evidence.scene.ran && !sample.evidence.claims && pre_ui_matching(sample), "FG-on gameplay claimed, measured D or did not match");
+        require(!measured(s, sample) && !sample.evidence.claims && pre_ui_matching(sample), "FG-on gameplay claimed, measured D or did not match");
       }
     }
     const auto proven_from = poll_of(s, earned);
@@ -3198,7 +3348,7 @@ namespace {
         continue;
       }
       const auto &e = sample.evidence;
-      const bool testable = (e.candidates & candidate::layer) && !e.layer_covered && e.scene.valid && e.scene.verdict == scene_verdict::visible;
+      const bool testable = (e.candidates & candidate::layer) && !e.layer_covered && measured(s, sample) && e.scene.valid && e.scene.verdict == scene_verdict::visible;
       if (!testable) {
         elapsed += running ? sample.sample_tick_ms - running : 0;
         running = 0;
@@ -3531,7 +3681,7 @@ namespace {
         if (grain) {
           never_flat(s, "A scene buffer behind grain");
           for (const auto &sample : s.samples) {
-            require(!sample.evidence.scene.ran && !sample.evidence.claims, "The unproven buffer behind grain claimed or measured");
+            require(!measured(s, sample) && !sample.evidence.claims, "The unproven buffer behind grain claimed or measured");
           }
           require(!s.scene_entered && session.stored().empty(), "The buffer behind grain was proven, or a verdict held");
           check_counters(s, "scene buffer behind grain");
@@ -3580,7 +3730,7 @@ namespace {
         require(f.source == 2 && f.covered == 15 && !f.decision.h1 && !f.decision.claims, "Dark gameplay with an accepted tag and opaque presented alpha flattened or claimed");
       }
       for (const auto &sample : s.samples) {
-        require(!sample.evidence.scene.ran, "Dark gameplay without a claim measured");
+        require(!measured(s, sample), "Dark gameplay without a claim measured");
       }
       check_counters(s, "accepted tag beside opaque presented alpha");
     }
@@ -3603,7 +3753,7 @@ namespace {
       q.offered = candidate::current;
       run(s, q, 10000, 20000);
       for (const auto &sample : s.samples) {
-        require(sample.evidence.claims == 0 && sample.evidence.scene.ran == shadow, "The Dead Space-like stream claimed, or measured without the shadow");
+        require(sample.evidence.claims == 0 && measured(s, sample) == shadow, "The Dead Space-like stream claimed, or measured without the shadow");
       }
       never_flat(s, "The Dead Space-like stream");
       require(!s.guard.hidden.until && !s.guard.hidden.last && !s.scene_entered, "The Dead Space-like stream acted on evidence");
@@ -3718,6 +3868,405 @@ namespace {
         require(f.flat() && f.source == 3 && !f.decision.h1 && f.decision.claims == candidate::backbuffer, "H1 overrode an accepted winner opaque on every pixel");
       }
       check_counters(s, "accepted winner opaque everywhere");
+    }
+  }
+
+  // ---------------------------------------------------------------- H2 still screens (fix 2)
+
+  // Rule H2 (docs/reshade-sbs.md, still screens without a UI source;
+  // game3d_still_screen.h). The offer of Stellar Blade's SDR loading screen
+  // (sb_s2b_0719.log, 07:19:57-07:20:06): the cleared output target almost
+  // black without alpha (V1-invalid) and an opaque current alpha (0x48),
+  // neither accepted, so no source decides and nothing claims; or E33's SDR
+  // FG-off current alpha alone. Texel 5 carries the presented frame's D;
+  // depth that is not the frame's own marks it invalid (H1 ignores it), but
+  // the evidence pass still writes n and D, which H2 reads.
+  gpu_model still_screen_model(std::function<float(std::uint64_t)> d_of, std::uint32_t current_covered = 1000) {
+    return [d_of, current_covered](const gpu_inputs &in) {
+      synthetic f;
+      f.alpha(kind::ui_layer, 0, 1000).alpha(kind::current, current_covered).opaque(kind::current, current_covered).scene(d_of(in.now_ms), .3f);
+      if (in.per_frame & ui_detection::per_frame_depth_not_current) {
+        f.scene_valid = false;
+        f.verdict = scene_verdict::none;
+      }
+      return f.words(in);
+    };
+  }
+
+  present loading_screen_present() {
+    present p;
+    p.offered = candidate::layer | candidate::current;
+    p.layer_flags = ui_detection::layer_detection_flags(false);
+    return p;
+  }
+
+  // Presents every 16 ms from `from` to `to`; with reused_depth every eighth
+  // Present's depth is not its own (about 12%, as on the live loading screen:
+  // 93 of 827 publications by 07:20:01, 204 of 1767 by 07:20:06).
+  void run_still(sequence &s, present p, std::uint64_t from, std::uint64_t to, bool reused_depth = false) {
+    std::size_t n = 0;
+    for (auto now = from; now < to; now += 16, ++n) {
+      p.now_ms = now;
+      p.depth_current = !reused_depth || n % 8 != 7;
+      s.step(p);
+    }
+  }
+
+  // The stream's H2 events that entered, ended an entered episode, or ended a
+  // run before it entered.
+  std::vector<sequence::still_event> still_events_of(const sequence &s, bool (*which)(const still_screen::observation &)) {
+    std::vector<sequence::still_event> result;
+    std::copy_if(s.still_events.begin(), s.still_events.end(), std::back_inserter(result), [which](const sequence::still_event &e) {
+      return which(e.what);
+    });
+    return result;
+  }
+
+  bool still_entered(const still_screen::observation &o) {
+    return o.entered;
+  }
+
+  bool still_ended(const still_screen::observation &o) {
+    return o.ended;
+  }
+
+  bool still_short(const still_screen::observation &o) {
+    return o.short_run;
+  }
+
+  void h2_still_screens() {
+    // Stellar Blade's SDR loading screen: D -0.014..-0.068 on every sample,
+    // every cell still.
+    const auto sb_d = [](std::uint64_t now) {
+      return -.014f - .054f * float((now / 100) % 10) / 9.f;
+    };
+    // The run enters at the first sample whose tick is at least run_ms after
+    // its first passing sample, so within one sample interval of it.
+    const auto entered_at_run_ms = [](const sequence::still_event &e) {
+      return e.run.duration_ms() >= ui_detection::still::run_ms && e.run.duration_ms() <= ui_detection::still::run_ms + sample_interval_ms + 16;
+    };
+    {
+      // The default shadow: the run enters at its 2 s sample and only
+      // reports it; no decision changes. About 12% of the samples read depth
+      // that is not the frame's own (invalid for H1) and keep the run.
+      alpha_auto_policy session;
+      sequence s(session, still_screen_model(sb_d));
+      auto p = loading_screen_present();
+      run_still(s, p, 10000, 19000, true);
+      require(!s.samples.empty() && !s.samples[0].evidence.still_compared && s.samples[0].evidence.scene.ran, "The first sample compared cells without a previous mean, or was not measured");
+      std::size_t stale = 0;
+      for (const auto &sample : s.samples) {
+        require(!sample.evidence.claims && !sample.source_kind, "The loading screen claimed or decided");
+        stale += sample.evidence.scene.ran && !sample.evidence.scene.valid && sample.evidence.scene.n >= ui_detection::scene::min_edges ? 1 : 0;
+      }
+      const auto entered = still_events_of(s, still_entered);
+      require(stale >= 5 && entered.size() == 1 && entered[0].counted && entered_at_run_ms(entered[0]) && entered[0].run.first == s.samples[1].sample_tick_ms && still_events_of(s, still_ended).empty() && still_events_of(s, still_short).empty(), "The SDR loading screen's shadow did not enter once at its 2 s sample, or reused depth ended its run");
+      for (std::size_t i = 0; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
+        require(!f.source && !f.still_bits && f.still_scope && !f.decision.still && !f.decision.own_source, "The shadow changed a decision or pushed the still word");
+        require((f.consumed.still.phase == still_screen::phase::active) == (i >= entered[0].frame) && !f.consumed.still.enabled, "The render's still phase did not follow the run");
+      }
+      // The screen starts to change (90% of the cells still): the first
+      // moving sample read ends the episode.
+      p.still_share = .9f;
+      run_still(s, p, 19000, 19600, true);
+      const auto ended = still_events_of(s, still_ended);
+      require(ended.size() == 1 && ended[0].counted && ended[0].what.reason == still_screen::end_reason::moving && ended[0].frame == poll_of(s, first_sample_from(s, 19000)) && ended[0].what.ended_episode.duration_ms() >= 6500, "The first moving sample did not end the episode");
+      require(session.counters()[ui_counter::still_entered] == 1 && session.counters()[ui_counter::still_released] == 1, "The shadow's episode was not counted");
+      check_counters(s, "SB SDR loading screen, shadow");
+    }
+    {
+      // Enabled (UIFlattenStillScreens=1): flat as source 11 from the frame
+      // that reads the 2 s sample until the frame that reads the first
+      // moving one; the T1 hold store keeps the decision before H2.
+      alpha_auto_policy session;
+      session.set_still_flatten(true);
+      sequence s(session, still_screen_model(sb_d));
+      auto p = loading_screen_present();
+      run_still(s, p, 10000, 19000, true);
+      p.still_share = .9f;
+      run_still(s, p, 19000, 19600, true);
+      const auto entered = still_events_of(s, still_entered), ended = still_events_of(s, still_ended);
+      require(entered.size() == 1 && ended.size() == 1 && entered_at_run_ms(entered[0]) && ended[0].what.reason == still_screen::end_reason::moving, "The enabled loading screen did not enter once and end on its first moving sample");
+      const auto release = poll_of(s, first_sample_from(s, 19000));
+      require(ended[0].frame == release && s.frames[release].now_ms - 19000 <= sample_interval_ms + 2 * 16, "The release took longer than one sample interval and its readback");
+      bool sampled_flat = false;
+      for (std::size_t i = 0; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
+        const bool flat = i >= entered[0].frame && i < release;
+        require(f.source == (flat ? ui_detection::source_still : 0u) && f.still_bits == (flat ? ui_detection::still::flatten : 0u) && (!flat || (f.flat() && f.decision.still && !f.decision.next.source && !f.decision.own_source)), "The enabled loading screen was not flat as source 11 exactly from its entry to its release, at frame " + std::to_string(i));
+        sampled_flat = sampled_flat || f.consumed.source_kind == ui_detection::source_still;
+      }
+      require(sampled_flat && session.counters().decided(ui_detection::source_still) > 0, "No sample or counter showed source 11");
+      check_counters(s, "SB SDR loading screen, enabled");
+    }
+    {
+      // E33 SDR FG-off gameplay (e33_s2b.log 07:43:02-07:43:23): the current
+      // alpha alone, unaccepted; the presented frame reads visible except for
+      // short dips whose hidden runs last at most 547 ms (shadow_hidden_ms).
+      // Three of them read D <= 0.05 (0.025, 0.035, 0.040): even every cell
+      // still and flattening enabled, they end as short runs and never enter.
+      const std::array<std::pair<std::uint64_t, float>, 16> logged {{{20, .380f}, {1791, .025f}, {2796, .424f}, {5315, .035f}, {6330, .211f}, {7631, .112f}, {9047, .193f}, {10289, .074f}, {11294, .539f}, {12897, .099f}, {13894, .229f}, {15298, .072f}, {16291, .166f}, {17604, .040f}, {18608, .362f}, {20113, .111f}}};
+      const auto e33_d = [logged](std::uint64_t now) {
+        const auto t = now - 10000;
+        float visible = .38f;
+        for (const auto &[at, d] : logged) {
+          if (d < .15f && t + 273 >= at && t < at + 274) {
+            return d;
+          }
+          if (d >= .15f && at <= t) {
+            visible = d;
+          }
+        }
+        return visible;
+      };
+      alpha_auto_policy session;
+      session.set_still_flatten(true);
+      sequence s(session, still_screen_model(e33_d));
+      present q;
+      q.offered = candidate::current;
+      run_still(s, q, 10000, 31000);
+      const auto shorts = still_events_of(s, still_short);
+      std::uint64_t longest = 0;
+      for (const auto &e : shorts) {
+        longest = std::max(longest, e.what.short_ms);
+      }
+      require(still_events_of(s, still_entered).empty() && shorts.size() == 3 && longest > 0 && longest <= 547, "E33's gameplay dips entered H2, or were not three short runs of at most 547 ms: " + std::to_string(shorts.size()) + " / " + std::to_string(longest));
+      for (const auto &f : s.frames) {
+        require(!f.source && !f.still_bits, "E33 gameplay flattened");
+      }
+      require(session.counters()[ui_counter::still_short] == 3 && !session.counters()[ui_counter::still_entered], "E33's short runs were not counted");
+      check_counters(s, "E33 SDR FG-off gameplay dips");
+    }
+    {
+      // Moving dark grainy gameplay: D at most 0.05 on every sample, but only
+      // 80% of the cells still. It never starts a run.
+      alpha_auto_policy session;
+      session.set_still_flatten(true);
+      sequence s(session, still_screen_model([](std::uint64_t now) { return (now / 100) % 2 ? .02f : .05f; }));
+      present q;
+      q.offered = candidate::current;
+      q.still_share = .8f;
+      run_still(s, q, 10000, 16000);
+      require(s.still_events.empty(), "Moving dark gameplay started a still run");
+      for (const auto &f : s.frames) {
+        require(!f.source && f.consumed.still.phase == still_screen::phase::none, "Moving dark gameplay ran or flattened");
+      }
+      check_counters(s, "moving dark grainy gameplay");
+    }
+    {
+      // The measured residual risk: an idle, still, very dark and finely
+      // grained SDR scene. Grain collapses D (0.02) while the cell means stay
+      // within 1/255 (99% still): it would flatten after 2 s and stay flat
+      // until it moves. The default shadow only reports it; the shadow period
+      // measures how often this happens in real gameplay.
+      alpha_auto_policy session;
+      sequence s(session, still_screen_model([](std::uint64_t) { return .02f; }));
+      present q;
+      q.offered = candidate::current;
+      q.still_share = .99f;
+      run_still(s, q, 10000, 13000);
+      const auto entered = still_events_of(s, still_entered);
+      require(entered.size() == 1 && entered_at_run_ms(entered[0]), "The still grainy dark scene (the measured residual risk) did not would-flatten after 2 s");
+      for (const auto &f : s.frames) {
+        require(!f.source && !f.still_bits, "The shadow flattened the still grainy dark scene");
+      }
+      check_counters(s, "still grainy dark scene (the measured residual risk)");
+    }
+    for (const auto &[color_space, format] : {std::pair<std::uint32_t, std::uint32_t> {pq, 24}, std::pair<std::uint32_t, std::uint32_t> {2, 10}}) {
+      // HDR output (PQ or scRGB) is out of scope: the same loading screen
+      // with flattening enabled never runs, and no evidence pass runs for it.
+      alpha_auto_policy session;
+      session.set_still_flatten(true);
+      sequence s(session, still_screen_model(sb_d));
+      auto p = loading_screen_present();
+      p.signatures = signatures_in(color_space);
+      p.output_format = format;
+      run_still(s, p, 10000, 14000, true);
+      require(s.still_events.empty(), "An HDR loading screen started a still run");
+      for (const auto &f : s.frames) {
+        require(!f.still_scope && !f.source && !f.still_bits && !f.consumed.still.scope, "An HDR frame was in H2's scope");
+      }
+      for (const auto &sample : s.samples) {
+        require(!sample.evidence.scene.ran && !sample.evidence.still_compared, "An HDR sample ran the evidence passes for H2");
+      }
+      check_counters(s, "HDR loading screen");
+    }
+    {
+      // E33 with its current alpha accepted: it decides an empty mask (source
+      // 4 at 0% coverage), which H2 respects. Only the first sample, before
+      // any source decided, runs the evidence passes.
+      alpha_auto_policy session;
+      session.set_still_flatten(true);
+      restore(session, key(kind::current), 1);
+      sequence s(session, still_screen_model([](std::uint64_t) { return .02f; }, 0));
+      present q;
+      q.offered = candidate::current;
+      run_still(s, q, 10000, 14000);
+      std::size_t measured_samples = 0;
+      for (const auto &sample : s.samples) {
+        measured_samples += sample.evidence.scene.ran ? 1 : 0;
+      }
+      require(s.still_events.empty() && measured_samples <= 1, "An accepted empty decision started a still run, or kept measuring for H2");
+      for (const auto &f : s.frames) {
+        require(f.source == 4u && !f.covered && !f.still_bits && f.consumed.still.phase == still_screen::phase::none, "The accepted empty current alpha did not decide, or H2 overrode it");
+      }
+      check_counters(s, "E33 accepted current alpha at 0% coverage");
+    }
+    {
+      // An identity change restarts the 2 s: FG toggled (another epoch)
+      // during a pending run, then Stellar Blade suspending FG in a menu
+      // (the depth moves to another provider: another viewport) during an
+      // active one, which ends it at once (reason identity).
+      alpha_auto_policy session;
+      session.set_still_flatten(true);
+      sequence s(session, still_screen_model(sb_d));
+      auto p = loading_screen_present();
+      run_still(s, p, 10000, 11500);
+      ++p.epoch;
+      run_still(s, p, 11500, 15000);
+      ++p.viewport;
+      const std::size_t suspended = s.frames.size();
+      run_still(s, p, 15000, 18000);
+      const auto entered = still_events_of(s, still_entered), ended = still_events_of(s, still_ended), shorts = still_events_of(s, still_short);
+      require(shorts.size() == 1 && !shorts[0].counted && shorts[0].what.reason == still_screen::end_reason::identity && shorts[0].now_ms == 11500, "An FG toggle did not end the pending run");
+      // The run it ended reaches the status once (the UI line's short_max_ms).
+      std::size_t published = 0;
+      for (const auto &f : s.frames) {
+        published += f.consumed.evidence.still_short_ms == shorts[0].what.short_ms && f.now_ms == 11500 ? 1 : 0;
+      }
+      require(shorts[0].what.short_ms >= 1000 && published == 1, "The run an identity change ended did not reach the status");
+      require(entered.size() == 2 && entered[0].run.first >= 11500 && entered[0].now_ms >= 11500 + ui_detection::still::run_ms && entered[1].run.first >= 15000 && entered[1].now_ms >= 15000 + ui_detection::still::run_ms, "A run entered less than 2 s after an identity change");
+      require(ended.size() == 1 && !ended[0].counted && ended[0].what.reason == still_screen::end_reason::identity && ended[0].frame == suspended, "The suspended FG's identity change did not end the active episode at once");
+      for (std::size_t i = suspended; i != s.frames.size(); ++i) {
+        require((s.frames[i].source == ui_detection::source_still) == (i >= entered[1].frame), "A frame after the identity change was flat before its new run entered");
+      }
+      check_counters(s, "identity changes during a still run");
+    }
+    {
+      // Auto -> manual On during an active run leaves scope: the episode ends
+      // at once (reason scope); back in Auto a new run needs its own 2 s. The
+      // last Auto frame submits a sample, which the first manual frame reads.
+      alpha_auto_policy session;
+      session.set_still_flatten(true);
+      sequence s(session, still_screen_model(sb_d));
+      auto p = loading_screen_present();
+      run_still(s, p, 10000, 13000);
+      std::uint64_t switch_at = 13000;
+      for (; !s.frames.back().submitted; switch_at += 16) {
+        p.now_ms = switch_at;
+        s.step(p);
+      }
+      require(still_events_of(s, still_entered).size() == 1 && s.frames.back().source == ui_detection::source_still, "The run did not enter before the mode change");
+      session.set_manual(true);
+      const std::size_t manual = s.frames.size();
+      run_still(s, p, switch_at, 13500);
+      require(s.frames[manual].polled, "The first manual frame did not read the Auto sample in flight");
+      session.set_automatic();
+      const std::size_t automatic = s.frames.size();
+      run_still(s, p, 13500, 16000);
+      const auto ended = still_events_of(s, still_ended), entered = still_events_of(s, still_entered);
+      require(ended.size() == 1 && !ended[0].counted && ended[0].what.reason == still_screen::end_reason::scope && ended[0].frame == manual, "Manual On did not end the episode at once with reason scope");
+      for (std::size_t i = manual; i != automatic; ++i) {
+        require(!s.frames[i].still_scope && s.frames[i].source != ui_detection::source_still && !s.frames[i].still_bits, "A manual frame was in H2's scope or flat as 11");
+      }
+      require(entered.size() == 2 && entered[1].run.first >= 13500 && entered[1].now_ms >= 13500 + ui_detection::still::run_ms, "Back in Auto the run did not need its own 2 s");
+      // The Auto sample still in flight when manual On began is read out of
+      // scope: it starts no run, so no short run follows the scope end.
+      require(still_events_of(s, still_short).empty() && !session.counters()[ui_counter::still_short], "A sample in flight across the scope end started a run");
+      check_counters(s, "Auto to manual On during a still run");
+    }
+    {
+      // Enabled, an active episode, then real frames that offer nothing in
+      // the same epoch while an accepted candidate is missing (T1 grace,
+      // accepted_missing): they are never sampled, so the first ends the run
+      // (unmeasured) and none is flat; offers returning need a new 2 s run.
+      // The accepted UI colour tag (empty, source 2) is offered first, so
+      // the adopted bits keep it and the loading screen's 0x48 frames are
+      // flagged accepted_missing too.
+      alpha_auto_policy session;
+      session.set_still_flatten(true);
+      restore(session, key(kind::ui_color), 1);
+      sequence s(session, still_screen_model(sb_d));
+      auto tagged = loading_screen_present();
+      tagged.offered |= candidate::ui_color;
+      run_still(s, tagged, 10000, 10500);
+      auto p = loading_screen_present();
+      run_still(s, p, 10500, 14000);
+      const auto entered = still_events_of(s, still_entered);
+      require(entered.size() == 1 && s.frames.back().source == ui_detection::source_still && (s.frames.back().hold.per_frame & ui_detection::per_frame_accepted_missing), "The loading screen with the tag missing did not enter and flatten");
+      const std::size_t zero_offer = s.frames.size();
+      present nothing = p;
+      nothing.offered = 0;
+      run_still(s, nothing, 14000, 15000);
+      const std::size_t offers_return = s.frames.size();
+      run_still(s, p, 15000, 16000);
+      for (std::size_t i = zero_offer; i != offers_return; ++i) {
+        require(s.frames[i].grace && !s.frames[i].submitted && s.frames[i].source != ui_detection::source_still && !s.frames[i].still_bits, "A zero-offer grace frame was flat as 11 or sampled");
+      }
+      for (std::size_t i = offers_return; i != s.frames.size(); ++i) {
+        require(s.frames[i].source != ui_detection::source_still && !s.frames[i].still_bits, "A frame after the zero-offer stretch was flat before a new 2 s run");
+      }
+      const auto ended = still_events_of(s, still_ended);
+      require(ended.size() == 1 && !ended[0].counted && ended[0].what.reason == still_screen::end_reason::unmeasured && ended[0].frame == zero_offer, "The first zero-offer frame did not end the episode as unmeasured");
+      check_counters(s, "zero-offer grace frames after a still episode");
+    }
+    {
+      // Enabled, an active episode, then an inactive gap (nothing offered,
+      // nothing accepted missing): the first inactive render ends the run,
+      // and the frames that offer again are not flat before a new 2 s run.
+      alpha_auto_policy session;
+      session.set_still_flatten(true);
+      sequence s(session, still_screen_model(sb_d));
+      auto p = loading_screen_present();
+      run_still(s, p, 10000, 13000);
+      require(still_events_of(s, still_entered).size() == 1 && s.frames.back().source == ui_detection::source_still, "The run did not enter before the gap");
+      const std::size_t gap = s.frames.size();
+      present nothing = p;
+      nothing.offered = 0;
+      run_still(s, nothing, 13000, 13500);
+      const std::size_t back = s.frames.size();
+      run_still(s, p, 13500, 15000);
+      for (std::size_t i = gap; i != back; ++i) {
+        require(!s.frames[i].active && !s.frames[i].still_bits, "An inactive frame ran detection or pushed the still word");
+      }
+      for (std::size_t i = back; i != s.frames.size(); ++i) {
+        require(s.frames[i].source != ui_detection::source_still && !s.frames[i].still_bits, "A frame offering again after an inactive gap was flat before a new 2 s run");
+      }
+      const auto ended = still_events_of(s, still_ended);
+      require(ended.size() == 1 && !ended[0].counted && ended[0].what.reason == still_screen::end_reason::unmeasured && ended[0].frame == gap, "The first inactive render did not end the episode as unmeasured");
+      check_counters(s, "inactive gap after a still episode");
+    }
+    {
+      // The default shadow leaves the acceptance ledger as it was before
+      // fix 2. Stellar Blade SDR, second session: the layer's pre-UI proof
+      // restored provisional; gameplay offers the layer (uncovered, never
+      // matching) beside a HUD-less image that does not decide, so the
+      // HUD-less image is the offer's pre-UI image and no other rule
+      // measures. H2 measures every sample frame (visible, so it never
+      // runs), but its measurements never reach the ledger: the proof's
+      // reconfirm clock stays paused and it does not lapse.
+      alpha_auto_policy session;
+      restore(session, sb_sdr_proof(), 1);
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.alpha(kind::ui_layer, 0).change_set(10).scene(.4f, .4f);
+        return f.words(in);
+      });
+      run_still(s, sb_sdr_present(candidate::layer | candidate::hudless), 10000, 80000);
+      std::uint64_t first = 0, last = 0;
+      for (std::size_t i = 0; i != s.samples.size(); ++i) {
+        const auto &e = s.samples[i].evidence;
+        require(!e.claims && !s.samples[i].source_kind, "The gameplay stream claimed or decided");
+        if (e.scene.ran) {
+          require(s.h2_only[i] && e.scene.valid && e.scene.verdict == scene_verdict::visible, "A sample measured for a rule other than H2, or not visible");
+          first = first ? first : s.samples[i].sample_tick_ms;
+          last = s.samples[i].sample_tick_ms;
+        }
+      }
+      require(last - first > alpha_trust_reconfirm_ms, "H2 did not measure visible samples for longer than the reconfirm time");
+      require(session.stored() == sb_sdr_proof() && session.pre_ui_proven(sb_sdr_signatures().of(kind::ui_layer)) && !session.counters()[ui_counter::trust_lapsed], "H2's measurements ran the restored proof's reconfirm clock: it lapsed in the shadow");
+      check_counters(s, "H2 measurements kept from the ledger");
     }
   }
 
@@ -4043,6 +4592,7 @@ int main(int argc, char **argv) {
     {"H1/A1 pre-UI proof keys", h1_pre_ui_proof_keys},
     {"H1 dark gameplay never flat", h1_dark_gameplay_never_flat},
     {"H1 overrides a partial winner", h1_overrides_a_partial_winner},
+    {"H2 still screens (fix 2)", h2_still_screens},
     {"S1/T1 invariants", s1_invariants},
   };
   try {

@@ -91,6 +91,17 @@ LEGACY_TRUST = re.compile(r'Sunshine UI protection: discarded (\d+) legacy UI tr
 # Since S2a: the panel's Forget action (A3) and the first-run shadow toggle (F1, UISceneShadow).
 FORGET = re.compile(r'Sunshine UI protection: forgot learned UI sources (\S+) for this game')
 SHADOW = re.compile(r'Sunshine UI protection: first-run shadow measures this session \(UISceneShadow=(\w+)\)')
+# Since fix 2, rule H2 (docs/reshade-sbs.md, still screens without a UI source): the session's switch
+# (UIFlattenStillScreens, 0 a shadow that only logs), each episode's start (the run of still hidden samples without a
+# UI source reached STILL_RUN_MS) and end, and the UI line's still group (exporter.cpp).
+STILL_SWITCH = re.compile(r'Sunshine UI protection: still screens with no UI source are (?:flattened|only logged) '
+                          r'\(UIFlattenStillScreens=(\d)\)')
+STILL_START = re.compile(r'Sunshine UI still screen: (?:would flatten|flattening) \(UIFlattenStillScreens=(\d)\) after '
+                         r'run_ms=(\d+) samples=(\d+) d=\[(-?[0-9.]+),(-?[0-9.]+)\] still_min=([0-9.]+)')
+STILL_END = re.compile(r'Sunshine UI still screen: episode ended reason=(\w+) duration_ms=(\d+) samples=(\d+) '
+                       r'd=\[(-?[0-9.]+),(-?[0-9.]+)\] still_min=([0-9.]+) flattened=(\d)')
+STILL = re.compile(r'\bstill=\{scope=(\d) enabled=(\d) phase=(\w+) run_ms=(\d+) sampled=(\d+)/(\d+) '
+                   r'short_max_ms=(\d+)\}')
 # The session's cumulative exact UI counters (docs/reshade-sbs.md, UI counters), absent from older logs.
 COUNTERS = re.compile(r'Sunshine UI counters: (.*)$')
 COUNTER_FIELD = re.compile(r'(\w+)=(?:\{([^}]*)\}|(\S+))')
@@ -162,11 +173,16 @@ PRE_UI_PROOF_RULE = ('3 samples over 2 s whose layer equals the presented frame 
                      'on at least half')
 PRE_UI_RECONFIRM_S = 60
 # Decided sources by number (decision texel 0, docs/reshade-sbs.md); 7 is retired. Before S2b 8 and 9 were the
-# hidden-scene layer and HUD-less routes; since S2b 8 is H1 and 9 is retired.
+# hidden-scene layer and HUD-less routes; since S2b 8 is H1 and 9 is retired; since fix 2 11 is H2's still screen.
 SOURCE_NAMES = {0: 'no mask', 1: 'UI alpha', 2: 'UI colour', 3: 'Backbuffer alpha', 4: 'current alpha',
                 5: 'HUD-less difference', 6: 'full frame (exact pair)', 8: 'full frame (layer route)',
                 9: 'HUD-less route (before S2b)', 10: 'UI layer'}
-S2B_SOURCE_NAMES = SOURCE_NAMES | {8: 'full frame over a hidden scene (H1)'}
+S2B_SOURCE_NAMES = SOURCE_NAMES | {8: 'full frame over a hidden scene (H1)',
+                                   11: 'still screen without a UI source (H2)'}
+# Since fix 2 a run of still hidden samples without a UI source enters H2 once it spans this long (still::run_ms in
+# game3d_ui_detection_contract.h); a run that ends sooner is a short run, the gameplay-safety evidence. Its samples
+# read the presented frame's D at most STILL_D (still::d_percent / 100).
+STILL_RUN_MS, STILL_D = 2000, 0.05
 CLAIM_PRE_UI = 0x80  # The pre-UI scene image's informative claim (ui_detection::claim_pre_ui), since S2b.
 NO_MASK_REASONS = ('layer_aside', 'trusted_invalid', 'presented_blocked', 'ambiguous', 'difference_failed',
                    'gate_no_hold', 'no_candidate', 'other', 'unaccepted')
@@ -259,12 +275,39 @@ class Scene(NamedTuple):
         return bool(self.claims & CLAIM_PRE_UI) and bool(self.guard and self.guard[1])
 
 
+class Still(NamedTuple):
+    """Since fix 2: rule H2 as the render that logged a UI line saw it (still={...}, exporter.cpp)."""
+    scope: bool  # SDR output in Auto.
+    enabled: bool  # UIFlattenStillScreens=1; otherwise a shadow that only logs.
+    phase: str  # none, pending, shadow (active, flattening off) or flat (active, flattening on).
+    run_ms: int  # The current run's length.
+    still: int  # The sample's still and compared cells of the D grid (decision texel 12).
+    compared: int
+    short_max_ms: int  # The longest run since the previous line that ended before STILL_RUN_MS.
+
+
+@dataclass
+class StillEpisode:
+    """Since fix 2: one H2 episode, from its 'would flatten' or 'flattening' line (the run reached STILL_RUN_MS) to
+    its 'episode ended' line. The end line's D range and lowest still share cover the whole run."""
+    start: float
+    flatten: bool  # Logged with UIFlattenStillScreens=1.
+    run_ms: int
+    d: tuple[float, float]
+    still_min: float
+    end: float | None = None  # None while the log ended inside it.
+    reason: str = ''
+    duration_ms: int = 0
+    flattened: bool = False  # The renderer pushed the flatten flag during it.
+
+
 class UISample(NamedTuple):
     t: float
     detection: str
     # 1-4: UI alpha, UI colour tag, Backbuffer or current alpha decided, 10: the UI layer, 5: HUD-less difference, 6:
-    # full frame flat (exact pair), 8: full frame over a hidden scene by the layer route, 9: by the HUD-less route. 7
-    # is retired. Before S1 the layer decided as 2; parse() reads it as 10.
+    # full frame flat (exact pair), 8: full frame over a hidden scene by the layer route, 9: by the HUD-less route, 11
+    # (since fix 2): a still screen without a UI source shown flat (H2). 7 is retired. Before S1 the layer decided as
+    # 2; parse() reads it as 10.
     source: int
     covered: int
     pixels: int
@@ -292,6 +335,7 @@ class UISample(NamedTuple):
     lit: int = 0
     # The offered layer was the one-frame-late copy, which no A2 judge reads (E2); since S2a, absent before.
     late_layer: bool = False
+    still: Still | None = None  # Since fix 2, absent before.
 
     @property
     def s2a(self) -> bool:
@@ -540,6 +584,8 @@ class Session:
     # A Forget is listed with None too: the acceptance line logged just before it records the change.
     trust_events: list[tuple[float, str, str, tuple[str, ...] | None]] = field(default_factory=list)
     shadow: list[tuple[float, str]] = field(default_factory=list)  # First-run shadow sessions and their UISceneShadow.
+    still_switch: list[tuple[float, bool]] = field(default_factory=list)  # Since fix 2: UIFlattenStillScreens is 1.
+    still_episodes: list[StillEpisode] = field(default_factory=list)  # Since fix 2: H2 episodes in log order.
     # The last 'Sunshine UI counters' line: the session's totals are cumulative over all its runtimes.
     counters: dict[str, int] | None = None
     losses: dict[int, tuple[float, str]] = field(default_factory=dict)
@@ -648,7 +694,28 @@ def parse(lines) -> Session:
                               None if e['proven'] is None else e['proven'] == '1',
                               None if e['match'] is None else
                               tuple(int(e[k]) for k in ('match', 'image_lit', 'presented_lit', 'differs')))
-            s.ui.append(ui_sample(t, text, found.groupdict(), scene))
+            sample = ui_sample(t, text, found.groupdict(), scene)
+            if still := STILL.search(text):
+                scope, enabled, phase, run_ms, cells, compared, short_ms = still.groups()
+                sample = sample._replace(still=Still(scope == '1', enabled == '1', phase, int(run_ms), int(cells),
+                                                     int(compared), int(short_ms)))
+            s.ui.append(sample)
+        if found := STILL_SWITCH.search(text):
+            s.still_switch.append((t, found.group(1) == '1'))
+        if found := STILL_START.search(text):
+            flag, run_ms, _, d_min, d_max, still_min = found.groups()
+            s.still_episodes.append(StillEpisode(t, flag == '1', int(run_ms), (float(d_min), float(d_max)),
+                                                 float(still_min)))
+        if found := STILL_END.search(text):
+            reason, duration, _, d_min, d_max, still_min, flattened = found.groups()
+            episode = s.still_episodes[-1] if s.still_episodes and s.still_episodes[-1].end is None else None
+            if episode is None:
+                # An end without its start line (the log began inside the episode).
+                episode = StillEpisode(t - int(duration) / 1000.0, flattened == '1', 0, (0.0, 0.0), 0.0)
+                s.still_episodes.append(episode)
+            episode.end, episode.reason, episode.duration_ms = t, reason, int(duration)
+            episode.d, episode.still_min = (float(d_min), float(d_max)), float(still_min)
+            episode.flattened = flattened == '1'
         if found := TRUST.search(text):
             s.trust_events.append((t, found.group(1), found.group(2), accepted_keys(found.group(2))))
         if found := LEGACY_TRUST.search(text):
@@ -1075,6 +1142,7 @@ def ui_checks(s: Session, add) -> None:
                        refusals(s), short, short_text)
         gap_checks(s, add)
         scene_checks(s, add)
+        still_checks(s, add)
         return
     states = Counter(u.detection for u in s.ui)
     add(Check('FAIL' if overrides or flattened or contradicted else 'WARN' if disputes else 'PASS', 'UI protection',
@@ -1089,6 +1157,7 @@ def ui_checks(s: Session, add) -> None:
               (overrides + flattened + contradicted or disputes or handled or short)[:6]))
     gap_checks(s, add)
     scene_checks(s, add)
+    still_checks(s, add)
 
 
 def pre_ui_proofs(s: Session) -> list[tuple[float, str, str]]:
@@ -1451,6 +1520,53 @@ def dark_pre_ui_checks(scenes: list[UISample], add) -> None:
               [f'{clock(u.t)} presented lit {percent(u.scene.pre_ui_pixels[2], u.pixels)}, layer lit '
                f'{percent(u.scene.pre_ui_pixels[1], u.pixels)}, differing '
                f'{percent(u.scene.pre_ui_pixels[3], u.pixels)}' for u in dark][:6]))
+
+
+def still_checks(s: Session, add) -> None:
+    """'UI still screen' (since fix 2): rule H2's episodes, still screens without a UI source whose presented frame
+    read hidden while staying still for STILL_RUN_MS (docs/reshade-sbs.md, still screens without a UI source).
+
+    Flattening them is off by default (UIFlattenStillScreens=0): the add-on only logs each screen it would flatten,
+    so those episodes WARN for review before the panel switch is turned on; episodes logged while it was on are INFO.
+    Every report of the check also gives the gameplay-safety evidence: the longest run of such samples that ended
+    before STILL_RUN_MS (the UI lines' short_max_ms) and how many did (the last counter line's still.short). Logs
+    before fix 2 have none of these lines, and no such check."""
+    lines = [u.still for u in s.ui if u.still is not None]
+    counted = s.counters is not None and 'still.short' in s.counters
+    if not (s.still_episodes or s.still_switch or lines or counted):
+        return
+    shadow = [e for e in s.still_episodes if not e.flatten]
+    shown = [e for e in s.still_episodes if e.flatten]
+    longest = max((u.short_max_ms for u in lines), default=0)
+    runs = f'{s.counters["still.short"]} short runs' if counted else 'short runs not counted without a counter line'
+    safety = f'longest run that reset before {STILL_RUN_MS / 1000:g} s: {longest} ms ({runs})'
+    switch = (f'UIFlattenStillScreens={int(s.still_switch[-1][1])}; ' if s.still_switch else '')
+    if counted:
+        switch += f'entered {s.counters["still.entered"]}, released {s.counters["still.released"]}; '
+
+    def screens(n: int) -> str:
+        return f'{n} still screen' + ('' if n == 1 else 's')
+
+    def row(e: StillEpisode) -> str:
+        verb = 'flattened' if e.flatten else 'would flatten'
+        ended = (f'ended {clock(e.end, True)} ({e.reason}) after {e.duration_ms} ms' if e.end is not None else
+                 'still active when the log ended')
+        return (f'{clock(e.start, True)} {verb} after {e.run_ms} ms, {ended}; D {e.d[0]:.3f} to {e.d[1]:.3f}, '
+                f'still at least {e.still_min:.1%} of cells')
+    if shadow:
+        add(Check('WARN', 'UI still screen',
+                  f'{screens(len(shadow))} without a UI source would have been flattened (shadow): the '
+                  f'presented frame read hidden (D at most {STILL_D:g}) and still for {STILL_RUN_MS / 1000:g} s while '
+                  'no UI source decided; review each one (a Dump 3D taken during one shows the screen) before turning '
+                  'on "Flatten still screens with no UI source"'
+                  + (f'; {screens(len(shown))} shown flat' if shown else '') + f'; {switch}{safety}',
+                  [row(e) for e in s.still_episodes][:6]))
+    elif shown:
+        add(Check('INFO', 'UI still screen',
+                  f'{screens(len(shown))} without a UI source shown flat (H2, source 11); {switch}{safety}',
+                  [row(e) for e in shown][:6]))
+    else:
+        add(Check('INFO', 'UI still screen', f'no still screen without a UI source; {switch}{safety}'))
 
 
 def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:
