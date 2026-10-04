@@ -58,6 +58,7 @@ namespace {
     {"SunshineUIBackbufferAlpha", D3D_SIT_TEXTURE, 13},
     {"SunshineHUDless", D3D_SIT_TEXTURE, 14},
     {"SunshineUIChangeSetPlanes", D3D_SIT_TEXTURE, 8}, // Change-set count pass only (fix 3).
+    {"SunshineUIStamps", D3D_SIT_TEXTURE, 9}, // UI detection passes only (S3).
     {"SunshineHostCandidateStore", D3D_SIT_UAV_RWTYPED, 0},
     {"SunshineHostVerticalMajorantStore", D3D_SIT_UAV_RWTYPED, 1},
     {"SunshineHostVerticalConditionedStore", D3D_SIT_UAV_RWTYPED, 2},
@@ -111,6 +112,11 @@ namespace {
     // Selection revision 5: H2's still-screen flag; revision 6 (fix 3): the
     // change-set rule bits beside it.
     {"Sunshine_UIRules", 20, 4, D3D_SVT_UINT},
+    // S3: the proposed labels and the identity bits.
+    {"Sunshine_UIExpectedLayerPresent", 24, 4, D3D_SVT_UINT},
+    {"Sunshine_UIExpectedLayerToken", 28, 4, D3D_SVT_UINT},
+    {"Sunshine_UIExpectedHUDlessPresent", 32, 4, D3D_SVT_UINT},
+    {"Sunshine_UIIdentity", 36, 4, D3D_SVT_UINT},
   };
 
   struct entry_point {
@@ -253,9 +259,9 @@ namespace {
       require(SUCCEEDED(buffer->GetDesc(&description)), "Constant-buffer reflection failed");
       const bool ui = std::string(description.Name) == "SunshineUIConstants";
       const bool detection = std::string(description.Name) == "SunshineUIDetectionConstants";
-      require((ui && description.Size == 16) || (detection && description.Size == 32) ||
+      require((ui && description.Size == 16) || (detection && description.Size == 48) ||
           (std::string(description.Name) == "SunshineGame3DConstants" && description.Size == 80),
-        "Native constants must retain the 80-byte b0, the 16-byte b1 and the six-word (32-byte) b2");
+        "Native constants must retain the 80-byte b0, the 16-byte b1 and the ten-word (48-byte) b2");
       const constant *begin = detection ? std::begin(detection_constants) : ui ? std::begin(ui_constants) : std::begin(constants);
       const constant *end = detection ? std::end(detection_constants) : ui ? std::end(ui_constants) : std::end(constants);
       for (auto item = begin; item != end; ++item) {
@@ -294,6 +300,20 @@ namespace {
       const std::string name = entry.name;
       require(!retained || ((name.rfind("SunshineUIDetection", 0) == 0 || name.rfind("SunshineUIDarkening", 0) == 0) && !shared),
         name + ": only the UI detection passes may read the retained Presents at t2 and t3");
+    }
+    // S3: the stamps share t9 with the resolved UI plane; only the detection
+    // reduce and the scene evidence pass read them (texel 12's identity words).
+    {
+      bool stamps = false, resolved = false;
+      for (unsigned index = 0; index < shader.BoundResources; ++index) {
+        D3D11_SHADER_INPUT_BIND_DESC actual {};
+        require(SUCCEEDED(reflection->GetResourceBindingDesc(index, &actual)), "Binding reflection failed");
+        stamps |= std::string(actual.Name) == "SunshineUIStamps";
+        resolved |= std::string(actual.Name) == "SunshineUIPlaneResolvedSampler";
+      }
+      const std::string name = entry.name;
+      require(!stamps || ((name == "SunshineUIDetectionReduceCS" || name == "SunshineSceneEvidenceCS") && !resolved),
+        name + ": only the detection reduce and the scene evidence pass may read the S3 stamps at t9");
     }
     // The exact UI counters share u7 with the conflict probe's statistics, and
     // the T1 hold store shares u5 with the resolved UI plane: only the

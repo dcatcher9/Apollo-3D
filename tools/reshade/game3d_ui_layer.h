@@ -33,6 +33,16 @@
 //
 // Dump census: while a Dump 3D is armed, qualifying clears are also recorded and
 // copied as diagnostic artifacts.
+//
+// S3 stamps (shadow; game3d_ui_ticket.h, game3d_frame_clock.h): right after each
+// live or census copy, the same game list copies the device's present and token
+// clocks into the copy's own 16-byte stamp, so the copy and its stamp are
+// written by one execution. A before-clear stamp's C_P read is the Present
+// interval the copy executed in (its present label) and its C_T read the newest
+// Backbuffer token executed before it (its token label). The queue watch names
+// the queue that executed the lists carrying the live copy: a read on another
+// queue than the presenting one races, so its present label is refused. Nothing
+// decides from a stamp while ui_ticket::identity_authoritative is false.
 namespace sunshine_game3d::ui_layer {
   namespace api = reshade::api;
   inline constexpr unsigned max_candidates = 3; // game3d_debug::ui_layer_count
@@ -90,6 +100,46 @@ namespace sunshine_game3d::ui_layer {
     bool captured_since_present_{}, copied_{};
   };
 
+  // S3 queue watch (pure; no GPU or runtime calls). Remembers up to capacity
+  // command lists that recorded a stamped live copy since their last reset,
+  // and which queue executed them. Sticky per scope (clear_scope): one
+  // execution on another queue than the presenting one refuses present
+  // labels for the scope; mixed records more than one executing queue, so no
+  // single queue can be compared with the Backbuffer producer's.
+  class queue_watch {
+  public:
+    static constexpr unsigned capacity = 4;
+    // This list recorded a stamped copy.
+    void carried(std::uint64_t list);
+    // The list was reset: it carries nothing until it records again.
+    void reset(std::uint64_t list);
+    // D3D11 FinishCommandList: the deferred context's commands move into a
+    // new command list, which carries what the context carried and only that;
+    // the context carries nothing afterwards.
+    void move(std::uint64_t list, std::uint64_t context);
+    // A secondary list executed into a primary list that keeps its own
+    // commands (a D3D12 bundle, a D3D11 command list executed on a deferred
+    // context): the primary also carries what the secondary carried.
+    void transfer(std::uint64_t primary, std::uint64_t secondary);
+    // A list executed on a queue (presenting: the presenting queue, 0 when
+    // unknown). True when the list carried a stamped copy.
+    bool executed(std::uint64_t list, std::uint64_t queue, std::uint64_t presenting);
+    // A copy recorded directly on a queue (D3D11's immediate context).
+    void executed_on(std::uint64_t queue, std::uint64_t presenting);
+    bool watching() const;
+    // The watched lists (0: a free entry).
+    const std::array<std::uint64_t, capacity> &lists() const { return lists_; }
+    bool foreign_present() const { return foreign_present_; }
+    bool mixed() const { return mixed_; }
+    std::uint64_t last_queue() const { return last_queue_; }
+    void clear_scope() { *this = {}; }
+  private:
+    // Oldest first; free entries (0) last.
+    std::array<std::uint64_t, capacity> lists_{};
+    std::uint64_t last_queue_{};
+    bool foreign_present_{}, mixed_{};
+  };
+
   struct live_capture {
     api::resource copy{};       // Add-on owned, shader_resource state between uses.
     std::uint64_t capture_id{}; // Increases with every copy; never zero when valid.
@@ -99,6 +149,14 @@ namespace sunshine_game3d::ui_layer {
     // the copy holds the frame of the Present that many back
     // (game3d_ui_change_set.h, pairing).
     std::uint32_t presents_since_copy{};
+    // S3 (shadow): the copy's 16-byte stamp buffer (add-on owned, a default
+    // buffer resting in COMMON; it reads 0 until a stamped copy executed, and
+    // is recreated at 0 with the copy), whether this copy's list recorded its
+    // stamp, and the queue watch's verdict for the scope: foreign_present,
+    // the last executing queue (native; 0 unknown) and whether several did.
+    api::resource stamp{};
+    bool stamped{}, foreign_present{}, queue_mixed{};
+    std::uint64_t executed_queue{};
   };
   // The active layer's newest copy on this device, recorded less than
   // max_clear_gap_ms ago. Each call also asks for the next copies: the layer is
@@ -112,6 +170,18 @@ namespace sunshine_game3d::ui_layer {
     std::uint32_t clears{};  // Qualifying clears seen while armed.
     bool active{};           // The live tracker's layer when the census was taken.
     const char *status = "observed";
+    // S3 (shadow): the copy's 16-byte CPU-readable stamp (a readback buffer
+    // the dump maps once its fence completed) and whether its list recorded it.
+    // The holder retires it like the copy.
+    api::resource stamp{};
+    bool stamped{};
+  };
+
+  // Test add-on only (SunshineUILayerTestLive): the live copy's S3 facts.
+  struct test_live_state {
+    std::uint64_t stamp{}, capture_id{}, executed_queue{}, presenting_queue{};
+    std::uint32_t present_label{}, presents_since_copy{};
+    std::uint32_t stamped{}, foreign_present{}, queue_mixed{}, watching{};
   };
 
   void register_events();
@@ -124,7 +194,8 @@ namespace sunshine_game3d::ui_layer {
   // while its device lives; the caller either keeps a reference and destroys
   // its handle, or passes it to retire().
   std::vector<candidate> take(api::device *&device);
-  // Destroys a copy once any game command list that wrote it has executed.
+  // Destroys a copy (or a stamp) once any game command list that wrote it has
+  // executed.
   void retire(api::device *device, api::resource copy);
   // Drops an armed census whose dump was withdrawn.
   void cancel();

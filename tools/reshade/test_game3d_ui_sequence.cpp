@@ -42,7 +42,17 @@
 // framework: stages S0-S6; rules E1, E2, V1, V2, A1-A3, S1, S2, H1, P1, T1,
 // F1) changes prints "KNOWN_TODAY <stage> <rule>: <text>" and does not fail;
 // that stage turns it into a strict assertion. Two remain after S2b, both S3
-// T1/E2. Outcomes the rules already call correct, such as an accepted source
+// T1/E2: S3 ships in shadow, and its group (S3 identity shadow) prints
+// strict "SHADOW S3" lines for what the snapshot ticket would decide and
+// asserts both cases strictly under the test-only identity override
+// (ui_temporal::detection_state::identity_override); its GPU-verdict group
+// (S3 GPU identity verdicts) feeds stamps and proposals (b2 words 6-9,
+// ui_selection::identity_input) into every detection, proves that by
+// default no verdict changes a decision while the GPU identity words are
+// counted, and under the override asserts the gates: a late, unstamped or
+// mismatched pair is refused (T1 reuses once), a token-space pre-UI pair
+// decides with frame generation suspended, and an inexact HUD-less pair is
+// absent. Outcomes the rules already call correct, such as an accepted source
 // pinning a whole-frame alpha flat over a visible scene (P1, the opacity
 // ruling), are asserted strictly, and so is the risk the approved pre-UI
 // proof accepts (h1_dark_gameplay_never_flat, a proven pre-fog buffer).
@@ -59,6 +69,7 @@
 #include "game3d_ui_mask.h"
 #include "game3d_ui_selection.h"
 #include "game3d_ui_temporal.h"
+#include "game3d_ui_ticket.h"
 
 #include <algorithm>
 #include <array>
@@ -231,13 +242,15 @@ namespace {
     std::uint64_t now_ms {};
     ui_selection::hold_state hold {};
     std::uint32_t rules {};
+    // S3: the stamps at t9 and b2 words 6-9 (the renderer's detect_ui).
+    ui_selection::identity_input identity {};
   };
 
   using gpu_model = std::function<texels(const gpu_inputs &)>;
 
   // The reduce's decision of these counts and inputs (ui_selection::decide).
   ui_selection::decision decide(const texels &t, const gpu_inputs &in) {
-    return ui_selection::decide(ui_selection::counts_from_words(t.data(), t.size()), in.bits, in.accepted, in.flags | in.per_frame, in.hold, in.rules);
+    return ui_selection::decide(ui_selection::counts_from_words(t.data(), t.size()), in.bits, in.accepted, in.flags | in.per_frame, in.hold, in.rules, in.identity);
   }
 
   // The counts of `t` with the words the reduce writes for these inputs:
@@ -699,6 +712,11 @@ namespace {
     // capture).
     bool hold_previous {};
     std::uint64_t real_frame {};
+    // S3 (game3d_ui_ticket.h, shadow): the newest token generation among the
+    // Present's offered tag snapshots (ui_ticket::newest_token; 0 none).
+    // ui_temporal::ticket_identity fills the identity's token fields from it;
+    // T1 reads them only under the test-only identity_override.
+    std::uint64_t token_label {};
     // The provider offered an Auto input (source_alpha_ui); without one it
     // offers no candidate.
     bool available = true;
@@ -723,6 +741,12 @@ namespace {
     bool fg_known_off = true;
     std::uint32_t layer_presents_ago = 1;
     bool retained_1 = true, retained_2 = true;
+    // S3 (game3d_ui_ticket.h): the stamps the GPU reads and the labels the
+    // provider proposes (ui_selection::identity_input, b2 words 6-8), and
+    // in bits only identity::token_batch (the renderer's proof of a
+    // same-token HUD-less pair); the renderer adds the gates while identity
+    // is authoritative.
+    ui_selection::identity_input identity {};
   };
 
   struct frame_result {
@@ -764,6 +788,8 @@ namespace {
     // darkening unpinned (darkening_applied; a frame T1 reused, or a held
     // Present, keeps the mask of the frame it shows).
     bool darkening {}, darkened {};
+    // S3: the identity this detection pushed (stamps, proposals and bits).
+    ui_selection::identity_input identity {};
     // update_alpha_auto's status for this frame.
     alpha_auto_decision consumed;
 
@@ -887,6 +913,9 @@ namespace {
       bool layer_proven {}, hudless_offered {}, auto_mode {}, enabled {};
     };
     std::size_t discards {}, commits {}, committed_frames {};
+    // S3: the GPU identity verdict totals the committed samples carry
+    // (renderer::identity_counts).
+    ui_ticket::identity_counters identity_gpu;
 
     // The overlay's Forget (A3): the session clears the game's entries; the
     // transitions continue from the cleared set.
@@ -918,6 +947,16 @@ namespace {
       const bool pin_only_ui = auto_mode && session.pin_only_ui();
       const bool pre_ui_proven = layer_offered && session.pre_ui_proven(signatures.of(kind::ui_layer));
       const bool hudless_offered = (bits & candidate::hudless) != 0;
+      // S3 (game3d_renderer.cpp): only while identity is authoritative does a
+      // layer without a Present-counted pairing pair in token space (frame
+      // generation not known off, a Backbuffer tag offered, a token
+      // proposed), and only then are the gates pushed.
+      const bool authoritative = ui_ticket::authoritative(temporal.identity_override);
+      if (authoritative && layer_offered && r.pairing.kind != change_set::pair_class::retained && (bits & candidate::backbuffer) && p.identity.expected_layer_token && !p.fg_known_off) {
+        r.pairing = change_set::token_pairing();
+      }
+      r.identity = p.identity;
+      r.identity.bits = (p.identity.bits & ui_detection::identity::token_batch) | (authoritative ? ui_detection::identity::gate_hudless : 0u) | (authoritative && pin_only_ui ? ui_detection::identity::gate_layer : 0u);
       if (change_set::offered(auto_mode, pin_only_ui, pre_ui_proven, hudless_offered, r.pairing)) {
         bits |= candidate::pre_ui;
         signatures.set(kind::pre_ui, signatures.format[std::size_t(kind::ui_layer)]);
@@ -930,7 +969,7 @@ namespace {
       observation.revision = p.revision;
       observation.viewport = p.viewport;
       observation.session = &session;
-      const ui_temporal::present_identity identity {p.hold_previous, p.real_frame};
+      const auto identity = ui_temporal::ticket_identity({p.hold_previous, p.real_frame}, p.token_label, temporal.decision_token, bits != 0);
       r.hold = temporal.arbitrate(identity, observation, bits);
       const std::uint32_t flags = (bits & candidate::layer) ? p.layer_flags : 0u;
       if (r.hold.adopt) {
@@ -980,8 +1019,10 @@ namespace {
         still_share = p.still_share;
         pending_change = {r.pairing, pre_ui_proven, hudless_offered, auto_mode, pin_only_ui};
         detect(observation, bits, flags, accepted, signatures, per_frame, shadow, index, r);
+        // T1's invariant on the identity T1 applied (today's, or under the
+        // test-only override the ticket's).
+        invariants.generated_detections += temporal.applied(identity).generated ? 1 : 0;
         temporal.detected(observation, identity, bits);
-        invariants.generated_detections += p.hold_previous ? 1 : 0;
       } else {
         ++cpu[ui_counter::inactive_no_candidates];
         temporal.inactive();
@@ -1118,7 +1159,7 @@ namespace {
       // every Auto frame that offers candidates with the switch on and on
       // Auto sample frames in its shadow; the pushed b2 word 5 says so.
       r.darkening = !r.grace && pending_change.auto_mode && ((r.rules & ui_detection::rules::pin_only_ui) || sample);
-      r.gpu = {bits, flags, accepted, per_frame, now, gpu_hold, r.rules | (r.darkening ? ui_detection::rules::darkening_measured : 0u)};
+      r.gpu = {bits, flags, accepted, per_frame, now, gpu_hold, r.rules | (r.darkening ? ui_detection::rules::darkening_measured : 0u), r.identity};
       // A zero-offer frame runs no tiles pass: the reduce reads the
       // statistics rows the previous tiles pass left (with nothing offered,
       // they decide nothing of their own).
@@ -1143,6 +1184,11 @@ namespace {
       const auto adds = ui_selection::counter_adds(r.decision, r.gpu.flags | per_frame);
       for (std::size_t i = 0; i != adds.size(); ++i) {
         gpu_words[i] += adds[i];
+      }
+      // S3: the identity counter words after count.
+      const auto identity_adds = ui_selection::identity_counter_adds(r.decision.identity);
+      for (std::size_t i = 0; i != identity_adds.size(); ++i) {
+        identity_words[i] += identity_adds[i];
       }
       ++invariants.detections;
       invariants.untrusted_inferred += r.decision.untrusted_inferred ? 1 : 0;
@@ -1194,6 +1240,7 @@ namespace {
       submitted_change = pending_change;
       counters_pending = true;
       pending_words = gpu_words;
+      pending_identity_words = identity_words;
       pending_cpu = cpu;
       pending_frame = index;
       pending_source = observation;
@@ -1228,6 +1275,10 @@ namespace {
       still_committed_short += observation.still.short_run ? 1 : 0;
       committed_cpu = pending_cpu;
       committed_words = pending_words;
+      // S3 (game3d_renderer.cpp, commit_counters): the identity words' change
+      // joins the "Sunshine UI identity" gpu group, never ui_counters.
+      identity_gpu += ui_temporal::identity_gpu_delta(pending_identity_words, committed_identity_words);
+      committed_identity_words = pending_identity_words;
       committed_frames = pending_frame + 1;
       ++commits;
       session.add_counters(delta);
@@ -1235,6 +1286,7 @@ namespace {
 
     ui_counters cpu, pending_cpu, committed_cpu;
     std::array<std::uint32_t, ui_counter_word::count> gpu_words {}, pending_words {}, committed_words {};
+    std::array<std::uint32_t, ui_counter_word::identity_words> identity_words {}, pending_identity_words {}, committed_identity_words {};
     bool pending {}, awaiting {}, counters_pending {};
     // Whether the pending sample's scene evidence is actionable (the guard's
     // measure when it was submitted).
@@ -2218,6 +2270,191 @@ namespace {
       known_today("S3", "T1/E2", "a multiplier change in the middle of a real frame, reported a real frame late, pairs " + std::to_string(t.misread) + " generated Presents as real or late (Present counting, not real-frame identity)");
       check_counters(s, "mid-frame multiplier change");
     }
+  }
+
+  // ---------------------------------------------------------------- S3 identity shadow
+
+  // A frame-generation stream with S3 token labels (game3d_ui_ticket.h). The
+  // game tags each real frame's HUD-less and Backbuffer images under one
+  // token right after the previous real Present (the pacer's tag stands for
+  // the token generation), and every Present until the next real one
+  // re-offers that snapshot: under DLSS-G ordering a token's first Present is
+  // a generated one. Today (authoritative false) the stream is fg_drift's:
+  // the provider pairs the HUD-less image with the presented colour by
+  // Present counting under the reported multiplier, inexact, and the
+  // identity shadow compares that with the ticket per Present. Under the
+  // test-only override T1 follows the tokens and the HUD-less image pairs
+  // only with its same-token Backbuffer (exact), never with a presented
+  // image.
+  struct identity_stream {
+    fg_tally tally;
+    std::size_t tokens {}, detections {}, fresh_detections {}, holds {}, unavailable {}, inexact_detections {};
+    ui_ticket::identity_counters counters;
+  };
+
+  identity_stream fg_identity(std::size_t count, const std::function<std::pair<std::uint32_t, std::uint32_t>(std::size_t)> &cadence, bool authoritative, const char *what) {
+    alpha_auto_policy session;
+    accept_hudless(session);
+    sequence s(session, difference_frame);
+    s.temporal.identity_override = authoritative;
+    fg_pacer pacer(cadence(0).first);
+    present real;
+    real.offered = authoritative ? candidate::hudless | candidate::exact : candidate::current | candidate::hudless;
+    identity_stream out;
+    ui_ticket::identity_shadow shadow;
+    std::uint64_t now = 10000, last_token = 0;
+    for (std::size_t index = 0; index != count; ++index) {
+      const auto [actual, reported] = cadence(index);
+      const auto step = pacer.present(true, actual, reported);
+      // Today's identity and offer by Present counting; under the override
+      // every Present re-offers the token's exact pair.
+      auto p = fg_present(step.kind, real, candidate::current, pacer.tag);
+      if (authoritative) {
+        p.offered = real.offered;
+      }
+      p.token_label = pacer.tag;
+      p.now_ms = now;
+      now += 8;
+      const bool first = pacer.tag != last_token;
+      last_token = pacer.tag;
+      out.tokens += first ? 1 : 0;
+      const auto &r = s.step(p);
+      const bool paired = r.detected && (r.gpu.bits & candidate::hudless);
+      ++out.tally.presents;
+      if (step.real) {
+        ++out.tally.real;
+        out.tally.extra_holds += r.held ? 1 : 0;
+        out.tally.paired_real += paired ? 1 : 0;
+      } else if (r.held) {
+        ++out.tally.held;
+      } else {
+        ++out.tally.lost;
+        out.tally.misread += paired ? 1 : 0;
+      }
+      out.detections += r.detected ? 1 : 0;
+      out.fresh_detections += r.detected && first ? 1 : 0;
+      out.holds += r.held ? 1 : 0;
+      out.unavailable += r.unavailable ? 1 : 0;
+      out.inexact_detections += paired && !(r.gpu.bits & candidate::exact) ? 1 : 0;
+      ui_ticket::today_view today;
+      today.offered = true;  // The game tags a HUD-less image for every real frame.
+      today.detects = paired;
+      today.holds = r.held;
+      today.exact = (p.offered & candidate::exact) != 0;
+      today.real_frame = p.real_frame;
+      // The ticket pairs the HUD-less image only with its same-token
+      // Backbuffer, which only the override's stream offers.
+      const auto view = shadow.step(today, pacer.tag, authoritative, authoritative, out.counters);
+      require(view.fresh == first && view.hold_previous == !first && view.real_frame == pacer.tag, std::string("The ticket identity was not fresh once per token: ") + what);
+    }
+    shadow.end_scope(out.counters);
+    check_counters(s, what);
+    return out;
+  }
+
+  void s3_identity_shadow() {
+    namespace idn = ui_ticket::identity_counter;
+    using cadence_fn = std::function<std::pair<std::uint32_t, std::uint32_t>(std::size_t)>;
+    struct drift {
+      const char *what;
+      std::size_t count;
+      cadence_fn cadence;
+      bool known_today;
+    };
+
+    const drift cases[] {
+      {"4x matching cadence", 401, [](std::size_t) {
+         return std::pair {3u, 3u};
+       },
+       false},
+      {"4x reported as 2x", 401, [](std::size_t) {
+         return std::pair {3u, 1u};
+       },
+       true},
+      {"2x reported as 4x", 300, [](std::size_t index) {
+         return std::pair {1u, index < 100 ? 1u : 3u};
+       },
+       false},
+      {"2x to 4x in the middle of a real frame, reported late", 300, [](std::size_t index) {
+         return std::pair {index < 100 ? 1u : 3u, index < 103 ? 1u : 3u};
+       },
+       true},
+    };
+    for (const auto &c : cases) {
+      // Default: today's outcomes, identical to the multiplier drift group's
+      // fg_drift, and the identity shadow of them.
+      alpha_auto_policy session;
+      accept_hudless(session);
+      sequence reference(session, difference_frame);
+      const auto expected = fg_drift(reference, c.count, 0, c.cadence);
+      const auto today = fg_identity(c.count, c.cadence, false, c.what);
+      require(today.tally.real == expected.real && today.tally.held == expected.held && today.tally.misread == expected.misread && today.tally.lost == expected.lost && today.tally.extra_holds == expected.extra_holds && today.tally.paired_real == expected.paired_real, std::string("The S3 shadow changed today's outcome: ") + c.what);
+      const auto &k = today.counters;
+      require(k[idn::frames_total] <= today.tokens && k[idn::frames_total] == k[idn::frames_once] + k[idn::frames_missed] + k[idn::frames_repeated], std::string("The identity shadow's frames do not add up: ") + c.what);
+      // Every detection beyond a token's first is a misread generated Present.
+      require(k[idn::frames_extra] == expected.misread && (!c.known_today || k[idn::frames_repeated]), std::string("The identity shadow's repeated detections are not today's misreads: ") + c.what);
+      std::printf("SHADOW S3 T1/E2: %s: today detects %llu of %llu frames once, %llu repeatedly (%llu extra detections, %zu from an inexact presented pair), misses %llu; the ticket detects each of %zu tokens once and holds every Present that re-offers one\n", c.what, static_cast<unsigned long long>(k[idn::frames_once]), static_cast<unsigned long long>(k[idn::frames_total]), static_cast<unsigned long long>(k[idn::frames_repeated]), static_cast<unsigned long long>(k[idn::frames_extra]), today.inexact_detections, static_cast<unsigned long long>(k[idn::frames_missed]), today.tokens);
+      // The test-only override (S3 enabled): T1 by token, the exact
+      // same-token pair. Strict for every cadence, the two KNOWN_TODAY S3
+      // T1/E2 cases included.
+      const auto ticket = fg_identity(c.count, c.cadence, true, c.what);
+      require(ticket.detections == ticket.tokens && ticket.fresh_detections == ticket.tokens, std::string("Under S3 a token did not detect exactly once, on its first Present: ") + c.what);
+      require(ticket.holds + ticket.detections == ticket.tally.presents && !ticket.unavailable && !ticket.inexact_detections, std::string("Under S3 a Present re-offering a token did not hold its decision, or a pair was inexact: ") + c.what);
+      require(!ticket.counters[idn::frames_repeated] && !ticket.counters[idn::frames_extra] && ticket.counters[idn::detect_agree] == ticket.tokens && !ticket.counters[idn::detect_today_only], std::string("Under S3 the shadow saw a repeated detection: ") + c.what);
+    }
+
+    // Labels (game3d_ui_ticket.h, game3d_ui_change_set.h): what the stamp
+    // proves where Present counting cannot see.
+    using ui_ticket::boundary;
+    using ui_ticket::label_space;
+    using ui_ticket::refusal;
+    ui_ticket::identity_counters counters;
+    const change_set::layer_pairing retained1 {change_set::pair_class::retained, 1u};
+    const std::uint32_t present_label = 10;
+    const auto proposed = ui_ticket::valid_label(label_space::present, change_set::proposed_layer_label(retained1, present_label));
+    // A layer copy whose list executed as counted pairs; one that executed a
+    // Present earlier than the count (or after the next Present) is a
+    // mismatch: absent once identity decides, whatever the content verdict.
+    require(ui_ticket::pair_exact(ui_ticket::present_label(boundary::before_clear, 9), proposed), "A copy executed as counted did not pair");
+    for (const std::uint32_t read : {8u, 10u}) {
+      const auto copy = ui_ticket::present_label(boundary::before_clear, read);
+      require(!ui_ticket::pair_exact(copy, proposed) && ui_ticket::pair_refusal(copy, proposed) == refusal::mismatch, "A late-executed layer copy paired");
+      ui_ticket::count_gpu_verdict(ui_ticket::gpu_verdict::mismatch, false, counters);
+    }
+    // A copy executed on another queue: its read races the clock.
+    ui_ticket::ticket foreign;
+    foreign.kind = ui_ticket::capture_kind::layer_copy;
+    foreign.at = boundary::before_clear;
+    foreign.present_queue = ui_ticket::queue_relation::foreign;
+    foreign.present = ui_ticket::refuse(ui_ticket::present_label(boundary::before_clear, 9), refusal::foreign_queue);
+    ui_ticket::refusal_inputs foreign_inputs;
+    foreign_inputs.foreign_queue = foreign_inputs.mismatch = true;
+    foreign.refused = ui_ticket::first_refusal(foreign_inputs);
+    require(foreign.refused == refusal::foreign_queue && ui_ticket::pair_refusal(foreign.present, proposed) == refusal::foreign_queue, "A foreign-queue copy was not refused as foreign");
+    ui_ticket::count_ticket(foreign, counters);
+    // A scope change recreates the stamp entries at 0 and the tags' scope
+    // differs: old stamps never pair.
+    require(ui_ticket::pair_refusal(ui_ticket::present_label(boundary::before_clear, 0), proposed) == refusal::unstamped, "A recreated stamp entry paired");
+    ui_ticket::ticket old_tag, new_tag;
+    old_tag.token = new_tag.token = ui_ticket::token_label_of_tag(41);
+    old_tag.token_generation = new_tag.token_generation = 41;
+    old_tag.epoch = 1;
+    new_tag.epoch = 2;
+    require(!ui_ticket::same_frame(old_tag, new_tag), "Tags of two scopes were one frame");
+    // FG suspended (known and requested): no Present is proven real, so no
+    // present-space proposal; with Backbuffer tags the layer pairs in token
+    // space through C_T, without them there is no pair.
+    const bool span = ui_ticket::real_span(5, 1, ui_ticket::interposer::sl_interposer | ui_ticket::interposer::sl_dlss_g, true, true);
+    const auto present_proposal = span ? change_set::proposed_layer_label(retained1, present_label) : 0u;
+    require(!span && !present_proposal, "A present-space pair was proposed with FG suspended");
+    const auto with_tags = ui_ticket::valid_label(label_space::token, change_set::token_proposal(true, 77));
+    require(ui_ticket::pair_exact(ui_ticket::token_label_of_copy(77), with_tags), "The layer copy after a tagged frame did not pair by token");
+    ui_ticket::count_gpu_verdict(ui_ticket::gpu_verdict::exact, true, counters);
+    require(!change_set::token_proposal(false, 77), "A token was proposed without a ready Backbuffer tag");
+    require(ui_ticket::pair_refusal(ui_ticket::token_label_of_copy(77), ui_ticket::label {}) == refusal::no_reference, "A layer copy without a Backbuffer tag had a reference");
+    ui_ticket::count_gpu_verdict(ui_ticket::gpu_verdict::unproposed, false, counters);
+    require(counters[idn::gpu_mismatch] == 2 && counters[idn::gpu_exact] == 1 && counters[idn::gpu_token_exact] == 1 && counters[idn::gpu_unproposed] == 1 && counters[idn::refused + std::size_t(refusal::foreign_queue)] == 1, "The label cases' counts moved");
+    std::printf("SHADOW S3 E2: label cases: %s\n", ui_ticket::format_identity_counters(counters).c_str());
   }
 
   void generated_presents_hold_within_the_tag_bound() {
@@ -5741,6 +5978,173 @@ namespace {
     }
     return 0;
   }
+  // S3, the GPU's identity verdicts (game3d_native.hlsl SunshineIdentityWords,
+  // ui_selection::verify_identity): every detection carries the stamps of
+  // its candidate copies and the provider's proposals. By default no
+  // verdict changes a decision and the identity words count each offered
+  // pair; under the test-only override the renderer pushes the gates.
+  void s3_gpu_identity() {
+    namespace idn = ui_ticket::identity_counter;
+    using ui_detection::identity::token_batch;
+    // (a) The SB SDR Equipment page with UIPinOnlyUI=1: the layer copy's
+    // stamp read equals the proposed label (its retained Present's), except
+    // on late frames, where its list executed one Present late (read + 1).
+    const auto equipment = [](bool authoritative, const std::function<bool(int)> &late, int frames) {
+      auto session = std::make_unique<alpha_auto_policy>();
+      restore_sb_sdr(*session);
+      session->set_pin_only_ui(true);
+      auto s = std::make_unique<sequence>(*session, sb_sdr_page(sb_equipment));
+      s->temporal.identity_override = authoritative;
+      auto p = sb_sdr_menu_present();
+      for (int i = 0; i != frames; ++i) {
+        const std::uint32_t label = 100u + std::uint32_t(i);
+        p.now_ms = 10000u + std::uint64_t(i) * 16u;
+        p.identity = {late(i) ? label + 1u : label, 0u, 0u, label, 0u, 0u};
+        s->step(p);
+      }
+      return std::make_pair(std::move(session), std::move(s));
+    };
+    const auto late_frames = [](int i) {
+      return i == 60 || (i >= 80 && i < 83);
+    };
+    {
+      const auto [session, reference] = equipment(false, [](int) { return false; }, 120);
+      const auto [late_session, today] = equipment(false, late_frames, 120);
+      for (std::size_t i = 0; i != today->frames.size(); ++i) {
+        const auto &f = today->frames[i];
+        require(f.source == reference->frames[i].source && f.covered == reference->frames[i].covered && f.decision.reused == reference->frames[i].decision.reused && f.source == ui_detection::source_pre_ui, "By default a late layer copy's verdict changed the Equipment page's decision");
+        require(f.decision.identity.layer == (late_frames(int(i)) ? ui_detection::identity::mismatch : ui_detection::identity::exact) && f.decision.identity.layer_space == ui_detection::identity::space_present && f.decision.identity.layer_delta == (late_frames(int(i)) ? 1 : 0) && !(f.identity.bits & (ui_detection::identity::gate_layer | ui_detection::identity::gate_hudless)), "A late layer copy was not a present-space mismatch, or the shadow pushed a gate");
+      }
+      // The committed identity words count every offered layer pair.
+      std::uint64_t exact = 0, mismatch = 0;
+      for (std::size_t i = 0; i != today->committed_frames; ++i) {
+        (late_frames(int(i)) ? mismatch : exact) += 1;
+      }
+      const auto &k = today->identity_gpu;
+      require(today->commits && k[idn::gpu_exact] == exact && k[idn::gpu_mismatch] == mismatch && !k[idn::gpu_unstamped] && !k[idn::gpu_unproposed] && !k[idn::gpu_token_exact], "The committed identity words do not count the frames through the last commit");
+      check_counters(*today, "S3 shadow: SB SDR Equipment page, late copies");
+      std::printf("SHADOW S3 E2: SB SDR Equipment page, UIPinOnlyUI=1, 4 of 120 copies late: decisions unchanged; committed %s\n", ui_ticket::format_identity_counters(k).c_str());
+      // Under the override the gate refuses each late pair: refine finds no
+      // set, so the first late frame reuses the refined 12 once (T1), and of
+      // three in a row the next two show the flat alpha, until the exact pair
+      // returns.
+      const auto [gated_session, gated] = equipment(true, late_frames, 120);
+      for (std::size_t i = 0; i != gated->frames.size(); ++i) {
+        const auto &f = gated->frames[i];
+        require((f.identity.bits & ui_detection::identity::gate_layer) && f.pre_ui_offered, "The override did not push the layer gate");
+        if (i == 60 || i == 80) {
+          require(f.decision.reused && f.source == ui_detection::source_pre_ui && f.decision.own_source == 4u, "Under S3 the first late copy did not reuse the refined 12 once");
+        } else if (i == 81 || i == 82) {
+          require(!f.decision.reused && f.source == 4u && f.flat(), "Under S3 a late copy after a reuse did not show the flat alpha");
+        } else {
+          require(f.source == ui_detection::source_pre_ui && !f.decision.reused, "Under S3 an exact layer copy did not decide 12");
+        }
+      }
+      check_counters(*gated, "S3 enabled: SB SDR Equipment page, late copies");
+    }
+    // (b) Stellar Blade SDR with frame generation suspended (requested, not
+    // known off): no Present-counted pairing. The game tags its Backbuffer,
+    // and the layer copy after a tagged frame reads that token through C_T.
+    // By default nothing pairs and the frame stays flat (4); under the
+    // override the layer pairs in token space (offset 3, the same-token
+    // Backbuffer) and decides 12, a token mismatch is refused, and without
+    // Backbuffer tags there is no pair.
+    {
+      // The page's counts at the Backbuffer pair: the counted pair's.
+      const auto page = sb_sdr_page(sb_equipment);
+      const gpu_model token_page = [page](const gpu_inputs &in) {
+        auto at = in;
+        if (ui_detection::change_set::pair_offset(at.rules) == ui_detection::change_set::pair_backbuffer) {
+          at.rules = (at.rules & ~ui_detection::change_set::pair_mask) | (1u << ui_detection::change_set::pair_shift);
+        }
+        return decision_words(page(at), in);
+      };
+      for (const bool authoritative : {false, true}) {
+        for (const bool tagged : {true, false}) {
+          alpha_auto_policy session;
+          restore_sb_sdr(session);
+          session.set_pin_only_ui(true);
+          sequence s(session, token_page);
+          s.temporal.identity_override = authoritative;
+          auto p = sb_sdr_present(candidate::layer | candidate::current | (tagged ? candidate::backbuffer : 0u), 0);
+          p.fg_known_off = false;
+          for (int i = 0; i != 60; ++i) {
+            const std::uint32_t token = 500u + std::uint32_t(i);
+            p.now_ms = 10000u + std::uint64_t(i) * 16u;
+            p.identity = {0u, i == 40 ? token - 1u : token, 0u, 0u, tagged ? token : 0u, 0u};
+            const auto &f = s.step(p);
+            const bool token_pair = authoritative && tagged;
+            require(f.pairing.kind == (token_pair ? change_set::pair_class::token : change_set::pair_class::late) && f.pre_ui_offered == token_pair, "The token-space pairing did not follow the override and the Backbuffer tag");
+            if (!token_pair) {
+              require(f.source == 4u && f.flat() && f.decision.identity.layer == (tagged ? (i == 40 ? ui_detection::identity::mismatch : ui_detection::identity::exact) : ui_detection::identity::unproposed), "Without the token pair the FG-suspended page was not flat, or its verdict was wrong");
+            } else if (i == 40) {
+              require(f.decision.reused && f.source == ui_detection::source_pre_ui && f.decision.identity.layer == ui_detection::identity::mismatch && f.decision.identity.layer_delta == -1, "Under S3 a token mismatch was not refused with one T1 reuse");
+            } else {
+              require(f.source == ui_detection::source_pre_ui && f.decision.refined && f.decision.identity.layer_space == ui_detection::identity::space_token && ui_detection::change_set::pair_offset(f.rules) == ui_detection::change_set::pair_backbuffer, "Under S3 the token-space pair did not decide 12 against the Backbuffer");
+            }
+          }
+          check_counters(s, "S3 SB SDR FG suspended, token pair");
+          if (authoritative && tagged) {
+            require(s.identity_gpu[idn::gpu_token_exact] && s.identity_gpu[idn::gpu_token_exact] == s.identity_gpu[idn::gpu_exact], "Token-space exact pairs were not counted as token_exact");
+          }
+        }
+      }
+    }
+    // (c) A scope change recreates the stamp entries at 0: every read is
+    // unstamped until a copy stamps again. By default nothing changes; under
+    // the override the unstamped pair is refused, and after the scope change
+    // (T1's hold reset) the frame shows the flat alpha, never an old pair.
+    for (const bool authoritative : {false, true}) {
+      alpha_auto_policy session;
+      restore_sb_sdr(session);
+      session.set_pin_only_ui(true);
+      sequence s(session, sb_sdr_page(sb_equipment));
+      s.temporal.identity_override = authoritative;
+      auto p = sb_sdr_menu_present();
+      for (int i = 0; i != 40; ++i) {
+        const std::uint32_t label = 300u + std::uint32_t(i);
+        p.now_ms = 10000u + std::uint64_t(i) * 16u;
+        p.epoch = i < 20 ? 1u : 2u;
+        p.identity = {i == 20 || i == 21 ? 0u : label, 0u, 0u, label, 0u, 0u};
+        const auto &f = s.step(p);
+        if (i == 20 || i == 21) {
+          require(f.decision.identity.layer == ui_detection::identity::unstamped, "A recreated stamp entry was not unstamped");
+          require(authoritative ? f.source == 4u && f.flat() && !f.decision.reused : f.source == ui_detection::source_pre_ui, "An unstamped pair after a scope change was not refused (enabled) or changed a decision (shadow)");
+        } else {
+          require(f.source == ui_detection::source_pre_ui, "An exact pair did not decide 12");
+        }
+      }
+      check_counters(s, "S3 unstamped after a scope change");
+    }
+    // (d) A HUD-less image paired by Present counting under frame generation
+    // (inexact: no same-token Backbuffer, no proposal). By default it decides
+    // as today (5 from an inexact pair); under the override it is absent: the
+    // gate refuses it, so the frame reuses the last exact decision once and
+    // then has no mask, while a token batch (the CPU's proof) decides.
+    for (const bool authoritative : {false, true}) {
+      alpha_auto_policy session;
+      accept_hudless(session);
+      sequence s(session, difference_frame);
+      s.temporal.identity_override = authoritative;
+      present p;
+      p.offered = candidate::hudless;
+      for (int i = 0; i != 40; ++i) {
+        p.now_ms = 10000u + std::uint64_t(i) * 16u;
+        const bool batch = i < 20 || i >= 23;
+        p.identity = {0u, 0u, 0u, 0u, 0u, 0u, batch ? token_batch : 0u};
+        p.offered = candidate::hudless | (batch ? candidate::exact : 0u);
+        const auto &f = s.step(p);
+        if (batch) {
+          require(f.source == 5u && f.decision.identity.hudless == ui_detection::identity::exact && f.decision.identity.hudless_space == ui_detection::identity::space_token, "A token batch did not decide 5 as an exact token-space pair");
+        } else if (!authoritative) {
+          require(f.source == 5u && f.decision.inexact_difference && f.decision.identity.hudless == ui_detection::identity::unproposed, "By default an inexact HUD-less pair did not decide as today");
+        } else {
+          require(f.decision.identity.hudless == ui_detection::identity::unproposed && !(f.decision.valid_bits & candidate::hudless) && (i == 20 ? f.decision.reused && f.source == 5u : !f.decision.reused && !f.source), "Under S3 an inexact HUD-less pair was not absent with one T1 reuse");
+        }
+      }
+      check_counters(s, "S3 inexact HUD-less pair");
+    }
+  }
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -5805,6 +6209,8 @@ int main(int argc, char **argv) {
     {"P2/H1/H2 whole-frame decisions untouched (fix 4)", fix4_full_frame_sources_untouched},
     {"P2/S1 refine to 12 with darkening (fix 4)", fix4_refine_to_12_with_darkening},
     {"P2 one switch UIPinOnlyUI (fix 4)", fix4_one_switch},
+    {"S3 identity shadow", s3_identity_shadow},
+    {"S3 GPU identity verdicts", s3_gpu_identity},
     {"S1/T1 invariants", s1_invariants},
   };
   try {

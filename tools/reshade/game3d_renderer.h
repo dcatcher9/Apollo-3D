@@ -5,6 +5,7 @@
 #include "game3d_alpha_auto.h"
 #include "game3d_ui_adaptive.h"
 #include "game3d_ui_change_set.h"
+#include "game3d_ui_ticket.h"
 #include <windows.h>
 #include <reshade_api.hpp>
 #include <array>
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace sunshine_game3d {
@@ -84,6 +86,21 @@ namespace sunshine_game3d {
     // such real Presents: Present counting pairs the copy only within it.
     std::uint32_t layer_presents_ago = 0;
     bool fg_known_off = false;
+    // S3 snapshot tickets (game3d_ui_ticket.h; shadow: nothing decides from
+    // them while ui_ticket::identity_authoritative is false), one per offered
+    // candidate in ui_ticket::slot order: 0-2 the tags, 3 the presented
+    // colour, 4 the layer, 5 the HUD-less image.
+    std::array<ui_ticket::ticket, ui_ticket::slot::count> tickets{};
+    // The labels the CPU proposes for the GPU to verify against the stamps
+    // (0: not proposed): the offered layer copy's present label (its retained
+    // Present's, within a real span on the presenting queue) and token label
+    // (the newest ready Backbuffer tag's, with FG on, unknown or suspended),
+    // and the HUD-less image's present label (FG off).
+    std::uint32_t expected_layer_present = 0, expected_layer_token = 0, expected_hudless_present = 0;
+    // frame_clock::label of this render: its Present's label, kept beside
+    // every Present the renderer retains (diagnostic_resources::
+    // retained_labels).
+    std::uint32_t present_label = 0;
   };
   struct ui_render_input {
     ui_input_kind kind = ui_input_kind::unavailable;
@@ -153,7 +170,13 @@ namespace sunshine_game3d {
     // offered no layer).
     std::array<reshade::api::resource, 2> retained_presents{};
     std::array<std::uint32_t, 2> retained_offsets{1, 2};
+    // S3: the present label each retained Present was copied at (0 unknown).
+    std::array<std::uint32_t, 2> retained_labels{};
     reshade::api::resource ui_layer_detected{};
+    // S3: the stamp buffer (renderer::ui_stamps) the render's detection read,
+    // and whether it is in copy_dest in this submission (else COMMON).
+    reshade::api::resource ui_stamps{};
+    bool ui_stamps_copy_dest{};
   };
 
   // GPU time of the live render stages over a reporting window, in ms. Inputs
@@ -215,6 +238,13 @@ namespace sunshine_game3d {
     // (game3d_ui_change_set.h); zero and none without a layer.
     std::uint32_t layer_presents_ago{};
     change_set::pair_class layer_pairing = change_set::pair_class::none;
+    // S3 (game3d_ui_ticket.h, shadow): b2 words 6-9, the labels the CPU
+    // proposed for the offered layer copy (present and token space) and the
+    // HUD-less image (present space), 0 not proposed, and
+    // Sunshine_UIIdentity (ui_detection::identity: token_batch, and the
+    // gates, pushed only while identity is authoritative). The GPU verified
+    // them against the stamp buffer (renderer::ui_stamps) of this render.
+    std::uint32_t expected_layer_present{}, expected_layer_token{}, expected_hudless_present{}, identity_bits{};
   };
   inline const char *name(ui_detection_snapshot::run_state value) {
     switch (value) {
@@ -263,6 +293,13 @@ namespace sunshine_game3d {
     reshade::api::resource_view ui_source_view() const;
     reshade::api::resource ui_candidate(unsigned slot, reshade::api::format format);
     reshade::api::resource_view ui_candidate_view(unsigned slot) const;
+    // The copy callback takes the destination texture, or, to copy the
+    // snapshot's S3 stamp entry beside it, also the stamp buffer and the byte
+    // offset of the candidate's slot there (ui_stamp_offset; a null buffer
+    // when it could not be made: the callback then copies no stamp). A
+    // three-argument callback that returns true with a stamp buffer has
+    // recorded the entry's copy on the runtime's immediate list, which leaves
+    // the buffer in copy_dest (note_ui_stamp_write).
     template<class Copy>
     reshade::api::resource_view prepare_ui_candidate(unsigned slot, std::uint64_t capture_id, Copy &&copy,
         reshade::api::format format) {
@@ -271,10 +308,36 @@ namespace sunshine_game3d {
       if (!destination.handle) return {};
       if (ui_candidate_captures_[slot] != capture_id) {
         ui_candidate_captures_[slot] = 0;
-        if (!std::forward<Copy>(copy)(destination)) return {};
+        bool copied;
+        if constexpr (std::is_invocable_v<Copy &, reshade::api::resource, reshade::api::resource, std::uint64_t>) {
+          const auto stamps = ui_stamps();
+          copied = std::forward<Copy>(copy)(destination, stamps, ui_stamp_offset(slot));
+          if (copied && stamps.handle) note_ui_stamp_write();
+        } else copied = std::forward<Copy>(copy)(destination);
+        if (!copied) return {};
         ui_candidate_captures_[slot] = capture_id;
       }
       return ui_candidate_view(slot);
+    }
+    // S3: the stamp buffer, ui_ticket::slot::count uint4 entries (x the C_P
+    // read, y the C_T read), created on first need in COMMON; its shader view
+    // is a typed r32g32b32a32_uint buffer (Buffer<uint4>), which every UI
+    // detection pass reads at t9 (game3d_native.hlsl SunshineUIStamps) to
+    // verify the proposed labels. Within a submission it is in copy_dest once
+    // a candidate copy wrote an entry and after every detection (the renderer
+    // transitions it around its reads); a submission starts it in COMMON.
+    // Empty when it could not be made.
+    reshade::api::resource ui_stamps();
+    reshade::api::resource_view ui_stamps_view() const;
+    // S3 (shadow): the GPU identity verdict totals of this renderer's
+    // committed samples (only the gpu_* fields of ui_ticket::identity_counter
+    // are set), for the "Sunshine UI identity" line, and the last committed
+    // sample's verdict of its offered pairs (decision texel 12 .z/.w).
+    ui_ticket::identity_counters identity_counts() const;
+    ui_selection::identity_verdict sampled_identity() const;
+    // The byte offset of a candidate slot's entry (ui_ticket::slot_of_candidate).
+    static std::uint64_t ui_stamp_offset(unsigned candidate_slot) {
+      return ui_ticket::slot_of_candidate(candidate_slot) * ui_ticket::stamp_bytes;
     }
     // The caller must first admit a current capture. Repeated presentations of
     // that immutable capture reuse our private texture in renderer queue order.
@@ -344,6 +407,8 @@ namespace sunshine_game3d {
     // ReShade's destroy_effect_runtime follows its GPU drain. No extra wait.
     void reset_after_runtime_drain();
   private:
+    // S3: a candidate copy wrote a stamp entry in this submission.
+    void note_ui_stamp_write();
     struct impl;
     std::unique_ptr<impl> data_;
     std::uint64_t ui_source_capture_ = 0;

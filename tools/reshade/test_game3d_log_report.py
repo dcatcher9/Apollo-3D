@@ -213,6 +213,33 @@ S1_CLEAN_COUNTERS = {'auto_frames': 100, 'detection_frames': 80, 'held.generated
                      'none.ambiguous': 20, 'trust.earned': 1, 'samples': 30, 'through_ms': 3000}
 
 
+# The groups and keys of format_identity_counters (game3d_ui_ticket.h), the S3 shadow's identity line.
+IDENTITY_GROUPS = (
+    ('renders', None), ('tagged', None),
+    ('frames', ('total', 'once', 'missed', 'repeated', 'extra')),
+    ('detect', ('agree', 'today_only', 'ticket_only')),
+    ('exact', ('agree', 'today_only', 'ticket_only', 'inexact')),
+    ('batch', ('agree', 'today_only', 'ticket_only')),
+    ('label', ('token', 'present', 'none')),
+    ('refused', ('unstamped', 'foreign_queue', 'not_real_span', 'stale_scope', 'no_reference', 'mismatch',
+                 'enhanced_barrier', 'render_pass', 'recording_not_covered', 'budget', 'begin_refused')),
+    ('gpu', ('exact', 'mismatch', 'unstamped', 'unproposed', 'token_exact')),
+    ('interposers', None),
+)
+
+
+def identity(t, values, runtime='0000000000000001'):
+    """A 'Sunshine UI identity' line (S3 shadow); values maps 'key' or 'group.key' to a count, every other field is
+    0."""
+    return counters(t, values, runtime, IDENTITY_GROUPS).replace('Sunshine UI counters:', 'Sunshine UI identity:')
+
+
+def interposers(t, bits, names, fg_known=0, fg_enabled=0, runtime='0000000000000001'):
+    """A 'Sunshine FG interposers' line (format_interposers in game3d_ui_ticket.h)."""
+    return line(t, f'[Sunshine 3D] Sunshine FG interposers: runtime={runtime} bits={bits} names={names} '
+                   f'fg_known={fg_known} fg_enabled={fg_enabled}')
+
+
 BASE = [
     line('10:00:00', "Initializing crosire's ReShade version '6.8' loaded from 'D:\\G\\dxgi.dll' "
                      "into 'D:\\G\\game.exe' ..."),
@@ -1604,6 +1631,112 @@ class ReadinessReport(unittest.TestCase):
         self.assertIn('legacy entries discarded 0', checks['UI trust events'].detail)
         clean = run(BASE + [counters('10:00:12', CLEAN_COUNTERS)])
         self.assertEqual((clean['UI inferred alpha'].status, clean['UI inexact difference'].status), ('PASS', 'PASS'))
+
+    # S3 shadow: 120 renders, 50 HUD-less real frames (40 detected once, 6 repeated with 9 extra detections, 4
+    # missed), the tickets' labels and refusals and the GPU verdicts of proposed pairs.
+    IDENTITY_COUNTS = {'renders': 120, 'tagged': 100, 'frames.total': 50, 'frames.once': 40, 'frames.missed': 4,
+                       'frames.repeated': 6, 'frames.extra': 9, 'detect.agree': 44, 'detect.today_only': 9,
+                       'detect.ticket_only': 2, 'exact.agree': 60, 'exact.today_only': 20, 'exact.ticket_only': 5,
+                       'exact.inexact': 15, 'batch.agree': 70, 'label.token': 100, 'label.present': 80,
+                       'label.none': 3, 'refused.foreign_queue': 2, 'refused.unstamped': 1, 'gpu.exact': 30,
+                       'gpu.token_exact': 10, 'gpu.unproposed': 4, 'interposers': 3}
+
+    def test_s3_identity_line_is_parsed_and_reported(self):
+        # The text test_game3d_ui_ticket pins for format_identity_counters.
+        text = ('renders=9 tagged=8 frames={total=4 once=2 missed=1 repeated=1 extra=2} '
+                'detect={agree=0 today_only=0 ticket_only=0} exact={agree=3 today_only=0 ticket_only=0 inexact=0} '
+                'batch={agree=0 today_only=1 ticket_only=0} label={token=1 present=1 none=1} '
+                'refused={unstamped=0 foreign_queue=1 not_real_span=0 stale_scope=0 no_reference=0 mismatch=0 '
+                'enhanced_barrier=0 render_pass=0 recording_not_covered=0 budget=0 begin_refused=0} '
+                'gpu={exact=2 mismatch=1 unstamped=0 unproposed=1 token_exact=1} interposers=3')
+        fields = report.counter_fields(
+            report.IDENTITY.search(line('10:00:00', 'Sunshine UI identity: runtime=0000000000000001 ' + text))
+            .group(1))
+        self.assertEqual((fields['renders'], fields['frames.extra'], fields['batch.today_only'], fields['label.none'],
+                          fields['refused.foreign_queue'], fields['gpu.mismatch'], fields['gpu.token_exact'],
+                          fields['interposers']), (9, 2, 1, 1, 1, 1, 1, 3))
+        self.assertNotIn('runtime', fields)
+        # The helper writes the same grammar.
+        self.assertEqual(report.counter_fields(report.IDENTITY.search(identity('10:00:00', fields)).group(1)), fields)
+        # The totals are cumulative: the last line counts; the interposer lines are listed.
+        lines = BASE + [interposers('10:00:06', 1, 'sl_interposer'),
+                        identity('10:00:10', {'renders': 1}),
+                        interposers('10:00:11', 3, 'sl_interposer,sl_dlss_g', fg_known=1, fg_enabled=1),
+                        identity('10:00:15', self.IDENTITY_COUNTS)]
+        check = run(lines)['UI identity (S3)']
+        self.assertEqual(check.status, 'INFO')
+        self.assertEqual(check.detail,
+                         '120 renders (100 tagged); HUD-less real frames detected once 40/50 (80%), repeated 6 '
+                         '(9 extra detections), missed 4; detect agree 44, today only 9, ticket only 2; exact agree '
+                         '60, today only 20, ticket only 5, both inexact 15; batch agree 70, today only 0, ticket '
+                         'only 0; labels token 100, present 80, none 3; refused unstamped 1, foreign_queue 2; GPU '
+                         'verdicts exact 30, unproposed 4, token_exact 10 (0 unstamped and 2 foreign-queue labels '
+                         'prove no pair); FG interposers sl_interposer, sl_dlss_g; shadow only: nothing is decided '
+                         'from it')
+        self.assertEqual(check.times, [
+            '10:00:06 runtime=0000000000000001 bits=1 names=sl_interposer fg_known=0 fg_enabled=0',
+            '10:00:11 runtime=0000000000000001 bits=3 names=sl_interposer,sl_dlss_g fg_known=1 fg_enabled=1'])
+        # Without interposer lines the identity line's latest bits name them; nothing evaluated reads none.
+        bits = run(BASE + [identity('10:00:15', {'interposers': 5})])['UI identity (S3)']
+        self.assertIn('; no HUD-less real frame identified; ', bits.detail)
+        self.assertIn('refused none; GPU verdicts none; FG interposers sl_interposer, ngx_dlssg; ', bits.detail)
+        self.assertEqual(bits.times, [])
+
+    def test_s3_identity_warns_on_unproven_batches_and_mismatches(self):
+        values = dict(self.IDENTITY_COUNTS)
+        values.update({'batch.today_only': 3, 'gpu.mismatch': 2})
+        check = run(BASE + [identity('10:00:15', values)])['UI identity (S3)']
+        self.assertEqual(check.status, 'WARN')
+        self.assertTrue(check.detail.startswith(
+            'today paired 3 renders as one tag batch that no token proves; 2 proposed pairs carried a stamp that '
+            'contradicts their label; 120 renders'))
+        for values in ({'batch.today_only': 1}, {'gpu.mismatch': 1}):
+            self.assertEqual(run(BASE + [identity('10:00:15', values)])['UI identity (S3)'].status, 'WARN')
+        # Ticket-only batches, unstamped or foreign stamps and unproposed pairs stay INFO.
+        info = {'batch.ticket_only': 4, 'gpu.unstamped': 3, 'refused.foreign_queue': 2, 'gpu.unproposed': 9}
+        self.assertEqual(run(BASE + [identity('10:00:15', info)])['UI identity (S3)'].status, 'INFO')
+
+    def test_s3_enabled_identity_fails_inexact_differences(self):
+        # Until S3 is enabled an inexact HUD-less pair deciding is expected; once the identity line says identity is
+        # authoritative (authoritative=1), it is a defect, and the identity check says identity decides.
+        inexact = dict(CLEAN_COUNTERS, inexact_difference=4)
+        shadow = run(BASE + [identity('10:00:10', self.IDENTITY_COUNTS), counters('10:00:12', inexact)])
+        self.assertEqual(shadow['UI inexact difference'].status, 'WARN')
+        self.assertIn('expected until S3 is enabled', shadow['UI inexact difference'].detail)
+        enabled_line = identity('10:00:10', self.IDENTITY_COUNTS)
+        enabled_line = enabled_line.replace(' interposers=', ' authoritative=1 interposers=')
+        enabled = run(BASE + [enabled_line, counters('10:00:12', inexact)])
+        self.assertEqual(enabled['UI inexact difference'].status, 'FAIL')
+        self.assertIn('S3 identity is authoritative, so only exact pairs decide',
+                      enabled['UI inexact difference'].detail)
+        self.assertTrue(enabled['UI identity (S3)'].detail.endswith(
+            'S3 identity is authoritative: only exact pairs decide'))
+        clean = run(BASE + [enabled_line, counters('10:00:12', CLEAN_COUNTERS)])
+        self.assertEqual(clean['UI inexact difference'].status, 'PASS')
+        # Unstamped stamps alone are informative.
+        unstamped = run(BASE + [identity('10:00:15', {'gpu.unstamped': 3})])['UI identity (S3)']
+        self.assertEqual(unstamped.status, 'INFO')
+        self.assertIn('(3 unstamped and 0 foreign-queue labels prove no pair)', unstamped.detail)
+
+    def test_logs_without_identity_lines_have_no_identity_check(self):
+        checks = run(BASE + [counters('10:00:12', CLEAN_COUNTERS), line('10:00:20', 'Finished exiting.')])
+        self.assertNotIn('UI identity (S3)', checks)
+        # An interposer line alone (no identity totals) adds nothing either.
+        self.assertNotIn('UI identity (S3)', run(BASE + [interposers('10:00:06', 1, 'sl_interposer')]))
+        self.assertIsNone(report.parse(BASE).identity)
+        # The identity lines change no other check, and 'UI inexact difference' keeps its wording.
+        shadow = [interposers('10:00:06', 3, 'sl_interposer,sl_dlss_g', fg_known=1, fg_enabled=1),
+                  identity('10:00:12', self.IDENTITY_COUNTS)]
+        session = report.parse(shadow)
+        self.assertEqual((session.ui, session.counters, len(session.interposers)), ([], None, 1))
+        inexact = dict(CLEAN_COUNTERS, inexact_difference=4)
+        for extra in ([counters('10:00:12', CLEAN_COUNTERS), line('10:00:20', 'Finished exiting.')],
+                      [counters('10:00:12', inexact)]):
+            before = report.evaluate(report.parse(BASE + extra))
+            after = report.evaluate(report.parse(BASE + shadow + extra))
+            self.assertEqual([c for c in after if c.name != 'UI identity (S3)'], before)
+            self.assertEqual(len(after), len(before) + 1)
+        self.assertIn('expected until S3', run(BASE + [counters('10:00:12', inexact)])['UI inexact difference'].detail)
 
     def test_host_lines_from_another_session_are_not_counted(self):
         with TemporaryDirectory() as folder:

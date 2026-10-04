@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "streamline_depth_capture.h"
 #include "capture_state_policy.h"
+#include "game3d_frame_clock_native.h"
 #include "streamline_native_observer.h"
 #include "native_command_storage.h"
 #include "native_resource_identity.h"
@@ -12,7 +13,9 @@
 #include <cmath>
 #include <optional>
 #include <cstdio>
+#include <initializer_list>
 #include <mutex>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -175,7 +178,9 @@ namespace sunshine_streamline::depth_capture {
       if (!supported_description(desc)) { out = {}; return status::unsupported_resource; }
       return source_region(desc, resource, out);
     }
-    struct source_state { std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}; };
+    // enhanced: value is the legacy equivalent of an enhanced Barrier layout
+    // (S3 shadow provenance; admission treats it like a legacy state).
+    struct source_state { std::uint64_t source{}; std::uint32_t value{}; bool known{}, blocked{}, enhanced{}; };
     struct command_state {
       std::uint64_t cookie{};
       std::uint64_t observation_generation{};
@@ -230,6 +235,7 @@ namespace sunshine_streamline::depth_capture {
     ~texture_reference() { if (shared_handle) CloseHandle(shared_handle); }
   };
   namespace {
+    struct stamp_pool;
     struct fence_point { std::uint64_t queue{}, value{}; };
     struct slot {
       std::shared_ptr<texture_reference> texture;
@@ -254,10 +260,146 @@ namespace sunshine_streamline::depth_capture {
       bool source_nominated{}, nomination_only{}, nomination_invalid{};
       status pixel_failure{status::unavailable};
       capture_failure failure{capture_failure::none};
+      // S3 shadow facts of an auxiliary snapshot; nothing here admits, retires
+      // or reuses a slot. stamps holds the device's stamp pool while the slot
+      // may still be read (its entry is this slot's index there).
+      state_basis basis{state_basis::unknown};
+      bool stamped{};
+      std::shared_ptr<stamp_pool> stamps;
     };
     std::array<slot, slot_limit> slots;
     std::array<slot, diagnostic_slot_limit> diagnostic_slots;
     bool diagnostic_slots_active{}; // Protected by mutex; idle callbacks skip this pool.
+
+    // S3 snapshot stamps (game3d_ui_ticket.h, shadow only). One CPU-readable
+    // buffer per device holds a 16-byte entry per auxiliary slot (the C_P read
+    // at byte 0, the C_T read at byte 4) and one entry that stays zero for
+    // consumers of an unstamped slot. Every access recorded into a game list
+    // is bracketed by explicit COMMON barriers on the add-on's own buffers
+    // (the clocks and this one), so a later implicit promotion in the same
+    // list stays legal; no barrier touches a game resource. Consumers on
+    // ReShade's immediate list, submitted alone, rely on implicit promotion.
+    namespace frame_clock = sunshine_game3d::frame_clock;
+    constexpr std::uint64_t stamp_entry_bytes = 16, stamp_zero_entry = diagnostic_slot_limit;
+    constexpr std::uint32_t stamp_ring_entries = 64;
+    struct stamp_pool {
+      com_ptr<ID3D12Device> device;
+      com_ptr<ID3D12Resource> entries, ring;
+      std::uint64_t device_identity{};
+      // entries is mapped for the pool's lifetime (a write-back custom heap);
+      // ring (an upload buffer for lists without WriteBufferImmediate) too.
+      const volatile std::uint32_t *mapped{};
+      std::uint32_t *ring_data{};
+      std::uint32_t ring_next{};
+      ~stamp_pool() {
+        if (mapped) entries->Unmap(0, nullptr);
+        if (ring_data) ring->Unmap(0, nullptr);
+      }
+    };
+    std::array<std::weak_ptr<stamp_pool>, queue_limit> stamp_pools; // Protected by mutex.
+    D3D12_RESOURCE_DESC stamp_buffer_desc(std::uint64_t bytes) {
+      D3D12_RESOURCE_DESC desc{};
+      desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; desc.Width = bytes; desc.Height = 1;
+      desc.DepthOrArraySize = desc.MipLevels = 1; desc.Format = DXGI_FORMAT_UNKNOWN;
+      desc.SampleDesc.Count = 1; desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      return desc;
+    }
+    // Requires the lock. The device's stamp pool, created on first need; null
+    // when its buffer cannot be made (the snapshot then stays unstamped).
+    std::shared_ptr<stamp_pool> stamp_pool_for(ID3D12Device *device, std::uint64_t identity) {
+      if (!device || !identity) return {};
+      std::weak_ptr<stamp_pool> *free_entry = nullptr;
+      for (auto &entry : stamp_pools) {
+        if (auto pool = entry.lock()) {
+          if (pool->device_identity == identity) return pool;
+        } else if (!free_entry) free_entry = &entry;
+      }
+      if (!free_entry) return {};
+      auto pool = std::make_shared<stamp_pool>();
+      device->AddRef(); pool->device.p = device; pool->device_identity = identity;
+      D3D12_HEAP_PROPERTIES heap{};
+      heap.Type = D3D12_HEAP_TYPE_CUSTOM; heap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
+      heap.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+      const auto desc = stamp_buffer_desc((stamp_zero_entry + 1) * stamp_entry_bytes);
+      native_observer::suppression_scope suppress;
+      void *data = nullptr;
+      if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+            __uuidof(ID3D12Resource), reinterpret_cast<void **>(pool->entries.put()))) ||
+          FAILED(pool->entries->Map(0, nullptr, &data)) || !data) return {};
+      std::fill_n(static_cast<std::uint32_t *>(data), (stamp_zero_entry + 1) * stamp_entry_bytes / 4, 0u);
+      pool->mapped = static_cast<const volatile std::uint32_t *>(data);
+      *free_entry = pool;
+      return pool;
+    }
+    // Explicit transitions of the add-on's own buffers from COMMON (to) or
+    // back to it.
+    void stamp_barriers(ID3D12GraphicsCommandList *list,
+        std::initializer_list<std::pair<ID3D12Resource *, D3D12_RESOURCE_STATES>> resources, bool to) {
+      D3D12_RESOURCE_BARRIER barriers[3]{};
+      UINT count = 0;
+      for (const auto &[resource, state] : resources) {
+        if (count == 3) break;
+        auto &b = barriers[count++];
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, to ? D3D12_RESOURCE_STATE_COMMON : state,
+          to ? state : D3D12_RESOURCE_STATE_COMMON};
+      }
+      list->ResourceBarrier(count, barriers);
+    }
+    // Requires the lock; recorded right after an auxiliary snapshot copy in its
+    // own list. Copies C_P and C_T into the slot's entry and, for a Backbuffer
+    // tag (input::token_clock), then writes the low 32 bits of its token
+    // generation into C_T. False, recording nothing, before the device's
+    // clocks exist (game3d_frame_clock_native.h).
+    bool record_stamp(ID3D12GraphicsCommandList *list, ID3D12Device *device, stamp_pool &pool, std::size_t index,
+        const input &value) {
+      auto present = frame_clock::native_present_clock(device), token = frame_clock::native_token_clock(device);
+      if ((!present.resource || !token.resource) && value.source && value.source->device.p != device) {
+        present = frame_clock::native_present_clock(value.source->device.p);
+        token = frame_clock::native_token_clock(value.source->device.p);
+      }
+      if (!present.resource || !token.resource || index >= stamp_zero_entry) return false;
+      auto *present_clock = static_cast<ID3D12Resource *>(present.resource);
+      auto *token_clock = static_cast<ID3D12Resource *>(token.resource);
+      const auto entry = index * stamp_entry_bytes;
+      stamp_barriers(list, {{present_clock, D3D12_RESOURCE_STATE_COPY_SOURCE}, {token_clock, D3D12_RESOURCE_STATE_COPY_SOURCE},
+        {pool.entries.p, D3D12_RESOURCE_STATE_COPY_DEST}}, true);
+      list->CopyBufferRegion(pool.entries.p, entry, present_clock, present.offset, 4);
+      list->CopyBufferRegion(pool.entries.p, entry + 4, token_clock, token.offset, 4);
+      stamp_barriers(list, {{present_clock, D3D12_RESOURCE_STATE_COPY_SOURCE}, {token_clock, D3D12_RESOURCE_STATE_COPY_SOURCE},
+        {pool.entries.p, D3D12_RESOURCE_STATE_COPY_DEST}}, false);
+      // 0 means never written: a tag without a token generation (or whose low
+      // 32 bits wrapped to 0) leaves the token clock as it was.
+      const auto label = static_cast<std::uint32_t>(value.source_frame_generation);
+      if (!value.token_clock || !label) return true;
+      com_ptr<ID3D12GraphicsCommandList2> list2;
+      const bool immediate = SUCCEEDED(list->QueryInterface(__uuidof(ID3D12GraphicsCommandList2),
+        reinterpret_cast<void **>(list2.put()))) && list2.p;
+      if (!immediate && !pool.ring.p) {
+        D3D12_HEAP_PROPERTIES upload{};
+        upload.Type = D3D12_HEAP_TYPE_UPLOAD;
+        const auto desc = stamp_buffer_desc(stamp_ring_entries * 4ull);
+        void *data = nullptr;
+        if (FAILED(pool.device->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+              nullptr, __uuidof(ID3D12Resource), reinterpret_cast<void **>(pool.ring.put()))) ||
+            FAILED(pool.ring->Map(0, nullptr, &data)) || !data) {
+          pool.ring.reset();
+          return true;
+        }
+        pool.ring_data = static_cast<std::uint32_t *>(data);
+      }
+      stamp_barriers(list, {{token_clock, D3D12_RESOURCE_STATE_COPY_DEST}}, true);
+      if (immediate) {
+        const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER parameter{token_clock->GetGPUVirtualAddress() + token.offset, label};
+        list2->WriteBufferImmediate(1, &parameter, nullptr);
+      } else {
+        const auto ring_slot = pool.ring_next++ % stamp_ring_entries;
+        pool.ring_data[ring_slot] = label;
+        list->CopyBufferRegion(token_clock, token.offset, pool.ring.p, ring_slot * 4ull, 4);
+      }
+      stamp_barriers(list, {{token_clock, D3D12_RESOURCE_STATE_COPY_DEST}}, false);
+      return true;
+    }
     template<class Operation> void for_each_capture(Operation operation) {
       for (auto &value : slots) operation(value);
       if (diagnostic_slots_active) for (auto &value : diagnostic_slots) operation(value);
@@ -421,6 +563,7 @@ namespace sunshine_streamline::depth_capture {
           if (known->blocked) continue;
           known->known = value.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE && copy_state::supported(value.Transition.StateAfter);
           known->value = value.Transition.StateAfter;
+          known->enhanced = false;
         }
       }
     }
@@ -517,7 +660,15 @@ namespace sunshine_streamline::depth_capture {
         if (known->blocked) continue;
         known->known = copy_state::supported(*legacy);
         known->value = *legacy;
+        known->enhanced = true;
       }
+    }
+    // S3 shadow provenance of an admitted copy's pre-copy state: an entry on the
+    // recording (the copy used or matched it), else the SDK contract or the
+    // per-call declaration. It never changes which state the copy uses.
+    state_basis copy_basis(const source_state *observed, const copy_state::decision &chosen) {
+      if (observed) return observed->enhanced ? state_basis::observed_enhanced : state_basis::observed_legacy;
+      return chosen.used_contract ? state_basis::contract : state_basis::declared;
     }
     void render_pass(std::uint64_t native, std::uint64_t cookie, bool inside) {
       std::lock_guard lock(mutex);
@@ -1784,6 +1935,7 @@ namespace sunshine_streamline::depth_capture {
       copy_state::observation{true, observed->known, observed->blocked, observed->value} : copy_state::observation{}, desc.Flags);
     if (!chosen.admitted) return reject(chosen.result, chosen.stage);
     const auto before = chosen.state;
+    const auto basis = copy_basis(observed, chosen);
     if (diagnostic) {
       diagnostic->copy_state = before; diagnostic->copy_state_known = true;
       diagnostic->used_observed_state = chosen.used_observed;
@@ -1870,6 +2022,7 @@ namespace sunshine_streamline::depth_capture {
     *found = {};
     found->texture = std::move(texture); found->metadata = value; found->metadata.native_state = before;
     found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
+    found->basis = basis;
     found->preservation_only = preservation_only;
     found->diagnostic_only = diagnostic_copy;
     found->diagnostic_reusable = reusable_storage;
@@ -1903,6 +2056,12 @@ namespace sunshine_streamline::depth_capture {
     }
     if (before == D3D12_RESOURCE_STATE_COPY_SOURCE) list->ResourceBarrier(1, &transitions[1]);
     else list->ResourceBarrier(2, transitions);
+    if (diagnostic_copy) {
+      // S3 shadow: the snapshot's stamp in the same list, right after its copy.
+      found->stamps = stamp_pool_for(list_device.p, device_identity);
+      found->stamped = found->stamps &&
+        record_stamp(list, list_device.p, *found->stamps, static_cast<std::size_t>(found - diagnostic_slots.data()), value);
+    }
     if (!preservation_only) set_attempt(value.provider, status::recorded);
     if (diagnostic) { diagnostic->result = status::recorded; diagnostic->stage = record_stage::recorded; }
     if (preserved) *preserved = {found->id, reinterpret_cast<std::uint64_t>(found->texture->resource.p),
@@ -1962,11 +2121,17 @@ namespace sunshine_streamline::depth_capture {
       retire_dead_recordings(entry);
       out.capture_id = entry.id; out.producer_queue = entry.queue; out.producer_fence = entry.producer_fence;
       out.failure = entry.failure; out.producer_recording_retired = producer_recording_retired(entry);
+      out.stamped = entry.stamped; out.basis = entry.basis;
       const auto progress = local && entry.queue == native_consumer ? queue_progress{} : producer_progress(entry);
       out.producer_completed = progress.completed;
       const auto admission = local ? local_texture_admission(entry, native_consumer, consumer->device_identity, progress) :
         diagnostic_admission(entry, progress);
       if (admission != status::ready) return result(admission);
+      if (!local && entry.stamped && entry.stamps && entry.stamps->mapped) {
+        // The strict path admits only a completed producer: its stamp is final.
+        const auto *stamp = entry.stamps->mapped + (&entry - diagnostic_slots.data()) * (stamp_entry_bytes / 4);
+        out.stamp_present = stamp[0]; out.stamp_token = stamp[1]; out.stamp_read = true;
+      }
       const auto &texture = entry.texture;
       const auto desc = texture->resource->GetDesc();
       out.ownership = texture;
@@ -2204,7 +2369,7 @@ namespace sunshine_streamline::depth_capture {
   // submission, followed by the queue fence.
   static bool consume_owned(std::uint64_t native, const packet &value, std::uint64_t destination,
       std::uint32_t destination_state, consumer_diagnostic *diagnostic, bool auxiliary = false, bool local_auxiliary = false,
-      bool immediate = false) {
+      bool immediate = false, stamp_destination stamp = {}) {
     if (diagnostic) *diagnostic = {};
     const auto result = [diagnostic](consumer_status why) {
       if (diagnostic) diagnostic->result = why;
@@ -2245,6 +2410,16 @@ namespace sunshine_streamline::depth_capture {
         retained_target = retain_source(reinterpret_cast<std::uint64_t>(target.p));
         if (!retained_target) return result(consumer_status::invalid_destination);
       }
+    }
+    // S3 shadow: the stamp entry's destination, a buffer on this device with
+    // room for the entry; an unusable one is skipped, never a failed copy.
+    com_ptr<ID3D12Resource> stamp_target;
+    if (auxiliary && destination && stamp.buffer && query_native(stamp.buffer, IID_ID3D12Resource, stamp_target)) {
+      com_ptr<ID3D12Device> stamp_device;
+      const auto desc = stamp_target->GetDesc();
+      if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || desc.Width < stamp.offset + stamp_entry_bytes ||
+          FAILED(stamp_target->GetDevice(IID_ID3D12Device, reinterpret_cast<void **>(stamp_device.put()))) ||
+          device_cookie(stamp_device.p) != device_identity) stamp_target.reset();
     }
     std::lock_guard lock(mutex);
     // A list in ReShade's lifecycle (or a registered runtime list) is read
@@ -2319,6 +2494,12 @@ namespace sunshine_streamline::depth_capture {
           std::swap(transitions[0].Transition.StateBefore, transitions[0].Transition.StateAfter);
           std::swap(transitions[1].Transition.StateBefore, transitions[1].Transition.StateAfter);
           list->ResourceBarrier(destination_state == D3D12_RESOURCE_STATE_COPY_DEST ? 1 : 2, transitions);
+          // The stamp entry beside the pixels (zeros for an unstamped slot).
+          const auto pool = stamp_target.p ? (entry.stamps ? entry.stamps : stamp_pool_for(device.p, device_identity)) : nullptr;
+          if (pool) {
+            const auto index = entry.stamped && entry.stamps ? static_cast<std::uint64_t>(current - begin) : stamp_zero_entry;
+            list->CopyBufferRegion(stamp_target.p, stamp.offset, pool->entries.p, index * stamp_entry_bytes, stamp_entry_bytes);
+          }
         }
         return result(consumer_status::ready);
       }
@@ -2343,7 +2524,7 @@ namespace sunshine_streamline::depth_capture {
   }
   static bool copy_auxiliary_texture(std::uint64_t command, std::uint64_t consumer_queue,
       const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
-      consumer_diagnostic *diagnostic, bool local, bool immediate) {
+      consumer_diagnostic *diagnostic, bool local, bool immediate, stamp_destination stamp) {
     const auto reject = [&](consumer_status value) {
       if (diagnostic) { *diagnostic = {}; diagnostic->result = value; }
       return false;
@@ -2372,17 +2553,19 @@ namespace sunshine_streamline::depth_capture {
       selected.device = reinterpret_cast<std::uint64_t>(found->texture->device.p);
       selected.queue = reinterpret_cast<std::uint64_t>(owner->queue.p);
     }
-    return consume_owned(command, selected, destination, destination_state, diagnostic, true, local, immediate);
+    return consume_owned(command, selected, destination, destination_state, diagnostic, true, local, immediate, stamp);
   }
   bool copy_diagnostic_texture(std::uint64_t command, std::uint64_t consumer_queue,
       const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
-      consumer_diagnostic *diagnostic, bool immediate) {
-    return copy_auxiliary_texture(command, consumer_queue, ticket, destination, destination_state, diagnostic, false, immediate);
+      consumer_diagnostic *diagnostic, bool immediate, stamp_destination stamp) {
+    return copy_auxiliary_texture(command, consumer_queue, ticket, destination, destination_state, diagnostic, false, immediate,
+      stamp);
   }
   bool copy_local_texture(std::uint64_t command, std::uint64_t consumer_queue,
       const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
-      consumer_diagnostic *diagnostic, bool immediate) {
-    return copy_auxiliary_texture(command, consumer_queue, ticket, destination, destination_state, diagnostic, true, immediate);
+      consumer_diagnostic *diagnostic, bool immediate, stamp_destination stamp) {
+    return copy_auxiliary_texture(command, consumer_queue, ticket, destination, destination_state, diagnostic, true, immediate,
+      stamp);
   }
   namespace {
     consumer_status preserved_admission(const slot &value, const preservation_ticket &ticket,
@@ -2453,6 +2636,14 @@ namespace sunshine_streamline::depth_capture {
     CASE(no_completed_snapshot); CASE(completed_before_gap); CASE(completed_not_older);
     CASE(completed_already_consumed); CASE(presentation_already_selected); CASE(layout_changed);
     CASE(completed_not_readable); CASE(completed_snapshot); CASE(fg_scope_missing); CASE(fg_scope_mismatch);
+#undef CASE
+    }
+    return "unknown";
+  }
+  const char *name(state_basis value) {
+    switch (value) {
+#define CASE(x) case state_basis::x: return #x
+    CASE(unknown); CASE(observed_legacy); CASE(observed_enhanced); CASE(declared); CASE(contract);
 #undef CASE
     }
     return "unknown";
@@ -4600,6 +4791,46 @@ namespace sunshine_streamline::depth_capture {
         value.queue == native && value.producer_fence == fence &&
         value.failure == capture_failure::producer_queue_changed && cross_queue_completion_regression() &&
         shared_preservation_regression() && preservation_owner_regression() && source_authority_regression();
+    }
+    bool snapshot_stamp_regression() {
+      // S3 shadow provenance: admission still uses the mapped legacy state of
+      // an enhanced layout, while the basis records where it came from.
+      const auto saved = requested.load();
+      struct restore_requested { bool value; ~restore_requested() { requested = value; } } restore{saved};
+      requested = true;
+      private_object list, target;
+      const auto address = native_object(list);
+      std::uint64_t cookie{};
+      associate_recording(address, &cookie);
+      auto owner = command(address, cookie, false);
+      if (!cookie || !owner) return false;
+      owner->reported = true;
+      const native_observer::enhanced_texture shader_resource{reinterpret_cast<ID3D12Resource *>(&target),
+        D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, true};
+      enhanced_textures(address, cookie, 1, &shader_resource);
+      const auto identity = source_cookie(&target);
+      const auto *entry = state(*owner, identity, false);
+      if (!identity || !entry || !entry->known || entry->blocked || !entry->enhanced) return false;
+      const auto chosen = copy_state::resolve(copy_state::rule::observed_else_contract, UINT32_MAX,
+        copy_state::observation{true, entry->known, entry->blocked, entry->value}, 0);
+      if (!chosen.admitted || !chosen.used_observed || copy_basis(entry, chosen) != state_basis::observed_enhanced) return false;
+      // A later legacy transition replaces the provenance.
+      D3D12_RESOURCE_BARRIER transition{};
+      transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      transition.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&target);
+      transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      transition.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+      barriers(address, cookie, 1, &transition);
+      entry = state(*owner, identity, false);
+      if (!entry || entry->enhanced || copy_basis(entry, chosen) != state_basis::observed_legacy) return false;
+      copy_state::decision contract{};
+      contract.used_contract = true;
+      if (copy_basis(nullptr, contract) != state_basis::contract || copy_basis(nullptr, {}) != state_basis::declared) return false;
+      // Without a device no stamp pool exists: a snapshot then stays
+      // unstamped, and its consumers copy the zero entry instead.
+      std::lock_guard lock(mutex);
+      return !stamp_pool_for(nullptr, 1) && stamp_zero_entry == diagnostic_slot_limit && stamp_entry_bytes == 16 &&
+        std::string_view(name(state_basis::observed_enhanced)) == "observed_enhanced";
     }
   }
 #endif

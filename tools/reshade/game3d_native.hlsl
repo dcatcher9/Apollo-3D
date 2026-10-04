@@ -120,6 +120,41 @@
 #define SUNSHINE_UI_CHANGE_SET_PLANE_DARK 6
 #define SUNSHINE_UI_CHANGE_SET_PLANE_STRUCT 7
 #define SUNSHINE_UI_CHANGE_SET_PLANE_TILE 8
+// S3 frame identity (docs/reshade-sbs.md, UI decision framework, "S3
+// snapshot ticket (shadow)"), mirrored from game3d_ui_detection_contract.h
+// (namespace identity): the CPU proposes the label a paired snapshot must
+// carry (b2 words 6-8, 0 not proposed) and the detection passes verify it
+// against the snapshot's stamp in SunshineUIStamps (t9; entry LAYER for the
+// offscreen layer copy, HUDLESS for the HUD-less image; x its C_P read, y its
+// C_T read). Sunshine_UIIdentity carries TOKEN_BATCH (the CPU proved the
+// HUD-less pair one tag batch by token) and the gates: GATE_LAYER ANDs the
+// layer pair's identity into the pre-UI change set's validity (source 12),
+// GATE_HUDLESS the HUD-less pair's into the HUD-less change set's (5, 6).
+// Verdicts EXACT, MISMATCH, UNSTAMPED (the stamp read 0) and UNPROPOSED, in
+// SPACE_TOKEN or SPACE_PRESENT; decision texel 12 .z packs both pairs'
+// verdicts and spaces (the HUD-less one from HUDLESS_SHIFT) and the exact
+// pairs' candidate bits from OK_SHIFT, .w the read minus the proposal of
+// each as int16 halves (the layer's low). Pair offset PAIR_BACKBUFFER (3)
+// compares the layer with the Backbuffer tag's colour (t13), a token-space
+// pair's final image.
+#define SUNSHINE_UI_IDENTITY 1
+#define SUNSHINE_UI_IDENTITY_TOKEN_BATCH 0x1u
+#define SUNSHINE_UI_IDENTITY_GATE_LAYER 0x2u
+#define SUNSHINE_UI_IDENTITY_GATE_HUDLESS 0x4u
+#define SUNSHINE_UI_IDENTITY_STAMP_LAYER 4
+#define SUNSHINE_UI_IDENTITY_STAMP_HUDLESS 5
+#define SUNSHINE_UI_IDENTITY_STAMP_ENTRIES 6
+#define SUNSHINE_UI_IDENTITY_EXACT 1
+#define SUNSHINE_UI_IDENTITY_MISMATCH 2
+#define SUNSHINE_UI_IDENTITY_UNSTAMPED 3
+#define SUNSHINE_UI_IDENTITY_UNPROPOSED 4
+#define SUNSHINE_UI_IDENTITY_SPACE_TOKEN 1
+#define SUNSHINE_UI_IDENTITY_SPACE_PRESENT 2
+#define SUNSHINE_UI_IDENTITY_SPACE_MASK 3
+#define SUNSHINE_UI_IDENTITY_SPACE_SHIFT 4
+#define SUNSHINE_UI_IDENTITY_HUDLESS_SHIFT 8
+#define SUNSHINE_UI_IDENTITY_OK_SHIFT 16
+#define SUNSHINE_UI_CHANGE_SET_PAIR_BACKBUFFER 3
 // Pin only UI (fix 4, rule P2; docs/reshade-sbs.md, UI decision framework),
 // mirrored from game3d_ui_detection_contract.h, whose CPU reference is
 // game3d_ui_darkening.h: a pure darkening (the UI adds no colour of its own,
@@ -193,6 +228,14 @@
 #define SUNSHINE_UI_COUNTER_FULL_ALPHA 28
 #define SUNSHINE_UI_COUNTER_REUSED 29
 #define SUNSHINE_UI_COUNTER_REFINED 30
+// S3: SUNSHINE_UI_COUNTER_IDENTITY_WORDS more words after the counted ones,
+// one add per offered layer and HUD-less pair by its identity verdict.
+#define SUNSHINE_UI_COUNTER_IDENTITY_WORDS 5
+#define SUNSHINE_UI_COUNTER_IDENTITY_EXACT 31
+#define SUNSHINE_UI_COUNTER_IDENTITY_MISMATCH 32
+#define SUNSHINE_UI_COUNTER_IDENTITY_UNSTAMPED 33
+#define SUNSHINE_UI_COUNTER_IDENTITY_UNPROPOSED 34
+#define SUNSHINE_UI_COUNTER_IDENTITY_TOKEN_EXACT 35
 #define SUNSHINE_UI_NONE_LAYER_ASIDE 0
 #define SUNSHINE_UI_NONE_TRUSTED_INVALID 1
 #define SUNSHINE_UI_NONE_PRESENTED_BLOCKED 2
@@ -283,6 +326,12 @@ Texture2D<float4> SunshineHUDless : register(t14);
 // both registers in passes of their own.
 Texture2D<uint> SunshineUIChangeSetPlanes : register(t8);
 RWTexture2D<uint> SunshineUIChangeSetPlanesStore : register(u4);
+// S3: the stamps of the candidate copies, SUNSHINE_UI_IDENTITY_STAMP_ENTRIES
+// uint4 entries (x the C_P read, y the C_T read), bound at t9 by the
+// detection passes only (the nearest UI plane's resolved value shares t9 in
+// passes of its own); unbound, as in offline replay without stamps, every
+// entry reads zero (unstamped).
+Buffer<uint4> SunshineUIStamps : register(t9);
 // Sunshine_UIDetectionFlags (docs/reshade-sbs.md, UI detection flags and
 // decision texels), mirrored from game3d_ui_detection_contract.h. Stored bits
 // describe the offscreen UI layer slot (t7): it must pass the premultiplied
@@ -356,6 +405,13 @@ cbuffer SunshineUIDetectionConstants : register(b2)
     // Presents (SUNSHINE_UI_CHANGE_SET_RETAINED_1 and _2). Fix 4:
     // SUNSHINE_UI_DARKENING_MEASURED when the darkening passes run.
     uint Sunshine_UIRules;
+    // S3: the labels the CPU proposes for the offered layer copy (present
+    // and token space) and the HUD-less image (present space), 0 not
+    // proposed, and the SUNSHINE_UI_IDENTITY_* bits.
+    uint Sunshine_UIExpectedLayerPresent;
+    uint Sunshine_UIExpectedLayerToken;
+    uint Sunshine_UIExpectedHUDlessPresent;
+    uint Sunshine_UIIdentity;
 };
 RWTexture2D<float> SunshineHostCandidateStore : register(u0);
 RWTexture2D<float> SunshineHostVerticalMajorantStore : register(u1);
@@ -431,14 +487,67 @@ uint SunshineLayerPairOffset()
     return (Sunshine_UIRules & SUNSHINE_UI_CHANGE_SET_PAIR_MASK) >> SUNSHINE_UI_CHANGE_SET_PAIR_SHIFT;
 }
 // The Present a layer copy is compared with: 0 the current presented color
-// (t6), 1 and 2 the retained Presents one and two back (t2, t3).
+// (t6), 1 and 2 the retained Presents one and two back (t2, t3), and (S3)
+// SUNSHINE_UI_CHANGE_SET_PAIR_BACKBUFFER the Backbuffer tag's colour (t13),
+// the final image of a token-space pair.
 float3 SunshineLayerPairColor(int3 at, uint offset)
 {
     float3 color;
     [branch] if (offset == 1u) color = SunshineRetainedPresent1.Load(at).rgb;
     else [branch] if (offset == 2u) color = SunshineRetainedPresent2.Load(at).rgb;
+    else [branch] if (offset == SUNSHINE_UI_CHANGE_SET_PAIR_BACKBUFFER) color = SunshineUIBackbufferAlpha.Load(at).rgb;
     else color = SunshinePresentedColor.Load(at).rgb;
     return color;
+}
+// S3: one pair's identity verdict, a read against the proposed label.
+uint SunshineIdentityVerdict(uint read, uint expected)
+{
+    return !expected ? SUNSHINE_UI_IDENTITY_UNPROPOSED : !read ? SUNSHINE_UI_IDENTITY_UNSTAMPED :
+        read == expected ? SUNSHINE_UI_IDENTITY_EXACT : SUNSHINE_UI_IDENTITY_MISMATCH;
+}
+// The read minus the proposal, clamped to int16; zero unless both are set.
+int SunshineIdentityDelta(uint read, uint expected)
+{
+    return read && expected ? clamp(int(read - expected), -32768, 32767) : 0;
+}
+// Decision texel 12 .z and .w (ui_selection::verify_identity): an offered
+// layer pairs in present space when a present label is proposed, else in
+// token space; an offered HUD-less image in token space with
+// SUNSHINE_UI_IDENTITY_TOKEN_BATCH, else in present space with its stamp's C_P
+// read + 1 (a tag copy holds the frame after the Present it read).
+uint2 SunshineIdentityWords()
+{
+    uint layerVerdict = 0u, layerSpace = 0u, hudlessVerdict = 0u, hudlessSpace = 0u;
+    int layerDelta = 0, hudlessDelta = 0;
+    [branch] if (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) {
+        const uint4 stamp = SunshineUIStamps.Load(SUNSHINE_UI_IDENTITY_STAMP_LAYER);
+        if (Sunshine_UIExpectedLayerPresent) {
+            layerSpace = SUNSHINE_UI_IDENTITY_SPACE_PRESENT;
+            layerVerdict = SunshineIdentityVerdict(stamp.x, Sunshine_UIExpectedLayerPresent);
+            layerDelta = SunshineIdentityDelta(stamp.x, Sunshine_UIExpectedLayerPresent);
+        } else if (Sunshine_UIExpectedLayerToken) {
+            layerSpace = SUNSHINE_UI_IDENTITY_SPACE_TOKEN;
+            layerVerdict = SunshineIdentityVerdict(stamp.y, Sunshine_UIExpectedLayerToken);
+            layerDelta = SunshineIdentityDelta(stamp.y, Sunshine_UIExpectedLayerToken);
+        } else layerVerdict = SUNSHINE_UI_IDENTITY_UNPROPOSED;
+    }
+    [branch] if (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_HUDLESS) {
+        if (Sunshine_UIIdentity & SUNSHINE_UI_IDENTITY_TOKEN_BATCH) {
+            hudlessSpace = SUNSHINE_UI_IDENTITY_SPACE_TOKEN;
+            hudlessVerdict = SUNSHINE_UI_IDENTITY_EXACT;
+        } else if (Sunshine_UIExpectedHUDlessPresent) {
+            const uint read = SunshineUIStamps.Load(SUNSHINE_UI_IDENTITY_STAMP_HUDLESS).x;
+            const uint label = read ? read + 1u : 0u;
+            hudlessSpace = SUNSHINE_UI_IDENTITY_SPACE_PRESENT;
+            hudlessVerdict = SunshineIdentityVerdict(label, Sunshine_UIExpectedHUDlessPresent);
+            hudlessDelta = SunshineIdentityDelta(label, Sunshine_UIExpectedHUDlessPresent);
+        } else hudlessVerdict = SUNSHINE_UI_IDENTITY_UNPROPOSED;
+    }
+    const uint ok = (layerVerdict == SUNSHINE_UI_IDENTITY_EXACT ? SUNSHINE_UI_CANDIDATE_LAYER : 0u) |
+        (hudlessVerdict == SUNSHINE_UI_IDENTITY_EXACT ? SUNSHINE_UI_CANDIDATE_HUDLESS : 0u);
+    return uint2(layerVerdict | layerSpace << SUNSHINE_UI_IDENTITY_SPACE_SHIFT |
+        (hudlessVerdict | hudlessSpace << SUNSHINE_UI_IDENTITY_SPACE_SHIFT) << SUNSHINE_UI_IDENTITY_HUDLESS_SHIFT |
+        ok << SUNSHINE_UI_IDENTITY_OK_SHIFT, (uint(layerDelta) & 0xffffu) | uint(hudlessDelta) << 16);
 }
 // The change-set slot's difference at one pixel, and its pre-UI colour:
 // the pre-UI layer (t7) against the Present of the pair offset, or the
@@ -1586,12 +1695,21 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
         lit * 100u >= pixels * SUNSHINE_UI_CHANGE_SET_LIT_PERCENT;
     const bool full_set = (offered & SUNSHINE_UI_CANDIDATE_EXACT) && !difference.y &&
         difference.x * 100u >= pixels * 98u && lit * 2u >= pixels;
-    if (partial_set || full_set) valid |= SUNSHINE_UI_CANDIDATE_HUDLESS;
+    // S3: the offered pairs' identity; a gate ANDs it into the paired change
+    // set's validity (GATE_HUDLESS for 5 and 6, GATE_LAYER for 12).
+    const uint2 identity = SunshineIdentityWords();
+    const uint identity_ok = identity.x >> SUNSHINE_UI_IDENTITY_OK_SHIFT;
+    const bool hudless_identity = !(Sunshine_UIIdentity & SUNSHINE_UI_IDENTITY_GATE_HUDLESS) ||
+        (identity_ok & SUNSHINE_UI_CANDIDATE_HUDLESS) != 0u;
+    const bool layer_identity = !(Sunshine_UIIdentity & SUNSHINE_UI_IDENTITY_GATE_LAYER) ||
+        (identity_ok & SUNSHINE_UI_CANDIDATE_LAYER) != 0u;
+    if ((partial_set || full_set) && hudless_identity) valid |= SUNSHINE_UI_CANDIDATE_HUDLESS;
     if (partial_set) selective |= SUNSHINE_UI_CANDIDATE_HUDLESS;
     // Fix 3: the pre-UI change set is partial only, without an offered
     // HUD-less image (whose pair the slot then holds) and over a layer
     // without coverage.
-    if ((offered & SUNSHINE_UI_CANDIDATE_PRE_UI) && !(offered & SUNSHINE_UI_CANDIDATE_HUDLESS) && partial_set && !layer.x) {
+    if ((offered & SUNSHINE_UI_CANDIDATE_PRE_UI) && !(offered & SUNSHINE_UI_CANDIDATE_HUDLESS) && partial_set && !layer.x &&
+        layer_identity) {
         valid |= SUNSHINE_UI_CANDIDATE_PRE_UI;
         selective |= SUNSHINE_UI_CANDIDATE_PRE_UI;
     }
@@ -1736,9 +1854,13 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // store, and then has no mask (or its own flat alpha);
     // SUNSHINE_UI_PER_FRAME_HOLD_RESET means no previous real decision exists
     // in this chain. The store is read before it is written.
+    // S3: a gate that refused an offered paired change set (its pair not
+    // exact) counts as that set missing for one frame, like the gap.
+    const bool identity_refused = ((offered & SUNSHINE_UI_CANDIDATE_PRE_UI) && !layer_identity) ||
+        ((offered & SUNSHINE_UI_CANDIDATE_HUDLESS) && !hudless_identity);
     const bool refine_missing = refine_on && shapeless && !refined &&
         ((Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_ACCEPTED_MISSING) != 0u ||
-        (Sunshine_UIRules & SUNSHINE_UI_CHANGE_SET_GAP) != 0u);
+        (Sunshine_UIRules & SUNSHINE_UI_CHANGE_SET_GAP) != 0u || identity_refused);
     const bool no_own = (!source && ((Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_ACCEPTED_MISSING) ||
         (offered & accepted & candidate_bits & ~valid))) || refine_missing;
     const uint prior = (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_HOLD_RESET) ? SUNSHINE_UI_HOLD_NONE :
@@ -1787,6 +1909,22 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
         InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_REUSED, 0u)], 1u);
     if (refined)
         InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_REFINED, 0u)], 1u);
+    // S3: one add per offered pair by its identity verdict.
+    [unroll] for (uint pair = 0u; pair < 2u; ++pair) {
+        const uint verdict = (identity.x >> (pair * SUNSHINE_UI_IDENTITY_HUDLESS_SHIFT)) & 0xfu;
+        const uint space = (identity.x >> (pair * SUNSHINE_UI_IDENTITY_HUDLESS_SHIFT + SUNSHINE_UI_IDENTITY_SPACE_SHIFT)) &
+            SUNSHINE_UI_IDENTITY_SPACE_MASK;
+        if (verdict == SUNSHINE_UI_IDENTITY_EXACT) {
+            InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_IDENTITY_EXACT, 0u)], 1u);
+            if (space == SUNSHINE_UI_IDENTITY_SPACE_TOKEN)
+                InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_IDENTITY_TOKEN_EXACT, 0u)], 1u);
+        } else if (verdict == SUNSHINE_UI_IDENTITY_MISMATCH)
+            InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_IDENTITY_MISMATCH, 0u)], 1u);
+        else if (verdict == SUNSHINE_UI_IDENTITY_UNSTAMPED)
+            InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_IDENTITY_UNSTAMPED, 0u)], 1u);
+        else if (verdict == SUNSHINE_UI_IDENTITY_UNPROPOSED)
+            InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_IDENTITY_UNPROPOSED, 0u)], 1u);
+    }
     // Texel 0 is the applied decision the mask pass resolves.
     SunshineAlphaCoverageStore[uint2(0,0)] = uint4(applied, applied_covered, pixels, matching_tiles);
     // Diagnostic evidence for the CPU readback; nothing reads it on the GPU.
@@ -1795,10 +1933,10 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     SunshineAlphaCoverageStore[uint2(3,0)] = invalid;
     SunshineAlphaCoverageStore[uint2(4,0)] = uint4(lit, accepted, opaque);
     // No scene evidence, and no stillness counts (H2), unless the evidence
-    // passes run after this one.
+    // passes run after this one; S3's identity words in texel 12 .z/.w.
     SunshineAlphaCoverageStore[uint2(5,0)] = 0u;
     SunshineAlphaCoverageStore[uint2(6,0)] = 0u;
-    SunshineAlphaCoverageStore[uint2(12,0)] = 0u;
+    SunshineAlphaCoverageStore[uint2(12,0)] = uint4(0u, 0u, identity);
     SunshineAlphaCoverageStore[uint2(7,0)] = uint4(layer, valid);
     SunshineAlphaCoverageStore[uint2(8,0)] = uint4(strong, refused);
     // The mask pass keeps the previous real frame's mask when reused.
@@ -2228,8 +2366,10 @@ void SunshineSceneEvidenceCS(uint3 thread : SV_GroupThreadID)
     const uint image = SunshinePreUIImage();
     SunshineAlphaCoverageStore[uint2(6, 0)] = image ? uint4(uint(n), asuint(d.y), uint(valid) | 2u, image) : 0u;
     // H2: the stillness counts, whatever the depth's currency (the warp of
-    // this frame uses the same depth); the CPU reads them with D.
-    SunshineAlphaCoverageStore[uint2(12, 0)] = active ? uint4(SunshineSceneStill[0], SunshineSceneStill[1], 0u, 0u) : 0u;
+    // this frame uses the same depth); the CPU reads them with D. S3's
+    // identity words stay as the reduce wrote them.
+    SunshineAlphaCoverageStore[uint2(12, 0)] = uint4(active ? uint2(SunshineSceneStill[0], SunshineSceneStill[1]) : uint2(0u, 0u),
+        SunshineIdentityWords());
 }
 
 #if BUFFER_COLOR_SPACE == 3

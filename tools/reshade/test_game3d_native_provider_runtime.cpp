@@ -6,6 +6,8 @@
 #include "test_streamline_direct_runtime.cpp"
 #include "game3d_controls.h"
 #include "game3d_ui_detection_contract.h"
+#include "game3d_ui_layer.h"
+#include "game3d_ui_ticket.h"
 #include "../../src/game3d_debug_protocol.h"
 #include <nlohmann/json.hpp>
 
@@ -145,7 +147,8 @@ namespace {
         const sunshine_streamline::abi_v2::viewport &viewport,
         sunshine_streamline::abi_v2::set_tag_for_frame frame_tag,
         sunshine_streamline::abi_v2::set_tag global_tag,
-        std::uint32_t resource_type) {
+        std::uint32_t resource_type,
+        const std::function<void(bool)> &configure_fg) {
       using namespace sunshine_streamline;
       namespace dump = ::game3d_debug;
       const auto hook_directory = runtime_directory / ("ui-hook-type-" + std::to_string(resource_type));
@@ -312,6 +315,19 @@ namespace {
       // resolved R32 mask through its red channel (mask channel 1).
       const auto &origin = metadata.at("ui_source");
       const auto &replay = metadata.at("replay");
+      // S3 shadow: the dumped render's detection ran, so its stamp buffer is
+      // read back, one [C_P, C_T] per ticket slot, beside the proposals.
+      {
+        const auto &detection = replay.at("ui_detection");
+        const auto &stamps = detection.at("stamps");
+        bool stamps_ok = detection.at("ran_or_held") == "ran" && stamps.is_array() &&
+          stamps.size() == sunshine_game3d::ui_ticket::slot::count && detection.contains("expected_layer_present") &&
+          detection.contains("expected_layer_token") && detection.contains("expected_hudless_present") &&
+          detection.at("identity_bits") == 0u && origin.contains("identity_shadow");
+        if (stamps_ok)
+          for (const auto &entry : stamps) stamps_ok = stamps_ok && entry.is_array() && entry.size() == 2;
+        require(stamps_ok, ("Dump lost the S3 identity fields: " + detection.dump()).c_str());
+      }
       bool tag23_candidate = false;
       for (const auto &candidate : origin.value("candidates", nlohmann::json::array()))
         tag23_candidate |= candidate.at("source") == "sl_ui_color_alpha" && candidate.at("tag_type") == 23 &&
@@ -352,6 +368,22 @@ namespace {
             entry.at("width") == width && entry.at("height") == height && entry.at("clears_while_armed") >= 1)
           layer_artifact = entry.at("artifact_id");
       if (!layer_artifact) throw std::runtime_error("Dump census missed the offscreen UI layer: " + metadata.at("ui_layer_census").dump());
+      // S3 shadow tickets: the census copy's stamp is read once the dump
+      // completed, every offered candidate carries its ticket, and the render
+      // reports today's pairing beside the ticket's.
+      for (const auto &entry : metadata.at("ui_layer_census").at("candidates"))
+        if (entry.at("artifact_id") == layer_artifact)
+          require(entry.at("ticket").at("kind") == "layer_copy" && entry.at("ticket").at("stamped") == true &&
+              entry.at("ticket").at("stamp").at("present_read").get<std::uint32_t>() != 0 &&
+              entry.at("ticket").at("stamp").at("present_label") == entry.at("ticket").at("stamp").at("present_read"),
+            ("The dump census copy lacks its S3 ticket or stamp: " + entry.dump()).c_str());
+      for (const auto &candidate : origin.at("candidates"))
+        if (candidate.at("source") == "sl_ui_color_alpha" || candidate.at("source") == "ui_layer")
+          require(candidate.contains("ticket") && candidate.at("ticket").at("kind") ==
+              (candidate.at("source") == "ui_layer" ? "layer_copy" : "sl_tag"),
+            ("An offered candidate lacks its S3 ticket: " + candidate.dump()).c_str());
+      require(origin.contains("identity_shadow") && origin.at("identity_shadow").contains("today") &&
+          origin.at("identity_shadow").at("authoritative") == false, "The dump lacks the render's S3 identity shadow");
       bool layer_bytes = false;
       for (unsigned i = 0; i < box.state->response.texture_count; ++i) {
         const auto &item = box.state->response.textures[i];
@@ -602,6 +634,280 @@ namespace {
           (sampled.at("valid_bits").get<unsigned>() & candidate::layer) ||
           straight_metadata.at("replay").at("source_alpha_auto").at("sampled_source") == sunshine_game3d::ui_detection::source_layer)
         throw std::runtime_error("The GPU admitted an offscreen layer with straight alpha: " + sampled.dump());
+      // S3 layer stamps on D3D12 (shadow; game3d_ui_layer.h): once, since the
+      // foreign-queue verdict is sticky for the layer's scope.
+      if (resource_type == 0) {
+        const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
+        const auto live_state = reinterpret_cast<BOOL (*)(sunshine_game3d::ui_layer::test_live_state *)>(
+          GetProcAddress(module, "SunshineUILayerTestLive"));
+        const auto last_generation = reinterpret_cast<BOOL (*)(std::uint32_t, std::uint64_t *)>(
+          GetProcAddress(module, "SunshineUIMaskTestLastGeneration"));
+        const auto identity = reinterpret_cast<BOOL (*)(api::effect_runtime *, sunshine_game3d::ui_ticket::identity_counters *)>(
+          GetProcAddress(module, "SunshineUIInputTestIdentity"));
+        require(live_state && last_generation && identity, "Test add-on lacks the S3 layer, token and identity observers");
+        namespace counter = sunshine_game3d::ui_ticket::identity_counter;
+        const auto identity_totals = [&] {
+          sunshine_game3d::ui_ticket::identity_counters value;
+          require(identity(observed.runtime, &value), "No S3 identity totals");
+          return value;
+        };
+        const auto format_counts = [](const sunshine_game3d::ui_ticket::identity_counters &value) {
+          return sunshine_game3d::ui_ticket::format_identity_counters(value);
+        };
+        const auto query = [&] {
+          sunshine_game3d::ui_layer::test_live_state value;
+          require(live_state(&value) && value.stamp && value.present_label, "The live layer copy has no S3 stamp");
+          return value;
+        };
+        const auto stamp_words = [&](std::uint64_t stamp) {
+          com_ptr<ID3D12Resource> staging;
+          buffer(staging, 16, D3D12_HEAP_TYPE_READBACK);
+          begin_commands();
+          commands->CopyBufferRegion(staging.p, 0, reinterpret_cast<ID3D12Resource *>(stamp), 0, 16);
+          submit();
+          void *mapped = nullptr;
+          const D3D12_RANGE range{0, 16};
+          checked(staging->Map(0, &range, &mapped), "Map the layer stamp");
+          std::array<std::uint32_t, 4> words{};
+          std::memcpy(words.data(), mapped, sizeof(words));
+          const D3D12_RANGE no_write{0, 0};
+          staging->Unmap(0, &no_write);
+          return words;
+        };
+        const auto wait = [&](ID3D12CommandQueue *on) {
+          checked(on->Signal(completion.p, ++fence_value), "Fence the layer list");
+          checked(completion->SetEventOnCompletion(fence_value, completion_event), "Observe the layer list");
+          require(WaitForSingleObject(completion_event, 3000) == WAIT_OBJECT_0, "The layer list exceeded three seconds");
+        };
+        bool skip_layer = false, tag_backbuffer = false;
+        render_tracked_depth = [&] {
+          real_frame();
+          if (!skip_layer) draw_layer();
+          if (!tag_backbuffer) return;
+          // The game's final image, tagged after its UI: the token clock
+          // carries this frame's token to the next frame's layer copy.
+          auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
+          abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
+          resource.type = resource_type; resource.native = mask.p; resource.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+          resource.width = width; resource.height = height; resource.native_format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
+          resource.mip_levels = resource.array_layers = 1;
+          const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 53, 0, {0, 0, width, height}};
+          require(token && (frame_tag ? frame_tag(*token, viewport, &tag, 1, list) : global_tag(viewport, &tag, 1, list)) == 0,
+            "Public Backbuffer tag changed the synthetic SDK result");
+        };
+        // Present labels are proposed only over a real span (frame generation
+        // known off); the token section below turns it back on.
+        configure_fg(false);
+        for (unsigned i = 0; i != 4; ++i) { step(); no_effects(); }
+        // The GPU verifies the proposals end to end (provider proposal, stamp
+        // copy, shader): copies run before their Present are exact. Verdicts
+        // commit a few renders late, so each window ends after more frames.
+        const auto in_order_before = identity_totals();
+        for (unsigned i = 0; i != 8; ++i) { step(); no_effects(); }
+        const auto in_order = identity_totals() - in_order_before;
+        require(in_order[counter::gpu_exact] > 0 && !in_order[counter::gpu_mismatch] && !in_order[counter::gpu_unstamped],
+          ("Layer copies run before their Present did not verify exact on the GPU: " + format_counts(in_order)).c_str());
+        // The copy ran in its own list before its Present: its C_P read is the
+        // label of the Present before it, which the count names.
+        auto live = query();
+        auto words = stamp_words(live.stamp);
+        require(live.stamped && live.watching && live.presents_since_copy == 1 && words[0] == live.present_label - 1 &&
+            !live.foreign_present && !live.queue_mixed && live.executed_queue && live.executed_queue == live.presenting_queue,
+          "A layer copy executed before its Present did not carry the label its count names on the presenting queue");
+        const auto same_list = words[0];
+        // A layer list executed after the next Present carries that later
+        // label; the count still names the earlier one.
+        com_ptr<ID3D12CommandAllocator> late_allocator;
+        com_ptr<ID3D12GraphicsCommandList> late;
+        checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(late_allocator.put())), "Late layer allocator");
+        checked(game->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, late_allocator.p, nullptr, IID_PPV_ARGS(late.put())),
+          "Late layer list");
+        const float transparent[4]{};
+        late->ClearRenderTargetView(layer_rtv, transparent, 0, nullptr);
+        checked(late->Close(), "Close the late layer list");
+        const auto late_before = identity_totals();
+        skip_layer = true;
+        step(); no_effects();
+        ID3D12CommandList *late_lists[]{late.p};
+        queue->ExecuteCommandLists(1, late_lists);
+        wait(queue.p);
+        live = query();
+        words = stamp_words(live.stamp);
+        const auto late_label = words[0];
+        require(live.stamped && late_label == live.present_label && late_label != live.present_label - live.presents_since_copy &&
+            !live.foreign_present,
+          "A layer list executed after the next Present did not carry that later label");
+        // Executed twice: the stamp is the last execution's.
+        step(); no_effects();
+        queue->ExecuteCommandLists(1, late_lists);
+        wait(queue.p);
+        live = query();
+        words = stamp_words(live.stamp);
+        require(words[0] == live.present_label && words[0] == late_label + 1, "A twice-executed layer list kept its first stamp");
+        // Recorded but never executed: the stamp is unchanged.
+        const auto executed_twice = words[0];
+        const auto capture_before = live.capture_id;
+        checked(late_allocator->Reset(), "Reset the late layer allocator");
+        checked(late->Reset(late_allocator.p, nullptr), "Reset the late layer list");
+        late->ClearRenderTargetView(layer_rtv, transparent, 0, nullptr);
+        checked(late->Close(), "Close the unexecuted layer list");
+        step(); no_effects();
+        live = query();
+        words = stamp_words(live.stamp);
+        require(live.capture_id > capture_before && words[0] == executed_twice && words[0] != live.present_label,
+          "A never-executed layer list changed the stamp");
+        // The late and never-executed copies read another Present than their
+        // count names: the GPU reports the proposals mismatched.
+        skip_layer = false;
+        for (unsigned i = 0; i != 6; ++i) { step(); no_effects(); }
+        const auto late_counts = identity_totals() - late_before;
+        require(late_counts[counter::gpu_mismatch] > 0,
+          ("Late-executed layer copies did not mismatch their proposals on the GPU: " + format_counts(late_counts)).c_str());
+        evidence << "s3-gpu-layer in_order={" << format_counts(in_order) << "} late={" << format_counts(late_counts) << "}\n";
+        configure_fg(true);
+        // The token clock: each frame's Backbuffer tag writes its token after
+        // its snapshot; the next frame's layer copy reads it.
+        tag_backbuffer = true;
+        std::uint64_t previous_generation{}, generation{};
+        for (unsigned i = 0; i != 6; ++i) {
+          previous_generation = generation;
+          step(); no_effects();
+          require(last_generation(53, &generation), "No Backbuffer generation observer");
+        }
+        live = query();
+        words = stamp_words(live.stamp);
+        // Without token generations (the legacy v2 SDK's global tags) the
+        // token clock is never written and the copy's token label is unstamped.
+        require(generation ? previous_generation && generation != previous_generation &&
+              words[1] == static_cast<std::uint32_t>(previous_generation) : !previous_generation && !words[1],
+          ("The next frame's layer copy did not read the Backbuffer tag's token through the token clock: read " +
+            std::to_string(words[1]) + ", previous " + std::to_string(previous_generation) + ", last " + std::to_string(generation) +
+            ", label " + std::to_string(live.present_label) + ", present read " + std::to_string(words[0])).c_str());
+        const auto token_read = words[1];
+        // Token pairing (S3 shadow): a HUD-less tag in another list with the
+        // frame's own token pairs with that frame's Backbuffer as one batch
+        // (today's Present counting agrees); with a second token minted between
+        // them, today still calls them one batch, which no token proves.
+        HMODULE sdk_module{};
+        require(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(reinterpret_cast<void *>(frame_tag ? reinterpret_cast<void *>(frame_tag) : reinterpret_cast<void *>(global_tag))),
+            &sdk_module), "No SDK module");
+        const auto mint = reinterpret_cast<abi_v2::get_new_frame_token>(GetProcAddress(sdk_module, "slGetNewFrameToken"));
+        const bool token_frames = frame_tag && mint && generation;
+        com_ptr<ID3D12CommandAllocator> side_allocator;
+        com_ptr<ID3D12GraphicsCommandList> side;
+        checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(side_allocator.put())), "Side tag allocator");
+        checked(game->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, side_allocator.p, nullptr, IID_PPV_ARGS(side.put())),
+          "Side tag list");
+        checked(side->Close(), "Close the side tag list");
+        bool second_token = false;
+        render_tracked_depth = [&] {
+          real_frame();
+          // HUD-less in its own list, executed before the frame's list. The
+          // fixture's reset observer names the side list's native object; the
+          // frame keeps its own list.
+          const auto frame_list = game_native_command;
+          checked(side_allocator->Reset(), "Reset the side allocator");
+          checked(side->Reset(side_allocator.p, nullptr), "Reset the side list");
+          auto *side_native = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
+          game_native_command = frame_list;
+          abi_v2::resource hudless{}; hudless.base = {nullptr, resource_guid, 1};
+          hudless.type = resource_type; hudless.native = mask.p; hudless.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+          hudless.width = width; hudless.height = height; hudless.native_format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
+          hudless.mip_levels = hudless.array_layers = 1;
+          const abi_v2::resource_tag hudless_tag{{nullptr, tag_guid, 1}, &hudless, 2, 0, {0, 0, width, height}};
+          require(token && (frame_tag ? frame_tag(*token, viewport, &hudless_tag, 1, side_native) :
+              global_tag(viewport, &hudless_tag, 1, side_native)) == 0, "Public HUD-less tag changed the synthetic SDK result");
+          checked(side->Close(), "Close the side tag list");
+          ID3D12CommandList *side_lists[]{side.p};
+          queue->ExecuteCommandLists(1, side_lists);
+          if (second_token) {
+            abi_v2::frame_token *next{};
+            const std::uint32_t frame = 0x7fff0000u;
+            require(mint && mint(next, &frame) == 0 && next, "Could not mint a second token");
+            token = next;
+          }
+          draw_layer();
+          auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(game_native_command);
+          abi_v2::resource resource{}; resource.base = {nullptr, resource_guid, 1};
+          resource.type = resource_type; resource.native = mask.p; resource.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+          resource.width = width; resource.height = height; resource.native_format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
+          resource.mip_levels = resource.array_layers = 1;
+          const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 53, 0, {0, 0, width, height}};
+          require(token && (frame_tag ? frame_tag(*token, viewport, &tag, 1, list) : global_tag(viewport, &tag, 1, list)) == 0,
+            "Public Backbuffer tag changed the synthetic SDK result");
+        };
+        sunshine_game3d::ui_ticket::identity_counters before, after;
+        if (token_frames) {
+        for (unsigned i = 0; i != 3; ++i) { step(); no_effects(); }
+        require(identity(observed.runtime, &before), "No S3 identity totals");
+        for (unsigned i = 0; i != 8; ++i) { step(); no_effects(); }
+        require(identity(observed.runtime, &after), "No S3 identity totals");
+        const auto one_token = after - before;
+        second_token = true;
+        for (unsigned i = 0; i != 3; ++i) { step(); no_effects(); }
+        require(identity(observed.runtime, &before), "No S3 identity totals");
+        for (unsigned i = 0; i != 8; ++i) { step(); no_effects(); }
+        require(identity(observed.runtime, &after), "No S3 identity totals");
+        const auto two_tokens = after - before;
+        second_token = false;
+        require(one_token[counter::batch_agree] + one_token[counter::batch_ticket_only] > 0 && !one_token[counter::batch_today_only] &&
+            two_tokens[counter::batch_today_only] > 0 && !two_tokens[counter::batch_agree] && !two_tokens[counter::batch_ticket_only],
+          ("Token pairing did not prove one-token batches or refuse two-token ones: one=" +
+            sunshine_game3d::ui_ticket::format_identity_counters(one_token) + " two=" +
+            sunshine_game3d::ui_ticket::format_identity_counters(two_tokens)).c_str());
+        evidence << "s3-token-batch one_token={" << sunshine_game3d::ui_ticket::format_identity_counters(one_token) <<
+          "} two_tokens={" << sunshine_game3d::ui_ticket::format_identity_counters(two_tokens) << "}\n";
+        // The one-token batches verify exact in token space on the GPU.
+        require(one_token[counter::gpu_token_exact] > 0,
+          ("One-token batches did not verify exact in token space on the GPU: " + format_counts(one_token)).c_str());
+        }
+        evidence << "s3-gpu-verdicts " << format_counts(identity_totals()) << "\n";
+        tag_backbuffer = false;
+        render_tracked_depth = [&] {
+          real_frame();
+          if (!skip_layer) draw_layer();
+        };
+        // A layer list executed on a second direct queue: foreign, sticky.
+        com_ptr<ID3D12CommandQueue> second;
+        D3D12_COMMAND_QUEUE_DESC second_desc{};
+        second_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        checked(game->CreateCommandQueue(&second_desc, IID_PPV_ARGS(second.put())), "Second direct queue");
+        // The list also executes a bundle after its clear, as bundle-heavy
+        // engines do for their UI draws: the list keeps its own stamped copy.
+        com_ptr<ID3D12CommandAllocator> bundle_allocator;
+        com_ptr<ID3D12GraphicsCommandList> bundle;
+        checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_BUNDLE, IID_PPV_ARGS(bundle_allocator.put())), "Bundle allocator");
+        checked(game->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_BUNDLE, bundle_allocator.p, nullptr, IID_PPV_ARGS(bundle.put())),
+          "Bundle");
+        checked(bundle->Close(), "Close the bundle");
+        skip_layer = true;
+        checked(late_allocator->Reset(), "Reset the foreign layer allocator");
+        checked(late->Reset(late_allocator.p, nullptr), "Reset the foreign layer list");
+        late->ClearRenderTargetView(layer_rtv, transparent, 0, nullptr);
+        late->ExecuteBundle(bundle.p);
+        checked(late->Close(), "Close the foreign layer list");
+        second->ExecuteCommandLists(1, late_lists);
+        wait(second.p);
+        step(); no_effects();
+        live = query();
+        require(live.foreign_present && live.queue_mixed && live.executed_queue != live.presenting_queue,
+          "A layer list executed on a second queue, after a bundle, was not foreign");
+        skip_layer = false;
+        render_tracked_depth = [&] { real_frame(); draw_layer(); };
+        step(); no_effects();
+        require(query().foreign_present, "The foreign-queue verdict did not stay for the layer's scope");
+        evidence << "s3-layer-stamps-d3d12 same_list=" << same_list << " late=" << late_label << " twice=" << executed_twice <<
+          " token_read=" << token_read << '\n';
+        std::printf("PASS D3D12 S3 layer stamps (shadow): a copy run before its Present carries the label its count names (%u); "
+          "a list executed after the next Present carries that later label (%u), executed twice the last (%u), never executed "
+          "none; with FG off the GPU verifies the in-order copies' proposals exact and the late ones mismatched; the next "
+          "frame's copy reads the Backbuffer tag's token (%u, 0 without token generations) through the token clock; %s; a list "
+          "on a second direct queue, its copy kept across a bundle, is foreign for the scope\n", same_list, late_label, executed_twice,
+          token_read, token_frames ? "HUD-less and Backbuffer tagged with one token in different lists pair as one batch by "
+          "token, exact in token space on the GPU, two tokens in one Present interval only by today's count" :
+          "no token pairing without frame tokens");
+      }
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
         " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 live_ui_layer_mask=1 frame_tags=" << bool(frame_tag) << '\n';
       std::puts("PASS actual public SL tag23 hook: typeless90 to typed87, automatic GPU mask equals pre-overwrite alpha and optional dump exact before opaque overwrite; host lease immutable");
@@ -1003,7 +1309,7 @@ namespace {
       recovered_fresh(mode_seed, "SLFG-cache-mode-fresh-recovery");
       std::puts("PASS native FG cache: repeated holds cannot renew capture age; camera reset keeps the finished copy within its age; FG off/on cannot revive old depth; fresh copies recover all three intervals; no FX");
       for (const std::uint32_t type : {0u, 8u})
-        run_ui_hook(real_frame, last_token, viewport, tag_call, global_tag_call, type);
+        run_ui_hook(real_frame, last_token, viewport, tag_call, global_tag_call, type, configure);
 
       // The Witcher 3 pattern with FG off: each frame tags depth valid until
       // present, evaluates, then clears the tag before present, while another

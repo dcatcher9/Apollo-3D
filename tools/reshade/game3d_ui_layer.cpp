@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_ui_layer.h"
 #include "addon_lifetime.h"
+#include "game3d_frame_clock.h"
 #include "game3d_ui_detection_contract.h"
 
 #include <d3d11.h>
@@ -8,9 +9,53 @@
 #include <dxgi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 
 namespace sunshine_game3d::ui_layer {
+  void queue_watch::carried(std::uint64_t list) {
+    if (!list || std::find(lists_.begin(), lists_.end(), list) != lists_.end()) return;
+    // Oldest first, free entries last: a full watch drops its oldest list.
+    if (lists_.back()) {
+      std::rotate(lists_.begin(), lists_.begin() + 1, lists_.end());
+      lists_.back() = list;
+    } else *std::find(lists_.begin(), lists_.end(), std::uint64_t{0}) = list;
+  }
+
+  void queue_watch::reset(std::uint64_t list) {
+    if (!list) return;
+    const auto end = std::remove(lists_.begin(), lists_.end(), list);
+    std::fill(end, lists_.end(), std::uint64_t{0});
+  }
+
+  void queue_watch::move(std::uint64_t list, std::uint64_t context) {
+    const bool carries = context && std::find(lists_.begin(), lists_.end(), context) != lists_.end();
+    reset(list);
+    reset(context);
+    if (carries) carried(list);
+  }
+
+  void queue_watch::transfer(std::uint64_t primary, std::uint64_t secondary) {
+    if (secondary && std::find(lists_.begin(), lists_.end(), secondary) != lists_.end()) carried(primary);
+  }
+
+  bool queue_watch::executed(std::uint64_t list, std::uint64_t queue, std::uint64_t presenting) {
+    if (!list || std::find(lists_.begin(), lists_.end(), list) == lists_.end()) return false;
+    executed_on(queue, presenting);
+    return true;
+  }
+
+  void queue_watch::executed_on(std::uint64_t queue, std::uint64_t presenting) {
+    if (!queue) return;
+    if (last_queue_ && last_queue_ != queue) mixed_ = true;
+    last_queue_ = queue;
+    if (presenting && queue != presenting) foreign_present_ = true;
+  }
+
+  bool queue_watch::watching() const {
+    return std::any_of(lists_.begin(), lists_.end(), [](std::uint64_t value) { return value != 0; });
+  }
+
   bool layer_tracker::clear(std::uint64_t resource, std::uint64_t now_ms) {
     if (!resource) return false;
     const auto recent = [&](const entry &value) {
@@ -69,6 +114,11 @@ namespace sunshine_game3d::ui_layer {
       std::uint32_t width{}, height{};
       api::format format{};
       std::uint64_t capture_id{}, tick{};
+      // S3 (shadow): the copy's stamp, whether the newest copy's list
+      // recorded it, and the scope's queue watch.
+      api::resource stamp{};
+      bool stamped{};
+      queue_watch watch;
     };
 
     // The live copy is recorded only while UI detection asked for the layer
@@ -85,11 +135,75 @@ namespace sunshine_game3d::ui_layer {
       std::vector<candidate> candidates;
       std::vector<retired> graveyard;
       live_state live;
+      // S3: the presenting queue's native handle at the last Present
+      // (frame_clock::presenting_queue), and a copy of the queue watch's
+      // lists that the execute and reset events check without the lock, so
+      // lists that carried no stamped copy never take it.
+      std::uint64_t presenting_queue{};
+      std::array<std::atomic<std::uint64_t>, queue_watch::capacity> watched{};
     };
     // Deliberately leaked: clear events can arrive during process exit.
     state_t &state() {
       static state_t *value = new state_t;
       return *value;
+    }
+
+    // Requires the state lock: publishes the watch's lists to the lock-free copy.
+    void publish_watch(state_t &s) {
+      for (std::size_t i = 0; i != queue_watch::capacity; ++i)
+        s.watched[i].store(s.live.watch.lists()[i], std::memory_order_relaxed);
+    }
+
+    bool watched(const state_t &s, const void *list) {
+      const auto key = reinterpret_cast<std::uint64_t>(list);
+      for (const auto &value : s.watched) if (key && value.load(std::memory_order_relaxed) == key) return true;
+      return false;
+    }
+
+    // Requires the state lock. Retires the live copy and its stamp (a scope
+    // change: the next copy starts a new stamp at 0 and a new queue watch).
+    void retire_live(state_t &s, std::uint64_t now) {
+      if (s.live.copy.handle) s.graveyard.push_back({s.device, s.live.copy, now});
+      if (s.live.stamp.handle) s.graveyard.push_back({s.device, s.live.stamp, now});
+      s.live = {};
+      publish_watch(s);
+    }
+
+    // A 16-byte stamp: a default buffer at 0 in COMMON, or a CPU-readable one
+    // for the dump census (readback heaps rest in COPY_DEST on D3D12).
+    api::resource create_stamp(api::device *device, bool readback) {
+      static std::uint32_t zeros[4]{};
+      const api::resource_desc desc(16, readback ? api::memory_heap::readback : api::memory_heap::default_,
+        readback ? api::resource_usage::copy_dest : api::resource_usage::copy_source | api::resource_usage::copy_dest);
+      // D3D12 zeroes committed buffers; D3D11 gets its zeros explicitly.
+      const bool d3d11 = device->get_api() == api::device_api::d3d11 && !readback;
+      const api::subresource_data initial{zeros, 16, 16};
+      api::resource stamp{};
+      if (!device->create_resource(desc, d3d11 ? &initial : nullptr,
+            readback ? api::resource_usage::copy_dest : api::resource_usage::general, &stamp)) return {};
+      return stamp;
+    }
+
+    // Records the device's C_P and C_T into stamp right after a copy in the
+    // same list. The clocks and a default stamp move from COMMON and back by
+    // explicit barriers (the add-on's own buffers only), so other add-on
+    // accesses in the same list stay legal; a readback stamp stays COPY_DEST.
+    // False, recording nothing, before the device's clocks exist.
+    bool record_stamp(api::command_list *commands, api::resource stamp, bool readback) {
+      if (!stamp.handle) return false;
+      const auto native = reinterpret_cast<void *>(commands->get_device()->get_native());
+      const auto present = frame_clock::native_present_clock(native), token = frame_clock::native_token_clock(native);
+      if (!present.resource || !token.resource) return false;
+      const api::resource resources[3]{{reinterpret_cast<std::uint64_t>(present.resource)},
+        {reinterpret_cast<std::uint64_t>(token.resource)}, stamp};
+      const api::resource_usage common[3]{api::resource_usage::general, api::resource_usage::general, api::resource_usage::general};
+      const api::resource_usage copy[3]{api::resource_usage::copy_source, api::resource_usage::copy_source, api::resource_usage::copy_dest};
+      const std::uint32_t count = readback ? 2 : 3;
+      commands->barrier(count, resources, common, copy);
+      commands->copy_buffer_region(resources[0], present.offset, stamp, 0, 4);
+      commands->copy_buffer_region(resources[1], token.offset, stamp, 4, 4);
+      commands->barrier(count, resources, copy, common);
+      return true;
     }
 
     // Requires the state lock.
@@ -105,8 +219,10 @@ namespace sunshine_game3d::ui_layer {
 
     // Requires the state lock. Retires census copies that no dump took.
     void drop_candidates(state_t &s) {
-      for (auto &c : s.candidates)
+      for (auto &c : s.candidates) {
         if (c.copy.handle) s.graveyard.push_back({s.device, c.copy, GetTickCount64()});
+        if (c.stamp.handle) s.graveyard.push_back({s.device, c.stamp, GetTickCount64()});
+      }
       s.candidates.clear();
     }
 
@@ -128,6 +244,11 @@ namespace sunshine_game3d::ui_layer {
       if (live.copy.handle && (live.width != desc.texture.width || live.height != desc.texture.height || live.format != typed)) {
         s.graveyard.push_back({device, live.copy, GetTickCount64()});
         live.copy = {};
+        // S3: a new copy is a new scope: its stamp restarts at 0.
+        if (live.stamp.handle) s.graveyard.push_back({device, live.stamp, GetTickCount64()});
+        live.stamp = {};
+        live.watch.clear_scope();
+        publish_watch(s);
       }
       if (!live.copy.handle) {
         const api::resource_desc copy_desc(desc.texture.width, desc.texture.height, 1, 1, typed, 1, api::memory_heap::default_,
@@ -138,8 +259,16 @@ namespace sunshine_game3d::ui_layer {
         }
         live.width = desc.texture.width; live.height = desc.texture.height; live.format = typed;
       }
+      if (!live.stamp.handle) live.stamp = create_stamp(device, false);
       commands->barrier(live.copy, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
       record_copy(commands, resource, live.copy);
+      // S3 (shadow): the stamp in the same list, then the list joins the watch
+      // (a D3D11 immediate context is the presenting queue itself).
+      live.stamped = record_stamp(commands, live.stamp, false);
+      const auto list = commands->get_native();
+      if (list && list == s.presenting_queue) live.watch.executed_on(list, s.presenting_queue);
+      else live.watch.carried(reinterpret_cast<std::uint64_t>(commands));
+      publish_watch(s);
       ++live.capture_id;
       live.tick = GetTickCount64();
       // The Present count at the copy: it holds the previous Present's frame.
@@ -168,6 +297,9 @@ namespace sunshine_game3d::ui_layer {
       if (device->create_resource(copy_desc, nullptr, api::resource_usage::copy_dest, &c.copy)) {
         record_copy(commands, resource, c.copy);
         c.status = "captured_before_clear";
+        // S3 (shadow): the census copy's own stamp, which the dump reads.
+        c.stamp = create_stamp(device, true);
+        c.stamped = record_stamp(commands, c.stamp, true);
       } else {
         c.copy = {};
         c.status = "copy_allocation_failed";
@@ -237,6 +369,9 @@ namespace sunshine_game3d::ui_layer {
     if (!device || device != s.device || !live.copy.handle || !live.capture_id || !live.tracker.active() ||
         now_ms < live.tick || now_ms - live.tick > max_clear_gap_ms) return false;
     out = {live.copy, live.capture_id, live.tick, static_cast<std::uint32_t>(live.format), live.tracker.presents_since_copy()};
+    out.stamp = live.stamp; out.stamped = live.stamped;
+    out.foreign_present = live.watch.foreign_present(); out.queue_mixed = live.watch.mixed();
+    out.executed_queue = live.watch.last_queue();
     return true;
   }
 
@@ -251,25 +386,86 @@ namespace sunshine_game3d::ui_layer {
         else *keep++ = r;
       }
       s.graveyard.erase(keep, s.graveyard.end());
-      for (auto &c : s.candidates) if (s.device == device && c.copy.handle) device->destroy_resource(c.copy);
+      for (auto &c : s.candidates) if (s.device == device) {
+        if (c.copy.handle) device->destroy_resource(c.copy);
+        if (c.stamp.handle) device->destroy_resource(c.stamp);
+      }
       if (s.device == device) {
         if (s.live.copy.handle) device->destroy_resource(s.live.copy);
+        if (s.live.stamp.handle) device->destroy_resource(s.live.stamp);
         s.live = {};
+        publish_watch(s);
         s.candidates.clear();
         s.back_buffers.clear();
         s.device = nullptr;
+        s.presenting_queue = 0;
       }
+    }
+
+    // True for a D3D11 command list: the primary of FinishCommandList's event
+    // (a deferred context or a D3D12 bundle's parent is not one).
+    bool finished_command_list(api::command_list *primary) {
+      if (primary->get_device()->get_api() != api::device_api::d3d11) return false;
+      auto *native = reinterpret_cast<IUnknown *>(primary->get_native());
+      ID3D11CommandList *list = nullptr;
+      if (!native || FAILED(native->QueryInterface(IID_PPV_ARGS(&list)))) return false;
+      list->Release();
+      return true;
+    }
+
+    // S3 queue watch events. Lists that carried no stamped copy return before
+    // any lock.
+    void on_execute(api::command_queue *queue, api::command_list *commands) {
+      auto &s = state();
+      if (!queue || !watched(s, commands)) return;
+      std::lock_guard<std::mutex> lock(s.mutex);
+      s.live.watch.executed(reinterpret_cast<std::uint64_t>(commands), queue->get_native(), s.presenting_queue);
+    }
+
+    void on_execute_secondary(api::command_list *primary, api::command_list *secondary) {
+      auto &s = state();
+      if (!primary || !secondary || (!watched(s, secondary) && !watched(s, primary))) return;
+      std::lock_guard<std::mutex> lock(s.mutex);
+      const auto list = reinterpret_cast<std::uint64_t>(secondary);
+      // D3D11: ExecuteCommandList on the immediate context, the presenting
+      // queue itself, executes the list.
+      if (primary->get_native() && primary->get_native() == s.presenting_queue)
+        s.live.watch.executed(list, s.presenting_queue, s.presenting_queue);
+      // D3D11 FinishCommandList (the primary is the new ID3D11CommandList):
+      // the deferred context's commands move into it.
+      else if (finished_command_list(primary))
+        s.live.watch.move(reinterpret_cast<std::uint64_t>(primary), list);
+      // A D3D12 bundle, or a command list executed on a deferred context: the
+      // primary keeps its own commands and adds the secondary's.
+      else s.live.watch.transfer(reinterpret_cast<std::uint64_t>(primary), list);
+      publish_watch(s);
+    }
+
+    void on_reset(api::command_list *commands) {
+      auto &s = state();
+      if (!watched(s, commands)) return;
+      std::lock_guard<std::mutex> lock(s.mutex);
+      s.live.watch.reset(reinterpret_cast<std::uint64_t>(commands));
+      publish_watch(s);
     }
   }
 
   void register_events() {
     reshade::register_event<reshade::addon_event::clear_render_target_view>(sunshine_addon_lifetime::guarded<on_clear>);
     reshade::register_event<reshade::addon_event::destroy_device>(sunshine_addon_lifetime::guarded<on_destroy_device>);
+    reshade::register_event<reshade::addon_event::execute_command_list>(sunshine_addon_lifetime::guarded<on_execute>);
+    reshade::register_event<reshade::addon_event::execute_secondary_command_list>(
+      sunshine_addon_lifetime::guarded<on_execute_secondary>);
+    reshade::register_event<reshade::addon_event::reset_command_list>(sunshine_addon_lifetime::guarded<on_reset>);
   }
 
   void unregister_events() {
     reshade::unregister_event<reshade::addon_event::clear_render_target_view>(sunshine_addon_lifetime::guarded<on_clear>);
     reshade::unregister_event<reshade::addon_event::destroy_device>(sunshine_addon_lifetime::guarded<on_destroy_device>);
+    reshade::unregister_event<reshade::addon_event::execute_command_list>(sunshine_addon_lifetime::guarded<on_execute>);
+    reshade::unregister_event<reshade::addon_event::execute_secondary_command_list>(
+      sunshine_addon_lifetime::guarded<on_execute_secondary>);
+    reshade::unregister_event<reshade::addon_event::reset_command_list>(sunshine_addon_lifetime::guarded<on_reset>);
     cancel();
   }
 
@@ -293,14 +489,17 @@ namespace sunshine_game3d::ui_layer {
       buffer->Release();
     }
     const auto now = GetTickCount64();
+    // S3: the queue this Present's frame_clock::advance ran on.
+    const auto *presenting = frame_clock::presenting_queue(device);
+    const auto presenting_queue = presenting ? presenting->get_native() : 0;
     std::lock_guard<std::mutex> lock(s.mutex);
     // Every retired copy's device is alive: on_destroy_device releases its own.
     reap(s);
     if (s.armed && s.device && s.device != device) return;
     if (s.live.copy.handle && (s.device != device || s.width != desc.BufferDesc.Width || s.height != desc.BufferDesc.Height)) {
-      s.graveyard.push_back({s.device, s.live.copy, now});
-      s.live = {};
-    } else if (s.device != device) s.live = {};
+      retire_live(s, now);
+    } else if (s.device != device) retire_live(s, now);
+    s.presenting_queue = presenting_queue;
     s.device = device;
     s.width = desc.BufferDesc.Width;
     s.height = desc.BufferDesc.Height;
@@ -341,3 +540,27 @@ namespace sunshine_game3d::ui_layer {
     drop_candidates(s);
   }
 }
+
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+// The live copy's S3 facts for the D3D12 runtime fixture; the stamp buffer is
+// an ID3D12Resource * the fixture reads back itself.
+extern "C" __declspec(dllexport) BOOL SunshineUILayerTestLive(sunshine_game3d::ui_layer::test_live_state *out) {
+  using namespace sunshine_game3d::ui_layer;
+  if (!out) return FALSE;
+  *out = {};
+  api::device *device = nullptr;
+  {
+    auto &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    const auto &live = s.live;
+    device = s.device;
+    out->stamp = live.stamp.handle; out->capture_id = live.capture_id;
+    out->executed_queue = live.watch.last_queue(); out->presenting_queue = s.presenting_queue;
+    out->presents_since_copy = live.tracker.presents_since_copy();
+    out->stamped = live.stamped; out->foreign_present = live.watch.foreign_present();
+    out->queue_mixed = live.watch.mixed(); out->watching = live.watch.watching();
+  }
+  out->present_label = device ? sunshine_game3d::frame_clock::label(device) : 0;
+  return device != nullptr;
+}
+#endif

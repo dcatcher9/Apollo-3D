@@ -15,11 +15,16 @@
 //     1. bits: the offered candidate bits (ui_detection::candidate), and the
 //        candidate_signatures of the offered kinds; identity: the provider's
 //        present_identity, {hold_previous, real_frame} (Present counting until
-//        S3 stamps real frames: generated from the HUD-less pairing, or,
-//        without one, a Present that offers nothing within the reported
-//        generated count of the last one that offered a UI tag
+//        S3 is enabled: generated from the HUD-less pairing, or, without one,
+//        a Present that offers nothing within the reported generated count of
+//        the last one that offered a UI tag
 //        (ui_mask::generated_without_input); the HUD-less tag's present
-//        generation as the real-frame id, 0 without a HUD-less capture);
+//        generation as the real-frame id, 0 without a HUD-less capture), with
+//        S3's ticket_identity(that, ui_ticket::newest_token(tickets),
+//        state.decision_token, bits != 0) beside it, which arbitrate, held and
+//        detected read (applied_identity) only while
+//        ui_ticket::identity_authoritative (or the sequence harness's
+//        test-only identity_override);
 //        Fix 3 (game3d_ui_change_set.h): pairing =
 //        change_set::pair_layer(layer offered, the run of real Presents with
 //        frame generation known off, this one included, the layer copy's
@@ -110,6 +115,7 @@
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
+#include "game3d_ui_ticket.h"
 
 #include <algorithm>
 #include <array>
@@ -309,15 +315,68 @@ namespace sunshine_game3d::ui_temporal {
     return delta;
   }
 
-  // T1 identity of one Present (M6), by Present counting until S3 stamps real
-  // frames: whether the HUD-less pairing, or without one the count since the
+  // S3 (shadow): the uint32 wrap-safe change of the identity verdict counter
+  // words (ui_counter_word::identity_*, after count) since the last commit,
+  // as the gpu group of the "Sunshine UI identity" totals. They never join
+  // ui_counters: the "Sunshine UI counters" line is unchanged by S3.
+  inline ui_ticket::identity_counters identity_gpu_delta(
+      const std::array<std::uint32_t, ui_counter_word::identity_words> &now,
+      const std::array<std::uint32_t, ui_counter_word::identity_words> &before) {
+    namespace n = ui_ticket::identity_counter;
+    namespace w = ui_counter_word;
+    const auto delta = [&](std::size_t word) {
+      return std::uint64_t(std::uint32_t(now[word - w::identity_exact] - before[word - w::identity_exact]));
+    };
+    ui_ticket::identity_counters c;
+    c[n::gpu_exact] = delta(w::identity_exact);
+    c[n::gpu_mismatch] = delta(w::identity_mismatch);
+    c[n::gpu_unstamped] = delta(w::identity_unstamped);
+    c[n::gpu_unproposed] = delta(w::identity_unproposed);
+    c[n::gpu_token_exact] = delta(w::identity_token_exact);
+    return c;
+  }
+
+  // T1 identity of one Present (M6), by Present counting until S3 is
+  // enabled: whether the HUD-less pairing, or without one the count since the
   // last Present that offered a UI tag, classified it as generated
   // (hold_previous), and the real frame it shows, as the HUD-less tag's
-  // present generation (0 without a HUD-less capture: no tag bound).
+  // present generation (0 without a HUD-less capture: no tag bound). S3
+  // (game3d_ui_ticket.h, shadow): token_label is the newest token generation
+  // among the Present's offered tag snapshots (0 none), and new_label whether
+  // the Present offers a label newer than the last decision's
+  // (ticket_identity).
   struct present_identity {
     bool generated{};
     std::uint64_t real_frame{};
+    std::uint64_t token_label{};
+    bool new_label{};
   };
+
+  // S3 T1 by ticket: today's identity with the token fields filled. A Present
+  // offering a token is new exactly when the token is newer than the one the
+  // last decision detected (decision_token); a re-offered or older token is
+  // not, under any multiplier. A Present offering evidence without a token
+  // (present-space evidence such as the current colour) is always new; one
+  // that offers nothing is neither, and keeps today's
+  // ui_mask::generated_without_input bound.
+  inline present_identity ticket_identity(present_identity today, std::uint64_t token_label,
+      std::uint64_t decision_token, bool offers_evidence) {
+    today.token_label = token_label;
+    today.new_label = token_label ? token_label > decision_token : offers_evidence;
+    return today;
+  }
+
+  // The identity T1 applies: today's Present counting, or, when identity is
+  // authoritative, the ticket's: a new label detects (a token is the real
+  // frame), a token that is not new holds the frame it names, and a Present
+  // offering nothing keeps today's count bound.
+  inline present_identity applied_identity(const present_identity &identity, bool authoritative) {
+    if (!authoritative) return identity;
+    if (identity.token_label)
+      return {!identity.new_label, identity.token_label, identity.token_label, identity.new_label};
+    if (identity.new_label) return {false, 0, 0, true};
+    return identity;
+  }
 
   // What a Present does under T1: a real Present detects (none: no hold); a
   // generated Present shows the decision of the real frame it shows
@@ -375,6 +434,12 @@ namespace sunshine_game3d::ui_temporal {
     alpha_auto_decision latest;
     alpha_auto_source latest_source;
     std::uint32_t latest_key{};
+    // S3 (shadow): the token label of the last detection (ticket_identity's
+    // decision_token), and the sequence harness's test-only switch that makes
+    // T1 apply the ticket identity (ui_ticket::authoritative); nothing in the
+    // add-on sets it.
+    std::uint64_t decision_token{};
+    bool identity_override{};
 
     // T1: a generated Present never detects. It shows the decision of the
     // real frame it shows: the last detection's (detected_mask) while it is
@@ -400,7 +465,8 @@ namespace sunshine_game3d::ui_temporal {
     // it by design, and flagging those frames would stop adoption for the
     // rest of the scope. Its one-frame gap (the previous real frame of this
     // chain offered it, this one does not) is change_set_gap instead.
-    hold_decision arbitrate(const present_identity &identity, const alpha_auto_source &scope, std::uint32_t offered) const {
+    hold_decision arbitrate(const present_identity &offered_identity, const alpha_auto_source &scope, std::uint32_t offered) const {
+      const auto identity = applied(offered_identity);
       hold_decision result;
       const bool same_scope = have_decision && !hold_scope_changed(scope, decision_scope);
       if (identity.generated) {
@@ -447,13 +513,16 @@ namespace sunshine_game3d::ui_temporal {
 
     // A generated Present that applied the detected mask: the first other
     // real-frame id it shows becomes the next real frame.
-    void held(const present_identity &identity) {
+    void held(const present_identity &offered_identity) {
+      const auto identity = applied(offered_identity);
       ++holds;
       if (identity.real_frame != decision_frame && !next_frame) next_frame = identity.real_frame;
     }
     // A real Present that detected with these offered candidates: its
     // decision is the chain's.
-    void detected(const alpha_auto_source &scope, const present_identity &identity, std::uint32_t offered) {
+    void detected(const alpha_auto_source &scope, const present_identity &offered_identity, std::uint32_t offered) {
+      const auto identity = applied(offered_identity);
+      decision_token = offered_identity.token_label;
       have_decision = true;
       pre_ui_offered = (offered & ui_detection::candidate::pre_ui) != 0u;
       decision_scope = scope;
@@ -471,5 +540,9 @@ namespace sunshine_game3d::ui_temporal {
     // A render without detection keeps no real decision (T1). The
     // hidden-scene guard keeps its state.
     void inactive() { unavailable(); }
+    // The identity T1 applies to a Present (applied_identity).
+    present_identity applied(const present_identity &identity) const {
+      return applied_identity(identity, ui_ticket::authoritative(identity_override));
+    }
   };
 }

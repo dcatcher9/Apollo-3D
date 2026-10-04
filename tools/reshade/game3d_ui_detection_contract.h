@@ -306,6 +306,10 @@ namespace sunshine_game3d::ui_detection {
   namespace change_set {
     inline constexpr std::uint32_t shadow = 0x4u, gap = 0x8u, pair_shift = 4u, pair_mask = 0x30u, retained_1 = 0x40u,
       retained_2 = 0x80u;
+    // S3: pair offset 3 compares the layer with the Backbuffer tag's colour
+    // (t13), the same-token final image of a token-space pair; the renderer
+    // pushes it only while identity is authoritative.
+    inline constexpr std::uint32_t pair_backbuffer = 3u;
     inline constexpr std::uint32_t inferred_scale = 8u, lit_percent = 1u, min_neighbourhood = 3u;
     namespace judge {
       inline constexpr std::uint32_t none = 0u, ui_alpha = 1u, ui_color = 2u;
@@ -354,6 +358,54 @@ namespace sunshine_game3d::ui_detection {
   static_assert(((rules::darkening_measured | rules::tag_linear) & (still::flatten | rules::pin_only_ui | change_set::shadow |
     change_set::gap | change_set::pair_mask | change_set::retained_1 | change_set::retained_2)) == 0 &&
     (rules::darkening_measured & rules::tag_linear) == 0);
+
+  // S3 frame identity (docs/reshade-sbs.md, UI decision framework, "S3
+  // snapshot ticket (shadow)"; game3d_ui_ticket.h owns the ticket and label
+  // contract): the CPU proposes the label a paired snapshot must carry and
+  // the GPU verifies it against the snapshot's stamp. The renderer's stamp
+  // buffer (Buffer<uint4> SunshineUIStamps, t9 of the detection passes only,
+  // one entry per ui_ticket::slot: x the C_P read, y the C_T read) holds the
+  // stamp copied beside each candidate. b2 words 6-8 are the proposals, 0 not
+  // proposed: the offscreen layer copy's present label (the label of the
+  // retained Present it pairs with) and token label (the newest ready
+  // Backbuffer tag's), and the HUD-less image's present label; b2 word 9
+  // (Sunshine_UIIdentity) carries token_batch (the CPU proved the HUD-less
+  // image and its Backbuffer reference one tag batch by token equality) and
+  // the gates: gate_layer ANDs the layer pair's identity into the pre-UI
+  // change set's V2 validity (source 12), gate_hudless the HUD-less pair's
+  // into the HUD-less change set's (5 and 6). The renderer pushes a gate only
+  // while ui_ticket::identity_authoritative (S3 enabled), so in the shadow
+  // the verdict is measured and counted and decides nothing. A pair's
+  // verdict: none (its candidate not offered), unproposed (no label
+  // proposed), unstamped (the stamp read 0), exact or mismatch. The layer
+  // pairs in present space when a present label is proposed, else in token
+  // space; the HUD-less image in token space by token_batch, else in present
+  // space against its stamp's C_P read + 1 (it is copied at its tag, the
+  // frame after the Present it read). Decision texel 12 .z (word verdicts)
+  // packs both verdicts, their label spaces and the pairs that are exact in
+  // candidate-bit positions from ok_shift; .w (word deltas) the read minus
+  // the proposal of each pair as two int16 halves (the layer's low; zero
+  // unless both are nonzero). The reduce and the scene evidence pass both
+  // write them. A shader with the identity marker has all of this; the
+  // counter words ui_counter_word::identity_* count each offered pair's
+  // verdict on every detection frame.
+  namespace identity {
+    inline constexpr std::string_view marker = "SUNSHINE_UI_IDENTITY";
+    inline constexpr std::uint32_t version = 1u;
+    inline constexpr std::uint32_t token_batch = 0x1u, gate_layer = 0x2u, gate_hudless = 0x4u;
+    inline constexpr std::uint32_t stamp_layer = 4u, stamp_hudless = 5u, stamp_entries = 6u;
+    inline constexpr std::uint32_t none = 0u, exact = 1u, mismatch = 2u, unstamped = 3u, unproposed = 4u;
+    inline constexpr std::uint32_t space_none = 0u, space_token = 1u, space_present = 2u;
+    inline constexpr std::uint32_t verdict_mask = 0xfu, space_shift = 4u, space_mask = 0x3u, hudless_shift = 8u, ok_shift = 16u;
+    // The b2 words the renderer pushes: words 0-5 as before, then the three
+    // proposals and Sunshine_UIIdentity.
+    inline constexpr std::uint32_t b2_words = 10u;
+  }
+  static_assert(identity::stamp_entries == 6u && identity::unproposed < identity::verdict_mask &&
+    ((identity::space_mask << identity::space_shift) & identity::verdict_mask) == 0u &&
+    ((identity::verdict_mask | (identity::space_mask << identity::space_shift)) << identity::hudless_shift) <
+      (1u << identity::ok_shift) && ((candidate::layer | candidate::hudless) << identity::ok_shift) <= 0xffffffffu &&
+    (identity::token_batch & identity::gate_layer & identity::gate_hudless) == 0u);
   // The planes fit the 16384-texel D3D11 width at the shader's 8192 limit.
   static_assert(change_set::plane::judge + 1u == change_set::plane::dark && change_set::plane::tile + 1u == change_set::planes &&
     change_set::plane_words(254u) == 8u && change_set::plane_words(3840u) == 120u &&
@@ -519,7 +571,27 @@ namespace sunshine_game3d::ui_detection {
   // change-set shadow and its bit planes.
   // Fix 4: the pin-only-UI and darkening rule bits, the darkening planes and
   // statistics row, and the darkening rule's integer mirrors.
-  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 36> hlsl_change_set_defines{{
+  // S3: the identity marker, Sunshine_UIIdentity's bits, the stamp entries,
+  // the verdicts and label spaces and the verdict word's layout.
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 54> hlsl_change_set_defines{{
+    {"SUNSHINE_UI_IDENTITY", identity::version},
+    {"SUNSHINE_UI_IDENTITY_TOKEN_BATCH", identity::token_batch},
+    {"SUNSHINE_UI_IDENTITY_GATE_LAYER", identity::gate_layer},
+    {"SUNSHINE_UI_IDENTITY_GATE_HUDLESS", identity::gate_hudless},
+    {"SUNSHINE_UI_IDENTITY_STAMP_LAYER", identity::stamp_layer},
+    {"SUNSHINE_UI_IDENTITY_STAMP_HUDLESS", identity::stamp_hudless},
+    {"SUNSHINE_UI_IDENTITY_EXACT", identity::exact},
+    {"SUNSHINE_UI_IDENTITY_MISMATCH", identity::mismatch},
+    {"SUNSHINE_UI_IDENTITY_UNSTAMPED", identity::unstamped},
+    {"SUNSHINE_UI_IDENTITY_UNPROPOSED", identity::unproposed},
+    {"SUNSHINE_UI_IDENTITY_SPACE_TOKEN", identity::space_token},
+    {"SUNSHINE_UI_IDENTITY_SPACE_PRESENT", identity::space_present},
+    {"SUNSHINE_UI_IDENTITY_SPACE_SHIFT", identity::space_shift},
+    {"SUNSHINE_UI_IDENTITY_HUDLESS_SHIFT", identity::hudless_shift},
+    {"SUNSHINE_UI_IDENTITY_OK_SHIFT", identity::ok_shift},
+    {"SUNSHINE_UI_CHANGE_SET_PAIR_BACKBUFFER", change_set::pair_backbuffer},
+    {"SUNSHINE_UI_IDENTITY_STAMP_ENTRIES", identity::stamp_entries},
+    {"SUNSHINE_UI_IDENTITY_SPACE_MASK", identity::space_mask},
     {"SUNSHINE_UI_PIN_ONLY_UI", rules::pin_only_ui},
     {"SUNSHINE_UI_DARKENING_MEASURED", rules::darkening_measured},
     {"SUNSHINE_UI_TAG_LINEAR", rules::tag_linear},
@@ -606,6 +678,11 @@ namespace sunshine_game3d::ui_detection {
     // measured sample's, and those compared (a previous mean existed); zero
     // when the evidence passes did not run or the depth was inactive.
     inline constexpr std::size_t still_cells = 48, still_compared = 49;
+    // Texel 12 .z/.w (S3, a shader with identity::marker): the identity
+    // verdicts of the offered layer and HUD-less pairs and their deltas
+    // (namespace identity), written by the reduce and rewritten unchanged by
+    // the scene evidence pass; zero from a shader without the marker.
+    inline constexpr std::size_t id_verdicts = 50, id_deltas = 51;
     // Texels 13-15 (selection revision 6, fix 3): the change-set shadow, the
     // offscreen layer against its pair's Present (b2 word 5's offset) at
     // change_set::inferred_scale times b2 word 4, on sample frames with an
@@ -636,6 +713,7 @@ namespace sunshine_game3d::ui_detection {
     decision_word::presented_lit_differs == 4 * pre_ui_decision_texels - 1 &&
     decision_word::still_cells == 4 * pre_ui_decision_texels && decision_word::still_compared == decision_word::still_cells + 1 &&
     decision_word::still_cells + 4 == 4 * still_decision_texels && decision_word::cs_changed == 4 * still_decision_texels &&
+    decision_word::id_verdicts == decision_word::still_compared + 1 && decision_word::id_deltas + 1 == decision_word::cs_changed &&
     decision_word::cs_judge_kind + 3 == 4 * change_set_decision_texels && change_set_decision_texels <= max_decision_texels &&
     decision_word::dk_unpinned == decision_word::cs_judge_kind + 1 && decision_word::dk_kept + 1 == 4 * change_set_decision_texels);
   enum class scene_verdict : std::uint32_t { none = 0, hidden = 1, ambiguous = 2, visible = 3 };

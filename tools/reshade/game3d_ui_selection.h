@@ -51,7 +51,9 @@ namespace sunshine_game3d::ui_selection {
   // 5's rules::pin_only_ui) lets a valid exact selective change set decide
   // where S1's winner is an accepted alpha opaque on every pixel (the h1
   // word's refined bit and counter word); and the change-set shadow of
-  // texels 13-15.
+  // texels 13-15. S3's identity verdict and gates (identity_input) are
+  // versioned by the shader's identity marker (ui_detection::identity), not
+  // a revision: without a gate pushed decide() is revision 6's.
   inline constexpr std::uint32_t revision = 6;
   inline constexpr std::string_view revision_marker = "SUNSHINE_UI_SELECTION_REVISION";
 
@@ -216,6 +218,9 @@ namespace sunshine_game3d::ui_selection {
     std::uint32_t pre_ui_match{}, pre_ui_lit{}, presented_lit{}, presented_lit_differs{};
     // Texels 13-15 (revision 6): the change-set shadow.
     change_set_shadow shadow;
+    // Texel 12 .z/.w (S3): the identity verdicts the GPU wrote (zero from a
+    // shader without them). decide() recomputes them from its identity input.
+    std::uint32_t identity_verdicts{}, identity_deltas{};
   };
   // Counts from decision words (texel t, component c is word 4 t + c); the
   // layer's (texel 7) read zero from fewer than 32 words, the one-way counts
@@ -253,6 +258,10 @@ namespace sunshine_game3d::ui_selection {
       c.pre_ui_lit = words[word::pre_ui_image_lit];
       c.presented_lit = words[word::presented_lit];
       c.presented_lit_differs = words[word::presented_lit_differs];
+    }
+    if (n >= 4u * ui_detection::change_set_decision_texels) {
+      c.identity_verdicts = words[word::id_verdicts];
+      c.identity_deltas = words[word::id_deltas];
     }
     if (n >= 4u * ui_detection::change_set_decision_texels)
       c.shadow = {words[word::cs_changed], words[word::cs_unchanged], words[word::cs_nonfinite], words[word::cs_matching_tiles],
@@ -329,6 +338,114 @@ namespace sunshine_game3d::ui_selection {
     return exact && !c.nonfinite && c.changed * 100u >= c.pixels * 98u && c.lit * 2u >= c.pixels;
   }
 
+  // S3 frame identity (ui_detection::identity; game3d_ui_ticket.h owns the
+  // labels): the stamp reads of the offered layer and HUD-less copies (C_P
+  // at x, C_T at y of their stamp entries) and b2 words 6-9, the proposals
+  // and Sunshine_UIIdentity. Default: nothing proposed, no gate, as with
+  // nothing bound or pushed.
+  struct identity_input {
+    std::uint32_t layer_present{}, layer_token{}, hudless_present{};
+    std::uint32_t expected_layer_present{}, expected_layer_token{}, expected_hudless_present{};
+    std::uint32_t bits{};
+  };
+  // The GPU's identity verdict of the offered pairs (decision texel 12 .z/.w):
+  // per pair its verdict and label space (ui_detection::identity), its read
+  // minus the proposal clamped to int16 (0 unless both are nonzero), and ok,
+  // the pairs that are exact in candidate-bit positions.
+  struct identity_verdict {
+    std::uint32_t layer{}, layer_space{}, hudless{}, hudless_space{};
+    std::int32_t layer_delta{}, hudless_delta{};
+    std::uint32_t ok{};
+    friend constexpr bool operator==(const identity_verdict &a, const identity_verdict &b) {
+      return a.layer == b.layer && a.layer_space == b.layer_space && a.hudless == b.hudless &&
+        a.hudless_space == b.hudless_space && a.layer_delta == b.layer_delta && a.hudless_delta == b.hudless_delta &&
+        a.ok == b.ok;
+    }
+  };
+  namespace detail {
+    constexpr std::uint32_t identity_of(std::uint32_t read, std::uint32_t expected) {
+      namespace id = ui_detection::identity;
+      return !expected ? id::unproposed : !read ? id::unstamped : read == expected ? id::exact : id::mismatch;
+    }
+    constexpr std::int32_t identity_delta(std::uint32_t read, std::uint32_t expected) {
+      if (!read || !expected) return 0;
+      const auto delta = std::int32_t(read - expected);
+      return delta < -32768 ? -32768 : delta > 32767 ? 32767 : delta;
+    }
+  }
+  // The verdict SunshineIdentityWords computes: an offered layer pairs in
+  // present space when a present label is proposed, else in token space; an
+  // offered HUD-less image in token space when the CPU proved the token
+  // batch, else in present space with its stamp's C_P read + 1 (a tag copy
+  // holds the frame after the Present it read); unproposed without a label.
+  constexpr identity_verdict verify_identity(const identity_input &in, std::uint32_t offered) {
+    namespace id = ui_detection::identity;
+    identity_verdict v;
+    if (offered & candidate::layer) {
+      if (in.expected_layer_present) {
+        v.layer_space = id::space_present;
+        v.layer = detail::identity_of(in.layer_present, in.expected_layer_present);
+        v.layer_delta = detail::identity_delta(in.layer_present, in.expected_layer_present);
+      } else if (in.expected_layer_token) {
+        v.layer_space = id::space_token;
+        v.layer = detail::identity_of(in.layer_token, in.expected_layer_token);
+        v.layer_delta = detail::identity_delta(in.layer_token, in.expected_layer_token);
+      } else {
+        v.layer = id::unproposed;
+      }
+    }
+    if (offered & candidate::hudless) {
+      if (in.bits & id::token_batch) {
+        v.hudless_space = id::space_token;
+        v.hudless = id::exact;
+      } else if (in.expected_hudless_present) {
+        v.hudless_space = id::space_present;
+        const std::uint32_t read = in.hudless_present ? in.hudless_present + 1u : 0u;
+        v.hudless = detail::identity_of(read, in.expected_hudless_present);
+        v.hudless_delta = detail::identity_delta(read, in.expected_hudless_present);
+      } else {
+        v.hudless = id::unproposed;
+      }
+    }
+    v.ok = (v.layer == id::exact ? candidate::layer : 0u) | (v.hudless == id::exact ? candidate::hudless : 0u);
+    return v;
+  }
+  // Decision words id_verdicts and id_deltas of a verdict, and back.
+  constexpr std::uint32_t identity_verdict_word(const identity_verdict &v) {
+    namespace id = ui_detection::identity;
+    return v.layer | v.layer_space << id::space_shift | (v.hudless | v.hudless_space << id::space_shift) << id::hudless_shift |
+      v.ok << id::ok_shift;
+  }
+  constexpr std::uint32_t identity_delta_word(const identity_verdict &v) {
+    return (std::uint32_t(v.layer_delta) & 0xffffu) | std::uint32_t(v.hudless_delta) << 16;
+  }
+  constexpr identity_verdict identity_of_words(std::uint32_t verdicts, std::uint32_t deltas) {
+    namespace id = ui_detection::identity;
+    identity_verdict v;
+    v.layer = verdicts & id::verdict_mask;
+    v.layer_space = (verdicts >> id::space_shift) & id::space_mask;
+    v.hudless = (verdicts >> id::hudless_shift) & id::verdict_mask;
+    v.hudless_space = (verdicts >> (id::hudless_shift + id::space_shift)) & id::space_mask;
+    v.ok = verdicts >> id::ok_shift;
+    v.layer_delta = std::int32_t(std::int16_t(std::uint16_t(deltas & 0xffffu)));
+    v.hudless_delta = std::int32_t(std::int16_t(std::uint16_t(deltas >> 16)));
+    return v;
+  }
+  static_assert(verify_identity({9u, 0u, 0u, 9u}, candidate::layer).ok == candidate::layer &&
+    verify_identity({8u, 0u, 0u, 9u}, candidate::layer).layer == ui_detection::identity::mismatch &&
+    verify_identity({8u, 0u, 0u, 9u}, candidate::layer).layer_delta == -1 &&
+    verify_identity({0u, 0u, 0u, 9u}, candidate::layer).layer == ui_detection::identity::unstamped &&
+    verify_identity({9u, 7u, 0u, 0u, 7u}, candidate::layer).layer_space == ui_detection::identity::space_token &&
+    verify_identity({9u, 7u, 0u, 0u, 7u}, candidate::layer).ok == candidate::layer &&
+    verify_identity({}, candidate::layer).layer == ui_detection::identity::unproposed &&
+    verify_identity({0u, 0u, 4u, 0u, 0u, 5u}, candidate::hudless).ok == candidate::hudless &&
+    verify_identity({0u, 0u, 5u, 0u, 0u, 5u}, candidate::hudless).hudless_delta == 1 &&
+    verify_identity({0u, 0u, 0u, 0u, 0u, 0u, ui_detection::identity::token_batch}, candidate::hudless).ok == candidate::hudless &&
+    verify_identity({9u, 7u, 4u, 9u, 7u, 5u}, 0u) == identity_verdict{} &&
+    identity_of_words(identity_verdict_word(verify_identity({8u, 0u, 7u, 9u, 0u, 5u}, candidate::layer | candidate::hudless)),
+      identity_delta_word(verify_identity({8u, 0u, 7u, 9u, 0u, 5u}, candidate::layer | candidate::hudless))) ==
+      verify_identity({8u, 0u, 7u, 9u, 0u, 5u}, candidate::layer | candidate::hudless));
+
   // T1: the GPU hold store of the last real detection (ui_detection::hold):
   // whether it decided on its own (own) or not (spent), and the decision it
   // applied. Default: none, as with nothing bound at u5.
@@ -378,6 +495,8 @@ namespace sunshine_game3d::ui_selection {
     // a valid exact selective change set replaced it (refined; s1_source is
     // then 5 or 12), whatever H1 then applied.
     bool shapeless{}, refined{};
+    // S3: the identity verdict of the offered pairs (decision texel 12 .z/.w).
+    identity_verdict identity{};
   };
   // Decision word h1 of a decision (texel 10 .w).
   constexpr std::uint32_t h1_word(const decision &d) {
@@ -449,10 +568,22 @@ namespace sunshine_game3d::ui_selection {
   // hold store keeps the decision before it. H1 runs after refine, so a
   // refined frame under a held hidden verdict with an acting claim (the
   // shapeless alpha's claim (a) stays) is flat as source 8.
+  // S3 (identity, b2 words 6-9): with identity::gate_hudless a HUD-less
+  // change set is valid only while its pair is exact, and with
+  // identity::gate_layer the pre-UI change set only while the layer pair is;
+  // an invalid paired set then follows T1 like any other, and under refine a
+  // refused set counts as missing (refine_missing), so a shapeless winner
+  // reuses the previous real frame's decision once rather than show flat.
+  // Without a gate the verdict decides nothing.
   inline decision decide(const counts &c, std::uint32_t offered, std::uint32_t accepted, std::uint32_t flags,
-      const hold_state &previous = {}, std::uint32_t rules = 0u) {
+      const hold_state &previous = {}, std::uint32_t rules = 0u, const identity_input &identity = {}) {
     decision d;
     const std::uint32_t pixels = c.pixels;
+    d.identity = verify_identity(identity, offered);
+    const bool hudless_identity = !(identity.bits & ui_detection::identity::gate_hudless) ||
+      (d.identity.ok & candidate::hudless) != 0u;
+    const bool layer_identity = !(identity.bits & ui_detection::identity::gate_layer) ||
+      (d.identity.ok & candidate::layer) != 0u;
     std::uint32_t valid = 0u, selective_bits = 0u;
     for (const auto k : draw_order) {
       if (!alpha_kind(k)) continue;
@@ -461,12 +592,12 @@ namespace sunshine_game3d::ui_selection {
       if (selective(c.covered[i], pixels)) selective_bits |= bit(k);
     }
     const bool partial_set = change_set_selective(c), full_set = change_set_full(c, (offered & candidate::exact) != 0u);
-    if (partial_set || full_set) valid |= candidate::hudless;
+    if ((partial_set || full_set) && hudless_identity) valid |= candidate::hudless;
     if (partial_set) selective_bits |= candidate::hudless;
     // The pre-UI change set: partial only, without an offered HUD-less image
     // (whose pair the slot then holds) and over a layer without coverage.
     if ((offered & candidate::pre_ui) && !(offered & candidate::hudless) && partial_set &&
-        !c.covered[alpha_index(kind::ui_layer)]) {
+        !c.covered[alpha_index(kind::ui_layer)] && layer_identity) {
       valid |= candidate::pre_ui;
       selective_bits |= candidate::pre_ui;
     }
@@ -579,8 +710,12 @@ namespace sunshine_game3d::ui_selection {
           d.contradicted_bits |= bit(judged_kinds[i]);
     // T1: no decision of its own, so the previous real frame's own decision
     // once; per_frame_hold_reset means there is none in this chain.
+    // S3: a gate that refused an offered paired change set counts as that
+    // set missing for one frame, like the gap.
+    const bool identity_refused = ((offered & candidate::pre_ui) && !layer_identity) ||
+      ((offered & candidate::hudless) && !hudless_identity);
     const bool refine_missing = refine_on && shapeless && !d.refined &&
-      ((flags & ui_detection::per_frame_accepted_missing) || (rules & ui_detection::change_set::gap));
+      ((flags & ui_detection::per_frame_accepted_missing) || (rules & ui_detection::change_set::gap) || identity_refused);
     const bool no_own = (!source && ((flags & ui_detection::per_frame_accepted_missing) ||
       (offered & accepted & candidate_bits & ~valid))) || refine_missing;
     const std::uint32_t prior = (flags & ui_detection::per_frame_hold_reset) ? ui_detection::hold::none : previous.state;
@@ -627,6 +762,25 @@ namespace sunshine_game3d::ui_selection {
     adds[ui_counter_word::full_alpha] = d.full_alpha;
     adds[ui_counter_word::reused] = d.reused;
     adds[ui_counter_word::refined] = d.refined;
+    return adds;
+  }
+  // S3: the adds one detection frame makes to the identity counter words
+  // (ui_counter_word::identity_*, after count): one per offered pair by its
+  // verdict, and token_exact for an exact pair in token space.
+  inline std::array<std::uint32_t, ui_counter_word::identity_words> identity_counter_adds(const identity_verdict &v) {
+    namespace id = ui_detection::identity;
+    std::array<std::uint32_t, ui_counter_word::identity_words> adds{};
+    const auto add = [&](std::uint32_t verdict, std::uint32_t space) {
+      const std::size_t base = ui_counter_word::identity_exact;
+      if (verdict == id::exact) {
+        ++adds[ui_counter_word::identity_exact - base];
+        if (space == id::space_token) ++adds[ui_counter_word::identity_token_exact - base];
+      } else if (verdict == id::mismatch) ++adds[ui_counter_word::identity_mismatch - base];
+      else if (verdict == id::unstamped) ++adds[ui_counter_word::identity_unstamped - base];
+      else if (verdict == id::unproposed) ++adds[ui_counter_word::identity_unproposed - base];
+    };
+    add(v.layer, v.layer_space);
+    add(v.hudless, v.hudless_space);
     return adds;
   }
 

@@ -82,13 +82,32 @@ namespace sunshine_game3d {
     // with a valid exact selective change set (source 5 or 12; the h1 word's
     // refined bit), whatever H1 then applied.
     inline constexpr std::size_t refined = reused + 1;
+    // count: the words every counting shader writes (SUNSHINE_UI_COUNTER_WORDS).
     inline constexpr std::size_t count = refined + 1;
+    // S3 (game3d_ui_ticket.h, shadow; ui_detection::identity): a shader with
+    // the identity marker appends identity_words words after count, one add
+    // per offered layer and HUD-less pair on every detection frame by its
+    // identity verdict: exact (and of those, token_exact in token space),
+    // mismatch, unstamped and unproposed. The renderer's counter texture then
+    // holds with_identity words; the "Sunshine UI identity" line's gpu group
+    // carries their totals (ui_ticket::identity_counter::gpu_*), and the
+    // "Sunshine UI counters" line does not.
+    inline constexpr std::size_t identity_exact = count, identity_mismatch = count + 1, identity_unstamped = count + 2,
+      identity_unproposed = count + 3, identity_token_exact = count + 4, identity_words = 5;
+    inline constexpr std::size_t with_identity = count + identity_words;
   }
   static_assert(ui_counter_word::decided + ui_counter_word::decided_count == ui_counter_word::untrusted_inferred &&
     ui_counter_word::full_alpha == 28 && ui_counter_word::reused == 29 && ui_counter_word::refined == 30 &&
-    ui_counter_word::count == 31);
+    ui_counter_word::count == 31 && ui_counter_word::identity_token_exact + 1 == ui_counter_word::with_identity &&
+    ui_counter_word::with_identity == 36);
   // The game3d_native.hlsl define mirroring each GPU word index.
-  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 21> hlsl_counter_defines{{
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 27> hlsl_counter_defines{{
+    {"SUNSHINE_UI_COUNTER_IDENTITY_WORDS", std::uint32_t(ui_counter_word::identity_words)},
+    {"SUNSHINE_UI_COUNTER_IDENTITY_EXACT", std::uint32_t(ui_counter_word::identity_exact)},
+    {"SUNSHINE_UI_COUNTER_IDENTITY_MISMATCH", std::uint32_t(ui_counter_word::identity_mismatch)},
+    {"SUNSHINE_UI_COUNTER_IDENTITY_UNSTAMPED", std::uint32_t(ui_counter_word::identity_unstamped)},
+    {"SUNSHINE_UI_COUNTER_IDENTITY_UNPROPOSED", std::uint32_t(ui_counter_word::identity_unproposed)},
+    {"SUNSHINE_UI_COUNTER_IDENTITY_TOKEN_EXACT", std::uint32_t(ui_counter_word::identity_token_exact)},
     {"SUNSHINE_UI_COUNTER_WORDS", std::uint32_t(ui_counter_word::count)},
     {"SUNSHINE_UI_COUNTER_DETECTION_FRAMES", std::uint32_t(ui_counter_word::detection_frames)},
     {"SUNSHINE_UI_COUNTER_DECIDED", std::uint32_t(ui_counter_word::decided)},

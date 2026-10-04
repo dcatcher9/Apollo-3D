@@ -6,6 +6,7 @@
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_layer.h"
 #include "game3d_ui_selection.h"
+#include "game3d_ui_ticket.h"
 #include "scene_gain.h"
 #include "src/game3d_debug_protocol.h"
 #include "src/game3d_debug_formats.h"
@@ -177,6 +178,10 @@ namespace sunshine_game3d {
         {"retained_present_offsets", {{"retained_present_1", f.resources.retained_offsets[0]},
           {"retained_present_2", f.resources.retained_offsets[1]}}},
         {"held_presents", detection.held_presents}, {"candidate_layout", ui_detection::candidate_layout},
+        {"expected_layer_present", detection.expected_layer_present}, {"expected_layer_token", detection.expected_layer_token},
+        {"expected_hudless_present", detection.expected_hudless_present}, {"identity_bits", detection.identity_bits},
+        {"stamps", nullptr},
+        {"identity_meaning", "S3 shadow (docs/reshade-sbs.md, UI decision framework, S3 snapshot ticket): expected_layer_present, expected_layer_token and expected_hudless_present are b2 words 6-8, the labels the CPU proposed for the GPU to verify (0: not proposed), identity_bits b2 word 9 (Sunshine_UIIdentity). stamps is the renderer's stamp buffer read back once this dump completed, one [C_P, C_T] per ui_ticket slot (0-2 the tags, 3 the presented colour, 4 the layer, 5 the HUD-less image), as the detection that ran in this render read it at t9; null when no detection ran in this render (held or inactive) or the buffer does not exist. ui_detection_replay pushes and binds them."},
         {"meaning", "b2 constants of the automatic UI detection run whose mask this render consumed: it ran in this render from this real frame's own offered candidates, was held (a generated Present showing the decision of the real frame it shows, held_presents generated Presents in a row; UI framework T1), or was inactive (all zero). candidates and accepted are candidate bits of candidate_layout 2 (0x1 UIAlpha, 0x2 UI color tag, 0x4 Backbuffer, 0x8 current, 0x10 HUD-less, 0x20 exact pair, 0x40 offscreen UI layer, 0x100 the pre-UI change set: the layer proven the pre-UI scene image, paired with a retained Present, fix 3); accepted is the session's accepted candidates pushed in b2 word 2. flags is the full pushed Sunshine_UIDetectionFlags word: its stored bits describe the offscreen UI layer slot, and per-frame bits are included (0x40000: the depth was not this frame's; 0x100000: an accepted candidate the previous adopting real frame offered is missing; 0x200000: no previous real decision exists in this chain, so the T1 grace cannot reuse one; 0x400000: the hidden-scene guard holds a hidden verdict of D on the presented frame; 0x800000: its samples read the pre-UI scene image visible; bits 24-30: the candidate bits shifted left by 24 whose source signature a visible verdict refuted, so their full claims do not act (H1); 0x80000000: the offered layer's signature is proven the pre-UI scene image (the session ledger's key pre_ui:<format>:<space>), so its claim (d) may act (H1 d); 0x10000 and 0x80000, the layer and HUD-less route holds before S2b, and 0x20000000, the layer measured beside a HUD-less image for its D proof before fix 1, are retired and never reused); threshold_bits is the float32 difference threshold (b2 word 1) and pre_ui_threshold_bits the float32 pair threshold of the offscreen UI layer and the presented color (b2 word 4, zero without a layer, when they are not comparable or on a frame that is not a detection sample, since the CPU reads texel 11 from samples only), at 8 times which the tiles pass counts the layer's pre-UI pixels. rules_bits is b2 word 5 (Sunshine_UIRules) and still_bits its bit 0x1, set while rule H2's run is active in SDR Auto and the session enables it (UIFlattenStillScreens=1), so a frame applying no source of its own that the T1 grace did not reuse is shown flat as source 11 (a still screen without a UI source); zero otherwise, the default shadow included. Fix 3's rule bits: 0x2 pin only UI (Auto with UIPinOnlyUI=1: refine, a valid exact selective change set decides where S1's winner is an accepted alpha opaque on every pixel, and with 0x100 rule P2: the mask pass leaves the decided source's pure darkening unpinned), 0x100 that the darkening passes ran (fix 4, rule P2: every Auto detection frame with UIPinOnlyUI=1, sample frames in its shadow), 0x200 that the UI color tag has a float format (linear colour, rule P2's linear tolerance), bits 4-5 the Present offset the offscreen layer copy is compared with (0 the current Present, 1 and 2 the retained Presents one and two back at t2 and t3), 0x40 and 0x80 that those are bound. layer_presents_ago is the Presents since the offered layer copy was taken (it holds the frame of that Present), and layer_pairing its pairing: retained (exact by Present counting, frame generation off), late (frame generation active, against the current Present), unavailable (that Present not retained) or none (no layer). The retained Presents and the consumed layer copy are the optional artifacts retained_present_1, retained_present_2 and ui_layer_detected, at the offsets retained_present_offsets names; ui_detection_replay binds them by its case labels (layer_pair). ui_detection_replay pushes still from this field (rules_bits when present) with its own change-set bits and reruns detection from the package's candidates as a single frame without a previous decision: a render whose mask the T1 grace reused replays as its own decision (no mask, with its reason)."}};
       result["ui_pin"] = {{"soft_pin_gain", shader_marker(captured_shader, "SUNSHINE_UI_SOFT_PIN_GAIN")},
         {"decision_texels", shader_marker(captured_shader, ui_detection::decision_texels_marker)},
@@ -475,6 +480,90 @@ namespace sunshine_game3d {
       api::resource_view depth_uav {}, null_uav {};
       bool recorded = false, signalled = false, signal_failed = false, published = false;
       std::uint64_t bytes = 0;
+      // S3 shadow: the census rows' CPU-readable stamps, read once the batch
+      // completed (read_census_stamps), then retired like their copies.
+      std::vector<std::pair<std::size_t, api::resource>> census_stamps;
+
+      void retire_census_stamps() {
+        for (const auto &[row, stamp] : census_stamps) {
+          if (device) {
+            ui_layer::retire(device, stamp);
+          }
+        }
+        census_stamps.clear();
+      }
+
+      // After completion: each census row's ticket gets its stamp reads (a
+      // before-clear copy holds the frame of the Present its C_P read names).
+      void read_census_stamps() {
+        if (census_stamps.empty() || !device) {
+          return;
+        }
+        auto metadata = nlohmann::json::parse(json, nullptr, false);
+        auto *rows = metadata.is_object() && metadata.contains("ui_layer_census") ? &metadata["ui_layer_census"]["candidates"] : nullptr;
+        for (const auto &[row, stamp] : census_stamps) {
+          void *data = nullptr;
+          if (!rows || !rows->is_array() || row >= rows->size() || !device->map_buffer_region(stamp, 0, 16, api::map_access::read_only, &data) || !data) {
+            continue;
+          }
+          std::uint32_t words[4] {};
+          std::memcpy(words, data, sizeof(words));
+          device->unmap_buffer_region(stamp);
+          auto &ticket = (*rows)[row]["ticket"];
+          const auto present = ui_ticket::present_label(ui_ticket::boundary::before_clear, words[0]);
+          const auto token = ui_ticket::token_label_of_copy(words[1]);
+          ticket["stamp"] = {{"present_read", words[0]}, {"token_read", words[1]}, {"present_label", present.valid ? nlohmann::json(present.value) : nlohmann::json(nullptr)}, {"token_label", token.valid ? nlohmann::json(token.value) : nlohmann::json(nullptr)}};
+        }
+        if (rows) {
+          json = metadata.dump();
+        }
+        retire_census_stamps();
+      }
+
+      // S3 shadow: the renderer's stamp buffer as the detection of the dumped
+      // render read it, copied after that render in the same submission and
+      // read once the batch completed (replay.ui_detection.stamps).
+      api::resource identity_stamps {};
+
+      void retire_identity_stamps() {
+        if (identity_stamps.handle && device) {
+          ui_layer::retire(device, identity_stamps);
+        }
+        identity_stamps = {};
+      }
+
+      void record_identity_stamps(api::command_list *commands, api::resource stamps, bool copy_dest) {
+        constexpr std::uint64_t bytes = ui_ticket::slot::count * ui_ticket::stamp_bytes;
+        if (!stamps.handle || !device->create_resource(api::resource_desc(bytes, api::memory_heap::readback, api::resource_usage::copy_dest), nullptr, api::resource_usage::copy_dest, &identity_stamps)) {
+          identity_stamps = {};
+          return;
+        }
+        const auto state = copy_dest ? api::resource_usage::copy_dest : api::resource_usage::general;
+        commands->barrier(stamps, state, api::resource_usage::copy_source);
+        commands->copy_buffer_region(stamps, 0, identity_stamps, 0, bytes);
+        commands->barrier(stamps, api::resource_usage::copy_source, state);
+      }
+
+      void read_identity_stamps() {
+        if (!identity_stamps.handle || !device) {
+          return;
+        }
+        constexpr std::size_t slots = ui_ticket::slot::count;
+        std::uint32_t words[slots * 4] {};
+        void *data = nullptr;
+        auto metadata = nlohmann::json::parse(json, nullptr, false);
+        if (metadata.is_object() && metadata.contains("replay") && metadata["replay"].contains("ui_detection") && device->map_buffer_region(identity_stamps, 0, sizeof(words), api::map_access::read_only, &data) && data) {
+          std::memcpy(words, data, sizeof(words));
+          device->unmap_buffer_region(identity_stamps);
+          auto stamps = nlohmann::json::array();
+          for (std::size_t slot = 0; slot != slots; ++slot) {
+            stamps.push_back({words[slot * 4], words[slot * 4 + 1]});
+          }
+          metadata["replay"]["ui_detection"]["stamps"] = std::move(stamps);
+          json = metadata.dump();
+        }
+        retire_identity_stamps();
+      }
 
       void release_program() {
         if (depth_uav.handle) {
@@ -496,6 +585,8 @@ namespace sunshine_game3d {
       }
 
       ~capture_batch() {
+        retire_census_stamps();
+        retire_identity_stamps();
         release_program();
       }
 
@@ -649,17 +740,35 @@ namespace sunshine_game3d {
         }
         char source[24];
         std::snprintf(source, sizeof(source), "0x%llx", static_cast<unsigned long long>(c.source));
+        // S3 shadow ticket of a recorded copy; its stamp is read once the
+        // batch completed (read_census_stamps).
+        nlohmann::json ticket = nullptr;
+        if (c.copy.handle) {
+          ticket = {{"kind", ui_ticket::name(ui_ticket::capture_kind::layer_copy)}, {"boundary", ui_ticket::name(ui_ticket::boundary::before_clear)}, {"proof", ui_ticket::name(ui_ticket::proof::clear_precall)}, {"stamped", c.stamped}, {"refusal", ui_ticket::name(c.stamped ? ui_ticket::refusal::none : ui_ticket::refusal::unstamped)}, {"stamp", nullptr}};
+        }
         rows.push_back({{"artifact_id", static_cast<unsigned>(kind)}, {"kind", wire::ui_layer_names[i]}, {"captured", added},
           {"status", status}, {"source", source}, {"width", c.width}, {"height", c.height}, {"dxgi_format", c.format},
-          {"clears_while_armed", c.clears}, {"active", c.active}});
+          {"clears_while_armed", c.clears}, {"active", c.active}, {"ticket", std::move(ticket)}});
         // add() holds its own reference; the add-on's handle is released once
         // any game command list that wrote the copy has executed.
         ui_layer::retire(owner, c.copy);
+        if (c.stamp.handle) {
+          if (owner == device && c.stamped) {
+            batch.census_stamps.emplace_back(rows.size() - 1, c.stamp);
+          } else {
+            ui_layer::retire(owner, c.stamp);
+          }
+        }
       }
       return {{"meaning", "Output-resolution color targets the game cleared to transparent black while this request was armed, "
         "the signature of an offscreen UI layer. Each copy was taken before a clear, so it shows the previous frame's content. "
         "active marks the target the live tracker chose; without a tagged UI buffer its copy is UI detection's color+alpha "
         "candidate, admitted only while premultiplied. The others are candidates only, and none is verified UI."},
+        {"ticket_meaning", "S3 snapshot ticket, shadow only (docs/reshade-sbs.md, UI decision framework): the copy's stamp, "
+          "written by the same game list right after the copy, read once this dump completed. present_read is the present "
+          "clock C_P when the copy executed (a before-clear copy holds the frame of that Present: present_label), token_read "
+          "the token clock C_T (the newest Backbuffer tag token executed before it: token_label); 0 is unstamped. null: no "
+          "copy, or the stamp was not recorded."},
         {"candidates", std::move(rows)}};
     }
     // Fix 3: the retained Presents the pre-UI change set pairs with and the
@@ -752,6 +861,8 @@ namespace sunshine_game3d {
 
     void poll(bool foreground_frame = false) {
       if (pending && pending->complete()) {
+        pending->read_census_stamps();
+        pending->read_identity_stamps();
         pending->release_program();
         if (current(*pending)) {
           if (!pending->published) {
@@ -909,6 +1020,9 @@ namespace sunshine_game3d {
       }
       next->response.result = wire::status::complete;
       next->record(commands, depth.shader_resource);
+      if (frame.ui_detection.state == ui_detection_snapshot::run_state::ran) {
+        next->record_identity_stamps(commands, r.ui_stamps, r.ui_stamps_copy_dest);
+      }
     } catch (const std::exception &error) {
       next->response.result = wire::status::failed;
       next->response.texture_count = 0;
@@ -951,6 +1065,7 @@ namespace sunshine_game3d {
       p->json = metadata.dump();
     }
     p->recorded = false;
+    p->retire_census_stamps();
     p->release_program();
     p->device = nullptr;
     p->runtime = nullptr;

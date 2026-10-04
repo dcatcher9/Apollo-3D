@@ -489,7 +489,7 @@ asks for the layer (within the last second), the active layer is copied once per
 first clear, into a persistent add-on texture; otherwise no copy is recorded into the game's
 frame. Auto offers the newest copy, if under 250 ms old, as a candidate of its own (candidate
 bit `0x40`, deciding as source 10) beside any tagged UIColorAndAlpha; the two never share a slot
-or an acceptance (E1). Until S3 one layer, the tracker's active one, is offered. Copies are released through their own device, at the latest when it is
+or an acceptance (E1). Until S4 one layer, the tracker's active one, is offered. Copies are released through their own device, at the latest when it is
 destroyed. It is one frame late (stored flag `0x4`), and its UI may have moved since, but its
 consumed mask is its raw alpha, exactly like every other source; the **UI pin band** (below) pins
 only finite positive alpha. UI that moves in the layer can therefore show a one-frame edge or tear.
@@ -594,7 +594,7 @@ storage can be reused. Unsubmitted, failed or replay-invalidated captures remain
 **Temporal hold (T1).** A Present without its own fresh decision uses the decision of the real
 frame it shows, and a real frame without a decision of its own reuses the previous real frame's
 decision once; after that there is no mask. There is no multiplier constant and no time bound.
-Until S3 stamps real frames at execution, Present counting tells real from generated Presents: the
+Until S3 is enabled, Present counting tells real from generated Presents: the
 HUD-less pairing above, and without a HUD-less capture, under FG, a Present that offers no input
 within the reported generated count (one while it is unknown) of the last Present that offered a
 Streamline UI tag (`ui_mask::generated_without_input`). Expedition 33 with FG on tags its Backbuffer
@@ -1184,7 +1184,7 @@ observer read the game's FG mode as off (`change_set::next_fg_off_presents`), an
 unknown mode (no observation yet, no Streamline FG observer, or frame generation from another SDK),
 FG on, a generated Present and the first Presents after FG turns off all give `late`. A game that
 switches FG off in its menus qualifies; one that keeps FG requested while suspended does not,
-since nothing marks its Presents real until S3. Only a retained pairing is offered; never on a
+since nothing marks its Presents real until S3 is enabled. Only a retained pairing is offered; never on a
 generated Present, never against the current Present, never beside a HUD-less image.
 Its difference uses eight times the layer's pair threshold with the presented colour (16/255 for
 Stellar Blade's 8-bit target) and the 3x3 rule. On dump 478's same-frame pair this rule found the
@@ -1497,14 +1497,20 @@ the refine rule and, with `0x100`, rule P2 (Auto with `UIPinOnlyUI=1`), `0x4`
 (`SUNSHINE_UI_CHANGE_SET_SHADOW`) that the offered layer is proven the pre-UI scene image, the only
 layer the change-set shadow measures, `0x8` (`SUNSHINE_UI_CHANGE_SET_GAP`) T1's change-set gap
 (below), bits 4-5 the Present offset of the layer pair (0 the current Present at `t6`, 1 and 2 the
-retained Presents),
+retained Presents, and since S3 3 the Backbuffer tag's colour at `t13`, a token-space pair, pushed
+only while identity is authoritative),
 and `0x40` and `0x80` that `SunshineRetainedPresent1` (`t2`) and `SunshineRetainedPresent2` (`t3`)
 are bound, and since fix 4 `0x100` (`SUNSHINE_UI_DARKENING_MEASURED`) that the darkening passes run
 on this frame (**Pin only UI (fix 4)**) and `0x200` (`SUNSHINE_UI_TAG_LINEAR`) that the UI color tag
 has a float format; the reduce reads neither `0x100`, `0x200` nor anything they imply. Those two SRVs are bound for the detection passes only; the eye and pack passes keep
 their own `t2` and `t3`. When `0x100` is offered without a HUD-less image, the change-set slot
 (the HUD-less words of texels 0, 1 and 4) holds the layer pair at eight times word 1, which is then
-the layer's pair threshold; otherwise it holds the HUD-less pair at word 1. A layer seen
+the layer's pair threshold; otherwise it holds the HUD-less pair at word 1. Since S3 `b2` has ten
+words (48 bytes): words 6-8 the labels the CPU proposes for the offered layer copy (present and
+token space) and HUD-less image (present space), 0 not proposed, and word 9 `Sunshine_UIIdentity`,
+`0x1` the CPU's token-batch proof of the HUD-less pair and the gates `0x2` (the layer pair, source
+12) and `0x4` (the HUD-less pair, sources 5 and 6), which the renderer pushes only while identity is
+authoritative (**S3 snapshot ticket (shadow)**). A layer seen
 through an `*_SRGB` view is not comparable with a UNORM presented frame, so it is never proven.
 `Sunshine_UIDetectionFlags` (`b2` word 3) has stored and per-frame bits:
 
@@ -1579,9 +1585,10 @@ earlier layer's counts. Its first two words feed the layer's pre-UI proof
 The verdict is 0 none, 1 hidden, 2 ambiguous or 3 visible. The detection reduce writes texels 5
 and 6 as zero on every frame and the evidence passes overwrite them when they run, so a sample
 never carries an earlier frame's evidence; texel 6 stays zero without a pre-UI scene image. The
-pre-UI image's verdict is not stored: the CPU reads it from D with the bounds above. Texel 12 is
-zeroed and overwritten the same way, and the evidence sum writes it as zero when the depth is
-inactive; it does not depend on whether the depth is this frame's, which H2 reads as described
+pre-UI image's verdict is not stored: the CPU reads it from D with the bounds above. Texel 12's
+`.x` and `.y` are zeroed and overwritten the same way, and the evidence sum writes them as zero when
+the depth is inactive; its `.z` and `.w` (S3) are the identity verdicts, which the reduce writes and
+the evidence pass rewrites unchanged; it does not depend on whether the depth is this frame's, which H2 reads as described
 above. Texel 0 reads 11 when H2 applied; the reason in texel 9 and the refused candidate in texel 8
 are the decision's before it. Texels 13-15 are written by the tiles pass and the reduce on frames
 with an offered layer and word 4 above 0 (sample frames), zero otherwise; no decision reads them,
@@ -1642,7 +1649,13 @@ same functions in `tools/reshade/game3d_ui_temporal.h` (`decode_detection_sample
 with a shader whose `SUNSHINE_UI_COUNTER_WORDS` is 31, and the offline replay binds nothing at
 `u7`, so its adds are dropped. Since fix 2 `decided` has twelve words, sources 0-11, so every GPU
 word after it moved up by one; since fix 3 it has thirteen, sources 0-12, every later word moved
-up by one again, and `refined` follows `reused`. Tools use the named indices.
+up by one again, and `refined` follows `reused`. Tools use the named indices. Since S3 a shader with
+the identity marker (`SUNSHINE_UI_IDENTITY`) appends `SUNSHINE_UI_COUNTER_IDENTITY_WORDS` (5) words
+after `refined`, so the texture holds 36: one add per offered layer and HUD-less pair on every
+detection frame by its GPU identity verdict, `identity_exact` (of those, `identity_token_exact` in
+token space), `identity_mismatch`, `identity_unstamped` and `identity_unproposed`. Their committed
+totals are the `gpu` group of the `Sunshine UI identity` line (`renderer::identity_counts`), not
+fields of this line, which S3 leaves unchanged.
 
 | Field | Counts |
 | --- | --- |
@@ -1702,7 +1715,7 @@ cumulative, so the last line holds the session's totals.
 | `full_d.visible` exceeds `scene.released` (counter lines since S2b) | WARN: an H1 hold acted over a visible scene. The sample that releases a held hidden verdict decided 8 before its own evidence read the scene visible, and the guard counts it as a release, so `full_d.visible` never exceeds `scene.released` otherwise; PASS with the H1 samples' verdicts and the guard's entered, released and refuted counts. |
 | `full_d.visible` is above zero (counter lines before S2b) | WARN when the layer or HUD-less route (8 or 9) decided: each release of a held route counted one, and those lines cannot tell a release from a held route over a visible scene. INFO when only source 6 decided: an exact full change-set decided without a hold, as intended for an accepted exact pair (P1). |
 | `untrusted_inferred` is above zero | FAIL: zero by construction since S1. WARN on counter lines before S1 (with `trust.opaque_set` rather than `trust.discarded`), whose untrusted pass could decide. |
-| `inexact_difference` is above zero | WARN, expected until S3 |
+| `inexact_difference` is above zero | WARN, expected until S3 is enabled; FAIL once the `Sunshine UI identity` line says `authoritative=1` |
 | Holds by kind (`held.generated`, `held.none`) and `reused`; on S1 lines the three hold kinds and the cap | INFO |
 | Frames without a mask by reason, as a share of `auto_frames` (`held.none` included), with the sampled lines' reasons and refused candidates | INFO |
 | Acceptance events, `forgotten` included | INFO |
@@ -1759,7 +1772,7 @@ It also pushes the exact 80-byte `b0` from `replay.parameter_hex`, as every rend
 receives it, and binds the raw depth artifact at `t1` and the presented color at `t6` (`t0` stays
 the color HUD-less is paired with) for the scene-evidence passes, which it runs after the decision
 as on a sample frame and which read the pre-UI scene image from `t14` or the layer slot `t7`; they
-write only decision texels 5, 6 and 12. Its `b2` has the renderer's six words (32 bytes): word 4 is
+write only decision texels 5, 6 and 12. Its `b2` has the renderer's ten words (48 bytes; six before S3): word 4 is
 `ui_selection::comparable` of the layer artifact's encoding and the presented one, so texel 11
 counts the captured layer against the captured presented colour, and word 5 is the dump's own
 H2 flag (`replay.ui_detection.still_bits`, 0 when absent; since fix 3 bit `0x1` of `rules_bits`
@@ -1776,8 +1789,15 @@ layer artifact. `expect.change_set` checks the change-set shadow through
 `filtered`, `matching_tiles`, `judge_precision` and `judge_recall` bounds as `_min`/`_max`),
 `expect.mask_reference: true` compares a source-12 mask with a CPU reference of the same rule
 (changed at eight times the pair threshold with the 3x3 rule; at most 0.01% of pixels may
-differ), and `expect.refined` checks the h1 word's refined bit. A case may carry a free-text
-`note`. Without a raw depth artifact
+differ), and `expect.refined` checks the h1 word's refined bit. S3: the replay binds the package's
+stamp buffer at `t9` and pushes `b2` words 6-9 from `replay.ui_detection` (`stamps`,
+`expected_layer_present`, `expected_layer_token`, `expected_hudless_present`, `identity_bits`); a
+label's `identity` object (those names with `bits`, and `layer_present`, `layer_token` and
+`hudless_present` for the stamp reads) overrides them. A package without them proposes nothing and
+pushes no gate, as every package before S3, so it replays unchanged. The mirror also compares texel
+12's identity words with `ui_selection::verify_identity`, and `--identity` prints each case's
+verdicts (`identity={layer=<verdict>/<space> delta hudless=<verdict>/<space> delta labelled cpu}`).
+A case may carry a free-text `note`. Without a raw depth artifact
 `t1` is a 1x1 placeholder and depth and camera readiness are cleared, as in a render without depth.
 A label's hidden-scene guard keys set the per-frame bits of H1: `scene_hold: true` pushes the held
 hidden verdict (`0x400000`), `pre_ui_visible: true` the held visible pre-UI image (`0x800000`), and
@@ -1926,7 +1946,23 @@ Witcher 3-like semi-transparent layer (never refined), T1 for a missing pair (on
 flat), H1 over a refined frame (8), the declared block, the switch edited mid-session, and an
 inert shadow (the same stream with texels 13-15 populated or zeroed gives identical decisions,
 ledger transitions and counters outside the `change_set` group). Each stream also reconciles
-`refined` and the `change_set` group.
+`refined` and the `change_set` group. The S3 shadow adds two groups. `S3 GPU identity verdicts`
+feeds stamps and proposals into every detection: by default a Stellar Blade SDR Equipment page with
+four late layer copies decides exactly as without them while the committed identity words count
+each pair; under the test-only override the layer gate refuses each late copy (the first reuses the
+refined 12 once, the next two show the flat alpha), Stellar Blade SDR with FG suspended pairs in
+token space against its Backbuffer tag and decides 12 (none without the tag, a token mismatch
+refused with one T1 reuse), an unstamped pair after a scope change is refused without reuse, and an
+inexact HUD-less pair is absent (one reuse, then no mask) while a token batch decides 5. `S3
+identity shadow`: four
+frame-generation cadences (4x matching, 4x reported as 2x, 2x reported as 4x, and a multiplier
+change in the middle of a real frame reported late) whose outcomes equal today's while the identity
+shadow counts them and prints a `SHADOW S3` line each, then, under the test-only identity override,
+detect exactly once per token and hold every Present that re-offers it with the exact same-token
+pair (the two KNOWN_TODAY S3 T1/E2 lines stay until the enable); and the label cases (a layer copy
+executed a Present early or late is a mismatch, a foreign-queue copy and a recreated stamp are
+refused, a scope change never pairs, and with FG suspended only a token-space pair exists, and only
+with a Backbuffer tag).
 The single-frame replay remains the gate for decisions. `--log <ReShade.log>`, outside ctest,
 replays logged samples through the trust policy and prints its predicted transitions beside the
 logged ones; logged samples are sparse, so this is informational only.
@@ -2162,7 +2198,7 @@ result when every candidate was rejected;
 the enabled mask path does not by itself imply any protected pixels. Replay uses these frozen
 values and does not run candidate selection again. Optional candidate metadata remains separate.
 `replay.ui_detection` records the detection constants behind that mask: `candidates`,
-`threshold_bits` (the float32 difference threshold), `pre_ui_threshold_bits` (since fix 1, the float32 pair threshold of the offscreen UI layer and the presented colour, `b2` word 4), `still_bits` (since fix 2, H2's `b2` word 5, which `ui_detection_replay` pushes), `rules_bits` (since fix 3, the whole `b2` word 5), `layer_presents_ago` and `layer_pairing` (the offered layer copy's Presents since it was taken and its pairing class), `retained_present_offsets`, `accepted` (candidate bits), `candidate_layout`, `flags` (the full pushed word,
+`threshold_bits` (the float32 difference threshold), `pre_ui_threshold_bits` (since fix 1, the float32 pair threshold of the offscreen UI layer and the presented colour, `b2` word 4), `still_bits` (since fix 2, H2's `b2` word 5, which `ui_detection_replay` pushes), `rules_bits` (since fix 3, the whole `b2` word 5), since S3 `expected_layer_present`, `expected_layer_token`, `expected_hudless_present` and `identity_bits` (`b2` words 6-9, the renderer's `ui_detection_snapshot`) and `stamps` (the stamp buffer read back after the dumped render, one `[C_P, C_T]` per ticket slot; null when no detection ran in that render), which `ui_detection_replay` pushes and binds, `layer_presents_ago` and `layer_pairing` (the offered layer copy's Presents since it was taken and its pairing class), `retained_present_offsets`, `accepted` (candidate bits), `candidate_layout`, `flags` (the full pushed word,
 per-frame bits included), `ran_or_held` (`ran` this render from this real frame's own offered
 candidates, `held` by a generated Present showing a real frame's decision (T1), or `inactive`) and
 `held_presents` (the generated Presents held in a row). `replay.ui_pin` records the captured shader's
@@ -2170,7 +2206,8 @@ candidates, `held` by a generated Present showing a real frame's decision (T1), 
 decision in texel 0; 11 with selection revision 3: texel 10 and the pre-UI scene image in texel 6;
 12 with selection revision 4: texel 11, the layer against the presented frame; 13 with selection
 revision 5: texel 12, H2's still and compared cells; 16 with selection revision 6: texels 13-15,
-the change-set shadow, whose texel 15 `.z` and `.w` hold rule P2's darkening counts since fix 4)
+the change-set shadow, whose texel 15 `.z` and `.w` hold rule P2's darkening counts since fix 4,
+and, from a shader with `SUNSHINE_UI_IDENTITY`, texel 12 `.z` and `.w` S3's identity verdicts)
 and `evidence_images` markers; 0 means absent
 (binary pinning and the 5-texel decision of older packages, which replay
 that way with their embedded shader unless `--shader` is given). Packages captured while the shader
@@ -2382,7 +2419,7 @@ acceptance and selection, hidden-scene guard, hold, pin weight. Diagnostics only
 | Rule | Requires |
 | --- | --- |
 | E1 Proof and identity (M1) | A candidate exists only as a snapshot with proven state, boundary, real-frame identity, encoding (typed format and swapchain colour space) and signature; otherwise there is no candidate and a recorded reason. Each cleared target or declared resource is its own signature in its own slot. Over budget, a spare slot rotates across unseen signatures and records a budget refusal. |
-| E2 Exactness (M1) | FG off: the same real Present. FG on: only same-batch Streamline tags, with the same-batch Backbuffer tag (or the real frame's own Present once frame identity exists) as the final-image reference. Without a frame token while any FG interposer is loaded, Present-time evidence is inexact. The one-frame-late layer copy is inexact opacity evidence: it may draw, but never judges or pairs. Since fix 3 the copy, taken at the first qualifying clear after a Present, holds the frame of the Present `presents_since_copy` back; paired with that retained Present (one or two back) it is an exact change-set pair by Present counting while that Present and every one since were real Presents with FG known off (the observed mode; a game that switches FG off in its menus qualifies, an unknown mode or FG kept requested while suspended does not). Against the current Present, with FG on or unknown, or on the first Presents after FG turns off, it stays late and inexact. Pairing is a precondition that validity cannot catch: the late pair of dump 033 passes V2. |
+| E2 Exactness (M1) | FG off: the same real Present. FG on: only same-batch Streamline tags, with the same-batch Backbuffer tag (or the real frame's own Present once frame identity exists) as the final-image reference. Without a frame token while any FG interposer is loaded, Present-time evidence is inexact. The one-frame-late layer copy is inexact opacity evidence: it may draw, but never judges or pairs. Since fix 3 the copy, taken at the first qualifying clear after a Present, holds the frame of the Present `presents_since_copy` back; paired with that retained Present (one or two back) it is an exact change-set pair by Present counting while that Present and every one since were real Presents with FG known off (the observed mode; a game that switches FG off in its menus qualifies, an unknown mode or FG kept requested while suspended does not). Against the current Present, with FG on or unknown, or on the first Presents after FG turns off, it stays late and inexact. Pairing is a precondition that validity cannot catch: the late pair of dump 033 passes V2. Until S3 is enabled these pairs come from Present counting; S3's snapshot tickets prove each pair by equal frame labels instead (UI decision framework, S3 snapshot ticket). |
 | V1 Opacity validity (M2) | Finite, in-range alpha with at most 1% invalid pixels, at any bit depth; a cleared layer must also pass the premultiplied bound. Presented and Backbuffer alpha are checked for range only. The tolerance does not depend on trust. |
 | V2 Change-set validity (M2) | A difference is evidence only from an exact pair, with the threshold from the two snapshots' own encodings. The HUD-less image is lit, and the changed set passes the tile test above when partial or is nearly the whole frame; the middle band and noisy pairs are invalid. Since fix 3 one formula serves every change set: a pixel changed when its largest channel difference exceeds `k * t` and is unchanged at most `k * t / 2`, with `t` the pair's threshold and `k` by provenance, 1 for a declared HUD-less pair and 8 for the inferred pre-UI layer pair, whose changed pixels also need at least three changed pixels in their 3x3 window (itself included). A partial set also needs its pre-UI image lit on at least 1% of pixels: a black image is no scene. The inferred provider has no full form; full pages stay with H1. |
 | A1 Earning (M3) | Acceptance is keyed by game and source signature (with the swapchain colour space), not by FG mode. A declared source (UI alpha or color tag, or an exact HUD-less pair) is accepted by its first valid selective sample; an inferred source needs the steady selective run above. A source that is never selective is never accepted. A sample does not count while a declared alpha is offered but invalid. Holds and manual inputs never earn. An offered layer without coverage earns its signature's pre-UI proof (ledger key `pre_ui:<format>:<space>`) like an inferred source: three samples over 2 s in which it equals the presented frame at eight times their pair threshold on at least 90% of pixels and is lit on at least half; a mismatch neither withdraws it nor restarts the run, and no judge revokes it. Since fix 3 that proof is also the pre-UI change set's acceptance: accepted exactly while it is held, never earned or revoked as a candidate. |
@@ -2394,7 +2431,7 @@ acceptance and selection, hidden-scene guard, hold, pin weight. Diagnostics only
 | H2 Still screen (M5) | In SDR Auto, on a frame whose applied decision has no source and was not reused (T1), after S1 and H1: when consecutive samples spanning 2 s each read D on the presented frame at most 0.05 and keep 95% of the D grid's cells within 1/255 of the previous sample's presented-luma mean, the frame is flat until the first sample that fails. Unaccepted candidates do not block it; an accepted source deciding, even empty, does. Reused depth does not invalidate its samples. Only an identity change or leaving scope clears its run, and nothing is remembered. A shadow that only logs unless the game's `UIFlattenStillScreens` is 1. |
 | P1 Pin weight (M7) | `saturate(8 * c)` of the selected coverage at any coverage (binary for change-sets, the pre-UI set's after its 3x3 rule); 1 everywhere when H1 or H2 says flat; 0 where P2 unpins a pure darkening. |
 | P2 Pin only UI (M7) | Since fix 4, with `UIPinOnlyUI=1` (otherwise a shadow that measures and logs), on a frame whose own decision is an eligible source: the UI color tag (2) and the offscreen UI layer (10) by *opacity*, whose colour is evidence, and the HUD-less (5) and pre-UI (12) sets by *change set*. P2 acts only on M7's pin weight: alpha-only sources (UIAlpha 1, Backbuffer 3, current 4), whole-frame decisions (6, 8, 11), acceptance, selection, H1, H2 and T1 are unchanged. For a composite `P = L (1 - a) + U a` the UI's own colour is `U a`; a pixel is a *darkening* when that colour is nil. *Opacity*: in the source's coverage (`a > 0`) with `max |rgb| <= 4/255` of sRGB code, as UNORM layers and tags store colour; a float layer (stored flag `0x2`) or float tag (`b2` word 5 `0x200`) stores linear scRGB and compares with the sRGB EOTF of 4/255 (about 0.0012), so that an SDR composite and its HDR counterpart get the same verdict (a charcoal #303030 panel at alpha 0.5 is colour in both: 24/255 in code, 0.0148 linear). The layer's colour is premultiplied, `U a` itself, and a straight tag's is an upper bound of it, so a straight tag errs toward pinning. 4/255 is V1's premultiplied slack and the knee of Stellar Blade's HDR Equipment layer (53.1% of its UI pixels within 2/255, 83.8% within 4/255, 83.9% within 8/255). Its opacity is `a` with uncertainty `σ` = 0. An opacity source with colour beyond the tolerance on no pixel of the frame (an engine that tags or renders coverage only, its colour cleared) carries no colour evidence and unpins nothing on that frame (`colourless`). *Change set*: in the source's mask, the darkening fit `s = clamp(Σ f(P) f(L) / Σ f(L)², 0, 1)` of presented `P` on pre-UI `L` in the fit space `f`, the channel-wise ST 2084 EOTF without a primaries matrix for PQ (Witcher 3 dims in linear light: a fit within `t` held on 83% of its sign-wheel pixels in linear light, 4.5% in PQ code) and the encoded values for sRGB and scRGB; residual `R = max_c |P_c - f⁻¹(s f(L_c))|` (scRGB over `max(1, peak P)`). A darkening when the unclamped fit is below 1 (`P` no brighter) and `R <= 4 t`, `t` the pair threshold (`b2` word 1): 4t is the inferred pair's unchanged bound `k t / 2` at `k` = 8, reused for declared pairs; dump 033's band residual has median 3.05/255 and 90th percentile 9.5/255 at `t` = 2/255 (96.7% of the band within 4t, 66% within t), and 94% of dump 478's exact-pair changed noise lies within 4t. Its opacity is `a = 1 - s` with `σ = min(1, (f(e + t) - f(e)) / f(e))` at `e` = `L`'s peak (`t / max(e, t)` for identity spaces). *Structure*: a darkening pixel is on structure when a 4-neighbour in the frame is raw colour UI (opacity: `max |rgb| > 4/255`; change set: changed beyond `k t` and not a darkening) or `|a - a_n| - σ - σ_n >= 1/64`, and is kept when at least 3 such pixels lie in its 3x3 window (itself included). 1/64 separates dims from UI edges: the steepest opacity step inside dims was 0.0033 per pixel (dump 033's band), 0.0078 (90th percentile, Stellar Blade's HDR band) and 0.0039 (99th percentile, Witcher 3's backdrop), against 0.02-0.1 on HUD halos and at least 0.25 on glyph edges; at 1/8 Stellar Blade's HDR HUD lost 32-37% of its pin weight (halos), at 1/64 3-4%. No dilation by the parallax limit: the pin band keeps the field within 0.5 px per px of any pinned texel horizontally and the warp is horizontal, so pinned edge pixels protect the interior next to them. *Tile gate* (change sets only; a grey tint over a grey scene is a darkening at the pixel): each 16 x 16 tile from the frame origin with at least 32 fitting pixels (in the mask with `R <= 4t`, darker or not) fits the pooled channels `f(P) = m f(L) + C`; `C` is the tile's own colour, judged by its effect `E = |f⁻¹(base + C) - f⁻¹(base)| / t` at `base = clamp(m mean f(L), 0, 1)` (scRGB over `max(1, base)`): a darkening verdict at `E <= 4`, else a colour verdict, none with fewer pixels or a variance of at most 10⁻⁶ of the squared mean. A tile is proven when its verdict is darkening and no tile in its 3x3 ring has a colour verdict: 98.9% of dump 033's band tiles and 99.5% of the Witcher 3 wheel pair's are within 4t, against 14.2% of Hogwarts Legacy's tinted minigame panel (median 12t). *Regions* (change sets): the verdict is taken per darkening region, the 8-connected tiles that hold darkening pixels structure does not keep (kept pixels are pinned anyway and join nothing, so separate dims do not merge through the outlines between them; they still count in the regression, where a tint over a textured scene shows its colour). A region unpins when one of its tiles is proven and none has a colour verdict in its ring; a tile without a verdict takes its region's. One translucent widget is then all dim or all UI: per tile, Hogwarts Legacy's minimap disc unpinned in scattered 16-pixel blocks beside its pinned map lines, and a block boundary that is not a widget edge tears horizontally, since the pin band acts only along rows. A region errs toward pinning: one colour tile pins all of it (on the late pair 033 the band's half under the moving dress). The GPU floods the tile grid in group-shared memory: a frame whose grid exceeds 2,720 words of 32 tiles (above about 6144 x 3456) or whose floods do not settle within two iterations per tile row plus 16 unpins no change-set darkening. A darkening pixel that is not kept (and, for a change set, lies in a region that unpins; for an opacity source, on a frame with colour) is *unpinned*: its pin weight is 0. Attaching dims to nearby colour UI by tile was rejected: it tore the visible scene's depth along tile edges. |
-| T1 Hold (M6) | A Present without its own fresh decision uses the decision of the real frame it shows; a real frame without one reuses the previous real frame's decision once, then has no mask. No multiplier constant and no time bound; until S3, real frames are identified by Present counting. Since fix 3, with refine on, a frame whose winner is shapeless and not refined while an accepted candidate is missing, or while the pre-UI change set the previous real frame of the chain offered is not offered (`refine_missing`; the gap is `b2` word 5 `0x8`, one frame), has no decision of its own either, so it reuses the refined decision once instead of flashing flat. The pre-UI change set is offered intermittently by design (only with an exact retained pairing), so T1's accepted-missing test leaves it out: a frame without it still adopts its inputs. |
+| T1 Hold (M6) | A Present without its own fresh decision uses the decision of the real frame it shows; a real frame without one reuses the previous real frame's decision once, then has no mask. No multiplier constant and no time bound; until S3 is enabled, real frames are identified by Present counting. Since fix 3, with refine on, a frame whose winner is shapeless and not refined while an accepted candidate is missing, or while the pre-UI change set the previous real frame of the chain offered is not offered (`refine_missing`; the gap is `b2` word 5 `0x8`, one frame), has no decision of its own either, so it reuses the refined decision once instead of flashing flat. The pre-UI change set is offered intermittently by design (only with an exact retained pairing), so T1's accepted-missing test leaves it out: a frame without it still adopts its inputs. |
 | F1 Fail safe and diagnostics (M8) | No qualifying source gives no mask with a named reason and refused candidate, the panel warning and exact counters. Status freshness is keyed on the scope and the winning accepted candidate, and the first-run shadow does not depend on acceptance. Diagnostics feed nothing back. |
 
 Scope (runtime, device, epoch, viewport, size, colour mode and encoding, but not the FG multiplier)
@@ -2436,7 +2473,7 @@ lapse (until S4 this includes a wrongly accepted layer, which the one-way test d
 whether a wrong declared alpha that once read selective needs a judge, since declared sources are
 never judged; whether the premultiplied bound also applies to declared UI color tags; whether live
 generated Presents without a HUD-less pairing re-offer the last tag snapshot (Expedition 33 at 3x
-or 4x, counted from the last tag until S3); and whether a generated Present over untagged UI should
+or 4x, counted from the last tag until S3 is enabled); and whether a generated Present over untagged UI should
 use the masks of both real frames it interpolates (it needs a moving-HUD FG dump).
 
 Open questions of fix 3: the bottom dim band of Stellar Blade's Equipment page is about 40% of its
@@ -2479,7 +2516,70 @@ no dump has validated yet. The UI plane estimate (`SunshineUINearest*`) reads th
 switch on it comes from real UI only and can move on frames such as the sign wheel's. Turning the
 switch on waits for the shadow's review of the darkening lines.
 
-S0, S1, S2a and S2b are done; S3 is next. Fix 1 after S2b (selection revision 4) replaced the
+**S3 snapshot ticket (shadow).** Every UI candidate snapshot carries an immutable ticket
+(`game3d_ui_ticket.h`): its kind and A1 signature (typed format and swapchain colour space), its
+boundary (`at_tag`, `before_clear` or `present`), a token label and a present label each with a
+validity reason, its proof (the capture owner's state basis, the executing queue relative to the
+presenting queue and to the Backbuffer producer's, list coverage) and a refusal (`unstamped`,
+`foreign_queue`, `not_real_span`, `stale_scope`, `no_reference`, `mismatch`, `enhanced_barrier`,
+`render_pass`, `recording_not_covered`, `budget`, or `begin_refused` with the stage where a tag's
+`begin()` stopped). Labels come from two add-on clocks per device (`game3d_frame_clock.h`), 32-bit
+GPU words where 0 means never written. The present clock is advanced at every foreground Present
+on the presenting queue, before anything copies at it; every copy the add-on takes at that Present
+(the current colour, the retained Presents) carries that label. The token clock is written in the
+game's own list right after each Streamline Backbuffer tag snapshot, with the low 32 bits of the
+probe's token generation (unique per token issue, so unnumbered tokens work too). Each snapshot
+recorded into a game list is followed in the same list by two 4-byte copies of both clocks into its
+16-byte stamp entry, so the image and its stamp come from the same execution however late, often
+or never the list runs. A `before_clear` copy holds the frame of the Present whose label it read, an
+`at_tag` copy the frame after it, a Present copy its own; a game copy's present label holds only on
+the presenting queue and while every Present since it was real (FG known off, no FG interposer
+module that the adapter cannot see), its token label only on the Backbuffer producer's queue; a read
+across queues races and is refused. The layer's queue watch follows each list that recorded a stamped
+copy: D3D11 `FinishCommandList` moves a deferred context's copy into the new command list, while a
+D3D12 bundle or a command list executed on a deferred context adds its copy to the primary list,
+which keeps its own. One pairing rule replaces Present counting: an image and its
+final-image reference pair exactly iff they carry equal valid labels in one space; otherwise the
+pair is absent with its reason, never inexact. The CPU proposes the pair it pairs today (the
+HUD-less image against a counted Present with FG off, the layer copy against the retained Present
+fix 3 counts, or with FG on, unknown or suspended against the newest ready same-token Backbuffer
+snapshot) and pushes the label it expects; the GPU checks the stamp. The proposals are `b2` words
+6-8 (the layer copy's present and token labels, the HUD-less image's present label; 0 not proposed)
+and word 9 carries the CPU's token-batch proof and the gates; the renderer's stamp buffer, one
+`uint4` per ticket slot (`x` the C_P read, `y` the C_T read), is bound at `t9` of the detection
+passes. The reduce writes each offered pair's verdict (`exact`, `mismatch`, `unstamped`,
+`unproposed`), label space and read-minus-proposal delta into decision texel 12 `.z` and `.w` and
+adds one identity counter word per pair; `ui_selection::verify_identity` is the mirror, and the
+change-set shadow line ends with the layer pair's `identity=` and `identity_delta=`. A gate ANDs a
+pair's identity into the paired change set's V2 validity (`gate_layer` for 12, `gate_hudless` for 5
+and 6); a refused set follows T1, and under refine it counts as missing (`refine_missing`), so a
+shapeless winner reuses the refined decision once. Pair offset 3 compares the layer with the
+Backbuffer tag's colour (`t13`), a token-space pair's final image. HUD-less and Backbuffer
+snapshots pair on the CPU by token equality, and a present-space pair is never proposed unless FG is
+known off. T1 by ticket: a Present offering no token newer than the last decision's holds that
+decision (a generated Present that re-offers the tag snapshot), a newer token detects, evidence
+without a token (the current colour) is always new, and a Present offering nothing keeps Present
+counting as its hold bound. In the shadow, nothing decides from a ticket: the process logs
+`Sunshine UI identity` (today's pairing against the ticket's, per frame identity, labels, refusals
+and the GPU's verdicts) and `Sunshine FG interposers` on change, Dump 3D carries the tickets, and
+the readiness report's `UI identity (S3)` check reads them. In the shadow the renderer pushes no
+gate and no token-space pairing, so the GPU verdicts are counted and dumped only. Enabling it takes
+the live evidence from the known games, read with the report from the identity line's `gpu` group
+(`exact`, `mismatch`, `unstamped`, `unproposed`, `token_exact`), its `batch` and `refused` groups and
+the change-set lines' `identity=` with `ui_detection_replay --identity` on new dumps: no tag batch
+that only today pairs (`batch.today_only`), rare GPU mismatches, no unstamped or foreign
+present-space pairs in Hogwarts Legacy, Expedition 33 and Stellar Blade, and token-space exact pairs
+where Stellar Blade keeps tagging its Backbuffer with FG suspended. One compile-time constant
+(`ui_ticket::identity_authoritative`, not an ini key) then enables all of it: the gates (the
+pre-UI change set's with `UIPinOnlyUI=1`), the token-space pre-UI pair, HUD-less exactness by token
+and T1 by token; the identity line should then log `authoritative=1`, which makes the report's `UI
+inexact difference` a FAIL. The enable also retires the counted HUD-less pairing and fix 3's content
+pair verdict, kept until then as cross-checks. The sequence replay and the selection contract
+already assert that outcome under a test-only override. Cost: one 4-byte copy per
+Present, two per snapshot, one per Backbuffer tag and one 16-byte copy per consumed slot, under 4 KB
+of buffers, no full-resolution copy and no barrier on a game resource.
+
+S0, S1, S2a and S2b are done; S3 runs in shadow. Fix 1 after S2b (selection revision 4) replaced the
 guard's D proof of the scene layer, which an FG suspension's viewport change cleared and a fade-in
 sample withdrew, by the ledger's pixel proof, so Stellar Blade's SDR settings and full menus are
 flat with FG suspended. Fix 2 (selection revision 5) added H2 for still SDR screens without any UI
@@ -2502,8 +2602,8 @@ that its full claim acts only through H1 (c), under a held hidden verdict.
 | S2b fix 2 | H2, still screens without a UI source in SDR Auto (M5, `game3d_still_screen.h`): stillness counts per D cell against the previous measured sample (texel 12, the previous-luma texture), the run and release on the CPU, source 11 pushed through `b2` word 5, counters `decided.11` and `still`, the `UIFlattenStillScreens` switch defaulting to a shadow that only logs, and selection revision 5. | Default: no decision changes anywhere; every replay case unchanged; the H2 sequence cases strict (Stellar Blade's SDR loading would flatten at 2 s in the shadow and is flat when enabled until the first failing sample; Expedition 33's gameplay dips, moving dark gameplay, HDR and an accepted empty decision never; identity changes restart the run); the still dark grainy scene asserted as the measured residual risk; enabling it waits for the shadow's episodes to be reviewed. |
 | S2b fix 3 | One change-set path with two pre-UI image providers: the declared HUD-less pair and the inferred layer proven the pre-UI scene image, paired with a retained Present by Present counting (candidate `0x100`, source 12, `game3d_ui_change_set.h`); the lit rule for partial change sets; the refine rule and `refine_missing` (S1, T1) behind the `UIPinChangedPixels` switch, defaulting to a shadow that only logs; the change-set shadow (texels 13-15, the `change_set` log line and counters, the report's `Pre-UI change set` check, Dump 3D artifacts 43-45); the ring's per-requester slots; selection revision 6. Review fixes: exactness from the run of real Presents with FG known off that covers the paired Present (`change_set::next_fg_off_presents`; unknown, FG on, generated and first-after-FG Presents are late); the shadow and its retention only for a layer proven the pre-UI image (`b2` word 5 `0x4`); `0x100` out of T1's accepted-missing test, its one-frame gap as word 5 `0x8`; the GPU's `none` counter of a frame that reused a decision without a source while its own had one counts `other`, as `decide()` does. | Default: no decision, mask, reason or existing counter changes; every earlier replay case identical in source, covered, decision words 0-51 and mask (95 passed and 10 skipped before; 109 passed with 14 new cases: dump 033's late pair valid but never offered, flat 4 with refine, and 12 only with the test-only exact override; 035, 468 and 962 invalid; 470, 476 and 478 late, 478 judged at precision 0.393, recall 0.836 and IoU 0.364 with its layer proven, and without the proof measured nothing; every unproven layer's shadow fields read zero, decisions unchanged); existing logs give identical report output; the fifteen fix 3 sequence groups strict (exactness by paired Presents and the T1 gap keeping adoption included; the Equipment page refined to 12 with only its changed pixels, settings and black loading screens flat, late pairs and FG-on gameplay never acting, an Expedition 33-like HUD-less set refining a shapeless Backbuffer alpha, a semi-transparent layer unaffected, T1, H1 after refine, the declared block, the switch and an inert shadow); the runtime fixture section `pre-UI change set (fix 3, Stellar Blade SDR)`; enabling waits for the shadow's review. |
 | S2b fix 4 | Rule P2, pin only UI (M7, `game3d_ui_darkening.h`): pure darkening of an eligible source (2, 10 by opacity; 5, 12 by change set) does not pin unless sharp structure keeps it or, for a change set, its darkening region is unproven or holds a colour verdict (for an opacity source, unless the frame carries no colour); a float layer or tag compares linear colour; the darkening passes (bits, tiles, region, count, finish), planes 6-8 (marker 9), statistics rows 192-207 and decision words 62-63 (63's top bit colourless); `b2` word 5 `0x100` and `0x200`; fix 3's switch renamed `UIPinOnlyUI` for refine and P2 together, defaulting to a shadow that counts every eligible sample and logs a throttled line (`Sunshine UI darkening`, counters `darkening`, the report's `Pin only UI`); selection revision unchanged (6). | Default: no decision, mask, reason or existing counter changes; every earlier replay case identical in source, covered, words 0-61 and mask apart from three cases with the switch on (033's test-exact pair: mask 5.41% to 4.19%, and the two dump-478 tag cases, 8 pixels); 10 new replay cases within their bounds (033 pair 12: 101,506 unpinned, 109,894 kept, 6 of 112 regions unpinning, the band's half under the late pair's moving dress pinned whole; Stellar Blade HDR Equipment layer: 1,065,506 and 78,689, the switch-off mask unchanged; Witcher 3 wheel: 3,403,159; Stellar Blade HDR HUD 472: 2,604 and 5,407 kept (halo); RE9 tag: 300 and 5,992 kept (black outlines); Hogwarts Legacy subtitle backdrop and minigame panel with its minimap: 0 unpinned, each region holding colour tiles), unpinned pixels mirrored exactly on every case (Hogwarts Legacy's PQ pairs' kept words within 0.01% of the reference, darkening pixels at a rounding bound); GPU and CPU equal on synthetic sRGB, scRGB and PQ images in the selection contract (a colourless layer, a charcoal panel through a float layer and a float tag, a dim joined to a tint pinned with its region beside a separate dim that unpins); the six fix 4 sequence groups strict (the shadow changes nothing and logs once a second, only eligible sources darken, T1's reuse and holds keep the darkened mask, H1, H2 and the full set untouched, refine to 12 with the band unpinned, one switch); the runtime fixture section `pin only UI (fix 4, rule P2)` in sRGB and scRGB (the band unpinned, strokes and icon pinned, words equal to the reference) and the dimmed Equipment page through the proven pre-UI pair; the D3D12 native runtime fixture's `D3D12 pre-UI change set` and `D3D12 pin only UI on an HDR-like float layer` sections in sRGB and scRGB (the layer proven by gameplay at its 22nd frame, the shadow, refine, the dimmed band, T1, frame generation and Dump 3D through the retained Presents, with counts equal to D3D11's at the same size, and the opacity path on a float layer with a 4x HDR icon and a linear-colour panel); per game with the switch on (share of pin weight removed): Stellar Blade HDR Equipment 76.1% (band 96.9%), HUD 2.9-4.4%; Stellar Blade SDR Equipment 21.9% (late pair); Witcher 3 sign wheel FG off 92.3%, notice board 73.9%, FG on 0%; RE9 0.18%; Hogwarts Legacy HUD 0%, tooltip 0.04%, minigame 0%, subtitle 0% (1.9-5.4%, 9.5%, 12.2-16.5% and 29.3% under the per-tile gate, in 16-pixel blocks of tinted panels); Expedition 33, Dead Space, Cyberpunk 2077 0%; unpinned pixels on a step of at least 1/8 at most 0.1% of coverage; cost above. Enabling waits for the shadow's review. |
-| S3 | Snapshot identity and exactness (E2, T1): one capture ticket with execute-time or Streamline frame stamps; under FG, pairs against the same-batch Backbuffer tag; one slot per cleared-target signature with a budgeted census rotation (E1). | Single-frame and sequence replay A/B; exact-pair rate before and after. |
-| S4 | Same-frame cleared target: the offscreen UI layer at its write end (D3D12) or at Present (D3D11), replacing the one-frame-late copy. | No one-frame tear on moving HUD; Present-interval A/B. |
+| S3 (in shadow) | Snapshot identity and exactness (E2, T1): one snapshot ticket per capture with GPU frame stamps from the present and token clocks; one pairing rule by equal labels, the CPU proposing (`b2` words 6-9) and the GPU verifying against the stamps at `t9` (decision texel 12 `.z`/`.w`, five identity counter words); under FG, HUD-less and layer pairs against the same-token Backbuffer tag (pair offset 3); T1 by token. Ships as a shadow; one compile-time constant, `identity_authoritative`, enables the gates (source 12 with `UIPinOnlyUI=1`, source 5), the token-space pre-UI pair and T1 by token. | Default: no decision, mask, pin, ledger or existing counter changes; the selection contract's GPU and CPU identity verdicts and counter words equal on synthetic stamps, every gated decision with exact pairs equal to the ungated one, and the Backbuffer pair equal to the retained one; the sequence replay's `S3 identity shadow` and `S3 GPU identity verdicts` groups (today unchanged, `SHADOW S3` lines, both KNOWN_TODAY S3 T1/E2 cases and the gates strict under the test-only override); single-frame replay identical, legacy packages replaying with nothing proposed; exact-pair rate before and after from the live shadow. |
+| S4 | Same-frame cleared target: the offscreen UI layer at its write end (D3D12) or at Present (D3D11), replacing the one-frame-late copy; one slot per cleared-target signature with a budgeted census rotation (E1, moved from S3). | No one-frame tear on moving HUD; Present-interval A/B. |
 | S5 | Back-buffer pre-UI snapshot, evidence-gated. | Census and shadow logs per affected title; bounded added cost. |
 | S6 | Evidence sweep, no code: every game in each colour mode and FG mode, scRGB, non-16:9, FMV and a first boot into a menu. | Every cell has a labelled dump and a report without FAIL counters. |
 

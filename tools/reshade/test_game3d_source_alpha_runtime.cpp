@@ -6,6 +6,7 @@
 #include "test_game3d_debug_dump_runtime.h"
 #include "game3d_ui_darkening.h"
 #include "game3d_ui_detection_contract.h"
+#include "game3d_frame_clock.h"
 #include "game3d_ui_layer.h"
 #include "game3d_ui_temporal.h"
 #include <reshade.hpp>
@@ -2413,6 +2414,19 @@ namespace {
     require(!replay.at("ui_pin").contains("late_margin") &&
         replay.at("ui_pin").at("soft_pin_gain") == shader_marker(renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"),
       "Dump lost the soft pin gain or still records a late-layer margin");
+    // S3 shadow: nothing proposed for a directly offered layer, no gate, and
+    // the stamp buffer, when the renderer has one, read back per ticket slot.
+    {
+      const auto &identity = replay.at("ui_detection");
+      const auto &stamps = identity.at("stamps");
+      bool stamps_ok = stamps.is_null() || (stamps.is_array() && stamps.size() == ui_ticket::slot::count);
+      if (stamps.is_array())
+        for (const auto &entry : stamps) stamps_ok = stamps_ok && entry.is_array() && entry.size() == 2;
+      require(identity.at("expected_layer_present") == 0u && identity.at("expected_layer_token") == 0u &&
+          identity.at("expected_hudless_present") == 0u && identity.at("identity_bits") == 0u && stamps_ok &&
+          stamps.is_null() == !gpu.renderer.diagnostics().ui_stamps.handle,
+        "Dump lost the S3 identity fields (expected labels, identity_bits, stamps)");
+    }
     // The accepted layer the previous real frame offered is missing now (T1):
     // the tag decides by itself, so nothing is reused.
     inputs = {};
@@ -4041,6 +4055,105 @@ namespace {
     std::puts("PASS retained UI upload identity: no repeat copy; failures and renderer replacement reupload");
   }
 }
+// S3 layer stamps on D3D11 (shadow; game3d_ui_layer.h, game3d_frame_clock.h):
+// the offscreen layer's live copy carries the present clock of the Present
+// interval its commands executed in. On the immediate context, which is the
+// presenting queue, that is the copy's own interval; a copy recorded on a
+// deferred context and executed after the next Present carries that later
+// label, which today's Present count cannot see.
+// As exporter.cpp's on_begin_present: the clock advances on the presenting
+// queue, then the layer's tracker observes the Present.
+void stamp_begin_present(api::command_queue *queue, api::swapchain *swapchain, const api::rect *, const api::rect *,
+    std::uint32_t, const api::rect *) {
+  sunshine_game3d::frame_clock::advance(queue, swapchain);
+  sunshine_game3d::ui_layer::observe_output(swapchain);
+}
+void verify_layer_stamps_d3d11(fixture &gpu, std::ofstream &report) {
+  namespace layer = sunshine_game3d::ui_layer;
+  namespace clock = sunshine_game3d::frame_clock;
+  auto *runtime = observed_runtime;
+  auto *device = runtime->get_device();
+  auto *queue = runtime->get_command_queue();
+  require(device->get_api() == api::device_api::d3d11, "the stamp section expects D3D11");
+  layer::register_events();
+  clock::register_events();
+  reshade::register_event<reshade::addon_event::present>(stamp_begin_present);
+  struct unregister {
+    ~unregister() {
+      reshade::unregister_event<reshade::addon_event::present>(stamp_begin_present);
+      layer::unregister_events(); clock::unregister_events();
+    }
+  } cleanup;
+  // An output-size target cleared to transparent black every frame.
+  ComPtr<ID3D11Texture2D> target, staging;
+  ComPtr<ID3D11RenderTargetView> target_rtv;
+  D3D11_TEXTURE2D_DESC desc{};
+  gpu.runtime_backbuffer->GetDesc(&desc);
+  desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+  desc.MiscFlags = 0; desc.Usage = D3D11_USAGE_DEFAULT; desc.CPUAccessFlags = 0;
+  checked(gpu.device->CreateTexture2D(&desc, nullptr, &target), "create the offscreen UI layer");
+  checked(gpu.device->CreateRenderTargetView(target.Get(), nullptr, &target_rtv), "layer RTV");
+  D3D11_BUFFER_DESC read_desc{16, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0};
+  ComPtr<ID3D11Buffer> readback;
+  checked(gpu.device->CreateBuffer(&read_desc, nullptr, &readback), "stamp readback");
+  ComPtr<ID3D11DeviceContext> deferred;
+  checked(gpu.device->CreateDeferredContext(0, &deferred), "deferred context");
+  const float transparent[4]{};
+  layer::live_capture live;
+  // Present k: the clock advances on the presenting queue, then the layer's
+  // tracker observes the Present (as on_begin_present), then DXGI presents.
+  const auto present = [&] { checked(gpu.swapchain->Present(0, 0), "present"); };
+  const auto stamp_of = [&](const layer::live_capture &value) {
+    require(value.stamp.handle, "the live copy has no stamp");
+    gpu.context->CopyResource(readback.Get(), reinterpret_cast<ID3D11Buffer *>(value.stamp.handle));
+    gpu.drain_render();
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    checked(gpu.context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped), "map the stamp");
+    std::array<std::uint32_t, 4> words{};
+    std::memcpy(words.data(), mapped.pData, sizeof(words));
+    gpu.context->Unmap(readback.Get(), 0);
+    return words;
+  };
+  // Confirm the layer and keep UI detection asking for it.
+  for (unsigned frame = 0; frame != 6; ++frame) {
+    layer::latest(device, GetTickCount64(), live);
+    gpu.context->ClearRenderTargetView(target_rtv.Get(), transparent);
+    present();
+    Sleep(5);
+  }
+  // Immediate context: the copy executes in its own interval, at the label
+  // of the Present before it, which the count names (presents_since_copy 1).
+  layer::latest(device, GetTickCount64(), live);
+  gpu.context->ClearRenderTargetView(target_rtv.Get(), transparent);
+  const auto copied_at = clock::label(device);
+  present();
+  require(layer::latest(device, GetTickCount64(), live) && live.stamped && live.presents_since_copy == 1, "the live copy was not taken and stamped on the immediate context");
+  auto words = stamp_of(live);
+  const auto label = clock::label(device);
+  require(copied_at && words[0] == copied_at && words[0] == label - live.presents_since_copy && words[1] == 0 &&
+      !live.foreign_present && !live.queue_mixed && live.executed_queue == queue->get_native(),
+    "an immediate-context layer copy's stamp did not name the Present interval it executed in");
+  // Deferred context: the copy is recorded before Present k+1 and executes
+  // after it, so its stamp carries label k+1 while the count still names k.
+  const auto first_capture = live.capture_id;
+  deferred->ClearRenderTargetView(target_rtv.Get(), transparent);
+  ComPtr<ID3D11CommandList> commands;
+  checked(deferred->FinishCommandList(FALSE, &commands), "finish the deferred layer list");
+  const auto recorded_at = clock::label(device);
+  present();
+  gpu.context->ExecuteCommandList(commands.Get(), FALSE);
+  const auto executed_at = clock::label(device);
+  require(layer::latest(device, GetTickCount64(), live) && live.stamped && live.capture_id > first_capture, "the deferred copy was not taken");
+  words = stamp_of(live);
+  require(executed_at == recorded_at + 1 && words[0] == executed_at && words[0] != executed_at - live.presents_since_copy &&
+      !live.foreign_present && live.executed_queue == queue->get_native(),
+    "a deferred layer copy executed after the next Present did not carry that later label on the presenting queue");
+  report << "s3-layer-stamps-d3d11 immediate=" << copied_at << " deferred_recorded=" << recorded_at << " executed=" << executed_at
+         << " stamp=" << words[0] << " presents_since_copy=" << live.presents_since_copy << '\n';
+  std::printf("PASS D3D11 S3 layer stamps (shadow): an immediate-context copy carries the label of the Present interval it ran in (%u, as its count names), a deferred-context copy executed after the next Present carries that later label (%u, the count names %u), both on the presenting queue\n",
+    copied_at, words[0], executed_at - live.presents_since_copy);
+}
+
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (argc < 6 || argc > 8) { std::fputs("usage: source_alpha_runtime official-ReShade64.dll fresh-output srgb|scrgb width height [frozen-control.hlsl] [--temporal-ui-probe|--temporal-ui-front-limit|--adaptive-ui-only|--pre-ui-change-set-only|--pin-only-ui-only]\n", stderr); return 2; }
@@ -4123,6 +4236,7 @@ int main(int argc, char **argv) {
     verify_hidden_scene(gpu, report);
     verify_pre_ui_change_set(gpu, report, directory);
     verify_pin_only_ui_darkening(gpu, report);
+    verify_layer_stamps_d3d11(gpu, report);
     verify_normalized_ui_input(gpu, report);
     verify_mask_upload_recovery(gpu);
     require(report.good(), "cannot write evidence");

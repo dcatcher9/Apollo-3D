@@ -41,6 +41,7 @@
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
+#include "game3d_ui_ticket.h"
 
 #include <array>
 #include <cstddef>
@@ -55,13 +56,17 @@ namespace sunshine_game3d::change_set {
   // when frame generation was not known off on every Present since the one
   // it shows (against the current Present, inexact); unavailable when the
   // Present it shows is not retained (or the copy is of the current
-  // interval).
-  enum class pair_class : std::uint8_t { none, retained, late, unavailable };
+  // interval). S3: token, the layer paired in token space with the
+  // same-token Backbuffer tag (pair offset
+  // ui_detection::change_set::pair_backbuffer), which the renderer chooses
+  // only while identity is authoritative (game3d_ui_ticket.h).
+  enum class pair_class : std::uint8_t { none, retained, late, unavailable, token };
   constexpr std::string_view name(pair_class value) {
     switch (value) {
       case pair_class::retained: return "retained";
       case pair_class::late: return "late";
       case pair_class::unavailable: return "unavailable";
+      case pair_class::token: return "token";
       default: return "none";
     }
   }
@@ -87,13 +92,16 @@ namespace sunshine_game3d::change_set {
       return {pair_class::retained, presents_since_copy};
     return {pair_class::unavailable, 0u};
   }
+  // S3: the token-space pairing (against the Backbuffer tag's colour).
+  constexpr layer_pairing token_pairing() { return {pair_class::token, ui_detection::change_set::pair_backbuffer}; }
   // Whether a detection offers the pre-UI change set: in Auto, with the
   // session's switch on (UIPinOnlyUI), the layer's signature proven
   // the pre-UI scene image (the ledger's pre_ui key, which is also its
   // acceptance), no HUD-less image offered (a declared pair takes the slot)
-  // and an exact retained pairing.
+  // and an exact retained pairing (S3, enabled only: or a token pairing).
   constexpr bool offered(bool auto_mode, bool enabled, bool layer_proven, bool hudless_offered, layer_pairing pairing) {
-    return auto_mode && enabled && layer_proven && !hudless_offered && pairing.kind == pair_class::retained;
+    return auto_mode && enabled && layer_proven && !hudless_offered &&
+      (pairing.kind == pair_class::retained || pairing.kind == pair_class::token);
   }
   // b2 word 5 (Sunshine_UIRules): H2's flatten, refine
   // (ui_detection::rules::pin_only_ui, which the mask pass also reads for
@@ -121,6 +129,25 @@ namespace sunshine_game3d::change_set {
     pair_layer(true, 3u, 2u, true, false) == layer_pairing{pair_class::unavailable, 0u} &&
     pair_layer(true, 1u, 0u, true, true) == layer_pairing{pair_class::unavailable, 0u} &&
     pair_layer(true, 4u, 3u, true, true) == layer_pairing{pair_class::unavailable, 0u});
+  // S3 (game3d_ui_ticket.h, shadow): the present label the CPU proposes for an
+  // offered layer copy, for the GPU to check against the copy's C_P read: the
+  // label of the retained Present a retained pairing names (present_label,
+  // this render's, minus its offset); 0, not proposed, for any other class,
+  // without a label, or within the label's first Presents.
+  constexpr std::uint32_t proposed_layer_label(layer_pairing pairing, std::uint32_t present_label) {
+    return pairing.kind == pair_class::retained && pairing.offset && present_label > pairing.offset ?
+      present_label - pairing.offset : 0u;
+  }
+  // The token label the CPU proposes for the layer copy with FG on, unknown
+  // or suspended: the newest ready Backbuffer tag snapshot's token label
+  // (the copy's C_T read must equal it), 0 when none is ready.
+  constexpr std::uint32_t token_proposal(bool backbuffer_ready, std::uint32_t token) {
+    return backbuffer_ready ? token : 0u;
+  }
+  static_assert(proposed_layer_label({pair_class::retained, 1u}, 10u) == 9u &&
+    proposed_layer_label({pair_class::retained, 2u}, 10u) == 8u && !proposed_layer_label({pair_class::late, 0u}, 10u) &&
+    !proposed_layer_label({pair_class::unavailable, 0u}, 10u) && !proposed_layer_label({pair_class::retained, 1u}, 1u) &&
+    !proposed_layer_label({}, 10u) && token_proposal(true, 7u) == 7u && !token_proposal(false, 7u));
   static_assert(next_fg_off_presents(0u, true, false) == 1u && next_fg_off_presents(4u, true, false) == 5u &&
     next_fg_off_presents(4u, false, false) == 0u && next_fg_off_presents(4u, true, true) == 0u &&
     next_fg_off_presents(0xffffffffu, true, false) == 0xffffffffu);
@@ -128,7 +155,8 @@ namespace sunshine_game3d::change_set {
     !offered(true, true, true, true, {pair_class::retained, 1u}) && !offered(true, true, true, false, {pair_class::late, 0u}) &&
     !offered(false, true, true, false, {pair_class::retained, 1u}) &&
     !offered(true, false, true, false, {pair_class::retained, 1u}) &&
-    !offered(true, true, false, false, {pair_class::retained, 1u}));
+    !offered(true, true, false, false, {pair_class::retained, 1u}) && offered(true, true, true, false, token_pairing()) &&
+    ui_detection::change_set::pair_offset(rule_bits(false, true, true, false, token_pairing(), false, false)) == 3u);
   static_assert(rule_bits(true, true, false, false, {pair_class::retained, 2u}, true, true) == 0xe3u &&
     rule_bits(false, false, false, false, {pair_class::late, 0u}, false, false) == 0u &&
     rule_bits(false, false, true, false, {pair_class::retained, 1u}, true, false) == 0x54u &&
@@ -138,7 +166,9 @@ namespace sunshine_game3d::change_set {
   // against the Presents 0, 1 and 2 back: verified when the paired offset's
   // is strictly below every other measured one, contradicted when another is
   // strictly below it, inconclusive otherwise; none without a retained
-  // pairing.
+  // pairing. Since S3 it is the content cross-check of the stamp's identity
+  // verdict (shadow_sample::identity), kept while S3 runs in shadow and
+  // deleted when identity becomes authoritative.
   enum class pair_verdict : std::uint8_t { none, verified, contradicted, inconclusive };
   constexpr std::string_view name(pair_verdict value) {
     switch (value) {
@@ -183,6 +213,12 @@ namespace sunshine_game3d::change_set {
     // shapeless alpha, and whether S1 chose source 12 itself.
     std::uint32_t winner{}, applied_source{}, would_source{};
     bool shapeless{}, would_refine{}, would_decide{};
+    // S3 (shadow): the GPU's identity verdict of the layer pair from the
+    // change-set pass's verdict texel (exact, mismatch, unstamped or
+    // unproposed; none where the shader writes none), and its stamp read
+    // minus the proposed label.
+    ui_ticket::gpu_verdict identity = ui_ticket::gpu_verdict::none;
+    std::int64_t identity_delta{};
   };
 
   // The shadow of one completed sample: its counts (texels 0-15), the
@@ -245,6 +281,20 @@ namespace sunshine_game3d::change_set {
     return s;
   }
 
+  // S3 (shadow): the GPU's identity verdict of the sample's layer pair
+  // (decision texel 12 .z/.w, ui_selection::identity_of_words) and its read
+  // minus the proposal. The contract's verdict values are ui_ticket's.
+  static_assert(std::uint32_t(ui_ticket::gpu_verdict::exact) == ui_detection::identity::exact &&
+    std::uint32_t(ui_ticket::gpu_verdict::mismatch) == ui_detection::identity::mismatch &&
+    std::uint32_t(ui_ticket::gpu_verdict::unstamped) == ui_detection::identity::unstamped &&
+    std::uint32_t(ui_ticket::gpu_verdict::unproposed) == ui_detection::identity::unproposed &&
+    std::uint32_t(ui_ticket::gpu_verdict::none) == ui_detection::identity::none);
+  inline void add_identity(shadow_sample &s, const ui_selection::identity_verdict &v) {
+    s.identity = v.layer < std::uint32_t(ui_ticket::gpu_verdict::count) ? ui_ticket::gpu_verdict(v.layer) :
+      ui_ticket::gpu_verdict::none;
+    s.identity_delta = v.layer_delta;
+  }
+
   // The log text of a shadow sample (game3d_log_report.py parses it).
   inline std::string shadow_log_text(const shadow_sample &s) {
     const auto offset = [&](std::size_t i) { return s.measured[i] ? std::to_string(s.offsets[i]) : std::string("-"); };
@@ -277,6 +327,10 @@ namespace sunshine_game3d::change_set {
     text.append(" would_refine=").append(flag(s.would_refine)).append(" would_source=").append(std::to_string(s.would_source));
     text.append(" applied_source=").append(std::to_string(s.applied_source));
     text.append(" pixels=").append(std::to_string(s.pixels));
+    // S3 (shadow): the layer pair's identity verdict, when the GPU wrote one.
+    if (s.identity != ui_ticket::gpu_verdict::none)
+      text.append(" identity=").append(ui_ticket::name(s.identity)).append(" identity_delta=")
+        .append(std::to_string(s.identity_delta));
     return text;
   }
 

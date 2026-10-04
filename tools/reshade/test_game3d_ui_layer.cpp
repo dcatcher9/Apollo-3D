@@ -221,6 +221,70 @@ int main() {
     }
     std::puts("PASS UI layer pairing count (fix 3): a copy after Present k reads 1 at render k+1, 2 after an interval without "
       "one, 0 within its own interval");
+    // S3 queue watch: the queue that executed the lists carrying a stamped
+    // copy; another queue than the presenting one is sticky for the scope.
+    {
+      layer::queue_watch watch;
+      constexpr std::uint64_t presenting = 0x10, other = 0x20;
+      require(!watch.watching() && !watch.executed(1, presenting, presenting), "An unwatched list was recorded");
+      watch.carried(1);
+      require(watch.watching() && watch.executed(1, presenting, presenting) && !watch.foreign_present() &&
+          watch.last_queue() == presenting && !watch.mixed(), "A list on the presenting queue was not same-queue");
+      // Executed twice (no reset): still watched, still same.
+      require(watch.executed(1, presenting, presenting) && !watch.foreign_present(), "A second execution lost the watch");
+      watch.carried(2);
+      require(watch.executed(2, other, presenting) && watch.foreign_present() && watch.mixed() && watch.last_queue() == other,
+        "A list on a second queue was not foreign");
+      watch.reset(2);
+      require(!watch.executed(2, presenting, presenting) && watch.foreign_present(),
+        "A reset list stayed watched, or the foreign verdict was not sticky");
+      // An unknown presenting queue decides nothing.
+      layer::queue_watch unknown;
+      unknown.carried(3);
+      require(unknown.executed(3, other, 0) && !unknown.foreign_present(), "An unknown presenting queue made a copy foreign");
+      // D3D11 FinishCommandList: a deferred context's commands move into its
+      // command list, which the immediate context (the presenting queue)
+      // executes; the context carries nothing afterwards.
+      layer::queue_watch deferred;
+      deferred.carried(0x100);
+      deferred.move(0x200, 0x100);
+      require(deferred.watching() && !deferred.executed(0x100, other, presenting) &&
+          deferred.executed(0x200, presenting, presenting) && !deferred.foreign_present(),
+        "A command list did not take its deferred context's copy");
+      // A new command list at a reused address carries nothing from a context
+      // that recorded no copy.
+      deferred.move(0x200, 0x300);
+      require(!deferred.executed(0x200, other, presenting), "A list that carries nothing kept an old watch");
+      // A D3D12 bundle or a command list executed on a deferred context: the
+      // primary keeps its own stamped copy whatever the secondary carried,
+      // and gains the secondary's.
+      layer::queue_watch bundle;
+      bundle.carried(0x400);
+      bundle.transfer(0x400, 0x500);
+      require(bundle.executed(0x400, presenting, presenting), "A primary with its own copy lost it to a secondary carrying nothing");
+      bundle.carried(0x600);
+      bundle.transfer(0x700, 0x600);
+      require(bundle.executed(0x700, presenting, presenting) && bundle.executed(0x600, presenting, presenting),
+        "A primary did not gain its secondary's copy, or the secondary lost it");
+      bundle.reset(0x400);
+      bundle.carried(0x800); bundle.carried(0x900);
+      require(bundle.executed(0x600, presenting, presenting), "A free entry was not reused before the oldest list");
+      // A copy recorded on the queue itself (an immediate context).
+      layer::queue_watch immediate;
+      immediate.executed_on(presenting, presenting);
+      require(!immediate.foreign_present() && immediate.last_queue() == presenting, "An immediate-context copy was not same-queue");
+      // Bounded: a fifth list replaces the oldest; a scope change clears all.
+      layer::queue_watch bounded;
+      for (std::uint64_t list = 1; list <= layer::queue_watch::capacity + 1; ++list) bounded.carried(list);
+      require(!bounded.executed(1, presenting, presenting) && bounded.executed(layer::queue_watch::capacity + 1, presenting, presenting),
+        "The watch was unbounded or dropped its newest list");
+      bounded.executed(2, other, presenting);
+      bounded.clear_scope();
+      require(!bounded.watching() && !bounded.foreign_present() && !bounded.mixed(), "A scope change kept the watch");
+    }
+    std::puts("PASS UI layer queue watch (S3): the presenting queue is same, another queue is foreign and sticky per scope, "
+      "a reset list and a list carrying nothing drop out, a D3D11 command list carries its deferred context's copy, at most "
+      "4 lists are watched");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

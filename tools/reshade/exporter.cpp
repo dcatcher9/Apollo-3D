@@ -41,6 +41,7 @@
 #include <windows.h>
 #include "game3d_slow_step.h"
 #include "game3d_ui_layer.h"
+#include "game3d_frame_clock.h"
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   #include "test_overlay_patch.h"
@@ -1093,6 +1094,9 @@ namespace {
       auto &ui_session = sunshine_game3d::source_alpha_session();
       publish_alpha.ui_session = &ui_session;
       auto ui_input = sunshine_game3d::ui_input::acquire(runtime, *renderer, source_alpha, ui_session, diagnostic_owner);
+      // S3 shadow: the present label of this render (its Present's), which the
+      // renderer keeps beside each Present it retains.
+      ui_input.detection.present_label = sunshine_game3d::frame_clock::label(runtime->get_device());
       timer.mark();
       // Publish what this render actually consumes, not the saved preference or
       // a later SDK observation. No RGB from the retained input is displayed.
@@ -2237,6 +2241,7 @@ namespace {
     // still alive; capture keeps any leases required by outstanding GPU work.
     addon_session().end([&] {
       sunshine_game3d::ui_layer::unregister_events();
+      sunshine_game3d::frame_clock::unregister_events();
       sunshine_game3d::depth_input::shutdown_observers();
       sunshine_depth::shutdown();
       reshade::unregister_addon(addon, reshade);
@@ -2310,11 +2315,16 @@ namespace {
     }
   }
 
-  void on_begin_present(api::command_queue *, api::swapchain *swapchain, const api::rect *, const api::rect *, std::uint32_t, const api::rect *) {
+  void on_begin_present(api::command_queue *queue, api::swapchain *swapchain, const api::rect *, const api::rect *, std::uint32_t, const api::rect *) {
     try {
       if (publisher) {
         publisher->begin_present(swapchain->get_native(), swapchain->get_color_space());
-        if (static_cast<HWND>(swapchain->get_hwnd()) == observed_foreground_window()) sunshine_game3d::ui_layer::observe_output(swapchain);
+        if (static_cast<HWND>(swapchain->get_hwnd()) == observed_foreground_window()) {
+          // S3 (game3d_frame_clock.h): every foreground Present advances the
+          // present label on its queue before anything copies at it.
+          sunshine_game3d::frame_clock::advance(queue, swapchain);
+          sunshine_game3d::ui_layer::observe_output(swapchain);
+        }
         publisher->render_present(swapchain);
       }
     } catch (...) {
@@ -2416,6 +2426,7 @@ extern "C" {
       reshade::register_event<reshade::addon_event::reshade_open_overlay>(sunshine_addon_lifetime::guarded<on_overlay>);
       reshade::register_event<reshade::addon_event::reshade_overlay>(sunshine_addon_lifetime::guarded<on_draw_overlay>);
       sunshine_game3d::ui_layer::register_events();
+      sunshine_game3d::frame_clock::register_events();
       return true;
     } catch (...) {
       teardown_addon(addon, reshade);

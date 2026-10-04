@@ -137,6 +137,10 @@ namespace sunshine_streamline::depth_capture {
     value_copy.texture.area = value.resource.area.width ? value.resource.area : sunshine_scene_depth::extent {0, 0, next_width, next_height};
     value_copy.texture.producer_queue = 45;
     value_copy.texture.producer_fence = 46;
+    // S3: the producer stamped the copy (C_P 41, C_T 7) from a declared state.
+    value_copy.texture.stamped = value_copy.texture.stamp_read = true;
+    value_copy.texture.stamp_present = 41; value_copy.texture.stamp_token = 7;
+    value_copy.texture.basis = capture::state_basis::declared;
     operations.push_back(std::move(value_copy));
     return {operations.size(), operations.back().gpu_owner};
   }
@@ -495,6 +499,13 @@ int main() try {
             captured["semantic"] == "final_game_color_before_fg_candidate_not_verified_ui_mask" &&
             captured["observation"]["tag_type"] == 53 && captured["observation"]["source_native"] == "0x5353",
             "Backbuffer evidence lost provenance or was promoted to an authoritative UI mask");
+    // S3 shadow ticket: a tag copy holds the frame after the Present its C_P
+    // read names; its C_T read is reported as read.
+    const auto &ticket = captured.at("ticket");
+    require(ticket["kind"] == "sl_tag" && ticket["boundary"] == "at_tag" && ticket["proof"] == "sl_declared" &&
+            ticket["stamped"] == true && ticket["refusal"] == "none" && ticket["stamp"]["present_read"] == 41 &&
+            ticket["stamp"]["present_label"] == 42 && ticket["stamp"]["token_read"] == 7 && ticket["stamp"]["token_label"] == 7,
+            "The optional Backbuffer copy lost its S3 ticket or stamp reads");
     require(response.texture_count == 2 && static_cast<unsigned>(response.textures[1].kind) == 32 &&
             response.textures[1].dxgi_format == 24 && response.textures[1].width == 3840 && response.textures[1].height == 2160 &&
             bytes == 64 + std::uint64_t(3840) * 2160 * 4,

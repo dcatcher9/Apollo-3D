@@ -240,6 +240,31 @@ namespace sunshine_game3d {
     std::array<uint64_t, ui_detection_inputs::max_retained_presents> retained_present{};
     std::array<uint8_t, ui_detection_inputs::max_retained_presents> retained_requesters{};
     uint64_t present_number{};
+    // S3 shadow (game3d_ui_ticket.h): this render's present label
+    // (ui_detection_inputs::present_label, 0 unknown), the label each
+    // retained slot was copied at and the owed copy's. present_number keeps
+    // its retention and linger roles.
+    uint32_t present_label{}, owed_label{};
+    std::array<uint32_t, ui_detection_inputs::max_retained_presents> retained_label{};
+    // S3: the stamp buffer (renderer::ui_stamps), created on first need, and
+    // its D3D12 state within the current submission: COMMON at its start (a
+    // buffer decays after every ExecuteCommandLists, and finish_present's
+    // signal flushes the immediate list), copy_dest once a candidate copy
+    // wrote an entry (note_ui_stamp_write) and after every detection that
+    // read it (detect_ui returns it there, so later copies need no barrier).
+    texture stamps{};
+    bool stamps_attempted{}, stamps_copy_dest{};
+    // S3: the shader verifies identity (ui_detection::identity::marker): it
+    // reads the stamps at t9, b2 words 6-9 and writes decision texel 12 .z/.w
+    // and the identity counter words.
+    bool identity_supported{};
+    // S3: the GPU identity verdict totals the committed samples carry
+    // (ui_ticket::identity_counter::gpu_*, renderer::identity_counts), and
+    // the identity counter words at the last commit.
+    ui_ticket::identity_counters identity_gpu;
+    std::array<uint32_t, ui_counter_word::identity_words> committed_identity_words{};
+    // The identity verdict of the last committed sample (decision texel 12).
+    ui_selection::identity_verdict sampled_identity{};
     // The mean Present interval over the last sample period, clamped to 1-100
     // ms (100 before the first), and the Present number of the last sample:
     // the change-set shadow retains the Presents before a likely sample.
@@ -252,10 +277,13 @@ namespace sunshine_game3d {
     // Fix 4: whether the pending sample's darkening passes ran (its rules
     // have rules::darkening_measured), so that its decision words dk_unpinned
     // and dk_kept hold its eligible source's darkening.
+    // S3: identity_bits is b2 word 9 (Sunshine_UIIdentity: the CPU's token
+    // batch proof and, only while identity is authoritative, the gates).
     struct change_set_submission {
       change_set::layer_pairing pairing;
       bool layer_proven{}, hudless_offered{}, auto_mode{}, enabled{};
       uint32_t rules{};
+      uint32_t identity_bits{};
     };
     change_set_submission detection_pending_change_set;
     bool detection_pending_layer_measured{}, detection_pending_darkening{}, pin_only_ui_render{};
@@ -332,6 +360,8 @@ namespace sunshine_game3d {
         if (t.srv.handle) device->destroy_resource_view(t.srv);
         if (t.resource.handle) device->destroy_resource(t.resource);
       }
+      if (stamps.srv.handle) device->destroy_resource_view(stamps.srv);
+      if (stamps.resource.handle) device->destroy_resource(stamps.resource);
       for (auto p : pipelines) if (p.handle) device->destroy_pipeline(p);
       for (auto s : samplers) if (s.handle) device->destroy_sampler(s);
       if (null_srv.handle) device->destroy_resource_view(null_srv);
@@ -404,6 +434,10 @@ namespace sunshine_game3d {
         shader_marker(shader_source(), ui_detection::change_set::planes_marker) == ui_detection::change_set::planes;
       counter_words = shader_marker(shader_source(), "SUNSHINE_UI_COUNTER_WORDS") == ui_counter_word::count ?
         uint32_t(ui_counter_word::count) : 0u;
+      // S3: a shader that verifies identity appends its identity counter words.
+      identity_supported = shader_marker(shader_source(), ui_detection::identity::marker) == ui_detection::identity::version &&
+        shader_marker(shader_source(), "SUNSHINE_UI_COUNTER_IDENTITY_WORDS") == ui_counter_word::identity_words;
+      if (counter_words && identity_supported) counter_words = uint32_t(ui_counter_word::with_identity);
       if (!device->create_fence(0, api::fence_flags::none, &completion)) return false;
       if (device->get_api() == api::device_api::d3d12 &&
           (!device->create_resource_view({}, api::resource_usage::shader_resource, api::resource_view_desc(api::format::r32_float), &null_srv) ||
@@ -421,7 +455,7 @@ namespace sunshine_game3d {
         api::descriptor_range{0, 0, 0, 15, api::shader_stage::all, 1, api::descriptor_type::shader_resource_view},
         api::descriptor_range{0, 0, 0, 8, api::shader_stage::compute, 1, api::descriptor_type::unordered_access_view},
         api::constant_range{0, 1, 0, 4, api::shader_stage::compute},
-        api::constant_range{0, 2, 0, 6, api::shader_stage::compute}};
+        api::constant_range{0, 2, 0, ui_detection::identity::b2_words, api::shader_stage::compute}};
       if (!device->create_pipeline_layout(uint32_t(std::size(params)), params, &layout)) return false;
       for (unsigned i = 0; i < samplers.size(); ++i) {
         api::sampler_desc sampler;
@@ -609,7 +643,7 @@ namespace sunshine_game3d {
     }
     // Keep a Present's source color (still textures[source]), replacing the
     // oldest retained one.
-    void retain_color(api::command_list *cmd, uint64_t number, uint8_t requesters) {
+    void retain_color(api::command_list *cmd, uint64_t number, uint8_t requesters, uint32_t label) {
       if (!requesters || !prepare_retention() || !number) return;
       const auto slot = unsigned(number % retained_present.size());
       const auto target = textures[retained_color + slot].resource, from = textures[source].resource;
@@ -620,6 +654,7 @@ namespace sunshine_game3d {
       cmd->barrier(from, api::resource_usage::copy_source, api::resource_usage::shader_resource);
       retained_present[slot] = number;
       retained_requesters[slot] = requesters;
+      retained_label[slot] = label;
     }
     // A render's own retention, owed when a dump capture defers it.
     void retain_color(api::command_list *cmd, bool defer) {
@@ -627,13 +662,14 @@ namespace sunshine_game3d {
       if (defer) {
         owed_present = requesters ? present_number : 0;
         owed_requesters = requesters;
+        owed_label = present_label;
       } else {
-        retain_color(cmd, present_number, requesters);
+        retain_color(cmd, present_number, requesters, present_label);
       }
     }
     void retain_owed(api::command_list *cmd) {
       const auto number = std::exchange(owed_present, uint64_t{});
-      retain_color(cmd, number, std::exchange(owed_requesters, uint8_t{}));
+      retain_color(cmd, number, std::exchange(owed_requesters, uint8_t{}), std::exchange(owed_label, uint32_t{}));
     }
     // The final side-by-side pass. Its target rests in `resting` between owners.
     void record_pack(api::command_list *cmd, api::resource target, api::resource_view view, api::resource_usage resting) {
@@ -868,10 +904,11 @@ namespace sunshine_game3d {
       return SUCCEEDED(native->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
         D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(counters_readback12.put())));
     }
-    // The GPU words of the sample just completed; false when not readable now
-    // (the totals are cumulative, so a later sample catches up).
-    bool read_counters(std::array<uint32_t, ui_counter_word::count> &words) {
-      const auto bytes = words.size() * sizeof(uint32_t);
+    // The GPU words of the sample just completed (counter_words of them, S3's
+    // identity words after count when the shader writes them); false when not
+    // readable now (the totals are cumulative, so a later sample catches up).
+    bool read_counters(std::array<uint32_t, ui_counter_word::with_identity> &words) {
+      const auto bytes = std::min<size_t>(words.size(), counter_words) * sizeof(uint32_t);
       if (context11.p) {
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (FAILED(context11->Map(counters_readback11.p, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped))) return false;
@@ -890,14 +927,24 @@ namespace sunshine_game3d {
     // renderer's CPU counts, which a later commit carries.
     void commit_counters(const alpha_auto_decision &sample, alpha_auto_policy *session,
         const scene_guard::observation &observed, const change_set::shadow_sample *shadow = nullptr) {
-      std::array<uint32_t, ui_counter_word::count> words{};
+      std::array<uint32_t, ui_counter_word::with_identity> all{};
       const auto add_samples = [&](ui_counters &counts) {
         if (shadow) change_set::add_shadow_counters(counts, *shadow);
         if (sample.darkening.measured) counts.add_darkening(sample.darkening.unpinned, sample.darkening.kept);
       };
-      if (!counters_pending || !read_counters(words)) {
+      if (!counters_pending || !read_counters(all)) {
         add_samples(cpu_counts);
         return;
+      }
+      std::array<uint32_t, ui_counter_word::count> words{};
+      std::copy_n(all.begin(), words.size(), words.begin());
+      // S3: the identity verdict words' change since the last commit joins the
+      // gpu group of the "Sunshine UI identity" totals, never ui_counters.
+      if (counter_words == ui_counter_word::with_identity) {
+        std::array<uint32_t, ui_counter_word::identity_words> identity{};
+        std::copy_n(all.begin() + ui_counter_word::count, identity.size(), identity.begin());
+        identity_gpu += ui_temporal::identity_gpu_delta(identity, committed_identity_words);
+        committed_identity_words = identity;
       }
       auto delta = ui_temporal::sample_counters(sample, pending_counts, committed_counts, words, committed_words,
         detection_pending_source.now_ms, observed);
@@ -916,6 +963,8 @@ namespace sunshine_game3d {
       const auto c = ui_selection::counts_from_words(words.data(), words.size());
       auto shadow = change_set::measure_shadow(c, sample.evidence.candidates, sample.evidence.accepted, detection_pending_flags,
         state.rules, state.pairing, state.layer_proven, state.hudless_offered, state.auto_mode, state.enabled);
+      // S3: the layer pair's GPU identity verdict (decision texel 12 .z/.w).
+      if (identity_supported) change_set::add_identity(shadow, ui_selection::identity_of_words(c.identity_verdicts, c.identity_deltas));
       sample.change_set = {true, shadow.pairing.kind, shadow.pairing.offset, shadow.valid, shadow.would_refine, state.enabled};
       if (change_set::shadow_log_due(change_set_log, shadow, detection_pending_source.now_ms))
         sunshine_log::message(reshade::log::level::info, change_set::shadow_log_text(shadow).c_str());
@@ -979,6 +1028,9 @@ namespace sunshine_game3d {
         detection_submitted, scene_evidence_supported(), detection_pending_flags);
       const auto shadow = change_set_shadow(counts, latest);
       darkening_sample(counts, latest);
+      if (identity_supported && counts.size() >= 4u * ui_detection::change_set_decision_texels)
+        sampled_identity = ui_selection::identity_of_words(counts[ui_detection::decision_word::id_verdicts],
+          counts[ui_detection::decision_word::id_deltas]);
       temporal.latest_source = detection_pending_source;
       temporal.latest_key = detection_pending_status_key;
       // The scene guard reads the sample's decision words before the
@@ -1069,11 +1121,36 @@ namespace sunshine_game3d {
       detection_run.pre_ui_threshold_bits = pre_ui_threshold_bits;
       detection_run.still_bits = still_bits;
       detection_run.rules_bits = rules;
+      // S3: b2 words 6-9, the proposals P2's provider made and the identity
+      // bits; the stamps the GPU verifies them against are bound at t9.
+      detection_run.expected_layer_present = input.expected_layer_present;
+      detection_run.expected_layer_token = input.expected_layer_token;
+      detection_run.expected_hudless_present = input.expected_hudless_present;
+      detection_run.identity_bits = change.identity_bits;
       if (bits & ui_detection::candidate::layer) {
         detection_run.layer_presents_ago = input.layer_presents_ago;
         detection_run.layer_pairing = change.pairing.kind;
       }
       if (still_bits) still_flattened = true;
+      // S3: every detection pass reads the stamps at t9 (the shader's
+      // SunshineUIStamps). A candidate copy left the buffer in copy_dest this
+      // submission, else it is still COMMON; after the passes it returns to
+      // copy_dest for the copies that follow in the same submission.
+      struct stamp_lease {
+        api::command_list *cmd;
+        impl *d;
+        ~stamp_lease() {
+          if (!d) return;
+          cmd->barrier(d->stamps.resource, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
+          d->stamps_copy_dest = true;
+        }
+      } stamps_lease{cmd, nullptr};
+      if (identity_supported && stamps.srv.handle) {
+        cmd->barrier(stamps.resource, stamps_copy_dest ? api::resource_usage::copy_dest : api::resource_usage::general,
+          api::resource_usage::shader_resource);
+        stamps_lease.d = this;
+        views[9] = stamps.srv;
+      }
       // The reduce also adds this frame to the exact counters at u7.
       auto &counter_texture = textures[ui_counter_words];
       if (counter_words && !counters_cleared) {
@@ -1126,10 +1203,12 @@ namespace sunshine_game3d {
           uint32_t accepted, flags;
           float pre_ui_threshold;
           uint32_t rules;
+          uint32_t expected_layer_present, expected_layer_token, expected_hudless_present, identity;
         } values{detection_run.candidates, difference_threshold, detection_run.accepted, detection_run.flags,
-          pushed_pre_ui_threshold, detection_run.rules_bits};
-        static_assert(sizeof(values) == 6 * sizeof(uint32_t));
-        cmd->push_constants(api::shader_stage::compute, layout, 5, 0, 6, &values);
+          pushed_pre_ui_threshold, detection_run.rules_bits, detection_run.expected_layer_present,
+          detection_run.expected_layer_token, detection_run.expected_hudless_present, detection_run.identity_bits};
+        static_assert(sizeof(values) == ui_detection::identity::b2_words * sizeof(uint32_t));
+        cmd->push_constants(api::shader_stage::compute, layout, 5, 0, ui_detection::identity::b2_words, &values);
         cmd->dispatch(x, y, 1);
         uavs.fill(null_uav);
         cmd->push_descriptors(api::shader_stage::compute, layout, 3,
@@ -1583,6 +1662,7 @@ namespace sunshine_game3d {
     else if (ui.kind == ui_input_kind::hudless_difference) candidates.hudless = ui.view;
     else if (ui.kind == ui_input_kind::captured_color_alpha) candidates.masks[2] = ui.view;
     else if (ui.kind == ui_input_kind::dedicated_mask) candidates.masks[channel == ui_mask_channel::red ? 0 : 1] = ui.view;
+    d.present_label = candidates.present_label;
     const auto compatible = [&](api::resource_view view) {
       if (!view.handle) return false;
       const auto desc = d.device->get_resource_desc(d.device->get_resource_from_view(view));
@@ -1660,16 +1740,49 @@ namespace sunshine_game3d {
         candidates.hold_previous);
       d.fg_off_present = d.present_number;
     }
-    const auto pairing = change_set::pair_layer(layer_offered, d.fg_off_presents, candidates.layer_presents_ago,
+    auto pairing = change_set::pair_layer(layer_offered, d.fg_off_presents, candidates.layer_presents_ago,
       retained_1.handle != 0, retained_2.handle != 0);
     const bool pin_only_ui = auto_mode && automatic->session->pin_only_ui();
     const bool pre_ui_proven = layer_offered && automatic && automatic->session &&
       automatic->session->pre_ui_proven(signatures.of(kind::ui_layer));
     const bool hudless_offered = (bits & candidate::hudless) != 0;
-    if (layer_threshold > 0.f && change_set::offered(auto_mode, pin_only_ui, pre_ui_proven, hudless_offered, pairing)) {
+    // S3 (game3d_ui_ticket.h): whether identity decides (the compile-time
+    // switch; the sequence harness's override never reaches a live render).
+    // Only then does a proven layer without a Present-counted pairing pair in
+    // token space: with frame generation not known off, a Backbuffer tag
+    // offered and the CPU's token proposal for the layer copy, its change set
+    // compares the layer with that same-token final image (pair offset
+    // pair_backbuffer, the layer's threshold with the Backbuffer's encoding).
+    const bool identity_authoritative = ui_ticket::authoritative(d.temporal.identity_override);
+    float pair_layer_threshold = layer_threshold;
+    if (identity_authoritative && layer_offered && pairing.kind != change_set::pair_class::retained &&
+        (bits & candidate::backbuffer) && candidates.expected_layer_token && !candidates.fg_known_off) {
+      const auto token_threshold = ui_selection::comparable({signatures.format[std::size_t(kind::ui_layer)], d.color},
+        {signatures.format[std::size_t(kind::backbuffer)] ? signatures.format[std::size_t(kind::backbuffer)] :
+          format_of(candidates.masks[2]), d.color});
+      if (token_threshold) {
+        pairing = change_set::token_pairing();
+        pair_layer_threshold = *token_threshold;
+      }
+    }
+    if (pair_layer_threshold > 0.f && change_set::offered(auto_mode, pin_only_ui, pre_ui_proven, hudless_offered, pairing)) {
       bits |= candidate::pre_ui;
       signatures.set(kind::pre_ui, signatures.format[std::size_t(kind::ui_layer)]);
     }
+    // S3 (shadow): b2 word 9. The CPU proves a HUD-less pair one tag batch
+    // when its image and the bound Backbuffer reference are snapshots of one
+    // token (ui_ticket::same_frame); the GPU counts that pair exact in token
+    // space. The gates exist only while identity is authoritative: the
+    // HUD-less change set needs its exact pair, and with UIPinOnlyUI=1 the
+    // pre-UI change set its exact layer pair.
+    const auto &tickets = candidates.tickets;
+    const bool token_batch = hudless_offered && candidates.hudless_pair.handle &&
+      tickets[ui_ticket::slot::hudless].token.valid && tickets[ui_ticket::slot::backbuffer].token.valid &&
+      ui_ticket::same_frame(tickets[ui_ticket::slot::hudless], tickets[ui_ticket::slot::backbuffer]);
+    namespace identity_bit = ui_detection::identity;
+    const uint32_t identity_bits = (token_batch ? identity_bit::token_batch : 0u) |
+      (identity_authoritative ? identity_bit::gate_hudless : 0u) |
+      (identity_authoritative && pin_only_ui ? identity_bit::gate_layer : 0u);
     // With the switch on, a proven layer retains every Present (lingering
     // like the HUD-less request), whatever the frame generation state, so a
     // menu entry that turns it off has its pair as soon as the run of
@@ -1688,7 +1801,11 @@ namespace sunshine_game3d {
     // inputs; a generated one shows the decision of the real frame it shows,
     // or has no mask (unavailable). Only a real Present whose accepted inputs
     // are all offered adopts them.
-    const ui_temporal::present_identity identity{candidates.hold_previous, candidates.real_frame};
+    // S3 shadow: the identity also carries the newest offered token and
+    // whether it is new to the last decision (ui_temporal::ticket_identity);
+    // arbitrate reads them only while ui_ticket::identity_authoritative.
+    const auto identity = ui_temporal::ticket_identity({candidates.hold_previous, candidates.real_frame},
+      ui_ticket::newest_token(candidates.tickets), d.temporal.decision_token, bits != 0);
     const auto arbitration = d.temporal.arbitrate(identity, observation, bits);
     // The layer's stored flags are pushed with its detection; nothing on the
     // CPU reads them back.
@@ -1697,7 +1814,7 @@ namespace sunshine_game3d {
     // b2 word 1, the change-set slot's pair threshold: the HUD-less pair's,
     // the pre-UI layer's with the presented color when it holds the slot
     // (fix 3), else the presented color's own, as the replay computes it.
-    d.difference_threshold = pair_threshold ? *pair_threshold : (bits & candidate::pre_ui) ? layer_threshold :
+    d.difference_threshold = pair_threshold ? *pair_threshold : (bits & candidate::pre_ui) ? pair_layer_threshold :
       ui_selection::comparable(presented, presented).value_or(2.f / 255.f);
     // H1 (d): the offscreen UI layer's pair threshold with the presented
     // color, from the layer signature's format; zero (no pre-UI pixel counts)
@@ -1816,7 +1933,7 @@ namespace sunshine_game3d {
         // the bound retained Presents; the sample keeps the change-set state.
         const impl::change_set_submission change{pairing, pre_ui_proven, hudless_offered, auto_mode, pin_only_ui,
           change_set::rule_bits(still_flatten, pin_only_ui, pre_ui_proven, arbitration.change_set_gap, pairing,
-            retained_1.handle != 0, retained_2.handle != 0)};
+            retained_1.handle != 0, retained_2.handle != 0), identity_bits};
         d.detect_ui(cmd, p, candidates, observation, hudless_color, depth, bits, accepted, flags, per_frame, change,
           retained_1, retained_2);
         d.consumed_layer = layer_offered ? d.device->get_resource_from_view(candidates.layer) : api::resource{};
@@ -1997,6 +2114,37 @@ namespace sunshine_game3d {
   api::resource_view renderer::ui_candidate_view(unsigned slot) const {
     return data_ && slot < data_->ui_candidates.size() ? data_->ui_candidates[slot].srv : api::resource_view{};
   }
+  api::resource renderer::ui_stamps() {
+    if (!data_) return {};
+    auto &d = *data_;
+    if (d.stamps_attempted) return d.stamps.resource;
+    d.stamps_attempted = true;
+    // D3D12 buffers live in COMMON: the copies into the entries promote it
+    // implicitly, and it decays after each submission.
+    constexpr uint64_t entries = ui_ticket::slot::count;
+    const api::resource_desc desc(entries * ui_ticket::stamp_bytes, api::memory_heap::default_,
+      api::resource_usage::copy_dest | api::resource_usage::shader_resource);
+    if (!d.device->create_resource(desc, nullptr, api::resource_usage::general, &d.stamps.resource)) {
+      d.stamps.resource = {};
+      return {};
+    }
+    if (!d.device->create_resource_view(d.stamps.resource, api::resource_usage::shader_resource,
+          api::resource_view_desc(api::format::r32g32b32a32_uint, 0, entries), &d.stamps.srv)) {
+      d.device->destroy_resource(d.stamps.resource);
+      d.stamps = {};
+    }
+    return d.stamps.resource;
+  }
+  api::resource_view renderer::ui_stamps_view() const { return data_ ? data_->stamps.srv : api::resource_view{}; }
+  void renderer::note_ui_stamp_write() {
+    if (data_ && data_->stamps.resource.handle) data_->stamps_copy_dest = true;
+  }
+  ui_ticket::identity_counters renderer::identity_counts() const {
+    return data_ ? data_->identity_gpu : ui_ticket::identity_counters{};
+  }
+  ui_selection::identity_verdict renderer::sampled_identity() const {
+    return data_ ? data_->sampled_identity : ui_selection::identity_verdict{};
+  }
   render_parameters renderer::consumed_parameters() const { return data_ ? data_->consumed : render_parameters{}; }
   bool renderer::consumed_source_alpha_ui() const { return data_ && data_->source_alpha_ui; }
   ui_mask_channel renderer::consumed_ui_channel() const { return data_ ? data_->consumed_channel : ui_mask_channel::alpha; }
@@ -2021,9 +2169,13 @@ namespace sunshine_game3d {
     // that retained itself without deferral has replaced the second), and
     // the layer copy its detection consumed.
     for (std::size_t i = 0; i != result.retained_presents.size(); ++i)
-      if (const auto *retained = data_->retained(result.retained_offsets[i], impl::retain_any))
+      if (const auto *retained = data_->retained(result.retained_offsets[i], impl::retain_any)) {
         result.retained_presents[i] = retained->resource;
+        result.retained_labels[i] = data_->retained_label[std::size_t(retained - &data_->textures[impl::retained_color])];
+      }
     result.ui_layer_detected = data_->consumed_layer;
+    result.ui_stamps = data_->stamps.resource;
+    result.ui_stamps_copy_dest = data_->stamps_copy_dest;
     return result;
   }
   api::resource_view renderer::native_rtv(api::resource backbuffer) {
@@ -2038,6 +2190,10 @@ namespace sunshine_game3d {
     if (!data_) return;
     ++data_->present_number;
     data_->profile_open = false;
+    // S3: the previous Present's submission ended (ReShade flushes its
+    // immediate list at every Present), so the stamp buffer is COMMON again
+    // before this Present's candidate copies write it.
+    data_->stamps_copy_dest = false;
     if (!data_->pending) return;
     // The missed presentation's commands still execute in queue order before
     // any later signal, so that signal conservatively retires them too.
@@ -2084,6 +2240,8 @@ namespace sunshine_game3d {
     auto &d = *data_;
     if (!d.queue->signal(d.completion, ++d.sequence)) d.failed = true;
     else {
+      // The signal flushed the immediate list: the stamp buffer decays to COMMON.
+      d.stamps_copy_dest = false;
       if (d.adaptive_awaiting_signal) {
         d.adaptive_fence = d.sequence;
         d.adaptive_awaiting_signal = false;

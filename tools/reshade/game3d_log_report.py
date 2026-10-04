@@ -131,6 +131,14 @@ DARKENING_SOURCES = (2, 5, 10, 12)
 # The session's cumulative exact UI counters (docs/reshade-sbs.md, UI counters), absent from older logs.
 COUNTERS = re.compile(r'Sunshine UI counters: (.*)$')
 COUNTER_FIELD = re.compile(r'(\w+)=(?:\{([^}]*)\}|(\S+))')
+# S3 shadow (docs/reshade-sbs.md, UI decision framework, S3 snapshot ticket): the process's cumulative snapshot-ticket
+# identity counters (format_identity_counters in game3d_ui_ticket.h) and each runtime's FG-capable interposer modules
+# when they change (format_interposers), both absent from older logs. Nothing is decided from them.
+IDENTITY = re.compile(r'Sunshine UI identity: runtime=\S+ (.*)$')
+INTERPOSERS = re.compile(r'Sunshine FG interposers: (.*)$')
+INTERPOSER_LIST = re.compile(r'\bnames=(\S+)')
+# The interposer bits of the identity line, in bit order (ui_ticket::interposer::short_names).
+INTERPOSER_NAMES = ('sl_interposer', 'sl_dlss_g', 'ngx_dlssg', 'fidelityfx_fg', 'xess_fg')
 LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
 UNAVAILABLE_MS = re.compile(r'\bunavailable_ms=(\d+)')
@@ -248,7 +256,8 @@ def accepted_keys(value: str) -> tuple[str, ...]:
 
 
 def counter_fields(text: str) -> dict[str, int]:
-    """The numeric fields of a 'Sunshine UI counters' line, a group's fields as 'group.key'."""
+    """The numeric fields of a 'Sunshine UI counters' or 'Sunshine UI identity' line, a group's fields as
+    'group.key'."""
     values: dict[str, int] = {}
     for key, group, value in COUNTER_FIELD.findall(text):
         if group:
@@ -701,6 +710,10 @@ class Session:
     darkening_before_counters: int = 0
     # The last 'Sunshine UI counters' line: the session's totals are cumulative over all its runtimes.
     counters: dict[str, int] | None = None
+    # S3 shadow: the last 'Sunshine UI identity' line (cumulative totals) and each 'Sunshine FG interposers' line's
+    # time and text.
+    identity: dict[str, int] | None = None
+    interposers: list[tuple[float, str]] = field(default_factory=list)
     losses: dict[int, tuple[float, str]] = field(default_factory=dict)
     readiness: Counter = field(default_factory=Counter)  # Losses while the export streamed.
     depth_episodes: list[DepthEpisode] = field(default_factory=list)
@@ -856,6 +869,10 @@ def parse(lines) -> Session:
         if (found := COUNTERS.search(text)) and 'auto_frames' in (values := counter_fields(found.group(1))):
             s.counters = values
             s.darkening_before_counters = len(s.darkening)
+        if found := IDENTITY.search(text):
+            s.identity = counter_fields(found.group(1))
+        if found := INTERPOSERS.search(text):
+            s.interposers.append((t, found.group(1)))
         if found := LOSS.search(text):
             s.losses.setdefault(int(found.group(1)), (t, found.group(2)))
         if found := READINESS.search(text):
@@ -1073,6 +1090,7 @@ def evaluate(s: Session) -> list[Check]:
         add(Check('WARN', 'Placement', 'neither projection nor raw placement became ready'))
 
     ui_checks(s, add)
+    identity_check(s, add)
 
     tokens = sum(1 for _, cause in s.losses.values() if cause == 'tokens_busy')
     causes = Counter(cause for _, cause in s.losses.values())
@@ -1126,6 +1144,64 @@ def evaluate(s: Session) -> list[Check]:
         add(Check('WARN', 'Log warnings', f'{len(s.warnings)} unexpected WARN/ERROR lines',
                   [f'{clock(t)} {w}' for t, w in s.warnings[:5]]))
     return checks
+
+
+def identity_authoritative(s: Session) -> bool:
+    """Whether the S3 identity line says identity decides (an authoritative=1 field, which shadow builds do not
+    log)."""
+    return bool(s.identity and s.identity.get('authoritative', 0))
+
+
+def identity_check(s: Session, add) -> None:
+    """S3 shadow (docs/reshade-sbs.md, UI decision framework, S3 snapshot ticket): how the snapshot tickets' frame
+    identity agrees with today's Present-counting pairing, and the GPU's verdicts of proposed pairs. Nothing is
+    decided from it; it is the live evidence for enabling S3. WARN where today pairs a tag batch the tickets do not
+    prove, or a proposed pair's stamp contradicts its label; absent from older logs."""
+    if s.identity is None:
+        return
+    c = s.identity
+
+    def agreement(group: str) -> str:
+        return (f'{group} agree {c.get(f"{group}.agree", 0)}, today only {c.get(f"{group}.today_only", 0)}, '
+                f'ticket only {c.get(f"{group}.ticket_only", 0)}')
+
+    def named(group: str) -> str:
+        found = [f'{key.split(".", 1)[1]} {n}' for key, n in c.items() if key.startswith(group + '.') and n]
+        return ', '.join(found) or 'none'
+
+    total = c.get('frames.total', 0)
+    frames = (f'HUD-less real frames detected once {c.get("frames.once", 0)}/{total} '
+              f'({percent(c.get("frames.once", 0), total)}), repeated {c.get("frames.repeated", 0)} '
+              f'({c.get("frames.extra", 0)} extra detections), missed {c.get("frames.missed", 0)}'
+              if total else 'no HUD-less real frame identified')
+    seen: list[str] = []
+    for _, text in s.interposers:
+        names = INTERPOSER_LIST.search(text)
+        for name in names.group(1).split(',') if names else ():
+            if name != 'none' and name not in seen:
+                seen.append(name)
+    if not s.interposers:
+        seen = [name for i, name in enumerate(INTERPOSER_NAMES) if c.get('interposers', 0) & (1 << i)]
+    batch_only, mismatch = c.get('batch.today_only', 0), c.get('gpu.mismatch', 0)
+    warn = []
+    if batch_only:
+        warn.append(f'today paired {batch_only} renders as one tag batch that no token proves')
+    if mismatch:
+        warn.append(f'{mismatch} proposed pairs carried a stamp that contradicts their label')
+    # Unstamped and foreign-queue labels prove no pair (absent, never inexact): informative, not a warning.
+    unproven = c.get('gpu.unstamped', 0) + c.get('refused.foreign_queue', 0)
+    text = ('; '.join(warn) + '; ' if warn else '') + (
+        f'{c.get("renders", 0)} renders ({c.get("tagged", 0)} tagged); {frames}; {agreement("detect")}; '
+        f'{agreement("exact")}, both inexact {c.get("exact.inexact", 0)}; {agreement("batch")}; labels '
+        f'token {c.get("label.token", 0)}, present {c.get("label.present", 0)}, none {c.get("label.none", 0)}; '
+        f'refused {named("refused")}; GPU verdicts {named("gpu")}'
+        + (f' ({c.get("gpu.unstamped", 0)} unstamped and {c.get("refused.foreign_queue", 0)} foreign-queue '
+           'labels prove no pair)' if unproven else '')
+        + f'; FG interposers {", ".join(seen) or "none"}; '
+        + ('S3 identity is authoritative: only exact pairs decide' if c.get('authoritative', 0) else
+           'shadow only: nothing is decided from it'))
+    add(Check('WARN' if warn else 'INFO', 'UI identity (S3)', text,
+              [f'{clock(t)} {entry}' for t, entry in s.interposers][:6]))
 
 
 def ui_checks(s: Session, add) -> None:
@@ -1271,7 +1347,7 @@ def ui_checks(s: Session, add) -> None:
                   'were not revoked, as designed' if short else '')
     if s.counters is not None:
         counter_checks(s.counters, add, overrides, flattened, contradicted, disputes, handled, dispute_text,
-                       refusals(s), short, short_text)
+                       refusals(s), short, short_text, identity_authoritative(s))
         gap_checks(s, add)
         scene_checks(s, add)
         still_checks(s, add)
@@ -1324,7 +1400,7 @@ def refusals(s: Session) -> Counter:
 
 def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flattened_sampled: list[str],
                    contradicted_sampled: list[str], disputes: list[str], handled: list[str], dispute_text: str,
-                   refused: Counter, short: list[str] = (), short_text: str = '') -> None:
+                   refused: Counter, short: list[str] = (), short_text: str = '', authoritative: bool = False) -> None:
     """Checks from the add-on's exact per-frame UI counters (docs/reshade-sbs.md, UI counters).
 
     They replace the sampled invariants: every Auto frame is counted, not one per 100 ms sample. Sampled lines still
@@ -1447,10 +1523,13 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
               'alpha (UI layer, Backbuffer or current alpha)'
               + ('; only accepted candidates decide since S1' if s1 else '; expected before S1') if inferred else
               'no frame decided from unaccepted inferred alpha'))
+    # Until S3 is enabled an inexact pair may decide; once the identity line says identity is authoritative
+    # (authoritative=1), only exact pairs decide, so a count is a defect.
     inexact = get('inexact_difference')
-    add(Check('WARN' if inexact else 'PASS', 'UI inexact difference',
+    add(Check(('FAIL' if authoritative else 'WARN') if inexact else 'PASS', 'UI inexact difference',
               f'{inexact} frames ({percent(inexact, detected)} of detection frames) decided a HUD-less difference '
-              'from an inexact pair; expected until S3' if inexact else
+              'from an inexact pair' + ('; S3 identity is authoritative, so only exact pairs decide' if authoritative
+                                        else '; expected until S3 is enabled') if inexact else
               'no HUD-less difference decided from an inexact pair'))
 
     if s2a:

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// GPU contract of the UI selection predicate (UI framework S1, S2a, S2b, fix 1, fix 2, fix 3, fix 4): runs the
+// GPU contract of the UI selection predicate (UI framework S1, S2a, S2b, fix 1, fix 2, fix 3, fix 4, S3): runs the
 // real SunshineUIDetectionReduceCS of game3d_native.hlsl on synthetic
 // per-tile statistics, detection constants and T1 hold stores, and compares
 // every decision word, the written hold store and every counter add with
@@ -13,7 +13,9 @@
 // decision texels 13-15) and the 3x3 mask of source 12 are checked against
 // a CPU oracle on synthetic images. Fix 4: the darkening passes (pin only
 // UI, rule P2) against game3d_ui_darkening.h's reference, mask for mask and
-// in decision words 62-63, on synthetic images. Also checks the predicate's intended
+// in decision words 62-63, on synthetic images. S3: the identity verdicts of
+// texel 12 .z/.w and the identity counter words on synthetic stamps (t9) and
+// proposals (b2 words 6-9), and the gates of sources 5 and 12. Also checks the predicate's intended
 // behaviour (selection, the T1 grace, F1 reasons and refused candidates, the
 // H1 override of a hidden scene and its informative claims, the H2 override
 // of a still screen without a UI source, the pre-UI change set and refine),
@@ -50,6 +52,8 @@ namespace {
   namespace candidate = detection::candidate;
   namespace word = detection::decision_word;
   using sunshine_game3d::ui_counter_word::count;
+  using sunshine_game3d::ui_counter_word::with_identity;
+  namespace identity = detection::identity;
 
   void require(bool condition, const std::string &message) {
     if (!condition) throw std::runtime_error(message);
@@ -139,6 +143,8 @@ namespace {
     // the CPU's run is active and enabled) and fix 3's refine, pair offset
     // and retained bits.
     std::uint32_t rules{};
+    // S3: the stamps at t9 and b2 words 6-9.
+    selection::identity_input identity{};
   };
 
   // An even split of every pixel over the tiles.
@@ -185,6 +191,9 @@ namespace {
     ComPtr<ID3D11ShaderResourceView> statistics_view;
     ComPtr<ID3D11UnorderedAccessView> decision_view, counters_view, hold_view;
     ComPtr<ID3D11Buffer> constants;
+    // S3: the stamp buffer at t9 (identity::stamp_entries uint4 entries).
+    ComPtr<ID3D11Buffer> stamps;
+    ComPtr<ID3D11ShaderResourceView> stamps_view;
     std::string adapter;
     // The hold store as the last reduce wrote it.
     selection::hold_state hold_written{};
@@ -219,7 +228,7 @@ namespace {
     desc.Usage = D3D11_USAGE_STAGING;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.decision_staging), "decision staging");
-    desc.Width = UINT(count);
+    desc.Width = UINT(with_identity);
     desc.Format = DXGI_FORMAT_R32_UINT;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.CPUAccessFlags = 0;
@@ -242,10 +251,18 @@ namespace {
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.hold_staging), "hold store staging");
     D3D11_BUFFER_DESC buffer{};
-    buffer.ByteWidth = 32; // b2: six words, padded to 16 bytes.
+    buffer.ByteWidth = 48; // b2: ten words, padded to 16 bytes.
     buffer.Usage = D3D11_USAGE_DEFAULT;
     buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     checked(gpu.device->CreateBuffer(&buffer, nullptr, &gpu.constants), "constants");
+    buffer.ByteWidth = identity::stamp_entries * 16u;
+    buffer.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    checked(gpu.device->CreateBuffer(&buffer, nullptr, &gpu.stamps), "stamps");
+    D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+    view.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+    view.Buffer.NumElements = identity::stamp_entries;
+    checked(gpu.device->CreateShaderResourceView(gpu.stamps.Get(), &view, &gpu.stamps_view), "stamps view");
     return gpu;
   }
 
@@ -280,16 +297,34 @@ namespace {
     return result;
   }
 
-  // b2 as the renderer pushes it (six words), padded to the buffer's 32 bytes.
+  // b2 as the renderer pushes it (ten words, S3's proposals and identity
+  // bits in words 6-9), padded to the buffer's 48 bytes.
   struct detection_constants {
     std::uint32_t offered;
     float threshold;
     std::uint32_t accepted, flags;
     float pre_ui_threshold;
     std::uint32_t rules;
-    std::uint32_t padding[2];
+    std::uint32_t padding[6];
   };
-  static_assert(sizeof(detection_constants) == 32);
+  static_assert(sizeof(detection_constants) == 48);
+  // S3: b2 words 6-9 of an identity input, in the padding.
+  detection_constants with_identity_words(detection_constants c, const selection::identity_input &in) {
+    c.padding[0] = in.expected_layer_present;
+    c.padding[1] = in.expected_layer_token;
+    c.padding[2] = in.expected_hudless_present;
+    c.padding[3] = in.bits;
+    return c;
+  }
+  // The stamp entries an identity input reads: the layer's {C_P, C_T} and
+  // the HUD-less image's C_P; every other entry a sentinel no pair reads.
+  void upload_stamps(gpu_t &gpu, const selection::identity_input &in) {
+    std::array<texel, identity::stamp_entries> entries{};
+    for (auto &entry : entries) entry = {0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu};
+    entries[identity::stamp_layer] = {in.layer_present, in.layer_token, 0u, 0u};
+    entries[identity::stamp_hudless] = {in.hudless_present, 0x5eedu, 0u, 0u};
+    gpu.context->UpdateSubresource(gpu.stamps.Get(), 0, nullptr, entries.data(), 0, 0);
+  }
 
   // Runs one case and compares it; returns the decision for the semantic checks.
   selection::decision run(gpu_t &gpu, ID3D11ComputeShader *reduce, const case_t &test, const char *space) {
@@ -310,9 +345,10 @@ namespace {
     gpu.context->UpdateSubresource(gpu.statistics.Get(), 0, nullptr, rows.data(), 16 * sizeof(texel), 0);
     // The reduce reads b2 word 4 only as zero or not (texels 11 and 13-15
     // sums or zero).
-    const detection_constants constants{test.offered, 2.f / 255.f, test.accepted, test.flags, test.pre_ui_threshold, test.rules,
-      {}};
+    const auto constants = with_identity_words({test.offered, 2.f / 255.f, test.accepted, test.flags, test.pre_ui_threshold,
+      test.rules, {}}, test.identity);
     gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
+    upload_stamps(gpu, test.identity);
     const std::array<std::uint32_t, 4> sentinel{0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu};
     gpu.context->ClearUnorderedAccessViewUint(gpu.decision_view.Get(), sentinel.data());
     const std::array<std::uint32_t, 4> zero{};
@@ -325,6 +361,7 @@ namespace {
     }
     gpu.context->CSSetShader(reduce, nullptr, 0);
     ID3D11ShaderResourceView *views[11]{};
+    views[9] = gpu.stamps_view.Get();
     views[10] = gpu.statistics_view.Get();
     gpu.context->CSSetShaderResources(0, 11, views);
     ID3D11Buffer *buffers[3]{nullptr, nullptr, gpu.constants.Get()};
@@ -337,16 +374,18 @@ namespace {
     gpu.context->CSSetUnorderedAccessViews(5, 3, none, nullptr);
     const auto words = read<std::uint32_t>(gpu, gpu.decision.Get(), gpu.decision_staging.Get(),
       4 * detection::change_set_decision_texels);
-    const auto counters = read<std::uint32_t>(gpu, gpu.counters.Get(), gpu.counters_staging.Get(), count);
+    const auto counters = read<std::uint32_t>(gpu, gpu.counters.Get(), gpu.counters_staging.Get(), with_identity);
     const auto store = read<std::uint32_t>(gpu, gpu.hold.Get(), gpu.hold_staging.Get(), detection::hold::store_texels);
     gpu.hold_written = {store[detection::hold::word::state], store[detection::hold::word::source],
       store[detection::hold::word::covered]};
 
     const auto c = sums(test.statistics);
-    const auto d = selection::decide(c, test.offered, test.accepted, test.flags, previous, test.rules);
+    const auto d = selection::decide(c, test.offered, test.accepted, test.flags, previous, test.rules, test.identity);
     // Texel 12 (H2's stillness counts) reads zero: the reduce clears it for
-    // the evidence passes.
+    // the evidence passes; .z/.w are S3's identity words.
     std::array<std::uint32_t, 4 * detection::change_set_decision_texels> want{};
+    want[word::id_verdicts] = selection::identity_verdict_word(d.identity);
+    want[word::id_deltas] = selection::identity_delta_word(d.identity);
     want[word::source] = d.source;
     want[word::covered] = d.covered;
     want[word::pixels] = c.pixels;
@@ -416,7 +455,8 @@ namespace {
         back.pre_ui_lit == want[word::pre_ui_image_lit] && back.presented_lit == want[word::presented_lit] &&
         back.presented_lit_differs == want[word::presented_lit_differs] && back.shadow.changed == want[word::cs_changed] &&
         back.shadow.matching_tiles == want[word::cs_matching_tiles] && back.shadow.filtered == want[word::cs_filtered] &&
-        back.shadow.judge_tp == want[word::cs_judge_tp] && back.shadow.judge_kind == want[word::cs_judge_kind],
+        back.shadow.judge_tp == want[word::cs_judge_tp] && back.shadow.judge_kind == want[word::cs_judge_kind] &&
+        selection::identity_of_words(back.identity_verdicts, back.identity_deltas) == d.identity,
       test.name + ": counts_from_words does not invert the decision words");
     for (std::size_t i = 0; i != want.size(); ++i)
       if (words[i] != want[i]) {
@@ -433,8 +473,12 @@ namespace {
         gpu.hold_written.state, gpu.hold_written.source, gpu.hold_written.covered, d.next.state, d.next.source, d.next.covered);
       throw std::runtime_error(test.name + text);
     }
-    const auto adds = selection::counter_adds(d, test.flags);
-    for (std::size_t i = 0; i != count; ++i)
+    const auto core = selection::counter_adds(d, test.flags);
+    const auto identity_adds = selection::identity_counter_adds(d.identity);
+    std::array<std::uint32_t, with_identity> adds{};
+    std::copy(core.begin(), core.end(), adds.begin());
+    std::copy(identity_adds.begin(), identity_adds.end(), adds.begin() + count);
+    for (std::size_t i = 0; i != with_identity; ++i)
       if (counters[i] != adds[i]) {
         char text[200];
         std::snprintf(text, sizeof(text), " (%s): counter word %zu added %u on the GPU, decide() gives %u (source %u)", space, i,
@@ -475,6 +519,98 @@ namespace {
         test.statistics.strong[0][i] = strong;
         test.statistics.contradicted[0][i] = contradicted;
       }
+  }
+
+  // S3: the identity verdicts and gates on the fix 3 pre-UI pair (Stellar
+  // Blade SDR's bare layer and a shapeless current alpha, refine on) and an
+  // exact-or-not HUD-less pair (E33-like, over a shapeless Backbuffer).
+  // Without a gate every verdict decides nothing; with gate_layer the
+  // pre-UI change set is valid only with its layer pair exact, with
+  // gate_hudless the HUD-less change set only with its pair exact (a token
+  // batch, or the stamp's C_P + 1 equal to the proposal).
+  std::vector<case_t> identity_cases() {
+    std::vector<case_t> cases;
+    const std::uint32_t p = small_pixels;
+    using k = selection::kind;
+    const auto refine = detection::rules::pin_only_ui;
+    const auto layer_pair = refine | (1u << detection::change_set::pair_shift) | detection::change_set::retained_1;
+    struct stamp_case {
+      const char *name;
+      selection::identity_input identity;
+    };
+    const stamp_case layer_stamps[]{
+      {"exact present", {41u, 7u, 0u, 41u, 0u, 0u}},
+      {"late copy (mismatch)", {42u, 7u, 0u, 41u, 0u, 0u}},
+      {"unstamped", {0u, 0u, 0u, 41u, 0u, 0u}},
+      {"unproposed", {41u, 7u, 0u, 0u, 0u, 0u}},
+      {"exact token", {41u, 9u, 0u, 0u, 9u, 0u}},
+      {"token mismatch", {41u, 8u, 0u, 0u, 9u, 0u}},
+      {"far mismatch", {90000u, 7u, 0u, 41u, 0u, 0u}},
+    };
+    for (const auto &stamp : layer_stamps)
+      for (const std::uint32_t gate : {0u, unsigned(identity::gate_layer), unsigned(identity::gate_hudless)}) {
+        case_t test{std::string("S3 pre-UI layer pair ") + stamp.name + ", gate " + std::to_string(gate), {},
+          candidate::layer | candidate::current | candidate::pre_ui, candidate::pre_ui | candidate::current, 0u};
+        difference_rows(test.statistics, p, 128, 100, 900);
+        test.statistics.lit[0][0] = p / 4u;
+        alpha(test, k::ui_layer, 0, 30000);
+        alpha(test, k::current, p, 0, p);
+        test.rules = layer_pair;
+        test.identity = stamp.identity;
+        test.identity.bits = gate;
+        cases.push_back(test);
+      }
+    // T1 under refine: a refused pre-UI pair counts as missing, so the frame
+    // after a refined 12 reuses it once (then the flat alpha, spent).
+    {
+      case_t test{"S3 pre-UI late copy after a refined 12", {}, candidate::layer | candidate::current | candidate::pre_ui,
+        candidate::pre_ui | candidate::current, 0u};
+      difference_rows(test.statistics, p, 128, 100, 900);
+      test.statistics.lit[0][0] = p / 4u;
+      alpha(test, k::ui_layer, 0, 30000);
+      alpha(test, k::current, p, 0, p);
+      test.rules = layer_pair;
+      test.identity = {42u, 7u, 0u, 41u, 0u, 0u, identity::gate_layer};
+      test.previous = selection::hold_state{detection::hold::own, detection::source_pre_ui, 2000u};
+      cases.push_back(test);
+      test.name = "S3 pre-UI late copy, spent";
+      test.previous = selection::hold_state{detection::hold::spent, detection::source_pre_ui, 2000u};
+      cases.push_back(test);
+    }
+    const stamp_case hudless_stamps[]{
+      {"token batch", {0u, 0u, 0u, 0u, 0u, 0u, identity::token_batch}},
+      {"exact present", {0u, 0u, 40u, 0u, 0u, 41u}},
+      {"generated Present (mismatch)", {0u, 0u, 41u, 0u, 0u, 41u}},
+      {"unstamped", {0u, 0u, 0u, 0u, 0u, 41u}},
+      {"unproposed", {0u, 0u, 40u, 0u, 0u, 0u}},
+    };
+    for (const auto &stamp : hudless_stamps)
+      for (const std::uint32_t gate : {0u, unsigned(identity::gate_hudless)})
+        for (const std::uint32_t exact : {0u, unsigned(candidate::exact)}) {
+          case_t test{std::string("S3 HUD-less pair ") + stamp.name + ", gate " + std::to_string(gate) + ", exact " +
+            std::to_string(exact), {}, candidate::backbuffer | candidate::hudless | exact | candidate::layer,
+            candidate::backbuffer | candidate::hudless, 0u};
+          difference_rows(test.statistics, p, 128, 100, 900);
+          test.statistics.lit[0][0] = p;
+          alpha(test, k::backbuffer, p, 0, p);
+          alpha(test, k::ui_layer, 0, 30000);
+          test.rules = refine;
+          test.identity = stamp.identity;
+          test.identity.bits |= gate;
+          cases.push_back(test);
+        }
+    // A full change set (menus): a gated mismatched pair is not valid, so T1
+    // reuses the previous own decision once.
+    for (const std::uint32_t gate : {0u, unsigned(identity::gate_hudless)}) {
+      case_t test{"S3 full HUD-less set, mismatch, gate " + std::to_string(gate), {}, candidate::hudless | candidate::exact,
+        candidate::hudless, 0u};
+      difference_rows(test.statistics, p, 0, 1000, 0);
+      test.statistics.lit[0][0] = p;
+      test.identity = {0u, 0u, 41u, 0u, 0u, 41u, gate};
+      test.previous = selection::hold_state{detection::hold::own, 5u, 1234u};
+      cases.push_back(test);
+    }
+    return cases;
   }
 
   std::vector<case_t> crafted() {
@@ -912,6 +1048,7 @@ namespace {
       chained.previous = std::nullopt;
       cases.push_back(chained);
     }
+    for (auto &test : identity_cases()) cases.push_back(std::move(test));
     return cases;
   }
 
@@ -1013,6 +1150,14 @@ namespace {
     // Some tiles at least 99% unchanged in the shadow.
     for (std::size_t i = 0; i != 256; ++i)
       if (random() & 1u) t.change_set[i][1] = t.difference[i][3] - (random() % 3u ? 0u : std::min<std::uint32_t>(2u, t.difference[i][3]));
+    // S3: stamps and proposals near each other in half the cases, the token
+    // batch and the gates in a quarter.
+    if (random() & 1u) {
+      const auto label = [&] { return std::uniform_int_distribution<std::uint32_t>(0u, 3u)(random); };
+      test.identity = {label(), label(), label(), label(), label(), label(), 0u};
+      if (!(random() % 16u)) test.identity.layer_present = 0xfffffff0u + label();
+      if (!(random() % 4u)) test.identity.bits = std::uint32_t(random()) & 7u;
+    }
     return test;
   }
 
@@ -1108,8 +1253,14 @@ namespace {
     buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     ComPtr<ID3D11Buffer> b0;
     checked(gpu.device->CreateBuffer(&buffer, nullptr, &b0), "b0");
-    const detection_constants constants{0u, 2.f / 255.f, 0u, 0u, 0.f, 0u, {}};
+    // S3: the evidence pass rewrites texel 12 .z/.w with the identity words
+    // the reduce wrote: an offered layer pair one Present late.
+    const selection::identity_input stamped{42u, 7u, 0u, 41u, 0u, 0u};
+    const auto constants = with_identity_words({candidate::layer, 2.f / 255.f, 0u, 0u, 0.f, 0u, {}}, stamped);
+    const auto verdict = selection::verify_identity(stamped, candidate::layer);
+    require(verdict.layer == identity::mismatch && verdict.layer_delta == 1, "S3: the evidence pass's case is not a late copy");
     gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
+    upload_stamps(gpu, stamped);
     const auto pass = [&](bool active) {
       const geometry g{1.f, 0, active ? 1u : 0u, active ? 1u : 0u, 0, 1.f, 1.f, .02f, {0.f, 1.f}, {0.f, 0.f}, {.5f, .1f},
         {0.f, 0.f}, {0.f, 0.f, 1.f, 1.f}};
@@ -1128,7 +1279,8 @@ namespace {
       gpu.context->Dispatch(cells_x / 16, cells_y / 16, 1);
       ID3D11UnorderedAccessView *none[2]{};
       gpu.context->CSSetUnorderedAccessViews(5, 2, none, nullptr);
-      // Evidence: statistics at t10, decision texels at u6.
+      // Evidence: statistics at t10, the stamps at t9, decision texels at u6.
+      views[9] = gpu.stamps_view.Get();
       views[10] = statistics_view.Get();
       gpu.context->CSSetShader(evidence.Get(), nullptr, 0);
       gpu.context->CSSetShaderResources(0, 11, views);
@@ -1146,8 +1298,10 @@ namespace {
     auto statistics_rows = read<texel>(gpu, statistics.Get(), statistics_staging.Get(), 16 * rows);
     auto words = read<std::uint32_t>(gpu, decision.Get(), decision_staging.Get(), 4 * detection::still_decision_texels);
     require(stored == previous && statistics_rows[16 * detection::still_statistics_row][0] == 0xdeadbeefu &&
-        !words[word::still_cells] && !words[word::still_compared] && words[word::still_compared + 1] == 0u,
-      "H2 stillness: inactive depth stored or counted cells, or texel 12 is not zero");
+        !words[word::still_cells] && !words[word::still_compared] &&
+        words[word::id_verdicts] == selection::identity_verdict_word(verdict) &&
+        words[word::id_deltas] == selection::identity_delta_word(verdict),
+      "H2 stillness: inactive depth stored or counted cells, or texel 12 is not zero with S3's identity words");
     // Active: per-group counts, the stored means and texel 12.
     pass(true);
     stored = read<std::uint32_t>(gpu, previous_store.Get(), previous_staging.Get(), cells);
@@ -1165,7 +1319,8 @@ namespace {
           std::to_string(expected_rows[group][1]));
     }
     require(words[word::still_cells] == expected_still && words[word::still_compared] == expected_compared &&
-        !words[word::still_compared + 1] && !words[word::still_compared + 2] && expected_still * 5u == expected_compared * 3u &&
+        words[word::id_verdicts] == selection::identity_verdict_word(verdict) &&
+        words[word::id_deltas] == selection::identity_delta_word(verdict) && expected_still * 5u == expected_compared * 3u &&
         expected_compared * 6u == cells * 5u, "H2 stillness: texel 12 does not sum the groups");
     // The next sample of the same image: every cell compared and still.
     pass(true);
@@ -1517,12 +1672,15 @@ namespace {
     const auto reduce_pass = compile_pass(gpu, source, color, "SunshineUIDetectionReduceCS", width);
     const auto mask_pass = compile_pass(gpu, source, color, "SunshineUIDetectionMaskCS", width);
     ID3D11ShaderResourceView *t8 = nullptr;
+    // S3: the token-space pair binds the Present one back as the Backbuffer
+    // tag's colour (t13, pair offset change_set::pair_backbuffer) instead.
+    bool backbuffer_pair = false;
     const auto stage = [&](ID3D11ComputeShader *shader, ID3D11ShaderResourceView *t10, UINT slot_index,
                          ID3D11UnorderedAccessView *uav, UINT x, UINT y) {
       ID3D11ShaderResourceView *bound[15]{};
       bound[8] = t8;
       bound[0] = views[0].Get();
-      bound[2] = views[1].Get();
+      bound[backbuffer_pair ? 13 : 2] = views[1].Get();
       bound[3] = views[2].Get();
       bound[6] = views[3].Get();
       bound[7] = views[4].Get();
@@ -1663,6 +1821,43 @@ namespace {
         if (resolved[i] != (kept[i] ? 1.f : 0.f))
           throw std::runtime_error("change set (sRGB): the source-12 mask at x=" + std::to_string(i % width) + " y=" +
             std::to_string(i / width) + " is " + std::to_string(resolved[i]) + ", the 3x3 rule " + std::to_string(int(kept[i])));
+    }
+    // S3, enabled only: the token-space pair (offset pair_backbuffer) compares
+    // the layer with the Backbuffer tag's colour at t13, the same slot rows,
+    // shadow rows and source-12 mask as the retained pair it equals here.
+    {
+      backbuffer_pair = true;
+      const std::uint32_t offered = candidate::layer | candidate::current | candidate::pre_ui | candidate::backbuffer;
+      const std::uint32_t accepted = candidate::current | candidate::pre_ui;
+      const std::uint32_t token_rules = detection::rules::pin_only_ui | detection::change_set::shadow |
+        (detection::change_set::pair_backbuffer << detection::change_set::pair_shift);
+      const detection_constants constants{offered, threshold, accepted, detection::layer_detection_flags(color == 2), threshold,
+        token_rules, {}};
+      gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
+      tiles_stage(constants);
+      const auto got = read<texel>(gpu, statistics.Get(), statistics_staging.Get(), 16 * rows);
+      for (std::size_t lane = 0; lane != 256; ++lane)
+        for (std::size_t k = 0; k != 4; ++k) {
+          const auto &slot_got = got[(32 + lane / 16) * 16 + lane % 16];
+          const auto &shadow_got = got[(detection::change_set_statistics_row + lane / 16) * 16 + lane % 16];
+          if (slot_got[k] != slot[lane][k] || shadow_got[k] != shadow[lane][k])
+            throw std::runtime_error(std::string("change set (") + space + "): the Backbuffer pair's tile " +
+              std::to_string(lane) + " differs from the retained pair's");
+        }
+      const std::array<std::uint32_t, 4> sentinel{0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu};
+      gpu.context->ClearUnorderedAccessViewUint(decision_uav.Get(), sentinel.data());
+      stage(reduce_pass.Get(), statistics_view.Get(), 6, decision_uav.Get(), 1, 1);
+      const auto words = read<std::uint32_t>(gpu, decision.Get(), decision_staging.Get(), 4 * detection::change_set_decision_texels);
+      require(words[word::source] == (color == 2 ? 4u : detection::source_pre_ui),
+        std::string("change set (") + space + "): the Backbuffer pair did not decide as the retained pair does");
+      if (color != 2) {
+        stage(mask_pass.Get(), decision_view.Get(), 0, mask_uav.Get(), (width + 7) / 8, (height + 7) / 8);
+        const auto resolved = read<float>(gpu, mask.Get(), mask_staging.Get(), width * height);
+        for (int i = 0; i != width * height; ++i)
+          if (resolved[i] != (kept[i] ? 1.f : 0.f))
+            throw std::runtime_error("change set (sRGB): the Backbuffer pair's source-12 mask differs at " + std::to_string(i));
+      }
+      backbuffer_pair = false;
     }
   }
 
@@ -2259,6 +2454,88 @@ namespace {
             std::to_string(reference.n.kept));
       }
     }
+  }
+}
+
+namespace {
+  // S3 semantics, on the CPU (run() proved the reduce equal to decide() on
+  // every case): no verdict decides without a gate; exact pairs leave every
+  // gated decision unchanged; the gates refuse exactly the non-exact pairs.
+  void check_identity_semantics(const std::vector<case_t> &cases) {
+    const auto same = [](const selection::decision &a, const selection::decision &b) {
+      return a.source == b.source && a.covered == b.covered && a.valid_bits == b.valid_bits && a.reused == b.reused &&
+        a.refused == b.refused && a.frame_reason == b.frame_reason && a.next.state == b.next.state &&
+        a.next.source == b.next.source && a.h1 == b.h1 && a.refined == b.refined && a.still == b.still;
+    };
+    for (const auto &test : cases) {
+      const auto c = sums(test.statistics);
+      const auto previous = test.previous ? *test.previous : selection::hold_state{};
+      const auto plain = selection::decide(c, test.offered, test.accepted, test.flags, previous, test.rules);
+      auto ungated = test.identity;
+      ungated.bits &= identity::token_batch;
+      require(same(plain, selection::decide(c, test.offered, test.accepted, test.flags, previous, test.rules, ungated)),
+        test.name + ": an identity verdict changed a decision without a gate");
+      // Exact stamps for both pairs, gated: the decision of the ungated frame
+      // (the pre-UI change set is never offered without its layer live; one
+      // offered alone has no layer pair, which the gate refuses).
+      selection::identity_input exact{17u, 0u, 16u, 17u, 0u, 17u, identity::gate_layer | identity::gate_hudless};
+      if (!(test.offered & candidate::pre_ui) || (test.offered & candidate::layer))
+        require(same(plain, selection::decide(c, test.offered, test.accepted, test.flags, previous, test.rules, exact)),
+          test.name + ": a gate changed a decision whose pairs are exact");
+      const auto gated = selection::decide(c, test.offered, test.accepted, test.flags, previous, test.rules, test.identity);
+      const auto v = gated.identity;
+      if ((test.identity.bits & identity::gate_layer) && !(v.ok & candidate::layer))
+        require(!(gated.valid_bits & candidate::pre_ui), test.name + ": a non-exact layer pair left source 12 valid");
+      if ((test.identity.bits & identity::gate_hudless) && !(v.ok & candidate::hudless))
+        require(!(gated.valid_bits & candidate::hudless), test.name + ": a non-exact HUD-less pair left 5/6 valid");
+    }
+    // The named cases: a late layer copy under gate_layer loses source 12
+    // (the shapeless current alpha keeps the frame flat, refine finds no
+    // set), an exact one keeps it; a generated Present's HUD-less stamp
+    // under gate_hudless loses the refined 5; a mismatched full set reuses.
+    const auto find = [&](const std::string &name) -> const case_t & {
+      for (const auto &test : cases)
+        if (test.name == name) return test;
+      throw std::runtime_error("S3: no case " + name);
+    };
+    const auto decided = [](const case_t &test) {
+      return selection::decide(sums(test.statistics), test.offered, test.accepted, test.flags,
+        test.previous ? *test.previous : selection::hold_state{}, test.rules, test.identity);
+    };
+    const auto gate = std::to_string(identity::gate_layer), hudless_gate = std::to_string(identity::gate_hudless);
+    require(decided(find("S3 pre-UI layer pair exact present, gate " + gate)).source == detection::source_pre_ui &&
+        decided(find("S3 pre-UI layer pair exact token, gate " + gate)).source == detection::source_pre_ui &&
+        decided(find("S3 pre-UI layer pair late copy (mismatch), gate 0")).source == detection::source_pre_ui &&
+        decided(find("S3 pre-UI layer pair late copy (mismatch), gate " + gate)).source == 4u &&
+        decided(find("S3 pre-UI layer pair unstamped, gate " + gate)).source == 4u &&
+        decided(find("S3 pre-UI layer pair unproposed, gate " + gate)).source == 4u &&
+        decided(find("S3 pre-UI layer pair late copy (mismatch), gate " + hudless_gate)).source == detection::source_pre_ui,
+      "S3: the layer gate does not keep exactly the exact pre-UI pairs");
+    const auto late = decided(find("S3 pre-UI layer pair late copy (mismatch), gate " + gate));
+    require(late.identity.layer == identity::mismatch && late.identity.layer_delta == 1 &&
+        late.identity.layer_space == identity::space_present &&
+        decided(find("S3 pre-UI layer pair far mismatch, gate 0")).identity.layer_delta == 32767 &&
+        decided(find("S3 pre-UI layer pair token mismatch, gate 0")).identity.layer_delta == -1,
+      "S3: the layer verdict or its delta is wrong");
+    const auto exact_bit = std::to_string(candidate::exact);
+    require(decided(find("S3 HUD-less pair token batch, gate " + hudless_gate + ", exact " + exact_bit)).source == 5u &&
+        decided(find("S3 HUD-less pair exact present, gate " + hudless_gate + ", exact " + exact_bit)).source == 5u &&
+        decided(find("S3 HUD-less pair generated Present (mismatch), gate 0, exact " + exact_bit)).source == 5u &&
+        decided(find("S3 HUD-less pair generated Present (mismatch), gate " + hudless_gate + ", exact " + exact_bit)).source ==
+          3u &&
+        decided(find("S3 HUD-less pair unproposed, gate " + hudless_gate + ", exact 0")).source == 3u,
+      "S3: the HUD-less gate does not keep exactly the exact HUD-less pairs");
+    const auto reuse = decided(find("S3 pre-UI late copy after a refined 12")),
+      spent = decided(find("S3 pre-UI late copy, spent"));
+    require(reuse.reused && reuse.source == detection::source_pre_ui && reuse.covered == 2000u &&
+        reuse.next.state == detection::hold::spent && !spent.reused && spent.source == 4u,
+      "S3: a refused pre-UI pair under refine does not reuse the refined 12 once, then show the flat alpha");
+    const auto full = decided(find("S3 full HUD-less set, mismatch, gate " + hudless_gate));
+    require(decided(find("S3 full HUD-less set, mismatch, gate 0")).source == 6u && full.reused && full.source == 5u &&
+        full.next.state == detection::hold::spent, "S3: a gated mismatched full set does not take T1's one reuse");
+    const auto adds = selection::identity_counter_adds(decided(find("S3 pre-UI layer pair exact token, gate 0")).identity);
+    require(adds[0] == 1u && adds[4] == 1u && adds[1] + adds[2] + adds[3] == 0u,
+      "S3: an exact token pair does not count exact and token_exact");
   }
 }
 
@@ -2867,6 +3144,11 @@ int main() {
     }
     require(!own_retired && h1 && gate_no_hold && still && refined && sources[detection::source_pre_ui],
       "The contract cases decided a retired source (7, 9), or never exercised H1, H2, refine or source 12");
+    check_identity_semantics(cases);
+    std::puts("PASS UI identity (S3): the reduce's identity verdicts (texel 12 .z/.w) and identity counter words match "
+      "verify_identity on synthetic stamps; without a gate no verdict changes a decision; with exact pairs every gated "
+      "decision equals the ungated one; a late, unstamped or unproposed layer pair invalidates source 12 under "
+      "gate_layer, a mismatched HUD-less pair sources 5 and 6 under gate_hudless (T1 then reuses once)");
     for (const unsigned color : {1u, 2u}) {
       for (const int width : {256, 254}) check_change_set(gpu, source, color, width);
       check_change_set_narrow(gpu, source, color);
@@ -2874,7 +3156,7 @@ int main() {
     std::puts("PASS UI change-set passes (fix 3): the pre-UI layer pair's slot rows at 8 times b2 word 1, the shadow rows "
       "160-191 (pair, 3x3 rule, offsets 1 and 2, UIAlpha judge), texels 13-15, the verified pair offset, source 12 refining a "
       "shapeless alpha and its 3x3 mask (specks removed, line interiors kept) match the CPU oracle in sRGB and scRGB, and the "
-      "shadow rows at width 8 (tiles empty in x) match it too");
+      "shadow rows at width 8 (tiles empty in x) match it too, as do S3's token-space Backbuffer pair (offset 3, t13)");
     check_darkening(gpu, source);
     std::puts("PASS UI darkening passes (fix 4, P2): the bits, tiles, region, mask, count and finish passes match the CPU "
       "reference (game3d_ui_darkening.h) mask for mask and in words 62-63: an sRGB and scRGB (float, linear tolerance) "
