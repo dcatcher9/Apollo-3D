@@ -344,6 +344,10 @@ namespace sunshine_game3d::ui_input {
     // own beside any tagged UIColorAndAlpha (E1), in renderer slot 4. Its copy
     // holds the previous frame's UI; detection reads it only while V1-valid,
     // premultiplied included.
+    // Every render reports whether the game's frame generation mode is known
+    // off (not merely unobserved), so the renderer's run of such Presents
+    // covers the Presents without a layer too.
+    result.detection.fg_known_off = status.fg.known && !status.fg.enabled;
     ui_layer::live_capture layer;
     const bool layer_wanted = status.requested &&
       (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::color_and_alpha));
@@ -360,10 +364,14 @@ namespace sunshine_game3d::ui_input {
       if (diagnostic) candidates.push_back({{"source", "ui_layer"}, {"channel", "alpha"}, {"format", layer.format},
         {"candidate_bit", ui_detection::candidate::layer}, {"available_for_detection", view.handle != 0},
         {"association", "previous_frame_offscreen_ui_layer"}, {"capture_id", layer.capture_id},
-        {"age_ms", now >= layer.tick ? now - layer.tick : 0}});
+        {"presents_since_copy", layer.presents_since_copy}, {"age_ms", now >= layer.tick ? now - layer.tick : 0}});
       if (view.handle) {
         result.detection.layer = view;
         result.detection.layer_flags = ui_layer::detection_flags(static_cast<api::format>(layer.format));
+        // Fix 3 (game3d_ui_change_set.h): the copy holds the frame of the
+        // Present this many Presents ago; Present counting pairs it only
+        // within a run of Presents with frame generation known off.
+        result.detection.layer_presents_ago = layer.presents_since_copy;
         signatures.set(ui_selection::kind::ui_layer, typed_format(layer.format));
         result.status.retained_alpha_ready = true; available = true;
       }

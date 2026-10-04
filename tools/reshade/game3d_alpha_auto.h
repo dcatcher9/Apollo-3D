@@ -3,6 +3,7 @@
 
 #include "game3d_scene_guard.h"
 #include "game3d_still_screen.h"
+#include "game3d_ui_change_set.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
@@ -66,8 +67,9 @@ namespace sunshine_game3d {
     // current A, 5 HUD-less difference, 6 full-frame UI (HUD-less differs
     // almost everywhere), 8 full-frame UI over a hidden scene (H1), 10 the
     // offscreen UI layer A, 11 a still screen without a UI source shown flat
-    // (H2). 7 and 9 (the HUD-less route before S2b) are retired and never
-    // reused.
+    // (H2), 12 the changed pixels of the proven pre-UI layer against the
+    // retained Present it shows (fix 3). 7 and 9 (the HUD-less route before
+    // S2b) are retired and never reused.
     std::uint32_t source_kind{};
     // Hidden-scene evidence of one image (docs/reshade-sbs.md, hidden-scene
     // evidence): edge cells n and D, whether the passes ran and the evidence
@@ -104,6 +106,10 @@ namespace sunshine_game3d {
       // S1 winner's source, and whether H1 overrode it with source 8.
       std::uint32_t claims{}, s1_source{};
       bool h1_applied{};
+      // Fix 3, the h1 word's refined bit (ui_detection::h1_refined): a valid
+      // exact selective change set replaced a shapeless whole-frame alpha
+      // winner, so s1_source is the change set's (5 or 12).
+      bool refined{};
       // How long consecutive samples have read the presented frame hidden
       // while no source decided, not blank, ending with this one; zero otherwise.
       std::uint64_t shadow_hidden_ms{};
@@ -139,6 +145,12 @@ namespace sunshine_game3d {
       // gameplay-safety evidence), zero otherwise.
       std::uint32_t still_cells{}, still_compared{};
       std::uint64_t still_short_ms{};
+      // Fix 3, texels 13-15 (selection revision 6): the change-set shadow,
+      // the offscreen layer against its pair's Present on a sample frame with
+      // an offered layer (game3d_ui_change_set.h). Diagnostics only: the
+      // acceptance ledger never reads it (ui_temporal::ledger_evidence clears
+      // it), so it advances no ledger clock.
+      ui_selection::change_set_shadow change_set;
     } evidence;
     // This render's state, not the sample's: the hidden-scene guard's
     // verdicts pushed with this render (game3d_scene_guard.h: a held hidden
@@ -161,6 +173,18 @@ namespace sunshine_game3d {
       still_screen::phase phase = still_screen::phase::none;
       std::uint64_t run_ms{};
     } still;
+    // Fix 3 (game3d_ui_change_set.h): the latest sample's change-set shadow,
+    // when it measured the offscreen layer: the layer's pairing with a
+    // Present (class and offset), whether the pair passed the pre-UI change
+    // set's validity, and whether the counterfactual with UIPinChangedPixels=1
+    // refined a shapeless alpha; and this render's switch (enabled,
+    // UIPinChangedPixels=1 in Auto).
+    struct change_set_state {
+      bool measured{};
+      change_set::pair_class pairing = change_set::pair_class::none;
+      std::uint32_t offset{};
+      bool valid{}, would_refine{}, enabled{};
+    } change_set;
   };
 
   // One alpha candidate's covered and invalid pixels in a sample.
@@ -217,8 +241,10 @@ namespace sunshine_game3d {
   // docs/reshade-sbs.md, UI decision framework). Live Auto validates each
   // frame's inputs on the GPU; this holds only the mode and one accepted bit
   // per source signature that those samples earn, and per offscreen layer
-  // signature the proof that it holds the pre-UI scene image (H1 d, the
-  // ledger-only kind ui_selection::kind::pre_ui). It knows nothing about
+  // signature the proof that it holds the pre-UI scene image (H1 d, the key
+  // of ui_selection::kind::pre_ui, which is also the pre-UI change set's
+  // acceptance, fix 3: accepted() names candidate::pre_ui exactly while the
+  // proof is held, and no sample earns or revokes it as a candidate). It knows nothing about
   // slots, holds or FG mode, and reads the presented frame's D verdict only
   // as the gate of that proof's reconfirm clock.
   class alpha_auto_policy {
@@ -460,6 +486,21 @@ namespace sunshine_game3d {
       return still_flatten_;
     }
 
+    // Fix 3 (game3d_ui_change_set.h): whether the pre-UI change set decides
+    // (Auto offers candidate::pre_ui for an exact retained pairing and pushes
+    // the refine rule) or is only measured and logged (the default, a
+    // shadow). A per-game switch its owner sets (ReShade.ini
+    // UIPinChangedPixels, game3d_controls.cpp), independent of acceptance:
+    // restore, earning, revocation and forget() never change it.
+    void set_pin_changed_pixels(bool enabled) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      pin_changed_pixels_ = enabled;
+    }
+    bool pin_changed_pixels() {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return pin_changed_pixels_;
+    }
+
   private:
     // Consecutive samples of one kind of evidence about one signature.
     struct evidence_run {
@@ -661,7 +702,7 @@ namespace sunshine_game3d {
     std::mutex mutex_;
     std::optional<bool> manual_; // Empty in Auto.
     std::vector<entry> entries_;
-    bool first_run_{}, still_flatten_{};
+    bool first_run_{}, still_flatten_{}, pin_changed_pixels_{};
     std::function<void(const std::string &)> change_listener_;
     ui_counters counters_;
   };

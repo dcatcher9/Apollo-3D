@@ -20,11 +20,13 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iomanip>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -281,6 +283,8 @@ namespace {
         dump->begin(observed_runtime, active, p, {reinterpret_cast<std::uint64_t>(depth_view.Get())},
           frame_generation_active, static_cast<api::color_space>(color));
       }
+      // A dumped render's own retention, owed until the dump's copies (fix 3).
+      active.finish_retention(queue->get_immediate_command_list());
       queue->flush_immediate_command_list(); active.finish_present();
       if (dump) dump->submitted(observed_runtime);
       drain_render();
@@ -2400,7 +2404,9 @@ namespace {
         replay.at("ui_detection").at("accepted") == ui_detection::candidate::layer &&
         replay.at("ui_detection").at("candidate_layout") == ui_detection::candidate_layout &&
         replay.at("ui_detection").at("still_bits") == 0u &&
-        replay.at("ui_pin").at("decision_texels") == ui_detection::still_decision_texels &&
+        (replay.at("ui_detection").at("rules_bits").get<std::uint32_t>() &
+          (ui_detection::still::flatten | ui_detection::change_set::refine)) == 0u &&
+        replay.at("ui_pin").at("decision_texels") == ui_detection::change_set_decision_texels &&
         replay.at("ui_pin").at("evidence_images") == ui_detection::max_scene_evidence_images,
       "Dump lost the layer's detection constants or pin markers");
     require(!replay.at("ui_pin").contains("late_margin") &&
@@ -3169,6 +3175,481 @@ namespace {
         "scRGB output is out of scope: the same loading screen, flattening enabled, never runs, measures or pushes the still word");
     }
   }
+  // Fix 3, the pre-UI change set (docs/reshade-sbs.md, UI decision
+  // framework; game3d_ui_change_set.h), as Stellar Blade SDR shows it: its
+  // cleared offscreen target holds the scene drawn before the UI at alpha 0,
+  // copied before the first clear after a Present, so the copy offered with a
+  // render holds the pre-UI image of the Present one before (presents_since_
+  // copy 1); the presented alpha is accepted and a uniform 1.0 in menus (the
+  // FG-off gameplay alpha that equals the UI colour tag), and the session's
+  // ledger proved the layer the pre-UI scene image (its pre_ui key). The
+  // scene moves every frame, so only the retained Present the copy shows
+  // pairs with it exactly. UIPinChangedPixels=0 (the default) only measures
+  // and logs the pair (the change-set shadow) and the menu stays flat by the
+  // whole-frame alpha (source 4); =1 offers the pre-UI change set and the
+  // refine rule pins only the changed pixels (source 12) while full pages and
+  // a black pre-UI image stay flat. Without an exact pairing (the copy's own
+  // interval, frame generation) it is never offered. Then the HUD-less
+  // pairing's ring isolation, Dump 3D's retained Presents and the GPU cost.
+  void verify_pre_ui_change_set(fixture &gpu, std::ostream &report, const fs::path &directory, bool timing_only = false) {
+    using namespace sunshine_game3d;
+    namespace candidate = ui_detection::candidate;
+    const unsigned width = gpu.width, height = gpu.height;
+    const auto pixels = size_t(width) * height;
+    const auto bpp = gpu.color == 2 ? 8u : 4u;
+    D3D11_TEXTURE2D_DESC color_desc{}; gpu.source->GetDesc(&color_desc);
+    color_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    using rgba = std::array<float, 4>;
+    const auto encode = [&](const std::function<rgba(unsigned, unsigned)> &pixel) {
+      std::vector<unsigned char> bytes(pixels * bpp);
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const size_t i = size_t(y) * width + x;
+        const auto v = pixel(x, y);
+        if (gpu.color == 2) for (unsigned c = 0; c != 4; ++c) { const auto half = half_bits(v[c]); std::memcpy(bytes.data() + i * bpp + c * 2, &half, 2); }
+        else for (unsigned c = 0; c != 4; ++c) bytes[i * bpp + c] = static_cast<unsigned char>(std::lround(std::clamp(v[c], 0.f, 1.f) * 255));
+      }
+      return bytes;
+    };
+    std::vector<ComPtr<ID3D11Texture2D>> textures;
+    std::vector<ComPtr<ID3D11ShaderResourceView>> views;
+    const auto view_of = [&](const std::vector<unsigned char> &bytes, ComPtr<ID3D11Texture2D> *out = nullptr) {
+      const D3D11_SUBRESOURCE_DATA data{bytes.data(), width * bpp, 0};
+      ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> view;
+      checked(gpu.device->CreateTexture2D(&color_desc, &data, &texture), "pre-UI change-set texture");
+      checked(gpu.device->CreateShaderResourceView(texture.Get(), nullptr, &view), "pre-UI change-set view");
+      if (out) *out = texture;
+      textures.push_back(texture); views.push_back(view);
+      return api::resource_view{reinterpret_cast<std::uint64_t>(view.Get())};
+    };
+    // The UI of the Equipment page: a tab row, the left icon panel, the
+    // bottom-right prompts, a one-pixel hint line and an isolated speck. A
+    // changed pixel stays in the mask with at least 3 changed pixels in its
+    // 3x3 window: the speck and the line's two ends go.
+    std::vector<std::uint8_t> ui(pixels, 0);
+    const auto fill = [&](unsigned x0, unsigned y0, unsigned x1, unsigned y1) {
+      for (unsigned y = y0; y < y1 && y < height; ++y) for (unsigned x = x0; x < x1 && x < width; ++x) ui[size_t(y) * width + x] = 1;
+    };
+    fill(width / 4, height / 20, width * 3 / 4, height / 20 + std::max(2u, height / 40));
+    fill(width / 40, height / 4, width / 40 + std::max(2u, width / 20), height * 3 / 4);
+    fill(width * 3 / 4, height * 9 / 10, width * 19 / 20, height * 19 / 20);
+    fill(width / 2, height / 2, width / 2 + width / 10, height / 2 + 1);
+    fill(width * 3 / 5, height * 3 / 10, width * 3 / 5 + 1, height * 3 / 10 + 1);
+    std::vector<std::uint8_t> filtered(pixels, 0);
+    std::uint32_t ui_pixels = 0, kept = 0;
+    for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+      const size_t i = size_t(y) * width + x;
+      if (!ui[i]) continue;
+      ++ui_pixels;
+      unsigned count = 0;
+      for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+        const int nx = int(x) + dx, ny = int(y) + dy;
+        if (nx >= 0 && ny >= 0 && nx < int(width) && ny < int(height)) count += ui[size_t(ny) * width + nx];
+      }
+      if (count >= ui_detection::change_set::min_neighbourhood) { filtered[i] = 1; ++kept; }
+    }
+    require(kept < ui_pixels && kept * 4 < pixels, "The fixture's UI has nothing for the 3x3 rule to remove, or is not selective");
+    // A moving scene (checkers that shift every frame, lit everywhere) and
+    // the page's presented colour over it, opaque everywhere.
+    const auto scene = [&](unsigned phase, bool lit = true) {
+      return [=](unsigned x, unsigned y) -> rgba {
+        return lit ? rgba{0.f, ((x + 3 * phase) / 4 + y / 4) % 2 ? .75f : .25f, .25f, 1.f} : rgba{0.f, 0.f, 0.f, 1.f};
+      };
+    };
+    enum class page { equipment, settings, loading };
+    const auto presented_of = [&](page kind, unsigned phase) {
+      const auto base = scene(phase, kind != page::loading);
+      return encode([&](unsigned x, unsigned y) -> rgba {
+        if (kind == page::settings) return {.5f, .5f, .5f, 1.f};
+        return ui[size_t(y) * width + x] ? rgba{1.f, .5f, 1.f, 1.f} : base(x, y);
+      });
+    };
+    // The cleared target: the pre-UI scene at alpha 0 (black on the loading
+    // screen, lit on far fewer than 1% of pixels).
+    const auto layer_of = [&](page kind, unsigned phase) {
+      const auto base = scene(phase, kind != page::loading);
+      return encode([&](unsigned x, unsigned y) -> rgba { auto v = base(x, y); v[3] = 0.f; return v; });
+    };
+    ComPtr<ID3D11Texture2D> layer_texture;
+    const auto layer_view = view_of(layer_of(page::equipment, 0), &layer_texture);
+    const auto layer_flags = ui_layer::detection_flags(static_cast<api::format>(color_desc.Format));
+
+    alpha_auto_policy sb;
+    const auto current_key = gpu.key(ui_selection::kind::current), pre_ui_key = gpu.key(ui_selection::kind::pre_ui);
+    require(sb.restore(current_key + ',' + pre_ui_key).restored == 2, "The current alpha and pre-UI keys were not restored");
+    const auto layer_signature = ui_selection::signature{ui_selection::kind::ui_layer, std::uint32_t(color_desc.Format), gpu.color};
+    require(sb.pre_ui_proven(layer_signature), "The restored pre-UI key did not prove the layer");
+    alpha_auto_source source;
+    source.session = &sb; source.now_ms = source.tick_ms = 500000;
+    source.epoch = 61; source.revision = 1; source.sequence = 1;
+    ui_detection_inputs inputs;
+    ui_render_input ui_input;
+    ui_input.automatic = &source; ui_input.detection = &inputs;
+    struct outcome { alpha_auto_decision sample; ui_detection_snapshot run; image mask; };
+    // One render of a page at the next phase. The layer offered is the
+    // previous render's pre-UI image (exact when presents_ago is 1, as the
+    // tracker counts it); the next render's layer is this one's.
+    unsigned phase = 0;
+    page last = page::equipment;
+    // The presented colours of the last three renders, newest last.
+    std::array<std::vector<unsigned char>, 3> presented_history;
+    const auto step = [&](page kind, std::uint32_t presents_ago = 1, bool fg = false, std::uint64_t advance = 100,
+        const fs::path &dump = {}) {
+      const auto layer = layer_of(last, phase);
+      gpu.context->UpdateSubresource(layer_texture.Get(), 0, nullptr, layer.data(), width * bpp, 0);
+      ++phase;
+      last = kind;
+      inputs.current_color = true;
+      inputs.layer = layer_view; inputs.layer_flags = layer_flags;
+      inputs.layer_presents_ago = presents_ago; inputs.fg_known_off = !fg;
+      gpu.original = presented_of(kind, phase);
+      std::rotate(presented_history.begin(), presented_history.begin() + 1, presented_history.end());
+      presented_history.back() = gpu.original;
+      gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), width * bpp, 0);
+      source.now_ms += advance; source.tick_ms = source.now_ms; ++source.sequence;
+      gpu.renderer.begin_present();
+      gpu.render(true, 1, false, false, false, {}, dump, {}, nullptr, nullptr, nullptr, nullptr, &ui_input);
+      return outcome{gpu.renderer.consumed_alpha_auto(), gpu.renderer.consumed_detection(),
+        gpu.read(gpu.renderer.diagnostics().ui_source)};
+    };
+    const auto is_flat = [&](const image &mask) {
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x)
+        if (mask.channel(x, y, 0) != 1.f) return false;
+      return true;
+    };
+    const auto is_filtered_ui = [&](const image &mask) {
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x)
+        if (mask.channel(x, y, 0) != float(filtered[size_t(y) * width + x])) return false;
+      return true;
+    };
+    const auto pre_ui_rules = [](const ui_detection_snapshot &run) {
+      return run.rules_bits & (ui_detection::change_set::refine | ui_detection::change_set::pair_mask);
+    };
+    // A frame without protection ends any mask an earlier section left.
+    gpu.original = presented_of(page::equipment, phase);
+    gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), width * bpp, 0);
+    source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+    gpu.render(false, 1, false, false, false, {}, {}, {}, nullptr, &source);
+    step(page::equipment, 0);
+
+    if (!timing_only) {
+      // (a) The shadow (UIPinChangedPixels=0): never offered and the menu is
+      // flat by the accepted whole-frame alpha, while each sample measures the
+      // layer against the retained Present it shows: exactly the UI pixels
+      // changed, verified against the Presents 0 and 2 back, valid, and with
+      // the switch it would refine. The ledger keeps its keys.
+      // The first frame reads the sample of the copy's own interval.
+      step(page::equipment);
+      const auto stored = sb.stored();
+      const auto counters_before = sb.counters();
+      outcome shadow{};
+      for (unsigned i = 0; i != 4; ++i) {
+        shadow = step(page::equipment);
+        require(!(shadow.run.candidates & candidate::pre_ui) && shadow.run.layer_pairing == change_set::pair_class::retained &&
+            shadow.run.layer_presents_ago == 1u && !(shadow.run.rules_bits & ui_detection::change_set::refine) &&
+            ui_detection::change_set::pair_offset(shadow.run.rules_bits) == 1u && is_flat(shadow.mask),
+          "The shadow offered the pre-UI change set, lost the retained pairing or did not leave the menu flat");
+      }
+      const auto &cs = shadow.sample.evidence.change_set;
+      require(shadow.sample.source_kind == 4u && shadow.sample.covered == pixels && !shadow.sample.evidence.refined &&
+          shadow.sample.change_set.measured && shadow.sample.change_set.pairing == change_set::pair_class::retained &&
+          shadow.sample.change_set.offset == 1u && shadow.sample.change_set.valid && shadow.sample.change_set.would_refine &&
+          !shadow.sample.change_set.enabled && cs.changed == ui_pixels && cs.filtered == kept && cs.changed_1 == ui_pixels &&
+          cs.changed_2 > ui_pixels && cs.matching_tiles >= 128u && !cs.nonfinite && !cs.judge_kind,
+        "The shadow sample did not measure exactly the UI pixels against the retained Present, or would not refine: changed=" +
+          std::to_string(cs.changed) + " filtered=" + std::to_string(cs.filtered) + " ui=" + std::to_string(ui_pixels) +
+          " kept=" + std::to_string(kept) + " changed_1=" + std::to_string(cs.changed_1) + " changed_2=" +
+          std::to_string(cs.changed_2) + " tiles=" + std::to_string(cs.matching_tiles));
+      const auto counted = sb.counters() - counters_before;
+      require(sb.stored() == stored && sb.pre_ui_proven(layer_signature) && counted[ui_counter::change_set_samples] >= 3 &&
+          counted[ui_counter::change_set_retained] == counted[ui_counter::change_set_samples] &&
+          counted[ui_counter::change_set_valid] == counted[ui_counter::change_set_samples] &&
+          counted[ui_counter::change_set_would_refine] == counted[ui_counter::change_set_samples] &&
+          counted[ui_counter::change_set_pair_verified] == counted[ui_counter::change_set_samples] &&
+          !counted[ui_counter::change_set_pair_contradicted] && !counted[ui_counter::refined] && !counted.decided(12) &&
+          counted.decided(4) >= 1,
+        "The shadow changed the ledger, or its counters are not exact");
+      // (b) UIPinChangedPixels=1: offered with the retained pairing, refined
+      // from the shapeless alpha, and only the changed pixels the 3x3 rule
+      // keeps are pinned; the scene stays unpinned.
+      sb.set_pin_changed_pixels(true);
+      outcome pinned{};
+      for (unsigned i = 0; i != 3; ++i) {
+        pinned = step(page::equipment);
+        require((pinned.run.candidates & candidate::pre_ui) && (pinned.run.accepted & candidate::pre_ui) &&
+            !(pinned.run.candidates & candidate::exact) &&
+            pre_ui_rules(pinned.run) == (ui_detection::change_set::refine | (1u << ui_detection::change_set::pair_shift)) &&
+            is_filtered_ui(pinned.mask),
+          "UIPinChangedPixels=1 did not offer the pre-UI change set or pin exactly the changed pixels the 3x3 rule keeps");
+      }
+      require(pinned.sample.source_kind == ui_detection::source_pre_ui && pinned.sample.covered == ui_pixels &&
+          pinned.sample.evidence.refined && pinned.sample.evidence.s1_source == ui_detection::source_pre_ui &&
+          pinned.sample.change_set.enabled && pinned.sample.change_set.would_refine && sb.stored() == stored,
+        "The refined sample did not report source 12 with the refined bit");
+      // (c) Settings, a full page: the changed pixels are the whole frame, an
+      // invalid set, so the whole-frame alpha keeps it flat. A black loading
+      // screen (pre-UI image lit on fewer than 1% of pixels) also stays flat.
+      // The first frame of a page pairs the copy of the page before it (the
+      // pair describes the Present one before), so the page is checked from
+      // its second frame and its sample from the third.
+      for (const auto kind : {page::settings, page::loading}) {
+        const char *label = kind == page::settings ? "settings page" : "black loading screen";
+        step(kind);
+        const auto second = step(kind);
+        const auto flat = step(kind);
+        require((flat.run.candidates & candidate::pre_ui) && is_flat(second.mask) && is_flat(flat.mask) &&
+            flat.sample.source_kind == 4u && !flat.sample.evidence.refined && flat.sample.change_set.measured &&
+            !flat.sample.change_set.valid,
+          std::string(label) + ": the pre-UI change set refined an invalid set");
+      }
+      step(page::equipment);
+      require(is_filtered_ui(step(page::equipment).mask), "The Equipment page did not refine again after a full page");
+      // (d) T1: a frame without an exact pairing (the copy's own interval)
+      // misses the pre-UI change set the previous real frame offered (T1's
+      // change-set gap, b2 word 5; never accepted_missing), so the refined
+      // decision is reused once, then the frame is flat; frame generation is
+      // a late pairing, never offered, and so is the first Present after it
+      // (the Present the copy shows was not known off).
+      const auto missing = step(page::equipment, 0);
+      require(!(missing.run.candidates & candidate::pre_ui) && missing.run.layer_pairing == change_set::pair_class::unavailable &&
+          (missing.run.rules_bits & ui_detection::change_set::gap) &&
+          !(missing.run.flags & ui_detection::per_frame_accepted_missing) && is_filtered_ui(missing.mask),
+        "A frame without its pair did not reuse the refined decision once through the change-set gap");
+      const auto spent = step(page::equipment, 0);
+      require(!(spent.run.candidates & candidate::pre_ui) && is_flat(spent.mask) && spent.sample.evidence.reused,
+        "A second frame without its pair reused again, or the sample lost the reuse");
+      const auto generated = step(page::equipment, 1, true);
+      require(!(generated.run.candidates & candidate::pre_ui) && generated.run.layer_pairing == change_set::pair_class::late &&
+          !ui_detection::change_set::pair_offset(generated.run.rules_bits) && is_flat(generated.mask),
+        "Frame generation offered the pre-UI change set or paired the layer with a retained Present");
+      const auto late = step(page::equipment, 1, true);
+      require(late.sample.change_set.pairing == change_set::pair_class::late && late.sample.change_set.offset == 0u &&
+          !late.sample.change_set.valid && late.sample.evidence.change_set.changed > ui_pixels,
+        "The late pair's shadow was not measured against the current Present");
+      const auto first_off = step(page::equipment);
+      require(!(first_off.run.candidates & candidate::pre_ui) && first_off.run.layer_pairing == change_set::pair_class::late &&
+          is_flat(first_off.mask),
+        "The first Present after frame generation paired the Present before it, which was not known off");
+      require(is_filtered_ui(step(page::equipment).mask), "The retained pairing did not refine again after frame generation");
+      // (e) Dump 3D: an armed dump retains every Present and the dumped
+      // render defers its own copy, so the package carries both retained
+      // Presents and the consumed layer copy; the next render still pairs.
+      gpu.renderer.set_dump_retention(true, true);
+      const auto dumped = step(page::equipment, 1, false, 100, directory / "pre-ui-change-set-dump");
+      gpu.renderer.set_dump_retention(false, false);
+      require(is_filtered_ui(dumped.mask), "The dumped render did not refine");
+      std::ifstream stored_manifest(directory / "pre-ui-change-set-dump" / "manifest.json");
+      const auto manifest = nlohmann::json::parse(stored_manifest);
+      const auto &metadata = manifest.at("producer_metadata");
+      const auto &detection = metadata.at("replay").at("ui_detection");
+      std::set<std::string> kinds;
+      std::map<std::string, std::vector<unsigned char>> retained_bytes;
+      for (const auto &artifact : manifest.at("artifacts")) {
+        const auto kind = artifact.at("kind").get<std::string>();
+        kinds.insert(kind);
+        if (kind.rfind("retained_present_", 0) == 0) {
+          std::ifstream file(directory / "pre-ui-change-set-dump" / artifact.at("file").get<std::string>(), std::ios::binary);
+          retained_bytes[kind] = {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+        }
+      }
+      bool all_captured = true;
+      for (const auto &row : metadata.at("change_set_artifacts").at("artifacts")) all_captured = all_captured && row.at("captured").get<bool>();
+      require(kinds.count("retained_present_1") && kinds.count("retained_present_2") && kinds.count("ui_layer_detected") &&
+          all_captured && detection.at("layer_pairing") == "retained" && detection.at("layer_presents_ago") == 1u &&
+          detection.at("rules_bits") == dumped.run.rules_bits && detection.at("still_bits") == 0u &&
+          metadata.at("replay").at("ui_pin").at("decision_texels") == ui_detection::change_set_decision_texels &&
+          retained_bytes["retained_present_1"] == presented_history[1] && retained_bytes["retained_present_2"] == presented_history[0],
+        "Dump 3D lost the retained Presents (the colours one and two Presents back), the consumed layer copy or the pairing metadata");
+      const auto after_dump = step(page::equipment);
+      require((after_dump.run.candidates & candidate::pre_ui) && after_dump.run.layer_pairing == change_set::pair_class::retained &&
+          is_filtered_ui(after_dump.mask), "The render after a dump lost its retained pair");
+      sb.set_pin_changed_pixels(false);
+      // (f) Ring isolation: a late HUD-less pairing sees only Presents
+      // retained for it. After every retention request lapsed (more than its
+      // 120 Presents), the first late HUD-less render finds no pair and the
+      // second pairs, whether the renders before it retained every Present
+      // for the proven layer's shadow (path 1) or nothing (path 0: frame
+      // generation).
+      {
+        const auto hudless = view_of(encode(scene(phase + 50)));
+        alpha_auto_policy plain, proven;
+        require(proven.restore(current_key + ',' + pre_ui_key).restored == 2, "The ring isolation session was not restored");
+        std::array<std::array<std::uint32_t, 2>, 2> candidates_of{};
+        std::array<std::array<std::vector<unsigned char>, 2>, 2> masks;
+        for (unsigned path = 0; path != 2; ++path) {
+          ++source.epoch;
+          source.session = &proven;
+          for (unsigned i = 0; i != 125; ++i) step(page::equipment, 1, path == 0);
+          source.session = &plain;
+          inputs.layer = {}; inputs.layer_flags = 0;
+          inputs.hudless = hudless; inputs.hudless_presents_ago = 1;
+          for (unsigned i = 0; i != 2; ++i) {
+            gpu.original = presented_of(page::equipment, ++phase);
+            gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), width * bpp, 0);
+            source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+            gpu.renderer.begin_present();
+            gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui_input);
+            candidates_of[path][i] = gpu.renderer.consumed_detection().candidates;
+            masks[path][i] = gpu.read(gpu.renderer.diagnostics().ui_source).bytes;
+          }
+          inputs.hudless = {}; inputs.hudless_presents_ago = 0;
+        }
+        require(candidates_of[0] == candidates_of[1] && masks[0] == masks[1] && !(candidates_of[0][0] & candidate::hudless) &&
+            (candidates_of[0][1] & candidate::hudless),
+          "Renders that retained Presents for the layer changed the late HUD-less pairing");
+        source.session = &sb;
+      }
+      report << "pre-ui-change-set D3D11 ui=" << ui_pixels << " kept=" << kept << " shadow_retained_valid_would_refine=1"
+        " ledger_unchanged=1 refined_source12=1 settings_flat=1 loading_flat=1 t1_reuse_once=1 fg_late_never_offered=1"
+        " dump_retained_presents=1 ring_isolation=1\n";
+      std::printf("PASS D3D11 pre-UI change set (fix 3, Stellar Blade SDR): the shadow measures exactly the UI pixels (%u, %u after the 3x3 rule) against the retained Present the layer copy shows, verified against the Presents 0 and 2 back, valid and would refine, while the menu stays flat by the accepted whole-frame alpha and the ledger is unchanged; UIPinChangedPixels=1 refines it to source 12 pinning only those pixels; a settings page and a black loading screen stay flat; a frame without its pair reuses the refined decision once; frame generation is a late pairing, never offered; Dump 3D carries both retained Presents and the consumed layer copy; a late HUD-less pairing is unchanged by layer retention\n",
+        ui_pixels, kept);
+    }
+
+    // (g) GPU cost of the detection stage (the span from the source copy to
+    // the end of detection, the retention copy included), the median per
+    // frame by configuration and by frame kind (a sample frame, one per 100
+    // ms, or another): no layer offered; frame generation on (no retention,
+    // the shadow measures the proven layer's late pair on sample frames); the
+    // shadow (retained pairs); the switch on (every Present retained, the 3x3
+    // mask of source 12); frame generation on with every Present retained
+    // (the copy alone); and a real UI layer that is never proven (Witcher 3,
+    // Stellar Blade HDR: no shadow, no retention). Renders only, without readbacks, each completed
+    // before the next. With a frozen control shader the control renderer is
+    // timed too (an A/B of a shader variant).
+    //
+    // Timing at sustained clocks (the timing configuration): an idle GPU
+    // stays at its lowest clocks (P8, 405 MHz memory on an RTX 5080) between
+    // frames that wait on the CPU, where each full-frame read costs about a
+    // millisecond, so such medians measure memory latency, not the passes.
+    // The scene's eight phases (its checkers shift three pixels a frame, an
+    // eight-pixel period) are uploaded once and copied on the GPU, and before
+    // each timed render the GPU copies a 256 MB buffer warm_copies times
+    // (about 5 ms at full clocks), which keeps it busy and leaves none of the
+    // frame's inputs in its L2. nvidia-smi samples the clock state during
+    // each configuration's timed frames.
+    renderer *timed = &gpu.renderer;
+    const page timed_page = last;
+    std::array<ComPtr<ID3D11Texture2D>, 8> timed_presented, timed_layer;
+    for (unsigned k = 0; k != timed_presented.size(); ++k) {
+      view_of(presented_of(page::equipment, k), &timed_presented[k]);
+      view_of(layer_of(timed_page, k), &timed_layer[k]);
+    }
+    const unsigned warm_copies = timing_only ? 8u : 0u;
+    ComPtr<ID3D11Buffer> flush_from, flush_to;
+    if (warm_copies) {
+      D3D11_BUFFER_DESC desc{};
+      desc.ByteWidth = 256u << 20;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      checked(gpu.device->CreateBuffer(&desc, nullptr, &flush_from), "timing warm-up buffer");
+      checked(gpu.device->CreateBuffer(&desc, nullptr, &flush_to), "timing warm-up buffer");
+    }
+    const auto warm = [&](unsigned copies) {
+      for (unsigned i = 0; i != copies; ++i) gpu.context->CopyResource(flush_to.Get(), flush_from.Get());
+    };
+    const auto gpu_state = [timing_only]() -> std::string {
+      if (!timing_only) return "-";
+      std::string text;
+      if (FILE *pipe = _popen("nvidia-smi --query-gpu=pstate,clocks.sm,clocks.mem --format=csv,noheader,nounits 2>NUL", "r")) {
+        char line[128];
+        if (std::fgets(line, sizeof(line), pipe)) text = line;
+        _pclose(pipe);
+      }
+      text.erase(std::remove_if(text.begin(), text.end(), [](char c) { return c == ' ' || c == '\r' || c == '\n'; }), text.end());
+      std::replace(text.begin(), text.end(), ',', '/');
+      return text.empty() ? std::string("unknown") : text;
+    };
+    const auto timed_step = [&](bool layer, bool fg, std::uint64_t advance) {
+      gpu.context->CopyResource(layer_texture.Get(), timed_layer[phase % timed_layer.size()].Get());
+      ++phase;
+      inputs.current_color = true;
+      inputs.layer = layer ? layer_view : api::resource_view{}; inputs.layer_flags = layer ? layer_flags : 0u;
+      inputs.layer_presents_ago = 1; inputs.fg_known_off = !fg;
+      gpu.context->CopyResource(gpu.source.Get(), timed_presented[phase % timed_presented.size()].Get());
+      gpu.context->CopyResource(gpu.backbuffer.Get(), gpu.source.Get());
+      warm(warm_copies);
+      source.now_ms += advance; source.tick_ms = source.now_ms; ++source.sequence;
+      timed->begin_present();
+      render_frame_input frame;
+      frame.color = {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())};
+      frame.depth = {reinterpret_cast<std::uint64_t>(gpu.depth_view.Get())};
+      frame.scene = gpu.renderer.consumed_parameters();
+      frame.ui = ui_input;
+      auto *queue = observed_runtime->get_command_queue();
+      require(timed->render(queue->get_immediate_command_list(), frame), "Timed change-set render failed");
+      queue->flush_immediate_command_list();
+      timed->finish_present();
+      gpu.drain_render();
+      return timed->consumed_detection().pre_ui_threshold_bits != 0;
+    };
+    struct cost { double sample_ms{}, other_ms{}; unsigned frames{}; std::string state; };
+    const auto median = [](std::vector<double> values) {
+      if (values.empty()) return 0.;
+      std::sort(values.begin(), values.end());
+      return values[values.size() / 2];
+    };
+    // A session without the pre-UI key: its layer is a real UI layer to the
+    // renderer (never proven), as in Witcher 3 or Stellar Blade HDR.
+    alpha_auto_policy unproven;
+    require(unproven.restore(current_key).restored == 1, "The unproven timing session was not restored");
+    const auto measure = [&](bool layer, bool pin, bool fg, bool retain_all, bool proven = true) {
+      source.session = proven ? &sb : &unproven;
+      sb.set_pin_changed_pixels(pin);
+      timed->set_dump_retention(retain_all, false);
+      std::vector<double> samples, others;
+      gpu_timing discard;
+      // Half a second of copies first: clocks ramp up over a few hundred
+      // milliseconds of load.
+      for (const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(warm_copies ? 500 : 0);
+           std::chrono::steady_clock::now() < until;) {
+        warm(warm_copies);
+        gpu.drain_render();
+      }
+      for (unsigned i = 0; i != 8; ++i) timed_step(layer, fg, 16);
+      timed->take_gpu_timing(discard);
+      auto state = std::async(std::launch::async, gpu_state);
+      for (unsigned i = 0; i != 64; ++i) {
+        // Without a layer no frame pushes a pre-UI threshold: a sample is
+        // one 100 ms after the last.
+        const auto before = source.now_ms;
+        const bool sample = timed_step(layer, fg, 16) || (!layer && (before + 16) / 100 != before / 100);
+        gpu_timing t;
+        if (!timed->take_gpu_timing(t) || t.frames != 1) continue;
+        (sample ? samples : others).push_back(t.mean_ms[gpu_timing::detection]);
+      }
+      timed->set_dump_retention(false, false);
+      source.session = &sb;
+      return cost{median(samples), median(others), unsigned(samples.size() + others.size()), state.get()};
+    };
+    for (auto *candidate_renderer : {&gpu.renderer, gpu.has_control ? &gpu.control_renderer : nullptr}) {
+      if (!candidate_renderer) continue;
+      timed = candidate_renderer;
+      const auto no_layer = measure(false, false, true, false), fg_on = measure(true, false, true, false),
+        shadow_cost = measure(true, false, false, false), pinned_cost = measure(true, true, false, false),
+        copy_cost = measure(true, false, true, true), unproven_cost = measure(true, false, false, false, false);
+      sb.set_pin_changed_pixels(false);
+      char text[1280];
+      std::snprintf(text, sizeof(text),
+        "pre-ui-change-set-gpu %s %ux%u detection_ms(median) no_layer={sample=%.4f other=%.4f} fg_on={sample=%.4f other=%.4f} "
+        "shadow={sample=%.4f other=%.4f} switch_on={sample=%.4f other=%.4f} fg_on_retain_every_present={sample=%.4f other=%.4f} "
+        "unproven_layer={sample=%.4f other=%.4f} frames=%u/%u/%u/%u/%u/%u retention_copy=%.4f "
+        "switch_on_other_minus_shadow_other=%.4f shadow_sample_minus_other=%.4f unproven_sample_minus_other=%.4f "
+        "warm_copies=%u gpu_state(pstate/sm/mem)=%s,%s,%s,%s,%s,%s\n",
+        timed == &gpu.renderer ? "production" : "control",
+        width, height, no_layer.sample_ms, no_layer.other_ms, fg_on.sample_ms, fg_on.other_ms, shadow_cost.sample_ms,
+        shadow_cost.other_ms, pinned_cost.sample_ms, pinned_cost.other_ms, copy_cost.sample_ms, copy_cost.other_ms,
+        unproven_cost.sample_ms, unproven_cost.other_ms, no_layer.frames, fg_on.frames, shadow_cost.frames, pinned_cost.frames,
+        copy_cost.frames, unproven_cost.frames, copy_cost.other_ms - fg_on.other_ms,
+        pinned_cost.other_ms - shadow_cost.other_ms, shadow_cost.sample_ms - shadow_cost.other_ms,
+        unproven_cost.sample_ms - unproven_cost.other_ms, warm_copies, no_layer.state.c_str(), fg_on.state.c_str(),
+        shadow_cost.state.c_str(), pinned_cost.state.c_str(), copy_cost.state.c_str(), unproven_cost.state.c_str());
+      report << text;
+      std::fputs(text, stdout);
+    }
+    // The presented colour the fixture keeps beside its source texture.
+    gpu.original = presented_of(page::equipment, phase);
+    gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), width * bpp, 0);
+    inputs = {};
+  }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;
     std::vector<float> selective(size_t(gpu.width) * gpu.height, 0.f);
@@ -3252,17 +3733,22 @@ namespace {
 }
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  if (argc < 6 || argc > 8) { std::fputs("usage: source_alpha_runtime official-ReShade64.dll fresh-output srgb|scrgb width height [frozen-control.hlsl] [--temporal-ui-probe|--temporal-ui-front-limit]\n", stderr); return 2; }
-  std::thread([] { Sleep(180000); TerminateProcess(GetCurrentProcess(), 124); }).detach();
+  if (argc < 6 || argc > 8) { std::fputs("usage: source_alpha_runtime official-ReShade64.dll fresh-output srgb|scrgb width height [frozen-control.hlsl] [--temporal-ui-probe|--temporal-ui-front-limit|--adaptive-ui-only|--pre-ui-change-set-only]\n", stderr); return 2; }
+  // The timing configuration at 4K, with a control renderer, runs longer.
+  const bool long_run = std::any_of(argv + 6, argv + argc, [](const char *a) { return !std::strcmp(a, "--pre-ui-change-set-only"); });
+  std::thread([long_run] { Sleep(long_run ? 900000 : 180000); TerminateProcess(GetCurrentProcess(), 124); }).detach();
   try {
     const unsigned color = !std::strcmp(argv[3], "srgb") ? 1 : !std::strcmp(argv[3], "scrgb") ? 2 : 0;
     require(color != 0, "unsupported source transfer");
     const auto directory = fs::absolute(argv[2]);
-    bool temporal_probe = false, temporal_front_limit = false, adaptive_only = false;
+    bool temporal_probe = false, temporal_front_limit = false, adaptive_only = false, change_set_only = false;
     fs::path control;
     for (int index = 6; index < argc; ++index) {
       if (!std::strcmp(argv[index], "--adaptive-ui-only")) {
         require(!adaptive_only, "duplicate adaptive-only argument"); adaptive_only = true;
+      } else if (!std::strcmp(argv[index], "--pre-ui-change-set-only")) {
+        // Fix 3's section alone, with its GPU cost (any size, such as 3840x2160).
+        require(!change_set_only, "duplicate change-set-only argument"); change_set_only = true;
       } else if (!std::strcmp(argv[index], "--temporal-ui-probe") || !std::strcmp(argv[index], "--temporal-ui-front-limit")) {
         require(!temporal_probe, "duplicate temporal probe argument"); temporal_probe = true;
         temporal_front_limit = !std::strcmp(argv[index], "--temporal-ui-front-limit");
@@ -3277,6 +3763,11 @@ int main(int argc, char **argv) {
     if (adaptive_only) {
       verify_adaptive_ui_plane(gpu, report, directory / "adaptive-ui-plane-dump");
       require(report.good(), "cannot write adaptive evidence");
+      return 0;
+    }
+    if (change_set_only) {
+      verify_pre_ui_change_set(gpu, report, directory, gpu.width * gpu.height > 1u << 20);
+      require(report.good(), "cannot write change-set evidence");
       return 0;
     }
     std::vector<float> alpha(size_t(gpu.width) * gpu.height, 0);
@@ -3310,6 +3801,7 @@ int main(int argc, char **argv) {
     verify_layer_detection_dump(gpu, report, directory / "layer-detection-dump");
     verify_layer_validity(gpu, report);
     verify_hidden_scene(gpu, report);
+    verify_pre_ui_change_set(gpu, report, directory);
     verify_normalized_ui_input(gpu, report);
     verify_mask_upload_recovery(gpu);
     require(report.good(), "cannot write evidence");

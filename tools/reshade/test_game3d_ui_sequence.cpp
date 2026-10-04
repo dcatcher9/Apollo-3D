@@ -11,18 +11,26 @@
 // pairing and counting under frame generation (ui_mask::pair_hudless_present,
 // generated_without_input) and the exact counters (ui_counters), and rule
 // H2's run of still screens without a UI source (still_screen::run, fix 2)
-// with the renderer's scope and switch. A stream's GPU input is what one
-// detection counts: decision texels 0-11 that ui_detection_replay --verbose
-// recorded on labelled dumps with the fix-1 shader, or synthetic counts;
-// texel 12, the compare pass's still and compared cells, is modelled from
-// each Present's still share (a recording's texel 12 is zero). Every
+// with the renderer's scope and switch, and fix 3's pre-UI change set: the
+// layer copy's pairing with a retained Present (change_set::pair_layer), its
+// offer as candidate::pre_ui under UIPinChangedPixels (change_set::offered),
+// b2 word 5's rule bits (change_set::rule_bits, the refine rule included) and
+// the change-set shadow of every sample that measured the layer
+// (change_set::measure_shadow, its log throttle and counters). A stream's
+// GPU input is what one detection counts: decision texels 0-11 that
+// ui_detection_replay --verbose recorded on labelled dumps with the fix-1
+// shader, or synthetic counts; texel 12, the compare pass's still and
+// compared cells, is modelled from each Present's still share (a
+// recording's texel 12 is zero); texels 13-15 and the change-set slot of the
+// layer pair are synthetic (a recording's are zero). Every
 // decision is ui_selection::decide, the C++ mirror of
-// SunshineUIDetectionReduceCS (the T1 hold store and the H1 and H2
-// overrides included) that test_game3d_ui_selection_contract proves equal to
-// the shader's reduce; every recorded decision must equal it.
+// SunshineUIDetectionReduceCS (the T1 hold store, the refine rule and the H1
+// and H2 overrides included) that test_game3d_ui_selection_contract proves
+// equal to the shader's reduce; every recorded decision must equal it.
 //
 // It asserts the rules through stage S2b, fix 1 (the pre-UI proof by
-// pixels) and fix 2 (H2) strictly. An outcome that a later
+// pixels), fix 2 (H2) and fix 3 (pre-UI change sets and the refine rule,
+// thirteen groups) strictly. An outcome that a later
 // stage of the UI decision framework (docs/reshade-sbs.md, UI decision
 // framework: stages S0-S6; rules E1, E2, V1, V2, A1-A3, S1, S2, H1, P1, T1,
 // F1) changes prints "KNOWN_TODAY <stage> <rule>: <text>" and does not fail;
@@ -37,6 +45,7 @@
 // predicted acceptance transitions beside the logged ones.
 #include "game3d_alpha_auto.h"
 #include "game3d_scene_guard.h"
+#include "game3d_ui_change_set.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_mask.h"
@@ -55,6 +64,7 @@
 #include <functional>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -141,14 +151,16 @@ namespace {
 
   // ---------------------------------------------------------------- decision texels
 
-  // Decision texels 0-12 as the renderer reads them back (selection revision 5).
-  constexpr std::size_t texel_words = 4 * ui_detection::still_decision_texels;
+  // Decision texels 0-15 as the renderer reads them back (selection revision 6).
+  constexpr std::size_t texel_words = 4 * ui_detection::change_set_decision_texels;
   using texels = std::array<std::uint32_t, texel_words>;
   // Texels 5 and 6: the hidden-scene evidence of the presented frame and of
   // the pre-UI scene image, and texel 12, H2's still and compared cells,
-  // written only by the evidence passes.
+  // written only by the evidence passes. Texels 13-15, the change-set shadow
+  // (fix 3), are the tiles pass's on every sample frame with an offered layer.
   constexpr std::size_t scene_texels_begin = 4 * 5, scene_texels_end = 4 * ui_detection::scene_decision_texels;
-  constexpr std::size_t still_texel_begin = 4 * ui_detection::pre_ui_decision_texels;
+  constexpr std::size_t still_texel_begin = 4 * ui_detection::pre_ui_decision_texels, still_texel_end = 4 * ui_detection::still_decision_texels;
+  constexpr std::size_t change_set_texel_begin = still_texel_end;
   // The cells of the D grid the compare pass compares (H2).
   constexpr std::uint32_t still_cells = ui_detection::scene::cells_x * ui_detection::scene::cells_y;
 
@@ -203,19 +215,21 @@ namespace {
   // bits and the hold store (game3d_renderer.cpp, detect_ui's b2 constants:
   // the candidates, the layer's stored flags with the per-frame bits of T1,
   // the scene guard and the depth, the accepted candidates; the T1 hold store
-  // at u5, as the previous detection wrote it; H2's still word, b2 word 5).
+  // at u5, as the previous detection wrote it; b2 word 5's rule bits: H2's
+  // still::flatten and fix 3's refine, layer pair offset and bound retained
+  // Presents, change_set::rule_bits).
   struct gpu_inputs {
     std::uint32_t bits {}, flags {}, accepted {}, per_frame {};
     std::uint64_t now_ms {};
     ui_selection::hold_state hold {};
-    std::uint32_t still {};
+    std::uint32_t rules {};
   };
 
   using gpu_model = std::function<texels(const gpu_inputs &)>;
 
   // The reduce's decision of these counts and inputs (ui_selection::decide).
   ui_selection::decision decide(const texels &t, const gpu_inputs &in) {
-    return ui_selection::decide(ui_selection::counts_from_words(t.data(), t.size()), in.bits, in.accepted, in.flags | in.per_frame, in.hold, in.still);
+    return ui_selection::decide(ui_selection::counts_from_words(t.data(), t.size()), in.bits, in.accepted, in.flags | in.per_frame, in.hold, in.rules);
   }
 
   // The counts of `t` with the words the reduce writes for these inputs:
@@ -457,11 +471,43 @@ namespace {
 
     // A HUD-less pair's change set (V2): partial and valid under a quarter of
     // the frame, full (source 6) from 98% with lit() from an exact pair,
-    // invalid in between (the middle band).
+    // invalid in between (the middle band). Its HUD-less image is lit
+    // everywhere unless lit() says otherwise (fix 3: a partial set needs it
+    // lit on 1% of pixels).
     synthetic &change_set(std::uint32_t changed) {
       c.changed = changed;
       c.unchanged = c.pixels - changed;
       c.matching_tiles = 200;
+      c.lit = c.pixels;
+      return *this;
+    }
+
+    // Fix 3: the offscreen layer against its pair's Present at
+    // change_set::inferred_scale times the layer's pair threshold (texels
+    // 13-15, the tiles pass's shadow on sample frames with an offered layer;
+    // and the change-set slot when candidate::pre_ui is offered without a
+    // HUD-less image): changed and unchanged pixels, matching tiles, the
+    // changed pixels the 3x3 rule keeps, and the changed pixels against the
+    // Presents one and two back (measured when bound). The pair's lit pixels
+    // are the layer's (texel 11, pre_ui_pixels).
+    synthetic &layer_pair(std::uint32_t changed, std::uint32_t filtered, std::uint32_t tiles, std::uint32_t changed_1, std::uint32_t changed_2) {
+      c.shadow.changed = changed;
+      c.shadow.unchanged = c.pixels - changed;
+      c.shadow.nonfinite = 0;
+      c.shadow.matching_tiles = tiles;
+      c.shadow.filtered = filtered;
+      c.shadow.changed_1 = changed_1;
+      c.shadow.changed_2 = changed_2;
+      return *this;
+    }
+
+    // The shadow's judge: the first offered and accepted declared alpha's
+    // pixels (ui_detection::change_set::judge kind) and those of them the
+    // filtered set holds.
+    synthetic &judge(std::uint32_t judge_kind, std::uint32_t pixels, std::uint32_t tp) {
+      c.shadow.judge_kind = judge_kind;
+      c.shadow.judge_pixels = pixels;
+      c.shadow.judge_tp = tp;
       return *this;
     }
 
@@ -536,11 +582,21 @@ namespace {
     texels words(const gpu_inputs &in) const {
       texels t {};
       t[word::pixels] = c.pixels;
-      t[word::matching_tiles] = c.matching_tiles;
-      t[word::hudless_changed] = c.changed;
-      t[word::hudless_unchanged] = c.unchanged;
-      t[word::hudless_invalid] = c.nonfinite;
-      t[word::hudless_lit] = c.lit;
+      // The change-set slot: the layer pair when the pre-UI change set holds
+      // it (fix 3), else the HUD-less pair.
+      if (ui_selection::layer_pair_slot(in.bits)) {
+        t[word::matching_tiles] = c.shadow.matching_tiles;
+        t[word::hudless_changed] = c.shadow.changed;
+        t[word::hudless_unchanged] = c.shadow.unchanged;
+        t[word::hudless_invalid] = c.shadow.nonfinite;
+        t[word::hudless_lit] = pre_ui_counts[1];
+      } else {
+        t[word::matching_tiles] = c.matching_tiles;
+        t[word::hudless_changed] = c.changed;
+        t[word::hudless_unchanged] = c.unchanged;
+        t[word::hudless_invalid] = c.nonfinite;
+        t[word::hudless_lit] = c.lit;
+      }
       const kind presented[] {kind::ui_alpha, kind::ui_color, kind::backbuffer, kind::current};
       for (std::size_t i = 0; i != 4; ++i) {
         t[word::alpha_covered + i] = c.covered[ui_selection::alpha_index(presented[i])];
@@ -563,6 +619,24 @@ namespace {
         t[word::pre_ui_image_lit] = pre_ui_counts[1];
         t[word::presented_lit] = pre_ui_counts[2];
         t[word::presented_lit_differs] = pre_ui_counts[3];
+        // Texels 13-15: the change-set shadow of a layer proven the pre-UI
+        // scene image (b2 word 5's shadow bit; zero otherwise); the Presents
+        // one and two back only when bound (its retained bits).
+        if (in.rules & ui_detection::change_set::shadow) {
+          const auto &s = c.shadow;
+          const bool bound_1 = (in.rules & ui_detection::change_set::retained_1) != 0;
+          const bool bound_2 = (in.rules & ui_detection::change_set::retained_2) != 0;
+          t[word::cs_changed] = s.changed;
+          t[word::cs_unchanged] = s.unchanged;
+          t[word::cs_nonfinite] = s.nonfinite;
+          t[word::cs_matching_tiles] = s.matching_tiles;
+          t[word::cs_filtered] = s.filtered;
+          t[word::cs_changed_1] = bound_1 ? s.changed_1 : 0u;
+          t[word::cs_changed_2] = bound_2 ? s.changed_2 : 0u;
+          t[word::cs_judge_pixels] = s.judge_pixels;
+          t[word::cs_judge_tp] = s.judge_tp;
+          t[word::cs_judge_kind] = s.judge_kind;
+        }
       }
       for (std::size_t i = 0; i != ui_selection::judged_kinds.size(); ++i) {
         t[word::strong + i] = c.strong[i];
@@ -610,6 +684,18 @@ namespace {
     // H2: the share of the D grid's cells whose presented-luma mean stays
     // within the tolerance of the previous measured sample's (texel 12).
     float still_share = 1.f;
+    // Fix 3, the offscreen layer copy's pairing inputs
+    // (change_set::pair_layer): the game's frame generation mode is known off
+    // at this Present (the sequence counts the run of such real Presents,
+    // change_set::next_fg_off_presents), the Presents observed since the
+    // copy (ui_layer::live_capture::presents_since_copy: 1 when it was taken
+    // at the first clear after the previous Present), and whether the
+    // renderer's ring retained the Presents one and two back (the ring's
+    // requesters and linger are the renderer's,
+    // test_game3d_source_alpha_runtime's section 'pre-UI change set').
+    bool fg_known_off = true;
+    std::uint32_t layer_presents_ago = 1;
+    bool retained_1 = true, retained_2 = true;
   };
 
   struct frame_result {
@@ -637,6 +723,13 @@ namespace {
     // H2: this render's scope (SDR Auto) and the still word it pushed.
     bool still_scope {};
     std::uint32_t still_bits {};
+    // Fix 3: the run of real Presents with frame generation known off, this
+    // one included; the layer copy's pairing, whether the pre-UI change set
+    // was offered (candidate::pre_ui), and b2 word 5's rule bits as pushed.
+    std::uint32_t fg_off_presents {};
+    change_set::layer_pairing pairing;
+    bool pre_ui_offered {};
+    std::uint32_t rules {};
     // update_alpha_auto's status for this frame.
     alpha_auto_decision consumed;
 
@@ -706,6 +799,12 @@ namespace {
     // Edits a submitted sample's texels: (texels, tick, scene evidence ran).
     std::function<void(texels &, std::uint64_t, bool)> sample_edit;
     ui_temporal::detection_state temporal;
+    // Fix 3: the run of real Presents with frame generation known off, the
+    // last step's included. A stream starts within such a run (two Presents
+    // before its first: the Present one and two back were known off), as a
+    // menu entered with FG off; a stream that models the run's start sets it
+    // to zero.
+    std::uint32_t fg_off_presents = 2;
     // The hidden-scene guard (M5), owned by the depth path.
     scene_guard::state guard;
     std::vector<frame_result> frames;
@@ -736,6 +835,17 @@ namespace {
     };
 
     std::vector<transition> trust;  // stored() after a sample changed it.
+    // Fix 3: each sample's change-set shadow (when it measured the layer),
+    // the shadow lines the renderer would log, and the change_set counters
+    // the committed samples carry.
+    std::vector<std::optional<change_set::shadow_sample>> shadows;
+    std::vector<std::string> shadow_lines;
+    ui_counters shadow_committed;
+    // What render() saves with a sample for its change-set shadow.
+    struct change_state {
+      change_set::layer_pairing pairing;
+      bool layer_proven {}, hudless_offered {}, auto_mode {}, enabled {};
+    };
     std::size_t discards {}, commits {}, committed_frames {};
 
     // The overlay's Forget (A3): the session clears the game's entries; the
@@ -752,8 +862,28 @@ namespace {
       const auto index = frames.size();
       current_frame = index;
       current_now = p.now_ms;
-      const std::uint32_t bits = p.available ? p.offered : 0u;
-      const std::uint32_t accepted = session.accepted(bits, p.signatures);
+      std::uint32_t bits = p.available ? p.offered : 0u;
+      const auto state = session.decision().state;
+      const bool auto_mode = state != alpha_auto_state::manual_on && state != alpha_auto_state::manual_off;
+      // Fix 3 (game3d_ui_change_set.h): the layer copy pairs with the
+      // retained Present it shows; in Auto with UIPinChangedPixels=1 a layer
+      // whose signature the ledger proved the pre-UI scene image is offered
+      // as the pre-UI change set (signed with the layer's format, so its
+      // acceptance is that proof) unless a HUD-less image holds the slot.
+      const bool layer_offered = (bits & candidate::layer) != 0;
+      auto signatures = p.signatures;
+      fg_off_presents = change_set::next_fg_off_presents(fg_off_presents, p.fg_known_off, p.hold_previous);
+      r.fg_off_presents = fg_off_presents;
+      r.pairing = change_set::pair_layer(layer_offered, fg_off_presents, p.layer_presents_ago, p.retained_1, p.retained_2);
+      const bool pin_changed = auto_mode && session.pin_changed_pixels();
+      const bool pre_ui_proven = layer_offered && session.pre_ui_proven(signatures.of(kind::ui_layer));
+      const bool hudless_offered = (bits & candidate::hudless) != 0;
+      if (change_set::offered(auto_mode, pin_changed, pre_ui_proven, hudless_offered, r.pairing)) {
+        bits |= candidate::pre_ui;
+        signatures.set(kind::pre_ui, signatures.format[std::size_t(kind::ui_layer)]);
+        r.pre_ui_offered = true;
+      }
+      const std::uint32_t accepted = session.accepted(bits, signatures);
       alpha_auto_source observation;
       observation.now_ms = observation.tick_ms = p.now_ms;
       observation.epoch = p.epoch;
@@ -768,8 +898,6 @@ namespace {
       }
       // H2 (game3d_still_screen.h): Auto on SDR output only; a render outside
       // that scope ends the run at once.
-      const auto state = session.decision().state;
-      const bool auto_mode = state != alpha_auto_state::manual_on && state != alpha_auto_state::manual_off;
       still_scope = auto_mode && still_screen::sdr_output(p.signatures.color_space, p.output_format);
       const bool still_enabled = still_scope && session.still_flatten();
       r.still_scope = still_scope;
@@ -806,9 +934,13 @@ namespace {
           still_unmeasured();
         }
         r.still_bits = still_enabled && guard.still_flatten() ? ui_detection::still::flatten : 0u;
+        // b2 word 5: H2's flatten, refine (Auto and the switch), the layer
+        // pair's offset and the retained Presents bound at t2 and t3.
+        r.rules = change_set::rule_bits(r.still_bits != 0, pin_changed, pre_ui_proven, r.hold.change_set_gap, r.pairing, layer_offered && p.retained_1, layer_offered && p.retained_2);
         still_share = p.still_share;
-        detect(observation, bits, flags, accepted, p.signatures, per_frame, shadow, index, r);
-        temporal.detected(observation, identity);
+        pending_change = {r.pairing, pre_ui_proven, hudless_offered, auto_mode, pin_changed};
+        detect(observation, bits, flags, accepted, signatures, per_frame, shadow, index, r);
+        temporal.detected(observation, identity, bits);
         invariants.generated_detections += p.hold_previous ? 1 : 0;
       } else {
         ++cpu[ui_counter::inactive_no_candidates];
@@ -896,12 +1028,27 @@ namespace {
       // H2: the episode log; the committed sample counts its observation.
       still_end(observation.still, true);
       session.observe(ui_temporal::ledger_evidence(latest.evidence, pending_h2_only), latest.pixels, pending_source.now_ms, pending_signatures);
-      commit(latest, observation);
+      // Fix 3, the change-set shadow (game3d_renderer.cpp, change_set_shadow):
+      // measure_shadow of the sample's counts with the state it was submitted
+      // with, logged when due; its counters join this commit. It reaches no
+      // ledger and changes no decision.
+      std::optional<change_set::shadow_sample> shadow;
+      if (pending_layer_measured) {
+        const auto c = ui_selection::counts_from_words(pending_texels.data(), pending_texels.size());
+        const auto &change = submitted_change;
+        shadow = change_set::measure_shadow(c, latest.evidence.candidates, latest.evidence.accepted, pending_flags, pending_rules, change.pairing, change.layer_proven, change.hudless_offered, change.auto_mode, change.enabled);
+        latest.change_set = {true, shadow->pairing.kind, shadow->pairing.offset, shadow->valid, shadow->would_refine, change.enabled};
+        if (change_set::shadow_log_due(shadow_log, *shadow, pending_source.now_ms)) {
+          shadow_lines.push_back(change_set::shadow_log_text(*shadow));
+        }
+      }
+      commit(latest, observation, shadow ? &*shadow : nullptr);
       counters_pending = false;
       r.polled = true;
       samples.push_back(latest);
       observed.push_back(observation);
       h2_only.push_back(pending_h2_only);
+      shadows.push_back(shadow);
       auto now_accepted = session.stored();
       if (now_accepted != last_accepted) {
         trust.push_back({latest.sample_tick_ms, now_accepted});
@@ -910,7 +1057,7 @@ namespace {
     }
 
     void detect(const alpha_auto_source &observation, std::uint32_t bits, std::uint32_t flags, std::uint32_t accepted, const candidate_signatures &signatures, std::uint32_t per_frame, bool shadow, std::size_t index, frame_result &r) {
-      r.gpu = {bits, flags, accepted, per_frame, observation.now_ms, gpu_hold, r.still_bits};
+      r.gpu = {bits, flags, accepted, per_frame, observation.now_ms, gpu_hold, r.rules};
       // A zero-offer frame runs no tiles pass: the reduce reads the
       // statistics rows the previous tiles pass left (with nothing offered,
       // they decide nothing of their own).
@@ -956,7 +1103,7 @@ namespace {
       // them.
       else {
         std::fill(t.begin() + scene_texels_begin, t.begin() + scene_texels_end, 0u);
-        std::fill(t.begin() + still_texel_begin, t.end(), 0u);
+        std::fill(t.begin() + still_texel_begin, t.begin() + still_texel_end, 0u);
       }
       if (sample_edit) {
         sample_edit(t, now, evidence);
@@ -965,6 +1112,12 @@ namespace {
       pending_signatures = signatures;
       pending_flags = r.gpu.flags | per_frame;
       pending_still_scope = still_scope;
+      // Fix 3: a sample with an offered layer proven the pre-UI scene image
+      // measured its pair (b2 word 4 is pushed on sample frames, word 5
+      // carries the shadow bit); the change-set state it was submitted with.
+      pending_layer_measured = (bits & candidate::layer) && (r.rules & ui_detection::change_set::shadow);
+      pending_rules = r.rules;
+      submitted_change = pending_change;
       counters_pending = true;
       pending_words = gpu_words;
       pending_cpu = cpu;
@@ -980,11 +1133,15 @@ namespace {
     // commit_counters: ui_temporal::sample_counters of the CPU counts
     // snapshotted at submission, the GPU words copied under its fence and the
     // scene guard's observation of the sample.
-    void commit(const alpha_auto_decision &sample, const scene_guard::observation &observation) {
+    void commit(const alpha_auto_decision &sample, const scene_guard::observation &observation, const change_set::shadow_sample *shadow) {
       if (!counters_pending) {
         return;
       }
-      const auto delta = ui_temporal::sample_counters(sample, pending_cpu, committed_cpu, pending_words, committed_words, pending_source.now_ms, observation);
+      auto delta = ui_temporal::sample_counters(sample, pending_cpu, committed_cpu, pending_words, committed_words, pending_source.now_ms, observation);
+      if (shadow) {
+        change_set::add_shadow_counters(delta, *shadow);
+        change_set::add_shadow_counters(shadow_committed, *shadow);
+      }
       scene_entered += observation.entered ? 1 : 0;
       scene_released += observation.released ? 1 : 0;
       scene_refuted += observation.refuted;
@@ -1019,6 +1176,12 @@ namespace {
     candidate_signatures pending_signatures;
     std::uint32_t pending_flags {};
     texels pending_texels {};
+    // Fix 3: the change-set state of this render and of the pending sample,
+    // and the shadow's log throttle.
+    bool pending_layer_measured {};
+    std::uint32_t pending_rules {};
+    change_state pending_change, submitted_change;
+    change_set::shadow_log_state shadow_log;
     // The GPU's state across detections: the statistics rows of the last
     // tiles pass, the T1 hold store (u5) and the detected mask.
     texels statistics {};
@@ -1065,13 +1228,14 @@ namespace {
           ++expected[ui_counter::none + f.decision.none_reason];
         }
         expected[ui_counter::reused] += f.decision.reused ? 1 : 0;
+        expected[ui_counter::refined] += f.decision.refined ? 1 : 0;
         expected[ui_counter::contradicted] += f.decision.contradicted ? 1 : 0;
         full_alpha += alpha_source(f.source) && f.pixels && std::uint64_t(f.covered) * 100 >= std::uint64_t(f.pixels) * 99 ? 1 : 0;
       }
     }
     require(totals[ui_counter::full_alpha] == full_alpha, what + ": full_alpha is " + std::to_string(totals[ui_counter::full_alpha]) + ", the stream says " + std::to_string(full_alpha));
     expected[ui_counter::samples] = s.commits;
-    for (const auto index : {ui_counter::auto_frames, ui_counter::detection_frames, ui_counter::held_generated, ui_counter::held_none, ui_counter::reused, ui_counter::inactive_no_candidates, ui_counter::contradicted, ui_counter::samples}) {
+    for (const auto index : {ui_counter::auto_frames, ui_counter::detection_frames, ui_counter::held_generated, ui_counter::held_none, ui_counter::reused, ui_counter::inactive_no_candidates, ui_counter::contradicted, ui_counter::samples, ui_counter::refined}) {
       require(totals[index] == expected[index], what + ": counter " + std::to_string(index) + " is " + std::to_string(totals[index]) + ", the stream says " + std::to_string(expected[index]));
     }
     for (std::uint32_t source = 0; source != ui_counter_word::decided_count; ++source) {
@@ -1090,6 +1254,10 @@ namespace {
     // and the renderer's own ends of a run (H2).
     const auto still = s.still_committed();
     require(totals[ui_counter::still_entered] == still[0] && totals[ui_counter::still_released] == still[1] && totals[ui_counter::still_short] == still[2], what + ": the still counters differ from the run's observations");
+    // The change_set group counts the committed samples' shadows (fix 3).
+    for (auto index = ui_counter::change_set_samples; index <= ui_counter::change_set_pair_contradicted; ++index) {
+      require(totals[index] == s.shadow_committed[index], what + ": change_set counter " + std::to_string(index) + " differs from the committed shadows");
+    }
   }
 
   void run(sequence &s, present p, std::uint64_t from, std::uint64_t to, std::uint64_t interval = 16) {
@@ -4270,6 +4438,646 @@ namespace {
     }
   }
 
+  // ---------------------------------------------------------------- Pre-UI change sets (fix 3)
+
+  // Fix 3 (docs/reshade-sbs.md, UI decision framework; game3d_ui_change_set.h):
+  // Stellar Blade in SDR since 10-03 21:52 accepts current:24:srgb from FG-off
+  // gameplay, where the presented alpha equals the UI colour tag; in menus
+  // that alpha is 1.0 on every pixel (shapeless), so P1 pins the whole menu
+  // flat. Its cleared output target is the pre-UI scene image without alpha
+  // (V1-invalid), proven by gameplay (pre_ui:87:srgb), and the copy shows the
+  // previous Present's frame, so it pairs exactly with the retained Present
+  // one back while frame generation is off or suspended. A page's counts over
+  // 1000 pixels: the exact pair (offset 1), the one-frame-late pair against
+  // the current Present (offset 0: texel 11's mismatch; the dump's own pair),
+  // the pair against the Present two back, and the layer's lit pixels.
+  struct pair_counts {
+    std::uint32_t changed, filtered, tiles;
+  };
+
+  struct sb_page {
+    pair_counts exact, late;
+    std::uint32_t two_back, lit;
+  };
+
+  // The Equipment tab (dump 033 scaled: tab row, icon panel, prompts and the
+  // bottom dim band, about 5.4%; the late pair also holds the idling
+  // character's motion and still passes the tile test, 138 tiles).
+  constexpr sb_page sb_equipment {{52, 51, 150}, {56, 54, 138}, 60, 260};
+  // The Settings page (dumps 035, 468, 962): changed almost everywhere, no
+  // matching tile.
+  constexpr sb_page sb_settings {{600, 590, 0}, {610, 600, 0}, 615, 300};
+  // A loading screen (sb_fix1_b.log 21:51:36-52): the pre-UI image is black,
+  // lit on 0.2% (0.04-0.46% logged), below the 1% a change set needs.
+  constexpr sb_page sb_loading {{30, 28, 200}, {31, 29, 200}, 32, 2};
+
+  std::string sb_sdr_current() {
+    return sb_sdr_signatures().of(kind::current).key();
+  }
+
+  // A session that restored the layer's proof and, with current, the
+  // accepted current alpha (provisional; no sample below is testable for
+  // longer than A3's 60 s).
+  void restore_sb_sdr(alpha_auto_policy &session, bool current = true) {
+    restore(session, current ? sb_sdr_current() + "," + sb_sdr_proof() : sb_sdr_proof(), current ? 2 : 1);
+  }
+
+  // A page: the layer without alpha, the opaque current alpha (accepted or
+  // not by the session), texel 11 against the current Present, and the layer
+  // pair of the pushed offset (b2 word 5); edit adds a stream's evidence.
+  gpu_model sb_sdr_page(const sb_page page, std::function<void(synthetic &, const gpu_inputs &)> edit = {}) {
+    return [page, edit](const gpu_inputs &in) {
+      synthetic f;
+      f.alpha(kind::ui_layer, 0, 1000).alpha(kind::current, 1000).opaque(kind::current, 1000);
+      f.pre_ui_pixels(1000 - page.late.changed, page.lit, 900, page.late.changed);
+      const auto offset = (in.rules & ui_detection::change_set::pair_mask) >> ui_detection::change_set::pair_shift;
+      const pair_counts at = offset == 1 ? page.exact : offset == 2 ? pair_counts {page.two_back, page.two_back, page.exact.tiles} : page.late;
+      f.layer_pair(at.changed, at.filtered, at.tiles, page.exact.changed, page.two_back);
+      if (edit) {
+        edit(f, in);
+      }
+      return f.words(in);
+    };
+  }
+
+  // A Stellar Blade SDR menu Present with frame generation off or suspended
+  // (viewport 0: depth from NGX).
+  present sb_sdr_menu_present() {
+    return sb_sdr_present(candidate::layer | candidate::current, 0);
+  }
+
+  // Hidden presented frame, visible pre-UI image (dump 962: 0.031, 0.588).
+  void hidden_menu(synthetic &f, const gpu_inputs &) {
+    f.scene(.031f, .588f);
+  }
+
+  // The samples that measured the layer, with their shadows.
+  std::vector<const change_set::shadow_sample *> shadows_of(const sequence &s) {
+    std::vector<const change_set::shadow_sample *> result;
+    for (const auto &shadow : s.shadows) {
+      if (shadow) {
+        result.push_back(&*shadow);
+      }
+    }
+    return result;
+  }
+
+  bool starts_with(const std::string &text, const std::string &prefix) {
+    return text.compare(0, prefix.size(), prefix) == 0;
+  }
+
+  void fix3_equipment_page() {
+    // (a) The Equipment tab over a live backdrop, the exact retained pairing,
+    // the current alpha accepted and uniformly opaque. Switch off (the
+    // default shadow): flat as source 4 on every frame, and every sample's
+    // shadow is retained, valid, verified by its offsets, and would refine to
+    // 12. Switch on: source 12 from the first frame, the S1 winner refined
+    // (h1 word), only the changed pixels pinned; the ledger never moves.
+    for (const bool enabled : {false, true}) {
+      alpha_auto_policy session;
+      restore_sb_sdr(session);
+      session.set_pin_changed_pixels(enabled);
+      const auto stored = session.stored();
+      sequence s(session, sb_sdr_page(sb_equipment));
+      run(s, sb_sdr_menu_present(), 10000, 13000);
+      for (const auto &f : s.frames) {
+        require(f.detected && f.pairing == change_set::layer_pairing {change_set::pair_class::retained, 1u} && f.pre_ui_offered == enabled, "The Equipment page's layer did not pair with the Present one back, or the switch did not gate its offer");
+        require(f.rules == ((enabled ? ui_detection::change_set::refine : 0u) | ui_detection::change_set::shadow | (1u << ui_detection::change_set::pair_shift) | ui_detection::change_set::retained_1 | ui_detection::change_set::retained_2), "The Equipment page pushed other rule bits");
+        if (enabled) {
+          require(f.source == ui_detection::source_pre_ui && f.covered == sb_equipment.exact.changed && f.covered < f.pixels && f.decision.refined && f.decision.shapeless && f.decision.s1_source == ui_detection::source_pre_ui && (ui_selection::h1_word(f.decision) & ui_detection::h1_refined) && !f.decision.reused, "The enabled Equipment page did not pin only its changed pixels as a refined source 12");
+        } else {
+          require(f.source == 4u && f.flat() && !f.decision.refined && f.decision.shapeless && !(f.rules & ui_detection::change_set::refine), "The shadow changed the Equipment page's flat current alpha");
+        }
+      }
+      const auto shadows = shadows_of(s);
+      require(shadows.size() == s.samples.size() && shadows.size() >= 20, "Not every sample measured the layer pair");
+      for (const auto *shadow : shadows) {
+        require(shadow->pairing.kind == change_set::pair_class::retained && shadow->pairing.offset == 1 && shadow->valid && shadow->would_refine && shadow->would_source == ui_detection::source_pre_ui && !shadow->would_decide && shadow->verdict == change_set::pair_verdict::verified && shadow->shapeless && shadow->enabled == enabled, "An Equipment sample's shadow was not retained, valid, verified and refining");
+        require(shadow->winner == (enabled ? ui_detection::source_pre_ui : 4u) && shadow->applied_source == (enabled ? ui_detection::source_pre_ui : 4u) && shadow->counts.filtered == sb_equipment.exact.filtered, "An Equipment sample's own decision was not the frame's");
+      }
+      for (const auto &sample : s.samples) {
+        require(sample.change_set.measured && sample.change_set.valid && sample.change_set.would_refine && sample.change_set.enabled == enabled && sample.evidence.refined == enabled, "A sample's change-set status or refined bit was wrong");
+      }
+      const std::string flag = enabled ? "1" : "0";
+      require(!s.shadow_lines.empty() && starts_with(s.shadow_lines[0], "Sunshine UI change set: pairing=retained offset=1 fg=0 UIPinChangedPixels=" + flag + " changed=52 unchanged=948 nonfinite=0 matching_tiles=150 lit=260 layer_covered=0 valid=1 filtered=51 offsets={0=56 1=52 2=60} pair=verified judge={kind=none pixels=0 tp=0 precision=- recall=- iou=-} winner=" + (enabled ? "12" : "4") + " shapeless=1 would_refine=1 would_source=12 applied_source=" + (enabled ? "12" : "4") + " pixels=1000"), "The shadow's first line differs: " + (s.shadow_lines.empty() ? std::string("none") : s.shadow_lines[0]));
+      require(s.shadow_lines.size() >= 3 && s.shadow_lines.size() <= 4, "The shadow lines were not throttled to one per second");
+      require(session.stored() == stored && s.trust.empty(), "The Equipment page moved the ledger");
+      const auto totals = session.counters();
+      require(totals[ui_counter::change_set_samples] && totals[ui_counter::change_set_retained] == totals[ui_counter::change_set_samples] && totals[ui_counter::change_set_valid] == totals[ui_counter::change_set_samples] && totals[ui_counter::change_set_would_refine] == totals[ui_counter::change_set_samples] && totals[ui_counter::change_set_pair_verified] == totals[ui_counter::change_set_samples] && !totals[ui_counter::change_set_pair_contradicted] && !totals[ui_counter::change_set_would_decide], "The change_set counters do not count every retained, valid, verified sample");
+      require((totals[ui_counter::refined] > 0) == enabled && (totals.decided(ui_detection::source_pre_ui) > 0) == enabled && (totals.decided(4) > 0) == !enabled, "The refined and decided counters do not follow the switch");
+      check_counters(s, enabled ? "SB SDR Equipment page, UIPinChangedPixels=1" : "SB SDR Equipment page, shadow");
+    }
+  }
+
+  // The sources of one stream's detected frames.
+  std::vector<std::uint32_t> sources_of(const sequence &s) {
+    std::vector<std::uint32_t> result;
+    for (const auto &f : s.frames) {
+      result.push_back(f.source);
+    }
+    return result;
+  }
+
+  void fix3_settings_page() {
+    // (b) The Settings page: the layer pair changed almost everywhere and no
+    // tile matches, so the set is invalid whatever the switch. With the
+    // current alpha accepted it stays flat as 4; with nothing but the proof
+    // (before 10-03) and a held hidden verdict, H1 (d) shows it flat as 8
+    // exactly as with the switch off.
+    for (const bool current : {true, false}) {
+      std::array<std::vector<std::uint32_t>, 2> modes;
+      for (const bool enabled : {false, true}) {
+        alpha_auto_policy session;
+        restore_sb_sdr(session, current);
+        session.set_pin_changed_pixels(enabled);
+        sequence s(session, sb_sdr_page(sb_settings, hidden_menu));
+        run(s, sb_sdr_menu_present(), 10000, 12500);
+        for (const auto &f : s.frames) {
+          require(f.pre_ui_offered == enabled && !(f.decision.valid_bits & candidate::pre_ui) && !f.decision.refined && f.source != ui_detection::source_pre_ui, "The Settings page's change set was valid or refined");
+          if (current) {
+            require(f.source == 4u && f.flat(), "The Settings page with the accepted current alpha was not flat as 4");
+          }
+        }
+        for (const auto *shadow : shadows_of(s)) {
+          require(!shadow->valid && !shadow->counts.matching_tiles && !shadow->would_refine && shadow->would_source == shadow->applied_source, "The Settings page's shadow was valid or would refine");
+        }
+        if (!current) {
+          std::size_t flat = 0;
+          for (const auto &f : s.frames) {
+            flat += f.source == 8u && f.flat() ? 1 : 0;
+          }
+          require(flat > 50 && s.frames.back().source == 8u && s.scene_entered == 1, "H1 did not show the Settings page flat as 8 under the held hidden verdict");
+        }
+        require(!session.counters()[ui_counter::refined] && !session.counters().decided(ui_detection::source_pre_ui), "The Settings page counted a refined or source-12 frame");
+        check_counters(s, std::string("SB SDR Settings page") + (current ? ", current accepted" : ", H1") + (enabled ? ", UIPinChangedPixels=1" : ""));
+        modes[enabled] = sources_of(s);
+      }
+      require(modes[0] == modes[1], "The switch changed a Settings page decision");
+    }
+  }
+
+  void fix3_loading_screen() {
+    // (c) A loading screen whose pre-UI image is black (lit on 0.2%): a black
+    // image is no scene, so its small changed set is invalid by the lit rule
+    // and the frame stays flat (4 by the accepted current alpha; 8 under a
+    // held hidden verdict without it) in both modes.
+    for (const bool current : {true, false}) {
+      std::array<std::vector<std::uint32_t>, 2> modes;
+      for (const bool enabled : {false, true}) {
+        alpha_auto_policy session;
+        restore_sb_sdr(session, current);
+        session.set_pin_changed_pixels(enabled);
+        sequence s(session, sb_sdr_page(sb_loading, hidden_menu));
+        run(s, sb_sdr_menu_present(), 10000, 12500);
+        for (const auto &f : s.frames) {
+          require(!(f.decision.valid_bits & candidate::pre_ui) && !f.decision.refined && (!current || (f.source == 4u && f.flat())), "The black loading screen's change set was valid, or the frame was not flat");
+        }
+        for (const auto *shadow : shadows_of(s)) {
+          require(!shadow->valid && shadow->lit == sb_loading.lit && shadow->counts.matching_tiles == 200 && !shadow->would_refine, "The loading screen's shadow passed the lit rule");
+        }
+        if (!current) {
+          require(s.frames.back().source == 8u && s.frames.back().flat(), "The loading screen under a held hidden verdict was not flat as 8");
+        }
+        check_counters(s, std::string("SB SDR loading screen") + (enabled ? ", UIPinChangedPixels=1" : ""));
+        modes[enabled] = sources_of(s);
+      }
+      require(modes[0] == modes[1], "The switch changed a loading screen decision");
+    }
+  }
+
+  void fix3_fg_on() {
+    // (d) Stellar Blade SDR gameplay with frame generation on: the UI colour
+    // tag is accepted and selective (2), and decides with or without the
+    // switch. The layer pairs late, so the pre-UI change set is never offered;
+    // the shadow still measures the late pair against the current Present
+    // and judges it against the tag (dump 478: precision 0.39, recall 0.84,
+    // IoU 0.36, 125 tiles: invalid).
+    const auto model = [](const gpu_inputs &in) {
+      synthetic f;
+      f.alpha(kind::ui_color, 30).alpha(kind::ui_layer, 0, 1000).alpha(kind::current, 1000).opaque(kind::current, 1000);
+      f.pre_ui_pixels(920, 880, 900, 80).layer_pair(80, 70, 125, 85, 90).judge(ui_detection::change_set::judge::ui_color, 30, 26);
+      return f.words(in);
+    };
+    std::array<std::vector<std::uint32_t>, 2> modes;
+    for (const bool enabled : {false, true}) {
+      alpha_auto_policy session;
+      restore(session, sb_sdr_signatures().of(kind::ui_color).key() + "," + sb_sdr_current() + "," + sb_sdr_proof(), 3);
+      session.set_pin_changed_pixels(enabled);
+      sequence s(session, model);
+      auto p = sb_sdr_present(candidate::ui_color | candidate::layer | candidate::current);
+      p.fg_known_off = false;
+      run(s, p, 10000, 12500);
+      for (const auto &f : s.frames) {
+        require(f.source == 2u && f.covered == 30 && !f.pre_ui_offered && f.pairing == change_set::layer_pairing {change_set::pair_class::late, 0u} && !f.decision.refined, "FG-on gameplay did not decide the tag, or offered the late pair");
+      }
+      const auto shadows = shadows_of(s);
+      require(shadows.size() == s.samples.size() && !shadows.empty(), "FG-on samples did not measure the late pair");
+      for (const auto *shadow : shadows) {
+        require(shadow->fg && shadow->pairing.kind == change_set::pair_class::late && shadow->verdict == change_set::pair_verdict::none && !shadow->valid && !shadow->would_refine && shadow->would_source == 2u && std::fabs(shadow->precision - 26. / 70.) < 1e-9 && std::fabs(shadow->recall - 26. / 30.) < 1e-9 && std::fabs(shadow->iou - 26. / 74.) < 1e-9, "The late pair's shadow or judge agreement is wrong");
+      }
+      require(!s.shadow_lines.empty() && s.shadow_lines[0].find("pairing=late offset=0 fg=1") != std::string::npos && s.shadow_lines[0].find("judge={kind=ui_color pixels=30 tp=26 precision=0.371 recall=0.867 iou=0.351}") != std::string::npos, "The late pair's shadow line lacks its judge: " + (s.shadow_lines.empty() ? std::string("none") : s.shadow_lines[0]));
+      const auto totals = session.counters();
+      require(totals[ui_counter::change_set_late] == totals[ui_counter::change_set_samples] && totals[ui_counter::change_set_samples] && !totals[ui_counter::change_set_valid] && !totals[ui_counter::refined], "The late pair's counters are wrong");
+      check_counters(s, std::string("SB SDR FG on") + (enabled ? ", UIPinChangedPixels=1" : ""));
+      modes[enabled] = sources_of(s);
+    }
+    require(modes[0] == modes[1], "The switch changed an FG-on decision");
+  }
+
+  void fix3_late_pairing_never_acts() {
+    // (e) With the switch on, the Equipment page never decides from a pair
+    // that is not exact by Present counting: a copy of the current interval
+    // (presents_since_copy 0), frame generation not known off (on, or an
+    // unknown mode: no observation, no Streamline FG observer, another SDK's
+    // FG), or the Present it shows not retained. Each stays flat by the
+    // accepted current alpha.
+    struct variant {
+      const char *name;
+      std::uint32_t presents_ago;
+      bool fg_known_off, retained_1;
+      change_set::pair_class kind;
+    };
+
+    for (const auto &v : {variant {"current interval", 0, true, true, change_set::pair_class::unavailable}, variant {"FG on or unknown", 1, false, true, change_set::pair_class::late}, variant {"ring missing", 1, true, false, change_set::pair_class::unavailable}}) {
+      alpha_auto_policy session;
+      restore_sb_sdr(session);
+      session.set_pin_changed_pixels(true);
+      sequence s(session, sb_sdr_page(sb_equipment));
+      auto p = sb_sdr_menu_present();
+      p.layer_presents_ago = v.presents_ago;
+      p.fg_known_off = v.fg_known_off;
+      p.retained_1 = v.retained_1;
+      run(s, p, 10000, 12000);
+      for (const auto &f : s.frames) {
+        require(f.pairing.kind == v.kind && !f.pre_ui_offered && f.source == 4u && f.flat() && !f.decision.refined && !f.decision.reused, std::string("A pair that is not exact acted: ") + v.name);
+      }
+      for (const auto *shadow : shadows_of(s)) {
+        require(shadow->pairing.kind == v.kind && !shadow->would_refine && shadow->would_source == 4u, std::string("The shadow would act on a pair that is not exact: ") + v.name);
+      }
+      require(!session.counters()[ui_counter::refined] && !session.counters().decided(ui_detection::source_pre_ui), std::string("A late pairing was counted as refined: ") + v.name);
+      check_counters(s, std::string("SB SDR late pairing, ") + v.name);
+    }
+  }
+
+  void fix3_hdr_layer_unchanged() {
+    // (f) Stellar Blade in HDR: the offscreen target is a real UI layer with
+    // coverage (accepted, 1.5%), never proven a pre-UI image (a layer with
+    // coverage earns no proof), so the change set is never offered and the
+    // layer decides as source 10 in both modes.
+    const auto model = [](const gpu_inputs &in) {
+      synthetic f;
+      f.alpha(kind::ui_layer, 15).opaque(kind::ui_layer, 10).alpha(kind::current, 1000).opaque(kind::current, 1000);
+      f.pre_ui_pixels(985, 900, 900, 15).layer_pair(15, 14, 240, 15, 18);
+      return f.words(in);
+    };
+    std::array<std::vector<std::uint32_t>, 2> modes;
+    for (const bool enabled : {false, true}) {
+      alpha_auto_policy session;
+      const auto signatures = sb_hdr_signatures();
+      restore(session, signatures.of(kind::ui_layer).key(), 1);
+      session.set_pin_changed_pixels(enabled);
+      sequence s(session, model);
+      present p;
+      p.offered = candidate::layer | candidate::current;
+      p.layer_flags = ui_detection::layer_detection_flags(false);
+      p.signatures = signatures;
+      run(s, p, 10000, 13000);
+      for (const auto &f : s.frames) {
+        require(f.source == ui_detection::source_layer && f.covered == 15 && !f.pre_ui_offered && !f.layer_proven && !f.decision.refined, "The HDR UI layer did not decide as 10, or its target was offered as a pre-UI image");
+      }
+      // A real UI layer can never be the provider, so the shadow never
+      // measures it (no shadow bit, no tiles-pass work, no retention).
+      for (const auto &f : s.frames) {
+        require(!(f.rules & ui_detection::change_set::shadow), "The HDR UI layer pushed the shadow bit");
+      }
+      require(shadows_of(s).empty() && !s.samples.empty() && !session.counters()[ui_counter::change_set_samples], "The change-set shadow measured the HDR UI layer");
+      require(!session.pre_ui_proven(signatures.of(kind::ui_layer)), "A layer with coverage was proven a pre-UI image");
+      check_counters(s, std::string("SB HDR layer") + (enabled ? ", UIPinChangedPixels=1" : ""));
+      modes[enabled] = sources_of(s);
+    }
+    require(modes[0] == modes[1], "The switch changed an HDR decision");
+  }
+
+  void fix3_e33_hudless_refines() {
+    // (g) Every game: an Expedition 33-like menu over a visible scene whose
+    // accepted Backbuffer alpha is opaque on every pixel (no shape), beside
+    // an exact accepted HUD-less pair whose change set is selective (6%).
+    // The refine rule lets the change set decide (5) with the switch on; off,
+    // the whole-frame alpha keeps it flat (3). The pause menu (76% changed)
+    // fails the selective test and stays flat in both modes.
+    for (const std::uint32_t changed : {60u, 760u}) {
+      for (const bool enabled : {false, true}) {
+        alpha_auto_policy session;
+        restore(session, key(kind::backbuffer) + "," + key(kind::hudless), 2);
+        session.set_pin_changed_pixels(enabled);
+        sequence s(session, [changed](const gpu_inputs &in) {
+          synthetic f;
+          f.alpha(kind::backbuffer, 1000).opaque(kind::backbuffer, 1000).change_set(changed);
+          return f.words(in);
+        });
+        present p;
+        p.offered = candidate::backbuffer | candidate::hudless | candidate::exact;
+        run(s, p, 10000, 12000);
+        const bool refines = enabled && changed == 60u;
+        for (const auto &f : s.frames) {
+          require(f.source == (refines ? 5u : 3u) && f.covered == (refines ? 60u : 1000u) && f.decision.refined == refines && !f.decision.inexact_difference && !(f.rules & ~ui_detection::change_set::refine) && f.pairing.kind == change_set::pair_class::none, "An exact selective HUD-less set did not refine the shapeless Backbuffer alpha exactly when enabled");
+        }
+        require(s.shadows.size() == s.samples.size() && shadows_of(s).empty(), "A stream without a layer measured a layer pair");
+        require((session.counters()[ui_counter::refined] > 0) == refines, "The refined counter does not follow the refine");
+        check_counters(s, std::string("E33-like HUD-less refine, ") + std::to_string(changed) + (enabled ? ", UIPinChangedPixels=1" : ""));
+      }
+    }
+  }
+
+  void fix3_w3_semi_transparent() {
+    // (h) A Witcher 3-like sign wheel: an accepted layer over the whole frame
+    // but opaque on only 35% of it (the semi-transparent backdrop), beside an
+    // exact selective HUD-less set. It has shape, so the refine rule never
+    // replaces it: source 10 in both modes.
+    std::array<std::vector<std::uint32_t>, 2> modes;
+    for (const bool enabled : {false, true}) {
+      alpha_auto_policy session;
+      restore(session, key(kind::ui_layer) + "," + key(kind::hudless), 2);
+      session.set_pin_changed_pixels(enabled);
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.alpha(kind::ui_layer, 1000).opaque(kind::ui_layer, 350).change_set(60).pre_ui_pixels(400, 900, 900, 600).layer_pair(600, 590, 0, 600, 600);
+        return f.words(in);
+      });
+      present p;
+      p.offered = candidate::layer | candidate::hudless | candidate::exact;
+      p.layer_flags = ui_detection::layer_detection_flags(false);
+      run(s, p, 10000, 12000);
+      for (const auto &f : s.frames) {
+        require(f.source == ui_detection::source_layer && f.covered == 1000 && !f.decision.shapeless && !f.decision.refined && !f.pre_ui_offered, "The semi-transparent whole-frame layer was refined");
+      }
+      check_counters(s, std::string("W3-like sign wheel") + (enabled ? ", UIPinChangedPixels=1" : ""));
+      modes[enabled] = sources_of(s);
+    }
+    require(modes[0] == modes[1], "The switch changed the sign wheel's decision");
+  }
+
+  void fix3_missing_pair_t1() {
+    // (i) T1 with the switch on: a real frame whose pair is not retained
+    // (the pre-UI change set the previous real frame offered is missing:
+    // T1's change-set gap in b2 word 5, never accepted_missing, so the frame
+    // still adopts) under the shapeless current alpha has no decision of its
+    // own (refine_missing): one such frame reuses the refined decision; of
+    // three, the first reuses it and the next two apply their own flat
+    // alpha, until the pair returns.
+    alpha_auto_policy session;
+    restore_sb_sdr(session);
+    session.set_pin_changed_pixels(true);
+    sequence s(session, sb_sdr_page(sb_equipment));
+    auto p = sb_sdr_menu_present();
+    std::uint64_t now = 10000;
+    const auto step = [&](bool retained) -> const frame_result & {
+      p.now_ms = now;
+      now += 16;
+      p.retained_1 = retained;
+      return s.step(p);
+    };
+    for (int i = 0; i != 60; ++i) {
+      require(step(true).source == ui_detection::source_pre_ui, "The Equipment page did not decide 12 before the missing pair");
+    }
+    const auto &once = step(false);
+    require(once.decision.reused && once.source == ui_detection::source_pre_ui && once.covered == sb_equipment.exact.changed && !once.pre_ui_offered && (once.rules & ui_detection::change_set::gap) && once.hold.change_set_gap && !(once.gpu.per_frame & ui_detection::per_frame_accepted_missing) && once.hold.adopt && once.decision.own_source == 4u, "One missing pair did not reuse the refined decision through the change-set gap");
+    require(step(true).source == ui_detection::source_pre_ui && !s.frames.back().decision.reused, "The pair's return did not decide 12 on its own");
+    for (int i = 0; i != 3; ++i) {
+      const auto &f = step(false);
+      require(f.decision.reused == (i == 0) && f.source == (i == 0 ? ui_detection::source_pre_ui : 4u) && (i == 0 || f.flat()) && ((f.rules & ui_detection::change_set::gap) != 0) == (i == 0) && !(f.gpu.per_frame & ui_detection::per_frame_accepted_missing) && f.hold.adopt, "Three missing pairs did not reuse once and then show flat, or a frame did not adopt");
+    }
+    require(step(true).source == ui_detection::source_pre_ui, "The pair's return after three missing frames did not decide 12");
+    check_counters(s, "SB SDR Equipment page, missing pair");
+  }
+
+  void fix3_h1_over_refined() {
+    // (j) H1 runs after refine: the Equipment page whose presented frame
+    // reads hidden while the pre-UI image reads visible enters a held hidden
+    // verdict; the shapeless alpha's claim (a) and the proven layer's (d)
+    // act, so the refined frame is flat as source 8 from the entry (its S1
+    // winner stays the refined 12). Switch off, the shapeless alpha is flat
+    // already and H1 leaves it (4).
+    for (const bool enabled : {false, true}) {
+      alpha_auto_policy session;
+      restore_sb_sdr(session);
+      session.set_pin_changed_pixels(enabled);
+      sequence s(session, sb_sdr_page(sb_equipment, hidden_menu));
+      run(s, sb_sdr_menu_present(), 10000, 12500);
+      require(s.scene_entered == 1, "The hidden Equipment page did not enter a held hidden verdict");
+      std::size_t entry = s.frames.size();
+      for (std::size_t i = 0; i != s.frames.size() && entry == s.frames.size(); ++i) {
+        entry = s.frames[i].scene_bits & ui_detection::per_frame_scene_hidden ? i : entry;
+      }
+      require(entry > 0 && entry < s.frames.size(), "No frame held the hidden verdict");
+      for (std::size_t i = 0; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
+        if (!enabled) {
+          require(f.source == 4u && f.flat() && !f.decision.h1, "H1 overrode the flat shapeless alpha");
+        } else if (i < entry) {
+          require(f.source == ui_detection::source_pre_ui && f.decision.refined, "The refined frame before the hold was not 12");
+        } else {
+          require(f.source == 8u && f.flat() && f.decision.h1 && f.decision.refined && f.decision.s1_source == ui_detection::source_pre_ui && (f.decision.claims & candidate::current) && (f.decision.claims & ui_detection::claim_pre_ui), "H1 did not show the refined frame flat as 8 under the held hidden verdict");
+        }
+      }
+      check_counters(s, std::string("SB SDR Equipment page under H1") + (enabled ? ", UIPinChangedPixels=1" : ""));
+    }
+  }
+
+  void fix3_declared_block() {
+    // (k) An offered, accepted declared alpha keeps the pre-UI change set out
+    // of S1 even while it is invalid itself: UIAlpha decides (1) while valid;
+    // invalid, no source decides (the current alpha and the valid pre-UI set
+    // are blocked) and T1 reuses its decision once, then shows no mask.
+    alpha_auto_policy session;
+    restore(session, key(kind::ui_alpha) + "," + sb_sdr_current() + "," + sb_sdr_proof(), 3);
+    session.set_pin_changed_pixels(true);
+    sequence s(session, sb_sdr_page(sb_equipment, [](synthetic &f, const gpu_inputs &in) {
+      f.alpha(kind::ui_alpha, 20, in.now_ms >= 11000 ? 500 : 0);
+    }));
+    run(s, sb_sdr_present(candidate::ui_alpha | candidate::layer | candidate::current, 0), 10000, 12000);
+    bool reused = false;
+    for (const auto &f : s.frames) {
+      require(f.pre_ui_offered && (f.decision.valid_bits & candidate::pre_ui) && f.source != ui_detection::source_pre_ui && f.source != 4u && !f.decision.refined, "The valid pre-UI change set decided beside an accepted declared alpha");
+      if (f.now_ms < 11000) {
+        require(f.source == 1u && f.covered == 20, "The valid UIAlpha did not decide");
+      } else {
+        require(f.decision.reused ? (!reused && f.source == 1u) : (!f.source && f.decision.none_reason == ui_no_mask::presented_blocked && f.decision.refused == ((f.gpu.accepted & candidate::current) ? candidate::current : candidate::pre_ui)), "The invalid UIAlpha did not reuse once and then show no mask, blocking the presented alpha: source " + std::to_string(f.source) + " reused " + std::to_string(f.decision.reused) + " reason " + std::to_string(f.decision.none_reason) + " refused " + hex(f.decision.refused) + " at " + std::to_string(f.now_ms));
+        reused = reused || f.decision.reused;
+      }
+    }
+    require(reused, "The invalid UIAlpha's first frame did not reuse its decision");
+    check_counters(s, "Declared alpha blocks the pre-UI change set");
+  }
+
+  void fix3_switch_toggled() {
+    // (l) UIPinChangedPixels edited mid-session (the panel): the decision
+    // follows from the next frame, and the ledger never moves.
+    alpha_auto_policy session;
+    restore_sb_sdr(session);
+    const auto stored = session.stored();
+    sequence s(session, sb_sdr_page(sb_equipment));
+    const auto p = sb_sdr_menu_present();
+    run(s, p, 10000, 11000);
+    const auto on = s.frames.size();
+    session.set_pin_changed_pixels(true);
+    run(s, p, 11000, 12000);
+    const auto off = s.frames.size();
+    session.set_pin_changed_pixels(false);
+    run(s, p, 12000, 13000);
+    for (std::size_t i = 0; i != s.frames.size(); ++i) {
+      const bool enabled = i >= on && i < off;
+      require(s.frames[i].source == (enabled ? ui_detection::source_pre_ui : 4u) && s.frames[i].decision.refined == enabled && !s.frames[i].decision.reused, "A decision did not follow the switch at once, at frame " + std::to_string(i));
+    }
+    require(session.stored() == stored && s.trust.empty() && session.pin_changed_pixels() == false, "Editing the switch moved the ledger");
+    check_counters(s, "SB SDR switch toggled");
+  }
+
+  void fix3_shadow_inert() {
+    // (m) The shadow is diagnostics only: the same Stellar Blade SDR gameplay
+    // stream (the current alpha selective, earned 2 s in; the restored proof
+    // provisional while the layer mismatches on testable samples, so it
+    // lapses after 60 s of testable time) with texels 13-15 as the tiles pass
+    // writes them or zeroed gives the same decisions, ledger transitions,
+    // stored keys and counters, the change_set group apart.
+    const auto model = sb_sdr_page({{50, 48, 230}, {150, 140, 120}, 160, 900}, [](synthetic &f, const gpu_inputs &) {
+      f.alpha(kind::current, 50).opaque(kind::current, 40).scene(.4f, .4f);
+    });
+    std::array<std::vector<frame_result>, 2> frames;
+    std::array<std::vector<sequence::transition>, 2> trust;
+    std::array<std::string, 2> stored;
+    std::array<ui_counters, 2> totals;
+    for (const bool zeroed : {false, true}) {
+      alpha_auto_policy session;
+      restore(session, sb_sdr_proof(), 1);
+      sequence s(session, model);
+      if (zeroed) {
+        s.sample_edit = [](texels &t, std::uint64_t, bool) {
+          std::fill(t.begin() + change_set_texel_begin, t.end(), 0u);
+        };
+      }
+      run(s, sb_sdr_present(candidate::layer | candidate::current, 0), 10000, 75000, 33);
+      check_counters(s, std::string("SB SDR shadow inert") + (zeroed ? ", zeroed" : ""));
+      frames[zeroed] = s.frames;
+      trust[zeroed] = s.trust;
+      stored[zeroed] = session.stored();
+      totals[zeroed] = session.counters();
+    }
+    require(frames[0].size() == frames[1].size(), "The streams differ in length");
+    for (std::size_t i = 0; i != frames[0].size(); ++i) {
+      const auto &a = frames[0][i], &b = frames[1][i];
+      require(a.source == b.source && a.covered == b.covered && a.decision.reused == b.decision.reused && a.scene_bits == b.scene_bits && a.layer_proven == b.layer_proven && a.rules == b.rules && a.submitted == b.submitted, "The shadow texels changed a decision at frame " + std::to_string(i));
+    }
+    require(trust[0].size() == trust[1].size() && stored[0] == stored[1], "The shadow texels changed the ledger");
+    for (std::size_t i = 0; i != trust[0].size(); ++i) {
+      require(trust[0][i].tick == trust[1][i].tick && trust[0][i].accepted == trust[1][i].accepted, "The shadow texels moved a ledger clock");
+    }
+    // The ledger's clocks ran: the current alpha earned, the proof lapsed.
+    const auto earned = sb_sdr_current();
+    require(trust[0].size() == 2 && trust[0][0].accepted == stored_of({sb_sdr_signatures().of(kind::current), ui_selection::pre_ui_key(sb_sdr_signatures().of(kind::ui_layer))}) && trust[0][1].accepted == earned && trust[0][1].tick >= 70000, "The stream did not earn the current alpha and then lapse the proof");
+    for (std::size_t i = 0; i != ui_counter::count; ++i) {
+      if (i < ui_counter::change_set_samples || i > ui_counter::change_set_pair_contradicted) {
+        require(totals[0][i] == totals[1][i], "The shadow texels changed counter " + std::to_string(i));
+      }
+    }
+    require(totals[0][ui_counter::change_set_samples] == totals[1][ui_counter::change_set_samples] && totals[0][ui_counter::change_set_valid] == totals[0][ui_counter::change_set_samples] && !totals[1][ui_counter::change_set_valid], "The change_set group did not show the populated and zeroed shadows");
+  }
+
+  void fix3_fg_exactness() {
+    // (n) Exactness is a property of the paired Presents (review fix): the
+    // run of real Presents with frame generation known off must cover the
+    // Present the copy shows. With the switch on, over the Equipment page:
+    // (1) FG on or unknown for a while, then known off: the first known-off
+    // Present still pairs late (the Present it shows was not known off), the
+    // second pairs retained and refines; (2) a generated Present inside the
+    // run (one an unobserved mode change let through) ends it: the next real
+    // frame pairs late and decides nothing from the pair (T1's gap reuses
+    // the refined decision once), the one after pairs retained again; (3) a
+    // game whose FG mode is never known (no Streamline FG observer, or FG
+    // another SDK generates) never pairs retained.
+    alpha_auto_policy session;
+    restore_sb_sdr(session);
+    session.set_pin_changed_pixels(true);
+    sequence s(session, sb_sdr_page(sb_equipment));
+    s.fg_off_presents = 0;
+    auto p = sb_sdr_menu_present();
+    std::uint64_t now = 10000;
+    const auto step = [&](bool known_off, bool generated = false) -> const frame_result & {
+      p.now_ms = now;
+      now += 16;
+      p.fg_known_off = known_off;
+      p.hold_previous = generated;
+      return s.step(p);
+    };
+    for (int i = 0; i != 20; ++i) {
+      const auto &f = step(false);
+      require(f.pairing.kind == change_set::pair_class::late && !f.pre_ui_offered && f.source == 4u && f.flat() && !f.fg_off_presents, "A pair under FG on or unknown was not late, or acted");
+    }
+    const auto &first = step(true);
+    require(first.fg_off_presents == 1 && first.pairing.kind == change_set::pair_class::late && !first.pre_ui_offered && first.source == 4u && !first.decision.reused, "The first known-off Present paired the Present before it, which was not known off");
+    const auto &second = step(true);
+    require(second.fg_off_presents == 2 && second.pairing == change_set::layer_pairing {change_set::pair_class::retained, 1u} && second.pre_ui_offered && second.source == ui_detection::source_pre_ui && second.decision.refined, "The second known-off Present did not pair retained and refine");
+    for (int i = 0; i != 10; ++i) {
+      require(step(true).source == ui_detection::source_pre_ui, "The known-off run did not keep refining");
+    }
+    const auto &generated = step(true, true);
+    require(generated.held && !generated.detected && !generated.fg_off_presents, "A generated Present detected, or did not end the run");
+    const auto &after = step(true);
+    require(after.fg_off_presents == 1 && after.pairing.kind == change_set::pair_class::late && !after.pre_ui_offered && after.decision.own_source == 4u && after.decision.reused && after.source == ui_detection::source_pre_ui && (after.rules & ui_detection::change_set::gap), "The real frame after a generated Present paired retained, or did not reuse once through the gap");
+    const auto &again = step(true);
+    require(again.pairing.kind == change_set::pair_class::retained && again.source == ui_detection::source_pre_ui && !again.decision.reused, "The run after a generated Present did not pair retained again");
+    check_counters(s, "SB SDR FG exactness");
+
+    alpha_auto_policy unknown;
+    restore_sb_sdr(unknown);
+    unknown.set_pin_changed_pixels(true);
+    sequence never(unknown, sb_sdr_page(sb_equipment));
+    auto q = sb_sdr_menu_present();
+    q.fg_known_off = false;
+    run(never, q, 10000, 12000);
+    for (const auto &f : never.frames) {
+      require(f.pairing.kind == change_set::pair_class::late && !f.pre_ui_offered && f.source == 4u && f.flat() && !f.decision.refined, "A game whose FG mode is never known paired retained or refined");
+    }
+    require(!unknown.counters()[ui_counter::refined] && unknown.counters()[ui_counter::change_set_late] == unknown.counters()[ui_counter::change_set_samples], "An unknown FG mode counted a refined frame or a pairing other than late");
+    check_counters(never, "SB SDR FG unknown");
+  }
+
+  void fix3_gap_keeps_adoption() {
+    // (o) T1 adoption with the pre-UI change set adopted (review fix): the
+    // menu decides 12 with the set offered; then FG-on gameplay offers a
+    // full-page opaque UI colour tag (accepted) and never the set (late).
+    // Only the first gameplay frame carries the change-set gap and reuses
+    // the refined decision once; every later frame decides on its own (2,
+    // flat) and adopts its inputs, so the status key follows the tag.
+    alpha_auto_policy session;
+    restore(session, sb_sdr_signatures().of(kind::ui_color).key() + "," + sb_sdr_current() + "," + sb_sdr_proof(), 3);
+    session.set_pin_changed_pixels(true);
+    sequence s(session, sb_sdr_page(sb_equipment, [](synthetic &f, const gpu_inputs &in) {
+      if (in.bits & candidate::ui_color) {
+        f.alpha(kind::ui_color, 1000).opaque(kind::ui_color, 1000);
+      }
+    }));
+    run(s, sb_sdr_menu_present(), 10000, 11000);
+    require(s.frames.back().source == ui_detection::source_pre_ui && (s.temporal.bits & candidate::pre_ui), "The menu did not decide and adopt the pre-UI change set");
+    const auto menu = s.frames.size();
+    // The same identity scope (viewport 0), so T1's chain continues.
+    auto p = sb_sdr_present(candidate::ui_color | candidate::layer | candidate::current, 0);
+    p.fg_known_off = false;
+    run(s, p, 11000, 12000);
+    for (std::size_t i = menu; i != s.frames.size(); ++i) {
+      const auto &f = s.frames[i];
+      const bool gap = i == menu;
+      require(f.detected && f.pairing.kind == change_set::pair_class::late && !f.pre_ui_offered && f.hold.change_set_gap == gap && ((f.rules & ui_detection::change_set::gap) != 0) == gap && !(f.gpu.per_frame & ui_detection::per_frame_accepted_missing) && f.hold.adopt, "A gameplay frame carried the gap after the first, flagged accepted_missing or did not adopt, at frame " + std::to_string(i));
+      if (gap) {
+        require(f.decision.reused && f.source == ui_detection::source_pre_ui && f.decision.own_source == 2u, "The first gameplay frame did not reuse the refined decision once");
+      } else {
+        require(!f.decision.reused && f.source == 2u && f.flat(), "A later gameplay frame reused a decision or did not decide the full-page tag, at frame " + std::to_string(i));
+      }
+    }
+    require(s.temporal.bits == p.offered && s.temporal.status_key() == candidate::ui_color, "The adopted inputs stopped updating after the gap");
+    check_counters(s, "SB SDR gap keeps adoption");
+  }
+
   void s1_invariants() {
     // Every detection of every stream above: no unaccepted inferred alpha
     // decided (untrusted_inferred), and no inferred alpha decided beside an
@@ -4593,6 +5401,21 @@ int main(int argc, char **argv) {
     {"H1 dark gameplay never flat", h1_dark_gameplay_never_flat},
     {"H1 overrides a partial winner", h1_overrides_a_partial_winner},
     {"H2 still screens (fix 2)", h2_still_screens},
+    {"S1/P1 refine: SB SDR Equipment page (fix 3)", fix3_equipment_page},
+    {"V2 SB SDR Settings page (fix 3)", fix3_settings_page},
+    {"V2 black loading screen (fix 3)", fix3_loading_screen},
+    {"E2 FG on: tags decide, late shadow (fix 3)", fix3_fg_on},
+    {"E2 late pairing never acts (fix 3)", fix3_late_pairing_never_acts},
+    {"A1 HDR UI layer unchanged (fix 3)", fix3_hdr_layer_unchanged},
+    {"S1 refine: E33-like HUD-less set (fix 3)", fix3_e33_hudless_refines},
+    {"S1 refine: semi-transparent layer unaffected (fix 3)", fix3_w3_semi_transparent},
+    {"T1 missing pair under refine (fix 3)", fix3_missing_pair_t1},
+    {"H1 over a refined frame (fix 3)", fix3_h1_over_refined},
+    {"S1 declared alpha blocks the pre-UI set (fix 3)", fix3_declared_block},
+    {"S1 switch toggled mid-session (fix 3)", fix3_switch_toggled},
+    {"A1/F1 change-set shadow inert (fix 3)", fix3_shadow_inert},
+    {"E2 FG exactness by paired Presents (fix 3)", fix3_fg_exactness},
+    {"T1 change-set gap keeps adoption (fix 3)", fix3_gap_keeps_adoption},
     {"S1/T1 invariants", s1_invariants},
   };
   try {

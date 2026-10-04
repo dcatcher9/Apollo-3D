@@ -102,6 +102,23 @@ STILL_END = re.compile(r'Sunshine UI still screen: episode ended reason=(\w+) du
                        r'd=\[(-?[0-9.]+),(-?[0-9.]+)\] still_min=([0-9.]+) flattened=(\d)')
 STILL = re.compile(r'\bstill=\{scope=(\d) enabled=(\d) phase=(\w+) run_ms=(\d+) sampled=(\d+)/(\d+) '
                    r'short_max_ms=(\d+)\}')
+# Since fix 3, pre-UI change sets (docs/reshade-sbs.md, pre-UI change sets): the session's switch (UIPinChangedPixels,
+# 0 a shadow that only logs), the throttled change-set shadow of sample frames with an offered layer
+# (game3d_ui_change_set.h, shadow_log_text) and the UI line's change_set group (exporter.cpp).
+PIN_SWITCH = re.compile(r'Sunshine UI protection: changed pixels of an exact pre-UI image '
+                        r'.*\(UIPinChangedPixels=(\d)\)')
+CHANGE_SET = re.compile(
+    r'Sunshine UI change set: pairing=(?P<pairing>\w+) offset=(?P<offset>\d+) fg=(?P<fg>\d) '
+    r'UIPinChangedPixels=(?P<enabled>\d) changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) '
+    r'nonfinite=(?P<nonfinite>\d+) matching_tiles=(?P<tiles>\d+) lit=(?P<lit>\d+) '
+    r'layer_covered=(?P<layer_covered>\d+) valid=(?P<valid>\d) filtered=(?P<filtered>\d+) '
+    r'offsets=\{0=(?P<o0>\d+|-) 1=(?P<o1>\d+|-) 2=(?P<o2>\d+|-)\} pair=(?P<pair>[\w-]+) '
+    r'judge=\{kind=(?P<judge>\w+) pixels=(?P<judge_pixels>\d+) tp=(?P<tp>\d+) precision=(?P<precision>[0-9.]+|-) '
+    r'recall=(?P<recall>[0-9.]+|-) iou=(?P<iou>[0-9.]+|-)\} winner=(?P<winner>\d+) shapeless=(?P<shapeless>\d) '
+    r'would_refine=(?P<would_refine>\d) would_source=(?P<would_source>\d+) applied_source=(?P<applied>\d+) '
+    r'pixels=(?P<pixels>\d+)')
+CHANGE_SET_STATUS = re.compile(r'\bchange_set=\{pairing=(\w+) offset=(\d+) valid=(\d) would_refine=(\d) refined=(\d) '
+                               r'enabled=(\d)\}')
 # The session's cumulative exact UI counters (docs/reshade-sbs.md, UI counters), absent from older logs.
 COUNTERS = re.compile(r'Sunshine UI counters: (.*)$')
 COUNTER_FIELD = re.compile(r'(\w+)=(?:\{([^}]*)\}|(\S+))')
@@ -178,7 +195,11 @@ SOURCE_NAMES = {0: 'no mask', 1: 'UI alpha', 2: 'UI colour', 3: 'Backbuffer alph
                 5: 'HUD-less difference', 6: 'full frame (exact pair)', 8: 'full frame (layer route)',
                 9: 'HUD-less route (before S2b)', 10: 'UI layer'}
 S2B_SOURCE_NAMES = SOURCE_NAMES | {8: 'full frame over a hidden scene (H1)',
-                                   11: 'still screen without a UI source (H2)'}
+                                   11: 'still screen without a UI source (H2)',
+                                   12: 'pre-UI change set'}
+# Since fix 3 a decision of source 12, the changed pixels of the offscreen layer proven the pre-UI scene image against
+# the retained Present it shows; it and the refine rule act only with UIPinChangedPixels=1.
+PRE_UI_SOURCE = 12
 # Since fix 2 a run of still hidden samples without a UI source enters H2 once it spans this long (still::run_ms in
 # game3d_ui_detection_contract.h); a run that ends sooner is a short run, the gameplay-safety evidence. Its samples
 # read the presented frame's D at most STILL_D (still::d_percent / 100).
@@ -286,6 +307,64 @@ class Still(NamedTuple):
     short_max_ms: int  # The longest run since the previous line that ended before STILL_RUN_MS.
 
 
+class ChangeSetStatus(NamedTuple):
+    """Since fix 3: the latest sample's change-set shadow as the render that logged a UI line saw it (change_set={...},
+    exporter.cpp): the layer pairing and offset, validity, whether the switch would refine, whether this sample's
+    decision was refined, and the render's switch."""
+    pairing: str
+    offset: int
+    valid: bool
+    would_refine: bool
+    refined: bool
+    enabled: bool
+
+
+class ChangeSetSample(NamedTuple):
+    """Since fix 3: one logged change-set shadow line (game3d_ui_change_set.h, shadow_log_text): the offscreen layer
+    against the Present it pairs with, at eight times their pair threshold. Lines are throttled (a change of pairing,
+    validity, would_refine or would_source, else one per second); the counters count every sample."""
+    t: float
+    pairing: str  # retained (exact by Present counting), late (FG active), unavailable or none.
+    offset: int
+    fg: bool
+    enabled: bool  # UIPinChangedPixels=1.
+    changed: int
+    unchanged: int
+    tiles: int
+    lit: int
+    layer_covered: int
+    valid: bool
+    filtered: int
+    offsets: tuple[int | None, int | None, int | None]  # Changed against the Presents 0, 1 and 2 back.
+    pair: str  # verified, contradicted, inconclusive or '-' without a retained pairing.
+    judge: str  # ui_alpha, ui_color or none.
+    judge_pixels: int
+    tp: int
+    precision: float | None
+    recall: float | None
+    iou: float | None
+    winner: int
+    shapeless: bool
+    would_refine: bool
+    would_source: int
+    applied: int
+    pixels: int
+
+
+def change_set_sample(t: float, g: dict[str, str]) -> ChangeSetSample:
+    def ratio(value: str) -> float | None:
+        return None if value == '-' else float(value)
+
+    def count(value: str) -> int | None:
+        return None if value == '-' else int(value)
+    return ChangeSetSample(t, g['pairing'], int(g['offset']), g['fg'] == '1', g['enabled'] == '1', int(g['changed']),
+                           int(g['unchanged']), int(g['tiles']), int(g['lit']), int(g['layer_covered']),
+                           g['valid'] == '1', int(g['filtered']), (count(g['o0']), count(g['o1']), count(g['o2'])),
+                           g['pair'], g['judge'], int(g['judge_pixels']), int(g['tp']), ratio(g['precision']),
+                           ratio(g['recall']), ratio(g['iou']), int(g['winner']), g['shapeless'] == '1',
+                           g['would_refine'] == '1', int(g['would_source']), int(g['applied']), int(g['pixels']))
+
+
 @dataclass
 class StillEpisode:
     """Since fix 2: one H2 episode, from its 'would flatten' or 'flattening' line (the run reached STILL_RUN_MS) to
@@ -336,6 +415,7 @@ class UISample(NamedTuple):
     # The offered layer was the one-frame-late copy, which no A2 judge reads (E2); since S2a, absent before.
     late_layer: bool = False
     still: Still | None = None  # Since fix 2, absent before.
+    change_set: ChangeSetStatus | None = None  # Since fix 3, absent before.
 
     @property
     def s2a(self) -> bool:
@@ -348,6 +428,9 @@ class UISample(NamedTuple):
         if nonfinite or not self.candidates & HUDLESS:
             return False
         selective = changed and changed * 4 < self.pixels and unchanged * 100 >= self.pixels * 75 and self.tiles >= 128
+        if self.change_set is not None:
+            # Since fix 3 a partial change set also needs its pre-UI image lit on at least 1% of pixels.
+            selective = selective and self.lit * 100 >= self.pixels
         full = (self.candidates & HUDLESS_PAIR == HUDLESS_PAIR and changed * 100 >= self.pixels * 98
                 and self.lit * 2 >= self.pixels)
         return bool(selective or full)
@@ -586,6 +669,8 @@ class Session:
     shadow: list[tuple[float, str]] = field(default_factory=list)  # First-run shadow sessions and their UISceneShadow.
     still_switch: list[tuple[float, bool]] = field(default_factory=list)  # Since fix 2: UIFlattenStillScreens is 1.
     still_episodes: list[StillEpisode] = field(default_factory=list)  # Since fix 2: H2 episodes in log order.
+    pin_switch: list[tuple[float, bool]] = field(default_factory=list)  # Since fix 3: UIPinChangedPixels is 1.
+    change_sets: list[ChangeSetSample] = field(default_factory=list)  # Since fix 3: logged change-set shadows.
     # The last 'Sunshine UI counters' line: the session's totals are cumulative over all its runtimes.
     counters: dict[str, int] | None = None
     losses: dict[int, tuple[float, str]] = field(default_factory=dict)
@@ -699,7 +784,16 @@ def parse(lines) -> Session:
                 scope, enabled, phase, run_ms, cells, compared, short_ms = still.groups()
                 sample = sample._replace(still=Still(scope == '1', enabled == '1', phase, int(run_ms), int(cells),
                                                      int(compared), int(short_ms)))
+            if status := CHANGE_SET_STATUS.search(text):
+                pairing, offset, valid, would_refine, refined, enabled = status.groups()
+                sample = sample._replace(change_set=ChangeSetStatus(pairing, int(offset), valid == '1',
+                                                                    would_refine == '1', refined == '1',
+                                                                    enabled == '1'))
             s.ui.append(sample)
+        if found := PIN_SWITCH.search(text):
+            s.pin_switch.append((t, found.group(1) == '1'))
+        if found := CHANGE_SET.search(text):
+            s.change_sets.append(change_set_sample(t, found.groupdict()))
         if found := STILL_SWITCH.search(text):
             s.still_switch.append((t, found.group(1) == '1'))
         if found := STILL_START.search(text):
@@ -1014,6 +1108,7 @@ def ui_checks(s: Session, add) -> None:
                   + (': the first session since the key was written' if setting == 'absent' else '') + ')'))
     if not s.ui and s.counters is None:
         add(Check('INFO', 'UI protection', 'no UI protection samples'))
+        change_set_checks(s, add)
         return
     # Inferred alpha (Backbuffer, current alpha and the UI layer) must never decide while an accepted declared UI
     # channel is offered (S1): that flattens scene as UI. Nor may an accepted alpha cover the whole frame while an
@@ -1143,6 +1238,7 @@ def ui_checks(s: Session, add) -> None:
         gap_checks(s, add)
         scene_checks(s, add)
         still_checks(s, add)
+        change_set_checks(s, add)
         return
     states = Counter(u.detection for u in s.ui)
     add(Check('FAIL' if overrides or flattened or contradicted else 'WARN' if disputes else 'PASS', 'UI protection',
@@ -1158,6 +1254,7 @@ def ui_checks(s: Session, add) -> None:
     gap_checks(s, add)
     scene_checks(s, add)
     still_checks(s, add)
+    change_set_checks(s, add)
 
 
 def pre_ui_proofs(s: Session) -> list[tuple[float, str, str]]:
@@ -1567,6 +1664,94 @@ def still_checks(s: Session, add) -> None:
                   [row(e) for e in shown][:6]))
     else:
         add(Check('INFO', 'UI still screen', f'no still screen without a UI source; {switch}{safety}'))
+
+
+def change_set_checks(s: Session, add) -> None:
+    """'Pre-UI change set' (since fix 3): the offscreen layer proven the pre-UI scene image, paired with the retained
+    Present it shows, and the refine rule (docs/reshade-sbs.md, pre-UI change sets).
+
+    Deciding from it is off by default (UIPinChangedPixels=0): the add-on measures every sample frame with an offered
+    layer and logs what the switch would do, so a session with measured samples WARNs with a summary for review before
+    the switch is turned on. The counters count every sample (change_set group), the throttled lines give example
+    times and the judge's agreement. FAIL: a frame refined or decided the pre-UI change set (source 12) in a session
+    whose switch was never on, or a retained pairing that the changed counts against the Presents 0-2 back
+    contradicted while the switch was on (the pairing by Present counting did not hold). A contradicted pair in the
+    shadow WARNs. Logs before fix 3 have none of these lines, and no such check."""
+    lines = s.change_sets
+    status = [u.change_set for u in s.ui if u.change_set is not None]
+    c = s.counters if s.counters is not None and 'change_set.samples' in s.counters else None
+    if not (s.pin_switch or lines or status or c):
+        return
+
+    def get(key: str) -> int:
+        return c.get(key, 0) if c else 0
+    values = [on for _, on in s.pin_switch] + [line.enabled for line in lines] + [u.enabled for u in status]
+    ever_on = any(values)
+    always_on = bool(values) and all(values)
+    last = s.pin_switch[-1][1] if s.pin_switch else bool(values and values[-1])
+    switch = f'UIPinChangedPixels={int(last)}'
+    if c:
+        samples, retained, late, unavailable = (get(f'change_set.{k}') for k in ('samples', 'retained', 'late',
+                                                                                 'unavailable'))
+        valid, would_refine, would_decide = (get(f'change_set.{k}') for k in ('valid', 'would_refine', 'would_decide'))
+        verified, contradicted = get('change_set.pair_verified'), get('change_set.pair_contradicted')
+        counted = 'counted'
+    else:
+        samples = len(lines)
+        retained, late, unavailable = (sum(line.pairing == k for line in lines)
+                                       for k in ('retained', 'late', 'unavailable'))
+        valid = sum(line.valid for line in lines)
+        would_refine = sum(line.would_refine for line in lines)
+        would_decide = sum(line.would_source == PRE_UI_SOURCE and not line.would_refine for line in lines)
+        verified = sum(line.pair == 'verified' for line in lines)
+        contradicted = sum(line.pair == 'contradicted' for line in lines)
+        counted = 'logged (no counter line)'
+    refined, decided = get('refined'), get(f'decided.{PRE_UI_SOURCE}')
+    detail = (f'{switch}; {samples} samples {counted}: retained {percent(retained, samples)}, late '
+              f'{percent(late, samples)}, unavailable {percent(unavailable, samples)}; pair verified {verified}, '
+              f'contradicted {contradicted}; valid {percent(valid, samples)}; would refine {would_refine}, would '
+              f'decide source {PRE_UI_SOURCE} {would_decide}')
+    if c:
+        detail += f'; refined {refined} frames, decided source {PRE_UI_SOURCE} {decided} frames'
+    judged = [line for line in lines if line.fg and line.judge != 'none' and line.iou is not None]
+    if judged:
+        def mean(values: list[float | None]) -> str:
+            numbers = [v for v in values if v is not None]
+            return f'{sum(numbers) / len(numbers):.3f}' if numbers else '-'
+        detail += (f'; late pairs judged by a declared alpha (FG on, {len(judged)} lines): precision '
+                   f'{mean([line.precision for line in judged])}, recall {mean([line.recall for line in judged])}, '
+                   f'IoU {mean([line.iou for line in judged])}')
+
+    def row(line: ChangeSetSample) -> str:
+        verb = 'would refine' if line.would_refine and not line.enabled else 'refined' if line.would_refine else \
+            'would decide' if line.would_source == PRE_UI_SOURCE else 'measured'
+        return (f'{clock(line.t, True)} {verb}: winner {line.winner} -> {line.would_source}, {line.pairing} offset '
+                f'{line.offset}, changed {percent(line.changed, line.pixels)}, filtered {line.filtered}, tiles '
+                f'{line.tiles}, lit {percent(line.lit, line.pixels)}, pair {line.pair}')
+    examples = [row(line) for line in lines if line.would_refine or line.would_source == PRE_UI_SOURCE][:6]
+    contradicted_on = (any(line.enabled and line.pair == 'contradicted' for line in lines)
+                       or (always_on and contradicted > 0))
+    if (refined or decided) and not ever_on:
+        add(Check('FAIL', 'Pre-UI change set',
+                  f'{refined} frames refined and {decided} decided source {PRE_UI_SOURCE} while UIPinChangedPixels '
+                  f'was never on; {detail}', examples))
+    elif contradicted_on:
+        add(Check('FAIL', 'Pre-UI change set',
+                  'a retained pairing was contradicted while UIPinChangedPixels=1: the Present the layer copy shows '
+                  f'is not the one Present counting paired it with; {detail}',
+                  [row(line) for line in lines if line.pair == 'contradicted'][:6]))
+    elif contradicted:
+        add(Check('WARN', 'Pre-UI change set',
+                  f'{contradicted} shadow samples contradicted the retained pairing (another Present matched the layer '
+                  f'copy better), so Present counting does not hold here; do not turn on UIPinChangedPixels; {detail}',
+                  [row(line) for line in lines if line.pair == 'contradicted'][:6]))
+    elif samples and not ever_on:
+        add(Check('WARN', 'Pre-UI change set',
+                  f'shadow summary for review: {detail}; review the samples that would refine or decide (a Dump 3D '
+                  'taken during one carries the retained Presents) before setting UIPinChangedPixels=1', examples))
+    else:
+        add(Check('INFO', 'Pre-UI change set', detail if samples else f'{switch}; no sample measured the layer pair',
+                  examples))
 
 
 def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:

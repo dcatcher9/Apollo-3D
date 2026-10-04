@@ -108,6 +108,10 @@ namespace sunshine_game3d {
         // game's UIFlattenStillScreens is 1; by default it only logs them.
         policy->set_still_flatten(load_still_flatten(global));
         sunshine_log::message(reshade::log::level::info, still_flatten_log_text(policy->still_flatten()).c_str());
+        // Fix 3: the changed pixels of an exact pre-UI image decide only when
+        // the game's UIPinChangedPixels is 1; by default they are only logged.
+        policy->set_pin_changed_pixels(load_pin_changed_pixels(global));
+        sunshine_log::message(reshade::log::level::info, pin_changed_pixels_log_text(policy->pin_changed_pixels()).c_str());
         if (restored.discarded) {
           const auto message = "Sunshine UI protection: discarded " + std::to_string(restored.discarded) +
             " legacy UI trust entries (" + restored.discarded_text +
@@ -408,6 +412,20 @@ namespace sunshine_game3d {
               sunshine_log::message(reshade::log::level::info, still_flatten_log_text(still_flatten).c_str());
           }
           ImGui::SetItemTooltip("%s", still_flatten_tooltip);
+          ImGui::EndDisabled();
+          // Fix 3 (docs/reshade-sbs.md, UI decision framework): the pre-UI
+          // change set decides only with this per-game switch, Auto only.
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TableNextColumn();
+          bool pin_changed = data->alpha_session->pin_changed_pixels();
+          ImGui::BeginDisabled(data->values.ui_protection != source_alpha_mode::automatic);
+          if (ImGui::Checkbox(pin_changed_pixels_label, &pin_changed)) {
+            global_config_backend global;
+            if (edit_pin_changed_pixels(*data, pin_changed, global))
+              sunshine_log::message(reshade::log::level::info, pin_changed_pixels_log_text(pin_changed).c_str());
+          }
+          ImGui::SetItemTooltip("%s", pin_changed_pixels_tooltip);
           ImGui::EndDisabled();
         }
       }

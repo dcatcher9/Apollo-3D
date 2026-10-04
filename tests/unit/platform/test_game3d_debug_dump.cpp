@@ -484,6 +484,46 @@ TEST_F(Game3DDumpGpu, OptionalMasksAndAlphaPreserveBytesAndBadOptionalDoesNotLos
     EXPECT_TRUE(std::filesystem::exists(path / name));
 }
 
+// Fix 3: the retained Presents and the consumed layer copy are optional
+// artifacts with their own names (and no preview); a host whose catalog does
+// not know an optional ID (here a future one, as an older host sees 43-45)
+// drops it with an optional_capture_errors entry and keeps the package.
+TEST_F(Game3DDumpGpu, ChangeSetArtifactsAreNamedOptionalAndUnknownOnesAreDropped) {
+  EXPECT_STREQ(wire::change_set_name(43), "retained_present_1");
+  EXPECT_STREQ(wire::change_set_name(44), "retained_present_2");
+  EXPECT_STREQ(wire::change_set_name(45), "ui_layer_detected");
+  EXPECT_EQ(wire::change_set_name(46), nullptr);
+  EXPECT_EQ(wire::change_set_artifact_id("ui_layer_detected"), 45u);
+  EXPECT_EQ(wire::change_set_artifact_id("ui_layer_candidate_0"), 0u);
+  request();
+  const std::vector<std::uint8_t> color(width * height * 4, 73), one_back(width * height * 4, 61),
+    two_back(width * height * 4, 52), layer(width * height * 4, 7);
+  ASSERT_TRUE(texture(wire::artifact::source_color, DXGI_FORMAT_R8G8B8A8_UNORM, color));
+  ASSERT_TRUE(texture(wire::artifact::retained_present_1, DXGI_FORMAT_R8G8B8A8_UNORM, one_back));
+  ASSERT_TRUE(texture(wire::artifact::retained_present_2, DXGI_FORMAT_R8G8B8A8_UNORM, two_back));
+  ASSERT_TRUE(texture(wire::artifact::ui_layer_detected, DXGI_FORMAT_R8G8B8A8_UNORM, layer));
+  ASSERT_TRUE(texture(static_cast<wire::artifact>(46), DXGI_FORMAT_R8G8B8A8_UNORM, layer));
+  respond(wire::status::complete, R"({"color_space":1,"replay":{"ui_detection":{"layer_pairing":"retained","layer_presents_ago":1}}})");
+  poll();
+  close_producer_textures();
+  const auto path = await_package();
+  ASSERT_FALSE(path.empty());
+  const auto manifest = read_manifest(path);
+  EXPECT_EQ(manifest["status"], "complete");
+  ASSERT_EQ(manifest["artifacts"].size(), 4u);
+  EXPECT_EQ(read_bytes(path / "0_source_color.bin"), color);
+  EXPECT_EQ(read_bytes(path / "1_retained_present_1.bin"), one_back);
+  EXPECT_EQ(read_bytes(path / "2_retained_present_2.bin"), two_back);
+  EXPECT_EQ(read_bytes(path / "3_ui_layer_detected.bin"), layer);
+  EXPECT_EQ(manifest["artifacts"][3]["artifact_id"], 45);
+  ASSERT_EQ(manifest["optional_capture_errors"].size(), 1u);
+  EXPECT_EQ(manifest["optional_capture_errors"][0]["artifact_id"], 46);
+  EXPECT_EQ(manifest["producer_metadata"]["replay"]["ui_detection"]["layer_pairing"], "retained");
+  EXPECT_TRUE(std::filesystem::exists(path / "color.png"));
+  EXPECT_FALSE(std::filesystem::exists(path / "retained_present_1.png"));
+  EXPECT_NE(manifest["visualizations"]["status"], "failed");
+}
+
 TEST_F(Game3DDumpGpu, PreviewFailurePreservesLosslessCaptureAndManifest) {
   request();
   const std::vector<std::uint8_t> color(width * height * 4, 73);

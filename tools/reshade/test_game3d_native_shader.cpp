@@ -40,6 +40,8 @@ namespace {
     {"DepthBuffer", D3D_SIT_TEXTURE, 1},
     {"SunshineLinearClamp", D3D_SIT_TEXTURE, 2},
     {"SunshineHostCandidateSampler", D3D_SIT_TEXTURE, 3},
+    {"SunshineRetainedPresent1", D3D_SIT_TEXTURE, 2}, // UI detection passes only (fix 3).
+    {"SunshineRetainedPresent2", D3D_SIT_TEXTURE, 3}, // UI detection passes only (fix 3).
     {"SunshineHostVerticalConditionedSampler", D3D_SIT_TEXTURE, 4},
     {"SunshineHostFinalSampler", D3D_SIT_TEXTURE, 5},
     {"SunshineEyeLeftSampler", D3D_SIT_TEXTURE, 6},
@@ -53,11 +55,13 @@ namespace {
     {"SunshineUIColorAlpha", D3D_SIT_TEXTURE, 12},
     {"SunshineUIBackbufferAlpha", D3D_SIT_TEXTURE, 13},
     {"SunshineHUDless", D3D_SIT_TEXTURE, 14},
+    {"SunshineUIChangeSetPlanes", D3D_SIT_TEXTURE, 8}, // Change-set count pass only (fix 3).
     {"SunshineHostCandidateStore", D3D_SIT_UAV_RWTYPED, 0},
     {"SunshineHostVerticalMajorantStore", D3D_SIT_UAV_RWTYPED, 1},
     {"SunshineHostVerticalConditionedStore", D3D_SIT_UAV_RWTYPED, 2},
     {"SunshineHostFinalStore", D3D_SIT_UAV_RWTYPED, 3},
     {"SunshineUIPlaneTilesStore", D3D_SIT_UAV_RWTYPED, 4},
+    {"SunshineUIChangeSetPlanesStore", D3D_SIT_UAV_RWTYPED, 4}, // Change-set bits pass only (fix 3).
     {"SunshineUIPlaneResolvedStore", D3D_SIT_UAV_RWTYPED, 5},
     {"SunshineAlphaCoverageStore", D3D_SIT_UAV_RWTYPED, 6},
     {"SunshineUIConflictStore", D3D_SIT_UAV_RWTYPED, 7},
@@ -102,8 +106,9 @@ namespace {
     {"Sunshine_UIDetectionFlags", 12, 4, D3D_SVT_UINT},
     // Selection revision 4: the layer's pair threshold with the presented color.
     {"Sunshine_UIPreUIThreshold", 16, 4, D3D_SVT_FLOAT},
-    // Selection revision 5: H2's still-screen flag.
-    {"Sunshine_UIStillScreen", 20, 4, D3D_SVT_UINT},
+    // Selection revision 5: H2's still-screen flag; revision 6 (fix 3): the
+    // change-set rule bits beside it.
+    {"Sunshine_UIRules", 20, 4, D3D_SVT_UINT},
   };
 
   struct entry_point {
@@ -272,6 +277,21 @@ namespace {
       require(shared <= 32768, std::string(entry.name) + " exceeds 32 KiB of group-shared memory");
       manifest << "  groupshared " << shared << '\n';
     }
+    // Fix 3: the retained Presents share t2 and t3 with other passes'
+    // resources; only the UI detection passes read them, never beside those.
+    {
+      bool retained = false, shared = false;
+      for (unsigned index = 0; index < shader.BoundResources; ++index) {
+        D3D11_SHADER_INPUT_BIND_DESC actual {};
+        require(SUCCEEDED(reflection->GetResourceBindingDesc(index, &actual)), "Binding reflection failed");
+        const std::string name = actual.Name;
+        retained |= name == "SunshineRetainedPresent1" || name == "SunshineRetainedPresent2";
+        shared |= name == "SunshineLinearClamp" || name == "SunshineHostCandidateSampler";
+      }
+      const std::string name = entry.name;
+      require(!retained || (name.rfind("SunshineUIDetection", 0) == 0 && !shared),
+        name + ": only the UI detection passes may read the retained Presents at t2 and t3");
+    }
     // The exact UI counters share u7 with the conflict probe's statistics, and
     // the T1 hold store shares u5 with the resolved UI plane: only the
     // detection reduce binds the counters and the hold store, and no entry
@@ -355,12 +375,13 @@ int main(int argc, char **argv) {
     mirrored(detection::hlsl_hold_defines);
     mirrored(detection::hlsl_h1_defines);
     mirrored(detection::hlsl_still_defines);
+    mirrored(detection::hlsl_change_set_defines);
     // The reduce ports ui_selection::decide of this revision.
     require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision &&
-        sunshine_game3d::ui_selection::revision == 5u,
-      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 5");
-    require(decision_texels == detection::still_decision_texels && decision_texels == 13u,
-      "Selection revision 5 writes H2's stillness counts in decision texel 12: 13 decision texels");
+        sunshine_game3d::ui_selection::revision == 6u,
+      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 6");
+    require(decision_texels == detection::change_set_decision_texels && decision_texels == 16u,
+      "Selection revision 6 writes the change-set shadow in decision texels 13-15: 16 decision texels");
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");
@@ -389,6 +410,9 @@ int main(int argc, char **argv) {
           entries.push_back({"SunshineUIDetectionTilesCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUIDetectionReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIDetectionMaskCS", "cs_5_0", 8, 8, 1});
+          // Fix 3's change-set shadow: a word of 32 pixels on 8 rows, then one group per tile.
+          entries.push_back({"SunshineUIDetectionChangeSetBitsCS", "cs_5_0", 32, 8, 1});
+          entries.push_back({"SunshineUIDetectionChangeSetCountCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineSceneCellsCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineSceneCompareCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineSceneEvidenceCS", "cs_5_0", 16, 16, 1});

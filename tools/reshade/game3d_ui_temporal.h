@@ -20,6 +20,13 @@
 //        generated count of the last one that offered a UI tag
 //        (ui_mask::generated_without_input); the HUD-less tag's present
 //        generation as the real-frame id, 0 without a HUD-less capture);
+//        Fix 3 (game3d_ui_change_set.h): pairing =
+//        change_set::pair_layer(layer offered, the run of real Presents with
+//        frame generation known off, this one included, the layer copy's
+//        presents_since_copy, Present 1 retained, Present 2 retained); when
+//        change_set::offered(Auto, the session's pin_changed_pixels(), the
+//        layer's pre_ui key proven, a HUD-less image offered, pairing),
+//        bits |= candidate::pre_ui with the layer's format as its signature;
 //     2. accepted = session.accepted(bits, signatures) (manual On: every
 //        offered candidate, without the ledger);
 //     3. t = state.arbitrate(identity, observation, bits);
@@ -47,7 +54,10 @@
 //          0 (a zero-offer frame first ends H2's run with
 //          scene_guard.still.leave(unmeasured) when in still_scope), and
 //          detection with this frame's own bits, accepted and flags pushed
-//          (b2), flags | per_frame, still as b2 word 5, and the hold store
+//          (b2), flags | per_frame, rules = change_set::rule_bits(still,
+//          Auto and pin_changed_pixels(), the layer's pre_ui key proven,
+//          t.change_set_gap, pairing, Presents 1 and 2 bound)
+//          as b2 word 5, the retained Presents at t2 and t3, and the hold store
 //          bound at u5 for the reduce. A sample frame runs the evidence
 //          passes when measure = scene_guard.measure(now, shadow,
 //          whole_frame(state.latest), proven_image, still_scope &&
@@ -55,7 +65,7 @@
 //          measure.actionable, still_scope and whether the passes ran for H2
 //          alone (measure.run without the still argument does not run) with
 //          the pending sample. Then
-//          state.detected(observation, identity). A sample keeps the
+//          state.detected(observation, identity, bits). A sample keeps the
 //          signatures and pushed flags it was submitted with, and its status
 //          key is state.status_key() at submission. Before any of this, a
 //          render outside still_scope ends H2's run with
@@ -80,8 +90,13 @@
 //     8. session.observe(sample.evidence, sample.pixels, tick, submitted
 //        signatures), its scene evidence (scene and pre_ui_scene) cleared
 //        when the passes ran for H2 alone, so that H2's measurements never
-//        reach the ledger; a session in a manual mode ignores it;
-//     9. sample_counters(..., obs) commits the counts.
+//        reach the ledger; a session in a manual mode ignores it; the
+//        change-set shadow (evidence.change_set) never reaches it;
+//     9. sample_counters(..., obs) commits the counts; a sample that measured
+//        the layer (offered, b2 word 4 nonzero) first gets its
+//        change_set::measure_shadow from the counts, flags, rules, pairing
+//        and switch it was submitted with, whose add_shadow_counters join that
+//        commit, and is logged when change_set::shadow_log_due.
 //   status (after render):
 //    10. state.latest describes the frame only while
 //        state.status_fresh(observation); otherwise the status is collecting.
@@ -140,11 +155,12 @@ namespace sunshine_game3d::ui_temporal {
   // layer_decision_texels; the one-way judgment counts, the refused candidate
   // and the frame reason of texels 8 and 9 when there are
   // judgment_decision_texels; the H1 texel 10, the opaque Backbuffer and
-  // current counts, the claims and the h1 word, when there are
-  // h1_decision_texels; the pre-UI pixel counts of texel 11, the layer
-  // against the presented frame, when there are pre_ui_decision_texels; H2's
-  // still and compared cells of texel 12 when there are
-  // still_decision_texels).
+  // current counts, the claims and the h1 word with its refined bit, when
+  // there are h1_decision_texels; the pre-UI pixel counts of texel 11, the
+  // layer against the presented frame, when there are pre_ui_decision_texels;
+  // H2's still and compared cells of texel 12 when there are
+  // still_decision_texels; the change-set shadow of texels 13-15, fix 3, when
+  // there are change_set_decision_texels).
   // sequence numbers the submitted samples, and
   // flags are the Sunshine_UIDetectionFlags the detection pushed (whether an
   // offered layer was the one-frame-late copy).
@@ -190,6 +206,7 @@ namespace sunshine_game3d::ui_temporal {
       evidence.claims = words[word::claims];
       evidence.s1_source = words[word::h1] & ui_detection::h1_winner_mask;
       evidence.h1_applied = (words[word::h1] & ui_detection::h1_applied) != 0;
+      evidence.refined = (words[word::h1] & ui_detection::h1_refined) != 0;
     }
     if (count >= 4 * ui_detection::pre_ui_decision_texels) {
       evidence.pre_ui_match = words[word::pre_ui_match];
@@ -201,6 +218,8 @@ namespace sunshine_game3d::ui_temporal {
       evidence.still_cells = words[word::still_cells];
       evidence.still_compared = words[word::still_compared];
     }
+    if (count >= 4 * ui_detection::change_set_decision_texels)
+      evidence.change_set = ui_selection::counts_from_words(words, count).shadow;
     if (scene) {
       const auto decode = [&](std::size_t n, std::size_t d, std::size_t state) {
         alpha_auto_decision::scene_evidence result;
@@ -242,11 +261,14 @@ namespace sunshine_game3d::ui_temporal {
   // is cleared. H2 measures every SDR Auto sample frame where no source
   // decides and never acts on what it measures, so its measurements must not
   // run a pre-UI proof's reconfirm clock (alpha_auto_policy::observe) that
-  // was paused before fix 2: the shadow leaves every decision unchanged.
+  // was paused before fix 2: the shadow leaves every decision unchanged. The
+  // change-set shadow of texels 13-15 (fix 3) is always cleared: it is
+  // diagnostics only and must not advance any ledger clock.
   inline alpha_auto_decision::detection_evidence ledger_evidence(const alpha_auto_decision::detection_evidence &evidence,
       bool h2_only) {
     auto result = evidence;
     if (h2_only) result.scene = result.pre_ui_scene = {};
+    result.change_set = {};
     return result;
   }
 
@@ -320,6 +342,10 @@ namespace sunshine_game3d::ui_temporal {
     // The per-frame bits T1 pushes with a detection
     // (ui_detection::per_frame_hold_reset, per_frame_accepted_missing).
     std::uint32_t per_frame{};
+    // The pre-UI change set the previous real frame of this chain offered is
+    // not offered by this real one: b2 word 5's change_set::gap, for one
+    // frame (refine_missing in ui_selection::decide).
+    bool change_set_gap{};
   };
 
   // One renderer's detection state across frames. Candidate bits are
@@ -340,6 +366,8 @@ namespace sunshine_game3d::ui_temporal {
     alpha_auto_source decision_scope;
     std::uint64_t decision_frame{}, next_frame{};
     bool reset_pending = true;
+    // The last real frame that detected offered the pre-UI change set.
+    bool pre_ui_offered{};
     // Consecutive generated Presents that applied the detected mask.
     std::uint32_t holds{};
     // The latest completed status sample, the inputs it was taken for and its
@@ -366,7 +394,12 @@ namespace sunshine_game3d::ui_temporal {
     // previous real frame's decision once (ui_selection::decide) and the
     // frame adopts nothing. After an observation loss the previous
     // revision's captures are refused until the game tags again, so that
-    // real frame is flagged too.
+    // real frame is flagged too. The pre-UI change set is left out of that
+    // test: it is offered only with an exact retained pairing, so frame
+    // generation, a copy of the current interval or a lapsed ring withdraw
+    // it by design, and flagging those frames would stop adoption for the
+    // rest of the scope. Its one-frame gap (the previous real frame of this
+    // chain offered it, this one does not) is change_set_gap instead.
     hold_decision arbitrate(const present_identity &identity, const alpha_auto_source &scope, std::uint32_t offered) const {
       hold_decision result;
       const bool same_scope = have_decision && !hold_scope_changed(scope, decision_scope);
@@ -379,8 +412,11 @@ namespace sunshine_game3d::ui_temporal {
       }
       result.detect = true;
       if (!have_decision || reset_pending || !same_scope) result.per_frame |= ui_detection::per_frame_hold_reset;
-      else if (bits & accepted & ui_selection::candidate_bits & ~offered)
-        result.per_frame |= ui_detection::per_frame_accepted_missing;
+      else {
+        if (bits & accepted & ui_selection::candidate_bits & ~ui_detection::candidate::pre_ui & ~offered)
+          result.per_frame |= ui_detection::per_frame_accepted_missing;
+        result.change_set_gap = pre_ui_offered && !(offered & ui_detection::candidate::pre_ui);
+      }
       result.adopt = !(result.per_frame & ui_detection::per_frame_accepted_missing);
       return result;
     }
@@ -415,9 +451,11 @@ namespace sunshine_game3d::ui_temporal {
       ++holds;
       if (identity.real_frame != decision_frame && !next_frame) next_frame = identity.real_frame;
     }
-    // A real Present that detected: its decision is the chain's.
-    void detected(const alpha_auto_source &scope, const present_identity &identity) {
+    // A real Present that detected with these offered candidates: its
+    // decision is the chain's.
+    void detected(const alpha_auto_source &scope, const present_identity &identity, std::uint32_t offered) {
       have_decision = true;
+      pre_ui_offered = (offered & ui_detection::candidate::pre_ui) != 0u;
       decision_scope = scope;
       decision_frame = identity.real_frame;
       next_frame = 0;

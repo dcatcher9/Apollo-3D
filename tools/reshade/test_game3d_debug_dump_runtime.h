@@ -427,10 +427,26 @@ namespace sunshine_game3d_test {
             original = frame_.depth.resource;
             has_raw = true;
             break;
+          // Fix 3: the retained Presents and the layer copy detection consumed.
+          case wire::artifact::retained_present_1:
+            original = r.retained_presents[0];
+            break;
+          case wire::artifact::retained_present_2:
+            original = r.retained_presents[1];
+            break;
+          case wire::artifact::ui_layer_detected:
+            original = r.ui_layer_detected;
+            break;
+          default:
+            break;
         }
         check(original.handle != 0, "Snapshot fabricated an absent artifact");
         const auto actual = read(api::resource {reinterpret_cast<std::uint64_t>(opened.Get())}, true);
-        check(actual == read(original, false), "Shared GPU snapshot differs from the exact consumed/rendered pixels");
+        // The dumped render retains its own Present after the dump's copies,
+        // into the slot that held the Present two back: the caller checks
+        // that artifact against the Present it shows.
+        check(t.kind == wire::artifact::retained_present_2 || actual == read(original, false),
+          "Shared GPU snapshot differs from the exact consumed/rendered pixels");
         if (cross_api) {
           Microsoft::WRL::ComPtr<ID3D11Texture2D> received;
           check(SUCCEEDED(consumer_device_->OpenSharedResource1(reinterpret_cast<HANDLE>(t.handle), IID_PPV_ARGS(&received))), "Host D3D11 cannot open the immutable D3D12 diagnostic texture");
@@ -460,8 +476,10 @@ namespace sunshine_game3d_test {
         for (unsigned i = 0; i < response.texture_count; ++i) {
           const auto &t = response.textures[i];
           const auto kind = static_cast<unsigned>(t.kind);
-          check(t.kind == wire::artifact::ui_source_color || (kind > 0 && kind < std::size(names)), "Unknown diagnostic artifact kind");
-          const auto *name = t.kind == wire::artifact::ui_source_color ? "ui_source_color" : names[kind];
+          check(t.kind == wire::artifact::ui_source_color || wire::change_set_artifact(kind) || (kind > 0 && kind < std::size(names)),
+            "Unknown diagnostic artifact kind");
+          const auto *name = t.kind == wire::artifact::ui_source_color ? "ui_source_color" :
+            wire::change_set_artifact(kind) ? wire::change_set_name(kind) : names[kind];
           const auto file = std::to_string(i) + "_" + name + ".bin";
           std::ofstream stream(output_directory / file, std::ios::binary);
           stream.exceptions(std::ios::failbit | std::ios::badbit);

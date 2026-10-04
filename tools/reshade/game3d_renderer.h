@@ -4,6 +4,7 @@
 #include "game3d_ui_plane.h"
 #include "game3d_alpha_auto.h"
 #include "game3d_ui_adaptive.h"
+#include "game3d_ui_change_set.h"
 #include <windows.h>
 #include <reshade_api.hpp>
 #include <array>
@@ -75,6 +76,14 @@ namespace sunshine_game3d {
     // counting without frame generation). Only then may a difference covering
     // the whole frame mean full-screen UI rather than a mismatched pair.
     bool hudless_exact = false;
+    // Fix 3 (game3d_ui_change_set.h): the offered layer copy holds the frame
+    // of the Present this many Presents ago (ui_layer::live_capture::
+    // presents_since_copy; 0 within the copy's own interval), and the game's
+    // frame generation mode is known off at this Present (the Streamline
+    // observer read it; unknown is not off). The renderer counts the run of
+    // such real Presents: Present counting pairs the copy only within it.
+    std::uint32_t layer_presents_ago = 0;
+    bool fg_known_off = false;
   };
   struct ui_render_input {
     ui_input_kind kind = ui_input_kind::unavailable;
@@ -137,6 +146,14 @@ namespace sunshine_game3d {
   struct diagnostic_resources {
     reshade::api::resource source{}, linear_color{}, candidate{}, vertical_majorant{},
       vertical_field{}, final_field{}, sbs{}, ui_source{}, ui_plane_tiles{}, ui_plane_resolved{};
+    // Fix 3 (Dump 3D): the presented colors retained for the pre-UI change
+    // set's pairing, the Presents retained_offsets[i] before this render (1
+    // and 2; empty when that Present is not retained), and the offscreen UI
+    // layer copy this render's detection consumed (t7; empty when the render
+    // offered no layer).
+    std::array<reshade::api::resource, 2> retained_presents{};
+    std::array<std::uint32_t, 2> retained_offsets{1, 2};
+    reshade::api::resource ui_layer_detected{};
   };
 
   // GPU time of the live render stages over a reporting window, in ms. Inputs
@@ -184,10 +201,17 @@ namespace sunshine_game3d {
     // when the two are not comparable or on a frame that is not a detection
     // sample (H1 d).
     std::uint32_t pre_ui_threshold_bits{};
-    // b2 word 5 (Sunshine_UIStillScreen): ui_detection::still::flatten while
-    // H2's run is active in SDR Auto and the session enables it
-    // (UIFlattenStillScreens), zero otherwise (game3d_still_screen.h).
-    std::uint32_t still_bits{};
+    // b2 word 5 (Sunshine_UIRules, rules_bits): still_bits is its
+    // ui_detection::still::flatten, set while H2's run is active in SDR Auto
+    // and the session enables it (UIFlattenStillScreens), zero otherwise
+    // (game3d_still_screen.h); the other bits are fix 3's
+    // (ui_detection::change_set: refine in Auto with UIPinChangedPixels=1,
+    // the layer pair's Present offset and the bound retained Presents).
+    std::uint32_t still_bits{}, rules_bits{};
+    // Fix 3: the offered layer copy's Presents since the copy and its pairing
+    // (game3d_ui_change_set.h); zero and none without a layer.
+    std::uint32_t layer_presents_ago{};
+    change_set::pair_class layer_pairing = change_set::pair_class::none;
   };
   inline const char *name(ui_detection_snapshot::run_state value) {
     switch (value) {
@@ -297,6 +321,13 @@ namespace sunshine_game3d {
     // also numbers Presents for colors retained for late HUD-less pairing.
     void begin_present();
     void finish_present();
+    // Fix 3, Dump 3D: while armed, every Present's color is retained (the
+    // dump carries the Presents the pre-UI change set pairs with). A render
+    // that will be dumped (capture) defers retaining its own color, so that
+    // the dump still finds the Presents one and two before it; the caller
+    // then records the owed copy with finish_retention after the dump's.
+    void set_dump_retention(bool armed, bool capture);
+    void finish_retention(reshade::api::command_list *commands);
     // Marks the start of this presentation's input work for the GPU profile.
     void begin_gpu_profile(reshade::api::command_list *commands);
     // Completed-frame GPU stage times since the last call; resets the window.

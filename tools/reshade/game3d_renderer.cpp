@@ -5,6 +5,7 @@
 #include "async_log.h"
 #include "game3d_shader_cache.h"
 #include "game3d_still_screen.h"
+#include "game3d_ui_change_set.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
@@ -45,7 +46,8 @@ namespace sunshine_game3d {
     }
     api::pipeline_layout layout{};
     enum pass { pq, candidate, vertical, ui_tiles, ui_reduce, horizontal, eyes, pack, ui_conflict, ui_apply,
-      detection_tiles, detection_reduce, detection_mask, scene_cells, scene_compare, scene_evidence, pass_count };
+      detection_tiles, detection_reduce, detection_mask, scene_cells, scene_compare, scene_evidence, detection_bits,
+      detection_count, pass_count };
     std::array<api::pipeline, pass_count> pipelines{};
     std::array<api::sampler, 3> samplers{};
     api::resource_view null_srv{}, null_uav{};
@@ -53,7 +55,7 @@ namespace sunshine_game3d {
     enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field,
       ui_plane_tiles, ui_plane_resolved, left, right, packed, ui_source, ui_source_second, ui_source_third,
       ui_conflict_statistics, detection_statistics, detection_decision, detected_mask, scene_cell_sums, ui_counter_words,
-      detection_hold, scene_previous_luma, retained_color,
+      detection_hold, scene_previous_luma, change_set_planes, retained_color,
       retained_color_last = retained_color + ui_detection_inputs::max_retained_presents - 1, texture_count };
     std::array<texture, texture_count> textures{};
     std::vector<std::pair<api::resource, api::resource_view>> backbuffers;
@@ -154,6 +156,11 @@ namespace sunshine_game3d {
         detection_decision_texels >= ui_detection::scene_decision_texels;
     }
     uint64_t scene_evidence_runs{};
+    // Fix 3: the shader computes the change-set shadow in passes of its own
+    // (SUNSHINE_UI_CHANGE_SET_PLANES): the bits pass into
+    // textures[change_set_planes] and the count pass into the statistics
+    // rows, dispatched after the tiles pass on shadow samples only.
+    bool change_set_planes_supported{};
     // This render's scene guard bits (per_frame_scene_hidden,
     // per_frame_pre_ui_visible, the refuted candidates and
     // per_frame_pre_ui_proven), pushed with its detection, and whether its
@@ -194,14 +201,57 @@ namespace sunshine_game3d {
     // The constants of the last detection run, and the run this render's mask
     // came from (fresh, or held on a generated Present).
     ui_detection_snapshot detection_run, consumed_detection;
-    // Presented colors kept for late HUD-less captures, created on first need.
-    // Each slot records the Present number it holds; zero is empty.
+    // Presented colors kept for pairing, created on first need: for late
+    // HUD-less captures, for the pre-UI change set's layer pair (fix 3,
+    // game3d_ui_change_set.h) and for an armed Dump 3D. Each slot records the
+    // Present number it holds (zero is empty) and the requesters it was
+    // copied for: the HUD-less pairing sees only colors retained for it, so
+    // its late pairing is the same with or without the other requesters,
+    // while the layer pair and the dump take any slot holding their Present.
+    enum retention_requester : uint8_t { retain_hudless = 1, retain_layer_pair = 2, retain_dump = 4, retain_any = 7 };
     bool retention_wanted{}, retention_attempted{}, retention_ready{};
-    // Retention stops this many Presents after the last late capture needed it.
+    // Retention stops this many Presents after the last late capture (or,
+    // with UIPinChangedPixels=1, the last proven layer) needed it.
     static constexpr uint64_t retention_linger_presents = 120;
     uint64_t retention_requested_present{};
+    bool layer_retention_wanted{};
+    uint64_t layer_retention_requested_present{};
+    // This render's change-set shadow request: its Present is retained when a
+    // detection sample is likely within the next two Presents.
+    bool layer_shadow_retention{};
+    // Fix 3: the run of consecutive real Presents with frame generation known
+    // off, the last render's included (change_set::next_fg_off_presents), and
+    // the Present number of that render; a Present no render observed ends
+    // the run.
+    uint32_t fg_off_presents{};
+    uint64_t fg_off_present{};
+    // An armed Dump 3D retains every Present; the render it captures defers
+    // its own copy (owed) until after the dump's copies of the Presents
+    // before it.
+    bool dump_retention{}, retention_deferred{};
+    uint64_t owed_present{};
+    uint8_t owed_requesters{};
     std::array<uint64_t, ui_detection_inputs::max_retained_presents> retained_present{};
+    std::array<uint8_t, ui_detection_inputs::max_retained_presents> retained_requesters{};
     uint64_t present_number{};
+    // The mean Present interval over the last sample period, clamped to 1-100
+    // ms (100 before the first), and the Present number of the last sample:
+    // the change-set shadow retains the Presents before a likely sample.
+    uint64_t present_interval_ms = 100, detection_submit_present{};
+    // Fix 3: the change-set state a sample was submitted with (its pairing,
+    // whether the layer was proven, a HUD-less image offered, Auto, the
+    // switch, the pushed rule bits), whether it measured the layer (an
+    // offered layer and a nonzero b2 word 4), the shadow log's throttle, this
+    // render's switch, and the layer copy this render's detection consumed.
+    struct change_set_submission {
+      change_set::layer_pairing pairing;
+      bool layer_proven{}, hudless_offered{}, auto_mode{}, enabled{};
+      uint32_t rules{};
+    };
+    change_set_submission detection_pending_change_set;
+    bool detection_pending_layer_measured{}, pin_changed_render{};
+    change_set::shadow_log_state change_set_log;
+    api::resource consumed_layer{};
     // The status key (ui_temporal::detection_state::status_key) when the
     // pending sample was submitted; the sample describes frames of that winner.
     uint32_t detection_pending_status_key{};
@@ -338,6 +388,8 @@ namespace sunshine_game3d {
       detection_decision_texels = texels ? texels : ui_detection::default_decision_texels;
       // An out-of-range marker leaves automatic detection unavailable (prepare_detection).
       detection_statistics_images = images;
+      change_set_planes_supported =
+        shader_marker(shader_source(), ui_detection::change_set::planes_marker) == ui_detection::change_set::planes;
       counter_words = shader_marker(shader_source(), "SUNSHINE_UI_COUNTER_WORDS") == ui_counter_word::count ?
         uint32_t(ui_counter_word::count) : 0u;
       if (!device->create_fence(0, api::fence_flags::none, &completion)) return false;
@@ -518,25 +570,58 @@ namespace sunshine_game3d {
         if (!texture_create(texture_id(retained_color + i), width, height, source_format, api::resource_usage::copy_dest)) return false;
       return retention_ready = true;
     }
-    api::resource_view retained_view(uint32_t presents_ago) const {
-      if (!retention_ready || !presents_ago || presents_ago > present_number) return {};
+    // The retained color of the Present this many before the current one,
+    // copied for any of these requesters; empty when not retained.
+    const texture *retained(uint32_t presents_ago, uint8_t requesters) const {
+      if (!retention_ready || !presents_ago || presents_ago > present_number) return nullptr;
       const auto wanted = present_number - presents_ago;
       for (unsigned i = 0; i != retained_present.size(); ++i)
-        if (retained_present[i] && retained_present[i] == wanted) return textures[retained_color + i].srv;
-      return {};
+        if (retained_present[i] && retained_present[i] == wanted && (retained_requesters[i] & requesters))
+          return &textures[retained_color + i];
+      return nullptr;
     }
-    // Keep this Present's source color, replacing the oldest retained one.
-    void retain_color(api::command_list *cmd) {
-      if (!retention_wanted || present_number - retention_requested_present > retention_linger_presents ||
-          !prepare_retention() || !present_number) return;
-      const auto slot = unsigned(present_number % retained_present.size());
+    api::resource_view retained_view(uint32_t presents_ago, uint8_t requesters = retain_hudless) const {
+      const auto *t = retained(presents_ago, requesters);
+      return t ? t->srv : api::resource_view{};
+    }
+    // Who wants this Present's color retained.
+    uint8_t retention_requesters() const {
+      uint8_t requesters = 0;
+      if (retention_wanted && present_number - retention_requested_present <= retention_linger_presents)
+        requesters |= retain_hudless;
+      if ((layer_retention_wanted && present_number - layer_retention_requested_present <= retention_linger_presents) ||
+          layer_shadow_retention)
+        requesters |= retain_layer_pair;
+      if (dump_retention) requesters |= retain_dump;
+      return requesters;
+    }
+    // Keep a Present's source color (still textures[source]), replacing the
+    // oldest retained one.
+    void retain_color(api::command_list *cmd, uint64_t number, uint8_t requesters) {
+      if (!requesters || !prepare_retention() || !number) return;
+      const auto slot = unsigned(number % retained_present.size());
       const auto target = textures[retained_color + slot].resource, from = textures[source].resource;
       cmd->barrier(from, api::resource_usage::shader_resource, api::resource_usage::copy_source);
       cmd->barrier(target, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
       cmd->copy_resource(from, target);
       cmd->barrier(target, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
       cmd->barrier(from, api::resource_usage::copy_source, api::resource_usage::shader_resource);
-      retained_present[slot] = present_number;
+      retained_present[slot] = number;
+      retained_requesters[slot] = requesters;
+    }
+    // A render's own retention, owed when a dump capture defers it.
+    void retain_color(api::command_list *cmd, bool defer) {
+      const auto requesters = retention_requesters();
+      if (defer) {
+        owed_present = requesters ? present_number : 0;
+        owed_requesters = requesters;
+      } else {
+        retain_color(cmd, present_number, requesters);
+      }
+    }
+    void retain_owed(api::command_list *cmd) {
+      const auto number = std::exchange(owed_present, uint64_t{});
+      retain_color(cmd, number, std::exchange(owed_requesters, uint8_t{}));
     }
     // The final side-by-side pass. Its target rests in `resting` between owners.
     void record_pack(api::command_list *cmd, api::resource target, api::resource_view view, api::resource_usage resting) {
@@ -633,6 +718,7 @@ namespace sunshine_game3d {
         (scene_bits & ui_detection::per_frame_pre_ui_visible) != 0, uint32_t(guard.refuted_count), scene_layer_proven};
       consumed_auto.scene_shadow = scene_shadow;
       consumed_auto.still = {still_scope, still_enabled, guard.still.state(), guard.still.run_ms()};
+      consumed_auto.change_set.enabled = pin_changed_render;
       consumed_auto.evidence.still_short_ms = std::max(consumed_auto.evidence.still_short_ms, still_short_ms);
     }
     // H2: logs what a run's observation or end did, records a run that ended
@@ -677,13 +763,16 @@ namespace sunshine_game3d {
       // detection binds candidate layout 2 (the offscreen UI layer at t7 and the
       // accepted mask in b2 word 2); a shader of another layout, such as an
       // older embedded replay shader, would misread both, so it gets none.
-      // Selection revision 5 (the T1 grace with its hold store at u5, the
+      // Selection revision 6 (the T1 grace with its hold store at u5, the
       // one-way judgment and the F1 reason words in texels 8 and 9, H1 with
       // its texel 10, the layer's pre-UI pixel counts in texel 11 from the
-      // statistics rows at pre_ui_statistics_row with b2 word 4, and H2 with
-      // b2 word 5, the stillness counts of texel 12 from the rows at
+      // statistics rows at pre_ui_statistics_row with b2 word 4, H2 with b2
+      // word 5, the stillness counts of texel 12 from the rows at
       // still_statistics_row and the previous cell means at u5 of the
-      // compare pass) is the only one this renderer drives.
+      // compare pass, and fix 3's change sets: the rule bits of b2 word 5,
+      // the retained Presents at t2 and t3 and the change-set shadow of
+      // texels 13-15 from the rows at change_set_statistics_row) is the only
+      // one this renderer drives.
       if (shader_source().find("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") == std::string_view::npos ||
           shader_marker(shader_source(), ui_detection::candidate_layout_marker) != ui_detection::candidate_layout ||
           shader_marker(shader_source(), ui_selection::revision_marker) != ui_selection::revision ||
@@ -698,10 +787,15 @@ namespace sunshine_game3d {
           !texture_create(detected_mask, width, height, api::format::r32_float, api::resource_usage::unordered_access) ||
           !texture_create(detection_hold, ui_detection::hold::store_texels, 1, api::format::r32_uint,
             api::resource_usage::unordered_access) ||
-          detection_decision_texels < ui_detection::still_decision_texels ||
+          detection_decision_texels < ui_detection::change_set_decision_texels ||
           !pipeline_create(detection_tiles, "SunshineUIDetectionTilesCS", true, {}) ||
           !pipeline_create(detection_reduce, "SunshineUIDetectionReduceCS", true, {}) ||
           !pipeline_create(detection_mask, "SunshineUIDetectionMaskCS", true, {}) ||
+          (change_set_planes_supported &&
+            (!texture_create(change_set_planes, ui_detection::change_set::planes * ui_detection::change_set::plane_words(width),
+               height, api::format::r32_uint, api::resource_usage::unordered_access) ||
+              !pipeline_create(detection_bits, "SunshineUIDetectionChangeSetBitsCS", true, {}) ||
+              !pipeline_create(detection_count, "SunshineUIDetectionChangeSetCountCS", true, {}))) ||
           (scene_evidence_supported() && (!texture_create(scene_cell_sums, ui_detection::scene::cells_x,
               ui_detection::scene::cells_y, api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
             !texture_create(scene_previous_luma, ui_detection::scene::cells_x, ui_detection::scene::cells_y,
@@ -771,16 +865,37 @@ namespace sunshine_game3d {
       const D3D12_RANGE written{0, 0}; counters_readback12->Unmap(0, &written);
       return true;
     }
-    // Commits a completed sample's counts (ui_temporal::sample_counters).
+    // Commits a completed sample's counts (ui_temporal::sample_counters) with
+    // its change-set shadow's (fix 3). Uncommitted, the shadow's join the
+    // renderer's CPU counts, which a later commit carries.
     void commit_counters(const alpha_auto_decision &sample, alpha_auto_policy *session,
-        const scene_guard::observation &observed) {
+        const scene_guard::observation &observed, const change_set::shadow_sample *shadow = nullptr) {
       std::array<uint32_t, ui_counter_word::count> words{};
-      if (!counters_pending || !read_counters(words)) return;
-      const auto delta = ui_temporal::sample_counters(sample, pending_counts, committed_counts, words, committed_words,
+      if (!counters_pending || !read_counters(words)) {
+        if (shadow) change_set::add_shadow_counters(cpu_counts, *shadow);
+        return;
+      }
+      auto delta = ui_temporal::sample_counters(sample, pending_counts, committed_counts, words, committed_words,
         detection_pending_source.now_ms, observed);
+      if (shadow) change_set::add_shadow_counters(delta, *shadow);
       committed_counts = pending_counts;
       committed_words = words;
       if (session) session->add_counters(delta);
+    }
+    // Fix 3: the change-set shadow of a completed sample that measured the
+    // offscreen layer (game3d_ui_change_set.h), from its decision words and
+    // the state it was submitted with; logged when due. It reaches no ledger
+    // and changes no decision.
+    std::optional<change_set::shadow_sample> change_set_shadow(const std::vector<uint32_t> &words, alpha_auto_decision &sample) {
+      if (!detection_pending_layer_measured || words.size() < 4u * ui_detection::change_set_decision_texels) return std::nullopt;
+      const auto &state = detection_pending_change_set;
+      const auto c = ui_selection::counts_from_words(words.data(), words.size());
+      auto shadow = change_set::measure_shadow(c, sample.evidence.candidates, sample.evidence.accepted, detection_pending_flags,
+        state.rules, state.pairing, state.layer_proven, state.hudless_offered, state.auto_mode, state.enabled);
+      sample.change_set = {true, shadow.pairing.kind, shadow.pairing.offset, shadow.valid, shadow.would_refine, state.enabled};
+      if (change_set::shadow_log_due(change_set_log, shadow, detection_pending_source.now_ms))
+        sunshine_log::message(reshade::log::level::info, change_set::shadow_log_text(shadow).c_str());
+      return shadow;
     }
     void poll_detection(const alpha_auto_source &input) {
       if (!detection_pending || detection_awaiting_signal || !detection_fence) return;
@@ -820,6 +935,7 @@ namespace sunshine_game3d {
       if (!read) { counters_pending = false; return; }
       latest = ui_temporal::decode_detection_sample(counts.data(), counts.size(), detection_pending_source.now_ms,
         detection_submitted, scene_evidence_supported(), detection_pending_flags);
+      const auto shadow = change_set_shadow(counts, latest);
       temporal.latest_source = detection_pending_source;
       temporal.latest_key = detection_pending_status_key;
       // The scene guard reads the sample's decision words before the
@@ -839,7 +955,7 @@ namespace sunshine_game3d {
       if (input.session)
         input.session->observe(ui_temporal::ledger_evidence(latest.evidence, detection_pending_h2_only), latest.pixels,
           detection_pending_source.now_ms, detection_pending_signatures);
-      commit_counters(latest, input.session, observed);
+      commit_counters(latest, input.session, observed, shadow ? &*shadow : nullptr);
       counters_pending = false;
     }
     // One real frame's detection, from its own offered candidates, accepted
@@ -848,9 +964,15 @@ namespace sunshine_game3d {
     // the T1 grace with per_frame_accepted_missing) runs the reduce and mask
     // passes only and never submits a sample: its statistics rows are the
     // previous frame's, which the reduce masks off with offered zero.
+    // change carries b2 word 5 (rules: H2's still::flatten and fix 3's
+    // change-set bits) and the change-set state a sample keeps; retained_1
+    // and retained_2 are the Presents one and two back (t2, t3, detection
+    // passes only), bound when the layer is offered and they are retained.
     void detect_ui(api::command_list *cmd, const render_parameters &p, const ui_detection_inputs &input,
         const alpha_auto_source &observation, api::resource_view paired_color, api::resource_view depth,
-        uint32_t bits, uint32_t accepted, uint32_t flags, uint32_t per_frame, uint32_t still_bits) {
+        uint32_t bits, uint32_t accepted, uint32_t flags, uint32_t per_frame, const change_set_submission &change,
+        api::resource_view retained_1, api::resource_view retained_2) {
+      const uint32_t rules = change.rules, still_bits = rules & ui_detection::still::flatten;
       std::array<api::resource_view, 15> views{};
       // A HUD-less image is compared with the color of the frame it belongs to:
       // its batch's tagged Backbuffer or a retained Present. Detection then also
@@ -862,6 +984,10 @@ namespace sunshine_game3d {
       views[6] = textures[source].srv;
       // Candidate layout 2: the offscreen UI layer in its own slot (t7).
       views[7] = input.layer;
+      // Fix 3: the retained Presents the layer copy pairs with (b2 word 5's
+      // pair offset); the eye and pack passes keep their own t2 and t3.
+      views[2] = retained_1;
+      views[3] = retained_2;
       for (unsigned i = 0; i != 3; ++i) views[11+i] = input.masks[i];
       views[14] = input.hudless;
       // A sample frame: the CPU reads the decision texels of at most one real
@@ -880,6 +1006,11 @@ namespace sunshine_game3d {
       detection_run = {ui_detection_snapshot::run_state::ran, bits, threshold_bits, accepted, flags | per_frame, flags};
       detection_run.pre_ui_threshold_bits = pre_ui_threshold_bits;
       detection_run.still_bits = still_bits;
+      detection_run.rules_bits = rules;
+      if (bits & ui_detection::candidate::layer) {
+        detection_run.layer_presents_ago = input.layer_presents_ago;
+        detection_run.layer_pairing = change.pairing.kind;
+      }
       if (still_bits) still_flattened = true;
       // The reduce also adds this frame to the exact counters at u7.
       auto &counter_texture = textures[ui_counter_words];
@@ -932,9 +1063,9 @@ namespace sunshine_game3d {
           float threshold;
           uint32_t accepted, flags;
           float pre_ui_threshold;
-          uint32_t still;
+          uint32_t rules;
         } values{detection_run.candidates, difference_threshold, detection_run.accepted, detection_run.flags,
-          pushed_pre_ui_threshold, detection_run.still_bits};
+          pushed_pre_ui_threshold, detection_run.rules_bits};
         static_assert(sizeof(values) == 6 * sizeof(uint32_t));
         cmd->push_constants(api::shader_stage::compute, layout, 5, 0, 6, &values);
         cmd->dispatch(x, y, 1);
@@ -948,6 +1079,19 @@ namespace sunshine_game3d {
           cmd->barrier(previous_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
       };
       if (bits) dispatch_stage(detection_tiles, detection_statistics, 6, 16, 16);
+      // Fix 3's change-set shadow on its sample frames, exactly when the
+      // shader's SunshineChangeSetShadow() holds (the tiles pass then leaves
+      // its statistics rows to the count pass): the bits pass compares each
+      // pixel once into the planes, the count pass sums them per tile.
+      const bool shadow_measured =
+        bits && ui_detection::change_set::shadow_dispatched(bits, pushed_pre_ui_threshold, rules);
+      if (shadow_measured && change_set_planes_supported) {
+        dispatch_stage(detection_bits, change_set_planes, 4, ui_detection::change_set::plane_words(width),
+          (height + ui_detection::change_set::bits_group_rows - 1) / ui_detection::change_set::bits_group_rows);
+        views[8] = textures[change_set_planes].srv;
+        dispatch_stage(detection_count, detection_statistics, 6, 16, 16);
+        views[8] = {};
+      }
       views[10] = textures[detection_statistics].srv;
       dispatch_stage(detection_reduce, detection_decision, 6, 1, 1, true, true);
       views[10] = textures[detection_decision].srv;
@@ -1025,7 +1169,17 @@ namespace sunshine_game3d {
       detection_pending_signatures = input.signatures;
       detection_pending_flags = detection_run.flags;
       detection_pending_still_scope = still_scope;
+      // Fix 3: the sample measured the offscreen layer against its pair (the
+      // change-set shadow, texels 13-15) when it offered one proven the
+      // pre-UI scene image with a pre-UI threshold.
+      detection_pending_change_set = change;
+      detection_pending_layer_measured = shadow_measured;
       detection_pending = detection_awaiting_signal = true;
+      // The mean Present interval of the sample period that ends here.
+      if (detection_last_submit && observation.now_ms > detection_last_submit && present_number > detection_submit_present)
+        present_interval_ms = std::clamp<uint64_t>((observation.now_ms - detection_last_submit) /
+          (present_number - detection_submit_present), 1, 100);
+      detection_submit_present = present_number;
       detection_last_submit = observation.now_ms; ++detection_submitted;
     }
     bool prepare_adaptive_probe() {
@@ -1263,6 +1417,10 @@ namespace sunshine_game3d {
         entries.insert(entries.end(), {{"SunshineUIDetectionTilesCS", "cs_5_0"}, {"SunshineUIDetectionReduceCS", "cs_5_0"},
           {"SunshineUIDetectionMaskCS", "cs_5_0"}});
       if (has("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") &&
+          shader_marker(source, ui_detection::change_set::planes_marker) == ui_detection::change_set::planes)
+        entries.insert(entries.end(), {{"SunshineUIDetectionChangeSetBitsCS", "cs_5_0"},
+          {"SunshineUIDetectionChangeSetCountCS", "cs_5_0"}});
+      if (has("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") &&
           shader_marker(source, ui_detection::scene_evidence_images_marker) == ui_detection::max_scene_evidence_images)
         entries.insert(entries.end(), {{"SunshineSceneCellsCS", "cs_5_0"}, {"SunshineSceneCompareCS", "cs_5_0"},
           {"SunshineSceneEvidenceCS", "cs_5_0"}});
@@ -1390,6 +1548,49 @@ namespace sunshine_game3d {
     sign(kind::hudless, candidates.hudless);
     if ((bits & candidate::current) && !signatures.format[std::size_t(kind::current)])
       signatures.set(kind::current, uint32_t(d.source_format));
+    // Fix 3 (game3d_ui_change_set.h): the offscreen layer copy holds the frame
+    // of the Present layer_presents_ago before this one. Its pairing is exact
+    // by Present counting with the retained color of that Present (from any
+    // requester), never with the current Present, and only while that Present
+    // and every one since, this one included, were real Presents with frame
+    // generation known off (the run below; a render twice in one Present
+    // counts once). In Auto with UIPinChangedPixels=1, a layer the ledger
+    // proved the pre-UI scene image (its pre_ui key, which is also the
+    // acceptance) is offered as the pre-UI change set (candidate::pre_ui,
+    // signed with the layer's format) unless a HUD-less image takes the
+    // change-set slot; its pair threshold is the layer's with the presented
+    // color (the shader applies change_set::inferred_scale) and it is never
+    // exact. Otherwise the layer pair is only measured on sample frames (the
+    // change-set shadow).
+    const bool layer_offered = (bits & candidate::layer) != 0;
+    const float layer_threshold = layer_offered ?
+      ui_selection::comparable({signatures.format[std::size_t(kind::ui_layer)], d.color}, presented).value_or(0.f) : 0.f;
+    const auto retained_1 = layer_offered ? d.retained_view(1, impl::retain_any) : api::resource_view{},
+      retained_2 = layer_offered ? d.retained_view(2, impl::retain_any) : api::resource_view{};
+    if (d.fg_off_present != d.present_number) {
+      const bool contiguous = d.fg_off_present + 1 == d.present_number;
+      d.fg_off_presents = change_set::next_fg_off_presents(contiguous ? d.fg_off_presents : 0u, candidates.fg_known_off,
+        candidates.hold_previous);
+      d.fg_off_present = d.present_number;
+    }
+    const auto pairing = change_set::pair_layer(layer_offered, d.fg_off_presents, candidates.layer_presents_ago,
+      retained_1.handle != 0, retained_2.handle != 0);
+    const bool pin_changed = auto_mode && automatic->session->pin_changed_pixels();
+    const bool pre_ui_proven = layer_offered && automatic && automatic->session &&
+      automatic->session->pre_ui_proven(signatures.of(kind::ui_layer));
+    const bool hudless_offered = (bits & candidate::hudless) != 0;
+    if (layer_threshold > 0.f && change_set::offered(auto_mode, pin_changed, pre_ui_proven, hudless_offered, pairing)) {
+      bits |= candidate::pre_ui;
+      signatures.set(kind::pre_ui, signatures.format[std::size_t(kind::ui_layer)]);
+    }
+    // With the switch on, a proven layer retains every Present (lingering
+    // like the HUD-less request), whatever the frame generation state, so a
+    // menu entry that turns it off has its pair as soon as the run of
+    // known-off Presents covers it.
+    if (pin_changed && pre_ui_proven) {
+      d.layer_retention_wanted = true;
+      d.layer_retention_requested_present = d.present_number;
+    }
     // Only accepted candidates decide (S1): the session's ledger in Auto,
     // every offered candidate in manual On, none in manual Off. Explicit
     // offline input without a session is already a resolved choice.
@@ -1406,13 +1607,16 @@ namespace sunshine_game3d {
     // CPU reads them back.
     const uint32_t flags = (bits & candidate::layer) ? candidates.layer_flags : 0u;
     if (arbitration.adopt) d.temporal.adopt(bits, accepted);
-    d.difference_threshold = pair_threshold ? *pair_threshold : ui_selection::comparable(presented, presented).value_or(2.f / 255.f);
+    // b2 word 1, the change-set slot's pair threshold: the HUD-less pair's,
+    // the pre-UI layer's with the presented color when it holds the slot
+    // (fix 3), else the presented color's own, as the replay computes it.
+    d.difference_threshold = pair_threshold ? *pair_threshold : (bits & candidate::pre_ui) ? layer_threshold :
+      ui_selection::comparable(presented, presented).value_or(2.f / 255.f);
     // H1 (d): the offscreen UI layer's pair threshold with the presented
     // color, from the layer signature's format; zero (no pre-UI pixel counts)
     // without a layer or when the two are not comparable. detect_ui pushes it
     // on sample frames only.
-    d.pre_ui_threshold = (bits & candidate::layer) ?
-      ui_selection::comparable({signatures.format[std::size_t(kind::ui_layer)], d.color}, presented).value_or(0.f) : 0.f;
+    d.pre_ui_threshold = layer_threshold;
     const bool needs_detection = auto_mode || manual_detection || ui.kind == ui_input_kind::hudless_difference;
     const bool detection_requested = needs_detection && (!automatic || mode != alpha_auto_state::manual_off);
     // A real Present that offers nothing runs detection only for the T1 grace
@@ -1454,6 +1658,10 @@ namespace sunshine_game3d {
     const auto &t = d.textures;
     d.collect_profile();
     if (d.prepare_profile()) d.mark(cmd, impl::mark_render);
+    // A retention a dump capture deferred and the caller did not finish is
+    // recorded before this Present's color replaces the source.
+    d.retain_owed(cmd);
+    const bool defer_retention = std::exchange(d.retention_deferred, false);
     cmd->barrier(backbuffer, api::resource_usage::present, api::resource_usage::copy_source);
     cmd->barrier(t[impl::source].resource, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
     cmd->copy_resource(backbuffer, t[impl::source].resource);
@@ -1465,6 +1673,8 @@ namespace sunshine_game3d {
     d.consumed = p;
     d.consumed_plane = plane;
     d.consumed_detection = {};
+    d.consumed_layer = {};
+    d.pin_changed_render = pin_changed;
     d.scene_bits = 0;
     d.scene_shadow = d.scene_layer_proven = false;
     // H2 (game3d_still_screen.h): Auto on SDR output only; a render outside
@@ -1511,10 +1721,20 @@ namespace sunshine_game3d {
         // zero-offer frame (the T1 grace) is never sampled, so it ends the
         // run instead.
         if (!bits) d.still_unmeasured();
-        const uint32_t still_bits = d.still_enabled && d.guard.still_flatten() ? ui_detection::still::flatten : 0u;
-        d.detect_ui(cmd, p, candidates, observation, hudless_color, depth, bits, accepted, flags, per_frame, still_bits);
+        const bool still_flatten = d.still_enabled && d.guard.still_flatten();
+        // b2 word 5: H2's flatten, and fix 3's refine (Auto with
+        // UIPinChangedPixels=1), the shadow (a layer proven the pre-UI scene
+        // image, the only one it measures), T1's change-set gap, the layer
+        // pair's Present offset and the bound retained Presents; the sample
+        // keeps the change-set state.
+        const impl::change_set_submission change{pairing, pre_ui_proven, hudless_offered, auto_mode, pin_changed,
+          change_set::rule_bits(still_flatten, pin_changed, pre_ui_proven, arbitration.change_set_gap, pairing,
+            retained_1.handle != 0, retained_2.handle != 0)};
+        d.detect_ui(cmd, p, candidates, observation, hudless_color, depth, bits, accepted, flags, per_frame, change,
+          retained_1, retained_2);
+        d.consumed_layer = layer_offered ? d.device->get_resource_from_view(candidates.layer) : api::resource{};
         d.consumed_detection = d.detection_run;
-        d.temporal.detected(observation, identity);
+        d.temporal.detected(observation, identity, bits);
       }
       alpha_source = t[impl::detected_mask].srv;
     } else if (unavailable) {
@@ -1528,7 +1748,17 @@ namespace sunshine_game3d {
       d.temporal.inactive();
       d.still_unmeasured();
     }
-    d.retain_color(cmd);
+    // Fix 3, the change-set shadow: with an offered layer proven the pre-UI
+    // scene image and frame generation known off, this Present is retained
+    // when a detection sample (one per 100 ms) is likely within the next two
+    // Presents, so a sample finds the Presents before it. A real UI layer
+    // (never proven) retains nothing.
+    {
+      const uint64_t now = observation.now_ms ? observation.now_ms : GetTickCount64();
+      d.layer_shadow_retention = pre_ui_proven && d.fg_off_presents &&
+        (!d.detection_last_submit || now + 2 * d.present_interval_ms >= d.detection_last_submit + 100);
+    }
+    d.retain_color(cmd, defer_retention);
     d.mark(cmd, impl::mark_detection);
     // A captured input's RGB never replaces current eye color. Auto consumes a
     // freshly derived mask; explicit manual/replay inputs retain their meaning.
@@ -1695,11 +1925,19 @@ namespace sunshine_game3d {
   diagnostic_resources renderer::diagnostics() const {
     if (!data_) return {};
     const auto &t = data_->textures;
-    return {t[impl::source].resource, t[impl::linear].resource, t[impl::raw].resource,
+    diagnostic_resources result{t[impl::source].resource, t[impl::linear].resource, t[impl::raw].resource,
       t[impl::vertical_majorant].resource, t[impl::vertical_field].resource,
       t[impl::field].resource, t[impl::packed].resource, data_->consumed_ui_source,
       data_->nearest_ui_rendered ? t[impl::ui_plane_tiles].resource : api::resource{},
       data_->nearest_ui_rendered ? t[impl::ui_plane_resolved].resource : api::resource{}};
+    // Fix 3: the retained Presents one and two before this render (a render
+    // that retained itself without deferral has replaced the second), and
+    // the layer copy its detection consumed.
+    for (std::size_t i = 0; i != result.retained_presents.size(); ++i)
+      if (const auto *retained = data_->retained(result.retained_offsets[i], impl::retain_any))
+        result.retained_presents[i] = retained->resource;
+    result.ui_layer_detected = data_->consumed_layer;
+    return result;
   }
   api::resource_view renderer::native_rtv(api::resource backbuffer) {
     if (!data_) return {};
@@ -1718,6 +1956,20 @@ namespace sunshine_game3d {
     // any later signal, so that signal conservatively retires them too.
     data_->pending = false;
     data_->unsignaled = true;
+  }
+  void renderer::set_dump_retention(bool armed, bool capture) {
+    if (!data_) return;
+    data_->dump_retention = armed;
+    data_->retention_deferred = armed && capture;
+  }
+  void renderer::finish_retention(api::command_list *cmd) {
+    if (!data_ || !data_->owed_present || data_->failed) return;
+    auto &d = *data_;
+    com<ID3DDeviceContextState> previous;
+    const bool isolated = d.context11.p && !d.frame_state;
+    if (isolated) d.context11->SwapDeviceContextState(d.isolated11.p, previous.put());
+    d.retain_owed(cmd);
+    if (isolated) d.context11->SwapDeviceContextState(previous.p, nullptr);
   }
   void renderer::begin_gpu_profile(api::command_list *cmd) {
     if (!data_ || data_->failed || !data_->prepare_profile()) return;

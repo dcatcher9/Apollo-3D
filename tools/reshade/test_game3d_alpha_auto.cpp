@@ -523,7 +523,9 @@ namespace {
     policy.on_change([&](const std::string &stored) { heard.push_back(stored); });
     policy.restore("backbuffer:24:srgb");
     policy.set_manual(true);
-    require(policy.accepted(0x7fu, signatures()) == ui_selection::candidate_bits, "Manual On did not accept the offered candidates");
+    require(policy.accepted(0x7fu, signatures()) == (0x7fu & ui_selection::candidate_bits) &&
+        policy.accepted(0x17fu, signatures()) == ui_selection::candidate_bits && !policy.accepted(0x20u, signatures()),
+      "Manual On did not accept exactly the offered candidates");
     for (std::uint64_t tick = 1000; tick <= 70000; tick += 500) {
       feed(policy, sample().alpha(kind::current, 200).alpha(kind::ui_color, 30).pair(50, 900), tick);
       feed(policy, sample().alpha(kind::backbuffer, 1000).pair(100, 900).one_way(kind::backbuffer, 1000, 800), tick);
@@ -650,7 +652,7 @@ namespace {
     require(first.detect && !first.hold && first.kind == hold_kind::none && first.adopt &&
         first.per_frame == ui_detection::per_frame_hold_reset, "The first real Present did not detect from a new chain");
     state.adopt(16u | 32u, 16u);
-    state.detected(scope, present_identity{false, 5});
+    state.detected(scope, present_identity{false, 5}, 16u | 32u);
     // Generated Presents of that real frame and of the next one hold, as many
     // as come (no multiplier constant); a third real frame does not.
     for (std::uint32_t i = 0; i != 5; ++i) {
@@ -690,7 +692,7 @@ namespace {
     // The next real frame in scope detects without per-frame bits and adopts.
     const auto next = state.arbitrate(present_identity{false, 6}, scope, 48u);
     require(next.detect && next.adopt && !next.per_frame, "A real frame in the chain pushed per-frame bits");
-    state.detected(scope, present_identity{false, 6});
+    state.detected(scope, present_identity{false, 6}, 48u);
     require(!state.holds && !state.next_frame && state.decision_frame == 6, "A real decision kept the hold count or next frame");
     // A Present without a mask ends the chain: generated Presents then have
     // no mask, and the next real detection starts a new chain.
@@ -704,7 +706,7 @@ namespace {
     // nothing, and an unaccepted missing candidate is no such frame.
     temporal::detection_state accepted;
     accepted.adopt(4u, 4u);
-    accepted.detected(scope, present_identity{});
+    accepted.detected(scope, present_identity{}, 4u);
     const auto missing = accepted.arbitrate(present_identity{}, scope, 0u);
     require(missing.detect && !missing.adopt && missing.per_frame == ui_detection::per_frame_accepted_missing,
       "A missing accepted candidate was not flagged, or the frame adopted");
@@ -714,13 +716,42 @@ namespace {
       "An offered accepted candidate was flagged missing");
     temporal::detection_state unaccepted;
     unaccepted.adopt(4u | 0x40u, 0x40u);
-    unaccepted.detected(scope, present_identity{});
+    unaccepted.detected(scope, present_identity{}, 4u | 0x40u);
     require(!unaccepted.arbitrate(present_identity{}, scope, 0x40u).per_frame &&
         unaccepted.arbitrate(present_identity{}, scope, 4u).per_frame == ui_detection::per_frame_accepted_missing,
       "Missing candidates were flagged by the wrong acceptance");
     // A generated Present never flags or adopts, whatever it offers.
     const auto generated = accepted.arbitrate(present_identity{true, 0}, scope, 1u);
     require(generated.hold && !generated.per_frame && !generated.adopt, "A generated Present detected or adopted");
+    // The pre-UI change set (fix 3) is offered only with an exact retained
+    // pairing, so it is left out of the accepted-missing test: a real frame
+    // without it adopts, and only the first one after a real frame that
+    // offered it reports the change-set gap (b2 word 5), once.
+    {
+      const std::uint32_t pre_ui = ui_detection::candidate::pre_ui, layer = ui_detection::candidate::layer;
+      temporal::detection_state menu;
+      require(!menu.arbitrate(present_identity{}, scope, 8u | layer | pre_ui).change_set_gap,
+        "A new chain reported a change-set gap");
+      menu.adopt(8u | layer | pre_ui, 8u | layer | pre_ui);
+      menu.detected(scope, present_identity{}, 8u | layer | pre_ui);
+      const auto gap = menu.arbitrate(present_identity{}, scope, 8u | layer);
+      require(gap.detect && gap.adopt && !gap.per_frame && gap.change_set_gap,
+        "A frame without the pre-UI change set was flagged accepted_missing, did not adopt, or reported no gap");
+      menu.adopt(8u | layer, 8u | layer);
+      menu.detected(scope, present_identity{}, 8u | layer);
+      const auto after = menu.arbitrate(present_identity{}, scope, 2u | 8u | layer);
+      require(after.adopt && !after.per_frame && !after.change_set_gap,
+        "The gap lasted past one frame, or the adopted inputs stopped updating");
+      temporal::detection_state held;
+      held.adopt(8u | pre_ui, 8u | pre_ui);
+      held.detected(scope, present_identity{}, 8u | pre_ui);
+      require(held.arbitrate(present_identity{true, 0}, scope, 0u).hold &&
+          !held.arbitrate(present_identity{true, 0}, scope, 0u).change_set_gap &&
+          held.arbitrate(present_identity{}, scope, 8u).change_set_gap,
+        "A generated Present reported the gap, or the next real frame did not");
+      held.unavailable();
+      require(!held.arbitrate(present_identity{}, scope, 8u).change_set_gap, "A new chain inherited the change-set gap");
+    }
 
     // A scope change discards the latest sample; an inactive render ends the
     // T1 chain. Neither holds any hidden-scene state (game3d_scene_guard.h).
@@ -733,7 +764,7 @@ namespace {
     ++moved.revision;
     scoped.enter_scope(moved);
     require(!scoped.latest.sample_tick_ms, "A new scope kept the sample");
-    scoped.detected(scope, present_identity{false, 9});
+    scoped.detected(scope, present_identity{false, 9}, 0u);
     scoped.inactive();
     require(!scoped.have_decision && scoped.arbitrate(present_identity{true, 9}, scope, 0u).kind == hold_kind::unavailable &&
         scoped.arbitrate(present_identity{false, 10}, scope, 0u).per_frame == ui_detection::per_frame_hold_reset,
@@ -1256,6 +1287,36 @@ namespace {
     require(earning.forget() == "pre_ui:87:srgb" && forgotten.empty() && !earning.pre_ui_proven(layer) &&
         earning.counters()[n::trust_forgotten] == 1, "Forget did not clear the pre-UI proof");
 
+    // Fix 3: the pre-UI change set (candidate 0x100) is accepted exactly
+    // while the proof of its layer's signature (its signature's key) is
+    // held, and offering it changes no ledger entry: observe() never reads it.
+    {
+      auto offered_sb = sb;
+      offered_sb.set(kind::pre_ui, 87);
+      alpha_auto_policy proven, unproven;
+      for (std::uint64_t t = 1000; t <= 3000; t += 1000) proven.observe(match, pixels, t, sb);
+      const std::uint32_t offered = candidate::layer | candidate::current | candidate::pre_ui;
+      require(proven.pre_ui_proven(layer) && proven.accepted(offered, offered_sb) == candidate::pre_ui &&
+          !unproven.accepted(offered, offered_sb) &&
+          !proven.accepted(offered, sb_signatures(87, 3).set(kind::pre_ui, 87)),
+        "The pre-UI change set was not accepted exactly while its layer's proof is held");
+      // The same samples with and without the pre-UI change set offered (and
+      // valid) leave the same ledger and acceptance counters.
+      alpha_auto_policy with_bit, without_bit;
+      std::uint64_t t = 1000;
+      for (const auto &e : {match, mismatch, menu, match, match, mismatch, match}) {
+        auto offered_e = e;
+        offered_e.candidates |= candidate::pre_ui;
+        offered_e.valid_bits |= candidate::pre_ui;
+        with_bit.observe(offered_e, pixels, t, offered_sb);
+        without_bit.observe(e, pixels, t, sb);
+        t += 700;
+      }
+      require(with_bit.stored() == without_bit.stored() && with_bit.stored() == "pre_ui:87:srgb" &&
+          with_bit.counters().value == without_bit.counters().value,
+        "Offering the pre-UI change set changed a ledger entry");
+    }
+
     // Manual modes never earn it, but honour it.
     alpha_auto_policy manual;
     manual.set_manual(true);
@@ -1282,6 +1343,10 @@ namespace {
     c[n::full_alpha] = 2; c[n::full_alpha_d_visible] = 1;
     c[n::scene_entered] = 1; c[n::scene_released] = 1; c[n::scene_refuted] = 2;
     c[n::still_entered] = 2; c[n::still_released] = 1; c[n::still_short] = 7;
+    c[n::decided + 12] = 6; c[n::refined] = 4;
+    c[n::change_set_samples] = 9; c[n::change_set_retained] = 5; c[n::change_set_late] = 3; c[n::change_set_unavailable] = 1;
+    c[n::change_set_valid] = 4; c[n::change_set_would_refine] = 3; c[n::change_set_would_decide] = 1;
+    c[n::change_set_pair_verified] = 4; c[n::change_set_pair_contradicted] = 1;
     c[n::samples] = 4; c.through_ms = 12345;
     c[n::detection_frames] += 5; c[n::auto_frames] += 5;
     require(c.reconciled() && c.held() == 3 && c.inactive() == 1, "The counters' accounting identity is wrong");
@@ -1291,10 +1356,12 @@ namespace {
     --c[n::reused];
     require(format_ui_counters(c) ==
         "auto_frames=15 detection_frames=11 held={generated=2 none=1} reused=1 "
-        "inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 10=4 11=5} "
+        "inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 10=4 11=5 12=6} refined=4 "
         "none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 gate_no_hold=1 "
         "no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 depth_not_current=1} full_d={hidden=1 ambiguous=0 visible=0 invalid=0} "
-        "scene={entered=1 released=1 refuted=2} still={entered=2 released=1 short=7} untrusted_inferred=0 inexact_difference=3 contradicted=2 presented_over_dedicated=0 full_alpha=2 "
+        "scene={entered=1 released=1 refuted=2} still={entered=2 released=1 short=7} change_set={samples=9 retained=5 late=3 "
+        "unavailable=1 valid=4 would_refine=3 would_decide=1 pair_verified=4 pair_contradicted=1} untrusted_inferred=0 "
+        "inexact_difference=3 contradicted=2 presented_over_dedicated=0 full_alpha=2 "
         "full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=0} trust={earned=1 revoked_exact=1 "
         "revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3} samples=4 through_ms=12345",
       "The UI counters log text changed");
@@ -1308,13 +1375,14 @@ namespace {
     now[ui_counter_word::none + ui_no_mask::ambiguous] = 5u; now[ui_counter_word::none + ui_no_mask::unaccepted] = 3u;
     now[ui_counter_word::untrusted_inferred] = 2u;
     now[ui_counter_word::full_alpha] = 4u;
-    now[ui_counter_word::contradicted] = 7u; now[ui_counter_word::reused] = 8u;
+    now[ui_counter_word::contradicted] = 7u; now[ui_counter_word::reused] = 8u; now[ui_counter_word::refined] = 9u;
+    now[ui_counter_word::decided + 12] = 10u;
     ui_counters gpu;
     gpu.add_gpu_delta(now, before);
     require(gpu[n::detection_frames] == 3 && gpu.decided(4) == 2 && gpu.decided(10) == 6 &&
         gpu[n::none + ui_no_mask::ambiguous] == 5 && gpu[n::none + ui_no_mask::unaccepted] == 3 &&
         gpu[n::untrusted_inferred] == 2 && gpu[n::full_alpha] == 4 && gpu[n::contradicted] == 7 && gpu[n::reused] == 8 &&
-        !gpu.decided(0), "GPU counter deltas are wrong");
+        gpu[n::refined] == 9 && gpu.decided(12) == 10 && !gpu.decided(0), "GPU counter deltas are wrong");
     // A session sums every commit and keeps the latest tick.
     alpha_auto_policy session;
     ui_counters first, second;

@@ -250,11 +250,14 @@ namespace sunshine_game3d::scene_guard {
         if (refutations[i] == signature) return true;
       return false;
     }
-    // The offered candidate bits whose signatures are refuted.
+    // The offered candidate bits whose signatures are refuted: claimable
+    // kinds only (the pre-UI change set never claims), so that the bits fit
+    // per_frame_refuted_mask.
     std::uint32_t refuted_bits(std::uint32_t offered, const kind_signatures &signatures) const {
       std::uint32_t bits = 0;
       for (const auto k : ui_selection::draw_order)
-        if ((offered & ui_selection::bit(k)) && refuted(signatures[std::size_t(k)])) bits |= ui_selection::bit(k);
+        if (ui_selection::claimable(k) && (offered & ui_selection::bit(k)) && refuted(signatures[std::size_t(k)]))
+          bits |= ui_selection::bit(k);
       return bits;
     }
 
@@ -291,11 +294,12 @@ namespace sunshine_game3d::scene_guard {
     observation observe(const sample &s, bool actionable, const kind_signatures &signatures, bool still_scope = false) {
       observation result;
       // A refuted candidate offered, valid and below 99% opaque (or an exact
-      // pair without a full change set) is an overlay again.
+      // pair without a full change set) is an overlay again. The pre-UI
+      // change set never claims, so it is neither refuted nor restored.
       if (s.complete)
         for (const auto k : ui_selection::draw_order) {
           const auto b = ui_selection::bit(k);
-          if (!(s.offered & s.valid_bits & b)) continue;
+          if (!ui_selection::claimable(k) || !(s.offered & s.valid_bits & b)) continue;
           const bool overlay = ui_selection::alpha_kind(k) ?
             !ui_selection::opaque_full(s.opaque[ui_selection::alpha_index(k)], s.pixels) :
             (s.offered & ui_detection::candidate::exact) && !(s.claims & b);
@@ -308,7 +312,8 @@ namespace sunshine_game3d::scene_guard {
           hidden.release();
           pre_ui.release();
           for (const auto k : ui_selection::draw_order)
-            if ((s.claims & ui_selection::bit(k)) && refute(signatures[std::size_t(k)])) ++result.refuted;
+            if (ui_selection::claimable(k) && (s.claims & ui_selection::bit(k)) && refute(signatures[std::size_t(k)]))
+              ++result.refuted;
         } else if (presented.verdict == scene_verdict::hidden) {
           result.entered = hidden.hit(s.tick);
           // The pre-UI image's own evidence, read only for the image the
@@ -324,7 +329,7 @@ namespace sunshine_game3d::scene_guard {
           pre_ui.miss();
         }
       }
-      gate_open = (s.claims & ui_selection::candidate_bits & ~refuted_bits(s.offered, signatures)) != 0u ||
+      gate_open = (s.claims & ui_selection::claimable_bits & ~refuted_bits(s.offered, signatures)) != 0u ||
         (s.claims & ui_detection::claim_pre_ui) != 0u;
       // An uncovered hidden scene: consecutive hidden samples while no source
       // decided. The first-run shadow measures it. A sample with fewer decided

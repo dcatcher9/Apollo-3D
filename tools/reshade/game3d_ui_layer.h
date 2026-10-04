@@ -19,7 +19,9 @@
 // several, the one cleared last in the frame (UI draws last) is active. The
 // active layer is copied just before the first clear after each Present: D3D12
 // requires RENDER_TARGET for a clear, so the state is known, and the copy holds
-// the previous frame's UI. UI detection receives the newest copy as the
+// the previous frame's UI: the frame the previous Present showed, which the
+// tracker's Present count names (presents_since_copy, the pairing of the
+// pre-UI change set, game3d_ui_change_set.h). UI detection receives the newest copy as the
 // offscreen UI layer candidate, in a slot of its own beside any tagged
 // UIColorAndAlpha (UI framework E1, candidate bit 0x40 at t7). It decides only
 // once accepted by its own evidence (A1) and only in a frame where it is valid
@@ -59,6 +61,20 @@ namespace sunshine_game3d::ui_layer {
     // A Present: choose the active layer among confirmed targets.
     void present(std::uint64_t now_ms);
     std::uint64_t active() const { return active_; }
+    // The active layer's copy was recorded now, in the current Present
+    // interval (after the last present()).
+    void copied() {
+      copy_frame_ = frame_;
+      copied_ = true;
+    }
+    // Presents observed since the last copied() (fix 3): 1 when the copy was
+    // recorded after the previous Present and this Present was observed,
+    // so the copy holds the frame that previous Present showed; 2 when an
+    // interval passed without one; 0 within the copy's own interval or
+    // without a copy.
+    std::uint32_t presents_since_copy() const {
+      return copied_ && frame_ - copy_frame_ <= 0xffffffffu ? static_cast<std::uint32_t>(frame_ - copy_frame_) : 0u;
+    }
     void reset() { *this = {}; }
   private:
     struct entry {
@@ -70,8 +86,8 @@ namespace sunshine_game3d::ui_layer {
         now_ms - value.last_ms <= max_clear_gap_ms;
     }
     std::array<entry, 8> entries_{};
-    std::uint64_t order_{}, frame_{}, active_{};
-    bool captured_since_present_{};
+    std::uint64_t order_{}, frame_{}, active_{}, copy_frame_{};
+    bool captured_since_present_{}, copied_{};
   };
 
   struct live_capture {
@@ -79,6 +95,10 @@ namespace sunshine_game3d::ui_layer {
     std::uint64_t capture_id{}; // Increases with every copy; never zero when valid.
     std::uint64_t tick{};       // GetTickCount64 when the copy was recorded.
     std::uint32_t format{};     // Typed format of the copy.
+    // Presents observed since the copy (layer_tracker::presents_since_copy):
+    // the copy holds the frame of the Present that many back
+    // (game3d_ui_change_set.h, pairing).
+    std::uint32_t presents_since_copy{};
   };
   // The active layer's newest copy on this device, recorded less than
   // max_clear_gap_ms ago. Each call also asks for the next copies: the layer is

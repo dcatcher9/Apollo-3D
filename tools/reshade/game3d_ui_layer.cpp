@@ -142,6 +142,8 @@ namespace sunshine_game3d::ui_layer {
       record_copy(commands, resource, live.copy);
       ++live.capture_id;
       live.tick = GetTickCount64();
+      // The Present count at the copy: it holds the previous Present's frame.
+      live.tracker.copied();
     }
 
     // Requires the state lock. The dump census: each armed qualifying target once.
@@ -234,7 +236,7 @@ namespace sunshine_game3d::ui_layer {
     const auto &live = s.live;
     if (!device || device != s.device || !live.copy.handle || !live.capture_id || !live.tracker.active() ||
         now_ms < live.tick || now_ms - live.tick > max_clear_gap_ms) return false;
-    out = {live.copy, live.capture_id, live.tick, static_cast<std::uint32_t>(live.format)};
+    out = {live.copy, live.capture_id, live.tick, static_cast<std::uint32_t>(live.format), live.tracker.presents_since_copy()};
     return true;
   }
 
