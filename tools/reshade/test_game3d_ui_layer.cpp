@@ -139,7 +139,7 @@ int main() {
         detection::decision_word::cs_judge_kind == 61u && detection::change_set_statistics_row == 160u &&
         detection::statistics_rows(detection::max_scene_evidence_images) == 192u && detection::source_pre_ui == 12u &&
         detection::source_count == 13u && detection::candidate::pre_ui == 0x100u && detection::h1_refined == 0x200u &&
-        detection::change_set::refine == 0x2u && detection::change_set::shadow == 0x4u &&
+        detection::rules::pin_only_ui == 0x2u && detection::change_set::shadow == 0x4u &&
         detection::change_set::gap == 0x8u && detection::change_set::pair_mask == 0x30u &&
         detection::change_set::retained_1 == 0x40u && detection::change_set::retained_2 == 0x80u &&
         sunshine_game3d::ui_counter_word::decided_count == 13u && sunshine_game3d::ui_counter_word::refined == 30u &&

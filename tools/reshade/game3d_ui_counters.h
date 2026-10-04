@@ -143,10 +143,16 @@ namespace sunshine_game3d {
   // offscreen layer (fix 3, game3d_ui_change_set.h), per committed sample
   // that measured it: samples, by pairing (retained by Present counting,
   // late, unavailable), whose set was valid, whose counterfactual with the
-  // pre-UI change set offered and UIPinChangedPixels=1 refined a shapeless
-  // alpha (would_refine) or decided source 12 by S1 itself (would_decide),
-  // and the retained pairs whose offset the changed counts against the
-  // Presents 0-2 back verified or contradicted.
+  // pre-UI change set offered and UIPinOnlyUI=1 refined a shapeless alpha
+  // (would_refine) or decided source 12 by S1 itself (would_decide), and the
+  // retained pairs whose offset the changed counts against the Presents 0-2
+  // back verified or contradicted. darkening: rule P2's pin only UI (fix 4,
+  // game3d_ui_darkening.h), per committed sample whose darkening passes
+  // measured its eligible decided source (the samples that log a
+  // "Sunshine UI darkening" line, with UIPinOnlyUI=1 or in the shadow):
+  // samples, those that unpinned (or would unpin) at least one pixel, and the
+  // darkening pixels unpinned (or that would be) and kept, summed
+  // (decision words dk_unpinned and dk_kept).
   // Trust events are the session acceptance ledger's (alpha_auto_policy):
   // signatures earned, revoked (A2) by an exact change set's one-way test or
   // by a declared alpha's coverage, lapsed, restored from an earlier session,
@@ -178,7 +184,10 @@ namespace sunshine_game3d {
       change_set_valid = change_set_samples + 4, change_set_would_refine = change_set_samples + 5,
       change_set_would_decide = change_set_samples + 6, change_set_pair_verified = change_set_samples + 7,
       change_set_pair_contradicted = change_set_samples + 8;
-    inline constexpr std::size_t count = change_set_pair_contradicted + 1;
+    inline constexpr std::size_t darkening_samples = change_set_pair_contradicted + 1,
+      darkening_unpinned_samples = darkening_samples + 1, darkening_unpinned_px = darkening_samples + 2,
+      darkening_kept_px = darkening_samples + 3;
+    inline constexpr std::size_t count = darkening_kept_px + 1;
   }
 
   struct ui_counters {
@@ -197,6 +206,13 @@ namespace sunshine_game3d {
     std::uint64_t inactive() const {
       return value[ui_counter::inactive_no_candidates] + value[ui_counter::inactive_size] +
         value[ui_counter::inactive_unprepared];
+    }
+    // Fix 4: one committed sample's darkening (darkening group).
+    void add_darkening(std::uint32_t unpinned, std::uint32_t kept) {
+      ++value[ui_counter::darkening_samples];
+      if (unpinned) ++value[ui_counter::darkening_unpinned_samples];
+      value[ui_counter::darkening_unpinned_px] += unpinned;
+      value[ui_counter::darkening_kept_px] += kept;
     }
     // The accounting identity every commit preserves.
     bool reconciled() const { return value[ui_counter::auto_frames] == value[ui_counter::detection_frames] + held() + inactive(); }
@@ -298,6 +314,12 @@ namespace sunshine_game3d {
       field("would_decide", c[n::change_set_would_decide]);
       field("pair_verified", c[n::change_set_pair_verified]);
       field("pair_contradicted", c[n::change_set_pair_contradicted]);
+    });
+    group("darkening", [&] {
+      field("samples", c[n::darkening_samples]);
+      field("unpinned_samples", c[n::darkening_unpinned_samples]);
+      field("unpinned_px", c[n::darkening_unpinned_px]);
+      field("kept_px", c[n::darkening_kept_px]);
     });
     field("untrusted_inferred", c[n::untrusted_inferred]);
     field("inexact_difference", c[n::inexact_difference]);

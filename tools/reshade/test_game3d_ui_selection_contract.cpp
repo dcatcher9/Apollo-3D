@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// GPU contract of the UI selection predicate (UI framework S1, S2a, S2b, fix 1, fix 2, fix 3): runs the
+// GPU contract of the UI selection predicate (UI framework S1, S2a, S2b, fix 1, fix 2, fix 3, fix 4): runs the
 // real SunshineUIDetectionReduceCS of game3d_native.hlsl on synthetic
 // per-tile statistics, detection constants and T1 hold stores, and compares
 // every decision word, the written hold store and every counter add with
@@ -11,7 +11,9 @@
 // cell means at u5) against a CPU oracle. Fix 3: the change-set slot of the
 // pre-UI layer's pair, the change-set shadow (statistics rows 160-191,
 // decision texels 13-15) and the 3x3 mask of source 12 are checked against
-// a CPU oracle on synthetic images. Also checks the predicate's intended
+// a CPU oracle on synthetic images. Fix 4: the darkening passes (pin only
+// UI, rule P2) against game3d_ui_darkening.h's reference, mask for mask and
+// in decision words 62-63, on synthetic images. Also checks the predicate's intended
 // behaviour (selection, the T1 grace, F1 reasons and refused candidates, the
 // H1 override of a hidden scene and its informative claims, the H2 override
 // of a still screen without a UI source, the pre-UI change set and refine),
@@ -23,6 +25,7 @@
 #include <wrl/client.h>
 
 #include "game3d_ui_change_set.h"
+#include "game3d_ui_darkening.h"
 #include "game3d_ui_selection.h"
 
 #include <algorithm>
@@ -773,7 +776,7 @@ namespace {
     // with an accepted exact HUD-less set, never a winner with shape; T1's
     // refine_missing; H1 over a refined frame; F1's difference_failed.
     {
-      const auto refine = detection::change_set::refine;
+      const auto refine = detection::rules::pin_only_ui;
       const auto layer_pair = refine | (1u << detection::change_set::pair_shift) | detection::change_set::retained_1;
       const auto pre_ui_case = [&](std::string name, std::uint32_t offered, std::uint32_t accepted, std::uint32_t rules,
                                    std::uint32_t current_opaque = small_pixels, std::uint32_t lit = small_pixels / 4u, std::uint32_t flags = 0u) {
@@ -1549,7 +1552,7 @@ namespace {
     };
     char space[32];
     std::snprintf(space, sizeof(space), "%s, width %d", color == 2 ? "scRGB" : "sRGB", width);
-    const std::uint32_t rules = detection::change_set::refine | detection::change_set::shadow |
+    const std::uint32_t rules = detection::rules::pin_only_ui | detection::change_set::shadow |
       (1u << detection::change_set::pair_shift) | detection::change_set::retained_1 | detection::change_set::retained_2;
     // Run A offers the pre-UI set over a shapeless accepted current alpha;
     // run B offers an accepted UIAlpha, which keeps the set out and judges
@@ -1779,7 +1782,7 @@ namespace {
       ID3D11ShaderResourceView *cleared[15]{};
       gpu.context->CSSetShaderResources(0, 15, cleared);
     };
-    const std::uint32_t rules = detection::change_set::refine | detection::change_set::shadow |
+    const std::uint32_t rules = detection::rules::pin_only_ui | detection::change_set::shadow |
       (1u << detection::change_set::pair_shift) | detection::change_set::retained_1 | detection::change_set::retained_2;
     for (const bool judged : {false, true}) {
       const std::uint32_t offered = candidate::layer | candidate::current | (judged ? candidate::ui_alpha : candidate::pre_ui);
@@ -1808,6 +1811,453 @@ namespace {
                 got[(row + lane / 16) * 16 + lane % 16][k], (*want)[lane][k]);
               throw std::runtime_error(text);
             }
+    }
+  }
+
+  // Fix 4, pin only UI (rule P2): the darkening passes against the CPU
+  // reference (game3d_ui_darkening.h) on synthetic 256 x 144 images. The
+  // decision texels are written directly (texel 0's applied source, texel 9
+  // not reused), so that only the darkening passes and the mask pass run:
+  // the bits, tiles and region passes into the planes, the mask pass, then
+  // the count and finish passes into decision words 62-63. Every mask and
+  // both words must equal the reference: the opacity layer (source 10) in
+  // sRGB and scRGB (a float layer, linear tolerance) and the UI color tag
+  // (2) in sRGB, with a smooth black dim band (unpinned), 2-pixel black
+  // strokes (kept), a 40-pixel black panel (edges kept, interior unpinned),
+  // a colour icon with a soft black halo (inner rings kept, the tail
+  // unpinned), an isolated speck (unpinned), a faint tint at the tolerance
+  // (darkening) and one above it (colour); a colourless layer (rgb 0, real
+  // alpha) that unpins nothing and sets word 63's colourless bit; a charcoal
+  // #303030 panel at alpha 0.5 that a float layer and a float tag
+  // (rules::tag_linear) keep as colour in scRGB while a UNORM tag's code
+  // tolerance calls it a darkening; a PQ HUD-less change set (5) composited
+  // in linear light with the same shapes; the pre-UI pair at k 8 (12) in
+  // sRGB; a grey tint over a grey scene as a HUD-less change set, whose
+  // tiles judge colour so that nothing unpins; and a pure dim joined to that
+  // tint, whose far tiles prove darkening on their own but whose region
+  // holds the tint, so that it stays pinned while a separate dim unpins.
+  // Without the switch (rules::darkening_measured alone) the mask is the raw
+  // source's and the words are the same; a reused frame and an ineligible
+  // source measure nothing.
+  void check_darkening(gpu_t &gpu, const std::string &source) {
+    namespace dark = sunshine_game3d::ui_darkening;
+    constexpr int width = 256, height = 144;
+    constexpr std::size_t count = std::size_t(width) * height;
+    using rgba = std::array<float, 4>;
+    const auto texture = [&](UINT w, UINT h, DXGI_FORMAT format, ComPtr<ID3D11Texture2D> &result,
+                           ComPtr<ID3D11ShaderResourceView> *srv, ComPtr<ID3D11UnorderedAccessView> &uav,
+                           ComPtr<ID3D11Texture2D> &staging) {
+      D3D11_TEXTURE2D_DESC desc{};
+      desc.Width = w;
+      desc.Height = h;
+      desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+      desc.Format = format;
+      desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | (srv ? D3D11_BIND_SHADER_RESOURCE : 0u);
+      checked(gpu.device->CreateTexture2D(&desc, nullptr, &result), "darkening texture");
+      if (srv) checked(gpu.device->CreateShaderResourceView(result.Get(), nullptr, srv->GetAddressOf()), "darkening view");
+      checked(gpu.device->CreateUnorderedAccessView(result.Get(), nullptr, &uav), "darkening UAV");
+      desc.BindFlags = 0;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      checked(gpu.device->CreateTexture2D(&desc, nullptr, &staging), "darkening staging");
+    };
+    ComPtr<ID3D11Texture2D> statistics, statistics_staging, decision, decision_staging, mask, mask_staging, planes, planes_staging;
+    ComPtr<ID3D11ShaderResourceView> statistics_view, decision_view, planes_view;
+    ComPtr<ID3D11UnorderedAccessView> statistics_uav, decision_uav, mask_uav, planes_uav;
+    const UINT rows = detection::statistics_rows(0, detection::change_set_decision_texels, detection::change_set::planes);
+    const UINT words = detection::change_set::plane_words(width);
+    texture(16, rows, DXGI_FORMAT_R32G32B32A32_UINT, statistics, &statistics_view, statistics_uav, statistics_staging);
+    texture(detection::change_set_decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT, decision, &decision_view, decision_uav,
+      decision_staging);
+    texture(width, height, DXGI_FORMAT_R32_FLOAT, mask, nullptr, mask_uav, mask_staging);
+    texture(detection::change_set::planes * words, height, DXGI_FORMAT_R32_UINT, planes, &planes_view, planes_uav, planes_staging);
+
+    // The passes of each colour space, compiled once.
+    std::array<std::array<ComPtr<ID3D11ComputeShader>, 6>, 4> compiled;
+    // One run: the source's images (t0 the paired color, t2 the Present one
+    // back, t7 the layer, t12 the UI color tag, t14 the HUD-less image), the
+    // decided source, b2 and whether T1 reused the frame; returns the mask
+    // and the decision words.
+    struct images_t {
+      std::vector<rgba> paired, back1, layer, tag, hudless;
+    };
+    struct run_t {
+      std::vector<float> mask;
+      std::vector<std::uint32_t> words;
+    };
+    const auto run = [&](unsigned color, const images_t &images, std::uint32_t decided, const detection_constants &constants,
+                         bool reused) {
+      const auto view_of = [&](const std::vector<rgba> &image) {
+        return image.empty() ? ComPtr<ID3D11ShaderResourceView>{} : float_image(gpu, image, width);
+      };
+      const auto paired = view_of(images.paired), back1 = view_of(images.back1), layer = view_of(images.layer),
+        tag = view_of(images.tag), hudless = view_of(images.hudless);
+      auto &passes = compiled[color];
+      if (!passes[0]) {
+        const char *entries[6]{"SunshineUIDarkeningBitsCS", "SunshineUIDarkeningTilesCS", "SunshineUIDetectionMaskCS",
+          "SunshineUIDarkeningCountCS", "SunshineUIDarkeningFinishCS", "SunshineUIDarkeningRegionCS"};
+        for (std::size_t e = 0; e != 6; ++e) passes[e] = compile_pass(gpu, source, color, entries[e]);
+      }
+      const auto &bits_pass = passes[0], &tiles_pass = passes[1], &mask_pass = passes[2], &count_pass = passes[3],
+        &finish_pass = passes[4], &region_pass = passes[5];
+      // The reduce's decision: texel 0 {source, covered, pixels, matching
+      // tiles}, texel 9's frame reason, sentinels in texel 15 .zw.
+      std::array<texel, detection::change_set_decision_texels> written{};
+      written[0] = {decided, 1u, std::uint32_t(count), 0u};
+      written[9] = {0u, 0u, 0u, reused ? detection::frame_reason_reused : detection::frame_reason_decided};
+      written[15] = {0u, 0u, 0xdeadbeefu, 0xdeadbeefu};
+      gpu.context->UpdateSubresource(decision.Get(), 0, nullptr, written.data(), UINT(sizeof(written)), 0);
+      gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
+      const std::array<float, 4> sentinel{-1.f, -1.f, -1.f, -1.f};
+      gpu.context->ClearUnorderedAccessViewFloat(mask_uav.Get(), sentinel.data());
+      ID3D11ShaderResourceView *t8 = nullptr;
+      const auto stage = [&](ID3D11ComputeShader *shader, ID3D11ShaderResourceView *t10, UINT slot_index,
+                           ID3D11UnorderedAccessView *uav, UINT x, UINT y) {
+        ID3D11ShaderResourceView *bound[15]{};
+        bound[0] = paired.Get();
+        bound[2] = back1.Get();
+        bound[7] = layer.Get();
+        bound[8] = t8;
+        bound[10] = t10;
+        bound[12] = tag.Get();
+        bound[14] = hudless.Get();
+        gpu.context->CSSetShader(shader, nullptr, 0);
+        gpu.context->CSSetShaderResources(0, 15, bound);
+        ID3D11Buffer *buffers[3]{nullptr, nullptr, gpu.constants.Get()};
+        gpu.context->CSSetConstantBuffers(0, 3, buffers);
+        gpu.context->CSSetUnorderedAccessViews(slot_index, 1, &uav, nullptr);
+        gpu.context->Dispatch(x, y, 1);
+        ID3D11UnorderedAccessView *none = nullptr;
+        gpu.context->CSSetUnorderedAccessViews(slot_index, 1, &none, nullptr);
+        ID3D11ShaderResourceView *cleared[15]{};
+        gpu.context->CSSetShaderResources(0, 15, cleared);
+      };
+      // As the renderer dispatches them (detection::darkening::dispatched).
+      if (detection::darkening::dispatched(constants.rules)) {
+        stage(bits_pass.Get(), decision_view.Get(), 4, planes_uav.Get(), words,
+          (height + detection::change_set::bits_group_rows - 1) / detection::change_set::bits_group_rows);
+        stage(tiles_pass.Get(), decision_view.Get(), 4, planes_uav.Get(), detection::darkening::tiles(width),
+          detection::darkening::tiles(height));
+        stage(region_pass.Get(), decision_view.Get(), 4, planes_uav.Get(), 1, 1);
+      }
+      t8 = planes_view.Get();
+      stage(mask_pass.Get(), decision_view.Get(), 0, mask_uav.Get(), (width + 7) / 8, (height + 7) / 8);
+      if (detection::darkening::dispatched(constants.rules)) {
+        stage(count_pass.Get(), decision_view.Get(), 6, statistics_uav.Get(), 16, 16);
+        t8 = nullptr;
+        stage(finish_pass.Get(), statistics_view.Get(), 6, decision_uav.Get(), 1, 1);
+      }
+      return run_t{read<float>(gpu, mask.Get(), mask_staging.Get(), count),
+        read<std::uint32_t>(gpu, decision.Get(), decision_staging.Get(), 4 * detection::change_set_decision_texels)};
+    };
+
+    // The shapes every image draws, as UI opacity a in [0, 1] over the frame
+    // and whether a pixel is the colour icon.
+    std::vector<float> shape(count, 0.f);
+    std::vector<std::uint8_t> icon(count, 0u);
+    const auto at = [](int x, int y) { return std::size_t(y) * width + std::size_t(x); };
+    // A smooth black dim band, 0 to 0.5 over rows 100-143 (0.0114 a row,
+    // below the 1/64 step).
+    for (int y = 100; y != height; ++y)
+      for (int x = 0; x != width; ++x) shape[at(x, y)] = .5f * float(y - 100) / 44.f;
+    // 2-pixel black strokes: two vertical, one horizontal.
+    for (int y = 20; y <= 40; ++y)
+      for (const int x : {20, 21, 30, 31}) shape[at(x, y)] = 1.f;
+    for (int x = 20; x <= 60; ++x)
+      for (const int y : {50, 51}) shape[at(x, y)] = 1.f;
+    // A black opaque panel 40 pixels wide.
+    for (int y = 20; y <= 80; ++y)
+      for (int x = 100; x <= 139; ++x) shape[at(x, y)] = 1.f;
+    // A colour icon and its soft black halo, 0.25 falling by 0.6 per ring
+    // over 8 rings (steps 0.1 down to 0.005: the inner rings step sharply,
+    // the tail from ring 6 does not).
+    for (int y = 12; y <= 47; ++y)
+      for (int x = 172; x <= 207; ++x) {
+        const int ring = std::max({180 - x, x - 199, 20 - y, y - 39, 0});
+        if (!ring) {
+          shape[at(x, y)] = 1.f;
+          icon[at(x, y)] = 1u;
+        } else if (ring <= 8) {
+          shape[at(x, y)] = .25f * std::pow(.6f, float(ring - 1));
+        }
+      }
+    // An isolated 1-pixel black speck.
+    shape[at(230, 60)] = .5f;
+    std::vector<std::uint8_t> faint(count, 0u);
+    // Opacity only: a faint tint at the 4/255 tolerance (darkening) beside
+    // one 5/255 (colour), each 0.3 opaque.
+    for (int y = 60; y <= 90; ++y)
+      for (int x = 160; x <= 219; ++x) {
+        shape[at(x, y)] = .3f;
+        faint[at(x, y)] = x < 190 ? 1u : 2u;
+      }
+
+    for (const unsigned color : {1u, 2u}) {
+      for (const std::uint32_t decided : {detection::source_layer, 2u}) {
+        if (color == 2u && decided == 2u) continue;
+        // The scRGB layer is a float layer: its tolerance is linear.
+        const bool linear = color == 2u && decided == detection::source_layer;
+        // The premultiplied colour U a of each shape; the icon is orange
+        // (scRGB: beyond 1, with a negative channel).
+        std::vector<rgba> ui(count, rgba{0.f, 0.f, 0.f, 0.f});
+        std::vector<dark::rgb> colour(count);
+        std::vector<float> alpha(count);
+        for (std::size_t i = 0; i != count; ++i) {
+          const float a = shape[i];
+          dark::rgb c{0.f, 0.f, 0.f};
+          if (icon[i]) c = color == 2u ? dark::rgb{2.5f, .4f, -.05f} : dark::rgb{.8f, .4f, .1f};
+          else if (faint[i]) c = {faint[i] == 1u ? dark::opacity_tolerance_for(linear) : 5.f / 255.f, 0.f, 0.f};
+          ui[i] = {c[0], c[1], c[2], a};
+          colour[i] = c;
+          alpha[i] = a;
+        }
+        const auto reference = dark::reference_opacity(width, height, colour, alpha, linear);
+        const auto cls = [&](int x, int y) { return reference.classes[at(x, y)]; };
+        using pc = dark::pixel_class;
+        require(cls(50, 130) == pc::unpinned && cls(20, 30) == pc::kept && cls(21, 30) == pc::kept && cls(40, 50) == pc::kept &&
+            cls(100, 50) == pc::kept && cls(120, 50) == pc::unpinned && cls(101, 50) == pc::unpinned &&
+            cls(190, 30) == pc::colour && cls(179, 30) == pc::kept && cls(176, 30) == pc::kept && cls(174, 30) == pc::unpinned &&
+            cls(230, 60) == pc::unpinned && cls(175, 75) == pc::unpinned && cls(200, 75) == pc::colour && cls(160, 75) == pc::kept,
+          "check_darkening: the CPU reference does not classify the opacity shapes as intended");
+        images_t images;
+        (decided == 2u ? images.tag : images.layer) = ui;
+        const std::uint32_t offered = decided == 2u ? candidate::ui_color : candidate::layer;
+        const char *space = color == 2u ? "scRGB" : "sRGB";
+        for (const bool enabled : {true, false}) {
+          const std::uint32_t rules = detection::rules::darkening_measured | (enabled ? detection::rules::pin_only_ui : 0u);
+          const detection_constants constants{offered, 2.f / 255.f, offered, detection::layer_detection_flags(color == 2u), 0.f,
+            rules, {}};
+          const auto got = run(color, images, decided, constants, false);
+          for (std::size_t i = 0; i != count; ++i) {
+            const float want = enabled && reference.classes[i] == pc::unpinned ? 0.f : alpha[i];
+            if (got.mask[i] != want)
+              throw std::runtime_error(std::string("darkening (") + space + ", source " + std::to_string(decided) +
+                (enabled ? ", pin only UI" : ", shadow") + "): the mask at x=" + std::to_string(i % width) + " y=" +
+                std::to_string(i / width) + " is " + std::to_string(got.mask[i]) + ", the reference " + std::to_string(want));
+          }
+          require(got.words[word::dk_unpinned] == reference.n.unpinned && got.words[word::dk_kept] == reference.n.kept &&
+              got.words[word::cs_judge_tp] == 0u && got.words[word::cs_judge_kind] == 0u && !reference.colourless,
+            std::string("darkening (") + space + ", source " + std::to_string(decided) + "): words 62-63 are " +
+              std::to_string(got.words[word::dk_unpinned]) + "/" + std::to_string(got.words[word::dk_kept]) + ", the reference " +
+              std::to_string(reference.n.unpinned) + "/" + std::to_string(reference.n.kept));
+        }
+        if (color != 1u || decided != detection::source_layer) continue;
+        // A reused frame and an ineligible source measure nothing; without
+        // rules::darkening_measured the passes do not run and the mask pass
+        // never reads the planes.
+        const std::uint32_t on = detection::rules::darkening_measured | detection::rules::pin_only_ui;
+        const detection_constants constants{offered, 2.f / 255.f, offered, detection::layer_detection_flags(false), 0.f, on, {}};
+        const auto reused = run(color, images, decided, constants, true);
+        require(reused.words[word::dk_unpinned] == 0u && reused.words[word::dk_kept] == 0u && reused.mask[0] == -1.f,
+          "darkening: a reused frame measured or rewrote its mask");
+        const auto ineligible = run(color, images, 1u, constants, false);
+        require(ineligible.words[word::dk_unpinned] == 0u && ineligible.words[word::dk_kept] == 0u,
+          "darkening: an ineligible source (UIAlpha) measured darkening");
+        const detection_constants off{offered, 2.f / 255.f, offered, detection::layer_detection_flags(false), 0.f,
+          detection::rules::pin_only_ui, {}};
+        const auto unmeasured = run(color, images, decided, off, false);
+        for (std::size_t i = 0; i != count; ++i)
+          require(unmeasured.mask[i] == alpha[i], "darkening: the mask pass unpinned without rules::darkening_measured");
+      }
+    }
+    // A colourless opacity source (rgb 0 with real alpha: an engine that
+    // renders coverage only) carries no colour evidence: nothing unpins and
+    // word 63 has the colourless bit; a single colour pixel makes it live.
+    for (const unsigned color : {1u, 2u}) {
+      std::vector<rgba> ui(count, rgba{0.f, 0.f, 0.f, 0.f});
+      std::vector<dark::rgb> colour(count, dark::rgb{});
+      for (std::size_t i = 0; i != count; ++i) ui[i][3] = shape[i];
+      const bool linear = color == 2u;
+      const auto reference = dark::reference_opacity(width, height, colour, shape, linear);
+      require(reference.colourless && !reference.n.unpinned && reference.n.kept == reference.n.darkening && reference.n.kept,
+        "check_darkening: the CPU reference unpinned a colourless layer");
+      images_t images;
+      images.layer = ui;
+      const std::uint32_t on = detection::rules::darkening_measured | detection::rules::pin_only_ui;
+      const detection_constants constants{candidate::layer, 2.f / 255.f, candidate::layer,
+        detection::layer_detection_flags(linear), 0.f, on, {}};
+      const auto got = run(color, images, detection::source_layer, constants, false);
+      for (std::size_t i = 0; i != count; ++i)
+        require(got.mask[i] == shape[i], "darkening: the mask pass unpinned a colourless layer");
+      require(got.words[word::dk_unpinned] == 0u &&
+          got.words[word::dk_kept] == (std::uint32_t(reference.n.kept) | detection::darkening::colourless),
+        "darkening: a colourless layer's words 62-63 are " + std::to_string(got.words[word::dk_unpinned]) + "/" +
+          std::to_string(got.words[word::dk_kept]));
+      std::vector<rgba> live = ui;
+      live[at(190, 30)] = {.5f, .5f, .5f, 1.f};
+      images.layer = live;
+      colour[at(190, 30)] = {.5f, .5f, .5f};
+      std::vector<float> live_alpha = shape;
+      live_alpha[at(190, 30)] = 1.f;
+      const auto live_reference = dark::reference_opacity(width, height, colour, live_alpha, linear);
+      const auto lit = run(color, images, detection::source_layer, constants, false);
+      require(!live_reference.colourless && live_reference.n.unpinned && lit.words[word::dk_unpinned] == live_reference.n.unpinned &&
+          lit.words[word::dk_kept] == live_reference.n.kept,
+        "darkening: one colour pixel did not make the layer live");
+    }
+    // A charcoal #303030 panel at alpha 0.5 is colour in SDR (24/255 in an
+    // 8-bit sRGB layer) and must be in HDR: in a float layer its linear
+    // premultiplied colour (0.0148) exceeds the linear tolerance though it
+    // is below 4/255. A float tag says so with rules::tag_linear; without it
+    // the code tolerance reads the same value as a darkening.
+    {
+      const float charcoal = float(std::pow((48. / 255. + .055) / 1.055, 2.4)) * .5f;
+      std::vector<rgba> ui(count, rgba{0.f, 0.f, 0.f, 0.f});
+      std::vector<dark::rgb> colour(count, dark::rgb{});
+      std::vector<float> alpha(count, 0.f);
+      for (int y = 40; y != 100; ++y)
+        for (int x = 60; x != 160; ++x) {
+          ui[at(x, y)] = {charcoal, charcoal, charcoal, .5f};
+          colour[at(x, y)] = {charcoal, charcoal, charcoal};
+          alpha[at(x, y)] = .5f;
+        }
+      // An icon elsewhere, so that the code-tolerance run is not colourless.
+      ui[at(200, 20)] = {.5f, .5f, .5f, 1.f};
+      colour[at(200, 20)] = {.5f, .5f, .5f};
+      alpha[at(200, 20)] = 1.f;
+      const auto linear_reference = dark::reference_opacity(width, height, colour, alpha, true);
+      const auto code_reference = dark::reference_opacity(width, height, colour, alpha, false);
+      require(charcoal < dark::opacity_tolerance && charcoal > dark::opacity_tolerance_linear &&
+          !linear_reference.n.darkening && code_reference.n.unpinned,
+        "check_darkening: the charcoal panel must be colour in linear and a darkening in code");
+      const std::uint32_t on = detection::rules::darkening_measured | detection::rules::pin_only_ui;
+      for (const int run_kind : {0, 1, 2}) {
+        images_t images;
+        const bool layer = run_kind == 0, tag_linear = run_kind == 1;
+        (layer ? images.layer : images.tag) = ui;
+        const std::uint32_t offered = layer ? candidate::layer : candidate::ui_color;
+        const detection_constants constants{offered, 2.f / 255.f, offered, layer ? detection::layer_detection_flags(true) : 0u,
+          0.f, on | (tag_linear ? detection::rules::tag_linear : 0u), {}};
+        const auto got = run(2u, images, layer ? detection::source_layer : 2u, constants, false);
+        const auto &reference = run_kind == 2 ? code_reference : linear_reference;
+        for (std::size_t i = 0; i != count; ++i) {
+          const float want = reference.classes[i] == dark::pixel_class::unpinned ? 0.f : alpha[i];
+          require(got.mask[i] == want, std::string("darkening: the charcoal panel (") +
+            (layer ? "float layer" : tag_linear ? "float tag" : "UNORM tag") + ") mask differs at x=" +
+            std::to_string(i % width) + " y=" + std::to_string(i / width));
+        }
+        require(got.words[word::dk_unpinned] == reference.n.unpinned && got.words[word::dk_kept] == reference.n.kept,
+          "darkening: the charcoal panel's words 62-63 differ from the reference");
+      }
+    }
+
+    // Change sets: a textured scene L and the presented P with the shapes
+    // composited as dims (P = L (1 - a), in linear light for PQ) and the icon
+    // as colour; scene pixels unchanged.
+    const auto scene_of = [&](int x, int y) {
+      return dark::rgb{.25f + .5f * float((x * 7 + y * 3) % 17) / 17.f, .2f + .4f * float((x * 5 + y * 11) % 13) / 13.f,
+        .35f + .3f * float((x * 3 + y * 5) % 11) / 11.f};
+    };
+    struct change_case {
+      const char *name;
+      unsigned color;
+      std::uint32_t decided;
+      float t;
+      bool tint, joined;
+    };
+    for (const auto &c : {change_case{"PQ HUD-less change set", 3u, 5u, 4.f / 1023.f, false, false},
+           change_case{"sRGB pre-UI pair (k 8)", 1u, detection::source_pre_ui, 2.f / 255.f, false, false},
+           change_case{"sRGB grey tint over a grey scene", 1u, 5u, 2.f / 255.f, true, false},
+           change_case{"sRGB dim joined to a grey tint", 1u, 5u, 2.f / 255.f, true, true}}) {
+      std::vector<dark::rgb> presented(count), pre(count);
+      for (int y = 0; y != height; ++y)
+        for (int x = 0; x != width; ++x) {
+          const std::size_t i = at(x, y);
+          dark::rgb l = scene_of(x, y);
+          if (c.tint) {
+            // A grey scene of grey levels 0.25 + k/24; the tint U = 0.3, a =
+            // 0.5 over a rectangle.
+            const float g = .25f + .5f * float((x * 7 + y * 3) % 13) / 12.f;
+            l = {g, g, g};
+            const bool tinted = x >= 64 && x < 192 && y >= 32 && y < 112;
+            // joined: a pure dim to 0.5 below the tint (rows 112-143, tile
+            // rows 7-8, the last beyond the tint's colour ring) and a
+            // separate one at the left edge (tiles 0-1, two tiles apart).
+            const bool dimmed = c.joined && ((x >= 64 && x < 192 && y >= 112) || (x < 32 && y >= 16));
+            const float p = tinted ? .5f * g + .15f : dimmed ? .5f * g : g;
+            pre[i] = l;
+            presented[i] = {p, p, p};
+            continue;
+          }
+          if (c.color == 3u) {
+            // A scene around 100 nits in PQ code, composited in linear light.
+            dark::rgb code{};
+            for (int k = 0; k != 3; ++k) code[k] = dark::pq::inverse_eotf(.002f + .02f * l[k]);
+            l = code;
+          }
+          pre[i] = l;
+          dark::rgb p = l;
+          if (icon[i]) {
+            p = c.color == 3u ? dark::rgb{.7f, .5f, .3f} : dark::rgb{.9f, .3f, .1f};
+          } else if (shape[i] > 0.f) {
+            for (int k = 0; k != 3; ++k)
+              p[k] = c.color == 3u ? dark::pq::inverse_eotf(dark::pq::eotf(l[k]) * (1.f - shape[i])) : l[k] * (1.f - shape[i]);
+          }
+          presented[i] = p;
+        }
+      const bool pre_ui = c.decided == detection::source_pre_ui;
+      const float k = pre_ui ? float(detection::change_set::inferred_scale) : 1.f;
+      const auto raw = dark::change_set_mask(width, height, presented, pre, c.t, k, c.color, pre_ui);
+      const auto reference = dark::reference_change_set(width, height, presented, pre, raw, c.t, k, c.color);
+      using pc = dark::pixel_class;
+      const auto cls = [&](int x, int y) { return reference.classes[at(x, y)]; };
+      const auto tile_at = [&](int x, int y) { return std::size_t(y / 16) * reference.tiles_x + std::size_t(x / 16); };
+      // The tint over this textured grey scene is kept by structure (its
+      // opacity steps with the scene) and joins no region, but its colour
+      // verdicts ring the joined dim's first tile row, which pins the dim's
+      // whole region; tile row 8 alone is proven.
+      const auto poisoned = [&](std::size_t tile) {
+        for (std::size_t i = 0; i != reference.ring.size(); ++i)
+          if (reference.component[i] == reference.component[tile] && reference.ring[i]) return true;
+        return false;
+      };
+      if (c.joined)
+        require(reference.verdicts[tile_at(100, 135)] == dark::verdict::darkening && !reference.ring[tile_at(100, 135)] &&
+            reference.component[tile_at(100, 135)] >= 0 && poisoned(tile_at(100, 135)) && !reference.region[tile_at(100, 135)] &&
+            cls(100, 135) == pc::kept && cls(10, 70) == pc::unpinned && reference.n.regions_unpinned == 1u,
+          std::string("check_darkening (") + c.name + "): a proven dim tile joined to a tint must stay pinned with its region, "
+            "and the separate dim must unpin");
+      else if (c.tint)
+        require(!reference.n.unpinned && reference.n.darkening && reference.n.tiles_colour,
+          std::string("check_darkening (") + c.name + "): the CPU reference unpinned a tint or judged no colour tile");
+      else
+        require(cls(50, 140) == pc::unpinned && cls(20, 30) == pc::kept && cls(100, 50) == pc::kept &&
+            cls(120, 50) == pc::unpinned && cls(190, 30) == pc::colour && reference.n.tiles_darkening,
+          std::string("check_darkening (") + c.name + "): the CPU reference does not classify the shapes as intended");
+      images_t images;
+      std::vector<rgba> final_image(count), pre_image(count);
+      for (std::size_t i = 0; i != count; ++i) {
+        final_image[i] = {presented[i][0], presented[i][1], presented[i][2], 1.f};
+        pre_image[i] = {pre[i][0], pre[i][1], pre[i][2], 0.f};
+      }
+      std::uint32_t offered, pair_rules = 0u;
+      if (pre_ui) {
+        images.back1 = final_image;
+        images.layer = pre_image;
+        offered = candidate::layer | candidate::pre_ui;
+        pair_rules = (1u << detection::change_set::pair_shift) | detection::change_set::retained_1;
+      } else {
+        images.paired = final_image;
+        images.hudless = pre_image;
+        offered = candidate::hudless | candidate::exact;
+      }
+      for (const bool enabled : {true, false}) {
+        const std::uint32_t rules =
+          pair_rules | detection::rules::darkening_measured | (enabled ? detection::rules::pin_only_ui : 0u);
+        const detection_constants constants{offered, c.t, offered & ~candidate::exact, 0u, 0.f, rules, {}};
+        const auto got = run(c.color, images, c.decided, constants, false);
+        for (std::size_t i = 0; i != count; ++i) {
+          const float want = raw[i] && !(enabled && reference.classes[i] == pc::unpinned) ? 1.f : 0.f;
+          if (got.mask[i] != want)
+            throw std::runtime_error(std::string("darkening (") + c.name + (enabled ? ", pin only UI" : ", shadow") +
+              "): the mask at x=" + std::to_string(i % width) + " y=" + std::to_string(i / width) + " is " +
+              std::to_string(got.mask[i]) + ", the reference " + std::to_string(want));
+        }
+        require(got.words[word::dk_unpinned] == reference.n.unpinned && got.words[word::dk_kept] == reference.n.kept,
+          std::string("darkening (") + c.name + "): words 62-63 are " + std::to_string(got.words[word::dk_unpinned]) + "/" +
+            std::to_string(got.words[word::dk_kept]) + ", the reference " + std::to_string(reference.n.unpinned) + "/" +
+            std::to_string(reference.n.kept));
+      }
     }
   }
 }
@@ -2175,7 +2625,7 @@ int main() {
       namespace hold = detection::hold;
       namespace counter = sunshine_game3d::ui_counter_word;
       using sunshine_game3d::ui_no_mask::names;
-      const auto refine = detection::change_set::refine;
+      const auto refine = detection::rules::pin_only_ui;
       const std::uint32_t sb = candidate::layer | candidate::current | candidate::pre_ui;
       // Stellar Blade SDR's Equipment page: the bare layer (V1-invalid, no
       // coverage), a uniform current alpha, a valid partial set lit on 26%.
@@ -2312,7 +2762,7 @@ int main() {
           std::abs(s.recall - 30. / 40.) < 1e-12 && std::abs(s.iou - 30. / 55.) < 1e-12,
         "Fix 3: the shadow of an Equipment-like page is not would_refine 12 with a verified pair");
       require(change_set::shadow_log_text(s) ==
-          "Sunshine UI change set: pairing=retained offset=1 fg=0 UIPinChangedPixels=0 changed=50 unchanged=920 nonfinite=0 "
+          "Sunshine UI change set: pairing=retained offset=1 fg=0 UIPinOnlyUI=0 changed=50 unchanged=920 nonfinite=0 "
           "matching_tiles=138 lit=260 layer_covered=0 valid=1 filtered=45 offsets={0=100 1=50 2=80} pair=verified "
           "judge={kind=ui_alpha pixels=40 tp=30 precision=0.667 recall=0.750 iou=0.545} winner=4 shapeless=1 would_refine=1 "
           "would_source=12 applied_source=4 pixels=1000",
@@ -2425,6 +2875,16 @@ int main() {
       "160-191 (pair, 3x3 rule, offsets 1 and 2, UIAlpha judge), texels 13-15, the verified pair offset, source 12 refining a "
       "shapeless alpha and its 3x3 mask (specks removed, line interiors kept) match the CPU oracle in sRGB and scRGB, and the "
       "shadow rows at width 8 (tiles empty in x) match it too");
+    check_darkening(gpu, source);
+    std::puts("PASS UI darkening passes (fix 4, P2): the bits, tiles, region, mask, count and finish passes match the CPU "
+      "reference (game3d_ui_darkening.h) mask for mask and in words 62-63: an sRGB and scRGB (float, linear tolerance) "
+      "offscreen layer and an sRGB UI color tag (dim band unpinned, strokes, panel edges and inner halo kept, panel interior, "
+      "halo tail and speck unpinned, a tint at the tolerance darkening, 5/255 colour), a colourless layer that unpins nothing "
+      "(word 63's colourless bit) until one colour pixel, a charcoal #303030 panel at 0.5 that a float layer and a float tag "
+      "keep as colour, a PQ HUD-less change set composited in linear light, the pre-UI pair at k 8, a grey tint whose colour "
+      "tiles keep it pinned, and a dim joined to it that stays pinned with its region while a separate dim unpins; the "
+      "shadow keeps the raw mask, and a reused frame, an ineligible source or a frame without the measured bit measure "
+      "nothing");
     std::printf("PASS UI detection tiles (V1, V2, A2, H1 d): alpha, layer, difference, one-way and pre-UI pixel counts on edge "
       "values match the CPU count for layer flags 0, 5 and 7, with and without an exact pair and a comparable layer, in sRGB, PQ "
       "and scRGB\n");

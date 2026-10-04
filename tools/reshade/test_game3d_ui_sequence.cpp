@@ -13,24 +13,31 @@
 // H2's run of still screens without a UI source (still_screen::run, fix 2)
 // with the renderer's scope and switch, and fix 3's pre-UI change set: the
 // layer copy's pairing with a retained Present (change_set::pair_layer), its
-// offer as candidate::pre_ui under UIPinChangedPixels (change_set::offered),
-// b2 word 5's rule bits (change_set::rule_bits, the refine rule included) and
+// offer as candidate::pre_ui under UIPinOnlyUI (change_set::offered), b2
+// word 5's rule bits (change_set::rule_bits, the refine rule included) and
 // the change-set shadow of every sample that measured the layer
-// (change_set::measure_shadow, its log throttle and counters). A stream's
+// (change_set::measure_shadow, its log throttle and counters), and fix 4's
+// rule P2 (pin only UI, game3d_ui_darkening.h): when the darkening passes
+// run (rules::darkening_measured), whether the mask pass unpins an eligible
+// source's darkening (ui_detection::darkening_applied, the mask a T1 reuse
+// keeps included), and every sample's darkening counters and its throttled
+// line from its decision words dk_unpinned and dk_kept. A stream's
 // GPU input is what one detection counts: decision texels 0-11 that
 // ui_detection_replay --verbose recorded on labelled dumps with the fix-1
 // shader, or synthetic counts; texel 12, the compare pass's still and
 // compared cells, is modelled from each Present's still share (a
 // recording's texel 12 is zero); texels 13-15 and the change-set slot of the
-// layer pair are synthetic (a recording's are zero). Every
+// layer pair are synthetic (a recording's are zero), and so are words 62-63
+// (fix 4's darkening counts, which test_game3d_ui_selection_contract and
+// ui_detection_replay prove per pixel against the CPU reference). Every
 // decision is ui_selection::decide, the C++ mirror of
 // SunshineUIDetectionReduceCS (the T1 hold store, the refine rule and the H1
 // and H2 overrides included) that test_game3d_ui_selection_contract proves
 // equal to the shader's reduce; every recorded decision must equal it.
 //
 // It asserts the rules through stage S2b, fix 1 (the pre-UI proof by
-// pixels), fix 2 (H2) and fix 3 (pre-UI change sets and the refine rule,
-// thirteen groups) strictly. An outcome that a later
+// pixels), fix 2 (H2), fix 3 (pre-UI change sets and the refine rule,
+// thirteen groups) and fix 4 (rule P2, pin only UI, six groups) strictly. An outcome that a later
 // stage of the UI decision framework (docs/reshade-sbs.md, UI decision
 // framework: stages S0-S6; rules E1, E2, V1, V2, A1-A3, S1, S2, H1, P1, T1,
 // F1) changes prints "KNOWN_TODAY <stage> <rule>: <text>" and does not fail;
@@ -47,6 +54,7 @@
 #include "game3d_scene_guard.h"
 #include "game3d_ui_change_set.h"
 #include "game3d_ui_counters.h"
+#include "game3d_ui_darkening.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_mask.h"
 #include "game3d_ui_selection.h"
@@ -458,6 +466,9 @@ namespace {
     // that differ), written when a layer is offered (the reduce writes zeros
     // otherwise).
     std::array<std::uint32_t, 4> pre_ui_counts {};
+    // Fix 4: the decided source's darkening pixels unpinned (or that would
+    // be) and kept, decision words dk_unpinned and dk_kept.
+    std::uint32_t dark_unpinned {}, dark_kept {};
 
     synthetic() {
       c.pixels = 1000;
@@ -513,6 +524,14 @@ namespace {
 
     synthetic &lit(std::uint32_t pixels) {
       c.lit = pixels;
+      return *this;
+    }
+
+    // Fix 4: what the darkening count and finish passes sum for the decided
+    // source (rule P2).
+    synthetic &darkening(std::uint32_t unpinned, std::uint32_t kept) {
+      dark_unpinned = unpinned;
+      dark_kept = kept;
       return *this;
     }
 
@@ -649,7 +668,15 @@ namespace {
         t[word::strong + judged_index(kind::ui_layer)] = 0;
         t[word::contradicted + judged_index(kind::ui_layer)] = 0;
       }
-      return decision_words(t, in);
+      t = decision_words(t, in);
+      // Fix 4: words 62-63 hold the darkening only when its passes measured
+      // an eligible decided source on a frame T1 did not reuse (the finish
+      // pass writes zero otherwise; the stream reads them on sample frames).
+      if (ui_detection::darkening_dispatched(in.rules, t[word::source], (t[word::frame_reason] & ui_detection::frame_reason_reused) != 0u)) {
+        t[word::dk_unpinned] = dark_unpinned;
+        t[word::dk_kept] = dark_kept;
+      }
+      return t;
     }
   };
 
@@ -730,6 +757,13 @@ namespace {
     change_set::layer_pairing pairing;
     bool pre_ui_offered {};
     std::uint32_t rules {};
+    // Fix 4: whether this detection ran the darkening passes (b2 word 5 as
+    // pushed is rules | rules::darkening_measured: every Auto frame that
+    // offers candidates with UIPinOnlyUI=1, Auto sample frames in its shadow),
+    // and whether the mask this frame applies has an eligible source's
+    // darkening unpinned (darkening_applied; a frame T1 reused, or a held
+    // Present, keeps the mask of the frame it shows).
+    bool darkening {}, darkened {};
     // update_alpha_auto's status for this frame.
     alpha_auto_decision consumed;
 
@@ -837,10 +871,16 @@ namespace {
     std::vector<transition> trust;  // stored() after a sample changed it.
     // Fix 3: each sample's change-set shadow (when it measured the layer),
     // the shadow lines the renderer would log, and the change_set counters
-    // the committed samples carry.
+    // the committed samples carry. Fix 4: the darkening lines the renderer
+    // would log (one per sample that measured an eligible source) and the
+    // darkening counters the committed samples carry.
     std::vector<std::optional<change_set::shadow_sample>> shadows;
     std::vector<std::string> shadow_lines;
     ui_counters shadow_committed;
+    std::vector<std::string> darkening_lines;
+    ui_darkening::log_state darkening_log;
+    std::size_t darkening_samples {};
+    ui_counters darkening_committed;
     // What render() saves with a sample for its change-set shadow.
     struct change_state {
       change_set::layer_pairing pairing;
@@ -866,7 +906,7 @@ namespace {
       const auto state = session.decision().state;
       const bool auto_mode = state != alpha_auto_state::manual_on && state != alpha_auto_state::manual_off;
       // Fix 3 (game3d_ui_change_set.h): the layer copy pairs with the
-      // retained Present it shows; in Auto with UIPinChangedPixels=1 a layer
+      // retained Present it shows; in Auto with UIPinOnlyUI=1 a layer
       // whose signature the ledger proved the pre-UI scene image is offered
       // as the pre-UI change set (signed with the layer's format, so its
       // acceptance is that proof) unless a HUD-less image holds the slot.
@@ -875,10 +915,10 @@ namespace {
       fg_off_presents = change_set::next_fg_off_presents(fg_off_presents, p.fg_known_off, p.hold_previous);
       r.fg_off_presents = fg_off_presents;
       r.pairing = change_set::pair_layer(layer_offered, fg_off_presents, p.layer_presents_ago, p.retained_1, p.retained_2);
-      const bool pin_changed = auto_mode && session.pin_changed_pixels();
+      const bool pin_only_ui = auto_mode && session.pin_only_ui();
       const bool pre_ui_proven = layer_offered && session.pre_ui_proven(signatures.of(kind::ui_layer));
       const bool hudless_offered = (bits & candidate::hudless) != 0;
-      if (change_set::offered(auto_mode, pin_changed, pre_ui_proven, hudless_offered, r.pairing)) {
+      if (change_set::offered(auto_mode, pin_only_ui, pre_ui_proven, hudless_offered, r.pairing)) {
         bits |= candidate::pre_ui;
         signatures.set(kind::pre_ui, signatures.format[std::size_t(kind::ui_layer)]);
         r.pre_ui_offered = true;
@@ -936,9 +976,9 @@ namespace {
         r.still_bits = still_enabled && guard.still_flatten() ? ui_detection::still::flatten : 0u;
         // b2 word 5: H2's flatten, refine (Auto and the switch), the layer
         // pair's offset and the retained Presents bound at t2 and t3.
-        r.rules = change_set::rule_bits(r.still_bits != 0, pin_changed, pre_ui_proven, r.hold.change_set_gap, r.pairing, layer_offered && p.retained_1, layer_offered && p.retained_2);
+        r.rules = change_set::rule_bits(r.still_bits != 0, pin_only_ui, pre_ui_proven, r.hold.change_set_gap, r.pairing, layer_offered && p.retained_1, layer_offered && p.retained_2);
         still_share = p.still_share;
-        pending_change = {r.pairing, pre_ui_proven, hudless_offered, auto_mode, pin_changed};
+        pending_change = {r.pairing, pre_ui_proven, hudless_offered, auto_mode, pin_only_ui};
         detect(observation, bits, flags, accepted, signatures, per_frame, shadow, index, r);
         temporal.detected(observation, identity, bits);
         invariants.generated_detections += p.hold_previous ? 1 : 0;
@@ -951,6 +991,7 @@ namespace {
         r.source = mask_source;
         r.covered = mask_covered;
         r.pixels = mask_pixels;
+        r.darkened = mask_darkened;
       }
       if (awaiting) {
         awaiting = false;
@@ -1042,6 +1083,18 @@ namespace {
           shadow_lines.push_back(change_set::shadow_log_text(*shadow));
         }
       }
+      // Fix 4, rule P2 (game3d_renderer.cpp, darkening_sample): a sample whose
+      // darkening passes measured its eligible decided source on a frame T1
+      // did not reuse reads its words dk_unpinned and dk_kept, its commit
+      // counts them, and its line is logged when due (on a change, else once
+      // a second).
+      if (pending_darkening && ui_detection::darkening_dispatched(pending_rules | ui_detection::rules::darkening_measured, latest.source_kind, latest.evidence.reused)) {
+        const bool applied = (pending_rules & ui_detection::rules::pin_only_ui) != 0u;
+        const auto measured = ui_darkening::sample_of(latest.source_kind, applied, latest.covered, pending_texels[word::dk_unpinned], pending_texels[word::dk_kept]);
+        latest.darkening = {true, applied, measured.unpinned, measured.kept, measured.colourless};
+        ++darkening_samples;
+        if (ui_darkening::log_due(darkening_log, measured, pending_source.now_ms)) darkening_lines.push_back(ui_darkening::log_text(measured));
+      }
       commit(latest, observation, shadow ? &*shadow : nullptr);
       counters_pending = false;
       r.polled = true;
@@ -1057,7 +1110,15 @@ namespace {
     }
 
     void detect(const alpha_auto_source &observation, std::uint32_t bits, std::uint32_t flags, std::uint32_t accepted, const candidate_signatures &signatures, std::uint32_t per_frame, bool shadow, std::size_t index, frame_result &r) {
-      r.gpu = {bits, flags, accepted, per_frame, observation.now_ms, gpu_hold, r.rules};
+      const auto now = observation.now_ms;
+      // A sample frame: the 100 ms cadence, one sample pending at a time,
+      // never a zero-offer frame.
+      const bool sample = !r.grace && !pending && !(last_submit && now >= last_submit && now - last_submit < sample_interval_ms);
+      // Fix 4 (game3d_renderer.cpp, detect_ui): the darkening passes run on
+      // every Auto frame that offers candidates with the switch on and on
+      // Auto sample frames in its shadow; the pushed b2 word 5 says so.
+      r.darkening = !r.grace && pending_change.auto_mode && ((r.rules & ui_detection::rules::pin_only_ui) || sample);
+      r.gpu = {bits, flags, accepted, per_frame, now, gpu_hold, r.rules | (r.darkening ? ui_detection::rules::darkening_measured : 0u)};
       // A zero-offer frame runs no tiles pass: the reduce reads the
       // statistics rows the previous tiles pass left (with nothing offered,
       // they decide nothing of their own).
@@ -1067,6 +1128,14 @@ namespace {
       // counter_adds); the mask pass writes no mask when it reused one.
       r.decision = decide(t, r.gpu);
       require(r.decision.source == t[word::source] && r.decision.covered == t[word::covered], "A stream's GPU model did not decide as ui_selection::decide");
+      // Fix 4: the darkening passes' bit never changes a decision (the reduce
+      // ignores it; only the passes after it and the mask pass read it).
+      if (r.darkening) {
+        auto plain = r.gpu;
+        plain.rules &= ~ui_detection::rules::darkening_measured;
+        const auto d = decide(t, plain);
+        require(d.source == r.decision.source && d.covered == r.decision.covered && d.reused == r.decision.reused && d.refined == r.decision.refined && d.none_reason == r.decision.none_reason && d.next.source == r.decision.next.source, "The darkening passes' bit changed a decision");
+      }
       gpu_hold = r.decision.next;
       if (!r.grace) {
         statistics = t;
@@ -1081,8 +1150,12 @@ namespace {
       mask_source = r.decision.source;
       mask_covered = r.decision.covered;
       mask_pixels = t[word::pixels];
-      const auto now = observation.now_ms;
-      if (r.grace || pending || (last_submit && now >= last_submit && now - last_submit < sample_interval_ms)) {
+      // The mask pass returns early on a frame T1 reused, so its mask keeps
+      // the previous real frame's darkening.
+      if (!r.decision.reused) {
+        mask_darkened = ui_detection::darkening_applied(r.gpu.rules, r.decision.source);
+      }
+      if (!sample) {
         return;
       }
       const bool proven_image = r.layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
@@ -1117,6 +1190,7 @@ namespace {
       // carries the shadow bit); the change-set state it was submitted with.
       pending_layer_measured = (bits & candidate::layer) && (r.rules & ui_detection::change_set::shadow);
       pending_rules = r.rules;
+      pending_darkening = r.darkening;
       submitted_change = pending_change;
       counters_pending = true;
       pending_words = gpu_words;
@@ -1141,6 +1215,10 @@ namespace {
       if (shadow) {
         change_set::add_shadow_counters(delta, *shadow);
         change_set::add_shadow_counters(shadow_committed, *shadow);
+      }
+      if (sample.darkening.measured) {
+        delta.add_darkening(sample.darkening.unpinned, sample.darkening.kept);
+        darkening_committed.add_darkening(sample.darkening.unpinned, sample.darkening.kept);
       }
       scene_entered += observation.entered ? 1 : 0;
       scene_released += observation.released ? 1 : 0;
@@ -1178,7 +1256,7 @@ namespace {
     texels pending_texels {};
     // Fix 3: the change-set state of this render and of the pending sample,
     // and the shadow's log throttle.
-    bool pending_layer_measured {};
+    bool pending_layer_measured {}, pending_darkening {};
     std::uint32_t pending_rules {};
     change_state pending_change, submitted_change;
     change_set::shadow_log_state shadow_log;
@@ -1187,6 +1265,7 @@ namespace {
     texels statistics {};
     ui_selection::hold_state gpu_hold {};
     std::uint32_t mask_source {}, mask_covered {}, mask_pixels {};
+    bool mask_darkened {};
     std::string last_accepted;
   };
 
@@ -1258,6 +1337,12 @@ namespace {
     for (auto index = ui_counter::change_set_samples; index <= ui_counter::change_set_pair_contradicted; ++index) {
       require(totals[index] == s.shadow_committed[index], what + ": change_set counter " + std::to_string(index) + " differs from the committed shadows");
     }
+    // The darkening group counts the committed samples' darkening (fix 4):
+    // every measured sample, of which the throttled lines are a subset.
+    for (auto index = ui_counter::darkening_samples; index <= ui_counter::darkening_kept_px; ++index) {
+      require(totals[index] == s.darkening_committed[index], what + ": darkening counter " + std::to_string(index) + " differs from the committed samples");
+    }
+    require(totals[ui_counter::darkening_samples] == s.darkening_samples && s.darkening_lines.size() <= s.darkening_samples, what + ": the darkening samples counted differ from those measured, or more lines were logged than samples");
   }
 
   void run(sequence &s, present p, std::uint64_t from, std::uint64_t to, std::uint64_t interval = 16) {
@@ -4536,17 +4621,17 @@ namespace {
     for (const bool enabled : {false, true}) {
       alpha_auto_policy session;
       restore_sb_sdr(session);
-      session.set_pin_changed_pixels(enabled);
+      session.set_pin_only_ui(enabled);
       const auto stored = session.stored();
       sequence s(session, sb_sdr_page(sb_equipment));
       run(s, sb_sdr_menu_present(), 10000, 13000);
       for (const auto &f : s.frames) {
         require(f.detected && f.pairing == change_set::layer_pairing {change_set::pair_class::retained, 1u} && f.pre_ui_offered == enabled, "The Equipment page's layer did not pair with the Present one back, or the switch did not gate its offer");
-        require(f.rules == ((enabled ? ui_detection::change_set::refine : 0u) | ui_detection::change_set::shadow | (1u << ui_detection::change_set::pair_shift) | ui_detection::change_set::retained_1 | ui_detection::change_set::retained_2), "The Equipment page pushed other rule bits");
+        require(f.rules == ((enabled ? ui_detection::rules::pin_only_ui : 0u) | ui_detection::change_set::shadow | (1u << ui_detection::change_set::pair_shift) | ui_detection::change_set::retained_1 | ui_detection::change_set::retained_2), "The Equipment page pushed other rule bits");
         if (enabled) {
           require(f.source == ui_detection::source_pre_ui && f.covered == sb_equipment.exact.changed && f.covered < f.pixels && f.decision.refined && f.decision.shapeless && f.decision.s1_source == ui_detection::source_pre_ui && (ui_selection::h1_word(f.decision) & ui_detection::h1_refined) && !f.decision.reused, "The enabled Equipment page did not pin only its changed pixels as a refined source 12");
         } else {
-          require(f.source == 4u && f.flat() && !f.decision.refined && f.decision.shapeless && !(f.rules & ui_detection::change_set::refine), "The shadow changed the Equipment page's flat current alpha");
+          require(f.source == 4u && f.flat() && !f.decision.refined && f.decision.shapeless && !(f.rules & ui_detection::rules::pin_only_ui), "The shadow changed the Equipment page's flat current alpha");
         }
       }
       const auto shadows = shadows_of(s);
@@ -4559,13 +4644,13 @@ namespace {
         require(sample.change_set.measured && sample.change_set.valid && sample.change_set.would_refine && sample.change_set.enabled == enabled && sample.evidence.refined == enabled, "A sample's change-set status or refined bit was wrong");
       }
       const std::string flag = enabled ? "1" : "0";
-      require(!s.shadow_lines.empty() && starts_with(s.shadow_lines[0], "Sunshine UI change set: pairing=retained offset=1 fg=0 UIPinChangedPixels=" + flag + " changed=52 unchanged=948 nonfinite=0 matching_tiles=150 lit=260 layer_covered=0 valid=1 filtered=51 offsets={0=56 1=52 2=60} pair=verified judge={kind=none pixels=0 tp=0 precision=- recall=- iou=-} winner=" + (enabled ? "12" : "4") + " shapeless=1 would_refine=1 would_source=12 applied_source=" + (enabled ? "12" : "4") + " pixels=1000"), "The shadow's first line differs: " + (s.shadow_lines.empty() ? std::string("none") : s.shadow_lines[0]));
+      require(!s.shadow_lines.empty() && starts_with(s.shadow_lines[0], "Sunshine UI change set: pairing=retained offset=1 fg=0 UIPinOnlyUI=" + flag + " changed=52 unchanged=948 nonfinite=0 matching_tiles=150 lit=260 layer_covered=0 valid=1 filtered=51 offsets={0=56 1=52 2=60} pair=verified judge={kind=none pixels=0 tp=0 precision=- recall=- iou=-} winner=" + (enabled ? "12" : "4") + " shapeless=1 would_refine=1 would_source=12 applied_source=" + (enabled ? "12" : "4") + " pixels=1000"), "The shadow's first line differs: " + (s.shadow_lines.empty() ? std::string("none") : s.shadow_lines[0]));
       require(s.shadow_lines.size() >= 3 && s.shadow_lines.size() <= 4, "The shadow lines were not throttled to one per second");
       require(session.stored() == stored && s.trust.empty(), "The Equipment page moved the ledger");
       const auto totals = session.counters();
       require(totals[ui_counter::change_set_samples] && totals[ui_counter::change_set_retained] == totals[ui_counter::change_set_samples] && totals[ui_counter::change_set_valid] == totals[ui_counter::change_set_samples] && totals[ui_counter::change_set_would_refine] == totals[ui_counter::change_set_samples] && totals[ui_counter::change_set_pair_verified] == totals[ui_counter::change_set_samples] && !totals[ui_counter::change_set_pair_contradicted] && !totals[ui_counter::change_set_would_decide], "The change_set counters do not count every retained, valid, verified sample");
       require((totals[ui_counter::refined] > 0) == enabled && (totals.decided(ui_detection::source_pre_ui) > 0) == enabled && (totals.decided(4) > 0) == !enabled, "The refined and decided counters do not follow the switch");
-      check_counters(s, enabled ? "SB SDR Equipment page, UIPinChangedPixels=1" : "SB SDR Equipment page, shadow");
+      check_counters(s, enabled ? "SB SDR Equipment page, UIPinOnlyUI=1" : "SB SDR Equipment page, shadow");
     }
   }
 
@@ -4589,7 +4674,7 @@ namespace {
       for (const bool enabled : {false, true}) {
         alpha_auto_policy session;
         restore_sb_sdr(session, current);
-        session.set_pin_changed_pixels(enabled);
+        session.set_pin_only_ui(enabled);
         sequence s(session, sb_sdr_page(sb_settings, hidden_menu));
         run(s, sb_sdr_menu_present(), 10000, 12500);
         for (const auto &f : s.frames) {
@@ -4609,7 +4694,7 @@ namespace {
           require(flat > 50 && s.frames.back().source == 8u && s.scene_entered == 1, "H1 did not show the Settings page flat as 8 under the held hidden verdict");
         }
         require(!session.counters()[ui_counter::refined] && !session.counters().decided(ui_detection::source_pre_ui), "The Settings page counted a refined or source-12 frame");
-        check_counters(s, std::string("SB SDR Settings page") + (current ? ", current accepted" : ", H1") + (enabled ? ", UIPinChangedPixels=1" : ""));
+        check_counters(s, std::string("SB SDR Settings page") + (current ? ", current accepted" : ", H1") + (enabled ? ", UIPinOnlyUI=1" : ""));
         modes[enabled] = sources_of(s);
       }
       require(modes[0] == modes[1], "The switch changed a Settings page decision");
@@ -4626,7 +4711,7 @@ namespace {
       for (const bool enabled : {false, true}) {
         alpha_auto_policy session;
         restore_sb_sdr(session, current);
-        session.set_pin_changed_pixels(enabled);
+        session.set_pin_only_ui(enabled);
         sequence s(session, sb_sdr_page(sb_loading, hidden_menu));
         run(s, sb_sdr_menu_present(), 10000, 12500);
         for (const auto &f : s.frames) {
@@ -4638,7 +4723,7 @@ namespace {
         if (!current) {
           require(s.frames.back().source == 8u && s.frames.back().flat(), "The loading screen under a held hidden verdict was not flat as 8");
         }
-        check_counters(s, std::string("SB SDR loading screen") + (enabled ? ", UIPinChangedPixels=1" : ""));
+        check_counters(s, std::string("SB SDR loading screen") + (enabled ? ", UIPinOnlyUI=1" : ""));
         modes[enabled] = sources_of(s);
       }
       require(modes[0] == modes[1], "The switch changed a loading screen decision");
@@ -4662,7 +4747,7 @@ namespace {
     for (const bool enabled : {false, true}) {
       alpha_auto_policy session;
       restore(session, sb_sdr_signatures().of(kind::ui_color).key() + "," + sb_sdr_current() + "," + sb_sdr_proof(), 3);
-      session.set_pin_changed_pixels(enabled);
+      session.set_pin_only_ui(enabled);
       sequence s(session, model);
       auto p = sb_sdr_present(candidate::ui_color | candidate::layer | candidate::current);
       p.fg_known_off = false;
@@ -4678,7 +4763,7 @@ namespace {
       require(!s.shadow_lines.empty() && s.shadow_lines[0].find("pairing=late offset=0 fg=1") != std::string::npos && s.shadow_lines[0].find("judge={kind=ui_color pixels=30 tp=26 precision=0.371 recall=0.867 iou=0.351}") != std::string::npos, "The late pair's shadow line lacks its judge: " + (s.shadow_lines.empty() ? std::string("none") : s.shadow_lines[0]));
       const auto totals = session.counters();
       require(totals[ui_counter::change_set_late] == totals[ui_counter::change_set_samples] && totals[ui_counter::change_set_samples] && !totals[ui_counter::change_set_valid] && !totals[ui_counter::refined], "The late pair's counters are wrong");
-      check_counters(s, std::string("SB SDR FG on") + (enabled ? ", UIPinChangedPixels=1" : ""));
+      check_counters(s, std::string("SB SDR FG on") + (enabled ? ", UIPinOnlyUI=1" : ""));
       modes[enabled] = sources_of(s);
     }
     require(modes[0] == modes[1], "The switch changed an FG-on decision");
@@ -4701,7 +4786,7 @@ namespace {
     for (const auto &v : {variant {"current interval", 0, true, true, change_set::pair_class::unavailable}, variant {"FG on or unknown", 1, false, true, change_set::pair_class::late}, variant {"ring missing", 1, true, false, change_set::pair_class::unavailable}}) {
       alpha_auto_policy session;
       restore_sb_sdr(session);
-      session.set_pin_changed_pixels(true);
+      session.set_pin_only_ui(true);
       sequence s(session, sb_sdr_page(sb_equipment));
       auto p = sb_sdr_menu_present();
       p.layer_presents_ago = v.presents_ago;
@@ -4735,7 +4820,7 @@ namespace {
       alpha_auto_policy session;
       const auto signatures = sb_hdr_signatures();
       restore(session, signatures.of(kind::ui_layer).key(), 1);
-      session.set_pin_changed_pixels(enabled);
+      session.set_pin_only_ui(enabled);
       sequence s(session, model);
       present p;
       p.offered = candidate::layer | candidate::current;
@@ -4752,7 +4837,7 @@ namespace {
       }
       require(shadows_of(s).empty() && !s.samples.empty() && !session.counters()[ui_counter::change_set_samples], "The change-set shadow measured the HDR UI layer");
       require(!session.pre_ui_proven(signatures.of(kind::ui_layer)), "A layer with coverage was proven a pre-UI image");
-      check_counters(s, std::string("SB HDR layer") + (enabled ? ", UIPinChangedPixels=1" : ""));
+      check_counters(s, std::string("SB HDR layer") + (enabled ? ", UIPinOnlyUI=1" : ""));
       modes[enabled] = sources_of(s);
     }
     require(modes[0] == modes[1], "The switch changed an HDR decision");
@@ -4769,7 +4854,7 @@ namespace {
       for (const bool enabled : {false, true}) {
         alpha_auto_policy session;
         restore(session, key(kind::backbuffer) + "," + key(kind::hudless), 2);
-        session.set_pin_changed_pixels(enabled);
+        session.set_pin_only_ui(enabled);
         sequence s(session, [changed](const gpu_inputs &in) {
           synthetic f;
           f.alpha(kind::backbuffer, 1000).opaque(kind::backbuffer, 1000).change_set(changed);
@@ -4780,11 +4865,11 @@ namespace {
         run(s, p, 10000, 12000);
         const bool refines = enabled && changed == 60u;
         for (const auto &f : s.frames) {
-          require(f.source == (refines ? 5u : 3u) && f.covered == (refines ? 60u : 1000u) && f.decision.refined == refines && !f.decision.inexact_difference && !(f.rules & ~ui_detection::change_set::refine) && f.pairing.kind == change_set::pair_class::none, "An exact selective HUD-less set did not refine the shapeless Backbuffer alpha exactly when enabled");
+          require(f.source == (refines ? 5u : 3u) && f.covered == (refines ? 60u : 1000u) && f.decision.refined == refines && !f.decision.inexact_difference && !(f.rules & ~ui_detection::rules::pin_only_ui) && f.pairing.kind == change_set::pair_class::none, "An exact selective HUD-less set did not refine the shapeless Backbuffer alpha exactly when enabled");
         }
         require(s.shadows.size() == s.samples.size() && shadows_of(s).empty(), "A stream without a layer measured a layer pair");
         require((session.counters()[ui_counter::refined] > 0) == refines, "The refined counter does not follow the refine");
-        check_counters(s, std::string("E33-like HUD-less refine, ") + std::to_string(changed) + (enabled ? ", UIPinChangedPixels=1" : ""));
+        check_counters(s, std::string("E33-like HUD-less refine, ") + std::to_string(changed) + (enabled ? ", UIPinOnlyUI=1" : ""));
       }
     }
   }
@@ -4798,7 +4883,7 @@ namespace {
     for (const bool enabled : {false, true}) {
       alpha_auto_policy session;
       restore(session, key(kind::ui_layer) + "," + key(kind::hudless), 2);
-      session.set_pin_changed_pixels(enabled);
+      session.set_pin_only_ui(enabled);
       sequence s(session, [](const gpu_inputs &in) {
         synthetic f;
         f.alpha(kind::ui_layer, 1000).opaque(kind::ui_layer, 350).change_set(60).pre_ui_pixels(400, 900, 900, 600).layer_pair(600, 590, 0, 600, 600);
@@ -4811,7 +4896,7 @@ namespace {
       for (const auto &f : s.frames) {
         require(f.source == ui_detection::source_layer && f.covered == 1000 && !f.decision.shapeless && !f.decision.refined && !f.pre_ui_offered, "The semi-transparent whole-frame layer was refined");
       }
-      check_counters(s, std::string("W3-like sign wheel") + (enabled ? ", UIPinChangedPixels=1" : ""));
+      check_counters(s, std::string("W3-like sign wheel") + (enabled ? ", UIPinOnlyUI=1" : ""));
       modes[enabled] = sources_of(s);
     }
     require(modes[0] == modes[1], "The switch changed the sign wheel's decision");
@@ -4827,7 +4912,7 @@ namespace {
     // alpha, until the pair returns.
     alpha_auto_policy session;
     restore_sb_sdr(session);
-    session.set_pin_changed_pixels(true);
+    session.set_pin_only_ui(true);
     sequence s(session, sb_sdr_page(sb_equipment));
     auto p = sb_sdr_menu_present();
     std::uint64_t now = 10000;
@@ -4861,7 +4946,7 @@ namespace {
     for (const bool enabled : {false, true}) {
       alpha_auto_policy session;
       restore_sb_sdr(session);
-      session.set_pin_changed_pixels(enabled);
+      session.set_pin_only_ui(enabled);
       sequence s(session, sb_sdr_page(sb_equipment, hidden_menu));
       run(s, sb_sdr_menu_present(), 10000, 12500);
       require(s.scene_entered == 1, "The hidden Equipment page did not enter a held hidden verdict");
@@ -4880,7 +4965,7 @@ namespace {
           require(f.source == 8u && f.flat() && f.decision.h1 && f.decision.refined && f.decision.s1_source == ui_detection::source_pre_ui && (f.decision.claims & candidate::current) && (f.decision.claims & ui_detection::claim_pre_ui), "H1 did not show the refined frame flat as 8 under the held hidden verdict");
         }
       }
-      check_counters(s, std::string("SB SDR Equipment page under H1") + (enabled ? ", UIPinChangedPixels=1" : ""));
+      check_counters(s, std::string("SB SDR Equipment page under H1") + (enabled ? ", UIPinOnlyUI=1" : ""));
     }
   }
 
@@ -4891,7 +4976,7 @@ namespace {
     // are blocked) and T1 reuses its decision once, then shows no mask.
     alpha_auto_policy session;
     restore(session, key(kind::ui_alpha) + "," + sb_sdr_current() + "," + sb_sdr_proof(), 3);
-    session.set_pin_changed_pixels(true);
+    session.set_pin_only_ui(true);
     sequence s(session, sb_sdr_page(sb_equipment, [](synthetic &f, const gpu_inputs &in) {
       f.alpha(kind::ui_alpha, 20, in.now_ms >= 11000 ? 500 : 0);
     }));
@@ -4911,7 +4996,7 @@ namespace {
   }
 
   void fix3_switch_toggled() {
-    // (l) UIPinChangedPixels edited mid-session (the panel): the decision
+    // (l) UIPinOnlyUI edited mid-session (the panel): the decision
     // follows from the next frame, and the ledger never moves.
     alpha_auto_policy session;
     restore_sb_sdr(session);
@@ -4920,16 +5005,16 @@ namespace {
     const auto p = sb_sdr_menu_present();
     run(s, p, 10000, 11000);
     const auto on = s.frames.size();
-    session.set_pin_changed_pixels(true);
+    session.set_pin_only_ui(true);
     run(s, p, 11000, 12000);
     const auto off = s.frames.size();
-    session.set_pin_changed_pixels(false);
+    session.set_pin_only_ui(false);
     run(s, p, 12000, 13000);
     for (std::size_t i = 0; i != s.frames.size(); ++i) {
       const bool enabled = i >= on && i < off;
       require(s.frames[i].source == (enabled ? ui_detection::source_pre_ui : 4u) && s.frames[i].decision.refined == enabled && !s.frames[i].decision.reused, "A decision did not follow the switch at once, at frame " + std::to_string(i));
     }
-    require(session.stored() == stored && s.trust.empty() && session.pin_changed_pixels() == false, "Editing the switch moved the ledger");
+    require(session.stored() == stored && s.trust.empty() && session.pin_only_ui() == false, "Editing the switch moved the ledger");
     check_counters(s, "SB SDR switch toggled");
   }
 
@@ -4997,7 +5082,7 @@ namespace {
     // another SDK generates) never pairs retained.
     alpha_auto_policy session;
     restore_sb_sdr(session);
-    session.set_pin_changed_pixels(true);
+    session.set_pin_only_ui(true);
     sequence s(session, sb_sdr_page(sb_equipment));
     s.fg_off_presents = 0;
     auto p = sb_sdr_menu_present();
@@ -5030,7 +5115,7 @@ namespace {
 
     alpha_auto_policy unknown;
     restore_sb_sdr(unknown);
-    unknown.set_pin_changed_pixels(true);
+    unknown.set_pin_only_ui(true);
     sequence never(unknown, sb_sdr_page(sb_equipment));
     auto q = sb_sdr_menu_present();
     q.fg_known_off = false;
@@ -5051,7 +5136,7 @@ namespace {
     // flat) and adopts its inputs, so the status key follows the tag.
     alpha_auto_policy session;
     restore(session, sb_sdr_signatures().of(kind::ui_color).key() + "," + sb_sdr_current() + "," + sb_sdr_proof(), 3);
-    session.set_pin_changed_pixels(true);
+    session.set_pin_only_ui(true);
     sequence s(session, sb_sdr_page(sb_equipment, [](synthetic &f, const gpu_inputs &in) {
       if (in.bits & candidate::ui_color) {
         f.alpha(kind::ui_color, 1000).opaque(kind::ui_color, 1000);
@@ -5076,6 +5161,304 @@ namespace {
     }
     require(s.temporal.bits == p.offered && s.temporal.status_key() == candidate::ui_color, "The adopted inputs stopped updating after the gap");
     check_counters(s, "SB SDR gap keeps adoption");
+  }
+
+  // ---------------------------------------------------------------- fix 4: pin only UI (rule P2)
+
+  // A Stellar Blade HDR-like stream: the accepted offscreen UI layer (1.5%
+  // covered) decides 10; its darkening words say 4 of its pixels are a pure
+  // darkening the rule unpins and 6 a darkening sharp structure keeps.
+  // invalid_from..invalid_to makes the layer invalid (T1's grace reuses the
+  // previous decision once).
+  gpu_model sb_hdr_layer_model(std::uint64_t invalid_from = 0, std::uint64_t invalid_to = 0) {
+    return [invalid_from, invalid_to](const gpu_inputs &in) {
+      synthetic f;
+      const bool invalid = in.now_ms >= invalid_from && in.now_ms < invalid_to;
+      f.alpha(kind::ui_layer, 15, invalid ? 500 : 0).opaque(kind::ui_layer, 10).alpha(kind::current, 1000).opaque(kind::current, 1000);
+      f.pre_ui_pixels(985, 900, 900, 15).darkening(4, 6);
+      return f.words(in);
+    };
+  }
+
+  present sb_hdr_layer_present() {
+    present p;
+    p.offered = candidate::layer | candidate::current;
+    p.layer_flags = ui_detection::layer_detection_flags(false);
+    p.signatures = sb_hdr_signatures();
+    return p;
+  }
+
+  // The darkening lines a stream logged, by their switch flag.
+  std::size_t darkening_lines_with(const sequence &s, const std::string &text) {
+    return std::size_t(std::count_if(s.darkening_lines.begin(), s.darkening_lines.end(), [&](const std::string &line) {
+      return line.find(text) != std::string::npos;
+    }));
+  }
+
+  void fix4_shadow_changes_nothing() {
+    // (a) The default shadow (UIPinOnlyUI=0) only measures: the darkening
+    // passes run on Auto sample frames alone, every sample of the eligible
+    // layer logs one line with UIPinOnlyUI=0 and is counted, and no mask is
+    // darkened. The same stream with words 62-63 zeroed gives the same
+    // decisions, masks, rules, ledger and counters, the darkening group
+    // apart (and every detection of every stream decides the same without
+    // the passes' bit: sequence::detect).
+    std::array<std::vector<frame_result>, 2> frames;
+    std::array<ui_counters, 2> totals;
+    std::array<std::string, 2> stored;
+    for (const bool zeroed : {false, true}) {
+      alpha_auto_policy session;
+      restore(session, sb_hdr_signatures().of(kind::ui_layer).key(), 1);
+      sequence s(session, sb_hdr_layer_model());
+      if (zeroed) {
+        s.sample_edit = [](texels &t, std::uint64_t, bool) {
+          t[word::dk_unpinned] = t[word::dk_kept] = 0u;
+        };
+      }
+      run(s, sb_hdr_layer_present(), 10000, 13000);
+      for (const auto &f : s.frames) {
+        require(f.source == ui_detection::source_layer && f.covered == 15 && !f.darkened && f.darkening == f.submitted && !(f.rules & ui_detection::rules::pin_only_ui) && !(f.rules & ui_detection::rules::darkening_measured), "The shadow darkened a mask, ran the darkening passes on a frame that was not a sample, or pushed the switch's bit");
+      }
+      // Every sample is measured and counted; its unchanging line logs at
+      // the first sample and then once a second (3 s: at most 4 lines).
+      require(s.samples.size() >= 20 && s.darkening_samples == s.samples.size() && !s.darkening_lines.empty() && s.darkening_lines.size() <= 4u && darkening_lines_with(s, "UIPinOnlyUI=0") == s.darkening_lines.size(), "The shadow's darkening lines were not throttled to once a second, or a sample was not measured");
+      require(s.darkening_lines[0] == (zeroed ? "Sunshine UI darkening: source=10 UIPinOnlyUI=0 covered=15 unpinned=0 kept=0 colourless=0" : "Sunshine UI darkening: source=10 UIPinOnlyUI=0 covered=15 unpinned=4 kept=6 colourless=0"), "The darkening line differs: " + s.darkening_lines[0]);
+      for (const auto &sample : s.samples) {
+        require(sample.darkening.measured && !sample.darkening.applied && sample.darkening.unpinned == (zeroed ? 0u : 4u), "A shadow sample's darkening status is wrong");
+      }
+      const auto c = session.counters();
+      require(c[ui_counter::darkening_samples] && c[ui_counter::darkening_unpinned_samples] == (zeroed ? 0u : c[ui_counter::darkening_samples]) && c[ui_counter::darkening_unpinned_px] == (zeroed ? 0u : 4u * c[ui_counter::darkening_samples]) && c[ui_counter::darkening_kept_px] == (zeroed ? 0u : 6u * c[ui_counter::darkening_samples]), "The darkening counters do not sum the committed samples");
+      check_counters(s, std::string("SB HDR layer, darkening shadow") + (zeroed ? ", zeroed" : ""));
+      frames[zeroed] = s.frames;
+      totals[zeroed] = c;
+      stored[zeroed] = session.stored();
+    }
+    require(frames[0].size() == frames[1].size() && stored[0] == stored[1], "The darkening words changed the stream or the ledger");
+    for (std::size_t i = 0; i != frames[0].size(); ++i) {
+      const auto &a = frames[0][i], &b = frames[1][i];
+      require(a.source == b.source && a.covered == b.covered && a.darkened == b.darkened && a.rules == b.rules && a.darkening == b.darkening && a.decision.reused == b.decision.reused && a.submitted == b.submitted, "The darkening words changed a decision or mask at frame " + std::to_string(i));
+    }
+    for (std::size_t i = 0; i != ui_counter::count; ++i) {
+      if (i < ui_counter::darkening_samples || i > ui_counter::darkening_kept_px) {
+        require(totals[0][i] == totals[1][i], "The darkening words changed counter " + std::to_string(i));
+      }
+    }
+  }
+
+  void fix4_switch_unpins_only_eligible_sources() {
+    // (b) UIPinOnlyUI=1: the darkening passes run on every Auto detection
+    // frame; the mask is darkened exactly when the frame's own decision is an
+    // eligible source (2 the UI color tag, 10 the layer, 5 a HUD-less set,
+    // 12 the pre-UI set), never for an alpha-only source (1 UIAlpha, 3
+    // Backbuffer, 4 current). Every decision equals the shadow's, apart from
+    // refine (its own groups).
+    struct variant {
+      const char *name;
+      std::string stored;
+      std::size_t restored;
+      std::uint32_t offered;
+      std::function<void(synthetic &)> counts;
+      std::uint32_t source;
+    };
+    const variant variants[] {
+      {"UI color tag", key(kind::ui_color), 1, candidate::ui_color | candidate::current, [](synthetic &f) { f.alpha(kind::ui_color, 30); }, 2u},
+      {"offscreen UI layer", key(kind::ui_layer), 1, candidate::layer | candidate::current, [](synthetic &f) { f.alpha(kind::ui_layer, 15); }, ui_detection::source_layer},
+      {"HUD-less set", key(kind::hudless), 1, candidate::hudless | candidate::exact | candidate::current, [](synthetic &f) { f.change_set(60); }, 5u},
+      {"UIAlpha", key(kind::ui_alpha), 1, candidate::ui_alpha | candidate::current, [](synthetic &f) { f.alpha(kind::ui_alpha, 20); }, 1u},
+      {"Backbuffer alpha", key(kind::backbuffer), 1, candidate::backbuffer, [](synthetic &f) { f.alpha(kind::backbuffer, 40); }, 3u},
+      {"current alpha", key(kind::current), 1, candidate::current, [](synthetic &f) { f.alpha(kind::current, 40); }, 4u},
+    };
+    for (const auto &v : variants) {
+      std::array<std::vector<std::uint32_t>, 2> modes;
+      for (const bool enabled : {false, true}) {
+        alpha_auto_policy session;
+        restore(session, v.stored, v.restored);
+        session.set_pin_only_ui(enabled);
+        const auto counts = v.counts;
+        sequence s(session, [counts](const gpu_inputs &in) {
+          synthetic f;
+          counts(f);
+          f.darkening(3, 2);
+          return f.words(in);
+        });
+        present p;
+        p.offered = v.offered;
+        p.layer_flags = (v.offered & candidate::layer) ? ui_detection::layer_detection_flags(false) : 0u;
+        run(s, p, 10000, 12000);
+        const bool eligible = ui_detection::darkening::eligible(v.source);
+        for (const auto &f : s.frames) {
+          require(f.source == v.source && f.darkening == (enabled || f.submitted) && f.darkened == (enabled && eligible) && ((f.rules & ui_detection::rules::pin_only_ui) != 0) == enabled, std::string(v.name) + ": the darkening passes or the darkened mask do not follow the switch and the source's eligibility");
+        }
+        require(s.darkening_samples == (eligible ? s.samples.size() : 0u) && (s.darkening_lines.empty() != eligible) && s.darkening_lines.size() <= 3u && darkening_lines_with(s, enabled ? "UIPinOnlyUI=1" : "UIPinOnlyUI=0") == s.darkening_lines.size(), std::string(v.name) + ": the darkening samples or their throttled lines do not follow eligibility");
+        if (eligible) {
+          require(starts_with(s.darkening_lines[0], "Sunshine UI darkening: source=" + std::to_string(v.source) + " UIPinOnlyUI=" + (enabled ? "1" : "0") + " covered="), std::string(v.name) + ": the darkening line names another source or switch: " + s.darkening_lines[0]);
+          for (const auto &sample : s.samples) {
+            require(sample.darkening.measured && sample.darkening.applied == enabled && sample.darkening.unpinned == 3u && sample.darkening.kept == 2u, std::string(v.name) + ": a sample's darkening is wrong");
+          }
+        }
+        require((session.counters()[ui_counter::darkening_samples] > 0) == eligible, std::string(v.name) + ": the darkening samples were not counted exactly for an eligible source");
+        check_counters(s, std::string("Pin only UI, ") + v.name + (enabled ? ", UIPinOnlyUI=1" : ""));
+        modes[enabled] = sources_of(s);
+      }
+      require(modes[0] == modes[1], std::string(v.name) + ": the switch changed a decision");
+    }
+  }
+
+  void fix4_t1_reuse_keeps_the_darkened_mask() {
+    // (c) T1 with the switch on: a real frame whose accepted layer turns
+    // invalid reuses the previous real frame's decision and mask once (the
+    // mask pass returns early), so it stays darkened, and a sample of a
+    // reused frame logs no darkening (texel 9's reused bit stops the passes);
+    // the next frame has no mask. Generated Presents hold the darkened mask
+    // of the real frame they show.
+    alpha_auto_policy session;
+    restore(session, sb_hdr_signatures().of(kind::ui_layer).key(), 1);
+    session.set_pin_only_ui(true);
+    sequence s(session, sb_hdr_layer_model(11000, 11040));
+    auto p = sb_hdr_layer_present();
+    run(s, p, 10000, 11100);
+    std::size_t reused = 0, lost = 0;
+    for (const auto &f : s.frames) {
+      if (f.decision.reused) {
+        ++reused;
+        require(f.source == ui_detection::source_layer && f.darkened && f.darkening, "A frame T1 reused lost the darkened mask");
+      } else if (f.now_ms >= 11000 && f.now_ms < 11040) {
+        ++lost;
+        require(!f.source && !f.darkened, "An invalid frame after the reuse kept a mask");
+      } else {
+        require(f.source == ui_detection::source_layer && f.darkened, "A valid layer frame was not darkened");
+      }
+    }
+    require(reused == 1 && lost >= 1, "The invalid layer did not reuse its decision exactly once");
+    for (const auto &sample : s.samples) {
+      require(sample.darkening.measured == (sample.source_kind == ui_detection::source_layer && !sample.evidence.reused), "A sample of a reused or undecided frame measured darkening");
+    }
+    // A generated Present shows the real frame's darkened mask.
+    p.hold_previous = true;
+    p.now_ms = 11104;
+    const auto &held = s.step(p);
+    require(held.held && held.source == ui_detection::source_layer && held.darkened && !held.darkening, "A generated Present did not hold the darkened mask, or ran the passes");
+    check_counters(s, "Pin only UI, T1 reuse");
+  }
+
+  void fix4_full_frame_sources_untouched() {
+    // (d) Whole-frame decisions are never darkened: H1's flat 8 over a
+    // refined Equipment page (its S1 winner 12 is eligible), H2's still
+    // screen 11 and the exact full HUD-less set 6, each with the switch on.
+    {
+      alpha_auto_policy session;
+      restore_sb_sdr(session);
+      session.set_pin_only_ui(true);
+      sequence s(session, sb_sdr_page(sb_equipment, [](synthetic &f, const gpu_inputs &in) {
+        hidden_menu(f, in);
+        f.darkening(20, 10);
+      }));
+      run(s, sb_sdr_menu_present(), 10000, 12500);
+      std::size_t flat = 0, refined = 0;
+      for (const auto &f : s.frames) {
+        require(f.darkening && f.darkened == (f.source == ui_detection::source_pre_ui), "H1 left an eligible frame undarkened or darkened its flat frame");
+        flat += f.source == 8u ? 1 : 0;
+        refined += f.source == ui_detection::source_pre_ui ? 1 : 0;
+      }
+      require(flat > 50 && refined > 0 && s.frames.back().source == 8u && s.frames.back().flat(), "H1 did not show the refined page flat as 8");
+      require(darkening_lines_with(s, "source=12 ") == s.darkening_lines.size() && darkening_lines_with(s, "source=8 ") == 0u, "A flat H1 sample logged darkening");
+      check_counters(s, "Pin only UI, H1 over a refined page");
+    }
+    {
+      const auto sb_d = [](std::uint64_t now) {
+        return -.014f - .054f * float((now / 100) % 10) / 9.f;
+      };
+      alpha_auto_policy session;
+      session.set_still_flatten(true);
+      session.set_pin_only_ui(true);
+      sequence s(session, still_screen_model(sb_d));
+      run_still(s, loading_screen_present(), 10000, 14000);
+      std::size_t still = 0;
+      for (const auto &f : s.frames) {
+        require(!f.darkened, "A still screen was darkened");
+        still += f.source == ui_detection::source_still ? 1 : 0;
+      }
+      require(still > 50 && s.darkening_lines.empty() && !session.counters()[ui_counter::darkening_samples], "H2 did not flatten, or its samples logged darkening");
+      check_counters(s, "Pin only UI, H2 still screen");
+    }
+    {
+      alpha_auto_policy session;
+      restore(session, key(kind::hudless), 1);
+      session.set_pin_only_ui(true);
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.change_set(990).darkening(5, 5);
+        return f.words(in);
+      });
+      present p;
+      p.offered = candidate::hudless | candidate::exact | candidate::current;
+      run(s, p, 10000, 11500);
+      for (const auto &f : s.frames) {
+        require(f.source == 6u && f.flat() && f.darkening && !f.darkened, "The full change set was not flat as 6, or was darkened");
+      }
+      require(s.darkening_lines.empty(), "The full change set logged darkening");
+      check_counters(s, "Pin only UI, full change set");
+    }
+  }
+
+  void fix4_refine_to_12_with_darkening() {
+    // (e) The Stellar Blade SDR Equipment page (dump 033: the bottom dim
+    // band about 40% of the changed pixels): with the switch on, refine
+    // decides the pre-UI set 12 and the darkening unpins its band on every
+    // frame; off, the page is flat by the shapeless current alpha (4, not
+    // eligible), and its samples log no darkening although the passes run.
+    for (const bool enabled : {false, true}) {
+      alpha_auto_policy session;
+      restore_sb_sdr(session);
+      session.set_pin_only_ui(enabled);
+      sequence s(session, sb_sdr_page(sb_equipment, [](synthetic &f, const gpu_inputs &) {
+        f.darkening(20, 4);
+      }));
+      run(s, sb_sdr_menu_present(), 10000, 12000);
+      for (const auto &f : s.frames) {
+        require(f.source == (enabled ? ui_detection::source_pre_ui : 4u) && f.darkened == enabled && f.darkening == (enabled || f.submitted) && f.decision.refined == enabled, "The Equipment page did not refine and darken exactly with the switch");
+      }
+      require(s.darkening_samples == (enabled ? s.samples.size() : 0u) && s.darkening_lines.empty() != enabled, "The Equipment page's darkening samples or lines do not follow the switch");
+      if (enabled) {
+        require(s.darkening_lines[0] == "Sunshine UI darkening: source=12 UIPinOnlyUI=1 covered=52 unpinned=20 kept=4 colourless=0", "The refined page's darkening line differs: " + s.darkening_lines[0]);
+        require(!s.shadow_lines.empty() && s.shadow_lines[0].find(" UIPinOnlyUI=1 ") != std::string::npos, "The change-set line does not name the shared switch");
+      }
+      check_counters(s, std::string("Pin only UI, SB SDR Equipment") + (enabled ? ", UIPinOnlyUI=1" : ""));
+    }
+  }
+
+  void fix4_one_switch() {
+    // (f) One switch, UIPinOnlyUI (fix 3's UIPinChangedPixels renamed): an
+    // edit mid-session turns refine and the darkening on and off together
+    // from the next frame, the change-set and darkening lines carry the same
+    // flag, and the ledger never moves.
+    alpha_auto_policy session;
+    restore_sb_sdr(session);
+    const auto stored = session.stored();
+    sequence s(session, sb_sdr_page(sb_equipment, [](synthetic &f, const gpu_inputs &) {
+      f.darkening(20, 4);
+    }));
+    const auto p = sb_sdr_menu_present();
+    run(s, p, 10000, 11000);
+    const auto on = s.frames.size();
+    session.set_pin_only_ui(true);
+    run(s, p, 11000, 12000);
+    const auto off = s.frames.size();
+    session.set_pin_only_ui(false);
+    run(s, p, 12000, 13000);
+    for (std::size_t i = 0; i != s.frames.size(); ++i) {
+      const bool enabled = i >= on && i < off;
+      const auto &f = s.frames[i];
+      require(f.source == (enabled ? ui_detection::source_pre_ui : 4u) && f.decision.refined == enabled && f.darkened == enabled && ((f.rules & ui_detection::rules::pin_only_ui) != 0) == enabled, "Refine and the darkening did not follow the one switch at frame " + std::to_string(i));
+    }
+    for (const auto &line : s.darkening_lines) {
+      require(starts_with(line, "Sunshine UI darkening: source=12 UIPinOnlyUI=1 "), "A darkening line outside the switched-on span: " + line);
+    }
+    for (const auto &line : s.shadow_lines) {
+      require(line.find("UIPinChangedPixels") == std::string::npos && line.find(" UIPinOnlyUI=") != std::string::npos, "A change-set line names the old key: " + line);
+    }
+    require(!s.darkening_lines.empty() && session.stored() == stored && s.trust.empty() && !session.pin_only_ui(), "Editing the switch moved the ledger or logged no darkening");
+    check_counters(s, "Pin only UI, switch toggled");
   }
 
   void s1_invariants() {
@@ -5416,6 +5799,12 @@ int main(int argc, char **argv) {
     {"A1/F1 change-set shadow inert (fix 3)", fix3_shadow_inert},
     {"E2 FG exactness by paired Presents (fix 3)", fix3_fg_exactness},
     {"T1 change-set gap keeps adoption (fix 3)", fix3_gap_keeps_adoption},
+    {"P2 shadow changes nothing (fix 4)", fix4_shadow_changes_nothing},
+    {"P2 switch unpins only eligible sources (fix 4)", fix4_switch_unpins_only_eligible_sources},
+    {"P2/T1 reuse keeps the darkened mask (fix 4)", fix4_t1_reuse_keeps_the_darkened_mask},
+    {"P2/H1/H2 whole-frame decisions untouched (fix 4)", fix4_full_frame_sources_untouched},
+    {"P2/S1 refine to 12 with darkening (fix 4)", fix4_refine_to_12_with_darkening},
+    {"P2 one switch UIPinOnlyUI (fix 4)", fix4_one_switch},
     {"S1/T1 invariants", s1_invariants},
   };
   try {

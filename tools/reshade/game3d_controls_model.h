@@ -157,46 +157,51 @@ namespace sunshine_game3d {
     "not show the scene depth's edges and stays still for 2 s is shown flat until it changes. Saved per game "
     "(UIFlattenStillScreens).";
 
-  // Fix 3 (docs/reshade-sbs.md, UI decision framework; game3d_ui_change_set.h):
-  // the changed pixels of an exact pre-UI image decide (the proven offscreen
-  // layer paired with the retained Present it shows is offered, and refine
-  // lets a valid exact selective change set replace a shapeless whole-frame
-  // alpha) only when ReShade.ini UIPinChangedPixels is 1; absent writes 0 so
-  // the key is discoverable, and 0 (or anything else) keeps the default
-  // shadow, which only measures and logs what it would do. ReShade.ini is
-  // per game.
-  inline constexpr const char *pin_changed_pixels_key = "UIPinChangedPixels";
+  // Pin only UI (docs/reshade-sbs.md, UI decision framework: fix 3's
+  // pre-UI change set, game3d_ui_change_set.h, and rule P2's darkening,
+  // game3d_ui_darkening.h): only UI pins. The changed pixels of an exact
+  // pre-UI image decide (the proven offscreen layer paired with the retained
+  // Present it shows is offered, and refine lets a valid exact selective
+  // change set replace a shapeless whole-frame alpha) and a pure darkening
+  // the decided source shows (a dim, vignette, fade or backdrop that adds no
+  // colour of its own, without sharp structure) does not pin, only when
+  // ReShade.ini UIPinOnlyUI is 1; absent writes 0 so the key is
+  // discoverable, and 0 (or anything else) keeps the default shadow, which
+  // only measures and logs what it would do. ReShade.ini is per game. Fix 3's
+  // UIPinChangedPixels is not read (it shipped as a shadow).
+  inline constexpr const char *pin_only_ui_key = "UIPinOnlyUI";
   template<class Backend>
-  bool load_pin_changed_pixels(Backend &config) {
+  bool load_pin_only_ui(Backend &config) {
     int value = -1;
-    config.read(pin_changed_pixels_key, value);
+    config.read(pin_only_ui_key, value);
     if (value == -1) {
-      config.write(pin_changed_pixels_key, 0);
+      config.write(pin_only_ui_key, 0);
       return false;
     }
     return value == 1;
   }
   // The panel's checkbox: saves the key, then switches the game's session.
   template<class Backend>
-  bool edit_pin_changed_pixels(settings_state &settings, bool value, Backend &config) {
-    if (!settings.alive || !settings.alpha_session || value == settings.alpha_session->pin_changed_pixels()) return false;
-    config.write(pin_changed_pixels_key, value ? 1 : 0);
+  bool edit_pin_only_ui(settings_state &settings, bool value, Backend &config) {
+    if (!settings.alive || !settings.alpha_session || value == settings.alpha_session->pin_only_ui()) return false;
+    config.write(pin_only_ui_key, value ? 1 : 0);
     if (!settings.alive) return false;
-    settings.alpha_session->set_pin_changed_pixels(value);
+    settings.alpha_session->set_pin_only_ui(value);
     return true;
   }
   // The session log line, at session start and on every edit.
-  inline std::string pin_changed_pixels_log_text(bool enabled) {
-    return enabled ?
-      "Sunshine UI protection: changed pixels of an exact pre-UI image decide where the UI alpha has no shape "
-      "(UIPinChangedPixels=1)" :
-      "Sunshine UI protection: changed pixels of an exact pre-UI image are only logged (UIPinChangedPixels=0)";
+  inline std::string pin_only_ui_log_text(bool enabled) {
+    return enabled ? "Sunshine UI protection: only UI pixels pin (UIPinOnlyUI=1)" :
+                     "Sunshine UI protection: dims and unchanged pixels are only logged (UIPinOnlyUI=0)";
   }
-  inline constexpr const char *pin_changed_pixels_label = "Pin only the pixels the UI changed (exact pre-UI image)";
-  inline constexpr const char *pin_changed_pixels_tooltip =
-    "Off (default): Auto only logs what it would do. On: where the accepted UI alpha covers the whole frame without "
-    "shape, or no UI alpha decides, the pixels an exact pre-UI scene image of the same frame shows changed are the UI, "
-    "so a menu over a live scene keeps the scene in 3D; full pages stay flat. Saved per game (UIPinChangedPixels).";
+  inline constexpr const char *pin_only_ui_label = "Pin only UI pixels (dimmed scene keeps its 3D)";
+  inline constexpr const char *pin_only_ui_tooltip =
+    "Off (default): Auto only logs what it would do. On: only the UI itself is shown flat. Where the accepted UI alpha "
+    "covers the whole frame without shape, the pixels an exact pre-UI scene image of the same frame shows changed are "
+    "the UI; and where the UI source carries colour (the UI color tag, the game's UI layer, or a pre-UI or HUD-less "
+    "image), a dim, vignette or backdrop that only darkens the scene is not UI, so the scene under a menu keeps its 3D. "
+    "Alpha-only UI sources still pin their dims; text, icons and sharp dark outlines stay flat, and full pages stay "
+    "flat. Saved per game (UIPinOnlyUI).";
 
   // The overlay name of a candidate bit (ui_detection::candidate), empty for
   // none.

@@ -4,6 +4,7 @@
 #include "test_game3d_render_input.h"
 #include "game3d_controls.h"
 #include "test_game3d_debug_dump_runtime.h"
+#include "game3d_ui_darkening.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_layer.h"
 #include "game3d_ui_temporal.h"
@@ -2405,7 +2406,7 @@ namespace {
         replay.at("ui_detection").at("candidate_layout") == ui_detection::candidate_layout &&
         replay.at("ui_detection").at("still_bits") == 0u &&
         (replay.at("ui_detection").at("rules_bits").get<std::uint32_t>() &
-          (ui_detection::still::flatten | ui_detection::change_set::refine)) == 0u &&
+          (ui_detection::still::flatten | ui_detection::rules::pin_only_ui)) == 0u &&
         replay.at("ui_pin").at("decision_texels") == ui_detection::change_set_decision_texels &&
         replay.at("ui_pin").at("evidence_images") == ui_detection::max_scene_evidence_images,
       "Dump lost the layer's detection constants or pin markers");
@@ -3184,7 +3185,7 @@ namespace {
   // FG-off gameplay alpha that equals the UI colour tag), and the session's
   // ledger proved the layer the pre-UI scene image (its pre_ui key). The
   // scene moves every frame, so only the retained Present the copy shows
-  // pairs with it exactly. UIPinChangedPixels=0 (the default) only measures
+  // pairs with it exactly. UIPinOnlyUI=0 (the default) only measures
   // and logs the pair (the change-set shadow) and the menu stays flat by the
   // whole-frame alpha (source 4); =1 offers the pre-UI change set and the
   // refine rule pins only the changed pixels (source 12) while full pages and
@@ -3255,13 +3256,35 @@ namespace {
         return lit ? rgba{0.f, ((x + 3 * phase) / 4 + y / 4) % 2 ? .75f : .25f, .25f, 1.f} : rgba{0.f, 0.f, 0.f, 1.f};
       };
     };
-    enum class page { equipment, settings, loading };
+    // Fix 4: the Equipment page with its bottom dim band (dump 033), the
+    // scene darkened by a black band whose opacity rises to 0.3 over the
+    // bottom fifth of the frame (less than 1/64 per row), under the UI; the
+    // change set stays selective (under a quarter of the frame changed, half
+    // of the tiles unchanged).
+    enum class page { equipment, settings, loading, dimmed };
+    const unsigned dim_rows = height / 5, dim_top = height - dim_rows;
     const auto presented_of = [&](page kind, unsigned phase) {
       const auto base = scene(phase, kind != page::loading);
       return encode([&](unsigned x, unsigned y) -> rgba {
         if (kind == page::settings) return {.5f, .5f, .5f, 1.f};
-        return ui[size_t(y) * width + x] ? rgba{1.f, .5f, 1.f, 1.f} : base(x, y);
+        if (ui[size_t(y) * width + x]) return rgba{1.f, .5f, 1.f, 1.f};
+        auto v = base(x, y);
+        if (kind == page::dimmed && y >= dim_top) {
+          const float keep = 1.f - .3f * float(y - dim_top + 1) / float(dim_rows + 1);
+          for (unsigned c = 0; c != 3; ++c) v[c] *= keep;
+        }
+        return v;
       });
+    };
+    // The colours the shader loads from an encoded image.
+    const auto decode = [&](const std::vector<unsigned char> &bytes) {
+      std::vector<ui_darkening::rgb> result(pixels);
+      for (size_t i = 0; i != pixels; ++i)
+        for (unsigned c = 0; c != 3; ++c) {
+          if (gpu.color == 2) { std::uint16_t half; std::memcpy(&half, bytes.data() + i * bpp + c * 2, 2); result[i][c] = half_float(half); }
+          else result[i][c] = float(bytes[i * bpp + c]) / 255.f;
+        }
+      return result;
     };
     // The cleared target: the pre-UI scene at alpha 0 (black on the loading
     // screen, lit on far fewer than 1% of pixels).
@@ -3322,7 +3345,7 @@ namespace {
       return true;
     };
     const auto pre_ui_rules = [](const ui_detection_snapshot &run) {
-      return run.rules_bits & (ui_detection::change_set::refine | ui_detection::change_set::pair_mask);
+      return run.rules_bits & (ui_detection::rules::pin_only_ui | ui_detection::change_set::pair_mask);
     };
     // A frame without protection ends any mask an earlier section left.
     gpu.original = presented_of(page::equipment, phase);
@@ -3332,7 +3355,7 @@ namespace {
     step(page::equipment, 0);
 
     if (!timing_only) {
-      // (a) The shadow (UIPinChangedPixels=0): never offered and the menu is
+      // (a) The shadow (UIPinOnlyUI=0): never offered and the menu is
       // flat by the accepted whole-frame alpha, while each sample measures the
       // layer against the retained Present it shows: exactly the UI pixels
       // changed, verified against the Presents 0 and 2 back, valid, and with
@@ -3345,7 +3368,7 @@ namespace {
       for (unsigned i = 0; i != 4; ++i) {
         shadow = step(page::equipment);
         require(!(shadow.run.candidates & candidate::pre_ui) && shadow.run.layer_pairing == change_set::pair_class::retained &&
-            shadow.run.layer_presents_ago == 1u && !(shadow.run.rules_bits & ui_detection::change_set::refine) &&
+            shadow.run.layer_presents_ago == 1u && !(shadow.run.rules_bits & ui_detection::rules::pin_only_ui) &&
             ui_detection::change_set::pair_offset(shadow.run.rules_bits) == 1u && is_flat(shadow.mask),
           "The shadow offered the pre-UI change set, lost the retained pairing or did not leave the menu flat");
       }
@@ -3368,23 +3391,67 @@ namespace {
           !counted[ui_counter::change_set_pair_contradicted] && !counted[ui_counter::refined] && !counted.decided(12) &&
           counted.decided(4) >= 1,
         "The shadow changed the ledger, or its counters are not exact");
-      // (b) UIPinChangedPixels=1: offered with the retained pairing, refined
+      // (b) UIPinOnlyUI=1: offered with the retained pairing, refined
       // from the shapeless alpha, and only the changed pixels the 3x3 rule
       // keeps are pinned; the scene stays unpinned.
-      sb.set_pin_changed_pixels(true);
+      sb.set_pin_only_ui(true);
       outcome pinned{};
       for (unsigned i = 0; i != 3; ++i) {
         pinned = step(page::equipment);
         require((pinned.run.candidates & candidate::pre_ui) && (pinned.run.accepted & candidate::pre_ui) &&
             !(pinned.run.candidates & candidate::exact) &&
-            pre_ui_rules(pinned.run) == (ui_detection::change_set::refine | (1u << ui_detection::change_set::pair_shift)) &&
+            pre_ui_rules(pinned.run) == (ui_detection::rules::pin_only_ui | (1u << ui_detection::change_set::pair_shift)) &&
             is_filtered_ui(pinned.mask),
-          "UIPinChangedPixels=1 did not offer the pre-UI change set or pin exactly the changed pixels the 3x3 rule keeps");
+          "UIPinOnlyUI=1 did not offer the pre-UI change set or pin exactly the changed pixels the 3x3 rule keeps");
       }
       require(pinned.sample.source_kind == ui_detection::source_pre_ui && pinned.sample.covered == ui_pixels &&
           pinned.sample.evidence.refined && pinned.sample.evidence.s1_source == ui_detection::source_pre_ui &&
           pinned.sample.change_set.enabled && pinned.sample.change_set.would_refine && sb.stored() == stored,
         "The refined sample did not report source 12 with the refined bit");
+      // (b2) Fix 4, rule P2 (pin only UI): the page with its bottom dim band.
+      // The refined pre-UI set (12) holds the band's changed pixels; with the
+      // switch on they do not pin unless sharp structure or an unproven
+      // region keeps them (beside the prompts), exactly as game3d_ui_darkening.h's
+      // reference of the layer pair says, and the UI's colour pixels keep
+      // their pins. The next frame's sample carries the same counts.
+      std::uint64_t dimmed_unpinned = 0, dimmed_kept = 0;
+      {
+        step(page::dimmed);
+        const auto pre_ui = decode(layer_of(page::dimmed, phase));
+        const auto dimmed = step(page::dimmed);
+        const auto paired = decode(presented_history[1]);
+        float t;
+        std::memcpy(&t, &dimmed.run.threshold_bits, sizeof(t));
+        const auto k = float(ui_detection::change_set::inferred_scale);
+        const auto mask = ui_darkening::change_set_mask(width, height, paired, pre_ui, t, k, gpu.color, true);
+        const auto reference = ui_darkening::reference_change_set(width, height, paired, pre_ui, mask, t, k, gpu.color);
+        std::uint64_t band_unpinned = 0, band_changed = 0, differs = 0;
+        for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+          const auto i = size_t(y) * width + x;
+          const bool unpinned = reference.classes[i] == ui_darkening::pixel_class::unpinned;
+          differs += dimmed.mask.channel(x, y, 0) != (mask[i] && !unpinned ? 1.f : 0.f);
+          require(!filtered[i] || (mask[i] && reference.classes[i] == ui_darkening::pixel_class::colour),
+            "A UI colour pixel of the dimmed page was not pinned as colour by the reference");
+          if (y >= dim_top && !ui[i] && mask[i]) { ++band_changed; band_unpinned += unpinned; }
+        }
+        require(dimmed.sample.source_kind == ui_detection::source_pre_ui && (dimmed.run.candidates & candidate::pre_ui) &&
+            pre_ui_rules(dimmed.run) == (ui_detection::rules::pin_only_ui | (1u << ui_detection::change_set::pair_shift)) &&
+            (dimmed.run.rules_bits & ui_detection::rules::darkening_measured) && !differs,
+          "The dimmed page's mask differs from the CPU reference on " + std::to_string(differs) + " pixels");
+        require(band_changed && band_unpinned * 2 >= band_changed && reference.n.unpinned == band_unpinned,
+          "The dimmed page's band was not mostly unpinned by the reference, or something else was: " + std::to_string(band_unpinned) + " of " +
+            std::to_string(band_changed));
+        const auto next = step(page::dimmed);
+        require(next.sample.source_kind == ui_detection::source_pre_ui && next.sample.darkening.measured &&
+            next.sample.darkening.applied && next.sample.darkening.unpinned == reference.n.unpinned &&
+            next.sample.darkening.kept == reference.n.kept,
+          "The dimmed page's sample words 62-63 differ from the CPU reference: unpinned=" +
+            std::to_string(next.sample.darkening.unpinned) + " kept=" + std::to_string(next.sample.darkening.kept) + " reference " +
+            std::to_string(reference.n.unpinned) + "/" + std::to_string(reference.n.kept));
+        dimmed_unpinned = reference.n.unpinned;
+        dimmed_kept = reference.n.kept;
+        step(page::equipment);
+      }
       // (c) Settings, a full page: the changed pixels are the whole frame, an
       // invalid set, so the whole-frame alpha keeps it flat. A black loading
       // screen (pre-UI image lit on fewer than 1% of pixels) also stays flat.
@@ -3462,7 +3529,7 @@ namespace {
       const auto after_dump = step(page::equipment);
       require((after_dump.run.candidates & candidate::pre_ui) && after_dump.run.layer_pairing == change_set::pair_class::retained &&
           is_filtered_ui(after_dump.mask), "The render after a dump lost its retained pair");
-      sb.set_pin_changed_pixels(false);
+      sb.set_pin_only_ui(false);
       // (f) Ring isolation: a late HUD-less pairing sees only Presents
       // retained for it. After every retention request lapsed (more than its
       // 120 Presents), the first late HUD-less render finds no pair and the
@@ -3500,8 +3567,8 @@ namespace {
       }
       report << "pre-ui-change-set D3D11 ui=" << ui_pixels << " kept=" << kept << " shadow_retained_valid_would_refine=1"
         " ledger_unchanged=1 refined_source12=1 settings_flat=1 loading_flat=1 t1_reuse_once=1 fg_late_never_offered=1"
-        " dump_retained_presents=1 ring_isolation=1\n";
-      std::printf("PASS D3D11 pre-UI change set (fix 3, Stellar Blade SDR): the shadow measures exactly the UI pixels (%u, %u after the 3x3 rule) against the retained Present the layer copy shows, verified against the Presents 0 and 2 back, valid and would refine, while the menu stays flat by the accepted whole-frame alpha and the ledger is unchanged; UIPinChangedPixels=1 refines it to source 12 pinning only those pixels; a settings page and a black loading screen stay flat; a frame without its pair reuses the refined decision once; frame generation is a late pairing, never offered; Dump 3D carries both retained Presents and the consumed layer copy; a late HUD-less pairing is unchanged by layer retention\n",
+        " dump_retained_presents=1 ring_isolation=1 dimmed_band_unpinned=" << dimmed_unpinned << " dimmed_kept=" << dimmed_kept << "\n";
+      std::printf("PASS D3D11 pre-UI change set (fix 3, Stellar Blade SDR): the shadow measures exactly the UI pixels (%u, %u after the 3x3 rule) against the retained Present the layer copy shows, verified against the Presents 0 and 2 back, valid and would refine, while the menu stays flat by the accepted whole-frame alpha and the ledger is unchanged; UIPinOnlyUI=1 refines it to source 12 pinning only those pixels; a settings page and a black loading screen stay flat; a frame without its pair reuses the refined decision once; frame generation is a late pairing, never offered; Dump 3D carries both retained Presents and the consumed layer copy; a late HUD-less pairing is unchanged by layer retention\n",
         ui_pixels, kept);
     }
 
@@ -3591,10 +3658,12 @@ namespace {
     // renderer (never proven), as in Witcher 3 or Stellar Blade HDR.
     alpha_auto_policy unproven;
     require(unproven.restore(current_key).restored == 1, "The unproven timing session was not restored");
-    const auto measure = [&](bool layer, bool pin, bool fg, bool retain_all, bool proven = true) {
+    const auto measure = [&](bool layer, bool pin, bool fg, bool retain_all, bool proven = true, bool darkening = true) {
       source.session = proven ? &sb : &unproven;
-      sb.set_pin_changed_pixels(pin);
+      sb.set_pin_only_ui(pin);
       timed->set_dump_retention(retain_all, false);
+      // Fix 4: without the darkening passes, as a shader without them.
+      timed->set_darkening_passes(darkening);
       std::vector<double> samples, others;
       gpu_timing discard;
       // Half a second of copies first: clocks ramp up over a few hundred
@@ -3617,6 +3686,7 @@ namespace {
         (sample ? samples : others).push_back(t.mean_ms[gpu_timing::detection]);
       }
       timed->set_dump_retention(false, false);
+      timed->set_darkening_passes(true);
       source.session = &sb;
       return cost{median(samples), median(others), unsigned(samples.size() + others.size()), state.get()};
     };
@@ -3626,7 +3696,12 @@ namespace {
       const auto no_layer = measure(false, false, true, false), fg_on = measure(true, false, true, false),
         shadow_cost = measure(true, false, false, false), pinned_cost = measure(true, true, false, false),
         copy_cost = measure(true, false, true, true), unproven_cost = measure(true, false, false, false, false);
-      sb.set_pin_changed_pixels(false);
+      // Fix 4: the switch on (source 12, the passes on every frame) and the
+      // shadow (source 4, ineligible: the passes on sample frames return at
+      // once) without the darkening passes.
+      const auto pinned_plain = measure(true, true, false, false, true, false),
+        shadow_plain = measure(true, false, false, false, true, false);
+      sb.set_pin_only_ui(false);
       char text[1280];
       std::snprintf(text, sizeof(text),
         "pre-ui-change-set-gpu %s %ux%u detection_ms(median) no_layer={sample=%.4f other=%.4f} fg_on={sample=%.4f other=%.4f} "
@@ -3644,10 +3719,245 @@ namespace {
         shadow_cost.state.c_str(), pinned_cost.state.c_str(), copy_cost.state.c_str(), unproven_cost.state.c_str());
       report << text;
       std::fputs(text, stdout);
+      std::snprintf(text, sizeof(text),
+        "pre-ui-change-set-darkening-gpu %s %ux%u detection_ms(median) switch_on={sample=%.4f other=%.4f} "
+        "switch_on_without_darkening={sample=%.4f other=%.4f} shadow_without_darkening={sample=%.4f other=%.4f} "
+        "darkening_per_enabled_frame=%.4f darkening_per_enabled_sample=%.4f ineligible_shadow_sample=%.4f "
+        "ineligible_shadow_other=%.4f gpu_state=%s,%s\n",
+        timed == &gpu.renderer ? "production" : "control", width, height, pinned_cost.sample_ms, pinned_cost.other_ms,
+        pinned_plain.sample_ms, pinned_plain.other_ms, shadow_plain.sample_ms, shadow_plain.other_ms,
+        pinned_cost.other_ms - pinned_plain.other_ms, pinned_cost.sample_ms - pinned_plain.sample_ms,
+        shadow_cost.sample_ms - shadow_plain.sample_ms, shadow_cost.other_ms - shadow_plain.other_ms,
+        pinned_plain.state.c_str(), shadow_plain.state.c_str());
+      report << text;
+      std::fputs(text, stdout);
     }
     // The presented colour the fixture keeps beside its source texture.
     gpu.original = presented_of(page::equipment, phase);
     gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), width * bpp, 0);
+    inputs = {};
+  }
+  // Fix 4, rule P2 (pin only UI; docs/reshade-sbs.md, UI decision
+  // framework): an accepted offscreen UI layer (source 10) holding a smooth
+  // black dim band over the bottom of the frame (alpha rising to 0.6, less
+  // than 1/64 per row), sharp black 2-pixel strokes (four separate bars, as
+  // the strokes of glyphs; a 2x2 junction's inner pixels would unpin, which
+  // the pin band covers) and a white icon. In the default shadow (UIPinOnlyUI=0) the mask stays the
+  // layer's raw alpha, the decisions stay 10, and every sample's words 62-63
+  // equal game3d_ui_darkening.h's reference of the layer (unpinned, kept);
+  // with the switch on the band no longer pins while the strokes and the icon
+  // keep their pins, exactly as the reference says. With timing (the
+  // --pin-only-ui-only configuration at 4K), the GPU cost of the darkening
+  // passes on this layer, A/B against the same renderer without them.
+  void verify_pin_only_ui_darkening(fixture &gpu, std::ostream &report, bool timing = false) {
+    using namespace sunshine_game3d;
+    const unsigned width = gpu.width, height = gpu.height;
+    const auto pixels = size_t(width) * height;
+    const auto bpp = gpu.color == 2 ? 8u : 4u;
+    using rgba = std::array<float, 4>;
+    std::vector<rgba> value(pixels, rgba{0.f, 0.f, 0.f, 0.f});
+    // 1 the dim band, 2 a stroke, 3 the icon.
+    std::vector<std::uint8_t> region(pixels, 0);
+    const unsigned band = height * 3 / 8, top = height - band;
+    for (unsigned y = top; y < height; ++y)
+      for (unsigned x = 0; x < width; ++x) {
+        value[size_t(y) * width + x] = {0.f, 0.f, 0.f, .6f * float(y - top + 1) / float(band + 1)};
+        region[size_t(y) * width + x] = 1;
+      }
+    const auto fill = [&](unsigned x0, unsigned y0, unsigned x1, unsigned y1, rgba v, std::uint8_t r) {
+      for (unsigned y = y0; y < y1 && y < top; ++y)
+        for (unsigned x = x0; x < x1 && x < width; ++x) { value[size_t(y) * width + x] = v; region[size_t(y) * width + x] = r; }
+    };
+    const rgba black{0.f, 0.f, 0.f, 1.f}, white{1.f, 1.f, 1.f, 1.f};
+    const unsigned stroke = 2, glyph = std::max(8u, height / 4), left = width / 8, row = height / 8;
+    fill(left, row, left + glyph, row + stroke, black, 2);
+    fill(left + glyph / 2 - 1, row + stroke + 2, left + glyph / 2 + 1, row + glyph, black, 2);
+    fill(left + glyph + 4, row, left + glyph + 4 + stroke, row + glyph - stroke - 2, black, 2);
+    fill(left + glyph + 8, row + glyph - stroke, left + 2 * glyph, row + glyph, black, 2);
+    fill(width * 5 / 8, row, width * 5 / 8 + std::max(4u, width / 10), row + std::max(4u, height / 8), white, 3);
+    // The layer in the fixture's format, and the values the shader loads.
+    std::vector<unsigned char> bytes(pixels * bpp);
+    std::vector<ui_darkening::rgb> colour(pixels);
+    std::vector<float> alpha(pixels);
+    for (size_t i = 0; i != pixels; ++i) {
+      std::array<float, 4> loaded{};
+      for (unsigned c = 0; c != 4; ++c) {
+        if (gpu.color == 2) {
+          const auto half = half_bits(value[i][c]);
+          std::memcpy(bytes.data() + i * bpp + c * 2, &half, 2);
+          loaded[c] = half_float(half);
+        } else {
+          const auto byte = static_cast<unsigned char>(std::lround(std::clamp(value[i][c], 0.f, 1.f) * 255));
+          bytes[i * bpp + c] = byte;
+          loaded[c] = float(byte) / 255.f;
+        }
+      }
+      colour[i] = {loaded[0], loaded[1], loaded[2]};
+      alpha[i] = loaded[3];
+    }
+    // The scRGB layer is a float layer, whose tolerance is linear.
+    const auto reference = ui_darkening::reference_opacity(width, height, colour, alpha, gpu.color == 2);
+    // The band's first rows round to alpha 0 at 4K in sRGB: no UI there.
+    std::uint64_t band_pixels = 0, stroke_pixels = 0;
+    for (size_t i = 0; i != pixels; ++i) {
+      const auto c = reference.classes[i];
+      const bool band_ui = region[i] == 1 && alpha[i] > 0.f;
+      band_pixels += band_ui;
+      stroke_pixels += region[i] == 2;
+      require(band_ui ? c == ui_darkening::pixel_class::unpinned : region[i] == 2 ? c == ui_darkening::pixel_class::kept :
+          region[i] == 3 ? c == ui_darkening::pixel_class::colour : c == ui_darkening::pixel_class::not_ui,
+        "The darkening fixture does not mean what it says: the band must unpin, the strokes stay kept, the icon is colour (pixel " +
+          std::to_string(i % width) + "," + std::to_string(i / width) + " region " + std::to_string(region[i]) + " class " +
+          std::to_string(int(c)) + " alpha " + std::to_string(alpha[i]) + ")");
+    }
+    require(reference.n.unpinned == band_pixels && reference.n.kept == stroke_pixels, "The darkening fixture's reference counts differ");
+    D3D11_TEXTURE2D_DESC desc{}; gpu.source->GetDesc(&desc); desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA data{bytes.data(), width * bpp, 0};
+    ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> view;
+    checked(gpu.device->CreateTexture2D(&desc, &data, &texture), "darkening layer texture");
+    checked(gpu.device->CreateShaderResourceView(texture.Get(), nullptr, &view), "darkening layer view");
+    alpha_auto_policy policy;
+    require(policy.restore(gpu.key(ui_selection::kind::ui_layer)).restored == 1, "The layer key was not restored");
+    alpha_auto_source source;
+    source.session = &policy; source.now_ms = source.tick_ms = 2000000;
+    source.epoch = 71; source.revision = 1; source.sequence = 1;
+    ui_detection_inputs inputs;
+    inputs.layer = {reinterpret_cast<std::uint64_t>(view.Get())};
+    inputs.layer_flags = ui_layer::detection_flags(static_cast<api::format>(desc.Format));
+    ui_render_input ui;
+    ui.automatic = &source; ui.detection = &inputs;
+    gpu.pattern(std::vector<float>(pixels, 0.f));
+    struct outcome { alpha_auto_decision sample; ui_detection_snapshot run; image mask; };
+    const auto frame = [&](bool enabled) {
+      policy.set_pin_only_ui(enabled);
+      source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
+      gpu.renderer.begin_present();
+      gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, &ui);
+      return outcome{gpu.renderer.consumed_alpha_auto(), gpu.renderer.consumed_detection(),
+        gpu.read(gpu.renderer.diagnostics().ui_source)};
+    };
+    const auto masked = [&](const image &mask, bool enabled) {
+      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const auto i = size_t(y) * width + x;
+        const float expected = enabled && reference.classes[i] == ui_darkening::pixel_class::unpinned ? 0.f : alpha[i];
+        if (!(std::fabs(mask.channel(x, y, 0) - expected) <= 1e-6f)) return false;
+      }
+      return true;
+    };
+    const auto rules = [](const ui_detection_snapshot &run) {
+      return run.rules_bits & (ui_detection::rules::pin_only_ui | ui_detection::rules::darkening_measured);
+    };
+    const auto counters_before = policy.counters();
+    // (a) The shadow: the mask is the raw alpha, every frame is a sample that
+    // runs the passes, and the samples carry the reference's counts.
+    outcome shadow{};
+    for (unsigned i = 0; i != 4; ++i) {
+      shadow = frame(false);
+      require(shadow.run.state == ui_detection_snapshot::run_state::ran && rules(shadow.run) == ui_detection::rules::darkening_measured &&
+          masked(shadow.mask, false), "The shadow changed the layer's raw alpha mask or did not run the darkening passes");
+      if (i)
+        require(shadow.sample.source_kind == ui_detection::source_layer && shadow.sample.covered == reference.n.covered &&
+            shadow.sample.darkening.measured && !shadow.sample.darkening.applied &&
+            shadow.sample.darkening.unpinned == reference.n.unpinned && shadow.sample.darkening.kept == reference.n.kept,
+          "A shadow sample's words 62-63 differ from the CPU reference: unpinned=" + std::to_string(shadow.sample.darkening.unpinned) +
+            " kept=" + std::to_string(shadow.sample.darkening.kept) + " reference " + std::to_string(reference.n.unpinned) + "/" +
+            std::to_string(reference.n.kept));
+    }
+    const auto counted = policy.counters() - counters_before;
+    require(counted[ui_counter::darkening_samples] >= 2 &&
+        counted[ui_counter::darkening_unpinned_samples] == counted[ui_counter::darkening_samples] &&
+        counted[ui_counter::darkening_unpinned_px] == counted[ui_counter::darkening_samples] * reference.n.unpinned &&
+        counted[ui_counter::darkening_kept_px] == counted[ui_counter::darkening_samples] * reference.n.kept &&
+        counted.decided(ui_detection::source_layer) >= 1,
+      "The darkening counters do not sum the committed samples");
+    // (b) UIPinOnlyUI=1: from the first frame the band does not pin and the
+    // strokes and the icon do; the samples say the rule applied.
+    outcome pinned{};
+    for (unsigned i = 0; i != 3; ++i) {
+      pinned = frame(true);
+      require(rules(pinned.run) == (ui_detection::rules::pin_only_ui | ui_detection::rules::darkening_measured) && masked(pinned.mask, true),
+        "UIPinOnlyUI=1 did not unpin exactly the reference's darkening pixels");
+    }
+    require(pinned.sample.source_kind == ui_detection::source_layer && pinned.sample.darkening.measured &&
+        pinned.sample.darkening.applied && pinned.sample.darkening.unpinned == reference.n.unpinned &&
+        pinned.sample.darkening.kept == reference.n.kept, "The applied sample's words 62-63 differ from the CPU reference");
+    // Back to the shadow: the raw alpha again, at once.
+    require(masked(frame(false).mask, false), "Clearing the switch did not restore the raw alpha mask");
+    if (!timing) {
+      report << "pin-only-ui D3D11 band=" << band_pixels << " strokes=" << stroke_pixels << " unpinned=" << reference.n.unpinned
+             << " kept=" << reference.n.kept << " shadow_raw_alpha=1 words_equal_reference=1 switch_on_band_unpinned=1 strokes_icon_pinned=1\n";
+      std::printf("PASS D3D11 pin only UI (fix 4, rule P2): an accepted layer's smooth black dim band (%llu px) is measured in the shadow and unpinned with UIPinOnlyUI=1, its sharp black strokes (%llu px) and white icon keep their pins; words 62-63 and the masks equal the CPU reference\n",
+        static_cast<unsigned long long>(band_pixels), static_cast<unsigned long long>(stroke_pixels));
+    } else {
+      // GPU cost of the detection stage, the median per frame by kind (a
+      // sample frame or another), the switch on and off, with and without
+      // the darkening passes, at sustained clocks as the pre-UI timing.
+      D3D11_BUFFER_DESC buffer{};
+      buffer.ByteWidth = 256u << 20;
+      buffer.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      ComPtr<ID3D11Buffer> flush_from, flush_to;
+      checked(gpu.device->CreateBuffer(&buffer, nullptr, &flush_from), "timing warm-up buffer");
+      checked(gpu.device->CreateBuffer(&buffer, nullptr, &flush_to), "timing warm-up buffer");
+      const auto warm = [&] { for (unsigned i = 0; i != 8; ++i) gpu.context->CopyResource(flush_to.Get(), flush_from.Get()); };
+      const auto timed_step = [&] {
+        gpu.context->CopyResource(gpu.backbuffer.Get(), gpu.source.Get());
+        warm();
+        source.now_ms += 16; source.tick_ms = source.now_ms; ++source.sequence;
+        gpu.renderer.begin_present();
+        render_frame_input frame_input;
+        frame_input.color = {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())};
+        frame_input.depth = {reinterpret_cast<std::uint64_t>(gpu.depth_view.Get())};
+        frame_input.scene = gpu.renderer.consumed_parameters();
+        frame_input.ui = ui;
+        auto *queue = observed_runtime->get_command_queue();
+        require(gpu.renderer.render(queue->get_immediate_command_list(), frame_input), "Timed darkening render failed");
+        queue->flush_immediate_command_list();
+        gpu.renderer.finish_present();
+        gpu.drain_render();
+        return gpu.renderer.consumed_detection().pre_ui_threshold_bits != 0;
+      };
+      struct cost { double sample_ms{}, other_ms{}; };
+      const auto median = [](std::vector<double> values) {
+        if (values.empty()) return 0.;
+        std::sort(values.begin(), values.end());
+        return values[values.size() / 2];
+      };
+      const auto measure = [&](bool enabled, bool passes) {
+        policy.set_pin_only_ui(enabled);
+        gpu.renderer.set_darkening_passes(passes);
+        for (const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(500); std::chrono::steady_clock::now() < until;) {
+          warm();
+          gpu.drain_render();
+        }
+        for (unsigned i = 0; i != 8; ++i) timed_step();
+        gpu_timing discard;
+        gpu.renderer.take_gpu_timing(discard);
+        std::vector<double> samples, others;
+        for (unsigned i = 0; i != 96; ++i) {
+          const bool sample = timed_step();
+          gpu_timing t;
+          if (!gpu.renderer.take_gpu_timing(t) || t.frames != 1) continue;
+          (sample ? samples : others).push_back(t.mean_ms[gpu_timing::detection]);
+        }
+        gpu.renderer.set_darkening_passes(true);
+        return cost{median(samples), median(others)};
+      };
+      const auto on = measure(true, true), on_without = measure(true, false), shadow_cost = measure(false, true),
+        shadow_without = measure(false, false);
+      policy.set_pin_only_ui(false);
+      char text[768];
+      std::snprintf(text, sizeof(text),
+        "pin-only-ui-gpu layer %ux%u detection_ms(median) switch_on={sample=%.4f other=%.4f} "
+        "switch_on_without_darkening={sample=%.4f other=%.4f} shadow={sample=%.4f other=%.4f} "
+        "shadow_without_darkening={sample=%.4f other=%.4f} darkening_per_enabled_frame=%.4f "
+        "darkening_per_enabled_sample=%.4f darkening_per_shadow_sample=%.4f shadow_other_delta=%.4f\n",
+        width, height, on.sample_ms, on.other_ms, on_without.sample_ms, on_without.other_ms, shadow_cost.sample_ms,
+        shadow_cost.other_ms, shadow_without.sample_ms, shadow_without.other_ms, on.other_ms - on_without.other_ms,
+        on.sample_ms - on_without.sample_ms, shadow_cost.sample_ms - shadow_without.sample_ms,
+        shadow_cost.other_ms - shadow_without.other_ms);
+      report << text;
+      std::fputs(text, stdout);
+    }
     inputs = {};
   }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
@@ -3733,15 +4043,17 @@ namespace {
 }
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  if (argc < 6 || argc > 8) { std::fputs("usage: source_alpha_runtime official-ReShade64.dll fresh-output srgb|scrgb width height [frozen-control.hlsl] [--temporal-ui-probe|--temporal-ui-front-limit|--adaptive-ui-only|--pre-ui-change-set-only]\n", stderr); return 2; }
+  if (argc < 6 || argc > 8) { std::fputs("usage: source_alpha_runtime official-ReShade64.dll fresh-output srgb|scrgb width height [frozen-control.hlsl] [--temporal-ui-probe|--temporal-ui-front-limit|--adaptive-ui-only|--pre-ui-change-set-only|--pin-only-ui-only]\n", stderr); return 2; }
   // The timing configuration at 4K, with a control renderer, runs longer.
-  const bool long_run = std::any_of(argv + 6, argv + argc, [](const char *a) { return !std::strcmp(a, "--pre-ui-change-set-only"); });
+  const bool long_run = std::any_of(argv + 6, argv + argc, [](const char *a) {
+    return !std::strcmp(a, "--pre-ui-change-set-only") || !std::strcmp(a, "--pin-only-ui-only");
+  });
   std::thread([long_run] { Sleep(long_run ? 900000 : 180000); TerminateProcess(GetCurrentProcess(), 124); }).detach();
   try {
     const unsigned color = !std::strcmp(argv[3], "srgb") ? 1 : !std::strcmp(argv[3], "scrgb") ? 2 : 0;
     require(color != 0, "unsupported source transfer");
     const auto directory = fs::absolute(argv[2]);
-    bool temporal_probe = false, temporal_front_limit = false, adaptive_only = false, change_set_only = false;
+    bool temporal_probe = false, temporal_front_limit = false, adaptive_only = false, change_set_only = false, pin_only_ui_only = false;
     fs::path control;
     for (int index = 6; index < argc; ++index) {
       if (!std::strcmp(argv[index], "--adaptive-ui-only")) {
@@ -3749,6 +4061,9 @@ int main(int argc, char **argv) {
       } else if (!std::strcmp(argv[index], "--pre-ui-change-set-only")) {
         // Fix 3's section alone, with its GPU cost (any size, such as 3840x2160).
         require(!change_set_only, "duplicate change-set-only argument"); change_set_only = true;
+      } else if (!std::strcmp(argv[index], "--pin-only-ui-only")) {
+        // Fix 4's section alone, with its GPU cost on a layer (any size).
+        require(!pin_only_ui_only, "duplicate pin-only-UI argument"); pin_only_ui_only = true;
       } else if (!std::strcmp(argv[index], "--temporal-ui-probe") || !std::strcmp(argv[index], "--temporal-ui-front-limit")) {
         require(!temporal_probe, "duplicate temporal probe argument"); temporal_probe = true;
         temporal_front_limit = !std::strcmp(argv[index], "--temporal-ui-front-limit");
@@ -3768,6 +4083,11 @@ int main(int argc, char **argv) {
     if (change_set_only) {
       verify_pre_ui_change_set(gpu, report, directory, gpu.width * gpu.height > 1u << 20);
       require(report.good(), "cannot write change-set evidence");
+      return 0;
+    }
+    if (pin_only_ui_only) {
+      verify_pin_only_ui_darkening(gpu, report, gpu.width * gpu.height > 1u << 20);
+      require(report.good(), "cannot write pin-only-UI evidence");
       return 0;
     }
     std::vector<float> alpha(size_t(gpu.width) * gpu.height, 0);
@@ -3802,6 +4122,7 @@ int main(int argc, char **argv) {
     verify_layer_validity(gpu, report);
     verify_hidden_scene(gpu, report);
     verify_pre_ui_change_set(gpu, report, directory);
+    verify_pin_only_ui_darkening(gpu, report);
     verify_normalized_ui_input(gpu, report);
     verify_mask_upload_recovery(gpu);
     require(report.good(), "cannot write evidence");

@@ -48,7 +48,7 @@ namespace sunshine_game3d::ui_selection {
   // layer proven the pre-UI scene image (candidate::pre_ui, source 12,
   // paired with a retained Present by b2 word 5's offset); a partial change
   // set needs its pre-UI image lit on 1% of pixels; the refine rule (b2 word
-  // 5's change_set::refine) lets a valid exact selective change set decide
+  // 5's rules::pin_only_ui) lets a valid exact selective change set decide
   // where S1's winner is an accepted alpha opaque on every pixel (the h1
   // word's refined bit and counter word); and the change-set shadow of
   // texels 13-15.
@@ -403,7 +403,7 @@ namespace sunshine_game3d::ui_selection {
   // pre-UI change set (fix 3, last in draw order) is valid only as a partial
   // set (no full form), without an offered HUD-less image and over a layer
   // without coverage, and decides as source 12.
-  // Refine (fix 3, rules & change_set::refine, Auto with UIPinChangedPixels):
+  // Refine (fix 3, rules & rules::pin_only_ui, Auto with UIPinOnlyUI=1):
   // when S1's winner is an alpha opaque on every pixel (shapeless: no shape
   // information) and a valid exact selective change set of the same frame
   // exists, the change set decides instead (5 from an accepted exact HUD-less
@@ -496,7 +496,7 @@ namespace sunshine_game3d::ui_selection {
     }
     // Refine: a shapeless alpha winner gives way to a valid exact selective
     // change set of the same frame.
-    const bool refine_on = (rules & ui_detection::change_set::refine) != 0u;
+    const bool refine_on = (rules & ui_detection::rules::pin_only_ui) != 0u;
     const bool alpha_winner = (source >= 1u && source <= 4u) || source == ui_detection::source_layer;
     const bool shapeless = alpha_winner && pixels && winner_opaque == pixels;
     d.shapeless = shapeless;

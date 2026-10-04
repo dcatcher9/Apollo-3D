@@ -29,7 +29,7 @@
 // at the paired offset) is the evidence that it holds, and needs no ground
 // truth.
 //
-// The shadow (UIPinChangedPixels=0, the default): sample frames with an
+// The shadow (UIPinOnlyUI=0, the default): sample frames with an
 // offered layer whose signature is proven the pre-UI scene image (b2 word 5
 // ui_detection::change_set::shadow; a real UI layer never earns the proof
 // and is never measured) measure the layer against its pair (decision
@@ -88,21 +88,23 @@ namespace sunshine_game3d::change_set {
     return {pair_class::unavailable, 0u};
   }
   // Whether a detection offers the pre-UI change set: in Auto, with the
-  // session's switch on (UIPinChangedPixels), the layer's signature proven
+  // session's switch on (UIPinOnlyUI), the layer's signature proven
   // the pre-UI scene image (the ledger's pre_ui key, which is also its
   // acceptance), no HUD-less image offered (a declared pair takes the slot)
   // and an exact retained pairing.
   constexpr bool offered(bool auto_mode, bool enabled, bool layer_proven, bool hudless_offered, layer_pairing pairing) {
     return auto_mode && enabled && layer_proven && !hudless_offered && pairing.kind == pair_class::retained;
   }
-  // b2 word 5 (Sunshine_UIRules): H2's flatten, refine, the shadow (the
+  // b2 word 5 (Sunshine_UIRules): H2's flatten, refine
+  // (ui_detection::rules::pin_only_ui, which the mask pass also reads for
+  // rule P2's darkening, game3d_ui_darkening.h), the shadow (the
   // offered layer proven the pre-UI scene image), T1's change-set gap, the
   // pairing's Present offset and the bound retained Presents.
   constexpr std::uint32_t rule_bits(bool still_flatten, bool refine, bool shadow, bool gap, layer_pairing pairing,
       bool retained_1, bool retained_2) {
     namespace rule = ui_detection::change_set;
-    return (still_flatten ? ui_detection::still::flatten : 0u) | (refine ? rule::refine : 0u) | (shadow ? rule::shadow : 0u) |
-      (gap ? rule::gap : 0u) | ((pairing.offset << rule::pair_shift) & rule::pair_mask) |
+    return (still_flatten ? ui_detection::still::flatten : 0u) | (refine ? ui_detection::rules::pin_only_ui : 0u) |
+      (shadow ? rule::shadow : 0u) | (gap ? rule::gap : 0u) | ((pairing.offset << rule::pair_shift) & rule::pair_mask) |
       (retained_1 ? rule::retained_1 : 0u) | (retained_2 ? rule::retained_2 : 0u);
   }
   // The run of real Presents with frame generation known off after one more
@@ -154,7 +156,7 @@ namespace sunshine_game3d::change_set {
   // One sample's change-set shadow.
   struct shadow_sample {
     layer_pairing pairing;
-    // The session's switch (UIPinChangedPixels), and whether the pairing is
+    // The session's switch (UIPinOnlyUI), and whether the pairing is
     // late (pair_layer's class without frame generation known off over the
     // pair).
     bool enabled{}, fg{};
@@ -176,7 +178,7 @@ namespace sunshine_game3d::change_set {
     // The sample's own decision: the S1 winner's source (decision word h1),
     // whether that winner was an alpha opaque on every pixel, and the applied
     // source; and what the pre-UI change set offered with
-    // UIPinChangedPixels=1 would give (the sample's own decision when it
+    // UIPinOnlyUI=1 would give (the sample's own decision when it
     // could not be offered): the applied source, whether it refined a
     // shapeless alpha, and whether S1 chose source 12 itself.
     std::uint32_t winner{}, applied_source{}, would_source{};
@@ -231,7 +233,7 @@ namespace sunshine_game3d::change_set {
     s.applied_source = own.source;
     if (offered(auto_mode, true, layer_proven, hudless_offered, pairing)) {
       const auto would = ui_selection::decide(pair, offered_bits | candidate::pre_ui, accepted | candidate::pre_ui, flags,
-        previous, rules | ui_detection::change_set::refine);
+        previous, rules | ui_detection::rules::pin_only_ui);
       s.would_source = would.source;
       s.would_refine = would.refined;
       s.would_decide = would.s1_source == ui_detection::source_pre_ui && !would.refined;
@@ -255,7 +257,7 @@ namespace sunshine_game3d::change_set {
     const auto flag = [](bool value) { return value ? "1" : "0"; };
     std::string text = "Sunshine UI change set: pairing=";
     text.append(name(s.pairing.kind)).append(" offset=").append(std::to_string(s.pairing.offset));
-    text.append(" fg=").append(flag(s.fg)).append(" UIPinChangedPixels=").append(flag(s.enabled));
+    text.append(" fg=").append(flag(s.fg)).append(" UIPinOnlyUI=").append(flag(s.enabled));
     text.append(" changed=").append(std::to_string(s.counts.changed));
     text.append(" unchanged=").append(std::to_string(s.counts.unchanged));
     text.append(" nonfinite=").append(std::to_string(s.counts.nonfinite));

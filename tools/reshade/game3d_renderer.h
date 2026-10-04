@@ -205,8 +205,11 @@ namespace sunshine_game3d {
     // ui_detection::still::flatten, set while H2's run is active in SDR Auto
     // and the session enables it (UIFlattenStillScreens), zero otherwise
     // (game3d_still_screen.h); the other bits are fix 3's
-    // (ui_detection::change_set: refine in Auto with UIPinChangedPixels=1,
-    // the layer pair's Present offset and the bound retained Presents).
+    // (ui_detection::change_set: refine, rules::pin_only_ui, in Auto with
+    // UIPinOnlyUI=1, the layer pair's Present offset and the bound retained
+    // Presents) and fix 4's rules::darkening_measured (rule P2's darkening
+    // passes ran: every Auto detection frame with UIPinOnlyUI=1, sample
+    // frames in its shadow).
     std::uint32_t still_bits{}, rules_bits{};
     // Fix 3: the offered layer copy's Presents since the copy and its pairing
     // (game3d_ui_change_set.h); zero and none without a layer.
@@ -327,6 +330,11 @@ namespace sunshine_game3d {
     // the dump still finds the Presents one and two before it; the caller
     // then records the owed copy with finish_retention after the dump's.
     void set_dump_retention(bool armed, bool capture);
+    // Fix 4 (rule P2, pin only UI): whether detection dispatches the
+    // darkening passes (on by default). The runtime test's GPU cost A/B
+    // clears it, which behaves as a shader without them: nothing measures or
+    // unpins darkening. Nothing in the add-on clears it.
+    void set_darkening_passes(bool enabled);
     void finish_retention(reshade::api::command_list *commands);
     // Marks the start of this presentation's input work for the GPU profile.
     void begin_gpu_profile(reshade::api::command_list *commands);

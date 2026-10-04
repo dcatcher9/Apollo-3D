@@ -279,7 +279,7 @@ namespace sunshine_game3d::ui_detection {
   // its 3x3 window, itself included (out-of-frame neighbours unchanged),
   // which removes specks and keeps one-pixel lines. b2 word 5
   // (Sunshine_UIRules) carries the rule bits beside H2's still::flatten:
-  // refine (Auto with UIPinChangedPixels=1) lets a valid exact selective
+  // refine (Auto with UIPinOnlyUI=1, rules::pin_only_ui) lets a valid exact selective
   // change set decide where S1's winner is an accepted alpha opaque on every
   // pixel; shadow that the offered layer's signature is proven the pre-UI
   // scene image, the only layer the change-set shadow measures; gap that the
@@ -291,9 +291,21 @@ namespace sunshine_game3d::ui_detection {
   // (decision texels 13-15, statistics rows from change_set_statistics_row)
   // measures the layer against its pair at inferred_scale times b2 word 4 on
   // sample frames; judge names the declared alpha it is compared with.
+  //
+  // Fix 4 (rule P2, pin only UI; docs/reshade-sbs.md, UI decision framework)
+  // shares the switch: rules::pin_only_ui is the refine bit, pushed in Auto
+  // with UIPinOnlyUI=1 (fix 3's UIPinChangedPixels renamed), and
+  // rules::darkening_measured says the darkening passes (namespace darkening)
+  // run on this frame. The mask pass unpins pure darkening only with both.
+  // rules::tag_linear says the UI color tag (t12) has a float format, whose
+  // colour is linear (the offscreen layer's is stored_hdr_headroom, b2 word
+  // 3), so that the opacity tolerance applies in linear light.
+  namespace rules {
+    inline constexpr std::uint32_t pin_only_ui = 0x2u, darkening_measured = 0x100u, tag_linear = 0x200u;
+  }
   namespace change_set {
-    inline constexpr std::uint32_t refine = 0x2u, shadow = 0x4u, gap = 0x8u, pair_shift = 4u, pair_mask = 0x30u,
-      retained_1 = 0x40u, retained_2 = 0x80u;
+    inline constexpr std::uint32_t shadow = 0x4u, gap = 0x8u, pair_shift = 4u, pair_mask = 0x30u, retained_1 = 0x40u,
+      retained_2 = 0x80u;
     inline constexpr std::uint32_t inferred_scale = 8u, lit_percent = 1u, min_neighbourhood = 3u;
     namespace judge {
       inline constexpr std::uint32_t none = 0u, ui_alpha = 1u, ui_color = 2u;
@@ -306,11 +318,23 @@ namespace sunshine_game3d::ui_detection {
     // side by side in x: plane p of row y at texel (p * plane_words(width) +
     // word, y)) and the count pass (the statistics rows from
     // change_set_statistics_row), dispatched after the tiles pass exactly
-    // when the shadow is on (shadow_dispatched).
+    // when the shadow is on (shadow_dispatched). Fix 4 adds three planes the
+    // darkening passes write after the reduce (darkening::dispatched): dark
+    // (the decided source's darkening pixels), structure (those on a sharp
+    // opacity step or touching raw colour UI) and tile (darkening::tile_rows
+    // rows per row of 16x16 tiles, bit tx of word tx / 32: for a change set
+    // row 3 ty a colour verdict in the tile's 3x3 ring, row 3 ty + 1 its own
+    // darkening verdict, row 3 ty + 2 a darkening pixel in the tile, which
+    // the region pass replaces by the tiles whose darkening region unpins;
+    // for an opacity source bit 0 of row 8 gy, word gx, a colour pixel in the
+    // bits pass's group (gx, gy), and bit 0 of row 1, word 0, a colour pixel
+    // in the frame). A shader whose planes marker is planes has the
+    // darkening passes.
     inline constexpr std::string_view planes_marker = "SUNSHINE_UI_CHANGE_SET_PLANES";
-    inline constexpr std::uint32_t planes = 6u;
+    inline constexpr std::uint32_t planes = 9u;
     namespace plane {
       inline constexpr std::uint32_t changed = 0u, unchanged = 1u, invalid = 2u, changed_1 = 3u, changed_2 = 4u, judge = 5u;
+      inline constexpr std::uint32_t dark = 6u, structure = 7u, tile = 8u;
     }
     constexpr std::uint32_t plane_words(std::uint32_t width) { return (width + 31u) / 32u; }
     // The bits pass's groups (one word on each of 8 rows) and the count
@@ -323,13 +347,94 @@ namespace sunshine_game3d::ui_detection {
       return pre_ui_threshold > 0.f && (candidates & candidate::layer) != 0u && (rules & shadow) != 0u;
     }
   }
-  static_assert(((change_set::refine | change_set::shadow | change_set::gap | change_set::pair_mask | change_set::retained_1 |
-    change_set::retained_2) & still::flatten) == 0 && ((change_set::refine | change_set::shadow | change_set::gap) &
+  static_assert(((rules::pin_only_ui | change_set::shadow | change_set::gap | change_set::pair_mask | change_set::retained_1 |
+    change_set::retained_2) & still::flatten) == 0 && ((rules::pin_only_ui | change_set::shadow | change_set::gap) &
     (change_set::pair_mask | change_set::retained_1 | change_set::retained_2)) == 0 &&
-    (change_set::refine & (change_set::shadow | change_set::gap)) == 0 && (change_set::shadow & change_set::gap) == 0 && (change_set::pair_mask >> change_set::pair_shift) == 3u && change_set::pair_offset(0x2fu) == 2u);
+    (rules::pin_only_ui & (change_set::shadow | change_set::gap)) == 0 && (change_set::shadow & change_set::gap) == 0 && (change_set::pair_mask >> change_set::pair_shift) == 3u && change_set::pair_offset(0x2fu) == 2u);
+  static_assert(((rules::darkening_measured | rules::tag_linear) & (still::flatten | rules::pin_only_ui | change_set::shadow |
+    change_set::gap | change_set::pair_mask | change_set::retained_1 | change_set::retained_2)) == 0 &&
+    (rules::darkening_measured & rules::tag_linear) == 0);
   // The planes fit the 16384-texel D3D11 width at the shader's 8192 limit.
-  static_assert(change_set::plane::judge + 1u == change_set::planes && change_set::plane_words(254u) == 8u &&
-    change_set::plane_words(3840u) == 120u && change_set::planes * change_set::plane_words(8192u) <= 16384u);
+  static_assert(change_set::plane::judge + 1u == change_set::plane::dark && change_set::plane::tile + 1u == change_set::planes &&
+    change_set::plane_words(254u) == 8u && change_set::plane_words(3840u) == 120u &&
+    change_set::planes * change_set::plane_words(8192u) <= 16384u);
+
+  // Fix 4, pin only UI (rule P2; docs/reshade-sbs.md, UI decision framework,
+  // owns the thresholds and their measured justification;
+  // game3d_ui_darkening.h is the CPU reference and aliases these, and
+  // test_game3d_native_shader checks the shader's mirrors). A pure darkening
+  // (the UI adds no colour of its own, P = s L) is not UI: on an eligible
+  // source the mask pass zeroes the pin weight of a darkening pixel that
+  // sharp structure does not keep and, for a change set, whose darkening
+  // region (8-connected 16x16 tiles holding darkening pixels) has a proven
+  // tile and no tile with a colour verdict in its 3x3 ring; an opacity
+  // source must carry colour somewhere in the frame. The passes run after
+  // the reduce exactly when b2 word 5 has rules::darkening_measured
+  // (dispatched): the bits pass (one word on change_set::bits_group_rows
+  // rows per group, as the change-set bits pass), the tiles pass (one group
+  // per tile) and the region pass (one group); on sample frames the count
+  // pass (one group per 16x16 detection tile, statistics rows from
+  // statistics_row) and the finish pass (one group) write decision words
+  // dk_unpinned and dk_kept. Integer mirrors: the opacity tolerance in
+  // 1/255 of sRGB code (a float source compares its linear colour with the
+  // sRGB EOTF of it), the change-set residual and tile effect in multiples
+  // of the pair threshold (b2 word 1), the step as its inverse, the tile in
+  // pixels and its minimum fitting pixels, and the minimum relative variance
+  // in millionths. The region pass floods the tile grid in group-shared
+  // memory, three sets of region_words words (a row of tiles padded to
+  // whole words); a frame with more tiles (above about 6144x3456) unpins no
+  // change-set darkening, nor does a frame whose regions do not settle
+  // within the shader's iteration bound (two per tile row and 16 more).
+  namespace darkening {
+    inline constexpr std::uint32_t opacity_tolerance_255 = 4u, change_set_scale = 4u, step_inverse = 64u, tile = 16u,
+      tile_min_pixels = 32u, tile_effect_scale = 4u, min_variance_ppm = 1u;
+    inline constexpr std::uint32_t statistics_row = 192u, tile_rows = 3u, region_words = 2720u;
+    // Word dk_kept's top bit: the decided opacity source carried no colour
+    // on this frame, so it unpinned nothing (its darkening pixels are kept).
+    inline constexpr std::uint32_t colourless = 0x80000000u;
+    // The eligible sources: the UI color tag (2) and the offscreen UI layer
+    // (source_layer) by opacity, the HUD-less difference (5) and the pre-UI
+    // change set (source_pre_ui) by change set.
+    constexpr bool opacity_source(std::uint32_t source) { return source == 2u || source == source_layer; }
+    constexpr bool change_set_source(std::uint32_t source) { return source == 5u || source == source_pre_ui; }
+    constexpr bool eligible(std::uint32_t source) { return opacity_source(source) || change_set_source(source); }
+    // The tiles of an extent: the tiles pass's groups in x and y.
+    constexpr std::uint32_t tiles(std::uint32_t pixels) { return (pixels + tile - 1u) / tile; }
+    // Whether the region pass can flood a frame's tile grid.
+    constexpr bool region_supported(std::uint32_t width, std::uint32_t height) {
+      return std::uint64_t((tiles(width) + 31u) / 32u) * tiles(height) <= region_words;
+    }
+    // Whether a detection run with this b2 word 5 dispatches the darkening
+    // passes (the shader's SUNSHINE_UI_DARKENING_MEASURED).
+    constexpr bool dispatched(std::uint32_t rules) { return (rules & rules::darkening_measured) != 0u; }
+  }
+  // Whether a committed sample measured the darkening of its applied source
+  // (words dk_unpinned and dk_kept): the passes dispatched, an eligible
+  // source and a frame T1 did not reuse; and whether the mask pass applied
+  // it (pin only UI on too).
+  constexpr bool darkening_dispatched(std::uint32_t rules, std::uint32_t source, bool reused = false) {
+    return darkening::dispatched(rules) && darkening::eligible(source) && !reused;
+  }
+  constexpr bool darkening_applied(std::uint32_t rules, std::uint32_t source, bool reused = false) {
+    return darkening_dispatched(rules, source, reused) && (rules & rules::pin_only_ui) != 0u;
+  }
+  static_assert(darkening::eligible(2u) && darkening::eligible(5u) && darkening::eligible(10u) && darkening::eligible(12u) &&
+    !darkening::eligible(0u) && !darkening::eligible(1u) && !darkening::eligible(3u) && !darkening::eligible(4u) &&
+    !darkening::eligible(6u) && !darkening::eligible(8u) && !darkening::eligible(11u) && !darkening::eligible(13u) &&
+    darkening::opacity_source(10u) && !darkening::opacity_source(5u) && darkening::change_set_source(12u) &&
+    !darkening::change_set_source(2u) &&
+    darkening_dispatched(rules::darkening_measured, 12u) && !darkening_dispatched(rules::darkening_measured, 12u, true) &&
+    !darkening_applied(rules::darkening_measured, 10u) &&
+    darkening_applied(rules::darkening_measured | rules::pin_only_ui, 10u) && !darkening_dispatched(rules::pin_only_ui, 10u) &&
+    darkening::tiles(3840u) == 240u && darkening::tiles(2160u) == 135u && darkening::tiles(254u) == 16u &&
+    // The tile plane's rows and words fit the plane from an extent of 3 (a
+    // smaller one reads its missing rows as zero and unpins nothing), and
+    // the three group-shared sets fit 32 KiB with the pass's flag words.
+    3u * darkening::tiles(3u) <= 3u && 3u * darkening::tiles(17u) <= 17u && 3u * darkening::tiles(8192u) <= 8192u &&
+    (darkening::tiles(8192u) + 31u) / 32u <= change_set::plane_words(8192u) &&
+    (darkening::tiles(8u) + 31u) / 32u <= change_set::plane_words(8u) && 3u * darkening::region_words * 4u + 16u <= 32768u &&
+    darkening::region_supported(3840u, 2160u) && darkening::region_supported(6144u, 3456u) &&
+    !darkening::region_supported(7680u, 4320u) && darkening::colourless > 8192u * 8192u);
 
   // Statistics texture, 16 columns: 112 rows of per-tile counts (rows 0-63
   // the alpha coverage, alpha invalid, HUD-less difference and lit/opaque
@@ -353,16 +458,23 @@ namespace sunshine_game3d::ui_detection {
   // Present {changed, unchanged, non-finite, changed and kept by the 3x3
   // rule}, then {changed against the Present one back, two back, judge
   // pixels, judge pixels the 3x3 rule kept} (decision texels 13-15), 192
-  // rows in all. The cells have a texture of their own, cells_x by cells_y,
-  // and so do H2's previous presented-luma cell means (R32_UINT, u5 of the
-  // compare pass only).
+  // rows in all, and from fix 4 (planes marker change_set::planes) rows
+  // 192-207 from darkening_statistics_row: per tile, the darkening count
+  // pass's {unpinned, kept, 0, 0} (decision words dk_unpinned and dk_kept),
+  // 208 rows in all. The cells have a texture of their own, cells_x by
+  // cells_y, and so do H2's previous presented-luma cell means (R32_UINT, u5
+  // of the compare pass only).
   inline constexpr std::uint32_t layer_statistics_row = 64u, judgment_statistics_row = 80u, scene_partial_row = 112u,
-    pre_ui_statistics_row = 128u, still_statistics_row = 144u, change_set_statistics_row = 160u;
+    pre_ui_statistics_row = 128u, still_statistics_row = 144u, change_set_statistics_row = 160u,
+    darkening_statistics_row = darkening::statistics_row;
   // The statistics rows of a shader with these markers (images: its
   // SUNSHINE_UI_SCENE_EVIDENCE_IMAGES, decision_texels: its
-  // SUNSHINE_UI_DECISION_TEXELS).
-  constexpr std::uint32_t statistics_rows(std::uint32_t images, std::uint32_t decision_texels = change_set_decision_texels) {
-    return decision_texels >= change_set_decision_texels ? change_set_statistics_row + 32u :
+  // SUNSHINE_UI_DECISION_TEXELS, planes: its SUNSHINE_UI_CHANGE_SET_PLANES;
+  // zero sizes no darkening rows).
+  constexpr std::uint32_t statistics_rows(std::uint32_t images, std::uint32_t decision_texels = change_set_decision_texels,
+      std::uint32_t planes = 0u) {
+    return decision_texels >= change_set_decision_texels && planes >= change_set::planes ? darkening_statistics_row + 16u :
+      decision_texels >= change_set_decision_texels ? change_set_statistics_row + 32u :
       decision_texels >= still_decision_texels ? still_statistics_row + 16u :
       decision_texels >= pre_ui_decision_texels ? pre_ui_statistics_row + 16u :
       scene_partial_row + (images ? scene::cells_y / 16u : 0u);
@@ -374,7 +486,10 @@ namespace sunshine_game3d::ui_detection {
     pre_ui_statistics_row + 16u == still_statistics_row &&
     still_statistics_row + scene::cells_y / 16u <= statistics_rows(2, still_decision_texels) &&
     statistics_rows(2, still_decision_texels) == 160u && statistics_rows(0, still_decision_texels) == 160u &&
-    still_statistics_row + 16u == change_set_statistics_row && statistics_rows(2) == 192u && statistics_rows(0) == 192u);
+    still_statistics_row + 16u == change_set_statistics_row && statistics_rows(2) == 192u && statistics_rows(0) == 192u &&
+    change_set_statistics_row + 32u == darkening_statistics_row && statistics_rows(2, change_set_decision_texels, 9u) == 208u &&
+    statistics_rows(0, change_set_decision_texels, change_set::planes) == 208u &&
+    statistics_rows(0, change_set_decision_texels, 6u) == 192u && statistics_rows(0, still_decision_texels, 9u) == 160u);
   inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 13> hlsl_scene_defines{{
     {"SUNSHINE_UI_SCENE_CELLS_X", scene::cells_x},
     {"SUNSHINE_UI_SCENE_CELLS_Y", scene::cells_y},
@@ -402,8 +517,12 @@ namespace sunshine_game3d::ui_detection {
   // Fix 3: the change-set rule bits of b2 word 5, the inferred scale, lit
   // share and 3x3 bound, the judge kinds, the first statistics row of the
   // change-set shadow and its bit planes.
-  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 20> hlsl_change_set_defines{{
-    {"SUNSHINE_UI_CHANGE_SET_REFINE", change_set::refine},
+  // Fix 4: the pin-only-UI and darkening rule bits, the darkening planes and
+  // statistics row, and the darkening rule's integer mirrors.
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 36> hlsl_change_set_defines{{
+    {"SUNSHINE_UI_PIN_ONLY_UI", rules::pin_only_ui},
+    {"SUNSHINE_UI_DARKENING_MEASURED", rules::darkening_measured},
+    {"SUNSHINE_UI_TAG_LINEAR", rules::tag_linear},
     {"SUNSHINE_UI_CHANGE_SET_SHADOW", change_set::shadow},
     {"SUNSHINE_UI_CHANGE_SET_GAP", change_set::gap},
     {"SUNSHINE_UI_CHANGE_SET_PAIR_SHIFT", change_set::pair_shift},
@@ -423,6 +542,20 @@ namespace sunshine_game3d::ui_detection {
     {"SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED_1", change_set::plane::changed_1},
     {"SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED_2", change_set::plane::changed_2},
     {"SUNSHINE_UI_CHANGE_SET_PLANE_JUDGE", change_set::plane::judge},
+    {"SUNSHINE_UI_CHANGE_SET_PLANE_DARK", change_set::plane::dark},
+    {"SUNSHINE_UI_CHANGE_SET_PLANE_STRUCT", change_set::plane::structure},
+    {"SUNSHINE_UI_CHANGE_SET_PLANE_TILE", change_set::plane::tile},
+    {"SUNSHINE_UI_DARKENING_ROW", darkening_statistics_row},
+    {"SUNSHINE_UI_DARKENING_OPACITY_TOLERANCE", darkening::opacity_tolerance_255},
+    {"SUNSHINE_UI_DARKENING_CHANGE_SET_SCALE", darkening::change_set_scale},
+    {"SUNSHINE_UI_DARKENING_STEP_INVERSE", darkening::step_inverse},
+    {"SUNSHINE_UI_DARKENING_TILE", darkening::tile},
+    {"SUNSHINE_UI_DARKENING_TILE_MIN_PIXELS", darkening::tile_min_pixels},
+    {"SUNSHINE_UI_DARKENING_TILE_EFFECT_SCALE", darkening::tile_effect_scale},
+    {"SUNSHINE_UI_DARKENING_MIN_VARIANCE_PPM", darkening::min_variance_ppm},
+    {"SUNSHINE_UI_DARKENING_TILE_ROWS", darkening::tile_rows},
+    {"SUNSHINE_UI_DARKENING_REGION_WORDS", darkening::region_words},
+    {"SUNSHINE_UI_DARKENING_COLOURLESS", darkening::colourless},
   }};
 
   // Words of the decision readback (the decision texel table): texel t,
@@ -485,6 +618,16 @@ namespace sunshine_game3d::ui_detection {
     inline constexpr std::size_t cs_changed = 52, cs_unchanged = 53, cs_nonfinite = 54, cs_matching_tiles = 55;
     inline constexpr std::size_t cs_filtered = 56, cs_changed_1 = 57, cs_changed_2 = 58, cs_judge_pixels = 59;
     inline constexpr std::size_t cs_judge_tp = 60, cs_judge_kind = 61;
+    // Texel 15 .z/.w (fix 4, a shader whose planes marker is
+    // change_set::planes): the pin-only-UI darkening of a sample whose
+    // darkening passes ran (darkening_dispatched: rules::darkening_measured,
+    // an eligible applied source, a frame T1 did not reuse), whether or not
+    // the mask pass applied it: the source's darkening pixels it unpins and
+    // those that stay pinned (sharp structure, a change set's unproven
+    // region, or an opacity source without colour on the frame, which also
+    // sets darkening::colourless in dk_kept); zero otherwise. Never reused
+    // for anything else.
+    inline constexpr std::size_t dk_unpinned = 62, dk_kept = 63;
   }
   static_assert(decision_word::alpha_opaque + 1 < 4 * min_decision_texels &&
     decision_word::pre_ui_scene_image < 4 * scene_decision_texels && decision_word::valid_bits < 4 * layer_decision_texels &&
@@ -493,7 +636,8 @@ namespace sunshine_game3d::ui_detection {
     decision_word::presented_lit_differs == 4 * pre_ui_decision_texels - 1 &&
     decision_word::still_cells == 4 * pre_ui_decision_texels && decision_word::still_compared == decision_word::still_cells + 1 &&
     decision_word::still_cells + 4 == 4 * still_decision_texels && decision_word::cs_changed == 4 * still_decision_texels &&
-    decision_word::cs_judge_kind + 3 == 4 * change_set_decision_texels && change_set_decision_texels <= max_decision_texels);
+    decision_word::cs_judge_kind + 3 == 4 * change_set_decision_texels && change_set_decision_texels <= max_decision_texels &&
+    decision_word::dk_unpinned == decision_word::cs_judge_kind + 1 && decision_word::dk_kept + 1 == 4 * change_set_decision_texels);
   enum class scene_verdict : std::uint32_t { none = 0, hidden = 1, ambiguous = 2, visible = 3 };
   inline const char *name(scene_verdict value) {
     switch (value) {

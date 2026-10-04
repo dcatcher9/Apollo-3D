@@ -104,13 +104,14 @@ STILL = re.compile(r'\bstill=\{scope=(\d) enabled=(\d) phase=(\w+) run_ms=(\d+) 
                    r'short_max_ms=(\d+)\}')
 # Since fix 3, pre-UI change sets (docs/reshade-sbs.md, pre-UI change sets): the session's switch (UIPinChangedPixels,
 # 0 a shadow that only logs), the throttled change-set shadow of sample frames with an offered layer
-# (game3d_ui_change_set.h, shadow_log_text) and the UI line's change_set group (exporter.cpp).
-PIN_SWITCH = re.compile(r'Sunshine UI protection: changed pixels of an exact pre-UI image '
-                        r'.*\(UIPinChangedPixels=(\d)\)')
+# (game3d_ui_change_set.h, shadow_log_text) and the UI line's change_set group (exporter.cpp). Since fix 4 the switch
+# is UIPinOnlyUI (rule P2, pin only UI), which also covers the darkening rule; logs before it keep the old key.
+PIN_SWITCH = re.compile(r'Sunshine UI protection: (?:changed pixels of an exact pre-UI image .*\((UIPinChangedPixels)'
+                        r'|.*\((UIPinOnlyUI))=(\d)\)')
 CHANGE_SET = re.compile(
     r'Sunshine UI change set: pairing=(?P<pairing>\w+) offset=(?P<offset>\d+) fg=(?P<fg>\d) '
-    r'UIPinChangedPixels=(?P<enabled>\d) changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) '
-    r'nonfinite=(?P<nonfinite>\d+) matching_tiles=(?P<tiles>\d+) lit=(?P<lit>\d+) '
+    r'(?P<key>UIPinChangedPixels|UIPinOnlyUI)=(?P<enabled>\d) changed=(?P<changed>\d+) '
+    r'unchanged=(?P<unchanged>\d+) nonfinite=(?P<nonfinite>\d+) matching_tiles=(?P<tiles>\d+) lit=(?P<lit>\d+) '
     r'layer_covered=(?P<layer_covered>\d+) valid=(?P<valid>\d) filtered=(?P<filtered>\d+) '
     r'offsets=\{0=(?P<o0>\d+|-) 1=(?P<o1>\d+|-) 2=(?P<o2>\d+|-)\} pair=(?P<pair>[\w-]+) '
     r'judge=\{kind=(?P<judge>\w+) pixels=(?P<judge_pixels>\d+) tp=(?P<tp>\d+) precision=(?P<precision>[0-9.]+|-) '
@@ -119,6 +120,14 @@ CHANGE_SET = re.compile(
     r'pixels=(?P<pixels>\d+)')
 CHANGE_SET_STATUS = re.compile(r'\bchange_set=\{pairing=(\w+) offset=(\d+) valid=(\d) would_refine=(\d) refined=(\d) '
                                r'enabled=(\d)\}')
+# Since fix 4 (rule P2, pin only UI): a committed sample whose decided source is eligible (2, 5, 10, 12), its covered
+# pixels, the darkening pixels the rule unpins or keeps and whether an opacity source carried no colour
+# (game3d_ui_darkening.h, log_text; logged on a change, else at most once a second, so a subset of the samples; the
+# first fix 4 builds logged every sample without colourless=), and the counter group darkening={samples
+# unpinned_samples unpinned_px kept_px}, which counts every such sample.
+DARKENING = re.compile(r'Sunshine UI darkening: source=(\d+) UIPinOnlyUI=(\d) covered=(\d+) unpinned=(\d+) '
+                       r'kept=(\d+)(?: colourless=(\d))?')
+DARKENING_SOURCES = (2, 5, 10, 12)
 # The session's cumulative exact UI counters (docs/reshade-sbs.md, UI counters), absent from older logs.
 COUNTERS = re.compile(r'Sunshine UI counters: (.*)$')
 COUNTER_FIELD = re.compile(r'(\w+)=(?:\{([^}]*)\}|(\S+))')
@@ -349,6 +358,20 @@ class ChangeSetSample(NamedTuple):
     would_source: int
     applied: int
     pixels: int
+
+
+class DarkeningSample(NamedTuple):
+    """Since fix 4: one logged sample's pin-only-UI darkening (game3d_ui_darkening.h, log_text): the decided source,
+    the switch, the source's covered pixels, the darkening pixels unpinned (or that would be, in the shadow), the
+    darkening pixels that stay pinned (kept: by sharp structure, in a change set's unproven darkening region, or all of
+    an opacity source's that carried no colour on the frame) and whether it carried none."""
+    t: float
+    source: int
+    enabled: bool  # UIPinOnlyUI=1.
+    covered: int
+    unpinned: int
+    kept: int
+    colourless: bool = False
 
 
 def change_set_sample(t: float, g: dict[str, str]) -> ChangeSetSample:
@@ -671,6 +694,11 @@ class Session:
     still_episodes: list[StillEpisode] = field(default_factory=list)  # Since fix 2: H2 episodes in log order.
     pin_switch: list[tuple[float, bool]] = field(default_factory=list)  # Since fix 3: UIPinChangedPixels is 1.
     change_sets: list[ChangeSetSample] = field(default_factory=list)  # Since fix 3: logged change-set shadows.
+    # The switch's key: UIPinChangedPixels (fix 3) until a line names UIPinOnlyUI (fix 4).
+    pin_key: str = 'UIPinChangedPixels'
+    darkening: list[DarkeningSample] = field(default_factory=list)  # Since fix 4: one line per eligible sample.
+    # Darkening lines logged before the last counter line.
+    darkening_before_counters: int = 0
     # The last 'Sunshine UI counters' line: the session's totals are cumulative over all its runtimes.
     counters: dict[str, int] | None = None
     losses: dict[int, tuple[float, str]] = field(default_factory=dict)
@@ -791,9 +819,16 @@ def parse(lines) -> Session:
                                                                     enabled == '1'))
             s.ui.append(sample)
         if found := PIN_SWITCH.search(text):
-            s.pin_switch.append((t, found.group(1) == '1'))
+            s.pin_switch.append((t, found.group(3) == '1'))
+            s.pin_key = found.group(1) or found.group(2)
         if found := CHANGE_SET.search(text):
             s.change_sets.append(change_set_sample(t, found.groupdict()))
+            s.pin_key = found.group('key')
+        if found := DARKENING.search(text):
+            source, enabled, covered, unpinned, kept, colourless = found.groups()
+            s.darkening.append(DarkeningSample(t, int(source), enabled == '1', int(covered), int(unpinned), int(kept),
+                                               colourless == '1'))
+            s.pin_key = 'UIPinOnlyUI'
         if found := STILL_SWITCH.search(text):
             s.still_switch.append((t, found.group(1) == '1'))
         if found := STILL_START.search(text):
@@ -820,6 +855,7 @@ def parse(lines) -> Session:
             s.shadow.append((t, found.group(1)))
         if (found := COUNTERS.search(text)) and 'auto_frames' in (values := counter_fields(found.group(1))):
             s.counters = values
+            s.darkening_before_counters = len(s.darkening)
         if found := LOSS.search(text):
             s.losses.setdefault(int(found.group(1)), (t, found.group(2)))
         if found := READINESS.search(text):
@@ -1109,6 +1145,7 @@ def ui_checks(s: Session, add) -> None:
     if not s.ui and s.counters is None:
         add(Check('INFO', 'UI protection', 'no UI protection samples'))
         change_set_checks(s, add)
+        pin_only_ui_checks(s, add)
         return
     # Inferred alpha (Backbuffer, current alpha and the UI layer) must never decide while an accepted declared UI
     # channel is offered (S1): that flattens scene as UI. Nor may an accepted alpha cover the whole frame while an
@@ -1239,6 +1276,7 @@ def ui_checks(s: Session, add) -> None:
         scene_checks(s, add)
         still_checks(s, add)
         change_set_checks(s, add)
+        pin_only_ui_checks(s, add)
         return
     states = Counter(u.detection for u in s.ui)
     add(Check('FAIL' if overrides or flattened or contradicted else 'WARN' if disputes else 'PASS', 'UI protection',
@@ -1255,6 +1293,7 @@ def ui_checks(s: Session, add) -> None:
     scene_checks(s, add)
     still_checks(s, add)
     change_set_checks(s, add)
+    pin_only_ui_checks(s, add)
 
 
 def pre_ui_proofs(s: Session) -> list[tuple[float, str, str]]:
@@ -1670,13 +1709,14 @@ def change_set_checks(s: Session, add) -> None:
     """'Pre-UI change set' (since fix 3): the offscreen layer proven the pre-UI scene image, paired with the retained
     Present it shows, and the refine rule (docs/reshade-sbs.md, pre-UI change sets).
 
-    Deciding from it is off by default (UIPinChangedPixels=0): the add-on measures every sample frame with an offered
-    layer and logs what the switch would do, so a session with measured samples WARNs with a summary for review before
-    the switch is turned on. The counters count every sample (change_set group), the throttled lines give example
-    times and the judge's agreement. FAIL: a frame refined or decided the pre-UI change set (source 12) in a session
-    whose switch was never on, or a retained pairing that the changed counts against the Presents 0-2 back
-    contradicted while the switch was on (the pairing by Present counting did not hold). A contradicted pair in the
-    shadow WARNs. Logs before fix 3 have none of these lines, and no such check."""
+    Deciding from it is off by default (UIPinChangedPixels=0, since fix 4 UIPinOnlyUI=0, the key the details name):
+    the add-on measures every sample frame with an offered layer and logs what the switch would do, so a session
+    with measured samples WARNs with a summary for review before the switch is turned on. The counters count every
+    sample (change_set group), the throttled lines give example times and the judge's agreement. FAIL: a frame
+    refined or decided the pre-UI change set (source 12) in a session whose switch was never on, or a retained
+    pairing that the changed counts against the Presents 0-2 back contradicted while the switch was on (the pairing
+    by Present counting did not hold). A contradicted pair in the shadow WARNs. Logs before fix 3 have none of these
+    lines, and no such check."""
     lines = s.change_sets
     status = [u.change_set for u in s.ui if u.change_set is not None]
     c = s.counters if s.counters is not None and 'change_set.samples' in s.counters else None
@@ -1689,7 +1729,8 @@ def change_set_checks(s: Session, add) -> None:
     ever_on = any(values)
     always_on = bool(values) and all(values)
     last = s.pin_switch[-1][1] if s.pin_switch else bool(values and values[-1])
-    switch = f'UIPinChangedPixels={int(last)}'
+    key = s.pin_key
+    switch = f'{key}={int(last)}'
     if c:
         samples, retained, late, unavailable = (get(f'change_set.{k}') for k in ('samples', 'retained', 'late',
                                                                                  'unavailable'))
@@ -1733,25 +1774,81 @@ def change_set_checks(s: Session, add) -> None:
                        or (always_on and contradicted > 0))
     if (refined or decided) and not ever_on:
         add(Check('FAIL', 'Pre-UI change set',
-                  f'{refined} frames refined and {decided} decided source {PRE_UI_SOURCE} while UIPinChangedPixels '
+                  f'{refined} frames refined and {decided} decided source {PRE_UI_SOURCE} while {key} '
                   f'was never on; {detail}', examples))
     elif contradicted_on:
         add(Check('FAIL', 'Pre-UI change set',
-                  'a retained pairing was contradicted while UIPinChangedPixels=1: the Present the layer copy shows '
+                  f'a retained pairing was contradicted while {key}=1: the Present the layer copy shows '
                   f'is not the one Present counting paired it with; {detail}',
                   [row(line) for line in lines if line.pair == 'contradicted'][:6]))
     elif contradicted:
         add(Check('WARN', 'Pre-UI change set',
                   f'{contradicted} shadow samples contradicted the retained pairing (another Present matched the layer '
-                  f'copy better), so Present counting does not hold here; do not turn on UIPinChangedPixels; {detail}',
+                  f'copy better), so Present counting does not hold here; do not turn on {key}; {detail}',
                   [row(line) for line in lines if line.pair == 'contradicted'][:6]))
     elif samples and not ever_on:
         add(Check('WARN', 'Pre-UI change set',
                   f'shadow summary for review: {detail}; review the samples that would refine or decide (a Dump 3D '
-                  'taken during one carries the retained Presents) before setting UIPinChangedPixels=1', examples))
+                  f'taken during one carries the retained Presents) before setting {key}=1', examples))
     else:
         add(Check('INFO', 'Pre-UI change set', detail if samples else f'{switch}; no sample measured the layer pair',
                   examples))
+
+
+def pin_only_ui_checks(s: Session, add) -> None:
+    """'Pin only UI' (since fix 4, rule P2; docs/reshade-sbs.md, UI decision framework): darkening alone is not UI, so
+    with UIPinOnlyUI=1 the darkening pixels of an eligible source (the UI color tag 2, the HUD-less difference 5, the
+    UI layer 10 and the pre-UI change set 12) that no sharp edge or touching colour UI keeps unpin and the scene under
+    a dim keeps its depth (a change set's only in a darkening region without colour of its own, an opacity source's
+    only on a frame where it carries colour); with UIPinOnlyUI=0 (the default shadow) every eligible sample is
+    measured and counted, a throttled subset logged, and nothing changes. The shadow measures the frame's own decided
+    source only: Stellar Blade's SDR menus decide the pre-UI change set (12) only with the switch on (refine).
+
+    INFO per source: the lines logged, the median and largest share of the covered pixels unpinned (or that would be),
+    the median kept, and the colourless lines; the totals come from the counters. FAIL when the darkening counter
+    group falls below the lines logged before the last counter line: it counts every measured sample, of which the
+    lines are a subset. Logs before fix 4 have no darkening line and no UIPinOnlyUI text, and no such check."""
+    lines = s.darkening
+    if not lines and s.pin_key != 'UIPinOnlyUI':
+        return
+    values = [on for _, on in s.pin_switch] + [line.enabled for line in lines]
+    last = s.pin_switch[-1][1] if s.pin_switch else bool(values and values[-1])
+    detail = f'UIPinOnlyUI={int(last)}' + ('' if last else ' (shadow: measured and logged, nothing unpinned)')
+    if not lines:
+        detail += f'; no sample decided an eligible source ({", ".join(str(n) for n in DARKENING_SOURCES)})'
+    examples = []
+    for source in sorted({line.source for line in lines}):
+        own = [line for line in lines if line.source == source]
+        shares = sorted(line.unpinned / line.covered for line in own if line.covered)
+        kept = sorted(line.kept for line in own)
+        colourless = sum(line.colourless for line in own)
+        verb = 'unpinned' if all(line.enabled for line in own) else 'would unpin' if not any(
+            line.enabled for line in own) else 'unpinned or would unpin'
+        name = S2B_SOURCE_NAMES.get(source, 'unknown')
+        detail += (f'; source {source} ({name}): {len(own)} lines, median {verb} '
+                   f'{f"{100 * shares[len(shares) // 2]:.1f}%" if shares else "-"} of covered (largest '
+                   f'{f"{100 * shares[-1]:.1f}%" if shares else "-"}), median kept {kept[len(kept) // 2]} px')
+        if colourless:
+            detail += f', {colourless} colourless (no colour on the frame, nothing unpinned)'
+        top = max(own, key=lambda line: line.unpinned / line.covered if line.covered else 0.0)
+        examples.append(f'{clock(top.t, True)} source {source}: unpinned {top.unpinned} of {top.covered} covered, '
+                        f'kept {top.kept}' + ('' if top.enabled else ' (shadow)'))
+    c = s.counters if s.counters is not None and 'darkening.samples' in s.counters else None
+    status = 'INFO'
+    if c:
+        fields = ('samples', 'unpinned_samples', 'unpinned_px', 'kept_px')
+        logged = lines[:s.darkening_before_counters]
+        low = (len(logged), sum(line.unpinned > 0 for line in logged), sum(line.unpinned for line in logged),
+               sum(line.kept for line in logged))
+        counted = tuple(c.get(f'darkening.{k}', 0) for k in fields)
+        detail += (f'; counted {counted[0]} samples ({counted[1]} unpinning), {counted[2]} unpinned and {counted[3]} '
+                   'kept pixels')
+        if any(n < lo for n, lo in zip(counted, low)):
+            status = 'FAIL'
+            detail += ('; the darkening counters do not reconcile with the logged lines (each field must be at least '
+                       "the logged lines' before the last counter line: "
+                       + ', '.join(f'{k} {n} below {lo}' for k, n, lo in zip(fields, counted, low) if n < lo) + ')')
+    add(Check(status, 'Pin only UI', detail, examples[:6]))
 
 
 def host_checks(path: Path, start: datetime, end: datetime) -> list[Check]:

@@ -176,15 +176,28 @@ namespace sunshine_game3d {
     // Fix 3 (game3d_ui_change_set.h): the latest sample's change-set shadow,
     // when it measured the offscreen layer: the layer's pairing with a
     // Present (class and offset), whether the pair passed the pre-UI change
-    // set's validity, and whether the counterfactual with UIPinChangedPixels=1
+    // set's validity, and whether the counterfactual with UIPinOnlyUI=1
     // refined a shapeless alpha; and this render's switch (enabled,
-    // UIPinChangedPixels=1 in Auto).
+    // UIPinOnlyUI=1 in Auto).
     struct change_set_state {
       bool measured{};
       change_set::pair_class pairing = change_set::pair_class::none;
       std::uint32_t offset{};
       bool valid{}, would_refine{}, enabled{};
     } change_set;
+    // Fix 4 (rule P2, pin only UI; game3d_ui_darkening.h): the latest
+    // sample's darkening, when its darkening passes measured its eligible
+    // decided source (ui_detection::darkening_dispatched): the darkening
+    // pixels unpinned, or that would be in the shadow, and those kept
+    // (decision words dk_unpinned and dk_kept), whether the mask pass
+    // applied it (UIPinOnlyUI=1 in Auto), and whether an opacity source
+    // carried no colour on the frame (darkening::colourless), so that it
+    // unpinned nothing.
+    struct darkening_state {
+      bool measured{}, applied{};
+      std::uint32_t unpinned{}, kept{};
+      bool colourless{};
+    } darkening;
   };
 
   // One alpha candidate's covered and invalid pixels in a sample.
@@ -486,19 +499,21 @@ namespace sunshine_game3d {
       return still_flatten_;
     }
 
-    // Fix 3 (game3d_ui_change_set.h): whether the pre-UI change set decides
-    // (Auto offers candidate::pre_ui for an exact retained pairing and pushes
-    // the refine rule) or is only measured and logged (the default, a
-    // shadow). A per-game switch its owner sets (ReShade.ini
-    // UIPinChangedPixels, game3d_controls.cpp), independent of acceptance:
-    // restore, earning, revocation and forget() never change it.
-    void set_pin_changed_pixels(bool enabled) {
+    // Pin only UI (fix 3, game3d_ui_change_set.h, and rule P2,
+    // game3d_ui_darkening.h): whether the pre-UI change set decides (Auto
+    // offers candidate::pre_ui for an exact retained pairing and pushes
+    // rules::pin_only_ui, the refine rule) and pure darkening unpins (the
+    // mask pass on the same bit), or both are only measured and logged (the
+    // default, a shadow). A per-game switch its owner sets (ReShade.ini
+    // UIPinOnlyUI, game3d_controls.cpp), independent of acceptance: restore,
+    // earning, revocation and forget() never change it.
+    void set_pin_only_ui(bool enabled) {
       std::lock_guard<std::mutex> lock(mutex_);
-      pin_changed_pixels_ = enabled;
+      pin_only_ui_ = enabled;
     }
-    bool pin_changed_pixels() {
+    bool pin_only_ui() {
       std::lock_guard<std::mutex> lock(mutex_);
-      return pin_changed_pixels_;
+      return pin_only_ui_;
     }
 
   private:
@@ -702,7 +717,7 @@ namespace sunshine_game3d {
     std::mutex mutex_;
     std::optional<bool> manual_; // Empty in Auto.
     std::vector<entry> entries_;
-    bool first_run_{}, still_flatten_{}, pin_changed_pixels_{};
+    bool first_run_{}, still_flatten_{}, pin_only_ui_{};
     std::function<void(const std::string &)> change_listener_;
     ui_counters counters_;
   };

@@ -24,7 +24,7 @@
 //        change_set::pair_layer(layer offered, the run of real Presents with
 //        frame generation known off, this one included, the layer copy's
 //        presents_since_copy, Present 1 retained, Present 2 retained); when
-//        change_set::offered(Auto, the session's pin_changed_pixels(), the
+//        change_set::offered(Auto, the session's pin_only_ui(), the
 //        layer's pre_ui key proven, a HUD-less image offered, pairing),
 //        bits |= candidate::pre_ui with the layer's format as its signature;
 //     2. accepted = session.accepted(bits, signatures) (manual On: every
@@ -55,7 +55,7 @@
 //          scene_guard.still.leave(unmeasured) when in still_scope), and
 //          detection with this frame's own bits, accepted and flags pushed
 //          (b2), flags | per_frame, rules = change_set::rule_bits(still,
-//          Auto and pin_changed_pixels(), the layer's pre_ui key proven,
+//          Auto and pin_only_ui(), the layer's pre_ui key proven,
 //          t.change_set_gap, pairing, Presents 1 and 2 bound)
 //          as b2 word 5, the retained Presents at t2 and t3, and the hold store
 //          bound at u5 for the reduce. A sample frame runs the evidence

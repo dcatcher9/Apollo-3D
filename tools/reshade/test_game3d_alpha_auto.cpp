@@ -1347,6 +1347,8 @@ namespace {
     c[n::change_set_samples] = 9; c[n::change_set_retained] = 5; c[n::change_set_late] = 3; c[n::change_set_unavailable] = 1;
     c[n::change_set_valid] = 4; c[n::change_set_would_refine] = 3; c[n::change_set_would_decide] = 1;
     c[n::change_set_pair_verified] = 4; c[n::change_set_pair_contradicted] = 1;
+    // Fix 4: three darkening samples, two of them unpinning.
+    c.add_darkening(250, 40); c.add_darkening(0, 5); c.add_darkening(50, 0);
     c[n::samples] = 4; c.through_ms = 12345;
     c[n::detection_frames] += 5; c[n::auto_frames] += 5;
     require(c.reconciled() && c.held() == 3 && c.inactive() == 1, "The counters' accounting identity is wrong");
@@ -1360,7 +1362,8 @@ namespace {
         "none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 gate_no_hold=1 "
         "no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 depth_not_current=1} full_d={hidden=1 ambiguous=0 visible=0 invalid=0} "
         "scene={entered=1 released=1 refuted=2} still={entered=2 released=1 short=7} change_set={samples=9 retained=5 late=3 "
-        "unavailable=1 valid=4 would_refine=3 would_decide=1 pair_verified=4 pair_contradicted=1} untrusted_inferred=0 "
+        "unavailable=1 valid=4 would_refine=3 would_decide=1 pair_verified=4 pair_contradicted=1} "
+        "darkening={samples=3 unpinned_samples=2 unpinned_px=300 kept_px=45} untrusted_inferred=0 "
         "inexact_difference=3 contradicted=2 presented_over_dedicated=0 full_alpha=2 "
         "full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=0} trust={earned=1 revoked_exact=1 "
         "revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3} samples=4 through_ms=12345",

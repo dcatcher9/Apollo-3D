@@ -100,9 +100,12 @@ can be viewed live.
 Streamed Game 3D requires compatible host/client Game provider support, ReShade 6.8 with full
 add-on support, and `SunshineSBS.addon64`. No external FX shader or Depth3D checkout is required.
 Adjust strength in **ReShade → Add-ons → Sunshine 3D**; native controls save automatically.
-Automatic UI protection keeps the game's UI flat; its per-game `UIPinChangedPixels` switch (off by
-default, only logging) lets an SDR menu drawn over a live scene pin only the pixels the UI changed,
-so the scene behind it keeps its depth ([UI decision framework](./docs/reshade-sbs.md#ui-decision-framework)).
+Automatic UI protection keeps the game's UI flat; its per-game `UIPinOnlyUI` switch (formerly
+`UIPinChangedPixels`; off by default, only logging) pins only the UI itself: an SDR menu drawn over a
+live scene pins only the pixels the UI changed, and where the UI source carries colour (the UI
+color tag, the game's UI layer, or a pre-UI or HUD-less image) dims, vignettes and backdrops that
+only darken the scene leave it its depth in SDR and HDR; alpha-only UI sources still pin their dims
+([UI decision framework](./docs/reshade-sbs.md#ui-decision-framework)).
 Select Game 3D in Moonlight 3D without changing a host provider toggle or
 restarting Sunshine. SDR and native HDR DirectX 11/12 input are supported; live game/glasses/headset
 compatibility depends on the game and display. Original SuperDepth3D is an optional comparison

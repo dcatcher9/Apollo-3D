@@ -213,7 +213,7 @@ namespace {
     // (the offscreen layer's pairing with a Present, whether its pair was
     // valid and would refine a shapeless alpha), whether the sample's own
     // decision was refined (the h1 word's refined bit) and this render's
-    // switch (UIPinChangedPixels).
+    // switch (UIPinOnlyUI).
     const auto &change_set = value.coverage.change_set;
     char message[3072];
     std::snprintf(message, sizeof(message),
