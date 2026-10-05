@@ -435,71 +435,10 @@ namespace {
       "Failed HUD-less source retained earlier comparison pixels or revoked unrelated alpha");
   }
 
-  // S3: the newest HUD-less and Backbuffer pair of one game frame, by token
-  // generation (numbered or not), read-only.
-  void token_batch_pairs_the_newest_common_frame() {
-    reset();
-    const auto tagged = [](std::uint64_t sequence, std::uint64_t generation, std::uint64_t tick) {
-      auto value = input(sequence, tick);
-      value.source_frame_generation = generation; value.source_frame_has_numeric = false; value.source_frame_numeric = 0;
-      return value;
-    };
-    const auto capture = [](const capture::input &value, mask::source_kind kind, bool ready) {
-      auto attempt = begin(value, kind); mask::finish(attempt, true);
-      if (ready) complete(attempt);
-      return attempt;
-    };
-    // Frame F's HUD-less and Backbuffer are recorded before F's HUD-less
-    // completes (one game list), so F-1 stays retained beside it.
-    const auto hudless_previous = capture(tagged(1, 20, 1000), mask::source_kind::hudless, true);
-    const auto backbuffer_previous = capture(tagged(1, 20, 1000), mask::source_kind::backbuffer, true);
-    const auto hudless_current = capture(tagged(2, 21, 1010), mask::source_kind::hudless, false);
-    const auto backbuffer_current = capture(tagged(2, 21, 1010), mask::source_kind::backbuffer, false);
-    complete(hudless_current);
-    mask::selection hudless, backbuffer;
-    // HUD-less F and F-1 ready, Backbuffer F-1 only: the pair is F-1.
-    require(mask::acquire_batch(runtime, 1011, 0x900, hudless, backbuffer) && hudless.token_generation == 20 &&
-        backbuffer.token_generation == 20 && hudless.ticket.id == hudless_previous.ticket.id &&
-        backbuffer.ticket.id == backbuffer_previous.ticket.id && hudless.origin.kind == mask::source_kind::hudless &&
-        backbuffer.origin.kind == mask::source_kind::backbuffer,
-      "HUD-less F and F-1 with only Backbuffer F-1 ready did not pair F-1");
-    require(!snapshots.at(hudless_previous.ticket.id).released && !snapshots.at(hudless_current.ticket.id).released,
-      "The token batch retired a snapshot");
-    complete(backbuffer_current);
-    require(mask::acquire_batch(runtime, 1012, 0x900, hudless, backbuffer) && hudless.token_generation == 21 &&
-        hudless.ticket.id == hudless_current.ticket.id && backbuffer.ticket.id == backbuffer_current.ticket.id,
-      "The newest common token was not chosen once its Backbuffer was ready");
-    require(!mask::acquire_batch(runtime, 1012, 0, hudless, backbuffer) && !hudless.ticket && !backbuffer.ticket,
-      "A token batch without a consumer queue exposed pixels");
-    // Different generations, or none, never pair.
-    reset();
-    capture(tagged(1, 30, 1000), mask::source_kind::hudless, true);
-    capture(tagged(1, 31, 1000), mask::source_kind::backbuffer, true);
-    require(!mask::acquire_batch(runtime, 1001, 0x900, hudless, backbuffer), "Different token generations paired");
-    reset();
-    capture(tagged(1, 0, 1000), mask::source_kind::hudless, true);
-    capture(tagged(1, 0, 1000), mask::source_kind::backbuffer, true);
-    require(!mask::acquire_batch(runtime, 1001, 0x900, hudless, backbuffer), "Snapshots without a token generation paired");
-    // A scope change (epoch or viewport) revokes both: nothing pairs across it.
-    reset();
-    capture(tagged(1, 40, 1000), mask::source_kind::hudless, true);
-    capture(tagged(1, 40, 1000), mask::source_kind::backbuffer, true);
-    require(mask::acquire_batch(runtime, 1001, 0x900, hudless, backbuffer), "One frame's tags did not pair");
-    auto moved = request(); ++moved.viewport; mask::set_request(moved);
-    require(!mask::acquire_batch(runtime, 1002, 0x900, hudless, backbuffer), "A token batch crossed a viewport change");
-    mask::set_request(request());
-    // The token clock write is asked for after Backbuffer snapshots only.
-    reset();
-    require(begin(tagged(1, 50, 1000), mask::source_kind::backbuffer).ticket &&
-        snapshots.rbegin()->second.input.token_clock, "A Backbuffer snapshot did not ask for the token clock");
-    require(begin(tagged(1, 50, 1000), mask::source_kind::hudless).ticket &&
-        !snapshots.rbegin()->second.input.token_clock, "A HUD-less snapshot asked for the token clock");
-  }
-
-  // S3: every begin() that makes no attempt names its stage.
+  // Every begin() that makes no attempt names its stage.
   void begin_refusals_name_their_stage() {
     reset();
-    using stage = sunshine_game3d::ui_ticket::begin_stage;
+    using stage = mask::begin_stage;
     const auto counts = [] {
       mask::diagnostic_snapshot value;
       require(mask::query_diagnostic(runtime, value), "No diagnostic for the request");
@@ -743,8 +682,7 @@ int main() {
     source_filter_change_revokes_ready_pending_and_inflight_attempts(); std::puts("PASS source-filter changes revoke completed, pending and in-flight old reservations");
     hudless_pairs_with_the_next_present_only(); std::puts("PASS HUD-less pairs with the Present after its tag, late captures within retained history, never stale or reversed generations");
     declared_lifetimes_preserve_state_policy(); std::puts("PASS UI tag lifetimes preserve provenance and choose observed-at-call or strict longer-lived state policy");
-    token_batch_pairs_the_newest_common_frame(); std::puts("PASS S3 token batch: the newest HUD-less and Backbuffer pair of one token generation, numbered or not, read-only; different or missing tokens and a scope change never pair; only Backbuffer snapshots ask for the token clock");
-    begin_refusals_name_their_stage(); std::puts("PASS S3 begin refusals: no or ambiguous request, filtered kind, not newer, shape, unsupported lifetime and no reservation each name their stage");
+    begin_refusals_name_their_stage(); std::puts("PASS UI capture begin refusals: no or ambiguous request, filtered kind, not newer, shape, unsupported lifetime and no reservation each name their stage");
     mask::invalidate_all();
     return 0;
   } catch (const std::exception &error) {

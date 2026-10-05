@@ -53,7 +53,6 @@ namespace {
     {"SunshineUIColorAlpha", D3D_SIT_TEXTURE, 12},
     {"SunshineUIBackbufferAlpha", D3D_SIT_TEXTURE, 13},
     {"SunshineHUDless", D3D_SIT_TEXTURE, 14},
-    {"SunshineUIStamps", D3D_SIT_TEXTURE, 9}, // UI detection passes only (S3).
     {"SunshineHostCandidateStore", D3D_SIT_UAV_RWTYPED, 0},
     {"SunshineHostVerticalMajorantStore", D3D_SIT_UAV_RWTYPED, 1},
     {"SunshineHostVerticalConditionedStore", D3D_SIT_UAV_RWTYPED, 2},
@@ -64,7 +63,6 @@ namespace {
     {"SunshineUIConflictStore", D3D_SIT_UAV_RWTYPED, 7},
     {"SunshineUICountersStore", D3D_SIT_UAV_RWTYPED, 7}, // Detection reduce only.
     {"SunshineUIHoldStore", D3D_SIT_UAV_RWTYPED, 5}, // Detection reduce only.
-    {"SunshineScenePreviousLumaStore", D3D_SIT_UAV_RWTYPED, 5}, // Scene compare only (H2).
     {"SunshinePointClamp", D3D_SIT_SAMPLER, 0},
     {"SunshineLinearClampState", D3D_SIT_SAMPLER, 1},
     {"SunshinePointBorder", D3D_SIT_SAMPLER, 2},
@@ -103,13 +101,9 @@ namespace {
     {"Sunshine_UIDetectionFlags", 12, 4, D3D_SVT_UINT},
     // Selection revision 4: the layer's pair threshold with the presented color.
     {"Sunshine_UIPreUIThreshold", 16, 4, D3D_SVT_FLOAT},
-    // Selection revision 5: H2's still-screen flag (bits 0x2-0x200 reserved).
-    {"Sunshine_UIStillScreen", 20, 4, D3D_SVT_UINT},
-    // S3: the proposed labels and the identity bits.
-    {"Sunshine_UIExpectedLayerPresent", 24, 4, D3D_SVT_UINT},
-    {"Sunshine_UIExpectedLayerToken", 28, 4, D3D_SVT_UINT},
-    {"Sunshine_UIExpectedHUDlessPresent", 32, 4, D3D_SVT_UINT},
-    {"Sunshine_UIIdentity", 36, 4, D3D_SVT_UINT},
+    // Reserved and pushed as zero since selection revision 9 (H2's still-screen
+    // flag and fix 3 and fix 4's bits, all removed); S3's words 6-9 are gone.
+    {"Sunshine_UIReserved", 20, 4, D3D_SVT_UINT},
   };
 
   struct entry_point {
@@ -278,20 +272,6 @@ namespace {
       require(shared <= 32768, std::string(entry.name) + " exceeds 32 KiB of group-shared memory");
       manifest << "  groupshared " << shared << '\n';
     }
-    // S3: the stamps share t9 with the resolved UI plane; only the detection
-    // reduce and the scene evidence pass read them (texel 12's identity words).
-    {
-      bool stamps = false, resolved = false;
-      for (unsigned index = 0; index < shader.BoundResources; ++index) {
-        D3D11_SHADER_INPUT_BIND_DESC actual {};
-        require(SUCCEEDED(reflection->GetResourceBindingDesc(index, &actual)), "Binding reflection failed");
-        stamps |= std::string(actual.Name) == "SunshineUIStamps";
-        resolved |= std::string(actual.Name) == "SunshineUIPlaneResolvedSampler";
-      }
-      const std::string name = entry.name;
-      require(!stamps || ((name == "SunshineUIDetectionReduceCS" || name == "SunshineSceneEvidenceCS") && !resolved),
-        name + ": only the detection reduce and the scene evidence pass may read the S3 stamps at t9");
-    }
     // The exact UI counters share u7 with the conflict probe's statistics, and
     // the T1 hold store shares u5 with the resolved UI plane: only the
     // detection reduce binds the counters and the hold store, and no entry
@@ -374,7 +354,6 @@ int main(int argc, char **argv) {
     mirrored(detection::hlsl_candidate_defines);
     mirrored(detection::hlsl_hold_defines);
     mirrored(detection::hlsl_h1_defines);
-    mirrored(detection::hlsl_still_defines);
     // The tiles pass counts each statistics tile in this many parts; the
     // renderer and the replay size the statistics texture from it.
     mirrored(detection::hlsl_tile_defines);
@@ -384,10 +363,10 @@ int main(int argc, char **argv) {
     require(marker("SUNSHINE_MONO_SKIPS_CONDITIONING") == 1, "The mono pack must keep reading no conditioning");
     // The reduce ports ui_selection::decide of this revision.
     require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision &&
-        sunshine_game3d::ui_selection::revision == 8u,
-      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 8");
-    require(decision_texels == detection::still_decision_texels && decision_texels == 13u,
-      "Selection revision 8 (deciding as revision 5 with the empty change set) writes H2's stillness counts in decision texel 12: 13 decision texels");
+        sunshine_game3d::ui_selection::revision == 9u,
+      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 9");
+    require(decision_texels == detection::pre_ui_decision_texels && decision_texels == 12u,
+      "Selection revision 9 (H2 and S3 removed, so texel 12 is reserved) writes 12 decision texels");
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");

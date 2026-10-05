@@ -2,10 +2,7 @@
 #include "game3d_ui_input_provider.h"
 #include "game3d_ui_mask.h"
 #include "game3d_ui_layer.h"
-#include "game3d_ui_ticket.h"
-#include "game3d_frame_clock.h"
 #include "game3d_capture_diagnostic.h"
-#include "game3d_diagnostics.h"
 #include "streamline_camera_probe.h"
 #include "streamline_buffer_contract.h"
 #include <d3d12.h>
@@ -48,19 +45,6 @@ namespace sunshine_game3d::ui_input {
       std::uint64_t input_present{}, input_epoch{};
       std::uint32_t input_viewport{};
       bool suspended{};
-      // S3 shadow (game3d_ui_ticket.h): today's Present-counting pairing beside
-      // the ticket's identity, the running totals and what was last logged,
-      // and the run of renders with frame generation known off (this one
-      // included), which bounds a real span.
-      ui_ticket::identity_shadow identity;
-      ui_ticket::identity_counters identity_totals, identity_logged;
-      // The renderer's cumulative GPU verdict counts (renderer::identity_counts)
-      // last folded into identity_totals' gpu group.
-      ui_ticket::identity_counters identity_gpu_seen;
-      std::uint64_t next_identity_log{}, identity_epoch{};
-      std::uint32_t identity_viewport{}, fg_off_run{};
-      std::uint32_t logged_interposers{UINT32_MAX};
-      bool logged_fg_known{}, logged_fg_enabled{};
     };
     std::mutex source_mutex;
     std::unordered_map<api::effect_runtime *, source_entry> sources;
@@ -102,11 +86,6 @@ namespace sunshine_game3d::ui_input {
         default: return choice::sl_backbuffer;
       }
     }
-    std::string pointer_text(const void *value) {
-      char text[32]{};
-      std::snprintf(text, sizeof(text), "%p", value);
-      return text;
-    }
     ui_qualification::scope captured_scope(ui_qualification::scope base, const ui_mask::selection &selected) {
       const auto &origin = selected.origin;
       base.source = choice_for(origin.kind); base.provider = 1; base.source_id = origin.source.source_id;
@@ -119,61 +98,12 @@ namespace sunshine_game3d::ui_input {
         sunshine_streamline::buffers::ui_alpha_authenticated(sunshine_streamline::buffers::active()) ? 1 : 0;
       return base;
     }
-    // S3: the frame-generation modules loaded in this process, probed at most
-    // once a second (frame_clock::loaded_interposers).
-    std::uint32_t interposer_bits(std::uint64_t now) {
-      static std::atomic<std::uint64_t> probed{};
-      static std::atomic<std::uint32_t> bits{};
-      const auto last = probed.load(std::memory_order_relaxed);
-      if (!last || now < last || now - last >= 1000) {
-        bits.store(frame_clock::loaded_interposers(), std::memory_order_relaxed);
-        probed.store(now ? now : 1, std::memory_order_relaxed);
-      }
-      return bits.load(std::memory_order_relaxed);
-    }
     // Once per process and kind: the first candidate read where it lies.
     void log_direct_binding(unsigned kind) {
       static std::atomic<bool> logged[2]{};
       if (logged[kind].exchange(true, std::memory_order_relaxed)) return;
       sunshine_log::message(reshade::log::level::info, kind ? "Sunshine UI input: reading the live UI layer copy directly (no copy)" :
         "Sunshine UI input: reading leased Streamline UI snapshots directly (no copy)");
-    }
-    ui_ticket::queue_relation relation(std::uint64_t executed, std::uint64_t wanted) {
-      return !executed || !wanted ? ui_ticket::queue_relation::unknown :
-        executed == wanted ? ui_ticket::queue_relation::same : ui_ticket::queue_relation::foreign;
-    }
-    // The CPU half of a Streamline tag snapshot's ticket: its own token label
-    // (contract 6); its present label (C_P read + 1) is known on the GPU only.
-    ui_ticket::ticket tag_ticket(const ui_mask::selection &selected, ui_selection::kind source, std::uint32_t typed_format,
-        const ui_qualification::scope &base, std::uint64_t presenting_queue) {
-      ui_ticket::ticket t;
-      t.kind = ui_ticket::capture_kind::sl_tag; t.source = source; t.at = ui_ticket::boundary::at_tag;
-      t.token = ui_ticket::token_label_of_tag(selected.token_generation);
-      t.present = {ui_ticket::label_space::present, 0, false, ui_ticket::refusal::none};
-      t.how = ui_ticket::state_basis_proof(static_cast<std::uint8_t>(selected.texture.basis));
-      t.present_queue = relation(selected.texture.producer_queue, presenting_queue);
-      t.token_queue = ui_ticket::queue_relation::same;
-      t.typed_format = typed_format; t.color_space = base.color_space;
-      t.epoch = selected.origin.source.epoch; t.viewport = selected.origin.source.viewport;
-      t.token_generation = selected.token_generation;
-      ui_ticket::refusal_inputs in;
-      in.stale_scope = t.epoch != base.epoch || t.viewport != base.viewport;
-      in.foreign_queue = t.present_queue == ui_ticket::queue_relation::foreign;
-      in.unstamped = !selected.texture.stamped;
-      t.refused = ui_ticket::first_refusal(in);
-      return t;
-    }
-    nlohmann::json label_json(const ui_ticket::label &value) {
-      return {{"space", ui_ticket::name(value.space)}, {"value", value.value}, {"valid", value.valid},
-        {"reason", ui_ticket::name(value.reason)}};
-    }
-    nlohmann::json ticket_json(const ui_ticket::ticket &t, bool stamped) {
-      return {{"kind", ui_ticket::name(t.kind)}, {"signature", t.key()}, {"boundary", ui_ticket::name(t.at)},
-        {"token", label_json(t.token)}, {"present", label_json(t.present)}, {"proof", ui_ticket::name(t.how)},
-        {"present_queue", ui_ticket::name(t.present_queue)}, {"token_queue", ui_ticket::name(t.token_queue)},
-        {"refusal", ui_ticket::name(t.refused)}, {"begin_stage", ui_ticket::name(t.stage)},
-        {"encoding", {{"typed_format", t.typed_format}, {"color_space", t.color_space}}},
-        {"epoch", t.epoch}, {"viewport", t.viewport}, {"token_generation", t.token_generation}, {"stamped", stamped}};
     }
     nlohmann::json captured_metadata(const ui_mask::selection &selected, std::uint64_t now, bool admitted, bool paired) {
       const auto &origin = selected.origin; const auto &source = origin.source; const auto &copy = selected.texture;
@@ -196,7 +126,7 @@ namespace sunshine_game3d::ui_input {
         {"current_source_present_generation", selected.current_source_present_generation},
         {"producer_queue", copy.producer_queue}, {"producer_fence", copy.producer_fence},
         {"producer_completed", copy.producer_completed}, {"producer_recording_retired", copy.producer_recording_retired},
-        {"token_generation", selected.token_generation}, {"state_basis", capture::name(copy.basis)}
+        {"state_basis", capture::name(copy.basis)}
       };
     }
   }
@@ -320,33 +250,6 @@ namespace sunshine_game3d::ui_input {
     auto *commands = queue->get_immediate_command_list();
     constexpr ui_mask::source_kind kinds[]{ui_mask::source_kind::alpha, ui_mask::source_kind::color_and_alpha,
       ui_mask::source_kind::backbuffer, ui_mask::source_kind::hudless};
-    // S3 shadow (game3d_ui_ticket.h): this render's Present label, one ticket
-    // per offered candidate, and the labels the CPU proposes for the GPU to
-    // verify. Nothing here decides while ui_ticket::identity_authoritative is
-    // false; today's Present-counting pairing is computed unchanged beside it.
-    const bool authoritative = ui_ticket::authoritative(false);
-    // The shadow runs only with the Diagnostics switch on (G2): off, nothing
-    // is stamped or proposed and no identity totals or lines are kept. The
-    // tickets' own token labels come from the capture owner either way.
-    const bool shadow = diagnostics::enabled();
-    const auto present_label = shadow ? frame_clock::label(runtime->get_device()) : 0u;
-    const auto presenting_queue = queue->get_native();
-    const auto interposers = shadow ? interposer_bits(now) : 0u;
-    std::uint32_t fg_off_run{};
-    {
-      std::lock_guard<std::mutex> lock(source_mutex);
-      if (const auto found = sources.find(runtime); found != sources.end()) {
-        auto &entry = found->second;
-        entry.fg_off_run = status.fg.known && !status.fg.enabled ? entry.fg_off_run + 1 : 0;
-        fg_off_run = entry.fg_off_run;
-      }
-    }
-    std::array<ui_ticket::ticket, ui_ticket::slot::count> tickets{};
-    std::array<bool, ui_ticket::slot::count> offered{}, stamped{};
-    ui_ticket::today_view today;
-    std::uint32_t expected_layer_present{}, expected_layer_token{}, expected_hudless_present{};
-    std::uint64_t hudless_token{}, backbuffer_producer{}, backbuffer_token{};
-    bool hudless_present_space{};
     // The hooked interposer's own header range decides UIAlpha's raw number
     // (2.11.x: 68, 2.12+: 69). Outside the surveyed range it stays manual-only.
     const bool alpha_authenticated =
@@ -356,11 +259,10 @@ namespace sunshine_game3d::ui_input {
     // tag batch as HUD-less, it is that image's exact pair on any Present.
     struct { api::resource_view view{}; std::uint64_t tagged{}, current{}; } backbuffer;
     const bool capturing = capture_needed(status, runtime->get_device()->get_api());
-    // Direct binding (C4): with the shadow off and no dump armed, a candidate
-    // is read where it lies (a leased Streamline snapshot, the live layer
-    // copy) instead of being copied into the renderer's slot first. A dump or
-    // the shadow keeps today's copies (and their stamp entries).
-    const bool direct_binding = !shadow && !diagnostic && commands == queue->get_immediate_command_list();
+    // Direct binding (C4): with no dump armed, a candidate is read where it
+    // lies (a leased Streamline snapshot, the live layer copy) instead of
+    // being copied into the renderer's slot first. A dump keeps the copies.
+    const bool direct_binding = !diagnostic && commands == queue->get_immediate_command_list();
     if (capturing && direct_binding)
       capture::observe_runtime_list(commands->get_native(), queue->get_native()); // Registered once; an SRW check after.
     // Manual On offers the same filtered candidates through detection, each
@@ -383,25 +285,12 @@ namespace sunshine_game3d::ui_input {
     constexpr ui_selection::kind slot_kinds[]{ui_selection::kind::ui_alpha, ui_selection::kind::ui_color,
       ui_selection::kind::backbuffer, ui_selection::kind::hudless};
     const bool hudless_wanted = capturing && (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::hudless));
-    // S3: the newest HUD-less and Backbuffer pair of one game frame by token
-    // (read-only, before acquire_kind retires an older ready snapshot).
-    ui_mask::selection batch_hudless, batch_backbuffer;
-    const bool token_batch = hudless_wanted && ui_mask::acquire_batch(reinterpret_cast<std::uint64_t>(runtime), now,
-      presenting_queue, batch_hudless, batch_backbuffer);
     if (capturing) for (unsigned slot = 0; slot != 4; ++slot) {
       const auto kind = kinds[slot];
       if (!(source_filter(wanted_source) & ui_mask::source_mask(kind))) continue;
       ui_mask::selection selected;
-      if (authoritative && token_batch && (kind == ui_mask::source_kind::hudless || kind == ui_mask::source_kind::backbuffer))
-        selected = kind == ui_mask::source_kind::hudless ? batch_hudless : batch_backbuffer;
-      else if (!ui_mask::acquire_kind(reinterpret_cast<std::uint64_t>(runtime), kind, selected, now, queue->get_native())) continue;
+      if (!ui_mask::acquire_kind(reinterpret_cast<std::uint64_t>(runtime), kind, selected, now, queue->get_native())) continue;
       const bool hudless = kind == ui_mask::source_kind::hudless;
-      const auto ticket_slot = ui_ticket::slot_of_candidate(slot);
-      tickets[ticket_slot] = tag_ticket(selected, slot_kinds[slot], typed_format(selected.texture.format), base, presenting_queue);
-      offered[ticket_slot] = true; stamped[ticket_slot] = shadow && selected.texture.stamped;
-      if (kind == ui_mask::source_kind::backbuffer) {
-        backbuffer_producer = selected.texture.producer_queue; backbuffer_token = selected.token_generation;
-      }
       // Without a same-batch Backbuffer, counting proposes the presented color
       // after the tag, inexact (ui_mask::pair_hudless_present); only V2 then
       // validates the pair's pixels. Streamline can present on its own queue;
@@ -412,23 +301,7 @@ namespace sunshine_game3d::ui_input {
       using ui_mask::hudless_present;
       const bool batch = hudless && backbuffer.view.handle &&
         ui_mask::same_tag_interval(tagged, current, backbuffer.tagged, backbuffer.current);
-      const bool counted = pairing.kind != hudless_present::unpaired;
-      // S3: the ticket's pair for this HUD-less image: the same-token
-      // Backbuffer (token space, any frame generation), else, with frame
-      // generation off over a real span on the presenting queue, the
-      // presented colour today's count names, proposed for the GPU to verify.
-      bool ticket_exact = false;
-      if (hudless) {
-        hudless_token = selected.token_generation;
-        hudless_present_space = !token_batch && counted && !status.fg_active() &&
-          ui_ticket::real_span(fg_off_run, pairing.presents_ago, interposers, status.fg.known, status.fg.enabled) &&
-          tickets[ticket_slot].present_queue == ui_ticket::queue_relation::same && present_label > pairing.presents_ago;
-        if (hudless_present_space) expected_hudless_present = present_label - pairing.presents_ago;
-        ticket_exact = (token_batch && batch_hudless.token_generation == selected.token_generation) || hudless_present_space;
-        today.offered = true; today.batch = batch; today.real_frame = tagged;
-      }
-      const bool paired = authoritative && hudless ? ticket_exact || (token_batch && batch) :
-        batch || counted;
+      const bool paired = batch || pairing.kind != hudless_present::unpaired;
       if (hudless) hudless_result = batch ? hudless_batch : pairing.kind == hudless_present::next_present ? hudless_real :
         pairing.kind == hudless_present::earlier_present ? hudless_late :
         tagged && tagged != UINT64_MAX && current > tagged ? hudless_stale : hudless_other;
@@ -448,27 +321,18 @@ namespace sunshine_game3d::ui_input {
         if (view.handle) log_direct_binding(0);
         result.leased |= view.handle != 0;
       }
-      const auto copy = [&](api::resource destination, api::resource stamps, std::uint64_t stamp_offset) {
-        return capture::copy_local_texture(commands->get_native(), queue->get_native(), selected.ticket,
-          destination.handle, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-          nullptr, commands == queue->get_immediate_command_list(), {stamps.handle, stamp_offset});
-      };
-      // The shadow's copy carries the snapshot's S3 stamp entry into the
-      // renderer's stamp buffer beside it; without it no stamp buffer exists.
-      if (admissible && !view.handle) {
-        if (shadow) view = renderer.prepare_ui_candidate(slot, selected.ticket.id, copy, static_cast<api::format>(selected.texture.format));
-        else view = renderer.prepare_ui_candidate(slot, selected.ticket.id,
-            [&](api::resource destination) { return copy(destination, {}, 0); }, static_cast<api::format>(selected.texture.format));
-      }
+      if (admissible && !view.handle)
+        view = renderer.prepare_ui_candidate(slot, selected.ticket.id, [&](api::resource destination) {
+          return capture::copy_local_texture(commands->get_native(), queue->get_native(), selected.ticket,
+            destination.handle, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            nullptr, commands == queue->get_immediate_command_list());
+        }, static_cast<api::format>(selected.texture.format));
       if (diagnostic) {
         candidates.push_back(captured_metadata(selected, now, view.handle != 0, pairing.kind == hudless_present::next_present));
         if (hudless) {
           candidates.back()["paired_with"] = batch ? "tagged_backbuffer_same_batch" : "presented_color";
           candidates.back()["presents_ago"] = pairing.presents_ago;
-          candidates.back()["ticket_pair"] = token_batch && batch_hudless.token_generation == selected.token_generation ?
-            "same_token_backbuffer" : hudless_present_space ? "proposed_present" : "absent";
         }
-        candidates.back()["ticket"] = ticket_json(tickets[ticket_slot], stamped[ticket_slot]);
       }
       if (!view.handle) continue;
       if (kind == ui_mask::source_kind::backbuffer) backbuffer = {view, tagged, current};
@@ -479,11 +343,9 @@ namespace sunshine_game3d::ui_input {
         else result.detection.hudless_presents_ago = pairing.presents_ago;
         // Only a same-batch Backbuffer makes the pair exact (E2): a counted
         // Present can show another frame, with frame generation or without
-        // (Hogwarts 09-30 and 10-05). Once S3 is authoritative the ticket's
-        // pair decides exactness instead.
-        result.detection.hudless_exact = authoritative ? ticket_exact : batch;
+        // (Hogwarts 09-30 and 10-05).
+        result.detection.hudless_exact = batch;
         result.detection.hudless = view;
-        today.detects = true; today.exact = result.detection.hudless_exact;
       } else result.detection.masks[slot] = view;
       signatures.set(slot_kinds[slot], typed_format(selected.texture.format));
       result.status.retained_alpha_ready = true;
@@ -499,70 +361,30 @@ namespace sunshine_game3d::ui_input {
       (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::color_and_alpha));
     if (layer_wanted && ui_layer::latest(runtime->get_device(), now, layer)) {
       constexpr std::uint64_t layer_capture = std::uint64_t(1) << 62; // Never a Streamline ticket id.
-      const auto copy = [&](api::resource destination, api::resource stamps, std::uint64_t stamp_offset) {
+      // Direct binding reads the live copy where it lies when its lists ran
+      // on the presenting queue; else it is copied into the renderer's slot
+      // (both rest in shader_resource). Either read holds the ring entry until
+      // this render's completion (complete()).
+      api::resource_view view{};
+      if (direct_binding && layer.direct)
+        view = renderer.bind_ui_candidate(4, layer_capture | layer.capture_id, layer.view, layer.copy);
+      if (view.handle) log_direct_binding(1);
+      else view = renderer.prepare_ui_candidate(4, layer_capture | layer.capture_id, [&](api::resource destination) {
         commands->barrier(layer.copy, api::resource_usage::shader_resource, api::resource_usage::copy_source);
         commands->barrier(destination, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
         commands->copy_resource(layer.copy, destination);
         commands->barrier(destination, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
         commands->barrier(layer.copy, api::resource_usage::copy_source, api::resource_usage::shader_resource);
-        if (stamps.handle && layer.stamp.handle) commands->copy_buffer_region(layer.stamp, 0, stamps, stamp_offset, 16);
         return true;
-      };
-      // Direct binding reads the live copy where it lies when its lists ran
-      // on the presenting queue; else it is copied into the renderer's slot
-      // (with the shadow, also its S3 stamp into the renderer's stamp buffer;
-      // both rest in COMMON; implicit promotion on this list). Either read
-      // holds the ring entry until this render's completion (complete()).
-      api::resource_view view{};
-      if (direct_binding && layer.direct)
-        view = renderer.bind_ui_candidate(4, layer_capture | layer.capture_id, layer.view, layer.copy);
-      if (view.handle && direct_binding && layer.direct) log_direct_binding(1);
-      else if (shadow) view = renderer.prepare_ui_candidate(4, layer_capture | layer.capture_id, copy, static_cast<api::format>(layer.format));
-      else view = renderer.prepare_ui_candidate(4, layer_capture | layer.capture_id,
-          [&](api::resource destination) { return copy(destination, {}, 0); }, static_cast<api::format>(layer.format));
+      }, static_cast<api::format>(layer.format));
       result.layer_device = runtime->get_device();
       result.layer_capture = layer.capture_id;
-      // S3 ticket: a before-clear copy whose labels only its stamp knows. The
-      // CPU proposes its present label (the Present its count names, within a
-      // real span on the presenting queue) and, with frame generation on,
-      // unknown or suspended, its token label (the newest ready Backbuffer's,
-      // when the layer's lists run on the Backbuffer's queue).
-      auto &layer_ticket = tickets[ui_ticket::slot::layer];
-      layer_ticket.kind = ui_ticket::capture_kind::layer_copy; layer_ticket.source = ui_selection::kind::ui_layer;
-      layer_ticket.at = ui_ticket::boundary::before_clear; layer_ticket.how = ui_ticket::proof::clear_precall;
-      layer_ticket.token = {ui_ticket::label_space::token, 0, false, ui_ticket::refusal::none};
-      layer_ticket.present = {ui_ticket::label_space::present, 0, false, ui_ticket::refusal::none};
-      layer_ticket.present_queue = layer.foreign_present ? ui_ticket::queue_relation::foreign :
-        relation(layer.executed_queue, presenting_queue);
-      layer_ticket.token_queue = layer.queue_mixed ? ui_ticket::queue_relation::foreign :
-        relation(layer.executed_queue, backbuffer_producer);
-      layer_ticket.typed_format = typed_format(layer.format); layer_ticket.color_space = base.color_space;
-      layer_ticket.epoch = base.epoch; layer_ticket.viewport = base.viewport;
-      offered[ui_ticket::slot::layer] = true; stamped[ui_ticket::slot::layer] = shadow && layer.stamped;
-      const bool fg_known_off = status.fg.known && !status.fg.enabled;
-      const bool present_space = fg_known_off && layer.presents_since_copy < present_label &&
-        ui_ticket::real_span(fg_off_run, layer.presents_since_copy, interposers, status.fg.known, status.fg.enabled);
-      const bool token_space = !fg_known_off && backbuffer_token &&
-        layer_ticket.token_queue == ui_ticket::queue_relation::same;
-      if (present_space && layer_ticket.present_queue != ui_ticket::queue_relation::foreign)
-        expected_layer_present = present_label - layer.presents_since_copy;
-      if (token_space && shadow) expected_layer_token = static_cast<std::uint32_t>(backbuffer_token);
-      {
-        ui_ticket::refusal_inputs in;
-        in.foreign_queue = (present_space && layer_ticket.present_queue == ui_ticket::queue_relation::foreign) ||
-          (!fg_known_off && layer_ticket.token_queue == ui_ticket::queue_relation::foreign);
-        in.unstamped = !stamped[ui_ticket::slot::layer];
-        in.not_real_span = fg_known_off && !present_space;
-        in.no_reference = !expected_layer_present && !expected_layer_token;
-        layer_ticket.refused = ui_ticket::first_refusal(in);
-      }
       if (diagnostic) candidates.push_back({{"source", "ui_layer"}, {"channel", "alpha"}, {"format", layer.format},
         {"candidate_bit", ui_detection::candidate::layer}, {"available_for_detection", view.handle != 0},
         {"association", "previous_frame_offscreen_ui_layer"}, {"capture_id", layer.capture_id},
         {"presents_since_copy", layer.presents_since_copy}, {"age_ms", now >= layer.tick ? now - layer.tick : 0},
-        {"ticket", ticket_json(layer_ticket, layer.stamped)},
-        {"executed_queue", layer.executed_queue}, {"expected_present_label", expected_layer_present},
-        {"expected_token_label", expected_layer_token}});
+        {"executed_queue", layer.executed_queue}, {"foreign_present", layer.foreign_present},
+        {"queue_mixed", layer.queue_mixed}});
       if (view.handle) {
         result.detection.layer = view;
         result.detection.layer_flags = ui_layer::detection_flags(static_cast<api::format>(layer.format));
@@ -576,7 +398,6 @@ namespace sunshine_game3d::ui_input {
     // (ui_mask::generated_without_input); the count bounds it.
     const bool tag_offered = result.detection.masks[0].handle || result.detection.masks[1].handle ||
       result.detection.masks[2].handle;
-    std::string identity_line, interposer_line;
     if (capturing && !available &&
         ui_mask::generated_without_input(frame_sequence, input_present, status.fg_active(), status.fg.generated_frames)) {
       if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},
@@ -588,20 +409,8 @@ namespace sunshine_game3d::ui_input {
     const bool current_allowed = status.requested && !status.fg_active() && present_has_alpha(base.output_format) &&
       (wanted_source == choice::automatic || wanted_source == choice::current_color);
     if (current_allowed) {
-      // S3: the presented colour carries this render's own Present label.
-      auto &current_ticket = tickets[ui_ticket::slot::current];
-      current_ticket.kind = ui_ticket::capture_kind::present_color; current_ticket.source = ui_selection::kind::current;
-      current_ticket.at = ui_ticket::boundary::present; current_ticket.how = ui_ticket::proof::present_boundary;
-      current_ticket.present = ui_ticket::present_label(ui_ticket::boundary::present, 0, present_label);
-      current_ticket.token = {};
-      current_ticket.present_queue = ui_ticket::queue_relation::same;
-      current_ticket.typed_format = typed_format(base.output_format); current_ticket.color_space = base.color_space;
-      current_ticket.epoch = base.epoch; current_ticket.viewport = base.viewport;
-      current_ticket.refused = current_ticket.present.valid ? ui_ticket::refusal::none : ui_ticket::refusal::unstamped;
-      offered[ui_ticket::slot::current] = true;
       if (diagnostic) candidates.push_back({{"source", "current_color"}, {"candidate_bit", ui_detection::candidate::current},
-        {"available_for_detection", true}, {"association", "current_color_allocation"}, {"format", base.output_format},
-        {"ticket", ticket_json(current_ticket, false)}});
+        {"available_for_detection", true}, {"association", "current_color_allocation"}, {"format", base.output_format}});
       result.detection.current_color = true; available = true;
       signatures.set(ui_selection::kind::current, typed_format(base.output_format));
     }
@@ -652,35 +461,10 @@ namespace sunshine_game3d::ui_input {
     // The derived mask is current-frame GPU output. Delayed CPU quality
     // feedback must never be promoted into exact current-winner provenance.
     input.retained = false; input.tick_ms = now; input.sequence = frame_sequence;
-    // S3 shadow: today's view of this render beside the ticket's.
-    today.holds = result.detection.hold_previous;
-    today.detects = today.detects && today.offered;
-    const auto frame_id = ui_ticket::newest_token(tickets);
-    const bool ticket_batch = token_batch && hudless_token && batch_hudless.token_generation == hudless_token;
-    const bool ticket_pair_exact = today.offered && (ticket_batch || hudless_present_space);
-    result.detection.tickets = tickets;
-    result.detection.expected_layer_present = expected_layer_present;
-    result.detection.expected_layer_token = expected_layer_token;
-    result.detection.expected_hudless_present = expected_hudless_present;
-    nlohmann::json identity_json;
-    if (diagnostic) identity_json = {
-      {"meaning", "S3 shadow (docs/reshade-sbs.md, UI decision framework, S3 snapshot ticket): this render's pairing by "
-        "Present counting (today) beside what the snapshot tickets would decide (ticket). Nothing decides from the ticket "
-        "while identity_authoritative is false. expected holds the labels proposed for the GPU to verify against the "
-        "stamps (0: not proposed)."},
-      {"authoritative", authoritative}, {"present_label", present_label}, {"fg_off_run", fg_off_run},
-      {"interposers", ui_ticket::interposer_names(interposers)},
-      {"today", {{"offered", today.offered}, {"detects", today.detects && !today.holds}, {"holds", today.holds},
-        {"exact", today.exact}, {"batch", today.batch}, {"real_frame", today.real_frame}}},
-      {"ticket", {{"frame_id", frame_id}, {"paired", ticket_pair_exact}, {"batch", ticket_batch},
-        {"token_batch", token_batch ? nlohmann::json(batch_hudless.token_generation) : nlohmann::json(nullptr)},
-        {"pair_space", ticket_batch ? "token" : hudless_present_space ? "present" : "none"}}},
-      {"expected", {{"hudless_present", expected_hudless_present}, {"layer_present", expected_layer_present},
-        {"layer_token", expected_layer_token}}}};
     if (diagnostic && !manual) result.source_metadata = nlohmann::json{
       {"source", "automatic_candidate_set"}, {"association", "current_render_gpu_validation"},
       {"meaning", "Current render validates all admitted candidates and produces its mask on the GPU. Delayed quality statistics do not identify the exact current winner or authorize pixels."},
-      {"candidates", candidates}, {"identity_shadow", identity_json}}.dump();
+      {"candidates", candidates}}.dump();
     {
       std::lock_guard<std::mutex> lock(source_mutex);
       const auto found = sources.find(runtime);
@@ -689,40 +473,6 @@ namespace sunshine_game3d::ui_input {
         if (hudless_wanted) ++entry.hudless_outcomes[hudless_result];
         if (tag_offered) {
           entry.input_present = frame_sequence; entry.input_epoch = base.epoch; entry.input_viewport = base.viewport;
-        }
-        // S3 shadow counters: a scope change ends the identity run.
-        if (entry.identity_epoch != base.epoch || entry.identity_viewport != base.viewport) {
-          entry.identity.end_scope(entry.identity_totals);
-          entry.identity_epoch = base.epoch; entry.identity_viewport = base.viewport;
-        }
-        if (shadow && (capturing || layer_wanted)) {
-          entry.identity.step(today, frame_id, ticket_pair_exact, ticket_batch, entry.identity_totals);
-          for (std::size_t i = 0; i != tickets.size(); ++i) if (offered[i]) ui_ticket::count_ticket(tickets[i], entry.identity_totals);
-        }
-        if (shadow) entry.identity_totals[ui_ticket::identity_counter::interposers] = interposers;
-        // The GPU verdicts committed since the last render join the gpu group.
-        // A recreated renderer restarts its cumulative counts from zero.
-        if (shadow) {
-          namespace n = ui_ticket::identity_counter;
-          const auto gpu = renderer.identity_counts();
-          for (std::size_t i = n::gpu_exact; i <= n::gpu_token_exact; ++i) {
-            const auto seen = entry.identity_gpu_seen[i];
-            entry.identity_totals[i] += gpu[i] >= seen ? gpu[i] - seen : gpu[i];
-            entry.identity_gpu_seen[i] = gpu[i];
-          }
-        }
-        if (shadow && now >= entry.next_identity_log && entry.identity_totals != entry.identity_logged &&
-            entry.identity_totals[ui_ticket::identity_counter::renders]) {
-          entry.next_identity_log = now + 5000;
-          entry.identity_logged = entry.identity_totals;
-          identity_line = "Sunshine UI identity: runtime=" + pointer_text(runtime) + ' ' +
-            ui_ticket::format_identity_counters(entry.identity_totals);
-        }
-        if (shadow && (interposers != entry.logged_interposers || status.fg.known != entry.logged_fg_known ||
-            status.fg.enabled != entry.logged_fg_enabled)) {
-          entry.logged_interposers = interposers; entry.logged_fg_known = status.fg.known; entry.logged_fg_enabled = status.fg.enabled;
-          interposer_line = "Sunshine FG interposers: runtime=" + pointer_text(runtime) + ' ' +
-            ui_ticket::format_interposers(interposers, status.fg.known, status.fg.enabled);
         }
         const bool matches = entry.instance == instance && !entry.suspended && entry.base == base &&
           entry.selection.snapshot().choice_revision == before.choice_revision;
@@ -739,8 +489,6 @@ namespace sunshine_game3d::ui_input {
       result.detection = {}; result.detection.current_color = false;
       result.status.retained_alpha_ready = false; result.status.input = source_alpha_input::none;
     }
-    if (!interposer_line.empty()) sunshine_log::message(reshade::log::level::info, interposer_line.c_str());
-    if (!identity_line.empty()) sunshine_log::message(reshade::log::level::info, identity_line.c_str());
     ui_mask::diagnostic_snapshot latest;
     const bool have_diagnostic = status.requested && ui_mask::query_diagnostic(reinterpret_cast<std::uint64_t>(runtime), latest);
     bool log_gate = false;
@@ -755,14 +503,14 @@ namespace sunshine_game3d::ui_input {
     }
     if (log_gate) {
       const auto &gate = latest.hook_gate;
-      // S3: where tag begin() calls stopped without an attempt (process
-      // counts per stage), and this request's latest such stage.
+      // Where tag begin() calls stopped without an attempt (process counts per
+      // stage), and this request's latest such stage.
       std::string refused = "begin_refused={";
       for (std::size_t stage = 1; stage != latest.begin_refusals.size(); ++stage) {
         if (stage != 1) refused += ' ';
-        refused.append(ui_ticket::begin_stage_names[stage]).append("=").append(std::to_string(latest.begin_refusals[stage]));
+        refused.append(ui_mask::begin_stage_names[stage]).append("=").append(std::to_string(latest.begin_refusals[stage]));
       }
-      refused.append("} begin_last=").append(ui_ticket::name(latest.begin_refusal));
+      refused.append("} begin_last=").append(ui_mask::name(latest.begin_refusal));
       char message[1152]{};
       std::snprintf(message, sizeof(message),
         "Sunshine UI capture gate: runtime=%p request_generation=%llu wanted={epoch=%llu revision=%llu viewport=%u device=%llu size=%ux%u kinds=0x%x} hook={state=%s epoch=%llu revision=%llu viewport=%u sequence=%llu tick=%llu kinds=0x%x matches=%u} boundary=%llu attempted=%u recorded=%u hudless_presents={batch=%u real=%u late=%u generated=0 stale=%u other=%u none=%u} %s; gate metadata does not authorize pixels",
@@ -809,18 +557,6 @@ namespace sunshine_game3d::ui_input {
     }
     return result;
   }
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-  // The D3D12 runtime fixture's view of a runtime's S3 shadow totals.
-  extern "C" __declspec(dllexport) BOOL SunshineUIInputTestIdentity(api::effect_runtime *runtime,
-      ui_ticket::identity_counters *out) {
-    if (!runtime || !out) return FALSE;
-    std::lock_guard<std::mutex> lock(source_mutex);
-    const auto found = sources.find(runtime);
-    if (found == sources.end()) return FALSE;
-    *out = found->second.identity_totals;
-    return TRUE;
-  }
-#endif
   ui_adaptive::source frame::match_scene(ui_adaptive::source source, bool scene_ready) const {
     source.now_ms = observation.now_ms; source.eligible = source.eligible && scene_ready;
     // A retained capture, Manual On's explicit one included (the renderer

@@ -9,10 +9,6 @@ left/right image for its local glasses presenter or Game 3D stream. Follow the
 The Game 3D panel keeps **Enable Game 3D**, **3D strength**, and **UI protection** above its tabs.
 Strength defaults to **50%**; **Reset** stays in place and is disabled at the default value.
 The UI protection row's **Forget** clears the UI sources Auto accepted for this game.
-The row below it, **Flatten still screens with no UI source (SDR only)**, saved per game as
-`UIFlattenStillScreens`, lets Auto show still SDR screens that no UI source covers flat; it is off
-by default, when Auto only logs them (rule H2,
-[still screens without a UI source](../../docs/reshade-sbs.md#setup)).
 Existing saved values, including zero strength, are preserved until an explicit edit/reset.
 **Status**, **Troubleshooting**, and **Calibration** separate live information from source/preview
 controls and detailed measurements. Wrapped status text stays in its own scroll area and cannot
@@ -576,16 +572,17 @@ ctest --test-dir cmake-build-relwithdebinfo/reshade-addon -R reshade_game3d_ui_s
 ```
 
 Its `KNOWN_TODAY <stage> <rule>` lines name today's known-wrong outcomes by
-[UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework) stage and rule ID (such as
-`S3 T1/E2`). They do not fail the test. It ends with
-`PASS UI sequence replay: <groups> groups, 2 KNOWN_TODAY`, both for S3 (T1/E2); the
+[UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework) stage and rule ID, and
+its `KNOWN_LIMIT <rule>` lines name known limits that no stage changes. Neither fails the test. It
+ends with `PASS UI sequence replay: <groups> groups, 0 KNOWN_TODAY, 2 KNOWN_LIMIT`, both limits of
+Present counting under a misreported frame-generation multiplier (T1/E2); the
 [UI protection](../../docs/reshade-sbs.md#setup) contract gives the current group count. A
 replay `xfail` reason names the same rule IDs.
 
 ## Additional diagnostics
 
 `[SUNSHINE_GAME3D] Diagnostics=1` (the **Diagnostics** row under Troubleshooting) turns on the
-add-on's diagnostic-only per-frame work: per-pass GPU timing and the S3 frame-identity shadow
+add-on's diagnostic-only per-frame work: per-pass GPU timing
 (see [Diagnostics switch](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)). It
 is off by default and changes no decision or exported pixel.
 

@@ -13,9 +13,9 @@
 // hidden-scene guard's per-frame bits (H1) itself, or has the guard
 // (game3d_scene_guard.h) derive them from the frame's own measured evidence;
 // pre_ui_proven stands for the acceptance ledger's pre-UI proof of the offered
-// layer's signature (H1 d). H2's still-screen flag (b2 word 5) is the dump's
-// own (replay.ui_detection.still_bits, zero when absent); a single frame has
-// no previous cell means, so its stillness counts read nothing compared.
+// layer's signature (H1 d). b2 word 5 is reserved and pushed as zero; a
+// dump's still_bits and S3 identity fields (selection revisions 5 to 8) are
+// ignored.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -257,9 +257,10 @@ namespace {
   // selection revision 2 the one-way judgment rows 80-111 (the scene rows
   // follow from 112, 121 rows in all) and decision texels 8 and 9, and
   // selection revision 4 (12 decision texels) the pre-UI pixel rows 128-143
-  // (144 rows in all) and decision texel 11, and selection revision 5 (13
-  // decision texels) H2's stillness rows from 144 (160 rows in all) and
-  // decision texel 12. A shader with the tile-parts marker counts each tile in
+  // (144 rows in all) and decision texel 11; selection revisions 5 to 8 (13
+  // decision texels) added H2's stillness rows from 144 (160 rows in all)
+  // and decision texel 12, both removed by revision 9 (12 texels again). A
+  // shader with the tile-parts marker counts each tile in
   // that many groups (the dispatch's z) at columns 16 apart.
   struct sizes_t {
     UINT statistics_rows, decision_texels;
@@ -283,93 +284,22 @@ namespace {
     std::string mask_exact; // Empty unless the label asks for it.
     std::vector<float> mask;
     UINT width = 0, height = 0;
-    // The candidate layout, and the pushed candidate bits, accepted mask,
-    // detection flags (of the second pass when measured) and H2's b2 word 5.
-    std::uint32_t layout = 0, offered = 0, accepted = 0, flags = 0, still = 0;
+    // The candidate layout, and the pushed candidate bits, accepted mask and
+    // detection flags (of the second pass when measured).
+    std::uint32_t layout = 0, offered = 0, accepted = 0, flags = 0;
     // scene_hold "measured": the per-frame bits the scene guard derived.
     bool measured = false;
     std::uint32_t guard_bits = 0;
-    // S3: the stamps and proposals pushed (b2 words 6-9 and t9), whether the
-    // package or the label carried any (a legacy package replays with none
-    // proposed and no gate, as the renderer did before S3), and whether the
-    // shader verifies identity (texel 12 .z/.w).
-    selection::identity_input identity;
-    bool identity_labelled = false, identity_supported = false;
   };
-
-  // S3: the identity a case replays. The package's replay.ui_detection
-  // carries the renderer's b2 words 6-9 (expected_layer_present,
-  // expected_layer_token, expected_hudless_present, identity_bits) and its
-  // stamp buffer read back (stamps: one [C_P, C_T] per ui_ticket slot, the
-  // layer at 4 and the HUD-less image at 5); a label's identity object (the
-  // same names, plus layer_present, layer_token and hudless_present for the
-  // stamp reads) overrides any of them.
-  selection::identity_input identity_of(const json &metadata, const json &label, bool &labelled) {
-    selection::identity_input in;
-    labelled = false;
-    const auto read = [&](const json &object, const char *name, std::uint32_t &field) {
-      if (!object.is_object() || !object.contains(name)) return;
-      field = object.at(name).get<std::uint32_t>();
-      labelled = true;
-    };
-    if (metadata.contains("replay") && metadata.at("replay").contains("ui_detection")) {
-      const auto &recorded = metadata.at("replay").at("ui_detection");
-      read(recorded, "expected_layer_present", in.expected_layer_present);
-      read(recorded, "expected_layer_token", in.expected_layer_token);
-      read(recorded, "expected_hudless_present", in.expected_hudless_present);
-      read(recorded, "identity_bits", in.bits);
-      if (recorded.contains("stamps") && recorded.at("stamps").is_array()) {
-        const auto &stamps = recorded.at("stamps");
-        const auto entry = [&](std::size_t slot, std::size_t component) {
-          return slot < stamps.size() && stamps[slot].is_array() && component < stamps[slot].size() ?
-            stamps[slot][component].get<std::uint32_t>() : 0u;
-        };
-        in.layer_present = entry(contract::identity::stamp_layer, 0);
-        in.layer_token = entry(contract::identity::stamp_layer, 1);
-        in.hudless_present = entry(contract::identity::stamp_hudless, 0);
-        labelled = true;
-      }
-    }
-    if (label.contains("identity")) {
-      const auto &override_ = label.at("identity");
-      if (!override_.is_object()) throw std::runtime_error("identity must be an object");
-      read(override_, "expected_layer_present", in.expected_layer_present);
-      read(override_, "expected_layer_token", in.expected_layer_token);
-      read(override_, "expected_hudless_present", in.expected_hudless_present);
-      read(override_, "bits", in.bits);
-      read(override_, "layer_present", in.layer_present);
-      read(override_, "layer_token", in.layer_token);
-      read(override_, "hudless_present", in.hudless_present);
-    }
-    return in;
-  }
-
-  // The " identity={...}" text of --identity: each offered pair's GPU verdict,
-  // label space and delta (texel 12 .z/.w), whether the CPU's verify_identity
-  // agrees, and whether the package or label carried stamps.
-  std::string identity_text(const outcome &result) {
-    const auto &d = result.decision;
-    if (!result.identity_supported || d.size() <= word::id_deltas) return " identity=n/a";
-    const auto gpu = selection::identity_of_words(d[word::id_verdicts], d[word::id_deltas]);
-    const auto cpu = selection::verify_identity(result.identity, result.offered);
-    static constexpr const char *verdicts[]{"none", "exact", "mismatch", "unstamped", "unproposed"};
-    static constexpr const char *spaces[]{"none", "token", "present", "?"};
-    const auto verdict = [](std::uint32_t v) { return v < 5u ? verdicts[v] : "?"; };
-    char text[256];
-    std::snprintf(text, sizeof(text), " identity={layer=%s/%s delta=%d hudless=%s/%s delta=%d labelled=%d cpu=%s}",
-      verdict(gpu.layer), spaces[gpu.layer_space & 3u], gpu.layer_delta, verdict(gpu.hudless), spaces[gpu.hudless_space & 3u],
-      gpu.hudless_delta, result.identity_labelled ? 1 : 0, gpu == cpu ? "match" : "differs");
-    return text;
-  }
 
   std::string mask_exact(const outcome &result, const std::array<const artifact_t *, 4> &inputs, const artifact_t *layer,
       const artifact_t &paired) {
-    // Raw selected alpha, or a whole-frame flat (sources 6, 8 and 11); a
+    // Raw selected alpha, or a whole-frame flat (sources 6 and 8); a
     // HUD-less difference has no CPU reference here.
     const auto source = result.decision.at(word::source);
     std::vector<float> reference;
     if (!source) reference.assign(result.mask.size(), 0.f);
-    else if (source == 6u || source == 8u || source == contract::source_still) reference.assign(result.mask.size(), 1.f);
+    else if (source == 6u || source == 8u) reference.assign(result.mask.size(), 1.f);
     else if (source <= 4u || source == contract::source_layer) {
       const auto *input = source == 4u ? &paired : source == contract::source_layer ? layer : inputs[source - 1];
       if (!input) return "no-reference(missing candidate)";
@@ -536,8 +466,8 @@ namespace {
     // candidates (layout 1: trusted slots), flags, (selection revision 4)
     // the offscreen UI layer's pair threshold with the presented color, from
     // the two artifacts' own encodings (zero without a layer or when not
-    // comparable), and (selection revision 5) H2's still-screen flag as the
-    // dump recorded it, padded to the 16-byte constant buffer granularity.
+    // comparable), and the reserved word 5 as zero, padded to the 16-byte
+    // constant buffer granularity.
     const float threshold = pair_threshold ? *pair_threshold :
       selection::comparable(encoding_of(paired), encoding_of(paired)).value_or(2.f / 255.f);
     float pre_ui_threshold = 0.f;
@@ -545,42 +475,15 @@ namespace {
       if (ui_layer_kind(kind.get<std::string>()) && layer_input)
         pre_ui_threshold =
           selection::comparable(encoding_of(kind.get<std::string>()), encoding_of("source_color")).value_or(0.f);
-    std::uint32_t still = 0;
-    if (const auto &replay = metadata.at("replay"); replay.contains("ui_detection") &&
-        replay.at("ui_detection").contains("still_bits"))
-      still = replay.at("ui_detection").at("still_bits").get<std::uint32_t>();
-    // S3: b2 words 6-9 and the stamp buffer at t9 (identity_of; a legacy
-    // package proposes nothing and pushes no gate).
-    bool identity_labelled = false;
-    const auto identity = identity_of(metadata, label, identity_labelled);
     struct {
       std::uint32_t bits;
       float threshold;
       std::uint32_t accepted, flags;
       float pre_ui_threshold;
-      std::uint32_t still;
-      std::uint32_t expected_layer_present, expected_layer_token, expected_hudless_present, identity_bits;
+      std::uint32_t reserved;
       std::uint32_t padding[2];
-    } constants{bits, threshold, accepted, flags, pre_ui_threshold, still, identity.expected_layer_present,
-      identity.expected_layer_token, identity.expected_hudless_present, identity.bits, {}};
-    static_assert(sizeof(constants) == 48);
-    ComPtr<ID3D11Buffer> stamp_buffer;
-    ComPtr<ID3D11ShaderResourceView> stamp_view;
-    {
-      std::array<std::array<std::uint32_t, 4>, contract::identity::stamp_entries> entries{};
-      entries[contract::identity::stamp_layer] = {identity.layer_present, identity.layer_token, 0u, 0u};
-      entries[contract::identity::stamp_hudless] = {identity.hudless_present, 0u, 0u, 0u};
-      D3D11_BUFFER_DESC buffer{};
-      buffer.ByteWidth = UINT(sizeof(entries));
-      buffer.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-      const D3D11_SUBRESOURCE_DATA initial{entries.data(), 0, 0};
-      checked(gpu.device->CreateBuffer(&buffer, &initial, &stamp_buffer), "stamps");
-      D3D11_SHADER_RESOURCE_VIEW_DESC view{};
-      view.Format = DXGI_FORMAT_R32G32B32A32_UINT;
-      view.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-      view.Buffer.NumElements = contract::identity::stamp_entries;
-      checked(gpu.device->CreateShaderResourceView(stamp_buffer.Get(), &view, &stamp_view), "stamps view");
-    }
+    } constants{bits, threshold, accepted, flags, pre_ui_threshold, 0u, {}};
+    static_assert(sizeof(constants) == 32 && contract::b2_words * 4 <= sizeof(constants));
     const auto constant_buffer = [&](const void *bytes, UINT size) {
       D3D11_BUFFER_DESC buffer{};
       buffer.ByteWidth = size; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -600,7 +503,6 @@ namespace {
       views[1] = depth.srv.Get();
       views[6] = presented.gpu.srv.Get();
       views[7] = layer_input ? layer_input->gpu.srv.Get() : nullptr;
-      views[9] = stamp_view.Get();
       views[10] = t10;
       for (unsigned i = 0; i < 4; ++i) views[11 + i] = inputs[i] ? inputs[i]->gpu.srv.Get() : nullptr;
       context.CSSetShader(shader, nullptr, 0);
@@ -656,11 +558,7 @@ namespace {
     result.decision = download<std::uint32_t>(gpu, decision);
     result.mask = download<float>(gpu, mask);
     result.width = width; result.height = height;
-    result.layout = layout; result.offered = bits; result.accepted = accepted; result.flags = flags; result.still = still;
-    result.identity = identity;
-    result.identity_labelled = identity_labelled;
-    result.identity_supported = sunshine_game3d::shader_marker(shader_source, contract::identity::marker) ==
-      contract::identity::version;
+    result.layout = layout; result.offered = bits; result.accepted = accepted; result.flags = flags;
     result.pixels = result.mask.size();
     for (const float value : result.mask) {
       result.ui_pixels += value > 0.f ? 1u : 0u;
@@ -819,8 +717,8 @@ namespace {
   }
 
   // ui_selection::decide on the counts the GPU wrote, with the pushed
-  // candidate bits, accepted mask, flags and still-screen flag and no
-  // previous decision (the hold store unbound): "match" when the GPU's
+  // candidate bits, accepted mask and flags and no previous decision (the
+  // hold store unbound): "match" when the GPU's
   // source, coverage, accepted
   // word, valid bits, refused candidate, frame reason, claims and h1 word
   // agree, "n/a" for a shader of another candidate layout or selection
@@ -829,15 +727,11 @@ namespace {
     const auto &d = result.decision;
     if (!mirrored || d.size() <= word::h1) return "n/a";
     const auto expected = selection::decide(selection::counts_from_words(d.data(), d.size()), result.offered, result.accepted,
-      result.flags, selection::hold_state{}, result.still, result.identity);
-    // S3: a shader that verifies identity also writes its verdicts (texel 12).
-    const bool identity = !result.identity_supported || (d.size() > word::id_deltas &&
-      d[word::id_verdicts] == selection::identity_verdict_word(expected.identity) &&
-      d[word::id_deltas] == selection::identity_delta_word(expected.identity));
+      result.flags, selection::hold_state{});
     if (expected.source == d[word::source] && expected.covered == d[word::covered] && expected.valid_bits == d[word::valid_bits] &&
         d[word::accepted] == result.accepted && d[word::candidates] == result.offered && expected.refused == d[word::refused] &&
         selection::frame_reason_word(expected) == d[word::frame_reason] && expected.claims == d[word::claims] &&
-        selection::h1_word(expected) == d[word::h1] && identity)
+        selection::h1_word(expected) == d[word::h1])
       return "match";
     char text[240];
     std::snprintf(text, sizeof(text),
@@ -880,19 +774,18 @@ namespace {
 int main(int argc, char **argv) {
   try {
     std::optional<fs::path> write_masks;
-    bool verbose = false, strict = false, identity = false;
+    bool verbose = false, strict = false;
     std::vector<std::string> positional;
     for (int i = 1; i < argc; ++i) {
       const std::string argument = argv[i];
       if (argument == "--write-mask" && i + 1 < argc && !write_masks) write_masks = fs::absolute(argv[++i]);
       else if (argument == "--verbose") verbose = true;
       else if (argument == "--strict") strict = true;
-      else if (argument == "--identity") identity = true;
       else positional.push_back(argument);
     }
     if (positional.size() != 2) {
       std::fprintf(stderr, "Usage: ui_detection_replay <game3d_native.hlsl> <cases.json> [--write-mask <new-dir>] [--verbose] "
-        "[--strict] [--identity]\n"
+        "[--strict]\n"
         "cases.json: {\"dump_root\": dir, \"cases\": [{\"dump\", \"label\", \"candidates\": [kinds|\"current\"], "
         "\"paired\": kind, \"exact\": bool, \"accepted\": [kinds], \"scene_hold\": bool|\"measured\", "
         "\"pre_ui_visible\": bool, \"pre_ui_proven\": bool, \"refuted\": [kinds], \"depth_not_current\": bool, "
@@ -935,15 +828,7 @@ int main(int argc, char **argv) {
         "(strong/contradicted pixels of the layer, Backbuffer and current alpha) from selection revision 2, and the H1\n"
         "claims and h1 word (applied, S1 winner) from selection revision 3, and the layer's pre-UI pixel counts\n"
         "(texel 11: match, image_lit, presented_lit, presented_lit_differs) from selection revision 4.\n"
-        "--verbose prints every decision word.\n"
-        "S3 (frame identity, shadow): a shader with SUNSHINE_UI_IDENTITY binds the package's stamp buffer read back at t9\n"
-        "(replay.ui_detection.stamps: [C_P, C_T] per ticket slot, the layer at 4 and the HUD-less image at 5) and pushes\n"
-        "its b2 words 6-9 (replay.ui_detection expected_layer_present, expected_layer_token, expected_hudless_present,\n"
-        "identity_bits); a label's \"identity\" object (those names with bits, and layer_present, layer_token and\n"
-        "hudless_present for the stamp reads) overrides them. A legacy package proposes nothing and pushes no gate, so\n"
-        "it replays as before S3. The mirror also compares texel 12's identity words with ui_selection::verify_identity.\n"
-        "--identity adds identity={layer=<verdict>/<space> delta hudless=<verdict>/<space> delta labelled cpu} to every\n"
-        "line.\n");
+        "--verbose prints every decision word.\n");
       return 2;
     }
     const auto shader_path = fs::absolute(positional[0]);
@@ -1078,7 +963,6 @@ int main(int argc, char **argv) {
         result.mask_exact.empty() ? "" : " mask_exact=", result.mask_exact.c_str(), scene.empty() ? "" : " scene=", scene.c_str(),
         pre_ui_scene.empty() ? "" : " pre_ui_scene=", pre_ui_scene.c_str(), pre_ui_match.empty() ? "" : " pre_ui_match=",
         pre_ui_match.c_str());
-      if (identity) std::printf("  %s\n", identity_text(result).c_str() + 1);
       if (verbose) {
         std::printf("  words=");
         for (size_t i = 0; i < d.size(); ++i) std::printf("%u%s", d[i], i + 1 < d.size() ? "," : "");

@@ -36,27 +36,6 @@ class GameDumpReaderTest(unittest.TestCase):
         with Image.open(self.root / "previews" / name) as image:
             return np.array(image).reshape(-1, 3).tolist()
 
-    def test_identity_tickets_are_reported_and_absent_before_s3(self):
-        depth = self.artifact("raw_depth", [0.5])
-        self.assertIsNone(self.inspect([depth])["identity_tickets"])
-        ticket = dict(kind="sl_tag", boundary="at_tag", token=dict(space="token", value=7, valid=True, reason="none"),
-                      present=dict(space="present", value=0, valid=False, reason="none"), proof="sl_declared",
-                      refusal="none", stamped=True)
-        layer = dict(kind="layer_copy", boundary="before_clear", proof="clear_precall", refusal="none", stamped=True,
-                     stamp=dict(present_read=41, token_read=7, present_label=41, token_label=7))
-        metadata = dict(
-            ui_source=dict(candidates=[dict(source="sl_hudless", ticket=ticket), dict(source="none")],
-                           identity_shadow=dict(today=dict(batch=True), ticket=dict(batch=False))),
-            ui_layer_census=dict(candidates=[dict(kind="ui_layer_0", ticket=layer)]),
-            optional_captures=[dict(name="Backbuffer", ticket=dict(kind="sl_tag", stamp=None))])
-        report = self.inspect([self.artifact("raw_depth", [0.5])], metadata)["identity_tickets"]
-        self.assertEqual([r["source"] for r in report["candidates"]], ["sl_hudless"])
-        self.assertEqual(report["candidates"][0]["token"]["value"], 7)
-        self.assertIsNone(report["candidates"][0]["present_read"])
-        self.assertEqual((report["census"][0]["present_label"], report["census"][0]["token_read"]), (41, 7))
-        self.assertEqual(report["optional"][0]["source"], "Backbuffer")
-        self.assertEqual(report["identity_shadow"]["today"]["batch"], True)
-
     def test_raw_float_depth_is_not_clamped_or_inverted(self):
         values = (-1.25, 0.0, 0.75, 12.5)
         (self.root / "depth.bin").write_bytes(struct.pack("<4f", *values))

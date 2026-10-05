@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-#include "game3d_ui_ticket.h"
 #include "streamline_buffer_types.h"
 #include "streamline_depth_capture.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
 
 // A live, bounded owner for SL's dedicated UI alpha/color, real backbuffer and
 // HUD-less scene color. HUD-less pixels require comparison with paired final color.
@@ -105,9 +109,6 @@ namespace sunshine_game3d::ui_mask {
     // Read from the retained original resource when immutable pixels are polled.
     // A generation match is a necessary pairing gate, not a content/frame proof.
     std::uint64_t current_source_present_generation{};
-    // S3: the probe's token generation of the tag's frame (Streamline contract
-    // 6: unique per slGetNewFrameToken issue, numbered or not; 0 none).
-    std::uint64_t token_generation{};
   };
   enum class capture_gate { not_observed, invalid_viewport, inactive_observation, observation_changed,
     no_matching_request, ambiguous_request, no_ui_tags, admitted };
@@ -128,6 +129,27 @@ namespace sunshine_game3d::ui_mask {
     std::uint64_t epoch{}, revision{}, sequence{}, tick{};
     std::uint32_t viewport{}, seen_kinds{}, matching_requests{};
   };
+  // Where a tag's begin() stopped without a capture attempt: no live request
+  // matches, more than one does, the request's kinds exclude the tag, the
+  // tag is not newer than the request's latest, its shape or declared
+  // lifetime is unsupported, or both of its kind's reservations are taken.
+  // The capture gate line counts them per stage.
+  enum class begin_stage : std::uint8_t {
+    none,
+    no_request,
+    ambiguous_request,
+    kind_filtered,
+    not_newer,
+    shape,
+    unsupported_lifetime,
+    no_reservation,
+    count
+  };
+  inline constexpr std::array<std::string_view, std::size_t(begin_stage::count)> begin_stage_names{"none", "no_request",
+    "ambiguous_request", "kind_filtered", "not_newer", "shape", "unsupported_lifetime", "no_reservation"};
+  constexpr std::string_view name(begin_stage value) {
+    return value < begin_stage::count ? begin_stage_names[std::size_t(value)] : std::string_view("none");
+  }
   struct diagnostic_snapshot {
     request wanted;
     // Latest global hook gate, independent of this request's matching boundary.
@@ -137,12 +159,12 @@ namespace sunshine_game3d::ui_mask {
     boundary latest_boundary;
     sunshine_streamline::depth_capture::record_diagnostic record;
     bool record_attempted{}, record_completed{}, sdk_result_known{}, sdk_successful{};
-    // S3: where begin() stopped without an attempt, the latest in this request
+    // Where begin() stopped without an attempt, the latest in this request
     // (none after an attempt), and the process's counts per stage since start
-    // (ui_ticket::begin_stage; no_request and ambiguous_request have no
-    // request of their own, so only the counts name them).
-    sunshine_game3d::ui_ticket::begin_stage begin_refusal{};
-    std::array<std::uint64_t, std::size_t(sunshine_game3d::ui_ticket::begin_stage::count)> begin_refusals{};
+    // (no_request and ambiguous_request have no request of their own, so
+    // only the counts name them).
+    begin_stage begin_refusal{};
+    std::array<std::uint64_t, std::size_t(begin_stage::count)> begin_refusals{};
   };
 
   // Repeating an identical request preserves completed pixels. Disable or any
@@ -160,15 +182,6 @@ namespace sunshine_game3d::ui_mask {
   // then use copy_local_texture on that queue. Zero keeps strict diagnostics.
   bool acquire_kind(std::uint64_t runtime, source_kind kind, selection &out, std::uint64_t now_ms,
     std::uint64_t consumer_queue = 0);
-  // S3 token pairing (shadow until ui_ticket::identity_authoritative): of the
-  // retained HUD-less and Backbuffer snapshots (two per kind), the pair of one
-  // game frame (ui_ticket::same_frame: same epoch and viewport and the same
-  // nonzero token generation) with the newest token generation whose both
-  // snapshots are ready for this consumer queue (as acquire_kind). Read-only:
-  // it retires nothing, so a caller asks for it before acquire_kind retires
-  // an older ready snapshot. False when no such pair is ready.
-  bool acquire_batch(std::uint64_t runtime, std::uint64_t now_ms, std::uint64_t consumer_queue, selection &hudless,
-    selection &backbuffer);
   // Plain metadata for the newest boundary in the current requested scope.
   // True with a zero boundary sequence means no matching tag has arrived yet;
   // record_attempted distinguishes a native call from no call; record_completed
@@ -194,8 +207,6 @@ namespace sunshine_game3d::ui_mask {
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   namespace testing {
     bool last_attempt(std::uint64_t runtime, boundary &out);
-    // Whether the last attempt's record asked for the S3 token clock write.
-    bool last_token_clock(std::uint64_t runtime);
   }
 #endif
 }

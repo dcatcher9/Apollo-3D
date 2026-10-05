@@ -17,7 +17,6 @@ namespace sunshine_game3d::ui_mask {
       capture::diagnostic_ticket ticket;
       capture::source_ref source;
     };
-    using begin_stage = ui_ticket::begin_stage;
     struct entry {
       request wanted;
       std::uint64_t generation{}, latest_sequence{};
@@ -27,7 +26,6 @@ namespace sunshine_game3d::ui_mask {
       std::uint64_t diagnostic_reservation{};
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
       boundary last_attempt;
-      bool last_token_clock{};
 #endif
     };
     struct state {
@@ -36,10 +34,6 @@ namespace sunshine_game3d::ui_mask {
       capture_gate_observation hook_gate;
       std::array<entry, runtime_capacity> entries;
       std::array<std::uint64_t, std::size_t(begin_stage::count)> begin_refusals{};
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-      // The token generation of each kind's last reservation (rank order).
-      std::array<std::uint64_t, source_count> last_generation{};
-#endif
     };
     state &owner() {
       // The add-on is pinned and its SDK detours can outlive AddonUninit. Keep
@@ -65,7 +59,6 @@ namespace sunshine_game3d::ui_mask {
       value.diagnostic_reservation = 0;
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
       value.last_attempt = {};
-      value.last_token_clock = false;
 #endif
     }
     bool same(const request &a, const request &b) {
@@ -147,7 +140,6 @@ namespace sunshine_game3d::ui_mask {
           } else if (ready && rank == best_priority && stored.origin.source.sequence == newest_ready[rank - 1] && out) {
             out->ticket = stored.ticket; out->texture = checked.texture; out->origin = stored.origin;
             out->current_source_present_generation = checked.current_present_generation;
-            out->token_generation = stored.origin.source.source_frame_generation;
             found = true;
           }
         }
@@ -223,71 +215,6 @@ namespace sunshine_game3d::ui_mask {
     return source_mask(kind) && collect(runtime, now_ms, &out, source_mask(kind), consumer_queue);
   }
 
-  bool acquire_batch(std::uint64_t runtime, std::uint64_t now_ms, std::uint64_t consumer_queue, selection &hudless,
-      selection &backbuffer) {
-    hudless = {}; backbuffer = {};
-    auto &state = owner();
-    std::array<slot, snapshot_capacity> retained;
-    request wanted;
-    std::uint64_t generation{};
-    AcquireSRWLockShared(&state.lock);
-    for (const auto &item : state.entries) if (item.wanted.runtime == runtime && item.wanted.enabled) {
-      wanted = item.wanted; generation = item.generation;
-      retained = item.snapshots;
-      break;
-    }
-    ReleaseSRWLockShared(&state.lock);
-    if (!wanted.enabled || !consumer_queue) return false;
-    struct ready_slot {
-      const slot *value{};
-      capture::diagnostic_texture texture;
-      std::uint64_t current_present_generation{};
-    };
-    std::array<ready_slot, snapshot_capacity> ready{};
-    for (unsigned i = 0; i != snapshot_capacity; ++i) {
-      const auto &item = retained[i];
-      const auto kind = item.origin.kind;
-      if (!item.ticket || (kind != source_kind::hudless && kind != source_kind::backbuffer) ||
-          !item.origin.source.source_frame_generation || !recent(item.origin.source.tick, now_ms) || now_ms < item.origin.source.tick)
-        continue;
-      capture::diagnostic_texture texture;
-      if (capture::acquire_local_texture(item.ticket, consumer_queue, texture) != capture::status::ready ||
-          !usable(wanted, kind, texture)) continue;
-      ready[i] = {&item, texture, capture::source_present_generation(item.source)};
-    }
-    const ready_slot *best_hudless = nullptr, *best_backbuffer = nullptr;
-    for (const auto &h : ready) if (h.value && h.value->origin.kind == source_kind::hudless)
-      for (const auto &b : ready) if (b.value && b.value->origin.kind == source_kind::backbuffer) {
-        const auto &hs = h.value->origin.source, &bs = b.value->origin.source;
-        if (hs.epoch != bs.epoch || hs.viewport != bs.viewport || hs.source_frame_generation != bs.source_frame_generation) continue;
-        if (!best_hudless || hs.source_frame_generation > best_hudless->value->origin.source.source_frame_generation) {
-          best_hudless = &h; best_backbuffer = &b;
-        }
-      }
-    if (!best_hudless) return false;
-    // Commit only against the identical request generation and reservations.
-    bool current = false;
-    AcquireSRWLockShared(&state.lock);
-    for (const auto &item : state.entries) if (item.wanted.runtime == runtime && item.generation == generation) {
-      unsigned found = 0;
-      for (const auto &stored : item.snapshots)
-        for (const auto *candidate : {best_hudless->value, best_backbuffer->value})
-          if (stored.reservation && stored.reservation == candidate->reservation && stored.ticket.id == candidate->ticket.id) ++found;
-      current = found == 2;
-      break;
-    }
-    ReleaseSRWLockShared(&state.lock);
-    if (!current) return false;
-    const auto fill = [](selection &out, const ready_slot &value) {
-      out.ticket = value.value->ticket; out.texture = value.texture; out.origin = value.value->origin;
-      out.current_source_present_generation = value.current_present_generation;
-      out.token_generation = value.value->origin.source.source_frame_generation;
-    };
-    fill(hudless, *best_hudless);
-    fill(backbuffer, *best_backbuffer);
-    return true;
-  }
-
   bool query_diagnostic(std::uint64_t runtime, diagnostic_snapshot &out) {
     out = {};
     auto &state = owner();
@@ -330,8 +257,8 @@ namespace sunshine_game3d::ui_mask {
   attempt begin(const boundary &where, const capture::input &input) {
     auto &state = owner();
     const auto &source = where.source;
-    // S3: every return without an attempt names its stage (the counts, and
-    // the request's latest refusal when the request is known).
+    // Every return without an attempt names its stage (the counts, and the
+    // request's latest refusal when the request is known).
     const auto refuse = [&](begin_stage stage, std::uint64_t refused_runtime = 0) {
       AcquireSRWLockExclusive(&state.lock);
       ++state.begin_refusals[std::size_t(stage)];
@@ -379,7 +306,6 @@ namespace sunshine_game3d::ui_mask {
       item.diagnostic_reservation = 0;
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
       item.last_attempt = where;
-      item.last_token_clock = where.kind == source_kind::backbuffer;
 #endif
       result.runtime = runtime; result.generation = item.generation; result.sequence = source.sequence;
       result.kind = where.kind;
@@ -406,9 +332,6 @@ namespace sunshine_game3d::ui_mask {
           snapshot.source = input.source;
           item.diagnostic_reservation = result.reservation;
           item.diagnostic.record_attempted = true;
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-          state.last_generation[rank - 1] = source.source_frame_generation;
-#endif
           stage = begin_stage::none;
           break;
         }
@@ -421,14 +344,9 @@ namespace sunshine_game3d::ui_mask {
     release(old);
     if (!result.reservation) return result;
     capture::record_diagnostic record;
-    // S3 token clock: a Backbuffer snapshot's list writes its token after it
-    // (shadow; no admission changes).
-    auto recorded = input;
-    recorded.token_clock = where.kind == source_kind::backbuffer;
     // OnlyValidNow can use current recording evidence over a stale hint.
     // Longer-lived tags retain their declared lifetime and strict state contract.
-    auto ticket = capture::record_local_texture(where.command, recorded, &record,
-      capture::auxiliary_state_policy(recorded));
+    auto ticket = capture::record_local_texture(where.command, input, &record, capture::auxiliary_state_policy(input));
     bool retained = false;
     AcquireSRWLockExclusive(&state.lock);
     for (auto &item : state.entries) if (item.wanted.runtime == runtime && item.generation == result.generation) {
@@ -479,20 +397,6 @@ namespace sunshine_game3d::ui_mask {
     if (value.ticket) capture::finish_diagnostic_texture(value.ticket, successful && current);
     release(old);
   }
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-  // The D3D12 runtime fixture's view of the last reserved token generation of
-  // a kind (its Streamline buffer type), the value a Backbuffer snapshot
-  // writes into the S3 token clock.
-  extern "C" __declspec(dllexport) BOOL SunshineUIMaskTestLastGeneration(std::uint32_t kind, std::uint64_t *generation) {
-    const auto rank = priority(static_cast<source_kind>(kind));
-    if (!generation || !rank) return FALSE;
-    auto &state = owner();
-    AcquireSRWLockShared(&state.lock);
-    *generation = state.last_generation[rank - 1];
-    ReleaseSRWLockShared(&state.lock);
-    return TRUE;
-  }
-#endif
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   namespace testing {
     bool last_attempt(std::uint64_t runtime, boundary &out) {
@@ -502,14 +406,6 @@ namespace sunshine_game3d::ui_mask {
       for (const auto &item : state.entries) if (item.wanted.runtime == runtime) { out = item.last_attempt; break; }
       ReleaseSRWLockShared(&state.lock);
       return out.source.sequence != 0;
-    }
-    bool last_token_clock(std::uint64_t runtime) {
-      auto &state = owner();
-      bool value = false;
-      AcquireSRWLockShared(&state.lock);
-      for (const auto &item : state.entries) if (item.wanted.runtime == runtime) { value = item.last_token_clock; break; }
-      ReleaseSRWLockShared(&state.lock);
-      return value;
     }
   }
 #endif

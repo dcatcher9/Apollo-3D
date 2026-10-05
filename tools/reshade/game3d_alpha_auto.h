@@ -2,7 +2,6 @@
 #pragma once
 
 #include "game3d_scene_guard.h"
-#include "game3d_still_screen.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
@@ -65,9 +64,8 @@ namespace sunshine_game3d {
     // Latest completed diagnostic: 1 UI R, 2 UI color tag A, 3 backbuffer A, 4
     // current A, 5 HUD-less difference, 6 full-frame UI (HUD-less differs
     // almost everywhere), 8 full-frame UI over a hidden scene (H1), 10 the
-    // offscreen UI layer A, 11 a still screen without a UI source shown flat
-    // (H2). 7 and 9 (the HUD-less route before S2b) are retired and never
-    // reused.
+    // offscreen UI layer A. 7 and 9 (the HUD-less route before S2b) and 11
+    // (rule H2's still screen, removed) are retired and never reused.
     std::uint32_t source_kind{};
     // Hidden-scene evidence of one image (docs/reshade-sbs.md, hidden-scene
     // evidence): edge cells n and D, whether the passes ran and the evidence
@@ -132,13 +130,6 @@ namespace sunshine_game3d {
       // are shadow statistics nothing acts on. All zero without a layer or a
       // comparable pair.
       std::uint32_t pre_ui_match{}, pre_ui_image_lit{}, presented_lit{}, presented_lit_differs{};
-      // H2, texel 12 (selection revision 5): the D grid's cells whose
-      // presented-luma mean stayed within still::tolerance of the previous
-      // measured sample's, and those compared; and the length of a run of
-      // still hidden samples that this sample ended before it entered (the
-      // gameplay-safety evidence), zero otherwise.
-      std::uint32_t still_cells{}, still_compared{};
-      std::uint64_t still_short_ms{};
     } evidence;
     // This render's state, not the sample's: the hidden-scene guard's
     // verdicts pushed with this render (game3d_scene_guard.h: a held hidden
@@ -153,14 +144,6 @@ namespace sunshine_game3d {
       bool proven{};
     } scene_guard;
     bool scene_shadow{};
-    // This render's H2 state (game3d_still_screen.h): in scope (SDR Auto),
-    // flattening enabled by the session (UIFlattenStillScreens), the run's
-    // phase and length.
-    struct still_state {
-      bool scope{}, enabled{};
-      still_screen::phase phase = still_screen::phase::none;
-      std::uint64_t run_ms{};
-    } still;
   };
 
   // One alpha candidate's covered and invalid pixels in a sample.
@@ -401,8 +384,8 @@ namespace sunshine_game3d {
     // keys as stored() wrote them, empty when none was accepted. When that
     // changed stored(), the listener hears "" outside the lock, so the owner
     // persists an empty TrustedUISources. Each source is then accepted again
-    // by its own evidence. The mode, the counters, the first-run shadow and
-    // the still-screen switch are unchanged.
+    // by its own evidence. The mode, the counters and the first-run shadow
+    // are unchanged.
     std::string forget() {
       std::string cleared;
       std::function<void(const std::string &)> listener;
@@ -447,20 +430,6 @@ namespace sunshine_game3d {
     bool first_run() {
       std::lock_guard<std::mutex> lock(mutex_);
       return first_run_;
-    }
-
-    // Whether rule H2 flattens a still screen without a UI source (SDR
-    // Auto; game3d_still_screen.h) or only logs it (the default, a shadow).
-    // A per-game switch its owner sets (ReShade.ini UIFlattenStillScreens,
-    // game3d_controls.cpp), independent of acceptance: restore, earning,
-    // revocation and forget() never change it.
-    void set_still_flatten(bool enabled) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      still_flatten_ = enabled;
-    }
-    bool still_flatten() {
-      std::lock_guard<std::mutex> lock(mutex_);
-      return still_flatten_;
     }
 
   private:
@@ -671,7 +640,7 @@ namespace sunshine_game3d {
     std::mutex mutex_;
     std::optional<bool> manual_; // Empty in Auto.
     std::vector<entry> entries_;
-    bool first_run_{}, still_flatten_{};
+    bool first_run_{};
     std::function<void(const std::string &)> change_listener_;
     ui_counters counters_;
   };

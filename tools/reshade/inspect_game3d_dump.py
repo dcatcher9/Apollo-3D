@@ -499,31 +499,6 @@ def band(text):
     return int(first), int(last)
 
 
-def identity_tickets(metadata):
-    """The S3 snapshot tickets of a dump (shadow only; docs/reshade-sbs.md, UI decision framework): each offered
-    candidate's ticket, the render's identity shadow (today's pairing beside the ticket's), and the dump census and
-    optional Streamline copies with their stamp reads. Absent before S3."""
-    def row(source, ticket):
-        stamp = ticket.get("stamp") or {}
-        return dict(source=source, kind=ticket.get("kind"), boundary=ticket.get("boundary"),
-                    token=ticket.get("token"), present=ticket.get("present"), proof=ticket.get("proof"),
-                    refusal=ticket.get("refusal"), stamped=ticket.get("stamped"),
-                    present_read=stamp.get("present_read"), token_read=stamp.get("token_read"),
-                    present_label=stamp.get("present_label"), token_label=stamp.get("token_label"))
-    source = metadata.get("ui_source", {})
-    rows = [row(c.get("source"), c["ticket"]) for c in source.get("candidates", [])
-            if isinstance(c.get("ticket"), dict)]
-    census = [row(c.get("kind"), c["ticket"]) for c in metadata.get("ui_layer_census", {}).get("candidates", [])
-              if isinstance(c.get("ticket"), dict)]
-    optional = [row(c.get("name"), c["ticket"]) for c in metadata.get("optional_captures", [])
-                if isinstance(c.get("ticket"), dict)]
-    shadow = source.get("identity_shadow")
-    if not rows and not census and not optional and not shadow:
-        return None
-    return dict(candidates=rows, census=census, optional=optional, identity_shadow=shadow,
-                note="Shadow only: nothing decides from a ticket while identity_authoritative is false.")
-
-
 def inspect(root, previews=False, ui_review=None):
     root = Path(root)
     manifest_bytes = (root / "manifest.json").read_bytes()
@@ -540,7 +515,6 @@ def inspect(root, previews=False, ui_review=None):
     report["optional_captures"] = metadata.get("optional_captures", [])
     report["optional_capture_errors"] = manifest.get("optional_capture_errors", [])
     report["ui_source"] = metadata.get("ui_source", {})
-    report["identity_tickets"] = identity_tickets(metadata)
     report["ui_alpha_source"] = metadata.get("replay", {}).get("ui_alpha_source", "legacy")
     report["ui_mask_channel"] = metadata.get("replay", {}).get("ui_constant_binding", {}).get("mask_channel", "alpha")
     if report["ui_mask_channel"] not in ("alpha", "red"):

@@ -22,11 +22,6 @@ namespace sunshine_streamline::depth_capture {
     // generation presents earlier frames on another thread meanwhile; such a
     // Present cannot end this call's own lifetime (see source_lifetime_current).
     bool at_tag_call{};
-    // S3 token clock (game3d_frame_clock.h): a Backbuffer tag snapshot. After
-    // its copy and stamp, the same list writes the low 32 bits of
-    // source_frame_generation into the device's token clock C_T. Shadow only:
-    // it changes no admission, retirement or reuse.
-    bool token_clock{};
   };
   struct packet {
     input metadata;
@@ -156,9 +151,9 @@ namespace sunshine_streamline::depth_capture {
     // The copy used the SDK input contract because the recording had no entry.
     bool used_contract_state{};
   };
-  // Where an auxiliary copy's pre-copy state came from (S3 shadow provenance;
-  // it changes no admission). The values are fixed: the UI ticket maps them by
-  // number (ui_ticket::state_basis_proof).
+  // Where an auxiliary copy's pre-copy state came from (diagnostic
+  // provenance; it changes no admission). The values are fixed: dumps record
+  // them by name (name(state_basis)).
   enum class state_basis : std::uint8_t { unknown, observed_legacy, observed_enhanced, declared, contract };
   struct consumer_diagnostic {
     consumer_status result{consumer_status::not_attempted};
@@ -295,23 +290,9 @@ namespace sunshine_streamline::depth_capture {
     status result{status::unavailable};
     capture_failure failure{capture_failure::none};
     bool producer_recording_retired{};
-    // S3 snapshot stamp (shadow; game3d_ui_ticket.h), reported even before the
-    // pixels are admitted. stamped: the producer list copied the device's
-    // present and token clocks (C_P, C_T) into this snapshot's 16-byte stamp
-    // entry right after its copy; without clocks the entry reads 0. The reads
-    // are known only on the strict diagnostic path once the producer completed
-    // (stamp_read). basis: the pre-copy state's provenance.
-    bool stamped{}, stamp_read{};
-    std::uint32_t stamp_present{}, stamp_token{};
+    // The pre-copy state's provenance, reported even before the pixels are
+    // admitted.
     state_basis basis{state_basis::unknown};
-  };
-  // An optional destination for a snapshot's 16-byte stamp entry: an
-  // ID3D12Resource * buffer and the byte offset of the entry there. The
-  // consumer copy then copies the entry (zeros when the producer recorded no
-  // stamp) beside the texture, in the same list, without barriers: the buffer
-  // must accept an implicit promotion to COPY_DEST there.
-  struct stamp_destination {
-    std::uint64_t buffer{}, offset{};
   };
   // Auxiliary snapshots use the same state/recording/fence owner as depth, but
   // an independent bounded pool. They never nominate or change a depth source.
@@ -358,13 +339,12 @@ namespace sunshine_streamline::depth_capture {
   // switch destination or consumer queue after its first successful copy.
   // immediate: command is the consumer queue's ReShade immediate list (see
   // copy_current), which may fall back when its hooks were refused.
-  // stamp: also copy the snapshot's S3 stamp entry (stamp_destination).
   bool copy_diagnostic_texture(std::uint64_t command, std::uint64_t consumer_queue,
     const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
-    consumer_diagnostic *diagnostic = nullptr, bool immediate = false, stamp_destination stamp = {});
+    consumer_diagnostic *diagnostic = nullptr, bool immediate = false);
   bool copy_local_texture(std::uint64_t command, std::uint64_t consumer_queue,
     const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
-    consumer_diagnostic *diagnostic = nullptr, bool immediate = false, stamp_destination stamp = {});
+    consumer_diagnostic *diagnostic = nullptr, bool immediate = false);
   // Direct binding of a local auxiliary snapshot (no second copy). A shader
   // view of the snapshot's own storage, valid for reads recorded into command
   // on this Present.
@@ -475,9 +455,8 @@ namespace sunshine_streamline::depth_capture {
   namespace testing { bool initial_recording_regression(); bool zero_cookie_submission_regression(); bool unsupported_com_boundary_regression(); bool source_cookie_reentry_regression(); bool recording_recovery_regression(); bool recording_state_loss_regression(); }
   namespace testing { bool submission_completion_regression(); bool provider_admission_regression(); bool crop_region_regression(); bool record_diagnostic_regression(); }
   namespace testing { bool live_source_admission_regression(); }
-  // S3: the stamp and token-clock commands after an auxiliary snapshot copy,
-  // the consumer's stamp copy, and the state-basis provenance.
-  namespace testing { bool snapshot_stamp_regression(); }
+  // The state-basis provenance of an auxiliary snapshot copy.
+  namespace testing { bool snapshot_basis_regression(); }
   // Called once (then cleared) on the recording thread while a record call
   // allocates new storage without the capture lock.
   namespace testing { void set_allocation_hook(void (*hook)(void *), void *context); }

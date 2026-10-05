@@ -6,7 +6,6 @@
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_layer.h"
 #include "game3d_ui_selection.h"
-#include "game3d_ui_ticket.h"
 #include "scene_gain.h"
 #include "src/game3d_debug_protocol.h"
 #include "src/game3d_debug_formats.h"
@@ -222,17 +221,13 @@ namespace sunshine_game3d {
       const auto &detection = f.ui_detection;
       result["ui_detection"] = {{"ran_or_held", name(detection.state)}, {"candidates", detection.candidates},
         {"threshold_bits", detection.threshold_bits}, {"accepted", detection.accepted}, {"flags", detection.flags},
-        {"pre_ui_threshold_bits", detection.pre_ui_threshold_bits}, {"still_bits", detection.still_bits},
+        {"pre_ui_threshold_bits", detection.pre_ui_threshold_bits},
         {"held_presents", detection.held_presents}, {"candidate_layout", ui_detection::candidate_layout},
-        {"expected_layer_present", detection.expected_layer_present}, {"expected_layer_token", detection.expected_layer_token},
-        {"expected_hudless_present", detection.expected_hudless_present}, {"identity_bits", detection.identity_bits},
-        {"stamps", nullptr},
-        {"identity_meaning", "S3 shadow (docs/reshade-sbs.md, UI decision framework, S3 snapshot ticket): expected_layer_present, expected_layer_token and expected_hudless_present are b2 words 6-8, the labels the CPU proposed for the GPU to verify (0: not proposed; the layer copy's are measured only, since the pre-UI change set that paired the layer was removed), identity_bits b2 word 9 (Sunshine_UIIdentity). stamps is the renderer's stamp buffer read back once this dump completed, one [C_P, C_T] per ui_ticket slot (0-2 the tags, 3 the presented colour, 4 the layer, 5 the HUD-less image), as the detection that ran in this render read it at t9; null when no detection ran in this render (held or inactive) or the buffer does not exist. ui_detection_replay pushes and binds them."},
-        {"meaning", "b2 constants of the automatic UI detection run whose mask this render consumed: it ran in this render from this real frame's own offered candidates, was held (a generated Present showing the decision of the real frame it shows, held_presents generated Presents in a row; UI framework T1), or was inactive (all zero). candidates and accepted are candidate bits of candidate_layout 2 (0x1 UIAlpha, 0x2 UI color tag, 0x4 Backbuffer, 0x8 current, 0x10 HUD-less, 0x20 exact pair, 0x40 offscreen UI layer); accepted is the session's accepted candidates pushed in b2 word 2. flags is the full pushed Sunshine_UIDetectionFlags word: its stored bits describe the offscreen UI layer slot, and per-frame bits are included (0x40000: the depth was not this frame's; 0x100000: an accepted candidate the previous adopting real frame offered is missing; 0x200000: no previous real decision exists in this chain, so the T1 grace cannot reuse one; 0x400000: the hidden-scene guard holds a hidden verdict of D on the presented frame; 0x800000: its samples read the pre-UI scene image visible; bits 24-30: the candidate bits shifted left by 24 whose source signature a visible verdict refuted, so their full claims do not act (H1); 0x80000000: the offered layer's signature is proven the pre-UI scene image (the session ledger's key pre_ui:<format>:<space>), so its claim (d) may act (H1 d); 0x10000 and 0x80000, the layer and HUD-less route holds before S2b, and 0x20000000, the layer measured beside a HUD-less image for its D proof before fix 1, are retired and never reused); threshold_bits is the float32 difference threshold (b2 word 1) and pre_ui_threshold_bits the float32 pair threshold of the offscreen UI layer and the presented color (b2 word 4, zero without a layer, when they are not comparable or on a frame that is not a detection sample, since the CPU reads texel 11 from samples only), at 8 times which the tiles pass counts the layer's pre-UI pixels. still_bits is b2 word 5 (Sunshine_UIStillScreen): 0x1 while rule H2's run is active in SDR Auto and the session enables it (UIFlattenStillScreens=1), so a frame applying no source of its own that the T1 grace did not reuse is shown flat as source 11 (a still screen without a UI source); zero otherwise, the default shadow included. ui_detection_replay pushes it from this field and reruns detection from the package's candidates as a single frame without a previous decision: a render whose mask the T1 grace reused replays as its own decision (no mask, with its reason)."}};
+        {"meaning", "b2 constants of the automatic UI detection run whose mask this render consumed: it ran in this render from this real frame's own offered candidates, was held (a generated Present showing the decision of the real frame it shows, held_presents generated Presents in a row; UI framework T1), or was inactive (all zero). candidates and accepted are candidate bits of candidate_layout 2 (0x1 UIAlpha, 0x2 UI color tag, 0x4 Backbuffer, 0x8 current, 0x10 HUD-less, 0x20 exact pair, 0x40 offscreen UI layer); accepted is the session's accepted candidates pushed in b2 word 2. flags is the full pushed Sunshine_UIDetectionFlags word: its stored bits describe the offscreen UI layer slot, and per-frame bits are included (0x40000: the depth was not this frame's; 0x100000: an accepted candidate the previous adopting real frame offered is missing; 0x200000: no previous real decision exists in this chain, so the T1 grace cannot reuse one; 0x400000: the hidden-scene guard holds a hidden verdict of D on the presented frame; 0x800000: its samples read the pre-UI scene image visible; bits 24-30: the candidate bits shifted left by 24 whose source signature a visible verdict refuted, so their full claims do not act (H1); 0x80000000: the offered layer's signature is proven the pre-UI scene image (the session ledger's key pre_ui:<format>:<space>), so its claim (d) may act (H1 d); 0x10000 and 0x80000, the layer and HUD-less route holds before S2b, and 0x20000000, the layer measured beside a HUD-less image for its D proof before fix 1, are retired and never reused); threshold_bits is the float32 difference threshold (b2 word 1) and pre_ui_threshold_bits the float32 pair threshold of the offscreen UI layer and the presented color (b2 word 4, zero without a layer, when they are not comparable or on a frame that is not a detection sample, since the CPU reads texel 11 from samples only), at 8 times which the tiles pass counts the layer's pre-UI pixels. b2 word 5 is reserved and pushed as zero (dumps before selection revision 9 also carry still_bits, rule H2's flag, and S3's identity fields, both removed). ui_detection_replay reruns detection from the package's candidates as a single frame without a previous decision: a render whose mask the T1 grace reused replays as its own decision (no mask, with its reason)."}};
       result["ui_pin"] = {{"soft_pin_gain", shader_marker(captured_shader, "SUNSHINE_UI_SOFT_PIN_GAIN")},
         {"decision_texels", shader_marker(captured_shader, ui_detection::decision_texels_marker)},
         {"evidence_images", shader_marker(captured_shader, ui_detection::scene_evidence_images_marker)},
-        {"meaning", "Markers of the captured shader; 0 means absent: binary pinning and the 5-texel detection decision without scene-evidence images. A shader with 7 decision texels and 2 evidence images writes the presented and pre-UI scene image's hidden-scene evidence in texels 5 and 6 (before selection revision 3 the HUD-less image's); with 8 (candidate layout 2) texel 7 holds the offscreen UI layer's counts and the valid candidates; with 10 (selection revision 2) texel 8 holds the one-way strong counts and the refused candidate and texel 9 the one-way contradicted counts and the frame reason; with 11 (selection revision 3) texel 10 holds the opaque Backbuffer and current pixel counts, the informative full claims and the h1 word (H1); with 12 (selection revision 4) texel 11 holds the offscreen UI layer against the presented frame (matching, lit layer, lit presented, and lit presented but different pixels; H1 d); with 13 (selection revision 5) texel 12 holds rule H2's still and compared cells of the D grid (zero unless the evidence passes ran); and texel 0 is the applied decision, which the T1 grace may have reused from the previous real frame (docs/reshade-sbs.md)."}};
+        {"meaning", "Markers of the captured shader; 0 means absent: binary pinning and the 5-texel detection decision without scene-evidence images. A shader with 7 decision texels and 2 evidence images writes the presented and pre-UI scene image's hidden-scene evidence in texels 5 and 6 (before selection revision 3 the HUD-less image's); with 8 (candidate layout 2) texel 7 holds the offscreen UI layer's counts and the valid candidates; with 10 (selection revision 2) texel 8 holds the one-way strong counts and the refused candidate and texel 9 the one-way contradicted counts and the frame reason; with 11 (selection revision 3) texel 10 holds the opaque Backbuffer and current pixel counts, the informative full claims and the h1 word (H1); with 12 (selection revision 4) texel 11 holds the offscreen UI layer against the presented frame (matching, lit layer, lit presented, and lit presented but different pixels; H1 d); with 13 (selection revisions 5 to 8) texel 12 held rule H2's still and compared cells and S3's identity words, both removed; and texel 0 is the applied decision, which the T1 grace may have reused from the previous real frame (docs/reshade-sbs.md)."}};
       result["source_alpha_ui_requested"] = f.source_alpha_decision.requested;
       result["source_alpha_input_state"] = name(f.source_alpha_decision.input_state);
       const auto &review = f.source_alpha_decision.qualification;
@@ -274,7 +269,6 @@ namespace sunshine_game3d {
             {"scene", scene_json(coverage.evidence.scene, true)},
             {"pre_ui_scene", pre_ui_scene_json(coverage.evidence.pre_ui_scene, coverage.evidence.pre_ui_image)},
             {"shadow_hidden_ms", coverage.evidence.shadow_hidden_ms},
-            {"still_short_ms", coverage.evidence.still_short_ms},
             {"pre_ui_pixels", {{"match", coverage.evidence.pre_ui_match}, {"image_lit", coverage.evidence.pre_ui_image_lit},
               {"presented_lit", coverage.evidence.presented_lit},
               {"presented_lit_differs", coverage.evidence.presented_lit_differs}}},
@@ -288,10 +282,7 @@ namespace sunshine_game3d {
             {"reused", coverage.evidence.reused}}},
           {"scene_guard", {{"hidden", coverage.scene_guard.hidden}, {"pre_ui", coverage.scene_guard.pre_ui},
             {"refuted", coverage.scene_guard.refuted}, {"proven", coverage.scene_guard.proven}}}, {"scene_shadow", coverage.scene_shadow},
-          {"still_screen", {{"scope", coverage.still.scope}, {"enabled", coverage.still.enabled},
-            {"phase", still_screen::name(coverage.still.phase)}, {"run_ms", coverage.still.run_ms},
-            {"sampled_still", coverage.evidence.still_cells}, {"sampled_compared", coverage.evidence.still_compared}}},
-          {"meaning", "Auto selects and validates current-frame candidates on the GPU without review. These bounded asynchronous statistics describe a completed earlier detection sample and never authorize current pixels. ui_source_color contains the actual resolved red-channel mask for this frame, possibly empty. Replay uses that frozen mask without rerunning detection. sampled_source 2 is the UI color tag, 10 the offscreen UI layer, 8 a full-frame UI over a hidden scene (H1: an informative full claim while the hidden-scene guard holds a hidden verdict), and 11 a still screen without a UI source shown flat (H2: no source of its own, not reused by T1, while rule H2's run is active and UIFlattenStillScreens=1); 7 and 9 (the HUD-less route before S2b) are retired. sampled_evidence.alpha_covered and alpha_invalid hold UIAlpha, the UI color tag, Backbuffer and current; layer holds the offscreen UI layer's covered, invalid (out of range or beyond the premultiplied bound) and opaque pixels; accepted is the accepted candidates pushed with that detection and valid_bits the offered candidates that passed V1/V2, both in candidate bits; sampled_evidence.alpha_opaque counts alpha of at least 254/255 in UIAlpha and the UI color tag and inferred_opaque in Backbuffer and current alpha; claims are the raw informative full claims before refutation (candidate bits, 0x80 the pre-UI scene image: a HUD-less image changed on 90% of pixels, or an offered layer without coverage whose signature is proven) and h1 the S1 winner's source and whether H1 overrode it with 8; scene and pre_ui_scene are that sample's hidden-scene evidence of the presented frame and of the pre-UI scene image (image none, hudless or layer) (n edge cells, D, valid, ran, the presented verdict with its decided, untied comparisons, and the pre-UI image's verdict read from D), and shadow_hidden_ms how long consecutive samples up to it read the presented frame hidden while no source decided and the frame was not blank (at least 128 decided comparisons), and still_short_ms the length of a run of still hidden samples without a decided source that this sample ended before it reached 2 s (rule H2's gameplay-safety evidence; zero otherwise). pre_ui_pixels holds the offscreen UI layer against the presented frame at 8 times their pair threshold (decision texel 11; all zero without a layer or a comparable pair): match, the pixels whose colours match, and image_lit, the lit layer pixels, from which the session ledger proves the layer's signature the pre-UI scene image (3 samples over 2 s with match on at least 90% and image_lit on at least half of the pixels while the layer has no coverage); presented_lit, the lit presented pixels, and presented_lit_differs, those of them that differ from the layer, are shadow statistics nothing acts on. one_way holds the A2 one-way judgment counts of the inferred alpha kinds: strong pixels (finite alpha of at least 1/2) and those of them where an offered exact HUD-less pair is lit and unchanged (contradicted); neither is counted for the one-frame-late layer copy (late_layer), which no A2 judge reads. sampled_source and covered are the applied decision; reason names the sample's own decision (decided, or the ui_no_mask reason without a mask), refused the highest-ranked candidate that reason refused (none when it decided), and reused whether the T1 grace applied the previous real frame's decision and mask instead. scene_guard and scene_shadow describe this render: the hidden-scene guard's pushed verdicts (hidden: a held hidden verdict; pre_ui: its samples read the pre-UI image visible) and how many source signatures it holds refuted, proven whether the offered layer's signature is proven the pre-UI scene image (the session ledger's key pre_ui:<format>:<space>, so that its image may act as H1 (d)), and the first-run shadow that measures without an acting claim (docs/reshade-sbs.md, hidden-scene evidence). still_screen describes rule H2 for this render (docs/reshade-sbs.md, still screens without a UI source): scope (SDR output in Auto), enabled (UIFlattenStillScreens=1; otherwise a shadow that only logs), the run's phase (none, pending, or active: the screen would flatten, or flattens when enabled) and run_ms, its length; sampled_still and sampled_compared are the sample's texel 12, the D grid cells whose presented-luma mean stayed within 1/255 of the previous measured sample's and the cells compared."}};
+          {"meaning", "Auto selects and validates current-frame candidates on the GPU without review. These bounded asynchronous statistics describe a completed earlier detection sample and never authorize current pixels. ui_source_color contains the actual resolved red-channel mask for this frame, possibly empty. Replay uses that frozen mask without rerunning detection. sampled_source 2 is the UI color tag, 10 the offscreen UI layer, and 8 a full-frame UI over a hidden scene (H1: an informative full claim while the hidden-scene guard holds a hidden verdict); 7 and 9 (the HUD-less route before S2b) and 11 (rule H2's still screen, removed) are retired. sampled_evidence.alpha_covered and alpha_invalid hold UIAlpha, the UI color tag, Backbuffer and current; layer holds the offscreen UI layer's covered, invalid (out of range or beyond the premultiplied bound) and opaque pixels; accepted is the accepted candidates pushed with that detection and valid_bits the offered candidates that passed V1/V2, both in candidate bits; sampled_evidence.alpha_opaque counts alpha of at least 254/255 in UIAlpha and the UI color tag and inferred_opaque in Backbuffer and current alpha; claims are the raw informative full claims before refutation (candidate bits, 0x80 the pre-UI scene image: a HUD-less image changed on 90% of pixels, or an offered layer without coverage whose signature is proven) and h1 the S1 winner's source and whether H1 overrode it with 8; scene and pre_ui_scene are that sample's hidden-scene evidence of the presented frame and of the pre-UI scene image (image none, hudless or layer) (n edge cells, D, valid, ran, the presented verdict with its decided, untied comparisons, and the pre-UI image's verdict read from D), and shadow_hidden_ms how long consecutive samples up to it read the presented frame hidden while no source decided and the frame was not blank (at least 128 decided comparisons). pre_ui_pixels holds the offscreen UI layer against the presented frame at 8 times their pair threshold (decision texel 11; all zero without a layer or a comparable pair): match, the pixels whose colours match, and image_lit, the lit layer pixels, from which the session ledger proves the layer's signature the pre-UI scene image (3 samples over 2 s with match on at least 90% and image_lit on at least half of the pixels while the layer has no coverage); presented_lit, the lit presented pixels, and presented_lit_differs, those of them that differ from the layer, are shadow statistics nothing acts on. one_way holds the A2 one-way judgment counts of the inferred alpha kinds: strong pixels (finite alpha of at least 1/2) and those of them where an offered exact HUD-less pair is lit and unchanged (contradicted); neither is counted for the one-frame-late layer copy (late_layer), which no A2 judge reads. sampled_source and covered are the applied decision; reason names the sample's own decision (decided, or the ui_no_mask reason without a mask), refused the highest-ranked candidate that reason refused (none when it decided), and reused whether the T1 grace applied the previous real frame's decision and mask instead. scene_guard and scene_shadow describe this render: the hidden-scene guard's pushed verdicts (hidden: a held hidden verdict; pre_ui: its samples read the pre-UI image visible) and how many source signatures it holds refuted, proven whether the offered layer's signature is proven the pre-UI scene image (the session ledger's key pre_ui:<format>:<space>, so that its image may act as H1 (d)), and the first-run shadow that measures without an acting claim (docs/reshade-sbs.md, hidden-scene evidence)."}};
       }
       const auto &fg = f.source_alpha_decision.fg;
       result["source_alpha_ui_fg_mode"] = {{"known", fg.known}, {"enabled", fg.enabled},
@@ -513,91 +504,6 @@ namespace sunshine_game3d {
       api::resource_view depth_uav {}, null_uav {};
       bool recorded = false, signalled = false, signal_failed = false, published = false;
       std::uint64_t bytes = 0;
-      // S3 shadow: the census rows' CPU-readable stamps, read once the batch
-      // completed (read_census_stamps), then retired like their copies.
-      std::vector<std::pair<std::size_t, api::resource>> census_stamps;
-
-      void retire_census_stamps() {
-        for (const auto &[row, stamp] : census_stamps) {
-          if (device) {
-            ui_layer::retire(device, stamp);
-          }
-        }
-        census_stamps.clear();
-      }
-
-      // After completion: each census row's ticket gets its stamp reads (a
-      // before-clear copy holds the frame of the Present its C_P read names).
-      void read_census_stamps() {
-        if (census_stamps.empty() || !device) {
-          return;
-        }
-        auto metadata = nlohmann::json::parse(json, nullptr, false);
-        auto *rows = metadata.is_object() && metadata.contains("ui_layer_census") ? &metadata["ui_layer_census"]["candidates"] : nullptr;
-        for (const auto &[row, stamp] : census_stamps) {
-          void *data = nullptr;
-          if (!rows || !rows->is_array() || row >= rows->size() || !device->map_buffer_region(stamp, 0, 16, api::map_access::read_only, &data) || !data) {
-            continue;
-          }
-          std::uint32_t words[4] {};
-          std::memcpy(words, data, sizeof(words));
-          device->unmap_buffer_region(stamp);
-          auto &ticket = (*rows)[row]["ticket"];
-          const auto present = ui_ticket::present_label(ui_ticket::boundary::before_clear, words[0]);
-          const auto token = ui_ticket::token_label_of_copy(words[1]);
-          ticket["stamp"] = {{"present_read", words[0]}, {"token_read", words[1]}, {"present_label", present.valid ? nlohmann::json(present.value) : nlohmann::json(nullptr)}, {"token_label", token.valid ? nlohmann::json(token.value) : nlohmann::json(nullptr)}};
-        }
-        if (rows) {
-          json = metadata.dump();
-        }
-        retire_census_stamps();
-      }
-
-      // S3 shadow: the renderer's stamp buffer as the detection of the dumped
-      // render read it, copied after that render in the same submission and
-      // read once the batch completed (replay.ui_detection.stamps).
-      api::resource identity_stamps {};
-
-      void retire_identity_stamps() {
-        if (identity_stamps.handle && device) {
-          ui_layer::retire(device, identity_stamps);
-        }
-        identity_stamps = {};
-      }
-
-      void record_identity_stamps(api::command_list *commands, api::resource stamps, bool copy_dest) {
-        constexpr std::uint64_t bytes = ui_ticket::slot::count * ui_ticket::stamp_bytes;
-        if (!stamps.handle || !device->create_resource(api::resource_desc(bytes, api::memory_heap::readback, api::resource_usage::copy_dest), nullptr, api::resource_usage::copy_dest, &identity_stamps)) {
-          identity_stamps = {};
-          return;
-        }
-        const auto state = copy_dest ? api::resource_usage::copy_dest : api::resource_usage::general;
-        commands->barrier(stamps, state, api::resource_usage::copy_source);
-        commands->copy_buffer_region(stamps, 0, identity_stamps, 0, bytes);
-        commands->barrier(stamps, api::resource_usage::copy_source, state);
-      }
-
-      void read_identity_stamps() {
-        if (!identity_stamps.handle || !device) {
-          return;
-        }
-        constexpr std::size_t slots = ui_ticket::slot::count;
-        std::uint32_t words[slots * 4] {};
-        void *data = nullptr;
-        auto metadata = nlohmann::json::parse(json, nullptr, false);
-        if (metadata.is_object() && metadata.contains("replay") && metadata["replay"].contains("ui_detection") && device->map_buffer_region(identity_stamps, 0, sizeof(words), api::map_access::read_only, &data) && data) {
-          std::memcpy(words, data, sizeof(words));
-          device->unmap_buffer_region(identity_stamps);
-          auto stamps = nlohmann::json::array();
-          for (std::size_t slot = 0; slot != slots; ++slot) {
-            stamps.push_back({words[slot * 4], words[slot * 4 + 1]});
-          }
-          metadata["replay"]["ui_detection"]["stamps"] = std::move(stamps);
-          json = metadata.dump();
-        }
-        retire_identity_stamps();
-      }
-
       void release_program() {
         if (depth_uav.handle) {
           device->destroy_resource_view(depth_uav);
@@ -618,8 +524,6 @@ namespace sunshine_game3d {
       }
 
       ~capture_batch() {
-        retire_census_stamps();
-        retire_identity_stamps();
         release_program();
       }
 
@@ -773,35 +677,17 @@ namespace sunshine_game3d {
         }
         char source[24];
         std::snprintf(source, sizeof(source), "0x%llx", static_cast<unsigned long long>(c.source));
-        // S3 shadow ticket of a recorded copy; its stamp is read once the
-        // batch completed (read_census_stamps).
-        nlohmann::json ticket = nullptr;
-        if (c.copy.handle) {
-          ticket = {{"kind", ui_ticket::name(ui_ticket::capture_kind::layer_copy)}, {"boundary", ui_ticket::name(ui_ticket::boundary::before_clear)}, {"proof", ui_ticket::name(ui_ticket::proof::clear_precall)}, {"stamped", c.stamped}, {"refusal", ui_ticket::name(c.stamped ? ui_ticket::refusal::none : ui_ticket::refusal::unstamped)}, {"stamp", nullptr}};
-        }
         rows.push_back({{"artifact_id", static_cast<unsigned>(kind)}, {"kind", wire::ui_layer_names[i]}, {"captured", added},
           {"status", status}, {"source", source}, {"width", c.width}, {"height", c.height}, {"dxgi_format", c.format},
-          {"clears_while_armed", c.clears}, {"active", c.active}, {"ticket", std::move(ticket)}});
+          {"clears_while_armed", c.clears}, {"active", c.active}});
         // add() holds its own reference; the add-on's handle is released once
         // any game command list that wrote the copy has executed.
         ui_layer::retire(owner, c.copy);
-        if (c.stamp.handle) {
-          if (owner == device && c.stamped) {
-            batch.census_stamps.emplace_back(rows.size() - 1, c.stamp);
-          } else {
-            ui_layer::retire(owner, c.stamp);
-          }
-        }
       }
       return {{"meaning", "Output-resolution color targets the game cleared to transparent black while this request was armed, "
         "the signature of an offscreen UI layer. Each copy was taken before a clear, so it shows the previous frame's content. "
         "active marks the target the live tracker chose; without a tagged UI buffer its copy is UI detection's color+alpha "
         "candidate, admitted only while premultiplied. The others are candidates only, and none is verified UI."},
-        {"ticket_meaning", "S3 snapshot ticket, shadow only (docs/reshade-sbs.md, UI decision framework): the copy's stamp, "
-          "written by the same game list right after the copy, read once this dump completed. present_read is the present "
-          "clock C_P when the copy executed (a before-clear copy holds the frame of that Present: present_label), token_read "
-          "the token clock C_T (the newest Backbuffer tag token executed before it: token_label); 0 is unstamped. null: no "
-          "copy, or the stamp was not recorded."},
         {"candidates", std::move(rows)}};
     }
   }  // namespace
@@ -865,8 +751,6 @@ namespace sunshine_game3d {
 
     void poll(bool foreground_frame = false) {
       if (pending && pending->complete()) {
-        pending->read_census_stamps();
-        pending->read_identity_stamps();
         pending->release_program();
         if (current(*pending)) {
           if (!pending->published) {
@@ -1023,9 +907,6 @@ namespace sunshine_game3d {
       }
       next->response.result = wire::status::complete;
       next->record(commands, depth.shader_resource);
-      if (frame.ui_detection.state == ui_detection_snapshot::run_state::ran) {
-        next->record_identity_stamps(commands, r.ui_stamps, r.ui_stamps_copy_dest);
-      }
     } catch (const std::exception &error) {
       next->response.result = wire::status::failed;
       next->response.texture_count = 0;
@@ -1068,7 +949,6 @@ namespace sunshine_game3d {
       p->json = metadata.dump();
     }
     p->recorded = false;
-    p->retire_census_stamps();
     p->release_program();
     p->device = nullptr;
     p->runtime = nullptr;

@@ -16,12 +16,7 @@
 //        candidate_signatures of the offered kinds; identity: the provider's
 //        present_identity {hold_previous} (Present counting: a Present that
 //        offers nothing within the reported generated count of the last one
-//        that offered a UI tag, ui_mask::generated_without_input), with
-//        S3's ticket_identity(that, ui_ticket::newest_token(tickets),
-//        state.decision_token, bits != 0) beside it, which arbitrate, held and
-//        detected read (applied_identity) only while
-//        ui_ticket::identity_authoritative (or the sequence harness's
-//        test-only identity_override);
+//        that offered a UI tag, ui_mask::generated_without_input);
 //     2. accepted = session.accepted(bits, signatures) (manual On: every
 //        offered candidate, without the ledger);
 //     3. t = state.arbitrate(identity, observation, bits);
@@ -43,30 +38,17 @@
 //          scene_guard.enter_scope(epoch, viewport) (game3d_scene_guard.h:
 //          only an identity change clears it), then poll_detection; then
 //          per_frame = scene_guard.per_frame(now, bits, signatures) |
-//          t.per_frame | depth_not_current, still = still::flatten when
-//          still_scope (SDR Auto, still_screen::sdr_output), the session's
-//          still_flatten(), scene_guard.still_flatten() and bits != 0, else
-//          0 (a zero-offer frame first ends H2's run with
-//          scene_guard.still.leave(unmeasured) when in still_scope), and
-//          detection with this frame's own bits, accepted and flags pushed
-//          (b2), flags | per_frame, still as b2 word 5, and the hold store
-//          bound at u5 for the reduce. A sample frame runs the evidence
-//          passes when measure = scene_guard.measure(now, shadow,
-//          whole_frame(state.latest), proven_image, still_scope &&
-//          scene_guard.still.wants_measure()) says run, and keeps
-//          measure.actionable, still_scope and whether the passes ran for H2
-//          alone (measure.run without the still argument does not run) with
-//          the pending sample. Then
-//          state.detected(observation, identity). A sample keeps the
-//          signatures and pushed flags it was submitted with, and its status
-//          key is state.status_key() at submission. Before any of this, a
-//          render outside still_scope ends H2's run with
-//          scene_guard.still.leave(scope), and what enter_scope or leave
-//          ended is counted in the renderer's own counts (still.released or
-//          still.short);
+//          t.per_frame | depth_not_current, and detection with this frame's
+//          own bits, accepted and flags pushed (b2), flags | per_frame, and
+//          the hold store bound at u5 for the reduce. A sample frame runs the
+//          evidence passes when measure = scene_guard.measure(now, shadow,
+//          whole_frame(state.latest), proven_image) says run, and keeps
+//          measure.actionable with the pending sample. Then
+//          state.detected(observation). A sample keeps the signatures and
+//          pushed flags it was submitted with, and its status key is
+//          state.status_key() at submission;
 //        otherwise inactive.* and state.inactive() (the scene guard keeps
-//        its state; in still_scope an unavailable or inactive render ends
-//        H2's run with scene_guard.still.leave(unmeasured)).
+//        its state).
 //   poll_detection (a completed sample):
 //     6. sample_discarded(input, pending source) drops it unread (another
 //        scope, or stale on arrival); otherwise
@@ -75,14 +57,10 @@
 //        state.latest = sample, state.latest_source = the pending source and
 //        state.latest_key = the status key at submission;
 //     7. obs = scene_guard.observe(scene_guard::sample_of(words, count, tick,
-//        scene), the pending actionable, the submitted signatures by kind,
-//        the pending still_scope and this render's still_scope), then
-//        sample.evidence.shadow_hidden_ms = obs.shadow_hidden_ms and
-//        sample.evidence.still_short_ms = obs.still.short_ms;
+//        scene), the pending actionable, the submitted signatures by kind),
+//        then sample.evidence.shadow_hidden_ms = obs.shadow_hidden_ms;
 //     8. session.observe(sample.evidence, sample.pixels, tick, submitted
-//        signatures), its scene evidence (scene and pre_ui_scene) cleared
-//        when the passes ran for H2 alone, so that H2's measurements never
-//        reach the ledger; a session in a manual mode ignores it;
+//        signatures); a session in a manual mode ignores it;
 //     9. sample_counters(..., obs) commits the counts.
 //   status (after render):
 //    10. state.latest describes the frame only while
@@ -97,7 +75,6 @@
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
-#include "game3d_ui_ticket.h"
 
 #include <algorithm>
 #include <array>
@@ -145,9 +122,7 @@ namespace sunshine_game3d::ui_temporal {
   // judgment_decision_texels; the H1 texel 10, the opaque Backbuffer and
   // current counts, the claims and the h1 word, when there are
   // h1_decision_texels; the pre-UI pixel counts of texel 11, the layer
-  // against the presented frame, when there are pre_ui_decision_texels; H2's
-  // still and compared cells of texel 12 when there are
-  // still_decision_texels).
+  // against the presented frame, when there are pre_ui_decision_texels).
   // sequence numbers the submitted samples, and
   // flags are the Sunshine_UIDetectionFlags the detection pushed (whether an
   // offered layer was the one-frame-late copy).
@@ -200,10 +175,6 @@ namespace sunshine_game3d::ui_temporal {
       evidence.presented_lit = words[word::presented_lit];
       evidence.presented_lit_differs = words[word::presented_lit_differs];
     }
-    if (count >= 4 * ui_detection::still_decision_texels) {
-      evidence.still_cells = words[word::still_cells];
-      evidence.still_compared = words[word::still_compared];
-    }
     if (scene) {
       const auto decode = [&](std::size_t n, std::size_t d, std::size_t state) {
         alpha_auto_decision::scene_evidence result;
@@ -239,27 +210,12 @@ namespace sunshine_game3d::ui_temporal {
   // every pixel (ui_selection::decide).
   inline bool whole_frame(const alpha_auto_decision &sample) { return full_alpha(sample) || sample.source_kind == 6; }
 
-  // The evidence the acceptance ledger observes of a sample (step 8): its own,
-  // except that when its evidence passes ran for rule H2 alone (h2_only:
-  // measure.run, but not without H2's still argument), the scene evidence
-  // is cleared. H2 measures every SDR Auto sample frame where no source
-  // decides and never acts on what it measures, so its measurements must not
-  // run a pre-UI proof's reconfirm clock (alpha_auto_policy::observe) that
-  // was paused before fix 2: the shadow leaves every decision unchanged.
-  inline alpha_auto_decision::detection_evidence ledger_evidence(const alpha_auto_decision::detection_evidence &evidence,
-      bool h2_only) {
-    auto result = evidence;
-    if (h2_only) result.scene = result.pre_ui_scene = {};
-    return result;
-  }
-
   // The counts a completed sample commits (game3d_ui_counters.h): the CPU
   // counts snapshotted when it was submitted and the GPU words copied under
   // its fence, each as the change since the previous commit; when it decided
   // H1 (source 8) or an accepted whole-frame decision (whole_frame), the
   // hidden-scene verdict that same sample measured; and what the
-  // hidden-scene guard's observation of it did (scene, and H2's still
-  // group, added to the renderer's own ends of a run in its CPU counts).
+  // hidden-scene guard's observation of it did (scene).
   inline ui_counters sample_counters(const alpha_auto_decision &sample, const ui_counters &cpu,
       const ui_counters &committed_cpu, const std::array<std::uint32_t, ui_counter_word::count> &words,
       const std::array<std::uint32_t, ui_counter_word::count> &committed_words, std::uint64_t through_ms,
@@ -282,73 +238,19 @@ namespace sunshine_game3d::ui_temporal {
     delta[ui_counter::scene_entered] = observed.entered;
     delta[ui_counter::scene_released] = observed.released;
     delta[ui_counter::scene_refuted] = observed.refuted;
-    delta[ui_counter::still_entered] += observed.still.entered;
-    delta[ui_counter::still_released] += observed.still.ended;
-    delta[ui_counter::still_short] += observed.still.short_run;
     delta[ui_counter::samples] = 1;
     delta.through_ms = through_ms;
     return delta;
-  }
-
-  // S3 (shadow): the uint32 wrap-safe change of the identity verdict counter
-  // words (ui_counter_word::identity_*, after count) since the last commit,
-  // as the gpu group of the "Sunshine UI identity" totals. They never join
-  // ui_counters: the "Sunshine UI counters" line is unchanged by S3.
-  inline ui_ticket::identity_counters identity_gpu_delta(
-      const std::array<std::uint32_t, ui_counter_word::identity_words> &now,
-      const std::array<std::uint32_t, ui_counter_word::identity_words> &before) {
-    namespace n = ui_ticket::identity_counter;
-    namespace w = ui_counter_word;
-    const auto delta = [&](std::size_t word) {
-      return std::uint64_t(std::uint32_t(now[word - w::identity_exact] - before[word - w::identity_exact]));
-    };
-    ui_ticket::identity_counters c;
-    c[n::gpu_exact] = delta(w::identity_exact);
-    c[n::gpu_mismatch] = delta(w::identity_mismatch);
-    c[n::gpu_unstamped] = delta(w::identity_unstamped);
-    c[n::gpu_unproposed] = delta(w::identity_unproposed);
-    c[n::gpu_token_exact] = delta(w::identity_token_exact);
-    return c;
   }
 
   // T1 identity of one Present (M6), by Present counting: whether it offers
   // nothing within the reported generated count of the last Present that
   // offered a UI tag (ui_mask::generated_without_input, hold_previous). A
   // HUD-less pairing names no real frame: an offered image makes the Present
-  // real. S3 (game3d_ui_ticket.h, shadow): token_label is the newest token
-  // generation among the Present's offered tag snapshots (0 none), and
-  // new_label whether the Present offers a label newer than the last
-  // decision's (ticket_identity).
+  // real.
   struct present_identity {
     bool generated{};
-    std::uint64_t token_label{};
-    bool new_label{};
   };
-
-  // S3 T1 by ticket: today's identity with the token fields filled. A Present
-  // offering a token is new exactly when the token is newer than the one the
-  // last decision detected (decision_token); a re-offered or older token is
-  // not, under any multiplier. A Present offering evidence without a token
-  // (present-space evidence such as the current colour) is always new; one
-  // that offers nothing is neither, and keeps today's
-  // ui_mask::generated_without_input bound.
-  inline present_identity ticket_identity(present_identity today, std::uint64_t token_label,
-      std::uint64_t decision_token, bool offers_evidence) {
-    today.token_label = token_label;
-    today.new_label = token_label ? token_label > decision_token : offers_evidence;
-    return today;
-  }
-
-  // The identity T1 applies: today's Present counting, or, when identity is
-  // authoritative, the ticket's: a new label detects (a token is the real
-  // frame), a token that is not new holds the last decision, and a Present
-  // offering nothing keeps today's count bound.
-  inline present_identity applied_identity(const present_identity &identity, bool authoritative) {
-    if (!authoritative) return identity;
-    if (identity.token_label) return {!identity.new_label, identity.token_label, identity.new_label};
-    if (identity.new_label) return {false, 0, true};
-    return identity;
-  }
 
   // What a Present does under T1: a real Present detects (none: no hold); a
   // generated Present shows the last real decision (generated, counted
@@ -397,12 +299,6 @@ namespace sunshine_game3d::ui_temporal {
     alpha_auto_decision latest;
     alpha_auto_source latest_source;
     std::uint32_t latest_key{};
-    // S3 (shadow): the token label of the last detection (ticket_identity's
-    // decision_token), and the sequence harness's test-only switch that makes
-    // T1 apply the ticket identity (ui_ticket::authoritative); nothing in the
-    // add-on sets it.
-    std::uint64_t decision_token{};
-    bool identity_override{};
 
     // T1: a generated Present never detects. It shows the last real
     // decision (detected_mask) while that was made in the same identity
@@ -422,8 +318,7 @@ namespace sunshine_game3d::ui_temporal {
     // frame adopts nothing. After an observation loss the previous
     // revision's captures are refused until the game tags again, so that
     // real frame is flagged too.
-    hold_decision arbitrate(const present_identity &offered_identity, const alpha_auto_source &scope, std::uint32_t offered) const {
-      const auto identity = applied(offered_identity);
+    hold_decision arbitrate(const present_identity &identity, const alpha_auto_source &scope, std::uint32_t offered) const {
       hold_decision result;
       const bool same_scope = have_decision && !hold_scope_changed(scope, decision_scope);
       if (identity.generated) {
@@ -466,8 +361,7 @@ namespace sunshine_game3d::ui_temporal {
     // A generated Present that applied the detected mask.
     void held() { ++holds; }
     // A real Present that detected: its decision is the chain's.
-    void detected(const alpha_auto_source &scope, const present_identity &offered_identity) {
-      decision_token = offered_identity.token_label;
+    void detected(const alpha_auto_source &scope) {
       have_decision = true;
       decision_scope = scope;
       holds = 0;
@@ -482,9 +376,5 @@ namespace sunshine_game3d::ui_temporal {
     // A render without detection keeps no real decision (T1). The
     // hidden-scene guard keeps its state.
     void inactive() { unavailable(); }
-    // The identity T1 applies to a Present (applied_identity).
-    present_identity applied(const present_identity &identity) const {
-      return applied_identity(identity, ui_ticket::authoritative(identity_override));
-    }
   };
 }

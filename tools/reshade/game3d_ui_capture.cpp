@@ -2,7 +2,6 @@
 #include "game3d_ui_capture.h"
 #include "game3d_capture_diagnostic.h"
 #include "game3d_diagnostic_metadata.h"
-#include "game3d_ui_ticket.h"
 #include "streamline_depth_capture.h"
 #include "../../src/game3d_debug_formats.h"
 
@@ -214,25 +213,8 @@ namespace sunshine_game3d {
           {"state_declared", o.state_declared}, {"tag_type", o.tag_type}, {"lifecycle", o.lifecycle}, {"sdk_success", e.finished ? nlohmann::json(e.successful) : nlohmann::json(nullptr)}};
         row["declared_area"] = {{"left", o.area.left}, {"top", o.area.top}, {"width", o.area.width}, {"height", o.area.height}};
       } else row["observation"] = nullptr;
-      if (e.ticket) row["gpu"] = {{"capture_id", p.capture_id}, {"producer_queue", hex(p.producer_queue)}, {"producer_fence", p.producer_fence}, {"producer_completed", p.producer_completed}, {"recording_retired", p.producer_recording_retired}};
-      // S3 shadow ticket of this optional copy: its stamp, read once its
-      // producer completed (a tag copy holds the frame after the Present its
-      // C_P read names), and the copy state's provenance. Nothing pairs it.
-      if (e.ticket) {
-        nlohmann::json stamp = nullptr;
-        if (p.stamp_read) {
-          const auto present = ui_ticket::present_label(ui_ticket::boundary::at_tag, p.stamp_present);
-          const auto token = ui_ticket::token_label_of_copy(p.stamp_token);
-          stamp = {{"present_read", p.stamp_present}, {"token_read", p.stamp_token},
-            {"present_label", present.valid ? nlohmann::json(present.value) : nlohmann::json(nullptr)},
-            {"token_label", token.valid ? nlohmann::json(token.value) : nlohmann::json(nullptr)}};
-        }
-        row["ticket"] = {{"kind", ui_ticket::name(ui_ticket::capture_kind::sl_tag)},
-          {"boundary", ui_ticket::name(ui_ticket::boundary::at_tag)},
-          {"proof", ui_ticket::name(ui_ticket::state_basis_proof(static_cast<std::uint8_t>(p.basis)))},
-          {"stamped", p.stamped}, {"refusal", ui_ticket::name(p.stamped ? ui_ticket::refusal::none : ui_ticket::refusal::unstamped)},
-          {"stamp", std::move(stamp)}};
-      }
+      // gpu.state_basis: where the copy's pre-copy state came from.
+      if (e.ticket) row["gpu"] = {{"capture_id", p.capture_id}, {"producer_queue", hex(p.producer_queue)}, {"producer_fence", p.producer_fence}, {"producer_completed", p.producer_completed}, {"recording_retired", p.producer_recording_retired}, {"state_basis", capture::name(p.basis)}};
       if (p.result == capture::status::ready) {
         row["allocation"] = {{"width", p.width}, {"height", p.height}, {"dxgi_format", p.format}};
         row["area"] = rectangle(p.area);

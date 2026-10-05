@@ -681,7 +681,7 @@ namespace {
     require(first.detect && !first.hold && first.kind == hold_kind::none && first.adopt &&
         first.per_frame == ui_detection::per_frame_hold_reset, "The first real Present did not detect from a new chain");
     state.adopt(16u | 32u, 16u);
-    state.detected(scope, present_identity{false});
+    state.detected(scope);
     // Generated Presents hold the last real decision, as many as come (no
     // multiplier constant and no real-frame id).
     for (std::uint32_t i = 0; i != 5; ++i) {
@@ -714,7 +714,7 @@ namespace {
     // The next real frame in scope detects without per-frame bits and adopts.
     const auto next = state.arbitrate(present_identity{false}, scope, 48u);
     require(next.detect && next.adopt && !next.per_frame, "A real frame in the chain pushed per-frame bits");
-    state.detected(scope, present_identity{false});
+    state.detected(scope);
     require(!state.holds, "A real decision kept the hold count");
     // A Present without a mask ends the chain: generated Presents then have
     // no mask, and the next real detection starts a new chain.
@@ -728,7 +728,7 @@ namespace {
     // nothing, and an unaccepted missing candidate is no such frame.
     temporal::detection_state accepted;
     accepted.adopt(4u, 4u);
-    accepted.detected(scope, present_identity{});
+    accepted.detected(scope);
     const auto missing = accepted.arbitrate(present_identity{}, scope, 0u);
     require(missing.detect && !missing.adopt && missing.per_frame == ui_detection::per_frame_accepted_missing,
       "A missing accepted candidate was not flagged, or the frame adopted");
@@ -738,7 +738,7 @@ namespace {
       "An offered accepted candidate was flagged missing");
     temporal::detection_state unaccepted;
     unaccepted.adopt(4u | 0x40u, 0x40u);
-    unaccepted.detected(scope, present_identity{});
+    unaccepted.detected(scope);
     require(!unaccepted.arbitrate(present_identity{}, scope, 0x40u).per_frame &&
         unaccepted.arbitrate(present_identity{}, scope, 4u).per_frame == ui_detection::per_frame_accepted_missing,
       "Missing candidates were flagged by the wrong acceptance");
@@ -757,7 +757,7 @@ namespace {
     ++moved.revision;
     scoped.enter_scope(moved);
     require(!scoped.latest.sample_tick_ms, "A new scope kept the sample");
-    scoped.detected(scope, present_identity{false});
+    scoped.detected(scope);
     scoped.inactive();
     require(!scoped.have_decision && scoped.arbitrate(present_identity{true}, scope, 0u).kind == hold_kind::unavailable &&
         scoped.arbitrate(present_identity{false}, scope, 0u).per_frame == ui_detection::per_frame_hold_reset,
@@ -1100,45 +1100,6 @@ namespace {
     const auto older = scene_guard::sample_of(t.data(), 4 * ui_detection::judgment_decision_texels, 1234, false);
     require(!older.complete && !older.claims && !older.presented.valid && !older.pre_ui_image,
       "The scene guard decoded texel 10 or evidence it was not given");
-
-    // H2 (game3d_still_screen.h): the guard feeds its run from the samples it
-    // observes in scope; acceptance, holds and refutations never clear it,
-    // an identity change does; measure(still) runs without being actionable.
-    scene_guard::state still;
-    still.enter_scope(1, 1);
-    const auto still_sample = [&](std::uint64_t tick) {
-      auto s = scene_sample(tick, H, 0u, 0u);
-      s.presented.d = -.03f;
-      s.still_cells = s.still_compared = still_screen::cells;
-      return s;
-    };
-    for (std::uint64_t tick = 1000; tick < 3000; tick += 100)
-      require(!still.observe(still_sample(tick), false, sigs, true).still.entered, "H2 entered before 2 s");
-    require(still.observe(still_sample(3000), false, sigs, true).still.entered && still.still_flatten(),
-      "The guard's H2 run did not enter at 2 s of still hidden samples");
-    require(!still.observe(still_sample(3100), true, sigs, true).still.ended && still.still_flatten() &&
-        !still.enter_scope(1, 1).ended && still.still_flatten(), "An actionable sample or the same scope ended H2's run");
-    const auto still_idle = still.measure(3100, false, false, false), still_measured = still.measure(3100, false, false, false, true);
-    require(!still_idle.run && still_measured.run && !still_measured.actionable, "measure(still) was not a non-actionable run");
-    auto still_out = still_sample(3200);
-    require(still.observe(still_out, false, sigs, false).still.ended && !still.still_flatten(),
-      "A sample submitted out of H2's scope did not end its run");
-    for (std::uint64_t tick = 4000; tick <= 6000; tick += 100) still.observe(still_sample(tick), false, sigs, true);
-    const auto ended = still.enter_scope(2, 1);
-    require(ended.ended && ended.reason == still_screen::end_reason::identity && !still.still_flatten(),
-      "An identity change did not end H2's run");
-    // Evidence measured for H2 alone never reaches the acceptance ledger: its
-    // scene evidence is cleared, so a pre-UI proof's reconfirm clock stays
-    // paused; evidence measured for any other rule passes unchanged.
-    {
-      alpha_auto_decision::detection_evidence measured;
-      measured.scene = {300u, 600u, .4f, true, true, ui_detection::scene_verdict::visible};
-      measured.pre_ui_scene = measured.scene;
-      measured.pre_ui_match = 7u;
-      const auto h2_only = ui_temporal::ledger_evidence(measured, true), other = ui_temporal::ledger_evidence(measured, false);
-      require(!h2_only.scene.valid && !h2_only.scene.ran && !h2_only.pre_ui_scene.valid && h2_only.pre_ui_match == 7u &&
-          other.scene.valid && other.scene.verdict == ui_detection::scene_verdict::visible, "ledger_evidence did not hide only H2's measurement");
-    }
   }
   // H1 (d), fix 1: Stellar Blade SDR's cleared output target, an offered
   // layer without coverage (BGRA8, V1-invalid: colour beyond the
@@ -1298,14 +1259,13 @@ namespace {
     c[n::auto_frames] = 10; c[n::detection_frames] = 6;
     c[n::held_generated] = 2; c[n::held_none] = 1; c[n::reused] = 1;
     c[n::inactive_no_candidates] = 1;
-    c[n::decided + 0] = 2; c[n::decided + 5] = 3; c[n::decided + 6] = 1; c[n::decided + 10] = 4; c[n::decided + 11] = 5;
+    c[n::decided + 0] = 2; c[n::decided + 5] = 3; c[n::decided + 6] = 1; c[n::decided + 10] = 4;
     c[n::none + ui_no_mask::difference_failed] = 1; c[n::none + ui_no_mask::gate_no_hold] = 1;
     c[n::none + ui_no_mask::unaccepted] = 2;
     c[n::depth_not_current] = 1; c[n::full_d_hidden] = 1; c[n::inexact_difference] = 3; c[n::trust_earned] = 1;
     c[n::trust_discarded] = 2; c[n::trust_revoked_exact] = 1; c[n::trust_forgotten] = 3; c[n::contradicted] = 2;
     c[n::full_alpha] = 2; c[n::full_alpha_d_visible] = 1;
     c[n::scene_entered] = 1; c[n::scene_released] = 1; c[n::scene_refuted] = 2;
-    c[n::still_entered] = 2; c[n::still_released] = 1; c[n::still_short] = 7;
     c[n::samples] = 4; c.through_ms = 12345;
     c[n::detection_frames] += 5; c[n::auto_frames] += 5;
     require(c.reconciled() && c.held() == 3 && c.inactive() == 1, "The counters' accounting identity is wrong");
@@ -1315,10 +1275,10 @@ namespace {
     --c[n::reused];
     require(format_ui_counters(c) ==
         "auto_frames=15 detection_frames=11 held={generated=2 none=1} reused=1 "
-        "inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 10=4 11=5} "
+        "inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 10=4} "
         "none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 gate_no_hold=1 "
         "no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 depth_not_current=1} full_d={hidden=1 ambiguous=0 visible=0 invalid=0} "
-        "scene={entered=1 released=1 refuted=2} still={entered=2 released=1 short=7} untrusted_inferred=0 inexact_difference=3 contradicted=2 presented_over_dedicated=0 full_alpha=2 "
+        "scene={entered=1 released=1 refuted=2} untrusted_inferred=0 inexact_difference=3 contradicted=2 presented_over_dedicated=0 full_alpha=2 "
         "full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=0} trust={earned=1 revoked_exact=1 "
         "revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3} samples=4 through_ms=12345",
       "The UI counters log text changed");
@@ -1390,7 +1350,7 @@ namespace {
   // counts it commits.
   void sample_decode_and_commit_are_shared() {
     namespace word = ui_detection::decision_word;
-    std::array<std::uint32_t, 4 * ui_detection::still_decision_texels> t{};
+    std::array<std::uint32_t, 4 * ui_detection::pre_ui_decision_texels> t{};
     t[word::source] = 10; t[word::covered] = 995; t[word::pixels] = 1000; t[word::matching_tiles] = 7;
     t[word::candidates] = 0x7a; t[word::hudless_changed] = 9; t[word::hudless_unchanged] = 900;
     t[word::hudless_invalid] = 1; t[word::hudless_lit] = 800; t[word::accepted] = 0x42;
@@ -1408,7 +1368,6 @@ namespace {
     t[word::refused] = candidate::backbuffer;
     t[word::frame_reason] = std::uint32_t(ui_no_mask::unaccepted) | ui_detection::frame_reason_reused;
     t[word::pre_ui_match] = 960; t[word::pre_ui_image_lit] = 880; t[word::presented_lit] = 890; t[word::presented_lit_differs] = 7;
-    t[word::still_cells] = 35100; t[word::still_compared] = 36864;
     const auto sample = ui_temporal::decode_detection_sample(t.data(), t.size(), 1500, 9, true);
     const auto &e = sample.evidence;
     require(sample.source_kind == 10 && sample.enabled && sample.state == alpha_auto_state::automatic_on &&
@@ -1425,14 +1384,6 @@ namespace {
         e.h1_applied, "Texel 10 did not decode");
     require(e.pre_ui_match == 960 && e.pre_ui_image_lit == 880 && e.presented_lit == 890 && e.presented_lit_differs == 7,
       "Texel 11 did not decode");
-    require(e.still_cells == 35100 && e.still_compared == 36864, "Texel 12 (H2) did not decode");
-    const auto revision4 = ui_temporal::decode_detection_sample(t.data(), 4 * ui_detection::pre_ui_decision_texels, 1500, 9, true);
-    require(revision4.evidence.pre_ui_match == 960 && !revision4.evidence.still_cells && !revision4.evidence.still_compared,
-      "Texel 12 decoded from fewer than 52 words");
-    // The scene guard reads the same texel 12 and the reused bit (H2).
-    const auto guarded = scene_guard::sample_of(t.data(), t.size(), 1500, true);
-    require(guarded.still_cells == 35100 && guarded.still_compared == 36864 && guarded.reused,
-      "The scene guard did not decode texel 12 or the reused bit");
     const auto revision3 = ui_temporal::decode_detection_sample(t.data(), 4 * ui_detection::h1_decision_texels, 1500, 9, true);
     require(revision3.evidence.h1_applied && !revision3.evidence.pre_ui_match && !revision3.evidence.presented_lit_differs,
       "Texel 11 decoded from fewer than 48 words");
@@ -1478,18 +1429,6 @@ namespace {
     require(delta[n::full_d_visible] == 1 && !delta[n::full_alpha_d_visible] && !ui_temporal::whole_frame(h1) &&
         !delta[n::scene_entered] && delta[n::scene_released] == 1 && delta[n::scene_refuted] == 2,
       "An H1 sample was counted as a whole-frame decision, or its observation was not counted");
-    // H2: the guard's observation of the sample adds to the renderer's own
-    // ends of a run (a scope or identity change) in its CPU counts.
-    {
-      auto cpu_still = cpu_now;
-      cpu_still[n::still_released] = 1;
-      cpu_still[n::still_short] = 2;
-      scene_guard::observation still_observed;
-      still_observed.still.entered = still_observed.still.short_run = true;
-      const auto still_delta = ui_temporal::sample_counters(sample, cpu_still, cpu_then, after, before, 1500, still_observed);
-      require(still_delta[n::still_entered] == 1 && still_delta[n::still_released] == 1 && still_delta[n::still_short] == 3 &&
-          still_delta.reconciled(), "H2's observation and the renderer's own ends were not both counted");
-    }
     // The exact full change set (6) is an accepted whole-frame decision.
     auto full_set = sample;
     full_set.source_kind = 6;

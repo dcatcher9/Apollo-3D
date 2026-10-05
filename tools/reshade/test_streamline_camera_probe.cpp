@@ -2980,7 +2980,6 @@ namespace {
           observed.source.resource.native == reinterpret_cast<std::uint64_t>(&native) &&
           observed.source.valid_until == sunshine_scene_depth::lifetime::at_call && !observed.tag_scope,
         "dedicated UI tag was not offered to the live owner with diagnostics off");
-      require(!mask::testing::last_token_clock(runtime), "S3: a non-Backbuffer UI tag asked for the token clock");
       call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
       require(mask::testing::last_attempt(runtime, observed) && observed.kind == kind && observed.tag_scope == 1 &&
           observed.source.source_frame_numeric == numeric,
@@ -3006,7 +3005,6 @@ namespace {
     require(mask::testing::last_attempt(runtime, observed) && observed.kind == mask::source_kind::backbuffer &&
         observed.source.resource.native == reinterpret_cast<std::uint64_t>(&native),
       "null preferred UI source blocked a valid same-batch backbuffer fallback");
-    require(mask::testing::last_token_clock(runtime), "S3: a Backbuffer tag snapshot did not ask for the token clock");
     tag.resource_ptr = nullptr;
     call_v2_tag(view, &tag, 1, &commands);
     require(mask::testing::last_attempt(runtime, observed) && !observed.source.resource.native,
@@ -3972,9 +3970,8 @@ int main(int argc, char **argv) {
     std::puts("PASS live pipelined sources use their own completed snapshots after owner expiry, reset or source change; delivering owners are kept through rejected attempts and stay revocable");
     require(depth_capture::testing::crop_region_regression(), "native depth crop admitted an unsupported copy or rejected a valid extent");
     require(depth_capture::testing::record_diagnostic_regression(), "record diagnostics changed admission or were overwritten by another attempt");
-    require(depth_capture::testing::snapshot_stamp_regression(),
-      "S3 state-basis provenance changed admission, or a snapshot without a stamp pool was not left unstamped");
-    std::puts("PASS S3 snapshot stamps: enhanced and legacy state provenance without admission changes; no device leaves a snapshot unstamped and consumers copy the zero entry");
+    require(depth_capture::testing::snapshot_basis_regression(), "Snapshot state-basis provenance changed admission");
+    std::puts("PASS snapshot state basis: enhanced and legacy state provenance without admission changes");
     std::puts("PASS pending evaluation is unavailable until success in either submission order; failure, Signal loss and queue change remain terminal");
     require(depth_capture::testing::source_cookie_reentry_regression(), "retagged live resource lost its recorded state identity");
     std::puts("PASS live resource keeps its cookie across expired metadata wrappers; new resources and failed writes remain separate");

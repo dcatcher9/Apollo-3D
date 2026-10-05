@@ -97,8 +97,6 @@ int main() {
       mirrored(detection::hlsl_candidate_defines);
       mirrored(detection::hlsl_hold_defines);
       mirrored(detection::hlsl_h1_defines);
-      mirrored(detection::hlsl_still_defines);
-      mirrored(detection::hlsl_identity_defines);
       // The hidden-scene routes' per-frame bits (0x10000, 0x80000) and the
       // layer's D proof bit (0x20000000) are retired; fix 1's proven bit and
       // the pre-UI statistics row are mirrored.
@@ -115,42 +113,40 @@ int main() {
       const auto texels = sunshine_game3d::shader_marker(source, detection::decision_texels_marker);
       const auto images = sunshine_game3d::shader_marker(source, detection::scene_evidence_images_marker);
       require(source.find("#define " + std::string(detection::scene_evidence_images_marker) + ' ') != std::string::npos &&
-          texels >= detection::still_decision_texels && texels <= detection::max_decision_texels &&
+          texels >= detection::pre_ui_decision_texels && texels <= detection::max_decision_texels &&
           images <= detection::max_scene_evidence_images,
         "game3d_native.hlsl's UI detection size markers are missing or outside the contract's range");
     }
     // Selection revision 4 (fix 1) writes the pre-UI pixel counts in texel
-    // 11 after the H1 texel 10, and revision 5 (fix 2) H2's stillness counts
-    // in texel 12 from statistics rows 144-152 (160 rows), with source 11,
-    // b2 word 5's flatten bit and a 1/255 tolerance; retired route defines
-    // stay gone. Revision 7 removes fix 3 and fix 4 (revision 6): the decision
-    // layout is revision 5's, with source 12's counter word and word 30
-    // reserved (zero) so that S3's identity words keep their indices, and the
-    // removed defines stay gone. Revision 8 adds the empty change set and
-    // keeps that layout.
-    require(sunshine_game3d::ui_selection::revision == 8u && detection::h1_decision_texels == 11u &&
+    // 11 after the H1 texel 10. Revision 5 (fix 2) added H2's stillness
+    // counts in texel 12 and statistics rows 144-159; revision 7 removed fix 3
+    // and fix 4 (revision 6), keeping source 12's counter word and word 30
+    // reserved (zero); revision 8 added the empty change set; and revision 9
+    // removes H2 and S3: 12 texels and 144 statistics rows again, with source
+    // 11, texel 12 (words 48-51), rows 144-159, counter words 31-35 and b2
+    // words 5-9 reserved, b2 shrunk to 6 words, and the removed defines gone.
+    require(sunshine_game3d::ui_selection::revision == 9u && detection::h1_decision_texels == 11u &&
         detection::decision_word::h1 == 43u && detection::pre_ui_decision_texels == 12u &&
         detection::decision_word::pre_ui_match == 44u && detection::decision_word::presented_lit_differs == 47u &&
         detection::per_frame_pre_ui_proven == 0x80000000u && detection::pre_ui_statistics_row == 128u &&
-        detection::still_decision_texels == 13u && detection::decision_word::still_cells == 48u &&
-        detection::decision_word::still_compared == 49u && detection::still_statistics_row == 144u &&
-        detection::statistics_rows(detection::max_scene_evidence_images) == 160u && detection::source_still == 11u &&
-        detection::source_count == 12u && detection::still::flatten == 1u && detection::still::tolerance == 4112u &&
+        detection::statistics_rows(detection::max_scene_evidence_images) == 144u && detection::statistics_rows(0) == 144u &&
+        detection::source_count == 12u && detection::source_layer == 10u && detection::b2_words == 6u &&
         sunshine_game3d::ui_counter_word::decided_count == 13u && sunshine_game3d::ui_counter_word::count == 31u &&
-        sunshine_game3d::ui_counter_word::reserved_refined == 30u && sunshine_game3d::ui_counter_word::with_identity == 36u,
-      "The decision layout is not selection revision 8 with 13 texels");
+        sunshine_game3d::ui_counter_word::reserved_refined == 30u,
+      "The decision layout is not selection revision 9 with 12 texels and 144 statistics rows");
     {
       std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);
       const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
       for (const char *removed : {"SUNSHINE_UI_CANDIDATE_PRE_UI", "SUNSHINE_UI_SOURCE_PRE_UI", "SUNSHINE_UI_CHANGE_SET_",
              "SUNSHINE_UI_DARKENING_", "SUNSHINE_UI_PIN_ONLY_UI", "SUNSHINE_UI_COUNTER_REFINED", "SUNSHINE_UI_H1_REFINED",
-             "SUNSHINE_UI_IDENTITY_GATE_LAYER", "SUNSHINE_UI_TAG_LINEAR"})
+             "SUNSHINE_UI_TAG_LINEAR", "SUNSHINE_UI_IDENTITY", "SUNSHINE_UI_COUNTER_IDENTITY_",
+             "SUNSHINE_UI_SOURCE_STILL", "SUNSHINE_UI_STILL_"})
         require(source.find(std::string("#define ") + removed) == std::string::npos,
           (std::string("game3d_native.hlsl still defines the removed ") + removed).c_str());
     }
     std::puts("PASS UI detection contract: game3d_native.hlsl mirrors every flag, candidate bit, counter word, hold store value, "
-      "H1 claim word, H2 still-screen word, the pre-UI and still statistics rows and the selection revision, and sizes "
-      "detection within range");
+      "H1 claim word, the pre-UI statistics rows and the selection revision, and sizes detection within range; removed "
+      "defines stay gone");
 
     // One game frame: each target cleared in order, then Present.
     const auto frame = [](layer::layer_tracker &tracker, std::initializer_list<std::uint64_t> clears, std::uint64_t now) {
@@ -197,8 +193,8 @@ int main() {
     }
     std::puts("PASS UI layer tracking: confirmed after repeated clears, last-cleared layer active, one copy per Present, expiry");
     // The Present count at the live copy names the Present whose frame it
-    // holds (presents_since_copy), the present label S3's layer ticket
-    // expects; the provider reads it after the Present's observe_output.
+    // holds (presents_since_copy); the provider reads it after the Present's
+    // observe_output and reports it with the layer's metadata.
     {
       layer::layer_tracker tracker;
       std::uint64_t now = 1000;
@@ -224,8 +220,8 @@ int main() {
     }
     std::puts("PASS UI layer Present count: a copy after Present k reads 1 at render k+1, 2 after an interval without "
       "one, 0 within its own interval");
-    // S3 queue watch: the queue that executed the lists carrying a stamped
-    // copy; another queue than the presenting one is sticky for the scope.
+    // Queue watch: the queue that executed the lists carrying a layer copy;
+    // another queue than the presenting one is sticky for the scope.
     {
       layer::queue_watch watch;
       constexpr std::uint64_t presenting = 0x10, other = 0x20;
@@ -259,7 +255,7 @@ int main() {
       deferred.move(0x200, 0x300);
       require(!deferred.executed(0x200, other, presenting), "A list that carries nothing kept an old watch");
       // A D3D12 bundle or a command list executed on a deferred context: the
-      // primary keeps its own stamped copy whatever the secondary carried,
+      // primary keeps its own copy whatever the secondary carried,
       // and gains the secondary's.
       layer::queue_watch bundle;
       bundle.carried(0x400);
@@ -285,7 +281,7 @@ int main() {
       bounded.clear_scope();
       require(!bounded.watching() && !bounded.foreign_present() && !bounded.mixed(), "A scope change kept the watch");
     }
-    std::puts("PASS UI layer queue watch (S3): the presenting queue is same, another queue is foreign and sticky per scope, "
+    std::puts("PASS UI layer queue watch: the presenting queue is same, another queue is foreign and sticky per scope, "
       "a reset list and a list carrying nothing drop out, a D3D11 command list carries its deferred context's copy, at most "
       "4 lists are watched");
     // Live-copy ring (direct binding): the oldest free entry other than the

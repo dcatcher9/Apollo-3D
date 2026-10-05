@@ -6,7 +6,6 @@
 #include "game3d_diagnostics.h"
 #include "test_game3d_debug_dump_runtime.h"
 #include "game3d_ui_detection_contract.h"
-#include "game3d_frame_clock.h"
 #include "game3d_ui_layer.h"
 #include "game3d_ui_temporal.h"
 #include <reshade.hpp>
@@ -2401,26 +2400,18 @@ namespace {
         replay.at("ui_detection").at("candidates") == ui_detection::candidate::layer &&
         replay.at("ui_detection").at("accepted") == ui_detection::candidate::layer &&
         replay.at("ui_detection").at("candidate_layout") == ui_detection::candidate_layout &&
-        replay.at("ui_detection").at("still_bits") == 0u &&
-        replay.at("ui_pin").at("decision_texels") == ui_detection::still_decision_texels &&
+        replay.at("ui_pin").at("decision_texels") == ui_detection::pre_ui_decision_texels &&
         replay.at("ui_pin").at("evidence_images") == ui_detection::max_scene_evidence_images,
       "Dump lost the layer's detection constants or pin markers");
     require(!replay.at("ui_pin").contains("late_margin") &&
         replay.at("ui_pin").at("soft_pin_gain") == shader_marker(renderer::shader_source(), "SUNSHINE_UI_SOFT_PIN_GAIN"),
       "Dump lost the soft pin gain or still records a late-layer margin");
-    // S3 shadow: nothing proposed for a directly offered layer, no gate, and
-    // the stamp buffer, when the renderer has one, read back per ticket slot.
-    {
-      const auto &identity = replay.at("ui_detection");
-      const auto &stamps = identity.at("stamps");
-      bool stamps_ok = stamps.is_null() || (stamps.is_array() && stamps.size() == ui_ticket::slot::count);
-      if (stamps.is_array())
-        for (const auto &entry : stamps) stamps_ok = stamps_ok && entry.is_array() && entry.size() == 2;
-      require(identity.at("expected_layer_present") == 0u && identity.at("expected_layer_token") == 0u &&
-          identity.at("expected_hudless_present") == 0u && identity.at("identity_bits") == 0u && stamps_ok &&
-          stamps.is_null() == !gpu.renderer.diagnostics().ui_stamps.handle,
-        "Dump lost the S3 identity fields (expected labels, identity_bits, stamps)");
-    }
+    // S3's frame identity and rule H2 were removed: no proposals, stamps or
+    // still word remain in the dump.
+    for (const char *removed : {"expected_layer_present", "expected_layer_token", "expected_hudless_present", "identity_bits",
+           "stamps", "still_bits"})
+      require(!replay.at("ui_detection").contains(removed),
+        std::string("Dump kept the removed S3 or H2 field ") + removed);
     // The accepted layer the previous real frame offered is missing now (T1):
     // the tag decides by itself, so nothing is reused.
     inputs = {};
@@ -2545,11 +2536,6 @@ namespace {
     ui_render_input ui;
     ui.automatic = &source; ui.detection = &inputs;
     struct outcome { bool flat, empty, held; std::uint64_t evidence; alpha_auto_decision sample; result pixels; };
-    // Rule H2 (fix 2) measures every SDR Auto sample frame on which no source
-    // other than 11 decided, without acting on it (scene_guard::measure), so
-    // in sRGB the evidence passes also run where nothing else asks for them;
-    // scRGB keeps every check that they do not.
-    const bool h2_measures = gpu.color == 1;
     const auto frame = [&](const std::vector<unsigned char> &color, const render_parameters *parameters = nullptr) {
       gpu.original = color;
       gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), width * bpp, 0);
@@ -2611,7 +2597,7 @@ namespace {
     // verdict enters the hold (H1), and the frame pins flat at one plane.
     inputs.layer = opaque_layer; inputs.layer_flags = layer_flags;
     const auto first = frame(logo_color);
-    require(!first.flat && (h2_measures || !first.evidence), "Evidence ran or flattened before any sample showed a claim");
+    require(!first.flat && !first.evidence, "Evidence ran or flattened before any sample showed a claim");
     const auto second = frame(logo_color);
     require(!second.flat && second.evidence == 1, "A claim did not measure the next sample frame");
     const auto one_sample = frame(logo_color);
@@ -2762,7 +2748,7 @@ namespace {
         require(!quiet.flat && !quiet.held, std::string(label) + ": no claim flattened or held");
         runs += quiet.evidence;
       }
-      require(h2_measures || !runs, std::string(label) + ": evidence passes ran without a claim, a hold or the first-run shadow");
+      require(!runs, std::string(label) + ": evidence passes ran without a claim, a hold or the first-run shadow");
     };
     closed_gate(nearly_opaque_layer, false, "98.9% opaque layer");
     closed_gate(half_layer, false, "layer at alpha 0.5 over the whole frame");
@@ -2786,7 +2772,7 @@ namespace {
     inputs = {}; inputs.masks[0] = opaque_ui_alpha;
     never_flat(logo_color, 4, "unaccepted opaque UIAlpha");
     const auto quiet_ui_alpha = never_flat(logo_color, 2, "unaccepted opaque UIAlpha");
-    require(h2_measures || !quiet_ui_alpha.evidence, "An unaccepted UIAlpha ran evidence");
+    require(!quiet_ui_alpha.evidence, "An unaccepted UIAlpha ran evidence");
     {
       alpha_auto_policy trusting;
       require(trusting.restore(gpu.key(ui_selection::kind::ui_alpha, DXGI_FORMAT_R32_FLOAT)).restored == 1,
@@ -2907,7 +2893,7 @@ namespace {
     // from the V1-invalid layer's own claim). Its pixels mismatch.
     const auto unproven = never_flat(menu_color, 5, "Stellar Blade SDR settings before gameplay (layer unproven)");
     const auto menu_pixels = expected_pixels(menu_color, scene_layer_bytes);
-    require(!unproven.held && (h2_measures || !unproven.evidence) && !unproven.sample.evidence.claims && !unproven.sample.scene_guard.proven &&
+    require(!unproven.held && !unproven.evidence && !unproven.sample.evidence.claims && !unproven.sample.scene_guard.proven &&
         !proven_pushed() && counted(unproven.sample) == menu_pixels && menu_pixels[0] * 10u < all_pixels * 9u &&
         !sdr.pre_ui_proven(layer_signature),
       "The unproven SDR scene layer acted or measured, or its pixel counts are not exact");
@@ -2924,7 +2910,7 @@ namespace {
       proving = frame(scene_color);
       ++proving_frames;
       require(!proving.flat && (proving_frames == 1 || counted(proving.sample) == play_pixels) &&
-          (sdr.pre_ui_proven(layer_signature) || h2_measures || !proving.evidence),
+          (sdr.pre_ui_proven(layer_signature) || !proving.evidence),
         "SDR gameplay before the proof flattened or measured, or its pixel counts are not exact");
     }
     require(proving_frames == 22 && proving.sample.scene_guard.proven && proving.evidence == 1 && proven_pushed(),
@@ -3030,7 +3016,7 @@ namespace {
     inputs = {}; inputs.current_color = true;
     never_flat(logo_color, 2, "no claim before the shadow");
     const auto quiet_no_claim = never_flat(logo_color, 2, "no claim before the shadow");
-    require(h2_measures || !quiet_no_claim.evidence, "Evidence ran without a claim");
+    require(!quiet_no_claim.evidence, "Evidence ran without a claim");
     policy.set_first_run(true);
     outcome shadow{};
     for (unsigned i = 0; i != 8; ++i) {
@@ -3067,171 +3053,54 @@ namespace {
       " first_run_shadow=1"
       " blank_frames_end_run=1 shadow_entry_unchanged=1\n";
     std::puts("PASS D3D11 hidden scene (H1): an informative full claim (an unaccepted opaque layer, an unaccepted exact full change set, or a pre-UI image: an inexact HUD-less image, or Stellar Blade SDR's cleared target without alpha once the session ledger proved it the pre-UI image by its pixels (three matching samples over 2 s, kept across a mismatching sample and an identity change), reading visible while the presented frame reads hidden) flattens as 8 only after two valid hidden samples and while the depth is this frame's; holds expire after hold_ms, release on visible evidence and clear only on an epoch change, not on a revision, inactive detection, acceptance or a HUD-less pairing that comes and goes; a visible verdict refutes the layer's claim until it shows itself transparent; reused depth, an unready camera, no claim, a tagged UI color, presented alpha and an unaccepted UIAlpha never flatten, while an accepted UIAlpha or layer decides by itself and is never overridden; an exact full-frame pair is rule 6 once accepted; SDR gameplay (both images visible) and dark gameplay (both hidden) never flatten; evidence runs only for a claim, a hold, the shadow or a whole-frame decision; the first-run shadow only measures, ignores blank frames and leaves entry unchanged");
-    // (m) Rule H2 (fix 2; docs/reshade-sbs.md, still screens without a UI
-    // source). Stellar Blade's SDR loading screen offers its cleared output
-    // target almost black and without alpha (V1-invalid, unproven) beside an
-    // opaque current alpha (0x48), neither accepted: no source decides and
-    // nothing claims. Its frame shows none of the depth's edges (the banded
-    // image: D < 0) and stays still. In SDR Auto the run enters at the sample
-    // 2 s after its first passing one; the default shadow only reports it,
-    // and enabled (UIFlattenStillScreens=1) the frames are flat as source 11
-    // from the first frame that reads that sample until the first one that
-    // reads a moving sample. Depth that is not the frame's own keeps the run.
-    // scRGB is out of scope: nothing runs and nothing is pushed.
+    // (m) G3, the Diagnostics switch: a loading-like screen (Stellar Blade's
+    // SDR loading screen: its cleared output target almost black without
+    // alpha beside an opaque current alpha, neither accepted, over a frame
+    // without the depth's edges) on two fresh renderers and sessions, one
+    // with the switch on and one with it off: every frame decides, masks and
+    // packs bit for bit alike (the switch adds per-pass GPU timing only).
     {
-      constexpr std::uint32_t cells = ui_detection::scene::cells_x * ui_detection::scene::cells_y;
       const auto near_black_layer = color_view(zero_alpha(make([](unsigned, unsigned) { return 1.f / 64.f; }, opaque)));
-      // The same stripes moved by one scene cell: every striped cell changes.
-      const auto panned_color = make([&](unsigned x, unsigned y) {
-        return near_edge(x, y) ? .5f : (x * ui_detection::scene::cells_x / width + 1) % 2 ? .75f : .25f;
-      }, opaque);
-      alpha_auto_policy loading;
-      source.session = &loading;
       gpu.depth_view = silhouette;
       gpu.depth_current = true;
-      const auto uniform_field = [&](const outcome &o) {
-        float plane{}; bool uniform = true;
-        std::memcpy(&plane, o.pixels.field.bytes.data(), sizeof(plane));
-        for (size_t i = 0; i != pixels; ++i) { float value; std::memcpy(&value, o.pixels.field.bytes.data() + i * 4, 4); uniform = uniform && value == plane; }
-        return uniform;
-      };
-      // One loading screen of `count` frames after an identity change; returns
-      // the frame that first reads an active run (0 without one) and the last
-      // outcome. Every frame is flat exactly when the run is active, in scope
-      // and enabled, which is exactly when the still word is pushed.
-      const auto loading_screen = [&](bool enabled, unsigned count, const char *label) {
-        loading.set_still_flatten(enabled);
-        inputs = {}; inputs.current_color = true; inputs.layer = near_black_layer; inputs.layer_flags = layer_flags;
-        // Another screen before it (the logo), then an identity change.
-        frame(logo_color);
-        ++source.epoch;
-        unsigned entry = 0;
-        outcome o{};
-        for (unsigned i = 1; i <= count; ++i) {
-          o = frame(banded_color);
-          const auto bits = gpu.renderer.consumed_detection().still_bits;
-          const bool active = o.sample.still.phase == still_screen::phase::active;
-          if (active && !entry) entry = i;
-          require(o.sample.still.scope == h2_measures && o.sample.still.enabled == (h2_measures && enabled) && !o.held &&
-              !o.sample.evidence.claims, std::string(label) + ": wrong scope or switch, a claim or a hidden-scene hold");
-          require(o.flat == (h2_measures && enabled && active) && bits == (o.flat ? ui_detection::still::flatten : 0u) &&
-              (!o.flat || uniform_field(o)),
-            std::string(label) + ": flat outside an enabled active run, the still word pushed without one, or a non-uniform field");
-          require(h2_measures || (!o.evidence && o.sample.still.phase == still_screen::phase::none &&
-              !o.sample.evidence.still_compared), std::string(label) + ": rule H2 ran outside SDR");
+      renderer measured, quiet;
+      const api::resource presented{reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())};
+      require(measured.configure(observed_runtime, presented, static_cast<api::color_space>(gpu.color)) &&
+          quiet.configure(observed_runtime, presented, static_cast<api::color_space>(gpu.color)),
+        "configure the diagnostics-switch renderers");
+      alpha_auto_policy measured_session, quiet_session;
+      alpha_auto_source measured_source = source, quiet_source = source;
+      measured_source.session = &measured_session;
+      quiet_source.session = &quiet_session;
+      ui_detection_inputs switch_inputs;
+      switch_inputs.current_color = true;
+      switch_inputs.layer = near_black_layer;
+      switch_inputs.layer_flags = layer_flags;
+      ui_render_input measured_ui, quiet_ui;
+      measured_ui.automatic = &measured_source; measured_ui.detection = &switch_inputs;
+      quiet_ui.automatic = &quiet_source; quiet_ui.detection = &switch_inputs;
+      for (unsigned i = 0; i != 26; ++i) {
+        gpu.original = i ? banded_color : logo_color;
+        gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), width * bpp, 0);
+        for (auto *clock : {&measured_source, &quiet_source}) {
+          clock->now_ms += 100; clock->tick_ms = clock->now_ms; ++clock->sequence;
         }
-        return std::pair{entry, o};
-      };
-      if (h2_measures) {
-        // The shadow: 2.5 s of the loading screen never flattens, but the run
-        // enters at the frame reading the sample 2 s after its first passing
-        // one. After the identity change the first sample compares with the
-        // screen before (moving), so the run starts at the second (read by
-        // frame 3) and its sample 2 s later is read by frame 23.
-        const auto [shadow_entry, shadow] = loading_screen(false, 25, "SDR loading screen, shadow");
-        require(shadow_entry == 23 && !shadow.flat && shadow.evidence == 1 && !shadow.sample.source_kind &&
-            shadow.sample.still.phase == still_screen::phase::active && shadow.sample.still.run_ms >= ui_detection::still::run_ms &&
-            shadow.sample.evidence.still_compared == cells && shadow.sample.evidence.still_cells == cells &&
-            shadow.sample.evidence.scene.n >= ui_detection::scene::min_edges && shadow.sample.evidence.scene.d <= .05f,
-          "The SDR loading screen's shadow did not enter at its 2 s sample with every cell compared and still: " +
-            std::to_string(shadow_entry));
-        // G3 (the Diagnostics switch): the same shadow loading screen on two
-        // fresh renderers and sessions, one with the switch on and one with
-        // it off. Off, H2 does not measure for itself (UIFlattenStillScreens=0):
-        // no evidence pass runs and its run never enters, while every frame
-        // decides, masks and packs exactly as with the switch on.
-        {
-          renderer measured, quiet;
-          const api::resource presented{reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())};
-          require(measured.configure(observed_runtime, presented, static_cast<api::color_space>(gpu.color)) &&
-              quiet.configure(observed_runtime, presented, static_cast<api::color_space>(gpu.color)),
-            "configure the diagnostics-switch renderers");
-          alpha_auto_policy measured_session, quiet_session;
-          alpha_auto_source measured_source = source, quiet_source = source;
-          measured_source.session = &measured_session;
-          quiet_source.session = &quiet_session;
-          ui_detection_inputs switch_inputs;
-          switch_inputs.current_color = true;
-          switch_inputs.layer = near_black_layer;
-          switch_inputs.layer_flags = layer_flags;
-          ui_render_input measured_ui, quiet_ui;
-          measured_ui.automatic = &measured_source; measured_ui.detection = &switch_inputs;
-          quiet_ui.automatic = &quiet_source; quiet_ui.detection = &switch_inputs;
-          bool entered = false;
-          for (unsigned i = 0; i != 26; ++i) {
-            gpu.original = i ? banded_color : logo_color;
-            gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), width * bpp, 0);
-            for (auto *clock : {&measured_source, &quiet_source}) {
-              clock->now_ms += 100; clock->tick_ms = clock->now_ms; ++clock->sequence;
-            }
-            diagnostics::set_enabled(true);
-            const auto on = gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, &measured, &measured_ui);
-            const auto on_mask = gpu.read(measured.diagnostics().ui_source).bytes;
-            diagnostics::set_enabled(false);
-            const auto off = gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, &quiet, &quiet_ui);
-            const auto off_mask = gpu.read(quiet.diagnostics().ui_source).bytes;
-            diagnostics::set_enabled(true);
-            const auto a = measured.consumed_alpha_auto(), b = quiet.consumed_alpha_auto();
-            require(on.field.bytes == off.field.bytes && on.output.bytes == off.output.bytes && on_mask == off_mask &&
-                a.state == b.state && a.enabled == b.enabled && a.source_kind == b.source_kind && a.covered == b.covered &&
-                measured.consumed_detection().still_bits == quiet.consumed_detection().still_bits &&
-                measured.consumed_detection().flags == quiet.consumed_detection().flags,
-              "The Diagnostics switch changed a decision, mask or packed pixel of frame " + std::to_string(i));
-            entered = entered || a.still.phase == still_screen::phase::active;
-            require(b.still.phase == still_screen::phase::none, "H2 measured with diagnostics off and UIFlattenStillScreens=0");
-          }
-          require(entered && measured.alpha_probe_activity().scene_evidence && !quiet.alpha_probe_activity().scene_evidence,
-            "The Diagnostics switch did not gate H2's own evidence passes");
-          std::puts("PASS D3D11 Diagnostics switch (G3): off, the still-screen shadow runs no evidence pass and never "
-            "enters, while 26 frames decide, mask and pack bit for bit as with the switch on");
-        }
-        // Enabled: flat from the same frame on, as source 11 in its samples.
-        const auto [flat_entry, flat_outcome] = loading_screen(true, 25, "SDR loading screen, enabled");
-        require(flat_entry == 23 && flat_outcome.flat && flat_outcome.sample.source_kind == ui_detection::source_still &&
-            flat_outcome.sample.covered == pixels && flat_outcome.sample.evidence.frame_reason != ui_detection::frame_reason_decided &&
-            flat_outcome.sample.evidence.still_cells == cells,
-          "The enabled SDR loading screen was not flat as source 11 from the frame reading its 2 s sample: " +
-            std::to_string(flat_entry));
-        // Depth that is not the frame's own (about 12% of the live loading
-        // screen's samples): its evidence is invalid for H1, but H2 counts D
-        // against the depth the warp uses, so the run and the flat frames stay.
-        gpu.depth_current = false;
-        for (unsigned i = 0; i != 4; ++i) {
-          const auto stale = frame(banded_color);
-          require(stale.flat && stale.sample.still.phase == still_screen::phase::active &&
-              gpu.renderer.consumed_detection().still_bits == ui_detection::still::flatten,
-            "Depth that is not the frame's own ended the still screen's run");
-        }
-        const auto stale_read = frame(banded_color);
-        require(stale_read.flat && !stale_read.sample.evidence.scene.valid && stale_read.sample.evidence.scene.ran &&
-            stale_read.sample.source_kind == ui_detection::source_still, "A reused-depth sample was valid or not flat as source 11");
-        gpu.depth_current = true;
-        // The screen moves: the frame that first shows it is still flat (its
-        // sample is not read yet); the next frame reads that moving sample and
-        // releases at once, and a new run starts from the frame after.
-        const auto moved = frame(panned_color);
-        const auto released = frame(panned_color);
-        require(moved.flat && !released.flat && released.sample.source_kind == ui_detection::source_still &&
-            std::uint64_t(released.sample.evidence.still_cells) * 100 < std::uint64_t(cells) * ui_detection::still::still_percent &&
-            released.sample.still.phase == still_screen::phase::none && !gpu.renderer.consumed_detection().still_bits,
-          "A moving loading screen was not released by the first frame that read its sample");
-        const auto again = frame(panned_color);
-        require(!again.flat && again.sample.still.phase == still_screen::phase::pending,
-          "The still screen after the move did not start a new run");
-      } else {
-        // scRGB: never in scope, flattening enabled or not.
-        const auto [entry, last] = loading_screen(true, 25, "scRGB loading screen, enabled");
-        require(!entry && !last.flat, "An scRGB loading screen entered rule H2");
+        diagnostics::set_enabled(true);
+        const auto on = gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, &measured, &measured_ui);
+        const auto on_mask = gpu.read(measured.diagnostics().ui_source).bytes;
+        diagnostics::set_enabled(false);
+        const auto off = gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, &quiet, &quiet_ui);
+        const auto off_mask = gpu.read(quiet.diagnostics().ui_source).bytes;
+        diagnostics::set_enabled(true);
+        const auto a = measured.consumed_alpha_auto(), b = quiet.consumed_alpha_auto();
+        require(on.field.bytes == off.field.bytes && on.output.bytes == off.output.bytes && on_mask == off_mask &&
+            a.state == b.state && a.enabled == b.enabled && a.source_kind == b.source_kind && a.covered == b.covered &&
+            measured.consumed_detection().flags == quiet.consumed_detection().flags,
+          "The Diagnostics switch changed a decision, mask or packed pixel of frame " + std::to_string(i));
       }
-      loading.set_still_flatten(false);
-      source.session = &policy;
+      std::puts("PASS D3D11 Diagnostics switch (G3): 26 frames of a loading screen without a UI source decide, mask and pack "
+        "bit for bit alike with the switch on and off");
       inputs = {};
-      report << "still-screen D3D11 scope=" << h2_measures << " shadow_entry_frame=" << (h2_measures ? 23 : 0)
-             << " enabled_flat_source11=" << h2_measures << " reused_depth_keeps_run=" << h2_measures
-             << " release_next_read_sample=" << h2_measures << " scrgb_never=" << !h2_measures << '\n';
-      std::printf("PASS D3D11 still screen (H2, fix 2): %s\n", h2_measures ?
-        "an SDR loading screen without a UI source (unaccepted 0x48, D < 0, every cell still) enters at the frame reading its 2 s sample; the shadow only reports it, enabled it is flat as source 11 (uniform field), reused depth keeps the run, and the first moving sample read releases it" :
-        "scRGB output is out of scope: the same loading screen, flattening enabled, never runs, measures or pushes the still word");
     }
   }
   void verify_normalized_ui_input(fixture &gpu, std::ostream &report) {
@@ -3315,33 +3184,27 @@ namespace {
     std::puts("PASS retained UI upload identity: no repeat copy; failures and renderer replacement reupload");
   }
 }
-// S3 layer stamps on D3D11 (shadow; game3d_ui_layer.h, game3d_frame_clock.h):
-// the offscreen layer's live copy carries the present clock of the Present
-// interval its commands executed in. On the immediate context, which is the
-// presenting queue, that is the copy's own interval; a copy recorded on a
-// deferred context and executed after the next Present carries that later
-// label, which today's Present count cannot see.
-// As exporter.cpp's on_begin_present: the clock advances on the presenting
-// queue, then the layer's tracker observes the Present.
-void stamp_begin_present(api::command_queue *queue, api::swapchain *swapchain, const api::rect *, const api::rect *,
+// The offscreen layer's live copy on D3D11 (game3d_ui_layer.h, queue watch):
+// on the immediate context, which is the presenting queue, the copy executes
+// in its own Present interval; a copy recorded on a deferred context executes
+// on the presenting queue too when its command list does.
+// As exporter.cpp's on_begin_present: the layer's tracker observes the Present.
+void layer_begin_present(api::command_queue *queue, api::swapchain *swapchain, const api::rect *, const api::rect *,
     std::uint32_t, const api::rect *) {
-  sunshine_game3d::frame_clock::advance(queue, swapchain);
   sunshine_game3d::ui_layer::observe_output(swapchain, queue);
 }
-void verify_layer_stamps_d3d11(fixture &gpu, std::ofstream &report) {
+void verify_layer_queue_d3d11(fixture &gpu, std::ofstream &report) {
   namespace layer = sunshine_game3d::ui_layer;
-  namespace clock = sunshine_game3d::frame_clock;
   auto *runtime = observed_runtime;
   auto *device = runtime->get_device();
   auto *queue = runtime->get_command_queue();
-  require(device->get_api() == api::device_api::d3d11, "the stamp section expects D3D11");
+  require(device->get_api() == api::device_api::d3d11, "the layer queue section expects D3D11");
   layer::register_events();
-  clock::register_events();
-  reshade::register_event<reshade::addon_event::present>(stamp_begin_present);
+  reshade::register_event<reshade::addon_event::present>(layer_begin_present);
   struct unregister {
     ~unregister() {
-      reshade::unregister_event<reshade::addon_event::present>(stamp_begin_present);
-      layer::unregister_events(); clock::unregister_events();
+      reshade::unregister_event<reshade::addon_event::present>(layer_begin_present);
+      layer::unregister_events();
     }
   } cleanup;
   // An output-size target cleared to transparent black every frame.
@@ -3353,27 +3216,13 @@ void verify_layer_stamps_d3d11(fixture &gpu, std::ofstream &report) {
   desc.MiscFlags = 0; desc.Usage = D3D11_USAGE_DEFAULT; desc.CPUAccessFlags = 0;
   checked(gpu.device->CreateTexture2D(&desc, nullptr, &target), "create the offscreen UI layer");
   checked(gpu.device->CreateRenderTargetView(target.Get(), nullptr, &target_rtv), "layer RTV");
-  D3D11_BUFFER_DESC read_desc{16, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0};
-  ComPtr<ID3D11Buffer> readback;
-  checked(gpu.device->CreateBuffer(&read_desc, nullptr, &readback), "stamp readback");
   ComPtr<ID3D11DeviceContext> deferred;
   checked(gpu.device->CreateDeferredContext(0, &deferred), "deferred context");
   const float transparent[4]{};
   layer::live_capture live;
-  // Present k: the clock advances on the presenting queue, then the layer's
-  // tracker observes the Present (as on_begin_present), then DXGI presents.
+  // Present k: the layer's tracker observes the Present (as on_begin_present),
+  // then DXGI presents.
   const auto present = [&] { checked(gpu.swapchain->Present(0, 0), "present"); };
-  const auto stamp_of = [&](const layer::live_capture &value) {
-    require(value.stamp.handle, "the live copy has no stamp");
-    gpu.context->CopyResource(readback.Get(), reinterpret_cast<ID3D11Buffer *>(value.stamp.handle));
-    gpu.drain_render();
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    checked(gpu.context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped), "map the stamp");
-    std::array<std::uint32_t, 4> words{};
-    std::memcpy(words.data(), mapped.pData, sizeof(words));
-    gpu.context->Unmap(readback.Get(), 0);
-    return words;
-  };
   // Confirm the layer and keep UI detection asking for it.
   for (unsigned frame = 0; frame != 6; ++frame) {
     layer::latest(device, GetTickCount64(), live);
@@ -3381,37 +3230,28 @@ void verify_layer_stamps_d3d11(fixture &gpu, std::ofstream &report) {
     present();
     Sleep(5);
   }
-  // Immediate context: the copy executes in its own interval, at the label
-  // of the Present before it, which the count names (presents_since_copy 1).
+  // Immediate context: the copy executes in its own interval on the
+  // presenting queue, and the count names the Present before it.
   layer::latest(device, GetTickCount64(), live);
   gpu.context->ClearRenderTargetView(target_rtv.Get(), transparent);
-  const auto copied_at = clock::label(device);
   present();
-  require(layer::latest(device, GetTickCount64(), live) && live.stamped && live.presents_since_copy == 1, "the live copy was not taken and stamped on the immediate context");
-  auto words = stamp_of(live);
-  const auto label = clock::label(device);
-  require(copied_at && words[0] == copied_at && words[0] == label - live.presents_since_copy && words[1] == 0 &&
-      !live.foreign_present && !live.queue_mixed && live.executed_queue == queue->get_native(),
-    "an immediate-context layer copy's stamp did not name the Present interval it executed in");
+  require(layer::latest(device, GetTickCount64(), live) && live.presents_since_copy == 1 && !live.foreign_present &&
+      !live.queue_mixed && live.executed_queue == queue->get_native(),
+    "an immediate-context layer copy was not taken on the presenting queue one Present before");
   // Deferred context: the copy is recorded before Present k+1 and executes
-  // after it, so its stamp carries label k+1 while the count still names k.
+  // after it, on the presenting queue.
   const auto first_capture = live.capture_id;
   deferred->ClearRenderTargetView(target_rtv.Get(), transparent);
   ComPtr<ID3D11CommandList> commands;
   checked(deferred->FinishCommandList(FALSE, &commands), "finish the deferred layer list");
-  const auto recorded_at = clock::label(device);
   present();
   gpu.context->ExecuteCommandList(commands.Get(), FALSE);
-  const auto executed_at = clock::label(device);
-  require(layer::latest(device, GetTickCount64(), live) && live.stamped && live.capture_id > first_capture, "the deferred copy was not taken");
-  words = stamp_of(live);
-  require(executed_at == recorded_at + 1 && words[0] == executed_at && words[0] != executed_at - live.presents_since_copy &&
-      !live.foreign_present && live.executed_queue == queue->get_native(),
-    "a deferred layer copy executed after the next Present did not carry that later label on the presenting queue");
-  report << "s3-layer-stamps-d3d11 immediate=" << copied_at << " deferred_recorded=" << recorded_at << " executed=" << executed_at
-         << " stamp=" << words[0] << " presents_since_copy=" << live.presents_since_copy << '\n';
-  std::printf("PASS D3D11 S3 layer stamps (shadow): an immediate-context copy carries the label of the Present interval it ran in (%u, as its count names), a deferred-context copy executed after the next Present carries that later label (%u, the count names %u), both on the presenting queue\n",
-    copied_at, words[0], executed_at - live.presents_since_copy);
+  require(layer::latest(device, GetTickCount64(), live) && live.capture_id > first_capture && !live.foreign_present &&
+      live.executed_queue == queue->get_native(),
+    "a deferred layer copy was not taken, or not on the presenting queue");
+  report << "layer-queue-d3d11 immediate_same_queue=1 deferred_same_queue=1 presents_since_copy=" << live.presents_since_copy << '\n';
+  std::puts("PASS D3D11 layer queue watch: an immediate-context copy runs on the presenting queue one Present before its "
+    "render reads it, and a deferred-context copy executed by the immediate context runs on the presenting queue too");
 }
 
 namespace {
@@ -3536,9 +3376,8 @@ int main(int argc, char **argv) {
         control = fs::absolute(argv[index]);
       }
     }
-    // Diagnostics on (game3d_diagnostics.h): the hidden-scene and still-screen
-    // sections assert the shadow's own measurements; the still-screen section
-    // also proves the switch off changes no decision.
+    // Diagnostics on (game3d_diagnostics.h), as the panel sets it; the
+    // hidden-scene section also proves the switch off changes no decision.
     sunshine_game3d::diagnostics::set_enabled(true);
     fixture gpu(fs::absolute(argv[1]), directory, color, unsigned(std::stoul(argv[4])), unsigned(std::stoul(argv[5])), control);
     if (temporal_probe) { temporal_ui_probe(gpu, directory, temporal_front_limit); return 0; }
@@ -3581,7 +3420,7 @@ int main(int argc, char **argv) {
     verify_layer_detection_dump(gpu, report, directory / "layer-detection-dump");
     verify_layer_validity(gpu, report);
     verify_hidden_scene(gpu, report);
-    verify_layer_stamps_d3d11(gpu, report);
+    verify_layer_queue_d3d11(gpu, report);
     verify_normalized_ui_input(gpu, report);
     verify_mask_upload_recovery(gpu);
     require(report.good(), "cannot write evidence");

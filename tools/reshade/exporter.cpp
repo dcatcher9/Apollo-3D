@@ -45,7 +45,6 @@
 #include <windows.h>
 #include "game3d_slow_step.h"
 #include "game3d_ui_layer.h"
-#include "game3d_frame_clock.h"
 #include "game3d_diagnostics.h"
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
@@ -71,9 +70,6 @@ namespace {
     // The longest run of hidden samples without a decided source since the
     // last log line: the renderer reports only the current run.
     std::uint64_t shadow_hidden_max_ms = 0;
-    // Likewise the longest run of still hidden samples without a decided
-    // source that ended before it entered rule H2 (game3d_still_screen.h).
-    std::uint64_t still_short_max_ms = 0;
     // The game session whose UI counters this runtime's lines carry, known
     // once a render acquired it; counters_logged once a line carried them, so
     // the runtime's reset or destruction ends the log with the session totals.
@@ -154,7 +150,7 @@ namespace {
       bool game3d_enabled = true, sunshine_game3d::alpha_auto_policy *ui_session = nullptr) {
     const auto now = GetTickCount64();
     bool write_log = false;
-    std::uint64_t shadow_hidden_ms = 0, still_short_ms = 0;
+    std::uint64_t shadow_hidden_ms = 0;
     sunshine_game3d::alpha_auto_policy *counters_session = nullptr;
     {
       std::lock_guard<std::mutex> lock(automatic_ui_mutex);
@@ -164,7 +160,6 @@ namespace {
         sunshine_game3d::next_unprotected_since(value, game3d_enabled, entry.source_alpha.unprotected_since_ms, now);
       entry.source_alpha = value;
       entry.shadow_hidden_max_ms = std::max(entry.shadow_hidden_max_ms, value.coverage.evidence.shadow_hidden_ms);
-      entry.still_short_max_ms = std::max(entry.still_short_max_ms, value.coverage.evidence.still_short_ms);
       const auto &last = entry.logged_source_alpha;
       // Of the hidden-scene verdict only entering or leaving hidden counts: the
       // first-run shadow measures every sample, and matched scenes near the
@@ -186,8 +181,6 @@ namespace {
         entry.counters_logged |= counters_session != nullptr;
         shadow_hidden_ms = entry.shadow_hidden_max_ms;
         entry.shadow_hidden_max_ms = 0;
-        still_short_ms = entry.still_short_max_ms;
-        entry.still_short_max_ms = 0;
       }
     }
     if (!write_log) return;
@@ -207,17 +200,9 @@ namespace {
     const char *const pre_ui_name = evidence.pre_ui_image == pre_ui_image::hudless ? "hudless" :
       evidence.pre_ui_image == pre_ui_image::layer ? "layer" : "none";
     const auto &guard = value.coverage.scene_guard;
-    // H2 (game3d_still_screen.h): this render's scope, the session's switch
-    // (UIFlattenStillScreens) and the run's phase: pending, then shadow (it
-    // would flatten) or flat (it flattens); the sample's still and compared
-    // cells (texel 12).
-    const auto &still = value.coverage.still;
-    const bool still_active = still.phase == sunshine_game3d::still_screen::phase::active;
-    const char *const still_phase = still.phase == sunshine_game3d::still_screen::phase::pending ? "pending" :
-      still_active ? (still.enabled ? "flat" : "shadow") : "none";
     char message[3072];
     std::snprintf(message, sizeof(message),
-      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u accepted=0x%x sampled_layer={covered=%u invalid=%u opaque=%u} sampled_one_way={strong=%u/%u/%u contradicted=%u/%u/%u} sampled_reason=%.*s sampled_refused=%.*s sampled_reused=%d sampled_late_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_inferred_opaque=%u/%u sampled_claims=0x%x sampled_h1={applied=%d winner=%u} sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_pre_ui_scene={image=%s n=%u d=%.3f valid=%d} scene_guard={hidden=%d pre_ui=%d refuted=%u proven=%d} shadow=%d shadow_hidden_ms=%llu sampled_pre_ui_pixels={match=%u image_lit=%u presented_lit=%u presented_lit_differs=%u} still={scope=%d enabled=%d phase=%s run_ms=%llu sampled=%u/%u short_max_ms=%llu} status_revision=%llu",
+      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u accepted=0x%x sampled_layer={covered=%u invalid=%u opaque=%u} sampled_one_way={strong=%u/%u/%u contradicted=%u/%u/%u} sampled_reason=%.*s sampled_refused=%.*s sampled_reused=%d sampled_late_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_inferred_opaque=%u/%u sampled_claims=0x%x sampled_h1={applied=%d winner=%u} sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_pre_ui_scene={image=%s n=%u d=%.3f valid=%d} scene_guard={hidden=%d pre_ui=%d refuted=%u proven=%d} shadow=%d shadow_hidden_ms=%llu sampled_pre_ui_pixels={match=%u image_lit=%u presented_lit=%u presented_lit_differs=%u} status_revision=%llu",
       static_cast<void *>(runtime), value.mode == sunshine_game3d::source_alpha_mode::automatic ? "auto" :
         value.mode == sunshine_game3d::source_alpha_mode::on ? "on" : "off",
       int(value.rendered), int(value.applied), sunshine_game3d::name(value.input), int(value.retained_alpha_ready),
@@ -237,9 +222,7 @@ namespace {
       sunshine_game3d::ui_detection::name(scene.verdict), pre_ui_name, pre_ui_scene.n, double(pre_ui_scene.d),
       int(pre_ui_scene.valid), int(guard.hidden), int(guard.pre_ui), guard.refuted, int(guard.proven), int(value.coverage.scene_shadow),
       static_cast<unsigned long long>(shadow_hidden_ms), evidence.pre_ui_match, evidence.pre_ui_image_lit,
-      evidence.presented_lit, evidence.presented_lit_differs, int(still.scope), int(still.enabled), still_phase,
-      static_cast<unsigned long long>(still.run_ms), evidence.still_cells, evidence.still_compared,
-      static_cast<unsigned long long>(still_short_ms), static_cast<unsigned long long>(value.qualification.token));
+      evidence.presented_lit, evidence.presented_lit_differs, static_cast<unsigned long long>(value.qualification.token));
     log(reshade::log::level::info, message);
     if (counters_session) log_ui_counters(runtime, *counters_session);
   }
@@ -2424,7 +2407,6 @@ namespace {
     // still alive; capture keeps any leases required by outstanding GPU work.
     addon_session().end([&] {
       sunshine_game3d::ui_layer::unregister_events();
-      sunshine_game3d::frame_clock::unregister_events();
       sunshine_game3d::depth_input::shutdown_observers();
       sunshine_depth::shutdown();
       reshade::unregister_addon(addon, reshade);
@@ -2524,13 +2506,8 @@ namespace {
     try {
       if (publisher) {
         publisher->begin_present(swapchain->get_native(), swapchain->get_color_space());
-        if (static_cast<HWND>(swapchain->get_hwnd()) == observed_foreground_window()) {
-          // S3 (game3d_frame_clock.h): every foreground Present advances the
-          // present label on its queue before anything copies at it, while
-          // the Diagnostics switch is on (the shadow is diagnostic only).
-          if (sunshine_game3d::diagnostics::enabled()) sunshine_game3d::frame_clock::advance(queue, swapchain);
+        if (static_cast<HWND>(swapchain->get_hwnd()) == observed_foreground_window())
           sunshine_game3d::ui_layer::observe_output(swapchain, queue);
-        }
         publisher->render_present(swapchain);
       }
     } catch (...) {
@@ -2634,7 +2611,6 @@ extern "C" {
       reshade::register_event<reshade::addon_event::reshade_open_overlay>(sunshine_addon_lifetime::guarded<on_overlay>);
       reshade::register_event<reshade::addon_event::reshade_overlay>(sunshine_addon_lifetime::guarded<on_draw_overlay>);
       sunshine_game3d::ui_layer::register_events();
-      sunshine_game3d::frame_clock::register_events();
       return true;
     } catch (...) {
       teardown_addon(addon, reshade);

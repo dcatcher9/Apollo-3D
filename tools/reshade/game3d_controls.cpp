@@ -36,7 +36,7 @@ namespace sunshine_game3d {
     bool alpha_mode_loaded = false;
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-    float control_positions[6][2] {};
+    float control_positions[5][2] {};
 #endif
 
     void record_control_position(unsigned index) {
@@ -105,10 +105,6 @@ namespace sunshine_game3d {
             scene_shadow_key + '=' + (shadow == scene_shadow_setting::absent ? "absent" : "1") + ')';
           sunshine_log::message(reshade::log::level::info, message.c_str());
         }
-        // Rule H2 flattens still screens without a UI source only when the
-        // game's UIFlattenStillScreens is 1; by default it only logs them.
-        policy->set_still_flatten(load_still_flatten(global));
-        sunshine_log::message(reshade::log::level::info, still_flatten_log_text(policy->still_flatten()).c_str());
         // The add-on's Diagnostics switch (game3d_diagnostics.h), process-wide.
         sunshine_log::message(reshade::log::level::info, diagnostics_log_text(load_diagnostics(global)).c_str());
         if (restored.discarded) {
@@ -396,23 +392,6 @@ namespace sunshine_game3d {
           ImGui::SetItemTooltip("Forget learned UI sources: clears the UI sources Auto accepted for this game, in this session and in TrustedUISources. Auto learns them again from the game's evidence.");
           ImGui::EndDisabled();
         }
-        if (data->alive && data->alpha_session) {
-          // Rule H2 (docs/reshade-sbs.md, still screens without a UI source):
-          // a per-game switch in the global ReShade.ini, Auto only.
-          ImGui::TableNextRow();
-          ImGui::TableNextColumn();
-          ImGui::TableNextColumn();
-          bool still_flatten = data->alpha_session->still_flatten();
-          ImGui::BeginDisabled(data->values.ui_protection != source_alpha_mode::automatic);
-          record_control_position(5);
-          if (ImGui::Checkbox(still_flatten_label, &still_flatten)) {
-            global_config_backend global;
-            if (edit_still_flatten(*data, still_flatten, global))
-              sunshine_log::message(reshade::log::level::info, still_flatten_log_text(still_flatten).c_str());
-          }
-          ImGui::SetItemTooltip("%s", still_flatten_tooltip);
-          ImGui::EndDisabled();
-        }
       }
       ImGui::EndTable();
     }
@@ -572,7 +551,7 @@ namespace sunshine_game3d {
   // Scalar-only adapters retain the existing test ABI while exercising native
   // config ownership. No test path reflects, modifies or saves shader presets.
   extern "C" __declspec(dllexport) BOOL SunshineGame3DTestControlPosition(unsigned index, float *x, float *y) {
-    if (index >= 6 || !x || !y) return FALSE;
+    if (index >= 5 || !x || !y) return FALSE;
     *x = control_positions[index][0];
     *y = control_positions[index][1];
     return TRUE;
@@ -616,7 +595,7 @@ namespace sunshine_game3d {
   }
 
   // The Diagnostics switch as the panel edits it (saved, logged), for fixtures
-  // that observe diagnostic-only output such as the S3 shadow.
+  // that observe diagnostic-only output such as the per-pass GPU timing.
   extern "C" __declspec(dllexport) BOOL SunshineGame3DTestSetDiagnostics(BOOL enabled) {
     std::lock_guard<std::recursive_mutex> lock(state_mutex);
     if (!registered) return FALSE;
