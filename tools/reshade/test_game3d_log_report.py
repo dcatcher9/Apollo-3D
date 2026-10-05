@@ -1177,6 +1177,30 @@ class ReadinessReport(unittest.TestCase):
                                               tiles=tiles, lit=lit)]).ui[0]
             self.assertFalse(sample.change_set_valid())
 
+    def test_declared_alpha_one_way_contradictions_since_revision_10(self):
+        # Since selection revision 10 the exact one-way judge also reads UIAlpha and the UI colour tag
+        # (sampled_declared_one_way); three contradictions within 2 s that no revocation followed fail.
+        def wheel(t, against):
+            text = ui2(t, 1, 800, (800, 0, 0, 0), 0x31, 0x11, hudless=(10, 980), tiles=200, lit=600)
+            declared = f' sampled_declared_one_way={{strong=800/0 contradicted={against}/0}} status_revision=1'
+            return text.replace(' status_revision=1', declared)
+        sample = report.parse(BASE + [wheel('10:00:06', 400)]).ui[0]
+        self.assertEqual((sample.declared_one_way, sample.one_way_counts(0), sample.one_way(0)),
+                         (((800, 0), (400, 0)), (800, 400), True))
+        self.assertFalse(report.parse(BASE + [wheel('10:00:06', 40)]).ui[0].one_way(0))
+        run_of_three = [wheel(f'10:00:{6 + i:02}', 400) for i in range(3)]
+        unresolved = run(BASE + run_of_three + [counters('10:00:12', {**CLEAN_COUNTERS, 'contradicted': 3})])
+        self.assertEqual(unresolved['UI protection'].status, 'FAIL')
+        self.assertIn('UI alpha decided while an exact HUD-less pair showed 50% of its strong pixels',
+                      unresolved['UI protection'].times[0])
+        revoked = run(BASE + run_of_three + [accepted_now('10:00:09', 'none'),
+                                             counters('10:00:12', {**CLEAN_COUNTERS, 'contradicted': 3})])
+        self.assertEqual(revoked['UI protection'].status, 'PASS')
+        # The gate's re-offered pairings are Present-counted pairings too.
+        gate = ('Sunshine UI capture gate: runtime=1 hook={state=admitted} hudless_presents={batch=0 real=2 late=1 '
+                'generated=0 reoffered=7 stale=0 other=0 none=0}; gate metadata does not authorize pixels')
+        self.assertEqual(report.parse(BASE + [line('10:00:06', '[Sunshine 3D] ' + gate)]).gate_counted, 10)
+
     def test_logs_of_the_removed_shadow_features_still_report(self):
         # The first-run shadow, texel 11's dark pre-UI statistics, rule H2's still screens and the S3 identity shadow
         # were removed (selection revision 9). Their builds' lines still parse; none adds a check of its own, and H2's

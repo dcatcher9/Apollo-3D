@@ -98,7 +98,11 @@ COUNTERS = re.compile(r'Sunshine UI counters: (.*)$')
 COUNTER_FIELD = re.compile(r'(\w+)=(?:\{([^}]*)\}|(\S+))')
 # The UI capture gate's HUD-less pairings per log interval (game3d_ui_input_provider.cpp): batch is a same-batch
 # Backbuffer pair, the only exact one; real and late are Present-counted proposals.
-GATE = re.compile(r'Sunshine UI capture gate: .*?hudless_presents=\{batch=(\d+) real=(\d+) late=(\d+) generated=(\d+)')
+GATE = re.compile(r'Sunshine UI capture gate: .*?hudless_presents=\{batch=(\d+) real=(\d+) late=(\d+) generated=(\d+)'
+                  r'(?: reoffered=(\d+))?')
+# Since selection revision 10 the exact one-way judge (A2) also reads the declared alphas, UIAlpha and the UI colour
+# tag, logged as their own group before status_revision.
+DECLARED_ONE_WAY = re.compile(r'sampled_declared_one_way=\{strong=(\d+)/(\d+) contradicted=(\d+)/(\d+)\}')
 LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)')
 READINESS = re.compile(r'Sunshine depth readiness: (lost|recovered) reason=(\w+)')
 UNAVAILABLE_MS = re.compile(r'\bunavailable_ms=(\d+)')
@@ -321,8 +325,12 @@ class UISample(NamedTuple):
     reused: bool = False
     tiles: int = 0  # HUD-less matching tiles and lit pixels (V2).
     lit: int = 0
-    # The offered layer was the one-frame-late copy, which no A2 judge reads (E2); since S2a, absent before.
+    # The offered layer was the one-frame-late copy, which no A2 judge reads (E2); since S2a, absent before. Since
+    # selection revision 10 the field means a layer was offered (the layer is never judged).
     late_layer: bool = False
+    # Since selection revision 10: the declared alphas' (UIAlpha, UI colour tag) strong and one-way contradicted
+    # pixels, ((strong...), (contradicted...)); None before.
+    declared_one_way: tuple[tuple[int, int], tuple[int, int]] | None = None
 
     @property
     def s2a(self) -> bool:
@@ -348,10 +356,19 @@ class UISample(NamedTuple):
     def one_way(self, c: int) -> bool:
         """A2: at least a tenth of judged alpha c's strong pixels lie where the exact pair's HUD-less image is lit and
         unchanged (ui_selection::one_way_contradicted); only with a valid exact pair."""
-        if not self.s2a or c not in JUDGED or not self.exact_judge():
+        if not self.s2a or not self.exact_judge():
             return False
-        strong, contradicted = self.strong[JUDGED.index(c)], self.contradicted[JUDGED.index(c)]
+        strong, contradicted = self.one_way_counts(c)
         return bool(strong) and contradicted * 10 >= strong
+
+    def one_way_counts(self, c: int) -> tuple[int, int]:
+        """Strong and one-way contradicted pixels of alpha c: the judged inferred kinds since S2a, the declared ones
+        since selection revision 10; (0, 0) where the line has none."""
+        if c in JUDGED and self.strong is not None:
+            return self.strong[JUDGED.index(c)], self.contradicted[JUDGED.index(c)]
+        if c in DECLARED and self.declared_one_way is not None:
+            return self.declared_one_way[0][c], self.declared_one_way[1][c]
+        return 0, 0
 
     def offered(self, c: int) -> bool:
         return bool(self.candidates & ALPHA_BITS[c])
@@ -690,11 +707,15 @@ def parse(lines) -> Session:
                               tuple(int(v) for v in e['inferred'].split('/')),
                               None if e['proven'] is None else e['proven'] == '1',
                               None if e['match'] is None else (int(e['match']), int(e['image_lit'])))
-            s.ui.append(ui_sample(t, text, found.groupdict(), scene))
+            sample = ui_sample(t, text, found.groupdict(), scene)
+            if declared := DECLARED_ONE_WAY.search(text):
+                strong0, strong1, against0, against1 = (int(v) for v in declared.groups())
+                sample = sample._replace(declared_one_way=((strong0, strong1), (against0, against1)))
+            s.ui.append(sample)
         if found := GATE.search(text):
-            batch, real, late, _ = (int(v) for v in found.groups())
+            batch, real, late, _, reoffered = (int(v or 0) for v in found.groups())
             s.gate_batch += batch
-            s.gate_counted += real + late
+            s.gate_counted += real + late + reoffered
         if found := TRUST.search(text):
             s.trust_events.append((t, found.group(1), found.group(2), accepted_keys(found.group(2))))
         if found := LEGACY_TRUST.search(text):
@@ -1053,9 +1074,9 @@ def ui_checks(s: Session, add) -> None:
         (handled if when is not None else unresolved).append(
             text + (f', acceptance revoked {clock(when)}' + (f' ({a2})' if a2 else '') if when is not None else ''))
 
-    # Since S2a each accepted inferred alpha's sampled contradictions, as the ledger judges them (A2): (time, text,
-    # judge, one way).
-    a2: dict[int, list[tuple[float, str, str, bool]]] = {c: [] for c in INFERRED}
+    # Since S2a each accepted inferred alpha's sampled contradictions, as the ledger judges them (A2), and since
+    # selection revision 10 the declared alphas' one-way contradictions too: (time, text, judge, one way).
+    a2: dict[int, list[tuple[float, str, str, bool]]] = {c: [] for c in DECLARED + INFERRED}
     for u in s.ui:
         if not u.pixels:
             continue
@@ -1067,16 +1088,17 @@ def ui_checks(s: Session, add) -> None:
             # by a valid exact pair or (b) by coverage differing by at least 10% of the frame from every accepted,
             # valid UIAlpha or UI color tag offered in the same sample.
             masks = [u.alpha[c] for c in DECLARED if u.offered(c) and u.is_accepted(c) and u.valid(c)]
-            for c in INFERRED:
+            judged = INFERRED + (DECLARED if u.declared_one_way is not None else ())
+            for c in judged:
                 if not (u.offered(c) and u.is_accepted(c) and u.valid(c)) or (c == 4 and u.late_layer):
                     continue
                 if u.one_way(c):
-                    strong, against = u.strong[JUDGED.index(c)], u.contradicted[JUDGED.index(c)]
+                    strong, against = u.one_way_counts(c)
                     state = 'decided' if u.source == ALPHA_SOURCES[c] and not u.reused else 'accepted'
                     a2[c].append((u.t, f'{clock(u.t)} {ALPHA_NAMES[c]} {state} while an exact HUD-less pair showed '
                                   f'{percent(against, strong)} of its strong pixels as lit, unchanged scene',
                                   'A2, one-way by an exact pair', True))
-                elif masks and min(abs(u.alpha[c] - d) for d in masks) * 10 >= u.pixels:
+                elif c in INFERRED and masks and min(abs(u.alpha[c] - d) for d in masks) * 10 >= u.pixels:
                     a2[c].append((u.t, f'{clock(u.t)} {ALPHA_NAMES[c]} {100 * u.alpha[c] / u.pixels:.0f}% vs declared '
                                   f'UI {100 * masks[0] / u.pixels:.1f}%', 'A2, declared coverage', False))
             continue
@@ -1157,7 +1179,7 @@ def ui_checks(s: Session, add) -> None:
               ', '.join(f'{k} {v}' for k, v in states.most_common())
               + ('; inferred alpha decided beside an accepted declared UI channel' if overrides else '')
               + ('; an accepted UI source flattened the visible scene' if flattened else '')
-              + ('; an exact HUD-less pair contradicted an accepted inferred alpha one way 3 times within 2 s without '
+              + ('; an exact HUD-less pair contradicted an accepted alpha one way 3 times within 2 s without '
                  'a revocation (A2)' if contradicted else '')
               + (dispute_text if disputes else '') + short_text
               + ('; a contradicted source lost its acceptance'
@@ -1229,7 +1251,8 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
     overrides = get('presented_over_dedicated')
     if s2a:
         flattened, revoked, sampled = get('contradicted'), get('trust.revoked_exact'), contradicted_sampled
-        contradiction = (f'; an exact HUD-less pair contradicted a deciding accepted inferred alpha one way (A2) in '
+        # Inferred alpha per frame; since selection revision 10 any accepted alpha, declared included, per sample.
+        contradiction = (f'; an exact HUD-less pair contradicted a deciding accepted alpha one way (A2) in '
                          f'{flattened} frames')
         resolution = (f' before {revoked} one-way revocations' if revoked else
                       ', no sampled run reaching the revocation condition (3 within 2 s)')
@@ -1248,7 +1271,7 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
               + (f'; inferred alpha decided beside an accepted declared UI channel in {overrides} frames'
                  if overrides else '')
               + (contradiction + ('' if unresolved else resolution) if flattened else
-                 '; an exact HUD-less pair contradicted an accepted inferred alpha one way 3 times within 2 s without '
+                 '; an exact HUD-less pair contradicted an accepted alpha one way 3 times within 2 s without '
                  'a revocation (A2)' if sampled else '')
               + (dispute_text if disputes else '') + short_text
               + ('; a contradicted source lost its acceptance' if handled and not disputes and not unresolved else ''),

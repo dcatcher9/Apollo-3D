@@ -488,7 +488,7 @@ invariants from the last counter line, not from the 100 ms samples. It reports t
 - `UI counters`: the add-on's own accounting (Auto frames are detection frames, generated Presents
   that held a real frame's decision or had none, and frames without detection).
 - `UI protection`: inferred alpha beside an accepted declared UI channel, and the frames in which a
-  valid exact pair contradicted a deciding accepted inferred alpha one way (`contradicted`), which
+  valid exact pair contradicted a deciding accepted alpha one way (`contradicted`; inferred alpha per frame, since selection revision 10 any accepted alpha, declared included, per sample), which
   fail only with a sampled run of three such contradictions within 2 s that no revocation followed:
   A2 never revokes shorter ones, and the counter cannot tell them apart. Counter lines logged
   before S2a keep the older rule: accepted full coverage of a visible scene (`trusted_full`) that no
