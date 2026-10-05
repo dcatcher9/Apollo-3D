@@ -6,7 +6,8 @@
 namespace sunshine_game3d::diagnostics {
   // The add-on's Diagnostics switch (docs/reshade-sbs.md, Diagnostics switch):
   // ReShade.ini [SUNSHINE_GAME3D] Diagnostics=1 turns on diagnostic-only
-  // per-frame work (per-pass GPU timestamps and per-Present diagnostic
+  // per-frame work (per-pass GPU timestamps, the Streamline presentation
+  // brackets with their PCL marker hooks, and other per-Present diagnostic
   // bookkeeping that only feeds dumps and logs). Absent writes 0, so
   // the key is discoverable; 0 (or anything else) keeps it off. Nothing that
   // decides reads it: UI decisions, masks and exported pixels are the same

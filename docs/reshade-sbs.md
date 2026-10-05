@@ -244,7 +244,10 @@ process-wide switch (`game3d_diagnostics.h`), and the Troubleshooting panel's **
 below **UI mask source** edits it at runtime in both directions. Loading and every edit log
 `Sunshine Game 3D: diagnostics on (Diagnostics=1)` or `... off (Diagnostics=0)`. Off (the
 default), the add-on records none of its diagnostic-only per-frame work: per-pass GPU timestamps
-and their resolves (the timing line keeps its CPU fields and hitch lines stay). The A2 per-pixel
+and their resolves (the timing line keeps its CPU fields and hitch lines stay), and the Streamline
+V1 Reflex / V2 PCL presentation brackets, which only the probe's presentation trace reads (the PCL
+marker hooks are installed only while it is on; see
+[Upscaler call-route diagnostic](#upscaler-call-route-diagnostic)). The A2 per-pixel
 statistics (A2 revocation and the one-way judgment read them) and the exact UI counters always run. Decisions, masks, candidate binding and exported pixels
 are the same with the switch on or off. The capture owner's queue watch and the layer's carrier
 events stay registered either way, since direct binding reads them and the layer's live-copy ring

@@ -655,11 +655,11 @@ preservation copy from a separate resource. Its ten cases check that SL FG nomin
 current depth and completed depth beneath a pending successor survive reclamation, while
 failed/missing input still revokes old depth and prevents pre-gap resurrection. Pixel cases use
 actual GPU readback.
-`--content [width height]` nominates a full patterned packed D32S8 scene through NGX
-while the Generic preservation callback reports availability, then clears that same source after
-the API capture. It checks the snapshot's scene depth byte-for-byte and verifies that depth-plane
+`--content [width height]` nominates a full patterned packed D32S8 scene through NGX, which
+copies it at the API call, then clears that same source after the API capture. It checks the
+snapshot's scene depth byte-for-byte and verifies that depth-plane
 copies preserve both the original and consumer stencil. This is one post-capture-clear scenario;
-it does not cover a separate missing-callback or no-clear case.
+it does not cover a separate no-clear case.
 Any fixture completion waits serve its deterministic pixel oracle and cleanup; they are not
 production capture behavior. These owner-level tests do not establish SDK-hook coverage or
 color/depth correspondence in a real game.
