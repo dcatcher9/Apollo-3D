@@ -339,9 +339,12 @@ namespace {
       {
         std::ofstream config(directory / "ReShade.ini");
         config << "[ADDON]\nAddonPath=.\\addons\n";
+        // The independent reference renderer is calibrated only while native
+        // Game 3D, enabled by default, is off (docs/reshade-sbs.md).
         if (!depth_addon.empty())
           config << "DisabledAddons=Generic Depth\n[DEPTH]\nDepthCopyBeforeClears=1\nUseAspectRatioHeuristics=1\n"
-                    "[SUNSHINE_DEPTH]\nAutoSelectSceneDepth=" << (automatic_depth ? 1 : 0) << "\n";
+                    "[SUNSHINE_DEPTH]\nAutoSelectSceneDepth=" << (automatic_depth ? 1 : 0) << "\n"
+                    "[SUNSHINE_GAME3D]\nEnabled=0\n";
         config << "[GENERAL]\nEffectSearchPaths=.\\effects\nPresetPath=.\\preset.ini\n"
                   "PerformanceMode=" << performance_mode << "\nSkipLoadingDisabledEffects=0\nIntermediateCachePath=.\\cache\n"
                   "[OVERLAY]\nTutorialProgress=4\nShowFPS=0\nShowClock=0\nShowPresetName=0\n";
