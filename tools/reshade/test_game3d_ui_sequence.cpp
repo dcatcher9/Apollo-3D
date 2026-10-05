@@ -1760,7 +1760,7 @@ namespace {
       restore(session, backbuffer, 1);
       require(heard.empty() && session.counters()[ui_counter::trust_restored] == 1, "A restore called the listener");
       sequence s(session, [reconfirm](const gpu_inputs &in) {
-        return backbuffer_alpha(reconfirm ? 200 : 1000).words(in);
+        return backbuffer_alpha(reconfirm ? 200 : 0).words(in);
       });
       present p;
       p.offered = candidate::backbuffer;

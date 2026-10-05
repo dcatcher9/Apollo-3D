@@ -282,11 +282,25 @@ namespace {
     late.restore("current:24:srgb");
     feed(late, sample().alpha(kind::backbuffer, 0), 1000);
     feed(late, sample().alpha(kind::current, 500, 600), 2000);
-    feed(late, sample().alpha(kind::current, 1000), 30000);
-    feed(late, sample().alpha(kind::current, 1000), 89999);
+    feed(late, sample().alpha(kind::current, 0), 30000);
+    feed(late, sample().alpha(kind::current, 0), 89999);
     require(accepts(late, kind::current), "The lapse clock started before the source was offered valid");
-    feed(late, sample().alpha(kind::current, 1000), 90000);
+    feed(late, sample().alpha(kind::current, 0), 90000);
     require(!accepts(late, kind::current), "The lapse clock did not start at the first valid offer");
+    // A sample opaque almost everywhere (a full menu: Stellar Blade's presented
+    // alpha while frame generation is suspended) can neither earn nor refute
+    // the source, so the clock pauses there; empty samples run it again.
+    alpha_auto_policy menus;
+    menus.restore("current:24:srgb");
+    feed(menus, sample().alpha(kind::current, 0), 1000);
+    for (std::uint64_t tick = 2000; tick <= 200000; tick += 1000) feed(menus, sample().alpha(kind::current, 1000), tick);
+    require(accepts(menus, kind::current) && menus.counters()[ui_counter::trust_lapsed] == 0,
+      "Full menus ran the reconfirm clock of a restored source");
+    feed(menus, sample().alpha(kind::current, 0), 201000);
+    feed(menus, sample().alpha(kind::current, 0), 259999);
+    require(accepts(menus, kind::current), "The clock counted the paused full menus");
+    feed(menus, sample().alpha(kind::current, 0), 260000);
+    require(!accepts(menus, kind::current), "An unconfirmed source did not lapse after 60 s of testable time");
     // A restored declared source confirmed by one selective sample keeps it.
     alpha_auto_policy confirmed;
     confirmed.restore("ui_alpha:61:srgb");
@@ -301,15 +315,15 @@ namespace {
     // offers have run the clock for a minute in total.
     alpha_auto_policy rejected;
     rejected.restore("ui_color:87:srgb");
-    feed(rejected, sample().alpha(kind::ui_color, 1000), 1000);
+    feed(rejected, sample().alpha(kind::ui_color, 0), 1000);
     for (std::uint64_t tick = 2000; tick <= 100000; tick += 1000)
       feed(rejected, sample().alpha(kind::ui_color, 0, 600).alpha(kind::current, 400), tick);
     require(accepts(rejected, kind::ui_color) && !rejected.counters()[ui_counter::trust_lapsed],
       "A restored tag lapsed while it was offered but invalid");
-    feed(rejected, sample().alpha(kind::ui_color, 1000), 100500);
-    feed(rejected, sample().alpha(kind::ui_color, 1000), 159499);
+    feed(rejected, sample().alpha(kind::ui_color, 0), 100500);
+    feed(rejected, sample().alpha(kind::ui_color, 0), 159499);
     require(accepts(rejected, kind::ui_color), "The paused clock did not resume at the next valid offer");
-    feed(rejected, sample().alpha(kind::ui_color, 1000), 159500);
+    feed(rejected, sample().alpha(kind::ui_color, 0), 159500);
     require(!accepts(rejected, kind::ui_color) && rejected.counters()[ui_counter::trust_lapsed] == 1,
       "The paused clock never lapsed");
     // Invalid offers never extend the clock: a tag invalid every other
@@ -317,9 +331,9 @@ namespace {
     alpha_auto_policy alternating;
     alternating.restore("ui_color:87:srgb");
     for (std::uint64_t tick = 1000; tick <= 120000; tick += 1000)
-      feed(alternating, (tick / 1000) % 2 ? sample().alpha(kind::ui_color, 1000) : sample().alpha(kind::ui_color, 0, 600), tick);
+      feed(alternating, (tick / 1000) % 2 ? sample().alpha(kind::ui_color, 0) : sample().alpha(kind::ui_color, 0, 600), tick);
     require(accepts(alternating, kind::ui_color), "An alternating tag lapsed before 60 s of valid offers");
-    feed(alternating, sample().alpha(kind::ui_color, 1000), 121000);
+    feed(alternating, sample().alpha(kind::ui_color, 0), 121000);
     require(!accepts(alternating, kind::ui_color) && alternating.counters()[ui_counter::trust_lapsed] == 1,
       "Invalid offers kept restarting the clock of a tag that never confirmed");
     alpha_auto_policy recovered;
@@ -343,9 +357,9 @@ namespace {
     // Inferred entries keep the clock: invalid samples do not re-arm it.
     alpha_auto_policy inferred;
     inferred.restore("current:24:srgb");
-    feed(inferred, sample().alpha(kind::current, 1000), 1000);
+    feed(inferred, sample().alpha(kind::current, 0), 1000);
     for (std::uint64_t tick = 2000; tick <= 60000; tick += 1000) feed(inferred, sample().alpha(kind::current, 0, 600), tick);
-    feed(inferred, sample().alpha(kind::current, 1000), 61000);
+    feed(inferred, sample().alpha(kind::current, 0), 61000);
     require(!accepts(inferred, kind::current), "Invalid samples re-armed an inferred entry's clock");
   }
 
@@ -1421,8 +1435,8 @@ namespace {
     // earn that confirms it counts.
     alpha_auto_policy lapsing;
     lapsing.restore("backbuffer:24:srgb");
-    feed(lapsing, sample().alpha(kind::backbuffer, pixels), 1000);
-    feed(lapsing, sample().alpha(kind::backbuffer, pixels), 61000);
+    feed(lapsing, sample().alpha(kind::backbuffer, 0), 1000);
+    feed(lapsing, sample().alpha(kind::backbuffer, 0), 61000);
     require(!accepts(lapsing, kind::backbuffer) && lapsing.counters()[n::trust_restored] == 1 &&
         lapsing.counters()[n::trust_lapsed] == 1, "A restore or a provisional lapse was not counted");
     alpha_auto_policy confirmed;

@@ -647,7 +647,10 @@ namespace sunshine_game3d {
         }
         auto &e = at(signatures.of(k));
         const auto covered = alpha_counts_of(evidence, k).covered;
-        reconfirm_offered(e, tick_ms);
+        // A3: a sample opaque almost everywhere (a full menu) can neither
+        // earn nor refute the source, so its reconfirm clock pauses there.
+        if (ui_selection::full(covered, pixels)) reconfirm_paused(e, tick_ms);
+        else reconfirm_offered(e, tick_ms);
         // A2: only inferred alpha is judged, and never the one-frame-late
         // layer copy (E2); the one-way test only with strong pixels to test.
         std::size_t judged = ui_selection::judged_kinds.size();
