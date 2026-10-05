@@ -1024,13 +1024,16 @@ probe visits and an active manual pin remains authoritative. These are controlle
 regression bounds, not promised recovery times for every game. No selection, depth
 or camera values are injected. `--native-priority` runs the late-native case instead.
 
-`reshade_depth_alternating_runtime_test` uses those same four arguments and
-environment settings for an actual 4K rotating-allocation regression. Each allocation
+`reshade_depth_alternating_runtime_test` uses those same four arguments and, like the
+probe-round fixture, renders through native Game 3D with no FX and no environment settings
+for an actual 4K rotating-allocation regression. Each allocation
 first passes a continuous capture/calibration control. ABC and AABB cadences must
 then reach continuous current capture, readiness and full stereo within a bounded
-warmup; each allocation keeps its own deliberately different H/t0. Every checked
-present verifies the physical depth source, actual copied depth, a changing color
-marker in both exported eyes, and current mono when depth is unavailable. Additional
+warmup; each allocation keeps its own gain and zero, those of its own drawn range and
+contrast midpoint, which differ between the members. Every checked
+present verifies the physical depth source and actual copied depth its native render
+consumed, a changing color marker in both eyes of the exported SBS, and current mono when
+depth is unavailable. Additional
 phases cover off-turn transfer writes, exact manual pin/release, lifetime replacement,
 unsupported partial crops, full-layout return, real depth gaps and a moving-center
 trajectory. Run the identical executable against the frozen old and candidate add-ons;
@@ -1040,7 +1043,7 @@ not an uncontended frame-time benchmark. Execution is opt-in and serial, outside
 
 The same fixture accepts one optional isolated case after its four normal arguments:
 `--overlap`, `--interrupted-startup`, `--moving-startup`, `--rotating-startup`,
-`--flat-startup`, or `--layout`. Each case needs a
+`--crowded-rotating-startup`, `--flat-startup`, or `--layout`. Each case needs a
 fresh output directory. They cover complementary rotation becoming concurrent rendering,
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,

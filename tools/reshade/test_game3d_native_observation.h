@@ -168,6 +168,15 @@ namespace {
 
     // The newest completed publication, which belongs to the latest present.
     std::vector<std::uint8_t> exported() {
+      std::vector<std::uint8_t> pixels;
+      read_exported([&](ID3D12Resource *texture) { pixels = fixture_.read(texture, D3D12_RESOURCE_STATE_COMMON); });
+      return pixels;
+    }
+
+    // Claims the newest completed publication, which belongs to the latest
+    // present, and lends its shared texture (COMMON state) to read, for
+    // fixtures that copy only a few texels per Present.
+    void read_exported(const std::function<void(ID3D12Resource *)> &read) {
       namespace wire = reshade_bridge;
       require(export_state_ != nullptr, "Native export was read without a streaming consumer");
       const auto before = InterlockedCompareExchange(reinterpret_cast<volatile LONG *>(&export_state_->metadata_sequence), 0, 0);
@@ -203,10 +212,9 @@ namespace {
         checked(fixture_.game->OpenSharedHandle(reinterpret_cast<HANDLE>(metadata.ready_fence_handle), IID_PPV_ARGS(fence.put())), "Open native export fence");
         require(fence->GetCompletedValue() != UINT64_MAX && fence->GetCompletedValue() >= sequence, "Native export preceded GPU completion");
         checked(fixture_.game->OpenSharedHandle(reinterpret_cast<HANDLE>(metadata.texture_handles[index]), IID_PPV_ARGS(texture.put())), "Open native export texture");
-        auto pixels = fixture_.read(texture.p, D3D12_RESOURCE_STATE_COMMON);
+        read(texture.p);
         release();
         export_sequence_ = sequence;
-        return pixels;
       } catch (...) {
         release();
         throw;
