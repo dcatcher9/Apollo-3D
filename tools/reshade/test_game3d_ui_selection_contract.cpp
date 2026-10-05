@@ -193,7 +193,7 @@ namespace {
     checked(result, "D3D11CreateDevice");
     D3D11_TEXTURE2D_DESC desc{};
     desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-    desc.Width = 16;
+    desc.Width = detection::statistics_columns(detection::tile_parts);
     desc.Height = detection::statistics_rows(0);
     desc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -308,19 +308,30 @@ namespace {
 
   // Runs one case and compares it; returns the decision for the semantic checks.
   selection::decision run(gpu_t &gpu, ID3D11ComputeShader *reduce, const case_t &test, const char *space) {
-    std::array<texel, 16 * detection::statistics_rows(0)> rows{};
+    // Each tile's counts split over its tile parts (columns 16 apart) as the
+    // tiles pass writes them: the reduce must add them back exactly.
+    constexpr std::size_t columns = detection::statistics_columns(detection::tile_parts);
+    std::vector<texel> rows(columns * detection::statistics_rows(0));
     for (std::size_t lane = 0; lane != 256; ++lane) {
       const std::size_t column = lane % 16, row = lane / 16;
-      rows[row * 16 + column] = test.statistics.coverage[lane];
-      rows[(row + 16) * 16 + column] = test.statistics.invalid[lane];
-      rows[(row + 32) * 16 + column] = test.statistics.difference[lane];
-      rows[(row + 48) * 16 + column] = test.statistics.lit[lane];
-      rows[(row + detection::layer_statistics_row) * 16 + column] = test.statistics.layer[lane];
-      rows[(row + detection::judgment_statistics_row) * 16 + column] = test.statistics.strong[lane];
-      rows[(row + detection::judgment_statistics_row + 16) * 16 + column] = test.statistics.contradicted[lane];
-      rows[(row + detection::pre_ui_statistics_row) * 16 + column] = test.statistics.pre_ui[lane];
+      const auto put = [&](std::size_t first_row, const texel &value) {
+        for (std::size_t part = 0; part != detection::tile_parts; ++part)
+          for (std::size_t k = 0; k != 4; ++k) {
+            const std::uint32_t share = value[k] / detection::tile_parts;
+            rows[(first_row + row) * columns + part * 16 + column][k] =
+              part ? share : value[k] - share * (detection::tile_parts - 1);
+          }
+      };
+      put(0, test.statistics.coverage[lane]);
+      put(16, test.statistics.invalid[lane]);
+      put(32, test.statistics.difference[lane]);
+      put(48, test.statistics.lit[lane]);
+      put(detection::layer_statistics_row, test.statistics.layer[lane]);
+      put(detection::judgment_statistics_row, test.statistics.strong[lane]);
+      put(detection::judgment_statistics_row + 16, test.statistics.contradicted[lane]);
+      put(detection::pre_ui_statistics_row, test.statistics.pre_ui[lane]);
     }
-    gpu.context->UpdateSubresource(gpu.statistics.Get(), 0, nullptr, rows.data(), 16 * sizeof(texel), 0);
+    gpu.context->UpdateSubresource(gpu.statistics.Get(), 0, nullptr, rows.data(), UINT(columns * sizeof(texel)), 0);
     // The reduce reads b2 word 4 only as zero or not (texel 11 sums or zero).
     const auto constants = with_identity_words({test.offered, 2.f / 255.f, test.accepted, test.flags, test.pre_ui_threshold,
       test.still, {}}, test.identity);
@@ -1221,6 +1232,12 @@ namespace {
         const auto &l = images[4][i];
         images[6][i] = {l[0] + moved, l[1], l[2] + moved * .5f, 1.f};
       }
+    // A candidate that is not offered is not bound, as the renderer and the
+    // replay bind them: it reads zero (the pass skips its loads).
+    const std::array<std::pair<std::size_t, std::uint32_t>, 5> slots{{{0, candidate::ui_alpha}, {1, candidate::ui_color},
+      {2, candidate::backbuffer}, {4, candidate::layer}, {5, candidate::hudless}}};
+    for (const auto &[image, bit] : slots)
+      if (!(offered & bit)) std::fill(images[image].begin(), images[image].end(), std::array<float, 4>{});
     const auto okay = [](float a) { return std::isfinite(a) && a >= 0.f && a <= 1.f; };
     const auto strong = [](float a) { return a >= .5f && a <= 1.f; };
     const float opaque = 254.f / 255.f, headroom = (flags & detection::stored_hdr_headroom) ? 125.f : 2.f;
@@ -1283,7 +1300,8 @@ namespace {
     std::array<ComPtr<ID3D11ShaderResourceView>, 7> views;
     for (std::size_t k = 0; k != views.size(); ++k) views[k] = float_image(gpu, images[k]);
     D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = 16;
+    constexpr std::size_t columns = detection::statistics_columns(detection::tile_parts);
+    desc.Width = UINT(columns);
     desc.Height = detection::statistics_rows(0);
     desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
     desc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
@@ -1301,23 +1319,31 @@ namespace {
     ID3D11ShaderResourceView *bound[15]{};
     bound[0] = views[3].Get();
     bound[6] = views[6].Get();
-    bound[7] = views[4].Get();
-    bound[11] = views[0].Get();
-    bound[12] = views[1].Get();
-    bound[13] = views[2].Get();
-    bound[14] = views[5].Get();
+    bound[7] = (offered & candidate::layer) ? views[4].Get() : nullptr;
+    bound[11] = (offered & candidate::ui_alpha) ? views[0].Get() : nullptr;
+    bound[12] = (offered & candidate::ui_color) ? views[1].Get() : nullptr;
+    bound[13] = (offered & candidate::backbuffer) ? views[2].Get() : nullptr;
+    bound[14] = (offered & candidate::hudless) ? views[5].Get() : nullptr;
     gpu.context->CSSetShader(tiles, nullptr, 0);
     gpu.context->CSSetShaderResources(0, 15, bound);
     ID3D11Buffer *buffers[3]{nullptr, nullptr, gpu.constants.Get()};
     gpu.context->CSSetConstantBuffers(0, 3, buffers);
     ID3D11UnorderedAccessView *uav = statistics_view.Get();
     gpu.context->CSSetUnorderedAccessViews(6, 1, &uav, nullptr);
-    gpu.context->Dispatch(16, 16, 1);
+    // Each tile in its parts (group z), at columns 16 apart; the CPU adds
+    // them as the reduce does.
+    gpu.context->Dispatch(16, 16, detection::tile_parts);
     ID3D11UnorderedAccessView *none = nullptr;
     gpu.context->CSSetUnorderedAccessViews(6, 1, &none, nullptr);
     ID3D11ShaderResourceView *cleared[15]{};
     gpu.context->CSSetShaderResources(0, 15, cleared);
-    const auto rows = read<texel>(gpu, statistics.Get(), staging.Get(), 16 * detection::statistics_rows(0));
+    const auto parts = read<texel>(gpu, statistics.Get(), staging.Get(), columns * detection::statistics_rows(0));
+    std::vector<texel> rows(16 * detection::statistics_rows(0));
+    for (std::size_t row = 0; row != detection::statistics_rows(0); ++row)
+      for (std::size_t column = 0; column != 16; ++column)
+        for (std::size_t part = 0; part != detection::tile_parts; ++part)
+          for (std::size_t k = 0; k != 4; ++k)
+            rows[row * 16 + column][k] += parts[row * columns + part * 16 + column][k];
     std::uint32_t total_contradicted = 0;
     texel total_pre_ui{};
     for (std::size_t lane = 0; lane != 256; ++lane) {
@@ -1797,6 +1823,11 @@ int main() {
         for (const std::uint32_t offered : {0x5fu, 0x7fu})
           for (const float pre_ui_threshold : {2.f / 255.f, 0.f})
             check_tiles(gpu, tiles.Get(), flags, offered, space, color, pre_ui_threshold);
+      // Partial offers leave the other candidates unbound, as live renders
+      // do: the skipped loads count as the zero an unbound view reads.
+      for (const std::uint32_t offered : {0x08u, 0x0cu, 0x49u, 0x3au, 0x16u})
+        check_tiles(gpu, tiles.Get(), detection::layer_detection_flags(false), offered, space, color,
+          (offered & candidate::layer) ? 2.f / 255.f : 0.f);
       gpu.hold_written = {};
       const std::array<std::uint32_t, detection::hold::store_texels> zero{};
       gpu.context->UpdateSubresource(gpu.hold.Get(), 0, nullptr, zero.data(), UINT(sizeof(zero)), 0);

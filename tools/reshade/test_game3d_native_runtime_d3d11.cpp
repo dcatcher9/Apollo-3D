@@ -149,8 +149,30 @@ namespace {
       std::printf("MEASURE D3D11 native/FX %s byte_exact=%u max_relative_error=%.9g\n", test.name, unsigned(pixels == reference[index]), maximum);
       require(maximum <= (fixture.color == 1 ? 1.01 / 1023 : .002), "D3D11 native/FX parity exceeded export quantization");
       require(fixture.read(fixture.backbuffer.p) == source, "D3D11 native renderer changed mono game color");
+      {
+        // Owed conditioning (C2): with the pack owed, pack() records the
+        // conditioning inside its isolated device-context state, and the
+        // export is the same bytes; a mono frame records none.
+        const auto before = renderer.conditioning_activity();
+        renderer.begin_present();
+        fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
+        sunshine_game3d::render_frame_input frame;
+        frame.color = backbuffer;
+        frame.depth = test.ready ? observed.depth_view : api::resource_view{};
+        frame.scene = p;
+        auto *commands = queue->get_immediate_command_list();
+        require(renderer.render(commands, frame, true) && renderer.pack(commands), "D3D11 native renderer rejected an owed pack");
+        queue->flush_immediate_command_list(); renderer.finish_present();
+        queue->wait_idle();
+        require(fixture.read(texture.p) == pixels, (std::string("D3D11 owed pack differs from the immediate pack of ") + test.name).c_str());
+        const auto after = renderer.conditioning_activity();
+        const bool mono = !p.depth_ready || !p.camera_ready || p.depth_view == 2 || !(p.strength > 0.f) || !(p.strength_blend > 0.f);
+        require(after.recorded - before.recorded == (mono ? 0u : 1u) && after.mono - before.mono == (mono ? 1u : 0u),
+          (std::string("D3D11 owed pack recorded the wrong conditioning for ") + test.name).c_str());
+      }
       ++index;
     }
+    std::puts("PASS D3D11 owed conditioning: every parity frame packs the same bytes with its conditioning owed to pack(); mono frames record none");
     const auto original_depth = fixture.read(fixture.depth.p);
     for (const auto &test : sunshine_game3d_test::budget_cases()) {
       const auto parameters = sunshine_game3d_test::budget_parameters(test);

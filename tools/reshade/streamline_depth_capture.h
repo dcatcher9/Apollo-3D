@@ -205,6 +205,14 @@ namespace sunshine_streamline::depth_capture {
   // changed; false when there is nothing to log.
   bool list_coverage_report(std::uint64_t now_ms, char *out, std::size_t size);
   void observe_queue(std::uint64_t queue);
+  // Once per Present, before any capture/copy of that Present: observe the
+  // effects pass's command list, ReShade's immediate list (registering it as
+  // in observe_runtime_list) and its queue with one interface check each and
+  // one capture-lock round trip. Equivalent to observe_command(command),
+  // observe_queue(queue) and observe_runtime_list(immediate, queue); later
+  // copies of the same Present on the registered immediate list skip their
+  // repeated interface checks and observation.
+  void observe_present(std::uint64_t command, std::uint64_t queue, std::uint64_t immediate);
   void retire_queue(std::uint64_t queue);
   void poll();
   using preservation_available_callback = bool (*)(std::uint64_t native, std::uint64_t resource_id, std::uint64_t device_id);
@@ -219,6 +227,9 @@ namespace sunshine_streamline::depth_capture {
   // packet keeps its own camera/encoding. Explicit FG still requires SL FG.
   void observe_provider(std::uint64_t command);
   bool provider_active(std::uint64_t queue);
+  // Handoff evidence only (provider hysteresis): some API provider began an
+  // evaluation with a source identity within window_ms. Grants nothing.
+  bool evaluation_live(std::uint64_t now_ms, std::uint64_t window_ms);
   bool provider_identity(std::uint64_t queue, sunshine_scene_depth::provider_kind &provider,
     std::uint64_t &source_id);
   // An explicit feature release or authority revocation differs from a missing frame.
@@ -354,6 +365,42 @@ namespace sunshine_streamline::depth_capture {
   bool copy_local_texture(std::uint64_t command, std::uint64_t consumer_queue,
     const diagnostic_ticket &ticket, std::uint64_t destination, std::uint32_t destination_state,
     consumer_diagnostic *diagnostic = nullptr, bool immediate = false, stamp_destination stamp = {});
+  // Direct binding of a local auxiliary snapshot (no second copy). A shader
+  // view of the snapshot's own storage, valid for reads recorded into command
+  // on this Present.
+  struct local_view {
+    // A D3D12 CPU descriptor handle in a non-shader-visible heap owned by the
+    // snapshot storage; on ReShade D3D12 this is the reshade::api::
+    // resource_view handle to pass to push_descriptors (descriptors are
+    // copied at record time). It is not one of ReShade's own views, so
+    // device::get_resource_from_view does not resolve it: use resource.
+    std::uint64_t view{};
+    std::uint64_t resource{}; // ID3D12Resource * (reshade::api::resource handle).
+    std::uint64_t capture_id{};
+    std::uint32_t width{}, height{}, format{}, view_format{};
+  };
+  // Leases ticket's snapshot to command, ReShade's registered immediate list
+  // (observe_runtime_list/observe_present) of consumer_queue, open outside any
+  // render pass. Records the snapshot's COMMON -> PIXEL|NON_PIXEL_SHADER_RESOURCE
+  // transition there (once per recording) and registers command's recording as
+  // a consumer exactly like copy_local_texture, so the slot is neither reused
+  // nor released until that submission's queue fence passes (Reset alone
+  // never retires it). view_format is the typed DXGI format the consumer reads
+  // (same typeless family as the storage); the SRV is created on first use and
+  // cached with the storage. A ticket offered again on a later Present takes a
+  // new lease on that Present's list.
+  // False (nothing recorded; the caller keeps copy_local_texture) for D3D11 or
+  // a list that is not the registered immediate list, a producer on another
+  // queue (foreign or mixed), a shared/strict diagnostic ticket, a ticket that
+  // was already copied, an unadmitted or released ticket, no consumer capacity,
+  // or an incompatible view format. Never allocates, never waits.
+  bool lease_local_view(std::uint64_t command, std::uint64_t consumer_queue, const diagnostic_ticket &ticket,
+    std::uint32_t view_format, local_view &out, consumer_diagnostic *diagnostic = nullptr);
+  // Once per Present after the Present's last read of any leased view (before
+  // the list is submitted): records the transitions of every snapshot leased
+  // on command's current recording back to COMMON. Snapshots stay leased
+  // (unreusable) until their GPU retirement as above.
+  void end_local_views(std::uint64_t command);
   // Revokes the ticket, never its outstanding GPU obligations. Drop all leases
   // after cancellation/IPC acknowledgement so completed storage can be reclaimed.
   void release_diagnostic_texture(const diagnostic_ticket &ticket);
@@ -431,6 +478,9 @@ namespace sunshine_streamline::depth_capture {
   // S3: the stamp and token-clock commands after an auxiliary snapshot copy,
   // the consumer's stamp copy, and the state-basis provenance.
   namespace testing { bool snapshot_stamp_regression(); }
+  // Called once (then cleared) on the recording thread while a record call
+  // allocates new storage without the capture lock.
+  namespace testing { void set_allocation_hook(void (*hook)(void *), void *context); }
 #endif
 
 }

@@ -123,6 +123,16 @@ RUNTIME = re.compile(r'\bruntime=(0x[0-9a-fA-F]+)')
 PLACEMENT = re.compile(r'Sunshine 3D (raw automation|Streamline scale): (\w+);')
 DEPTH_STATUS = re.compile(r'Sunshine Streamline depth: (\w+);')
 HITCH = re.compile(r'Game 3D hitch: (.+?) took ([0-9.]+) ms')
+# The present-thread steps of a depth-source flip (Streamline <-> NGX <-> Generic) that each log their own hitch
+# line (docs/reshade-sbs.md, depth handoff): named in the hitch details.
+DEPTH_FLIP_STEPS = frozenset((
+    'native depth frame', 'depth display retirement', 'depth present observation', 'depth list coverage report',
+    'frame generation query', 'depth readiness trace', 'API depth binding', 'generic capture switch',
+    'generic challenger release', 'generic depth rebinding', 'depth capture acquisition', 'depth display preparation'))
+# The add-on's Diagnostics switch (game3d_diagnostics.h): off by default, which records no per-pass GPU timing and
+# no S3 identity shadow.
+DIAGNOSTICS = re.compile(r'Sunshine Game 3D: diagnostics (on|off) \(Diagnostics=(\d)\)')
+GPU_PROFILE = re.compile(r'\bgpu_profile=(\w+)')
 NGX = re.compile(r'Sunshine NGX depth: .*?evaluations=(\d+) nominations=(\d+) copy_recorded=(\d+) '
                  r'metadata_only=(\d+)')
 TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-9.]+) max=([0-9.]+)\}'
@@ -611,6 +621,8 @@ class Session:
     statuses: Counter = field(default_factory=Counter)
     hitches: list[tuple[float, str, float]] = field(default_factory=list)
     timing: tuple | None = None
+    timing_profile: str = ''  # The last timing line's gpu_profile state ('disabled' with Diagnostics off).
+    diagnostics: list[tuple[float, bool]] = field(default_factory=list)  # Each Diagnostics switch line.
     ngx: tuple[int, ...] | None = None
     warnings: list[tuple[float, str]] = field(default_factory=list)
 
@@ -777,6 +789,10 @@ def parse(lines) -> Session:
         if found := TIMING.search(text):
             s.timing = (int(found.group(1)), float(found.group(2)), float(found.group(3)),
                         int(found.group(4)), float(found.group(5)), float(found.group(6)))
+            profile = GPU_PROFILE.search(text)
+            s.timing_profile = profile.group(1) if profile else ''
+        if found := DIAGNOSTICS.search(text):
+            s.diagnostics.append((t, found.group(1) == 'on'))
     if s.last is not None:
         pause(s.last, 'open')
     return s
@@ -999,16 +1015,24 @@ def evaluate(s: Session) -> list[Check]:
         worst = sorted(unexpected, key=lambda h: -h[2])[:3]
         add(Check('WARN', 'Present hitches', f'{len(unexpected)} outside resets, FG switches and overlay opening, '
                                              f'worst {worst[0][2]:.1f} ms',
-                  [f'{clock(t)} {what} {ms:.1f} ms' for t, what, ms in worst]))
+                  [f'{clock(t)} {what} {ms:.1f} ms' + (' (depth-source flip step)' if what in DEPTH_FLIP_STEPS else '')
+                   for t, what, ms in worst]))
     else:
         add(Check('PASS', 'Present hitches', f'{len(expected)} at resets, FG switches or overlay opening' if expected
                   else 'none'))
 
+    if s.diagnostics:
+        on = s.diagnostics[-1][1]
+        add(Check('INFO', 'Diagnostics', f'Diagnostics={int(on)}: ' + (
+            'per-pass GPU timing and the S3 identity shadow are recorded' if on else
+            'no per-pass GPU timing and no S3 identity shadow (their lines are absent by design)')))
     if s.timing:
         presents, cpu_mean, cpu_max, gpu_frames, gpu_mean, gpu_max = s.timing
-        add(Check('INFO' if gpu_frames else 'WARN', 'Game 3D cost',
+        disabled = s.timing_profile == 'disabled'
+        add(Check('INFO' if gpu_frames or disabled else 'WARN', 'Game 3D cost',
                   f'CPU {cpu_mean:.2f} ms mean ({cpu_max:.1f} max); '
-                  + (f'GPU {gpu_mean:.2f} ms mean ({gpu_max:.1f} max)' if gpu_frames else 'no GPU timing samples')))
+                  + (f'GPU {gpu_mean:.2f} ms mean ({gpu_max:.1f} max)' if gpu_frames else
+                     'GPU timing off (Diagnostics=0)' if disabled else 'no GPU timing samples')))
     if s.fg_switches:
         add(Check('INFO', 'Frame generation',
                   ', '.join(f'{clock(t)} {"on" if mode else "off"}' for t, mode in s.fg_switches)))

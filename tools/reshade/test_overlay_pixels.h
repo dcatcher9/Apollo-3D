@@ -88,11 +88,29 @@ namespace sunshine_sbs_overlay_pixels {
     return true;
   }
 
+  // The host's scRGBTo2100PQ of scRGB rgb, as 10-bit code values over 1023.
+  inline std::array<float, 3> host_pq(const std::array<double, 3> &rgb) {
+    static const double matrix[3][3] {{0.627402, 0.329292, 0.043306}, {0.069095, 0.919544, 0.011360},
+      {0.016394, 0.088028, 0.895578}};
+    std::array<float, 3> code {};
+    for (unsigned c = 0; c < 3; ++c) {
+      const double nits = (matrix[c][0] * rgb[0] + matrix[c][1] * rgb[1] + matrix[c][2] * rgb[2]) * 80.0;
+      const double lp = std::pow(std::clamp(nits / 10000.0, 0.0, 1.0), 2610.0 / 4096.0 / 4);
+      code[c] = float(std::pow((3424.0 / 4096.0 + 2413.0 / 4096.0 * 32 * lp) / (1 + 2392.0 / 4096.0 * 32 * lp),
+        2523.0 / 4096.0 * 128));
+    }
+    return code;
+  }
+
   // Native add-on output of a flat game frame with no depth: both eyes carry the
   // source color, encoded for the export (color 1 = 8-bit sRGB game, 2 = scRGB,
-  // 3 = PQ BT.2020 game exported as scRGB), with the optional UI patches.
+  // 3 = PQ BT.2020 game exported as scRGB, or as its own 10-bit PQ codes when
+  // format is 24, the PQ wire transfer), with the optional UI patches.
   inline bool check_native(const void *data, unsigned pitch, unsigned format, unsigned width, unsigned height,
     unsigned color, std::array<float, 3> expected, bool overlay, bool patches) {
+    const bool pq = color == 3 && format == 24;
+    std::array<float, 3> codes {};
+    std::array<double, 3> scene {};
     if (color == 1) {
       for (unsigned c = 0; c < 3; ++c) expected[c] = std::round(expected[c] * 255.f) / 255.f;
     } else if (color == 3) {
@@ -103,9 +121,11 @@ namespace sunshine_sbs_overlay_pixels {
         linear[c] = 125.0 * std::pow(std::max(p - 3424.0 / 4096.0, 0.0) /
           (2413.0 / 128.0 - 2392.0 / 128.0 * p), 16384.0 / 2610.0);
       }
+      for (unsigned c = 0; c < 3; ++c) codes[c] = float(std::round(expected[c] * 1023.0) / 1023.0);
       expected[0] = float(1.6604910021 * linear[0] - .5876411388 * linear[1] - .0728498633 * linear[2]);
       expected[1] = float(-.1245504745 * linear[0] + 1.1328998971 * linear[1] - .0083494226 * linear[2]);
       expected[2] = float(-.0181507634 * linear[0] - .1005788980 * linear[1] + 1.1187296614 * linear[2]);
+      for (unsigned c = 0; c < 3; ++c) scene[c] = expected[c];
     }
     const auto pixel = [&](unsigned x, unsigned y, unsigned c) {
       const auto row = static_cast<const std::uint8_t *>(data) + y * pitch;
@@ -113,13 +133,17 @@ namespace sunshine_sbs_overlay_pixels {
         half(reinterpret_cast<const std::uint16_t *>(row)[x * 4 + c]);
     };
     const float tolerance = format == 24 ? .004f : .012f;
-    const float white = format == 24 ? 1.f : 203.f / 80.f;
+    const float white = format == 24 && !pq ? 1.f : 203.f / 80.f;
     const unsigned probes[][2] {{width - 200, height - 64}, {width - 96, height - 144}, {width - 96, height - 80}};
     for (unsigned eye = 0; eye < 2; ++eye) {
       for (unsigned probe = 0; probe < 3; ++probe) {
         const float alpha = !overlay || !patches || probe == 0 ? 0.f : probe == 1 ? 1.f : 128.f / 255.f;
+        // A PQ export blends the UI in linear scRGB and encodes it as the host does.
+        std::array<double, 3> mixed {};
+        for (unsigned c = 0; c < 3; ++c) mixed[c] = scene[c] * (1 - alpha) + white * alpha;
+        const auto pq_wanted = host_pq(mixed);
         for (unsigned c = 0; c < 3; ++c) {
-          const float wanted = format == 24 && alpha > 0 ?
+          const float wanted = pq ? (alpha > 0 ? pq_wanted[c] : codes[c]) : format == 24 && alpha > 0 ?
             encode_srgb(decode_srgb(expected[c]) * (1 - alpha) + alpha) : expected[c] * (1 - alpha) + white * alpha;
           const float actual = pixel(eye * width + probes[probe][0], probes[probe][1], c);
           if (!std::isfinite(actual) || std::abs(actual - wanted) > tolerance) {
@@ -135,7 +159,7 @@ namespace sunshine_sbs_overlay_pixels {
         for (unsigned c = 0; c < 3; ++c) {
           const float actual = pixel(eye * width + x, y, c);
           if (!std::isfinite(actual)) return false;
-          different |= std::abs(actual - expected[c]) > .05f;
+          different |= std::abs(actual - (pq ? codes[c] : expected[c])) > .05f;
         }
         changed += different;
       }

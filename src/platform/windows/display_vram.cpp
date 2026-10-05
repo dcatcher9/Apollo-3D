@@ -164,6 +164,17 @@ namespace platf::dxgi {
   blob_t convert_yuv420_planar_y_ps_linear_hlsl;
   blob_t convert_yuv420_planar_y_ps_perceptual_quantizer_hlsl;
   blob_t convert_yuv420_planar_y_vs_hlsl;
+  // Game 3D "pq" exports (Rec.2020 ST 2084 code values): HDR streams pass the codes through.
+  blob_t convert_yuv420_packed_uv_type0_ps_pq_input_linear_hlsl;
+  blob_t convert_yuv420_packed_uv_type0_ps_pq_input_perceptual_quantizer_hlsl;
+  blob_t convert_yuv420_packed_uv_type0s_ps_pq_input_linear_hlsl;
+  blob_t convert_yuv420_packed_uv_type0s_ps_pq_input_perceptual_quantizer_hlsl;
+  blob_t convert_yuv420_planar_y_ps_pq_input_linear_hlsl;
+  blob_t convert_yuv420_planar_y_ps_pq_input_perceptual_quantizer_hlsl;
+  blob_t rgb_present_pq_input_to_linear_ps_hlsl;
+  blob_t rgb_present_pq_input_to_srgb_ps_hlsl;
+  blob_t sbs_packed_resample_pq_input_ps_hlsl;
+  blob_t pq_input_to_scrgb_ps_hlsl;
   blob_t cursor_ps_hlsl;
   blob_t cursor_ps_normalize_white_hlsl;
   blob_t sbs_packed_resample_ps_hlsl;
@@ -632,7 +643,8 @@ namespace platf::dxgi {
           }
         }
 
-        auto draw = [&](auto &input, const D3D11_VIEWPORT &y_or_yuv_viewport, const D3D11_VIEWPORT &uv_viewport, bool input_is_linear, bool y_already_written = false, bool external_input = false) {
+        // `planes` selects Y (1) and/or UV (2); the cursor patch re-runs one plane at a time.
+        auto draw = [&](auto &input, const D3D11_VIEWPORT &y_or_yuv_viewport, const D3D11_VIEWPORT &uv_viewport, bool input_is_linear, bool y_already_written = false, bool external_input = false, bool input_is_pq = false, int planes = 3) {
           device_ctx->PSSetShaderResources(0, 1, &input);
           ID3D11Buffer *converter_buffers[] = {
             color_matrix.get(),
@@ -647,36 +659,42 @@ namespace platf::dxgi {
 
           // The optional HDR Host-SBS MRT has already populated luma while producing the packed
           // RGB raster. Every other path retains the established standalone Y/YUV draw.
-          if (!y_already_written) {
+          if (!y_already_written && (planes & 1)) {
             device_ctx->OMSetRenderTargets(1, &out_Y_or_YUV_rtv, nullptr);
             device_ctx->VSSetShader(convert_Y_or_YUV_vs.get(), nullptr, 0);
-            device_ctx->PSSetShader(input_is_linear ? convert_Y_or_YUV_fp16_ps.get() : convert_Y_or_YUV_ps.get(), nullptr, 0);
+            auto *y_shader = input_is_linear ? convert_Y_or_YUV_fp16_ps.get() : convert_Y_or_YUV_ps.get();
+            device_ctx->PSSetShader(input_is_pq ? convert_Y_or_YUV_pq_ps.get() : y_shader, nullptr, 0);
             device_ctx->RSSetViewports(1, &y_or_yuv_viewport);
             device_ctx->Draw(3, 0);
           }
 
           // Draw UV if needed
-          if (out_UV_rtv) {
+          if (out_UV_rtv && (planes & 2)) {
             assert(format == DXGI_FORMAT_NV12 || format == DXGI_FORMAT_P010);
             device_ctx->OMSetRenderTargets(1, &out_UV_rtv, nullptr);
             device_ctx->VSSetShader(convert_UV_vs.get(), nullptr, 0);
-            device_ctx->PSSetShader(input_is_linear ? convert_UV_fp16_ps.get() : convert_UV_ps.get(), nullptr, 0);
+            auto *uv_shader = input_is_linear ? convert_UV_fp16_ps.get() : convert_UV_ps.get();
+            device_ctx->PSSetShader(input_is_pq ? convert_UV_pq_ps.get() : uv_shader, nullptr, 0);
             device_ctx->RSSetViewports(1, &uv_viewport);
             device_ctx->Draw(3, 0);
           }
         };
 
-        auto draw_rgb = [&](ID3D11ShaderResourceView *input, bool input_is_linear, bool input_is_hdr = false) {
+        auto draw_rgb = [&](ID3D11ShaderResourceView *input, bool input_is_linear, bool input_is_hdr = false, bool input_is_pq = false) {
           device_ctx->OMSetRenderTargets(1, &rgb_present_target, nullptr);
           device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
           ID3D11PixelShader *presentation_shader = rgb_present_ps.get();
-          if (input_is_linear != rgb_present_target_is_linear) {
+          if (input_is_pq) {
+            // A PQ export is HDR: decode it for a linear output, or tone map it for an SDR one.
+            presentation_shader = rgb_present_target_is_linear ? rgb_present_pq_to_linear_ps.get() : rgb_present_pq_to_srgb_ps.get();
+            input_is_hdr = true;
+          } else if (input_is_linear != rgb_present_target_is_linear) {
             presentation_shader = input_is_linear ?
                                     (input_is_hdr ? rgb_present_hdr_to_srgb_ps.get() : rgb_present_linear_to_srgb_ps.get()) :
                                     rgb_present_srgb_to_linear_ps.get();
           }
           device_ctx->PSSetShader(presentation_shader, nullptr, 0);
-          if ((!input_is_linear && rgb_present_target_is_linear) || (input_is_hdr && !rgb_present_target_is_linear)) {
+          if ((!input_is_linear && !input_is_pq && rgb_present_target_is_linear) || (input_is_hdr && !rgb_present_target_is_linear)) {
             ID3D11Buffer *sdr_white = rgb_present_sdr_white.get();
             device_ctx->PSSetConstantBuffers(1, 1, &sdr_white);
           }
@@ -738,56 +756,112 @@ namespace platf::dxgi {
           return true;
         };
 
+        // Re-records one pass with the scissor enabled and restores the caller's rasterizer state.
+        auto with_scissor = [&](const D3D11_RECT &rect, auto &&record) {
+          Microsoft::WRL::ComPtr<ID3D11RasterizerState> previous;
+          device_ctx->RSGetState(&previous);
+          device_ctx->RSSetState(cursor_scissor_raster.Get());
+          device_ctx->RSSetScissorRects(1, &rect);
+          const bool recorded = record();
+          device_ctx->RSSetState(previous.Get());
+          return recorded;
+        };
+
         if (reshade_receiver && ::video::is_packed_mode(sbs_mode)) {
           ID3D11Texture2D *packed_texture = nullptr;
           ID3D11ShaderResourceView *packed_view = nullptr;
           bool packed_linear = false;
+          bool packed_pq = false;
+          // A visible Windows cursor lives in a frame-sized patch that is valid only around the
+          // texels it changed. Every pass reads the export itself, then re-runs over the
+          // cursor's output pixels from the patch. Those pixels read only patch texels equal to
+          // the composited frame, so the output is the same as converting a full composited copy.
+          std::optional<sbs_cursor::result_t> cursor_patch;
           if (external) {
             packed_texture = external->texture;
             packed_view = external->view;
             packed_linear = external->linear;
+            packed_pq = external->transfer == platf::reshade_bridge::transfer_e::pq;
             converted_content_timestamp = external->timestamp;
-            if (external_cursor) {
-              const auto composited = external_cursor->compose(
-                packed_texture, packed_view, img.cursor, packed_linear, external_cursor_white_multiplier,
-                external->ui_parallax_uv
-              );
-              if (!composited) {
-                BOOST_LOG(error) << "Failed to composite the Windows cursor over external Game 3D."sv;
-                return -1;
-              }
-              packed_texture = composited->texture;
-              packed_view = composited->view;
-              if (!external_cursor_logged && packed_texture != external->texture) {
-                BOOST_LOG(info) << "Game 3D: compositing the Windows cursor into both eyes ("
-                                << (packed_linear ? "linear HDR" : "SDR") << ").";
-                external_cursor_logged = true;
-              }
-            }
             // The final conversion reads exact output-sized texels. Same-aspect eyes authored at
             // another size are resampled first, each output eye from its own source half. FP16
             // keeps linear and encoded values alike; the transfer stays tracked by packed_linear.
             D3D11_TEXTURE2D_DESC packed_desc {};
             packed_texture->GetDesc(&packed_desc);
-            if (packed_desc.Width != static_cast<UINT>(std::lround(sbs_viewport.Width)) ||
-                packed_desc.Height != static_cast<UINT>(std::lround(sbs_viewport.Height))) {
+            const bool resample = packed_desc.Width != static_cast<UINT>(std::lround(sbs_viewport.Width)) ||
+                                  packed_desc.Height != static_cast<UINT>(std::lround(sbs_viewport.Height));
+            if (external_cursor) {
+              // The patch must hold the footprint of the most minified pass that reads the
+              // export: the resample, the Local AR presentation, or the half-size chroma plane.
+              const auto scale = [&](const D3D11_VIEWPORT &viewport) {
+                return std::min(viewport.Width / float(packed_desc.Width), viewport.Height / float(packed_desc.Height));
+              };
+              const float minimum_scale = resample           ? scale(sbs_viewport) :
+                                          rgb_present_target ? scale(rgb_present_viewport) :
+                                                               std::min(scale(out_Y_or_YUV_viewport), scale(out_UV_viewport));
+              auto transfer = packed_linear ? sbs_cursor::source_transfer_e::scrgb : sbs_cursor::source_transfer_e::srgb;
+              if (packed_pq) {
+                transfer = sbs_cursor::source_transfer_e::pq;
+              }
+              const auto composited = external_cursor->compose(
+                packed_texture,
+                packed_view,
+                img.cursor,
+                transfer,
+                external_cursor_white_multiplier,
+                external->ui_parallax_uv,
+                sbs_cursor::patch_margin(minimum_scale)
+              );
+              if (!composited) {
+                BOOST_LOG(error) << "Failed to composite the Windows cursor over external Game 3D."sv;
+                return -1;
+              }
+              if (composited->regions) {
+                cursor_patch = composited;
+                if (!external_cursor_logged) {
+                  const char *blend = packed_linear ? "linear HDR" : "SDR";
+                  if (packed_pq) {
+                    blend = "PQ HDR10, blended in linear light";
+                  }
+                  BOOST_LOG(info) << "Game 3D: compositing the Windows cursor into both eyes (" << blend << ").";
+                  external_cursor_logged = true;
+                }
+              }
+            }
+            if (resample) {
               if (!ensure_sbs_intermediate_storage(true)) {
                 return -1;
               }
-              const host_sbs_v2_draw_command_t resample_draw {
-                .render_targets = {sbs_intermediate_rtv.get(), nullptr},
-                .vertex_shader = sbs_reprojection_vs.get(),
-                .pixel_shader = sbs_packed_resample_ps.get(),
-                .viewport = sbs_viewport,
-                .sampler = sampler_linear.get(),
-                .shader_resources = {packed_view},
-                .geometry_constants = sbs_reprojection_cbuffer.get(),
+              const auto resample_from = [&](ID3D11ShaderResourceView *source, ID3D11PixelShader *shader) {
+                const host_sbs_v2_draw_command_t resample_draw {
+                  .render_targets = {sbs_intermediate_rtv.get(), nullptr},
+                  .vertex_shader = sbs_reprojection_vs.get(),
+                  .pixel_shader = shader,
+                  .viewport = sbs_viewport,
+                  .sampler = sampler_linear.get(),
+                  .shader_resources = {source},
+                  .geometry_constants = sbs_reprojection_cbuffer.get(),
+                };
+                return record_host_sbs_v2_draw(device_ctx.get(), resample_draw);
               };
-              if (!record_host_sbs_v2_draw(device_ctx.get(), resample_draw)) {
+              // A PQ export is decoded per tap, so the intermediate is FP16 scRGB filtered in
+              // linear light. The cursor patch of a PQ export is already scRGB.
+              if (!resample_from(packed_view, packed_pq ? sbs_packed_resample_pq_ps.get() : sbs_packed_resample_ps.get())) {
                 return -1;
+              }
+              for (std::uint32_t i = 0; cursor_patch && i < cursor_patch->regions; ++i) {
+                const auto region = sbs_cursor::output_region(cursor_patch->changed[i], packed_desc.Width, packed_desc.Height, sbs_viewport);
+                if (region && !with_scissor(*region, [&]() {
+                      return resample_from(cursor_patch->view, sbs_packed_resample_ps.get());
+                    })) {
+                  return -1;
+                }
               }
               packed_texture = sbs_intermediate_texture.get();
               packed_view = sbs_intermediate_srv.get();
+              packed_linear = packed_linear || packed_pq;
+              packed_pq = false;
+              cursor_patch.reset();
             }
           } else {
             // An unavailable, incompatible, or unfocused publisher never selects Host AI.
@@ -811,12 +885,47 @@ namespace platf::dxgi {
             packed_texture = sbs_intermediate_texture.get();
             packed_view = sbs_intermediate_srv.get();
           }
+          D3D11_TEXTURE2D_DESC final_desc {};
+          packed_texture->GetDesc(&final_desc);
           if (rgb_present_target) {
-            if (!copy_rgb(packed_texture, packed_linear)) {
-              draw_rgb(packed_view, packed_linear, packed_linear && (external.has_value() || display_is_hdr));
+            // A PQ export never matches a local sRGB or scRGB swapchain's transfer.
+            if (!packed_pq && copy_rgb(packed_texture, packed_linear)) {
+              // The patch has the export's format and transfer; copy the cursor's texels exactly.
+              for (std::uint32_t i = 0; cursor_patch && i < cursor_patch->regions; ++i) {
+                const auto &changed = cursor_patch->changed[i];
+                const D3D11_BOX box {UINT(changed.left), UINT(changed.top), 0, UINT(changed.right), UINT(changed.bottom), 1};
+                device_ctx->CopySubresourceRegion(rgb_present_texture, 0, box.left, box.top, 0, cursor_patch->texture, 0, &box);
+              }
+            } else {
+              draw_rgb(packed_view, packed_linear, packed_linear && (external.has_value() || display_is_hdr), packed_pq);
+              for (std::uint32_t i = 0; cursor_patch && i < cursor_patch->regions; ++i) {
+                if (const auto region = sbs_cursor::output_region(cursor_patch->changed[i], final_desc.Width, final_desc.Height, rgb_present_viewport)) {
+                  with_scissor(*region, [&]() {
+                    draw_rgb(cursor_patch->view, cursor_patch->linear, cursor_patch->linear);
+                    return true;
+                  });
+                }
+              }
             }
           } else {
-            draw(packed_view, out_Y_or_YUV_viewport, out_UV_viewport, packed_linear, false, external.has_value());
+            draw(packed_view, out_Y_or_YUV_viewport, out_UV_viewport, packed_linear, false, external.has_value(), packed_pq);
+            for (std::uint32_t i = 0; cursor_patch && i < cursor_patch->regions; ++i) {
+              auto *patch_view = cursor_patch->view;
+              const auto &changed = cursor_patch->changed[i];
+              if (const auto region = sbs_cursor::output_region(changed, final_desc.Width, final_desc.Height, out_Y_or_YUV_viewport)) {
+                with_scissor(*region, [&]() {
+                  draw(patch_view, out_Y_or_YUV_viewport, out_UV_viewport, cursor_patch->linear, false, true, false, 1);
+                  return true;
+                });
+              }
+              const auto chroma = out_UV_rtv ? sbs_cursor::output_region(changed, final_desc.Width, final_desc.Height, out_UV_viewport) : std::nullopt;
+              if (chroma) {
+                with_scissor(*chroma, [&]() {
+                  draw(patch_view, out_Y_or_YUV_viewport, out_UV_viewport, cursor_patch->linear, false, true, false, 2);
+                  return true;
+                });
+              }
+            }
           }
         } else if (sbs_mode == ::video::SBS_AI) {
           const bool input_is_linear =
@@ -5178,7 +5287,12 @@ namespace platf::dxgi {
       external_cursor_logged = false;
       if (reshade_receiver) {
         external_cursor = std::make_unique<sbs_cursor::compositor_t>(
-          device.get(), device_ctx.get(), cursor_vs_hlsl.get(), cursor_ps_hlsl.get(), cursor_ps_normalize_white_hlsl.get()
+          device.get(),
+          device_ctx.get(),
+          cursor_vs_hlsl.get(),
+          cursor_ps_hlsl.get(),
+          cursor_ps_normalize_white_hlsl.get(),
+          pq_input_to_scrgb_ps_hlsl.get()
         );
         const auto white_nits = display->get_sdr_white_nits();
         external_cursor_white_multiplier = white_nits && *white_nits > 0.0f ? *white_nits / 80.0f : 203.0f / 80.0f;
@@ -5196,6 +5310,8 @@ namespace platf::dxgi {
       sbs_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? nullptr : std::move(sbs_debug_dump_request));
       sbs_flat_identity_ps.reset();
       sbs_packed_resample_ps.reset();
+      sbs_packed_resample_pq_ps.reset();
+      cursor_scissor_raster.Reset();
       sbs_reprojection_v2_live_ps.reset();
       sbs_reprojection_v2_p010_y_ps.reset();
       p010_y_mrt_targets_checked = false;
@@ -5336,6 +5452,8 @@ namespace platf::dxgi {
           rgb_present_srgb_to_linear_ps_hlsl,
           rgb_present_srgb_to_linear_ps
         );
+        create_pixel_shader_helper(rgb_present_pq_input_to_linear_ps_hlsl, rgb_present_pq_to_linear_ps);
+        create_pixel_shader_helper(rgb_present_pq_input_to_srgb_ps_hlsl, rgb_present_pq_to_srgb_ps);
         // Local HDR presentation can receive BGRA/sRGB frames from WGC even though its swapchain
         // is linear scRGB. Match the existing HDR cursor convention: scRGB 1.0 is 80 nits, while
         // captured SDR white follows the user's display setting (203 nits is Windows' fallback).
@@ -5391,6 +5509,18 @@ namespace platf::dxgi {
           return -1;
         }
         create_pixel_shader_helper(sbs_packed_resample_ps_hlsl, sbs_packed_resample_ps);
+        create_pixel_shader_helper(sbs_packed_resample_pq_input_ps_hlsl, sbs_packed_resample_pq_ps);
+        // Re-runs a conversion pass from the Game 3D cursor patch over the cursor's pixels only.
+        // Otherwise identical to the default rasterizer state the conversion passes use.
+        D3D11_RASTERIZER_DESC scissor_desc {};
+        scissor_desc.FillMode = D3D11_FILL_SOLID;
+        scissor_desc.CullMode = D3D11_CULL_BACK;
+        scissor_desc.DepthClipEnable = TRUE;
+        scissor_desc.ScissorEnable = TRUE;
+        if (FAILED(status = device->CreateRasterizerState(&scissor_desc, &cursor_scissor_raster))) {
+          BOOST_LOG(error) << "Failed to create the Game 3D cursor scissor state: " << util::log_hex(status);
+          return -1;
+        }
       }
       if (ai_on) {
         HRESULT v2_pixel_status = E_FAIL;
@@ -5446,14 +5576,17 @@ namespace platf::dxgi {
             create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
             create_pixel_shader_helper(convert_yuv420_planar_y_ps_hlsl, convert_Y_or_YUV_ps);
             create_pixel_shader_helper(convert_yuv420_planar_y_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
+            create_pixel_shader_helper(convert_yuv420_planar_y_ps_pq_input_linear_hlsl, convert_Y_or_YUV_pq_ps);
             if (downscaling && !sbs_on) {
               create_vertex_shader_helper(convert_yuv420_packed_uv_type0s_vs_hlsl, convert_UV_vs);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_hlsl, convert_UV_ps);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_linear_hlsl, convert_UV_fp16_ps);
+              create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_pq_input_linear_hlsl, convert_UV_pq_ps);
             } else {
               create_vertex_shader_helper(convert_yuv420_packed_uv_type0_vs_hlsl, convert_UV_vs);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_hlsl, convert_UV_ps);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear_hlsl, convert_UV_fp16_ps);
+              create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_pq_input_linear_hlsl, convert_UV_pq_ps);
             }
             break;
 
@@ -5463,24 +5596,30 @@ namespace platf::dxgi {
             create_pixel_shader_helper(convert_yuv420_planar_y_ps_hlsl, convert_Y_or_YUV_ps);
             if (output_is_hdr) {
               create_pixel_shader_helper(convert_yuv420_planar_y_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
+              create_pixel_shader_helper(convert_yuv420_planar_y_ps_pq_input_perceptual_quantizer_hlsl, convert_Y_or_YUV_pq_ps);
             } else {
               create_pixel_shader_helper(convert_yuv420_planar_y_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
+              create_pixel_shader_helper(convert_yuv420_planar_y_ps_pq_input_linear_hlsl, convert_Y_or_YUV_pq_ps);
             }
             if (downscaling && !sbs_on) {
               create_vertex_shader_helper(convert_yuv420_packed_uv_type0s_vs_hlsl, convert_UV_vs);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_hlsl, convert_UV_ps);
               if (output_is_hdr) {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_perceptual_quantizer_hlsl, convert_UV_fp16_ps);
+                create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_pq_input_perceptual_quantizer_hlsl, convert_UV_pq_ps);
               } else {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_linear_hlsl, convert_UV_fp16_ps);
+                create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_pq_input_linear_hlsl, convert_UV_pq_ps);
               }
             } else {
               create_vertex_shader_helper(convert_yuv420_packed_uv_type0_vs_hlsl, convert_UV_vs);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_hlsl, convert_UV_ps);
               if (output_is_hdr) {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_perceptual_quantizer_hlsl, convert_UV_fp16_ps);
+                create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_pq_input_perceptual_quantizer_hlsl, convert_UV_pq_ps);
               } else {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear_hlsl, convert_UV_fp16_ps);
+                create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_pq_input_linear_hlsl, convert_UV_pq_ps);
               }
             }
             break;
@@ -5914,10 +6053,12 @@ namespace platf::dxgi {
     vs_t convert_Y_or_YUV_vs;
     ps_t convert_Y_or_YUV_ps;
     ps_t convert_Y_or_YUV_fp16_ps;
+    ps_t convert_Y_or_YUV_pq_ps;  ///< Game 3D PQ export; passthrough for an HDR stream.
 
     vs_t convert_UV_vs;
     ps_t convert_UV_ps;
     ps_t convert_UV_fp16_ps;
+    ps_t convert_UV_pq_ps;
 
     D3D11_VIEWPORT out_Y_or_YUV_viewport;
     D3D11_VIEWPORT out_UV_viewport;
@@ -5937,6 +6078,8 @@ namespace platf::dxgi {
     ps_t rgb_present_linear_to_srgb_ps;
     ps_t rgb_present_hdr_to_srgb_ps;
     ps_t rgb_present_srgb_to_linear_ps;
+    ps_t rgb_present_pq_to_linear_ps;
+    ps_t rgb_present_pq_to_srgb_ps;
     buf_t rgb_present_sdr_white;
     D3D11_VIEWPORT rgb_present_viewport {};
 
@@ -5982,6 +6125,8 @@ namespace platf::dxgi {
     ps_t sbs_flat_identity_ps;
     // Resizes same-aspect external full-SBS eyes to the packed output before YUV conversion.
     ps_t sbs_packed_resample_ps;
+    ps_t sbs_packed_resample_pq_ps;  ///< Decodes PQ taps to FP16 scRGB while resizing.
+    Microsoft::WRL::ComPtr<ID3D11RasterizerState> cursor_scissor_raster;
     ps_t sbs_reprojection_v2_live_ps;
     ps_t sbs_reprojection_v2_p010_y_ps;
     bool p010_y_mrt_targets_checked = false;
@@ -8422,6 +8567,16 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(convert_yuv420_planar_y_ps_linear);
     compile_pixel_shader_helper(convert_yuv420_planar_y_ps_perceptual_quantizer);
     compile_vertex_shader_helper(convert_yuv420_planar_y_vs);
+    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_pq_input_linear);
+    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_pq_input_perceptual_quantizer);
+    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_pq_input_linear);
+    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_pq_input_perceptual_quantizer);
+    compile_pixel_shader_helper(convert_yuv420_planar_y_ps_pq_input_linear);
+    compile_pixel_shader_helper(convert_yuv420_planar_y_ps_pq_input_perceptual_quantizer);
+    compile_pixel_shader_helper(rgb_present_pq_input_to_linear_ps);
+    compile_pixel_shader_helper(rgb_present_pq_input_to_srgb_ps);
+    compile_pixel_shader_helper(sbs_packed_resample_pq_input_ps);
+    compile_pixel_shader_helper(pq_input_to_scrgb_ps);
     compile_pixel_shader_helper(cursor_ps);
     compile_pixel_shader_helper(cursor_ps_normalize_white);
     compile_pixel_shader_helper(sbs_packed_resample_ps);

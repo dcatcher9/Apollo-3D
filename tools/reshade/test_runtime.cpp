@@ -6,6 +6,7 @@
 #include "test_overlay_pixels.h"
 #include "test_receiver_api.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -408,8 +409,13 @@ technique SuperDepth3D {
         }
         require(!same_generation || metadata.generation == same_generation, "Overlay or uniform edit replaced the resource generation");
         require(metadata.source_width == source_width && metadata.source_height == source_height && metadata.window == reinterpret_cast<std::uint64_t>(window), "Exporter source identity/dimensions incorrect");
-        require(metadata.color_transfer == (expected_color == 1 ? wire::transfer::srgb : wire::transfer::scrgb), "Exporter declared wrong transfer");
-        require(metadata.dxgi_format == (expected_color == 1 ? 24u : 10u), "Exporter declared wrong resource format");
+        // The native HDR10 renderer exports 10-bit PQ to the production
+        // receiver, which accepts it (docs/reshade-sbs.md, PQ wire transfer).
+        const bool pq = native_only && expected_color == 3 && receiver_state;
+        require(metadata.color_transfer == (expected_color == 1 ? wire::transfer::srgb : pq ? wire::transfer::pq : wire::transfer::scrgb),
+          "Exporter declared wrong transfer");
+        require(metadata.dxgi_format == (expected_color == 1 || pq ? 24u : 10u), "Exporter declared wrong resource format");
+        require(metadata.protocol_version == (pq ? wire::pq_version : wire::version), "Exporter declared the wrong protocol");
         if (receiver_state) {
           if (metadata.accepted_consumer_nonce != read64(shared->consumer_nonce)) {
             // A new consumer needs another Present to receive its replacement ring.
@@ -433,7 +439,8 @@ technique SuperDepth3D {
             Sleep(1);
           }
           require(received_status == 1 && received.sequence == newest_sequence && received.texture && received.timestamp_ns, "Production receiver did not retire the latest D3D11 publication");
-          require(received.linear == (expected_color != 1), "Production receiver lost the declared source transfer");
+          require(received.linear == (expected_color != 1 && !pq) && received.transfer == (expected_color == 1 ? 0u : pq ? 2u : 1u),
+            "Production receiver lost the declared source transfer");
           if (!inspect_texture(receiver.p, receiver_context.p, received.texture, metadata.dxgi_format)) {
             continue;
           }
@@ -712,10 +719,75 @@ technique SuperDepth3D {
       require(receiver_state != nullptr, "Could not restart native D3D11 production receiver");
       wait_pixels(generation);
       require(read64(shared->consumer_nonce) != previous_nonce, "Native D3D11 receiver restart reused its old nonce");
+      exercise_resize_toggle();
       require(observation.presents == observation.finishes && observation.techniques == 0,
         "Native D3D11 presentation lifecycle is incomplete");
-      std::printf("PASS native add-on-only D3D11 color=%u: direct slot export, overlay copy path, effects toggle, focus recovery, receiver restart\n",
+      std::printf("PASS native add-on-only D3D11 color=%u: direct slot export, overlay copy path, effects toggle, focus recovery, receiver restart, ResizeBuffers colour toggle\n",
         expected_color);
+    }
+
+    // How often the add-on logged marker (waits until the count reaches
+    // at_least or 2 s pass: its log lines are written asynchronously).
+    std::size_t log_count(const char *marker, std::size_t at_least = 0) const {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      std::size_t count = 0;
+      do {
+        std::ifstream input(output_directory / "ReShade.log");
+        const std::string log((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        count = 0;
+        for (auto at = log.find(marker); at != std::string::npos; at = log.find(marker, at + 1)) ++count;
+        if (count >= at_least) break;
+        Sleep(10);
+      } while (std::chrono::steady_clock::now() < deadline);
+      return count;
+    }
+
+    // A game's colour toggle: ResizeBuffers to the other format and colour
+    // space (ReShade resets its runtime around it). A D3D11 back-buffer
+    // reference left anywhere fails the call.
+    void resize_color(unsigned color) {
+      game_context->OMSetRenderTargets(0, nullptr, nullptr);
+      target.reset();
+      checked(swapchain->ResizeBuffers(2, source_width, source_height, color == 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+        color == 3 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM, 0), "Colour-toggle ResizeBuffers");
+      com_ptr<IDXGISwapChain3> swapchain3;
+      checked(swapchain->QueryInterface(IID_PPV_ARGS(swapchain3.put())), "Swapchain color-space interface");
+      checked(swapchain3->SetColorSpace1(color == 2 ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : color == 3 ?
+        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709), "Colour-toggle colour space");
+      com_ptr<ID3D11Texture2D> buffer;
+      checked(swapchain->GetBuffer(0, IID_PPV_ARGS(buffer.put())), "Resized game backbuffer");
+      checked(game->CreateRenderTargetView(buffer.p, nullptr, target.put()), "Resized game backbuffer view");
+      expected_color = color;
+    }
+
+    // A toggle to the other colour transfer and back through ResizeBuffers
+    // (docs/reshade-sbs.md, colour toggles): the toggle back reuses the first
+    // transfer's renderer and export ring instead of allocating them again.
+    void exercise_resize_toggle() {
+      constexpr const char *renderer_reuse = "reusing the cached add-on GPU renderer of this colour transfer";
+      const auto same_ring = [](const wire::metadata_t &a, const wire::metadata_t &b) {
+        return std::equal(std::begin(a.texture_handles), std::end(a.texture_handles), std::begin(b.texture_handles)) &&
+          a.ready_fence_handle == b.ready_fence_handle;
+      };
+      const unsigned original = expected_color, other = original == 1 ? 2 : 1;
+      wire::metadata_t first, second, back;
+      require(snapshot(*shared, first) && first.generation, "No D3D11 export before the colour toggle");
+      resize_color(other);
+      auto generation = wait_pixels(first.generation);
+      require(snapshot(*shared, second) && second.generation == generation && !same_ring(second, first),
+        "The other D3D11 colour transfer did not get its own export ring");
+      // The first ring becomes reusable once inactive for the idle reuse delay.
+      const auto idle_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(700);
+      while (std::chrono::steady_clock::now() < idle_until) step();
+      const auto reuses = log_count(renderer_reuse);
+      resize_color(original);
+      generation = wait_pixels(generation);
+      require(snapshot(*shared, back) && back.generation == generation && same_ring(back, first),
+        "The D3D11 toggle back through ResizeBuffers reallocated the first transfer's export ring");
+      require(log_count(renderer_reuse, reuses + 1) > reuses,
+        "The D3D11 toggle back through ResizeBuffers did not reuse the first transfer's renderer");
+      std::printf("PASS D3D11 ResizeBuffers colour toggle %u->%u->%u: the toggle back reuses the renderer and export ring\n",
+        original, other, original);
     }
 
     void run() {

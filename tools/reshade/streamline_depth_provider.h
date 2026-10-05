@@ -59,6 +59,22 @@ namespace sunshine_streamline::provider {
     source_description current, last_valid;
     sunshine_depth_stats::presentation_statistics presentations;
   };
+  // Handoff hysteresis (docs/reshade-sbs.md): when the API source is no
+  // longer associated with the queue, API ownership is held in mono instead
+  // of starting the generic selector only while all of these hold: the
+  // provider owned the previous Present, the last associated Present is at
+  // most hold_ms old, the swapchain size is unchanged since then, and some
+  // API provider began an evaluation within hold_ms (another source is about
+  // to establish). Reload resets the association.
+  struct handoff_evidence {
+    bool previously_owned{}, evaluation_live{};
+    std::uint64_t now_ms{}, associated_ms{};
+    std::uint32_t width{}, height{}, associated_width{}, associated_height{};
+  };
+  constexpr bool handoff_hold(const handoff_evidence &e, std::uint64_t hold_ms) {
+    return e.previously_owned && e.associated_ms && e.now_ms >= e.associated_ms && e.now_ms - e.associated_ms <= hold_ms &&
+      e.width == e.associated_width && e.height == e.associated_height && e.evaluation_live;
+  }
   void initialize(reshade::api::effect_runtime *runtime);
   void destroy(reshade::api::effect_runtime *runtime);
   void reload(reshade::api::effect_runtime *runtime);

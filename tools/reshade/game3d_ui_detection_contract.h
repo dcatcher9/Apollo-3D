@@ -327,6 +327,19 @@ namespace sunshine_game3d::ui_detection {
   // means (R32_UINT, u5 of the compare pass only).
   inline constexpr std::uint32_t layer_statistics_row = 64u, judgment_statistics_row = 80u, scene_partial_row = 112u,
     pre_ui_statistics_row = 128u, still_statistics_row = 144u;
+  // The per-tile rows (0-111 and the pre-UI rows 128-143) are counted in
+  // tile_parts parts (SUNSHINE_UI_DETECTION_TILE_PARTS, the tiles pass's group
+  // z): part k of tile (x, y) is at column x + 16k, and the reduce sums a
+  // tile's parts (a 16-column texture reads zero beyond them). The scene
+  // rows stay in the first 16 columns. A shader without the marker counts
+  // each tile in one part.
+  inline constexpr std::string_view tile_parts_marker = "SUNSHINE_UI_DETECTION_TILE_PARTS";
+  inline constexpr std::uint32_t tile_parts = 4u, max_tile_parts = 16u;
+  // The statistics texture's width for a shader's tile-parts marker (0: none).
+  constexpr std::uint32_t statistics_columns(std::uint32_t parts) { return 16u * (parts ? parts : 1u); }
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 1> hlsl_tile_defines{{
+    {"SUNSHINE_UI_DETECTION_TILE_PARTS", tile_parts},
+  }};
   // The statistics rows of a shader with these markers (images: its
   // SUNSHINE_UI_SCENE_EVIDENCE_IMAGES, decision_texels: its
   // SUNSHINE_UI_DECISION_TEXELS).

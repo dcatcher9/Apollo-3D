@@ -1,0 +1,4 @@
+#define PQ_INPUT_HDR_OUTPUT
+#include "include/convert_pq_input_base.hlsl"
+
+#include "include/convert_yuv420_planar_y_ps_base.hlsl"

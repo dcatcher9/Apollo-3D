@@ -117,6 +117,16 @@ namespace sunshine_game3d {
     // The depth was captured for this frame rather than reused from an
     // earlier one. Hidden-scene evidence is valid only for current depth.
     bool depth_current = true;
+    // Dump 3D is armed for this Present: a pack recorded for it also records
+    // the full conditioning, even where the pack would show the source mono,
+    // so that the dump's diagnostic textures describe this render.
+    bool diagnostic_armed = false;
+    // Nonzero only when the depth view's content is immutable for this value
+    // (the provider's capture epoch, source and sequence). Equal values with
+    // the same view and parameters let the renderer keep its depth candidate
+    // and vertical field from the last recorded conditioning; zero (unknown)
+    // always records them.
+    std::uint64_t depth_identity = 0;
   };
 
   // Current positive display bound after strength and blend. Scene admission
@@ -147,7 +157,11 @@ namespace sunshine_game3d {
   }
 
   // Borrowed only during the current render lease. Diagnostic copies must be
-  // recorded before the next render reuses these textures.
+  // recorded before the next render reuses these textures. The conditioning
+  // textures (linear color, candidate, vertical, final field, nearest UI
+  // plane) hold the last RECORDED conditioning: a render whose pack is owed
+  // records it with that pack, and an owed pack that shows the source mono
+  // records none unless Dump 3D is armed (render_frame_input::diagnostic_armed).
   struct diagnostic_resources {
     reshade::api::resource source{}, linear_color{}, candidate{}, vertical_majorant{},
       vertical_field{}, final_field{}, sbs{}, ui_source{}, ui_plane_tiles{}, ui_plane_resolved{};
@@ -155,23 +169,31 @@ namespace sunshine_game3d {
     // and whether it is in copy_dest in this submission (else COMMON).
     reshade::api::resource ui_stamps{};
     bool ui_stamps_copy_dest{};
+    // sbs holds 10-bit PQ code values (renderer::set_pq_output: Rec.2020,
+    // ST 2084, R10G10B10A2_UNORM) instead of FP16 scRGB.
+    bool sbs_pq{};
   };
 
   // GPU time of the live render stages over a reporting window, in ms. Inputs
   // covers work the caller records after begin_gpu_profile (depth and UI
-  // captures); pack is zero on frames nothing consumed.
+  // captures); pack is zero on frames nothing consumed. Recorded only while
+  // the add-on's Diagnostics switch is on (game3d_diagnostics.h).
   struct gpu_timing {
     // Conditioning is split into PQ linearization, depth candidate, and the
     // vertical and horizontal scans (the latter includes UI placement passes).
+    // A pack records the conditioning it owes first, so these stages time the
+    // conditioning itself wherever it was recorded; they are zero on frames
+    // that recorded none (no pack, or a pack that shows the source mono).
     enum stage { inputs, source, detection, linearize, candidate, vertical, horizontal, eyes, pack, total, stage_count };
     std::uint32_t frames{};
     std::array<double, stage_count> mean_ms{}, max_ms{};
-    // Why marked frames did not count. The profile may never have started;
+    // Why marked frames did not count. The profile may never have started,
+    // or the Diagnostics switch is off (disabled: no timestamps are recorded);
     // a frame's slot can be reused before its completion fence passed, or
     // after it passed with results never readable (a resolve copy that had not
     // executed, or, on D3D11, results ReShade did not return); or a read frame
-    // lacked its render and conditioning marks.
-    enum class profile_state : std::uint8_t { not_started, ready, no_timestamp_frequency, no_query_heap };
+    // lacked its render mark.
+    enum class profile_state : std::uint8_t { not_started, ready, no_timestamp_frequency, no_query_heap, disabled };
     profile_state state = profile_state::not_started;
     std::uint32_t dropped_fence_pending{}, dropped_unresolved{}, incomplete{};
   };
@@ -180,6 +202,7 @@ namespace sunshine_game3d {
       case gpu_timing::profile_state::ready: return "ready";
       case gpu_timing::profile_state::no_timestamp_frequency: return "no_timestamp_frequency";
       case gpu_timing::profile_state::no_query_heap: return "no_query_heap";
+      case gpu_timing::profile_state::disabled: return "disabled";
       default: return "not_started";
     }
   }
@@ -249,7 +272,13 @@ namespace sunshine_game3d {
     // adaptive freezes the submitted fraction for deterministic replay.
     // defer_pack leaves the final SBS pack owed until a consumer calls pack(),
     // into an export slot or output(). An unconsumed pack is never recorded, and
-    // output() then keeps an earlier image.
+    // output() then keeps an earlier image. Detection and every CPU decision
+    // happen here; the depth conditioning only the pack, a dump or the
+    // adaptive probe read is owed with the pack (recorded here for a probe
+    // frame, an older two-pass replay shader or without defer_pack, in full),
+    // and an owed pack that shows the source mono records none unless Dump 3D
+    // is armed. A Present's owed work is dropped by the next render or
+    // begin_present.
     bool render(reshade::api::command_list *commands, const render_frame_input &input, bool defer_pack = false);
     // Records the owed pack. A null target writes output(); an export target
     // receives the SBS image directly, avoiding a full-frame copy. Views of
@@ -263,6 +292,26 @@ namespace sunshine_game3d {
     reshade::api::resource_view ui_source_view() const;
     reshade::api::resource ui_candidate(unsigned slot, reshade::api::format format);
     reshade::api::resource_view ui_candidate_view(unsigned slot) const;
+    // Direct binding (docs/reshade-sbs.md, direct candidate binding): a
+    // candidate the caller keeps readable and unwritten through this
+    // Present's last read (a leased Streamline snapshot, a live UI layer
+    // copy), bound as is, recording no copy. resource is the view's texture:
+    // a leased snapshot's view is a raw descriptor that
+    // device::get_resource_from_view cannot resolve. Returns the view, or
+    // nothing (the caller then copies). Cleared at begin_present.
+    reshade::api::resource_view bind_ui_candidate(unsigned slot, std::uint64_t capture_id,
+      reshade::api::resource_view view, reshade::api::resource resource);
+    // The same for a leased Streamline snapshot (D3D12 only): the renderer
+    // describes it itself, a typed DXGI view_format of its storage, in an
+    // original-device descriptor that push_descriptors can copy.
+    reshade::api::resource_view bind_ui_snapshot(unsigned slot, std::uint64_t capture_id,
+      reshade::api::resource resource, std::uint32_t view_format);
+    // The completion fence of this renderer's submissions and the value that
+    // its next signal (the current Present's finish_present, or a later one
+    // for a Present that missed it) sets: a resource read by work recorded so
+    // far is free once the fence reaches it.
+    reshade::api::fence completion_fence() const;
+    std::uint64_t completion_value() const;
     // The copy callback takes the destination texture, or, to copy the
     // snapshot's S3 stamp entry beside it, also the stamp buffer and the byte
     // offset of the candidate's slot there (ui_stamp_offset; a null buffer
@@ -326,6 +375,14 @@ namespace sunshine_game3d {
       return ui_source_view();
     }
     reshade::api::resource output() const;
+    // The export transfer (docs/reshade-sbs.md, PQ wire transfer): true packs
+    // an HDR10 source as 10-bit PQ code values (Rec.2020, ST 2084, encoded as
+    // the host's scRGBTo2100PQ) into an R10G10B10A2_UNORM target, output()
+    // included; false packs FP16 scRGB. Only an HDR10 swapchain with a
+    // per-tap PQ shader supports it; returns the transfer now in effect.
+    bool set_pq_output(bool pq);
+    bool pq_output() const;
+    bool pq_output_supported() const;
     diagnostic_resources diagnostics() const;
     render_parameters consumed_parameters() const;
     bool consumed_source_alpha_ui() const;
@@ -364,13 +421,34 @@ namespace sunshine_game3d {
     bool take_gpu_timing(gpu_timing &out);
     // ReShade's destroy_effect_runtime follows its GPU drain. No extra wait.
     void reset_after_runtime_drain();
+    // The same, for a runtime reset that may be a swapchain resize (an SDR and
+    // HDR toggle): the renderer and its cached one are kept for the runtime's
+    // reinitialisation; only the views of the swapchain's back buffers go.
+    // The next configure starts the decision state as a new renderer would.
+    void park_after_runtime_drain();
+    // The device of the current renderer (nullptr before the first configure).
+    reshade::api::device *device() const;
+    // Recorded conditioning since configure: recorded in full, skipped for a
+    // pack that shows the source mono, and recorded with the depth candidate
+    // and vertical field kept from the last one (an exact repeat of its
+    // depth view, nonzero depth identity and parameters).
+    struct conditioning_counters {
+      std::uint64_t recorded = 0, mono = 0, memo = 0;
+    };
+    conditioning_counters conditioning_activity() const;
   private:
     // S3: a candidate copy wrote a stamp entry in this submission.
     void note_ui_stamp_write();
     struct impl;
     std::unique_ptr<impl> data_;
+    // The renderer of the previous colour transfer (SDR and HDR toggles),
+    // reused on a toggle back and released once idle for cached_idle_ms.
+    std::unique_ptr<impl> cached_;
+    std::uint64_t cached_since_ = 0;
+    static constexpr std::uint64_t cached_idle_ms = 60000;
     std::uint64_t ui_source_capture_ = 0;
     std::array<std::uint64_t, 5> ui_candidate_captures_{};
     bool preparing_ = false;
+    bool resume_pending_ = false;
   };
 }

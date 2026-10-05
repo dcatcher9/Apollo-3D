@@ -43,7 +43,7 @@ TEST(ReShadeBridgeProtocol, RequiresVersionedIdentityAndCompleteSynchronizationH
            m.signature ^= 1;
          },
          [](metadata_t &m) {
-           ++m.protocol_version;
+           m.protocol_version = pq_version + 1;
          },
          [](metadata_t &m) {
            --m.metadata_bytes;
@@ -102,6 +102,54 @@ TEST(ReShadeBridgeProtocol, RejectsHalfSbsOversizedAndColorIncoherentMetadata) {
   EXPECT_TRUE(valid_metadata(metadata));
   metadata.color_transfer = static_cast<transfer>(3);
   EXPECT_FALSE(valid_metadata(metadata));
+  metadata.color_transfer = static_cast<transfer>(4);
+  metadata.dxgi_format = 24;
+  metadata.protocol_version = pq_version;
+  EXPECT_FALSE(valid_metadata(metadata));
+}
+
+TEST(ReShadeBridgeProtocol, PqTransferRequiresTenBitStorageAndProtocolThree) {
+  using namespace ::reshade_bridge;
+  auto metadata = valid_bridge_metadata();
+  metadata.color_transfer = transfer::pq;
+  metadata.dxgi_format = 24;  // R10G10B10A2_UNORM
+  metadata.protocol_version = pq_version;
+  EXPECT_TRUE(valid_metadata(metadata));
+  // Older consumers know protocol 2 only; a PQ declaration there is malformed.
+  for (const auto protocol : {screen_plane_version, version}) {
+    metadata.protocol_version = protocol;
+    EXPECT_FALSE(valid_metadata(metadata)) << protocol;
+  }
+  metadata.protocol_version = pq_version;
+  for (const auto format : {10u, 28u, 87u, 0u}) {
+    metadata.dxgi_format = format;
+    EXPECT_FALSE(valid_metadata(metadata)) << format;
+  }
+  // Protocol 3 carries the other transfers unchanged.
+  metadata = valid_bridge_metadata();
+  metadata.protocol_version = pq_version;
+  EXPECT_TRUE(valid_metadata(metadata));
+  metadata.color_transfer = transfer::scrgb;
+  metadata.dxgi_format = 10;
+  EXPECT_TRUE(valid_metadata(metadata));
+  metadata.dxgi_format = 24;
+  EXPECT_FALSE(valid_metadata(metadata));
+  EXPECT_TRUE(supported_version(pq_version));
+  EXPECT_FALSE(supported_version(pq_version + 1));
+}
+
+TEST(ReShadeBridgeProtocol, CapabilitiesBindToTheNonceTheyWereWrittenWith) {
+  using namespace ::reshade_bridge;
+  EXPECT_EQ(offsetof(shared_state_t, capability_nonce), 136u);
+  EXPECT_EQ(offsetof(shared_state_t, consumer_capabilities), 144u);
+  EXPECT_EQ(offsetof(shared_state_t, slots), 192u);
+  EXPECT_EQ(sizeof(shared_state_t), 384u);
+  EXPECT_EQ(answered_capabilities(7, 7, consumer_accepts_pq), consumer_accepts_pq);
+  // A replaced consumer's (stale) capabilities never apply to the nonce being answered, and
+  // an old consumer that never writes them reads as zero.
+  EXPECT_EQ(answered_capabilities(8, 7, consumer_accepts_pq), 0u);
+  EXPECT_EQ(answered_capabilities(8, 0, 0), 0u);
+  EXPECT_EQ(answered_capabilities(0, 0, consumer_accepts_pq), 0u);
 }
 
 TEST(ReShadeBridgeProtocol, ScalesSameAspectEyesAndRejectsDistortingOutputs) {
@@ -169,7 +217,11 @@ TEST(ReShadeBridgeProtocol, RejectsMalformedPlaneExtensionsAndUnknownVersions) {
     EXPECT_EQ(value, 0.0f);
   }
   slot.cursor_plane_flags = cursor_plane_present;
-  for (const auto invalid_version : {0u, version + 1u, UINT32_MAX}) {
+  slot.ui_parallax_uv = 0.005f;
+  float pq_value = 0.0f;
+  EXPECT_TRUE(read_ui_parallax(pq_version, slot, pq_value));
+  EXPECT_EQ(pq_value, 0.005f);
+  for (const auto invalid_version : {0u, pq_version + 1u, UINT32_MAX}) {
     float value = 1.0f;
     EXPECT_FALSE(read_ui_parallax(invalid_version, slot, value));
     EXPECT_EQ(value, 0.0f);
@@ -262,7 +314,7 @@ namespace {
 
     void TearDown() override {
       if (copy_gate_active) {
-        signal_ready(2);
+        signal_ready(copy_gate_value);
       }
       bridge.reset();
       rings.clear();
@@ -296,7 +348,8 @@ namespace {
       DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM,
       protocol::transfer transfer = protocol::transfer::srgb,
       int render_width = source_width,
-      int render_height = height
+      int render_height = height,
+      std::uint32_t protocol_version = protocol::version
     ) {
       auto ring = std::make_unique<shared_ring_t>();
       D3D11_TEXTURE2D_DESC desc {};
@@ -333,6 +386,7 @@ namespace {
       metadata.packed_height = render_height;
       metadata.dxgi_format = format;
       metadata.color_transfer = transfer;
+      metadata.protocol_version = protocol_version;
       for (std::size_t i = 0; i < protocol::slot_count; ++i) {
         metadata.texture_handles[i] = reinterpret_cast<std::uintptr_t>(ring->handles[i]);
         state->slots[i] = protocol::slot_t {};
@@ -359,11 +413,30 @@ namespace {
       publish_pixels(sequence, source_pixels.data(), packed_width * sizeof(std::uint32_t), signal, ui_parallax_uv, cursor_plane_flags);
     }
 
+    // Like the producer, write any free slot of the current generation. The receiver holds the
+    // slot of its newest frame and returns a replaced one only after its reads complete, so a
+    // free slot may take a few polls to appear.
     void publish_pixels(std::uint64_t sequence, const void *source_pixels, UINT row_pitch, bool signal = true, float ui_parallax_uv = 0.0f, std::uint32_t cursor_plane_flags = protocol::cursor_plane_present) {
-      auto &slot = state->slots[0];
       const auto generation = state->metadata.generation;
-      ASSERT_EQ(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&slot.control), static_cast<LONG64>(protocol::slot_control(generation, protocol::slot_state::writing)), static_cast<LONG64>(protocol::slot_control(generation, protocol::slot_state::free))), static_cast<LONG64>(protocol::slot_control(generation, protocol::slot_state::free)));
-      producer_context->UpdateSubresource(rings.back()->textures[0].Get(), 0, nullptr, source_pixels, row_pitch, 0);
+      const auto free_control = static_cast<LONG64>(protocol::slot_control(generation, protocol::slot_state::free));
+      const auto writing_control = static_cast<LONG64>(protocol::slot_control(generation, protocol::slot_state::writing));
+      int index = -1;
+      const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
+      while (index < 0 && bridge_clock_t::now() < deadline) {
+        for (int i = 0; i < static_cast<int>(protocol::slot_count) && index < 0; ++i) {
+          if (InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&state->slots[i].control), writing_control, free_control) == free_control) {
+            index = i;
+          }
+        }
+        if (index < 0) {
+          poll();
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
+      ASSERT_GE(index, 0) << "No free export slot";
+      last_slot = index;
+      auto &slot = state->slots[index];
+      producer_context->UpdateSubresource(rings.back()->textures[index].Get(), 0, nullptr, source_pixels, row_pitch, 0);
       slot.sequence = sequence;
       LARGE_INTEGER qpc {};
       ASSERT_TRUE(QueryPerformanceCounter(&qpc));
@@ -393,11 +466,22 @@ namespace {
       return std::nullopt;
     }
 
-    bool await_free() {
+    std::optional<receiver::frame_t> await_frame_after(std::uint64_t sequence) {
+      const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
+      do {
+        if (auto frame = poll(); frame && frame->sequence > sequence) {
+          return frame;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      } while (bridge_clock_t::now() < deadline);
+      return std::nullopt;
+    }
+
+    bool await_slot(int index, protocol::slot_state expected) {
       const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
       do {
         poll();
-        if (protocol::control_state(state->slots[0].control) == protocol::slot_state::free) {
+        if (protocol::control_state(state->slots[index].control) == expected) {
           return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -405,14 +489,30 @@ namespace {
       return false;
     }
 
-    void hold_consumer_copy() {
+    // The receiver consumed the last published slot: it holds a valid frame (`reading`) or
+    // returned a malformed one (`free`).
+    bool await_consumed() {
+      const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
+      do {
+        poll();
+        if (protocol::control_state(state->slots[last_slot].control) != protocol::slot_state::ready) {
+          return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      } while (bridge_clock_t::now() < deadline);
+      return false;
+    }
+
+    // Blocks the consumer's GPU queue behind a producer fence value, so reads recorded after
+    // this point cannot complete until the test signals it.
+    void hold_consumer_reads(std::uint64_t gate) {
       ComPtr<ID3D11Device5> consumer5;
       ComPtr<ID3D11DeviceContext4> consumer_context4;
-      ComPtr<ID3D11Fence> consumer_fence;
       ASSERT_EQ(consumer.As(&consumer5), S_OK);
       ASSERT_EQ(consumer_context.As(&consumer_context4), S_OK);
       ASSERT_EQ(consumer5->OpenSharedFence(rings.back()->fence_handle, IID_PPV_ARGS(&consumer_fence)), S_OK);
-      ASSERT_EQ(consumer_context4->Wait(consumer_fence.Get(), 2), S_OK);
+      ASSERT_EQ(consumer_context4->Wait(consumer_fence.Get(), gate), S_OK);
+      copy_gate_value = gate;
       copy_gate_active = true;
     }
 
@@ -452,57 +552,110 @@ namespace {
     platf::foreground_window::observation_t observed;
     std::unique_ptr<receiver::receiver_t> bridge;
     bool copy_gate_active = false;
+    std::uint64_t copy_gate_value = 0;
+    ComPtr<ID3D11Fence> consumer_fence;
+    int last_slot = 0;
   };
 }  // namespace
 
-TEST_F(ReShadeBridgeGpu, CopiesBothEyesAndReturnsSlotOnlyAfterPrivateCopyCompletes) {
+TEST_F(ReShadeBridgeGpu, AdvertisesPqBeforeItsNonceAndImportsAPqGeneration) {
+  // SetUp's first poll wrote the request: capabilities, their nonce, then consumer_nonce.
+  EXPECT_EQ(state->consumer_capabilities, protocol::consumer_accepts_pq);
+  EXPECT_EQ(state->capability_nonce, state->consumer_nonce);
+  EXPECT_EQ(protocol::answered_capabilities(state->consumer_nonce, state->capability_nonce, state->consumer_capabilities), protocol::consumer_accepts_pq);
+
+  // A PQ declaration at protocol 2 is malformed and never presented.
+  ASSERT_TRUE(new_generation(DXGI_FORMAT_R10G10B10A2_UNORM, protocol::transfer::pq));
+  const auto codes = pixels(0xC00003FF, 0xFFF00000);
+  publish_pixels(1, codes.data(), packed_width * sizeof(std::uint32_t));
+  for (int i = 0; i < 20; ++i) {
+    EXPECT_FALSE(poll());
+  }
+
+  ASSERT_TRUE(new_generation(DXGI_FORMAT_R10G10B10A2_UNORM, protocol::transfer::pq, source_width, height, protocol::pq_version));
+  publish_pixels(1, codes.data(), packed_width * sizeof(std::uint32_t));
+  const auto frame = await_frame();
+  ASSERT_TRUE(frame);
+  EXPECT_EQ(frame->transfer, receiver::transfer_e::pq);
+  EXPECT_FALSE(frame->linear);
+  expect_pixels(frame->texture, DXGI_FORMAT_R10G10B10A2_UNORM, 0xC00003FF, 0xFFF00000);
+}
+
+TEST_F(ReShadeBridgeGpu, ConvertsFromTheHeldSlotAndReturnsItOnlyAfterItsReadsComplete) {
   publish(1, false, 0.007f);
+  const int first_slot = last_slot;
   const auto started = bridge_clock_t::now();
   for (int i = 0; i < 20; ++i) {
     EXPECT_FALSE(poll());
   }
   EXPECT_LT(bridge_clock_t::now() - started, std::chrono::milliseconds(500));
-  EXPECT_EQ(protocol::control_state(state->slots[0].control), protocol::slot_state::ready);
+  EXPECT_EQ(protocol::control_state(state->slots[first_slot].control), protocol::slot_state::ready);
   signal_ready(1);
-  hold_consumer_copy();
   const auto frame = await_frame();
   ASSERT_TRUE(frame);
   EXPECT_EQ(frame->sequence, 1u);
   EXPECT_EQ(frame->ui_parallax_uv, 0.007f);
   EXPECT_FALSE(frame->linear);
+  EXPECT_EQ(frame->transfer, receiver::transfer_e::srgb);
   EXPECT_NE(frame->timestamp, bridge_clock_t::time_point {});
-  const auto copying = bridge_clock_t::now();
+  // No private copy: the frame is the shared slot itself, held while it is the newest frame.
+  // Repeat conversions keep reading it, and the producer cannot reclaim it.
   for (int i = 0; i < 20; ++i) {
     const auto retained = poll();
     ASSERT_TRUE(retained);
     EXPECT_EQ(retained->sequence, frame->sequence);
+    EXPECT_EQ(retained->texture, frame->texture);
+    EXPECT_EQ(retained->view, frame->view);
     EXPECT_EQ(retained->ui_parallax_uv, frame->ui_parallax_uv);
-    EXPECT_EQ(protocol::control_state(state->slots[0].control), protocol::slot_state::reading);
+    EXPECT_EQ(protocol::control_state(state->slots[first_slot].control), protocol::slot_state::reading);
   }
-  EXPECT_LT(bridge_clock_t::now() - copying, std::chrono::milliseconds(500));
-  signal_ready(2);
-  copy_gate_active = false;
-  ASSERT_TRUE(await_free());
   expect_pixels(frame->texture);
 
-  // Once returned, the producer may overwrite its slot. The receiver's retained frame must
-  // remain a private immutable copy, not an alias of the producer's reusable texture.
-  const auto overwritten = pixels(0xFF00FF00, 0xFF00FF00);
-  producer_context->UpdateSubresource(rings.back()->textures[0].Get(), 0, nullptr, overwritten.data(), packed_width * sizeof(std::uint32_t), 0);
-  signal_ready(3);
-  state->slots[0].ui_parallax_uv = 0.025f;
-  const auto retained = poll();
-  ASSERT_TRUE(retained);
-  EXPECT_EQ(retained->sequence, frame->sequence);
-  EXPECT_EQ(retained->ui_parallax_uv, frame->ui_parallax_uv);
-  expect_pixels(frame->texture);
+  // A read recorded before the replacement is gated on the consumer GPU. The replaced slot must
+  // stay `reading` until that read has completed, then return to the producer without a wait.
+  hold_consumer_reads(100);
+  const auto gated = pixels(0xFF00FF00, 0xFF00FF00);
+  publish_pixels(2, gated.data(), packed_width * sizeof(std::uint32_t), false);
+  const int second_slot = last_slot;
+  EXPECT_NE(second_slot, first_slot);
+  signal_ready(2);
+  const auto replacing = bridge_clock_t::now();
+  auto second = await_frame_after(1);
+  ASSERT_TRUE(second);
+  for (int i = 0; i < 20; ++i) {
+    second = poll();
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->sequence, 2u);
+    EXPECT_EQ(protocol::control_state(state->slots[first_slot].control), protocol::slot_state::reading);
+  }
+  EXPECT_LT(bridge_clock_t::now() - replacing, std::chrono::milliseconds(500));
+  EXPECT_NE(second->texture, frame->texture);
+  EXPECT_EQ(protocol::control_state(state->slots[second_slot].control), protocol::slot_state::reading);
+  signal_ready(100);
+  copy_gate_active = false;
+  ASSERT_TRUE(await_slot(first_slot, protocol::slot_state::free));
+  EXPECT_EQ(protocol::control_state(state->slots[second_slot].control), protocol::slot_state::reading);
+  expect_pixels(second->texture, DXGI_FORMAT_R8G8B8A8_UNORM, 0xFF00FF00, 0xFF00FF00);
+
+  // A frame dropped by a transient metadata replacement is not presented again, but its slot
+  // stays held until a newer frame replaces it.
+  InterlockedIncrement(reinterpret_cast<volatile LONG *>(&state->metadata_sequence));
+  EXPECT_FALSE(poll());
+  InterlockedIncrement(reinterpret_cast<volatile LONG *>(&state->metadata_sequence));
+  EXPECT_FALSE(poll());
+  EXPECT_EQ(protocol::control_state(state->slots[second_slot].control), protocol::slot_state::reading);
+  publish(3, false);  // The gate already completed fence value 100.
+  const auto third = await_frame();
+  ASSERT_TRUE(third);
+  EXPECT_EQ(third->sequence, 3u);
+  ASSERT_TRUE(await_slot(second_slot, protocol::slot_state::free));
 }
 
 TEST_F(ReShadeBridgeGpu, KeepsCursorPlaneWithItsFrameAcrossPendingInvalidAndReplacedExports) {
   publish(1, true, 0.006f);
   const auto first = await_frame();
   ASSERT_TRUE(first);
-  ASSERT_TRUE(await_free());
+  ASSERT_TRUE(await_consumed());
   EXPECT_EQ(first->sequence, 1u);
   EXPECT_EQ(first->ui_parallax_uv, 0.006f);
 
@@ -513,9 +666,9 @@ TEST_F(ReShadeBridgeGpu, KeepsCursorPlaneWithItsFrameAcrossPendingInvalidAndRepl
     EXPECT_EQ(retained->sequence, first->sequence);
     EXPECT_EQ(retained->ui_parallax_uv, first->ui_parallax_uv);
   }
-  EXPECT_EQ(protocol::control_state(state->slots[0].control), protocol::slot_state::ready);
+  EXPECT_EQ(protocol::control_state(state->slots[last_slot].control), protocol::slot_state::ready);
   signal_ready(2);
-  ASSERT_TRUE(await_free());
+  ASSERT_TRUE(await_consumed());
   const auto second = poll();
   ASSERT_TRUE(second);
   EXPECT_EQ(second->sequence, 2u);
@@ -524,7 +677,8 @@ TEST_F(ReShadeBridgeGpu, KeepsCursorPlaneWithItsFrameAcrossPendingInvalidAndRepl
   // Invalid metadata must not advance either the retained pixels or their cursor plane.
   const auto invalid_pixels = pixels(0xFF00FF00, 0xFF00FF00);
   publish_pixels(3, invalid_pixels.data(), packed_width * sizeof(std::uint32_t), true, std::numeric_limits<float>::quiet_NaN());
-  ASSERT_TRUE(await_free());
+  ASSERT_TRUE(await_consumed());
+  EXPECT_EQ(protocol::control_state(state->slots[last_slot].control), protocol::slot_state::free);
   const auto after_invalid = poll();
   ASSERT_TRUE(after_invalid);
   EXPECT_EQ(after_invalid->sequence, second->sequence);
@@ -532,7 +686,7 @@ TEST_F(ReShadeBridgeGpu, KeepsCursorPlaneWithItsFrameAcrossPendingInvalidAndRepl
   expect_pixels(after_invalid->texture);
 
   publish(4, true, -0.004f);
-  ASSERT_TRUE(await_free());
+  ASSERT_TRUE(await_consumed());
   const auto recovered = poll();
   ASSERT_TRUE(recovered);
   EXPECT_EQ(recovered->sequence, 4u);
@@ -556,7 +710,7 @@ TEST_F(ReShadeBridgeGpu, ImportsLegacyPublisherWithUnspecifiedSlotPaddingAtScree
   ASSERT_TRUE(legacy);
   EXPECT_EQ(legacy->sequence, 1u);
   EXPECT_EQ(legacy->ui_parallax_uv, 0.0f);
-  ASSERT_TRUE(await_free());
+  ASSERT_TRUE(await_consumed());
   expect_pixels(legacy->texture);
 
   ASSERT_TRUE(new_generation());
@@ -574,10 +728,10 @@ TEST_F(ReShadeBridgeGpu, PublisherIdentityStaysStableAcrossFramesAndTracksResour
   EXPECT_EQ(first->producer_process_id, GetCurrentProcessId());
   EXPECT_EQ(first->producer_creation_time, creation_time);
   EXPECT_EQ(first->resource_generation, state->metadata.generation);
-  ASSERT_TRUE(await_free());
+  ASSERT_TRUE(await_consumed());
 
   publish(2);
-  ASSERT_TRUE(await_free());
+  ASSERT_TRUE(await_consumed());
   const auto second = poll();
   ASSERT_TRUE(second);
   EXPECT_EQ(second->sequence, 2u);
@@ -735,7 +889,7 @@ TEST_F(ReShadeBridgeGpu, PreservesScRgbHighlightsAndUsesDeclaredTransferAcrossGe
   const auto hdr_frame = await_frame();
   ASSERT_TRUE(hdr_frame);
   EXPECT_TRUE(hdr_frame->linear);
-  ASSERT_TRUE(await_free());
+  ASSERT_TRUE(await_consumed());
   expect_pixel_bytes(hdr_frame->texture, DXGI_FORMAT_R16G16B16A16_FLOAT, source_pixels.data(), row_pitch);
 
   // Color declarations cannot be changed underneath an existing resource generation.
@@ -752,7 +906,7 @@ TEST_F(ReShadeBridgeGpu, PreservesScRgbHighlightsAndUsesDeclaredTransferAcrossGe
   const auto sdr_frame = await_frame();
   ASSERT_TRUE(sdr_frame);
   EXPECT_FALSE(sdr_frame->linear);
-  ASSERT_TRUE(await_free());
+  ASSERT_TRUE(await_consumed());
   expect_pixel_bytes(sdr_frame->texture, DXGI_FORMAT_R16G16B16A16_FLOAT, source_pixels.data(), row_pitch);
 }
 
@@ -904,7 +1058,7 @@ TEST_F(ReShadeBridgeGpu, ImportsD3D12Rgb10A2BothEyesWithoutWaitingForProducerFen
   ASSERT_TRUE(frame);
   EXPECT_EQ(frame->sequence, 1u);
   EXPECT_FALSE(frame->linear);
-  ASSERT_TRUE(await_free());
+  EXPECT_EQ(protocol::control_state(slot.control), protocol::slot_state::reading);
   expect_pixels(frame->texture, DXGI_FORMAT_R10G10B10A2_UNORM, 0xC00003FF, 0xFFF00000);
 }
 

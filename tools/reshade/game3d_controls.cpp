@@ -108,6 +108,8 @@ namespace sunshine_game3d {
         // game's UIFlattenStillScreens is 1; by default it only logs them.
         policy->set_still_flatten(load_still_flatten(global));
         sunshine_log::message(reshade::log::level::info, still_flatten_log_text(policy->still_flatten()).c_str());
+        // The add-on's Diagnostics switch (game3d_diagnostics.h), process-wide.
+        sunshine_log::message(reshade::log::level::info, diagnostics_log_text(load_diagnostics(global)).c_str());
         if (restored.discarded) {
           const auto message = "Sunshine UI protection: discarded " + std::to_string(restored.discarded) +
             " legacy UI trust entries (" + restored.discarded_text +
@@ -529,6 +531,15 @@ namespace sunshine_game3d {
             "Discover automatically\0Current color alpha\0Streamline UI alpha\0Streamline UI color alpha\0Streamline real-input alpha\0HUDless color difference\0"))
           ui_input::select_source(runtime, static_cast<ui_qualification::choice>(choice));
         ImGui::SetItemTooltip("Automatic discovery chooses a usable UI source. Select a specific source to troubleshoot it; selection does not bypass capture or quality checks.\nSelected: %s", ui_qualification::name(source.selected));
+        // The process-wide Diagnostics switch (game3d_diagnostics.h).
+        control_row(diagnostics::label);
+        bool diagnostics_on = diagnostics::enabled();
+        if (ImGui::Checkbox("##Diagnostics", &diagnostics_on)) {
+          global_config_backend global;
+          if (edit_diagnostics(diagnostics_on, global))
+            sunshine_log::message(reshade::log::level::info, diagnostics_log_text(diagnostics_on).c_str());
+        }
+        ImGui::SetItemTooltip("%s", diagnostics::tooltip);
       }
       ImGui::EndTable();
     }
@@ -587,6 +598,17 @@ namespace sunshine_game3d {
     const auto data = get_state(runtime);
     config_backend config {runtime};
     return edit_enabled(*data, enabled != FALSE, config) ? TRUE : FALSE;
+  }
+
+  // The Diagnostics switch as the panel edits it (saved, logged), for fixtures
+  // that observe diagnostic-only output such as the S3 shadow.
+  extern "C" __declspec(dllexport) BOOL SunshineGame3DTestSetDiagnostics(BOOL enabled) {
+    std::lock_guard<std::recursive_mutex> lock(state_mutex);
+    if (!registered) return FALSE;
+    global_config_backend global;
+    if (edit_diagnostics(enabled != FALSE, global))
+      sunshine_log::message(reshade::log::level::info, diagnostics_log_text(enabled != FALSE).c_str());
+    return TRUE;
   }
 
   extern "C" __declspec(dllexport) BOOL SunshineGame3DTestSave(api::effect_runtime *runtime) {

@@ -259,19 +259,22 @@ namespace {
   // selection revision 4 (12 decision texels) the pre-UI pixel rows 128-143
   // (144 rows in all) and decision texel 11, and selection revision 5 (13
   // decision texels) H2's stillness rows from 144 (160 rows in all) and
-  // decision texel 12.
+  // decision texel 12. A shader with the tile-parts marker counts each tile in
+  // that many groups (the dispatch's z) at columns 16 apart.
   struct sizes_t {
     UINT statistics_rows, decision_texels;
     bool scene;
+    UINT tile_parts;
   };
   sizes_t detection_sizes(const std::string &source) {
     auto texels = sunshine_game3d::shader_marker(source, contract::decision_texels_marker);
     const auto images = sunshine_game3d::shader_marker(source, contract::scene_evidence_images_marker);
     if (!texels) texels = contract::default_decision_texels;
     const bool scene = images == contract::max_scene_evidence_images && texels >= contract::scene_decision_texels;
-    if (texels > contract::max_decision_texels || (images && !scene))
+    const auto parts = sunshine_game3d::shader_marker(source, contract::tile_parts_marker);
+    if (texels > contract::max_decision_texels || (images && !scene) || parts > contract::max_tile_parts)
       throw std::runtime_error("unsupported detection size markers in the shader");
-    return {std::max(80u, contract::statistics_rows(images, texels)), std::max(6u, texels), scene};
+    return {std::max(80u, contract::statistics_rows(images, texels)), std::max(6u, texels), scene, std::max(parts, 1u)};
   }
 
   struct outcome {
@@ -523,7 +526,8 @@ namespace {
       shaders.compare = compile(gpu, shader_source, "SunshineSceneCompareCS", width, height, color);
       shaders.evidence = compile(gpu, shader_source, "SunshineSceneEvidenceCS", width, height, color);
     }
-    auto statistics = target(gpu, 16, sizes.statistics_rows, DXGI_FORMAT_R32G32B32A32_UINT);
+    auto statistics = target(gpu, contract::statistics_columns(sizes.tile_parts), sizes.statistics_rows,
+      DXGI_FORMAT_R32G32B32A32_UINT);
     texture_t cells;
     if (sizes.scene) cells = target(gpu, contract::scene::cells_x, contract::scene::cells_y, DXGI_FORMAT_R32G32B32A32_UINT);
     auto decision = target(gpu, sizes.decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT);
@@ -589,7 +593,8 @@ namespace {
     auto cb = constant_buffer(&constants, sizeof(constants));
 
     auto &context = *gpu.context.Get();
-    const auto stage = [&](ID3D11ComputeShader *shader, ID3D11ShaderResourceView *t10, UINT uav_slot, ID3D11UnorderedAccessView *uav, UINT x, UINT y) {
+    const auto stage = [&](ID3D11ComputeShader *shader, ID3D11ShaderResourceView *t10, UINT uav_slot, ID3D11UnorderedAccessView *uav, UINT x, UINT y,
+        UINT z = 1) {
       std::array<ID3D11ShaderResourceView *, 15> views{};
       views[0] = paired_color.gpu.srv.Get();
       views[1] = depth.srv.Get();
@@ -603,13 +608,13 @@ namespace {
       ID3D11Buffer *buffers[3]{geometry.Get(), nullptr, cb.Get()};
       context.CSSetConstantBuffers(0, 3, buffers);
       context.CSSetUnorderedAccessViews(uav_slot, 1, &uav, nullptr);
-      context.Dispatch(x, y, 1);
+      context.Dispatch(x, y, z);
       ID3D11UnorderedAccessView *none = nullptr;
       context.CSSetUnorderedAccessViews(uav_slot, 1, &none, nullptr);
       std::array<ID3D11ShaderResourceView *, 15> cleared{};
       context.CSSetShaderResources(0, UINT(cleared.size()), cleared.data());
     };
-    stage(shaders.tiles.Get(), nullptr, 6, statistics.uav.Get(), 16, 16);
+    stage(shaders.tiles.Get(), nullptr, 6, statistics.uav.Get(), 16, 16, sizes.tile_parts);
     stage(shaders.reduce.Get(), statistics.srv.Get(), 6, decision.uav.Get(), 1, 1);
     stage(shaders.mask.Get(), decision.srv.Get(), 0, mask.uav.Get(), (width + 7) / 8, (height + 7) / 8);
     // The hidden-scene evidence of a sample frame: measured after the

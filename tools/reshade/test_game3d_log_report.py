@@ -528,6 +528,28 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(expected['Present hitches'].status, 'PASS')
         self.assertEqual(run(BASE + [line('10:00:12', hitch, 'WARN')])['Present hitches'].status, 'WARN')
 
+    def test_depth_flip_hitches_are_named(self):
+        hitch = '[Sunshine 3D] Sunshine Game 3D hitch: generic challenger release took 21.5 ms on the present thread'
+        checks = run(BASE + [line('10:00:12', hitch, 'WARN')])
+        self.assertEqual(checks['Present hitches'].status, 'WARN')
+        self.assertIn('generic challenger release 21.5 ms (depth-source flip step)', checks['Present hitches'].times[0])
+
+    def test_diagnostics_off_reports_no_gpu_timing_without_a_warning(self):
+        timing = ('[Sunshine 3D] Sunshine Game 3D timing: presents=600 cpu_ms={mean=0.400 max=1.200} '
+                  'cpu_worst_ms={setup=0.1 depth=0.1 ui=0.1 render=0.1 export=0.1} gpu_frames=0 gpu_ms mean/max={'
+                  'total=0.000/0.000 inputs=0.000/0.000} gpu_profile=disabled dropped_fence_pending=0 '
+                  'dropped_unresolved=0 incomplete=0')
+        off = run(BASE + [line('10:00:01', '[Sunshine 3D] Sunshine Game 3D: diagnostics off (Diagnostics=0)'),
+                          line('10:00:12', timing)])
+        self.assertEqual(off['Game 3D cost'].status, 'INFO')
+        self.assertIn('GPU timing off (Diagnostics=0)', off['Game 3D cost'].detail)
+        self.assertIn('Diagnostics=0', off['Diagnostics'].detail)
+        self.assertNotIn('UI identity (S3)', off)
+        on = run(BASE + [line('10:00:01', '[Sunshine 3D] Sunshine Game 3D: diagnostics on (Diagnostics=1)'),
+                         line('10:00:12', timing.replace('gpu_profile=disabled', 'gpu_profile=ready'))])
+        self.assertEqual(on['Game 3D cost'].status, 'WARN')
+        self.assertIn('Diagnostics=1', on['Diagnostics'].detail)
+
     def test_blocked_captures_and_copyless_ngx_are_named(self):
         checks = run(BASE + [
             line('10:00:06', '[Sunshine 3D] Sunshine Streamline depth: incomplete_state; source_selected=1'),

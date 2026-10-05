@@ -61,6 +61,7 @@ extern "C" __declspec(dllexport) int SunshineReceiverTestPoll(void *opaque, suns
     }
     output->texture = frame->texture;
     output->linear = frame->linear;
+    output->transfer = static_cast<std::uint32_t>(frame->transfer);
     output->sequence = frame->sequence;
     output->timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(frame->timestamp.time_since_epoch()).count();
     return 1;

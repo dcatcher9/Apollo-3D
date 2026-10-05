@@ -11,12 +11,37 @@
 #include <reshade.hpp>
 #include "async_log.h"
 #include "game3d_slow_step.h"
+#include <d3d12.h>
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include <vector>
 
 namespace sunshine_streamline::provider {
   namespace api = reshade::api;
+  // A provider handoff (one API source released, another about to establish
+  // on the same queue) keeps API ownership in mono at most this long instead
+  // of starting the generic selector (docs/reshade-sbs.md, depth handoff).
+  constexpr std::uint64_t handoff_hold_ms = 250;
+  namespace handoff_contract {
+    constexpr handoff_evidence base{true, true, 1200, 1000, 1920, 1080, 1920, 1080};
+    constexpr handoff_evidence with(handoff_evidence e, int field) {
+      switch (field) {
+        case 0: e.previously_owned = false; break;
+        case 1: e.evaluation_live = false; break;
+        case 2: e.now_ms = 1251; break;
+        case 3: e.associated_ms = 0; break;
+        case 4: e.width = 1280; break;
+        case 5: e.now_ms = 999; break;
+        default: e.now_ms = 1250; break;
+      }
+      return e;
+    }
+    static_assert(handoff_hold(base, handoff_hold_ms) && handoff_hold(with(base, 6), handoff_hold_ms));
+    static_assert(!handoff_hold(with(base, 0), handoff_hold_ms) && !handoff_hold(with(base, 1), handoff_hold_ms) &&
+      !handoff_hold(with(base, 2), handoff_hold_ms) && !handoff_hold(with(base, 3), handoff_hold_ms) &&
+      !handoff_hold(with(base, 4), handoff_hold_ms) && !handoff_hold(with(base, 5), handoff_hold_ms));
+  }
   enum class display_status { not_attempted, ready, reused_depth, texture_creation_failed, view_creation_failed, waiting_capture };
   struct observation_loss_lookup {
     std::uint64_t requested_revision{};
@@ -46,6 +71,31 @@ namespace sunshine_streamline::provider {
       api::resource_view display_view{}, bound_view{};
       sunshine_depth::ready_uniform_cache<api::effect_uniform_variable> depth_ready;
       std::uint32_t display_width{}, display_height{}, display_format{};
+      // Display storage per shape/format (NGX and Streamline usually differ),
+      // so a provider flip reuses the other entry instead of reallocating.
+      // The active entry is mirrored in display_texture/display_view above.
+      struct display_entry {
+        api::resource texture{};
+        api::resource_view view{};
+        std::uint32_t width{}, height{}, format{};
+      };
+      std::array<display_entry, 2> displays{};
+      // The view last passed to update_texture_bindings by this provider.
+      api::resource_view effects_view{};
+      // Replaced display storage, destroyed once the runtime queue passed a
+      // fence signaled on a later Present (never a CPU wait on this path).
+      struct retired_display {
+        api::resource texture{};
+        api::resource_view view{};
+        std::uint64_t present{}, fence_value{};
+      };
+      std::vector<retired_display> retired_displays;
+      api::fence retire_fence{};
+      std::uint64_t retire_value{};
+      // Handoff hysteresis: the last associated Present and its color size.
+      std::uint64_t associated_tick{};
+      std::uint32_t associated_width{}, associated_height{};
+      bool handoff_hold{};
       sunshine_diagnostics::log_gate logging;
       depth_capture::status last_status{depth_capture::status::inactive};
       depth_capture::capture_failure last_capture_failure{depth_capture::capture_failure::none};
@@ -136,16 +186,56 @@ namespace sunshine_streamline::provider {
       // ReShade 6.8 waits for the whole queue on every update, even if the
       // handle is unchanged. Keep the descriptor stable while pixels rotate.
       if (view != data.bound_view) {
+        const sunshine_game3d::slow_step step("API depth binding");
         runtime->update_texture_bindings("DEPTH", view, view);
         data.bound_view = view;
+        data.effects_view = view;
       }
       set_depth_ready(runtime, ready);
     }
+    // Requires an idle runtime queue (teardown only).
     void destroy_display(api::effect_runtime *runtime, state &data) {
       data.cache.invalidate("display_recreated");
-      if (data.display_view.handle) runtime->get_device()->destroy_resource_view(data.display_view);
-      if (data.display_texture.handle) runtime->get_device()->destroy_resource(data.display_texture);
+      auto *device = runtime->get_device();
+      for (auto &entry : data.displays) {
+        if (entry.view.handle) device->destroy_resource_view(entry.view);
+        if (entry.texture.handle) device->destroy_resource(entry.texture);
+        entry = {};
+      }
+      for (auto &entry : data.retired_displays) {
+        if (entry.view.handle) device->destroy_resource_view(entry.view);
+        if (entry.texture.handle) device->destroy_resource(entry.texture);
+      }
+      data.retired_displays.clear();
+      if (data.retire_fence.handle) device->destroy_fence(data.retire_fence);
+      data.retire_fence = {};
       data.display_view = {}; data.display_texture = {};
+      data.display_width = data.display_height = data.display_format = 0;
+    }
+    // Once per Present. A retired display is fenced on a Present after the one
+    // that replaced it, when every earlier read of it (effects, renderer,
+    // sampler) is already submitted on this queue; it is destroyed once that
+    // fence completed. Signaled natively, so ReShade's immediate list is not
+    // flushed early.
+    void collect_displays(api::effect_runtime *runtime, state &data, std::uint64_t present) {
+      if (data.retired_displays.empty()) return;
+      auto *device = runtime->get_device();
+      if (!data.retire_fence.handle && !device->create_fence(0, api::fence_flags::none, &data.retire_fence)) return;
+      auto *fence = reinterpret_cast<ID3D12Fence *>(data.retire_fence.handle);
+      auto *queue = reinterpret_cast<ID3D12CommandQueue *>(runtime->get_command_queue()->get_native());
+      const auto completed = fence->GetCompletedValue();
+      auto keep = data.retired_displays.begin();
+      for (auto &entry : data.retired_displays) {
+        if (!entry.fence_value && present > entry.present && SUCCEEDED(queue->Signal(fence, data.retire_value + 1)))
+          entry.fence_value = ++data.retire_value;
+        if (entry.fence_value && completed != UINT64_MAX && completed >= entry.fence_value) {
+          if (entry.view.handle) device->destroy_resource_view(entry.view);
+          if (entry.texture.handle) device->destroy_resource(entry.texture);
+          continue;
+        }
+        *keep++ = entry;
+      }
+      data.retired_displays.erase(keep, data.retired_displays.end());
     }
     const char *name(display_status value) {
       switch (value) {
@@ -168,6 +258,7 @@ namespace sunshine_streamline::provider {
     }
     void trace_readiness(api::effect_runtime *runtime, state &data, const readiness_evidence &e,
         bool ready, const char *why) {
+      const sunshine_game3d::slow_step step("depth readiness trace");
       const bool changed = data.traced_ready != ready;
       data.traced_ready = ready;
       if (!changed) return;
@@ -267,26 +358,55 @@ namespace sunshine_streamline::provider {
       data.suppressed_trace_episodes = 0;
       if (ready) data.traced_loss = false;
     }
-    display_status prepare_display(api::effect_runtime *runtime, state &data, const depth_capture::packet &packet) {
+    void activate_display(state &data, const state::display_entry &entry) {
+      data.display_texture = entry.texture; data.display_view = entry.view;
+      data.display_width = entry.width; data.display_height = entry.height; data.display_format = entry.format;
+    }
+    display_status prepare_display(api::effect_runtime *runtime, state &data, const depth_capture::packet &packet,
+        std::uint64_t present) {
+      const auto matches = [&](const state::display_entry &entry) {
+        return entry.texture.handle && entry.width == packet.width && entry.height == packet.height && entry.format == packet.format;
+      };
       if (data.display_texture.handle && data.display_width == packet.width && data.display_height == packet.height &&
           data.display_format == packet.format) return display_status::ready;
       // Resolution/format changes are rare lifecycle events. Ordinary rotation
-      // never calls wait_idle, allocates a texture or changes descriptors.
-      if (data.display_texture.handle) {
-        runtime->get_command_queue()->wait_idle();
-        bind(runtime, data, {}, false);
-        destroy_display(runtime, data);
+      // never allocates a texture or changes descriptors. A provider flip
+      // (NGX and Streamline usually differ in shape or format) switches to the
+      // other retained entry; the cache never reuses the other entry's pixels.
+      for (const auto &entry : data.displays) if (matches(entry)) {
+        activate_display(data, entry);
+        data.cache.invalidate("display_switched");
+        return display_status::ready;
       }
+      // An empty entry, else the inactive one. The active entry is retained.
+      auto *victim = &data.displays[0];
+      for (auto &entry : data.displays) {
+        if (!entry.texture.handle) { victim = &entry; break; }
+        if (entry.texture != data.display_texture) victim = &entry;
+      }
+      if (victim->texture.handle) {
+        // Effects can still name this view only if it was the last binding.
+        if (victim->view == data.effects_view) bind(runtime, data, {}, false);
+        data.retired_displays.push_back({victim->texture, victim->view, present, 0});
+        if (victim->texture == data.display_texture) { data.display_texture = {}; data.display_view = {}; }
+        *victim = {};
+      }
+      data.cache.invalidate("display_recreated");
       api::resource_desc desc(packet.width, packet.height, 1, 1, static_cast<api::format>(packet.format), 1,
         api::memory_heap::default_, api::resource_usage::shader_resource | api::resource_usage::copy_dest);
-      if (!runtime->get_device()->create_resource(desc, nullptr, api::resource_usage::shader_resource, &data.display_texture)) return display_status::texture_creation_failed;
+      state::display_entry created;
+      if (!runtime->get_device()->create_resource(desc, nullptr, api::resource_usage::shader_resource, &created.texture))
+        return display_status::texture_creation_failed;
       api::resource_view_desc view(static_cast<api::format>(packet.srv_format));
       view.type = api::resource_view_type::texture_2d;
-      if (!runtime->get_device()->create_resource_view(data.display_texture, api::resource_usage::shader_resource, view, &data.display_view)) {
-        destroy_display(runtime, data);
+      if (!runtime->get_device()->create_resource_view(created.texture, api::resource_usage::shader_resource, view, &created.view)) {
+        // Never read or bound: no GPU work references it yet.
+        runtime->get_device()->destroy_resource(created.texture);
         return display_status::view_creation_failed;
       }
-      data.display_width = packet.width; data.display_height = packet.height; data.display_format = packet.format;
+      created.width = packet.width; created.height = packet.height; created.format = packet.format;
+      *victim = created;
+      activate_display(data, created);
       return display_status::ready;
     }
   }
@@ -302,7 +422,9 @@ namespace sunshine_streamline::provider {
   void initialize(api::effect_runtime *runtime) { runtime->create_private_data<state>(); }
   void destroy(api::effect_runtime *runtime) {
     if (auto *data = runtime->get_private_data<state>()) {
-      if (data->display_texture.handle) runtime->get_command_queue()->wait_idle();
+      const bool owned = std::any_of(data->displays.begin(), data->displays.end(),
+        [](const auto &entry) { return entry.texture.handle != 0; }) || !data->retired_displays.empty();
+      if (owned) runtime->get_command_queue()->wait_idle();
       destroy_display(runtime, *data);
     }
     runtime->destroy_private_data<state>();
@@ -320,6 +442,10 @@ namespace sunshine_streamline::provider {
       data->source_metadata = {};
       data->source_policy = {};
       data->bound_view = {};
+      data->effects_view = {};
+      data->associated_tick = 0;
+      data->associated_width = data->associated_height = 0;
+      data->handoff_hold = false;
       // The sampler independently retains any submitted slot until completion.
       data->pending_id = 0;
       trace_readiness(runtime, *data, evidence, false, "runtime_reload");
@@ -384,7 +510,8 @@ namespace sunshine_streamline::provider {
     if (!data) return false;
     auto evidence = before_decision(*data, present);
     const bool previously_owned = data->owns_pass;
-    data->open = data->owns_pass = false;
+    const bool previously_held = data->handoff_hold;
+    data->open = data->owns_pass = data->handoff_hold = false;
     data->frame = {}; data->output = {};
     if (!allowed || runtime->get_device()->get_api() != api::device_api::d3d12) {
       data->source_policy = {};
@@ -392,22 +519,35 @@ namespace sunshine_streamline::provider {
       data->presentations.reset();
       data->presentation_source = {};
       data->bound_view = {};
+      data->associated_tick = 0;
       trace_readiness(runtime, *data, evidence, false, data->cache.reason());
       return false;
     }
-    depth_capture::observe_command(commands->get_native());
-    depth_capture::observe_queue(runtime->get_command_queue()->get_native());
-    depth_capture::observe_runtime_list(runtime->get_command_queue()->get_immediate_command_list()->get_native(),
-      runtime->get_command_queue()->get_native());
+    {
+      const sunshine_game3d::slow_step step("depth display retirement");
+      collect_displays(runtime, *data, present);
+    }
+    {
+      // The effects list, ReShade's immediate list and their queue: once per
+      // Present, one interface check each and one capture-lock round trip.
+      const sunshine_game3d::slow_step step("depth present observation");
+      auto *queue = runtime->get_command_queue();
+      depth_capture::observe_present(commands->get_native(), queue->get_native(),
+        queue->get_immediate_command_list()->get_native());
+    }
     {
       // Capture admissions by ReShade's list lifecycle, which decides coverage.
+      const sunshine_game3d::slow_step step("depth list coverage report");
       char text[256];
       if (depth_capture::list_coverage_report(GetTickCount64(), text, sizeof(text)))
         sunshine_log::message(reshade::log::level::info, text);
     }
     frame_generation_snapshot fg_source;
     frame_generation_query_status fg_status;
-    query_frame_generation(UINT32_MAX, fg_source, &fg_status);
+    {
+      const sunshine_game3d::slow_step step("frame generation query");
+      query_frame_generation(UINT32_MAX, fg_source, &fg_status);
+    }
     const auto selection = data->source_policy.update(fg_status, fg_source);
     evidence.fg = fg_source;
     evidence.fg_query = fg_status;
@@ -460,10 +600,37 @@ namespace sunshine_streamline::provider {
     // a supported API has identified a valid source on this queue, a missing frame stays
     // mono; it cannot silently select another encoding and recalibrate its gain.
     const bool associated = selection.require_frame_generation || depth_capture::provider_active(runtime->get_command_queue()->get_native());
+    std::uint32_t frame_width{}, frame_height{};
+    runtime->get_screenshot_width_and_height(&frame_width, &frame_height);
+    const auto handoff_tick = GetTickCount64();
+    if (available || associated) {
+      data->associated_tick = handoff_tick;
+      data->associated_width = frame_width; data->associated_height = frame_height;
+    }
+    // Handoff hysteresis: a provider flip (Streamline FG scope released while
+    // NGX, or the other way round, is evaluating and about to establish on
+    // this queue) keeps API ownership in mono instead of enabling the generic
+    // selector, its challenger and two effect rebinds for a few Presents.
+    // Bounded by handoff_hold_ms after the last associated Present, the same
+    // runtime (reload resets it) and swapchain size, and live evidence of an
+    // API evaluation. An explicit release with no other evaluation falls back
+    // at once, as before.
+    const bool hold = !available && !associated && [&] {
+      handoff_evidence e;
+      e.previously_owned = previously_owned || previously_held;
+      e.now_ms = handoff_tick; e.associated_ms = data->associated_tick;
+      e.width = frame_width; e.height = frame_height;
+      e.associated_width = data->associated_width; e.associated_height = data->associated_height;
+      // Queried last: the capture lock only when everything else holds.
+      e.evaluation_live = handoff_hold({e.previously_owned, true, e.now_ms, e.associated_ms, e.width, e.height,
+        e.associated_width, e.associated_height}, handoff_hold_ms) && depth_capture::evaluation_live(handoff_tick, handoff_hold_ms);
+      return handoff_hold(e, handoff_hold_ms);
+    }();
     if (!available && !associated) {
-      data->cache.invalidate("source_not_associated");
+      data->cache.invalidate(hold ? "source_handoff" : "source_not_associated");
       data->presentations.reset();
       data->presentation_source = {};
+      if (!hold) data->associated_tick = 0;
       if (data->logging.due(GetTickCount64(), status != data->last_status, previously_owned)) {
         // The initial failure needs the same handoff evidence as an established
         // provider. Otherwise a valid captured depth rejected on another queue
@@ -478,8 +645,24 @@ namespace sunshine_streamline::provider {
           unsigned(capture_info.producer_recording_retired),
           unsigned(capture_info.finished), unsigned(capture_info.success), unsigned(capture_info.submitted),
           unsigned(capture_info.invalid), depth_capture::name(capture_info.failure));
+        if (hold) {
+          // The same evidence; ownership is held (mono) for the handoff.
+          const auto suffix = std::strstr(text, "; using generic depth fallback");
+          if (suffix) std::snprintf(suffix, sizeof(text) - std::size_t(suffix - text),
+            "; holding API ownership (mono) for a provider handoff, at most %llu ms",
+            static_cast<unsigned long long>(handoff_hold_ms));
+        }
         sunshine_log::message(reshade::log::level::info, text);
         data->last_status = status;
+      }
+      if (hold) {
+        data->owns_pass = data->open = data->handoff_hold = true;
+        data->output.provided = data->source_metadata;
+        data->output.projection = projection(data->source_metadata);
+        // The stable descriptor stays bound; readiness is withdrawn.
+        bind(runtime, *data, data->display_view, false);
+        trace_readiness(runtime, *data, evidence, false, "source_handoff");
+        return true;
       }
       data->bound_view = {};
       trace_readiness(runtime, *data, evidence, false, "source_not_associated");
@@ -523,7 +706,7 @@ namespace sunshine_streamline::provider {
     if (available) display = display_status::waiting_capture;
     if (update.action == depth_capture::display_action::copy_fresh &&
         (display = [&] { const sunshine_game3d::slow_step step("depth display preparation");
-          return prepare_display(runtime, *data, data->frame); }()) == display_status::ready) {
+          return prepare_display(runtime, *data, data->frame, present); }()) == display_status::ready) {
       const auto &packet = data->frame;
       copied = [&] { const sunshine_game3d::slow_step step("depth display copy");
         return sunshine_depth::copy_selected_depth(runtime, commands, packet, data->display_texture, captured, &consumer); }();

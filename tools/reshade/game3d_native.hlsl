@@ -21,6 +21,15 @@
 #define SUNSHINE_LIMITER_LINE_GROUPS 8
 // One pass renders both eyes straight into the side-by-side target.
 #define SUNSHINE_PACKED_EYES 1
+// The mono pack (SunshineAutomaticMono) and the depth preview read no depth
+// conditioning, so the renderer may skip it for a pack that shows either.
+#define SUNSHINE_MONO_SKIPS_CONDITIONING 1
+// An HDR10 (PQ) source is decoded per tap where the pack interpolates it
+// (SunshineSourceLinear): no full-frame linearization pass and no FP16 linear
+// texture. SunshineRenderPackedPQPS writes the 10-bit PQ export (Rec.2020,
+// ST 2084) encoded exactly as the host's scRGBTo2100PQ (docs/reshade-sbs.md,
+// PQ wire transfer).
+#define SUNSHINE_PQ_PER_TAP 1
 // UI pinning groups own eight adjacent rows.
 #define SUNSHINE_UI_PIN_LINE_GROUPS 8
 // UI mask alpha pins with weight saturate(gain * alpha) through a soft band
@@ -31,6 +40,10 @@
 // UI detection flags and decision texels).
 #define SUNSHINE_UI_DECISION_TEXELS 13
 #define SUNSHINE_UI_SCENE_EVIDENCE_IMAGES 2
+// Each of the 16x16 statistics tiles is counted by this many groups (the
+// tiles pass's group z); part k of tile (x, y) stores its counts at
+// statistics column x + 16k, and the reduce sums the parts.
+#define SUNSHINE_UI_DETECTION_TILE_PARTS 4
 // Candidate layout 2 (UI framework S1, E1), mirrored from
 // game3d_ui_detection_contract.h: every candidate has its own slot and bit in
 // Sunshine_UICandidates and Sunshine_UIAcceptedCandidates; the offscreen UI
@@ -341,21 +354,20 @@ float SunshineSelectedUIAlpha(uint2 coordinate)
 
 // Auto validates each CURRENT pair on the GPU. No prior CPU observation can
 // authorize a changed candidate: session acceptance only names the sources
-// that carry UI coverage, and this frame's own pixels are the mask.
-float4 SunshineUIDetectionAlpha(uint2 xy)
+// that carry UI coverage, and this frame's own pixels are the mask. The
+// tiles pass reads UIAlpha (t11 .r), the UI color tag (t12 .a), the
+// Backbuffer (t13 .a) and the current alpha (t0 .a).
+float SunshineHUDlessDifferenceOf(float3 a, float3 b, out bool valid)
 {
-    int3 at = int3(xy, 0);
-    return float4(SunshineUIDedicatedAlpha.Load(at).r, SunshineUIColorAlpha.Load(at).a,
-        SunshineUIBackbufferAlpha.Load(at).a, SunshineSourceSampler.Load(at).a);
-}
-float SunshineHUDlessDifference(uint2 xy, out bool valid)
-{
-    float3 a = SunshineSourceSampler.Load(int3(xy, 0)).rgb;
-    float3 b = SunshineHUDless.Load(int3(xy, 0)).rgb;
     valid = all(isfinite(a)) && all(isfinite(b));
     // scRGB is unbounded linear light; use a relative tolerance above one.
     float scale = BUFFER_COLOR_SPACE == 2 ? max(1.0, max(max(abs(a.r), abs(a.g)), abs(a.b))) : 1.0;
     return max(max(abs(a.r-b.r), abs(a.g-b.g)), abs(a.b-b.b)) / scale;
+}
+float SunshineHUDlessDifference(uint2 xy, out bool valid)
+{
+    return SunshineHUDlessDifferenceOf(SunshineSourceSampler.Load(int3(xy, 0)).rgb, SunshineHUDless.Load(int3(xy, 0)).rgb,
+        valid);
 }
 // The pre-UI pixel counts of one pixel (H1 d): the offscreen UI layer's
 // colour against the presented colour at a coarse threshold, eight times
@@ -379,8 +391,10 @@ uint4 SunshinePreUIPixel(uint2 xy, float3 layer)
     uint presentedLit = presentedPeak > coarse ? 1u : 0u;
     return uint4(match, layerPeak > coarse ? 1u : 0u, presentedLit, match ? 0u : presentedLit);
 }
-// Each of the 16x16 tiles is one group of 256 threads; the integer counts do
-// not depend on how pixels are split among them.
+// Each of the 16x16 tiles is counted by SUNSHINE_UI_DETECTION_TILE_PARTS
+// groups of 256 threads (group z: part k takes the tile's runs of 16 rows
+// whose index is k modulo the parts); the integer counts do not depend on how
+// pixels are split among them, and the reduce adds the parts.
 groupshared uint4 SunshineUIDetectionCoverage[256];
 groupshared uint4 SunshineUIDetectionInvalid[256];
 groupshared uint4 SunshineUIDetectionDifference[256];
@@ -401,6 +415,8 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
 {
     uint2 first = group.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
     uint2 last = (group.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
+    // This part's statistics column.
+    const uint2 column = uint2(group.x + 16u * group.z, group.y);
     uint4 coverage = 0u, invalid = 0u, difference = 0u, lit = 0u, layerCounts = 0u, preUI = 0u;
     uint3 strong = 0u, contradicted = 0u;
     // An offscreen layer is UI only when blended over transparent black: its
@@ -418,9 +434,18 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
     const uint pairBits = SUNSHINE_UI_CANDIDATE_HUDLESS | SUNSHINE_UI_CANDIDATE_EXACT;
     const bool exactPair = (Sunshine_UICandidates & pairBits) == pairBits;
     const bool lateLayer = (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_LATE_LAYER) != 0u;
-    [loop] for (uint y = first.y + thread.y; y < last.y; y += 16u)
+    // A candidate that is not offered is not bound: uniform branches skip its
+    // loads and use the zero an unbound view reads. The presented color (t0)
+    // is always bound and always read.
+    const uint offered = Sunshine_UICandidates;
+    [loop] for (uint y = first.y + thread.y + 16u * group.z; y < last.y; y += 16u * SUNSHINE_UI_DETECTION_TILE_PARTS)
     [loop] for (uint x = first.x + thread.x; x < last.x; x += 16u) {
-        float4 a = SunshineUIDetectionAlpha(uint2(x,y));
+        const int3 at = int3(x, y, 0);
+        const float4 presentedPair = SunshineSourceSampler.Load(at);
+        float4 a = float4(0.0, 0.0, 0.0, presentedPair.a);
+        [branch] if (offered & SUNSHINE_UI_CANDIDATE_UI_ALPHA) a.x = SunshineUIDedicatedAlpha.Load(at).r;
+        [branch] if (offered & SUNSHINE_UI_CANDIDATE_UI_COLOR) a.y = SunshineUIColorAlpha.Load(at).a;
+        [branch] if (offered & SUNSHINE_UI_CANDIDATE_BACKBUFFER) a.z = SunshineUIBackbufferAlpha.Load(at).a;
         bool4 okay = isfinite(a) && a >= 0.0 && a <= 1.0;
         coverage += uint4(okay && a > 0.0);
         invalid += uint4(!okay);
@@ -429,7 +454,8 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         uint4 opaque = uint4(okay && a >= 254.0 / 255.0);
         lit.yzw += opaque.xyz;
         layerCounts.w += opaque.w;
-        float4 layer = SunshineUILayer.Load(int3(x, y, 0));
+        float4 layer = 0.0;
+        [branch] if (offered & SUNSHINE_UI_CANDIDATE_LAYER) layer = SunshineUILayer.Load(at);
         bool layerOkay = isfinite(layer.a) && layer.a >= 0.0 && layer.a <= 1.0;
         bool layerBound = premultiplied && max(max(layer.r, layer.g), layer.b) > layer.a * headroom + 4.0 / 255.0;
         // Covered: in (0, 1], which is finite and in range. FXC folds the
@@ -437,15 +463,16 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         layerCounts.x += layer.a > 0.0 && layer.a <= 1.0 ? 1u : 0u;
         layerCounts.y += !layerOkay || layerBound ? 1u : 0u;
         layerCounts.z += layerOkay && layer.a >= 254.0 / 255.0 ? 1u : 0u;
+        float3 hudless = 0.0;
+        [branch] if (offered & SUNSHINE_UI_CANDIDATE_HUDLESS) hudless = SunshineHUDless.Load(at).rgb;
         bool finite;
-        float delta = SunshineHUDlessDifference(uint2(x,y), finite);
+        float delta = SunshineHUDlessDifferenceOf(presentedPair.rgb, hudless, finite);
         bool unchanged = finite && delta <= Sunshine_UIDifferenceThreshold * .5;
         difference.x += finite && delta > Sunshine_UIDifferenceThreshold ? 1u : 0u;
         difference.y += finite ? 0u : 1u;
         difference.z += unchanged ? 1u : 0u;
         difference.w += 1u;
         // A HUD-less pixel that shows scene content rather than black.
-        float3 hudless = SunshineHUDless.Load(int3(x, y, 0)).rgb;
         bool litPixel = finite && max(max(abs(hudless.r), abs(hudless.g)), abs(hudless.b)) > Sunshine_UIDifferenceThreshold * 8.0;
         lit.x += litPixel ? 1u : 0u;
         // A2, one way: a strong pixel (alpha in [1/2, 1], so finite) of the
@@ -484,13 +511,13 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         GroupMemoryBarrierWithGroupSync();
     }
     if (!lane) {
-        SunshineAlphaCoverageStore[group.xy] = SunshineUIDetectionCoverage[0];
-        SunshineAlphaCoverageStore[group.xy + uint2(0,16)] = SunshineUIDetectionInvalid[0];
-        SunshineAlphaCoverageStore[group.xy + uint2(0,32)] = SunshineUIDetectionDifference[0];
-        SunshineAlphaCoverageStore[group.xy + uint2(0,48)] = SunshineUIDetectionLit[0];
-        SunshineAlphaCoverageStore[group.xy + uint2(0,64)] = SunshineUIDetectionLayer[0];
-        SunshineAlphaCoverageStore[group.xy + uint2(0,SUNSHINE_UI_JUDGMENT_ROW)] = uint4(SunshineUIDetectionStrong[0], 0u);
-        SunshineAlphaCoverageStore[group.xy + uint2(0,SUNSHINE_UI_JUDGMENT_ROW + 16u)] =
+        SunshineAlphaCoverageStore[column] = SunshineUIDetectionCoverage[0];
+        SunshineAlphaCoverageStore[column + uint2(0,16)] = SunshineUIDetectionInvalid[0];
+        SunshineAlphaCoverageStore[column + uint2(0,32)] = SunshineUIDetectionDifference[0];
+        SunshineAlphaCoverageStore[column + uint2(0,48)] = SunshineUIDetectionLit[0];
+        SunshineAlphaCoverageStore[column + uint2(0,64)] = SunshineUIDetectionLayer[0];
+        SunshineAlphaCoverageStore[column + uint2(0,SUNSHINE_UI_JUDGMENT_ROW)] = uint4(SunshineUIDetectionStrong[0], 0u);
+        SunshineAlphaCoverageStore[column + uint2(0,SUNSHINE_UI_JUDGMENT_ROW + 16u)] =
             uint4(SunshineUIDetectionContradicted[0], 0u);
     }
     // A second phase sums the pre-UI pixel counts in the coverage array once
@@ -505,10 +532,19 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
             if (lane < half_step) SunshineUIDetectionCoverage[lane] += SunshineUIDetectionCoverage[lane+half_step];
             GroupMemoryBarrierWithGroupSync();
         }
-        if (!lane) SunshineAlphaCoverageStore[group.xy + uint2(0,SUNSHINE_UI_PRE_UI_ROW)] = SunshineUIDetectionCoverage[0];
+        if (!lane) SunshineAlphaCoverageStore[column + uint2(0,SUNSHINE_UI_PRE_UI_ROW)] = SunshineUIDetectionCoverage[0];
     } else if (!lane) {
-        SunshineAlphaCoverageStore[group.xy + uint2(0,SUNSHINE_UI_PRE_UI_ROW)] = 0u;
+        SunshineAlphaCoverageStore[column + uint2(0,SUNSHINE_UI_PRE_UI_ROW)] = 0u;
     }
+}
+// One tile's counts in a statistics row: the sum of its parts (a statistics
+// texture only 16 columns wide reads zero beyond them).
+uint4 SunshineUIDetectionTileCounts(uint2 tile, uint row)
+{
+    uint4 sum = 0u;
+    [unroll] for (uint part = 0u; part < SUNSHINE_UI_DETECTION_TILE_PARTS; ++part)
+        sum += SunshineUIDetectionSampler.Load(int3(tile.x + 16u * part, tile.y + row, 0));
+    return sum;
 }
 // One thread per tile, then an exact group sum; thread 0 decides. The
 // decision is ui_selection::decide (game3d_ui_selection.h) line for line, in
@@ -582,15 +618,14 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
 {
     uint lane = thread.x;
     uint2 tile = uint2(lane % 16u, lane / 16u);
-    uint4 d = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 32u, 0));
-    SunshineUIDetectionCoverage[lane] = SunshineUIDetectionSampler.Load(int3(tile, 0));
-    SunshineUIDetectionInvalid[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 16u, 0));
+    uint4 d = SunshineUIDetectionTileCounts(tile, 32u);
+    SunshineUIDetectionCoverage[lane] = SunshineUIDetectionTileCounts(tile, 0u);
+    SunshineUIDetectionInvalid[lane] = SunshineUIDetectionTileCounts(tile, 16u);
     SunshineUIDetectionDifference[lane] = d;
-    SunshineUIDetectionLit[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 48u, 0));
-    SunshineUIDetectionLayer[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + 64u, 0));
-    SunshineUIDetectionStrong[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + SUNSHINE_UI_JUDGMENT_ROW, 0)).xyz;
-    SunshineUIDetectionContradicted[lane] =
-        SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + SUNSHINE_UI_JUDGMENT_ROW + 16u, 0)).xyz;
+    SunshineUIDetectionLit[lane] = SunshineUIDetectionTileCounts(tile, 48u);
+    SunshineUIDetectionLayer[lane] = SunshineUIDetectionTileCounts(tile, 64u);
+    SunshineUIDetectionStrong[lane] = SunshineUIDetectionTileCounts(tile, SUNSHINE_UI_JUDGMENT_ROW).xyz;
+    SunshineUIDetectionContradicted[lane] = SunshineUIDetectionTileCounts(tile, SUNSHINE_UI_JUDGMENT_ROW + 16u).xyz;
     SunshineUIDetectionMatching[lane] = d.w && d.z * 100u >= d.w * 99u ? 1u : 0u;
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint step = 128u; step; step >>= 1u) {
@@ -614,7 +649,7 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     uint4 pre_ui_sum = 0u;
     if (Sunshine_UIPreUIThreshold > 0.0) {
         GroupMemoryBarrierWithGroupSync();
-        SunshineUIDetectionCoverage[lane] = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + SUNSHINE_UI_PRE_UI_ROW, 0));
+        SunshineUIDetectionCoverage[lane] = SunshineUIDetectionTileCounts(tile, SUNSHINE_UI_PRE_UI_ROW);
         GroupMemoryBarrierWithGroupSync();
         [unroll] for (uint half_step = 128u; half_step; half_step >>= 1u) {
             if (lane < half_step) SunshineUIDetectionCoverage[lane] += SunshineUIDetectionCoverage[lane+half_step];
@@ -1293,11 +1328,52 @@ float3 SunshineDecodePQ(float3 code)
     return mul(rec2020_to_rec709, linear_2020) * 125.0;
 }
 
-float4 SunshinePreparePQPS(float4 position : SV_Position, float2 texcoord : TEXCOORD0) : SV_Target
+// The texel coordinate of a normalized coordinate, in 1/256 texels, as the
+// sampler forms it for bilinear filtering: the coordinate truncated to 21
+// fractional bits, then rounded to 1/256 texel (measured on NVIDIA; an exact
+// reproduction of that hardware's weights). size * q / 8192 in integers.
+int SunshineFilterCoordinate(float coordinate, uint size)
 {
-    float4 color = SunshineSourceSampler.Load(int3(int2(position.xy), 0));
-    color.rgb = SunshineDecodePQ(color.rgb);
-    return color;
+    uint q = uint(floor(saturate(coordinate) * 2097152.0));
+    return int((q >> 13u) * size + (((q & 8191u) * size + 4096u) >> 13u)) - 128;
+}
+
+// The PQ source decoded to scRGB at uv as the former linearization pass and a
+// linear-filter sample of its FP16 texture gave it: each tap decoded and held
+// in FP16, then interpolated with the sampler's weights. The pack reads rows
+// at texel centres, where the vertical weight is zero, so only the
+// horizontal tap pair is read.
+float3 SunshineSourceLinear(float2 uv)
+{
+    int x = SunshineFilterCoordinate(uv.x, BUFFER_WIDTH);
+    int row = clamp(SunshineFilterCoordinate(uv.y, BUFFER_HEIGHT) >> 8, 0, BUFFER_HEIGHT - 1);
+    int x0 = x >> 8;
+    float weight = float(x & 255) / 256.0;
+    float3 left = f16tof32(f32tof16(SunshineDecodePQ(
+        SunshineSourceSampler.Load(int3(clamp(x0, 0, BUFFER_WIDTH - 1), row, 0)).rgb)));
+    float3 right = f16tof32(f32tof16(SunshineDecodePQ(
+        SunshineSourceSampler.Load(int3(clamp(x0 + 1, 0, BUFFER_WIDTH - 1), row, 0)).rgb)));
+    return lerp(left, right, weight);
+}
+
+// The host's scRGBTo2100PQ (src_assets/.../include/common.hlsl: Rec709toRec2020,
+// 80 nits per scRGB unit, NitsToPQ), in the same operations and order.
+float3 SunshineHostPQ(float3 rgb)
+{
+    static const float3x3 rec709_to_rec2020 = {
+        0.627402, 0.329292, 0.043306,
+        0.069095, 0.919544, 0.011360,
+        0.016394, 0.088028, 0.895578
+    };
+    rgb = mul(rec709_to_rec2020, rgb);
+    rgb *= 80;
+    static const float m1 = 2610.0 / 4096.0 / 4;
+    static const float m2 = 2523.0 / 4096.0 * 128;
+    static const float c1 = 3424.0 / 4096.0;
+    static const float c2 = 2413.0 / 4096.0 * 32;
+    static const float c3 = 2392.0 / 4096.0 * 32;
+    float3 Lp = pow(saturate(rgb / 10000.0), m1);
+    return pow((c1 + c2 * Lp) / (1 + c3 * Lp), m2);
 }
 
 #endif
@@ -1794,6 +1870,15 @@ groupshared int2 SunshineUIPinAnchors[8u][8u];
 groupshared float2 SunshineUIPinSlack[8u][8u];
 groupshared int2 SunshineUIPinCarryAnchors[8u][8u];
 groupshared float2 SunshineUIPinCarrySlack[8u][8u];
+// Each pinning scan loads this many texels of its chunk (weights and field
+// values) before it walks them in order: the loads of a block are independent
+// and overlap, while the walk does exactly the arithmetic, in exactly the
+// order, of a texel-by-texel scan. A block's field values are the ones the
+// texel-by-texel scan would read: each texel is read before the scan writes it,
+// and the scan writes only texels it has passed. Finer chunks would shorten
+// the scans but move the carries' float comparisons, so the field would not
+// stay bit-identical.
+#define SUNSHINE_UI_PIN_BLOCK 16u
 
 float SunshineUIPinRamp(uint distance) {
     return 0.5 * float(distance) / float(BUFFER_WIDTH);
@@ -1986,15 +2071,24 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
     float2 slack = float2(-1.0, -1.0), reach = float2(0.0, 0.0);
     if (active) {
         [loop]
-        for (uint x = chunk_start; x < chunk_end; ++x) {
-            float weight = SunshineUIPinWeight(x, y);
-            if (weight <= 0.0) continue;
-            // Fully weighted UI has no slack whatever the field.
-            float r = weight >= 1.0 ? 0.0 : SunshineUIPinSlackOf(SunshineHostFinalStore[int2(uint2(x, y))], weight, plane);
-            float right = SunshineUIPinBound(r, chunk_end - 1u - x);
-            if (slack.x < 0.0 || right <= reach.x) { anchors.x = (int)x + 1; slack.x = r; reach.x = right; }
-            float left = SunshineUIPinBound(r, x - chunk_start);
-            if (slack.y < 0.0 || left < reach.y) { anchors.y = (int)x - 1; slack.y = r; reach.y = left; }
+        for (uint block = chunk_start; block < chunk_end; block += SUNSHINE_UI_PIN_BLOCK) {
+            float weights[SUNSHINE_UI_PIN_BLOCK], values[SUNSHINE_UI_PIN_BLOCK];
+            [unroll] for (uint i = 0u; i < SUNSHINE_UI_PIN_BLOCK; ++i) {
+                const uint at = min(block + i, chunk_end - 1u);
+                weights[i] = SunshineUIPinWeight(at, y);
+                values[i] = SunshineHostFinalStore[int2(uint2(at, y))];
+            }
+            [unroll] for (uint j = 0u; j < SUNSHINE_UI_PIN_BLOCK; ++j) {
+                const uint x = block + j;
+                float weight = weights[j];
+                if (x >= chunk_end || weight <= 0.0) continue;
+                // Fully weighted UI has no slack whatever the field.
+                float r = weight >= 1.0 ? 0.0 : SunshineUIPinSlackOf(values[j], weight, plane);
+                float right = SunshineUIPinBound(r, chunk_end - 1u - x);
+                if (slack.x < 0.0 || right <= reach.x) { anchors.x = (int)x + 1; slack.x = r; reach.x = right; }
+                float left = SunshineUIPinBound(r, x - chunk_start);
+                if (slack.y < 0.0 || left < reach.y) { anchors.y = (int)x - 1; slack.y = r; reach.y = left; }
+            }
         }
     }
     SunshineUIPinAnchors[lane][row] = anchors;
@@ -2054,24 +2148,36 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
         value = SunshineHostFinalStore[int2(uint2(chunk_end - 1u, y))];
         r_here = SunshineUIPinSlackOf(value, SunshineUIPinWeight(chunk_end - 1u, y), plane);
     }
+    // Blocks from the chunk's end: texel top - j reads its left neighbor
+    // top - j - 1, which the scan writes only after it.
     [loop]
-    for (int scan_x = (int)chunk_end - 1; scan_x >= (int)chunk_start; --scan_x) {
-        uint x = (uint)scan_x;
-        float previous = 0.0, r_previous = -1.0;
-        if (x > chunk_start) {
-            previous = SunshineHostFinalStore[int2(uint2(x - 1u, y))];
-            r_previous = SunshineUIPinSlackOf(previous, SunshineUIPinWeight(x - 1u, y), plane);
+    for (int top = (int)chunk_end - 1; top >= (int)chunk_start; top -= (int)SUNSHINE_UI_PIN_BLOCK) {
+        float previous_weights[SUNSHINE_UI_PIN_BLOCK], previous_values[SUNSHINE_UI_PIN_BLOCK];
+        [unroll] for (uint i = 0u; i < SUNSHINE_UI_PIN_BLOCK; ++i) {
+            const uint at = (uint)max(top - (int)i - 1, (int)chunk_start);
+            previous_weights[i] = SunshineUIPinWeight(at, y);
+            previous_values[i] = SunshineHostFinalStore[int2(uint2(at, y))];
         }
-        float collar = SunshineUIPinMinSlack(SunshineUIPinMinSlack(r_previous, r_here), r_next);
-        if (collar >= 0.0 && (best < 0.0 || collar <= SunshineUIPinBound(best, (uint)(anchor - scan_x)))) {
-            anchor = scan_x; best = collar;
+        [unroll] for (uint j = 0u; j < SUNSHINE_UI_PIN_BLOCK; ++j) {
+            const int scan_x = top - (int)j;
+            if (scan_x < (int)chunk_start) break;
+            uint x = (uint)scan_x;
+            float previous = 0.0, r_previous = -1.0;
+            if (x > chunk_start) {
+                previous = previous_values[j];
+                r_previous = SunshineUIPinSlackOf(previous, previous_weights[j], plane);
+            }
+            float collar = SunshineUIPinMinSlack(SunshineUIPinMinSlack(r_previous, r_here), r_next);
+            if (collar >= 0.0 && (best < 0.0 || collar <= SunshineUIPinBound(best, (uint)(anchor - scan_x)))) {
+                anchor = scan_x; best = collar;
+            }
+            flat = flat && best == 0.0 && anchor == scan_x;
+            if (best >= 0.0) {
+                float pinned = SunshineUIPinClamp(value, plane, best, (uint)(anchor - scan_x));
+                if (asuint(pinned) != asuint(value)) SunshineHostFinalStore[int2(uint2(x, y))] = pinned;
+            }
+            r_next = r_here; r_here = r_previous; value = previous;
         }
-        flat = flat && best == 0.0 && anchor == scan_x;
-        if (best >= 0.0) {
-            float pinned = SunshineUIPinClamp(value, plane, best, (uint)(anchor - scan_x));
-            if (asuint(pinned) != asuint(value)) SunshineHostFinalStore[int2(uint2(x, y))] = pinned;
-        }
-        r_next = r_here; r_here = r_previous; value = previous;
     }
     // A chunk that is the plane throughout has nothing left to bound.
     if (flat) return;
@@ -2084,23 +2190,34 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
     anchor = carry_anchor.x;
     best = carry_slack.x;
     float w_previous = 0.0, w_here = chunk_start < chunk_end ? SunshineUIPinWeight(chunk_start, y) : 0.0;
+    // Blocks from the chunk's start: texel x is read (as the backward pass
+    // left it) before the scan writes it, and the scan writes only behind.
     [loop]
-    for (uint x = chunk_start; x < chunk_end; ++x) {
-        float w_next = x + 1u < chunk_end ? SunshineUIPinWeight(x + 1u, y) : 0.0;
-        bool collar = w_previous > 0.0 || w_here > 0.0 || w_next > 0.0;
-        // Next to fully weighted UI the backward pass left the plane itself.
-        if (max(max(w_previous, w_here), w_next) >= 1.0) {
-            anchor = (int)x; best = 0.0;
-        } else if (collar || best >= 0.0) {
-            float current = SunshineHostFinalStore[int2(uint2(x, y))];
-            if (collar) {
-                float offered = abs(current - plane);
-                if (best < 0.0 || offered <= SunshineUIPinBound(best, (uint)((int)x - anchor))) { anchor = (int)x; best = offered; }
-            }
-            float pinned = SunshineUIPinClamp(current, plane, best, (uint)((int)x - anchor));
-            if (asuint(pinned) != asuint(current)) SunshineHostFinalStore[int2(uint2(x, y))] = pinned;
+    for (uint block = chunk_start; block < chunk_end; block += SUNSHINE_UI_PIN_BLOCK) {
+        float next_weights[SUNSHINE_UI_PIN_BLOCK], currents[SUNSHINE_UI_PIN_BLOCK];
+        [unroll] for (uint i = 0u; i < SUNSHINE_UI_PIN_BLOCK; ++i) {
+            next_weights[i] = SunshineUIPinWeight(min(block + i + 1u, chunk_end - 1u), y);
+            currents[i] = SunshineHostFinalStore[int2(uint2(min(block + i, chunk_end - 1u), y))];
         }
-        w_previous = w_here; w_here = w_next;
+        [unroll] for (uint j = 0u; j < SUNSHINE_UI_PIN_BLOCK; ++j) {
+            const uint x = block + j;
+            if (x >= chunk_end) break;
+            float w_next = x + 1u < chunk_end ? next_weights[j] : 0.0;
+            bool collar = w_previous > 0.0 || w_here > 0.0 || w_next > 0.0;
+            // Next to fully weighted UI the backward pass left the plane itself.
+            if (max(max(w_previous, w_here), w_next) >= 1.0) {
+                anchor = (int)x; best = 0.0;
+            } else if (collar || best >= 0.0) {
+                float current = currents[j];
+                if (collar) {
+                    float offered = abs(current - plane);
+                    if (best < 0.0 || offered <= SunshineUIPinBound(best, (uint)((int)x - anchor))) { anchor = (int)x; best = offered; }
+                }
+                float pinned = SunshineUIPinClamp(current, plane, best, (uint)((int)x - anchor));
+                if (asuint(pinned) != asuint(current)) SunshineHostFinalStore[int2(uint2(x, y))] = pinned;
+            }
+            w_previous = w_here; w_here = w_next;
+        }
     }
 }
 
@@ -2190,7 +2307,7 @@ float4 SunshineHostRender(float2 eyeUV, bool rightEye)
     }
     float2 sourceUV = float2(saturate(sourceX), eyeUV.y);
     #if BUFFER_COLOR_SPACE == 3
-        float4 color = SunshineLinearClamp.SampleLevel(SunshineLinearClampState, (float4(sourceUV, 0, 0)).xy, (float4(sourceUV, 0, 0)).w);
+        float4 color = float4(SunshineSourceLinear(sourceUV), 1.0);
     #else
         float4 color = SunshineSourceSampler.SampleLevel(SunshineLinearClampState, (float4(sourceUV, 0, 0)).xy, (float4(sourceUV, 0, 0)).w);
     #endif
@@ -2252,3 +2369,23 @@ float4 SunshineRenderPackedPS(float4 position : SV_Position, float2 texcoord : T
     return color;
 #endif
 }
+#if BUFFER_COLOR_SPACE == 3
+// The 10-bit PQ export of an HDR10 source (R10G10B10A2_UNORM target): each
+// eye's scRGB value, held in FP16 as the FP16 export holds it, encoded as the
+// host encodes that export (SunshineHostPQ); the mono pack writes the source's
+// own code values. Alpha is the same 0/1 coverage.
+float4 SunshineRenderPackedPQPS(float4 position : SV_Position, float2 texcoord : TEXCOORD0) : SV_Target
+{
+    uint packedX = (uint)position.x;
+    if (SunshineAutomaticMono())
+        return float4(saturate(SunshineSourceSampler.Load(int3(int(packedX % BUFFER_WIDTH), int(position.y), 0)).rgb), 1.0);
+    float4 color;
+    [branch] if (packedX < BUFFER_WIDTH) {
+        color = SunshineRenderEye(position.xy / float2(BUFFER_WIDTH, BUFFER_HEIGHT), false);
+    } else {
+        float2 center = float2(position.x - float(BUFFER_WIDTH), position.y);
+        color = SunshineRenderEye(center / float2(BUFFER_WIDTH, BUFFER_HEIGHT), true);
+    }
+    return float4(SunshineHostPQ(f16tof32(f32tof16(color.rgb))), color.a);
+}
+#endif

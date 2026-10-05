@@ -331,6 +331,32 @@ namespace {
         never.writes.empty(), "UISceneShadow=0 ran the shadow, or was rewritten");
   }
 
+  // The Diagnostics switch (game3d_diagnostics.h): per game in the global
+  // ReShade.ini and process-wide; absent writes 0 (off), 1 turns it on,
+  // anything else is off; the panel's edit saves the key and switches the
+  // process, and both log one line.
+  void diagnostics_switch_is_per_game() {
+    fake_config absent;
+    check(!load_diagnostics(absent) && !diagnostics::enabled() && absent.writes == std::vector<std::string>{"Diagnostics"} &&
+        std::get<int>(absent.values.at("Diagnostics")) == 0, "An absent Diagnostics did not write 0 and stay off");
+    fake_config on;
+    on.values["Diagnostics"] = 1;
+    check(load_diagnostics(on) && diagnostics::enabled() && on.writes.empty(), "Diagnostics=1 did not turn it on, or was rewritten");
+    for (const int other : {0, 2, -7}) {
+      fake_config off;
+      off.values["Diagnostics"] = other;
+      check(!load_diagnostics(off) && !diagnostics::enabled() && off.writes.empty(), "A Diagnostics other than 1 turned it on");
+    }
+    fake_config global;
+    check(edit_diagnostics(true, global) && diagnostics::enabled() && std::get<int>(global.values.at("Diagnostics")) == 1,
+      "Checking the box did not save 1 and turn diagnostics on");
+    check(!edit_diagnostics(true, global) && global.writes.size() == 1, "An unchanged switch saved again");
+    check(edit_diagnostics(false, global) && !diagnostics::enabled() && std::get<int>(global.values.at("Diagnostics")) == 0,
+      "Clearing the box did not save 0 and turn diagnostics off");
+    check(diagnostics_log_text(true) == "Sunshine Game 3D: diagnostics on (Diagnostics=1)" &&
+        diagnostics_log_text(false) == "Sunshine Game 3D: diagnostics off (Diagnostics=0)", "The diagnostics line changed");
+  }
+
   // Rule H2's switch (UIFlattenStillScreens): per game in the global
   // ReShade.ini, absent writes 0 (the shadow), 1 enables flattening, anything
   // else is the shadow; the panel's edit saves the key and switches the
@@ -885,6 +911,7 @@ int main() {
     ui_protection_status_names_the_reason();
     forget_and_scene_shadow_are_per_game();
     still_flatten_is_per_game_and_named();
+    diagnostics_switch_is_per_game();
     ui_protection_warning_follows_unprotected_rendered_frames();
     source_alpha_applied_status_is_transient_and_mode_scoped();
     persistence_survives_runtime_recreation();

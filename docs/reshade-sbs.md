@@ -170,7 +170,14 @@ results through `ID3D12Device15::ResolveQueryData` whenever the game's D3D12 run
 `D3D12_QUERY_HEAP_FLAG_CPU_RESOLVE`, so that read fails and every frame there was
 `dropped_unresolved`. D3D11 reads ReShade's results. The CPU entry also splits the slowest present into setup, depth, UI, render and
 export, and a rate-limited `Sunshine Game 3D hitch` warning names any present-thread step that
-takes more than 8 ms.
+takes more than 8 ms. Each step name has its own once-per-second throttle, so a nested step and the
+step around it both log. The GPU stage times exist only while the add-on's Diagnostics switch is on
+([Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)); off, no
+timestamp is recorded, the line keeps its CPU fields and reports `gpu_profile=disabled`, and the
+query heap is created on the first enable. The conditioning stages (`linearize` through
+`horizontal`) time the depth conditioning wherever it was recorded: with the pack it was owed to,
+or in the render for a probe frame; a render whose pack never comes counts with zero conditioning
+and pack, and only a missing render mark counts as `incomplete`.
 
 ReShade writes every log line through to disk synchronously. In Hogwarts Legacy single lines took
 up to ~50 ms while the game streamed assets, and the periodic depth, camera and UI diagnostics were
@@ -231,6 +238,113 @@ composited into both eyes. Only the existing small calibration readback reaches 
 Multisampled and RGBX/BGRX swapchains are not admitted by this native driver: ReShade uses an
 internal resolve target for their GUI, which this overlay path does not own. The add-on reports
 an unavailable display mode rather than redirecting the GUI to the wrong texture.
+
+### Diagnostics switch and per-Present cost
+
+**Diagnostics switch.** `Diagnostics` under `[SUNSHINE_GAME3D]` in the game's `ReShade.ini` is
+read once at add-on start with `UISceneShadow` and `UIFlattenStillScreens`; when it is absent the
+add-on writes 0 so the key can be found, 1 turns it on, and any other value is off. It is one
+process-wide switch (`game3d_diagnostics.h`), and the Troubleshooting panel's **Diagnostics** row
+below **UI mask source** edits it at runtime in both directions. Loading and every edit log
+`Sunshine Game 3D: diagnostics on (Diagnostics=1)` or `... off (Diagnostics=0)`. Off (the
+default), the add-on records none of its diagnostic-only per-frame work: per-pass GPU timestamps
+and their resolves (the timing line keeps its CPU fields and hitch lines stay), the whole S3
+identity shadow (no present-clock advance, no stamps in game lists or candidate copies, no proposed
+labels, no `Sunshine UI identity` or `Sunshine FG interposers` line; the renderer's stamp buffer is
+never created), and H2's own evidence passes while `UIFlattenStillScreens=0`. The H1 whole-frame
+and first-run measurements, the A2 per-pixel statistics (A2 revocation and the one-way judgment read
+them) and the exact UI counters always run. Decisions, masks and exported pixels are the same with
+the switch on or off. The capture owner's and the layer's queue watches stay registered either
+way, since direct binding reads them and the layer's live-copy ring offers a copy only once a list
+carrying it executed; with the switch off their callbacks find no stamped list. The switch's own
+cost was not measured separately: Verify found no renderer-level GPU difference with it on or off.
+
+**Owed conditioning.** `render()` records the source copy, UI detection, retained colour and every
+CPU decision. The depth conditioning that only the pack, a dump or the adaptive probe read (depth
+candidate, vertical, nearest-UI tiles and reduce, horizontal, UI pinning) is owed with the pack,
+and `pack()` records it first (into an export slot, `output()` or a Dump 3D, inside the pack's
+isolated D3D11 state). A render records it at once for an adaptive-probe frame, an older two-pass
+replay shader or an immediate pack; a Present whose pack is never recorded records none, and the
+next render or `begin_present` drops what it owed. An owed pack that shows the source mono (no
+depth or camera, zero strength or blend, the depth preview, or a source larger than 3840) records
+none unless Dump 3D is armed (`render_frame_input::diagnostic_armed`); the shader declares
+`SUNSHINE_MONO_SKIPS_CONDITIONING`. Diagnostic textures hold the last recorded conditioning.
+`render_frame_input::depth_identity` is nonzero only when the depth view's content is immutable
+for that value: the exporter derives it from the API capture's epoch, source, sequence and
+viewport, and Generic depth gives 0. An exact repeat of {view, nonzero identity, the 80 `b0`
+bytes} (a generated Present reusing its real frame's depth) keeps the last depth candidate and
+vertical field. Packed and dumped outputs are byte-identical to always conditioning.
+
+**Detection and pinning shape.** The detection tiles pass splits each statistics tile over
+`SUNSHINE_UI_DETECTION_TILE_PARTS` groups (4; group z is the part, taking the tile's 16-row runs
+k modulo 4). Part k of tile (x,y) is stored at column x+16k of a 64-column statistics texture, and
+the reduce sums the parts of every per-tile row before it matches tiles; integer sums make the
+result independent of the split. Unoffered candidates are unbound and their loads are skipped by
+uniform branches. UI pinning walks its three serial scans in 16-texel preloaded blocks with the
+same arithmetic and order. A per-row occupancy prepass that skipped rows without UI was measured
+and dropped: the pass time is the slowest group's serial chain, which empty groups already run
+beside. The detected mask stays R32F: R16_UNORM cannot hold FP16 or 10-bit alpha candidates
+exactly and R16_FLOAT cannot hold 8-bit alpha, so a 16-bit mask would change masks. At 3840x2160
+detection went from 0.20 to 0.14 ms and UI pinning from 0.28 to 0.22 ms on a HUD-like frame;
+owed conditioning removes about 0.5 ms from every Present whose pack is never recorded.
+
+**Direct candidate binding.** With the Diagnostics switch off and no dump armed, a UI candidate
+is read where it lies instead of being copied into the renderer's slot first. A Streamline tag
+snapshot captured on the presenting queue is leased (`depth_capture::lease_local_view`): its
+storage moves to the shader-resource state on ReShade's immediate list, the lease registers that
+recording as a consumer exactly like a copy, so the storage is neither reused nor released until
+the submission's fence passes, and `end_local_views` returns it to its resting state after the
+Present's last read (its render, owed pack and dump). The renderer describes the leased storage
+in its own original-device descriptor (`renderer::bind_ui_snapshot`); the capture owner's own
+descriptor belongs to a heap ReShade wraps, which `push_descriptors` cannot copy. The offscreen UI
+layer keeps a ring of live copies (`ui_layer::ring_capacity`, 4; three normally suffice): each
+before-clear copy goes to an entry other than the newest whose last reader, a renderer
+submission, completed (`ui_layer::bound` with the renderer's completion fence and value); with
+every entry busy the ring grows, and a full ring skips that copy and logs once. A recorded copy is
+pending until a list carrying it executes; only then is it offered, so detection reads the last
+executed copy as the single live texture did. A carrying list reset unexecuted returns the entry
+(never offered), and a copy pending for 2 s is abandoned. The offered copy is
+bound directly when its lists ran on the presenting queue only (the queue watch). D3D11, foreign
+or mixed queues, sRGB-stored snapshots read through UNORM, an exhausted consumer budget (32
+diagnostic slots, 256 MB under FG), the Diagnostics switch (its stamps travel with the copies) and
+an armed dump keep today's copy. The pixels detection reads are the same either way. The log
+names the first direct read of each kind once (`Sunshine UI input: reading ... directly (no copy)`).
+
+**Colour toggles and the overlay.** The renderer keeps the working set of the previous colour
+transfer or extent (one cached entry) and makes it current again on a toggle back, without a wait
+or a recompilation; it starts every per-scene decision state as a new renderer would, and an
+entry cached for 60 s is released once its fence completed. The exporter likewise keeps the
+previous finished export ring (one entry, 60 s) and renews it under a new generation when its
+source matches again after 500 ms inactive. A game toggles by ResizeBuffers, around which ReShade
+resets its effect runtime (`destroy_effect_runtime`, `init_effect_runtime`): the renderer is parked
+over the reset (its back-buffer views dropped) and taken back by the reinitialised runtime, and the
+finished export rings stay, without any back-buffer reference (submitted sources and overlay
+compositors are released). Both are released only when ReShade destroys the swapchain itself
+(`destroy_swapchain` without resize) or its device. The overlay compositor's shaders for the current
+export transfer are compiled on the thread pool once a renderer is ready, so opening the overlay
+neither compiles nor stalls the Present.
+
+**Present-thread bookkeeping.** `ui_layer::observe_output` caches the swapchain's back buffers and
+re-enumerates them only when the swapchain, its size or buffer count, or its first buffer
+changes, or ReShade reports it created, resized or destroyed. The depth owner observes the effects
+list, the immediate list and the queue once per Present (`observe_present`), and later copies on
+the registered immediate list skip their repeated interface checks.
+
+**Depth handoff.** When the API source is no longer associated (Streamline FG released while NGX
+evaluates, or the reverse), API ownership is held in mono (depth not ready) for at most 250 ms
+after the last associated Present, with the same runtime and swapchain size and a live API
+evaluation, instead of starting the Generic selector, its challenger and two DEPTH rebinds. An
+explicit release with no other evaluation falls back at once. The log line ends `holding API
+ownership (mono) for a provider handoff, at most 250 ms`, and the readiness reason is
+`source_handoff`. Display storage keeps one entry per shape and format (at most two), so a flip
+switches entries rather than reallocating; a replaced entry is retired by a fence signalled on a
+later Present, with no `wait_idle`. New snapshot storage is reserved under the capture lock,
+allocated outside it, then re-validated and published under it; a reservation is only a
+preference, the 256 MB budget counts live reservations, and a lost race releases the new objects
+after the lock. The flip's present-thread steps each log their own hitch line: `native depth
+frame`, `depth display retirement`, `depth present observation`, `depth list coverage report`,
+`frame generation query`, `depth readiness trace`, `API depth binding`, `generic capture switch`,
+`generic challenger release` and `generic depth rebinding`.
 
 ## Setup
 
@@ -1097,7 +1211,8 @@ no UI source are flattened (UIFlattenStillScreens=1)` or `... are only logged
 `scene_guard::state::measure` also runs the evidence passes, never actionably, when the render is
 in scope and `still.wants_measure()` (false only while the latest sample decided a source other than
 11), so in SDR Auto they now run on every sample frame where no source decides, at most every
-100 ms, and HDR runs nothing more. The run (`still_screen::run`) lives in the hidden-scene guard, is
+100 ms, and HDR runs nothing more. H2 measures for itself only while `UIFlattenStillScreens=1` or
+the Diagnostics switch is on; with both off it neither runs those passes nor logs its shadow. The run (`still_screen::run`) lives in the hidden-scene guard, is
 fed by `observe` from the same sample decode and cleared by the same identity rule.
 
 The panel status shows source 11 as "Still screen without a UI source shown flat", which counts as
@@ -1498,6 +1613,7 @@ cumulative, so the last line holds the session's totals.
 | Acceptance events, `forgotten` included | INFO |
 | A pre-UI proof key (`pre_ui:<format>:<space>`, since fix 1) restored, added or removed by the acceptance lines | INFO `Pre-UI proof` with the key: restored (provisional), earned, lapsed, or forgotten when a Forget line beside the change names it. The key is never counted as a UI source of its kind in the dispute checks. |
 | Samples whose presented frame read hidden (valid) while the offered layer had no coverage, `proven=1`, and `image_lit` below half of the pixels (lines since fix 1) | INFO `Dark pre-UI image (shadow)`: their count and the ranges of `presented_lit`, `image_lit` and `presented_lit_differs` as shares of the frame, shadow statistics for a future dark pre-UI image rule (loading screens) that nothing acts on; absent without such samples. |
+| A `Sunshine Game 3D: diagnostics on/off` line | INFO `Diagnostics` with the switch; with it off the S3 and per-pass GPU lines are absent by design, and `Game 3D cost` reads `GPU timing off (Diagnostics=0)` (INFO, not WARN) when the timing line says `gpu_profile=disabled`. Unexpected hitches name the depth-source flip steps listed under [Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost). |
 | H2 episodes (`Sunshine UI still screen` lines, logs since fix 2, with or without counter lines) | `UI still screen`: WARN when any episode was logged with `UIFlattenStillScreens=0`, so that each screen the shadow would have flattened is reviewed before the switch is turned on; INFO when every episode was flattened, and INFO `no still screen without a UI source` in a fix 2 log without one. It lists up to six episodes (entry time, whether it would flatten or flattened, end time and reason, length, D range and lowest still share), names the session's switch and the counters' `still.entered` and `.released`, and always gives the gameplay-safety evidence: the longest run that reset before 2 s (the UI lines' `short_max_ms`) and the short runs (`still.short`). Logs before fix 2 get no such check. |
 
 The acceptance-dispute and time-based checks (`UI protection gaps`, hidden scene) still read the
@@ -2235,7 +2351,11 @@ counting as its hold bound. In the shadow, nothing decides from a ticket: the pr
 `Sunshine UI identity` (today's pairing against the ticket's, per frame identity, labels, refusals
 and the GPU's verdicts) and `Sunshine FG interposers` on change, Dump 3D carries the tickets, and
 the readiness report's `UI identity (S3)` check reads them. In the shadow the renderer pushes no
-gate, so the GPU verdicts are counted and dumped only. Enabling it takes
+gate, so the GPU verdicts are counted and dumped only. The shadow runs only while the Diagnostics
+switch is on ([Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost)):
+off, the present clock does not advance, nothing is stamped or proposed (`b2` words 6-8 are 0), no
+identity or interposer line is written and a dump's tickets read unstamped; tickets keep their
+capture-side token labels, which decide nothing while identity is not authoritative. Enabling it takes
 the live evidence from the known games, read with the report from the identity line's `gpu` group
 (`exact`, `mismatch`, `unstamped`, `unproposed`, `token_exact`), its `batch` and `refused` groups and `ui_detection_replay --identity` on new dumps:
 no tag batch that only today pairs (`batch.today_only`), rare GPU mismatches, and no unstamped or
@@ -2475,6 +2595,12 @@ with a strict 0.5 px threshold can differ slightly. It supports the fixed and di
 planes, which sit on the screen plane whenever the shader's camera admission rejects the frame's
 constants. Visibility, UI rows and flattening weigh by the consumed mask's alpha, which the
 report's `alpha` names.
+
+With the Diagnostics switch off a dump still records every artifact, but the S3 fields describe
+the shadow that did not run: no stamp buffer was read (`stamps` is null), census copies are
+unstamped and the proposals are 0. A dump armed on a mono Present still records the full depth
+conditioning. In an HDR10 session exporting the PQ transfer, the `sbs` artifact is R10G10B10A2 PQ
+code values (`sbs_transfer` 3) and there is no `linear_color` artifact.
 
 ### UI source discovery and snapshot qualification
 
@@ -4351,6 +4477,21 @@ Only zero flags or `cursor_plane_present` are valid; zero flags require a zero s
 host accepts protocol 1 as well, ignores its unspecified padding and uses zero cursor displacement.
 An older protocol-1 host rejects protocol-2 exports, so this feature requires a paired host/add-on
 update; it does not change the separate streamed Game provider negotiation version.
+
+**PQ wire transfer (protocol 3).** Producers publish protocol 2 by default. Protocol 3 is protocol
+2 plus `transfer::pq` (3): Rec.2020 primaries and SMPTE ST 2084 code values, 1.0 = 10000 cd/m2,
+valid only as R10G10B10A2_UNORM (DXGI 24) and only at protocol 3; protocol 3 slots carry the
+cursor plane like protocol 2, and protocol 3 also accepts sRGB and scRGB metadata. A consumer
+advertises what it accepts in protocol 2's padding: it writes `consumer_capabilities` (offset 144;
+`consumer_accepts_pq` = 1), then `capability_nonce` (offset 136) = its nonce, then
+`consumer_nonce`. A producer honours the bits only when `capability_nonce` equals the nonce it
+answers (`answered_capabilities`), so an older consumer, which never writes them, and a replaced
+one read as no capabilities. An HDR10 swapchain exports PQ only to a consumer that accepts it;
+any other consumer gets FP16 scRGB at protocol 2, and a consumer replaced between a Present's
+render and its export gets the next Present's FP16 export. Native scRGB swapchains always export
+FP16 scRGB: wide-gamut and over-10000-nit values clip differently in PQ (a negative Rec.2020 clip)
+than in the SDR stream's tone map (a Rec.709 clip). SDR stays sRGB. A changed transfer is a new
+export ring. The generation line names `PQ HDR10, protocol 3`.
 The mapping uses Windows' default access control. Sunshine verifies the process creation time
 before duplicating its NT texture and fence handles; resources are never looked up by a global
 texture name.
@@ -4371,12 +4512,13 @@ number and slot states are new, and the receiver reopens the same shared texture
 handles. Any read an abandoned receiver left in flight finished long before that, so this only
 removes the allocation from a return to the game or a reconnecting stream. A receiver that
 restarts while the game keeps exporting still gets a fresh ring, as does any size, format or HDR
-change.
+change. The finished ring of the previous transfer or extent stays cached (one entry, 60 s) and is
+renewed the same way on a toggle back.
 
 For each exported frame, the producer claims a slot, writes the final stereo image into it,
 signals its GPU fence, writes the frame sequence, QPC timestamp and matching UI displacement,
 then marks the slot ready. Native Game 3D renders both eyes in one pass
-(`SunshineRenderPackedPS`) directly into the claimed slot, so the common path writes no eye
+(`SunshineRenderPackedPS`, or `SunshineRenderPackedPQPS` for the PQ transfer) directly into the claimed slot, so the common path writes no eye
 intermediate and has no full-frame copy. Each half branches on its eye so the compiler folds the
 pixel-center scale into the warp exactly as the former per-eye pass did; the output is
 byte-identical to the former two passes and to the frozen FX reference. At 4K this drops two FP16
@@ -4404,12 +4546,26 @@ The opt-in `reshade_exporter_tests.exe --async-ring` regression delays GPU compl
 three publications, checks fourth-frame backpressure and ownership transitions, and verifies
 exact copied pixels and source lifetimes.
 
-Sunshine claims the newest completed slot and copies it into a private texture. All subsequent
-conversion and presentation read that private texture on the same D3D11 context. A GPU query
-releases the shared slot only after the copy completes. There is at most one pending receiver
-copy, no cross-process GPU wait, and no texture overwrite while either side uses the slot.
-Receiver teardown abandons an unfinished read. A new consumer requests fresh resources rather
-than reusing the abandoned generation. The receiver validates and copies the scalar while it owns
+Sunshine claims the newest completed slot and converts straight from it through a shader view
+created per slot when the generation opens; there is no private copy. The newest frame's slot stays
+`reading` while it is the newest, so repeat conversions and stream-gamma reconversion keep reading
+it. When a newer frame is claimed, an event query is ended for the previously held slot after all
+of its reads (Y, UV, Local AR, resample and the cursor patch), followed by the one flush per new
+frame the copy path also issued, and that slot returns to free only once the query completes,
+after the generation, nonce and sequence checks. It never blocks: queries are read without a flush,
+and one still pending after two polls is checked once with a flushing read (a lone event query was
+observed never completing otherwise). A generation change or detach abandons held and retiring
+slots rather than releasing them early. The receiver's hold leaves the producer two slots, and the
+producer already reclaims its own unconsumed ready slots. There is no cross-process GPU wait and
+no texture overwrite while either side uses the slot. A new consumer requests fresh resources
+rather than reusing the abandoned generation.
+
+The cursor no longer needs a full-frame scratch copy: only its changed rectangles, grown by
+`ceil(5 + 3/s)` texels where s is the most minified pass's scale, are copied (decoded to FP16 scRGB
+for a PQ export) into a frame-sized patch, the existing blend draws run on the patch, and each
+conversion pass re-runs scissored over the cursor's output region from the patch. The patch has
+the frame's size, so sampling coordinates are identical and the output equals converting a fully
+composited copy (byte-for-byte for SDR, R10G10B10A2 and FP16). The receiver validates and copies the scalar while it owns
 the same reading slot as the texture. Invalid cursor metadata rejects that publication.
 Repeated presentation retains the original frame timestamp and matching UI displacement.
 
@@ -4442,7 +4598,7 @@ The native add-on declares and validates the actual game swapchain color space:
 | --- | --- | --- |
 | SDR sRGB | RGB10A2 | Encoded sRGB |
 | Native HDR scRGB | RGBA16F | Linear Rec.709/scRGB, 1.0 = 80 nits |
-| Native HDR10/PQ, Rec.2020 | RGBA16F | PQ decoded and converted to linear Rec.709/scRGB, 1.0 = 80 nits |
+| Native HDR10/PQ, Rec.2020 | RGB10A2 to a consumer that accepts the PQ transfer (protocol 3), else RGBA16F | PQ code values (Rec.2020, ST 2084, encoded as the host's `scRGBTo2100PQ` of the scRGB eye), else PQ decoded to linear Rec.709/scRGB, 1.0 = 80 nits |
 
 The HDR export preserves values above 1.0 and negative scRGB components. It applies no tone map
 to the shared texture. The normal game window retains its original color encoding. A float or
@@ -4450,9 +4606,22 @@ to the shared texture. The normal game window retains its original color encodin
 color space and recreates its programs/resources when it changes. Reference FX must supply
 matching color-space annotations; a stale reference shader permutation is rejected.
 
-SunshineGame3D decodes HDR10 texels into one full-resolution
-FP16 surface before stereo color sampling. Interpolating PQ codes and decoding afterward
-darkens mixtures even when constant-color tests pass. Native scRGB requires no decode surface.
+SunshineGame3D decodes HDR10 texels before interpolating them. Interpolating PQ codes and
+decoding afterward darkens mixtures even when constant-color tests pass. The pack decodes the
+warp's two horizontal taps itself (`SUNSHINE_PQ_PER_TAP`; rows are texel centres, so the vertical
+weight is zero), each held in FP16 as the former full-resolution FP16 surface held it, and
+interpolates them with the sampler's own weights (the coordinate truncated to 21 fractional bits,
+then rounded to 1/256 texel, measured exactly on NVIDIA), so neither the linearization pass nor
+its 7680x2160 FP16 texture remains. The FP16 export differs from the former surface's by at most
+one FP16 unit of the brighter tap (the hardware's filter precision). The PQ export holds each eye's
+scRGB value in FP16, as the FP16 export holds it, and encodes it with the host's own matrix, 80-nit
+scale and `NitsToPQ` constants in their order; the mono pack writes the source's own codes, and
+alpha keeps its 0/1 coverage, which no host pass reads. Against the former FP16 export pushed
+through the host's `scRGBTo2100PQ`, it differs by at most one 10-bit code (one rounding). A dump's
+`sbs_transfer` (1 sRGB, 2 scRGB, 3 PQ) declares the SBS artifact's encoding, which the inspect and
+preview tools decode and replay reproduces. At 3840x2160 the per-tap pack took 0.33-0.37 ms
+against 0.37-0.43 ms for the former linearization pass and FP16 pack together (P1, GPU otherwise
+idle). Native scRGB requires no decoding.
 The earlier HDR AXAA wrapper corrected contrast normalization and applied the low-pass weight
 consistently to all three linear channels; it is historical because current Game3D has removed
 final image AA. Decode-before-filtering remains active. The original SuperDepth3D remains a
@@ -4470,12 +4639,18 @@ An HDR desktop can contain SDR UI and HDR game surfaces together; its output mod
 identify which transfer an individual source intended.
 
 Overlay composition uses a separate FP16 layer with reliable alpha. It blends in linear Rec.709,
-then encodes SDR output back to sRGB; HDR output remains scRGB. The overlay follows ReShade's
+then encodes SDR output back to sRGB; HDR output remains scRGB, and a PQ export decodes, blends in
+linear scRGB and encodes back as the host does. The overlay follows ReShade's
 HDR UI brightness while leaving the underlying game's highlights and negative components intact.
 Opening the panel does not tone-map the game or alter either eye's geometry.
 
 Sunshine converts the declared input to the destination's color space at final presentation or
-encoding. HDR output preserves HDR; SDR output uses tone mapping for HDR input. SDR input on
+encoding. HDR output preserves HDR; SDR output uses tone mapping for HDR input. A PQ export
+streamed as HDR with the Windows default stream gamma passes its codes through; stream gamma 1
+or 2 decodes it to linear Rec.2020, applies the channel correction and re-encodes; an SDR stream
+decodes it to scRGB and uses the FP16 tone map; Local AR decodes per tap (an scRGB swapchain) or
+tone maps (an sRGB swapchain) and never takes the exact-copy path; scaled eyes decode per tap into
+the FP16 scRGB intermediate; the cursor over a PQ export blends in linear light on a decoded patch. SDR input on
 an HDR output uses the Windows SDR white level when available. This does not invent HDR
 highlights in an SDR game. For streamed HDR, enable HDR for the client session and use HEVC
 or AV1 with a compatible decoder and display. Local glasses must themselves support HDR in

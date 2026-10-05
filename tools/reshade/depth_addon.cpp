@@ -3214,16 +3214,27 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	// A native API snapshot needs no Generic work. Shared preservation enables
 	// itself at its first copy above; keep that demand through temporary gaps.
 	// Manual pins and fallback resume capture before entering the selector.
-	set_generic_capture_enabled(runtime, data,
-		!api_selected || sunshine_streamline::provider::uses_shared_preservation(runtime));
+	{
+		const slow_step step("generic capture switch");
+		set_generic_capture_enabled(runtime, data,
+			!api_selected || sunshine_streamline::provider::uses_shared_preservation(runtime));
+	}
 	if (api_selected)
 	{
-		if (!was_streamline) release_challenger(runtime, data, true);
+		if (!was_streamline)
+		{
+			const slow_step step("generic challenger release");
+			release_challenger(runtime, data, true);
+		}
 		data.native_access_present = device_data->native_present_index;
 		data.native_access_open = true;
 		return;
 	}
-	if (was_streamline) update_effect_runtime(runtime);
+	if (was_streamline)
+	{
+		const slow_step step("generic depth rebinding");
+		update_effect_runtime(runtime);
+	}
 
 	resource selected_depth_stencil = { 0 };
 	const depth_selection_resource *selected_depth_stencil_info = nullptr;

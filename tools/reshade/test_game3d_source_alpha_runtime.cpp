@@ -3,6 +3,7 @@
 // No installed FX, CPU warp replica, visible window or performance claim.
 #include "test_game3d_render_input.h"
 #include "game3d_controls.h"
+#include "game3d_diagnostics.h"
 #include "test_game3d_debug_dump_runtime.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_frame_clock.h"
@@ -99,7 +100,8 @@ namespace {
     // The acceptance key (A1) of a fixture candidate: its typed DXGI format,
     // the source color's by default, in the fixture's color space.
     std::string key(sunshine_game3d::ui_selection::kind kind, DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN) const {
-      if (format == DXGI_FORMAT_UNKNOWN) format = color == 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+      if (format == DXGI_FORMAT_UNKNOWN)
+        format = color == 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT : color == 3 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
       return sunshine_game3d::ui_selection::signature{kind, std::uint32_t(format), color}.key();
     }
     fixture(const fs::path &runtime, const fs::path &directory, unsigned c, unsigned w, unsigned h, const fs::path &control): width(w), height(h), color(c) {
@@ -129,7 +131,9 @@ namespace {
         bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr, nullptr, wc.hInstance, nullptr);
       require(window && !IsWindowVisible(window), "fixture window must remain hidden");
       DXGI_SWAP_CHAIN_DESC desc{}; desc.BufferDesc.Width = runtime_width; desc.BufferDesc.Height = runtime_height;
-      desc.BufferDesc.Format = color == 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+      // An HDR10 (PQ) swapchain only for --timing (its pattern bytes are not PQ codes).
+      desc.BufferDesc.Format = color == 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT : color == 3 ? DXGI_FORMAT_R10G10B10A2_UNORM :
+        DXGI_FORMAT_R8G8B8A8_UNORM;
       desc.SampleDesc.Count = 1; desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; desc.BufferCount = 2;
       desc.OutputWindow = window; desc.Windowed = TRUE; desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
       const auto create = reinterpret_cast<decltype(&D3D11CreateDeviceAndSwapChain)>(GetProcAddress(module, "D3D11CreateDeviceAndSwapChain"));
@@ -138,7 +142,8 @@ namespace {
       const D3D11_QUERY_DESC completion_desc{D3D11_QUERY_EVENT, 0};
       checked(device->CreateQuery(&completion_desc, &completion_query), "create fixture completion query");
       ComPtr<IDXGISwapChain3> chain; checked(swapchain.As(&chain), "swapchain3");
-      checked(chain->SetColorSpace1(color == 2 ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709), "source color space");
+      checked(chain->SetColorSpace1(color == 2 ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : color == 3 ?
+        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709), "source color space");
       checked(swapchain->GetBuffer(0, IID_PPV_ARGS(&runtime_backbuffer)), "runtime backbuffer");
       checked(device->CreateRenderTargetView(runtime_backbuffer.Get(), nullptr, &rtv), "runtime backbuffer RTV");
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -3134,6 +3139,56 @@ namespace {
             shadow.sample.evidence.scene.n >= ui_detection::scene::min_edges && shadow.sample.evidence.scene.d <= .05f,
           "The SDR loading screen's shadow did not enter at its 2 s sample with every cell compared and still: " +
             std::to_string(shadow_entry));
+        // G3 (the Diagnostics switch): the same shadow loading screen on two
+        // fresh renderers and sessions, one with the switch on and one with
+        // it off. Off, H2 does not measure for itself (UIFlattenStillScreens=0):
+        // no evidence pass runs and its run never enters, while every frame
+        // decides, masks and packs exactly as with the switch on.
+        {
+          renderer measured, quiet;
+          const api::resource presented{reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())};
+          require(measured.configure(observed_runtime, presented, static_cast<api::color_space>(gpu.color)) &&
+              quiet.configure(observed_runtime, presented, static_cast<api::color_space>(gpu.color)),
+            "configure the diagnostics-switch renderers");
+          alpha_auto_policy measured_session, quiet_session;
+          alpha_auto_source measured_source = source, quiet_source = source;
+          measured_source.session = &measured_session;
+          quiet_source.session = &quiet_session;
+          ui_detection_inputs switch_inputs;
+          switch_inputs.current_color = true;
+          switch_inputs.layer = near_black_layer;
+          switch_inputs.layer_flags = layer_flags;
+          ui_render_input measured_ui, quiet_ui;
+          measured_ui.automatic = &measured_source; measured_ui.detection = &switch_inputs;
+          quiet_ui.automatic = &quiet_source; quiet_ui.detection = &switch_inputs;
+          bool entered = false;
+          for (unsigned i = 0; i != 26; ++i) {
+            gpu.original = i ? banded_color : logo_color;
+            gpu.context->UpdateSubresource(gpu.source.Get(), 0, nullptr, gpu.original.data(), width * bpp, 0);
+            for (auto *clock : {&measured_source, &quiet_source}) {
+              clock->now_ms += 100; clock->tick_ms = clock->now_ms; ++clock->sequence;
+            }
+            diagnostics::set_enabled(true);
+            const auto on = gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, &measured, &measured_ui);
+            const auto on_mask = gpu.read(measured.diagnostics().ui_source).bytes;
+            diagnostics::set_enabled(false);
+            const auto off = gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, nullptr, nullptr, &quiet, &quiet_ui);
+            const auto off_mask = gpu.read(quiet.diagnostics().ui_source).bytes;
+            diagnostics::set_enabled(true);
+            const auto a = measured.consumed_alpha_auto(), b = quiet.consumed_alpha_auto();
+            require(on.field.bytes == off.field.bytes && on.output.bytes == off.output.bytes && on_mask == off_mask &&
+                a.state == b.state && a.enabled == b.enabled && a.source_kind == b.source_kind && a.covered == b.covered &&
+                measured.consumed_detection().still_bits == quiet.consumed_detection().still_bits &&
+                measured.consumed_detection().flags == quiet.consumed_detection().flags,
+              "The Diagnostics switch changed a decision, mask or packed pixel of frame " + std::to_string(i));
+            entered = entered || a.still.phase == still_screen::phase::active;
+            require(b.still.phase == still_screen::phase::none, "H2 measured with diagnostics off and UIFlattenStillScreens=0");
+          }
+          require(entered && measured.alpha_probe_activity().scene_evidence && !quiet.alpha_probe_activity().scene_evidence,
+            "The Diagnostics switch did not gate H2's own evidence passes");
+          std::puts("PASS D3D11 Diagnostics switch (G3): off, the still-screen shadow runs no evidence pass and never "
+            "enters, while 26 frames decide, mask and pack bit for bit as with the switch on");
+        }
         // Enabled: flat from the same frame on, as source 11 in its samples.
         const auto [flat_entry, flat_outcome] = loading_screen(true, 25, "SDR loading screen, enabled");
         require(flat_entry == 23 && flat_outcome.flat && flat_outcome.sample.source_kind == ui_detection::source_still &&
@@ -3275,7 +3330,7 @@ namespace {
 void stamp_begin_present(api::command_queue *queue, api::swapchain *swapchain, const api::rect *, const api::rect *,
     std::uint32_t, const api::rect *) {
   sunshine_game3d::frame_clock::advance(queue, swapchain);
-  sunshine_game3d::ui_layer::observe_output(swapchain);
+  sunshine_game3d::ui_layer::observe_output(swapchain, queue);
 }
 void verify_layer_stamps_d3d11(fixture &gpu, std::ofstream &report) {
   namespace layer = sunshine_game3d::ui_layer;
@@ -3363,18 +3418,119 @@ void verify_layer_stamps_d3d11(fixture &gpu, std::ofstream &report) {
     copied_at, words[0], executed_at - live.presents_since_copy);
 }
 
+namespace {
+  // --timing: GPU stage times (Diagnostics on) of manual-On detection over a
+  // HUD-like current alpha with UI pinning, and of the same frame without UI,
+  // for the embedded shader and, with a control shader, that shader
+  // alternately: a 2 s warm-up, then three repetitions of 120 frames each,
+  // submitted back to back (the CPU waits every eighth frame, never reads
+  // pixels back). Evidence only; nothing is asserted.
+  void time_stages(fixture &gpu) {
+    using namespace sunshine_game3d;
+    diagnostics::set_enabled(true);
+    std::vector<float> alpha(size_t(gpu.width) * gpu.height, 0.f);
+    const auto fill = [&](unsigned x0, unsigned y0, unsigned x1, unsigned y1, float value) {
+      for (unsigned y = y0; y < y1; ++y) for (unsigned x = x0; x < x1; ++x) alpha[size_t(y) * gpu.width + x] = value;
+    };
+    // A top bar, a translucent bottom-left panel and a crosshair.
+    fill(gpu.width / 4, 0, gpu.width * 3 / 4, gpu.height / 12, 1.f);
+    fill(gpu.width / 20, gpu.height * 5 / 6, gpu.width / 4, gpu.height * 19 / 20, .75f);
+    fill(gpu.width / 2 - 4, gpu.height / 2 - 4, gpu.width / 2 + 5, gpu.height / 2 + 5, 1.f);
+    gpu.pattern(alpha, true);
+    alpha_auto_policy policy;
+    policy.set_manual(true);
+    alpha_auto_source source;
+    source.session = &policy; source.now_ms = source.tick_ms = 1000;
+    source.epoch = 1; source.revision = 1; source.sequence = 1;
+    ui_detection_inputs inputs;
+    inputs.current_color = true;
+    ui_render_input ui;
+    ui.kind = ui_input_kind::current_color_alpha;
+    ui.automatic = &source;
+    ui.detection = &inputs;
+    render_parameters p;
+    p.strength = 100; p.depth_ready = p.camera_ready = 1; p.coordinate_basis = 1;
+    p.depth_scale = 100000; p.strength_blend = 1; p.projection = {0, 1};
+    p.convergence = {.05f, .03f}; p.disparity_limit_uv = .04f;
+    gpu.context->CopyResource(gpu.backbuffer.Get(), gpu.source.Get());
+    auto *queue = observed_runtime->get_command_queue();
+    const auto run = [&](renderer &target, unsigned frames, bool with_ui = true) {
+      for (unsigned i = 0; i != frames; ++i) {
+        source.now_ms += 16; source.tick_ms = source.now_ms; ++source.sequence;
+        render_frame_input frame;
+        frame.color = {reinterpret_cast<std::uint64_t>(gpu.backbuffer.Get())};
+        frame.depth = {reinterpret_cast<std::uint64_t>(gpu.depth_view.Get())};
+        frame.scene = p;
+        if (with_ui) frame.ui = ui;
+        require(target.render(queue->get_immediate_command_list(), frame), "timing render failed");
+        queue->flush_immediate_command_list();
+        target.finish_present();
+        if (i % 8 == 7) gpu.drain_render();
+      }
+      gpu.drain_render();
+    };
+    const auto report = [&](const char *label, renderer &target) {
+      gpu_timing t;
+      target.take_gpu_timing(t);
+      std::printf("MEASURE %s %ux%u frames=%u source=%.4f detection=%.4f linearize=%.4f candidate=%.4f vertical=%.4f "
+        "horizontal_ui=%.4f eyes=%.4f total=%.4f detection_max=%.4f horizontal_ui_max=%.4f ms\n", label, gpu.width, gpu.height,
+        t.frames, t.mean_ms[gpu_timing::source], t.mean_ms[gpu_timing::detection], t.mean_ms[gpu_timing::linearize],
+        t.mean_ms[gpu_timing::candidate], t.mean_ms[gpu_timing::vertical], t.mean_ms[gpu_timing::horizontal],
+        t.mean_ms[gpu_timing::eyes], t.mean_ms[gpu_timing::total], t.max_ms[gpu_timing::detection],
+        t.max_ms[gpu_timing::horizontal]);
+    };
+    const auto warm_until = GetTickCount64() + 2000;
+    while (GetTickCount64() < warm_until) {
+      run(gpu.renderer, 10);
+      if (gpu.has_control) run(gpu.control_renderer, 10);
+      if (gpu.color == 3) {
+        gpu.renderer.set_pq_output(true);
+        run(gpu.renderer, 10);
+        gpu.renderer.set_pq_output(false);
+      }
+    }
+    gpu_timing discard;
+    gpu.renderer.take_gpu_timing(discard);
+    if (gpu.has_control) gpu.control_renderer.take_gpu_timing(discard);
+    for (unsigned repetition = 0; repetition != 3; ++repetition) {
+      // HDR10: the embedded shader's 10-bit PQ export beside its FP16 one
+      // (the control is the older shader's linearization pass and FP16 pack).
+      if (gpu.color == 3) {
+        require(gpu.renderer.set_pq_output(true), "the PQ export is unavailable");
+        run(gpu.renderer, 120);
+        report("embedded-pq", gpu.renderer);
+        gpu.renderer.set_pq_output(false);
+      }
+      run(gpu.renderer, 120);
+      report("embedded", gpu.renderer);
+      if (gpu.has_control) {
+        run(gpu.control_renderer, 120);
+        report("control", gpu.control_renderer);
+      }
+      run(gpu.renderer, 120, false);
+      report("embedded-no-ui", gpu.renderer);
+      if (gpu.has_control) {
+        run(gpu.control_renderer, 120, false);
+        report("control-no-ui", gpu.control_renderer);
+      }
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  if (argc < 6 || argc > 8) { std::fputs("usage: source_alpha_runtime official-ReShade64.dll fresh-output srgb|scrgb width height [frozen-control.hlsl] [--temporal-ui-probe|--temporal-ui-front-limit]\n", stderr); return 2; }
+  if (argc < 6 || argc > 8) { std::fputs("usage: source_alpha_runtime official-ReShade64.dll fresh-output srgb|scrgb|pq width height [frozen-control.hlsl] [--temporal-ui-probe|--temporal-ui-front-limit|--adaptive-ui-only|--timing] (pq: --timing only)\n", stderr); return 2; }
   std::thread([] { Sleep(180000); TerminateProcess(GetCurrentProcess(), 124); }).detach();
   try {
-    const unsigned color = !std::strcmp(argv[3], "srgb") ? 1 : !std::strcmp(argv[3], "scrgb") ? 2 : 0;
+    const unsigned color = !std::strcmp(argv[3], "srgb") ? 1 : !std::strcmp(argv[3], "scrgb") ? 2 : !std::strcmp(argv[3], "pq") ? 3 : 0;
     require(color != 0, "unsupported source transfer");
     const auto directory = fs::absolute(argv[2]);
-    bool temporal_probe = false, temporal_front_limit = false, adaptive_only = false;
+    bool temporal_probe = false, temporal_front_limit = false, adaptive_only = false, timing = false;
     fs::path control;
     for (int index = 6; index < argc; ++index) {
-      if (!std::strcmp(argv[index], "--adaptive-ui-only")) {
+      if (!std::strcmp(argv[index], "--timing")) {
+        require(!timing, "duplicate timing argument"); timing = true;
+      } else if (!std::strcmp(argv[index], "--adaptive-ui-only")) {
         require(!adaptive_only, "duplicate adaptive-only argument"); adaptive_only = true;
       } else if (!std::strcmp(argv[index], "--temporal-ui-probe") || !std::strcmp(argv[index], "--temporal-ui-front-limit")) {
         require(!temporal_probe, "duplicate temporal probe argument"); temporal_probe = true;
@@ -3384,8 +3540,14 @@ int main(int argc, char **argv) {
         control = fs::absolute(argv[index]);
       }
     }
+    // Diagnostics on (game3d_diagnostics.h): the hidden-scene and still-screen
+    // sections assert the shadow's own measurements; the still-screen section
+    // also proves the switch off changes no decision.
+    sunshine_game3d::diagnostics::set_enabled(true);
     fixture gpu(fs::absolute(argv[1]), directory, color, unsigned(std::stoul(argv[4])), unsigned(std::stoul(argv[5])), control);
     if (temporal_probe) { temporal_ui_probe(gpu, directory, temporal_front_limit); return 0; }
+    if (timing) { time_stages(gpu); return 0; }
+    require(color != 3, "the pq source is for --timing only");
     std::ofstream report(directory / "source-alpha-results.txt");
     if (adaptive_only) {
       verify_adaptive_ui_plane(gpu, report, directory / "adaptive-ui-plane-dump");

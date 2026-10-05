@@ -3,8 +3,14 @@
 
 #include "overlay_shaders.h"
 
+#include "addon_lifetime.h"
+
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <cstring>
+#include <map>
+#include <string>
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
@@ -74,16 +80,57 @@ namespace sunshine::overlay {
       }
     }
 
-    bool compile(const char *source, const char *entry, const char *target, bool hdr, com_t<ID3DBlob> &code) {
-      const D3D_SHADER_MACRO macros[] = {{"EXPORT_HDR", hdr ? "1" : "0"}, {nullptr, nullptr}};
+    // Export modes: 0 SDR, 1 FP16 scRGB, 2 10-bit PQ.
+    enum : int { mode_sdr, mode_scrgb, mode_pq, mode_count };
+
+    // Compiled bytecode, shared by every compositor of the process. warm()
+    // fills it on the thread pool when a renderer becomes ready, so the
+    // first overlay frame neither compiles nor waits.
+    struct blob_store {
+      std::mutex mutex;
+      std::map<std::string, com_t<ID3DBlob>> blobs;
+      std::array<std::atomic<bool>, mode_count> warming{};
+    };
+    blob_store &blobs() {
+      static auto *value = new blob_store; // Deliberately leaked: pool tasks may outlive teardown.
+      return *value;
+    }
+    std::string blob_key(const char *source, const char *entry, int mode) {
+      return std::to_string(reinterpret_cast<std::uintptr_t>(source)) + '|' + entry + '|' + std::to_string(mode);
+    }
+
+    bool compile(const char *source, const char *entry, const char *target, int mode, com_t<ID3DBlob> &code) {
+      const auto key = blob_key(source, entry, mode);
+      {
+        std::lock_guard<std::mutex> lock(blobs().mutex);
+        const auto found = blobs().blobs.find(key);
+        if (found != blobs().blobs.end()) {
+          code.retain(found->second.p);
+          return true;
+        }
+      }
+      const D3D_SHADER_MACRO macros[] = {{"EXPORT_HDR", mode == mode_scrgb ? "1" : "0"}, {"EXPORT_PQ", mode == mode_pq ? "1" : "0"},
+        {nullptr, nullptr}};
       com_t<ID3DBlob> errors;
       if (SUCCEEDED(D3DCompile(source, std::strlen(source), "Sunshine overlay compositor", macros, nullptr, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code.put(), errors.put()))) {
+        std::lock_guard<std::mutex> lock(blobs().mutex);
+        blobs().blobs[key].retain(code.p);
         return true;
       }
       if (errors.p) {
         sunshine_log::message(reshade::log::level::error, static_cast<const char *>(errors->GetBufferPointer()));
       }
       return false;
+    }
+
+    void CALLBACK warm_task(PTP_CALLBACK_INSTANCE, void *context) {
+      const int mode = static_cast<int>(reinterpret_cast<std::intptr_t>(context));
+      if (sunshine_addon_lifetime::stopping()) return;
+      com_t<ID3DBlob> code;
+      compile(gui_shader, "gui_vs", "vs_5_0", mode, code);
+      compile(gui_shader, "gui_ps", "ps_5_0", mode, code);
+      compile(composite_shader, "fullscreen_vs", "vs_5_0", mode, code);
+      compile(composite_shader, "composite_ps", "ps_5_0", mode, code);
     }
 
     D3D12_RENDER_TARGET_BLEND_DESC blend12(bool enabled) {
@@ -123,7 +170,8 @@ namespace sunshine::overlay {
     api::device_api backend = api::device_api::d3d11;
     UINT width = 0, height = 0;
     DXGI_FORMAT native_format = DXGI_FORMAT_UNKNOWN, export_format = DXGI_FORMAT_UNKNOWN;
-    bool hdr = false, initialized = false, armed = false, appended = false, captured = false;
+    int mode = mode_sdr;
+    bool initialized = false, armed = false, appended = false, captured = false;
 
     com_t<ID3D11Device1> device11;
     com_t<ID3D11DeviceContext1> context11;
@@ -170,7 +218,7 @@ namespace sunshine::overlay {
       }
 
       com_t<ID3DBlob> capture, vs, ps;
-      if (!compile(gui_shader, "gui_ps", "ps_5_0", hdr, capture) || !compile(composite_shader, "fullscreen_vs", "vs_5_0", hdr, vs) || !compile(composite_shader, "composite_ps", "ps_5_0", hdr, ps) || FAILED(device11->CreatePixelShader(capture->GetBufferPointer(), capture->GetBufferSize(), nullptr, capture_ps11.put())) || FAILED(device11->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, composite_vs11.put())) || FAILED(device11->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, composite_ps11.put()))) {
+      if (!compile(gui_shader, "gui_ps", "ps_5_0", mode, capture) || !compile(composite_shader, "fullscreen_vs", "vs_5_0", mode, vs) || !compile(composite_shader, "composite_ps", "ps_5_0", mode, ps) || FAILED(device11->CreatePixelShader(capture->GetBufferPointer(), capture->GetBufferSize(), nullptr, capture_ps11.put())) || FAILED(device11->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, composite_vs11.put())) || FAILED(device11->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, composite_ps11.put()))) {
         return false;
       }
 
@@ -296,7 +344,7 @@ namespace sunshine::overlay {
       }
 
       com_t<ID3DBlob> capture_vs, capture_ps, vs, ps;
-      if (!compile(gui_shader, "gui_vs", "vs_5_0", hdr, capture_vs) || !compile(gui_shader, "gui_ps", "ps_5_0", hdr, capture_ps) || !compile(composite_shader, "fullscreen_vs", "vs_5_0", hdr, vs) || !compile(composite_shader, "composite_ps", "ps_5_0", hdr, ps)) {
+      if (!compile(gui_shader, "gui_vs", "vs_5_0", mode, capture_vs) || !compile(gui_shader, "gui_ps", "ps_5_0", mode, capture_ps) || !compile(composite_shader, "fullscreen_vs", "vs_5_0", mode, vs) || !compile(composite_shader, "composite_ps", "ps_5_0", mode, ps)) {
         return false;
       }
       const D3D12_INPUT_ELEMENT_DESC inputs[] = {
@@ -463,6 +511,13 @@ namespace sunshine::overlay {
     }
   };
 
+  void warm(api::color_space export_color) {
+    const int mode = export_color == api::color_space::hdr10_pq ? mode_pq : export_color == api::color_space::scrgb ? mode_scrgb : mode_sdr;
+    if (blobs().warming[mode].exchange(true)) return;
+    if (!TrySubmitThreadpoolCallback(warm_task, reinterpret_cast<void *>(static_cast<std::intptr_t>(mode)), nullptr))
+      blobs().warming[mode].store(false); // Compiled on first use instead.
+  }
+
   compositor_t::compositor_t():
       impl_(std::make_unique<impl_t>()) {}
 
@@ -470,7 +525,9 @@ namespace sunshine::overlay {
 
   bool compositor_t::prepare(api::effect_runtime *runtime, api::resource_view native_rtv, api::resource source, api::resource destination, std::uint32_t width, std::uint32_t height, api::color_space source_color, api::color_space export_color) {
     cancel();
-    if (!runtime || !native_rtv.handle || !source.handle || !destination.handle || source.handle == destination.handle || !width || width > 8192 || !height || height > 16384 || (export_color != api::color_space::srgb && export_color != api::color_space::scrgb) || (source_color != api::color_space::srgb && source_color != api::color_space::scrgb && source_color != api::color_space::hdr10_pq) || ((source_color == api::color_space::srgb) != (export_color == api::color_space::srgb))) {
+    // A PQ export (10-bit Rec.2020 ST 2084 codes) comes only from an HDR10 source.
+    const bool pq_export = export_color == api::color_space::hdr10_pq && source_color == api::color_space::hdr10_pq;
+    if (!runtime || !native_rtv.handle || !source.handle || !destination.handle || source.handle == destination.handle || !width || width > 8192 || !height || height > 16384 || (export_color != api::color_space::srgb && export_color != api::color_space::scrgb && !pq_export) || (source_color != api::color_space::srgb && source_color != api::color_space::scrgb && source_color != api::color_space::hdr10_pq) || ((source_color == api::color_space::srgb) != (export_color == api::color_space::srgb))) {
       return false;
     }
     auto *device = runtime->get_device();
@@ -504,11 +561,11 @@ namespace sunshine::overlay {
       native_format = typed(native.Format);
       export_format = typed(input.Format);
     }
-    const bool hdr = export_color == api::color_space::scrgb;
-    if ((hdr && export_format != DXGI_FORMAT_R16G16B16A16_FLOAT) || (!hdr && export_format != DXGI_FORMAT_R10G10B10A2_UNORM && export_format != DXGI_FORMAT_R8G8B8A8_UNORM && export_format != DXGI_FORMAT_B8G8R8A8_UNORM)) {
+    const int mode = pq_export ? mode_pq : export_color == api::color_space::scrgb ? mode_scrgb : mode_sdr;
+    if ((mode == mode_scrgb && export_format != DXGI_FORMAT_R16G16B16A16_FLOAT) || (mode == mode_pq && export_format != DXGI_FORMAT_R10G10B10A2_UNORM) || (mode == mode_sdr && export_format != DXGI_FORMAT_R10G10B10A2_UNORM && export_format != DXGI_FORMAT_R8G8B8A8_UNORM && export_format != DXGI_FORMAT_B8G8R8A8_UNORM)) {
       return false;
     }
-    if (!impl_->initialized || impl_->backend != backend || impl_->width != width || impl_->height != height || impl_->native_format != native_format || impl_->export_format != export_format || impl_->hdr != hdr) {
+    if (!impl_->initialized || impl_->backend != backend || impl_->width != width || impl_->height != height || impl_->native_format != native_format || impl_->export_format != export_format || impl_->mode != mode) {
       impl_ = std::make_unique<impl_t>();
       auto &s = *impl_;
       s.width = width;
@@ -516,7 +573,7 @@ namespace sunshine::overlay {
       s.backend = backend;
       s.native_format = native_format;
       s.export_format = export_format;
-      s.hdr = hdr;
+      s.mode = mode;
       if (backend == api::device_api::d3d11) {
         if (FAILED(reinterpret_cast<ID3D11Device *>(device->get_native())->QueryInterface(IID_PPV_ARGS(s.device11.put()))) || FAILED(reinterpret_cast<ID3D11DeviceContext *>(commands->get_native())->QueryInterface(IID_PPV_ARGS(s.context11.put()))) || !s.create11()) {
           return false;

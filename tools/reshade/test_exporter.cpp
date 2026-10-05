@@ -1457,12 +1457,46 @@ namespace {
         "Native runtime destruction retained output, owner or automatic status");
     }
 
+    // destroy_effect_runtime also precedes every ResizeBuffers (an SDR and
+    // HDR toggle): the finished export ring and the cached ring of the other
+    // transfer stay for the toggle back, without back-buffer references,
+    // until destroy_swapchain without resize destroys the swapchain itself.
+    static void runtime_reset_keeps_toggle_rings() {
+      publisher_t publisher;
+      require(publisher.init(), "mapping creation failed");
+      activate(publisher);
+      const auto ring = [](std::uint64_t native) {
+        auto generation = std::make_unique<generation_t>();
+        generation->backend = api::device_api::d3d12;
+        generation->runtime = generation->owner_runtime = owner();
+        generation->native_swapchain = native;
+        return generation;
+      };
+      publisher.generation_ = ring(99);
+      publisher.cached_ring_ = ring(99);
+      publisher.cached_ring_->runtime = nullptr;
+      const auto *current = publisher.generation_.get();
+      const auto *cached = publisher.cached_ring_.get();
+      require(current->finished() && cached->finished(), "fixture rings are not finished");
+      publisher.invalidate(owner(), true, 99);
+      require(publisher.generation_.get() == current && publisher.cached_ring_.get() == cached &&
+          !current->owner_destroyed && !cached->owner_destroyed && !current->runtime,
+        "A runtime reset (a resize) discarded the export rings kept for a colour toggle back");
+      publisher.swapchain_destroyed(98);
+      require(publisher.generation_ && publisher.cached_ring_, "Another swapchain's destruction released this swapchain's rings");
+      publisher.swapchain_destroyed(99);
+      require(!publisher.generation_ && !publisher.cached_ring_ && !publisher.retired_,
+        "The destroyed swapchain's finished rings were not released");
+      std::puts("PASS runtime reset keeps the toggle rings until its swapchain is destroyed");
+    }
+
     static void color_contract() {
       for (std::uint32_t input = 0; input <= 5; ++input) {
         for (const char *output : {"srgb", "scrgb", "pq", ""}) {
           export_color_t color;
           const bool expected = (input == 1 && std::strcmp(output, "srgb") == 0) ||
-                                ((input == 2 || input == 3) && std::strcmp(output, "scrgb") == 0);
+                                ((input == 2 || input == 3) && std::strcmp(output, "scrgb") == 0) ||
+                                (input == 3 && std::strcmp(output, "pq") == 0);
           require(decode_export_color(output, input, color) == expected, "export transfer declaration accepted a contradictory or unknown color space");
         }
       }
@@ -1486,6 +1520,25 @@ namespace {
       require(decode_export_color("scrgb", 2, source.color), "native scRGB contract rejected");
       publisher_t::set_source(metadata, source);
       require(metadata.color_transfer == wire::transfer::scrgb && metadata.dxgi_format == 10, "explicit scRGB metadata lost its transfer");
+      require(metadata.protocol_version == wire::version, "an FP16 export left protocol 2");
+      // The 10-bit PQ export (docs/reshade-sbs.md, PQ wire transfer): protocol 3, R10G10B10A2 only.
+      require(decode_export_color("pq", 3, source.color), "PQ export declaration rejected");
+      source.format = DXGI_FORMAT_R10G10B10A2_UNORM;
+      publisher_t::set_source(metadata, source);
+      require(metadata.color_transfer == wire::transfer::pq && metadata.dxgi_format == 24 &&
+          metadata.protocol_version == wire::pq_version, "a PQ export is not protocol 3 R10G10B10A2 PQ");
+      require(wire::supported_format(metadata.dxgi_format, metadata.color_transfer) &&
+          !wire::supported_format(10, wire::transfer::pq), "the PQ transfer accepted FP16");
+      // Capabilities count only for the nonce they answer; an older consumer
+      // writes none, so it keeps the FP16 export.
+      auto &shared = *publisher.shared_;
+      shared.consumer_capabilities = wire::consumer_accepts_pq;
+      shared.capability_nonce = 41;
+      require(read_capabilities(shared, 41) == wire::consumer_accepts_pq, "the answered consumer's PQ capability was lost");
+      require(!read_capabilities(shared, 42) && !read_capabilities(shared, 0), "a stale capability nonce granted PQ");
+      shared.capability_nonce = 0;
+      require(!read_capabilities(shared, 41), "an older consumer granted PQ");
+      shared.consumer_capabilities = 0;
     }
 
     static void bounded_retirement() {
@@ -1767,6 +1820,7 @@ int main(int argc, char **argv) {
     publisher_tests::overlay_reload();
     publisher_tests::disabled_native_reload_lifetime();
     publisher_tests::native_reload_clears_fx_handles();
+    publisher_tests::runtime_reset_keeps_toggle_rings();
     publisher_tests::color_contract();
     publisher_tests::bounded_retirement();
     publisher_tests::d3d12_deferred_signal(false);

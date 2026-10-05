@@ -43,23 +43,62 @@ namespace platf::sbs_cursor {
   // value belongs to the exact packed frame, independently of the current cursor position.
   std::optional<placement_t> place_cursor(const snapshot_t &cursor, std::uint32_t packed_width, std::uint32_t packed_height, float ui_parallax_uv = 0.0f);
 
+  // Encoding of the frame the cursor is composited over.
+  enum class source_transfer_e {
+    srgb,  ///< Display-referred code values (any UNORM/FP16 format).
+    scrgb,  ///< Linear Rec.709, 1.0 = 80 cd/m2.
+    pq,  ///< Rec.2020 ST 2084 code values; the patch is decoded to scRGB first.
+  };
+
+  // A margin that makes compose() populate the whole frame, so `texture` is the complete
+  // composited frame (the reference full-frame composition).
+  inline constexpr std::uint32_t whole_frame_margin = UINT32_MAX;
+
   struct result_t {
     ID3D11Texture2D *texture = nullptr;
     ID3D11ShaderResourceView *view = nullptr;
+    // Encoding of `texture` when `regions` is nonzero: the source's for sRGB/scRGB; scRGB for PQ.
+    bool linear = false;
+    // Eyes whose cursor changed texels. Zero means `texture` is the unchanged source.
+    std::uint32_t regions = 0;
+    // Texels the cursor changed in each drawn eye (right/bottom exclusive, frame coordinates).
+    std::array<D3D11_RECT, 2> changed {};
+    // Texels of `texture` that equal the composited frame: `changed` grown by the requested
+    // margin and clamped to the frame. `texture` has the frame's size; outside these
+    // rectangles it is stale. A reader re-runs its pass from `texture` only over
+    // output_region(changed), whose footprint stays inside `valid`.
+    std::array<D3D11_RECT, 2> valid {};
   };
+
+  // Margin, in source texels, around a changed rectangle that holds the bilinear (or 4:2:0
+  // [1,2,1]x[1,1] texel) footprint of every output pixel output_region() returns, for passes
+  // whose viewport maps at least `minimum_scale` output pixels to one source texel.
+  std::uint32_t patch_margin(float minimum_scale);
+
+  // Render-target pixels of a pass that reads a `source_width` x `source_height` frame through
+  // `viewport` whose footprint may include a texel of `changed`, clamped to the viewport.
+  std::optional<D3D11_RECT> output_region(const D3D11_RECT &changed, std::uint32_t source_width, std::uint32_t source_height, const D3D11_VIEWPORT &viewport);
 
   class compositor_t {
   public:
-    compositor_t(ID3D11Device *device, ID3D11DeviceContext *context, ID3DBlob *vertex_shader, ID3DBlob *pixel_shader, ID3DBlob *hdr_pixel_shader);
+    compositor_t(ID3D11Device *device, ID3D11DeviceContext *context, ID3DBlob *vertex_shader, ID3DBlob *pixel_shader, ID3DBlob *hdr_pixel_shader, ID3DBlob *pq_decode_pixel_shader = nullptr);
     ~compositor_t();
     compositor_t(const compositor_t &) = delete;
     compositor_t &operator=(const compositor_t &) = delete;
 
     // Hidden/disabled cursors return the unchanged input without GPU allocation/copy.
-    // Visible output is private scratch, valid until the next call or destruction. Source is
-    // never modified. All device-context state is restored. Nullopt means invalid input/failure.
-    // Linear output uses the existing cursor HDR shader: sRGB decode * SDR-white-nits / 80.
-    std::optional<result_t> compose(ID3D11Texture2D *texture, ID3D11ShaderResourceView *view, const snapshot_t &cursor, bool linear, float white_multiplier, float ui_parallax_uv = 0.0f);
+    // A visible cursor is drawn into a private frame-sized patch, valid until the next call or
+    // destruction: only `valid` is copied from the source (or decoded, for PQ) before the
+    // blend, so no full-frame copy is made unless `margin` is whole_frame_margin. Source is
+    // never modified. All device-context state is restored. Nullopt means invalid
+    // input/failure. Linear output uses the existing cursor HDR shader: sRGB decode *
+    // SDR-white-nits / 80; a PQ source is blended in that same linear light.
+    std::optional<result_t> compose(ID3D11Texture2D *texture, ID3D11ShaderResourceView *view, const snapshot_t &cursor, source_transfer_e transfer, float white_multiplier, float ui_parallax_uv, std::uint32_t margin);
+
+    // Whole-frame composition of an sRGB or scRGB source: `texture` is the composited frame.
+    std::optional<result_t> compose(ID3D11Texture2D *texture, ID3D11ShaderResourceView *view, const snapshot_t &cursor, bool linear, float white_multiplier, float ui_parallax_uv = 0.0f) {
+      return compose(texture, view, cursor, linear ? source_transfer_e::scrgb : source_transfer_e::srgb, white_multiplier, ui_parallax_uv, whole_frame_margin);
+    }
 
   private:
     struct impl_t;

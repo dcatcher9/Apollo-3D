@@ -392,6 +392,9 @@ namespace platf::game3d_debug::preview {
     const auto metadata = manifest.value("producer_metadata", json::object());
     const auto parameters = metadata.value("render_parameters", json::object());
     const unsigned color_space = metadata.value("color_space", 0u);
+    // The SBS image's own encoding: FP16 scRGB for an HDR10 source unless the
+    // dump declares the 10-bit PQ wire transfer (sbs_transfer 3).
+    const unsigned sbs_transfer = metadata.value("sbs_transfer", color_space == 3 ? 2u : color_space);
     json report = {{"schema", "sunshine.game3d.previews.v1"}, {"status", "complete"}, {"index", "index.html"}, {"images", json::array()}, {"missing", json::array()}, {"notes", "Display-only PNGs. Native .bin and manifest replay parameters are authoritative and unchanged. Magenta marks nonfinite values. No percentile clipping."}};
     report["optional_errors"] = std::move(optional_errors);
     report["ui_resources"] = metadata.value("ui_resources", json::array());
@@ -467,7 +470,7 @@ namespace platf::game3d_debug::preview {
     }
     if (sbs) {
       add("final_sbs.png", "Final SBS (left eye | right eye)", sbs->width, sbs->height, std::string("Native renderer output before ReShade overlay, Windows cursor and host encoding. Alpha ignored for display. ") + (color_space == 2 || color_space == 3 ? hdr_note : encoded_note), [&](unsigned x, unsigned y) {
-        return detail::display_color(detail::sample(*sbs, x, y), color_space == 3 ? 2 : color_space);
+        return detail::display_color(detail::sample(*sbs, x, y), sbs_transfer);
       });
     }
     for (const auto &entry : sunshine_game3d::ui_resources::catalog) {
@@ -624,7 +627,7 @@ namespace platf::game3d_debug::preview {
             return invalid_color;
           }
         }
-        const auto left = detail::display_color(a, color_space == 3 ? 2 : color_space), right = detail::display_color(b, color_space == 3 ? 2 : color_space);
+        const auto left = detail::display_color(a, sbs_transfer), right = detail::display_color(b, sbs_transfer);
         rgb result;
         for (unsigned c = 0; c < 3; ++c) {
           result[c] = static_cast<std::uint8_t>(std::min(255, 4 * std::abs(int(left[c]) - int(right[c]))));

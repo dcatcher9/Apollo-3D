@@ -11,6 +11,8 @@ struct sunshine_receiver_test_frame {
   std::uint32_t linear = 0;
   std::uint64_t sequence = 0;
   std::int64_t timestamp_ns = 0;
+  // platf::reshade_bridge::transfer_e: 0 sRGB, 1 scRGB, 2 PQ (Rec.2020 ST 2084).
+  std::uint32_t transfer = 0;
 };
 
 using sunshine_receiver_test_create = void *(*) (ID3D11Device *, ID3D11DeviceContext *, HWND, DWORD, const RECT *);

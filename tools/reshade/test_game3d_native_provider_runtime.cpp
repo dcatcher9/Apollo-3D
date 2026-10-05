@@ -12,6 +12,15 @@
 #include <nlohmann/json.hpp>
 
 namespace {
+  // SUNSHINE_GAME3D_TEST_DIAGNOSTICS_OFF: the run keeps the Diagnostics switch
+  // off (direct candidate binding; no S3 shadow to check).
+  bool diagnostics_off() {
+    const char *value = std::getenv("SUNSHINE_GAME3D_TEST_DIAGNOSTICS_OFF");
+    return value && *value && std::strcmp(value, "0") != 0;
+  }
+}
+
+namespace {
   struct native_provider_fixture : direct_fixture {
     using automatic_t = BOOL (*)(api::effect_runtime *, unsigned *);
     using scale_t = BOOL (*)(api::effect_runtime *, unsigned *, unsigned *, float *);
@@ -90,6 +99,14 @@ namespace {
       query_scale = reinterpret_cast<scale_t>(GetProcAddress(module, "SunshineGame3DTestQueryScale"));
       require(capture && query_provider_status && query_automatic && query_scale,
         "Test add-on lacks native provider metadata adapter or passive UI observations");
+      // The S3 shadow sections below observe diagnostic-only stamps, labels
+      // and identity totals: the Diagnostics switch on, as the panel sets it.
+      // SUNSHINE_GAME3D_TEST_DIAGNOSTICS_OFF keeps it off (the default):
+      // candidates are then bound directly (leased snapshots, live layer
+      // copies) outside dumps, and the S3 checks are skipped.
+      const auto set_diagnostics = reinterpret_cast<BOOL (*)(BOOL)>(GetProcAddress(module, "SunshineGame3DTestSetDiagnostics"));
+      require(set_diagnostics && set_diagnostics(diagnostics_off() ? FALSE : TRUE),
+        "Test add-on cannot set the Diagnostics switch");
       fs::rename(directory / "effects" / effect_file, directory / "effects" / "SunshineGame3D.fx.disabled");
       const auto reloads = observed.reloads;
       observed.runtime->reload_effect_next_frame(nullptr);
@@ -317,7 +334,7 @@ namespace {
       const auto &replay = metadata.at("replay");
       // S3 shadow: the dumped render's detection ran, so its stamp buffer is
       // read back, one [C_P, C_T] per ticket slot, beside the proposals.
-      {
+      if (!diagnostics_off()) {
         const auto &detection = replay.at("ui_detection");
         const auto &stamps = detection.at("stamps");
         bool stamps_ok = detection.at("ran_or_held") == "ran" && stamps.is_array() &&
@@ -372,7 +389,7 @@ namespace {
       // completed, every offered candidate carries its ticket, and the render
       // reports today's pairing beside the ticket's.
       for (const auto &entry : metadata.at("ui_layer_census").at("candidates"))
-        if (entry.at("artifact_id") == layer_artifact)
+        if (entry.at("artifact_id") == layer_artifact && !diagnostics_off())
           require(entry.at("ticket").at("kind") == "layer_copy" && entry.at("ticket").at("stamped") == true &&
               entry.at("ticket").at("stamp").at("present_read").get<std::uint32_t>() != 0 &&
               entry.at("ticket").at("stamp").at("present_label") == entry.at("ticket").at("stamp").at("present_read"),
@@ -636,7 +653,7 @@ namespace {
         throw std::runtime_error("The GPU admitted an offscreen layer with straight alpha: " + sampled.dump());
       // S3 layer stamps on D3D12 (shadow; game3d_ui_layer.h): once, since the
       // foreign-queue verdict is sticky for the layer's scope.
-      if (resource_type == 0) {
+      if (resource_type == 0 && !diagnostics_off()) {
         const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
         const auto live_state = reinterpret_cast<BOOL (*)(sunshine_game3d::ui_layer::test_live_state *)>(
           GetProcAddress(module, "SunshineUILayerTestLive"));
@@ -754,6 +771,9 @@ namespace {
         step(); no_effects();
         live = query();
         words = stamp_words(live.stamp);
+        // The copy went to another live-copy ring entry (game3d_ui_layer.h,
+        // ring_capacity) that stays pending: the offered copy is still the
+        // last executed one, as a single live texture would hold.
         require(live.capture_id > capture_before && words[0] == executed_twice && words[0] != live.present_label,
           "A never-executed layer list changed the stamp");
         // The late and never-executed copies read another Present than their

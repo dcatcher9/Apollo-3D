@@ -537,8 +537,14 @@ uniform int DepthDirection < hidden = true; >;
         }
         require(!same_generation || metadata.generation == same_generation, "Overlay or uniform edit replaced the resource generation");
         require(metadata.source_width == source_width && metadata.source_height == source_height && metadata.window == reinterpret_cast<std::uint64_t>(window), "Exporter source identity/dimensions incorrect");
-        require(metadata.color_transfer == (expected_color == 1 ? wire::transfer::srgb : wire::transfer::scrgb), "Exporter declared wrong transfer");
-        require(metadata.dxgi_format == (expected_color == 1 ? 24u : 10u), "Exporter declared wrong resource format");
+        // The native HDR10 renderer exports 10-bit PQ at protocol 3 to the
+        // production receiver, which accepts it (docs/reshade-sbs.md, PQ wire
+        // transfer); the fixture's own consumer advertises nothing and keeps FP16.
+        const bool pq = native_only && expected_color == 3 && receiver_state;
+        require(metadata.color_transfer == (expected_color == 1 ? wire::transfer::srgb : pq ? wire::transfer::pq : wire::transfer::scrgb),
+          "Exporter declared wrong transfer");
+        require(metadata.dxgi_format == (expected_color == 1 || pq ? 24u : 10u), "Exporter declared wrong resource format");
+        require(metadata.protocol_version == (pq ? wire::pq_version : wire::version), "Exporter declared the wrong protocol");
         if (receiver_state) {
           if (metadata.accepted_consumer_nonce != read64(shared->consumer_nonce)) {
             // Reattachment just requested a new producer ring. It needs another Present.
@@ -562,7 +568,8 @@ uniform int DepthDirection < hidden = true; >;
             Sleep(1);
           }
           require(received_status == 1 && received.sequence == newest_sequence && received.texture && received.timestamp_ns, "Production receiver did not retire the latest D3D12 publication");
-          require(received.linear == (expected_color != 1), "Production receiver lost the declared source transfer");
+          require(received.linear == (expected_color != 1 && !pq) && received.transfer == (expected_color == 1 ? 0u : pq ? 2u : 1u),
+            "Production receiver lost the declared source transfer");
           if (!inspect_texture(receiver.p, receiver_context.p, received.texture, metadata.dxgi_format)) {
             continue;
           }
@@ -1072,10 +1079,73 @@ uniform int DepthDirection < hidden = true; >;
         wait_pixels(generation);
         require(read64(shared->consumer_nonce) != previous_nonce, "Native receiver restart reused its old nonce");
       }
+      generation = exercise_resize_toggle(generation, same_ring);
       require(observation.presents == observation.finishes && observation.techniques == 0,
         "Native no-FX presentation lifecycle is incomplete");
-      std::printf("PASS native add-on-only D3D12 color=%u: no FX files or techniques; native source/SDR/HDR pixels, controls/config, zero strength, enable/focus recovery, idle ring reuse, actual panel/overlay, reload%s\n",
+      std::printf("PASS native add-on-only D3D12 color=%u: no FX files or techniques; native source/SDR/HDR pixels, controls/config, zero strength, enable/focus recovery, idle ring reuse, actual panel/overlay, reload, ResizeBuffers colour toggle%s\n",
         expected_color, receiver_state ? ", production receiver restart" : "");
+    }
+
+    // How often the add-on logged marker (its log lines are written
+    // asynchronously: waits until the count reaches at_least or 2 s pass).
+    std::size_t log_count(const char *marker, std::size_t at_least = 0) const {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      std::size_t count = 0;
+      do {
+        std::ifstream input(output_directory / "ReShade.log");
+        const std::string log((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        count = 0;
+        for (auto at = log.find(marker); at != std::string::npos; at = log.find(marker, at + 1)) ++count;
+        if (count >= at_least) break;
+        Sleep(10);
+      } while (std::chrono::steady_clock::now() < deadline);
+      return count;
+    }
+
+    // A game's colour toggle: ResizeBuffers to the other format and colour
+    // space. ReShade resets its runtime (destroy_effect_runtime) around it.
+    void resize_color(unsigned color) {
+      for (auto &backbuffer : backbuffers) backbuffer.reset();
+      checked(swapchain->ResizeBuffers(2, source_width, source_height, color == 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+        color == 3 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM, 0), "Colour-toggle ResizeBuffers");
+      checked(swapchain->SetColorSpace1(color == 2 ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : color == 3 ?
+        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709), "Colour-toggle colour space");
+      auto target_handle = targets->GetCPUDescriptorHandleForHeapStart();
+      for (unsigned index = 0; index < 2; ++index) {
+        checked(swapchain->GetBuffer(index, IID_PPV_ARGS(backbuffers[index].put())), "Get the resized D3D12 backbuffer");
+        game->CreateRenderTargetView(backbuffers[index].p, nullptr, target_handle);
+        target_handle.ptr += target_stride;
+      }
+      expected_color = color;
+    }
+
+    // A toggle to the other colour transfer and back through ResizeBuffers
+    // (docs/reshade-sbs.md, colour toggles): the toggle back reuses the first
+    // transfer's renderer and export ring instead of allocating them again.
+    template<class same_ring_t>
+    std::uint64_t exercise_resize_toggle(std::uint64_t generation, const same_ring_t &same_ring) {
+      constexpr const char *renderer_reuse = "reusing the cached add-on GPU renderer of this colour transfer";
+      const unsigned original = expected_color, other = original == 1 ? 2 : 1;
+      wire::metadata_t first, second, back;
+      require(snapshot(*shared, first) && first.generation >= generation, "No export before the colour toggle");
+      generation = first.generation;
+      resize_color(other);
+      generation = wait_pixels(generation);
+      require(snapshot(*shared, second) && second.generation == generation && !same_ring(second, first),
+        "The other colour transfer did not get its own export ring");
+      // The first ring becomes reusable once inactive for the idle reuse delay.
+      const auto idle_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(700);
+      while (std::chrono::steady_clock::now() < idle_until) step();
+      const auto reuses = log_count(renderer_reuse);
+      resize_color(original);
+      generation = wait_pixels(generation);
+      require(snapshot(*shared, back) && back.generation == generation && same_ring(back, first),
+        "The toggle back through ResizeBuffers reallocated the first transfer's export ring");
+      require(log_count(renderer_reuse, reuses + 1) > reuses,
+        "The toggle back through ResizeBuffers did not reuse the first transfer's renderer");
+      std::printf("PASS ResizeBuffers colour toggle %u->%u->%u: the toggle back reuses the renderer and export ring\n",
+        original, other, original);
+      return generation;
     }
 #endif
 

@@ -11,10 +11,19 @@
 #include <optional>
 
 namespace platf::reshade_bridge {
+  // The declared encoding of the exported pixels.
+  enum class transfer_e : std::uint8_t {
+    srgb,  ///< Display-referred sRGB code values.
+    scrgb,  ///< Linear Rec.709, 1.0 = 80 cd/m2 (FP16).
+    pq,  ///< Rec.2020 SMPTE ST 2084 code values, 1.0 = 10000 cd/m2 (R10G10B10A2).
+  };
+
   struct frame_t {
     ID3D11Texture2D *texture = nullptr;
     ID3D11ShaderResourceView *view = nullptr;
+    // True only for scRGB. PQ frames are HDR but not linear; read `transfer` for them.
     bool linear = false;
+    transfer_e transfer = transfer_e::srgb;
     std::chrono::steady_clock::time_point timestamp {};
     std::uint64_t sequence = 0;
     // Validated publisher identity. Stable across frames within one resource generation;
@@ -36,8 +45,11 @@ namespace platf::reshade_bridge {
     receiver_t(const receiver_t &) = delete;
     receiver_t &operator=(const receiver_t &) = delete;
 
-    // Nonblocking. A returned frame is private to this receiver and may be reused while its
-    // exact foreground producer remains valid. Pointers live until the next poll/destruction.
+    // Nonblocking. A returned frame is the producer's shared slot, held in `reading` while it
+    // is the newest frame, and may be reused while its exact foreground producer remains valid.
+    // Callers only read it on this receiver's device context. Once a newer frame replaces it,
+    // the slot returns to the producer only after an event query issued after its last use has
+    // completed. Pointers live until the next poll/destruction.
     // Foreground ownership must cover source_rect. The returned texture keeps the authored
     // raster; its per-eye aspect must match output_width/output_height (within 0.5%) and the
     // consumer scales it. Fullscreen display scaling can make these extents independent.

@@ -140,10 +140,40 @@ namespace sunshine_game3d::ui_layer {
     bool foreign_present_{}, mixed_{};
   };
 
+  // Live copies: a ring of add-on owned copies (ring_capacity at most; three
+  // normally suffice). A before-clear copy goes to an entry other than the
+  // offered one whose last reader, a renderer submission (bound()), completed
+  // and whose own copy is not pending; with every entry busy the ring grows,
+  // and once full that copy is skipped and logged (saturated). A recorded copy
+  // is pending, never offered, until a list carrying it executes; the offered
+  // entry is the last executed copy. Pure: no GPU or runtime calls.
+  inline constexpr unsigned ring_capacity = 4;
+  struct ring_choice {
+    int index = -1;        // The entry to write; -1 when saturated.
+    bool allocate = false; // index is a new entry.
+  };
+  // allocated: entries [0, count) exist; free[i]: entry i's readers
+  // completed and its copy not pending; age[i]: its capture id (smaller is
+  // older); newest: the offered entry, the last executed copy (-1: none). The
+  // oldest free entry wins.
+  inline ring_choice choose_ring_entry(unsigned count, const std::array<bool, ring_capacity> &free,
+      const std::array<std::uint64_t, ring_capacity> &age, int newest) {
+    ring_choice choice;
+    for (unsigned i = 0; i != count && i != ring_capacity; ++i)
+      if (int(i) != newest && free[i] && (choice.index < 0 || age[i] < age[unsigned(choice.index)])) choice.index = int(i);
+    if (choice.index < 0 && count < ring_capacity) choice = {int(count), true};
+    return choice;
+  }
+
   struct live_capture {
     api::resource copy{};       // Add-on owned, shader_resource state between uses.
-    std::uint64_t capture_id{}; // Increases with every copy; never zero when valid.
-    std::uint64_t tick{};       // GetTickCount64 when the copy was recorded.
+    // The copy's shader view, for direct binding; direct when the newest
+    // copy's lists executed on the presenting queue only (the queue watch),
+    // so that queue order puts the copy before this Present's reads.
+    api::resource_view view{};
+    bool direct{};
+    std::uint64_t capture_id{}; // The offered entry's copy id; never zero when valid.
+    std::uint64_t tick{};       // GetTickCount64 when the newest copy was recorded.
     std::uint32_t format{};     // Typed format of the copy.
     // Presents observed since the copy (layer_tracker::presents_since_copy):
     // the copy holds the frame of the Present that many back (S3's layer
@@ -158,8 +188,8 @@ namespace sunshine_game3d::ui_layer {
     bool stamped{}, foreign_present{}, queue_mixed{};
     std::uint64_t executed_queue{};
   };
-  // The active layer's newest copy on this device, recorded less than
-  // max_clear_gap_ms ago. Each call also asks for the next copies: the layer is
+  // The active layer's last executed copy on this device, while its newest
+  // copy was recorded less than max_clear_gap_ms ago. Each call also asks for the next copies: the layer is
   // copied only while UI detection keeps asking.
   bool latest(api::device *device, std::uint64_t now_ms, live_capture &out);
 
@@ -184,11 +214,18 @@ namespace sunshine_game3d::ui_layer {
     std::uint32_t stamped{}, foreign_present{}, queue_mixed{}, watching{};
   };
 
+  // A renderer submission read the live copy capture_id (a direct binding or
+  // the copy into the renderer's slot): that ring entry is not rewritten
+  // until fence reaches value (renderer::completion_fence/completion_value).
+  void bound(api::device *device, std::uint64_t capture_id, api::fence fence, std::uint64_t value);
+
   void register_events();
   void unregister_events();
   // Every Present of the foreground swapchain only: output size, back buffers
-  // and the live tracker's frame boundary.
-  void observe_output(api::swapchain *swapchain);
+  // (cached until the swapchain, its size or buffer count, or its first
+  // buffer changes, or ReShade reports it created or resized), the presenting
+  // queue and the live tracker's frame boundary.
+  void observe_output(api::swapchain *swapchain, api::command_queue *queue);
   void arm();
   // Stops the census and hands over its candidates. Each copy stays valid
   // while its device lives; the caller either keeps a reference and destroys

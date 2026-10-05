@@ -3,6 +3,7 @@
 #include "game3d_shader_source.h"
 #include <reshade.hpp>
 #include "async_log.h"
+#include "game3d_diagnostics.h"
 #include "game3d_shader_cache.h"
 #include "game3d_still_screen.h"
 #include "game3d_ui_counters.h"
@@ -45,7 +46,7 @@ namespace sunshine_game3d {
     }
     api::pipeline_layout layout{};
     enum pass { pq, candidate, vertical, ui_tiles, ui_reduce, horizontal, eyes, pack, ui_conflict, ui_apply,
-      detection_tiles, detection_reduce, detection_mask, scene_cells, scene_compare, scene_evidence, pass_count };
+      detection_tiles, detection_reduce, detection_mask, scene_cells, scene_compare, scene_evidence, pack_pq, pass_count };
     std::array<api::pipeline, pass_count> pipelines{};
     std::array<api::sampler, 3> samplers{};
     api::resource_view null_srv{}, null_uav{};
@@ -54,7 +55,7 @@ namespace sunshine_game3d {
       ui_plane_tiles, ui_plane_resolved, left, right, packed, ui_source, ui_source_second, ui_source_third,
       ui_conflict_statistics, detection_statistics, detection_decision, detected_mask, scene_cell_sums, ui_counter_words,
       detection_hold, scene_previous_luma, retained_color,
-      retained_color_last = retained_color + ui_detection_inputs::max_retained_presents - 1, texture_count };
+      retained_color_last = retained_color + ui_detection_inputs::max_retained_presents - 1, packed_pq, texture_count };
     std::array<texture, texture_count> textures{};
     std::vector<std::pair<api::resource, api::resource_view>> backbuffers;
     // Render-target views of the current export generation's slot textures.
@@ -69,10 +70,13 @@ namespace sunshine_game3d {
     api::resource_view pack_depth{};
     api::fence completion{};
     uint64_t sequence = 0;
-    // Timestamps per presentation: begin, render, source, detection,
-    // conditioning, eyes, pack. A small ring is read after its fence completes.
-    enum profile_mark { mark_begin, mark_render, mark_source, mark_detection, mark_linearize, mark_candidate, mark_vertical,
-      mark_conditioning, mark_eyes, mark_pack, mark_count };
+    // Timestamps per presentation: begin, render, source, detection, the start
+    // of the recorded conditioning (in render, or owed with the pack), its
+    // stages, eyes, pack. A small ring is read after its fence completes.
+    // Recorded only while the Diagnostics switch is on: a Present's first
+    // mark decides, so a toggle never splits one Present's marks.
+    enum profile_mark { mark_begin, mark_render, mark_source, mark_detection, mark_owed, mark_linearize, mark_candidate,
+      mark_vertical, mark_conditioning, mark_eyes, mark_pack, mark_count };
     static constexpr uint32_t profile_frames = 4;
     struct profile_frame { uint64_t fence{}; uint32_t written{}; };
     api::query_heap profile_heap{};
@@ -94,6 +98,34 @@ namespace sunshine_game3d {
     std::array<profile_frame, profile_frames> profile_ring{};
     gpu_timing profile_window{};
     std::array<double, gpu_timing::stage_count> profile_sum_ms{};
+    // Conditioning (C2): everything after detection that only the pack, a
+    // dump or the adaptive probe read (PQ linearization, depth candidate,
+    // vertical, nearest-UI tiles and reduce, horizontal and UI pinning), with
+    // the inputs and b1 words render() resolved for it. render() records it
+    // for a probe frame, an older two-pass replay shader or an immediate pack;
+    // otherwise it is owed and record_pack records it first. A Present whose
+    // pack is never recorded records none; the next render or begin_present
+    // drops it.
+    struct conditioning_input {
+      render_parameters p;
+      api::resource_view depth{}, ui_alpha{};
+      ui_plane_parameters plane;
+      ui_mask_channel channel = ui_mask_channel::alpha;
+      bool apply_ui{}, probe{}, armed{};
+      uint64_t depth_identity{};
+    };
+    conditioning_input owed;
+    bool conditioning_owed = false;
+    // The shader's mono pack reads no conditioning (SUNSHINE_MONO_SKIPS_CONDITIONING):
+    // shows_mono() may then skip it. Older replay shaders always record it.
+    bool mono_skip_supported = false;
+    // The candidate and vertical field of the last recorded conditioning, kept
+    // while its depth view, nonzero depth identity and parameters repeat.
+    bool memo_valid = false;
+    api::resource_view memo_depth{};
+    uint64_t memo_identity{};
+    render_parameters memo_parameters;
+    renderer::conditioning_counters conditioning_counts;
     // pending: this presentation recorded work awaiting finish_present.
     // unsignaled: an earlier presentation's work awaits the next signal.
     bool pending = false, unsignaled = false, failed = false;
@@ -122,6 +154,26 @@ namespace sunshine_game3d {
     // Older embedded replay shaders render two FP16 eye textures and pack them
     // in a second pass.
     bool packed_eyes = false;
+    // The shader decodes an HDR10 (PQ) source per tap in the pack
+    // (SUNSHINE_PQ_PER_TAP): no linearization pass and no FP16 linear
+    // texture. Older replay shaders keep both.
+    bool pq_per_tap = false;
+    // The pack writes the 10-bit PQ export (renderer::set_pq_output) into
+    // textures[packed_pq] or an R10G10B10A2 export slot instead of FP16 scRGB.
+    bool pq_output = false;
+    // Candidates bound directly this Present (renderer::bind_ui_candidate):
+    // the caller's view and its texture, which device::get_resource_from_view
+    // cannot resolve for a leased snapshot's raw descriptor.
+    std::array<std::pair<api::resource_view, api::resource>, 5> direct_views{};
+    // D3D12: one original-device descriptor per slot for leased snapshots
+    // (renderer::bind_ui_snapshot), created on first use.
+    com<ID3D12DescriptorHeap> snapshot_views;
+    UINT snapshot_stride{};
+    api::resource resource_of(api::resource_view view) const {
+      for (const auto &[bound, resource] : direct_views)
+        if (bound.handle && bound.handle == view.handle) return resource;
+      return device->get_resource_from_view(view);
+    }
     // Rows per UI pinning group, from SUNSHINE_UI_PIN_LINE_GROUPS. Zero for
     // older embedded replay shaders, which pin one row per 32-thread group.
     uint32_t pin_lines = 0;
@@ -142,6 +194,9 @@ namespace sunshine_game3d {
     // (docs/reshade-sbs.md, UI detection flags and decision texels).
     uint32_t detection_decision_texels = ui_detection::default_decision_texels;
     uint32_t detection_statistics_images = ui_detection::default_scene_evidence_images;
+    // Parts per statistics tile (ui_detection::tile_parts_marker; zero for a
+    // shader without the marker, which counts each tile in one group).
+    uint32_t detection_tile_parts = 0;
     // Hidden-scene evidence (docs/reshade-sbs.md, hidden-scene evidence): the
     // shader writes decision texels 5, 6 and 12 with its evidence passes.
     // They run on sample frames only, and only when the scene guard measures
@@ -270,6 +325,41 @@ namespace sunshine_game3d {
     uint64_t adaptive_readback_bytes = 0;
     uint64_t adaptive_submitted = 0;
 
+    // A cached renderer becomes current again (a colour toggle back): it keeps
+    // its GPU objects and cumulative counters, and starts every per-scene
+    // decision state as a new renderer would, so that a toggle cannot carry a
+    // minute-old decision, hold or sample into the new session.
+    void resume() {
+      pending = unsignaled = false;
+      conditioning_owed = pack_owed = false;
+      profile_open = false;
+      direct_views = {};
+      memo_valid = false;
+      const bool override = temporal.identity_override;
+      temporal = {};
+      temporal.identity_override = override;
+      guard = {};
+      hold_cleared = previous_luma_cleared = false;
+      detection_pending = detection_awaiting_signal = detection_pending_actionable = detection_pending_h2_only = false;
+      detection_pending_still_scope = false;
+      detection_fence = detection_last_submit = 0;
+      counters_pending = false;
+      scene_bits = 0;
+      scene_shadow = scene_layer_proven = false;
+      still_scope = still_enabled = still_flattened = false;
+      still_short_unpublished_ms = 0;
+      detection_run = consumed_detection = {};
+      consumed_auto = {};
+      sampled_identity = {};
+      retention_wanted = false;
+      retained_present.fill(0);
+      adaptive_policy.reset();
+      consumed_adaptive = {};
+      adaptive_scope = adaptive_pending_source = {};
+      adaptive_scope_known = adaptive_readback_pending = adaptive_awaiting_signal = false;
+      ++adaptive_scope_generation;
+      adaptive_fence = adaptive_last_submit = adaptive_last_sequence = adaptive_last_mask_sequence = adaptive_last_tick = 0;
+    }
     bool idle() const {
       return !pending && !unsignaled && !failed &&
         (!completion.handle || device->get_completed_fence_value(completion) >= sequence);
@@ -329,7 +419,8 @@ namespace sunshine_game3d {
       api::depth_stencil_desc depth; depth.depth_enable = false; depth.depth_write_mask = false; depth.stencil_enable = false;
       api::blend_desc blend;
       auto topology = api::primitive_topology::triangle_list;
-      api::format formats[]{id == pack && color == 1 ? api::format::r10g10b10a2_unorm : api::format::r16g16b16a16_float, api::format::r16g16b16a16_float};
+      api::format formats[]{(id == pack && color == 1) || id == pack_pq ? api::format::r10g10b10a2_unorm :
+        api::format::r16g16b16a16_float, api::format::r16g16b16a16_float};
       uint32_t count = 1;
       const api::pipeline_subobject parts[]{
         {api::pipeline_subobject_type::vertex_shader, 1, &vs},
@@ -353,12 +444,16 @@ namespace sunshine_game3d {
       mask_channel_supported = shader_source().find("#define SUNSHINE_UI_MASK_CHANNEL 1") != std::string_view::npos;
       limiter_lines = shader_marker(shader_source(), "SUNSHINE_LIMITER_LINE_GROUPS");
       packed_eyes = shader_source().find("#define SUNSHINE_PACKED_EYES 1") != std::string_view::npos;
+      mono_skip_supported = packed_eyes &&
+        shader_source().find("#define SUNSHINE_MONO_SKIPS_CONDITIONING 1") != std::string_view::npos;
+      pq_per_tap = packed_eyes && shader_source().find("#define SUNSHINE_PQ_PER_TAP 1") != std::string_view::npos;
       pin_lines = shader_marker(shader_source(), "SUNSHINE_UI_PIN_LINE_GROUPS");
       const auto texels = shader_marker(shader_source(), ui_detection::decision_texels_marker);
       const auto images = shader_marker(shader_source(), ui_detection::scene_evidence_images_marker);
       detection_decision_texels = texels ? texels : ui_detection::default_decision_texels;
       // An out-of-range marker leaves automatic detection unavailable (prepare_detection).
       detection_statistics_images = images;
+      detection_tile_parts = shader_marker(shader_source(), ui_detection::tile_parts_marker);
       counter_words = shader_marker(shader_source(), "SUNSHINE_UI_COUNTER_WORDS") == ui_counter_word::count ?
         uint32_t(ui_counter_word::count) : 0u;
       // S3: a shader that verifies identity appends its identity counter words.
@@ -392,7 +487,8 @@ namespace sunshine_game3d {
       }
       if (!texture_create(source, width, height, source_format, api::resource_usage::copy_dest) ||
           !texture_create(empty_depth, 1, 1, api::format::r32_float, api::resource_usage::undefined)) return false;
-      if (color == 3 && !texture_create(linear, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target)) return false;
+      if (color == 3 && !pq_per_tap &&
+          !texture_create(linear, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target)) return false;
       if (width <= 3840 && height <= 3840)
         for (auto id : {raw, vertical_majorant, vertical_field, field})
           if (!texture_create(id, width, height, api::format::r32_float, api::resource_usage::unordered_access)) return false;
@@ -404,7 +500,8 @@ namespace sunshine_game3d {
       shader_cache::blob vs_code;
       if (!compile("PostProcessVS", "vs_5_0", vs_code)) return false;
       const api::shader_desc vs{vs_code.data(), vs_code.size()};
-      if (color == 3 && !pipeline_create(pq, "SunshinePreparePQPS", false, vs)) return false;
+      if (color == 3 && !pq_per_tap && !pipeline_create(pq, "SunshinePreparePQPS", false, vs)) return false;
+      if (color == 3 && pq_per_tap && !pipeline_create(pack_pq, "SunshineRenderPackedPQPS", false, vs)) return false;
       if (width <= 3840 && height <= 3840)
         if (!pipeline_create(candidate, "SunshineHostCandidateCS", true, vs) || !pipeline_create(vertical, "SunshineHostVerticalCS", true, vs) ||
             !pipeline_create(horizontal, "SunshineHostHorizontalCS", true, vs) ||
@@ -442,7 +539,11 @@ namespace sunshine_game3d {
       if (stage == api::shader_stage::compute)
         cmd->push_descriptors(stage, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
     }
-    api::format packed_format() const { return color == 1 ? api::format::r10g10b10a2_unorm : api::format::r16g16b16a16_float; }
+    api::format packed_format() const {
+      return color == 1 || pq_output ? api::format::r10g10b10a2_unorm : api::format::r16g16b16a16_float;
+    }
+    // The internal side-by-side image of the current export transfer.
+    texture_id packed_texture() const { return pq_output ? packed_pq : packed; }
     bool prepare_profile() {
       if (profile_attempted) return profile_ready;
       profile_attempted = true;
@@ -495,16 +596,18 @@ namespace sunshine_game3d {
         if (!read) continue; // Not resolved yet; retry on a later collection.
         if (has(mark_render)) profile_resolved_render[i] = ticks[mark_render];
         frame.written = 0;
-        // Packed-eye frames mark their eyes only when the side-by-side target
-        // is recorded; without a consumer the frame ends after conditioning.
-        if (!has(mark_render) || !has(mark_conditioning)) { ++profile_window.incomplete; continue; }
+        // Packed-eye frames mark their conditioning and eyes only when the
+        // side-by-side target is recorded; without a consumer the frame ends
+        // after detection, and a mono pack marks no conditioning stage.
+        if (!has(mark_render)) { ++profile_window.incomplete; continue; }
         const auto span = [&](unsigned from, unsigned to) {
           return has(from) && has(to) && ticks[to] >= ticks[from] ? double(ticks[to] - ticks[from]) / profile_ticks_per_ms : 0.0;
         };
         const unsigned first = has(mark_begin) ? mark_begin : mark_render,
-          last = has(mark_pack) ? mark_pack : has(mark_eyes) ? mark_eyes : mark_conditioning;
+          last = has(mark_pack) ? mark_pack : has(mark_eyes) ? mark_eyes : has(mark_conditioning) ? mark_conditioning :
+            mark_detection;
         const std::array<double, gpu_timing::stage_count> ms{span(mark_begin, mark_render), span(mark_render, mark_source),
-          span(mark_source, mark_detection), span(mark_detection, mark_linearize), span(mark_linearize, mark_candidate),
+          span(mark_source, mark_detection), span(mark_owed, mark_linearize), span(mark_linearize, mark_candidate),
           span(mark_candidate, mark_vertical), span(mark_vertical, mark_conditioning), span(mark_conditioning, mark_eyes),
           span(mark_eyes, mark_pack), span(first, last)};
         ++profile_window.frames;
@@ -516,8 +619,9 @@ namespace sunshine_game3d {
       if (resolved) device->unmap_buffer_region(profile_readback);
     }
     void mark(api::command_list *cmd, profile_mark which) {
-      if (!profile_ready) return;
       if (!profile_open) {
+        // Diagnostics only (G1): with the switch off no timestamp is written.
+        if (!diagnostics::enabled() || !prepare_profile()) return;
         // The first mark of a presentation claims the next slot, dropping an
         // unread frame; this presentation's completion signal retires it.
         profile_slot = (profile_slot + 1) % profile_frames;
@@ -563,10 +667,93 @@ namespace sunshine_game3d {
       cmd->barrier(from, api::resource_usage::copy_source, api::resource_usage::shader_resource);
       retained_present[slot] = present_number;
     }
+    // A pack that shows the source mono (SunshineAutomaticMono) or the depth
+    // preview (Depth_Map_View 2, which reads depth only) reads no conditioning.
+    // A conservative CPU subset of that predicate: when in doubt (a camera
+    // only SunshineCameraActive rejects) the passes run.
+    bool shows_mono(const render_parameters &p) const {
+      return width > 3840 || height > 3840 || p.depth_view == 2 || !p.depth_ready || !p.camera_ready ||
+        !(std::isfinite(p.strength) && p.strength > 0.f) || !(std::isfinite(p.strength_blend) && p.strength_blend > 0.f);
+    }
+    // owed: recorded by the pack it was owed to. Only such a pack may skip it
+    // as mono; render() records it in full for a probe, an older two-pass
+    // shader or an immediate pack (replay and fixtures that read every
+    // diagnostic texture after the render).
+    void record_conditioning(api::command_list *cmd, const conditioning_input &c, bool owed_pack = false) {
+      conditioning_owed = false;
+      // The passes push the b1 words of the render that resolved them.
+      struct restore_words {
+        impl &d;
+        bool ui;
+        ui_plane_parameters plane;
+        ui_mask_channel channel;
+        ~restore_words() { d.source_alpha_ui = ui; d.consumed_plane = plane; d.consumed_channel = channel; }
+      } restore{*this, source_alpha_ui, consumed_plane, consumed_channel};
+      source_alpha_ui = c.apply_ui;
+      consumed_plane = c.plane;
+      consumed_channel = c.channel;
+      mark(cmd, mark_owed);
+      // An adaptive probe reads the unpinned field and a dump every texture.
+      if (owed_pack && mono_skip_supported && !c.probe && !c.armed && shows_mono(c.p)) {
+        ++conditioning_counts.mono;
+        mark(cmd, mark_conditioning);
+        return;
+      }
+      ++conditioning_counts.recorded;
+      nearest_ui_rendered = false;
+      const auto &t = textures;
+      const auto &p = c.p;
+      if (color == 3 && !pq_per_tap) draw(cmd, pq, width, {linear}, p, {t[source].srv});
+      mark(cmd, mark_linearize);
+      if (width <= 3840 && height <= 3840) {
+        // The candidate reads only the depth and b0, the vertical scan only
+        // the candidate; an exact repeat keeps both.
+        const bool reuse = memo_valid && c.depth_identity && c.depth_identity == memo_identity &&
+          c.depth.handle == memo_depth.handle && !std::memcmp(&c.p, &memo_parameters, sizeof(render_parameters));
+        const uint32_t group_lines = std::max(limiter_lines, 1u);
+        if (reuse) ++conditioning_counts.memo;
+        else {
+          memo_valid = false;
+          dispatch(cmd, candidate, (width + 7) / 8, (height + 7) / 8, p, {api::resource_view{}, c.depth}, {raw});
+        }
+        mark(cmd, mark_candidate);
+        if (!reuse) {
+          dispatch(cmd, vertical, (width + group_lines - 1) / group_lines, 1, p, {api::resource_view{}, {}, {}, t[raw].srv},
+            {vertical_majorant, vertical_field});
+          memo_valid = c.depth_identity != 0;
+          memo_depth = c.depth;
+          memo_identity = c.depth_identity;
+          memo_parameters = c.p;
+        }
+        mark(cmd, mark_vertical);
+        if (c.apply_ui && c.plane.mode == ui_plane_mode::depth_midpoint_nearest_ui) {
+          dispatch(cmd, ui_tiles, (width + 15) / 16, (height + 15) / 16, p, {c.ui_alpha, c.depth}, {ui_plane_tiles});
+          dispatch(cmd, ui_reduce, 1, 1, p,
+            {api::resource_view{}, {}, {}, {}, {}, {}, {}, {}, t[ui_plane_tiles].srv}, {ui_plane_resolved});
+          nearest_ui_rendered = true;
+        }
+        // UI passes read the explicit selected mask channel. Eye RGB stays current.
+        // UI pinning follows the complete scene field as its own pass, and a
+        // probe observes the unpinned field in between. Older embedded replay
+        // shaders pin inside the horizontal pass unless a probe needs it apart.
+        const std::array<api::resource_view, 15> field_inputs{c.ui_alpha, {}, {}, {}, t[vertical_field].srv,
+          {}, {}, {}, {}, nearest_ui_rendered ? t[ui_plane_resolved].srv : api::resource_view{}};
+        const bool pin_apart = limiter_lines || c.probe;
+        if (pin_apart) source_alpha_ui = false;
+        dispatch(cmd, horizontal, (height + group_lines - 1) / group_lines, 1, p, field_inputs, {field});
+        source_alpha_ui = c.apply_ui;
+        if (c.probe) submit_adaptive_probe(cmd, c.ui_alpha, p);
+        const uint32_t pin_groups = std::max(pin_lines, 1u);
+        if (pin_apart && c.apply_ui)
+          dispatch(cmd, ui_apply, (height + pin_groups - 1) / pin_groups, 1, p, field_inputs, {field});
+      }
+      mark(cmd, mark_conditioning);
+    }
     // The final side-by-side pass. Its target rests in `resting` between owners.
     void record_pack(api::command_list *cmd, api::resource target, api::resource_view view, api::resource_usage resting) {
+      if (conditioning_owed) record_conditioning(cmd, owed, true);
       cmd->barrier(target, resting, api::resource_usage::render_target);
-      cmd->bind_pipeline(api::pipeline_stage::all_graphics, pipelines[pack]);
+      cmd->bind_pipeline(api::pipeline_stage::all_graphics, pipelines[pq_output ? pack_pq : pack]);
       if (packed_eyes)
         bindings(cmd, api::shader_stage::all_graphics, pack_parameters,
           {textures[source].srv, pack_depth, textures[linear].srv, {}, {}, textures[field].srv});
@@ -715,7 +902,8 @@ namespace sunshine_game3d {
           detection_decision_texels < ui_detection::pre_ui_decision_texels ||
           detection_decision_texels > ui_detection::max_decision_texels ||
           (detection_statistics_images && !scene_evidence_supported()) ||
-          !texture_create(detection_statistics, 16,
+          detection_tile_parts > ui_detection::max_tile_parts ||
+          !texture_create(detection_statistics, ui_detection::statistics_columns(detection_tile_parts),
             ui_detection::statistics_rows(detection_statistics_images, detection_decision_texels),
             api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
           !texture_create(detection_decision, detection_decision_texels, 1, api::format::r32g32b32a32_uint,
@@ -977,7 +1165,7 @@ namespace sunshine_game3d {
       // scene compare pass (previous true) H2's previous cell means; no other
       // detection pass reads either.
       const auto dispatch_stage = [&](pass stage, texture_id target, unsigned output, unsigned x, unsigned y,
-          bool count = false, bool reduce = false, bool previous = false) {
+          bool count = false, bool reduce = false, bool previous = false, unsigned z = 1) {
         auto &t = textures[target];
         count = count && counter_words;
         cmd->barrier(t.resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
@@ -1003,7 +1191,7 @@ namespace sunshine_game3d {
           detection_run.expected_layer_token, detection_run.expected_hudless_present, detection_run.identity_bits};
         static_assert(sizeof(values) == ui_detection::identity::b2_words * sizeof(uint32_t));
         cmd->push_constants(api::shader_stage::compute, layout, 5, 0, ui_detection::identity::b2_words, &values);
-        cmd->dispatch(x, y, 1);
+        cmd->dispatch(x, y, z);
         uavs.fill(null_uav);
         cmd->push_descriptors(api::shader_stage::compute, layout, 3,
           {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
@@ -1013,7 +1201,9 @@ namespace sunshine_game3d {
         if (previous)
           cmd->barrier(previous_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
       };
-      if (bits) dispatch_stage(detection_tiles, detection_statistics, 6, 16, 16);
+      // Each statistics tile in its parts (group z), which the reduce adds.
+      if (bits) dispatch_stage(detection_tiles, detection_statistics, 6, 16, 16, false, false, false,
+        std::max(detection_tile_parts, 1u));
       views[10] = textures[detection_statistics].srv;
       dispatch_stage(detection_reduce, detection_decision, 6, 1, 1, true, true);
       views[10] = textures[detection_decision].srv;
@@ -1035,8 +1225,10 @@ namespace sunshine_game3d {
       // color (t6).
       const bool proven_image = scene_layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
       const bool whole_frame = ui_temporal::whole_frame(temporal.latest);
+      // G3: H2 measures for itself only while the session flattens still
+      // screens or the Diagnostics switch is on; its shadow decides nothing.
       const auto measure = guard.measure(observation.now_ms, scene_shadow, whole_frame, proven_image,
-        still_scope && guard.still.wants_measure());
+        still_scope && (still_enabled || diagnostics::enabled()) && guard.still.wants_measure());
       detection_pending_actionable = false;
       // Whether the passes run for H2 alone, whose measurements the
       // acceptance ledger never observes (ui_temporal::ledger_evidence).
@@ -1308,6 +1500,7 @@ namespace sunshine_game3d {
   renderer::~renderer() {
     // Explicit hot-unload is rare. Never free a recorded frame or block the game.
     if (data_ && !data_->idle()) data_.release();
+    if (cached_ && !cached_->idle()) cached_.release();
   }
   std::string_view renderer::shader_source() { return {game3d_shader_source, sizeof(game3d_shader_source) - 1}; }
   std::string_view renderer::active_shader_source() const { return data_ ? data_->shader_source() : shader_source(); }
@@ -1316,7 +1509,9 @@ namespace sunshine_game3d {
   static std::vector<shader_cache::entry_point> shader_entries(std::string_view source, uint32_t w, uint32_t h, uint32_t c) {
     const auto has = [source](const char *marker) { return source.find(marker) != std::string_view::npos; };
     std::vector<shader_cache::entry_point> entries{{"PostProcessVS", "vs_5_0"}};
-    if (c == 3) entries.push_back({"SunshinePreparePQPS", "ps_5_0"});
+    if (c == 3)
+      entries.push_back(has("#define SUNSHINE_PACKED_EYES 1") && has("#define SUNSHINE_PQ_PER_TAP 1") ?
+        shader_cache::entry_point{"SunshineRenderPackedPQPS", "ps_5_0"} : shader_cache::entry_point{"SunshinePreparePQPS", "ps_5_0"});
     if (w <= 3840 && h <= 3840) {
       entries.insert(entries.end(), {{"SunshineHostCandidateCS", "cs_5_0"}, {"SunshineHostVerticalCS", "cs_5_0"},
         {"SunshineHostHorizontalCS", "cs_5_0"}});
@@ -1350,9 +1545,39 @@ namespace sunshine_game3d {
         // ReShade draws its GUI to an internal alpha-bearing resolve target
         // for X8 swapchains. Our native overlay target must be the backbuffer.
         format == api::format::r8g8b8x8_unorm || format == api::format::b8g8r8x8_unorm) return false;
-    if (data_ && data_->device == device && data_->width == desc.texture.width && data_->height == desc.texture.height &&
-        data_->source_format == typed(desc.texture.format) && data_->color == c &&
-        data_->source_override == source_override) return !data_->failed;
+    const auto matches = [&](const impl &value) {
+      return value.device == device && value.width == desc.texture.width && value.height == desc.texture.height &&
+        value.source_format == typed(desc.texture.format) && value.color == c && value.source_override == source_override;
+    };
+    const auto now = GetTickCount64();
+    // The cached renderer of the other colour transfer is released once idle
+    // this long (item 6: bounded to one cached entry).
+    if (cached_ && now - cached_since_ >= cached_idle_ms && cached_->idle()) cached_.reset();
+    if (data_ && matches(*data_)) {
+      // The first configure after a parked runtime reset starts the current
+      // renderer's decision state as a new renderer would.
+      if (resume_pending_ && !data_->failed) {
+        if (data_->pending || data_->unsignaled) return false;
+        resume_pending_ = false;
+        ui_source_capture_ = 0;
+        ui_candidate_captures_.fill(0);
+        data_->resume();
+      }
+      return !data_->failed;
+    }
+    // A toggle back (SDR and HDR) reuses the cached renderer: its pipelines,
+    // textures and detection state, without a wait or recompilation. The
+    // outgoing one has no unsignaled work, so its own fence retires it.
+    if (cached_ && matches(*cached_) && !cached_->failed && (!data_ || (!data_->pending && !data_->unsignaled))) {
+      std::swap(data_, cached_);
+      cached_since_ = now;
+      resume_pending_ = false;
+      ui_source_capture_ = 0;
+      ui_candidate_captures_.fill(0);
+      if (data_) data_->resume();
+      sunshine_log::message(reshade::log::level::info, "Sunshine Game 3D: reusing the cached add-on GPU renderer of this colour transfer");
+      return true;
+    }
     if (data_ && !data_->idle()) return false;
     const bool background = prepare_in_background && source_override.empty();
     if (background) {
@@ -1365,7 +1590,14 @@ namespace sunshine_game3d {
     }
     ui_source_capture_ = 0;
     ui_candidate_captures_.fill(0);
+    // The outgoing renderer (idle) stays cached for a toggle back, replacing
+    // an older cached one only once that is idle too.
+    if (data_ && !data_->failed && (!cached_ || cached_->idle())) {
+      cached_ = std::move(data_);
+      cached_since_ = now;
+    }
     data_.reset();
+    resume_pending_ = false;
     auto next = std::make_unique<impl>();
     next->source_override.assign(source_override);
     next->precompiled = background;
@@ -1390,6 +1622,8 @@ namespace sunshine_game3d {
     const auto channel = source_alpha_ui ? ui.channel : ui_mask_channel::alpha;
     if (!data_ || data_->failed || data_->pending) return false;
     auto &d = *data_;
+    // The previous render's owed conditioning, if its pack never came, is dropped.
+    d.conditioning_owed = false;
     const auto mode = automatic && automatic->session ? automatic->session->decision().state : alpha_auto_state::manual_off;
     const bool auto_mode = automatic && automatic->session && mode != alpha_auto_state::manual_on && mode != alpha_auto_state::manual_off;
     // Manual On validates the provider's filtered candidates through detection,
@@ -1406,12 +1640,12 @@ namespace sunshine_game3d {
     else if (ui.kind == ui_input_kind::dedicated_mask) candidates.masks[channel == ui_mask_channel::red ? 0 : 1] = ui.view;
     const auto compatible = [&](api::resource_view view) {
       if (!view.handle) return false;
-      const auto desc = d.device->get_resource_desc(d.device->get_resource_from_view(view));
+      const auto desc = d.device->get_resource_desc(d.resource_of(view));
       return desc.type == api::resource_type::texture_2d && desc.texture.width == d.width && desc.texture.height == d.height &&
         desc.texture.samples == 1 && desc.texture.depth_or_layers == 1;
     };
     const auto format_of = [&](api::resource_view view) {
-      return uint32_t(typed(d.device->get_resource_desc(d.device->get_resource_from_view(view)).texture.format));
+      return uint32_t(typed(d.device->get_resource_desc(d.resource_of(view)).texture.format));
     };
     uint32_t bits = candidates.current_color ? candidate::current : 0u;
     constexpr std::array<uint32_t, 3> mask_bits{candidate::ui_alpha, candidate::ui_color, candidate::backbuffer};
@@ -1537,8 +1771,8 @@ namespace sunshine_game3d {
     struct restore { impl &d; ID3DDeviceContextState *previous; bool isolated; ~restore() { if (isolated) d.context11->SwapDeviceContextState(previous, nullptr); } } restore_state{d, previous.p, isolated};
     d.pending = true;
     const auto &t = d.textures;
-    d.collect_profile();
-    if (d.prepare_profile()) d.mark(cmd, impl::mark_render);
+    if (diagnostics::enabled()) d.collect_profile();
+    d.mark(cmd, impl::mark_render);
     cmd->barrier(backbuffer, api::resource_usage::present, api::resource_usage::copy_source);
     cmd->barrier(t[impl::source].resource, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
     cmd->copy_resource(backbuffer, t[impl::source].resource);
@@ -1621,40 +1855,28 @@ namespace sunshine_game3d {
     d.update_alpha_auto(ui_eligible && ui_mode_supported && (!needs_detection || d.detection_active || explicit_fallback) &&
       (!automatic || !automatic->retained || alpha_source.handle), automatic);
     const bool probe_ui = d.prepare_adaptive_frame(p, adaptive);
-    d.nearest_ui_rendered = false;
-    d.consumed_ui_source = d.source_alpha_ui && alpha_source.handle ? d.device->get_resource_from_view(alpha_source) : api::resource{};
-    if (d.color == 3) d.draw(cmd, impl::pq, d.width, {impl::linear}, p, {t[impl::source].srv});
-    d.mark(cmd, impl::mark_linearize);
-    if (d.width <= 3840 && d.height <= 3840) {
-      d.dispatch(cmd, impl::candidate, (d.width + 7) / 8, (d.height + 7) / 8, p, {api::resource_view{}, depth}, {impl::raw});
-      d.mark(cmd, impl::mark_candidate);
-      const uint32_t group_lines = std::max(d.limiter_lines, 1u);
-      d.dispatch(cmd, impl::vertical, (d.width + group_lines - 1) / group_lines, 1, p, {api::resource_view{}, {}, {}, t[impl::raw].srv}, {impl::vertical_majorant, impl::vertical_field});
-      d.mark(cmd, impl::mark_vertical);
-      const auto ui_alpha = d.consumed_ui_source.handle ? alpha_source : t[impl::source].srv;
-      if (d.source_alpha_ui && plane.mode == ui_plane_mode::depth_midpoint_nearest_ui) {
-        d.dispatch(cmd, impl::ui_tiles, (d.width + 15) / 16, (d.height + 15) / 16, p,
-          {ui_alpha, depth}, {impl::ui_plane_tiles});
-        d.dispatch(cmd, impl::ui_reduce, 1, 1, p,
-          {api::resource_view{}, {}, {}, {}, {}, {}, {}, {}, t[impl::ui_plane_tiles].srv}, {impl::ui_plane_resolved});
-        d.nearest_ui_rendered = true;
-      }
-      // UI passes read the explicit selected mask channel. Eye RGB stays current.
-      // UI pinning follows the complete scene field as its own pass, and a
-      // probe observes the unpinned field in between. Older embedded replay
-      // shaders pin inside the horizontal pass unless a probe needs it apart.
-      const std::array<api::resource_view, 15> field_inputs{ui_alpha, {}, {}, {}, t[impl::vertical_field].srv,
-        {}, {}, {}, {}, d.nearest_ui_rendered ? t[impl::ui_plane_resolved].srv : api::resource_view{}};
-      const bool apply_ui = d.source_alpha_ui, pin_apart = d.limiter_lines || probe_ui;
-      if (pin_apart) d.source_alpha_ui = false;
-      d.dispatch(cmd, impl::horizontal, (d.height + group_lines - 1) / group_lines, 1, p, field_inputs, {impl::field});
-      d.source_alpha_ui = apply_ui;
-      if (probe_ui) d.submit_adaptive_probe(cmd, ui_alpha, p);
-      const uint32_t pin_lines = std::max(d.pin_lines, 1u);
-      if (pin_apart && apply_ui)
-        d.dispatch(cmd, impl::ui_apply, (d.height + pin_lines - 1) / pin_lines, 1, p, field_inputs, {impl::field});
+    d.consumed_ui_source = d.source_alpha_ui && alpha_source.handle ? d.resource_of(alpha_source) : api::resource{};
+    // The conditioning inputs, resolved now (C2). The views stay valid for
+    // this Present: the source copy and the detected mask until the next
+    // render, captured candidates until the next acquisition, the borrowed
+    // depth for the render lease.
+    impl::conditioning_input conditioning;
+    conditioning.p = p;
+    conditioning.depth = depth;
+    conditioning.ui_alpha = d.consumed_ui_source.handle ? alpha_source : t[impl::source].srv;
+    conditioning.plane = d.consumed_plane;
+    conditioning.channel = d.consumed_channel;
+    conditioning.apply_ui = d.source_alpha_ui;
+    conditioning.probe = probe_ui;
+    conditioning.armed = input.diagnostic_armed;
+    conditioning.depth_identity = input.depth_identity;
+    // A probe frame reads the unpinned field now, an older two-pass shader
+    // renders its eyes now, and an immediate pack follows at once.
+    if (probe_ui || !d.packed_eyes || !defer_pack) d.record_conditioning(cmd, conditioning);
+    else {
+      d.owed = conditioning;
+      d.conditioning_owed = true;
     }
-    d.mark(cmd, impl::mark_conditioning);
     if (!d.packed_eyes) {
       d.draw(cmd, impl::eyes, d.width, {impl::left, impl::right}, p, {t[impl::source].srv, depth, t[impl::linear].srv, {}, {}, t[impl::field].srv});
       d.mark(cmd, impl::mark_eyes);
@@ -1663,14 +1885,16 @@ namespace sunshine_game3d {
     d.pack_depth = depth;
     d.pack_parameters = p;
     d.pack_owed = true;
-    if (!defer_pack) d.record_pack(cmd, t[impl::packed].resource, t[impl::packed].rtv, api::resource_usage::shader_resource);
+    if (!defer_pack)
+      d.record_pack(cmd, t[d.packed_texture()].resource, t[d.packed_texture()].rtv, api::resource_usage::shader_resource);
     return true;
   }
   bool renderer::pack(api::command_list *cmd, api::resource export_target, std::uint64_t export_generation) {
     if (!data_ || !data_->pack_owed) return false;
     auto &d = *data_;
-    auto target = d.textures[impl::packed].resource;
-    auto view = d.textures[impl::packed].rtv;
+    if (d.pq_output && !d.textures[impl::packed_pq].resource.handle) return false;
+    auto target = d.textures[d.packed_texture()].resource;
+    auto view = d.textures[d.packed_texture()].rtv;
     auto resting = api::resource_usage::shader_resource;
     if (!export_target.handle && !d.export_views.empty()) {
       // Views keep D3D11 slot textures alive; hold them only while exporting.
@@ -1703,7 +1927,72 @@ namespace sunshine_game3d {
     if (isolated) d.context11->SwapDeviceContextState(previous.p, nullptr);
     return true;
   }
-  api::resource renderer::output() const { return data_ ? data_->textures[impl::packed].resource : api::resource{}; }
+  api::resource renderer::output() const { return data_ ? data_->textures[data_->packed_texture()].resource : api::resource{}; }
+  bool renderer::set_pq_output(bool pq) {
+    if (!data_) return !pq;
+    auto &d = *data_;
+    if (pq && (d.color != 3 || !d.pq_per_tap || !d.pipelines[impl::pack_pq].handle)) pq = false;
+    if (pq && !d.textures[impl::packed_pq].resource.handle &&
+        !d.texture_create(impl::packed_pq, d.width * 2, d.height, api::format::r10g10b10a2_unorm,
+          api::resource_usage::render_target | api::resource_usage::copy_source)) {
+      auto &t = d.textures[impl::packed_pq];
+      if (t.srv.handle) d.device->destroy_resource_view(t.srv);
+      if (t.rtv.handle) d.device->destroy_resource_view(t.rtv);
+      if (t.resource.handle) d.device->destroy_resource(t.resource);
+      t = {};
+      pq = false;
+    }
+    if (d.pq_output != pq && !d.export_views.empty()) {
+      // Export views carry the transfer's format; RTV descriptors are consumed
+      // at record time, so they go without waiting.
+      for (auto &[resource, old] : d.export_views) d.device->destroy_resource_view(old);
+      d.export_views.clear();
+      d.export_generation = 0;
+    }
+    d.pq_output = pq;
+    return pq;
+  }
+  bool renderer::pq_output() const { return data_ && data_->pq_output; }
+  bool renderer::pq_output_supported() const {
+    return data_ && data_->color == 3 && data_->pq_per_tap && data_->pipelines[impl::pack_pq].handle;
+  }
+  api::fence renderer::completion_fence() const { return data_ ? data_->completion : api::fence{}; }
+  std::uint64_t renderer::completion_value() const { return data_ ? data_->sequence + 1 : 0; }
+  api::resource_view renderer::bind_ui_candidate(unsigned slot, std::uint64_t capture_id, api::resource_view view,
+      api::resource resource) {
+    if (!data_ || data_->failed || slot >= data_->direct_views.size() || !capture_id || !view.handle || !resource.handle)
+      return {};
+    data_->direct_views[slot] = {view, resource};
+    return view;
+  }
+  api::resource_view renderer::bind_ui_snapshot(unsigned slot, std::uint64_t capture_id, api::resource resource,
+      std::uint32_t view_format) {
+    if (!data_ || data_->failed || slot >= data_->direct_views.size() || !capture_id || !resource.handle || !view_format ||
+        data_->device->get_api() != api::device_api::d3d12) return {};
+    auto &d = *data_;
+    auto *native = reinterpret_cast<ID3D12Device *>(d.device->get_native());
+    if (!d.snapshot_views.p) {
+      // Original-device CPU descriptors: push_descriptors copies them as they
+      // are, which a descriptor of a heap ReShade wraps would not survive.
+      D3D12_DESCRIPTOR_HEAP_DESC heap{};
+      heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+      heap.NumDescriptors = UINT(d.direct_views.size());
+      if (FAILED(native->CreateDescriptorHeap(&heap, IID_PPV_ARGS(d.snapshot_views.put())))) return {};
+      d.snapshot_stride = native->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    }
+    // Rewritten per Present: descriptors are consumed when commands record.
+    auto handle = d.snapshot_views->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += SIZE_T(slot) * d.snapshot_stride;
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+    desc.Format = static_cast<DXGI_FORMAT>(view_format);
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    desc.Texture2D.MipLevels = 1;
+    native->CreateShaderResourceView(reinterpret_cast<ID3D12Resource *>(resource.handle), &desc, handle);
+    const api::resource_view view{static_cast<std::uint64_t>(handle.ptr)};
+    d.direct_views[slot] = {view, resource};
+    return view;
+  }
   api::resource renderer::ui_source(api::format format) {
     if (!data_ || data_->failed) return {};
     auto &d = *data_;
@@ -1809,16 +2098,20 @@ namespace sunshine_game3d {
   ui_adaptive::decision renderer::consumed_ui_adaptive() const { return data_ ? data_->consumed_adaptive : ui_adaptive::decision{}; }
   std::uint64_t renderer::ui_probe_submissions() const { return data_ ? data_->adaptive_submitted : 0; }
   ui_plane_parameters renderer::consumed_ui_plane() const { return data_ ? data_->consumed_plane : ui_plane_parameters{}; }
+  renderer::conditioning_counters renderer::conditioning_activity() const {
+    return data_ ? data_->conditioning_counts : conditioning_counters{};
+  }
   diagnostic_resources renderer::diagnostics() const {
     if (!data_) return {};
     const auto &t = data_->textures;
     diagnostic_resources result{t[impl::source].resource, t[impl::linear].resource, t[impl::raw].resource,
       t[impl::vertical_majorant].resource, t[impl::vertical_field].resource,
-      t[impl::field].resource, t[impl::packed].resource, data_->consumed_ui_source,
+      t[impl::field].resource, t[data_->packed_texture()].resource, data_->consumed_ui_source,
       data_->nearest_ui_rendered ? t[impl::ui_plane_tiles].resource : api::resource{},
       data_->nearest_ui_rendered ? t[impl::ui_plane_resolved].resource : api::resource{}};
     result.ui_stamps = data_->stamps.resource;
     result.ui_stamps_copy_dest = data_->stamps_copy_dest;
+    result.sbs_pq = data_->pq_output;
     return result;
   }
   api::resource_view renderer::native_rtv(api::resource backbuffer) {
@@ -1833,6 +2126,11 @@ namespace sunshine_game3d {
     if (!data_) return;
     ++data_->present_number;
     data_->profile_open = false;
+    // Direct bindings last one Present (their leases end with it).
+    data_->direct_views = {};
+    // A pack owed by an earlier Present is never recorded: its depth lease
+    // ended with that Present.
+    data_->conditioning_owed = data_->pack_owed = false;
     // S3: the previous Present's submission ended (ReShade flushes its
     // immediate list at every Present), so the stamp buffer is COMMON again
     // before this Present's candidate copies write it.
@@ -1844,13 +2142,22 @@ namespace sunshine_game3d {
     data_->unsignaled = true;
   }
   void renderer::begin_gpu_profile(api::command_list *cmd) {
-    if (!data_ || data_->failed || !data_->prepare_profile()) return;
+    if (!data_ || data_->failed || !diagnostics::enabled() || !data_->prepare_profile()) return;
     data_->collect_profile();
     data_->mark(cmd, impl::mark_begin);
   }
   bool renderer::take_gpu_timing(gpu_timing &out) {
     if (!data_) return false;
     auto &d = *data_;
+    if (!diagnostics::enabled()) {
+      // G1: no timestamps while the Diagnostics switch is off. Frames marked
+      // before it turned off are read once it is on again.
+      out = {};
+      out.state = gpu_timing::profile_state::disabled;
+      d.profile_window = {};
+      d.profile_sum_ms = {};
+      return false;
+    }
     d.collect_profile();
     out = d.profile_window;
     out.state = d.profile_state;
@@ -1893,5 +2200,26 @@ namespace sunshine_game3d {
     }
     data_->frame_state = false;
   }
-  void renderer::reset_after_runtime_drain() { ui_source_capture_ = 0; ui_candidate_captures_.fill(0); data_.reset(); }
+  void renderer::reset_after_runtime_drain() {
+    ui_source_capture_ = 0;
+    ui_candidate_captures_.fill(0);
+    resume_pending_ = false;
+    data_.reset();
+    cached_.reset();
+  }
+  api::device *renderer::device() const { return data_ ? data_->device : cached_ ? cached_->device : nullptr; }
+  void renderer::park_after_runtime_drain() {
+    ui_source_capture_ = 0;
+    ui_candidate_captures_.fill(0);
+    preparing_ = false;
+    // The swapchain's back buffers are released or recreated by the reset:
+    // drop the views of them (a D3D11 view would keep a buffer referenced,
+    // failing ResizeBuffers).
+    for (auto *value : {data_.get(), cached_.get()}) {
+      if (!value) continue;
+      for (auto &[resource, view] : value->backbuffers) value->device->destroy_resource_view(view);
+      value->backbuffers.clear();
+    }
+    resume_pending_ = data_ != nullptr;
+  }
 }

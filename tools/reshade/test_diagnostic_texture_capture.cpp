@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <future>
 #include <stdexcept>
 #include <vector>
 
@@ -1324,11 +1325,180 @@ namespace {
     capture::release_diagnostic_texture(recovered); check(close_list(gpu.list.Get()), "canceled final close"); gpu.reset(); recovered = {}; capture::poll();
     std::puts("PASS replay rejection, canceled discarded recording, independent bounded pool and failed API result");
   }
+  // A ReShade runtime's immediate list, registered as observe_present does it
+  // at the start of every Present.
+  struct runtime_list_fixture {
+    fixture &gpu;
+    ComPtr<ID3D12CommandAllocator> allocator, spare;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    explicit runtime_list_fixture(fixture &value): gpu(value) {
+      check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "runtime allocator");
+      check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&spare)), "runtime spare allocator");
+      check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list)),
+        "runtime list");
+      present();
+    }
+    ~runtime_list_fixture() { capture::observe_list_event(native(list.Get()), capture::list_event::destroyed); }
+    void present() {
+      capture::observe_present(native(list.Get()), native(gpu.queue.Get()), native(list.Get()));
+    }
+    // ReShade submits its list at Present and resets it right after.
+    void submit() {
+      check(list->Close(), "runtime list close");
+      ID3D12CommandList *values[]{list.Get()};
+      gpu.queue->ExecuteCommandLists(1, values);
+    }
+    void reset() {
+      check(spare->Reset(), "runtime allocator reset");
+      check(list->Reset(spare.Get(), nullptr), "runtime list reset");
+      std::swap(allocator, spare); capture::poll();
+    }
+  };
+
+  void local_view_lease(fixture &gpu) {
+    // Direct binding: the leased snapshot is read in place on the runtime's
+    // immediate list, kept until that submission's fence, and returned to
+    // COMMON by end_local_views. Every other case falls back to the copy.
+    constexpr auto sampled = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    runtime_list_fixture runtime(gpu);
+    consumer_fixture game(gpu);
+    texture_case image(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, 4);
+    auto local = capture::record_local_texture(native(gpu.list.Get()), image.input);
+    auto shared = capture::record_diagnostic_texture(native(gpu.list.Get()), image.input);
+    require(local && shared, "lease snapshot setup");
+    const auto list = native(runtime.list.Get());
+    const auto queue = native(gpu.queue.Get());
+    capture::local_view view;
+    capture::consumer_diagnostic diagnostic;
+    require(!capture::lease_local_view(list, queue, local, DXGI_FORMAT_R10G10B10A2_UNORM, view, &diagnostic) && !view.view,
+      "an unsubmitted, unfinished snapshot was leased");
+    gpu.submit();
+    capture::finish_diagnostic_texture(local, true);
+    capture::finish_diagnostic_texture(shared, true);
+    gate delayed(gpu.device.Get(), gpu.queue.Get());
+    require(!capture::lease_local_view(native(game.list.Get()), queue, local, DXGI_FORMAT_R10G10B10A2_UNORM, view, &diagnostic) &&
+        diagnostic.result == capture::consumer_status::observer_not_ready,
+      "a list other than the registered immediate list took a lease");
+    require(!capture::lease_local_view(list, queue, shared, DXGI_FORMAT_R10G10B10A2_UNORM, view, &diagnostic),
+      "a shared dump snapshot was leased for local reads");
+    require(!capture::lease_local_view(list, native(gpu.foreign_queue.Get()), local, DXGI_FORMAT_R10G10B10A2_UNORM, view, &diagnostic),
+      "a snapshot produced on another queue was leased");
+    require(!capture::lease_local_view(list, queue, local, DXGI_FORMAT_R10G10B10A2_TYPELESS, view, &diagnostic) &&
+        !capture::lease_local_view(list, queue, local, DXGI_FORMAT_R8G8B8A8_UNORM, view, &diagnostic),
+      "a typeless or incompatible view format was leased");
+    require(capture::lease_local_view(list, queue, local, DXGI_FORMAT_R10G10B10A2_UNORM, view, &diagnostic) &&
+        diagnostic.result == capture::consumer_status::ready && view.view && view.resource && view.capture_id == local.id &&
+        view.width == image.width && view.height == image.height && view.format == DXGI_FORMAT_R10G10B10A2_UNORM &&
+        view.view_format == DXGI_FORMAT_R10G10B10A2_UNORM, "a submitted same-queue local snapshot was not leased");
+    capture::local_view again;
+    require(capture::lease_local_view(list, queue, local, DXGI_FORMAT_R10G10B10A2_UNORM, again) &&
+        again.view == view.view && again.resource == view.resource, "a repeated lease did not reuse the cached view");
+    require(!capture::lease_local_view(list, queue, local, DXGI_FORMAT_R10G10B10A2_TYPELESS, again),
+      "a repeated lease changed its view format within one recording");
+    auto target = destination(gpu.device.Get(), DXGI_FORMAT_R10G10B10A2_UNORM);
+    require(!capture::copy_local_texture(list, queue, local, native(target.Get()), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        &diagnostic, true), "a leased snapshot was also copied in its lease's recording");
+    // The view is a real SRV descriptor: copy it into a shader-visible heap.
+    ComPtr<ID3D12DescriptorHeap> visible;
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap_desc.NumDescriptors = 1;
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    check(gpu.device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&visible)), "shader-visible heap");
+    gpu.device->CopyDescriptorsSimple(1, visible->GetCPUDescriptorHandleForHeapStart(),
+      D3D12_CPU_DESCRIPTOR_HANDLE{static_cast<SIZE_T>(view.view)}, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    // Read the leased storage in place: it is in the shader-resource state.
+    auto *leased = reinterpret_cast<ID3D12Resource *>(view.resource);
+    readback actual(gpu, leased);
+    transition(runtime.list.Get(), leased, sampled, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+    from.pResource = leased; from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    to.pResource = actual.bytes.Get(); to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; to.PlacedFootprint = actual.footprint;
+    runtime.list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    transition(runtime.list.Get(), leased, D3D12_RESOURCE_STATE_COPY_SOURCE, sampled);
+    capture::end_local_views(list);
+    std::weak_ptr<const capture::texture_reference> storage = local.ownership;
+    capture::release_diagnostic_texture(local); local = {};
+    capture::release_diagnostic_texture(shared); shared = {};
+    view = {}; again = {};
+    runtime.submit(); gpu.reset(); capture::poll();
+    require(!storage.expired(), "lease bookkeeping lost its storage");
+    // Still leased: the producing slot must not be reused while the submitted
+    // read is pending, so the next capture takes new storage. (This test runs
+    // before any other local R10 capture, so the pool holds no other match.)
+    auto pending = capture::record_local_texture(native(gpu.list.Get()), image.input);
+    require(bool(pending) && pending.ownership != storage.lock(), "a leased snapshot's storage was reused before its fence");
+    capture::finish_diagnostic_texture(pending, false);
+    capture::release_diagnostic_texture(pending); pending = {};
+    delayed.open(); gpu.wait(); actual.verify(image.width, image.height, 4);
+    runtime.reset(); runtime.present(); capture::poll();
+    // Retired by the fence (the open recording still owns the pending slot):
+    // the leased storage is reusable again.
+    auto retired = capture::record_local_texture(native(gpu.list.Get()), image.input);
+    require(bool(retired) && retired.ownership == storage.lock(), "a fenced lease kept its storage leased");
+    capture::finish_diagnostic_texture(retired, false);
+    capture::release_diagnostic_texture(retired); retired = {};
+    check(close_list(gpu.list.Get()), "lease producer close"); execute(gpu.queue.Get(), gpu.list.Get()); gpu.wait(); gpu.reset();
+    runtime.submit(); gpu.wait(); runtime.reset();
+    gpu.check_debug_errors();
+    std::puts("PASS direct binding: same-queue local snapshot leased in place with its SRV, kept past release until the fence, transitions back at end; other lists, queues, shared tickets, formats and copies fall back");
+  }
+
+  void unlocked_allocation(fixture &gpu) {
+    // New snapshot storage is allocated without the capture lock, and the
+    // attempt repeats every admission check before it publishes.
+    texture_case image(gpu, DXGI_FORMAT_R8G8B8A8_UNORM, 4);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    struct context {
+      bool lock_free{}, closed{};
+      std::uint64_t list{};
+      bool close_recording{};
+    } state;
+    state.list = native(gpu.list.Get());
+    const auto hook = [](void *value) {
+      auto &state = *static_cast<context *>(value);
+      // Another thread takes the capture lock while this one allocates.
+      auto other = std::async(std::launch::async, [] { return capture::active(); });
+      state.lock_free = other.wait_for(std::chrono::seconds(2)) == std::future_status::ready && other.get();
+      if (state.close_recording) {
+        // The recording ends while the storage is being made.
+        capture::observe_list_event(state.list, capture::list_event::closed);
+        state.closed = true;
+      }
+    };
+    // Runs first: the empty pool must allocate this storage.
+    capture::testing::set_allocation_hook(hook, &state);
+    auto first = capture::record_local_texture(native(gpu.list.Get()), image.input);
+    capture::testing::set_allocation_hook(nullptr, nullptr);
+    require(bool(first) && state.lock_free, "storage allocation held the capture lock or failed");
+    capture::finish_diagnostic_texture(first, false); capture::release_diagnostic_texture(first); first = {};
+    // A recording closed during the unlocked allocation is rejected on
+    // re-validation; nothing is published or recorded.
+    texture_case other(gpu, DXGI_FORMAT_R16G16B16A16_FLOAT, 8);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    state.close_recording = true; state.lock_free = false;
+    capture::record_diagnostic rejected;
+    capture::testing::set_allocation_hook(hook, &state);
+    auto stale = capture::record_local_texture(native(gpu.list.Get()), other.input, &rejected);
+    capture::testing::set_allocation_hook(nullptr, nullptr);
+    require(state.closed && state.lock_free && !stale && rejected.stage == capture::record_stage::recording_closed,
+      "a reservation published after its recording closed");
+    check(gpu.list->Close(), "close re-validated recording");
+    gpu.reset();
+    // The prepared storage was discarded; the next attempt allocates again.
+    auto fresh = capture::record_local_texture(native(gpu.list.Get()), other.input);
+    require(bool(fresh), "capture after a rejected reservation");
+    capture::finish_diagnostic_texture(fresh, false); capture::release_diagnostic_texture(fresh);
+    check(close_list(gpu.list.Get()), "unlocked allocation close"); gpu.reset();
+    gpu.check_debug_errors();
+    std::puts("PASS unlocked storage allocation: the capture lock is free during allocation, re-validation rejects a closed recording");
+  }
 }
 int main() {
   try {
     require(capture::testing::diagnostic_snapshot_regression(), "diagnostic retirement/fence/format policy regression");
     fixture gpu;
+    unlocked_allocation(gpu);
+    local_view_lease(gpu);
     first_recording_depth_capture(gpu);
     ngx_contract_depth_capture(gpu);
     local_same_queue_ordered_capture(gpu);

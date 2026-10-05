@@ -112,6 +112,34 @@ float3 encoded_srgb(float3 c) {
                 c.g <= .0031308 ? 12.92*c.g : 1.055*pow(c.g, 1.0/2.4)-.055,
                 c.b <= .0031308 ? 12.92*c.b : 1.055*pow(c.b, 1.0/2.4)-.055);
 }
+#if EXPORT_PQ
+// A 10-bit PQ export (Rec.2020, ST 2084): decoded as the Game 3D pack decodes
+// its source, blended in linear scRGB like the FP16 export, then encoded as
+// the host's scRGBTo2100PQ (src_assets/.../include/common.hlsl).
+float3 pq_to_scrgb(float3 c) {
+  c = pow(saturate(c), 1.0 / 78.84375);
+  c = pow(max(c - .8359375, 0) / max(18.8515625 - 18.6875 * c, 1e-6), 1.0 / .1593017578125);
+  return mul(float3x3(1.6604910021, -.5876411388, -.0728498633,
+                      -.1245504745, 1.1328998971, -.0083494226,
+                      -.0181507634, -.1005788980, 1.1187296614), c) * 125.0;
+}
+float3 host_pq(float3 rgb) {
+  static const float3x3 rec709_to_rec2020 = {
+    0.627402, 0.329292, 0.043306,
+    0.069095, 0.919544, 0.011360,
+    0.016394, 0.088028, 0.895578
+  };
+  rgb = mul(rec709_to_rec2020, rgb);
+  rgb *= 80;
+  static const float m1 = 2610.0 / 4096.0 / 4;
+  static const float m2 = 2523.0 / 4096.0 * 128;
+  static const float c1 = 3424.0 / 4096.0;
+  static const float c2 = 2413.0 / 4096.0 * 32;
+  static const float c3 = 2392.0 / 4096.0 * 32;
+  float3 Lp = pow(saturate(rgb / 10000.0), m1);
+  return pow((c1 + c2 * Lp) / (1 + c3 * Lp), m2);
+}
+#endif
 float4 composite_ps(float4 pos : SV_POSITION) : SV_TARGET {
   uint w, h;
   layer.GetDimensions(w, h);
@@ -119,7 +147,9 @@ float4 composite_ps(float4 pos : SV_POSITION) : SV_TARGET {
   float4 source = stereo.Load(int3(p, 0));
   float4 ui = layer.Load(int3(uint2(p.x % w, p.y), 0));
   if (ui.a == 0) return source;
-#if EXPORT_HDR
+#if EXPORT_PQ
+  source.rgb = host_pq(f16tof32(f32tof16(ui.rgb + pq_to_scrgb(source.rgb) * (1 - ui.a))));
+#elif EXPORT_HDR
   source.rgb = ui.rgb + source.rgb * (1 - ui.a);
 #else
   source.rgb = encoded_srgb(ui.rgb + linear_srgb(source.rgb) * (1 - ui.a));

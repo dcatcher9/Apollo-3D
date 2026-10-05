@@ -101,7 +101,8 @@ Streamed Game 3D requires compatible host/client Game provider support, ReShade 
 add-on support, and `SunshineSBS.addon64`. No external FX shader or Depth3D checkout is required.
 Adjust strength in **ReShade → Add-ons → Sunshine 3D**; native controls save automatically.
 Select Game 3D in Moonlight 3D without changing a host provider toggle or
-restarting Sunshine. SDR and native HDR DirectX 11/12 input are supported; live game/glasses/headset
+restarting Sunshine. SDR and native HDR DirectX 11/12 input are supported; an HDR10 game reaches a
+current host as 10-bit PQ and an older host as FP16 scRGB. Live game/glasses/headset
 compatibility depends on the game and display. Original SuperDepth3D is an optional comparison
 renderer, not part of normal installation. For local AR glasses, the separate **Use ReShade for local AR 3D**
 host setting selects this provider. Host AI 3D always uses Sunshine's AI conversion.

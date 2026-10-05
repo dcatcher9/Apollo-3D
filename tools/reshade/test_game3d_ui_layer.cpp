@@ -287,6 +287,29 @@ int main() {
     std::puts("PASS UI layer queue watch (S3): the presenting queue is same, another queue is foreign and sticky per scope, "
       "a reset list and a list carrying nothing drop out, a D3D11 command list carries its deferred context's copy, at most "
       "4 lists are watched");
+    // Live-copy ring (direct binding): the oldest free entry other than the
+    // newest takes the next copy; with every entry read by an unfinished
+    // render the ring grows to ring_capacity, then the copy is skipped.
+    {
+      std::array<bool, layer::ring_capacity> free{};
+      std::array<std::uint64_t, layer::ring_capacity> age{};
+      auto choice = layer::choose_ring_entry(0, free, age, -1);
+      require(choice.index == 0 && choice.allocate, "An empty ring did not allocate its first entry");
+      free = {true, true, true, false}; age = {7, 5, 9, 0};
+      choice = layer::choose_ring_entry(3, free, age, 2);
+      require(choice.index == 1 && !choice.allocate, "The ring did not reuse its oldest free entry");
+      choice = layer::choose_ring_entry(3, free, age, 1);
+      require(choice.index == 0 && !choice.allocate, "The ring reused the newest copy");
+      free = {false, false, true, false};
+      choice = layer::choose_ring_entry(3, free, age, 2);
+      require(choice.index == 3 && choice.allocate, "A busy ring did not grow");
+      free = {false, false, false, true};
+      choice = layer::choose_ring_entry(4, free, age, 3);
+      require(choice.index < 0, "A full busy ring overwrote an entry a render still reads");
+      choice = layer::choose_ring_entry(4, {true, false, false, true}, age, 3);
+      require(choice.index == 0, "A full ring ignored a completed entry");
+    }
+    std::puts("PASS UI layer live-copy ring: oldest free non-newest entry, growth to the capacity, skip when every entry is read");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

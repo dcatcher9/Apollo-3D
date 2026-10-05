@@ -124,7 +124,7 @@ namespace platf::reshade_bridge {
       if (!supported_ || width <= 0 || height <= 0 || source.right <= source.left || source.bottom <= source.top) {
         return std::nullopt;
       }
-      if (!complete_copy()) {
+      if (!retire_slots()) {
         return std::nullopt;
       }
       const auto observation = observe_();
@@ -165,6 +165,11 @@ namespace platf::reshade_bridge {
       }
       if (!nonce_) {
         nonce_ = new_nonce();
+        // Capabilities first, then their nonce, then the request itself (full barriers). A
+        // producer trusts the bits only for the nonce they name, so it never applies them
+        // to another consumer's request.
+        InterlockedExchange(reinterpret_cast<volatile LONG *>(&shared_->consumer_capabilities), static_cast<LONG>(wire::consumer_accepts_pq));
+        InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared_->capability_nonce), static_cast<LONG64>(nonce_));
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared_->consumer_nonce), static_cast<LONG64>(nonce_));
         return std::nullopt;
       }
@@ -192,18 +197,20 @@ namespace platf::reshade_bridge {
           return std::nullopt;
         }
         metadata_ = metadata;
+        const char *transfer_name = "sRGB SDR";
+        if (metadata.color_transfer == wire::transfer::scrgb) {
+          transfer_name = "linear scRGB HDR";
+        } else if (metadata.color_transfer == wire::transfer::pq) {
+          transfer_name = "PQ HDR10";
+        }
         BOOST_LOG(info) << "ReShade SBS connected: process " << pid_ << ", " << width << 'x' << height
-                        << ", " << (metadata.color_transfer == wire::transfer::scrgb ? "linear scRGB HDR" : "sRGB SDR")
+                        << ", " << transfer_name << ", protocol " << metadata.protocol_version
                         << ", generation " << metadata.generation << '.';
       } else if (std::memcmp(&metadata, &metadata_, sizeof(metadata)) != 0) {
         // Resource identity, color and dimensions are immutable within an acknowledged generation.
         cached_.reset();
         return std::nullopt;
       }
-      if (pending_slot_ >= 0) {
-        return cached_;
-      }
-
       const auto completed = ready_fence_->GetCompletedValue();
       if (completed == UINT64_MAX) {
         reset_resources();
@@ -213,6 +220,9 @@ namespace platf::reshade_bridge {
       std::uint64_t newest = cached_ ? cached_->sequence : 0;
       for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
         auto &slot = shared_->slots[i];
+        if (static_cast<int>(i) == held_slot_) {
+          continue;
+        }
         if (read64(slot.control) == wire::slot_control(metadata_.generation, wire::slot_state::ready)) {
           const auto sequence = read64(slot.sequence);
           if (sequence > newest && sequence <= completed) {
@@ -250,17 +260,26 @@ namespace platf::reshade_bridge {
         claim(slot, metadata_.generation, wire::slot_state::reading, wire::slot_state::free);
         return cached_;
       }
-      context_->CopyResource(private_texture_.Get(), textures_[selected].Get());
-      context_->End(copy_complete_.Get());
-      // Flush submits bounded work; neither producer nor consumer waits for the GPU.
-      context_->Flush();
-      pending_slot_ = selected;
-      pending_sequence_ = sequence;
-      pending_generation_ = metadata_.generation;
+      // Conversion reads the shared slot directly; it stays `reading` while it is the newest
+      // frame, so repeat conversions keep their exact pixels. Every earlier read of the
+      // previously held slot is already recorded on this context, so an event query issued
+      // now covers all of them. The slot returns to the producer only once that completes.
+      if (held_slot_ >= 0) {
+        context_->End(retire_queries_[held_slot_].Get());
+        retiring_[held_slot_] = {true, held_sequence_, metadata_.generation, 0};
+        // Flush submits bounded work; neither producer nor consumer waits for the GPU.
+        context_->Flush();
+      }
+      held_slot_ = selected;
+      held_sequence_ = sequence;
+      const auto transfer = metadata_.color_transfer == wire::transfer::scrgb ? transfer_e::scrgb :
+                            metadata_.color_transfer == wire::transfer::pq    ? transfer_e::pq :
+                                                                                transfer_e::srgb;
       cached_ = frame_t {
-        .texture = private_texture_.Get(),
-        .view = private_view_.Get(),
-        .linear = metadata_.color_transfer == wire::transfer::scrgb,
+        .texture = textures_[selected].Get(),
+        .view = views_[selected].Get(),
+        .linear = transfer == transfer_e::scrgb,
+        .transfer = transfer,
         .timestamp = frame_time(qpc),
         .sequence = sequence,
         .producer_process_id = metadata_.producer_pid,
@@ -344,53 +363,70 @@ namespace platf::reshade_bridge {
           return false;
         }
         textures_[i]->GetDesc(&desc);
-        if (desc.Width != metadata.packed_width || desc.Height != metadata.packed_height || desc.Format != static_cast<DXGI_FORMAT>(metadata.dxgi_format) || desc.MipLevels != 1 || desc.ArraySize != 1 || desc.SampleDesc.Count != 1 || desc.SampleDesc.Quality != 0) {
+        if (desc.Width != metadata.packed_width || desc.Height != metadata.packed_height || desc.Format != static_cast<DXGI_FORMAT>(metadata.dxgi_format) || desc.MipLevels != 1 || desc.ArraySize != 1 || desc.SampleDesc.Count != 1 || desc.SampleDesc.Quality != 0 || FAILED(device_->CreateShaderResourceView(textures_[i].Get(), nullptr, &views_[i]))) {
           reset_resources();
           return false;
         }
       }
-      desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-      desc.CPUAccessFlags = desc.MiscFlags = 0;
       const D3D11_QUERY_DESC query {D3D11_QUERY_EVENT, 0};
-      if (FAILED(device_->CreateTexture2D(&desc, nullptr, &private_texture_)) || FAILED(device_->CreateShaderResourceView(private_texture_.Get(), nullptr, &private_view_)) || FAILED(device_->CreateQuery(&query, &copy_complete_))) {
-        reset_resources();
-        return false;
+      for (auto &retire_query : retire_queries_) {
+        if (FAILED(device_->CreateQuery(&query, &retire_query))) {
+          reset_resources();
+          return false;
+        }
       }
       return true;
     }
 
-    bool complete_copy() {
-      if (pending_slot_ < 0 || !shared_ || !copy_complete_) {
+    // Returns a replaced slot to the producer once every read recorded before its event query
+    // has completed. Never blocks. Later conversion work normally submits the query; a driver
+    // may otherwise hold a lone event query back, so a query still pending after two polls is
+    // checked once more with a flush.
+    bool retire_slots() {
+      if (!shared_) {
         return true;
       }
-      const auto result = context_->GetData(copy_complete_.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH);
-      if (FAILED(result)) {
-        BOOST_LOG(warning) << "ReShade SBS receiver GPU copy failed; this device must be recreated (HRESULT " << result << ").";
-        reset_resources();
-        supported_ = false;
-        return false;
+      for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
+        auto &retiring = retiring_[i];
+        if (!retiring.active || !retire_queries_[i]) {
+          continue;
+        }
+        auto result = context_->GetData(retire_queries_[i].Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        if (result == S_FALSE && ++retiring.pending_polls > 2) {
+          result = context_->GetData(retire_queries_[i].Get(), nullptr, 0, 0);
+        }
+        if (FAILED(result)) {
+          BOOST_LOG(warning) << "ReShade SBS receiver GPU read failed; this device must be recreated (HRESULT " << result << ").";
+          reset_resources();
+          supported_ = false;
+          return false;
+        }
+        if (result != S_OK) {
+          continue;
+        }
+        wire::metadata_t current;
+        auto &slot = shared_->slots[i];
+        if (snapshot(*shared_, current) && current.generation == retiring.generation && current.accepted_consumer_nonce == nonce_ && read64(slot.sequence) == retiring.sequence) {
+          claim(slot, retiring.generation, wire::slot_state::reading, wire::slot_state::free);
+        }
+        retiring = {};
       }
-      if (result != S_OK) {
-        return true;
-      }
-      wire::metadata_t current;
-      auto &slot = shared_->slots[pending_slot_];
-      if (snapshot(*shared_, current) && current.generation == pending_generation_ && current.accepted_consumer_nonce == nonce_ && read64(slot.sequence) == pending_sequence_) {
-        claim(slot, pending_generation_, wire::slot_state::reading, wire::slot_state::free);
-      }
-      pending_slot_ = -1;
       return true;
     }
 
     void reset_resources() {
       cached_.reset();
-      // An in-flight read is abandoned, never unlocked prematurely. A new generation has new
-      // resources; the D3D runtime retains submitted resource references through completion.
-      pending_slot_ = -1;
-      copy_complete_.Reset();
-      private_view_.Reset();
-      private_texture_.Reset();
+      // Held and retiring reads are abandoned, never unlocked prematurely. A new generation has
+      // new resources; the D3D runtime retains submitted resource references through completion.
+      held_slot_ = -1;
+      held_sequence_ = 0;
+      retiring_ = {};
+      for (auto &retire_query : retire_queries_) {
+        retire_query.Reset();
+      }
+      for (auto &view : views_) {
+        view.Reset();
+      }
       for (auto &texture : textures_) {
         texture.Reset();
       }
@@ -428,14 +464,21 @@ namespace platf::reshade_bridge {
     handle_t process_, mapping_;
     wire::shared_state_t *shared_ = nullptr;
     wire::metadata_t metadata_;
+    struct retiring_t {
+      bool active = false;
+      std::uint64_t sequence = 0, generation = 0;
+      std::uint32_t pending_polls = 0;
+    };
+
     std::array<ComPtr<ID3D11Texture2D>, wire::slot_count> textures_;
+    std::array<ComPtr<ID3D11ShaderResourceView>, wire::slot_count> views_;
+    std::array<ComPtr<ID3D11Query>, wire::slot_count> retire_queries_;
+    std::array<retiring_t, wire::slot_count> retiring_ {};
     ComPtr<ID3D11Fence> ready_fence_;
-    ComPtr<ID3D11Texture2D> private_texture_;
-    ComPtr<ID3D11ShaderResourceView> private_view_;
-    ComPtr<ID3D11Query> copy_complete_;
     std::optional<frame_t> cached_;
-    int pending_slot_ = -1;
-    std::uint64_t pending_sequence_ = 0, pending_generation_ = 0;
+    // The slot behind cached_ (or the last frame before cached_ was dropped), still `reading`.
+    int held_slot_ = -1;
+    std::uint64_t held_sequence_ = 0;
     std::chrono::steady_clock::time_point next_attach_ {};
     std::uint64_t reported_generation_ = 0;
     int reported_width_ = 0, reported_height_ = 0;

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "game3d_controls.h"
+#include "game3d_diagnostics.h"
 
 #include <cmath>
 #include <cstdio>
@@ -151,6 +152,31 @@ namespace sunshine_game3d {
     return enabled ? "Sunshine UI protection: still screens with no UI source are flattened (UIFlattenStillScreens=1)" :
                      "Sunshine UI protection: still screens with no UI source are only logged (UIFlattenStillScreens=0)";
   }
+  // The add-on's Diagnostics switch (game3d_diagnostics.h; docs/reshade-sbs.md,
+  // Diagnostics switch): per game in the global ReShade.ini, process-wide.
+  // Absent writes 0 so the key is discoverable; 1 turns it on, anything else
+  // keeps it off. Loading sets the process switch.
+  template<class Backend>
+  bool load_diagnostics(Backend &config) {
+    int value = -1;
+    config.read(diagnostics::key, value);
+    if (value == -1) config.write(diagnostics::key, 0);
+    diagnostics::set_enabled(value == 1);
+    return value == 1;
+  }
+  // The panel's checkbox: saves the key, then switches the process.
+  template<class Backend>
+  bool edit_diagnostics(bool value, Backend &config) {
+    if (value == diagnostics::enabled()) return false;
+    config.write(diagnostics::key, value ? 1 : 0);
+    diagnostics::set_enabled(value);
+    return true;
+  }
+  // The log line, at load and on every edit.
+  inline std::string diagnostics_log_text(bool enabled) {
+    return enabled ? "Sunshine Game 3D: diagnostics on (Diagnostics=1)" : "Sunshine Game 3D: diagnostics off (Diagnostics=0)";
+  }
+
   inline constexpr const char *still_flatten_label = "Flatten still screens with no UI source (SDR only)";
   inline constexpr const char *still_flatten_tooltip =
     "Off (default): Auto only logs screens it would flatten. On: in SDR, when no UI source decides, a screen that does "

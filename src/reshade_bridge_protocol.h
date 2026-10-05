@@ -9,8 +9,11 @@
 // layout, not a C++ object ABI: use Interlocked operations for ownership/control fields.
 namespace reshade_bridge {
   inline constexpr std::uint64_t magic = 0x3153425353485353ULL;
+  // Producers publish `version` by default. `pq_version` is protocol 2 plus the 10-bit PQ
+  // transfer; a producer uses it only for a consumer that advertised consumer_accepts_pq.
   inline constexpr std::uint32_t version = 2;
   inline constexpr std::uint32_t screen_plane_version = 1;
+  inline constexpr std::uint32_t pq_version = 3;
   inline constexpr std::uint32_t slot_count = 3;
   inline constexpr wchar_t mapping_prefix[] = L"Local\\Sunshine3D.ReShade.SBS.";
   inline constexpr std::uint32_t max_source_width = 8192;
@@ -20,9 +23,11 @@ namespace reshade_bridge {
   // rendered UI displacement; the receiver never recomputes it from scene parameters.
   inline constexpr float maximum_ui_parallax_uv = 0.04f;
   inline constexpr std::uint32_t cursor_plane_present = 1u;
+  // Consumer capability bits, valid only for the consumer nonce they were written with.
+  inline constexpr std::uint32_t consumer_accepts_pq = 1u;
 
   [[nodiscard]] constexpr bool supported_version(std::uint32_t candidate) {
-    return candidate == screen_plane_version || candidate == version;
+    return candidate == screen_plane_version || candidate == version || candidate == pq_version;
   }
 
   [[nodiscard]] constexpr bool valid_ui_parallax(float value) {
@@ -54,6 +59,9 @@ namespace reshade_bridge {
   enum class transfer : std::uint32_t {
     srgb = 1,
     scrgb = 2,  // Linear Rec.709 primaries; 1.0 = 80 cd/m2.
+    // Rec.2020 primaries with SMPTE ST 2084 code values; code 1.0 = 10000 cd/m2.
+    // Valid only as R10G10B10A2_UNORM at protocol pq_version.
+    pq = 3,
   };
 
   enum class layout : std::uint32_t {
@@ -98,7 +106,7 @@ namespace reshade_bridge {
     if (protocol_version == screen_plane_version) {
       return true;
     }
-    if (protocol_version != version || (slot.cursor_plane_flags != 0u && slot.cursor_plane_flags != cursor_plane_present) || !valid_ui_parallax(slot.ui_parallax_uv) || (slot.cursor_plane_flags == 0u && slot.ui_parallax_uv != 0.0f)) {
+    if ((protocol_version != version && protocol_version != pq_version) || (slot.cursor_plane_flags != 0u && slot.cursor_plane_flags != cursor_plane_present) || !valid_ui_parallax(slot.ui_parallax_uv) || (slot.cursor_plane_flags == 0u && slot.ui_parallax_uv != 0.0f)) {
       return false;
     }
     if (slot.cursor_plane_flags == cursor_plane_present) {
@@ -118,17 +126,29 @@ namespace reshade_bridge {
     // A detaching receiver resets its own nonce to zero; zero means no receiver.
     std::uint64_t consumer_nonce = 0;
     metadata_t metadata;
+    // Protocol 3 consumer capabilities, in protocol 2's padding. A consumer writes
+    // consumer_capabilities, then capability_nonce = its nonce, then consumer_nonce. A producer
+    // honours the bits only when capability_nonce equals the nonce it answers, so an older
+    // consumer (which never writes them) and a replaced consumer both read as no capabilities.
+    std::uint64_t capability_nonce = 0;
+    std::uint32_t consumer_capabilities = 0;
     slot_t slots[slot_count];
   };
 
+  // The capabilities a producer may use while answering `answered_nonce`.
+  [[nodiscard]] constexpr std::uint32_t answered_capabilities(std::uint64_t answered_nonce, std::uint64_t capability_nonce, std::uint32_t capabilities) {
+    return answered_nonce != 0 && capability_nonce == answered_nonce ? capabilities : 0u;
+  }
+
   [[nodiscard]] constexpr bool supported_format(std::uint32_t format, transfer color) {
     // DXGI_FORMAT_R8G8B8A8_UNORM, B8G8R8A8_UNORM, R10G10B10A2_UNORM, R16G16B16A16_FLOAT.
-    return color == transfer::srgb ? (format == 28 || format == 87 || format == 24 || format == 10) :
-                                     color == transfer::scrgb && format == 10;
+    return color == transfer::srgb  ? (format == 28 || format == 87 || format == 24 || format == 10) :
+           color == transfer::scrgb ? format == 10 :
+                                      color == transfer::pq && format == 24;
   }
 
   [[nodiscard]] constexpr bool valid_metadata(const metadata_t &m) {
-    if (m.signature != magic || !supported_version(m.protocol_version) || m.metadata_bytes != sizeof(metadata_t) || m.producer_pid == 0 || m.producer_creation_time == 0 || m.window == 0 || m.generation == 0 || m.generation > max_generation || m.accepted_consumer_nonce == 0 || m.source_width == 0 || m.source_width > max_source_width || m.source_height == 0 || m.source_height > max_source_height || m.packed_width != m.source_width * 2 || m.packed_width > max_packed_width || m.packed_height != m.source_height || m.packed_width % 4 != 0 || m.packed_height % 2 != 0 || m.image_layout != layout::full_sbs_left_first || !supported_format(m.dxgi_format, m.color_transfer) || m.ready_fence_handle == 0) {
+    if (m.signature != magic || !supported_version(m.protocol_version) || m.metadata_bytes != sizeof(metadata_t) || m.producer_pid == 0 || m.producer_creation_time == 0 || m.window == 0 || m.generation == 0 || m.generation > max_generation || m.accepted_consumer_nonce == 0 || m.source_width == 0 || m.source_width > max_source_width || m.source_height == 0 || m.source_height > max_source_height || m.packed_width != m.source_width * 2 || m.packed_width > max_packed_width || m.packed_height != m.source_height || m.packed_width % 4 != 0 || m.packed_height % 2 != 0 || m.image_layout != layout::full_sbs_left_first || !supported_format(m.dxgi_format, m.color_transfer) || (m.color_transfer == transfer::pq && m.protocol_version != pq_version) || m.ready_fence_handle == 0) {
       return false;
     }
     for (auto handle : m.texture_handles) {
@@ -163,5 +183,7 @@ namespace reshade_bridge {
   static_assert(offsetof(slot_t, cursor_plane_flags) == 24);
   static_assert(offsetof(slot_t, ui_parallax_uv) == 28);
   static_assert(offsetof(shared_state_t, consumer_nonce) % 8 == 0);
+  static_assert(offsetof(shared_state_t, capability_nonce) == 136);
+  static_assert(offsetof(shared_state_t, consumer_capabilities) == 144);
   static_assert(offsetof(shared_state_t, slots) == 192);
 }  // namespace reshade_bridge

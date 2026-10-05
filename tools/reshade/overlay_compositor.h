@@ -10,6 +10,11 @@
 #include <memory>
 
 namespace sunshine::overlay {
+  // Compiles the compositor's shaders for this export colour on the thread
+  // pool (once per process), so that opening the overlay later neither
+  // compiles nor stalls the Present. Call when a renderer becomes ready.
+  void warm(reshade::api::color_space export_color);
+
   // One instance belongs to one exporter ring slot. The caller must retain it
   // until that slot's GPU fence completes, including after cancel(). No
   // ReShade wrappers are retained by the destructor: all GPU ownership is COM.
@@ -22,6 +27,8 @@ namespace sunshine::overlay {
 
     // Call from the source technique callback, after reserving/copying the slot.
     // Width is ONE eye. Source and destination are both exactly 2*width x height.
+    // export_color is srgb, scrgb (FP16) or hdr10_pq (10-bit Rec.2020 ST 2084
+    // codes, from an HDR10 source only; docs/reshade-sbs.md, PQ wire transfer).
     // Destination enters/leaves COMMON on D3D12; source stays shader-readable.
     // A new prepare requires completion of this instance's previous GPU work.
     bool prepare(reshade::api::effect_runtime *runtime, reshade::api::resource_view native_rtv, reshade::api::resource source, reshade::api::resource destination, std::uint32_t width, std::uint32_t height, reshade::api::color_space source_color, reshade::api::color_space export_color);

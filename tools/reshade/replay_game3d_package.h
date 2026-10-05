@@ -343,7 +343,9 @@ namespace sunshine_game3d::replay {
         } else if (a.kind == "source_color") {
           require(color_format(a.format), "Unsupported native source format");
         } else if (a.kind == "sbs") {
-          require(a.format == (p.color == 1 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R16G16B16A16_FLOAT), "Unexpected SBS format");
+          // An HDR10 source's SBS image is FP16 scRGB, or 10-bit PQ codes (the PQ wire transfer).
+          require(a.format == (p.color == 1 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R16G16B16A16_FLOAT) ||
+              (p.color == 3 && a.format == DXGI_FORMAT_R10G10B10A2_UNORM), "Unexpected SBS format");
         } else if (a.kind == "linear_color") {
           require(p.color == 3 && a.format == DXGI_FORMAT_R16G16B16A16_FLOAT, "Unexpected linear color format");
         } else {

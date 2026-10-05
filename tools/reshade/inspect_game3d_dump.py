@@ -586,7 +586,11 @@ def inspect(root, previews=False, ui_review=None):
                         transfer = 0
                 elif artifact["kind"] == "ui_source_color":
                     transfer = 0  # Mask channel only; do not invent RGB transfer metadata.
-                elif artifact["kind"] == "linear_color" or (artifact["kind"] == "sbs" and transfer == 3):
+                elif artifact["kind"] == "sbs":
+                    # The SBS image's own encoding (sbs_transfer): FP16 scRGB for an HDR10 source unless the
+                    # dump declares the 10-bit PQ wire transfer (3).
+                    transfer = metadata.get("sbs_transfer", 2 if transfer in (2, 3) else transfer)
+                elif artifact["kind"] == "linear_color":
                     transfer = 2
                 pixels = color_preview(value, transfer)
                 result["preview_mapping"] = ("Unknown transfer; RGB code values displayed, no final-color transfer or premultiplication assumed"

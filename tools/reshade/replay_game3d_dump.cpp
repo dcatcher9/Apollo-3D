@@ -566,6 +566,9 @@ int main(int argc, char **argv) {
 
     const api::resource backbuffer {reinterpret_cast<std::uint64_t>(fixture.backbuffer.Get())};
     require(renderer.configure(runtime_seen, backbuffer, static_cast<api::color_space>(package.color), shader), "Production renderer cannot configure captured frame");
+    // A dump of the 10-bit PQ wire transfer replays its PQ pack.
+    if (package.color == 3 && package.artifacts.at("sbs").format == DXGI_FORMAT_R10G10B10A2_UNORM)
+      require(renderer.set_pq_output(true), "The replay shader has no PQ pack for this captured PQ export");
     const auto source = fixture.upload(package.artifacts.at("source_color"), read_artifact(directory, package.artifacts.at("source_color")));
     fixture.context->CopyResource(fixture.backbuffer.Get(), source.Get());
     ComPtr<ID3D11Texture2D> depth;

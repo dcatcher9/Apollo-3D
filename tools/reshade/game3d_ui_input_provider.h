@@ -45,6 +45,13 @@ namespace sunshine_game3d::ui_input {
     ui_detection_inputs detection;
     bool automatic_detection{};
     std::string source_metadata, capture_metadata;
+    // The live UI layer copy this Present offered (ui_layer::live_capture's
+    // capture_id; 0 none), reported to the layer's ring by complete().
+    std::uint64_t layer_capture{};
+    reshade::api::device *layer_device{};
+    // A Streamline snapshot was leased on the immediate list this Present
+    // (depth_capture::end_local_views ends it after the last read).
+    bool leased{};
 
     ui_adaptive::source match_scene(ui_adaptive::source source, bool scene_ready) const;
     ui_render_input for_render(const ui_plane_parameters &plane, const ui_adaptive::source &adaptive);

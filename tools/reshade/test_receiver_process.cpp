@@ -521,6 +521,8 @@ namespace {
       context->UpdateSubresource(texture.value, 0, nullptr, reinterpret_cast<const std::uint8_t *>(view.value) + ipc::pixel_offset, box.row_pitch, 0);
       output.texture = texture.value;
       output.linear = box.linear;
+      // The inspection box carries only the linear flag; PQ is not proven across processes.
+      output.transfer = box.linear ? 1u : 0u;
       output.sequence = box.sequence;
       output.timestamp_ns = box.timestamp_ns;
       return 1;

@@ -584,6 +584,11 @@ replay `xfail` reason names the same rule IDs.
 
 ## Additional diagnostics
 
+`[SUNSHINE_GAME3D] Diagnostics=1` (the **Diagnostics** row under Troubleshooting) turns on the
+add-on's diagnostic-only per-frame work: per-pass GPU timing and the S3 frame-identity shadow
+(see [Diagnostics switch](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)). It
+is off by default and changes no decision or exported pixel.
+
 The separate [Streamline camera probe](../../docs/reshade-sbs.md#streamline-camera-metadata-experiment)
 is disabled by default. `StreamlineCameraProbe=1` enables detailed diagnostics after restart;
 leave it off for ordinary play. Production source selection does not enable its per-draw content
@@ -1310,7 +1315,8 @@ these tests do not establish access across a live game's process or host-service
 Set `SUNSHINE_GAME3D_NATIVE_ONLY=1` for the controlled D3D11 fixture to run native Game 3D with
 no FX file or technique installed. It requires the production receiver facade and checks the
 add-on's direct slot export, the overlay's copy path, effects toggle, focus recovery and
-receiver restart with exact SDR/scRGB/PQ pixels. `reshade_game_present_d3d12_test` accepts the same
+receiver restart with exact SDR/scRGB/PQ pixels, then a colour toggle through ResizeBuffers and back
+that must reuse the first transfer's renderer and export ring. `reshade_game_present_d3d12_test` accepts the same
 flag.
 
 To exercise the same checks with the production receiver in a separate process, build its

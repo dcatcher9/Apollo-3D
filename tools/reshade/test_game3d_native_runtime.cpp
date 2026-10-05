@@ -8,10 +8,41 @@
 #include "test_game3d_budget.h"
 #include "test_game3d_ui_pin_band.h"
 #include "game3d_ui_layer.h"
+#include "game3d_diagnostics.h"
 #include <d3d12sdklayers.h>
 #include <atomic>
 
 namespace {
+  // The host's scRGBTo2100PQ (src_assets/.../include/common.hlsl) of one FP16
+  // export channel, as a 10-bit code: the reference a PQ export must match
+  // within one code (docs/reshade-sbs.md, PQ wire transfer).
+  int host_pq_code(const float rgb[3], unsigned channel) {
+    static const float matrix[3][3]{{0.627402f, 0.329292f, 0.043306f}, {0.069095f, 0.919544f, 0.011360f},
+      {0.016394f, 0.088028f, 0.895578f}};
+    const float m1 = 2610.f / 4096.f / 4, m2 = 2523.f / 4096.f * 128, c1 = 3424.f / 4096.f, c2 = 2413.f / 4096.f * 32,
+      c3 = 2392.f / 4096.f * 32;
+    float nits = (matrix[channel][0] * rgb[0] + matrix[channel][1] * rgb[1] + matrix[channel][2] * rgb[2]) * 80.f;
+    const float lp = std::pow(std::clamp(nits / 10000.f, 0.f, 1.f), m1);
+    const float code = std::pow((c1 + c2 * lp) / (1 + c3 * lp), m2);
+    return int(std::lround(double(code) * 1023.0));
+  }
+  float half_to_float(std::uint16_t h) {
+    const std::uint32_t sign = std::uint32_t(h & 0x8000u) << 16, exponent = (h >> 10) & 31u, mantissa = h & 1023u;
+    std::uint32_t bits;
+    if (!exponent) {
+      if (!mantissa) bits = sign;
+      else {
+        int e = -1;
+        std::uint32_t m = mantissa;
+        do { ++e; m <<= 1; } while (!(m & 1024u));
+        bits = sign | std::uint32_t(127 - 15 - e) << 23 | (m & 1023u) << 13;
+      }
+    } else if (exponent == 31) bits = sign | 0x7f800000u | mantissa << 13;
+    else bits = sign | (exponent + 112u) << 23 | mantissa << 13;
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+  }
   struct native_case {
     std::string name;
     sunshine_game3d::render_parameters parameters;
@@ -1754,6 +1785,103 @@ namespace {
       compare_pixels(test, fixture.color, load_pixels(results / (test.name + ".fx.bin")), pixels, report);
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
         "Native renderer changed the game's mono backbuffer");
+      // Owed conditioning (C2): the same frame with its pack owed records the
+      // conditioning with the pack and packs the same bytes: with the
+      // Diagnostics switch on (timestamps); off, with the depth identity the
+      // first owed pack recorded (the memo keeps its candidate and vertical
+      // field); and armed for Dump 3D. A mono frame records no conditioning
+      // unless armed.
+      const bool mono = !test.parameters.depth_ready || !test.parameters.camera_ready || test.parameters.depth_view == 2 ||
+        !(test.parameters.strength > 0.f) || !(test.parameters.strength_blend > 0.f);
+      const std::uint64_t identity = 0x5eed0000u + std::uint64_t(&test - tests.data());
+      for (unsigned variant = 0; variant != 3; ++variant) {
+        const bool diagnostics_on = variant != 1, armed = variant == 2;
+        sunshine_game3d::diagnostics::set_enabled(diagnostics_on);
+        const auto before = renderer.conditioning_activity();
+        renderer.begin_present();
+        sunshine_game3d::render_frame_input frame;
+        frame.color = source;
+        frame.depth = test.parameters.depth_ready ? fixture.depth_view : api::resource_view{};
+        frame.scene = test.parameters;
+        frame.diagnostic_armed = armed;
+        frame.depth_identity = armed ? 0u : identity;
+        auto *commands = owner_queue->get_immediate_command_list();
+        require(renderer.render(commands, frame, true) && renderer.pack(commands) && !renderer.pack(commands),
+          "Native renderer rejected an owed pack");
+        owner_queue->flush_immediate_command_list();
+        renderer.finish_present();
+        owner_queue->wait_idle();
+        require(fixture.read(texture) == pixels, "An owed pack differs from the immediate pack of " + test.name +
+          (variant == 1 ? " with diagnostics off and its depth identity repeated" : armed ? " armed for Dump 3D" : ""));
+        const auto after = renderer.conditioning_activity();
+        const bool records = armed || !mono;
+        require(after.recorded - before.recorded == (records ? 1u : 0u) && after.mono - before.mono == (records ? 0u : 1u) &&
+            after.memo - before.memo == (variant == 1 && records ? 1u : 0u),
+          "An owed pack of " + test.name + " recorded the wrong conditioning");
+      }
+      sunshine_game3d::diagnostics::set_enabled(true);
+      if (fixture.color == 3) {
+        // The 10-bit PQ export of the same frame (docs/reshade-sbs.md, PQ wire
+        // transfer): within one code of the host's scRGBTo2100PQ of its FP16
+        // export, with the same 0/1 coverage in its 2-bit alpha.
+        require(renderer.set_pq_output(true) && renderer.pq_output(), "An HDR10 renderer refused the PQ export");
+        renderer.begin_present();
+        sunshine_game3d::render_frame_input frame;
+        frame.color = source;
+        frame.depth = test.parameters.depth_ready ? fixture.depth_view : api::resource_view{};
+        frame.scene = test.parameters;
+        auto *commands = owner_queue->get_immediate_command_list();
+        require(renderer.render(commands, frame, true) && renderer.pack(commands), "Native renderer rejected a PQ pack");
+        owner_queue->flush_immediate_command_list();
+        renderer.finish_present();
+        owner_queue->wait_idle();
+        auto *pq_texture = reinterpret_cast<ID3D12Resource *>(renderer.output().handle);
+        require(pq_texture && pq_texture->GetDesc().Format == DXGI_FORMAT_R10G10B10A2_UNORM, "The PQ export is not R10G10B10A2");
+        const auto codes = fixture.read(pq_texture);
+        sunshine_parity::write_bytes(results / (test.name + ".pq.bin"), codes.data(), codes.size());
+        require(codes.size() * 2 == pixels.size(), "The PQ export size differs from the FP16 export");
+        int worst = 0;
+        std::size_t differing = 0;
+        for (std::size_t i = 0; i != codes.size() / 4; ++i) {
+          std::uint32_t word, half[2];
+          std::memcpy(&word, codes.data() + i * 4, 4);
+          std::memcpy(half, pixels.data() + i * 8, 8);
+          const float rgb[3]{half_to_float(std::uint16_t(half[0])), half_to_float(std::uint16_t(half[0] >> 16)),
+            half_to_float(std::uint16_t(half[1]))};
+          const float alpha = half_to_float(std::uint16_t(half[1] >> 16));
+          for (unsigned c = 0; c != 3; ++c) {
+            const int difference = std::abs(int(word >> (10 * c) & 1023u) - host_pq_code(rgb, c));
+            worst = std::max(worst, difference);
+            differing += difference != 0;
+          }
+          require((word >> 30) == (alpha >= 1.f ? 3u : 0u), "The PQ export changed the coverage alpha of " + test.name);
+        }
+        require(worst <= 1, "The PQ export of " + test.name + " differs from the host's encoding of its FP16 export by " +
+          std::to_string(worst) + " codes");
+        report << "PQ " << test.name << " differing_codes=" << differing << " max_code_difference=" << worst << "\n";
+        renderer.set_pq_output(false);
+        require(renderer.output().handle == output.handle, "The FP16 export did not return after the PQ export");
+      }
+      {
+        // A render whose pack never comes records no conditioning; the next
+        // Present drops it, and a later pack() has nothing owed.
+        const auto before = renderer.conditioning_activity();
+        renderer.begin_present();
+        sunshine_game3d::render_frame_input frame;
+        frame.color = source;
+        frame.depth = test.parameters.depth_ready ? fixture.depth_view : api::resource_view{};
+        frame.scene = test.parameters;
+        require(renderer.render(owner_queue->get_immediate_command_list(), frame, true), "Native renderer rejected a render-only frame");
+        owner_queue->flush_immediate_command_list();
+        renderer.finish_present();
+        renderer.begin_present();
+        require(!renderer.pack(owner_queue->get_immediate_command_list()), "An owed pack survived its Present");
+        renderer.finish_present();
+        owner_queue->wait_idle();
+        const auto after = renderer.conditioning_activity();
+        require(after.recorded == before.recorded && after.mono == before.mono,
+          "A render-only frame recorded conditioning");
+      }
     }
     {
       // Completed parity frames report GPU stage times without a CPU wait.
@@ -1769,6 +1897,18 @@ namespace {
       std::printf("PASS native GPU timing: frames=%u total=%.3f ms eyes=%.3f ms pack=%.3f ms\n", timing.frames,
         timing.mean_ms[stage::total], timing.mean_ms[stage::eyes], timing.mean_ms[stage::pack]);
       require(!renderer.take_gpu_timing(timing) && timing.frames == 0, "GPU timing window did not reset");
+      // G1: with the Diagnostics switch off nothing is timed.
+      sunshine_game3d::diagnostics::set_enabled(false);
+      require(!renderer.take_gpu_timing(timing) && timing.frames == 0 &&
+          timing.state == sunshine_game3d::gpu_timing::profile_state::disabled,
+        "GPU timing reported frames while diagnostics were off");
+      sunshine_game3d::diagnostics::set_enabled(true);
+      if (fixture.color == 3)
+        std::puts("PASS PQ export: every parity frame's 10-bit PQ pack is within one code of the host's scRGBTo2100PQ of "
+          "its FP16 pack, with the same coverage alpha");
+      std::puts("PASS owed conditioning: every parity frame packs the same bytes with its conditioning owed to the pack, "
+        "with diagnostics on and off, with a repeated depth identity (candidate and vertical kept) and armed for Dump 3D; "
+        "mono frames record none unless armed, render-only frames none, and diagnostics off reports GPU timing disabled");
     }
     {
       // A Present that never reaches finish_present must not wedge native
@@ -1801,6 +1941,41 @@ namespace {
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
         "Missed-finish recovery changed the game's mono backbuffer");
       std::puts("PASS missed finish_present: next presentation renders, resource replacement waits for the covering signal");
+    }
+    {
+      // A colour toggle and back (item 6) reuses the cached renderer of the
+      // first transfer: its output texture returns and the same frame packs
+      // the same bytes, without waiting for or recompiling anything.
+      const auto &test = tests.front();
+      prepare_depth(fixture, test);
+      auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
+      write_native_source(fixture, backbuffer);
+      const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+      const auto color = static_cast<api::color_space>(fixture.color);
+      const auto other = fixture.color == 1 ? api::color_space::scrgb : api::color_space::srgb;
+      const auto depth = test.parameters.depth_ready ? fixture.depth_view : api::resource_view{};
+      const auto render_once = [&] {
+        renderer.begin_present();
+        require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source, depth,
+          test.parameters), "The colour-toggle fixture rejected a frame");
+        owner_queue->flush_immediate_command_list();
+        renderer.finish_present();
+        owner_queue->wait_idle();
+        return fixture.read(reinterpret_cast<ID3D12Resource *>(renderer.output().handle));
+      };
+      require(renderer.configure(observed.runtime, source, color), "The colour-toggle fixture cannot configure");
+      const auto first_output = renderer.output();
+      const auto first = render_once();
+      require(renderer.configure(observed.runtime, source, other) && renderer.output().handle != first_output.handle,
+        "The other colour transfer did not get its own renderer");
+      render_once();
+      const auto toggle_start = std::chrono::steady_clock::now();
+      require(renderer.configure(observed.runtime, source, color) && renderer.output().handle == first_output.handle,
+        "The toggle back did not reuse the cached renderer");
+      const auto toggle_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - toggle_start).count();
+      require(render_once() == first, "The cached renderer packed different bytes after the toggle back");
+      std::printf("PASS colour toggle: the toggle back reuses the cached renderer of the first transfer (%.3f ms) and packs the "
+        "same bytes\n", toggle_ms);
     }
     // Exercise the production cap independently of the deliberately uncapped
     // frozen-FX oracle. Read both the candidate and authoritative final field.
@@ -1959,11 +2134,15 @@ namespace {
       auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
       write_native_source(fixture, backbuffer);
       const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+      const bool dump_case = !test.reverse && test.maximum == .75f;
+      // An HDR10 dump packs the 10-bit PQ export, so its replay manifest
+      // names the PQ pack (SunshineRenderPackedPQPS).
+      const bool pq_dump = dump_case && fixture.color == 3;
+      if (pq_dump) require(renderer.set_pq_output(true), "An HDR10 renderer refused the PQ export for its dump");
       require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source, fixture.depth_view,
         parameters, true, {}, plane), "Nearest-UI D3D12 render failed");
       require(sunshine_game3d::ui_parameter_words(true, renderer.consumed_ui_plane()) ==
           sunshine_game3d::ui_parameter_words(true, plane), "Nearest-UI D3D12 changed submitted floor/mode bits");
-      const bool dump_case = !test.reverse && test.maximum == .75f;
       if (dump_case) dump.begin(observed.runtime, renderer, parameters, fixture.depth_view, false,
         static_cast<api::color_space>(fixture.color));
       owner_queue->flush_immediate_command_list();
@@ -2043,7 +2222,23 @@ namespace {
             pass.at("srvs").at("t9") == "ui_plane_resolved";
         }
         require(tile_pass && reduce_pass && field_pass && pin_pass, "Nearest-UI D3D12 dump lost actual u4/u5/t8/t9 bindings");
+        // The pack the dump names is the one that ran: the PQ pack for a PQ
+        // export, and no linearized input (t2) when the source is decoded per
+        // tap or needs no decoding.
+        const auto sbs_transfer = manifest.at("producer_metadata").at("sbs_transfer").get<unsigned>();
+        unsigned packs = 0;
+        for (const auto &pass : replay.at("passes")) {
+          const auto entry = pass.at("entry").get<std::string>();
+          if (entry.rfind("SunshineRenderPacked", 0)) continue;
+          ++packs;
+          require(entry == (sbs_transfer == 3 ? "SunshineRenderPackedPQPS" : "SunshineRenderPackedPS") &&
+              !pass.at("srvs").contains("t2") && sbs_transfer == (pq_dump ? 3u : fixture.color == 1 ? 1u : 2u) &&
+              pass.at("rtvs").at(0) == (sbs_transfer == 2 ? "sbs:RGBA16_FLOAT" : "sbs:R10G10B10A2_UNORM"),
+            "The D3D12 dump manifest names another pack, input or target than the pack that ran");
+        }
+        require(packs == 1, "The D3D12 dump manifest lists no single pack pass");
       }
+      if (pq_dump) renderer.set_pq_output(false);
       require(fixture.read(fixture.depth.p) == frozen_depth, "Nearest-UI reduction changed source depth");
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
         "Nearest-UI D3D12 changed source color");
@@ -2269,6 +2464,9 @@ int main(int argc, char **argv) {
       std::printf("MEASURE D3D12 debug layer %s (0x%08lx)\n", d3d12_debug_layer ? "enabled" :
         "unavailable: d3d12SDKLayers is not installed", static_cast<unsigned long>(result));
     }
+    // Diagnostics on (game3d_diagnostics.h): the GPU timing checks need the
+    // per-pass timestamps; the owed-conditioning section also runs with it off.
+    sunshine_game3d::diagnostics::set_enabled(true);
     fixture_t fixture;
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), directory, color, 0);
     check_native_parity(fixture, directory);

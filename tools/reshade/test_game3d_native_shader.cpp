@@ -375,12 +375,19 @@ int main(int argc, char **argv) {
     mirrored(detection::hlsl_hold_defines);
     mirrored(detection::hlsl_h1_defines);
     mirrored(detection::hlsl_still_defines);
+    // The tiles pass counts each statistics tile in this many parts; the
+    // renderer and the replay size the statistics texture from it.
+    mirrored(detection::hlsl_tile_defines);
+    require(detection::tile_parts >= 1 && detection::tile_parts <= detection::max_tile_parts,
+      "UI detection tile parts out of range");
+    // The renderer may skip conditioning for a pack that shows the source mono.
+    require(marker("SUNSHINE_MONO_SKIPS_CONDITIONING") == 1, "The mono pack must keep reading no conditioning");
     // The reduce ports ui_selection::decide of this revision.
     require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision &&
-        sunshine_game3d::ui_selection::revision == 5u,
-      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 5");
+        sunshine_game3d::ui_selection::revision == 7u,
+      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 7");
     require(decision_texels == detection::still_decision_texels && decision_texels == 13u,
-      "Selection revision 5 writes H2's stillness counts in decision texel 12: 13 decision texels");
+      "Selection revision 7 (deciding as revision 5) writes H2's stillness counts in decision texel 12: 13 decision texels");
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");
@@ -396,7 +403,7 @@ int main(int argc, char **argv) {
         std::vector<entry_point> entries {
           {"PostProcessVS", "vs_5_0"}, {"SunshineRenderPackedPS", "ps_5_0"},
         };
-        if (color == 3) entries.push_back({"SunshinePreparePQPS", "ps_5_0"});
+        if (color == 3) entries.push_back({"SunshineRenderPackedPQPS", "ps_5_0"});
         if (width <= 3840 && height <= 3840) {
           entries.push_back({"SunshineHostCandidateCS", "cs_5_0", 8, 8, 1});
           // Limiter groups: the marked number of adjacent columns (rows) by eight chunks.
