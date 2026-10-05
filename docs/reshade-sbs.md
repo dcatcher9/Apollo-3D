@@ -2873,7 +2873,7 @@ retain priority. Resource creation, drawing and queue observation remain common 
 while Generic ranking and qualification are suspended.
 Optional candidate accounting is separate from those capture facts. Numeric draw/vertex counters
 pause on native API capture unless the manual list is visible or activity diagnostics request them.
-Generic selection and shared preservation retain counters needed for their actual capture decisions.
+Generic selection retains the counters needed for its actual capture decisions.
 Per-clear history is collected only for the visible list. UI demand expires after the list stops
 being drawn, including when the overlay closes or changes tabs. Hidden lists do not copy or sort
 the inventory. Work-presence, viewport, clear direction, preservation boundaries, resource lifetime
@@ -2930,9 +2930,10 @@ depth unavailable for minutes. Invalid pointers,
 device/extent/lifetime mismatches and an unsuccessful or unsubmitted first evaluation cannot
 establish authority. A loaded DLL alone cannot establish it either. Once established, temporary
 missing or failed observations retain ownership. Explicit source release, disable or lifecycle
-teardown ends it; a silence timeout does not, although a silent owner never blocks another live API
-source. Disabling DLSS without an observed teardown can therefore require disabling its source
-option and restarting to use Generic fallback.
+teardown ends it, and so does one second without any evaluation of the established source (a
+game that switches DLSS to TAA, or a cutscene without DLSS, without releasing the feature); the
+queue then returns to Generic through its usual selection. A silent owner never blocks another
+live API source.
 
 One native D3D12 capture owner serves both API-selected and Generic-selected sources. It owns the
 snapshot pool, recording/submission identities, source and snapshot leases, consumer registration
@@ -2948,7 +2949,14 @@ API nominations always capture at the middleware boundary and leave Generic capt
 including for tracked depth-stencil resources. Manual/fallback selection resumes Generic capture
 before selection. Stable API frames do not toggle that demand or repeatedly clear
 Generic capture state. All depth-readiness writers share one per-runtime uniform cache, reflected
-again after effects reload and published only when readiness changes.
+again after effects reload and published only when readiness changes. Readiness never rebinds
+`DEPTH`: ReShade 6.8 waits for the whole queue on every binding update once an effect declares
+`DEPTH`, so Generic rebinds only when its view changes. A logical Generic source rotating through
+several physical members binds one stable copy per format and size instead of each member's view.
+The add-on's renderer reads the selected capture directly, so the copy exists only while effects
+are enabled and some technique is enabled (any enabled technique counts as a possible `DEPTH`
+reader); otherwise a
+rotating source binds nothing. One depth copy is recorded per new ready capture.
 
 For each effects pass, the exporter resolves calibration into a value-only frame decision before
 publishing shader parameters and Automatic UI status. Export and FG retention consume that same
@@ -2989,7 +2997,9 @@ A failed ordering check declines the copy before any read is recorded. There is 
 wait or pending-copy flush. Device removal is not completion, and actual GPU
 completion is still required for allocation retirement. The selected capture stays frozen across
 the pass. While a same-source successor is pending, SL and NGX may advance to the newest unconsumed
-completed snapshot. Its original sequence, timestamp, projection, jitter and feedback travel with
+completed snapshot: on the consumer's own queue one already submitted there (queue order, as for a
+current capture), from another queue one whose recording retired and whose producer fence
+completed. Its original sequence, timestamp, projection, jitter and feedback travel with
 its pixels. Provider, epoch, logical source, viewport, FG role and known
 depth layout must match, and the snapshot must be within the source age. Later camera resets and
 observation bookkeeping do not revoke its eligibility. The pool retains one eligible completed snapshot while recording its successor, so
@@ -3152,8 +3162,11 @@ SDK call or lifecycle) advances the Streamline observation revision. A frame-tok
 finds another thread writing the token table retries briefly (a few microseconds, still
 non-blocking) before counting as `tokens_busy`: The Witcher 3 requests about 30 tokens a frame
 from several threads, and each collision dropped depth for about five presents and reset UI
-placement, most visibly in its settings menu; each viewport's feedback
-revision is that loss count plus its own resets. The reset feedback discards old scene measurements
+placement, most visibly in its settings menu. Each viewport's feedback revision counts only what
+can hide or end its temporal history: lost constants observations, observation restarts and its
+own resets. Other losses (a busy lock, a failed SDK call) leave scene gain history intact. A Frame
+Generation options call publishes its mode with the same brief retry, since a game may set its
+options only once. The reset feedback discards old scene measurements
 while retaining established gain and zero placement; it does not force a valid current depth frame
 to render mono. The Witcher 3 exercises both cases: another viewport sends reset constants every
 frame, and the depth tag is cleared after each evaluation.
@@ -3190,7 +3203,14 @@ valid current nomination while its successor is pending, including against alloc
 provider. Supersession, failure or invalidation releases the current record's authority hold;
 completed-fallback eligibility and all GPU retirement requirements still apply before storage can
 be reused. This uses the existing bounded pool and does not extend capture freshness or authorize
-reading expired depth.
+reading expired depth. Once per Present, every other reusable record drops its game resource,
+device and recording references and keeps only its private allocation; idle allocations beyond
+256 MB are released. A hitch therefore cannot leave the pool holding old game depth buffers.
+While API depth owns the pass, Generic's unselected rotation members retire on their usual delay.
+In the 32-slot colour/mask pool, live snapshots (`record_local_texture`) and Dump 3D copies keep
+separate byte budgets: dumps 256 MB, live snapshots eight of the requested size and at least
+256 MB. A dump never counts against or evicts live storage: it takes only a slot without live
+storage and is otherwise exhausted. Idle live storage is released 2 s after its last snapshot.
 
 Capture acquisition returns source authority separately from the packet's pixel readiness.
 Its typed decision carries the selected identity and repeated/pending continuity. The capture
@@ -3292,8 +3312,10 @@ same contract; no AMD integration is implemented. The shared scale controller co
 frames and immutable samples, independently of source-selection and allocation decisions.
 Camera projection is optional: invalid matrices never block an otherwise valid source or become
 scale coefficients. Without projection, a known depth direction allows the shared adaptive raw
-controller to follow the provider's logical generation/viewport. Direction comes from the API when
-supplied, otherwise from shared preservation's established clear-value evidence; unknown stays mono.
+controller to follow the provider's logical generation/viewport. Direction comes from the API;
+unknown stays mono. (API sources always copy at the middleware call; the former shared ReShade
+preservation route, which could also supply clear-value direction, had no production caller and
+was removed.)
 
 The direct provider supports D3D12 full-resource, single-sample
 device depth and positive linear view distance with UntilEvaluate/UntilPresent lifetimes; it accepts bounded active rectangles while
@@ -3379,7 +3401,11 @@ CommandList7 Barrier: they supply observed resource states when they see the lis
 `barrier` event cannot replace these hooks: it reports a transition for the whole resource without
 its subresource (Dead Space transitions the stencil plane of its R32G8X24 depth separately), drops
 split flags, and reports an aliasing barrier as a completed transition of its "after" resource.
-The queue's ExecuteCommandLists hook stays and reports submissions.
+The queue's ExecuteCommandLists hook stays and reports submissions. A list's observed states live
+in its own recording state and are read and written only by the thread recording it (its lifecycle
+events, its captures and these hooks), so a barrier takes no capture lock; a list ReShade never
+reported is not tracked at all, since it cannot admit a capture. A consumer copy is recorded after
+its read lease is registered, outside the capture lock.
 
 A ReShade runtime's own immediate list is never reported by those events. ReShade records it only
 during present/effects events, open outside any render pass, and resets it right after each
@@ -3527,9 +3553,11 @@ applies the SR device-depth default. Ray Reconstruction's helpers always write t
 and Frame Generation has no `Depth` input. A map without creation values stays unknown, and a
 handle released in the current epoch is never revived without a new successful creation. The
 five-second `Sunshine NGX depth` line reports `recovered_features`.
-D3D11 NGX interception remains diagnostic-only.
+D3D11 NGX interception remains diagnostic-only: its exports are hooked only while the upscaler
+call trace is on.
 
 At evaluation entry the adapter reads the exact `Depth` resource and explicit render/depth subrect.
+A render subrect reported as 0x0 means the whole creation-size input, exactly like absent keys.
 NGX supplies no per-call resource state, but its SDK fixes one: NVIDIA's DLSS Programming Guide,
 section 3.4 "Resource States", requires every D3D12 input to be
 `D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE` at the evaluation call and states that DLSS
@@ -3738,7 +3766,9 @@ and UIAlpha tags. Live UI capture at tag boundaries independent of FG is describ
 contract; merely retaining diagnostic color metadata does not authorize a mask. Actual effects-input
 identity comes from ReShade's begin-effects render-target view,
 which may differ from the swapchain after a resolve/copy. V1 Reflex and V2 PCL PresentStart/End
-markers supply bounded, current-thread presentation brackets. V2 PCL discovery passively observes
+markers supply bounded, current-thread presentation brackets. Only the diagnostic presentation
+trace reads them, so they are tracked (and the PCL marker hooks installed) only while the
+Diagnostics switch is on. V2 PCL discovery passively observes
 `slGetFeatureFunction`; a marker function cached before the hook was installed remains unavailable.
 Failed, nested, repeated, stale, untracked or out-of-order brackets do not establish a current frame.
 Thread lifetimes are retained explicitly so a reused OS thread ID cannot inherit an open bracket.
@@ -3789,45 +3819,11 @@ registration are still live acceptance work.
 
 ### Experimental automatic scale and screen plane
 
-This fixed-scale policy and the mode gates below are historical. They do not describe current
-Game3D's current independent-gain/zero-plane controller or an available Manual shader mode.
-
-`tools/reshade/camera_scene_policy.h` retains a historical, separate CPU policy for the controlled
-camera fixture. It is not the production `projection_depth_controller.h` path: its scene-derived
-fixed-reference `K=1/q_ref` and admission logic must not replace the shared reference policy and
-production source admission described above. Its input
-requires independently admitted depth/color/frame registration, with immutable projection and
-source/extent identities attached to the actual sampled frame. The existing sampler's resource
-token and the latest camera matrix alone do not establish that correspondence.
-
-The default native-camera strategy observes the fixed central 4x4 cells of the 32x18 depth grid. It requires at least four
-distinct captures spanning 750 ms with coherent mean inverse distance, including every accepted
-sample's temporal variation. An unstable window restarts without extending the five-second
-startup deadline. Exact depth endpoints make the whole reference ambiguous; they are not trimmed
-out or reweighted, and the rendering shader still retains its endpoint depths. These timing and
-coherence values are prototype policy constants, not game-specific settings.
-
-For reference inverse distance `q_ref`, the candidate chooses `K=1/q_ref` and a fixed
-`referenceZPD=0.05`, initially placing `q_ref` at the screen plane. Both remain fixed after startup.
-Later samples move only the screen plane `q0`, using elapsed-time smoothing. The policy stores
-`q0` and its target directly; normalized `K*q0` is derived only for diagnostics. Dividing the
-normalized motion-rate bound by `K` preserves the existing screen-plane movement in these
-coordinates. Target freshness comes from capture time, not readback arrival. Missing proof, stale
-targets, cuts and unsupported FP16 ranges suspend readiness while retaining the established scale;
-resumption does not accumulate movement credit from the gap. Only an explicit calibration/unit epoch resets K.
-
-This reference is scene-relative, not meters or a universal stereo strength. Starting against a
-wall versus a vista, or including a close foreground object in the central patch, can choose a
-different scale. Freezing K avoids continuing scene gain changes but does not solve that initial
-choice. Likewise, preserving K during missing evidence does not establish seamless rendered
-transitions: the current shader readiness fallback restores the saved original rendering path.
-Live transition behavior and representative silhouette/AA comparisons remain acceptance work.
-
-The opt-in `SUNSHINE_GAME3D_CAMERA_SCENE_TEST=1` fixture runs this CPU policy through the actual
-external shader with synthetic, known registration; it also requires
-`SUNSHINE_GAME3D_CAMERA_DEPTH=1`. It tests automatically chosen scale, equivalent world units,
-clipping-plane changes, walking disparity, the measured screen plane and cut/gap continuity.
-It does not replace a real game's camera/depth association or a headset quality test.
+The historical fixed-scale CPU policy (`K=1/q_ref` from a central reference patch, then a moving
+screen plane) and its opt-in `SUNSHINE_GAME3D_CAMERA_SCENE_TEST=1` fixture had no production
+consumer and were removed. `tools/reshade/camera_scene_policy.h` keeps only the registration
+types and constants shared with the camera sample binding and the production
+`projection_depth_controller.h`, scene gain and raw controllers.
 
 ### Experimental raw-depth automation
 
@@ -4230,8 +4226,11 @@ output/readback resources, command storage, descriptors and completion objects. 
 its source and immutable capture facts until GPU completion; only then may the source binding
 be replaced. D3D12 fence values increase across reuse, and each executed list restores the scratch
 output's starting state. Runtime retirement or a device change discards idle resources; submitted
-work retains its resources until completion. Failure to prove completion still quarantines one
-bundle and disables further sampling. Reuse introduces no wait or additional in-flight sample.
+work retains its resources until completion. Failure to prove completion (device removal, a
+failed fence signal or query) quarantines one bundle for the process lifetime and pauses sampling
+until that bundle's runtime is retired; a replacement device or runtime samples again. Only a
+shader compilation failure disables sampling permanently. Reuse introduces no wait or additional
+in-flight sample.
 
 Selection takes one owned, contiguous snapshot of resource identity, dimensions, activity and
 capture-region facts under the tracking lock, then releases that lock before device calls. It

@@ -283,9 +283,9 @@ namespace {
       candidate.metadata.feedback.reset = true; ++candidate.metadata.observation_revision;
       require(decide(previous, selected, candidate).action == action::copy_fresh,
         "A valid reset frame or later observation could not establish a fresh private copy");
-      candidate.pixel_ready = false; candidate.shared_preservation = true;
-      require(decide({}, selected, candidate).action == action::copy_fresh,
-        "Shared preservation lost its separate fresh-copy authorization");
+      candidate.pixel_ready = false;
+      require(decide({}, selected, candidate).action == action::invalidate,
+        "A selected source without ready pixels authorized a fresh copy");
 
       provider::frame_generation_policy source_policy;
       frame_generation_snapshot fg_snapshot;
@@ -297,7 +297,7 @@ namespace {
         "Ambiguous FG kept a mandatory missing scope or failed to revoke FG input authority");
       require(!held(fg, fg_pending, {}, excluded), "Ambiguous FG inherited a previous FG display copy");
       auto fg_candidate = candidate;
-      fg_candidate.shared_preservation = false; fg_candidate.pixel_ready = true;
+      fg_candidate.pixel_ready = true;
       fg_candidate.metadata.frame_generation_input = true; fg_candidate.metadata.source_id = fg.metadata.source_id;
       auto fg_selected = fg_pending; fg_selected.source_selected = true;
       require(decide(fg, fg_selected, fg_candidate, excluded).action == action::invalidate &&
@@ -342,7 +342,6 @@ namespace {
       packet.area = {0, 0, 2228, 1253};
       packet.queue = 200;
       packet.resource_id = 7;
-      packet.shared_preservation = true;
       sunshine_depth::frame_depth captured;
       captured.resource = {300};
       captured.source_id = 7;
@@ -374,7 +373,6 @@ namespace {
 
       // Independent native snapshots do not supply ReShade preservation
       // metadata. An already populated output must not retain the prior copy.
-      packet.shared_preservation = false;
       ++packet.metadata.sequence;
       provider::test_describe_copied_depth(out, packet, {}, {500}, {501}, 11194);
       require(out.ready && out.provided.sequence == 10473 && !out.backup_id && !out.capture_marker &&

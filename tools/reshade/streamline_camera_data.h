@@ -124,7 +124,7 @@ namespace sunshine_streamline {
 
   enum class validation_status {
     valid, valid_matrix_scalar_mismatch, non_finite, invalid_flags, inactive, orthographic, unsupported_projection,
-    inverse_mismatch, invalid_planes, depth_direction_mismatch, invalid_fov_aspect
+    inverse_mismatch, invalid_planes, depth_direction_mismatch
   };
   struct camera_validation {
     validation_status status{validation_status::non_finite};

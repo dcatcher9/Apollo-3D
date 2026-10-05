@@ -54,7 +54,7 @@ namespace sunshine_streamline::depth_capture {
       out.reason = "FG_scope_unconfirmed";
       return out;
     }
-    if (current.source_selected && (candidate.shared_preservation || candidate.pixel_ready)) {
+    if (current.source_selected && candidate.pixel_ready) {
       out.action = display_action::copy_fresh;
       out.reason = "fresh_copy_candidate";
       return out;

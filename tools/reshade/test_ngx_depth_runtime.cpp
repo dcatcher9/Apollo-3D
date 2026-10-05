@@ -841,18 +841,28 @@ RWTexture2D<float> depth : register(u0);
       hold_then_mono("missing-established-depth","NGX without depth fell back to an unrelated Generic scene or outlived the retained depth");
       parameters.provide_depth=true;ngx_settle("missing-depth-recovery");
       emit=false;
+      const auto silence_began=GetTickCount64();
       hold_then_mono("silent-established-provider","Silent NGX provider exposed stale depth or Generic fallback");
-      const auto silent_until=GetTickCount64()+1800;
+      // A silent provider keeps the queue mono only for the association
+      // timeout (one second without an evaluation); then Generic may run.
+      bool association_released=false;
       do {
         ngx_tick("silent-established-provider");
-        require(!provider.ready && !status.ready() && status.scale==reference_scale,"Silent NGX provider exposed stale depth or Generic fallback");
-        require_status(true,false);
-      } while(GetTickCount64()<silent_until);
-      check_exported_mono();
+        sunshine_streamline::provider::source_status current;
+        require(query_provider_status(observed.runtime,&current),"NGX provider UI observation failed");
+        require(!provider.ready && !current.ready,"Silent NGX provider exposed stale depth");
+        if(GetTickCount64()-silence_began<900)
+          require(current.selected && !status.ready() && status.scale==reference_scale,
+            "Silent NGX provider released its association before the timeout");
+        // Released, the fixture's Generic scene depth may take over.
+        if(!current.selected) association_released=true;
+        else require(!association_released,"A released NGX association returned without an evaluation");
+      } while(GetTickCount64()-silence_began<1800);
+      require(association_released,"Silent NGX provider kept the queue mono past the association timeout");
       emit=true;
       const auto initial=ngx_settle("silent-provider-recovery");
       require_established(initial,"NGX temporary gap changed its logical depth domain or calibration");
-      std::puts("PASS established NGX failures and missing depth keep source ownership, hold the newest completed copy within its age bound, then render current-color mono and recover");
+      std::puts("PASS established NGX failures and missing depth keep source ownership, hold the newest completed copy within its age bound, then render current-color mono; one second of silence releases the association; all recover");
 
       // A center change starts smooth refinement with its fresh measurements.
       // Refinement never interrupts the current source or its readiness.

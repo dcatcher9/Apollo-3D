@@ -680,7 +680,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
     bool submit(api::effect_runtime *runtime, api::command_list *commands, const sample_request &request) {
       std::lock_guard<std::mutex> lock(mutex_);
       reap_retired();
-      if (pending_ || disabled_ || !runtime || !commands || !request.source.handle) return false;
+      if (pending_ || shader_failed_ || !runtime || !commands || !request.source.handle) return false;
       auto *queue = runtime->get_command_queue();
       if (!queue || commands != queue->get_immediate_command_list()) return false;
       const auto api = runtime->get_device()->get_api();
@@ -690,7 +690,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
         if (FAILED(D3DCompile(shader_source, std::strlen(shader_source), "SunshineDepthContent", nullptr, nullptr,
             "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, shader_.put(), errors.put()))) {
           warning("Sunshine depth selection: content sampler shader compilation failed; sampling disabled");
-          disabled_ = true;
+          shader_failed_ = true;
           return false;
         }
       }
@@ -710,7 +710,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
     bool busy() {
       std::lock_guard<std::mutex> lock(mutex_);
       reap_retired();
-      return disabled_ || bool(pending_);
+      return shader_failed_ || bool(pending_);
     }
 
     void begin_present(api::swapchain *swapchain) {
@@ -733,7 +733,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
         ID3D12CommandList *list = sample.commands12.get();
         sample.queue12->ExecuteCommandLists(1, &list);
         if (FAILED(sample.queue12->Signal(sample.fence12.get(), sample.fence_value12))) {
-          quarantine(sample, "Sunshine depth selection: sampler fence signal failed; one GPU bundle retained and sampling disabled");
+          quarantine(sample, "Sunshine depth selection: sampler fence signal failed; one GPU bundle retained, sampling paused until its runtime is replaced");
           return;
         }
       } else {
@@ -765,10 +765,11 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
     }
 
   private:
+    // A quarantined bundle stays pending, which blocks further sampling, until
+    // its runtime is retired (device removal destroys the device's runtimes).
     void quarantine(sample_t &sample, const char *message) {
       if (!sample.quarantined) warning(message);
       sample.quarantined = true;
-      disabled_ = true;
     }
 
     bool complete(sample_t &sample) {
@@ -777,7 +778,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
       if (sample.fence12.get()) {
         const UINT64 completed = sample.fence12->GetCompletedValue();
         if (completed == UINT64_MAX) {
-          quarantine(sample, "Sunshine depth selection: sampler device removed; one GPU bundle retained and sampling disabled");
+          quarantine(sample, "Sunshine depth selection: sampler device removed; one GPU bundle retained, sampling paused until its runtime is replaced");
           return false;
         }
         return completed >= sample.fence_value12;
@@ -785,14 +786,22 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
       BOOL ready = FALSE;
       const HRESULT hr = sample.context11->GetData(sample.query11.get(), &ready, sizeof(ready), D3D11_ASYNC_GETDATA_DONOTFLUSH);
       if (FAILED(hr)) {
-        quarantine(sample, "Sunshine depth selection: sampler query failed; one GPU bundle retained and sampling disabled");
+        quarantine(sample, "Sunshine depth selection: sampler query failed; one GPU bundle retained, sampling paused until its runtime is replaced");
         return false;
       }
       return hr == S_OK && ready;
     }
 
     void reap_retired() {
-      if (pending_ && pending_->retired && (!pending_->executed || complete(*pending_))) pending_.reset();
+      if (!pending_ || !pending_->retired) return;
+      if (pending_->quarantined) {
+        // Completion can never be proved: keep the one bundle alive for the
+        // process lifetime (as ~sampler_t does) and let a replacement device
+        // or runtime sample again.
+        pending_.release();
+        return;
+      }
+      if (!pending_->executed || complete(*pending_)) pending_.reset();
     }
 
     std::mutex mutex_;
@@ -801,7 +810,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID,
     std::unique_ptr<sample_t> pending_;
     // At most one submitted bundle. Reuse its fixed-size scratch after completion.
     std::unique_ptr<sample_t> spare_;
-    bool disabled_ = false;
+    bool shader_failed_ = false;
   };
 
   sampler_t sampler;

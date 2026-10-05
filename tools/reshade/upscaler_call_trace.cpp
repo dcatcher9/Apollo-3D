@@ -401,7 +401,9 @@ namespace sunshine_upscaler_trace {
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
             reinterpret_cast<LPCWSTR>(value.hModule), &retained)) continue;
         ++found_modules;
-        for (unsigned api = 0; api != 2; ++api) {
+        // D3D11 NGX supplies no depth capture; its calls only feed the trace.
+        const unsigned apis = active_epoch.load(std::memory_order_acquire) ? 2 : 1;
+        for (unsigned api = 0; api != apis; ++api) {
           for (unsigned op = 0; op != 4; ++op) {
             char name[80]{};
             const char *suffix = op == 0 ? "CreateFeature" : op == 1 ? "EvaluateFeature" :

@@ -65,7 +65,6 @@ namespace sunshine_streamline::provider {
       sunshine_depth_statistics::tile_layout pending_grid;
       std::uint64_t pending_id{}, pending_texture{}, next_sample{};
       bool owns_pass{}, open{}, have_latest{};
-      bool shared_preservation{};
       frame_generation_policy source_policy;
       api::resource display_texture{};
       api::resource_view display_view{}, bound_view{};
@@ -433,7 +432,7 @@ namespace sunshine_streamline::provider {
     if (auto *data = runtime->get_private_data<state>()) {
       const auto evidence = before_decision(*data, data->output.frame_index);
       data->depth_ready.invalidate();
-      data->open = data->owns_pass = data->have_latest = data->shared_preservation = false;
+      data->open = data->owns_pass = data->have_latest = false;
       data->cache.invalidate("runtime_reload");
       data->presentations.reset();
       data->presentation_source = {};
@@ -481,7 +480,7 @@ namespace sunshine_streamline::provider {
     const bool matches = value.valid && value.moments.supplied && value.source.handle == data->pending_texture &&
       value.width == data->pending_grid.x && value.height == data->pending_grid.y &&
       value.values.size() == std::size_t(data->pending_grid.x) * data->pending_grid.y &&
-      value.values.size() <= data->latest.raw.size() &&
+      value.values.size() <= sunshine_depth_statistics::maximum_tiles &&
       value.source_width == data->pending_metadata.resource.width && value.source_height == data->pending_metadata.resource.height &&
       value.viewport_x == data->pending_metadata.resource.area.left && value.viewport_y == data->pending_metadata.resource.area.top &&
       value.viewport_width == data->pending_metadata.resource.area.width && value.viewport_height == data->pending_metadata.resource.area.height;
@@ -492,8 +491,6 @@ namespace sunshine_streamline::provider {
       data->latest.tick = data->pending_metadata.tick;
       data->latest.width = value.width;
       data->latest.height = value.height;
-      data->latest.raw = {};
-      std::copy(value.values.begin(), value.values.end(), data->latest.raw.begin());
       data->latest.range_valid = value.range_valid;
       data->latest.range_min = value.range_min;
       data->latest.range_max = value.range_max;
@@ -556,7 +553,7 @@ namespace sunshine_streamline::provider {
       data->source_metadata = {};
       data->cache.invalidate("FG_scope_unconfirmed");
       data->last_valid = {};
-      data->have_latest = data->shared_preservation = false;
+      data->have_latest = false;
       data->pending_id = 0;
       data->pending_metadata = {};
       data->pending_grid = {};
@@ -576,7 +573,7 @@ namespace sunshine_streamline::provider {
         data->source_metadata.frame_generation_input = true;
         data->cache.invalidate("FG_scope_changed");
         data->last_valid = {};
-        data->have_latest = data->shared_preservation = false;
+        data->have_latest = false;
         data->pending_id = 0;
       }
     }
@@ -680,10 +677,7 @@ namespace sunshine_streamline::provider {
     data->owns_pass = data->open = true;
     if (selection.require_frame_generation && !available)
       data->source_metadata.source_id = acquisition.source_id;
-    if (available) {
-      data->shared_preservation = data->frame.shared_preservation;
-      data->source_metadata = data->frame.metadata;
-    }
+    if (available) data->source_metadata = data->frame.metadata;
     // Keep the encoding identity through gaps. Only the explicit bounded hold
     // below can authorize the already-owned display pixels during a pending copy.
     data->output.provided = data->source_metadata;
@@ -783,7 +777,7 @@ namespace sunshine_streamline::provider {
         capture_info.failure != data->last_capture_failure || handoff_changed, !previously_owned, !available)) {
       char text[2560]{};
       if (available)
-        std::snprintf(text, sizeof(text), "Sunshine %s depth: %s; source_selected=1 snapshot_ready=%u final_ready=%u display=%s consumer=%s loss=%s; allocation=%ux%u active=%u,%u,%u,%u source=%u viewport=%u; metadata_projection=%u output_projection=%u; state=0x%x proof=%u; capture=%llu sequence=%llu present=%llu command=0x%llx cookie=%llu device=%llu expected_device=%llu slot_invalid=%u tracked_commands=%u; producer_queue=0x%llx consumer_queue=0x%llx producer_fence=%llu producer_completed=%llu completion_valid=%u producer_retired=%u; transport=%s resource_id=%llu",
+        std::snprintf(text, sizeof(text), "Sunshine %s depth: %s; source_selected=1 snapshot_ready=%u final_ready=%u display=%s consumer=%s loss=%s; allocation=%ux%u active=%u,%u,%u,%u source=%u viewport=%u; metadata_projection=%u output_projection=%u; state=0x%x proof=%u; capture=%llu sequence=%llu present=%llu command=0x%llx cookie=%llu device=%llu expected_device=%llu slot_invalid=%u tracked_commands=%u; producer_queue=0x%llx consumer_queue=0x%llx producer_fence=%llu producer_completed=%llu completion_valid=%u producer_retired=%u; resource_id=%llu",
           path_name, depth_capture::name(status), unsigned(data->frame.pixel_ready), unsigned(data->output.ready), name(display), depth_capture::name(consumer.result),
           depth_capture::name(consumer.invalidation),
           data->frame.width, data->frame.height, data->frame.area.left, data->frame.area.top, data->frame.area.width, data->frame.area.height,
@@ -797,7 +791,7 @@ namespace sunshine_streamline::provider {
           static_cast<unsigned long long>(capture_info.queue), static_cast<unsigned long long>(capture_info.consumer_queue),
           static_cast<unsigned long long>(capture_info.producer_fence), static_cast<unsigned long long>(capture_info.producer_completed),
           unsigned(capture_info.producer_completion_valid), unsigned(capture_info.producer_recording_retired),
-          data->frame.shared_preservation ? "ReShade preservation" : "API snapshot", static_cast<unsigned long long>(data->frame.resource_id));
+          static_cast<unsigned long long>(data->frame.resource_id));
       else {
         // A failed acquisition has no output packet. Its zeroed fields say
         // nothing about the resource/camera that the provider actually tagged.
@@ -915,15 +909,6 @@ namespace sunshine_streamline::provider {
   extern "C" __declspec(dllexport) bool SunshineStreamlineTestCenter(api::effect_runtime *runtime, center_sample *out) {
     return out && latest_center(runtime, *out);
   }
-  extern "C" __declspec(dllexport) bool SunshineStreamlineTestSnapshot(api::effect_runtime *runtime,
-      std::uint64_t *texture, bool *forced, bool *shared) {
-    const auto *data = runtime->get_private_data<state>();
-    if (!data || !texture || !forced || !shared) return false;
-    *texture = data->frame.texture;
-    *forced = data->frame.metadata.force_snapshot;
-    *shared = data->frame.shared_preservation;
-    return data->output.ready && !data->output.reused_depth;
-  }
 #endif
   bool selected(api::effect_runtime *runtime) {
     const auto *data = runtime->get_private_data<state>();
@@ -942,16 +927,11 @@ namespace sunshine_streamline::provider {
       trace_readiness(runtime, *data, evidence, data->output.ready, "explicit_reuse_invalidation");
     }
   }
-  bool uses_shared_preservation(api::effect_runtime *runtime) {
-    const auto *data = runtime->get_private_data<state>();
-    return data && data->owns_pass && data->shared_preservation;
-  }
   source_status describe(api::effect_runtime *runtime, std::uint64_t present) {
     source_status out;
     const auto *data = runtime->get_private_data<state>();
     if (!data) return out;
     out.selected = data->owns_pass;
-    out.shared_preservation = data->shared_preservation;
     out.last_valid = data->last_valid;
     out.presentations = data->presentations.snapshot(GetTickCount64());
     out.provider = data->source_metadata.provider;
