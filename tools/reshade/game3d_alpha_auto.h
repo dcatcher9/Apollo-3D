@@ -102,16 +102,13 @@ namespace sunshine_game3d {
       // S1 winner's source, and whether H1 overrode it with source 8.
       std::uint32_t claims{}, s1_source{};
       bool h1_applied{};
-      // A2, decision texels 8 and 9 (selection revision 2), in
-      // ui_selection::judged_kinds order (layer, Backbuffer, current): pixels
-      // with alpha of at least 1/2, and those of them where an offered exact
-      // pair's HUD-less image is lit and unchanged. The GPU counts neither for
-      // the one-frame-late layer copy.
-      std::array<std::uint32_t, 3> strong{}, contradicted{};
-      // The offered layer was the one-frame-late copy (stored flag
-      // ui_detection::stored_late_layer at submission): not same-sample
-      // evidence (E2), so no judge of A2 reads it.
-      bool late_layer{};
+      // A2, decision texels 16, 8 and 9 (selection revision 10), in
+      // ui_selection::judged_kinds order (UIAlpha, UI color tag, Backbuffer,
+      // current): pixels with alpha of at least 1/2, and those of them where
+      // an offered exact pair's HUD-less image is lit and unchanged, counted
+      // on sample frames with an exact pair. The one-frame-late layer copy is
+      // never judged (E2).
+      std::array<std::uint32_t, 4> strong{}, contradicted{};
       // F1: the frame's own decision's refused candidate bit (zero when it
       // decided) and its reason (a ui_no_mask index, or
       // ui_detection::frame_reason_decided when it decided a source or the
@@ -155,15 +152,13 @@ namespace sunshine_game3d {
       default: return {};
     }
   }
-  // The offered alpha candidates a sample over `pixels` read V1-invalid (more
-  // than 1% invalid pixels), in candidate-bit positions.
-  inline std::uint32_t invalid_alpha_bits(const alpha_auto_decision::detection_evidence &evidence, std::uint32_t pixels) {
-    std::uint32_t bits = 0;
-    for (const auto k : ui_selection::draw_order)
-      if (ui_selection::alpha_kind(k) && (evidence.candidates & ui_selection::bit(k)) &&
-          !ui_selection::alpha_valid(alpha_counts_of(evidence, k).invalid, pixels))
-        bits |= ui_selection::bit(k);
-    return bits;
+  // One judged alpha kind's one-way counts (A2) in a sample: strong and
+  // contradicted pixels; zero for a kind that is not judged.
+  inline std::pair<std::uint32_t, std::uint32_t> one_way_of(const alpha_auto_decision::detection_evidence &evidence,
+      ui_selection::kind k) {
+    for (std::size_t i = 0; i != ui_selection::judged_kinds.size(); ++i)
+      if (ui_selection::judged_kinds[i] == k) return {evidence.strong[i], evidence.contradicted[i]};
+    return {};
   }
 
   // The acceptance signature of every candidate kind a detection offers
@@ -259,23 +254,28 @@ namespace sunshine_game3d {
     // source (the offscreen UI
     // layer, Backbuffer or current alpha) by alpha_trust_samples valid
     // selective samples spanning alpha_trust_span_ms within a factor of two of
-    // each other, where a full (at least 90%) sample restarts the run. Alpha
-    // with more than 1% invalid pixels (V1) is no evidence. A sample in which
-    // an offered declared alpha is V1-invalid is void for earning: no run
-    // advances or restarts (Resident Evil Requiem's rejected-tag frames).
+    // each other, consecutive among its selective samples: a full (at least
+    // 90%) sample, or a gap of more than alpha_trust_span_ms since the run's
+    // last selective sample, restarts the run, while empty samples within
+    // that bound stay neutral. Alpha with more than 1% invalid pixels (V1,
+    // the GPU's valid bits) is no evidence. A sample in which an offered
+    // declared alpha is V1-invalid is void for earning: no run advances or
+    // restarts (Resident Evil Requiem's rejected-tag frames).
     // A2 revocation, by evidence of stronger provenance in the same sample,
-    // whatever the drawing rank: an offered, V1-valid inferred alpha (the
-    // layer, Backbuffer, current) is judged by a V2-valid exact change set
-    // (ui_selection::exact_judge; acceptance not required), which
+    // whatever the drawing rank: every offered, V1-valid alpha but the
+    // one-frame-late layer copy (UIAlpha, the UI color tag, Backbuffer,
+    // current; ui_selection::judged_kinds) is judged by a V2-valid exact
+    // change set (ui_selection::exact_judge; acceptance not required), which
     // contradicts it when at least a tenth of its pixels with alpha of at
     // least 1/2 lie where the HUD-less image is lit and unchanged (the
-    // one-way test; dims and tints over dark or changed pixels never meet
-    // it), and by every offered, accepted, V1-valid declared alpha (UIAlpha,
-    // the UI color tag), which contradict it when its coverage differs from
-    // each of theirs by at least a tenth of the frame. The one-way judge
-    // needs a basis: a source without strong pixels in the sample is not
-    // judged by it. Declared sources and the one-frame-late layer copy
-    // (evidence.late_layer, not same-sample evidence, E2) are never judged.
+    // one-way test; real UI, dims and tints over dark or changed pixels never
+    // meet it, an opaque final image read as UI does), and an inferred one
+    // (Backbuffer, current) also by every offered, accepted, V1-valid
+    // declared alpha, which contradict it when its coverage differs from each
+    // of theirs by at least a tenth of the frame. The one-way judge needs a
+    // basis: a source without strong pixels in the sample is not judged by
+    // it. The layer copy is not same-sample evidence (E2) and is never
+    // judged.
     // An accepted source is revoked by alpha_trust_samples contradicting
     // judged samples within alpha_trust_span_ms ("3 contradictions within
     // 2 s"); agreeing and unjudged samples change nothing, and invalid or
@@ -415,14 +415,18 @@ namespace sunshine_game3d {
     // Consecutive samples of one kind of evidence about one signature.
     struct evidence_run {
       std::uint32_t samples{};
-      std::uint64_t first_tick_ms{}, low{}, high{};
+      std::uint64_t first_tick_ms{}, last_tick_ms{}, low{}, high{};
       // True once alpha_trust_samples samples span alpha_trust_span_ms. A value
-      // outside a factor of two of the run's others starts a new run with it.
-      bool add(std::uint64_t tick_ms, std::uint64_t value = 0) {
+      // outside a factor of two of the run's others starts a new run with it,
+      // and so does, when max_gap_ms is set, a sample more than max_gap_ms
+      // after the run's last one.
+      bool add(std::uint64_t tick_ms, std::uint64_t value = 0, std::uint64_t max_gap_ms = 0) {
         const auto lo = samples ? std::min(low, value) : value, hi = samples ? std::max(high, value) : value;
-        if (!samples || tick_ms < first_tick_ms || hi > lo * 2) *this = {0, tick_ms, value, value};
+        if (!samples || tick_ms < last_tick_ms || hi > lo * 2 || (max_gap_ms && tick_ms - last_tick_ms > max_gap_ms))
+          *this = {0, tick_ms, tick_ms, value, value};
         else { low = lo; high = hi; }
         ++samples;
+        last_tick_ms = tick_ms;
         return samples >= alpha_trust_samples && tick_ms - first_tick_ms >= alpha_trust_span_ms;
       }
     };
@@ -521,7 +525,9 @@ namespace sunshine_game3d {
       using ui_selection::kind;
       namespace candidate = ui_detection::candidate;
       const auto offered = evidence.candidates;
-      const auto invalid = invalid_alpha_bits(evidence, pixels);
+      // V1 as the GPU judged it: the offered alpha candidates outside the
+      // sample's valid bits (decision texel 7 .w).
+      const auto invalid = offered & ui_selection::alpha_bits & ~evidence.valid_bits;
       const bool void_sample = (offered & invalid & ui_selection::declared_alpha_bits) != 0;
       // A2 judges of this sample: a V2-valid exact change set, and the
       // coverage of every offered, accepted, V1-valid declared alpha.
@@ -546,18 +552,16 @@ namespace sunshine_game3d {
         // earn nor refute the source, so its reconfirm clock pauses there.
         if (ui_selection::full(covered, pixels)) reconfirm_paused(e, tick_ms);
         else reconfirm_offered(e, tick_ms);
-        // A2: only inferred alpha is judged, and never the one-frame-late
-        // layer copy (E2); the one-way test only with strong pixels to test.
-        std::size_t judged = ui_selection::judged_kinds.size();
-        for (std::size_t i = 0; i != ui_selection::judged_kinds.size(); ++i)
-          if (ui_selection::judged_kinds[i] == k) judged = i;
-        const bool same_sample = judged != ui_selection::judged_kinds.size() &&
-          !(k == kind::ui_layer && evidence.late_layer);
-        const bool exact_basis = same_sample && exact_judge && evidence.strong[judged] != 0;
-        const bool declared_basis = same_sample && declared_count != 0;
+        // A2: every judged kind (all alpha but the one-frame-late layer copy,
+        // E2) meets the one-way test, with strong pixels to test; inferred
+        // alpha also the declared alphas' coverage.
+        const bool judged = std::find(ui_selection::judged_kinds.begin(), ui_selection::judged_kinds.end(), k) !=
+          ui_selection::judged_kinds.end();
+        const auto [strong, contradicted] = one_way_of(evidence, k);
+        const bool exact_basis = judged && exact_judge && strong != 0;
+        const bool declared_basis = judged && !ui_selection::declared(k) && declared_count != 0;
         if (exact_basis || declared_basis) {
-          const bool by_exact = exact_basis &&
-            ui_selection::one_way_contradicted(evidence.strong[judged], evidence.contradicted[judged]);
+          const bool by_exact = exact_basis && ui_selection::one_way_contradicted(strong, contradicted);
           bool by_declared = declared_basis;
           for (std::size_t j = 0; j != declared_count; ++j)
             by_declared = by_declared && ui_selection::coverage_disagrees(declared[j], covered, pixels);
@@ -572,7 +576,9 @@ namespace sunshine_game3d {
           }
         }
         if (ui_selection::selective(covered, pixels)) {
-          if (!void_sample && (ui_selection::declared(k) || e.earned.add(tick_ms, covered))) accept(e);
+          // An inferred run is consecutive and bounded: a selective sample
+          // more than alpha_trust_span_ms after the run's last one restarts it.
+          if (!void_sample && (ui_selection::declared(k) || e.earned.add(tick_ms, covered, alpha_trust_span_ms))) accept(e);
         } else if (ui_selection::full(covered, pixels)) {
           if (!void_sample) e.earned = {};
         }
@@ -602,16 +608,14 @@ namespace sunshine_game3d {
       // alpha's does: a full menu or a mispaired (V2-invalid) sample pauses it.
       if (offered & candidate::hudless) {
         auto &e = at(signatures.of(kind::hudless));
-        ui_selection::counts c;
-        c.pixels = pixels;
-        c.changed = evidence.hudless_changed;
-        c.unchanged = evidence.hudless_unchanged;
-        c.nonfinite = evidence.hudless_invalid;
-        c.lit = evidence.hudless_lit;
-        c.matching_tiles = evidence.matching_tiles;
-        if ((evidence.valid_bits & candidate::hudless) && !ui_selection::full(c.changed, pixels)) reconfirm_offered(e, tick_ms);
+        // The GPU's V2 verdict (valid bits): a valid set is partial (some
+        // changed pixels, fewer than a quarter), empty or, only from an exact
+        // pair, full (98%), so a valid selective one is the partial change
+        // set (ui_selection::change_set_selective).
+        const bool valid = (evidence.valid_bits & candidate::hudless) != 0u;
+        if (valid && !ui_selection::full(evidence.hudless_changed, pixels)) reconfirm_offered(e, tick_ms);
         else reconfirm_paused(e, tick_ms);
-        if (!void_sample && ui_selection::change_set_selective(c)) accept(e);
+        if (!void_sample && valid && ui_selection::selective(evidence.hudless_changed, pixels)) accept(e);
         lapse_if_due(e, tick_ms);
       }
     }

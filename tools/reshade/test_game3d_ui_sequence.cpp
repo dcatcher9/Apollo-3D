@@ -152,8 +152,9 @@ namespace {
 
   // ---------------------------------------------------------------- decision texels
 
-  // Decision texels 0-11 as the renderer reads them back (selection revision 9).
-  constexpr std::size_t texel_words = 4 * ui_detection::pre_ui_decision_texels;
+  // Decision texels 0-16 as the renderer reads them back (selection revision
+  // 10; texels 12-15 are reserved zeros).
+  constexpr std::size_t texel_words = 4 * ui_detection::decision_texels;
   using texels = std::array<std::uint32_t, texel_words>;
   // Texels 5 and 6: the hidden-scene evidence of the presented frame and of
   // the pre-UI scene image, written only by the evidence passes.
@@ -224,10 +225,20 @@ namespace {
   }
 
   // The counts of `t` with the words the reduce writes for these inputs:
-  // texel 0 the applied decision, the refused candidate and the frame reason
-  // (F1, with the T1 reused bit), and texel 10's informative claims and h1
-  // word (the S1 winner, and whether H1 overrode it).
+  // the one-way judgment and pre-UI counts only on a status sample
+  // (per_frame_sample; words 32 and 36, the layer's before revision 10, are
+  // reserved zeros), texel 0 the applied decision, the refused candidate and
+  // the frame reason (F1, with the T1 reused bit), and texel 10's informative
+  // claims and h1 word (the S1 winner, and whether H1 overrode it).
   texels decision_words(texels t, const gpu_inputs &in) {
+    t[word::strong] = t[word::contradicted] = 0;
+    if (!(in.per_frame & ui_detection::per_frame_sample)) {
+      for (const auto w : {word::strong_ui_alpha, word::strong_ui_color, word::strong_backbuffer, word::strong_current,
+             word::contradicted_ui_alpha, word::contradicted_ui_color, word::contradicted_backbuffer,
+             word::contradicted_current, word::pre_ui_match, word::pre_ui_image_lit}) {
+        t[w] = 0;
+      }
+    }
     const auto d = decide(t, in);
     t[word::source] = d.source;
     t[word::covered] = d.covered;
@@ -517,9 +528,10 @@ namespace {
       return *this;
     }
 
-    // A2, the one-way counts of a judged kind (the layer, Backbuffer or
-    // current alpha): pixels with alpha of at least 1/2, and those of them
-    // where an offered exact pair's HUD-less image is lit and unchanged.
+    // A2, the one-way counts of a judged kind (UIAlpha, the UI color tag,
+    // Backbuffer or current alpha; never the layer copy): pixels with alpha of
+    // at least 1/2, and those of them where an offered exact pair's HUD-less
+    // image is lit and unchanged. The reduce keeps them on status samples only.
     synthetic &strong(kind k, std::uint32_t pixels) {
       c.strong[judged_index(k)] = pixels;
       return *this;
@@ -533,7 +545,7 @@ namespace {
     static std::size_t judged_index(kind k) {
       const auto &judged = ui_selection::judged_kinds;
       const auto at = std::find(judged.begin(), judged.end(), k);
-      require(at != judged.end(), "Only inferred alpha is judged");
+      require(at != judged.end(), "The layer copy is never judged");
       return std::size_t(at - judged.begin());
     }
 
@@ -566,17 +578,14 @@ namespace {
         t[word::pre_ui_match] = pre_ui_counts[0];
         t[word::pre_ui_image_lit] = pre_ui_counts[1];
       }
-      for (std::size_t i = 0; i != ui_selection::judged_kinds.size(); ++i) {
-        t[word::strong + i] = c.strong[i];
-        t[word::contradicted + i] = c.contradicted[i];
-      }
-      // The tiles pass counts neither strong nor contradicted pixels of the
-      // one-frame-late layer copy (stored flag 0x4): under E2 it is not
-      // same-sample evidence (test_game3d_ui_selection_contract, check_tiles).
-      if (in.flags & ui_detection::stored_late_layer) {
-        t[word::strong + judged_index(kind::ui_layer)] = 0;
-        t[word::contradicted + judged_index(kind::ui_layer)] = 0;
-      }
+      t[word::strong_ui_alpha] = c.strong[0];
+      t[word::strong_ui_color] = c.strong[1];
+      t[word::strong_backbuffer] = c.strong[2];
+      t[word::strong_current] = c.strong[3];
+      t[word::contradicted_ui_alpha] = c.contradicted[0];
+      t[word::contradicted_ui_color] = c.contradicted[1];
+      t[word::contradicted_backbuffer] = c.contradicted[2];
+      t[word::contradicted_current] = c.contradicted[3];
       return decision_words(t, in);
     }
   };
@@ -598,6 +607,11 @@ namespace {
     // generated count of the last Present that offered a UI tag
     // (ui_mask::generated_without_input; fg_pacer computes it).
     bool hold_previous {};
+    // The provider offered the previous render's inexact HUD-less snapshot
+    // again (ui_detection_inputs::hudless_reoffer); the renderer pushes
+    // per_frame_reoffer when no UIAlpha, UI color or Backbuffer tag comes
+    // with it.
+    bool hudless_reoffer {};
     // The provider offered an Auto input (source_alpha_ui); without one it
     // offers no candidate.
     bool available = true;
@@ -649,13 +663,14 @@ namespace {
   //                       the offered layer's signature (layer_proven) + the
   //                       guard's per_frame(..., layer_proven) + detect_ui +
   //                       detected() (t.detect with bits, or a zero-offer
-  //                       real frame flagged accepted_missing), or
+  //                       real frame flagged accepted_missing; with
+  //                       per_frame_reoffer for a tagless HUD-less re-offer), or
   //                       inactive() (the guard keeps its state);
   //   end of render:      the detection fence is signaled (detection_awaiting_signal);
   //   update_alpha_auto:  the latest sample only while status_fresh;
   //   poll_detection:     sample_discarded (scope, stale on arrival),
   //                       decode_detection_sample, latest_key, the guard's
-  //                       observe(sample_of(words), the pending actionable,
+  //                       observe(guard_sample(the decoded sample), the pending actionable,
   //                       the submitted signatures by kind), session.observe
   //                       of the sample's evidence
   //                       with the signatures the sample was submitted
@@ -663,7 +678,9 @@ namespace {
   //                       guard's observation);
   //   detect_ui:          the reduce with the hold store (u5) and, except on
   //                       a zero-offer frame, the tiles pass and the 100 ms
-  //                       sample cadence, scene evidence when the guard's
+  //                       sample cadence (per_frame_sample: only samples
+  //                       count the one-way judgment and the pre-UI
+  //                       pixels), scene evidence when the guard's
   //                       measure(now, a proven layer that is the offer's
   //                       pre-UI image) says it is actionable, the counter
   //                       and CPU snapshot and the status key.
@@ -745,7 +762,10 @@ namespace {
         // read after the poll, so a sample that just earned it counts at once.
         r.layer_proven = (bits & candidate::layer) && session.pre_ui_proven(p.signatures.of(kind::ui_layer));
         r.scene_bits = guard.per_frame(p.now_ms, bits, p.signatures.by_kind(), r.layer_proven);
-        const std::uint32_t per_frame = r.scene_bits | r.hold.per_frame | (!p.depth_current ? ui_detection::per_frame_depth_not_current : 0u);
+        constexpr std::uint32_t tags = candidate::ui_alpha | candidate::ui_color | candidate::backbuffer | candidate::exact;
+        const bool reoffer = p.hudless_reoffer && (bits & candidate::hudless) && !(bits & tags);
+        const std::uint32_t per_frame = r.scene_bits | r.hold.per_frame | (!p.depth_current ? ui_detection::per_frame_depth_not_current : 0u) |
+          (reoffer ? ui_detection::per_frame_reoffer : 0u);
         detect(observation, bits, flags, accepted, p.signatures, per_frame, index, r);
         // T1's invariant: no generated Present detects.
         invariants.generated_detections += p.hold_previous ? 1 : 0;
@@ -785,10 +805,10 @@ namespace {
       }
       pending = false;
       auto &latest = temporal.latest;
-      latest = ui_temporal::decode_detection_sample(pending_texels.data(), pending_texels.size(), pending_source.now_ms, submitted, true, pending_flags);
+      latest = ui_temporal::decode_detection_sample(pending_texels.data(), pending_texels.size(), pending_source.now_ms, submitted);
       temporal.latest_source = pending_source;
       temporal.latest_key = pending_key;
-      const auto observation = guard.observe(scene_guard::sample_of(pending_texels.data(), pending_texels.size(), pending_source.now_ms, true), pending_actionable, pending_signatures.by_kind());
+      const auto observation = guard.observe(ui_temporal::guard_sample(latest), pending_actionable, pending_signatures.by_kind());
       session.observe(latest.evidence, latest.pixels, pending_source.now_ms, pending_signatures);
       commit(latest, observation);
       counters_pending = false;
@@ -803,6 +823,13 @@ namespace {
     }
 
     void detect(const alpha_auto_source &observation, std::uint32_t bits, std::uint32_t flags, std::uint32_t accepted, const candidate_signatures &signatures, std::uint32_t per_frame, std::size_t index, frame_result &r) {
+      // A status sample (the renderer's detect_ui): at most one real frame
+      // with candidates every 100 ms while no sample is pending pushes
+      // per_frame_sample, so that only it counts the one-way judgment and
+      // the pre-UI pixels.
+      const auto now = observation.now_ms;
+      const bool sample = !r.grace && !pending && !(last_submit && now >= last_submit && now - last_submit < sample_interval_ms);
+      per_frame |= sample ? ui_detection::per_frame_sample : 0u;
       r.gpu = {bits, flags, accepted, per_frame, observation.now_ms, gpu_hold};
       // A zero-offer frame runs no tiles pass: the reduce reads the
       // statistics rows the previous tiles pass left (with nothing offered,
@@ -822,13 +849,12 @@ namespace {
         gpu_words[i] += adds[i];
       }
       ++invariants.detections;
-      invariants.untrusted_inferred += r.decision.untrusted_inferred ? 1 : 0;
-      invariants.presented_over_dedicated += r.decision.presented_over_dedicated ? 1 : 0;
+      invariants.untrusted_inferred += ui_selection::untrusted_inferred(r.decision, accepted) ? 1 : 0;
+      invariants.presented_over_dedicated += ui_selection::inferred_over_declared(r.decision, bits, accepted) ? 1 : 0;
       mask_source = r.decision.source;
       mask_covered = r.decision.covered;
       mask_pixels = t[word::pixels];
-      const auto now = observation.now_ms;
-      if (r.grace || pending || (last_submit && now >= last_submit && now - last_submit < sample_interval_ms)) {
+      if (!sample) {
         return;
       }
       const bool proven_image = r.layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
@@ -843,7 +869,6 @@ namespace {
       }
       pending_texels = t;
       pending_signatures = signatures;
-      pending_flags = r.gpu.flags | per_frame;
       counters_pending = true;
       pending_words = gpu_words;
       pending_cpu = cpu;
@@ -885,7 +910,6 @@ namespace {
     std::uint32_t pending_key {};
     alpha_auto_source pending_source;
     candidate_signatures pending_signatures;
-    std::uint32_t pending_flags {};
     texels pending_texels {};
     // The GPU's state across detections: the statistics rows of the last
     // tiles pass, the T1 hold store (u5) and the detected mask.
@@ -1166,7 +1190,9 @@ namespace {
         if (f.now_ms >= 13000 && (f.gpu.accepted & candidate::backbuffer)) {
           // An accepted source pins its whole-frame alpha flat (P1, the
           // opacity ruling) until the exact pair's contradictions revoke it.
-          require(f.flat() && f.source == 3 && f.decision.contradicted, "The accepted full claim did not decide flat, or was not counted contradicted");
+          // The one-way counts exist on status samples only (selection
+          // revision 10), so only those count it contradicted.
+          require(f.flat() && f.source == 3 && f.decision.contradicted == f.submitted, "The accepted full claim did not decide flat, or a sample was not counted contradicted");
           flat_ms = f.now_ms - 13000;
         }
         if (f.now_ms >= 13000 && !(f.gpu.accepted & candidate::backbuffer)) {
@@ -1239,11 +1265,12 @@ namespace {
       require(c[ui_counter::trust_revoked_declared] == 1 && !c[ui_counter::trust_revoked_exact] && c[ui_counter::trust_earned] == 3, "Presented-alpha revocation or the re-earn was not counted");
       check_counters(s, "presented disagreement");
     }
-    for (const bool late : {false, true}) {
-      // The offscreen layer is inferred: an accepted UIAlpha's coverage
-      // judges a same-frame layer (S4, no stored flag 0x4) like presented
-      // alpha (revoked_declared, the same timing). Today's one-frame-late
-      // copy is not same-sample evidence (E2): no judge reads it.
+    {
+      // The offscreen layer is inferred, but every layer copy is one frame
+      // late, not same-sample evidence (E2): it is never a judged kind
+      // (selection revision 10 dropped the unused judgment of a same-frame
+      // layer), so an accepted UIAlpha's disagreeing coverage leaves it
+      // accepted.
       const auto layer = signatures_in(srgb).of(kind::ui_layer), ui_alpha = signatures_in(srgb).of(kind::ui_alpha);
       alpha_auto_policy session;
       restore(session, layer.key(), 1);
@@ -1254,30 +1281,22 @@ namespace {
       });
       present p;
       p.offered = candidate::ui_alpha | candidate::layer;
-      p.layer_flags = late ? ui_detection::layer_detection_flags(false) : ui_detection::stored_premultiplied;
+      p.layer_flags = ui_detection::layer_detection_flags(false);
       run(s, p, 10000, 17000);
       const auto first = s.samples.front().sample_tick_ms;
-      if (late) {
-        require(s.trust.size() == 1 && s.trust[0].tick == first && s.trust[0].accepted == stored_of({ui_alpha, layer}) && !session.counters()[ui_counter::trust_revoked_declared], "An accepted UIAlpha judged the one-frame-late layer");
-        check_counters(s, "late layer beside UIAlpha");
-        continue;
-      }
-      const auto revoked = third_sample_from(s, 13000);
-      require(s.trust.size() == 2 && s.trust[0].tick == first && s.trust[0].accepted == stored_of({ui_alpha, layer}) && s.trust[1].tick == revoked && s.trust[1].accepted == ui_alpha.key(), "An accepted UIAlpha did not revoke the disagreeing layer by its third contradiction");
-      require(session.counters()[ui_counter::trust_revoked_declared] == 1, "The layer's revocation was not counted as revoked_declared");
-      check_counters(s, "layer judged by UIAlpha");
+      require(s.trust.size() == 1 && s.trust[0].tick == first && s.trust[0].accepted == stored_of({ui_alpha, layer}) && !session.counters()[ui_counter::trust_revoked_declared], "An accepted UIAlpha judged the one-frame-late layer");
+      check_counters(s, "late layer beside UIAlpha");
     }
     {
-      // The one-frame-late layer copy is never one-way judged before S4
-      // (E2): its tiles count neither strong nor contradicted pixels, so an
-      // accepted full layer over a valid exact pair is not revoked by it.
+      // Nor is it one-way judged: an accepted full layer over a valid exact
+      // pair is not revoked, and no sample counts a strong pixel for it.
       const auto layer = signatures_in(srgb).of(kind::ui_layer);
       alpha_auto_policy session;
       restore(session, layer.key(), 1);
       sequence s(session, [](const gpu_inputs &in) {
         const bool full = in.now_ms >= 13000;
         synthetic f;
-        f.alpha(kind::ui_layer, full ? 1000 : 200).strong(kind::ui_layer, full ? 1000 : 200).contradicted(kind::ui_layer, full ? 800 : 0).change_set(50);
+        f.alpha(kind::ui_layer, full ? 1000 : 200).change_set(50);
         return f.words(in);
       });
       present p;
@@ -1285,13 +1304,46 @@ namespace {
       p.layer_flags = ui_detection::layer_detection_flags(false);
       run(s, p, 10000, 17000);
       for (const auto &sample : s.samples) {
-        require(!sample.evidence.contradicted[0] && !sample.evidence.strong[0] && sample.evidence.late_layer, "The late layer was counted strong or contradicted");
+        require(sample.evidence.strong == std::array<std::uint32_t, 4> {} && sample.evidence.contradicted == std::array<std::uint32_t, 4> {}, "The late layer was counted strong or contradicted");
       }
       for (const auto &f : s.frames) {
         require(f.source == ui_detection::source_layer && (f.now_ms < 13000 || f.flat()), "The accepted late layer did not decide");
       }
       require(session.accepts(layer) && !session.counters()[ui_counter::trust_revoked_exact], "The late layer was one-way judged");
       check_counters(s, "late layer");
+    }
+    {
+      // D1 (selection revision 10): a declared alpha is judged one way too.
+      // An opaque final image tagged as UI color (Hogwarts Legacy's and
+      // Stellar Blade HDR's UIColorAndAlpha) read selective once during a
+      // fade is accepted by that first sample (A1); afterwards it covers the
+      // frame over a valid exact pair whose HUD-less image shows the scene
+      // unchanged under it, so the third contradiction within 2 s revokes it
+      // and the pair decides again. Before it was revoked it decided flat.
+      const auto tag = signatures_in(srgb).of(kind::ui_color), hudless = signatures_in(srgb).of(kind::hudless);
+      alpha_auto_policy session;
+      sequence s(session, [](const gpu_inputs &in) {
+        const bool fade = in.now_ms < 10200;
+        synthetic f;
+        f.alpha(kind::ui_color, fade ? 300u : 1000u).change_set(50).lit(1000);
+        if (!fade) {
+          f.strong(kind::ui_color, 1000).contradicted(kind::ui_color, 900);
+        }
+        return f.words(in);
+      });
+      present p;
+      p.offered = candidate::ui_color | candidate::hudless | candidate::exact;
+      run(s, p, 10000, 13000);
+      const auto first = s.samples.front().sample_tick_ms;
+      require(s.trust.size() >= 2 && s.trust[0].tick == first && s.trust[0].accepted == stored_of({tag, hudless}), "The fading tag and the exact pair were not accepted by their first sample");
+      const auto revoked = third_sample_from(s, 10200);
+      require(s.trust[1].tick == revoked && s.trust[1].accepted == hudless.key() && session.counters()[ui_counter::trust_revoked_exact] == 1, "The opaque final image was not revoked by its third one-way contradiction");
+      const auto revoked_at = poll_of(s, revoked);
+      for (std::size_t i = revoked_at + 1; i != s.frames.size(); ++i) {
+        require(s.frames[i].source == 5 && s.frames[i].covered == 50, "The exact pair did not decide after the tag was revoked");
+      }
+      require(session.counters()[ui_counter::contradicted] > 0, "The contradicted declared winner was not counted");
+      check_counters(s, "declared one-way revocation");
     }
   }
 
@@ -1565,8 +1617,9 @@ namespace {
       // the held verdict flattens the title as source 8. Then the gameplay HUD
       // earns the pair and its first sample, visible, releases the hold
       // without refuting anything (the HUD claims nothing); back on the title
-      // the accepted pair decides it flat (6), which H1 never overrides
-      // although the guard holds the hidden verdict again.
+      // the accepted pair decides it flat (6), and once the guard holds the
+      // hidden verdict again H1 relabels it 8 (selection revision 10: a flat
+      // winner pins at weight 1 either way, P1).
       alpha_auto_policy session;
       const auto title = recorded_frames({recorded::hl_title, recorded::hl_title_held, recorded::hl_title_accepted});
       sequence s(session, phased({{12000, title}, {13000, recorded_frames({recorded::hl_hud, recorded::hl_hud_accepted})}, {UINT64_MAX, title}}));
@@ -1581,7 +1634,7 @@ namespace {
           require(f.source == (i >= entry ? 8u : 0u) && f.decision.h1 == (i >= entry), "The title did not go flat (H1) exactly from the poll of its second measured hidden sample");
           require(i >= entry || (f.decision.none_reason == ui_no_mask::gate_no_hold && f.decision.refused == candidate::hudless), "The title before the hold did not name its acting claim");
         } else if (f.now_ms >= 13000) {
-          require(f.flat() && f.source == 6 && !f.decision.h1, "The accepted pair did not decide the title flat");
+          require(f.flat() && f.decision.s1_source == 6 && (f.source == 6 ? !f.decision.h1 : f.source == 8 && f.decision.h1 && (f.scene_bits & ui_detection::per_frame_scene_hidden)), "The accepted pair did not decide the title flat, or only H1 relabelled it under the held verdict");
         }
       }
       require(s.trust.size() == 1 && s.trust[0].tick == first_sample_from(s, 12000) && s.trust[0].accepted == hudless, "The gameplay HUD did not accept the pair by its first sample");
@@ -2160,6 +2213,34 @@ namespace {
   // same-batch Backbuffer, counting proposes the presented colour after the
   // tag (ui_mask::pair_hudless_present), which is never exact (E2): only V2
   // validates the pair, and only a same-batch Backbuffer makes it exact.
+
+  // The input provider's HUD-less offers under a frame-generation cadence:
+  // the game tags the HUD-less image of each real frame once, and every
+  // Present of that frame's window (its `generated` generated Presents and
+  // its real one, presented first, or last as DLSS-G does) offers that
+  // snapshot, on time. Each offer pairs as the provider pairs it
+  // (ui_mask::pair_hudless_offer: the first offer with the Present after
+  // the tag, every later one with its own Present's colour), and the pair
+  // compares the snapshot's own real frame only when the compared Present is
+  // the real one; any other shows interpolated colour, a mispaired pair. A
+  // later offer is a re-offer of the render before (hudless_reoffer).
+  struct hudless_window {
+    std::uint32_t generated;
+    bool real_first;
+
+    struct offer {
+      bool real, first, own_frame;
+    };
+
+    offer at(std::size_t present_index) const {
+      const std::size_t window = generated + 1, j = present_index % window, real_at = real_first ? 0 : generated;
+      const std::uint64_t tagged = 1000 + window * (present_index / window), current = tagged + j + 1;
+      const auto pairing = ui_mask::pair_hudless_offer(tagged, current, j != 0);
+      require(pairing.kind != ui_mask::hudless_present::unpaired && pairing.presents_ago <= j, "An on-time HUD-less offer did not pair");
+      return {j == real_at, j == 0, j - pairing.presents_ago == real_at};
+    }
+  };
+
   void hudless_pairs_are_exact_only_by_batch() {
     // The game tags its next frame one to three counted Presents before each
     // Present, so every Present pairs (where counting by the reported
@@ -2168,47 +2249,69 @@ namespace {
     for (std::uint64_t after = 1; after <= 3; ++after) {
       require(ui_mask::pair_hudless_present(3725, 3725 + after).kind != ui_mask::hudless_present::unpaired, "A pipelined HUD-less tag did not pair");
     }
-    // A cycle of four Presents: three generated ones whose HUD-less image the
-    // count pairs with interpolated colour (a middle-band change set,
-    // V2-invalid) and the real one (a valid partial set, the HUD).
-    const auto real_present = [](std::uint64_t now) {
-      return (now - 10000) / 8 % 4 == 3;
-    };
-    {
-      // (i) FG 4x, every Present offering an inexact HUD-less pair: the first
-      // V2-valid selective sample accepts the pair (A1, exact or not), and
-      // from then on a valid partial set decides 5; a mispaired Present has
-      // no decision of its own (T1 reuses once). Then a menu-sized change set
-      // over a visible scene: full but inexact, so never 6, and with claim
-      // (d) but no hidden verdict never 8: no mask after the grace.
+    for (const auto [generated, real_first] : {std::pair {3u, false}, std::pair {3u, true}, std::pair {1u, false}, std::pair {1u, true}}) {
+      // (i) FG 4x (three generated Presents per real one; Hogwarts Legacy
+      // 10-05) and 2x, every Present offering its real frame's inexact
+      // HUD-less snapshot, with the real Present last (DLSS-G) or first in
+      // the window. Each Present's change
+      // set follows from the pair the provider makes (hudless_window): the
+      // real Present compares its own colour, a valid partial set (the HUD),
+      // and every generated Present interpolated colour (a middle-band set,
+      // V2-invalid). The first V2-valid selective sample accepts the pair
+      // (A1, exact or not); from then on the real Present decides 5 and every
+      // mispaired Present shows that held decision (T1: a snapshot's first
+      // offer without a decision of its own reuses it once, each re-offer
+      // keeps it, per_frame_reoffer). Then a menu-sized change set over a
+      // visible scene: full but inexact, so never 6, and with claim (d) but
+      // no hidden verdict never 8: the re-offers of the snapshot that spent
+      // the grace keep the held HUD, and from the next snapshot's first offer
+      // there is no mask.
+      const hudless_window cadence {generated, real_first};
+      const std::string name = std::to_string(generated + 1) + "x, " + (real_first ? "real Present first" : "real Present last");
       alpha_auto_policy session;
-      sequence s(session, [&real_present](const gpu_inputs &in) {
+      sequence s(session, [cadence](const gpu_inputs &in) {
         synthetic f;
-        f.change_set(in.now_ms >= 12000 ? 990 : real_present(in.now_ms) ? 50 : 500).lit(1000).scene(.5f, .5f);
+        f.change_set(in.now_ms >= 12000 ? 990 : cadence.at((in.now_ms - 10000) / 8).own_frame ? 50 : 500).lit(1000).scene(.5f, .5f);
         return f.words(in);
       });
-      present p;
-      p.offered = candidate::hudless;
-      run(s, p, 10000, 14000, 8);
-      std::size_t accepted_at = s.frames.size();
+      for (std::uint64_t now = 10000; now < 14000; now += 8) {
+        present p;
+        p.now_ms = now;
+        p.offered = candidate::hudless;
+        p.hudless_reoffer = !cadence.at((now - 10000) / 8).first;
+        s.step(p);
+      }
+      std::size_t accepted_at = s.frames.size(), menu_first_offers = 0, held_menu = 0;
+      bool real_decided = false;
       for (std::size_t i = 0; i != s.frames.size(); ++i) {
         const auto &r = s.frames[i];
-        require(r.detected && !r.held && (r.gpu.bits & candidate::hudless) && !(r.gpu.bits & candidate::exact), "A Hogwarts Present did not detect from an inexact HUD-less pair");
-        require(r.source != 6 && r.source != 8 && !r.decision.h1, "A Hogwarts inexact pair decided a whole-frame source");
+        const auto offer = cadence.at(i);
+        require(r.detected && !r.held && (r.gpu.bits & candidate::hudless) && !(r.gpu.bits & candidate::exact), "A Hogwarts Present did not detect from an inexact HUD-less pair (" + name + ")");
+        require(r.source != 6 && r.source != 8 && !r.decision.h1, "A Hogwarts inexact pair decided a whole-frame source (" + name + ")");
+        require(((r.gpu.per_frame & ui_detection::per_frame_reoffer) != 0) == !offer.first, "A re-offer was not flagged, or a first offer was (" + name + ")");
         if (accepted_at == s.frames.size() && (r.gpu.accepted & candidate::hudless)) {
           accepted_at = i;
         }
         if (i < accepted_at) {
-          require(!r.source, "The pair decided before it was accepted");
+          require(!r.source, "The pair decided before it was accepted (" + name + ")");
         } else if (r.now_ms < 12000) {
-          require(real_present(r.now_ms) ? r.source == 5 && r.covered == 50 && !r.decision.reused : !r.decision.own_source && (!r.source || (r.decision.reused && r.source == 5)), "A Hogwarts gameplay Present did not decide its valid change set, or a mispaired one did more than reuse once");
+          // Until the first real Present after acceptance, the held decision
+          // is that of a real frame decided before it: no mask.
+          if (offer.real) {
+            real_decided = true;
+          }
+          const bool shows = real_decided ? r.source == 5 && r.covered == 50 : !r.source;
+          require(shows && (offer.real ? !r.decision.reused && r.decision.own_source == 5 : !r.decision.own_source && r.decision.reused), "A Hogwarts gameplay Present did not decide its own valid change set, or a mispaired one did not show the held decision (" + name + ", Present " + std::to_string(i) + ")");
         } else {
-          require(!r.decision.own_source && r.decision.none_reason == ui_no_mask::difference_failed && (!r.source || r.decision.reused), "The inexact full change set over a visible scene decided something");
+          menu_first_offers += offer.first ? 1 : 0;
+          held_menu += r.source ? 1 : 0;
+          require(!r.decision.own_source && r.decision.none_reason == ui_no_mask::difference_failed && (!r.source || (r.decision.reused && r.source == 5)) && (menu_first_offers < 2 || !r.source), "The inexact full change set over a visible scene decided something, or the held HUD outlived the snapshot that spent the grace (" + name + ")");
         }
       }
-      require(accepted_at < s.frames.size() && s.frames[accepted_at].now_ms < 11000 && s.trust.size() == 1 && s.trust[0].accepted == key(kind::hudless), "The inexact HUD-less pair was not accepted by a valid selective sample");
-      require(!s.scene_entered && !s.guard.hidden.held(14000), "A visible scene entered the hidden-scene hold");
-      check_counters(s, "Hogwarts HUD-less only, FG 4x");
+      require(accepted_at < s.frames.size() && s.frames[accepted_at].now_ms < 11000 && s.trust.size() == 1 && s.trust[0].accepted == key(kind::hudless), "The inexact HUD-less pair was not accepted by a valid selective sample (" + name + ")");
+      require(held_menu && held_menu <= 2 * (cadence.generated + 1), "The menu's held HUD did not end within two real frames (" + name + ")");
+      require(!s.scene_entered && !s.guard.hidden.held(14000), "A visible scene entered the hidden-scene hold (" + name + ")");
+      check_counters(s, "Hogwarts HUD-less only, FG " + name);
     }
     {
       // (ii) FG off, the Present after each tag counted, not a batch: an
@@ -2283,6 +2386,110 @@ namespace {
         require(r.detected && r.flat() && r.source == 6 && !r.decision.h1, "A same-batch exact full change set did not decide 6");
       }
       check_counters(s, "same-batch exact full change set");
+    }
+  }
+
+  // T1 across HUD-less re-offers (selection revision 10, per_frame_reoffer).
+  void hudless_reoffers_keep_the_held_decision() {
+    // A game that tags UIAlpha for real frames only and a HUD-less image
+    // that every Present of the real frame's window offers (The Witcher 3 at
+    // 3x and 4x): the real Present decides its accepted UIAlpha; a generated
+    // Present misses it (accepted missing) and pairs its HUD-less snapshot
+    // with interpolated colour (V2-invalid), so it has no decision of its
+    // own. The snapshot's first offer reuses the real decision once, and
+    // every re-offer keeps the held decision, so every generated Present
+    // shows its last real frame's UIAlpha, with the real Present first or
+    // last in the window. Before revision 10 the grace was spent by the
+    // first generated Present and the rest of the window had no mask.
+    const auto ui_alpha = key(kind::ui_alpha);
+    for (const std::uint32_t generated : {2u, 3u}) {
+      for (const bool real_first : {false, true}) {
+        const hudless_window cadence {generated, real_first};
+        const std::string name = std::to_string(generated + 1) + "x, " + (real_first ? "real Present first" : "real Present last");
+        alpha_auto_policy session;
+        restore(session, ui_alpha, 1);
+        sequence s(session, [cadence](const gpu_inputs &in) {
+          synthetic f;
+          f.alpha(kind::ui_alpha, (in.bits & candidate::ui_alpha) ? 60u : 0u).change_set(cadence.at((in.now_ms - 10000) / 8).own_frame ? 60 : 500).lit(1000);
+          return f.words(in);
+        });
+        std::uint32_t real_source = 0;
+        std::size_t generated_presents = 0;
+        for (std::uint64_t now = 10000; now < 12000; now += 8) {
+          const auto offer = cadence.at((now - 10000) / 8);
+          present p;
+          p.now_ms = now;
+          p.offered = candidate::hudless | (offer.real ? candidate::ui_alpha : 0u);
+          p.hudless_reoffer = !offer.first;
+          const auto &r = s.step(p);
+          require(r.detected && !r.held, "A W3 Present did not detect (" + name + ")");
+          require(((r.gpu.per_frame & ui_detection::per_frame_reoffer) != 0) == (!offer.first && !offer.real), "The re-offer bit was not pushed exactly on tagless re-offers (" + name + ")");
+          if (offer.real) {
+            require(r.source == 1 && r.covered == 60 && !r.decision.reused, "The real W3 Present did not decide its accepted UIAlpha (" + name + ")");
+            real_source = r.source;
+          } else if (real_source) {
+            ++generated_presents;
+            require(!r.decision.own_source && r.decision.reused && r.source == real_source && r.covered == 60 && (r.gpu.per_frame & ui_detection::per_frame_accepted_missing), "A generated W3 Present did not show its last real frame's UIAlpha (" + name + ")");
+          }
+        }
+        require(generated_presents > 100, "The W3 stream had too few generated Presents (" + name + ")");
+        check_counters(s, "W3 HUD-less re-offers " + name);
+      }
+    }
+    {
+      // FG off, a stale re-offer: the game misses a few HUD-less tags (a busy
+      // capture reservation), so the provider re-offers the last snapshot
+      // against later frames (V2-invalid). The re-offers keep the held
+      // decision only while the same snapshot is offered; a new snapshot's
+      // first offer without a decision of its own reuses it once more, and
+      // the next has no mask.
+      alpha_auto_policy session;
+      accept_hudless(session);
+      std::vector<bool> valid, reoffer;
+      for (std::size_t i = 0; i != 40; ++i) {
+        reoffer.push_back(i >= 20 && i < 30);  // Snapshot 19 offered again for ten renders.
+        valid.push_back(i < 20);               // Frames 30 and later: new snapshots, mispaired.
+      }
+      sequence s(session, [valid](const gpu_inputs &in) {
+        synthetic f;
+        f.change_set(valid[(in.now_ms - 10000) / 16] ? 50 : 500).lit(1000);
+        return f.words(in);
+      });
+      for (std::size_t i = 0; i != valid.size(); ++i) {
+        present p;
+        p.now_ms = 10000 + 16 * i;
+        p.offered = candidate::hudless;
+        p.hudless_reoffer = reoffer[i];
+        const auto &r = s.step(p);
+        if (i < 20) {
+          require(r.source == 5 && !r.decision.reused, "A fresh FG-off pair did not decide");
+        } else if (i < 31) {
+          require(!r.decision.own_source && r.decision.reused && r.source == 5 && r.covered == 50, "A stale re-offer, or the next snapshot's first offer, did not keep the held decision");
+        } else {
+          require(!r.source && !r.decision.reused, "The held decision outlived the re-offered snapshot and the grace");
+        }
+      }
+      check_counters(s, "FG-off stale re-offer");
+    }
+    {
+      // A re-offer beside a UIAlpha, UI color or Backbuffer tag, or paired
+      // exactly with its batch's Backbuffer, is a frame of its own: the
+      // renderer pushes no re-offer bit (an accepted tag decides it or the
+      // grace applies once).
+      alpha_auto_policy session;
+      accept_hudless(session);
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.change_set(500).lit(1000);
+        return f.words(in);
+      });
+      for (const std::uint32_t with : {unsigned(candidate::ui_alpha), unsigned(candidate::ui_color), unsigned(candidate::backbuffer), unsigned(candidate::exact)}) {
+        present p;
+        p.now_ms = 10000 + 16 * s.frames.size();
+        p.offered = candidate::hudless | with;
+        p.hudless_reoffer = true;
+        require(!(s.step(p).gpu.per_frame & ui_detection::per_frame_reoffer), "A re-offer beside a tag or an exact pair pushed the re-offer bit");
+      }
     }
   }
 
@@ -2634,13 +2841,14 @@ namespace {
     }
     {
       // Acceptance changes never clear D state: the layer accepted mid-hold
-      // decides itself (opaque on every pixel, never overridden) and stays
-      // flat; forgotten again, H1 flattens it at once.
+      // is the S1 winner (opaque on every pixel), which H1 relabels 8 under
+      // the held verdict (selection revision 10: flat either way, P1), and
+      // stays flat; forgotten again, H1 still flattens it.
       establish();
       restore(session, layer.key(), 1);
       for (const auto until = now + 300; now < until;) {
         const auto &r = step(p);
-        require(held() && r.flat() && r.source == ui_detection::source_layer && !r.decision.h1 && (r.scene_bits & ui_detection::per_frame_scene_hidden), "The layer accepted mid-hold did not stay flat as itself, or cleared the held verdict");
+        require(held() && r.flat() && r.source == 8u && r.decision.h1 && r.decision.s1_source == ui_detection::source_layer && (r.scene_bits & ui_detection::per_frame_scene_hidden), "The layer accepted mid-hold did not stay flat, or cleared the held verdict");
       }
       require(s.forget() == layer.key(), "Forget did not clear the accepted layer");
       const auto &r = step(p);
@@ -3818,8 +4026,10 @@ namespace {
       check_counters(s, "accepted opaque-full winner");
     }
     {
-      // An accepted alpha winner opaque on every pixel is flat already: H1
-      // holds the hidden verdict but never overrides it.
+      // An accepted alpha winner opaque on every pixel is flat already; H1
+      // relabels it 8 from the hold's entry like any other winner (selection
+      // revision 10: it pins at weight 1 either way, P1, so only the label
+      // and the counters move from source 3 to 8).
       alpha_auto_policy session;
       restore(session, signatures.of(kind::backbuffer).key(), 1);
       sequence s(session, [](const gpu_inputs &in) {
@@ -3831,8 +4041,15 @@ namespace {
       p.offered = candidate::backbuffer;
       run(s, p, 10000, 13000);
       require(s.scene_entered == 1, "The opaque winner's hidden scene was not held");
-      for (const auto &f : s.frames) {
-        require(f.flat() && f.source == 3 && !f.decision.h1 && f.decision.claims == candidate::backbuffer, "H1 overrode an accepted winner opaque on every pixel");
+      std::size_t entry = 0;
+      for (std::size_t i = 0; i != s.samples.size(); ++i) {
+        if (s.observed[i].entered) {
+          entry = poll_of(s, s.samples[i].sample_tick_ms);
+        }
+      }
+      for (std::size_t i = 0; i != s.frames.size(); ++i) {
+        const auto &f = s.frames[i];
+        require(f.flat() && f.decision.s1_source == 3 && f.decision.claims == candidate::backbuffer && f.source == (i < entry ? 3u : 8u) && f.decision.h1 == (i >= entry), "H1 did not relabel an accepted winner opaque on every pixel from its entry");
       }
       check_counters(s, "accepted winner opaque everywhere");
     }
@@ -4017,9 +4234,20 @@ namespace {
         }
         // S2a: the one-way judgment counts (A2), the frame's own reason, its
         // refused candidate and the T1 grace (F1).
+        // The line's columns are the layer (never judged since selection
+        // revision 10), Backbuffer and current alpha; sampled_declared_one_way
+        // (revision 10) holds UIAlpha and the UI color tag. Evidence keeps
+        // judged_kinds order.
         if (const auto one_way = field_group(line, "sampled_one_way"); !one_way.empty()) {
           const auto strong = field_quad(field_text(one_way, "strong")), contradicted = field_quad(field_text(one_way, "contradicted"));
-          for (std::size_t i = 0; i != evidence.strong.size(); ++i) {
+          for (std::size_t i = 0; i != 2; ++i) {
+            evidence.strong[2 + i] = strong[1 + i];
+            evidence.contradicted[2 + i] = contradicted[1 + i];
+          }
+        }
+        if (const auto declared = field_group(line, "sampled_declared_one_way"); !declared.empty()) {
+          const auto strong = field_quad(field_text(declared, "strong")), contradicted = field_quad(field_text(declared, "contradicted"));
+          for (std::size_t i = 0; i != 2; ++i) {
             evidence.strong[i] = strong[i];
             evidence.contradicted[i] = contradicted[i];
           }
@@ -4035,7 +4263,6 @@ namespace {
           evidence.refused = ui_selection::bit(*refused);
         }
         evidence.reused = field_text(line, "sampled_reused") == "1";
-        evidence.late_layer = field_text(line, "sampled_late_layer") == "1";
         // S2b: texel 10 (the opaque Backbuffer and current pixels, the
         // informative claims and the h1 word) and the pre-UI scene image's
         // evidence; before S2b, the HUD-less image's (sampled_hudless_scene).
@@ -4145,6 +4372,7 @@ int main(int argc, char **argv) {
     {"T1 holds survive key churn", holds_survive_key_churn},
     {"A1/S1/T1/P1 E33 title and Load Game", e33_title_and_load_game},
     {"E2/V2/A1/H1 Hogwarts HUD-less pairs exact only by batch", hudless_pairs_are_exact_only_by_batch},
+    {"T1 HUD-less re-offers keep the held decision", hudless_reoffers_keep_the_held_decision},
     {"F1 sample staleness and status key", samples_go_stale_and_are_discarded},
     {"F1 winner keys samples", accepted_alpha_keys_samples_alone},
     {"H1 W3 layer route", hidden_scene_layer_route},

@@ -25,11 +25,22 @@ namespace sunshine_game3d::ui_input {
   namespace {
     using choice = ui_qualification::choice;
     // Paired with its batch's tagged Backbuffer (exact), with the Present
-    // after its tag, late with retained color (both inexact), too old to
-    // pair, otherwise unpaired, and no HUD-less capture. The gate line keeps
-    // its generated field, always 0 since no HUD-less pairing holds.
-    enum hudless_outcome : unsigned { hudless_batch, hudless_real, hudless_late, hudless_stale, hudless_other,
-      hudless_none, hudless_outcome_count };
+    // after its tag, late with retained color, offered again with a later
+    // Present's own color (all three inexact), too old to pair, otherwise
+    // unpaired, and no HUD-less capture. The gate line keeps its generated
+    // field, always 0 since no HUD-less pairing holds.
+    enum hudless_outcome : unsigned { hudless_batch, hudless_real, hudless_late, hudless_reoffered, hudless_stale,
+      hudless_other, hudless_none, hudless_outcome_count };
+    // The HUD-less snapshot a render offered: its ticket, epoch and viewport,
+    // and that render's frame_sequence (zero ticket: none yet).
+    struct offered_snapshot {
+      std::uint64_t ticket{}, epoch{}, present{};
+      std::uint32_t viewport{};
+      bool same(const ui_mask::selection &selected) const {
+        return ticket && ticket == selected.ticket.id && epoch == selected.origin.source.epoch &&
+          viewport == selected.origin.source.viewport;
+      }
+    };
     struct source_entry {
       ui_qualification::session selection;
       ui_qualification::scope base;
@@ -44,6 +55,11 @@ namespace sunshine_game3d::ui_input {
       // viewport (ui_mask::generated_without_input).
       std::uint64_t input_present{}, input_epoch{};
       std::uint32_t input_viewport{};
+      // The HUD-less snapshot offered last (ui_mask::pair_hudless_offer): a
+      // later offer of the same one pairs with its own Present's color, and
+      // one directly after the render that offered it is a re-offer for the
+      // T1 grace (ui_detection::per_frame_reoffer).
+      offered_snapshot hudless_offered;
       bool suspended{};
     };
     std::mutex source_mutex;
@@ -228,6 +244,7 @@ namespace sunshine_game3d::ui_input {
     ui_qualification::scope base;
     ui_qualification::status before;
     std::uint64_t instance{}, frame_sequence{}, input_present{};
+    offered_snapshot hudless_before;
     {
       std::lock_guard<std::mutex> lock(source_mutex);
       const auto found = sources.find(runtime);
@@ -236,6 +253,7 @@ namespace sunshine_game3d::ui_input {
         base = entry.base; before = entry.selection.snapshot();
         instance = entry.instance; frame_sequence = ++found->second.frame_sequence;
         if (entry.input_epoch == base.epoch && entry.input_viewport == base.viewport) input_present = entry.input_present;
+        hudless_before = entry.hudless_offered;
       }
     }
     const auto now = GetTickCount64();
@@ -287,6 +305,10 @@ namespace sunshine_game3d::ui_input {
     constexpr ui_selection::kind slot_kinds[]{ui_selection::kind::ui_alpha, ui_selection::kind::ui_color,
       ui_selection::kind::backbuffer, ui_selection::kind::hudless};
     const bool hudless_wanted = capturing && (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::hudless));
+    // The HUD-less snapshot this render offers, and whether the render before
+    // it offered the same one, inexactly (a re-offer for the T1 grace).
+    offered_snapshot hudless_offer;
+    bool hudless_reoffered_now = false;
     if (capturing) for (unsigned slot = 0; slot != 4; ++slot) {
       const auto kind = kinds[slot];
       if (!(source_filter(wanted_source) & ui_mask::source_mask(kind))) continue;
@@ -294,18 +316,21 @@ namespace sunshine_game3d::ui_input {
       if (!ui_mask::acquire_kind(reinterpret_cast<std::uint64_t>(runtime), kind, selected, now, queue->get_native())) continue;
       const bool hudless = kind == ui_mask::source_kind::hudless;
       // Without a same-batch Backbuffer, counting proposes the presented color
-      // after the tag, inexact (ui_mask::pair_hudless_present); only V2 then
-      // validates the pair's pixels. Streamline can present on its own queue;
-      // pixels from another queue were already admitted only after the
+      // after the tag for a snapshot's first offer, and the current color for
+      // every later offer of it (ui_mask::pair_hudless_offer), inexact; only
+      // V2 then validates the pair's pixels. Streamline can present on its own
+      // queue; pixels from another queue were already admitted only after the
       // producer completed and its recording retired.
       const auto tagged = selected.origin.source_present_generation, current = selected.current_source_present_generation;
-      const auto pairing = ui_mask::pair_hudless_present(tagged, current);
+      const bool offered_before = hudless && hudless_before.same(selected);
+      const auto pairing = ui_mask::pair_hudless_offer(tagged, current, offered_before);
       using ui_mask::hudless_present;
       const bool batch = hudless && backbuffer.view.handle &&
         ui_mask::same_tag_interval(tagged, current, backbuffer.tagged, backbuffer.current);
       const bool paired = batch || pairing.kind != hudless_present::unpaired;
       if (hudless) hudless_result = batch ? hudless_batch : pairing.kind == hudless_present::next_present ? hudless_real :
         pairing.kind == hudless_present::earlier_present ? hudless_late :
+        pairing.kind == hudless_present::reoffered ? hudless_reoffered :
         tagged && tagged != UINT64_MAX && current > tagged ? hudless_stale : hudless_other;
       // An unauthenticated UIAlpha tag cannot hide independently usable
       // lower-priority candidates in Auto; an authenticated one is validated on
@@ -330,10 +355,12 @@ namespace sunshine_game3d::ui_input {
             nullptr, commands == queue->get_immediate_command_list());
         }, static_cast<api::format>(selected.texture.format));
       if (diagnostic) {
-        candidates.push_back(captured_metadata(selected, now, view.handle != 0, pairing.kind == hudless_present::next_present));
+        candidates.push_back(captured_metadata(selected, now, view.handle != 0,
+          pairing.kind == hudless_present::next_present || pairing.kind == hudless_present::reoffered));
         if (hudless) {
           candidates.back()["paired_with"] = batch ? "tagged_backbuffer_same_batch" : "presented_color";
           candidates.back()["presents_ago"] = pairing.presents_ago;
+          candidates.back()["reoffered"] = offered_before;
         }
       }
       if (!view.handle) continue;
@@ -348,6 +375,8 @@ namespace sunshine_game3d::ui_input {
         // (Hogwarts 09-30 and 10-05).
         result.detection.hudless_exact = batch;
         result.detection.hudless = view;
+        hudless_offer = {selected.ticket.id, selected.origin.source.epoch, frame_sequence, selected.origin.source.viewport};
+        hudless_reoffered_now = offered_before && !batch && hudless_before.present + 1 == frame_sequence;
       } else result.detection.masks[slot] = view;
       signatures.set(slot_kinds[slot], typed_format(selected.texture.format));
       result.status.retained_alpha_ready = true;
@@ -400,6 +429,11 @@ namespace sunshine_game3d::ui_input {
     // (ui_mask::generated_without_input); the count bounds it.
     const bool tag_offered = result.detection.masks[0].handle || result.detection.masks[1].handle ||
       result.detection.masks[2].handle;
+    // T1 (ui_detection::per_frame_reoffer): the render before offered this
+    // same snapshot, inexactly, and no UIAlpha, UI color or Backbuffer tag
+    // comes with it, so a mispaired re-offer keeps the decision it holds
+    // instead of spending the grace.
+    result.detection.hudless_reoffer = hudless_reoffered_now && !tag_offered;
     if (capturing && !available &&
         ui_mask::generated_without_input(frame_sequence, input_present, status.fg_active(), status.fg.generated_frames)) {
       if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},
@@ -481,6 +515,7 @@ namespace sunshine_game3d::ui_input {
         if (matches && available) {
           entry.selection.observe(candidate, status.requested);
           entry.last_observe_tick = input.tick_ms; expire_available(entry, now);
+          if (hudless_offer.ticket) entry.hudless_offered = hudless_offer;
         } else { entry.selection.unavailable(); entry.last_observe_tick = 0; }
         result.status.qualification = entry.selection.snapshot();
         if (!matches || !result.status.qualification.available) available = false;
@@ -515,7 +550,7 @@ namespace sunshine_game3d::ui_input {
       refused.append("} begin_last=").append(ui_mask::name(latest.begin_refusal));
       char message[1152]{};
       std::snprintf(message, sizeof(message),
-        "Sunshine UI capture gate: runtime=%p request_generation=%llu wanted={epoch=%llu revision=%llu viewport=%u device=%llu size=%ux%u kinds=0x%x} hook={state=%s epoch=%llu revision=%llu viewport=%u sequence=%llu tick=%llu kinds=0x%x matches=%u} boundary=%llu attempted=%u recorded=%u hudless_presents={batch=%u real=%u late=%u generated=0 stale=%u other=%u none=%u} %s; gate metadata does not authorize pixels",
+        "Sunshine UI capture gate: runtime=%p request_generation=%llu wanted={epoch=%llu revision=%llu viewport=%u device=%llu size=%ux%u kinds=0x%x} hook={state=%s epoch=%llu revision=%llu viewport=%u sequence=%llu tick=%llu kinds=0x%x matches=%u} boundary=%llu attempted=%u recorded=%u hudless_presents={batch=%u real=%u late=%u generated=0 reoffered=%u stale=%u other=%u none=%u} %s; gate metadata does not authorize pixels",
         static_cast<void *>(runtime), static_cast<unsigned long long>(latest.request_generation),
         static_cast<unsigned long long>(latest.wanted.epoch), static_cast<unsigned long long>(latest.wanted.revision),
         latest.wanted.viewport, static_cast<unsigned long long>(latest.wanted.device_identity),
@@ -524,8 +559,8 @@ namespace sunshine_game3d::ui_input {
         gate.viewport, static_cast<unsigned long long>(gate.sequence), static_cast<unsigned long long>(gate.tick),
         gate.seen_kinds, gate.matching_requests, static_cast<unsigned long long>(latest.latest_boundary.source.sequence),
         unsigned(latest.record_attempted), unsigned(latest.record_completed),
-        outcomes[hudless_batch], outcomes[hudless_real], outcomes[hudless_late], outcomes[hudless_stale],
-        outcomes[hudless_other], outcomes[hudless_none], refused.c_str());
+        outcomes[hudless_batch], outcomes[hudless_real], outcomes[hudless_late], outcomes[hudless_reoffered],
+        outcomes[hudless_stale], outcomes[hudless_other], outcomes[hudless_none], refused.c_str());
       sunshine_log::message(reshade::log::level::info, message);
     }
     if (have_diagnostic && latest.latest_boundary.source.sequence) {

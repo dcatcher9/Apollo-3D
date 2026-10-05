@@ -121,7 +121,7 @@ the presentation path consumes completed snapshots rather than fetching every SD
 | Depth | Prefer usable SL captures, then usable NGX captures. Generic ReShade depth is the fallback when the API provider does not own the pass. Within an SL batch, try HighResDepth (48), Depth (0), then LinearDepth (49). |
 | Camera / encoding / jitter | Use metadata paired with the selected depth capture. Linear-distance depth can work without camera matrices; device depth without a paired projection uses the existing relative-depth calibration when eligible. Never borrow another provider's camera. |
 | UI with FG off or no observed FG | Automatically validate captured SL UIAlpha (R; tag 68 in 2.11.x, 69 from 2.12.0, see [buffer contract](#streamline-buffer-type-contract)), UIColorAndAlpha (23, A), Backbuffer (53, A), current color alpha, then paired HUDLessColor (2) difference. |
-| UI with FG on | Use the same captured-source order and HUD-less fallback; presented alpha is excluded. HUD-less pairs exactly with its same-batch tagged Backbuffer, else inexactly with the presented colour of the Present after its tag, which only V2's pixel test validates. UIAlpha stays manual-only when the loaded interposer is outside the surveyed header range. |
+| UI with FG on | Use the same captured-source order and HUD-less fallback; presented alpha is excluded. HUD-less pairs exactly with its same-batch tagged Backbuffer, else inexactly: a snapshot's first offer with the presented colour of the Present after its tag, every later offer of the same snapshot with its own Present's colour, so the real frame's own Present is compared wherever frame generation places it; only V2's pixel test validates these pairs, and a mispaired re-offer keeps the held decision (T1). UIAlpha stays manual-only when the loaded interposer is outside the surveyed header range. |
 
 Depth order preserves source continuity: a brief pending copy can retain an admitted
 source and its authorized prior pixels. Known FG requirements restrict selection to
@@ -471,9 +471,10 @@ Automatic selection separates two questions. Whether a source carries UI coverag
 property of the game, so it is learned once and remembered for that game (acceptance, A1). How much
 UI the frame shows is read from that source's current pixels on the GPU, whatever the answer: none,
 a HUD, or a whole menu. Validity (V1) does not depend on acceptance: alpha that is non-finite or out
-of range on more than 1% of pixels, or, for the offscreen UI layer, beyond the premultiplied bound
-(below) on more than 1%, is invalid for that frame. Presented and Backbuffer alpha are checked for
-range only, at any bit depth, so Expedition 33's 2-bit alpha stays eligible.
+of range on more than 1% of pixels is invalid for that frame, and so is an offscreen UI layer whose
+pixels beyond the premultiplied bound (below) lie on more than 1% of the frame and outnumber its
+covered pixels within the bound. Presented and Backbuffer alpha are checked for range only, at any
+bit depth, so Expedition 33's 2-bit alpha stays eligible.
 
 Acceptance is one bit per game and source signature: the candidate kind (UIAlpha, UI color tag,
 offscreen UI layer, Backbuffer, current color or HUD-less pair), its typed DXGI format and the
@@ -487,8 +488,10 @@ Hogwarts Legacy did on 10-05: while only exact pairs earned, its pair was never 
 inferred source (the offscreen UI layer, Backbuffer and current alpha) is a guess: it needs
 consecutive completed GPU samples covering some but less than 90% of the frame at least three times
 over at least 2 s, each within a factor of two of the others. A full-frame sample restarts that run,
-and coverage that swings more (scene effects such as particles in a transparent target) never earns
-acceptance. A source that is never selective is never accepted: an empty or nearly full-scene source
+and so does, since selection revision 10, a selective sample more than 2 s after the run's last one
+(empty samples within that bound stay neutral), so a run is bounded: sparse selective samples spread
+over minutes never add up to acceptance. Coverage that swings more (scene effects such as particles
+in a transparent target) never earns acceptance. A source that is never selective is never accepted: an empty or nearly full-scene source
 is ambiguous, because an opaque channel can carry no UI at all (Hogwarts Legacy's UIColorAndAlpha,
 and Stellar Blade's in HDR, are the opaque final image during play). A sample in which an offered
 UIAlpha or UI color tag is invalid is void for earning: no run advances or restarts (Resident Evil
@@ -531,29 +534,35 @@ again by its own evidence. Deleting the key forgets it for later sessions.
 Acceptance is revoked only by evidence of stronger provenance in the same sample (A2), whatever
 the drawing rank. There are two judges: a valid exact change set (an exact HUD-less pair whose
 change set passes V2, partial, empty or full, accepted or not), and each offered, accepted, valid (V1)
-UIAlpha or UI color tag. They judge the inferred sources, the offscreen UI layer, Backbuffer and
-current alpha, when offered and valid, accepted or not. Declared sources are never judged, and
-neither is the one-frame-late layer copy (below).
+UIAlpha or UI color tag. The exact change set judges every alpha but the one-frame-late layer copy
+(below): UIAlpha, the UI color tag, Backbuffer and current alpha, when offered and valid, accepted or
+not. Since selection revision 10 that includes the declared alphas, so that a declared alpha wrongly
+accepted from one selective sample (an opaque final image tagged as UI color, read selective once
+during a fade) no longer decides the frame flat until Forget. The declared alphas' coverage judges
+the inferred Backbuffer and current alpha only; the layer copy is never judged.
+The one-way counts are counted on status samples only (the frames whose decision texels the CPU
+reads, per-frame bit `0x4000`), in the passes' second phase, since no other frame's counts are read.
 
-- **One-way lit-pixel disagreement.** An exact pair contradicts an inferred alpha when at least a
+- **One-way lit-pixel disagreement.** An exact pair contradicts a judged alpha when at least a
   tenth of its strong pixels (finite alpha of at least 1/2) lie where the HUD-less image is lit
   (above eight times the difference threshold, as in the full-frame rule below) and unchanged
   (within half the threshold). The GPU counts both per tile (statistics rows 80-111, below). Real
   UI changes the final image under it, and a dim or tint either changes the pixels it covers or
   covers dark ones, so neither meets the test: Expedition 33's pause tint and The Witcher 3's
-  sign-wheel backdrop stay accepted. The test is one way: alpha missing where the pair changed
+  sign-wheel backdrop stay accepted, and so does a correct UIAlpha or UI color tag. An opaque final
+  image read as UI alpha marks the unchanged scene and meets it. The test is one way: alpha missing where the pair changed
   contradicts nothing. It needs a basis: a source without strong pixels in the sample is not judged
   by it.
 - **Declared-versus-inferred coverage disagreement.** An accepted declared alpha contradicts an
   inferred one whose covered pixels differ from those of each accepted, valid declared alpha in the
   sample by at least 10% of the frame. Resident Evil Requiem's UI color covers 0.2% during play
   while its presented alpha covers 35-100%, and in menus the UI color covers everything while the
-  presented alpha covers 0.05%. The layer is judged like presented alpha and no longer judges.
+  presented alpha covers 0.05%. The layer copy is neither judged (below) nor a judge.
 
 The one-frame-late layer copy (stored flag `0x4`, every layer until S4 replaces the copy) is not
-same-sample evidence (E2): the GPU counts neither strong nor contradicted pixels for it, and the
-sample records it (`late_layer`, carried from the flags the detection pushed), so neither judge
-reads it. Comparing it with this frame's UIAlpha would otherwise contradict it on every UI
+same-sample evidence (E2): it is no judged kind (`ui_selection::judged_kinds`), so the GPU counts
+no strong or contradicted pixel for it and neither judge reads it (before selection revision 10 the
+GPU kept a layer column that was always zero and the sample recorded `late_layer`). Comparing it with this frame's UIAlpha would otherwise contradict it on every UI
 transition, and a moving marker would contradict it one way. An accepted source is revoked by three
 contradicting judged samples within 2 s (`alpha_trust_samples` and `alpha_trust_span_ms` in
 `game3d_alpha_auto.h`), counted `trust.revoked_exact` when the one-way test contradicted it in the
@@ -631,10 +640,17 @@ notice board, where the binary pin tore 0 to 95. Moves of 8 to 16 texels tore ab
 times the binary pin. These are rigid shifts of the whole layer, so real exposure is limited to
 UI that animates, such as scrolling lists, slide-ins and compasses; how often the tear is visible
 in play is unmeasured. Tagged sources belong to the presented frame and never had a margin. Detection,
-coverage and acceptance read the same raw alpha. V1 admits it only while premultiplied: any pixel whose color exceeds twice its alpha by
-more than 4/255 (for a float layer, 125 times its alpha, up to 10000 nits) counts as invalid, and the
-usual invalid-pixel limits apply to that frame. UI blended over transparent black is premultiplied by
-construction; the factor two admits UI tinted brighter than white. Stellar Blade's real UI layer
+coverage and acceptance read the same raw alpha. V1 admits it only while premultiplied: a pixel whose
+color exceeds twice its alpha by more than 4/255 (for a float layer, 125 times its alpha, up to 10000
+nits) lies beyond the bound. Such pixels are not UI: they are neither covered nor opaque, and they
+invalidate the whole layer for the frame only when they lie on more than 1% of the frame and
+outnumber its covered pixels (more than half of its lit pixels, covered or beyond the bound), as a
+scene image drawn into the target does. Before selection revision 10 more than 1% of the frame beyond
+the bound invalidated the layer outright, so a new engine's additive glow strip beside the HUD would
+have disabled layer protection entirely; the GPU now counts them per tile (statistics rows 208-223)
+and the reduce reports them in the layer's invalid pixels (decision texel 7 `.y`) only when they
+invalidate it. UI blended over transparent black is premultiplied by construction; the factor two
+admits UI tinted brighter than white. Stellar Blade's real UI layer
 failed the former limit (alpha plus 4/255) in most samples: its notification dots sat 5-9/255 above
 their nearly opaque alpha, and GPU samples during pulsing markers counted 1,306 and 5,377 such
 pixels, so the layer could not earn acceptance during play. A scene buffer is not: Dead
@@ -644,7 +660,8 @@ rejection has not been observed live.
 
 A layer without alpha is no layer. Premultiplied UI over transparent black cannot have color without
 alpha, so a layer copy with no alpha anywhere but color beyond its alpha on more than 1% of pixels
-fails V1's premultiplied bound like any other invalid layer: it neither decides nor blocks, and
+(then outnumbering its covered pixels, of which it has none) fails V1's premultiplied bound like any
+other invalid layer: it neither decides nor blocks, and
 makes no full claim of its own; since fix 1 a layer without coverage whose signature gameplay proved
 equal to the presented frame is the pre-UI scene image of the hidden-scene guard (claim (d) under
 **Hidden-scene evidence**). Since S1 this needs no rule of
@@ -664,7 +681,8 @@ covering 64-80%, which must not decide: the declared-alpha block keeps it out. T
 still taken in SDR, at the same cost as in HDR, and the rule needs no state: the first copy with
 valid alpha is a layer again. A real layer whose only UI is additive color without alpha on more
 than 1% of pixels would be invalid for that frame; this breaks the premultiplied contract and has
-not been observed. A layer earns acceptance like any inferred source: selective coverage during
+not been observed. Additive color beside covered UI that outnumbers it keeps the layer valid, with
+that color uncovered. A layer earns acceptance like any inferred source: selective coverage during
 play, after which a sign wheel that dims the whole scene or a full-screen menu covers everything and
 stays flat. That holds for any uniform dim at or above 1/8; a fainter dim flattens the scene only in
 proportion. Games that draw UI straight onto the back buffer have no layer and are unchanged.
@@ -687,14 +705,27 @@ needed it: with DLSS-G on, differencing HUD-less with the presented color change
 pixel, while its same-batch HUD-less and Backbuffer differed only in the UI (5.7-12.8% of pixels,
 over 200 of 256 tiles unchanged). A manual HUD-less choice captures the Backbuffer only for this
 pairing. Without a same-batch Backbuffer, counting proposes the presented color of the Present
-after the tag (`ui_mask::pair_hudless_present`): a current source presentation generation one
-beyond the generation captured at the tag. The integrated depth Present callback advances that
-generation before the Game 3D render. A merely recent snapshot from an earlier presentation does
-not pass. Such a pair is never exact, with frame generation on or off (E2): a game may tag its next
-frame before the Present counted for it, and frame generation presents interpolated color between
-real frames. Only V2's test of the pixels validates it, a full change set from it is never
-full-screen UI, and it never judges (A2). The HUD-less image is offered on every Present it pairs,
-so such a Present is real to the temporal hold (**Temporal hold**, below). The pairing reads no
+after the tag for a snapshot's first offer (`ui_mask::pair_hudless_present`): a current source
+presentation generation one beyond the generation captured at the tag. The integrated depth Present
+callback advances that generation before the Game 3D render. A merely recent snapshot first seen
+later does not pass unless it is a late capture (below). The capture owner offers the newest ready
+snapshot of its kind for as long as it is recent (250 ms), so one snapshot is offered on every
+Present until the next tag replaces it. The provider remembers, per runtime, the snapshot (ticket,
+epoch and viewport) it offered last, and since 10-05 every later offer of the same snapshot pairs
+with its own Present's color (`ui_mask::pair_hudless_offer`, `reoffered`, presents ago 0): under
+DLSS-G the Present after the tag is a generated one (DLSS-G presents its generated frames first) and
+the real frame comes last in the snapshot's window, so only the current color can be the real
+frame's; before, every later offer compared the color retained from the Present after the tag, the
+interpolated one, so the real frame was never compared, and at 4x the last offers were too old to
+pair at all. Such pairs are never exact, with frame generation on or off (E2): a game may tag its
+next frame before the Present counted for it, and frame generation presents interpolated color
+between real frames. Only V2's test of the pixels validates them: the real frame's own Present compares equal but for the
+UI, and every other Present of the window is mispaired, which the temporal hold covers
+(**Temporal hold**, below, the re-offer bit). A full change set from them is never full-screen UI,
+and they never judge (A2). The HUD-less image is offered on every Present it pairs, so such a
+Present is real to the temporal hold. The capture gate line counts the pairings per interval
+(`hudless_presents={batch real late generated=0 reoffered stale other none}`: same batch, first
+offer on time, first offer late, always 0, later offers, too old, unpaired, none). The pairing reads no
 frame generation multiplier. Until 10-05 it expected the real frame `generated_frames + 1` Presents
 after the tag, held the Presents before it as generated and counted pairs exact with FG off.
 Hogwarts Legacy on 10-05 (Epic launch, DLSS-G 4x multi-frame generation) tagged only HUDLessColor,
@@ -709,7 +740,8 @@ Present's retained color, and the resulting mask protects the current frame. The
 retaining the last two presented colors (two source-size copies, one extra copy per Present) only
 after the first such late capture, and stops copying 120 Presents after the last one; games whose
 captures pair on time never allocate them. A late
-capture older than the retained history does not pair.
+capture older than the retained history does not pair. Only a snapshot's first offer can be late:
+its later offers pair with their own Presents.
 Hogwarts Legacy on 09-30 (SL 2.6.10, DLSS-G on) showed the pattern: its real frame matched
 HUDLessColor on 93.5% of pixels two Presents after the tag, so with frame generation the counted
 Present shows another frame as often as not, and its UIColorAndAlpha was the opaque final image.
@@ -763,6 +795,18 @@ the renderer and the sequence replay follow:
   the store spent: decision texel 9 bit 16 (`reused`), and the mask pass writes nothing, so the
   previous real frame's resolved mask stays. Any other frame without its own decision applies none
   and marks the store spent; a frame with its own decision applies and stores it.
+- HUD-less re-offers (selection revision 10). The CPU pushes `0x8000` when the offered inexact
+  HUD-less snapshot is the one the previous render offered and no UIAlpha, UI color or Backbuffer
+  tag comes with it. Such a re-offer without a decision of its own (a generated Present's
+  interpolated pair, or with FG off a stale snapshot against a newer frame, both V2-invalid) leaves
+  the store as it is and applies the stored decision while one is held (state own, or spent with a
+  stored source: the decision an earlier frame of the snapshot reused); `0x200000` still blocks all
+  reuse. So every Present of a snapshot's window shows the last real decision; before, at 3x or 4x
+  the first generated Present spent the grace and the rest of the window had no mask, a HUD flicker in a
+  game that tags only HUDLessColor (Hogwarts Legacy) and in one that tags UIAlpha on real Presents
+  only beside a HUD-less image offered on all of them (The Witcher 3). The held decision lasts only
+  while the same snapshot is re-offered: the next snapshot's first offer without a decision of its
+  own reuses it at most once more, as any frame.
 - A real Present that offers no candidate but carries `0x100000` runs the reduce and mask passes
   without the tiles pass and never submits a sample, so the grace can apply: a real frame whose tag
   is missing, or, with a multiplier reported too low, a generated Present beyond the count. Any
@@ -779,9 +823,9 @@ rejected-tag frames keep the previous mask. With 3x or 4x FG and no HUD-less pai
 Expedition 33, every generated Present within the reported count holds, where S1 held at most
 three; a count reported too low leaves the later generated Presents to the grace (the first reuses
 once, the rest have no mask), a known limit of Present counting since S3's real-frame identity was
-removed (selection revision 9). Whether live generated
-Presents re-offer the last completed snapshot is unmeasured; one that does detects from it as a
-real Present, as before.
+removed (selection revision 9). A generated Present that re-offers the last completed snapshot
+detects from it as a real Present: its own pair is compared with its own color (above), and when
+that pair is mispaired the re-offer bit keeps the held decision.
 
 The GPU compares native RGB in matching color space. A changed pixel exceeds 4/1023 for
 R10 color or 2/255 for other SDR/PQ color; floating-point scRGB uses 0.005 times the larger
@@ -921,12 +965,15 @@ guard's held samples read the pre-UI image visible, and for the layer only while
 frame's (`0x40000` not pushed) and some claim acts, the frame is full-frame UI over a hidden scene:
 source 8, covered pixels all, and the mask pass writes 1.0, as for source 6. It applies whatever S1
 selected, an accepted partial winner included: an accepted HUD tag deciding 0.25% while a full menu
-covers the scene gives way to the flat frame for as long as the hold lasts. Only a winner that is
-already flat on every pixel keeps its decision: source 6, or an alpha winner (1-4, 10) with alpha of
-at least 254/255 on every pixel. An opaque-full winner with transparent pixels would leave them to P1,
-which warps them with the hidden scene's depth, so H1 takes it over: Expedition 33's accepted Load
-Game Backbuffer (99.9998% opaque) decides 3 until the guard holds its hidden verdict and 8 from then
-on, flat throughout (replay case `E33 load game FG on, trusted backbuffer, hold`). A render without
+covers the scene gives way to the flat frame for as long as the hold lasts. An opaque-full winner
+with transparent pixels would leave them to P1, which warps them with the hidden scene's depth, so
+H1 takes it over: Expedition 33's accepted Load Game Backbuffer (99.9998% opaque) decides 3 until
+the guard holds its hidden verdict and 8 from then on, flat throughout (replay case `E33 load game
+FG on, trusted backbuffer, hold`). Since selection revision 10 a winner already flat on every pixel
+(source 6, or an alpha winner opaque on every pixel) is relabelled 8 too: P1 pins it at weight 1
+either way, so only its label and counters change (`decided.8` and `full_d` instead of `decided.6`
+or the alpha source and `full_alpha`), and H1 needs no winner test (replay case `E33 settings FG on,
+exact full-frame pair under a hold, relabelled 8 by H1`, which decided 6 before). A render without
 depth has no parallax and is flat anyway, so H1 does not test for depth; reused or generated depth
 (`0x40000`) disables it. The A2 and T1 counts, the hold store and the counters follow
 the final decision, so an overridden winner counts as decided 8 and never as contradicted. The
@@ -1131,15 +1178,16 @@ The native path uses GPU statistics, reduction/selection and mask passes. Each o
 statistics tiles is one 256-thread group, the reduction sums the 256 tiles in parallel, and the
 mask pass loads only the selected candidate; the integer counts and the mask are unchanged. At 4K
 this took UI detection from about 0.148 to 0.12 ms averaged over the provider fixture, which
-is mostly bound by reading the candidate textures. A bounded asynchronous 192-byte summary (208
-bytes in selection revisions 5 to 8) may be
+is mostly bound by reading the candidate textures. A bounded asynchronous 272-byte summary (192
+bytes in selection revision 9, 208 in revisions 5 to 8) may be
 read at 100 ms intervals for diagnostics; it never authorizes protection and there is no full-frame
 CPU readback. Besides the decision, it carries the candidate bits the shader was offered, the
 accepted candidates pushed with the detection, the offered candidates that passed V1 or V2, the
 covered and invalid pixels of UIAlpha, the UI color tag, Backbuffer and current alpha, the offscreen
 UI layer's covered, invalid and nearly opaque pixels, the HUD-less changed, unchanged, non-finite
 and lit pixel counts with matching tiles, the nearly opaque pixels of all five alpha kinds,
-the one-way judgment counts of the layer, Backbuffer and current alpha (A2), the frame's own-decision
+the one-way judgment counts of UIAlpha, the UI color tag, Backbuffer and current alpha (A2, on
+status samples), the frame's own-decision
 reason, the candidate it refused and whether the T1 grace reused a decision (F1), the informative
 full claims, the S1 winner and whether H1 applied, the offscreen UI layer's pixels against the
 presented frame (matching and lit; since fix 1), and, on samples that
@@ -1163,11 +1211,12 @@ in the summary are those offered, invalid ones included. The `Sunshine UI protec
 (`sampled_candidates`, `sampled_alpha_covered` and `sampled_alpha_invalid` for UIAlpha, the UI color
 tag, Backbuffer and current, `accepted` as candidate bits, `sampled_layer` with the offscreen UI
 layer's `covered`, `invalid` and `opaque` pixels, `sampled_one_way` with the `strong` and
-`contradicted` pixels of the layer, Backbuffer and current alpha, `sampled_reason` (the own
+`contradicted` pixels of the layer (0 since selection revision 10, which judges no layer copy),
+Backbuffer and current alpha, `sampled_reason` (the own
 decision's `ui_no_mask` reason, or `decided`), `sampled_refused` (the refused candidate's kind,
 `ui_alpha`, `ui_color`, `ui_layer`, `backbuffer`, `current` or `hudless`, or `none`),
-`sampled_reused`, `sampled_late_layer` (the offered layer was the one-frame-late copy, which no
-A2 judge reads), `sampled_hudless`, `sampled_alpha_opaque` for
+`sampled_reused`, `sampled_late_layer` (a layer was offered: every layer is the one-frame-late
+copy, which no A2 judge reads), `sampled_hudless`, `sampled_alpha_opaque` for
 UIAlpha and the UI color tag, `sampled_inferred_opaque` for Backbuffer and current alpha,
 `sampled_claims` (the informative full claims before refutation: candidate bits, `0x80` the pre-UI
 scene image), `sampled_h1` with `applied` (H1 overrode the S1 winner with 8) and `winner` (the S1
@@ -1180,11 +1229,14 @@ proven the pre-UI scene image, the ledger's `pre_ui` key, so that its pre-UI ima
 `shadow` and `shadow_hidden_ms` (the removed first-run shadow's fields, 0 since selection revision
 9), then `sampled_pre_ui_pixels` with decision texel 11's `match` and `image_lit` and the reserved
 `presented_lit` and `presented_lit_differs` (0 since selection revision 9; the layer against the presented frame,
-**The layer's pre-UI proof**), and the dump's `source_alpha_auto.sampled_evidence` (`alpha_opaque`, `inferred_opaque`, `claims`, `h1`
+**The layer's pre-UI proof**), then (since selection revision 10) `sampled_declared_one_way` with
+the `strong` and `contradicted` pixels of UIAlpha and the UI color tag, and the dump's `source_alpha_auto.sampled_evidence` (`alpha_opaque`, `inferred_opaque`, `claims`, `h1`
 with `applied` and `winner`, `layer`, `accepted`, `valid_bits`,
 `scene` with the presented image's `decided` comparisons, `pre_ui_scene` with its `image` and
 `verdict`, `pre_ui_pixels` with the same four counts, the current run's
-`one_way` with `strong` and `contradicted` by kind and `late_layer`, `reason`, `refused` and
+`one_way` with `strong` and `contradicted` by judged kind (`ui_alpha`, `ui_color`, `backbuffer`,
+`current` since selection revision 10; before it `ui_layer`, `backbuffer`, `current` and
+`late_layer`), `reason`, `refused` and
 `reused`, with the render's `scene_guard` beside it; dumps before selection revision 9 also have
 `shadow_hidden_ms`, `scene_shadow` and the last two `pre_ui_pixels`) report it, so a
 rejection names the failing check. `sampled_source` and `sampled_covered` are the applied decision,
@@ -1225,14 +1277,24 @@ hold store, the one-way counts, the refused candidate and the frame reason; 3 si
 informative full claims and the H1 override, texel 10 and the pre-UI scene image in texel 6; 4 since
 fix 1: claim (d) for the layer by its proven signature, and texel 11; 5 since fix 2: the H2 override
 with `b2` word 5, and texel 12; 7 removed fix 3 and fix 4 and decided as 5; 8 since 10-05: the empty
-change set, V2 above; 9: H2 and S3 removed, so texel 12 is reserved and 9 otherwise decides as 8).
+change set, V2 above; 9: H2 and S3 removed, so texel 12 is reserved and 9 otherwise decides as 8;
+10 since WP1a: T1 keeps the held decision across HUD-less re-offers (per-frame bit `0x8000`), the
+one-way test judges the declared alphas too (texel 16) and no longer the layer copy (words 32 and 36
+reserved), counted on status samples only (per-frame bit `0x4000`), the layer's pixels beyond the
+premultiplied bound invalidate it only when they lie on more than 1% of the frame and outnumber its
+covered pixels (statistics rows 208-223), H1 overrides every S1 winner, and the invariant counter
+words 14 and 18 are reserved).
 `reshade_game3d_ui_selection_contract` runs the reduce on crafted and random counts, previous hold
 states and per-frame bits, and compares every decision word, the written hold store and the counter
-adds with `decide()` and `counter_adds()`. The renderer runs automatic detection only with that
-layout, selection revision 9 (revision 5's decision with the empty change set, without H2 and S3)
-and at least 12 decision texels; otherwise its frames count as
-`inactive.unprepared`. `ui_detection_replay` still replays a shader without the marker (layout 1,
-the layer in the UI color slot) or of an older revision, without the mirror check.
+adds with `decide()` and `counter_adds()`; it asserts S1's invariants (no unaccepted inferred alpha
+decides, none beside an accepted declared alpha) on every case, whose counter words are reserved
+since revision 10. The renderer runs automatic detection only with that layout, selection revision
+10, its 17 decision texels and both scene-evidence images; otherwise its frames count as
+`inactive.unprepared`. The live decoders (`ui_selection::counts_from_words`,
+`ui_temporal::decode_detection_sample`, which the hidden-scene guard and the acceptance ledger read
+once decoded) read only that revision's texture. `ui_detection_replay` alone still replays a shader
+without the marker (layout 1, the layer in the UI color slot) or of an older revision, sizing its
+statistics rows and padding its decision words itself, without the mirror check.
 `Sunshine_UIDifferenceThreshold` (`b2` word 1) is the HUD-less pair's difference threshold. Since
 fix 1 `b2` has five words (a 32-byte constant buffer): `Sunshine_UIPreUIThreshold` (word 4, float) is the
 pair threshold of the offscreen UI layer and the presented colour (`ui_selection::comparable` of the
@@ -1252,8 +1314,10 @@ through an `*_SRGB` view is not comparable with a UNORM presented frame, so it i
 | --- | --- | --- |
 | `0x1` | stored | The offscreen UI layer must pass the premultiplied bound (V1). |
 | `0x2` | stored | With a float layer's HDR headroom. |
-| `0x4` | stored | The layer is the one-frame-late copy. Its mask is the raw alpha, and it is never judged (A2, E2): the GPU counts no strong pixel of it. |
-| `0x8` | stored | Reserved and never reused; the shader defines nothing for it. |
+| `0x4` | stored | The layer is the one-frame-late copy. Its mask is the raw alpha, and it is never judged (A2, E2): it is no judged kind, and since selection revision 10 no pass reads the bit. |
+| `0x8` | stored | Reserved and never reused; the shader defines nothing for it. Since selection revision 10 stored bits end at `0x2000` (`0x10`-`0x2000` never used) and per-frame bits start at `0x4000`. |
+| `0x4000` | per-frame | Since selection revision 10: a status sample, a detection whose decision texels the CPU reads (at most one every 100 ms). Only it counts the one-way judgment (A2) and the pre-UI pixels (texel 11) in the passes' second phase; every other frame's one-way and pre-UI counts are zero. Every `ui_detection_replay` case pushes it. |
+| `0x8000` | per-frame | Since selection revision 10 (T1): the offered inexact HUD-less snapshot is the one the previous render offered, and no UIAlpha, UI color or Backbuffer tag comes with it. Without a decision of its own the frame leaves the hold store as it is and applies the stored decision while one is held. |
 | `0x10000` | per-frame | Reserved and never reused; before S2b the layer route's hidden-scene hold (source 8). The shader defines nothing for it. |
 | `0x20000` | per-frame | Reserved and never reused; no render pushes it and the shader defines nothing for it. |
 | `0x40000` | per-frame | The consumed depth is not this frame's (reused, or behind a generated Present). |
@@ -1270,15 +1334,16 @@ An 8-bit layer stores 5 and a layer in the `R16G16B16A16` or `R32G32B32A32` type
 included) 7. Stored bits describe the offscreen UI layer slot: the renderer keeps them between
 frames. They key no decision or status, and since S2b nothing on the CPU reads them.
 Per-frame bits ride only in one render's pushed word and are never stored.
-The detection reduce reads the guard's bits, `0x40000` and the two T1 bits, and the evidence sum
-reads `0x40000`; a dump's `replay.ui_detection.flags` records the pushed word. The informative
+The tiles pass reads `0x4000`, the detection reduce the guard's bits, `0x4000`, `0x40000` and the
+three T1 bits, and the evidence sum reads `0x40000`; a dump's `replay.ui_detection.flags` records the pushed word. The informative
 claims add claim bit `0x80` (`SUNSHINE_UI_CLAIM_PRE_UI`, the pre-UI scene image), outside the
 candidate bits, and the h1 word marks an applied override with `0x100` (`SUNSHINE_UI_H1_APPLIED`).
 
 The decision texture has `SUNSHINE_UI_DECISION_TEXELS` `R32G32B32A32_UINT` texels (5 without the
 marker, 7 with scene evidence, 8 with candidate layout 2, 10 with selection revision 2, 11 with
-selection revision 3, 12 with selection revision 4, 13 with selection revision 5), and the bounded
-summary above is that whole texture, 208 bytes:
+selection revision 3, 12 with selection revision 4, 13 with selection revisions 5 to 8, 12 with
+selection revision 9 and 17 with selection revision 10), and the bounded summary above is that whole
+texture, 272 bytes:
 
 | Texel | x | y | z | w |
 | --- | --- | --- | --- | --- |
@@ -1289,16 +1354,20 @@ summary above is that whole texture, 208 bytes:
 | 4 | Lit HUD-less pixels | Accepted candidate bits | Pixels of UIAlpha at least 254/255 | Of the UI color tag |
 | 5 | Presented `n` | `asuint(D)` | `valid \| ran << 1 \| verdict << 2` | Presented decided comparisons |
 | 6 | Pre-UI scene image `n` | `asuint(D)` | `valid \| ran << 1` | The image: 0 none, 1 HUD-less, 2 the offscreen UI layer |
-| 7 | Covered pixels of the offscreen UI layer | Its invalid pixels (out of range or beyond the premultiplied bound) | Its pixels at least 254/255 | Offered candidate bits that passed V1 or V2 |
-| 8 | Strong pixels (finite alpha of at least 1/2) of the layer | Of Backbuffer alpha | Of current alpha | The refused candidate's bit (0 when the frame decided) |
-| 9 | Strong pixels of the layer where an offered exact pair's HUD-less image is lit and unchanged (0 for the late copy) | The same of Backbuffer alpha | Of current alpha | Bits 0-7: the own decision's `ui_no_mask` index, 0xFF when it decided a source; bit 16: the T1 grace reused the previous decision |
+| 7 | Covered pixels of the offscreen UI layer (within the premultiplied bound since selection revision 10) | Its invalid pixels: out of range, plus those beyond the premultiplied bound when these lie on more than 1% of the frame and outnumber its covered ones (before selection revision 10 every pixel beyond the bound) | Its pixels at least 254/255 (within the bound) | Offered candidate bits that passed V1 or V2 |
+| 8 | Reserved zero (the layer's strong pixels before selection revision 10, always 0 for the late copy) | Strong pixels (finite alpha of at least 1/2) of Backbuffer alpha | Of current alpha | The refused candidate's bit (0 when the frame decided) |
+| 9 | Reserved zero (the layer's contradicted pixels before selection revision 10) | Strong pixels of Backbuffer alpha where an offered exact pair's HUD-less image is lit and unchanged | The same of current alpha | Bits 0-7: the own decision's `ui_no_mask` index, 0xFF when it decided a source; bit 16: the T1 grace reused the previous decision |
 | 10 | Pixels of Backbuffer alpha at least 254/255 | Of current alpha | The informative full claims before refutation (candidate bits, `0x80` the pre-UI scene image) | The h1 word: bits 0-7 the S1 winner's source, `0x100` H1 applied |
 | 11 | Pixels where the offscreen UI layer's RGB equals the presented colour (words 44-47; since fix 1) | Lit layer pixels | Reserved zero (lit presented pixels in selection revisions 4 to 8) | Reserved zero (lit presented pixels that differ from the layer in selection revisions 4 to 8) |
+| 16 | Strong pixels of UIAlpha (words 64-67; since selection revision 10) | Of the UI color tag | Strong pixels of UIAlpha where an offered exact pair's HUD-less image is lit and unchanged | The same of the UI color tag |
 
 Texel 12 (words 48-51) is reserved: selection revisions 5 to 8 wrote H2's still and compared cells
 there and, from a shader with `SUNSHINE_UI_IDENTITY`, S3's identity verdicts and deltas, both
 removed. Texels 13-15 (words 52-63) are reserved too: selection revision 6 (fix 3's change-set
-shadow and fix 4's darkening words) used them, and both were removed by user decision.
+shadow and fix 4's darkening words) used them, and both were removed by user decision. Selection
+revision 10 writes texels 12-15 as zeros and the declared alphas' one-way counts in texel 16. The
+one-way counts of texels 8, 9 and 16 and texel 11 are zero on a frame that is not a status sample
+(per-frame bit `0x4000`).
 
 Texel 0 is the applied decision: the frame's own, or under the T1 grace the stored one of the
 previous real frame. The other texels describe the frame's own counts. The refused candidate is the
@@ -1326,19 +1395,25 @@ HUD-less difference counts, 48-63 its lit HUD-less pixels with the nearly opaque
 the UI color tag and (`.w`, since selection revision 3) Backbuffer alpha, 64-79 the offscreen UI
 layer's covered, invalid and nearly opaque pixels with (`.w`) the nearly opaque pixels of current
 alpha,
-80-95 (`SUNSHINE_UI_JUDGMENT_ROW` onward) the strong pixels of the layer, Backbuffer and current
-alpha, and 96-111 those of them that an offered exact pair contradicts (the texel 9 counts per
-tile); rows 112-120 (`SUNSHINE_UI_SCENE_PARTIAL_ROW` onward) hold each 16x16-cell comparison
+80-95 (`SUNSHINE_UI_JUDGMENT_ROW` onward) the strong pixels of UIAlpha, the UI color tag,
+Backbuffer and current alpha (since selection revision 10; the layer, Backbuffer and current alpha
+before), and 96-111 those of them that an offered exact pair contradicts (the texel 8, 9 and 16
+counts per tile, on status samples only); rows 112-120 (`SUNSHINE_UI_SCENE_PARTIAL_ROW` onward) hold each 16x16-cell comparison
 group's {n, wins - losses of each image, the presented image's decided comparisons}. Since selection
 revision 4 the texture has 144 rows: rows 128-143 (`SUNSHINE_UI_PRE_UI_ROW` onward) hold each
 tile's texel 11 counts {match, lit layer, 0, 0}, and rows
 121-127 are unused. Selection revisions 5 to 8 had 160 rows, rows 144-152 holding each comparison
-group's H2 counts {still cells, compared cells, 0, 0}; rows 144-159 are reserved. The tiles pass and the reduce sum them in a second phase that reuses the
-coverage group-shared array, which keeps both within the 32 KiB `cs_5_0` limit. The 256 x 144
+group's H2 counts {still cells, compared cells, 0, 0}; rows 144-207 are reserved. Since selection
+revision 10 the texture has 224 rows: rows 208-223 (`SUNSHINE_UI_LAYER_BOUND_ROW` onward) hold each
+tile's layer pixels beyond the premultiplied bound {beyond, 0, 0, 0}, which the reduce weighs
+against the layer's covered pixels (V1). On a status sample the tiles pass and the reduce sum the
+one-way and pre-UI counts in a second phase that reuses the coverage, invalid and difference
+group-shared arrays, which keeps both within the 32 KiB `cs_5_0` limit; every other frame skips it
+and writes those rows as zero. The 256 x 144
 cell sums have their own texture, because a pass cannot read the texture it writes.
 `SUNSHINE_UI_SCENE_*` defines mirror the statistic's constants. The renderer sizes the textures,
-the readback and its parse from the markers, and makes automatic detection unavailable for a shader
-whose markers are out of range. The T1 hold store (`SunshineUIHoldStore`, three `R32_UINT` texels at
+the readback and its parse for the current revision, and makes automatic detection unavailable for
+a shader whose markers differ from it. The T1 hold store (`SunshineUIHoldStore`, three `R32_UINT` texels at
 `u5`, `SUNSHINE_UI_HOLD_*`) is bound for the reduce only, never beside the resolved-plane store
 that shares the register; the renderer zero-clears it once (state none). The offline replay binds
 nothing there, so its reduce reads state none and never reuses a decision.
@@ -1369,8 +1444,8 @@ S3's five identity verdict words after word 30 (31-35, a 36-word texture from a 
 | `auto_frames` | Renders that requested GPU detection: Auto, or an explicit HUD-less difference input outside manual Off. |
 | `detection_frames` | Frames on which the detection passes ran: every real Present that detected, including a frame without candidates that ran for the T1 grace. |
 | `held.generated` | Generated Presents that applied the decision of the real frame they show (T1); they run no detection. |
-| `held.none` | Generated Presents without such a decision in their scope: no mask, and the chain ends. Counter lines before the 10-05 pairing change also count generated Presents beyond the tag bound. |
-| `reused` | Detection frames without a decision of their own that applied the previous real frame's decision and mask (the T1 grace, decision texel 9 bit 16). |
+| `held.none` | Generated Presents (offering nothing within the reported generated count of the last Present that offered a UI tag) without such a decision in their identity scope: no mask, and the chain ends. A Present that offers a HUD-less image, a re-offered snapshot included, is real and never counts here: it detects, and when mispaired it reuses the held decision (`reused`). Counter lines before the 10-05 pairing change also count Presents the old HUD-less pairing held as generated. |
+| `reused` | Detection frames without a decision of their own that applied the held decision and mask (decision texel 9 bit 16): the T1 grace once after a real decision, and since selection revision 10 every HUD-less re-offer (`0x8000`) while a decision is held. |
 | `inactive.no_candidates`, `inactive.size`, `inactive.unprepared` | Requested renders without detection: no usable candidate, a frame larger than 3840, or detection resources that could not be prepared. |
 | `decided.N` | Detection frames by applied source 0-10, a reused decision included. 7, 9 and 11 (H2's still screen, logged by counter lines of fix 2 to selection revision 8) are retired and not logged; their GPU words stay zero. |
 | `none.R` | Frames whose own decision was source 0 and that applied no mask, each by the first reason that applies: `gate_no_hold` (an informative full claim acted but H1 did not apply: no held hidden verdict, or depth that is not this frame's; the name is kept for log compatibility), `presented_blocked` (an offered, accepted UIAlpha or UI color tag, invalid itself, kept an accepted, valid inferred alpha out), `trusted_invalid` (an offered, accepted alpha had more than 1% invalid pixels), `layer_aside` (the offered layer was V1-invalid, such as a layer without alpha), `unaccepted` (an offered, unaccepted candidate was valid and selective: its acceptance is still being earned), `difference_failed` (a HUD-less image was offered, including an inexact one that changed nearly everywhere without the pre-UI hold), `ambiguous` (an unaccepted valid alpha empty or nearly full), `no_candidate` (no alpha offered), then `other`. |
@@ -1378,10 +1453,10 @@ S3's five identity verdict words after word 30 (31-35, a 36-word texture from a 
 | `full.depth_not_current` | Detection frames pushed with `0x40000`, whatever they decided. |
 | `full_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Committed samples that decided H1 (source 8), by the hidden-scene verdict measured on that same sample. `invalid` includes evidence that was not measured. These count samples, not frames. Counter lines before S2b count sources 6, 8 and 9 here. |
 | `scene.entered`, `.released`, `.refuted` | The hidden-scene guard's observations of committed samples (since S2b): its hidden verdict entered; a held verdict released by a visible sample, every visible sample that decided 8 included; source signatures newly refuted. |
-| `untrusted_inferred` | Frames decided from an inferred source (Backbuffer 3, current alpha 4 or the offscreen UI layer 10) that was not accepted. Zero by construction since S1, where only accepted candidates decide; kept as an invariant. |
+| `untrusted_inferred` | Frames decided from an inferred source (Backbuffer 3, current alpha 4 or the offscreen UI layer 10) that was not accepted. Zero by construction since S1, where only accepted candidates decide. Since selection revision 10 its GPU word (14) is reserved and no shader writes it: the selection contract test asserts the invariant on every case, and the field is logged as 0. |
 | `inexact_difference` | Source 5 decided from an inexact HUD-less pair (before S2b also 9). |
-| `contradicted` | An accepted inferred alpha (Backbuffer 3, current alpha 4 or the layer 10) decided by the frame's own decision while the same frame's valid exact pair contradicted it one way (A2). It keeps deciding until the ledger revokes it. Counter lines before S2a have `trusted_full` instead: an accepted alpha source (1-4, 10) covering at least 99% of pixels while an exact pair without invalid pixels left at least half of the frame unchanged. |
-| `presented_over_dedicated` | Inferred alpha (3, 4, 10) decided while an accepted UIAlpha or UI color tag was offered. The declared-alpha block keeps this 0, so it checks later rule changes. |
+| `contradicted` | An accepted alpha (since selection revision 10 UIAlpha 1, the UI color tag 2, Backbuffer 3 or current alpha 4; before it Backbuffer, current alpha or the layer 10) decided by the frame's own decision, not overridden by H1, while the same frame's valid exact pair contradicted it one way (A2). It keeps deciding until the ledger revokes it. Since selection revision 10 the one-way counts exist on status samples only, so it counts samples rather than frames. Counter lines before S2a have `trusted_full` instead: an accepted alpha source (1-4, 10) covering at least 99% of pixels while an exact pair without invalid pixels left at least half of the frame unchanged. |
+| `presented_over_dedicated` | Inferred alpha (3, 4, 10) decided while an accepted UIAlpha or UI color tag was offered. The declared-alpha block keeps this 0. Since selection revision 10 its GPU word (18) is reserved and no shader writes it: the selection contract test asserts the invariant on every case, and the field is logged as 0. |
 | `full_alpha` | An applied alpha source (1-4, 10) covering at least 99% of pixels: a whole-frame mask from alpha, with or without a HUD-less pair. Only accepted sources decide. |
 | `full_alpha_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Reserved, 0 since selection revision 9. Before it: committed samples that decided an accepted whole-frame decision, such a whole-frame alpha or (since S2b) an exact full change-set (6), by the hidden-scene verdict that a diagnostic evidence run, now removed, measured on that same sample from the sample after one that decided it. |
 | `trust.earned`, `.revoked_exact`, `.revoked_declared`, `.lapsed`, `.restored`, `.discarded`, `.forgotten` | Session acceptance events. `earned`: a signature accepted, or a restored one confirmed, by this session's samples. `revoked_exact`: revoked when the one-way test of an exact pair contradicted it in the revoking sample (A2). `revoked_declared`: revoked by an accepted declared alpha's coverage. `lapsed`: a provisional restore lapsed. `restored`: restored entries. `discarded`: legacy `TrustedUISources` entries discarded on load. `forgotten`: accepted signatures that Forget cleared. Since fix 1 the layers' pre-UI proof keys (`pre_ui`) count with the accepted signatures: earned by matching samples, restored, lapsed and forgotten. Counter lines of S1 have `revoked_full` (a full claim over a visible exact pair) and `revoked_presented` (presented alpha disagreeing with an accepted UI channel) instead of `revoked_exact` and `revoked_declared`, and no `forgotten`; counter lines before S1 have `opaque_set` and `opaque_cleared` (the retired opaque-tag proof) instead of `discarded`. |
@@ -1603,7 +1678,14 @@ only HUDLessColor under 4x frame generation offers an inexact pair on every Pres
 acceptance from its first V2-valid partial set and decides 5, while a full change set over a visible
 scene decides no mask (never 6, never 8 without the hold); with FG off a counted full change set
 never decides 6; such a game's title over a hidden scene is flat through H1 (d) (8) from the hold's
-entry; and a same-batch exact full change set still decides 6. That makes 33 groups. With S3
+entry; and a same-batch exact full change set still decides 6. Selection revision 10 derives that
+group's change sets from the pair the provider makes for each Present (a snapshot's first offer
+with the Present after its tag, every re-offer with its own Present), with the real Present last or
+first in 2x and 4x windows, so every mispaired gameplay Present shows the held decision, and adds `T1
+HUD-less re-offers keep the held decision`: UIAlpha on real Presents only beside a HUD-less image
+re-offered on all of them at 3x and 4x, both orders, shows the last real UIAlpha on every
+generated Present; a stale FG-off re-offer keeps the held decision only while the same snapshot is
+offered; and no re-offer bit is pushed beside a tag or an exact pair. That makes 34 groups. With S3
 removed (selection revision 9), its two T1/E2 lines are known limits of Present counting rather
 than outcomes a stage will change: under a frame-generation multiplier reported lower than the
 presented one, or changed in the middle of a real frame and reported late, the generated Presents
@@ -2050,18 +2132,18 @@ acceptance and selection, hidden-scene guard, hold, pin weight. Diagnostics only
 | Rule | Requires |
 | --- | --- |
 | E1 Proof and identity (M1) | A candidate exists only as a snapshot with proven state, boundary, real-frame identity, encoding (typed format and swapchain colour space) and signature; otherwise there is no candidate and a recorded reason. Each cleared target or declared resource is its own signature in its own slot. Over budget, a spare slot rotates across unseen signatures and records a budget refusal. |
-| E2 Exactness (M1) | Only same-batch Streamline tags, with the same-batch Backbuffer tag as the final-image reference, with frame generation on or off. Present counting only proposes a pair (the Present after the tag): it is inexact, validated by V2's pixel test alone, never full-frame UI and never a judge. Without a frame token while any FG interposer is loaded, Present-time evidence is inexact. The one-frame-late layer copy is inexact opacity evidence: it may draw, but never judges or pairs. |
-| V1 Opacity validity (M2) | Finite, in-range alpha with at most 1% invalid pixels, at any bit depth; a cleared layer must also pass the premultiplied bound. Presented and Backbuffer alpha are checked for range only. The tolerance does not depend on trust. |
+| E2 Exactness (M1) | Only same-batch Streamline tags, with the same-batch Backbuffer tag as the final-image reference, with frame generation on or off. Present counting only proposes a pair (a snapshot's first offer with the Present after the tag, every later offer of it with its own Present): it is inexact, validated by V2's pixel test alone, never full-frame UI and never a judge. Without a frame token while any FG interposer is loaded, Present-time evidence is inexact. The one-frame-late layer copy is inexact opacity evidence: it may draw, but never judges or pairs. |
+| V1 Opacity validity (M2) | Finite, in-range alpha with at most 1% invalid pixels, at any bit depth; a cleared layer must also pass the premultiplied bound: its pixels beyond it are uncovered, and invalidate the layer only when they lie on more than 1% of the frame and outnumber its covered pixels. Presented and Backbuffer alpha are checked for range only. The tolerance does not depend on trust. |
 | V2 Change-set validity (M2) | A difference is evidence only with the threshold from the two snapshots' own encodings, and only a valid change set is: the changed set passes the tile test above when partial, changes no pixel of a lit HUD-less image in clean tiles (empty, since revision 8, which an accepted pair decides as an empty mask of its own), or, from an exact pair whose HUD-less image is lit, is nearly the whole frame. The middle band (a pair mispaired with interpolated or another frame's colour) and noisy pairs are invalid. |
-| A1 Earning (M3) | Acceptance is keyed by game and source signature (with the swapchain colour space), not by FG mode. A declared source (UI alpha or color tag, or a HUD-less pair, exact or not, by its partial change set) is accepted by its first valid selective sample; an inferred source needs the steady selective run above. A source that is never selective is never accepted. A sample does not count while a declared alpha is offered but invalid. Holds and manual inputs never earn. An offered layer without coverage earns its signature's pre-UI proof (ledger key `pre_ui:<format>:<space>`) like an inferred source: three samples over 2 s in which it equals the presented frame at eight times their pair threshold on at least 90% of pixels and is lit on at least half; a mismatch neither withdraws it nor restarts the run, and no judge revokes it. |
-| A2 Revocation (M3) | Three contradictions within 2 s by valid same-sample evidence of stronger provenance (an accepted declared alpha or an exact change-set), whatever the drawing rank: one-way disagreement on lit pixels, or declared-versus-inferred coverage disagreement. Agreeing samples do not reset the count. Declared sources are never judged, and the one-frame-late layer copy is not same-sample evidence (E2), so neither judge reads it. Forget also revokes. Ambiguous or invalid samples never revoke. |
+| A1 Earning (M3) | Acceptance is keyed by game and source signature (with the swapchain colour space), not by FG mode. A declared source (UI alpha or color tag, or a HUD-less pair, exact or not, by its partial change set) is accepted by its first valid selective sample; an inferred source needs the steady selective run above, consecutive and bounded (a selective sample more than 2 s after the run's last one restarts it). A source that is never selective is never accepted. A sample does not count while a declared alpha is offered but invalid. Holds and manual inputs never earn. An offered layer without coverage earns its signature's pre-UI proof (ledger key `pre_ui:<format>:<space>`) like an inferred source: three samples over 2 s in which it equals the presented frame at eight times their pair threshold on at least 90% of pixels and is lit on at least half; a mismatch neither withdraws it nor restarts the run, and no judge revokes it. |
+| A2 Revocation (M3) | Three contradictions within 2 s by valid same-sample evidence of stronger provenance (an accepted declared alpha or an exact change-set), whatever the drawing rank: one-way disagreement on lit pixels, or declared-versus-inferred coverage disagreement. Agreeing samples do not reset the count. Every accepted alpha is judged by exact one-way contradictions, declared ones included (selection revision 10); the declared alphas' coverage judges inferred alpha only; the one-frame-late layer copy is not same-sample evidence (E2), so neither judge reads it. Forget also revokes. Ambiguous or invalid samples never revoke. |
 | A3 Persistence (M3) | Restored acceptance is provisional and lapses unless earned again in time; for every kind the clock runs only on samples that could earn or refute the source (offered, valid and not full: alpha below 90% of the frame, a partial or empty change set) and pauses on every other offer (a full menu can neither earn nor refute it, so Stellar Blade's presented alpha no longer lapses during long menu visits, nor a HUD-less pair through mispaired samples). A restored pre-UI proof's clock runs only on testable samples (its layer offered without coverage while the presented frame's evidence is valid and visible), so it lapses after 60 s of testable time without a match. Legacy per-kind entries are discarded; Forget clears the game's entries, pre-UI proofs included. |
 | S1 Selection (M4) | Among accepted, valid candidates the first in draw order wins: opacity before change-set, then declared before inferred. An unaccepted or invalid candidate never blocks another, except that an offered, accepted declared alpha blocks inferred alpha (when it is invalid, T1 applies). Nothing qualifies: no mask, with the reason of the highest-ranked refused candidate. |
 | S2 Manual (M3) | Off offers nothing; the filter restricts offers; On accepts the filtered valid candidates for this session only, without persisting, earning or revoking. |
-| H1 Hidden scene (M5) | With valid depth, a held hidden D verdict (two hidden samples enter, renewals extend, a visible sample releases) and an informative full claim (from an accepted source, a layer proven cleared transparent this frame, an exact full change-set, or a pre-UI scene image on which D reads visible while D on the presented frame reads hidden: the declared HUD-less image, or an offscreen layer without coverage whose signature the ledger holds proven, A1), the frame is flat whatever M4 selected. A visible verdict refutes that signature's full claim until it shows below 99% opaque. Invalid D acts on nothing; only a scope change clears D state. |
+| H1 Hidden scene (M5) | With valid depth, a held hidden D verdict (two hidden samples enter, renewals extend, a visible sample releases) and an informative full claim (from an accepted source, a layer proven cleared transparent this frame, an exact full change-set, or a pre-UI scene image on which D reads visible while D on the presented frame reads hidden: the declared HUD-less image, or an offscreen layer without coverage whose signature the ledger holds proven, A1), the frame is flat whatever M4 selected (a winner already flat is relabelled 8 too). A visible verdict refutes that signature's full claim until it shows below 99% opaque. Invalid D acts on nothing; only a scope change clears D state. |
 | H2 Still screen (M5, removed) | Fix 2's flattening of still SDR screens without a UI source, removed in selection revision 9 (**Still screens without a UI source (H2, fix 2): removed**); the ID is not reused. |
 | P1 Pin weight (M7) | `saturate(8 * c)` of the selected coverage at any coverage (binary for change-sets); 1 everywhere when H1 says flat. |
-| T1 Hold (M6) | A Present without its own fresh decision uses the last real decision; a real frame without one reuses the previous real frame's decision once, then has no mask. No multiplier constant and no time bound; real frames are identified by Present counting (S3's real-frame identity was removed): a Present that offers nothing within the reported generated count of the last UI tag is generated, and one that offers any input is real. |
+| T1 Hold (M6) | A Present without its own fresh decision uses the last real decision; a real frame without one reuses the previous real frame's decision once, then has no mask, except that a mispaired re-offer of the previous render's HUD-less snapshot without a UI tag keeps the held decision for as long as that snapshot is re-offered. No multiplier constant and no time bound; real frames are identified by Present counting (S3's real-frame identity was removed): a Present that offers nothing within the reported generated count of the last UI tag is generated, and one that offers any input is real. |
 | F1 Fail safe and diagnostics (M8) | No qualifying source gives no mask with a named reason and refused candidate, the panel warning and exact counters. Status freshness is keyed on the scope and the winning accepted candidate. Diagnostics feed nothing back. |
 
 Scope (runtime, device, epoch, viewport, size, colour mode and encoding, but not the FG multiplier)
@@ -2096,8 +2178,9 @@ presented frame) need a rule of their own (texel 11's shadow statistics that mea
 whether a wrongly
 accepted inferred source with no declared or exact judge needs more than Forget and the provisional
 lapse (until S4 this includes a wrongly accepted layer, which the one-way test does not judge);
-whether a wrong declared alpha that once read selective needs a judge, since declared sources are
-never judged; whether the premultiplied bound also applies to declared UI color tags; whether live
+whether a wrong declared alpha that once read selective needs a judge where no exact pair is
+offered (since selection revision 10 an exact pair judges it one way, as every alpha but the layer
+copy); whether the premultiplied bound also applies to declared UI color tags; whether live
 generated Presents without a HUD-less pairing re-offer the last tag snapshot (Expedition 33 at 3x
 or 4x, counted from the last tag); and whether a generated Present over untagged UI should
 use the masks of both real frames it interpolates (it needs a moving-HUD FG dump).

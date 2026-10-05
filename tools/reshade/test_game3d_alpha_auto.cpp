@@ -62,21 +62,19 @@ namespace {
       e.hudless_lit = pixels;
       return *this;
     }
-    // A2's one-way counts of a judged kind (layer, Backbuffer, current):
-    // pixels with alpha of at least 1/2, and those of them where the HUD-less
-    // image is lit and unchanged.
+    // A2's one-way counts of a judged kind (UIAlpha, the UI color tag,
+    // Backbuffer, current; never the layer copy): pixels with alpha of at
+    // least 1/2, and those of them where the HUD-less image is lit and
+    // unchanged.
     sample &one_way(kind k, std::uint32_t strong, std::uint32_t contradicted) {
+      bool judged = false;
       for (std::size_t i = 0; i != ui_selection::judged_kinds.size(); ++i)
         if (ui_selection::judged_kinds[i] == k) {
           e.strong[i] = strong;
           e.contradicted[i] = contradicted;
+          judged = true;
         }
-      return *this;
-    }
-    // The offered layer was the one-frame-late copy (stored flag 0x4), for
-    // which the GPU counts no strong pixel.
-    sample &late() {
-      e.late_layer = true;
+      require(judged, "Only judged kinds have one-way counts");
       return *this;
     }
   };
@@ -180,6 +178,19 @@ namespace {
     feed(run, sample().alpha(kind::current, 300), 4000);
     feed(run, sample().alpha(kind::current, 250), 5000);
     require(accepts(run, kind::current), "Consecutive steady samples did not accept current alpha");
+    // D2 (selection revision 10): the run is consecutive and bounded. A
+    // selective sample more than alpha_trust_span_ms after the run's last one
+    // starts a new run; empty samples within that bound stay neutral.
+    alpha_auto_policy sparse;
+    feed(sparse, sample().alpha(kind::current, 200), 1000);
+    feed(sparse, sample().alpha(kind::current, 200), 2500);
+    feed(sparse, sample().alpha(kind::current, 0), 4000);
+    feed(sparse, sample().alpha(kind::current, 200), 4501);
+    feed(sparse, sample().alpha(kind::current, 200), 5000);
+    require(!accepts(sparse, kind::current), "A selective sample more than 2 s after the run's last one continued it");
+    feed(sparse, sample().alpha(kind::current, 0), 6000);
+    feed(sparse, sample().alpha(kind::current, 200), 6501);
+    require(accepts(sparse, kind::current), "A bounded run with an empty sample inside it did not earn");
     // Coverage that swings beyond a factor of two (scene effects) never earns.
     alpha_auto_policy effects;
     for (std::uint64_t tick = 1000; tick <= 20000; tick += 500)
@@ -194,14 +205,27 @@ namespace {
     alpha_auto_policy policy;
     feed(policy, sample().alpha(kind::backbuffer, 200), 1000);
     feed(policy, sample().alpha(kind::backbuffer, 200), 2000);
-    for (std::uint64_t tick = 2100; tick <= 9000; tick += 100)
+    for (std::uint64_t tick = 2100; tick <= 2900; tick += 100)
       feed(policy, sample().alpha(kind::backbuffer, tick % 200 ? 200u : 1000u).alpha(kind::ui_color, 0, 600), tick);
     require(!accepts(policy, kind::backbuffer) && !accepts(policy, kind::ui_color),
       "A sample beside an invalid tag earned acceptance");
     // The void neither advanced nor restarted the run: the third clean sample
     // completes it.
-    feed(policy, sample().alpha(kind::backbuffer, 200), 9100);
+    feed(policy, sample().alpha(kind::backbuffer, 200), 3000);
     require(accepts(policy, kind::backbuffer), "A void sample restarted the earning run");
+    // D2: a void longer than alpha_trust_span_ms is a gap in the run's
+    // selective samples like any other, so the next clean sample starts a
+    // new run.
+    alpha_auto_policy long_void;
+    feed(long_void, sample().alpha(kind::backbuffer, 200), 1000);
+    feed(long_void, sample().alpha(kind::backbuffer, 200), 2000);
+    for (std::uint64_t tick = 2100; tick <= 9000; tick += 100)
+      feed(long_void, sample().alpha(kind::backbuffer, 200).alpha(kind::ui_color, 0, 600), tick);
+    feed(long_void, sample().alpha(kind::backbuffer, 200), 9100);
+    require(!accepts(long_void, kind::backbuffer), "A run continued across a void longer than 2 s");
+    feed(long_void, sample().alpha(kind::backbuffer, 200), 10100);
+    feed(long_void, sample().alpha(kind::backbuffer, 200), 11100);
+    require(accepts(long_void, kind::backbuffer), "A new run after a long void did not earn");
     // Revocation still evaluates void samples: a valid exact pair one-way
     // contradicts the full Backbuffer claim.
     for (const std::uint64_t tick : {10000u, 11000u, 12000u})
@@ -464,15 +488,37 @@ namespace {
     require(!accepts(policy, kind::backbuffer), "A contradicted source earned acceptance again");
     for (const std::uint64_t tick : {21000u, 22000u, 23000u}) feed(policy, sample().alpha(kind::backbuffer, 200), tick);
     require(accepts(policy, kind::backbuffer), "An uncontradicted run did not earn acceptance again");
-    // The one-frame-late layer copy is not same-sample evidence (E2): the GPU
-    // counts no strong pixel of it, and neither judge reads it, not even a
-    // disagreeing accepted UIAlpha.
+    // The one-frame-late layer copy (every layer) is not same-sample evidence
+    // (E2): it is not a judged kind, so the GPU counts no strong pixel of it
+    // and neither judge reads it, not even a disagreeing accepted UIAlpha.
     alpha_auto_policy late;
     late.restore("ui_layer:10:srgb,ui_alpha:61:srgb");
     for (std::uint64_t tick = 1000; tick <= 6000; tick += 500)
-      feed(late, sample().alpha(kind::ui_layer, 1000).alpha(kind::ui_alpha, 20).pair(100, 900).late(), tick);
+      feed(late, sample().alpha(kind::ui_layer, 1000).alpha(kind::ui_alpha, 20).pair(100, 900), tick);
     require(accepts(late, kind::ui_layer) && !late.counters()[ui_counter::trust_revoked_exact] &&
         !late.counters()[ui_counter::trust_revoked_declared], "The late layer was judged");
+    // D1 (selection revision 10): the declared alphas meet the one-way test
+    // too. An opaque final image tagged as UI color, read selective once
+    // during a fade, is accepted by that sample; over an exact pair whose
+    // HUD-less image shows the scene unchanged under its strong pixels it is
+    // contradicted and revoked, and a contradicted sample never earns.
+    alpha_auto_policy final_image;
+    feed(final_image, sample().alpha(kind::ui_color, 300), 1000);
+    require(accepts(final_image, kind::ui_color), "A selective UI color sample did not accept the tag");
+    for (const std::uint64_t tick : {1100u, 1200u, 1300u})
+      feed(final_image, sample().alpha(kind::ui_color, 1000).pair(20, 980).one_way(kind::ui_color, 1000, 900), tick);
+    require(!accepts(final_image, kind::ui_color) && final_image.counters()[ui_counter::trust_revoked_exact] == 1,
+      "An exact pair did not revoke a declared alpha that marks the unchanged scene");
+    feed(final_image, sample().alpha(kind::ui_color, 300).pair(20, 980).one_way(kind::ui_color, 300, 250), 1400);
+    require(!accepts(final_image, kind::ui_color), "A contradicted selective sample accepted the declared alpha");
+    // Real UI changes the pixels it covers, so it never meets the test: an
+    // accepted UIAlpha over its own exact change set stays accepted.
+    alpha_auto_policy real_ui;
+    real_ui.restore("ui_alpha:61:srgb");
+    for (std::uint64_t tick = 1000; tick <= 4000; tick += 100)
+      feed(real_ui, sample().alpha(kind::ui_alpha, 50).pair(50, 950).one_way(kind::ui_alpha, 40, 0), tick);
+    require(accepts(real_ui, kind::ui_alpha) && !real_ui.counters()[ui_counter::trust_revoked_exact],
+      "Real UI over its own exact change set was contradicted");
 
     // Presented alpha disagreeing with an accepted UIAlpha (Resident Evil
     // Requiem: tag 0.2%, presented alpha 35-100% in play; menus agree).
@@ -494,14 +540,16 @@ namespace {
     for (const std::uint64_t tick : {14000u, 15000u, 16000u})
       feed(presented, sample().alpha(kind::ui_alpha, 20).alpha(kind::current, 30), tick);
     require(accepts(presented, kind::current), "Presented alpha agreeing with the UI mask could not earn acceptance");
-    // The layer is inferred: an accepted UIAlpha judges it by coverage, and
+    // The layer is inferred, but every layer is the one-frame-late copy (E2):
+    // an accepted UIAlpha whose coverage disagrees never judges it (selection
+    // revision 10 dropped the never-used judgment of a same-frame layer), and
     // it judges nothing itself.
     alpha_auto_policy layer;
     layer.restore("ui_alpha:61:srgb,ui_layer:10:srgb");
     for (const std::uint64_t tick : {1000u, 2000u, 3000u})
       feed(layer, sample().alpha(kind::ui_alpha, 20).alpha(kind::ui_layer, 400), tick);
-    require(!accepts(layer, kind::ui_layer) && accepts(layer, kind::ui_alpha) &&
-        layer.counters()[ui_counter::trust_revoked_declared] == 1, "An accepted UIAlpha did not judge the layer");
+    require(accepts(layer, kind::ui_layer) && accepts(layer, kind::ui_alpha) &&
+        !layer.counters()[ui_counter::trust_revoked_declared], "An accepted UIAlpha judged the layer copy");
     alpha_auto_policy judge;
     judge.restore("ui_layer:10:srgb,backbuffer:24:srgb");
     for (std::uint64_t tick = 1000; tick <= 6000; tick += 1000)
@@ -517,8 +565,10 @@ namespace {
     }
     require(accepts(alone, kind::current) && !accepts(alone, kind::ui_alpha),
       "An unaccepted or invalid declared alpha revoked presented alpha");
-    // Declared sources are never judged: an accepted UIAlpha beside a valid
-    // exact pair and disagreeing presented alpha stays accepted.
+    // A declared source is judged by the exact pair's one-way test alone (D1):
+    // disagreeing presented alpha never judges it, and an exact pair without
+    // strong pixels under it has no basis, so an accepted UIAlpha beside them
+    // stays accepted.
     alpha_auto_policy declared;
     declared.restore("ui_alpha:61:srgb");
     for (std::uint64_t tick = 1000; tick <= 6000; tick += 500)
@@ -764,7 +814,6 @@ namespace {
     s.valid_bits = offered & ui_selection::candidate_bits;
     s.claims = claims;
     s.opaque.fill(pixels);
-    s.complete = true;
     s.presented.n = 400;
     s.presented.decided = 600;
     s.presented.ran = true;
@@ -950,20 +999,15 @@ namespace {
       "The pre-UI hold acted for an unproven signature");
 
     // Restore: a refuted candidate offered, valid and below 99% opaque is an
-    // overlay again; opaque-full, invalid, or a sample without texel 10 does
-    // not restore.
+    // overlay again; opaque-full or invalid does not restore.
     auto opaque_layer = scene_sample(2100, A);
     g.observe(opaque_layer, true, sigs);
     require(g.refuted(signatures().of(kind::ui_layer)), "An opaque-full layer restored its refuted signature");
-    auto incomplete = scene_sample(2200, A, candidate::layer, 0u);
-    incomplete.opaque.fill(0);
-    incomplete.complete = false;
-    g.observe(incomplete, true, sigs);
     auto invalid_layer = scene_sample(2300, A, candidate::layer, 0u);
     invalid_layer.opaque.fill(0);
     invalid_layer.valid_bits = 0;
     g.observe(invalid_layer, true, sigs);
-    require(g.refuted(signatures().of(kind::ui_layer)), "An invalid layer or a sample without texel 10 restored the layer");
+    require(g.refuted(signatures().of(kind::ui_layer)), "An invalid layer restored the layer");
     auto overlay = scene_sample(2400, A, candidate::layer, 0u);
     overlay.opaque[ui_selection::alpha_index(kind::ui_layer)] = pixels / 2;
     g.observe(overlay, true, sigs);
@@ -1041,9 +1085,9 @@ namespace {
         !viewport.per_frame(1200, candidate::layer, sigs, false) && !viewport.refuted_count,
       "An epoch or viewport change kept the guard's state");
 
-    // sample_of decodes the decision words the guard reads: texels 0, 1, 4, 5,
-    // 6, 7 and 10.
-    std::array<std::uint32_t, 4 * ui_detection::h1_decision_texels> t{};
+    // The guard reads the decoded sample (ui_temporal::guard_sample of
+    // decode_detection_sample): texels 0, 1, 4, 5, 6, 7 and 10.
+    std::array<std::uint32_t, 4 * ui_detection::decision_texels> t{};
     t[word::source] = 8; t[word::pixels] = pixels; t[word::candidates] = 0x48;
     t[word::alpha_opaque] = 11; t[word::alpha_opaque + 1] = 12; t[word::layer_opaque] = 13; t[word::valid_bits] = 0x8;
     t[word::opaque_backbuffer] = 14; t[word::opaque_current] = 15; t[word::claims] = 0x80;
@@ -1053,16 +1097,19 @@ namespace {
     t[word::scene_state] = 1u | 2u | std::uint32_t(H) << 2; t[word::scene_decided] = 600;
     t[word::pre_ui_scene_n] = 380; std::memcpy(&t[word::pre_ui_scene_d], &pre_ui_d, sizeof(pre_ui_d));
     t[word::pre_ui_scene_state] = 3u; t[word::pre_ui_scene_image] = ui_detection::pre_ui_image::layer;
-    const auto decoded = scene_guard::sample_of(t.data(), t.size(), 1234, true);
+    const auto decoded = ui_temporal::guard_sample(ui_temporal::decode_detection_sample(t.data(), t.size(), 1234, 1));
     require(decoded.tick == 1234 && decoded.source == 8 && decoded.pixels == pixels && decoded.offered == 0x48 &&
-        decoded.valid_bits == 0x8 && decoded.claims == 0x80 && decoded.complete &&
+        decoded.valid_bits == 0x8 && decoded.claims == 0x80 &&
         decoded.opaque == std::array<std::uint32_t, 5>{11, 12, 13, 14, 15} && decoded.presented.valid &&
         decoded.presented.verdict == H && decoded.presented.decided == 600 && decoded.pre_ui.valid && decoded.pre_ui.n == 380 &&
         decoded.pre_ui.verdict == V && decoded.pre_ui_image == ui_detection::pre_ui_image::layer,
-      "The scene guard did not decode a sample");
-    const auto older = scene_guard::sample_of(t.data(), 4 * ui_detection::judgment_decision_texels, 1234, false);
-    require(!older.complete && !older.claims && !older.presented.valid && !older.pre_ui_image,
-      "The scene guard decoded texel 10 or evidence it was not given");
+      "The scene guard did not read a decoded sample");
+    // Only the current revision's texture decodes (ui_detection_replay pads
+    // older shaders' words itself).
+    const auto older = ui_temporal::guard_sample(ui_temporal::decode_detection_sample(t.data(),
+      4 * ui_detection::pre_ui_decision_texels, 1234, 1));
+    require(!older.pixels && !older.offered && !older.claims && !older.presented.valid && !older.pre_ui_image,
+      "A shorter decision texture decoded");
   }
   // H1 (d), fix 1: Stellar Blade SDR's cleared output target, an offered
   // layer without coverage (BGRA8, V1-invalid: colour beyond the
@@ -1251,15 +1298,17 @@ namespace {
     before[ui_counter_word::decided + 4] = 7u; now[ui_counter_word::decided + 4] = 9u;
     now[ui_counter_word::decided + 10] = 6u;
     now[ui_counter_word::none + ui_no_mask::ambiguous] = 5u; now[ui_counter_word::none + ui_no_mask::unaccepted] = 3u;
-    now[ui_counter_word::untrusted_inferred] = 2u;
+    // Words 14 and 18 (S1's invariants) are reserved since selection
+    // revision 10: whatever they hold is never counted.
+    now[ui_counter_word::untrusted_inferred] = 2u; now[ui_counter_word::presented_over_dedicated] = 3u;
     now[ui_counter_word::full_alpha] = 4u;
     now[ui_counter_word::contradicted] = 7u; now[ui_counter_word::reused] = 8u;
     ui_counters gpu;
     gpu.add_gpu_delta(now, before);
     require(gpu[n::detection_frames] == 3 && gpu.decided(4) == 2 && gpu.decided(10) == 6 &&
         gpu[n::none + ui_no_mask::ambiguous] == 5 && gpu[n::none + ui_no_mask::unaccepted] == 3 &&
-        gpu[n::untrusted_inferred] == 2 && gpu[n::full_alpha] == 4 && gpu[n::contradicted] == 7 && gpu[n::reused] == 8 &&
-        !gpu.decided(0), "GPU counter deltas are wrong");
+        !gpu[n::untrusted_inferred] && !gpu[n::presented_over_dedicated] && gpu[n::full_alpha] == 4 &&
+        gpu[n::contradicted] == 7 && gpu[n::reused] == 8 && !gpu.decided(0), "GPU counter deltas are wrong");
     // A session sums every commit and keeps the latest tick.
     alpha_auto_policy session;
     ui_counters first, second;
@@ -1311,7 +1360,7 @@ namespace {
   // counts it commits.
   void sample_decode_and_commit_are_shared() {
     namespace word = ui_detection::decision_word;
-    std::array<std::uint32_t, 4 * ui_detection::pre_ui_decision_texels> t{};
+    std::array<std::uint32_t, 4 * ui_detection::decision_texels> t{};
     t[word::source] = 10; t[word::covered] = 995; t[word::pixels] = 1000; t[word::matching_tiles] = 7;
     t[word::candidates] = 0x7a; t[word::hudless_changed] = 9; t[word::hudless_unchanged] = 900;
     t[word::hudless_invalid] = 1; t[word::hudless_lit] = 800; t[word::accepted] = 0x42;
@@ -1325,11 +1374,15 @@ namespace {
     t[word::opaque_backbuffer] = 997; t[word::opaque_current] = 998; t[word::claims] = 0xc0u;
     t[word::h1] = 10u | ui_detection::h1_applied;
     t[word::layer_covered] = 995; t[word::layer_invalid] = 2; t[word::layer_opaque] = 990; t[word::valid_bits] = 0x4a;
+    // Texels 8 and 9 .x are reserved (the layer's before revision 10); the
+    // declared alphas' counts are texel 16.
     for (std::uint32_t i = 0; i != 3; ++i) { t[word::strong + i] = 40 + i; t[word::contradicted + i] = 50 + i; }
+    t[word::strong_ui_alpha] = 60; t[word::strong_ui_color] = 61; t[word::contradicted_ui_alpha] = 62;
+    t[word::contradicted_ui_color] = 63;
     t[word::refused] = candidate::backbuffer;
     t[word::frame_reason] = std::uint32_t(ui_no_mask::unaccepted) | ui_detection::frame_reason_reused;
     t[word::pre_ui_match] = 960; t[word::pre_ui_image_lit] = 880; t[46] = 890; t[47] = 7;
-    const auto sample = ui_temporal::decode_detection_sample(t.data(), t.size(), 1500, 9, true);
+    const auto sample = ui_temporal::decode_detection_sample(t.data(), t.size(), 1500, 9);
     const auto &e = sample.evidence;
     require(sample.source_kind == 10 && sample.enabled && sample.state == alpha_auto_state::automatic_on &&
         sample.covered == 995 && sample.pixels == 1000 && sample.sample_tick_ms == 1500 && sample.sample_sequence == 9 &&
@@ -1338,7 +1391,7 @@ namespace {
         e.alpha_covered[3] == 13 && e.alpha_invalid[0] == 20 && e.alpha_opaque[1] == 31 && e.layer_covered == 995 &&
         e.layer_invalid == 2 && e.layer_opaque == 990 && e.valid_bits == 0x4a,
       "The decision texels did not decode");
-    require(e.strong == std::array<std::uint32_t, 3>{40, 41, 42} && e.contradicted == std::array<std::uint32_t, 3>{50, 51, 52} &&
+    require(e.strong == std::array<std::uint32_t, 4>{60, 61, 41, 42} && e.contradicted == std::array<std::uint32_t, 4>{62, 63, 51, 52} &&
         e.refused == candidate::backbuffer && e.frame_reason == ui_no_mask::unaccepted && e.reused,
       "The one-way counts, refused candidate or frame reason did not decode");
     require(e.inferred_opaque == std::array<std::uint32_t, 2>{997, 998} && e.claims == 0xc0u && e.s1_source == 10 &&
@@ -1346,27 +1399,19 @@ namespace {
     // Words 46 and 47 (texel 11 .z and .w) are reserved: a sample of an older
     // shader that wrote them decodes as before, without them.
     require(e.pre_ui_match == 960 && e.pre_ui_image_lit == 880, "Texel 11 did not decode");
-    const auto revision3 = ui_temporal::decode_detection_sample(t.data(), 4 * ui_detection::h1_decision_texels, 1500, 9, true);
-    require(revision3.evidence.h1_applied && !revision3.evidence.pre_ui_match && !revision3.evidence.pre_ui_image_lit,
-      "Texel 11 decoded from fewer than 48 words");
-    const auto revision2 = ui_temporal::decode_detection_sample(t.data(), 4 * ui_detection::judgment_decision_texels, 1500, 9, true);
-    require(revision2.evidence.reused && !revision2.evidence.claims && !revision2.evidence.h1_applied &&
-        !revision2.evidence.inferred_opaque[0], "Texel 10 decoded from fewer than 44 words");
-    const auto layer_only = ui_temporal::decode_detection_sample(t.data(), 4 * ui_detection::layer_decision_texels, 1500, 9, true);
-    require(layer_only.evidence.valid_bits == 0x4a && !layer_only.evidence.strong[0] && !layer_only.evidence.refused &&
-        layer_only.evidence.frame_reason == ui_detection::frame_reason_decided && !layer_only.evidence.reused,
-      "Texels 8 and 9 decoded from fewer than 40 words");
+    // Fewer words than the current revision's decode as no sample: the
+    // renderer refuses other revisions and ui_detection_replay pads them.
+    for (const std::uint32_t texels : {ui_detection::pre_ui_decision_texels, ui_detection::h1_decision_texels,
+           ui_detection::judgment_decision_texels, ui_detection::layer_decision_texels}) {
+      const auto older = ui_temporal::decode_detection_sample(t.data(), 4 * texels, 1500, 9);
+      require(!older.pixels && !older.evidence.candidates, "An older revision's decision texels decoded");
+    }
     require(e.scene.n == 400 && e.scene.d == .5f && e.scene.valid && e.scene.ran &&
         e.scene.verdict == ui_detection::scene_verdict::visible && e.scene.decided == 600 && e.pre_ui_scene.n == 300 &&
         e.pre_ui_scene.d == .3f && e.pre_ui_scene.valid && e.pre_ui_scene.ran &&
         e.pre_ui_scene.verdict == ui_detection::scene_verdict::visible && e.pre_ui_image == ui_detection::pre_ui_image::layer,
       "The scene texels did not decode");
-    const auto unsupported = ui_temporal::decode_detection_sample(t.data(), 4 * ui_detection::scene_decision_texels, 1500, 9, false);
-    require(!unsupported.evidence.scene.ran && !unsupported.evidence.scene.n && !unsupported.evidence.layer_covered &&
-        !unsupported.evidence.valid_bits && unsupported.evidence.accepted == 0x42,
-      "Scene texels decoded without scene evidence, or layer texels without texel 7");
-    require(!ui_temporal::decode_detection_sample(t.data(), 4, 1500, 9, false).pixels,
-      "Too few texels decoded");
+    require(!ui_temporal::decode_detection_sample(t.data(), 4, 1500, 9).pixels, "Too few texels decoded");
     // 995 of 1000 pixels from the layer (source 10) is a whole-frame alpha:
     // the GPU counts it as full_alpha, while full_alpha_d (its verdict,
     // measured only by the removed whole-frame diagnostic) stays zero.
@@ -1412,10 +1457,10 @@ namespace {
     partial.evidence.scene.valid = false;
     delta = ui_temporal::sample_counters(partial, cpu_now, cpu_then, after, before, 1500);
     require(!delta[n::full_alpha_d_invalid] && !delta[n::full_d_invalid], "A 98% alpha sample was counted as whole-frame");
-    // The V1-invalid alpha bits a hold reads from a sample.
-    alpha_auto_decision::detection_evidence invalid;
-    invalid.candidates = 0x4fu; invalid.alpha_invalid = {11, 10, 0, 50}; invalid.layer_invalid = 11;
-    require(invalid_alpha_bits(invalid, 1000) == (0x1u | 0x8u | 0x40u), "V1-invalid alpha bits were wrong");
+    // The one-way counts of a judged kind, none for the layer copy.
+    require(one_way_of(e, kind::ui_color) == std::pair<std::uint32_t, std::uint32_t>{61, 63} &&
+        one_way_of(e, kind::current) == std::pair<std::uint32_t, std::uint32_t>{42, 52} &&
+        one_way_of(e, kind::ui_layer) == std::pair<std::uint32_t, std::uint32_t>{}, "The one-way counts of a kind were wrong");
   }
 } // namespace
 

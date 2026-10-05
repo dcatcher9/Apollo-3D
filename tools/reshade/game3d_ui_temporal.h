@@ -38,9 +38,13 @@
 //          scene_guard.enter_scope(epoch, viewport) (game3d_scene_guard.h:
 //          only an identity change clears it), then poll_detection; then
 //          per_frame = scene_guard.per_frame(now, bits, signatures) |
-//          t.per_frame | depth_not_current, and detection with this frame's
-//          own bits, accepted and flags pushed (b2), flags | per_frame, and
-//          the hold store bound at u5 for the reduce. A sample frame runs the
+//          t.per_frame | depth_not_current | per_frame_reoffer (the
+//          provider's hudless_reoffer of an inexact HUD-less snapshot
+//          without a UIAlpha, UI color or Backbuffer tag), and detection
+//          with this frame's own bits, accepted and flags pushed (b2), flags
+//          | per_frame, plus per_frame_sample on a sample frame (at most one
+//          every 100 ms while none is pending), and the hold store bound at
+//          u5 for the reduce. A sample frame runs the
 //          evidence passes when scene_guard.measure(now, proven_image) says
 //          they are actionable, and keeps that with the pending sample. Then
 //          state.detected(observation). A sample keeps the signatures and
@@ -51,12 +55,12 @@
 //   poll_detection (a completed sample):
 //     6. sample_discarded(input, pending source) drops it unread (another
 //        scope, or stale on arrival); otherwise
-//        sample = decode_detection_sample(words, count, tick, sequence, scene,
-//        pushed flags),
-//        state.latest = sample, state.latest_source = the pending source and
-//        state.latest_key = the status key at submission;
-//     7. obs = scene_guard.observe(scene_guard::sample_of(words, count, tick,
-//        scene), the pending actionable, the submitted signatures by kind);
+//        sample = decode_detection_sample(words, count, tick, sequence), the
+//        one decode of the decision words, state.latest = sample,
+//        state.latest_source = the pending source and state.latest_key = the
+//        status key at submission;
+//     7. obs = scene_guard.observe(guard_sample(sample), the pending
+//        actionable, the submitted signatures by kind);
 //     8. session.observe(sample.evidence, sample.pixels, tick, submitted
 //        signatures); a session in a manual mode ignores it;
 //     9. sample_counters(..., obs) commits the counts.
@@ -112,24 +116,20 @@ namespace sunshine_game3d::ui_temporal {
     return scope_changed(input, pending) || input.now_ms < pending.now_ms || input.now_ms - pending.now_ms > sample_fresh_ms;
   }
 
-  // The status sample poll_detection reads from the decision texels `words`
-  // (4 per texel, at least min_decision_texels; with scene, the evidence
-  // texels 5 and 6 too; the offscreen UI layer's texel 7 when there are
-  // layer_decision_texels; the one-way judgment counts, the refused candidate
-  // and the frame reason of texels 8 and 9 when there are
-  // judgment_decision_texels; the H1 texel 10, the opaque Backbuffer and
-  // current counts, the claims and the h1 word, when there are
-  // h1_decision_texels; the pre-UI pixel counts of texel 11, the layer
-  // against the presented frame, when there are pre_ui_decision_texels).
-  // sequence numbers the submitted samples, and
-  // flags are the Sunshine_UIDetectionFlags the detection pushed (whether an
-  // offered layer was the one-frame-late copy).
+  // The status sample poll_detection reads from the current revision's
+  // decision texels `words` (4 per texel, ui_detection::decision_texels of
+  // them; anything shorter, as from an older shader that only
+  // ui_detection_replay pads, decodes as no sample): the decision, the
+  // candidates and counts, the scene evidence texels 5 and 6 (zero when the
+  // evidence passes did not run), the offscreen UI layer's texel 7, the
+  // one-way judgment counts (texels 16, 8 and 9), the refused candidate and
+  // the frame reason, the H1 texel 10 and the pre-UI pixel counts of texel
+  // 11. sequence numbers the submitted samples.
   inline alpha_auto_decision decode_detection_sample(const std::uint32_t *words, std::size_t count,
-      std::uint64_t tick_ms, std::uint64_t sequence, bool scene, std::uint32_t flags = 0) {
+      std::uint64_t tick_ms, std::uint64_t sequence) {
     namespace word = ui_detection::decision_word;
     alpha_auto_decision sample;
-    if (count < 4 * ui_detection::min_decision_texels ||
-        (scene && count < 4 * ui_detection::scene_decision_texels)) return sample;
+    if (count < 4 * ui_detection::decision_texels) return sample;
     sample.source_kind = words[word::source];
     sample.enabled = words[word::source] != 0;
     sample.state = words[word::source] ? alpha_auto_state::automatic_on : alpha_auto_state::automatic_off;
@@ -146,50 +146,74 @@ namespace sunshine_game3d::ui_temporal {
     evidence.hudless_lit = words[word::hudless_lit];
     evidence.accepted = words[word::accepted];
     evidence.alpha_opaque = {words[word::alpha_opaque], words[word::alpha_opaque + 1]};
-    evidence.late_layer = (evidence.candidates & ui_detection::candidate::layer) &&
-      (flags & ui_detection::stored_late_layer);
-    if (count >= 4 * ui_detection::layer_decision_texels) {
-      evidence.layer_covered = words[word::layer_covered];
-      evidence.layer_invalid = words[word::layer_invalid];
-      evidence.layer_opaque = words[word::layer_opaque];
-      evidence.valid_bits = words[word::valid_bits];
-    }
-    if (count >= 4 * ui_detection::judgment_decision_texels) {
-      std::copy_n(words + word::strong, evidence.strong.size(), evidence.strong.begin());
-      std::copy_n(words + word::contradicted, evidence.contradicted.size(), evidence.contradicted.begin());
-      evidence.refused = words[word::refused];
-      evidence.frame_reason = words[word::frame_reason] & ui_detection::frame_reason_reason_mask;
-      evidence.reused = (words[word::frame_reason] & ui_detection::frame_reason_reused) != 0;
-    }
-    if (count >= 4 * ui_detection::h1_decision_texels) {
-      evidence.inferred_opaque = {words[word::opaque_backbuffer], words[word::opaque_current]};
-      evidence.claims = words[word::claims];
-      evidence.s1_source = words[word::h1] & ui_detection::h1_winner_mask;
-      evidence.h1_applied = (words[word::h1] & ui_detection::h1_applied) != 0;
-    }
-    if (count >= 4 * ui_detection::pre_ui_decision_texels) {
-      evidence.pre_ui_match = words[word::pre_ui_match];
-      evidence.pre_ui_image_lit = words[word::pre_ui_image_lit];
-    }
-    if (scene) {
-      const auto decode = [&](std::size_t n, std::size_t d, std::size_t state) {
-        alpha_auto_decision::scene_evidence result;
-        result.n = words[n];
-        std::memcpy(&result.d, &words[d], sizeof(result.d));
-        result.valid = ui_detection::scene_state_valid(words[state]);
-        result.ran = ui_detection::scene_state_ran(words[state]);
-        result.verdict = ui_detection::scene_state_verdict(words[state]);
-        return result;
-      };
-      evidence.scene = decode(word::scene_n, word::scene_d, word::scene_state);
-      evidence.scene.decided = words[word::scene_decided];
-      // The pre-UI image's texel carries no verdict: the CPU reads it from D.
-      evidence.pre_ui_scene = decode(word::pre_ui_scene_n, word::pre_ui_scene_d, word::pre_ui_scene_state);
-      evidence.pre_ui_scene.verdict = evidence.pre_ui_scene.valid ?
-        ui_detection::scene_verdict_of(evidence.pre_ui_scene.d) : ui_detection::scene_verdict::none;
-      evidence.pre_ui_image = words[word::pre_ui_scene_image];
-    }
+    evidence.layer_covered = words[word::layer_covered];
+    evidence.layer_invalid = words[word::layer_invalid];
+    evidence.layer_opaque = words[word::layer_opaque];
+    evidence.valid_bits = words[word::valid_bits];
+    evidence.strong = {words[word::strong_ui_alpha], words[word::strong_ui_color], words[word::strong_backbuffer],
+      words[word::strong_current]};
+    evidence.contradicted = {words[word::contradicted_ui_alpha], words[word::contradicted_ui_color],
+      words[word::contradicted_backbuffer], words[word::contradicted_current]};
+    evidence.refused = words[word::refused];
+    evidence.frame_reason = words[word::frame_reason] & ui_detection::frame_reason_reason_mask;
+    evidence.reused = (words[word::frame_reason] & ui_detection::frame_reason_reused) != 0;
+    evidence.inferred_opaque = {words[word::opaque_backbuffer], words[word::opaque_current]};
+    evidence.claims = words[word::claims];
+    evidence.s1_source = words[word::h1] & ui_detection::h1_winner_mask;
+    evidence.h1_applied = (words[word::h1] & ui_detection::h1_applied) != 0;
+    evidence.pre_ui_match = words[word::pre_ui_match];
+    evidence.pre_ui_image_lit = words[word::pre_ui_image_lit];
+    const auto decode = [&](std::size_t n, std::size_t d, std::size_t state) {
+      alpha_auto_decision::scene_evidence result;
+      result.n = words[n];
+      std::memcpy(&result.d, &words[d], sizeof(result.d));
+      result.valid = ui_detection::scene_state_valid(words[state]);
+      result.ran = ui_detection::scene_state_ran(words[state]);
+      result.verdict = ui_detection::scene_state_verdict(words[state]);
+      return result;
+    };
+    evidence.scene = decode(word::scene_n, word::scene_d, word::scene_state);
+    evidence.scene.decided = words[word::scene_decided];
+    // The pre-UI image's texel carries no verdict: the CPU reads it from D.
+    evidence.pre_ui_scene = decode(word::pre_ui_scene_n, word::pre_ui_scene_d, word::pre_ui_scene_state);
+    evidence.pre_ui_scene.verdict = evidence.pre_ui_scene.valid ?
+      ui_detection::scene_verdict_of(evidence.pre_ui_scene.d) : ui_detection::scene_verdict::none;
+    evidence.pre_ui_image = words[word::pre_ui_scene_image];
     return sample;
+  }
+
+  // The hidden-scene guard's view of a decoded status sample
+  // (game3d_scene_guard.h) at its tick.
+  inline scene_guard::sample guard_sample(const alpha_auto_decision &decoded) {
+    const auto &evidence = decoded.evidence;
+    scene_guard::sample s;
+    s.tick = decoded.sample_tick_ms;
+    s.pixels = decoded.pixels;
+    s.offered = evidence.candidates;
+    s.valid_bits = evidence.valid_bits;
+    s.source = decoded.source_kind;
+    s.claims = evidence.claims;
+    using ui_selection::alpha_index;
+    using ui_selection::kind;
+    s.opaque[alpha_index(kind::ui_alpha)] = evidence.alpha_opaque[0];
+    s.opaque[alpha_index(kind::ui_color)] = evidence.alpha_opaque[1];
+    s.opaque[alpha_index(kind::ui_layer)] = evidence.layer_opaque;
+    s.opaque[alpha_index(kind::backbuffer)] = evidence.inferred_opaque[0];
+    s.opaque[alpha_index(kind::current)] = evidence.inferred_opaque[1];
+    const auto image = [](const alpha_auto_decision::scene_evidence &e) {
+      scene_guard::image_evidence result;
+      result.n = e.n;
+      result.d = e.d;
+      result.valid = e.valid;
+      result.ran = e.ran;
+      result.verdict = e.verdict;
+      result.decided = e.decided;
+      return result;
+    };
+    s.presented = image(evidence.scene);
+    s.pre_ui = image(evidence.pre_ui_scene);
+    s.pre_ui_image = evidence.pre_ui_image;
+    return s;
   }
 
   // The counts a completed sample commits (game3d_ui_counters.h): the CPU

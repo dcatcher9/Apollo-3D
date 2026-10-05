@@ -48,15 +48,22 @@ namespace sunshine_game3d::ui_mask {
     std::uint64_t source_present_generation{}; // Captured at this exact tag entry.
   };
   // The presented color a HUD-less image is compared with when no same-batch
-  // Backbuffer was tagged with it: the Present after its tag (next_present,
-  // presents_ago 0), or, for a capture that completed later (another queue),
-  // the color retained up to max_late_presents Presents ago (earlier_present);
-  // anything older is unpaired. Counting Presents only proposes this pair: a
-  // game may tag its next frame before the Present counted for it, and frame
-  // generation presents interpolated color between real frames, so the pair is
-  // never exact (UI framework E2). Only V2's test of the pixels validates it,
-  // and only a same-batch Backbuffer (same_tag_interval) makes a pair exact.
-  enum class hudless_present { unpaired, next_present, earlier_present };
+  // Backbuffer was tagged with it. A snapshot's first offer pairs with the
+  // Present after its tag (next_present, presents_ago 0), or, for a capture
+  // that completed later (another queue), with the color retained up to
+  // max_late_presents Presents ago (earlier_present); anything older is
+  // unpaired. Every later offer of the same snapshot (the capture owner offers
+  // the newest ready snapshot of its kind for as long as it is recent) pairs
+  // with that later Present's own color (reoffered, presents_ago 0): under
+  // frame generation the Present after the tag may be generated (DLSS-G
+  // presents its generated frames first) and the real frame come later in the
+  // snapshot's window, so only the current color can be the real frame's.
+  // Counting Presents only proposes these pairs: a game may tag its next frame
+  // before the Present counted for it, and frame generation presents
+  // interpolated color between real frames, so the pair is never exact (UI
+  // framework E2). Only V2's test of the pixels validates it, and only a
+  // same-batch Backbuffer (same_tag_interval) makes a pair exact.
+  enum class hudless_present { unpaired, next_present, earlier_present, reoffered };
   inline constexpr std::uint32_t max_late_presents = 2;
   struct hudless_pairing {
     hudless_present kind = hudless_present::unpaired;
@@ -68,6 +75,13 @@ namespace sunshine_game3d::ui_mask {
     if (!ago) return {hudless_present::next_present};
     if (ago > max_late_presents) return {};
     return {hudless_present::earlier_present, static_cast<std::uint32_t>(ago)};
+  }
+  // One offer of a snapshot: offered_before when the provider already offered
+  // this snapshot (its ticket, epoch and viewport) on an earlier Present.
+  constexpr hudless_pairing pair_hudless_offer(std::uint64_t tagged, std::uint64_t current, bool offered_before) {
+    if (!offered_before) return pair_hudless_present(tagged, current);
+    if (!tagged || tagged == UINT64_MAX || current <= tagged) return {};
+    return {hudless_present::reoffered};
   }
   // Present counting of generated Presents (UI framework T1). Under frame
   // generation a game may tag its UI inputs (UIAlpha, the UI color tag, the

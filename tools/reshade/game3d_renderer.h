@@ -64,14 +64,19 @@ namespace sunshine_game3d {
     // hudless_presents_ago is not used.
     reshade::api::resource_view hudless_pair{};
     // Otherwise counting proposes the color presented this many Presents ago
-    // (ui_mask::pair_hudless_present): the retained color, or the current one
-    // for zero. Such a pair is inexact; only V2 validates its pixels.
+    // (ui_mask::pair_hudless_offer): the retained color, or the current one
+    // for zero, as for every later offer of the same snapshot. Such a pair is
+    // inexact; only V2 validates its pixels.
     std::uint32_t hudless_presents_ago = 0;
     static constexpr std::uint32_t max_retained_presents = 2;
     // The pair is known to show one game frame: a same-batch Backbuffer
     // (E2). Only then may a difference covering the whole frame mean
     // full-screen UI rather than a mismatched pair.
     bool hudless_exact = false;
+    // The provider offered this same inexact HUD-less snapshot on the
+    // previous render, and no UIAlpha, UI color or Backbuffer tag with it:
+    // the detection pushes ui_detection::per_frame_reoffer (T1).
+    bool hudless_reoffer = false;
   };
   struct ui_render_input {
     ui_input_kind kind = ui_input_kind::unavailable;

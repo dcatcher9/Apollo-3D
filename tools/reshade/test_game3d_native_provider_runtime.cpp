@@ -356,7 +356,8 @@ namespace {
       if (tag_detection.at("ran_or_held") == "inactive" ||
           (tag_detection.at("candidates").get<unsigned>() & (candidate::ui_color | candidate::layer)) !=
             (candidate::ui_color | candidate::layer) ||
-          !(tag_detection.at("accepted").get<unsigned>() & candidate::ui_color) || tag_detection.at("flags") != 5u)
+          !(tag_detection.at("accepted").get<unsigned>() & candidate::ui_color) ||
+          (tag_detection.at("flags").get<unsigned>() & sunshine_game3d::ui_detection::stored_mask) != 5u)
         throw std::runtime_error("A tagged UIColorAndAlpha did not reach detection accepted beside the layer: " + tag_detection.dump());
       bool optional = false;
       for (const auto &entry : metadata.at("optional_captures")) if (entry.at("artifact_id") == 10) {
@@ -531,15 +532,17 @@ namespace {
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->released_id), box.request);
         step(); no_effects();
         // An accepted layer (earned by its selective frames, here or in an
-        // earlier pass of this hook) decides by itself, flat at any coverage
-        // (source 10), a winner opaque on every pixel that H1 never overrides.
+        // earlier pass of this hook) is the S1 winner, flat at any coverage
+        // (source 10), which H1 relabels 8 under a held hidden verdict
+        // (selection revision 10: it pins at weight 1 either way, P1).
         const bool accepted_layer = hidden_sample.at("accepted").get<unsigned>() & candidate::layer;
         const auto flags = hidden_metadata.at("replay").at("ui_detection").at("flags").get<unsigned>();
         if (!full_frame || hidden_sample.at("layer").at("opaque") != size_t(width) * height || scene.at("ran") != true ||
             !scene.contains("n") || !scene.contains("d") || pre_ui_scene.at("ran") != true || pre_ui_scene.at("image") != "layer" ||
             (accepted_layer ?
-              automatic.at("sampled_source") != sunshine_game3d::ui_detection::source_layer ||
-                hidden_sample.at("h1").at("applied") != false :
+              hidden_sample.at("h1").at("winner") != sunshine_game3d::ui_detection::source_layer ||
+                automatic.at("sampled_source") !=
+                  (hidden_sample.at("h1").at("applied") == true ? 8u : sunshine_game3d::ui_detection::source_layer) :
               automatic.at("sampled_source") != 8u || automatic.at("scene_guard").at("hidden") != true ||
               hidden_sample.at("h1").at("applied") != true ||
               !(hidden_sample.at("claims").get<unsigned>() & candidate::layer) || scene.at("valid") != true ||
@@ -568,7 +571,8 @@ namespace {
       const auto &layer_detection = layer_metadata.at("replay").at("ui_detection");
       if (layer_detection.at("ran_or_held") == "inactive" || !(layer_detection.at("candidates").get<unsigned>() & candidate::layer) ||
           !(layer_detection.at("accepted").get<unsigned>() & candidate::layer) ||
-          layer_detection.at("flags") != 5u || !layer_metadata.at("replay").contains("ui_pin"))
+          (layer_detection.at("flags").get<unsigned>() & sunshine_game3d::ui_detection::stored_mask) != 5u ||
+          !layer_metadata.at("replay").contains("ui_pin"))
         throw std::runtime_error("The offscreen UI layer did not reach detection accepted with flags 5: " + layer_detection.dump());
       // The layer is one frame late, but its mask is its raw alpha like every
       // other source: exactly the 160/255 rectangle, never a texel beyond it.

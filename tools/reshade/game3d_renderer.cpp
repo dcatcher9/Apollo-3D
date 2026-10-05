@@ -186,13 +186,14 @@ namespace sunshine_game3d {
     // invalid alpha, lit HUD-less pixels with the accepted candidates, the
     // offscreen UI layer's counts with the valid candidates (texel 7), and the
     // one-way judgment counts with the refused candidate and the frame reason
-    // (texels 8 and 9), the H1 texel 10 (the opaque Backbuffer and current
-    // counts, the claims and the h1 word) and texel 11 (the layer's pre-UI
-    // pixel counts, H1 d). The shader's markers size the decision texels and
-    // statistics rows
-    // (docs/reshade-sbs.md, UI detection flags and decision texels).
-    uint32_t detection_decision_texels = ui_detection::default_decision_texels;
-    uint32_t detection_statistics_images = ui_detection::default_scene_evidence_images;
+    // (texels 8 and 9, and the declared alphas' texel 16), the H1 texel 10
+    // (the opaque Backbuffer and current counts, the claims and the h1 word)
+    // and texel 11 (the layer's pre-UI pixel counts, H1 d). Detection runs
+    // only with the current revision's markers: its decision texels and both
+    // scene-evidence images (docs/reshade-sbs.md, UI detection flags and
+    // decision texels); zero when the shader has no marker.
+    uint32_t detection_decision_texels = 0;
+    uint32_t detection_statistics_images = 0;
     // Parts per statistics tile (ui_detection::tile_parts_marker; zero for a
     // shader without the marker, which counts each tile in one group).
     uint32_t detection_tile_parts = 0;
@@ -204,7 +205,7 @@ namespace sunshine_game3d {
     // image), so everything they measure is actionable.
     bool scene_evidence_supported() const {
       return detection_statistics_images == ui_detection::max_scene_evidence_images &&
-        detection_decision_texels >= ui_detection::scene_decision_texels;
+        detection_decision_texels == ui_detection::decision_texels;
     }
     uint64_t scene_evidence_runs{};
     // This render's scene guard bits (per_frame_scene_hidden,
@@ -245,9 +246,6 @@ namespace sunshine_game3d {
     // The acceptance signatures the pending sample was submitted with; its
     // read earns or revokes acceptance for exactly these (A1).
     candidate_signatures detection_pending_signatures;
-    // The Sunshine_UIDetectionFlags the pending sample was pushed with (its
-    // offered layer's late-copy bit, A2/E2).
-    uint32_t detection_pending_flags{};
     float difference_threshold = 4.f / 1023.f;
     // b2 word 4: the offscreen UI layer's pair threshold with the presented
     // color (H1 d, the pre-UI pixel counts); zero without a layer or when the
@@ -405,7 +403,7 @@ namespace sunshine_game3d {
       pin_lines = shader_marker(shader_source(), "SUNSHINE_UI_PIN_LINE_GROUPS");
       const auto texels = shader_marker(shader_source(), ui_detection::decision_texels_marker);
       const auto images = shader_marker(shader_source(), ui_detection::scene_evidence_images_marker);
-      detection_decision_texels = texels ? texels : ui_detection::default_decision_texels;
+      detection_decision_texels = texels;
       // An out-of-range marker leaves automatic detection unavailable (prepare_detection).
       detection_statistics_images = images;
       detection_tile_parts = shader_marker(shader_source(), ui_detection::tile_parts_marker);
@@ -795,25 +793,24 @@ namespace sunshine_game3d {
     bool prepare_detection() {
       if (detection_attempted) return detection_ready;
       detection_attempted = true;
-      // A shader either measures both images' scene evidence or none. Live
-      // detection binds candidate layout 2 (the offscreen UI layer at t7 and the
-      // accepted mask in b2 word 2); a shader of another layout, such as an
-      // older embedded replay shader, would misread both, so it gets none.
-      // Selection revision 9 (the T1 grace with its hold store at u5, the
-      // one-way judgment and the F1 reason words in texels 8 and 9, H1 with
-      // its texel 10, the layer's pre-UI pixel counts in texel 11 from the
-      // statistics rows at pre_ui_statistics_row with b2 word 4, and the
-      // empty change set) is the only one this renderer drives.
+      // Live detection binds candidate layout 2 (the offscreen UI layer at t7
+      // and the accepted mask in b2 word 2); a shader of another layout, such
+      // as an older embedded replay shader, would misread both, so it gets
+      // none. Selection revision 10 with its 17 decision texels and both
+      // scene-evidence images (the T1 grace with its hold store at u5 and the
+      // HUD-less re-offer bit, the one-way judgment of every alpha but the
+      // layer on sample frames, the F1 reason words, H1 with its texel 10,
+      // the layer's pre-UI pixel counts in texel 11 with b2 word 4, the empty
+      // change set, and the layer's premultiplied bound counted apart) is the
+      // only one this renderer drives; ui_detection_replay alone reads older
+      // shaders.
       if (shader_source().find("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") == std::string_view::npos ||
           shader_marker(shader_source(), ui_detection::candidate_layout_marker) != ui_detection::candidate_layout ||
           shader_marker(shader_source(), ui_selection::revision_marker) != ui_selection::revision ||
-          detection_decision_texels < ui_detection::pre_ui_decision_texels ||
-          detection_decision_texels > ui_detection::max_decision_texels ||
-          (detection_statistics_images && !scene_evidence_supported()) ||
+          !scene_evidence_supported() ||
           detection_tile_parts > ui_detection::max_tile_parts ||
           !texture_create(detection_statistics, ui_detection::statistics_columns(detection_tile_parts),
-            ui_detection::statistics_rows(detection_statistics_images, detection_decision_texels),
-            api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
+            ui_detection::statistics_row_count, api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
           !texture_create(detection_decision, detection_decision_texels, 1, api::format::r32g32b32a32_uint,
             api::resource_usage::unordered_access | api::resource_usage::copy_source) ||
           !texture_create(detected_mask, width, height, api::format::r32_float, api::resource_usage::unordered_access) ||
@@ -822,11 +819,11 @@ namespace sunshine_game3d {
           !pipeline_create(detection_tiles, "SunshineUIDetectionTilesCS", true, {}) ||
           !pipeline_create(detection_reduce, "SunshineUIDetectionReduceCS", true, {}) ||
           !pipeline_create(detection_mask, "SunshineUIDetectionMaskCS", true, {}) ||
-          (scene_evidence_supported() && (!texture_create(scene_cell_sums, ui_detection::scene::cells_x,
-              ui_detection::scene::cells_y, api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
-            !pipeline_create(scene_cells, "SunshineSceneCellsCS", true, {}) ||
-            !pipeline_create(scene_compare, "SunshineSceneCompareCS", true, {}) ||
-            !pipeline_create(scene_evidence, "SunshineSceneEvidenceCS", true, {})))) return false;
+          !texture_create(scene_cell_sums, ui_detection::scene::cells_x, ui_detection::scene::cells_y,
+            api::format::r32g32b32a32_uint, api::resource_usage::unordered_access) ||
+          !pipeline_create(scene_cells, "SunshineSceneCellsCS", true, {}) ||
+          !pipeline_create(scene_compare, "SunshineSceneCompareCS", true, {}) ||
+          !pipeline_create(scene_evidence, "SunshineSceneEvidenceCS", true, {})) return false;
       if (context11.p) {
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = desc.Height = desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
@@ -938,13 +935,13 @@ namespace sunshine_game3d {
       latest = {};
       if (!read) { counters_pending = false; return; }
       latest = ui_temporal::decode_detection_sample(counts.data(), counts.size(), detection_pending_source.now_ms,
-        detection_submitted, scene_evidence_supported(), detection_pending_flags);
+        detection_submitted);
       temporal.latest_source = detection_pending_source;
       temporal.latest_key = detection_pending_status_key;
-      // The scene guard reads the sample's decision words before the
-      // acceptance ledger observes it (game3d_scene_guard.h).
-      const auto observed = guard.observe(scene_guard::sample_of(counts.data(), counts.size(), detection_pending_source.now_ms,
-        scene_evidence_supported()), detection_pending_actionable, detection_pending_signatures.by_kind());
+      // The scene guard reads the decoded sample before the acceptance
+      // ledger observes it (game3d_scene_guard.h).
+      const auto observed = guard.observe(ui_temporal::guard_sample(latest), detection_pending_actionable,
+        detection_pending_signatures.by_kind());
       // Earns or revokes acceptance of the signatures this sample was taken
       // for; a session in a manual mode ignores it (S2).
       if (input.session)
@@ -975,10 +972,12 @@ namespace sunshine_game3d {
       for (unsigned i = 0; i != 3; ++i) views[11+i] = input.masks[i];
       views[14] = input.hudless;
       // A sample frame: the CPU reads the decision texels of at most one real
-      // frame every 100 ms. Only it pushes the pre-UI threshold, so that the
-      // tiles pass and the reduce count the pre-UI pixels (texel 11, read by
-      // the CPU only) on sample frames; every other frame pushes zero, which
-      // skips the presented-colour loads and the second sums.
+      // frame every 100 ms. Only it pushes per_frame_sample, so that the
+      // tiles pass and the reduce count the one-way judgment (A2) and the
+      // pre-UI pixels (texel 11) in their sample phase, and the pre-UI
+      // threshold; every other frame pushes neither, which skips the
+      // judgment's per-pixel work, the presented-colour loads and the second
+      // sums (its one-way and pre-UI counts are zero).
       const bool sample = bits && !detection_pending && !(detection_last_submit &&
         observation.now_ms >= detection_last_submit && observation.now_ms - detection_last_submit < 100);
       const float pushed_pre_ui_threshold = sample ? pre_ui_threshold : 0.f;
@@ -987,7 +986,8 @@ namespace sunshine_game3d {
       uint32_t threshold_bits, pre_ui_threshold_bits;
       std::memcpy(&threshold_bits, &difference_threshold, sizeof(threshold_bits));
       std::memcpy(&pre_ui_threshold_bits, &pushed_pre_ui_threshold, sizeof(pre_ui_threshold_bits));
-      detection_run = {ui_detection_snapshot::run_state::ran, bits, threshold_bits, accepted, flags | per_frame, flags};
+      detection_run = {ui_detection_snapshot::run_state::ran, bits, threshold_bits, accepted,
+        flags | per_frame | (sample ? ui_detection::per_frame_sample : 0u), flags};
       detection_run.pre_ui_threshold_bits = pre_ui_threshold_bits;
       // The reduce also adds this frame to the exact counters at u7.
       auto &counter_texture = textures[ui_counter_words];
@@ -1110,7 +1110,6 @@ namespace sunshine_game3d {
       }
       detection_pending_source = observation; detection_pending_status_key = temporal.status_key();
       detection_pending_signatures = input.signatures;
-      detection_pending_flags = detection_run.flags;
       detection_pending = detection_awaiting_signal = true;
       detection_last_submit = observation.now_ms; ++detection_submitted;
     }
@@ -1625,8 +1624,14 @@ namespace sunshine_game3d {
         // that is not this frame's. The sample just read may hold or release.
         d.scene_layer_proven = layer_proven();
         d.scene_bits = d.guard.per_frame(observation.now_ms, bits, candidates.signatures.by_kind(), d.scene_layer_proven);
+        // T1's re-offer bit: the provider offered the previous render's
+        // inexact HUD-less snapshot again, with no UIAlpha, UI color or
+        // Backbuffer tag (ui_detection::per_frame_reoffer).
+        constexpr uint32_t tags = candidate::ui_alpha | candidate::ui_color | candidate::backbuffer | candidate::exact;
+        const bool reoffer = candidates.hudless_reoffer && (bits & candidate::hudless) && !(bits & tags);
         const uint32_t per_frame = d.scene_bits | arbitration.per_frame |
-          (!input.depth_current ? ui_detection::per_frame_depth_not_current : 0u);
+          (!input.depth_current ? ui_detection::per_frame_depth_not_current : 0u) |
+          (reoffer ? ui_detection::per_frame_reoffer : 0u);
         d.detect_ui(cmd, p, candidates, observation, hudless_color, depth, bits, accepted, flags, per_frame);
         d.consumed_detection = d.detection_run;
         d.temporal.detected(observation);

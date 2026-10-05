@@ -246,9 +246,12 @@ namespace {
       require(SUCCEEDED(buffer->GetDesc(&description)), "Constant-buffer reflection failed");
       const bool ui = std::string(description.Name) == "SunshineUIConstants";
       const bool detection = std::string(description.Name) == "SunshineUIDetectionConstants";
-      require((ui && description.Size == 16) || (detection && description.Size == 48) ||
+      // b2 is ui_detection::b2_words (six since selection revision 9), padded
+      // to the 16-byte constant buffer granularity.
+      require((ui && description.Size == 16) ||
+          (detection && description.Size == (sunshine_game3d::ui_detection::b2_words * 4u + 15u) / 16u * 16u) ||
           (std::string(description.Name) == "SunshineGame3DConstants" && description.Size == 80),
-        "Native constants must retain the 80-byte b0, the 16-byte b1 and the ten-word (48-byte) b2");
+        "Native constants must retain the 80-byte b0, the 16-byte b1 and the six-word (32-byte) b2");
       const constant *begin = detection ? std::begin(detection_constants) : ui ? std::begin(ui_constants) : std::begin(constants);
       const constant *end = detection ? std::end(detection_constants) : ui ? std::end(ui_constants) : std::end(constants);
       for (auto item = begin; item != end; ++item) {
@@ -363,10 +366,10 @@ int main(int argc, char **argv) {
     require(marker("SUNSHINE_MONO_SKIPS_CONDITIONING") == 1, "The mono pack must keep reading no conditioning");
     // The reduce ports ui_selection::decide of this revision.
     require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision &&
-        sunshine_game3d::ui_selection::revision == 9u,
-      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 9");
-    require(decision_texels == detection::pre_ui_decision_texels && decision_texels == 12u,
-      "Selection revision 9 (H2 and S3 removed, so texel 12 is reserved) writes 12 decision texels");
+        sunshine_game3d::ui_selection::revision == 10u,
+      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 10");
+    require(decision_texels == detection::decision_texels && decision_texels == 17u,
+      "Selection revision 10 (texels 12-15 reserved, the declared alphas' one-way counts in texel 16) writes 17 decision texels");
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");

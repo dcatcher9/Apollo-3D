@@ -27,9 +27,11 @@
 //     removed). layer_proven: the offered layer's signature is proven the
 //     pre-UI scene image (alpha_auto_policy::pre_ui_proven of its
 //     signature); proven_image: that layer is also the offer's pre-UI image;
-//   - at poll, for a completed sample in scope: observe(sample_of(words, n,
-//     tick, scene), actionable, the signatures it was submitted with), before
-//     the acceptance ledger observes it.
+//   - at poll, for a completed sample in scope: observe(sample, actionable,
+//     the signatures it was submitted with), before the acceptance ledger
+//     observes it, with sample the guard's view of the decoded status sample
+//     (ui_temporal::guard_sample of ui_temporal::decode_detection_sample, so
+//     the decision words are decoded once).
 //
 // Holds (run_hold): two valid hidden samples within hold_ms enter a hold,
 // each further one renews it to its tick plus hold_ms, one valid visible
@@ -60,7 +62,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 
 namespace sunshine_game3d::scene_guard {
   using ui_detection::scene_verdict;
@@ -77,63 +78,20 @@ namespace sunshine_game3d::scene_guard {
     std::uint32_t decided{};
   };
 
-  // What the guard reads of one completed detection sample.
+  // What the guard reads of one completed detection sample (built from the
+  // decoded sample by ui_temporal::guard_sample).
   struct sample {
     std::uint64_t tick{};
     std::uint32_t pixels{}, offered{}, valid_bits{}, source{};
     // The raw informative claims before refutation (candidate bits |
-    // ui_detection::claim_pre_ui); zero without texel 10.
+    // ui_detection::claim_pre_ui).
     std::uint32_t claims{};
     // Pixels with alpha of at least 254/255, in ui_selection::alpha_index order.
     std::array<std::uint32_t, 5> opaque{};
     image_evidence presented, pre_ui;
     // The image texel 6 measured (ui_detection::pre_ui_image).
     std::uint32_t pre_ui_image{};
-    // Texel 10 exists (selection revision 3), so every opaque count is known.
-    bool complete{};
   };
-
-  // Decodes a sample from the decision words (texel t, component c is word
-  // 4 t + c): texels 0, 1, 4 and 7, the evidence texels 5 and 6 when scene
-  // evidence ran (scene) and texel 10 when there are h1_decision_texels.
-  inline sample sample_of(const std::uint32_t *words, std::size_t n, std::uint64_t tick, bool scene) {
-    namespace word = ui_detection::decision_word;
-    sample s;
-    s.tick = tick;
-    if (n < 4u * ui_detection::min_decision_texels) return s;
-    s.source = words[word::source];
-    s.pixels = words[word::pixels];
-    s.offered = words[word::candidates];
-    s.opaque[ui_selection::alpha_index(ui_selection::kind::ui_alpha)] = words[word::alpha_opaque];
-    s.opaque[ui_selection::alpha_index(ui_selection::kind::ui_color)] = words[word::alpha_opaque + 1];
-    if (n >= 4u * ui_detection::layer_decision_texels) {
-      s.opaque[ui_selection::alpha_index(ui_selection::kind::ui_layer)] = words[word::layer_opaque];
-      s.valid_bits = words[word::valid_bits];
-    }
-    if (n >= 4u * ui_detection::h1_decision_texels) {
-      s.opaque[ui_selection::alpha_index(ui_selection::kind::backbuffer)] = words[word::opaque_backbuffer];
-      s.opaque[ui_selection::alpha_index(ui_selection::kind::current)] = words[word::opaque_current];
-      s.claims = words[word::claims];
-      s.complete = true;
-    }
-    if (scene && n >= 4u * ui_detection::scene_decision_texels) {
-      const auto decode = [&](std::size_t first) {
-        image_evidence result;
-        result.n = words[first];
-        std::memcpy(&result.d, &words[first + 1], sizeof(result.d));
-        result.valid = ui_detection::scene_state_valid(words[first + 2]);
-        result.ran = ui_detection::scene_state_ran(words[first + 2]);
-        return result;
-      };
-      s.presented = decode(word::scene_n);
-      s.presented.verdict = ui_detection::scene_state_verdict(words[word::scene_state]);
-      s.presented.decided = words[word::scene_decided];
-      s.pre_ui = decode(word::pre_ui_scene_n);
-      s.pre_ui.verdict = s.pre_ui.valid ? ui_detection::scene_verdict_of(s.pre_ui.d) : scene_verdict::none;
-      s.pre_ui_image = words[word::pre_ui_scene_image];
-    }
-    return s;
-  }
 
   // A two-sample run hold over sample ticks (ms; 0 is no tick).
   struct run_hold {
@@ -237,15 +195,14 @@ namespace sunshine_game3d::scene_guard {
       observation result;
       // A refuted candidate offered, valid and below 99% opaque (or an exact
       // pair without a full change set) is an overlay again.
-      if (s.complete)
-        for (const auto k : ui_selection::draw_order) {
-          const auto b = ui_selection::bit(k);
-          if (!(s.offered & s.valid_bits & b)) continue;
-          const bool overlay = ui_selection::alpha_kind(k) ?
-            !ui_selection::opaque_full(s.opaque[ui_selection::alpha_index(k)], s.pixels) :
-            (s.offered & ui_detection::candidate::exact) && !(s.claims & b);
-          if (overlay) restore(signatures[std::size_t(k)]);
-        }
+      for (const auto k : ui_selection::draw_order) {
+        const auto b = ui_selection::bit(k);
+        if (!(s.offered & s.valid_bits & b)) continue;
+        const bool overlay = ui_selection::alpha_kind(k) ?
+          !ui_selection::opaque_full(s.opaque[ui_selection::alpha_index(k)], s.pixels) :
+          (s.offered & ui_detection::candidate::exact) && !(s.claims & b);
+        if (overlay) restore(signatures[std::size_t(k)]);
+      }
       const auto &presented = s.presented;
       if (actionable && presented.valid) {
         if (presented.verdict == scene_verdict::visible) {

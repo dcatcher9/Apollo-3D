@@ -594,6 +594,38 @@ namespace {
     static_assert(kind(0, 1) == present::unpaired);
     static_assert(kind(UINT64_MAX, 0) == present::unpaired);
     static_assert(kind(9, 3) == present::unpaired);
+    // A snapshot's first offer counts as above; every later offer of the same
+    // snapshot pairs with that Present's own color (reoffered, presents_ago 0)
+    // for as long as it is offered, beyond the retained history too: under
+    // DLSS-G the Present after the tag may be generated and the real frame
+    // come later in the snapshot's window.
+    constexpr auto offer = [](std::uint64_t tagged, std::uint64_t current, bool before) {
+      return mask::pair_hudless_offer(tagged, current, before);
+    };
+    static_assert(offer(10, 11, false).kind == present::next_present && offer(10, 12, false).kind == present::earlier_present &&
+      offer(10, 12, false).presents_ago == 1 && offer(10, 14, false).kind == present::unpaired);
+    for (const std::uint64_t current : {11u, 12u, 13u, 14u, 20u}) {
+      const auto later = offer(10, current, true);
+      require(later.kind == present::reoffered && !later.presents_ago, "A later offer of a HUD-less snapshot did not pair with its own Present");
+    }
+    static_assert(offer(0, 1, true).kind == present::unpaired && offer(UINT64_MAX, 2, true).kind == present::unpaired &&
+      offer(10, 10, true).kind == present::unpaired && offer(10, 9, true).kind == present::unpaired);
+    // FG 2x and 4x, both orderings: the real Present is the first or the last
+    // of the snapshot's window. Only the first offer may pair with an earlier
+    // Present, so the real frame's own Present is compared with its own color
+    // wherever it lies in the window.
+    for (const std::uint64_t window : {2u, 4u})
+      for (const bool real_first : {true, false}) {
+        const std::uint64_t tagged = 100, real = real_first ? tagged + 1 : tagged + window;
+        bool compared_real = false;
+        for (std::uint64_t current = tagged + 1; current <= tagged + window; ++current) {
+          const auto pairing = offer(tagged, current, current != tagged + 1);
+          require(pairing.kind == (current == tagged + 1 ? present::next_present : present::reoffered) && !pairing.presents_ago,
+            "An on-time HUD-less offer did not pair with its own Present");
+          compared_real = compared_real || current == real;
+        }
+        require(compared_real, "The real Present of a frame-generation window was never compared with its own color");
+      }
     // Hogwarts tags HUDLessColor and Backbuffer in one batch; their counters
     // started at different values but advanced by the same Presents.
     static_assert(mask::same_tag_interval(619, 621, 1, 3));
@@ -680,7 +712,7 @@ int main() {
     local_queue_acquisition_preserves_current_candidate(); std::puts("PASS explicit local consumer queue selects current submitted pixels without changing strict diagnostic acquisition");
     explicit_source_filter_prevents_higher_priority_starvation(); std::puts("PASS exact source filtering prevents unreviewed priority starvation and fallback");
     source_filter_change_revokes_ready_pending_and_inflight_attempts(); std::puts("PASS source-filter changes revoke completed, pending and in-flight old reservations");
-    hudless_pairs_with_the_next_present_only(); std::puts("PASS HUD-less pairs with the Present after its tag, late captures within retained history, never stale or reversed generations");
+    hudless_pairs_with_the_next_present_only(); std::puts("PASS HUD-less pairs with the Present after its tag, late captures within retained history, later offers with their own Present, never stale or reversed generations");
     declared_lifetimes_preserve_state_policy(); std::puts("PASS UI tag lifetimes preserve provenance and choose observed-at-call or strict longer-lived state policy");
     begin_refusals_name_their_stage(); std::puts("PASS UI capture begin refusals: no or ambiguous request, filtered kind, not newer, shape, unsupported lifetime and no reservation each name their stage");
     mask::invalidate_all();
