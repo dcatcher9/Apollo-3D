@@ -504,6 +504,14 @@ namespace platf {
     /** The encoder finished consuming the most recent conversion; release its inputs early. */
     virtual void encoder_consumed_input() {}
 
+    /** True when the most recent convert() left the encoder input unchanged: its image carried
+     * only metadata for pixels an external provider owned, and that provider no longer owns the
+     * output. The encode loop then has nothing new to encode for it.
+     */
+    virtual bool conversion_kept_input() const {
+      return false;
+    }
+
     video::sunshine_colorspace_t colorspace;
   };
 

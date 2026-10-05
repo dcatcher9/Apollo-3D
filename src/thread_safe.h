@@ -131,6 +131,12 @@ namespace safe {
       _cv.notify_all();
     }
 
+    /** @brief Forget a wake() that no timed pop() has consumed, for a consumer starting over. */
+    void discard_wake() {
+      std::lock_guard lg {_lock};
+      _woken = false;
+    }
+
     // pop and view should not be used interchangeably
     status_t view() {
       std::unique_lock ul {_lock};

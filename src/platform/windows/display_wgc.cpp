@@ -90,6 +90,7 @@ namespace platf::dxgi {
   }
 
   wgc_capture_t::~wgc_capture_t() {
+    drop_kept_frame();
     if (capture_session) {
       capture_session.Close();
     }
@@ -252,6 +253,35 @@ namespace platf::dxgi {
       consumed_frame = nullptr;
     }
     return capture_e::ok;
+  }
+
+  void wgc_capture_t::keep_frame() {
+    if (consumed_frame == nullptr) {
+      return;
+    }
+    drop_kept_frame();
+    kept_frame = consumed_frame;
+    consumed_frame = nullptr;
+  }
+
+  bool wgc_capture_t::kept_frame_texture(ID3D11Texture2D **out, detail::wgc_timestamp_t &out_time) {
+    if (kept_frame == nullptr) {
+      return false;
+    }
+    auto capture_access = kept_frame.Surface().as<winrt::IDirect3DDxgiInterfaceAccess>();
+    if (capture_access == nullptr || FAILED(capture_access->GetInterface(IID_ID3D11Texture2D, (void **) out))) {
+      drop_kept_frame();
+      return false;
+    }
+    out_time = kept_frame.SystemRelativeTime();
+    return true;
+  }
+
+  void wgc_capture_t::drop_kept_frame() {
+    if (kept_frame != nullptr) {
+      kept_frame.Close();
+      kept_frame = nullptr;
+    }
   }
 
   int wgc_capture_t::set_cursor_visible(bool x) {

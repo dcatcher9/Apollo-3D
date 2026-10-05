@@ -104,6 +104,22 @@ TEST(ThreadSafeEventTest, WakeBeforeTheWaitIsKeptOnceAndAValueConsumesIt) {
   EXPECT_GE(std::chrono::steady_clock::now() - after_value, 10ms);  // A full wait, not a wake.
 }
 
+TEST(ThreadSafeEventTest, DiscardedWakeLeavesAFullWaitAndKeepsStoredValues) {
+  safe::event_t<int> event;
+  event.wake();
+  event.discard_wake();
+  const auto started = std::chrono::steady_clock::now();
+  EXPECT_FALSE(event.pop(20ms));
+  EXPECT_GE(std::chrono::steady_clock::now() - started, 15ms);
+
+  event.raise(4);
+  event.wake();
+  event.discard_wake();
+  auto value = event.pop(0ms);
+  ASSERT_TRUE(value);
+  EXPECT_EQ(*value, 4);
+}
+
 TEST(ThreadSafeEventTest, TimedViewWakesWhenStopped) {
   safe::event_t<int> event;
   std::thread stopper {[&event] {

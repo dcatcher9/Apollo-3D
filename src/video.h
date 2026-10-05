@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <limits>
 #include <memory>
@@ -401,6 +402,40 @@ namespace video {
     std::atomic<std::uint64_t> _pacing;
   };
 
+  /**
+   * Ends the session encode loop's current wait so it services a control request promptly.
+   *
+   * The control stream raises IDR, reference-invalidation, stream-gamma, video-mode and shutdown
+   * requests on the session's mail, and capture raises a display reinitialization, without
+   * signalling the image wait. An independent provider's encode loop does not poll at stream
+   * cadence (a live Game 3D export wakes it only for new frames), so it would see them only at its
+   * next frame or minimum-FPS keepalive. That loop installs its image wait's wake here while it
+   * runs; other loops keep their bounded waits, and with nothing installed a wake does nothing.
+   */
+  class encode_wake_t {
+  public:
+    void install(std::function<void()> wake) {
+      std::lock_guard lock {_mutex};
+      _wake = std::move(wake);
+    }
+
+    /** Call after raising the request, from any thread. */
+    void wake() const {
+      std::function<void()> wake;
+      {
+        std::lock_guard lock {_mutex};
+        wake = _wake;
+      }
+      if (wake) {
+        wake();
+      }
+    }
+
+  private:
+    mutable std::mutex _mutex;
+    std::function<void()> _wake;
+  };
+
   struct video_mode_request_ref_t {
     std::uint32_t request_id;
     std::uint64_t transaction_id;
@@ -515,6 +550,8 @@ namespace video {
     stream_gamma_mode_e stream_gamma = stream_gamma_mode_e::windows_default;
     std::shared_ptr<stream_gamma_publisher_t> stream_gamma_state;
     bool stream_gamma_supported = false;
+    // APPEND-ONLY. Shared with the control stream, which wakes the encode loop after each request.
+    std::shared_ptr<encode_wake_t> encode_wake;
   };
 
   // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.

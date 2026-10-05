@@ -821,7 +821,14 @@ namespace stream {
     std::uint64_t gcm_iv_counter;
     safe::mail_raw_t::event_t<bool> idr_events;
     safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;
+    // Shared with the encode loop through config_t::encode_wake.
+    std::shared_ptr<video::encode_wake_t> encode_wake = std::make_shared<video::encode_wake_t>();
     std::unique_ptr<platf::deinit_t> qos;
+
+    /** Call after raising a request on the session mail that the encode loop services. */
+    void wake_encoder() const {
+      encode_wake->wake();
+    }
   };
 
   struct audio_channel_t {
@@ -1001,6 +1008,7 @@ namespace stream {
       // Do not publish pacing here. The requested encoder may fail, so video.cpp publishes the
       // coherent effective bitrate/cadence pair only after init_encoder() succeeds.
       request.mail->queue<video::video_mode_change_t>(mail::video_mode)->raise(request.change);
+      request.video->wake_encoder();
     }
 
     /**
@@ -2240,6 +2248,7 @@ namespace stream {
         });
       } else {
         session->control.stream_gamma_queue->raise(request);
+        session->video->wake_encoder();
       }
     });
 
@@ -2260,6 +2269,7 @@ namespace stream {
 
     server->map(control_packet::request_idr, [](session_t *session, const std::string_view &) {
       session->video->idr_events->raise(true);
+      session->video->wake_encoder();
     });
 
     server->map(control_packet::invalidate_ref_frames, 2 * sizeof(std::int64_t), [&](session_t *session, const std::string_view &payload) {
@@ -2269,6 +2279,7 @@ namespace stream {
       auto lastFrame = util::endian::little(frames[1]);
 
       session->video->invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
+      session->video->wake_encoder();
     });
 
     server->map(control_packet::sbs_telemetry_subscription, [](session_t *session, const std::string_view &payload) {
@@ -2794,6 +2805,7 @@ namespace stream {
       );
       send_termination(*server, *session);
       session->shutdown_event->raise(true);
+      session->video->wake_encoder();
       session->controlEnd.raise(true);
       session->control.deferred_live_video_mode_acks.clear();
       session->control.peer = nullptr;
@@ -2973,6 +2985,7 @@ namespace stream {
         }
         channel->awaiting_recovery_idr = true;
         channel->idr_events->try_raise(true);
+        channel->wake_encoder();
       };
 
       const auto packet_dequeued_at = std::chrono::steady_clock::now();
@@ -4372,6 +4385,7 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      session.video->wake_encoder();
       rtsp_stream::notify_session_stopping();
     }
 
@@ -4381,6 +4395,7 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      session.video->wake_encoder();
       rtsp_stream::notify_session_stopping();
     }
 
@@ -4395,6 +4410,7 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      session.video->wake_encoder();
       rtsp_stream::notify_session_stopping();
       return true;
     }
@@ -4604,6 +4620,7 @@ namespace stream {
       session->video->min_required_fec_packets = config.minRequiredFecPackets;
       session->video->source_frame_id_negotiated = config.client_supports_source_frame_id_v1;
       session->video->effective_mode = session->config.monitor.effective_mode;
+      session->config.monitor.encode_wake = session->video->encode_wake;
       session->config.monitor.sbs_debug_dump_pending =
         session->video->sbs_debug_dump_pending;
       session->requested_sbs_mode->store(

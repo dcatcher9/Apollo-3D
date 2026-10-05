@@ -219,6 +219,77 @@ namespace {
     EXPECT_EQ(cursor_removed->content_timestamp, captured_at);
   }
 
+  TEST(WindowsDdupDroppedDesktopTest, ReleasedExportOnAStaticDesktopDeliversACopiedWholeDesktop) {
+    platf::dxgi::detail::ddup_dropped_desktop_t desktop;
+    // A live export owns the output: the present that reveals the desktop is forwarded as
+    // metadata (a pixels_skipped image), and no retained surface keeps it.
+    auto acquisition = desktop.acquire(true, true);
+    EXPECT_TRUE(acquisition.skip_pixels);
+    EXPECT_FALSE(acquisition.read_desktop);
+    EXPECT_TRUE(desktop.dropped());
+    EXPECT_FALSE(desktop.reduplicate_on_timeout(true));
+
+    // The export releases the output and the static desktop presents nothing more. The capture
+    // timeout re-duplicates the output once, never repeatedly.
+    EXPECT_TRUE(desktop.reduplicate_on_timeout(false));
+    EXPECT_FALSE(desktop.reduplicate_on_timeout(false));
+
+    // The new duplication's first acquisition is copied as a whole desktop, with or without a
+    // present, and without dirty metadata that would relate it to pixels never copied.
+    for (const bool has_present : {false, true}) {
+      auto copy = desktop;
+      acquisition = copy.acquire(false, has_present);
+      EXPECT_FALSE(acquisition.skip_pixels);
+      EXPECT_TRUE(acquisition.read_desktop);
+      EXPECT_TRUE(acquisition.unknown_damage);
+    }
+    acquisition = desktop.acquire(false, false);
+    ASSERT_TRUE(acquisition.read_desktop);
+    desktop.copied();
+    EXPECT_FALSE(desktop.dropped());
+
+    // Afterwards pointer-only updates are ordinary again and timeouts change nothing.
+    acquisition = desktop.acquire(false, false);
+    EXPECT_FALSE(acquisition.skip_pixels);
+    EXPECT_FALSE(acquisition.read_desktop);
+    EXPECT_FALSE(acquisition.unknown_damage);
+    EXPECT_FALSE(desktop.reduplicate_on_timeout(false));
+    acquisition = desktop.acquire(false, true);
+    EXPECT_TRUE(acquisition.read_desktop);
+    EXPECT_FALSE(acquisition.unknown_damage);
+  }
+
+  TEST(WindowsDdupDroppedDesktopTest, PointerUpdateAfterReleaseReadsTheDesktopWithoutReduplicating) {
+    platf::dxgi::detail::ddup_dropped_desktop_t desktop;
+    ASSERT_TRUE(desktop.acquire(true, true).skip_pixels);
+    // Cursor-only updates while the export still owns the output stay metadata.
+    EXPECT_TRUE(desktop.acquire(true, false).skip_pixels);
+    EXPECT_TRUE(desktop.dropped());
+
+    const auto acquisition = desktop.acquire(false, false);
+    EXPECT_FALSE(acquisition.skip_pixels);
+    EXPECT_TRUE(acquisition.read_desktop);
+    EXPECT_TRUE(acquisition.unknown_damage);
+    desktop.copied();
+    EXPECT_FALSE(desktop.reduplicate_on_timeout(false));
+  }
+
+  TEST(WindowsDdupDroppedDesktopTest, OnlyDroppedPresentsNeedRecoveryAndEachDropMayReduplicateOnce) {
+    platf::dxgi::detail::ddup_dropped_desktop_t desktop;
+    // A cursor-only update under an export drops no desktop pixels.
+    EXPECT_TRUE(desktop.acquire(true, false).skip_pixels);
+    EXPECT_FALSE(desktop.dropped());
+    EXPECT_FALSE(desktop.reduplicate_on_timeout(false));
+    EXPECT_FALSE(desktop.acquire(false, false).read_desktop);
+
+    // An export that resumes after a re-duplication and drops another present gets one more.
+    ASSERT_TRUE(desktop.acquire(true, true).skip_pixels);
+    EXPECT_TRUE(desktop.reduplicate_on_timeout(false));
+    ASSERT_TRUE(desktop.acquire(true, true).skip_pixels);
+    EXPECT_TRUE(desktop.reduplicate_on_timeout(false));
+    EXPECT_FALSE(desktop.reduplicate_on_timeout(false));
+  }
+
   TEST(WindowsDdupDamageTest, NormalizesDirtyAndBothSidesOfMoveRects) {
     const RECT dirty {10, 20, 30, 40};
     DXGI_OUTDUPL_MOVE_RECT move {};

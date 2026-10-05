@@ -7559,8 +7559,9 @@ TEST(EncodeReadyEventLifecycleSourceTests, ConsumesOnlyReadinessSampledBeforeCon
   );
   const auto ready_peek = encode_scope.find("depth_pipeline_ready_event->peek();", sample);
   const auto convert = encode_scope.find("convert_frame(*last_img, schedule.next_encode_target)", ready_peek);
+  // Any completed conversion consumes it, including one that kept the encoder input.
   const auto consume = encode_scope.find(
-    "converted_frame && consume_sampled_depth_pipeline_ready && depth_pipeline_ready_event",
+    "conversion_ran && consume_sampled_depth_pipeline_ready && depth_pipeline_ready_event",
     convert
   );
   const auto pop = encode_scope.find("depth_pipeline_ready_event->pop(0ms);", consume);

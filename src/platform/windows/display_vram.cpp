@@ -494,9 +494,18 @@ namespace platf::dxgi {
     // capture skips the desktop pixels it never reads. Local AR never installs it.
     void set_external_frame_wake(std::function<void()> wake) {
       external_frame_wake = std::move(wake);
+      if (!external_frame_wake) {
+        // The streaming loop is leaving: capture must copy the desktop again for whoever
+        // converts next, including a replacement encoder on this display.
+        claim_capture_pixels(false);
+      }
       if (reshade_receiver && ::video::is_packed_mode(sbs_mode)) {
         reshade_receiver->set_frame_wake(external_frame_wake);
       }
+    }
+
+    bool conversion_kept_input() const {
+      return conversion_kept_input_;
     }
 
     void encoder_consumed_input() {
@@ -613,6 +622,7 @@ namespace platf::dxgi {
         std::nullopt
     ) {
       auto &img = (img_d3d_t &) img_base;
+      conversion_kept_input_ = false;
       // Reference white belongs to the captured Windows display, not its EDID peak or
       // the headset. Poll at most once a second, including when the desktop is static.
       const auto gamma_now = std::chrono::steady_clock::now();
@@ -670,7 +680,8 @@ namespace platf::dxgi {
         claim_capture_pixels(export_owns_output && external_frame_wake);
         if (img.pixels_skipped && !export_owns_output) {
           // Capture skipped these pixels while an export owned the stream, and it no longer does.
-          // Keep the previous encoder input; capture copies again from the next desktop present.
+          // The encoder input stays as it was; capture now copies the whole desktop again.
+          conversion_kept_input_ = true;
           return 0;
         }
 
@@ -6162,6 +6173,7 @@ namespace platf::dxgi {
     std::unique_ptr<platf::reshade_bridge::receiver_t> reshade_receiver;
     std::function<void()> external_frame_wake;  ///< See set_external_frame_wake().
     std::uint64_t capture_pixels_token = 0;  ///< This encoder's display->external_pixels_owner value.
+    bool conversion_kept_input_ = false;  ///< See platf::encode_device_t::conversion_kept_input().
     std::unique_ptr<sbs_cursor::compositor_t> external_cursor;
     float external_cursor_white_multiplier = 203.0f / 80.0f;
     bool external_cursor_logged = false;
@@ -7743,6 +7755,10 @@ namespace platf::dxgi {
       base.encoder_consumed_input();
     }
 
+    bool conversion_kept_input() const override {
+      return base.conversion_kept_input();
+    }
+
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const override {
       return base.rendered_content_timestamp();
     }
@@ -7805,6 +7821,11 @@ namespace platf::dxgi {
     auto capture_status = dup.next_frame(frame_info, timeout, &res_p);
     resource_t res {res_p};
 
+    // Sampled once per acquisition; the encode thread may claim or release the output any time.
+    const bool export_owns_output = external_pixels_owner.load(std::memory_order_acquire) != 0;
+    if (capture_status == capture_e::timeout && dropped_desktop.reduplicate_on_timeout(export_owns_output)) {
+      return reduplicate_output();
+    }
     if (capture_status != capture_e::ok) {
       return capture_status;
     }
@@ -7812,8 +7833,11 @@ namespace platf::dxgi {
     const bool mouse_update_flag = frame_info.LastMouseUpdateTime.QuadPart != 0 || frame_info.PointerShapeBufferSize > 0;
     const bool frame_update_flag = frame_info.LastPresentTime.QuadPart != 0;
     const bool update_flag = mouse_update_flag || frame_update_flag;
+    const auto acquisition = dropped_desktop.acquire(export_owns_output, frame_update_flag);
+    // After dropped presents, any acquisition's surface holds the whole current desktop.
+    const bool read_surface = frame_update_flag || (acquisition.read_desktop && res);
 
-    if (!update_flag) {
+    if (!update_flag && !read_surface) {
       return capture_e::timeout;
     }
 
@@ -7833,11 +7857,18 @@ namespace platf::dxgi {
       last_content_timestamp
     );
     auto frame_timestamp = timestamp_selection.presentation_timestamp;
+    if (read_surface && !frame_timestamp) {
+      frame_timestamp = timestamp_now;
+    }
+    // A whole-desktop read without a present carries content current as of this acquisition.
+    const auto surface_timestamp = present_timestamp ? present_timestamp :
+                                   read_surface      ? frame_timestamp :
+                                                       std::nullopt;
     // A present becomes content only after its CopyResource is actually submitted. Mark the
     // metadata chain discontinuous now so any early return makes the next successful commit
     // explicitly UNKNOWN instead of omitting an acquired-but-uncopied surface.
     const bool prior_damage_chain_valid = damage_chain_valid;
-    if (frame_update_flag) {
+    if (read_surface) {
       damage_chain_valid = false;
     }
 
@@ -7879,7 +7910,7 @@ namespace platf::dxgi {
 
     texture2d_t src {};
     std::optional<detail::ddup_damage_update_t> pending_damage;
-    if (frame_update_flag) {
+    if (read_surface) {
       // Get the texture object from this frame
       status = res->QueryInterface(IID_ID3D11Texture2D, (void **) &src);
       if (FAILED(status)) {
@@ -7910,20 +7941,22 @@ namespace platf::dxgi {
         return capture_e::reinit;
       }
 
-      pending_damage = dup.damage_update(
-        frame_info,
-        display_rotation,
-        width_before_rotation,
-        height_before_rotation
-      );
-      if (!prior_damage_chain_valid) {
+      pending_damage = frame_update_flag ?
+                         dup.damage_update(
+                           frame_info,
+                           display_rotation,
+                           width_before_rotation,
+                           height_before_rotation
+                         ) :
+                         detail::ddup_damage_update_t {};
+      if (!prior_damage_chain_valid || acquisition.unknown_damage) {
         pending_damage->known = false;
         pending_damage->rects.clear();
       }
     }
 
     auto commit_desktop_surface = [&]() {
-      if (!pending_damage || !present_timestamp) {
+      if (!pending_damage || !surface_timestamp) {
         return;
       }
 
@@ -7938,7 +7971,7 @@ namespace platf::dxgi {
         last_ddup_damage.reset();
       }
       pending_damage.reset();
-      last_content_timestamp = present_timestamp;
+      last_content_timestamp = surface_timestamp;
       damage_chain_valid = true;
     };
 
@@ -7955,10 +7988,10 @@ namespace platf::dxgi {
 
     // An encoder converting a live external export never reads these pixels: forward only the
     // timestamps and the cursor it composites, without a copy or keyed-mutex round trip. Copies
-    // resume once it releases the capture. Until a present is copied again no retained surface
-    // holds current pixels, so cursor-only updates stay metadata too; the encoder repeats its
-    // last output for them (at most until the game's next present).
-    if (capture_format != DXGI_FORMAT_UNKNOWN && (external_pixels_owner.load(std::memory_order_acquire) != 0 || (desktop_pixels_dropped && !src))) {
+    // resume once it releases the capture, starting with a whole-desktop read (dropped_desktop).
+    // Should no surface be readable before that, no retained surface holds current pixels either,
+    // so a cursor update stays metadata rather than becoming a black dummy frame.
+    if ((acquisition.skip_pixels || (dropped_desktop.dropped() && !src)) && capture_format != DXGI_FORMAT_UNKNOWN) {
       if (src) {
         if (auto surface = std::get_if<texture2d_t>(&last_frame_variant)) {
           old_surface_delayed_destruction.reset(surface->release());
@@ -7966,7 +7999,6 @@ namespace platf::dxgi {
         }
         last_frame_variant = {};
         last_ddup_damage.reset();
-        desktop_pixels_dropped = true;
       }
       const auto cursor = blend_mouse_cursor_flag ? cursor_snapshot() : sbs_cursor::snapshot_t {};
       const bool cursor_changed = !sbs_cursor::same_presentation(cursor, last_delivered_cursor);
@@ -8201,7 +8233,7 @@ namespace platf::dxgi {
     }
 
     if (last_frame_action == lfa::copy_src_to_img || last_frame_action == lfa::copy_src_to_surface) {
-      desktop_pixels_dropped = false;
+      dropped_desktop.copied();
     }
 
     auto blend_cursor = [&](img_d3d_t &d3d_img) {
@@ -8332,15 +8364,30 @@ namespace platf::dxgi {
     return dup.release_frame();
   }
 
+  capture_e display_ddup_vram_t::reduplicate_output() {
+    BOOST_LOG(info) << "Desktop Duplication: re-duplicating the output to read the desktop a Game 3D export covered."sv;
+    // Duplicating resets the detected format. Keep it so the first acquisition still detects a
+    // real format change (and reinitializes) instead of delivering a dummy frame.
+    const auto format = capture_format;
+    if (const auto status = dup.reset(); status != capture_e::ok) {
+      return status;
+    }
+    if (dup.init(this)) {
+      return capture_e::reinit;
+    }
+    capture_format = format;
+    return capture_e::timeout;
+  }
+
   int display_ddup_vram_t::init(const ::video::config_t &config, const std::string &display_name) {
     cursor_shape.reset();
     last_content_timestamp.reset();
     last_ddup_damage.reset();
-    desktop_pixels_dropped = false;
+    dropped_desktop = {};
     last_delivered_cursor = {};
     damage_history = std::make_shared<detail::ddup_damage_history_t>();
     damage_chain_valid = true;
-    if (display_base_t::init(config, display_name, capture_backend_e::ddup) || dup.init(this, config)) {
+    if (display_base_t::init(config, display_name, capture_backend_e::ddup) || dup.init(this)) {
       return -1;
     }
 
@@ -8440,16 +8487,22 @@ namespace platf::dxgi {
     detail::wgc_timestamp_t frame_time {};
     dup.set_cursor_visible(cursor_visible);
     auto capture_status = dup.next_frame(timeout, &src, frame_time);
-    if (capture_status != capture_e::ok) {
+    // Sampled once per frame; the encode thread may claim or release the output any time.
+    const bool export_owns_output = external_pixels_owner.load(std::memory_order_acquire) != 0;
+    // A static screen sends no frame once an export releases the output. Copy the newest frame
+    // forwarded without pixels meanwhile, which is still the current screen.
+    const bool kept_frame = capture_status == capture_e::timeout && !export_owns_output && dup.kept_frame_texture(&src, frame_time);
+    if (capture_status != capture_e::ok && !kept_frame) {
       return capture_status;
     }
 
     const auto timestamp_now = std::chrono::steady_clock::now();
-    const auto frame_timestamp = timestamp_now - detail::wgc_frame_age(
-                                                   qpc_counter(),
-                                                   qpc_frequency(),
-                                                   frame_time
-                                                 );
+    const auto frame_timestamp = kept_frame ? timestamp_now :
+                                              timestamp_now - detail::wgc_frame_age(
+                                                                qpc_counter(),
+                                                                qpc_frequency(),
+                                                                frame_time
+                                                              );
     D3D11_TEXTURE2D_DESC desc {};
     src->GetDesc(&desc);
 
@@ -8476,11 +8529,13 @@ namespace platf::dxgi {
     d3d_img->ddup_damage.reset();
     d3d_img->cursor = {};
     d3d_img->blank = false;  // image is always ready for capture
-    if (external_pixels_owner.load(std::memory_order_acquire) != 0) {
+    if (export_owns_output) {
       // A live external export owns the encoded pixels. WGC exposes no cursor metadata, so the
-      // frame carries nothing new for that encoder: forward its timestamp without a copy.
+      // frame carries nothing new for that encoder: forward its timestamp without a copy, and
+      // keep the frame for the copy once the export releases the output.
       d3d_img->pixels_skipped = true;
       d3d_img->conversion_needed = false;
+      dup.keep_frame();
     } else if (complete_img(d3d_img.get(), false) == 0) {
       texture_lock_helper lock_helper(d3d_img->capture_mutex.get());
       if (lock_helper.lock()) {
@@ -8489,6 +8544,8 @@ namespace platf::dxgi {
         BOOST_LOG(error) << "Failed to lock capture texture";
         return capture_e::error;
       }
+      // This copy, or a newer frame's, supersedes any kept frame.
+      dup.drop_kept_frame();
     } else {
       return capture_e::error;
     }

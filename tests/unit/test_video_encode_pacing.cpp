@@ -463,6 +463,41 @@ namespace {
     EXPECT_FALSE(images.peek());
   }
 
+  TEST(RemoteEncodePendingSourceTest, MetadataOnlySourceIsNeverHandedToAReplacement) {
+    // A live export's capture carries no pixels. Returned to a replacement encoder, it would only
+    // keep that encoder's black startup input; capture copies the whole desktop again instead.
+    safe::event_t<std::shared_ptr<captured_source>> images;
+    std::weak_ptr<captured_source> skipped;
+    {
+      source_owner retiring;
+      retiring.observe(std::make_shared<captured_source>(7, at(5ms)));
+      skipped = retiring.latest();
+      retiring.return_for_rebuild(images, false, false, false);
+      EXPECT_FALSE(images.try_pop());
+    }
+    EXPECT_TRUE(skipped.expired());
+  }
+
+  TEST(RemoteEncodeWakeTest, ControlRequestsWakeOnlyAnInstalledEncodeLoop) {
+    video::encode_wake_t wake;
+    wake.wake();  // Nothing installed: no effect.
+
+    safe::event_t<int> images;
+    wake.install([&images]() {
+      images.wake();
+    });
+    wake.wake();
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_FALSE(images.pop(10s));  // Ends at once, without a value.
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 5s);
+
+    wake.install({});
+    wake.wake();
+    const auto idle = std::chrono::steady_clock::now();
+    EXPECT_FALSE(images.pop(20ms));  // A full wait again.
+    EXPECT_GE(std::chrono::steady_clock::now() - idle, 15ms);
+  }
+
   TEST(RemoteEncodePendingSourceTest, FailureHandoffPreservesNewerQueuedCapture) {
     safe::event_t<std::shared_ptr<captured_source>> images;
     source_owner retiring;

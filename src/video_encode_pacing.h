@@ -48,11 +48,13 @@ namespace video::detail {
 
     /** Return real content to a same-display replacement after either failure or a mode change.
      * A capture already waiting in the mailbox is newer and must win. Display reinitialization
-     * owns disposal of old-device images, so never hand one back across that boundary.
+     * owns disposal of old-device images, so never hand one back across that boundary. An image
+     * without pixels (metadata for pixels an external provider owned) is never handed back
+     * either: the replacement could only keep its black startup input for it.
      */
     template<class ImageEvent>
-    void return_for_rebuild(ImageEvent &images, bool shutting_down, bool display_reinit_pending) {
-      if (latest_ && !shutting_down && images.running() && !display_reinit_pending) {
+    void return_for_rebuild(ImageEvent &images, bool shutting_down, bool display_reinit_pending, bool holds_pixels = true) {
+      if (latest_ && holds_pixels && !shutting_down && images.running() && !display_reinit_pending) {
         images.try_raise(release());
       }
     }

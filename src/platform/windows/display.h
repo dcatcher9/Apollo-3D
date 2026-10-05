@@ -584,6 +584,60 @@ namespace platf::dxgi {
       return capture_e::ok;
     }
 
+    /** Desktop Duplication pixels dropped while an external export owned the encoded output.
+     *
+     * While an encoder converts a live export, capture forwards each acquisition as metadata and
+     * copies no present. DDup reports a present only once, so when the export releases the output
+     * no retained surface holds the current desktop, and a static desktop may never present again.
+     * The first acquisition after the release is therefore read as a whole-desktop present even
+     * when only the pointer changed: its surface always holds the complete desktop, with damage
+     * unknown. If none arrives before a capture timeout, the output is duplicated again once; the
+     * new duplication's first acquisition returns the whole desktop.
+     */
+    class ddup_dropped_desktop_t {
+    public:
+      struct acquisition_t {
+        bool skip_pixels = false;  ///< Forward timestamps and cursor metadata only.
+        bool read_desktop = false;  ///< Copy the acquired surface, present or not.
+        bool unknown_damage = false;  ///< No dirty metadata relates the copy to retained pixels.
+      };
+
+      /** Plan one successful acquisition. */
+      [[nodiscard]] acquisition_t acquire(bool export_owns_output, bool has_present) noexcept {
+        if (export_owns_output) {
+          if (has_present) {
+            dropped_ = true;
+            reduplicated_ = false;
+          }
+          return {true, false, false};
+        }
+        return {false, has_present || dropped_, dropped_};
+      }
+
+      /** Whether a timed-out acquisition re-duplicates the output now: once per drop. */
+      [[nodiscard]] bool reduplicate_on_timeout(bool export_owns_output) noexcept {
+        if (!dropped_ || export_owns_output || reduplicated_) {
+          return false;
+        }
+        reduplicated_ = true;
+        return true;
+      }
+
+      /** A whole desktop surface was copied again. */
+      void copied() noexcept {
+        dropped_ = false;
+        reduplicated_ = false;
+      }
+
+      [[nodiscard]] bool dropped() const noexcept {
+        return dropped_;
+      }
+
+    private:
+      bool dropped_ = false;
+      bool reduplicated_ = false;
+    };
+
     inline constexpr std::size_t ddup_damage_history_frame_budget = 128u;
     inline constexpr std::size_t ddup_damage_history_rect_budget = 4096u;
     inline constexpr std::size_t ddup_damage_frame_rect_budget = 512u;
@@ -999,7 +1053,7 @@ namespace platf::dxgi {
     bool has_frame {};
     std::chrono::steady_clock::time_point last_protected_content_warning_time {};
 
-    int init(display_base_t *display, const ::video::config_t &config);
+    int init(display_base_t *display);
     capture_e next_frame(DXGI_OUTDUPL_FRAME_INFO &frame_info, std::chrono::milliseconds timeout, resource_t::pointer *res_p);
     detail::ddup_damage_update_t damage_update(
       const DXGI_OUTDUPL_FRAME_INFO &frame_info,
@@ -1027,6 +1081,9 @@ namespace platf::dxgi {
     capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
     capture_e release_snapshot() override;
 
+    // Replaces the duplication in place so its first acquisition returns the whole desktop.
+    capture_e reduplicate_output();
+
     duplication_t dup;
     sampler_state_t sampler_linear;
 
@@ -1049,9 +1106,8 @@ namespace platf::dxgi {
     std::shared_ptr<detail::ddup_damage_history_t> damage_history;
     std::optional<detail::ddup_damage_snapshot_t> last_ddup_damage;
     bool damage_chain_valid = true;
-    // A desktop present was acquired without being copied (external_pixels_owner): no retained
-    // surface or image holds current desktop pixels until the next copied present.
-    bool desktop_pixels_dropped = false;
+    // Presents acquired without a copy while external_pixels_owner was set, and their recovery.
+    detail::ddup_dropped_desktop_t dropped_desktop;
     // Cursor of the last delivered image, to tell whether a skipped-pixel update changes anything.
     sbs_cursor::snapshot_t last_delivered_cursor;
   };
@@ -1065,6 +1121,8 @@ namespace platf::dxgi {
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool frame_pool {nullptr};
     winrt::Windows::Graphics::Capture::GraphicsCaptureSession capture_session {nullptr};
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame produced_frame {nullptr}, consumed_frame {nullptr};
+    // Capture thread only; see keep_frame().
+    winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame kept_frame {nullptr};
     SRWLOCK frame_lock = SRWLOCK_INIT;
     CONDITION_VARIABLE frame_present_cv;
 
@@ -1078,6 +1136,18 @@ namespace platf::dxgi {
     capture_e next_frame(std::chrono::milliseconds timeout, ID3D11Texture2D **out, detail::wgc_timestamp_t &out_time);
     capture_e release_frame();
     int set_cursor_visible(bool);
+
+    /** Keep the frame from the last next_frame() instead of releasing it, replacing any kept one.
+     *
+     * For a frame forwarded without a copy while an external export owned the output. WGC
+     * delivers a frame only when the screen changes, so the kept frame stays the current screen
+     * until a newer one arrives, and it can still be copied once the export releases the output.
+     * It holds one buffer of the frame pool meanwhile.
+     */
+    void keep_frame();
+    /** The kept frame's texture and time; false when no frame is kept. */
+    bool kept_frame_texture(ID3D11Texture2D **out, detail::wgc_timestamp_t &out_time);
+    void drop_kept_frame();
   };
 
   /**

@@ -418,6 +418,10 @@ namespace video {
       }
     }
 
+    bool conversion_kept_input() const {
+      return device && device->conversion_kept_input();
+    }
+
     bool set_stream_gamma(stream_gamma_mode_e mode) {
       return device && device->set_stream_gamma(mode);
     }
@@ -855,6 +859,11 @@ namespace video {
         case platf::capture_e::reinit:
           {
             reinit_event.raise(true);
+            // The encode loop releases the display only once it sees the reinit. An independent
+            // provider's image wait can last until its keepalive, so end it now.
+            if (capture_ctx->config.encode_wake) {
+              capture_ctx->config.encode_wake->wake();
+            }
 
             // Some classes of images contain references to the display --> display won't delete unless img is deleted
             for (auto &img : imgs) {
@@ -1165,6 +1174,9 @@ namespace video {
     }
 
     std::chrono::steady_clock::time_point encode_frame_timestamp;
+    // A wake meant for a previous encode loop is stale here. Left pending, it would end this loop's
+    // first wait at once, before capture delivers a frame, and encode the black startup input.
+    images->discard_wake();
     // An independent provider (Game 3D) wakes this loop when its own frame finishes, so a frame is
     // converted as soon as it is ready instead of at the next stream deadline or desktop capture.
     // Like an early capture, a provider frame may convert one variation threshold before its
@@ -1174,6 +1186,13 @@ namespace video {
     session->set_external_frame_wake([images]() {
       images->wake();
     });
+    // Without stream-cadence polls, control requests (IDR, reference invalidation, stream gamma,
+    // video mode, shutdown) would otherwise wait for the next provider frame or keepalive.
+    if (independent_provider && config.encode_wake) {
+      config.encode_wake->install([images]() {
+        images->wake();
+      });
+    }
     const auto keepalive_interval = std::chrono::duration_cast<std::chrono::nanoseconds>(max_frametime);
     auto last_encode_at = std::chrono::steady_clock::now();
     auto next_mouse_keys_refresh = std::chrono::steady_clock::now() + 1s;
@@ -1191,7 +1210,17 @@ namespace video {
       // Encoder failures also rebuild against the same capture display. Preserve its last real
       // image so a static desktop does not keep encoding the replacement's black dummy frame.
       // A newer queued capture wins; the capture thread drains old images on display reinit.
-      source.return_for_rebuild(*images, shutdown_event->peek(), reinit_event.peek());
+      // Metadata for pixels a live export owned has none to show: capture copies the whole
+      // desktop again for the replacement once the guard below releases the output.
+      source.return_for_rebuild(*images, shutdown_event->peek(), reinit_event.peek(), !last_img || !last_img->pixels_skipped);
+    });
+    // Declared after retain_source so that it runs first. No provider or control wake outlives
+    // this loop, and capture stops skipping pixels for an encoder that no longer converts.
+    auto release_external_frames = util::fail_guard([&] {
+      session->set_external_frame_wake({});
+      if (config.encode_wake) {
+        config.encode_wake->install({});
+      }
     });
     auto encode_diagnostics = detail::make_diagnostic_state<encode_stage_diagnostics_t>(
       config::sunshine.diagnostics_enabled
@@ -1359,10 +1388,12 @@ namespace video {
       }
 
       bool requested_idr_frame = false;
+      bool invalidated_ref_frames = false;
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
           session->invalidate_ref_frames(frames->first, frames->second);
+          invalidated_ref_frames = true;
         }
       }
 
@@ -1375,8 +1406,21 @@ namespace video {
         session->request_idr_frame();
       }
 
+      // An independent provider encodes no repeats between its frames, so a client recovering
+      // from loss gets its reference-invalidated frame now, like an IDR, rather than at the next
+      // provider frame or keepalive. Other sources keep encoding at capture cadence.
+      const bool recovery_frame_requested = requested_idr_frame || (independent_provider && invalidated_ref_frames);
+
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
       bool converted_frame = false;
+      bool conversion_ran = false;
+      // A conversion that kept the encoder input (metadata for pixels an export no longer owns)
+      // still retires its source and schedule, but leaves nothing new to encode.
+      const auto finish_conversion = [&]() {
+        conversion_ran = true;
+        converted_frame = !session->conversion_kept_input();
+        source.converted();
+      };
       processing_started.reset();
       bool consume_sampled_depth_pipeline_ready = false;
       const auto provider_poll_target = independent_provider ?
@@ -1385,7 +1429,7 @@ namespace video {
 
       // Idle keepalives preserve static image quality. Pending retained-source conversion is
       // serviced at the requested cadence instead of waiting for that slower heartbeat.
-      if (!requested_idr_frame || images->peek()) {
+      if (!recovery_frame_requested || images->peek()) {
         const bool conversion_poll_pending = last_img && (pending_gamma || session->needs_conversion_poll());
         const auto wait_started = std::chrono::steady_clock::now();
         auto pending_source_wait = source.remaining_wait(wait_started, provider_poll_target, independent_provider && conversion_poll_pending);
@@ -1431,7 +1475,7 @@ namespace video {
           // stops here, the pending-source deadline below must still display these final pixels.
           if (time_diff < -frame_variation_threshold) {
             const auto now = std::chrono::steady_clock::now();
-            if (!source.due(now, provider_poll_target, requested_idr_frame)) {
+            if (!source.due(now, provider_poll_target, recovery_frame_requested)) {
               continue;
             }
             // A stale capture timestamp must not starve a source whose presentation is due.
@@ -1451,8 +1495,7 @@ namespace video {
             BOOST_LOG(error) << "Could not convert image"sv;
             break;
           }
-          converted_frame = true;
-          source.converted();
+          finish_conversion();
 
           *frame_timestamp = schedule.presentation_timestamp;
           encode_frame_timestamp = schedule.next_encode_target;
@@ -1463,11 +1506,11 @@ namespace video {
       // its scheduled presentation is due, before falling back to the slower idle keepalive.
       // IDR recovery uses the newest retained source immediately. The single source slot is
       // replaced by newer captures, so waiting cannot accumulate a queue of deferred images.
-      if (!converted_frame && source.pending() && last_img) {
+      if (!conversion_ran && source.pending() && last_img) {
         const auto now = std::chrono::steady_clock::now();
         // An independent provider's wait ends at its poll target; convert there rather than
         // waking repeatedly until the later presentation target.
-        if (source.due(now, provider_poll_target, requested_idr_frame)) {
+        if (source.due(now, provider_poll_target, recovery_frame_requested)) {
           if (lifecycle_change_requested()) {
             break;
           }
@@ -1483,14 +1526,13 @@ namespace video {
             BOOST_LOG(error) << "Could not convert deferred capture image"sv;
             break;
           }
-          converted_frame = true;
-          source.converted();
+          finish_conversion();
           frame_timestamp = schedule.presentation_timestamp;
           encode_frame_timestamp = schedule.next_encode_target;
         }
       }
 
-      if (!converted_frame && pending_gamma && last_img) {
+      if (!conversion_ran && pending_gamma && last_img) {
         if (lifecycle_change_requested()) {
           break;
         }
@@ -1499,15 +1541,14 @@ namespace video {
           BOOST_LOG(error) << "Could not convert the retained source with stream gamma"sv;
           break;
         }
-        converted_frame = true;
-        source.converted();
+        finish_conversion();
       }
 
       // Host SBS initializes only its per-stream D3D/CUDA resources in the background; the model
       // engine and execution context are already process-resident. If initialization completes
       // while the desktop is static, reconvert the retained source once so the ready pipeline is
       // installed and the client receives depth immediately instead of waiting for desktop motion.
-      if (!converted_frame && depth_pipeline_ready_event && depth_pipeline_ready_event->peek() && last_img) {
+      if (!conversion_ran && depth_pipeline_ready_event && depth_pipeline_ready_event->peek() && last_img) {
         if (lifecycle_change_requested()) {
           break;
         }
@@ -1517,8 +1558,7 @@ namespace video {
           BOOST_LOG(error) << "Could not activate the initialized Host SBS GPU pipeline"sv;
           break;
         }
-        converted_frame = true;
-        source.converted();
+        finish_conversion();
       }
 
       // Host SBS inference may still be pending when capture goes idle. Reconvert the retained
@@ -1527,12 +1567,12 @@ namespace video {
       // pending and suppresses duplicate inference for those same pixels. An independent provider
       // also converts for its keepalive, which re-checks the export while no frame arrives.
       const bool provider_keepalive_due = independent_provider && std::chrono::steady_clock::now() >= last_encode_at + keepalive_interval;
-      if (!converted_frame && last_img && (provider_keepalive_due || session->needs_conversion_poll())) {
+      if (!conversion_ran && last_img && (provider_keepalive_due || session->needs_conversion_poll())) {
         const auto now = std::chrono::steady_clock::now();
         // A faster minimum-FPS heartbeat may encode retained output before this deadline,
         // but must not advance an independent provider's schedule ahead of actual time.
         // Host AI completion retains its existing immediate timeout service.
-        if (!independent_provider || source.due(now, provider_poll_target, requested_idr_frame, true)) {
+        if (!independent_provider || source.due(now, provider_poll_target, recovery_frame_requested, true)) {
           if (lifecycle_change_requested()) {
             break;
           }
@@ -1548,23 +1588,23 @@ namespace video {
             BOOST_LOG(error) << "Could not consume pending Host SBS depth for retained source"sv;
             break;
           }
-          converted_frame = true;
-          source.converted();
+          finish_conversion();
           if (schedule) {
             encode_frame_timestamp = schedule->next_encode_target;
           }
         }
       }
 
-      if (converted_frame && consume_sampled_depth_pipeline_ready && depth_pipeline_ready_event) {
+      if (conversion_ran && consume_sampled_depth_pipeline_ready && depth_pipeline_ready_event) {
         // Consume only readiness observed before conversion. A build that finishes during the
-        // conversion remains armed so a static retained source adopts it on the next loop.
+        // conversion remains armed so a static retained source adopts it on the next loop. A
+        // conversion that kept the input consumes it too: the next real source installs it.
         depth_pipeline_ready_event->pop(0ms);
       }
 
-      if (independent_provider && !converted_frame && !requested_idr_frame && std::chrono::steady_clock::now() < last_encode_at + keepalive_interval) {
-        // Woken without new content (a provider frame not yet due, an unchanged metadata capture
-        // or a stale wake): wait again instead of encoding a repeat of the current input.
+      if (independent_provider && !converted_frame && !recovery_frame_requested && std::chrono::steady_clock::now() < last_encode_at + keepalive_interval) {
+        // Woken without new content (a provider frame not yet due, an unchanged metadata capture,
+        // a kept input or a stale wake): wait again instead of encoding a repeat of the input.
         continue;
       }
 
