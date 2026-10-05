@@ -1210,7 +1210,10 @@ static captured_depth capture_record(effect_runtime *runtime, const generic_dept
 	depth.layout_epoch = info.layout_epoch; depth.frame_index = info.last_used_in_frame; depth.runtime_epoch = data.runtime_epoch;
 	depth.detected_orientation = info.orientation_evidence.detected();
 	depth.orientation_agreeing_frames = info.orientation_evidence.agreeing_frames();
-	depth.capture_marker = displayed_copy.recording; depth.depth_copy = displayed_copy;
+	// The capture marker is the actual preserved copy's recording, also when a
+	// D3D12 backup is published later on the runtime's own list (the displayed
+	// copy below): that forward records no command evidence of its own.
+	depth.capture_marker = info.last_frame_stats.capture_marker; depth.depth_copy = displayed_copy;
 	depth.ready = out.current(device_data.native_present_index, device_data.frame_index, data.runtime_epoch);
 	lock.unlock();
 	if (view != 0 && runtime->get_device()->get_resource_from_view(view) != sampled) return {};

@@ -355,8 +355,10 @@ namespace {
         config << "[ADDON]\nAddonPath=.\\addons\n";
         if (!depth_addon.empty())
 #ifdef SUNSHINE_COMMAND_ASSOCIATION_RUNTIME
+          // The reference effect reads its frame's depth at begin-effects only
+          // while native Game 3D, enabled by default, is off.
           config << "DisabledAddons=Generic Depth\n[DEPTH]\nDepthCopyBeforeClears=2\nUseAspectRatioHeuristics=1\n"
-                    "[SUNSHINE_DEPTH]\nStreamlineCameraProbe=1\n";
+                    "[SUNSHINE_DEPTH]\nStreamlineCameraProbe=1\n[SUNSHINE_GAME3D]\nEnabled=0\n";
 #else
           config << "DisabledAddons=Generic Depth\n[DEPTH]\nDepthCopyBeforeClears="
                  << (sunshine_camera_fixture::flag("SUNSHINE_DEPTH_BIND_SWITCH_TEST") ? 2 : 1)

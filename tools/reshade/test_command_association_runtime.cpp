@@ -157,20 +157,32 @@ namespace {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
         while (checked_frames != 4 && std::chrono::steady_clock::now() < deadline) {
           step();
-          if (!frame_ready || !frame_association.associated() || (scenario < 4 && !content_use.valid()) || !captured_frame.depth_copy.valid()) continue;
-          require(!content_association.coverage_complete && !content_association.final_color_registered,
-            "Observed depth mutations were promoted into complete native coverage");
-          const bool expected_match = scenario == 0 || scenario == 3;
-          if (content_association.matched() != expected_match)
-            std::fprintf(stderr, "Content case %s: %s\n", labels[scenario], sunshine_streamline::content::name(content_association.state));
-          require(content_association.matched() == expected_match, "Actual source content/copy association disagrees with draw/clear ordering");
+          if (!frame_ready || !frame_association.associated() || (scenario < 4 && !content_use.valid())) continue;
+          // The capture owner publishes the shader-visible backup from its
+          // before-clear snapshot on the runtime's own immediate list, whose
+          // reset/close events ReShade never reports: that forward has no
+          // recording, so no ordering of the game's draws, clears and
+          // evaluation may promote it to observed content correspondence. The
+          // same-recording ordering rules are unit-tested by the content ledger
+          // (reshade_streamline_depth_content).
+          if (captured_frame.depth_copy.state != sunshine_streamline::content::status::unknown_recording ||
+              content_association.matched())
+            std::fprintf(stderr, "Content case %s: copy=%s association=%s\n", labels[scenario],
+              sunshine_streamline::content::name(captured_frame.depth_copy.state),
+              sunshine_streamline::content::name(content_association.state));
+          require(captured_frame.depth_copy.state == sunshine_streamline::content::status::unknown_recording,
+            "The runtime-list publication of the selected backup claimed a command recording");
+          require(!content_association.matched() && !content_association.coverage_complete &&
+              !content_association.final_color_registered,
+            "An unrecorded backup publication was promoted into observed content correspondence");
           ++checked_frames;
         }
         if (checked_frames != 4) std::fprintf(stderr, "Content timeout %s: use=%s copy=%s association=%s\n", labels[scenario],
           sunshine_streamline::content::name(content_use.state), sunshine_streamline::content::name(captured_frame.depth_copy.state),
           sunshine_streamline::content::name(content_association.state));
         require(checked_frames == 4, "Content observations failed to become available");
-        std::printf("PASS actual DSV content ordering: %s; native coverage remains explicitly incomplete\n", labels[scenario]);
+        std::printf("PASS actual DSV content ordering: %s; the evaluation's use is observed, the runtime-list backup publication is never promoted\n",
+          labels[scenario]);
       }
       scene->before_final_clear = {};
       render_tracked_depth = {};

@@ -102,6 +102,8 @@ namespace {
     require(f.ledger.use({}, source.native, device).state == content::status::unknown_recording, "untracked command accepted");
     require(f.ledger.use(f.mark(), source.native, device + 1).state == content::status::different_device, "cross-device use accepted");
     require(f.ledger.copy(f.mark(), source, backup, device + 1).state == content::status::different_device, "cross-device copy accepted");
+    require(f.ledger.copy({}, source, backup, 0).state == content::status::unknown_recording,
+      "an untracked copy was reported as a device mismatch instead of an unknown recording");
     use = f.use(); copy = f.copy(other_command);
     require(f.associate(use, copy).state == content::status::different_recording, "cross-recording content accepted");
     use = f.use(); copy = f.copy();
