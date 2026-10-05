@@ -1718,12 +1718,18 @@ namespace {
       // of the previous real frame is missing too) has no decision of its own
       // and reuses that frame's selective tag decision once (T1); the next
       // ones have no mask.
+      // The malformed rows lie above the UI rectangle and cover more than 1%
+      // of the frame at any fixture size (rows * 100 > height); a fixed three
+      // rows did so only below 300 rows.
+      const unsigned malformed_rows = std::max(3u, gpu.height / 100 + 1);
+      require(malformed_rows * 100u > gpu.height && malformed_rows < gpu.height / 4,
+        "The V1 fixture cannot place more than 1% malformed rows above its UI");
       source.retained = source.dedicated_mask = false;
       bool first = true;
       for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
           std::numeric_limits<float>::infinity(), -1.f, 2.f}) {
         auto malformed = masks[1];
-        std::fill_n(malformed.begin(), 3 * gpu.width, invalid);
+        std::fill_n(malformed.begin(), size_t(malformed_rows) * gpu.width, invalid);
         gpu.pattern(malformed, true);
         source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
         require(exact(gpu.render(true, 1, false, false, false, {}, {}, {}, nullptr, &source), first ? on[1] : off[1]),
