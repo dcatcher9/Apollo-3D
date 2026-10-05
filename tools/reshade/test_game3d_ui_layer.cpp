@@ -283,6 +283,49 @@ int main() {
     }
     std::puts("PASS UI layer queue order: a copy run on the presenting queue alone is in order (bound directly); one run on "
       "another queue, on two queues, before it executed or with an unknown presenting queue is not; the verdict is per copy");
+    // Cross-queue order: on D3D12 a copy run on one other queue owes a fence
+    // signal after its submission; the presenting queue's reads are then
+    // ordered by queue order, by a fence that passed, by a GPU wait, or (no
+    // value signalled, or the queue revoked) not at all.
+    {
+      constexpr std::uint64_t presenting = 0x10, other = 0x20;
+      require(layer::owes_signal(true, other, presenting) && layer::owes_signal(true, other, 0),
+        "A D3D12 copy run on another queue, or with an unknown presenting queue, owed no fence signal");
+      require(!layer::owes_signal(true, presenting, presenting) && !layer::owes_signal(false, other, presenting) &&
+          !layer::owes_signal(true, layer::mixed_queue, presenting) && !layer::owes_signal(true, 0, presenting),
+        "A copy on the presenting queue, on D3D11, on two queues or not yet executed owed a fence signal");
+      using order = layer::read_order;
+      require(layer::order_for(true, 0, 0, false) == order::queue && layer::order_for(true, 4, 0, true) == order::queue,
+        "A copy run on the presenting queue was not in queue order");
+      require(layer::order_for(false, 4, 4, false) == order::fence_passed && layer::order_for(false, 4, 9, false) == order::fence_passed,
+        "A copy whose fence passed its value made the presenting queue wait");
+      require(layer::order_for(false, 4, 3, false) == order::fence_wait, "A pending copy on another queue was not waited for");
+      require(layer::order_for(false, 4, UINT64_MAX, false) == order::fence_passed,
+        "A removed device's fence (UINT64_MAX) made the presenting queue wait");
+      require(layer::order_for(false, 0, 0, false) == order::unordered && layer::order_for(false, 4, 3, true) == order::unordered &&
+          layer::order_for(false, 4, 4, true) == order::unordered,
+        "A copy without a signalled value, or on a revoked queue, was ordered");
+      require(std::string(layer::name(order::queue)) == "queue" && std::string(layer::name(order::fence_passed)) == "fence_passed" &&
+          std::string(layer::name(order::fence_wait)) == "fence_wait" && std::string(layer::name(order::unordered)) == "unordered",
+        "The read order names changed");
+    }
+    std::puts("PASS UI layer cross-queue order: only a D3D12 copy run on one other queue owes a fence signal; it is read "
+      "after its passed fence or a GPU wait for it, and unordered without a value or on a revoked queue");
+    // The watchdog: a wait whose fence made no progress for rescue_after_ms
+    // is stalled; one that was reached, or that progressed since, is not.
+    {
+      const auto rescue = layer::rescue_after_ms;
+      require(!layer::stalled(5, 5, 0, 100000) && !layer::stalled(7, 5, 0, 100000), "A reached wait was stalled");
+      require(!layer::stalled(4, 5, 1000, 1000 + rescue - 1) && layer::stalled(4, 5, 1000, 1000 + rescue),
+        "A wait without progress was not stalled exactly at rescue_after_ms");
+      require(!layer::stalled(4, 5, 3000, 2000), "A progress stamp after now was stalled");
+      // It looks several times before a rescue, and releases a cycle well
+      // within a GPU timeout (2 s).
+      require(rescue >= 5 * layer::watchdog_period_ms && rescue + layer::watchdog_period_ms < 2000,
+        "The watchdog's rescue time is not several looks long and within a GPU timeout");
+    }
+    std::puts("PASS UI layer cross-queue watchdog: a wait whose fence made no progress for rescue_after_ms is stalled, a "
+      "reached or progressing one is not");
     // Live-copy ring (direct binding): the oldest free entry other than the
     // newest takes the next copy; with every entry read by an unfinished
     // render the ring grows to ring_capacity, then the copy is skipped.

@@ -249,9 +249,10 @@ V1 Reflex / V2 PCL presentation brackets, which only the probe's presentation tr
 marker hooks are installed only while it is on; see
 [Upscaler call-route diagnostic](#upscaler-call-route-diagnostic)). The A2 per-pixel
 statistics (A2 revocation and the one-way judgment read them) and the exact UI counters always run. Decisions, masks, candidate binding and exported pixels
-are the same with the switch on or off. The capture owner's queue watch and the layer's carrier
-events stay registered either way, since direct binding reads them and the layer's live-copy ring
-offers a copy only once a list carrying it executed. The switch's own cost was not measured separately: Verify
+are the same with the switch on or off. The capture owner's queue watch, the layer's carrier
+events and its submission listener stay registered either way, since direct binding reads them,
+the layer's live-copy ring offers a copy only once a list carrying it executed, and its
+cross-queue fence is signalled after that submission. The switch's own cost was not measured separately: Verify
 found no renderer-level GPU difference with it on or off. Before selection revision 9 the switch
 also gated S3's frame-identity shadow (its clocks, stamps, proposals and log lines) and H2's own
 evidence passes, both removed, and with it on candidates were copied rather than bound directly.
@@ -311,21 +312,52 @@ as a growth would be, and the ring keeps rotating its existing copies meanwhile.
 pending until a list carrying it executes; only then is it offered, so detection reads the last
 executed copy as the single live texture did. A carrying list reset unexecuted returns the entry
 (never offered), and a copy pending for 2 s is abandoned. Each entry keeps the queue that
-executed its carrying list (one executed on two queues has none), and the offered copy is bound
-directly only when that is the presenting queue (a D3D11 immediate or deferred-context copy
-always is), since queue order then puts the copy before the Present's reads. The verdict is per
-copy: before WP1b one scope-wide queue watch remembered at most four carrying lists, so a fifth
-dropped the oldest list's queue while its copy was still promoted, and one foreign execution kept
-the whole scope from direct binding. A copy that ran on another queue is still offered and copied
-into the renderer's slot, as before, with no fence of the add-on ordering it, and the first such
-copy logs once (`Sunshine UI layer: the live layer copy executed on queue ..., not on the
-presenting queue ...`). Refusing such copies was considered and rejected: the Stellar Blade (SDR,
-FG off) and The Witcher 3 (FG on) dumps of 10-04 both record their layer copies as run on another
-queue than the presenting one, so a refusal would remove their layer protection. Streamline
+executed its carrying list (one executed on two queues has none). A copy that ran on the
+presenting queue alone (a D3D11 immediate or deferred-context copy always does) is in queue
+order before the Present's reads. The verdict is per copy: before WP1b one scope-wide queue watch
+remembered at most four carrying lists, so a fifth dropped the oldest list's queue while its copy
+was still promoted, and one foreign execution kept the whole scope from direct binding. A copy
+in queue or fence order (below) is bound directly; one no fence orders is copied. Streamline
 snapshots on D3D11, from foreign or mixed queues, sRGB-stored snapshots read through UNORM, an
 exhausted consumer budget (32 diagnostic slots, 256 MB under FG) and an armed dump keep today's
 copy. The pixels detection reads are the same either way. The log
 names the first direct read of each kind once (`Sunshine UI input: reading ... directly (no copy)`).
+
+**Layer cross-queue fence.** On D3D12 a copy whose carrying list ran on one other queue is ordered
+by a fence of the add-on (`ui_layer::read_order`). ReShade reports an execution before the native
+`ExecuteCommandLists`, so the execution only marks the copy as owing a signal to that native
+list; the add-on's own submission hook (the capture owner's native observer, which already
+watches every queue's `ExecuteCommandLists`, through `native_observer::set_submission_listener`)
+then signals that queue's fence right after the native call returns, so the value follows the
+copy in that queue's order, and records the value with the ring entry. The fence is created on
+first use, one per device and queue (at most four), from the queue's own device. Before the
+renderer reads or copies the entry, the presenting queue waits for that value on the GPU
+(`ui_layer::order_read`, `command_queue::wait`; never a CPU wait), unless the fence already passed
+it (`fence_passed`, also what a removed device's `UINT64_MAX` reads); a fenced copy is bound
+directly like a same-queue one. It is the only GPU dependency the add-on adds from the presenting
+queue onto a game queue, and it is bounded: the game's queue may legally wait for presenting-queue
+work queued after the add-on's wait (a wait before its signal is legal D3D12), which would
+close a cycle no GPU wait can leave. A watchdog (a thread-pool timer armed only while a wait is
+outstanding, looking every 100 ms) therefore releases a wait whose fence made no progress for
+`ui_layer::rescue_after_ms` (1 s) by signalling the fence from the CPU, revokes that queue for the
+device's life (its copies are read unordered from then on) and logs once (`Sunshine UI layer: the
+presenting queue's wait for a layer copy on queue ... made no progress ...`). Teardown and device
+destruction release outstanding waits the same way, so no wait outlives the add-on or its fence.
+A wait holds the presenting queue only until the copy's own submission ran; a game that presents
+the frame that carries the copy already orders its Present after it, so the wait costs nothing
+there, while a copy from work the game submitted for a later frame makes the Present wait for
+that work (watch frame pacing with frame generation). Where no fence orders a copy (its submission
+not observed, the fence not created or not signalled, a copy run on two queues, a revoked queue, or
+the watchdog or the wait not started), the copy is still offered and copied into the renderer's
+slot unordered, as before the fence; each reason logs once (`Sunshine UI layer: the live layer copy
+executed on queue ..., not on the presenting queue ..., and no fence orders it (...)`), and the
+first fenced copy logs `... the presenting queue's reads wait for the fence value signalled after
+it`. Dumps record the layer's `read_order` (`queue`, `fence_passed`, `fence_wait` or `unordered`)
+and `fence_value` beside `executed_queue` and `presenting_queue_order` (queue order only). Refusing
+cross-queue copies was considered and rejected: the Stellar Blade (SDR, FG off) and The Witcher 3
+(FG on) dumps of 10-04 both record their layer copies as run on another queue than the presenting
+one, so a refusal would remove their layer protection; before this fence such a copy was read with
+no ordering at all (a torn or next-frame mask, both queues touching the texture).
 
 **Colour toggles and the overlay.** The renderer keeps the working set of the previous colour
 transfer or extent (one cached entry) and makes it current again on a toggle back, without a wait
@@ -2308,9 +2340,10 @@ reserved and are never reused: `b2` words 6-9, decision words 50-51 (with H2's 4
 12) and counter words 31-35. HUD-less pairs are
 exact only by a same-batch Backbuffer (E2) and real frames are identified by Present counting
 (T1). The layer's queue watch, which S3 introduced, remained until WP1b replaced it by each live
-copy's own executing queue: the live layer copy is bound directly only when it ran on the
-presenting queue, and its dumps record `executed_queue` and `presenting_queue_order` (before WP1b
-`foreign_present` and `queue_mixed`, the scope-wide watch's sticky verdicts).
+copy's own executing queue: the live layer copy is in queue order when it ran on the presenting
+queue, and since the layer cross-queue fence one run on another queue is ordered by that queue's
+fence. Its dumps record `executed_queue`, `presenting_queue_order`, `read_order` and `fence_value`
+(before WP1b `foreign_present` and `queue_mixed`, the scope-wide watch's sticky verdicts).
 
 S0, S1, S2a and S2b are done; S3 was removed. Fix 1 after S2b (selection revision 4) replaced the
 guard's D proof of the scene layer, which an FG suspension's viewport change cleared and a fade-in
@@ -3000,9 +3033,12 @@ consumer uses queue order. A different consumer queue on the same device require
 producer submission and Reset/destruction to retire the producer recording. A still-replayable
 recording could overwrite the copy again; completion alone does not make it immutable. If the
 immutable copy is still in flight, source metadata remains selected but its pixels are unavailable
-until its private producer fence completes. The add-on never inserts a foreign-queue Wait: the
-producer can already depend on future consumer work, so a reverse wait could deadlock the game.
-Flushing an immediate command list cannot prove that the application's queue graph is acyclic.
+until its private producer fence completes. The add-on never inserts a foreign-queue Wait for a
+depth capture: the producer can already depend on future consumer work, so a reverse wait could
+deadlock the game. Flushing an immediate command list cannot prove that the application's queue
+graph is acyclic. (The offscreen UI layer's copy is the one exception, a wait its watchdog
+releases from the CPU when that cycle occurs; see the layer cross-queue fence under
+[Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost).)
 A failed ordering check declines the copy before any read is recorded. There is no CPU depth-fence
 wait or pending-copy flush. Device removal is not completion, and actual GPU
 completion is still required for allocation retirement. The selected capture stays frozen across

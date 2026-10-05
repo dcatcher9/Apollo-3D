@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdio>
 #include <mutex>
+#include <utility>
 
 namespace sunshine_game3d::ui_layer {
   bool layer_tracker::clear(std::uint64_t resource, std::uint64_t now_ms) {
@@ -123,6 +124,13 @@ namespace sunshine_game3d::ui_layer {
       std::array<std::uint64_t, 2> carriers{};
       // The queue that executed the copy (merge_queue; 0 not yet).
       std::uint64_t queue{};
+      // Cross-queue order (D3D12, run on one other queue than the presenting
+      // one): the native list whose submission owes the copy its fence signal
+      // (0: none owed), then the queue fence's slot and generation and the
+      // value signalled after that submission (0: none).
+      std::uint64_t owed{};
+      int fence = -1;
+      std::uint64_t fence_generation{}, signalled{};
       bool pending{};
       // The entry's copy is being allocated outside the lock (capture_live).
       bool allocating{};
@@ -155,6 +163,31 @@ namespace sunshine_game3d::ui_layer {
     // again on the game's recording thread; after it they are retired.
     constexpr std::uint64_t live_release_ms = 10000;
 
+    // A fence of the add-on on a game queue that ran live copies away from the
+    // presenting queue (game3d_ui_layer.h, queue order); one per device and
+    // queue.
+    struct queue_fence {
+      api::device *device{};
+      std::uint64_t queue{};  // Native queue, identity only (never referenced).
+      ID3D12Fence *fence{};   // Owned reference; null with failed set: creation failed.
+      std::uint64_t generation{};
+      // The last value signalled on the queue, the highest value the
+      // presenting queue was told to wait for, and the watchdog's last seen
+      // completed value and the tick it last advanced.
+      std::uint64_t signalled{}, waited{}, progress{}, progress_ms{};
+      // revoked: a stalled wait was released from the CPU; the queue's copies
+      // are read unordered for this device's life.
+      bool revoked{}, failed{};
+    };
+    constexpr unsigned fence_capacity = 4;
+
+    // One-time log lines.
+    enum log_bit : std::uint32_t {
+      log_fenced = 1u << 0, log_unobserved = 1u << 1, log_mixed = 1u << 2, log_revoked = 1u << 3,
+      log_no_fence = 1u << 4, log_create_failed = 1u << 5, log_signal_failed = 1u << 6, log_wait_failed = 1u << 7,
+      log_watchdog_failed = 1u << 8, log_rescued = 1u << 9, log_fence_capacity = 1u << 10,
+    };
+
     struct state_t {
       std::mutex mutex;
       // Read without the lock by every clear and Present (wanted()).
@@ -180,12 +213,22 @@ namespace sunshine_game3d::ui_layer {
       // or dropped: an allocation made outside the lock for an earlier scope
       // is destroyed instead of published.
       std::uint64_t live_scope{}, census_scope{};
-      bool unordered_logged{};
+      std::uint32_t logged{}; // log_bit
       // The presenting queue's native handle at the last Present, and each
       // ring entry's carriers, which the execute and reset events check
       // without the lock, so lists that carried no live copy never take it.
       std::uint64_t presenting_queue{};
       std::array<std::atomic<std::uint64_t>, ring_capacity * 2> watched{};
+      // Cross-queue order: the queue fences, and each ring entry's owed native
+      // list, which the submission listener checks without the lock.
+      std::array<queue_fence, fence_capacity> fences{};
+      std::uint64_t fence_generation{};
+      std::array<std::atomic<std::uint64_t>, ring_capacity> owed{};
+      // The watchdog's one-shot timer, armed while a wait is outstanding;
+      // closed between unregister_events and register_events (no new wait).
+      PTP_TIMER watchdog{};
+      bool watchdog_armed{}, watchdog_closed{};
+      std::atomic<std::uint64_t> waits{0}, rescues{0};
     };
     // Deliberately leaked: clear events can arrive during process exit.
     state_t &state() {
@@ -204,19 +247,31 @@ namespace sunshine_game3d::ui_layer {
       return s.armed.load(std::memory_order_relaxed) || demanded(s, now);
     }
 
-    // Requires the state lock: publishes the ring entries' carriers to the
-    // lock-free copy.
+    // Requires the state lock: publishes the ring entries' carriers and owed
+    // native lists to their lock-free copies.
     void publish_watch(state_t &s) {
-      for (std::size_t i = 0; i != ring_capacity; ++i)
+      for (std::size_t i = 0; i != ring_capacity; ++i) {
         for (std::size_t j = 0; j != 2; ++j)
           s.watched[i * 2 + j].store(s.live.ring[i].carriers[j], std::memory_order_relaxed);
+        s.owed[i].store(s.live.ring[i].owed, std::memory_order_relaxed);
+      }
+    }
+
+    // Requires the state lock. True the first time bit is logged.
+    bool first(state_t &s, std::uint32_t bit) {
+      if (s.logged & bit) return false;
+      s.logged |= bit;
+      return true;
     }
 
     // Requires the state lock. A list executed on queue: the entries it
     // carries hold their copies now, executed on that queue, and the newest of
     // them becomes the offered copy (the last executed copy, as a single live
-    // texture would hold).
-    void carriers_executed(state_t &s, std::uint64_t list, std::uint64_t queue) {
+    // texture would hold). This execution writes each copy again, so a fence
+    // value signalled after an earlier one no longer covers it; on D3D12 a
+    // copy run on one queue other than the presenting one owes a signal after
+    // this submission (native_list, which observed_submission matches).
+    void carriers_executed(state_t &s, std::uint64_t list, std::uint64_t native_list, std::uint64_t queue, bool d3d12) {
       auto &live = s.live;
       int promoted = -1;
       for (unsigned i = 0; i != live.entries; ++i) {
@@ -224,19 +279,213 @@ namespace sunshine_game3d::ui_layer {
         if (!entry.carries(list)) continue;
         entry.pending = false;
         entry.queue = merge_queue(entry.queue, queue);
+        entry.fence = -1;
+        entry.fence_generation = entry.signalled = 0;
+        entry.owed = native_list && owes_signal(d3d12, entry.queue, s.presenting_queue) ? native_list : 0;
         if (promoted < 0 || entry.capture_id > live.ring[unsigned(promoted)].capture_id) promoted = int(i);
       }
       if (promoted >= 0) live.newest = promoted;
     }
 
     // Requires the state lock. A list was reset: it carries nothing; an
-    // entry no executed list wrote drops back to free (never offered).
-    void carriers_reset(state_t &s, std::uint64_t list) {
+    // entry no executed list wrote drops back to free (never offered), and a
+    // signal the list's submission owed can no longer come (it is matched
+    // within that submission).
+    void carriers_reset(state_t &s, std::uint64_t list, std::uint64_t native_list) {
       for (unsigned i = 0; i != s.live.entries; ++i) {
         auto &entry = s.live.ring[i];
+        if (native_list && entry.owed == native_list) entry.owed = 0;
         if (!entry.carries(list)) continue;
         for (auto &c : entry.carriers) if (c == list) c = 0;
         if (!entry.carriers[0] && !entry.carriers[1]) entry.pending = false;
+      }
+    }
+
+    void release(queue_fence &f) {
+      if (f.fence) f.fence->Release();
+      f = {};
+    }
+
+    // Requires the state lock. The queue fence a live copy names, while that
+    // record still holds the fence it was signalled on (null: none).
+    queue_fence *fence_of(state_t &s, const ring_entry &entry) {
+      if (entry.fence < 0 || unsigned(entry.fence) >= fence_capacity) return nullptr;
+      auto &f = s.fences[unsigned(entry.fence)];
+      return f.fence && f.generation == entry.fence_generation ? &f : nullptr;
+    }
+
+    // Requires the state lock. How the presenting queue's reads are ordered
+    // after a live copy now, and the queue fence that orders it (null: none).
+    read_order order_of(state_t &s, const ring_entry &entry, const queue_fence *&fence) {
+      const bool same = presented_in_order(entry.queue, s.presenting_queue);
+      fence = same ? nullptr : fence_of(s, entry);
+      const auto signalled = fence ? entry.signalled : 0;
+      return order_for(same, signalled, signalled ? fence->fence->GetCompletedValue() : 0, fence && fence->revoked);
+    }
+
+    // Requires the state lock. A record no live copy names and no GPU work
+    // still uses: every signal and wait passed. A revoked record of the
+    // current device stays, so its queue stays revoked.
+    bool reusable(state_t &s, unsigned index) {
+      const auto &f = s.fences[index];
+      if (f.failed) return f.device != s.device;
+      if (!f.fence || (f.revoked && f.device == s.device)) return false;
+      for (unsigned i = 0; i != s.live.entries; ++i)
+        if (s.live.ring[i].fence == int(index) && s.live.ring[i].fence_generation == f.generation) return false;
+      const auto completed = f.fence->GetCompletedValue();
+      return completed >= f.signalled && completed >= f.waited;
+    }
+
+    // Requires the state lock. The fence record of the current device's queue
+    // (native), created on first use; -1 when none can be had (logged once).
+    int fence_slot(state_t &s, std::uint64_t queue) {
+      for (unsigned i = 0; i != fence_capacity; ++i) {
+        const auto &f = s.fences[i];
+        if ((f.fence || f.failed) && f.device == s.device && f.queue == queue) return f.fence ? int(i) : -1;
+      }
+      int slot = -1;
+      for (unsigned i = 0; i != fence_capacity && slot < 0; ++i)
+        if (!s.fences[i].fence && !s.fences[i].failed) slot = int(i);
+      for (unsigned i = 0; i != fence_capacity && slot < 0; ++i)
+        if (reusable(s, i)) slot = int(i);
+      if (slot < 0) {
+        if (first(s, log_fence_capacity))
+          sunshine_log::message(reshade::log::level::warning,
+            "Sunshine UI layer: every cross-queue fence is in use; a layer copy on another queue stays unordered (logged once)");
+        return -1;
+      }
+      auto &f = s.fences[unsigned(slot)];
+      release(f);
+      f.device = s.device;
+      f.queue = queue;
+      f.generation = ++s.fence_generation;
+      // The queue's own device: the copy's list ran there.
+      ID3D12Device *device = nullptr;
+      if (SUCCEEDED(reinterpret_cast<ID3D12CommandQueue *>(queue)->GetDevice(IID_PPV_ARGS(&device))) && device) {
+        if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f.fence)))) f.fence = nullptr;
+        device->Release();
+      }
+      if (f.fence) return slot;
+      f.failed = true;
+      if (first(s, log_create_failed)) {
+        char message[200]{};
+        std::snprintf(message, sizeof(message),
+          "Sunshine UI layer: could not create a fence for queue 0x%llx; its layer copies stay unordered (logged once)",
+          static_cast<unsigned long long>(queue));
+        sunshine_log::message(reshade::log::level::warning, message);
+      }
+      return -1;
+    }
+
+    // Requires the state lock. A native submission on queue ran the lists
+    // in commands: each live copy owing a signal to one of them gets the
+    // queue fence's next value, signalled now, after that submission.
+    void signal_owed(state_t &s, std::uint64_t queue, unsigned count,
+        const sunshine_streamline::native_observer::command_identity *commands) {
+      auto &live = s.live;
+      std::array<unsigned, ring_capacity> due{};
+      unsigned owing = 0;
+      for (unsigned i = 0; i != live.entries; ++i) {
+        const auto owed = live.ring[i].owed;
+        for (unsigned c = 0; owed && c != count; ++c)
+          if (commands[c].native_command == owed) { due[owing++] = i; break; }
+      }
+      if (!owing) return;
+      const int slot = fence_slot(s, queue);
+      std::uint64_t value = 0, generation = 0;
+      if (slot >= 0) {
+        auto &f = s.fences[unsigned(slot)];
+        generation = f.generation;
+        if (f.revoked) {
+          // Its copies stay unordered; latest() names the reason.
+        } else if (SUCCEEDED(reinterpret_cast<ID3D12CommandQueue *>(queue)->Signal(f.fence, f.signalled + 1))) {
+          value = ++f.signalled;
+        } else if (first(s, log_signal_failed)) {
+          char message[200]{};
+          std::snprintf(message, sizeof(message),
+            "Sunshine UI layer: could not signal the fence of queue 0x%llx after a layer copy; it stays unordered (logged once)",
+            static_cast<unsigned long long>(queue));
+          sunshine_log::message(reshade::log::level::warning, message);
+        }
+      }
+      for (unsigned k = 0; k != owing; ++k) {
+        auto &entry = live.ring[due[k]];
+        entry.owed = 0;
+        entry.fence = slot;
+        entry.fence_generation = generation;
+        entry.signalled = value;
+      }
+      publish_watch(s);
+    }
+
+    void CALLBACK watchdog_tick(PTP_CALLBACK_INSTANCE, PVOID, PTP_TIMER);
+
+    // Requires the state lock. Arms the watchdog's next look (one-shot), unless
+    // armed; false when its timer cannot be created.
+    bool arm_watchdog(state_t &s) {
+      if (s.watchdog_closed) return false;
+      if (!s.watchdog) s.watchdog = CreateThreadpoolTimer(watchdog_tick, nullptr, nullptr);
+      if (!s.watchdog) return false;
+      if (!s.watchdog_armed) {
+        ULARGE_INTEGER relative;
+        relative.QuadPart = static_cast<ULONGLONG>(-static_cast<LONGLONG>(watchdog_period_ms * 10000));
+        FILETIME due{relative.LowPart, relative.HighPart};
+        SetThreadpoolTimer(s.watchdog, &due, 0, 0);
+        s.watchdog_armed = true;
+      }
+      return true;
+    }
+
+    // Requires the state lock. Releases every wait the presenting queue queued
+    // on f by signalling it from the CPU to the last value its queue was told
+    // to signal (the queue's own later signals reach the same value).
+    bool release_waits(queue_fence &f) {
+      return f.fence && SUCCEEDED(f.fence->Signal(f.signalled));
+    }
+
+    // Requires the state lock. A stalled wait: the game's queue waits for
+    // presenting-queue work behind the add-on's wait. The wait is released and
+    // the queue's copies are read unordered for this device's life.
+    void rescue(state_t &s, queue_fence &f, std::uint64_t completed) {
+      f.revoked = true;
+      const bool released = release_waits(f);
+      s.rescues.fetch_add(1, std::memory_order_relaxed);
+      if (!first(s, log_rescued)) return;
+      char message[400]{};
+      std::snprintf(message, sizeof(message),
+        "Sunshine UI layer: the presenting queue's wait for a layer copy on queue 0x%llx made no progress in %llu ms "
+        "(fence %llu of %llu; the game's queue waits for later presenting-queue work); %s it from the CPU and reads that "
+        "queue's copies unordered from now on (logged once)",
+        static_cast<unsigned long long>(f.queue), static_cast<unsigned long long>(rescue_after_ms),
+        static_cast<unsigned long long>(completed), static_cast<unsigned long long>(f.waited),
+        released ? "released" : "could not release");
+      sunshine_log::message(reshade::log::level::warning, message);
+    }
+
+    // The watchdog's look, every watchdog_period_ms while a wait is
+    // outstanding: a fence whose waited value is not reached and that made no
+    // progress for rescue_after_ms is rescued. Teardown releases waits itself.
+    void CALLBACK watchdog_tick(PTP_CALLBACK_INSTANCE, PVOID, PTP_TIMER) {
+      if (sunshine_addon_lifetime::stopping()) return;
+      try {
+        auto &s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        s.watchdog_armed = false;
+        const auto now = GetTickCount64();
+        bool outstanding = false;
+        for (auto &f : s.fences) {
+          if (!f.fence || f.revoked || !f.waited) continue;
+          const auto completed = f.fence->GetCompletedValue(); // UINT64_MAX once removed: passed.
+          if (completed >= f.waited) continue;
+          if (completed != f.progress) {
+            f.progress = completed;
+            f.progress_ms = now;
+          }
+          if (stalled(completed, f.waited, f.progress_ms, now)) rescue(s, f, completed);
+          else outstanding = true;
+        }
+        if (outstanding) arm_watchdog(s);
+      } catch (...) {
       }
     }
 
@@ -334,6 +583,9 @@ namespace sunshine_game3d::ui_layer {
       entry.capture_id = ++live.capture_id;
       entry.tick = live.tick = GetTickCount64();
       entry.queue = 0;
+      entry.owed = 0;
+      entry.fence = -1;
+      entry.fence_generation = entry.signalled = 0;
       entry.carriers = {};
       // A D3D11 immediate context is the presenting queue itself, so the copy
       // executed there; else the entry is pending until a list carrying it
@@ -596,20 +848,118 @@ namespace sunshine_game3d::ui_layer {
     out.copy = entry->copy; out.view = entry->view; out.capture_id = entry->capture_id; out.tick = live.tick;
     out.format = static_cast<std::uint32_t>(live.format); out.presents_since_copy = live.tracker.presents_since_copy();
     out.executed_queue = entry->queue;
-    // Only a copy that ran on the presenting queue alone is bound directly:
-    // queue order puts it before this Present's reads.
-    out.in_order = presented_in_order(entry->queue, s.presenting_queue);
+    // Queue order puts a copy run on the presenting queue alone before this
+    // Present's reads; a fence signalled after its submission orders one run
+    // on another queue (a wait unless the fence already passed it).
+    const queue_fence *fence = nullptr;
+    out.order = order_of(s, *entry, fence);
+    out.fence_value = fence ? entry->signalled : 0;
+    out.in_order = out.order != read_order::unordered;
     out.direct = entry->view.handle && out.in_order;
-    if (!out.in_order && !s.unordered_logged) {
-      s.unordered_logged = true;
-      char message[256]{};
-      std::snprintf(message, sizeof(message),
-        "Sunshine UI layer: the live layer copy executed on queue 0x%llx, not on the presenting queue 0x%llx; it is "
-        "copied into the renderer, not bound directly (logged once)",
-        static_cast<unsigned long long>(entry->queue), static_cast<unsigned long long>(s.presenting_queue));
+    if (out.order == read_order::fence_wait) {
+      out.wait_fence = {reinterpret_cast<std::uint64_t>(fence->fence)};
+      out.wait_value = out.fence_value;
+    }
+    if (out.order == read_order::queue) return true;
+    // Logged once: the first fenced copy, and each reason a copy is unordered.
+    const char *reason = nullptr;
+    std::uint32_t bit = log_fenced;
+    if (out.order == read_order::unordered) {
+      if (entry->queue == mixed_queue) { bit = log_mixed; reason = "it ran on more than one queue"; }
+      else if (entry->owed) { bit = log_unobserved; reason = "its submission was not observed by the add-on's submission hook"; }
+      else if (fence && fence->revoked) { bit = log_revoked; reason = "that queue's ordering was revoked after a stalled wait"; }
+      else { bit = log_no_fence; reason = "no fence value was signalled after its submission"; }
+    }
+    if (first(s, bit)) {
+      char message[400]{};
+      if (reason)
+        std::snprintf(message, sizeof(message),
+          "Sunshine UI layer: the live layer copy executed on queue 0x%llx, not on the presenting queue 0x%llx, and no "
+          "fence orders it (%s); it is copied into the renderer unordered (logged once)",
+          static_cast<unsigned long long>(entry->queue), static_cast<unsigned long long>(s.presenting_queue), reason);
+      else
+        std::snprintf(message, sizeof(message),
+          "Sunshine UI layer: the live layer copy executed on queue 0x%llx, not on the presenting queue 0x%llx; the "
+          "presenting queue's reads wait for the fence value signalled after it (logged once)",
+          static_cast<unsigned long long>(entry->queue), static_cast<unsigned long long>(s.presenting_queue));
       sunshine_log::message(reshade::log::level::info, message);
     }
     return true;
+  }
+
+  const char *name(read_order value) {
+    switch (value) {
+      case read_order::queue: return "queue";
+      case read_order::fence_passed: return "fence_passed";
+      case read_order::fence_wait: return "fence_wait";
+      default: return "unordered";
+    }
+  }
+
+  bool order_read(api::command_queue *queue, const live_capture &capture) {
+    if (capture.order != read_order::fence_wait) return capture.in_order;
+    if (!queue || !capture.wait_fence.handle || !capture.wait_value) return false;
+    auto &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    queue_fence *f = nullptr;
+    for (auto &value : s.fences)
+      if (value.fence && reinterpret_cast<std::uint64_t>(value.fence) == capture.wait_fence.handle) f = &value;
+    // Revoked since latest(): unordered, as that queue's later copies.
+    if (!f || f->revoked || capture.wait_value > f->signalled) {
+      if (f && f->revoked && first(s, log_revoked))
+        sunshine_log::message(reshade::log::level::info,
+          "Sunshine UI layer: a layer copy's queue was revoked before its wait; it is copied into the renderer unordered (logged once)");
+      return false;
+    }
+    // The watchdog first: a wait it cannot bound is never queued.
+    if (!arm_watchdog(s)) {
+      if (first(s, log_watchdog_failed))
+        sunshine_log::message(reshade::log::level::warning,
+          "Sunshine UI layer: could not start the cross-queue watchdog; layer copies on another queue are copied into "
+          "the renderer unordered (logged once)");
+      return false;
+    }
+    if (!queue->wait(capture.wait_fence, capture.wait_value)) {
+      if (first(s, log_wait_failed))
+        sunshine_log::message(reshade::log::level::warning,
+          "Sunshine UI layer: the presenting queue could not wait for a layer copy's fence; it is copied into the "
+          "renderer unordered (logged once)");
+      return false;
+    }
+    // No wait was outstanding: the watchdog's stall clock starts now.
+    const auto completed = f->fence->GetCompletedValue();
+    if (completed >= f->waited) {
+      f->progress = completed;
+      f->progress_ms = GetTickCount64();
+    }
+    f->waited = std::max(f->waited, capture.wait_value);
+    s.waits.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+
+  void observed_submission(std::uint64_t queue, unsigned count,
+      const sunshine_streamline::native_observer::command_identity *commands) noexcept {
+    if (!queue || !count || !commands) return;
+    try {
+      auto &s = state();
+      // Lock-free filter: only a submission of a list a live copy owes its
+      // signal to takes the lock.
+      const auto owing = [&](std::uint64_t list) {
+        if (!list) return false;
+        for (const auto &value : s.owed) if (value.load(std::memory_order_relaxed) == list) return true;
+        return false;
+      };
+      bool any = false;
+      for (const auto &value : s.owed) any |= value.load(std::memory_order_relaxed) != 0;
+      if (!any) return;
+      bool found = false;
+      for (unsigned i = 0; i != count && !found; ++i) found = owing(commands[i].native_command);
+      if (!found) return;
+      std::lock_guard<std::mutex> lock(s.mutex);
+      signal_owed(s, queue, count, commands);
+    } catch (...) {
+      // A failure never propagates into the game's submission.
+    }
   }
 
   void bound(api::device *device, std::uint64_t capture_id, api::fence fence, std::uint64_t value) {
@@ -671,6 +1021,13 @@ namespace sunshine_game3d::ui_layer {
           s.device = nullptr;
           s.presenting_queue = 0;
         }
+        // Its queue fences: an outstanding wait is released first, so none
+        // outlives the fence.
+        for (auto &f : s.fences) {
+          if (f.device != device) continue;
+          if (f.fence && f.waited && f.fence->GetCompletedValue() < f.waited) release_waits(f);
+          release(f);
+        }
       }
       destroy(doomed);
     }
@@ -687,11 +1044,16 @@ namespace sunshine_game3d::ui_layer {
     }
 
     // Carrier events. Lists that carried no live copy return before any lock.
+    // ReShade reports an execution before the native submission; on D3D12 a
+    // copy run away from the presenting queue owes its fence signal to the
+    // submission hook, which runs after it (observed_submission).
     void on_execute(api::command_queue *queue, api::command_list *commands) {
       auto &s = state();
       if (!queue || !watched(s, commands)) return;
+      const bool d3d12 = queue->get_device()->get_api() == api::device_api::d3d12;
       std::lock_guard<std::mutex> lock(s.mutex);
-      carriers_executed(s, reinterpret_cast<std::uint64_t>(commands), queue->get_native());
+      carriers_executed(s, reinterpret_cast<std::uint64_t>(commands), commands->get_native(), queue->get_native(), d3d12);
+      publish_watch(s);
     }
 
     void on_execute_secondary(api::command_list *primary, api::command_list *secondary) {
@@ -702,7 +1064,7 @@ namespace sunshine_game3d::ui_layer {
       // D3D11: ExecuteCommandList on the immediate context, the presenting
       // queue itself, executes the list.
       if (primary->get_native() && primary->get_native() == s.presenting_queue)
-        carriers_executed(s, list, s.presenting_queue);
+        carriers_executed(s, list, 0, s.presenting_queue, false);
       // D3D11 FinishCommandList (the primary is the new ID3D11CommandList):
       // the deferred context's commands move into it.
       else if (finished_command_list(primary))
@@ -718,7 +1080,7 @@ namespace sunshine_game3d::ui_layer {
       auto &s = state();
       if (!watched(s, commands)) return;
       std::lock_guard<std::mutex> lock(s.mutex);
-      carriers_reset(s, reinterpret_cast<std::uint64_t>(commands));
+      carriers_reset(s, reinterpret_cast<std::uint64_t>(commands), commands->get_native());
       publish_watch(s);
     }
 
@@ -738,6 +1100,9 @@ namespace sunshine_game3d::ui_layer {
     reshade::register_event<reshade::addon_event::reset_command_list>(sunshine_addon_lifetime::guarded<on_reset>);
     reshade::register_event<reshade::addon_event::init_swapchain>(sunshine_addon_lifetime::guarded<on_swapchain>);
     reshade::register_event<reshade::addon_event::destroy_swapchain>(sunshine_addon_lifetime::guarded<on_swapchain>);
+    auto &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.watchdog_closed = false;
   }
 
   void unregister_events() {
@@ -750,6 +1115,27 @@ namespace sunshine_game3d::ui_layer {
     reshade::unregister_event<reshade::addon_event::init_swapchain>(sunshine_addon_lifetime::guarded<on_swapchain>);
     reshade::unregister_event<reshade::addon_event::destroy_swapchain>(sunshine_addon_lifetime::guarded<on_swapchain>);
     cancel();
+    // No wait of the add-on outlives it: outstanding waits are released and
+    // their queues revoked, then the watchdog stops (its look takes the lock,
+    // so it is awaited outside it).
+    PTP_TIMER timer = nullptr;
+    {
+      auto &s = state();
+      std::lock_guard<std::mutex> lock(s.mutex);
+      for (auto &f : s.fences)
+        if (f.fence && f.waited && f.fence->GetCompletedValue() < f.waited) {
+          release_waits(f);
+          f.revoked = true;
+        }
+      timer = std::exchange(s.watchdog, nullptr);
+      s.watchdog_armed = false;
+      s.watchdog_closed = true;
+    }
+    if (timer) {
+      SetThreadpoolTimer(timer, nullptr, 0, 0);
+      WaitForThreadpoolTimerCallbacks(timer, TRUE);
+      CloseThreadpoolTimer(timer);
+    }
   }
 
   void observe_output(api::swapchain *swapchain, api::command_queue *queue) {
@@ -874,8 +1260,16 @@ extern "C" __declspec(dllexport) BOOL SunshineUILayerTestLive(sunshine_game3d::u
   out->presents_since_copy = live.tracker.presents_since_copy();
   if (const auto *entry = live.latest()) {
     out->executed_queue = entry->queue;
-    out->in_order = entry->copy.handle && presented_in_order(entry->queue, s.presenting_queue);
+    // As latest() orders it now.
+    const queue_fence *fence = nullptr;
+    const auto order = order_of(s, *entry, fence);
+    out->fence_value = fence ? entry->signalled : 0;
+    out->order = static_cast<std::uint32_t>(order);
+    out->revoked = fence && fence->revoked;
+    out->in_order = entry->copy.handle && order != read_order::unordered;
   }
+  out->waits = s.waits.load(std::memory_order_relaxed);
+  out->rescues = s.rescues.load(std::memory_order_relaxed);
   return s.device != nullptr;
 }
 #endif

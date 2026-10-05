@@ -268,6 +268,15 @@ namespace {
     SetLastError(0xbadf00d);
   }
   void on_invalidated() { ++invalidations; SetLastError(0xbadf00d); }
+  // The submission listener (the UI layer's cross-queue fence).
+  unsigned listen_events{}, listened_count{}, listened_owner_events{}, listened_originals{};
+  std::uint64_t listened_queue{}, listened_command{};
+  void on_listen(std::uint64_t queue, unsigned count, const observer::command_identity *commands) noexcept {
+    ++listen_events; listened_queue = queue; listened_count = count;
+    listened_command = count ? commands[0].native_command : 0;
+    listened_owner_events = submit_events; listened_originals = original_submissions;
+    SetLastError(0xbadf00d);
+  }
   void on_enhanced_textures(std::uint64_t command, std::uint64_t cookie, unsigned count, const observer::enhanced_texture *textures) {
     ++enhanced_reports; observed_command = command; observed_cookie = cookie;
     observed_texture_count = count; observed_texture = count ? textures[0].resource : nullptr;
@@ -631,6 +640,23 @@ int main() {
     observer::initialize(callbacks); observer::set_active(true);
     submit(queues[0], 1, &submitted_command);
     require(submit_events == before_shutdown + 1, "reinitialized observer lost retained hooks");
+    {
+      // The submission listener sees each submission once, innermost, after
+      // the original and the capture owner's callback, with the same native
+      // identities; never under suppression nor once removed.
+      observer::set_submission_listener(on_listen);
+      const auto listened = listen_events;
+      submit(queues[1], 1, &submitted_command);
+      require(listen_events == listened + 1 && listened_queue == address(queues[0]) && listened_count == 1 &&
+          listened_command == address(commands[0]) && listened_owner_events == submit_events &&
+          listened_originals == original_submissions, "the submission listener missed, repeated or preceded a submission");
+      { observer::suppression_scope scope; submit(queues[0], 1, &submitted_command); }
+      require(listen_events == listened + 1, "the submission listener ran under suppression");
+      observer::set_submission_listener(nullptr);
+      submit(queues[0], 1, &submitted_command);
+      require(listen_events == listened + 1, "a removed submission listener still ran");
+    }
+    std::puts("PASS submission listener: once per submission, innermost, after the original and the owner's callback, never suppressed or after removal");
     throw_callback = true;
     const auto before_throw = original_submissions.load();
     submit(queues[0], 1, &submitted_command);

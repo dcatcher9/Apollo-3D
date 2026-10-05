@@ -420,12 +420,16 @@ namespace sunshine_game3d::ui_input {
       (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::color_and_alpha));
     if (layer_wanted && ui_layer::latest(runtime->get_device(), now, layer)) {
       constexpr std::uint64_t layer_capture = std::uint64_t(1) << 62; // Never a Streamline ticket id.
-      // Direct binding reads the live copy where it lies when it ran on the
-      // presenting queue alone; else, and under a dump, it is copied into the
-      // renderer's slot (both rest in shader_resource). Either read holds the
-      // ring entry until this render's completion (complete()).
+      // A copy run on another queue is ordered by its queue's fence: this
+      // queue waits for it on the GPU before any read below (order_read).
+      const bool ordered = ui_layer::order_read(queue, layer);
+      // Direct binding reads the live copy where it lies when queue or fence
+      // order puts it before this Present's reads; else, and under a dump, it
+      // is copied into the renderer's slot (both rest in shader_resource).
+      // Either read holds the ring entry until this render's completion
+      // (complete()).
       api::resource_view view{};
-      if (direct_binding && layer.direct)
+      if (direct_binding && layer.direct && ordered)
         view = renderer.bind_ui_candidate(4, layer_capture | layer.capture_id, layer.view, layer.copy);
       if (view.handle) log_direct_binding(1);
       else view = renderer.prepare_ui_candidate(4, layer_capture | layer.capture_id, [&](api::resource destination) {
@@ -442,7 +446,9 @@ namespace sunshine_game3d::ui_input {
         {"candidate_bit", ui_detection::candidate::layer}, {"available_for_detection", view.handle != 0},
         {"association", "previous_frame_offscreen_ui_layer"}, {"capture_id", layer.capture_id},
         {"presents_since_copy", layer.presents_since_copy}, {"age_ms", now >= layer.tick ? now - layer.tick : 0},
-        {"executed_queue", layer.executed_queue}, {"presenting_queue_order", layer.in_order}});
+        {"executed_queue", layer.executed_queue}, {"presenting_queue_order", layer.order == ui_layer::read_order::queue},
+        {"read_order", ui_layer::name(ordered ? layer.order : ui_layer::read_order::unordered)},
+        {"fence_value", layer.fence_value}});
       if (view.handle) {
         result.detection.layer = view;
         result.detection.layer_flags = ui_layer::detection_flags(static_cast<api::format>(layer.format));

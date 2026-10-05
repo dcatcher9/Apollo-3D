@@ -2528,6 +2528,7 @@ namespace {
     // Observer metadata releases its source leases while capture/UI owners are
     // still alive; capture keeps any leases required by outstanding GPU work.
     addon_session().end([&] {
+      sunshine_streamline::native_observer::set_submission_listener(nullptr);
       sunshine_game3d::ui_layer::unregister_events();
       sunshine_game3d::depth_input::shutdown_observers();
       sunshine_depth::shutdown();
@@ -2733,6 +2734,9 @@ extern "C" {
       reshade::register_event<reshade::addon_event::reshade_open_overlay>(sunshine_addon_lifetime::guarded<on_overlay>);
       reshade::register_event<reshade::addon_event::reshade_overlay>(sunshine_addon_lifetime::guarded<on_draw_overlay>);
       sunshine_game3d::ui_layer::register_events();
+      // The layer's cross-queue fence is signalled right after each native
+      // submission that ran a copy away from the presenting queue.
+      sunshine_streamline::native_observer::set_submission_listener(sunshine_game3d::ui_layer::observed_submission);
       return true;
     } catch (...) {
       teardown_addon(addon, reshade);

@@ -196,6 +196,9 @@ namespace {
     std::vector<std::uint8_t> source_bytes;
     fs::path native_oracle_output;
     std::function<void()> render_tracked_depth;
+    // Queue work the game submits after its Present returns and before the
+    // fixture's completion signal (a later presenting-queue signal).
+    std::function<void()> after_present;
 
     ~fixture_t() {
       observed.capture = observed.inject = false;
@@ -264,6 +267,7 @@ namespace {
       queue->ExecuteCommandLists(1, lists);
       if (present) {
         checked(swapchain->Present(0, 0), "Actual natural D3D12 game Present");
+        if (after_present) after_present();
       }
       checked(queue->Signal(completion.p, ++fence_value), "Fence fixture and natural ReShade work");
       checked(completion->SetEventOnCompletion(fence_value, completion_event), "Observe fixture completion");
