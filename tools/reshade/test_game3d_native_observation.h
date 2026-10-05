@@ -44,7 +44,7 @@ namespace {
     std::string provider;
     float depth_scale{}, strength_blend{};
     int coordinate_basis{};
-    std::array<float, 2> convergence{};
+    std::array<float, 2> convergence{}, projection{};
     std::array<float, 4> depth_rect{};
     // Full consumed R32F allocation when depth was ready; packed SBS on request.
     std::vector<std::uint8_t> raw_depth, sbs;
@@ -256,6 +256,7 @@ namespace {
       frame.depth_scale = parameters.at("depth_scale");
       frame.strength_blend = parameters.at("strength_blend");
       frame.convergence = {parameters.at("convergence").at(0), parameters.at("convergence").at(1)};
+      frame.projection = {parameters.at("projection").at(0), parameters.at("projection").at(1)};
       for (unsigned i = 0; i < 4; ++i) frame.depth_rect[i] = parameters.at("depth_rect").at(i);
       require((parameters.at("depth_ready").get<unsigned>() != 0) == frame.depth_ready, "Native constants disagree with the consumed depth");
       for (unsigned i = 0; i < response.texture_count; ++i) {

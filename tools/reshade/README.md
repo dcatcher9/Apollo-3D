@@ -700,22 +700,26 @@ these native capture gates.
 
 The optional `reshade_streamline_direct_runtime_test` is a component integration fixture.
 Its metadata seam bypasses SDK discovery; the real SDK-entry NGX/Streamline cases below remain
-necessary to validate that entry path. Its historical rendering assertions use the former
-current-zero ratio and independently derived inverse-depth values; those assertions are not
-acceptance evidence for the current gain policy.
+necessary to validate that entry path. Like the NGX fixture it renders through native Game 3D
+with no FX and needs no environment settings; each Present's consumed depth and constants come
+from the test add-on's last-render query and Dump 3D captures verify the depth pixels and
+projection a native render consumed. Its gain and zero oracle is the owning contract applied to
+the inverse distance of the known draw: gain `L/Q` from the nearest depth and the zero at the
+contrast midpoint.
 
 This fixture exercises independent capture and
 projection-based rendering. It writes real R32_FLOAT UAV textures that never enter the generic
 depth-stencil inventory, preserves them through native command submission, and checks their
-spatial depth pattern against the shader input. It also checks rotating resources, manual
-pin/release, the former coupled screen-plane/normalization changes, explicit recentering, proportional strength,
-failed evaluation recovery, and zero-strength HDR color. It uses the same arguments/environment
-below, with `reshade_streamline_direct_runtime_test.exe` and a fresh output directory. Its test-only
+spatial depth pattern against the consumed depth. It also checks rotating resources, manual
+pin/release, a changed center that moves only the zero, explicit recentering, proportional strength,
+failed, missing and refused evaluations (the newest completed copy held within its age bound, then
+current-color mono; one second of silence releases the association), and zero-strength HDR color.
+It uses the same arguments as the NGX fixture below, with
+`reshade_streamline_direct_runtime_test.exe` and a fresh output directory. Its test-only
 seam supplies middleware metadata, never shader readiness, copied pixels or GPU completion.
 `SUNSHINE_STREAMLINE_MATRIX_CHANGE_TEST=1` checks changed near/far projection metadata:
-the shader must use current reconstruction coefficients. Its old zero-tracking assertions belong
-to the coupled ratio policy. It also checks rotation, gaps, FOV invariance
-and actual HDR pixels.
+the render must use current reconstruction coefficients while the gain and zero follow the
+new decoded depth. It also checks rotation, gaps, FOV invariance and actual HDR pixels.
 Like the modes below, it is exclusive. A source nomination ticket is not a pixel-readiness
 assertion: negative capture cases verify held API ownership and current-color mono separately.
 Set `SUNSHINE_STREAMLINE_COLD_V1_TEST=1` for V1-only rotation without successful V2 warmup.
@@ -725,8 +729,8 @@ malformed, conflicting or split-transition rejection. These modes are mutually e
 use the same real GPU capture and shader path.
 `SUNSHINE_STREAMLINE_PACKED_V1_TEST=1` is a third exclusive mode for the packed
 `R32G8X24_TYPELESS` depth/stencil format observed in Dead Space. It checks rotating sources,
-prior-recording provider state, plane-aware depth readback, unchanged source stencil, actual
-shader preparation, mono fallback and recovery.
+prior-recording provider state, plane-aware depth readback, unchanged source stencil, the
+consumed depth and projection, mono fallback and recovery.
 `SUNSHINE_STREAMLINE_COMMAND_CAPACITY_TEST=1` is another exclusive mode. It retains
 160 real native-only command lists on the observed vtable, then destroys and recreates them
 while checking packed-depth rotation, shader output and recovery. These lists bypass ReShade's
@@ -735,7 +739,7 @@ device wrapper, so their cleanup must follow native COM lifetime rather than ReS
 ordinary packed-depth rendering, it submits the real producer recording before completing the
 evaluation. Successful completion must still reach the shader; failed completion and replaying
 the unchanged producer must remain mono. It checks both rotating sources, preserved source
-stencil and actual prepared-depth pixels, then verifies recovery with a new recording.
+stencil and consumed depth pixels, then verifies recovery with a new recording.
 `SUNSHINE_STREAMLINE_LARGE_BATCH_TEST=1` is another exclusive mode. It submits 97 real native
 command lists together with the depth producer at the start, middle and end; a separate idle-only
 96-list batch must not invalidate captured depth. A 257-barrier call puts the source transition
