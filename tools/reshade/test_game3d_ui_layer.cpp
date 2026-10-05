@@ -326,6 +326,40 @@ int main() {
     }
     std::puts("PASS UI layer cross-queue watchdog: a wait whose fence made no progress for rescue_after_ms is stalled, a "
       "reached or progressing one is not");
+    // The watchdog acts on where the presenting queue is (its marker brackets
+    // each wait: reached before, reached + 1 after), never on the fence's age
+    // alone: a wait not reached yet (the game's queue waiting for earlier
+    // presenting-queue work, no cycle) is never rescued, however old.
+    {
+      using action = layer::watch_action;
+      const auto rescue = layer::rescue_after_ms;
+      constexpr std::uint64_t reached = 41, value = 9;
+      for (const std::uint64_t now : {std::uint64_t(0), rescue, 10 * rescue, std::uint64_t(1000000)})
+        for (const bool revoked : {false, true})
+          require(layer::watch(reached - 1, reached, 0, value, revoked, 0, now) == action::waiting &&
+              layer::watch(0, reached, 0, value, revoked, 1, now) == action::waiting,
+            "A wait the presenting queue had not reached was rescued or released");
+      require(layer::watch(reached + 1, reached, 0, value, false, 1, 100000) == action::done &&
+          layer::watch(UINT64_MAX, reached, 0, value, true, 1, 100000) == action::done,
+        "A passed wait (or a removed device's marker) was still watched");
+      require(layer::watch(reached, reached, value, value, false, 1, 100000) == action::waiting &&
+          layer::watch(reached, reached, UINT64_MAX, value, true, 1, 100000) == action::waiting,
+        "A reached wait whose fence passed its value was acted on");
+      require(layer::watch(reached, reached, value - 1, value, false, 1000, 1000 + rescue - 1) == action::waiting &&
+          layer::watch(reached, reached, value - 1, value, false, 1000, 1000 + rescue) == action::rescue,
+        "A blocked wait was not rescued exactly rescue_after_ms after it was blocked without progress");
+      // Revoked: the game queue's own earlier signal moved the fence back
+      // below a later wait; that wait is released again at once.
+      require(layer::watch(reached, reached, value - 1, value, true, 1000, 1000) == action::release,
+        "A revoked fence moved back below a reached wait was not released again at once");
+      // An executed copy owing its signal is held only while the listener is heard.
+      require(layer::held_for_signal(true, true) && !layer::held_for_signal(true, false) && !layer::held_for_signal(false, true),
+        "A copy owing its fence signal was offered before it, or held without a listener");
+    }
+    std::puts("PASS UI layer cross-queue marker: a wait the presenting queue has not reached is never stalled, whatever "
+      "the fence's age; a passed one is done; a blocked one is rescued after rescue_after_ms without progress, and a "
+      "revoked fence moved back below a reached wait is released again at once; an owing copy is held only while the "
+      "listener is heard");
     // Live-copy ring (direct binding): the oldest free entry other than the
     // newest takes the next copy; with every entry read by an unfinished
     // render the ring grows to ring_capacity, then the copy is skipped.

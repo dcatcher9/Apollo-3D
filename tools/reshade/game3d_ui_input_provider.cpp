@@ -3,6 +3,7 @@
 #include "game3d_ui_mask.h"
 #include "game3d_ui_layer.h"
 #include "game3d_capture_diagnostic.h"
+#include "game3d_diagnostics.h"
 #include "streamline_camera_probe.h"
 #include "streamline_buffer_contract.h"
 #include <d3d12.h>
@@ -422,6 +423,12 @@ namespace sunshine_game3d::ui_input {
       constexpr std::uint64_t layer_capture = std::uint64_t(1) << 62; // Never a Streamline ticket id.
       // A copy run on another queue is ordered by its queue's fence: this
       // queue waits for it on the GPU before any read below (order_read).
+      // The wait goes onto the queue at once, ahead of ReShade's immediate
+      // list, so with the Diagnostics switch on that list (the renderer's
+      // begin timestamp and the depth preparation) is submitted first: the
+      // inputs and total GPU stage times then include the wait.
+      if (layer.order == ui_layer::read_order::fence_wait && queue && diagnostics::enabled())
+        queue->flush_immediate_command_list();
       const bool ordered = ui_layer::order_read(queue, layer);
       // Direct binding reads the live copy where it lies when queue or fence
       // order puts it before this Present's reads; else, and under a dump, it

@@ -199,6 +199,11 @@ namespace {
     // Queue work the game submits after its Present returns and before the
     // fixture's completion signal (a later presenting-queue signal).
     std::function<void()> after_present;
+    // The next submit signals its completion value but does not wait for it,
+    // so the CPU records the next frame while this one is still queued (the
+    // caller records it with another allocator; the next waiting submit
+    // covers both).
+    bool defer_completion = false;
 
     ~fixture_t() {
       observed.capture = observed.inject = false;
@@ -270,6 +275,7 @@ namespace {
         if (after_present) after_present();
       }
       checked(queue->Signal(completion.p, ++fence_value), "Fence fixture and natural ReShade work");
+      if (defer_completion) return;
       checked(completion->SetEventOnCompletion(fence_value, completion_event), "Observe fixture completion");
       require(WaitForSingleObject(completion_event, 3000) == WAIT_OBJECT_0, "D3D12 fixture GPU work exceeded three seconds");
     }
