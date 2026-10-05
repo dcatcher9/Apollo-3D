@@ -200,33 +200,6 @@ S1_CLEAN_COUNTERS = {'auto_frames': 100, 'detection_frames': 80, 'held.generated
                      'none.ambiguous': 20, 'trust.earned': 1, 'samples': 30, 'through_ms': 3000}
 
 
-# The groups and keys of format_identity_counters (game3d_ui_ticket.h), the S3 shadow's identity line.
-IDENTITY_GROUPS = (
-    ('renders', None), ('tagged', None),
-    ('frames', ('total', 'once', 'missed', 'repeated', 'extra')),
-    ('detect', ('agree', 'today_only', 'ticket_only')),
-    ('exact', ('agree', 'today_only', 'ticket_only', 'inexact')),
-    ('batch', ('agree', 'today_only', 'ticket_only')),
-    ('label', ('token', 'present', 'none')),
-    ('refused', ('unstamped', 'foreign_queue', 'not_real_span', 'stale_scope', 'no_reference', 'mismatch',
-                 'enhanced_barrier', 'render_pass', 'recording_not_covered', 'budget', 'begin_refused')),
-    ('gpu', ('exact', 'mismatch', 'unstamped', 'unproposed', 'token_exact')),
-    ('interposers', None),
-)
-
-
-def identity(t, values, runtime='0000000000000001'):
-    """A 'Sunshine UI identity' line (S3 shadow); values maps 'key' or 'group.key' to a count, every other field is
-    0."""
-    return counters(t, values, runtime, IDENTITY_GROUPS).replace('Sunshine UI counters:', 'Sunshine UI identity:')
-
-
-def interposers(t, bits, names, fg_known=0, fg_enabled=0, runtime='0000000000000001'):
-    """A 'Sunshine FG interposers' line (format_interposers in game3d_ui_ticket.h)."""
-    return line(t, f'[Sunshine 3D] Sunshine FG interposers: runtime={runtime} bits={bits} names={names} '
-                   f'fg_known={fg_known} fg_enabled={fg_enabled}')
-
-
 BASE = [
     line('10:00:00', "Initializing crosire's ReShade version '6.8' loaded from 'D:\\G\\dxgi.dll' "
                      "into 'D:\\G\\game.exe' ..."),
@@ -319,7 +292,7 @@ class ReadinessReport(unittest.TestCase):
     def test_rejected_selective_ui_channel_warns(self):
         # Stellar Blade before the factor-two headroom: its real UI layer covered
         # 1.8% but pulsing markers made it invalid, so no mask protected the HUD.
-        rejected = ui('10:00:12', 0, 0, (0, 18, 0, 1000), 0xa, 0x0, layer=1, invalid=(0, 5, 0, 0))
+        rejected = ui('10:00:12', 0, 0, (0, 18, 0, 1000), 0xa, 0x0, layer=1, invalid=(0, 15, 0, 0))
         checks = run(BASE + [rejected])
         self.assertEqual(checks['UI channel admission'].status, 'WARN')
         self.assertIn('UI layer 1.8% covered', checks['UI channel admission'].times[0])
@@ -502,11 +475,14 @@ class ReadinessReport(unittest.TestCase):
         checks = run(BASE + [rounded])
         self.assertEqual(checks['UI protection'].status, 'PASS')
         self.assertIn('0 released by a visible verdict', checks['Hidden scene'].detail)
-        # The first-run shadow: the presented frame read hidden for 600 ms while no UI source decided.
+        # The first-run shadow (builds up to revision 7): the presented frame read hidden for 600 ms while no UI
+        # source decided. The run is listed by its start, once, at its longest length.
         uncovered = ui('10:00:14', 0, 0, (0, 0, 0, 1000), 0x8, 0x0, scene=(0.01, 'hidden', 0, 1, 600))
         checks = run(BASE + [uncovered])
         self.assertEqual(checks['Hidden scene'].status, 'WARN')
-        self.assertEqual(checks['Hidden scene'].times, ['10:00:14 600 ms (first-run shadow)'])
+        self.assertEqual(checks['Hidden scene'].times, ['10:00:13 600 ms (first-run shadow)'])
+        longer = ui('10:00:15', 0, 0, (0, 0, 0, 1000), 0x8, 0x0, scene=(0.01, 'hidden', 0, 1, 1600))
+        self.assertEqual(run(BASE + [uncovered, longer])['Hidden scene'].times, ['10:00:13 1600 ms (first-run shadow)'])
         brief = ui('10:00:14', 0, 0, (0, 0, 0, 1000), 0x8, 0x0, scene=(0.01, 'hidden', 0, 1, 400))
         self.assertEqual(run(BASE + [brief])['Hidden scene'].status, 'INFO')
         # A decided source covers the run; older logs have no hidden-scene check.
@@ -955,7 +931,7 @@ class ReadinessReport(unittest.TestCase):
         reused = ui2('10:00:06', 3, 30, (0, 0, 0, 0), 0x0, 0x0, reused=1, reason='no_candidate')
         self.assertNotIn('sampled reasons', run(BASE + [reused, counters('10:00:12', CLEAN_COUNTERS)])
                          ['UI no mask'].detail)
-        # The panel's Forget (A3) and the first-run shadow toggle (F1) are listed.
+        # The panel's Forget (A3) is listed.
         forget = line('10:00:07', '[Sunshine 3D] Sunshine UI protection: forgot learned UI sources '
                                   'backbuffer:24:srgb,ui_layer:28:srgb for this game; each source is accepted again '
                                   'by its own evidence')
@@ -969,9 +945,8 @@ class ReadinessReport(unittest.TestCase):
                           ('forgot learned UI sources', None), ('accepted UI sources are now', ())])
         trust = [c.detail for c in report.evaluate(session) if c.name == 'UI trust']
         self.assertIn('10:00:07 forgot learned UI sources backbuffer:24:srgb,ui_layer:28:srgb', trust)
-        self.assertEqual(run(lines)['UI first-run shadow'].detail,
-                         '10:00:01 measures this session (UISceneShadow=absent: the first session since the key was '
-                         'written)')
+        # The first-run shadow was removed: its line in older logs is ignored.
+        self.assertNotIn('UI first-run shadow', run(lines))
         checks = run(BASE + [counters('10:00:12', {**CLEAN_COUNTERS, 'trust.forgotten': 2})])
         self.assertTrue(checks['UI trust events'].detail.endswith('forgotten 2'))
 
@@ -1040,9 +1015,9 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual((checks['UI full frame'].status, checks['UI full alpha'].status), ('PASS', 'INFO'))
         self.assertEqual(checks['UI full alpha'].detail,
                          '0 frames decided a whole-frame alpha and 10 an exact full change-set (6) (12% of detection '
-                         'frames); samples of these accepted whole-frame decisions (alpha, or exact full change-set '
-                         '6) read the scene hidden 0, ambiguous 0, visible 2, invalid or unmeasured 0; 2 samples '
-                         'pinned an accepted whole-frame decision flat over a visible scene, as intended (P1)')
+                         'frames); samples of them read the scene hidden 0, ambiguous 0, visible 2, invalid or '
+                         'unmeasured 0; 2 samples pinned an accepted whole-frame decision flat over a visible scene, '
+                         'as intended (P1)')
         clean = run(BASE + [counters('10:00:12', CLEAN_COUNTERS, groups=S2B_COUNTER_GROUPS)])
         self.assertEqual(clean['UI full alpha'].detail,
                          'no frame decided a whole-frame alpha or an exact full change-set (6)')
@@ -1090,7 +1065,7 @@ class ReadinessReport(unittest.TestCase):
                    guard=(1, 0, 0), shadow=1, hidden_ms=900)
         checks = run(BASE + [dark, counters('10:00:16', guard, groups=S2B_COUNTER_GROUPS)])
         self.assertEqual((checks['Hidden scene'].status, checks['Hidden scene'].times),
-                         ('WARN', ['10:00:16 900 ms (first-run shadow)']))
+                         ('WARN', ['10:00:15 900 ms (first-run shadow)']))
         self.assertIn('H1 hidden scene (8) in 0 samples', checks['Hidden scene'].detail)
         self.assertNotIn('unproven', checks['Hidden scene'].detail)
         # Since the layer proof: a settings menu opened before any gameplay sample proved the scene layer reads hidden
@@ -1121,7 +1096,7 @@ class ReadinessReport(unittest.TestCase):
         new = report.parse([SB_FIX1_SETTINGS]).ui[0]
         self.assertEqual((new.scene.fix1, new.scene.pre_ui_pixels, new.scene.claims, new.scene.proven,
                           new.scene.hidden_ms, new.bare_layer(), new.hidden()),
-                         (True, (2719720, 2148784, 5994692, 5238234), 0, False, 656, True, True))
+                         (True, (2719720, 2148784), 0, False, 656, True, True))
         detail = run(BASE + [SB_FIX1_SETTINGS])['Hidden scene'].detail
         self.assertIn('1 hidden samples had an unproven pre-UI layer (no proof yet: 3 samples over 2 s whose layer '
                       'equals the presented frame on at least 90% of pixels and is lit on at least half)', detail)
@@ -1135,7 +1110,15 @@ class ReadinessReport(unittest.TestCase):
         flat = ui3('10:00:12', 8, 1000, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 600), scene=(0.031, 'hidden'),
                    claims=0x80, h1=1, winner=0, pre_ui=('layer', 0.588, 1), guard=(1, 1, 0, 1),
                    pre_ui_pixels=(330, 260, 600, 520))
-        self.assertEqual(report.parse(BASE + [flat]).ui[0].scene.pre_ui_pixels, (330, 260, 600, 520))
+        self.assertEqual(report.parse(BASE + [flat]).ui[0].scene.pre_ui_pixels, (330, 260))
+        # Since selection revision 8 the line carries neither the removed shadow fields nor the last two pixel
+        # counts (shadow statistics), and parses the same.
+        current = flat.replace('shadow=0 shadow_hidden_ms=0 ', '').replace(
+            ' presented_lit=600 presented_lit_differs=520', '')
+        self.assertNotIn('shadow=', current)
+        parsed = report.parse(BASE + [current]).ui[0].scene
+        self.assertEqual((parsed.s2b, parsed.pre_ui_pixels, parsed.shadow, parsed.hidden_ms, parsed.proven),
+                         (True, (330, 260), False, 0, True))
         self.assertEqual(run(BASE + [flat])['Hidden scene'].detail,
                          'H1 hidden scene (8) in 1 samples (pre-UI image: hudless 0, layer 1), hidden hold held in 1 '
                          'samples (no counter line); 1 of 1 samples measured')
@@ -1183,159 +1166,40 @@ class ReadinessReport(unittest.TestCase):
         unresolved = run(BASE + [start] + samples + [accepted_now('10:00:15', 'ui_alpha:61:srgb,ui_layer:28:srgb')])
         self.assertEqual(unresolved['UI protection'].status, 'WARN')
 
-    def test_fix1_dark_pre_ui_image_is_a_shadow_statistic(self):
-        # Stellar Blade's SDR loading screen after the layer was proven: the presented frame reads hidden, the layer
-        # (no coverage) is an almost black scene image whose D is weak, so H1 (d) does not apply. The report only
-        # summarizes the shadow statistics, INFO.
-        def loading(t, image_lit, presented_lit, differs, proven=1, verdict='hidden', covered=0):
-            return ui3(t, 0, 0, (0, 0, 0, 1000), 0x48, 0x0, layer=(covered, 30), reason='ambiguous',
-                       refused='current', scene=(-0.04, verdict), pre_ui=('layer', 0.18, 1),
-                       guard=(1, 0, 0, proven), pre_ui_pixels=(990, image_lit, presented_lit, differs))
-        dark = [loading('10:00:12', 2, 30, 28), loading('10:00:13', 40, 60, 25), loading('10:00:14', 12, 45, 40)]
-        checks = run(BASE + dark)
-        shadow = checks['Dark pre-UI image (shadow)']
-        self.assertEqual(shadow.status, 'INFO')
-        self.assertEqual(shadow.detail,
-                         '3 samples read the presented frame hidden over a proven but dark pre-UI layer (lit on less '
-                         'than half of the pixels): presented lit 3.0%-6.0%, layer lit 0.20%-4.0%, presented lit and '
-                         'different from the layer 2.5%-4.0% of pixels; shadow statistics for a future dark pre-UI '
-                         'image rule (loading screens), nothing acts on them')
-        self.assertEqual(shadow.times[0], '10:00:12 presented lit 3.0%, layer lit 0.20%, differing 2.8%')
-        # Not about an unproven, lit or covered layer, a frame that did not read hidden, or S2b lines.
-        for lines in ([loading('10:00:12', 2, 30, 28, proven=0)], [loading('10:00:12', 500, 600, 20)],
-                      [loading('10:00:12', 2, 30, 28, covered=10)], [loading('10:00:12', 2, 30, 28, verdict='visible')],
-                      [ui3('10:00:12', 0, 0, (0, 0, 0, 1000), 0x48, 0x0, scene=(-0.04, 'hidden'),
-                           pre_ui=('layer', 0.18, 1), guard=(1, 0, 0, 1))]):
-            self.assertNotIn('Dark pre-UI image (shadow)', run(BASE + lines))
-
-    def test_fix2_counter_lines_parse_decided_11_and_the_still_group(self):
-        # The text test_game3d_alpha_auto pins for format_ui_counters since fix 2: decided adds 11 and H2's group
-        # follows the scene guard's.
-        text = ('auto_frames=15 detection_frames=11 held={generated=2 none=1} reused=1 '
-                'inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 10=4 11=5} '
-                'none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 '
-                'gate_no_hold=1 no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 depth_not_current=1} '
-                'full_d={hidden=1 ambiguous=0 visible=0 invalid=0} scene={entered=1 released=1 refuted=2} '
-                'still={entered=2 released=1 short=7} untrusted_inferred=0 inexact_difference=3 contradicted=2 '
-                'presented_over_dedicated=0 full_alpha=2 full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=0} '
-                'trust={earned=1 revoked_exact=1 revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3} '
-                'samples=4 through_ms=12345')
-        fields = report.counter_fields('runtime=0000000000000001 ' + text)
-        self.assertEqual((fields['decided.11'], fields['still.entered'], fields['still.released'],
-                          fields['still.short'], fields['scene.refuted']), (5, 2, 1, 7, 2))
-        self.assertEqual(report.counter_fields(report.COUNTERS.search(
-            counters('10:00:00', fields, groups=FIX2_COUNTER_GROUPS)).group(1)), fields)
-        # H2 frames are named among the decided sources and keep the accounting identity.
-        flat = {**CLEAN_COUNTERS, 'decided.0': 10, 'decided.11': 10, 'none.ambiguous': 10, 'still.entered': 1,
-                'still.released': 1}
-        checks = run(BASE + [counters('10:00:12', flat, groups=FIX2_COUNTER_GROUPS)])
+    def test_logs_of_the_removed_shadow_features_still_report(self):
+        # The first-run shadow, texel 11's dark pre-UI statistics, rule H2's still screens and the S3 identity shadow
+        # were removed (selection revision 8). Their builds' lines still parse; none adds a check of its own, and H2's
+        # counted frames are named as removed.
+        dark = ui3('10:00:12', 0, 0, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 30), reason='ambiguous',
+                   refused='current', scene=(-0.04, 'hidden'), pre_ui=('layer', 0.18, 1), guard=(1, 0, 0, 1),
+                   shadow=1, hidden_ms=300, pre_ui_pixels=(990, 2, 30, 28),
+                   still=(1, 0, 'pending', 1200, 900, 920, 325))
+        old = [
+            line('10:00:01', '[Sunshine 3D] Sunshine UI protection: first-run shadow measures this session '
+                             '(UISceneShadow=absent)'),
+            line('10:00:01', '[Sunshine 3D] Sunshine UI protection: still screens with no UI source are only logged '
+                             '(UIFlattenStillScreens=0)'),
+            dark,
+            line('10:00:13', '[Sunshine 3D] Sunshine UI still screen: would flatten (UIFlattenStillScreens=0) after '
+                             'run_ms=2000 samples=3 d=[0.010,0.040] still_min=0.970'),
+            line('10:00:14', '[Sunshine 3D] Sunshine UI still screen: episode ended reason=moved duration_ms=900 '
+                             'samples=2 d=[0.010,0.040] still_min=0.960 flattened=0'),
+            line('10:00:14', '[Sunshine 3D] Sunshine FG interposers: runtime=0000000000000001 bits=3 '
+                             'names=sl_interposer,sl_dlss_g fg_known=1 fg_enabled=1'),
+            line('10:00:14', '[Sunshine 3D] Sunshine UI identity: runtime=0000000000000001 renders=9 tagged=8 '
+                             'frames={total=4 once=2 missed=1 repeated=1 extra=2} gpu={exact=2 mismatch=1} '
+                             'interposers=3'),
+        ]
+        h2 = {**CLEAN_COUNTERS, 'decided.0': 10, 'decided.11': 10, 'none.ambiguous': 10, 'still.entered': 1,
+              'still.released': 1}
+        session = report.parse(BASE + old)
+        self.assertEqual([u.t for u in session.ui], [36012.0])
+        self.assertEqual((session.ui[0].scene.pre_ui_pixels, session.ui[0].scene.hidden_ms), ((990, 2), 300))
+        checks = run(BASE + old + [counters('10:00:15', h2, groups=FIX2_COUNTER_GROUPS)])
+        for name in ('Dark pre-UI image (shadow)', 'UI still screen', 'UI first-run shadow', 'UI identity (S3)'):
+            self.assertNotIn(name, checks)
+        self.assertIn('still screen without a UI source (H2, removed) (11) 12%', checks['UI protection'].detail)
         self.assertEqual(checks['UI counters'].status, 'PASS')
-        self.assertIn('UI layer (10) 75%, still screen without a UI source (H2) (11) 12%',
-                      checks['UI protection'].detail)
-        # Without episodes the check says so, with the safety evidence of the counter line.
-        self.assertEqual((checks['UI still screen'].status, checks['UI still screen'].detail),
-                         ('INFO', 'no still screen without a UI source; entered 1, released 1; longest run that reset '
-                                  'before 2 s: 0 ms (0 short runs)'))
-
-    def test_fix2_still_screen_episodes_warn_in_the_shadow(self):
-        # Stellar Blade's SDR loading screen (2026-10-03 07:19:57-07:20:06): the cleared output target (0x48) and
-        # current alpha are offered, neither accepted, so no source decides; the presented frame reads hidden (D
-        # -0.014 to -0.068) and still. In the default shadow H2 only logs that it would flatten it.
-        def loading(t, phase, run_ms, short_ms=0):
-            return ui3(t, 0, 0, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 4), reason='ambiguous', refused='current',
-                       scene=(-0.04, 'hidden'), shadow=1, hidden_ms=run_ms,
-                       still=(1, 0, phase, run_ms, 36864, 36864, short_ms))
-        switch = line('10:00:01', '[Sunshine 3D] Sunshine UI protection: still screens with no UI source are only '
-                                  'logged (UIFlattenStillScreens=0)')
-        start = line('10:00:12', '[Sunshine 3D] Sunshine UI still screen: would flatten (UIFlattenStillScreens=0) '
-                                 'after run_ms=2000 samples=21 d=[-0.068,-0.014] still_min=1.000')
-        end = line('10:00:19', '[Sunshine 3D] Sunshine UI still screen: episode ended reason=moving duration_ms=7000 '
-                               'samples=71 d=[-0.068,-0.014] still_min=0.990 flattened=0')
-        totals = {**CLEAN_COUNTERS, 'still.entered': 1, 'still.released': 1, 'still.short': 3}
-        lines = BASE + [switch, loading('10:00:11', 'pending', 900, 547), loading('10:00:12', 'shadow', 2000), start,
-                        loading('10:00:18', 'shadow', 6000), end,
-                        counters('10:00:19', totals, groups=FIX2_COUNTER_GROUPS)]
-        session = report.parse(lines)
-        self.assertEqual(session.still_switch, [(36001.0, False)])
-        self.assertEqual(session.ui[1].still, report.Still(True, False, 'shadow', 2000, 36864, 36864, 0))
-        episode = session.still_episodes[0]
-        self.assertEqual((episode.flatten, episode.run_ms, episode.end, episode.reason, episode.duration_ms,
-                          episode.d, episode.still_min, episode.flattened),
-                         (False, 2000, 36019.0, 'moving', 7000, (-0.068, -0.014), 0.99, False))
-        checks = run(lines)
-        still = checks['UI still screen']
-        self.assertEqual(still.status, 'WARN')
-        self.assertEqual(still.detail,
-                         '1 still screen without a UI source would have been flattened (shadow): the presented frame '
-                         'read hidden (D at most 0.05) and still for 2 s while no UI source decided; review each one '
-                         '(a Dump 3D taken during one shows the screen) before turning on "Flatten still screens with '
-                         'no UI source"; UIFlattenStillScreens=0; entered 1, released 1; longest run that reset before '
-                         '2 s: 547 ms (3 short runs)')
-        self.assertEqual(still.times, ['10:00:12.000 would flatten after 2000 ms, ended 10:00:19.000 (moving) after '
-                                       '7000 ms; D -0.068 to -0.014, still at least 99.0% of cells'])
-        # Its hidden run still warns as an uncovered hidden scene, as the first-run shadow logged it before fix 2.
-        self.assertEqual(checks['Hidden scene'].status, 'WARN')
-        # Without a counter line the short runs are not counted, and an episode the log ended in stays open.
-        still = run(BASE + [switch, loading('10:00:11', 'pending', 900, 547), start])['UI still screen']
-        self.assertTrue(still.detail.endswith('; UIFlattenStillScreens=0; longest run that reset before 2 s: 547 ms '
-                                              '(short runs not counted without a counter line)'), still.detail)
-        self.assertEqual(still.times, ['10:00:12.000 would flatten after 2000 ms, still active when the log ended; D '
-                                       '-0.068 to -0.014, still at least 100.0% of cells'])
-
-    def test_fix2_flattened_still_screens_are_info_and_protected(self):
-        # With "Flatten still screens with no UI source" on, the same screen is H2's source 11: a mask, so no gap.
-        def flat(t, run_ms):
-            return ui3(t, 11, 1000, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 4), reason='ambiguous', refused='current',
-                       scene=(-0.04, 'hidden'), winner=0, still=(1, 1, 'flat', run_ms, 36864, 36864, 0))
-        switch = line('10:00:01', '[Sunshine 3D] Sunshine UI protection: still screens with no UI source are '
-                                  'flattened (UIFlattenStillScreens=1)')
-        start = line('10:00:06', '[Sunshine 3D] Sunshine UI still screen: flattening (UIFlattenStillScreens=1) after '
-                                 'run_ms=2000 samples=21 d=[-0.068,-0.014] still_min=1.000')
-        end = line('10:00:19', '[Sunshine 3D] Sunshine UI still screen: episode ended reason=not_hidden '
-                               'duration_ms=13000 samples=131 d=[-0.068,-0.010] still_min=0.995 flattened=1')
-        totals = {**CLEAN_COUNTERS, 'decided.10': 30, 'decided.11': 30, 'still.entered': 1, 'still.released': 1,
-                  'still.short': 2}
-        lines = BASE + [switch, start] + [flat(f'10:00:{s:02}', 2000 + 1000 * (s - 6)) for s in range(6, 19)] + [
-            end, counters('10:00:19', totals, groups=FIX2_COUNTER_GROUPS), line('10:00:20', 'Finished exiting.')]
-        checks = run(lines)
-        still = checks['UI still screen']
-        self.assertEqual((still.status, still.detail),
-                         ('INFO', '1 still screen without a UI source shown flat (H2, source 11); '
-                                  'UIFlattenStillScreens=1; entered 1, released 1; longest run that reset before 2 s: '
-                                  '0 ms (2 short runs)'))
-        self.assertEqual(still.times, ['10:00:06.000 flattened after 2000 ms, ended 10:00:19.000 (not_hidden) after '
-                                       '13000 ms; D -0.068 to -0.010, still at least 99.5% of cells'])
-        self.assertEqual(checks['UI protection gaps'].status, 'PASS')
-        self.assertIn('still screen without a UI source (H2) (11) 38%', checks['UI protection'].detail)
-        # A flat sample is decided: no uncovered hidden run.
-        self.assertEqual(checks['Hidden scene'].status, 'INFO')
-        # Shadow episodes beside flattened ones still warn.
-        shadow = line('10:00:30', '[Sunshine 3D] Sunshine UI still screen: would flatten (UIFlattenStillScreens=0) '
-                                  'after run_ms=2000 samples=21 d=[0.010,0.040] still_min=0.970')
-        mixed = run(lines + [shadow])['UI still screen']
-        self.assertEqual(mixed.status, 'WARN')
-        self.assertIn('1 still screen without a UI source would have been flattened (shadow)', mixed.detail)
-        self.assertIn('; 1 still screen shown flat; ', mixed.detail)
-        self.assertEqual(len(mixed.times), 2)
-
-    def test_fix2_logs_before_it_have_no_still_screen_check(self):
-        # Lines and counters logged before fix 2 parse as before and add no check.
-        for lines in ([SB_S2B_SETTINGS], [SB_FIX1_SETTINGS],
-                      [counters('10:00:12', CLEAN_COUNTERS, groups=S2B_COUNTER_GROUPS)]):
-            session = report.parse(BASE + lines)
-            self.assertEqual((session.still_switch, session.still_episodes), ([], []))
-            self.assertTrue(all(u.still is None for u in session.ui))
-            self.assertNotIn('UI still screen', run(BASE + lines))
-        # The same real line with fix 2's group parses it and reports the safety evidence.
-        fix2 = SB_FIX1_SETTINGS.replace(' status_revision=17', ' still={scope=1 enabled=0 phase=pending run_ms=1200 '
-                                        'sampled=36700/36864 short_max_ms=325} status_revision=17')
-        u = report.parse([fix2]).ui[0]
-        self.assertEqual((u.still, u.scene.pre_ui_pixels, u.source, u.reason),
-                         (report.Still(True, False, 'pending', 1200, 36700, 36864, 325),
-                          (2719720, 2148784, 5994692, 5238234), 0, 'layer_aside'))
-        self.assertEqual(run(BASE + [fix2])['UI still screen'].detail,
-                         'no still screen without a UI source; longest run that reset before 2 s: 325 ms (short runs '
-                         'not counted without a counter line)')
 
     def test_logs_of_the_removed_fix3_and_fix4_builds_still_report(self):
         # Fix 3 and fix 4 (the pre-UI change set and pin only UI) were removed by user decision. Their builds' counter
@@ -1376,7 +1240,7 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual((checks['UI full alpha'].status, checks['UI protection'].status), ('INFO', 'PASS'))
         self.assertIn('40 frames (50% of detection frames) decided a whole-frame alpha', checks['UI full alpha'].detail)
         self.assertIn('visible 3, invalid or unmeasured 1', checks['UI full alpha'].detail)
-        self.assertIn('3 samples pinned an accepted whole-frame alpha flat over a visible scene, as intended (P1)',
+        self.assertIn('3 samples pinned an accepted whole-frame decision flat over a visible scene, as intended (P1)',
                       checks['UI full alpha'].detail)
         # Counted one-way contradictions without a sampled run reaching the A2 revocation condition are reported.
         unresolved = {**wheel, 'contradicted': 40}
@@ -1393,8 +1257,9 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(checks['UI inferred alpha'].status, 'FAIL')
         self.assertIn('8 frames (10% of detection frames)', checks['UI inferred alpha'].detail)
         self.assertIn('only accepted candidates decide since S1', checks['UI inferred alpha'].detail)
-        self.assertEqual(checks['UI inexact difference'].status, 'WARN')
-        self.assertIn('until S3', checks['UI inexact difference'].detail)
+        # A Present-counted pair's partial difference is validated by its own pixels (V2): informative.
+        self.assertEqual(checks['UI inexact difference'].status, 'INFO')
+        self.assertIn('validated by its own pixels (V2)', checks['UI inexact difference'].detail)
         # Counters logged before S1 let the untrusted pass decide.
         before = run(BASE + [counters('10:00:12', {**S1_CLEAN_COUNTERS, 'untrusted_inferred': 8},
                                       groups=S0_COUNTER_GROUPS)])
@@ -1405,111 +1270,69 @@ class ReadinessReport(unittest.TestCase):
         clean = run(BASE + [counters('10:00:12', CLEAN_COUNTERS)])
         self.assertEqual((clean['UI inferred alpha'].status, clean['UI inexact difference'].status), ('PASS', 'PASS'))
 
-    # S3 shadow: 120 renders, 50 HUD-less real frames (40 detected once, 6 repeated with 9 extra detections, 4
-    # missed), the tickets' labels and refusals and the GPU verdicts of proposed pairs.
-    IDENTITY_COUNTS = {'renders': 120, 'tagged': 100, 'frames.total': 50, 'frames.once': 40, 'frames.missed': 4,
-                       'frames.repeated': 6, 'frames.extra': 9, 'detect.agree': 44, 'detect.today_only': 9,
-                       'detect.ticket_only': 2, 'exact.agree': 60, 'exact.today_only': 20, 'exact.ticket_only': 5,
-                       'exact.inexact': 15, 'batch.agree': 70, 'label.token': 100, 'label.present': 80,
-                       'label.none': 3, 'refused.foreign_queue': 2, 'refused.unstamped': 1, 'gpu.exact': 30,
-                       'gpu.token_exact': 10, 'gpu.unproposed': 4, 'interposers': 3}
+    @staticmethod
+    def gate(t, batch, real, generated=0):
+        """A 'Sunshine UI capture gate' line's HUD-less pairing counts (game3d_ui_input_provider.cpp)."""
+        return line(t, '[Sunshine 3D] Sunshine UI capture gate: runtime=0000000000000001 request_generation=1 '
+                       'wanted={epoch=4 revision=4 viewport=0 device=5 size=3840x2160 kinds=0xf} hook={state=admitted '
+                       'epoch=4 revision=4 viewport=0 sequence=1 tick=1 kinds=0x8 matches=1} boundary=1 attempted=1 '
+                       f'recorded=1 hudless_presents={{batch={batch} real={real} late=0 generated={generated} stale=0 '
+                       'other=0 none=0}; gate metadata does not authorize pixels')
 
-    def test_s3_identity_line_is_parsed_and_reported(self):
-        # The text test_game3d_ui_ticket pins for format_identity_counters.
-        text = ('renders=9 tagged=8 frames={total=4 once=2 missed=1 repeated=1 extra=2} '
-                'detect={agree=0 today_only=0 ticket_only=0} exact={agree=3 today_only=0 ticket_only=0 inexact=0} '
-                'batch={agree=0 today_only=1 ticket_only=0} label={token=1 present=1 none=1} '
-                'refused={unstamped=0 foreign_queue=1 not_real_span=0 stale_scope=0 no_reference=0 mismatch=0 '
-                'enhanced_barrier=0 render_pass=0 recording_not_covered=0 budget=0 begin_refused=0} '
-                'gpu={exact=2 mismatch=1 unstamped=0 unproposed=1 token_exact=1} interposers=3')
-        fields = report.counter_fields(
-            report.IDENTITY.search(line('10:00:00', 'Sunshine UI identity: runtime=0000000000000001 ' + text))
-            .group(1))
-        self.assertEqual((fields['renders'], fields['frames.extra'], fields['batch.today_only'], fields['label.none'],
-                          fields['refused.foreign_queue'], fields['gpu.mismatch'], fields['gpu.token_exact'],
-                          fields['interposers']), (9, 2, 1, 1, 1, 1, 1, 3))
-        self.assertNotIn('runtime', fields)
-        # The helper writes the same grammar.
-        self.assertEqual(report.counter_fields(report.IDENTITY.search(identity('10:00:00', fields)).group(1)), fields)
-        # The totals are cumulative: the last line counts; the interposer lines are listed.
-        lines = BASE + [interposers('10:00:06', 1, 'sl_interposer'),
-                        identity('10:00:10', {'renders': 1}),
-                        interposers('10:00:11', 3, 'sl_interposer,sl_dlss_g', fg_known=1, fg_enabled=1),
-                        identity('10:00:15', self.IDENTITY_COUNTS)]
-        check = run(lines)['UI identity (S3)']
-        self.assertEqual(check.status, 'INFO')
-        self.assertEqual(check.detail,
-                         '120 renders (100 tagged); HUD-less real frames detected once 40/50 (80%), repeated 6 '
-                         '(9 extra detections), missed 4; detect agree 44, today only 9, ticket only 2; exact agree '
-                         '60, today only 20, ticket only 5, both inexact 15; batch agree 70, today only 0, ticket '
-                         'only 0; labels token 100, present 80, none 3; refused unstamped 1, foreign_queue 2; GPU '
-                         'verdicts exact 30, unproposed 4, token_exact 10 (0 unstamped and 2 foreign-queue labels '
-                         'prove no pair); FG interposers sl_interposer, sl_dlss_g; shadow only: nothing is decided '
-                         'from it')
-        self.assertEqual(check.times, [
-            '10:00:06 runtime=0000000000000001 bits=1 names=sl_interposer fg_known=0 fg_enabled=0',
-            '10:00:11 runtime=0000000000000001 bits=3 names=sl_interposer,sl_dlss_g fg_known=1 fg_enabled=1'])
-        # Without interposer lines the identity line's latest bits name them; nothing evaluated reads none.
-        bits = run(BASE + [identity('10:00:15', {'interposers': 5})])['UI identity (S3)']
-        self.assertIn('; no HUD-less real frame identified; ', bits.detail)
-        self.assertIn('refused none; GPU verdicts none; FG interposers sl_interposer, ngx_dlssg; ', bits.detail)
-        self.assertEqual(bits.times, [])
+    def test_hogwarts_hudless_only_session(self):
+        # Hogwarts Legacy 10-05 tagged only HUDLessColor: no same-batch Backbuffer pair, so its exact full change-sets
+        # (6) came from Present-counted pairs, and whole gameplay seconds were flat. Only a same-batch pair is exact.
+        flat = {**CLEAN_COUNTERS, 'decided.10': 50, 'decided.6': 10}
+        counted = run(BASE + [self.gate('10:00:06', 0, 551), counters('10:00:12', flat, groups=S2B_COUNTER_GROUPS)])
+        self.assertEqual(counted['UI full frame pairing'].status, 'FAIL')
+        self.assertIn('no same-batch Backbuffer pair (551 Present-counted HUD-less pairings, 0 same-batch)',
+                      counted['UI full frame pairing'].detail)
+        batch = run(BASE + [self.gate('10:00:06', 300, 39), counters('10:00:12', flat, groups=S2B_COUNTER_GROUPS)])
+        self.assertNotIn('UI full frame pairing', batch)
+        # FG on at 4x: every Present held without a real-frame decision. Counters advance only when a sample commits,
+        # so the window runs from the counter line that last advanced.
+        fg_on = line('10:00:05', '[Sunshine 3D] Sunshine Streamline frame generation: viewport=0 mode=1 '
+                                 'generated_frames=3 supported=1 success=1')
+        start = {'auto_frames': 100, 'detection_frames': 100, 'samples': 3}
+        held = {'auto_frames': 1100, 'detection_frames': 140, 'held.none': 960, 'samples': 4}
+        checks = run(BASE + [fg_on, counters('10:00:06', start), counters('10:00:10', start),
+                             counters('10:00:20', held)])
+        check = checks['UI holds without a decision']
+        self.assertEqual(check.status, 'FAIL')
+        self.assertEqual(check.times,
+                         ['10:00:06-10:00:20 (14 s) FG on: 96% of 1000 Auto frames held without a decision'])
+        brief = {'auto_frames': 200, 'detection_frames': 140, 'held.none': 60, 'samples': 4}
+        warned = run(BASE + [counters('10:00:06', start), counters('10:00:09', brief)])['UI holds without a decision']
+        self.assertEqual((warned.status, warned.times[0][:26]), ('WARN', '10:00:06-10:00:09 (3 s) FG'))
+        self.assertEqual(run(BASE + [counters('10:00:12', CLEAN_COUNTERS)])['UI holds without a decision'].status,
+                         'PASS')
+        # The gap's pending lines carry their own FG state and the last sample's reason.
+        unprotected = ui2('10:00:06', 0, 0, (0, 0, 0, 1000), 0x48, 0x0, layer=(1000, 0), reason='gate_no_hold',
+                          refused='ui_layer')
+        searching = [ui2(t, 0, 0, (0, 0, 0, 0), 0x0, 0x0, detection='searching', fg=1)
+                     for t in ('10:00:08', '10:00:14')]
+        gaps = run(BASE + [unprotected] + searching)['UI protection gaps']
+        self.assertTrue(gaps.times[0].endswith('FG on: searching; last sample: UI layer covers 100% (not accepted); '
+                                               'current alpha covers 100% (not accepted) (reason gate no hold: UI '
+                                               'layer)'), gaps.times)
 
-    def test_s3_identity_warns_on_unproven_batches_and_mismatches(self):
-        values = dict(self.IDENTITY_COUNTS)
-        values.update({'batch.today_only': 3, 'gpu.mismatch': 2})
-        check = run(BASE + [identity('10:00:15', values)])['UI identity (S3)']
-        self.assertEqual(check.status, 'WARN')
-        self.assertTrue(check.detail.startswith(
-            'today paired 3 renders as one tag batch that no token proves; 2 proposed pairs carried a stamp that '
-            'contradicts their label; 120 renders'))
-        for values in ({'batch.today_only': 1}, {'gpu.mismatch': 1}):
-            self.assertEqual(run(BASE + [identity('10:00:15', values)])['UI identity (S3)'].status, 'WARN')
-        # Ticket-only batches, unstamped or foreign stamps and unproposed pairs stay INFO.
-        info = {'batch.ticket_only': 4, 'gpu.unstamped': 3, 'refused.foreign_queue': 2, 'gpu.unproposed': 9}
-        self.assertEqual(run(BASE + [identity('10:00:15', info)])['UI identity (S3)'].status, 'INFO')
-
-    def test_s3_enabled_identity_fails_inexact_differences(self):
-        # Until S3 is enabled an inexact HUD-less pair deciding is expected; once the identity line says identity is
-        # authoritative (authoritative=1), it is a defect, and the identity check says identity decides.
-        inexact = dict(CLEAN_COUNTERS, inexact_difference=4)
-        shadow = run(BASE + [identity('10:00:10', self.IDENTITY_COUNTS), counters('10:00:12', inexact)])
-        self.assertEqual(shadow['UI inexact difference'].status, 'WARN')
-        self.assertIn('expected until S3 is enabled', shadow['UI inexact difference'].detail)
-        enabled_line = identity('10:00:10', self.IDENTITY_COUNTS)
-        enabled_line = enabled_line.replace(' interposers=', ' authoritative=1 interposers=')
-        enabled = run(BASE + [enabled_line, counters('10:00:12', inexact)])
-        self.assertEqual(enabled['UI inexact difference'].status, 'FAIL')
-        self.assertIn('S3 identity is authoritative, so only exact pairs decide',
-                      enabled['UI inexact difference'].detail)
-        self.assertTrue(enabled['UI identity (S3)'].detail.endswith(
-            'S3 identity is authoritative: only exact pairs decide'))
-        clean = run(BASE + [enabled_line, counters('10:00:12', CLEAN_COUNTERS)])
-        self.assertEqual(clean['UI inexact difference'].status, 'PASS')
-        # Unstamped stamps alone are informative.
-        unstamped = run(BASE + [identity('10:00:15', {'gpu.unstamped': 3})])['UI identity (S3)']
-        self.assertEqual(unstamped.status, 'INFO')
-        self.assertIn('(3 unstamped and 0 foreign-queue labels prove no pair)', unstamped.detail)
-
-    def test_logs_without_identity_lines_have_no_identity_check(self):
-        checks = run(BASE + [counters('10:00:12', CLEAN_COUNTERS), line('10:00:20', 'Finished exiting.')])
-        self.assertNotIn('UI identity (S3)', checks)
-        # An interposer line alone (no identity totals) adds nothing either.
-        self.assertNotIn('UI identity (S3)', run(BASE + [interposers('10:00:06', 1, 'sl_interposer')]))
-        self.assertIsNone(report.parse(BASE).identity)
-        # The identity lines change no other check, and 'UI inexact difference' keeps its wording.
-        shadow = [interposers('10:00:06', 3, 'sl_interposer,sl_dlss_g', fg_known=1, fg_enabled=1),
-                  identity('10:00:12', self.IDENTITY_COUNTS)]
-        session = report.parse(shadow)
-        self.assertEqual((session.ui, session.counters, len(session.interposers)), ([], None, 1))
-        inexact = dict(CLEAN_COUNTERS, inexact_difference=4)
-        for extra in ([counters('10:00:12', CLEAN_COUNTERS), line('10:00:20', 'Finished exiting.')],
-                      [counters('10:00:12', inexact)]):
-            before = report.evaluate(report.parse(BASE + extra))
-            after = report.evaluate(report.parse(BASE + shadow + extra))
-            self.assertEqual([c for c in after if c.name != 'UI identity (S3)'], before)
-            self.assertEqual(len(after), len(before) + 1)
-        self.assertIn('expected until S3', run(BASE + [counters('10:00:12', inexact)])['UI inexact difference'].detail)
+    def test_session_end_cost_and_settling_status(self):
+        # An Unreal game ends its process after ReShade tore its runtimes down but before ReShade's own exit line.
+        teardown = line('10:00:16', 'Destroyed runtime environment on runtime 00000001F5873510 (ReShade.ini).')
+        self.assertEqual(report.parse(BASE + [teardown]).teardown, 36016.0)
+        # Every timing window counts: Present-weighted CPU mean and the maximum over all windows.
+        timing = [line(t, f'[Sunshine 3D] Sunshine Game 3D timing: presents={n} cpu_ms={{mean={mean} max={peak}}} '
+                          'gpu_frames=0 gpu_ms mean/max={total=0.00/0.00} gpu_profile=disabled')
+                  for t, n, mean, peak in (('10:00:06', 100, '0.40', '900.0'), ('10:00:16', 300, '0.20', '0.5'))]
+        self.assertEqual(run(BASE + timing)['Game 3D cost'].detail,
+                         'CPU 0.25 ms mean (900.0 max) over 400 Presents; GPU timing off (Diagnostics=0)')
+        # A capture status while the export starts is the source settling; later ones warn.
+        settling = line('10:00:03', '[Sunshine 3D] Sunshine Streamline depth: conflicting_state; viewport=0')
+        later = line('10:00:12', '[Sunshine 3D] Sunshine Streamline depth: conflicting_state; viewport=0')
+        self.assertEqual(run(BASE + [settling])['Capture status'].status, 'INFO')
+        status = run(BASE + [settling, later])['Capture status']
+        self.assertEqual((status.status, status.detail, status.times),
+                         ('WARN', 'conflicting_state 1; 1 more while settling', ['10:00:12 conflicting_state']))
 
     def test_host_lines_from_another_session_are_not_counted(self):
         with TemporaryDirectory() as folder:
