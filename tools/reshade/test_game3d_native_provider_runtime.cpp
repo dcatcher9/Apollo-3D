@@ -357,7 +357,7 @@ namespace {
           (tag_detection.at("candidates").get<unsigned>() & (candidate::ui_color | candidate::layer)) !=
             (candidate::ui_color | candidate::layer) ||
           !(tag_detection.at("accepted").get<unsigned>() & candidate::ui_color) ||
-          (tag_detection.at("flags").get<unsigned>() & sunshine_game3d::ui_detection::stored_mask) != 5u)
+          (tag_detection.at("flags").get<unsigned>() & ~sunshine_game3d::ui_detection::per_frame_sample) != 5u)
         throw std::runtime_error("A tagged UIColorAndAlpha did not reach detection accepted beside the layer: " + tag_detection.dump());
       bool optional = false;
       for (const auto &entry : metadata.at("optional_captures")) if (entry.at("artifact_id") == 10) {
@@ -571,7 +571,7 @@ namespace {
       const auto &layer_detection = layer_metadata.at("replay").at("ui_detection");
       if (layer_detection.at("ran_or_held") == "inactive" || !(layer_detection.at("candidates").get<unsigned>() & candidate::layer) ||
           !(layer_detection.at("accepted").get<unsigned>() & candidate::layer) ||
-          (layer_detection.at("flags").get<unsigned>() & sunshine_game3d::ui_detection::stored_mask) != 5u ||
+          (layer_detection.at("flags").get<unsigned>() & ~sunshine_game3d::ui_detection::per_frame_sample) != 5u ||
           !layer_metadata.at("replay").contains("ui_pin"))
         throw std::runtime_error("The offscreen UI layer did not reach detection accepted with flags 5: " + layer_detection.dump());
       // The layer is one frame late, but its mask is its raw alpha like every

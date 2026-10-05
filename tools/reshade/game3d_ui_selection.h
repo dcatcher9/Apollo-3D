@@ -53,12 +53,14 @@ namespace sunshine_game3d::ui_selection {
   // 12 and all of b2 word 5 are reserved too; 9 otherwise decides as 8. 10:
   // T1 keeps the held decision across HUD-less re-offers
   // (per_frame_reoffer); the one-way test (A2) judges the declared alphas too
-  // (texel 16) and no longer counts the never-judged layer copy (words 32
-  // and 36 reserved), only on sample frames (per_frame_sample); the layer's
-  // premultiplied bound invalidates it only when its pixels beyond the bound
-  // lie on more than 1% of the frame and outnumber its covered ones, which
-  // exclude them (statistics rows 208-223); H1 overrides every S1 winner;
-  // and the invariant counter words 14 and 18 are reserved.
+  // (texel 16), those captured in the exact pair's tag batch only
+  // (per_frame_unaligned_shift), and no longer counts the never-judged layer
+  // copy (words 32 and 36 reserved), only on sample frames
+  // (per_frame_sample); the layer's pixels beyond its premultiplied bound
+  // are uncovered (statistics rows 208-223) and invalidate it only when they
+  // lie on more than 1% of the frame and on more than 5% of it or more than
+  // its opaque pixels; H1 overrides every S1 winner; and the invariant
+  // counter words 14 and 18 are reserved.
   inline constexpr std::uint32_t revision = 10;
   inline constexpr std::string_view revision_marker = "SUNSHINE_UI_SELECTION_REVISION";
 
@@ -152,7 +154,9 @@ namespace sunshine_game3d::ui_selection {
   // A2: the kinds the one-way test judges, every alpha kind but the
   // one-frame-late layer copy (E2), in the order of counts::strong and
   // counts::contradicted (decision texel 16 .x/.z and .y/.w, then texels 8
-  // and 9 .y and .z).
+  // and 9 .y and .z). A declared tag captured in another tag batch than the
+  // exact pair (per_frame_unaligned_shift) counts no strong pixel on that
+  // frame, so it is not judged there.
   inline constexpr std::array<kind, 4> judged_kinds{kind::ui_alpha, kind::ui_color, kind::backbuffer, kind::current};
   // A2 judge (a): an exact change set, valid this frame (V2), partial or full;
   // acceptance is not required. offered and valid_bits in candidate bits.

@@ -594,38 +594,57 @@ namespace {
     static_assert(kind(0, 1) == present::unpaired);
     static_assert(kind(UINT64_MAX, 0) == present::unpaired);
     static_assert(kind(9, 3) == present::unpaired);
-    // A snapshot's first offer counts as above; every later offer of the same
-    // snapshot pairs with that Present's own color (reoffered, presents_ago 0)
-    // for as long as it is offered, beyond the retained history too: under
-    // DLSS-G the Present after the tag may be generated and the real frame
-    // come later in the snapshot's window.
-    constexpr auto offer = [](std::uint64_t tagged, std::uint64_t current, bool before) {
-      return mask::pair_hudless_offer(tagged, current, before);
+    // Without frame generation every offer counts from its tag, a re-offer
+    // too: the snapshot's own frame is the Present after the tag, retained
+    // for up to max_late_presents Presents, and an older re-offer is
+    // unpaired.
+    constexpr auto offer = [](std::uint64_t tagged, std::uint64_t current, bool before, bool fg) {
+      return mask::pair_hudless_offer(tagged, current, before, fg);
     };
-    static_assert(offer(10, 11, false).kind == present::next_present && offer(10, 12, false).kind == present::earlier_present &&
-      offer(10, 12, false).presents_ago == 1 && offer(10, 14, false).kind == present::unpaired);
+    static_assert(offer(10, 11, false, false).kind == present::next_present &&
+      offer(10, 12, false, false).kind == present::earlier_present && offer(10, 12, false, false).presents_ago == 1 &&
+      offer(10, 14, false, false).kind == present::unpaired);
+    static_assert(offer(10, 12, true, false).kind == present::earlier_present && offer(10, 12, true, false).presents_ago == 1 &&
+      offer(10, 13, true, false).kind == present::earlier_present && offer(10, 13, true, false).presents_ago == 2 &&
+      offer(10, 14, true, false).kind == present::unpaired);
+    // Under frame generation a snapshot's first offer on the Present after
+    // its tag counts as above; a later first offer (a capture one Present
+    // late) and every later offer of the same snapshot pair with that
+    // Present's own color (reoffered, presents_ago 0) for as long as it is
+    // offered, beyond the retained history too: DLSS-G presents its
+    // generated frames first, so the real frame comes later in the
+    // snapshot's window.
+    static_assert(offer(10, 11, false, true).kind == present::next_present &&
+      offer(10, 12, false, true).kind == present::reoffered && !offer(10, 12, false, true).presents_ago &&
+      offer(10, 14, false, true).kind == present::reoffered);
     for (const std::uint64_t current : {11u, 12u, 13u, 14u, 20u}) {
-      const auto later = offer(10, current, true);
-      require(later.kind == present::reoffered && !later.presents_ago, "A later offer of a HUD-less snapshot did not pair with its own Present");
+      const auto later = offer(10, current, true, true);
+      require(later.kind == present::reoffered && !later.presents_ago, "A later offer of a HUD-less snapshot under frame generation did not pair with its own Present");
     }
-    static_assert(offer(0, 1, true).kind == present::unpaired && offer(UINT64_MAX, 2, true).kind == present::unpaired &&
-      offer(10, 10, true).kind == present::unpaired && offer(10, 9, true).kind == present::unpaired);
-    // FG 2x and 4x, both orderings: the real Present is the first or the last
-    // of the snapshot's window. Only the first offer may pair with an earlier
-    // Present, so the real frame's own Present is compared with its own color
-    // wherever it lies in the window.
+    for (const bool fg : {false, true})
+      for (const bool before : {false, true})
+        require(offer(0, 1, before, fg).kind == present::unpaired && offer(UINT64_MAX, 2, before, fg).kind == present::unpaired &&
+            offer(10, 10, before, fg).kind == present::unpaired && offer(10, 9, before, fg).kind == present::unpaired,
+          "An unknown, sentinel or reversed generation paired");
+    // FG 2x and 4x, both orderings, and a capture on time or one Present
+    // late (its first offer on the second Present of the window): the real
+    // frame's own Present is compared with its own color wherever it lies in
+    // the window, but for a real Present first whose capture is late, which
+    // only the Present after the tag could compare.
     for (const std::uint64_t window : {2u, 4u})
-      for (const bool real_first : {true, false}) {
-        const std::uint64_t tagged = 100, real = real_first ? tagged + 1 : tagged + window;
-        bool compared_real = false;
-        for (std::uint64_t current = tagged + 1; current <= tagged + window; ++current) {
-          const auto pairing = offer(tagged, current, current != tagged + 1);
-          require(pairing.kind == (current == tagged + 1 ? present::next_present : present::reoffered) && !pairing.presents_ago,
-            "An on-time HUD-less offer did not pair with its own Present");
-          compared_real = compared_real || current == real;
+      for (const bool real_first : {true, false})
+        for (const std::uint64_t delay : {0u, 1u}) {
+          const std::uint64_t tagged = 100, real = real_first ? tagged + 1 : tagged + window;
+          bool compared_real = false;
+          for (std::uint64_t current = tagged + 1 + delay; current <= tagged + window; ++current) {
+            const bool first = current == tagged + 1 + delay;
+            const auto pairing = offer(tagged, current, !first, true);
+            require(pairing.kind == (current == tagged + 1 ? present::next_present : present::reoffered) && !pairing.presents_ago,
+              "An on-time or late HUD-less offer under frame generation did not pair with its own Present");
+            compared_real = compared_real || current == real;
+          }
+          require(compared_real == !(real_first && delay), "The real Present of a frame-generation window was not compared with its own color");
         }
-        require(compared_real, "The real Present of a frame-generation window was never compared with its own color");
-      }
     // Hogwarts tags HUDLessColor and Backbuffer in one batch; their counters
     // started at different values but advanced by the same Presents.
     static_assert(mask::same_tag_interval(619, 621, 1, 3));

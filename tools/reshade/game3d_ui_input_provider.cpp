@@ -25,10 +25,12 @@ namespace sunshine_game3d::ui_input {
   namespace {
     using choice = ui_qualification::choice;
     // Paired with its batch's tagged Backbuffer (exact), with the Present
-    // after its tag, late with retained color, offered again with a later
-    // Present's own color (all three inexact), too old to pair, otherwise
-    // unpaired, and no HUD-less capture. The gate line keeps its generated
-    // field, always 0 since no HUD-less pairing holds.
+    // after its tag, a first offer after that Present (late: with retained
+    // color, or under frame generation the current one), offered again (with
+    // a later Present's own color under frame generation, else with retained
+    // color; all four inexact), too old to pair, otherwise unpaired, and no
+    // HUD-less capture. The gate line keeps its generated field, always 0
+    // since no HUD-less pairing holds.
     enum hudless_outcome : unsigned { hudless_batch, hudless_real, hudless_late, hudless_reoffered, hudless_stale,
       hudless_other, hudless_none, hudless_outcome_count };
     // The HUD-less snapshot a render offered: its ticket, epoch and viewport,
@@ -56,9 +58,9 @@ namespace sunshine_game3d::ui_input {
       std::uint64_t input_present{}, input_epoch{};
       std::uint32_t input_viewport{};
       // The HUD-less snapshot offered last (ui_mask::pair_hudless_offer): a
-      // later offer of the same one pairs with its own Present's color, and
-      // one directly after the render that offered it is a re-offer for the
-      // T1 grace (ui_detection::per_frame_reoffer).
+      // later offer of the same one pairs with its own Present's color under
+      // frame generation, and one directly after the render that offered it
+      // is a re-offer for the T1 grace (ui_detection::per_frame_reoffer).
       offered_snapshot hudless_offered;
       bool suspended{};
     };
@@ -309,6 +311,11 @@ namespace sunshine_game3d::ui_input {
     // it offered the same one, inexactly (a re-offer for the T1 grace).
     offered_snapshot hudless_offer;
     bool hudless_reoffered_now = false;
+    // The tag intervals of the offered UIAlpha and UI color tags (slots 0 and
+    // 1), compared with an exact pair's after the loop (A2).
+    struct tag_interval { std::uint64_t tagged{}, current{}; };
+    std::array<tag_interval, 2> declared_intervals{};
+    const bool fg_active = status.fg_active();
     if (capturing) for (unsigned slot = 0; slot != 4; ++slot) {
       const auto kind = kinds[slot];
       if (!(source_filter(wanted_source) & ui_mask::source_mask(kind))) continue;
@@ -316,22 +323,23 @@ namespace sunshine_game3d::ui_input {
       if (!ui_mask::acquire_kind(reinterpret_cast<std::uint64_t>(runtime), kind, selected, now, queue->get_native())) continue;
       const bool hudless = kind == ui_mask::source_kind::hudless;
       // Without a same-batch Backbuffer, counting proposes the presented color
-      // after the tag for a snapshot's first offer, and the current color for
-      // every later offer of it (ui_mask::pair_hudless_offer), inexact; only
-      // V2 then validates the pair's pixels. Streamline can present on its own
-      // queue; pixels from another queue were already admitted only after the
-      // producer completed and its recording retired.
+      // after the tag for a snapshot's first offer, or retained color for a
+      // late one; under frame generation a late first offer and every later
+      // offer pair with the current color instead (ui_mask::pair_hudless_offer),
+      // all inexact; only V2 then validates the pair's pixels. Streamline can
+      // present on its own queue; pixels from another queue were already
+      // admitted only after the producer completed and its recording retired.
       const auto tagged = selected.origin.source_present_generation, current = selected.current_source_present_generation;
       const bool offered_before = hudless && hudless_before.same(selected);
-      const auto pairing = ui_mask::pair_hudless_offer(tagged, current, offered_before);
+      const auto pairing = ui_mask::pair_hudless_offer(tagged, current, offered_before, fg_active);
       using ui_mask::hudless_present;
       const bool batch = hudless && backbuffer.view.handle &&
         ui_mask::same_tag_interval(tagged, current, backbuffer.tagged, backbuffer.current);
       const bool paired = batch || pairing.kind != hudless_present::unpaired;
       if (hudless) hudless_result = batch ? hudless_batch : pairing.kind == hudless_present::next_present ? hudless_real :
-        pairing.kind == hudless_present::earlier_present ? hudless_late :
-        pairing.kind == hudless_present::reoffered ? hudless_reoffered :
-        tagged && tagged != UINT64_MAX && current > tagged ? hudless_stale : hudless_other;
+        pairing.kind == hudless_present::unpaired ?
+          (tagged && tagged != UINT64_MAX && current > tagged ? hudless_stale : hudless_other) :
+        offered_before ? hudless_reoffered : hudless_late;
       // An unauthenticated UIAlpha tag cannot hide independently usable
       // lower-priority candidates in Auto; an authenticated one is validated on
       // the GPU. A manual choice may use it.
@@ -365,6 +373,7 @@ namespace sunshine_game3d::ui_input {
       }
       if (!view.handle) continue;
       if (kind == ui_mask::source_kind::backbuffer) backbuffer = {view, tagged, current};
+      if (slot < declared_intervals.size()) declared_intervals[slot] = {tagged, current};
       // A manual HUD-less choice captures the Backbuffer only as its pair.
       if (manual && wanted_source == choice::sl_hudless && !hudless) continue;
       if (hudless) {
@@ -383,6 +392,16 @@ namespace sunshine_game3d::ui_input {
       available = true;
       if (manual) explicit_captures[slot] = {true, selected, view, diagnostic ? candidates.back().dump() : std::string{}};
     }
+    // A2: an exact pair judges a declared tag one way only when that tag was
+    // captured in the pair's tag batch (the same-batch Backbuffer's Present
+    // interval). Each kind is the newest ready snapshot of its own, so a tag
+    // of another frame would read moved UI against the pair as contradicted
+    // (E2); the detection pushes the others as unaligned, never judged.
+    if (result.detection.hudless_exact)
+      for (unsigned slot = 0; slot != declared_intervals.size(); ++slot)
+        if (result.detection.masks[slot].handle && !ui_mask::same_tag_interval(declared_intervals[slot].tagged,
+              declared_intervals[slot].current, backbuffer.tagged, backbuffer.current))
+          result.detection.unaligned_declared |= slot ? ui_detection::candidate::ui_color : ui_detection::candidate::ui_alpha;
     // The game's offscreen UI layer (game3d_ui_layer.h) is a candidate of its
     // own beside any tagged UIColorAndAlpha (E1), in renderer slot 4. Its copy
     // holds the previous frame's UI; detection reads it only while V1-valid,
@@ -435,7 +454,7 @@ namespace sunshine_game3d::ui_input {
     // instead of spending the grace.
     result.detection.hudless_reoffer = hudless_reoffered_now && !tag_offered;
     if (capturing && !available &&
-        ui_mask::generated_without_input(frame_sequence, input_present, status.fg_active(), status.fg.generated_frames)) {
+        ui_mask::generated_without_input(frame_sequence, input_present, fg_active, status.fg.generated_frames)) {
       if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},
         {"association", "present_count_after_last_ui_tag"}, {"presents_since_ui_tag", frame_sequence - input_present}});
       result.status.retained_alpha_ready = true;

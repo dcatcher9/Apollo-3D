@@ -1629,9 +1629,14 @@ namespace sunshine_game3d {
         // Backbuffer tag (ui_detection::per_frame_reoffer).
         constexpr uint32_t tags = candidate::ui_alpha | candidate::ui_color | candidate::backbuffer | candidate::exact;
         const bool reoffer = candidates.hudless_reoffer && (bits & candidate::hudless) && !(bits & tags);
+        // A2: the offered declared tags outside the exact pair's tag batch,
+        // which the one-way test does not judge
+        // (ui_detection::per_frame_unaligned_shift).
+        const uint32_t unaligned = (bits & candidate::exact) ?
+          candidates.unaligned_declared & bits & (candidate::ui_alpha | candidate::ui_color) : 0u;
         const uint32_t per_frame = d.scene_bits | arbitration.per_frame |
           (!input.depth_current ? ui_detection::per_frame_depth_not_current : 0u) |
-          (reoffer ? ui_detection::per_frame_reoffer : 0u);
+          (reoffer ? ui_detection::per_frame_reoffer : 0u) | (unaligned << ui_detection::per_frame_unaligned_shift);
         d.detect_ui(cmd, p, candidates, observation, hudless_color, depth, bits, accepted, flags, per_frame);
         d.consumed_detection = d.detection_run;
         d.temporal.detected(observation);

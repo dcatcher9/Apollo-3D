@@ -65,8 +65,9 @@ namespace sunshine_game3d {
     reshade::api::resource_view hudless_pair{};
     // Otherwise counting proposes the color presented this many Presents ago
     // (ui_mask::pair_hudless_offer): the retained color, or the current one
-    // for zero, as for every later offer of the same snapshot. Such a pair is
-    // inexact; only V2 validates its pixels.
+    // for zero, as under frame generation for a late first offer and every
+    // later offer of the same snapshot. Such a pair is inexact; only V2
+    // validates its pixels.
     std::uint32_t hudless_presents_ago = 0;
     static constexpr std::uint32_t max_retained_presents = 2;
     // The pair is known to show one game frame: a same-batch Backbuffer
@@ -77,6 +78,11 @@ namespace sunshine_game3d {
     // previous render, and no UIAlpha, UI color or Backbuffer tag with it:
     // the detection pushes ui_detection::per_frame_reoffer (T1).
     bool hudless_reoffer = false;
+    // With an exact pair: the offered declared tags (candidate bits UIAlpha,
+    // UI color) not captured in the pair's tag batch. The detection pushes
+    // them from ui_detection::per_frame_unaligned_shift, so the one-way test
+    // does not judge them (A2, E2).
+    std::uint32_t unaligned_declared = 0;
   };
   struct ui_render_input {
     ui_input_kind kind = ui_input_kind::unavailable;

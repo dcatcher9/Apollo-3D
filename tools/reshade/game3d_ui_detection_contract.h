@@ -85,10 +85,17 @@ namespace sunshine_game3d::ui_detection {
   inline constexpr std::uint32_t stored_late_layer = 0x4u;
   // 0x8u is reserved (a retired stage-2 bit) and never reused. Selection
   // revision 10 moved the boundary down from 0x10000u: stored bits 0x10u to
-  // 0x2000u are free, never having been used.
-  inline constexpr std::uint32_t stored_mask = 0x3fffu;
+  // 0x800u are free, never having been used.
+  inline constexpr std::uint32_t stored_mask = 0xfffu;
   // Per-frame bits ride in the pushed flags word of one render only. They are
   // never stored in the renderer's detection flags.
+  // A2 (selection revision 10): the offered UIAlpha (0x1000) or UI color tag
+  // (0x2000), its candidate bit shifted by per_frame_unaligned_shift, was not
+  // captured in the exact HUD-less pair's tag batch (its Present interval is
+  // not the same-batch Backbuffer's, ui_mask::same_tag_interval). A tag of
+  // another frame is no same-sample evidence (E2): the tiles pass counts no
+  // strong pixel of it, so the one-way test does not judge it there.
+  inline constexpr std::uint32_t per_frame_unaligned_shift = 12u, per_frame_unaligned_mask = 0x3000u;
   // A status sample (selection revision 10, D4): the CPU reads this
   // detection's decision texels, so only it counts the one-way judgment (A2)
   // and the pre-UI pixels (H1 d) in the passes' sample phase.
@@ -124,22 +131,25 @@ namespace sunshine_game3d::ui_detection {
   // scene image (the acceptance ledger's key pre_ui:<format>:<space>,
   // game3d_alpha_auto.h), so that its claim (d) may act.
   inline constexpr std::uint32_t per_frame_pre_ui_proven = 0x80000000u;
-  inline constexpr std::uint32_t per_frame_mask = 0xffffc000u;
+  inline constexpr std::uint32_t per_frame_mask = 0xfffff000u;
   static_assert((stored_mask & per_frame_mask) == 0 && (stored_mask | per_frame_mask) == 0xffffffffu &&
     (stored_premultiplied | stored_hdr_headroom | stored_late_layer | 0x8u) <= stored_mask);
+  static_assert(((candidate::ui_alpha | candidate::ui_color) << per_frame_unaligned_shift) == per_frame_unaligned_mask &&
+    (per_frame_unaligned_mask & ~per_frame_mask) == 0 && per_frame_unaligned_mask < per_frame_sample);
   static_assert(((candidate::ui_alpha | candidate::ui_color | candidate::backbuffer | candidate::current | candidate::hudless |
     candidate::layer) << per_frame_refuted_shift) == per_frame_refuted_mask && (per_frame_refuted_mask & ~per_frame_mask) == 0 &&
     (per_frame_refuted_mask & (per_frame_scene_hidden | per_frame_pre_ui_visible | per_frame_hold_reset)) == 0 &&
     (per_frame_pre_ui_proven & (per_frame_refuted_mask | ~per_frame_mask | 0x20000000u)) == 0);
-  // The two revision 10 bits lie below every older per-frame bit, the
-  // reserved ones included.
-  static_assert(((per_frame_sample | per_frame_reoffer) & ~per_frame_mask) == 0 && (per_frame_sample | per_frame_reoffer) < 0x10000u &&
-    per_frame_sample != per_frame_reoffer);
+  // The revision 10 bits lie below every older per-frame bit, the reserved
+  // ones included.
+  static_assert(((per_frame_unaligned_mask | per_frame_sample | per_frame_reoffer) & ~per_frame_mask) == 0 &&
+    (per_frame_unaligned_mask | per_frame_sample | per_frame_reoffer) < 0x10000u && per_frame_sample != per_frame_reoffer);
   // The game3d_native.hlsl define mirroring each flag.
-  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 12> hlsl_flag_defines{{
+  inline constexpr std::array<std::pair<std::string_view, std::uint32_t>, 13> hlsl_flag_defines{{
     {"SUNSHINE_UI_STORED_PREMULTIPLIED", stored_premultiplied},
     {"SUNSHINE_UI_STORED_HDR_HEADROOM", stored_hdr_headroom},
     {"SUNSHINE_UI_STORED_LATE_LAYER", stored_late_layer},
+    {"SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT", per_frame_unaligned_shift},
     {"SUNSHINE_UI_PER_FRAME_SAMPLE", per_frame_sample},
     {"SUNSHINE_UI_PER_FRAME_REOFFER", per_frame_reoffer},
     {"SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT", per_frame_depth_not_current},
@@ -343,10 +353,10 @@ namespace sunshine_game3d::ui_detection {
     // Texel 7 (layout 2): the offscreen UI layer's covered pixels (within the
     // premultiplied bound since selection revision 10), its invalid pixels
     // (out of range, plus, from revision 10, those beyond the premultiplied
-    // bound when these lie on more than 1% of the frame and outnumber the
-    // covered ones; before it every pixel beyond the bound) and its opaque
-    // pixels, and the offered candidates that passed V1/V2, in candidate-bit
-    // positions.
+    // bound when these lie on more than 1% of the frame and on more than 5%
+    // of it or more than the opaque ones; before it every pixel beyond the
+    // bound) and its opaque pixels (within the bound), and the offered
+    // candidates that passed V1/V2, in candidate-bit positions.
     inline constexpr std::size_t layer_covered = 28, layer_invalid = 29, layer_opaque = 30, valid_bits = 31;
     // Texels 8 and 9 (selection revision 2): the one-way judgment counts (A2)
     // of Backbuffer and current alpha in .y and .z (strong: alpha of at

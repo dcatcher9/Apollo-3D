@@ -40,7 +40,10 @@
 //          per_frame = scene_guard.per_frame(now, bits, signatures) |
 //          t.per_frame | depth_not_current | per_frame_reoffer (the
 //          provider's hudless_reoffer of an inexact HUD-less snapshot
-//          without a UIAlpha, UI color or Backbuffer tag), and detection
+//          without a UIAlpha, UI color or Backbuffer tag) | the offered
+//          declared tags outside the exact pair's tag batch shifted by
+//          per_frame_unaligned_shift (the provider's
+//          unaligned_declared), and detection
 //          with this frame's own bits, accepted and flags pushed (b2), flags
 //          | per_frame, plus per_frame_sample on a sample frame (at most one
 //          every 100 ms while none is pending), and the hold store bound at

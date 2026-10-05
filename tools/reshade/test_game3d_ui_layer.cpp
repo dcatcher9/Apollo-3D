@@ -115,9 +115,11 @@ int main() {
       require(texels == detection::decision_texels && texels <= detection::max_decision_texels &&
           images == detection::max_scene_evidence_images,
         "game3d_native.hlsl's UI detection size markers are not the current revision's (the renderer requires them)");
-      // Selection revision 10: the sample and re-offer bits, the layer-bound
-      // row, and the invariant counter words 14 and 18 reserved (no define).
-      require(source.find("#define SUNSHINE_UI_PER_FRAME_SAMPLE 0x4000u") != std::string::npos &&
+      // Selection revision 10: the unaligned-tag shift and the sample and
+      // re-offer bits, the layer-bound row, and the invariant counter words
+      // 14 and 18 reserved (no define).
+      require(source.find("#define SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT 12") != std::string::npos &&
+          source.find("#define SUNSHINE_UI_PER_FRAME_SAMPLE 0x4000u") != std::string::npos &&
           source.find("#define SUNSHINE_UI_PER_FRAME_REOFFER 0x8000u") != std::string::npos &&
           source.find("#define SUNSHINE_UI_LAYER_BOUND_ROW 208") != std::string::npos &&
           source.find("SUNSHINE_UI_COUNTER_UNTRUSTED_INFERRED") == std::string::npos &&
@@ -136,8 +138,9 @@ int main() {
     // 12-15 stay reserved zeros and words 32 and 36, the layer's one-way
     // counts, become reserved zeros) and rows 208-223 (the layer's pixels
     // beyond the premultiplied bound; rows 144-207 stay reserved), 17 texels
-    // and 224 rows, moves the stored/per-frame boundary to 0x4000 for the
-    // sample and re-offer bits, and reserves counter words 14 and 18.
+    // and 224 rows, moves the stored/per-frame boundary to 0x1000 for the
+    // unaligned declared tags (0x1000, 0x2000) and the sample and re-offer
+    // bits, and reserves counter words 14 and 18.
     require(sunshine_game3d::ui_selection::revision == 10u && detection::h1_decision_texels == 11u &&
         detection::decision_word::h1 == 43u && detection::pre_ui_decision_texels == 12u &&
         detection::decision_word::pre_ui_match == 44u && detection::decision_word::pre_ui_image_lit == 45u &&
@@ -146,7 +149,8 @@ int main() {
         detection::decision_word::strong_backbuffer == 33u && detection::decision_word::contradicted_current == 38u &&
         detection::layer_bound_statistics_row == 208u && detection::statistics_row_count == 224u &&
         detection::per_frame_sample == 0x4000u && detection::per_frame_reoffer == 0x8000u &&
-        detection::per_frame_mask == 0xffffc000u &&
+        detection::per_frame_mask == 0xfffff000u && detection::per_frame_unaligned_shift == 12u &&
+        detection::per_frame_unaligned_mask == 0x3000u &&
         detection::source_count == 12u && detection::source_layer == 10u && detection::b2_words == 6u &&
         sunshine_game3d::ui_counter_word::decided_count == 13u && sunshine_game3d::ui_counter_word::count == 31u &&
         sunshine_game3d::ui_counter_word::reserved_refined == 30u &&

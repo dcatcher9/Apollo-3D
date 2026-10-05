@@ -193,7 +193,10 @@ Texture2D<float4> SunshineHUDless : register(t14);
 // decision texels), mirrored from game3d_ui_detection_contract.h. Stored bits
 // describe the offscreen UI layer slot (t7): it must pass the premultiplied
 // bound, with a float layer's HDR headroom, and is the one-frame-late copy.
-// Per-frame bits ride in one render's pushed word only: a status sample,
+// Per-frame bits ride in one render's pushed word only: the offered UIAlpha
+// or UI color tag was not captured in the exact pair's tag batch (its
+// candidate bit from bit SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT; the one-way
+// test does not judge it), a status sample,
 // whose decision texels the CPU reads (only it counts the one-way judgment
 // and the pre-UI pixels), the offered HUD-less snapshot is the previous
 // render's, re-offered (T1), the consumed depth is not this frame's, an
@@ -210,6 +213,7 @@ Texture2D<float4> SunshineHUDless : register(t14);
 #define SUNSHINE_UI_STORED_LATE_LAYER 0x4u
 // 0x8u (stored), 0x10000u, 0x20000u, 0x80000u and 0x20000000u (per-frame)
 // are reserved and never reused.
+#define SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT 12
 #define SUNSHINE_UI_PER_FRAME_SAMPLE 0x4000u
 #define SUNSHINE_UI_PER_FRAME_REOFFER 0x8000u
 #define SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT 0x40000u
@@ -348,11 +352,12 @@ groupshared uint SunshineUIDetectionBound[256];
 // Whether a layer pixel lies beyond the premultiplied bound (V1). An
 // offscreen layer is UI only when blended over transparent black: its color
 // stays within a small multiple of its alpha. UI tinted brighter than white
-// (Stellar Blade's pulsing markers, up to twice its alpha) qualifies; a scene
-// buffer whose alpha is not coverage (Dead Space: alpha near 11/255 under
-// saturated color) or a scene image drawn into the cleared target (Stellar
-// Blade in SDR) does not. scRGB UI may be up to 10000 nits. Only a cleared
-// layer (SUNSHINE_UI_STORED_PREMULTIPLIED) is bounded.
+// (Stellar Blade's pulsing markers, up to twice its alpha) qualifies; the
+// saturated pixels of a scene buffer whose alpha is not coverage (Dead Space:
+// a luma-like alpha, mean 11/255) and a scene image drawn into the cleared
+// target (Stellar Blade in SDR, alpha 0) do not, though the dark or grey
+// pixels of a luma-like alpha stay within it. scRGB UI may be up to 10000
+// nits. Only a cleared layer (SUNSHINE_UI_STORED_PREMULTIPLIED) is bounded.
 bool SunshineUILayerBeyondBound(float4 layer)
 {
     const bool premultiplied = (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_PREMULTIPLIED) != 0u;
@@ -372,15 +377,20 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
     uint4 strong = 0u, contradicted = 0u, preUI = 0u;
     // Presented, Backbuffer and tagged alpha are checked for range only; a
     // layer pixel of in-range alpha beyond the premultiplied bound counts
-    // apart, never as covered or opaque, and the reduce invalidates the whole
-    // layer only when such pixels outnumber its covered ones.
+    // apart, never as covered or opaque, and the reduce decides whether such
+    // pixels invalidate the whole layer (V1).
     // A2 counts on a status sample (SUNSHINE_UI_PER_FRAME_SAMPLE) with an
     // exact pair only, the one judge that reads them: UIAlpha, the UI color
     // tag, Backbuffer and current alpha. The one-frame-late layer copy is not
-    // same-sample evidence (E2) and is never judged.
+    // same-sample evidence (E2) and is never judged, nor is a declared tag
+    // captured in another tag batch than the pair (unaligned): neither
+    // counts a strong pixel.
     const uint pairBits = SUNSHINE_UI_CANDIDATE_HUDLESS | SUNSHINE_UI_CANDIDATE_EXACT;
     const bool sample = (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_SAMPLE) != 0u;
     const bool judging = sample && (Sunshine_UICandidates & pairBits) == pairBits;
+    const uint unaligned = Sunshine_UIDetectionFlags >> SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT;
+    const uint4 judged = uint4((unaligned & SUNSHINE_UI_CANDIDATE_UI_ALPHA) ? 0u : 1u,
+        (unaligned & SUNSHINE_UI_CANDIDATE_UI_COLOR) ? 0u : 1u, 1u, 1u);
     // A candidate that is not offered is not bound: uniform branches skip its
     // loads and use the zero an unbound view reads. The presented color (t0)
     // is always bound and always read.
@@ -429,7 +439,7 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         // unchanged, the scene shown without UI. Real UI changes the pixels it
         // covers, and dims and tints over dark or changed pixels never do.
         [branch] if (judging) {
-            const uint4 strongPixel = uint4(a >= .5 && a <= 1.0);
+            const uint4 strongPixel = uint4(a >= .5 && a <= 1.0) & judged;
             strong += strongPixel;
             contradicted += litPixel && unchanged ? strongPixel : uint4(0u, 0u, 0u, 0u);
         }
@@ -582,12 +592,14 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     const uint pixels = difference.w;
     // The layer's covered pixels (within the premultiplied bound), invalid
     // pixels and opaque pixels (within the bound). V1 (revision 10): its
-    // pixels beyond the bound invalidate it only when they lie on more than
-    // 1% of the frame and outnumber its covered ones (more than half of its
-    // lit pixels: covered, or colored beyond the bound), as a scene image in
-    // the target does; otherwise they are uncovered, not UI.
-    const uint3 layer = uint3(layer_sum.x,
-        layer_sum.y + (beyond * 100u > pixels && beyond > layer_sum.x ? beyond : 0u), layer_sum.z);
+    // pixels beyond the bound invalidate it when they lie on more than 1% of
+    // the frame and either on more than 5% of it or on more pixels than its
+    // opaque ones (within the bound), as a scene image in the target does
+    // (Stellar Blade's SDR scene, or a luma-like alpha whose pixels are
+    // rarely opaque); below that they are uncovered, not UI (an additive glow
+    // beside an opaque HUD).
+    const bool scene_like = beyond * 100u > pixels && (beyond * 20u > pixels || beyond > layer_sum.z);
+    const uint3 layer = uint3(layer_sum.x, layer_sum.y + (scene_like ? beyond : 0u), layer_sum.z);
     // The layer against the presented frame (H1 d): {matching, lit layer, 0,
     // 0} (words 46 and 47 are reserved zeros); zero without an offered layer
     // or a pre-UI threshold.

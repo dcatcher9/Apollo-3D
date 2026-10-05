@@ -38,6 +38,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -77,7 +78,7 @@ namespace {
   // counts on a sample frame only (per_frame_sample), the pre-UI counts on a
   // sample frame with an offered layer and a pre-UI threshold, and the
   // layer's pixels beyond the bound as invalid when they lie on more than 1%
-  // of the frame and outnumber its covered ones.
+  // of the frame and on more than 5% of it or more than its opaque ones.
   selection::counts sums(const tiles &t, std::uint32_t offered = 0, std::uint32_t flags = 0, float pre_ui_threshold = 0.f) {
     selection::counts c;
     std::array<std::uint32_t, 4> coverage{}, invalid{}, difference{};
@@ -108,7 +109,8 @@ namespace {
     c.lit = lit[0];
     c.opaque_ui_alpha = lit[1];
     c.opaque_ui_color = lit[2];
-    const std::uint32_t layer_invalid = layer[1] + (std::uint64_t(beyond) * 100u > c.pixels && beyond > layer[0] ? beyond : 0u);
+    const bool scene_like = std::uint64_t(beyond) * 100u > c.pixels && (std::uint64_t(beyond) * 20u > c.pixels || beyond > layer[2]);
+    const std::uint32_t layer_invalid = layer[1] + (scene_like ? beyond : 0u);
     c.covered = {coverage[0], coverage[1], layer[0], coverage[2], coverage[3]};
     c.invalid = {invalid[0], invalid[1], layer_invalid, invalid[2], invalid[3]};
     c.opaque_layer = layer[2];
@@ -485,20 +487,40 @@ namespace {
       cases.push_back(layer);
     }
     // V1's premultiplied bound (revision 10): the layer's pixels beyond it
-    // invalidate the layer only when they lie on more than 1% of the frame
-    // and outnumber its covered pixels (a scene image in the target, SB SDR
-    // and Dead Space); otherwise they are uncovered, not UI (an additive glow
-    // beside the HUD), and out-of-range pixels keep the 1% rule.
-    for (const std::uint32_t covered : {0u, 368u, 2000u})
-      for (const std::uint32_t beyond : {368u, 369u, 2000u, 2001u, 30000u})
+    // invalidate the layer when they lie on more than 1% of the frame and
+    // on more than 5% of it (p / 20 = 1843.2) or more than its opaque pixels
+    // (a HUD beside a smaller additive glow stays valid); they are uncovered
+    // either way, and out-of-range pixels keep the 1% rule. Covered pixels do
+    // not weigh: a scene buffer's faint luma-like alpha covers most of the
+    // frame within the bound.
+    for (const std::uint32_t opaque : {0u, 368u, 1000u, 2000u})
+      for (const std::uint32_t beyond : {368u, 369u, 999u, 1000u, 1001u, 1843u, 1844u, 30000u})
         for (const std::uint32_t range : {0u, 369u}) {
-          auto test = alpha_case("V1 layer beyond the bound, " + std::to_string(beyond) + " beyond " + std::to_string(covered) +
-            " covered", p, candidate::layer | candidate::backbuffer, candidate::layer | candidate::backbuffer);
-          alpha(test, k::ui_layer, covered, range);
+          auto test = alpha_case("V1 layer beyond the bound, " + std::to_string(beyond) + " beyond " + std::to_string(opaque) +
+            " opaque", p, candidate::layer | candidate::backbuffer, candidate::layer | candidate::backbuffer);
+          alpha(test, k::ui_layer, opaque + 25000u, range, opaque);
           alpha(test, k::backbuffer, 300, 0);
           beyond_bound(test, beyond);
           cases.push_back(test);
         }
+    // A dark scene buffer with luma-like alpha (Dead Space's census target):
+    // 70% of pixels covered at alpha 8-20/255, none opaque, 20% saturated
+    // beyond the bound; a HUD whose opaque body (3%) outnumbers a glow
+    // beside it (2%), and one whose glow outnumbers it (1% opaque); a menu
+    // whose opaque body (54%) outnumbers a glow on 5% of the frame, and on
+    // one pixel more.
+    for (const auto &[name, covered, opaque, beyond] : {std::tuple {"dark scene buffer", 25805u, 0u, 7373u},
+           std::tuple {"HUD beside a smaller glow", 2212u, 1106u, 737u},
+           std::tuple {"glow beside a smaller HUD", 2212u, 368u, 737u},
+           std::tuple {"menu beside a glow on 5%", 30000u, 20000u, 1843u},
+           std::tuple {"menu beside a glow on more than 5%", 30000u, 20000u, 1844u}}) {
+      auto test = alpha_case(std::string("V1 layer, ") + name, p, candidate::layer | candidate::backbuffer,
+        candidate::layer | candidate::backbuffer);
+      alpha(test, k::ui_layer, covered, 0, opaque);
+      alpha(test, k::backbuffer, 300, 0);
+      beyond_bound(test, beyond);
+      cases.push_back(test);
+    }
     // The 90% selective bound (0.9 p = 33177.6), accepted and not.
     for (const std::uint32_t covered : {33177u, 33178u})
       for (const std::uint32_t accepted : {0u, unsigned(candidate::current)}) {
@@ -853,11 +875,13 @@ namespace {
       default: test.accepted = std::uniform_int_distribution<std::uint32_t>(0, 0x7f)(random) & selection::candidate_bits;
     }
     // Every per-frame bit, the retired ones (0x10000, 0x80000, 0x20000000)
-    // included, and refuted candidate bits in bits 24-30.
-    static constexpr std::array<std::uint32_t, 11> per_frame{detection::per_frame_scene_hidden,
+    // included, refuted candidate bits in bits 24-30 and the unaligned
+    // declared tags (bits 12 and 13, which only the tiles pass reads).
+    static constexpr std::array<std::uint32_t, 13> per_frame{detection::per_frame_scene_hidden,
       detection::per_frame_pre_ui_visible, detection::per_frame_depth_not_current, detection::per_frame_accepted_missing,
       detection::per_frame_hold_reset, detection::per_frame_pre_ui_proven, detection::per_frame_sample,
-      detection::per_frame_reoffer, 0x10000u, 0x80000u, 0x20000000u};
+      detection::per_frame_reoffer, 0x10000u, 0x80000u, 0x20000000u, candidate::ui_alpha << detection::per_frame_unaligned_shift,
+      candidate::ui_color << detection::per_frame_unaligned_shift};
     for (const auto bit : per_frame)
       if (random() & 1u) test.flags |= bit;
     if (random() & 1u) test.flags |= (std::uint32_t(random()) & 0x7fu) << detection::per_frame_refuted_shift;
@@ -880,11 +904,16 @@ namespace {
       pick(random, p), random);
     for (std::size_t k = 0; k != 4; ++k) spread(t.lit, k, pick(random, p), random);
     for (std::size_t k = 0; k != 4; ++k) spread(t.pre_ui, k, pick(random, p), random);
-    // The layer's pixels beyond the premultiplied bound, near its bounds.
-    std::uint32_t layer_covered = 0;
-    for (const auto &tile : t.layer) layer_covered += tile[0];
-    spread(t.bound, 0, (random() & 1u) ? pick(random, p) : layer_covered + std::uint32_t(random() % 3u) - (layer_covered ? 1u : 0u),
-      random);
+    // The layer's pixels beyond the premultiplied bound, near its bounds
+    // (1% and 5% of the frame, and its opaque pixels).
+    std::uint32_t layer_opaque = 0;
+    for (const auto &tile : t.layer) layer_opaque += tile[2];
+    const std::uint32_t nudge = std::uint32_t(random() % 3u);
+    switch (random() % 3u) {
+      case 0: spread(t.bound, 0, pick(random, p), random); break;
+      case 1: spread(t.bound, 0, layer_opaque + nudge - (layer_opaque ? 1u : 0u), random); break;
+      default: spread(t.bound, 0, p / 20u + nudge - 1u, random);
+    }
     // One-way counts near the tenth bound.
     for (std::size_t k = 0; k != 4; ++k) {
       const std::uint32_t strong = pick(random, p);
@@ -941,7 +970,8 @@ namespace {
   // strong is alpha in [1/2, 1] of UIAlpha, the UI color tag, Backbuffer
   // and current alpha, contradicted a strong pixel where an offered exact
   // pair's HUD-less image is lit and unchanged, none without an exact pair
-  // (A2; the layer copy is never judged, E2), and rows 128-143, the layer's
+  // nor of a declared tag pushed unaligned (A2; the layer copy is never
+  // judged, E2), and rows 128-143, the layer's
   // colour against the presented colour (t6) at 8 times pre_ui_threshold
   // (b2 word 4; zero compares nothing): matching and lit layer pixels,
   // relative above one in scRGB (H1 d); a frame that is not a sample writes
@@ -992,6 +1022,10 @@ namespace {
     const float threshold = 2.f / 255.f;
     const bool exact = (offered & (candidate::hudless | candidate::exact)) == (candidate::hudless | candidate::exact);
     const bool judging = sample && exact;
+    // A declared tag outside the exact pair's tag batch counts no strong
+    // pixel (per_frame_unaligned_shift).
+    const std::uint32_t unaligned = flags >> detection::per_frame_unaligned_shift;
+    const std::array<bool, 4> judged{!(unaligned & candidate::ui_alpha), !(unaligned & candidate::ui_color), true, true};
     const auto peak = [](const std::array<float, 4> &v) { return std::max({std::abs(v[0]), std::abs(v[1]), std::abs(v[2])}); };
     std::array<texel, 256> coverage{}, invalid{}, difference{}, lit{}, layer{}, strong_counts{}, contradicted{}, pre_ui{}, bound_counts{};
     for (std::uint32_t y = 0; y != 144; ++y)
@@ -1028,8 +1062,8 @@ namespace {
         lit[tile][0] += lit_pixel;
         const bool shown = lit_pixel && unchanged;
         for (std::size_t k = 0; k != 4; ++k) {
-          strong_counts[tile][k] += judging && strong(a[k]);
-          contradicted[tile][k] += judging && strong(a[k]) && shown;
+          strong_counts[tile][k] += judging && judged[k] && strong(a[k]);
+          contradicted[tile][k] += judging && judged[k] && strong(a[k]) && shown;
         }
         // H1 (d): the layer's colour against the presented colour.
         const auto &presented = images[6][i];
@@ -1211,6 +1245,24 @@ int main() {
       empty.lit = 500;
       empty.matching_tiles = 127;
       require(selection::decide(empty, 0x30, 0x10, 0, own).reused, "A noisy empty pair was valid");
+      // V1's premultiplied bound as the reduce applies it (sums): the layer's
+      // pixels beyond it weigh against its opaque pixels only, never against
+      // faint coverage within the bound.
+      const auto layer_valid = [](std::uint32_t covered, std::uint32_t opaque, std::uint32_t beyond) {
+        tiles t;
+        t.difference[0] = {0, 0, 0, small_pixels};
+        t.layer[0] = {covered, 0, opaque, 0};
+        t.bound[0][0] = beyond;
+        return (selection::decide(sums(t), candidate::layer, candidate::layer, 0).valid_bits & candidate::layer) != 0u;
+      };
+      require(!layer_valid(25805u, 0u, 7373u) && !layer_valid(35000u, 0u, 1000u),
+        "V1: a scene buffer with faint luma-like alpha was a valid layer");
+      require(layer_valid(2212u, 1106u, 737u) && layer_valid(2212u, 0u, 368u),
+        "V1: a glow beside a larger opaque HUD, or 1% of the frame beyond the bound, invalidated the layer");
+      require(!layer_valid(2212u, 368u, 737u) && !layer_valid(2212u, 736u, 737u) && layer_valid(2212u, 737u, 737u),
+        "V1: the beyond-bound pixels were not weighed against the opaque ones");
+      require(layer_valid(30000u, 20000u, 1843u) && !layer_valid(30000u, 20000u, 1844u) && !layer_valid(36864u, 36864u, 30000u),
+        "V1: more than 5% of the frame beyond the bound did not invalidate the layer whatever its opaque pixels");
     }
     std::puts("PASS UI selection (S1): accepted valid candidates only, the declared-alpha block, P1 at any coverage");
 
@@ -1554,6 +1606,13 @@ int main() {
             for (const std::uint32_t sample : {unsigned(detection::per_frame_sample), 0u})
               if (sample || !pre_ui_threshold)
                 check_tiles(gpu, tiles.Get(), flags | sample, offered, space, color, pre_ui_threshold);
+      // A declared tag outside the exact pair's tag batch is not judged (A2):
+      // UIAlpha, the UI color tag or both pushed unaligned, on a sample and
+      // on a frame that is not one.
+      for (const std::uint32_t unaligned : {0x1u, 0x2u, 0x3u})
+        for (const std::uint32_t sample : {unsigned(detection::per_frame_sample), 0u})
+          check_tiles(gpu, tiles.Get(), detection::layer_detection_flags(false) | sample |
+            (unaligned << detection::per_frame_unaligned_shift), 0x7fu, space, color, sample ? 2.f / 255.f : 0.f);
       // Partial offers leave the other candidates unbound, as live renders
       // do: the skipped loads count as the zero an unbound view reads.
       for (const std::uint32_t offered : {0x08u, 0x0cu, 0x49u, 0x3au, 0x16u})
@@ -1575,8 +1634,8 @@ int main() {
     }
     require(!own_retired && h1 && gate_no_hold, "The contract cases decided a retired source (7, 9, 11), or never exercised H1");
     std::printf("PASS UI detection tiles (V1, V2, A2, H1 d): alpha, layer, beyond-bound, difference, one-way and pre-UI pixel "
-      "counts on edge values match the CPU count for layer flags 0, 5 and 7, with and without an exact pair, a comparable layer "
-      "and a status sample, in sRGB, PQ and scRGB\n");
+      "counts on edge values match the CPU count for layer flags 0, 5 and 7, with and without an exact pair, a comparable layer, "
+      "a status sample and unaligned declared tags, in sRGB, PQ and scRGB\n");
     std::printf("PASS UI selection GPU contract (%s): %zu crafted and %zu random cases in two color spaces match decide() in every "
       "decision word, hold store write and counter add; %u reused, %u H1, %u gate_no_hold; applied sources",
       gpu.adapter.c_str(), crafted_count, cases.size() - crafted_count, reused, h1, gate_no_hold);
