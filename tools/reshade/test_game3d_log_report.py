@@ -1409,6 +1409,13 @@ class ReadinessReport(unittest.TestCase):
                          ('late', True, (80, None, None), '-', 'ui_color', 0.371, 0.867, 0.351, 2))
         self.assertEqual(report.parse([PIN_ON]).pin_switch, [(36001.0, True)])
 
+    def test_change_set_status_does_not_shift_later_timestamps(self):
+        # The UI line's change_set offset once overwrote the parser's midnight offset, so the next line crashed.
+        status = ui3('10:00:06', 4, 1000, (0, 0, 0, 1000), 0x48, 0x8, change_set=('retained', 1, 1, 1, 0, 0))
+        later = ui3('10:00:07', 4, 1000, (0, 0, 0, 1000), 0x48, 0x8)
+        session = report.parse([status, later])
+        self.assertEqual([sample.t for sample in session.ui], [36006.0, 36007.0])
+
     def test_fix3_shadow_summary_warns_for_review(self):
         # The default shadow (UIPinChangedPixels=0): Stellar Blade SDR menus that would refine, a settings page whose
         # set is invalid, and FG-on gameplay whose late pair the UI colour tag judges.
@@ -1466,11 +1473,19 @@ class ReadinessReport(unittest.TestCase):
         self.assertTrue(check.detail.startswith('1 shadow samples contradicted the retained pairing'), check.detail)
         self.assertEqual(len(check.times), 1)
         on = {**contradicted, 'refined': 5, 'decided.12': 5, 'decided.10': 55}
+        # The counters alone cannot tell a valid set from a loading screen, so they warn.
         check = run(BASE + [PIN_ON, counters('10:00:12', on, groups=FIX3_COUNTER_GROUPS)])['Pre-UI change set']
-        self.assertEqual(check.status, 'FAIL')
-        self.assertTrue(check.detail.startswith('a retained pairing was contradicted while UIPinChangedPixels=1'))
+        self.assertEqual(check.status, 'WARN')
+        self.assertTrue(check.detail.startswith('1 samples contradicted the retained pairing, none of them logged'),
+                        check.detail)
         check = run(BASE + [PIN_ON, change_set_line('10:00:06', enabled=1, offsets='40 52 60', pair='contradicted')])
         self.assertEqual(check['Pre-UI change set'].status, 'FAIL')
+        self.assertTrue(check['Pre-UI change set'].detail.startswith(
+            'a retained pairing was contradicted while UIPinChangedPixels=1'))
+        # A contradicted invalid set (a loading screen) never acts: it warns with the switch on.
+        check = run(BASE + [PIN_ON, change_set_line('10:00:06', enabled=1, offsets='40 52 60', pair='contradicted',
+                                                    valid=0, would_refine=0, would_source=4)])
+        self.assertEqual(check['Pre-UI change set'].status, 'WARN')
         # Refined frames with the switch on are expected.
         check = run(BASE + [PIN_ON, counters('10:00:12', {**shadow, 'refined': 5, 'decided.12': 5, 'decided.10': 55},
                                              groups=FIX3_COUNTER_GROUPS)])['Pre-UI change set']

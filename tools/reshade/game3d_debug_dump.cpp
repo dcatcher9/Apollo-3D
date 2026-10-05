@@ -73,6 +73,51 @@ namespace sunshine_game3d {
       return encoded;
     }
 
+    // Fits the producer metadata into the mailbox without losing pixels: it
+    // drops the explanatory "meaning" strings, then whole top-level sections
+    // largest first, keeping "replay" (what the replay tools read) unless
+    // nothing else is left, and lists what it dropped in "metadata_reduced".
+    std::string fit_metadata(const std::string &json, std::size_t limit) {
+      if (json.size() < limit) return json;
+      nlohmann::json metadata = nlohmann::json::parse(json, nullptr, false);
+      if (!metadata.is_object()) return R"({"metadata_reduced":["unparsable"]})";
+      auto dropped = nlohmann::json::array();
+      auto fits = [&] {
+        auto candidate = metadata;
+        candidate["metadata_reduced"] = dropped;
+        return candidate.dump().size() < limit;
+      };
+      std::size_t meanings = 0;
+      auto strip = [&](auto &self, nlohmann::json &node) -> void {
+        if (node.is_object()) {
+          meanings += node.erase("meaning");
+          for (auto &child : node) self(self, child);
+        } else if (node.is_array()) {
+          for (auto &child : node) self(self, child);
+        }
+      };
+      strip(strip, metadata);
+      if (meanings) dropped.push_back("meaning");
+      while (!fits()) {
+        std::string largest;
+        std::size_t largest_size = 0;
+        for (auto &[key, value] : metadata.items()) {
+          const auto size = value.dump().size();
+          if (key != "replay" && key != "schema" && size > largest_size) {
+            largest = key;
+            largest_size = size;
+          }
+        }
+        if (largest.empty()) largest = metadata.contains("replay") ? "replay" : std::string {};
+        if (largest.empty()) break;
+        metadata.erase(largest);
+        dropped.push_back(largest);
+      }
+      metadata["metadata_reduced"] = std::move(dropped);
+      auto reduced = metadata.dump();
+      return reduced.size() < limit ? reduced : std::string(R"({"metadata_reduced":["all"]})");
+    }
+
     // One image's hidden-scene evidence (docs/reshade-sbs.md, hidden-scene evidence).
     nlohmann::json scene_json(const alpha_auto_decision::scene_evidence &scene, bool verdict) {
       nlohmann::json result{{"n", scene.n}, {"d", scene.d}, {"valid", scene.valid}, {"ran", scene.ran}};
@@ -846,11 +891,8 @@ namespace sunshine_game3d {
       if (!current(p)) {
         return;
       }
-      if (p.json.size() >= wire::max_json_bytes) {
-        p.response.result = wire::status::failed;
-        p.response.texture_count = 0;
-        p.json = R"({"error":"Game3D diagnostic metadata exceeds the bounded mailbox."})";
-      }
+      // Oversized metadata is reduced, never a reason to drop the pixels.
+      if (p.json.size() >= wire::max_json_bytes) p.json = fit_metadata(p.json, wire::max_json_bytes);
       p.response.json_bytes = static_cast<unsigned>(p.json.size());
       shared->response = p.response;
       std::memcpy(shared->json, p.json.data(), p.json.size());

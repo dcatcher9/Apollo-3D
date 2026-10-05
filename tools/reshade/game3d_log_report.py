@@ -826,8 +826,8 @@ def parse(lines) -> Session:
                 sample = sample._replace(still=Still(scope == '1', enabled == '1', phase, int(run_ms), int(cells),
                                                      int(compared), int(short_ms)))
             if status := CHANGE_SET_STATUS.search(text):
-                pairing, offset, valid, would_refine, refined, enabled = status.groups()
-                sample = sample._replace(change_set=ChangeSetStatus(pairing, int(offset), valid == '1',
+                pairing, pair_offset, valid, would_refine, refined, enabled = status.groups()
+                sample = sample._replace(change_set=ChangeSetStatus(pairing, int(pair_offset), valid == '1',
                                                                     would_refine == '1', refined == '1',
                                                                     enabled == '1'))
             s.ui.append(sample)
@@ -1792,9 +1792,11 @@ def change_set_checks(s: Session, add) -> None:
     the add-on measures every sample frame with an offered layer and logs what the switch would do, so a session
     with measured samples WARNs with a summary for review before the switch is turned on. The counters count every
     sample (change_set group), the throttled lines give example times and the judge's agreement. FAIL: a frame
-    refined or decided the pre-UI change set (source 12) in a session whose switch was never on, or a retained
-    pairing that the changed counts against the Presents 0-2 back contradicted while the switch was on (the pairing
-    by Present counting did not hold). A contradicted pair in the shadow WARNs. Logs before fix 3 have none of these
+    refined or decided the pre-UI change set (source 12) in a session whose switch was never on, or a logged retained
+    pairing that the changed counts against the Presents 0-2 back contradicted while the switch was on and whose set
+    was valid, so it could act (the pairing by Present counting did not hold). Any other contradicted pair WARNs:
+    in the shadow, and with the switch on on invalid sets (loading screens and transitions, which never act) or in
+    the counters alone, which cannot tell valid sets apart. Logs before fix 3 have none of these
     lines, and no such check."""
     lines = s.change_sets
     status = [u.change_set for u in s.ui if u.change_set is not None]
@@ -1806,7 +1808,6 @@ def change_set_checks(s: Session, add) -> None:
         return c.get(key, 0) if c else 0
     values = [on for _, on in s.pin_switch] + [line.enabled for line in lines] + [u.enabled for u in status]
     ever_on = any(values)
-    always_on = bool(values) and all(values)
     last = s.pin_switch[-1][1] if s.pin_switch else bool(values and values[-1])
     key = s.pin_key
     switch = f'{key}={int(last)}'
@@ -1849,8 +1850,7 @@ def change_set_checks(s: Session, add) -> None:
                 f'{line.offset}, changed {percent(line.changed, line.pixels)}, filtered {line.filtered}, tiles '
                 f'{line.tiles}, lit {percent(line.lit, line.pixels)}, pair {line.pair}')
     examples = [row(line) for line in lines if line.would_refine or line.would_source == PRE_UI_SOURCE][:6]
-    contradicted_on = (any(line.enabled and line.pair == 'contradicted' for line in lines)
-                       or (always_on and contradicted > 0))
+    contradicted_on = any(line.enabled and line.pair == 'contradicted' and line.valid for line in lines)
     if (refined or decided) and not ever_on:
         add(Check('FAIL', 'Pre-UI change set',
                   f'{refined} frames refined and {decided} decided source {PRE_UI_SOURCE} while {key} '
@@ -1859,6 +1859,11 @@ def change_set_checks(s: Session, add) -> None:
         add(Check('FAIL', 'Pre-UI change set',
                   f'a retained pairing was contradicted while {key}=1: the Present the layer copy shows '
                   f'is not the one Present counting paired it with; {detail}',
+                  [row(line) for line in lines if line.pair == 'contradicted'][:6]))
+    elif contradicted and ever_on:
+        add(Check('WARN', 'Pre-UI change set',
+                  f'{contradicted} samples contradicted the retained pairing, none of them logged with a valid set '
+                  f'(loading screens and transitions, which never act); {detail}',
                   [row(line) for line in lines if line.pair == 'contradicted'][:6]))
     elif contradicted:
         add(Check('WARN', 'Pre-UI change set',
