@@ -277,8 +277,9 @@ namespace sunshine_game3d {
     // One completed GPU detection sample over `pixels` pixels, taken for
     // candidates of these signatures (those at submission). Manual modes
     // never earn or revoke. A1 earning: a declared source (UIAlpha, the UI
-    // color tag, or a HUD-less pair from an exact sample only) is accepted by
-    // its first valid selective sample; an inferred source (the offscreen UI
+    // color tag, or a HUD-less pair, exact or not, whose partial change set
+    // passes V2) is accepted by its first valid selective sample; an inferred
+    // source (the offscreen UI
     // layer, Backbuffer or current alpha) by alpha_trust_samples valid
     // selective samples spanning alpha_trust_span_ms within a factor of two of
     // each other, where a full (at least 90%) sample restarts the run. Alpha
@@ -304,10 +305,12 @@ namespace sunshine_game3d {
     // ambiguous samples never revoke. A contradicted sample earns nothing
     // and restarts the earning run (unless void). A3: restored entries lapse
     // unless earned again within alpha_trust_reconfirm_ms of being first
-    // offered valid. That clock pauses while a restored declared source
-    // (UIAlpha, the UI color tag, a HUD-less pair) is offered but invalid,
-    // from its first invalid offer to its next valid one, so it never lapses
-    // during an invalid run and invalid offers never extend it.
+    // offered valid. That clock runs only on samples that could earn or
+    // refute the source: offered, valid (V1, or V2 for a HUD-less pair) and
+    // not full (below 90% coverage, or a partial or empty change set). Every
+    // other sample of an offered source pauses it, from its first such offer
+    // to its next testable one, so it never lapses during an invalid run or
+    // a long full-screen menu, and such offers never extend it.
     // H1 (d), fix 1: an offered layer without coverage (layer_covered zero)
     // earns its signature's pre-UI proof (key ui_selection::pre_ui_key) like
     // an inferred source: alpha_trust_samples samples spanning
@@ -583,10 +586,10 @@ namespace sunshine_game3d {
       for (const auto k : ui_selection::draw_order) {
         if (!ui_selection::alpha_kind(k) || !(offered & ui_selection::bit(k))) continue;
         if (invalid & ui_selection::bit(k)) {
-          // A3: a restored declared alpha offered but invalid does not lapse;
-          // its clock pauses until the next valid offer.
-          if (ui_selection::declared(k))
-            if (auto *e = find(signatures.of(k))) reconfirm_paused(*e, tick_ms);
+          // A3: a restored alpha offered but invalid can neither earn nor be
+          // refuted, so it does not lapse; its clock pauses until the next
+          // valid offer.
+          if (auto *e = find(signatures.of(k))) reconfirm_paused(*e, tick_ms);
           continue;
         }
         auto &e = at(signatures.of(k));
@@ -642,13 +645,15 @@ namespace sunshine_game3d {
       }
       for (auto &e : entries_)
         if (e.signature.source_kind == kind::pre_ui && (!tested || e.signature != *tested)) reconfirm_paused(e, tick_ms);
-      // A HUD-less change set earns only from an exact pair (V2) whose partial
-      // change set is valid; an inexact pair never earns. Offered without its
-      // valid bit, it is invalid this sample (A3).
+      // A HUD-less change set is declared: it earns from its first V2-valid
+      // partial change set, exact or not, since V2's tile test is the proof of
+      // its pixels (a game may tag only HUDLessColor, whose pairs are then all
+      // counted and inexact: Hogwarts Legacy 10-05). Only an exact pair judges
+      // (A2). A3: its clock runs only on samples that could earn or refute it,
+      // offered V2-valid and not full (a partial or empty change set), as an
+      // alpha's does: a full menu or a mispaired (V2-invalid) sample pauses it.
       if (offered & candidate::hudless) {
         auto &e = at(signatures.of(kind::hudless));
-        if (evidence.valid_bits & candidate::hudless) reconfirm_offered(e, tick_ms);
-        else reconfirm_paused(e, tick_ms);
         ui_selection::counts c;
         c.pixels = pixels;
         c.changed = evidence.hudless_changed;
@@ -656,7 +661,9 @@ namespace sunshine_game3d {
         c.nonfinite = evidence.hudless_invalid;
         c.lit = evidence.hudless_lit;
         c.matching_tiles = evidence.matching_tiles;
-        if (!void_sample && (offered & candidate::exact) && ui_selection::change_set_selective(c)) accept(e);
+        if ((evidence.valid_bits & candidate::hudless) && !ui_selection::full(c.changed, pixels)) reconfirm_offered(e, tick_ms);
+        else reconfirm_paused(e, tick_ms);
+        if (!void_sample && ui_selection::change_set_selective(c)) accept(e);
         lapse_if_due(e, tick_ms);
       }
     }

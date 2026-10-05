@@ -16,7 +16,8 @@
 // of texel 12 .z/.w and the identity counter words on synthetic stamps (t9)
 // and proposals (b2 words 6-9), and the HUD-less gate of sources 5 and 6.
 // Fix 3 and fix 4 (selection revision 6) were removed by user decision;
-// revision 7 decides as revision 5. Uses a hardware D3D11 device, else WARP.
+// revision 7 decides as revision 5, and revision 8 adds the empty change set.
+// Uses a hardware D3D11 device, else WARP.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -608,6 +609,21 @@ namespace {
             case_t test{"full change set " + std::to_string(permille), {}, candidate::hudless | exact, accepted, flags};
             difference_rows(test.statistics, p, 0, permille, 0);
             test.statistics.lit[0][0] = p / 2u;
+            cases.push_back(test);
+          }
+    // An empty change set (revision 8): a lit pair whose tiles changed no
+    // pixel, at least 128 of them clean, exact or not, accepted or not, after
+    // an own decision; 127 clean tiles or a HUD-less image lit on less than
+    // half of the pixels leave the pair invalid (T1 reuses).
+    for (const std::uint32_t matching : {127u, 128u})
+      for (const std::uint32_t lit : {p / 2u - 1u, p / 2u})
+        for (const std::uint32_t accepted : {0u, unsigned(candidate::hudless)})
+          for (const std::uint32_t exact : {0u, unsigned(candidate::exact)}) {
+            case_t test{"empty change set, " + std::to_string(matching) + " clean tiles, lit " + std::to_string(lit), {},
+              candidate::hudless | exact, accepted};
+            difference_rows(test.statistics, p, matching, 0, 900);
+            test.statistics.lit[0][0] = lit;
+            test.previous = selection::hold_state{detection::hold::own, 5u, 1234u};
             cases.push_back(test);
           }
     // The declared block: an accepted tag invalid this frame keeps accepted,
@@ -1495,6 +1511,29 @@ int main() {
           selection::decide(full, 0x30, 0, detection::per_frame_scene_hidden).source == 8 &&
           !selection::decide(full, 0x10, 0x10, 0).source,
         "A full change set must need an accepted exact pair, else H1 under a hidden verdict");
+      // An empty change set (revision 8): a lit pair without a changed pixel
+      // in clean tiles, exact or not, is valid. Accepted, it decides an empty
+      // mask of its own instead of reusing the previous decision (T1).
+      selection::counts empty;
+      empty.pixels = 1000;
+      empty.unchanged = 1000;
+      empty.lit = 500;
+      empty.matching_tiles = 128;
+      const selection::hold_state own{detection::hold::own, 5u, 50u};
+      for (const std::uint32_t pair : {0x10u, 0x30u}) {
+        const auto accepted = selection::decide(empty, pair, 0x10, 0, own);
+        require(accepted.source == 5 && !accepted.covered && !accepted.reused && accepted.own_source == 5 &&
+            (accepted.valid_bits & candidate::hudless) && accepted.next.state == detection::hold::own,
+          "An accepted empty change set did not decide an empty mask of its own");
+        const auto unaccepted = selection::decide(empty, pair, 0x00, 0, own);
+        require(!unaccepted.source && !unaccepted.reused && (unaccepted.valid_bits & candidate::hudless),
+          "An unaccepted empty change set decided or reused");
+      }
+      empty.lit = 499;
+      require(selection::decide(empty, 0x30, 0x10, 0, own).reused, "A dark empty pair was valid");
+      empty.lit = 500;
+      empty.matching_tiles = 127;
+      require(selection::decide(empty, 0x30, 0x10, 0, own).reused, "A noisy empty pair was valid");
     }
     std::puts("PASS UI selection (S1): accepted valid candidates only, the declared-alpha block, P1 at any coverage");
 
@@ -1575,6 +1614,12 @@ int main() {
       d = selection::decide(c, 0x34, 0x00, 0);
       require(d.contradicted_bits == candidate::backbuffer && !d.contradicted,
         "A2: an unaccepted judged source must be contradicted without the decided counter");
+      // An exact empty change set (revision 8) judges too.
+      c.changed = 0;
+      c.unchanged = 1000;
+      c.lit = 500;
+      require(selection::decide(c, 0x34, 0x04, 0).contradicted_bits == candidate::backbuffer,
+        "A2: an exact empty change set did not judge");
     }
     std::puts("PASS UI one-way judgment (A2): an exact valid pair, a tenth of strong pixels lit and unchanged");
 

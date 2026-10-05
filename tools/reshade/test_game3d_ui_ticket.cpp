@@ -222,20 +222,20 @@ namespace {
     using temporal::present_identity;
     // A re-offered token holds, a newer one detects, a Present offering
     // nothing keeps today's count bound; evidence without a token is new.
-    const auto again = temporal::ticket_identity({false, 20}, 41, 41, true);
+    const auto again = temporal::ticket_identity({false}, 41, 41, true);
     require(again.token_label == 41 && !again.new_label, "A re-offered token is not new");
-    require(temporal::ticket_identity({true, 20}, 42, 41, true).new_label, "A newer token is new");
-    require(!temporal::ticket_identity({false, 20}, 40, 41, true).new_label, "An older token is not new");
-    require(temporal::ticket_identity({false, 0}, 0, 41, true).new_label && !temporal::ticket_identity({true, 0}, 0, 41, false).new_label, "Evidence without a token is new; nothing offered is not");
+    require(temporal::ticket_identity({true}, 42, 41, true).new_label, "A newer token is new");
+    require(!temporal::ticket_identity({false}, 40, 41, true).new_label, "An older token is not new");
+    require(temporal::ticket_identity({false}, 0, 41, true).new_label && !temporal::ticket_identity({true}, 0, 41, false).new_label, "Evidence without a token is new; nothing offered is not");
     // applied_identity: today's unless authoritative.
     const auto applied_default = temporal::applied_identity(again, ticket::authoritative(false));
-    require(!applied_default.generated && applied_default.real_frame == 20, "The default applies today's identity");
+    require(!applied_default.generated && applied_default.token_label == 41, "The default applies today's identity");
     const auto held = temporal::applied_identity(again, true);
-    require(held.generated && held.real_frame == 41, "A re-offered token holds the frame it names");
-    const auto fresh = temporal::applied_identity(temporal::ticket_identity({true, 20}, 42, 41, true), true);
-    require(!fresh.generated && fresh.real_frame == 42, "A new token detects, whatever counting said");
-    const auto zero = temporal::applied_identity(temporal::ticket_identity({true, 0}, 0, 41, false), true);
-    require(zero.generated && !zero.real_frame, "A zero-offer Present keeps the count bound");
+    require(held.generated && held.token_label == 41, "A re-offered token holds the last decision");
+    const auto fresh = temporal::applied_identity(temporal::ticket_identity({true}, 42, 41, true), true);
+    require(!fresh.generated && fresh.token_label == 42, "A new token detects, whatever counting said");
+    const auto zero = temporal::applied_identity(temporal::ticket_identity({true}, 0, 41, false), true);
+    require(zero.generated && !zero.token_label, "A zero-offer Present keeps the count bound");
     // detection_state: the default arbitrates today's identity; the
     // test-only override arbitrates the ticket's.
     sunshine_game3d::alpha_auto_source scope;
@@ -243,12 +243,12 @@ namespace {
     for (const bool override_on : {false, true}) {
       temporal::detection_state state;
       state.identity_override = override_on;
-      const auto first = temporal::ticket_identity({false, 10}, 41, state.decision_token, true);
+      const auto first = temporal::ticket_identity({false}, 41, state.decision_token, true);
       require(state.arbitrate(first, scope, 0x10).detect, "The first Present detects");
       state.detected(scope, first);
       require(state.decision_token == 41, "The decision's token is kept");
       // Today's counting misreads the re-offering Present as real.
-      const auto misread = temporal::ticket_identity({false, 11}, 41, state.decision_token, true);
+      const auto misread = temporal::ticket_identity({false}, 41, state.decision_token, true);
       const auto t = state.arbitrate(misread, scope, 0x10);
       require(override_on ? t.hold && !t.detect : t.detect && !t.hold, "The override holds a re-offered token; the default detects as today");
     }

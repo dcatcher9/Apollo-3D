@@ -627,48 +627,34 @@ namespace {
       }
     }
   }
-  void hudless_pairs_with_the_real_frame_under_frame_generation() {
+  void hudless_pairs_with_the_next_present_only() {
     using present = mask::hudless_present;
-    constexpr auto kind = [](std::uint64_t tagged, std::uint64_t current, bool fg, std::uint32_t generated) {
-      return mask::pair_hudless_present(tagged, current, fg, generated).kind;
+    constexpr auto kind = [](std::uint64_t tagged, std::uint64_t current) {
+      return mask::pair_hudless_present(tagged, current).kind;
     };
-    constexpr auto ago = [](std::uint64_t tagged, std::uint64_t current, bool fg, std::uint32_t generated) {
-      return mask::pair_hudless_present(tagged, current, fg, generated).presents_ago;
+    constexpr auto ago = [](std::uint64_t tagged, std::uint64_t current) {
+      return mask::pair_hudless_present(tagged, current).presents_ago;
     };
-    // Without FG the next present is the tag's own frame.
-    static_assert(kind(10, 11, false, 0) == present::real_frame && ago(10, 11, false, 0) == 0);
-    static_assert(kind(10, 10, false, 0) == present::unpaired);
-    // A capture that completes after its frame pairs with that frame's retained
+    // The Present after the tag is the proposal, with or without frame
+    // generation: counting no longer says which Present is real (E2).
+    static_assert(kind(10, 11) == present::next_present && ago(10, 11) == 0);
+    static_assert(kind(10, 10) == present::unpaired);
+    // A capture that completes after that Present pairs with its retained
     // color, at most max_late_presents ago.
-    static_assert(kind(10, 12, false, 0) == present::earlier_real_frame && ago(10, 12, false, 0) == 1);
-    static_assert(kind(10, 13, false, 0) == present::earlier_real_frame && ago(10, 13, false, 0) == 2);
-    static_assert(kind(10, 14, false, 0) == present::unpaired);
-    // Hogwarts Legacy, SL 2.6.10 DLSS-G: the generated frame is presented
-    // first, then the real frame that matches HUDLessColor two presents on.
-    static_assert(kind(3725, 3726, true, 1) == present::generated_frame);
-    static_assert(kind(3725, 3727, true, 1) == present::real_frame);
-    static_assert(kind(3725, 3728, true, 1) == present::earlier_real_frame && ago(3725, 3728, true, 1) == 1);
-    // Enabled FG with an unreported count means one generated frame.
-    static_assert(kind(5, 7, true, 0) == present::real_frame);
-    // Multi-frame generation follows the reported count without a multiplier
-    // constant (T1's tag bound keeps a wrong count fail-safe).
-    static_assert(kind(5, 8, true, 3) == present::generated_frame);
-    static_assert(kind(5, 9, true, 3) == present::real_frame);
-    static_assert(kind(5, 9, true, 7) == present::generated_frame);
-    static_assert(kind(5, 13, true, 7) == present::real_frame);
-    static_assert(kind(5, 14, true, 7) == present::earlier_real_frame && ago(5, 14, true, 7) == 1);
-    // 6x: five generated Presents, then the real frame, then late pairs.
-    static_assert(kind(5, 6, true, 5) == present::generated_frame && kind(5, 10, true, 5) == present::generated_frame);
-    static_assert(kind(5, 11, true, 5) == present::real_frame);
-    static_assert(kind(5, 12, true, 5) == present::earlier_real_frame && ago(5, 12, true, 5) == 1);
-    static_assert(kind(5, 13, true, 5) == present::earlier_real_frame && ago(5, 13, true, 5) == 2);
-    static_assert(kind(5, 14, true, 5) == present::unpaired);
-    // FG status only moves the real frame when it is known enabled.
-    static_assert(kind(5, 6, false, 1) == present::real_frame && kind(5, 7, false, 1) == present::earlier_real_frame);
+    static_assert(kind(10, 12) == present::earlier_present && ago(10, 12) == 1);
+    static_assert(kind(10, 13) == present::earlier_present && ago(10, 13) == 2);
+    static_assert(kind(10, 14) == present::unpaired);
+    // Hogwarts Legacy 10-05 (DLSS-G 4x, HUDLessColor only): the game tags its
+    // next frame one to three counted Presents before each Present, and every
+    // one of them pairs (inexact), where counting by the reported multiplier
+    // had read every Present as generated.
+    static_assert(kind(3725, 3726) == present::next_present);
+    static_assert(kind(3725, 3727) == present::earlier_present && ago(3725, 3727) == 1);
+    static_assert(kind(3725, 3728) == present::earlier_present && ago(3725, 3728) == 2);
     // Unknown, sentinel and reversed generations never pair.
-    static_assert(kind(0, 1, false, 0) == present::unpaired);
-    static_assert(kind(UINT64_MAX, 0, true, 1) == present::unpaired);
-    static_assert(kind(9, 3, true, 1) == present::unpaired);
+    static_assert(kind(0, 1) == present::unpaired);
+    static_assert(kind(UINT64_MAX, 0) == present::unpaired);
+    static_assert(kind(9, 3) == present::unpaired);
     // Hogwarts tags HUDLessColor and Backbuffer in one batch; their counters
     // started at different values but advanced by the same Presents.
     static_assert(mask::same_tag_interval(619, 621, 1, 3));
@@ -755,7 +741,7 @@ int main() {
     local_queue_acquisition_preserves_current_candidate(); std::puts("PASS explicit local consumer queue selects current submitted pixels without changing strict diagnostic acquisition");
     explicit_source_filter_prevents_higher_priority_starvation(); std::puts("PASS exact source filtering prevents unreviewed priority starvation and fallback");
     source_filter_change_revokes_ready_pending_and_inflight_attempts(); std::puts("PASS source-filter changes revoke completed, pending and in-flight old reservations");
-    hudless_pairs_with_the_real_frame_under_frame_generation(); std::puts("PASS HUD-less pairs with its real frame after generated presents, late captures within retained history, never stale or reversed generations");
+    hudless_pairs_with_the_next_present_only(); std::puts("PASS HUD-less pairs with the Present after its tag, late captures within retained history, never stale or reversed generations");
     declared_lifetimes_preserve_state_policy(); std::puts("PASS UI tag lifetimes preserve provenance and choose observed-at-call or strict longer-lived state policy");
     token_batch_pairs_the_newest_common_frame(); std::puts("PASS S3 token batch: the newest HUD-less and Backbuffer pair of one token generation, numbered or not, read-only; different or missing tokens and a scope change never pair; only Backbuffer snapshots ask for the token clock");
     begin_refusals_name_their_stage(); std::puts("PASS S3 begin refusals: no or ambiguous request, filtered kind, not newer, shape, unsupported lifetime and no reservation each name their stage");

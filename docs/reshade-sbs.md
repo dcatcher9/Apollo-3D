@@ -486,8 +486,11 @@ Acceptance is one bit per game and source signature: the candidate kind (UIAlpha
 offscreen UI layer, Backbuffer, current color or HUD-less pair), its typed DXGI format and the
 swapchain colour space. Frame generation is not part of it, so turning FG on or off keeps it, while
 HDR and SDR output are different signatures that each earn their own. A declared source, the game's
-own UI contract (the UIAlpha and UIColorAndAlpha tags, and a HUD-less pair from an exact sample), is
-accepted by its first valid selective sample, one covering some but less than 90% of the frame. An
+own UI contract (the UIAlpha and UIColorAndAlpha tags, and a HUD-less pair, exact or not), is
+accepted by its first valid selective sample, one covering some but less than 90% of the frame; for
+a HUD-less pair that is a partial change set that passes V2's tile test, which proves its pixels.
+A game that tags only HUDLessColor pairs every image by Present counting, inexactly (below), and
+Hogwarts Legacy did on 10-05: while only exact pairs earned, its pair was never accepted. An
 inferred source (the offscreen UI layer, Backbuffer and current alpha) is a guess: it needs
 consecutive completed GPU samples covering some but less than 90% of the frame at least three times
 over at least 2 s, each within a factor of two of the others. A full-frame sample restarts that run,
@@ -534,7 +537,7 @@ again by its own evidence. Deleting the key forgets it for later sessions.
 
 Acceptance is revoked only by evidence of stronger provenance in the same sample (A2), whatever
 the drawing rank. There are two judges: a valid exact change set (an exact HUD-less pair whose
-change set passes V2, partial or full, accepted or not), and each offered, accepted, valid (V1)
+change set passes V2, partial, empty or full, accepted or not), and each offered, accepted, valid (V1)
 UIAlpha or UI color tag. They judge the inferred sources, the offscreen UI layer, Backbuffer and
 current alpha, when offered and valid, accepted or not. Declared sources are never judged, and
 neither is the one-frame-late layer copy (below).
@@ -575,19 +578,22 @@ source is cleared only by Forget or by the provisional lapse below; that is an o
 [framework](#ui-decision-framework).
 
 Acceptance remembered from an earlier session protects from the first frame but is provisional
-(A3): unless the session earns it again within 60 s (`alpha_trust_reconfirm_ms`) of the source
-first being offered valid, it lapses and is forgotten, so a wrong remembered claim cannot outlive
-every session. The clock of a remembered declared source (UIAlpha, the UI color tag or a HUD-less
-pair) pauses from a sample that offers it but finds it invalid until its next valid offer: alpha
-that fails V1, or a HUD-less pair whose change set is not V2-valid (the middle band, or an inexact
-pair changed everywhere). It therefore never lapses during an invalid run, such as Resident Evil
-Requiem's rejected-tag frames, and resumes after it with the time it had already run; invalid
-offers never extend it, so a source that is invalid now and then still lapses after 60 s of valid
-offers in total unless it earns acceptance. Remembered inferred sources keep the plain clock. For
-every alpha source, a valid sample covering 90% of the frame or more also pauses the clock: a full
-menu can neither earn nor refute a source (only a selective sample earns), so counting it lapsed
-Stellar Blade's presented alpha during long SDR menu visits, which left the menus unprotected until
-gameplay with frame generation off earned it again.
+(A3): unless the session earns it again within 60 s (`alpha_trust_reconfirm_ms`) of testable
+samples, it lapses and is forgotten, so a wrong remembered claim cannot outlive every session. A
+sample is testable for a source when it could earn or refute it: the source is offered, valid (V1,
+or V2 for a HUD-less pair) and not full (alpha below 90% of the frame; a partial or empty change
+set). Every other sample that offers the source pauses its clock until its next testable one, for
+every kind: alpha that fails V1, a HUD-less pair whose change set is not V2-valid (the middle band
+of a pair mispaired with interpolated colour, or an inexact pair changed everywhere) and a full
+sample. It therefore never lapses during an invalid run, such as Resident Evil Requiem's
+rejected-tag frames, and resumes after it with the time it had already run; such offers never
+extend it, so a source that is testable now and then still lapses after 60 s of testable samples in
+total unless it earns acceptance. A full menu can neither earn nor refute a source (only a
+selective sample earns), so counting it lapsed Stellar Blade's presented alpha during long SDR menu
+visits, which left the menus unprotected until gameplay with frame generation off earned it again;
+a full change set pauses a HUD-less pair's clock the same way. Until 10-05 a remembered inferred
+source kept a plain clock through its invalid samples, and a HUD-less pair's clock ran through full
+change sets.
 
 An accepted alpha candidate that is valid in the frame decides by itself (S1). While an accepted
 UIAlpha or UI color tag is offered, inferred alpha never decides (the declared-alpha block): when the
@@ -687,24 +693,33 @@ frame generation or on queue timing; the mask then protects the current frame. H
 needed it: with DLSS-G on, differencing HUD-less with the presented color changed nearly every
 pixel, while its same-batch HUD-less and Backbuffer differed only in the UI (5.7-12.8% of pixels,
 over 200 of 256 tiles unchanged). A manual HUD-less choice captures the Backbuffer only for this
-pairing. Without a same-batch Backbuffer, HUD-less must pair with the real frame of its tag: a current source presentation generation
-one beyond the generation captured at the tag, or `generated_frames + 1` beyond while FG is known
-enabled, with the count the provider reports and no cap (one while FG is active and the count is
-unknown). Streamline presents the generated frames first, so the
-Present that matches HUDLessColor comes last. The integrated depth Present callback advances that
+pairing. Without a same-batch Backbuffer, counting proposes the presented color of the Present
+after the tag (`ui_mask::pair_hudless_present`): a current source presentation generation one
+beyond the generation captured at the tag. The integrated depth Present callback advances that
 generation before the Game 3D render. A merely recent snapshot from an earlier presentation does
-not pass. Each generated Present in between shows interpolated scene color, which must not be
-differenced; it shows the decision of the real frame it shows (**Temporal hold**, below). A real
-frame whose HUD-less image pairs only by Present counting while FG is on is not exact (E2).
-A capture from another queue can still be incomplete or unretired at its own real frame. When
-the newest ready capture belongs to a real frame one or two Presents ago, it is compared with that
-frame's retained color, and the resulting mask protects the current frame. The renderer starts
+not pass. Such a pair is never exact, with frame generation on or off (E2): a game may tag its next
+frame before the Present counted for it, and frame generation presents interpolated color between
+real frames. Only V2's test of the pixels validates it, a full change set from it is never
+full-screen UI, and it never judges (A2). The HUD-less image is offered on every Present it pairs,
+so such a Present is real to the temporal hold (**Temporal hold**, below). The pairing reads no
+frame generation multiplier. Until 10-05 it expected the real frame `generated_frames + 1` Presents
+after the tag, held the Presents before it as generated and counted pairs exact with FG off.
+Hogwarts Legacy on 10-05 (Epic launch, DLSS-G 4x multi-frame generation) tagged only HUDLessColor,
+with no Backbuffer and no UI color: with FG off, counted pairs that belonged to another frame changed
+about every pixel, decided an exact full change set and showed whole seconds of gameplay flat
+(source 6) while D read the scene visible (0.45-0.65); with FG on the game tagged its next frame
+before the counted real Present, so every Present read as generated and held a decision no real
+frame had made, 49 s without a UI mask.
+A capture from another queue can still be incomplete or unretired when its Present comes. When
+the newest ready capture belongs to a Present one or two Presents ago, it is compared with that
+Present's retained color, and the resulting mask protects the current frame. The renderer starts
 retaining the last two presented colors (two source-size copies, one extra copy per Present) only
 after the first such late capture, and stops copying 120 Presents after the last one; games whose
 captures pair on time never allocate them. A late
 capture older than the retained history does not pair.
-Hogwarts Legacy (SL 2.6.10, DLSS-G on) showed the pattern: its real frame matched HUDLessColor
-on 93.5% of pixels two Presents after the tag, and its UIColorAndAlpha was the opaque final image.
+Hogwarts Legacy on 09-30 (SL 2.6.10, DLSS-G on) showed the pattern: its real frame matched
+HUDLessColor on 93.5% of pixels two Presents after the tag, so with frame generation the counted
+Present shows another frame as often as not, and its UIColorAndAlpha was the opaque final image.
 It also presents on a different queue from the one that records its tags, so pairing does not
 require the producer's queue. The capture rules below already admit another queue's pixels only
 after the producer completes and its recording retires.
@@ -716,27 +731,28 @@ dump acquisition still require producer completion and recording retirement. No 
 wait is inserted, and all producer/consumer fence and recording leases remain required before
 storage can be reused. Unsubmitted, failed or replay-invalidated captures remain unavailable.
 
-**Temporal hold (T1).** A Present without its own fresh decision uses the decision of the real
-frame it shows, and a real frame without a decision of its own reuses the previous real frame's
-decision once; after that there is no mask. There is no multiplier constant and no time bound.
-Until S3 is enabled, Present counting tells real from generated Presents: the
-HUD-less pairing above, and without a HUD-less capture, under FG, a Present that offers no input
-within the reported generated count (one while it is unknown) of the last Present that offered a
-Streamline UI tag (`ui_mask::generated_without_input`). Expedition 33 with FG on tags its Backbuffer
-on real Presents only and pairs no HUD-less image, so its generated Presents offer nothing; the
-count classifies them at 2x, 3x and 4x. The real-frame id is the HUD-less tag's present generation
-(`ui_detection_inputs::real_frame`, 0 without a HUD-less capture: no tag bound, the count bounds
-it). `tools/reshade/game3d_ui_temporal.h` owns the arbiter and the call order that the renderer and
-the sequence replay follow:
+**Temporal hold (T1).** A Present without its own fresh decision uses the last real decision,
+and a real frame without a decision of its own reuses the previous real frame's decision once;
+after that there is no mask. There is no multiplier constant and no time bound. Present counting
+tells real from generated Presents: under FG, a Present that offers no input within the reported
+generated count (one while it is unknown) of the last Present that offered a Streamline UI tag is
+generated (`ui_mask::generated_without_input`). A Present that offers any input of its own is real,
+a HUD-less image (offered on every Present it pairs) or the offscreen UI layer copy included.
+Expedition 33 with FG on tags its Backbuffer on real Presents only and pairs no HUD-less image, so
+its generated Presents offer nothing; the count classifies them at 2x, 3x and 4x. A Present carries
+no real-frame id. Until 10-05 the HUD-less tag's present generation was one, and the HUD-less
+pairing classified Presents as generated, which held every Present of Hogwarts Legacy's 4x frame
+generation (above). `tools/reshade/game3d_ui_temporal.h` owns the arbiter and the call order that
+the renderer and the sequence replay follow:
 
 - A generated Present never detects and takes no sample. It applies the mask of the last real
   decision unchanged (`held.generated`) when that decision was made in the same identity scope
-  (epoch and viewport: a recreated swapchain or device, or another viewport) and the Present shows
-  the decided real frame or the next one: its tag is the decision's or the first new tag after it,
-  or it has none. Otherwise it has no mask (`held.none`) and the chain ends. An observation revision
-  alone (a depth observation loss) is a missing input, not another identity, so it keeps the chain. A misreported multiplier therefore fails safe: Presents beyond
-  that tag bound lose the mask instead of differencing interpolated images, and 6x frame
-  generation holds every generated Present.
+  (epoch and viewport: a recreated swapchain or device, or another viewport). Otherwise it has no
+  mask (`held.none`) and the chain ends. An observation revision alone (a depth observation loss)
+  is a missing input, not another identity, so it keeps the chain. A misreported multiplier
+  therefore fails safe: a count reported too high holds only Presents that offer nothing, one
+  reported too low leaves the later generated Presents to the grace below, and 6x frame generation
+  holds every generated Present.
 - A real Present always detects from its own offered candidates, accepted bits and layer flags.
   The CPU pushes `0x200000` when this chain has no previous real decision (the first detection, an
   identity scope change, an inactive frame or a `held.none` Present since), else `0x100000` when an accepted
@@ -778,14 +794,24 @@ R10 color or 2/255 for other SDR/PQ color; floating-point scRGB uses 0.005 times
 of one and the current pixel's largest absolute RGB component. Both RGB inputs must be finite.
 Acceptance requires a nonempty difference covering fewer than 25% of pixels, at least 75% of pixels within half the
 threshold, and at least 128 of 256 tiles with 99% matching pixels. These guards reject broad
-scene mismatch before the difference becomes a UI mask. One exception covers full-screen UI:
-when the pair is exact (a same-batch Backbuffer, or Present counting with frame generation off),
-at least 98% of pixels changed and at least half of the HUD-less pixels are lit (above eight times
-the threshold), the whole frame is UI and stays flat. Hogwarts Legacy's title screen needed it:
+scene mismatch before the difference becomes a UI mask. Since selection revision 8 a lit pair (at
+least half of the HUD-less pixels above eight times the threshold) without any changed pixel, in
+at least 128 such tiles, exact or not, is a valid empty change set: no UI is on screen, so an
+accepted pair decides an empty mask of its own (source 5, covered 0), as an accepted alpha deciding
+coverage 0 does, instead of being invalid and reusing the previous real frame's mask once under T1.
+It earns nothing, runs a restored pair's reconfirm clock and, exact, judges (A2). One exception
+covers full-screen UI: when the pair is exact (a same-batch Backbuffer), at least 98% of pixels
+changed and at least half of the HUD-less pixels are lit (above eight times the threshold), the
+whole frame is UI and stays flat. Hogwarts Legacy's title screen needed it:
 the game keeps rendering its next 3D scene behind the menu and tags that scene's depth and
 HUD-less image, so 99.9% of pixels differed while the depth matched the hidden room. A mismatched
 pair can also change every pixel, so an unverified pair is still rejected (directly after an exact
-decision the T1 grace reuses it once), and a black HUD-less image never counts as a scene. HUD-less comparison remains guarded in manual modes. Its binary mask identifies changed pixels, not exact compositing opacity, and cannot detect
+decision the T1 grace reuses it once), and a black HUD-less image never counts as a scene. A pair
+by Present counting is never exact, with frame generation off too: on 10-05 Hogwarts Legacy's
+FG-off counted pairs decided gameplay as source 6 while they were. The full-screen menu of a game
+that tags only HUDLessColor is flat through H1 (d) instead: its HUD-less image, changed on at least
+90% of pixels, is the pre-UI scene image, which acts once the hidden-scene guard holds the presented
+frame hidden and that image visible (**Hidden-scene evidence**, below). HUD-less comparison remains guarded in manual modes. Its binary mask identifies changed pixels, not exact compositing opacity, and cannot detect
 UI whose color matches the underlying scene. Local motion or other postprocessing differences
 can still resemble UI; live game/headset validation remains necessary.
 
@@ -793,8 +819,9 @@ can still resemble UI; live game/headset validation remains necessary.
 whose depth it keeps tagging, without any input the rules above accept as full-frame UI. Stellar
 Blade draws its notice and SHIFT UP splashes into its offscreen UI layer, fully opaque over the next
 scene; in a first session the layer is not yet accepted, and an unaccepted source covering the
-frame is ambiguous. Hogwarts Legacy's title screen with FG on pairs its HUD-less image only by Present
-counting, so the exact-pair rule cannot apply. Stellar Blade in SDR suspends frame generation while
+frame is ambiguous. Hogwarts Legacy's title screen pairs its HUD-less image only by Present
+counting when it tags no same-batch Backbuffer (with FG on on 09-30, and in every mode on 10-05), so
+the exact-pair rule cannot apply. Stellar Blade in SDR suspends frame generation while
 a menu is open, so its settings page has no Streamline tag at all: its only candidates are the
 cleared output target, which holds the scene without UI (a layer without alpha, below), and opaque
 presented alpha. In all three the presented frame lacks the consumed depth's edges, which is what
@@ -1396,13 +1423,14 @@ an exact pair (not a candidate) and `0x40` the offscreen UI layer (`t7`). The fr
 hold store, the one-way counts, the refused candidate and the frame reason; 3 since S2b: the
 informative full claims and the H1 override, texel 10 and the pre-UI scene image in texel 6; 4 since
 fix 1: claim (d) for the layer by its proven signature, and texel 11; 5 since fix 2: the H2 override
-with `b2` word 5, and texel 12).
+with `b2` word 5, and texel 12; 7 removed fix 3 and fix 4 and decided as 5; 8 since 10-05: the empty
+change set, V2 above).
 `reshade_game3d_ui_selection_contract` runs the reduce on crafted and random counts, previous hold
 states and per-frame bits, and compares every decision word, the written hold store and the counter
 adds with `decide()` and `counter_adds()`; since fix 2 it also checks the comparison pass's still
 and compared cells against a CPU oracle (no previous mean, equal, at and beyond the tolerance,
 inactive depth) and their sum in texel 12. The renderer runs automatic detection only with that
-layout, selection revision 7 (which decides as 5) and at least 13 decision texels; otherwise its frames count as
+layout, selection revision 8 (revision 5's decision with the empty change set) and at least 13 decision texels; otherwise its frames count as
 `inactive.unprepared`. `ui_detection_replay` still replays a shader without the marker (layout 1,
 the layer in the UI color slot) or of an older revision, without the mirror check.
 `Sunshine_UIDifferenceThreshold` (`b2` word 1) is the HUD-less pair's difference threshold. Since
@@ -1762,7 +1790,7 @@ arbiter, scope clears, sample decode and counter commit are pure functions in
 `sample_counters`), and its hidden-scene guard is `scene_guard::state` in
 `tools/reshade/game3d_scene_guard.h`, all called by `render()`, `detect_ui()` and
 `poll_detection()` in a fixed order. The test drives per-frame decision streams through those
-functions, `alpha_auto_policy` trust and the Present pairing in exactly that order. The GPU
+functions, `alpha_auto_policy` trust and the Present counting in exactly that order. The GPU
 decisions are inputs: synthetic, or taken from replay output of labelled dumps, checked against
 `decide()` when loaded; the test carries the T1 hold store from one detection to the next through
 `decide()` as the GPU does, and a frame without candidates that runs for the grace reads the
@@ -1777,7 +1805,10 @@ layer (equal everywhere but unlit, never proven),
 Resident Evil Requiem-like dark gameplay with an accepted UI color tag beside accepted presented
 alpha that is opaque everywhere (never flat, no claim), and frame generation whose presented
 cadence differs from the multiplier the provider reports (lagging, leading, or changed in the middle
-of a real frame). Recorded streams from the labelled dumps cover Stellar Blade's SDR menu visits
+of a real frame). Frame generation streams identify generated Presents the production way: a game
+tags its UI inputs on real frames only, a HUD-less image is offered on every Present as an inexact
+pair, and a Present that offers nothing within the reported count of the last tag is generated.
+Recorded streams from the labelled dumps cover Stellar Blade's SDR menu visits
 from FG-off gameplay and with FG suspended after FG-on gameplay that proves the layer by its pixels
 (H1 (d)), the same menu booted into before any gameplay (unproven in a first session, never flat), and an
 accepted partial winner that H1 overrides, refutes and re-arms. Since fix 1 they also replay the
@@ -1803,7 +1834,13 @@ run), a still dark grainy scene that would flatten after 2 s (the measured resid
 scRGB (never in scope, no evidence runs), an accepted current alpha deciding at 0% (never), an FG
 toggle and an FG suspension that restart the 2 s, and a switch to manual On that ends the run.
 Each stream also reconciles the counters' `still` group with its own observations. Fix 3 and fix 4
-added groups for the pre-UI change set and pin only UI, removed with them by user decision. The S3
+added groups for the pre-UI change set and pin only UI, removed with them by user decision. The
+10-05 pairing change adds `E2/V2/A1/H1 Hogwarts HUD-less pairs exact only by batch`: a game that tags
+only HUDLessColor under 4x frame generation offers an inexact pair on every Present, earns
+acceptance from its first V2-valid partial set and decides 5, while a full change set over a visible
+scene decides no mask (never 6, never 8 without the hold); with FG off a counted full change set
+never decides 6; such a game's title over a hidden scene is flat through H1 (d) (8) from the hold's
+entry; and a same-batch exact full change set still decides 6. The S3
 shadow adds two groups. `S3 GPU identity verdicts` feeds stamps and proposals into every
 detection: by default an inexact HUD-less pair decides as today while the committed identity words
 count each pair (a token batch exact in token space); under the test-only override the HUD-less
@@ -1811,8 +1848,9 @@ gate makes an inexact pair absent (one reuse, then no mask) while a token batch 
 offered layer copy's verdict (exact, or a late copy's mismatch) decides nothing, with the reserved
 layer gate never pushed. `S3 identity shadow`: four
 frame-generation cadences (4x matching, 4x reported as 2x, 2x reported as 4x, and a multiplier
-change in the middle of a real frame reported late) whose outcomes equal today's while the identity
-shadow counts them and prints a `SHADOW S3` line each, then, under the test-only identity override,
+change in the middle of a real frame reported late) in which today every Present detects from its
+inexact HUD-less pair while the identity shadow counts the extra detections and prints a
+`SHADOW S3` line each, then, under the test-only identity override,
 detect exactly once per token and hold every Present that re-offers it with the exact same-token
 pair (the two KNOWN_TODAY S3 T1/E2 lines stay until the enable); and the label cases (a layer copy
 executed a Present early or late is a mismatch, a foreign-queue copy and a recreated stamp are
@@ -2090,9 +2128,11 @@ A bounded `Sunshine UI capture gate` log reports the same evidence. An admitted 
 zero capture boundary and a changing request generation indicates that the request was replaced
 or invalidated after admission, rather than that the game supplied no UI tag. Its
 `hudless_presents` counts, since the previous line, Presents whose newest ready HUD-less capture
-paired with its `batch` Backbuffer, was the current `real` frame, a `late` real frame paired with retained color, a `generated`
-Present that held the previous mask, `stale` (older than the retained history), `other`, or
-`none` (no ready HUD-less capture). Unchanged failed
+paired with its `batch` Backbuffer (exact), with the current Present after its tag (`real`), with
+a Present one or two Presents ago through retained color (`late`; both inexact), `stale` (older than
+the retained history), `other`, or `none` (no ready HUD-less capture); `generated` is always 0
+since 10-05, when HUD-less pairing stopped holding Presents, and stays so that old and new lines
+parse alike. Unchanged failed
 or successful FG Off options preserve independent UI tags; an actual FG knowledge/mode loss
 still revokes the old scope once and requires fresh input.
 Capture diagnostics preserve the raw declared hint and independent observed state.
@@ -2254,18 +2294,18 @@ acceptance and selection, hidden-scene guard, hold, pin weight. Diagnostics only
 | Rule | Requires |
 | --- | --- |
 | E1 Proof and identity (M1) | A candidate exists only as a snapshot with proven state, boundary, real-frame identity, encoding (typed format and swapchain colour space) and signature; otherwise there is no candidate and a recorded reason. Each cleared target or declared resource is its own signature in its own slot. Over budget, a spare slot rotates across unseen signatures and records a budget refusal. |
-| E2 Exactness (M1) | FG off: the same real Present. FG on: only same-batch Streamline tags, with the same-batch Backbuffer tag (or the real frame's own Present once frame identity exists) as the final-image reference. Without a frame token while any FG interposer is loaded, Present-time evidence is inexact. The one-frame-late layer copy is inexact opacity evidence: it may draw, but never judges or pairs. |
+| E2 Exactness (M1) | Only same-batch Streamline tags, with the same-batch Backbuffer tag (or the real frame's own Present once frame identity exists) as the final-image reference, with frame generation on or off. Present counting only proposes a pair (the Present after the tag): it is inexact, validated by V2's pixel test alone, never full-frame UI and never a judge. Without a frame token while any FG interposer is loaded, Present-time evidence is inexact. The one-frame-late layer copy is inexact opacity evidence: it may draw, but never judges or pairs. |
 | V1 Opacity validity (M2) | Finite, in-range alpha with at most 1% invalid pixels, at any bit depth; a cleared layer must also pass the premultiplied bound. Presented and Backbuffer alpha are checked for range only. The tolerance does not depend on trust. |
-| V2 Change-set validity (M2) | A difference is evidence only from an exact pair, with the threshold from the two snapshots' own encodings. The HUD-less image is lit, and the changed set passes the tile test above when partial or is nearly the whole frame; the middle band and noisy pairs are invalid. |
-| A1 Earning (M3) | Acceptance is keyed by game and source signature (with the swapchain colour space), not by FG mode. A declared source (UI alpha or color tag, or an exact HUD-less pair) is accepted by its first valid selective sample; an inferred source needs the steady selective run above. A source that is never selective is never accepted. A sample does not count while a declared alpha is offered but invalid. Holds and manual inputs never earn. An offered layer without coverage earns its signature's pre-UI proof (ledger key `pre_ui:<format>:<space>`) like an inferred source: three samples over 2 s in which it equals the presented frame at eight times their pair threshold on at least 90% of pixels and is lit on at least half; a mismatch neither withdraws it nor restarts the run, and no judge revokes it. |
+| V2 Change-set validity (M2) | A difference is evidence only with the threshold from the two snapshots' own encodings, and only a valid change set is: the changed set passes the tile test above when partial, changes no pixel of a lit HUD-less image in clean tiles (empty, since revision 8, which an accepted pair decides as an empty mask of its own), or, from an exact pair whose HUD-less image is lit, is nearly the whole frame. The middle band (a pair mispaired with interpolated or another frame's colour) and noisy pairs are invalid. |
+| A1 Earning (M3) | Acceptance is keyed by game and source signature (with the swapchain colour space), not by FG mode. A declared source (UI alpha or color tag, or a HUD-less pair, exact or not, by its partial change set) is accepted by its first valid selective sample; an inferred source needs the steady selective run above. A source that is never selective is never accepted. A sample does not count while a declared alpha is offered but invalid. Holds and manual inputs never earn. An offered layer without coverage earns its signature's pre-UI proof (ledger key `pre_ui:<format>:<space>`) like an inferred source: three samples over 2 s in which it equals the presented frame at eight times their pair threshold on at least 90% of pixels and is lit on at least half; a mismatch neither withdraws it nor restarts the run, and no judge revokes it. |
 | A2 Revocation (M3) | Three contradictions within 2 s by valid same-sample evidence of stronger provenance (an accepted declared alpha or an exact change-set), whatever the drawing rank: one-way disagreement on lit pixels, or declared-versus-inferred coverage disagreement. Agreeing samples do not reset the count. Declared sources are never judged, and the one-frame-late layer copy is not same-sample evidence (E2), so neither judge reads it. Forget also revokes. Ambiguous or invalid samples never revoke. |
-| A3 Persistence (M3) | Restored acceptance is provisional and lapses unless earned again in time; the clock pauses while that declared source is offered but invalid, and while an alpha source covers 90% of the frame or more (a full menu can neither earn nor refute it, so Stellar Blade's presented alpha no longer lapses during long menu visits). A restored pre-UI proof's clock runs only on testable samples (its layer offered without coverage while the presented frame's evidence is valid and visible), so it lapses after 60 s of testable time without a match. Legacy per-kind entries are discarded; Forget clears the game's entries, pre-UI proofs included. |
+| A3 Persistence (M3) | Restored acceptance is provisional and lapses unless earned again in time; for every kind the clock runs only on samples that could earn or refute the source (offered, valid and not full: alpha below 90% of the frame, a partial or empty change set) and pauses on every other offer (a full menu can neither earn nor refute it, so Stellar Blade's presented alpha no longer lapses during long menu visits, nor a HUD-less pair through mispaired samples). A restored pre-UI proof's clock runs only on testable samples (its layer offered without coverage while the presented frame's evidence is valid and visible), so it lapses after 60 s of testable time without a match. Legacy per-kind entries are discarded; Forget clears the game's entries, pre-UI proofs included. |
 | S1 Selection (M4) | Among accepted, valid candidates the first in draw order wins: opacity before change-set, then declared before inferred. An unaccepted or invalid candidate never blocks another, except that an offered, accepted declared alpha blocks inferred alpha (when it is invalid, T1 applies). Nothing qualifies: no mask, with the reason of the highest-ranked refused candidate. |
 | S2 Manual (M3) | Off offers nothing; the filter restricts offers; On accepts the filtered valid candidates for this session only, without persisting, earning or revoking. |
 | H1 Hidden scene (M5) | With valid depth, a held hidden D verdict (two hidden samples enter, renewals extend, a visible sample releases) and an informative full claim (from an accepted source, a layer proven cleared transparent this frame, an exact full change-set, or a pre-UI scene image on which D reads visible while D on the presented frame reads hidden: the declared HUD-less image, or an offscreen layer without coverage whose signature the ledger holds proven, A1), the frame is flat whatever M4 selected. A visible verdict refutes that signature's full claim until it shows below 99% opaque. Invalid D acts on nothing; only a scope change clears D state. |
 | H2 Still screen (M5) | In SDR Auto, on a frame whose applied decision has no source and was not reused (T1), after S1 and H1: when consecutive samples spanning 2 s each read D on the presented frame at most 0.05 and keep 95% of the D grid's cells within 1/255 of the previous sample's presented-luma mean, the frame is flat until the first sample that fails. Unaccepted candidates do not block it; an accepted source deciding, even empty, does. Reused depth does not invalidate its samples. Only an identity change or leaving scope clears its run, and nothing is remembered. A shadow that only logs unless the game's `UIFlattenStillScreens` is 1. |
 | P1 Pin weight (M7) | `saturate(8 * c)` of the selected coverage at any coverage (binary for change-sets); 1 everywhere when H1 or H2 says flat. |
-| T1 Hold (M6) | A Present without its own fresh decision uses the decision of the real frame it shows; a real frame without one reuses the previous real frame's decision once, then has no mask. No multiplier constant and no time bound; until S3 is enabled, real frames are identified by Present counting. |
+| T1 Hold (M6) | A Present without its own fresh decision uses the last real decision; a real frame without one reuses the previous real frame's decision once, then has no mask. No multiplier constant and no time bound; until S3 is enabled, real frames are identified by Present counting: a Present that offers nothing within the reported generated count of the last UI tag is generated, and one that offers any input is real. |
 | F1 Fail safe and diagnostics (M8) | No qualifying source gives no mask with a named reason and refused candidate, the panel warning and exact counters. Status freshness is keyed on the scope and the winning accepted candidate, and the first-run shadow does not depend on acceptance. Diagnostics feed nothing back. |
 
 Scope (runtime, device, epoch, viewport, size, colour mode and encoding, but not the FG multiplier)

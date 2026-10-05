@@ -889,7 +889,8 @@ namespace sunshine_game3d {
       // detection binds candidate layout 2 (the offscreen UI layer at t7 and the
       // accepted mask in b2 word 2); a shader of another layout, such as an
       // older embedded replay shader, would misread both, so it gets none.
-      // Selection revision 7 (decides as revision 5: the T1 grace with its hold store at u5, the
+      // Selection revision 8 (revision 5's decision with the empty change
+      // set: the T1 grace with its hold store at u5, the
       // one-way judgment and the F1 reason words in texels 8 and 9, H1 with
       // its texel 10, the layer's pre-UI pixel counts in texel 11 from the
       // statistics rows at pre_ui_statistics_row with b2 word 4, and H2 with
@@ -1718,7 +1719,7 @@ namespace sunshine_game3d {
     // S3 shadow: the identity also carries the newest offered token and
     // whether it is new to the last decision (ui_temporal::ticket_identity);
     // arbitrate reads them only while ui_ticket::identity_authoritative.
-    const auto identity = ui_temporal::ticket_identity({candidates.hold_previous, candidates.real_frame},
+    const auto identity = ui_temporal::ticket_identity({candidates.hold_previous},
       ui_ticket::newest_token(candidates.tickets), d.temporal.decision_token, bits != 0);
     const auto arbitration = d.temporal.arbitrate(identity, observation, bits);
     // The layer's stored flags are pushed with its detection; nothing on the
@@ -1810,7 +1811,7 @@ namespace sunshine_game3d {
         d.scene_layer_proven = layer_proven();
         d.scene_bits = d.guard.per_frame(observation.now_ms, bits, candidates.signatures.by_kind(), d.scene_layer_proven);
         ++d.cpu_counts[ui_counter::held_generated];
-        d.temporal.held(identity);
+        d.temporal.held();
         d.consumed_detection = d.detection_run;
         d.consumed_detection.state = ui_detection_snapshot::run_state::held;
         d.consumed_detection.held_presents = d.temporal.holds;

@@ -54,28 +54,24 @@ namespace sunshine_game3d {
     candidate_signatures signatures;
     reshade::api::resource_view hudless{};
     bool current_color = false;
-    // A generated present between a HUD-less tag and its real frame, or,
-    // without a HUD-less pairing, one that offers nothing within the reported
-    // generated count of the last Present that offered a UI tag, by Present
-    // counting (UI framework T1, until S3 stamps real frames). It
-    // never detects: it shows the decision of the real frame it shows, or has
-    // no mask (ui_temporal::detection_state::arbitrate).
+    // A generated Present by Present counting (UI framework T1): one that
+    // offers nothing within the reported generated count of the last Present
+    // that offered a UI tag (ui_mask::generated_without_input). It never
+    // detects: it shows the last real decision, or has no mask
+    // (ui_temporal::detection_state::arbitrate).
     bool hold_previous = false;
-    // The T1 real-frame id: the HUD-less tag's present generation, on
-    // generated and paired Presents alike; zero without a HUD-less capture.
-    std::uint64_t real_frame = 0;
     // The game's own final color from the HUD-less image's tag batch (Streamline
     // Backbuffer). When present, HUD-less is compared with it exactly, and
     // hudless_presents_ago is not used.
     reshade::api::resource_view hudless_pair{};
-    // Otherwise the HUD-less image belongs to the frame presented this many
-    // Presents ago. It is compared with that frame's retained color; zero is
-    // the current one.
+    // Otherwise counting proposes the color presented this many Presents ago
+    // (ui_mask::pair_hudless_present): the retained color, or the current one
+    // for zero. Such a pair is inexact; only V2 validates its pixels.
     std::uint32_t hudless_presents_ago = 0;
     static constexpr std::uint32_t max_retained_presents = 2;
-    // The pair is known to show one game frame (a tag batch, or Present
-    // counting without frame generation). Only then may a difference covering
-    // the whole frame mean full-screen UI rather than a mismatched pair.
+    // The pair is known to show one game frame: a same-batch Backbuffer
+    // (E2). Only then may a difference covering the whole frame mean
+    // full-screen UI rather than a mismatched pair.
     bool hudless_exact = false;
     // S3 snapshot tickets (game3d_ui_ticket.h; shadow: nothing decides from
     // them while ui_ticket::identity_authoritative is false), one per offered

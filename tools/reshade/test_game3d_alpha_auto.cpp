@@ -344,23 +344,36 @@ namespace {
     for (std::uint64_t tick = 101000; tick <= 300000; tick += 1000) feed(recovered, sample().alpha(kind::ui_color, 1000), tick);
     require(accepts(recovered, kind::ui_color) && recovered.counters()[ui_counter::trust_earned] == 1,
       "A tag that confirmed after its invalid run was not kept");
-    // A restored HUD-less pair offered without its valid bit (a middle-band
-    // change set) is invalid the same way.
+    // A restored HUD-less pair runs its clock only on valid samples that are
+    // not full (a partial or, here, an empty change set): a mispaired
+    // (middle-band, V2-invalid) sample and a full change set (a menu) pause
+    // it, exact or not.
     alpha_auto_policy pair;
     pair.restore("hudless:24:srgb");
-    feed(pair, sample().pair(980, 10), 1000);
-    for (std::uint64_t tick = 2000; tick <= 100000; tick += 1000) feed(pair, sample().pair(500, 500), tick);
-    require(accepts(pair, kind::hudless), "A restored HUD-less pair lapsed while it was invalid");
-    feed(pair, sample().pair(980, 10), 100500);
-    feed(pair, sample().pair(980, 10), 160500);
-    require(!accepts(pair, kind::hudless), "A restored HUD-less pair never lapsed after its invalid run");
-    // Inferred entries keep the clock: invalid samples do not re-arm it.
+    feed(pair, sample().pair(0, 1000, false), 1000);
+    for (std::uint64_t tick = 2000; tick <= 100000; tick += 1000)
+      feed(pair, (tick / 1000) % 2 ? sample().pair(500, 500, false) : sample().pair(990, 10), tick);
+    require(accepts(pair, kind::hudless) && !pair.counters()[ui_counter::trust_lapsed],
+      "A restored HUD-less pair lapsed during mispaired samples or full menus");
+    feed(pair, sample().pair(0, 1000, false), 100500);
+    feed(pair, sample().pair(0, 1000), 159499);
+    require(accepts(pair, kind::hudless), "The paused clock did not resume at the next empty change set");
+    feed(pair, sample().pair(0, 1000, false), 159500);
+    require(!accepts(pair, kind::hudless) && pair.counters()[ui_counter::trust_lapsed] == 1,
+      "A restored HUD-less pair never lapsed after 60 s of testable samples");
+    // Inferred entries pause the same way: invalid samples neither run nor
+    // re-arm the clock.
     alpha_auto_policy inferred;
     inferred.restore("current:24:srgb");
     feed(inferred, sample().alpha(kind::current, 0), 1000);
     for (std::uint64_t tick = 2000; tick <= 60000; tick += 1000) feed(inferred, sample().alpha(kind::current, 0, 600), tick);
     feed(inferred, sample().alpha(kind::current, 0), 61000);
-    require(!accepts(inferred, kind::current), "Invalid samples re-armed an inferred entry's clock");
+    require(accepts(inferred, kind::current), "Invalid samples ran an inferred entry's clock");
+    feed(inferred, sample().alpha(kind::current, 0), 119999);
+    require(accepts(inferred, kind::current), "The inferred entry's paused clock did not resume");
+    feed(inferred, sample().alpha(kind::current, 0), 120000);
+    require(!accepts(inferred, kind::current) && inferred.counters()[ui_counter::trust_lapsed] == 1,
+      "An inferred entry never lapsed after 60 s of testable samples");
   }
 
   // Forget (A3): clears every entry of the game, accepted, provisional,
@@ -515,18 +528,22 @@ namespace {
     require(accepts(declared, kind::ui_alpha), "A declared source was judged");
   }
 
-  // A HUD-less change set is declared: accepted by its first selective
-  // sample from an exact pair; an inexact pair never earns.
-  void exact_change_sets_earn() {
-    alpha_auto_policy policy;
-    for (std::uint64_t tick = 1000; tick <= 10000; tick += 100) feed(policy, sample().pair(50, 900, false), tick);
-    feed(policy, sample().pair(980, 10), 10100);                // A full change set (a menu).
-    feed(policy, sample().pair(50, 900, true, 100), 10200);     // Too few matching tiles.
-    feed(policy, sample().pair(50, 900).alpha(kind::ui_alpha, 0, 20), 10300); // Void.
-    require(!accepts(policy, kind::hudless), "An inexact, full, noisy or void pair was accepted");
-    feed(policy, sample().pair(50, 900), 10400);
-    require(accepts(policy, kind::hudless) && policy.accepted(candidate::hudless | candidate::exact, signatures()) ==
-        candidate::hudless, "An exact selective change set was not accepted");
+  // A HUD-less change set is declared: accepted by its first V2-valid
+  // selective sample, exact or not (a game that tags only HUDLessColor pairs
+  // inexactly on every Present: Hogwarts Legacy 10-05).
+  void change_sets_earn() {
+    for (const bool exact : {false, true}) {
+      alpha_auto_policy policy;
+      feed(policy, sample().pair(990, 10, exact), 1000);                // A full change set (a menu).
+      feed(policy, sample().pair(0, 1000, exact), 1100);                // An empty one (no UI).
+      feed(policy, sample().pair(500, 500, exact), 1200);               // The middle band (mispaired).
+      feed(policy, sample().pair(50, 900, exact, 100), 1300);           // Too few matching tiles.
+      feed(policy, sample().pair(50, 900, exact).alpha(kind::ui_alpha, 0, 20), 1400); // Void.
+      require(!accepts(policy, kind::hudless), "A full, empty, mispaired, noisy or void pair was accepted");
+      feed(policy, sample().pair(50, 900, exact), 1500);
+      require(accepts(policy, kind::hudless) && policy.accepted(candidate::hudless, signatures()) == candidate::hudless,
+        "A valid selective change set was not accepted");
+    }
   }
 
   // S2: manual On accepts the offered candidates for this session only; it
@@ -644,10 +661,10 @@ namespace {
     require(first.first_run(), "Forget ended the first-run shadow");
   }
 
-  // T1 (game3d_ui_temporal.h): a generated Present shows the decision of the
-  // real frame it shows, within the tag bound and the scope, else no mask; a
-  // real Present always detects and pushes its per-frame bits. The runtime
-  // tests prove the renderer calls it; these pin its rules without a GPU.
+  // T1 (game3d_ui_temporal.h): a generated Present shows the last real
+  // decision within the identity scope, else no mask; a real Present always
+  // detects and pushes its per-frame bits. The runtime tests prove the
+  // renderer calls it; these pin its rules without a GPU.
   void temporal_state_holds() {
     namespace temporal = ui_temporal;
     using temporal::hold_kind;
@@ -657,60 +674,53 @@ namespace {
     temporal::detection_state state;
     // Nothing decided yet: a generated Present has no mask, a real one
     // detects from a new chain.
-    const auto none = state.arbitrate(present_identity{true, 5}, scope, 0u);
+    const auto none = state.arbitrate(present_identity{true}, scope, 0u);
     require(none.kind == hold_kind::unavailable && !none.hold && !none.detect && !none.adopt && !none.per_frame,
       "A generated Present held a mask no decision made");
-    const auto first = state.arbitrate(present_identity{false, 5}, scope, 16u | 32u);
+    const auto first = state.arbitrate(present_identity{false}, scope, 16u | 32u);
     require(first.detect && !first.hold && first.kind == hold_kind::none && first.adopt &&
         first.per_frame == ui_detection::per_frame_hold_reset, "The first real Present did not detect from a new chain");
     state.adopt(16u | 32u, 16u);
-    state.detected(scope, present_identity{false, 5});
-    // Generated Presents of that real frame and of the next one hold, as many
-    // as come (no multiplier constant); a third real frame does not.
+    state.detected(scope, present_identity{false});
+    // Generated Presents hold the last real decision, as many as come (no
+    // multiplier constant and no real-frame id).
     for (std::uint32_t i = 0; i != 5; ++i) {
-      const auto hold = state.arbitrate(present_identity{true, 5}, scope, 0u);
+      const auto hold = state.arbitrate(present_identity{true}, scope, 0u);
       require(hold.hold && hold.kind == hold_kind::generated && !hold.detect && !hold.adopt && !hold.per_frame,
-        "A generated Present of the decided real frame did not hold");
-      state.held(present_identity{true, 5});
+        "A generated Present did not hold the last real decision");
+      state.held();
     }
-    require(state.holds == 5 && !state.next_frame, "Holds of the decided real frame set the next frame");
-    require(state.arbitrate(present_identity{true, 6}, scope, 0u).hold, "A generated Present of the next real frame did not hold");
-    state.held(present_identity{true, 6});
-    require(state.next_frame == 6 && state.arbitrate(present_identity{true, 5}, scope, 0u).hold &&
-        state.arbitrate(present_identity{true, 6}, scope, 0u).hold, "The tag bound lost the decided or the next real frame");
-    const auto beyond = state.arbitrate(present_identity{true, 7}, scope, 0u);
-    require(!beyond.hold && beyond.kind == hold_kind::unavailable, "A generated Present beyond the next real frame held");
-    require(state.arbitrate(present_identity{true, 0}, scope, 0u).hold, "A generated Present without a HUD-less tag did not hold");
+    require(state.holds == 5, "The holds were not counted");
     // A generated Present under another identity scope has no mask, and a
     // real one there starts a new chain.
     auto recreated = scope;
     ++recreated.epoch;
-    require(state.arbitrate(present_identity{true, 5}, recreated, 0u).kind == hold_kind::unavailable &&
-        state.arbitrate(present_identity{false, 6}, recreated, 48u).per_frame == ui_detection::per_frame_hold_reset,
+    require(state.arbitrate(present_identity{true}, recreated, 0u).kind == hold_kind::unavailable &&
+        state.arbitrate(present_identity{false}, recreated, 48u).per_frame == ui_detection::per_frame_hold_reset,
       "A hold crossed an epoch change");
     // An observation revision alone (a depth observation loss) is a missing
     // input, not another identity: a generated Present holds, and a real one
     // missing the accepted pair reuses the previous decision once (T1).
     auto lost = scope;
     ++lost.revision;
-    require(state.arbitrate(present_identity{true, 5}, lost, 0u).hold &&
-        state.arbitrate(present_identity{false, 6}, lost, 0u).per_frame == ui_detection::per_frame_accepted_missing,
+    require(state.arbitrate(present_identity{true}, lost, 0u).hold &&
+        state.arbitrate(present_identity{false}, lost, 0u).per_frame == ui_detection::per_frame_accepted_missing,
       "An observation revision reset the hold chain");
     auto resized = scope;
     ++resized.viewport;
-    require(!state.arbitrate(present_identity{true, 5}, resized, 0u).hold &&
-        state.arbitrate(present_identity{false, 6}, resized, 48u).per_frame == ui_detection::per_frame_hold_reset,
+    require(!state.arbitrate(present_identity{true}, resized, 0u).hold &&
+        state.arbitrate(present_identity{false}, resized, 48u).per_frame == ui_detection::per_frame_hold_reset,
       "A hold crossed a viewport change");
     // The next real frame in scope detects without per-frame bits and adopts.
-    const auto next = state.arbitrate(present_identity{false, 6}, scope, 48u);
+    const auto next = state.arbitrate(present_identity{false}, scope, 48u);
     require(next.detect && next.adopt && !next.per_frame, "A real frame in the chain pushed per-frame bits");
-    state.detected(scope, present_identity{false, 6});
-    require(!state.holds && !state.next_frame && state.decision_frame == 6, "A real decision kept the hold count or next frame");
+    state.detected(scope, present_identity{false});
+    require(!state.holds, "A real decision kept the hold count");
     // A Present without a mask ends the chain: generated Presents then have
     // no mask, and the next real detection starts a new chain.
     state.unavailable();
-    require(state.arbitrate(present_identity{true, 6}, scope, 0u).kind == hold_kind::unavailable &&
-        state.arbitrate(present_identity{false, 7}, scope, 48u).per_frame == ui_detection::per_frame_hold_reset,
+    require(state.arbitrate(present_identity{true}, scope, 0u).kind == hold_kind::unavailable &&
+        state.arbitrate(present_identity{false}, scope, 48u).per_frame == ui_detection::per_frame_hold_reset,
       "A Present without a mask kept the chain");
     // An accepted candidate the last adopting real frame offered and this one
     // misses: accepted_missing, and the frame adopts nothing. Acceptance is
@@ -733,7 +743,7 @@ namespace {
         unaccepted.arbitrate(present_identity{}, scope, 4u).per_frame == ui_detection::per_frame_accepted_missing,
       "Missing candidates were flagged by the wrong acceptance");
     // A generated Present never flags or adopts, whatever it offers.
-    const auto generated = accepted.arbitrate(present_identity{true, 0}, scope, 1u);
+    const auto generated = accepted.arbitrate(present_identity{true}, scope, 1u);
     require(generated.hold && !generated.per_frame && !generated.adopt, "A generated Present detected or adopted");
 
     // A scope change discards the latest sample; an inactive render ends the
@@ -747,10 +757,10 @@ namespace {
     ++moved.revision;
     scoped.enter_scope(moved);
     require(!scoped.latest.sample_tick_ms, "A new scope kept the sample");
-    scoped.detected(scope, present_identity{false, 9});
+    scoped.detected(scope, present_identity{false});
     scoped.inactive();
-    require(!scoped.have_decision && scoped.arbitrate(present_identity{true, 9}, scope, 0u).kind == hold_kind::unavailable &&
-        scoped.arbitrate(present_identity{false, 10}, scope, 0u).per_frame == ui_detection::per_frame_hold_reset,
+    require(!scoped.have_decision && scoped.arbitrate(present_identity{true}, scope, 0u).kind == hold_kind::unavailable &&
+        scoped.arbitrate(present_identity{false}, scope, 0u).per_frame == ui_detection::per_frame_hold_reset,
       "An inactive render kept a decision");
   }
 
@@ -1519,7 +1529,7 @@ int main() {
     restore_is_provisional_and_legacy_entries_are_discarded();
     forget_clears_the_ledger();
     revocation_is_per_signature();
-    exact_change_sets_earn();
+    change_sets_earn();
     manual_on_is_a_session_override();
     status_follows_the_winner_and_scope();
     samples_that_flatten_learn_nothing();

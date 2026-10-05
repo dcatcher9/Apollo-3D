@@ -126,8 +126,9 @@ int main() {
     // stay gone. Revision 7 removes fix 3 and fix 4 (revision 6): the decision
     // layout is revision 5's, with source 12's counter word and word 30
     // reserved (zero) so that S3's identity words keep their indices, and the
-    // removed defines stay gone.
-    require(sunshine_game3d::ui_selection::revision == 7u && detection::h1_decision_texels == 11u &&
+    // removed defines stay gone. Revision 8 adds the empty change set and
+    // keeps that layout.
+    require(sunshine_game3d::ui_selection::revision == 8u && detection::h1_decision_texels == 11u &&
         detection::decision_word::h1 == 43u && detection::pre_ui_decision_texels == 12u &&
         detection::decision_word::pre_ui_match == 44u && detection::decision_word::presented_lit_differs == 47u &&
         detection::per_frame_pre_ui_proven == 0x80000000u && detection::pre_ui_statistics_row == 128u &&
@@ -137,7 +138,7 @@ int main() {
         detection::source_count == 12u && detection::still::flatten == 1u && detection::still::tolerance == 4112u &&
         sunshine_game3d::ui_counter_word::decided_count == 13u && sunshine_game3d::ui_counter_word::count == 31u &&
         sunshine_game3d::ui_counter_word::reserved_refined == 30u && sunshine_game3d::ui_counter_word::with_identity == 36u,
-      "The decision layout is not selection revision 7 with 13 texels");
+      "The decision layout is not selection revision 8 with 13 texels");
     {
       std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);
       const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};

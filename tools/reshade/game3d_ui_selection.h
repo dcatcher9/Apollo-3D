@@ -47,11 +47,13 @@ namespace sunshine_game3d::ui_selection {
   // gate on partial change sets and the change-set shadow and darkening words
   // of texels 13-15; the user rejected them and 7 removes them, so that 7
   // decides exactly as 5 did. Source 12, candidate bit 0x100, the h1 word's
-  // bit 0x200, b2 word 5's bits 0x2-0x200 and texels 13-15 stay reserved.
-  // S3's identity verdict and gate (identity_input) are versioned by the
+  // bit 0x200, b2 word 5's bits 0x2-0x200 and texels 13-15 stay reserved. 8:
+  // a lit HUD-less pair without any changed pixel is a valid empty change set
+  // (change_set_empty), decided by an accepted pair as an empty mask of its
+  // own. S3's identity verdict and gate (identity_input) are versioned by the
   // shader's identity marker (ui_detection::identity), not a revision:
-  // without a gate pushed decide() is revision 7's.
-  inline constexpr std::uint32_t revision = 7;
+  // without a gate pushed decide() is revision 8's.
+  inline constexpr std::uint32_t revision = 8;
   inline constexpr std::string_view revision_marker = "SUNSHINE_UI_SELECTION_REVISION";
 
   // Candidate kinds. Declared sources are the game's own UI contract (the
@@ -289,6 +291,29 @@ namespace sunshine_game3d::ui_selection {
   constexpr bool change_set_full(const counts &c, bool exact) {
     return exact && !c.nonfinite && c.changed * 100u >= c.pixels * 98u && c.lit * 2u >= c.pixels;
   }
+  // V2, an empty change set (revision 8): a lit HUD-less image (as for a full
+  // set) that no pixel of the pair changed, in clean tiles, exact or not: the
+  // change-set analogue of alpha coverage 0, no UI on screen. It is valid, so
+  // an accepted pair decides it as an empty mask of its own (source 5,
+  // covered 0) instead of reusing the previous decision under T1, it runs a
+  // restored pair's reconfirm clock (A3), and an exact one judges (A2). It
+  // is not selective, so it earns nothing (A1). A black HUD-less image is no
+  // scene, as for a full set.
+  constexpr bool change_set_empty(const counts &c) {
+    return c.pixels && !c.nonfinite && !c.changed && c.lit * 2u >= c.pixels && c.matching_tiles >= 128u;
+  }
+  static_assert([] {
+    counts c;
+    c.pixels = 100u; c.lit = 50u; c.matching_tiles = 128u;
+    const bool empty = change_set_empty(c) && !change_set_selective(c) && !change_set_full(c, true);
+    c.lit = 49u;
+    const bool dark = !change_set_empty(c);
+    c.lit = 50u; c.matching_tiles = 127u;
+    const bool noisy = !change_set_empty(c);
+    c.matching_tiles = 128u; c.changed = 1u;
+    const bool changed = !change_set_empty(c);
+    return empty && dark && noisy && changed;
+  }());
 
   // S3 frame identity (ui_detection::identity; game3d_ui_ticket.h owns the
   // labels): the stamp reads of the offered layer and HUD-less copies (C_P
@@ -463,8 +488,8 @@ namespace sunshine_game3d::ui_selection {
   // decides, at any coverage (P1). An unaccepted or invalid candidate never
   // blocks another, except that an offered, accepted declared alpha (UIAlpha
   // or the UI color tag) keeps inferred alpha from deciding even while it is
-  // invalid itself. A change set decides as source 5 when partial and as 6
-  // when full from an exact pair.
+  // invalid itself. A change set decides as source 5 when partial or empty
+  // (covered 0) and as 6 when full from an exact pair.
   // H1 (M5): some valid candidate makes an informative full claim: (a) an
   // alpha S1 may select (eligible: accepted, and not an inferred alpha the
   // declared-alpha block keeps out) that is opaque-full, (b) the offscreen
@@ -514,7 +539,8 @@ namespace sunshine_game3d::ui_selection {
       if (selective(c.covered[i], pixels)) selective_bits |= bit(k);
     }
     const bool partial_set = change_set_selective(c), full_set = change_set_full(c, (offered & candidate::exact) != 0u);
-    if ((partial_set || full_set) && hudless_identity) valid |= candidate::hudless;
+    const bool empty_set = change_set_empty(c);
+    if ((partial_set || full_set || empty_set) && hudless_identity) valid |= candidate::hudless;
     if (partial_set) selective_bits |= candidate::hudless;
     valid &= offered & candidate_bits;
     d.valid_bits = valid;
@@ -529,12 +555,13 @@ namespace sunshine_game3d::ui_selection {
       break;
     }
     if (!source && (eligible & candidate::hudless)) {
-      if (partial_set) {
-        source = 5u;
-        covered = c.changed;
-      } else {
+      if (full_set) {
         source = 6u;
         covered = pixels;
+      } else {
+        // A partial set, or an empty one (covered 0).
+        source = 5u;
+        covered = c.changed;
       }
     }
     // H1: the informative full claims of this frame, (a)-(d) above.

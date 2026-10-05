@@ -1853,25 +1853,22 @@ namespace {
       }
     };
     // A1: a HUD-less pair is a declared source. Its first valid selective
-    // sample from an exact pair accepts it; an inexact pair never earns, and
+    // sample accepts it, exact or not (V2's tile test proves its pixels; a
+    // game may tag only HUDLessColor, whose pairs are all counted), and
     // before acceptance it decides nothing (S1).
     const auto hudless_signature = *ui_selection::signature::parse(gpu.key(ui_selection::kind::hudless));
     ui_detection_inputs earning;
     earning.hudless = correct;
     ui.detection = &earning;
-    run(false, "an unaccepted inexact HUD-less pair decides nothing");
-    run(false, "an inexact HUD-less pair never earns acceptance");
-    require(!policy.accepts(hudless_signature), "An inexact HUD-less pair earned acceptance");
-    earning.hudless_exact = true;
-    run(false, "an unaccepted exact HUD-less pair decides nothing yet");
+    run(false, "an unaccepted inexact HUD-less pair decides nothing yet");
     run(false, "acceptance applies from the render after its sample is read");
-    require(policy.accepts(hudless_signature), "A valid selective exact HUD-less sample did not accept the pair");
+    require(policy.accepts(hudless_signature), "A valid selective inexact HUD-less sample did not accept the pair");
     ui.detection = nullptr;
     // A frame without protection ends the decision chain (T1).
     source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
     gpu.render(false, 1, false, false, false, {}, {}, {}, nullptr, &source);
-    // An accepted change set decides from an inexact pair too (counted as
-    // inexact_difference) until frame identity is exact (E2).
+    // An accepted change set decides from an inexact pair (counted as
+    // inexact_difference): only V2 validates a counted pair (E2).
     run(true, "matching final/HUDless");
     // T1: an accepted HUD-less pair that is invalid this frame leaves the
     // real frame without a decision of its own. It reuses the previous real
@@ -1879,6 +1876,8 @@ namespace {
     ui.view = shifted;
     run(true, "a scene-wide camera shift after a good pair reuses its decision once");
     run(false, "scene-wide camera shift after a good pair");
+    // An identical lit pair is a valid empty change set (revision 8): the
+    // accepted pair decides an empty mask of its own.
     ui.view = flattened_ui;
     run(false, "identical final/HUDless has no separator");
     ui.view = correct;
@@ -1902,14 +1901,12 @@ namespace {
     // same frame instead of letting that unusable higher candidate win.
     ui_detection_inputs inputs;
     inputs.masks[1] = flattened_ui; inputs.hudless = correct; inputs.current_color = true;
-    inputs.real_frame = 7;
     ui.detection = &inputs;
     run(true, "flattened explicit UI falls through to HUDless");
-    // Frame generation presents interpolated frames between a HUD-less tag and
-    // its real frame. They never detect (T1): each shows the decision of the
-    // real frame it shows, the decided one or the next, by the HUD-less tag's
-    // present generation, without a multiplier cap.
-    inputs.hudless = {}; inputs.hold_previous = true; inputs.real_frame = 8;
+    // A generated Present (it offers nothing within the reported generated
+    // count of the last Present that offered a tag) never detects (T1): it
+    // shows the last real decision, without a multiplier cap.
+    inputs.hudless = {}; inputs.hold_previous = true;
     run(true, "generated present holds the real frame's HUD-less mask");
     {
       // A held mask reports the detection run that made it.
@@ -1921,21 +1918,20 @@ namespace {
     run(true, "second generated present still holds");
     run(true, "third generated present still holds");
     run(true, "a fourth generated present still holds: no multiplier cap");
-    // A Present classified generated that shows neither the decided real
-    // frame nor the next one has no mask, and the chain ends (fail safe).
-    inputs.real_frame = 9;
-    run(false, "a generated present beyond the next real frame has no mask", false);
+    // A generated Present in another identity scope (a recreated swapchain)
+    // has no decision to show: no mask, and the chain ends (fail safe).
+    ++source.epoch;
+    run(false, "a generated present in another scope has no mask", false);
     require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::inactive,
-      "A generated present beyond the T1 tag bound reported a held mask");
-    inputs.real_frame = 8;
+      "A generated present without a decision to show reported a held mask");
+    --source.epoch;
     run(false, "a generated present after the chain ended has no mask", false);
-    inputs.hold_previous = false; inputs.hudless = correct; inputs.real_frame = 10;
+    inputs.hold_previous = false; inputs.hudless = correct;
     run(true, "the next real frame detects again");
     require(gpu.renderer.consumed_detection().state == ui_detection_snapshot::run_state::ran &&
         !gpu.renderer.consumed_detection().held_presents &&
         (gpu.renderer.consumed_detection().flags & ui_detection::per_frame_hold_reset),
       "A fresh detection after the chain ended reported a held mask or no hold reset");
-    inputs.real_frame = 0;
     inputs.hudless = shifted;
     run(true, "the first unsuitable frame reuses the previous real frame's decision once");
     run(false, "all candidates unsuitable");
@@ -2017,8 +2013,8 @@ namespace {
     };
     full_frame(correct, false, false, "an unverified pair differing everywhere is rejected, not flattened");
     full_frame(correct, true, true, "a full-frame menu over a lit scene stays flat");
-    // With frame generation on, a real frame outside the tag batch pairs only by
-    // Present counting. Right after an exact decision the T1 grace reuses that
+    // Without a same-batch Backbuffer a frame pairs only by Present counting,
+    // inexact (E2). Right after an exact decision the T1 grace reuses that
     // decision once instead of flipping the menu to 3D; the next such frame
     // has no mask.
     full_frame(correct, false, true, "an inexact real frame reuses the exact full-frame decision once");
@@ -2155,8 +2151,8 @@ namespace {
         static_cast<unsigned long long>(delta[ui_counter::reused]));
     }
     inputs = {};
-    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 t1_tag_bound=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 t1_grace_once=1 hudless_earned_exact=1 accepted_alpha=1 declared_never_judged=1 one_way_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
-    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, generated Presents showing the real frame's decision within the T1 tag bound and without a cap, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, the T1 grace reusing a real frame's decision once for a missing or invalid accepted source, acceptance earned from one selective sample (an exact HUD-less pair, UIAlpha) before anything decides, a declared UIAlpha never judged, one-way revocation of a full accepted Backbuffer, and manual Off without review");
+    report << "automatic-hudless D3D11 final_alpha_opaque=1 paired_HUD_exact=1 scene_wide_motion_rejected=1 identical_pair_empty=1 same_frame_bad_pair_rejection=1 flattened_explicit_fallback=1 generated_present_hold=1 t1_chain_end=1 late_retained_pair=1 tagged_backbuffer_pair=1 full_frame_ui=1 t1_grace_once=1 hudless_earned_inexact=1 accepted_alpha=1 declared_never_judged=1 one_way_revocation=1 current_RGB_preserved=1 manual_off_wins=1 no_review=1\n";
+    std::puts("PASS D3D11 HUDless auto: exact HUD difference, scene-wide motion/identical rejection, flattened candidate fallback, generated Presents showing the last real decision without a cap and no mask once the chain ended, late pairing with retained color, exact tagged-Backbuffer pairing, full-frame UI flattening, the T1 grace reusing a real frame's decision once for a missing or invalid accepted source, acceptance earned from one selective sample (an inexact HUD-less pair, UIAlpha) before anything decides, a declared UIAlpha never judged, one-way revocation of a full accepted Backbuffer, and manual Off without review");
   }
   // V1 and S1 for the offscreen UI layer (docs/reshade-sbs.md, UI decision
   // framework). Stellar Blade draws its SDR scene image into the cleared

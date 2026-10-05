@@ -384,10 +384,10 @@ int main(int argc, char **argv) {
     require(marker("SUNSHINE_MONO_SKIPS_CONDITIONING") == 1, "The mono pack must keep reading no conditioning");
     // The reduce ports ui_selection::decide of this revision.
     require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision &&
-        sunshine_game3d::ui_selection::revision == 7u,
-      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 7");
+        sunshine_game3d::ui_selection::revision == 8u,
+      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 8");
     require(decision_texels == detection::still_decision_texels && decision_texels == 13u,
-      "Selection revision 7 (deciding as revision 5) writes H2's stillness counts in decision texel 12: 13 decision texels");
+      "Selection revision 8 (deciding as revision 5 with the empty change set) writes H2's stillness counts in decision texel 12: 13 decision texels");
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");

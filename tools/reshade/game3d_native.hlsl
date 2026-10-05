@@ -51,11 +51,11 @@
 // 10. SunshineUIDetectionReduceCS ports ui_selection::decide
 // (game3d_ui_selection.h) line for line, the T1 grace and its hold store and
 // the H1 and H2 overrides included; this revision must equal
-// ui_selection::revision. Revision 7 decides exactly as revision 5: revision
+// ui_selection::revision. Revision 7 decided exactly as revision 5: revision
 // 6 (fix 3 and fix 4, removed by user decision) added candidate bit 0x100 and
-// source 12, which stay reserved.
+// source 12, which stay reserved. Revision 8 adds the empty change set.
 #define SUNSHINE_UI_CANDIDATE_LAYOUT 2
-#define SUNSHINE_UI_SELECTION_REVISION 7
+#define SUNSHINE_UI_SELECTION_REVISION 8
 #define SUNSHINE_UI_CANDIDATE_UI_ALPHA 0x1u
 #define SUNSHINE_UI_CANDIDATE_UI_COLOR 0x2u
 #define SUNSHINE_UI_CANDIDATE_BACKBUFFER 0x4u
@@ -697,18 +697,21 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // frame (menus, title screens) changes nearly every pixel while the
     // HUD-less image still shows a lit scene; only an exact pair qualifies
     // there, since a mismatched pair can also differ everywhere, and a black
-    // HUD-less image is no scene.
+    // HUD-less image is no scene. A lit pair without any changed pixel in
+    // clean tiles, exact or not, is a valid empty set (no UI on screen), which
+    // an accepted pair decides as an empty mask of its own (source 5).
     const bool partial_set = !difference.y && difference.x && difference.x * 4u < pixels &&
         difference.z * 100u >= pixels * 75u && matching_tiles >= 128u;
     const bool full_set = (offered & SUNSHINE_UI_CANDIDATE_EXACT) && !difference.y &&
         difference.x * 100u >= pixels * 98u && lit * 2u >= pixels;
+    const bool empty_set = pixels && !difference.y && !difference.x && lit * 2u >= pixels && matching_tiles >= 128u;
     // S3: the offered pairs' identity; GATE_HUDLESS ANDs it into the HUD-less
     // change set's validity (5 and 6), and an invalid set then follows T1.
     const uint2 identity = SunshineIdentityWords();
     const uint identity_ok = identity.x >> SUNSHINE_UI_IDENTITY_OK_SHIFT;
     const bool hudless_identity = !(Sunshine_UIIdentity & SUNSHINE_UI_IDENTITY_GATE_HUDLESS) ||
         (identity_ok & SUNSHINE_UI_CANDIDATE_HUDLESS) != 0u;
-    if ((partial_set || full_set) && hudless_identity) valid |= SUNSHINE_UI_CANDIDATE_HUDLESS;
+    if ((partial_set || full_set || empty_set) && hudless_identity) valid |= SUNSHINE_UI_CANDIDATE_HUDLESS;
     if (partial_set) selective |= SUNSHINE_UI_CANDIDATE_HUDLESS;
     valid &= offered & candidate_bits;
     // S1: among offered, accepted and valid candidates the first in draw
@@ -729,8 +732,8 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     else if (eligible & SUNSHINE_UI_CANDIDATE_BACKBUFFER) { source = 3u; covered = coverage.z; winner_opaque = opaque_backbuffer; }
     else if (eligible & SUNSHINE_UI_CANDIDATE_CURRENT) { source = 4u; covered = coverage.w; winner_opaque = opaque_current; }
     else if (eligible & SUNSHINE_UI_CANDIDATE_HUDLESS) {
-        if (partial_set) { source = 5u; covered = difference.x; }
-        else { source = 6u; covered = pixels; }
+        if (full_set) { source = 6u; covered = pixels; }
+        else { source = 5u; covered = difference.x; }
     }
     // H1, a hidden scene (docs/reshade-sbs.md, hidden-scene evidence): the
     // informative full claims of this frame are (a) an alpha S1 may select

@@ -14,12 +14,9 @@
 //   render (one Present; Auto, or manual On through detection):
 //     1. bits: the offered candidate bits (ui_detection::candidate), and the
 //        candidate_signatures of the offered kinds; identity: the provider's
-//        present_identity, {hold_previous, real_frame} (Present counting until
-//        S3 is enabled: generated from the HUD-less pairing, or, without one,
-//        a Present that offers nothing within the reported generated count of
-//        the last one that offered a UI tag
-//        (ui_mask::generated_without_input); the HUD-less tag's present
-//        generation as the real-frame id, 0 without a HUD-less capture), with
+//        present_identity {hold_previous} (Present counting: a Present that
+//        offers nothing within the reported generated count of the last one
+//        that offered a UI tag, ui_mask::generated_without_input), with
 //        S3's ticket_identity(that, ui_ticket::newest_token(tickets),
 //        state.decision_token, bits != 0) beside it, which arbitrate, held and
 //        detected read (applied_identity) only while
@@ -38,8 +35,8 @@
 //        generated hold and a zero-offer frame apply the mask even while no
 //        UI input is available:
 //        - t.hold (kind generated): apply the detected mask as it is (the
-//          decision of the real frame shown), count held.generated, then
-//          state.held(identity); no poll and no sample;
+//          last real decision), count held.generated, then state.held(); no
+//          poll and no sample;
 //        - t.kind unavailable (a generated Present with no such decision): no
 //          mask, count held.none, then state.unavailable();
 //        - t.detect: state.enter_scope(observation) and
@@ -314,18 +311,16 @@ namespace sunshine_game3d::ui_temporal {
     return c;
   }
 
-  // T1 identity of one Present (M6), by Present counting until S3 is
-  // enabled: whether the HUD-less pairing, or without one the count since the
-  // last Present that offered a UI tag, classified it as generated
-  // (hold_previous), and the real frame it shows, as the HUD-less tag's
-  // present generation (0 without a HUD-less capture: no tag bound). S3
-  // (game3d_ui_ticket.h, shadow): token_label is the newest token generation
-  // among the Present's offered tag snapshots (0 none), and new_label whether
-  // the Present offers a label newer than the last decision's
-  // (ticket_identity).
+  // T1 identity of one Present (M6), by Present counting: whether it offers
+  // nothing within the reported generated count of the last Present that
+  // offered a UI tag (ui_mask::generated_without_input, hold_previous). A
+  // HUD-less pairing names no real frame: an offered image makes the Present
+  // real. S3 (game3d_ui_ticket.h, shadow): token_label is the newest token
+  // generation among the Present's offered tag snapshots (0 none), and
+  // new_label whether the Present offers a label newer than the last
+  // decision's (ticket_identity).
   struct present_identity {
     bool generated{};
-    std::uint64_t real_frame{};
     std::uint64_t token_label{};
     bool new_label{};
   };
@@ -346,20 +341,19 @@ namespace sunshine_game3d::ui_temporal {
 
   // The identity T1 applies: today's Present counting, or, when identity is
   // authoritative, the ticket's: a new label detects (a token is the real
-  // frame), a token that is not new holds the frame it names, and a Present
+  // frame), a token that is not new holds the last decision, and a Present
   // offering nothing keeps today's count bound.
   inline present_identity applied_identity(const present_identity &identity, bool authoritative) {
     if (!authoritative) return identity;
-    if (identity.token_label)
-      return {!identity.new_label, identity.token_label, identity.token_label, identity.new_label};
-    if (identity.new_label) return {false, 0, 0, true};
+    if (identity.token_label) return {!identity.new_label, identity.token_label, identity.new_label};
+    if (identity.new_label) return {false, 0, true};
     return identity;
   }
 
   // What a Present does under T1: a real Present detects (none: no hold); a
-  // generated Present shows the decision of the real frame it shows
-  // (generated, counted held.generated) or, when no such decision exists in
-  // its scope, has no mask (unavailable, counted held.none).
+  // generated Present shows the last real decision (generated, counted
+  // held.generated) or, when no such decision exists in its scope, has no
+  // mask (unavailable, counted held.none).
   enum class hold_kind : std::uint8_t { none, generated, unavailable };
   inline const char *name(hold_kind value) {
     switch (value) {
@@ -391,13 +385,10 @@ namespace sunshine_game3d::ui_temporal {
     // The inputs the last adopting real frame offered (adopt): they key the
     // status (status_key) and the accepted-missing reference.
     std::uint32_t bits{}, accepted{};
-    // T1 (M6): whether a real decision exists in this chain, its scope and
-    // real-frame id, the first other real-frame id a generated Present
-    // showed since (the next real frame; zero before), and whether the next
-    // detection starts a new chain (per_frame_hold_reset).
+    // T1 (M6): whether a real decision exists in this chain, its scope, and
+    // whether the next detection starts a new chain (per_frame_hold_reset).
     bool have_decision{};
     alpha_auto_source decision_scope;
-    std::uint64_t decision_frame{}, next_frame{};
     bool reset_pending = true;
     // Consecutive generated Presents that applied the detected mask.
     std::uint32_t holds{};
@@ -413,15 +404,14 @@ namespace sunshine_game3d::ui_temporal {
     std::uint64_t decision_token{};
     bool identity_override{};
 
-    // T1: a generated Present never detects. It shows the decision of the
-    // real frame it shows: the last detection's (detected_mask) while it is
-    // in the same identity scope (hold_scope_changed: an observation
-    // revision alone keeps it) and the Present shows that real frame or the
-    // next one
-    // (its real-frame id equals the decision's, or is the first other id a
-    // generated Present showed since; 0, no HUD-less capture, is no bound).
-    // Otherwise it has no mask and the chain ends. No multiplier constant and
-    // no time bound: a wrong frame-generation count fails safe. A real
+    // T1: a generated Present never detects. It shows the last real
+    // decision (detected_mask) while that was made in the same identity
+    // scope (hold_scope_changed: an observation revision alone keeps it);
+    // otherwise it has no mask and the chain ends. No multiplier constant and
+    // no time bound: Present counting (ui_mask::generated_without_input)
+    // classifies only Presents that offer nothing, so a count reported too
+    // high holds only those, and one too low leaves the later ones to the
+    // grace below. A real
     // Present always detects; its detection pushes per_frame_hold_reset when
     // no real decision exists in this chain (the first detection, an
     // identity scope change, an inactive frame or a Present without a mask
@@ -437,9 +427,7 @@ namespace sunshine_game3d::ui_temporal {
       hold_decision result;
       const bool same_scope = have_decision && !hold_scope_changed(scope, decision_scope);
       if (identity.generated) {
-        const bool shows = !identity.real_frame || identity.real_frame == decision_frame || !next_frame ||
-          identity.real_frame == next_frame;
-        result.hold = same_scope && shows;
+        result.hold = same_scope;
         result.kind = result.hold ? hold_kind::generated : hold_kind::unavailable;
         return result;
       }
@@ -475,21 +463,13 @@ namespace sunshine_game3d::ui_temporal {
       if (scope_changed(observation, latest_source)) latest = {};
     }
 
-    // A generated Present that applied the detected mask: the first other
-    // real-frame id it shows becomes the next real frame.
-    void held(const present_identity &offered_identity) {
-      const auto identity = applied(offered_identity);
-      ++holds;
-      if (identity.real_frame != decision_frame && !next_frame) next_frame = identity.real_frame;
-    }
+    // A generated Present that applied the detected mask.
+    void held() { ++holds; }
     // A real Present that detected: its decision is the chain's.
     void detected(const alpha_auto_source &scope, const present_identity &offered_identity) {
-      const auto identity = applied(offered_identity);
       decision_token = offered_identity.token_label;
       have_decision = true;
       decision_scope = scope;
-      decision_frame = identity.real_frame;
-      next_frame = 0;
       holds = 0;
       reset_pending = false;
     }

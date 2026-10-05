@@ -8,8 +8,10 @@
 // hidden-scene guard that holds the CPU's verdicts of D and refutes claims
 // per signature (scene_guard::state, M5), the sample decode and counter
 // commit (ui_temporal::decode_detection_sample, sample_counters), Present
-// pairing and counting under frame generation (ui_mask::pair_hudless_present,
-// generated_without_input) and the exact counters (ui_counters), and rule
+// counting under frame generation (ui_mask::generated_without_input: inputs
+// tagged on real frames only, a HUD-less image offered on every Present it
+// pairs, inexact by ui_mask::pair_hudless_present) and the exact counters
+// (ui_counters), and rule
 // H2's run of still screens without a UI source (still_screen::run, fix 2)
 // with the renderer's scope and switch. A stream's GPU input is what one
 // detection counts: decision texels 0-11 that ui_detection_replay --verbose
@@ -605,12 +607,10 @@ namespace {
     // The acceptance signatures of the offered kinds (A1).
     candidate_signatures signatures = signatures_in(srgb);
     // T1 identity by Present counting (ui_temporal::present_identity): a
-    // generated Present (ui_mask::pair_hudless_present, set by the input
-    // provider only while a HUD-less tag pairs), and the real frame it
-    // shows, the HUD-less tag's present generation (0 without a HUD-less
-    // capture).
+    // generated Present, one that offers nothing within the reported
+    // generated count of the last Present that offered a UI tag
+    // (ui_mask::generated_without_input; fg_pacer computes it).
     bool hold_previous {};
-    std::uint64_t real_frame {};
     // S3 (game3d_ui_ticket.h, shadow): the newest token generation among the
     // Present's offered tag snapshots (ui_ticket::newest_token; 0 none).
     // ui_temporal::ticket_identity fills the identity's token fields from it;
@@ -794,7 +794,7 @@ namespace {
       const bool authoritative = ui_ticket::authoritative(temporal.identity_override);
       r.identity = p.identity;
       r.identity.bits = (p.identity.bits & ui_detection::identity::token_batch) | (authoritative ? ui_detection::identity::gate_hudless : 0u);
-      const auto identity = ui_temporal::ticket_identity({p.hold_previous, p.real_frame}, p.token_label, temporal.decision_token, bits != 0);
+      const auto identity = ui_temporal::ticket_identity({p.hold_previous}, p.token_label, temporal.decision_token, bits != 0);
       r.hold = temporal.arbitrate(identity, observation, bits);
       const std::uint32_t flags = (bits & candidate::layer) ? p.layer_flags : 0u;
       if (r.hold.adopt) {
@@ -813,9 +813,9 @@ namespace {
       ++cpu[ui_counter::auto_frames];
       const bool missing = (r.hold.per_frame & ui_detection::per_frame_accepted_missing) != 0;
       if (r.hold.hold) {
-        // The detected mask as it is: the decision of the real frame shown.
+        // The detected mask as it is: the last real decision.
         ++cpu[ui_counter::held_generated];
-        temporal.held(identity);
+        temporal.held();
         r.active = r.held = true;
       } else if (r.hold.kind == hold_kind::unavailable) {
         ++cpu[ui_counter::held_none];
@@ -1146,61 +1146,48 @@ namespace {
     }
   }
 
-  // Presents under frame generation. The game's actual cadence decides which
-  // Presents are real: each real frame's tags are made right after the
-  // previous real Present, then `actual` generated frames are presented,
-  // then the real one; a cadence change applies from the next Present. The
-  // production pairing classifies each Present against the latest tag from
-  // the multiplier the provider reports, which can lag or lead the cadence
-  // (dynamic or automatic frame generation, a multiplier change).
+  // Presents under frame generation, identified the production way. The
+  // game's actual cadence decides which Presents are real: `actual`
+  // generated frames, then the real one; a cadence change applies from the
+  // next Present. A real Present offers the stream's inputs; a generated one
+  // offers `generated_bits` only: the game tags its UI inputs (UIAlpha, the
+  // UI color tag, the Backbuffer) for real frames only, while an image
+  // offered on every Present (a HUD-less image, paired inexactly by Present
+  // counting, or the offscreen UI layer copy) is offered there too. As the
+  // input provider does (ui_mask::generated_without_input), a Present that
+  // offers nothing within the multiplier the provider reports, which can lag
+  // or lead the cadence (dynamic or automatic frame generation, a multiplier
+  // change), of the last Present that offered a UI tag is generated
+  // (hold_previous).
   struct fg_pacer {
     // The first Present is a real frame's.
     explicit fg_pacer(std::uint32_t actual):
-        presented(1 + actual) {}
+        since_real(actual) {}
 
-    std::uint64_t presented, tagged = 1;
-    // The tag the last Present paired against: its T1 real-frame id (the
-    // HUD-less tag's present generation).
-    std::uint64_t tag {};
+    std::uint64_t presented {}, input_present {};
+    // Generated Presents since the last real one.
+    std::uint32_t since_real;
 
     struct step {
-      ui_mask::hudless_present kind;  // As the pairing classified it.
       bool real;  // As the game presented it.
+      present p;  // As the provider offers it.
     };
 
-    step present(bool fg_active, std::uint32_t actual, std::uint32_t reported) {
-      tag = tagged;
-      const auto pairing = ui_mask::pair_hudless_present(tagged, ++presented, fg_active, reported);
-      const bool real = presented - tagged >= std::uint64_t(actual) + 1;
-      if (real) {
-        tagged = presented;
+    step next(present real, std::uint32_t generated_bits, std::uint32_t actual, std::uint32_t reported) {
+      ++presented;
+      const bool is_real = since_real >= actual;
+      since_real = is_real ? 0u : since_real + 1;
+      if (!is_real) {
+        real.offered = generated_bits;
       }
-      return {pairing.kind, real};
-    }
-
-    // A provider whose reported multiplier matches the cadence.
-    ui_mask::hudless_present next(bool fg_active, std::uint32_t generated_frames) {
-      const auto result = present(fg_active, generated_frames, generated_frames);
-      require(result.real == (result.kind != ui_mask::hudless_present::generated_frame), "The pairing misread a matching cadence");
-      return result.kind;
+      constexpr std::uint32_t tags = candidate::ui_alpha | candidate::ui_color | candidate::backbuffer;
+      if (real.offered & tags) {
+        input_present = presented;
+      }
+      real.hold_previous = !real.offered && ui_mask::generated_without_input(presented, input_present, true, reported);
+      return {is_real, real};
     }
   };
-
-  // A Present the pairing reads as real (or late) offers `real`; a generated
-  // one offers `generated_bits` and is generated (hold_previous) when the
-  // stream pairs a HUD-less image; an unpaired one offers `generated_bits`
-  // without its HUD-less image (game3d_ui_input_provider.cpp admits only a
-  // pair). With a HUD-less capture every Present carries the tag it paired
-  // against as its real-frame id.
-  present fg_present(ui_mask::hudless_present kind, present real, std::uint32_t generated_bits, std::uint64_t tag) {
-    real.real_frame = (real.offered & candidate::hudless) ? tag : 0u;
-    if (kind == ui_mask::hudless_present::real_frame || kind == ui_mask::hudless_present::earlier_real_frame) {
-      return real;
-    }
-    real.hold_previous = kind == ui_mask::hudless_present::generated_frame && (real.offered & candidate::hudless) != 0;
-    real.offered = generated_bits;
-    return real;
-  }
 
   // The tick of the first sample at or after `from`.
   std::uint64_t first_sample_from(const sequence &s, std::uint64_t from) {
@@ -1674,17 +1661,16 @@ namespace {
     const auto &returned = s.step(back);
     require(returned.gpu.accepted == candidate::backbuffer && returned.source == 3, "The PQ acceptance did not decide after switching back");
     // Frame generation is not part of the signature: toggled on, real
-    // Presents keep deciding with the same acceptance. Without a HUD-less
-    // pairing the generated Presents offer nothing and count as real: each
-    // reuses the decision of the real frame before it (T1).
+    // Presents keep deciding with the same acceptance. The generated
+    // Presents offer nothing, so Present counting reads them as generated
+    // and each shows the decision of the real frame before it (T1).
     fg_pacer pacer(1);
     for (std::uint64_t now = 16016; now < 17000; now += 8) {
-      const auto kind = pacer.next(true, 1);
-      auto q = fg_present(kind, back, 0u, pacer.tag);
-      q.now_ms = now;
-      const auto &r = s.step(q);
-      if (kind == ui_mask::hudless_present::generated_frame) {
-        require(r.grace && r.decision.reused && r.source == 3 && !r.submitted, "A zero-offer Present did not reuse the accepted Backbuffer's decision");
+      auto step = pacer.next(back, 0u, 1, 1);
+      step.p.now_ms = now;
+      const auto &r = s.step(step.p);
+      if (!step.real) {
+        require(r.held && !r.detected && r.source == 3 && !r.submitted, "A generated Present did not show the accepted Backbuffer's decision");
       } else {
         require(r.gpu.accepted == candidate::backbuffer && r.source == 3, "An FG toggle changed the acceptance");
       }
@@ -1853,36 +1839,47 @@ namespace {
     restore(session, key(kind::hudless), 1);
   }
 
+  // A Backbuffer tagged on real Presents only (Expedition 33 under frame
+  // generation), covering 20% and accepted in an earlier session.
+  texels backbuffer_frame(const gpu_inputs &in) {
+    return backbuffer_alpha(200).words(in);
+  }
+
+  void accept_backbuffer(alpha_auto_policy &session) {
+    restore(session, key(kind::backbuffer), 1);
+  }
+
   void generated_presents_hold_per_multiplier() {
-    // FG 2x, 3x and 4x with a same-batch (exact) HUD-less pair: a generated
-    // Present never detects; it shows the decision of the real frame it
-    // shows (T1), held.generated once per generated Present.
+    // FG 2x, 3x and 4x with the Backbuffer tagged on real Presents only: a
+    // generated Present offers nothing, Present counting reads it as
+    // generated, and it never detects; it shows the last real decision (T1),
+    // held.generated once per generated Present.
     alpha_auto_policy session;
-    accept_hudless(session);
-    sequence s(session, difference_frame);
+    accept_backbuffer(session);
+    sequence s(session, backbuffer_frame);
     fg_pacer pacer(1);
     present real;
-    real.offered = candidate::current | candidate::hudless | candidate::exact;  // Current alpha and a same-batch HUD-less pair.
+    real.offered = candidate::backbuffer;
     std::uint64_t now = 10000;
     std::size_t all_generated = 0;
     for (const std::uint32_t generated : {1u, 2u, 3u, 1u}) {
       std::size_t generated_presents = 0, real_presents = 0, since_real = 0;
       const auto until = now + 1000;
-      auto kind = ui_mask::hudless_present::unpaired;
+      bool real_last = false;
       // Change the multiplier only after a real Present.
-      while (now < until || kind == ui_mask::hudless_present::generated_frame) {
-        kind = pacer.next(true, generated);
-        auto p = fg_present(kind, real, candidate::current, pacer.tag);
-        p.now_ms = now;
+      while (now < until || !real_last) {
+        auto step = pacer.next(real, 0u, generated, generated);
+        step.p.now_ms = now;
         now += 8;
-        const auto &r = s.step(p);
-        if (kind == ui_mask::hudless_present::generated_frame) {
+        real_last = step.real;
+        const auto &r = s.step(step.p);
+        if (!step.real) {
           ++generated_presents;
           ++since_real;
-          require(r.held && !r.detected && r.hold.kind == hold_kind::generated && r.source == 5 && s.temporal.bits == real.offered && s.temporal.holds == since_real, "A generated Present did not hold the real frame's mask");
+          require(step.p.hold_previous && r.held && !r.detected && r.hold.kind == hold_kind::generated && r.source == 3 && s.temporal.bits == real.offered && s.temporal.holds == since_real, "A generated Present did not hold the real frame's mask");
         } else {
-          require(kind == ui_mask::hudless_present::real_frame && r.detected && r.source == 5 && !s.temporal.holds, "A real Present did not detect afresh");
-          require(since_real == generated || s.frames.size() == 1, "The pairing did not give " + std::to_string(generated) + " generated Presents per real one");
+          require(!step.p.hold_previous && r.detected && r.source == 3 && !s.temporal.holds, "A real Present did not detect afresh");
+          require(since_real == generated || s.frames.size() == 1, "The cadence did not give " + std::to_string(generated) + " generated Presents per real one");
           since_real = 0;
           ++real_presents;
         }
@@ -1900,42 +1897,44 @@ namespace {
   }
 
   // What a frame-generation stream did to the Presents the game actually
-  // generated and to its real ones.
+  // generated and to its real ones: generated Presents that held, that Present
+  // counting read as real (beyond the reported count) and that then reused
+  // the decision once or had no mask (the T1 grace), and real Presents that
+  // held.
   struct fg_tally {
-    std::size_t presents {}, real {}, held {}, misread {}, lost {}, extra_holds {}, paired_real {};
+    std::size_t presents {}, real {}, held {}, beyond {}, reused {}, lost {}, extra_holds {};
   };
 
-  // Present-paired HUD-less difference under frame generation (inexact: no
-  // tag batch). cadence(index) gives the game's actual generated frames and
-  // the provider's reported ones for the Present with that index; tallies
-  // count from Present `from`.
+  // An accepted Backbuffer tagged on real Presents only under frame
+  // generation (Expedition 33). cadence(index) gives the game's actual
+  // generated frames and the provider's reported ones for the Present with
+  // that index; tallies count from Present `from`.
   fg_tally fg_drift(sequence &s, std::size_t count, std::size_t from, const std::function<std::pair<std::uint32_t, std::uint32_t>(std::size_t)> &cadence) {
     fg_pacer pacer(cadence(0).first);
     present real;
-    real.offered = candidate::current | candidate::hudless;
+    real.offered = candidate::backbuffer;
     fg_tally t;
     std::uint64_t now = 10000;
     for (std::size_t index = 0; index != count; ++index) {
       const auto [actual, reported] = cadence(index);
-      const auto step = pacer.present(true, actual, reported);
-      auto p = fg_present(step.kind, real, candidate::current, pacer.tag);
-      p.now_ms = now;
+      auto step = pacer.next(real, 0u, actual, reported);
+      step.p.now_ms = now;
       now += 8;
-      const auto &r = s.step(p);
+      const auto &r = s.step(step.p);
       if (index < from) {
         continue;
       }
       ++t.presents;
-      const bool paired = r.detected && (r.gpu.bits & candidate::hudless);
       if (step.real) {
         ++t.real;
         t.extra_holds += r.held ? 1 : 0;
-        t.paired_real += paired ? 1 : 0;
       } else if (r.held) {
         ++t.held;
       } else {
-        ++t.lost;
-        t.misread += paired ? 1 : 0;
+        require(r.detected && r.grace && !r.submitted, "A generated Present beyond the reported count did not run the T1 grace alone");
+        ++t.beyond;
+        t.reused += r.decision.reused ? 1 : 0;
+        t.lost += r.source ? 0 : 1;
       }
     }
     return t;
@@ -1945,71 +1944,65 @@ namespace {
     {
       // 4x, reported as presented: every generated Present holds.
       alpha_auto_policy session;
-      accept_hudless(session);
-      sequence s(session, difference_frame);
+      accept_backbuffer(session);
+      sequence s(session, backbuffer_frame);
       const auto t = fg_drift(s, 401, 0, [](std::size_t) {
         return std::pair {3u, 3u};
       });
-      require(t.real == 101 && t.held == 300 && !t.lost && !t.extra_holds && t.paired_real == 101, "A 4x cadence reported as 4x did not hold every generated Present");
+      require(t.real == 101 && t.held == 300 && !t.beyond && !t.extra_holds, "A 4x cadence reported as 4x did not hold every generated Present");
       check_counters(s, "4x matching cadence");
     }
     {
       // Presented at 4x while the provider still reports 2x (dynamic frame
-      // generation): Presents 2 and 3 of each real frame pair as real or late.
+      // generation): Presents 2 and 3 of each real frame lie beyond the
+      // reported count, so counting reads them as real. They offer nothing
+      // while the accepted Backbuffer is missing: the first reuses the
+      // decision once, the second has no mask (the T1 grace). No Present
+      // detects from an interpolated image.
       alpha_auto_policy session;
-      accept_hudless(session);
-      sequence s(session, difference_frame);
+      accept_backbuffer(session);
+      sequence s(session, backbuffer_frame);
       const auto t = fg_drift(s, 401, 0, [](std::size_t) {
         return std::pair {3u, 1u};
       });
-      require(t.real == 101 && t.held == 100 && t.misread == 200 && t.lost == 200 && !t.extra_holds && t.paired_real == 101, "The lagging multiplier's pairing moved");
-      known_today("S3", "T1/E2", "presented at 4x but reported as 2x, " + std::to_string(t.misread) + " of " + std::to_string(t.held + t.lost) + " generated Presents pair as a real frame (or a late one) and detection reads an interpolated image instead of holding");
+      require(t.real == 101 && t.held == 100 && t.beyond == 200 && t.reused == 100 && t.lost == 100 && !t.extra_holds, "The lagging multiplier's grace moved");
+      known_today("S3", "T1/E2", "presented at 4x but reported as 2x, " + std::to_string(t.beyond) + " of " + std::to_string(t.held + t.beyond) + " generated Presents lie beyond the reported count: Present counting reads them as real, and the T1 grace reuses the decision for " + std::to_string(t.reused) + " and leaves " + std::to_string(t.lost) + " without a mask");
       check_counters(s, "lagging multiplier");
     }
     {
       // Presented at 2x while the provider reports 4x, after a matching
-      // start: from Present 100 every Present pairs as generated, so none
-      // detects from an interpolated image (T1). Present 99 (generated) and
-      // Present 100 (real, read as generated) show the next real frame (tag
-      // of Present 98) and hold the decision of Present 98; Present 101 shows
-      // a third tag, has no mask and ends the chain; no Present pairs as
-      // real again, so every later one has no mask (held.none). Fail-safe
-      // under the wrong multiplier; S3 identity fixes the pairing.
+      // start: a count reported too high holds only Presents without an
+      // input of their own, so every generated Present still holds and every
+      // real one, offering its tag, detects.
       alpha_auto_policy session;
-      accept_hudless(session);
-      sequence s(session, difference_frame);
+      accept_backbuffer(session);
+      sequence s(session, backbuffer_frame);
       const auto t = fg_drift(s, 300, 100, [](std::size_t index) {
         return std::pair {1u, index < 100 ? 1u : 3u};
       });
-      require(s.frames[98].detected && s.frames[98].source == 5 && s.frames[99].held && s.frames[100].held && s.frames[100].source == 5, "The leading multiplier's last holds moved");
-      for (std::size_t i = 101; i != s.frames.size(); ++i) {
-        const auto &f = s.frames[i];
-        require(f.unavailable && f.hold.kind == hold_kind::unavailable && !f.detected && !f.source, "A Present read as generated detected, or held a decision of a real frame it does not show");
-      }
-      require(t.real == 100 && t.extra_holds == 1 && !t.paired_real && !t.misread && !t.held && t.lost == 100, "The leading multiplier's holds moved");
-      // No real Present detects, so no sample commits these frames' counts
-      // (held.none) until one does.
+      require(t.real == 100 && t.held == 100 && !t.beyond && !t.extra_holds, "The leading multiplier's holds moved");
       check_counters(s, "leading multiplier");
     }
     {
       // 2x to 4x in the middle of a real frame (after its generated Present),
-      // reported one real frame late: two generated Presents pair as real or
-      // late, then every generated Present holds again.
+      // reported one real frame late: the two generated Presents beyond the
+      // old count fall to the grace (Present 100 reuses once, 101 has no
+      // mask), then every generated Present holds again.
       alpha_auto_policy session;
-      accept_hudless(session);
-      sequence s(session, difference_frame);
+      accept_backbuffer(session);
+      sequence s(session, backbuffer_frame);
       constexpr std::size_t change = 100, reported_from = 103;
       const auto t = fg_drift(s, 300, 0, [](std::size_t index) {
         return std::pair {index < change ? 1u : 3u, index < reported_from ? 1u : 3u};
       });
       // Present 102 is the first real one after the change: Presents 100 and 101 are generated.
-      require(t.misread == 2 && !s.frames[change].held && !s.frames[change + 1].held && s.frames[change + 3].held && !t.extra_holds && t.paired_real == t.real, "The mid-frame multiplier change's pairing moved");
+      require(t.beyond == 2 && s.frames[change].decision.reused && s.frames[change].source == 3 && !s.frames[change + 1].source && s.frames[change + 3].held && !t.extra_holds, "The mid-frame multiplier change's grace moved");
       for (std::size_t i = reported_from; i != s.frames.size(); ++i) {
         const auto &f = s.frames[i];
-        require(f.held || (f.detected && (f.gpu.bits & candidate::hudless)), "A Present after the reported multiplier caught up neither held nor paired");
+        require(f.held || (f.detected && (f.gpu.bits & candidate::backbuffer)), "A Present after the reported multiplier caught up neither held nor detected its tag");
       }
       // Clearing nothing is right: the FG multiplier is not part of the scope.
-      known_today("S3", "T1/E2", "a multiplier change in the middle of a real frame, reported a real frame late, pairs " + std::to_string(t.misread) + " generated Presents as real or late (Present counting, not real-frame identity)");
+      known_today("S3", "T1/E2", "a multiplier change in the middle of a real frame, reported a real frame late, leaves " + std::to_string(t.beyond) + " generated Presents beyond the reported count to the T1 grace (Present counting, not real-frame identity)");
       check_counters(s, "mid-frame multiplier change");
     }
   }
@@ -2018,16 +2011,15 @@ namespace {
 
   // A frame-generation stream with S3 token labels (game3d_ui_ticket.h). The
   // game tags each real frame's HUD-less and Backbuffer images under one
-  // token right after the previous real Present (the pacer's tag stands for
-  // the token generation), and every Present until the next real one
-  // re-offers that snapshot: under DLSS-G ordering a token's first Present is
-  // a generated one. Today (authoritative false) the stream is fg_drift's:
+  // token right after the previous real Present, and every Present until
+  // the next real one re-offers that snapshot: under DLSS-G ordering a
+  // token's first Present is a generated one. Today (authoritative false)
   // the provider pairs the HUD-less image with the presented colour by
-  // Present counting under the reported multiplier, inexact, and the
-  // identity shadow compares that with the ticket per Present. Under the
-  // test-only override T1 follows the tokens and the HUD-less image pairs
-  // only with its same-token Backbuffer (exact), never with a presented
-  // image.
+  // Present counting on every Present, inexact, so every Present detects,
+  // and the identity shadow compares that with the ticket per Present. Under
+  // the test-only override T1 follows the tokens and the HUD-less image
+  // pairs only with its same-token Backbuffer (exact), never with a
+  // presented image.
   struct identity_stream {
     fg_tally tally;
     std::size_t tokens {}, detections {}, fresh_detections {}, holds {}, unavailable {}, inexact_detections {};
@@ -2041,24 +2033,21 @@ namespace {
     s.temporal.identity_override = authoritative;
     fg_pacer pacer(cadence(0).first);
     present real;
-    real.offered = authoritative ? candidate::hudless | candidate::exact : candidate::current | candidate::hudless;
+    real.offered = authoritative ? candidate::hudless | candidate::exact : candidate::hudless;
     identity_stream out;
     ui_ticket::identity_shadow shadow;
-    std::uint64_t now = 10000, last_token = 0;
+    std::uint64_t now = 10000, last_token = 0, token = 1;
     for (std::size_t index = 0; index != count; ++index) {
       const auto [actual, reported] = cadence(index);
-      const auto step = pacer.present(true, actual, reported);
-      // Today's identity and offer by Present counting; under the override
-      // every Present re-offers the token's exact pair.
-      auto p = fg_present(step.kind, real, candidate::current, pacer.tag);
-      if (authoritative) {
-        p.offered = real.offered;
-      }
-      p.token_label = pacer.tag;
+      // Every Present re-offers the token's HUD-less image (today inexact,
+      // under the override with its same-token Backbuffer, exact).
+      auto step = pacer.next(real, real.offered, actual, reported);
+      auto &p = step.p;
+      p.token_label = token;
       p.now_ms = now;
       now += 8;
-      const bool first = pacer.tag != last_token;
-      last_token = pacer.tag;
+      const bool first = token != last_token;
+      last_token = token;
       out.tokens += first ? 1 : 0;
       const auto &r = s.step(p);
       const bool paired = r.detected && (r.gpu.bits & candidate::hudless);
@@ -2066,12 +2055,10 @@ namespace {
       if (step.real) {
         ++out.tally.real;
         out.tally.extra_holds += r.held ? 1 : 0;
-        out.tally.paired_real += paired ? 1 : 0;
       } else if (r.held) {
         ++out.tally.held;
       } else {
-        ++out.tally.lost;
-        out.tally.misread += paired ? 1 : 0;
+        ++out.tally.beyond;
       }
       out.detections += r.detected ? 1 : 0;
       out.fresh_detections += r.detected && first ? 1 : 0;
@@ -2083,11 +2070,12 @@ namespace {
       today.detects = paired;
       today.holds = r.held;
       today.exact = (p.offered & candidate::exact) != 0;
-      today.real_frame = p.real_frame;
       // The ticket pairs the HUD-less image only with its same-token
       // Backbuffer, which only the override's stream offers.
-      const auto view = shadow.step(today, pacer.tag, authoritative, authoritative, out.counters);
-      require(view.fresh == first && view.hold_previous == !first && view.real_frame == pacer.tag, std::string("The ticket identity was not fresh once per token: ") + what);
+      const auto view = shadow.step(today, token, authoritative, authoritative, out.counters);
+      require(view.fresh == first && view.hold_previous == !first && view.real_frame == token, std::string("The ticket identity was not fresh once per token: ") + what);
+      // The next token is tagged right after a real Present.
+      token += step.real ? 1 : 0;
     }
     shadow.end_scope(out.counters);
     check_counters(s, what);
@@ -2101,40 +2089,31 @@ namespace {
       const char *what;
       std::size_t count;
       cadence_fn cadence;
-      bool known_today;
     };
 
     const drift cases[] {
       {"4x matching cadence", 401, [](std::size_t) {
          return std::pair {3u, 3u};
-       },
-       false},
+       }},
       {"4x reported as 2x", 401, [](std::size_t) {
          return std::pair {3u, 1u};
-       },
-       true},
+       }},
       {"2x reported as 4x", 300, [](std::size_t index) {
          return std::pair {1u, index < 100 ? 1u : 3u};
-       },
-       false},
+       }},
       {"2x to 4x in the middle of a real frame, reported late", 300, [](std::size_t index) {
          return std::pair {index < 100 ? 1u : 3u, index < 103 ? 1u : 3u};
-       },
-       true},
+       }},
     };
     for (const auto &c : cases) {
-      // Default: today's outcomes, identical to the multiplier drift group's
-      // fg_drift, and the identity shadow of them.
-      alpha_auto_policy session;
-      accept_hudless(session);
-      sequence reference(session, difference_frame);
-      const auto expected = fg_drift(reference, c.count, 0, c.cadence);
+      // Default: today every Present detects from its inexact HUD-less pair
+      // (no Present offers nothing), and the identity shadow counts every
+      // detection beyond a token's first.
       const auto today = fg_identity(c.count, c.cadence, false, c.what);
-      require(today.tally.real == expected.real && today.tally.held == expected.held && today.tally.misread == expected.misread && today.tally.lost == expected.lost && today.tally.extra_holds == expected.extra_holds && today.tally.paired_real == expected.paired_real, std::string("The S3 shadow changed today's outcome: ") + c.what);
+      require(today.detections == today.tally.presents && !today.holds && !today.unavailable && today.inexact_detections == today.detections, std::string("Today a Present did not detect from its inexact pair: ") + c.what);
       const auto &k = today.counters;
       require(k[idn::frames_total] <= today.tokens && k[idn::frames_total] == k[idn::frames_once] + k[idn::frames_missed] + k[idn::frames_repeated], std::string("The identity shadow's frames do not add up: ") + c.what);
-      // Every detection beyond a token's first is a misread generated Present.
-      require(k[idn::frames_extra] == expected.misread && (!c.known_today || k[idn::frames_repeated]), std::string("The identity shadow's repeated detections are not today's misreads: ") + c.what);
+      require(k[idn::frames_extra] == today.detections - k[idn::frames_total] && k[idn::frames_repeated], std::string("The identity shadow's repeated detections are not today's: ") + c.what);
       std::printf("SHADOW S3 T1/E2: %s: today detects %llu of %llu frames once, %llu repeatedly (%llu extra detections, %zu from an inexact presented pair), misses %llu; the ticket detects each of %zu tokens once and holds every Present that re-offers one\n", c.what, static_cast<unsigned long long>(k[idn::frames_once]), static_cast<unsigned long long>(k[idn::frames_total]), static_cast<unsigned long long>(k[idn::frames_repeated]), static_cast<unsigned long long>(k[idn::frames_extra]), today.inexact_detections, static_cast<unsigned long long>(k[idn::frames_missed]), today.tokens);
       // The test-only override (S3 enabled): T1 by token, the exact
       // same-token pair. Strict for every cadence, the two KNOWN_TODAY S3
@@ -2198,57 +2177,48 @@ namespace {
     std::printf("SHADOW S3 E2: label cases: %s\n", ui_ticket::format_identity_counters(counters).c_str());
   }
 
-  void generated_presents_hold_within_the_tag_bound() {
-    // No multiplier constant: any number of generated Presents showing the
-    // decided real frame or the next one holds its decision (T1).
+  void generated_presents_hold_without_a_bound() {
+    // No multiplier constant and no real-frame id: any number of generated
+    // Presents (offering nothing within the reported count) hold the last
+    // real decision (T1). Only another identity scope, or a chain ended by a
+    // Present without a mask, leaves a generated Present without one.
     alpha_auto_policy session;
-    accept_hudless(session);
-    sequence s(session, difference_frame);
-    present exact;
-    exact.offered = candidate::current | candidate::hudless | candidate::exact;
-    exact.real_frame = 100;
-    exact.now_ms = 10000;
-    require(s.step(exact).source == 5, "The exact pair did not decide");
+    accept_backbuffer(session);
+    sequence s(session, backbuffer_frame);
+    present real;
+    real.offered = candidate::backbuffer;
+    real.now_ms = 10000;
+    require(s.step(real).source == 3, "The accepted Backbuffer did not decide");
     present generated;
-    generated.offered = candidate::current;
     generated.hold_previous = true;
-    generated.real_frame = 101;
     for (std::uint32_t i = 0; i != 5; ++i) {
       generated.now_ms = 10008 + 8 * i;
       const auto &r = s.step(generated);
-      require(r.held && r.hold.kind == hold_kind::generated && r.source == 5 && s.temporal.holds == i + 1, "A run of generated Presents of one tag did not hold");
+      require(r.held && r.hold.kind == hold_kind::generated && r.source == 3 && s.temporal.holds == i + 1, "A run of generated Presents did not hold");
     }
-    // A Present showing a third real frame has no decision of a frame it
-    // shows: no mask, and the chain ends.
-    generated.real_frame = 102;
-    generated.now_ms = 10048;
-    const auto &third = s.step(generated);
-    require(third.unavailable && !third.active && !third.source && !s.temporal.have_decision, "A Present beyond the tag bound held a mask");
-    generated.real_frame = 101;
+    // A generated Present in another identity scope (a recreated swapchain)
+    // has no decision to show: no mask, and the chain ends.
+    auto other = generated;
+    other.epoch = 2;
+    other.now_ms = 10048;
+    const auto &third = s.step(other);
+    require(third.unavailable && !third.active && !third.source && !s.temporal.have_decision, "A generated Present held a mask across a scope change");
     generated.now_ms = 10056;
     require(s.step(generated).unavailable, "A generated Present held after its chain ended");
     // The next real Present starts a new chain.
-    exact.real_frame = 102;
-    exact.now_ms = 10064;
-    const auto &real = s.step(exact);
-    require(real.detected && (real.gpu.per_frame & ui_detection::per_frame_hold_reset) && real.source == 5, "The real Present after a chain ended did not detect with hold_reset");
-    // DLSS multi-frame generation at 6x (5 generated): generated after 1-5
-    // Presents, real at 6, late at 7-8.
-    using ui_mask::hudless_present;
-    const hudless_present expected[] {hudless_present::generated_frame, hudless_present::generated_frame, hudless_present::generated_frame, hudless_present::generated_frame, hudless_present::generated_frame, hudless_present::real_frame, hudless_present::earlier_real_frame, hudless_present::earlier_real_frame};
-    for (std::uint64_t after = 1; after <= 8; ++after) {
-      const auto pairing = ui_mask::pair_hudless_present(100, 100 + after, true, 5);
-      require(pairing.kind == expected[after - 1] && pairing.presents_ago == (after > 6 ? after - 6 : 0), "The 6x frame generation pairing moved");
-    }
-    check_counters(s, "tag bound");
-    // A 6x stream holds every generated Present.
+    real.now_ms = 10064;
+    const auto &next = s.step(real);
+    require(next.detected && (next.gpu.per_frame & ui_detection::per_frame_hold_reset) && next.source == 3, "The real Present after a chain ended did not detect with hold_reset");
+    check_counters(s, "no bound");
+    // DLSS multi-frame generation at 6x (5 generated Presents per real one)
+    // holds every generated Present.
     alpha_auto_policy six;
-    accept_hudless(six);
-    sequence stream(six, difference_frame);
+    accept_backbuffer(six);
+    sequence stream(six, backbuffer_frame);
     const auto t = fg_drift(stream, 601, 0, [](std::size_t) {
       return std::pair {5u, 5u};
     });
-    require(t.real == 101 && t.held == 500 && !t.lost && !t.extra_holds && t.paired_real == 101, "A 6x stream did not hold every generated Present");
+    require(t.real == 101 && t.held == 500 && !t.beyond && !t.extra_holds, "A 6x stream did not hold every generated Present");
     check_counters(stream, "6x");
   }
 
@@ -2314,7 +2284,6 @@ namespace {
       });
       present p;
       p.offered = candidate::backbuffer;
-      p.real_frame = 20;
       p.now_ms = 10000;
       require(s.step(p).source == 3, "The accepted Backbuffer did not decide");
       p.offered = candidate::current;
@@ -2324,18 +2293,17 @@ namespace {
         require(r.detected && (r.gpu.per_frame & ui_detection::per_frame_accepted_missing) && !r.gpu.accepted && !r.decision.own_source && s.temporal.bits == candidate::backbuffer, "Current alpha inherited the missing Backbuffer's acceptance, or the frame adopted");
         require(i ? !r.decision.reused && !r.source : r.decision.reused && r.source == 3 && r.covered == 200, "The missing accepted Backbuffer's decision was not reused exactly once");
       }
-      // A generated Present offering an accepted UIAlpha shows the real
-      // frame's decision; it never decides from Present-time evidence.
+      // A generated Present (it offers nothing) shows the real frame's
+      // decision; it never decides from Present-time evidence.
       p.offered = candidate::backbuffer;
       p.now_ms = 10100;
       require(s.step(p).source == 3, "The returning Backbuffer did not decide");
       auto generated = p;
-      generated.offered = candidate::ui_alpha | candidate::current;
+      generated.offered = 0;
       generated.hold_previous = true;
-      generated.real_frame = 21;
       generated.now_ms = 10116;
       const auto &held = s.step(generated);
-      require(held.held && !held.detected && held.hold.kind == hold_kind::generated && held.source == 3, "A generated Present offering an accepted UIAlpha did not hold the real frame's decision");
+      require(held.held && !held.detected && held.hold.kind == hold_kind::generated && held.source == 3, "A generated Present did not hold the real frame's decision");
       check_counters(s, "accepted missing");
     }
   }
@@ -2358,7 +2326,6 @@ namespace {
       });
       present exact;
       exact.offered = candidate::current | candidate::hudless | candidate::exact;
-      exact.real_frame = 10;
       exact.now_ms = 10000;
       require(s.step(exact).source == 5, "The exact pair did not decide");
       const auto change = [field](present q) {
@@ -2372,9 +2339,8 @@ namespace {
         return q;
       };
       auto generated = change(exact);
-      generated.offered = candidate::current;
+      generated.offered = 0;
       generated.hold_previous = true;
-      generated.real_frame = 11;
       generated.now_ms = 10008;
       const bool identity = field != 1;
       const auto &g = s.step(generated);
@@ -2385,7 +2351,6 @@ namespace {
       }
       auto inexact = change(exact);
       inexact.offered = candidate::current | candidate::hudless;
-      inexact.real_frame = 11;
       inexact.now_ms = 10016;
       const auto &r = s.step(inexact);
       if (identity) {
@@ -2411,10 +2376,12 @@ namespace {
 
   void holds_survive_key_churn() {
     // An accepted, V1-invalid offscreen layer beside an accepted Backbuffer
-    // that frame generation tags on real Presents only, with a HUD-less
-    // pairing: the Backbuffer decides every real frame and every generated
-    // Present (offering the layer alone) holds it. The S1 status key, which
-    // churned between them, no longer gates a hold.
+    // that frame generation tags on real Presents only: the Backbuffer
+    // decides every real frame. A generated Present offers the layer (copied
+    // at every Present), so Present counting reads it as real: it misses the
+    // accepted Backbuffer and, the accepted layer being invalid, reuses the
+    // real frame's decision once (T1). The S1 status key, which churned
+    // between them, gates nothing and discards no sample.
     alpha_auto_policy session;
     const auto signatures = signatures_in(srgb);
     restore(session, stored_of({signatures.of(kind::ui_layer), signatures.of(kind::backbuffer)}), 2);
@@ -2425,19 +2392,18 @@ namespace {
     });
     fg_pacer pacer(1);
     present real;
-    real.offered = candidate::layer | candidate::backbuffer | candidate::hudless;
+    real.offered = candidate::layer | candidate::backbuffer;
     real.layer_flags = ui_detection::layer_detection_flags(false);
     std::size_t generated = 0;
     for (std::uint64_t now = 10000; now < 13000; now += 8) {
-      const auto kind = pacer.next(true, 1);
-      auto p = fg_present(kind, real, candidate::layer, pacer.tag);
-      p.now_ms = now;
-      const auto &r = s.step(p);
-      if (kind == ui_mask::hudless_present::generated_frame) {
+      auto step = pacer.next(real, candidate::layer, 1, 1);
+      step.p.now_ms = now;
+      const auto &r = s.step(step.p);
+      if (!step.real) {
         ++generated;
-        require(r.held && r.source == 3 && r.covered == 40, "A generated Present beside the invalid accepted layer did not hold");
+        require(r.detected && r.decision.reused && r.source == 3 && r.covered == 40, "A generated Present beside the invalid accepted layer did not reuse the real frame's decision");
       } else {
-        require(r.detected && r.source == 3 && r.covered == 40, "The accepted Backbuffer did not decide beside the invalid accepted layer");
+        require(r.detected && !r.decision.reused && r.source == 3 && r.covered == 40, "The accepted Backbuffer did not decide beside the invalid accepted layer");
       }
     }
     require(generated > 100 && !s.discards && s.frames.back().consumed.state != alpha_auto_state::collecting, "Key churn discarded samples or kept the status collecting");
@@ -2468,19 +2434,12 @@ namespace {
     present real;
     real.offered = candidate::backbuffer;
     std::size_t unaccepted_real = 0, held_unaccepted = 0, held_accepted = 0, reused = 0, lost = 0;
-    std::uint64_t presents = 0, input_present = 0;
     std::uint32_t real_source = 0, real_covered = 0;
     for (std::uint64_t now = 10000; now < 17000; now += 8) {
-      const auto step = pacer.present(true, c.actual, c.reported);
-      auto p = fg_present(step.real ? ui_mask::hudless_present::real_frame : ui_mask::hudless_present::generated_frame, real, 0u, pacer.tag);
+      // The input provider's Present counting (fg_pacer).
+      auto step = pacer.next(real, 0u, c.actual, c.reported);
+      auto &p = step.p;
       p.now_ms = now;
-      // The input provider's Present counting without a HUD-less pairing.
-      ++presents;
-      if (p.offered) {
-        input_present = presents;
-      } else {
-        p.hold_previous = ui_mask::generated_without_input(presents, input_present, true, c.reported);
-      }
       const auto &r = s.step(p);
       require(!r.unavailable, "An E33 generated Present had no real decision to show (" + name + ")");
       if (step.real) {
@@ -2545,6 +2504,139 @@ namespace {
       require(!f.source, "Load Game without acceptance was not empty");
     }
     require(fresh.stored().empty(), "Load Game's opaque Backbuffer was accepted");
+  }
+
+  // ---------------------------------------------------------------- E2/V2 HUD-less pairs
+
+  // Hogwarts Legacy 10-05 (Epic launch, DLSS-G 4x multi-frame generation)
+  // tagged only HUDLessColor: no Backbuffer and no UI color. Without a
+  // same-batch Backbuffer, counting proposes the presented colour after the
+  // tag (ui_mask::pair_hudless_present), which is never exact (E2): only V2
+  // validates the pair, and only a same-batch Backbuffer makes it exact.
+  void hudless_pairs_are_exact_only_by_batch() {
+    // The game tags its next frame one to three counted Presents before each
+    // Present, so every Present pairs (where counting by the reported
+    // multiplier had read every one as generated and held 49 s without a
+    // decision).
+    for (std::uint64_t after = 1; after <= 3; ++after) {
+      require(ui_mask::pair_hudless_present(3725, 3725 + after).kind != ui_mask::hudless_present::unpaired, "A pipelined HUD-less tag did not pair");
+    }
+    // A cycle of four Presents: three generated ones whose HUD-less image the
+    // count pairs with interpolated colour (a middle-band change set,
+    // V2-invalid) and the real one (a valid partial set, the HUD).
+    const auto real_present = [](std::uint64_t now) {
+      return (now - 10000) / 8 % 4 == 3;
+    };
+    {
+      // (i) FG 4x, every Present offering an inexact HUD-less pair: the first
+      // V2-valid selective sample accepts the pair (A1, exact or not), and
+      // from then on a valid partial set decides 5; a mispaired Present has
+      // no decision of its own (T1 reuses once). Then a menu-sized change set
+      // over a visible scene: full but inexact, so never 6, and with claim
+      // (d) but no hidden verdict never 8: no mask after the grace.
+      alpha_auto_policy session;
+      sequence s(session, [&real_present](const gpu_inputs &in) {
+        synthetic f;
+        f.change_set(in.now_ms >= 12000 ? 990 : real_present(in.now_ms) ? 50 : 500).lit(1000).scene(.5f, .5f);
+        return f.words(in);
+      });
+      present p;
+      p.offered = candidate::hudless;
+      run(s, p, 10000, 14000, 8);
+      std::size_t accepted_at = s.frames.size();
+      for (std::size_t i = 0; i != s.frames.size(); ++i) {
+        const auto &r = s.frames[i];
+        require(r.detected && !r.held && (r.gpu.bits & candidate::hudless) && !(r.gpu.bits & candidate::exact), "A Hogwarts Present did not detect from an inexact HUD-less pair");
+        require(r.source != 6 && r.source != 8 && !r.decision.h1, "A Hogwarts inexact pair decided a whole-frame source");
+        if (accepted_at == s.frames.size() && (r.gpu.accepted & candidate::hudless)) {
+          accepted_at = i;
+        }
+        if (i < accepted_at) {
+          require(!r.source, "The pair decided before it was accepted");
+        } else if (r.now_ms < 12000) {
+          require(real_present(r.now_ms) ? r.source == 5 && r.covered == 50 && !r.decision.reused : !r.decision.own_source && (!r.source || (r.decision.reused && r.source == 5)), "A Hogwarts gameplay Present did not decide its valid change set, or a mispaired one did more than reuse once");
+        } else {
+          require(!r.decision.own_source && r.decision.none_reason == ui_no_mask::difference_failed && (!r.source || r.decision.reused), "The inexact full change set over a visible scene decided something");
+        }
+      }
+      require(accepted_at < s.frames.size() && s.frames[accepted_at].now_ms < 11000 && s.trust.size() == 1 && s.trust[0].accepted == key(kind::hudless), "The inexact HUD-less pair was not accepted by a valid selective sample");
+      require(!s.scene_entered && !s.guard.hidden.held(14000), "A visible scene entered the hidden-scene hold");
+      check_counters(s, "Hogwarts HUD-less only, FG 4x");
+    }
+    {
+      // (ii) FG off, the Present after each tag counted, not a batch: an
+      // accepted pair's full change set over a visible scene (a pause menu
+      // over the live scene, or a pair that missed its frame) is inexact, so
+      // it never decides 6; the T1 grace reuses the partial decision once.
+      alpha_auto_policy session;
+      accept_hudless(session);
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.change_set(in.now_ms < 11000 ? 50 : 990).lit(1000).scene(.5f, .5f);
+        return f.words(in);
+      });
+      present p;
+      p.offered = candidate::hudless;
+      run(s, p, 10000, 12000);
+      std::size_t reused = 0;
+      for (const auto &r : s.frames) {
+        require(r.detected && r.source != 6 && r.source != 8, "A counted full change set decided a whole-frame source");
+        if (r.now_ms < 11000) {
+          require(r.source == 5 && r.covered == 50, "A counted partial change set did not decide 5");
+        } else {
+          reused += r.decision.reused ? 1 : 0;
+          require(!r.decision.own_source && (r.decision.reused ? r.source == 5 : !r.source), "A counted full change set had a decision of its own");
+        }
+      }
+      require(reused == 1 && !s.scene_entered, "The grace did not reuse once, or a visible scene entered the hidden-scene hold");
+      check_counters(s, "FG off counted full change set");
+    }
+    {
+      // (iii) A title or full-screen menu of a HUD-less-only game over a hidden
+      // scene (presented D 0.039, the HUD-less image 0.556): the inexact full
+      // change set never decides 6, but the HUD-less image is the pre-UI
+      // scene image (claim (d), changed on 90% or more), so the frame is flat
+      // through H1 (8) from the poll of the second hidden sample, once the
+      // guard holds the hidden and the pre-UI verdicts; a first session that
+      // never accepted the pair.
+      alpha_auto_policy session;
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.change_set(999).lit(1000).scene(.039f, .556f);
+        return f.words(in);
+      });
+      present p;
+      p.offered = candidate::hudless;
+      run(s, p, 10000, 11000);
+      require(s.samples.size() > 3 && !measured(s, s.samples[0]) && s.samples[1].evidence.scene.ran && s.observed[2].entered, "The HUD-less-only title did not measure and enter at its second hidden sample");
+      const auto entry = poll_of(s, s.samples[2].sample_tick_ms);
+      require(s.frames[entry].scene_bits == (ui_detection::per_frame_scene_hidden | ui_detection::per_frame_pre_ui_visible), "The title did not hold both verdicts from its entry");
+      for (std::size_t i = 0; i != s.frames.size(); ++i) {
+        const auto &r = s.frames[i];
+        require(r.source != 6 && (i >= entry ? r.flat() && r.source == 8 && r.decision.h1 : !r.source && r.decision.none_reason == ui_no_mask::difference_failed), "The HUD-less-only title was not flat exactly from the hold's entry through H1 (d)");
+      }
+      require(session.stored().empty(), "The title's full change set earned acceptance");
+      check_counters(s, "HUD-less-only title over a hidden scene");
+    }
+    {
+      // (iv) A same-batch Backbuffer makes the pair exact (Hogwarts 09-30 with
+      // its Backbuffer tagged): an accepted full change set over a lit scene
+      // is a full-screen menu and decides 6, flat.
+      alpha_auto_policy session;
+      accept_hudless(session);
+      sequence s(session, [](const gpu_inputs &in) {
+        synthetic f;
+        f.change_set(990).lit(1000).scene(.5f, .5f);
+        return f.words(in);
+      });
+      present p;
+      p.offered = candidate::backbuffer | candidate::hudless | candidate::exact;
+      run(s, p, 10000, 11000);
+      for (const auto &r : s.frames) {
+        require(r.detected && r.flat() && r.source == 6 && !r.decision.h1, "A same-batch exact full change set did not decide 6");
+      }
+      check_counters(s, "same-batch exact full change set");
+    }
   }
 
   // ---------------------------------------------------------------- F1 staleness and status
@@ -2622,10 +2714,11 @@ namespace {
   void accepted_alpha_keys_samples_alone() {
     const auto signatures = signatures_in(srgb);
     {
-      // The Witcher 3 or Resident Evil Requiem with FG 2x after an FG-off
-      // session accepted the exact HUD-less pair: real Presents offer the
-      // accepted UIAlpha and the (inexact) pair, generated ones UIAlpha alone
-      // and hold the real frame's decision (T1).
+      // Resident Evil Requiem with FG after a session accepted the HUD-less
+      // pair: every Present offers the accepted UIAlpha, and its HUD-less
+      // image pairs (inexactly, by Present counting) on some Presents only.
+      // The accepted UIAlpha decides every Present; the Presents without the
+      // pair miss an accepted candidate, adopt nothing and discard nothing.
       alpha_auto_policy session;
       restore(session, stored_of({signatures.of(kind::ui_alpha), signatures.of(kind::hudless)}), 2);
       sequence s(session, [](const gpu_inputs &in) {
@@ -2633,28 +2726,26 @@ namespace {
         f.alpha(kind::ui_alpha, 50).change_set(50);
         return f.words(in);
       });
-      fg_pacer pacer(1);
-      present real;
-      real.offered = candidate::ui_alpha | candidate::hudless;
-      std::size_t generated = 0;
-      for (std::uint64_t now = 10000; now < 13000; now += 8) {
-        const auto kind = pacer.next(true, 1);
-        auto p = fg_present(kind, real, candidate::ui_alpha, pacer.tag);
+      present p;
+      std::size_t unpaired = 0, index = 0;
+      for (std::uint64_t now = 10000; now < 13000; now += 8, ++index) {
+        const bool paired = index % 2 == 0;
+        p.offered = paired ? candidate::ui_alpha | candidate::hudless : candidate::ui_alpha;
         p.now_ms = now;
         const auto &r = s.step(p);
-        const bool is_generated = kind == ui_mask::hudless_present::generated_frame;
-        generated += is_generated ? 1 : 0;
-        require((is_generated ? r.held : r.detected) && r.source == 1 && r.covered == 50, "The accepted UIAlpha did not decide every real Present, or a generated Present did not hold it");
+        unpaired += paired ? 0 : 1;
+        require(r.detected && !r.decision.reused && r.source == 1 && r.covered == 50, "The accepted UIAlpha did not decide every Present");
       }
-      require(generated > 100 && !s.discards && s.samples.size() >= 25, "An intermittent accepted HUD-less pair discarded samples beside the accepted UIAlpha (" + std::to_string(s.discards) + " discarded, " + std::to_string(s.samples.size()) + " read)");
+      require(unpaired > 100 && !s.discards && s.samples.size() >= 25, "An intermittent accepted HUD-less pair discarded samples beside the accepted UIAlpha (" + std::to_string(s.discards) + " discarded, " + std::to_string(s.samples.size()) + " read)");
       require(s.frames.back().consumed.state != alpha_auto_state::collecting, "The status stayed checking");
       check_counters(s, "accepted UIAlpha beside an accepted HUD-less pair");
     }
     {
       // An accepted offscreen layer beside an accepted Backbuffer that frame
-      // generation tags on real Presents only (no HUD-less pair, so every
-      // Present is real): the layer decides every Present; Presents without
-      // the Backbuffer flag it missing but decide by themselves.
+      // generation tags on real Presents only: the layer copy is offered on
+      // every Present, so every Present is real to Present counting; the
+      // layer decides every Present, and Presents without the Backbuffer flag
+      // it missing but decide by themselves.
       alpha_auto_policy session;
       restore(session, stored_of({signatures.of(kind::ui_layer), signatures.of(kind::backbuffer)}), 2);
       sequence s(session, [](const gpu_inputs &in) {
@@ -2667,9 +2758,9 @@ namespace {
       real.offered = candidate::layer | candidate::backbuffer;
       real.layer_flags = ui_detection::layer_detection_flags(false);
       for (std::uint64_t now = 10000; now < 13000; now += 8) {
-        auto p = fg_present(pacer.next(true, 1), real, candidate::layer, pacer.tag);
-        p.now_ms = now;
-        const auto &r = s.step(p);
+        auto step = pacer.next(real, candidate::layer, 1, 1);
+        step.p.now_ms = now;
+        const auto &r = s.step(step.p);
         require(r.detected && r.source == ui_detection::source_layer && !r.decision.reused, "The accepted layer did not decide every Present");
       }
       require(!s.discards && s.samples.size() >= 25 && s.frames.back().consumed.state != alpha_auto_state::collecting, "An intermittent accepted Backbuffer discarded samples beside the accepted layer");
@@ -2984,9 +3075,21 @@ namespace {
     {
       // W3 FG on 2x: the HUD's declared UIAlpha is accepted by its first
       // sample (A1) and decides afterwards; the sign wheel's full UIAlpha then
-      // pins flat on real Presents (P1) and is held on generated ones (T1).
-      // The inexact pair never judges it (E2, A2).
-      const auto w3 = phased({{14000, recorded_frames({recorded::w3_hud_fg, recorded::w3_hud_fg_accepted})}, {UINT64_MAX, recorded_frames({recorded::w3_wheel_fg, recorded::w3_wheel_fg_accepted})}});
+      // pins flat on real Presents (P1). A generated Present offers only its
+      // HUD-less image, paired by Present counting with interpolated colour
+      // (a middle-band change set, V2-invalid), so it is real to counting:
+      // without the accepted UIAlpha it reuses the real frame's decision once
+      // (T1). The inexact pair never judges it (E2, A2).
+      const auto recorded = phased({{14000, recorded_frames({recorded::w3_hud_fg, recorded::w3_hud_fg_accepted})}, {UINT64_MAX, recorded_frames({recorded::w3_wheel_fg, recorded::w3_wheel_fg_accepted})}});
+      const auto w3 = [recorded](const gpu_inputs &in) {
+        if (in.bits & candidate::ui_alpha) {
+          return recorded(in);
+        }
+        synthetic f;
+        f.c.pixels = 3686400;
+        f.change_set(3686400 / 2);
+        return f.words(in);
+      };
       alpha_auto_policy session;
       sequence s(session, w3);
       fg_pacer pacer(1);
@@ -2994,13 +3097,12 @@ namespace {
       real.offered = candidate::ui_alpha | candidate::current | candidate::hudless;  // UIAlpha, current and an inexact HUD-less pair.
       std::uint32_t last_real = 0;
       for (std::uint64_t now = 10000; now < 17000; now += 8) {
-        const auto kind = pacer.next(true, 1);
-        auto p = fg_present(kind, real, candidate::current, pacer.tag);
-        p.now_ms = now;
-        const auto &r = s.step(p);
-        require(r.held == (kind == ui_mask::hudless_present::generated_frame) && r.detected == !r.held, "A W3 FG Present was held wrongly");
-        if (r.held) {
-          require(r.source == last_real, "A generated Present did not hold the real frame's mask");
+        auto step = pacer.next(real, candidate::hudless, 1, 1);
+        step.p.now_ms = now;
+        const auto &r = s.step(step.p);
+        require(r.detected && !r.held, "A W3 FG Present did not detect");
+        if (!step.real) {
+          require(r.source == last_real && !r.decision.own_source, "A generated Present did not show the real frame's mask");
         } else if (!(r.gpu.accepted & candidate::ui_alpha)) {
           require(!r.source && r.decision.none_reason == ui_no_mask::unaccepted, "The W3 HUD UIAlpha decided before its first sample was read");
         } else if (now < 14000) {
@@ -3009,7 +3111,7 @@ namespace {
         if (now >= 14100) {
           require(r.flat() && r.source == 1, "The accepted W3 FG on sign wheel was not flat");
         }
-        if (!r.held) {
+        if (step.real) {
           last_real = r.source;
         }
       }
@@ -3407,8 +3509,9 @@ namespace {
     // The live failure fix 1 answers (S2b build, Stellar Blade SDR, FG set to
     // 2x, 07:19-07:21): the game suspends frame generation while a menu is
     // open. FG-on gameplay offers the layer, current alpha and the HUD-less
-    // tag on real Presents (viewport 1: depth from Streamline), and generated
-    // Presents hold. Nothing claims, so no sample measures D (the log's
+    // image (paired by Present counting) on every Present (viewport 1: depth
+    // from Streamline), so every Present detects. Nothing claims, so no
+    // sample measures D (the log's
     // evidence was invalid on its samples), yet the layer equals the
     // presented frame on 99.82% of pixels (dump 476, texel 11): the ledger
     // proves pre_ui:87:srgb by the first sample 2 s in. A menu suspends FG:
@@ -3480,13 +3583,12 @@ namespace {
         now += 16;
         continue;
       }
-      const auto kind = pacer.next(true, 1);
-      auto p = fg_present(kind, fg_on, candidate::layer | candidate::current, pacer.tag);
-      p.now_ms = now;
-      const auto &r = s.step(p);
-      if (kind == ui_mask::hudless_present::generated_frame) {
+      auto step = pacer.next(fg_on, fg_on.offered, 1, 1);
+      step.p.now_ms = now;
+      const auto &r = s.step(step.p);
+      if (!step.real) {
         ++generated;
-        require(!r.detected && !r.flat(), "A generated FG-on Present detected or was flat");
+        require(r.detected && !r.flat(), "A generated FG-on Present did not detect, or was flat");
       }
       now += 8;
     }
@@ -4472,16 +4574,17 @@ namespace {
       // The default shadow leaves the acceptance ledger as it was before
       // fix 2. Stellar Blade SDR, second session: the layer's pre-UI proof
       // restored provisional; gameplay offers the layer (uncovered, never
-      // matching) beside a HUD-less image that does not decide, so the
-      // HUD-less image is the offer's pre-UI image and no other rule
-      // measures. H2 measures every sample frame (visible, so it never
-      // runs), but its measurements never reach the ledger: the proof's
-      // reconfirm clock stays paused and it does not lapse.
+      // matching) beside a mispaired HUD-less image (a middle-band change
+      // set) that never earns or decides, so the HUD-less image is the
+      // offer's pre-UI image and no other rule measures. H2 measures every
+      // sample frame (visible, so it never runs), but its measurements never
+      // reach the ledger: the proof's reconfirm clock stays paused and it
+      // does not lapse.
       alpha_auto_policy session;
       restore(session, sb_sdr_proof(), 1);
       sequence s(session, [](const gpu_inputs &in) {
         synthetic f;
-        f.alpha(kind::ui_layer, 0).change_set(10).scene(.4f, .4f);
+        f.alpha(kind::ui_layer, 0).change_set(500).scene(.4f, .4f);
         return f.words(in);
       });
       run_still(s, sb_sdr_present(candidate::layer | candidate::hudless), 10000, 80000);
@@ -4864,11 +4967,12 @@ int main(int argc, char **argv) {
     {"S2 manual On", manual_on_is_a_session_override},
     {"T1 frame generation holds", generated_presents_hold_per_multiplier},
     {"T1/E2 frame generation multiplier drift", generated_presents_under_multiplier_drift},
-    {"T1 tag bound and 6x", generated_presents_hold_within_the_tag_bound},
+    {"T1 no bound and 6x", generated_presents_hold_without_a_bound},
     {"T1 grace of real frames without their own decision", real_frames_without_their_own_decision},
     {"T1 no hold across a scope change", holds_never_cross_a_scope},
     {"T1 holds survive key churn", holds_survive_key_churn},
     {"A1/S1/T1/P1 E33 title and Load Game", e33_title_and_load_game},
+    {"E2/V2/A1/H1 Hogwarts HUD-less pairs exact only by batch", hudless_pairs_are_exact_only_by_batch},
     {"F1 sample staleness and status key", samples_go_stale_and_are_discarded},
     {"F1 winner keys samples", accepted_alpha_keys_samples_alone},
     {"H1 W3 layer route", hidden_scene_layer_route},

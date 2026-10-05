@@ -27,11 +27,12 @@ namespace sunshine_game3d::ui_input {
   namespace capture = sunshine_streamline::depth_capture;
   namespace {
     using choice = ui_qualification::choice;
-    // Paired with its batch's tagged Backbuffer, on time, late but paired with
-    // retained color, held on a generated present, too old to pair, otherwise
-    // unpaired, and no HUD-less capture.
-    enum hudless_outcome : unsigned { hudless_batch, hudless_real, hudless_late, hudless_generated, hudless_stale,
-      hudless_other, hudless_none, hudless_outcome_count };
+    // Paired with its batch's tagged Backbuffer (exact), with the Present
+    // after its tag, late with retained color (both inexact), too old to
+    // pair, otherwise unpaired, and no HUD-less capture. The gate line keeps
+    // its generated field, always 0 since no HUD-less pairing holds.
+    enum hudless_outcome : unsigned { hudless_batch, hudless_real, hudless_late, hudless_stale, hudless_other,
+      hudless_none, hudless_outcome_count };
     struct source_entry {
       ui_qualification::session selection;
       ui_qualification::scope base;
@@ -184,7 +185,7 @@ namespace sunshine_game3d::ui_input {
         {"tag_type", static_cast<std::uint32_t>(origin.kind)}, {"tag_scope", origin.tag_scope},
         {"channel", origin.kind == ui_mask::source_kind::hudless ? "rgb_difference" : origin.kind == ui_mask::source_kind::alpha ? "red" : "alpha"}, {"format", copy.format},
         {"available_for_detection", admitted}, {"current_present_pair", paired},
-        {"association", origin.kind == ui_mask::source_kind::hudless ? "real_frame_present_generation" : "latest_submitted_input_approximation"},
+        {"association", origin.kind == ui_mask::source_kind::hudless ? "present_after_tag_inexact" : "latest_submitted_input_approximation"},
         {"epoch", source.epoch}, {"observation_revision", source.observation_revision},
         {"sequence", source.sequence}, {"tick_ms", source.tick}, {"age_ms", now >= source.tick ? now - source.tick : 0},
         {"viewport", source.viewport}, {"source_native", source.resource.native}, {"source_command", origin.command},
@@ -401,15 +402,17 @@ namespace sunshine_game3d::ui_input {
       if (kind == ui_mask::source_kind::backbuffer) {
         backbuffer_producer = selected.texture.producer_queue; backbuffer_token = selected.token_generation;
       }
-      // Pairing is by Present count only. Streamline can present on its own
-      // queue; pixels from another queue were already admitted only after the
+      // Without a same-batch Backbuffer, counting proposes the presented color
+      // after the tag, inexact (ui_mask::pair_hudless_present); only V2 then
+      // validates the pair's pixels. Streamline can present on its own queue;
+      // pixels from another queue were already admitted only after the
       // producer completed and its recording retired.
       const auto tagged = selected.origin.source_present_generation, current = selected.current_source_present_generation;
-      const auto pairing = ui_mask::pair_hudless_present(tagged, current, status.fg_active(), status.fg.generated_frames);
+      const auto pairing = ui_mask::pair_hudless_present(tagged, current);
       using ui_mask::hudless_present;
       const bool batch = hudless && backbuffer.view.handle &&
         ui_mask::same_tag_interval(tagged, current, backbuffer.tagged, backbuffer.current);
-      const bool counted = pairing.kind == hudless_present::real_frame || pairing.kind == hudless_present::earlier_real_frame;
+      const bool counted = pairing.kind != hudless_present::unpaired;
       // S3: the ticket's pair for this HUD-less image: the same-token
       // Backbuffer (token space, any frame generation), else, with frame
       // generation off over a real span on the presenting queue, the
@@ -426,26 +429,9 @@ namespace sunshine_game3d::ui_input {
       }
       const bool paired = authoritative && hudless ? ticket_exact || (token_batch && batch) :
         batch || counted;
-      if (hudless) hudless_result = batch ? hudless_batch : pairing.kind == hudless_present::real_frame ? hudless_real :
-        pairing.kind == hudless_present::earlier_real_frame ? hudless_late :
-        pairing.kind == hudless_present::generated_frame ? hudless_generated :
+      if (hudless) hudless_result = batch ? hudless_batch : pairing.kind == hudless_present::next_present ? hudless_real :
+        pairing.kind == hudless_present::earlier_present ? hudless_late :
         tagged && tagged != UINT64_MAX && current > tagged ? hudless_stale : hudless_other;
-      if (hudless && !batch && pairing.kind == hudless_present::generated_frame) {
-        // Interpolated color cannot be differenced against this tag's scene.
-        // Nothing is copied; the renderer shows the decision of the real frame
-        // this Present shows (T1), identified by the tag's present generation.
-        if (diagnostic) {
-          candidates.push_back(captured_metadata(selected, now, false, false));
-          candidates.back()["held_for_generated_present"] = true;
-        }
-        result.status.retained_alpha_ready = true;
-        result.detection.hold_previous = true;
-        result.detection.real_frame = tagged;
-        available = true;
-        if (manual) explicit_captures[slot] = {true, selected, {}, diagnostic ? candidates.back().dump() : std::string{}};
-        if (diagnostic) candidates.back()["ticket"] = ticket_json(tickets[ticket_slot], stamped[ticket_slot]);
-        continue;
-      }
       // An unauthenticated UIAlpha tag cannot hide independently usable
       // lower-priority candidates in Auto; an authenticated one is validated on
       // the GPU. A manual choice may use it.
@@ -475,10 +461,10 @@ namespace sunshine_game3d::ui_input {
             [&](api::resource destination) { return copy(destination, {}, 0); }, static_cast<api::format>(selected.texture.format));
       }
       if (diagnostic) {
-        candidates.push_back(captured_metadata(selected, now, view.handle != 0, pairing.kind == hudless_present::real_frame));
+        candidates.push_back(captured_metadata(selected, now, view.handle != 0, pairing.kind == hudless_present::next_present));
         if (hudless) {
           candidates.back()["paired_with"] = batch ? "tagged_backbuffer_same_batch" : "presented_color";
-          candidates.back()["real_frame_presents_ago"] = pairing.presents_ago;
+          candidates.back()["presents_ago"] = pairing.presents_ago;
           candidates.back()["ticket_pair"] = token_batch && batch_hudless.token_generation == selected.token_generation ?
             "same_token_backbuffer" : hudless_present_space ? "proposed_present" : "absent";
         }
@@ -491,15 +477,12 @@ namespace sunshine_game3d::ui_input {
       if (hudless) {
         if (batch) result.detection.hudless_pair = backbuffer.view;
         else result.detection.hudless_presents_ago = pairing.presents_ago;
-        // Present counting is exact only without frame generation; Hogwarts
-        // showed FG-on Present pairs that belonged to another frame. Once S3
-        // is authoritative the ticket's pair decides exactness instead.
-        result.detection.hudless_exact = authoritative ? ticket_exact : batch || !status.fg_active();
+        // Only a same-batch Backbuffer makes the pair exact (E2): a counted
+        // Present can show another frame, with frame generation or without
+        // (Hogwarts 09-30 and 10-05). Once S3 is authoritative the ticket's
+        // pair decides exactness instead.
+        result.detection.hudless_exact = authoritative ? ticket_exact : batch;
         result.detection.hudless = view;
-        // T1 identifies the real frame by the HUD-less tag's present
-        // generation; once S3 is authoritative the renderer identifies it by
-        // the newest offered token (ui_temporal::ticket_identity).
-        result.detection.real_frame = tagged;
         today.detects = true; today.exact = result.detection.hudless_exact;
       } else result.detection.masks[slot] = view;
       signatures.set(slot_kinds[slot], typed_format(selected.texture.format));
@@ -587,21 +570,19 @@ namespace sunshine_game3d::ui_input {
         result.status.retained_alpha_ready = true; available = true;
       }
     }
-    // T1 by Present counting without a HUD-less pairing: a render that offers
-    // nothing, within the reported generated count of the last one that
-    // offered a Streamline UI tag, is a generated Present and shows that
-    // real frame's decision. It carries no real-frame id (no tag bound); the
-    // count bounds it.
+    // T1 by Present counting: a render that offers nothing, within the
+    // reported generated count of the last one that offered a Streamline UI
+    // tag, is a generated Present and shows that real frame's decision
+    // (ui_mask::generated_without_input); the count bounds it.
     const bool tag_offered = result.detection.masks[0].handle || result.detection.masks[1].handle ||
       result.detection.masks[2].handle;
     std::string identity_line, interposer_line;
-    if (capturing && !available && !result.detection.hold_previous &&
+    if (capturing && !available &&
         ui_mask::generated_without_input(frame_sequence, input_present, status.fg_active(), status.fg.generated_frames)) {
       if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},
         {"association", "present_count_after_last_ui_tag"}, {"presents_since_ui_tag", frame_sequence - input_present}});
       result.status.retained_alpha_ready = true;
       result.detection.hold_previous = true;
-      result.detection.real_frame = 0;
       available = true;
     }
     const bool current_allowed = status.requested && !status.fg_active() && present_has_alpha(base.output_format) &&
@@ -784,7 +765,7 @@ namespace sunshine_game3d::ui_input {
       refused.append("} begin_last=").append(ui_ticket::name(latest.begin_refusal));
       char message[1152]{};
       std::snprintf(message, sizeof(message),
-        "Sunshine UI capture gate: runtime=%p request_generation=%llu wanted={epoch=%llu revision=%llu viewport=%u device=%llu size=%ux%u kinds=0x%x} hook={state=%s epoch=%llu revision=%llu viewport=%u sequence=%llu tick=%llu kinds=0x%x matches=%u} boundary=%llu attempted=%u recorded=%u hudless_presents={batch=%u real=%u late=%u generated=%u stale=%u other=%u none=%u} %s; gate metadata does not authorize pixels",
+        "Sunshine UI capture gate: runtime=%p request_generation=%llu wanted={epoch=%llu revision=%llu viewport=%u device=%llu size=%ux%u kinds=0x%x} hook={state=%s epoch=%llu revision=%llu viewport=%u sequence=%llu tick=%llu kinds=0x%x matches=%u} boundary=%llu attempted=%u recorded=%u hudless_presents={batch=%u real=%u late=%u generated=0 stale=%u other=%u none=%u} %s; gate metadata does not authorize pixels",
         static_cast<void *>(runtime), static_cast<unsigned long long>(latest.request_generation),
         static_cast<unsigned long long>(latest.wanted.epoch), static_cast<unsigned long long>(latest.wanted.revision),
         latest.wanted.viewport, static_cast<unsigned long long>(latest.wanted.device_identity),
@@ -793,8 +774,8 @@ namespace sunshine_game3d::ui_input {
         gate.viewport, static_cast<unsigned long long>(gate.sequence), static_cast<unsigned long long>(gate.tick),
         gate.seen_kinds, gate.matching_requests, static_cast<unsigned long long>(latest.latest_boundary.source.sequence),
         unsigned(latest.record_attempted), unsigned(latest.record_completed),
-        outcomes[hudless_batch], outcomes[hudless_real], outcomes[hudless_late], outcomes[hudless_generated],
-        outcomes[hudless_stale], outcomes[hudless_other], outcomes[hudless_none], refused.c_str());
+        outcomes[hudless_batch], outcomes[hudless_real], outcomes[hudless_late], outcomes[hudless_stale],
+        outcomes[hudless_other], outcomes[hudless_none], refused.c_str());
       sunshine_log::message(reshade::log::level::info, message);
     }
     if (have_diagnostic && latest.latest_boundary.source.sequence) {
