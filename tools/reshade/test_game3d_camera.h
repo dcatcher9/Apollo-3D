@@ -3,7 +3,6 @@
 // No per-game calibration, source selection, or alternative renderer lives here.
 #pragma once
 #include <limits>
-#include "test_game3d_camera_scene.h"
 #include "test_scale_candidates_runtime.h"
 #include "test_stereo_reference_runtime.h"
 
@@ -272,7 +271,6 @@ namespace sunshine_camera_fixture {
       runtime->set_uniform_value_float(f.uniform("Sunshine_CameraConvergence"), convergence, 2);
     };
     if (scene_requested()) {
-      run_scene_policy(f, width, height, plane, capture, prepared_center, metadata, ready, log, output);
       // A nondefault depth-coordinate transform cannot silently change the
       // reference patch behind raw-relative automation. Compare final pixels
       // against the original path with that same saved transform.

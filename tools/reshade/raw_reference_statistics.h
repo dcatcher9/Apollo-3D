@@ -6,7 +6,7 @@
 #include <limits>
 
 // Stateless reference statistics. Source/frame association, clock, calibration,
-// target readiness and frozen gain belong exclusively to camera_scene_policy.
+// target readiness and gain belong exclusively to their callers.
 namespace sunshine_raw_reference {
   inline constexpr unsigned width = 32, height = 18, cell_count = width * height;
   using grid = std::array<float, cell_count>;

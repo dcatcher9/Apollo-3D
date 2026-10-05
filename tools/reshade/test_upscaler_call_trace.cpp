@@ -1005,6 +1005,15 @@ namespace {
     require(captured_frame.jitter.supplied && captured_frame.jitter.x == 0.0f && captured_frame.jitter.y == 0.0f &&
       captured_frame.jitter.width == 1920 && captured_frame.jitter.height == 1080,
       "zero jitter or legacy creation-resolution domain was lost");
+    // NGX's evaluation helpers always write the render subrect; 0x0 means the
+    // whole creation-size input, exactly like absent keys.
+    parameters.missing_render = false;
+    parameters.render_width = parameters.render_height = 0;
+    evaluate_metadata(api);
+    require(captured_frame.resource.area.width == 1920 && captured_frame.resource.area.height == 1080 &&
+      captured_frame.jitter.width == 1920 && captured_frame.jitter.height == 1080,
+      "a 0x0 render subrect was not treated as unset");
+    parameters.missing_render = true;
 
     const auto expect_unsupplied = [&] {
       require(!captured_frame.jitter.supplied && captured_frame.jitter.x == 0.0f && captured_frame.jitter.y == 0.0f &&

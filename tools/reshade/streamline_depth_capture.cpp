@@ -241,7 +241,9 @@ namespace sunshine_streamline::depth_capture {
     };
     using command_storage = sunshine_native_command::storage<command_state>;
     using recording_ref = std::shared_ptr<sunshine_native_command::recording_lifetime>;
-    std::uint64_t command_generation{1}; // Protected by mutex, like recording payloads.
+    // Advanced under mutex (invalidate_all); read without it by the barrier
+    // hooks, which keep their recording's payload without the capture lock.
+    std::atomic<std::uint64_t> command_generation{1};
     struct queue_state {
       com_ptr<ID3D12CommandQueue> queue;
       com_ptr<ID3D12Device> device;
@@ -312,6 +314,7 @@ namespace sunshine_streamline::depth_capture {
       // publication never trusts it. reserved_bytes counts toward the
       // diagnostic budget while live.
       std::uint64_t reservation{}, reservation_tick{}, reserved_bytes{};
+      bool reserved_live{}; // The reservation is for a live snapshot (its budget).
       // Direct binding (lease_local_view): the runtime list and recording on
       // which this snapshot sits in the shader-resource state until
       // end_local_views returns it to COMMON.
@@ -580,10 +583,15 @@ namespace sunshine_streamline::depth_capture {
       ++command_generation;
       reason = status::unavailable;
     }
+    // Every game ResourceBarrier/Barrier arrives here. A recording's payload is
+    // read and written only on the thread recording that list (its lifecycle
+    // events, record_impl and this hook; a list is recorded by one thread at
+    // a time), so barrier states take no capture lock. A list ReShade never
+    // reported cannot admit a capture (lifecycle_view), so nothing is tracked
+    // for it and its states cannot grow without a Reset.
     void barriers(std::uint64_t native, std::uint64_t cookie, std::uint32_t count, const D3D12_RESOURCE_BARRIER *values) {
-      std::lock_guard lock(mutex);
       auto owner = command(native, cookie, true);
-      if (!owner || owner->closed) return;
+      if (!owner || owner->closed || !owner->reported) return;
       ++owner->native_barrier_calls;
       owner->last_barrier_command = native;
       for (unsigned n = 0; n != count; ++n) {
@@ -695,9 +703,9 @@ namespace sunshine_streamline::depth_capture {
     // recording. Other subresources (a stencil plane) keep subresource 0's state.
     void enhanced_textures(std::uint64_t native, std::uint64_t cookie, unsigned count,
         const native_observer::enhanced_texture *textures) {
-      std::lock_guard lock(mutex);
+      // No capture lock, exactly as barriers().
       auto owner = command(native, cookie, true);
-      if (!owner || owner->closed) return;
+      if (!owner || owner->closed || !owner->reported) return;
       for (unsigned i = 0; i != count; ++i) {
         const auto &texture = textures[i];
         if (!texture.resource || !texture.first_subresource) continue;
@@ -978,20 +986,27 @@ namespace sunshine_streamline::depth_capture {
     // Requiring the latest nomination to finish can starve a pipelined game.
     // Finished pixels stay valid through later metadata events (camera reset,
     // tag changes, observation loss); only source identity and age bound them.
-    slot *completed_snapshot(const input &current, std::uint64_t now) {
+    // consumer: the reading queue. A snapshot already submitted on it is
+    // ordered before the read by queue order, exactly as a current capture is
+    // (submission_status); another queue needs a retired recording and a
+    // completed producer fence.
+    slot *completed_snapshot(const input &current, std::uint64_t now, std::uint64_t consumer = 0) {
       if (!valid_provider(current.provider) || !current.epoch) return nullptr;
       slot *best = nullptr;
       for (auto &value : slots) {
         const auto &metadata = value.metadata;
         if (!value.id || !value.texture || value.shared_preservation || value.nomination_only || value.preservation_only ||
             !value.source_nominated || !value.finished || !value.success || value.invalid || value.nomination_invalid ||
-            !value.producer_submitted || !producer_recording_retired(value) ||
+            !value.producer_submitted ||
             metadata.provider != current.provider || metadata.frame_generation_input != current.frame_generation_input ||
             metadata.epoch != current.epoch || metadata.source_id != current.source_id || metadata.viewport != current.viewport ||
             metadata.sequence > current.sequence ||
             !metadata.tick || now < metadata.tick || now - metadata.tick >= sunshine_scene_depth::maximum_source_age_ms) continue;
-        const auto progress = producer_progress(value);
-        if (!progress.valid() || progress.completed < value.producer_fence) continue;
+        if (!consumer || value.queue != consumer) {
+          if (!producer_recording_retired(value)) continue;
+          const auto progress = producer_progress(value);
+          if (!progress.valid() || progress.completed < value.producer_fence) continue;
+        }
         if (!best || metadata.sequence > best->metadata.sequence ||
             (metadata.sequence == best->metadata.sequence && value.id > best->id)) best = &value;
       }
@@ -1033,7 +1048,7 @@ namespace sunshine_streamline::depth_capture {
       if (!latest || (chosen.result != status::recorded && chosen.result != status::submitted) ||
           latest->invalid || latest->nomination_invalid || latest->nomination_only ||
           (latest->finished && !latest->success) || !within_source_age(latest->metadata.tick, now)) return chosen;
-      auto *completed = completed_snapshot(latest->metadata, now);
+      auto *completed = completed_snapshot(latest->metadata, now, native);
       if (!completed) { chosen.selection = selection_reason::no_completed_snapshot; return chosen; }
       chosen.selection = completed_fallback_reason(owner, present, *latest, *completed);
       if (chosen.selection != selection_reason::completed_snapshot) {
@@ -1334,34 +1349,43 @@ namespace sunshine_streamline::depth_capture {
     void clear_reservation(std::uint64_t token) {
       if (!token) return;
       const auto clear = [token](slot &entry) {
-        if (entry.reservation == token) entry.reservation = entry.reservation_tick = entry.reserved_bytes = 0;
+        if (entry.reservation == token) { entry.reservation = entry.reservation_tick = entry.reserved_bytes = 0; entry.reserved_live = false; }
       };
       for (auto &entry : slots) clear(entry);
       for (auto &entry : diagnostic_slots) clear(entry);
     }
+    // Live snapshots (record_local_texture, reused every frame) and Dump 3D
+    // copies keep separate budgets, so an armed dump never evicts or crowds
+    // live storage. Dump copies keep the fixed limit. Live storage is sized
+    // from the request: room for this many snapshots of its size (a few UI
+    // kinds, each with a frame in flight), never less than the fixed limit.
+    constexpr std::uint64_t live_snapshot_reserve = 8;
+    // Idle cached storage is always live: dump copies are never cached.
+    bool live_storage(const slot &entry) { return entry.id ? entry.diagnostic_reusable : bool(entry.texture); }
     // own: the caller's reservation, whose reserved bytes are its own. Evicted
     // idle storage moves to discard (released by the caller after the lock).
     bool reserve_diagnostic_bytes(std::array<slot, diagnostic_slot_limit> &pool,
-        const slot *replacement, std::uint64_t bytes, std::uint64_t own = 0,
+        const slot *replacement, std::uint64_t bytes, bool live, std::uint64_t own = 0,
         std::vector<std::shared_ptr<texture_reference>> *discard = nullptr) {
-      if (!bytes || bytes > diagnostic_byte_limit) return false;
+      const auto limit = live ? std::max(diagnostic_byte_limit, live_snapshot_reserve * bytes) : diagnostic_byte_limit;
+      if (!bytes || bytes > limit) return false;
       std::uint64_t allocated = 0;
       for (const auto &entry : pool) {
-        if (&entry != replacement && entry.texture) allocated += entry.texture->allocation_bytes;
+        if (&entry != replacement && entry.texture && live_storage(entry) == live) allocated += entry.texture->allocation_bytes;
         // Storage another attempt is allocating without the lock right now.
-        if (reserved_by_other(entry, own)) allocated += entry.reserved_bytes;
+        if (reserved_by_other(entry, own) && entry.reserved_live == live) allocated += entry.reserved_bytes;
       }
       // A format/size change may need different storage. Evict only idle cache
       // entries; live tickets and any unfinished GPU obligations retain theirs.
       for (auto &entry : pool) {
-        if (allocated <= diagnostic_byte_limit - bytes) return true;
-        if (&entry != replacement && !entry.id && entry.texture) {
+        if (allocated <= limit - bytes) return true;
+        if (live && &entry != replacement && !entry.id && entry.texture) {
           allocated -= entry.texture->allocation_bytes;
           if (discard) discard->push_back(std::move(entry.texture));
           entry.texture.reset();
         }
       }
-      return allocated <= diagnostic_byte_limit - bytes;
+      return allocated <= limit - bytes;
     }
     // Storage a record attempt allocates without the capture lock.
     struct storage_plan {
@@ -1745,10 +1769,45 @@ namespace sunshine_streamline::depth_capture {
     }
     collect_retired();
   }
+  namespace {
+    // Idle snapshot storage kept for reuse beyond this is released.
+    constexpr std::uint64_t idle_pixel_byte_limit = 256ull * 1024 * 1024;
+    // Requires mutex. A reclaimable slot keeps only its allocation: the game
+    // resource, its device and recording references go now rather than when
+    // the slot is next reused (after a hitch many slots can be idle). Released
+    // storage moves to discard, for release after the lock.
+    void release_idle_slots(std::vector<std::shared_ptr<texture_reference>> &discard) {
+      // An API namespace's newest nomination stays: selection reports its
+      // failure or pending state.
+      const auto head = [](const slot &value) {
+        const auto &metadata = value.metadata;
+        if (value.preservation_only || !metadata.epoch || !valid_provider(metadata.provider)) return false;
+        const auto &current = evaluations[provider_index(metadata.provider)];
+        return metadata.epoch == current.epoch && metadata.sequence == current.sequence && metadata.source_id == current.source_id;
+      };
+      std::uint64_t idle = 0;
+      for (auto &value : slots) {
+        if (value.id && !head(value) && reclaimable(value)) {
+          slot idle_slot;
+          idle_slot.texture = std::move(value.texture);
+          // A record attempt may be allocating for this slot without the lock.
+          idle_slot.reservation = value.reservation; idle_slot.reservation_tick = value.reservation_tick;
+          idle_slot.reserved_bytes = value.reserved_bytes; idle_slot.reserved_live = value.reserved_live;
+          value = std::move(idle_slot);
+        }
+        if (value.id || !value.texture) continue;
+        if (idle + value.texture->allocation_bytes > idle_pixel_byte_limit) discard.push_back(std::move(value.texture));
+        else idle += value.texture->allocation_bytes;
+      }
+    }
+  }
   void poll() {
     if (requested.load()) native_observer::install_pending();
+    std::vector<std::shared_ptr<texture_reference>> discard;
     std::lock_guard lock(mutex);
     collect_retired();
+    try { release_idle_slots(discard); } catch (...) {}
+    // discard is destroyed after the lock (declared before it).
   }
   void set_preservation_available(preservation_available_callback callback) {
     preservation_available.store(callback, std::memory_order_release);
@@ -1759,11 +1818,33 @@ namespace sunshine_streamline::depth_capture {
     // queue is unknown here, and depth/metadata/evaluation may still be invalid.
     observe_command(native);
   }
+  namespace {
+    // An established source keeps its queue mono through gaps only while its
+    // API still evaluates it. A game that stops calling the API without a
+    // release (DLSS -> TAA, a cutscene without DLSS) loses the association
+    // after this silence, and Generic takes over through its usual hysteresis.
+    constexpr std::uint64_t association_timeout_ms = 1000;
+    // Requires mutex.
+    void expire_association(queue_state &owner, std::uint64_t now) {
+      if (!owner.provider_established || !valid_provider(owner.provider)) return;
+      const auto &current = evaluations[provider_index(owner.provider)];
+      const auto recent = [&](const evaluation_head &head) {
+        return head.source_id == owner.source_id && head.tick && now >= head.tick && now - head.tick <= association_timeout_ms;
+      };
+      if (recent(current.pending_nomination) || std::any_of(current.views.begin(), current.views.end(), recent)) return;
+      owner.provider_established = false;
+      owner.source_id = owner.last_epoch = owner.last_sequence = owner.last_source_tick = owner.nominated_epoch = owner.present_capture = 0;
+      // Snapshots from before the silence never re-establish it.
+      owner.admission_after = std::max(owner.admission_after, serial.load(std::memory_order_relaxed));
+    }
+  }
   bool provider_active(std::uint64_t native) {
     if (!requested.load() || !native) return false;
     std::lock_guard lock(mutex);
-    const auto *owner = queue(native);
-    return requested.load() && owner && !owner->retiring && owner->provider_established;
+    auto *owner = queue(native);
+    if (!requested.load() || !owner || owner->retiring) return false;
+    expire_association(*owner, GetTickCount64());
+    return owner->provider_established;
   }
   bool evaluation_live(std::uint64_t now_ms, std::uint64_t window_ms) {
     if (!requested.load()) return false;
@@ -1781,8 +1862,10 @@ namespace sunshine_streamline::depth_capture {
     source_id = 0;
     if (!requested.load() || !native) return false;
     std::lock_guard lock(mutex);
-    const auto *owner = queue(native);
-    if (!owner || owner->retiring || !owner->provider_established) return false;
+    auto *owner = queue(native);
+    if (!owner || owner->retiring) return false;
+    expire_association(*owner, GetTickCount64());
+    if (!owner->provider_established) return false;
     provider = owner->provider;
     source_id = owner->source_id;
     return true;
@@ -2181,7 +2264,7 @@ namespace sunshine_streamline::depth_capture {
           // Storage allocated by an earlier attempt. Its budget was reserved on
           // the slot it reserved; a different slot must admit it again.
           if (diagnostic_copy && found->reservation != reservation &&
-              !reserve_diagnostic_bytes(diagnostic_slots, found, prepared->allocation_bytes, reservation, &discarded))
+              !reserve_diagnostic_bytes(diagnostic_slots, found, prepared->allocation_bytes, reusable_storage, reservation, &discarded))
             return reject(status::exhausted, record_stage::capacity);
           texture = std::move(prepared);
         } else {
@@ -2206,7 +2289,7 @@ namespace sunshine_streamline::depth_capture {
               return reject(status::unsupported_resource, record_stage::resource_region);
             destination.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
             const auto allocation = plan.device->GetResourceAllocationInfo(0, 1, &destination);
-            if (!reserve_diagnostic_bytes(diagnostic_slots, found, allocation.SizeInBytes, reservation, &discarded))
+            if (!reserve_diagnostic_bytes(diagnostic_slots, found, allocation.SizeInBytes, reusable_storage, reservation, &discarded))
               return reject(status::exhausted, record_stage::capacity);
             plan.allocation_bytes = allocation.SizeInBytes;
             plan.shared = !reusable_storage;
@@ -2218,11 +2301,13 @@ namespace sunshine_streamline::depth_capture {
           } else {
             plan.descriptors = true;
             plan.view = view_format(desc.Format);
+            // Sizes the idle-storage budget (release_idle_slots).
+            plan.allocation_bytes = plan.device->GetResourceAllocationInfo(0, 1, &destination).SizeInBytes;
           }
           clear_reservation(reservation);
           reservation = ++reservation_serial;
           found->reservation = reservation; found->reservation_tick = GetTickCount64();
-          found->reserved_bytes = plan.allocation_bytes;
+          found->reserved_bytes = plan.allocation_bytes; found->reserved_live = diagnostic_copy && reusable_storage;
           lock.unlock();
           discarded.clear();
           prepared.reset();
@@ -2332,11 +2417,15 @@ namespace sunshine_streamline::depth_capture {
     out = {};
     const auto result = [&](status value) { out.result = value; return value; };
     if (!ticket) return result(status::unavailable);
-    if (local) {
-      if (!consumer_queue) return result(status::unsupported_queue);
+    if (local && !consumer_queue) return result(status::unsupported_queue);
+    std::unique_lock lock(mutex);
+    // A queue already registered (observe_present, once per Present) needs no
+    // second interface check, observation and lock round trip here.
+    if (local && !known_queue(consumer_queue)) {
+      lock.unlock();
       observe_queue(consumer_queue);
+      lock.lock();
     }
-    std::lock_guard lock(mutex);
     const auto *consumer = local ? queue(consumer_queue) : nullptr;
     if (local && (!consumer || consumer->retiring)) return result(status::unsupported_queue);
     const auto native_consumer = consumer ? reinterpret_cast<std::uint64_t>(consumer->queue.p) : 0;
@@ -2653,7 +2742,7 @@ namespace sunshine_streamline::depth_capture {
           FAILED(stamp_target->GetDevice(IID_ID3D12Device, reinterpret_cast<void **>(stamp_device.put()))) ||
           device_cookie(stamp_device.p) != device_identity) stamp_target.reset();
     }
-    std::lock_guard lock(mutex);
+    std::unique_lock lock(mutex);
     // A list in ReShade's lifecycle (or a registered runtime list) is read
     // under its recording lease, which also proves it is open and outside a
     // render pass. An unregistered runtime immediate list relies on its
@@ -2726,32 +2815,37 @@ namespace sunshine_streamline::depth_capture {
           entry.auxiliary_destination = retained_target;
         }
         if (target.p) {
-          // All selected sources use this exact copy and consumer lease path.
-          // Full subresource: depth plane or native auxiliary color pixels.
-          native_observer::suppression_scope suppress;
-          D3D12_RESOURCE_BARRIER transitions[2]{};
-          transitions[0].Type = transitions[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-          transitions[0].Transition = {entry.texture->resource.p, 0,
-            auxiliary ? D3D12_RESOURCE_STATE_COMMON : sampled_state, D3D12_RESOURCE_STATE_COPY_SOURCE};
-          transitions[1].Transition = {target.p, 0, static_cast<D3D12_RESOURCE_STATES>(destination_state), D3D12_RESOURCE_STATE_COPY_DEST};
-          list->ResourceBarrier(destination_state == D3D12_RESOURCE_STATE_COPY_DEST ? 1 : 2, transitions);
-          D3D12_TEXTURE_COPY_LOCATION source_location{}, target_location{};
-          source_location.pResource = entry.texture->resource.p; source_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-          target_location.pResource = target.p; target_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-          list->CopyTextureRegion(&target_location, 0, 0, 0, &source_location, nullptr);
-          std::swap(transitions[0].Transition.StateBefore, transitions[0].Transition.StateAfter);
-          std::swap(transitions[1].Transition.StateBefore, transitions[1].Transition.StateAfter);
-          list->ResourceBarrier(destination_state == D3D12_RESOURCE_STATE_COPY_DEST ? 1 : 2, transitions);
           // The stamp entry beside the pixels (zeros for an unstamped slot).
           const auto pool = stamp_target.p ? (entry.stamps ? entry.stamps : stamp_pool_for(device.p, device_identity)) : nullptr;
+          std::uint64_t stamp_index{};
           if (pool) {
             // The copy reads the pool's buffer on the GPU later: an unstamped
             // slot (Diagnostics off) must keep the pool it created alive with
             // the slot, which outlives this consumer's fence.
             if (!entry.stamps) entry.stamps = pool;
-            const auto index = entry.stamped && entry.stamps ? static_cast<std::uint64_t>(current - begin) : stamp_zero_entry;
-            list->CopyBufferRegion(stamp_target.p, stamp.offset, pool->entries.p, index * stamp_entry_bytes, stamp_entry_bytes);
+            stamp_index = entry.stamped && entry.stamps ? static_cast<std::uint64_t>(current - begin) : stamp_zero_entry;
           }
+          // The registered consumer keeps the slot from reuse until its fence
+          // passes, and the packet owns the storage: record without the lock.
+          // All selected sources use this exact copy and consumer lease path.
+          // Full subresource: depth plane or native auxiliary color pixels.
+          ID3D12Resource *const source = value.ownership->resource.p;
+          lock.unlock();
+          native_observer::suppression_scope suppress;
+          D3D12_RESOURCE_BARRIER transitions[2]{};
+          transitions[0].Type = transitions[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+          transitions[0].Transition = {source, 0,
+            auxiliary ? D3D12_RESOURCE_STATE_COMMON : sampled_state, D3D12_RESOURCE_STATE_COPY_SOURCE};
+          transitions[1].Transition = {target.p, 0, static_cast<D3D12_RESOURCE_STATES>(destination_state), D3D12_RESOURCE_STATE_COPY_DEST};
+          list->ResourceBarrier(destination_state == D3D12_RESOURCE_STATE_COPY_DEST ? 1 : 2, transitions);
+          D3D12_TEXTURE_COPY_LOCATION source_location{}, target_location{};
+          source_location.pResource = source; source_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+          target_location.pResource = target.p; target_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+          list->CopyTextureRegion(&target_location, 0, 0, 0, &source_location, nullptr);
+          std::swap(transitions[0].Transition.StateBefore, transitions[0].Transition.StateAfter);
+          std::swap(transitions[1].Transition.StateBefore, transitions[1].Transition.StateAfter);
+          list->ResourceBarrier(destination_state == D3D12_RESOURCE_STATE_COPY_DEST ? 1 : 2, transitions);
+          if (pool) list->CopyBufferRegion(stamp_target.p, stamp.offset, pool->entries.p, stamp_index * stamp_entry_bytes, stamp_entry_bytes);
         } else if (lease) {
           auto &texture = *entry.texture;
           const auto requested = static_cast<DXGI_FORMAT>(lease_format);
@@ -3056,21 +3150,31 @@ namespace sunshine_streamline::depth_capture {
       }
       desc.Format = DXGI_FORMAT_R8_UNORM; desc.SampleDesc.Count = 2;
       if (diagnostic_description(desc)) return false;
-      // Cached allocations count toward the same budget as live captures, but
+      // Cached allocations count toward the live budget with live tickets, and
       // only the cache can be evicted to admit a changed output layout.
+      constexpr auto limit = diagnostic_byte_limit;
       std::array<slot, diagnostic_slot_limit> cache;
-      for (unsigned i = 0; i != 3; ++i) {
+      for (unsigned i = 0; i != 5; ++i) {
         cache[i].texture = std::make_shared<texture_reference>();
-        cache[i].texture->allocation_bytes = diagnostic_byte_limit / 4;
+        cache[i].texture->allocation_bytes = limit / 4;
       }
-      cache[0].id = 1; // Live GPU/IPC ownership must survive budget pressure.
-      if (!reserve_diagnostic_bytes(cache, &cache[3], diagnostic_byte_limit / 2) ||
-          !cache[0].texture || cache[1].texture || !cache[2].texture) return false;
-      if (reserve_diagnostic_bytes(cache, &cache[3], diagnostic_byte_limit) ||
-          !cache[0].texture || cache[2].texture) return false;
-      return !reserve_diagnostic_bytes(cache, &cache[0], 0) &&
-        !reserve_diagnostic_bytes(cache, &cache[0], diagnostic_byte_limit + 1) &&
-        reserve_diagnostic_bytes(cache, &cache[0], diagnostic_byte_limit);
+      cache[0].id = 1; cache[0].diagnostic_reusable = true; // A live ticket survives budget pressure.
+      // A small request keeps the fixed limit: 5/4 allocated, room for 1/16.
+      if (!reserve_diagnostic_bytes(cache, &cache[9], limit / 16, true) ||
+          !cache[0].texture || cache[1].texture || cache[2].texture || !cache[3].texture || !cache[4].texture) return false;
+      // A large live request is sized from itself: room for eight of it.
+      if (!reserve_diagnostic_bytes(cache, &cache[9], limit, true) || !cache[3].texture || !cache[4].texture) return false;
+      // Dump copies have their own fixed budget: live storage never counts
+      // against them and is never evicted for them.
+      cache[5].texture = std::make_shared<texture_reference>();
+      cache[5].texture->allocation_bytes = limit / 2;
+      cache[5].id = 2; // A dump ticket.
+      if (!reserve_diagnostic_bytes(cache, &cache[9], limit / 2, false) ||
+          reserve_diagnostic_bytes(cache, &cache[9], limit / 2 + 1, false) ||
+          !cache[3].texture || !cache[4].texture) return false;
+      return !reserve_diagnostic_bytes(cache, &cache[0], 0, false) &&
+        !reserve_diagnostic_bytes(cache, &cache[5], limit + 1, false) &&
+        reserve_diagnostic_bytes(cache, &cache[5], limit, false);
     }
     bool record_diagnostic_regression() {
       // COM Release can synchronously invoke observers. Detach ownership first
@@ -4368,6 +4472,10 @@ namespace sunshine_streamline::depth_capture {
       transition.Transition.pResource = reinterpret_cast<ID3D12Resource *>(&resource);
       transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
       transition.Transition.StateAfter = sampled_state;
+      // A list ReShade never reported cannot admit a capture: nothing is tracked.
+      barriers(address, cookie, 1, &transition);
+      if (source_cookie(&resource) || !owner->states.empty() || owner->native_barrier_calls) return false;
+      owner->reported = true; // ReShade's create event.
       barriers(address, cookie, 1, &transition);
       const auto source = source_cookie(&resource);
       const auto *observed = state(*owner, source, false);
@@ -4384,7 +4492,7 @@ namespace sunshine_streamline::depth_capture {
       if (duplicate || owner->cookie != cookie) return false;
       close(address, cookie, S_OK);
       if (!owner->closed) return false;
-      reset(address, cookie, S_OK);
+      reset(address, cookie, S_OK, true);
       const auto next_cookie = native_observer::get_recording_cookie(address);
       if (!next_cookie || next_cookie == cookie || owner->closed || !owner->states.empty() ||
           owner->native_barrier_calls || owner->native_transition_count || owner->last_barrier_command) return false;
@@ -4476,6 +4584,7 @@ namespace sunshine_streamline::depth_capture {
       const auto cookie = ++serial;
       auto recording = command(native_command, cookie, true);
       if (!recording) return false;
+      recording->reported = true; // ReShade's create event.
       const auto target_id = retain_source_cookie(&target);
       D3D12_RESOURCE_BARRIER transition{};
       transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -4510,7 +4619,7 @@ namespace sunshine_streamline::depth_capture {
       if (recording->invalid || !selected || !selected->blocked || recording->states.size() != 161) return false;
       const auto capacity = recording->states.capacity();
       const auto *storage = recording->states.data();
-      reset(native_command, cookie, S_OK);
+      reset(native_command, cookie, S_OK, true);
       const auto next_cookie = native_observer::get_recording_cookie(native_command);
       if (!next_cookie || next_cookie == cookie || recording->cookie != next_cookie || recording->invalid ||
           !recording->states.empty() || recording->states.capacity() != capacity || recording->states.data() != storage) return false;
@@ -4534,8 +4643,10 @@ namespace sunshine_streamline::depth_capture {
       } restore{&*capture};
       const auto restart_case = [&] {
         recording->restart(cookie, command_generation);
+        recording->reported = true; // ReShade's lifecycle drives this recording.
         recording.life()->cookie.store(cookie);
       };
+      recording->reported = true;
       *capture = {}; // Match record() allocation after a prior global invalidation.
       capture->id = ++serial; capture->command = cookie; capture->finished = capture->success = capture->producer_submitted = true;
       D3D12_RESOURCE_BARRIER value{};
@@ -4646,7 +4757,7 @@ namespace sunshine_streamline::depth_capture {
       barriers(native_command, cookie, 1, &value);
       if (!recording->invalid || recording->invalidation != recording_loss::source_state_capacity || capture->invalid) return false;
       fail_state_growth = false;
-      reset(native_command, cookie, S_OK);
+      reset(native_command, cookie, S_OK, true);
       const auto new_cookie = native_observer::get_recording_cookie(native_command);
       return new_cookie && new_cookie != cookie && recording->cookie == new_cookie &&
         recording.life()->cookie.load() == new_cookie && !recording->invalid && !capture->invalid && capture->command == 0 &&

@@ -127,11 +127,19 @@ namespace {
     require(validate(v).status == validation_status::valid_matrix_scalar_mismatch &&
         !validate(v).scalar_planes_match, "near metadata disagreement discarded the checked matrix or went unreported");
     v = perspective(false, false);
+    // Unusable scalar planes, including SL's unset FLT_MAX sentinel, fail only
+    // the redundant cross-check; the checked matrix pair stays authoritative.
     v.far_plane = -1;
-    require(validate(v).status == validation_status::invalid_planes, "negative far accepted");
+    require(validate(v).status == validation_status::valid_matrix_scalar_mismatch && !validate(v).scalar_planes_match,
+      "negative far discarded the checked matrix or matched the cross-check");
     v = perspective(false, false);
     v.far_plane = std::numeric_limits<float>::max();
-    require(validate(v).status == validation_status::invalid_planes, "Streamline unset far sentinel accepted");
+    require(validate(v).status == validation_status::valid_matrix_scalar_mismatch && !validate(v).scalar_planes_match,
+      "Streamline unset far sentinel discarded the checked matrix or matched the cross-check");
+    v = perspective(false, false);
+    v.fov = 0;
+    require(validate(v).status == validation_status::valid_matrix_scalar_mismatch && !validate(v).scalar_fov_aspect_match,
+      "unset FOV discarded the checked matrix or matched the cross-check");
     v = perspective(false, false);
     v.fov += .2f;
     require(validate(v).status == validation_status::valid_matrix_scalar_mismatch &&
@@ -206,8 +214,9 @@ namespace {
       "FG scalar mismatch hid an incompatible depth direction");
     v.depth_inverted = 1;
     v.near_plane = std::numeric_limits<float>::max();
-    require(validate(v).status == validation_status::invalid_planes,
-      "FG scalar mismatch admitted unset metadata sentinel");
+    const auto unset_near = validate(v);
+    require(unset_near.status == validation_status::valid_matrix_scalar_mismatch && !unset_near.scalar_planes_match &&
+        unset_near.depth_scale == checked.depth_scale, "unset near sentinel changed the checked FG matrix");
   }
   void fill_common(common_constants &out, const camera_data &v) {
     out.camera_view_to_clip = v.projection;

@@ -7,6 +7,7 @@
 #include "streamline_v1_resource_state.h"
 #include "upscaler_call_trace.h"
 #include "game3d_diagnostic_metadata.h"
+#include "game3d_diagnostics.h"
 #include "game3d_ui_mask.h"
 #include "observer_snapshot.h"
 
@@ -187,6 +188,11 @@ namespace sunshine_streamline {
     std::atomic<std::uint64_t> observation_generation{};
     std::atomic<std::uint64_t> constant_calls{}, tag_calls{}, evaluation_calls{}, dropped{}, invalid{};
     std::atomic<std::uint64_t> call_sequence{}, loss_revision{};
+    // Lost constants observations (each may have hidden a camera reset) and
+    // observation restarts. With a viewport's own resets this alone bounds
+    // temporal history (feedback.revision); other transient losses (a busy
+    // lock, an SDK failure) cannot hide a reset and leave history intact.
+    std::atomic<std::uint64_t> history_loss{};
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
     thread_local bool entry_policy_armed{}, entry_policy_observed{}, entry_path_selected{}, entry_source_admitted{};
 #endif
@@ -489,8 +495,15 @@ namespace sunshine_streamline {
           pin->observation != observation_generation.load(std::memory_order_acquire))) pin.reset();
       return pin;
     }
-    metadata_owner::transaction write_metadata(std::uint64_t ticket) {
+    // briefly: retry a contended writer a bounded number of times, like
+    // write_tokens_briefly, for a publication the game may never repeat.
+    metadata_owner::transaction write_metadata(std::uint64_t ticket, bool briefly = false) {
       auto update = metadata.try_write();
+      for (unsigned attempt = 0; briefly && !update && update.failure() == observation::write_failure::owner_busy && attempt < 64; ++attempt) {
+        if (attempt < 48) YieldProcessor();
+        else SwitchToThread();
+        update = metadata.try_write();
+      }
       if (update) {
         if (!current(ticket)) update.reset();
         else { update->epoch = epoch.load(std::memory_order_acquire); update->observation = ticket; }
@@ -604,8 +617,10 @@ namespace sunshine_streamline {
       for (const auto &token : pin->tokens) if (token.frame.token == address && address) { result = token.frame; break; }
       return result;
     }
+    // Presentation brackets feed only report_probe_diagnostics: tracked with
+    // the Diagnostics switch, so production markers take no lock or thread wait.
     std::uint64_t start_presentation_marker(std::uint32_t marker, const frame_identity &frame, std::uint64_t ticket) {
-      if ((marker != 4 && marker != 5) || !current(ticket)) return 0;
+      if ((marker != 4 && marker != 5) || !current(ticket) || !sunshine_game3d::diagnostics::enabled()) return 0;
       const auto serial = ++call_sequence;
       if (!TryAcquireSRWLockExclusive(&presentations_lock)) { drop_presentation(); return 0; }
       if (!current(ticket)) { ReleaseSRWLockExclusive(&presentations_lock); return 0; }
@@ -684,7 +699,7 @@ namespace sunshine_streamline {
     template<unsigned Index> std::int32_t hook_pcl_marker(std::uint32_t marker, const abi_v2::frame_token &frame) {
       const DWORD incoming = GetLastError();
       const auto ticket = observation_ticket();
-      const bool sample = ticket && pcl_available.load(std::memory_order_acquire) &&
+      const bool sample = ticket && sunshine_game3d::diagnostics::enabled() && pcl_available.load(std::memory_order_acquire) &&
         current_pcl_target.load(std::memory_order_acquire) == pcl_targets[Index].entry;
       if (ticket) ++pcl_calls;
       const auto identity = sample && (marker == 4 || marker == 5) ? presentation_frame(reinterpret_cast<std::uintptr_t>(&frame)) : frame_identity{};
@@ -751,7 +766,9 @@ namespace sunshine_streamline {
       std::uint64_t retired_epoch{};
       if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, GetTickCount64(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, result == 0);
       bool changed = false;
-      auto update = sample && current(ticket) ? write_metadata(ticket) : metadata_owner::transaction{};
+      // A game may set its FG options once: a busy writer must not leave the
+      // mode unknown until the next call.
+      auto update = sample && current(ticket) ? write_metadata(ticket, true) : metadata_owner::transaction{};
       if (update) {
         if (current(ticket)) {
           if (!valid_viewport) {
@@ -930,7 +947,10 @@ namespace sunshine_streamline {
       details.sequence = serial; details.viewport = viewport;
       details.reset = decoded == decode_status::ok ? camera.reset : UINT32_MAX;
       auto update = write_metadata(ticket);
-      if (!update) { if (current(ticket)) metadata_write_lost(update, __func__, __LINE__, details); return; }
+      if (!update) {
+        if (current(ticket)) { ++history_loss; metadata_write_lost(update, __func__, __LINE__, details); }
+        return;
+      }
       auto &state = *update;
       auto &record = slot(state, viewport);
       if (serial < record.camera_serial) return;
@@ -971,7 +991,7 @@ namespace sunshine_streamline {
           saved->has_camera = true;
         }
       }
-      if (current(ticket) && !update.commit()) metadata_write_lost(update, __func__, __LINE__, details);
+      if (current(ticket) && !update.commit()) { ++history_loss; metadata_write_lost(update, __func__, __LINE__, details); }
     }
     void store_tags(batch &values) {
       if (!values.valid_viewport || !current(values.observation)) return;
@@ -1019,6 +1039,9 @@ namespace sunshine_streamline {
       out.loss_revision = loss;
       out.status = evidence_status::source_associated_evaluation;
       if (!current(ticket)) { out.status = evidence_status::inactive; return out; }
+      // Read before the metadata, like loss: a later lost constants call
+      // belongs to the next evaluation.
+      const auto history_revision = history_loss.load(std::memory_order_acquire);
       auto pin = selected_state ? metadata_owner::read_pin{} : read_metadata();
       if (!selected_state && pin) selected_state = &*pin;
       if (!selected_state && metadata.has_publication()) { out.status = evidence_status::busy; return out; }
@@ -1059,9 +1082,10 @@ namespace sunshine_streamline {
         }
       }
       // Freeze history continuity with this camera/frame tuple before the native
-      // evaluation. It ends at this viewport's reset or at an actual observation
-      // loss, which may have hidden a reset. Both counters only increase.
-      out.feedback.revision = loss + 1 + (out.frame_correlated ? saved->history : record.history);
+      // evaluation. It ends at this viewport's reset, at a lost constants call
+      // (which may have hidden a reset) or at an observation restart; other
+      // transient losses cannot hide a reset. Both counters only increase.
+      out.feedback.revision = history_revision + 1 + (out.frame_correlated ? saved->history : record.history);
       out.feedback.reset = out.frame_correlated && out.decoded == decode_status::ok && out.camera.reset == 1;
       bool has_depth = false;
       for (unsigned i = 0; i != out.tags.size(); ++i) {
@@ -2274,7 +2298,8 @@ namespace sunshine_streamline {
     void install_hook_work() {
       if (!hooks_installed && !permanently_rejected) discover();
       if (middleware_requested() && observing.load(std::memory_order_acquire)) {
-        install_pcl_hooks();
+        // PCL markers feed only diagnostics (start_presentation_marker).
+        if (sunshine_game3d::diagnostics::enabled()) install_pcl_hooks();
         install_fg_hooks();
       }
     }
@@ -2337,6 +2362,7 @@ namespace sunshine_streamline {
     for (auto &record : presentations) { if (record.thread) CloseHandle(record.thread); record = {}; }
     lose_presentation();
     lose(loss_diagnostics::reason::lifecycle, __func__, __LINE__, {});
+    ++history_loss; // Camera records were released: every viewport's history restarts.
     ++epoch;
     ReleaseSRWLockExclusive(&presentations_lock);
     next_discovery = next_report = 0;
@@ -3008,7 +3034,8 @@ namespace sunshine_streamline {
       }
       if (minhook_initialized) depth_capture::poll();
     }
-    if (middleware_requested() && observing.load(std::memory_order_acquire) && (pcl_targets_pending() || fg_targets_pending()))
+    if (middleware_requested() && observing.load(std::memory_order_acquire) &&
+        ((sunshine_game3d::diagnostics::enabled() && pcl_targets_pending()) || fg_targets_pending()))
       schedule_install();
     report_probe_diagnostics(selected, now);
   }

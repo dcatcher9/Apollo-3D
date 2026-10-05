@@ -233,11 +233,14 @@ namespace sunshine_ngx {
     bool get_uint(const parameter_api &api, const void *parameters, const char *key, unsigned &out) {
       return api.unsigned_integer && success(api.unsigned_integer(const_cast<void *>(parameters), key, &out));
     }
+    // zero_unset: a pair reported as 0,0 means "not set", exactly like absent
+    // keys (NGX's evaluation helpers always write the render subrect, zero
+    // when the game renders to the whole input).
     bool read_pair(const parameter_api &api, const void *parameters, const char *key_x, const char *key_y,
-        unsigned &x, unsigned &y, unsigned default_x, unsigned default_y) {
+        unsigned &x, unsigned &y, unsigned default_x, unsigned default_y, bool zero_unset = false) {
       x = y = 0;
       const bool have_x = get_uint(api, parameters, key_x, x), have_y = get_uint(api, parameters, key_y, y);
-      if (!have_x && !have_y) { x = default_x; y = default_y; return true; }
+      if ((!have_x && !have_y) || (zero_unset && have_x && have_y && !x && !y)) { x = default_x; y = default_y; return true; }
       return have_x && have_y;
     }
     feature *find_feature(HMODULE owner, const void *handle, bool create) {
@@ -487,7 +490,7 @@ namespace sunshine_ngx {
     auto &area = value.resource.area;
     const bool valid = success(api.resource(const_cast<void *>(parameters), "Depth", &resource)) && resource &&
       read_pair(api, parameters, "DLSS.Render.Subrect.Dimensions.Width", "DLSS.Render.Subrect.Dimensions.Height",
-        area.width, area.height, selected.parameters.width, selected.parameters.height) &&
+        area.width, area.height, selected.parameters.width, selected.parameters.height, true) &&
       read_pair(api, parameters, "DLSS.Input.Depth.Subrect.Base.X", "DLSS.Input.Depth.Subrect.Base.Y", area.left, area.top, 0, 0) &&
       valid_dimension(area.width) && valid_dimension(area.height) && area.left < 16384 && area.top < 16384;
     if (!valid) { ++missing_parameters; return attempt; }

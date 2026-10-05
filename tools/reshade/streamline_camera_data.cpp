@@ -123,29 +123,32 @@ namespace sunshine_streamline {
     result.infinite_far = far_inverse == 0;
     result.far_from_matrix = result.infinite_far ? std::numeric_limits<double>::infinity() : 1.0 / far_inverse;
     const bool explicit_infinity = std::isinf(v.far_plane) && v.far_plane > 0;
-    if (!ordinary(v.near_plane) || !(v.near_plane > 0) ||
-        (!explicit_infinity && (!ordinary(v.far_plane) || !(v.far_plane > v.near_plane))))
-      return fail(validation_status::invalid_planes);
     // Scalar planes are a redundant cross-check, not coefficients of the
     // tagged depth encoding. Some integrations supply those distances in a
-    // different unit convention, or report finite gameplay culling planes
-    // alongside an infinite projection. Keep the self-consistent matrix pair
-    // authoritative; never replace B with the scalar near plane. Recovering
-    // far from float coefficients is also ill-conditioned when far/near is
-    // large, so compare metadata endpoints in clip space for diagnostics.
-    const double metadata_near = result.depth_offset + result.depth_scale / v.near_plane;
-    const double metadata_far = explicit_infinity ? result.depth_offset :
-      result.depth_offset + result.depth_scale / v.far_plane;
-    result.scalar_planes_match = std::abs(metadata_near - near_depth) <= 2e-4 &&
-      std::abs(metadata_far - far_depth) <= 2e-4;
+    // different unit convention, report finite gameplay culling planes
+    // alongside an infinite projection, or leave them unset (SL's FLT_MAX
+    // sentinel). Keep the self-consistent matrix pair authoritative; never
+    // replace B with the scalar near plane. An unusable scalar only fails the
+    // cross-check. Recovering far from float coefficients is also
+    // ill-conditioned when far/near is large, so compare metadata endpoints in
+    // clip space for diagnostics.
+    const bool planes_usable = ordinary(v.near_plane) && v.near_plane > 0 &&
+      (explicit_infinity || (ordinary(v.far_plane) && v.far_plane > v.near_plane));
+    if (planes_usable) {
+      const double metadata_near = result.depth_offset + result.depth_scale / v.near_plane;
+      const double metadata_far = explicit_infinity ? result.depth_offset :
+        result.depth_offset + result.depth_scale / v.far_plane;
+      result.scalar_planes_match = std::abs(metadata_near - near_depth) <= 2e-4 &&
+        std::abs(metadata_far - far_depth) <= 2e-4;
+    }
     result.fov_from_matrix = 2 * std::atan(std::abs(h / p[1][1]));
     result.aspect_from_matrix = std::abs(static_cast<double>(p[1][1]) / p[0][0]);
-    if (!ordinary(v.fov) || !ordinary(v.aspect) || !(v.fov > 0 && v.fov < 3.141592654f) || !(v.aspect > 0))
-      return fail(validation_status::invalid_fov_aspect);
     // cameraFOV does not specify a horizontal/vertical convention in the
     // pinned SL headers. Rendering uses the matrix, so disagreement with this
-    // scalar must not discard an otherwise checked depth encoding.
-    result.scalar_fov_aspect_match = std::abs(result.fov_from_matrix - v.fov) <= 0.03 &&
+    // scalar, or an unset/zero one, must not discard an otherwise checked
+    // depth encoding.
+    const bool fov_usable = ordinary(v.fov) && ordinary(v.aspect) && v.fov > 0 && v.fov < 3.141592654f && v.aspect > 0;
+    result.scalar_fov_aspect_match = fov_usable && std::abs(result.fov_from_matrix - v.fov) <= 0.03 &&
       std::abs(result.aspect_from_matrix / v.aspect - 1) <= 0.03;
     return fail(result.scalar_planes_match && result.scalar_fov_aspect_match ?
       validation_status::valid : validation_status::valid_matrix_scalar_mismatch);
@@ -194,7 +197,6 @@ namespace sunshine_streamline {
       case validation_status::inverse_mismatch: return "inverse-mismatch";
       case validation_status::invalid_planes: return "invalid-planes";
       case validation_status::depth_direction_mismatch: return "depth-direction-mismatch";
-      case validation_status::invalid_fov_aspect: return "invalid-fov-aspect";
     }
     return "unknown";
   }

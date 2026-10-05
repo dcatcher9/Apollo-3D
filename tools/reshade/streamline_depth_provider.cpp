@@ -481,7 +481,7 @@ namespace sunshine_streamline::provider {
     const bool matches = value.valid && value.moments.supplied && value.source.handle == data->pending_texture &&
       value.width == data->pending_grid.x && value.height == data->pending_grid.y &&
       value.values.size() == std::size_t(data->pending_grid.x) * data->pending_grid.y &&
-      value.values.size() <= data->latest.raw.size() &&
+      value.values.size() <= sunshine_depth_statistics::maximum_tiles &&
       value.source_width == data->pending_metadata.resource.width && value.source_height == data->pending_metadata.resource.height &&
       value.viewport_x == data->pending_metadata.resource.area.left && value.viewport_y == data->pending_metadata.resource.area.top &&
       value.viewport_width == data->pending_metadata.resource.area.width && value.viewport_height == data->pending_metadata.resource.area.height;
@@ -492,8 +492,6 @@ namespace sunshine_streamline::provider {
       data->latest.tick = data->pending_metadata.tick;
       data->latest.width = value.width;
       data->latest.height = value.height;
-      data->latest.raw = {};
-      std::copy(value.values.begin(), value.values.end(), data->latest.raw.begin());
       data->latest.range_valid = value.range_valid;
       data->latest.range_min = value.range_min;
       data->latest.range_max = value.range_max;

@@ -391,6 +391,25 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	// True when the shader resource view was created from the backup resource, false when it was created from the original depth-stencil
 	bool using_backup_texture = false;
 
+	// The view effects bind as DEPTH. ReShade 6.8 waits for the whole GPU queue
+	// on every binding update, so it changes only when this view does, never
+	// for a readiness flip. A logical source rotating through several physical
+	// members (rotating) binds one stable copy per format and size instead of
+	// each member's view; retired copies are destroyed after the usual delay.
+	resource_view effects_view = { 0 };
+	bool effects_bound = false;
+	bool rotating = false;
+	bool stable_current = false; // The stable copy holds this Present's selected capture.
+	struct stable_binding
+	{
+		resource texture = { 0 };
+		resource_view view = { 0 };
+		resource_desc desc = {};
+		uint64_t destroy_after_frame = 0;
+	};
+	stable_binding stable;
+	std::vector<stable_binding> retired_stable;
+
 	sunshine_depth::selection_policy selection;
 	resource challenger_depth_stencil = { 0 };
 	uint64_t challenger_id = 0;
@@ -457,8 +476,16 @@ struct depth_stencil_backup
 
 	// Set to zero for automatic detection, otherwise will use the clear operation at the specific index within a frame
 	uint32_t force_clear_index = 0;
-	uint32_t current_clear_index = 0;
+	// Counted by recording threads under the shared lock (interlocked).
+	LONG current_clear_index = 0;
 };
+
+static uint32_t configured_clear_index()
+{
+	uint32_t value = 0;
+	reshade::get_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", value);
+	return value;
+}
 
 struct depth_stencil_resource
 {
@@ -558,6 +585,17 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 		return nullptr;
 	}
 
+	// Recording threads read a backup's frame size and clear index under the
+	// shared lock (on_clear_depth_impl); the effects thread writes them here.
+	static void configure_backup(depth_stencil_backup &backup, uint32_t width, uint32_t height,
+		std::optional<uint32_t> force_clear_index = std::nullopt)
+	{
+		const std::unique_lock<std::shared_mutex> lock(s_mutex);
+		backup.frame_width = width;
+		backup.frame_height = height;
+		if (force_clear_index) backup.force_clear_index = *force_clear_index;
+	}
+
 	depth_stencil_backup *track_depth_stencil_for_backup(device *device, resource depth_stencil, resource_desc desc)
 	{
 		assert(depth_stencil != 0);
@@ -613,6 +651,8 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 				desc.texture.format == existing_desc.texture.format &&
 				(desc.usage & existing_desc.usage) == desc.usage)
 			{
+				// Recording threads look backups up under the shared lock.
+				const std::unique_lock<std::shared_mutex> lock(s_mutex);
 				backup.references++;
 				backup.depth_stencil = depth_stencil;
 				backup.destroy_after_frame = std::numeric_limits<uint64_t>::max();
@@ -640,6 +680,8 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 				sunshine_streamline::depth_resource_initialized(new_backup.backup_texture.handle, new_backup.content_identity,
 					device->get_native(), content_supported(desc));
 
+			// Growth can move every entry: exclude recording-thread lookups.
+			const std::unique_lock<std::shared_mutex> lock(s_mutex);
 			return &depth_stencil_backups.emplace_back(std::move(new_backup));
 		}
 		else
@@ -652,7 +694,10 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 		}
 	}
 
-	void untrack_depth_stencil(device *device, resource depth_stencil)
+	// Frames an unreferenced backup stays revivable before its delayed destruction.
+	static constexpr uint64_t backup_retirement_frames = 50;
+
+	void untrack_depth_stencil(device *device, resource depth_stencil, uint64_t retire_frames = backup_retirement_frames)
 	{
 		assert(depth_stencil != 0);
 
@@ -664,11 +709,15 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 		depth_stencil_backup &backup = *it;
 		if (s_streamline_probe_events && device->get_api() == device_api::d3d12)
 			sunshine_streamline::depth_resource_destroyed(backup.backup_texture.handle, backup.content_identity);
-		backup.depth_stencil = { 0 };
+		{
+			// Recording threads look backups up by this source under the shared lock.
+			const std::unique_lock<std::shared_mutex> lock(s_mutex);
+			backup.depth_stencil = { 0 };
+		}
 
 		// Do not destroy backup texture immediately since it may still be referenced by a command list that is in flight or was prerecorded
 		// Instead mark it for delayed destruction in the future
-		backup.destroy_after_frame = frame_index + 50; // Destroy after 50 frames
+		backup.destroy_after_frame = frame_index + retire_frames;
 
 		const device_api api = device->get_api();
 		if (api <= device_api::d3d12)
@@ -1446,8 +1495,7 @@ bool sunshine_depth::copy_selected_depth(effect_runtime *runtime, command_list *
 		const bool existing = device_data->find_depth_stencil_backup(original) != nullptr;
 		auto *backup = device_data->track_depth_stencil_for_backup(device, original, desc);
 		if (!backup) return false;
-		backup->frame_width = source.resource.area.width;
-		backup->frame_height = source.resource.area.height;
+		generic_depth_device_data::configure_backup(*backup, source.resource.area.width, source.resource.area.height);
 		*member = {original, identity, existing ? 0 : device_data->frame_index, device_data->native_present_index};
 	}
 	member->last_present = device_data->native_present_index;
@@ -1497,6 +1545,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	const auto group = data.capture_budget.update(anchor, observations, manual || !automatic);
 	data.anchor_depth_stencil = selected;
 	data.anchor_identity = anchor;
+	data.rotating = group.count > 1;
 	for (auto &member : data.member_views)
 	{
 		if (member.view == 0) continue;
@@ -1524,8 +1573,8 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 			const bool already_tracked = device_data.find_depth_stencil_backup(source->first) != nullptr;
 			auto *backup = device_data.track_depth_stencil_for_backup(runtime->get_device(), source->first, source->second.desc);
 			if (!backup) continue;
-			backup->frame_width = frame_width; backup->frame_height = frame_height;
-			if (s_preserve_depth_buffers) reshade::get_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", backup->force_clear_index);
+			generic_depth_device_data::configure_backup(*backup, frame_width, frame_height,
+				s_preserve_depth_buffers ? std::optional<uint32_t>(configured_clear_index()) : std::nullopt);
 			resource_view view {};
 			const resource_view_desc desc(format_to_default_typed(source->second.desc.texture.format));
 			if (!runtime->get_device()->create_resource_view(backup->backup_texture, resource_usage::shader_resource, desc, &view))
@@ -1734,12 +1783,16 @@ static void release_challenger(effect_runtime *runtime, generic_depth_data &data
 			for (std::size_t i = 0; i != owners.size(); ++i)
 				owners[i] = {data.member_views[i].source.handle, data.member_views[i].view.handle, data.member_views[i].retire_after};
 			const bool retained = sunshine_depth_probe::capture_keeps_backup(data.challenger_depth_stencil.handle, owners);
-			device_data->untrack_depth_stencil(runtime->get_device(), data.challenger_depth_stencil);
 			// The inherited capture path may have recorded work on other queues.
 			// Retain its usual retirement interval before allocating another extra
 			// backup, unless a nonretiring capture slot took over this allocation.
 			// An in-flight sampler reference alone cannot skip that interval.
-			if (!retained) data.challenger_retired_until = device_data->frame_index + 50;
+			// The released backup stays revivable for as long again, so the next
+			// visit of the same shape reuses it instead of creating a full-size
+			// texture on the present thread.
+			constexpr auto gap = generic_depth_device_data::backup_retirement_frames;
+			device_data->untrack_depth_stencil(runtime->get_device(), data.challenger_depth_stencil, 2 * gap);
+			if (!retained) data.challenger_retired_until = device_data->frame_index + gap;
 		}
 		data.challenger_depth_stencil = { 0 };
 		data.challenger_id = 0;
@@ -1838,8 +1891,17 @@ static void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, r
 		return;
 	stats.preservation_boundary = true;
 	if (device_data->generic_capture_users.load(std::memory_order_relaxed) == 0) return;
+	// The effects thread adds, revives and erases backups under the exclusive
+	// lock. Read this backup's settings under the shared one (already held for
+	// queue state) and keep no pointer into the list past it.
+	std::shared_lock<std::shared_mutex> backup_lock(s_mutex, std::defer_lock);
+	if (!state.is_queue) backup_lock.lock();
 	depth_stencil_backup *const depth_stencil_backup = device_data->find_depth_stencil_backup(depth_stencil);
 	if (depth_stencil_backup == nullptr || depth_stencil_backup->backup_texture == 0) return;
+	const resource backup_texture = depth_stencil_backup->backup_texture;
+	const float backup_frame_width = static_cast<float>(depth_stencil_backup->frame_width);
+	const float backup_frame_height = static_cast<float>(depth_stencil_backup->frame_height);
+	const uint32_t force_clear_index = depth_stencil_backup->force_clear_index;
 
 	// Reset draw call stats for clears
 	const draw_stats current_stats = stats.current;
@@ -1853,12 +1915,12 @@ static void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, r
 		// Mirror's Edge and Portal occasionally render something into a small viewport (16x16 in Mirror's Edge, 512x512 in Portal to render underwater geometry)
 		do_copy = s_sunshine_auto ?
 			check_aspect_ratio(current_stats.last_viewport.width, current_stats.last_viewport.height,
-				static_cast<float>(depth_stencil_backup->frame_width), static_cast<float>(depth_stencil_backup->frame_height)) :
-			(current_stats.last_viewport.width > 1024 || (current_stats.last_viewport.width == 0 || depth_stencil_backup->frame_width <= 1024));
+				backup_frame_width, backup_frame_height) :
+			(current_stats.last_viewport.width > 1024 || (current_stats.last_viewport.width == 0 || backup_frame_width <= 1024));
 		break;
 	case clear_op::fullscreen_draw:
 		// Mass Effect 3 in Mass Effect Legendary Edition sometimes uses a larger common depth buffer for shadow map and scene rendering, where the former uses a 1024x1024 viewport and the latter uses a viewport matching the render resolution
-		do_copy = check_aspect_ratio(current_stats.last_viewport.width, current_stats.last_viewport.height, static_cast<float>(depth_stencil_backup->frame_width), static_cast<float>(depth_stencil_backup->frame_height));
+		do_copy = check_aspect_ratio(current_stats.last_viewport.width, current_stats.last_viewport.height, backup_frame_width, backup_frame_height);
 		break;
 	case clear_op::unbind_depth_stencil_view:
 	case clear_op::direct_depth_switch:
@@ -1870,20 +1932,21 @@ static void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, r
 		if (op != clear_op::unbind_depth_stencil_view && op != clear_op::direct_depth_switch)
 		{
 			// If clear index override is set to zero, always copy any suitable buffers
-			if (depth_stencil_backup->force_clear_index == 0)
+			if (force_clear_index == 0)
 			{
 				// Use greater equals operator here to handle case where the same scene is first rendered into a shadow map and then for real (e.g. Mirror's Edge main menu)
 				do_copy = current_stats.vertices >= stats.best_copy_stats.vertices || (op == clear_op::fullscreen_draw && current_stats.drawcalls >= stats.best_copy_stats.drawcalls);
 			}
 			else
-			if (depth_stencil_backup->force_clear_index == std::numeric_limits<uint32_t>::max())
+			if (force_clear_index == std::numeric_limits<uint32_t>::max())
 			{
 				// Special case for Garry's Mod which chooses the last clear operation that has a high workload
 				do_copy = current_stats.vertices >= 5000;
 			}
 			else
 			{
-				do_copy = (depth_stencil_backup->current_clear_index++) == (depth_stencil_backup->force_clear_index - 1);
+				// Several recording threads can count clears under the shared lock.
+				do_copy = static_cast<uint32_t>(InterlockedIncrement(&depth_stencil_backup->current_clear_index) - 1) == force_clear_index - 1;
 			}
 
 			if (demand.clear_history) stats.clears.push_back({ current_stats, op, do_copy });
@@ -1898,6 +1961,7 @@ static void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, r
 			stats.copied_viewport = current_stats.last_viewport;
 			stats.copy_provenance_ambiguous = false;
 			stats.depth_copy = {};
+			if (backup_lock.owns_lock()) backup_lock.unlock();
 			if (device->get_api() == device_api::d3d12)
 			{
 				if (state.is_queue) lock.unlock();
@@ -1929,7 +1993,7 @@ static void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, r
 				assert(device->check_capability(device_caps::resolve_depth_stencil) && (desc.usage & resource_usage::resolve_source) != 0);
 
 				cmd_list->barrier(depth_stencil, resource_usage::depth_stencil_write, resource_usage::resolve_source);
-				cmd_list->resolve_texture_region(depth_stencil, 0, nullptr, depth_stencil_backup->backup_texture, 0, 0, 0, 0, format_to_default_typed(desc.texture.format));
+				cmd_list->resolve_texture_region(depth_stencil, 0, nullptr, backup_texture, 0, 0, 0, 0, format_to_default_typed(desc.texture.format));
 				cmd_list->barrier(depth_stencil, resource_usage::resolve_source, resource_usage::depth_stencil_write);
 			}
 			else
@@ -1938,7 +2002,7 @@ static void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, r
 
 				// A resource has to be in this state for a clear operation, so can assume it here
 				cmd_list->barrier(depth_stencil, resource_usage::depth_stencil_write, resource_usage::copy_source);
-				cmd_list->copy_resource(depth_stencil, depth_stencil_backup->backup_texture);
+				cmd_list->copy_resource(depth_stencil, backup_texture);
 				cmd_list->barrier(depth_stencil, resource_usage::copy_source, resource_usage::depth_stencil_write);
 			}
 		}
@@ -1947,11 +2011,83 @@ static void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, r
 
 static void update_effect_runtime(effect_runtime *runtime)
 {
-	const auto &data = *runtime->get_private_data<generic_depth_data>();
+	auto &data = *runtime->get_private_data<generic_depth_data>();
 
-	runtime->update_texture_bindings("DEPTH", data.selected_shader_resource, data.selected_shader_resource);
+	const resource_view view = data.stable_current && data.stable.view != 0 ? data.stable.view : data.selected_shader_resource;
+	if (!data.effects_bound || view != data.effects_view)
+	{
+		const sunshine_game3d::slow_step step("generic depth binding");
+		runtime->update_texture_bindings("DEPTH", view, view);
+		data.effects_view = view;
+		data.effects_bound = true;
+	}
 
-	sunshine_streamline::provider::set_depth_ready(runtime, data.selected_shader_resource != 0 && data.capture_ready);
+	sunshine_streamline::provider::set_depth_ready(runtime, view != 0 && data.capture_ready);
+}
+
+// Copies the selected member's current backup into the stable binding (see
+// generic_depth_data::rotating). source is in the shader-resource state.
+static bool copy_stable_binding(effect_runtime *runtime, command_list *cmd_list, generic_depth_data &data,
+	const generic_depth_device_data &device_data, resource source)
+{
+	device *const device = runtime->get_device();
+	if (device->get_api() != device_api::d3d11 && device->get_api() != device_api::d3d12)
+		return false;
+	const resource_desc desc = device->get_resource_desc(source);
+	auto &stable = data.stable;
+	if (stable.texture != 0 && (stable.desc.texture.width != desc.texture.width ||
+		stable.desc.texture.height != desc.texture.height || stable.desc.texture.format != desc.texture.format))
+	{
+		stable.destroy_after_frame = device_data.frame_index + generic_depth_device_data::backup_retirement_frames;
+		data.retired_stable.push_back(stable);
+		stable = {};
+	}
+	if (stable.texture == 0)
+	{
+		resource_desc stable_desc(desc.texture.width, desc.texture.height, 1, 1, desc.texture.format, 1,
+			memory_heap::default_, resource_usage::shader_resource | resource_usage::copy_dest);
+		if (!device->create_resource(stable_desc, nullptr, resource_usage::shader_resource, &stable.texture))
+		{
+			stable = {};
+			return false;
+		}
+		const resource_view_desc view_desc(format_to_default_typed(desc.texture.format));
+		if (!device->create_resource_view(stable.texture, resource_usage::shader_resource, view_desc, &stable.view))
+		{
+			device->destroy_resource(stable.texture); // Never recorded or bound.
+			stable = {};
+			return false;
+		}
+		device->set_resource_name(stable.texture, "Sunshine depth effects binding");
+		stable.desc = desc;
+	}
+	cmd_list->barrier(source, resource_usage::shader_resource, resource_usage::copy_source);
+	cmd_list->barrier(stable.texture, resource_usage::shader_resource, resource_usage::copy_dest);
+	cmd_list->copy_resource(source, stable.texture);
+	cmd_list->barrier(source, resource_usage::copy_source, resource_usage::shader_resource);
+	cmd_list->barrier(stable.texture, resource_usage::copy_dest, resource_usage::shader_resource);
+	return true;
+}
+
+static void destroy_stable_bindings(effect_runtime *runtime, generic_depth_data &data, uint64_t frame_index, bool all)
+{
+	device *const device = runtime->get_device();
+	const auto destroy = [device](const generic_depth_data::stable_binding &entry) {
+		if (entry.view != 0) device->destroy_resource_view(entry.view);
+		if (entry.texture != 0) device->destroy_resource(entry.texture);
+	};
+	auto keep = data.retired_stable.begin();
+	for (auto &entry : data.retired_stable)
+	{
+		if (all || frame_index >= entry.destroy_after_frame) { destroy(entry); continue; }
+		*keep++ = entry;
+	}
+	data.retired_stable.erase(keep, data.retired_stable.end());
+	if (all)
+	{
+		destroy(data.stable);
+		data.stable = {};
+	}
 }
 
 static void on_reload_effect_runtime(effect_runtime *runtime)
@@ -1961,12 +2097,14 @@ static void on_reload_effect_runtime(effect_runtime *runtime)
 		// FX handles are recreated, but the native capture/scale owner is not.
 		// Do not throw away a live capture epoch or retained real FG depth.
 		sunshine_streamline::provider::reload_effect_bindings(runtime);
+		data->effects_bound = false; // New effect descriptor tables.
 		if (!sunshine_streamline::provider::selected(runtime)) update_effect_runtime(runtime);
 		return;
 	}
 	sunshine_streamline::provider::reload(runtime);
 	if (auto *data = runtime->get_private_data<generic_depth_data>())
 	{
+		data->effects_bound = false; // New effect descriptor tables.
 		clear_raw_sample_request(*data);
 		data->runtime_epoch = s_next_sample_scope.fetch_add(1, std::memory_order_relaxed);
 		data->native_depth_requested = false;
@@ -2126,6 +2264,12 @@ static void on_destroy_effect_runtime(effect_runtime *runtime)
 	{
 		retire_provided_members(runtime, data, *device_data, true);
 		retire_member_views(runtime, data, *device_data, true);
+	}
+	if (data.stable.texture != 0 || !data.retired_stable.empty())
+	{
+		// Effects of earlier Presents may still read these copies.
+		runtime->get_command_queue()->wait_idle();
+		destroy_stable_bindings(runtime, data, 0, true);
 	}
 
 	runtime->destroy_private_data<generic_depth_data>();
@@ -2861,10 +3005,8 @@ static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list
 			data.probe_target_id = 0;
 			return;
 		}
-		backup->frame_width = frame_width;
-		backup->frame_height = frame_height;
-		if (s_preserve_depth_buffers)
-			reshade::get_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", backup->force_clear_index);
+		generic_depth_device_data::configure_backup(*backup, frame_width, frame_height,
+			s_preserve_depth_buffers ? std::optional<uint32_t>(configured_clear_index()) : std::nullopt);
 		data.challenger_depth_stencil = target;
 		data.challenger_id = info.identity;
 		data.challenger_started_frame = device_data.frame_index;
@@ -3226,6 +3368,17 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			const slow_step step("generic challenger release");
 			release_challenger(runtime, data, true);
 		}
+		{
+			// Rotation members are bound only while selected. While API depth owns
+			// the pass they retire on the usual delay, releasing their game depth
+			// references and backups; the selected view stays for fallback.
+			const slow_step step("generic member retirement");
+			for (auto &member : data.member_views)
+				if (member.view != 0 && !member.retire_after && member.view != data.selected_shader_resource)
+					member.retire_after = device_data->frame_index + generic_depth_device_data::backup_retirement_frames;
+			retire_member_views(runtime, data, *device_data);
+		}
+		data.effects_bound = false; // The API provider owns the DEPTH binding.
 		data.native_access_present = device_data->native_present_index;
 		data.native_access_open = true;
 		return;
@@ -3235,6 +3388,8 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		const slow_step step("generic depth rebinding");
 		update_effect_runtime(runtime);
 	}
+	if (!data.retired_stable.empty())
+		destroy_stable_bindings(runtime, data, device_data->frame_index, false);
 
 	resource selected_depth_stencil = { 0 };
 	const depth_selection_resource *selected_depth_stencil_info = nullptr;
@@ -3443,7 +3598,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		release_challenger(runtime, data);
 
 	const resource_view prev_shader_resource = data.selected_shader_resource;
-	const bool previous_capture_ready = data.capture_ready;
+	data.stable_current = false; // Set again below by this Present's stable copy.
 	auto *member_binding = select_captured_depth(runtime, cmd_list, data, *device_data, current_depth_stencil_resources,
 		automatic, manual, frame_width, frame_height, selected_depth_stencil, selected_depth_stencil_info);
 	const uint64_t selected_id = selected_depth_stencil_info ? selected_depth_stencil_info->identity : 0;
@@ -3513,13 +3668,8 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 				}
 				assert(depth_stencil_backup->backup_texture != 0);
 
-				depth_stencil_backup->frame_width = frame_width;
-				depth_stencil_backup->frame_height = frame_height;
-
-				if (s_preserve_depth_buffers)
-					reshade::get_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", depth_stencil_backup->force_clear_index);
-				else
-					depth_stencil_backup->force_clear_index = 0;
+				generic_depth_device_data::configure_backup(*depth_stencil_backup, frame_width, frame_height,
+					s_preserve_depth_buffers ? configured_clear_index() : 0u);
 
 				// Avoid recreating shader resource view when the backup texture did not change
 				if (prev_shader_resource == 0 || device->get_resource_from_view(prev_shader_resource) != depth_stencil_backup->backup_texture)
@@ -3569,6 +3719,11 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 				member_binding ? member_binding->capture_after : 0);
 
 			cmd_list->barrier(backup_texture, resource_usage::copy_dest, resource_usage::shader_resource);
+			if (data.rotating)
+			{
+				const slow_step step("generic stable depth copy");
+				data.stable_current = copy_stable_binding(runtime, cmd_list, data, *device_data, backup_texture);
+			}
 		}
 		else
 		{
@@ -3609,12 +3764,11 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.selected_desc = {};
 	} while (0);
 
-	if (prev_shader_resource != data.selected_shader_resource || previous_capture_ready != data.capture_ready)
-	{
-		update_effect_runtime(runtime);
-		if (prev_shader_resource != data.selected_shader_resource && !owns_member_view(data, prev_shader_resource))
-			device->destroy_resource_view(prev_shader_resource);
-	}
+	// Rebinds only when the effects view changed; a readiness flip only
+	// publishes readiness.
+	update_effect_runtime(runtime);
+	if (prev_shader_resource != data.selected_shader_resource && !owns_member_view(data, prev_shader_resource))
+		device->destroy_resource_view(prev_shader_resource);
 	const bool selection_changed = data.last_logged_id != data.anchor_identity || data.last_logged_manual != manual;
 	const bool binding_changed = data.last_logged_state != data.binding_state;
 	// The game may alternate its tagged allocation every present. Ordinary
@@ -3759,6 +3913,7 @@ static void reset_depth_selection(effect_runtime *runtime, generic_depth_data &d
 	}
 	retire_member_views(runtime, data, *device_data, true);
 	data.capture_budget.reset();
+	data.rotating = data.stable_current = false;
 	data.anchor_depth_stencil = {}; data.anchor_identity = 0;
 	data.raw_roster = {}; data.raw_members = {};
 	data.captures = {}; data.selected_record = {}; data.selected_capture = {};

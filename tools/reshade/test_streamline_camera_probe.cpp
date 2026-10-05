@@ -8,6 +8,7 @@
 #include "streamline_depth_provider.h"
 #include "streamline_camera_version.h"
 #include "upscaler_call_trace.h"
+#include "game3d_diagnostics.h"
 #include "game3d_ui_mask.h"
 #include <reshade.hpp>
 
@@ -249,6 +250,12 @@ namespace {
     ~fixture() {
       testing::clear();
     }
+  };
+  // Presentation brackets are tracked only with the Diagnostics switch on.
+  struct diagnostics_on {
+    const bool previous = sunshine_game3d::diagnostics::enabled();
+    diagnostics_on() { sunshine_game3d::diagnostics::set_enabled(true); }
+    ~diagnostics_on() { sunshine_game3d::diagnostics::set_enabled(previous); }
   };
 
   common_constants camera() {
@@ -1813,8 +1820,7 @@ namespace {
     };
     evaluate(1, 1);
     sunshine_scene_depth::frame initial;
-    require(testing::normalized_source(1, 0, initial) && !initial.feedback.reset &&
-        initial.feedback.revision != 0 && initial.feedback.revision == initial.observation_revision + 1,
+    require(testing::normalized_source(1, 0, initial) && !initial.feedback.reset && initial.feedback.revision != 0,
       "source revision missing from normalized depth");
     evaluate(2, 1);
     sunshine_scene_depth::frame ordinary;
@@ -1844,12 +1850,22 @@ namespace {
     evaluate(4, 1);
     sunshine_scene_depth::frame recovered;
     require(testing::normalized_source(1, 0, recovered) && !recovered.feedback.reset &&
-        recovered.feedback.revision == reset.feedback.revision && recovered.feedback.revision == depth_observation_revision() + 2 &&
+        recovered.feedback.revision == reset.feedback.revision && recovered.feedback.revision == initial.feedback.revision + 1 &&
         recovered.source_id == initial.source_id && recovered.viewport == initial.viewport,
       "fresh post-reset input lost revision or logical source identity");
     require(!initial.feedback.reset && initial.feedback.revision == ordinary.feedback.revision &&
         ordinary.feedback.revision < recovered.feedback.revision,
       "later reset mutated a frozen earlier frame");
+    // A transient loss (a busy lock, an SDK failure) cannot hide a camera
+    // reset: it moves the observation revision but keeps temporal history.
+    testing::lose_observation();
+    evaluate(5, 1);
+    sunshine_scene_depth::frame after_loss;
+    require(testing::normalized_source(1, 0, after_loss) && !after_loss.feedback.reset &&
+        after_loss.feedback.revision == recovered.feedback.revision &&
+        after_loss.observation_revision == depth_observation_revision() &&
+        after_loss.observation_revision != recovered.observation_revision,
+      "a transient observation loss restarted temporal history");
   }
 
   void test_scene_feedback_inflight() {
@@ -1858,7 +1874,7 @@ namespace {
     int native{}; abi_v1::resource resource{}; resource.native = &native;
     auto constants = old_camera();
     call_v1_constants(constants, 1, 1); call_v1_tag(&resource, 0, 1, nullptr);
-    const auto original_revision = depth_observation_revision() + 1;
+    const auto loss_before = depth_observation_revision();
     block_original = true;
     std::thread pending([] { call_v1_evaluate(nullptr, 0, 1, 1); });
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -1875,10 +1891,11 @@ namespace {
     // The next frame's reset is observed metadata, not lost evidence: the
     // in-flight frame keeps its own depth and its pre-reset history.
     require(testing::latest_snapshot(1, first) && first.frame.numeric == 1 && !first.feedback.reset &&
-        first.feedback.revision == original_revision && depth_observation_revision() + 1 == original_revision &&
+        first.feedback.revision != 0 && depth_observation_revision() == loss_before &&
         first.status == evidence_status::source_associated_evaluation &&
         testing::normalized_source(1, 0, normalized) && normalized.source_frame_numeric == 1 && !normalized.feedback.reset,
       "a later frame's reset revoked in-flight depth or leaked into its history");
+    const auto original_revision = first.feedback.revision;
     call_v1_evaluate(nullptr, 0, 2, 1);
     evaluation_snapshot reset;
     require(testing::latest_snapshot(1, reset) && reset.frame.numeric == 2 && reset.feedback.reset &&
@@ -2739,6 +2756,10 @@ namespace {
           evaluate_call.calls == before + 1 && evaluate_call.a == 3 && evaluate_call.b == frame && evaluate_call.c == type &&
           evaluate_call.first == nullptr && evaluate_call.incoming_error == incoming_error, "v1 presentation marker forwarding changed");
     };
+    marker(10, 4);
+    require(query_current_presentation(value) == presentation_status::missing_bracket,
+      "presentation tracked with the Diagnostics switch off");
+    diagnostics_on diagnostics;
     marker(10, 0);
     require(query_current_presentation(value) == presentation_status::missing_bracket, "Reflex simulation marker opened presentation");
     marker(10, 4);
@@ -2784,6 +2805,7 @@ namespace {
   }
   void test_presentation_v2() {
     fixture cleanup;
+    diagnostics_on diagnostics;
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "v2 PCL getter fixture install failed");
     presentation_snapshot value;
     require(query_current_presentation(value) == presentation_status::missing_marker_function, "v2 fabricated PCL function discovery");
@@ -3565,11 +3587,14 @@ namespace {
         testing::install_presentation_hooks(), "source-only PCL hook discovery failed");
     mint(token, &numeric);
     auto marker = reinterpret_cast<abi_v2::pcl_set_marker>(function);
-    marker(4, token.ref());
-    presentation_snapshot bracket;
-    require(query_current_presentation(bracket) == presentation_status::open_bracket && bracket.explicit_bracket,
-      "source-only FG lost its explicit present bracket when diagnostics were disabled");
-    marker(5, token.ref());
+    {
+      diagnostics_on diagnostics;
+      marker(4, token.ref());
+      presentation_snapshot bracket;
+      require(query_current_presentation(bracket) == presentation_status::open_bracket && bracket.explicit_bracket,
+        "source-only FG lost its explicit present bracket when probe diagnostics were disabled");
+      marker(5, token.ref());
+    }
     shutdown();
     const auto calls = fg_call.calls;
     require(set_options(view, options) == 0 && fg_call.calls == calls + 1 && !query_frame_generation(view.value, fg),

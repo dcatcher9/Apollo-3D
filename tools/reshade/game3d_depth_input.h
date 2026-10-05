@@ -13,9 +13,9 @@ namespace sunshine_game3d::depth_input {
     sunshine_scene_depth::frame metadata;
     sunshine_depth::frame_depth::projection_t projection;
     std::uint64_t id{}, tick{};
-    // Exact point grid for diagnostics only; live scene geometry uses moments.
+    // The sampled point grid's shape. Scene geometry uses moments and range;
+    // the grid's values are not retained.
     std::uint32_t width{}, height{};
-    std::array<float, sunshine_depth_statistics::maximum_tiles> raw{};
     bool range_valid{};
     float range_min{}, range_max{};
     sunshine_depth_statistics::moments moments{};

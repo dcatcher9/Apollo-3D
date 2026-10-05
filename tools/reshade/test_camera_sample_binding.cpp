@@ -107,21 +107,8 @@ namespace {
       require(out.sample.raw[i] == complete.pixels[i], "Raw sample changed during transport");
     complete.pixels[0] = 99;
     require(out.sample.raw[0] != 99, "Mailbox retained borrowed readback storage");
-    scene::policy numerical;
-    numerical.reset(expected.camera.unit_epoch, 1000);
-    // The old numerical fixture accepts only its fixed layout. Explicitly adapt
-    // this legacy test case; live dynamic grids never enter that fixed payload.
-    scene::sample physical;
-    require(out.sample.width == scene::grid_width && out.sample.height == scene::grid_height &&
-      out.sample.count == physical.raw.size(), "Legacy fixture silently changed point layout");
-    physical.id = out.sample.id;
-    physical.capture_ms = out.sample.capture_ms;
-    physical.metadata = out.sample.metadata;
-    physical.readback_frame = out.sample.readback_frame;
-    physical.readback_source = out.sample.readback_source;
-    std::copy_n(out.sample.raw.begin(), physical.raw.size(), physical.raw.begin());
-    require(numerical.observe(physical, 1200) == scene::status::proof_missing,
-      "Weak bound metadata entered the numerical policy");
+    require(out.sample.width == scene::grid_width && out.sample.height == scene::grid_height,
+      "Fixture silently changed point layout");
     require(m.complete(complete.result, 1201, out) == binding::status::no_pending, "Duplicate completion was accepted");
     clean_rejection(out);
   }
