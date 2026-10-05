@@ -693,10 +693,11 @@ checking that this unrelated repeated failure cannot erase the independent UI in
 fixture's foreground override applies only to dump ownership; it does not change desktop focus.
 See the [canonical capture diagnostics](../../docs/reshade-sbs.md) for the gate and request fields.
 Run these functional cases serially when they share resources or output directories; their timing
-is not performance evidence. The NGX and preservation-mode-2 runtime fixtures below use the same
-zero-FX native lifecycle. The other effect-based fixtures documented below remain in the repository,
-but their shader-uniform and shared-preservation expectations are historical and do not replace
-these native capture gates.
+is not performance evidence. The NGX, direct Streamline, preservation-mode-2, probe-round,
+rotating-allocation and adaptive raw-depth runtime fixtures below use the same zero-FX native
+lifecycle. They select their frozen `SunshineGame3D.fx` boot effect and the test add-on themselves,
+so they need no environment settings. The command-association, native-selection and
+native-present fixtures exercise the reference effects with native Game 3D off.
 
 The optional `reshade_streamline_direct_runtime_test` is a component integration fixture.
 Its metadata seam bypasses SDK discovery; the real SDK-entry NGX/Streamline cases below remain
