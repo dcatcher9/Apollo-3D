@@ -2944,7 +2944,7 @@ retain priority. Resource creation, drawing and queue observation remain common 
 while Generic ranking and qualification are suspended.
 Optional candidate accounting is separate from those capture facts. Numeric draw/vertex counters
 pause on native API capture unless the manual list is visible or activity diagnostics request them.
-Generic selection and shared preservation retain counters needed for their actual capture decisions.
+Generic selection retains the counters needed for its actual capture decisions.
 Per-clear history is collected only for the visible list. UI demand expires after the list stops
 being drawn, including when the overlay closes or changes tabs. Hidden lists do not copy or sort
 the inventory. Work-presence, viewport, clear direction, preservation boundaries, resource lifetime
@@ -3379,8 +3379,10 @@ same contract; no AMD integration is implemented. The shared scale controller co
 frames and immutable samples, independently of source-selection and allocation decisions.
 Camera projection is optional: invalid matrices never block an otherwise valid source or become
 scale coefficients. Without projection, a known depth direction allows the shared adaptive raw
-controller to follow the provider's logical generation/viewport. Direction comes from the API when
-supplied, otherwise from shared preservation's established clear-value evidence; unknown stays mono.
+controller to follow the provider's logical generation/viewport. Direction comes from the API;
+unknown stays mono. (API sources always copy at the middleware call; the former shared ReShade
+preservation route, which could also supply clear-value direction, had no production caller and
+was removed.)
 
 The direct provider supports D3D12 full-resource, single-sample
 device depth and positive linear view distance with UntilEvaluate/UntilPresent lifetimes; it accepts bounded active rectangles while

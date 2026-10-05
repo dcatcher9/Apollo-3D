@@ -35,12 +35,9 @@ namespace sunshine_streamline::depth_capture {
     // when an immutable copy is handed to a different queue on the same device.
     std::uint64_t texture{}, shader_resource{}, device{}, queue{}, producer_queue{}, capture_id{}, producer_fence{};
     std::uint64_t resource_id{};
-    // This packet nominates a source only. The ReShade preservation owner must
-    // separately prove and provide its current copy; texture/view stay zero.
-    bool shared_preservation{};
     // A successful source nomination can own this presentation while capture
     // is unsupported/pending. This authorizes neither texture access nor a
-    // fallback selector. Shared preservation proves pixel readiness separately.
+    // fallback selector.
     bool pixel_ready{};
     // Allocation dimensions stay intact (D3D12 depth/stencil copies require a
     // full subresource). Area is always positive and in allocation pixels;
@@ -215,10 +212,6 @@ namespace sunshine_streamline::depth_capture {
   void observe_present(std::uint64_t command, std::uint64_t queue, std::uint64_t immediate);
   void retire_queue(std::uint64_t queue);
   void poll();
-  using preservation_available_callback = bool (*)(std::uint64_t native, std::uint64_t resource_id, std::uint64_t device_id);
-  // Capability lookup only; no GPU commands. Invoked without the capture mutex
-  // so the ReShade resource registry can take its own lock safely.
-  void set_preservation_available(preservation_available_callback callback);
   // Observing an API attempt discovers its command list, never claims ownership.
   // Only acquire of a successful, submitted current source establishes a
   // provider on that exact queue. Readable SL takes priority over NGX; pending
@@ -249,8 +242,7 @@ namespace sunshine_streamline::depth_capture {
   void begin_evaluation(std::uint64_t epoch, std::uint64_t sequence, std::uint32_t viewport,
     sunshine_scene_depth::provider_kind provider = sunshine_scene_depth::provider_kind::streamline,
     std::uint64_t source_id = 0, std::uint64_t superseded_source_id = UINT64_MAX);
-  // Observe before the original DLSS evaluation on its actual command list.
-  // Registered preserved sources create a metadata-only ticket; other sources
+  // Observe before the original DLSS evaluation on its actual command list and
   // record an independent copy. Every nonzero ticket must always finish.
   std::uint64_t record(std::uint64_t command, const input &value, record_diagnostic *diagnostic = nullptr);
   // Source adapters supply identity/metadata and always snapshot at the API

@@ -379,7 +379,7 @@ namespace {
       static_cast<unsigned long long>(first.metadata.sequence), int(first.pixel_ready),
       capture::name(first_diagnostic.result), capture::name(first_diagnostic.failure));
     require(first_acquired && first.pixel_ready &&
-      !first.shared_preservation && first.capture_id == first_ticket, "Establish NGX pipeline with frame one");
+      first.capture_id == first_ticket, "Establish NGX pipeline with frame one");
     consume(first, 1);
     first = {};
 
@@ -419,7 +419,7 @@ namespace {
       static_cast<unsigned long long>(selected.metadata.sequence),
       static_cast<unsigned long long>(diagnostic.newest_sequence), int(selected.pixel_ready), capture::name(diagnostic.result));
     if (allows_completed) {
-      require(acquired && selected.pixel_ready && !selected.shared_preservation && selected.capture_id == completed_ticket &&
+      require(acquired && selected.pixel_ready && selected.capture_id == completed_ticket &&
         selected.metadata.sequence == 2 && diagnostic.newest_sequence == 3,
         "Completed NGX frame was starved by a newer pending evaluation");
       // Submission behind the producer's blocked frame would hang here if the
@@ -443,12 +443,6 @@ namespace {
     }
     gpu.drain();
     std::printf("PASS: pipeline %s\n", name(scenario));
-  }
-
-  unsigned preservation_queries{};
-  bool has_generic_preservation(std::uint64_t, std::uint64_t, std::uint64_t) {
-    ++preservation_queries;
-    return true;
   }
 
   void transition(ID3D12GraphicsCommandList *commands, ID3D12Resource *resource,
@@ -751,10 +745,6 @@ namespace {
     com_ptr<ID3D12DescriptorHeap> descriptors;
     plane_readback captured_depth, captured_stencil, source_depth, source_stencil;
     fixture gpu(width, height, true);
-    struct callback_scope {
-      callback_scope() { preservation_queries = 0; capture::set_preservation_available(has_generic_preservation); }
-      ~callback_scope() { capture::set_preservation_available(nullptr); }
-    } registered_generic;
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
     heap.NumDescriptors = 2;
@@ -797,9 +787,8 @@ namespace {
     capture::record_diagnostic recorded;
     const auto ticket = capture::nominate_evaluation(gpu.producer_commands.native(), input, UINT64_MAX, &recorded);
     require(ticket && recorded.result == capture::status::recorded, "Record the full NGX scene at the API boundary");
-    std::printf("content record: ticket=%llu generic_queries=%u status=%s stage=%s\n",
-      static_cast<unsigned long long>(ticket), preservation_queries, capture::name(recorded.result), capture::name(recorded.stage));
-    require(!preservation_queries, "API capture delegated its timing to Generic preservation");
+    std::printf("content record: ticket=%llu status=%s stage=%s\n",
+      static_cast<unsigned long long>(ticket), capture::name(recorded.result), capture::name(recorded.stage));
     capture::finish(ticket, true);
 
     // Same address, different contents after evaluation: any live resource or
@@ -818,7 +807,7 @@ namespace {
     capture::packet packet;
     capture::capture_diagnostic acquired;
     require(capture::acquire(gpu.consumer.native(), 1, packet, &acquired) && packet.pixel_ready &&
-      !packet.shared_preservation && packet.capture_id == ticket && packet.texture != gpu.source.native(),
+      packet.capture_id == ticket && packet.texture != gpu.source.native(),
       "NGX capture did not return an independent API-boundary snapshot");
     gpu.consumer_commands->ClearDepthStencilView(destination_dsv,
       D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 0.f, 203, 0, nullptr);
@@ -845,7 +834,6 @@ namespace {
     captured_stencil.verify(width, true, [](UINT, UINT) { return 203.f; }, "Depth capture modified consumer stencil");
     source_depth.verify(width, false, [](UINT, UINT) { return .875f; }, "Post-evaluation source overwrite did not execute");
     source_stencil.verify(width, true, [](UINT, UINT) { return 17.f; }, "API capture modified original stencil");
-    require(!preservation_queries, "API path consulted Generic preservation during capture/consumption");
     gpu.drain();
     std::printf("PASS: %ux%u D32S8 API snapshot matches all %llu original pixels; later source overwrite and both stencil planes exact; Generic queries=0\n",
       width, height, static_cast<unsigned long long>(width) * height);

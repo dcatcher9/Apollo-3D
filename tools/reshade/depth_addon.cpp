@@ -315,13 +315,6 @@ enum class native_depth_ui_state { inactive, waiting_depth, calibrating, waiting
 
 struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_data
 {
-    struct provided_member {
-      resource source{};
-      uint64_t identity{}, capture_after{}, last_present{};
-    };
-    // Source authority is API-owned; these entries only keep the shared
-    // preservation assignments alive across physical buffer rotation.
-    std::array<provided_member, 8> provided_members{};
     // Runtime ownership, separate from retained backup/view lifetime. API
     // capture can suspend generic work without destroying in-flight resources.
     bool generic_capture_enabled = false;
@@ -756,34 +749,6 @@ static depth_tracking_demand tracking_demand(device *device)
 {
 	const auto *data = device->get_private_data<generic_depth_device_data>();
 	return data ? tracking_demand(*data) : depth_tracking_demand {};
-}
-
-// The resource inventory remains owned by ReShade's device lifetime. API
-// adapters only ask whether that inventory can preserve an exact native object.
-static std::unordered_map<uint64_t, generic_depth_device_data *> s_preservation_devices;
-
-static auto find_preserved_source(generic_depth_device_data &device_data, uint64_t native, uint64_t identity)
-{
-	auto found = device_data.depth_stencil_resources.find(resource{native});
-	if (found != device_data.depth_stencil_resources.end() && found->second.identity == identity) return found;
-	// A proven shared cookie also handles an interface wrapper whose address
-	// differs. Dimensions and contents are never used as identity evidence.
-	return std::find_if(device_data.depth_stencil_resources.begin(), device_data.depth_stencil_resources.end(),
-		[identity](const auto &entry) { return identity && entry.second.identity == identity; });
-}
-
-static bool preservation_available(uint64_t native, uint64_t identity, uint64_t device_identity)
-{
-	const std::shared_lock<std::shared_mutex> lock(s_mutex);
-	const auto device = s_preservation_devices.find(device_identity);
-	if (device == s_preservation_devices.end() || !identity) return false;
-	const auto found = find_preserved_source(*device->second, native, identity);
-	if (found == device->second->depth_stencil_resources.end() || !found->second.api_identity || !content_supported(found->second.desc)) return false;
-	if (!found->second.last_frame_stats.total.has_work()) return false;
-	// Mode 2 cannot take an end-of-frame copy. A registered DSV that is only
-	// populated by clears/copies may have no legal preservation boundary at all;
-	// it keeps the native API snapshot route, without changing source authority.
-	return s_preserve_depth_buffers != 2 || found->second.last_frame_stats.preservation_boundary;
 }
 
 // Temporary, bounded metadata diagnostics. No resource is read, retained or
@@ -1294,7 +1259,7 @@ static void publish_preserved_depth(effect_runtime *runtime, command_list *comma
 }
 
 static void preserve_d3d12_at_effects(effect_runtime *runtime, command_list *commands,
-	generic_depth_device_data &device_data, resource source, uint64_t identity, uint64_t capture_after, bool publish)
+	generic_depth_device_data &device_data, resource source, uint64_t identity, uint64_t capture_after)
 {
 	const auto frame = device_data.frame_index, present = device_data.native_present_index;
 	viewport copied_viewport{};
@@ -1355,7 +1320,7 @@ static void preserve_d3d12_at_effects(effect_runtime *runtime, command_list *com
 			observe_preserved_layout(found->second, stats);
 		}
 	}
-	if (publish) publish_preserved_depth(runtime, commands, device_data, source, identity, capture_after);
+	publish_preserved_depth(runtime, commands, device_data, source, identity, capture_after);
 }
 
 // Produce an allowed end-of-frame copy before consumers decide which current
@@ -1363,7 +1328,7 @@ static void preserve_d3d12_at_effects(effect_runtime *runtime, command_list *com
 // Probe, capture-member and legacy selected paths share the same live facts;
 // a selection snapshot cannot authorize a second copy or an inactive present.
 static void preserve_depth_at_effects(effect_runtime *runtime, command_list *cmd_list,
-	generic_depth_device_data &device_data, resource source, uint64_t identity, uint64_t capture_after = 0, bool publish = true)
+	generic_depth_device_data &device_data, resource source, uint64_t identity, uint64_t capture_after = 0)
 {
 	device *const device = runtime->get_device();
 	const auto api = device->get_api();
@@ -1372,7 +1337,7 @@ static void preserve_depth_at_effects(effect_runtime *runtime, command_list *cmd
 		// ReShade's own list records this copy; its list events never report it.
 		sunshine_streamline::depth_capture::observe_runtime_list(
 			runtime->get_command_queue()->get_immediate_command_list()->get_native(), runtime->get_command_queue()->get_native());
-		preserve_d3d12_at_effects(runtime, cmd_list, device_data, source, identity, capture_after, publish);
+		preserve_d3d12_at_effects(runtime, cmd_list, device_data, source, identity, capture_after);
 		return;
 	}
 	if (s_preserve_depth_buffers == 2 && (api == device_api::d3d12 || api == device_api::vulkan)) return;
@@ -1442,85 +1407,15 @@ static void preserve_depth_at_effects(effect_runtime *runtime, command_list *cmd
 	stats.capture_marker = stats.depth_copy.recording;
 }
 
-static void retire_provided_members(effect_runtime *runtime, generic_depth_data &data,
-	generic_depth_device_data &device_data, bool all = false)
-{
-	for (auto &member : data.provided_members)
-		if (member.identity && (all || device_data.native_present_index > member.last_present + 50))
-		{
-			device_data.untrack_depth_stencil(runtime->get_device(), member.source);
-			member = {};
-		}
-}
-
-static void set_generic_capture_enabled(effect_runtime *runtime, generic_depth_data &data, bool enabled);
-
 bool sunshine_depth::copy_selected_depth(effect_runtime *runtime, command_list *commands,
 	const sunshine_streamline::depth_capture::packet &selection, resource destination, frame_depth &captured,
 	sunshine_streamline::depth_capture::consumer_diagnostic *diagnostic)
 {
 	captured = {};
 	constexpr uint32_t sampled_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-	if (!selection.shared_preservation)
-		return runtime && commands && destination.handle && sunshine_streamline::depth_capture::copy_current(
-			commands->get_native(), selection, destination.handle, sampled_state, diagnostic,
-			commands == runtime->get_command_queue()->get_immediate_command_list());
-	const auto &source = selection.metadata;
-	const auto identity = selection.resource_id;
-	if (!runtime || !commands || !identity || !destination.handle) return false;
-	auto *device = runtime->get_device();
-	auto *device_data = device->get_private_data<generic_depth_device_data>();
-	auto *data = runtime->get_private_data<generic_depth_data>();
-	if (!device_data || !data || device->get_api() != device_api::d3d12) return false;
-	// A newly API-selected tracked source needs preservation before this copy.
-	// Native snapshots never enter here and leave Generic capture dormant.
-	set_generic_capture_enabled(runtime, *data, true);
-	resource original{};
-	resource_desc desc;
-	{
-		const std::shared_lock<std::shared_mutex> lock(s_mutex);
-		const auto found = find_preserved_source(*device_data, source.resource.native, identity);
-		if (found == device_data->depth_stencil_resources.end() || !found->second.api_identity ||
-			!content_supported(found->second.desc)) return false;
-		original = found->first; desc = found->second.desc;
-	}
-	if (desc.texture.width != source.resource.width || desc.texture.height != source.resource.height) return false;
-	auto member = std::find_if(data->provided_members.begin(), data->provided_members.end(),
-		[identity](const auto &entry) { return entry.identity == identity; });
-	if (member == data->provided_members.end())
-	{
-		member = std::find_if(data->provided_members.begin(), data->provided_members.end(),
-			[](const auto &entry) { return !entry.identity; });
-		if (member == data->provided_members.end()) return false;
-		const bool existing = device_data->find_depth_stencil_backup(original) != nullptr;
-		auto *backup = device_data->track_depth_stencil_for_backup(device, original, desc);
-		if (!backup) return false;
-		generic_depth_device_data::configure_backup(*backup, source.resource.area.width, source.resource.area.height);
-		*member = {original, identity, existing ? 0 : device_data->frame_index, device_data->native_present_index};
-	}
-	member->last_present = device_data->native_present_index;
-	// Shared preservation owns all timing/readiness decisions, including the
-	// mode-2 requirement to copy before clear and the fresh-assignment boundary.
-	preserve_depth_at_effects(runtime, commands, *device_data, original, identity, member->capture_after, false);
-	const auto current = capture_record(runtime, *data, *device_data, original, identity, {}, true, member->capture_after, false);
-	if (!current.record.current(device_data->native_present_index, device_data->frame_index, data->runtime_epoch)) return false;
-	sunshine_streamline::depth_capture::preservation_ticket ticket;
-	{
-		const std::shared_lock<std::shared_mutex> lock(s_mutex);
-		const auto found = find_preserved_source(*device_data, original.handle, identity);
-		if (found == device_data->depth_stencil_resources.end()) return false;
-		ticket = found->second.last_frame_stats.capture_ticket;
-		if (!ticket || ticket.texture != current.record.sampled || ticket.resource_id != current.record.assignment) return false;
-	}
-	if (!sunshine_streamline::depth_capture::copy_preserved(commands->get_native(), runtime->get_command_queue()->get_native(),
-		ticket, destination.handle, sampled_state, diagnostic)) return false;
-	const auto after = capture_record(runtime, *data, *device_data, original, identity, {}, true, member->capture_after, false);
-	if (!after.record.current(device_data->native_present_index, device_data->frame_index, data->runtime_epoch) ||
-		after.record.present != current.record.present || after.record.frame != current.record.frame ||
-		after.record.sampled != current.record.sampled || after.record.assignment != current.record.assignment ||
-		after.record.layout != current.record.layout || !(after.record.shape == current.record.shape)) return false;
-	captured = current.metadata;
-	return true;
+	return runtime && commands && destination.handle && sunshine_streamline::depth_capture::copy_current(
+		commands->get_native(), selection, destination.handle, sampled_state, diagnostic,
+		commands == runtime->get_command_queue()->get_immediate_command_list());
 }
 
 static generic_depth_data::member_view *select_captured_depth(effect_runtime *runtime, command_list *cmd_list, generic_depth_data &data,
@@ -2123,8 +2018,6 @@ static void on_init_device(device *device)
 	{
 		auto *data = device->get_private_data<generic_depth_device_data>();
 		data->native_identity = sunshine_native_identity::device_cookie(reinterpret_cast<ID3D12Device *>(device->get_native()), true);
-		const std::unique_lock<std::shared_mutex> lock(s_mutex);
-		if (data->native_identity) s_preservation_devices[data->native_identity] = data;
 	}
 	// Before the first DLSS feature is created, outside DLL loader lock. This
 	// catches the game's linked NGX exports even if the runtime DLL loads later.
@@ -2153,10 +2046,6 @@ static void on_init_device(device *device)
 static void on_destroy_device(device *device)
 {
 	const generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
-	{
-		const std::unique_lock<std::shared_mutex> lock(s_mutex);
-		s_preservation_devices.erase(device_data->native_identity);
-	}
 
 	// Destroy any remaining resources
 	for (const depth_stencil_backup &backup : device_data->depth_stencil_backups)
@@ -2262,7 +2151,6 @@ static void on_destroy_effect_runtime(effect_runtime *runtime)
 	}
 	if (auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>())
 	{
-		retire_provided_members(runtime, data, *device_data, true);
 		retire_member_views(runtime, data, *device_data, true);
 	}
 	if (data.stable.texture != 0 || !data.retired_stable.empty())
@@ -3344,22 +3232,16 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		release_sample_reference(runtime, data);
 	}
 	const bool was_streamline = sunshine_streamline::provider::selected(runtime);
-	{
-		const slow_step step("provided depth retirement");
-		retire_provided_members(runtime, data, *device_data);
-	}
 	const bool api_selected = [&] {
 		const slow_step step("Streamline depth acquisition");
 		return sunshine_streamline::provider::begin(runtime, cmd_list, device_data->native_present_index,
 			automatic && data.override_depth_stencil == 0 && s_streamline_source_events);
 	}();
-	// A native API snapshot needs no Generic work. Shared preservation enables
-	// itself at its first copy above; keep that demand through temporary gaps.
-	// Manual pins and fallback resume capture before entering the selector.
+	// A native API snapshot needs no Generic work. Manual pins and fallback
+	// resume capture before entering the selector.
 	{
 		const slow_step step("generic capture switch");
-		set_generic_capture_enabled(runtime, data,
-			!api_selected || sunshine_streamline::provider::uses_shared_preservation(runtime));
+		set_generic_capture_enabled(runtime, data, !api_selected);
 	}
 	if (api_selected)
 	{
@@ -4425,7 +4307,6 @@ static void register_depth_events()
 	s_streamline_probe_events = sunshine_streamline::enabled();
 	s_streamline_source_events = sunshine_streamline::source_enabled() || sunshine_upscaler_trace::capture_enabled();
 	sunshine_streamline::depth_capture::initialize(true); // Shared D3D12 capture also serves Generic fallback.
-	sunshine_streamline::depth_capture::set_preservation_available(preservation_available);
 	s_frame_activity_trace = false;
 	reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "FrameActivityTrace", s_frame_activity_trace);
 	reshade::register_event<reshade::addon_event::init_device>(sunshine_addon_lifetime::guarded<on_init_device>);

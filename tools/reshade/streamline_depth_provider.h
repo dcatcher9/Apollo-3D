@@ -54,7 +54,6 @@ namespace sunshine_streamline::provider {
   struct source_status {
     bool selected{}, ready{};
     bool reused_depth{};
-    bool shared_preservation{};
     sunshine_scene_depth::provider_kind provider{sunshine_scene_depth::provider_kind::streamline};
     source_description current, last_valid;
     sunshine_depth_stats::presentation_statistics presentations;
@@ -94,7 +93,6 @@ namespace sunshine_streamline::provider {
   // Focus/technique/export invalidation cannot carry approximate held depth
   // across a new viewing interval. The owned texture and numeric history remain.
   void invalidate_reused_depth(reshade::api::effect_runtime *runtime);
-  bool uses_shared_preservation(reshade::api::effect_runtime *runtime);
   // Overlay snapshot, valid after effects finish too. Deliberate bounded reuse marks
   // the active previous real capture explicitly; otherwise it is only last_valid.
   source_status describe(reshade::api::effect_runtime *runtime, std::uint64_t present);

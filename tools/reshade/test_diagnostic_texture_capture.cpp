@@ -349,7 +349,7 @@ namespace {
     capture::packet packet;
     capture::capture_diagnostic acquired;
     require(capture::acquire(native(gpu.foreign_queue.Get()), 1, packet, &acquired) && packet.pixel_ready &&
-        !packet.shared_preservation && packet.capture_id == ticket &&
+        packet.capture_id == ticket &&
         packet.metadata.provider == sunshine_scene_depth::provider_kind::ngx && !packet.metadata.frame_generation_input,
       "completed first-recording NGX depth was unavailable or changed provider role");
     auto target = destination(gpu.device.Get(), DXGI_FORMAT_R32_FLOAT);
