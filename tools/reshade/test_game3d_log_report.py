@@ -275,6 +275,19 @@ class ReadinessReport(unittest.TestCase):
         checks = run(BASE + [ui('10:00:12', 2, 5, (0, 5, 0, 0), 0x2, 0x2), line('10:00:20', 'Finished exiting.')])
         self.assertTrue(all(c.status in ('PASS', 'INFO') for c in checks.values()), checks)
 
+    def test_display_scaling_warns(self):
+        # Witcher 3 at 150% scaling on a 3840x2160 virtual display (2026-10-04): the add-on's line, a WARN check.
+        text = ('[Sunshine 3D] Sunshine Game 3D: display scaling limits the game: it renders at 2560x1440 on a '
+                '3840x2160 display because Windows display scaling is 150%; set scaling to 100% or this '
+                "game's high-DPI override to Application")
+        scaled = line('10:00:03', text, 'WARN')
+        checks = run(BASE + [scaled])
+        self.assertEqual(checks['Display scaling'].status, 'WARN')
+        self.assertIn('2560x1440 on a 3840x2160 display', checks['Display scaling'].detail)
+        self.assertIn('150%', checks['Display scaling'].detail)
+        self.assertNotIn('Log warnings', checks)
+        self.assertNotIn('Display scaling', run(BASE))
+
     def test_presented_alpha_over_trusted_ui_channel_fails(self):
         # Resident Evil Requiem before 74039d17: current alpha (source 4) decided while
         # the trusted UI color channel was offered, flattening most of the scene.

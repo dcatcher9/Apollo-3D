@@ -360,6 +360,13 @@ frame`, `depth display retirement`, `depth present observation`, `depth list cov
    this is for comparison testing, not ordinary setup.
 3. Put the game in fullscreen or borderless fullscreen on Sunshine's virtual display at the normal resolution.
    Its client area must exactly cover that display, and ReShade and Sunshine must use the same GPU.
+   Windows display scaling above 100% on that display makes a game that is not DPI aware see the
+   display at its logical size (3840 × 2160 at 150% looks like 2560 × 1440), so a borderless game
+   renders there whatever its own resolution setting says. When the game's back buffer equals that
+   logical size below the display's real mode, the panel shows an orange warning, ReShade.log gets one
+   `Sunshine Game 3D: display scaling limits the game` line per swapchain initialization, and the
+   readiness report adds a **Display scaling** WARN (`game3d_display_scale.h`). Set scaling to 100%
+   for that display, or set the game's .exe high-DPI override to **Application**, and restart the game.
 4. For a streamed headset, select **Game 3D** in Moonlight 3D. Its own options pane controls
    **Resolution**, **FPS** and **Bandwidth**. Choose a normal source resolution such as
    1920 × 1080 or 3840 × 2160. No Sunshine provider toggle or host restart is required.

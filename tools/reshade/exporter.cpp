@@ -9,6 +9,7 @@
 #include "provided_raw_scene.h"
 #include "automatic_scene_transition.h"
 #include "game3d_controls.h"
+#include "game3d_display_scale.h"
 #include "game3d_renderer.h"
 #include "game3d_depth_input.h"
 #include "game3d_ui_input_provider.h"
@@ -2451,6 +2452,20 @@ namespace {
 
   void on_init_runtime(api::effect_runtime *runtime) {
     if (publisher) publisher->track_runtime(runtime);
+    // Windows display scaling can hold a DPI-unaware game below its display's
+    // resolution (docs/reshade-sbs.md, display scaling); say so once per
+    // swapchain (re)initialization. The panel shows the same warning.
+    if (!runtime) return;
+    uint32_t width = 0, height = 0;
+    runtime->get_screenshot_width_and_height(&width, &height);
+    if (const auto scale = sunshine_game3d::display_scale::query(runtime->get_hwnd(), width, height); scale.limited) {
+      char message[320];
+      std::snprintf(message, sizeof(message),
+        "Sunshine Game 3D: display scaling limits the game: it renders at %ux%u on a %ux%u display because "
+        "Windows display scaling is %u%%; set scaling to 100%% or this game's high-DPI override to Application",
+        scale.game_width, scale.game_height, scale.display_width, scale.display_height, scale.scale_percent);
+      log(reshade::log::level::warning, message);
+    }
   }
 
   void on_begin_effects(api::effect_runtime *runtime, api::command_list *commands, api::resource_view rtv, api::resource_view) {

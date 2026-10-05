@@ -2,6 +2,7 @@
 #include "addon_lifetime.h"
 #include "game3d_controls.h"
 #include "game3d_controls_model.h"
+#include "game3d_display_scale.h"
 #include "game3d_stereo_contract.h"
 #include "game3d_ui_adaptive.h"
 #include "streamline_buffer_contract.h"
@@ -508,6 +509,20 @@ namespace sunshine_game3d {
     }
 
     camera_hint(automatic, data->values.enabled, fg);
+    {
+      uint32_t width = 0, height = 0;
+      runtime->get_screenshot_width_and_height(&width, &height);
+      if (const auto scale = display_scale::query(runtime->get_hwnd(), width, height); scale.limited) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+        ImGui::TextWrapped("Game renders at %ux%u on a %ux%u display because Windows display scaling is %u%%.",
+          scale.game_width, scale.game_height, scale.display_width, scale.display_height, scale.scale_percent);
+        ImGui::SetItemTooltip("This game ignores its resolution setting while Windows scales the display, so the stream "
+          "and the depth map get fewer pixels. Set Windows display scaling to 100%% for this display, or open the "
+          "game's .exe Properties > Compatibility > Change high DPI settings and set 'Override high DPI scaling "
+          "behavior' to 'Application'. Then restart the game.");
+        ImGui::PopStyleColor();
+      }
+    }
     if (data->values.depth_view != 0)
       ImGui::TextWrapped("Depth preview is selected. To return to gameplay, choose Troubleshooting > Depth view > Game image.");
     ImGui::Spacing();

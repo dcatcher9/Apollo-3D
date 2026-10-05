@@ -139,12 +139,15 @@ TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-
                     r'.*?gpu_frames=(\d+)'
                     r' gpu_ms mean/max=\{total=([0-9.]+)/([0-9.]+)')
 LOADED = re.compile(r"loaded from '.*' into '(.*)'")
+# Windows display scaling holds a DPI-unaware game below its display's resolution (game3d_display_scale.h).
+DISPLAY_SCALING = re.compile(r'display scaling limits the game: it renders at (\d+)x(\d+) on a (\d+)x(\d+) display '
+                             r'because Windows display scaling is (\d+)%')
 HOST_LINE = re.compile(r'^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.(\d{3})\]: (\w+): (.*)$')
 
 # ReShade and game noise that says nothing about Game 3D.
 BENIGN = (
     'Successfully compiled', 'IDirectInput8W::CreateDevice failed', 'is inconsistent',
-    'Add-ons are still loaded', 'Game 3D hitch',
+    'Add-ons are still loaded', 'Game 3D hitch', 'display scaling limits the game',
 )
 # Export pauses that are part of normal play rather than faults.
 ROUTINE_INACTIVE = {'not_foreground', 'runtime_reset', 'no_consumer', 'present_without_render', 'runtime_gone'}
@@ -624,6 +627,7 @@ class Session:
     timing_profile: str = ''  # The last timing line's gpu_profile state ('disabled' with Diagnostics off).
     diagnostics: list[tuple[float, bool]] = field(default_factory=list)  # Each Diagnostics switch line.
     ngx: tuple[int, ...] | None = None
+    display_scaling: list[tuple[float, tuple[int, ...]]] = field(default_factory=list)
     warnings: list[tuple[float, str]] = field(default_factory=list)
 
 
@@ -656,6 +660,8 @@ def parse(lines) -> Session:
         s.last = t
         if level in ('WARN', 'ERROR') and not any(b in text for b in BENIGN):
             s.warnings.append((t, f'{level} {text[:160]}'))
+        if found := DISPLAY_SCALING.search(text):
+            s.display_scaling.append((t, tuple(int(v) for v in found.groups())))
         if (found := LOADED.search(text)) and not s.exe:
             s.exe = os.path.basename(found.group(1))
         if 'Finished exiting' in text:
@@ -907,6 +913,11 @@ def evaluate(s: Session) -> list[Check]:
                                                              if s.addon else 'never registered')))
         return checks
     add(Check('PASS', 'Add-on', f'loaded; output {s.generation or "unknown"}'))
+    if s.display_scaling:
+        gw, gh, dw, dh, pct = s.display_scaling[-1][1]
+        add(Check('WARN', 'Display scaling', f'the game rendered at {gw}x{gh} on a {dw}x{dh} display because Windows '
+                  f"display scaling is {pct}%; set scaling to 100% or the game's high-DPI override to Application",
+                  [clock(t) for t, _ in s.display_scaling][:6]))
 
     published = sum(i.published for i in s.intervals)
     # Depth has started once most of an interval's publications carry it.
