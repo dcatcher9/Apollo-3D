@@ -103,24 +103,9 @@ namespace sunshine_game3d {
     return any;
   }
 
-  // The first-run shadow (docs/reshade-sbs.md, hidden-scene evidence) is a
-  // diagnostics toggle, independent of acceptance: ReShade.ini UISceneShadow
-  // absent means this session measures and the key is written 0, so only the
-  // game's first session after install does; 1 always, 0 (or anything else)
-  // never.
-  enum class scene_shadow_setting { absent, always, never };
-  inline constexpr const char *scene_shadow_key = "UISceneShadow";
-  template<class Backend>
-  scene_shadow_setting load_scene_shadow(Backend &config) {
-    int value = -1;
-    config.read(scene_shadow_key, value);
-    if (value == -1) {
-      config.write(scene_shadow_key, 0);
-      return scene_shadow_setting::absent;
-    }
-    return value == 1 ? scene_shadow_setting::always : scene_shadow_setting::never;
-  }
-  inline bool scene_shadow_runs(scene_shadow_setting setting) { return setting != scene_shadow_setting::never; }
+  // The first-run shadow of hidden-scene evidence (UISceneShadow) was
+  // removed: a ReShade.ini that still carries the key loads unchanged and it
+  // is ignored, like UIPinOnlyUI and UIFlattenStillScreens below.
 
   // Rule H2 (still screens without a UI source) was removed: a ReShade.ini
   // that still carries UIFlattenStillScreens loads unchanged and the key is

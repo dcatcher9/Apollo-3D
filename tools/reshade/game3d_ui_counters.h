@@ -128,9 +128,9 @@ namespace sunshine_game3d {
   // over a hidden scene), the hidden-scene verdict that same sample
   // measured: invalid when the evidence was not valid or not measured.
   // full_alpha_d: the same for a sample that decided an accepted whole-frame
-  // decision (ui_temporal::whole_frame: an alpha covering at least 99%, or
-  // the exact full change set 6), whose evidence the renderer measures only
-  // as a diagnostic, from the sample after one that decided it. scene: the
+  // decision (an alpha covering at least 99%, or the exact full change set
+  // 6), measured by a diagnostic evidence run that was removed with the
+  // first-run shadow: reserved, they stay zero and are still logged. scene: the
   // hidden-scene guard's observations of committed samples
   // (game3d_scene_guard.h): its hidden hold entered, a hold released by a
   // visible sample (every visible H1 sample is one), and source signatures

@@ -102,9 +102,6 @@ namespace sunshine_game3d {
       // S1 winner's source, and whether H1 overrode it with source 8.
       std::uint32_t claims{}, s1_source{};
       bool h1_applied{};
-      // How long consecutive samples have read the presented frame hidden
-      // while no source decided, not blank, ending with this one; zero otherwise.
-      std::uint64_t shadow_hidden_ms{};
       // A2, decision texels 8 and 9 (selection revision 2), in
       // ui_selection::judged_kinds order (layer, Backbuffer, current): pixels
       // with alpha of at least 1/2, and those of them where an offered exact
@@ -124,26 +121,23 @@ namespace sunshine_game3d {
       bool reused{};
       // H1 (d), texel 11 (selection revision 4): the offscreen UI layer
       // against the presented frame at 8 times their pair threshold: pixels
-      // whose colours match, lit layer pixels, lit presented pixels, and lit
-      // presented pixels that differ from the layer. The first two prove the
-      // layer the pre-UI scene image (ui_selection::pre_ui_match); the last two
-      // are shadow statistics nothing acts on. All zero without a layer or a
-      // comparable pair.
-      std::uint32_t pre_ui_match{}, pre_ui_image_lit{}, presented_lit{}, presented_lit_differs{};
+      // whose colours match and lit layer pixels, which prove the layer the
+      // pre-UI scene image (ui_selection::pre_ui_match). Both zero without a
+      // layer or a comparable pair. Texel 11 .z and .w (the lit presented
+      // pixels and those that differ, shadow statistics) are reserved zeros.
+      std::uint32_t pre_ui_match{}, pre_ui_image_lit{};
     } evidence;
     // This render's state, not the sample's: the hidden-scene guard's
     // verdicts pushed with this render (game3d_scene_guard.h: a held hidden
     // verdict, its samples reading the pre-UI image visible) and how many
     // source signatures a visible verdict refuted, whether the offered layer's
     // signature is proven the pre-UI scene image (H1 d: the ledger's key
-    // pre_ui:<format>:<space>, alpha_auto_policy::pre_ui_proven), and whether
-    // the first-run shadow evaluates the evidence without an acting claim.
+    // pre_ui:<format>:<space>, alpha_auto_policy::pre_ui_proven).
     struct scene_guard_state {
       bool hidden{}, pre_ui{};
       std::uint32_t refuted{};
       bool proven{};
     } scene_guard;
-    bool scene_shadow{};
   };
 
   // One alpha candidate's covered and invalid pixels in a sample.
@@ -384,8 +378,7 @@ namespace sunshine_game3d {
     // keys as stored() wrote them, empty when none was accepted. When that
     // changed stored(), the listener hears "" outside the lock, so the owner
     // persists an empty TrustedUISources. Each source is then accepted again
-    // by its own evidence. The mode, the counters and the first-run shadow
-    // are unchanged.
+    // by its own evidence. The mode and the counters are unchanged.
     std::string forget() {
       std::string cleared;
       std::function<void(const std::string &)> listener;
@@ -416,20 +409,6 @@ namespace sunshine_game3d {
     ui_counters counters() {
       std::lock_guard<std::mutex> lock(mutex_);
       return counters_;
-    }
-
-    // Whether this session runs the hidden-scene evidence as a first-run
-    // shadow: on sample frames whatever the gates, logged only; it never
-    // changes a decision. A diagnostics toggle its owner sets (ReShade.ini
-    // UISceneShadow, game3d_controls.cpp), independent of acceptance:
-    // restore, earning, revocation and forget() never change it.
-    void set_first_run(bool first_run) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      first_run_ = first_run;
-    }
-    bool first_run() {
-      std::lock_guard<std::mutex> lock(mutex_);
-      return first_run_;
     }
 
   private:
@@ -640,7 +619,6 @@ namespace sunshine_game3d {
     std::mutex mutex_;
     std::optional<bool> manual_; // Empty in Auto.
     std::vector<entry> entries_;
-    bool first_run_{};
     std::function<void(const std::string &)> change_listener_;
     ui_counters counters_;
   };

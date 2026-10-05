@@ -2427,10 +2427,9 @@ namespace {
   // presented frame lacking the consumed depth's edges, and for a pre-UI
   // image's claim also that image reading visible on those samples; nothing
   // else changes a decision. The evidence passes run on sample frames only,
-  // after a sample with an acting-capable claim, while a hold is active, for
-  // the first-run shadow or after an accepted whole-frame decision, and in
-  // SDR Auto for rule H2 (fix 2) while no source other than 11 decided; its
-  // own section (m) closes this one.
+  // after a sample with an acting-capable claim, while a hold is active or for
+  // a proven pre-UI layer, and what they measure is actionable; section (m),
+  // the Diagnostics switch, closes this one.
   void verify_hidden_scene(fixture &gpu, std::ostream &report) {
     using namespace sunshine_game3d;
     using ui_detection::scene_verdict;
@@ -2849,10 +2848,9 @@ namespace {
     const auto scene_layer = color_view(scene_layer_bytes), mismatch_layer = color_view(menu_layer_bytes),
       dark_layer = color_view(dark_layer_bytes);
     // Texel 11 as SunshinePreUIPixel counts it from the pushed pair threshold
-    // (b2 word 4): matching pixels, lit layer pixels, lit presented pixels
-    // and lit presented pixels that differ, at 8 times the threshold (scRGB
-    // relative above one).
-    using pre_ui_pixels = std::array<std::uint32_t, 4>;
+    // (b2 word 4): matching pixels and lit layer pixels at 8 times the
+    // threshold (scRGB relative above one); .z and .w are reserved zeros.
+    using pre_ui_pixels = std::array<std::uint32_t, 2>;
     const auto channel_of = [&](const std::vector<unsigned char> &bytes, size_t i, unsigned c) {
       if (gpu.color != 2) return bytes[i * bpp + c] / 255.f;
       std::uint16_t half; std::memcpy(&half, bytes.data() + i * bpp + c * 2, 2); return half_float(half);
@@ -2872,14 +2870,13 @@ namespace {
           delta = std::max(delta, std::abs(p - l));
         }
         delta /= gpu.color == 2 ? std::max(1.f, presented_peak) : 1.f;
-        const bool match = delta <= coarse, lit = presented_peak > coarse;
-        counts[0] += match; counts[1] += layer_peak > coarse; counts[2] += lit; counts[3] += lit && !match;
+        counts[0] += delta <= coarse; counts[1] += layer_peak > coarse;
       }
       return counts;
     };
     const auto counted = [](const alpha_auto_decision &sample) {
       const auto &e = sample.evidence;
-      return pre_ui_pixels{e.pre_ui_match, e.pre_ui_image_lit, e.presented_lit, e.presented_lit_differs};
+      return pre_ui_pixels{e.pre_ui_match, e.pre_ui_image_lit};
     };
     const auto all_pixels = std::uint32_t(pixels);
     const auto proven_pushed = [&] { return (gpu.renderer.consumed_detection().flags & ui_detection::per_frame_pre_ui_proven) != 0; };
@@ -2903,7 +2900,7 @@ namespace {
     // previous frame's sample, 100 ms apart: the 22nd gameplay frame reads
     // the sample 2 s after the first.
     const auto play_pixels = expected_pixels(scene_color, scene_layer_bytes);
-    require(play_pixels == pre_ui_pixels{all_pixels, all_pixels, all_pixels, 0u}, "The fixture's gameplay layer does not equal the presented colour");
+    require(play_pixels == pre_ui_pixels{all_pixels, all_pixels}, "The fixture's gameplay layer does not equal the presented colour");
     unsigned proving_frames = 0;
     outcome proving{};
     while (!sdr.pre_ui_proven(layer_signature) && proving_frames != 30) {
@@ -2985,7 +2982,8 @@ namespace {
     // (k) An accepted layer decides by itself (source 10), whatever the
     // evidence: its opaque-full claim measures, and the hidden verdict it
     // enters is held, but H1 never overrides a winner opaque on every pixel. Its
-    // samples count as accepted whole-frame decisions (full_alpha_d).
+    // frames count as full_alpha; full_alpha_d, which only the removed
+    // whole-frame diagnostic measured, stays zero.
     {
       alpha_auto_policy trusting;
       require(trusting.restore(gpu.key(ui_selection::kind::ui_layer)).restored == 1, "The layer key was not restored");
@@ -3000,49 +2998,26 @@ namespace {
           !trusted.sample.evidence.h1_applied && trusted.sample.evidence.s1_source == ui_detection::source_layer,
         "An accepted layer lost its own decision, or H1 overrode it");
       const auto counted = trusting.counters();
-      require(counted[ui_counter::full_alpha] >= 3 && counted[ui_counter::full_alpha_d_hidden] +
-          counted[ui_counter::full_alpha_d_ambiguous] + counted[ui_counter::full_alpha_d_visible] >= 1 &&
-          !counted[ui_counter::full_d_hidden] && !counted[ui_counter::full_d_visible] && counted[ui_counter::scene_entered] == 1,
-        "The whole-frame layer's frames or measured samples were not counted as full_alpha, or its entry not counted");
+      require(counted[ui_counter::full_alpha] >= 3 && !counted[ui_counter::full_alpha_d_hidden] &&
+          !counted[ui_counter::full_alpha_d_ambiguous] && !counted[ui_counter::full_alpha_d_visible] &&
+          !counted[ui_counter::full_alpha_d_invalid] && !counted[ui_counter::full_d_hidden] && !counted[ui_counter::full_d_visible] &&
+          counted[ui_counter::scene_entered] == 1,
+        "The whole-frame layer's frames were not counted as full_alpha, full_alpha_d counted, or its entry not counted");
       source.session = &policy;
     }
-    // (l) The first-run shadow measures on sample frames without a claim,
-    // never changes a decision or a hold, and reports how long the hidden run
-    // lasts. A frame without protection first ends the accepted layer's flat
-    // mask, which its absence would otherwise hold (T1).
+    // (l) Without a claim nothing measures, and a claim enters after the same
+    // samples as before. A frame without protection first ends the accepted
+    // layer's flat mask, which its absence would otherwise hold (T1).
     ++source.epoch;
     source.now_ms += 100; source.tick_ms = source.now_ms; ++source.sequence;
     gpu.render(false, 1, false, false, false, {}, {}, {}, nullptr, &source);
     inputs = {}; inputs.current_color = true;
-    never_flat(logo_color, 2, "no claim before the shadow");
-    const auto quiet_no_claim = never_flat(logo_color, 2, "no claim before the shadow");
-    require(!quiet_no_claim.evidence, "Evidence ran without a claim");
-    policy.set_first_run(true);
-    outcome shadow{};
-    for (unsigned i = 0; i != 8; ++i) {
-      shadow = never_flat(banded_color, 1, "first-run shadow");
-      require(shadow.empty && shadow.evidence == 1 && shadow.sample.scene_shadow && !shadow.held &&
-          !shadow.sample.scene_guard.hidden, "The first-run shadow changed a decision or a hold, or skipped a sample frame");
-    }
-    require(shadow.sample.evidence.scene.verdict == scene_verdict::hidden && !shadow.sample.source_kind &&
-        shadow.sample.evidence.scene.decided >= ui_detection::scene::min_edges &&
-        shadow.sample.evidence.shadow_hidden_ms >= 500, "The first-run shadow did not report its uncovered hidden run");
-    // A blank frame reads hidden too, with nothing decided: it is not an
-    // uncovered hidden scene and ends the run.
-    const auto blank_shadow = never_flat(logo_color, 2, "first-run shadow over a blank frame");
-    require(blank_shadow.sample.evidence.scene.verdict == scene_verdict::hidden &&
-        blank_shadow.sample.evidence.scene.decided < ui_detection::scene::min_edges &&
-        !blank_shadow.sample.evidence.shadow_hidden_ms, "A blank frame extended the uncovered hidden run");
-    const auto visible_shadow = never_flat(scene_color, 2, "first-run shadow over a visible scene");
-    require(!visible_shadow.sample.evidence.shadow_hidden_ms && visible_shadow.sample.evidence.scene.verdict == scene_verdict::visible,
-      "A visible sample did not end the hidden run");
-    // With a claim, only evidence the claim or a hold asked for acts: H1
-    // enters after the same samples as without the shadow, though the shadow
-    // measured the first sample that showed the claim.
+    never_flat(logo_color, 2, "no claim");
+    const auto quiet_no_claim = never_flat(logo_color, 2, "no claim");
+    require(!quiet_no_claim.evidence && !quiet_no_claim.sample.evidence.scene.ran, "Evidence ran without a claim");
     inputs = {}; inputs.layer = opaque_layer; inputs.layer_flags = layer_flags;
-    require(frames_to_flat(logo_color, 5, "first-run shadow with a claim") == 4,
-      "The first-run shadow changed when H1 enters");
-    policy.set_first_run(false);
+    require(frames_to_flat(logo_color, 5, "a claim after a quiet screen") == 4,
+      "A claim after a quiet screen did not enter at its second hidden sample");
     inputs = {};
     report << "hidden-scene D3D11 layer_claim=1 two_sample_entry=1 visible_release=1 refuted_layer_quiet=1 hold_expiry_frames="
       << held_frames << " reused_depth_blocks=1 camera_blocks=1 epoch_clears=1 revision_inactive_acceptance_keep=1"
@@ -3050,9 +3025,8 @@ namespace {
       " accepted_ui_alpha_source1=1 pre_ui_hudless=1 black_hudless_rejected=1 unaccepted_exact_pair_h1=1 rule6_accepted=1"
       " sdr_unproven_quiet=1 sdr_proof_frames=" << proving_frames << " sdr_proof_kept_mismatch=1 sdr_proof_kept_identity=1"
       " sdr_pre_ui_pixels_exact=1 sdr_pre_ui_sample_only=1 sdr_pre_ui_layer=1 sdr_gameplay_visible=1 sdr_dark_never_flat=1 accepted_layer_not_overridden=1"
-      " first_run_shadow=1"
-      " blank_frames_end_run=1 shadow_entry_unchanged=1\n";
-    std::puts("PASS D3D11 hidden scene (H1): an informative full claim (an unaccepted opaque layer, an unaccepted exact full change set, or a pre-UI image: an inexact HUD-less image, or Stellar Blade SDR's cleared target without alpha once the session ledger proved it the pre-UI image by its pixels (three matching samples over 2 s, kept across a mismatching sample and an identity change), reading visible while the presented frame reads hidden) flattens as 8 only after two valid hidden samples and while the depth is this frame's; holds expire after hold_ms, release on visible evidence and clear only on an epoch change, not on a revision, inactive detection, acceptance or a HUD-less pairing that comes and goes; a visible verdict refutes the layer's claim until it shows itself transparent; reused depth, an unready camera, no claim, a tagged UI color, presented alpha and an unaccepted UIAlpha never flatten, while an accepted UIAlpha or layer decides by itself and is never overridden; an exact full-frame pair is rule 6 once accepted; SDR gameplay (both images visible) and dark gameplay (both hidden) never flatten; evidence runs only for a claim, a hold, the shadow or a whole-frame decision; the first-run shadow only measures, ignores blank frames and leaves entry unchanged");
+      " quiet_without_claim=1\n";
+    std::puts("PASS D3D11 hidden scene (H1): an informative full claim (an unaccepted opaque layer, an unaccepted exact full change set, or a pre-UI image: an inexact HUD-less image, or Stellar Blade SDR's cleared target without alpha once the session ledger proved it the pre-UI image by its pixels (three matching samples over 2 s, kept across a mismatching sample and an identity change), reading visible while the presented frame reads hidden) flattens as 8 only after two valid hidden samples and while the depth is this frame's; holds expire after hold_ms, release on visible evidence and clear only on an epoch change, not on a revision, inactive detection, acceptance or a HUD-less pairing that comes and goes; a visible verdict refutes the layer's claim until it shows itself transparent; reused depth, an unready camera, no claim, a tagged UI color, presented alpha and an unaccepted UIAlpha never flatten, while an accepted UIAlpha or layer decides by itself and is never overridden; an exact full-frame pair is rule 6 once accepted; SDR gameplay (both images visible) and dark gameplay (both hidden) never flatten; evidence runs only for a claim, a hold or a proven pre-UI layer, so everything it measures is actionable");
     // (m) G3, the Diagnostics switch: a loading-like screen (Stellar Blade's
     // SDR loading screen: its cleared output target almost black without
     // alpha beside an opaque current alpha, neither accepted, over a frame

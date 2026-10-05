@@ -67,9 +67,6 @@ namespace {
     sunshine_game3d::source_alpha_ui_decision source_alpha;
     sunshine_game3d::source_alpha_ui_decision logged_source_alpha;
     sunshine_diagnostics::log_gate source_alpha_log;
-    // The longest run of hidden samples without a decided source since the
-    // last log line: the renderer reports only the current run.
-    std::uint64_t shadow_hidden_max_ms = 0;
     // The game session whose UI counters this runtime's lines carry, known
     // once a render acquired it; counters_logged once a line carried them, so
     // the runtime's reset or destruction ends the log with the session totals.
@@ -150,7 +147,6 @@ namespace {
       bool game3d_enabled = true, sunshine_game3d::alpha_auto_policy *ui_session = nullptr) {
     const auto now = GetTickCount64();
     bool write_log = false;
-    std::uint64_t shadow_hidden_ms = 0;
     sunshine_game3d::alpha_auto_policy *counters_session = nullptr;
     {
       std::lock_guard<std::mutex> lock(automatic_ui_mutex);
@@ -159,11 +155,10 @@ namespace {
       value.unprotected_since_ms =
         sunshine_game3d::next_unprotected_since(value, game3d_enabled, entry.source_alpha.unprotected_since_ms, now);
       entry.source_alpha = value;
-      entry.shadow_hidden_max_ms = std::max(entry.shadow_hidden_max_ms, value.coverage.evidence.shadow_hidden_ms);
       const auto &last = entry.logged_source_alpha;
-      // Of the hidden-scene verdict only entering or leaving hidden counts: the
-      // first-run shadow measures every sample, and matched scenes near the
-      // visible bound turn between ambiguous and visible.
+      // Of the hidden-scene verdict only entering or leaving hidden counts:
+      // matched scenes near the visible bound turn between ambiguous and
+      // visible.
       const auto hidden = [](const sunshine_game3d::source_alpha_ui_decision &decision) {
         return decision.coverage.evidence.scene.verdict == sunshine_game3d::ui_detection::scene_verdict::hidden;
       };
@@ -179,8 +174,6 @@ namespace {
         entry.logged_source_alpha = value;
         counters_session = entry.ui_session;
         entry.counters_logged |= counters_session != nullptr;
-        shadow_hidden_ms = entry.shadow_hidden_max_ms;
-        entry.shadow_hidden_max_ms = 0;
       }
     }
     if (!write_log) return;
@@ -194,15 +187,17 @@ namespace {
     const auto refused = sunshine_game3d::ui_selection::candidate_name(evidence.refused);
     // H1 (texels 6 and 10): the pre-UI scene image texel 6 measured. H1 (d),
     // texel 11: the offscreen UI layer against the presented frame (matching
-    // and lit layer pixels prove it the pre-UI scene image; lit presented
-    // pixels and those that differ are shadow statistics only).
+    // and lit layer pixels prove it the pre-UI scene image). The removed
+    // first-run shadow's fields and texel 11's removed shadow statistics
+    // (presented_lit, presented_lit_differs) keep their places as zeros, so
+    // the line's layout does not change.
     namespace pre_ui_image = sunshine_game3d::ui_detection::pre_ui_image;
     const char *const pre_ui_name = evidence.pre_ui_image == pre_ui_image::hudless ? "hudless" :
       evidence.pre_ui_image == pre_ui_image::layer ? "layer" : "none";
     const auto &guard = value.coverage.scene_guard;
     char message[3072];
     std::snprintf(message, sizeof(message),
-      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u accepted=0x%x sampled_layer={covered=%u invalid=%u opaque=%u} sampled_one_way={strong=%u/%u/%u contradicted=%u/%u/%u} sampled_reason=%.*s sampled_refused=%.*s sampled_reused=%d sampled_late_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_inferred_opaque=%u/%u sampled_claims=0x%x sampled_h1={applied=%d winner=%u} sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_pre_ui_scene={image=%s n=%u d=%.3f valid=%d} scene_guard={hidden=%d pre_ui=%d refuted=%u proven=%d} shadow=%d shadow_hidden_ms=%llu sampled_pre_ui_pixels={match=%u image_lit=%u presented_lit=%u presented_lit_differs=%u} status_revision=%llu",
+      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u accepted=0x%x sampled_layer={covered=%u invalid=%u opaque=%u} sampled_one_way={strong=%u/%u/%u contradicted=%u/%u/%u} sampled_reason=%.*s sampled_refused=%.*s sampled_reused=%d sampled_late_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_inferred_opaque=%u/%u sampled_claims=0x%x sampled_h1={applied=%d winner=%u} sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_pre_ui_scene={image=%s n=%u d=%.3f valid=%d} scene_guard={hidden=%d pre_ui=%d refuted=%u proven=%d} shadow=0 shadow_hidden_ms=0 sampled_pre_ui_pixels={match=%u image_lit=%u presented_lit=0 presented_lit_differs=0} status_revision=%llu",
       static_cast<void *>(runtime), value.mode == sunshine_game3d::source_alpha_mode::automatic ? "auto" :
         value.mode == sunshine_game3d::source_alpha_mode::on ? "on" : "off",
       int(value.rendered), int(value.applied), sunshine_game3d::name(value.input), int(value.retained_alpha_ready),
@@ -220,9 +215,8 @@ namespace {
       evidence.alpha_opaque[0], evidence.alpha_opaque[1], evidence.inferred_opaque[0], evidence.inferred_opaque[1],
       evidence.claims, int(evidence.h1_applied), evidence.s1_source, scene.n, double(scene.d), int(scene.valid), int(scene.ran),
       sunshine_game3d::ui_detection::name(scene.verdict), pre_ui_name, pre_ui_scene.n, double(pre_ui_scene.d),
-      int(pre_ui_scene.valid), int(guard.hidden), int(guard.pre_ui), guard.refuted, int(guard.proven), int(value.coverage.scene_shadow),
-      static_cast<unsigned long long>(shadow_hidden_ms), evidence.pre_ui_match, evidence.pre_ui_image_lit,
-      evidence.presented_lit, evidence.presented_lit_differs, static_cast<unsigned long long>(value.qualification.token));
+      int(pre_ui_scene.valid), int(guard.hidden), int(guard.pre_ui), guard.refuted, int(guard.proven),
+      evidence.pre_ui_match, evidence.pre_ui_image_lit, static_cast<unsigned long long>(value.qualification.token));
     log(reshade::log::level::info, message);
     if (counters_session) log_ui_counters(runtime, *counters_session);
   }

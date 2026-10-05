@@ -100,8 +100,6 @@ namespace {
     c.opaque_current = layer[3];
     c.pre_ui_match = pre_ui[0];
     c.pre_ui_lit = pre_ui[1];
-    c.presented_lit = pre_ui[2];
-    c.presented_lit_differs = pre_ui[3];
     return c;
   }
 
@@ -365,12 +363,12 @@ namespace {
     want[word::claims] = d.claims;
     want[word::h1] = selection::h1_word(d);
     // Texel 11 (H1 d): the layer's pre-UI pixel counts, zero without a layer
-    // or a pre-UI threshold (a frame that is not a detection sample).
+    // or a pre-UI threshold (a frame that is not a detection sample). Its .z
+    // and .w (words 46 and 47) are reserved zeros, whatever the statistics
+    // rows' .z and .w hold.
     const bool layer = (test.offered & candidate::layer) != 0u && test.pre_ui_threshold > 0.f;
     want[word::pre_ui_match] = layer ? c.pre_ui_match : 0u;
     want[word::pre_ui_image_lit] = layer ? c.pre_ui_lit : 0u;
-    want[word::presented_lit] = layer ? c.presented_lit : 0u;
-    want[word::presented_lit_differs] = layer ? c.presented_lit_differs : 0u;
     // decide() reads its counts back from the words it is compared with.
     const auto back = selection::counts_from_words(want.data(), want.size());
     require(back.covered == c.covered && back.invalid == c.invalid && back.pixels == c.pixels &&
@@ -378,8 +376,7 @@ namespace {
         back.contradicted == c.contradicted && back.opaque_ui_alpha == c.opaque_ui_alpha &&
         back.opaque_ui_color == c.opaque_ui_color && back.opaque_backbuffer == c.opaque_backbuffer &&
         back.opaque_current == c.opaque_current && back.pre_ui_match == want[word::pre_ui_match] &&
-        back.pre_ui_lit == want[word::pre_ui_image_lit] && back.presented_lit == want[word::presented_lit] &&
-        back.presented_lit_differs == want[word::presented_lit_differs],
+        back.pre_ui_lit == want[word::pre_ui_image_lit],
       test.name + ": counts_from_words does not invert the decision words");
     for (std::size_t i = 0; i != want.size(); ++i)
       if (words[i] != want[i]) {
@@ -940,11 +937,9 @@ namespace {
           const float scale = color == 2 ? std::max(1.f, peak(presented)) : 1.f;
           const float apart = std::max({std::abs(presented[0] - l[0]), std::abs(presented[1] - l[1]),
             std::abs(presented[2] - l[2])}) / scale;
-          const bool presented_lit = peak(presented) > coarse;
+          // .z and .w (the removed lit-presented shadow statistics) stay zero.
           pre_ui[tile][0] += apart <= coarse;
           pre_ui[tile][1] += peak(l) > coarse;
-          pre_ui[tile][2] += presented_lit;
-          pre_ui[tile][3] += presented_lit && apart > coarse;
         }
       }
     std::array<ComPtr<ID3D11ShaderResourceView>, 7> views;
@@ -1020,7 +1015,8 @@ namespace {
       for (std::size_t k = 0; k != 4; ++k) total_pre_ui[k] += pre_ui[lane][k];
     }
     require(!exact || total_contradicted, "check_tiles: the images exercise no contradicted pixel");
-    require(pre_ui_threshold > 0.f ? total_pre_ui[0] && total_pre_ui[1] && total_pre_ui[3] && total_pre_ui[0] < 256u * 144u :
+    require(pre_ui_threshold > 0.f ? total_pre_ui[0] && total_pre_ui[1] && !total_pre_ui[2] && !total_pre_ui[3] &&
+        total_pre_ui[0] < 256u * 144u :
       total_pre_ui == texel{}, "check_tiles: the pre-UI pixel counts are degenerate");
   }
 }

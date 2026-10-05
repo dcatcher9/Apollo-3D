@@ -184,10 +184,10 @@ namespace sunshine_game3d::ui_selection {
     // unchanged (neither for the one-frame-late layer, E2).
     std::array<std::uint32_t, 3> strong{}, contradicted{};
     // Texel 11 (revision 4): the offscreen UI layer against the presented
-    // frame at 8 times their pair threshold: matching pixels, lit layer
-    // pixels, lit presented pixels, lit presented pixels that differ. No
-    // decision reads them; the acceptance ledger proves the layer from them.
-    std::uint32_t pre_ui_match{}, pre_ui_lit{}, presented_lit{}, presented_lit_differs{};
+    // frame at 8 times their pair threshold: matching pixels and lit layer
+    // pixels (.z and .w are reserved zeros). No decision reads them; the
+    // acceptance ledger proves the layer from them.
+    std::uint32_t pre_ui_match{}, pre_ui_lit{};
   };
   // Counts from decision words (texel t, component c is word 4 t + c); the
   // layer's (texel 7) read zero from fewer than 32 words, the one-way counts
@@ -223,8 +223,6 @@ namespace sunshine_game3d::ui_selection {
     if (n >= 4u * ui_detection::pre_ui_decision_texels) {
       c.pre_ui_match = words[word::pre_ui_match];
       c.pre_ui_lit = words[word::pre_ui_image_lit];
-      c.presented_lit = words[word::presented_lit];
-      c.presented_lit_differs = words[word::presented_lit_differs];
     }
     return c;
   }

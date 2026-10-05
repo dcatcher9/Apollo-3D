@@ -349,9 +349,8 @@ namespace sunshine_game3d_test {
         const auto &pre_ui = replay.at("source_alpha_auto").at("sampled_evidence").at("pre_ui_pixels");
         const auto &evidence = frame_.source_alpha_decision.coverage.evidence;
         check(pre_ui.at("match") == evidence.pre_ui_match && pre_ui.at("image_lit") == evidence.pre_ui_image_lit &&
-            pre_ui.at("presented_lit") == evidence.presented_lit &&
-            pre_ui.at("presented_lit_differs") == evidence.presented_lit_differs,
-          "Dump lost the sampled pre-UI pixel counts");
+            !pre_ui.contains("presented_lit") && !pre_ui.contains("presented_lit_differs"),
+          "Dump lost the sampled pre-UI pixel counts, or kept the removed shadow statistics");
       }
       const auto &pin = replay.at("ui_pin");
       const auto marker = [&](std::string_view name) { return sunshine_game3d::shader_marker(frame_.shader_source, name); };

@@ -127,7 +127,7 @@ int main() {
     // words 5-9 reserved, b2 shrunk to 6 words, and the removed defines gone.
     require(sunshine_game3d::ui_selection::revision == 9u && detection::h1_decision_texels == 11u &&
         detection::decision_word::h1 == 43u && detection::pre_ui_decision_texels == 12u &&
-        detection::decision_word::pre_ui_match == 44u && detection::decision_word::presented_lit_differs == 47u &&
+        detection::decision_word::pre_ui_match == 44u && detection::decision_word::pre_ui_image_lit == 45u &&
         detection::per_frame_pre_ui_proven == 0x80000000u && detection::pre_ui_statistics_row == 128u &&
         detection::statistics_rows(detection::max_scene_evidence_images) == 144u && detection::statistics_rows(0) == 144u &&
         detection::source_count == 12u && detection::source_layer == 10u && detection::b2_words == 6u &&

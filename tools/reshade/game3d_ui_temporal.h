@@ -41,9 +41,8 @@
 //          t.per_frame | depth_not_current, and detection with this frame's
 //          own bits, accepted and flags pushed (b2), flags | per_frame, and
 //          the hold store bound at u5 for the reduce. A sample frame runs the
-//          evidence passes when measure = scene_guard.measure(now, shadow,
-//          whole_frame(state.latest), proven_image) says run, and keeps
-//          measure.actionable with the pending sample. Then
+//          evidence passes when scene_guard.measure(now, proven_image) says
+//          they are actionable, and keeps that with the pending sample. Then
 //          state.detected(observation). A sample keeps the signatures and
 //          pushed flags it was submitted with, and its status key is
 //          state.status_key() at submission;
@@ -57,8 +56,7 @@
 //        state.latest = sample, state.latest_source = the pending source and
 //        state.latest_key = the status key at submission;
 //     7. obs = scene_guard.observe(scene_guard::sample_of(words, count, tick,
-//        scene), the pending actionable, the submitted signatures by kind),
-//        then sample.evidence.shadow_hidden_ms = obs.shadow_hidden_ms;
+//        scene), the pending actionable, the submitted signatures by kind);
 //     8. session.observe(sample.evidence, sample.pixels, tick, submitted
 //        signatures); a session in a manual mode ignores it;
 //     9. sample_counters(..., obs) commits the counts.
@@ -172,8 +170,6 @@ namespace sunshine_game3d::ui_temporal {
     if (count >= 4 * ui_detection::pre_ui_decision_texels) {
       evidence.pre_ui_match = words[word::pre_ui_match];
       evidence.pre_ui_image_lit = words[word::pre_ui_image_lit];
-      evidence.presented_lit = words[word::presented_lit];
-      evidence.presented_lit_differs = words[word::presented_lit_differs];
     }
     if (scene) {
       const auto decode = [&](std::size_t n, std::size_t d, std::size_t state) {
@@ -196,45 +192,28 @@ namespace sunshine_game3d::ui_temporal {
     return sample;
   }
 
-  // A sample that decided a whole-frame mask from alpha: a source 1-4 or the
-  // offscreen UI layer (10) covering at least 99% of pixels (the GPU's
-  // full_alpha counter word).
-  inline bool full_alpha(const alpha_auto_decision &sample) {
-    const bool alpha = (sample.source_kind >= 1 && sample.source_kind <= 4) || sample.source_kind == ui_detection::source_layer;
-    return alpha && sample.pixels &&
-      std::uint64_t(sample.covered) * 100 >= std::uint64_t(sample.pixels) * 99;
-  }
-
-  // An accepted whole-frame decision: a whole-frame alpha, or the exact full
-  // change set (source 6). H1 overrides only an alpha one that is not opaque on
-  // every pixel (ui_selection::decide).
-  inline bool whole_frame(const alpha_auto_decision &sample) { return full_alpha(sample) || sample.source_kind == 6; }
-
   // The counts a completed sample commits (game3d_ui_counters.h): the CPU
   // counts snapshotted when it was submitted and the GPU words copied under
   // its fence, each as the change since the previous commit; when it decided
-  // H1 (source 8) or an accepted whole-frame decision (whole_frame), the
-  // hidden-scene verdict that same sample measured; and what the
-  // hidden-scene guard's observation of it did (scene).
+  // H1 (source 8), the hidden-scene verdict that same sample measured; and
+  // what the hidden-scene guard's observation of it did (scene). The
+  // full_alpha_d counters (accepted whole-frame decisions, which only a
+  // removed diagnostic evidence run measured) stay zero, reserved.
   inline ui_counters sample_counters(const alpha_auto_decision &sample, const ui_counters &cpu,
       const ui_counters &committed_cpu, const std::array<std::uint32_t, ui_counter_word::count> &words,
       const std::array<std::uint32_t, ui_counter_word::count> &committed_words, std::uint64_t through_ms,
       const scene_guard::observation &observed = {}) {
     auto delta = cpu - committed_cpu;
     delta.add_gpu_delta(words, committed_words);
-    const bool h1 = sample.source_kind == 8;
-    if (h1 || whole_frame(sample)) {
+    if (sample.source_kind == 8) {
       using ui_detection::scene_verdict;
       const auto &scene = sample.evidence.scene;
       const auto verdict = scene.valid ? scene.verdict : scene_verdict::none;
-      const std::size_t hidden = h1 ? ui_counter::full_d_hidden : ui_counter::full_alpha_d_hidden;
-      ++delta[hidden + (verdict == scene_verdict::hidden ? 0 : verdict == scene_verdict::ambiguous ? 1 :
+      ++delta[ui_counter::full_d_hidden + (verdict == scene_verdict::hidden ? 0 : verdict == scene_verdict::ambiguous ? 1 :
         verdict == scene_verdict::visible ? 2 : 3)];
     }
-    static_assert(ui_counter::full_d_invalid == ui_counter::full_d_hidden + 3 &&
-      ui_counter::full_alpha_d_ambiguous == ui_counter::full_alpha_d_hidden + 1 &&
-      ui_counter::full_alpha_d_visible == ui_counter::full_alpha_d_hidden + 2 &&
-      ui_counter::full_alpha_d_invalid == ui_counter::full_alpha_d_hidden + 3);
+    static_assert(ui_counter::full_d_ambiguous == ui_counter::full_d_hidden + 1 &&
+      ui_counter::full_d_visible == ui_counter::full_d_hidden + 2 && ui_counter::full_d_invalid == ui_counter::full_d_hidden + 3);
     delta[ui_counter::scene_entered] = observed.entered;
     delta[ui_counter::scene_released] = observed.released;
     delta[ui_counter::scene_refuted] = observed.refuted;

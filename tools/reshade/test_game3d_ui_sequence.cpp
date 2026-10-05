@@ -445,10 +445,9 @@ namespace {
     bool pre_ui_valid {};
     float pre_ui_d {};
     // Texel 11: the offscreen UI layer against the presented frame (matching
-    // pixels, lit layer pixels, lit presented pixels, lit presented pixels
-    // that differ), written when a layer is offered (the reduce writes zeros
-    // otherwise).
-    std::array<std::uint32_t, 4> pre_ui_counts {};
+    // pixels, lit layer pixels), written when a layer is offered (the reduce
+    // writes zeros otherwise); .z and .w are reserved zeros.
+    std::array<std::uint32_t, 2> pre_ui_counts {};
 
     synthetic() {
       c.pixels = 1000;
@@ -513,8 +512,8 @@ namespace {
 
     // The layer's pre-UI pixel counts (texel 11, fix 1): the ledger proves
     // its signature from samples matching on 90% of pixels while lit on half.
-    synthetic &pre_ui_pixels(std::uint32_t matched, std::uint32_t image_lit, std::uint32_t presented_lit, std::uint32_t differs) {
-      pre_ui_counts = {matched, image_lit, presented_lit, differs};
+    synthetic &pre_ui_pixels(std::uint32_t matched, std::uint32_t image_lit) {
+      pre_ui_counts = {matched, image_lit};
       return *this;
     }
 
@@ -566,8 +565,6 @@ namespace {
       if (in.bits & candidate::layer) {
         t[word::pre_ui_match] = pre_ui_counts[0];
         t[word::pre_ui_image_lit] = pre_ui_counts[1];
-        t[word::presented_lit] = pre_ui_counts[2];
-        t[word::presented_lit_differs] = pre_ui_counts[3];
       }
       for (std::size_t i = 0; i != ui_selection::judged_kinds.size(); ++i) {
         t[word::strong + i] = c.strong[i];
@@ -659,17 +656,17 @@ namespace {
   //   poll_detection:     sample_discarded (scope, stale on arrival),
   //                       decode_detection_sample, latest_key, the guard's
   //                       observe(sample_of(words), the pending actionable,
-  //                       the submitted signatures by kind) and the shadow
-  //                       run, session.observe of the sample's evidence
+  //                       the submitted signatures by kind), session.observe
+  //                       of the sample's evidence
   //                       with the signatures the sample was submitted
   //                       with, commit_counters (sample_counters with the
   //                       guard's observation);
   //   detect_ui:          the reduce with the hold store (u5) and, except on
   //                       a zero-offer frame, the tiles pass and the 100 ms
-  //                       sample cadence, scene evidence by the guard's
-  //                       measure(now, shadow, whole_frame(latest), a
-  //                       proven layer that is the offer's pre-UI image),
-  //                       the counter and CPU snapshot and the status key.
+  //                       sample cadence, scene evidence when the guard's
+  //                       measure(now, a proven layer that is the offer's
+  //                       pre-UI image) says it is actionable, the counter
+  //                       and CPU snapshot and the status key.
   // The frame size, resource preparation and depth are not modelled.
   class sequence {
   public:
@@ -743,14 +740,13 @@ namespace {
         r.grace = !bits;
         temporal.enter_scope(observation);
         guard.enter_scope(observation.epoch, observation.viewport);
-        const bool shadow = session.first_run();
         poll(observation, r);
         // H1 (d): the ledger's pre-UI proof of the offered layer's signature,
         // read after the poll, so a sample that just earned it counts at once.
         r.layer_proven = (bits & candidate::layer) && session.pre_ui_proven(p.signatures.of(kind::ui_layer));
         r.scene_bits = guard.per_frame(p.now_ms, bits, p.signatures.by_kind(), r.layer_proven);
         const std::uint32_t per_frame = r.scene_bits | r.hold.per_frame | (!p.depth_current ? ui_detection::per_frame_depth_not_current : 0u);
-        detect(observation, bits, flags, accepted, p.signatures, per_frame, shadow, index, r);
+        detect(observation, bits, flags, accepted, p.signatures, per_frame, index, r);
         // T1's invariant: no generated Present detects.
         invariants.generated_detections += p.hold_previous ? 1 : 0;
         temporal.detected(observation);
@@ -793,7 +789,6 @@ namespace {
       temporal.latest_source = pending_source;
       temporal.latest_key = pending_key;
       const auto observation = guard.observe(scene_guard::sample_of(pending_texels.data(), pending_texels.size(), pending_source.now_ms, true), pending_actionable, pending_signatures.by_kind());
-      latest.evidence.shadow_hidden_ms = observation.shadow_hidden_ms;
       session.observe(latest.evidence, latest.pixels, pending_source.now_ms, pending_signatures);
       commit(latest, observation);
       counters_pending = false;
@@ -807,7 +802,7 @@ namespace {
       last_accepted = std::move(now_accepted);
     }
 
-    void detect(const alpha_auto_source &observation, std::uint32_t bits, std::uint32_t flags, std::uint32_t accepted, const candidate_signatures &signatures, std::uint32_t per_frame, bool shadow, std::size_t index, frame_result &r) {
+    void detect(const alpha_auto_source &observation, std::uint32_t bits, std::uint32_t flags, std::uint32_t accepted, const candidate_signatures &signatures, std::uint32_t per_frame, std::size_t index, frame_result &r) {
       r.gpu = {bits, flags, accepted, per_frame, observation.now_ms, gpu_hold};
       // A zero-offer frame runs no tiles pass: the reduce reads the
       // statistics rows the previous tiles pass left (with nothing offered,
@@ -837,14 +832,10 @@ namespace {
         return;
       }
       const bool proven_image = r.layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
-      const auto measure = guard.measure(now, shadow, ui_temporal::whole_frame(temporal.latest), proven_image);
-      pending_actionable = false;
-      const bool evidence = measure.run;
-      if (evidence) {
-        pending_actionable = measure.actionable;
-      }
+      const bool evidence = guard.measure(now, proven_image);
+      pending_actionable = evidence;
       // The reduce zeroes texels 5 and 6; only the evidence passes write them.
-      else {
+      if (!evidence) {
         std::fill(t.begin() + scene_texels_begin, t.begin() + scene_texels_end, 0u);
       }
       if (sample_edit) {
@@ -959,6 +950,10 @@ namespace {
     require(totals[ui_counter::scene_entered] == s.scene_entered && totals[ui_counter::scene_released] == s.scene_released && totals[ui_counter::scene_refuted] == s.scene_refuted, what + ": the scene counters differ from the guard's observations");
     require(totals[ui_counter::full_d_visible] <= totals[ui_counter::scene_released], what + ": an H1 decision over a visible scene released no hold");
     require(!totals.decided(7) && !totals.decided(9) && !totals.decided(11) && !totals.decided(12), what + ": a retired source decided");
+    // full_alpha_d is reserved: nothing measures an accepted whole-frame
+    // decision for itself since the whole-frame diagnostic was removed.
+    require(!totals[ui_counter::full_alpha_d_hidden] && !totals[ui_counter::full_alpha_d_ambiguous] &&
+      !totals[ui_counter::full_alpha_d_visible] && !totals[ui_counter::full_alpha_d_invalid], what + ": full_alpha_d counted");
   }
 
   void run(sequence &s, present p, std::uint64_t from, std::uint64_t to, std::uint64_t interval = 16) {
@@ -2135,8 +2130,8 @@ namespace {
     }
     // Load Game is a whole-frame alpha from the accepted Backbuffer, pinned
     // flat (P1) over a hidden scene until H1 takes it over: the counters
-    // measure it hidden, never visible.
-    require(counted[ui_counter::full_alpha] > 0 && counted[ui_counter::full_alpha_d_hidden] > 0 && !counted[ui_counter::full_alpha_d_visible] && counted[ui_counter::full_d_hidden] > 0 && !counted[ui_counter::full_d_visible], "The counters did not record Load Game's whole-frame alpha over a hidden scene (" + name + ")");
+    // measure H1's samples hidden, never visible.
+    require(counted[ui_counter::full_alpha] > 0 && counted[ui_counter::full_d_hidden] > 0 && !counted[ui_counter::full_d_visible], "The counters did not record Load Game's whole-frame alpha over a hidden scene (" + name + ")");
     check_counters(s, "E33 title and Load Game " + name);
   }
 
@@ -2524,7 +2519,7 @@ namespace {
     check_counters(s, "W3 layer route");
   }
 
-  void hidden_scene_shadow_and_clears() {
+  void hidden_scene_gate_and_clears() {
     // A hidden synthetic stream with an opaque, unaccepted cleared layer: an
     // informative full claim (H1 (b)).
     const auto hidden_layer = [](const gpu_inputs &in) {
@@ -2534,10 +2529,10 @@ namespace {
     };
     const auto layer_flags = ui_detection::layer_detection_flags(false);
     {
-      // The first-run shadow measures every sample, never holds on a sample
-      // it alone measured, and tracks the uncovered hidden run.
+      // Without a claim nothing measures. With one, the sample that first
+      // shows it measures nothing (the gate opens at its poll), and the next
+      // two, actionable, enter the hold.
       alpha_auto_policy session;
-      session.set_first_run(true);
       sequence s(session, [](const gpu_inputs &in) {
         synthetic f;
         f.scene_valid = true;
@@ -2549,15 +2544,11 @@ namespace {
       present p;
       p.offered = candidate::current;
       run(s, p, 10000, 11000);
-      const auto first = s.samples.front().sample_tick_ms;
       for (const auto &sample : s.samples) {
-        require(sample.evidence.scene.ran && sample.evidence.shadow_hidden_ms == sample.sample_tick_ms - first, "The first-run shadow did not measure every sample");
+        require(!sample.evidence.scene.ran, "A sample without a claim measured");
       }
-      require(!s.guard.hidden.until && !s.guard.hidden.last, "The shadow held a verdict");
-      // With a claim, the shadow's own first sample holds nothing either:
-      // the next two actionable samples enter the hold.
+      require(!s.guard.hidden.until && !s.guard.hidden.last, "A sample without a claim held a verdict");
       alpha_auto_policy gated;
-      gated.set_first_run(true);
       sequence g(gated, hidden_layer);
       p.offered = candidate::layer | candidate::current;
       p.layer_flags = layer_flags;
@@ -2568,7 +2559,7 @@ namespace {
           continue;
         }
         ++polls;
-        require(g.samples.back().evidence.scene.ran && (polls == 3) == g.guard.hidden.held(now) && (polls == 1) == !g.guard.hidden.last, "A shadow-only sample held, or the next two actionable ones did not enter");
+        require(g.samples.back().evidence.scene.ran == (polls != 1) && (polls == 3) == g.guard.hidden.held(now) && (polls == 1) == !g.guard.hidden.last, "The sample that first showed the claim measured, or the next two actionable ones did not enter");
       }
     }
     alpha_auto_policy session;
@@ -2709,10 +2700,9 @@ namespace {
           require(f.flat() && f.source == ui_detection::source_layer, "The accepted sign wheel layer was not flat");
         }
       }
-      // The counters see it: whole-frame alpha frames, and the samples after
-      // the first one measure the visible scene beneath (a diagnostic only).
+      // The counters see it: whole-frame alpha frames.
       const auto c = session.counters();
-      require(c[ui_counter::full_alpha] > 0 && c[ui_counter::full_alpha_d_visible] > 0 && c[ui_counter::full_alpha_d_invalid] == 1 && !c[ui_counter::full_alpha_d_hidden] && !c[ui_counter::contradicted], "The counters did not record the accepted full layer over a visible scene");
+      require(c[ui_counter::full_alpha] > 0 && !c[ui_counter::contradicted], "The counters did not record the accepted full layer over a visible scene");
       require(!c[ui_counter::trust_revoked_exact] && !c[ui_counter::trust_revoked_declared] && session.stored() == key(kind::ui_layer), "The accepted sign wheel layer was revoked");
       check_counters(s, "W3 FG off");
       // A session that never saw the HUD keeps the sign wheel 3D: a source
@@ -2769,7 +2759,7 @@ namespace {
       }
       require(s.trust.size() == 1 && s.trust[0].tick == s.samples.front().sample_tick_ms && s.trust[0].accepted == key(kind::ui_alpha), "The W3 HUD UIAlpha was not accepted once by its first sample");
       const auto c = session.counters();
-      require(c[ui_counter::full_alpha] > 0 && c[ui_counter::full_alpha_d_visible] > 0 && !c[ui_counter::full_alpha_d_hidden], "The counters did not record the accepted full UIAlpha over a visible scene");
+      require(c[ui_counter::full_alpha] > 0, "The counters did not record the accepted full UIAlpha over a visible scene");
       require(!c[ui_counter::trust_revoked_exact] && !c[ui_counter::trust_revoked_declared], "The accepted sign wheel UIAlpha was revoked");
       check_counters(s, "W3 FG on");
     }
@@ -3313,7 +3303,7 @@ namespace {
   // with invalid evidence.
   texels sb_mismatching_play(const gpu_inputs &in, bool valid) {
     synthetic f;
-    f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).pre_ui_pixels(500, 1000, 1000, 500);
+    f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).pre_ui_pixels(500, 1000);
     if (valid) {
       f.scene(.5f, .5f);
     }
@@ -3474,36 +3464,30 @@ namespace {
     // within 0.03 of the presented frame in gameplay (0.50 and 0.51: the S2b
     // D proof accepted such a target), but equal to the presented frame on
     // only 60% of pixels in every sample. It is never proven, so it never
-    // claims, and a hidden menu over it (presented D -0.01, the target 0.55)
-    // stays 3D. The first-run shadow measures every sample to show the D
-    // agreement, and acts on none.
+    // claims, nothing measures, and a hidden menu over it (presented D -0.01,
+    // the target 0.55) stays 3D.
     alpha_auto_policy session;
-    session.set_first_run(true);
     sequence s(session, [](const gpu_inputs &in) {
       const bool menu = in.now_ms >= 20000 && in.now_ms < 25000;
       synthetic f;
       f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000);
       if (menu) {
-        f.scene(-.01f, .55f).pre_ui_pixels(300, 1000, 1000, 700);
+        f.scene(-.01f, .55f).pre_ui_pixels(300, 1000);
       } else {
-        f.scene(.5f, .51f).pre_ui_pixels(600, 1000, 1000, 400);
+        f.scene(.5f, .51f).pre_ui_pixels(600, 1000);
       }
       return f.words(in);
     });
     const auto p = sb_sdr_present(candidate::layer | candidate::current);
     run(s, p, 10000, 30000);
-    std::size_t agreeing = 0, hidden = 0;
     for (const auto &sample : s.samples) {
       const auto &e = sample.evidence;
-      require(e.scene.ran && !e.claims && !pre_ui_matching(sample), "The effects target claimed, matched, or a sample was not measured by the shadow");
-      agreeing += e.scene.valid && e.scene.verdict == scene_verdict::visible && std::fabs(e.scene.d - e.pre_ui_scene.d) <= .03f ? 1 : 0;
-      hidden += e.scene.valid && e.scene.verdict == scene_verdict::hidden ? 1 : 0;
+      require(!e.scene.ran && !e.claims && !pre_ui_matching(sample), "The effects target claimed, matched or measured");
     }
-    require(agreeing > 50 && hidden > 20, "The effects stream did not agree with the presented D in gameplay, or never read the menu hidden");
     for (const auto &f : s.frames) {
       require(!f.flat() && !f.source && !f.layer_proven && !(f.scene_bits & (ui_detection::per_frame_pre_ui_visible | ui_detection::per_frame_pre_ui_proven)), "The effects target was proven or flattened");
     }
-    require(session.stored().empty() && !session.pre_ui_proven(p.signatures.of(kind::ui_layer)) && !s.guard.pre_ui.until && !s.scene_entered, "The effects target earned the proof, or a shadow-only sample held");
+    require(session.stored().empty() && !session.pre_ui_proven(p.signatures.of(kind::ui_layer)) && !s.guard.pre_ui.until && !s.scene_entered, "The effects target earned the proof, or a verdict held");
     check_counters(s, "effects target");
   }
 
@@ -3518,7 +3502,7 @@ namespace {
       alpha_auto_policy session;
       sequence s(session, [](const gpu_inputs &in) {
         synthetic f;
-        f.alpha(kind::current, 1000).opaque(kind::current, 1000).pre_ui_pixels(1000, 0, 0, 0);
+        f.alpha(kind::current, 1000).opaque(kind::current, 1000).pre_ui_pixels(1000, 0);
         return f.words(in);
       });
       run(s, sb_sdr_present(candidate::layer | candidate::current), 10000, 20000);
@@ -3535,7 +3519,7 @@ namespace {
       alpha_auto_policy session;
       sequence s(session, [](const gpu_inputs &in) {
         synthetic f;
-        f.alpha(kind::ui_layer, 50).alpha(kind::current, 1000).opaque(kind::current, 1000).pre_ui_pixels(990, 900, 900, 5);
+        f.alpha(kind::ui_layer, 50).alpha(kind::current, 1000).opaque(kind::current, 1000).pre_ui_pixels(990, 900);
         return f.words(in);
       });
       run(s, sb_sdr_present(candidate::layer | candidate::current), 10000, 14000);
@@ -3549,7 +3533,7 @@ namespace {
       alpha_auto_policy session;
       sequence s(session, [](const gpu_inputs &in) {
         synthetic f;
-        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(.5f, .5f).pre_ui_pixels(990, 900, 900, 5);
+        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(.5f, .5f).pre_ui_pixels(990, 900);
         return f.words(in);
       });
       const auto sdr = sb_sdr_present(candidate::layer | candidate::current);
@@ -3602,7 +3586,7 @@ namespace {
       restore(session, proof, 1);
       sequence s(session, [](const gpu_inputs &in) {
         synthetic f;
-        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(-.01f, .05f).pre_ui_pixels(1000, 0, 0, 0);
+        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(-.01f, .05f).pre_ui_pixels(1000, 0);
         return f.words(in);
       });
       run(s, p, 10000, 20000);
@@ -3626,7 +3610,7 @@ namespace {
         const float presented = .10f + float(random.next(2001)) / 10000.f;
         const float pre_ui = presented + (float(random.next(1001)) - 500.f) / 10000.f;
         synthetic f;
-        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(presented, pre_ui).pre_ui_pixels(990, 900, 900, 5);
+        f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(presented, pre_ui).pre_ui_pixels(990, 900);
         return f.words(in);
       });
       run(s, p, 10000, 40000);
@@ -3659,7 +3643,7 @@ namespace {
           const float buffer = .5f, offset = grain ? .05f : 0.f, presented = buffer - offset - fade * (.45f - offset);
           const auto matched = grain ? 600u : std::uint32_t(990.f - 700.f * fade);
           synthetic f;
-          f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(presented, buffer).pre_ui_pixels(matched, 1000, 1000, 1000 - matched);
+          f.alpha(kind::ui_layer, 0, 500).alpha(kind::current, 1000).opaque(kind::current, 1000).scene(presented, buffer).pre_ui_pixels(matched, 1000);
           return f.words(in);
         });
         run(s, p, 10000, 23000);
@@ -3719,13 +3703,11 @@ namespace {
       }
       check_counters(s, "accepted tag beside opaque presented alpha");
     }
-    for (const bool shadow : {false, true}) {
+    {
       // Dead Space-like: diegetic UI only, so no informative claim (an
       // unaccepted current alpha over the whole frame, not opaque), with D
-      // near the verdict bounds. Without the first-run shadow nothing
-      // measures; with it every sample measures but none is actionable.
+      // near the verdict bounds: nothing measures.
       alpha_auto_policy session;
-      session.set_first_run(shadow);
       lcg random {77};
       sequence s(session, [&random](const gpu_inputs &in) {
         constexpr float near_bounds[] {.14f, .16f, .24f, .26f};
@@ -3738,11 +3720,11 @@ namespace {
       q.offered = candidate::current;
       run(s, q, 10000, 20000);
       for (const auto &sample : s.samples) {
-        require(sample.evidence.claims == 0 && measured(sample) == shadow, "The Dead Space-like stream claimed, or measured without the shadow");
+        require(sample.evidence.claims == 0 && !measured(sample), "The Dead Space-like stream claimed or measured");
       }
       never_flat(s, "The Dead Space-like stream");
       require(!s.guard.hidden.until && !s.guard.hidden.last && !s.scene_entered, "The Dead Space-like stream acted on evidence");
-      check_counters(s, shadow ? "Dead Space-like, shadow" : "Dead Space-like");
+      check_counters(s, "Dead Space-like");
     }
   }
 
@@ -3832,7 +3814,7 @@ namespace {
         require(f.flat() && f.decision.s1_source == 3 && f.decision.claims == candidate::backbuffer && f.source == (i < entry ? 3u : 8u) && f.decision.h1 == (i >= entry), "H1 did not take over an accepted winner with transparent pixels from its entry");
       }
       const auto c = session.counters();
-      require(c[ui_counter::full_alpha_d_hidden] > 0 && c[ui_counter::full_d_hidden] > 0 && !c[ui_counter::full_d_visible], "Load Game's samples were not counted as whole-frame alpha, then as H1");
+      require(c[ui_counter::full_alpha] > 0 && c[ui_counter::full_d_hidden] > 0 && !c[ui_counter::full_d_visible], "Load Game's frames were not counted as whole-frame alpha, then as H1");
       check_counters(s, "accepted opaque-full winner");
     }
     {
@@ -4093,8 +4075,6 @@ namespace {
         if (const auto pre_ui_pixels = field_group(line, "sampled_pre_ui_pixels"); !pre_ui_pixels.empty()) {
           evidence.pre_ui_match = field_number(field_text(pre_ui_pixels, "match"));
           evidence.pre_ui_image_lit = field_number(field_text(pre_ui_pixels, "image_lit"));
-          evidence.presented_lit = field_number(field_text(pre_ui_pixels, "presented_lit"));
-          evidence.presented_lit_differs = field_number(field_text(pre_ui_pixels, "presented_lit_differs"));
         }
         // This render's guard state, not the sample's: scene_guard since S2b,
         // scene_hold (the held routes) before.
@@ -4168,7 +4148,7 @@ int main(int argc, char **argv) {
     {"F1 sample staleness and status key", samples_go_stale_and_are_discarded},
     {"F1 winner keys samples", accepted_alpha_keys_samples_alone},
     {"H1 W3 layer route", hidden_scene_layer_route},
-    {"H1 shadow and scope clears", hidden_scene_shadow_and_clears},
+    {"H1 claim gate and scope clears", hidden_scene_gate_and_clears},
     {"P1/A1/S1 recorded menus", recorded_menus_after_acceptance},
     {"A1/S1 adversaries", adversaries},
     {"H1 Stellar Blade SDR menu visits", h1_stellar_blade_sdr_menu_visits},

@@ -1649,7 +1649,7 @@ namespace {
       ++proving_frames;
       const auto &e = proving.sample.evidence;
       require(all_equal(proving.mask, 0.f) && !proving.sample.source_kind && (proving_frames == 1 ||
-          (e.pre_ui_match == all_pixels && e.pre_ui_image_lit == all_pixels && e.presented_lit == all_pixels && !e.presented_lit_differs)),
+          (e.pre_ui_match == all_pixels && e.pre_ui_image_lit == all_pixels)),
         "D3D12 gameplay before the proof pinned, or its texel 11 pixel counts are not exact");
     }
     require(proving_frames == 22 && proving.sample.scene_guard.proven &&

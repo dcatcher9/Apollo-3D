@@ -200,8 +200,8 @@ namespace sunshine_game3d {
     // shader writes decision texels 5 and 6 with its evidence passes. They
     // run on sample frames only, and only when the scene guard measures
     // (scene_guard::state::measure: an acting-capable claim in the latest
-    // sample, a held verdict, the first-run shadow or the whole-frame
-    // diagnostic).
+    // sample, a held verdict, or a proven layer that is the offer's pre-UI
+    // image), so everything they measure is actionable.
     bool scene_evidence_supported() const {
       return detection_statistics_images == ui_detection::max_scene_evidence_images &&
         detection_decision_texels >= ui_detection::scene_decision_texels;
@@ -213,7 +213,7 @@ namespace sunshine_game3d {
     // offered layer's signature is proven the pre-UI scene image (H1 d, the
     // session ledger's pre-UI proof).
     uint32_t scene_bits{};
-    bool scene_shadow{}, scene_layer_proven{};
+    bool scene_layer_proven{};
     // The CPU-side temporal state (game3d_ui_temporal.h): the adopted inputs
     // (the offered and accepted candidates), which Presents detect and which
     // show a real frame's decision (T1) and the latest status sample. The GPU
@@ -225,8 +225,7 @@ namespace sunshine_game3d {
     // identity change clears it; the layer's pre-UI proof lives in the
     // session's acceptance ledger, which no identity change clears.
     scene_guard::state guard;
-    // The pending sample ran the evidence passes for the guard (measure
-    // actionable), not for the first-run shadow or diagnostic alone.
+    // The pending sample ran the evidence passes (measure: actionable).
     bool detection_pending_actionable{};
     bool hold_cleared{};
     // The constants of the last detection run, and the run this render's mask
@@ -306,7 +305,7 @@ namespace sunshine_game3d {
       detection_fence = detection_last_submit = 0;
       counters_pending = false;
       scene_bits = 0;
-      scene_shadow = scene_layer_proven = false;
+      scene_layer_proven = false;
       detection_run = consumed_detection = {};
       consumed_auto = {};
       retention_wanted = false;
@@ -792,7 +791,6 @@ namespace sunshine_game3d {
       }
       consumed_auto.scene_guard = {(scene_bits & ui_detection::per_frame_scene_hidden) != 0,
         (scene_bits & ui_detection::per_frame_pre_ui_visible) != 0, uint32_t(guard.refuted_count), scene_layer_proven};
-      consumed_auto.scene_shadow = scene_shadow;
     }
     bool prepare_detection() {
       if (detection_attempted) return detection_ready;
@@ -947,7 +945,6 @@ namespace sunshine_game3d {
       // acceptance ledger observes it (game3d_scene_guard.h).
       const auto observed = guard.observe(scene_guard::sample_of(counts.data(), counts.size(), detection_pending_source.now_ms,
         scene_evidence_supported()), detection_pending_actionable, detection_pending_signatures.by_kind());
-      latest.evidence.shadow_hidden_ms = observed.shadow_hidden_ms;
       // Earns or revokes acceptance of the signatures this sample was taken
       // for; a session in a manual mode ignores it (S2).
       if (input.session)
@@ -1056,21 +1053,18 @@ namespace sunshine_game3d {
       if (!sample) return;
       // A sample frame. Hidden-scene evidence only measures this frame for the
       // CPU and writes decision texels 5 and 6 after the decision and mask;
-      // without an acting-capable claim in the latest sample, a held verdict,
-      // the first-run shadow or an accepted whole-frame decision in the latest
-      // sample nothing runs (scene_guard::state::measure; a proven layer that
+      // without an acting-capable claim in the latest sample or a held
+      // verdict nothing runs (scene_guard::state::measure; a proven layer that
       // is the offer's pre-UI image always measures). The cells pass reads
       // the pre-UI scene image the b2 constants name: the HUD-less image
       // (t14) when offered, else the offscreen UI layer's colour (t7), both
       // still bound from the detection passes above, beside the presented
       // color (t6).
       const bool proven_image = scene_layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
-      const bool whole_frame = ui_temporal::whole_frame(temporal.latest);
-      const auto measure = guard.measure(observation.now_ms, scene_shadow, whole_frame, proven_image);
       detection_pending_actionable = false;
-      if (scene_evidence_supported() && measure.run) {
+      if (scene_evidence_supported() && guard.measure(observation.now_ms, proven_image)) {
         namespace scene = ui_detection::scene;
-        detection_pending_actionable = measure.actionable;
+        detection_pending_actionable = true;
         views[1] = depth;
         views[10] = {};
         dispatch_stage(scene_cells, scene_cell_sums, 6, scene::cells_x / 16, scene::cells_y);
@@ -1599,11 +1593,10 @@ namespace sunshine_game3d {
     d.consumed_plane = plane;
     d.consumed_detection = {};
     d.scene_bits = 0;
-    d.scene_shadow = d.scene_layer_proven = false;
+    d.scene_layer_proven = false;
     if (detection_requested) ++d.cpu_counts[ui_counter::auto_frames];
     if (d.detection_active) {
       if (!observation.now_ms) observation.now_ms = observation.tick_ms = GetTickCount64();
-      d.scene_shadow = automatic && automatic->session && automatic->session->first_run();
       // H1 (d): the offered layer's signature is proven the pre-UI scene image
       // by the session's acceptance ledger (never cleared by an identity
       // change, FG toggles or acceptance changes); read after any poll, so a

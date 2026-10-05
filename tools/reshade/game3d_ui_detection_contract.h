@@ -249,8 +249,8 @@ namespace sunshine_game3d::ui_detection {
   // per 16 cell rows (rows 112-120), and from selection revision 4 (decision
   // texels pre_ui_decision_texels) rows 128-143 from pre_ui_statistics_row:
   // per tile, the offscreen UI layer against the presented frame {matching
-  // pixels, lit layer pixels, lit presented pixels, lit presented pixels that
-  // differ} (decision texel 11), 144 rows in all. Rows 144-159 (fix 2's H2
+  // pixels, lit layer pixels, 0, 0} (decision texel 11; .z and .w held the
+  // removed lit-presented shadow statistics), 144 rows in all. Rows 144-159 (fix 2's H2
   // stillness counts) and 160-207 (fix 3's change-set shadow and fix 4's
   // darkening), all removed, are reserved and never reused. The cells have a
   // texture of their own, cells_x by cells_y.
@@ -334,12 +334,11 @@ namespace sunshine_game3d::ui_detection {
     // Texel 11 (selection revision 4, fix 1): the offscreen UI layer against
     // the presented frame, whatever the offer's pre-UI image, at 8 times the
     // pair threshold (b2 word 4; all zero when that is zero): pixels whose
-    // colours match, lit layer pixels, lit presented pixels, and lit
-    // presented pixels that differ from the layer. The acceptance ledger
-    // proves the layer the pre-UI scene image from the first two
-    // (ui_selection::pre_ui_match); the last two are shadow statistics that
-    // nothing acts on.
-    inline constexpr std::size_t pre_ui_match = 44, pre_ui_image_lit = 45, presented_lit = 46, presented_lit_differs = 47;
+    // colours match and lit layer pixels, from which the acceptance ledger
+    // proves the layer the pre-UI scene image (ui_selection::pre_ui_match).
+    // Words 46 and 47 are reserved zeros: they held lit presented pixels and
+    // those that differ from the layer, shadow statistics that were removed.
+    inline constexpr std::size_t pre_ui_match = 44, pre_ui_image_lit = 45;
     // Texel 12 (words 48-51) is reserved: from selection revision 5 H2's
     // still and compared cells (fix 2) and S3's identity verdicts and deltas
     // were written there, both removed. Texels 13-15 (words 52-63) are reserved
@@ -350,7 +349,7 @@ namespace sunshine_game3d::ui_detection {
     decision_word::pre_ui_scene_image < 4 * scene_decision_texels && decision_word::valid_bits < 4 * layer_decision_texels &&
     decision_word::frame_reason == 4 * judgment_decision_texels - 1 && decision_word::h1 == 4 * h1_decision_texels - 1 &&
     decision_word::pre_ui_match == 4 * h1_decision_texels &&
-    decision_word::presented_lit_differs == 4 * pre_ui_decision_texels - 1 && pre_ui_decision_texels <= max_decision_texels);
+    decision_word::pre_ui_image_lit + 3 == 4 * pre_ui_decision_texels && pre_ui_decision_texels <= max_decision_texels);
   enum class scene_verdict : std::uint32_t { none = 0, hidden = 1, ambiguous = 2, visible = 3 };
   inline const char *name(scene_verdict value) {
     switch (value) {

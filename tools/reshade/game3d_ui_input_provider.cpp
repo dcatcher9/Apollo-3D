@@ -245,7 +245,9 @@ namespace sunshine_game3d::ui_input {
     const auto wanted_source = before.selected;
     auto candidate = base;
     bool available = false;
-    nlohmann::json candidates = nlohmann::json::array();
+    // Diagnostic dumps only: the candidate list is built lazily (null until a
+    // dump request pushes the first row), so ordinary Presents allocate none.
+    nlohmann::json candidates;
     auto *queue = runtime->get_command_queue();
     auto *commands = queue->get_immediate_command_list();
     constexpr ui_mask::source_kind kinds[]{ui_mask::source_kind::alpha, ui_mask::source_kind::color_and_alpha,
@@ -464,7 +466,7 @@ namespace sunshine_game3d::ui_input {
     if (diagnostic && !manual) result.source_metadata = nlohmann::json{
       {"source", "automatic_candidate_set"}, {"association", "current_render_gpu_validation"},
       {"meaning", "Current render validates all admitted candidates and produces its mask on the GPU. Delayed quality statistics do not identify the exact current winner or authorize pixels."},
-      {"candidates", candidates}}.dump();
+      {"candidates", candidates.is_null() ? nlohmann::json::array() : std::move(candidates)}}.dump();
     {
       std::lock_guard<std::mutex> lock(source_mutex);
       const auto found = sources.find(runtime);

@@ -302,10 +302,10 @@ float SunshineHUDlessDifference(uint2 xy, out bool valid)
 // The pre-UI pixel counts of one pixel (H1 d): the offscreen UI layer's
 // colour against the presented colour at a coarse threshold, eight times
 // their pair threshold as the lit test of a HUD-less image: {matching, lit
-// layer, lit presented, lit presented and different}, all zero when the pair
-// is not comparable (threshold zero) or either colour is not finite. scRGB is
-// compared with the same relative tolerance above one as
-// SunshineHUDlessDifference.
+// layer, 0, 0} (.z and .w held the removed lit-presented shadow statistics),
+// all zero when the pair is not comparable (threshold zero) or either colour
+// is not finite. scRGB is compared with the same relative tolerance above one
+// as SunshineHUDlessDifference.
 uint4 SunshinePreUIPixel(uint2 xy, float3 layer)
 {
     const float coarse = Sunshine_UIPreUIThreshold * 8.0;
@@ -317,9 +317,7 @@ uint4 SunshinePreUIPixel(uint2 xy, float3 layer)
     float scale = BUFFER_COLOR_SPACE == 2 ? max(1.0, presentedPeak) : 1.0;
     float3 difference = abs(presented - layer);
     float delta = max(max(difference.r, difference.g), difference.b) / scale;
-    uint match = delta <= coarse ? 1u : 0u;
-    uint presentedLit = presentedPeak > coarse ? 1u : 0u;
-    return uint4(match, layerPeak > coarse ? 1u : 0u, presentedLit, match ? 0u : presentedLit);
+    return uint4(delta <= coarse ? 1u : 0u, layerPeak > coarse ? 1u : 0u, 0u, 0u);
 }
 // Each of the 16x16 tiles is counted by SUNSHINE_UI_DETECTION_TILE_PARTS
 // groups of 256 threads (group z: part k takes the tile's runs of 16 rows
@@ -547,10 +545,10 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // A2 one-way counts of the layer, Backbuffer and current alpha.
     uint3 strong = SunshineUIDetectionStrong[0], contradicted = SunshineUIDetectionContradicted[0];
     const uint pixels = difference.w;
-    // The layer against the presented frame (H1 d): {matching, lit layer, lit
-    // presented, lit presented and different}; zero without an offered layer
+    // The layer against the presented frame (H1 d): {matching, lit layer, 0,
+    // 0} (words 46 and 47 are reserved zeros); zero without an offered layer
     // or a pre-UI threshold.
-    const uint4 pre_ui_pixels = (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) ? pre_ui_sum : 0u;
+    const uint4 pre_ui_pixels = (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) ? uint4(pre_ui_sum.xy, 0u, 0u) : 0u;
     const uint offered = Sunshine_UICandidates, accepted = Sunshine_UIAcceptedCandidates;
     const uint alpha_bits = SUNSHINE_UI_CANDIDATE_UI_ALPHA | SUNSHINE_UI_CANDIDATE_UI_COLOR |
         SUNSHINE_UI_CANDIDATE_BACKBUFFER | SUNSHINE_UI_CANDIDATE_CURRENT | SUNSHINE_UI_CANDIDATE_LAYER;

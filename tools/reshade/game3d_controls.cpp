@@ -94,18 +94,10 @@ namespace sunshine_game3d {
       static const auto session = [] {
         auto policy = std::make_shared<alpha_auto_policy>();
         const auto restored = policy->restore(read_accepted_sources());
-        // The first-run shadow of hidden-scene evidence is a diagnostics
-        // toggle, independent of acceptance (docs/reshade-sbs.md): it runs in
-        // the session that finds UISceneShadow absent, then whenever it is 1.
-        global_config_backend global;
-        const auto shadow = load_scene_shadow(global);
-        policy->set_first_run(scene_shadow_runs(shadow));
-        if (scene_shadow_runs(shadow)) {
-          const auto message = std::string("Sunshine UI protection: first-run shadow measures this session (") +
-            scene_shadow_key + '=' + (shadow == scene_shadow_setting::absent ? "absent" : "1") + ')';
-          sunshine_log::message(reshade::log::level::info, message.c_str());
-        }
         // The add-on's Diagnostics switch (game3d_diagnostics.h), process-wide.
+        // The removed first-run shadow's UISceneShadow is ignored like the
+        // other removed keys (game3d_controls_model.h).
+        global_config_backend global;
         sunshine_log::message(reshade::log::level::info, diagnostics_log_text(load_diagnostics(global)).c_str());
         if (restored.discarded) {
           const auto message = "Sunshine UI protection: discarded " + std::to_string(restored.discarded) +

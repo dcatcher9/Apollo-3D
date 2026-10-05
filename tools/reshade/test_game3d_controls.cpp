@@ -295,8 +295,8 @@ namespace {
     check(ui_protection_reason_text(value.coverage).empty(), "A decided sample named a no-mask reason");
   }
 
-  // A3 Forget, and the first-run shadow toggle (UISceneShadow).
-  void forget_and_scene_shadow_are_per_game() {
+  // A3 Forget.
+  void forget_is_per_game() {
     settings_state settings;
     check(!forget_learned_ui_sources(settings), "Forget without a session cleared something");
     settings.alpha_session = std::make_shared<alpha_auto_policy>();
@@ -314,21 +314,6 @@ namespace {
     settings.alpha_session->restore("ui_color:87:srgb");
     check(!forget_learned_ui_sources(settings) && !settings.alpha_session->stored().empty(),
       "Forget acted on a destroyed runtime's settings");
-
-    fake_config absent;
-    check(load_scene_shadow(absent) == scene_shadow_setting::absent && scene_shadow_runs(scene_shadow_setting::absent) &&
-        absent.writes == std::vector<std::string>{"UISceneShadow"} && std::get<int>(absent.values.at("UISceneShadow")) == 0,
-      "An absent UISceneShadow did not run this session and write 0");
-    check(load_scene_shadow(absent) == scene_shadow_setting::never && absent.writes.size() == 1,
-      "The next session after the first ran the shadow or rewrote the key");
-    fake_config always;
-    always.values["UISceneShadow"] = 1;
-    check(load_scene_shadow(always) == scene_shadow_setting::always && scene_shadow_runs(scene_shadow_setting::always) &&
-        always.writes.empty(), "UISceneShadow=1 did not run the shadow, or was rewritten");
-    fake_config never;
-    never.values["UISceneShadow"] = 0;
-    check(load_scene_shadow(never) == scene_shadow_setting::never && !scene_shadow_runs(scene_shadow_setting::never) &&
-        never.writes.empty(), "UISceneShadow=0 ran the shadow, or was rewritten");
   }
 
   // The Diagnostics switch (game3d_diagnostics.h): per game in the global
@@ -348,16 +333,17 @@ namespace {
       check(!load_diagnostics(off) && !diagnostics::enabled() && off.writes.empty(), "A Diagnostics other than 1 turned it on");
     }
     // The removed per-game switches (fix 3's UIPinChangedPixels, fix 4's
-    // UIPinOnlyUI, rule H2's UIFlattenStillScreens): a ReShade.ini that still
-    // carries them loads unchanged; no key is read or rewritten, and none
-    // enables anything.
+    // UIPinOnlyUI, rule H2's UIFlattenStillScreens, the first-run shadow's
+    // UISceneShadow): a ReShade.ini that still carries them loads unchanged;
+    // no key is read or rewritten, and none enables anything.
     {
       fake_config legacy;
       legacy.values["Diagnostics"] = 0;
-      for (const char *removed : {"UIPinOnlyUI", "UIPinChangedPixels", "UIFlattenStillScreens"}) legacy.values[removed] = 1;
+      for (const char *removed : {"UIPinOnlyUI", "UIPinChangedPixels", "UIFlattenStillScreens", "UISceneShadow"})
+        legacy.values[removed] = 1;
       check(!load_diagnostics(legacy) && !diagnostics::enabled() && legacy.writes.empty(),
         "A legacy removed key changed the Diagnostics switch or was rewritten");
-      for (const char *removed : {"UIPinOnlyUI", "UIPinChangedPixels", "UIFlattenStillScreens"})
+      for (const char *removed : {"UIPinOnlyUI", "UIPinChangedPixels", "UIFlattenStillScreens", "UISceneShadow"})
         check(std::get<int>(legacy.values.at(removed)) == 1, (std::string("A legacy ") + removed + " key was rewritten").c_str());
     }
     fake_config global;
@@ -828,7 +814,7 @@ int main() {
     source_alpha_fg_mode_survives_observation_gaps();
     source_alpha_selection_reports_capture_prerequisite();
     ui_protection_status_names_the_reason();
-    forget_and_scene_shadow_are_per_game();
+    forget_is_per_game();
     diagnostics_switch_is_per_game();
     ui_protection_warning_follows_unprotected_rendered_frames();
     source_alpha_applied_status_is_transient_and_mode_scoped();
@@ -839,7 +825,7 @@ int main() {
     measured_statistics_follow_applied_and_held_scale_ownership();
     positive_flat_zero_target_does_not_invent_gain_tracking();
     projection_conversion_is_independent_and_retained_with_its_reference();
-    std::puts("PASS native Game 3D controls: defaults, automatic persistence, independent resets, runtime lifetime, output status, UI protection warning, reason, Forget, shadow and diagnostics toggles, and scale/conversion");
+    std::puts("PASS native Game 3D controls: defaults, automatic persistence, independent resets, runtime lifetime, output status, UI protection warning, reason, Forget, the diagnostics toggle and removed keys, and scale/conversion");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

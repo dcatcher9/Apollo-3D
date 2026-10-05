@@ -20,10 +20,11 @@
 //     ui_temporal::hold_scope_changed) clears the state. An observation
 //     revision, an inactive frame, acceptance changes and Forget never do;
 //   - before detection: per_frame(now, offered, signatures, layer_proven) is
-//     ORed into the pushed flags; and measure(now, shadow, whole_frame,
-//     proven_image) says whether this sample frame runs the evidence passes
-//     and whether what they measure is actionable (kept with the pending
-//     sample). layer_proven: the offered layer's signature is proven the
+//     ORed into the pushed flags; and measure(now, proven_image) says whether
+//     this sample frame runs the evidence passes, which is whether what they
+//     measure is actionable (kept with the pending sample; the first-run
+//     shadow and the whole-frame diagnostic that measured without acting were
+//     removed). layer_proven: the offered layer's signature is proven the
 //     pre-UI scene image (alpha_auto_policy::pre_ui_proven of its
 //     signature); proven_image: that layer is also the offer's pre-UI image;
 //   - at poll, for a completed sample in scope: observe(sample_of(words, n,
@@ -159,18 +160,11 @@ namespace sunshine_game3d::scene_guard {
   };
 
   // What one observation did: the hidden hold entered, a hold was released
-  // by a visible sample (or a sample that decided H1 read visible), how many
-  // signatures it newly refuted, and the first-run shadow's run length.
+  // by a visible sample (or a sample that decided H1 read visible), and how
+  // many signatures it newly refuted.
   struct observation {
     bool entered{}, released{};
     std::uint32_t refuted{};
-    std::uint64_t shadow_hidden_ms{};
-  };
-
-  // Whether a sample frame runs the evidence passes, and whether what they
-  // measure is actionable (may hold, release or refute).
-  struct measurement {
-    bool run{}, actionable{};
   };
 
   // The acceptance signature of every candidate kind, in ui_selection::kind
@@ -188,9 +182,6 @@ namespace sunshine_game3d::scene_guard {
     // The latest sample had an acting-capable claim (a claim not refuted, or
     // the pre-UI claim).
     bool gate_open{};
-    // The first sample tick of the current run of hidden samples without a
-    // decided source (the first-run shadow); zero without a run.
-    std::uint64_t shadow_run_start{};
     // The identity this state belongs to.
     std::uint64_t epoch{};
     std::uint32_t viewport{};
@@ -235,15 +226,11 @@ namespace sunshine_game3d::scene_guard {
         (proven ? ui_detection::per_frame_pre_ui_proven : 0u);
     }
 
-    // A sample frame runs the evidence passes when the latest sample had an
-    // acting-capable claim, a hold is active or a proven layer is the offer's
-    // pre-UI image (proven_image) (actionable), for the first-run shadow
-    // (shadow), and as a diagnostic after a whole-frame decision
-    // (whole_frame: an accepted alpha covering 99% or source 6). Only
-    // actionable evidence holds, releases or refutes.
-    measurement measure(std::uint64_t now, bool shadow, bool whole_frame, bool proven_image) const {
-      const bool actionable = gate_open || hidden.held(now) || pre_ui.held(now) || proven_image;
-      return {actionable || shadow || whole_frame, actionable};
+    // A sample frame runs the evidence passes only when what they measure is
+    // actionable: the latest sample had an acting-capable claim, a hold is
+    // active or a proven layer is the offer's pre-UI image (proven_image).
+    bool measure(std::uint64_t now, bool proven_image) const {
+      return gate_open || hidden.held(now) || pre_ui.held(now) || proven_image;
     }
 
     observation observe(const sample &s, bool actionable, const kind_signatures &signatures) {
@@ -284,15 +271,6 @@ namespace sunshine_game3d::scene_guard {
       }
       gate_open = (s.claims & ui_selection::candidate_bits & ~refuted_bits(s.offered, signatures)) != 0u ||
         (s.claims & ui_detection::claim_pre_ui) != 0u;
-      // An uncovered hidden scene: consecutive hidden samples while no source
-      // decided. The first-run shadow measures it. A sample with fewer decided
-      // comparisons than valid evidence needs edge cells is blank (black, or a
-      // flat fade), with nothing to protect.
-      if (presented.valid && presented.verdict == scene_verdict::hidden && !s.source &&
-          presented.decided >= ui_detection::scene::min_edges) {
-        if (!shadow_run_start || s.tick < shadow_run_start) shadow_run_start = s.tick;
-        result.shadow_hidden_ms = s.tick - shadow_run_start;
-      } else shadow_run_start = 0;
       return result;
     }
 

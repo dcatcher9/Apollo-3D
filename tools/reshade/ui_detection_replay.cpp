@@ -542,7 +542,7 @@ namespace {
       const bool proven_image = pre_ui_proven && selection::pre_ui_image_of(bits) == contract::pre_ui_image::layer;
       for (const std::uint64_t tick : {900u, 1000u, 1100u})
         guard.observe(sunshine_game3d::scene_guard::sample_of(words.data(), words.size(), tick, true),
-          guard.measure(tick, false, false, proven_image).actionable, signatures);
+          guard.measure(tick, proven_image), signatures);
       guard_bits = guard.per_frame(1100, bits, signatures, pre_ui_proven);
       flags |= guard_bits;
       constants.flags = flags;
@@ -621,7 +621,7 @@ namespace {
   // without coverage and ui_selection::pre_ui_match on decision texel 11.
   // A shader without texel 11 fails the check.
   bool pre_ui_match_matches(const std::vector<std::uint32_t> &d, bool expected, std::string &text) {
-    if (d.size() <= word::presented_lit_differs) {
+    if (d.size() < 4 * contract::pre_ui_decision_texels) {
       text = "no-reference(" + std::to_string(d.size() / 4) + " decision texels)";
       return false;
     }
@@ -827,7 +827,7 @@ int main(int argc, char **argv) {
         "fails its case. Each line shows the frame reason, the refused candidate and the one-way judgment counts\n"
         "(strong/contradicted pixels of the layer, Backbuffer and current alpha) from selection revision 2, and the H1\n"
         "claims and h1 word (applied, S1 winner) from selection revision 3, and the layer's pre-UI pixel counts\n"
-        "(texel 11: match, image_lit, presented_lit, presented_lit_differs) from selection revision 4.\n"
+        "(texel 11: match and image_lit) from selection revision 4.\n"
         "--verbose prints every decision word.\n");
       return 2;
     }
@@ -948,10 +948,9 @@ int main(int argc, char **argv) {
       // H1 (d) from selection revision 4 (texel 11): the layer against the
       // presented frame.
       char pre_ui_pixels[128] = "";
-      if (d.size() > word::presented_lit_differs)
-        std::snprintf(pre_ui_pixels, sizeof(pre_ui_pixels),
-          " pre_ui_pixels={match=%u image_lit=%u presented_lit=%u presented_lit_differs=%u}", d[word::pre_ui_match],
-          d[word::pre_ui_image_lit], d[word::presented_lit], d[word::presented_lit_differs]);
+      if (d.size() >= 4 * contract::pre_ui_decision_texels)
+        std::snprintf(pre_ui_pixels, sizeof(pre_ui_pixels), " pre_ui_pixels={match=%u image_lit=%u}", d[word::pre_ui_match],
+          d[word::pre_ui_image_lit]);
       std::printf("%s %-44s source=%u covered=%u/%u ui=%.2f%% mask=%s (want %s) candidates=0x%x accepted=0x%x "
         "alpha_covered=%u/%u/%u/%u%s%s%s%s%s hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u} "
         "mirror=%s%s%s%s%s%s%s%s%s\n",

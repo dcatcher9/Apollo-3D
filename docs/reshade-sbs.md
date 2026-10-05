@@ -238,15 +238,14 @@ an unavailable display mode rather than redirecting the GUI to the wrong texture
 ### Diagnostics switch and per-Present cost
 
 **Diagnostics switch.** `Diagnostics` under `[SUNSHINE_GAME3D]` in the game's `ReShade.ini` is
-read once at add-on start with `UISceneShadow`; when it is absent the
+read once at add-on start; when it is absent the
 add-on writes 0 so the key can be found, 1 turns it on, and any other value is off. It is one
 process-wide switch (`game3d_diagnostics.h`), and the Troubleshooting panel's **Diagnostics** row
 below **UI mask source** edits it at runtime in both directions. Loading and every edit log
 `Sunshine Game 3D: diagnostics on (Diagnostics=1)` or `... off (Diagnostics=0)`. Off (the
 default), the add-on records none of its diagnostic-only per-frame work: per-pass GPU timestamps
-and their resolves (the timing line keeps its CPU fields and hitch lines stay). The H1 whole-frame
-and first-run measurements, the A2 per-pixel statistics (A2 revocation and the one-way judgment read
-them) and the exact UI counters always run. Decisions, masks, candidate binding and exported pixels
+and their resolves (the timing line keeps its CPU fields and hitch lines stay). The A2 per-pixel
+statistics (A2 revocation and the one-way judgment read them) and the exact UI counters always run. Decisions, masks, candidate binding and exported pixels
 are the same with the switch on or off. The capture owner's and the layer's queue watches stay
 registered either way, since direct binding reads them and the layer's live-copy ring offers a copy
 only once a list carrying it executed. The switch's own cost was not measured separately: Verify
@@ -1021,13 +1020,14 @@ and a target that is not the final pre-UI image but equals the presented frame o
 at the coarse bound (a late post-process input), which would be proven. The two-sample entry, release
 on one visible sample, the provisional lapse and Forget bound them.
 
-**Shadow statistics for a future dark pre-UI image rule.** Texel 11 also counts the lit presented
-pixels and those of them that differ from the layer at the same bound. Nothing acts on them. They
-measure screens that no claim covers: Stellar Blade's SDR loading screen offers the layer without
-coverage as an almost black scene image (invalid on only 0.2-0.4% of pixels, so V1-valid), the
-presented frame reads hidden and the layer only weakly (D 0.15-0.22), so H1 (d) does not apply and
-it stays 3D. The UI log line and Dump 3D carry the four counts, and the readiness report summarizes
-hidden samples over a proven, dark layer as INFO `Dark pre-UI image (shadow)`.
+**Shadow statistics for a future dark pre-UI image rule: removed.** Selection revisions 4 to 8
+also counted in texel 11 the lit presented pixels and those of them that differ from the layer at
+the same bound, which nothing acted on. They measured screens that no claim covers, such as Stellar
+Blade's SDR loading screen: the layer without coverage is an almost black scene image (invalid on
+only 0.2-0.4% of pixels, so V1-valid), the presented frame reads hidden and the layer only weakly
+(D 0.15-0.22), so H1 (d) does not apply and it stays 3D. Selection revision 9 writes texel 11's
+`.z` and `.w` as reserved zeros, and the UI log line keeps `presented_lit=0` and
+`presented_lit_differs=0` in place.
 
 A visible sample also refutes the signature (`<kind>:<format>:<colour space>`, as for acceptance) of
 every candidate whose full claim it carried, since the presented frame then shows the depth's edges
@@ -1055,14 +1055,14 @@ pushes none.
 The evidence passes only measure: cell sums into their own 256 x 144 texture, a 16 x 16-cell
 comparison per group into nine statistics rows, and their sum into decision texels 5 and 6. They
 run after detection on sample frames only (the 100 ms readback cadence), and only while the latest
-sample had a claim that could act (a claim not refuted, or claim (d)), a verdict is held, the
-first-run shadow measures, the latest sample was an accepted whole-frame decision (an alpha
-covering at least 99% of pixels, or source 6) or a proven layer is the offer's pre-UI image (H1
-(d)); otherwise nothing is dispatched. All but the shadow and the whole-frame diagnostic make the
-evidence actionable: the shadow's and the whole-frame diagnostic's (for the `full_alpha_d` UI
-counters) evidence hold, release and refute nothing. Fix 2's still-screen rule H2 (selection
-revisions 5 to 8) also measured SDR Auto samples without a decided source, never actionably; it was
-removed (**Still screens without a UI source (H2, fix 2): removed** below). A proven layer is actionable from its first
+sample had a claim that could act (a claim not refuted, or claim (d)), a verdict is held or a
+proven layer is the offer's pre-UI image (H1 (d)); otherwise nothing is dispatched. Everything they
+measure is therefore actionable. Until selection revision 9 they also ran, never actionably, for
+the first-run shadow, as a diagnostic after an accepted whole-frame decision (for the
+`full_alpha_d` UI counters) and, in selection revisions 5 to 8, for fix 2's still-screen rule H2;
+all three were removed (**The first-run shadow: removed** and **Still screens without a UI source
+(H2, fix 2): removed** below). That also ends a leak: non-actionable evidence of a visible scene
+reached the acceptance ledger and could run a restored pre-UI proof's reconfirm clock. A proven layer is actionable from its first
 sample, so a menu that opens just after an identity change (Stellar Blade suspending FG) enters at
 its second hidden sample. Stellar Blade in SDR measures every sample once its layer is proven, since
 its target always holds the scene, and so does a game while its presented frame keeps reading
@@ -1083,23 +1083,19 @@ stays true after its menu closes, so up to one sample interval plus the readback
 (the sequence replay bounds it at 132 ms) is shown flat before the first gameplay sample releases
 the verdict; a per-frame pre-UI difference would close that window and belongs to S5.
 
-The first-run shadow measures for a whole session: the evidence passes run on every
-sample frame whatever the claims, the result is logged, and no decision changes. Whether it runs is a
-diagnostics toggle, independent of acceptance (F1): `UISceneShadow` under `[SUNSHINE_GAME3D]` in the
-game's `ReShade.ini`. When the key is absent the shadow runs this session and the add-on writes 0, so
-every game runs it once after install; 1 runs it in every session and 0 never. Restored acceptance,
-the legacy discard and Forget do not change it. A session that runs it logs `first-run shadow
-measures this session (UISceneShadow=absent)` or `(UISceneShadow=1)`. The log's
-`shadow_hidden_ms` reports runs of consecutive samples reading the presented frame hidden while no
-source decided. A sample with fewer decided comparisons than the 128 edge cells valid evidence
-needs is blank, such as black or a flat fade, and ends a run: it reads hidden from ties alone and
-has nothing to protect. Stellar Blade's splashes decided 304 and 228. Stellar Blade's SDR settings
-page with FG suspended, which the shadow logged hidden for about 9 s per visit, is flat through
-claim (d) once its layer is proven: S2b's D proof did not survive FG suspending, and since fix 1 the
-proof is by pixels and kept in the ledger. Known first-session gaps stay open by design, because none has an informative
-claim, and the shadow logs them: Expedition 33 settings with FG off and The Witcher 3 settings
-without a UI layer offer only presented alpha, and Expedition 33's Load Game with FG on only its
-tagged Backbuffer alpha, which flatten from the second session through remembered acceptance.
+**The first-run shadow: removed.** Until selection revision 9 a session could run the evidence
+passes on every sample frame whatever the claims and log the result without changing a decision
+(the first-run shadow, the per-game `UISceneShadow` key, absent meaning the game's first session),
+reporting `shadow_hidden_ms`, the run of consecutive samples reading the presented frame hidden while
+no source decided. It found Stellar Blade's SDR settings page with FG suspended hidden for about
+9 s per visit, which is flat through claim (d) once its layer is proven since fix 1. It was removed
+with its key, its `first-run shadow measures this session` line and its dump fields; the UI log
+line keeps `shadow=0 shadow_hidden_ms=0` in place, and a `ReShade.ini` that still carries
+`UISceneShadow` loads unchanged with the key ignored. Known first-session gaps stay open by design,
+because none has an informative claim: Expedition 33 settings with FG off and The Witcher 3
+settings without a UI layer offer only presented alpha, and Expedition 33's Load Game with FG on
+only its tagged Backbuffer alpha, which flatten from the second session through remembered
+acceptance.
 Stellar Blade in HDR with FG on offers its opaque tagged UI colour, never accepted and never
 informative, beside its layer, so in a first session, until the layer earns acceptance, only its
 layer's claim (b) and its HUD-less image's claim (d) can act.
@@ -1146,7 +1142,7 @@ and lit pixel counts with matching tiles, the nearly opaque pixels of all five a
 the one-way judgment counts of the layer, Backbuffer and current alpha (A2), the frame's own-decision
 reason, the candidate it refused and whether the T1 grace reused a decision (F1), the informative
 full claims, the S1 winner and whether H1 applied, the offscreen UI layer's pixels against the
-presented frame (matching, lit, and the shadow statistics; since fix 1), and, on samples that
+presented frame (matching and lit; since fix 1), and, on samples that
 measured it, the hidden-scene evidence of the presented frame and the pre-UI scene image. Updating
 acceptance and the layer's pre-UI proof from this summary is the only way it feeds back; it never authorizes the frame it describes. Every sample read in the
 same scope feeds the hidden-scene guard, the ledger and the counters; only a sample from another
@@ -1181,15 +1177,16 @@ and `verdict`, `sampled_pre_ui_scene` with the pre-UI scene image's `image` (`no
 `scene_guard` with `hidden` and `pre_ui` (the verdicts the hidden-scene guard pushed with that
 render), `refuted` (the signatures it holds refuted) and `proven` (the offered layer's signature is
 proven the pre-UI scene image, the ledger's `pre_ui` key, so that its pre-UI image may act),
-`shadow` (the first-run shadow) and `shadow_hidden_ms`, the longest hidden run without a decided
-source since the previous line), then `sampled_pre_ui_pixels` with decision texel 11's `match`,
-`image_lit`, `presented_lit` and `presented_lit_differs` (the layer against the presented frame,
+`shadow` and `shadow_hidden_ms` (the removed first-run shadow's fields, 0 since selection revision
+9), then `sampled_pre_ui_pixels` with decision texel 11's `match` and `image_lit` and the reserved
+`presented_lit` and `presented_lit_differs` (0 since selection revision 9; the layer against the presented frame,
 **The layer's pre-UI proof**), and the dump's `source_alpha_auto.sampled_evidence` (`alpha_opaque`, `inferred_opaque`, `claims`, `h1`
 with `applied` and `winner`, `layer`, `accepted`, `valid_bits`,
 `scene` with the presented image's `decided` comparisons, `pre_ui_scene` with its `image` and
 `verdict`, `pre_ui_pixels` with the same four counts, the current run's
-`shadow_hidden_ms`, `one_way` with `strong` and `contradicted` by kind and `late_layer`, `reason`, `refused` and
-`reused`, with the render's `scene_guard` and `scene_shadow` beside it) report it, so a
+`one_way` with `strong` and `contradicted` by kind and `late_layer`, `reason`, `refused` and
+`reused`, with the render's `scene_guard` beside it; dumps before selection revision 9 also have
+`shadow_hidden_ms`, `scene_shadow` and the last two `pre_ui_pixels`) report it, so a
 rejection names the failing check. `sampled_source` and `sampled_covered` are the applied decision,
 which the T1 grace may have reused. Logs before S1 wrote `trusted_alpha` (slot bits) and
 `sampled_ui_layer` (the layer in the UI color slot) instead of `accepted` and `sampled_layer`; logs
@@ -1296,7 +1293,7 @@ summary above is that whole texture, 208 bytes:
 | 8 | Strong pixels (finite alpha of at least 1/2) of the layer | Of Backbuffer alpha | Of current alpha | The refused candidate's bit (0 when the frame decided) |
 | 9 | Strong pixels of the layer where an offered exact pair's HUD-less image is lit and unchanged (0 for the late copy) | The same of Backbuffer alpha | Of current alpha | Bits 0-7: the own decision's `ui_no_mask` index, 0xFF when it decided a source; bit 16: the T1 grace reused the previous decision |
 | 10 | Pixels of Backbuffer alpha at least 254/255 | Of current alpha | The informative full claims before refutation (candidate bits, `0x80` the pre-UI scene image) | The h1 word: bits 0-7 the S1 winner's source, `0x100` H1 applied |
-| 11 | Pixels where the offscreen UI layer's RGB equals the presented colour (words 44-47; since fix 1) | Lit layer pixels | Lit presented pixels | Lit presented pixels that differ from the layer |
+| 11 | Pixels where the offscreen UI layer's RGB equals the presented colour (words 44-47; since fix 1) | Lit layer pixels | Reserved zero (lit presented pixels in selection revisions 4 to 8) | Reserved zero (lit presented pixels that differ from the layer in selection revisions 4 to 8) |
 
 Texel 12 (words 48-51) is reserved: selection revisions 5 to 8 wrote H2's still and compared cells
 there and, from a shader with `SUNSHINE_UI_IDENTITY`, S3's identity verdicts and deltas, both
@@ -1316,7 +1313,7 @@ compares at eight times `b2` word 4 (match: the largest channel difference at mo
 above one in scRGB; lit: the largest channel above it) and is zero without a layer or a comparable
 pair; the reduce writes it as zero when no layer is offered, so a grace frame never carries an
 earlier layer's counts. Its first two words feed the layer's pre-UI proof
-(`ui_selection::pre_ui_match`); the last two are shadow statistics nothing acts on.
+(`ui_selection::pre_ui_match`); the last two are reserved zeros.
 The verdict is 0 none, 1 hidden, 2 ambiguous or 3 visible. The detection reduce writes texels 5
 and 6 as zero on every frame and the evidence passes overwrite them when they run, so a sample
 never carries an earlier frame's evidence; texel 6 stays zero without a pre-UI scene image. The
@@ -1334,7 +1331,7 @@ alpha, and 96-111 those of them that an offered exact pair contradicts (the texe
 tile); rows 112-120 (`SUNSHINE_UI_SCENE_PARTIAL_ROW` onward) hold each 16x16-cell comparison
 group's {n, wins - losses of each image, the presented image's decided comparisons}. Since selection
 revision 4 the texture has 144 rows: rows 128-143 (`SUNSHINE_UI_PRE_UI_ROW` onward) hold each
-tile's texel 11 counts {match, lit layer, lit presented, lit presented that differ}, and rows
+tile's texel 11 counts {match, lit layer, 0, 0}, and rows
 121-127 are unused. Selection revisions 5 to 8 had 160 rows, rows 144-152 holding each comparison
 group's H2 counts {still cells, compared cells, 0, 0}; rows 144-159 are reserved. The tiles pass and the reduce sum them in a second phase that reuses the
 coverage group-shared array, which keeps both within the 32 KiB `cs_5_0` limit. The 256 x 144
@@ -1386,7 +1383,7 @@ S3's five identity verdict words after word 30 (31-35, a 36-word texture from a 
 | `contradicted` | An accepted inferred alpha (Backbuffer 3, current alpha 4 or the layer 10) decided by the frame's own decision while the same frame's valid exact pair contradicted it one way (A2). It keeps deciding until the ledger revokes it. Counter lines before S2a have `trusted_full` instead: an accepted alpha source (1-4, 10) covering at least 99% of pixels while an exact pair without invalid pixels left at least half of the frame unchanged. |
 | `presented_over_dedicated` | Inferred alpha (3, 4, 10) decided while an accepted UIAlpha or UI color tag was offered. The declared-alpha block keeps this 0, so it checks later rule changes. |
 | `full_alpha` | An applied alpha source (1-4, 10) covering at least 99% of pixels: a whole-frame mask from alpha, with or without a HUD-less pair. Only accepted sources decide. |
-| `full_alpha_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Committed samples that decided an accepted whole-frame decision, such a whole-frame alpha or (since S2b) an exact full change-set (6), by the hidden-scene verdict measured on that same sample, as `full_d`. Evidence runs for them only from the sample after one that decided it, so the first sample of each episode counts as `invalid`. |
+| `full_alpha_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Reserved, 0 since selection revision 9. Before it: committed samples that decided an accepted whole-frame decision, such a whole-frame alpha or (since S2b) an exact full change-set (6), by the hidden-scene verdict that a diagnostic evidence run, now removed, measured on that same sample from the sample after one that decided it. |
 | `trust.earned`, `.revoked_exact`, `.revoked_declared`, `.lapsed`, `.restored`, `.discarded`, `.forgotten` | Session acceptance events. `earned`: a signature accepted, or a restored one confirmed, by this session's samples. `revoked_exact`: revoked when the one-way test of an exact pair contradicted it in the revoking sample (A2). `revoked_declared`: revoked by an accepted declared alpha's coverage. `lapsed`: a provisional restore lapsed. `restored`: restored entries. `discarded`: legacy `TrustedUISources` entries discarded on load. `forgotten`: accepted signatures that Forget cleared. Since fix 1 the layers' pre-UI proof keys (`pre_ui`) count with the accepted signatures: earned by matching samples, restored, lapsed and forgotten. Counter lines of S1 have `revoked_full` (a full claim over a visible exact pair) and `revoked_presented` (presented alpha disagreeing with an accepted UI channel) instead of `revoked_exact` and `revoked_declared`, and no `forgotten`; counter lines before S1 have `opaque_set` and `opaque_cleared` (the retired opaque-tag proof) instead of `discarded`. |
 | `samples`, `through_ms` | Committed samples, and the sample tick through which the totals are exact. |
 
@@ -1526,7 +1523,7 @@ replay pushed, which describe the replaced mask. `--verbose`
 prints every decision word (48 with selection revisions 4 and 9, 52 with revisions 5 to 8). Each line also shows the own decision's
 reason (`(reused)` when the grace applied), the refused candidate, the one-way counts, the
 informative claims (`claims=`), the h1 word (`h1={applied=,winner=}`) and, since selection
-revision 4, texel 11 (`pre_ui_pixels={match= image_lit= presented_lit= presented_lit_differs=}`).
+revision 4, texel 11 (`pre_ui_pixels={match= image_lit=}`).
 With a shader of the current layout and selection revision (9: revision 5's decision with the empty change set), every decision, its claims and its h1 word
 are checked against `decide()` on the GPU's counts with the pushed bits and no previous decision
 (`mirror=match`; a mirror that differs fails its case). A single-frame replay binds nothing at the hold store, so the T1 grace never
@@ -2065,7 +2062,7 @@ acceptance and selection, hidden-scene guard, hold, pin weight. Diagnostics only
 | H2 Still screen (M5, removed) | Fix 2's flattening of still SDR screens without a UI source, removed in selection revision 9 (**Still screens without a UI source (H2, fix 2): removed**); the ID is not reused. |
 | P1 Pin weight (M7) | `saturate(8 * c)` of the selected coverage at any coverage (binary for change-sets); 1 everywhere when H1 says flat. |
 | T1 Hold (M6) | A Present without its own fresh decision uses the last real decision; a real frame without one reuses the previous real frame's decision once, then has no mask. No multiplier constant and no time bound; real frames are identified by Present counting (S3's real-frame identity was removed): a Present that offers nothing within the reported generated count of the last UI tag is generated, and one that offers any input is real. |
-| F1 Fail safe and diagnostics (M8) | No qualifying source gives no mask with a named reason and refused candidate, the panel warning and exact counters. Status freshness is keyed on the scope and the winning accepted candidate, and the first-run shadow does not depend on acceptance. Diagnostics feed nothing back. |
+| F1 Fail safe and diagnostics (M8) | No qualifying source gives no mask with a named reason and refused candidate, the panel warning and exact counters. Status freshness is keyed on the scope and the winning accepted candidate. Diagnostics feed nothing back. |
 
 Scope (runtime, device, epoch, viewport, size, colour mode and encoding, but not the FG multiplier)
 is an M1 identity property: changing it drops snapshots, pairs, holds and D state. An observation
@@ -2083,7 +2080,7 @@ gameplay stress minimum (0.161), where validation covers 16:9 only: claim (d) ne
 image to contradict the presented reading, which fog, blackout and dark grain do not do, but claim
 (b) on an opaque cleared target still depends on the presented reading until its first visible
 verdict, so fog, blackout and flashlight scenes (Hogwarts Legacy's forest, Dead Space) and non-16:9
-output need `shadow_hidden_ms` evidence before the informative-claim gate is relaxed in any way;
+output need dumps of the uncovered hidden screens before the informative-claim gate is relaxed in any way;
 whether the flat gameplay after a Stellar Blade SDR menu closes (up to one sample interval plus the
 readback, because claim (d) on its scene target stays true) needs a per-frame pre-UI difference
 (S5) or a shorter sample cadence while a pre-UI hold is active; whether the entry of about 300 ms
@@ -2095,7 +2092,7 @@ gaps (a cut straight from proven gameplay into a scene that effects after the la
 with no ambiguous sample between, and a late post-process input equal to the presented frame on 90%
 of pixels at the coarse bound) need a check beyond D; whether dark pre-UI images such as Stellar
 Blade's SDR loading screen (a proven layer lit on less than half of the pixels under a hidden
-presented frame) need a rule of their own, for which the shadow statistics of texel 11 are logged;
+presented frame) need a rule of their own (texel 11's shadow statistics that measured them were removed);
 whether a wrongly
 accepted inferred source with no declared or exact judge needs more than Forget and the provisional
 lapse (until S4 this includes a wrongly accepted layer, which the one-way test does not judge);

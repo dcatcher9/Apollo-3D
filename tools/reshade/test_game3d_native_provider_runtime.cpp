@@ -449,11 +449,10 @@ namespace {
           "Production Dump3D did not complete the offscreen UI layer capture");
         return nlohmann::json::parse(std::string(box.state->json, box.state->response.json_bytes));
       };
-      // D3D12 reads back all eleven decision texels: the tagged UI color's
-      // nearly opaque pixels (texel 4), in this first session without
-      // remembered acceptance the first-run shadow's hidden-scene evidence of
-      // the presented and pre-UI images (texels 5 and 6), which changes
-      // nothing, the layer's own counts (texel 7) and the H1 texel 10.
+      // D3D12 reads back the decision texels: the tagged UI color's nearly
+      // opaque pixels (texel 4), the layer's own counts (texel 7) and the H1
+      // texel 10. Nothing claims here, so no evidence pass runs and texels 5
+      // and 6 read as not measured; the layer's claim below measures them.
       {
         unsigned opaque{};
         for (size_t offset = 3; offset < expected.size(); offset += 4) opaque += expected[offset] == 255;
@@ -467,8 +466,8 @@ namespace {
             sampled.at("alpha_opaque")[1] != opaque || sampled.at("alpha_opaque")[0] != 0u || !opaque ||
             !(sampled.at("accepted").get<unsigned>() & candidate::ui_color) || automatic.at("sampled_source") != 2u ||
             !(sampled.at("candidates").get<unsigned>() & candidate::layer) || !sampled.at("layer").contains("opaque") ||
-            automatic.at("scene_shadow") != true || automatic.at("scene_guard").at("hidden") != false ||
-            automatic.at("scene_guard").at("pre_ui") != false || scene.at("ran") != true || !scene.contains("verdict") ||
+            automatic.contains("scene_shadow") || automatic.at("scene_guard").at("hidden") != false ||
+            automatic.at("scene_guard").at("pre_ui") != false || scene.at("ran") != false || !scene.contains("verdict") ||
             !scene.contains("n") || !scene.contains("d") || !sampled.at("pre_ui_scene").contains("valid") ||
             !sampled.at("pre_ui_scene").contains("image") || !sampled.contains("inferred_opaque") || !sampled.contains("claims") ||
             sampled.at("h1").at("applied") != false || sampled.at("h1").at("winner") != 2u || automatic.at("sampled_source") == 8u ||
@@ -477,9 +476,9 @@ namespace {
             // Rule H2 (fix 2) was removed with its fields.
             automatic.contains("still_screen") || sampled.contains("still_short_ms") ||
             tagged_metadata.at("replay").at("ui_detection").contains("still_bits"))
-          throw std::runtime_error("D3D12 lost a decision texel or the first-run shadow changed a decision: " + automatic.dump());
-        evidence << "d3d12-decision-texels opaque_ui_color=" << opaque << " shadow_scene_n=" << scene.at("n") << " shadow_scene_d=" <<
-          scene.at("d") << " verdict=" << scene.at("verdict").get<std::string>() << '\n';
+          throw std::runtime_error("D3D12 lost a decision texel, measured without a claim or kept a removed field: " +
+            automatic.dump());
+        evidence << "d3d12-decision-texels opaque_ui_color=" << opaque << " scene_ran=" << scene.at("ran") << '\n';
       }
       // Once tag 23 stops, the offscreen layer is the remaining candidate: live
       // tracking copies it before each clear, and once accepted it decides
@@ -490,7 +489,9 @@ namespace {
       // everywhere over a flat presented frame that shows none of the depth's
       // edges, as a splash: an informative full claim (b). The scene guard
       // holds the hidden verdict after two samples and the frame is full-frame
-      // UI (8).
+      // UI (8). The claim makes the evidence passes run, actionably, so D3D12
+      // reads back texel 5 (the presented frame) and texel 6 (the layer as the
+      // pre-UI scene image) here, accepted layer or not.
       {
         const auto pixel_bytes = source_bytes.size() / (size_t(width) * height);
         std::vector<std::uint8_t> flat_bytes(source_bytes.size());
@@ -513,6 +514,7 @@ namespace {
         const auto &automatic = hidden_metadata.at("replay").at("source_alpha_auto");
         const auto &hidden_sample = automatic.at("sampled_evidence");
         const auto &scene = hidden_sample.at("scene");
+        const auto &pre_ui_scene = hidden_sample.at("pre_ui_scene");
         bool full_frame = false;
         for (unsigned i = 0; i < box.state->response.texture_count; ++i) {
           const auto &item = box.state->response.textures[i];
@@ -533,7 +535,9 @@ namespace {
         // (source 10), a winner opaque on every pixel that H1 never overrides.
         const bool accepted_layer = hidden_sample.at("accepted").get<unsigned>() & candidate::layer;
         const auto flags = hidden_metadata.at("replay").at("ui_detection").at("flags").get<unsigned>();
-        if (!full_frame || hidden_sample.at("layer").at("opaque") != size_t(width) * height || (accepted_layer ?
+        if (!full_frame || hidden_sample.at("layer").at("opaque") != size_t(width) * height || scene.at("ran") != true ||
+            !scene.contains("n") || !scene.contains("d") || pre_ui_scene.at("ran") != true || pre_ui_scene.at("image") != "layer" ||
+            (accepted_layer ?
               automatic.at("sampled_source") != sunshine_game3d::ui_detection::source_layer ||
                 hidden_sample.at("h1").at("applied") != false :
               automatic.at("sampled_source") != 8u || automatic.at("scene_guard").at("hidden") != true ||
@@ -546,7 +550,7 @@ namespace {
             " full_frame=" + std::to_string(full_frame));
         evidence << "d3d12-h1-layer accepted_layer=" << accepted_layer << " sampled_source=" << automatic.at("sampled_source") <<
           " scene_guard_hidden=" << automatic.at("scene_guard").at("hidden") << " scene_n=" << scene.at("n") << " scene_d=" <<
-          scene.at("d") << '\n';
+          scene.at("d") << " pre_ui_n=" << pre_ui_scene.at("n") << " pre_ui_d=" << pre_ui_scene.at("d") << '\n';
       }
       // An inferred source: the layer is accepted by valid selective samples
       // over at least 2 s (A1), so it draws selectively for longer first.
