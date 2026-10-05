@@ -58,9 +58,10 @@ UI = re.compile(
 # (scene_hold); since S2b (SCENE_S2B) the Backbuffer and current alpha's opaque pixels, the informative full claims, the
 # H1 word, the pre-UI scene image's D and the scene guard's holds (docs/reshade-sbs.md, hidden-scene evidence); since
 # fix 1 (selection revision 4) also the offscreen UI layer against the presented frame (decision texel 11): matching and
-# lit layer pixels, which prove the layer's signature the pre-UI scene image. Logs of fix 1 to revision 7 also carry
+# lit layer pixels, which prove the layer's signature the pre-UI scene image. Logs of fix 1 to revision 8 also carry
 # lit presented pixels and those that differ from the layer, and the first-run shadow's fields (shadow,
-# shadow_hidden_ms); both were shadow statistics, removed since, and are optional here.
+# shadow_hidden_ms); both were shadow statistics, removed in selection revision 9 (logged as 0 since), and optional
+# here.
 SCENE = re.compile(
     r'sampled_alpha_opaque=(?P<opaque>\d+/\d+) sampled_scene=\{n=(?P<n>\d+) d=(?P<d>-?[0-9.]+) valid=(?P<valid>\d) '
     r'ran=(?P<ran>\d) verdict=(?P<verdict>\w+)\} sampled_hudless_scene=\{n=\d+ d=(?P<hudless_d>-?[0-9.]+) '
@@ -252,7 +253,7 @@ class Scene(NamedTuple):
     hudless_d: float  # The second image's D: before S2b the HUD-less image's, since S2b the pre-UI scene image's.
     hudless_valid: bool
     hold: int  # Before S2b the routes held by the render that logged: 1 layer (source 8), 2 HUD-less (source 9).
-    # Logs up to selection revision 7 only (the removed first-run shadow): whether it measured with the gates closed,
+    # Logs before selection revision 9 only (the removed first-run shadow): whether it measured with the gates closed,
     # and the longest hidden run without a decided source since the previous line; False and 0 otherwise.
     shadow: bool
     hidden_ms: int
@@ -293,7 +294,7 @@ class UISample(NamedTuple):
     detection: str
     # 1-4: UI alpha, UI colour tag, Backbuffer or current alpha decided, 10: the UI layer, 5: HUD-less difference, 6:
     # full frame flat (exact pair), 8: full frame over a hidden scene by the layer route, 9: by the HUD-less route, 11
-    # (fix 2 to revision 7): a still screen without a UI source shown flat (H2, removed). 7 is retired. Before S1 the
+    # (fix 2 to revision 8): a still screen without a UI source shown flat (H2, removed). 7 is retired. Before S1 the
     # layer decided as 2; parse() reads it as 10.
     source: int
     covered: int
@@ -329,14 +330,16 @@ class UISample(NamedTuple):
         return self.strong is not None
 
     def change_set_valid(self) -> bool:
-        """V2 from the logged HUD-less counts, as ui_selection::change_set_selective and change_set_full."""
+        """V2 from the logged HUD-less counts, as ui_selection::change_set_selective, change_set_full and (since
+        selection revision 8) change_set_empty: a lit pair without any changed pixel in clean tiles."""
         changed, unchanged, nonfinite = self.hudless
         if nonfinite or not self.candidates & HUDLESS:
             return False
         selective = changed and changed * 4 < self.pixels and unchanged * 100 >= self.pixels * 75 and self.tiles >= 128
         full = (self.candidates & HUDLESS_PAIR == HUDLESS_PAIR and changed * 100 >= self.pixels * 98
                 and self.lit * 2 >= self.pixels)
-        return bool(selective or full)
+        empty = not changed and self.pixels and self.lit * 2 >= self.pixels and self.tiles >= 128
+        return bool(selective or full or empty)
 
     def exact_judge(self) -> bool:
         """A2 judge (a): an offered exact pair whose change set is valid this sample (ui_selection::exact_judge)."""
@@ -1282,8 +1285,8 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
     # accepted source an exact pair contradicts and no revocation resolved (UI protection; one way since S2a, a full
     # claim over the scene before it), and unaccepted inferred alpha (UI inferred alpha). Dims and tints over dark or
     # changed pixels never meet the one-way test. Since S2b an exact full change-set (6) is counted with these accepted
-    # whole-frame decisions. Builds up to selection revision 7 measured D on the samples after such a decision
-    # (full_alpha_d, a diagnostic since removed), listed when present.
+    # whole-frame decisions. Builds before selection revision 9 measured D on the samples after such a decision
+    # (full_alpha_d, a diagnostic since removed and logged as 0), listed when present.
     #
     # Only a same-batch Backbuffer pair is exact (E2): a Present-counted pair can belong to another frame and then
     # differs everywhere, so a session whose gate offered HUD-less pairs but never a same-batch one cannot have decided
@@ -1512,8 +1515,8 @@ def gap_checks(s: Session, add) -> None:
 
 def scene_checks(s: Session, add) -> None:
     """Hidden-scene evidence: how often full-frame UI covered a hidden scene, and runs of the presented frame
-    reading hidden while no UI source decided, which nothing protected (reported by the first-run shadow of builds up to
-    selection revision 7, removed since).
+    reading hidden while no UI source decided, which nothing protected (reported by the first-run shadow of builds
+    before selection revision 9, removed since).
 
     Before S2b a sample whose frame was full-frame UI (8 or 9) and whose own evidence read the presented frame
     visible is a route's exit: that verdict releases the hold at once, so each hidden scene that ends shows one, and a
@@ -1526,7 +1529,7 @@ def scene_checks(s: Session, add) -> None:
     scenes = [u for u in s.ui if u.scene]
     if not scenes:
         return
-    # Logs up to selection revision 7: the first-run shadow's hidden runs without a decided source. Consecutive lines
+    # Logs before selection revision 9: the first-run shadow's hidden runs without a decided source. Consecutive lines
     # report the same run with a growing length, so each run is listed once, by its start, at its longest.
     runs: dict[float, tuple[float, UISample]] = {}
     for u in scenes:

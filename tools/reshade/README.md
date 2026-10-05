@@ -450,7 +450,7 @@ at; the exit code is 1 when a check failed. The checks cover: add-on and rendere
 fresh depth and gaps outside the settle time after FG switches and runtime resets; publications
 that showed the colour frame with depth; capture coverage by the list lifecycle; whether the
 camera projection or only the raw controller places the scene (the latter while a valid camera
-exists is a warning); UI acceptance changes, Forget and the first-run shadow; inferred alpha
+exists is a warning); UI acceptance changes and Forget; inferred alpha
 deciding beside an accepted UIAlpha or UI color tag; an accepted inferred alpha that a valid exact
 HUD-less pair contradicted one way three times within 2 s without a revocation (in logs before S2a,
 an accepted source covering the whole frame while an exact pair shows the scene; shorter
@@ -469,25 +469,17 @@ released and refuted counts from the last counter line, and how many hidden samp
 layer whose signature was not yet proven the pre-UI scene image (since fix 1 by matching pixels, in
 S2b logs by D; in logs before S2b, how many were a
 route's exit, whose own evidence read the presented frame visible: each hidden scene that ends
-shows one, so they are counted rather than judged); a warning when the
-presented frame read hidden, not blank, for at least 500 ms while no UI source decided
-(`shadow_hidden_ms`, which the first-run shadow measures in a game's first session after install, or
-whenever `UISceneShadow=1`, even where
-nothing could act, such as a game whose only UI signal is presented alpha; since S2b H1 covers
-Stellar Blade's SDR menus, which the shadow logged this way while frame generation was suspended,
-once their layer is proven); in logs since fix 1, `Pre-UI proof` for each layer proof key
-(`pre_ui:<format>:<space>`) restored, earned, lapsed or forgotten, and the INFO-only
-`Dark pre-UI image (shadow)`, which summarizes hidden samples over a proven but dark layer (a
-loading screen) for a future rule that nothing acts on yet
-([hidden-scene evidence](../../docs/reshade-sbs.md#setup) defines both); in logs since fix 2,
-`UI still screen`, which lists rule H2's still screens without a UI source: a warning when the
-default shadow only logged them (review them before turning the panel switch on), INFO when they
-were shown flat, always with the gameplay-safety evidence of the runs that reset before entering
-([still screens without a UI source](../../docs/reshade-sbs.md#setup) defines them);
-observation losses by
-cause; unusual export pauses; present-thread
-hitches; Game 3D CPU and GPU cost; and, from the host log, the Game 3D link, size fit and encoder
-stalls.
+shows one, so they are counted rather than judged); in logs before selection revision 9, a
+warning when the removed first-run shadow measured the presented frame hidden, not blank, for at
+least 500 ms while no UI source decided (`shadow_hidden_ms`, listed once per run by its start); in
+logs since fix 1, `Pre-UI proof` for each layer proof key (`pre_ui:<format>:<space>`) restored,
+earned, lapsed or forgotten ([hidden-scene evidence](../../docs/reshade-sbs.md#setup) defines it);
+observation losses by cause; capture statuses outside the settle time after an export start, FG
+switch or reset (those inside it are INFO); unusual export pauses; present-thread hitches; Game 3D
+CPU and GPU cost over every timing window (Present-weighted means and the maximum); and, from the
+host log, the Game 3D link, size fit and encoder stalls. A log whose game process ended right
+after ReShade tore its runtimes down (Unreal games often end before ReShade logs its exit) counts
+as a normal exit.
 
 Logs that contain `Sunshine UI counters` lines carry the add-on's exact per-frame
 [UI counters](../../docs/reshade-sbs.md#setup). For these logs the report decides the UI
@@ -509,13 +501,23 @@ invariants from the last counter line, not from the 100 ms samples. It reports t
   route (8 or 9) counted one, so it warns when such a route decided, and an exact full change-set
   (6) alone is INFO.
 - `UI full alpha`: accepted whole-frame decisions, a whole-frame mask from alpha or (since S2b) an
-  exact full change-set (6), and whether their samples read the scene visible.
-  It is INFO: an accepted source pins its alpha at any coverage, so a full one is flat even over a
-  visible scene, as the [opacity ruling](../../docs/reshade-sbs.md#ui-decision-framework) intends.
+  exact full change-set (6), and, in logs before selection revision 9, whether their samples read
+  the scene visible. It is INFO: an accepted source pins its alpha at any coverage, so a full one is
+  flat even over a visible scene, as the
+  [opacity ruling](../../docs/reshade-sbs.md#ui-decision-framework) intends.
+- `UI full frame pairing`: a failure when the whole frame was decided flat (6) in a session whose UI
+  capture gate offered HUD-less pairs but never a same-batch Backbuffer pair. Only a same-batch pair
+  is exact (rule E2); a Present-counted pair can belong to another frame and then differs everywhere
+  (Hogwarts Legacy 10-05, which tagged only `HUDLessColor`).
 - `UI inferred alpha`: a failure when an unaccepted inferred alpha decided, which only accepted
   candidates do since S1 (a warning on counter lines logged before S1).
-- `UI inexact difference`: a warning that names the
-  [roadmap stage](../../docs/reshade-sbs.md#ui-decision-framework) that fixes it.
+- `UI inexact difference`: INFO, the frames whose HUD-less difference came from a Present-counted
+  (inexact) pair, validated by its own pixels (V2); expected wherever a game offers no same-batch
+  pair.
+- `UI holds without a decision`: per counter window (from one counter line that advanced to the
+  next), a warning when at least half of the Auto frames were held without a real-frame decision to
+  show (T1), and a failure when at least 90% were for 10 s or longer: UI detection effectively never
+  ran (Hogwarts Legacy 10-05 at 4x frame generation, before the HUD-less pairing fix).
 - `UI holds`, `UI no mask` and `UI trust events`: exact totals. Holds are the generated Presents
   that showed a real frame's decision or had none, and the real frames that reused the previous
   real frame's decision once (T1); frames without a mask also list the sampled reasons with the
@@ -528,9 +530,15 @@ layer logged before S1 is read as the layer candidate. UI lines since S2b carry 
 image's evidence (`sampled_pre_ui_scene`), the informative claims and the H1 word
 (`sampled_claims`, `sampled_h1`) and the guard's pushed verdicts and layer proof (`scene_guard`) in place of
 `sampled_hudless_scene` and `scene_hold`; UI lines since fix 1 add the layer's pixels against the
-presented frame (`sampled_pre_ui_pixels`), UI lines since fix 2 add rule H2's `still` group and
-counter lines its `still` group and `decided.11`, and lines without them read as before;
-[UI protection](../../docs/reshade-sbs.md#setup) defines them.
+presented frame (`sampled_pre_ui_pixels`), and lines without them read as before;
+[UI protection](../../docs/reshade-sbs.md#setup) defines them. Lines of removed features still parse
+and add no check: the first-run shadow, rule H2's still screens (`still` groups, `decided.11`, `Sunshine
+UI still screen` lines), the S3 identity shadow (`Sunshine UI identity`, `Sunshine FG interposers`),
+and the dark pre-UI statistics; since selection revision 9 the add-on logs their remaining fields
+(`shadow`, `shadow_hidden_ms`, `presented_lit`, `presented_lit_differs`, `full_alpha_d`) as 0.
+Each `UI protection gaps` window lists its pieces with each line's own FG state; a line whose
+status sample was still pending, or an unrendered line, continues a run as `searching` after the
+last sample's reason.
 
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
 the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`

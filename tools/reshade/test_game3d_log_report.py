@@ -475,7 +475,7 @@ class ReadinessReport(unittest.TestCase):
         checks = run(BASE + [rounded])
         self.assertEqual(checks['UI protection'].status, 'PASS')
         self.assertIn('0 released by a visible verdict', checks['Hidden scene'].detail)
-        # The first-run shadow (builds up to revision 7): the presented frame read hidden for 600 ms while no UI
+        # The first-run shadow (builds before revision 9): the presented frame read hidden for 600 ms while no UI
         # source decided. The run is listed by its start, once, at its longest length.
         uncovered = ui('10:00:14', 0, 0, (0, 0, 0, 1000), 0x8, 0x0, scene=(0.01, 'hidden', 0, 1, 600))
         checks = run(BASE + [uncovered])
@@ -1111,8 +1111,8 @@ class ReadinessReport(unittest.TestCase):
                    claims=0x80, h1=1, winner=0, pre_ui=('layer', 0.588, 1), guard=(1, 1, 0, 1),
                    pre_ui_pixels=(330, 260, 600, 520))
         self.assertEqual(report.parse(BASE + [flat]).ui[0].scene.pre_ui_pixels, (330, 260))
-        # Since selection revision 8 the line carries neither the removed shadow fields nor the last two pixel
-        # counts (shadow statistics), and parses the same.
+        # A line without the removed shadow fields and the last two pixel counts (shadow statistics; since selection
+        # revision 9 they are logged as 0) parses the same.
         current = flat.replace('shadow=0 shadow_hidden_ms=0 ', '').replace(
             ' presented_lit=600 presented_lit_differs=520', '')
         self.assertNotIn('shadow=', current)
@@ -1166,9 +1166,20 @@ class ReadinessReport(unittest.TestCase):
         unresolved = run(BASE + [start] + samples + [accepted_now('10:00:15', 'ui_alpha:61:srgb,ui_layer:28:srgb')])
         self.assertEqual(unresolved['UI protection'].status, 'WARN')
 
+    def test_empty_change_set_is_valid_v2_evidence(self):
+        # Since selection revision 8 a lit pair without any changed pixel in clean tiles is a valid empty change set
+        # (ui_selection::change_set_empty), so an exact empty pair judges like any other valid exact pair.
+        empty = report.parse(BASE + [ui2('10:00:06', 0, 0, (0, 0, 0, 0), 0x30, 0x10, hudless=(0, 1000), tiles=200,
+                                         lit=600)]).ui[0]
+        self.assertTrue((empty.change_set_valid(), empty.exact_judge()) == (True, True))
+        for tiles, lit in ((127, 600), (200, 499)):
+            sample = report.parse(BASE + [ui2('10:00:06', 0, 0, (0, 0, 0, 0), 0x30, 0x10, hudless=(0, 1000),
+                                              tiles=tiles, lit=lit)]).ui[0]
+            self.assertFalse(sample.change_set_valid())
+
     def test_logs_of_the_removed_shadow_features_still_report(self):
         # The first-run shadow, texel 11's dark pre-UI statistics, rule H2's still screens and the S3 identity shadow
-        # were removed (selection revision 8). Their builds' lines still parse; none adds a check of its own, and H2's
+        # were removed (selection revision 9). Their builds' lines still parse; none adds a check of its own, and H2's
         # counted frames are named as removed.
         dark = ui3('10:00:12', 0, 0, (0, 0, 0, 1000), 0x48, 0x0, layer=(0, 30), reason='ambiguous',
                    refused='current', scene=(-0.04, 'hidden'), pre_ui=('layer', 0.18, 1), guard=(1, 0, 0, 1),
