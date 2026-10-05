@@ -979,7 +979,12 @@ uniform int DepthDirection < hidden = true; >;
       const auto ready = native_uniform("Sunshine_DepthReady"), calibrated = native_uniform("Sunshine_Calibrated");
       const auto anchor = native_uniform("Sunshine_RawAnchor"), gain = native_uniform("Sunshine_RawGain");
       const auto rect = native_uniform("Sunshine_DepthRect"), direction = native_uniform("DepthDirection");
-      observation.runtime->set_uniform_value_bool(ready, true);
+      // Readiness (bufready_depth) has one change-only owner shared by Generic
+      // and API depth, invalidated on every effect reload
+      // (depth_ready_uniform_cache.h, reshade_depth_ready_uniform_cache): it is
+      // published when it changes, not rewritten each Present, so it is read
+      // as published rather than poisoned. The calibration set is rewritten
+      // with every prepared Present and is poisoned below.
       observation.runtime->set_uniform_value_bool(calibrated, true);
       const float poison = 123.f, invalid_rect[] {-1.f, -1.f, -1.f, -1.f};
       observation.runtime->set_uniform_value_float(anchor, &poison, 1);
@@ -989,7 +994,8 @@ uniform int DepthDirection < hidden = true; >;
       wait_pixels(0, generation, prior_sequence);
 
       // No depth buffer is rendered by this transport fixture. A fresh real
-      // publisher callback must overwrite every poisoned value before publication.
+      // publisher callback must overwrite every poisoned value before
+      // publication, and readiness must be published unready.
       bool actual_ready = true, actual_calibrated = true;
       float actual_anchor = poison, actual_gain = poison, actual_rect[4] {};
       int actual_direction = -1;
