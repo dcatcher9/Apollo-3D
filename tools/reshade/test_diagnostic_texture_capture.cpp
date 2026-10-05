@@ -789,7 +789,9 @@ namespace {
     retained_destination = {}; target.Reset();
     capture::release_diagnostic_texture(ticket); ticket = {};
     {
-      gate delayed(gpu.device.Get(), gpu.foreign_queue.Get()); consumer.submit(); consumer.reset(); capture::poll();
+      gate delayed(gpu.device.Get(), gpu.foreign_queue.Get()); consumer.submit(); consumer.reset();
+      // Dump copies never evict idle live caches: age out those of earlier cases.
+      capture::testing::age_idle_storage(2000); capture::poll();
       require(!source_lifetime.expired() && !target_lifetime.expired(),
         "consumer Reset released source or destination before GPU completion");
       // The pending consumer must occupy one of the existing 32 auxiliary slots.
@@ -1296,9 +1298,34 @@ namespace {
       capture::release_diagnostic_texture(ticket); ticket = {}; pixels = {}; capture::poll();
       require(storage.use_count() == 1, "retired capture did not retain exactly one cache owner");
     }
-    std::puts("PASS local snapshot reuse with fresh IDs/exact pixels; exported pixels stay immutable after host ack");
+    // Dump 3D copies never take or evict an idle live cache: they fill the
+    // pool until it is exhausted, and the cache is the next snapshot's storage.
+    std::vector<capture::diagnostic_ticket> dumps;
+    for (;;) {
+      capture::record_diagnostic failure;
+      auto dump = capture::record_diagnostic_texture(native(gpu.list.Get()), image.input, &failure);
+      require(!storage.expired(), "a Dump 3D copy evicted an idle live snapshot cache");
+      if (!dump) { require(failure.result == capture::status::exhausted, "dump copy failed before the pool was exhausted"); break; }
+      dumps.push_back(std::move(dump));
+    }
+    require(!dumps.empty(), "no dump copy fitted beside the idle live cache");
+    for (auto &dump : dumps) { capture::release_diagnostic_texture(dump); capture::finish_diagnostic_texture(dump, true); }
+    check(close_list(gpu.list.Get()), "discarded dump recording close"); gpu.reset(); dumps.clear(); capture::poll();
+    auto reused = capture::record_local_texture(native(gpu.list.Get()), image.input);
+    require(bool(reused) && reused.ownership == storage.lock(), "live cache was not reused after the dump copies");
+    capture::finish_diagnostic_texture(reused, true); gpu.submit(); gpu.wait(); gpu.reset();
+    capture::release_diagnostic_texture(reused); reused = {}; capture::poll();
+    // Idle live storage is released 2 s after its last snapshot retired, not before.
+    require(!storage.expired(), "recently idle live storage was released");
+    capture::testing::age_idle_storage(2000); capture::poll();
+    require(storage.expired(), "idle live storage was kept past 2 s");
+    std::puts("PASS local snapshot reuse with fresh IDs/exact pixels; exported pixels stay immutable after host ack; "
+      "dump copies never evict idle live storage, which is released after 2 s idle");
   }
   void replay_and_cancel(fixture &gpu) {
+    // Dump copies never evict live caches: age out those of earlier cases so
+    // this case fills the whole pool.
+    capture::testing::age_idle_storage(2000); capture::poll();
     texture_case image(gpu, DXGI_FORMAT_R8_UNORM, 1);
     gpu.submit(); gpu.wait(); gpu.reset(); // Initial upload is not part of the replayed recording.
     auto ticket = capture::record_diagnostic_texture(native(gpu.list.Get()), image.input); require(bool(ticket), "replay capture");

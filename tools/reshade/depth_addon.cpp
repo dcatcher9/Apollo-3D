@@ -388,11 +388,18 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	// on every binding update, so it changes only when this view does, never
 	// for a readiness flip. A logical source rotating through several physical
 	// members (rotating) binds one stable copy per format and size instead of
-	// each member's view; retired copies are destroyed after the usual delay.
+	// each member's view. The add-on's renderer reads selected_shader_resource,
+	// so that copy exists only while an enabled technique may read DEPTH
+	// (effects_read_depth); otherwise a rotating source binds nothing. Retired
+	// copies are destroyed after the usual delay.
 	resource_view effects_view = { 0 };
 	bool effects_bound = false;
 	bool rotating = false;
 	bool stable_current = false; // The stable copy holds this Present's selected capture.
+	// Any enabled technique (a safe over-approximation of a DEPTH reader).
+	// Recounted at begin_effects after an effect reload or a technique toggle.
+	bool effects_read_depth = false;
+	bool effects_read_depth_dirty = true;
 	struct stable_binding
 	{
 		resource texture = { 0 };
@@ -401,6 +408,9 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 		uint64_t destroy_after_frame = 0;
 	};
 	stable_binding stable;
+	// Identity, sampled backup, frame and Present of the capture the stable copy
+	// holds: an unchanged capture is not copied again.
+	std::array<uint64_t, 4> stable_capture = {};
 	std::vector<stable_binding> retired_stable;
 
 	sunshine_depth::selection_policy selection;
@@ -1908,7 +1918,8 @@ static void update_effect_runtime(effect_runtime *runtime)
 {
 	auto &data = *runtime->get_private_data<generic_depth_data>();
 
-	const resource_view view = data.stable_current && data.stable.view != 0 ? data.stable.view : data.selected_shader_resource;
+	// A rotating source binds only its stable copy (nothing while it has none).
+	const resource_view view = data.rotating ? data.stable.view : data.selected_shader_resource;
 	if (!data.effects_bound || view != data.effects_view)
 	{
 		const sunshine_game3d::slow_step step("generic depth binding");
@@ -1917,7 +1928,17 @@ static void update_effect_runtime(effect_runtime *runtime)
 		data.effects_bound = true;
 	}
 
-	sunshine_streamline::provider::set_depth_ready(runtime, view != 0 && data.capture_ready);
+	sunshine_streamline::provider::set_depth_ready(runtime, view != 0 && data.capture_ready && (!data.rotating || data.stable_current));
+}
+
+// The stable copy stays bound until this Present's binding update replaces it.
+static void retire_stable_binding(generic_depth_data &data, const generic_depth_device_data &device_data)
+{
+	data.stable.destroy_after_frame = device_data.frame_index + generic_depth_device_data::backup_retirement_frames;
+	data.retired_stable.push_back(data.stable);
+	data.stable = {};
+	data.stable_capture = {};
+	data.stable_current = false;
 }
 
 // Copies the selected member's current backup into the stable binding (see
@@ -1932,11 +1953,7 @@ static bool copy_stable_binding(effect_runtime *runtime, command_list *cmd_list,
 	auto &stable = data.stable;
 	if (stable.texture != 0 && (stable.desc.texture.width != desc.texture.width ||
 		stable.desc.texture.height != desc.texture.height || stable.desc.texture.format != desc.texture.format))
-	{
-		stable.destroy_after_frame = device_data.frame_index + generic_depth_device_data::backup_retirement_frames;
-		data.retired_stable.push_back(stable);
-		stable = {};
-	}
+		retire_stable_binding(data, device_data);
 	if (stable.texture == 0)
 	{
 		resource_desc stable_desc(desc.texture.width, desc.texture.height, 1, 1, desc.texture.format, 1,
@@ -1993,6 +2010,7 @@ static void on_reload_effect_runtime(effect_runtime *runtime)
 		// Do not throw away a live capture epoch or retained real FG depth.
 		sunshine_streamline::provider::reload_effect_bindings(runtime);
 		data->effects_bound = false; // New effect descriptor tables.
+		data->effects_read_depth_dirty = true;
 		if (!sunshine_streamline::provider::selected(runtime)) update_effect_runtime(runtime);
 		return;
 	}
@@ -2000,6 +2018,7 @@ static void on_reload_effect_runtime(effect_runtime *runtime)
 	if (auto *data = runtime->get_private_data<generic_depth_data>())
 	{
 		data->effects_bound = false; // New effect descriptor tables.
+		data->effects_read_depth_dirty = true;
 		clear_raw_sample_request(*data);
 		data->runtime_epoch = s_next_sample_scope.fetch_add(1, std::memory_order_relaxed);
 		data->native_depth_requested = false;
@@ -2009,6 +2028,31 @@ static void on_reload_effect_runtime(effect_runtime *runtime)
 		data->native_ui_present = 0;
 		update_effect_runtime(runtime);
 	}
+}
+
+// Fires before the state changes (user, preset or another add-on); begin_effects
+// recounts. An enabled technique counts at once, before it first renders.
+static bool on_set_technique_state(effect_runtime *runtime, effect_technique, bool enabled)
+{
+	if (auto *data = runtime->get_private_data<generic_depth_data>())
+	{
+		data->effects_read_depth = data->effects_read_depth || enabled;
+		data->effects_read_depth_dirty = true;
+	}
+	return false;
+}
+
+// ReShade fires begin_effects only while its effects are loaded, so the
+// technique list is complete here (it is empty while loading).
+static void refresh_effects_read_depth(effect_runtime *runtime, generic_depth_data &data)
+{
+	if (!data.effects_read_depth_dirty) return;
+	data.effects_read_depth_dirty = false;
+	bool enabled = false;
+	runtime->enumerate_techniques(nullptr, [&enabled](effect_runtime *owner, effect_technique technique) {
+		enabled = enabled || owner->get_technique_state(technique);
+	});
+	data.effects_read_depth = enabled;
 }
 
 static void on_init_device(device *device)
@@ -2712,7 +2756,7 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 	// Declared before the lock, so its destructor emits only after unlocking.
 	std::optional<activity_present_trace> trace;
 	if (s_frame_activity_trace) trace.emplace(swapchain, presenting_queue);
-	const std::unique_lock<std::shared_mutex> lock(s_mutex);
+	std::unique_lock<std::shared_mutex> lock(s_mutex);
 	++device_data->native_present_index;
 	consume_depth_candidate_list_request(*device_data);
 	const auto demand = tracking_demand(*device_data);
@@ -2770,14 +2814,16 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 		}
 	}
 
-	// Destroy resources that were enqueued for delayed destruction and have reached the targeted number of passed frames
+	// Destroy resources that were enqueued for delayed destruction and have reached the targeted number of passed frames.
+	// Erase them under the lock and destroy them after it: game-thread depth clears wait for this exclusive section.
+	std::vector<resource> expired;
 	for (auto it = device_data->depth_stencil_backups.begin(); it != device_data->depth_stencil_backups.end();)
 	{
 		if (device_data->frame_index >= it->destroy_after_frame)
 		{
 			assert(it->references == 0);
 
-			device->destroy_resource(it->backup_texture);
+			expired.push_back(it->backup_texture);
 			it = device_data->depth_stencil_backups.erase(it);
 			continue;
 		}
@@ -2787,6 +2833,9 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 
 		++it;
 	}
+	lock.unlock();
+	for (const resource texture : expired)
+		device->destroy_resource(texture);
 }
 
 static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list, generic_depth_data &data,
@@ -3270,6 +3319,9 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		const slow_step step("generic depth rebinding");
 		update_effect_runtime(runtime);
 	}
+	// No enabled technique can read the stable copy; this Present unbinds it.
+	if (!data.effects_read_depth && data.stable.texture != 0)
+		retire_stable_binding(data, *device_data);
 	if (!data.retired_stable.empty())
 		destroy_stable_bindings(runtime, data, device_data->frame_index, false);
 
@@ -3601,11 +3653,6 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 				member_binding ? member_binding->capture_after : 0);
 
 			cmd_list->barrier(backup_texture, resource_usage::copy_dest, resource_usage::shader_resource);
-			if (data.rotating)
-			{
-				const slow_step step("generic stable depth copy");
-				data.stable_current = copy_stable_binding(runtime, cmd_list, data, *device_data, backup_texture);
-			}
 		}
 		else
 		{
@@ -3621,6 +3668,20 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.selected_record = captured.record;
 		data.selected_capture = captured.metadata;
 		data.capture_ready = captured.record.renderable(device_data->native_present_index, device_data->frame_index, data.runtime_epoch);
+		if (data.rotating && data.effects_read_depth && data.using_backup_texture && data.capture_ready)
+		{
+			// Only a new ready capture is copied. A renderable record's sampled
+			// texture is the selected view's backup, in the shader-resource state.
+			const std::array<uint64_t, 4> key = { captured.record.identity, captured.record.sampled,
+				captured.record.frame, captured.record.present };
+			data.stable_current = data.stable.view != 0 && key == data.stable_capture;
+			if (!data.stable_current)
+			{
+				const slow_step step("generic stable depth copy");
+				data.stable_current = copy_stable_binding(runtime, cmd_list, data, *device_data, resource { captured.record.sampled });
+				data.stable_capture = data.stable_current ? key : std::array<uint64_t, 4> {};
+			}
+		}
 		for (unsigned i = 0; i != data.captures.count; ++i)
 			if (data.captures.records[i].identity == data.selected_identity)
 			{
@@ -3715,6 +3776,7 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *comma
 {
 	auto *data = runtime->get_private_data<generic_depth_data>();
 	if (!data) return;
+	refresh_effects_read_depth(runtime, *data);
 	if (!data->native_driver) { begin_depth_frame(runtime, commands); return; }
 	// Other user effects may still consume DEPTH. Reopen only its read state;
 	// selection, capture and numeric sampling already ran once at native present.
@@ -4204,7 +4266,8 @@ static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
 					if (bool value = (depth_stencil_backup->force_clear_index == clear_index);
 						ImGui::Checkbox(label, &value))
 					{
-						depth_stencil_backup->force_clear_index = value ? clear_index : 0;
+						generic_depth_device_data::configure_backup(*depth_stencil_backup, depth_stencil_backup->frame_width,
+							depth_stencil_backup->frame_height, value ? clear_index : 0u);
 						reshade::set_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", depth_stencil_backup->force_clear_index);
 					}
 
@@ -4220,7 +4283,8 @@ static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
 					if (bool value = (depth_stencil_backup->force_clear_index == std::numeric_limits<uint32_t>::max());
 						ImGui::Checkbox("Use last busy clear", &value))
 					{
-						depth_stencil_backup->force_clear_index = value ? std::numeric_limits<uint32_t>::max() : 0;
+						generic_depth_device_data::configure_backup(*depth_stencil_backup, depth_stencil_backup->frame_width,
+							depth_stencil_backup->frame_height, value ? std::numeric_limits<uint32_t>::max() : 0u);
 						reshade::set_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", depth_stencil_backup->force_clear_index);
 					}
 					ImGui::SetItemTooltip("Choose the last clear operation with a high number of draw calls.");
@@ -4350,6 +4414,7 @@ static void register_depth_events()
 	reshade::register_event<reshade::addon_event::reshade_finish_effects>(sunshine_addon_lifetime::guarded<on_finish_render_effects>);
 	// Need to set texture binding again after reloading
 	reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(sunshine_addon_lifetime::guarded<on_reload_effect_runtime>);
+	reshade::register_event<reshade::addon_event::reshade_set_technique_state>(sunshine_addon_lifetime::guarded<on_set_technique_state>);
 }
 static void unregister_depth_events()
 {
@@ -4393,6 +4458,7 @@ static void unregister_depth_events()
 	reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(sunshine_addon_lifetime::guarded<on_begin_render_effects>);
 	reshade::unregister_event<reshade::addon_event::reshade_finish_effects>(sunshine_addon_lifetime::guarded<on_finish_render_effects>);
 	reshade::unregister_event<reshade::addon_event::reshade_reloaded_effects>(sunshine_addon_lifetime::guarded<on_reload_effect_runtime>);
+	reshade::unregister_event<reshade::addon_event::reshade_set_technique_state>(sunshine_addon_lifetime::guarded<on_set_technique_state>);
 }
 
 static bool read_disabled_addons(std::vector<std::string> &names)

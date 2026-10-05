@@ -3023,8 +3023,10 @@ Generic capture state. All depth-readiness writers share one per-runtime uniform
 again after effects reload and published only when readiness changes. Readiness never rebinds
 `DEPTH`: ReShade 6.8 waits for the whole queue on every binding update once an effect declares
 `DEPTH`, so Generic rebinds only when its view changes. A logical Generic source rotating through
-several physical members binds one stable copy per format and size (one extra depth copy per
-Present while rotating) instead of each member's view.
+several physical members binds one stable copy per format and size instead of each member's view.
+The add-on's renderer reads the selected capture directly, so the copy exists only while some
+technique is enabled (any enabled technique counts as a possible `DEPTH` reader); otherwise a
+rotating source binds nothing. One depth copy is recorded per new ready capture.
 
 For each effects pass, the exporter resolves calibration into a value-only frame decision before
 publishing shader parameters and Automatic UI status. Export and FG retention consume that same
@@ -3277,7 +3279,8 @@ device and recording references and keeps only its private allocation; idle allo
 While API depth owns the pass, Generic's unselected rotation members retire on their usual delay.
 In the 32-slot colour/mask pool, live snapshots (`record_local_texture`) and Dump 3D copies keep
 separate byte budgets: dumps 256 MB, live snapshots eight of the requested size and at least
-256 MB. A dump never counts against or evicts live storage.
+256 MB. A dump never counts against or evicts live storage: it takes only a slot without live
+storage and is otherwise exhausted. Idle live storage is released 2 s after its last snapshot.
 
 Capture acquisition returns source authority separately from the packet's pixel readiness.
 Its typed decision carries the selected identity and repeated/pending continuity. The capture

@@ -313,6 +313,9 @@ namespace sunshine_streamline::depth_capture {
       // diagnostic budget while live.
       std::uint64_t reservation{}, reservation_tick{}, reserved_bytes{};
       bool reserved_live{}; // The reservation is for a live snapshot (its budget).
+      // When a colour/mask slot's capture retired and it kept only its cached
+      // live allocation (collect_diagnostics). poll() releases old idle storage.
+      std::uint64_t idle_tick{};
       // Direct binding (lease_local_view): the runtime list and recording on
       // which this snapshot sits in the shader-resource state until
       // end_local_views returns it to COMMON.
@@ -1316,6 +1319,7 @@ namespace sunshine_streamline::depth_capture {
     void collect_diagnostics() {
       if (!diagnostic_slots_active) return;
       bool retained = false;
+      const auto now = GetTickCount64();
       for (auto &value : diagnostic_slots) {
         if (value.id && reclaimable(value)) {
           // Retire the capture identity/leases, not its reusable allocation.
@@ -1324,6 +1328,7 @@ namespace sunshine_streamline::depth_capture {
           auto storage = value.diagnostic_reusable ? std::move(value.texture) : nullptr;
           value = {};
           value.texture = std::move(storage);
+          value.idle_tick = now;
         }
         retained |= value.id != 0;
       }
@@ -1792,13 +1797,26 @@ namespace sunshine_streamline::depth_capture {
         else idle += value.texture->allocation_bytes;
       }
     }
+    // Cached colour/mask storage a live snapshot has not reused for this long.
+    constexpr std::uint64_t idle_live_storage_ms = 2000;
+    // Requires mutex. Its live budget is sized from the request, so idle storage
+    // ages out instead of waiting for budget pressure. Released storage moves to
+    // discard, for release after the lock.
+    void release_idle_diagnostics(std::vector<std::shared_ptr<texture_reference>> &discard, std::uint64_t now) {
+      for (auto &value : diagnostic_slots)
+        if (!value.id && value.texture && !reserved_by_other(value, 0) && now - value.idle_tick >= idle_live_storage_ms)
+          discard.push_back(std::move(value.texture));
+    }
   }
   void poll() {
     if (requested.load()) native_observer::install_pending();
     std::vector<std::shared_ptr<texture_reference>> discard;
     std::lock_guard lock(mutex);
     collect_retired();
-    try { release_idle_slots(discard); } catch (...) {}
+    try {
+      release_idle_slots(discard);
+      release_idle_diagnostics(discard, GetTickCount64());
+    } catch (...) {}
     // discard is destroyed after the lock (declared before it).
   }
 
@@ -2217,8 +2235,12 @@ namespace sunshine_streamline::depth_capture {
       // successor before the effects queue can consume it. This borrows an
       // existing pool slot; no extra owner, queue, or resource copy is introduced.
       const auto *completed = nominate_source ? completed_snapshot(value, GetTickCount64()) : nullptr;
+      // A Dump 3D copy (never cached) takes only a slot without live storage:
+      // a live snapshot reuses its cache every frame. A full pool is exhausted.
+      const bool dump_copy = diagnostic_copy && !reusable_storage;
       if (found == pixel_end) found = std::find_if(pixel_begin, pixel_end, [&](auto &entry) {
-        return &entry != completed && free_for_us(entry) && reclaimable(entry);
+        return &entry != completed && free_for_us(entry) && reclaimable(entry) &&
+          !(dump_copy && entry.texture && live_storage(entry));
       });
       if (found == pixel_end) return reject(status::exhausted, record_stage::capacity);
       auto texture = found->texture;
@@ -3074,6 +3096,11 @@ namespace sunshine_streamline::depth_capture {
   }
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   namespace testing {
+    void age_idle_storage(std::uint64_t ms) {
+      std::lock_guard lock(mutex);
+      for (auto &value : diagnostic_slots)
+        if (!value.id && value.texture) value.idle_tick -= std::min(value.idle_tick, ms);
+    }
     bool diagnostic_snapshot_regression() {
       // Same admission helper as production; completion alone must not publish
       // a texture while its recorded copy can still legally replay.
