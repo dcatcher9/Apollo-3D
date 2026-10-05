@@ -183,7 +183,9 @@ namespace {
     return pairs;
   }
 
-  void compile(const std::string &source, const std::string &source_name,
+  // Returns how many typed stores to u1 (the vertical majorant) the compiled
+  // entry contains.
+  unsigned compile(const std::string &source, const std::string &source_name,
       const std::filesystem::path &output, unsigned width, unsigned height,
       unsigned color, const entry_point &entry, std::ostream &manifest) {
     const auto width_text = std::to_string(width);
@@ -310,6 +312,11 @@ namespace {
     std::ofstream binary(output / (std::string(entry.name) + ".cso"), std::ios::binary);
     binary.write(static_cast<const char *>(bytecode->GetBufferPointer()), bytecode->GetBufferSize());
     require(binary.good(), "Could not write compiled shader evidence");
+    const auto listing = disassembly(bytecode.Get());
+    unsigned majorant_stores = 0;
+    for (size_t at = listing.find("store_uav_typed u1."); at != std::string::npos; at = listing.find("store_uav_typed u1.", at + 1))
+      ++majorant_stores;
+    return majorant_stores;
   }
 }
 
@@ -364,6 +371,10 @@ int main(int argc, char **argv) {
       "UI detection tile parts out of range");
     // The renderer may skip conditioning for a pack that shows the source mono.
     require(marker("SUNSHINE_MONO_SKIPS_CONDITIONING") == 1, "The mono pack must keep reading no conditioning");
+    // The renderer packs native scRGB as PQ and runs the live vertical pass
+    // only when the shader declares them.
+    require(marker("SUNSHINE_SCRGB_PQ_PACK") == 1 && marker("SUNSHINE_VERTICAL_LIVE_ENTRY") == 1,
+      "The scRGB PQ pack and the live vertical pass must stay declared");
     // The reduce ports ui_selection::decide of this revision.
     require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision &&
         sunshine_game3d::ui_selection::revision == 10u,
@@ -385,11 +396,13 @@ int main(int argc, char **argv) {
         std::vector<entry_point> entries {
           {"PostProcessVS", "vs_5_0"}, {"SunshineRenderPackedPS", "ps_5_0"},
         };
-        if (color == 3) entries.push_back({"SunshineRenderPackedPQPS", "ps_5_0"});
+        // The 10-bit PQ export: HDR10, and native scRGB for an HDR10 stream.
+        if (color >= 2) entries.push_back({"SunshineRenderPackedPQPS", "ps_5_0"});
         if (width <= 3840 && height <= 3840) {
           entries.push_back({"SunshineHostCandidateCS", "cs_5_0", 8, 8, 1});
           // Limiter groups: the marked number of adjacent columns (rows) by eight chunks.
           entries.push_back({"SunshineHostVerticalCS", "cs_5_0", limiter_lines, 8, 1});
+          entries.push_back({"SunshineHostVerticalLiveCS", "cs_5_0", limiter_lines, 8, 1});
           entries.push_back({"SunshineHostHorizontalCS", "cs_5_0", limiter_lines, 8, 1});
           entries.push_back({"SunshineUINearestTilesCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUINearestReduceCS", "cs_5_0", 256, 1, 1});
@@ -402,10 +415,18 @@ int main(int argc, char **argv) {
           entries.push_back({"SunshineSceneCompareCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineSceneEvidenceCS", "cs_5_0", 16, 16, 1});
         }
+        unsigned full_majorant = 0, live_majorant = 0;
         for (const auto &entry : entries) {
-          compile(source, source_path.string(), directory, width, height, color, entry, manifest);
+          const auto stores = compile(source, source_path.string(), directory, width, height, color, entry, manifest);
+          if (std::string(entry.name) == "SunshineHostVerticalCS") full_majorant = stores;
+          if (std::string(entry.name) == "SunshineHostVerticalLiveCS") live_majorant = stores;
           ++compiled;
         }
+        // The live vertical pass leaves out only the final majorant write-back
+        // (frames of at most 32 rows keep the serial diagnostic path in both).
+        if (width <= 3840 && height <= 3840 && height > 32)
+          require(live_majorant != 0 && live_majorant < full_majorant,
+            name + ": the live vertical pass must store fewer majorant texels than the full pass");
         std::cout << "PASS " << name << ": " << entries.size() << " entries, explicit registers and 80-byte constants\n";
       }
     }

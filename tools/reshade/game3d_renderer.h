@@ -156,6 +156,8 @@ namespace sunshine_game3d {
   // plane) hold the last RECORDED conditioning: a render whose pack is owed
   // records it with that pack, and an owed pack that shows the source mono
   // records none unless Dump 3D is armed (render_frame_input::diagnostic_armed).
+  // The vertical majorant is complete only where Dump 3D is armed or render()
+  // recorded the conditioning; an owed pack otherwise leaves its intermediate.
   struct diagnostic_resources {
     reshade::api::resource source{}, linear_color{}, candidate{}, vertical_majorant{},
       vertical_field{}, final_field{}, sbs{}, ui_source{}, ui_plane_tiles{}, ui_plane_resolved{};
@@ -322,10 +324,11 @@ namespace sunshine_game3d {
     }
     reshade::api::resource output() const;
     // The export transfer (docs/reshade-sbs.md, PQ wire transfer): true packs
-    // an HDR10 source as 10-bit PQ code values (Rec.2020, ST 2084, encoded as
-    // the host's scRGBTo2100PQ) into an R10G10B10A2_UNORM target, output()
-    // included; false packs FP16 scRGB. Only an HDR10 swapchain with a
-    // per-tap PQ shader supports it; returns the transfer now in effect.
+    // an HDR source as 10-bit PQ code values (Rec.2020, ST 2084, encoded as
+    // the host's scRGBTo2100PQ of the FP16 eye) into an R10G10B10A2_UNORM
+    // target, output() included; false packs FP16 scRGB. An HDR10 swapchain
+    // with a per-tap PQ shader and a native scRGB one with a shader declaring
+    // SUNSHINE_SCRGB_PQ_PACK support it; returns the transfer now in effect.
     bool set_pq_output(bool pq);
     bool pq_output() const;
     bool pq_output_supported() const;

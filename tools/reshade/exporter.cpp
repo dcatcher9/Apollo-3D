@@ -371,6 +371,17 @@ namespace {
     return wire::answered_capabilities(nonce, answered, bits);
   }
 
+  // The export transfer of an HDR swapchain for the answered consumer's
+  // capabilities (docs/reshade-sbs.md, PQ wire transfer): 10-bit PQ for an
+  // HDR10 source when the consumer accepts PQ, and for any HDR source, native
+  // scRGB included, when it encodes HDR10 PQ (consumer_stream_pq, which
+  // implies acceptance). Every other consumer gets FP16 scRGB.
+  bool exports_pq(api::color_space source, std::uint32_t capabilities) {
+    if (source == api::color_space::hdr10_pq)
+      return (capabilities & (wire::consumer_accepts_pq | wire::consumer_stream_pq)) != 0;
+    return source == api::color_space::scrgb && (capabilities & wire::consumer_stream_pq) != 0;
+  }
+
   // The colour space a transfer's export is encoded in (the overlay's target).
   api::color_space export_space(wire::transfer transfer) {
     return transfer == wire::transfer::srgb ? api::color_space::srgb :
@@ -618,7 +629,12 @@ namespace {
       last_submitted = sequence;
     }
 
-    bool submit(api::command_list *commands, api::resource input, std::uint32_t index, std::uint64_t sequence) {
+    // copy false: the overlay's composite pass, recorded in reshade_present,
+    // writes every pixel of the slot from this same source (composite_ps
+    // returns the source wherever the controls are transparent), so a copy
+    // first would only be overwritten. The source is retained either way.
+    bool submit(api::command_list *commands, api::resource input, std::uint32_t index, std::uint64_t sequence,
+        bool copy = true) {
       auto &submitted_source = submitted_sources[index];
       submitted_source.reset();
       auto *source_object = reinterpret_cast<IUnknown *>(input.handle);
@@ -627,6 +643,7 @@ namespace {
       const auto destination = texture(index);
       // Set this before appending commands: an exception cannot make recorded work appear idle.
       last_submitted = sequence;
+      if (!copy) return true;
       commands->barrier(input, api::resource_usage::shader_resource, api::resource_usage::copy_source);
       if (backend == api::device_api::d3d12) {
         commands->barrier(destination, api::resource_usage::general, api::resource_usage::copy_dest);
@@ -867,6 +884,10 @@ namespace {
       std::uint64_t missing_unavailable = 0, missing_reuse_after_gap = 0, missing_reuse_other_source = 0;
       // Publications with depth that showed the colour frame or were fading in.
       std::uint64_t scene_flat = 0, scene_fading = 0;
+      // Export slots (acquire_slot): Presents a consumer was attached to that
+      // found no reusable slot, and packs written over a ready slot the
+      // consumer never claimed (it took a newer one, or none yet).
+      std::uint64_t dropped = 0, overwritten_unconsumed = 0;
       void add(const output_sample &sample) {
         ++published;
         if (sample.fg) ++fg;
@@ -1115,12 +1136,11 @@ namespace {
         proof.width = desc.texture.width; proof.height = desc.texture.height;
         proof.frame_strength = settings.strength;
         // The export transfer (docs/reshade-sbs.md, PQ wire transfer): an
-        // HDR10 swapchain exports 10-bit PQ to a consumer that accepts it;
-        // any other consumer, and a native scRGB swapchain, get FP16 scRGB.
+        // HDR10 swapchain exports 10-bit PQ to a consumer that accepts it,
+        // and a native scRGB one to a consumer that encodes HDR10 PQ; any
+        // other consumer gets FP16 scRGB (exports_pq).
         const auto space = swapchain->get_color_space();
-        const bool accepts_pq = space == api::color_space::hdr10_pq &&
-          (read_capabilities(*shared_, read_nonce(*shared_)) & wire::consumer_accepts_pq);
-        const bool pq = renderer->set_pq_output(accepts_pq);
+        const bool pq = renderer->set_pq_output(exports_pq(space, read_capabilities(*shared_, read_nonce(*shared_))));
         proof.color = {space, space == api::color_space::srgb ? wire::transfer::srgb : pq ? wire::transfer::pq : wire::transfer::scrgb};
         // The overlay compositor of this export is compiled off the Present
         // before the overlay first opens (once per process and transfer).
@@ -1359,20 +1379,21 @@ namespace {
             log(reshade::log::level::warning, "Sunshine SBS: overlay capture unavailable; showing the captured desktop");
           }
         }
+        // The export is complete once its pack and overlay are recorded:
+        // publish it now, before the game's Present. D3D11 records on the
+        // immediate context, which signal_pending flushes. D3D12 submits
+        // ReShade's immediate list first; ReShade 6.8 fires finish_present only
+        // after the real Present returns, so signalling there queued the fence
+        // behind the Present packet and the CPU's Present wait.
         if (generation_->backend == api::device_api::d3d11) {
-          const auto index = generation_->pending_slot;
-          generation_->pending_slot = wire::slot_count;
-          const HRESULT hr = generation_->context11->Signal(generation_->fence11.get(), generation_->last_submitted);
-          generation_->context11->Flush();
-          if (FAILED(hr)) {
-            generation_->signal_failed = true;
-            log_hr("D3D11 publication fence signal", hr);
-            deactivate(runtime, "fence_signal_failed");
-          } else if (generation_->runtime && published_runtime_ == runtime && read_nonce(*shared_) == generation_->nonce) {
-            complete_slot(index, generation_->pending_qpc);
-          }
+          signal_pending(runtime);
+        } else if (auto *queue = runtime->get_command_queue();
+            queue && queue->get_native() == reinterpret_cast<std::uint64_t>(generation_->queue12.get())) {
+          queue->flush_immediate_command_list();
+          signal_pending(runtime);
         }
       }
+      release_idle_rings();
       if (found != runtimes_.end()) {
         found->second.rendered_since_present = false;
         found->second.native_depth_prepared = false;
@@ -1813,8 +1834,9 @@ namespace {
           break;
         }
       debug_dump_.poll(diagnostic_frame);
-      // A preceding Present did not reach finish_present. Retain its copy until a later
-      // matching submission can be fenced, but stop exposing the previous cached image.
+      // A preceding Present signalled its export neither in reshade_present nor
+      // in finish_present. Retain its recording until a later matching
+      // submission can be fenced, but stop exposing the previous cached image.
       if (generation_ && generation_->pending_slot != wire::slot_count && generation_->native_swapchain == swapchain) {
         deactivate(generation_->runtime, "present_not_finished");
       }
@@ -1826,23 +1848,13 @@ namespace {
       debug_dump_.finish_present(queue, swapchain);
       for (auto &[runtime, proof] : runtimes_)
         if (proof.swapchain == swapchain && proof.renderer) proof.renderer->finish_present();
+      // A D3D12 export is normally signalled in reshade_present (present()).
+      // One whose reshade_present did not run is fenced here, after the game's
+      // Present, which ReShade preceded with a flush of its immediate list.
       if (!generation_ || generation_->backend != api::device_api::d3d12 || generation_->pending_slot == wire::slot_count || swapchain != generation_->native_swapchain || queue != reinterpret_cast<std::uint64_t>(generation_->queue12.get())) {
         return;
       }
-      const auto index = generation_->pending_slot;
-      generation_->pending_slot = wire::slot_count;
-      const HRESULT hr = generation_->queue12->Signal(generation_->fence12.get(), generation_->last_submitted);
-      if (FAILED(hr)) {
-        generation_->signal_failed = true;
-        log_hr("D3D12 publication fence signal", hr);
-        deactivate(generation_->runtime, "fence_signal_failed");
-        return;
-      }
-      // Reload/focus/nonce changes may have retired this submission after it was recorded.
-      // It still needs a fence, but must never republish its image.
-      if (generation_->runtime && published_runtime_ == generation_->runtime && read_nonce(*shared_) == generation_->nonce) {
-        complete_slot(index, generation_->pending_qpc);
-      }
+      signal_pending(nullptr);
     }
 
     void frame(api::effect_runtime *runtime, api::effect_technique technique, api::command_list *commands, api::resource_view native_rtv, bool addon_render = false) {
@@ -1863,8 +1875,7 @@ namespace {
       }
       auto &proof = runtimes_[runtime];
       if (proof.addon_native && !addon_render) return;
-      if (cached_ring_ && cached_ring_->finished() && std::chrono::steady_clock::now() - cached_ring_since_ >= cached_ring_idle)
-        cached_ring_.reset();
+      release_idle_rings();
       if (game && proof.raw_supported && !proof.frame.prepared) {
         deactivate(runtime, "frame_not_prepared");
         return;
@@ -1937,9 +1948,9 @@ namespace {
         }
         return;
       }
-      // A PQ export only for the consumer that accepted it (C3): one replaced
-      // since this Present's render gets the next Present's FP16 export.
-      if (source.color.output == wire::transfer::pq && !(read_capabilities(*shared_, nonce) & wire::consumer_accepts_pq)) {
+      // A PQ export only for a consumer that takes it (C3, exports_pq): one
+      // replaced since this Present's render gets the next Present's export.
+      if (source.color.output == wire::transfer::pq && !exports_pq(source.color.input, read_capabilities(*shared_, nonce))) {
         deactivate(runtime, "consumer_without_pq");
         return;
       }
@@ -2021,7 +2032,16 @@ namespace {
         deactivate(runtime, "device_removed");
         return;
       }
-      const auto index = acquire_slot(completed);
+      // The owed native pack renders straight into the slot. The overlay and
+      // dumps read the internal SBS image, so they pack it there first.
+      auto *renderer = addon_render ? proof.renderer.get() : nullptr;
+      // The dump mailbox is read once per exported Present.
+      const bool dump = addon_render && proof.diagnostic_armed && debug_dump_.requested();
+      const bool direct = renderer && !overlay_open(runtime) && !dump;
+      bool overwrote = false;
+      const auto index = acquire_slot(completed, direct, &overwrote);
+      if (index == wire::slot_count) ++proof.output.dropped;
+      else if (overwrote) ++proof.output.overwritten_unconsumed;
       if (index != wire::slot_count) {
         auto &slot = shared_->slots[index];
         // A nonce replacement races only on metadata. Do not issue new old-generation work.
@@ -2040,12 +2060,6 @@ namespace {
         // exports. ReShade's own controls and cursor are at screen disparity.
         generation_->pending_ui_parallax_uv = addon_render && !overlay_open(runtime) ? proof.native_ui_parallax_uv : 0.f;
         generation_->pending_output = game ? std::optional(classify_output(proof.frame)) : std::nullopt;
-        // The owed native pack renders straight into the slot. The overlay and
-        // dumps read the internal SBS image, so they pack it and copy it here.
-        auto *renderer = addon_render ? proof.renderer.get() : nullptr;
-        // The dump mailbox is read once per exported Present.
-        const bool dump = addon_render && proof.diagnostic_armed && debug_dump_.requested();
-        const bool direct = renderer && !overlay_open(runtime) && !dump;
         if (direct) generation_->adopt_rendered(index, sequence);
         if (direct && renderer->pack(commands, generation_->texture(index), generation_->id)) {
           if (!generation_->rendered_directly) {
@@ -2054,7 +2068,10 @@ namespace {
           }
         } else {
           if (renderer) renderer->pack(commands);
-          if (!generation_->submit(commands, source.resource, index, sequence)) {
+          // With the overlay open its composite writes the whole slot from the
+          // source in reshade_present, so nothing is copied first; a dump, a
+          // reference export or a failed direct pack copies the source.
+          if (!generation_->submit(commands, source.resource, index, sequence, !overlay_open(runtime))) {
             deactivate(runtime, "submit_failed");
             return;
           }
@@ -2107,19 +2124,55 @@ namespace {
       debug_dump_.capture(runtime, commands, frame);
     }
 
-    std::uint32_t acquire_slot(std::uint64_t completed) {
+    // Claims a slot for this Present's export (docs/reshade-sbs.md, GPU handoff
+    // contract): a free slot first, else the oldest ready slot, never the
+    // ring's newest unconsumed frame (a ready slot whose sequence is the
+    // highest of the ready and reading slots), which the consumer would claim
+    // next. A slot is reusable once its previous GPU write completed; a direct
+    // pack (direct) may also reuse a slot whose previous write was a direct
+    // pack still queued (no retained source or overlay), since the new pack is
+    // recorded after it on the same queue. A consumer may discard a frame
+    // without reading it, so even a free slot retains its source and overlay
+    // until that write completes. overwrote: a ready slot was claimed.
+    std::uint32_t acquire_slot(std::uint64_t completed, bool direct = false, bool *overwrote = nullptr) {
+      if (overwrote) *overwrote = false;
       // A recorded copy must be fenced before admitting the next. Submitted
       // work is bounded by the existing ring, not a global one-copy gate.
       if (!generation_ || generation_->signal_failed || completed == UINT64_MAX ||
           generation_->pending_slot != wire::slot_count) return wire::slot_count;
+      const auto id = generation_->id;
+      std::array<wire::slot_state, wire::slot_count> states{};
+      std::array<bool, wire::slot_count> current{};
+      std::uint64_t newest = 0;
+      for (std::uint32_t index = 0; index < wire::slot_count; ++index) {
+        const auto control = static_cast<std::uint64_t>(InterlockedCompareExchange64(
+          reinterpret_cast<volatile LONG64 *>(&shared_->slots[index].control), 0, 0));
+        current[index] = wire::control_generation(control) == id;
+        states[index] = wire::control_state(control);
+        if (current[index] && (states[index] == wire::slot_state::ready || states[index] == wire::slot_state::reading))
+          newest = std::max(newest, shared_->slots[index].sequence);
+      }
+      const auto reusable = [&](std::uint32_t index) {
+        return current[index] && (completed >= shared_->slots[index].sequence ||
+          (direct && !generation_->submitted_sources[index]));
+      };
       for (std::uint32_t offset = 0; offset < wire::slot_count; ++offset) {
         const auto index = (next_slot_ + offset) % wire::slot_count;
-        auto &slot = shared_->slots[index];
-        // A consumer may discard a frame without reading it. Even a free slot
-        // must retain its source/overlay until that slot's GPU work completes.
-        if (completed < slot.sequence) continue;
-        if (exchange_state(slot, generation_->id, wire::slot_state::writing, wire::slot_state::free) ||
-            exchange_state(slot, generation_->id, wire::slot_state::writing, wire::slot_state::ready)) return index;
+        if (states[index] == wire::slot_state::free && reusable(index) &&
+            exchange_state(shared_->slots[index], id, wire::slot_state::writing, wire::slot_state::free)) return index;
+      }
+      // Ready slots oldest first; a claim the consumer won meanwhile moves on.
+      std::array<std::uint32_t, wire::slot_count> order{};
+      for (std::uint32_t index = 0; index < wire::slot_count; ++index) order[index] = index;
+      std::sort(order.begin(), order.end(), [&](std::uint32_t a, std::uint32_t b) {
+        return shared_->slots[a].sequence < shared_->slots[b].sequence;
+      });
+      for (const auto index : order) {
+        if (states[index] != wire::slot_state::ready || !reusable(index) || shared_->slots[index].sequence >= newest) continue;
+        if (exchange_state(shared_->slots[index], id, wire::slot_state::writing, wire::slot_state::ready)) {
+          if (overwrote) *overwrote = true;
+          return index;
+        }
       }
       return wire::slot_count;
     }
@@ -2202,8 +2255,8 @@ namespace {
     void log_output(api::effect_runtime *runtime, runtime_t &proof, std::uint64_t now) {
       auto &counts = proof.output;
       if (now < counts.next_log) return;
-      char text[768]{};
-      std::snprintf(text, sizeof(text), "Sunshine SBS output: published=%llu fg=%llu scene_flat=%llu scene_fading=%llu published_fresh_depth=%llu published_reused_depth=%llu published_depth_missing=%llu (unavailable=%llu reuse_after_gap=%llu reuse_other_source=%llu) runtime=0x%llx generation=%llu; cumulative Game 3D publications; scene_flat had depth but showed the colour frame; reused depth is bounded and does not advance calibration; unavailable reasons are in Sunshine depth readiness",
+      char text[896]{};
+      std::snprintf(text, sizeof(text), "Sunshine SBS output: published=%llu fg=%llu scene_flat=%llu scene_fading=%llu published_fresh_depth=%llu published_reused_depth=%llu published_depth_missing=%llu (unavailable=%llu reuse_after_gap=%llu reuse_other_source=%llu) runtime=0x%llx generation=%llu dropped=%llu overwritten_unconsumed=%llu; cumulative Game 3D publications; scene_flat had depth but showed the colour frame; reused depth is bounded and does not advance calibration; unavailable reasons are in Sunshine depth readiness; dropped found no reusable export slot, overwritten_unconsumed replaced a ready slot the consumer never claimed",
         static_cast<unsigned long long>(counts.published), static_cast<unsigned long long>(counts.fg),
         static_cast<unsigned long long>(counts.scene_flat), static_cast<unsigned long long>(counts.scene_fading),
         static_cast<unsigned long long>(counts.published_fresh_depth), static_cast<unsigned long long>(counts.published_reused_depth),
@@ -2211,9 +2264,56 @@ namespace {
         static_cast<unsigned long long>(counts.missing_unavailable), static_cast<unsigned long long>(counts.missing_reuse_after_gap),
         static_cast<unsigned long long>(counts.missing_reuse_other_source),
         static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(runtime)),
-        static_cast<unsigned long long>(generation_ ? generation_->id : 0));
+        static_cast<unsigned long long>(generation_ ? generation_->id : 0),
+        static_cast<unsigned long long>(counts.dropped), static_cast<unsigned long long>(counts.overwritten_unconsumed));
       log(reshade::log::level::info, text);
       counts.next_log = now + 5000;
+    }
+
+    // Publishes the pending export, then queues its fence signal behind the
+    // pack and overlay already submitted on the generation's queue (D3D11
+    // flushes after it). Ready first: the consumer claims a slot only once the
+    // fence reached its sequence, so a ready slot is never read early and
+    // every fence wake finds its slot ready. A recording retired by reload,
+    // focus or nonce changes, or whose overlay composite was never recorded,
+    // is still fenced but never published. A failed signal withdraws the slot
+    // and deactivates the export (runtime: the reshade_present caller, null
+    // from finish_present).
+    void signal_pending(api::effect_runtime *runtime) {
+      auto &g = *generation_;
+      const auto index = std::exchange(g.pending_slot, wire::slot_count);
+      const bool composed = !std::exchange(g.pending_overlay, false);
+      if (!composed && g.overlays[index]) g.overlays[index]->cancel();
+      const bool publish = composed && g.runtime && published_runtime_ == g.runtime && read_nonce(*shared_) == g.nonce;
+      if (publish) complete_slot(index, g.pending_qpc);
+      HRESULT hr = E_FAIL;
+      if (g.backend == api::device_api::d3d11) {
+        hr = g.context11->Signal(g.fence11.get(), g.last_submitted);
+        g.context11->Flush();
+      } else {
+        hr = g.queue12->Signal(g.fence12.get(), g.last_submitted);
+      }
+      if (SUCCEEDED(hr)) return;
+      g.signal_failed = true;
+      if (publish) exchange_state(shared_->slots[index], g.id, wire::slot_state::writing, wire::slot_state::ready);
+      log_hr(g.backend == api::device_api::d3d11 ? "D3D11 publication fence signal" : "D3D12 publication fence signal", hr);
+      deactivate(runtime ? runtime : g.runtime, "fence_signal_failed");
+    }
+
+    // A ring that stopped exporting (deactivated: focus loss, no consumer)
+    // and has no unfinished work is released after export_ring_idle, so a
+    // stereo-to-mono switch frees its 2W x H slots (200-400 MB at 4K); a
+    // later export allocates a new ring. The cached ring of the other colour
+    // transfer keeps its own cached_ring_idle.
+    void release_idle_rings() {
+      const auto now = std::chrono::steady_clock::now();
+      if (generation_ && !generation_->runtime && generation_->finished() &&
+          generation_->inactive_since != std::chrono::steady_clock::time_point{} &&
+          now - generation_->inactive_since >= export_ring_idle) {
+        log(reshade::log::level::info, "Sunshine SBS: released the idle export ring");
+        generation_.reset();
+      }
+      if (cached_ring_ && cached_ring_->finished() && now - cached_ring_since_ >= cached_ring_idle) cached_ring_.reset();
     }
 
     void complete_slot(std::uint32_t index, std::uint64_t qpc) {
@@ -2380,6 +2480,7 @@ namespace {
     std::vector<parked_t> parked_;
     std::chrono::steady_clock::time_point cached_ring_since_{};
     static constexpr auto cached_ring_idle = std::chrono::seconds(60);
+    static constexpr auto export_ring_idle = std::chrono::seconds(10);
     bool retirement_limit_logged_ = false;
     std::uint64_t next_generation_ = 0;
     std::uint32_t next_slot_ = 0;

@@ -1785,6 +1785,11 @@ namespace {
       compare_pixels(test, fixture.color, load_pixels(results / (test.name + ".fx.bin")), pixels, report);
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
         "Native renderer changed the game's mono backbuffer");
+      // The immediate render recorded the full vertical pass; an armed owed
+      // pack must leave the same complete majorant for its dump (WP4 E6).
+      const auto majorant_resource = renderer.diagnostics().vertical_majorant;
+      const auto full_majorant = majorant_resource.handle ?
+        fixture.read(reinterpret_cast<ID3D12Resource *>(majorant_resource.handle)) : std::vector<std::uint8_t>{};
       // Owed conditioning (C2): the same frame with its pack owed records the
       // conditioning with the pack and packs the same bytes: with the
       // Diagnostics switch on (timestamps); off, with the depth identity the
@@ -1818,13 +1823,17 @@ namespace {
         require(after.recorded - before.recorded == (records ? 1u : 0u) && after.mono - before.mono == (records ? 0u : 1u) &&
             after.memo - before.memo == (variant == 1 && records ? 1u : 0u),
           "An owed pack of " + test.name + " recorded the wrong conditioning");
+        if (armed && majorant_resource.handle)
+          require(fixture.read(reinterpret_cast<ID3D12Resource *>(majorant_resource.handle)) == full_majorant,
+            "An armed owed pack of " + test.name + " left a different vertical majorant than the full pass");
       }
       sunshine_game3d::diagnostics::set_enabled(true);
-      if (fixture.color == 3) {
+      if (fixture.color == 3 || fixture.color == 2) {
         // The 10-bit PQ export of the same frame (docs/reshade-sbs.md, PQ wire
-        // transfer): within one code of the host's scRGBTo2100PQ of its FP16
-        // export, with the same 0/1 coverage in its 2-bit alpha.
-        require(renderer.set_pq_output(true) && renderer.pq_output(), "An HDR10 renderer refused the PQ export");
+        // transfer), of an HDR10 source and of a native scRGB one for an
+        // HDR10 stream: within one code of the host's scRGBTo2100PQ of its
+        // FP16 export, with the same 0/1 coverage in its 2-bit alpha.
+        require(renderer.set_pq_output(true) && renderer.pq_output(), "An HDR renderer refused the PQ export");
         renderer.begin_present();
         sunshine_game3d::render_frame_input frame;
         frame.color = source;
@@ -1903,7 +1912,7 @@ namespace {
           timing.state == sunshine_game3d::gpu_timing::profile_state::disabled,
         "GPU timing reported frames while diagnostics were off");
       sunshine_game3d::diagnostics::set_enabled(true);
-      if (fixture.color == 3)
+      if (fixture.color == 3 || fixture.color == 2)
         std::puts("PASS PQ export: every parity frame's 10-bit PQ pack is within one code of the host's scRGBTo2100PQ of "
           "its FP16 pack, with the same coverage alpha");
       std::puts("PASS owed conditioning: every parity frame packs the same bytes with its conditioning owed to the pack, "

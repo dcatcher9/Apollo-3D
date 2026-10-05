@@ -270,7 +270,13 @@ none unless Dump 3D is armed (`render_frame_input::diagnostic_armed`); the shade
 for that value: the exporter derives it from the API capture's epoch, source, sequence and
 viewport, and Generic depth gives 0. An exact repeat of {view, nonzero identity, the 80 `b0`
 bytes} (a generated Present reusing its real frame's depth) keeps the last depth candidate and
-vertical field. Packed and dumped outputs are byte-identical to always conditioning.
+vertical field. Packed and dumped outputs are byte-identical to always conditioning. An owed pack
+without an armed dump runs the live vertical pass (`SunshineHostVerticalLiveCS`, declared by
+`SUNSHINE_VERTICAL_LIVE_ENTRY`): the same field without the final majorant write-back, which only
+Dump 3D reads, so the majorant texture keeps its intermediate values. `render()` (replay,
+fixtures, probe frames) and an armed pack record the full `SunshineHostVerticalCS`, and an armed
+pack never keeps the memo, so a dump's majorant is its own render's. At 3840x2160 the vertical
+pass went from 0.230 to 0.200 ms.
 
 **Detection and pinning shape.** The detection tiles pass splits each statistics tile over
 `SUNSHINE_UI_DETECTION_TILE_PARTS` groups (4; group z is the part, taking the tile's 16-row runs
@@ -326,7 +332,8 @@ transfer or extent (one cached entry) and makes it current again on a toggle bac
 or a recompilation; it starts every per-scene decision state as a new renderer would, and an
 entry cached for 60 s is released once its fence completed. The exporter likewise keeps the
 previous finished export ring (one entry, 60 s) and renews it under a new generation when its
-source matches again after 500 ms inactive. A game toggles by ResizeBuffers, around which ReShade
+source matches again after 500 ms inactive; the current ring, once it stopped exporting, is
+released after 10 s idle ([GPU handoff contract](#gpu-handoff-contract)). A game toggles by ResizeBuffers, around which ReShade
 resets its effect runtime (`destroy_effect_runtime`, `init_effect_runtime`): the renderer is parked
 over the reset (its back-buffer views dropped) and taken back by the reinitialised runtime, and the
 finished export rings stay, without any back-buffer reference (submitted sources and overlay
@@ -3250,8 +3257,11 @@ split by reason: `unavailable` (the provider had none this Present, for example 
 an FG toggle or expiry; `Sunshine depth readiness` names the provider's reason), `reuse_after_gap`
 (a generated or pending frame whose previous presentation had no depth) and `reuse_other_source`
 (its depth belongs to another source than the previous presentation's scene). These classify
-depth availability; `scene_flat` and `scene_fading` classify placement. Runtime reload/destruction
-resets these counters.
+depth availability; `scene_flat` and `scene_fading` classify placement. `dropped` counts
+Presents with an attached consumer that found no reusable export slot, and
+`overwritten_unconsumed` packs written over a ready slot the consumer never claimed (it took a
+newer frame, or none yet); see the [GPU handoff contract](#gpu-handoff-contract) for the slot
+policy. Runtime reload/destruction resets these counters.
 
 Game 3D captures color at ReShade's Present event, so it sees exactly the Presents that pass
 through ReShade's swapchain wrapper. Whether frame-generated images are among them depends on how
@@ -4422,14 +4432,21 @@ valid only as R10G10B10A2_UNORM (DXGI 24) and only at protocol 3; protocol 3 slo
 cursor plane like protocol 2, and protocol 3 also accepts sRGB and scRGB metadata. A consumer
 advertises what it accepts in protocol 2's padding: it writes `consumer_capabilities` (offset 144;
 `consumer_accepts_pq` = 1), then `capability_nonce` (offset 136) = its nonce, then
-`consumer_nonce`. A producer honours the bits only when `capability_nonce` equals the nonce it
+`consumer_nonce`. `consumer_stream_pq` = 2 means the consumer encodes HDR10 PQ: a producer may
+pack any HDR source, scRGB included, as R10G10B10A2 PQ at protocol 3. Sunshine sets it only for a
+streaming encoder whose output is HDR, never for Local AR. A consumer whose capabilities change
+requests the connection again under a new nonce; producers that predate the bit ignore it. A
+producer honours the bits only when `capability_nonce` equals the nonce it
 answers (`answered_capabilities`), so an older consumer, which never writes them, and a replaced
-one read as no capabilities. An HDR10 swapchain exports PQ only to a consumer that accepts it;
-any other consumer gets FP16 scRGB at protocol 2, and a consumer replaced between a Present's
-render and its export gets the next Present's FP16 export. Native scRGB swapchains always export
-FP16 scRGB: wide-gamut and over-10000-nit values clip differently in PQ (a negative Rec.2020 clip)
-than in the SDR stream's tone map (a Rec.709 clip). SDR stays sRGB. A changed transfer is a new
-export ring. The generation line names `PQ HDR10, protocol 3`.
+one read as no capabilities. An HDR10 swapchain exports PQ to a consumer that accepts it, and a
+native scRGB swapchain exports PQ to a consumer that encodes HDR10 PQ (`exports_pq`; the bit
+implies acceptance). Any other consumer gets FP16 scRGB at protocol 2, and a consumer replaced
+between a Present's render and its export gets the next Present's export. For an HDR stream the
+host would itself encode an FP16 scRGB export with `scRGBTo2100PQ`, so packing it in the game is
+the same encoding at half the shared bytes per frame. An SDR stream and Local AR keep FP16 scRGB
+from a native scRGB swapchain: wide-gamut and over-10000-nit values clip differently in PQ (a
+negative Rec.2020 clip) than in the SDR tone map (a Rec.709 clip). SDR stays sRGB. A changed
+transfer is a new export ring. The generation line names `PQ HDR10, protocol 3`.
 The mapping uses Windows' default access control. Sunshine verifies the process creation time
 before duplicating its NT texture and fence handles; resources are never looked up by a global
 texture name.
@@ -4451,18 +4468,32 @@ handles. Any read an abandoned receiver left in flight finished long before that
 removes the allocation from a return to the game or a reconnecting stream. A receiver that
 restarts while the game keeps exporting still gets a fresh ring, as does any size, format or HDR
 change. The finished ring of the previous transfer or extent stays cached (one entry, 60 s) and is
-renewed the same way on a toggle back.
+renewed the same way on a toggle back. A ring that stopped exporting (focus loss, or no consumer,
+as in Game mono) and has no unfinished producer work is released after 10 s idle
+(`export_ring_idle`), so leaving stereo frees its slots: about 400 MB for a 4K FP16 ring and
+200 MB for an RGB10A2 one. A later export allocates a new ring, the present-thread step above.
 
 For each exported frame, the producer claims a slot, writes the final stereo image into it,
-signals its GPU fence, writes the frame sequence, QPC timestamp and matching UI displacement,
-then marks the slot ready. Native Game 3D renders both eyes in one pass
+writes the frame sequence, QPC timestamp and matching UI displacement, marks the slot ready, then
+signals its GPU fence (the host's fence wake then always finds the slot ready). The host never
+reads a ready slot before the fence reaches its sequence, so the early mark exposes nothing. The
+producer publishes in ReShade's `reshade_present` callback, right after the pack and any overlay
+composition and before the game's Present, on both APIs: D3D11 signals on the immediate context
+and flushes; D3D12 first submits ReShade's immediate command list (`flush_immediate_command_list`),
+then signals on the presenting queue. ReShade 6.8 fires `finish_present` only after the real
+Present returns, so a D3D12 signal there sat behind the Present packet and waited for the CPU's
+Present call to return. `finish_present` now fences only a D3D12 export whose `reshade_present`
+did not run, and publishes it only if its overlay composite was recorded. A failed signal withdraws
+the slot and deactivates the export. Native Game 3D renders both eyes in one pass
 (`SunshineRenderPackedPS`, or `SunshineRenderPackedPQPS` for the PQ transfer) directly into the claimed slot, so the common path writes no eye
 intermediate and has no full-frame copy. Each half branches on its eye so the compiler folds the
 pixel-center scale into the warp exactly as the former per-eye pass did; the output is
 byte-identical to the former two passes and to the frozen FX reference. At 4K this drops two FP16
-eye textures (~133 MB) and their write/read-back. While the ReShade overlay is visible or a
-diagnostic dump is armed, the pass writes the renderer's own SBS image instead, which is then
-copied into the slot with any overlay composition; reference FX exports always use that copy.
+eye textures (~133 MB) and their write/read-back. While a diagnostic dump is armed the pass
+writes the renderer's own SBS image instead, which is then copied into the slot; reference FX
+exports use that copy too. While the ReShade overlay is visible the pass also writes the
+renderer's own image, and the overlay's composite then writes every slot pixel from it (the image
+itself wherever the controls are transparent), so nothing is copied into the slot first.
 Without a consumer, a free slot or an armed dump, no eye is rendered at all. The shader declares
 `SUNSHINE_PACKED_EYES`; a dump whose embedded shader predates it replays with the former eye and
 pack passes.
@@ -4471,10 +4502,16 @@ common state between owners, and the pass reads only the renderer's working set,
 renderer's completion fence already retains. Up to three submitted GPU writes may remain unfinished, bounded by
 the existing three-slot ring. A recorded slot write must receive its submission fence before the next
 is admitted; there is no global requirement to wait for the previous GPU write to complete.
-Admission checks each slot's own fence sequence, including slots already marked free by a
-consumer that discarded them. Only free or unconsumed-ready ownership can be claimed, and only
-after that slot's previous GPU write completes. Reading slots remain unavailable. If every slot
-is busy, the add-on drops the publication and returns to the game without waiting.
+Admission (`acquire_slot`) takes a free slot first, else the oldest ready slot, and never the
+ring's newest unconsumed frame (a ready slot whose sequence is the highest of the ready and
+reading slots), which the consumer would claim next; the round-robin it replaced could overwrite
+that frame. A slot is reusable once its previous GPU write completed, judged by that slot's own
+fence sequence, including slots already marked free by a consumer that discarded them. A direct
+pack may also reuse a slot whose previous write was a direct pack still queued: it records after
+that write on the same queue, and the slot retains no source or overlay. A copy or overlay write
+waits for completion. Reading slots remain unavailable. If no slot is reusable, the add-on drops
+the publication and returns to the game without waiting. `Sunshine SBS output` counts both
+(`dropped`, and `overwritten_unconsumed` for a ready slot written over).
 
 Each slot retains its native source resource and a separate overlay compositor. They cannot be
 replaced while that slot's copy/composition remains in flight. Reload, deactivation and runtime
@@ -4497,6 +4534,34 @@ slots rather than releasing them early. The receiver's hold leaves the producer 
 producer already reclaims its own unconsumed ready slots. There is no cross-process GPU wait and
 no texture overwrite while either side uses the slot. A new consumer requests fresh resources
 rather than reusing the abandoned generation.
+
+Sunshine converts a live export when its fence completes, not at its next poll. The receiver
+arms the generation's ready fence (`SetEventOnCompletion` for the next value) on a thread-pool
+wait that wakes the encode loop; a woken frame converts once it is within the variation threshold
+of its target, so the stream cadence still caps the encode rate. Every slot is gated on being
+ready for the current generation with a sequence at most the fence's completed value. While an
+export is live the loop neither polls nor repeats frames at stream cadence: new exports, cursor
+changes and the minimum-FPS keepalive (which re-checks the connection) produce frames. A replaced
+slot is retired right after its encode, so the producer gets it back a frame sooner. Game mono
+observes the producer's published source without attaching (a status-only READY): the game then
+creates no ring and packs no stereo.
+
+While a streaming encoder converts a live packed export it holds the display's capture-pixel
+claim, and Desktop Duplication and WGC forward only timestamps and cursor metadata. When the
+claim is released (the export ends, or the encode loop exits or rebuilds), capture recovers the
+dropped desktop. Desktop Duplication reads the next acquisition's surface as a whole-desktop
+present even when only the pointer moved (damage unknown); if none arrives within an idle source
+wait (200 ms; a pacing probe does not count), it re-duplicates the output once in place, and the
+new duplication's first frame is the whole desktop. WGC keeps the newest frame it forwarded
+without a copy and copies it on the first timeout after the release. An exiting encode loop
+releases the claim before handing its retained source to a replacement and never hands over an
+image without pixels. Converting such an image after the export is gone keeps the encoder input
+and is encoded only as the minimum-FPS keepalive or a recovery frame. An encoder rebuilt while an
+export owned the output encodes nothing until capture delivers the desktop, at most 210 ms, then
+falls back to its startup frame; an IDR requested meanwhile is applied to the first real frame.
+IDR, reference-invalidation, stream-gamma, video-mode and shutdown requests, and a capture
+reinit, wake an independent provider's encode loop at once; a reference invalidation then encodes
+a recovery frame immediately, like an IDR.
 
 The cursor no longer needs a full-frame scratch copy: only its changed rectangles, grown by
 `ceil(5 + 3/s)` texels where s is the most minified pass's scale, are copied (decoded to FP16 scRGB
@@ -4535,7 +4600,7 @@ The native add-on declares and validates the actual game swapchain color space:
 | Game backbuffer color | Shared stereo texture | Transfer supplied to Sunshine |
 | --- | --- | --- |
 | SDR sRGB | RGB10A2 | Encoded sRGB |
-| Native HDR scRGB | RGBA16F | Linear Rec.709/scRGB, 1.0 = 80 nits |
+| Native HDR scRGB | RGB10A2 to a consumer that encodes HDR10 PQ (`consumer_stream_pq`, protocol 3), else RGBA16F | PQ code values (Rec.2020, ST 2084, encoded as the host's `scRGBTo2100PQ` of the scRGB eye), else linear Rec.709/scRGB, 1.0 = 80 nits |
 | Native HDR10/PQ, Rec.2020 | RGB10A2 to a consumer that accepts the PQ transfer (protocol 3), else RGBA16F | PQ code values (Rec.2020, ST 2084, encoded as the host's `scRGBTo2100PQ` of the scRGB eye), else PQ decoded to linear Rec.709/scRGB, 1.0 = 80 nits |
 
 The HDR export preserves values above 1.0 and negative scRGB components. It applies no tone map
@@ -4559,7 +4624,12 @@ through the host's `scRGBTo2100PQ`, it differs by at most one 10-bit code (one r
 `sbs_transfer` (1 sRGB, 2 scRGB, 3 PQ) declares the SBS artifact's encoding, which the inspect and
 preview tools decode and replay reproduces. At 3840x2160 the per-tap pack took 0.33-0.37 ms
 against 0.37-0.43 ms for the former linearization pass and FP16 pack together (P1, GPU otherwise
-idle). Native scRGB requires no decoding.
+idle). Native scRGB requires no decoding. For a consumer that encodes HDR10 PQ, a native scRGB
+source packs the same 10-bit PQ export (`SUNSHINE_SCRGB_PQ_PACK`): each eye's FP16 export value,
+mono included, encoded with the same constants, within one 10-bit code of the host's encoding of
+the FP16 export (mono exactly). At 3840x2160 that pack took 0.237 ms against 0.210 ms for the
+FP16 pack (the source-alpha fixture's `--timing`), while the shared image halves to 66 MB per
+frame and the host passes its codes through instead of encoding FP16.
 The earlier HDR AXAA wrapper corrected contrast normalization and applied the low-pass weight
 consistently to all three linear channels; it is historical because current Game3D has removed
 final image AA. Decode-before-filtering remains active. The original SuperDepth3D remains a

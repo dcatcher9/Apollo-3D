@@ -3276,7 +3276,9 @@ namespace {
     p.convergence = {.05f, .03f}; p.disparity_limit_uv = .04f;
     gpu.context->CopyResource(gpu.backbuffer.Get(), gpu.source.Get());
     auto *queue = observed_runtime->get_command_queue();
-    const auto run = [&](renderer &target, unsigned frames, bool with_ui = true) {
+    // owed: the pack is owed and recorded by pack(), as the live export does
+    // (its vertical pass is the live one, without the majorant write-back).
+    const auto run = [&](renderer &target, unsigned frames, bool with_ui = true, bool owed = false) {
       for (unsigned i = 0; i != frames; ++i) {
         source.now_ms += 16; source.tick_ms = source.now_ms; ++source.sequence;
         render_frame_input frame;
@@ -3284,7 +3286,9 @@ namespace {
         frame.depth = {reinterpret_cast<std::uint64_t>(gpu.depth_view.Get())};
         frame.scene = p;
         if (with_ui) frame.ui = ui;
-        require(target.render(queue->get_immediate_command_list(), frame), "timing render failed");
+        require(owed ? target.render(queue->get_immediate_command_list(), frame, true) &&
+            target.pack(queue->get_immediate_command_list()) :
+          target.render(queue->get_immediate_command_list(), frame), "timing render failed");
         queue->flush_immediate_command_list();
         target.finish_present();
         if (i % 8 == 7) gpu.drain_render();
@@ -3305,7 +3309,7 @@ namespace {
     while (GetTickCount64() < warm_until) {
       run(gpu.renderer, 10);
       if (gpu.has_control) run(gpu.control_renderer, 10);
-      if (gpu.color == 3) {
+      if (gpu.color >= 2) {
         gpu.renderer.set_pq_output(true);
         run(gpu.renderer, 10);
         gpu.renderer.set_pq_output(false);
@@ -3315,9 +3319,10 @@ namespace {
     gpu.renderer.take_gpu_timing(discard);
     if (gpu.has_control) gpu.control_renderer.take_gpu_timing(discard);
     for (unsigned repetition = 0; repetition != 3; ++repetition) {
-      // HDR10: the embedded shader's 10-bit PQ export beside its FP16 one
-      // (the control is the older shader's linearization pass and FP16 pack).
-      if (gpu.color == 3) {
+      // HDR10 and native scRGB: the embedded shader's 10-bit PQ export beside
+      // its FP16 one (the HDR10 control is the older shader's linearization
+      // pass and FP16 pack).
+      if (gpu.color >= 2) {
         require(gpu.renderer.set_pq_output(true), "the PQ export is unavailable");
         run(gpu.renderer, 120);
         report("embedded-pq", gpu.renderer);
@@ -3325,6 +3330,8 @@ namespace {
       }
       run(gpu.renderer, 120);
       report("embedded", gpu.renderer);
+      run(gpu.renderer, 120, true, true);
+      report("embedded-owed", gpu.renderer);
       if (gpu.has_control) {
         run(gpu.control_renderer, 120);
         report("control", gpu.control_renderer);

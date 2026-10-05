@@ -45,7 +45,8 @@ namespace sunshine_game3d {
     }
     api::pipeline_layout layout{};
     enum pass { pq, candidate, vertical, ui_tiles, ui_reduce, horizontal, eyes, pack, ui_conflict, ui_apply,
-      detection_tiles, detection_reduce, detection_mask, scene_cells, scene_compare, scene_evidence, pack_pq, pass_count };
+      detection_tiles, detection_reduce, detection_mask, scene_cells, scene_compare, scene_evidence, pack_pq, vertical_live,
+      pass_count };
     std::array<api::pipeline, pass_count> pipelines{};
     std::array<api::sampler, 3> samplers{};
     api::resource_view null_srv{}, null_uav{};
@@ -160,6 +161,13 @@ namespace sunshine_game3d {
     // The pack writes the 10-bit PQ export (renderer::set_pq_output) into
     // textures[packed_pq] or an R10G10B10A2 export slot instead of FP16 scRGB.
     bool pq_output = false;
+    // The shader packs a native scRGB source as 10-bit PQ too
+    // (SUNSHINE_SCRGB_PQ_PACK); older replay shaders pack only HDR10 as PQ.
+    bool scrgb_pq_pack = false;
+    // The shader's live vertical pass skips the majorant write-back only a
+    // dump reads (SUNSHINE_VERTICAL_LIVE_ENTRY); older replay shaders always
+    // write it.
+    bool vertical_live_supported = false;
     // Candidates bound directly this Present (renderer::bind_ui_candidate):
     // the caller's view and its texture, which device::get_resource_from_view
     // cannot resolve for a leased snapshot's raw descriptor.
@@ -400,6 +408,8 @@ namespace sunshine_game3d {
       mono_skip_supported = packed_eyes &&
         shader_source().find("#define SUNSHINE_MONO_SKIPS_CONDITIONING 1") != std::string_view::npos;
       pq_per_tap = packed_eyes && shader_source().find("#define SUNSHINE_PQ_PER_TAP 1") != std::string_view::npos;
+      scrgb_pq_pack = packed_eyes && shader_source().find("#define SUNSHINE_SCRGB_PQ_PACK 1") != std::string_view::npos;
+      vertical_live_supported = shader_source().find("#define SUNSHINE_VERTICAL_LIVE_ENTRY 1") != std::string_view::npos;
       pin_lines = shader_marker(shader_source(), "SUNSHINE_UI_PIN_LINE_GROUPS");
       const auto texels = shader_marker(shader_source(), ui_detection::decision_texels_marker);
       const auto images = shader_marker(shader_source(), ui_detection::scene_evidence_images_marker);
@@ -450,11 +460,13 @@ namespace sunshine_game3d {
       if (!compile("PostProcessVS", "vs_5_0", vs_code)) return false;
       const api::shader_desc vs{vs_code.data(), vs_code.size()};
       if (color == 3 && !pq_per_tap && !pipeline_create(pq, "SunshinePreparePQPS", false, vs)) return false;
-      if (color == 3 && pq_per_tap && !pipeline_create(pack_pq, "SunshineRenderPackedPQPS", false, vs)) return false;
+      if (((color == 3 && pq_per_tap) || (color == 2 && scrgb_pq_pack)) &&
+          !pipeline_create(pack_pq, "SunshineRenderPackedPQPS", false, vs)) return false;
       if (width <= 3840 && height <= 3840)
         if (!pipeline_create(candidate, "SunshineHostCandidateCS", true, vs) || !pipeline_create(vertical, "SunshineHostVerticalCS", true, vs) ||
             !pipeline_create(horizontal, "SunshineHostHorizontalCS", true, vs) ||
-            (limiter_lines && !pipeline_create(ui_apply, "SunshineApplyUICS", true, vs))) return false;
+            (limiter_lines && !pipeline_create(ui_apply, "SunshineApplyUICS", true, vs)) ||
+            (vertical_live_supported && !pipeline_create(vertical_live, "SunshineHostVerticalLiveCS", true, vs))) return false;
       if (packed_eyes) return pipeline_create(pack, "SunshineRenderPackedPS", false, vs);
       return pipeline_create(eyes, "SunshineRenderEyesPS", false, vs) && pipeline_create(pack, "SunshinePackEyesPS", false, vs);
     }
@@ -656,9 +668,15 @@ namespace sunshine_game3d {
       mark(cmd, mark_linearize);
       if (width <= 3840 && height <= 3840) {
         // The candidate reads only the depth and b0, the vertical scan only
-        // the candidate; an exact repeat keeps both.
-        const bool reuse = memo_valid && c.depth_identity && c.depth_identity == memo_identity &&
+        // the candidate; an exact repeat keeps both. A dump records both, so
+        // its vertical majorant is this render's.
+        const bool reuse = !c.armed && memo_valid && c.depth_identity && c.depth_identity == memo_identity &&
           c.depth.handle == memo_depth.handle && !std::memcmp(&c.p, &memo_parameters, sizeof(render_parameters));
+        // Only a dump reads the vertical majorant: an owed pack that no dump
+        // reads runs the live pass, which leaves the majorant's intermediate
+        // and writes the same field. render() records the full pass (replay,
+        // fixtures and a probe read every diagnostic texture).
+        const bool live_vertical = owed_pack && !c.armed && pipelines[vertical_live].handle;
         const uint32_t group_lines = std::max(limiter_lines, 1u);
         if (reuse) ++conditioning_counts.memo;
         else {
@@ -667,8 +685,8 @@ namespace sunshine_game3d {
         }
         mark(cmd, mark_candidate);
         if (!reuse) {
-          dispatch(cmd, vertical, (width + group_lines - 1) / group_lines, 1, p, {api::resource_view{}, {}, {}, t[raw].srv},
-            {vertical_majorant, vertical_field});
+          dispatch(cmd, live_vertical ? vertical_live : vertical, (width + group_lines - 1) / group_lines, 1, p,
+            {api::resource_view{}, {}, {}, t[raw].srv}, {vertical_majorant, vertical_field});
           memo_valid = c.depth_identity != 0;
           memo_depth = c.depth;
           memo_identity = c.depth_identity;
@@ -1339,11 +1357,14 @@ namespace sunshine_game3d {
     if (c == 3)
       entries.push_back(has("#define SUNSHINE_PACKED_EYES 1") && has("#define SUNSHINE_PQ_PER_TAP 1") ?
         shader_cache::entry_point{"SunshineRenderPackedPQPS", "ps_5_0"} : shader_cache::entry_point{"SunshinePreparePQPS", "ps_5_0"});
+    if (c == 2 && has("#define SUNSHINE_PACKED_EYES 1") && has("#define SUNSHINE_SCRGB_PQ_PACK 1"))
+      entries.push_back({"SunshineRenderPackedPQPS", "ps_5_0"});
     if (w <= 3840 && h <= 3840) {
       entries.insert(entries.end(), {{"SunshineHostCandidateCS", "cs_5_0"}, {"SunshineHostVerticalCS", "cs_5_0"},
         {"SunshineHostHorizontalCS", "cs_5_0"}});
       if (shader_marker(source, "SUNSHINE_LIMITER_LINE_GROUPS") || has("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1"))
         entries.push_back({"SunshineApplyUICS", "cs_5_0"});
+      if (has("#define SUNSHINE_VERTICAL_LIVE_ENTRY 1")) entries.push_back({"SunshineHostVerticalLiveCS", "cs_5_0"});
       if (has("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1")) entries.push_back({"SunshineUIConflictCS", "cs_5_0"});
       if (has("#define SUNSHINE_UI_NEAREST_PLANE 1"))
         entries.insert(entries.end(), {{"SunshineUINearestTilesCS", "cs_5_0"}, {"SunshineUINearestReduceCS", "cs_5_0"}});
@@ -1734,7 +1755,7 @@ namespace sunshine_game3d {
   bool renderer::set_pq_output(bool pq) {
     if (!data_) return !pq;
     auto &d = *data_;
-    if (pq && (d.color != 3 || !d.pq_per_tap || !d.pipelines[impl::pack_pq].handle)) pq = false;
+    if (pq && !pq_output_supported()) pq = false;
     if (pq && !d.textures[impl::packed_pq].resource.handle &&
         !d.texture_create(impl::packed_pq, d.width * 2, d.height, api::format::r10g10b10a2_unorm,
           api::resource_usage::render_target | api::resource_usage::copy_source)) {
@@ -1757,7 +1778,8 @@ namespace sunshine_game3d {
   }
   bool renderer::pq_output() const { return data_ && data_->pq_output; }
   bool renderer::pq_output_supported() const {
-    return data_ && data_->color == 3 && data_->pq_per_tap && data_->pipelines[impl::pack_pq].handle;
+    return data_ && ((data_->color == 3 && data_->pq_per_tap) || (data_->color == 2 && data_->scrgb_pq_pack)) &&
+      data_->pipelines[impl::pack_pq].handle;
   }
   api::fence renderer::completion_fence() const { return data_ ? data_->completion : api::fence{}; }
   std::uint64_t renderer::completion_value() const { return data_ ? data_->sequence + 1 : 0; }

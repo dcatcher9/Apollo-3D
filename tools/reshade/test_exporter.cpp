@@ -1537,6 +1537,18 @@ namespace {
       shared.capability_nonce = 0;
       require(!read_capabilities(shared, 41), "an older consumer granted PQ");
       shared.consumer_capabilities = 0;
+      // The export transfer per source and capabilities: an HDR10 source
+      // packs PQ for a consumer that accepts it, native scRGB only for one
+      // that encodes HDR10 PQ (consumer_stream_pq, which implies acceptance).
+      using cs = api::color_space;
+      const auto both = wire::consumer_accepts_pq | wire::consumer_stream_pq;
+      require(exports_pq(cs::hdr10_pq, wire::consumer_accepts_pq) && exports_pq(cs::hdr10_pq, wire::consumer_stream_pq) &&
+          exports_pq(cs::hdr10_pq, both) && !exports_pq(cs::hdr10_pq, 0),
+        "an HDR10 source chose the wrong export transfer");
+      require(!exports_pq(cs::scrgb, wire::consumer_accepts_pq) && exports_pq(cs::scrgb, wire::consumer_stream_pq) &&
+          exports_pq(cs::scrgb, both) && !exports_pq(cs::scrgb, 0),
+        "a native scRGB source packed PQ without an HDR10 stream, or FP16 for one");
+      require(!exports_pq(cs::srgb, both) && !exports_pq(cs::unknown, both), "an SDR source packed PQ");
     }
 
     static void bounded_retirement() {
@@ -1595,6 +1607,160 @@ namespace {
         require(slot.cursor_plane_flags == wire::cursor_plane_present && slot.ui_parallax_uv == .0037f,
           "Published cursor plane did not follow its fenced source frame");
       }
+    }
+
+    // acquire_slot (docs/reshade-sbs.md, GPU handoff contract): free slots
+    // first, then the oldest ready slot that is not the ring's newest
+    // unconsumed frame; a still queued write is reusable only by a direct pack
+    // over a direct pack. CPU only: the slot words are set directly.
+    static void slot_policy() {
+      publisher_t publisher;
+      require(publisher.init(), "mapping creation failed");
+      publisher.generation_ = std::make_unique<generation_t>();
+      auto &generation = *publisher.generation_;
+      generation.id = 3;
+      auto &slots = publisher.shared_->slots;
+      const auto set = [&](std::array<std::pair<wire::slot_state, std::uint64_t>, wire::slot_count> states) {
+        for (std::uint32_t i = 0; i != wire::slot_count; ++i) {
+          store_state(slots[i], generation.id, states[i].first);
+          slots[i].sequence = states[i].second;
+        }
+      };
+      using s = wire::slot_state;
+      bool overwrote = true;
+      set({{{s::ready, 5}, {s::free, 4}, {s::reading, 6}}});
+      require(publisher.acquire_slot(6, false, &overwrote) == 1 && !overwrote, "a ready slot was taken over a free one");
+      set({{{s::ready, 7}, {s::ready, 8}, {s::reading, 6}}});
+      require(publisher.acquire_slot(8, false, &overwrote) == 0 && overwrote, "the oldest ready slot was not reused");
+      require(wire::control_state(slots[1].control) == s::ready, "the newest unconsumed frame was claimed");
+      set({{{s::reading, 6}, {s::ready, 8}, {s::reading, 7}}});
+      require(publisher.acquire_slot(8, true) == wire::slot_count, "the ring's newest unconsumed frame was overwritten");
+      set({{{s::reading, 9}, {s::ready, 8}, {s::reading, 7}}});
+      require(publisher.acquire_slot(9) == 1, "a ready frame older than the consumer's was kept");
+      // Writes 10 and 11 still queued (completed 9): only a direct pack over a
+      // direct pack may take the older one; the newest stays.
+      set({{{s::reading, 9}, {s::ready, 10}, {s::ready, 11}}});
+      require(publisher.acquire_slot(9) == wire::slot_count, "a queued write was reused by a copy");
+      require(publisher.acquire_slot(9, true, &overwrote) == 1 && overwrote, "a direct pack could not reuse a queued direct pack");
+      set({{{s::reading, 9}, {s::ready, 10}, {s::ready, 11}}});
+      com_ptr<IDXGIFactory1> retained;
+      require(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(retained.put()))), "COM fixture object unavailable");
+      retained->AddRef();
+      *generation.submitted_sources[1].put() = retained.get();
+      require(publisher.acquire_slot(9, true) == wire::slot_count, "a queued copy or overlay write was reused while its source is retained");
+      generation.submitted_sources[1].reset();
+      set({{{s::reading, 9}, {s::free, 12}, {s::ready, 11}}});
+      require(publisher.acquire_slot(9) == wire::slot_count && publisher.acquire_slot(9, true) == 1,
+        "a discarded free slot's queued write was misjudged");
+      // Another generation's words are never claimed.
+      set({{{s::free, 0}, {s::free, 0}, {s::free, 0}}});
+      for (auto &slot : slots) store_state(slot, generation.id + 1, s::free);
+      require(publisher.acquire_slot(0, true) == wire::slot_count, "another generation's slot was claimed");
+      std::puts("PASS export slot policy: free first, oldest ready, newest unconsumed kept, queued writes only for direct packs");
+    }
+
+    // The export's publication in reshade_present (present()), before the
+    // game's Present: D3D12 flushes ReShade's immediate list, marks the slot
+    // ready, then queues the fence signal, so the slot is ready while its
+    // fence is still pending; finish_present then has nothing left to fence.
+    static void present_signal(bool d3d12) {
+      struct queue_t final : api::command_queue {
+        std::uint64_t native = 0;
+        mutable unsigned flushes = 0;
+        uint64_t get_native() const override { return native; }
+        void get_private_data(const uint8_t[16], uint64_t *data) const override { *data = 0; }
+        void set_private_data(const uint8_t[16], const uint64_t) override {}
+        api::device *get_device() override { throw std::runtime_error("unexpected queue call"); }
+        api::command_queue_type get_type() const override { return api::command_queue_type::graphics; }
+        void wait_idle() const override { throw std::runtime_error("unexpected queue wait"); }
+        void flush_immediate_command_list() const override { ++flushes; }
+        api::command_list *get_immediate_command_list() override { throw std::runtime_error("unexpected queue call"); }
+        void begin_debug_event(const char *, const float[4]) override {}
+        void end_debug_event() override {}
+        void insert_debug_marker(const char *, const float[4]) override {}
+        bool wait(api::fence, uint64_t) override { throw std::runtime_error("unexpected queue wait"); }
+        bool signal(api::fence, uint64_t) override { throw std::runtime_error("unexpected queue signal"); }
+        uint64_t get_timestamp_frequency() const override { return 0; }
+      } queue;
+      struct queue_runtime final : runtime_fixture::empty_runtime {
+        api::command_queue *queue = nullptr;
+        api::command_queue *get_command_queue() override { return queue; }
+      } runtime;
+      runtime.queue = &queue;
+      publisher_t publisher;
+      require(publisher.init(), "mapping creation failed");
+      auto metadata = publisher.identity_;
+      metadata.window = reinterpret_cast<std::uint64_t>(GetForegroundWindow());
+      metadata.generation = 1;
+      publisher.runtimes_[&runtime].rendered_since_present = true;
+      publisher.publish(metadata, true, &runtime);
+      auto generation = pending_generation();
+      generation->runtime = generation->owner_runtime = &runtime;
+      com_ptr<ID3D12Fence> gate;
+      com_ptr<ID3D11Device> device11;
+      com_ptr<ID3D11DeviceContext> context11;
+      if (d3d12) {
+        require(SUCCEEDED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(generation->device12.put()))), "D3D12 device creation failed");
+        D3D12_COMMAND_QUEUE_DESC queue_desc {};
+        require(SUCCEEDED(generation->device12->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(generation->queue12.put()))), "D3D12 queue creation failed");
+        require(SUCCEEDED(generation->device12->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(generation->fence12.put()))), "D3D12 shared fence creation failed");
+        require(SUCCEEDED(generation->device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(gate.put()))) &&
+          SUCCEEDED(generation->queue12->Wait(gate.get(), 1)), "D3D12 queue gate failed");
+        queue.native = reinterpret_cast<std::uint64_t>(generation->queue12.get());
+      } else {
+        generation->backend = api::device_api::d3d11;
+        require(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, device11.put(), nullptr, context11.put())), "D3D11 device creation failed");
+        require(SUCCEEDED(device11->QueryInterface(IID_PPV_ARGS(generation->device11.put()))) &&
+          SUCCEEDED(context11->QueryInterface(IID_PPV_ARGS(generation->context11.put()))) &&
+          SUCCEEDED(generation->device11->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(generation->fence11.put()))),
+          "D3D11 shared fence creation failed");
+      }
+      publisher.generation_ = std::move(generation);
+      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&publisher.shared_->consumer_nonce), 42);
+      store_state(publisher.shared_->slots[0], 1, wire::slot_state::writing);
+      publisher.present(&runtime);
+      auto &g = *publisher.generation_;
+      const auto &slot = publisher.shared_->slots[0];
+      require(g.pending_slot == wire::slot_count && !g.signal_failed, "reshade_present did not signal the export");
+      require(wire::control_state(slot.control) == wire::slot_state::ready && slot.sequence == 1 && slot.qpc == 1234,
+        "reshade_present did not publish the slot");
+      if (d3d12) {
+        require(queue.flushes == 1, "the immediate list was not submitted before the fence signal");
+        // The gate holds the queue: the slot is ready while its fence is pending.
+        require(g.completed() == 0, "the D3D12 fence passed while its queue was held");
+        publisher.finish_present(queue.native, 99);
+        require(g.last_submitted == 1 && g.pending_slot == wire::slot_count, "finish_present fenced the export again");
+        require(SUCCEEDED(gate->Signal(1)), "D3D12 gate release failed");
+      }
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+      while (!g.finished() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      require(g.finished() && g.completed() == 1, "the export's fence did not complete");
+      std::printf("PASS %s export published ready in reshade_present, then fenced\n", d3d12 ? "D3D12" : "D3D11");
+    }
+
+    // A deactivated, finished ring is released after export_ring_idle (10 s);
+    // an exporting or recently deactivated one stays.
+    static void idle_ring_release() {
+      publisher_t publisher;
+      require(publisher.init(), "mapping creation failed");
+      publisher.generation_ = std::make_unique<generation_t>();
+      auto &generation = *publisher.generation_;
+      generation.runtime = generation.owner_runtime = owner();
+      generation.inactive_since = std::chrono::steady_clock::now() - std::chrono::seconds(30);
+      publisher.release_idle_rings();
+      require(publisher.generation_ != nullptr, "an exporting ring was released");
+      generation.runtime = nullptr;
+      generation.inactive_since = std::chrono::steady_clock::now() - std::chrono::seconds(9);
+      publisher.release_idle_rings();
+      require(publisher.generation_ != nullptr, "a ring idle for 9 s was released");
+      generation.pending_slot = 0;
+      generation.inactive_since = std::chrono::steady_clock::now() - std::chrono::seconds(11);
+      publisher.release_idle_rings();
+      require(publisher.generation_ != nullptr, "a ring with an unfenced recording was released");
+      generation.pending_slot = wire::slot_count;
+      publisher.release_idle_rings();
+      require(!publisher.generation_, "a finished ring idle for 11 s was kept");
+      std::puts("PASS idle export ring released after 10 s");
     }
 
     static void d3d12_async_ring() {
@@ -1823,6 +1989,10 @@ int main(int argc, char **argv) {
     publisher_tests::bounded_retirement();
     publisher_tests::d3d12_deferred_signal(false);
     publisher_tests::d3d12_deferred_signal(true);
+    publisher_tests::slot_policy();
+    publisher_tests::present_signal(true);
+    publisher_tests::present_signal(false);
+    publisher_tests::idle_ring_release();
     publisher_tests::native_sharing(false, DXGI_FORMAT_R10G10B10A2_UNORM);
     publisher_tests::native_sharing(true, DXGI_FORMAT_R10G10B10A2_UNORM);
     publisher_tests::native_sharing(false, DXGI_FORMAT_R16G16B16A16_FLOAT);

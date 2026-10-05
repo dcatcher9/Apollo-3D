@@ -25,10 +25,13 @@ namespace sunshine::overlay {
     compositor_t(const compositor_t &) = delete;
     compositor_t &operator=(const compositor_t &) = delete;
 
-    // Call from the source technique callback, after reserving/copying the slot.
+    // Call from the source technique callback, after reserving the slot.
     // Width is ONE eye. Source and destination are both exactly 2*width x height.
     // export_color is srgb, scrgb (FP16) or hdr10_pq (10-bit Rec.2020 ST 2084
-    // codes, from an HDR10 source only; docs/reshade-sbs.md, PQ wire transfer).
+    // codes, from an HDR10 or native scRGB source; docs/reshade-sbs.md, PQ
+    // wire transfer). Its composite writes every destination pixel, the
+    // source's own wherever the controls are transparent, so the caller need
+    // not copy the source into the destination first.
     // Destination enters/leaves COMMON on D3D12; source stays shader-readable.
     // A new prepare requires completion of this instance's previous GPU work.
     bool prepare(reshade::api::effect_runtime *runtime, reshade::api::resource_view native_rtv, reshade::api::resource source, reshade::api::resource destination, std::uint32_t width, std::uint32_t height, reshade::api::color_space source_color, reshade::api::color_space export_color);

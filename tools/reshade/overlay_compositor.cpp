@@ -489,8 +489,9 @@ namespace sunshine::overlay {
     }
 
     bool finish12() {
-      // ReShade owns this immediate command list; it is separate from game lists
-      // and naturally submitted after reshade_present. Never flush it here.
+      // ReShade owns this immediate command list; it is separate from game lists.
+      // The exporter submits it after finish(), in reshade_present, before it
+      // signals the slot's fence. Never flush it here.
       barrier12(command12.p, layer12.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
       barrier12(command12.p, destination12.p, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
       command12->OMSetRenderTargets(1, &rtv12[2], FALSE, nullptr);
@@ -525,8 +526,12 @@ namespace sunshine::overlay {
 
   bool compositor_t::prepare(api::effect_runtime *runtime, api::resource_view native_rtv, api::resource source, api::resource destination, std::uint32_t width, std::uint32_t height, api::color_space source_color, api::color_space export_color) {
     cancel();
-    // A PQ export (10-bit Rec.2020 ST 2084 codes) comes only from an HDR10 source.
-    const bool pq_export = export_color == api::color_space::hdr10_pq && source_color == api::color_space::hdr10_pq;
+    // A PQ export (10-bit Rec.2020 ST 2084 codes) comes only from an HDR
+    // source: HDR10, or native scRGB for a consumer that encodes HDR10 PQ.
+    // The capture layer is linear scRGB for both (gui_ps), so the composite
+    // is the same.
+    const bool pq_export = export_color == api::color_space::hdr10_pq &&
+      (source_color == api::color_space::hdr10_pq || source_color == api::color_space::scrgb);
     if (!runtime || !native_rtv.handle || !source.handle || !destination.handle || source.handle == destination.handle || !width || width > 8192 || !height || height > 16384 || (export_color != api::color_space::srgb && export_color != api::color_space::scrgb && !pq_export) || (source_color != api::color_space::srgb && source_color != api::color_space::scrgb && source_color != api::color_space::hdr10_pq) || ((source_color == api::color_space::srgb) != (export_color == api::color_space::srgb))) {
       return false;
     }

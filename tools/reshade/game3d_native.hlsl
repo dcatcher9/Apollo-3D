@@ -30,6 +30,12 @@
 // ST 2084) encoded exactly as the host's scRGBTo2100PQ (docs/reshade-sbs.md,
 // PQ wire transfer).
 #define SUNSHINE_PQ_PER_TAP 1
+// SunshineRenderPackedPQPS also packs a native scRGB source as that 10-bit PQ
+// export, for a consumer that encodes HDR10 PQ (consumer_stream_pq).
+#define SUNSHINE_SCRGB_PQ_PACK 1
+// SunshineHostVerticalLiveCS computes the same vertical field without the
+// final majorant write-back, which only Dump 3D reads.
+#define SUNSHINE_VERTICAL_LIVE_ENTRY 1
 // UI pinning groups own eight adjacent rows.
 #define SUNSHINE_UI_PIN_LINE_GROUPS 8
 // UI mask alpha pins with weight saturate(gain * alpha) through a soft band
@@ -1239,6 +1245,8 @@ float3 SunshineSourceLinear(float2 uv)
     return lerp(left, right, weight);
 }
 
+#endif
+#if BUFFER_COLOR_SPACE != 1
 // The host's scRGBTo2100PQ (src_assets/.../include/common.hlsl: Rec709toRec2020,
 // 80 nits per scRGB unit, NitsToPQ), in the same operations and order.
 float3 SunshineHostPQ(float3 rgb)
@@ -1452,10 +1460,10 @@ float V_share_vertical_envelopes(float upper, float lower) {
     return conditioned;
 }
 
-[numthreads(8u, 8u, 1)]
-void SunshineHostVerticalCS(
-    uint3 group_id : SV_GroupID,
-    uint3 group_thread_id : SV_GroupThreadID) {
+// complete_majorant (a literal per entry point): write each texel's final
+// majorant back. Only Dump 3D reads it; the field below never does, and each
+// texel's stored local majorant is read before that write.
+void SunshineHostVertical(uint3 group_id, uint3 group_thread_id, bool complete_majorant) {
     uint column = group_thread_id.x;
     uint lane = group_thread_id.y;
     uint x = group_id.x * 8u + column;
@@ -1644,12 +1652,30 @@ void SunshineHostVerticalCS(
         float final_lower = min(
             SunshineHostVerticalConditionedStore[int2(uint2(x, write_y))],
             V_V2LimitFromQ30(complete_lower_q30));
-        SunshineHostVerticalMajorantStore[int2(uint2(x, write_y))] = final_upper;
+        if (complete_majorant) {
+            SunshineHostVerticalMajorantStore[int2(uint2(x, write_y))] = final_upper;
+        }
         SunshineHostVerticalConditionedStore[int2(uint2(x, write_y))] = clamp(
             V_share_vertical_envelopes(final_upper, final_lower),
             final_lower,
             final_upper);
     }
+}
+
+[numthreads(8u, 8u, 1)]
+void SunshineHostVerticalCS(
+    uint3 group_id : SV_GroupID,
+    uint3 group_thread_id : SV_GroupThreadID) {
+    SunshineHostVertical(group_id, group_thread_id, true);
+}
+
+// The live pass (SUNSHINE_VERTICAL_LIVE_ENTRY): the same field, with the
+// majorant left at its intermediate (local forward) values.
+[numthreads(8u, 8u, 1)]
+void SunshineHostVerticalLiveCS(
+    uint3 group_id : SV_GroupID,
+    uint3 group_thread_id : SV_GroupThreadID) {
+    SunshineHostVertical(group_id, group_thread_id, false);
 }
 
 // Mechanical ReShade binding translation of depth_coordinate_v2_limit_cs.hlsl
@@ -2268,6 +2294,29 @@ float4 SunshineRenderPackedPQPS(float4 position : SV_Position, float2 texcoord :
     } else {
         float2 center = float2(position.x - float(BUFFER_WIDTH), position.y);
         color = SunshineRenderEye(center / float2(BUFFER_WIDTH, BUFFER_HEIGHT), true);
+    }
+    return float4(SunshineHostPQ(f16tof32(f32tof16(color.rgb))), color.a);
+}
+#elif BUFFER_COLOR_SPACE == 2
+// The same 10-bit PQ export of a native scRGB source, for a consumer that
+// encodes HDR10 PQ: each eye's FP16 export value, mono included, encoded as
+// the host encodes that FP16 export (SunshineHostPQ). Alpha is the same 0/1
+// coverage.
+float4 SunshineRenderPackedPQPS(float4 position : SV_Position, float2 texcoord : TEXCOORD0) : SV_Target
+{
+    uint packedX = (uint)position.x;
+    float4 color;
+    if (SunshineAutomaticMono()) {
+        float2 monoUV = float2((packedX % BUFFER_WIDTH) + 0.5, position.y) /
+            float2(BUFFER_WIDTH, BUFFER_HEIGHT);
+        color = SunshineNativeSource(monoUV);
+    } else {
+        [branch] if (packedX < BUFFER_WIDTH) {
+            color = SunshineRenderEye(position.xy / float2(BUFFER_WIDTH, BUFFER_HEIGHT), false);
+        } else {
+            float2 center = float2(position.x - float(BUFFER_WIDTH), position.y);
+            color = SunshineRenderEye(center / float2(BUFFER_WIDTH, BUFFER_HEIGHT), true);
+        }
     }
     return float4(SunshineHostPQ(f16tof32(f32tof16(color.rgb))), color.a);
 }
