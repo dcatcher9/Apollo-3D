@@ -14,8 +14,12 @@
 // when Streamline's UI buffers are absent (The Witcher 3 tags them only while
 // frame generation is on).
 //
-// Live tracking: every qualifying clear is observed. A target cleared in at
-// least confirm_clears frames with gaps under max_clear_gap_ms is a confirmed layer; of
+// Live tracking: while the layer is wanted (UI detection asked for it within
+// the last second, or a Dump 3D is armed), every qualifying clear is observed;
+// otherwise a clear returns before any lookup or lock, and Presents skip the
+// output bookkeeping. A target cleared whole (no rectangles, or one covering
+// the target) in at least confirm_clears frames with gaps under
+// max_clear_gap_ms is a confirmed layer; of
 // several, the one cleared last in the frame (UI draws last) is active. The
 // active layer is copied just before the first clear after each Present: D3D12
 // requires RENDER_TARGET for a clear, so the state is known, and the copy holds
@@ -34,10 +38,14 @@
 // Dump census: while a Dump 3D is armed, qualifying clears are also recorded and
 // copied as diagnostic artifacts.
 //
-// The queue watch names the queue that executed the lists carrying the live
-// copy: direct binding reads the copy where it lies only when those lists ran
-// on the presenting queue, so that queue order puts the copy before the
-// Present's reads.
+// Queue order: each live copy remembers the queue that executed the list
+// carrying it. A copy that ran on the presenting queue alone is bound
+// directly, since queue order puts it before the Present's reads; one that
+// ran elsewhere is still offered, copied into the renderer's slot, and no
+// fence of the add-on orders it. Stellar Blade's and The Witcher 3's copies
+// ran on another queue than the presenting one in their dumps (both load
+// Streamline), so refusing such copies would remove their layer protection.
+// Copies are allocated and destroyed outside the tracker's lock.
 namespace sunshine_game3d::ui_layer {
   namespace api = reshade::api;
   inline constexpr unsigned max_candidates = 3; // game3d_debug::ui_layer_count
@@ -53,9 +61,12 @@ namespace sunshine_game3d::ui_layer {
   // layer, HDR headroom. A copy with color but no alpha fails that bound
   // nearly everywhere and is V1-invalid for that frame.
   std::uint32_t detection_flags(api::format format);
-  // A single-sample 2D color target at the output size cleared to exactly
-  // (0, 0, 0, 0). Callers separately exclude swapchain back buffers.
-  bool qualifies(const api::resource_desc &desc, const float color[4], std::uint32_t width, std::uint32_t height);
+  // A single-sample 2D color target at the output size cleared whole to
+  // exactly (0, 0, 0, 0): without rectangles, or with one that covers the
+  // whole target (a partial clear, such as a viewport strip, is not a layer
+  // clear). Callers separately exclude swapchain back buffers.
+  bool qualifies(const api::resource_desc &desc, const float color[4], std::uint32_t width, std::uint32_t height,
+    std::uint32_t rect_count, const api::rect *rects);
 
   // Pure selection state of the live tracker; no GPU or runtime calls.
   class layer_tracker {
@@ -95,44 +106,25 @@ namespace sunshine_game3d::ui_layer {
     bool captured_since_present_{}, copied_{};
   };
 
-  // Queue watch (pure; no GPU or runtime calls). Remembers up to capacity
-  // command lists that recorded a live copy since their last reset, and
-  // which queue executed them. Sticky per scope (clear_scope): one execution
-  // on another queue than the presenting one (foreign_present), or on more
-  // than one queue (mixed), keeps the scope's copies from direct binding.
-  class queue_watch {
-  public:
-    static constexpr unsigned capacity = 4;
-    // This list recorded a live copy.
-    void carried(std::uint64_t list);
-    // The list was reset: it carries nothing until it records again.
-    void reset(std::uint64_t list);
-    // D3D11 FinishCommandList: the deferred context's commands move into a
-    // new command list, which carries what the context carried and only that;
-    // the context carries nothing afterwards.
-    void move(std::uint64_t list, std::uint64_t context);
-    // A secondary list executed into a primary list that keeps its own
-    // commands (a D3D12 bundle, a D3D11 command list executed on a deferred
-    // context): the primary also carries what the secondary carried.
-    void transfer(std::uint64_t primary, std::uint64_t secondary);
-    // A list executed on a queue (presenting: the presenting queue, 0 when
-    // unknown). True when the list carried a live copy.
-    bool executed(std::uint64_t list, std::uint64_t queue, std::uint64_t presenting);
-    // A copy recorded directly on a queue (D3D11's immediate context).
-    void executed_on(std::uint64_t queue, std::uint64_t presenting);
-    bool watching() const;
-    // The watched lists (0: a free entry).
-    const std::array<std::uint64_t, capacity> &lists() const { return lists_; }
-    bool foreign_present() const { return foreign_present_; }
-    bool mixed() const { return mixed_; }
-    std::uint64_t last_queue() const { return last_queue_; }
-    void clear_scope() { *this = {}; }
-  private:
-    // Oldest first; free entries (0) last.
-    std::array<std::uint64_t, capacity> lists_{};
-    std::uint64_t last_queue_{};
-    bool foreign_present_{}, mixed_{};
-  };
+  // The queue that executed a live copy (pure). A copy recorded on the
+  // presenting queue itself (D3D11's immediate context) executed there; one
+  // recorded into a game list executed on the queue that ran the list. A list
+  // run on two queues (executed again elsewhere) has no single queue:
+  // mixed_queue, which is never the presenting one.
+  inline constexpr std::uint64_t mixed_queue = UINT64_MAX;
+  constexpr std::uint64_t merge_queue(std::uint64_t executed, std::uint64_t queue) {
+    return !queue ? executed : !executed || executed == queue ? queue : mixed_queue;
+  }
+  // Queue order puts a live copy before the Present's reads only when it
+  // executed on the presenting queue alone (presenting: 0 unknown); only such
+  // a copy is bound directly.
+  constexpr bool presented_in_order(std::uint64_t executed, std::uint64_t presenting) {
+    return presenting && executed == presenting;
+  }
+  static_assert(merge_queue(0, 5) == 5 && merge_queue(5, 5) == 5 && merge_queue(5, 6) == mixed_queue &&
+    merge_queue(mixed_queue, 5) == mixed_queue && merge_queue(5, 0) == 5 && presented_in_order(5, 5) &&
+    !presented_in_order(6, 5) && !presented_in_order(mixed_queue, 5) && !presented_in_order(0, 0) &&
+    !presented_in_order(5, 0));
 
   // Live copies: a ring of add-on owned copies (ring_capacity at most; three
   // normally suffice). A before-clear copy goes to an entry other than the
@@ -147,9 +139,10 @@ namespace sunshine_game3d::ui_layer {
     bool allocate = false; // index is a new entry.
   };
   // allocated: entries [0, count) exist; free[i]: entry i's readers
-  // completed and its copy not pending; age[i]: its capture id (smaller is
-  // older); newest: the offered entry, the last executed copy (-1: none). The
-  // oldest free entry wins.
+  // completed and its copy neither pending nor being allocated; age[i]: its
+  // capture id (smaller is older; 0 for an entry whose allocation failed,
+  // which is allocated again when chosen); newest: the offered entry, the
+  // last executed copy (-1: none). The oldest free entry wins.
   inline ring_choice choose_ring_entry(unsigned count, const std::array<bool, ring_capacity> &free,
       const std::array<std::uint64_t, ring_capacity> &age, int newest) {
     ring_choice choice;
@@ -161,25 +154,25 @@ namespace sunshine_game3d::ui_layer {
 
   struct live_capture {
     api::resource copy{};       // Add-on owned, shader_resource state between uses.
-    // The copy's shader view, for direct binding; direct when the newest
-    // copy's lists executed on the presenting queue only (the queue watch),
-    // so that queue order puts the copy before this Present's reads.
+    // The copy's shader view, for direct binding; direct when it exists and
+    // the copy ran on the presenting queue alone (in_order: presented_in_order),
+    // so that queue order puts it before this Present's reads.
     api::resource_view view{};
-    bool direct{};
+    bool in_order{}, direct{};
     std::uint64_t capture_id{}; // The offered entry's copy id; never zero when valid.
     std::uint64_t tick{};       // GetTickCount64 when the newest copy was recorded.
     std::uint32_t format{};     // Typed format of the copy.
     // Presents observed since the copy (layer_tracker::presents_since_copy):
     // the copy holds the frame of the Present that many back.
     std::uint32_t presents_since_copy{};
-    // The queue watch's verdict for the scope: foreign_present, the last
-    // executing queue (native; 0 unknown) and whether several did.
-    bool foreign_present{}, queue_mixed{};
+    // The native queue that executed the copy (mixed_queue: more than one).
     std::uint64_t executed_queue{};
   };
   // The active layer's last executed copy on this device, while its newest
-  // copy was recorded less than max_clear_gap_ms ago. Each call also asks for the next copies: the layer is
-  // copied only while UI detection keeps asking.
+  // copy was recorded less than max_clear_gap_ms ago. The first copy offered
+  // from another queue than the presenting one is logged. Each call also asks
+  // for the next copies: the layer is tracked and copied only while UI
+  // detection keeps asking.
   bool latest(api::device *device, std::uint64_t now_ms, live_capture &out);
 
   struct candidate {
@@ -192,10 +185,12 @@ namespace sunshine_game3d::ui_layer {
   };
 
   // Test add-on only (SunshineUILayerTestLive): the live copy's queue facts.
+  // capture_id is the newest recorded copy's; executed_queue the queue that
+  // ran the last executed copy (mixed_queue: several); in_order whether that
+  // copy ran on the presenting queue alone (presented_in_order).
   struct test_live_state {
     std::uint64_t capture_id{}, executed_queue{}, presenting_queue{};
-    std::uint32_t presents_since_copy{};
-    std::uint32_t foreign_present{}, queue_mixed{}, watching{};
+    std::uint32_t presents_since_copy{}, in_order{};
   };
 
   // A renderer submission read the live copy capture_id (a direct binding or
@@ -208,7 +203,9 @@ namespace sunshine_game3d::ui_layer {
   // Every Present of the foreground swapchain only: output size, back buffers
   // (cached until the swapchain, its size or buffer count, or its first
   // buffer changes, or ReShade reports it created or resized), the presenting
-  // queue and the live tracker's frame boundary.
+  // queue and the live tracker's frame boundary, all only while the layer is
+  // wanted. Otherwise it only retires copies left from an earlier demand and
+  // destroys retired copies once due.
   void observe_output(api::swapchain *swapchain, api::command_queue *queue);
   void arm();
   // Stops the census and hands over its candidates. Each copy stays valid

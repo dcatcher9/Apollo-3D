@@ -306,6 +306,13 @@ namespace sunshine_streamline::depth_capture {
       value.valid_until == sunshine_scene_depth::lifetime::at_call ?
       texture_state_policy::prefer_observed_recording : texture_state_policy::source_contract;
   }
+  // The DXGI format of an auxiliary snapshot of a source of this format: the
+  // 8-bit RGBA typeless families (27, 90) are stored typed UNORM (28, 87), as
+  // their UI views are UNORM and alpha is unaffected by an sRGB RGB view;
+  // every other format as is (no float/integer guess for other families).
+  constexpr std::uint32_t auxiliary_snapshot_format(std::uint32_t format) {
+    return format == 27 ? 28u : format == 90 ? 87u : format;
+  }
   // prefer_observed_recording is restricted to at-call Streamline auxiliary
   // snapshots. UI adapters use it for both local and shared copies, independently
   // of FG mode or storage lifetime. It prefers the known, unblocked, nonzero state on this

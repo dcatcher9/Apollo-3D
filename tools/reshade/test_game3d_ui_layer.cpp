@@ -29,22 +29,38 @@ int main() {
     const float transparent[4]{}, black[4]{0.f, 0.f, 0.f, 1.f}, tinted[4]{0.f, 0.f, 0.001f, 0.f};
     for (const auto format : {api::format::r8g8b8a8_unorm, api::format::r8g8b8a8_typeless, api::format::b8g8r8a8_unorm_srgb,
            api::format::r16g16b16a16_float, api::format::r32g32b32a32_float})
-      require(layer::qualifies(target(format), transparent, 3840, 2160), "A transparent-cleared output-size alpha target did not qualify");
-    require(!layer::qualifies(target(api::format::r8g8b8a8_unorm), black, 3840, 2160), "Opaque black is not a transparent clear");
-    require(!layer::qualifies(target(api::format::r8g8b8a8_unorm), tinted, 3840, 2160), "A tinted clear qualified");
-    require(!layer::qualifies(target(api::format::r8g8b8a8_unorm, 2228, 1256), transparent, 3840, 2160),
+      require(layer::qualifies(target(format), transparent, 3840, 2160, 0, nullptr), "A transparent-cleared output-size alpha target did not qualify");
+    require(!layer::qualifies(target(api::format::r8g8b8a8_unorm), black, 3840, 2160, 0, nullptr), "Opaque black is not a transparent clear");
+    require(!layer::qualifies(target(api::format::r8g8b8a8_unorm), tinted, 3840, 2160, 0, nullptr), "A tinted clear qualified");
+    require(!layer::qualifies(target(api::format::r8g8b8a8_unorm, 2228, 1256), transparent, 3840, 2160, 0, nullptr),
       "A render-resolution scene target qualified as an output layer");
-    require(!layer::qualifies(target(api::format::r8g8b8a8_unorm), transparent, 0, 0), "No output size must reject everything");
+    require(!layer::qualifies(target(api::format::r8g8b8a8_unorm), transparent, 0, 0, 0, nullptr), "No output size must reject everything");
     for (const auto format : {api::format::r11g11b10_float, api::format::r8_unorm, api::format::r16g16_float, api::format::b8g8r8x8_unorm,
            api::format::r10g10b10a2_unorm, api::format::r10g10b10a2_typeless})
-      require(!layer::qualifies(target(format), transparent, 3840, 2160), "A format without blended alpha qualified");
+      require(!layer::qualifies(target(format), transparent, 3840, 2160, 0, nullptr), "A format without blended alpha qualified");
     auto msaa = target(api::format::r8g8b8a8_unorm); msaa.texture.samples = 4;
     auto mips = target(api::format::r8g8b8a8_unorm); mips.texture.levels = 2;
     auto array = target(api::format::r8g8b8a8_unorm); array.texture.depth_or_layers = 2;
     auto volume = target(api::format::r8g8b8a8_unorm); volume.type = api::resource_type::texture_3d;
     for (const auto &desc : {msaa, mips, array, volume})
-      require(!layer::qualifies(desc, transparent, 3840, 2160), "A multisampled, mipped, layered or 3D target qualified");
-    std::puts("PASS UI layer census qualification: output-size single-sample 2D alpha targets cleared to transparent black only");
+      require(!layer::qualifies(desc, transparent, 3840, 2160, 0, nullptr), "A multisampled, mipped, layered or 3D target qualified");
+    // Only a whole clear: no rectangles, or one that covers the target. A
+    // partial clear (a viewport strip, a split-screen half) is not a layer clear.
+    {
+      const auto layer_target = target(api::format::r8g8b8a8_unorm);
+      const api::rect whole{0, 0, 3840, 2160}, larger{-8, -8, 4096, 4096}, strip{0, 0, 3840, 200}, half{1920, 0, 3840, 2160};
+      const api::rect pair[]{strip, whole}, halves[]{{0, 0, 1920, 2160}, half};
+      require(layer::qualifies(layer_target, transparent, 3840, 2160, 1, &whole) &&
+          layer::qualifies(layer_target, transparent, 3840, 2160, 1, &larger) &&
+          layer::qualifies(layer_target, transparent, 3840, 2160, 2, pair), "A clear rectangle covering the target did not qualify");
+      require(!layer::qualifies(layer_target, transparent, 3840, 2160, 1, &strip) &&
+          !layer::qualifies(layer_target, transparent, 3840, 2160, 1, &half) &&
+          !layer::qualifies(layer_target, transparent, 3840, 2160, 2, halves) &&
+          !layer::qualifies(layer_target, transparent, 3840, 2160, 1, nullptr),
+        "A partial clear qualified as a layer clear");
+    }
+    std::puts("PASS UI layer census qualification: output-size single-sample 2D alpha targets cleared whole to transparent "
+      "black only");
 
     // A layer copy in its own slot (candidate layout 2) carries the
     // late-layer identity with the premultiplied check; float layers add HDR
@@ -243,70 +259,30 @@ int main() {
     }
     std::puts("PASS UI layer Present count: a copy after Present k reads 1 at render k+1, 2 after an interval without "
       "one, 0 within its own interval");
-    // Queue watch: the queue that executed the lists carrying a layer copy;
-    // another queue than the presenting one is sticky for the scope.
+    // Queue order: each live copy keeps the queue that executed it, and is in
+    // order (bound directly) only when that is the presenting queue alone. The
+    // verdict is per copy: the next copy run on the presenting queue is in
+    // order again.
     {
-      layer::queue_watch watch;
       constexpr std::uint64_t presenting = 0x10, other = 0x20;
-      require(!watch.watching() && !watch.executed(1, presenting, presenting), "An unwatched list was recorded");
-      watch.carried(1);
-      require(watch.watching() && watch.executed(1, presenting, presenting) && !watch.foreign_present() &&
-          watch.last_queue() == presenting && !watch.mixed(), "A list on the presenting queue was not same-queue");
-      // Executed twice (no reset): still watched, still same.
-      require(watch.executed(1, presenting, presenting) && !watch.foreign_present(), "A second execution lost the watch");
-      watch.carried(2);
-      require(watch.executed(2, other, presenting) && watch.foreign_present() && watch.mixed() && watch.last_queue() == other,
-        "A list on a second queue was not foreign");
-      watch.reset(2);
-      require(!watch.executed(2, presenting, presenting) && watch.foreign_present(),
-        "A reset list stayed watched, or the foreign verdict was not sticky");
-      // An unknown presenting queue decides nothing.
-      layer::queue_watch unknown;
-      unknown.carried(3);
-      require(unknown.executed(3, other, 0) && !unknown.foreign_present(), "An unknown presenting queue made a copy foreign");
-      // D3D11 FinishCommandList: a deferred context's commands move into its
-      // command list, which the immediate context (the presenting queue)
-      // executes; the context carries nothing afterwards.
-      layer::queue_watch deferred;
-      deferred.carried(0x100);
-      deferred.move(0x200, 0x100);
-      require(deferred.watching() && !deferred.executed(0x100, other, presenting) &&
-          deferred.executed(0x200, presenting, presenting) && !deferred.foreign_present(),
-        "A command list did not take its deferred context's copy");
-      // A new command list at a reused address carries nothing from a context
-      // that recorded no copy.
-      deferred.move(0x200, 0x300);
-      require(!deferred.executed(0x200, other, presenting), "A list that carries nothing kept an old watch");
-      // A D3D12 bundle or a command list executed on a deferred context: the
-      // primary keeps its own copy whatever the secondary carried,
-      // and gains the secondary's.
-      layer::queue_watch bundle;
-      bundle.carried(0x400);
-      bundle.transfer(0x400, 0x500);
-      require(bundle.executed(0x400, presenting, presenting), "A primary with its own copy lost it to a secondary carrying nothing");
-      bundle.carried(0x600);
-      bundle.transfer(0x700, 0x600);
-      require(bundle.executed(0x700, presenting, presenting) && bundle.executed(0x600, presenting, presenting),
-        "A primary did not gain its secondary's copy, or the secondary lost it");
-      bundle.reset(0x400);
-      bundle.carried(0x800); bundle.carried(0x900);
-      require(bundle.executed(0x600, presenting, presenting), "A free entry was not reused before the oldest list");
-      // A copy recorded on the queue itself (an immediate context).
-      layer::queue_watch immediate;
-      immediate.executed_on(presenting, presenting);
-      require(!immediate.foreign_present() && immediate.last_queue() == presenting, "An immediate-context copy was not same-queue");
-      // Bounded: a fifth list replaces the oldest; a scope change clears all.
-      layer::queue_watch bounded;
-      for (std::uint64_t list = 1; list <= layer::queue_watch::capacity + 1; ++list) bounded.carried(list);
-      require(!bounded.executed(1, presenting, presenting) && bounded.executed(layer::queue_watch::capacity + 1, presenting, presenting),
-        "The watch was unbounded or dropped its newest list");
-      bounded.executed(2, other, presenting);
-      bounded.clear_scope();
-      require(!bounded.watching() && !bounded.foreign_present() && !bounded.mixed(), "A scope change kept the watch");
+      std::uint64_t copy = 0;
+      copy = layer::merge_queue(copy, presenting);
+      require(copy == presenting && layer::presented_in_order(copy, presenting),
+        "A copy run on the presenting queue was not in order");
+      copy = layer::merge_queue(copy, presenting);
+      require(layer::presented_in_order(copy, presenting), "A list executed twice on the presenting queue lost its order");
+      copy = layer::merge_queue(copy, other);
+      require(copy == layer::mixed_queue && !layer::presented_in_order(copy, presenting) &&
+          !layer::presented_in_order(layer::merge_queue(copy, presenting), presenting),
+        "A copy run on two queues was in order");
+      require(!layer::presented_in_order(layer::merge_queue(0, other), presenting), "A copy run on another queue was in order");
+      require(!layer::presented_in_order(layer::merge_queue(0, presenting), 0) && !layer::presented_in_order(0, presenting),
+        "A copy was in order with an unknown presenting queue or before it executed");
+      require(layer::presented_in_order(layer::merge_queue(0, presenting), presenting),
+        "A new copy on the presenting queue was not in order after a copy on another queue");
     }
-    std::puts("PASS UI layer queue watch: the presenting queue is same, another queue is foreign and sticky per scope, "
-      "a reset list and a list carrying nothing drop out, a D3D11 command list carries its deferred context's copy, at most "
-      "4 lists are watched");
+    std::puts("PASS UI layer queue order: a copy run on the presenting queue alone is in order (bound directly); one run on "
+      "another queue, on two queues, before it executed or with an unknown presenting queue is not; the verdict is per copy");
     // Live-copy ring (direct binding): the oldest free entry other than the
     // newest takes the next copy; with every entry read by an unfinished
     // render the ring grows to ring_capacity, then the copy is skipped.
@@ -328,6 +304,10 @@ int main() {
       require(choice.index < 0, "A full busy ring overwrote an entry a render still reads");
       choice = layer::choose_ring_entry(4, {true, false, false, true}, age, 3);
       require(choice.index == 0, "A full ring ignored a completed entry");
+      // An entry whose allocation failed (age 0, no copy) is taken first and
+      // allocated again; an entry being allocated is not free.
+      choice = layer::choose_ring_entry(3, {true, true, false, false}, {7, 0, 9, 0}, -1);
+      require(choice.index == 1 && !choice.allocate, "An entry whose allocation failed was not taken first");
     }
     std::puts("PASS UI layer live-copy ring: oldest free non-newest entry, growth to the capacity, skip when every entry is read");
     return 0;

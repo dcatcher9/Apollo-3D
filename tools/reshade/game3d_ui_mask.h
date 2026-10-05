@@ -27,11 +27,26 @@ namespace sunshine_game3d::ui_mask {
   }
   inline constexpr std::uint32_t all_sources = source_mask(source_kind::backbuffer) |
     source_mask(source_kind::color_and_alpha) | source_mask(source_kind::alpha) | source_mask(source_kind::hudless);
+  // The capture slot order of every per-kind array (the renderer's candidate
+  // slots 0-3): UIAlpha, the UI color tag, Backbuffer, HUD-less.
+  inline constexpr std::array<source_kind, 4> capture_order{source_kind::alpha, source_kind::color_and_alpha,
+    source_kind::backbuffer, source_kind::hudless};
+  constexpr unsigned capture_slot(source_kind kind) {
+    return kind == source_kind::alpha ? 0u : kind == source_kind::color_and_alpha ? 1u :
+      kind == source_kind::backbuffer ? 2u : 3u;
+  }
+  // A snapshot's typed DXGI format (depth_capture::auxiliary_snapshot_format of
+  // the tagged resource's format) that the kind can be read from.
   inline bool supported_format(source_kind kind, std::uint32_t format) {
     if (kind == source_kind::alpha) return format == 41 || format == 54 || format == 56 || format == 61;
     return (kind == source_kind::backbuffer || kind == source_kind::color_and_alpha || kind == source_kind::hudless) &&
       (format == 2 || format == 10 || format == 24 || format == 28 || format == 29 || format == 87 || format == 91);
   }
+  // A request is live while its runtime refreshes it (set_request on every
+  // Present that wants UI captures): only requests refreshed within
+  // maximum_source_age_ms of a tag match it, so a swapchain that stopped
+  // presenting (a launcher, an old swapchain beside its replacement) never
+  // makes the tags of the live one ambiguous.
   struct request {
     std::uint64_t runtime{}, device_identity{}, epoch{}, revision{};
     std::uint32_t viewport{}, width{}, height{};
@@ -40,12 +55,21 @@ namespace sunshine_game3d::ui_mask {
     // Changing this set revokes all completed and in-flight work in the scope.
     std::uint32_t allowed_kinds = all_sources;
   };
+  // A tag is captured only while its runtime reads UI captures (acquire_all)
+  // within this window; otherwise begin() refuses it (no_reader) instead of
+  // copying pixels nobody reads (a Present that requested captures but
+  // returned before its render).
+  inline constexpr std::uint64_t reader_window_ms = 1000;
   struct boundary {
     sunshine_scene_depth::frame source;
     std::uint64_t command{};
     std::uint32_t tag_scope{}; // 0 global, 1 explicit frame; never inferred from Present.
     source_kind kind = source_kind::backbuffer;
     std::uint64_t source_present_generation{}; // Captured at this exact tag entry.
+    // The tagged resource's DXGI format (depth_capture::retain_source; 0
+    // unknown). begin() refuses a format the kind cannot be read from (format)
+    // before any copy.
+    std::uint32_t format{};
   };
   // The presented color a HUD-less image is compared with when no same-batch
   // Backbuffer was tagged with it. Without frame generation every offer of a
@@ -153,7 +177,9 @@ namespace sunshine_game3d::ui_mask {
   // Where a tag's begin() stopped without a capture attempt: no live request
   // matches, more than one does, the request's kinds exclude the tag, the
   // tag is not newer than the request's latest, its shape or declared
-  // lifetime is unsupported, or both of its kind's reservations are taken.
+  // lifetime is unsupported, both of its kind's reservations are taken, its
+  // runtime has not read UI captures within reader_window_ms, or its format
+  // cannot be read as its kind (supported_format).
   // The capture gate line counts them per stage.
   enum class begin_stage : std::uint8_t {
     none,
@@ -164,10 +190,13 @@ namespace sunshine_game3d::ui_mask {
     shape,
     unsupported_lifetime,
     no_reservation,
+    no_reader,
+    format,
     count
   };
   inline constexpr std::array<std::string_view, std::size_t(begin_stage::count)> begin_stage_names{"none", "no_request",
-    "ambiguous_request", "kind_filtered", "not_newer", "shape", "unsupported_lifetime", "no_reservation"};
+    "ambiguous_request", "kind_filtered", "not_newer", "shape", "unsupported_lifetime", "no_reservation", "no_reader",
+    "format"};
   constexpr std::string_view name(begin_stage value) {
     return value < begin_stage::count ? begin_stage_names[std::size_t(value)] : std::string_view("none");
   }
@@ -188,20 +217,28 @@ namespace sunshine_game3d::ui_mask {
     std::array<std::uint64_t, std::size_t(begin_stage::count)> begin_refusals{};
   };
 
-  // Repeating an identical request preserves completed pixels. Disable or any
-  // scope/size change revokes them, including in-flight attempts from the old scope.
-  void set_request(const request &value);
+  // Repeating an identical request preserves completed pixels and refreshes
+  // it (now_ms). Disable or any scope/size change revokes them, including
+  // in-flight attempts from the old scope. A runtime without an entry takes a
+  // free one, else the one refreshed longest ago once it expired.
+  void set_request(const request &value, std::uint64_t now_ms);
   void invalidate(std::uint64_t runtime);
   void invalidate_all();
   void invalidate_scope(std::uint64_t epoch, std::uint32_t viewport);
-  // Strict diagnostic query exposes completed immutable pixels within
-  // maximum_source_age_ms. The consumer must still use copy_diagnostic_texture.
-  bool acquire(std::uint64_t runtime, selection &out, std::uint64_t now_ms);
-  // Candidates retain independent completed/pending snapshots. A resource's
-  // availability or priority cannot hide another kind from automatic validation.
-  // A nonzero consumer_queue opts into ordered local GPU acquisition; it must
-  // then use copy_local_texture on that queue. Zero keeps strict diagnostics.
-  bool acquire_kind(std::uint64_t runtime, source_kind kind, selection &out, std::uint64_t now_ms,
+  // The newest ready snapshot of each kind in capture_order (by[i] is valid
+  // when found has source_mask(capture_order[i])).
+  struct acquired {
+    std::array<selection, 4> by{};
+    std::uint32_t found{};
+  };
+  // One scan per Present: every snapshot within maximum_source_age_ms is
+  // polled once, older and failed ones retire, and each allowed kind's newest
+  // ready snapshot is returned; a kind's availability or priority cannot hide
+  // another kind from automatic validation. A nonzero consumer_queue opts
+  // into ordered local GPU acquisition; it must then use copy_local_texture
+  // (or lease_local_view) on that queue. Zero keeps strict diagnostics. Each
+  // call marks the runtime a reader (reader_window_ms).
+  bool acquire_all(std::uint64_t runtime, std::uint64_t now_ms, acquired &out, std::uint32_t allowed = all_sources,
     std::uint64_t consumer_queue = 0);
   // Plain metadata for the newest boundary in the current requested scope.
   // True with a zero boundary sequence means no matching tag has arrived yet;
@@ -213,9 +250,12 @@ namespace sunshine_game3d::ui_mask {
 
   // Streamline adapter boundary. No source reference is obtained when no live
   // request matches. Every begin attempt must finish after the original SDK call,
-  // even if native recording had no free slot. Null/invalid tags revoke that kind;
+  // even if native recording had no free slot. Null/invalid tags (a resource of
+  // another shape or an unreadable format included) revoke that kind;
   // dedicated alpha, UI color and backbuffer remain distinct semantic sources.
-  bool interested(std::uint64_t epoch, std::uint64_t revision, std::uint32_t viewport,
+  // now_ms is the tag's entry tick; only requests refreshed within
+  // maximum_source_age_ms of it count.
+  bool interested(std::uint64_t epoch, std::uint64_t revision, std::uint32_t viewport, std::uint64_t now_ms,
     std::uint32_t *matching_requests = nullptr);
   void observe_gate(const capture_gate_observation &value);
   struct attempt {

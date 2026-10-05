@@ -10,52 +10,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <mutex>
 
 namespace sunshine_game3d::ui_layer {
-  void queue_watch::carried(std::uint64_t list) {
-    if (!list || std::find(lists_.begin(), lists_.end(), list) != lists_.end()) return;
-    // Oldest first, free entries last: a full watch drops its oldest list.
-    if (lists_.back()) {
-      std::rotate(lists_.begin(), lists_.begin() + 1, lists_.end());
-      lists_.back() = list;
-    } else *std::find(lists_.begin(), lists_.end(), std::uint64_t{0}) = list;
-  }
-
-  void queue_watch::reset(std::uint64_t list) {
-    if (!list) return;
-    const auto end = std::remove(lists_.begin(), lists_.end(), list);
-    std::fill(end, lists_.end(), std::uint64_t{0});
-  }
-
-  void queue_watch::move(std::uint64_t list, std::uint64_t context) {
-    const bool carries = context && std::find(lists_.begin(), lists_.end(), context) != lists_.end();
-    reset(list);
-    reset(context);
-    if (carries) carried(list);
-  }
-
-  void queue_watch::transfer(std::uint64_t primary, std::uint64_t secondary) {
-    if (secondary && std::find(lists_.begin(), lists_.end(), secondary) != lists_.end()) carried(primary);
-  }
-
-  bool queue_watch::executed(std::uint64_t list, std::uint64_t queue, std::uint64_t presenting) {
-    if (!list || std::find(lists_.begin(), lists_.end(), list) == lists_.end()) return false;
-    executed_on(queue, presenting);
-    return true;
-  }
-
-  void queue_watch::executed_on(std::uint64_t queue, std::uint64_t presenting) {
-    if (!queue) return;
-    if (last_queue_ && last_queue_ != queue) mixed_ = true;
-    last_queue_ = queue;
-    if (presenting && queue != presenting) foreign_present_ = true;
-  }
-
-  bool queue_watch::watching() const {
-    return std::any_of(lists_.begin(), lists_.end(), [](std::uint64_t value) { return value != 0; });
-  }
-
   bool layer_tracker::clear(std::uint64_t resource, std::uint64_t now_ms) {
     if (!resource) return false;
     const auto recent = [&](const entry &value) {
@@ -98,6 +56,16 @@ namespace sunshine_game3d::ui_layer {
       return color[0] == 0.f && color[1] == 0.f && color[2] == 0.f && color[3] == 0.f;
     }
 
+    // A clear without rectangles, or with one covering the whole target.
+    bool whole_clear(const api::resource_desc &desc, std::uint32_t rect_count, const api::rect *rects) {
+      if (!rect_count) return true;
+      if (!rects) return false;
+      return std::any_of(rects, rects + rect_count, [&](const api::rect &r) {
+        return r.left <= 0 && r.top <= 0 && r.right >= std::int64_t(desc.texture.width) &&
+          r.bottom >= std::int64_t(desc.texture.height);
+      });
+    }
+
     // A copy recorded into a game command list may execute a frame or more
     // later; a withdrawn copy is destroyed only after this long.
     constexpr std::uint64_t retire_delay_ms = 2000;
@@ -108,6 +76,16 @@ namespace sunshine_game3d::ui_layer {
       std::uint64_t tick{};
       api::resource_view view{};
     };
+
+    // Destroys add-on objects outside the state lock (their device is alive:
+    // on_destroy_device hands over its own before the device goes).
+    void destroy(const std::vector<retired> &values) {
+      for (const auto &r : values) {
+        if (!r.device) continue;
+        if (r.view.handle) r.device->destroy_resource_view(r.view);
+        if (r.copy.handle) r.device->destroy_resource(r.copy);
+      }
+    }
 
     // A reader of a ring entry: a renderer's completion fence (a native
     // reference, so a destroyed renderer cannot leave it dangling) and the
@@ -139,8 +117,12 @@ namespace sunshine_game3d::ui_layer {
       // copy is recorded but none of them executed yet. A pending entry is
       // never offered (it does not hold its copy yet) nor written again.
       std::array<std::uint64_t, 2> carriers{};
+      // The queue that executed the copy (merge_queue; 0 not yet).
+      std::uint64_t queue{};
       bool pending{};
-      bool free() const { return !pending && readers[0].completed() && readers[1].completed(); }
+      // The entry's copy is being allocated outside the lock (capture_live).
+      bool allocating{};
+      bool free() const { return !pending && !allocating && readers[0].completed() && readers[1].completed(); }
       bool carries(std::uint64_t list) const { return list && (carriers[0] == list || carriers[1] == list); }
     };
 
@@ -157,9 +139,6 @@ namespace sunshine_game3d::ui_layer {
       // The newest recorded copy's id and tick (latest() reports them as the
       // single live copy did).
       std::uint64_t capture_id{}, tick{};
-      // The scope's queue watch: which queue executed the lists carrying the
-      // live copies (direct binding).
-      queue_watch watch;
       bool saturated_logged{};
       const ring_entry *latest() const { return newest >= 0 ? &ring[unsigned(newest)] : nullptr; }
     };
@@ -170,8 +149,12 @@ namespace sunshine_game3d::ui_layer {
 
     struct state_t {
       std::mutex mutex;
-      bool armed{};
-      std::uint64_t demand_ms{};
+      // Read without the lock by every clear and Present (wanted()).
+      std::atomic<bool> armed{false};
+      std::atomic<std::uint64_t> demand_ms{0};
+      // Live or retired copies exist: observe_output retires and destroys
+      // them while the layer is not wanted.
+      std::atomic<bool> holding{false};
       api::device *device{};
       std::uint32_t width{}, height{};
       std::vector<std::uint64_t> back_buffers;
@@ -184,12 +167,16 @@ namespace sunshine_game3d::ui_layer {
       std::vector<candidate> candidates;
       std::vector<retired> graveyard;
       live_state live;
-      // The presenting queue's native handle at the last Present, and a copy
-      // of the queue watch's lists that the execute and reset events check
+      // Advance whenever the live ring is retired, or the census armed, taken
+      // or dropped: an allocation made outside the lock for an earlier scope
+      // is destroyed instead of published.
+      std::uint64_t live_scope{}, census_scope{};
+      bool unordered_logged{};
+      // The presenting queue's native handle at the last Present, and each
+      // ring entry's carriers, which the execute and reset events check
       // without the lock, so lists that carried no live copy never take it.
       std::uint64_t presenting_queue{};
-      // The queue watch's lists, then each ring entry's carriers.
-      std::array<std::atomic<std::uint64_t>, queue_watch::capacity + ring_capacity * 2> watched{};
+      std::array<std::atomic<std::uint64_t>, ring_capacity * 2> watched{};
     };
     // Deliberately leaked: clear events can arrive during process exit.
     state_t &state() {
@@ -197,26 +184,37 @@ namespace sunshine_game3d::ui_layer {
       return *value;
     }
 
-    // Requires the state lock: publishes the watch's lists and the ring
-    // entries' carriers to the lock-free copy.
-    void publish_watch(state_t &s) {
-      for (std::size_t i = 0; i != queue_watch::capacity; ++i)
-        s.watched[i].store(s.live.watch.lists()[i], std::memory_order_relaxed);
-      for (std::size_t i = 0; i != ring_capacity; ++i)
-        for (std::size_t j = 0; j != 2; ++j)
-          s.watched[queue_watch::capacity + i * 2 + j].store(s.live.ring[i].carriers[j], std::memory_order_relaxed);
+    // UI detection asked for the layer within demand_window_ms (a stamp
+    // after now, from another thread meanwhile, counts as now).
+    bool demanded(const state_t &s, std::uint64_t now) {
+      const auto demand = s.demand_ms.load(std::memory_order_relaxed);
+      return demand && (now <= demand || now - demand <= demand_window_ms);
+    }
+    // Some reader wants the layer: UI detection or an armed dump census.
+    bool wanted(const state_t &s, std::uint64_t now) {
+      return s.armed.load(std::memory_order_relaxed) || demanded(s, now);
     }
 
-    // Requires the state lock. A list executed: the entries it carries hold
-    // their copies now, and the newest of them becomes the offered copy (the
-    // last executed copy, as a single live texture would hold).
-    void carriers_executed(state_t &s, std::uint64_t list) {
+    // Requires the state lock: publishes the ring entries' carriers to the
+    // lock-free copy.
+    void publish_watch(state_t &s) {
+      for (std::size_t i = 0; i != ring_capacity; ++i)
+        for (std::size_t j = 0; j != 2; ++j)
+          s.watched[i * 2 + j].store(s.live.ring[i].carriers[j], std::memory_order_relaxed);
+    }
+
+    // Requires the state lock. A list executed on queue: the entries it
+    // carries hold their copies now, executed on that queue, and the newest of
+    // them becomes the offered copy (the last executed copy, as a single live
+    // texture would hold).
+    void carriers_executed(state_t &s, std::uint64_t list, std::uint64_t queue) {
       auto &live = s.live;
       int promoted = -1;
       for (unsigned i = 0; i != live.entries; ++i) {
         auto &entry = live.ring[i];
         if (!entry.carries(list)) continue;
         entry.pending = false;
+        entry.queue = merge_queue(entry.queue, queue);
         if (promoted < 0 || entry.capture_id > live.ring[unsigned(promoted)].capture_id) promoted = int(i);
       }
       if (promoted >= 0) live.newest = promoted;
@@ -266,22 +264,21 @@ namespace sunshine_game3d::ui_layer {
     }
 
     // Requires the state lock. Retires the live copies (a scope change: the
-    // next copy starts a new queue watch).
+    // next copy starts a new ring).
     void retire_live(state_t &s, std::uint64_t now) {
       for (unsigned i = 0; i != s.live.entries; ++i) retire_entry(s, s.device, s.live.ring[i], now);
       s.live = {};
+      ++s.live_scope;
       publish_watch(s);
     }
 
-    // Requires the state lock.
-    void reap(state_t &s) {
-      const auto now = GetTickCount64();
+    // Requires the state lock. Moves the retired copies that are due into
+    // due, for destruction after the lock.
+    void reap(state_t &s, std::uint64_t now, std::vector<retired> &due) {
       auto keep = s.graveyard.begin();
       for (auto &r : s.graveyard) {
-        if (now - r.tick >= retire_delay_ms) {
-          if (r.device && r.view.handle) r.device->destroy_resource_view(r.view);
-          if (r.device) r.device->destroy_resource(r.copy);
-        } else *keep++ = r;
+        if (now - r.tick >= retire_delay_ms) due.push_back(r);
+        else *keep++ = r;
       }
       s.graveyard.erase(keep, s.graveyard.end());
     }
@@ -289,7 +286,10 @@ namespace sunshine_game3d::ui_layer {
     // Requires the state lock. Retires census copies that no dump took.
     void drop_candidates(state_t &s) {
       for (auto &c : s.candidates)
-        if (c.copy.handle) s.graveyard.push_back({s.device, c.copy, GetTickCount64()});
+        if (c.copy.handle) {
+          s.graveyard.push_back({s.device, c.copy, GetTickCount64()});
+          s.holding.store(true, std::memory_order_relaxed);
+        }
       s.candidates.clear();
     }
 
@@ -302,25 +302,63 @@ namespace sunshine_game3d::ui_layer {
       commands->barrier(copy, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
     }
 
+    // A ring entry reserved under the lock whose copy the caller allocates
+    // outside it (index -1: none).
+    struct live_allocation {
+      int index = -1;
+      std::uint64_t scope{};
+      api::resource_desc desc;
+      api::format format{};
+    };
+
+    // Requires the state lock. Records the target's previous-frame content
+    // into an allocated ring entry.
+    void record_live(state_t &s, api::command_list *commands, unsigned index, api::resource resource) {
+      auto &live = s.live;
+      auto &entry = live.ring[index];
+      commands->barrier(entry.copy, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
+      record_copy(commands, resource, entry.copy);
+      entry.capture_id = ++live.capture_id;
+      entry.tick = live.tick = GetTickCount64();
+      entry.queue = 0;
+      entry.carriers = {};
+      // A D3D11 immediate context is the presenting queue itself, so the copy
+      // executed there; else the entry is pending until a list carrying it
+      // executes, on the queue that runs it.
+      const auto list = commands->get_native();
+      if (list && list == s.presenting_queue) {
+        entry.queue = list;
+        entry.pending = false;
+        live.newest = int(index);
+      } else {
+        entry.carriers[0] = reinterpret_cast<std::uint64_t>(commands);
+        entry.pending = true;
+      }
+      publish_watch(s);
+      // The Present count at the copy: it holds the previous Present's frame.
+      live.tracker.copied();
+      s.holding.store(true, std::memory_order_relaxed);
+    }
+
     // Requires the state lock. Copies the active layer's previous-frame content
-    // into a ring entry, before the game's clear.
-    void capture_live(state_t &s, api::command_list *commands, api::device *device, api::resource resource,
+    // into a ring entry, before the game's clear. An entry without a copy is
+    // reserved instead and returned for allocation outside the lock.
+    live_allocation capture_live(state_t &s, api::command_list *commands, api::device *device, api::resource resource,
         const api::resource_desc &desc) {
       auto &live = s.live;
       const auto typed = api::format_to_default_typed(desc.texture.format, 0);
+      const auto now = GetTickCount64();
       if (live.entries && (live.width != desc.texture.width || live.height != desc.texture.height || live.format != typed)) {
         // A new copy shape is a new scope.
-        const auto now = GetTickCount64();
         for (unsigned i = 0; i != live.entries; ++i) retire_entry(s, device, live.ring[i], now);
         live.entries = 0;
         live.newest = -1;
-        live.watch.clear_scope();
+        ++s.live_scope;
         publish_watch(s);
       }
       live.width = desc.texture.width; live.height = desc.texture.height; live.format = typed;
       std::array<bool, ring_capacity> free{};
       std::array<std::uint64_t, ring_capacity> age{};
-      const auto now = GetTickCount64();
       for (unsigned i = 0; i != live.entries; ++i) {
         auto &entry = live.ring[i];
         // A copy no carrying list executed or reset this long is abandoned.
@@ -329,7 +367,7 @@ namespace sunshine_game3d::ui_layer {
           entry.carriers = {};
         }
         free[i] = entry.free();
-        age[i] = entry.capture_id;
+        age[i] = entry.copy.handle ? entry.capture_id : 0;
       }
       const auto choice = choose_ring_entry(live.entries, free, age, live.newest);
       if (choice.index < 0) {
@@ -340,54 +378,59 @@ namespace sunshine_game3d::ui_layer {
           sunshine_log::message(reshade::log::level::warning,
             "Sunshine UI layer: every live copy is still being read; skipping a layer copy (logged once)");
         }
-        return;
+        return {};
       }
+      if (choice.allocate) ++live.entries;
       auto &entry = live.ring[unsigned(choice.index)];
-      if (choice.allocate) {
-        const api::resource_desc copy_desc(desc.texture.width, desc.texture.height, 1, 1, typed, 1, api::memory_heap::default_,
-          api::resource_usage::copy_dest | api::resource_usage::copy_source | api::resource_usage::shader_resource);
-        if (!device->create_resource(copy_desc, nullptr, api::resource_usage::shader_resource, &entry.copy)) {
-          entry = {};
-          return;
-        }
-        if (!device->create_resource_view(entry.copy, api::resource_usage::shader_resource, api::resource_view_desc(typed),
-              &entry.view))
-          entry.view = {};
-        ++live.entries;
+      if (!entry.copy.handle) {
+        // A new entry, or one whose allocation failed: reserved here, its copy
+        // and view are created outside the lock (publish_live records it).
+        entry = {};
+        entry.allocating = true;
+        return {choice.index, s.live_scope,
+          api::resource_desc(desc.texture.width, desc.texture.height, 1, 1, typed, 1, api::memory_heap::default_,
+            api::resource_usage::copy_dest | api::resource_usage::copy_source | api::resource_usage::shader_resource),
+          typed};
       }
-      commands->barrier(entry.copy, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
-      record_copy(commands, resource, entry.copy);
-      entry.capture_id = ++live.capture_id;
-      entry.tick = live.tick = now;
-      // The list joins the queue watch (a D3D11 immediate context is the
-      // presenting queue itself, so the copy is executed; else the entry is
-      // pending until a list carrying it executes).
-      const auto list = commands->get_native();
-      entry.carriers = {};
-      if (list && list == s.presenting_queue) {
-        live.watch.executed_on(list, s.presenting_queue);
-        entry.pending = false;
-        live.newest = choice.index;
-      } else {
-        live.watch.carried(reinterpret_cast<std::uint64_t>(commands));
-        entry.carriers[0] = reinterpret_cast<std::uint64_t>(commands);
-        entry.pending = true;
-      }
-      publish_watch(s);
-      // The Present count at the copy: it holds the previous Present's frame.
-      live.tracker.copied();
+      record_live(s, commands, unsigned(choice.index), resource);
+      return {};
     }
 
+    // Requires the state lock. Publishes a reserved entry's new copy and view
+    // and records the copy; false when the ring's scope moved on meanwhile
+    // (the caller destroys the objects). A failed allocation leaves the entry
+    // empty, to be allocated again when chosen.
+    bool publish_live(state_t &s, api::command_list *commands, api::device *device, const live_allocation &plan,
+        api::resource copy, api::resource_view view, api::resource resource) {
+      auto &live = s.live;
+      if (s.live_scope != plan.scope || device != s.device || unsigned(plan.index) >= live.entries) return false;
+      auto &entry = live.ring[unsigned(plan.index)];
+      if (!entry.allocating) return false;
+      entry.allocating = false;
+      if (!copy.handle) return true;
+      entry.copy = copy;
+      entry.view = view;
+      record_live(s, commands, unsigned(plan.index), resource);
+      return true;
+    }
+
+    // A census target whose copy the caller allocates outside the lock.
+    struct census_allocation {
+      bool wanted{};
+      std::uint64_t scope{}, source{};
+      api::resource_desc desc;
+    };
+    constexpr const char *census_allocating = "allocating";
+
     // Requires the state lock. The dump census: each armed qualifying target once.
-    void census(state_t &s, api::command_list *commands, api::device *device, api::resource resource,
-        const api::resource_desc &desc) {
+    census_allocation census(state_t &s, api::resource resource, const api::resource_desc &desc) {
       const auto known = std::find_if(s.candidates.begin(), s.candidates.end(),
         [&](const candidate &c) { return c.source == resource.handle; });
       if (known != s.candidates.end()) {
         ++known->clears;
-        return;
+        return {};
       }
-      if (s.candidates.size() >= max_candidates) return;
+      if (s.candidates.size() >= max_candidates) return {};
       candidate c;
       c.source = resource.handle;
       c.width = desc.texture.width;
@@ -395,41 +438,98 @@ namespace sunshine_game3d::ui_layer {
       const auto typed = api::format_to_default_typed(desc.texture.format, 0);
       c.format = static_cast<std::uint32_t>(typed);
       c.clears = 1;
-      const api::resource_desc copy_desc(c.width, c.height, 1, 1, typed, 1, api::memory_heap::default_,
-        api::resource_usage::copy_dest | api::resource_usage::shader_resource);
-      if (device->create_resource(copy_desc, nullptr, api::resource_usage::copy_dest, &c.copy)) {
-        record_copy(commands, resource, c.copy);
-        c.status = "captured_before_clear";
-      } else {
-        c.copy = {};
-        c.status = "copy_allocation_failed";
-      }
+      c.status = census_allocating;
       s.candidates.push_back(c);
+      return {true, s.census_scope, resource.handle, api::resource_desc(c.width, c.height, 1, 1, typed, 1,
+        api::memory_heap::default_, api::resource_usage::copy_dest | api::resource_usage::shader_resource)};
     }
 
-    bool on_clear(api::command_list *commands, api::resource_view view, const float color[4], std::uint32_t, const api::rect *) {
+    // Requires the state lock. Publishes a census copy allocated outside the
+    // lock and records it; false when the census moved on (the caller
+    // destroys the copy).
+    bool publish_census(state_t &s, api::command_list *commands, const census_allocation &plan, api::resource copy,
+        api::resource resource) {
+      if (s.census_scope != plan.scope) return false;
+      const auto c = std::find_if(s.candidates.begin(), s.candidates.end(), [&](const candidate &value) {
+        return value.source == plan.source && value.status == census_allocating;
+      });
+      if (c == s.candidates.end()) return false;
+      if (!copy.handle) {
+        c->status = "copy_allocation_failed";
+        return true;
+      }
+      c->copy = copy;
+      record_copy(commands, resource, copy);
+      c->status = "captured_before_clear";
+      return true;
+    }
+
+    bool on_clear(api::command_list *commands, api::resource_view view, const float color[4], std::uint32_t rect_count,
+        const api::rect *rects) {
       auto &s = state();
-      // Cheap rejection before any lock: only exact transparent black qualifies.
-      if (!transparent_black(color)) return false;
+      // Cheap rejection before any lookup or lock: only exact transparent
+      // black qualifies, and only while the layer is wanted.
+      if (!transparent_black(color) || !wanted(s, GetTickCount64())) return false;
       try {
         auto *device = commands->get_device();
         const auto resource = device->get_resource_from_view(view);
         if (!resource.handle) return false;
-        std::lock_guard<std::mutex> lock(s.mutex);
-        if (device != s.device ||
-            std::find(s.back_buffers.begin(), s.back_buffers.end(), resource.handle) != s.back_buffers.end()) return false;
         const auto desc = device->get_resource_desc(resource);
-        if (!qualifies(desc, color, s.width, s.height)) return false;
-        // Clearing requires the render-target state on every API, so the
-        // previous frame's layer can be copied here before the clear erases it.
-        const auto now = GetTickCount64();
-        if (s.live.tracker.clear(resource.handle, now) && s.demand_ms && now - s.demand_ms <= demand_window_ms)
-          capture_live(s, commands, device, resource, desc);
-        if (s.armed) census(s, commands, device, resource, desc);
+        live_allocation live;
+        census_allocation dump;
+        {
+          std::lock_guard<std::mutex> lock(s.mutex);
+          if (device != s.device ||
+              std::find(s.back_buffers.begin(), s.back_buffers.end(), resource.handle) != s.back_buffers.end()) return false;
+          if (!qualifies(desc, color, s.width, s.height, rect_count, rects)) return false;
+          // Clearing requires the render-target state on every API, so the
+          // previous frame's layer can be copied here before the clear erases it.
+          const auto now = GetTickCount64();
+          if (s.live.tracker.clear(resource.handle, now) && demanded(s, now))
+            live = capture_live(s, commands, device, resource, desc);
+          if (s.armed.load(std::memory_order_relaxed)) dump = census(s, resource, desc);
+        }
+        if (live.index < 0 && !dump.wanted) return false;
+        // New copies are allocated outside the lock, so a slow allocation
+        // never stalls the Present thread or another recording thread.
+        api::resource live_copy{}, dump_copy{};
+        api::resource_view live_view{};
+        if (live.index >= 0) {
+          if (!device->create_resource(live.desc, nullptr, api::resource_usage::shader_resource, &live_copy)) live_copy = {};
+          else if (!device->create_resource_view(live_copy, api::resource_usage::shader_resource,
+                     api::resource_view_desc(live.format), &live_view))
+            live_view = {};
+        }
+        if (dump.wanted && !device->create_resource(dump.desc, nullptr, api::resource_usage::copy_dest, &dump_copy))
+          dump_copy = {};
+        bool live_kept = live.index < 0, dump_kept = !dump.wanted;
+        {
+          std::lock_guard<std::mutex> lock(s.mutex);
+          if (live.index >= 0) live_kept = publish_live(s, commands, device, live, live_copy, live_view, resource);
+          if (dump.wanted) dump_kept = publish_census(s, commands, dump, dump_copy, resource);
+        }
+        // Objects of a scope that moved on meanwhile were never used.
+        std::vector<retired> lost;
+        if (!live_kept) lost.push_back({device, live_copy, 0, live_view});
+        if (!dump_kept) lost.push_back({device, dump_copy});
+        destroy(lost);
       } catch (...) {
         // A failure never propagates into the game's command recording.
       }
       return false; // Never skip the game's clear.
+    }
+
+    // Requires no lock. The layer is not wanted: copies left from an earlier
+    // demand are retired, and retired copies destroyed once due.
+    void idle(state_t &s, std::uint64_t now) {
+      std::vector<retired> due;
+      {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.live.entries) retire_live(s, now);
+        reap(s, now, due);
+        s.holding.store(!s.graveyard.empty() || !s.candidates.empty(), std::memory_order_relaxed);
+      }
+      destroy(due);
     }
   }
 
@@ -454,17 +554,19 @@ namespace sunshine_game3d::ui_layer {
     return ui_detection::layer_detection_flags(ui_detection::float_layer_format(static_cast<std::uint32_t>(format)));
   }
 
-  bool qualifies(const api::resource_desc &desc, const float color[4], std::uint32_t width, std::uint32_t height) {
+  bool qualifies(const api::resource_desc &desc, const float color[4], std::uint32_t width, std::uint32_t height,
+      std::uint32_t rect_count, const api::rect *rects) {
     return width && height && desc.type == api::resource_type::texture_2d && desc.texture.width == width &&
       desc.texture.height == height && desc.texture.samples == 1 && desc.texture.levels == 1 &&
-      desc.texture.depth_or_layers == 1 && alpha_format(desc.texture.format) && transparent_black(color);
+      desc.texture.depth_or_layers == 1 && alpha_format(desc.texture.format) && transparent_black(color) &&
+      whole_clear(desc, rect_count, rects);
   }
 
   bool latest(api::device *device, std::uint64_t now_ms, live_capture &out) {
     out = {};
     auto &s = state();
+    s.demand_ms.store(now_ms, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(s.mutex);
-    s.demand_ms = now_ms;
     const auto &live = s.live;
     const auto *entry = live.latest();
     // The executed copy is offered while the newest recorded one is recent,
@@ -474,10 +576,20 @@ namespace sunshine_game3d::ui_layer {
         now_ms < live.tick || now_ms - live.tick > max_clear_gap_ms) return false;
     out.copy = entry->copy; out.view = entry->view; out.capture_id = entry->capture_id; out.tick = live.tick;
     out.format = static_cast<std::uint32_t>(live.format); out.presents_since_copy = live.tracker.presents_since_copy();
-    out.foreign_present = live.watch.foreign_present(); out.queue_mixed = live.watch.mixed();
-    out.executed_queue = live.watch.last_queue();
-    out.direct = entry->view.handle && s.presenting_queue && !out.foreign_present && !out.queue_mixed &&
-      out.executed_queue == s.presenting_queue;
+    out.executed_queue = entry->queue;
+    // Only a copy that ran on the presenting queue alone is bound directly:
+    // queue order puts it before this Present's reads.
+    out.in_order = presented_in_order(entry->queue, s.presenting_queue);
+    out.direct = entry->view.handle && out.in_order;
+    if (!out.in_order && !s.unordered_logged) {
+      s.unordered_logged = true;
+      char message[256]{};
+      std::snprintf(message, sizeof(message),
+        "Sunshine UI layer: the live layer copy executed on queue 0x%llx, not on the presenting queue 0x%llx; it is "
+        "copied into the renderer, not bound directly (logged once)",
+        static_cast<unsigned long long>(entry->queue), static_cast<unsigned long long>(s.presenting_queue));
+      sunshine_log::message(reshade::log::level::info, message);
+    }
     return true;
   }
 
@@ -515,31 +627,33 @@ namespace sunshine_game3d::ui_layer {
     // Copies are destroyed through their own device while it still exists.
     void on_destroy_device(api::device *device) {
       auto &s = state();
-      std::lock_guard<std::mutex> lock(s.mutex);
-      auto keep = s.graveyard.begin();
-      for (auto &r : s.graveyard) {
-        if (r.device == device) {
-          if (r.view.handle) device->destroy_resource_view(r.view);
-          device->destroy_resource(r.copy);
-        } else *keep++ = r;
-      }
-      s.graveyard.erase(keep, s.graveyard.end());
-      for (auto &c : s.candidates)
-        if (s.device == device && c.copy.handle) device->destroy_resource(c.copy);
-      if (s.device == device) {
-        for (unsigned i = 0; i != s.live.entries; ++i) {
-          auto &entry = s.live.ring[i];
-          if (entry.view.handle) device->destroy_resource_view(entry.view);
-          if (entry.copy.handle) device->destroy_resource(entry.copy);
-          for (auto &r : entry.readers) r.release();
+      std::vector<retired> doomed;
+      {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        auto keep = s.graveyard.begin();
+        for (auto &r : s.graveyard) {
+          if (r.device == device) doomed.push_back(r);
+          else *keep++ = r;
         }
-        s.live = {};
-        publish_watch(s);
-        s.candidates.clear();
-        s.back_buffers.clear();
-        s.device = nullptr;
-        s.presenting_queue = 0;
+        s.graveyard.erase(keep, s.graveyard.end());
+        if (s.device == device) {
+          for (auto &c : s.candidates) if (c.copy.handle) doomed.push_back({device, c.copy});
+          for (unsigned i = 0; i != s.live.entries; ++i) {
+            auto &entry = s.live.ring[i];
+            doomed.push_back({device, entry.copy, 0, entry.view});
+            for (auto &r : entry.readers) r.release();
+          }
+          s.live = {};
+          ++s.live_scope;
+          ++s.census_scope;
+          publish_watch(s);
+          s.candidates.clear();
+          s.back_buffers.clear();
+          s.device = nullptr;
+          s.presenting_queue = 0;
+        }
       }
+      destroy(doomed);
     }
 
     // True for a D3D11 command list: the primary of FinishCommandList's event
@@ -553,15 +667,12 @@ namespace sunshine_game3d::ui_layer {
       return true;
     }
 
-    // Queue watch events. Lists that carried no live copy return before any
-    // lock.
+    // Carrier events. Lists that carried no live copy return before any lock.
     void on_execute(api::command_queue *queue, api::command_list *commands) {
       auto &s = state();
       if (!queue || !watched(s, commands)) return;
       std::lock_guard<std::mutex> lock(s.mutex);
-      const auto list = reinterpret_cast<std::uint64_t>(commands);
-      s.live.watch.executed(list, queue->get_native(), s.presenting_queue);
-      carriers_executed(s, list);
+      carriers_executed(s, reinterpret_cast<std::uint64_t>(commands), queue->get_native());
     }
 
     void on_execute_secondary(api::command_list *primary, api::command_list *secondary) {
@@ -571,22 +682,16 @@ namespace sunshine_game3d::ui_layer {
       const auto list = reinterpret_cast<std::uint64_t>(secondary);
       // D3D11: ExecuteCommandList on the immediate context, the presenting
       // queue itself, executes the list.
-      if (primary->get_native() && primary->get_native() == s.presenting_queue) {
-        s.live.watch.executed(list, s.presenting_queue, s.presenting_queue);
-        carriers_executed(s, list);
-      }
+      if (primary->get_native() && primary->get_native() == s.presenting_queue)
+        carriers_executed(s, list, s.presenting_queue);
       // D3D11 FinishCommandList (the primary is the new ID3D11CommandList):
       // the deferred context's commands move into it.
-      else if (finished_command_list(primary)) {
-        s.live.watch.move(reinterpret_cast<std::uint64_t>(primary), list);
+      else if (finished_command_list(primary))
         carriers_follow(s, list, reinterpret_cast<std::uint64_t>(primary), true);
-      }
       // A D3D12 bundle, or a command list executed on a deferred context: the
       // primary keeps its own commands and adds the secondary's.
-      else {
-        s.live.watch.transfer(reinterpret_cast<std::uint64_t>(primary), list);
+      else
         carriers_follow(s, list, reinterpret_cast<std::uint64_t>(primary), false);
-      }
       publish_watch(s);
     }
 
@@ -594,7 +699,6 @@ namespace sunshine_game3d::ui_layer {
       auto &s = state();
       if (!watched(s, commands)) return;
       std::lock_guard<std::mutex> lock(s.mutex);
-      s.live.watch.reset(reinterpret_cast<std::uint64_t>(commands));
       carriers_reset(s, reinterpret_cast<std::uint64_t>(commands));
       publish_watch(s);
     }
@@ -631,6 +735,11 @@ namespace sunshine_game3d::ui_layer {
 
   void observe_output(api::swapchain *swapchain, api::command_queue *queue) {
     auto &s = state();
+    const auto now = GetTickCount64();
+    if (!wanted(s, now)) {
+      if (s.holding.load(std::memory_order_relaxed)) idle(s, now);
+      return;
+    }
     auto *device = swapchain->get_device();
     // Native DXGI, as the exporter reads back buffers; identities only.
     // (ReShade's own back-buffer getters crashed under MinGW.) A resize may
@@ -665,40 +774,46 @@ namespace sunshine_game3d::ui_layer {
       for (count = 1; count < desc.BufferCount && count < buffers.size(); ++count)
         if (!(buffers[count] = buffer(count))) break;
     }
-    const auto now = GetTickCount64();
-    std::lock_guard<std::mutex> lock(s.mutex);
-    // Every retired copy's device is alive: on_destroy_device releases its own.
-    reap(s);
-    if (s.armed && s.device && s.device != device) return;
-    if (s.live.entries && (s.device != device || s.width != desc.BufferDesc.Width || s.height != desc.BufferDesc.Height)) {
-      retire_live(s, now);
-    } else if (s.device != device) retire_live(s, now);
-    // The queue this Present runs on, which the queue watch compares the
-    // live copies' executing queue with.
-    s.presenting_queue = queue ? queue->get_native() : 0;
-    s.device = device;
-    s.width = desc.BufferDesc.Width;
-    s.height = desc.BufferDesc.Height;
-    if (!cached) {
-      s.back_buffers.assign(buffers.begin(), buffers.begin() + count);
-      s.buffers_swapchain = key; s.buffers_first = first; s.buffers_count = desc.BufferCount;
-      s.buffers_width = desc.BufferDesc.Width; s.buffers_height = desc.BufferDesc.Height;
-      s.buffers_valid.store(true, std::memory_order_relaxed);
+    std::vector<retired> due;
+    {
+      std::lock_guard<std::mutex> lock(s.mutex);
+      // Every retired copy's device is alive: on_destroy_device hands over its own.
+      reap(s, now, due);
+      if (!s.armed.load(std::memory_order_relaxed) || !s.device || s.device == device) {
+        if (s.live.entries && (s.device != device || s.width != desc.BufferDesc.Width || s.height != desc.BufferDesc.Height)) {
+          retire_live(s, now);
+        } else if (s.device != device) retire_live(s, now);
+        // The queue this Present runs on, which a live copy's executing queue
+        // must equal to be bound directly.
+        s.presenting_queue = queue ? queue->get_native() : 0;
+        s.device = device;
+        s.width = desc.BufferDesc.Width;
+        s.height = desc.BufferDesc.Height;
+        if (!cached) {
+          s.back_buffers.assign(buffers.begin(), buffers.begin() + count);
+          s.buffers_swapchain = key; s.buffers_first = first; s.buffers_count = desc.BufferCount;
+          s.buffers_width = desc.BufferDesc.Width; s.buffers_height = desc.BufferDesc.Height;
+          s.buffers_valid.store(true, std::memory_order_relaxed);
+        }
+        s.live.tracker.present(now);
+      }
     }
-    s.live.tracker.present(now);
+    destroy(due);
   }
 
   void arm() {
     auto &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     drop_candidates(s);
-    s.armed = true;
+    ++s.census_scope;
+    s.armed.store(true, std::memory_order_relaxed);
   }
 
   std::vector<candidate> take(api::device *&device) {
     auto &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    s.armed = false;
+    s.armed.store(false, std::memory_order_relaxed);
+    ++s.census_scope;
     device = s.device;
     // The live tracker's choice is what UI detection reads; the others are candidates only.
     for (auto &c : s.candidates) c.active = c.source && c.source == s.live.tracker.active();
@@ -712,12 +827,14 @@ namespace sunshine_game3d::ui_layer {
     auto &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     s.graveyard.push_back({device, copy, GetTickCount64()});
+    s.holding.store(true, std::memory_order_relaxed);
   }
 
   void cancel() {
     auto &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    s.armed = false;
+    s.armed.store(false, std::memory_order_relaxed);
+    ++s.census_scope;
     drop_candidates(s);
   }
 }
@@ -731,12 +848,14 @@ extern "C" __declspec(dllexport) BOOL SunshineUILayerTestLive(sunshine_game3d::u
   auto &s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
   const auto &live = s.live;
-  // The newest recorded copy's id.
+  // The newest recorded copy's id, and the last executed copy's queue.
   out->capture_id = live.capture_id;
-  out->executed_queue = live.watch.last_queue(); out->presenting_queue = s.presenting_queue;
+  out->presenting_queue = s.presenting_queue;
   out->presents_since_copy = live.tracker.presents_since_copy();
-  out->foreign_present = live.watch.foreign_present();
-  out->queue_mixed = live.watch.mixed(); out->watching = live.watch.watching();
+  if (const auto *entry = live.latest()) {
+    out->executed_queue = entry->queue;
+    out->in_order = entry->copy.handle && presented_in_order(entry->queue, s.presenting_queue);
+  }
   return s.device != nullptr;
 }
 #endif

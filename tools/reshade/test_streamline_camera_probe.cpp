@@ -2899,7 +2899,7 @@ namespace {
       frame_generation_snapshot fg;
       require(query_frame_generation(view.value, fg) && fg.enabled, "versioned UI alpha FG mode was not confirmed");
       constexpr std::uint64_t runtime = 0x101, device = 0x201;
-      mask::set_request({runtime, device, fg.epoch, depth_observation_revision(), view.value, 1920, 1080, true});
+      mask::set_request({runtime, device, fg.epoch, depth_observation_revision(), view.value, 1920, 1080, true}, GetTickCount64());
       int native{}, commands{};
       auto resource = modern_resource(&native); resource.width = 1920; resource.height = 1080; resource.state = 8;
       auto tag = depth_tag_for(resource); tag.type = c.raw; tag.lifecycle = 0; tag.area = {0, 0, 1920, 1080};
@@ -2948,7 +2948,7 @@ namespace {
     require(query_frame_generation(view.value, fg) && fg.enabled, "FG alpha mode was not confirmed");
     constexpr std::uint64_t runtime = 0x100, device = 0x200;
     mask::request wanted{runtime, device, fg.epoch, depth_observation_revision(), view.value, 3840, 2160, true};
-    mask::set_request(wanted);
+    mask::set_request(wanted, GetTickCount64());
     int native{}, commands{};
     auto resource = modern_resource(&native); resource.width = 3840; resource.height = 2160; resource.state = 8;
     auto tag = depth_tag_for(resource); tag.type = 53; tag.lifecycle = 0; tag.area = {0, 0, 3840, 2160};
@@ -3015,25 +3015,25 @@ namespace {
     call_v2_tag(view, &tag, 1, &commands);
     require(mask::testing::last_attempt(runtime, observed) && observed.source.sequence == null_sequence,
       "new observation revision captured into an old requested alpha scope");
-    wanted.revision = depth_observation_revision(); mask::set_request(wanted);
+    wanted.revision = depth_observation_revision(); mask::set_request(wanted, GetTickCount64());
     call_v2_tag(view, &tag, 1, &commands);
     require(mask::testing::last_attempt(runtime, observed), "renewed alpha scope failed to recover");
     options.mode = 0; options_call(view, options);
-    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport) &&
+    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, GetTickCount64()) &&
         !mask::testing::last_attempt(runtime, observed), "FG Off retained alpha owner scope");
-    wanted.revision = depth_observation_revision(); mask::set_request(wanted);
+    wanted.revision = depth_observation_revision(); mask::set_request(wanted, GetTickCount64());
     tag.type = 2;
     call_v2_tag(view, &tag, 1, &commands);
     require(mask::testing::last_attempt(runtime, observed) && observed.kind == mask::source_kind::hudless &&
         !observed.source.frame_generation_input, "Fresh FG-off scope did not capture HUD-less color");
     options.mode = 1; options_call(view, options);
-    wanted.revision = depth_observation_revision(); mask::set_request(wanted);
+    wanted.revision = depth_observation_revision(); mask::set_request(wanted, GetTickCount64());
     call_v2_tag(view, &tag, 1, &commands);
     require(mask::testing::last_attempt(runtime, observed), "re-enabled FG did not resume color-only alpha capture");
     result_v2 = -7; options_call(view, options); result_v2 = 0;
-    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport), "failed FG options retained alpha scope");
-    mask::set_request(wanted); shutdown();
-    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport), "shutdown retained live alpha request");
+    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, GetTickCount64()), "failed FG options retained alpha scope");
+    mask::set_request(wanted, GetTickCount64()); shutdown();
+    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, GetTickCount64()), "shutdown retained live alpha request");
   }
 
   void test_ui_gate_viewport_zero_mixed_batch() {
@@ -3058,7 +3058,7 @@ namespace {
     require(query_ui_scope(UINT32_MAX, scope) && !scope.viewport,
       "Mixed viewport-zero tags did not establish live UI discovery scope");
     mask::request wanted{0x710, 0x720, scope.epoch, scope.revision, 0, 3840, 2160, true};
-    mask::set_request(wanted);
+    mask::set_request(wanted, GetTickCount64());
     SetLastError(incoming_error);
     require(call_v2_tag(view, tags, 3, &commands) == 0 && GetLastError() == outgoing_error,
       "Mixed UI capture gate changed public SDK forwarding");
@@ -3071,7 +3071,7 @@ namespace {
         !observed.latest_boundary.source.viewport && !observed.latest_boundary.source.frame_generation_input,
       "Mixed viewport-zero HUDless batch did not reach its matching live capture boundary");
     ++wanted.revision;
-    mask::set_request(wanted);
+    mask::set_request(wanted, GetTickCount64());
     call_v2_tag(view, tags, 3, &commands);
     require(mask::query_diagnostic(wanted.runtime, observed) && !observed.latest_boundary.source.sequence &&
         observed.hook_gate.state == mask::capture_gate::no_matching_request && !observed.hook_gate.matching_requests &&
@@ -3116,7 +3116,7 @@ namespace {
       ui_observation_scope scope;
       require(query_ui_scope(0, scope), "Repeated Off prevented independent UI scope discovery");
       const mask::request wanted{0x730, 0x740, scope.epoch, scope.revision, 0, 3840, 2160, true};
-      mask::set_request(wanted);
+      mask::set_request(wanted, GetTickCount64());
       mask::diagnostic_snapshot observed;
       require(mask::query_diagnostic(wanted.runtime, observed), "Repeated Off fixture lost initial request");
       const auto generation = observed.request_generation;
@@ -3144,7 +3144,7 @@ namespace {
         "Confirmed FG On did not retain its distinct input role");
       options.mode = options.generated_frames = 0;
       set_options(result);
-      require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport),
+      require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, GetTickCount64()),
         "Actual FG mode/knowledge loss retained the previous UI request");
     }
   }
@@ -3168,7 +3168,7 @@ namespace {
     require(query_ui_scope(view.value, scope), "Fresh UI scope could not be selected explicitly");
     constexpr std::uint64_t runtime = 0x100, device = 0x200;
     mask::request wanted{runtime, device, scope.epoch, scope.revision, scope.viewport, 3840, 2160, true};
-    mask::set_request(wanted);
+    mask::set_request(wanted, GetTickCount64());
     mask::boundary observed;
     for (const auto kind : {mask::source_kind::hudless, mask::source_kind::backbuffer,
         mask::source_kind::color_and_alpha, mask::source_kind::alpha}) {

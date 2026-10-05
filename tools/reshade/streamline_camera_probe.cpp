@@ -1746,6 +1746,7 @@ namespace sunshine_streamline {
       where.tag_scope = tag.source == origin::frame ? 1u : 0u;
       where.kind = static_cast<mask::source_kind>(tag.value.type);
       where.source_present_generation = input.source_present_generation;
+      where.format = input.source ? retained.format : 0;
       return mask::begin(where, input);
     }
     using alpha_attempts = std::array<sunshine_game3d::ui_mask::attempt, 4>;
@@ -1759,7 +1760,7 @@ namespace sunshine_streamline {
       gate.viewport = out.valid_viewport ? out.viewport : UINT32_MAX;
       for (const auto index : priority) if (out.tags[index].present)
         gate.seen_kinds |= mask::source_mask(static_cast<mask::source_kind>(out.tags[index].value.type));
-      const bool interested = mask::interested(source_epoch, out.loss, out.viewport, &gate.matching_requests);
+      const bool interested = mask::interested(source_epoch, out.loss, out.viewport, out.tick, &gate.matching_requests);
       if (!out.valid_viewport) gate.state = mask::capture_gate::invalid_viewport;
       else if (!current(out.observation)) gate.state = mask::capture_gate::inactive_observation;
       else if (out.loss != loss_revision.load(std::memory_order_acquire)) gate.state = mask::capture_gate::observation_changed;

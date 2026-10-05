@@ -234,7 +234,8 @@ namespace sunshine_game3d::ui_input {
       entry.native_device = base.device; entry.device_identity = device_identity;
     }
     ui_mask::set_request({reinterpret_cast<std::uint64_t>(runtime), device_identity,
-      observed.epoch, observed.revision, observed.viewport, desc.texture.width, desc.texture.height, true, filter});
+      observed.epoch, observed.revision, observed.viewport, desc.texture.width, desc.texture.height, true, filter},
+      GetTickCount64());
   }
   frame acquire(api::effect_runtime *runtime, renderer &renderer, source_alpha_ui_decision status,
       alpha_auto_policy &session, bool diagnostic) {
@@ -270,8 +271,7 @@ namespace sunshine_game3d::ui_input {
     nlohmann::json candidates;
     auto *queue = runtime->get_command_queue();
     auto *commands = queue->get_immediate_command_list();
-    constexpr ui_mask::source_kind kinds[]{ui_mask::source_kind::alpha, ui_mask::source_kind::color_and_alpha,
-      ui_mask::source_kind::backbuffer, ui_mask::source_kind::hudless};
+    const auto &kinds = ui_mask::capture_order;
     // The hooked interposer's own header range decides UIAlpha's raw number
     // (2.11.x: 68, 2.12+: 69). Outside the surveyed range it stays manual-only.
     const bool alpha_authenticated =
@@ -284,7 +284,7 @@ namespace sunshine_game3d::ui_input {
     // Direct binding (C4): with no dump armed, a candidate is read where it
     // lies (a leased Streamline snapshot, the live layer copy) instead of
     // being copied into the renderer's slot first. A dump keeps the copies.
-    const bool direct_binding = !diagnostic && commands == queue->get_immediate_command_list();
+    const bool direct_binding = !diagnostic;
     if (capturing && direct_binding)
       capture::observe_runtime_list(commands->get_native(), queue->get_native()); // Registered once; an SRW check after.
     // Manual On offers the same filtered candidates through detection, each
@@ -316,11 +316,16 @@ namespace sunshine_game3d::ui_input {
     struct tag_interval { std::uint64_t tagged{}, current{}; };
     std::array<tag_interval, 2> declared_intervals{};
     const bool fg_active = status.fg_active();
-    if (capturing) for (unsigned slot = 0; slot != 4; ++slot) {
+    // One scan of the capture owner per Present: the newest ready snapshot of
+    // each filtered kind (it also marks this runtime a reader of its tags).
+    ui_mask::acquired snapshots;
+    if (capturing)
+      ui_mask::acquire_all(reinterpret_cast<std::uint64_t>(runtime), now, snapshots, source_filter(wanted_source),
+        queue->get_native());
+    for (unsigned slot = 0; slot != kinds.size(); ++slot) {
       const auto kind = kinds[slot];
-      if (!(source_filter(wanted_source) & ui_mask::source_mask(kind))) continue;
-      ui_mask::selection selected;
-      if (!ui_mask::acquire_kind(reinterpret_cast<std::uint64_t>(runtime), kind, selected, now, queue->get_native())) continue;
+      if (!(snapshots.found & ui_mask::source_mask(kind))) continue;
+      const auto &selected = snapshots.by[slot];
       const bool hudless = kind == ui_mask::source_kind::hudless;
       // Without a same-batch Backbuffer, counting proposes the presented color
       // after the tag for a snapshot's first offer, or retained color for a
@@ -345,22 +350,26 @@ namespace sunshine_game3d::ui_input {
       // the GPU. A manual choice may use it.
       const bool admissible = (manual || kind != ui_mask::source_kind::alpha || alpha_authenticated) && (!hudless || paired);
       api::resource_view view{};
-      const auto typed = typed_format(selected.texture.format);
       // Direct binding: the leased snapshot itself, at the output's extent
-      // (the renderer's slot copy has that extent too), else the copy.
+      // (the renderer's slot copy has that extent too), else the copy. A
+      // lease moves the snapshot to the shader-resource state on this
+      // recording until end_local_views (result.leased), so a leased snapshot
+      // is never copied as well, even when the renderer cannot bind it.
+      bool leased = false;
       if (admissible && direct_binding && selected.texture.width == base.output_width &&
           selected.texture.height == base.output_height) {
-        capture::local_view leased;
-        if (capture::lease_local_view(commands->get_native(), queue->get_native(), selected.ticket, typed, leased))
-          view = renderer.bind_ui_snapshot(slot, selected.ticket.id, {leased.resource}, leased.view_format);
+        capture::local_view lease;
+        leased = capture::lease_local_view(commands->get_native(), queue->get_native(), selected.ticket,
+          typed_format(selected.texture.format), lease);
+        if (leased) view = renderer.bind_ui_snapshot(slot, selected.ticket.id, {lease.resource}, lease.view_format);
         if (view.handle) log_direct_binding(0);
-        result.leased |= view.handle != 0;
+        result.leased |= leased;
       }
-      if (admissible && !view.handle)
+      if (admissible && !leased)
         view = renderer.prepare_ui_candidate(slot, selected.ticket.id, [&](api::resource destination) {
           return capture::copy_local_texture(commands->get_native(), queue->get_native(), selected.ticket,
             destination.handle, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-            nullptr, commands == queue->get_immediate_command_list());
+            nullptr, true);
         }, static_cast<api::format>(selected.texture.format));
       if (diagnostic) {
         candidates.push_back(captured_metadata(selected, now, view.handle != 0,
@@ -411,10 +420,10 @@ namespace sunshine_game3d::ui_input {
       (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::color_and_alpha));
     if (layer_wanted && ui_layer::latest(runtime->get_device(), now, layer)) {
       constexpr std::uint64_t layer_capture = std::uint64_t(1) << 62; // Never a Streamline ticket id.
-      // Direct binding reads the live copy where it lies when its lists ran
-      // on the presenting queue; else it is copied into the renderer's slot
-      // (both rest in shader_resource). Either read holds the ring entry until
-      // this render's completion (complete()).
+      // Direct binding reads the live copy where it lies when it ran on the
+      // presenting queue alone; else, and under a dump, it is copied into the
+      // renderer's slot (both rest in shader_resource). Either read holds the
+      // ring entry until this render's completion (complete()).
       api::resource_view view{};
       if (direct_binding && layer.direct)
         view = renderer.bind_ui_candidate(4, layer_capture | layer.capture_id, layer.view, layer.copy);
@@ -433,8 +442,7 @@ namespace sunshine_game3d::ui_input {
         {"candidate_bit", ui_detection::candidate::layer}, {"available_for_detection", view.handle != 0},
         {"association", "previous_frame_offscreen_ui_layer"}, {"capture_id", layer.capture_id},
         {"presents_since_copy", layer.presents_since_copy}, {"age_ms", now >= layer.tick ? now - layer.tick : 0},
-        {"executed_queue", layer.executed_queue}, {"foreign_present", layer.foreign_present},
-        {"queue_mixed", layer.queue_mixed}});
+        {"executed_queue", layer.executed_queue}, {"presenting_queue_order", layer.in_order}});
       if (view.handle) {
         result.detection.layer = view;
         result.detection.layer_flags = ui_layer::detection_flags(static_cast<api::format>(layer.format));
@@ -520,12 +528,21 @@ namespace sunshine_game3d::ui_input {
       {"source", "automatic_candidate_set"}, {"association", "current_render_gpu_validation"},
       {"meaning", "Current render validates all admitted candidates and produces its mask on the GPU. Delayed quality statistics do not identify the exact current winner or authorize pixels."},
       {"candidates", candidates.is_null() ? nlohmann::json::array() : std::move(candidates)}}.dump();
+    ui_mask::diagnostic_snapshot latest;
+    const bool have_diagnostic = status.requested && ui_mask::query_diagnostic(reinterpret_cast<std::uint64_t>(runtime), latest);
+    bool log_gate = false;
+    std::array<std::uint32_t, hudless_outcome_count> outcomes{};
     {
       std::lock_guard<std::mutex> lock(source_mutex);
       const auto found = sources.find(runtime);
       if (found != sources.end()) {
         auto &entry = found->second;
         if (hudless_wanted) ++entry.hudless_outcomes[hudless_result];
+        if (have_diagnostic && now >= entry.next_gate_log) {
+          entry.next_gate_log = now + 5000;
+          outcomes = std::exchange(entry.hudless_outcomes, {});
+          log_gate = true;
+        }
         if (tag_offered) {
           entry.input_present = frame_sequence; entry.input_epoch = base.epoch; entry.input_viewport = base.viewport;
         }
@@ -544,18 +561,6 @@ namespace sunshine_game3d::ui_input {
       result.kind = ui_input_kind::unavailable; result.view = {}; result.explicit_origin.reset();
       result.detection = {}; result.detection.current_color = false;
       result.status.retained_alpha_ready = false; result.status.input = source_alpha_input::none;
-    }
-    ui_mask::diagnostic_snapshot latest;
-    const bool have_diagnostic = status.requested && ui_mask::query_diagnostic(reinterpret_cast<std::uint64_t>(runtime), latest);
-    bool log_gate = false;
-    std::array<std::uint32_t, hudless_outcome_count> outcomes{};
-    if (have_diagnostic) {
-      std::lock_guard<std::mutex> lock(source_mutex);
-      if (auto found = sources.find(runtime); found != sources.end() && now >= found->second.next_gate_log) {
-        found->second.next_gate_log = now + 5000;
-        outcomes = std::exchange(found->second.hudless_outcomes, {});
-        log_gate = true;
-      }
     }
     if (log_gate) {
       const auto &gate = latest.hook_gate;

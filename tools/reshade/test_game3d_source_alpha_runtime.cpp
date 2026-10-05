@@ -3170,7 +3170,7 @@ namespace {
     std::puts("PASS retained UI upload identity: no repeat copy; failures and renderer replacement reupload");
   }
 }
-// The offscreen layer's live copy on D3D11 (game3d_ui_layer.h, queue watch):
+// The offscreen layer's live copy on D3D11 (game3d_ui_layer.h, queue order):
 // on the immediate context, which is the presenting queue, the copy executes
 // in its own Present interval; a copy recorded on a deferred context executes
 // on the presenting queue too when its command list does.
@@ -3221,8 +3221,8 @@ void verify_layer_queue_d3d11(fixture &gpu, std::ofstream &report) {
   layer::latest(device, GetTickCount64(), live);
   gpu.context->ClearRenderTargetView(target_rtv.Get(), transparent);
   present();
-  require(layer::latest(device, GetTickCount64(), live) && live.presents_since_copy == 1 && !live.foreign_present &&
-      !live.queue_mixed && live.executed_queue == queue->get_native(),
+  require(layer::latest(device, GetTickCount64(), live) && live.presents_since_copy == 1 && live.in_order &&
+      live.direct && live.executed_queue == queue->get_native(),
     "an immediate-context layer copy was not taken on the presenting queue one Present before");
   // Deferred context: the copy is recorded before Present k+1 and executes
   // after it, on the presenting queue.
@@ -3232,12 +3232,12 @@ void verify_layer_queue_d3d11(fixture &gpu, std::ofstream &report) {
   checked(deferred->FinishCommandList(FALSE, &commands), "finish the deferred layer list");
   present();
   gpu.context->ExecuteCommandList(commands.Get(), FALSE);
-  require(layer::latest(device, GetTickCount64(), live) && live.capture_id > first_capture && !live.foreign_present &&
+  require(layer::latest(device, GetTickCount64(), live) && live.capture_id > first_capture && live.in_order &&
       live.executed_queue == queue->get_native(),
     "a deferred layer copy was not taken, or not on the presenting queue");
   report << "layer-queue-d3d11 immediate_same_queue=1 deferred_same_queue=1 presents_since_copy=" << live.presents_since_copy << '\n';
-  std::puts("PASS D3D11 layer queue watch: an immediate-context copy runs on the presenting queue one Present before its "
-    "render reads it, and a deferred-context copy executed by the immediate context runs on the presenting queue too");
+  std::puts("PASS D3D11 layer queue order: an immediate-context copy runs on the presenting queue one Present before its "
+    "render reads it and is bound directly, and a deferred-context copy executed by the immediate context runs on the presenting queue too");
 }
 
 namespace {

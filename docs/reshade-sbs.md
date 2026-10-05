@@ -246,9 +246,9 @@ below **UI mask source** edits it at runtime in both directions. Loading and eve
 default), the add-on records none of its diagnostic-only per-frame work: per-pass GPU timestamps
 and their resolves (the timing line keeps its CPU fields and hitch lines stay). The A2 per-pixel
 statistics (A2 revocation and the one-way judgment read them) and the exact UI counters always run. Decisions, masks, candidate binding and exported pixels
-are the same with the switch on or off. The capture owner's and the layer's queue watches stay
-registered either way, since direct binding reads them and the layer's live-copy ring offers a copy
-only once a list carrying it executed. The switch's own cost was not measured separately: Verify
+are the same with the switch on or off. The capture owner's queue watch and the layer's carrier
+events stay registered either way, since direct binding reads them and the layer's live-copy ring
+offers a copy only once a list carrying it executed. The switch's own cost was not measured separately: Verify
 found no renderer-level GPU difference with it on or off. Before selection revision 9 the switch
 also gated S3's frame-identity shadow (its clocks, stamps, proposals and log lines) and H2's own
 evidence passes, both removed, and with it on candidates were copied rather than bound directly.
@@ -288,7 +288,9 @@ snapshot captured on the presenting queue is leased (`depth_capture::lease_local
 storage moves to the shader-resource state on ReShade's immediate list, the lease registers that
 recording as a consumer exactly like a copy, so the storage is neither reused nor released until
 the submission's fence passes, and `end_local_views` returns it to its resting state after the
-Present's last read (its render, owed pack and dump). The renderer describes the leased storage
+Present's last read (its render, owed pack and dump). A snapshot leased on the Present's recording
+is never also copied there, even when the renderer cannot bind it (it is then not offered that
+Present), and `end_local_views` runs whenever a lease was taken. The renderer describes the leased storage
 in its own original-device descriptor (`renderer::bind_ui_snapshot`); the capture owner's own
 descriptor belongs to a heap ReShade wraps, which `push_descriptors` cannot copy. The offscreen UI
 layer keeps a ring of live copies (`ui_layer::ring_capacity`, 4; three normally suffice): each
@@ -297,10 +299,21 @@ submission, completed (`ui_layer::bound` with the renderer's completion fence an
 every entry busy the ring grows, and a full ring skips that copy and logs once. A recorded copy is
 pending until a list carrying it executes; only then is it offered, so detection reads the last
 executed copy as the single live texture did. A carrying list reset unexecuted returns the entry
-(never offered), and a copy pending for 2 s is abandoned. The offered copy is
-bound directly when its lists ran on the presenting queue only (the queue watch). D3D11, foreign
-or mixed queues, sRGB-stored snapshots read through UNORM, an exhausted consumer budget (32
-diagnostic slots, 256 MB under FG) and an armed dump keep today's copy. The pixels detection reads are the same either way. The log
+(never offered), and a copy pending for 2 s is abandoned. Each entry keeps the queue that
+executed its carrying list (one executed on two queues has none), and the offered copy is bound
+directly only when that is the presenting queue (a D3D11 immediate or deferred-context copy
+always is), since queue order then puts the copy before the Present's reads. The verdict is per
+copy: before WP1b one scope-wide queue watch remembered at most four carrying lists, so a fifth
+dropped the oldest list's queue while its copy was still promoted, and one foreign execution kept
+the whole scope from direct binding. A copy that ran on another queue is still offered and copied
+into the renderer's slot, as before, with no fence of the add-on ordering it, and the first such
+copy logs once (`Sunshine UI layer: the live layer copy executed on queue ..., not on the
+presenting queue ...`). Refusing such copies was considered and rejected: the Stellar Blade (SDR,
+FG off) and The Witcher 3 (FG on) dumps of 10-04 both record their layer copies as run on another
+queue than the presenting one, so a refusal would remove their layer protection. Streamline
+snapshots on D3D11, from foreign or mixed queues, sRGB-stored snapshots read through UNORM, an
+exhausted consumer budget (32 diagnostic slots, 256 MB under FG) and an armed dump keep today's
+copy. The pixels detection reads are the same either way. The log
 names the first direct read of each kind once (`Sunshine UI input: reading ... directly (no copy)`).
 
 **Colour toggles and the overlay.** The renderer keeps the working set of the previous colour
@@ -319,7 +332,14 @@ neither compiles nor stalls the Present.
 
 **Present-thread bookkeeping.** `ui_layer::observe_output` caches the swapchain's back buffers and
 re-enumerates them only when the swapchain, its size or buffer count, or its first buffer
-changes, or ReShade reports it created, resized or destroyed. The depth owner observes the effects
+changes, or ReShade reports it created, resized or destroyed. It does any of this only while the
+layer is wanted (UI detection asked for it within the last second, or a dump is armed: one atomic
+flag, which every transparent clear also reads before it resolves its view or takes the layer's
+lock); otherwise a Present only retires copies left from an earlier demand and destroys retired
+copies once due. The layer allocates new copies outside its lock (an entry is reserved under it,
+then allocated and published under it again, or destroyed when its scope moved on meanwhile) and
+destroys retired copies outside it, so a slow D3D12 allocation never stalls the Present thread or
+another recording thread. The depth owner observes the effects
 list, the immediate list and the queue once per Present (`observe_present`), and later copies on
 the registered immediate list skip their repeated interface checks.
 
@@ -619,14 +639,22 @@ The Witcher 3 Remastered tags Streamline's UI buffers only while FG is on, and i
 is opaque, but it draws all UI into such a layer (RGBA8, premultiplied, alpha exactly the UI's
 coverage). A layer is cleared to transparent black every frame, so the add-on observes each clear
 of a single-sample 2D color target that matches the swapchain size, has an alpha channel of at
-least 8 bits, is not a back buffer and is cleared to exactly (0, 0, 0, 0). A 2-bit alpha
+least 8 bits, is not a back buffer and is cleared whole to exactly (0, 0, 0, 0): without
+rectangles, or with a rectangle that covers the whole target. A partial clear (a viewport strip,
+one half of a split target) leaves the rest of the target's previous content, so it is not a
+layer clear; before WP1b any rectangle qualified. A 2-bit alpha
 (R10G10B10A2) cannot hold blended coverage; with FG on The Witcher 3 also clears such a scene
 target, which otherwise became the active layer and claimed the whole frame. Clearing requires the render-target state on
 every API, so a target can be copied just before its clear: the copy shows the previous frame.
 
 A target cleared in at least three frames with gaps under 250 ms is a confirmed layer; of several,
 the one cleared last in the frame is active, since UI draws last. Transient targets never displace
-a confirmed one. Only the foreground swapchain's Presents drive the tracker. While UI detection
+a confirmed one. Only the foreground swapchain's Presents drive the tracker. The tracker runs only
+while the layer is wanted: UI detection asked for it within the last second, or a dump is armed
+(its census). Otherwise every clear returns before it resolves its view or takes a lock, and
+Presents skip the output bookkeeping (**Present-thread bookkeeping** above); once wanted again the
+layer is confirmed anew after three cleared frames. Before WP1b clears and Presents were tracked
+with no reader. While UI detection
 asks for the layer (within the last second), the active layer is copied once per Present, at its
 first clear, into a persistent add-on texture; otherwise no copy is recorded into the game's
 frame. Auto offers the newest copy, if under 250 ms old, as a candidate of its own (candidate
@@ -2008,6 +2036,23 @@ evidence. It describes an attempt, not the consumed mask or an exact color/depth
 the consumed-alpha artifact and its provenance remain authoritative when a mask was used.
 Its `hook_gate` records the latest public tag callback's scope, observed UI kinds, matching
 request count and admission result; `request_generation` identifies the retained live request.
+A request matches a tag only while its runtime refreshed it (on every Present that wants UI
+captures) within 250 ms (`maximum_source_age_ms`) of the tag's entry, so a swapchain that stopped
+presenting (a launcher, an old swapchain beside its replacement) no longer makes every tag of the
+live one `ambiguous_request`, and a new runtime takes the entry of the one refreshed longest ago
+once it expired. A tag is copied only while its runtime read its UI captures within 1 s
+(`ui_mask::reader_window_ms`): a Present that requests captures but returns before its render
+(a renderer still compiling or unavailable) reads none, and its tags are refused rather than
+copied for no reader. The capture owner is read once per Present (`ui_mask::acquire_all`: every
+recent snapshot polled once, each filtered kind's newest ready one returned), and a tag scans the
+owner, its own kind only, only when both of its kind's reservations are taken. The gate line's
+`begin_refused` counts, per stage and since start, the tags whose `begin()` stopped without a
+capture attempt: `no_request`, `ambiguous_request`, `kind_filtered`, `not_newer`, `shape`,
+`unsupported_lifetime`, `no_reservation`, `no_reader` (the reader rule above) and `format` (the
+tagged resource's format, stored as its snapshot would be, cannot be read as its kind:
+`ui_mask::supported_format`, checked before any copy; such a tag revokes the kind's older
+snapshots like any invalid tag); `begin_last` names the request's latest. `no_reader` and `format`
+are new in WP1b: before it such tags were copied and then never read or never usable.
 A bounded `Sunshine UI capture gate` log reports the same evidence. An admitted hook with a
 zero capture boundary and a changing request generation indicates that the request was replaced
 or invalidated after admission, rather than that the game supplied no UI tag. Its
@@ -2245,9 +2290,10 @@ the token-batch pairing and the test-only identity override are gone. Its identi
 reserved and are never reused: `b2` words 6-9, decision words 50-51 (with H2's 48-49, all of texel
 12) and counter words 31-35. HUD-less pairs are
 exact only by a same-batch Backbuffer (E2) and real frames are identified by Present counting
-(T1). The layer's queue watch, which S3 introduced, remains: the live layer copy is bound directly
-only when the lists carrying it ran on the presenting queue, and its dumps keep `executed_queue`,
-`foreign_present` and `queue_mixed`.
+(T1). The layer's queue watch, which S3 introduced, remained until WP1b replaced it by each live
+copy's own executing queue: the live layer copy is bound directly only when it ran on the
+presenting queue, and its dumps record `executed_queue` and `presenting_queue_order` (before WP1b
+`foreign_present` and `queue_mixed`, the scope-wide watch's sticky verdicts).
 
 S0, S1, S2a and S2b are done; S3 was removed. Fix 1 after S2b (selection revision 4) replaced the
 guard's D proof of the scene layer, which an FG suspension's viewport change cleared and a fade-in
@@ -2270,7 +2316,7 @@ that its full claim acts only through H1 (c), under a held hidden verdict.
 | S2b fix 2 (removed) | H2, still screens without a UI source in SDR Auto (M5): stillness counts per D cell (texel 12, the previous-luma texture), source 11 through `b2` word 5, counters `decided.11` and `still`, the `UIFlattenStillScreens` switch defaulting to a shadow that only logs, and selection revision 5. Removed in selection revision 9 with S3; every identifier stays reserved (**Still screens without a UI source (H2, fix 2): removed**). | Every replay case unchanged; its sequence group was removed with it. |
 | S2b fix 3 (removed) | The pre-UI change set (candidate `0x100`, source 12), the refine rule, the lit rule for partial change sets, the change-set shadow and its bit-plane passes, the ring's per-requester slots, `UIPinChangedPixels`, the `Sunshine UI change set` line, the report's `Pre-UI change set` check and Dump 3D artifacts 43-45 (selection revision 6). Removed by user decision (rejected in SDR and HDR); selection revision 7 decides exactly as revision 5, and every identifier stays reserved (**Pre-UI change sets (fix 3) and pin only UI (fix 4): removed**). | Every replay case and sequence group that existed before fix 3 gives the outcome of fix 2 plus S3, A3 and the Dump 3D overflow fix; the 24 fix 3 and fix 4 replay cases and their groups were removed with them. |
 | S2b fix 4 (removed) | Rule P2, pin only UI: the darkening passes, planes 6-8, statistics rows 192-207, decision words 62-63, `b2` word 5 `0x100` and `0x200`, `UIPinOnlyUI` and its panel row, the `Sunshine UI darkening` line and the report's `Pin only UI` check. Removed by user decision with fix 3. | As fix 3's row. |
-| S3 (removed) | Snapshot identity and exactness (E2, T1) by snapshot tickets with GPU frame stamps, verified on the GPU and shipped as a shadow behind the Diagnostics switch; removed in selection revision 9 with H2 (**S3 snapshot ticket: removed**). HUD-less exactness stays by the same-batch Backbuffer and T1 by Present counting; the layer's queue watch remains. | Every replay case unchanged; its two sequence groups were removed, and its two KNOWN_TODAY T1/E2 cases are now `KNOWN_LIMIT` lines of Present counting. |
+| S3 (removed) | Snapshot identity and exactness (E2, T1) by snapshot tickets with GPU frame stamps, verified on the GPU and shipped as a shadow behind the Diagnostics switch; removed in selection revision 9 with H2 (**S3 snapshot ticket: removed**). HUD-less exactness stays by the same-batch Backbuffer and T1 by Present counting; the layer's queue watch remained until WP1b replaced it by each copy's own executing queue. | Every replay case unchanged; its two sequence groups were removed, and its two KNOWN_TODAY T1/E2 cases are now `KNOWN_LIMIT` lines of Present counting. |
 | S4 | Same-frame cleared target: the offscreen UI layer at its write end (D3D12) or at Present (D3D11), replacing the one-frame-late copy; one slot per cleared-target signature with a budgeted census rotation (E1, moved from S3). | No one-frame tear on moving HUD; Present-interval A/B. |
 | S5 | Back-buffer pre-UI snapshot, evidence-gated. | Census and shadow logs per affected title; bounded added cost. |
 | S6 | Evidence sweep, no code: every game in each colour mode and FG mode, scRGB, non-16:9, FMV and a first boot into a menu. | Every cell has a labelled dump and a report without FAIL counters. |
@@ -2391,7 +2437,9 @@ pixel semantics. Comparing unsynchronized final and HUDless images is not reliab
 While a dump request is armed, the first clear of up to three
 [offscreen UI layer](#setup) candidates is also copied as
 optional artifacts `ui_layer_candidate_0` to `_2` (IDs 40-42) with RGB and alpha previews, and
-`ui_layer_census` lists each target's size, format, clears seen while armed and capture status.
+`ui_layer_census` lists each target's size, format, clears seen while armed and capture status
+(`captured_before_clear`, `copy_allocation_failed`, or `allocating` when the dump was taken while
+the copy, allocated outside the layer's lock since WP1b, was not yet published).
 The census shows every qualifying target; `active` marks the one the live tracker chose, which the
 dump's automatic candidate set names as `ui_layer`.
 

@@ -638,8 +638,8 @@ namespace {
           straight_metadata.at("replay").at("source_alpha_auto").at("sampled_source") == sunshine_game3d::ui_detection::source_layer)
         throw std::runtime_error("The GPU admitted an offscreen layer with straight alpha: " + sampled.dump());
       // The live layer copy's queue facts on D3D12 (game3d_ui_layer.h, queue
-      // watch): once, since the foreign-queue verdict is sticky for the
-      // layer's scope.
+      // order): each copy keeps the queue that ran it; only one that ran on
+      // the presenting queue is bound directly.
       if (resource_type == 0) {
         const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
         const auto live_state = reinterpret_cast<BOOL (*)(sunshine_game3d::ui_layer::test_live_state *)>(
@@ -664,10 +664,11 @@ namespace {
         // The copy ran in the frame's own list on the presenting queue before
         // its Present: same queue, and the count names the Present before it.
         auto live = query();
-        require(live.watching && live.presents_since_copy == 1 && !live.foreign_present && !live.queue_mixed &&
-            live.executed_queue && live.executed_queue == live.presenting_queue,
-          "A layer copy executed before its Present was not a same-queue copy of the Present its count names");
-        // A layer list executed on a second direct queue: foreign, sticky.
+        require(live.in_order && live.presents_since_copy == 1 && live.executed_queue &&
+            live.executed_queue == live.presenting_queue,
+          "A layer copy executed before its Present was not an in-order copy of the Present its count names");
+        // A layer list executed on a second direct queue: its copy has no
+        // queue order before the Present's reads.
         com_ptr<ID3D12CommandQueue> second;
         D3D12_COMMAND_QUEUE_DESC second_desc{};
         second_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -694,14 +695,17 @@ namespace {
         wait(second.p);
         step(); no_effects();
         live = query();
-        require(live.foreign_present && live.queue_mixed && live.executed_queue != live.presenting_queue,
-          "A layer list executed on a second queue, after a bundle, was not foreign");
+        require(!live.in_order && live.executed_queue && live.executed_queue != live.presenting_queue,
+          "A layer copy executed on a second queue, after a bundle, was in queue order");
         skip_layer = false;
         render_tracked_depth = [&] { real_frame(); draw_layer(); };
         step(); no_effects();
-        require(query().foreign_present, "The foreign-queue verdict did not stay for the layer's scope");
-        std::puts("PASS D3D12 layer queue watch: a copy run on the presenting queue before its Present is same-queue and names "
-          "that Present; a list on a second direct queue, its copy kept across a bundle, is foreign for the scope");
+        live = query();
+        require(live.in_order && live.executed_queue == live.presenting_queue,
+          "The next layer copy run on the presenting queue was not in queue order again");
+        std::puts("PASS D3D12 layer queue order: a copy run on the presenting queue before its Present is in order and names "
+          "that Present; a copy run on a second direct queue, kept across a bundle, is not; the next copy on the "
+          "presenting queue is again (per copy, not sticky)");
       }
       evidence << "public-ui-hook descriptor_type=" << resource_type << " source_format=90 captured_format=87 tag=23 covered=" << covered <<
         " exact_consumed_and_optional=1 post_tag_opaque_overwrite=1 host_ack_immutable=1 offscreen_ui_layer=1 live_ui_layer_mask=1 frame_tags=" << bool(frame_tag) << '\n';

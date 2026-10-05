@@ -125,15 +125,13 @@ namespace sunshine_streamline::depth_capture {
     DXGI_FORMAT diagnostic_storage_format(DXGI_FORMAT format) {
       // Color/alpha allocations may be typeless while their UI views are UNORM.
       // Copy those bytes into a compatible typed snapshot so both the renderer
-      // and diagnostic host receive an explicit format. Alpha is unaffected by
-      // an sRGB RGB view. Do not guess float/integer interpretations for other
-      // typeless families, especially single-channel depth or mask resources.
-      switch (format) {
-      case DXGI_FORMAT_R8G8B8A8_TYPELESS: return DXGI_FORMAT_R8G8B8A8_UNORM;
-      case DXGI_FORMAT_B8G8R8A8_TYPELESS: return DXGI_FORMAT_B8G8R8A8_UNORM;
-      default: return format;
-      }
+      // and diagnostic host receive an explicit format (the UI capture owner
+      // checks the same mapping before it records a copy).
+      return static_cast<DXGI_FORMAT>(auxiliary_snapshot_format(static_cast<std::uint32_t>(format)));
     }
+    static_assert(auxiliary_snapshot_format(DXGI_FORMAT_R8G8B8A8_TYPELESS) == std::uint32_t(DXGI_FORMAT_R8G8B8A8_UNORM) &&
+      auxiliary_snapshot_format(DXGI_FORMAT_B8G8R8A8_TYPELESS) == std::uint32_t(DXGI_FORMAT_B8G8R8A8_UNORM) &&
+      auxiliary_snapshot_format(DXGI_FORMAT_R10G10B10A2_TYPELESS) == std::uint32_t(DXGI_FORMAT_R10G10B10A2_TYPELESS));
     unsigned diagnostic_pixel_bytes(DXGI_FORMAT format) {
       return game3d_debug::pixel_bytes(static_cast<unsigned>(diagnostic_storage_format(format)));
     }
