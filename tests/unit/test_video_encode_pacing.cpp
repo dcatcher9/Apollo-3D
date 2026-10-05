@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <vector>
+#include <src/platform/windows/capture_timing.h>
 #include <src/video.h>
 #include <src/video_encode_pacing.h>
 
@@ -476,6 +477,80 @@ namespace {
       EXPECT_FALSE(images.try_pop());
     }
     EXPECT_TRUE(skipped.expired());
+  }
+
+  TEST(RemoteEncodeStartupInputHoldTest, BoundIsOneIdleCaptureWaitAndItsBackoff) {
+    // Capture re-reads the desktop for a replacement no later than this after it starts.
+    const platf::dxgi::detail::capture_wait_policy_t remote {};
+    EXPECT_EQ(video::detail::desktop_after_export_wait, remote.source_timeout() + remote.idle_backoff());
+  }
+
+  TEST(RemoteEncodeStartupInputHoldTest, OnlyAPixelLessPredecessorHoldsTheStartupInput) {
+    video::detail::startup_input_hold_t hold {at(0ns), false};
+    EXPECT_FALSE(hold.active(at(0ns)));
+    EXPECT_EQ(hold.wait(at(0ns), std::chrono::nanoseconds {55ms}), 55ms);
+  }
+
+  TEST(RemoteEncodeStartupInputHoldTest, HeldInputWaitsOnlyForCaptureUntilTheDesktopArrives) {
+    // The predecessor's input had no pixels. The keepalive (55 ms) is overdue from the first wait
+    // and an IDR may be pending, yet nothing encodes the black startup input and no due deadline
+    // shortens the wait: it ends at each idle interval or with the desktop capture.
+    constexpr std::chrono::nanoseconds idle {55ms};
+    video::detail::startup_input_hold_t hold {at(0ns), true};
+    image_event images;
+    images.next_image = 150ms;
+    std::optional<int> captured;
+    while (!captured) {
+      ASSERT_TRUE(hold.active(at(images.now)));
+      captured = images.pop(hold.wait(at(images.now), idle));
+    }
+    EXPECT_EQ(images.now, 150ms);
+    EXPECT_EQ(images.polls, 3);  // 55 ms, 110 ms, then the capture.
+    hold.replaced();  // Converting the capture replaced the startup input; it is encoded now.
+    EXPECT_FALSE(hold.active(at(images.now)));
+    EXPECT_EQ(hold.wait(at(images.now), idle), idle);
+  }
+
+  TEST(RemoteEncodeStartupInputHoldTest, WithoutTheDesktopTheHoldEndsAtItsBound) {
+    constexpr std::chrono::nanoseconds idle {55ms};
+    video::detail::startup_input_hold_t hold {at(0ns), true};
+    image_event images;
+    while (hold.active(at(images.now))) {
+      ASSERT_FALSE(images.pop(hold.wait(at(images.now), idle)));
+      ASSERT_LE(images.polls, 4);
+    }
+    // 55, 110, 165 and the 210 ms bound; then the startup input may be encoded as before.
+    EXPECT_EQ(images.now, video::detail::desktop_after_export_wait);
+    EXPECT_EQ(images.polls, 4);
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, KeptInputGammaConversionPollsAtStreamCadence) {
+    // A pending stream gamma converts the retained source, but the conversion keeps the encoder
+    // input (metadata for pixels a released export owned), so pending_gamma stays armed. Its
+    // branch advances the provider schedule like a keepalive; left at the past target, the next
+    // wait would be zero and the same input would convert again at once.
+    constexpr std::chrono::nanoseconds interval {16ms};
+    constexpr auto threshold = interval / 4;
+    source_owner source;
+    source.observe(std::make_shared<captured_source>(1, at(0ns)));
+    source.converted();
+    image_event images;
+    images.now = 100ms;
+    auto target = at(40ms);
+    EXPECT_EQ(source.remaining_wait(at(images.now), target - threshold, true), 0ns);
+
+    std::vector<std::chrono::nanoseconds> waits;
+    for (int poll = 0; poll < 3; ++poll) {
+      target = video::detail::select_encode_frame_schedule(at(images.now), target, interval, threshold).next_encode_target;
+      const auto wait = source.remaining_wait(at(images.now), target - threshold, true);
+      ASSERT_TRUE(wait);
+      waits.push_back(*wait);
+      ASSERT_FALSE(video::detail::wait_for_encode_image(images, 55ms, interval, true, false, true, wait));
+    }
+    // The first poll rebases the overdue schedule; later ones keep exact stream cadence.
+    EXPECT_EQ(waits, (std::vector<std::chrono::nanoseconds> {interval - threshold, interval, interval}));
+    EXPECT_EQ(images.now, 100ms + interval - threshold + 2 * interval);
+    EXPECT_EQ(images.polls, 3);
   }
 
   TEST(RemoteEncodeWakeTest, ControlRequestsWakeOnlyAnInstalledEncodeLoop) {

@@ -7583,6 +7583,147 @@ TEST(EncodeReadyEventLifecycleSourceTests, ConsumesOnlyReadinessSampledBeforeCon
   );
 }
 
+namespace {
+  std::string encode_run_source_scope() {
+    const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
+    const auto encode_run = video_source.find("void encode_run(");
+    const auto capture_async = video_source.find("void capture_async(", encode_run);
+    if (encode_run == std::string::npos || capture_async == std::string::npos) {
+      return {};
+    }
+    return video_source.substr(encode_run, capture_async - encode_run);
+  }
+
+  // The body of the scope guard declared by `declaration`, which closes at loop-body indentation.
+  std::string encode_run_guard_body(const std::string &scope, const std::string &declaration) {
+    const auto start = scope.find(declaration);
+    const auto end = scope.find("\n    });", start);
+    if (start == std::string::npos || end == std::string::npos) {
+      return {};
+    }
+    return scope.substr(start, end - start);
+  }
+}  // namespace
+
+TEST(EncodeWakeLifecycleSourceTests, ControlStreamSharesTheSessionWakeWithTheEncodeLoop) {
+  const auto stream_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/stream.cpp");
+  ASSERT_FALSE(stream_source.empty());
+  EXPECT_NE(stream_source.find("session->config.monitor.encode_wake = session->video->encode_wake;"), std::string::npos);
+}
+
+TEST(EncodeWakeLifecycleSourceTests, OnlyAProviderLoopInstallsTheWakeAndItsExitUninstallsItFirst) {
+  const auto scope = encode_run_source_scope();
+  ASSERT_FALSE(scope.empty());
+  const auto gate = scope.find("if (independent_provider && config.encode_wake) {");
+  const auto install = scope.find("config.encode_wake->install(", gate);
+  ASSERT_NE(gate, std::string::npos);
+  ASSERT_NE(install, std::string::npos);
+  EXPECT_LT(install, scope.find('}', gate)) << "The install must be the gate's own body.";
+
+  // A guard declared later runs first: no wake outlives the loop, and capture copies the
+  // desktop again, before the source is handed to a replacement.
+  const auto retain = scope.find("auto retain_source = util::fail_guard(");
+  const auto release = scope.find("auto release_external_frames = util::fail_guard(");
+  ASSERT_NE(retain, std::string::npos);
+  ASSERT_NE(release, std::string::npos);
+  EXPECT_LT(retain, release);
+  const auto release_body = encode_run_guard_body(scope, "auto release_external_frames = util::fail_guard(");
+  EXPECT_NE(release_body.find("session->set_external_frame_wake({});"), std::string::npos);
+  EXPECT_NE(release_body.find("config.encode_wake->install({});"), std::string::npos);
+}
+
+TEST(EncodeWakeLifecycleSourceTests, KeptInputIsNotConvertedContentAndLossRecoveryEncodesAtOnce) {
+  const auto scope = encode_run_source_scope();
+  ASSERT_FALSE(scope.empty());
+  const auto finish = scope.find("const auto finish_conversion = [&]() {");
+  const auto finish_end = scope.find("};", finish);
+  ASSERT_NE(finish, std::string::npos);
+  ASSERT_NE(finish_end, std::string::npos);
+  const auto finish_body = scope.substr(finish, finish_end - finish);
+  EXPECT_NE(finish_body.find("converted_frame = !session->conversion_kept_input();"), std::string::npos);
+  EXPECT_NE(
+    scope.find("recovery_frame_requested = requested_idr_frame || (independent_provider && invalidated_ref_frames)"),
+    std::string::npos
+  );
+}
+
+TEST(EncodeWakeLifecycleSourceTests, KeptInputGammaConversionAdvancesTheProviderSchedule) {
+  const auto scope = encode_run_source_scope();
+  ASSERT_FALSE(scope.empty());
+  const auto gamma = scope.find("if (!conversion_ran && pending_gamma && last_img) {");
+  const auto failure = scope.find("Could not convert the retained source with stream gamma", gamma);
+  const auto kept = scope.find("if (independent_provider && !converted_frame) {", failure);
+  const auto advance = scope.find("encode_frame_timestamp = schedule.next_encode_target;", kept);
+  const auto next_branch = scope.find("if (!conversion_ran && depth_pipeline_ready_event", gamma);
+  ASSERT_NE(gamma, std::string::npos);
+  ASSERT_NE(failure, std::string::npos);
+  ASSERT_NE(kept, std::string::npos);
+  ASSERT_NE(advance, std::string::npos);
+  ASSERT_NE(next_branch, std::string::npos);
+  EXPECT_LT(advance, next_branch) << "Without the advance, a past target makes the next wait zero.";
+}
+
+TEST(EncodeWakeLifecycleSourceTests, ReplacementHoldsAPixelLessPredecessorsStartupInput) {
+  const auto scope = encode_run_source_scope();
+  ASSERT_FALSE(scope.empty());
+  const auto hold = scope.find("detail::startup_input_hold_t startup_input_hold {std::chrono::steady_clock::now(), awaiting_desktop_after_export};");
+  const auto retain = scope.find("auto retain_source = util::fail_guard(");
+  ASSERT_NE(hold, std::string::npos);
+  ASSERT_NE(retain, std::string::npos);
+  EXPECT_LT(hold, retain) << "The guard reads the hold on exit.";
+  const auto retain_body = encode_run_guard_body(scope, "auto retain_source = util::fail_guard(");
+  const auto handoff = retain_body.find("source.return_for_rebuild(*images, shutdown_event->peek(), reinit_event.peek(), holds_pixels);");
+  const auto carried = retain_body.find("awaiting_desktop_after_export = !holds_pixels || startup_input_hold.active(");
+  ASSERT_NE(handoff, std::string::npos);
+  ASSERT_NE(carried, std::string::npos);
+
+  // While held, even a recovery request waits for capture, and only the hold bounds that wait.
+  EXPECT_NE(scope.find("if (!recovery_frame_requested || images->peek() || hold_startup_input) {"), std::string::npos);
+  EXPECT_NE(scope.find("idle_wait = startup_input_hold.wait(wait_started, idle_wait);"), std::string::npos);
+  EXPECT_NE(scope.find("detail::wait_for_encode_image(*images, idle_wait, encode_frame_threshold, last_img && !hold_startup_input,"), std::string::npos);
+  // The capture that ends the hold converts at once; a deferral would wait out the idle interval.
+  EXPECT_NE(scope.find("if (!source.due(now, provider_poll_target, recovery_frame_requested || hold_startup_input)) {"), std::string::npos);
+
+  // Neither a keepalive nor a recovery request encodes the held input.
+  const auto replaced = scope.find("startup_input_hold.replaced();");
+  const auto held = scope.find("} else if (startup_input_hold.active(std::chrono::steady_clock::now())) {", replaced);
+  const auto skip = scope.find("continue;", held);
+  const auto keepalive_skip = scope.find("if (independent_provider && !converted_frame && !recovery_frame_requested", held);
+  const auto encode = scope.find("const auto publish_result = encode(", held);
+  ASSERT_NE(replaced, std::string::npos);
+  ASSERT_NE(held, std::string::npos);
+  ASSERT_NE(skip, std::string::npos);
+  ASSERT_NE(keepalive_skip, std::string::npos);
+  ASSERT_NE(encode, std::string::npos);
+  EXPECT_LT(skip, keepalive_skip);
+  EXPECT_LT(keepalive_skip, encode);
+
+  const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
+  const auto call = video_source.find("encode_run(\n        frame_nr,\n        awaiting_desktop_after_export,");
+  EXPECT_NE(call, std::string::npos) << "capture_async carries the hold across encode loops.";
+}
+
+TEST(EncodeWakeLifecycleSourceTests, DesktopDuplicationReduplicatesOnlyAfterAnIdleSourceTimeout) {
+  const auto display = read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  ASSERT_FALSE(display.empty());
+  const auto snapshot = display.find("capture_e display_ddup_vram_t::snapshot(");
+  const auto snapshot_end = display.find("capture_e display_ddup_vram_t::release_snapshot(", snapshot);
+  ASSERT_NE(snapshot, std::string::npos);
+  ASSERT_NE(snapshot_end, std::string::npos);
+  const auto body = display.substr(snapshot, snapshot_end - snapshot);
+  const std::string reduplicate_call = "dropped_desktop.reduplicate_on_timeout(export_owns_output)";
+  const auto reduplicate = body.find(reduplicate_call);
+  ASSERT_NE(reduplicate, std::string::npos);
+  EXPECT_EQ(body.find("reduplicate_on_timeout(", reduplicate + reduplicate_call.size()), std::string::npos);
+  const auto line_start = body.rfind('\n', reduplicate);
+  const auto line = body.substr(line_start, body.find('\n', reduplicate) - line_start);
+  EXPECT_NE(line.find("if (capture_status == capture_e::timeout && "), std::string::npos);
+  EXPECT_NE(line.find("detail::capture_wait_policy_t::waited_for_source(timeout)"), std::string::npos);
+  const auto not_ok = body.find("if (capture_status != capture_e::ok) {");
+  ASSERT_NE(not_ok, std::string::npos);
+  EXPECT_LT(reduplicate, not_ok) << "Only a timeout, through the once-per-drop policy, re-duplicates.";
+}
+
 TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals) {
   const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
   const auto display = read_source_file(

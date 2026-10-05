@@ -1079,6 +1079,7 @@ namespace video {
 
   void encode_run(
     int &frame_nr,  // Store progress of the frame number
+    bool &awaiting_desktop_after_export,  // In and out; see detail::startup_input_hold_t
     safe::mail_t mail,
     img_event_t images,
     config_t config,
@@ -1206,13 +1207,19 @@ namespace video {
     // until the desktop changes. Keep this source so the replacement can resume real content.
     detail::latest_encode_source_t<std::shared_ptr<platf::img_t>> source;
     const auto &last_img = source.latest();
+    // Declared before retain_source, which reads it on exit.
+    detail::startup_input_hold_t startup_input_hold {std::chrono::steady_clock::now(), awaiting_desktop_after_export};
     auto retain_source = util::fail_guard([&] {
       // Encoder failures also rebuild against the same capture display. Preserve its last real
       // image so a static desktop does not keep encoding the replacement's black dummy frame.
       // A newer queued capture wins; the capture thread drains old images on display reinit.
       // Metadata for pixels a live export owned has none to show: capture copies the whole
       // desktop again for the replacement once the guard below releases the output.
-      source.return_for_rebuild(*images, shutdown_event->peek(), reinit_event.peek(), !last_img || !last_img->pixels_skipped);
+      const bool holds_pixels = !last_img || !last_img->pixels_skipped;
+      source.return_for_rebuild(*images, shutdown_event->peek(), reinit_event.peek(), holds_pixels);
+      // The replacement then starts from its black startup input, as this loop may still do:
+      // it holds that input back until capture delivers the desktop.
+      awaiting_desktop_after_export = !holds_pixels || startup_input_hold.active(std::chrono::steady_clock::now());
     });
     // Declared after retain_source so that it runs first. No provider or control wake outlives
     // this loop, and capture stops skipping pixels for an encoder that no longer converts.
@@ -1429,7 +1436,9 @@ namespace video {
 
       // Idle keepalives preserve static image quality. Pending retained-source conversion is
       // serviced at the requested cadence instead of waiting for that slower heartbeat.
-      if (!recovery_frame_requested || images->peek()) {
+      // While the black startup input is held, even a recovery request waits for capture first.
+      const bool hold_startup_input = startup_input_hold.active(std::chrono::steady_clock::now());
+      if (!recovery_frame_requested || images->peek() || hold_startup_input) {
         const bool conversion_poll_pending = last_img && (pending_gamma || session->needs_conversion_poll());
         const auto wait_started = std::chrono::steady_clock::now();
         auto pending_source_wait = source.remaining_wait(wait_started, provider_poll_target, independent_provider && conversion_poll_pending);
@@ -1437,8 +1446,14 @@ namespace video {
           const auto keepalive_wait = detail::provider_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
           pending_source_wait = pending_source_wait ? std::min(*pending_source_wait, keepalive_wait) : keepalive_wait;
         }
+        // Nothing is encoded before capture delivers a frame while the startup input is held, so
+        // only the hold's deadline bounds this wait: a due poll or keepalive must not spin it.
+        auto idle_wait = max_frametime;
+        if (hold_startup_input) {
+          idle_wait = startup_input_hold.wait(wait_started, idle_wait);
+        }
         bool captured = false;
-        if (auto img = detail::wait_for_encode_image(*images, max_frametime, encode_frame_threshold, static_cast<bool>(last_img), depth_pipeline_ready_event && depth_pipeline_ready_event->peek(), conversion_poll_pending, pending_source_wait)) {
+        if (auto img = detail::wait_for_encode_image(*images, idle_wait, encode_frame_threshold, last_img && !hold_startup_input, depth_pipeline_ready_event && depth_pipeline_ready_event->peek(), conversion_poll_pending, pending_source_wait)) {
           // Metadata for pixels an external provider owns, with an unchanged cursor, only
           // replaces the retained source; the provider's own wake or the keepalive converts it.
           const bool new_content = img->conversion_needed;
@@ -1473,9 +1488,10 @@ namespace video {
 
           // Defer an early presentation, but retain the source until conversion. If capture
           // stops here, the pending-source deadline below must still display these final pixels.
+          // A capture that may replace a held startup input is never early: nothing was encoded.
           if (time_diff < -frame_variation_threshold) {
             const auto now = std::chrono::steady_clock::now();
-            if (!source.due(now, provider_poll_target, recovery_frame_requested)) {
+            if (!source.due(now, provider_poll_target, recovery_frame_requested || hold_startup_input)) {
               continue;
             }
             // A stale capture timestamp must not starve a source whose presentation is due.
@@ -1536,12 +1552,21 @@ namespace video {
         if (lifecycle_change_requested()) {
           break;
         }
-        frame_timestamp = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        frame_timestamp = now;
         if (convert_frame(*last_img)) {
           BOOST_LOG(error) << "Could not convert the retained source with stream gamma"sv;
           break;
         }
         finish_conversion();
+        if (independent_provider && !converted_frame) {
+          // Kept input: pending_gamma stays armed for the next real source. Poll for it at stream
+          // cadence; with the past target left as it was, the next wait would be zero.
+          const auto schedule = detail::select_encode_frame_schedule(
+            now, encode_frame_timestamp, encode_frame_threshold, frame_variation_threshold
+          );
+          encode_frame_timestamp = schedule.next_encode_target;
+        }
       }
 
       // Host SBS initializes only its per-stream D3D/CUDA resources in the background; the model
@@ -1600,6 +1625,14 @@ namespace video {
         // conversion remains armed so a static retained source adopts it on the next loop. A
         // conversion that kept the input consumes it too: the next real source installs it.
         depth_pipeline_ready_event->pop(0ms);
+      }
+
+      if (converted_frame) {
+        startup_input_hold.replaced();
+      } else if (startup_input_hold.active(std::chrono::steady_clock::now())) {
+        // The encoder input is still the black startup dummy while capture re-reads the desktop:
+        // neither a keepalive nor a recovery request encodes it. An IDR stays latched.
+        continue;
       }
 
       if (independent_provider && !converted_frame && !recovery_frame_requested && std::chrono::steady_clock::now() < last_encode_at + keepalive_interval) {
@@ -1800,6 +1833,8 @@ namespace video {
     }
 
     int frame_nr = 1;
+    // Set when an encode loop ends with an input that had no pixels; see startup_input_hold_t.
+    bool awaiting_desktop_after_export = false;
     detail::encoder_recovery_t recovery;
     bool recovery_wait_logged = false;
 
@@ -2218,6 +2253,7 @@ namespace video {
 
       encode_run(
         frame_nr,
+        awaiting_desktop_after_export,
         mail,
         images,
         session_config,

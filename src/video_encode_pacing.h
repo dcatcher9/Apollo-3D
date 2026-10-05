@@ -91,6 +91,58 @@ namespace video::detail {
     bool pending_ = false;
   };
 
+  /** Longest wait for capture to deliver the desktop to an encoder that starts without a source
+   * because its predecessor's input had no pixels (a live export owned them).
+   *
+   * Capture re-reads the whole desktop for it no later than when one idle source wait times out,
+   * and retries after its idle backoff: 200 ms + 10 ms in platf::dxgi::detail::capture_wait_policy_t.
+   */
+  inline constexpr std::chrono::milliseconds desktop_after_export_wait {210};
+
+  /** Holds back the black startup input of an encoder whose predecessor's input had no pixels.
+   *
+   * Such an encoder starts with only its black startup input while capture re-reads the whole
+   * desktop. Encoding that input, for the minimum-FPS keepalive or a recovery request, would flash
+   * black (as an IDR, for a recovery). Until a conversion replaces it, or desktop_after_export_wait
+   * has passed, the encode loop encodes nothing and waits only for capture: no keepalive or poll
+   * deadline shortens that wait, so it cannot spin. An IDR requested meanwhile stays latched for
+   * the first real frame.
+   */
+  class startup_input_hold_t {
+  public:
+    startup_input_hold_t(std::chrono::steady_clock::time_point now, bool hold) noexcept {
+      if (hold) {
+        deadline_ = now + desktop_after_export_wait;
+      }
+    }
+
+    /** Whether the startup input is still held at `now`; the hold ends at its deadline. */
+    [[nodiscard]] bool active(std::chrono::steady_clock::time_point now) noexcept {
+      if (deadline_ && now >= *deadline_) {
+        deadline_.reset();
+      }
+      return deadline_.has_value();
+    }
+
+    /** A conversion replaced the startup input. */
+    void replaced() noexcept {
+      deadline_.reset();
+    }
+
+    /** The image wait while held: the idle interval, cut at the deadline. */
+    template<class Duration>
+    [[nodiscard]] Duration wait(std::chrono::steady_clock::time_point now, Duration idle_interval) const noexcept {
+      if (!deadline_) {
+        return idle_interval;
+      }
+      const auto left = std::max(*deadline_ - now, std::chrono::steady_clock::duration::zero());
+      return std::min(idle_interval, std::chrono::duration_cast<Duration>(left));
+    }
+
+  private:
+    std::optional<std::chrono::steady_clock::time_point> deadline_;
+  };
+
   /** Time left until an independent provider's minimum-FPS keepalive is due.
    *
    * Such a provider wakes the encode loop itself and is not polled at stream cadence, and its

@@ -7828,7 +7828,9 @@ namespace platf::dxgi {
 
     // Sampled once per acquisition; the encode thread may claim or release the output any time.
     const bool export_owns_output = external_pixels_owner.load(std::memory_order_acquire) != 0;
-    if (capture_status == capture_e::timeout && dropped_desktop.reduplicate_on_timeout(export_owns_output)) {
+    // Only an idle source wait re-duplicates, never a short pacing probe: a stream's timed-out
+    // probe is followed by an ordinary source wait, which recovers the desktop if it stays idle.
+    if (capture_status == capture_e::timeout && detail::capture_wait_policy_t::waited_for_source(timeout) && dropped_desktop.reduplicate_on_timeout(export_owns_output)) {
       return reduplicate_output();
     }
     if (capture_status != capture_e::ok) {
@@ -8495,7 +8497,9 @@ namespace platf::dxgi {
     // Sampled once per frame; the encode thread may claim or release the output any time.
     const bool export_owns_output = external_pixels_owner.load(std::memory_order_acquire) != 0;
     // A static screen sends no frame once an export releases the output. Copy the newest frame
-    // forwarded without pixels meanwhile, which is still the current screen.
+    // forwarded without pixels meanwhile, which is still the current screen: a timeout means no
+    // newer frame is waiting. Unlike a re-duplication this is one cheap copy, so a short pacing
+    // probe may make it too, and the desktop returns without waiting for an idle source timeout.
     const bool kept_frame = capture_status == capture_e::timeout && !export_owns_output && dup.kept_frame_texture(&src, frame_time);
     if (capture_status != capture_e::ok && !kept_frame) {
       return capture_status;

@@ -115,6 +115,16 @@ namespace {
     EXPECT_EQ(idle.pacing_sleep(group_start + group_frames * frame_interval - now), frame_interval);
   }
 
+  TEST(WindowsCaptureWaitPolicyTest, OnlyASourceTimeoutCountsAsAnIdleSource) {
+    // Pacing probes wait 2 ms or less for a frame that is due now; a late present is ordinary
+    // there. Every source wait, local or remote, is long enough to count.
+    for (const auto probe : {0ms, 1ms, 2ms}) {
+      EXPECT_FALSE(capture_wait_policy_t::waited_for_source(probe));
+    }
+    EXPECT_TRUE(capture_wait_policy_t::waited_for_source(capture_wait_policy_t {true}.source_timeout()));
+    EXPECT_TRUE(capture_wait_policy_t::waited_for_source(capture_wait_policy_t {}.source_timeout()));
+  }
+
   TEST(WindowsLocalPresenterTimingTest, OnlyShortenedLocalPacingProbesRebaseTheGroup) {
     const capture_wait_policy_t pending {true};
     EXPECT_TRUE(pending.rebase_after_pacing_snapshot(16ms));

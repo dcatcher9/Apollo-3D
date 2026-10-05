@@ -161,6 +161,16 @@ namespace platf::dxgi::detail {
       // snapshot; entering the ordinary idle snapshot here hid the final result for 210 ms.
       return !pending_local_work;
     }
+
+    /** Whether a snapshot that timed out waited a whole source timeout, the shortest being 5 ms.
+     *
+     * Only then has the source stayed idle. A pacing probe waits 2 ms or less for a frame that is
+     * due now, and a present arriving a little later is ordinary, so its timeout must not start
+     * recovery meant for an idle source.
+     */
+    [[nodiscard]] static constexpr bool waited_for_source(const std::chrono::milliseconds timeout) noexcept {
+      return timeout >= capture_wait_policy_t {true}.source_timeout();
+    }
   };
 
 }  // namespace platf::dxgi::detail
