@@ -1310,7 +1310,9 @@ namespace {
     }
     require(!dumps.empty(), "no dump copy fitted beside the idle live cache");
     for (auto &dump : dumps) { capture::release_diagnostic_texture(dump); capture::finish_diagnostic_texture(dump, true); }
-    check(close_list(gpu.list.Get()), "discarded dump recording close"); gpu.reset(); dumps.clear(); capture::poll();
+    // No poll here: it ages idle storage on wall-clock time, and the dump
+    // allocations above may take long enough to release the cache.
+    check(close_list(gpu.list.Get()), "discarded dump recording close"); gpu.reset(); dumps.clear();
     auto reused = capture::record_local_texture(native(gpu.list.Get()), image.input);
     require(bool(reused) && reused.ownership == storage.lock(), "live cache was not reused after the dump copies");
     capture::finish_diagnostic_texture(reused, true); gpu.submit(); gpu.wait(); gpu.reset();

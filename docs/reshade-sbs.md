@@ -3024,8 +3024,9 @@ again after effects reload and published only when readiness changes. Readiness 
 `DEPTH`: ReShade 6.8 waits for the whole queue on every binding update once an effect declares
 `DEPTH`, so Generic rebinds only when its view changes. A logical Generic source rotating through
 several physical members binds one stable copy per format and size instead of each member's view.
-The add-on's renderer reads the selected capture directly, so the copy exists only while some
-technique is enabled (any enabled technique counts as a possible `DEPTH` reader); otherwise a
+The add-on's renderer reads the selected capture directly, so the copy exists only while effects
+are enabled and some technique is enabled (any enabled technique counts as a possible `DEPTH`
+reader); otherwise a
 rotating source binds nothing. One depth copy is recorded per new ready capture.
 
 For each effects pass, the exporter resolves calibration into a value-only frame decision before

@@ -389,8 +389,8 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	// for a readiness flip. A logical source rotating through several physical
 	// members (rotating) binds one stable copy per format and size instead of
 	// each member's view. The add-on's renderer reads selected_shader_resource,
-	// so that copy exists only while an enabled technique may read DEPTH
-	// (effects_read_depth); otherwise a rotating source binds nothing. Retired
+	// so that copy exists only while effects are enabled and an enabled technique
+	// may read DEPTH (effects_read_depth); otherwise a rotating source binds nothing. Retired
 	// copies are destroyed after the usual delay.
 	resource_view effects_view = { 0 };
 	bool effects_bound = false;
@@ -3258,6 +3258,9 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 
 	auto &data = *runtime->get_private_data<generic_depth_data>();
 	const bool automatic = s_sunshine_auto && (device->get_api() == device_api::d3d11 || device->get_api() == device_api::d3d12);
+	// Native mode runs this every Present, also while ReShade skips its effects
+	// (globally disabled, none loaded) and so never recounts the technique flag.
+	const bool effects_may_read_depth = data.effects_read_depth && runtime->get_effects_state();
 	data.native_access_open = false;
 	using sunshine_game3d::slow_step;
 	auto completed_sample = [&] { const slow_step step("depth sample poll"); return sunshine_depth::poll(runtime); }();
@@ -3320,7 +3323,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		update_effect_runtime(runtime);
 	}
 	// No enabled technique can read the stable copy; this Present unbinds it.
-	if (!data.effects_read_depth && data.stable.texture != 0)
+	if (!effects_may_read_depth && data.stable.texture != 0)
 		retire_stable_binding(data, *device_data);
 	if (!data.retired_stable.empty())
 		destroy_stable_bindings(runtime, data, device_data->frame_index, false);
@@ -3668,7 +3671,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.selected_record = captured.record;
 		data.selected_capture = captured.metadata;
 		data.capture_ready = captured.record.renderable(device_data->native_present_index, device_data->frame_index, data.runtime_epoch);
-		if (data.rotating && data.effects_read_depth && data.using_backup_texture && data.capture_ready)
+		if (data.rotating && effects_may_read_depth && data.using_backup_texture && data.capture_ready)
 		{
 			// Only a new ready capture is copied. A renderable record's sampled
 			// texture is the selected view's backup, in the shader-resource state.
