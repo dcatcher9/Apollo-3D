@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // CPU-only compile/reflection validation of the native Game 3D shader ABI.
 #include "game3d_ui_counters.h"
-#include "game3d_ui_darkening.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
 
@@ -13,7 +12,6 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -42,8 +40,6 @@ namespace {
     {"DepthBuffer", D3D_SIT_TEXTURE, 1},
     {"SunshineLinearClamp", D3D_SIT_TEXTURE, 2},
     {"SunshineHostCandidateSampler", D3D_SIT_TEXTURE, 3},
-    {"SunshineRetainedPresent1", D3D_SIT_TEXTURE, 2}, // UI detection passes only (fix 3).
-    {"SunshineRetainedPresent2", D3D_SIT_TEXTURE, 3}, // UI detection passes only (fix 3).
     {"SunshineHostVerticalConditionedSampler", D3D_SIT_TEXTURE, 4},
     {"SunshineHostFinalSampler", D3D_SIT_TEXTURE, 5},
     {"SunshineEyeLeftSampler", D3D_SIT_TEXTURE, 6},
@@ -57,14 +53,12 @@ namespace {
     {"SunshineUIColorAlpha", D3D_SIT_TEXTURE, 12},
     {"SunshineUIBackbufferAlpha", D3D_SIT_TEXTURE, 13},
     {"SunshineHUDless", D3D_SIT_TEXTURE, 14},
-    {"SunshineUIChangeSetPlanes", D3D_SIT_TEXTURE, 8}, // Change-set count pass only (fix 3).
     {"SunshineUIStamps", D3D_SIT_TEXTURE, 9}, // UI detection passes only (S3).
     {"SunshineHostCandidateStore", D3D_SIT_UAV_RWTYPED, 0},
     {"SunshineHostVerticalMajorantStore", D3D_SIT_UAV_RWTYPED, 1},
     {"SunshineHostVerticalConditionedStore", D3D_SIT_UAV_RWTYPED, 2},
     {"SunshineHostFinalStore", D3D_SIT_UAV_RWTYPED, 3},
     {"SunshineUIPlaneTilesStore", D3D_SIT_UAV_RWTYPED, 4},
-    {"SunshineUIChangeSetPlanesStore", D3D_SIT_UAV_RWTYPED, 4}, // Change-set bits pass only (fix 3).
     {"SunshineUIPlaneResolvedStore", D3D_SIT_UAV_RWTYPED, 5},
     {"SunshineAlphaCoverageStore", D3D_SIT_UAV_RWTYPED, 6},
     {"SunshineUIConflictStore", D3D_SIT_UAV_RWTYPED, 7},
@@ -109,9 +103,8 @@ namespace {
     {"Sunshine_UIDetectionFlags", 12, 4, D3D_SVT_UINT},
     // Selection revision 4: the layer's pair threshold with the presented color.
     {"Sunshine_UIPreUIThreshold", 16, 4, D3D_SVT_FLOAT},
-    // Selection revision 5: H2's still-screen flag; revision 6 (fix 3): the
-    // change-set rule bits beside it.
-    {"Sunshine_UIRules", 20, 4, D3D_SVT_UINT},
+    // Selection revision 5: H2's still-screen flag (bits 0x2-0x200 reserved).
+    {"Sunshine_UIStillScreen", 20, 4, D3D_SVT_UINT},
     // S3: the proposed labels and the identity bits.
     {"Sunshine_UIExpectedLayerPresent", 24, 4, D3D_SVT_UINT},
     {"Sunshine_UIExpectedLayerToken", 28, 4, D3D_SVT_UINT},
@@ -285,22 +278,6 @@ namespace {
       require(shared <= 32768, std::string(entry.name) + " exceeds 32 KiB of group-shared memory");
       manifest << "  groupshared " << shared << '\n';
     }
-    // Fix 3: the retained Presents share t2 and t3 with other passes'
-    // resources; only the UI detection passes (fix 4's darkening passes
-    // included) read them, never beside those.
-    {
-      bool retained = false, shared = false;
-      for (unsigned index = 0; index < shader.BoundResources; ++index) {
-        D3D11_SHADER_INPUT_BIND_DESC actual {};
-        require(SUCCEEDED(reflection->GetResourceBindingDesc(index, &actual)), "Binding reflection failed");
-        const std::string name = actual.Name;
-        retained |= name == "SunshineRetainedPresent1" || name == "SunshineRetainedPresent2";
-        shared |= name == "SunshineLinearClamp" || name == "SunshineHostCandidateSampler";
-      }
-      const std::string name = entry.name;
-      require(!retained || ((name.rfind("SunshineUIDetection", 0) == 0 || name.rfind("SunshineUIDarkening", 0) == 0) && !shared),
-        name + ": only the UI detection passes may read the retained Presents at t2 and t3");
-    }
     // S3: the stamps share t9 with the resolved UI plane; only the detection
     // reduce and the scene evidence pass read them (texel 12's identity words).
     {
@@ -398,46 +375,12 @@ int main(int argc, char **argv) {
     mirrored(detection::hlsl_hold_defines);
     mirrored(detection::hlsl_h1_defines);
     mirrored(detection::hlsl_still_defines);
-    mirrored(detection::hlsl_change_set_defines);
-    // The reduce ports ui_selection::decide of this revision. Fix 4 leaves
-    // decide() unchanged: its darkening passes are versioned by the planes
-    // marker, and they write decision words 62-63 of the same 16 texels.
+    // The reduce ports ui_selection::decide of this revision.
     require(marker(std::string(sunshine_game3d::ui_selection::revision_marker)) == sunshine_game3d::ui_selection::revision &&
-        sunshine_game3d::ui_selection::revision == 6u,
-      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 6");
-    require(decision_texels == detection::change_set_decision_texels && decision_texels == 16u,
-      "Selection revision 6 writes the change-set shadow in decision texels 13-15: 16 decision texels");
-    // Fix 4 (pin only UI, rule P2): nine bit planes, the darkening statistics
-    // rows after the change-set shadow's, and every darkening constant equal
-    // to the CPU reference's (game3d_ui_darkening.h), the opacity tolerance
-    // to the bit as the float the shader loads.
-    {
-      namespace dark = sunshine_game3d::ui_darkening;
-      namespace mirror = detection::darkening;
-      require(marker(std::string(detection::change_set::planes_marker)) == detection::change_set::planes &&
-          detection::change_set::planes == 9u && marker("SUNSHINE_UI_DARKENING_ROW") == detection::darkening_statistics_row &&
-          detection::statistics_rows(evidence_images, decision_texels, detection::change_set::planes) == 208u,
-        "Fix 4's darkening planes or statistics rows differ from the contract");
-      require(float(mirror::opacity_tolerance_255) / 255.f == dark::opacity_tolerance &&
-          float(mirror::change_set_scale) == dark::change_set_tolerance_scale &&
-          1.f / float(mirror::step_inverse) == dark::step && mirror::tile == dark::tile &&
-          mirror::tile_min_pixels == dark::tile_min_pixels && float(mirror::tile_effect_scale) == dark::tile_effect_scale &&
-          double(mirror::min_variance_ppm) * 1e-6 == dark::tile_min_relative_variance,
-        "The darkening constants of game3d_ui_detection_contract.h differ from game3d_ui_darkening.h");
-      for (std::uint32_t s = 0; s != detection::source_count + 2u; ++s)
-        require(mirror::eligible(s) == dark::eligible(s) && mirror::opacity_source(s) == dark::opacity_source(s),
-          "The darkening's eligible sources differ between the contract and the CPU reference");
-      for (const float tolerance : {dark::opacity_tolerance, dark::opacity_tolerance_linear}) {
-        std::uint32_t tolerance_bits;
-        std::memcpy(&tolerance_bits, &tolerance, sizeof(tolerance_bits));
-        char literal[32];
-        std::snprintf(literal, sizeof(literal), "asfloat(0x%08xu)", unsigned(tolerance_bits));
-        require(source.find(literal) != std::string::npos,
-          std::string("The shader's opacity tolerance is not the CPU reference's float ") + literal);
-      }
-      require(source.find("SUNSHINE_UI_CHANGE_SET_REFINE") == std::string::npos,
-        "game3d_native.hlsl still names fix 3's refine bit; it is SUNSHINE_UI_PIN_ONLY_UI");
-    }
+        sunshine_game3d::ui_selection::revision == 5u,
+      "SUNSHINE_UI_SELECTION_REVISION differs from ui_selection::revision 5");
+    require(decision_texels == detection::still_decision_texels && decision_texels == 13u,
+      "Selection revision 5 writes H2's stillness counts in decision texel 12: 13 decision texels");
     // Hidden-scene evidence writes decision texels 5 and 6 from cells of both images.
     require(evidence_images == detection::max_scene_evidence_images && decision_texels >= detection::scene_decision_texels,
       "The native shader lost its hidden-scene evidence markers");
@@ -466,17 +409,6 @@ int main(int argc, char **argv) {
           entries.push_back({"SunshineUIDetectionTilesCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUIDetectionReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIDetectionMaskCS", "cs_5_0", 8, 8, 1});
-          // Fix 3's change-set shadow: a word of 32 pixels on 8 rows, then one group per tile.
-          entries.push_back({"SunshineUIDetectionChangeSetBitsCS", "cs_5_0", 32, 8, 1});
-          entries.push_back({"SunshineUIDetectionChangeSetCountCS", "cs_5_0", 16, 16, 1});
-          // Fix 4's darkening: a word of 32 pixels on 8 rows, one group of
-          // 64 threads per 16x16 tile (four pixels each), the region pass's
-          // one group, one per detection tile, then one group.
-          entries.push_back({"SunshineUIDarkeningBitsCS", "cs_5_0", 32, 8, 1});
-          entries.push_back({"SunshineUIDarkeningTilesCS", "cs_5_0", 16, 4, 1});
-          entries.push_back({"SunshineUIDarkeningRegionCS", "cs_5_0", 1024, 1, 1});
-          entries.push_back({"SunshineUIDarkeningCountCS", "cs_5_0", 16, 16, 1});
-          entries.push_back({"SunshineUIDarkeningFinishCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineSceneCellsCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineSceneCompareCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineSceneEvidenceCS", "cs_5_0", 16, 16, 1});

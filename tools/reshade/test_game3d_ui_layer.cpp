@@ -98,7 +98,7 @@ int main() {
       mirrored(detection::hlsl_hold_defines);
       mirrored(detection::hlsl_h1_defines);
       mirrored(detection::hlsl_still_defines);
-      mirrored(detection::hlsl_change_set_defines);
+      mirrored(detection::hlsl_identity_defines);
       // The hidden-scene routes' per-frame bits (0x10000, 0x80000) and the
       // layer's D proof bit (0x20000000) are retired; fix 1's proven bit and
       // the pre-UI statistics row are mirrored.
@@ -115,39 +115,41 @@ int main() {
       const auto texels = sunshine_game3d::shader_marker(source, detection::decision_texels_marker);
       const auto images = sunshine_game3d::shader_marker(source, detection::scene_evidence_images_marker);
       require(source.find("#define " + std::string(detection::scene_evidence_images_marker) + ' ') != std::string::npos &&
-          texels >= detection::change_set_decision_texels && texels <= detection::max_decision_texels &&
+          texels >= detection::still_decision_texels && texels <= detection::max_decision_texels &&
           images <= detection::max_scene_evidence_images,
         "game3d_native.hlsl's UI detection size markers are missing or outside the contract's range");
     }
     // Selection revision 4 (fix 1) writes the pre-UI pixel counts in texel
-    // 11 after the H1 texel 10, revision 5 (fix 2) H2's stillness counts in
-    // texel 12 from statistics rows 144-152, with source 11, b2 word 5's
-    // flatten bit and a 1/255 tolerance, and revision 6 (fix 3) the
-    // change-set shadow in texels 13-15 from rows 160-191 (192 rows), with
-    // candidate 0x100, source 12, b2 word 5's rule bits, the h1 word's
-    // refined bit and the refined counter word; retired route defines stay
-    // gone.
-    require(sunshine_game3d::ui_selection::revision == 6u && detection::h1_decision_texels == 11u &&
+    // 11 after the H1 texel 10, and revision 5 (fix 2) H2's stillness counts
+    // in texel 12 from statistics rows 144-152 (160 rows), with source 11,
+    // b2 word 5's flatten bit and a 1/255 tolerance; retired route defines
+    // stay gone. Revision 7 removes fix 3 and fix 4 (revision 6): the decision
+    // layout is revision 5's, with source 12's counter word and word 30
+    // reserved (zero) so that S3's identity words keep their indices, and the
+    // removed defines stay gone.
+    require(sunshine_game3d::ui_selection::revision == 7u && detection::h1_decision_texels == 11u &&
         detection::decision_word::h1 == 43u && detection::pre_ui_decision_texels == 12u &&
         detection::decision_word::pre_ui_match == 44u && detection::decision_word::presented_lit_differs == 47u &&
         detection::per_frame_pre_ui_proven == 0x80000000u && detection::pre_ui_statistics_row == 128u &&
         detection::still_decision_texels == 13u && detection::decision_word::still_cells == 48u &&
         detection::decision_word::still_compared == 49u && detection::still_statistics_row == 144u &&
-        detection::statistics_rows(detection::max_scene_evidence_images, detection::still_decision_texels) == 160u &&
-        detection::source_still == 11u && detection::still::flatten == 1u && detection::still::tolerance == 4112u &&
-        detection::change_set_decision_texels == 16u && detection::decision_word::cs_changed == 52u &&
-        detection::decision_word::cs_judge_kind == 61u && detection::change_set_statistics_row == 160u &&
-        detection::statistics_rows(detection::max_scene_evidence_images) == 192u && detection::source_pre_ui == 12u &&
-        detection::source_count == 13u && detection::candidate::pre_ui == 0x100u && detection::h1_refined == 0x200u &&
-        detection::rules::pin_only_ui == 0x2u && detection::change_set::shadow == 0x4u &&
-        detection::change_set::gap == 0x8u && detection::change_set::pair_mask == 0x30u &&
-        detection::change_set::retained_1 == 0x40u && detection::change_set::retained_2 == 0x80u &&
-        sunshine_game3d::ui_counter_word::decided_count == 13u && sunshine_game3d::ui_counter_word::refined == 30u &&
-        sunshine_game3d::ui_counter_word::count == 31u,
-      "The decision layout is not selection revision 6 with 16 texels");
+        detection::statistics_rows(detection::max_scene_evidence_images) == 160u && detection::source_still == 11u &&
+        detection::source_count == 12u && detection::still::flatten == 1u && detection::still::tolerance == 4112u &&
+        sunshine_game3d::ui_counter_word::decided_count == 13u && sunshine_game3d::ui_counter_word::count == 31u &&
+        sunshine_game3d::ui_counter_word::reserved_refined == 30u && sunshine_game3d::ui_counter_word::with_identity == 36u,
+      "The decision layout is not selection revision 7 with 13 texels");
+    {
+      std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);
+      const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+      for (const char *removed : {"SUNSHINE_UI_CANDIDATE_PRE_UI", "SUNSHINE_UI_SOURCE_PRE_UI", "SUNSHINE_UI_CHANGE_SET_",
+             "SUNSHINE_UI_DARKENING_", "SUNSHINE_UI_PIN_ONLY_UI", "SUNSHINE_UI_COUNTER_REFINED", "SUNSHINE_UI_H1_REFINED",
+             "SUNSHINE_UI_IDENTITY_GATE_LAYER", "SUNSHINE_UI_TAG_LINEAR"})
+        require(source.find(std::string("#define ") + removed) == std::string::npos,
+          (std::string("game3d_native.hlsl still defines the removed ") + removed).c_str());
+    }
     std::puts("PASS UI detection contract: game3d_native.hlsl mirrors every flag, candidate bit, counter word, hold store value, "
-      "H1 claim word, H2 still-screen word, change-set rule bit, the pre-UI, still and change-set statistics rows and the "
-      "selection revision, and sizes detection within range");
+      "H1 claim word, H2 still-screen word, the pre-UI and still statistics rows and the selection revision, and sizes "
+      "detection within range");
 
     // One game frame: each target cleared in order, then Present.
     const auto frame = [](layer::layer_tracker &tracker, std::initializer_list<std::uint64_t> clears, std::uint64_t now) {
@@ -193,9 +195,9 @@ int main() {
       require(!tracker.active(), "Reset kept an active layer");
     }
     std::puts("PASS UI layer tracking: confirmed after repeated clears, last-cleared layer active, one copy per Present, expiry");
-    // Fix 3: the Present count at the live copy names the Present whose frame
-    // it holds (presents_since_copy). The renderer reads it after the
-    // Present's observe_output, before its render.
+    // The Present count at the live copy names the Present whose frame it
+    // holds (presents_since_copy), the present label S3's layer ticket
+    // expects; the provider reads it after the Present's observe_output.
     {
       layer::layer_tracker tracker;
       std::uint64_t now = 1000;
@@ -219,7 +221,7 @@ int main() {
       tracker.reset();
       require(!tracker.presents_since_copy(), "Reset kept the Present count of a copy");
     }
-    std::puts("PASS UI layer pairing count (fix 3): a copy after Present k reads 1 at render k+1, 2 after an interval without "
+    std::puts("PASS UI layer Present count: a copy after Present k reads 1 at render k+1, 2 after an interval without "
       "one, 0 within its own interval");
     // S3 queue watch: the queue that executed the lists carrying a stamped
     // copy; another queue than the presenting one is sticky for the scope.

@@ -7,10 +7,9 @@
 // without a decision of its own, the named no-mask reason and refused
 // candidate (F1), pair comparability (V2) and the acceptance signature key
 // (A1), the H1 override of a full-frame UI over a hidden scene (its CPU
-// hold lives in game3d_scene_guard.h), the H2 override of a still screen
-// without a UI source (its CPU run lives in game3d_still_screen.h), and the
-// change-set providers and refine rule of fix 3 (the live pairing and shadow
-// live in game3d_ui_change_set.h). decide() is the whole decision of
+// hold lives in game3d_scene_guard.h) and the H2 override of a still screen
+// without a UI source (its CPU run lives in game3d_still_screen.h). decide()
+// is the whole decision of
 // SunshineUIDetectionReduceCS thread 0, the hold store included, which
 // game3d_native.hlsl ports line for line with the same uint32 arithmetic:
 // test_game3d_ui_selection_contract runs the real reduce against it,
@@ -43,33 +42,29 @@ namespace sunshine_game3d::ui_selection {
   // 11 that prove it (b2 word 4, the layer's pair threshold). 5 (fix 2): H2,
   // a frame without a UI source decision shown flat as source 11 while the
   // CPU's run of still hidden samples pushes still::flatten (b2 word 5), with
-  // the stillness counts of texel 12. 6 (fix 3): one change-set path with two
-  // pre-UI image providers, the declared HUD-less image and the inferred
-  // layer proven the pre-UI scene image (candidate::pre_ui, source 12,
-  // paired with a retained Present by b2 word 5's offset); a partial change
-  // set needs its pre-UI image lit on 1% of pixels; the refine rule (b2 word
-  // 5's rules::pin_only_ui) lets a valid exact selective change set decide
-  // where S1's winner is an accepted alpha opaque on every pixel (the h1
-  // word's refined bit and counter word); and the change-set shadow of
-  // texels 13-15. S3's identity verdict and gates (identity_input) are
-  // versioned by the shader's identity marker (ui_detection::identity), not
-  // a revision: without a gate pushed decide() is revision 6's.
-  inline constexpr std::uint32_t revision = 6;
+  // the stillness counts of texel 12. 6 (fix 3 and fix 4) added the pre-UI
+  // change set (source 12, candidate bit 0x100), the refine rule, the lit
+  // gate on partial change sets and the change-set shadow and darkening words
+  // of texels 13-15; the user rejected them and 7 removes them, so that 7
+  // decides exactly as 5 did. Source 12, candidate bit 0x100, the h1 word's
+  // bit 0x200, b2 word 5's bits 0x2-0x200 and texels 13-15 stay reserved.
+  // S3's identity verdict and gate (identity_input) are versioned by the
+  // shader's identity marker (ui_detection::identity), not a revision:
+  // without a gate pushed decide() is revision 7's.
+  inline constexpr std::uint32_t revision = 7;
   inline constexpr std::string_view revision_marker = "SUNSHINE_UI_SELECTION_REVISION";
 
   // Candidate kinds. Declared sources are the game's own UI contract (the
   // UIAlpha and UIColorAndAlpha tags, a HUD-less pair); inferred sources are
-  // guesses (the offscreen UI layer, Backbuffer and current color alpha, and
-  // the pre-UI change set). pre_ui (fix 3) is the offscreen layer proven the
-  // pre-UI scene image, paired with the retained Present whose frame it
-  // holds: an inferred change set (candidate::pre_ui, source 12), offered
-  // only while the acceptance ledger holds that proof (H1 d, key
-  // pre_ui:<layer format>:<space>, game3d_alpha_auto.h), which is also its
-  // acceptance, so a kind's signature is its ledger key for every kind.
+  // guesses (the offscreen UI layer, Backbuffer and current color alpha).
+  // pre_ui is a ledger-only kind, never a candidate: the acceptance ledger's
+  // proof that a layer signature holds the pre-UI scene image (H1 d, key
+  // pre_ui:<layer format>:<space>, game3d_alpha_auto.h). It has no candidate
+  // bit, source, slot or draw rank.
   enum class kind : std::uint8_t { ui_alpha, ui_color, ui_layer, backbuffer, current, hudless, pre_ui };
   // S1 draw order: opacity before change sets, declared before inferred.
-  inline constexpr std::array<kind, 7> draw_order{kind::ui_alpha, kind::ui_color, kind::ui_layer, kind::backbuffer,
-    kind::current, kind::hudless, kind::pre_ui};
+  inline constexpr std::array<kind, 6> draw_order{kind::ui_alpha, kind::ui_color, kind::ui_layer, kind::backbuffer,
+    kind::current, kind::hudless};
 
   namespace candidate = ui_detection::candidate;
   inline constexpr std::uint32_t alpha_bits = candidate::ui_alpha | candidate::ui_color | candidate::backbuffer |
@@ -77,16 +72,8 @@ namespace sunshine_game3d::ui_selection {
   inline constexpr std::uint32_t declared_alpha_bits = candidate::ui_alpha | candidate::ui_color;
   inline constexpr std::uint32_t inferred_alpha_bits = alpha_bits & ~declared_alpha_bits;
   // Every candidate bit; candidate::exact marks the HUD-less pair, not a candidate.
-  inline constexpr std::uint32_t candidate_bits = alpha_bits | candidate::hudless | candidate::pre_ui;
-  // The candidates an offered, accepted declared alpha keeps out of S1: the
-  // inferred alpha and the inferred change set.
-  inline constexpr std::uint32_t blocked_bits = inferred_alpha_bits | candidate::pre_ui;
-  // The candidates that make H1 claims and have refuted bits: every one but
-  // the pre-UI change set.
-  inline constexpr std::uint32_t claimable_bits = candidate_bits & ~candidate::pre_ui;
-  static_assert(alpha_bits == 0x4fu && inferred_alpha_bits == 0x4cu && candidate_bits == 0x15fu && blocked_bits == 0x14cu &&
-    claimable_bits == 0x5fu &&
-    (claimable_bits << ui_detection::per_frame_refuted_shift) == ui_detection::per_frame_refuted_mask);
+  inline constexpr std::uint32_t candidate_bits = alpha_bits | candidate::hudless;
+  static_assert(alpha_bits == 0x4fu && inferred_alpha_bits == 0x4cu && candidate_bits == 0x5fu);
 
   constexpr std::uint32_t bit(kind k) {
     switch (k) {
@@ -96,7 +83,7 @@ namespace sunshine_game3d::ui_selection {
       case kind::backbuffer: return candidate::backbuffer;
       case kind::current: return candidate::current;
       case kind::hudless: return candidate::hudless;
-      default: return candidate::pre_ui;
+      default: return 0u; // pre_ui: not a candidate.
     }
   }
   // The decision source a kind decides as; a full change set from an exact
@@ -109,14 +96,11 @@ namespace sunshine_game3d::ui_selection {
       case kind::backbuffer: return 3u;
       case kind::current: return 4u;
       case kind::hudless: return 5u;
-      default: return ui_detection::source_pre_ui;
+      default: return 0u; // pre_ui: decides nothing.
     }
   }
   constexpr bool declared(kind k) { return k == kind::ui_alpha || k == kind::ui_color || k == kind::hudless; }
   constexpr bool alpha_kind(kind k) { return k != kind::hudless && k != kind::pre_ui; }
-  // A kind whose full claim H1 reads and whose signature a visible verdict
-  // may refute: every kind but the pre-UI change set.
-  constexpr bool claimable(kind k) { return k != kind::pre_ui; }
   // Index in counts::covered and counts::invalid (alpha kinds only).
   constexpr std::size_t alpha_index(kind k) {
     switch (k) {
@@ -137,10 +121,9 @@ namespace sunshine_game3d::ui_selection {
   }
   static_assert(bit(kind::ui_layer) == 0x40u && source_id(kind::ui_layer) == 10u && declared(kind::hudless) &&
     !declared(kind::ui_layer) && alpha_index(kind::current) == 4 && kind_named("ui_color") == kind::ui_color);
-  static_assert(bit(kind::hudless) == 0x10u && source_id(kind::hudless) == 5u && bit(kind::pre_ui) == 0x100u &&
-    source_id(kind::pre_ui) == 12u && !alpha_kind(kind::pre_ui) && !declared(kind::pre_ui) && !claimable(kind::pre_ui) &&
-    claimable(kind::hudless) && kind_named("pre_ui") == kind::pre_ui && draw_order.back() == kind::pre_ui &&
-    kind_names.size() == draw_order.size());
+  static_assert(bit(kind::hudless) == 0x10u && source_id(kind::hudless) == 5u && !bit(kind::pre_ui) && !source_id(kind::pre_ui) &&
+    !alpha_kind(kind::pre_ui) && !declared(kind::pre_ui) && kind_named("pre_ui") == kind::pre_ui &&
+    std::size_t(kind::pre_ui) == draw_order.size() && kind_names.size() == draw_order.size() + 1);
 
   // The first candidate of a bit set in draw order, zero when none.
   constexpr std::uint32_t first_in_draw_order(std::uint32_t bits) {
@@ -156,8 +139,7 @@ namespace sunshine_game3d::ui_selection {
     return "none";
   }
   static_assert(first_in_draw_order(0x5cu) == 0x40u && first_in_draw_order(0x1cu) == 0x4u && !first_in_draw_order(0x20u) &&
-    first_in_draw_order(0x110u) == 0x10u && first_in_draw_order(0x120u) == 0x100u && candidate_name(0x40u) == "ui_layer" &&
-    candidate_name(0x100u) == "pre_ui" && candidate_name(0u) == "none" && candidate_name(0x3u) == "none");
+    candidate_name(0x40u) == "ui_layer" && candidate_name(0u) == "none" && candidate_name(0x3u) == "none");
 
   // A2: the kinds the one-way test judges (inferred alpha), in the order of
   // counts::strong and counts::contradicted and of decision texels 8 and 9.
@@ -186,14 +168,6 @@ namespace sunshine_game3d::ui_selection {
     one_way_contradicted(1000u, 100u) && !one_way_contradicted(1000u, 99u) && !one_way_contradicted(0u, 0u) &&
     coverage_disagrees(0u, 100u, 1000u) && !coverage_disagrees(150u, 51u, 1000u) && !coverage_disagrees(0u, 0u, 0u));
 
-  // The change-set shadow of decision texels 13-15 (selection revision 6):
-  // the offscreen layer against its pair's Present at
-  // change_set::inferred_scale times b2 word 4 (ui_detection::decision_word
-  // cs_*). Nothing decides from it; game3d_ui_change_set.h reads it.
-  struct change_set_shadow {
-    std::uint32_t changed{}, unchanged{}, nonfinite{}, matching_tiles{}, filtered{}, changed_1{}, changed_2{};
-    std::uint32_t judge_pixels{}, judge_tp{}, judge_kind{};
-  };
   // One detection's counts as the reduce sums them (decision texels 0-4, 7-10).
   struct counts {
     std::uint32_t pixels{};
@@ -202,10 +176,8 @@ namespace sunshine_game3d::ui_selection {
     std::array<std::uint32_t, 5> covered{}, invalid{};
     // Pixels with alpha of at least 254/255.
     std::uint32_t opaque_ui_alpha{}, opaque_ui_color{}, opaque_layer{}, opaque_backbuffer{}, opaque_current{};
-    // The change-set slot (the HUD-less pair, or the pre-UI layer's pair when
-    // candidate::pre_ui is offered without a HUD-less image): changed,
-    // unchanged (within half the scaled threshold) and non-finite pixels,
-    // lit pre-UI image pixels, tiles at least 99% matching.
+    // The HUD-less pair: changed, unchanged (within half the threshold) and
+    // non-finite pixels, lit HUD-less pixels, tiles at least 99% matching.
     std::uint32_t changed{}, unchanged{}, nonfinite{}, lit{}, matching_tiles{};
     // A2, in judged_kinds order: pixels with alpha of at least 1/2, and those
     // of them where an offered exact pair's HUD-less image is lit and
@@ -216,8 +188,6 @@ namespace sunshine_game3d::ui_selection {
     // pixels, lit presented pixels, lit presented pixels that differ. No
     // decision reads them; the acceptance ledger proves the layer from them.
     std::uint32_t pre_ui_match{}, pre_ui_lit{}, presented_lit{}, presented_lit_differs{};
-    // Texels 13-15 (revision 6): the change-set shadow.
-    change_set_shadow shadow;
     // Texel 12 .z/.w (S3): the identity verdicts the GPU wrote (zero from a
     // shader without them). decide() recomputes them from its identity input.
     std::uint32_t identity_verdicts{}, identity_deltas{};
@@ -226,7 +196,7 @@ namespace sunshine_game3d::ui_selection {
   // layer's (texel 7) read zero from fewer than 32 words, the one-way counts
   // (texels 8-9) from fewer than 40, the opaque Backbuffer and current counts
   // (texel 10) from fewer than 44, the pre-UI pixel counts (texel 11) from
-  // fewer than 48, the change-set shadow (texels 13-15) from fewer than 64.
+  // fewer than 48.
   inline counts counts_from_words(const std::uint32_t *words, std::size_t n) {
     namespace word = ui_detection::decision_word;
     const auto at = [&](std::size_t i) { return i < n ? words[i] : 0u; };
@@ -259,14 +229,10 @@ namespace sunshine_game3d::ui_selection {
       c.presented_lit = words[word::presented_lit];
       c.presented_lit_differs = words[word::presented_lit_differs];
     }
-    if (n >= 4u * ui_detection::change_set_decision_texels) {
+    if (n >= 4u * ui_detection::still_decision_texels) {
       c.identity_verdicts = words[word::id_verdicts];
       c.identity_deltas = words[word::id_deltas];
     }
-    if (n >= 4u * ui_detection::change_set_decision_texels)
-      c.shadow = {words[word::cs_changed], words[word::cs_unchanged], words[word::cs_nonfinite], words[word::cs_matching_tiles],
-        words[word::cs_filtered], words[word::cs_changed_1], words[word::cs_changed_2], words[word::cs_judge_pixels],
-        words[word::cs_judge_tp], words[word::cs_judge_kind]};
     return c;
   }
   // Pixels with alpha of at least 254/255 of one alpha kind.
@@ -313,25 +279,11 @@ namespace sunshine_game3d::ui_selection {
   static_assert(pre_ui_match(90u, 50u, 100u) && !pre_ui_match(89u, 100u, 100u) && !pre_ui_match(100u, 49u, 100u) &&
     !pre_ui_match(0u, 0u, 0u));
   // V2, a partial change set: changed pixels within broad unchanged scene
-  // evidence in clean tiles, while the pre-UI image is lit on at least
-  // change_set::lit_percent of the pixels (fix 3: a black image is no scene;
-  // decides as source 5, or 12 from the pre-UI layer).
+  // evidence in clean tiles (decides as source 5).
   constexpr bool change_set_selective(const counts &c) {
     return !c.nonfinite && c.changed && c.changed * 4u < c.pixels && c.unchanged * 100u >= c.pixels * 75u &&
-      c.matching_tiles >= 128u && c.lit * 100u >= c.pixels * ui_detection::change_set::lit_percent;
+      c.matching_tiles >= 128u;
   }
-  // Fix 3: the change-set slot holds the pre-UI layer's pair (t7 against the
-  // Present of b2 word 5's offset) when candidate::pre_ui is offered without
-  // a HUD-less image, else the HUD-less pair; its difference threshold is
-  // this many times b2 word 1 (k: change_set::inferred_scale for the
-  // inferred pair, 1 for the declared one).
-  constexpr bool layer_pair_slot(std::uint32_t offered) {
-    return (offered & (candidate::pre_ui | candidate::hudless)) == candidate::pre_ui;
-  }
-  constexpr std::uint32_t change_set_scale(std::uint32_t offered) {
-    return layer_pair_slot(offered) ? ui_detection::change_set::inferred_scale : 1u;
-  }
-  static_assert(change_set_scale(0x148u) == 8u && change_set_scale(0x158u) == 1u && change_set_scale(0x58u) == 1u);
   // V2, a full change set: an exact pair changed nearly everywhere while the
   // HUD-less image is lit (decides as source 6).
   constexpr bool change_set_full(const counts &c, bool exact) {
@@ -491,17 +443,11 @@ namespace sunshine_game3d::ui_selection {
     // The hold store (next), the frame reason and the refused candidate keep
     // the decision before H2.
     bool still{};
-    // Fix 3: S1's winner was an alpha opaque on every pixel (shapeless), and
-    // a valid exact selective change set replaced it (refined; s1_source is
-    // then 5 or 12), whatever H1 then applied.
-    bool shapeless{}, refined{};
     // S3: the identity verdict of the offered pairs (decision texel 12 .z/.w).
     identity_verdict identity{};
   };
   // Decision word h1 of a decision (texel 10 .w).
-  constexpr std::uint32_t h1_word(const decision &d) {
-    return d.s1_source | (d.h1 ? ui_detection::h1_applied : 0u) | (d.refined ? ui_detection::h1_refined : 0u);
-  }
+  constexpr std::uint32_t h1_word(const decision &d) { return d.s1_source | (d.h1 ? ui_detection::h1_applied : 0u); }
   // Decision word frame_reason of a decision (texel 9 .w).
   constexpr std::uint32_t frame_reason_word(const decision &d) {
     return d.frame_reason | (d.reused ? ui_detection::frame_reason_reused : 0u);
@@ -516,19 +462,9 @@ namespace sunshine_game3d::ui_selection {
   // S1: among offered, accepted and valid candidates the first in draw order
   // decides, at any coverage (P1). An unaccepted or invalid candidate never
   // blocks another, except that an offered, accepted declared alpha (UIAlpha
-  // or the UI color tag) keeps inferred alpha and the pre-UI change set from
-  // deciding even while it is invalid itself (blocked_bits). A HUD-less change set decides
-  // as source 5 when partial and as 6 when full from an exact pair; the
-  // pre-UI change set (fix 3, last in draw order) is valid only as a partial
-  // set (no full form), without an offered HUD-less image and over a layer
-  // without coverage, and decides as source 12.
-  // Refine (fix 3, rules & rules::pin_only_ui, Auto with UIPinOnlyUI=1):
-  // when S1's winner is an alpha opaque on every pixel (shapeless: no shape
-  // information) and a valid exact selective change set of the same frame
-  // exists, the change set decides instead (5 from an accepted exact HUD-less
-  // pair, else 12 from the pre-UI change set), so only changed pixels pin.
-  // Without one the whole-frame alpha keeps the frame flat. A
-  // semi-transparent whole-frame alpha is not shapeless and is never refined.
+  // or the UI color tag) keeps inferred alpha from deciding even while it is
+  // invalid itself. A change set decides as source 5 when partial and as 6
+  // when full from an exact pair.
   // H1 (M5): some valid candidate makes an informative full claim: (a) an
   // alpha S1 may select (eligible: accepted, and not an inferred alpha the
   // declared-alpha block keeps out) that is opaque-full, (b) the offscreen
@@ -552,38 +488,24 @@ namespace sunshine_game3d::ui_selection {
   // missing (per_frame_accepted_missing) or offered but invalid has no
   // decision of its own; it applies the previous real frame's own decision
   // once (reused), unless per_frame_hold_reset says there is none, and then
-  // no mask. With refine, so has a frame whose winner is shapeless and not
-  // refined while an accepted candidate is missing, or while the pre-UI
-  // change set the previous real frame offered is not (rules &
-  // change_set::gap, one frame; pre_ui is offered intermittently by design,
-  // so T1's accepted-missing test leaves it out): refine_missing, so the
-  // pre-UI pair not retained for one frame reuses the refined decision once
-  // rather than flash flat. previous is the hold store as the last detection
-  // wrote it.
+  // no mask. previous is the hold store as the last detection wrote it.
   // H2 (M5, fix 2): an applied decision without a source that T1 did not
   // reuse is shown flat as source 11 while the CPU pushes still::flatten in
-  // rules (b2 word 5): its run of still samples that read the presented
+  // still (b2 word 5): its run of still samples that read the presented
   // frame hidden (game3d_still_screen.h). It runs after S1, H1 and T1, so an
   // accepted source deciding (even an empty mask) and H1 always win, and the
-  // hold store keeps the decision before it. H1 runs after refine, so a
-  // refined frame under a held hidden verdict with an acting claim (the
-  // shapeless alpha's claim (a) stays) is flat as source 8.
+  // hold store keeps the decision before it.
   // S3 (identity, b2 words 6-9): with identity::gate_hudless a HUD-less
-  // change set is valid only while its pair is exact, and with
-  // identity::gate_layer the pre-UI change set only while the layer pair is;
-  // an invalid paired set then follows T1 like any other, and under refine a
-  // refused set counts as missing (refine_missing), so a shapeless winner
-  // reuses the previous real frame's decision once rather than show flat.
-  // Without a gate the verdict decides nothing.
+  // change set is valid only while its pair is exact; an invalid paired set
+  // then follows T1 like any other. Without the gate the verdict decides
+  // nothing.
   inline decision decide(const counts &c, std::uint32_t offered, std::uint32_t accepted, std::uint32_t flags,
-      const hold_state &previous = {}, std::uint32_t rules = 0u, const identity_input &identity = {}) {
+      const hold_state &previous = {}, std::uint32_t still = 0u, const identity_input &identity = {}) {
     decision d;
     const std::uint32_t pixels = c.pixels;
     d.identity = verify_identity(identity, offered);
     const bool hudless_identity = !(identity.bits & ui_detection::identity::gate_hudless) ||
       (d.identity.ok & candidate::hudless) != 0u;
-    const bool layer_identity = !(identity.bits & ui_detection::identity::gate_layer) ||
-      (d.identity.ok & candidate::layer) != 0u;
     std::uint32_t valid = 0u, selective_bits = 0u;
     for (const auto k : draw_order) {
       if (!alpha_kind(k)) continue;
@@ -594,17 +516,10 @@ namespace sunshine_game3d::ui_selection {
     const bool partial_set = change_set_selective(c), full_set = change_set_full(c, (offered & candidate::exact) != 0u);
     if ((partial_set || full_set) && hudless_identity) valid |= candidate::hudless;
     if (partial_set) selective_bits |= candidate::hudless;
-    // The pre-UI change set: partial only, without an offered HUD-less image
-    // (whose pair the slot then holds) and over a layer without coverage.
-    if ((offered & candidate::pre_ui) && !(offered & candidate::hudless) && partial_set &&
-        !c.covered[alpha_index(kind::ui_layer)] && layer_identity) {
-      valid |= candidate::pre_ui;
-      selective_bits |= candidate::pre_ui;
-    }
     valid &= offered & candidate_bits;
     d.valid_bits = valid;
     const bool block = (offered & accepted & declared_alpha_bits) != 0u;
-    const std::uint32_t eligible = offered & accepted & valid & (block ? ~blocked_bits : ~0u);
+    const std::uint32_t eligible = offered & accepted & valid & (block ? ~inferred_alpha_bits : ~0u);
     std::uint32_t source = 0u, covered = 0u, winner_opaque = 0u;
     for (const auto k : draw_order) {
       if (!alpha_kind(k) || !(eligible & bit(k))) continue;
@@ -621,25 +536,6 @@ namespace sunshine_game3d::ui_selection {
         source = 6u;
         covered = pixels;
       }
-    } else if (!source && (eligible & candidate::pre_ui)) {
-      source = ui_detection::source_pre_ui;
-      covered = c.changed;
-    }
-    // Refine: a shapeless alpha winner gives way to a valid exact selective
-    // change set of the same frame.
-    const bool refine_on = (rules & ui_detection::rules::pin_only_ui) != 0u;
-    const bool alpha_winner = (source >= 1u && source <= 4u) || source == ui_detection::source_layer;
-    const bool shapeless = alpha_winner && pixels && winner_opaque == pixels;
-    d.shapeless = shapeless;
-    if (refine_on && shapeless && partial_set) {
-      if ((eligible & candidate::hudless) && (offered & candidate::exact)) {
-        source = 5u;
-        d.refined = true;
-      } else if (eligible & candidate::pre_ui) {
-        source = ui_detection::source_pre_ui;
-        d.refined = true;
-      }
-      if (d.refined) covered = c.changed;
     }
     // H1: the informative full claims of this frame, (a)-(d) above.
     const std::uint32_t s1_source = source;
@@ -655,12 +551,11 @@ namespace sunshine_game3d::ui_selection {
                     (image == ui_detection::pre_ui_image::layer && !c.covered[alpha_index(kind::ui_layer)] &&
                       (flags & ui_detection::per_frame_pre_ui_proven))))
       claims |= ui_detection::claim_pre_ui;
-    const std::uint32_t refuted = (flags >> ui_detection::per_frame_refuted_shift) & claimable_bits;
-    const std::uint32_t acting = (claims & claimable_bits & ~refuted) |
+    const std::uint32_t refuted = (flags >> ui_detection::per_frame_refuted_shift) & candidate_bits;
+    const std::uint32_t acting = (claims & candidate_bits & ~refuted) |
       ((flags & ui_detection::per_frame_pre_ui_visible) ? (claims & ui_detection::claim_pre_ui) : 0u);
-    // The winner is flat everywhere already: the full change set, or an
-    // alpha opaque on every pixel that refine did not replace.
-    const bool winner_full = source == 6u || (shapeless && !d.refined);
+    const bool alpha_winner = (source >= 1u && source <= 4u) || source == ui_detection::source_layer;
+    const bool winner_full = source == 6u || (alpha_winner && pixels && winner_opaque == pixels);
     const bool h1 = acting && (flags & ui_detection::per_frame_scene_hidden) &&
       !(flags & ui_detection::per_frame_depth_not_current) && !winner_full;
     if (h1) {
@@ -680,9 +575,9 @@ namespace sunshine_game3d::ui_selection {
         d.none_reason = ui_no_mask::gate_no_hold;
         d.refused = first_in_draw_order(acting & candidate_bits);
         if (!d.refused) d.refused = (offered & candidate::hudless) ? candidate::hudless : candidate::layer;
-      } else if (block && (offered & accepted & valid & blocked_bits)) {
+      } else if (block && (offered & accepted & valid & inferred_alpha_bits)) {
         d.none_reason = ui_no_mask::presented_blocked;
-        d.refused = first_in_draw_order(offered & accepted & valid & blocked_bits);
+        d.refused = first_in_draw_order(offered & accepted & valid & inferred_alpha_bits);
       } else if (offered & accepted & alpha_bits & ~valid) {
         d.none_reason = ui_no_mask::trusted_invalid;
         d.refused = first_in_draw_order(offered & accepted & alpha_bits & ~valid);
@@ -692,9 +587,9 @@ namespace sunshine_game3d::ui_selection {
       } else if (unaccepted & valid & selective_bits) {
         d.none_reason = ui_no_mask::unaccepted;
         d.refused = first_in_draw_order(unaccepted & valid & selective_bits);
-      } else if (offered & (candidate::hudless | candidate::pre_ui)) {
+      } else if (offered & candidate::hudless) {
         d.none_reason = ui_no_mask::difference_failed;
-        d.refused = (offered & candidate::hudless) ? candidate::hudless : candidate::pre_ui;
+        d.refused = candidate::hudless;
       } else if (unaccepted & valid & alpha_bits & ~selective_bits) {
         d.none_reason = ui_no_mask::ambiguous;
         d.refused = first_in_draw_order(unaccepted & valid & alpha_bits & ~selective_bits);
@@ -710,14 +605,8 @@ namespace sunshine_game3d::ui_selection {
           d.contradicted_bits |= bit(judged_kinds[i]);
     // T1: no decision of its own, so the previous real frame's own decision
     // once; per_frame_hold_reset means there is none in this chain.
-    // S3: a gate that refused an offered paired change set counts as that
-    // set missing for one frame, like the gap.
-    const bool identity_refused = ((offered & candidate::pre_ui) && !layer_identity) ||
-      ((offered & candidate::hudless) && !hudless_identity);
-    const bool refine_missing = refine_on && shapeless && !d.refined &&
-      ((flags & ui_detection::per_frame_accepted_missing) || (rules & ui_detection::change_set::gap) || identity_refused);
-    const bool no_own = (!source && ((flags & ui_detection::per_frame_accepted_missing) ||
-      (offered & accepted & candidate_bits & ~valid))) || refine_missing;
+    const bool no_own = !source && ((flags & ui_detection::per_frame_accepted_missing) ||
+      (offered & accepted & candidate_bits & ~valid));
     const std::uint32_t prior = (flags & ui_detection::per_frame_hold_reset) ? ui_detection::hold::none : previous.state;
     d.reused = no_own && prior == ui_detection::hold::own;
     d.own_source = source;
@@ -726,7 +615,7 @@ namespace sunshine_game3d::ui_selection {
     d.covered = d.reused ? previous.covered : covered;
     d.next = {no_own ? ui_detection::hold::spent : ui_detection::hold::own, d.source, d.covered};
     // H2: after T1, a frame applying no source of its own shows flat.
-    if (!d.source && !d.reused && (rules & ui_detection::still::flatten)) {
+    if (!d.source && !d.reused && (still & ui_detection::still::flatten)) {
       d.source = ui_detection::source_still;
       d.covered = pixels;
       d.still = true;
@@ -761,7 +650,6 @@ namespace sunshine_game3d::ui_selection {
     adds[ui_counter_word::presented_over_dedicated] = d.presented_over_dedicated;
     adds[ui_counter_word::full_alpha] = d.full_alpha;
     adds[ui_counter_word::reused] = d.reused;
-    adds[ui_counter_word::refined] = d.refined;
     return adds;
   }
   // S3: the adds one detection frame makes to the identity counter words

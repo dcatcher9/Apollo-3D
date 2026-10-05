@@ -107,7 +107,6 @@ namespace platf::game3d_debug {
           return "ui_source_color";
         default:
           if (const auto *layer = wire::ui_layer_name(static_cast<unsigned>(kind))) return layer;
-          if (const auto *change_set = wire::change_set_name(static_cast<unsigned>(kind))) return change_set;
           return sunshine_game3d::ui_resources::artifact_name(static_cast<unsigned>(kind));
       }
     }
@@ -220,9 +219,6 @@ namespace platf::game3d_debug {
             if (std::none_of(manifest["artifacts"].begin(), manifest["artifacts"].end(), [&](const json &written) {
                   return written.at("kind") == artifact_name(desc.kind);
                 })) continue;
-            // The change-set artifacts (retained Presents, the consumed layer
-            // copy) are replay inputs only; the preview does not know them.
-            if (wire::change_set_artifact(static_cast<unsigned>(desc.kind))) continue;
             images.push_back({artifact_name(desc.kind), desc.width, desc.height, desc.dxgi_format, image.bytes});
           }
           manifest["visualizations"] = preview::generate(temporary, manifest, images);

@@ -7,12 +7,8 @@
 #include "test_game3d_debug_dump_runtime.h"
 #include "test_game3d_budget.h"
 #include "test_game3d_ui_pin_band.h"
-#include "game3d_ui_change_set.h"
-#include "game3d_ui_darkening.h"
 #include "game3d_ui_layer.h"
 #include <d3d12sdklayers.h>
-#include <map>
-#include <set>
 #include <atomic>
 
 namespace {
@@ -1429,8 +1425,8 @@ namespace {
   }
 
   // Whether main enabled the D3D12 debug layer (d3d12SDKLayers, the Graphics
-  // Tools feature) before the device existed: the pre-UI change-set section
-  // then fails on any validation error or corruption message it records.
+  // Tools feature) before the device existed: the pre-UI proof section then
+  // fails on any validation error or corruption message it records.
   bool d3d12_debug_layer = false;
   void require(bool condition, const std::string &message) { require(condition, message.c_str()); }
   // A finite value in the normal half range, rounded to nearest.
@@ -1442,28 +1438,21 @@ namespace {
     return std::uint16_t((negative ? 0x8000 : 0) | ((exponent + 14) << 10) | unsigned(std::lround((fraction * 2 - 1) * 1024)));
   }
 
-  // Fix 1 (the pre-UI proof), fix 3 (the pre-UI change set) and fix 4 (rule
-  // P2, pin only UI) on D3D12 (docs/reshade-sbs.md, UI decision framework),
-  // with Stellar Blade SDR's scene as the D3D11 source-alpha fixture builds it
-  // (verify_hidden_scene, verify_pre_ui_change_set): a bare cleared offscreen
-  // target that holds the scene drawn before the UI at alpha 0, offered one
-  // Present late (layer_presents_ago 1) with frame generation known off.
-  // Gameplay shows exactly the layer, so the session's ledger proves it the
-  // pre-UI scene image by its pixels (texel 11); then, with the presented
-  // alpha accepted, the shadow measures the change set against the retained
-  // Present (t2, t3, the retention ring copies) through the bit-plane passes
-  // (u4 <-> t8), UIPinOnlyUI=1 refines it to source 12 and the darkening
-  // passes unpin a dim band, full pages stay flat, T1 reuses once, frame
-  // generation is a late pairing and Dump 3D defers the render's own
-  // retention. Every count is exact against the CPU construction or
-  // game3d_ui_darkening.h's reference. Last, the opacity darkening path on an
-  // HDR-like float layer (source 10, linear tolerance, HDR headroom).
-  void check_pre_ui_change_set_d3d12(fixture_t &fixture, sunshine_game3d::renderer &renderer,
-      sunshine_game3d_test::dump_fixture &dump, std::ostream &report, const fs::path &directory) {
+  // Fix 1 (the pre-UI proof) on D3D12 (docs/reshade-sbs.md, UI decision
+  // framework), with Stellar Blade SDR's scene as the D3D11 source-alpha
+  // fixture builds it (verify_hidden_scene): a bare cleared offscreen target
+  // that holds the scene drawn before the UI at alpha 0. Gameplay shows
+  // exactly the layer, so the session's ledger proves it the pre-UI scene
+  // image by its pixels (texel 11); then, with the presented alpha accepted,
+  // menu pages, a full settings page and a black loading screen stay flat by
+  // the whole-frame alpha. Fix 3 and fix 4 (the pre-UI change set and pin
+  // only UI), which this section also covered, were removed by user
+  // decision.
+  void check_pre_ui_proof_d3d12(fixture_t &fixture, sunshine_game3d::renderer &renderer, std::ostream &report) {
     using namespace sunshine_game3d;
     namespace candidate = ui_detection::candidate;
     if (fixture.color != 1 && fixture.color != 2) {
-      std::puts("MEASURE D3D12 pre-UI change set and pin only UI not run for a PQ source (sRGB and scRGB, as the D3D11 fixture)");
+      std::puts("MEASURE D3D12 pre-UI proof not run for a PQ source (sRGB and scRGB, as the D3D11 fixture)");
       return;
     }
     auto *queue = observed.runtime->get_command_queue();
@@ -1478,7 +1467,7 @@ namespace {
     const auto format = fixture.source_format;
     // A flat depth, as the D3D11 fixture's: the synthetic pages show none of
     // its edges, so no hidden-scene (H1) or still-screen (H2) evidence is
-    // valid and only the change set and the darkening decide.
+    // valid and only the accepted alpha decides.
     const auto original_depth = fixture.read(fixture.depth.p);
     const auto depth_desc = fixture.depth->GetDesc();
     fixture.upload_depth(std::vector<float>(size_t(depth_desc.Width) * depth_desc.Height, .02f));
@@ -1503,24 +1492,6 @@ namespace {
       return bytes;
     };
     const auto encode = [&](const std::function<rgba(unsigned, unsigned)> &pixel) { return encode_as(format, pixel); };
-    // The values the shader loads from an encoded image.
-    const auto decode_as = [&](DXGI_FORMAT f, const std::vector<std::uint8_t> &bytes) {
-      const auto stride = bytes_per_pixel(f);
-      std::vector<rgba> result(pixels);
-      for (size_t i = 0; i != pixels; ++i)
-        for (unsigned c = 0; c != 4; ++c) {
-          if (f == DXGI_FORMAT_R16G16B16A16_FLOAT) {
-            std::uint16_t half; std::memcpy(&half, bytes.data() + i * stride + c * 2, 2); result[i][c] = half_float(half);
-          } else result[i][c] = float(bytes[i * stride + c]) / 255.f;
-        }
-      return result;
-    };
-    const auto colours = [&](const std::vector<std::uint8_t> &bytes) {
-      std::vector<ui_darkening::rgb> result(pixels);
-      const auto loaded = decode_as(format, bytes);
-      for (size_t i = 0; i != pixels; ++i) result[i] = {loaded[i][0], loaded[i][1], loaded[i][2]};
-      return result;
-    };
     // Game-owned layer textures rest in ALL_SHADER_RESOURCE between uploads.
     std::vector<api::resource_view> views;
     const auto upload_texture = [&](ID3D12Resource *texture, const std::vector<std::uint8_t> &bytes, D3D12_RESOURCE_STATES before) {
@@ -1567,10 +1538,10 @@ namespace {
       return mask;
     };
     struct outcome { alpha_auto_decision sample; ui_detection_snapshot run; std::vector<float> mask; };
-    // One real Present: begin, render, the retention a dump capture owes,
-    // signal, drain (test-only), then the detected mask.
+    // One real Present: begin, render, signal, drain (test-only), then the
+    // detected mask.
     const auto render = [&](const std::vector<std::uint8_t> &presented, alpha_auto_source &observation,
-        const ui_render_input &ui, const fs::path &dump_directory = {}) {
+        const ui_render_input &ui) {
       present(presented);
       observation.now_ms += 100; observation.tick_ms = observation.now_ms; ++observation.sequence;
       renderer.begin_present();
@@ -1578,17 +1549,9 @@ namespace {
       frame.color = source; frame.depth = fixture.depth_view; frame.scene = parameters; frame.ui = ui;
       auto *commands = queue->get_immediate_command_list();
       require(renderer.render(commands, frame), "D3D12 pre-UI detection render failed");
-      const bool dumped = !dump_directory.empty();
-      if (dumped) dump.begin(observed.runtime, renderer, parameters, fixture.depth_view, false, static_cast<api::color_space>(color));
-      renderer.finish_retention(commands);
       queue->flush_immediate_command_list();
       renderer.finish_present();
-      if (dumped) dump.submitted(observed.runtime);
       queue->wait_idle(); // Test-only drain: the next render reads this one's sample.
-      if (dumped) dump.verify(observed.runtime, [&](api::resource texture, bool common) {
-        return fixture.read(reinterpret_cast<ID3D12Resource *>(texture.handle),
-          common ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-      }, dump_directory);
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == presented, "D3D12 UI detection changed the game's backbuffer");
       return outcome{renderer.consumed_alpha_auto(), renderer.consumed_detection(), read_mask()};
     };
@@ -1596,10 +1559,8 @@ namespace {
       return std::all_of(mask.begin(), mask.end(), [value](float v) { return v == value; });
     };
 
-    // The UI of the Equipment page (verify_pre_ui_change_set): a tab row, the
-    // left icon panel, the bottom-right prompts, a one-pixel hint line and an
-    // isolated speck. A changed pixel stays with at least 3 changed pixels in
-    // its 3x3 window: the speck and the line's two ends go.
+    // The UI of the Equipment page (as the D3D11 fixture's): a tab row, the
+    // left icon panel, the bottom-right prompts and a one-pixel hint line.
     std::vector<std::uint8_t> ui(pixels, 0);
     const auto fill_ui = [&](unsigned x0, unsigned y0, unsigned x1, unsigned y1) {
       for (unsigned y = y0; y < y1 && y < height; ++y) for (unsigned x = x0; x < x1 && x < width; ++x) ui[size_t(y) * width + x] = 1;
@@ -1608,42 +1569,20 @@ namespace {
     fill_ui(width / 40, height / 4, width / 40 + std::max(2u, width / 20), height * 3 / 4);
     fill_ui(width * 3 / 4, height * 9 / 10, width * 19 / 20, height * 19 / 20);
     fill_ui(width / 2, height / 2, width / 2 + width / 10, height / 2 + 1);
-    fill_ui(width * 3 / 5, height * 3 / 10, width * 3 / 5 + 1, height * 3 / 10 + 1);
-    std::vector<std::uint8_t> filtered(pixels, 0);
-    std::uint32_t ui_pixels = 0, kept = 0;
-    for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
-      const size_t i = size_t(y) * width + x;
-      if (!ui[i]) continue;
-      ++ui_pixels;
-      unsigned count = 0;
-      for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
-        const int nx = int(x) + dx, ny = int(y) + dy;
-        if (nx >= 0 && ny >= 0 && nx < int(width) && ny < int(height)) count += ui[size_t(ny) * width + nx];
-      }
-      if (count >= ui_detection::change_set::min_neighbourhood) { filtered[i] = 1; ++kept; }
-    }
-    require(kept < ui_pixels && size_t(kept) * 4 < pixels, "The D3D12 fixture's UI has nothing for the 3x3 rule to remove, or is not selective");
-    // A moving scene (checkers that shift every frame, lit everywhere), the
-    // page's presented colour over it (opaque), and the bottom dim band of
-    // fix 4 (opacity rising to 0.3 over the bottom fifth, under the UI).
+    // A moving scene (checkers that shift every frame, lit everywhere) and
+    // the page's presented colour over it (opaque).
     const auto scene = [&](unsigned phase, bool lit = true) {
       return [=](unsigned x, unsigned y) -> rgba {
         return lit ? rgba{0.f, ((x + 3 * phase) / 4 + y / 4) % 2 ? .75f : .25f, .25f, 1.f} : rgba{0.f, 0.f, 0.f, 1.f};
       };
     };
-    enum class page { equipment, settings, loading, dimmed };
-    const unsigned dim_rows = height / 5, dim_top = height - dim_rows;
+    enum class page { equipment, settings, loading };
     const auto presented_of = [&](page kind, unsigned phase) {
       const auto base = scene(phase, kind != page::loading);
       return encode([&](unsigned x, unsigned y) -> rgba {
         if (kind == page::settings) return {.5f, .5f, .5f, 1.f};
         if (ui[size_t(y) * width + x]) return rgba{1.f, .5f, 1.f, 1.f};
-        auto v = base(x, y);
-        if (kind == page::dimmed && y >= dim_top) {
-          const float keep = 1.f - .3f * float(y - dim_top + 1) / float(dim_rows + 1);
-          for (unsigned c = 0; c != 3; ++c) v[c] *= keep;
-        }
-        return v;
+        return base(x, y);
       });
     };
     // The cleared target: the pre-UI scene at alpha 0.
@@ -1669,7 +1608,6 @@ namespace {
     observation.epoch = 61; observation.revision = 1; observation.sequence = 1;
     ui_detection_inputs inputs;
     inputs.current_color = true; inputs.layer = layer_view; inputs.layer_flags = layer_flags;
-    inputs.layer_presents_ago = 1; inputs.fg_known_off = true;
     ui_render_input ui_input;
     ui_input.automatic = &observation; ui_input.detection = &inputs;
     const auto gameplay = encode(scene(0));
@@ -1693,335 +1631,35 @@ namespace {
 
     unsigned phase = 0;
     page last = page::equipment;
-    // The presented colours of the last three renders, newest last.
-    std::array<std::vector<std::uint8_t>, 3> presented_history;
     // One render of a page at the next phase. The layer offered is the
-    // previous render's pre-UI image (exact when presents_ago is 1).
-    const auto step = [&](page kind, std::uint32_t presents_ago = 1, bool fg = false, const fs::path &dump_directory = {}) {
+    // previous render's pre-UI image.
+    const auto step = [&](page kind) {
       upload_texture(layer_texture.p, layer_of(last, phase), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
       ++phase;
       last = kind;
-      inputs.layer_presents_ago = presents_ago; inputs.fg_known_off = !fg;
-      auto presented = presented_of(kind, phase);
-      std::rotate(presented_history.begin(), presented_history.begin() + 1, presented_history.end());
-      presented_history.back() = presented;
-      return render(presented, observation, ui_input, dump_directory);
+      return render(presented_of(kind, phase), observation, ui_input);
     };
     const auto is_flat = [&](const std::vector<float> &mask) { return all_equal(mask, 1.f); };
-    const auto is_filtered_ui = [&](const std::vector<float> &mask) {
-      for (size_t i = 0; i != pixels; ++i) if (mask[i] != float(filtered[i])) return false;
-      return true;
-    };
-    const auto pre_ui_rules = [](const ui_detection_snapshot &run) {
-      return run.rules_bits & (ui_detection::rules::pin_only_ui | ui_detection::change_set::pair_mask);
-    };
-    // (2) The shadow (UIPinOnlyUI=0). The first page frame pairs the copy of
-    // gameplay; the second's sample is the first that shows the page.
-    step(page::equipment);
-    step(page::equipment);
+    // (2) The Equipment page, a full settings page and a black loading
+    // screen stay flat by the accepted whole-frame alpha (source 4), checked
+    // from their second frame; the proof and the ledger stay as they are.
     const auto stored = sb.stored();
-    const auto counters_before = sb.counters();
-    outcome shadow{};
-    for (unsigned i = 0; i != 4; ++i) {
-      shadow = step(page::equipment);
-      require(!(shadow.run.candidates & candidate::pre_ui) && shadow.run.layer_pairing == change_set::pair_class::retained &&
-          shadow.run.layer_presents_ago == 1u && !(shadow.run.rules_bits & ui_detection::rules::pin_only_ui) &&
-          ui_detection::change_set::pair_offset(shadow.run.rules_bits) == 1u && is_flat(shadow.mask),
-        "The D3D12 shadow offered the pre-UI change set, lost the retained pairing or did not leave the menu flat");
-    }
-    const auto &cs = shadow.sample.evidence.change_set;
-    require(shadow.sample.source_kind == 4u && shadow.sample.covered == all_pixels && !shadow.sample.evidence.refined &&
-        shadow.sample.change_set.measured && shadow.sample.change_set.pairing == change_set::pair_class::retained &&
-        shadow.sample.change_set.offset == 1u && shadow.sample.change_set.valid && shadow.sample.change_set.would_refine &&
-        !shadow.sample.change_set.enabled && cs.changed == ui_pixels && cs.filtered == kept && cs.changed_1 == ui_pixels &&
-        cs.changed_2 > ui_pixels && cs.matching_tiles >= 128u && !cs.nonfinite && !cs.judge_kind,
-      "The D3D12 shadow sample did not measure exactly the UI pixels against the retained Present: changed=" +
-        std::to_string(cs.changed) + " filtered=" + std::to_string(cs.filtered) + " ui=" + std::to_string(ui_pixels) +
-        " kept=" + std::to_string(kept) + " changed_1=" + std::to_string(cs.changed_1) + " changed_2=" +
-        std::to_string(cs.changed_2) + " tiles=" + std::to_string(cs.matching_tiles));
-    const auto counted = sb.counters() - counters_before;
-    require(sb.stored() == stored && sb.pre_ui_proven(layer_signature) && counted[ui_counter::change_set_samples] >= 3 &&
-        counted[ui_counter::change_set_retained] == counted[ui_counter::change_set_samples] &&
-        counted[ui_counter::change_set_valid] == counted[ui_counter::change_set_samples] &&
-        counted[ui_counter::change_set_would_refine] == counted[ui_counter::change_set_samples] &&
-        counted[ui_counter::change_set_pair_verified] == counted[ui_counter::change_set_samples] &&
-        !counted[ui_counter::change_set_pair_contradicted] && !counted[ui_counter::refined] && !counted.decided(12) &&
-        counted.decided(4) >= 1,
-      "The D3D12 shadow changed the ledger, or its change-set counters are not exact");
-    const auto shadow_samples = counted[ui_counter::change_set_samples];
-    // (3) UIPinOnlyUI=1: offered with the retained pairing and refined; only
-    // the changed pixels the 3x3 rule keeps pin.
-    sb.set_pin_only_ui(true);
-    outcome pinned{};
-    const auto mask_differs = [&](const std::vector<float> &mask) {
-      std::uint64_t differs = 0;
-      for (size_t i = 0; i != pixels; ++i) differs += mask[i] != float(filtered[i]);
-      return differs;
-    };
-    for (unsigned i = 0; i != 3; ++i) {
-      pinned = step(page::equipment);
-      require((pinned.run.candidates & candidate::pre_ui) && (pinned.run.accepted & candidate::pre_ui) &&
-          !(pinned.run.candidates & candidate::exact) &&
-          pre_ui_rules(pinned.run) == (ui_detection::rules::pin_only_ui | (1u << ui_detection::change_set::pair_shift)) &&
-          is_filtered_ui(pinned.mask),
-        "D3D12 UIPinOnlyUI=1 did not offer the pre-UI change set or pin exactly the changed pixels the 3x3 rule keeps: frame " +
-          std::to_string(i) + " candidates=" + std::to_string(pinned.run.candidates) + " accepted=" +
-          std::to_string(pinned.run.accepted) + " rules=" + std::to_string(pinned.run.rules_bits) + " differing_pixels=" +
-          std::to_string(mask_differs(pinned.mask)));
-    }
-    require(pinned.sample.source_kind == ui_detection::source_pre_ui && pinned.sample.covered == ui_pixels &&
-        pinned.sample.evidence.refined && pinned.sample.evidence.s1_source == ui_detection::source_pre_ui &&
-        pinned.sample.change_set.enabled && pinned.sample.change_set.would_refine && sb.stored() == stored,
-      "The D3D12 refined sample did not report source 12 with the refined bit");
-    // (4) Fix 4, rule P2: the page with its bottom dim band. The band's
-    // changed pixels do not pin unless structure keeps them, exactly as the
-    // reference of the pair says; the UI's colour pixels keep their pins.
-    std::uint64_t dimmed_unpinned = 0, dimmed_kept = 0;
-    {
-      step(page::dimmed);
-      const auto pre_ui = colours(layer_of(page::dimmed, phase));
-      const auto dimmed = step(page::dimmed);
-      const auto paired = colours(presented_history[1]);
-      float t;
-      std::memcpy(&t, &dimmed.run.threshold_bits, sizeof(t));
-      const auto k = float(ui_detection::change_set::inferred_scale);
-      const auto mask = ui_darkening::change_set_mask(width, height, paired, pre_ui, t, k, color, true);
-      const auto reference = ui_darkening::reference_change_set(width, height, paired, pre_ui, mask, t, k, color);
-      std::uint64_t band_unpinned = 0, band_changed = 0, differs = 0;
-      for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
-        const auto i = size_t(y) * width + x;
-        const bool unpinned = reference.classes[i] == ui_darkening::pixel_class::unpinned;
-        differs += dimmed.mask[i] != (mask[i] && !unpinned ? 1.f : 0.f);
-        require(!filtered[i] || (mask[i] && reference.classes[i] == ui_darkening::pixel_class::colour),
-          "A UI colour pixel of the D3D12 dimmed page was not pinned as colour by the reference");
-        if (y >= dim_top && !ui[i] && mask[i]) { ++band_changed; band_unpinned += unpinned; }
-      }
-      require(dimmed.sample.source_kind == ui_detection::source_pre_ui && (dimmed.run.candidates & candidate::pre_ui) &&
-          pre_ui_rules(dimmed.run) == (ui_detection::rules::pin_only_ui | (1u << ui_detection::change_set::pair_shift)) &&
-          (dimmed.run.rules_bits & ui_detection::rules::darkening_measured) && !differs,
-        "The D3D12 dimmed page's mask differs from the CPU reference on " + std::to_string(differs) + " pixels");
-      require(band_changed && band_unpinned * 2 >= band_changed && reference.n.unpinned == band_unpinned && reference.n.kept,
-        "The D3D12 dimmed page's band was not mostly unpinned by the reference, nothing was kept, or something else unpinned: " +
-          std::to_string(band_unpinned) + " of " + std::to_string(band_changed));
-      const auto next = step(page::dimmed);
-      require(next.sample.source_kind == ui_detection::source_pre_ui && next.sample.darkening.measured &&
-          next.sample.darkening.applied && next.sample.darkening.unpinned == reference.n.unpinned &&
-          next.sample.darkening.kept == reference.n.kept,
-        "The D3D12 dimmed page's sample words 62-63 differ from the CPU reference: unpinned=" +
-          std::to_string(next.sample.darkening.unpinned) + " kept=" + std::to_string(next.sample.darkening.kept) + " reference " +
-          std::to_string(reference.n.unpinned) + "/" + std::to_string(reference.n.kept));
-      dimmed_unpinned = reference.n.unpinned;
-      dimmed_kept = reference.n.kept;
-      step(page::equipment);
-    }
-    // (5) A full settings page (an invalid set) and a black loading screen
-    // stay flat by the whole-frame alpha; checked from their second frame.
-    for (const auto kind : {page::settings, page::loading}) {
-      const std::string label = kind == page::settings ? "D3D12 settings page" : "D3D12 black loading screen";
+    unsigned pages = 0;
+    for (const auto kind : {page::equipment, page::settings, page::loading, page::equipment}) {
+      const std::string label = kind == page::settings ? "D3D12 settings page" : kind == page::loading ?
+        "D3D12 black loading screen" : "D3D12 Equipment page";
       step(kind);
       const auto second = step(kind);
       const auto flat = step(kind);
-      require((flat.run.candidates & candidate::pre_ui) && is_flat(second.mask) && is_flat(flat.mask) &&
-          flat.sample.source_kind == 4u && !flat.sample.evidence.refined && flat.sample.change_set.measured &&
-          !flat.sample.change_set.valid,
-        label + ": the pre-UI change set refined an invalid set");
+      require(!(flat.run.candidates & ~0xffu) && is_flat(second.mask) && is_flat(flat.mask) && flat.sample.source_kind == 4u &&
+          flat.sample.covered == all_pixels, label + ": the accepted whole-frame alpha did not keep the page flat");
+      ++pages;
     }
-    step(page::equipment);
-    require(is_filtered_ui(step(page::equipment).mask), "The D3D12 Equipment page did not refine again after a full page");
-    // (6) T1: a frame without its pair reuses the refined decision once
-    // through the change-set gap; frame generation is a late pairing, never
-    // offered, and so is the first Present after it.
-    const auto missing = step(page::equipment, 0);
-    require(!(missing.run.candidates & candidate::pre_ui) && missing.run.layer_pairing == change_set::pair_class::unavailable &&
-        (missing.run.rules_bits & ui_detection::change_set::gap) &&
-        !(missing.run.flags & ui_detection::per_frame_accepted_missing) && is_filtered_ui(missing.mask),
-      "A D3D12 frame without its pair did not reuse the refined decision once through the change-set gap");
-    const auto spent = step(page::equipment, 0);
-    require(!(spent.run.candidates & candidate::pre_ui) && is_flat(spent.mask) && spent.sample.evidence.reused,
-      "A second D3D12 frame without its pair reused again, or the sample lost the reuse");
-    const auto generated = step(page::equipment, 1, true);
-    require(!(generated.run.candidates & candidate::pre_ui) && generated.run.layer_pairing == change_set::pair_class::late &&
-        !ui_detection::change_set::pair_offset(generated.run.rules_bits) && is_flat(generated.mask),
-      "D3D12 frame generation offered the pre-UI change set or paired the layer with a retained Present");
-    const auto late = step(page::equipment, 1, true);
-    require(late.sample.change_set.pairing == change_set::pair_class::late && late.sample.change_set.offset == 0u &&
-        !late.sample.change_set.valid && late.sample.evidence.change_set.changed > ui_pixels,
-      "The D3D12 late pair's shadow was not measured against the current Present");
-    const auto first_off = step(page::equipment);
-    require(!(first_off.run.candidates & candidate::pre_ui) && first_off.run.layer_pairing == change_set::pair_class::late &&
-        is_flat(first_off.mask), "The first D3D12 Present after frame generation paired the Present before it");
-    require(is_filtered_ui(step(page::equipment).mask), "The D3D12 retained pairing did not refine again after frame generation");
-    // (7) Dump 3D: an armed dump retains every Present and the dumped render
-    // defers its own retention copy (finish_retention), so the package holds
-    // both retained Presents and the consumed layer copy; the next render
-    // still pairs.
-    const auto dump_directory = directory / "pre-ui-change-set-dump-d3d12";
-    renderer.set_dump_retention(true, true);
-    const auto dumped = step(page::equipment, 1, false, dump_directory);
-    renderer.set_dump_retention(false, false);
-    require(is_filtered_ui(dumped.mask), "The D3D12 dumped render did not refine");
-    {
-      std::ifstream stored_manifest(dump_directory / "manifest.json");
-      require(stored_manifest.good(), "The D3D12 pre-UI dump has no manifest");
-      const auto manifest = nlohmann::json::parse(stored_manifest);
-      const auto &metadata = manifest.at("producer_metadata");
-      const auto &detection = metadata.at("replay").at("ui_detection");
-      std::set<std::string> kinds;
-      std::map<std::string, std::vector<std::uint8_t>> retained_bytes;
-      for (const auto &artifact : manifest.at("artifacts")) {
-        const auto kind = artifact.at("kind").get<std::string>();
-        kinds.insert(kind);
-        if (kind.rfind("retained_present_", 0) == 0) {
-          std::ifstream file(dump_directory / artifact.at("file").get<std::string>(), std::ios::binary);
-          retained_bytes[kind] = {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-        }
-      }
-      bool all_captured = true;
-      for (const auto &row : metadata.at("change_set_artifacts").at("artifacts")) all_captured = all_captured && row.at("captured").get<bool>();
-      require(kinds.count("retained_present_1") && kinds.count("retained_present_2") && kinds.count("ui_layer_detected") &&
-          all_captured && detection.at("layer_pairing") == "retained" && detection.at("layer_presents_ago") == 1u &&
-          detection.at("rules_bits") == dumped.run.rules_bits &&
-          metadata.at("replay").at("ui_pin").at("decision_texels") == ui_detection::change_set_decision_texels &&
-          retained_bytes["retained_present_1"] == presented_history[1] && retained_bytes["retained_present_2"] == presented_history[0],
-        "D3D12 Dump 3D lost the retained Presents (one and two back), the consumed layer copy or the pairing metadata");
-    }
-    const auto after_dump = step(page::equipment);
-    require((after_dump.run.candidates & candidate::pre_ui) && after_dump.run.layer_pairing == change_set::pair_class::retained &&
-        is_filtered_ui(after_dump.mask), "The D3D12 render after a dump lost its retained pair");
-    sb.set_pin_only_ui(false);
-    report << "pre-ui-change-set D3D12 proof_frames=" << proving_frames << " ui=" << ui_pixels << " kept=" << kept
-           << " shadow_samples=" << shadow_samples << " shadow_retained_valid_would_refine=1 ledger_unchanged=1 refined_source12=1"
-              " settings_flat=1 loading_flat=1 t1_reuse_once=1 fg_late_never_offered=1 dump_retained_presents=1"
-              " dimmed_band_unpinned=" << dimmed_unpinned << " dimmed_kept=" << dimmed_kept << '\n';
-    std::printf("PASS D3D12 pre-UI change set (fixes 1, 3, 4; Stellar Blade SDR): %u gameplay frames prove the bare cleared layer by exact texel 11 counts; the shadow measures exactly the UI pixels (%u, %u after the 3x3 rule) against the retained Present through the bit-plane passes, verified against the Presents 0 and 2 back, with exact change-set counters and an unchanged ledger; UIPinOnlyUI=1 refines to source 12; the dim band unpins %llu pixels and keeps %llu exactly as the CPU reference; full pages stay flat, T1 reuses once, frame generation never pairs, and Dump 3D defers the retention copy\n",
-      proving_frames, ui_pixels, kept, static_cast<unsigned long long>(dimmed_unpinned), static_cast<unsigned long long>(dimmed_kept));
+    require(sb.stored() == stored && sb.pre_ui_proven(layer_signature), "The D3D12 pages changed the ledger or lost the proof");
+    report << "pre-ui-proof D3D12 proof_frames=" << proving_frames << " pages_flat=" << pages << " ledger_unchanged=1\n";
+    std::printf("PASS D3D12 pre-UI proof (fix 1; Stellar Blade SDR): %u gameplay frames prove the bare cleared layer by exact texel 11 counts; the Equipment, settings and black loading pages stay flat by the accepted presented alpha with the ledger unchanged\n",
+      proving_frames);
 
-    // (8) The opacity darkening path on an HDR-like float layer (source 10):
-    // a smooth black dim band (alpha rising to 0.6), sharp black 2-pixel
-    // strokes, an HDR white icon at 4x SDR white (beyond the UNORM layer's
-    // premultiplied bound, within the float layer's headroom) and a faint
-    // grey panel whose premultiplied colour (0.003) is colour in linear light
-    // but would read as a dim against the sRGB code tolerance (4/255). In the
-    // shadow the mask is the raw alpha and the samples carry the reference's
-    // counts; with UIPinOnlyUI=1 only the band unpins.
-    std::uint64_t hdr_band = 0, hdr_strokes = 0, hdr_unpinned = 0, hdr_kept = 0;
-    {
-      constexpr DXGI_FORMAT hdr_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-      std::vector<rgba> value(pixels, rgba{0.f, 0.f, 0.f, 0.f});
-      // 1 the dim band, 2 a stroke, 3 the HDR icon, 4 the faint panel.
-      std::vector<std::uint8_t> region(pixels, 0);
-      const unsigned band = height * 3 / 8, top = height - band;
-      for (unsigned y = top; y < height; ++y)
-        for (unsigned x = 0; x < width; ++x) {
-          value[size_t(y) * width + x] = {0.f, 0.f, 0.f, .6f * float(y - top + 1) / float(band + 1)};
-          region[size_t(y) * width + x] = 1;
-        }
-      const auto fill = [&](unsigned x0, unsigned y0, unsigned x1, unsigned y1, rgba v, std::uint8_t r) {
-        for (unsigned y = y0; y < y1 && y < top; ++y)
-          for (unsigned x = x0; x < x1 && x < width; ++x) { value[size_t(y) * width + x] = v; region[size_t(y) * width + x] = r; }
-      };
-      const rgba black{0.f, 0.f, 0.f, 1.f}, hdr_white{4.f, 4.f, 4.f, 1.f}, faint{.003f, .003f, .003f, .5f};
-      const unsigned stroke = 2, glyph = std::max(8u, height / 4), left = width / 8, row = height / 8;
-      fill(left, row, left + glyph, row + stroke, black, 2);
-      fill(left + glyph / 2 - 1, row + stroke + 2, left + glyph / 2 + 1, row + glyph, black, 2);
-      fill(left + glyph + 4, row, left + glyph + 4 + stroke, row + glyph - stroke - 2, black, 2);
-      fill(left + glyph + 8, row + glyph - stroke, left + 2 * glyph, row + glyph, black, 2);
-      const unsigned icon_w = std::max(4u, width / 10), icon_h = std::max(4u, height / 8);
-      fill(width * 5 / 8, row, width * 5 / 8 + icon_w, row + icon_h, hdr_white, 3);
-      fill(width * 5 / 8, row + icon_h + 8, width * 5 / 8 + icon_w, row + 2 * icon_h + 8, faint, 4);
-      const auto bytes = encode_as(hdr_format, [&](unsigned x, unsigned y) { return value[size_t(y) * width + x]; });
-      const auto loaded = decode_as(hdr_format, bytes);
-      std::vector<ui_darkening::rgb> colour(pixels);
-      std::vector<float> alpha(pixels);
-      for (size_t i = 0; i != pixels; ++i) { colour[i] = {loaded[i][0], loaded[i][1], loaded[i][2]}; alpha[i] = loaded[i][3]; }
-      // A float layer's colour is linear (stored_hdr_headroom).
-      const auto reference = ui_darkening::reference_opacity(width, height, colour, alpha, true);
-      const auto code_tolerance = ui_darkening::reference_opacity(width, height, colour, alpha, false);
-      std::uint64_t faint_dim_in_code = 0;
-      for (size_t i = 0; i != pixels; ++i) {
-        const auto c = reference.classes[i];
-        const bool band_ui = region[i] == 1 && alpha[i] > 0.f;
-        hdr_band += band_ui;
-        hdr_strokes += region[i] == 2;
-        faint_dim_in_code += region[i] == 4 && code_tolerance.classes[i] == ui_darkening::pixel_class::unpinned;
-        require(band_ui ? c == ui_darkening::pixel_class::unpinned : region[i] == 2 ? c == ui_darkening::pixel_class::kept :
-            region[i] >= 3 ? c == ui_darkening::pixel_class::colour : c == ui_darkening::pixel_class::not_ui,
-          "The D3D12 HDR darkening fixture does not mean what it says (pixel " + std::to_string(i % width) + "," +
-            std::to_string(i / width) + " region " + std::to_string(region[i]) + " class " + std::to_string(int(c)) + ")");
-      }
-      require(reference.n.unpinned == hdr_band && reference.n.kept == hdr_strokes && faint_dim_in_code,
-        "The D3D12 HDR darkening fixture's reference counts differ, or its faint panel does not separate linear from code tolerance");
-      hdr_unpinned = reference.n.unpinned; hdr_kept = reference.n.kept;
-      com_ptr<ID3D12Resource> hdr_texture;
-      const auto hdr_view = create_layer(hdr_texture, hdr_format, bytes);
-      const auto hdr_api_format = static_cast<api::format>(hdr_format);
-      alpha_auto_policy policy;
-      require(policy.restore(ui_selection::signature{ui_selection::kind::ui_layer,
-          std::uint32_t(api::format_to_default_typed(hdr_api_format, 0)), color}.key()).restored == 1,
-        "The D3D12 HDR layer key was not restored");
-      alpha_auto_source layer_observation;
-      layer_observation.session = &policy; layer_observation.now_ms = layer_observation.tick_ms = 2000000;
-      layer_observation.epoch = 71; layer_observation.revision = 1; layer_observation.sequence = 1;
-      ui_detection_inputs layer_inputs;
-      layer_inputs.layer = hdr_view;
-      layer_inputs.layer_flags = ui_layer::detection_flags(hdr_api_format);
-      require(layer_inputs.layer_flags & ui_detection::stored_hdr_headroom, "The float layer has no HDR headroom flag");
-      ui_render_input layer_ui;
-      layer_ui.automatic = &layer_observation; layer_ui.detection = &layer_inputs;
-      const auto frame = [&](bool enabled) {
-        policy.set_pin_only_ui(enabled);
-        return render(original, layer_observation, layer_ui);
-      };
-      const auto masked = [&](const std::vector<float> &mask, bool enabled) {
-        for (size_t i = 0; i != pixels; ++i) {
-          const float expected = enabled && reference.classes[i] == ui_darkening::pixel_class::unpinned ? 0.f : alpha[i];
-          if (!(std::fabs(mask[i] - expected) <= 1e-6f)) return false;
-        }
-        return true;
-      };
-      const auto rules = [](const ui_detection_snapshot &run) {
-        return run.rules_bits & (ui_detection::rules::pin_only_ui | ui_detection::rules::darkening_measured);
-      };
-      const auto layer_counters_before = policy.counters();
-      outcome layer_shadow{};
-      for (unsigned i = 0; i != 4; ++i) {
-        layer_shadow = frame(false);
-        require(layer_shadow.run.state == ui_detection_snapshot::run_state::ran &&
-            rules(layer_shadow.run) == ui_detection::rules::darkening_measured && masked(layer_shadow.mask, false),
-          "The D3D12 shadow changed the HDR layer's raw alpha mask or did not run the darkening passes");
-        if (i)
-          require(layer_shadow.sample.source_kind == ui_detection::source_layer && layer_shadow.sample.covered == reference.n.covered &&
-              layer_shadow.sample.darkening.measured && !layer_shadow.sample.darkening.applied &&
-              layer_shadow.sample.darkening.unpinned == reference.n.unpinned && layer_shadow.sample.darkening.kept == reference.n.kept,
-            "A D3D12 HDR layer shadow sample's words 62-63 differ from the CPU reference: unpinned=" +
-              std::to_string(layer_shadow.sample.darkening.unpinned) + " kept=" + std::to_string(layer_shadow.sample.darkening.kept) +
-              " reference " + std::to_string(reference.n.unpinned) + "/" + std::to_string(reference.n.kept));
-      }
-      const auto layer_counted = policy.counters() - layer_counters_before;
-      require(layer_counted[ui_counter::darkening_samples] >= 2 &&
-          layer_counted[ui_counter::darkening_unpinned_samples] == layer_counted[ui_counter::darkening_samples] &&
-          layer_counted[ui_counter::darkening_unpinned_px] == layer_counted[ui_counter::darkening_samples] * reference.n.unpinned &&
-          layer_counted[ui_counter::darkening_kept_px] == layer_counted[ui_counter::darkening_samples] * reference.n.kept &&
-          layer_counted.decided(ui_detection::source_layer) >= 1,
-        "The D3D12 darkening counters do not sum the committed HDR layer samples");
-      outcome layer_pinned{};
-      for (unsigned i = 0; i != 3; ++i) {
-        layer_pinned = frame(true);
-        require(rules(layer_pinned.run) == (ui_detection::rules::pin_only_ui | ui_detection::rules::darkening_measured) &&
-            masked(layer_pinned.mask, true), "D3D12 UIPinOnlyUI=1 did not unpin exactly the HDR layer reference's darkening pixels");
-      }
-      require(layer_pinned.sample.source_kind == ui_detection::source_layer && layer_pinned.sample.darkening.measured &&
-          layer_pinned.sample.darkening.applied && layer_pinned.sample.darkening.unpinned == reference.n.unpinned &&
-          layer_pinned.sample.darkening.kept == reference.n.kept,
-        "The D3D12 applied HDR layer sample's words 62-63 differ from the CPU reference");
-      require(masked(frame(false).mask, false), "Clearing the switch did not restore the D3D12 HDR layer's raw alpha mask");
-      policy.set_pin_only_ui(false);
-    }
-    report << "pin-only-ui-hdr-layer D3D12 band=" << hdr_band << " strokes=" << hdr_strokes << " unpinned=" << hdr_unpinned
-           << " kept=" << hdr_kept << " shadow_raw_alpha=1 words_equal_reference=1 switch_on_band_unpinned=1"
-              " strokes_hdr_icon_faint_panel_pinned=1 linear_tolerance=1\n";
-    std::printf("PASS D3D12 pin only UI on an HDR-like float layer (fix 4, opacity path): the dim band (%llu px) is measured in the shadow and unpinned with UIPinOnlyUI=1; sharp black strokes (%llu px), a 4x HDR white icon and a faint linear-colour panel keep their pins; words 62-63, counters and masks equal the CPU reference\n",
-      static_cast<unsigned long long>(hdr_band), static_cast<unsigned long long>(hdr_strokes));
 
     queue->wait_idle();
     for (const auto view : views) device->destroy_resource_view(view);
@@ -2042,7 +1680,7 @@ namespace {
         if (++errors <= 10) std::fprintf(stderr, "D3D12 validation: %.*s\n", int(message->DescriptionByteLength), message->pDescription);
       }
       require(!errors, "The D3D12 debug layer reported " + std::to_string(errors) + " validation errors in the pre-UI section");
-      std::puts("PASS D3D12 debug layer: no validation error or corruption message in the pre-UI change-set and pin-only-UI section");
+      std::puts("PASS D3D12 debug layer: no validation error or corruption message in the pre-UI proof section");
     }
   }
 
@@ -2588,7 +2226,7 @@ namespace {
     check_adaptive_ui_d3d12(fixture, renderer, dump, report, directory);
     check_typed_ui_masks_d3d12(fixture, renderer, dump, report, directory);
     check_ui_pin_band_d3d12(fixture, renderer, report);
-    check_pre_ui_change_set_d3d12(fixture, renderer, dump, report, directory);
+    check_pre_ui_proof_d3d12(fixture, renderer, report);
     std::puts("PASS nearest-UI D3D12 current GPU scalar, corner coverage, both depth directions, floor/strength and v3 dump bindings");
     require(observed.renders == effect_renders, "An FX technique ran during native parity");
     owner_queue->wait_idle();
@@ -2622,8 +2260,8 @@ int main(int argc, char **argv) {
     require(!fs::exists(directory), "Native parity requires a fresh output directory");
     // The D3D12 debug layer when this machine has it (d3d12SDKLayers.dll, the
     // Graphics Tools optional feature), enabled before any device exists;
-    // SUNSHINE_D3D12_DEBUG_LAYER=0 opts out. The pre-UI change-set section
-    // fails on the validation errors it records.
+    // SUNSHINE_D3D12_DEBUG_LAYER=0 opts out. The pre-UI proof section fails
+    // on the validation errors it records.
     if (const char *layer = std::getenv("SUNSHINE_D3D12_DEBUG_LAYER"); !layer || std::strcmp(layer, "0")) {
       com_ptr<ID3D12Debug> debug;
       const HRESULT result = D3D12GetDebugInterface(IID_PPV_ARGS(debug.put()));

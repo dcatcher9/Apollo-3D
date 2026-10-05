@@ -210,15 +210,9 @@ namespace {
     const bool still_active = still.phase == sunshine_game3d::still_screen::phase::active;
     const char *const still_phase = still.phase == sunshine_game3d::still_screen::phase::pending ? "pending" :
       still_active ? (still.enabled ? "flat" : "shadow") : "none";
-    // Fix 3 (game3d_ui_change_set.h): the latest sample's change-set shadow
-    // (the offscreen layer's pairing with a Present, whether its pair was
-    // valid and would refine a shapeless alpha), whether the sample's own
-    // decision was refined (the h1 word's refined bit) and this render's
-    // switch (UIPinOnlyUI).
-    const auto &change_set = value.coverage.change_set;
     char message[3072];
     std::snprintf(message, sizeof(message),
-      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u accepted=0x%x sampled_layer={covered=%u invalid=%u opaque=%u} sampled_one_way={strong=%u/%u/%u contradicted=%u/%u/%u} sampled_reason=%.*s sampled_refused=%.*s sampled_reused=%d sampled_late_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_inferred_opaque=%u/%u sampled_claims=0x%x sampled_h1={applied=%d winner=%u} sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_pre_ui_scene={image=%s n=%u d=%.3f valid=%d} scene_guard={hidden=%d pre_ui=%d refuted=%u proven=%d} shadow=%d shadow_hidden_ms=%llu sampled_pre_ui_pixels={match=%u image_lit=%u presented_lit=%u presented_lit_differs=%u} still={scope=%d enabled=%d phase=%s run_ms=%llu sampled=%u/%u short_max_ms=%llu} status_revision=%llu change_set={pairing=%s offset=%u valid=%d would_refine=%d refined=%d enabled=%d}",
+      "Sunshine UI protection: runtime=%p mode=%s rendered=%d mask_path=%d input=%s retained=%d fg=%d fg_known=%d fg_enabled=%d input_state=%s detection=%s selected=%s source=%s source_availability=%s sampled_source=%u sampled_covered=%u sampled_pixels=%u sampled_candidates=0x%x sampled_alpha_covered=%u/%u/%u/%u sampled_alpha_invalid=%u/%u/%u/%u accepted=0x%x sampled_layer={covered=%u invalid=%u opaque=%u} sampled_one_way={strong=%u/%u/%u contradicted=%u/%u/%u} sampled_reason=%.*s sampled_refused=%.*s sampled_reused=%d sampled_late_layer=%d sampled_hudless={changed=%u unchanged=%u invalid=%u matching_tiles=%u lit=%u} sampled_alpha_opaque=%u/%u sampled_inferred_opaque=%u/%u sampled_claims=0x%x sampled_h1={applied=%d winner=%u} sampled_scene={n=%u d=%.3f valid=%d ran=%d verdict=%s} sampled_pre_ui_scene={image=%s n=%u d=%.3f valid=%d} scene_guard={hidden=%d pre_ui=%d refuted=%u proven=%d} shadow=%d shadow_hidden_ms=%llu sampled_pre_ui_pixels={match=%u image_lit=%u presented_lit=%u presented_lit_differs=%u} still={scope=%d enabled=%d phase=%s run_ms=%llu sampled=%u/%u short_max_ms=%llu} status_revision=%llu",
       static_cast<void *>(runtime), value.mode == sunshine_game3d::source_alpha_mode::automatic ? "auto" :
         value.mode == sunshine_game3d::source_alpha_mode::on ? "on" : "off",
       int(value.rendered), int(value.applied), sunshine_game3d::name(value.input), int(value.retained_alpha_ready),
@@ -240,9 +234,7 @@ namespace {
       static_cast<unsigned long long>(shadow_hidden_ms), evidence.pre_ui_match, evidence.pre_ui_image_lit,
       evidence.presented_lit, evidence.presented_lit_differs, int(still.scope), int(still.enabled), still_phase,
       static_cast<unsigned long long>(still.run_ms), evidence.still_cells, evidence.still_compared,
-      static_cast<unsigned long long>(still_short_ms), static_cast<unsigned long long>(value.qualification.token),
-      std::string(sunshine_game3d::change_set::name(change_set.pairing)).c_str(), change_set.offset, int(change_set.valid),
-      int(change_set.would_refine), int(evidence.refined), int(change_set.enabled));
+      static_cast<unsigned long long>(still_short_ms), static_cast<unsigned long long>(value.qualification.token));
     log(reshade::log::level::info, message);
     if (counters_session) log_ui_counters(runtime, *counters_session);
   }
@@ -1094,9 +1086,6 @@ namespace {
       auto &ui_session = sunshine_game3d::source_alpha_session();
       publish_alpha.ui_session = &ui_session;
       auto ui_input = sunshine_game3d::ui_input::acquire(runtime, *renderer, source_alpha, ui_session, diagnostic_owner);
-      // S3 shadow: the present label of this render (its Present's), which the
-      // renderer keeps beside each Present it retains.
-      ui_input.detection.present_label = sunshine_game3d::frame_clock::label(runtime->get_device());
       timer.mark();
       // Publish what this render actually consumes, not the saved preference or
       // a later SDK observation. No RGB from the retained input is displayed.
@@ -1118,10 +1107,6 @@ namespace {
         // Reused depth belongs to an earlier frame: no hidden-scene evidence.
         const sunshine_game3d::render_frame_input input{backbuffer, proof.borrowed_depth, p,
           ui_input.for_render(scene.ui_plane, ui_observation), !proof.frame.reused_depth};
-        // Fix 3: an armed Dump 3D retains every Present for the pre-UI change
-        // set's pairing, and the render it captures retains its own color
-        // only after the dump copied the Presents before it (finish_retention).
-        renderer->set_dump_retention(diagnostic_owner, diagnostic_owner && proof.diagnostic_armed && debug_dump_.requested());
         rendered = proof.frame.prepared && renderer->render(commands, input, true);
         ui_input.complete(*renderer, rendered);
         source_alpha = ui_input.status;
@@ -1153,8 +1138,6 @@ namespace {
         proof.diagnostic_ui_capture_attempt.clear();
         proof.diagnostic_armed = false;
       }
-      // A dumped render's own retention, owed until the dump recorded its copies.
-      renderer->finish_retention(commands);
     }
 
     void invalidate(api::effect_runtime *runtime, bool destroy, std::uint64_t native_swapchain = 0) {

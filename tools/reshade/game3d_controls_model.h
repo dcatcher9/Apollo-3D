@@ -157,52 +157,6 @@ namespace sunshine_game3d {
     "not show the scene depth's edges and stays still for 2 s is shown flat until it changes. Saved per game "
     "(UIFlattenStillScreens).";
 
-  // Pin only UI (docs/reshade-sbs.md, UI decision framework: fix 3's
-  // pre-UI change set, game3d_ui_change_set.h, and rule P2's darkening,
-  // game3d_ui_darkening.h): only UI pins. The changed pixels of an exact
-  // pre-UI image decide (the proven offscreen layer paired with the retained
-  // Present it shows is offered, and refine lets a valid exact selective
-  // change set replace a shapeless whole-frame alpha) and a pure darkening
-  // the decided source shows (a dim, vignette, fade or backdrop that adds no
-  // colour of its own, without sharp structure) does not pin, only when
-  // ReShade.ini UIPinOnlyUI is 1; absent writes 0 so the key is
-  // discoverable, and 0 (or anything else) keeps the default shadow, which
-  // only measures and logs what it would do. ReShade.ini is per game. Fix 3's
-  // UIPinChangedPixels is not read (it shipped as a shadow).
-  inline constexpr const char *pin_only_ui_key = "UIPinOnlyUI";
-  template<class Backend>
-  bool load_pin_only_ui(Backend &config) {
-    int value = -1;
-    config.read(pin_only_ui_key, value);
-    if (value == -1) {
-      config.write(pin_only_ui_key, 0);
-      return false;
-    }
-    return value == 1;
-  }
-  // The panel's checkbox: saves the key, then switches the game's session.
-  template<class Backend>
-  bool edit_pin_only_ui(settings_state &settings, bool value, Backend &config) {
-    if (!settings.alive || !settings.alpha_session || value == settings.alpha_session->pin_only_ui()) return false;
-    config.write(pin_only_ui_key, value ? 1 : 0);
-    if (!settings.alive) return false;
-    settings.alpha_session->set_pin_only_ui(value);
-    return true;
-  }
-  // The session log line, at session start and on every edit.
-  inline std::string pin_only_ui_log_text(bool enabled) {
-    return enabled ? "Sunshine UI protection: only UI pixels pin (UIPinOnlyUI=1)" :
-                     "Sunshine UI protection: dims and unchanged pixels are only logged (UIPinOnlyUI=0)";
-  }
-  inline constexpr const char *pin_only_ui_label = "Pin only UI pixels (dimmed scene keeps its 3D)";
-  inline constexpr const char *pin_only_ui_tooltip =
-    "Off (default): Auto only logs what it would do. On: only the UI itself is shown flat. Where the accepted UI alpha "
-    "covers the whole frame without shape, the pixels an exact pre-UI scene image of the same frame shows changed are "
-    "the UI; and where the UI source carries colour (the UI color tag, the game's UI layer, or a pre-UI or HUD-less "
-    "image), a dim, vignette or backdrop that only darkens the scene is not UI, so the scene under a menu keeps its 3D. "
-    "Alpha-only UI sources still pin their dims; text, icons and sharp dark outlines stay flat, and full pages stay "
-    "flat. Saved per game (UIPinOnlyUI).";
-
   // The overlay name of a candidate bit (ui_detection::candidate), empty for
   // none.
   inline const char *ui_source_name(std::uint32_t candidate_bit) {
@@ -214,7 +168,6 @@ namespace sunshine_game3d {
       case candidate::backbuffer: return "real-input alpha";
       case candidate::current: return "current color alpha";
       case candidate::hudless: return "HUD-less difference";
-      case candidate::pre_ui: return "pre-UI image's changed pixels";
       default: return "";
     }
   }
@@ -242,9 +195,7 @@ namespace sunshine_game3d {
       case ui_no_mask::trusted_invalid: return the("UI source") + " is unusable in this frame";
       case ui_no_mask::presented_blocked: return "the UI tag is unusable in this frame and holds back " + the("inferred alpha");
       case ui_no_mask::layer_aside: return "the UI layer holds no UI alpha";
-      case ui_no_mask::difference_failed:
-        return evidence.refused == ui_detection::candidate::pre_ui ? "the pre-UI image's changed pixels do not isolate UI" :
-                                                                     "the HUD-less difference does not isolate UI";
+      case ui_no_mask::difference_failed: return "the HUD-less difference does not isolate UI";
       case ui_no_mask::gate_no_hold: return "checking whether a full-screen menu hides the scene";
       case ui_no_mask::no_candidate: return "no UI source offered";
       default: return "no UI source qualifies";

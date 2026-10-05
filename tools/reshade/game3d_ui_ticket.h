@@ -52,7 +52,6 @@ namespace sunshine_game3d::ui_ticket {
   // The S3 enable switch for HUD-less (source 5) exactness by token and T1
   // identity by token, flipped once after the live shadow evidence
   // docs/reshade-sbs.md lists (UI decision framework, S3 snapshot ticket).
-  // The pre-UI change set (source 12) rides on UIPinOnlyUI instead.
   inline constexpr bool identity_authoritative = false;
 
   // Whether identity decides: the constant, or the sequence harness's
@@ -422,8 +421,8 @@ namespace sunshine_game3d::ui_ticket {
 
   // A game copy's present label holds only when every Present from the
   // labelled one to this one was real: Present-time evidence is exact now and
-  // the run of real Presents with FG known off (fix 3's
-  // change_set::next_fg_off_presents, this one included) covers the
+  // the run of real Presents with FG known off (the provider's fg_off_run,
+  // this one included) covers the
   // presents_ago Presents since the labelled one.
   constexpr bool real_span(std::uint32_t fg_off_run, std::uint32_t presents_ago, std::uint32_t interposer_bits, bool fg_known, bool fg_enabled) {
     return present_time_exact(interposer_bits, fg_known, fg_enabled) && fg_off_run > presents_ago;

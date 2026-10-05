@@ -3,7 +3,6 @@
 // the one pair rule, same-frame identity, real spans, refusal precedence, the
 // FG interposer table, the identity shadow under DLSS-G ordering, T1 by
 // ticket (game3d_ui_temporal.h) and the identity line's text.
-#include "game3d_ui_change_set.h"
 #include "game3d_ui_temporal.h"
 #include "game3d_ui_ticket.h"
 
@@ -15,7 +14,6 @@
 
 namespace ticket = sunshine_game3d::ui_ticket;
 namespace temporal = sunshine_game3d::ui_temporal;
-namespace change_set = sunshine_game3d::change_set;
 using sunshine_game3d::ui_selection::kind;
 
 namespace {
@@ -59,12 +57,12 @@ namespace {
     require(ticket::pair_refusal(ticket::refuse(p9, refusal::not_real_span), p9) == refusal::not_real_span, "Evidence over a span that is not real");
     require(ticket::pair_refusal(p9, ticket::refuse(p9, refusal::foreign_queue)) == refusal::foreign_queue, "A refused reference");
     require(ticket::pair_refusal(p9, p9) == refusal::none, "An exact pair has no refusal");
-    // The proposals the CPU makes (game3d_ui_change_set.h): the retained
-    // Present's label, or the newest ready Backbuffer token.
-    const change_set::layer_pairing retained1 {change_set::pair_class::retained, 1u};
-    require(ticket::pair_exact(ticket::present_label(boundary::before_clear, 9), ticket::valid_label(label_space::present, change_set::proposed_layer_label(retained1, 10))), "A copy of Present 9 pairs with the retained Present one before Present 10");
-    require(ticket::pair_refusal(ticket::present_label(boundary::before_clear, 8), ticket::valid_label(label_space::present, change_set::proposed_layer_label(retained1, 10))) == refusal::mismatch, "A copy executed a Present earlier than the count is a mismatch");
-    require(ticket::pair_exact(ticket::token_label_of_copy(77), ticket::valid_label(label_space::token, change_set::token_proposal(true, 77))), "A layer copy after the tagged frame pairs by token");
+    // The labels the provider's layer ticket expects: the Present its count
+    // names (present label minus presents_since_copy), or the newest ready
+    // Backbuffer token.
+    require(ticket::pair_exact(ticket::present_label(boundary::before_clear, 9), ticket::valid_label(label_space::present, 10u - 1u)), "A copy of Present 9 pairs with the Present one before Present 10");
+    require(ticket::pair_refusal(ticket::present_label(boundary::before_clear, 8), ticket::valid_label(label_space::present, 10u - 1u)) == refusal::mismatch, "A copy executed a Present earlier than the count is a mismatch");
+    require(ticket::pair_exact(ticket::token_label_of_copy(77), ticket::valid_label(label_space::token, 77u)), "A layer copy after the tagged frame pairs by token");
   }
 
   ticket::ticket tag(kind source, std::uint64_t generation, std::uint64_t epoch = 7, std::uint32_t viewport = 1) {
@@ -247,7 +245,7 @@ namespace {
       state.identity_override = override_on;
       const auto first = temporal::ticket_identity({false, 10}, 41, state.decision_token, true);
       require(state.arbitrate(first, scope, 0x10).detect, "The first Present detects");
-      state.detected(scope, first, 0x10);
+      state.detected(scope, first);
       require(state.decision_token == 41, "The decision's token is kept");
       // Today's counting misreads the re-offering Present as real.
       const auto misread = temporal::ticket_identity({false, 11}, 41, state.decision_token, true);

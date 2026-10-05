@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// GPU contract of the UI selection predicate (UI framework S1, S2a, S2b, fix 1, fix 2, fix 3, fix 4, S3): runs the
+// GPU contract of the UI selection predicate (UI framework S1, S2a, S2b, fix 1, fix 2, S3): runs the
 // real SunshineUIDetectionReduceCS of game3d_native.hlsl on synthetic
 // per-tile statistics, detection constants and T1 hold stores, and compares
 // every decision word, the written hold store and every counter add with
@@ -8,26 +8,20 @@
 // checked against a CPU count of V1, V2, A2 and the layer's pre-UI comparison
 // (H1 d) on edge values, and the scene compare and evidence passes' H2
 // stillness counts (statistics rows 144-152, decision texel 12, the previous
-// cell means at u5) against a CPU oracle. Fix 3: the change-set slot of the
-// pre-UI layer's pair, the change-set shadow (statistics rows 160-191,
-// decision texels 13-15) and the 3x3 mask of source 12 are checked against
-// a CPU oracle on synthetic images. Fix 4: the darkening passes (pin only
-// UI, rule P2) against game3d_ui_darkening.h's reference, mask for mask and
-// in decision words 62-63, on synthetic images. S3: the identity verdicts of
-// texel 12 .z/.w and the identity counter words on synthetic stamps (t9) and
-// proposals (b2 words 6-9), and the gates of sources 5 and 12. Also checks the predicate's intended
-// behaviour (selection, the T1 grace, F1 reasons and refused candidates, the
-// H1 override of a hidden scene and its informative claims, the H2 override
-// of a still screen without a UI source, the pre-UI change set and refine),
-// pair comparability (V2) and the acceptance key (A1). Uses a hardware D3D11
-// device, else WARP.
+// cell means at u5) against a CPU oracle. Also checks the predicate's
+// intended behaviour (selection, the T1 grace, F1 reasons and refused
+// candidates, the H1 override of a hidden scene and its informative claims,
+// the H2 override of a still screen without a UI source), pair
+// comparability (V2) and the acceptance key (A1). S3: the identity verdicts
+// of texel 12 .z/.w and the identity counter words on synthetic stamps (t9)
+// and proposals (b2 words 6-9), and the HUD-less gate of sources 5 and 6.
+// Fix 3 and fix 4 (selection revision 6) were removed by user decision;
+// revision 7 decides as revision 5. Uses a hardware D3D11 device, else WARP.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
-#include "game3d_ui_change_set.h"
-#include "game3d_ui_darkening.h"
 #include "game3d_ui_selection.h"
 
 #include <algorithm>
@@ -74,15 +68,13 @@ namespace {
     std::array<texel, 256> coverage{}, invalid{}, difference{}, lit{}, layer{}, strong{}, contradicted{};
     // H1 (d), rows 128-143: the layer against the presented frame.
     std::array<texel, 256> pre_ui{};
-    // Fix 3, rows 160-191: the change-set shadow.
-    std::array<texel, 256> change_set{}, change_set_more{};
   };
 
   // What the reduce sums from the tiles, exactly as it does.
   selection::counts sums(const tiles &t) {
     selection::counts c;
     std::array<std::uint32_t, 4> coverage{}, invalid{}, difference{};
-    std::array<std::uint32_t, 4> lit{}, layer{}, pre_ui{}, change_set{}, change_set_more{};
+    std::array<std::uint32_t, 4> lit{}, layer{}, pre_ui{};
     for (std::size_t i = 0; i != 256; ++i) {
       for (std::size_t k = 0; k != 4; ++k) {
         coverage[k] += t.coverage[i][k];
@@ -91,8 +83,6 @@ namespace {
         lit[k] += t.lit[i][k];
         layer[k] += t.layer[i][k];
         pre_ui[k] += t.pre_ui[i][k];
-        change_set[k] += t.change_set[i][k];
-        change_set_more[k] += t.change_set_more[i][k];
       }
       for (std::size_t k = 0; k != 3; ++k) {
         c.strong[k] += t.strong[i][k];
@@ -100,16 +90,7 @@ namespace {
       }
       const auto &d = t.difference[i];
       c.matching_tiles += d[3] && d[2] * 100u >= d[3] * 99u ? 1u : 0u;
-      c.shadow.matching_tiles += d[3] && t.change_set[i][1] * 100u >= d[3] * 99u ? 1u : 0u;
     }
-    c.shadow.changed = change_set[0];
-    c.shadow.unchanged = change_set[1];
-    c.shadow.nonfinite = change_set[2];
-    c.shadow.filtered = change_set[3];
-    c.shadow.changed_1 = change_set_more[0];
-    c.shadow.changed_2 = change_set_more[1];
-    c.shadow.judge_pixels = change_set_more[2];
-    c.shadow.judge_tp = change_set_more[3];
     c.pixels = difference[3];
     c.changed = difference[0];
     c.nonfinite = difference[1];
@@ -139,10 +120,9 @@ namespace {
     // b2 word 4: the renderer pushes the pre-UI threshold on sample frames
     // only; zero skips the pre-UI sums and writes texel 11 as zero.
     float pre_ui_threshold = 2.f / 255.f;
-    // b2 word 5: the rule bits, H2's still-screen flag (still::flatten while
-    // the CPU's run is active and enabled) and fix 3's refine, pair offset
-    // and retained bits.
-    std::uint32_t rules{};
+    // b2 word 5: H2's still-screen flag (still::flatten while the CPU's run
+    // is active and enabled).
+    std::uint32_t still{};
     // S3: the stamps at t9 and b2 words 6-9.
     selection::identity_input identity{};
   };
@@ -219,7 +199,7 @@ namespace {
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.statistics), "statistics");
     checked(gpu.device->CreateShaderResourceView(gpu.statistics.Get(), nullptr, &gpu.statistics_view), "statistics view");
-    desc.Width = detection::change_set_decision_texels;
+    desc.Width = detection::still_decision_texels;
     desc.Height = 1;
     desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
     checked(gpu.device->CreateTexture2D(&desc, nullptr, &gpu.decision), "decision");
@@ -267,9 +247,9 @@ namespace {
   }
 
   ComPtr<ID3D11ComputeShader> compile_pass(gpu_t &gpu, const std::string &source, unsigned color,
-      const char *entry = "SunshineUIDetectionReduceCS", unsigned width = 256) {
-    const auto c = std::to_string(color), w = std::to_string(width);
-    const D3D_SHADER_MACRO defines[]{{"BUFFER_WIDTH", w.c_str()}, {"BUFFER_HEIGHT", "144"}, {"BUFFER_COLOR_SPACE", c.c_str()},
+      const char *entry = "SunshineUIDetectionReduceCS") {
+    const auto c = std::to_string(color);
+    const D3D_SHADER_MACRO defines[]{{"BUFFER_WIDTH", "256"}, {"BUFFER_HEIGHT", "144"}, {"BUFFER_COLOR_SPACE", c.c_str()},
       {nullptr, nullptr}};
     ComPtr<ID3DBlob> code, errors;
     const HRESULT result = D3DCompile(source.data(), source.size(), "game3d_native.hlsl", defines, nullptr, entry, "cs_5_0",
@@ -304,7 +284,7 @@ namespace {
     float threshold;
     std::uint32_t accepted, flags;
     float pre_ui_threshold;
-    std::uint32_t rules;
+    std::uint32_t still;
     std::uint32_t padding[6];
   };
   static_assert(sizeof(detection_constants) == 48);
@@ -339,14 +319,11 @@ namespace {
       rows[(row + detection::judgment_statistics_row) * 16 + column] = test.statistics.strong[lane];
       rows[(row + detection::judgment_statistics_row + 16) * 16 + column] = test.statistics.contradicted[lane];
       rows[(row + detection::pre_ui_statistics_row) * 16 + column] = test.statistics.pre_ui[lane];
-      rows[(row + detection::change_set_statistics_row) * 16 + column] = test.statistics.change_set[lane];
-      rows[(row + detection::change_set_statistics_row + 16) * 16 + column] = test.statistics.change_set_more[lane];
     }
     gpu.context->UpdateSubresource(gpu.statistics.Get(), 0, nullptr, rows.data(), 16 * sizeof(texel), 0);
-    // The reduce reads b2 word 4 only as zero or not (texels 11 and 13-15
-    // sums or zero).
+    // The reduce reads b2 word 4 only as zero or not (texel 11 sums or zero).
     const auto constants = with_identity_words({test.offered, 2.f / 255.f, test.accepted, test.flags, test.pre_ui_threshold,
-      test.rules, {}}, test.identity);
+      test.still, {}}, test.identity);
     gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
     upload_stamps(gpu, test.identity);
     const std::array<std::uint32_t, 4> sentinel{0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu};
@@ -373,17 +350,17 @@ namespace {
     ID3D11UnorderedAccessView *none[3]{};
     gpu.context->CSSetUnorderedAccessViews(5, 3, none, nullptr);
     const auto words = read<std::uint32_t>(gpu, gpu.decision.Get(), gpu.decision_staging.Get(),
-      4 * detection::change_set_decision_texels);
+      4 * detection::still_decision_texels);
     const auto counters = read<std::uint32_t>(gpu, gpu.counters.Get(), gpu.counters_staging.Get(), with_identity);
     const auto store = read<std::uint32_t>(gpu, gpu.hold.Get(), gpu.hold_staging.Get(), detection::hold::store_texels);
     gpu.hold_written = {store[detection::hold::word::state], store[detection::hold::word::source],
       store[detection::hold::word::covered]};
 
     const auto c = sums(test.statistics);
-    const auto d = selection::decide(c, test.offered, test.accepted, test.flags, previous, test.rules, test.identity);
+    const auto d = selection::decide(c, test.offered, test.accepted, test.flags, previous, test.still, test.identity);
     // Texel 12 (H2's stillness counts) reads zero: the reduce clears it for
     // the evidence passes; .z/.w are S3's identity words.
-    std::array<std::uint32_t, 4 * detection::change_set_decision_texels> want{};
+    std::array<std::uint32_t, 4 * detection::still_decision_texels> want{};
     want[word::id_verdicts] = selection::identity_verdict_word(d.identity);
     want[word::id_deltas] = selection::identity_delta_word(d.identity);
     want[word::source] = d.source;
@@ -428,23 +405,6 @@ namespace {
     want[word::pre_ui_image_lit] = layer ? c.pre_ui_lit : 0u;
     want[word::presented_lit] = layer ? c.presented_lit : 0u;
     want[word::presented_lit_differs] = layer ? c.presented_lit_differs : 0u;
-    // Texels 13-15 (fix 3): the change-set shadow and its judge on the same
-    // condition with b2 word 5's shadow bit (a layer proven the pre-UI scene
-    // image), zero otherwise.
-    if (layer && (test.rules & detection::change_set::shadow)) {
-      const auto judged = test.offered & test.accepted;
-      want[word::cs_changed] = c.shadow.changed;
-      want[word::cs_unchanged] = c.shadow.unchanged;
-      want[word::cs_nonfinite] = c.shadow.nonfinite;
-      want[word::cs_matching_tiles] = c.shadow.matching_tiles;
-      want[word::cs_filtered] = c.shadow.filtered;
-      want[word::cs_changed_1] = c.shadow.changed_1;
-      want[word::cs_changed_2] = c.shadow.changed_2;
-      want[word::cs_judge_pixels] = c.shadow.judge_pixels;
-      want[word::cs_judge_tp] = c.shadow.judge_tp;
-      want[word::cs_judge_kind] = (judged & candidate::ui_alpha) ? detection::change_set::judge::ui_alpha :
-        (judged & candidate::ui_color) ? detection::change_set::judge::ui_color : 0u;
-    }
     // decide() reads its counts back from the words it is compared with.
     const auto back = selection::counts_from_words(want.data(), want.size());
     require(back.covered == c.covered && back.invalid == c.invalid && back.pixels == c.pixels &&
@@ -453,16 +413,14 @@ namespace {
         back.opaque_ui_color == c.opaque_ui_color && back.opaque_backbuffer == c.opaque_backbuffer &&
         back.opaque_current == c.opaque_current && back.pre_ui_match == want[word::pre_ui_match] &&
         back.pre_ui_lit == want[word::pre_ui_image_lit] && back.presented_lit == want[word::presented_lit] &&
-        back.presented_lit_differs == want[word::presented_lit_differs] && back.shadow.changed == want[word::cs_changed] &&
-        back.shadow.matching_tiles == want[word::cs_matching_tiles] && back.shadow.filtered == want[word::cs_filtered] &&
-        back.shadow.judge_tp == want[word::cs_judge_tp] && back.shadow.judge_kind == want[word::cs_judge_kind] &&
+        back.presented_lit_differs == want[word::presented_lit_differs] &&
         selection::identity_of_words(back.identity_verdicts, back.identity_deltas) == d.identity,
       test.name + ": counts_from_words does not invert the decision words");
     for (std::size_t i = 0; i != want.size(); ++i)
       if (words[i] != want[i]) {
         char text[240];
         std::snprintf(text, sizeof(text), " (%s): word %zu is %u on the GPU, decide() gives %u (offered 0x%x accepted 0x%x flags 0x%x "
-          "rules 0x%x hold %u/%u/%u)", space, i, words[i], want[i], test.offered, test.accepted, test.flags, test.rules,
+          "still 0x%x hold %u/%u/%u)", space, i, words[i], want[i], test.offered, test.accepted, test.flags, test.still,
           previous.state, previous.source, previous.covered);
         throw std::runtime_error(test.name + text);
       }
@@ -521,19 +479,18 @@ namespace {
       }
   }
 
-  // S3: the identity verdicts and gates on the fix 3 pre-UI pair (Stellar
-  // Blade SDR's bare layer and a shapeless current alpha, refine on) and an
-  // exact-or-not HUD-less pair (E33-like, over a shapeless Backbuffer).
-  // Without a gate every verdict decides nothing; with gate_layer the
-  // pre-UI change set is valid only with its layer pair exact, with
-  // gate_hudless the HUD-less change set only with its pair exact (a token
-  // batch, or the stamp's C_P + 1 equal to the proposal).
+  // S3: the identity verdicts and the HUD-less gate on an offered layer
+  // (its pair verdict decides nothing: no gate reads it since the pre-UI
+  // change set was removed) and an
+  // exact-or-not HUD-less pair (E33-like, a shapeless Backbuffer offered but
+  // not accepted).
+  // Without a gate every verdict decides nothing; with gate_hudless the
+  // HUD-less change set is valid only with its pair exact (a token batch, or
+  // the stamp's C_P + 1 equal to the proposal).
   std::vector<case_t> identity_cases() {
     std::vector<case_t> cases;
     const std::uint32_t p = small_pixels;
     using k = selection::kind;
-    const auto refine = detection::rules::pin_only_ui;
-    const auto layer_pair = refine | (1u << detection::change_set::pair_shift) | detection::change_set::retained_1;
     struct stamp_case {
       const char *name;
       selection::identity_input identity;
@@ -548,35 +505,17 @@ namespace {
       {"far mismatch", {90000u, 7u, 0u, 41u, 0u, 0u}},
     };
     for (const auto &stamp : layer_stamps)
-      for (const std::uint32_t gate : {0u, unsigned(identity::gate_layer), unsigned(identity::gate_hudless)}) {
-        case_t test{std::string("S3 pre-UI layer pair ") + stamp.name + ", gate " + std::to_string(gate), {},
-          candidate::layer | candidate::current | candidate::pre_ui, candidate::pre_ui | candidate::current, 0u};
+      for (const std::uint32_t gate : {0u, unsigned(identity::gate_hudless)}) {
+        case_t test{std::string("S3 layer pair ") + stamp.name + ", gate " + std::to_string(gate), {},
+          candidate::layer | candidate::current, candidate::layer | candidate::current, 0u};
         difference_rows(test.statistics, p, 128, 100, 900);
         test.statistics.lit[0][0] = p / 4u;
-        alpha(test, k::ui_layer, 0, 30000);
+        alpha(test, k::ui_layer, 2000, 0, 100);
         alpha(test, k::current, p, 0, p);
-        test.rules = layer_pair;
         test.identity = stamp.identity;
         test.identity.bits = gate;
         cases.push_back(test);
       }
-    // T1 under refine: a refused pre-UI pair counts as missing, so the frame
-    // after a refined 12 reuses it once (then the flat alpha, spent).
-    {
-      case_t test{"S3 pre-UI late copy after a refined 12", {}, candidate::layer | candidate::current | candidate::pre_ui,
-        candidate::pre_ui | candidate::current, 0u};
-      difference_rows(test.statistics, p, 128, 100, 900);
-      test.statistics.lit[0][0] = p / 4u;
-      alpha(test, k::ui_layer, 0, 30000);
-      alpha(test, k::current, p, 0, p);
-      test.rules = layer_pair;
-      test.identity = {42u, 7u, 0u, 41u, 0u, 0u, identity::gate_layer};
-      test.previous = selection::hold_state{detection::hold::own, detection::source_pre_ui, 2000u};
-      cases.push_back(test);
-      test.name = "S3 pre-UI late copy, spent";
-      test.previous = selection::hold_state{detection::hold::spent, detection::source_pre_ui, 2000u};
-      cases.push_back(test);
-    }
     const stamp_case hudless_stamps[]{
       {"token batch", {0u, 0u, 0u, 0u, 0u, 0u, identity::token_batch}},
       {"exact present", {0u, 0u, 40u, 0u, 0u, 41u}},
@@ -589,12 +528,11 @@ namespace {
         for (const std::uint32_t exact : {0u, unsigned(candidate::exact)}) {
           case_t test{std::string("S3 HUD-less pair ") + stamp.name + ", gate " + std::to_string(gate) + ", exact " +
             std::to_string(exact), {}, candidate::backbuffer | candidate::hudless | exact | candidate::layer,
-            candidate::backbuffer | candidate::hudless, 0u};
+            candidate::hudless, 0u};
           difference_rows(test.statistics, p, 128, 100, 900);
           test.statistics.lit[0][0] = p;
           alpha(test, k::backbuffer, p, 0, p);
           alpha(test, k::ui_layer, 0, 30000);
-          test.rules = refine;
           test.identity = stamp.identity;
           test.identity.bits |= gate;
           cases.push_back(test);
@@ -636,12 +574,10 @@ namespace {
         cases.push_back(test);
       }
     // A partial change set: 128 matching tiles (fully unchanged) and 128 at
-    // 10% changed / 90% unchanged; 127 matching tiles fail. Its pre-UI image
-    // is lit on half the pixels.
+    // 10% changed / 90% unchanged; 127 matching tiles fail.
     for (const std::uint32_t matching : {127u, 128u}) {
       case_t test{"128 matching tiles, " + std::to_string(matching), {}, candidate::hudless | candidate::exact, candidate::hudless};
       difference_rows(test.statistics, p, matching, 100, 900);
-      test.statistics.lit[0][0] = p / 2u;
       cases.push_back(test);
     }
     // 75% unchanged: 128 clean tiles and 128 at 50% unchanged (5% changed)
@@ -650,15 +586,6 @@ namespace {
       case_t test{"75% unchanged, minus " + std::to_string(less), {}, candidate::hudless, candidate::hudless};
       difference_rows(test.statistics, p, 128, 50, 500);
       test.statistics.difference[200][2] -= less;
-      test.statistics.lit[0][0] = p / 2u;
-      cases.push_back(test);
-    }
-    // Fix 3, V2's lit bound: a partial set's pre-UI image lit on 1% of the
-    // pixels (p / 100 = 368.64) is valid, one pixel less is not.
-    for (const std::uint32_t lit : {368u, 369u}) {
-      case_t test{"partial set lit, " + std::to_string(lit), {}, candidate::hudless | candidate::exact, candidate::hudless};
-      difference_rows(test.statistics, p, 128, 100, 900);
-      test.statistics.lit[0][0] = lit;
       cases.push_back(test);
     }
     // 98% changed full sets from an exact pair, lit; accepted and not, with
@@ -829,7 +756,6 @@ namespace {
             auto test = alpha_case("one-way judgment, " + std::to_string(contradicted) + " contradicted", p,
               candidate::backbuffer | candidate::layer | candidate::current | pair, accepted);
             difference_rows(test.statistics, p, middle ? 0 : 128, 100, middle ? 500 : 900);
-            test.statistics.lit[0][0] = p;
             alpha(test, k::backbuffer, p, 0);
             alpha(test, k::ui_layer, 3000, 0);
             alpha(test, k::current, 2000, 0);
@@ -904,99 +830,6 @@ namespace {
       alpha(other, k::backbuffer, 0, 1000);
       cases.push_back(other);
     }
-    // Fix 3: the pre-UI change set (candidate 0x100, source 12) over Stellar
-    // Blade SDR's bare layer (V1-invalid, no coverage) and a current alpha:
-    // valid as a partial set lit on 1%, never over a layer with coverage or
-    // beside a HUD-less image, kept out by an accepted declared alpha; refine
-    // (b2 word 5) replaces a shapeless whole-frame alpha winner with it or
-    // with an accepted exact HUD-less set, never a winner with shape; T1's
-    // refine_missing; H1 over a refined frame; F1's difference_failed.
-    {
-      const auto refine = detection::rules::pin_only_ui;
-      const auto layer_pair = refine | (1u << detection::change_set::pair_shift) | detection::change_set::retained_1;
-      const auto pre_ui_case = [&](std::string name, std::uint32_t offered, std::uint32_t accepted, std::uint32_t rules,
-                                   std::uint32_t current_opaque = small_pixels, std::uint32_t lit = small_pixels / 4u, std::uint32_t flags = 0u) {
-        case_t test{std::move(name), {}, offered, accepted, flags};
-        difference_rows(test.statistics, p, 128, 100, 900);
-        test.statistics.lit[0][0] = lit;
-        alpha(test, k::ui_layer, 0, 30000);
-        alpha(test, k::current, p, 0, current_opaque);
-        test.rules = rules;
-        return test;
-      };
-      const std::uint32_t sb = candidate::layer | candidate::current | candidate::pre_ui;
-      for (const std::uint32_t lit : {368u, 369u})
-        cases.push_back(pre_ui_case("pre-UI set alone, lit " + std::to_string(lit), sb, candidate::pre_ui, layer_pair, p, lit));
-      cases.push_back(pre_ui_case("pre-UI set unaccepted", sb, 0u, layer_pair));
-      auto covered = pre_ui_case("pre-UI set over a covered layer", sb, candidate::pre_ui, layer_pair);
-      alpha(covered, k::ui_layer, 1, 30000);
-      cases.push_back(covered);
-      cases.push_back(pre_ui_case("pre-UI set beside a HUD-less image", sb | candidate::hudless | candidate::exact,
-        candidate::pre_ui | candidate::hudless, layer_pair));
-      auto blocked = pre_ui_case("pre-UI set blocked by an accepted invalid tag", sb | candidate::ui_color,
-        candidate::pre_ui | candidate::ui_color, layer_pair);
-      alpha(blocked, k::ui_color, 0, p);
-      cases.push_back(blocked);
-      // Refine over the shapeless current alpha, and not without the rule,
-      // over alpha with shape or without a valid set.
-      for (const std::uint32_t rules : {0u, unsigned(refine), unsigned(layer_pair)})
-        for (const std::uint32_t opaque : {p, p - 1u})
-          cases.push_back(pre_ui_case("refine, rules " + std::to_string(rules) + ", opaque " + std::to_string(opaque), sb,
-            candidate::pre_ui | candidate::current, rules, opaque));
-      cases.push_back(pre_ui_case("refine without a valid set", sb, candidate::pre_ui | candidate::current, layer_pair, p, 368u));
-      // Refine through an accepted exact HUD-less set over a shapeless
-      // Backbuffer (E33-like); an inexact pair never refines.
-      for (const std::uint32_t exact : {0u, unsigned(candidate::exact)}) {
-        auto e33 = alpha_case("refine through a HUD-less set, exact " + std::to_string(exact), p,
-          candidate::backbuffer | candidate::hudless | exact, candidate::backbuffer | candidate::hudless);
-        difference_rows(e33.statistics, p, 128, 100, 900);
-        e33.statistics.lit[0][0] = p;
-        alpha(e33, k::backbuffer, p, 0, p);
-        e33.rules = refine;
-        cases.push_back(e33);
-      }
-      // T1 refine_missing: the pre-UI set missing for one frame reuses a
-      // stored 12 once, then shows the flat alpha.
-      auto missing = pre_ui_case("refine_missing reuses 12", candidate::layer | candidate::current, candidate::current, refine, p,
-        p / 4u, detection::per_frame_accepted_missing);
-      missing.previous = selection::hold_state{detection::hold::own, detection::source_pre_ui, 2000u};
-      cases.push_back(missing);
-      missing.name = "refine_missing spent";
-      missing.previous = std::nullopt;
-      cases.push_back(missing);
-      // The same through T1's change-set gap (b2 word 5), which leaves the
-      // accepted-missing flag clear; without refine the gap does nothing.
-      for (const std::uint32_t rules : {refine | detection::change_set::gap, unsigned(detection::change_set::gap)}) {
-        auto gap = pre_ui_case("change-set gap, rules " + std::to_string(rules), candidate::layer | candidate::current,
-          candidate::current, rules, p, p / 4u);
-        gap.previous = selection::hold_state{detection::hold::own, detection::source_pre_ui, 2000u};
-        cases.push_back(gap);
-      }
-      // H1 over a refined frame: a held hidden verdict with the shapeless
-      // alpha's claim (a) shows it flat.
-      cases.push_back(pre_ui_case("H1 over a refined frame", sb, candidate::pre_ui | candidate::current, layer_pair, p, p / 4u,
-        hidden));
-      // F1: an accepted invalid pre-UI set beside a valid layer is
-      // difference_failed (refusing pre_ui) without other reasons.
-      auto failed = pre_ui_case("F1 difference_failed for pre_ui", candidate::layer | candidate::pre_ui, candidate::pre_ui,
-        layer_pair, p, 368u);
-      alpha(failed, k::ui_layer, 0, 0);
-      failed.previous = std::nullopt;
-      cases.push_back(failed);
-      // The change-set shadow: texels 13-15 sum rows 160-191 with a UI color
-      // judge, and none without a layer.
-      auto shadow = pre_ui_case("change-set shadow with a judge", candidate::layer | candidate::current | candidate::ui_color,
-        candidate::ui_color, 0u);
-      for (std::uint32_t i = 0; i != 256; ++i) {
-        const auto w = shadow.statistics.difference[i][3];
-        shadow.statistics.change_set[i] = {i % 3u, i < 150u ? w : w - 3u, i == 7u ? 1u : 0u, i % 2u};
-        shadow.statistics.change_set_more[i] = {i % 5u, i % 7u, i % 4u, i % 2u};
-      }
-      cases.push_back(shadow);
-      shadow.name = "change-set shadow without a layer";
-      shadow.offered &= ~candidate::layer;
-      cases.push_back(shadow);
-    }
     // H2 (fix 2): a frame applying no source that T1 did not reuse shows flat
     // (11) under still::flatten; the hold store keeps the decision before it.
     {
@@ -1005,28 +838,28 @@ namespace {
       // the unaccepted current alpha decide nothing.
       auto loading = alpha_case("H2 still screen without a UI source", p, candidate::layer | candidate::current, 0);
       alpha(loading, k::ui_layer, 0, 2000);
-      loading.rules = flatten;
+      loading.still = flatten;
       cases.push_back(loading);
       loading.name = "H2 shadow (no flag)";
-      loading.rules = 0;
+      loading.still = 0;
       cases.push_back(loading);
       loading.name = "H2 other b2 word 5 bits";
-      loading.rules = ~flatten;
+      loading.still = ~flatten;
       cases.push_back(loading);
       // E33 SDR: an accepted current alpha deciding an empty mask is respected.
       auto empty = alpha_case("H2 accepted empty decision", p, candidate::current, candidate::current);
-      empty.rules = flatten;
+      empty.still = flatten;
       cases.push_back(empty);
       // H1 wins over H2.
       auto h1 = alpha_case("H2 under H1", p, candidate::layer, 0, hidden);
       alpha(h1, k::ui_layer, p, 0, p);
-      h1.rules = flatten;
+      h1.still = flatten;
       cases.push_back(h1);
       // A T1-reused decision, even a stored no-mask one, is never H2's.
       auto reused = alpha_case("H2 on a reused decision", p, candidate::backbuffer, candidate::backbuffer);
       alpha(reused, k::backbuffer, 400, 2000);
       reused.previous = selection::hold_state{detection::hold::own, 0u, 0u};
-      reused.rules = flatten;
+      reused.still = flatten;
       cases.push_back(reused);
       reused.name = "H2 on a reused source";
       reused.previous = own_partial;
@@ -1035,7 +868,7 @@ namespace {
       auto stale = alpha_case("H2 on reused depth", p, candidate::layer | candidate::current, 0,
         detection::per_frame_depth_not_current);
       alpha(stale, k::ui_layer, 0, 2000);
-      stale.rules = flatten;
+      stale.still = flatten;
       cases.push_back(stale);
       // The next real frame finds the hold store the H2 frame wrote: its
       // own decision (none), not 11.
@@ -1043,7 +876,7 @@ namespace {
       alpha(chained, k::backbuffer, 400, 2000);
       auto first = loading;
       first.name = "H2 before a chained frame";
-      first.rules = flatten;
+      first.still = flatten;
       cases.push_back(first);
       chained.previous = std::nullopt;
       cases.push_back(chained);
@@ -1133,25 +966,9 @@ namespace {
     }
     if (!(random() % 8u)) t.difference[random() % 256u][1] = 1u;
     // H2's flag in half the cases, other bits of b2 word 5 now and then.
-    if (random() & 1u) test.rules = detection::still::flatten | ((random() % 8u) ? 0u : std::uint32_t(random()) & ~1u);
-    // Fix 3: refine, the shadow and gap bits, a pair offset and the retained
-    // bits in half the cases.
-    if (random() & 1u) test.rules |= std::uint32_t(random()) & 0xfeu;
-    // The pre-UI change set in a quarter of the offers, accepted with the
-    // rest (or by the random mask); its shadow rows near their bounds.
-    if (!(random() % 4u)) {
-      test.offered |= candidate::pre_ui;
-      if (random() & 1u) test.accepted |= candidate::pre_ui;
-    }
-    for (std::size_t k = 0; k != 4; ++k) {
-      spread(t.change_set, k, pick(random, p), random);
-      spread(t.change_set_more, k, pick(random, p), random);
-    }
-    // Some tiles at least 99% unchanged in the shadow.
-    for (std::size_t i = 0; i != 256; ++i)
-      if (random() & 1u) t.change_set[i][1] = t.difference[i][3] - (random() % 3u ? 0u : std::min<std::uint32_t>(2u, t.difference[i][3]));
+    if (random() & 1u) test.still = detection::still::flatten | ((random() % 8u) ? 0u : std::uint32_t(random()) & ~1u);
     // S3: stamps and proposals near each other in half the cases, the token
-    // batch and the gates in a quarter.
+    // batch and the gate (and the reserved bit 0x2) in a quarter.
     if (random() & 1u) {
       const auto label = [&] { return std::uniform_int_distribution<std::uint32_t>(0u, 3u)(random); };
       test.identity = {label(), label(), label(), label(), label(), label(), 0u};
@@ -1342,14 +1159,14 @@ namespace {
     }
   }
 
-  ComPtr<ID3D11ShaderResourceView> float_image(gpu_t &gpu, const std::vector<std::array<float, 4>> &texels, UINT width = 256) {
+  ComPtr<ID3D11ShaderResourceView> float_image(gpu_t &gpu, const std::vector<std::array<float, 4>> &texels) {
     D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = width;
+    desc.Width = 256;
     desc.Height = 144;
     desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
     desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    const D3D11_SUBRESOURCE_DATA data{texels.data(), UINT(width * sizeof(texels[0])), 0};
+    const D3D11_SUBRESOURCE_DATA data{texels.data(), 256 * sizeof(texels[0]), 0};
     ComPtr<ID3D11Texture2D> texture;
     checked(gpu.device->CreateTexture2D(&desc, &data, &texture), "image");
     ComPtr<ID3D11ShaderResourceView> view;
@@ -1429,7 +1246,7 @@ namespace {
         layer[tile][1] += !okay(l[3]) || bound;
         layer[tile][2] += okay(l[3]) && l[3] >= opaque;
         layer[tile][3] += okay(a[3]) && a[3] >= opaque;
-        // SunshineChangeSetDifference (the HUD-less pair), relative above one in scRGB.
+        // SunshineHUDlessDifference, relative above one in scRGB.
         const auto &current = images[3][i], &hudless = images[5][i];
         const bool finite = std::isfinite(current[0]) && std::isfinite(current[1]) && std::isfinite(current[2]) &&
           std::isfinite(hudless[0]) && std::isfinite(hudless[1]) && std::isfinite(hudless[2]);
@@ -1530,969 +1347,35 @@ namespace {
     require(pre_ui_threshold > 0.f ? total_pre_ui[0] && total_pre_ui[1] && total_pre_ui[3] && total_pre_ui[0] < 256u * 144u :
       total_pre_ui == texel{}, "check_tiles: the pre-UI pixel counts are degenerate");
   }
-
-  // Fix 3: the pre-UI layer's change set on synthetic 256 x 144 images. The
-  // layer (t7) is a scene S without alpha; the Present one back (t2) is S
-  // with UI drawn on the left half (isolated specks, a pair, one-pixel
-  // horizontal, vertical and diagonal lines, a filled rectangle, a corner
-  // group, a middle-band pixel and sub-threshold noise); the current Present
-  // (t6) adds differences on the right half, and two back (t3) more
-  // everywhere. Checked against a CPU oracle: the change-set slot's rows
-  // (32-63) of the layer pair at 8 times b2 word 1 when the pre-UI set is
-  // offered, the shadow rows 160-191 (pair, 3x3 rule, offsets 1 and 2, the
-  // UIAlpha judge), the reduce's texels 13-15 and decision (source 12,
-  // refined over a shapeless current alpha), and the mask pass's 3x3 rule:
-  // specks and pairs removed, line interiors, rectangles and corner groups
-  // kept. In scRGB a non-finite layer pixel counts in both non-finite rows.
-  // The shadow's bit-plane passes run after the tiles pass as the renderer
-  // dispatches them; a width of 254 leaves the last 32-pixel word partial
-  // and puts tile edges inside words.
-  void check_change_set(gpu_t &gpu, const std::string &source, unsigned color, int width = 256) {
-    constexpr int height = 144;
-    using rgba = std::array<float, 4>;
-    std::vector<rgba> scene(width * height), presented, back1, back2, current, ui_alpha(width * height, rgba{0.f, 0.f, 0.f, 1.f});
-    for (int y = 0; y != height; ++y)
-      for (int x = 0; x != width; ++x)
-        scene[y * width + x] = {.3f + .4f * float((x * 7 + y * 3) % 17) / 17.f, .5f, .4f, 0.f};
-    back1 = scene;
-    const auto ui = [&](std::vector<rgba> &image, int x, int y, float delta = .3f) { image[y * width + x][0] += delta; };
-    const std::vector<std::array<int, 2>> specks{{5, 5}, {20, 30}, {40, 100}}, pair_pixels{{10, 10}, {11, 10}},
-      corner{{0, 0}, {1, 0}, {0, 1}};
-    for (const auto &[x, y] : specks) ui(back1, x, y);
-    for (const auto &[x, y] : pair_pixels) ui(back1, x, y);
-    for (const auto &[x, y] : corner) ui(back1, x, y);
-    for (int x = 30; x <= 60; ++x) ui(back1, x, 50);
-    for (int y = 20; y <= 60; ++y) ui(back1, 70, y);
-    for (int i = 0; i <= 10; ++i) ui(back1, 80 + i, 80 + i);
-    for (int y = 100; y <= 120; ++y)
-      for (int x = 90; x <= 110; ++x) ui(back1, x, y);
-    // Between the unchanged and changed bounds (8/255 and 16/255): neither.
-    ui(back1, 100, 10, 12.f / 255.f);
-    // Noise within the unchanged bound.
-    for (int y = 0; y < height; y += 3)
-      for (int x = 1; x < width; x += 5) ui(back1, x, y, 3.f / 255.f);
-    presented = back1;
-    for (int y = 0; y < height; y += 2) ui(presented, 128 + (y * 7) % (width - 128), y);
-    back2 = back1;
-    for (int y = 1; y < height; y += 2)
-      for (int x = 0; x < width; x += 9) ui(back2, x, y, .2f);
-    auto layer = scene;
-    if (color == 2) layer[140 * width + 120][1] = std::numeric_limits<float>::quiet_NaN();
-    current = presented;
-    for (auto &pixel : current) pixel[3] = 1.f;
-    // The UIAlpha judge: the rectangle and some scene pixels around it.
-    for (int y = 95; y <= 120; ++y)
-      for (int x = 90; x <= 115; ++x) ui_alpha[y * width + x][0] = 1.f;
-
-    // The CPU oracle at bound 16/255 (b2 words 1 and 4 at 2/255), offset 1.
-    const float threshold = 2.f / 255.f, bound = threshold * 8.f;
-    const auto delta_of = [&](const std::vector<rgba> &final, int i, bool &finite) {
-      const auto &f = final[i], &l = layer[i];
-      finite = std::isfinite(f[0]) && std::isfinite(f[1]) && std::isfinite(f[2]) && std::isfinite(l[0]) && std::isfinite(l[1]) &&
-        std::isfinite(l[2]);
-      const float scale = color == 2 ? std::max(1.f, std::max({std::abs(f[0]), std::abs(f[1]), std::abs(f[2])})) : 1.f;
-      return std::max({std::abs(f[0] - l[0]), std::abs(f[1] - l[1]), std::abs(f[2] - l[2])}) / scale;
-    };
-    const auto changed_in = [&](const std::vector<rgba> &final, int x, int y) {
-      if (x < 0 || y < 0 || x >= width || y >= height) return false;
-      bool finite;
-      const float delta = delta_of(final, y * width + x, finite);
-      return finite && delta > bound;
-    };
-    std::vector<std::uint8_t> kept(width * height);
-    std::array<texel, 256> slot{}, lit{}, shadow{}, shadow_more{};
-    for (int y = 0; y != height; ++y)
-      for (int x = 0; x != width; ++x) {
-        int column = 0;
-        while (column != 15 && (column + 1) * width / 16 <= x) ++column;
-        const int i = y * width + x, tile = (y / 9) * 16 + column;
-        bool finite;
-        const float delta = delta_of(back1, i, finite);
-        const bool changed = finite && delta > bound;
-        int count = 0;
-        if (changed)
-          for (int dy = -1; dy <= 1; ++dy)
-            for (int dx = -1; dx <= 1; ++dx) count += changed_in(back1, x + dx, y + dy);
-        kept[i] = count >= 3;
-        const texel counts{changed ? 1u : 0u, finite ? 0u : 1u, finite && delta <= bound * .5f ? 1u : 0u, 1u};
-        for (std::size_t k = 0; k != 4; ++k) slot[tile][k] += counts[k];
-        const auto &l = layer[i];
-        lit[tile][0] += finite && std::max({std::abs(l[0]), std::abs(l[1]), std::abs(l[2])}) > bound;
-        shadow[tile][0] += changed;
-        shadow[tile][1] += finite && delta <= bound * .5f;
-        shadow[tile][2] += !finite;
-        shadow[tile][3] += kept[i];
-        shadow_more[tile][0] += changed_in(back1, x, y);
-        shadow_more[tile][1] += changed_in(back2, x, y);
-        shadow_more[tile][2] += ui_alpha[i][0] > 0.f;
-        shadow_more[tile][3] += ui_alpha[i][0] > 0.f && kept[i];
-      }
-    for (const auto &[x, y] : specks) require(!kept[y * width + x], "check_change_set: the oracle kept a speck");
-    require(!kept[10 * width + 10] && !kept[10 * width + 11] && !kept[50 * width + 30] && kept[50 * width + 31] &&
-        kept[40 * width + 70] && kept[85 * width + 85] && !kept[80 * width + 80] && kept[110 * width + 100] && kept[0] &&
-        kept[1] && kept[width], "check_change_set: the oracle's 3x3 rule is not the intended one");
-
-    const auto views = std::array<ComPtr<ID3D11ShaderResourceView>, 7>{float_image(gpu, current, width),
-      float_image(gpu, back1, width), float_image(gpu, back2, width), float_image(gpu, presented, width),
-      float_image(gpu, layer, width), float_image(gpu, ui_alpha, width), float_image(gpu, scene, width)};
-    const auto texture = [&](UINT w, UINT h, DXGI_FORMAT format, ComPtr<ID3D11Texture2D> &result,
-                           ComPtr<ID3D11ShaderResourceView> *srv, ComPtr<ID3D11UnorderedAccessView> &uav,
-                           ComPtr<ID3D11Texture2D> &staging) {
-      D3D11_TEXTURE2D_DESC desc{};
-      desc.Width = w;
-      desc.Height = h;
-      desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-      desc.Format = format;
-      desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | (srv ? D3D11_BIND_SHADER_RESOURCE : 0u);
-      checked(gpu.device->CreateTexture2D(&desc, nullptr, &result), "change-set texture");
-      if (srv) checked(gpu.device->CreateShaderResourceView(result.Get(), nullptr, srv->GetAddressOf()), "change-set view");
-      checked(gpu.device->CreateUnorderedAccessView(result.Get(), nullptr, &uav), "change-set UAV");
-      desc.BindFlags = 0;
-      desc.Usage = D3D11_USAGE_STAGING;
-      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      checked(gpu.device->CreateTexture2D(&desc, nullptr, &staging), "change-set staging");
-    };
-    ComPtr<ID3D11Texture2D> statistics, statistics_staging, decision, decision_staging, mask, mask_staging;
-    ComPtr<ID3D11ShaderResourceView> statistics_view, decision_view;
-    ComPtr<ID3D11UnorderedAccessView> statistics_uav, decision_uav, mask_uav;
-    const UINT rows = detection::statistics_rows(0);
-    texture(16, rows, DXGI_FORMAT_R32G32B32A32_UINT, statistics, &statistics_view, statistics_uav, statistics_staging);
-    texture(detection::change_set_decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT, decision, &decision_view, decision_uav,
-      decision_staging);
-    texture(width, height, DXGI_FORMAT_R32_FLOAT, mask, nullptr, mask_uav, mask_staging);
-    ComPtr<ID3D11Texture2D> planes, planes_staging;
-    ComPtr<ID3D11ShaderResourceView> planes_view;
-    ComPtr<ID3D11UnorderedAccessView> planes_uav;
-    const UINT words = detection::change_set::plane_words(UINT(width));
-    texture(detection::change_set::planes * words, height, DXGI_FORMAT_R32_UINT, planes, &planes_view, planes_uav,
-      planes_staging);
-    const auto tiles_pass = compile_pass(gpu, source, color, "SunshineUIDetectionTilesCS", width);
-    const auto bits_pass = compile_pass(gpu, source, color, "SunshineUIDetectionChangeSetBitsCS", width);
-    const auto count_pass = compile_pass(gpu, source, color, "SunshineUIDetectionChangeSetCountCS", width);
-    const auto reduce_pass = compile_pass(gpu, source, color, "SunshineUIDetectionReduceCS", width);
-    const auto mask_pass = compile_pass(gpu, source, color, "SunshineUIDetectionMaskCS", width);
-    ID3D11ShaderResourceView *t8 = nullptr;
-    // S3: the token-space pair binds the Present one back as the Backbuffer
-    // tag's colour (t13, pair offset change_set::pair_backbuffer) instead.
-    bool backbuffer_pair = false;
-    const auto stage = [&](ID3D11ComputeShader *shader, ID3D11ShaderResourceView *t10, UINT slot_index,
-                         ID3D11UnorderedAccessView *uav, UINT x, UINT y) {
-      ID3D11ShaderResourceView *bound[15]{};
-      bound[8] = t8;
-      bound[0] = views[0].Get();
-      bound[backbuffer_pair ? 13 : 2] = views[1].Get();
-      bound[3] = views[2].Get();
-      bound[6] = views[3].Get();
-      bound[7] = views[4].Get();
-      bound[10] = t10;
-      bound[11] = views[5].Get();
-      gpu.context->CSSetShader(shader, nullptr, 0);
-      gpu.context->CSSetShaderResources(0, 15, bound);
-      ID3D11Buffer *buffers[3]{nullptr, nullptr, gpu.constants.Get()};
-      gpu.context->CSSetConstantBuffers(0, 3, buffers);
-      gpu.context->CSSetUnorderedAccessViews(slot_index, 1, &uav, nullptr);
-      gpu.context->Dispatch(x, y, 1);
-      ID3D11UnorderedAccessView *none = nullptr;
-      gpu.context->CSSetUnorderedAccessViews(slot_index, 1, &none, nullptr);
-      ID3D11ShaderResourceView *cleared[15]{};
-      gpu.context->CSSetShaderResources(0, 15, cleared);
-    };
-    // The tiles pass, then the shadow's passes when the renderer would
-    // dispatch them (change_set::shadow_dispatched).
-    const auto tiles_stage = [&](const detection_constants &pushed) {
-      stage(tiles_pass.Get(), nullptr, 6, statistics_uav.Get(), 16, 16);
-      if (!detection::change_set::shadow_dispatched(pushed.offered, pushed.pre_ui_threshold, pushed.rules)) return;
-      stage(bits_pass.Get(), nullptr, 4, planes_uav.Get(), words,
-        (height + detection::change_set::bits_group_rows - 1) / detection::change_set::bits_group_rows);
-      t8 = planes_view.Get();
-      stage(count_pass.Get(), nullptr, 6, statistics_uav.Get(), 16, 16);
-      t8 = nullptr;
-    };
-    char space[32];
-    std::snprintf(space, sizeof(space), "%s, width %d", color == 2 ? "scRGB" : "sRGB", width);
-    const std::uint32_t rules = detection::rules::pin_only_ui | detection::change_set::shadow |
-      (1u << detection::change_set::pair_shift) | detection::change_set::retained_1 | detection::change_set::retained_2;
-    // Run A offers the pre-UI set over a shapeless accepted current alpha;
-    // run B offers an accepted UIAlpha, which keeps the set out and judges
-    // the shadow.
-    for (const bool judged : {false, true}) {
-      const std::uint32_t offered = judged ? candidate::layer | candidate::current | candidate::ui_alpha :
-        candidate::layer | candidate::current | candidate::pre_ui;
-      const std::uint32_t accepted = judged ? candidate::ui_alpha : candidate::current | candidate::pre_ui;
-      const detection_constants constants{offered, threshold, accepted, detection::layer_detection_flags(color == 2), threshold,
-        rules, {}};
-      gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
-      tiles_stage(constants);
-      const auto got = read<texel>(gpu, statistics.Get(), statistics_staging.Get(), 16 * rows);
-      const auto at = [&](const char *what, std::size_t row, const std::array<texel, 256> &want, std::size_t components) {
-        for (std::size_t lane = 0; lane != 256; ++lane)
-          for (std::size_t k = 0; k != components; ++k)
-            if (got[(row + lane / 16) * 16 + lane % 16][k] != want[lane][k]) {
-              char text[200];
-              std::snprintf(text, sizeof(text), "change set (%s, %s): tile %zu %s[%zu] is %u, the CPU count %u", space,
-                judged ? "judged" : "pre-UI offered", lane, what, k, got[(row + lane / 16) * 16 + lane % 16][k], want[lane][k]);
-              throw std::runtime_error(text);
-            }
-      };
-      if (!judged) {
-        at("slot difference", 32, slot, 4);
-        at("slot lit", 48, lit, 1);
-      }
-      at("shadow", detection::change_set_statistics_row, shadow, 4);
-      std::array<texel, 256> more = shadow_more;
-      if (!judged)
-        for (auto &t : more) t[2] = t[3] = 0u;
-      at("shadow offsets and judge", detection::change_set_statistics_row + 16, more, 4);
-      // The reduce: texels 13-15 and the decision.
-      const std::array<std::uint32_t, 4> sentinel{0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu};
-      gpu.context->ClearUnorderedAccessViewUint(decision_uav.Get(), sentinel.data());
-      stage(reduce_pass.Get(), statistics_view.Get(), 6, decision_uav.Get(), 1, 1);
-      const auto words = read<std::uint32_t>(gpu, decision.Get(), decision_staging.Get(), 4 * detection::change_set_decision_texels);
-      tiles sums_of;
-      for (std::size_t lane = 0; lane != 256; ++lane) {
-        const std::size_t row = lane / 16, column = lane % 16;
-        const auto tile = [&](std::size_t first) { return got[(first + row) * 16 + column]; };
-        sums_of.coverage[lane] = tile(0);
-        sums_of.invalid[lane] = tile(16);
-        sums_of.difference[lane] = tile(32);
-        sums_of.lit[lane] = tile(48);
-        sums_of.layer[lane] = tile(detection::layer_statistics_row);
-        for (std::size_t k = 0; k != 3; ++k) {
-          sums_of.strong[lane][k] = tile(detection::judgment_statistics_row)[k];
-          sums_of.contradicted[lane][k] = tile(detection::judgment_statistics_row + 16)[k];
-        }
-        sums_of.pre_ui[lane] = tile(detection::pre_ui_statistics_row);
-        sums_of.change_set[lane] = tile(detection::change_set_statistics_row);
-        sums_of.change_set_more[lane] = tile(detection::change_set_statistics_row + 16);
-      }
-      const auto c = sums(sums_of);
-      const auto d = selection::decide(c, offered, accepted, constants.flags, {}, rules);
-      std::uint32_t filtered = 0, changed = 0;
-      for (const auto &t : shadow) {
-        changed += t[0];
-        filtered += t[3];
-      }
-      require(words[word::cs_changed] == changed && words[word::cs_filtered] == filtered &&
-          words[word::cs_matching_tiles] == c.shadow.matching_tiles && c.shadow.matching_tiles >= 128u &&
-          words[word::cs_changed_1] == changed && words[word::cs_changed_2] > changed &&
-          words[word::cs_judge_kind] == (judged ? detection::change_set::judge::ui_alpha : 0u) &&
-          (!judged || (words[word::cs_judge_pixels] && words[word::cs_judge_tp] && words[word::cs_judge_tp] <
-            words[word::cs_judge_pixels])) && words[word::cs_nonfinite] == (color == 2 ? 1u : 0u) &&
-          words[word::source] == d.source && words[word::h1] == selection::h1_word(d),
-        std::string("change set (") + space + "): texels 13-15 do not sum the shadow rows, or the decision differs from decide()");
-      // The pair verdict without ground truth: offset 1 changed least.
-      const auto pairing = sunshine_game3d::change_set::layer_pairing{sunshine_game3d::change_set::pair_class::retained, 1u};
-      const auto sample = sunshine_game3d::change_set::measure_shadow(selection::counts_from_words(words.data(), words.size()),
-        offered, accepted, constants.flags, rules, pairing, true, false, true, !judged);
-      require(sample.verdict == sunshine_game3d::change_set::pair_verdict::verified && sample.offsets[1] == changed &&
-          sample.offsets[0] > changed && sample.offsets[2] > changed,
-        std::string("change set (") + space + "): the pair verdict did not verify offset 1");
-      if (judged) {
-        require(d.source == 1u && !(d.valid_bits & candidate::pre_ui) && !sample.valid == (color == 2) &&
-            sample.precision > 0. && sample.recall > 0. && sample.iou > 0. && sample.would_source == 1u,
-          std::string("change set (") + space + "): an accepted UIAlpha did not keep the set out, or the judge is empty");
-        continue;
-      }
-      // sRGB decides 12 refined over the shapeless current alpha; scRGB's
-      // non-finite pixel makes the set invalid (V2), so the alpha stays flat.
-      if (color == 2) {
-        require(d.source == 4u && !d.refined, "change set (scRGB): a set with a non-finite pixel refined");
-        continue;
-      }
-      require(d.source == detection::source_pre_ui && d.refined && d.covered == changed && sample.valid && sample.would_refine &&
-          sample.would_source == detection::source_pre_ui, "change set (sRGB): the valid set did not refine the shapeless alpha");
-      // Without the shadow bit (a layer not proven the pre-UI scene image)
-      // the tiles pass measures nothing: the shadow rows read zero.
-      {
-        const detection_constants unproven{offered, threshold, accepted, detection::layer_detection_flags(false), threshold,
-          rules & ~detection::change_set::shadow, {}};
-        gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &unproven, 0, 0);
-        tiles_stage(unproven);
-        const auto rows_of = read<texel>(gpu, statistics.Get(), statistics_staging.Get(), 16 * rows);
-        for (std::size_t i = detection::change_set_statistics_row * 16; i != (detection::change_set_statistics_row + 32) * 16; ++i)
-          if (rows_of[i] != texel{})
-            throw std::runtime_error("change set (sRGB): the tiles pass measured a layer without the shadow bit");
-        gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
-        tiles_stage(constants);
-      }
-      stage(mask_pass.Get(), decision_view.Get(), 0, mask_uav.Get(), (width + 7) / 8, (height + 7) / 8);
-      const auto resolved = read<float>(gpu, mask.Get(), mask_staging.Get(), width * height);
-      for (int i = 0; i != width * height; ++i)
-        if (resolved[i] != (kept[i] ? 1.f : 0.f))
-          throw std::runtime_error("change set (sRGB): the source-12 mask at x=" + std::to_string(i % width) + " y=" +
-            std::to_string(i / width) + " is " + std::to_string(resolved[i]) + ", the 3x3 rule " + std::to_string(int(kept[i])));
-    }
-    // S3, enabled only: the token-space pair (offset pair_backbuffer) compares
-    // the layer with the Backbuffer tag's colour at t13, the same slot rows,
-    // shadow rows and source-12 mask as the retained pair it equals here.
-    {
-      backbuffer_pair = true;
-      const std::uint32_t offered = candidate::layer | candidate::current | candidate::pre_ui | candidate::backbuffer;
-      const std::uint32_t accepted = candidate::current | candidate::pre_ui;
-      const std::uint32_t token_rules = detection::rules::pin_only_ui | detection::change_set::shadow |
-        (detection::change_set::pair_backbuffer << detection::change_set::pair_shift);
-      const detection_constants constants{offered, threshold, accepted, detection::layer_detection_flags(color == 2), threshold,
-        token_rules, {}};
-      gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
-      tiles_stage(constants);
-      const auto got = read<texel>(gpu, statistics.Get(), statistics_staging.Get(), 16 * rows);
-      for (std::size_t lane = 0; lane != 256; ++lane)
-        for (std::size_t k = 0; k != 4; ++k) {
-          const auto &slot_got = got[(32 + lane / 16) * 16 + lane % 16];
-          const auto &shadow_got = got[(detection::change_set_statistics_row + lane / 16) * 16 + lane % 16];
-          if (slot_got[k] != slot[lane][k] || shadow_got[k] != shadow[lane][k])
-            throw std::runtime_error(std::string("change set (") + space + "): the Backbuffer pair's tile " +
-              std::to_string(lane) + " differs from the retained pair's");
-        }
-      const std::array<std::uint32_t, 4> sentinel{0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu};
-      gpu.context->ClearUnorderedAccessViewUint(decision_uav.Get(), sentinel.data());
-      stage(reduce_pass.Get(), statistics_view.Get(), 6, decision_uav.Get(), 1, 1);
-      const auto words = read<std::uint32_t>(gpu, decision.Get(), decision_staging.Get(), 4 * detection::change_set_decision_texels);
-      require(words[word::source] == (color == 2 ? 4u : detection::source_pre_ui),
-        std::string("change set (") + space + "): the Backbuffer pair did not decide as the retained pair does");
-      if (color != 2) {
-        stage(mask_pass.Get(), decision_view.Get(), 0, mask_uav.Get(), (width + 7) / 8, (height + 7) / 8);
-        const auto resolved = read<float>(gpu, mask.Get(), mask_staging.Get(), width * height);
-        for (int i = 0; i != width * height; ++i)
-          if (resolved[i] != (kept[i] ? 1.f : 0.f))
-            throw std::runtime_error("change set (sRGB): the Backbuffer pair's source-12 mask differs at " + std::to_string(i));
-      }
-      backbuffer_pair = false;
-    }
-  }
-
-  // The shadow's passes on a frame narrower than 16 pixels (width 8): every
-  // other tile column is empty in x, so the count pass must cover no word
-  // there (not wrap its word range) and still match the per-pixel oracle in
-  // the shadow rows, with and without the UIAlpha judge.
-  void check_change_set_narrow(gpu_t &gpu, const std::string &source, unsigned color) {
-    constexpr int width = 8, height = 144;
-    using rgba = std::array<float, 4>;
-    std::vector<rgba> scene(width * height), ui_alpha(width * height, rgba{0.f, 0.f, 0.f, 1.f});
-    for (int y = 0; y != height; ++y)
-      for (int x = 0; x != width; ++x) scene[y * width + x] = {.3f + .4f * float((x * 7 + y * 3) % 17) / 17.f, .5f, .4f, 0.f};
-    auto layer = scene, back1 = scene;
-    for (int y = 0; y != height; ++y)
-      for (int x = 0; x != width; ++x)
-        if ((x * 5 + y * 3) % 7 < 3) back1[y * width + x][0] += .3f;
-    auto back2 = back1, presented = back1;
-    for (int y = 0; y != height; ++y)
-      for (int x = 0; x != width; ++x) {
-        if ((x + y) % 5 == 0) back2[y * width + x][0] += .2f;
-        if ((x * 3 + y) % 4 == 0) ui_alpha[y * width + x][0] = 1.f;
-      }
-    if (color == 2) layer[70 * width + 3][1] = std::numeric_limits<float>::quiet_NaN();
-    auto current = presented;
-    for (auto &pixel : current) pixel[3] = 1.f;
-    const float threshold = 2.f / 255.f, bound = threshold * 8.f;
-    const auto delta_of = [&](const std::vector<rgba> &final, int i, bool &finite) {
-      const auto &f = final[i], &l = layer[i];
-      finite = std::isfinite(f[0]) && std::isfinite(f[1]) && std::isfinite(f[2]) && std::isfinite(l[0]) && std::isfinite(l[1]) &&
-        std::isfinite(l[2]);
-      const float scale = color == 2 ? std::max(1.f, std::max({std::abs(f[0]), std::abs(f[1]), std::abs(f[2])})) : 1.f;
-      return std::max({std::abs(f[0] - l[0]), std::abs(f[1] - l[1]), std::abs(f[2] - l[2])}) / scale;
-    };
-    const auto changed_in = [&](const std::vector<rgba> &final, int x, int y) {
-      if (x < 0 || y < 0 || x >= width || y >= height) return false;
-      bool finite;
-      const float delta = delta_of(final, y * width + x, finite);
-      return finite && delta > bound;
-    };
-    std::array<texel, 256> shadow{}, shadow_more{};
-    for (int y = 0; y != height; ++y)
-      for (int x = 0; x != width; ++x) {
-        int column = 0;
-        while (column != 15 && (column + 1) * width / 16 <= x) ++column;
-        const int i = y * width + x, tile = (y / 9) * 16 + column;
-        bool finite;
-        const float delta = delta_of(back1, i, finite);
-        const bool changed = finite && delta > bound;
-        int count = 0;
-        if (changed)
-          for (int dy = -1; dy <= 1; ++dy)
-            for (int dx = -1; dx <= 1; ++dx) count += changed_in(back1, x + dx, y + dy);
-        const bool kept = count >= 3;
-        shadow[tile][0] += changed;
-        shadow[tile][1] += finite && delta <= bound * .5f;
-        shadow[tile][2] += !finite;
-        shadow[tile][3] += kept;
-        shadow_more[tile][0] += changed;
-        shadow_more[tile][1] += changed_in(back2, x, y);
-        shadow_more[tile][2] += ui_alpha[i][0] > 0.f;
-        shadow_more[tile][3] += ui_alpha[i][0] > 0.f && kept;
-      }
-    std::uint32_t kept_total = 0, changed_total = 0;
-    for (const auto &t : shadow) {
-      changed_total += t[0];
-      kept_total += t[3];
-    }
-    require(kept_total && kept_total < changed_total, "check_change_set_narrow: the pattern does not exercise the 3x3 rule");
-
-    const auto views = std::array<ComPtr<ID3D11ShaderResourceView>, 6>{float_image(gpu, current, width),
-      float_image(gpu, back1, width), float_image(gpu, back2, width), float_image(gpu, presented, width),
-      float_image(gpu, layer, width), float_image(gpu, ui_alpha, width)};
-    const auto texture = [&](UINT w, UINT h, ComPtr<ID3D11Texture2D> &result, ComPtr<ID3D11ShaderResourceView> &srv,
-                           ComPtr<ID3D11UnorderedAccessView> &uav, ComPtr<ID3D11Texture2D> &staging, DXGI_FORMAT format) {
-      D3D11_TEXTURE2D_DESC desc{};
-      desc.Width = w;
-      desc.Height = h;
-      desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-      desc.Format = format;
-      desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-      checked(gpu.device->CreateTexture2D(&desc, nullptr, &result), "narrow change-set texture");
-      checked(gpu.device->CreateShaderResourceView(result.Get(), nullptr, &srv), "narrow change-set view");
-      checked(gpu.device->CreateUnorderedAccessView(result.Get(), nullptr, &uav), "narrow change-set UAV");
-      desc.BindFlags = 0;
-      desc.Usage = D3D11_USAGE_STAGING;
-      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      checked(gpu.device->CreateTexture2D(&desc, nullptr, &staging), "narrow change-set staging");
-    };
-    ComPtr<ID3D11Texture2D> statistics, statistics_staging, planes, planes_staging;
-    ComPtr<ID3D11ShaderResourceView> statistics_view, planes_view;
-    ComPtr<ID3D11UnorderedAccessView> statistics_uav, planes_uav;
-    const UINT rows = detection::statistics_rows(0), words = detection::change_set::plane_words(UINT(width));
-    texture(16, rows, statistics, statistics_view, statistics_uav, statistics_staging, DXGI_FORMAT_R32G32B32A32_UINT);
-    texture(detection::change_set::planes * words, height, planes, planes_view, planes_uav, planes_staging, DXGI_FORMAT_R32_UINT);
-    const auto tiles_pass = compile_pass(gpu, source, color, "SunshineUIDetectionTilesCS", width);
-    const auto bits_pass = compile_pass(gpu, source, color, "SunshineUIDetectionChangeSetBitsCS", width);
-    const auto count_pass = compile_pass(gpu, source, color, "SunshineUIDetectionChangeSetCountCS", width);
-    const auto stage = [&](ID3D11ComputeShader *shader, ID3D11ShaderResourceView *t8, UINT slot_index,
-                         ID3D11UnorderedAccessView *uav, UINT x, UINT y) {
-      ID3D11ShaderResourceView *bound[15]{};
-      bound[0] = views[0].Get();
-      bound[2] = views[1].Get();
-      bound[3] = views[2].Get();
-      bound[6] = views[3].Get();
-      bound[7] = views[4].Get();
-      bound[8] = t8;
-      bound[11] = views[5].Get();
-      gpu.context->CSSetShader(shader, nullptr, 0);
-      gpu.context->CSSetShaderResources(0, 15, bound);
-      ID3D11Buffer *buffers[3]{nullptr, nullptr, gpu.constants.Get()};
-      gpu.context->CSSetConstantBuffers(0, 3, buffers);
-      gpu.context->CSSetUnorderedAccessViews(slot_index, 1, &uav, nullptr);
-      gpu.context->Dispatch(x, y, 1);
-      ID3D11UnorderedAccessView *none = nullptr;
-      gpu.context->CSSetUnorderedAccessViews(slot_index, 1, &none, nullptr);
-      ID3D11ShaderResourceView *cleared[15]{};
-      gpu.context->CSSetShaderResources(0, 15, cleared);
-    };
-    const std::uint32_t rules = detection::rules::pin_only_ui | detection::change_set::shadow |
-      (1u << detection::change_set::pair_shift) | detection::change_set::retained_1 | detection::change_set::retained_2;
-    for (const bool judged : {false, true}) {
-      const std::uint32_t offered = candidate::layer | candidate::current | (judged ? candidate::ui_alpha : candidate::pre_ui);
-      const std::uint32_t accepted = judged ? candidate::ui_alpha : candidate::current | candidate::pre_ui;
-      const detection_constants constants{offered, threshold, accepted, detection::layer_detection_flags(color == 2), threshold,
-        rules, {}};
-      require(detection::change_set::shadow_dispatched(constants.offered, constants.pre_ui_threshold, constants.rules),
-        "check_change_set_narrow: the shadow is not dispatched");
-      gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
-      stage(tiles_pass.Get(), nullptr, 6, statistics_uav.Get(), 16, 16);
-      stage(bits_pass.Get(), nullptr, 4, planes_uav.Get(), words,
-        (height + detection::change_set::bits_group_rows - 1) / detection::change_set::bits_group_rows);
-      stage(count_pass.Get(), planes_view.Get(), 6, statistics_uav.Get(), 16, 16);
-      const auto got = read<texel>(gpu, statistics.Get(), statistics_staging.Get(), 16 * rows);
-      std::array<texel, 256> more = shadow_more;
-      if (!judged)
-        for (auto &t : more) t[2] = t[3] = 0u;
-      for (const auto &[row, want] : {std::pair{detection::change_set_statistics_row, &shadow},
-             std::pair{detection::change_set_statistics_row + 16, &more}})
-        for (std::size_t lane = 0; lane != 256; ++lane)
-          for (std::size_t k = 0; k != 4; ++k)
-            if (got[(row + lane / 16) * 16 + lane % 16][k] != (*want)[lane][k]) {
-              char text[200];
-              std::snprintf(text, sizeof(text), "change set (%s, width 8, %s): tile %zu row %u [%zu] is %u, the CPU count %u",
-                color == 2 ? "scRGB" : "sRGB", judged ? "judged" : "pre-UI offered", lane, unsigned(row), k,
-                got[(row + lane / 16) * 16 + lane % 16][k], (*want)[lane][k]);
-              throw std::runtime_error(text);
-            }
-    }
-  }
-
-  // Fix 4, pin only UI (rule P2): the darkening passes against the CPU
-  // reference (game3d_ui_darkening.h) on synthetic 256 x 144 images. The
-  // decision texels are written directly (texel 0's applied source, texel 9
-  // not reused), so that only the darkening passes and the mask pass run:
-  // the bits, tiles and region passes into the planes, the mask pass, then
-  // the count and finish passes into decision words 62-63. Every mask and
-  // both words must equal the reference: the opacity layer (source 10) in
-  // sRGB and scRGB (a float layer, linear tolerance) and the UI color tag
-  // (2) in sRGB, with a smooth black dim band (unpinned), 2-pixel black
-  // strokes (kept), a 40-pixel black panel (edges kept, interior unpinned),
-  // a colour icon with a soft black halo (inner rings kept, the tail
-  // unpinned), an isolated speck (unpinned), a faint tint at the tolerance
-  // (darkening) and one above it (colour); a colourless layer (rgb 0, real
-  // alpha) that unpins nothing and sets word 63's colourless bit; a charcoal
-  // #303030 panel at alpha 0.5 that a float layer and a float tag
-  // (rules::tag_linear) keep as colour in scRGB while a UNORM tag's code
-  // tolerance calls it a darkening; a PQ HUD-less change set (5) composited
-  // in linear light with the same shapes; the pre-UI pair at k 8 (12) in
-  // sRGB; a grey tint over a grey scene as a HUD-less change set, whose
-  // tiles judge colour so that nothing unpins; and a pure dim joined to that
-  // tint, whose far tiles prove darkening on their own but whose region
-  // holds the tint, so that it stays pinned while a separate dim unpins.
-  // Without the switch (rules::darkening_measured alone) the mask is the raw
-  // source's and the words are the same; a reused frame and an ineligible
-  // source measure nothing.
-  void check_darkening(gpu_t &gpu, const std::string &source) {
-    namespace dark = sunshine_game3d::ui_darkening;
-    constexpr int width = 256, height = 144;
-    constexpr std::size_t count = std::size_t(width) * height;
-    using rgba = std::array<float, 4>;
-    const auto texture = [&](UINT w, UINT h, DXGI_FORMAT format, ComPtr<ID3D11Texture2D> &result,
-                           ComPtr<ID3D11ShaderResourceView> *srv, ComPtr<ID3D11UnorderedAccessView> &uav,
-                           ComPtr<ID3D11Texture2D> &staging) {
-      D3D11_TEXTURE2D_DESC desc{};
-      desc.Width = w;
-      desc.Height = h;
-      desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-      desc.Format = format;
-      desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | (srv ? D3D11_BIND_SHADER_RESOURCE : 0u);
-      checked(gpu.device->CreateTexture2D(&desc, nullptr, &result), "darkening texture");
-      if (srv) checked(gpu.device->CreateShaderResourceView(result.Get(), nullptr, srv->GetAddressOf()), "darkening view");
-      checked(gpu.device->CreateUnorderedAccessView(result.Get(), nullptr, &uav), "darkening UAV");
-      desc.BindFlags = 0;
-      desc.Usage = D3D11_USAGE_STAGING;
-      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      checked(gpu.device->CreateTexture2D(&desc, nullptr, &staging), "darkening staging");
-    };
-    ComPtr<ID3D11Texture2D> statistics, statistics_staging, decision, decision_staging, mask, mask_staging, planes, planes_staging;
-    ComPtr<ID3D11ShaderResourceView> statistics_view, decision_view, planes_view;
-    ComPtr<ID3D11UnorderedAccessView> statistics_uav, decision_uav, mask_uav, planes_uav;
-    const UINT rows = detection::statistics_rows(0, detection::change_set_decision_texels, detection::change_set::planes);
-    const UINT words = detection::change_set::plane_words(width);
-    texture(16, rows, DXGI_FORMAT_R32G32B32A32_UINT, statistics, &statistics_view, statistics_uav, statistics_staging);
-    texture(detection::change_set_decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT, decision, &decision_view, decision_uav,
-      decision_staging);
-    texture(width, height, DXGI_FORMAT_R32_FLOAT, mask, nullptr, mask_uav, mask_staging);
-    texture(detection::change_set::planes * words, height, DXGI_FORMAT_R32_UINT, planes, &planes_view, planes_uav, planes_staging);
-
-    // The passes of each colour space, compiled once.
-    std::array<std::array<ComPtr<ID3D11ComputeShader>, 6>, 4> compiled;
-    // One run: the source's images (t0 the paired color, t2 the Present one
-    // back, t7 the layer, t12 the UI color tag, t14 the HUD-less image), the
-    // decided source, b2 and whether T1 reused the frame; returns the mask
-    // and the decision words.
-    struct images_t {
-      std::vector<rgba> paired, back1, layer, tag, hudless;
-    };
-    struct run_t {
-      std::vector<float> mask;
-      std::vector<std::uint32_t> words;
-    };
-    const auto run = [&](unsigned color, const images_t &images, std::uint32_t decided, const detection_constants &constants,
-                         bool reused) {
-      const auto view_of = [&](const std::vector<rgba> &image) {
-        return image.empty() ? ComPtr<ID3D11ShaderResourceView>{} : float_image(gpu, image, width);
-      };
-      const auto paired = view_of(images.paired), back1 = view_of(images.back1), layer = view_of(images.layer),
-        tag = view_of(images.tag), hudless = view_of(images.hudless);
-      auto &passes = compiled[color];
-      if (!passes[0]) {
-        const char *entries[6]{"SunshineUIDarkeningBitsCS", "SunshineUIDarkeningTilesCS", "SunshineUIDetectionMaskCS",
-          "SunshineUIDarkeningCountCS", "SunshineUIDarkeningFinishCS", "SunshineUIDarkeningRegionCS"};
-        for (std::size_t e = 0; e != 6; ++e) passes[e] = compile_pass(gpu, source, color, entries[e]);
-      }
-      const auto &bits_pass = passes[0], &tiles_pass = passes[1], &mask_pass = passes[2], &count_pass = passes[3],
-        &finish_pass = passes[4], &region_pass = passes[5];
-      // The reduce's decision: texel 0 {source, covered, pixels, matching
-      // tiles}, texel 9's frame reason, sentinels in texel 15 .zw.
-      std::array<texel, detection::change_set_decision_texels> written{};
-      written[0] = {decided, 1u, std::uint32_t(count), 0u};
-      written[9] = {0u, 0u, 0u, reused ? detection::frame_reason_reused : detection::frame_reason_decided};
-      written[15] = {0u, 0u, 0xdeadbeefu, 0xdeadbeefu};
-      gpu.context->UpdateSubresource(decision.Get(), 0, nullptr, written.data(), UINT(sizeof(written)), 0);
-      gpu.context->UpdateSubresource(gpu.constants.Get(), 0, nullptr, &constants, 0, 0);
-      const std::array<float, 4> sentinel{-1.f, -1.f, -1.f, -1.f};
-      gpu.context->ClearUnorderedAccessViewFloat(mask_uav.Get(), sentinel.data());
-      ID3D11ShaderResourceView *t8 = nullptr;
-      const auto stage = [&](ID3D11ComputeShader *shader, ID3D11ShaderResourceView *t10, UINT slot_index,
-                           ID3D11UnorderedAccessView *uav, UINT x, UINT y) {
-        ID3D11ShaderResourceView *bound[15]{};
-        bound[0] = paired.Get();
-        bound[2] = back1.Get();
-        bound[7] = layer.Get();
-        bound[8] = t8;
-        bound[10] = t10;
-        bound[12] = tag.Get();
-        bound[14] = hudless.Get();
-        gpu.context->CSSetShader(shader, nullptr, 0);
-        gpu.context->CSSetShaderResources(0, 15, bound);
-        ID3D11Buffer *buffers[3]{nullptr, nullptr, gpu.constants.Get()};
-        gpu.context->CSSetConstantBuffers(0, 3, buffers);
-        gpu.context->CSSetUnorderedAccessViews(slot_index, 1, &uav, nullptr);
-        gpu.context->Dispatch(x, y, 1);
-        ID3D11UnorderedAccessView *none = nullptr;
-        gpu.context->CSSetUnorderedAccessViews(slot_index, 1, &none, nullptr);
-        ID3D11ShaderResourceView *cleared[15]{};
-        gpu.context->CSSetShaderResources(0, 15, cleared);
-      };
-      // As the renderer dispatches them (detection::darkening::dispatched).
-      if (detection::darkening::dispatched(constants.rules)) {
-        stage(bits_pass.Get(), decision_view.Get(), 4, planes_uav.Get(), words,
-          (height + detection::change_set::bits_group_rows - 1) / detection::change_set::bits_group_rows);
-        stage(tiles_pass.Get(), decision_view.Get(), 4, planes_uav.Get(), detection::darkening::tiles(width),
-          detection::darkening::tiles(height));
-        stage(region_pass.Get(), decision_view.Get(), 4, planes_uav.Get(), 1, 1);
-      }
-      t8 = planes_view.Get();
-      stage(mask_pass.Get(), decision_view.Get(), 0, mask_uav.Get(), (width + 7) / 8, (height + 7) / 8);
-      if (detection::darkening::dispatched(constants.rules)) {
-        stage(count_pass.Get(), decision_view.Get(), 6, statistics_uav.Get(), 16, 16);
-        t8 = nullptr;
-        stage(finish_pass.Get(), statistics_view.Get(), 6, decision_uav.Get(), 1, 1);
-      }
-      return run_t{read<float>(gpu, mask.Get(), mask_staging.Get(), count),
-        read<std::uint32_t>(gpu, decision.Get(), decision_staging.Get(), 4 * detection::change_set_decision_texels)};
-    };
-
-    // The shapes every image draws, as UI opacity a in [0, 1] over the frame
-    // and whether a pixel is the colour icon.
-    std::vector<float> shape(count, 0.f);
-    std::vector<std::uint8_t> icon(count, 0u);
-    const auto at = [](int x, int y) { return std::size_t(y) * width + std::size_t(x); };
-    // A smooth black dim band, 0 to 0.5 over rows 100-143 (0.0114 a row,
-    // below the 1/64 step).
-    for (int y = 100; y != height; ++y)
-      for (int x = 0; x != width; ++x) shape[at(x, y)] = .5f * float(y - 100) / 44.f;
-    // 2-pixel black strokes: two vertical, one horizontal.
-    for (int y = 20; y <= 40; ++y)
-      for (const int x : {20, 21, 30, 31}) shape[at(x, y)] = 1.f;
-    for (int x = 20; x <= 60; ++x)
-      for (const int y : {50, 51}) shape[at(x, y)] = 1.f;
-    // A black opaque panel 40 pixels wide.
-    for (int y = 20; y <= 80; ++y)
-      for (int x = 100; x <= 139; ++x) shape[at(x, y)] = 1.f;
-    // A colour icon and its soft black halo, 0.25 falling by 0.6 per ring
-    // over 8 rings (steps 0.1 down to 0.005: the inner rings step sharply,
-    // the tail from ring 6 does not).
-    for (int y = 12; y <= 47; ++y)
-      for (int x = 172; x <= 207; ++x) {
-        const int ring = std::max({180 - x, x - 199, 20 - y, y - 39, 0});
-        if (!ring) {
-          shape[at(x, y)] = 1.f;
-          icon[at(x, y)] = 1u;
-        } else if (ring <= 8) {
-          shape[at(x, y)] = .25f * std::pow(.6f, float(ring - 1));
-        }
-      }
-    // An isolated 1-pixel black speck.
-    shape[at(230, 60)] = .5f;
-    std::vector<std::uint8_t> faint(count, 0u);
-    // Opacity only: a faint tint at the 4/255 tolerance (darkening) beside
-    // one 5/255 (colour), each 0.3 opaque.
-    for (int y = 60; y <= 90; ++y)
-      for (int x = 160; x <= 219; ++x) {
-        shape[at(x, y)] = .3f;
-        faint[at(x, y)] = x < 190 ? 1u : 2u;
-      }
-
-    for (const unsigned color : {1u, 2u}) {
-      for (const std::uint32_t decided : {detection::source_layer, 2u}) {
-        if (color == 2u && decided == 2u) continue;
-        // The scRGB layer is a float layer: its tolerance is linear.
-        const bool linear = color == 2u && decided == detection::source_layer;
-        // The premultiplied colour U a of each shape; the icon is orange
-        // (scRGB: beyond 1, with a negative channel).
-        std::vector<rgba> ui(count, rgba{0.f, 0.f, 0.f, 0.f});
-        std::vector<dark::rgb> colour(count);
-        std::vector<float> alpha(count);
-        for (std::size_t i = 0; i != count; ++i) {
-          const float a = shape[i];
-          dark::rgb c{0.f, 0.f, 0.f};
-          if (icon[i]) c = color == 2u ? dark::rgb{2.5f, .4f, -.05f} : dark::rgb{.8f, .4f, .1f};
-          else if (faint[i]) c = {faint[i] == 1u ? dark::opacity_tolerance_for(linear) : 5.f / 255.f, 0.f, 0.f};
-          ui[i] = {c[0], c[1], c[2], a};
-          colour[i] = c;
-          alpha[i] = a;
-        }
-        const auto reference = dark::reference_opacity(width, height, colour, alpha, linear);
-        const auto cls = [&](int x, int y) { return reference.classes[at(x, y)]; };
-        using pc = dark::pixel_class;
-        require(cls(50, 130) == pc::unpinned && cls(20, 30) == pc::kept && cls(21, 30) == pc::kept && cls(40, 50) == pc::kept &&
-            cls(100, 50) == pc::kept && cls(120, 50) == pc::unpinned && cls(101, 50) == pc::unpinned &&
-            cls(190, 30) == pc::colour && cls(179, 30) == pc::kept && cls(176, 30) == pc::kept && cls(174, 30) == pc::unpinned &&
-            cls(230, 60) == pc::unpinned && cls(175, 75) == pc::unpinned && cls(200, 75) == pc::colour && cls(160, 75) == pc::kept,
-          "check_darkening: the CPU reference does not classify the opacity shapes as intended");
-        images_t images;
-        (decided == 2u ? images.tag : images.layer) = ui;
-        const std::uint32_t offered = decided == 2u ? candidate::ui_color : candidate::layer;
-        const char *space = color == 2u ? "scRGB" : "sRGB";
-        for (const bool enabled : {true, false}) {
-          const std::uint32_t rules = detection::rules::darkening_measured | (enabled ? detection::rules::pin_only_ui : 0u);
-          const detection_constants constants{offered, 2.f / 255.f, offered, detection::layer_detection_flags(color == 2u), 0.f,
-            rules, {}};
-          const auto got = run(color, images, decided, constants, false);
-          for (std::size_t i = 0; i != count; ++i) {
-            const float want = enabled && reference.classes[i] == pc::unpinned ? 0.f : alpha[i];
-            if (got.mask[i] != want)
-              throw std::runtime_error(std::string("darkening (") + space + ", source " + std::to_string(decided) +
-                (enabled ? ", pin only UI" : ", shadow") + "): the mask at x=" + std::to_string(i % width) + " y=" +
-                std::to_string(i / width) + " is " + std::to_string(got.mask[i]) + ", the reference " + std::to_string(want));
-          }
-          require(got.words[word::dk_unpinned] == reference.n.unpinned && got.words[word::dk_kept] == reference.n.kept &&
-              got.words[word::cs_judge_tp] == 0u && got.words[word::cs_judge_kind] == 0u && !reference.colourless,
-            std::string("darkening (") + space + ", source " + std::to_string(decided) + "): words 62-63 are " +
-              std::to_string(got.words[word::dk_unpinned]) + "/" + std::to_string(got.words[word::dk_kept]) + ", the reference " +
-              std::to_string(reference.n.unpinned) + "/" + std::to_string(reference.n.kept));
-        }
-        if (color != 1u || decided != detection::source_layer) continue;
-        // A reused frame and an ineligible source measure nothing; without
-        // rules::darkening_measured the passes do not run and the mask pass
-        // never reads the planes.
-        const std::uint32_t on = detection::rules::darkening_measured | detection::rules::pin_only_ui;
-        const detection_constants constants{offered, 2.f / 255.f, offered, detection::layer_detection_flags(false), 0.f, on, {}};
-        const auto reused = run(color, images, decided, constants, true);
-        require(reused.words[word::dk_unpinned] == 0u && reused.words[word::dk_kept] == 0u && reused.mask[0] == -1.f,
-          "darkening: a reused frame measured or rewrote its mask");
-        const auto ineligible = run(color, images, 1u, constants, false);
-        require(ineligible.words[word::dk_unpinned] == 0u && ineligible.words[word::dk_kept] == 0u,
-          "darkening: an ineligible source (UIAlpha) measured darkening");
-        const detection_constants off{offered, 2.f / 255.f, offered, detection::layer_detection_flags(false), 0.f,
-          detection::rules::pin_only_ui, {}};
-        const auto unmeasured = run(color, images, decided, off, false);
-        for (std::size_t i = 0; i != count; ++i)
-          require(unmeasured.mask[i] == alpha[i], "darkening: the mask pass unpinned without rules::darkening_measured");
-      }
-    }
-    // A colourless opacity source (rgb 0 with real alpha: an engine that
-    // renders coverage only) carries no colour evidence: nothing unpins and
-    // word 63 has the colourless bit; a single colour pixel makes it live.
-    for (const unsigned color : {1u, 2u}) {
-      std::vector<rgba> ui(count, rgba{0.f, 0.f, 0.f, 0.f});
-      std::vector<dark::rgb> colour(count, dark::rgb{});
-      for (std::size_t i = 0; i != count; ++i) ui[i][3] = shape[i];
-      const bool linear = color == 2u;
-      const auto reference = dark::reference_opacity(width, height, colour, shape, linear);
-      require(reference.colourless && !reference.n.unpinned && reference.n.kept == reference.n.darkening && reference.n.kept,
-        "check_darkening: the CPU reference unpinned a colourless layer");
-      images_t images;
-      images.layer = ui;
-      const std::uint32_t on = detection::rules::darkening_measured | detection::rules::pin_only_ui;
-      const detection_constants constants{candidate::layer, 2.f / 255.f, candidate::layer,
-        detection::layer_detection_flags(linear), 0.f, on, {}};
-      const auto got = run(color, images, detection::source_layer, constants, false);
-      for (std::size_t i = 0; i != count; ++i)
-        require(got.mask[i] == shape[i], "darkening: the mask pass unpinned a colourless layer");
-      require(got.words[word::dk_unpinned] == 0u &&
-          got.words[word::dk_kept] == (std::uint32_t(reference.n.kept) | detection::darkening::colourless),
-        "darkening: a colourless layer's words 62-63 are " + std::to_string(got.words[word::dk_unpinned]) + "/" +
-          std::to_string(got.words[word::dk_kept]));
-      std::vector<rgba> live = ui;
-      live[at(190, 30)] = {.5f, .5f, .5f, 1.f};
-      images.layer = live;
-      colour[at(190, 30)] = {.5f, .5f, .5f};
-      std::vector<float> live_alpha = shape;
-      live_alpha[at(190, 30)] = 1.f;
-      const auto live_reference = dark::reference_opacity(width, height, colour, live_alpha, linear);
-      const auto lit = run(color, images, detection::source_layer, constants, false);
-      require(!live_reference.colourless && live_reference.n.unpinned && lit.words[word::dk_unpinned] == live_reference.n.unpinned &&
-          lit.words[word::dk_kept] == live_reference.n.kept,
-        "darkening: one colour pixel did not make the layer live");
-    }
-    // A charcoal #303030 panel at alpha 0.5 is colour in SDR (24/255 in an
-    // 8-bit sRGB layer) and must be in HDR: in a float layer its linear
-    // premultiplied colour (0.0148) exceeds the linear tolerance though it
-    // is below 4/255. A float tag says so with rules::tag_linear; without it
-    // the code tolerance reads the same value as a darkening.
-    {
-      const float charcoal = float(std::pow((48. / 255. + .055) / 1.055, 2.4)) * .5f;
-      std::vector<rgba> ui(count, rgba{0.f, 0.f, 0.f, 0.f});
-      std::vector<dark::rgb> colour(count, dark::rgb{});
-      std::vector<float> alpha(count, 0.f);
-      for (int y = 40; y != 100; ++y)
-        for (int x = 60; x != 160; ++x) {
-          ui[at(x, y)] = {charcoal, charcoal, charcoal, .5f};
-          colour[at(x, y)] = {charcoal, charcoal, charcoal};
-          alpha[at(x, y)] = .5f;
-        }
-      // An icon elsewhere, so that the code-tolerance run is not colourless.
-      ui[at(200, 20)] = {.5f, .5f, .5f, 1.f};
-      colour[at(200, 20)] = {.5f, .5f, .5f};
-      alpha[at(200, 20)] = 1.f;
-      const auto linear_reference = dark::reference_opacity(width, height, colour, alpha, true);
-      const auto code_reference = dark::reference_opacity(width, height, colour, alpha, false);
-      require(charcoal < dark::opacity_tolerance && charcoal > dark::opacity_tolerance_linear &&
-          !linear_reference.n.darkening && code_reference.n.unpinned,
-        "check_darkening: the charcoal panel must be colour in linear and a darkening in code");
-      const std::uint32_t on = detection::rules::darkening_measured | detection::rules::pin_only_ui;
-      for (const int run_kind : {0, 1, 2}) {
-        images_t images;
-        const bool layer = run_kind == 0, tag_linear = run_kind == 1;
-        (layer ? images.layer : images.tag) = ui;
-        const std::uint32_t offered = layer ? candidate::layer : candidate::ui_color;
-        const detection_constants constants{offered, 2.f / 255.f, offered, layer ? detection::layer_detection_flags(true) : 0u,
-          0.f, on | (tag_linear ? detection::rules::tag_linear : 0u), {}};
-        const auto got = run(2u, images, layer ? detection::source_layer : 2u, constants, false);
-        const auto &reference = run_kind == 2 ? code_reference : linear_reference;
-        for (std::size_t i = 0; i != count; ++i) {
-          const float want = reference.classes[i] == dark::pixel_class::unpinned ? 0.f : alpha[i];
-          require(got.mask[i] == want, std::string("darkening: the charcoal panel (") +
-            (layer ? "float layer" : tag_linear ? "float tag" : "UNORM tag") + ") mask differs at x=" +
-            std::to_string(i % width) + " y=" + std::to_string(i / width));
-        }
-        require(got.words[word::dk_unpinned] == reference.n.unpinned && got.words[word::dk_kept] == reference.n.kept,
-          "darkening: the charcoal panel's words 62-63 differ from the reference");
-      }
-    }
-
-    // Change sets: a textured scene L and the presented P with the shapes
-    // composited as dims (P = L (1 - a), in linear light for PQ) and the icon
-    // as colour; scene pixels unchanged.
-    const auto scene_of = [&](int x, int y) {
-      return dark::rgb{.25f + .5f * float((x * 7 + y * 3) % 17) / 17.f, .2f + .4f * float((x * 5 + y * 11) % 13) / 13.f,
-        .35f + .3f * float((x * 3 + y * 5) % 11) / 11.f};
-    };
-    struct change_case {
-      const char *name;
-      unsigned color;
-      std::uint32_t decided;
-      float t;
-      bool tint, joined;
-    };
-    for (const auto &c : {change_case{"PQ HUD-less change set", 3u, 5u, 4.f / 1023.f, false, false},
-           change_case{"sRGB pre-UI pair (k 8)", 1u, detection::source_pre_ui, 2.f / 255.f, false, false},
-           change_case{"sRGB grey tint over a grey scene", 1u, 5u, 2.f / 255.f, true, false},
-           change_case{"sRGB dim joined to a grey tint", 1u, 5u, 2.f / 255.f, true, true}}) {
-      std::vector<dark::rgb> presented(count), pre(count);
-      for (int y = 0; y != height; ++y)
-        for (int x = 0; x != width; ++x) {
-          const std::size_t i = at(x, y);
-          dark::rgb l = scene_of(x, y);
-          if (c.tint) {
-            // A grey scene of grey levels 0.25 + k/24; the tint U = 0.3, a =
-            // 0.5 over a rectangle.
-            const float g = .25f + .5f * float((x * 7 + y * 3) % 13) / 12.f;
-            l = {g, g, g};
-            const bool tinted = x >= 64 && x < 192 && y >= 32 && y < 112;
-            // joined: a pure dim to 0.5 below the tint (rows 112-143, tile
-            // rows 7-8, the last beyond the tint's colour ring) and a
-            // separate one at the left edge (tiles 0-1, two tiles apart).
-            const bool dimmed = c.joined && ((x >= 64 && x < 192 && y >= 112) || (x < 32 && y >= 16));
-            const float p = tinted ? .5f * g + .15f : dimmed ? .5f * g : g;
-            pre[i] = l;
-            presented[i] = {p, p, p};
-            continue;
-          }
-          if (c.color == 3u) {
-            // A scene around 100 nits in PQ code, composited in linear light.
-            dark::rgb code{};
-            for (int k = 0; k != 3; ++k) code[k] = dark::pq::inverse_eotf(.002f + .02f * l[k]);
-            l = code;
-          }
-          pre[i] = l;
-          dark::rgb p = l;
-          if (icon[i]) {
-            p = c.color == 3u ? dark::rgb{.7f, .5f, .3f} : dark::rgb{.9f, .3f, .1f};
-          } else if (shape[i] > 0.f) {
-            for (int k = 0; k != 3; ++k)
-              p[k] = c.color == 3u ? dark::pq::inverse_eotf(dark::pq::eotf(l[k]) * (1.f - shape[i])) : l[k] * (1.f - shape[i]);
-          }
-          presented[i] = p;
-        }
-      const bool pre_ui = c.decided == detection::source_pre_ui;
-      const float k = pre_ui ? float(detection::change_set::inferred_scale) : 1.f;
-      const auto raw = dark::change_set_mask(width, height, presented, pre, c.t, k, c.color, pre_ui);
-      const auto reference = dark::reference_change_set(width, height, presented, pre, raw, c.t, k, c.color);
-      using pc = dark::pixel_class;
-      const auto cls = [&](int x, int y) { return reference.classes[at(x, y)]; };
-      const auto tile_at = [&](int x, int y) { return std::size_t(y / 16) * reference.tiles_x + std::size_t(x / 16); };
-      // The tint over this textured grey scene is kept by structure (its
-      // opacity steps with the scene) and joins no region, but its colour
-      // verdicts ring the joined dim's first tile row, which pins the dim's
-      // whole region; tile row 8 alone is proven.
-      const auto poisoned = [&](std::size_t tile) {
-        for (std::size_t i = 0; i != reference.ring.size(); ++i)
-          if (reference.component[i] == reference.component[tile] && reference.ring[i]) return true;
-        return false;
-      };
-      if (c.joined)
-        require(reference.verdicts[tile_at(100, 135)] == dark::verdict::darkening && !reference.ring[tile_at(100, 135)] &&
-            reference.component[tile_at(100, 135)] >= 0 && poisoned(tile_at(100, 135)) && !reference.region[tile_at(100, 135)] &&
-            cls(100, 135) == pc::kept && cls(10, 70) == pc::unpinned && reference.n.regions_unpinned == 1u,
-          std::string("check_darkening (") + c.name + "): a proven dim tile joined to a tint must stay pinned with its region, "
-            "and the separate dim must unpin");
-      else if (c.tint)
-        require(!reference.n.unpinned && reference.n.darkening && reference.n.tiles_colour,
-          std::string("check_darkening (") + c.name + "): the CPU reference unpinned a tint or judged no colour tile");
-      else
-        require(cls(50, 140) == pc::unpinned && cls(20, 30) == pc::kept && cls(100, 50) == pc::kept &&
-            cls(120, 50) == pc::unpinned && cls(190, 30) == pc::colour && reference.n.tiles_darkening,
-          std::string("check_darkening (") + c.name + "): the CPU reference does not classify the shapes as intended");
-      images_t images;
-      std::vector<rgba> final_image(count), pre_image(count);
-      for (std::size_t i = 0; i != count; ++i) {
-        final_image[i] = {presented[i][0], presented[i][1], presented[i][2], 1.f};
-        pre_image[i] = {pre[i][0], pre[i][1], pre[i][2], 0.f};
-      }
-      std::uint32_t offered, pair_rules = 0u;
-      if (pre_ui) {
-        images.back1 = final_image;
-        images.layer = pre_image;
-        offered = candidate::layer | candidate::pre_ui;
-        pair_rules = (1u << detection::change_set::pair_shift) | detection::change_set::retained_1;
-      } else {
-        images.paired = final_image;
-        images.hudless = pre_image;
-        offered = candidate::hudless | candidate::exact;
-      }
-      for (const bool enabled : {true, false}) {
-        const std::uint32_t rules =
-          pair_rules | detection::rules::darkening_measured | (enabled ? detection::rules::pin_only_ui : 0u);
-        const detection_constants constants{offered, c.t, offered & ~candidate::exact, 0u, 0.f, rules, {}};
-        const auto got = run(c.color, images, c.decided, constants, false);
-        for (std::size_t i = 0; i != count; ++i) {
-          const float want = raw[i] && !(enabled && reference.classes[i] == pc::unpinned) ? 1.f : 0.f;
-          if (got.mask[i] != want)
-            throw std::runtime_error(std::string("darkening (") + c.name + (enabled ? ", pin only UI" : ", shadow") +
-              "): the mask at x=" + std::to_string(i % width) + " y=" + std::to_string(i / width) + " is " +
-              std::to_string(got.mask[i]) + ", the reference " + std::to_string(want));
-        }
-        require(got.words[word::dk_unpinned] == reference.n.unpinned && got.words[word::dk_kept] == reference.n.kept,
-          std::string("darkening (") + c.name + "): words 62-63 are " + std::to_string(got.words[word::dk_unpinned]) + "/" +
-            std::to_string(got.words[word::dk_kept]) + ", the reference " + std::to_string(reference.n.unpinned) + "/" +
-            std::to_string(reference.n.kept));
-      }
-    }
-  }
 }
 
 namespace {
   // S3 semantics, on the CPU (run() proved the reduce equal to decide() on
-  // every case): no verdict decides without a gate; exact pairs leave every
-  // gated decision unchanged; the gates refuse exactly the non-exact pairs.
+  // every case): no verdict decides without the gate; exact pairs leave every
+  // gated decision unchanged; the gate refuses exactly the non-exact
+  // HUD-less pairs, and the reserved bit 0x2 (the removed layer gate)
+  // decides nothing.
   void check_identity_semantics(const std::vector<case_t> &cases) {
     const auto same = [](const selection::decision &a, const selection::decision &b) {
       return a.source == b.source && a.covered == b.covered && a.valid_bits == b.valid_bits && a.reused == b.reused &&
         a.refused == b.refused && a.frame_reason == b.frame_reason && a.next.state == b.next.state &&
-        a.next.source == b.next.source && a.h1 == b.h1 && a.refined == b.refined && a.still == b.still;
+        a.next.source == b.next.source && a.h1 == b.h1 && a.still == b.still;
     };
     for (const auto &test : cases) {
       const auto c = sums(test.statistics);
       const auto previous = test.previous ? *test.previous : selection::hold_state{};
-      const auto plain = selection::decide(c, test.offered, test.accepted, test.flags, previous, test.rules);
+      const auto plain = selection::decide(c, test.offered, test.accepted, test.flags, previous, test.still);
       auto ungated = test.identity;
-      ungated.bits &= identity::token_batch;
-      require(same(plain, selection::decide(c, test.offered, test.accepted, test.flags, previous, test.rules, ungated)),
-        test.name + ": an identity verdict changed a decision without a gate");
-      // Exact stamps for both pairs, gated: the decision of the ungated frame
-      // (the pre-UI change set is never offered without its layer live; one
-      // offered alone has no layer pair, which the gate refuses).
-      selection::identity_input exact{17u, 0u, 16u, 17u, 0u, 17u, identity::gate_layer | identity::gate_hudless};
-      if (!(test.offered & candidate::pre_ui) || (test.offered & candidate::layer))
-        require(same(plain, selection::decide(c, test.offered, test.accepted, test.flags, previous, test.rules, exact)),
-          test.name + ": a gate changed a decision whose pairs are exact");
-      const auto gated = selection::decide(c, test.offered, test.accepted, test.flags, previous, test.rules, test.identity);
-      const auto v = gated.identity;
-      if ((test.identity.bits & identity::gate_layer) && !(v.ok & candidate::layer))
-        require(!(gated.valid_bits & candidate::pre_ui), test.name + ": a non-exact layer pair left source 12 valid");
-      if ((test.identity.bits & identity::gate_hudless) && !(v.ok & candidate::hudless))
+      ungated.bits &= identity::token_batch | identity::reserved_gate_layer;
+      require(same(plain, selection::decide(c, test.offered, test.accepted, test.flags, previous, test.still, ungated)),
+        test.name + ": an identity verdict changed a decision without the gate");
+      const selection::identity_input exact{17u, 0u, 16u, 17u, 0u, 17u, identity::gate_hudless};
+      require(same(plain, selection::decide(c, test.offered, test.accepted, test.flags, previous, test.still, exact)),
+        test.name + ": the gate changed a decision whose pairs are exact");
+      const auto gated = selection::decide(c, test.offered, test.accepted, test.flags, previous, test.still, test.identity);
+      if ((test.identity.bits & identity::gate_hudless) && !(gated.identity.ok & candidate::hudless))
         require(!(gated.valid_bits & candidate::hudless), test.name + ": a non-exact HUD-less pair left 5/6 valid");
     }
-    // The named cases: a late layer copy under gate_layer loses source 12
-    // (the shapeless current alpha keeps the frame flat, refine finds no
-    // set), an exact one keeps it; a generated Present's HUD-less stamp
-    // under gate_hudless loses the refined 5; a mismatched full set reuses.
     const auto find = [&](const std::string &name) -> const case_t & {
       for (const auto &test : cases)
         if (test.name == name) return test;
@@ -2500,40 +1383,27 @@ namespace {
     };
     const auto decided = [](const case_t &test) {
       return selection::decide(sums(test.statistics), test.offered, test.accepted, test.flags,
-        test.previous ? *test.previous : selection::hold_state{}, test.rules, test.identity);
+        test.previous ? *test.previous : selection::hold_state{}, test.still, test.identity);
     };
-    const auto gate = std::to_string(identity::gate_layer), hudless_gate = std::to_string(identity::gate_hudless);
-    require(decided(find("S3 pre-UI layer pair exact present, gate " + gate)).source == detection::source_pre_ui &&
-        decided(find("S3 pre-UI layer pair exact token, gate " + gate)).source == detection::source_pre_ui &&
-        decided(find("S3 pre-UI layer pair late copy (mismatch), gate 0")).source == detection::source_pre_ui &&
-        decided(find("S3 pre-UI layer pair late copy (mismatch), gate " + gate)).source == 4u &&
-        decided(find("S3 pre-UI layer pair unstamped, gate " + gate)).source == 4u &&
-        decided(find("S3 pre-UI layer pair unproposed, gate " + gate)).source == 4u &&
-        decided(find("S3 pre-UI layer pair late copy (mismatch), gate " + hudless_gate)).source == detection::source_pre_ui,
-      "S3: the layer gate does not keep exactly the exact pre-UI pairs");
-    const auto late = decided(find("S3 pre-UI layer pair late copy (mismatch), gate " + gate));
+    const auto late = decided(find("S3 layer pair late copy (mismatch), gate 0"));
     require(late.identity.layer == identity::mismatch && late.identity.layer_delta == 1 &&
         late.identity.layer_space == identity::space_present &&
-        decided(find("S3 pre-UI layer pair far mismatch, gate 0")).identity.layer_delta == 32767 &&
-        decided(find("S3 pre-UI layer pair token mismatch, gate 0")).identity.layer_delta == -1,
+        decided(find("S3 layer pair far mismatch, gate 0")).identity.layer_delta == 32767 &&
+        decided(find("S3 layer pair token mismatch, gate 0")).identity.layer_delta == -1 &&
+        decided(find("S3 layer pair unproposed, gate 0")).identity.layer == identity::unproposed,
       "S3: the layer verdict or its delta is wrong");
-    const auto exact_bit = std::to_string(candidate::exact);
+    const auto hudless_gate = std::to_string(identity::gate_hudless), exact_bit = std::to_string(candidate::exact);
     require(decided(find("S3 HUD-less pair token batch, gate " + hudless_gate + ", exact " + exact_bit)).source == 5u &&
         decided(find("S3 HUD-less pair exact present, gate " + hudless_gate + ", exact " + exact_bit)).source == 5u &&
         decided(find("S3 HUD-less pair generated Present (mismatch), gate 0, exact " + exact_bit)).source == 5u &&
-        decided(find("S3 HUD-less pair generated Present (mismatch), gate " + hudless_gate + ", exact " + exact_bit)).source ==
-          3u &&
-        decided(find("S3 HUD-less pair unproposed, gate " + hudless_gate + ", exact 0")).source == 3u,
+        !decided(find("S3 HUD-less pair generated Present (mismatch), gate " + hudless_gate + ", exact " + exact_bit)).source &&
+        !decided(find("S3 HUD-less pair unproposed, gate " + hudless_gate + ", exact 0")).source &&
+        decided(find("S3 HUD-less pair unproposed, gate 0, exact 0")).source == 5u,
       "S3: the HUD-less gate does not keep exactly the exact HUD-less pairs");
-    const auto reuse = decided(find("S3 pre-UI late copy after a refined 12")),
-      spent = decided(find("S3 pre-UI late copy, spent"));
-    require(reuse.reused && reuse.source == detection::source_pre_ui && reuse.covered == 2000u &&
-        reuse.next.state == detection::hold::spent && !spent.reused && spent.source == 4u,
-      "S3: a refused pre-UI pair under refine does not reuse the refined 12 once, then show the flat alpha");
     const auto full = decided(find("S3 full HUD-less set, mismatch, gate " + hudless_gate));
     require(decided(find("S3 full HUD-less set, mismatch, gate 0")).source == 6u && full.reused && full.source == 5u &&
         full.next.state == detection::hold::spent, "S3: a gated mismatched full set does not take T1's one reuse");
-    const auto adds = selection::identity_counter_adds(decided(find("S3 pre-UI layer pair exact token, gate 0")).identity);
+    const auto adds = selection::identity_counter_adds(decided(find("S3 layer pair exact token, gate 0")).identity);
     require(adds[0] == 1u && adds[4] == 1u && adds[1] + adds[2] + adds[3] == 0u,
       "S3: an exact token pair does not count exact and token_exact");
   }
@@ -2663,7 +1533,6 @@ int main() {
       c.changed = 100;
       c.unchanged = 900;
       c.matching_tiles = 200;
-      c.lit = 900;
       c.strong = {0, 1000, 0};
       c.contradicted = {0, 100, 0};
       auto d = selection::decide(c, 0x34, 0x04, 0);
@@ -2897,204 +1766,6 @@ int main() {
     std::puts("PASS UI still screen (H2): a frame applying no source and not reused is flat (11) under the flag; S1, H1 and T1 "
       "win; the hold store, reason and refused candidate keep the decision before it; reused depth does not stop it");
 
-    // Fix 3: the pre-UI change set (candidate 0x100, source 12) and refine.
-    {
-      namespace hold = detection::hold;
-      namespace counter = sunshine_game3d::ui_counter_word;
-      using sunshine_game3d::ui_no_mask::names;
-      const auto refine = detection::rules::pin_only_ui;
-      const std::uint32_t sb = candidate::layer | candidate::current | candidate::pre_ui;
-      // Stellar Blade SDR's Equipment page: the bare layer (V1-invalid, no
-      // coverage), a uniform current alpha, a valid partial set lit on 26%.
-      selection::counts c;
-      c.pixels = 1000;
-      c.covered = {0, 0, 0, 0, 1000};
-      c.invalid = {0, 0, 900, 0, 0};
-      c.opaque_current = 1000;
-      c.changed = 50;
-      c.unchanged = 920;
-      c.matching_tiles = 138;
-      c.lit = 260;
-      auto d = selection::decide(c, sb, candidate::current | candidate::pre_ui, 0);
-      require(d.source == 4u && d.covered == 1000u && !d.refined && d.shapeless && (d.valid_bits & candidate::pre_ui) &&
-          selection::h1_word(d) == 4u, "Fix 3: without refine the shapeless current alpha must stay flat");
-      d = selection::decide(c, sb, candidate::current | candidate::pre_ui, 0, {}, refine);
-      const auto adds = selection::counter_adds(d, 0);
-      require(d.source == detection::source_pre_ui && d.covered == 50u && d.refined && d.s1_source == detection::source_pre_ui &&
-          selection::h1_word(d) == (detection::source_pre_ui | detection::h1_refined) && !d.full_alpha &&
-          adds[counter::decided + detection::source_pre_ui] == 1 && adds[counter::refined] == 1 && !adds[counter::full_alpha],
-        "Fix 3: refine did not replace the shapeless alpha with the pre-UI change set");
-      // Alpha with shape is never refined; a dim overlay alpha below 1 is not
-      // shapeless either (W3's semi-transparent sign wheel).
-      c.opaque_current = 999;
-      d = selection::decide(c, sb, candidate::current | candidate::pre_ui, 0, {}, refine);
-      require(d.source == 4u && !d.refined && !d.shapeless, "Fix 3: an alpha with transparent pixels was refined");
-      c.opaque_current = 1000;
-      // V2: lit on 1% (10 of 1000) is a scene, 9 is not (a loading screen).
-      c.lit = 10;
-      require(selection::decide(c, sb, candidate::current | candidate::pre_ui, 0, {}, refine).refined,
-        "Fix 3: a set lit on 1% did not refine");
-      c.lit = 9;
-      d = selection::decide(c, sb, candidate::current | candidate::pre_ui, 0, {}, refine);
-      require(d.source == 4u && !(d.valid_bits & candidate::pre_ui), "Fix 3: a set lit below 1% was valid");
-      c.lit = 260;
-      // The set needs a layer without coverage and no HUD-less image.
-      c.covered[2] = 1;
-      require(!(selection::decide(c, sb, candidate::pre_ui, 0).valid_bits & candidate::pre_ui),
-        "Fix 3: a layer with coverage was a pre-UI change set");
-      c.covered[2] = 0;
-      d = selection::decide(c, sb | candidate::hudless, candidate::current | candidate::pre_ui, 0, {}, refine);
-      require(!(d.valid_bits & candidate::pre_ui) && (d.valid_bits & candidate::hudless) && d.source == 4u && !d.refined,
-        "Fix 3: the pre-UI set was valid beside a HUD-less image, or an inexact HUD-less set refined");
-      // S1 alone: the set decides as 12 without an alpha winner, unless an
-      // accepted declared alpha keeps it out, and then refuses it (F1).
-      d = selection::decide(c, sb, candidate::pre_ui, 0);
-      require(d.source == detection::source_pre_ui && !d.refined && d.covered == 50u, "Fix 3: S1 did not decide the set as 12");
-      selection::counts blocked = c;
-      blocked.invalid[1] = 1000;
-      d = selection::decide(blocked, sb | candidate::ui_color, candidate::pre_ui | candidate::ui_color, 0);
-      require(!d.source && d.none_reason == sunshine_game3d::ui_no_mask::presented_blocked && d.refused == candidate::pre_ui,
-        "Fix 3: an accepted declared alpha did not keep the pre-UI set out");
-      // F1: an accepted pre-UI set that is invalid, beside a valid layer,
-      // is difference_failed refusing pre_ui; T1 then has no own decision.
-      selection::counts invalid = c;
-      invalid.lit = 0;
-      invalid.invalid = {};
-      d = selection::decide(invalid, candidate::layer | candidate::pre_ui, candidate::pre_ui, 0, {hold::own, 12u, 50u});
-      require(d.reused && d.source == 12u && d.none_reason == sunshine_game3d::ui_no_mask::difference_failed &&
-          d.refused == candidate::pre_ui && names[d.none_reason] == "difference_failed",
-        "Fix 3: an invalid accepted pre-UI set was not difference_failed with a T1 reuse");
-      // Refine through an accepted exact HUD-less set (E33-like); a full
-      // change set (a pause menu changed on 76%) never refines.
-      selection::counts e33;
-      e33.pixels = 1000;
-      e33.covered = {0, 0, 0, 1000, 0};
-      e33.opaque_backbuffer = 1000;
-      e33.changed = 50;
-      e33.unchanged = 920;
-      e33.matching_tiles = 200;
-      e33.lit = 900;
-      const std::uint32_t pair = candidate::backbuffer | candidate::hudless | candidate::exact;
-      d = selection::decide(e33, pair, candidate::backbuffer | candidate::hudless, 0, {}, refine);
-      require(d.source == 5u && d.refined && d.covered == 50u && !d.inexact_difference,
-        "Fix 3: an exact selective HUD-less set did not refine the shapeless Backbuffer");
-      require(selection::decide(e33, pair & ~candidate::exact, candidate::backbuffer | candidate::hudless, 0, {}, refine).source ==
-          3u, "Fix 3: an inexact HUD-less set refined");
-      e33.changed = 760;
-      e33.unchanged = 200;
-      require(selection::decide(e33, pair, candidate::backbuffer | candidate::hudless, 0, {}, refine).source == 3u,
-        "Fix 3: a full change set refined");
-      // H1 runs after refine: a held hidden verdict with the shapeless
-      // alpha's claim (a) shows a refined frame flat (8).
-      d = selection::decide(c, sb, candidate::current | candidate::pre_ui, detection::per_frame_scene_hidden, {}, refine);
-      require(d.source == 8u && d.h1 && d.refined && d.claims == candidate::current &&
-          selection::h1_word(d) == (detection::source_pre_ui | detection::h1_applied | detection::h1_refined),
-        "Fix 3: H1 did not override a refined frame under a held hidden verdict");
-      require(selection::decide(c, sb, candidate::current | candidate::pre_ui, detection::per_frame_scene_hidden).source == 4u,
-        "Fix 3: H1 overrode a shapeless winner without refine");
-      // T1 refine_missing: with refine, a shapeless winner whose accepted set
-      // is missing reuses the previous decision once, then shows its own flat
-      // alpha; without refine it decides itself.
-      const std::uint32_t missing = detection::per_frame_accepted_missing;
-      d = selection::decide(c, candidate::layer | candidate::current, candidate::current, missing, {hold::own, 12u, 50u}, refine);
-      require(d.reused && d.source == 12u && d.covered == 50u && d.next.state == hold::spent,
-        "Fix 3: refine_missing did not reuse the refined decision once");
-      d = selection::decide(c, candidate::layer | candidate::current, candidate::current, missing, d.next, refine);
-      require(!d.reused && d.source == 4u && d.next.state == hold::spent, "Fix 3: refine_missing reused twice");
-      d = selection::decide(c, candidate::layer | candidate::current, candidate::current, missing, {hold::own, 12u, 50u});
-      require(!d.reused && d.source == 4u && d.next.state == hold::own, "Fix 3: refine_missing acted without refine");
-      // The pre-UI kind never claims: its bit has no refuted position.
-      require(selection::claimable_bits == 0x5fu && !(selection::claimable_bits & candidate::pre_ui) &&
-          !selection::decide(c, sb, candidate::pre_ui, detection::per_frame_scene_hidden).h1,
-        "Fix 3: the pre-UI set made an H1 claim");
-      // The slot's scale: 8 for the inferred pair, 1 for a declared one.
-      require(selection::change_set_scale(sb) == 8u && selection::change_set_scale(sb | candidate::hudless) == 1u &&
-          selection::change_set_scale(candidate::hudless) == 1u, "Fix 3: the change-set slot's scale is wrong");
-    }
-    std::puts("PASS UI change sets (fix 3): the pre-UI set is valid as a partial set lit on 1% over an uncovered layer without a "
-      "HUD-less image, kept out by an accepted declared alpha, decides 12 in S1; refine replaces a shapeless alpha with it or an "
-      "exact HUD-less set, never alpha with shape; H1 after refine; T1 refine_missing; F1 difference_failed");
-
-    // Fix 3, the change-set shadow (game3d_ui_change_set.h): the counterfactual
-    // of the switch, the pair verdict, the judge's ratios, the log line the
-    // report parses, its throttle and the session counters.
-    {
-      namespace change_set = sunshine_game3d::change_set;
-      namespace n = sunshine_game3d::ui_counter;
-      selection::counts c;
-      c.pixels = 1000;
-      c.covered = {0, 0, 0, 0, 1000};
-      c.invalid = {0, 0, 900, 0, 0};
-      c.opaque_current = 1000;
-      c.pre_ui_match = 900;
-      c.pre_ui_lit = 260;
-      c.shadow = {50, 920, 0, 138, 45, 50, 80, 40, 30, 1};
-      const std::uint32_t offered = candidate::layer | candidate::current, accepted = candidate::current;
-      const change_set::layer_pairing retained{change_set::pair_class::retained, 1u};
-      const std::uint32_t rules = change_set::rule_bits(false, false, true, false, retained, true, true);
-      auto s = change_set::measure_shadow(c, offered, accepted, 0, rules, retained, true, false, true, false);
-      require(s.valid && s.would_refine && s.would_source == detection::source_pre_ui && !s.would_decide && s.winner == 4u &&
-          s.shapeless && s.applied_source == 4u && s.verdict == change_set::pair_verdict::verified && s.offsets[0] == 100u &&
-          s.offsets[1] == 50u && s.offsets[2] == 80u && !s.fg && std::abs(s.precision - 30. / 45.) < 1e-12 &&
-          std::abs(s.recall - 30. / 40.) < 1e-12 && std::abs(s.iou - 30. / 55.) < 1e-12,
-        "Fix 3: the shadow of an Equipment-like page is not would_refine 12 with a verified pair");
-      require(change_set::shadow_log_text(s) ==
-          "Sunshine UI change set: pairing=retained offset=1 fg=0 UIPinOnlyUI=0 changed=50 unchanged=920 nonfinite=0 "
-          "matching_tiles=138 lit=260 layer_covered=0 valid=1 filtered=45 offsets={0=100 1=50 2=80} pair=verified "
-          "judge={kind=ui_alpha pixels=40 tp=30 precision=0.667 recall=0.750 iou=0.545} winner=4 shapeless=1 would_refine=1 "
-          "would_source=12 applied_source=4 pixels=1000",
-        "Fix 3: the change-set shadow's log line changed: " + change_set::shadow_log_text(s));
-      // Without an accepted alpha the set would decide by itself; a late
-      // pairing is never offered, so its would_* are the sample's own.
-      s = change_set::measure_shadow(c, offered, 0u, 0, rules, retained, true, false, true, false);
-      require(s.would_decide && s.would_source == detection::source_pre_ui && !s.would_refine,
-        "Fix 3: the shadow without an alpha winner did not would_decide 12");
-      const change_set::layer_pairing late{change_set::pair_class::late, 0u};
-      s = change_set::measure_shadow(c, offered, accepted, 0, 0u, late, true, false, true, false);
-      require(s.fg && s.would_source == 4u && !s.would_refine && s.verdict == change_set::pair_verdict::none &&
-          !s.measured[1] && !s.measured[2], "Fix 3: a late pairing was offered in the shadow");
-      require(change_set::shadow_log_text(s).find("offsets={0=100 1=- 2=-} pair=- ") != std::string::npos,
-        "Fix 3: unmeasured offsets or the verdict of a late pairing are not '-' in the log line");
-      // A smaller change against another Present contradicts the pairing; a
-      // tie is inconclusive. HUD-less offered, Manual or unproven: not offered.
-      c.shadow.changed_2 = 49;
-      require(change_set::measure_shadow(c, offered, accepted, 0, rules, retained, true, false, true, false).verdict ==
-          change_set::pair_verdict::contradicted, "Fix 3: a lower changed count two back did not contradict the pairing");
-      c.shadow.changed_2 = 50;
-      require(change_set::measure_shadow(c, offered, accepted, 0, rules, retained, true, false, true, false).verdict ==
-          change_set::pair_verdict::inconclusive, "Fix 3: a tie did not read inconclusive");
-      for (const auto &[proven, hudless, automatic] : {std::array<bool, 3>{false, false, true}, std::array<bool, 3>{true, true, true},
-             std::array<bool, 3>{true, false, false}})
-        require(!change_set::measure_shadow(c, offered, accepted, 0, rules, retained, proven, hudless, automatic, true).would_refine,
-          "Fix 3: the shadow offered the set unproven, beside a HUD-less image or outside Auto");
-      // The throttle: a change of pairing, validity, would_refine or
-      // would_source logs at once, else once a second.
-      change_set::shadow_log_state log;
-      s = change_set::measure_shadow(c, offered, accepted, 0, rules, retained, true, false, true, false);
-      require(change_set::shadow_log_due(log, s, 1000) && !change_set::shadow_log_due(log, s, 1999) &&
-          change_set::shadow_log_due(log, s, 2000), "Fix 3: the shadow log did not throttle to once a second");
-      auto other = s;
-      other.valid = false;
-      require(change_set::shadow_log_due(log, other, 2001) && !change_set::shadow_log_due(log, other, 2002),
-        "Fix 3: a validity change did not log at once");
-      other.pairing = late;
-      require(change_set::shadow_log_due(log, other, 2003), "Fix 3: a pairing change did not log at once");
-      // Counters: every sample, by pairing, validity, would_* and verdict.
-      sunshine_game3d::ui_counters counters;
-      change_set::add_shadow_counters(counters, s);
-      change_set::add_shadow_counters(counters, change_set::measure_shadow(c, offered, accepted, 0, 0u, late, true, false, true,
-        false));
-      change_set::add_shadow_counters(counters, change_set::measure_shadow(c, offered, 0u, 0, 0u,
-        {change_set::pair_class::unavailable, 0u}, true, false, true, false));
-      require(counters[n::change_set_samples] == 3 && counters[n::change_set_retained] == 1 && counters[n::change_set_late] == 1 &&
-          counters[n::change_set_unavailable] == 1 && counters[n::change_set_valid] == 3 &&
-          counters[n::change_set_would_refine] == 1 && !counters[n::change_set_would_decide] &&
-          counters[n::change_set_pair_verified] == 0 && counters[n::change_set_pair_contradicted] == 0,
-        "Fix 3: the change-set counters are wrong");
-    }
-    std::puts("PASS UI change-set shadow (fix 3): the counterfactual switch, the pair verdict, the judge's ratios, the log line, "
-      "its throttle and the session counters");
-
     std::ifstream input(SUNSHINE_GAME3D_NATIVE_HLSL, std::ios::binary);
     require(input.good(), "Cannot read game3d_native.hlsl");
     const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
@@ -3107,7 +1778,7 @@ int main() {
     std::mt19937 random(0x5131u);
     for (unsigned i = 0; i != 6000; ++i) cases.push_back(random_case(random, i));
     std::array<unsigned, detection::source_count> sources{};
-    unsigned reused = 0, h1 = 0, gate_no_hold = 0, own_retired = 0, still = 0, refined = 0;
+    unsigned reused = 0, h1 = 0, gate_no_hold = 0, own_retired = 0, still = 0;
     check_stillness(gpu, source);
     std::puts("PASS UI still screen stillness (H2): the compare pass counts compared and still cells (within 1/255 of code luma) "
       "per group, stores each cell's mean, and the evidence pass sums them into texel 12; inactive depth writes nothing");
@@ -3137,42 +1808,23 @@ int main() {
           h1 += d.h1;
           own_retired += d.own_source == 7u || d.own_source == 9u;
           still += d.still;
-          refined += d.refined;
           gate_no_hold += !d.own_source && d.none_reason == sunshine_game3d::ui_no_mask::gate_no_hold;
         }
       }
     }
-    require(!own_retired && h1 && gate_no_hold && still && refined && sources[detection::source_pre_ui],
-      "The contract cases decided a retired source (7, 9), or never exercised H1, H2, refine or source 12");
+    require(!own_retired && h1 && gate_no_hold && still, "The contract cases decided a retired source (7, 9), or never exercised H1 "
+      "or H2");
     check_identity_semantics(cases);
     std::puts("PASS UI identity (S3): the reduce's identity verdicts (texel 12 .z/.w) and identity counter words match "
-      "verify_identity on synthetic stamps; without a gate no verdict changes a decision; with exact pairs every gated "
-      "decision equals the ungated one; a late, unstamped or unproposed layer pair invalidates source 12 under "
-      "gate_layer, a mismatched HUD-less pair sources 5 and 6 under gate_hudless (T1 then reuses once)");
-    for (const unsigned color : {1u, 2u}) {
-      for (const int width : {256, 254}) check_change_set(gpu, source, color, width);
-      check_change_set_narrow(gpu, source, color);
-    }
-    std::puts("PASS UI change-set passes (fix 3): the pre-UI layer pair's slot rows at 8 times b2 word 1, the shadow rows "
-      "160-191 (pair, 3x3 rule, offsets 1 and 2, UIAlpha judge), texels 13-15, the verified pair offset, source 12 refining a "
-      "shapeless alpha and its 3x3 mask (specks removed, line interiors kept) match the CPU oracle in sRGB and scRGB, and the "
-      "shadow rows at width 8 (tiles empty in x) match it too, as do S3's token-space Backbuffer pair (offset 3, t13)");
-    check_darkening(gpu, source);
-    std::puts("PASS UI darkening passes (fix 4, P2): the bits, tiles, region, mask, count and finish passes match the CPU "
-      "reference (game3d_ui_darkening.h) mask for mask and in words 62-63: an sRGB and scRGB (float, linear tolerance) "
-      "offscreen layer and an sRGB UI color tag (dim band unpinned, strokes, panel edges and inner halo kept, panel interior, "
-      "halo tail and speck unpinned, a tint at the tolerance darkening, 5/255 colour), a colourless layer that unpins nothing "
-      "(word 63's colourless bit) until one colour pixel, a charcoal #303030 panel at 0.5 that a float layer and a float tag "
-      "keep as colour, a PQ HUD-less change set composited in linear light, the pre-UI pair at k 8, a grey tint whose colour "
-      "tiles keep it pinned, and a dim joined to it that stays pinned with its region while a separate dim unpins; the "
-      "shadow keeps the raw mask, and a reused frame, an ineligible source or a frame without the measured bit measure "
-      "nothing");
+      "verify_identity on synthetic stamps; without the gate no verdict changes a decision; with exact pairs every gated "
+      "decision equals the ungated one; a mismatched HUD-less pair invalidates sources 5 and 6 under gate_hudless (T1 then "
+      "reuses once)");
     std::printf("PASS UI detection tiles (V1, V2, A2, H1 d): alpha, layer, difference, one-way and pre-UI pixel counts on edge "
       "values match the CPU count for layer flags 0, 5 and 7, with and without an exact pair and a comparable layer, in sRGB, PQ "
       "and scRGB\n");
     std::printf("PASS UI selection GPU contract (%s): %zu crafted and %zu random cases in two color spaces match decide() in every "
-      "decision word, hold store write and counter add; %u reused, %u H1, %u H2, %u refined, %u gate_no_hold; applied sources",
-      gpu.adapter.c_str(), crafted_count, cases.size() - crafted_count, reused, h1, still, refined, gate_no_hold);
+      "decision word, hold store write and counter add; %u reused, %u H1, %u H2, %u gate_no_hold; applied sources",
+      gpu.adapter.c_str(), crafted_count, cases.size() - crafted_count, reused, h1, still, gate_no_hold);
     for (std::size_t s = 0; s != sources.size(); ++s)
       if (s != 7 && s != 9) std::printf(" %zu=%u", s, sources[s]);
     std::printf(" other=%u\n", sources[7]);

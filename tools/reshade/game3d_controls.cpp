@@ -108,11 +108,6 @@ namespace sunshine_game3d {
         // game's UIFlattenStillScreens is 1; by default it only logs them.
         policy->set_still_flatten(load_still_flatten(global));
         sunshine_log::message(reshade::log::level::info, still_flatten_log_text(policy->still_flatten()).c_str());
-        // Pin only UI (fix 3's pre-UI change set and rule P2's darkening)
-        // acts only when the game's UIPinOnlyUI is 1; by default both are
-        // only measured and logged.
-        policy->set_pin_only_ui(load_pin_only_ui(global));
-        sunshine_log::message(reshade::log::level::info, pin_only_ui_log_text(policy->pin_only_ui()).c_str());
         if (restored.discarded) {
           const auto message = "Sunshine UI protection: discarded " + std::to_string(restored.discarded) +
             " legacy UI trust entries (" + restored.discarded_text +
@@ -413,21 +408,6 @@ namespace sunshine_game3d {
               sunshine_log::message(reshade::log::level::info, still_flatten_log_text(still_flatten).c_str());
           }
           ImGui::SetItemTooltip("%s", still_flatten_tooltip);
-          ImGui::EndDisabled();
-          // Pin only UI (docs/reshade-sbs.md, UI decision framework): the
-          // pre-UI change set decides and darkening unpins only with this
-          // per-game switch, Auto only.
-          ImGui::TableNextRow();
-          ImGui::TableNextColumn();
-          ImGui::TableNextColumn();
-          bool pin_only_ui = data->alpha_session->pin_only_ui();
-          ImGui::BeginDisabled(data->values.ui_protection != source_alpha_mode::automatic);
-          if (ImGui::Checkbox(pin_only_ui_label, &pin_only_ui)) {
-            global_config_backend global;
-            if (edit_pin_only_ui(*data, pin_only_ui, global))
-              sunshine_log::message(reshade::log::level::info, pin_only_ui_log_text(pin_only_ui).c_str());
-          }
-          ImGui::SetItemTooltip("%s", pin_only_ui_tooltip);
           ImGui::EndDisabled();
         }
       }

@@ -477,10 +477,6 @@ namespace sunshine_game3d::ui_input {
     // own beside any tagged UIColorAndAlpha (E1), in renderer slot 4. Its copy
     // holds the previous frame's UI; detection reads it only while V1-valid,
     // premultiplied included.
-    // Every render reports whether the game's frame generation mode is known
-    // off (not merely unobserved), so the renderer's run of such Presents
-    // covers the Presents without a layer too.
-    result.detection.fg_known_off = status.fg.known && !status.fg.enabled;
     ui_layer::live_capture layer;
     const bool layer_wanted = status.requested &&
       (source_filter(wanted_source) & ui_mask::source_mask(ui_mask::source_kind::color_and_alpha));
@@ -542,10 +538,6 @@ namespace sunshine_game3d::ui_input {
       if (view.handle) {
         result.detection.layer = view;
         result.detection.layer_flags = ui_layer::detection_flags(static_cast<api::format>(layer.format));
-        // Fix 3 (game3d_ui_change_set.h): the copy holds the frame of the
-        // Present this many Presents ago; Present counting pairs it only
-        // within a run of Presents with frame generation known off.
-        result.detection.layer_presents_ago = layer.presents_since_copy;
         signatures.set(ui_selection::kind::ui_layer, typed_format(layer.format));
         result.status.retained_alpha_ready = true; available = true;
       }
@@ -644,7 +636,6 @@ namespace sunshine_game3d::ui_input {
     result.detection.expected_layer_present = expected_layer_present;
     result.detection.expected_layer_token = expected_layer_token;
     result.detection.expected_hudless_present = expected_hudless_present;
-    result.detection.present_label = present_label;
     nlohmann::json identity_json;
     if (diagnostic) identity_json = {
       {"meaning", "S3 shadow (docs/reshade-sbs.md, UI decision framework, S3 snapshot ticket): this render's pairing by "
@@ -720,7 +711,6 @@ namespace sunshine_game3d::ui_input {
     if (!available) {
       result.kind = ui_input_kind::unavailable; result.view = {}; result.explicit_origin.reset();
       result.detection = {}; result.detection.current_color = false;
-      result.detection.present_label = present_label;
       result.status.retained_alpha_ready = false; result.status.input = source_alpha_input::none;
     }
     if (!interposer_line.empty()) sunshine_log::message(reshade::log::level::info, interposer_line.c_str());

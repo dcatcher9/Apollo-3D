@@ -38,6 +38,16 @@ namespace sunshine_game3d::replay {
     return game3d_debug::pixel_bytes(format);
   }
 
+  // The reserved IDs 43-45 (game3d_debug_protocol.h): fix 3's optional
+  // change-set artifacts, removed by user decision. Packages dumped while it
+  // shipped still load; replay validates and ignores them.
+  inline constexpr unsigned retired_artifact_first = 43u;
+  inline constexpr std::array<const char *, 3> retired_artifact_names {"retained_present_1", "retained_present_2", "ui_layer_detected"};
+  inline bool retired_artifact(unsigned id) {
+    return id >= retired_artifact_first && id < retired_artifact_first + retired_artifact_names.size();
+  }
+  static_assert(static_cast<unsigned>(game3d_debug::artifact::ui_layer_0) + game3d_debug::ui_layer_count == retired_artifact_first);
+
   inline unsigned artifact_id(const std::string &kind) {
     if (kind == "ui_source_color") return static_cast<unsigned>(game3d_debug::artifact::ui_source_color);
     constexpr std::array<const char *, 8> primary {
@@ -48,7 +58,9 @@ namespace sunshine_game3d::replay {
       if (kind == entry.file_stem) return entry.artifact_id;
     for (unsigned i = 0; i < game3d_debug::ui_layer_count; ++i)
       if (kind == game3d_debug::ui_layer_names[i]) return static_cast<unsigned>(game3d_debug::artifact::ui_layer_0) + i;
-    return game3d_debug::change_set_artifact_id(kind.c_str());
+    for (unsigned i = 0; i < retired_artifact_names.size(); ++i)
+      if (kind == retired_artifact_names[i]) return retired_artifact_first + i;
+    return 0;
   }
 
   inline bool color_format(unsigned format) {
@@ -313,7 +325,7 @@ namespace sunshine_game3d::replay {
       require(entry.at("layout") == "tightly packed rows, top to bottom, native little-endian DXGI pixels", "Unsupported artifact packing");
       total += a.byte_count;
       require(total <= max_package_bytes, "Dump exceeds the capture memory limit");
-      if (ui_resources::is_optional(id) || game3d_debug::ui_layer_artifact(id) || game3d_debug::change_set_artifact(id)) {
+      if (ui_resources::is_optional(id) || game3d_debug::ui_layer_artifact(id) || retired_artifact(id)) {
         // Preserve each optional allocation's own extent/format. Validate it
         // fully even though replay never opens or uploads this diagnostic file.
         p.ignored_optional_artifacts.push_back(a.kind);

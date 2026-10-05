@@ -29,20 +29,20 @@
 // Automatic UI detection writes this many decision texels; its statistics
 // rows hold the cells of this many scene-evidence images (docs/reshade-sbs.md,
 // UI detection flags and decision texels).
-#define SUNSHINE_UI_DECISION_TEXELS 16
+#define SUNSHINE_UI_DECISION_TEXELS 13
 #define SUNSHINE_UI_SCENE_EVIDENCE_IMAGES 2
 // Candidate layout 2 (UI framework S1, E1), mirrored from
 // game3d_ui_detection_contract.h: every candidate has its own slot and bit in
 // Sunshine_UICandidates and Sunshine_UIAcceptedCandidates; the offscreen UI
 // layer (t7) never shares the UI color tag's slot (t12) and decides as source
-// 10, and the layer proven the pre-UI scene image, paired with a retained
-// Present (t2/t3), is the inferred change set SUNSHINE_UI_CANDIDATE_PRE_UI
-// (source 12, fix 3). SunshineUIDetectionReduceCS ports ui_selection::decide
-// (game3d_ui_selection.h) line for line, the T1 grace and its hold store,
-// refine and the H1 and H2 overrides included; this revision must equal
-// ui_selection::revision.
+// 10. SunshineUIDetectionReduceCS ports ui_selection::decide
+// (game3d_ui_selection.h) line for line, the T1 grace and its hold store and
+// the H1 and H2 overrides included; this revision must equal
+// ui_selection::revision. Revision 7 decides exactly as revision 5: revision
+// 6 (fix 3 and fix 4, removed by user decision) added candidate bit 0x100 and
+// source 12, which stay reserved.
 #define SUNSHINE_UI_CANDIDATE_LAYOUT 2
-#define SUNSHINE_UI_SELECTION_REVISION 6
+#define SUNSHINE_UI_SELECTION_REVISION 7
 #define SUNSHINE_UI_CANDIDATE_UI_ALPHA 0x1u
 #define SUNSHINE_UI_CANDIDATE_UI_COLOR 0x2u
 #define SUNSHINE_UI_CANDIDATE_BACKBUFFER 0x4u
@@ -50,12 +50,10 @@
 #define SUNSHINE_UI_CANDIDATE_HUDLESS 0x10u
 #define SUNSHINE_UI_CANDIDATE_EXACT 0x20u
 #define SUNSHINE_UI_CANDIDATE_LAYER 0x40u
-#define SUNSHINE_UI_CANDIDATE_PRE_UI 0x100u
 #define SUNSHINE_UI_SOURCE_LAYER 10
-#define SUNSHINE_UI_SOURCE_PRE_UI 12
 // H2 (fix 2), mirrored from game3d_ui_detection_contract.h: a still screen
 // without a UI source decides as source 11 (flat) while the CPU pushes
-// SUNSHINE_UI_STILL_FLATTEN in Sunshine_UIRules; a cell is still when
+// SUNSHINE_UI_STILL_FLATTEN in Sunshine_UIStillScreen; a cell is still when
 // its presented-luma mean stays within SUNSHINE_UI_STILL_TOLERANCE (1/255 of
 // code luma in luma fixed point) of the previous measured sample's, and the
 // compare groups' stillness counts start at statistics row
@@ -64,130 +62,6 @@
 #define SUNSHINE_UI_STILL_FLATTEN 0x1u
 #define SUNSHINE_UI_STILL_TOLERANCE 4112
 #define SUNSHINE_UI_STILL_ROW 144
-// Change sets (fix 3), mirrored from game3d_ui_detection_contract.h: one
-// difference rule for the declared HUD-less pair (t14 against t0) and the
-// inferred pre-UI layer (t7 against the Present of the pair offset in
-// Sunshine_UIRules bits 4-5: 0 t6, 1 t2, 2 t3): changed beyond k times b2
-// word 1, unchanged within half of that, k 1 for the declared pair and
-// SUNSHINE_UI_CHANGE_SET_INFERRED_SCALE for the inferred one; a partial set
-// also needs its pre-UI image lit (beyond 8 times b2 word 1) on
-// SUNSHINE_UI_CHANGE_SET_LIT_PERCENT of the pixels. The inferred set's mask
-// keeps a changed pixel with SUNSHINE_UI_CHANGE_SET_MIN_NEIGHBOURHOOD changed
-// pixels in its 3x3 window. Sunshine_UIRules also carries PIN_ONLY_UI (fix
-// 3's refine: a valid exact selective change set decides where S1's winner is
-// an alpha opaque on every pixel; fix 4: with DARKENING_MEASURED the mask pass
-// unpins pure darkening, rule P2), SHADOW (the offered layer is proven the
-// pre-UI scene image, the only layer the change-set shadow measures), GAP (the
-// previous real frame offered the pre-UI change set and this one does not)
-// and whether t2 and t3 are bound. The change-set shadow's per-tile counts
-// start at statistics row SUNSHINE_UI_CHANGE_SET_ROW; its judge is the first
-// offered and accepted declared alpha.
-#define SUNSHINE_UI_PIN_ONLY_UI 0x2u
-#define SUNSHINE_UI_CHANGE_SET_SHADOW 0x4u
-#define SUNSHINE_UI_CHANGE_SET_GAP 0x8u
-#define SUNSHINE_UI_CHANGE_SET_PAIR_SHIFT 4
-#define SUNSHINE_UI_CHANGE_SET_PAIR_MASK 0x30u
-#define SUNSHINE_UI_CHANGE_SET_RETAINED_1 0x40u
-#define SUNSHINE_UI_CHANGE_SET_RETAINED_2 0x80u
-#define SUNSHINE_UI_CHANGE_SET_INFERRED_SCALE 8
-#define SUNSHINE_UI_CHANGE_SET_LIT_PERCENT 1
-#define SUNSHINE_UI_CHANGE_SET_MIN_NEIGHBOURHOOD 3
-#define SUNSHINE_UI_CHANGE_SET_JUDGE_UI_ALPHA 1
-#define SUNSHINE_UI_CHANGE_SET_JUDGE_UI_COLOR 2
-#define SUNSHINE_UI_CHANGE_SET_ROW 160
-// The change-set shadow's bit planes (SunshineUIDetectionChangeSetBitsCS):
-// SUNSHINE_UI_CHANGE_SET_PLANES planes of one bit per pixel, side by side in
-// x, each SUNSHINE_UI_CHANGE_SET_WORDS R32_UINT words of 32 pixels per row:
-// changed and unchanged against the pair, non-finite, changed against the
-// Presents one and two back (when not the pair) and the judge's pixels. The
-// renderer dispatches the bits and count passes on shadow samples only.
-// Fix 4 (pin only UI, rule P2) adds three planes the darkening passes write
-// after the reduce: DARK (darkening pixels of the decided source), STRUCT
-// (those on a sharp opacity step or touching raw colour UI) and TILE
-// (DARKENING_TILE_ROWS rows per row of 16x16 tiles, bit tx of word tx / 32:
-// for a change set row 3 ty a colour verdict in the tile's 3x3 ring, row
-// 3 ty + 1 its own darkening verdict, row 3 ty + 2 a darkening pixel in the
-// tile, which the region pass replaces by the tiles whose region unpins; for
-// an opacity source bit 0 of row 8 gy word gx a colour pixel in bits group
-// (gx, gy), and bit 0 of row 1 word 0 a colour pixel in the frame).
-#define SUNSHINE_UI_CHANGE_SET_PLANES 9
-#define SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED 0
-#define SUNSHINE_UI_CHANGE_SET_PLANE_UNCHANGED 1
-#define SUNSHINE_UI_CHANGE_SET_PLANE_INVALID 2
-#define SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED_1 3
-#define SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED_2 4
-#define SUNSHINE_UI_CHANGE_SET_PLANE_JUDGE 5
-#define SUNSHINE_UI_CHANGE_SET_PLANE_DARK 6
-#define SUNSHINE_UI_CHANGE_SET_PLANE_STRUCT 7
-#define SUNSHINE_UI_CHANGE_SET_PLANE_TILE 8
-// S3 frame identity (docs/reshade-sbs.md, UI decision framework, "S3
-// snapshot ticket (shadow)"), mirrored from game3d_ui_detection_contract.h
-// (namespace identity): the CPU proposes the label a paired snapshot must
-// carry (b2 words 6-8, 0 not proposed) and the detection passes verify it
-// against the snapshot's stamp in SunshineUIStamps (t9; entry LAYER for the
-// offscreen layer copy, HUDLESS for the HUD-less image; x its C_P read, y its
-// C_T read). Sunshine_UIIdentity carries TOKEN_BATCH (the CPU proved the
-// HUD-less pair one tag batch by token) and the gates: GATE_LAYER ANDs the
-// layer pair's identity into the pre-UI change set's validity (source 12),
-// GATE_HUDLESS the HUD-less pair's into the HUD-less change set's (5, 6).
-// Verdicts EXACT, MISMATCH, UNSTAMPED (the stamp read 0) and UNPROPOSED, in
-// SPACE_TOKEN or SPACE_PRESENT; decision texel 12 .z packs both pairs'
-// verdicts and spaces (the HUD-less one from HUDLESS_SHIFT) and the exact
-// pairs' candidate bits from OK_SHIFT, .w the read minus the proposal of
-// each as int16 halves (the layer's low). Pair offset PAIR_BACKBUFFER (3)
-// compares the layer with the Backbuffer tag's colour (t13), a token-space
-// pair's final image.
-#define SUNSHINE_UI_IDENTITY 1
-#define SUNSHINE_UI_IDENTITY_TOKEN_BATCH 0x1u
-#define SUNSHINE_UI_IDENTITY_GATE_LAYER 0x2u
-#define SUNSHINE_UI_IDENTITY_GATE_HUDLESS 0x4u
-#define SUNSHINE_UI_IDENTITY_STAMP_LAYER 4
-#define SUNSHINE_UI_IDENTITY_STAMP_HUDLESS 5
-#define SUNSHINE_UI_IDENTITY_STAMP_ENTRIES 6
-#define SUNSHINE_UI_IDENTITY_EXACT 1
-#define SUNSHINE_UI_IDENTITY_MISMATCH 2
-#define SUNSHINE_UI_IDENTITY_UNSTAMPED 3
-#define SUNSHINE_UI_IDENTITY_UNPROPOSED 4
-#define SUNSHINE_UI_IDENTITY_SPACE_TOKEN 1
-#define SUNSHINE_UI_IDENTITY_SPACE_PRESENT 2
-#define SUNSHINE_UI_IDENTITY_SPACE_MASK 3
-#define SUNSHINE_UI_IDENTITY_SPACE_SHIFT 4
-#define SUNSHINE_UI_IDENTITY_HUDLESS_SHIFT 8
-#define SUNSHINE_UI_IDENTITY_OK_SHIFT 16
-#define SUNSHINE_UI_CHANGE_SET_PAIR_BACKBUFFER 3
-// Pin only UI (fix 4, rule P2; docs/reshade-sbs.md, UI decision framework),
-// mirrored from game3d_ui_detection_contract.h, whose CPU reference is
-// game3d_ui_darkening.h: a pure darkening (the UI adds no colour of its own,
-// P = s L) is not UI. DARKENING_MEASURED in Sunshine_UIRules says the
-// darkening passes run this frame (words 62-63 on samples); with
-// SUNSHINE_UI_PIN_ONLY_UI too, the mask pass zeroes the pin weight of an
-// unpinned darkening pixel of an eligible source (2, 5, 10, 12). Opacity
-// sources are darkening when their colour is at most OPACITY_TOLERANCE/255
-// of sRGB code (a float source, TAG_LINEAR for the tag and the layer's
-// STORED_HDR_HEADROOM, compares its linear colour with the sRGB EOTF of it)
-// and need a colour pixel somewhere in the frame, change sets when the
-// darkening fit's residual is at most CHANGE_SET_SCALE times b2 word 1; a
-// sharp step is 1/STEP_INVERSE beyond both opacity uncertainties; change
-// sets also need a region (8-connected TILE px tiles holding darkening
-// pixels) with a proven tile (at least TILE_MIN_PIXELS fitting pixels, an
-// effect within TILE_EFFECT_SCALE times b2 word 1, pooled variance beyond
-// MIN_VARIANCE_PPM millionths of the squared mean, no colour verdict in its
-// 3x3 ring) and no colour-ringed tile, flooded in REGION_WORDS words of
-// group-shared memory per set. Per-tile counts {unpinned, kept, colourless}
-// start at statistics row SUNSHINE_UI_DARKENING_ROW; COLOURLESS marks word 63.
-#define SUNSHINE_UI_DARKENING_MEASURED 0x100u
-#define SUNSHINE_UI_TAG_LINEAR 0x200u
-#define SUNSHINE_UI_DARKENING_ROW 192
-#define SUNSHINE_UI_DARKENING_OPACITY_TOLERANCE 4
-#define SUNSHINE_UI_DARKENING_CHANGE_SET_SCALE 4
-#define SUNSHINE_UI_DARKENING_STEP_INVERSE 64
-#define SUNSHINE_UI_DARKENING_TILE 16
-#define SUNSHINE_UI_DARKENING_TILE_MIN_PIXELS 32
-#define SUNSHINE_UI_DARKENING_TILE_EFFECT_SCALE 4
-#define SUNSHINE_UI_DARKENING_MIN_VARIANCE_PPM 1
-#define SUNSHINE_UI_DARKENING_TILE_ROWS 3
-#define SUNSHINE_UI_DARKENING_REGION_WORDS 2720
-#define SUNSHINE_UI_DARKENING_COLOURLESS 0x80000000u
 // Hidden-scene evidence D (docs/reshade-sbs.md, hidden-scene evidence),
 // mirrored from game3d_ui_detection_contract.h: a grid of cells over the
 // frame, the parallax step of a depth edge in pixels per 2160 rows, the edge
@@ -212,10 +86,43 @@
 #define SUNSHINE_UI_JUDGMENT_ROW 80
 #define SUNSHINE_UI_SCENE_PARTIAL_ROW 112
 #define SUNSHINE_UI_PRE_UI_ROW 128
+// S3 frame identity (docs/reshade-sbs.md, UI decision framework, "S3
+// snapshot ticket (shadow)"), mirrored from game3d_ui_detection_contract.h
+// (namespace identity): the CPU proposes the label a paired snapshot must
+// carry (b2 words 6-8, 0 not proposed; the layer copy's labels are measured
+// only since the pre-UI change set was removed) and the detection passes
+// verify it against the snapshot's stamp in
+// SunshineUIStamps (t9; entry LAYER for the offscreen layer copy, HUDLESS for
+// the HUD-less image; x its C_P read, y its C_T read). Sunshine_UIIdentity
+// carries TOKEN_BATCH (the CPU proved the HUD-less pair one tag batch by
+// token) and GATE_HUDLESS, which ANDs the HUD-less pair's identity into the
+// HUD-less change set's validity (5, 6); bit 0x2 is reserved. Verdicts
+// EXACT, MISMATCH, UNSTAMPED (the stamp read 0) and UNPROPOSED, in
+// SPACE_TOKEN or SPACE_PRESENT; decision texel 12 .z packs both pairs'
+// verdicts and spaces (the HUD-less one from HUDLESS_SHIFT) and the exact
+// pairs' candidate bits from OK_SHIFT, .w the read minus the proposal of
+// each as int16 halves (the layer's low).
+#define SUNSHINE_UI_IDENTITY 1
+#define SUNSHINE_UI_IDENTITY_TOKEN_BATCH 0x1u
+#define SUNSHINE_UI_IDENTITY_GATE_HUDLESS 0x4u
+#define SUNSHINE_UI_IDENTITY_STAMP_LAYER 4
+#define SUNSHINE_UI_IDENTITY_STAMP_HUDLESS 5
+#define SUNSHINE_UI_IDENTITY_STAMP_ENTRIES 6
+#define SUNSHINE_UI_IDENTITY_EXACT 1
+#define SUNSHINE_UI_IDENTITY_MISMATCH 2
+#define SUNSHINE_UI_IDENTITY_UNSTAMPED 3
+#define SUNSHINE_UI_IDENTITY_UNPROPOSED 4
+#define SUNSHINE_UI_IDENTITY_SPACE_TOKEN 1
+#define SUNSHINE_UI_IDENTITY_SPACE_PRESENT 2
+#define SUNSHINE_UI_IDENTITY_SPACE_MASK 3
+#define SUNSHINE_UI_IDENTITY_SPACE_SHIFT 4
+#define SUNSHINE_UI_IDENTITY_HUDLESS_SHIFT 8
+#define SUNSHINE_UI_IDENTITY_OK_SHIFT 16
 // Exact per-session UI counters (docs/reshade-sbs.md, UI counters), mirrored
 // from game3d_ui_counters.h: the detection reduce adds every detection frame
 // to these words of SunshineUICountersStore. The no-mask reasons are offsets
-// from SUNSHINE_UI_COUNTER_NONE.
+// from SUNSHINE_UI_COUNTER_NONE. The decided word of source 12 and word 30
+// (fix 3, removed by user decision) are reserved and stay zero.
 #define SUNSHINE_UI_COUNTER_WORDS 31
 #define SUNSHINE_UI_COUNTER_DETECTION_FRAMES 0
 #define SUNSHINE_UI_COUNTER_DECIDED 1
@@ -227,7 +134,6 @@
 #define SUNSHINE_UI_COUNTER_NONE 19
 #define SUNSHINE_UI_COUNTER_FULL_ALPHA 28
 #define SUNSHINE_UI_COUNTER_REUSED 29
-#define SUNSHINE_UI_COUNTER_REFINED 30
 // S3: SUNSHINE_UI_COUNTER_IDENTITY_WORDS more words after the counted ones,
 // one add per offered layer and HUD-less pair by its identity verdict.
 #define SUNSHINE_UI_COUNTER_IDENTITY_WORDS 5
@@ -297,18 +203,11 @@ Texture2D<float4> SunshineSourceSampler : register(t0);
 Texture2D<float> DepthBuffer : register(t1);
 Texture2D<float4> SunshineLinearClamp : register(t2);
 Texture2D<float> SunshineHostCandidateSampler : register(t3);
-// Fix 3: the retained Presents one and two before the current one, as
-// copied (Sunshine_UIRules RETAINED_1 and RETAINED_2 say they are bound),
-// the frames an offscreen layer copy may hold. Bound by the UI detection
-// passes only, which read neither register above; every other pass keeps
-// t2 and t3 for its own resources.
-Texture2D<float4> SunshineRetainedPresent1 : register(t2);
-Texture2D<float4> SunshineRetainedPresent2 : register(t3);
 Texture2D<float> SunshineHostVerticalConditionedSampler : register(t4);
 Texture2D<float> SunshineHostFinalSampler : register(t5);
 // The current presented color as copied, before PQ linearization; t0 may be
-// the color a HUD-less image is paired with. Read by scene evidence, the
-// detection tiles' pre-UI pixel counts and the layer pair at offset 0 only.
+// the color a HUD-less image is paired with. Read by scene evidence and the
+// detection tiles' pre-UI pixel counts only.
 Texture2D<float4> SunshinePresentedColor : register(t6);
 // The offscreen UI layer candidate (SUNSHINE_UI_CANDIDATE_LAYER); read by
 // automatic detection (its alpha, and its colour against the presented
@@ -321,11 +220,6 @@ Texture2D<float4> SunshineUIDedicatedAlpha : register(t11);
 Texture2D<float4> SunshineUIColorAlpha : register(t12);
 Texture2D<float4> SunshineUIBackbufferAlpha : register(t13);
 Texture2D<float4> SunshineHUDless : register(t14);
-// Fix 3: the change-set shadow's bit planes, written at u4 by the bits pass
-// and read at t8 by the count pass only; the nearest UI plane's tiles share
-// both registers in passes of their own.
-Texture2D<uint> SunshineUIChangeSetPlanes : register(t8);
-RWTexture2D<uint> SunshineUIChangeSetPlanesStore : register(u4);
 // S3: the stamps of the candidate copies, SUNSHINE_UI_IDENTITY_STAMP_ENTRIES
 // uint4 entries (x the C_P read, y the C_T read), bound at t9 by the
 // detection passes only (the nearest UI plane's resolved value shares t9 in
@@ -358,12 +252,10 @@ Buffer<uint4> SunshineUIStamps : register(t9);
 #define SUNSHINE_UI_PER_FRAME_REFUTED_SHIFT 24
 #define SUNSHINE_UI_PER_FRAME_PRE_UI_PROVEN 0x80000000u
 // H1, mirrored from game3d_ui_detection_contract.h: the pre-UI scene image's
-// claim bit beside the candidate bits, the h1 word's applied and (fix 3)
-// refined bits above the S1 winner's source, and the pre-UI image of
-// decision texel 6 .w.
+// claim bit beside the candidate bits, the h1 word's applied bit above the
+// S1 winner's source, and the pre-UI image of decision texel 6 .w.
 #define SUNSHINE_UI_CLAIM_PRE_UI 0x80u
 #define SUNSHINE_UI_H1_APPLIED 0x100u
-#define SUNSHINE_UI_H1_REFINED 0x200u
 #define SUNSHINE_UI_PRE_UI_IMAGE_HUDLESS 1
 #define SUNSHINE_UI_PRE_UI_IMAGE_LAYER 2
 // The T1 hold store (SunshineUIHoldStore), mirrored from
@@ -381,11 +273,8 @@ cbuffer SunshineUIDetectionConstants : register(b2)
 {
     // SUNSHINE_UI_CANDIDATE_* bits: 0x1 UIAlpha (t11), 0x2 UI color tag (t12),
     // 0x4 Backbuffer (t13), 0x8 current alpha (t0), 0x10 paired HUD-less
-    // (t14), 0x20 exact pair, 0x40 offscreen UI layer (t7), 0x100 the
-    // pre-UI layer's change set (t7 against the pair's Present).
+    // (t14), 0x20 exact pair, 0x40 offscreen UI layer (t7).
     uint Sunshine_UICandidates;
-    // The change-set slot's pair threshold from the two images' own
-    // encodings (k times it decides changed pixels).
     float Sunshine_UIDifferenceThreshold;
     // The candidates the game session accepts (A1), in the same bit positions.
     uint Sunshine_UIAcceptedCandidates;
@@ -393,21 +282,16 @@ cbuffer SunshineUIDetectionConstants : register(b2)
     // The pair threshold of the offscreen UI layer (t7) and the presented
     // color (t6) from their own encodings; zero without a layer, when the
     // two are not comparable or on a frame that is not a detection sample
-    // (H1 d, the pre-UI pixel counts, and fix 3's change-set shadow, which
-    // the CPU reads from samples only).
+    // (H1 d, the pre-UI pixel counts, which the CPU reads from samples only).
     float Sunshine_UIPreUIThreshold;
-    // Rule bits. H2: SUNSHINE_UI_STILL_FLATTEN while the CPU's run of still
-    // samples that read the presented frame hidden is active and the session
-    // enables it; zero otherwise (the shadow default, HDR, manual modes,
-    // generated Presents). Fix 3: SUNSHINE_UI_PIN_ONLY_UI in Auto while the
-    // session pins only UI pixels (UIPinOnlyUI), the layer pair's Present
-    // offset (SUNSHINE_UI_CHANGE_SET_PAIR_MASK) and the bound retained
-    // Presents (SUNSHINE_UI_CHANGE_SET_RETAINED_1 and _2). Fix 4:
-    // SUNSHINE_UI_DARKENING_MEASURED when the darkening passes run.
-    uint Sunshine_UIRules;
+    // H2: SUNSHINE_UI_STILL_FLATTEN while the CPU's run of still samples that
+    // read the presented frame hidden is active and the session enables it;
+    // zero otherwise (the shadow default, HDR, manual modes, generated
+    // Presents). Bits 0x2-0x200 are reserved (fix 3 and fix 4, removed).
+    uint Sunshine_UIStillScreen;
     // S3: the labels the CPU proposes for the offered layer copy (present
-    // and token space) and the HUD-less image (present space), 0 not
-    // proposed, and the SUNSHINE_UI_IDENTITY_* bits.
+    // and token space, measured only) and the HUD-less image (present space),
+    // 0 not proposed, and the SUNSHINE_UI_IDENTITY_* bits.
     uint Sunshine_UIExpectedLayerPresent;
     uint Sunshine_UIExpectedLayerToken;
     uint Sunshine_UIExpectedHUDlessPresent;
@@ -464,155 +348,14 @@ float4 SunshineUIDetectionAlpha(uint2 xy)
     return float4(SunshineUIDedicatedAlpha.Load(at).r, SunshineUIColorAlpha.Load(at).a,
         SunshineUIBackbufferAlpha.Load(at).a, SunshineSourceSampler.Load(at).a);
 }
-// The larger channel difference of a final colour and its pre-UI colour,
-// valid when both are finite. scRGB is unbounded linear light, so the
-// difference is relative to the final colour's peak above one.
-float SunshineColorDifference(float3 final, float3 pre, out bool valid)
+float SunshineHUDlessDifference(uint2 xy, out bool valid)
 {
-    valid = all(isfinite(final)) && all(isfinite(pre));
-    float scale = BUFFER_COLOR_SPACE == 2 ? max(1.0, max(max(abs(final.r), abs(final.g)), abs(final.b))) : 1.0;
-    return max(max(abs(final.r-pre.r), abs(final.g-pre.g)), abs(final.b-pre.b)) / scale;
-}
-// Fix 3: the change-set slot holds the pre-UI layer's pair when its change
-// set (SUNSHINE_UI_CANDIDATE_PRE_UI) is offered without a HUD-less image,
-// else the HUD-less pair (ui_selection::layer_pair_slot).
-bool SunshineChangeSetLayerPair()
-{
-    return (Sunshine_UICandidates & (SUNSHINE_UI_CANDIDATE_PRE_UI | SUNSHINE_UI_CANDIDATE_HUDLESS)) ==
-        SUNSHINE_UI_CANDIDATE_PRE_UI;
-}
-// The Present offset of the layer pair (Sunshine_UIRules bits 4-5).
-uint SunshineLayerPairOffset()
-{
-    return (Sunshine_UIRules & SUNSHINE_UI_CHANGE_SET_PAIR_MASK) >> SUNSHINE_UI_CHANGE_SET_PAIR_SHIFT;
-}
-// The Present a layer copy is compared with: 0 the current presented color
-// (t6), 1 and 2 the retained Presents one and two back (t2, t3), and (S3)
-// SUNSHINE_UI_CHANGE_SET_PAIR_BACKBUFFER the Backbuffer tag's colour (t13),
-// the final image of a token-space pair.
-float3 SunshineLayerPairColor(int3 at, uint offset)
-{
-    float3 color;
-    [branch] if (offset == 1u) color = SunshineRetainedPresent1.Load(at).rgb;
-    else [branch] if (offset == 2u) color = SunshineRetainedPresent2.Load(at).rgb;
-    else [branch] if (offset == SUNSHINE_UI_CHANGE_SET_PAIR_BACKBUFFER) color = SunshineUIBackbufferAlpha.Load(at).rgb;
-    else color = SunshinePresentedColor.Load(at).rgb;
-    return color;
-}
-// S3: one pair's identity verdict, a read against the proposed label.
-uint SunshineIdentityVerdict(uint read, uint expected)
-{
-    return !expected ? SUNSHINE_UI_IDENTITY_UNPROPOSED : !read ? SUNSHINE_UI_IDENTITY_UNSTAMPED :
-        read == expected ? SUNSHINE_UI_IDENTITY_EXACT : SUNSHINE_UI_IDENTITY_MISMATCH;
-}
-// The read minus the proposal, clamped to int16; zero unless both are set.
-int SunshineIdentityDelta(uint read, uint expected)
-{
-    return read && expected ? clamp(int(read - expected), -32768, 32767) : 0;
-}
-// Decision texel 12 .z and .w (ui_selection::verify_identity): an offered
-// layer pairs in present space when a present label is proposed, else in
-// token space; an offered HUD-less image in token space with
-// SUNSHINE_UI_IDENTITY_TOKEN_BATCH, else in present space with its stamp's C_P
-// read + 1 (a tag copy holds the frame after the Present it read).
-uint2 SunshineIdentityWords()
-{
-    uint layerVerdict = 0u, layerSpace = 0u, hudlessVerdict = 0u, hudlessSpace = 0u;
-    int layerDelta = 0, hudlessDelta = 0;
-    [branch] if (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) {
-        const uint4 stamp = SunshineUIStamps.Load(SUNSHINE_UI_IDENTITY_STAMP_LAYER);
-        if (Sunshine_UIExpectedLayerPresent) {
-            layerSpace = SUNSHINE_UI_IDENTITY_SPACE_PRESENT;
-            layerVerdict = SunshineIdentityVerdict(stamp.x, Sunshine_UIExpectedLayerPresent);
-            layerDelta = SunshineIdentityDelta(stamp.x, Sunshine_UIExpectedLayerPresent);
-        } else if (Sunshine_UIExpectedLayerToken) {
-            layerSpace = SUNSHINE_UI_IDENTITY_SPACE_TOKEN;
-            layerVerdict = SunshineIdentityVerdict(stamp.y, Sunshine_UIExpectedLayerToken);
-            layerDelta = SunshineIdentityDelta(stamp.y, Sunshine_UIExpectedLayerToken);
-        } else layerVerdict = SUNSHINE_UI_IDENTITY_UNPROPOSED;
-    }
-    [branch] if (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_HUDLESS) {
-        if (Sunshine_UIIdentity & SUNSHINE_UI_IDENTITY_TOKEN_BATCH) {
-            hudlessSpace = SUNSHINE_UI_IDENTITY_SPACE_TOKEN;
-            hudlessVerdict = SUNSHINE_UI_IDENTITY_EXACT;
-        } else if (Sunshine_UIExpectedHUDlessPresent) {
-            const uint read = SunshineUIStamps.Load(SUNSHINE_UI_IDENTITY_STAMP_HUDLESS).x;
-            const uint label = read ? read + 1u : 0u;
-            hudlessSpace = SUNSHINE_UI_IDENTITY_SPACE_PRESENT;
-            hudlessVerdict = SunshineIdentityVerdict(label, Sunshine_UIExpectedHUDlessPresent);
-            hudlessDelta = SunshineIdentityDelta(label, Sunshine_UIExpectedHUDlessPresent);
-        } else hudlessVerdict = SUNSHINE_UI_IDENTITY_UNPROPOSED;
-    }
-    const uint ok = (layerVerdict == SUNSHINE_UI_IDENTITY_EXACT ? SUNSHINE_UI_CANDIDATE_LAYER : 0u) |
-        (hudlessVerdict == SUNSHINE_UI_IDENTITY_EXACT ? SUNSHINE_UI_CANDIDATE_HUDLESS : 0u);
-    return uint2(layerVerdict | layerSpace << SUNSHINE_UI_IDENTITY_SPACE_SHIFT |
-        (hudlessVerdict | hudlessSpace << SUNSHINE_UI_IDENTITY_SPACE_SHIFT) << SUNSHINE_UI_IDENTITY_HUDLESS_SHIFT |
-        ok << SUNSHINE_UI_IDENTITY_OK_SHIFT, (uint(layerDelta) & 0xffffu) | uint(hudlessDelta) << 16);
-}
-// The change-set slot's difference at one pixel, and its pre-UI colour:
-// the pre-UI layer (t7) against the Present of the pair offset, or the
-// HUD-less image (t14) against the color it is paired with (t0).
-void SunshineChangeSetPair(int3 at, out float3 final, out float3 pre)
-{
-    [branch] if (SunshineChangeSetLayerPair()) {
-        final = SunshineLayerPairColor(at, SunshineLayerPairOffset());
-        pre = SunshineUILayer.Load(at).rgb;
-    } else {
-        final = SunshineSourceSampler.Load(at).rgb;
-        pre = SunshineHUDless.Load(at).rgb;
-    }
-}
-float SunshineChangeSetDifference(uint2 xy, out bool valid, out float3 pre)
-{
-    float3 final;
-    SunshineChangeSetPair(int3(xy, 0), final, pre);
-    return SunshineColorDifference(final, pre, valid);
-}
-// The change-set slot's changed bound: k times b2 word 1, k the inferred
-// scale for the pre-UI layer's pair and 1 for a HUD-less pair (V2).
-float SunshineChangeSetThreshold()
-{
-    return Sunshine_UIDifferenceThreshold *
-        (SunshineChangeSetLayerPair() ? float(SUNSHINE_UI_CHANGE_SET_INFERRED_SCALE) : 1.0);
-}
-// Whether the layer (t7) differs from the Present of the offset beyond a
-// bound at a pixel; out-of-frame pixels never do.
-bool SunshineLayerChanged(int2 xy, uint offset, float bound)
-{
-    if (xy.x < 0 || xy.y < 0 || xy.x >= BUFFER_WIDTH || xy.y >= BUFFER_HEIGHT) return false;
-    bool valid;
-    float delta = SunshineColorDifference(SunshineLayerPairColor(int3(xy, 0), offset), SunshineUILayer.Load(int3(xy, 0)).rgb,
-        valid);
-    return valid && delta > bound;
-}
-// The changed pixels of the 3x3 window around a pixel, itself included: a
-// changed pixel stays in the inferred change set's mask with at least
-// SUNSHINE_UI_CHANGE_SET_MIN_NEIGHBOURHOOD of them, which removes isolated
-// specks and keeps one-pixel lines. Callers read it for changed pixels only;
-// a loop keeps the compiled passes small.
-uint SunshineLayerChangedNeighbourhood(int2 xy, uint offset, float bound)
-{
-    uint count = 0u;
-    [loop] for (uint i = 0u; i < 9u; ++i)
-        count += SunshineLayerChanged(xy + int2(int(i % 3u) - 1, int(i / 3u) - 1), offset, bound) ? 1u : 0u;
-    return count;
-}
-// The judge of the change-set shadow: the first offered and accepted
-// declared alpha (UIAlpha, else the UI color tag), or none.
-uint SunshineChangeSetJudge()
-{
-    const uint judged = Sunshine_UICandidates & Sunshine_UIAcceptedCandidates;
-    return (judged & SUNSHINE_UI_CANDIDATE_UI_ALPHA) ? SUNSHINE_UI_CHANGE_SET_JUDGE_UI_ALPHA :
-        (judged & SUNSHINE_UI_CANDIDATE_UI_COLOR) ? SUNSHINE_UI_CHANGE_SET_JUDGE_UI_COLOR : 0u;
-}
-// The change-set shadow runs on sample frames (a pre-UI threshold) with an
-// offered layer proven the pre-UI scene image (SUNSHINE_UI_CHANGE_SET_SHADOW):
-// a real UI layer can never be the provider, so it is never measured.
-// Nothing decides from it.
-bool SunshineChangeSetShadow()
-{
-    return Sunshine_UIPreUIThreshold > 0.0 && (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) != 0u &&
-        (Sunshine_UIRules & SUNSHINE_UI_CHANGE_SET_SHADOW) != 0u;
+    float3 a = SunshineSourceSampler.Load(int3(xy, 0)).rgb;
+    float3 b = SunshineHUDless.Load(int3(xy, 0)).rgb;
+    valid = all(isfinite(a)) && all(isfinite(b));
+    // scRGB is unbounded linear light; use a relative tolerance above one.
+    float scale = BUFFER_COLOR_SPACE == 2 ? max(1.0, max(max(abs(a.r), abs(a.g)), abs(a.b))) : 1.0;
+    return max(max(abs(a.r-b.r), abs(a.g-b.g)), abs(a.b-b.b)) / scale;
 }
 // The pre-UI pixel counts of one pixel (H1 d): the offscreen UI layer's
 // colour against the presented colour at a coarse threshold, eight times
@@ -620,7 +363,7 @@ bool SunshineChangeSetShadow()
 // layer, lit presented, lit presented and different}, all zero when the pair
 // is not comparable (threshold zero) or either colour is not finite. scRGB is
 // compared with the same relative tolerance above one as
-// SunshineColorDifference.
+// SunshineHUDlessDifference.
 uint4 SunshinePreUIPixel(uint2 xy, float3 layer)
 {
     const float coarse = Sunshine_UIPreUIThreshold * 8.0;
@@ -641,8 +384,8 @@ uint4 SunshinePreUIPixel(uint2 xy, float3 layer)
 groupshared uint4 SunshineUIDetectionCoverage[256];
 groupshared uint4 SunshineUIDetectionInvalid[256];
 groupshared uint4 SunshineUIDetectionDifference[256];
-// Lit pre-UI image pixels, then nearly opaque pixels of UIAlpha, the UI
-// color tag and the Backbuffer.
+// Lit HUD-less pixels, then nearly opaque pixels of UIAlpha, the UI color tag
+// and the Backbuffer.
 groupshared uint4 SunshineUIDetectionLit[256];
 // The offscreen UI layer's covered, invalid and nearly opaque pixels, then
 // the current alpha's nearly opaque pixels.
@@ -675,8 +418,6 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
     const uint pairBits = SUNSHINE_UI_CANDIDATE_HUDLESS | SUNSHINE_UI_CANDIDATE_EXACT;
     const bool exactPair = (Sunshine_UICandidates & pairBits) == pairBits;
     const bool lateLayer = (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_LATE_LAYER) != 0u;
-    // V2 (fix 3): the change-set slot's changed bound, k times b2 word 1.
-    const float changedBound = SunshineChangeSetThreshold();
     [loop] for (uint y = first.y + thread.y; y < last.y; y += 16u)
     [loop] for (uint x = first.x + thread.x; x < last.x; x += 16u) {
         float4 a = SunshineUIDetectionAlpha(uint2(x,y));
@@ -697,15 +438,15 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         layerCounts.y += !layerOkay || layerBound ? 1u : 0u;
         layerCounts.z += layerOkay && layer.a >= 254.0 / 255.0 ? 1u : 0u;
         bool finite;
-        float3 pre;
-        float delta = SunshineChangeSetDifference(uint2(x,y), finite, pre);
-        bool unchanged = finite && delta <= changedBound * .5;
-        difference.x += finite && delta > changedBound ? 1u : 0u;
+        float delta = SunshineHUDlessDifference(uint2(x,y), finite);
+        bool unchanged = finite && delta <= Sunshine_UIDifferenceThreshold * .5;
+        difference.x += finite && delta > Sunshine_UIDifferenceThreshold ? 1u : 0u;
         difference.y += finite ? 0u : 1u;
         difference.z += unchanged ? 1u : 0u;
         difference.w += 1u;
-        // A pre-UI image pixel that shows scene content rather than black.
-        bool litPixel = finite && max(max(abs(pre.r), abs(pre.g)), abs(pre.b)) > Sunshine_UIDifferenceThreshold * 8.0;
+        // A HUD-less pixel that shows scene content rather than black.
+        float3 hudless = SunshineHUDless.Load(int3(x, y, 0)).rgb;
+        bool litPixel = finite && max(max(abs(hudless.r), abs(hudless.g)), abs(hudless.b)) > Sunshine_UIDifferenceThreshold * 8.0;
         lit.x += litPixel ? 1u : 0u;
         // A2, one way: a strong pixel (alpha in [1/2, 1], so finite) of the
         // layer, Backbuffer or current alpha contradicts it where the exact
@@ -768,786 +509,6 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
     } else if (!lane) {
         SunshineAlphaCoverageStore[group.xy + uint2(0,SUNSHINE_UI_PRE_UI_ROW)] = 0u;
     }
-    // Fix 3: the change-set shadow's rows (SUNSHINE_UI_CHANGE_SET_ROW and 16
-    // below it) are SunshineUIDetectionChangeSetCountCS's on shadow samples;
-    // zero without the shadow.
-    if (!SunshineChangeSetShadow() && !lane) {
-        SunshineAlphaCoverageStore[group.xy + uint2(0,SUNSHINE_UI_CHANGE_SET_ROW)] = 0u;
-        SunshineAlphaCoverageStore[group.xy + uint2(0,SUNSHINE_UI_CHANGE_SET_ROW + 16u)] = 0u;
-    }
-}
-// Fix 3, the change-set shadow on its sample frames, in two passes the
-// renderer dispatches after the tiles pass exactly when
-// SunshineChangeSetShadow() holds. The bits pass compares each pixel once:
-// the layer (t7) against its pair's Present at the inferred scale times b2
-// word 4 (changed, unchanged within half of that, non-finite), against the
-// Presents one and two back when bound and not the pair, and the judge's
-// pixels, one bit per pixel in SUNSHINE_UI_CHANGE_SET_PLANES planes of
-// SUNSHINE_UI_CHANGE_SET_WORDS words per row (bit i of word w is pixel
-// 32 w + i; bits beyond the frame are zero). The count pass sums each 16x16
-// tile's bits, with the 3x3 rule evaluated on whole words, into the
-// statistics rows the tiles pass leaves to it, so every count is the
-// per-pixel rule's.
-#define SUNSHINE_UI_CHANGE_SET_WORDS ((BUFFER_WIDTH + 31) / 32)
-groupshared uint SunshineChangeSetPlaneWords[SUNSHINE_UI_CHANGE_SET_PLANES][8];
-// A group is one word on each of 8 rows, one thread per pixel.
-[numthreads(32, 8, 1)]
-void SunshineUIDetectionChangeSetBitsCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
-{
-    if (!SunshineChangeSetShadow()) return;
-    if (thread.x < SUNSHINE_UI_CHANGE_SET_PLANES) SunshineChangeSetPlaneWords[thread.x][thread.y] = 0u;
-    GroupMemoryBarrierWithGroupSync();
-    const uint x = group.x * 32u + thread.x, y = group.y * 8u + thread.y;
-    [branch] if (x < BUFFER_WIDTH && y < BUFFER_HEIGHT) {
-        const float bound = Sunshine_UIPreUIThreshold * float(SUNSHINE_UI_CHANGE_SET_INFERRED_SCALE);
-        const uint pairOffset = SunshineLayerPairOffset(), judge = SunshineChangeSetJudge(), bit = 1u << thread.x;
-        const int3 at = int3(x, y, 0);
-        const float3 layer = SunshineUILayer.Load(at).rgb;
-        bool pairValid;
-        const float pairDelta = SunshineColorDifference(SunshineLayerPairColor(at, pairOffset), layer, pairValid);
-        uint ignored;
-        if (pairValid && pairDelta > bound)
-            InterlockedOr(SunshineChangeSetPlaneWords[SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED][thread.y], bit, ignored);
-        if (pairValid && pairDelta <= bound * .5)
-            InterlockedOr(SunshineChangeSetPlaneWords[SUNSHINE_UI_CHANGE_SET_PLANE_UNCHANGED][thread.y], bit, ignored);
-        if (!pairValid) InterlockedOr(SunshineChangeSetPlaneWords[SUNSHINE_UI_CHANGE_SET_PLANE_INVALID][thread.y], bit, ignored);
-        // The paired offset's plane stays empty: the count pass reuses the
-        // changed plane for it.
-        [branch] if ((Sunshine_UIRules & SUNSHINE_UI_CHANGE_SET_RETAINED_1) && pairOffset != 1u) {
-            bool valid;
-            const float delta = SunshineColorDifference(SunshineRetainedPresent1.Load(at).rgb, layer, valid);
-            if (valid && delta > bound)
-                InterlockedOr(SunshineChangeSetPlaneWords[SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED_1][thread.y], bit, ignored);
-        }
-        [branch] if ((Sunshine_UIRules & SUNSHINE_UI_CHANGE_SET_RETAINED_2) && pairOffset != 2u) {
-            bool valid;
-            const float delta = SunshineColorDifference(SunshineRetainedPresent2.Load(at).rgb, layer, valid);
-            if (valid && delta > bound)
-                InterlockedOr(SunshineChangeSetPlaneWords[SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED_2][thread.y], bit, ignored);
-        }
-        [branch] if (judge != 0u) {
-            const float judgeAlpha = judge == SUNSHINE_UI_CHANGE_SET_JUDGE_UI_ALPHA ? SunshineUIDedicatedAlpha.Load(at).r :
-                SunshineUIColorAlpha.Load(at).a;
-            if (SunshineCameraFinite(judgeAlpha) && judgeAlpha > 0.0)
-                InterlockedOr(SunshineChangeSetPlaneWords[SUNSHINE_UI_CHANGE_SET_PLANE_JUDGE][thread.y], bit, ignored);
-        }
-    }
-    GroupMemoryBarrierWithGroupSync();
-    if (thread.x < SUNSHINE_UI_CHANGE_SET_PLANES && y < BUFFER_HEIGHT)
-        SunshineUIChangeSetPlanesStore[uint2(thread.x * SUNSHINE_UI_CHANGE_SET_WORDS + group.x, y)] =
-            SunshineChangeSetPlaneWords[thread.x][thread.y];
-}
-// A word of a plane; words beyond the frame read zero.
-// A plane's word from the planes at t8, or (store, a literal at every call,
-// so that a pass binds one of the two) from the plane store at u4.
-uint SunshineChangeSetPlaneWord(bool store, uint plane, int word, int y)
-{
-    if (word < 0 || word >= int(SUNSHINE_UI_CHANGE_SET_WORDS) || y < 0 || y >= int(BUFFER_HEIGHT)) return 0u;
-    const int2 at = int2(int(plane * SUNSHINE_UI_CHANGE_SET_WORDS) + word, y);
-    [branch] if (store) return SunshineUIChangeSetPlanesStore[uint2(at)];
-    return SunshineUIChangeSetPlanes.Load(int3(at, 0));
-}
-uint SunshineChangeSetWord(uint plane, int word, int y)
-{
-    return SunshineChangeSetPlaneWord(false, plane, word, y);
-}
-// One row's set pixels of a plane in each 3-pixel window of a word,
-// bit-sliced (count = 2 s1 + s0, 0 to 3), the neighbouring words' edge bits
-// included.
-void SunshineChangeSetRowSums(bool store, uint plane, int word, int y, out uint s0, out uint s1)
-{
-    const uint c = SunshineChangeSetPlaneWord(store, plane, word, y);
-    const uint l = (c << 1) | (SunshineChangeSetPlaneWord(store, plane, word - 1, y) >> 31);
-    const uint r = (c >> 1) | (SunshineChangeSetPlaneWord(store, plane, word + 1, y) << 31);
-    s0 = l ^ c ^ r;
-    s1 = (l & c) | (l & r) | (c & r);
-}
-// The set pixels of a plane's word (c) that the 3x3 rule keeps:
-// SUNSHINE_UI_CHANGE_SET_MIN_NEIGHBOURHOOD (3) set pixels in their 3x3
-// window, themselves included, as SunshineLayerChangedNeighbourhood counts
-// changed pixels; store as SunshineChangeSetPlaneWord.
-uint SunshineChangeSetKeptWord(bool store, uint plane, uint c, int word, int y)
-{
-    uint a0, a1, b0, b1, c0, c1;
-    SunshineChangeSetRowSums(store, plane, word, y - 1, a0, a1);
-    SunshineChangeSetRowSums(store, plane, word, y, b0, b1);
-    SunshineChangeSetRowSums(store, plane, word, y + 1, c0, c1);
-    // The three rows' sums (0 to 9) in t3 t2 t1 t0: a + b in three bits,
-    // then + c in four.
-    const uint ab0 = a0 ^ b0, k0 = a0 & b0;
-    const uint ab1 = a1 ^ b1 ^ k0, ab2 = (a1 & b1) | (k0 & (a1 ^ b1));
-    const uint t0 = ab0 ^ c0, m0 = ab0 & c0;
-    const uint t1 = ab1 ^ c1 ^ m0, m1 = (ab1 & c1) | (m0 & (ab1 ^ c1));
-    const uint t2 = ab2 ^ m1, t3 = ab2 & m1;
-    // At least 3.
-    return c & (t3 | t2 | (t1 & t0));
-}
-groupshared uint SunshineChangeSetSums[8];
-// One group per 16x16 tile, as the tiles pass: each thread sums whole words
-// of the tile's rows, masked to the tile's own pixels.
-[numthreads(16, 16, 1)]
-void SunshineUIDetectionChangeSetCountCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
-{
-    if (!SunshineChangeSetShadow()) return;
-    const uint lane = thread.y * 16u + thread.x;
-    if (lane < 8u) SunshineChangeSetSums[lane] = 0u;
-    GroupMemoryBarrierWithGroupSync();
-    const uint2 first = group.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
-    const uint2 last = (group.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
-    // A frame narrower than 16 pixels has tiles empty in x (first.x ==
-    // last.x): they cover no word, and (last.x - 1) would wrap to 2^27 words.
-    const uint firstWord = first.x / 32u, wordsWide = last.x > first.x ? (last.x - 1u) / 32u - firstWord + 1u : 0u;
-    const uint items = wordsWide * (last.y - first.y);
-    const uint pairOffset = SunshineLayerPairOffset(), judge = SunshineChangeSetJudge();
-    const bool retained1 = (Sunshine_UIRules & SUNSHINE_UI_CHANGE_SET_RETAINED_1) != 0u;
-    const bool retained2 = (Sunshine_UIRules & SUNSHINE_UI_CHANGE_SET_RETAINED_2) != 0u;
-    uint changed = 0u, unchanged = 0u, invalid = 0u, kept = 0u, more1 = 0u, more2 = 0u, judged = 0u, judgedKept = 0u;
-    [loop] for (uint item = lane; item < items; item += 256u) {
-        const uint word = firstWord + item % wordsWide, y = first.y + item / wordsWide;
-        const uint low = max(first.x, word * 32u) - word * 32u, high = min(last.x, word * 32u + 32u) - word * 32u;
-        const uint inTile = (high >= 32u ? 0xffffffffu : (1u << high) - 1u) & ~((1u << low) - 1u);
-        const uint c = SunshineChangeSetWord(SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED, int(word), int(y));
-        const uint k = SunshineChangeSetKeptWord(false, SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED, c, int(word), int(y)) & inTile;
-        changed += countbits(c & inTile);
-        kept += countbits(k);
-        unchanged += countbits(SunshineChangeSetWord(SUNSHINE_UI_CHANGE_SET_PLANE_UNCHANGED, int(word), int(y)) & inTile);
-        invalid += countbits(SunshineChangeSetWord(SUNSHINE_UI_CHANGE_SET_PLANE_INVALID, int(word), int(y)) & inTile);
-        // The paired offset's count is the changed plane itself.
-        [branch] if (retained1)
-            more1 += countbits((pairOffset == 1u ? c :
-                SunshineChangeSetWord(SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED_1, int(word), int(y))) & inTile);
-        [branch] if (retained2)
-            more2 += countbits((pairOffset == 2u ? c :
-                SunshineChangeSetWord(SUNSHINE_UI_CHANGE_SET_PLANE_CHANGED_2, int(word), int(y))) & inTile);
-        [branch] if (judge != 0u) {
-            const uint j = SunshineChangeSetWord(SUNSHINE_UI_CHANGE_SET_PLANE_JUDGE, int(word), int(y)) & inTile;
-            judged += countbits(j);
-            judgedKept += countbits(j & k);
-        }
-    }
-    InterlockedAdd(SunshineChangeSetSums[0], changed);
-    InterlockedAdd(SunshineChangeSetSums[1], unchanged);
-    InterlockedAdd(SunshineChangeSetSums[2], invalid);
-    InterlockedAdd(SunshineChangeSetSums[3], kept);
-    InterlockedAdd(SunshineChangeSetSums[4], more1);
-    InterlockedAdd(SunshineChangeSetSums[5], more2);
-    InterlockedAdd(SunshineChangeSetSums[6], judged);
-    InterlockedAdd(SunshineChangeSetSums[7], judgedKept);
-    GroupMemoryBarrierWithGroupSync();
-    if (!lane) {
-        SunshineAlphaCoverageStore[group.xy + uint2(0, SUNSHINE_UI_CHANGE_SET_ROW)] =
-            uint4(SunshineChangeSetSums[0], SunshineChangeSetSums[1], SunshineChangeSetSums[2], SunshineChangeSetSums[3]);
-        SunshineAlphaCoverageStore[group.xy + uint2(0, SUNSHINE_UI_CHANGE_SET_ROW + 16u)] =
-            uint4(SunshineChangeSetSums[4], SunshineChangeSetSums[5], SunshineChangeSetSums[6], SunshineChangeSetSums[7]);
-    }
-}
-// Fix 4, pin only UI (rule P2; docs/reshade-sbs.md, UI decision framework).
-// game3d_ui_darkening.h is the CPU reference that ui_detection_replay and
-// test_game3d_ui_selection_contract compare these passes with. A pure
-// darkening, where the UI adds no colour of its own and only scales the
-// scene down (dims, vignettes, fades, menu backdrops), is not UI: the mask
-// pass zeroes the pin weight of a darkening pixel of the decided source
-// unless sharp structure keeps it (black glyphs, outlines and panel edges)
-// or, for a change set, its 16x16 tile is not proven a darkening. The passes
-// run after the reduce exactly when Sunshine_UIRules has
-// SUNSHINE_UI_DARKENING_MEASURED and measure only a frame that T1 did not
-// reuse whose applied source is eligible (SunshineDarkeningSource); the mask
-// pass acts on them only with SUNSHINE_UI_PIN_ONLY_UI too, so that they are a
-// shadow otherwise. Bindings: the bits and tiles passes read the decision at
-// t10 and write the plane store at u4; the mask pass reads the planes at t8;
-// the count pass (sample frames) reads the decision at t10 and the planes at
-// t8 and writes statistics rows from SUNSHINE_UI_DARKENING_ROW at u6; the
-// finish pass reads those statistics at t10 and writes decision texel 15 at
-// u6. Arithmetic that the CPU reference repeats is precise.
-#define SUNSHINE_DARK_FINITE 0x1u
-#define SUNSHINE_DARK_COLOUR 0x2u
-#define SUNSHINE_DARK_UI 0x4u
-#define SUNSHINE_DARK_DIMS 0x8u
-#define SUNSHINE_DARK_FITS 0x10u
-#define SUNSHINE_UI_DARKENING_TILES_X ((BUFFER_WIDTH + SUNSHINE_UI_DARKENING_TILE - 1) / SUNSHINE_UI_DARKENING_TILE)
-#define SUNSHINE_UI_DARKENING_TILES_Y ((BUFFER_HEIGHT + SUNSHINE_UI_DARKENING_TILE - 1) / SUNSHINE_UI_DARKENING_TILE)
-#define SUNSHINE_UI_DARKENING_TILE_WORDS ((SUNSHINE_UI_DARKENING_TILES_X + 31) / 32)
-// The opacity sources' colour tolerance, 4/255 rounded to float as the CPU's
-// 4.f / 255.f, and for a float (linear) source its sRGB EOTF, the CPU's
-// 4.f / 255.f / 12.92f (both asserted by test_game3d_native_shader); and the
-// sharp step.
-float SunshineDarkeningOpacityTolerance(bool linearColour)
-{
-    return linearColour ? asfloat(0x3a9f22b4u) : asfloat(0x3c808081u);
-}
-float SunshineDarkeningStep()
-{
-    return 1.0 / float(SUNSHINE_UI_DARKENING_STEP_INVERSE);
-}
-// The eligible sources: the UI color tag (2) and the offscreen UI layer (10)
-// by opacity, the HUD-less difference (5) and the pre-UI change set (12) by
-// change set. Full-frame (6, 8, 11) and alpha-only (1, 3, 4) sources never.
-bool SunshineDarkeningOpacitySource(uint source)
-{
-    return source == 2u || source == SUNSHINE_UI_SOURCE_LAYER;
-}
-bool SunshineDarkeningEligible(uint source)
-{
-    return SunshineDarkeningOpacitySource(source) || source == 5u || source == SUNSHINE_UI_SOURCE_PRE_UI;
-}
-// The applied source the darkening passes measure (decision texel 0, at
-// t10): zero without SUNSHINE_UI_DARKENING_MEASURED, on a frame T1 reused
-// (texel 9) or for an ineligible source.
-uint SunshineDarkeningSource()
-{
-    if (!(Sunshine_UIRules & SUNSHINE_UI_DARKENING_MEASURED)) return 0u;
-    if (SunshineUIDetectionSampler.Load(int3(9, 0, 0)).w & SUNSHINE_UI_FRAME_REASON_REUSED) return 0u;
-    const uint source = SunshineUIDetectionSampler.Load(int3(0, 0, 0)).x;
-    return SunshineDarkeningEligible(source) ? source : 0u;
-}
-// The fit space: PQ blends in linear light, so a PQ change set is fitted
-// through the channel-wise ST 2084 EOTF without a primaries matrix (1 =
-// 10000 nits; not SunshineDecodePQ, which also converts primaries and scales
-// to scRGB), sRGB and scRGB in their own values.
-#if BUFFER_COLOR_SPACE == 3
-float3 SunshineDarkeningFit(float3 code)
-{
-    const float m1 = 2610.0 / 16384.0, m2 = 2523.0 / 32.0, c1 = 3424.0 / 4096.0, c2 = 2413.0 / 128.0, c3 = 2392.0 / 128.0;
-    precise float3 p = pow(saturate(code), 1.0 / m2);
-    precise float3 value = pow(max(p - c1, 0.0) / (c2 - c3 * p), 1.0 / m1);
-    return value;
-}
-float3 SunshineDarkeningUnfit(float3 value)
-{
-    const float m1 = 2610.0 / 16384.0, m2 = 2523.0 / 32.0, c1 = 3424.0 / 4096.0, c2 = 2413.0 / 128.0, c3 = 2392.0 / 128.0;
-    precise float3 p = pow(saturate(value), m1);
-    precise float3 code = pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
-    return code;
-}
-#else
-float3 SunshineDarkeningFit(float3 code)
-{
-    return code;
-}
-float3 SunshineDarkeningUnfit(float3 value)
-{
-    return value;
-}
-#endif
-float SunshineDarkeningPeak(float3 color)
-{
-    return max(max(abs(color.r), abs(color.g)), abs(color.b));
-}
-// One pixel's evidence (ui_darkening::evidence) in flags: FINITE; COLOUR raw
-// colour UI (what a touching neighbour reads); UI the source's own test
-// before any neighbourhood rule (alpha above zero, or changed beyond k times
-// b2 word 1); DIMS a darkening (no colour of its own, or a change set's fit
-// not brighter with its residual within the bound); FITS the residual within
-// the bound, darker or not (the tile regression's pixels). x is the opacity
-// a and y its uncertainty sigma; a pixel that is not finite is all zero, so
-// it takes part in no step.
-uint SunshineDarkeningOpacity(float4 value, bool linearColour, out float2 opacity)
-{
-    opacity = 0.0;
-    if (!SunshineCameraFinite(value.r) || !SunshineCameraFinite(value.g) || !SunshineCameraFinite(value.b) ||
-        !SunshineCameraFinite(value.a)) return 0u;
-    const bool ui = value.a > 0.0;
-    const bool colour = ui && SunshineDarkeningPeak(value.rgb) > SunshineDarkeningOpacityTolerance(linearColour);
-    opacity = float2(value.a, 0.0);
-    return SUNSHINE_DARK_FINITE | (ui ? SUNSHINE_DARK_UI : 0u) | (colour ? SUNSHINE_DARK_COLOUR : 0u) |
-        (ui && !colour ? SUNSHINE_DARK_DIMS | SUNSHINE_DARK_FITS : 0u);
-}
-// A change-set pixel, presented P (final) and pre-UI L (pre): the darkening
-// fit s = clamp(sum f(P) f(L) / sum f(L)^2, 0, 1) in the fit space, its
-// residual max |P - f^-1(s f(L))| (scRGB: relative to P's peak above 1, as
-// SunshineColorDifference), not brighter when the sum f(P) f(L) is below the
-// sum f(L)^2 (the CPU's s_raw < 1, exactly), a = 1 - s and sigma one
-// threshold step's opacity at L's peak e (PQ: (f(e + t) - f(e)) / f(e) up to
-// 1; otherwise t / max(e, t)). t is b2 word 1 and bound k times it.
-uint SunshineDarkeningChangeSet(float3 final, float3 pre, float t, float bound, out float2 opacity)
-{
-    opacity = 0.0;
-    bool valid;
-    const float delta = SunshineColorDifference(final, pre, valid);
-    if (!valid) return 0u;
-    precise float3 fl = SunshineDarkeningFit(pre), fp = SunshineDarkeningFit(final);
-    precise float num = fp.r * fl.r;
-    num = num + fp.g * fl.g;
-    num = num + fp.b * fl.b;
-    precise float den = fl.r * fl.r;
-    den = den + fl.g * fl.g;
-    den = den + fl.b * fl.b;
-    precise float s = den > 0.0 ? saturate(num / den) : 0.0;
-    precise float3 r = abs(final - SunshineDarkeningUnfit(s * fl));
-    precise float residual = max(max(r.r, r.g), r.b);
-    if (BUFFER_COLOR_SPACE == 2) residual = residual / max(1.0, SunshineDarkeningPeak(final));
-    const bool fits = residual <= float(SUNSHINE_UI_DARKENING_CHANGE_SET_SCALE) * t;
-    const bool dims = (den > 0.0 ? num < den : true) && fits;
-    const bool changed = delta > bound;
-    const float e = SunshineDarkeningPeak(pre);
-#if BUFFER_COLOR_SPACE == 3
-    precise float low = SunshineDarkeningFit(e.xxx).x, high = SunshineDarkeningFit(min(e + t, 1.0).xxx).x;
-    precise float sigma = min(1.0, (high - low) / max(low, 1.0e-12));
-#else
-    precise float sigma = t / max(e, t);
-#endif
-    opacity = float2(1.0 - s, sigma);
-    return SUNSHINE_DARK_FINITE | (changed ? SUNSHINE_DARK_UI : 0u) | (changed && !dims ? SUNSHINE_DARK_COLOUR : 0u) |
-        (dims ? SUNSHINE_DARK_DIMS : 0u) | (fits ? SUNSHINE_DARK_FITS : 0u);
-}
-// The evidence of an eligible source at a pixel; out-of-frame pixels are all
-// zero. Source 5 decides only with a HUD-less image offered and source 12
-// only without one, so the change-set slot holds the source's own pair.
-uint SunshineDarkeningPixel(int2 xy, uint source, out float2 opacity)
-{
-    opacity = 0.0;
-    if (xy.x < 0 || xy.y < 0 || xy.x >= BUFFER_WIDTH || xy.y >= BUFFER_HEIGHT) return 0u;
-    const int3 at = int3(xy, 0);
-    [branch] if (source == 2u)
-        return SunshineDarkeningOpacity(SunshineUIColorAlpha.Load(at), (Sunshine_UIRules & SUNSHINE_UI_TAG_LINEAR) != 0u, opacity);
-    [branch] if (source == SUNSHINE_UI_SOURCE_LAYER)
-        return SunshineDarkeningOpacity(SunshineUILayer.Load(at),
-            (Sunshine_UIDetectionFlags & SUNSHINE_UI_STORED_HDR_HEADROOM) != 0u, opacity);
-    float3 final, pre;
-    SunshineChangeSetPair(at, final, pre);
-    return SunshineDarkeningChangeSet(final, pre, Sunshine_UIDifferenceThreshold, SunshineChangeSetThreshold(), opacity);
-}
-// The bits pass: a group is one word on each of 8 rows, as the change-set
-// bits pass, and first evaluates every pixel of its 34x10 window (one pixel
-// of halo) once into group-shared memory. A pixel is DARK when it is in the
-// source's mask (source 12: at least SUNSHINE_UI_CHANGE_SET_MIN_NEIGHBOURHOOD
-// changed pixels in its 3x3 window) and a darkening, and STRUCT when DARK and
-// a 4-neighbour in the frame is raw colour UI or differs in opacity by
-// SunshineDarkeningStep() beyond both uncertainties. TILE is zeroed for the
-// tiles pass, except that for an opacity source bit 0 of the group's first
-// row says that one of its own pixels is colour UI (the region pass reads it).
-groupshared uint SunshineDarkeningHaloFlags[340];
-groupshared float2 SunshineDarkeningHaloOpacity[340];
-groupshared uint SunshineDarkeningWords[2][8];
-groupshared uint SunshineDarkeningGroupColour;
-[numthreads(32, 8, 1)]
-void SunshineUIDarkeningBitsCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
-{
-    const uint source = SunshineDarkeningSource();
-    if (!source) return;
-    const uint lane = thread.y * 32u + thread.x;
-    const int2 origin = int2(group.xy * uint2(32u, 8u)) - 1;
-    [loop] for (uint i = lane; i < 340u; i += 256u) {
-        float2 opacity;
-        SunshineDarkeningHaloFlags[i] = SunshineDarkeningPixel(origin + int2(int(i % 34u), int(i / 34u)), source, opacity);
-        SunshineDarkeningHaloOpacity[i] = opacity;
-    }
-    if (thread.x < 2u) SunshineDarkeningWords[thread.x][thread.y] = 0u;
-    if (!lane) SunshineDarkeningGroupColour = 0u;
-    GroupMemoryBarrierWithGroupSync();
-    const uint y = group.y * 8u + thread.y, centre = (thread.y + 1u) * 34u + thread.x + 1u;
-    const uint flags = SunshineDarkeningHaloFlags[centre];
-    if (flags & SUNSHINE_DARK_COLOUR) SunshineDarkeningGroupColour = 1u;
-    bool inMask = (flags & SUNSHINE_DARK_UI) != 0u;
-    [branch] if (source == SUNSHINE_UI_SOURCE_PRE_UI && inMask) {
-        uint count = 0u;
-        [unroll] for (uint k = 0u; k < 9u; ++k)
-            count += (SunshineDarkeningHaloFlags[centre + (k / 3u) * 34u + k % 3u - 35u] & SUNSHINE_DARK_UI) ? 1u : 0u;
-        inMask = count >= SUNSHINE_UI_CHANGE_SET_MIN_NEIGHBOURHOOD;
-    }
-    const bool dark = inMask && (flags & SUNSHINE_DARK_DIMS) != 0u;
-    bool structured = false;
-    [branch] if (dark) {
-        const float2 own = SunshineDarkeningHaloOpacity[centre];
-        [unroll] for (uint n = 0u; n < 4u; ++n) {
-            const uint other = n == 0u ? centre - 1u : n == 1u ? centre + 1u : n == 2u ? centre - 34u : centre + 34u;
-            const uint otherFlags = SunshineDarkeningHaloFlags[other];
-            const float2 opacity = SunshineDarkeningHaloOpacity[other];
-            precise float step = abs(own.x - opacity.x) - own.y - opacity.y;
-            structured = structured || (otherFlags & SUNSHINE_DARK_COLOUR) != 0u ||
-                ((otherFlags & SUNSHINE_DARK_FINITE) != 0u && step >= SunshineDarkeningStep());
-        }
-    }
-    uint ignored;
-    if (dark) InterlockedOr(SunshineDarkeningWords[0][thread.y], 1u << thread.x, ignored);
-    if (structured) InterlockedOr(SunshineDarkeningWords[1][thread.y], 1u << thread.x, ignored);
-    GroupMemoryBarrierWithGroupSync();
-    const uint groupColour = SunshineDarkeningOpacitySource(source) && !thread.y ? SunshineDarkeningGroupColour : 0u;
-    if (thread.x < 3u && y < BUFFER_HEIGHT)
-        SunshineUIChangeSetPlanesStore[uint2((SUNSHINE_UI_CHANGE_SET_PLANE_DARK + thread.x) * SUNSHINE_UI_CHANGE_SET_WORDS + group.x,
-            y)] = thread.x < 2u ? SunshineDarkeningWords[thread.x][thread.y] : groupColour;
-}
-// The tiles pass (change sets only): one group per 16x16 tile from the frame
-// origin pools the three channels of the source's fitting pixels (in its
-// mask with the residual within the bound; source 12's are exactly its DARK
-// pixels, since a changed pixel with s = 1 has a residual beyond 8 t) and
-// fits f(P) = m f(L) + C by centred sums. C is the tile's own colour, judged
-// by its effect E = |f^-1(base + C) - f^-1(base)| / t at the darkened level
-// base = m mean f(L) (scRGB: over max(1, base)): a darkening verdict within
-// SUNSHINE_UI_DARKENING_TILE_EFFECT_SCALE, else a colour verdict, none with
-// fewer than SUNSHINE_UI_DARKENING_TILE_MIN_PIXELS pixels or no spread. A
-// colour verdict marks its 3x3 ring in TILE row 3 ty, a darkening verdict
-// its own tile in row 3 ty + 1, and a darkening pixel that structure does
-// not keep (a candidate to unpin) its own tile in row 3 ty + 2 for the
-// region pass. Kept pixels (edges, outlines, the rims of colour UI) are
-// pinned anyway and join no region, so that separate dims do not merge
-// through the outlines between them; they still count in the regression,
-// where a tint over a textured scene (kept, its opacity steps with the
-// scene) shows its colour and rings its neighbours.
-//
-// Cost (docs/reshade-sbs.md, fix 4): 64 threads, four pixels each (rows
-// y, y + 4, y + 8 and y + 12). Each pixel's terms are stored as one of 256
-// and the sums reduce in the order of a 256-lane tree: a thread adds its
-// four terms as the tree's first two levels, (p + p[+128]) + (p[+64] +
-// p[+192]), and six more levels follow, so every sum is bit for bit the
-// 256-lane tree's. The tile's DARK and kept rows come first; source 12's
-// fitting pixels are its DARK pixels, so a tile with fewer than
-// SUNSHINE_UI_DARKENING_TILE_MIN_PIXELS of them has no verdict and returns
-// before it loads a pixel, and only its DARK pixels load their pair.
-groupshared float3 SunshineDarkeningTileSums[256];
-groupshared uint SunshineDarkeningTileKept[16];
-groupshared uint SunshineDarkeningTileRows[16];
-// The first two levels of the 256-lane tree at lane (below 64).
-float3 SunshineDarkeningTilePartial(uint lane)
-{
-    precise float3 low = SunshineDarkeningTileSums[lane] + SunshineDarkeningTileSums[lane + 128u];
-    precise float3 high = SunshineDarkeningTileSums[lane + 64u] + SunshineDarkeningTileSums[lane + 192u];
-    precise float3 sum = low + high;
-    return sum;
-}
-[numthreads(16, 4, 1)]
-void SunshineUIDarkeningTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
-{
-    const uint source = SunshineDarkeningSource();
-    if (source != 5u && source != SUNSHINE_UI_SOURCE_PRE_UI) return;
-    const uint lane = thread.y * 16u + thread.x;
-    const float t = Sunshine_UIDifferenceThreshold;
-    // The tile's 16 rows of DARK pixels and of kept pixels (STRUCT and the
-    // 3x3 rule), from the store, each a half word.
-    [branch] if (lane < 16u) {
-        const int word = int(group.x / 2u), row = int(group.y * SUNSHINE_UI_DARKENING_TILE + lane);
-        const uint shift = (group.x % 2u) * 16u;
-        const uint kept = SunshineChangeSetKeptWord(true, SUNSHINE_UI_CHANGE_SET_PLANE_STRUCT,
-            SunshineChangeSetPlaneWord(true, SUNSHINE_UI_CHANGE_SET_PLANE_STRUCT, word, row), word, row);
-        SunshineDarkeningTileKept[lane] = (kept >> shift) & 0xffffu;
-        SunshineDarkeningTileRows[lane] =
-            (SunshineChangeSetPlaneWord(true, SUNSHINE_UI_CHANGE_SET_PLANE_DARK, word, row) >> shift) & 0xffffu;
-    }
-    GroupMemoryBarrierWithGroupSync();
-    uint darkPixels = 0u, candidate = 0u;
-    [unroll] for (uint r = 0u; r < 16u; ++r) {
-        darkPixels += countbits(SunshineDarkeningTileRows[r]);
-        candidate |= SunshineDarkeningTileRows[r] & ~SunshineDarkeningTileKept[r];
-    }
-    const uint word = SUNSHINE_UI_CHANGE_SET_PLANE_TILE * SUNSHINE_UI_CHANGE_SET_WORDS;
-    uint ignored;
-    if (!lane && candidate)
-        InterlockedOr(SunshineUIChangeSetPlanesStore[uint2(word + group.x / 32u, 3u * group.y + 2u)], 1u << (group.x % 32u), ignored);
-    if (source == SUNSHINE_UI_SOURCE_PRE_UI && darkPixels < SUNSHINE_UI_DARKENING_TILE_MIN_PIXELS) return;
-    float3 x[4], y[4];
-    float n[4];
-    [unroll] for (uint k = 0u; k < 4u; ++k) {
-        const uint row = thread.y + 4u * k;
-        const uint2 xy = group.xy * SUNSHINE_UI_DARKENING_TILE + uint2(thread.x, row);
-        x[k] = 0.0;
-        y[k] = 0.0;
-        n[k] = 0.0;
-        [branch] if (xy.x < BUFFER_WIDTH && xy.y < BUFFER_HEIGHT) {
-            bool fits = ((SunshineDarkeningTileRows[row] >> thread.x) & 1u) != 0u;
-            float3 final = 0.0, pre = 0.0;
-            [branch] if (source != SUNSHINE_UI_SOURCE_PRE_UI) {
-                SunshineChangeSetPair(int3(xy, 0), final, pre);
-                float2 opacity;
-                const uint flags = SunshineDarkeningChangeSet(final, pre, t, SunshineChangeSetThreshold(), opacity);
-                fits = (flags & (SUNSHINE_DARK_UI | SUNSHINE_DARK_FITS)) == (SUNSHINE_DARK_UI | SUNSHINE_DARK_FITS);
-            } else [branch] if (fits) {
-                SunshineChangeSetPair(int3(xy, 0), final, pre);
-            }
-            if (fits) {
-                x[k] = SunshineDarkeningFit(pre);
-                y[k] = SunshineDarkeningFit(final);
-                n[k] = 1.0;
-            }
-        }
-        SunshineDarkeningTileSums[lane + 64u * k] =
-            float3(n[k], x[k].r + x[k].g + x[k].b, y[k].r + y[k].g + y[k].b);
-    }
-    GroupMemoryBarrierWithGroupSync();
-    SunshineDarkeningTileSums[lane] = SunshineDarkeningTilePartial(lane);
-    GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint half_step = 32u; half_step; half_step >>= 1u) {
-        if (lane < half_step) SunshineDarkeningTileSums[lane] += SunshineDarkeningTileSums[lane + half_step];
-        GroupMemoryBarrierWithGroupSync();
-    }
-    const float pixels = SunshineDarkeningTileSums[0].x, samples = pixels * 3.0;
-    const float meanX = samples > 0.0 ? SunshineDarkeningTileSums[0].y / samples : 0.0;
-    const float meanY = samples > 0.0 ? SunshineDarkeningTileSums[0].z / samples : 0.0;
-    GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint c = 0u; c < 4u; ++c) {
-        precise float3 dx = x[c] - meanX, dy = y[c] - meanY;
-        SunshineDarkeningTileSums[lane + 64u * c] = n[c] > 0.0 ? float3(dot(dx, dx), dot(dx, dy), 0.0) : 0.0;
-    }
-    GroupMemoryBarrierWithGroupSync();
-    SunshineDarkeningTileSums[lane] = SunshineDarkeningTilePartial(lane);
-    GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint centred_step = 32u; centred_step; centred_step >>= 1u) {
-        if (lane < centred_step) SunshineDarkeningTileSums[lane] += SunshineDarkeningTileSums[lane + centred_step];
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (lane || pixels < float(SUNSHINE_UI_DARKENING_TILE_MIN_PIXELS) || !(t > 0.0)) return;
-    precise float variance = SunshineDarkeningTileSums[0].x / samples, covariance = SunshineDarkeningTileSums[0].y / samples;
-    if (!(variance > float(SUNSHINE_UI_DARKENING_MIN_VARIANCE_PPM) * 1.0e-6 * meanX * meanX) ||
-        !SunshineCameraFinite(variance) || !SunshineCameraFinite(covariance)) return;
-    precise float slope = covariance / variance;
-    precise float offset = meanY - slope * meanX;
-    precise float base = saturate(slope * meanX);
-    precise float effect = abs(SunshineDarkeningUnfit(saturate(base + offset).xxx).x - SunshineDarkeningUnfit(base.xxx).x) / t;
-    if (BUFFER_COLOR_SPACE == 2) effect = effect / max(1.0, base);
-    if (!SunshineCameraFinite(effect)) return;
-    [branch] if (effect <= float(SUNSHINE_UI_DARKENING_TILE_EFFECT_SCALE)) {
-        InterlockedOr(SunshineUIChangeSetPlanesStore[uint2(word + group.x / 32u, 3u * group.y + 1u)], 1u << (group.x % 32u), ignored);
-    } else {
-        [loop] for (uint i = 0u; i < 9u; ++i) {
-            const int tx = int(group.x) + int(i % 3u) - 1, ty = int(group.y) + int(i / 3u) - 1;
-            if (tx >= 0 && ty >= 0 && tx < SUNSHINE_UI_DARKENING_TILES_X && ty < SUNSHINE_UI_DARKENING_TILES_Y)
-                InterlockedOr(SunshineUIChangeSetPlanesStore[uint2(word + uint(tx) / 32u, 3u * uint(ty))], 1u << (uint(tx) % 32u),
-                    ignored);
-        }
-    }
-}
-// The region pass (one group of 1024 threads, after the tiles pass; planes
-// at u4). A change set: its darkening regions are the 8-connected tiles with
-// a darkening pixel (TILE row 3 ty + 2). Two floods within them run together
-// in group-shared memory, one thread per row of tiles of each: the poison
-// from the tiles with a colour verdict in their 3x3 ring (row 3 ty) and the
-// proof from the proven tiles (row 3 ty + 1, darkening, and no ring). Each
-// iteration seeds a row from the 8 neighbours of its rows above and below
-// and fills it along its runs of tiles; the floods settle when an iteration
-// changes nothing. Row 3 ty + 2 then holds the tiles whose region has a
-// proof and no poison: none when the tile grid exceeds
-// SUNSHINE_UI_DARKENING_REGION_WORDS words or the floods do not settle
-// within SUNSHINE_UI_DARKENING_REGION_ITERATIONS, which errs toward pinning.
-// An opacity source: bit 0 of TILE row 1, word 0, says that some bits group
-// found a colour pixel (bit 0 of its first row).
-#define SUNSHINE_UI_DARKENING_REGION_ITERATIONS (2 * SUNSHINE_UI_DARKENING_TILES_Y + 16)
-groupshared uint SunshineDarkeningRegionMask[SUNSHINE_UI_DARKENING_REGION_WORDS];
-groupshared uint SunshineDarkeningRegionSets[2 * SUNSHINE_UI_DARKENING_REGION_WORDS];
-groupshared uint SunshineDarkeningRegionFlag;
-// The TILE plane's word of a row of tiles (u4).
-uint SunshineDarkeningTileWord(uint row, uint word)
-{
-    return row < BUFFER_HEIGHT ? SunshineUIChangeSetPlanesStore[uint2(SUNSHINE_UI_CHANGE_SET_PLANE_TILE *
-        SUNSHINE_UI_CHANGE_SET_WORDS + word, row)] : 0u;
-}
-// A flood's set (0 poison, 1 proof) at word w of tile row r; zero outside.
-uint SunshineDarkeningRegionAt(uint set, int r, int w)
-{
-    return r < 0 || w < 0 || r >= SUNSHINE_UI_DARKENING_TILES_Y || w >= SUNSHINE_UI_DARKENING_TILE_WORDS ? 0u :
-        SunshineDarkeningRegionSets[set * SUNSHINE_UI_DARKENING_REGION_WORDS + uint(r) * SUNSHINE_UI_DARKENING_TILE_WORDS + uint(w)];
-}
-// A word's seeds g (within its mask m) spread along the runs of m toward
-// higher bits (up) or lower bits (down): adding the seeds to the mask
-// carries through each run from its seed up to the run's end. A run that
-// reaches bit 31 (up) or bit 0 (down) carries into the next word.
-uint SunshineDarkeningFillUp(uint g, uint m)
-{
-    return g | (((m + (g & m)) ^ m) & m);
-}
-uint SunshineDarkeningFillDown(uint g, uint m)
-{
-    return reversebits(SunshineDarkeningFillUp(reversebits(g), reversebits(m)));
-}
-// One flood step of tile row r of a flood (set 0 poison, 1 proof): seeds
-// from the 8 neighbours in the rows above and below, then fills along the
-// row; returns whether it changed. One thread runs each row of each flood:
-// the row's mask m and its own words (own, which only its thread writes)
-// stay in registers, each neighbour word is read once, and only a changed
-// word is written. The rows beside it may change meanwhile; the floods only
-// grow, so a stale read only delays a seed to the next iteration.
-bool SunshineDarkeningRegionRow(uint set, uint r, uint m[SUNSHINE_UI_DARKENING_TILE_WORDS],
-    inout uint own[SUNSHINE_UI_DARKENING_TILE_WORDS])
-{
-    // near[w + 1] holds word w of the rows above and below; near[0] and
-    // near[words + 1] are the zero words beside the row.
-    uint near[SUNSHINE_UI_DARKENING_TILE_WORDS + 2], row[SUNSHINE_UI_DARKENING_TILE_WORDS];
-    near[0] = 0u;
-    near[SUNSHINE_UI_DARKENING_TILE_WORDS + 1] = 0u;
-    [unroll] for (uint w = 0u; w < SUNSHINE_UI_DARKENING_TILE_WORDS; ++w)
-        near[w + 1u] = SunshineDarkeningRegionAt(set, int(r) - 1, int(w)) | SunshineDarkeningRegionAt(set, int(r) + 1, int(w));
-    [unroll] for (uint seed = 0u; seed < SUNSHINE_UI_DARKENING_TILE_WORDS; ++seed) {
-        const uint v = near[seed + 1u], below = near[seed], above = near[seed + 2u];
-        row[seed] = own[seed] | (m[seed] & (v | (v << 1u) | (v >> 1u) | (below >> 31u) | (above << 31u)));
-    }
-    // Each word fills on its own in both directions; then the runs that
-    // leave a word carry into its neighbours, a carry filling the next
-    // word's run from its edge (the run of its first or last mask bit).
-    uint up[SUNSHINE_UI_DARKENING_TILE_WORDS], down[SUNSHINE_UI_DARKENING_TILE_WORDS];
-    [unroll] for (uint fill = 0u; fill < SUNSHINE_UI_DARKENING_TILE_WORDS; ++fill) {
-        up[fill] = SunshineDarkeningFillUp(row[fill], m[fill]);
-        down[fill] = SunshineDarkeningFillDown(row[fill], m[fill]);
-    }
-    uint carry = 0u;
-    [unroll] for (uint upward = 0u; upward < SUNSHINE_UI_DARKENING_TILE_WORDS; ++upward) {
-        if (carry) up[upward] = up[upward] | SunshineDarkeningFillUp(1u & m[upward], m[upward]);
-        carry = up[upward] >> 31u;
-    }
-    carry = 0u;
-    [unroll] for (uint downward = SUNSHINE_UI_DARKENING_TILE_WORDS; downward > 0u; --downward) {
-        const uint d = downward - 1u;
-        if (carry) down[d] = down[d] | SunshineDarkeningFillDown(0x80000000u & m[d], m[d]);
-        carry = down[d] & 1u;
-    }
-    bool changed = false;
-    [unroll] for (uint both = 0u; both < SUNSHINE_UI_DARKENING_TILE_WORDS; ++both) {
-        const uint filled = up[both] | down[both];
-        [branch] if (filled != own[both]) {
-            changed = true;
-            own[both] = filled;
-            SunshineDarkeningRegionSets[set * SUNSHINE_UI_DARKENING_REGION_WORDS + r * SUNSHINE_UI_DARKENING_TILE_WORDS + both] = filled;
-        }
-    }
-    return changed;
-}
-[numthreads(1024, 1, 1)]
-void SunshineUIDarkeningRegionCS(uint3 thread : SV_GroupThreadID)
-{
-    const uint source = SunshineDarkeningSource();
-    if (!source) return;
-    const uint lane = thread.x;
-    const uint tileWord = SUNSHINE_UI_CHANGE_SET_PLANE_TILE * SUNSHINE_UI_CHANGE_SET_WORDS;
-    const bool opacity = SunshineDarkeningOpacitySource(source);
-    const uint words = SUNSHINE_UI_DARKENING_TILE_WORDS * SUNSHINE_UI_DARKENING_TILES_Y;
-    const bool fits = words <= SUNSHINE_UI_DARKENING_REGION_WORDS;
-    if (!lane) SunshineDarkeningRegionFlag = 0u;
-    GroupMemoryBarrierWithGroupSync();
-    [branch] if (opacity) {
-        const uint groupRows = (BUFFER_HEIGHT + 7u) / 8u;
-        bool colour = false;
-        [loop] for (uint i = lane; i < SUNSHINE_UI_CHANGE_SET_WORDS * groupRows; i += 1024u)
-            colour = colour ||
-                (SunshineDarkeningTileWord(8u * (i / SUNSHINE_UI_CHANGE_SET_WORDS), i % SUNSHINE_UI_CHANGE_SET_WORDS) & 1u) != 0u;
-        if (colour) SunshineDarkeningRegionFlag = 1u;
-    } else if (fits) {
-        [loop] for (uint i = lane; i < words; i += 1024u) {
-            const uint ty = i / SUNSHINE_UI_DARKENING_TILE_WORDS, w = i % SUNSHINE_UI_DARKENING_TILE_WORDS;
-            const uint ring = SunshineDarkeningTileWord(3u * ty, w), verdict = SunshineDarkeningTileWord(3u * ty + 1u, w);
-            const uint dark = SunshineDarkeningTileWord(3u * ty + 2u, w);
-            SunshineDarkeningRegionMask[i] = dark;
-            SunshineDarkeningRegionSets[i] = dark & ring;
-            SunshineDarkeningRegionSets[SUNSHINE_UI_DARKENING_REGION_WORDS + i] = dark & verdict & ~ring;
-        }
-    }
-    GroupMemoryBarrierWithGroupSync();
-    if (opacity) {
-        if (!lane && BUFFER_HEIGHT > 1) SunshineUIChangeSetPlanesStore[uint2(tileWord, 1u)] = SunshineDarkeningRegionFlag;
-        return;
-    }
-    // The flag is a stamp, not a cleared flag: the iteration that last
-    // changed a row. Every thread reads it between two syncs, so all leave
-    // the loop together after the first iteration that changed nothing (cs_5_0
-    // leaves a synchronized loop on a shared value only behind a sync after
-    // the read).
-    bool settled = false;
-    // Lane set * tiles_y + r runs row r of flood set.
-    const uint set = lane < SUNSHINE_UI_DARKENING_TILES_Y ? 0u : 1u, r = lane - set * SUNSHINE_UI_DARKENING_TILES_Y;
-    const bool runs = fits && lane < 2u * SUNSHINE_UI_DARKENING_TILES_Y;
-    uint m[SUNSHINE_UI_DARKENING_TILE_WORDS], own[SUNSHINE_UI_DARKENING_TILE_WORDS];
-    [unroll] for (uint w = 0u; w < SUNSHINE_UI_DARKENING_TILE_WORDS; ++w) {
-        const uint at = min(r, SUNSHINE_UI_DARKENING_TILES_Y - 1u) * SUNSHINE_UI_DARKENING_TILE_WORDS + w;
-        m[w] = runs ? SunshineDarkeningRegionMask[at] : 0u;
-        own[w] = runs ? SunshineDarkeningRegionSets[set * SUNSHINE_UI_DARKENING_REGION_WORDS + at] : 0u;
-    }
-    [loop] for (uint iteration = 1u; iteration <= (fits ? SUNSHINE_UI_DARKENING_REGION_ITERATIONS : 0u); ++iteration) {
-        bool changed = false;
-        [branch] if (runs) changed = SunshineDarkeningRegionRow(set, r, m, own);
-        if (changed) SunshineDarkeningRegionFlag = iteration;
-        GroupMemoryBarrierWithGroupSync();
-        settled = SunshineDarkeningRegionFlag < iteration;
-        GroupMemoryBarrierWithGroupSync();
-        if (settled) break;
-    }
-    [loop] for (uint i = lane; i < SUNSHINE_UI_DARKENING_TILE_WORDS * SUNSHINE_UI_DARKENING_TILES_Y; i += 1024u) {
-        const uint ty = i / SUNSHINE_UI_DARKENING_TILE_WORDS, w = i % SUNSHINE_UI_DARKENING_TILE_WORDS;
-        uint unpins = 0u;
-        [branch] if (fits && settled)
-            unpins = SunshineDarkeningRegionSets[SUNSHINE_UI_DARKENING_REGION_WORDS + i] & ~SunshineDarkeningRegionSets[i];
-        if (3u * ty + 2u < BUFFER_HEIGHT) SunshineUIChangeSetPlanesStore[uint2(tileWord + w, 3u * ty + 2u)] = unpins;
-    }
-}
-// The unpinned darkening pixels of a word of row y (P2), from the planes at
-// t8: DARK, not kept by the 3x3 rule on STRUCT, and for a change set in a
-// tile whose region unpins (TILE row 3 ty + 2 after the region pass; a word
-// holds the tiles 2 w and 2 w + 1), for an opacity source on a frame with a
-// colour pixel (TILE row 1, word 0, bit 0). dark returns the word's DARK
-// pixels.
-uint SunshineDarkeningUnpinnedWord(uint source, int word, int y, out uint dark)
-{
-    dark = SunshineChangeSetWord(SUNSHINE_UI_CHANGE_SET_PLANE_DARK, word, y);
-    if (!dark) return 0u;
-    const uint kept = SunshineChangeSetKeptWord(false, SUNSHINE_UI_CHANGE_SET_PLANE_STRUCT,
-        SunshineChangeSetWord(SUNSHINE_UI_CHANGE_SET_PLANE_STRUCT, word, y), word, y);
-    uint proven;
-    [branch] if (SunshineDarkeningOpacitySource(source)) {
-        proven = (SunshineChangeSetWord(SUNSHINE_UI_CHANGE_SET_PLANE_TILE, 0, 1) & 1u) ? 0xffffffffu : 0u;
-    } else {
-        const int tileWord = int(uint(word) / 16u), ty = int(uint(y) / SUNSHINE_UI_DARKENING_TILE);
-        const uint regions = SunshineChangeSetWord(SUNSHINE_UI_CHANGE_SET_PLANE_TILE, tileWord, 3 * ty + 2);
-        const uint pair = (regions >> ((uint(word) % 16u) * 2u)) & 3u;
-        proven = ((pair & 1u) ? 0x0000ffffu : 0u) | ((pair & 2u) ? 0xffff0000u : 0u);
-    }
-    return dark & ~kept & proven;
-}
-// The count pass of a sample frame, one group per detection tile as the
-// change-set count pass: the tile's unpinned darkening pixels and those kept
-// (DARK and not unpinned) into statistics row SUNSHINE_UI_DARKENING_ROW +
-// tile row, and in .z whether an opacity source carried no colour (each
-// tile the same); zero when the passes measured nothing.
-groupshared uint SunshineDarkeningCounts[2];
-[numthreads(16, 16, 1)]
-void SunshineUIDarkeningCountCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
-{
-    const uint lane = thread.y * 16u + thread.x;
-    if (lane < 2u) SunshineDarkeningCounts[lane] = 0u;
-    GroupMemoryBarrierWithGroupSync();
-    const uint source = SunshineDarkeningSource();
-    const uint2 first = group.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
-    const uint2 last = (group.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
-    const uint firstWord = first.x / 32u, wordsWide = last.x > first.x ? (last.x - 1u) / 32u - firstWord + 1u : 0u;
-    const uint items = source ? wordsWide * (last.y - first.y) : 0u;
-    uint unpinned = 0u, kept = 0u;
-    [loop] for (uint item = lane; item < items; item += 256u) {
-        const uint word = firstWord + item % wordsWide, y = first.y + item / wordsWide;
-        const uint low = max(first.x, word * 32u) - word * 32u, high = min(last.x, word * 32u + 32u) - word * 32u;
-        const uint inTile = (high >= 32u ? 0xffffffffu : (1u << high) - 1u) & ~((1u << low) - 1u);
-        uint dark;
-        const uint u = SunshineDarkeningUnpinnedWord(source, int(word), int(y), dark) & inTile;
-        unpinned += countbits(u);
-        kept += countbits(dark & inTile & ~u);
-    }
-    InterlockedAdd(SunshineDarkeningCounts[0], unpinned);
-    InterlockedAdd(SunshineDarkeningCounts[1], kept);
-    GroupMemoryBarrierWithGroupSync();
-    const bool colourless = SunshineDarkeningOpacitySource(source) &&
-        !(SunshineChangeSetWord(SUNSHINE_UI_CHANGE_SET_PLANE_TILE, 0, 1) & 1u);
-    if (!lane)
-        SunshineAlphaCoverageStore[group.xy + uint2(0, SUNSHINE_UI_DARKENING_ROW)] =
-            uint4(SunshineDarkeningCounts[0], SunshineDarkeningCounts[1], colourless ? 1u : 0u, 0u);
-}
-// The finish pass of a sample frame (one group): sums the count pass's rows
-// into decision texel 15 .z (unpinned) and .w (kept, with
-// SUNSHINE_UI_DARKENING_COLOURLESS when an opacity source carried no
-// colour). A typed UAV of four
-// words cannot be read in cs_5_0, so it rewrites .x and .y exactly as the
-// reduce wrote them: the change-set shadow's last sum and its judge.
-[numthreads(256, 1, 1)]
-void SunshineUIDarkeningFinishCS(uint3 thread : SV_GroupThreadID)
-{
-    const uint lane = thread.x;
-    const uint2 tile = uint2(lane % 16u, lane / 16u);
-    const bool shadow = SunshineChangeSetShadow();
-    SunshineUIDetectionCoverage[lane] = uint4(SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + SUNSHINE_UI_DARKENING_ROW, 0)).xy,
-        shadow ? SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + SUNSHINE_UI_CHANGE_SET_ROW + 16u, 0)).w : 0u,
-        SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + SUNSHINE_UI_DARKENING_ROW, 0)).z);
-    GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint half_step = 128u; half_step; half_step >>= 1u) {
-        if (lane < half_step) SunshineUIDetectionCoverage[lane] += SunshineUIDetectionCoverage[lane + half_step];
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (!lane) {
-        const uint4 sum = SunshineUIDetectionCoverage[0];
-        SunshineAlphaCoverageStore[uint2(15, 0)] =
-            uint4(sum.z, shadow ? SunshineChangeSetJudge() : 0u, sum.x, sum.y | (sum.w ? SUNSHINE_UI_DARKENING_COLOURLESS : 0u));
-    }
 }
 // One thread per tile, then an exact group sum; thread 0 decides. The
 // decision is ui_selection::decide (game3d_ui_selection.h) line for line, in
@@ -1555,7 +516,7 @@ void SunshineUIDarkeningFinishCS(uint3 thread : SV_GroupThreadID)
 // overflows); test_game3d_ui_selection_contract runs this pass against it.
 groupshared uint SunshineUIDetectionMatching[256];
 // The first candidate of a bit set in draw order (ui_selection::draw_order):
-// UIAlpha, UI color tag, layer, Backbuffer, current, HUD-less, pre-UI.
+// UIAlpha, UI color tag, layer, Backbuffer, current, HUD-less.
 uint SunshineUIFirstCandidate(uint bits)
 {
     return (bits & SUNSHINE_UI_CANDIDATE_UI_ALPHA) ? SUNSHINE_UI_CANDIDATE_UI_ALPHA :
@@ -1563,8 +524,58 @@ uint SunshineUIFirstCandidate(uint bits)
         (bits & SUNSHINE_UI_CANDIDATE_LAYER) ? SUNSHINE_UI_CANDIDATE_LAYER :
         (bits & SUNSHINE_UI_CANDIDATE_BACKBUFFER) ? SUNSHINE_UI_CANDIDATE_BACKBUFFER :
         (bits & SUNSHINE_UI_CANDIDATE_CURRENT) ? SUNSHINE_UI_CANDIDATE_CURRENT :
-        (bits & SUNSHINE_UI_CANDIDATE_HUDLESS) ? SUNSHINE_UI_CANDIDATE_HUDLESS :
-        (bits & SUNSHINE_UI_CANDIDATE_PRE_UI);
+        (bits & SUNSHINE_UI_CANDIDATE_HUDLESS);
+}
+// S3: one pair's identity verdict, a read against the proposed label.
+uint SunshineIdentityVerdict(uint read, uint expected)
+{
+    return !expected ? SUNSHINE_UI_IDENTITY_UNPROPOSED : !read ? SUNSHINE_UI_IDENTITY_UNSTAMPED :
+        read == expected ? SUNSHINE_UI_IDENTITY_EXACT : SUNSHINE_UI_IDENTITY_MISMATCH;
+}
+// The read minus the proposal, clamped to int16; zero unless both are set.
+int SunshineIdentityDelta(uint read, uint expected)
+{
+    return read && expected ? clamp(int(read - expected), -32768, 32767) : 0;
+}
+// Decision texel 12 .z and .w (ui_selection::verify_identity): an offered
+// layer pairs in present space when a present label is proposed, else in
+// token space; an
+// offered HUD-less image in token space with SUNSHINE_UI_IDENTITY_TOKEN_BATCH,
+// else in present space with its stamp's C_P read + 1 (a tag copy holds the
+// frame after the Present it read).
+uint2 SunshineIdentityWords()
+{
+    uint layerVerdict = 0u, layerSpace = 0u, hudlessVerdict = 0u, hudlessSpace = 0u;
+    int layerDelta = 0, hudlessDelta = 0;
+    [branch] if (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_LAYER) {
+        const uint4 stamp = SunshineUIStamps.Load(SUNSHINE_UI_IDENTITY_STAMP_LAYER);
+        if (Sunshine_UIExpectedLayerPresent) {
+            layerSpace = SUNSHINE_UI_IDENTITY_SPACE_PRESENT;
+            layerVerdict = SunshineIdentityVerdict(stamp.x, Sunshine_UIExpectedLayerPresent);
+            layerDelta = SunshineIdentityDelta(stamp.x, Sunshine_UIExpectedLayerPresent);
+        } else if (Sunshine_UIExpectedLayerToken) {
+            layerSpace = SUNSHINE_UI_IDENTITY_SPACE_TOKEN;
+            layerVerdict = SunshineIdentityVerdict(stamp.y, Sunshine_UIExpectedLayerToken);
+            layerDelta = SunshineIdentityDelta(stamp.y, Sunshine_UIExpectedLayerToken);
+        } else layerVerdict = SUNSHINE_UI_IDENTITY_UNPROPOSED;
+    }
+    [branch] if (Sunshine_UICandidates & SUNSHINE_UI_CANDIDATE_HUDLESS) {
+        if (Sunshine_UIIdentity & SUNSHINE_UI_IDENTITY_TOKEN_BATCH) {
+            hudlessSpace = SUNSHINE_UI_IDENTITY_SPACE_TOKEN;
+            hudlessVerdict = SUNSHINE_UI_IDENTITY_EXACT;
+        } else if (Sunshine_UIExpectedHUDlessPresent) {
+            const uint read = SunshineUIStamps.Load(SUNSHINE_UI_IDENTITY_STAMP_HUDLESS).x;
+            const uint label = read ? read + 1u : 0u;
+            hudlessSpace = SUNSHINE_UI_IDENTITY_SPACE_PRESENT;
+            hudlessVerdict = SunshineIdentityVerdict(label, Sunshine_UIExpectedHUDlessPresent);
+            hudlessDelta = SunshineIdentityDelta(label, Sunshine_UIExpectedHUDlessPresent);
+        } else hudlessVerdict = SUNSHINE_UI_IDENTITY_UNPROPOSED;
+    }
+    const uint ok = (layerVerdict == SUNSHINE_UI_IDENTITY_EXACT ? SUNSHINE_UI_CANDIDATE_LAYER : 0u) |
+        (hudlessVerdict == SUNSHINE_UI_IDENTITY_EXACT ? SUNSHINE_UI_CANDIDATE_HUDLESS : 0u);
+    return uint2(layerVerdict | layerSpace << SUNSHINE_UI_IDENTITY_SPACE_SHIFT |
+        (hudlessVerdict | hudlessSpace << SUNSHINE_UI_IDENTITY_SPACE_SHIFT) << SUNSHINE_UI_IDENTITY_HUDLESS_SHIFT |
+        ok << SUNSHINE_UI_IDENTITY_OK_SHIFT, (uint(layerDelta) & 0xffffu) | uint(hudlessDelta) << 16);
 }
 [numthreads(256, 1, 1)]
 void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
@@ -1600,7 +611,6 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // threshold (not a sample frame, or no comparable layer) skips it and
     // writes zero counts.
     const uint4 coverage_sum = SunshineUIDetectionCoverage[0];
-    const uint matching_sum = SunshineUIDetectionMatching[0];
     uint4 pre_ui_sum = 0u;
     if (Sunshine_UIPreUIThreshold > 0.0) {
         GroupMemoryBarrierWithGroupSync();
@@ -1612,41 +622,10 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
         }
         pre_ui_sum = SunshineUIDetectionCoverage[0];
     }
-    // Fix 3, the change-set shadow (texels 13-15): two more phases sum its
-    // tile rows, and its matching tiles (at least 99% unchanged) in the
-    // matching array; zero without it.
-    const bool shadow = SunshineChangeSetShadow();
-    uint4 change_set = 0u, change_set_more = 0u;
-    uint change_set_tiles = 0u;
-    if (shadow) {
-        GroupMemoryBarrierWithGroupSync();
-        const uint4 tile_set = SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + SUNSHINE_UI_CHANGE_SET_ROW, 0));
-        SunshineUIDetectionCoverage[lane] = tile_set;
-        SunshineUIDetectionMatching[lane] = d.w && tile_set.y * 100u >= d.w * 99u ? 1u : 0u;
-        GroupMemoryBarrierWithGroupSync();
-        [loop] for (uint set_step = 128u; set_step; set_step >>= 1u) {
-            if (lane < set_step) {
-                SunshineUIDetectionCoverage[lane] += SunshineUIDetectionCoverage[lane+set_step];
-                SunshineUIDetectionMatching[lane] += SunshineUIDetectionMatching[lane+set_step];
-            }
-            GroupMemoryBarrierWithGroupSync();
-        }
-        change_set = SunshineUIDetectionCoverage[0];
-        change_set_tiles = SunshineUIDetectionMatching[0];
-        GroupMemoryBarrierWithGroupSync();
-        SunshineUIDetectionCoverage[lane] =
-            SunshineUIDetectionSampler.Load(int3(tile.x, tile.y + SUNSHINE_UI_CHANGE_SET_ROW + 16u, 0));
-        GroupMemoryBarrierWithGroupSync();
-        [loop] for (uint more_step = 128u; more_step; more_step >>= 1u) {
-            if (lane < more_step) SunshineUIDetectionCoverage[lane] += SunshineUIDetectionCoverage[lane+more_step];
-            GroupMemoryBarrierWithGroupSync();
-        }
-        change_set_more = SunshineUIDetectionCoverage[0];
-    }
     if (lane) return;
     uint4 coverage = coverage_sum, invalid = SunshineUIDetectionInvalid[0];
     uint4 difference = SunshineUIDetectionDifference[0];
-    uint matching_tiles = matching_sum, lit = SunshineUIDetectionLit[0].x;
+    uint matching_tiles = SunshineUIDetectionMatching[0], lit = SunshineUIDetectionLit[0].x;
     uint2 opaque = SunshineUIDetectionLit[0].yz;
     uint3 layer = SunshineUIDetectionLayer[0].xyz; // covered, invalid, opaque
     // Nearly opaque pixels of the Backbuffer and the current alpha (H1).
@@ -1663,12 +642,7 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
         SUNSHINE_UI_CANDIDATE_BACKBUFFER | SUNSHINE_UI_CANDIDATE_CURRENT | SUNSHINE_UI_CANDIDATE_LAYER;
     const uint declared_alpha_bits = SUNSHINE_UI_CANDIDATE_UI_ALPHA | SUNSHINE_UI_CANDIDATE_UI_COLOR;
     const uint inferred_alpha_bits = alpha_bits & ~declared_alpha_bits;
-    const uint candidate_bits = alpha_bits | SUNSHINE_UI_CANDIDATE_HUDLESS | SUNSHINE_UI_CANDIDATE_PRE_UI;
-    // An offered, accepted declared alpha keeps these out of S1: inferred
-    // alpha and the pre-UI change set. Every candidate but the pre-UI change
-    // set makes H1 claims.
-    const uint blocked_bits = inferred_alpha_bits | SUNSHINE_UI_CANDIDATE_PRE_UI;
-    const uint claimable_bits = candidate_bits & ~SUNSHINE_UI_CANDIDATE_PRE_UI;
+    const uint candidate_bits = alpha_bits | SUNSHINE_UI_CANDIDATE_HUDLESS;
     // V1: an alpha candidate is valid with at most 1% invalid pixels, accepted
     // or not; selective is some coverage below 90% of the frame.
     uint valid = 0u, selective = 0u;
@@ -1684,45 +658,33 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     if (coverage.w && coverage.w * 10u < pixels * 9u) selective |= SUNSHINE_UI_CANDIDATE_CURRENT;
     // V2: difference is changed-color support, not uniquely recovered
     // opacity. A partial change set needs broad unchanged scene evidence in
-    // clean tiles as well as bounded total coverage, and (fix 3) its pre-UI
-    // image lit on SUNSHINE_UI_CHANGE_SET_LIT_PERCENT of the pixels: a black
-    // image is no scene. UI covering the whole frame (menus, title screens)
-    // changes nearly every pixel while the HUD-less image still shows a lit
-    // scene; only an exact pair qualifies there, since a mismatched pair can
-    // also differ everywhere, and a black HUD-less image is no scene.
+    // clean tiles as well as bounded total coverage. UI covering the whole
+    // frame (menus, title screens) changes nearly every pixel while the
+    // HUD-less image still shows a lit scene; only an exact pair qualifies
+    // there, since a mismatched pair can also differ everywhere, and a black
+    // HUD-less image is no scene.
     const bool partial_set = !difference.y && difference.x && difference.x * 4u < pixels &&
-        difference.z * 100u >= pixels * 75u && matching_tiles >= 128u &&
-        lit * 100u >= pixels * SUNSHINE_UI_CHANGE_SET_LIT_PERCENT;
+        difference.z * 100u >= pixels * 75u && matching_tiles >= 128u;
     const bool full_set = (offered & SUNSHINE_UI_CANDIDATE_EXACT) && !difference.y &&
         difference.x * 100u >= pixels * 98u && lit * 2u >= pixels;
-    // S3: the offered pairs' identity; a gate ANDs it into the paired change
-    // set's validity (GATE_HUDLESS for 5 and 6, GATE_LAYER for 12).
+    // S3: the offered pairs' identity; GATE_HUDLESS ANDs it into the HUD-less
+    // change set's validity (5 and 6), and an invalid set then follows T1.
     const uint2 identity = SunshineIdentityWords();
     const uint identity_ok = identity.x >> SUNSHINE_UI_IDENTITY_OK_SHIFT;
     const bool hudless_identity = !(Sunshine_UIIdentity & SUNSHINE_UI_IDENTITY_GATE_HUDLESS) ||
         (identity_ok & SUNSHINE_UI_CANDIDATE_HUDLESS) != 0u;
-    const bool layer_identity = !(Sunshine_UIIdentity & SUNSHINE_UI_IDENTITY_GATE_LAYER) ||
-        (identity_ok & SUNSHINE_UI_CANDIDATE_LAYER) != 0u;
     if ((partial_set || full_set) && hudless_identity) valid |= SUNSHINE_UI_CANDIDATE_HUDLESS;
     if (partial_set) selective |= SUNSHINE_UI_CANDIDATE_HUDLESS;
-    // Fix 3: the pre-UI change set is partial only, without an offered
-    // HUD-less image (whose pair the slot then holds) and over a layer
-    // without coverage.
-    if ((offered & SUNSHINE_UI_CANDIDATE_PRE_UI) && !(offered & SUNSHINE_UI_CANDIDATE_HUDLESS) && partial_set && !layer.x &&
-        layer_identity) {
-        valid |= SUNSHINE_UI_CANDIDATE_PRE_UI;
-        selective |= SUNSHINE_UI_CANDIDATE_PRE_UI;
-    }
     valid &= offered & candidate_bits;
     // S1: among offered, accepted and valid candidates the first in draw
     // order decides at any coverage: nothing is no UI, everything a
     // full-screen menu (P1). An unaccepted or invalid candidate never blocks
     // another, except that an offered, accepted declared alpha (UIAlpha or the
-    // UI color tag) keeps inferred alpha and the pre-UI change set from
-    // deciding even while it is invalid itself: that frame then has no alpha
-    // mask rather than a scene-wide one.
+    // UI color tag) keeps inferred alpha from deciding even while it is
+    // invalid itself: that frame then has no alpha mask rather than a
+    // scene-wide one.
     const bool block = (offered & accepted & declared_alpha_bits) != 0u;
-    const uint eligible = offered & accepted & valid & (block ? ~blocked_bits : 0xffffffffu);
+    const uint eligible = offered & accepted & valid & (block ? ~inferred_alpha_bits : 0xffffffffu);
     uint source = 0u, covered = 0u, winner_opaque = 0u;
     if (eligible & SUNSHINE_UI_CANDIDATE_UI_ALPHA) { source = 1u; covered = coverage.x; winner_opaque = opaque.x; }
     else if (eligible & SUNSHINE_UI_CANDIDATE_UI_COLOR) { source = 2u; covered = coverage.y; winner_opaque = opaque.y; }
@@ -1734,23 +696,6 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     else if (eligible & SUNSHINE_UI_CANDIDATE_HUDLESS) {
         if (partial_set) { source = 5u; covered = difference.x; }
         else { source = 6u; covered = pixels; }
-    }
-    else if (eligible & SUNSHINE_UI_CANDIDATE_PRE_UI) { source = SUNSHINE_UI_SOURCE_PRE_UI; covered = difference.x; }
-    // Refine (fix 3): with SUNSHINE_UI_PIN_ONLY_UI, an alpha winner opaque on
-    // every pixel (shapeless) gives way to a valid exact selective change set
-    // of the same frame: an accepted exact HUD-less pair (5), else the pre-UI
-    // change set (12). Without one the alpha keeps the frame flat.
-    const bool refine_on = (Sunshine_UIRules & SUNSHINE_UI_PIN_ONLY_UI) != 0u;
-    const bool alpha_winner = (source >= 1u && source <= 4u) || source == SUNSHINE_UI_SOURCE_LAYER;
-    const bool shapeless = alpha_winner && pixels && winner_opaque == pixels;
-    bool refined = false;
-    if (refine_on && shapeless && partial_set) {
-        if ((eligible & SUNSHINE_UI_CANDIDATE_HUDLESS) && (offered & SUNSHINE_UI_CANDIDATE_EXACT)) {
-            source = 5u; refined = true;
-        } else if (eligible & SUNSHINE_UI_CANDIDATE_PRE_UI) {
-            source = SUNSHINE_UI_SOURCE_PRE_UI; refined = true;
-        }
-        if (refined) covered = difference.x;
     }
     // H1, a hidden scene (docs/reshade-sbs.md, hidden-scene evidence): the
     // informative full claims of this frame are (a) an alpha S1 may select
@@ -1767,10 +712,9 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // unless the CPU refuted its signature, and (d) only while the CPU's
     // samples read the pre-UI image visible. While the CPU holds a hidden
     // verdict of D on the presented frame and the depth is this frame's, an
-    // acting claim shows the frame flat (source 8), whatever S1 selected (a
-    // refined change set included), unless the S1 winner is already flat
-    // everywhere (source 6, or an alpha winner opaque on every pixel that
-    // refine did not replace). The evidence passes only measure.
+    // acting claim shows the frame flat (source 8), whatever S1 selected,
+    // unless the S1 winner is already flat everywhere (source 6, or an alpha
+    // winner opaque on every pixel). The evidence passes only measure.
     const uint s1_source = source;
     const uint opaque_needed = pixels * SUNSHINE_UI_SCENE_OPAQUE_PERCENT;
     uint claims = 0u;
@@ -1793,10 +737,11 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
             (image == SUNSHINE_UI_PRE_UI_IMAGE_LAYER && !layer.x &&
              (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_PRE_UI_PROVEN))))
         claims |= SUNSHINE_UI_CLAIM_PRE_UI;
-    const uint refuted = (Sunshine_UIDetectionFlags >> SUNSHINE_UI_PER_FRAME_REFUTED_SHIFT) & claimable_bits;
-    const uint acting = (claims & claimable_bits & ~refuted) |
+    const uint refuted = (Sunshine_UIDetectionFlags >> SUNSHINE_UI_PER_FRAME_REFUTED_SHIFT) & candidate_bits;
+    const uint acting = (claims & candidate_bits & ~refuted) |
         ((Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_PRE_UI_VISIBLE) ? (claims & SUNSHINE_UI_CLAIM_PRE_UI) : 0u);
-    const bool winner_full = source == 6u || (shapeless && !refined);
+    const bool alpha_winner = (source >= 1u && source <= 4u) || source == SUNSHINE_UI_SOURCE_LAYER;
+    const bool winner_full = source == 6u || (alpha_winner && pixels && winner_opaque == pixels);
     const bool h1 = acting && (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_SCENE_HIDDEN) &&
         !(Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_DEPTH_NOT_CURRENT) && !winner_full;
     if (h1) { source = 8u; covered = pixels; }
@@ -1810,9 +755,9 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
         none_reason = SUNSHINE_UI_NONE_GATE_NO_HOLD;
         refused = SunshineUIFirstCandidate(acting & candidate_bits);
         if (!refused) refused = (offered & SUNSHINE_UI_CANDIDATE_HUDLESS) ? SUNSHINE_UI_CANDIDATE_HUDLESS : SUNSHINE_UI_CANDIDATE_LAYER;
-    } else if (block && (offered & accepted & valid & blocked_bits)) {
+    } else if (block && (offered & accepted & valid & inferred_alpha_bits)) {
         none_reason = SUNSHINE_UI_NONE_PRESENTED_BLOCKED;
-        refused = SunshineUIFirstCandidate(offered & accepted & valid & blocked_bits);
+        refused = SunshineUIFirstCandidate(offered & accepted & valid & inferred_alpha_bits);
     } else if (offered & accepted & alpha_bits & ~valid) {
         none_reason = SUNSHINE_UI_NONE_TRUSTED_INVALID;
         refused = SunshineUIFirstCandidate(offered & accepted & alpha_bits & ~valid);
@@ -1822,9 +767,9 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     } else if (unaccepted & valid & selective) {
         none_reason = SUNSHINE_UI_NONE_UNACCEPTED;
         refused = SunshineUIFirstCandidate(unaccepted & valid & selective);
-    } else if (offered & (SUNSHINE_UI_CANDIDATE_HUDLESS | SUNSHINE_UI_CANDIDATE_PRE_UI)) {
+    } else if (offered & SUNSHINE_UI_CANDIDATE_HUDLESS) {
         none_reason = SUNSHINE_UI_NONE_DIFFERENCE_FAILED;
-        refused = (offered & SUNSHINE_UI_CANDIDATE_HUDLESS) ? SUNSHINE_UI_CANDIDATE_HUDLESS : SUNSHINE_UI_CANDIDATE_PRE_UI;
+        refused = SUNSHINE_UI_CANDIDATE_HUDLESS;
     } else if (unaccepted & valid & alpha_bits & ~selective) {
         none_reason = SUNSHINE_UI_NONE_AMBIGUOUS;
         refused = SunshineUIFirstCandidate(unaccepted & valid & alpha_bits & ~selective);
@@ -1846,23 +791,13 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
             contradicted_bits |= SUNSHINE_UI_CANDIDATE_CURRENT;
     }
     // T1: a real frame that decided no source while an accepted candidate is
-    // missing or offered but invalid has no decision of its own, and so (fix
-    // 3, with refine) has one whose winner is shapeless and not refined while
-    // an accepted candidate is missing or the pre-UI change set the previous
-    // real frame offered is not (SUNSHINE_UI_CHANGE_SET_GAP, one frame). It
-    // applies the previous real frame's own decision once, from the hold
-    // store, and then has no mask (or its own flat alpha);
-    // SUNSHINE_UI_PER_FRAME_HOLD_RESET means no previous real decision exists
-    // in this chain. The store is read before it is written.
-    // S3: a gate that refused an offered paired change set (its pair not
-    // exact) counts as that set missing for one frame, like the gap.
-    const bool identity_refused = ((offered & SUNSHINE_UI_CANDIDATE_PRE_UI) && !layer_identity) ||
-        ((offered & SUNSHINE_UI_CANDIDATE_HUDLESS) && !hudless_identity);
-    const bool refine_missing = refine_on && shapeless && !refined &&
-        ((Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_ACCEPTED_MISSING) != 0u ||
-        (Sunshine_UIRules & SUNSHINE_UI_CHANGE_SET_GAP) != 0u || identity_refused);
-    const bool no_own = (!source && ((Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_ACCEPTED_MISSING) ||
-        (offered & accepted & candidate_bits & ~valid))) || refine_missing;
+    // missing or offered but invalid has no decision of its own. It applies
+    // the previous real frame's own decision once, from the hold store, and
+    // then has no mask; SUNSHINE_UI_PER_FRAME_HOLD_RESET means no previous
+    // real decision exists in this chain. The store is read before it is
+    // written.
+    const bool no_own = !source && ((Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_ACCEPTED_MISSING) ||
+        (offered & accepted & candidate_bits & ~valid));
     const uint prior = (Sunshine_UIDetectionFlags & SUNSHINE_UI_PER_FRAME_HOLD_RESET) ? SUNSHINE_UI_HOLD_NONE :
         SunshineUIHoldStore[uint2(0u, 0u)];
     const uint stored_source = SunshineUIHoldStore[uint2(1u, 0u)], stored_covered = SunshineUIHoldStore[uint2(2u, 0u)];
@@ -1874,7 +809,7 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // H2 (fix 2): a frame applying no source that T1 did not reuse is shown
     // flat (source 11) while the CPU pushes SUNSHINE_UI_STILL_FLATTEN; the
     // hold store above keeps the decision before it.
-    const bool still = !held && !reused && (Sunshine_UIRules & SUNSHINE_UI_STILL_FLATTEN);
+    const bool still = !held && !reused && (Sunshine_UIStillScreen & SUNSHINE_UI_STILL_FLATTEN);
     const uint applied = still ? SUNSHINE_UI_SOURCE_STILL : held, applied_covered = still ? pixels : held_covered;
     // Exact per-session counters (game3d_ui_counters.h): this detection frame,
     // its applied decision and, without one, the own decision's reason; the
@@ -1886,13 +821,9 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     const bool alpha = (applied >= 1u && applied <= 4u) || applied == SUNSHINE_UI_SOURCE_LAYER;
     const bool full_alpha = alpha && applied_covered * 100u >= pixels * 99u;
     InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DETECTION_FRAMES, 0u)], 1u);
-    if (applied <= SUNSHINE_UI_SOURCE_PRE_UI)
+    if (applied <= SUNSHINE_UI_SOURCE_STILL)
         InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_DECIDED + applied, 0u)], 1u);
-    // A frame that applies no source counts its own decision's reason; one
-    // whose own decision had a source (T1 reused a previous decision without
-    // one, refine_missing) counts other, as decide() leaves its reason.
-    if (!applied)
-        InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_NONE + (source ? SUNSHINE_UI_NONE_OTHER : none_reason), 0u)], 1u);
+    if (!applied) InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_NONE + none_reason, 0u)], 1u);
     if (inferred && !(accepted & inferred_bit))
         InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_UNTRUSTED_INFERRED, 0u)], 1u);
     if (source == 5u && (offered & pair_bits) == SUNSHINE_UI_CANDIDATE_HUDLESS)
@@ -1907,8 +838,6 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
         InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_FULL_ALPHA, 0u)], 1u);
     if (reused)
         InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_REUSED, 0u)], 1u);
-    if (refined)
-        InterlockedAdd(SunshineUICountersStore[uint2(SUNSHINE_UI_COUNTER_REFINED, 0u)], 1u);
     // S3: one add per offered pair by its identity verdict.
     [unroll] for (uint pair = 0u; pair < 2u; ++pair) {
         const uint verdict = (identity.x >> (pair * SUNSHINE_UI_IDENTITY_HUDLESS_SHIFT)) & 0xfu;
@@ -1942,17 +871,12 @@ void SunshineUIDetectionReduceCS(uint3 thread : SV_GroupThreadID)
     // The mask pass keeps the previous real frame's mask when reused.
     SunshineAlphaCoverageStore[uint2(9,0)] = uint4(contradicted, frame_reason | (reused ? SUNSHINE_UI_FRAME_REASON_REUSED : 0u));
     // H1: the opaque Backbuffer and current counts, the raw claims before
-    // refutation, and the S1 winner with the applied and refined bits.
+    // refutation, and the S1 winner with the applied bit.
     SunshineAlphaCoverageStore[uint2(10,0)] = uint4(opaque_backbuffer, opaque_current, claims,
-        s1_source | (h1 ? SUNSHINE_UI_H1_APPLIED : 0u) | (refined ? SUNSHINE_UI_H1_REFINED : 0u));
+        s1_source | (h1 ? SUNSHINE_UI_H1_APPLIED : 0u));
     // H1 (d): the pre-UI pixel counts the CPU's acceptance ledger proves the
     // layer from; nothing on the GPU reads them.
     SunshineAlphaCoverageStore[uint2(11,0)] = pre_ui_pixels;
-    // Fix 3: the change-set shadow and its judge, for the CPU only; zero
-    // without it.
-    SunshineAlphaCoverageStore[uint2(13,0)] = uint4(change_set.xyz, change_set_tiles);
-    SunshineAlphaCoverageStore[uint2(14,0)] = uint4(change_set.w, change_set_more.xyz);
-    SunshineAlphaCoverageStore[uint2(15,0)] = uint4(change_set_more.w, shadow ? SunshineChangeSetJudge() : 0u, 0u, 0u);
 }
 [numthreads(8, 8, 1)]
 void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
@@ -1976,27 +900,7 @@ void SunshineUIDetectionMaskCS(uint3 id : SV_DispatchThreadID)
     else if (source == SUNSHINE_UI_SOURCE_LAYER) mask = SunshineUILayer.Load(at).a;
     else if (source == 5u) {
         bool finite;
-        float3 pre;
-        mask = SunshineChangeSetDifference(id.xy, finite, pre) > SunshineChangeSetThreshold() && finite ? 1.0 : 0.0;
-    }
-    // Fix 3: the pre-UI change set pins a changed pixel (P1: binary) that has
-    // at least SUNSHINE_UI_CHANGE_SET_MIN_NEIGHBOURHOOD changed pixels in its
-    // 3x3 window; neighbours are read for changed pixels only.
-    else if (source == SUNSHINE_UI_SOURCE_PRE_UI) {
-        const uint offset = SunshineLayerPairOffset();
-        const float bound = SunshineChangeSetThreshold();
-        [branch] if (SunshineLayerChanged(int2(id.xy), offset, bound))
-            mask = SunshineLayerChangedNeighbourhood(int2(id.xy), offset, bound) >= SUNSHINE_UI_CHANGE_SET_MIN_NEIGHBOURHOOD ?
-                1.0 : 0.0;
-    }
-    // Fix 4 (P2, pin only UI): with SUNSHINE_UI_PIN_ONLY_UI and the darkening
-    // passes measured this frame, an unpinned darkening pixel of an eligible
-    // source does not pin (planes at t8); without both the planes are a
-    // shadow that only the count pass reads.
-    const uint pinOnlyUI = SUNSHINE_UI_PIN_ONLY_UI | SUNSHINE_UI_DARKENING_MEASURED;
-    [branch] if ((Sunshine_UIRules & pinOnlyUI) == pinOnlyUI && SunshineDarkeningEligible(source) && mask != 0.0) {
-        uint dark;
-        if ((SunshineDarkeningUnpinnedWord(source, int(id.x / 32u), int(id.y), dark) >> (id.x % 32u)) & 1u) mask = 0.0;
+        mask = SunshineHUDlessDifference(id.xy, finite) > Sunshine_UIDifferenceThreshold && finite ? 1.0 : 0.0;
     }
     SunshineHostCandidateStore[id.xy] = mask;
 }

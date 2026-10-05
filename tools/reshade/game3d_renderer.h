@@ -4,7 +4,6 @@
 #include "game3d_ui_plane.h"
 #include "game3d_alpha_auto.h"
 #include "game3d_ui_adaptive.h"
-#include "game3d_ui_change_set.h"
 #include "game3d_ui_ticket.h"
 #include <windows.h>
 #include <reshade_api.hpp>
@@ -78,29 +77,18 @@ namespace sunshine_game3d {
     // counting without frame generation). Only then may a difference covering
     // the whole frame mean full-screen UI rather than a mismatched pair.
     bool hudless_exact = false;
-    // Fix 3 (game3d_ui_change_set.h): the offered layer copy holds the frame
-    // of the Present this many Presents ago (ui_layer::live_capture::
-    // presents_since_copy; 0 within the copy's own interval), and the game's
-    // frame generation mode is known off at this Present (the Streamline
-    // observer read it; unknown is not off). The renderer counts the run of
-    // such real Presents: Present counting pairs the copy only within it.
-    std::uint32_t layer_presents_ago = 0;
-    bool fg_known_off = false;
     // S3 snapshot tickets (game3d_ui_ticket.h; shadow: nothing decides from
     // them while ui_ticket::identity_authoritative is false), one per offered
     // candidate in ui_ticket::slot order: 0-2 the tags, 3 the presented
     // colour, 4 the layer, 5 the HUD-less image.
     std::array<ui_ticket::ticket, ui_ticket::slot::count> tickets{};
     // The labels the CPU proposes for the GPU to verify against the stamps
-    // (0: not proposed): the offered layer copy's present label (its retained
-    // Present's, within a real span on the presenting queue) and token label
-    // (the newest ready Backbuffer tag's, with FG on, unknown or suspended),
-    // and the HUD-less image's present label (FG off).
+    // (0: not proposed): the offered layer copy's present label (the Present
+    // its count names, within a real span on the presenting queue) and token
+    // label (the newest ready Backbuffer tag's, with FG on, unknown or
+    // suspended), which only measure the copy's identity (no gate reads
+    // them), and the HUD-less image's present label (FG off).
     std::uint32_t expected_layer_present = 0, expected_layer_token = 0, expected_hudless_present = 0;
-    // frame_clock::label of this render: its Present's label, kept beside
-    // every Present the renderer retains (diagnostic_resources::
-    // retained_labels).
-    std::uint32_t present_label = 0;
   };
   struct ui_render_input {
     ui_input_kind kind = ui_input_kind::unavailable;
@@ -163,16 +151,6 @@ namespace sunshine_game3d {
   struct diagnostic_resources {
     reshade::api::resource source{}, linear_color{}, candidate{}, vertical_majorant{},
       vertical_field{}, final_field{}, sbs{}, ui_source{}, ui_plane_tiles{}, ui_plane_resolved{};
-    // Fix 3 (Dump 3D): the presented colors retained for the pre-UI change
-    // set's pairing, the Presents retained_offsets[i] before this render (1
-    // and 2; empty when that Present is not retained), and the offscreen UI
-    // layer copy this render's detection consumed (t7; empty when the render
-    // offered no layer).
-    std::array<reshade::api::resource, 2> retained_presents{};
-    std::array<std::uint32_t, 2> retained_offsets{1, 2};
-    // S3: the present label each retained Present was copied at (0 unknown).
-    std::array<std::uint32_t, 2> retained_labels{};
-    reshade::api::resource ui_layer_detected{};
     // S3: the stamp buffer (renderer::ui_stamps) the render's detection read,
     // and whether it is in copy_dest in this submission (else COMMON).
     reshade::api::resource ui_stamps{};
@@ -224,26 +202,18 @@ namespace sunshine_game3d {
     // when the two are not comparable or on a frame that is not a detection
     // sample (H1 d).
     std::uint32_t pre_ui_threshold_bits{};
-    // b2 word 5 (Sunshine_UIRules, rules_bits): still_bits is its
-    // ui_detection::still::flatten, set while H2's run is active in SDR Auto
-    // and the session enables it (UIFlattenStillScreens), zero otherwise
-    // (game3d_still_screen.h); the other bits are fix 3's
-    // (ui_detection::change_set: refine, rules::pin_only_ui, in Auto with
-    // UIPinOnlyUI=1, the layer pair's Present offset and the bound retained
-    // Presents) and fix 4's rules::darkening_measured (rule P2's darkening
-    // passes ran: every Auto detection frame with UIPinOnlyUI=1, sample
-    // frames in its shadow).
-    std::uint32_t still_bits{}, rules_bits{};
-    // Fix 3: the offered layer copy's Presents since the copy and its pairing
-    // (game3d_ui_change_set.h); zero and none without a layer.
-    std::uint32_t layer_presents_ago{};
-    change_set::pair_class layer_pairing = change_set::pair_class::none;
+    // b2 word 5 (Sunshine_UIStillScreen): ui_detection::still::flatten while
+    // H2's run is active in SDR Auto and the session enables it
+    // (UIFlattenStillScreens), zero otherwise (game3d_still_screen.h). Its
+    // bits 0x2-0x200 are reserved (ui_detection::reserved_rule_bits).
+    std::uint32_t still_bits{};
     // S3 (game3d_ui_ticket.h, shadow): b2 words 6-9, the labels the CPU
-    // proposed for the offered layer copy (present and token space) and the
-    // HUD-less image (present space), 0 not proposed, and
-    // Sunshine_UIIdentity (ui_detection::identity: token_batch, and the
-    // gates, pushed only while identity is authoritative). The GPU verified
-    // them against the stamp buffer (renderer::ui_stamps) of this render.
+    // proposed for the offered layer copy (present and token space, measured
+    // only) and the HUD-less image (present space), 0 not proposed, and
+    // Sunshine_UIIdentity (ui_detection::identity:
+    // token_batch, and gate_hudless, pushed only while identity is
+    // authoritative). The GPU verified them against the stamp buffer
+    // (renderer::ui_stamps) of this render.
     std::uint32_t expected_layer_present{}, expected_layer_token{}, expected_hudless_present{}, identity_bits{};
   };
   inline const char *name(ui_detection_snapshot::run_state value) {
@@ -387,18 +357,6 @@ namespace sunshine_game3d {
     // also numbers Presents for colors retained for late HUD-less pairing.
     void begin_present();
     void finish_present();
-    // Fix 3, Dump 3D: while armed, every Present's color is retained (the
-    // dump carries the Presents the pre-UI change set pairs with). A render
-    // that will be dumped (capture) defers retaining its own color, so that
-    // the dump still finds the Presents one and two before it; the caller
-    // then records the owed copy with finish_retention after the dump's.
-    void set_dump_retention(bool armed, bool capture);
-    // Fix 4 (rule P2, pin only UI): whether detection dispatches the
-    // darkening passes (on by default). The runtime test's GPU cost A/B
-    // clears it, which behaves as a shader without them: nothing measures or
-    // unpins darkening. Nothing in the add-on clears it.
-    void set_darkening_passes(bool enabled);
-    void finish_retention(reshade::api::command_list *commands);
     // Marks the start of this presentation's input work for the GPU profile.
     void begin_gpu_profile(reshade::api::command_list *commands);
     // Completed-frame GPU stage times since the last call; resets the window.

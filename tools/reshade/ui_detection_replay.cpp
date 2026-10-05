@@ -14,20 +14,8 @@
 // (game3d_scene_guard.h) derive them from the frame's own measured evidence;
 // pre_ui_proven stands for the acceptance ledger's pre-UI proof of the offered
 // layer's signature (H1 d). H2's still-screen flag (b2 word 5) is the dump's
-// own (replay.ui_detection.rules_bits, else still_bits, zero when absent); a
-// single frame has no previous cell means, so its stillness counts read
-// nothing compared. Fix 3: a label's refine pushes the refine rule bit, and
-// the layer pairs with a retained Present the dump carries (layer_pair) or,
-// absent one, is late; the pre-UI change set is offered as the renderer
-// offers it (change_set::offered), and every line shows the change-set
-// shadow that change_set::measure_shadow reads from texels 13-15. Fix 4
-// (pin only UI, rule P2): a shader with the darkening planes runs its
-// darkening passes after the reduce as the renderer does on a sample frame
-// (b2 word 5 always has rules::darkening_measured, and rules::tag_linear
-// with a float UI color tag; refine, or its alias pin_only_ui, adds
-// rules::pin_only_ui, so the mask pass applies it), and every line of an
-// eligible source shows words 62-63 against game3d_ui_darkening.h's CPU
-// reference on the same inputs.
+// own (replay.ui_detection.still_bits, zero when absent); a single frame has
+// no previous cell means, so its stillness counts read nothing compared.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -37,8 +25,6 @@
 #include <nlohmann/json.hpp>
 
 #include "game3d_scene_guard.h"
-#include "game3d_ui_change_set.h"
-#include "game3d_ui_darkening.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
 
@@ -65,7 +51,6 @@ namespace {
   namespace word = contract::decision_word;
   namespace selection = sunshine_game3d::ui_selection;
   namespace candidate = contract::candidate;
-  namespace ui_darkening = sunshine_game3d::ui_darkening;
   using Microsoft::WRL::ComPtr;
   using json = nlohmann::json;
 
@@ -93,16 +78,13 @@ namespace {
   // Candidate kinds by artifact name and their bits in candidate layout 2:
   // t11 UI alpha (R), t12 UI color tag (A), t13 Backbuffer (A), current color
   // alpha (t0 A), t14 HUD-less, and an offscreen UI layer from the census
-  // (ui_layer_candidate_N) or the copy detection consumed (ui_layer_detected,
-  // fix 3) at t7 with the renderer's layer flags. Layout 1
+  // (ui_layer_candidate_N) at t7 with the renderer's layer flags. Layout 1
   // shaders (no SUNSHINE_UI_CANDIDATE_LAYOUT marker) take the layer in the UI
   // color slot (t12, bit 0x2) and trusted slot indices in b2 word 2.
   const std::map<std::string, unsigned> candidate_bits{{"sl_ui_alpha", candidate::ui_alpha},
     {"sl_ui_color_alpha", candidate::ui_color}, {"sl_backbuffer", candidate::backbuffer}, {"current", candidate::current},
     {"sl_hudless_color", candidate::hudless}};
-  bool ui_layer_kind(const std::string &name) {
-    return name.rfind("ui_layer_candidate_", 0) == 0 || name == "ui_layer_detected";
-  }
+  bool ui_layer_kind(const std::string &name) { return name.rfind("ui_layer_candidate_", 0) == 0; }
   // A candidate name's bit in the given layout; zero when unknown.
   unsigned candidate_bit(const std::string &name, std::uint32_t layout) {
     if (ui_layer_kind(name)) return layout >= contract::candidate_layout ? candidate::layer : candidate::ui_color;
@@ -180,8 +162,7 @@ namespace {
     gpu.context->CopyResource(staging.Get(), source.texture.Get());
     D3D11_MAPPED_SUBRESOURCE mapped{};
     checked(gpu.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "map");
-    const size_t per_row =
-      desc.Width * (sizeof(T) == 4 && (desc.Format == DXGI_FORMAT_R32_FLOAT || desc.Format == DXGI_FORMAT_R32_UINT) ? 1 : 4);
+    const size_t per_row = desc.Width * (sizeof(T) == 4 && desc.Format == DXGI_FORMAT_R32_FLOAT ? 1 : 4);
     std::vector<T> values(per_row * desc.Height);
     for (UINT y = 0; y < desc.Height; ++y)
       std::memcpy(values.data() + y * per_row, static_cast<const char *>(mapped.pData) + size_t(y) * mapped.RowPitch, per_row * sizeof(T));
@@ -208,21 +189,14 @@ namespace {
 
   // One component of every texel as Texture2D<float4>.Load returns it (absent
   // components read 0, absent alpha 1): the CPU reference for mask_exact.
-  // Empty for a format without an exact reference here, sRGB colour
-  // included unless srgb_decoded: the darkening reference (fix 4) decodes it
-  // with the sRGB EOTF in double, rounded to float, as the load does to well
-  // within its 4/255 colour tolerance.
-  std::vector<float> component(const artifact_t &a, unsigned channel, bool srgb_decoded = false) {
+  // Empty for a format without an exact reference here.
+  std::vector<float> component(const artifact_t &a, unsigned channel) {
     const auto format = a.descriptor.at("dxgi_format").get<unsigned>();
     const auto width = a.descriptor.at("width").get<size_t>(), height = a.descriptor.at("height").get<size_t>();
     const auto row = a.descriptor.at("row_bytes").get<size_t>();
     const auto *bytes = reinterpret_cast<const unsigned char *>(a.bytes.data());
     std::vector<float> values(width * height);
     const auto texel = [&](size_t x, size_t y, size_t size) { return bytes + y * row + x * size; };
-    const auto decoded = [](unsigned char code) {
-      const double c = code / 255.;
-      return float(c <= .04045 ? c / 12.92 : std::pow((c + .055) / 1.055, 2.4));
-    };
     for (size_t y = 0; y < height; ++y) for (size_t x = 0; x < width; ++x) {
       float &value = values[y * width + x];
       switch (format) {
@@ -235,18 +209,10 @@ namespace {
           value = channel == 3 ? float(packed >> 30) / 3.f : float((packed >> (10 * channel)) & 1023u) / 1023.f; break;
         }
         case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-          if (format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB && channel != 3) { // sRGB color is decoded on load.
-            if (!srgb_decoded) return {};
-            value = decoded(texel(x, y, 4)[channel]);
-            break;
-          }
+          if (format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB && channel != 3) return {}; // sRGB color is decoded on load.
           value = float(texel(x, y, 4)[channel]) / 255.f; break;
         case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
-          if (format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB && channel != 3) {
-            if (!srgb_decoded) return {};
-            value = decoded(texel(x, y, 4)[2 - channel]);
-            break;
-          }
+          if (format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB && channel != 3) return {};
           value = float(texel(x, y, 4)[channel == 3 ? 3 : 2 - channel]) / 255.f; break;
         case DXGI_FORMAT_R32_FLOAT:
           if (channel) value = channel == 3 ? 1.f : 0.f; else std::memcpy(&value, texel(x, y, 4), 4);
@@ -268,9 +234,7 @@ namespace {
   }
 
   struct shaders_t {
-    ComPtr<ID3D11ComputeShader> tiles, reduce, mask, cells, compare, evidence, bits, count;
-    // Fix 4: the darkening passes.
-    ComPtr<ID3D11ComputeShader> dark_bits, dark_tiles, dark_region, dark_count, dark_finish;
+    ComPtr<ID3D11ComputeShader> tiles, reduce, mask, cells, compare, evidence;
   };
 
   ComPtr<ID3D11ComputeShader> compile(device_t &gpu, const std::string &source, const char *entry, UINT width, UINT height, unsigned color) {
@@ -295,8 +259,7 @@ namespace {
   // selection revision 4 (12 decision texels) the pre-UI pixel rows 128-143
   // (144 rows in all) and decision texel 11, and selection revision 5 (13
   // decision texels) H2's stillness rows from 144 (160 rows in all) and
-  // decision texel 12, and (fix 4, the darkening planes) the darkening rows
-  // from 192 (208 rows in all).
+  // decision texel 12.
   struct sizes_t {
     UINT statistics_rows, decision_texels;
     bool scene;
@@ -304,35 +267,12 @@ namespace {
   sizes_t detection_sizes(const std::string &source) {
     auto texels = sunshine_game3d::shader_marker(source, contract::decision_texels_marker);
     const auto images = sunshine_game3d::shader_marker(source, contract::scene_evidence_images_marker);
-    const auto planes = sunshine_game3d::shader_marker(source, contract::change_set::planes_marker);
     if (!texels) texels = contract::default_decision_texels;
     const bool scene = images == contract::max_scene_evidence_images && texels >= contract::scene_decision_texels;
     if (texels > contract::max_decision_texels || (images && !scene))
       throw std::runtime_error("unsupported detection size markers in the shader");
-    return {std::max(80u, contract::statistics_rows(images, texels, planes)), std::max(6u, texels), scene};
+    return {std::max(80u, contract::statistics_rows(images, texels)), std::max(6u, texels), scene};
   }
-
-  // Fix 4: the darkening of the decided source (decision words 62-63)
-  // against ui_darkening's CPU reference on the same inputs. The GPU's own
-  // classes come from its planes (DARK, STRUCT and TILE after the region
-  // pass) by the mask pass's rule; GPU and CPU may round apart where a
-  // pixel's residual, fit or opacity step, or a tile's effect, lies at its
-  // bound, so a differing unpinned pixel is excused within two pixels of
-  // such a pixel, in the 3x3 tile ring of such a tile, or in a darkening
-  // region with such a tile in the ring of one of its tiles (at_bound: one
-  // tile can turn a whole region), and any other fails the case. The
-  // colourless bit of word 63 must equal the CPU reference's.
-  struct darkening_t {
-    bool measured = false;
-    std::string reference; // Why there is no CPU reference; empty with one.
-    ui_darkening::counts cpu;
-    std::uint64_t gpu_unpinned = 0, gpu_kept = 0, differ = 0, at_bound = 0;
-    std::size_t first = 0;
-    // The CPU reference's unpinned pixels (empty without one), which the
-    // mask references zero when the mask pass applied the rule.
-    std::vector<std::uint8_t> unpinned;
-    bool applied = false, ok = true;
-  };
 
   struct outcome {
     std::vector<std::uint32_t> decision;
@@ -341,20 +281,11 @@ namespace {
     std::vector<float> mask;
     UINT width = 0, height = 0;
     // The candidate layout, and the pushed candidate bits, accepted mask,
-    // detection flags (of the second pass when measured) and b2 word 5's
-    // rule bits.
-    std::uint32_t layout = 0, offered = 0, accepted = 0, flags = 0, rules = 0;
+    // detection flags (of the second pass when measured) and H2's b2 word 5.
+    std::uint32_t layout = 0, offered = 0, accepted = 0, flags = 0, still = 0;
     // scene_hold "measured": the per-frame bits the scene guard derived.
     bool measured = false;
     std::uint32_t guard_bits = 0;
-    // Fix 3: the layer's pairing, the label's refine and pre_ui_proven, and
-    // the change-set shadow; mask_reference's verdict when asked for.
-    sunshine_game3d::change_set::layer_pairing pairing;
-    bool refine = false, pre_ui_proven = false;
-    sunshine_game3d::change_set::shadow_sample shadow;
-    std::string mask_reference;
-    // Fix 4: the decided source's darkening against its CPU reference.
-    darkening_t darkening;
     // S3: the stamps and proposals pushed (b2 words 6-9 and t9), whether the
     // package or the label carried any (a legacy package replays with none
     // proposed and no gate, as the renderer did before S3), and whether the
@@ -367,9 +298,9 @@ namespace {
   // carries the renderer's b2 words 6-9 (expected_layer_present,
   // expected_layer_token, expected_hudless_present, identity_bits) and its
   // stamp buffer read back (stamps: one [C_P, C_T] per ui_ticket slot, the
-  // layer at 4 and the HUD-less image at 5); a label's identity object
-  // (the same names, plus layer_present, layer_token and hudless_present for
-  // the stamp reads) overrides any of them.
+  // layer at 4 and the HUD-less image at 5); a label's identity object (the
+  // same names, plus layer_present, layer_token and hudless_present for the
+  // stamp reads) overrides any of them.
   selection::identity_input identity_of(const json &metadata, const json &label, bool &labelled) {
     selection::identity_input in;
     labelled = false;
@@ -431,9 +362,7 @@ namespace {
   std::string mask_exact(const outcome &result, const std::array<const artifact_t *, 4> &inputs, const artifact_t *layer,
       const artifact_t &paired) {
     // Raw selected alpha, or a whole-frame flat (sources 6, 8 and 11); a
-    // HUD-less difference has no CPU reference here. Where the mask pass
-    // applied the darkening rule (fix 4), the CPU reference's unpinned
-    // pixels read zero.
+    // HUD-less difference has no CPU reference here.
     const auto source = result.decision.at(word::source);
     std::vector<float> reference;
     if (!source) reference.assign(result.mask.size(), 0.f);
@@ -445,12 +374,6 @@ namespace {
       if (reference.empty()) return "no-reference(format " + input->descriptor.at("dxgi_format").dump() + ")";
     } else return "no-reference(source " + std::to_string(source) + ")";
     if (reference.size() != result.mask.size()) return "differs(extent)";
-    if (result.darkening.applied) {
-      if (result.darkening.unpinned.size() != reference.size())
-        return "no-reference(darkening applied without its CPU reference: " + result.darkening.reference + ")";
-      for (size_t i = 0; i < reference.size(); ++i)
-        if (result.darkening.unpinned[i]) reference[i] = 0.f;
-    }
     std::uint64_t different = 0;
     size_t first = 0;
     for (size_t i = 0; i < reference.size(); ++i) {
@@ -465,265 +388,6 @@ namespace {
       static_cast<unsigned long long>(different), first % result.width, first / result.width,
       double(result.mask[first]), double(reference[first]));
     return text;
-  }
-
-  // mask_reference (fix 3): the pre-UI change set's mask (source 12) against
-  // a CPU reference of the same rule, the layer against its pair's Present
-  // changed beyond change_set::inferred_scale times b2 word 1 and kept by the
-  // 3x3 rule, and (fix 4) without the darkening reference's unpinned pixels
-  // where the mask pass applied the rule. GPU and CPU arithmetic may round a
-  // pixel on the bound apart, so at most 0.01% of the pixels may differ.
-  std::string mask_reference(const outcome &result, const artifact_t *layer, const artifact_t *pair, float threshold,
-      unsigned color) {
-    if (result.decision.at(word::source) != contract::source_pre_ui) return "no-reference(source not 12)";
-    if (!layer || !pair) return "no-reference(no layer pair)";
-    if (result.darkening.applied && result.darkening.unpinned.size() != result.mask.size())
-      return "no-reference(darkening applied without its CPU reference: " + result.darkening.reference + ")";
-    std::array<std::vector<float>, 3> final, pre;
-    for (unsigned c = 0; c != 3; ++c) {
-      final[c] = component(*pair, c);
-      pre[c] = component(*layer, c);
-      if (final[c].size() != result.mask.size() || pre[c].size() != result.mask.size())
-        return "no-reference(format or extent)";
-    }
-    const float bound = threshold * float(contract::change_set::inferred_scale);
-    const std::size_t width = result.width, height = result.height;
-    std::vector<std::uint8_t> changed(width * height);
-    for (std::size_t i = 0; i != changed.size(); ++i) {
-      bool finite = true;
-      float peak = 0.f, delta = 0.f;
-      for (unsigned c = 0; c != 3; ++c) {
-        finite = finite && std::isfinite(final[c][i]) && std::isfinite(pre[c][i]);
-        peak = std::max(peak, std::abs(final[c][i]));
-        delta = std::max(delta, std::abs(final[c][i] - pre[c][i]));
-      }
-      changed[i] = finite && delta / (color == 2 ? std::max(1.f, peak) : 1.f) > bound;
-    }
-    std::uint64_t different = 0, reference_pixels = 0;
-    for (std::size_t y = 0; y != height; ++y)
-      for (std::size_t x = 0; x != width; ++x) {
-        std::uint32_t count = 0;
-        if (changed[y * width + x])
-          for (int dy = -1; dy <= 1; ++dy)
-            for (int dx = -1; dx <= 1; ++dx) {
-              const auto nx = std::ptrdiff_t(x) + dx, ny = std::ptrdiff_t(y) + dy;
-              if (nx >= 0 && ny >= 0 && nx < std::ptrdiff_t(width) && ny < std::ptrdiff_t(height))
-                count += changed[std::size_t(ny) * width + std::size_t(nx)];
-            }
-        const bool unpinned = result.darkening.applied && result.darkening.unpinned[y * width + x];
-        const float reference = count >= contract::change_set::min_neighbourhood && !unpinned ? 1.f : 0.f;
-        reference_pixels += reference > 0.f;
-        different += result.mask[y * width + x] != reference;
-      }
-    char text[160];
-    std::snprintf(text, sizeof(text), "%s(%llu of %llu pixels differ, reference %llu UI pixels)",
-      different * 10000u <= std::uint64_t(width) * height ? "match" : "differs", static_cast<unsigned long long>(different),
-      static_cast<unsigned long long>(width * height), static_cast<unsigned long long>(reference_pixels));
-    return text;
-  }
-
-  // Fix 4: the darkening mirror of an eligible decided source (not reused,
-  // as no replay is). planes are the GPU's plane words (DARK, STRUCT and
-  // TILE); the CPU reference reads the source's own artifacts: the UI color
-  // tag (2) and the layer (10) by opacity, the paired color against the
-  // HUD-less image (5, k 1) and the layer pair's Present against the layer
-  // (12, k change_set::inferred_scale, with the 3x3 rule) by change set, at
-  // the change-set slot's threshold t.
-  darkening_t darkening_of(const std::vector<std::uint32_t> &decision, const std::vector<std::uint32_t> &planes, UINT width,
-      UINT height, std::uint32_t rules, std::uint32_t flags, unsigned color, float t, const artifact_t *tag, const artifact_t *layer,
-      const artifact_t *paired, const artifact_t *hudless, const artifact_t *pair) {
-    darkening_t r;
-    if (decision.size() <= word::dk_kept) return r;
-    const auto source = decision[word::source];
-    if (!contract::darkening_dispatched(rules, source, (decision[word::frame_reason] & contract::frame_reason_reused) != 0u))
-      return r;
-    r.measured = true;
-    r.applied = contract::darkening_applied(rules, source);
-    namespace plane = contract::change_set::plane;
-    const std::size_t count = std::size_t(width) * height, words = contract::change_set::plane_words(width),
-      row = contract::change_set::planes * words;
-    if (planes.size() != row * height) {
-      r.reference = "no planes";
-      r.ok = false;
-      return r;
-    }
-    const auto bit = [&](std::uint32_t p, std::uint32_t x, std::uint32_t y) {
-      return ((planes[std::size_t(y) * row + p * words + x / 32u] >> (x % 32u)) & 1u) != 0u;
-    };
-    const bool opacity = ui_darkening::opacity_source(source);
-    // The GPU's classes, by the mask pass's rule: 1 kept, 2 unpinned. An
-    // opacity source unpins only on a frame with colour (TILE row 1, word 0,
-    // bit 0), a change set only in a tile whose region unpins (row 3 ty + 2).
-    const bool coloured = opacity && height > 1u && bit(plane::tile, 0u, 1u);
-    std::vector<std::uint8_t> gpu(count);
-    for (std::uint32_t y = 0; y != height; ++y)
-      for (std::uint32_t x = 0; x != width; ++x) {
-        if (!bit(plane::dark, x, y)) continue;
-        bool kept = false;
-        if (bit(plane::structure, x, y)) {
-          unsigned around = 0;
-          for (int dy = -1; dy <= 1; ++dy)
-            for (int dx = -1; dx <= 1; ++dx) {
-              const int nx = int(x) + dx, ny = int(y) + dy;
-              if (nx >= 0 && ny >= 0 && nx < int(width) && ny < int(height))
-                around += bit(plane::structure, std::uint32_t(nx), std::uint32_t(ny)) ? 1u : 0u;
-            }
-          kept = around >= contract::change_set::min_neighbourhood;
-        }
-        const std::uint32_t tx = x / ui_darkening::tile, ty = y / ui_darkening::tile;
-        const std::uint32_t region_row = contract::darkening::tile_rows * ty + 2u;
-        const bool proven = opacity ? coloured : region_row < height && bit(plane::tile, tx, region_row);
-        const bool unpinned = !kept && proven;
-        gpu[std::size_t(y) * width + x] = unpinned ? 2u : 1u;
-        (unpinned ? r.gpu_unpinned : r.gpu_kept) += 1u;
-      }
-    // The count and finish passes sum exactly these classes.
-    const bool colourless = (decision[word::dk_kept] & contract::darkening::colourless) != 0u;
-    if (r.gpu_unpinned != decision[word::dk_unpinned] || r.gpu_kept != (decision[word::dk_kept] & ~contract::darkening::colourless) ||
-        colourless != (opacity && !coloured)) {
-      r.reference = "words 62-63 differ from the GPU planes";
-      r.ok = false;
-      return r;
-    }
-    // The CPU reference.
-    const auto channels = [&](const artifact_t *a) {
-      std::array<std::vector<float>, 4> values;
-      if (!a) return values;
-      for (unsigned c = 0; c != 4; ++c) values[c] = component(*a, c, true);
-      return values;
-    };
-    const auto usable = [&](const std::array<std::vector<float>, 4> &values) {
-      return std::all_of(values.begin(), values.end(), [&](const std::vector<float> &v) { return v.size() == count; });
-    };
-    const auto rgb_of = [&](const std::array<std::vector<float>, 4> &values) {
-      std::vector<ui_darkening::rgb> image(count);
-      for (std::size_t i = 0; i != count; ++i) image[i] = {values[0][i], values[1][i], values[2][i]};
-      return image;
-    };
-    ui_darkening::result reference;
-    std::vector<std::uint8_t> fragile(count), fragile_tiles;
-    const std::uint32_t tiles_x = ui_darkening::tiles(width), tiles_y = ui_darkening::tiles(height);
-    const auto tile_of = [&](std::size_t i) {
-      return (i / width / ui_darkening::tile) * tiles_x + (i % width) / ui_darkening::tile;
-    };
-    if (opacity) {
-      const auto values = channels(source == 2u ? tag : layer);
-      if (!usable(values)) {
-        r.reference = "no CPU reference for the source's format";
-        return r;
-      }
-      // A float source stores linear colour: the tag by its own format
-      // (rules::tag_linear), the layer by its flags (stored_hdr_headroom).
-      const bool linear = source == 2u ? (rules & contract::rules::tag_linear) != 0u : (flags & contract::stored_hdr_headroom) != 0u;
-      reference = ui_darkening::reference_opacity(width, height, rgb_of(values), values[3], linear);
-      if (reference.colourless != colourless) {
-        r.reference = std::string("the colourless bit differs from the CPU reference's (GPU ") + (colourless ? "1" : "0") + ")";
-        r.ok = false;
-        return r;
-      }
-    } else {
-      const bool pre_ui = source == contract::source_pre_ui;
-      const auto final_values = channels(pre_ui ? pair : paired), pre_values = channels(pre_ui ? layer : hudless);
-      if (!usable(final_values) || !usable(pre_values)) {
-        r.reference = "no CPU reference for the pair's formats";
-        return r;
-      }
-      const auto presented = rgb_of(final_values), pre = rgb_of(pre_values);
-      const float k = pre_ui ? float(contract::change_set::inferred_scale) : 1.f;
-      const auto mask = ui_darkening::change_set_mask(width, height, presented, pre, t, k, color, pre_ui);
-      reference = ui_darkening::reference_change_set(width, height, presented, pre, mask, t, k, color);
-      // Pixels at a bound: the residual within 1% of its bound, the fit at 1,
-      // the changed bound, and opacity steps at the step bound (PQ's pow
-      // rounds most); then tiles with such a pixel or an effect within 1% of
-      // the tile bound.
-      const float margin = color == ui_darkening::color_space::pq ? 1e-3f : 1e-5f;
-      const float residual_bound = ui_darkening::change_set_tolerance_scale * t;
-      std::vector<ui_darkening::evidence> e(count);
-      std::vector<ui_darkening::tile_sums> sums(std::size_t(tiles_x) * tiles_y);
-      for (std::size_t i = 0; i != count; ++i) {
-        if (!ui_darkening::finite(presented[i]) || !ui_darkening::finite(pre[i])) continue;
-        e[i] = ui_darkening::change_set(presented[i], pre[i], t, k, mask[i] != 0u, color);
-        const auto fit = ui_darkening::fit_darkening(presented[i], pre[i], color);
-        const float delta = ui_darkening::color_difference(presented[i], pre[i], color);
-        if (std::abs(fit.residual - residual_bound) <= .01f * residual_bound || std::abs(fit.s_raw - 1.f) <= margin ||
-            std::abs(delta - k * t) <= margin * k * t)
-          fragile[i] = 1u;
-        if (e[i].fits) sums[tile_of(i)].add(presented[i], pre[i], color);
-      }
-      for (std::uint32_t y = 0; y != height; ++y)
-        for (std::uint32_t x = 0; x != width; ++x) {
-          const std::size_t i = std::size_t(y) * width + x;
-          for (const std::size_t n : {x + 1 < width ? i + 1 : i, y + 1 < height ? i + width : i}) {
-            if (n == i || !e[i].finite || !e[n].finite) continue;
-            const float step = std::abs(e[i].a - e[n].a) - e[i].sigma - e[n].sigma;
-            if (std::abs(step - ui_darkening::step) <= std::max(margin, 1e-4f)) fragile[i] = fragile[n] = 1u;
-          }
-        }
-      fragile_tiles.assign(sums.size(), 0u);
-      for (std::size_t i = 0; i != sums.size(); ++i) {
-        const double effect = ui_darkening::tile_effect(sums[i], t, color);
-        if (effect >= 0. && std::abs(effect - ui_darkening::tile_effect_scale) <= .01 * ui_darkening::tile_effect_scale)
-          fragile_tiles[i] = 1u;
-      }
-      for (std::size_t i = 0; i != count; ++i)
-        if (fragile[i]) fragile_tiles[tile_of(i)] = 1u;
-    }
-    r.cpu = reference.n;
-    // Fragile pixels reach two pixels (STRUCT reads 4-neighbours, kept a 3x3
-    // window); fragile tiles their 3x3 ring.
-    std::vector<std::uint8_t> close_to_bound(count);
-    for (std::uint32_t y = 0; y != height; ++y)
-      for (std::uint32_t x = 0; x != width; ++x) {
-        if (!fragile[std::size_t(y) * width + x]) continue;
-        for (int dy = -2; dy <= 2; ++dy)
-          for (int dx = -2; dx <= 2; ++dx) {
-            const int nx = int(x) + dx, ny = int(y) + dy;
-            if (nx >= 0 && ny >= 0 && nx < int(width) && ny < int(height)) close_to_bound[std::size_t(ny) * width + std::size_t(nx)] = 1u;
-          }
-      }
-    // Regions (change sets) with a fragile tile in the ring of a member.
-    std::vector<std::uint8_t> fragile_region;
-    if (!fragile_tiles.empty() && !reference.component.empty()) {
-      fragile_region.assign(std::size_t(reference.n.regions), 0u);
-      for (std::uint32_t ty = 0; ty != tiles_y; ++ty)
-        for (std::uint32_t tx = 0; tx != tiles_x; ++tx) {
-          const auto c = reference.component[std::size_t(ty) * tiles_x + tx];
-          if (c < 0) continue;
-          for (int dy = -1; dy <= 1; ++dy)
-            for (int dx = -1; dx <= 1; ++dx) {
-              const int nx = int(tx) + dx, ny = int(ty) + dy;
-              if (nx >= 0 && ny >= 0 && nx < int(tiles_x) && ny < int(tiles_y) &&
-                  fragile_tiles[std::size_t(ny) * tiles_x + std::size_t(nx)])
-                fragile_region[std::size_t(c)] = 1u;
-            }
-        }
-    }
-    r.unpinned.assign(count, 0u);
-    for (std::uint32_t y = 0; y != height; ++y)
-      for (std::uint32_t x = 0; x != width; ++x) {
-        const std::size_t i = std::size_t(y) * width + x;
-        const bool cpu = reference.classes[i] == ui_darkening::pixel_class::unpinned;
-        r.unpinned[i] = cpu ? 1u : 0u;
-        if (cpu == (gpu[i] == 2u)) continue;
-        bool excused = close_to_bound[i] != 0u;
-        if (!excused && !fragile_region.empty()) {
-          const auto c = reference.component[std::size_t(y / ui_darkening::tile) * tiles_x + x / ui_darkening::tile];
-          excused = c >= 0 && fragile_region[std::size_t(c)];
-        }
-        if (!excused && !fragile_tiles.empty()) {
-          const int tx = int(x / ui_darkening::tile), ty = int(y / ui_darkening::tile);
-          for (int dy = -1; dy <= 1 && !excused; ++dy)
-            for (int dx = -1; dx <= 1 && !excused; ++dx) {
-              const int nx = tx + dx, ny = ty + dy;
-              excused = nx >= 0 && ny >= 0 && nx < int(tiles_x) && ny < int(tiles_y) &&
-                fragile_tiles[std::size_t(ny) * tiles_x + std::size_t(nx)];
-            }
-        }
-        if (excused) ++r.at_bound;
-        else if (!r.differ++) r.first = i;
-      }
-    r.ok = r.differ == 0u;
-    return r;
   }
 
   outcome run_case(device_t &gpu, const std::string &shader_source, const fs::path &dump, const json &label) {
@@ -784,38 +448,6 @@ namespace {
       }
     }
     if (label.value("exact", false) && (bits & candidate::hudless)) bits |= candidate::exact;
-    // Fix 3: the layer's pairing. layer_pair names the retained Present the
-    // dump carries (retained_present_1 at t2, retained_present_2 at t3);
-    // without one the copy is the one-frame-late layer, paired with nothing
-    // retained (late). layer_pair_exact, a test-only override, binds the
-    // presented color at t2 as the retained Present one back, to exercise
-    // the decision path on dumps taken before retained Presents existed.
-    namespace change_set = sunshine_game3d::change_set;
-    change_set::layer_pairing pairing;
-    const artifact_t *pair_input = nullptr; // t2 or t3
-    std::string pair_kind;
-    bool retained_1 = false, retained_2 = false;
-    // Fix 4: pin_only_ui is the same switch under its UIPinOnlyUI name.
-    const bool refine = label.value("refine", false) || label.value("pin_only_ui", false),
-      pair_exact = label.value("layer_pair_exact", false);
-    if (pair_exact && label.contains("layer_pair")) throw std::runtime_error("layer_pair and layer_pair_exact exclude each other");
-    if (layer_input) {
-      pairing = {change_set::pair_class::late, 0u};
-      if (pair_exact) pair_kind = "source_color";
-      else if (label.contains("layer_pair")) {
-        pair_kind = label.at("layer_pair").get<std::string>();
-        if (pair_kind != "retained_present_1" && pair_kind != "retained_present_2")
-          throw std::runtime_error("layer_pair must be retained_present_1 or retained_present_2");
-      }
-      if (!pair_kind.empty()) {
-        pair_input = &load(pair_kind);
-        retained_2 = pair_kind == "retained_present_2";
-        retained_1 = !retained_2;
-        pairing = {change_set::pair_class::retained, retained_2 ? 2u : 1u};
-      }
-    } else if (pair_exact || label.contains("layer_pair")) {
-      throw std::runtime_error("layer_pair needs an offered layer in candidate layout 2");
-    }
     unsigned accepted = 0;
     for (const auto &kind : label.value("accepted", json::array())) {
       const auto name = kind.get<std::string>();
@@ -845,22 +477,6 @@ namespace {
     if (pre_ui_proven && !(bits & contract::candidate::layer))
       throw std::runtime_error("pre_ui_proven needs an offered layer");
     if (pre_ui_proven) flags |= contract::per_frame_pre_ui_proven;
-    // The pre-UI change set as the renderer offers it: Auto with the switch
-    // (refine), the proven layer, no HUD-less image and an exact retained
-    // pairing whose two images are comparable; its acceptance is the proof
-    // (the pre_ui key of the layer's signature).
-    std::optional<float> pre_ui_pair_threshold;
-    std::string layer_name;
-    for (const auto &kind : label.at("candidates"))
-      if (ui_layer_kind(kind.get<std::string>())) layer_name = kind.get<std::string>();
-    if (pair_input && !layer_name.empty())
-      pre_ui_pair_threshold = selection::comparable(encoding_of(layer_name), encoding_of(pair_kind));
-    if (pre_ui_pair_threshold &&
-        change_set::offered(true, refine, pre_ui_proven, (bits & candidate::hudless) != 0u, pairing)) {
-      bits |= candidate::pre_ui;
-      accepted |= candidate::pre_ui;
-      signatures[std::size_t(selection::kind::pre_ui)] = selection::pre_ui_key(signatures[std::size_t(selection::kind::ui_layer)]);
-    }
     if (label.contains("scene_hold")) {
       const auto &hold = label.at("scene_hold");
       if (hold.is_string() && hold.get<std::string>() == "measured") measured = true;
@@ -907,38 +523,18 @@ namespace {
       shaders.compare = compile(gpu, shader_source, "SunshineSceneCompareCS", width, height, color);
       shaders.evidence = compile(gpu, shader_source, "SunshineSceneEvidenceCS", width, height, color);
     }
-    // Fix 3: a shader with the change-set shadow's bit planes measures it in
-    // passes of its own after the tiles pass, as the renderer dispatches them.
-    // Fix 4: its planes marker also says it has the darkening passes.
-    const bool planes = sunshine_game3d::shader_marker(shader_source, contract::change_set::planes_marker) ==
-      contract::change_set::planes;
-    texture_t plane_texture;
-    if (planes) {
-      shaders.bits = compile(gpu, shader_source, "SunshineUIDetectionChangeSetBitsCS", width, height, color);
-      shaders.count = compile(gpu, shader_source, "SunshineUIDetectionChangeSetCountCS", width, height, color);
-      shaders.dark_bits = compile(gpu, shader_source, "SunshineUIDarkeningBitsCS", width, height, color);
-      shaders.dark_tiles = compile(gpu, shader_source, "SunshineUIDarkeningTilesCS", width, height, color);
-      shaders.dark_region = compile(gpu, shader_source, "SunshineUIDarkeningRegionCS", width, height, color);
-      shaders.dark_count = compile(gpu, shader_source, "SunshineUIDarkeningCountCS", width, height, color);
-      shaders.dark_finish = compile(gpu, shader_source, "SunshineUIDarkeningFinishCS", width, height, color);
-      plane_texture = target(gpu, contract::change_set::planes * contract::change_set::plane_words(width), height,
-        DXGI_FORMAT_R32_UINT);
-    }
     auto statistics = target(gpu, 16, sizes.statistics_rows, DXGI_FORMAT_R32G32B32A32_UINT);
     texture_t cells;
     if (sizes.scene) cells = target(gpu, contract::scene::cells_x, contract::scene::cells_y, DXGI_FORMAT_R32G32B32A32_UINT);
     auto decision = target(gpu, sizes.decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT);
     auto mask = target(gpu, width, height, DXGI_FORMAT_R32_FLOAT);
-    // Detection constants b2: candidate bits, difference threshold (the
-    // change-set slot's pair: the HUD-less pair, or the pre-UI layer's when
-    // its change set is offered), accepted candidates (layout 1: trusted
-    // slots), flags, (selection revision 4) the offscreen UI layer's pair
-    // threshold with the presented color, from the two artifacts' own
-    // encodings (zero without a layer or when not comparable), and
-    // (selection revision 5) b2 word 5: H2's still-screen flag as the dump
-    // recorded it and (revision 6) the label's refine and the pairing's rule
-    // bits, padded to the 16-byte constant buffer granularity.
-    const float threshold = pair_threshold ? *pair_threshold : (bits & candidate::pre_ui) ? *pre_ui_pair_threshold :
+    // Detection constants b2: candidate bits, difference threshold, accepted
+    // candidates (layout 1: trusted slots), flags, (selection revision 4)
+    // the offscreen UI layer's pair threshold with the presented color, from
+    // the two artifacts' own encodings (zero without a layer or when not
+    // comparable), and (selection revision 5) H2's still-screen flag as the
+    // dump recorded it, padded to the 16-byte constant buffer granularity.
+    const float threshold = pair_threshold ? *pair_threshold :
       selection::comparable(encoding_of(paired), encoding_of(paired)).value_or(2.f / 255.f);
     float pre_ui_threshold = 0.f;
     for (const auto &kind : label.at("candidates"))
@@ -946,19 +542,9 @@ namespace {
         pre_ui_threshold =
           selection::comparable(encoding_of(kind.get<std::string>()), encoding_of("source_color")).value_or(0.f);
     std::uint32_t still = 0;
-    if (const auto &replay = metadata.at("replay"); replay.contains("ui_detection")) {
-      const auto &recorded = replay.at("ui_detection");
-      if (recorded.contains("rules_bits")) still = recorded.at("rules_bits").get<std::uint32_t>() & contract::still::flatten;
-      else if (recorded.contains("still_bits")) still = recorded.at("still_bits").get<std::uint32_t>();
-    }
-    // The shadow bit as the renderer pushes it: the offered layer proven the
-    // pre-UI scene image (pre_ui_proven); a single frame has no T1 gap. Fix
-    // 4: a replay frame is a sample, so the darkening passes always measure,
-    // with rules::tag_linear when the UI color tag has a float format.
-    const bool tag_linear = inputs[1] && contract::float_layer_format(inputs[1]->descriptor.at("dxgi_format").get<std::uint32_t>());
-    const std::uint32_t rules = still |
-      change_set::rule_bits(false, refine, pre_ui_proven, false, pairing, retained_1, retained_2) |
-      (planes ? contract::rules::darkening_measured | (tag_linear ? contract::rules::tag_linear : 0u) : 0u);
+    if (const auto &replay = metadata.at("replay"); replay.contains("ui_detection") &&
+        replay.at("ui_detection").contains("still_bits"))
+      still = replay.at("ui_detection").at("still_bits").get<std::uint32_t>();
     // S3: b2 words 6-9 and the stamp buffer at t9 (identity_of; a legacy
     // package proposes nothing and pushes no gate).
     bool identity_labelled = false;
@@ -968,10 +554,10 @@ namespace {
       float threshold;
       std::uint32_t accepted, flags;
       float pre_ui_threshold;
-      std::uint32_t rules;
+      std::uint32_t still;
       std::uint32_t expected_layer_present, expected_layer_token, expected_hudless_present, identity_bits;
       std::uint32_t padding[2];
-    } constants{bits, threshold, accepted, flags, pre_ui_threshold, rules, identity.expected_layer_present,
+    } constants{bits, threshold, accepted, flags, pre_ui_threshold, still, identity.expected_layer_present,
       identity.expected_layer_token, identity.expected_hudless_present, identity.bits, {}};
     static_assert(sizeof(constants) == 48);
     ComPtr<ID3D11Buffer> stamp_buffer;
@@ -1003,17 +589,12 @@ namespace {
     auto cb = constant_buffer(&constants, sizeof(constants));
 
     auto &context = *gpu.context.Get();
-    // The count pass's bit planes (t8).
-    ID3D11ShaderResourceView *t8 = nullptr;
     const auto stage = [&](ID3D11ComputeShader *shader, ID3D11ShaderResourceView *t10, UINT uav_slot, ID3D11UnorderedAccessView *uav, UINT x, UINT y) {
       std::array<ID3D11ShaderResourceView *, 15> views{};
       views[0] = paired_color.gpu.srv.Get();
       views[1] = depth.srv.Get();
-      // Fix 3: the retained Present of the layer pair (t2 one back, t3 two).
-      if (pair_input) views[retained_2 ? 3 : 2] = pair_input->gpu.srv.Get();
       views[6] = presented.gpu.srv.Get();
       views[7] = layer_input ? layer_input->gpu.srv.Get() : nullptr;
-      views[8] = t8;
       views[9] = stamp_view.Get();
       views[10] = t10;
       for (unsigned i = 0; i < 4; ++i) views[11 + i] = inputs[i] ? inputs[i]->gpu.srv.Get() : nullptr;
@@ -1029,35 +610,8 @@ namespace {
       context.CSSetShaderResources(0, UINT(cleared.size()), cleared.data());
     };
     stage(shaders.tiles.Get(), nullptr, 6, statistics.uav.Get(), 16, 16);
-    if (planes && contract::change_set::shadow_dispatched(bits, pre_ui_threshold, rules)) {
-      stage(shaders.bits.Get(), nullptr, 4, plane_texture.uav.Get(), contract::change_set::plane_words(width),
-        (height + contract::change_set::bits_group_rows - 1) / contract::change_set::bits_group_rows);
-      t8 = plane_texture.srv.Get();
-      stage(shaders.count.Get(), nullptr, 6, statistics.uav.Get(), 16, 16);
-      t8 = nullptr;
-    }
-    // The reduce, then (fix 4) the darkening passes as the renderer
-    // dispatches them on a sample frame: the bits, tiles and region passes
-    // into the planes, the mask pass reading them at t8, and the count and
-    // finish passes into decision words 62-63.
-    const auto decide_and_mask = [&]() {
-      stage(shaders.reduce.Get(), statistics.srv.Get(), 6, decision.uav.Get(), 1, 1);
-      if (planes) {
-        stage(shaders.dark_bits.Get(), decision.srv.Get(), 4, plane_texture.uav.Get(), contract::change_set::plane_words(width),
-          (height + contract::change_set::bits_group_rows - 1) / contract::change_set::bits_group_rows);
-        stage(shaders.dark_tiles.Get(), decision.srv.Get(), 4, plane_texture.uav.Get(), contract::darkening::tiles(width),
-          contract::darkening::tiles(height));
-        stage(shaders.dark_region.Get(), decision.srv.Get(), 4, plane_texture.uav.Get(), 1, 1);
-        t8 = plane_texture.srv.Get();
-      }
-      stage(shaders.mask.Get(), decision.srv.Get(), 0, mask.uav.Get(), (width + 7) / 8, (height + 7) / 8);
-      if (planes) {
-        stage(shaders.dark_count.Get(), decision.srv.Get(), 6, statistics.uav.Get(), 16, 16);
-        t8 = nullptr;
-        stage(shaders.dark_finish.Get(), statistics.srv.Get(), 6, decision.uav.Get(), 1, 1);
-      }
-    };
-    decide_and_mask();
+    stage(shaders.reduce.Get(), statistics.srv.Get(), 6, decision.uav.Get(), 1, 1);
+    stage(shaders.mask.Get(), decision.srv.Get(), 0, mask.uav.Get(), (width + 7) / 8, (height + 7) / 8);
     // The hidden-scene evidence of a sample frame: measured after the
     // decision, it writes decision texels 5 and 6 only.
     if (sizes.scene) {
@@ -1086,7 +640,8 @@ namespace {
       flags |= guard_bits;
       constants.flags = flags;
       cb = constant_buffer(&constants, sizeof(constants));
-      decide_and_mask();
+      stage(shaders.reduce.Get(), statistics.srv.Get(), 6, decision.uav.Get(), 1, 1);
+      stage(shaders.mask.Get(), decision.srv.Get(), 0, mask.uav.Get(), (width + 7) / 8, (height + 7) / 8);
       stage(shaders.evidence.Get(), statistics.srv.Get(), 6, decision.uav.Get(), 1, 1);
     }
 
@@ -1096,20 +651,11 @@ namespace {
     result.decision = download<std::uint32_t>(gpu, decision);
     result.mask = download<float>(gpu, mask);
     result.width = width; result.height = height;
-    result.layout = layout; result.offered = bits; result.accepted = accepted; result.flags = flags; result.rules = rules;
+    result.layout = layout; result.offered = bits; result.accepted = accepted; result.flags = flags; result.still = still;
     result.identity = identity;
     result.identity_labelled = identity_labelled;
     result.identity_supported = sunshine_game3d::shader_marker(shader_source, contract::identity::marker) ==
       contract::identity::version;
-    result.pairing = pairing;
-    result.refine = refine;
-    result.pre_ui_proven = pre_ui_proven;
-    if (result.decision.size() >= 4u * contract::change_set_decision_texels)
-      result.shadow = change_set::measure_shadow(selection::counts_from_words(result.decision.data(), result.decision.size()),
-        bits, accepted, flags, rules, pairing, pre_ui_proven, (bits & candidate::hudless) != 0u, true, refine);
-    if (planes)
-      result.darkening = darkening_of(result.decision, download<std::uint32_t>(gpu, plane_texture), width, height, rules, flags, color,
-        threshold, inputs[1], layer_input, &paired_color, inputs[3], pair_input);
     result.pixels = result.mask.size();
     for (const float value : result.mask) {
       result.ui_pixels += value > 0.f ? 1u : 0u;
@@ -1121,8 +667,6 @@ namespace {
       label.at("xfail").at("today").is_object() && label.at("xfail").at("today").value("mask_exact", false);
     if (label.at("expect").value("mask_exact", false) || exact_today)
       result.mask_exact = mask_exact(result, inputs, layer_input, paired_color);
-    if (label.at("expect").value("mask_reference", false))
-      result.mask_reference = mask_reference(result, layer_input, pair_input, threshold, color);
     return result;
   }
 
@@ -1186,65 +730,11 @@ namespace {
     return match == expected;
   }
 
-  // expect.change_set (fix 3): the change-set shadow as
-  // change_set::measure_shadow reads it: "class" (the pairing), "valid",
-  // "would_refine", and inclusive bounds changed_min/max, filtered_min/max,
-  // matching_tiles_min/max, judge_precision_min/max and judge_recall_min/max
-  // (a bound on a ratio without a basis fails). A shader without texels
-  // 13-15 fails the check.
-  bool change_set_matches(const outcome &result, const json &expected, std::string &text) {
-    namespace change_set = sunshine_game3d::change_set;
-    if (result.decision.size() < 4u * contract::change_set_decision_texels) {
-      text = "no-reference(" + std::to_string(result.decision.size() / 4) + " decision texels)";
-      return false;
-    }
-    const auto &s = result.shadow;
-    bool okay = true;
-    if (expected.contains("class")) okay = okay && expected.at("class").get<std::string>() == change_set::name(s.pairing.kind);
-    if (expected.contains("valid")) okay = okay && expected.at("valid").get<bool>() == s.valid;
-    if (expected.contains("would_refine")) okay = okay && expected.at("would_refine").get<bool>() == s.would_refine;
-    const auto bounded = [&](const char *key, double value) {
-      const auto low = std::string(key) + "_min", high = std::string(key) + "_max";
-      if (expected.contains(low)) okay = okay && value >= expected.at(low).get<double>();
-      if (expected.contains(high)) okay = okay && value <= expected.at(high).get<double>();
-    };
-    bounded("changed", s.counts.changed);
-    bounded("filtered", s.counts.filtered);
-    bounded("matching_tiles", s.counts.matching_tiles);
-    bounded("judge_precision", s.precision);
-    bounded("judge_recall", s.recall);
-    text = okay ? "match" : "differs";
-    return okay;
-  }
-
   // One expectation: a case's "expect", or the "today" outcome of its xfail.
   struct judged_t {
     bool okay = false;
-    std::string wanted_mask, scene, pre_ui_scene, pre_ui_match, change_set, darkening;
+    std::string wanted_mask, scene, pre_ui_scene, pre_ui_match;
   };
-
-  // expect.darkening (fix 4): inclusive bounds unpinned_min/max and
-  // kept_min/max on decision words 62-63 (the GPU's darkening of the decided
-  // source). A shader without them fails the check.
-  bool darkening_matches(const outcome &result, const json &expected, std::string &text) {
-    if (result.decision.size() <= word::dk_kept) {
-      text = "no-reference(" + std::to_string(result.decision.size() / 4) + " decision texels)";
-      return false;
-    }
-    bool okay = true;
-    const auto bounded = [&](const char *key, double value) {
-      const auto low = std::string(key) + "_min", high = std::string(key) + "_max";
-      if (expected.contains(low)) okay = okay && value >= expected.at(low).get<double>();
-      if (expected.contains(high)) okay = okay && value <= expected.at(high).get<double>();
-    };
-    bounded("unpinned", result.decision[word::dk_unpinned]);
-    bounded("kept", result.decision[word::dk_kept] & ~contract::darkening::colourless);
-    if (expected.contains("colourless"))
-      okay = okay && ((result.decision[word::dk_kept] & contract::darkening::colourless) != 0u) ==
-        expected.at("colourless").get<bool>();
-    text = okay ? "match" : "differs";
-    return okay;
-  }
   judged_t judge(const outcome &result, const json &expect) {
     const auto &d = result.decision;
     judged_t judged;
@@ -1264,14 +754,6 @@ namespace {
       judged.okay = scene_matches(d, expect.at("pre_ui_scene"), true, judged.pre_ui_scene) && judged.okay;
     if (expect.contains("pre_ui_match"))
       judged.okay = pre_ui_match_matches(d, expect.at("pre_ui_match").get<bool>(), judged.pre_ui_match) && judged.okay;
-    if (expect.contains("change_set"))
-      judged.okay = change_set_matches(result, expect.at("change_set"), judged.change_set) && judged.okay;
-    if (expect.contains("darkening"))
-      judged.okay = darkening_matches(result, expect.at("darkening"), judged.darkening) && judged.okay;
-    if (expect.value("mask_reference", false)) judged.okay = judged.okay && result.mask_reference.rfind("match", 0) == 0;
-    if (expect.contains("refined"))
-      judged.okay = judged.okay && d.size() > word::h1 &&
-        ((d[word::h1] & contract::h1_refined) != 0u) == expect.at("refined").get<bool>();
     return judged;
   }
 
@@ -1332,16 +814,17 @@ namespace {
   }
 
   // ui_selection::decide on the counts the GPU wrote, with the pushed
-  // candidate bits, accepted mask, flags and rule bits and no previous
-  // decision (the hold store unbound): "match" when the GPU's source,
-  // coverage, accepted word, valid bits, refused candidate, frame reason,
-  // claims and h1 word (its applied and refined bits included) agree, "n/a"
-  // for a shader of another candidate layout or selection revision.
+  // candidate bits, accepted mask, flags and still-screen flag and no
+  // previous decision (the hold store unbound): "match" when the GPU's
+  // source, coverage, accepted
+  // word, valid bits, refused candidate, frame reason, claims and h1 word
+  // agree, "n/a" for a shader of another candidate layout or selection
+  // revision.
   std::string mirror_of(const outcome &result, bool mirrored) {
     const auto &d = result.decision;
     if (!mirrored || d.size() <= word::h1) return "n/a";
     const auto expected = selection::decide(selection::counts_from_words(d.data(), d.size()), result.offered, result.accepted,
-      result.flags, selection::hold_state{}, result.rules, result.identity);
+      result.flags, selection::hold_state{}, result.still, result.identity);
     // S3: a shader that verifies identity also writes its verdicts (texel 12).
     const bool identity = !result.identity_supported || (d.size() > word::id_deltas &&
       d[word::id_verdicts] == selection::identity_verdict_word(expected.identity) &&
@@ -1408,13 +891,9 @@ int main(int argc, char **argv) {
         "cases.json: {\"dump_root\": dir, \"cases\": [{\"dump\", \"label\", \"candidates\": [kinds|\"current\"], "
         "\"paired\": kind, \"exact\": bool, \"accepted\": [kinds], \"scene_hold\": bool|\"measured\", "
         "\"pre_ui_visible\": bool, \"pre_ui_proven\": bool, \"refuted\": [kinds], \"depth_not_current\": bool, "
-        "\"refine\"|\"pin_only_ui\": bool, \"layer_pair\": \"retained_present_1\"|\"retained_present_2\", "
-        "\"layer_pair_exact\": bool, "
         "\"expect\": {\"mask\", "
         "\"source\": [ids], \"mask_exact\": bool, \"scene\": {\"verdict\", \"d_min\", \"d_max\"}, "
-        "\"pre_ui_scene\": {\"image\", \"verdict\", \"d_min\", \"d_max\"}, \"pre_ui_match\": bool, "
-        "\"change_set\": {\"class\", \"valid\", \"would_refine\", \"<count>_min\", \"<count>_max\"}, "
-        "\"mask_reference\": bool, \"refined\": bool, \"darkening\": {\"<unpinned|kept>_min\", \"<unpinned|kept>_max\"}}, "
+        "\"pre_ui_scene\": {\"image\", \"verdict\", \"d_min\", \"d_max\"}, \"pre_ui_match\": bool}, "
         "\"xfail\": {\"stage\", \"reason\", \"today\": {expect fields}}, \"needs_dump\": text}]}\n"
         "Binds each dump's candidates (t0 paired color, t11-t14, and a census ui_layer_candidate_N at t7 with the layer\n"
         "flags; a shader without SUNSHINE_UI_CANDIDATE_LAYOUT takes the layer at t12), raw depth (t1; a 1x1 placeholder\n"
@@ -1451,31 +930,7 @@ int main(int argc, char **argv) {
         "(strong/contradicted pixels of the layer, Backbuffer and current alpha) from selection revision 2, and the H1\n"
         "claims and h1 word (applied, S1 winner) from selection revision 3, and the layer's pre-UI pixel counts\n"
         "(texel 11: match, image_lit, presented_lit, presented_lit_differs) from selection revision 4.\n"
-        "Fix 3 (selection revision 6): refine pushes b2 word 5's refine bit (UIPinOnlyUI=1). The layer (a census\n"
-        "ui_layer_candidate_N or ui_layer_detected) pairs with the retained Present layer_pair names (its artifact at t2\n"
-        "or t3, offset 1 or 2), else it is late (offset 0); layer_pair_exact, a test-only override, binds source_color at\n"
-        "t2 as the Present one back to exercise the decision on a late dump. The pre-UI change set (candidate 0x100,\n"
-        "source 12) is offered as the renderer offers it (game3d_ui_change_set.h: refine, pre_ui_proven, no HUD-less\n"
-        "image, a retained pairing of comparable images), accepted by the proof, at the pair's threshold. Every line shows\n"
-        "change_set={...} (texels 13-15 through change_set::measure_shadow: pairing class and offset, changed, unchanged,\n"
-        "matching tiles, lit, 3x3-filtered, changed against the Presents 0/1/2 back, the pair verdict, the judge's\n"
-        "precision, recall and IoU, validity and what the switch would do) and refined= (the h1 word's bit). change_set\n"
-        "checks those fields (class, valid, would_refine, and _min/_max bounds of changed, filtered, matching_tiles,\n"
-        "judge_precision, judge_recall); mask_reference compares a source-12 mask with a CPU reference of the same rule\n"
-        "(at most 0.01%% of pixels may differ); refined checks the h1 word's refined bit. As in the renderer, the shadow\n"
-        "measures only a layer proven the pre-UI scene image (pre_ui_proven pushes b2 word 5's shadow bit); without the\n"
-        "proof its counts are zero.\n"
-        "Fix 4 (pin only UI, rule P2): a shader whose SUNSHINE_UI_CHANGE_SET_PLANES is 9 runs its darkening passes after the\n"
-        "reduce as on a sample frame (b2 word 5 always has 0x100; refine, or its alias pin_only_ui, adds 0x2, so the mask\n"
-        "pass applies the rule: UIPinOnlyUI=1). A line whose decided source is eligible (2, 5, 10, 12) shows\n"
-        "darkening={unpinned kept colourless applied reference regions mirror}: decision words 62-63 (word 63's\n"
-        "colourless bit apart), the CPU reference's counts and its change-set regions that unpin of all\n"
-        "(game3d_ui_darkening.h on the source's own artifacts) and the per-pixel mirror of the GPU planes' unpinned pixels\n"
-        "against it (match, match(N px near a bound) where a residual, fit, step or tile effect lies at its bound, or\n"
-        "differs, which fails the case, as do words 62-63 that are not the planes' sum or are set for another source).\n"
-        "With the rule applied, mask_exact and mask_reference zero the CPU reference's unpinned pixels. expect.darkening\n"
-        "checks _min/_max bounds of unpinned and kept (words 62-63) and colourless (word 63's top bit).\n"
-        "--verbose prints every decision word (62-63 the darkening).\n"
+        "--verbose prints every decision word.\n"
         "S3 (frame identity, shadow): a shader with SUNSHINE_UI_IDENTITY binds the package's stamp buffer read back at t9\n"
         "(replay.ui_detection.stamps: [C_P, C_T] per ticket slot, the layer at 4 and the HUD-less image at 5) and pushes\n"
         "its b2 words 6-9 (replay.ui_detection expected_layer_present, expected_layer_token, expected_hudless_present,\n"
@@ -1548,44 +1003,6 @@ int main(int argc, char **argv) {
         okay = false;
         status = "FAIL";
       }
-      // Fix 4: the darkening against its CPU reference; a pixel that differs
-      // away from every bound, or words 62-63 that are not the planes' sum,
-      // fail the case.
-      std::string darkening;
-      if (result.darkening.measured) {
-        const auto &k = result.darkening;
-        char text[320];
-        if (!k.ok && k.differ) {
-          std::snprintf(text, sizeof(text), "differs(%llu px, first x=%zu y=%zu; %llu near a bound)",
-            static_cast<unsigned long long>(k.differ), k.first % result.width, k.first / result.width,
-            static_cast<unsigned long long>(k.at_bound));
-        } else if (!k.ok) {
-          std::snprintf(text, sizeof(text), "differs(%s)", k.reference.c_str());
-        } else if (!k.reference.empty()) {
-          std::snprintf(text, sizeof(text), "n/a(%s)", k.reference.c_str());
-        } else if (k.at_bound) {
-          std::snprintf(text, sizeof(text), "match(%llu px near a bound)", static_cast<unsigned long long>(k.at_bound));
-        } else {
-          std::snprintf(text, sizeof(text), "match");
-        }
-        char line[512];
-        std::snprintf(line, sizeof(line),
-          " darkening={unpinned=%u kept=%u colourless=%d applied=%d reference=%llu/%llu regions=%llu/%llu mirror=%s}",
-          d[word::dk_unpinned], d[word::dk_kept] & ~contract::darkening::colourless,
-          (d[word::dk_kept] & contract::darkening::colourless) ? 1 : 0, k.applied ? 1 : 0,
-          static_cast<unsigned long long>(k.cpu.unpinned), static_cast<unsigned long long>(k.cpu.kept),
-          static_cast<unsigned long long>(k.cpu.regions_unpinned), static_cast<unsigned long long>(k.cpu.regions), text);
-        darkening = line;
-        if (!k.ok) {
-          okay = false;
-          status = "FAIL";
-        }
-      } else if (d.size() > word::dk_kept && (d[word::dk_unpinned] || d[word::dk_kept])) {
-        // Words 62-63 are zero unless the passes measured an eligible source.
-        darkening = " darkening={words 62-63 set without a measured eligible source}";
-        okay = false;
-        status = "FAIL";
-      }
       // A mask that cannot be written fails its case once.
       std::string written;
       if (write_masks) {
@@ -1608,8 +1025,6 @@ int main(int argc, char **argv) {
       const auto &scene = target.scene.empty() ? today.scene : target.scene;
       const auto &pre_ui_scene = target.pre_ui_scene.empty() ? today.pre_ui_scene : target.pre_ui_scene;
       const auto &pre_ui_match = target.pre_ui_match.empty() ? today.pre_ui_match : target.pre_ui_match;
-      const auto &change_set_check = target.change_set.empty() ? today.change_set : target.change_set;
-      const auto &darkening_check = target.darkening.empty() ? today.darkening : target.darkening;
       auto wanted = target.wanted_mask;
       if (xfail) {
         wanted += ", today " + today.wanted_mask + "; " + xfail->at("stage").get<std::string>() + ": " +
@@ -1647,41 +1062,17 @@ int main(int argc, char **argv) {
         std::snprintf(pre_ui_pixels, sizeof(pre_ui_pixels),
           " pre_ui_pixels={match=%u image_lit=%u presented_lit=%u presented_lit_differs=%u}", d[word::pre_ui_match],
           d[word::pre_ui_image_lit], d[word::presented_lit], d[word::presented_lit_differs]);
-      // Fix 3, selection revision 6 (texels 13-15): the change-set shadow as
-      // change_set::measure_shadow reads it, and the h1 word's refined bit.
-      std::string shadow;
-      if (d.size() >= 4u * contract::change_set_decision_texels) {
-        namespace change_set = sunshine_game3d::change_set;
-        const auto &s = result.shadow;
-        const auto ratio = [](double value) {
-          char text[16] = "-";
-          if (value >= 0.) std::snprintf(text, sizeof(text), "%.3f", value);
-          return std::string(text);
-        };
-        const auto offset = [&](std::size_t i) { return s.measured[i] ? std::to_string(s.offsets[i]) : std::string("-"); };
-        shadow = " change_set={class=" + std::string(change_set::name(s.pairing.kind)) + " offset=" +
-          std::to_string(s.pairing.offset) + " changed=" + std::to_string(s.counts.changed) + " unchanged=" +
-          std::to_string(s.counts.unchanged) + " tiles=" + std::to_string(s.counts.matching_tiles) + " lit=" +
-          std::to_string(s.lit) + " filtered=" + std::to_string(s.counts.filtered) + " offsets=" + offset(0) + '/' + offset(1) +
-          '/' + offset(2) + " pair=" + std::string(change_set::name(s.verdict)) + " judge=" +
-          std::string(change_set::judge_name(s.counts.judge_kind)) + " precision=" + ratio(s.precision) + " recall=" +
-          ratio(s.recall) + " iou=" + ratio(s.iou) + " valid=" + (s.valid ? "1" : "0") + " would_refine=" +
-          (s.would_refine ? "1" : "0") + " would_source=" + std::to_string(s.would_source) + "} refined=" +
-          ((d[word::h1] & contract::h1_refined) ? "1" : "0");
-      }
       std::printf("%s %-44s source=%u covered=%u/%u ui=%.2f%% mask=%s (want %s) candidates=0x%x accepted=0x%x "
-        "alpha_covered=%u/%u/%u/%u%s%s%s%s%s hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u}%s "
-        "mirror=%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+        "alpha_covered=%u/%u/%u/%u%s%s%s%s%s hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u} "
+        "mirror=%s%s%s%s%s%s%s%s%s\n",
         status, name.c_str(), d[word::source], d[word::covered], d[word::pixels],
         100.0 * double(result.ui_pixels) / double(result.pixels), mask_class(result).c_str(), wanted.c_str(),
         d[word::candidates], d[word::accepted], d[word::alpha_covered], d[word::alpha_covered + 1], d[word::alpha_covered + 2],
         d[word::alpha_covered + 3], layer, judgment, h1, guard, pre_ui_pixels, d[word::hudless_changed],
-        d[word::hudless_unchanged], d[word::hudless_invalid], d[word::matching_tiles], d[word::hudless_lit], shadow.c_str(),
-        mirror.c_str(), result.mask_exact.empty() ? "" : " mask_exact=", result.mask_exact.c_str(), scene.empty() ? "" : " scene=",
-        scene.c_str(), pre_ui_scene.empty() ? "" : " pre_ui_scene=", pre_ui_scene.c_str(),
-        pre_ui_match.empty() ? "" : " pre_ui_match=", pre_ui_match.c_str(), change_set_check.empty() ? "" : " change_set_check=",
-        change_set_check.c_str(), result.mask_reference.empty() ? "" : " mask_reference=", result.mask_reference.c_str(),
-        darkening.c_str(), darkening_check.empty() ? "" : " darkening_check=", darkening_check.c_str());
+        d[word::hudless_unchanged], d[word::hudless_invalid], d[word::matching_tiles], d[word::hudless_lit], mirror.c_str(),
+        result.mask_exact.empty() ? "" : " mask_exact=", result.mask_exact.c_str(), scene.empty() ? "" : " scene=", scene.c_str(),
+        pre_ui_scene.empty() ? "" : " pre_ui_scene=", pre_ui_scene.c_str(), pre_ui_match.empty() ? "" : " pre_ui_match=",
+        pre_ui_match.c_str());
       if (identity) std::printf("  %s\n", identity_text(result).c_str() + 1);
       if (verbose) {
         std::printf("  words=");

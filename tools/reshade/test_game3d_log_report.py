@@ -95,14 +95,12 @@ def ui2(t, source, covered, alpha, candidates, accepted, pixels=1000, hudless=(0
 
 def ui3(t, source, covered, alpha, candidates, accepted, pixels=1000, layer=(0, 0), invalid=(0, 0, 0, 0),
         reason=None, refused='none', scene=(0.6, 'visible'), claims=0, h1=0, winner=None, pre_ui=('none', 0.0, 0),
-        guard=(0, 0, 0), ran=1, shadow=0, hidden_ms=0, detection=None, fg=0, pre_ui_pixels=None, still=None,
-        change_set=None):
+        guard=(0, 0, 0), ran=1, shadow=0, hidden_ms=0, detection=None, fg=0, pre_ui_pixels=None, still=None):
     """A 'Sunshine UI protection' line since S2b (exporter.cpp): the S2a fields, then the Backbuffer and current
     alpha's opaque pixels, the informative full claims, the H1 word, the presented frame's D, the pre-UI scene image's
     D (image, d, valid) and the scene guard's holds (hidden, pre-UI, refuted signatures). Since fix 1 pre_ui_pixels
     (match, image lit, presented lit, presented lit and different) follows shadow_hidden_ms, and since fix 2 still
-    (scope, enabled, phase, run_ms, still cells, compared cells, short_max_ms), rule H2's group, follows it; since fix 3
-    change_set (pairing, offset, valid, would_refine, refined, enabled) follows status_revision."""
+    (scope, enabled, phase, run_ms, still cells, compared cells, short_max_ms), rule H2's group, follows it."""
     detection = detection or ('detected' if source else 'no_usable_mask')
     reason = reason or ('decided' if source else 'unaccepted')
     winner = source if winner is None else winner
@@ -132,10 +130,7 @@ def ui3(t, source, covered, alpha, candidates, accepted, pixels=1000, layer=(0, 
                       .format(*pre_ui_pixels))
                    + ('' if still is None else
                       'still={{scope={} enabled={} phase={} run_ms={} sampled={}/{} short_max_ms={}}} '.format(*still))
-                   + 'status_revision=1'
-                   + ('' if change_set is None else
-                      ' change_set={{pairing={} offset={} valid={} would_refine={} refined={} enabled={}}}'
-                      .format(*change_set)))
+                   + 'status_revision=1')
 
 
 def accepted_now(t, value):
@@ -169,14 +164,6 @@ FIX2_COUNTER_GROUPS = tuple(
     group for key, inner in S2B_COUNTER_GROUPS
     for group in ((key, inner + ('11',) if key == 'decided' else inner),)
     + ((('still', ('entered', 'released', 'short')),) if key == 'scene' else ()))
-# The same since fix 3: decided adds 12 (the pre-UI change set) and refined follows it, and the change-set shadow's
-# group follows H2's.
-FIX3_COUNTER_GROUPS = tuple(
-    group for key, inner in FIX2_COUNTER_GROUPS
-    for group in ((key, inner + ('12',) if key == 'decided' else inner),)
-    + ((('refined', None),) if key == 'decided' else ())
-    + ((('change_set', ('samples', 'retained', 'late', 'unavailable', 'valid', 'would_refine', 'would_decide',
-                        'pair_verified', 'pair_contradicted')),) if key == 'still' else ()))
 # The same in S1: three hold kinds and the cap, no reused, trusted_full and the S1 trust events.
 S1_COUNTER_GROUPS = tuple(
     ('held', ('generated', 'inexact_after_exact', 'trusted_missing', 'cap')) if key == 'held' else
@@ -281,45 +268,6 @@ SB_S2B_SETTINGS = (
 SB_FIX1_SETTINGS = SB_S2B_SETTINGS.replace('sampled_claims=0x80', 'sampled_claims=0x0').replace(
     'shadow_hidden_ms=656 ', 'shadow_hidden_ms=656 sampled_pre_ui_pixels={match=2719720 image_lit=2148784 '
     'presented_lit=5994692 presented_lit_differs=5238234} ')
-
-# Since fix 3: the UIPinChangedPixels switch lines (game3d_controls_model.h) and a change-set shadow line as
-# change_set::shadow_log_text writes it; the defaults are the sequence harness's Stellar Blade SDR Equipment page in
-# the shadow.
-PIN_OFF = line('10:00:01', '[Sunshine 3D] Sunshine UI protection: changed pixels of an exact pre-UI image are only '
-                           'logged (UIPinChangedPixels=0)')
-PIN_ON = line('10:00:01', '[Sunshine 3D] Sunshine UI protection: changed pixels of an exact pre-UI image decide where '
-                          'the UI alpha has no shape (UIPinChangedPixels=1)')
-
-
-def change_set_line(t, pairing='retained', offset=1, fg=0, enabled=0, changed=52, unchanged=948, tiles=150, lit=260,
-                    valid=1, filtered=51, offsets='56 52 60', pair='verified', judge=('none', 0, 0, '-', '-', '-'),
-                    winner=4, shapeless=1, would_refine=1, would_source=12, applied=4, pixels=1000):
-    o0, o1, o2 = offsets.split()
-    kind, judge_pixels, tp, precision, recall, iou = judge
-    return line(t, f'[Sunshine 3D] Sunshine UI change set: pairing={pairing} offset={offset} fg={fg} '
-                   f'UIPinChangedPixels={enabled} changed={changed} unchanged={unchanged} nonfinite=0 '
-                   f'matching_tiles={tiles} lit={lit} layer_covered=0 valid={valid} filtered={filtered} '
-                   f'offsets={{0={o0} 1={o1} 2={o2}}} pair={pair} judge={{kind={kind} pixels={judge_pixels} tp={tp} '
-                   f'precision={precision} recall={recall} iou={iou}}} winner={winner} shapeless={shapeless} '
-                   f'would_refine={would_refine} would_source={would_source} applied_source={applied} '
-                   f'pixels={pixels}')
-
-
-# Since fix 4: the UIPinOnlyUI switch lines (game3d_controls_model.h), which replace UIPinChangedPixels and also cover
-# the darkening rule (P2), a darkening line as ui_darkening::log_text writes it, and the counters with the darkening
-# group after the change-set shadow's.
-ONLY_UI_OFF = line('10:00:01', '[Sunshine 3D] Sunshine UI protection: dims and unchanged pixels are only logged '
-                               '(UIPinOnlyUI=0)')
-ONLY_UI_ON = line('10:00:01', '[Sunshine 3D] Sunshine UI protection: only UI pixels pin (UIPinOnlyUI=1)')
-FIX4_COUNTER_GROUPS = tuple(
-    group for key, inner in FIX3_COUNTER_GROUPS
-    for group in ((key, inner),) + ((('darkening', ('samples', 'unpinned_samples', 'unpinned_px', 'kept_px')),)
-                                    if key == 'change_set' else ()))
-
-
-def darkening_line(t, source=10, enabled=0, covered=1365596, unpinned=1065506, kept=78689, colourless=0):
-    return line(t, f'[Sunshine 3D] Sunshine UI darkening: source={source} UIPinOnlyUI={enabled} covered={covered} '
-                   f'unpinned={unpinned} kept={kept} colourless={colourless}')
 
 
 class ReadinessReport(unittest.TestCase):
@@ -1354,260 +1302,35 @@ class ReadinessReport(unittest.TestCase):
                          'no still screen without a UI source; longest run that reset before 2 s: 325 ms (short runs '
                          'not counted without a counter line)')
 
-    def test_fix3_counter_lines_parse_decided_12_refined_and_the_change_set_group(self):
-        # The text test_game3d_alpha_auto pins for format_ui_counters since fix 3: decided adds 12, refined follows
-        # the decided group and the change-set shadow's group follows H2's.
+    def test_logs_of_the_removed_fix3_and_fix4_builds_still_report(self):
+        # Fix 3 and fix 4 (the pre-UI change set and pin only UI) were removed by user decision. Their builds' counter
+        # text (decided source 12, refined and the change_set and darkening groups), switch, change-set and darkening
+        # lines and the UI line's change_set group still parse, decide nothing and add no check of their own.
         text = ('auto_frames=15 detection_frames=11 held={generated=2 none=1} reused=1 '
                 'inactive={no_candidates=1 size=0 unprepared=0} decided={0=2 1=0 2=0 3=0 4=0 5=3 6=1 8=0 10=4 11=5 '
-                '12=6} refined=4 none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 '
+                '12=0} refined=0 none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 '
                 'difference_failed=1 gate_no_hold=1 no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 '
                 'depth_not_current=1} full_d={hidden=1 ambiguous=0 visible=0 invalid=0} scene={entered=1 released=1 '
                 'refuted=2} still={entered=2 released=1 short=7} change_set={samples=9 retained=5 late=3 '
                 'unavailable=1 valid=4 would_refine=3 would_decide=1 pair_verified=4 pair_contradicted=1} '
+                'darkening={samples=2 unpinned_samples=1 unpinned_px=40 kept_px=7} '
                 'untrusted_inferred=0 inexact_difference=3 contradicted=2 presented_over_dedicated=0 full_alpha=2 '
                 'full_alpha_d={hidden=0 ambiguous=0 visible=1 invalid=0} trust={earned=1 revoked_exact=1 '
                 'revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3} samples=4 through_ms=12345')
         fields = report.counter_fields('runtime=0000000000000001 ' + text)
-        self.assertEqual((fields['decided.12'], fields['refined'], fields['change_set.samples'],
-                          fields['change_set.retained'], fields['change_set.late'], fields['change_set.unavailable'],
-                          fields['change_set.valid'], fields['change_set.would_refine'],
-                          fields['change_set.would_decide'], fields['change_set.pair_verified'],
-                          fields['change_set.pair_contradicted'], fields['still.short']),
-                         (6, 4, 9, 5, 3, 1, 4, 3, 1, 4, 1, 7))
-        self.assertEqual(report.counter_fields(report.COUNTERS.search(
-            counters('10:00:00', fields, groups=FIX3_COUNTER_GROUPS)).group(1)), fields)
-        self.assertEqual(report.COUNTERS.search(counters('10:00:00', fields, groups=FIX3_COUNTER_GROUPS)).group(1),
-                         'runtime=0000000000000001 ' + text)
-        # Source 12 frames are named among the decided sources and keep the accounting identity.
-        refined = {**CLEAN_COUNTERS, 'decided.10': 50, 'decided.12': 10, 'refined': 10, 'change_set.samples': 6,
-                   'change_set.retained': 6, 'change_set.valid': 6, 'change_set.would_refine': 6,
-                   'change_set.pair_verified': 6}
-        checks = run(BASE + [PIN_ON, counters('10:00:12', refined, groups=FIX3_COUNTER_GROUPS)])
-        self.assertEqual(checks['UI counters'].status, 'PASS')
-        self.assertIn('UI layer (10) 62%, pre-UI change set (12) 12%', checks['UI protection'].detail)
-        self.assertEqual((checks['Pre-UI change set'].status, checks['Pre-UI change set'].detail),
-                         ('INFO', 'UIPinChangedPixels=1; 6 samples counted: retained 100%, late 0%, unavailable 0%; '
-                                  'pair verified 6, contradicted 0; valid 100%; would refine 6, would decide source 12 '
-                                  '0; refined 10 frames, decided source 12 10 frames'))
-
-    def test_fix3_change_set_lines_parse(self):
-        # The switch line, a shadow line exactly as change_set::shadow_log_text writes it (the Equipment page of the
-        # sequence harness) and the UI line's change_set group.
-        status = ui3('10:00:06', 4, 1000, (0, 0, 0, 1000), 0x48, 0x8, change_set=('retained', 1, 1, 1, 0, 0))
-        session = report.parse([PIN_OFF, change_set_line('10:00:05'), status])
-        self.assertEqual(session.pin_switch, [(36001.0, False)])
-        self.assertEqual(session.change_sets, [report.ChangeSetSample(
-            36005.0, 'retained', 1, False, False, 52, 948, 150, 260, 0, True, 51, (56, 52, 60), 'verified', 'none',
-            0, 0, None, None, None, 4, True, True, 12, 4, 1000)])
-        self.assertEqual(session.ui[0].change_set, report.ChangeSetStatus('retained', 1, True, True, False, False))
-        late = report.parse([change_set_line('10:00:05', pairing='late', offset=0, fg=1, valid=0, offsets='80 - -',
-                                             pair='-', judge=('ui_color', 30, 26, '0.371', '0.867', '0.351'),
-                                             winner=2, shapeless=0, would_refine=0, would_source=2, applied=2)])
-        sample = late.change_sets[0]
-        self.assertEqual((sample.pairing, sample.fg, sample.offsets, sample.pair, sample.judge, sample.precision,
-                          sample.recall, sample.iou, sample.would_source),
-                         ('late', True, (80, None, None), '-', 'ui_color', 0.371, 0.867, 0.351, 2))
-        self.assertEqual(report.parse([PIN_ON]).pin_switch, [(36001.0, True)])
-
-    def test_change_set_status_does_not_shift_later_timestamps(self):
-        # The UI line's change_set offset once overwrote the parser's midnight offset, so the next line crashed.
-        status = ui3('10:00:06', 4, 1000, (0, 0, 0, 1000), 0x48, 0x8, change_set=('retained', 1, 1, 1, 0, 0))
+        self.assertEqual((fields['decided.12'], fields['refined'], fields['change_set.samples'], fields['still.short']),
+                         (0, 0, 9, 7))
+        old = line('10:00:12', '[Sunshine 3D] Sunshine UI counters: runtime=0000000000000001 ' + text)
+        status = (ui3('10:00:06', 4, 1000, (0, 0, 0, 1000), 0x48, 0x8) +
+                  ' change_set={pairing=retained offset=1 valid=1 would_refine=1 refined=0 enabled=0}')
         later = ui3('10:00:07', 4, 1000, (0, 0, 0, 1000), 0x48, 0x8)
-        session = report.parse([status, later])
+        pin = line('10:00:01', '[Sunshine 3D] Sunshine UI protection: dims and unchanged pixels are only logged '
+                               '(UIPinOnlyUI=0)')
+        session = report.parse([pin, status, later, old])
         self.assertEqual([sample.t for sample in session.ui], [36006.0, 36007.0])
-
-    def test_fix3_shadow_summary_warns_for_review(self):
-        # The default shadow (UIPinChangedPixels=0): Stellar Blade SDR menus that would refine, a settings page whose
-        # set is invalid, and FG-on gameplay whose late pair the UI colour tag judges.
-        lines = BASE + [
-            PIN_OFF,
-            change_set_line('10:00:05'),
-            change_set_line('10:00:06', changed=600, unchanged=385, tiles=0, valid=0, filtered=590,
-                            offsets='610 600 615', would_refine=0, would_source=4),
-            change_set_line('10:00:08', pairing='late', offset=0, fg=1, valid=0, offsets='80 - -', pair='-',
-                            judge=('ui_color', 30, 26, '0.371', '0.867', '0.351'), winner=2, shapeless=0,
-                            would_refine=0, would_source=2, applied=2),
-            change_set_line('10:00:09', pairing='late', offset=0, fg=1, valid=0, offsets='90 - -', pair='-',
-                            judge=('ui_color', 30, 20, '0.250', '0.667', '0.222'), winner=2, shapeless=0,
-                            would_refine=0, would_source=2, applied=2),
-            counters('10:00:12', {**CLEAN_COUNTERS, 'change_set.samples': 40, 'change_set.retained': 20,
-                                  'change_set.late': 18, 'change_set.unavailable': 2, 'change_set.valid': 12,
-                                  'change_set.would_refine': 12, 'change_set.pair_verified': 20},
-                     groups=FIX3_COUNTER_GROUPS)]
-        check = run(lines)['Pre-UI change set']
-        self.assertEqual(check.status, 'WARN')
-        self.assertEqual(check.detail,
-                         'shadow summary for review: UIPinChangedPixels=0; 40 samples counted: retained 50%, late 45%, '
-                         'unavailable 5.0%; pair verified 20, contradicted 0; valid 30%; would refine 12, would decide '
-                         'source 12 0; refined 0 frames, decided source 12 0 frames; late pairs judged by a declared '
-                         'alpha (FG on, 2 lines): precision 0.310, recall 0.767, IoU 0.286; review the samples that '
-                         'would refine or decide (a Dump 3D taken during one carries the retained Presents) before '
-                         'setting UIPinChangedPixels=1')
-        self.assertEqual(check.times, ['10:00:05.000 would refine: winner 4 -> 12, retained offset 1, changed 5.2%, '
-                                       'filtered 51, tiles 150, lit 26%, pair verified'])
-        # Without a counter line the logged lines are counted.
-        check = run(lines[:-1])['Pre-UI change set']
-        self.assertEqual(check.status, 'WARN')
-        self.assertTrue(check.detail.startswith('shadow summary for review: UIPinChangedPixels=0; 4 samples logged '
-                                                '(no counter line): retained 50%, late 50%, unavailable 0%; pair '
-                                                'verified 2, contradicted 0; valid 25%; would refine 1, would decide '
-                                                'source 12 0; late pairs judged'), check.detail)
-
-    def test_fix3_invariants(self):
-        shadow = {**CLEAN_COUNTERS, 'change_set.samples': 10, 'change_set.retained': 10, 'change_set.valid': 10,
-                  'change_set.would_refine': 10, 'change_set.pair_verified': 10}
-        # A refined frame, or one that decided source 12, while the switch was never on fails.
-        for extra in ({'refined': 3, 'decided.12': 3, 'decided.10': 57}, {'decided.12': 1, 'decided.10': 59}):
-            check = run(BASE + [PIN_OFF, change_set_line('10:00:05'),
-                                counters('10:00:12', {**shadow, **extra}, groups=FIX3_COUNTER_GROUPS)])
-            self.assertEqual(check['Pre-UI change set'].status, 'FAIL')
-            self.assertTrue(check['Pre-UI change set'].detail.startswith(
-                f'{extra.get("refined", 0)} frames refined and {extra["decided.12"]} decided source 12 while '
-                'UIPinChangedPixels was never on; '), check['Pre-UI change set'].detail)
-        # A contradicted pairing in the shadow warns; with the switch on it fails.
-        contradicted = {**shadow, 'change_set.pair_verified': 9, 'change_set.pair_contradicted': 1}
-        line_contradicted = change_set_line('10:00:06', offsets='40 52 60', pair='contradicted')
-        check = run(BASE + [PIN_OFF, line_contradicted,
-                            counters('10:00:12', contradicted, groups=FIX3_COUNTER_GROUPS)])['Pre-UI change set']
-        self.assertEqual(check.status, 'WARN')
-        self.assertTrue(check.detail.startswith('1 shadow samples contradicted the retained pairing'), check.detail)
-        self.assertEqual(len(check.times), 1)
-        on = {**contradicted, 'refined': 5, 'decided.12': 5, 'decided.10': 55}
-        # The counters alone cannot tell a valid set from a loading screen, so they warn.
-        check = run(BASE + [PIN_ON, counters('10:00:12', on, groups=FIX3_COUNTER_GROUPS)])['Pre-UI change set']
-        self.assertEqual(check.status, 'WARN')
-        self.assertTrue(check.detail.startswith('1 samples contradicted the retained pairing, none of them logged'),
-                        check.detail)
-        check = run(BASE + [PIN_ON, change_set_line('10:00:06', enabled=1, offsets='40 52 60', pair='contradicted')])
-        self.assertEqual(check['Pre-UI change set'].status, 'FAIL')
-        self.assertTrue(check['Pre-UI change set'].detail.startswith(
-            'a retained pairing was contradicted while UIPinChangedPixels=1'))
-        # A contradicted invalid set (a loading screen) never acts: it warns with the switch on.
-        check = run(BASE + [PIN_ON, change_set_line('10:00:06', enabled=1, offsets='40 52 60', pair='contradicted',
-                                                    valid=0, would_refine=0, would_source=4)])
-        self.assertEqual(check['Pre-UI change set'].status, 'WARN')
-        # Refined frames with the switch on are expected.
-        check = run(BASE + [PIN_ON, counters('10:00:12', {**shadow, 'refined': 5, 'decided.12': 5, 'decided.10': 55},
-                                             groups=FIX3_COUNTER_GROUPS)])['Pre-UI change set']
-        self.assertEqual(check.status, 'INFO')
-        # A session with the switch line but no layer offered says so.
-        check = run(BASE + [PIN_OFF])['Pre-UI change set']
-        self.assertEqual((check.status, check.detail), ('INFO', 'UIPinChangedPixels=0; no sample measured the layer '
-                                                                'pair'))
-
-    def test_fix3_logs_before_it_have_no_change_set_check(self):
-        # Lines and counters logged before fix 3 parse as before and add no check; the lit rule of V2 applies only to
-        # lines with the change_set group.
-        for lines in ([SB_FIX1_SETTINGS], [counters('10:00:12', CLEAN_COUNTERS, groups=FIX2_COUNTER_GROUPS)]):
-            session = report.parse(BASE + lines)
-            self.assertEqual((session.pin_switch, session.change_sets), ([], []))
-            self.assertTrue(all(u.change_set is None for u in session.ui))
-            self.assertNotIn('Pre-UI change set', run(BASE + lines))
-        sample = report.parse([SB_FIX1_SETTINGS]).ui[0]
-        sample = sample._replace(candidates=0x10, hudless=(50, 950, 0), tiles=200, lit=5, pixels=1000)
-        self.assertTrue(sample.change_set_valid())
-        self.assertFalse(sample._replace(change_set=report.ChangeSetStatus('none', 0, False, False, False,
-                                                                           False)).change_set_valid())
-
-    def test_fix4_darkening_and_switch_lines_parse(self):
-        # The darkening line of Stellar Blade's HDR Equipment layer (the reference's counts) and both switch texts.
-        session = report.parse([ONLY_UI_OFF, darkening_line('10:00:05'),
-                                darkening_line('10:00:06', enabled=1, unpinned=0, kept=90, colourless=1)])
-        self.assertEqual((session.pin_switch, session.pin_key, session.darkening),
-                         ([(36001.0, False)], 'UIPinOnlyUI',
-                          [report.DarkeningSample(36005.0, 10, False, 1365596, 1065506, 78689, False),
-                           report.DarkeningSample(36006.0, 10, True, 1365596, 0, 90, True)]))
-        # The first fix 4 lines had no colourless field.
-        early = darkening_line('10:00:05').replace(' colourless=0', '')
-        self.assertEqual(report.parse([early]).darkening, [report.DarkeningSample(36005.0, 10, False, 1365596, 1065506,
-                                                                                  78689)])
-        self.assertEqual((report.parse([ONLY_UI_ON]).pin_switch, report.parse([ONLY_UI_ON]).pin_key),
-                         ([(36001.0, True)], 'UIPinOnlyUI'))
-        # The change-set line names the new key; the old key still parses from fix 3 logs.
-        renamed = change_set_line('10:00:05', enabled=1).replace('UIPinChangedPixels=', 'UIPinOnlyUI=')
-        session = report.parse([renamed])
-        self.assertEqual((len(session.change_sets), session.change_sets[0].enabled, session.pin_key),
-                         (1, True, 'UIPinOnlyUI'))
-        session = report.parse([PIN_OFF, change_set_line('10:00:05')])
-        self.assertEqual((session.pin_switch, session.pin_key, session.darkening),
-                         ([(36001.0, False)], 'UIPinChangedPixels', []))
-        fields = report.counter_fields(report.COUNTERS.search(counters(
-            '10:00:12', {'darkening.samples': 3, 'darkening.unpinned_samples': 2, 'darkening.unpinned_px': 9,
-                         'darkening.kept_px': 4}, groups=FIX4_COUNTER_GROUPS)).group(1))
-        self.assertEqual(tuple(fields[f'darkening.{k}'] for k in ('samples', 'unpinned_samples', 'unpinned_px',
-                                                                  'kept_px')), (3, 2, 9, 4))
-
-    def test_fix4_pin_only_ui_summary_per_source(self):
-        # The shadow on Stellar Blade's HDR Equipment layer (source 10) and SDR Equipment pre-UI change set (source
-        # 12, the late pair's counts), the counters reconciled with the lines.
-        lines = BASE + [
-            ONLY_UI_OFF,
-            darkening_line('10:00:05'),
-            darkening_line('10:00:06', covered=1365596, unpinned=1000000, kept=80000),
-            darkening_line('10:00:07', covered=14519, unpinned=2604, kept=5407),
-            darkening_line('10:00:08', source=12, covered=448858, unpinned=176194, kept=35206),
-            counters('10:00:12', {**CLEAN_COUNTERS, 'darkening.samples': 4, 'darkening.unpinned_samples': 4,
-                                  'darkening.unpinned_px': 2244304, 'darkening.kept_px': 199302},
-                     groups=FIX4_COUNTER_GROUPS)]
-        checks = run(lines)
-        check = checks['Pin only UI']
-        self.assertEqual(check.status, 'INFO')
-        self.assertEqual(check.detail,
-                         'UIPinOnlyUI=0 (shadow: measured and logged, nothing unpinned); source 10 (UI layer): 3 '
-                         'lines, median would unpin 73.2% of covered (largest 78.0%), median kept 78689 px; source '
-                         '12 (pre-UI change set): 1 lines, median would unpin 39.3% of covered (largest 39.3%), '
-                         'median kept 35206 px; counted 4 samples (4 unpinning), 2244304 unpinned and 199302 kept '
-                         'pixels')
-        self.assertEqual(check.times, ['10:00:05.000 source 10: unpinned 1065506 of 1365596 covered, kept 78689 '
-                                       '(shadow)',
-                                       '10:00:08.000 source 12: unpinned 176194 of 448858 covered, kept 35206 '
-                                       '(shadow)'])
-        # The switch key is the new one in the change-set check too.
-        self.assertEqual(checks['Pre-UI change set'].detail, 'UIPinOnlyUI=0; no sample measured the layer pair')
-        # With the switch on the pixels are unpinned.
-        on = run(BASE + [ONLY_UI_ON, darkening_line('10:00:05', enabled=1)])['Pin only UI']
-        self.assertEqual((on.status, on.detail),
-                         ('INFO', 'UIPinOnlyUI=1; source 10 (UI layer): 1 lines, median unpinned 78.0% of covered '
-                                  '(largest 78.0%), median kept 78689 px'))
-        # A colourless opacity source unpins nothing, and the summary says so.
-        dark = run(BASE + [ONLY_UI_ON, darkening_line('10:00:05', enabled=1, unpinned=0, kept=90, colourless=1)])
-        self.assertEqual(dark['Pin only UI'].detail,
-                         'UIPinOnlyUI=1; source 10 (UI layer): 1 lines, median unpinned 0.0% of covered (largest '
-                         '0.0%), median kept 90 px, 1 colourless (no colour on the frame, nothing unpinned)')
-        # A session with the switch line and no eligible sample says so.
-        none = run(BASE + [ONLY_UI_OFF])['Pin only UI']
-        self.assertEqual((none.status, none.detail),
-                         ('INFO', 'UIPinOnlyUI=0 (shadow: measured and logged, nothing unpinned); no sample decided '
-                                  'an eligible source (2, 5, 10, 12)'))
-
-    def test_fix4_darkening_counters_must_reconcile(self):
-        def counted(samples, unpinned_samples, unpinned_px, kept_px):
-            return counters('10:00:12', {**CLEAN_COUNTERS, 'darkening.samples': samples,
-                                         'darkening.unpinned_samples': unpinned_samples,
-                                         'darkening.unpinned_px': unpinned_px, 'darkening.kept_px': kept_px},
-                            groups=FIX4_COUNTER_GROUPS)
-        before = [darkening_line('10:00:05', covered=100, unpinned=10, kept=5),
-                  darkening_line('10:00:06', covered=100, unpinned=0, kept=7)]
-        after = [darkening_line('10:00:13', covered=100, unpinned=20, kept=1)]
-        # The counters count every measured sample and the lines are a throttled subset, so the lines logged before
-        # the last counter line are a lower bound only: more counted samples (unlogged ones) reconcile.
-        for values in ((2, 1, 10, 12), (3, 2, 30, 13), (40, 20, 300, 130)):
-            check = run(BASE + [ONLY_UI_OFF] + before + [counted(*values)] + after)['Pin only UI']
-            self.assertEqual(check.status, 'INFO', check.detail)
-        check = run(BASE + [ONLY_UI_OFF] + before + [counted(1, 1, 10, 5)] + after)['Pin only UI']
-        self.assertEqual(check.status, 'FAIL')
-        self.assertIn('the darkening counters do not reconcile with the logged lines', check.detail)
-        self.assertIn('samples 1 below 2, kept_px 5 below 12)', check.detail)
-
-    def test_fix4_logs_before_it_have_no_pin_only_ui_check(self):
-        # Fix 3 logs keep their key in the change-set check and add no Pin only UI check.
-        for lines in ([PIN_OFF, change_set_line('10:00:05')],
-                      [PIN_OFF, counters('10:00:12', CLEAN_COUNTERS, groups=FIX3_COUNTER_GROUPS)],
-                      [SB_FIX1_SETTINGS]):
-            checks = run(BASE + lines)
-            self.assertNotIn('Pin only UI', checks)
-        check = run(BASE + [PIN_OFF])['Pre-UI change set']
-        self.assertEqual(check.detail, 'UIPinChangedPixels=0; no sample measured the layer pair')
+        checks = run(BASE + [pin, status, later, old])
+        self.assertNotIn('Pre-UI change set', checks)
+        self.assertNotIn('Pin only UI', checks)
 
     def test_counted_whole_frame_alpha_over_a_visible_scene_is_reported(self):
         # The Witcher 3 sign wheel: a trusted layer covers the frame without an exact pair, so contradicted stays 0;

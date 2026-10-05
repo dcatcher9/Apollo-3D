@@ -20,8 +20,8 @@
 // active layer is copied just before the first clear after each Present: D3D12
 // requires RENDER_TARGET for a clear, so the state is known, and the copy holds
 // the previous frame's UI: the frame the previous Present showed, which the
-// tracker's Present count names (presents_since_copy, the pairing of the
-// pre-UI change set, game3d_ui_change_set.h). UI detection receives the newest copy as the
+// tracker's Present count names (presents_since_copy, the present label S3's
+// layer ticket expects, game3d_ui_input_provider.cpp). UI detection receives the newest copy as the
 // offscreen UI layer candidate, in a slot of its own beside any tagged
 // UIColorAndAlpha (UI framework E1, candidate bit 0x40 at t7). It decides only
 // once accepted by its own evidence (A1) and only in a frame where it is valid
@@ -77,7 +77,7 @@ namespace sunshine_game3d::ui_layer {
       copy_frame_ = frame_;
       copied_ = true;
     }
-    // Presents observed since the last copied() (fix 3): 1 when the copy was
+    // Presents observed since the last copied(): 1 when the copy was
     // recorded after the previous Present and this Present was observed,
     // so the copy holds the frame that previous Present showed; 2 when an
     // interval passed without one; 0 within the copy's own interval or
@@ -146,8 +146,8 @@ namespace sunshine_game3d::ui_layer {
     std::uint64_t tick{};       // GetTickCount64 when the copy was recorded.
     std::uint32_t format{};     // Typed format of the copy.
     // Presents observed since the copy (layer_tracker::presents_since_copy):
-    // the copy holds the frame of the Present that many back
-    // (game3d_ui_change_set.h, pairing).
+    // the copy holds the frame of the Present that many back (S3's layer
+    // ticket, game3d_ui_input_provider.cpp).
     std::uint32_t presents_since_copy{};
     // S3 (shadow): the copy's 16-byte stamp buffer (add-on owned, a default
     // buffer resting in COMMON; it reads 0 until a stamped copy executed, and

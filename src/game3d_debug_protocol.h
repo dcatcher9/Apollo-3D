@@ -39,12 +39,9 @@ namespace game3d_debug {
     ui_layer_0 = 40,
     ui_layer_1 = 41,
     ui_layer_2 = 42,
-    // Optional: the presented colors the renderer retained for the pre-UI
-    // change set's pairing (fix 3), one and two Presents before the dumped
-    // render, and the offscreen UI layer copy UI detection consumed (t7).
-    retained_present_1 = 43,
-    retained_present_2 = 44,
-    ui_layer_detected = 45,
+    // 43-45 (retained_present_1, retained_present_2 and ui_layer_detected,
+    // fix 3's pre-UI change-set artifacts, removed by user decision) are
+    // reserved and never reused; a host drops them as unknown optional IDs.
   };
   inline constexpr unsigned ui_layer_count = 3;
   inline constexpr const char *ui_layer_names[ui_layer_count] {"ui_layer_candidate_0", "ui_layer_candidate_1", "ui_layer_candidate_2"};
@@ -54,33 +51,6 @@ namespace game3d_debug {
   inline constexpr const char *ui_layer_name(unsigned id) noexcept {
     return ui_layer_artifact(id) ? ui_layer_names[id - static_cast<unsigned>(artifact::ui_layer_0)] : nullptr;
   }
-  // The change-set artifacts (43-45), optional like every ID from 9: a host
-  // without these names drops them with an optional_capture_errors entry.
-  inline constexpr unsigned change_set_artifact_count = 3;
-  inline constexpr const char *change_set_names[change_set_artifact_count] {"retained_present_1", "retained_present_2", "ui_layer_detected"};
-  inline constexpr bool change_set_artifact(unsigned id) noexcept {
-    return id >= static_cast<unsigned>(artifact::retained_present_1) &&
-           id < static_cast<unsigned>(artifact::retained_present_1) + change_set_artifact_count;
-  }
-  inline constexpr const char *change_set_name(unsigned id) noexcept {
-    return change_set_artifact(id) ? change_set_names[id - static_cast<unsigned>(artifact::retained_present_1)] : nullptr;
-  }
-  // The ID of a change-set artifact name, zero for any other name.
-  inline unsigned change_set_artifact_id(const char *name) noexcept {
-    if (name)
-      for (unsigned i = 0; i < change_set_artifact_count; ++i) {
-        const char *a = change_set_names[i], *b = name;
-        while (*a && *a == *b) {
-          ++a;
-          ++b;
-        }
-        if (!*a && !*b) return static_cast<unsigned>(artifact::retained_present_1) + i;
-      }
-    return 0;
-  }
-  static_assert(static_cast<unsigned>(artifact::ui_layer_2) + 1 == static_cast<unsigned>(artifact::retained_present_1) &&
-                static_cast<unsigned>(artifact::ui_layer_detected) + 1 ==
-                  static_cast<unsigned>(artifact::retained_present_1) + change_set_artifact_count);
 
   struct texture_t {
     artifact kind {};

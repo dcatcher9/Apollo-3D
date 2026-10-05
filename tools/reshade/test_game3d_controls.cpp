@@ -349,6 +349,16 @@ namespace {
       shadow.values["UIFlattenStillScreens"] = other;
       check(!load_still_flatten(shadow) && shadow.writes.empty(), "A UIFlattenStillScreens other than 1 enabled flattening");
     }
+    // The removed pin switch (fix 3's UIPinChangedPixels, fix 4's
+    // UIPinOnlyUI): a ReShade.ini that still carries it loads unchanged; the
+    // key is neither read nor rewritten, and it enables nothing.
+    for (const char *removed : {"UIPinOnlyUI", "UIPinChangedPixels"}) {
+      fake_config legacy;
+      legacy.values[removed] = 1;
+      legacy.values["UIFlattenStillScreens"] = 0;
+      check(!load_still_flatten(legacy) && legacy.writes.empty() && std::get<int>(legacy.values.at(removed)) == 1,
+        (std::string("A legacy ") + removed + " key changed the still-screen switch or was rewritten").c_str());
+    }
     check(still_flatten_log_text(true) ==
           "Sunshine UI protection: still screens with no UI source are flattened (UIFlattenStillScreens=1)" &&
         still_flatten_log_text(false) ==
@@ -413,78 +423,6 @@ namespace {
     value.coverage.source_kind = ui_detection::source_still;
     check(!value.unprotected() && !next_unprotected_since(value, true, 5000, 9000),
       "A frame shown flat as a still screen counted as unprotected");
-  }
-
-  // The pin-only-UI switch (UIPinOnlyUI; fix 3's UIPinChangedPixels renamed
-  // when rule P2 joined it): per game in the global ReShade.ini, absent
-  // writes 0 (the shadow) and the old key is not read, 1 lets the changed
-  // pixels of an exact pre-UI image decide and pure darkening unpin,
-  // anything else is the shadow; the panel's edit saves the key and switches
-  // the session, independently of H2's switch; and F1 names a pre-UI change
-  // set that does not isolate UI.
-  void pin_only_ui_is_per_game_and_named() {
-    fake_config absent;
-    check(!load_pin_only_ui(absent) && absent.writes == std::vector<std::string>{"UIPinOnlyUI"} &&
-        std::get<int>(absent.values.at("UIPinOnlyUI")) == 0,
-      "An absent UIPinOnlyUI did not write 0 and stay a shadow");
-    check(!load_pin_only_ui(absent) && absent.writes.size() == 1, "The written 0 enabled the switch or was rewritten");
-    fake_config enabled;
-    enabled.values["UIPinOnlyUI"] = 1;
-    check(load_pin_only_ui(enabled) && enabled.writes.empty(), "UIPinOnlyUI=1 did not enable it, or was rewritten");
-    for (const int other : {0, 2, -7}) {
-      fake_config shadow;
-      shadow.values["UIPinOnlyUI"] = other;
-      check(!load_pin_only_ui(shadow) && shadow.writes.empty(), "A UIPinOnlyUI other than 1 enabled it");
-    }
-    // Fix 3's key shipped as a shadow and is not migrated: it neither enables
-    // the switch nor stops the new key's default from being written.
-    fake_config renamed;
-    renamed.values["UIPinChangedPixels"] = 1;
-    check(!load_pin_only_ui(renamed) && renamed.writes == std::vector<std::string>{"UIPinOnlyUI"},
-      "The old UIPinChangedPixels key was migrated or enabled the switch");
-    check(pin_only_ui_log_text(true) == "Sunshine UI protection: only UI pixels pin (UIPinOnlyUI=1)" &&
-        pin_only_ui_log_text(false) == "Sunshine UI protection: dims and unchanged pixels are only logged (UIPinOnlyUI=0)",
-      "The session's pin-only-UI line changed");
-    check(std::string(pin_only_ui_label) == "Pin only UI pixels (dimmed scene keeps its 3D)" &&
-        std::string(pin_only_ui_tooltip).find("Saved per game (UIPinOnlyUI).") != std::string::npos,
-      "The pin-only-UI checkbox lost its label or tooltip");
-
-    fake_config global;
-    settings_state settings;
-    check(!edit_pin_only_ui(settings, true, global) && global.writes.empty(), "The switch acted without a session");
-    settings.alpha_session = std::make_shared<alpha_auto_policy>();
-    settings.alpha_session->set_pin_only_ui(load_pin_only_ui(global));
-    check(!settings.alpha_session->pin_only_ui() && global.writes.size() == 1, "A new game did not start as a shadow");
-    check(edit_pin_only_ui(settings, true, global) && settings.alpha_session->pin_only_ui() &&
-        !settings.alpha_session->still_flatten() && global.writes.size() == 2 &&
-        std::get<int>(global.values.at("UIPinOnlyUI")) == 1,
-      "Checking the box did not save 1 and enable the session, or switched H2");
-    check(!edit_pin_only_ui(settings, true, global) && global.writes.size() == 2, "An unchanged switch saved again");
-    settings.alpha_session->restore("pre_ui:87:srgb");
-    settings.alpha_session->forget();
-    settings.alpha_session->set_manual(true);
-    settings.alpha_session->set_automatic();
-    check(settings.alpha_session->pin_only_ui(), "Acceptance, Forget or a mode change reset the pin-only-UI switch");
-    fake_config other_game;
-    check(!load_pin_only_ui(other_game), "Another game inherited the switch");
-    check(edit_pin_only_ui(settings, false, global) && !settings.alpha_session->pin_only_ui() &&
-        std::get<int>(global.values.at("UIPinOnlyUI")) == 0, "Clearing the box did not save 0 and return to the shadow");
-    global.on_write = [&] { settings.alive = false; };
-    check(!edit_pin_only_ui(settings, true, global) && !settings.alpha_session->pin_only_ui(),
-      "The switch committed after the runtime was destroyed");
-
-    // F1: a pre-UI change set that failed its validity names itself; a
-    // HUD-less one keeps its text.
-    source_alpha_ui_decision value;
-    value.qualification.available = true;
-    value.coverage.state = alpha_auto_state::automatic_off;
-    value.coverage.evidence.frame_reason = ui_no_mask::difference_failed;
-    value.coverage.evidence.refused = ui_detection::candidate::pre_ui;
-    check(source_alpha_detection_text(value.qualification, value) ==
-        "No usable UI mask (the pre-UI image's changed pixels do not isolate UI)", "A failed pre-UI change set was not named");
-    value.coverage.evidence.refused = ui_detection::candidate::hudless;
-    check(source_alpha_detection_text(value.qualification, value) ==
-        "No usable UI mask (the HUD-less difference does not isolate UI)", "A failed HUD-less change set lost its text");
   }
 
   void ui_protection_warning_follows_unprotected_rendered_frames() {
@@ -947,7 +885,6 @@ int main() {
     ui_protection_status_names_the_reason();
     forget_and_scene_shadow_are_per_game();
     still_flatten_is_per_game_and_named();
-    pin_only_ui_is_per_game_and_named();
     ui_protection_warning_follows_unprotected_rendered_frames();
     source_alpha_applied_status_is_transient_and_mode_scoped();
     persistence_survives_runtime_recreation();
@@ -957,7 +894,7 @@ int main() {
     measured_statistics_follow_applied_and_held_scale_ownership();
     positive_flat_zero_target_does_not_invent_gain_tracking();
     projection_conversion_is_independent_and_retained_with_its_reference();
-    std::puts("PASS native Game 3D controls: defaults, automatic persistence, independent resets, runtime lifetime, output status, UI protection warning, reason, Forget, shadow, still-screen and pre-UI change-set toggles, and scale/conversion");
+    std::puts("PASS native Game 3D controls: defaults, automatic persistence, independent resets, runtime lifetime, output status, UI protection warning, reason, Forget, shadow and still-screen toggles, and scale/conversion");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());
