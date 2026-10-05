@@ -69,6 +69,11 @@ namespace platf::reshade_bridge {
     // used either for status() or for poll(); status() withdraws an earlier poll() connection.
     std::optional<source_status_t> status(RECT source_rect, int output_width, int output_height);
 
+    // Tells the producer that this consumer encodes HDR10 PQ, so it may pack any HDR source
+    // (scRGB included) as PQ (protocol consumer_stream_pq). The bits bind to the consumer nonce,
+    // so a change while attached requests the connection again under a new nonce.
+    void set_stream_pq(bool stream_pq);
+
     // Calls `wake` from a thread-pool thread each time the attached export's ready fence advances,
     // so the owner converts a finished frame when it completes instead of at its next poll. The
     // callback must only signal the owner. Never blocks; destruction waits for a running callback.

@@ -25,6 +25,9 @@ namespace reshade_bridge {
   inline constexpr std::uint32_t cursor_plane_present = 1u;
   // Consumer capability bits, valid only for the consumer nonce they were written with.
   inline constexpr std::uint32_t consumer_accepts_pq = 1u;
+  // The consumer encodes HDR10 PQ: pack any HDR source, scRGB included, as R10G10B10A2 PQ at
+  // pq_version. A producer that predates this bit ignores it and keeps its own choice.
+  inline constexpr std::uint32_t consumer_stream_pq = 2u;
 
   [[nodiscard]] constexpr bool supported_version(std::uint32_t candidate) {
     return candidate == screen_plane_version || candidate == version || candidate == pq_version;

@@ -160,6 +160,18 @@ namespace platf::reshade_bridge {
       return source_status_t {metadata.producer_pid, metadata.producer_creation_time, metadata.generation};
     }
 
+    void set_stream_pq(bool stream_pq) {
+      const auto capabilities = wire::consumer_accepts_pq | (stream_pq ? wire::consumer_stream_pq : 0u);
+      if (capabilities == capabilities_) {
+        return;
+      }
+      capabilities_ = capabilities;
+      if (nonce_) {
+        // The producer honours capabilities only for the nonce they were written with.
+        detach();
+      }
+    }
+
     void set_frame_wake(std::function<void()> wake) {
       if (wait_) {
         disarm_wake();
@@ -264,7 +276,7 @@ namespace platf::reshade_bridge {
         // Capabilities first, then their nonce, then the request itself (full barriers). A
         // producer trusts the bits only for the nonce they name, so it never applies them
         // to another consumer's request.
-        InterlockedExchange(reinterpret_cast<volatile LONG *>(&shared_->consumer_capabilities), static_cast<LONG>(wire::consumer_accepts_pq));
+        InterlockedExchange(reinterpret_cast<volatile LONG *>(&shared_->consumer_capabilities), static_cast<LONG>(capabilities_));
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared_->capability_nonce), static_cast<LONG64>(nonce_));
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&shared_->consumer_nonce), static_cast<LONG64>(nonce_));
         return std::nullopt;
@@ -615,6 +627,8 @@ namespace platf::reshade_bridge {
     std::uint64_t adapter_luid_ = 0;
     DWORD pid_ = 0;
     std::uint64_t window_ = 0, process_creation_ = 0, nonce_ = 0;
+    // Advertised with each new nonce; see set_stream_pq().
+    std::uint32_t capabilities_ = wire::consumer_accepts_pq;
     handle_t process_, mapping_;
     wire::shared_state_t *shared_ = nullptr;
     wire::metadata_t metadata_;
@@ -659,6 +673,10 @@ namespace platf::reshade_bridge {
 
   std::optional<source_status_t> receiver_t::status(RECT source_rect, int output_width, int output_height) {
     return impl_->status(source_rect, output_width, output_height);
+  }
+
+  void receiver_t::set_stream_pq(bool stream_pq) {
+    impl_->set_stream_pq(stream_pq);
   }
 
   void receiver_t::set_frame_wake(std::function<void()> wake) {

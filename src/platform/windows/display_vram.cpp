@@ -5356,6 +5356,11 @@ namespace platf::dxgi {
                           (sbs_mode == ::video::SBS_AI && sbs_config.reshade)) ?
                            std::make_unique<platf::reshade_bridge::receiver_t>(device.get(), device_ctx.get()) :
                            nullptr;
+      if (reshade_receiver) {
+        // An HDR stream is encoded as HDR10 PQ, so the producer may pack an scRGB game in that
+        // format directly. Local presentation keeps the producer's own choice.
+        reshade_receiver->set_stream_pq(!rgb_only && output_is_hdr);
+      }
       if (reshade_receiver && ::video::is_packed_mode(sbs_mode) && external_frame_wake) {
         reshade_receiver->set_frame_wake(external_frame_wake);
       }

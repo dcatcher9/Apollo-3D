@@ -189,6 +189,10 @@ TEST(ReShadeBridgeProtocol, CapabilitiesBindToTheNonceTheyWereWrittenWith) {
   EXPECT_EQ(offsetof(shared_state_t, slots), 192u);
   EXPECT_EQ(sizeof(shared_state_t), 384u);
   EXPECT_EQ(answered_capabilities(7, 7, consumer_accepts_pq), consumer_accepts_pq);
+  // The HDR10-stream bit is its own wire bit, bound to the nonce like PQ acceptance.
+  EXPECT_EQ(consumer_stream_pq, 2u);
+  EXPECT_EQ(answered_capabilities(7, 7, consumer_accepts_pq | consumer_stream_pq), 3u);
+  EXPECT_EQ(answered_capabilities(8, 7, consumer_stream_pq), 0u);
   // A replaced consumer's (stale) capabilities never apply to the nonce being answered, and
   // an old consumer that never writes them reads as zero.
   EXPECT_EQ(answered_capabilities(8, 7, consumer_accepts_pq), 0u);
@@ -622,6 +626,37 @@ TEST_F(ReShadeBridgeGpu, AdvertisesPqBeforeItsNonceAndImportsAPqGeneration) {
   ASSERT_TRUE(frame);
   EXPECT_EQ(frame->transfer, receiver::transfer_e::pq);
   EXPECT_FALSE(frame->linear);
+  expect_pixels(frame->texture, DXGI_FORMAT_R10G10B10A2_UNORM, 0xC00003FF, 0xFFF00000);
+}
+
+TEST_F(ReShadeBridgeGpu, AdvertisesAnHdr10StreamOnlyUnderTheNonceItRequests) {
+  const auto first_nonce = state->consumer_nonce;
+  ASSERT_EQ(state->consumer_capabilities, protocol::consumer_accepts_pq);
+
+  // Unchanged capabilities keep the connection.
+  bridge->set_stream_pq(false);
+  EXPECT_EQ(state->consumer_nonce, first_nonce);
+
+  // An HDR stream withdraws the old request and makes a new one with both bits under a new nonce.
+  bridge->set_stream_pq(true);
+  EXPECT_EQ(state->consumer_nonce, 0u);
+  EXPECT_FALSE(poll());
+  ASSERT_NE(state->consumer_nonce, 0u);
+  EXPECT_NE(state->consumer_nonce, first_nonce);
+  const auto both = protocol::consumer_accepts_pq | protocol::consumer_stream_pq;
+  EXPECT_EQ(state->consumer_capabilities, both);
+  EXPECT_EQ(state->capability_nonce, state->consumer_nonce);
+  EXPECT_EQ(protocol::answered_capabilities(state->consumer_nonce, state->capability_nonce, state->consumer_capabilities), both);
+  // The previous consumer's answer never carries the new bits.
+  EXPECT_EQ(protocol::answered_capabilities(first_nonce, state->capability_nonce, state->consumer_capabilities), 0u);
+
+  // A producer answering the new nonce with PQ (an scRGB game packed for the HDR10 stream) presents.
+  ASSERT_TRUE(new_generation(DXGI_FORMAT_R10G10B10A2_UNORM, protocol::transfer::pq, source_width, height, protocol::pq_version));
+  const auto codes = pixels(0xC00003FF, 0xFFF00000);
+  publish_pixels(1, codes.data(), packed_width * sizeof(std::uint32_t));
+  const auto frame = await_frame();
+  ASSERT_TRUE(frame);
+  EXPECT_EQ(frame->transfer, receiver::transfer_e::pq);
   expect_pixels(frame->texture, DXGI_FORMAT_R10G10B10A2_UNORM, 0xC00003FF, 0xFFF00000);
 }
 
