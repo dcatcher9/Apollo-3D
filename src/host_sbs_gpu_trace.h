@@ -11,17 +11,17 @@
 #include <cstdint>
 
 namespace models::host_sbs_gpu_trace {
-  inline constexpr std::uint32_t ring_schema = 3u;
-  inline constexpr std::uint32_t dump_contract_schema = 4u;
-  inline constexpr std::uint32_t decoded_trace_schema = 5u;
+  inline constexpr std::uint32_t ring_schema = 4u;
+  inline constexpr std::uint32_t dump_contract_schema = 5u;
+  inline constexpr std::uint32_t decoded_trace_schema = 6u;
   inline constexpr std::uint32_t ring_tag = 0x48525447u;  // GTRH in little-endian memory.
   inline constexpr std::uint32_t record_tag = 0x31525447u;  // GTR1.
   inline constexpr std::uint32_t capacity = 300u;
   inline constexpr std::uint32_t header_word_count = 16u;
-  inline constexpr std::uint32_t record_word_count = 176u;
+  inline constexpr std::uint32_t record_word_count = 192u;
   inline constexpr std::uint32_t constant_word_count = 20u;
   inline constexpr std::uint32_t transaction_word_count = 64u;
-  inline constexpr std::uint32_t subtitle_locator_word_count = 80u;
+  inline constexpr std::uint32_t subtitle_locator_word_count = 96u;
   inline constexpr std::uint32_t subtitle_condition_word_count = 6u;
   inline constexpr std::uint32_t ring_word_count =
     header_word_count + capacity * record_word_count;
@@ -275,9 +275,9 @@ namespace models::host_sbs_gpu_trace {
   static_assert(word_index(record_word_e::subtitle_condition_begin) +
                   subtitle_condition_word_count ==
                 word_index(record_word_e::observation_timestamp_low));
-  static_assert(word_index(record_word_e::observation_timestamp_low) == 174u);
-  static_assert(word_index(record_word_e::observation_timestamp_high) == 175u);
+  static_assert(word_index(record_word_e::observation_timestamp_low) == 190u);
+  static_assert(word_index(record_word_e::observation_timestamp_high) == 191u);
   static_assert(word_index(record_word_e::reserved_begin) == record_word_count);
-  static_assert(ring_word_count == 52816u);
-  static_assert(ring_byte_count == 211264u);
+  static_assert(ring_word_count == 57616u);
+  static_assert(ring_byte_count == 230464u);
 }  // namespace models::host_sbs_gpu_trace

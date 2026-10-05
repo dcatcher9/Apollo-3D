@@ -100,6 +100,16 @@ Conformance proves that the renderer reproduced its selected coordinate and that
 state followed its declared schedule. It does not prove that the monocular depth or selected
 disparity is perceptually ideal.
 
+Vertical alignment uses exact per-eye source-map references on overlapping texture tiles. Each
+tile first ranks all finite, nondegenerate vertical NCC candidates, then applies the existing
+`3/255` reference-texture floor to the winner. A winner below that floor makes the tile abstain;
+it cannot be replaced by a more textured row with lower correlation. This prevents output
+quantization near the texture floor from turning a nearly exact zero-offset match into a false
+vertical displacement. Output texture, NCC, ambiguity, support, P99, and hard limits are unchanged.
+These selection semantics require evaluator schema38 and the current metric source hash. Earlier
+schema37 results retain their original meaning and require their preserved evaluator sources;
+they cannot be relabeled or reused as a schema38 matched comparison.
+
 ## Temporal metrics
 
 | Metric | Meaning | Preferred direction |

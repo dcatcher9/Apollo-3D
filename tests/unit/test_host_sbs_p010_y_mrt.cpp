@@ -68,7 +68,7 @@ namespace {
     state[v2::frame_valid] = std::bit_cast<std::uint32_t>(1.0f);
     state[v2::contract_tag_bits] = v2::contract_tag;
     state[v2::renderer_authorization_bits] = v2::contract_tag;
-    state[v2::mapping_state_reserved_1] = 0u;
+    state[v2::joint_plane_mode_bits] = 0u;
     state[v2::mapping_state_reserved_2] = 0u;
     state[v2::camera_center_integrity_bits] =
       v2::camera_center_integrity_for_words(

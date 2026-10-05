@@ -83,11 +83,11 @@ REPO = SCRIPT_DIR.parent.parent
 # Exact replay compares a Pillow-decoded NumPy oracle with a WIC-decoded native replay. Keep this
 # lossless-only so both sides attest the same decoded source pixels.
 FRAME_PATTERN = re.compile(r"frame_(\d+)\.png$", re.IGNORECASE)
-SEQUENCE_CONTRACT_SCHEMA = 21
-GPU_INPUT_MANIFEST_SCHEMA = 10
-GPU_INPUT_MANIFEST_MODE = "depth-coordinate-v2-production-gpu-sequence-v12"
+SEQUENCE_CONTRACT_SCHEMA = 22
+GPU_INPUT_MANIFEST_SCHEMA = 11
+GPU_INPUT_MANIFEST_MODE = "depth-coordinate-v2-production-gpu-sequence-v13"
 SEQUENCE_MAPPING_CONFIG_KEYS = frozenset(asdict(MappingV2Config()).keys())
-NUMPY_COMPARISON_SCHEMA = 4
+NUMPY_COMPARISON_SCHEMA = 5
 PRODUCER_EVIDENCE_SCHEMA = 1
 PRODUCER_EVIDENCE_BINDING = "self-contained-schema36-schema24-raw-producer-v1"
 PRODUCER_EVIDENCE_DIR = "gpu_input/provenance"
@@ -126,6 +126,7 @@ IMPLEMENTATION_SOURCE_FILES = (
     "tools/sbsbench/prod_zipdepth_convex2x_diagnostics_contract.py",
     "tools/sbsbench/contracts/prod-zipdepth-convex2x-v2.json",
     "tools/sbsbench/run_eval.py",
+    "tools/sbsbench/run_adaptive_replay.py",
     "tools/sbsbench/cut_state_contract.py",
     "tools/sbsbench/whole_clip_raw_contract.py",
     "tools/sbsbench/replay_depth_mapping_v2_sequence.py",
@@ -195,7 +196,7 @@ def _validate_metric_contract_evidence(value: object) -> None:
 
 def _diagnostic_summary(rows: Sequence[Dict[str, object]]) -> Dict[str, object]:
     return {
-        "role": "non-controlling-fixed-scale-camera-audit-v4",
+        "role": "non-controlling-mode-selected-camera-audit-v6",
         "maximum_abs_candidate_center_drift_u": max(
             abs(float(row["candidate_center_drift_u"])) for row in rows),
         "maximum_abs_predicted_zero_translation_source_u": max(
@@ -399,11 +400,24 @@ def _materialize_gpu_replay_inputs(
         cut_source: str,
         shape: tuple[int, int],
         run_model: Dict[str, object],
-        config: MappingV2Config) -> tuple[list[Dict[str, object]], Path]:
+        config: MappingV2Config, *,
+        joint_plane_mode: int = 0,
+        observation_timestamps_us: Optional[Sequence[int]] = None
+        ) -> tuple[list[Dict[str, object]], Path]:
     """Bind current color, exact raw bytes, and cut generations for native GPU replay."""
 
     if not (len(frame_ids) == len(cut_counts) == len(cut_pulses)):
         raise ValueError("GPU replay frame and cut sequences have different lengths")
+    if type(joint_plane_mode) is not int or joint_plane_mode not in (0, 3):
+        raise ValueError("GPU replay mode must be integer 0 or 3")
+    if joint_plane_mode == 3:
+        if (observation_timestamps_us is None or
+                len(observation_timestamps_us) != len(frame_ids) or
+                any(type(value) is not int or not 0 <= value <= 0xFFFFFFFFFFFFFFFF
+                    for value in observation_timestamps_us)):
+            raise ValueError("mode 3 requires one explicit uint64 source timestamp per frame")
+    elif observation_timestamps_us is not None:
+        raise ValueError("legacy replay modes cannot carry a gain source clock")
     input_frames = output / "input_frames"
     replay_frames = output / "frames"
     gpu_input = output / "gpu_input"
@@ -459,6 +473,8 @@ def _materialize_gpu_replay_inputs(
             "hard_cut_count": int(cut_counts[index]),
             "hard_cut_pulse": bool(cut_pulses[index]),
         })
+        if joint_plane_mode == 3:
+            manifest_frames[-1]["observation_timestamp_us"] = observation_timestamps_us[index]
         rows.append({
             "frame_id": frame_text,
             "input_source_file": str(input_path.relative_to(output)).replace("\\", "/"),
@@ -492,7 +508,8 @@ def _materialize_gpu_replay_inputs(
             "dtype": "float32-le", "layout": "row-major",
         },
         "source_shape": source_shape,
-        "mapping_config": asdict(config),
+        "mapping_config": {**asdict(config), **(
+            {"joint_plane_mode": joint_plane_mode} if joint_plane_mode else {})},
         "cut_source": cut_source,
         "frames": manifest_frames,
     }
@@ -500,6 +517,23 @@ def _materialize_gpu_replay_inputs(
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return rows, manifest_path
+
+
+def _read_explicit_source_timeline(path: Path, frame_count: int) -> list[int]:
+    """Read the maintained timeline ABI without leaking evaluator kernel limits to native work."""
+    environment = dict(os.environ)
+    try:
+        try:
+            from .run_adaptive_replay import read_observation_timeline
+        except ImportError:
+            from run_adaptive_replay import read_observation_timeline
+    finally:
+        os.environ.clear()
+        os.environ.update(environment)
+    timestamps = read_observation_timeline(path)
+    if len(timestamps) != frame_count:
+        raise ValueError("explicit source timeline count does not match the selected replay frames")
+    return timestamps
 
 
 def _exact_source_capture_grid_kind(
@@ -600,6 +634,31 @@ def _compare_gpu_with_numpy(
         config: MappingV2Config,
         gpu_trace: Dict[str, object]) -> Dict[str, object]:
     """Fail closed when native GPU fields leave explicit float32 oracle tolerances."""
+
+    mode = gpu_trace["mapping_config"].get("joint_plane_mode", 0)
+    if type(mode) is not int or mode not in (0, 3):
+        raise ValueError("GPU trace has an invalid joint plane mode")
+    if mode != 0:
+        # The retained NumPy reference implements only the production shot latch. Do not compare
+        # another native producer to that geometry or manufacture a new CPU warp/controller.
+        document = {
+            "schema": NUMPY_COMPARISON_SCHEMA,
+            "role": "not-applicable-mode-selected-native-only-v3",
+            "render_authority": "native-eight-shader-gpu-output",
+            "joint_plane_mode": mode,
+            "all_within_float32_tolerances": None,
+            "reason": "No NumPy geometry/controller replica exists for this native mode.",
+            "frames": [{
+                "frame_id": f"{frame_id:05d}",
+                "gpu_order_sha256": direct_geometry.file_sha256(
+                    str(output / "harness" / f"depth_{frame_id:05d}.f32")),
+                "gpu_parallax_sha256": direct_geometry.file_sha256(
+                    str(output / "harness" / f"parallax_{frame_id:05d}.f32")),
+            } for frame_id in frame_ids],
+        }
+        (output / NUMPY_COMPARISON_FILE).write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return document
 
     tolerances = {
         "canonical_max_abs": 5.0e-4,
@@ -830,6 +889,11 @@ def _validate_gpu_input_manifest_evidence(
         "frame_id", "raw_file", "raw_sha256", "source_sha256", "hard_cut_count",
         "hard_cut_pulse",
     }
+    mode = mapping.get("joint_plane_mode", 0)
+    if type(mode) is not int or mode not in (0, 3):
+        raise ValueError("GPU input manifest has an invalid joint plane mode")
+    if mode == 3:
+        expected_frame_keys.add("observation_timestamp_us")
     if (not isinstance(frames, list) or not isinstance(selected, list) or
             not isinstance(raw_records, list) or
             len(frames) != len(selected) or len(frames) != len(raw_records)):
@@ -848,6 +912,10 @@ def _validate_gpu_input_manifest_evidence(
                 not 0 <= row["hard_cut_count"] <= CUT_COUNTER_MAX or
                 type(row.get("hard_cut_pulse")) is not bool):
             raise ValueError(f"GPU input manifest frame {index} has invalid evidence")
+        if mode == 3 and (
+                type(row["observation_timestamp_us"]) is not int or
+                not 0 <= row["observation_timestamp_us"] <= 0xFFFFFFFFFFFFFFFF):
+            raise ValueError(f"GPU input manifest frame {index} has an invalid source clock")
         raw_path = reference_path.parent / expected_file
         try:
             raw_size = raw_path.stat().st_size
@@ -1071,14 +1139,15 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
         "unusable_depth_semantics", "mapping_implementation",
         "diagnostic_summary", "implementation_sources", "score_evidence",
         "gpu_input_manifest", "numpy_comparison",
-        "producer_evidence",
+        "producer_evidence", "observation_timeline",
     }
     if (set(document) != expected_root or document.get("schema") != SEQUENCE_CONTRACT_SCHEMA or
             document.get("experiment") != "depth-coordinate-v2-whole-clip-exact-replay" or
             document.get("mapping_implementation") !=
-            "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-gpu-state-v9" or
-            document.get("unusable_depth_semantics") !=
-            "current-color-flat-retain-camera-unless-cut-v2"):
+            "authenticated-raw-depth-plus-eight-v2-compute-shaders-persistent-gpu-state-v11" or
+            document.get("unusable_depth_semantics") not in {
+                "current-color-flat-retain-camera-unless-cut-v2",
+                "current-color-flat-retain-host-camera-on-unusable-and-cut-v4"}):
         raise ValueError("sequence contract has missing or unknown semantics")
     if document.get("implementation_sources") != _implementation_sources():
         raise ValueError("sequence implementation source hashes are stale or incomplete")
@@ -1103,9 +1172,9 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
             input_contract.get("contract_schema") !=
             whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA or
             input_contract.get("model_hash_authority") !=
-            "schema-37-run-level-results-json" or
+            "schema-38-run-level-results-json" or
             input_contract.get("input_shape_authority") !=
-            "schema-37-per-clip-raw-manifest" or
+            "schema-38-per-clip-raw-manifest" or
             not isinstance(input_contract.get("depth_model_url"), str) or
             not input_contract["depth_model_url"].startswith("https://") or
             not isinstance(input_contract.get("preprocess_profile"), str) or
@@ -1121,7 +1190,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
         raise ValueError("sequence input evidence has unknown authority or invalid hashes")
     raw_hash_authority = input_contract.get("raw_hash_authority")
     if raw_hash_authority != {
-            "source": "schema-37-run-level-results-json",
+            "source": "schema-38-run-level-results-json",
             "manifest_schema": whole_clip_raw_contract.MANIFEST_SCHEMA,
             "binding": whole_clip_raw_contract.BINDING,
     }:
@@ -1150,7 +1219,8 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
     if declared_input_digest != measured_input_digest:
         raise ValueError("sequence input evidence digest mismatch")
     mapping = document.get("mapping_config")
-    if (not isinstance(mapping, dict) or set(mapping) != SEQUENCE_MAPPING_CONFIG_KEYS or
+    if (not isinstance(mapping, dict) or set(mapping) not in (
+            SEQUENCE_MAPPING_CONFIG_KEYS, SEQUENCE_MAPPING_CONFIG_KEYS | {"joint_plane_mode"}) or
             mapping.get("raw_coordinate_scale") !=
             input_contract.get("raw_coordinate_scale") or
             mapping.get("vertical_majorant_share") !=
@@ -1203,12 +1273,45 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
     _validate_producer_evidence_bundle(
         output, document.get("producer_evidence"), input_contract, gpu_input)
     numpy_comparison = _read_json(output / NUMPY_COMPARISON_FILE)
+    mode = mapping.get("joint_plane_mode", 0)
+    expected_unusable_semantics = (
+        "current-color-flat-retain-host-camera-on-unusable-and-cut-v4" if mode == 3 else
+        "current-color-flat-retain-camera-unless-cut-v2")
+    if document["unusable_depth_semantics"] != expected_unusable_semantics:
+        raise ValueError("sequence unavailable-camera policy disagrees with native mode")
+    timeline_reference = document.get("observation_timeline")
+    if mode == 3:
+        if (not isinstance(timeline_reference, dict) or set(timeline_reference) != {
+                "file", "sha256", "time_provenance"} or
+                timeline_reference.get("file") != "gpu_input/observation.timeline" or
+                timeline_reference.get("time_provenance") != "explicit-authored-source-us-plus-one"):
+            raise ValueError("mode 3 replay requires explicit source-time provenance")
+        timeline_path = _relative_file(output, timeline_reference["file"], "observation timeline")
+        if direct_geometry.file_sha256(str(timeline_path)) != timeline_reference["sha256"]:
+            raise ValueError("source timeline bytes are not authenticated")
+        timestamps = _read_explicit_source_timeline(timeline_path, len(gpu_input["frames"]))
+        if timestamps != [row["observation_timestamp_us"] for row in gpu_input["frames"]]:
+            raise ValueError("source timeline disagrees with native GPU input clocks")
+    elif timeline_reference is not None:
+        raise ValueError("production control cannot inherit an adaptive source timeline")
     if (numpy_comparison.get("schema") != NUMPY_COMPARISON_SCHEMA or
-            numpy_comparison.get("role") != "numpy-comparison-oracle-only-v2" or
-            numpy_comparison.get("render_authority") !=
-            "native-six-shader-gpu-output" or
-            numpy_comparison.get("all_within_float32_tolerances") is not True):
-        raise ValueError("NumPy evidence is not a passing comparison-only oracle")
+            numpy_comparison.get("render_authority") != (
+                "native-eight-shader-gpu-output" if mode == 3 else "native-six-shader-gpu-output")):
+        raise ValueError("NumPy evidence has unknown render authority/schema")
+    if mode == 0:
+        if (numpy_comparison.get("role") != "numpy-comparison-oracle-only-v2" or
+                numpy_comparison.get("all_within_float32_tolerances") is not True):
+            raise ValueError("NumPy evidence is not a passing comparison-only oracle")
+    else:
+        if (set(numpy_comparison) != {
+                "schema", "role", "render_authority", "joint_plane_mode", "reason",
+                "all_within_float32_tolerances", "frames"} or
+                numpy_comparison.get("role") != "not-applicable-mode-selected-native-only-v3" or
+                numpy_comparison.get("joint_plane_mode") != mode or
+                numpy_comparison.get("all_within_float32_tolerances") is not None or
+                numpy_comparison.get("reason") !=
+                "No NumPy geometry/controller replica exists for this native mode."):
+            raise ValueError("native-only mode must not claim a passing NumPy geometry comparison")
 
     rows = document.get("frames")
     expected_row_keys = {
@@ -1259,8 +1362,18 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
     if trace["producer"]["manifest_sha256"] != gpu_input_ref.get("sha256"):
         raise ValueError("sequence native state trace names a different GPU input manifest")
     trace_rows = trace["frames"]
+    if mode != 0:
+        expected_native_only_rows = [{
+            "frame_id": row["frame_id"], "gpu_order_sha256": row["order_sha256"],
+            "gpu_parallax_sha256": row["parallax_sha256"],
+        } for row in trace_rows]
+        if numpy_comparison.get("frames") != expected_native_only_rows:
+            raise ValueError("native-only comparison status does not bind rendered field bytes")
     gpu_frames = gpu_input["frames"]
     for index, (gpu_row, trace_row) in enumerate(zip(gpu_frames, trace_rows)):
+        if trace_row["observation_timestamp_us"] != gpu_row.get("observation_timestamp_us", 0):
+            raise ValueError(
+                f"sequence frame {gpu_row['frame_id']} source clock disagrees with native trace")
         previous_count = (gpu_frames[index - 1]["hard_cut_count"] if index else
                           gpu_row["hard_cut_count"])
         expected_confirmed_cut = bool(
@@ -1299,7 +1412,8 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
         measured_vertical_shear = (
             float(np.max(np.abs(np.diff(decoded, axis=0)))) * raw_shape["width"]
             if raw_shape["height"] > 1 else 0.0)
-        if measured_maximum > DIRECT_PARALLAX_SOURCE_U_LIMIT + 2.0e-7:
+        display_limit = DIRECT_PARALLAX_SOURCE_U_LIMIT
+        if measured_maximum > display_limit + 2.0e-7:
             raise ValueError(f"sequence frame {frame_text} exceeds the hard parallax container")
         if measured_slope > float(mapping["max_horizontal_slope"]) + 2.0e-5:
             raise ValueError(f"sequence frame {frame_text} exceeds the horizontal slope bound")
@@ -1327,7 +1441,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
                            float(mapping["pop_strength"]), rtol=0.0, atol=1.0e-7) or
             gpu_execution.get("enabled") is not True or
             gpu_execution.get("execution") !=
-            "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-state-v9" or
+            "authenticated-raw-depth-plus-eight-v2-compute-shaders-persistent-state-v11" or
             gpu_execution.get("tensorrt_executed") is not False or
             gpu_execution.get("render_authority") != "gpu-canonical-and-final-fields" or
             gpu_execution.get("numpy_role") != "comparison-only" or
@@ -1426,7 +1540,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--pop-strength", type=float, default=None,
         help="explicit v2 pop override (default: resolved profile/global value in results.json)")
     parser.add_argument("--skip-score", action="store_true")
+    parser.add_argument("--joint-plane-mode", type=int, choices=(0, 3), default=0,
+                        help="native producer mode; mode 3 have no NumPy geometry replica")
+    parser.add_argument("--observation-timeline", type=Path,
+                        help="mode 3: explicit authored uint64 source-us-plus-one timeline")
     args = parser.parse_args(argv)
+    if (args.joint_plane_mode == 3) != (args.observation_timeline is not None):
+        parser.error("--observation-timeline is required exactly for --joint-plane-mode 3")
 
     raw_sequence = args.raw_seq.resolve()
     source_root = args.frames.resolve()
@@ -1460,7 +1580,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         harness = output / "harness"
         output_rows, gpu_manifest_path = _materialize_gpu_replay_inputs(
             output, sources, raw_paths, frame_ids, cut_counts, cut_pulses, cut_source,
-            shape, run_model, config)
+            shape, run_model, config, joint_plane_mode=args.joint_plane_mode,
+            observation_timestamps_us=(
+                _read_explicit_source_timeline(args.observation_timeline.resolve(), len(frame_ids))
+                if args.joint_plane_mode == 3 else None))
+        timeline_reference = None
+        if args.joint_plane_mode == 3:
+            timeline_copy = output / "gpu_input/observation.timeline"
+            shutil.copyfile(args.observation_timeline.resolve(), timeline_copy)
+            timeline_reference = {
+                "file": "gpu_input/observation.timeline",
+                "sha256": direct_geometry.file_sha256(str(timeline_copy)),
+                "time_provenance": "explicit-authored-source-us-plus-one",
+            }
         harness.mkdir()
         source_meta = source_root / "meta.json"
         if source_meta.is_file():
@@ -1523,9 +1655,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "schema": SEQUENCE_CONTRACT_SCHEMA,
             "experiment": "depth-coordinate-v2-whole-clip-exact-replay",
             "mapping_implementation":
-                "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-gpu-state-v9",
+                "authenticated-raw-depth-plus-eight-v2-compute-shaders-persistent-gpu-state-v11",
             "input_contract": input_contract,
-            "mapping_config": asdict(config),
+            "mapping_config": {**asdict(config), **(
+                {"joint_plane_mode": args.joint_plane_mode} if args.joint_plane_mode else {})},
+            "observation_timeline": timeline_reference,
             "pop_strength_authority": pop_strength_authority,
             "cut_source": cut_source,
             "state_trace": {
@@ -1557,8 +1691,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     str(output / NUMPY_COMPARISON_FILE)),
             },
             "frames": output_rows,
-            "unusable_depth_semantics":
-                "current-color-flat-retain-camera-unless-cut-v2",
+            "unusable_depth_semantics": (
+                "current-color-flat-retain-host-camera-on-unusable-and-cut-v4"
+                if args.joint_plane_mode == 3 else
+                "current-color-flat-retain-camera-unless-cut-v2"),
             "diagnostic_summary": _diagnostic_summary(trace_rows),
             "implementation_sources": _implementation_sources(),
             "score_evidence": score_evidence,

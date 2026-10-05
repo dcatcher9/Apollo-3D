@@ -82,7 +82,9 @@ void PublishNearIdenticalHistoryOwner(bool history_advances, float history_state
 bool CanonicalCoordinate(uint index, out float coordinate) {
     coordinate = 0.0f;
     float4 mapping_state = ShadowState[2];
-    if (asuint(V2_STATE_RENDERER_AUTHORIZATION_BITS(mapping_state)) != V2_CONTRACT_TAG) {
+    if (asuint(V2_STATE_RENDERER_AUTHORIZATION_BITS(mapping_state)) != V2_CONTRACT_TAG ||
+        !V2JointPlaneConstantsValid() ||
+        asuint(V2_STATE_JOINT_PLANE_MODE_BITS(mapping_state)) != v2_joint_plane_mode) {
         return false;
     }
     float4 active = ShadowState[0];
@@ -139,10 +141,14 @@ void main(uint3 id : SV_DispatchThreadID) {
         return;
     }
     float4 active = ShadowState[0];
-    float requested = v2_requested_gain *
-        (V2Curve(coordinate) -
+    uint mode = asuint(V2_STATE_JOINT_PLANE_MODE_BITS(ShadowState[2]));
+    float mapped_coordinate = mode == 0u ? V2Curve(coordinate) : coordinate;
+    float gain = v2_requested_gain;
+    float requested = gain *
+        (mapped_coordinate -
          V2_STATE_CONVERGENCE_CURVE(active));
-    float candidate = V2PointwiseContainer(requested);
+    float candidate = mode == 3u ? V2BoundDisplayParallax(requested) :
+        V2PointwiseContainer(requested);
     if (!V2Finite(candidate)) {
         candidate = 0.0f;
     }

@@ -1,14 +1,15 @@
-// Compact SLR13 lower-text authority.
+// Compact SLR14 lower-text authority, with an opt-in timed adaptive shared UI plane.
 //
 // OCR8 is the sole geometry source.  A coherent subtitle stack plus any bottom ribbon candidates
 // need two distinct, exact-frame observations before becoming one shared-plane owner. Only tight
-// cores copied from the current OCR8 record may select or track geometry; only their paired
-// same-frame covers may condition the BaseField. Cached owner, pending, target, and death-grace
+// cores copied from the current OCR8 record may authorize ownership; only their paired
+// same-frame covers may probe or condition the BaseField. Cached owner, pending, target, and death-grace
 // state never manufacture current geometry. Ordinary covers retain the established four-sided
 // analytic collar; a canonical full-width/bottom ribbon cover exposes only its top collar.
 
 #include "include/depth_constants.hlsl"
 #include "include/depth_coordinate_v2_ocr_assert.generated.hlsl"
+#include "include/depth_coordinate_v2.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
 
 StructuredBuffer<float4> CutBridge : register(t1);
@@ -26,6 +27,7 @@ cbuffer SubtitleLocatorConstants : register(b2) {
     uint4 locator_source;  // analysis source width, height, enabled, input-domain reset
     uint4 locator_frame;   // matched frame lo/hi, analysis generation lo/hi
     uint4 locator_content; // integer half-open real-source rectangle in locator_field
+    uint4 locator_observation; // exact source timestamp us lo/hi, two zero reserved words
 };
 
 static const uint FLAG_OWNER = 1u;
@@ -65,6 +67,24 @@ groupshared uint4 MatchedCovers[MAX_LINES];
 groupshared float TargetSamples[32];
 groupshared float LineCenters[MAX_LINES];
 
+// The adaptive controller is owned by the versioned SLR tail. These are within-group scratch,
+// not another persistent authority source. Counts cover the complete current-cover union.
+static const uint ADAPTIVE = V2_SUBTITLE_LOCATOR_ADAPTIVE_OFFSET;
+static const uint ADAPTIVE_APPROACH = 1u;
+static const uint ADAPTIVE_RETREAT = 2u;
+static const uint ADAPTIVE_CAPPED = 4u;
+static const uint ADAPTIVE_CLOCK = 8u;
+groupshared uint AdaptiveReset;
+groupshared uint AdaptiveDistinct;
+groupshared uint AdaptiveOcrValid;
+groupshared uint AdaptiveDomainValid;
+// Mode 3 retains four-source-pixel levels through the full representation cap. Supported Host
+// sources are at most 5120 pixels wide: ceil(5120/100)=52 is the last level, with one extra
+// histogram bucket for samples no candidate can clear.
+static const uint ADAPTIVE_HOST_MAX_SOURCE_WIDTH = 5120u;
+static const uint ADAPTIVE_COUNT_WORDS = 56u;
+groupshared uint AdaptiveCounts[ADAPTIVE_COUNT_WORDS];
+
 static const uint CONDITION_PARAM_SCHEMA_WORD = 0u;
 static const uint CONDITION_PARAM_TAG_WORD = 1u;
 static const uint CONDITION_PARAM_CURRENT_COUNT_WORD = 2u;
@@ -76,6 +96,83 @@ bool ProvisionalSingleLineReplacementRects(uint4 old_core, uint4 current_core);
 
 bool FiniteFloat(float value) {
     return (asuint(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+bool JointPlaneEnabled() {
+    return v2_joint_plane_mode == 3u;
+}
+
+bool JointPlanePolicyValid() {
+    return V2JointPlaneConstantsValid() &&
+        (v2_joint_plane_mode != 3u ||
+         (FiniteFloat(v2_requested_gain) && v2_requested_gain > 0.0f &&
+          all(uint2(v2_joint_observation_timestamp_low,
+                    v2_joint_observation_timestamp_high) == locator_observation.xy)));
+}
+
+uint AdaptiveMaximumIndex() {
+    // .04 source U / (4/source_width) equals source_width/100. Integer ceil keeps the level
+    // bound independent of SM5 division rounding; the last candidate returns the cap exactly.
+    return (locator_source.x + 99u) / 100u;
+}
+
+uint AdaptiveRead(bool previous, uint word) {
+    return previous ? PreviousState[ADAPTIVE + word] : ConditionStateSnapshot[ADAPTIVE + word];
+}
+
+bool SourceTimeAfter(uint2 a, uint2 b) {
+    return a.y > b.y || (a.y == b.y && a.x > b.x);
+}
+
+bool AdaptiveTailValid(bool previous) {
+    bool all_zero = true;
+    [unroll]
+    for (uint word = 0u; word < V2_SUBTITLE_LOCATOR_ADAPTIVE_WORD_COUNT; ++word) {
+        all_zero = all_zero && AdaptiveRead(previous, word) == 0u;
+    }
+    if (!JointPlaneEnabled()) return all_zero;
+    // An inactive publication can authenticate only an empty current mask. Previous inactive or
+    // old-mode state still reacquires ownership before it can grant any current cover authority.
+    if (all_zero) return !previous && ConditionStateSnapshot[20u] == 0u;
+    uint flags = AdaptiveRead(previous, 1u);
+    uint2 clock = uint2(AdaptiveRead(previous, 4u), AdaptiveRead(previous, 5u));
+    uint2 approach = uint2(AdaptiveRead(previous, 6u), AdaptiveRead(previous, 7u));
+    uint2 retreat = uint2(AdaptiveRead(previous, 8u), AdaptiveRead(previous, 9u));
+    float applied = asfloat(AdaptiveRead(previous, 3u));
+    float limit = asfloat(AdaptiveRead(previous, 12u));
+    uint covered = AdaptiveRead(previous, 13u);
+    uint content_area = (locator_content.z - locator_content.x) *
+        (locator_content.w - locator_content.y);
+    uint current = previous ? PreviousState[20u] : ConditionStateSnapshot[20u];
+    uint durable_target = previous ? PreviousState[18u] : ConditionStateSnapshot[18u];
+    uint durable_fade = previous ? PreviousState[24u] : ConditionStateSnapshot[24u];
+    uint owner_flags = previous ? PreviousState[2u] : ConditionStateSnapshot[2u];
+    uint provisional_target = previous ? PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD] :
+        ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD];
+    uint provisional_fade = previous ? PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] :
+        ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD];
+    if (current != 0u && (durable_target != asuint(applied) || durable_fade != 2u ||
+        ((owner_flags & FLAG_PROVISIONAL_CURRENT) != 0u &&
+         (provisional_target != asuint(applied) || provisional_fade != 2u)))) return false;
+    return AdaptiveRead(previous, 0u) == 1u && (flags & ~15u) == 0u &&
+        (flags & (ADAPTIVE_APPROACH | ADAPTIVE_RETREAT)) !=
+            (ADAPTIVE_APPROACH | ADAPTIVE_RETREAT) &&
+        AdaptiveRead(previous, 2u) <= AdaptiveMaximumIndex() &&
+        AdaptiveRead(previous, 10u) <= AdaptiveMaximumIndex() &&
+        AdaptiveRead(previous, 11u) <= AdaptiveMaximumIndex() &&
+        FiniteFloat(applied) && FiniteFloat(limit) && applied >= 0.0f &&
+        limit >= 0.0f && limit == V2DisplayBudget() && applied <= limit &&
+        (((flags & ADAPTIVE_CLOCK) != 0u) == any(clock != 0u)) &&
+        (((flags & ADAPTIVE_APPROACH) != 0u) == any(approach != 0u)) &&
+        (((flags & ADAPTIVE_RETREAT) != 0u) == any(retreat != 0u)) &&
+        ((flags & ADAPTIVE_APPROACH) == 0u || !SourceTimeAfter(approach, clock)) &&
+        ((flags & ADAPTIVE_RETREAT) == 0u || !SourceTimeAfter(retreat, clock)) &&
+        covered <= content_area && AdaptiveRead(previous, 14u) <= covered &&
+        (v2_joint_plane_mode != 3u ||
+         (((flags & ADAPTIVE_CAPPED) != 0u) ==
+          (AdaptiveRead(previous, 14u) * 5u > covered ||
+           AdaptiveRead(previous, 14u) * 50u > content_area))) &&
+        AdaptiveRead(previous, 15u) <= covered;
 }
 
 bool ZeroRect(uint4 rectangle) {
@@ -98,7 +195,10 @@ bool SubtitleTargetIsValid(float target) {
 // authority; the complete writer publishes BaseField exactly, while full-content live production
 // emits zero indirect groups and leaves the final UAV untouched.
 bool LocatorDomainGeometryValid() {
-    if (locator_source.x == 0u || locator_source.y == 0u || locator_source.z > 1u ||
+    if (!JointPlanePolicyValid() ||
+        any(locator_observation.zw != 0u) ||
+        locator_source.x == 0u || locator_source.y == 0u || locator_source.z > 1u ||
+        (v2_joint_plane_mode == 3u && locator_source.x > ADAPTIVE_HOST_MAX_SOURCE_WIDTH) ||
         locator_field.x == 0u || locator_field.y == 0u ||
         locator_field.x > 0xffffu || locator_field.y > 0xffffu ||
         locator_field.z >= locator_field.w || locator_field.w > locator_field.y ||
@@ -578,6 +678,7 @@ bool PackedKindsValid(uint packed, uint shift, uint count) {
 }
 
 bool ValidatePreviousState() {
+    if (!AdaptiveTailValid(true)) return false;
     uint flags = PreviousState[2u];
     uint owner_count = PreviousState[4u];
     uint pending_count = PreviousState[12u];
@@ -1159,9 +1260,18 @@ void PublishState(
     StoreRectBlock(
         V2_SUBTITLE_LOCATOR_CURRENT_OFFSET, NEW_CURRENT_BASE,
         target_valid ? current_count : 0u);
+    [unroll]
+    for (uint word = 0u; word < V2_SUBTITLE_LOCATOR_ADAPTIVE_WORD_COUNT; ++word) {
+        LocatorState[ADAPTIVE + word] = JointPlaneEnabled() && AdaptiveReset == 0u ?
+            PreviousState[ADAPTIVE + word] : 0u;
+    }
 }
 
 void ResolveObservation() {
+    AdaptiveReset = 1u;
+    AdaptiveDistinct = 1u;
+    AdaptiveOcrValid = 0u;
+    AdaptiveDomainValid = 0u;
     [loop]
     for (uint index = 0u; index < V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT; ++index) {
         PreviousState[index] = LocatorState[index];
@@ -1192,6 +1302,10 @@ void ResolveObservation() {
     // publication while reuse freezes both; the durable hard-cut authority is therefore the
     // authenticated epoch transition. Re-reading a retained pulse must never restart the scene.
     bool hard_cut = cut_valid && old_valid && PreviousState[26u] != scene_epoch;
+    AdaptiveReset = !old_valid || locator_source.w != 0u || hard_cut ||
+        PreviousState[ADAPTIVE] != 1u ? 1u : 0u;
+    AdaptiveDistinct = distinct_observation ? 1u : 0u;
+    AdaptiveDomainValid = cut_valid && locator_domain_valid ? 1u : 0u;
 
     bool old_target_valid = old_valid && (PreviousState[2u] & FLAG_TARGET_VALID) != 0u;
     float old_target = old_target_valid ? asfloat(PreviousState[18u]) : 0.0f;
@@ -1207,6 +1321,7 @@ void ResolveObservation() {
 
     uint final_count = 0u;
     bool ocr_valid = ValidateOcrRecord(final_count);
+    AdaptiveOcrValid = ocr_valid ? 1u : 0u;
     if (!cut_valid || !locator_domain_valid ||
         ((locator_source.w != 0u || hard_cut) && !ocr_valid)) {
         PublishState(0u, 0u, 0u, 0u, 0.0f, false, false, 0u, 0u,
@@ -1406,7 +1521,21 @@ void ResolveObservation() {
     bool provisional_current = false;
     float provisional_target = 0.0f;
     uint provisional_fade = 0u;
-    if (new_owner_count != 0u) {
+    if (JointPlaneEnabled() && new_owner_count != 0u) {
+        // OCR ownership/current covers are unchanged. Plane selection is independent of the
+        // local-support probe: an authorized cover must not disappear when that probe disagrees.
+        target = AdaptiveReset == 0u ? asfloat(PreviousState[ADAPTIVE + 3u]) : 0.0f;
+        target_valid = SubtitleTargetIsValid(target);
+        fade_step = target_valid ? 2u : 0u;
+        provisional_current = provisional_candidate && target_valid && authority_count != 0u;
+        provisional_target = provisional_current ? target : 0.0f;
+        provisional_fade = provisional_current ? 2u : 0u;
+        if (!target_valid) {
+            target = 0.0f;
+            target_reset = true;
+            authority_count = 0u;
+        }
+    } else if (new_owner_count != 0u) {
         // Every distinct authoritative owner observation samples the same local supporting plane.
         // Reliable samples are not moved toward an absolute screen plane; an established target
         // moves only through deadbanded EMA plus a binocular source-pixel slew bound. Exact
@@ -1607,7 +1736,7 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
         CutBridge[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS])) == SBS_CUT_CONTRACT_TAG;
     uint scene_epoch = cut_valid ? asuint(SBS_STATE_HARD_CUT_COUNT(
         CutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT])) : 0u;
-    if (!LocatorGeometryValid() ||
+    if (!LocatorGeometryValid() || !AdaptiveTailValid(false) ||
         !cut_valid || ConditionStateSnapshot[26u] != scene_epoch ||
         ConditionStateSnapshot[0u] != V2_SUBTITLE_LOCATOR_STATE_SCHEMA ||
         ConditionStateSnapshot[1u] != V2_SUBTITLE_LOCATOR_STATE_TAG ||
@@ -1639,6 +1768,10 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
         !FiniteFloat(v2_max_vertical_shear) || v2_max_vertical_shear < 0.0f) {
         return false;
     }
+    if (JointPlaneEnabled() &&
+        (ConditionStateSnapshot[ADAPTIVE + 15u] != 0u || durable_fade != 2u ||
+         fade_step != 2u || asuint(target) != ConditionStateSnapshot[ADAPTIVE + 3u] ||
+         asuint(durable_target) != ConditionStateSnapshot[ADAPTIVE + 3u])) return false;
     uint owner_kinds = (packed_kinds >> V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) &
         V2_SUBTITLE_LOCATOR_KIND_MASK;
     uint pending_kinds = (packed_kinds >> V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) &
@@ -1737,19 +1870,294 @@ void PublishConditionParamsFromSnapshot() {
 }
 
 // The live one-thread resolver owns both compact publications. Keeping the observation body in a
-// helper ensures every reset/abstention return comes back here before the UAV visibility barrier.
+float AdaptiveMaximumPlane() {
+    // Reserve the representation range for the independently selected UI plane.
+    return V2DisplayBudget();
+}
+
+float AdaptiveCandidate(uint index, float limit) {
+    if (index == AdaptiveMaximumIndex()) return limit;
+    return min((4.0f * (float)index) / (float)locator_source.x, limit);
+}
+
+bool AdaptiveBudgetPass(uint bad, uint covered, uint content, bool release) {
+    if (covered == 0u) return true;
+    // Calibrated field sizes keep these integer products below 2^32. Equality passes entry;
+    // release deliberately requires both budgets to be strictly below their thresholds.
+    return release ? bad * 20u < covered * 3u && bad * 200u < content * 3u :
+        bad * 5u <= covered && bad * 50u <= content;
+}
+
+uint2 SourceTimeDifference(uint2 newer, uint2 older) {
+    return uint2(newer.x - older.x, newer.y - older.y - (newer.x < older.x ? 1u : 0u));
+}
+
+bool SourceTimeElapsed(uint2 now, uint2 start, uint minimum_us) {
+    if (SourceTimeAfter(start, now)) return false;
+    uint2 elapsed = SourceTimeDifference(now, start);
+    return elapsed.y != 0u || elapsed.x >= minimum_us;
+}
+
+void AdaptiveDisarm(inout uint flags, inout uint tail[16]) {
+    flags &= ~(ADAPTIVE_APPROACH | ADAPTIVE_RETREAT);
+    tail[6u] = 0u;
+    tail[7u] = 0u;
+    tail[8u] = 0u;
+    tail[9u] = 0u;
+    tail[10u] = 0u;
+    tail[11u] = 0u;
+}
+
+void AdaptivePublish(uint tail[16]) {
+    // Resolve a complete private tuple before writing persistent UAV state. Timer decisions must
+    // never consume intermediate UAV stores from another branch of this same observation.
+    [unroll]
+    for (uint word = 0u; word < 16u; ++word) LocatorState[ADAPTIVE + word] = tail[word];
+    if ((LocatorState[2u] & (FLAG_OWNER | FLAG_TARGET_VALID)) ==
+            (FLAG_OWNER | FLAG_TARGET_VALID)) {
+        LocatorState[18u] = tail[3u];
+        LocatorState[24u] = 2u;
+        if ((LocatorState[2u] & FLAG_PROVISIONAL_CURRENT) != 0u) {
+            LocatorState[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD] = tail[3u];
+            LocatorState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] = 2u;
+        }
+    }
+}
+
+void AdaptiveAdvance() {
+    // Exact redispatches and the ordinary no-dispatch reuse path consume no clock or evidence.
+    if (AdaptiveDistinct == 0u && AdaptiveReset == 0u) return;
+    uint tail[16];
+    [unroll]
+    for (uint word = 0u; word < 16u; ++word) tail[word] = LocatorState[ADAPTIVE + word];
+    if (AdaptiveDomainValid == 0u) {
+        // No calibrated source/cut domain exists in which to label a cap or retain timed evidence.
+        // Publish a canonical inactive tail; the empty current mask remains exact Base.
+        [unroll]
+        for (uint word = 0u; word < V2_SUBTITLE_LOCATOR_ADAPTIVE_WORD_COUNT; ++word) {
+            tail[word] = 0u;
+        }
+        AdaptivePublish(tail);
+        return;
+    }
+    tail[0u] = 1u;
+    float limit = AdaptiveMaximumPlane();
+    float applied = min(asfloat(tail[3u]), limit);
+    uint flags = tail[1u];
+    if (asfloat(tail[12u]) != limit) AdaptiveDisarm(flags, tail);
+    tail[12u] = asuint(limit);
+    tail[3u] = asuint(applied);
+    if (AdaptiveOcrValid == 0u) {
+        // An abstention/malformed record supplies no probe, not an invented empty UI mask.
+        AdaptiveDisarm(flags, tail);
+        tail[1u] = flags;
+        AdaptivePublish(tail);
+        return;
+    }
+
+    uint covered = AdaptiveCounts[0u];
+    uint content_area = LocatorContentWidth() * (locator_content.w - locator_content.y);
+    uint maximum_index = AdaptiveMaximumIndex();
+    uint required = maximum_index;
+    uint release_index = maximum_index;
+    bool required_found = false;
+    bool release_found = false;
+    [loop]
+    for (uint level = 0u; level <= maximum_index; ++level) {
+        uint bad = AdaptiveCounts[2u + level];
+        if (!required_found && AdaptiveBudgetPass(bad, covered, content_area, false)) {
+            required = level;
+            required_found = true;
+        }
+        if (!release_found && AdaptiveBudgetPass(bad, covered, content_area, true)) {
+            release_index = level;
+            release_found = true;
+        }
+    }
+    flags = required_found ? flags & ~ADAPTIVE_CAPPED : flags | ADAPTIVE_CAPPED;
+    tail[13u] = covered;
+    tail[14u] = AdaptiveCounts[2u + maximum_index];
+    tail[15u] = AdaptiveCounts[1u];
+    uint2 now = locator_observation.xy;
+    uint2 last = uint2(tail[4u], tail[5u]);
+    bool have_clock = (flags & ADAPTIVE_CLOCK) != 0u;
+    if (AdaptiveCounts[1u] != 0u || all(now == 0u) ||
+        (have_clock && !SourceTimeAfter(now, last))) {
+        // No frame count/FPS clock is substituted. Keep the last accepted source time and plane.
+        AdaptiveDisarm(flags, tail);
+        tail[1u] = flags;
+        AdaptivePublish(tail);
+        return;
+    }
+
+    uint goal = tail[2u];
+    if (required > goal) {
+        flags &= ~ADAPTIVE_RETREAT;
+        tail[8u] = 0u;
+        tail[9u] = 0u;
+        tail[11u] = 0u;
+        if ((flags & ADAPTIVE_APPROACH) == 0u) {
+            flags |= ADAPTIVE_APPROACH;
+            tail[6u] = now.x;
+            tail[7u] = now.y;
+            tail[10u] = required;
+        } else {
+            tail[10u] = min(tail[10u], required);
+        }
+        uint2 start = uint2(tail[6u], tail[7u]);
+        if (SourceTimeElapsed(now, start, 100000u)) {
+            goal = tail[10u];
+            AdaptiveDisarm(flags, tail);
+        }
+    } else {
+        flags &= ~ADAPTIVE_APPROACH;
+        tail[6u] = 0u;
+        tail[7u] = 0u;
+        tail[10u] = 0u;
+        if (release_found && release_index < goal &&
+            (v2_joint_plane_mode != 3u || applied == AdaptiveCandidate(goal, limit))) {
+            if ((flags & ADAPTIVE_RETREAT) == 0u) {
+                flags |= ADAPTIVE_RETREAT;
+                tail[8u] = now.x;
+                tail[9u] = now.y;
+                tail[11u] = release_index;
+            } else {
+                tail[11u] = max(tail[11u], release_index);
+            }
+            uint2 start = uint2(tail[8u], tail[9u]);
+            if (SourceTimeElapsed(now, start, 1500000u)) {
+                goal = tail[11u];
+                AdaptiveDisarm(flags, tail);
+            }
+        } else {
+            flags &= ~ADAPTIVE_RETREAT;
+            tail[8u] = 0u;
+            tail[9u] = 0u;
+            tail[11u] = 0u;
+        }
+    }
+    float target = AdaptiveCandidate(goal, limit);
+    if (have_clock) {
+        uint2 elapsed = SourceTimeDifference(now, last);
+        // Game's live rate integration is capped to 250ms; this does not discard dwell evidence
+        // or expire a legitimate slower inference cadence. Both rates are one-eye source U/sec.
+        float seconds = elapsed.y != 0u ? 0.25f : min((float)elapsed.x * 1.0e-6f, 0.25f);
+        float step = seconds * (target > applied ? 0.03f : 0.005f);
+        applied = target > applied ? min(target, applied + step) : max(target, applied - step);
+    }
+    tail[2u] = goal;
+    tail[4u] = now.x;
+    tail[5u] = now.y;
+    tail[1u] = flags | ADAPTIVE_CLOCK;
+    tail[3u] = asuint(applied);
+    AdaptivePublish(tail);
+}
+
+uint AdaptiveFirstNonconflictingIndex(float desired, float limit, uint maximum_index) {
+    if (desired <= 0.0f) return 0u;
+    if (desired > limit) return maximum_index + 1u;
+    uint index = min((uint)ceil(desired * (float)locator_source.x * 0.25f), maximum_index);
+    // The arithmetic estimate can straddle a level by one FP32 ULP. Compare against the actual
+    // shader candidates so histogram bins retain the strict conflict predicate.
+    if (index != 0u && desired <= AdaptiveCandidate(index - 1u, limit)) --index;
+    if (desired > AdaptiveCandidate(index, limit)) ++index;
+    return index;
+}
+
+void AdaptiveResolveHistogram() {
+    if (v2_joint_plane_mode != 3u) return;
+    uint maximum_index = AdaptiveMaximumIndex();
+    uint conflicts = AdaptiveCounts[1u] + AdaptiveCounts[3u + maximum_index];
+    // Bucket k names the first candidate that can clear a sample; only buckets above a level
+    // conflict with it. The extra bucket above the last level is explicitly unclearable.
+    [loop]
+    for (int level = (int)maximum_index; level >= 0; --level) {
+        uint offset = 2u + (uint)level;
+        uint bucket = AdaptiveCounts[offset];
+        AdaptiveCounts[offset] = conflicts;
+        conflicts += bucket;
+    }
+}
+
+void AdaptiveProbe(uint lane) {
+    uint covered = 0u;
+    uint invalid = 0u;
+    float limit = AdaptiveMaximumPlane();
+    float clearance = 2.0f / (float)locator_source.x;
+    uint maximum_index = AdaptiveMaximumIndex();
+    uint pending_bucket = 0xffffffffu;
+    uint pending_count = 0u;
+    uint current_count = LocatorState[20u];
+    [loop]
+    for (uint slot = 0u; slot < current_count; ++slot) {
+        uint offset = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + slot * 4u;
+        uint4 rectangle = uint4(LocatorState[offset], LocatorState[offset + 1u],
+                               LocatorState[offset + 2u], LocatorState[offset + 3u]);
+        uint width = rectangle.z - rectangle.x;
+        uint area = width * (rectangle.w - rectangle.y);
+        [loop]
+        for (uint cell = lane; cell < area; cell += 256u) {
+            uint2 position = uint2(rectangle.x + cell % width, rectangle.y + cell / width);
+            bool already_counted = false;
+            [unroll]
+            for (uint earlier = 0u; earlier < MAX_LINES; ++earlier) {
+                if (earlier < slot) {
+                    uint prior = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + earlier * 4u;
+                    already_counted = already_counted ||
+                        (position.x >= LocatorState[prior] && position.y >= LocatorState[prior + 1u] &&
+                         position.x < LocatorState[prior + 2u] && position.y < LocatorState[prior + 3u]);
+                }
+            }
+            if (already_counted) continue;
+            float base = BaseField.Load(int3(position, 0));
+            bool finite = FiniteFloat(base) && abs(base) <= v2_direct_container_limit;
+            ++covered;
+            if (!finite) ++invalid;
+            if (finite) {
+                precise float desired = base + clearance;
+                uint bucket = AdaptiveFirstNonconflictingIndex(desired, limit, maximum_index);
+                if (bucket != pending_bucket && pending_count != 0u) {
+                    InterlockedAdd(AdaptiveCounts[2u + pending_bucket], pending_count);
+                    pending_count = 0u;
+                }
+                pending_bucket = bucket;
+                ++pending_count;
+            }
+        }
+    }
+    InterlockedAdd(AdaptiveCounts[0u], covered);
+    InterlockedAdd(AdaptiveCounts[1u], invalid);
+    if (pending_count != 0u) {
+        InterlockedAdd(AdaptiveCounts[2u + pending_bucket], pending_count);
+    }
+}
+
+// The helper ensures every reset/abstention return comes back here before the UAV visibility barrier.
 // The complete just-written state is then snapshotted and authenticated without aliasing u2 as an
 // SRV in the same dispatch.
-[numthreads(1, 1, 1)]
-void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
-    ResolveObservation();
-    DeviceMemoryBarrierWithGroupSync();
+[numthreads(256, 1, 1)]
+void resolve_main(uint3 dispatch_id : SV_DispatchThreadID, uint lane : SV_GroupIndex) {
+    if (lane == 0u) ResolveObservation();
+    AllMemoryBarrierWithGroupSync();
+    if (JointPlaneEnabled()) {
+        if (lane < ADAPTIVE_COUNT_WORDS) AdaptiveCounts[lane] = 0u;
+        GroupMemoryBarrierWithGroupSync();
+        if (AdaptiveDomainValid != 0u && AdaptiveOcrValid != 0u &&
+            (AdaptiveDistinct != 0u || AdaptiveReset != 0u)) AdaptiveProbe(lane);
+        GroupMemoryBarrierWithGroupSync();
+        if (lane == 0u) {
+            if (AdaptiveDomainValid != 0u && AdaptiveOcrValid != 0u &&
+                (AdaptiveDistinct != 0u || AdaptiveReset != 0u)) AdaptiveResolveHistogram();
+            AdaptiveAdvance();
+        }
+        AllMemoryBarrierWithGroupSync();
+    }
     [loop]
-    for (uint index = 0u; index < V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT; ++index) {
+    for (uint index = lane; index < V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT; index += 256u) {
         ConditionStateSnapshot[index] = LocatorState[index];
     }
     GroupMemoryBarrierWithGroupSync();
-    PublishConditionParamsFromSnapshot();
+    if (lane == 0u) PublishConditionParamsFromSnapshot();
 }
 
 bool ConditionParamsValid(
@@ -1761,12 +2169,15 @@ bool ConditionParamsValid(
     current_kinds = ConditionParams[CONDITION_PARAM_CURRENT_KINDS_WORD];
     fade_step = ConditionParams[CONDITION_PARAM_FADE_STEP_WORD];
     target = asfloat(ConditionParams[CONDITION_PARAM_TARGET_WORD]);
-    return ConditionParams[CONDITION_PARAM_SCHEMA_WORD] == V2_SUBTITLE_CONDITION_PARAM_SCHEMA &&
+    return JointPlanePolicyValid() &&
+        ConditionParams[CONDITION_PARAM_SCHEMA_WORD] == V2_SUBTITLE_CONDITION_PARAM_SCHEMA &&
         ConditionParams[CONDITION_PARAM_TAG_WORD] == V2_SUBTITLE_CONDITION_PARAM_TAG &&
         current_count != 0u && current_count <= MAX_LINES &&
         (current_kinds & ~V2_SUBTITLE_LOCATOR_KIND_MASK) == 0u &&
         PackedKindsValid(current_kinds, 0u, current_count) &&
-        (fade_step == 1u || fade_step == 2u) && SubtitleTargetIsValid(target);
+        (JointPlaneEnabled() ? fade_step == 2u : (fade_step == 1u || fade_step == 2u)) &&
+        SubtitleTargetIsValid(target) &&
+        (!JointPlaneEnabled() || (target >= 0.0f && target <= AdaptiveMaximumPlane()));
 }
 
 float EvaluateConditionedBase(
@@ -1816,7 +2227,14 @@ float EvaluateConditionedBase(
             }
         }
     }
-    precise float core_range = 0.5f / (float)locator_source.x;
+    if (v2_joint_plane_mode == 3u && best_distance == 0.0f) {
+        // Current coarse OCR covers are the admitted UI mask. Pin every covered cell to exactly
+        // one plane, including signed zero, rather than retaining a per-glyph depth slack.
+        changed = asuint(base) != asuint(condition_target);
+        return condition_target;
+    }
+    precise float core_range = v2_joint_plane_mode == 3u ? 0.0f :
+        0.5f / (float)locator_source.x;
     precise float budget = core_range + best_distance;
     precise float delta = base - condition_target;
     // Exact Base is a semantic branch, not an algebraic coincidence: bypassing reconstruction

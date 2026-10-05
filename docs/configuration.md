@@ -57,6 +57,13 @@ codec requirements. Adjust stereo strength in **ReShade → Add-ons → Sunshine
     <tr><td>Range</td><td><code>0.25</code>-<code>2.00</code></td></tr>
 </table>
 
+### sbs_3d_joint_plane_experiment
+
+Default: `disabled`. Enable and restart the host to select the continuous Host depth adapter:
+adaptive mean zero, robust amplitude reference, linear depth mapping, independent strength and
+adaptive subtitle plane. The [Host SBS joint-plane contract](host-sbs.md#opt-in-joint-plane-live-experiment)
+owns its calibration and qualification limits. The default retains the production control.
+
 ## General
 
 ### locale

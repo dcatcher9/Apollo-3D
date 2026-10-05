@@ -1,7 +1,7 @@
 """Authenticated raw-depth artifacts produced by a current whole-clip evaluator run.
 
 The temporal replay must not infer provenance from whatever ``raw_*.f32`` files happen to be
-present beside a results file.  Schema-37 ``run_eval.py`` records this manifest after the
+present beside a results file.  Schema-38 ``run_eval.py`` records this manifest after the
 independent schema-22 production evaluation harness finishes (not Dump 3D schema 40 or DVC2
 contract), rechecks it after scoring, and stores it in
 ``results.json``.  Consumers validate the same shared contract before reading a tensor.
@@ -25,11 +25,11 @@ except ImportError:  # Direct execution from tools/sbsbench.
     import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics  # type: ignore
 
 
-EVALUATOR_SCHEMA = 37
+EVALUATOR_SCHEMA = 38
 HARNESS_CONTRACT_SCHEMA = 22
 MANIFEST_SCHEMA = 1
 RESULTS_META_KEY = "whole_clip_raw_artifacts"
-BINDING = "schema-37-results-to-schema-22-harness-raw-f32-v1"
+BINDING = "schema-38-results-to-schema-22-harness-raw-f32-v1"
 RAW_SHAPE_SCHEMA = 1
 RAW_STAGE = "raw model output before transform/normalization/EMA/curvature"
 LEGACY_CAPTURE_GRID = "legacy-dav2"

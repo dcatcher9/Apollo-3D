@@ -45,13 +45,16 @@ namespace sbs_bench {
   namespace shader_cache = models::host_sbs_shader_cache;
 
   namespace {
-    constexpr std::uint32_t manifest_schema = 10u;
+    constexpr std::uint32_t manifest_schema = 11u;
     constexpr std::string_view manifest_mode =
-      "depth-coordinate-v2-production-gpu-sequence-v12";
+      "depth-coordinate-v2-production-gpu-sequence-v13";
     constexpr float direct_container_limit = v2::direct_container_limit;
 
-    const std::array<const char *, 38> trace_field_names {{
+    const std::array<const char *, 45> trace_field_names {{
       "frame_id",
+      "observation_timestamp_us",
+      "state_words_u32",
+      "joint_plane_mode",
       "input_source_frame_id",
       "rendered_source_frame_id",
       "calibration_revision",
@@ -73,6 +76,10 @@ namespace sbs_bench {
       "observed_std",
       "observed_raw_minimum",
       "observed_raw_maximum",
+      "observed_percentile_low",
+      "observed_percentile_high",
+      "observed_percentile_valid",
+      "observed_percentile_bin_width",
       "candidate_center_drift_u",
       "predicted_zero_translation_source_u",
       "pre_limiter_max_abs_source_u",
@@ -218,11 +225,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     bool create_immutable_constant_buffer(
       ID3D11Device *device,
       const T &value,
-      ComPtr<ID3D11Buffer> &buffer
+      ComPtr<ID3D11Buffer> &buffer,
+      const bool mutable_constants = false
     ) {
       static_assert(sizeof(T) % 16u == 0u);
       D3D11_BUFFER_DESC desc {};
-      desc.Usage = D3D11_USAGE_IMMUTABLE;
+      desc.Usage = mutable_constants ? D3D11_USAGE_DEFAULT : D3D11_USAGE_IMMUTABLE;
       desc.ByteWidth = static_cast<UINT>(sizeof(T));
       desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
       D3D11_SUBRESOURCE_DATA initial {&value, 0, 0};
@@ -401,6 +409,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       std::string source_sha256;
       std::uint32_t cut_generation = 0u;
       bool cut_pulse = false;
+      std::uint64_t observation_timestamp_us = 0u;
     };
   }  // namespace
 
@@ -422,6 +431,8 @@ void main(uint3 id : SV_DispatchThreadID) {
 
     ComPtr<ID3D11ComputeShader> moments_shader;
     ComPtr<ID3D11ComputeShader> frame_shader;
+    ComPtr<ID3D11ComputeShader> histogram_shader;
+    ComPtr<ID3D11ComputeShader> quantile_shader;
     ComPtr<ID3D11ComputeShader> state_shader;
     ComPtr<ID3D11ComputeShader> map_shader;
     ComPtr<ID3D11ComputeShader> coordinate_diagnostic_shader;
@@ -435,6 +446,9 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Buffer> raw_buffer;
     ComPtr<ID3D11ShaderResourceView> raw_srv;
     ComPtr<ID3D11Buffer> partial_buffer;
+    ComPtr<ID3D11Buffer> histogram_buffer;
+    ComPtr<ID3D11ShaderResourceView> histogram_srv;
+    ComPtr<ID3D11UnorderedAccessView> histogram_uav;
     ComPtr<ID3D11ShaderResourceView> partial_srv;
     ComPtr<ID3D11UnorderedAccessView> partial_uav;
     ComPtr<ID3D11Buffer> frame_buffer;
@@ -681,12 +695,25 @@ void main(uint3 id : SV_DispatchThreadID) {
         "pop_strength", "gain_per_pop", "max_horizontal_slope",
         "max_vertical_shear", "vertical_majorant_share", "direct_container_limit",
       }};
-      if (!mapping_config.is_object() || mapping_config.size() != mapping_keys.size() ||
+      if (!mapping_config.is_object() ||
+          (mapping_config.size() != mapping_keys.size() &&
+           !(mapping_config.size() == mapping_keys.size() + 1u &&
+             mapping_config.contains("joint_plane_mode"))) ||
           std::any_of(mapping_keys.begin(), mapping_keys.end(), [&](const char *key) {
             return !mapping_config.contains(key);
           })) {
         error = "v2 GPU replay manifest has invalid mapping configuration";
         return false;
+      }
+      constants.joint_plane_mode = 0u;
+      if (mapping_config.contains("joint_plane_mode")) {
+        const auto &mode = mapping_config["joint_plane_mode"];
+        if (!mode.is_number_integer() || mode.is_boolean() ||
+            (mode != 0 && mode != 3)) {
+          error = "v2 GPU replay joint_plane_mode must be an integer 0 or 3";
+          return false;
+        }
+        constants.joint_plane_mode = mode.get<std::uint32_t>();
       }
       float pop_strength = 0.0f;
       float gain_per_pop = 0.0f;
@@ -755,7 +782,10 @@ void main(uint3 id : SV_DispatchThreadID) {
           "frame_id", "raw_file", "raw_sha256", "source_sha256", "hard_cut_count",
           "hard_cut_pulse",
         }};
-        if (!value.is_object() || value.size() != frame_keys.size() ||
+        const bool continuous = constants.joint_plane_mode == 3u;
+        if (!value.is_object() || value.size() != frame_keys.size() + (continuous ? 1u : 0u) ||
+            (continuous && (!value.contains("observation_timestamp_us") ||
+                            !value["observation_timestamp_us"].is_number_unsigned())) ||
             std::any_of(frame_keys.begin(), frame_keys.end(), [&](const char *key) {
               return !value.contains(key);
             }) ||
@@ -767,6 +797,9 @@ void main(uint3 id : SV_DispatchThreadID) {
           return false;
         }
         input_frame frame;
+        if (continuous) {
+          frame.observation_timestamp_us = value["observation_timestamp_us"].get<std::uint64_t>();
+        }
         frame.frame_id = value["frame_id"].get<std::string>();
         const auto parsed = std::from_chars(
           frame.frame_id.data(),
@@ -838,9 +871,11 @@ void main(uint3 id : SV_DispatchThreadID) {
         const shader_cache::shader_spec *spec;
         ComPtr<ID3D11ComputeShader> *shader;
       };
-      const std::array<shader_target, 6> targets {{
+      const std::array<shader_target, 8> targets {{
         {&shader_cache::depth_coordinate_v2_moments, &moments_shader},
         {&shader_cache::depth_coordinate_v2_frame_resolve, &frame_shader},
+        {&shader_cache::depth_coordinate_v2_histogram, &histogram_shader},
+        {&shader_cache::depth_coordinate_v2_quantiles, &quantile_shader},
         {&shader_cache::depth_coordinate_v2_state_resolve, &state_shader},
         {&shader_cache::depth_coordinate_v2_map, &map_shader},
         {&shader_cache::depth_coordinate_v2_vertical_limit, &vertical_limit_shader},
@@ -903,7 +938,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       // color-mode slot. Freeze it to zero instead of manufacturing three equivalent buffers.
       common_words[2] = 0u;
       if (!create_immutable_constant_buffer(device.Get(), common_words, common_constants) ||
-          !create_immutable_constant_buffer(device.Get(), constants, v2_constants) ||
+          !create_immutable_constant_buffer(device.Get(), constants, v2_constants, true) ||
           !create_immutable_constant_buffer(device.Get(), near_words, near_constants) ||
           !create_immutable_constant_buffer(device.Get(), encode_words, encode_constants)) {
         error = "cannot create v2 GPU replay constant buffers";
@@ -919,6 +954,10 @@ void main(uint3 id : SV_DispatchThreadID) {
             device.Get(), sizeof(float) * 4u, reduce_groups * 3u, nullptr, true,
             partial_buffer, partial_srv, partial_uav
           ) ||
+          (constants.joint_plane_mode == 3u && !create_structured_buffer(
+            device.Get(), sizeof(std::uint32_t) * 4u, reduce_groups * 64u, nullptr, true,
+            histogram_buffer, histogram_srv, histogram_uav
+          )) ||
           !create_structured_buffer(
             device.Get(), sizeof(float) * 4u,
             static_cast<UINT>(v2::frame_stats_vector_count), nullptr, true,
@@ -1095,6 +1134,11 @@ void main(uint3 id : SV_DispatchThreadID) {
         return false;
       }
       context->UpdateSubresource(raw_buffer.Get(), 0, nullptr, raw_values.data(), 0, 0);
+      constants.joint_observation_timestamp_low =
+        static_cast<std::uint32_t>(frame.observation_timestamp_us);
+      constants.joint_observation_timestamp_high =
+        static_cast<std::uint32_t>(frame.observation_timestamp_us >> 32u);
+      context->UpdateSubresource(v2_constants.Get(), 0, nullptr, &constants, 0, 0);
       const bool confirmed_cut_input = sequence_index > 0u && (
         frame.cut_pulse ||
         frame.cut_generation != frames[sequence_index - 1u].cut_generation
@@ -1126,6 +1170,12 @@ void main(uint3 id : SV_DispatchThreadID) {
           reduce_groups, 1u, 1u
         ),
         .frame_resolve_dispatch = v2_gpu::dispatch_command_t::direct(1u, 1u, 1u),
+        .robust_quantiles = constants.joint_plane_mode == 3u,
+        .histogram_shader = histogram_shader.Get(),
+        .quantile_shader = quantile_shader.Get(),
+        .frame_stats = frame_srv.Get(),
+        .histogram_output = histogram_uav.Get(),
+        .histogram = histogram_srv.Get(),
       };
       if (!v2_gpu::record_moments_frame(context.Get(), moments_frame_command)) {
         error = "shared V2 GPU executor rejected replay moments/frame operands";
@@ -1296,23 +1346,23 @@ void main(uint3 id : SV_DispatchThreadID) {
         state_words[v2::renderer_authorization_bits] ==
           (frame_valid ? v2::contract_tag : 0u);
       const bool mapping_state_reserved_valid =
-        state_words[v2::mapping_state_reserved_1] == 0u &&
+        state_words[v2::joint_plane_mode_bits] == constants.joint_plane_mode &&
         state_words[v2::mapping_state_reserved_2] == 0u;
       const std::uint32_t calibration_revision =
         state_words[v2::calibration_revision];
-      const bool camera_integrity_valid = v2::camera_center_integrity_is_valid(
-        state_words[v2::center],
-        state_words[v2::inverse_scale],
-        state_words[v2::convergence_curve],
-        calibration_revision,
-        camera_center_integrity
-      );
+      v2::state_words_t authenticated_state_words {};
+      std::copy(state_words.begin(), state_words.end(), authenticated_state_words.begin());
+      const bool camera_integrity_valid = camera_center_integrity ==
+        v2::camera_center_integrity_for_state_words(authenticated_state_words);
       const bool camera_valid = camera_integrity_valid && renderer_authorization_valid &&
         mapping_state_reserved_valid &&
         v2::convergence_curve_is_valid(convergence_curve) &&
         inverse_scale > 0.0f &&
         v2::acquired_calibration_revision_is_valid(calibration_revision);
-      const float effective_gain = frame_valid ? constants.requested_gain : 0.0f;
+      const float display_budget = v2::display_budget_for_mode(
+        constants.requested_gain, constants.joint_plane_mode);
+      const float effective_gain = frame_valid ?
+        constants.requested_gain : 0.0f;
       const float observed_mean = input_valid ? float_stat(v2::frame_stat_mean) : 0.0f;
       const float observed_std = input_valid ?
                                    float_stat(v2::frame_stat_population_std) : 0.0f;
@@ -1320,23 +1370,48 @@ void main(uint3 id : SV_DispatchThreadID) {
                                          float_stat(v2::frame_stat_minimum) : 0.0f;
       const float observed_raw_maximum = input_valid ?
                                          float_stat(v2::frame_stat_maximum) : 0.0f;
+      bool frame_fit_usable = input_valid && std::isfinite(observed_std) && !collapsed;
+      if (frame_fit_usable && constants.joint_plane_mode == 3u) {
+        const float low = float_stat(v2::frame_stat_percentile_low);
+        const float high = float_stat(v2::frame_stat_percentile_high);
+        frame_fit_usable = float_stat(v2::frame_stat_percentile_valid) == 1.0f &&
+          low <= high && low >= observed_raw_minimum && high <= observed_raw_maximum &&
+          std::isfinite(0.5f * (high - low));
+      }
       const bool confirmed_cut = confirmed_cut_input;
       const bool state_values_finite =
         std::isfinite(center) && std::isfinite(inverse_scale) &&
         std::isfinite(latched_scale) && std::isfinite(convergence_curve) &&
         std::isfinite(container_scale);
-      v2::state_words_t authenticated_state_words {};
-      std::copy(state_words.begin(), state_words.end(), authenticated_state_words.begin());
       const bool state_authenticated = v2::parallax_state_words_are_authenticated(
         authenticated_state_words,
-        constants.raw_coordinate_scale
+        constants.raw_coordinate_scale,
+        constants.joint_plane_mode
       );
       if (!state_values_finite || !state_authenticated ||
-          frame_valid != (input_valid && !collapsed) ||
+          (constants.joint_plane_mode == 3u ?
+             (frame_valid && !frame_fit_usable) : frame_valid != frame_fit_usable) ||
           (frame_valid && !camera_valid) ||
           container_scale != 1.0f ||
-          (confirmed_cut && !frame_valid && camera_valid)) {
-        error = "v2 GPU replay state violates frame/camera validity semantics";
+          (constants.joint_plane_mode == 0u && confirmed_cut && !frame_valid && camera_valid)) {
+        std::ostringstream diagnostic;
+        diagnostic << "v2 GPU replay state violates frame/camera validity semantics: index="
+                   << sequence_index << " expected_mode=" << constants.joint_plane_mode
+                   << " outputs_finite=" << all_outputs_finite
+                   << " state_finite=" << state_values_finite
+                   << " input_valid=" << input_valid << " collapsed=" << collapsed
+                   << " frame_valid=" << frame_valid
+                   << " fit_usable=" << frame_fit_usable
+                   << " authenticated=" << state_authenticated
+                   << " camera_valid=" << camera_valid
+                   << " camera_integrity=" << camera_integrity_valid
+                   << " renderer_authorized=" << renderer_authorization_valid
+                   << " mode_reserved_valid=" << mapping_state_reserved_valid
+                   << " confirmed_cut=" << confirmed_cut << " state_words=";
+        for (const auto word : state_words) diagnostic << word << ',';
+        diagnostic << " frame_stats_words=";
+        for (const auto word : frame_words) diagnostic << word << ',';
+        error = diagnostic.str();
         return false;
       }
       if (!renderer_authorization_valid || !mapping_state_reserved_valid) {
@@ -1345,7 +1420,8 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
       const bool prior_camera_valid = !trace_rows.empty() &&
         trace_rows.back().at("camera_valid").get<bool>();
-      if (!trace_rows.empty() && !confirmed_cut && prior_camera_valid) {
+      if (!trace_rows.empty() && !confirmed_cut && prior_camera_valid &&
+          constants.joint_plane_mode == 0u) {
         const auto &previous = trace_rows.back();
         if (!camera_valid ||
             std::abs(center - previous.at("center").get<float>()) > 2.0e-6f ||
@@ -1359,13 +1435,14 @@ void main(uint3 id : SV_DispatchThreadID) {
       float predicted_zero_translation = 0.0f;
       if (frame_valid && camera_valid && observed_std > 0.0f) {
         candidate_center_drift = (observed_mean - center) * inverse_scale;
-        predicted_zero_translation = v2::pointwise_container(
-          effective_gain * (
-            v2_curve(candidate_center_drift, constants.far_tau, constants.near_log_tau) -
+        const float requested_translation = effective_gain * (
+            (constants.joint_plane_mode != 0u ? candidate_center_drift :
+             v2_curve(candidate_center_drift, constants.far_tau, constants.near_log_tau)) -
             convergence_curve
-          ),
-          constants.direct_container_limit
-        );
+          );
+        predicted_zero_translation = constants.joint_plane_mode == 3u ?
+          std::clamp(requested_translation, -display_budget, display_budget) :
+          v2::pointwise_container(requested_translation, constants.direct_container_limit);
       }
 
       float pre_limiter_max = 0.0f;
@@ -1393,13 +1470,15 @@ void main(uint3 id : SV_DispatchThreadID) {
         v2::max_vertical_shear / static_cast<float>(width) * 1.0e-9f
       );
       for (std::size_t index = 0; index < element_count; ++index) {
-        const float expected_candidate = frame_valid ? v2::pointwise_container(
-          constants.requested_gain * (
-            v2_curve(canonical[index], constants.far_tau, constants.near_log_tau) -
+        const float requested_candidate = effective_gain * (
+            (constants.joint_plane_mode != 0u ? canonical[index] :
+             v2_curve(canonical[index], constants.far_tau, constants.near_log_tau)) -
             convergence_curve
-          ),
-          constants.direct_container_limit
-        ) : 0.0f;
+          );
+        const float expected_candidate = frame_valid ?
+          (constants.joint_plane_mode == 3u ?
+             std::clamp(requested_candidate, -display_budget, display_budget) :
+             v2::pointwise_container(requested_candidate, constants.direct_container_limit)) : 0.0f;
         pointwise_container_mismatch |=
           std::abs(candidate[index] - expected_candidate) > 2.0e-6f;
         pre_limiter_max = std::max(pre_limiter_max, std::abs(candidate[index]));
@@ -1419,7 +1498,9 @@ void main(uint3 id : SV_DispatchThreadID) {
         vertical_conditioned_above_majorant |=
           vertical_conditioned[index] - vertical_majorant[index] > vertical_tolerance;
         row_majorant_illegally_lowered |=
-          final_values[index] - vertical_conditioned[index] < -limiter_tolerance;
+          final_values[index] - (constants.joint_plane_mode == 3u ?
+            std::clamp(vertical_conditioned[index], -display_budget, display_budget) :
+            vertical_conditioned[index]) < -limiter_tolerance;
         if (index % width != 0u) {
           horizontal_slope_max = std::max(
             horizontal_slope_max,
@@ -1453,8 +1534,8 @@ void main(uint3 id : SV_DispatchThreadID) {
       if (pointwise_container_mismatch || vertical_majorant_illegally_lowered ||
           vertical_conditioned_above_majorant ||
           row_majorant_illegally_lowered ||
-          pre_limiter_max > direct_container_limit + 2.0e-7f ||
-          final_max > direct_container_limit + 2.0e-7f ||
+          pre_limiter_max > display_budget + 2.0e-7f ||
+          final_max > display_budget + 2.0e-7f ||
           horizontal_slope_max > constants.max_horizontal_slope + 2.0e-5f ||
           vertical_majorant_shear_max > v2::max_vertical_shear + 2.0e-5f ||
           vertical_conditioned_shear_max > v2::max_vertical_shear + 2.0e-5f ||
@@ -1505,6 +1586,9 @@ void main(uint3 id : SV_DispatchThreadID) {
 
       nlohmann::ordered_json row = {
         {"frame_id", frame.frame_id},
+        {"observation_timestamp_us", frame.observation_timestamp_us},
+        {"state_words_u32", state_words},
+        {"joint_plane_mode", state_words[v2::joint_plane_mode_bits]},
         {"input_source_frame_id", frame.frame_id},
         {"rendered_source_frame_id", frame.frame_id},
         {"calibration_revision", state_words[v2::calibration_revision]},
@@ -1527,6 +1611,10 @@ void main(uint3 id : SV_DispatchThreadID) {
         {"observed_std", observed_std},
         {"observed_raw_minimum", observed_raw_minimum},
         {"observed_raw_maximum", observed_raw_maximum},
+        {"observed_percentile_low", float_stat(v2::frame_stat_percentile_low)},
+        {"observed_percentile_high", float_stat(v2::frame_stat_percentile_high)},
+        {"observed_percentile_valid", float_stat(v2::frame_stat_percentile_valid)},
+        {"observed_percentile_bin_width", float_stat(v2::frame_stat_percentile_bin_width)},
         {"candidate_center_drift_u", candidate_center_drift},
         {"predicted_zero_translation_source_u", predicted_zero_translation},
         {"pre_limiter_max_abs_source_u", pre_limiter_max},
@@ -1662,8 +1750,19 @@ void main(uint3 id : SV_DispatchThreadID) {
       {"calibration_contract", impl_->calibration_contract},
       {"cut_source", impl_->cut_source},
       {"diagnostic_role", std::string(depth_coordinate_v2_diagnostic_role)},
-      {"diagnostic_method", "gpu-frame-moments-and-rendered-fields-v5"},
+      {"diagnostic_method", "gpu-frame-moments-and-rendered-fields-v6"},
       {"mapping_config", impl_->mapping_config},
+      {"adaptation_semantics", {
+        {"coordinate", impl_->constants.joint_plane_mode == 3u ?
+          "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference" :
+          "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable"},
+        {"convergence_curve", impl_->constants.joint_plane_mode == 3u ?
+          "continuously-tracked-mean-is-zero-plane-no-cut-latch" :
+          "arithmetic-mean-center-is-zero-plane"},
+        {"near_curve", impl_->constants.joint_plane_mode == 3u ?
+          "linear-coordinate-no-depth-curve-before-hard-representation-cap" :
+          "fixed-contract-logarithmic-tau-independent-of-content-occupancy"},
+      }},
       {"frame_fields", std::move(fields)},
       {"frames", impl_->trace_rows},
       {"producer", {
@@ -1677,7 +1776,17 @@ void main(uint3 id : SV_DispatchThreadID) {
         // Production state/geometry passes. The replay's coordinate_main dispatch is
         // diagnostic report materialization, exactly like live Dump 3D, and is intentionally
         // excluded from the authenticated producer source closure.
-        {"shader_sequence", {
+        {"shader_sequence", impl_->constants.joint_plane_mode == 3u ?
+          nlohmann::ordered_json {
+          "depth_coordinate_v2_moments_cs.hlsl",
+          "depth_coordinate_v2_frame_resolve_cs.hlsl",
+          "depth_coordinate_v2_histogram_cs.hlsl",
+          "depth_coordinate_v2_quantiles_cs.hlsl",
+          "depth_coordinate_v2_state_resolve_cs.hlsl",
+          "depth_coordinate_v2_map_cs.hlsl",
+          "depth_coordinate_v2_vertical_limit_cs.hlsl",
+          "depth_coordinate_v2_limit_cs.hlsl",
+        } : nlohmann::ordered_json {
           "depth_coordinate_v2_moments_cs.hlsl",
           "depth_coordinate_v2_frame_resolve_cs.hlsl",
           "depth_coordinate_v2_state_resolve_cs.hlsl",

@@ -111,6 +111,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             76: "a6769249b05f9123ed725c202b21b56891cc72a822067a859d04e2346ac20150",
             77: "9ee049234edda521fb7536c195d055c36099d1d1f006efb4a7118a5584282763",
             78: "6560a9bd08f3750ad6daf961302651032d0027bb2e7d6dadd1611d3c28723872",
+            79: "6de312319f1526311cb515c55e27033ff491c8d64484faf2324a63692fe8f46a",
+            80: "f97b4c4190d6a99f3de24883746ff2c8839c1e3043b35ebf9edd5b84c8b3b265",
+            81: "bcf5134cb0ea4ec63dd7badcefa959f547dd65d2224b8573d12c79192dcc5dde",
+            82: "be6bf43b818de79679948ad39610180304c3b522d8d274d1cea2075dcbb99bff",
+            83: "aebe234c9830e7c01f0fcdc2253742c85919c8a220f00bf647a3148405335a52",
+            84: "9243ec42f578f4b0c85cfc47b63120d47835be3ec2c15487acb878706a75f909",
+            85: "7c4d5902f1ff91c262e624f124a727cd23174fc7de40622e24efd20b4ee27eda",
+            86: "9e86dbdbf11d83b19bcb4b5524d1485403a3c6a47f1d6bbe2b0bd078967e0a10",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -118,14 +126,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0xB4221F70)
+        self.assertEqual(generator.contract_tag(contract), 0x063B91AB)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "b4221f7012b21a6e60e7104824abf0c0282f97c5ed0315ca84414ce79ed9e0b1",
+            "063b91abe6647e70ad89cc36f27c222f6468d3f4af9e8f73b3de1f840a91d1ee",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "6f91d6290272ba8a4c9ccb56d654bc5f52f0a88a1fcd02374d075d400e98f6fc",
+            "0055fbdfe68e6f34de0f7ebee9bb749207fc93d6e5855008a332232bf2f982e6",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -146,6 +154,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 "raw_coordinate_scale", "collapse_abs_epsilon", "far_tau", "near_log_tau",
                 "requested_gain", "max_horizontal_slope", "direct_container_limit",
                 "convergence_curve_default",
+                "joint_plane_mode", "joint_plane_reserved0", "joint_plane_reserved1",
+                "joint_plane_reserved2",
+                "joint_observation_timestamp_low", "joint_observation_timestamp_high",
+                "joint_observation_reserved0", "joint_observation_reserved1",
             ],
         )
         self.assertEqual(
@@ -153,6 +165,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             [
                 "mean", "population_std", "minimum", "maximum", "valid_count",
                 "texel_count", "valid", "reserved",
+                "percentile_low", "percentile_high", "percentile_valid", "percentile_bin_width",
             ],
         )
         fields = contract["shadow_state"]["fields"]
@@ -162,7 +175,13 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 "center", "inverse_scale", "convergence_curve", "container_scale",
                 "calibration_revision", "frame_valid", "confirmed_cut_count", "contract_tag_bits",
                 "camera_center_integrity_bits", "renderer_authorization_bits",
-                "mapping_state_reserved_1", "mapping_state_reserved_2",
+                "joint_plane_mode_bits", "mapping_state_reserved_2",
+                "gain_last_observation_low", "gain_last_observation_high",
+                "gain_clock_armed", "gain_seed_count", "gain_target_zero",
+                "gain_target_inverse_scale", "gain_target_nearest", "gain_display_limit",
+                "gain_seed_first_low", "gain_seed_first_high",
+                "gain_seed_last_low", "gain_seed_last_high",
+                "gain_seed_mean_nearest", "gain_seed_mean_zero", "gain_reserved0", "gain_reserved1",
             ],
         )
         uint_fields = [field for field in fields if field["gpu_encoding"] == "uint_bits"]
@@ -174,8 +193,13 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 ("contract_tag_bits", generator.CONTRACT_TAG_SENTINEL),
                 ("camera_center_integrity_bits", 0),
                 ("renderer_authorization_bits", 0),
-                ("mapping_state_reserved_1", 0),
+                ("joint_plane_mode_bits", 0),
                 ("mapping_state_reserved_2", 0),
+                ("gain_last_observation_low", 0), ("gain_last_observation_high", 0),
+                ("gain_clock_armed", 0), ("gain_seed_count", 0),
+                ("gain_seed_first_low", 0), ("gain_seed_first_high", 0),
+                ("gain_seed_last_low", 0), ("gain_seed_last_high", 0),
+                ("gain_reserved0", 0), ("gain_reserved1", 0),
             ],
         )
         self.assertEqual(fields[2]["initial"], 0.0)
@@ -508,11 +532,11 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual((ocr.record_schema, ocr.record_tag), (3, 0x3852434F))
         self.assertEqual((ocr.record_word_count, ocr.raw_box_offset), (208, 16))
         self.assertEqual((ocr.final_box_offset, ocr.final_box_capacity), (144, 8))
-        self.assertEqual((ocr.locator_schema, ocr.locator_tag), (13, 0x33314C53))
+        self.assertEqual((ocr.locator_schema, ocr.locator_tag), (14, 0x34314C53))
         self.assertEqual(
             (ocr.locator_word_count, ocr.locator_owner_offset,
              ocr.locator_pending_offset, ocr.locator_current_offset),
-            (80, 32, 48, 64))
+            (96, 32, 48, 64))
         self.assertEqual(
             (ocr.condition_param_schema, ocr.condition_param_tag,
              ocr.condition_param_word_count),
@@ -522,7 +546,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 78u',
+                'contract_schema = 86u',
                 'final_parallax_contract_schema = 3u',
                 'final_parallax_authority = '
                 '"complete-atomic-subtitle-conditioned-r32f-live-render-authority"',
@@ -549,8 +573,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'std::array<double, 3> subtitle_ocr_imagenet_mean {{0.485, 0.456, 0.406}}',
                 'subtitle_ocr_output_width = 960u',
                 'subtitle_ocr_record_tag = 0x3852434Fu',
-                'subtitle_locator_state_schema = 13u',
-                'subtitle_locator_state_tag = 0x33314C53u',
+                'subtitle_locator_state_schema = 14u',
+                'subtitle_locator_state_tag = 0x34314C53u',
                 'subtitle_locator_provisional_current_flag = 16u',
                 'subtitle_locator_provisional_target_word = 29u',
                 'subtitle_locator_provisional_fade_word = 30u',
@@ -600,15 +624,15 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 78u',
+                '#define V2_CONTRACT_SCHEMA 86u',
                 '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 14u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
                 '#define V2_OCR_IMAGENET_MEAN_B 0.485f',
                 '#define V2_OCR_IMAGENET_STD_R 0.225f',
                 '#define V2_OCR_RECORD_TAG 0x3852434Fu',
-                '#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 13u',
-                '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x33314C53u',
+                '#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 14u',
+                '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x34314C53u',
                 '#define V2_SUBTITLE_LOCATOR_PROVISIONAL_CURRENT_FLAG 16u',
                 '#define V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD 29u',
                 '#define V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD 30u',
@@ -778,7 +802,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             "ocr-tag": lambda value: value["subtitle_ocr"]["ocr_record"].update(
                 {"tag": 0}),
             "locator-words": lambda value: value["subtitle_ocr"]["locator_state"].update(
-                {"word_count": 96}),
+                {"word_count": 112}),
         }
         for name, mutate in mutations.items():
             with self.subTest(name=name):
@@ -991,9 +1015,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertIn("cbuffer DepthCoordinateV2Constants : register(b1)", hlsl)
         self.assertIn("V2_FRAME_STATS_POPULATION_STD(value)", hlsl)
         self.assertIn("V2_STATE_CONTRACT_TAG_BITS(value)", hlsl)
-        self.assertIn("V2_CONSTANT_WORD_COUNT 8u", hlsl)
-        self.assertIn("V2_FRAME_STATS_WORD_COUNT 8u", hlsl)
-        self.assertIn("V2_SHADOW_STATE_WORD_COUNT 12u", hlsl)
+        self.assertIn("V2_CONSTANT_WORD_COUNT 16u", hlsl)
+        self.assertIn("V2_FRAME_STATS_WORD_COUNT 12u", hlsl)
+        self.assertIn("V2_SHADOW_STATE_WORD_COUNT 28u", hlsl)
         self.assertIn("#define V2_MAX_VERTICAL_SHEAR 2.0f", hlsl)
         self.assertIn(
             "static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;", hlsl)
@@ -1019,7 +1043,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         source = (REPO / "src_assets" / "windows" / "assets" / "shaders" / "directx" /
                   "depth_coordinate_v2_state_resolve_cs.hlsl").read_text(encoding="utf-8")
         self.assertIn("return min(value, 0xfffffffdu) + 1u;", source)
-        self.assertEqual(source.count("IncrementExactCounter(asuint("), 1)
+        # Legacy camera acquisition and completed Game-gain seeding both use the same
+        # saturating increment, so neither can manufacture the reserved revision sentinel.
+        self.assertEqual(source.count("IncrementExactCounter(asuint("), 2)
 
     def test_preprocess_source_identity_covers_transitive_includes_and_specs(self):
         with tempfile.TemporaryDirectory() as temporary:

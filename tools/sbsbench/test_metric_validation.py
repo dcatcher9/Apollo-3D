@@ -544,6 +544,42 @@ class ExactVerticalMisalignmentTests(unittest.TestCase):
         self.assertLess(result[0], 0.10)
         self.assertLess(result[1], 0.10)
 
+    def test_quantization_near_texture_floor_abstains_after_ranking_best_reference(self):
+        # A low-contrast horizontal pattern survives native-style UNORM rounding with slightly
+        # more contrast. The true zero-offset reference is below the frozen texture floor;
+        # shifting into the higher-contrast preceding row raises texture but worsens the match.
+        # Such a row must never replace the actual winner and become a one-row vertical fault.
+        row = np.tile(np.asarray([0.099] * 3 + [0.129] * 13, dtype=np.float32), 2)
+        expected = np.repeat(row[None, :], 32, axis=0)
+        expected[:7] = 0.03
+        expected[7] = 0.114 + 2.0 * (row - 0.114)
+        expected[24:] = 0.4
+        output = np.round(expected * 255.0).astype(np.float32) / 255.0
+        texture_floor = 3.0 / 255.0
+        self.assertLess(float(expected[8:24, :16].std()), texture_floor)
+        self.assertGreater(float(output[8:24, :16].std()), texture_floor)
+
+        offsets, attempted = sbsbench._local_vertical_offsets(
+            output, expected, np.ones(expected.shape, dtype=bool))
+
+        self.assertEqual(attempted, 3)
+        self.assertEqual(offsets, {})
+
+    def test_quantized_one_percent_vertical_fault_remains_detectable(self):
+        width, height = 256, 128
+        shape = mapping_shape(width, height)
+        source = textured_source(width, height)
+        mapping = identity_mapping(shape)
+        eyes = [np.round(eye * 255.0).astype(np.float32) / 255.0
+                for eye in render_exact_eyes(source, mapping, shape)]
+        shifted = shift_y(eyes[1], 4)
+        eyes[1][50:66, 104:124] = shifted[50:66, 104:124]
+
+        _, normalized_pct, support = self.evaluate(source, mapping, shape, eyes)
+
+        self.assertGreaterEqual(normalized_pct, 0.10)
+        self.assertGreater(support, 20.0)
+
     def test_common_vertical_motion_cancels(self):
         width, height = 192, 96
         shape = mapping_shape(width, height)

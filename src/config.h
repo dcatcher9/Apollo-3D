@@ -62,6 +62,8 @@ namespace config {
     struct sbs_t {
       bool reshade = false;  ///< Receive live final SBS from the ReShade add-on; offline conversion remains V2.
       double pop_strength = 1.75;  ///< Literal live V2 stereo strength (0.25-2) and offline conversion base strength.
+      bool joint_plane_experiment = false;  ///< Opt-in Host adaptive depth and subtitle planes with continuous full-capture warping.
+      std::uint32_t joint_plane_experiment_mode = 3u;  ///< Retained Host adaptive mode; only production 0 and adaptive 3 are admitted.
       int max_encode_width = 8192;  ///< Configured packed Host SBS width cap. Output also respects both runtime NVENC axes (RTX 5080: H.264 4096x4096, HEVC/AV1 8192x8192) with aspect-preserving scaling.
     };
 

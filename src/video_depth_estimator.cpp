@@ -1069,6 +1069,7 @@ namespace models {
       static_cast<std::uint32_t>(calibrated_dav2_shape.height)
     );
     if (!calibration ||
+        !depth_coordinate_v2::joint_plane_mode_word_is_valid(result.parallax_v2_joint_plane_mode) ||
         std::abs(result.parallax_v2_raw_coordinate_scale -
                  calibration->raw_coordinate_scale) > 1.0e-6f ||
         !depth_coordinate_v2::parallax_runtime_constants_are_valid(
@@ -2352,6 +2353,7 @@ namespace models {
     float parallax_v2_raw_coordinate_scale = 0.0f;
     const float parallax_v2_requested_pop_strength;
     const float parallax_v2_requested_gain;
+    const std::uint32_t joint_plane_mode;
     std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;
     std::shared_ptr<const composite_depth_runtime_provenance_t>
       composite_depth_runtime_provenance;
@@ -3231,6 +3233,8 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_scene_cut_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_moments_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_frame_resolve_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_histogram_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_quantiles_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_state_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_map_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_coordinate_diagnostic_cs;
@@ -3382,6 +3386,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_frame_stats_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_frame_stats_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_frame_stats_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_histogram_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_histogram_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_histogram_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_state_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_state_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_state_srv;
@@ -5228,7 +5235,8 @@ namespace models {
             static_cast<float>(cfg.pop_strength)
           )
         ),
-        parallax_v2_requested_gain(depth_coordinate_v2::requested_gain_for_config(static_cast<float>(cfg.pop_strength))) {
+        parallax_v2_requested_gain(depth_coordinate_v2::requested_gain_for_config(static_cast<float>(cfg.pop_strength))),
+        joint_plane_mode(cfg.joint_plane_experiment ? cfg.joint_plane_experiment_mode : 0u) {
       const auto init_started = std::chrono::steady_clock::now();
       // Enable the process-wide rolling collector for diagnostic runs. Do not reset it here:
       // Galaxy XR and local-AR estimators may coexist, and one session must not invalidate the
@@ -5570,6 +5578,8 @@ namespace models {
         std::addressof(depth_scene_cut_resolve_cs),
         std::addressof(depth_coordinate_v2_moments_cs),
         std::addressof(depth_coordinate_v2_frame_resolve_cs),
+        std::addressof(depth_coordinate_v2_histogram_cs),
+        std::addressof(depth_coordinate_v2_quantiles_cs),
         std::addressof(depth_coordinate_v2_state_resolve_cs),
         std::addressof(depth_coordinate_v2_map_cs),
         std::addressof(depth_coordinate_v2_vertical_limit_cs),
@@ -6115,6 +6125,9 @@ namespace models {
       depth_coordinate_v2_frame_stats_buf.Reset();
       depth_coordinate_v2_frame_stats_uav.Reset();
       depth_coordinate_v2_frame_stats_srv.Reset();
+      depth_coordinate_v2_histogram_buf.Reset();
+      depth_coordinate_v2_histogram_uav.Reset();
+      depth_coordinate_v2_histogram_srv.Reset();
       depth_coordinate_v2_state_buf.Reset();
       depth_coordinate_v2_state_uav.Reset();
       depth_coordinate_v2_state_srv.Reset();
@@ -6243,7 +6256,7 @@ namespace models {
                        ));
       }
       resources_ok = resources_ok &&
-        create_constant_buffer(64u, subtitle_locator_cbuffer);
+        create_constant_buffer(80u, subtitle_locator_cbuffer);
       if (!resources_ok) {
         return false;
       }
@@ -6458,6 +6471,15 @@ namespace models {
                             depth_coordinate_v2_frame_stats_srv,
                             depth_coordinate_v2_frame_stats_uav
                           );
+      if (joint_plane_mode == 3u) {
+        resources_ok = resources_ok && create_float4_buffer(
+          static_cast<std::size_t>(reduce_groups) * 64u,
+          nullptr,
+          depth_coordinate_v2_histogram_buf,
+          depth_coordinate_v2_histogram_srv,
+          depth_coordinate_v2_histogram_uav
+        );
+      }
 
       resources_ok = resources_ok &&
                      create_float4_buffer(
@@ -6521,9 +6543,13 @@ namespace models {
         .max_horizontal_slope = max_horizontal_slope,
         .direct_container_limit = direct_container_limit,
         .convergence_curve_default = convergence_curve_default,
+        .joint_plane_mode = joint_plane_mode,
+        .joint_plane_reserved0 = 0u,
+        .joint_plane_reserved1 = 0u,
+        .joint_plane_reserved2 = 0u,
       };
       D3D11_BUFFER_DESC constants_desc {};
-      constants_desc.Usage = D3D11_USAGE_IMMUTABLE;
+      constants_desc.Usage = D3D11_USAGE_DEFAULT;
       constants_desc.ByteWidth = sizeof(constants);
       constants_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
       D3D11_SUBRESOURCE_DATA constants_data {&constants, 0, 0};
@@ -6551,6 +6577,13 @@ namespace models {
       );
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_final_uav.Get(), clear);
       parallax_v2_producer_active = true;
+      if (joint_plane_mode == 3u) {
+        BOOST_LOG(info)
+          << "Host SBS adaptive plane enabled: continuous mean zero, robust Host depth scale, "
+             "independent artistic gain, linear mapping, adaptive subtitle plane; "
+          << "maximum per-eye source-U displacement=" << depth_coordinate_v2::direct_container_limit
+          << ", source clock=monotonic microseconds.";
+      }
       BOOST_LOG(info)
         << "Host SBS V2 GPU producer active on one "
         << target_w << 'x' << target_h << " fused convex2x analysis/live grid"
@@ -6561,8 +6594,38 @@ namespace models {
       return true;
     }
 
+    bool upload_parallax_v2_observation_constants() {
+      if (!depth_coordinate_v2_cbuffer) {
+        return false;
+      }
+      using namespace depth_coordinate_v2;
+      const constants_t constants {
+        .raw_coordinate_scale = parallax_v2_raw_coordinate_scale,
+        .collapse_abs_epsilon = collapse_abs_epsilon,
+        .far_tau = far_tau,
+        .near_log_tau = near_log_tau,
+        .requested_gain = parallax_v2_requested_gain,
+        .max_horizontal_slope = max_horizontal_slope,
+        .direct_container_limit = direct_container_limit,
+        .convergence_curve_default = convergence_curve_default,
+        .joint_plane_mode = joint_plane_mode,
+        .joint_plane_reserved0 = 0u,
+        .joint_plane_reserved1 = 0u,
+        .joint_plane_reserved2 = 0u,
+        .joint_observation_timestamp_low = static_cast<std::uint32_t>(pending_observation_timestamp_us),
+        .joint_observation_timestamp_high = static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        .joint_observation_reserved0 = 0u,
+        .joint_observation_reserved1 = 0u,
+      };
+      context->UpdateSubresource(depth_coordinate_v2_cbuffer.Get(), 0, nullptr, &constants, 0, 0);
+      return true;
+    }
+
     bool dispatch_parallax_v2_frame_stats(d3d_perf_slot *perf_slot) {
       if (!parallax_v2_producer_active) {
+        return false;
+      }
+      if (joint_plane_mode == 3u && !upload_parallax_v2_observation_constants()) {
         return false;
       }
 
@@ -6582,6 +6645,12 @@ namespace models {
         .minmax_raw_output = minmax_raw_uav.Get(),
         .moments_dispatch = parallax_v2_dispatch_command(reduce_groups, 1u, 1u, near_identical_gpu_infer_reduce_byte_offset),
         .frame_resolve_dispatch = parallax_v2_dispatch_command(1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset),
+        .robust_quantiles = joint_plane_mode == 3u,
+        .histogram_shader = depth_coordinate_v2_histogram_cs.Get(),
+        .quantile_shader = depth_coordinate_v2_quantiles_cs.Get(),
+        .frame_stats = depth_coordinate_v2_frame_stats_srv.Get(),
+        .histogram_output = depth_coordinate_v2_histogram_uav.Get(),
+        .histogram = depth_coordinate_v2_histogram_srv.Get(),
       };
       const bool recorded = host_sbs_v2_gpu::record_moments_frame(
         context.Get(),
@@ -6859,7 +6928,7 @@ namespace models {
       // publishes Base exactly into the distinct live output texture.
       const bool locator_geometry_valid = tensor_content && roi.valid();
       const auto field_content = tensor_content.value_or(depth_tensor_content_rect_t {});
-      const std::array<std::uint32_t, 16> constants {
+      const std::array<std::uint32_t, 20> constants {
         field_width,
         field_height,
         roi.roi_top,
@@ -6876,6 +6945,10 @@ namespace models {
         field_content.top,
         field_content.right,
         field_content.bottom,
+        static_cast<std::uint32_t>(pending_observation_timestamp_us),
+        static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        0u,
+        0u,
       };
       context->UpdateSubresource(
         subtitle_locator_cbuffer.Get(), 0, nullptr, constants.data(), 0,
@@ -6986,6 +7059,7 @@ namespace models {
         .width = static_cast<std::uint32_t>(target_w),
         .height = static_cast<std::uint32_t>(target_h),
         .raw_coordinate_scale = parallax_v2_raw_coordinate_scale,
+        .joint_plane_mode = joint_plane_mode,
         .expected_work = cuda_conditional_graph::work_flags_value(pending_subtitle_work),
         .submission_class = gpu_undecided_postprocess_pending() ?
                               publication_receipt::submission_class_e::gpu_undecided :
@@ -7291,6 +7365,7 @@ namespace models {
         r.parallax_v2_raw_coordinate_scale = parallax_v2_raw_coordinate_scale;
         r.parallax_v2_requested_pop_strength = parallax_v2_requested_pop_strength;
         r.parallax_v2_requested_gain = parallax_v2_requested_gain;
+        r.parallax_v2_joint_plane_mode = joint_plane_mode;
       }
       r.raw_width = target_w;
       r.raw_height = target_h;

@@ -26,11 +26,13 @@ immediately, and remains latched until a confirmed cut.
 The resulting center is the exact zero plane because convergence remains zero. It cannot select
 rendered geometry; the latter policies remain here only as falsifiers for the design decision.
 
-Every policy resets immediately on a confirmed cut. Source-U safety is a stateless pointwise
+Every research policy resets immediately on a confirmed cut. Its Source-U safety is a stateless pointwise
 soft container, so one extreme texel cannot rescale the rest of a shot. The report uses
 pre-reprojection one-eye source-U parallax so it does not confuse coordinate motion with holes,
 occlusion, or image motion. A subsampled raw field is sufficient for policy comparisons and
 makes whole-suite runs inexpensive.
+Native experimental mode 3 instead continuously tracks mean zero and a robust amplitude reference,
+then maps linearly with a hard representation cap. It has no depth curve or soft envelope.
 """
 
 from __future__ import annotations
@@ -65,6 +67,7 @@ try:
         CALIBRATED_DEFAULTS as V2_DEFAULTS, CONTRACT_CANONICAL_SHA256,
         CONTRACT_PATH, CONTRACT_SCHEMA, MODEL_CALIBRATIONS)
     from . import cut_state_contract, whole_clip_raw_contract
+    from . import depth_coordinate_v2_dump_contract as dump_contract
     from . import prod_zipdepth_convex2x as convex2x_contract
     from . import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics
 except ImportError:  # Direct execution from tools/sbsbench.
@@ -87,6 +90,7 @@ except ImportError:  # Direct execution from tools/sbsbench.
         CONTRACT_PATH, CONTRACT_SCHEMA, MODEL_CALIBRATIONS)
     import cut_state_contract  # type: ignore
     import whole_clip_raw_contract  # type: ignore
+    import depth_coordinate_v2_dump_contract as dump_contract  # type: ignore
     import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
     import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics  # type: ignore
 
@@ -95,9 +99,9 @@ RAW_PATTERN = re.compile(r"raw_(\d+)\.f32$")
 SELECTED_POLICY = "first"
 RESEARCH_POLICIES = ("aggregate", "slow")
 POLICY_STUDY_POLICIES = (SELECTED_POLICY, *RESEARCH_POLICIES)
-V2_STATE_TRACE_SCHEMA = 19
+V2_STATE_TRACE_SCHEMA = 22
 V2_STATE_TRACE_POLICY = (
-    "immediate-first-usable-arithmetic-mean-zero-fixed-scale-fixed-near-curve-retained-camera-pointwise-soft-container-vertical-share75-row-majorant-v18"
+    "authenticated-mode-selected-camera-host-robust-linear-hard-cap-vertical-share75-row-majorant-v22"
 )
 V2_GPU_SHADER_SEQUENCE = (
     "depth_coordinate_v2_moments_cs.hlsl",
@@ -107,8 +111,17 @@ V2_GPU_SHADER_SEQUENCE = (
     "depth_coordinate_v2_vertical_limit_cs.hlsl",
     "depth_coordinate_v2_limit_cs.hlsl",
 )
+V2_GPU_HOST_SHADER_SEQUENCE = (
+    *V2_GPU_SHADER_SEQUENCE[:2],
+    "depth_coordinate_v2_histogram_cs.hlsl",
+    "depth_coordinate_v2_quantiles_cs.hlsl",
+    *V2_GPU_SHADER_SEQUENCE[2:],
+)
 V2_STATE_TRACE_FIELDS = (
     "frame_id",
+    "observation_timestamp_us",
+    "state_words_u32",
+    "joint_plane_mode",
     "input_source_frame_id",
     "rendered_source_frame_id",
     "calibration_revision",
@@ -130,6 +143,10 @@ V2_STATE_TRACE_FIELDS = (
     "observed_std",
     "observed_raw_minimum",
     "observed_raw_maximum",
+    "observed_percentile_low",
+    "observed_percentile_high",
+    "observed_percentile_valid",
+    "observed_percentile_bin_width",
     "candidate_center_drift_u",
     "predicted_zero_translation_source_u",
     "pre_limiter_max_abs_source_u",
@@ -388,6 +405,24 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _trace_adaptation_semantics(mode: int) -> Dict[str, str]:
+    if type(mode) is not int or mode not in (0, 3):
+        raise ValueError("v2 trace joint plane mode must be 0 or 3")
+    return {
+        "coordinate": (
+            "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference" if mode == 3 else
+            "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable"),
+        "convergence_curve": (
+            "continuously-tracked-mean-is-zero-plane-no-cut-latch" if mode == 3 else
+            "arithmetic-mean-center-is-zero-plane"),
+        "near_curve": (
+            "linear-coordinate-no-depth-curve-before-hard-representation-cap" if mode == 3 else
+            "fixed-contract-logarithmic-tau-independent-of-content-occupancy"),
+    }
+
+
+
+
 def validate_v2_state_trace(
         trace: Dict[str, object],
         expected_frame_ids: Sequence[int]) -> None:
@@ -395,17 +430,17 @@ def validate_v2_state_trace(
 
     root_keys = {
         "schema", "policy", "calibration_contract", "cut_source", "diagnostic_role",
-        "diagnostic_method", "mapping_config",
+        "diagnostic_method", "mapping_config", "adaptation_semantics",
         "frame_fields", "frames", "producer",
     }
     if not isinstance(trace, dict) or set(trace) != root_keys:
         raise ValueError("v2 state trace has missing or unknown root fields")
     if (trace.get("schema") != V2_STATE_TRACE_SCHEMA or
             trace.get("policy") != V2_STATE_TRACE_POLICY or
-            trace.get("diagnostic_role") != "non-controlling-fixed-scale-camera-audit-v4" or
+            trace.get("diagnostic_role") != "non-controlling-mode-selected-camera-audit-v6" or
             trace.get("diagnostic_method") not in {
                 "frame-moment-proxies-not-matched-pixel-affine-v2",
-                "gpu-frame-moments-and-rendered-fields-v5"} or
+                "gpu-frame-moments-and-rendered-fields-v6"} or
             trace.get("frame_fields") != list(V2_STATE_TRACE_FIELDS) or
             not isinstance(trace.get("cut_source"), str) or not trace["cut_source"]):
         raise ValueError("v2 state trace has missing or unknown semantics")
@@ -421,10 +456,19 @@ def validate_v2_state_trace(
         raise ValueError("v2 state trace calibration contract is stale or unauthenticated")
     mapping_payload = trace.get("mapping_config")
     expected_mapping_keys = set(asdict(MappingV2Config()))
-    if not isinstance(mapping_payload, dict) or set(mapping_payload) != expected_mapping_keys:
+    if (not isinstance(mapping_payload, dict) or
+            set(mapping_payload) not in (
+                expected_mapping_keys, expected_mapping_keys | {"joint_plane_mode"})):
         raise ValueError("v2 state trace mapping config is missing or unknown")
+    mode = mapping_payload.get("joint_plane_mode", 0)
+    if type(mode) is not int or mode not in (0, 3):
+        raise ValueError("v2 state trace joint_plane_mode must be integer 0 or 3")
+    if trace.get("adaptation_semantics") != _trace_adaptation_semantics(mode):
+        raise ValueError("v2 state trace mode/adaptation semantics disagree")
     try:
-        mapping = MappingV2Config(**mapping_payload)
+        mapping = MappingV2Config(**{
+            key: value for key, value in mapping_payload.items()
+            if key != "joint_plane_mode"})
         # Trigger the complete mapping validation without coupling this module to private helpers.
         asymmetric_curve(np.asarray([0.0], dtype=np.float64), mapping)
     except (TypeError, ValueError) as exc:
@@ -435,12 +479,14 @@ def validate_v2_state_trace(
     producer_authority = producer.get("authority")
     expected_method = None
     if producer_authority == "numpy-reference-comparison-only-v3":
+        if mode != 0:
+            raise ValueError("continuous moment mode requires authenticated native GPU evidence")
         if (set(producer) != {"authority", "numpy_role"} or
                 producer.get("numpy_role") != "comparison-only-not-render-authority"):
             raise ValueError("v2 state trace has invalid NumPy producer evidence")
         expected_method = "frame-moment-proxies-not-matched-pixel-affine-v2"
     elif producer_authority == (
-            "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-gpu-state-v9"):
+            "authenticated-raw-depth-plus-eight-v2-compute-shaders-persistent-gpu-state-v11"):
         digest_pattern = re.compile(r"[0-9a-f]{64}")
         if (set(producer) != {
                 "authority", "manifest_sha256", "contract_canonical_sha256",
@@ -448,11 +494,12 @@ def validate_v2_state_trace(
                 not isinstance(producer.get("manifest_sha256"), str) or
                 digest_pattern.fullmatch(producer["manifest_sha256"]) is None or
                 producer.get("contract_canonical_sha256") != CONTRACT_CANONICAL_SHA256 or
-                producer.get("shader_sequence") != list(V2_GPU_SHADER_SEQUENCE) or
+                producer.get("shader_sequence") != list(
+                    V2_GPU_HOST_SHADER_SEQUENCE if mode == 3 else V2_GPU_SHADER_SEQUENCE) or
                 producer.get("state_persistence") != "single-buffer-whole-sequence" or
                 producer.get("numpy_role") != "comparison-only-not-render-authority"):
             raise ValueError("v2 state trace has invalid native GPU producer evidence")
-        expected_method = "gpu-frame-moments-and-rendered-fields-v5"
+        expected_method = "gpu-frame-moments-and-rendered-fields-v6"
         calibrated_shapes = {
             shape
             for calibration in MODEL_CALIBRATIONS
@@ -495,17 +542,43 @@ def validate_v2_state_trace(
     prior_center = 0.0
     prior_inverse_scale = 0.0
     prior_convergence_curve = V2_DEFAULTS.convergence_curve_default
+    prior_native_state = None
     requested_gain: Optional[float] = None
     digest_pattern = re.compile(r"[0-9a-f]{64}")
     for index, (row, expected_id) in enumerate(zip(rows, expected_ids)):
         if not isinstance(row, dict) or set(row) != set(V2_STATE_TRACE_FIELDS):
             raise ValueError(f"v2 state trace frame {index} has an invalid field layout")
         frame_id = row["frame_id"]
+        if type(row["joint_plane_mode"]) is not int or row["joint_plane_mode"] != mode:
+            raise ValueError(f"v2 state trace {frame_id} mode disagrees with mapping")
         if frame_id != f"{expected_id:05d}":
             raise ValueError(f"v2 state trace frame-id mismatch at index {index}")
         if (row["input_source_frame_id"] != frame_id or
                 row["rendered_source_frame_id"] != frame_id):
             raise ValueError(f"v2 state trace {frame_id} has invalid source-frame identity")
+        timestamp = row["observation_timestamp_us"]
+        words = row["state_words_u32"]
+        if (type(timestamp) is not int or not 0 <= timestamp <= 0xFFFFFFFFFFFFFFFF or
+                (mode != 3 and timestamp != 0) or not isinstance(words, list) or
+                len(words) != 28 or
+                any(type(word) is not int or not 0 <= word <= 0xFFFFFFFF for word in words)):
+            raise ValueError(f"v2 state trace {frame_id} has an invalid source clock/state layout")
+        native_state = None
+        if producer_authority == "numpy-reference-comparison-only-v3":
+            if words != [0] * 28:
+                raise ValueError("NumPy comparison must use the explicit non-authoritative state placeholder")
+        else:
+            native_state = dump_contract.validate_parallax_state_words(
+                words, raw_coordinate_scale=mapping.raw_coordinate_scale,
+                expected_joint_plane_mode=mode, requested_gain=mapping.parallax_gain)
+            for key in ("center", "inverse_scale", "convergence_curve", "container_scale"):
+                if np.float32(row[key]) != np.float32(native_state[key]):
+                    raise ValueError(f"v2 state trace {frame_id} {key} disagrees with authenticated state")
+            for key in ("calibration_revision", "confirmed_cut_count"):
+                if row[key] != native_state[key]:
+                    raise ValueError(f"v2 state trace {frame_id} {key} disagrees with authenticated state")
+            if row["frame_valid"] != (native_state["frame_valid"] == 1.0):
+                raise ValueError(f"v2 state trace {frame_id} validity disagrees with authenticated state")
         for key in ("calibration_revision", "confirmed_cut_count"):
             if type(row[key]) is not int or row[key] < 0 or row[key] > 0xFFFFFFFE:
                 raise ValueError(f"v2 state trace {frame_id} has an invalid {key}")
@@ -520,6 +593,8 @@ def validate_v2_state_trace(
                 "requested_gain", "container_scale", "effective_gain",
                 "observed_mean", "observed_std", "observed_raw_minimum",
                 "observed_raw_maximum",
+                "observed_percentile_low", "observed_percentile_high",
+                "observed_percentile_valid", "observed_percentile_bin_width",
                  "candidate_center_drift_u", "predicted_zero_translation_source_u",
                  "pre_limiter_max_abs_source_u",
                 "vertical_majorant_raised_fraction",
@@ -534,7 +609,62 @@ def validate_v2_state_trace(
         expected_collapsed = bool(
             row["input_valid"] and
             row["observed_std"] <= mapping.collapse_abs_epsilon)
+        percentile_valid = row["observed_percentile_valid"]
+        percentile_fields = ("observed_percentile_low", "observed_percentile_high",
+                             "observed_percentile_bin_width")
+        if percentile_valid not in (0.0, 1.0):
+            raise ValueError(f"v2 state trace {frame_id} has invalid percentile validity")
+        if percentile_valid == 1.0:
+            if (mode != 3 or not row["input_valid"] or
+                    row["observed_percentile_bin_width"] < 0.0 or not
+                    row["observed_raw_minimum"] <= row["observed_percentile_low"] <=
+                    row["observed_percentile_high"] <= row["observed_raw_maximum"]):
+                raise ValueError(f"v2 state trace {frame_id} has invalid percentile bounds")
+        elif any(row[key] != 0.0 for key in percentile_fields):
+            raise ValueError(f"v2 state trace {frame_id} has nonzero unavailable percentile tail")
         expected_frame_valid = bool(row["input_valid"] and not expected_collapsed)
+        if mode == 3:
+            maximum = np.float32(row["observed_raw_maximum"])
+            minimum = np.float32(row["observed_raw_minimum"])
+            with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+                low = np.float32(row["observed_percentile_low"])
+                high = np.float32(row["observed_percentile_high"])
+                amplitude = np.maximum(
+                    np.float32(np.float32(0.5) * np.float32(high - low)),
+                    np.float32(mapping.raw_coordinate_scale))
+                nearest_inverse = np.float32(np.float32(1.0) / amplitude)
+                target_zero = np.float32(row["observed_mean"])
+                fit_usable = bool(expected_frame_valid and
+                                  row["observed_percentile_valid"] == 1.0 and
+                                  maximum > minimum and
+                                  minimum <= target_zero <= maximum and
+                                  minimum <= low <= high <= maximum and
+                                  np.isfinite(amplitude) and
+                                  np.isfinite(nearest_inverse) and nearest_inverse > 0.0)
+            previous_clock = (prior_native_state["gain_last_observation_low"] |
+                              (prior_native_state["gain_last_observation_high"] << 32)
+                              if prior_native_state is not None else 0)
+            distinct_clock = timestamp > 0 and timestamp > previous_clock
+            authorization_eligible = bool(fit_usable and distinct_clock and
+                                          native_state["gain_seed_count"] == 1)
+            # Seeding/adaptation arithmetic may deliberately fail flat after a usable target.
+            # Audit the native authorization one-way, without inventing a CPU controller.
+            if row["frame_valid"] and not authorization_eligible:
+                raise ValueError(f"v2 state trace {frame_id} gain authorization lacks usable source evidence")
+            expected_frame_valid = row["frame_valid"]
+            last_clock = (native_state["gain_last_observation_low"] |
+                          (native_state["gain_last_observation_high"] << 32))
+            expected_clock = timestamp if distinct_clock else previous_clock
+            if last_clock != expected_clock:
+                raise ValueError(f"v2 state trace {frame_id} gain clock disagrees with source time")
+            if native_state["gain_clock_armed"] and not (fit_usable and distinct_clock):
+                raise ValueError(f"v2 state trace {frame_id} gain continuity disagrees with source evidence")
+            if fit_usable and distinct_clock:
+                for key, expected in (("gain_target_zero", target_zero),
+                                      ("gain_target_inverse_scale", nearest_inverse),
+                                      ("gain_target_nearest", amplitude)):
+                    if not math.isclose(native_state[key], expected, rel_tol=3.0e-5, abs_tol=3.0e-7):
+                        raise ValueError(f"v2 state trace {frame_id} {key} disagrees with captured moments")
         if (row["collapsed"] != expected_collapsed or
                 row["frame_valid"] != expected_frame_valid):
             raise ValueError(
@@ -560,7 +690,7 @@ def validate_v2_state_trace(
             raise ValueError(f"v2 state trace {frame_id} camera validity is inconsistent")
         latch = bool(
             row["frame_valid"] and
-            (not prior_camera_initialized or row["confirmed_cut"]))
+            (mode != 0 or not prior_camera_initialized or row["confirmed_cut"]))
         expected_revision = (_exact_counter_increment(prior_revision)
                              if latch else prior_revision)
         if revision != expected_revision:
@@ -616,15 +746,16 @@ def validate_v2_state_trace(
             if not math.isclose(row["effective_gain"], expected_gain, rel_tol=3.0e-5,
                                 abs_tol=3.0e-7):
                 raise ValueError(f"v2 state trace {frame_id} effective gain is inconsistent")
-            if latch:
+            if latch and mode != 3:
                 expected_scale = mapping.raw_coordinate_scale
                 if not math.isclose(row["latched_scale"], expected_scale,
                                     rel_tol=3.0e-5, abs_tol=3.0e-7):
                     raise ValueError(f"v2 state trace {frame_id} acquired the wrong camera")
+                expected_center = row["observed_mean"]
                 mean_center = math.isclose(
-                    row["center"], row["observed_mean"],
+                    row["center"], expected_center,
                     rel_tol=2.0e-6, abs_tol=2.0e-7)
-                accepted_center = (
+                accepted_center = mode == 0 and (
                     row["center"] - row["latched_scale"] > row["observed_mean"] and
                     row["center"] >= row["observed_raw_minimum"] - 3.0e-6 and
                     row["center"] <= row["observed_raw_maximum"] + 3.0e-6)
@@ -643,7 +774,7 @@ def validate_v2_state_trace(
             if row["effective_gain"] != 0.0 or row["container_scale"] != 1.0:
                 raise ValueError(
                     f"v2 state trace {frame_id} unavailable frame retained active gain")
-            expected_camera = prior_camera_initialized and not row["confirmed_cut"]
+            expected_camera = prior_camera_initialized and (mode == 3 or not row["confirmed_cut"])
             if camera_initialized != expected_camera:
                 raise ValueError(
                     f"v2 state trace {frame_id} changed camera on unavailable depth")
@@ -665,7 +796,8 @@ def validate_v2_state_trace(
                   row["convergence_curve"] != V2_DEFAULTS.convergence_curve_default):
                 raise ValueError(
                     f"v2 state trace {frame_id} failed to publish canonical empty camera")
-        if row["final_max_abs_source_u"] > DIRECT_PARALLAX_SOURCE_U_LIMIT + 1.0e-7:
+        limit = DIRECT_PARALLAX_SOURCE_U_LIMIT
+        if row["final_max_abs_source_u"] > limit + 1.0e-7:
             raise ValueError(f"v2 state trace {frame_id} exceeded the hard parallax container")
         if row["final_horizontal_slope_max"] > mapping.max_horizontal_slope + 1.0e-6:
             raise ValueError(f"v2 state trace {frame_id} exceeded the horizontal slope bound")
@@ -678,6 +810,7 @@ def validate_v2_state_trace(
         prior_center = row["center"]
         prior_inverse_scale = row["inverse_scale"]
         prior_convergence_curve = row["convergence_curve"]
+        prior_native_state = native_state
 
 
 def generate_first_latch_exact_sequence(
@@ -856,6 +989,10 @@ def generate_first_latch_exact_sequence(
         )
         row: Dict[str, object] = {
             "frame_id": frame_id_text,
+            "joint_plane_mode": 0,
+            "observation_timestamp_us": 0,
+            # The NumPy comparison does not own or forge authenticated native GPU state.
+            "state_words_u32": [0] * 28,
             "input_source_frame_id": frame_id_text,
             "rendered_source_frame_id": frame_id_text,
             "calibration_revision": calibration_revision,
@@ -877,6 +1014,10 @@ def generate_first_latch_exact_sequence(
             "observed_std": candidate.observed_std if candidate is not None else 0.0,
             "observed_raw_minimum": candidate.raw_min if candidate is not None else 0.0,
             "observed_raw_maximum": candidate.raw_max if candidate is not None else 0.0,
+            "observed_percentile_low": 0.0,
+            "observed_percentile_high": 0.0,
+            "observed_percentile_valid": 0.0,
+            "observed_percentile_bin_width": 0.0,
             "candidate_center_drift_u": candidate_center_drift_u,
             "predicted_zero_translation_source_u": predicted_zero_translation,
             "pre_limiter_max_abs_source_u": pre_limiter_max_abs,
@@ -907,9 +1048,10 @@ def generate_first_latch_exact_sequence(
             "sha256": _file_sha256(CONTRACT_PATH),
         },
         "cut_source": cut_source,
-        "diagnostic_role": "non-controlling-fixed-scale-camera-audit-v4",
+        "diagnostic_role": "non-controlling-mode-selected-camera-audit-v6",
         "diagnostic_method": "frame-moment-proxies-not-matched-pixel-affine-v2",
         "mapping_config": asdict(config),
+        "adaptation_semantics": _trace_adaptation_semantics(0),
         "frame_fields": list(V2_STATE_TRACE_FIELDS),
         "frames": rows,
         "producer": {
@@ -1493,10 +1635,10 @@ def _clip_sequence_input_contract(
         "raw_coordinate_scale": run_model["raw_coordinate_scale"],
         "run_pop_strength": run_model["pop_strength"],
         "results_json_sha256": run_model["results_sha256"],
-        "model_hash_authority": "schema-37-run-level-results-json",
-        "input_shape_authority": "schema-37-per-clip-raw-manifest",
+        "model_hash_authority": "schema-38-run-level-results-json",
+        "input_shape_authority": "schema-38-per-clip-raw-manifest",
         "raw_hash_authority": {
-            "source": "schema-37-run-level-results-json",
+            "source": "schema-38-run-level-results-json",
             "manifest_schema": whole_clip_raw_contract.MANIFEST_SCHEMA,
             "binding": whole_clip_raw_contract.BINDING,
         },

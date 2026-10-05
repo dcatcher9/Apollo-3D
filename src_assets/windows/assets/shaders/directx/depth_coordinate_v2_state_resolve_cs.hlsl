@@ -1,11 +1,13 @@
-// Acquire the shot center from the first usable depth field, then hold it until the next
-// authenticated cut. Scale is the fixed authenticated model/shape coordinate scale. Unusable
-// depth publishes flat without moving the scene camera; only an authenticated cut may clear a
-// camera without replacing it from a usable field on the same update.
+// Default mode acquires the shot mean and holds it until an authenticated cut, at fixed scale.
+// Mode 3 tracks Host mean zero / GPU P05-P95 amplitude with a declared model prior and linear map.
+// Reuse never dispatches this resolver. Unusable depth publishes flat without moving a valid
+// camera. Adaptive mode retains it through cuts; the reference clears it on an unusable cut update.
 
 StructuredBuffer<float4> FrameStats : register(t0);
 StructuredBuffer<float4> CutBridgeState : register(t1);
-RWStructuredBuffer<float4> ShadowState : register(u0);
+// Publish the mixed ABI as integer words. A floating typed UAV store may flush small mode
+// tokens even after integer local computation; numeric camera words use explicit bit casts.
+RWStructuredBuffer<uint4> ShadowState : register(u0);
 
 #include "include/depth_coordinate_v2.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
@@ -15,24 +17,149 @@ uint IncrementExactCounter(uint value) {
     return min(value, 0xfffffffdu) + 1u;
 }
 
-void ResetMappingState(inout float4 mapping_state) {
-    mapping_state = float4(asfloat(0u), asfloat(0u), asfloat(0u), asfloat(0u));
+void ResetMappingState(inout uint4 mapping_state) {
+    // This row contains only integer payloads. Keep the mode token as an integer through local
+    // reset/sealing; treating bit pattern 1 as a floating-point temporary can flush it to zero.
+    mapping_state = uint4(0u, 0u,
+        V2JointPlaneConstantsValid() ? v2_joint_plane_mode : 0u, 0u);
 }
 
-void StoreCameraState(float4 active, float4 control, inout float4 mapping_state) {
-    V2SealCameraCenter(active, control, mapping_state);
+void ClearGainState(inout V2GainState gain) {
+    gain.clock = 0u;
+    gain.target = 0u;
+    gain.seed_times = 0u;
+    gain.seed_values = 0u;
+}
+
+void DisarmGain(inout V2GainState gain) {
+    gain.clock.z = 0u;
+    gain.target.xyz = 0u;
+    if (gain.clock.w == 0u) {
+        gain.clock.w = 0u;
+        gain.seed_times = 0u;
+        gain.seed_values = 0u;
+    }
+}
+
+void StoreCameraState(float4 active, float4 control, inout uint4 mapping_state, V2GainState gain) {
+    if (mapping_state.z == 0u) ClearGainState(gain);
+    V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(mapping_state) =
+        V2CameraIntegrityWithGain(active, control, mapping_state, gain);
     // Seal the fully validated, current-frame-ready decision once. Per-texel producers and the
     // packed renderer consume this versioned token instead of repeating the full state checksum.
-    V2SealRendererAuthorization(control, mapping_state);
-    ShadowState[0] = active;
-    ShadowState[1] = control;
+    V2_STATE_RENDERER_AUTHORIZATION_BITS(mapping_state) =
+        V2_STATE_FRAME_VALID(control) > 0.5f ? V2_CONTRACT_TAG : 0u;
+    ShadowState[0] = asuint(active);
+    ShadowState[1] = asuint(control);
     ShadowState[2] = mapping_state;
+    ShadowState[3] = gain.clock;
+    ShadowState[4] = gain.target;
+    ShadowState[5] = gain.seed_times;
+    ShadowState[6] = gain.seed_values;
+}
+
+// Host mean zero and robust amplitude, observed only on authenticated infer publication.
+// A presentation/reuse never enters this function and cannot earn catch-up adaptation time.
+void ObserveAdaptiveCamera(inout float4 active, inout float4 control, inout uint4 mapping,
+                     inout V2GainState gain, float4 frame0, float4 frame1,
+                     bool initialized) {
+    V2_STATE_FRAME_VALID(control) = 0.0f;
+    if (mapping.z != v2_joint_plane_mode) {
+        active = float4(0.0f, 0.0f, v2_convergence_curve_default, 1.0f);
+        V2_STATE_CALIBRATION_REVISION(control) = asfloat(0u);
+        ResetMappingState(mapping);
+        ClearGainState(gain);
+        initialized = false;
+    }
+    // A cut remains authenticated frame metadata; it does not latch or disarm adaptation.
+
+    uint2 now = uint2(v2_joint_observation_timestamp_low, v2_joint_observation_timestamp_high);
+    uint2 previous = gain.clock.xy;
+    if (all(now == 0u) || (!all(previous == 0u) && !V2ClockAfter(now, previous))) {
+        DisarmGain(gain);
+        return;
+    }
+    bool can_move = initialized && gain.clock.z == 1u &&
+        V2ClockWithin(now, previous, (uint)v2_adaptive_max_tick_gap_ms * 1000u);
+    uint2 elapsed = V2ClockSubtract(now, previous);
+    gain.clock.xy = now;
+
+    float budget = V2DisplayBudget();
+    float recorded_budget = asfloat(gain.target.w);
+    // Artistic strength is stream configuration, not another adaptive normalization variable.
+    if (!V2Finite(budget) || budget <= 0.0f ||
+        (recorded_budget != 0.0f && recorded_budget != budget)) {
+        DisarmGain(gain);
+        return;
+    }
+    gain.target.w = asuint(budget);
+
+    float minimum = V2_FRAME_STATS_MINIMUM(frame0);
+    float maximum = V2_FRAME_STATS_MAXIMUM(frame0);
+    float mean = V2_FRAME_STATS_MEAN(frame0);
+    float observed_std = V2_FRAME_STATS_POPULATION_STD(frame0);
+    float4 quantiles = FrameStats[V2_FRAME_STATS_VECTOR_PERCENTILE_LOW];
+    float low = V2_FRAME_STATS_PERCENTILE_LOW(quantiles);
+    float high = V2_FRAME_STATS_PERCENTILE_HIGH(quantiles);
+    precise float half_span = 0.5f * (high - low);
+    // The model's calibrated raw scale is an artistic amplitude prior, not a noise floor or a
+    // physical inverse-distance conversion. Tiny raw contrast cannot earn full disparity.
+    float target_reference = max(half_span, v2_raw_coordinate_scale);
+    precise float target_zero = mean;
+    precise float target_inverse = 1.0f / target_reference;
+    bool usable = V2_FRAME_STATS_VALID(frame1) == 1.0f &&
+        V2Finite(minimum) && V2Finite(maximum) && V2Finite(mean) &&
+        maximum > minimum && mean >= minimum && mean <= maximum &&
+        V2Finite(observed_std) && observed_std > v2_collapse_abs_epsilon &&
+        V2_FRAME_STATS_PERCENTILE_VALID(quantiles) == 1.0f &&
+        V2Finite(low) && V2Finite(high) && low >= minimum && high <= maximum && low <= high &&
+        V2Finite(V2_FRAME_STATS_PERCENTILE_BIN_WIDTH(quantiles)) &&
+        V2_FRAME_STATS_PERCENTILE_BIN_WIDTH(quantiles) >= 0.0f &&
+        V2Finite(half_span) && V2Finite(v2_raw_coordinate_scale) && v2_raw_coordinate_scale > 0.0f &&
+        V2Finite(target_reference) && target_reference > 0.0f &&
+        V2Finite(target_inverse) && target_inverse > 0.0f;
+    if (!usable) {
+        DisarmGain(gain);
+        return;
+    }
+
+    // Historical state-tail field names retain their ABI; the nearest reference carries Host D.
+    gain.target.xyz = asuint(float3(target_zero, target_inverse, target_reference));
+    gain.clock.z = 1u;
+    if (!initialized) {
+        // Acquire on the first genuine observation, before DDup can freeze a static stream.
+        gain.clock.w = 1u;
+        gain.seed_times = uint4(now, now);
+        gain.seed_values = uint4(asuint(float2(target_reference, target_zero)), 0u, 0u);
+        active = float4(target_zero, target_inverse, v2_convergence_curve_default, 1.0f);
+    } else if (can_move) {
+        float seconds = float(elapsed.x) * 0.000001f;
+        float alpha = 1.0f - exp(-seconds / v2_adaptive_time_constant_seconds);
+        float old_inverse = V2_STATE_INVERSE_SCALE(active);
+        // Subtract logarithms instead of forming an overflowing target/old ratio.
+        float log_delta = alpha * (log(target_inverse) - log(old_inverse));
+        float log_bound = v2_adaptive_log_scale_rate * seconds;
+        precise float next_inverse = old_inverse * exp(clamp(log_delta, -log_bound, log_bound));
+        float zero_bound = v2_adaptive_zero_budget_per_second * seconds / next_inverse;
+        float old_zero = V2_STATE_CENTER(active);
+        float zero_delta = alpha * target_zero - alpha * old_zero;
+        precise float next_zero = old_zero + clamp(zero_delta, -zero_bound, zero_bound);
+        if (!V2Finite(next_inverse) || next_inverse <= 0.0f ||
+            !V2Finite(zero_bound) || !V2Finite(next_zero)) {
+            DisarmGain(gain);
+            return;
+        }
+        active = float4(next_zero, next_inverse, v2_convergence_curve_default, 1.0f);
+    }
+    V2_STATE_CALIBRATION_REVISION(control) = asfloat(
+        IncrementExactCounter(asuint(V2_STATE_CALIBRATION_REVISION(control))));
+    V2_STATE_FRAME_VALID(control) = 1.0f;
 }
 
 void PublishUnavailable(
     inout float4 active,
     inout float4 control,
-    inout float4 mapping_state,
+    inout uint4 mapping_state,
     bool clear_camera
 ) {
     if (clear_camera) {
@@ -46,9 +173,14 @@ void PublishUnavailable(
 
 [numthreads(1, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
-    float4 active = ShadowState[0];
-    float4 control = ShadowState[1];
-    float4 mapping_state = ShadowState[2];
+    float4 active = asfloat(ShadowState[0]);
+    float4 control = asfloat(ShadowState[1]);
+    uint4 mapping_state = ShadowState[2];
+    V2GainState gain;
+    gain.clock = ShadowState[3];
+    gain.target = ShadowState[4];
+    gain.seed_times = ShadowState[5];
+    gain.seed_values = ShadowState[6];
     bool contract_matches = asuint(V2_STATE_CONTRACT_TAG_BITS(control)) == V2_CONTRACT_TAG;
 
     float4 cut_header = CutBridgeState[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS];
@@ -71,24 +203,36 @@ void main(uint3 id : SV_DispatchThreadID) {
         control = float4(asfloat(0u), 0.0f, asfloat(previous_cut_count),
                          asfloat(V2_CONTRACT_TAG));
         ResetMappingState(mapping_state);
+        ClearGainState(gain);
     }
-    bool camera_initialized = V2CameraStateValid(active, control, mapping_state);
-    bool empty_camera = V2EmptyCameraStateValid(active, control, mapping_state);
+    bool camera_initialized = V2CameraStateWithGainValid(active, control, mapping_state, gain);
+    bool empty_camera = V2EmptyCameraStateWithGainValid(active, control, mapping_state, gain);
     if (contract_matches && !camera_initialized && !empty_camera) {
         // Same-tag corruption must not become a permanent pseudo-camera.
         active = float4(0.0f, 0.0f, v2_convergence_curve_default, 1.0f);
         control = float4(asfloat(0u), 0.0f, asfloat(previous_cut_count),
                          asfloat(V2_CONTRACT_TAG));
         ResetMappingState(mapping_state);
+        ClearGainState(gain);
     }
     V2_STATE_CONTRACT_TAG_BITS(control) = asfloat(V2_CONTRACT_TAG);
+
+    // Runtime mode is an authenticated producer choice, never inferred from arbitrary state bits.
+    // Malformed constant padding or an unsupported mode cannot authorize a parallax field.
+    if (!V2JointPlaneConstantsValid()) {
+        PublishUnavailable(active, control, mapping_state, !camera_initialized);
+        DisarmGain(gain);
+        StoreCameraState(active, control, mapping_state, gain);
+        return;
+    }
 
     // The cut buffer is an independently authenticated producer. A stale or same-sized foreign
     // buffer makes this frame unavailable, but it must not erase a previously valid scene camera.
     if (!cut_contract_matches) {
         V2_STATE_CONFIRMED_CUT_COUNT(control) = asfloat(previous_cut_count);
         PublishUnavailable(active, control, mapping_state, false);
-        StoreCameraState(active, control, mapping_state);
+        DisarmGain(gain);
+        StoreCameraState(active, control, mapping_state, gain);
         return;
     }
 
@@ -100,29 +244,36 @@ void main(uint3 id : SV_DispatchThreadID) {
 
     float4 frame0 = FrameStats[V2_FRAME_STATS_VECTOR_MEAN];
     float4 frame1 = FrameStats[V2_FRAME_STATS_VECTOR_VALID_COUNT];
+    if (v2_joint_plane_mode == 3u) {
+        ObserveAdaptiveCamera(active, control, mapping_state, gain, frame0, frame1,
+            camera_initialized);
+        StoreCameraState(active, control, mapping_state, gain);
+        return;
+    }
     float observed_std = V2_FRAME_STATS_POPULATION_STD(frame0);
     bool frame_valid = V2_FRAME_STATS_VALID(frame1) > 0.5f &&
         V2Finite(observed_std) && observed_std > v2_collapse_abs_epsilon;
     if (!frame_valid) {
         PublishUnavailable(
             active, control, mapping_state, confirmed_cut || !camera_initialized);
-        StoreCameraState(active, control, mapping_state);
+        StoreCameraState(active, control, mapping_state, gain);
         return;
     }
 
-    bool acquiring = !camera_initialized || confirmed_cut;
+    bool mode_changed = V2_STATE_JOINT_PLANE_MODE_BITS(mapping_state) != v2_joint_plane_mode;
+    bool acquiring = !camera_initialized || confirmed_cut || mode_changed;
     if (acquiring) {
         float inverse_scale = 1.0f / v2_raw_coordinate_scale;
+        float acquired_center = V2_FRAME_STATS_MEAN(frame0);
         if (!V2Finite(inverse_scale) || inverse_scale <= 0.0f) {
-            PublishUnavailable(active, control, mapping_state, true);
-            StoreCameraState(active, control, mapping_state);
+            PublishUnavailable(active, control, mapping_state,
+                v2_joint_plane_mode == 0u || confirmed_cut ||
+                !camera_initialized || mode_changed);
+            StoreCameraState(active, control, mapping_state, gain);
             return;
         }
-        // The arithmetic mean provides the occupancy behavior we need without a discrete scene
-        // classifier: a small near object remains prominent, while a large near region naturally
-        // pulls the zero plane toward itself. The wider calibrated coordinate scale keeps framing
-        // and letterbox regions from collapsing the rest of the scene onto the far shelf.
-        float acquired_center = V2_FRAME_STATS_MEAN(frame0);
+        // Default acquisition retains the occupancy-weighted arithmetic mean and calibrated
+        // scale. Adaptive mode above continuously observes mean zero and robust amplitude.
         active = float4(
             acquired_center, inverse_scale, v2_convergence_curve_default, 1.0f);
         ResetMappingState(mapping_state);
@@ -135,5 +286,5 @@ void main(uint3 id : SV_DispatchThreadID) {
     V2_STATE_CONTAINER_SCALE(active) = 1.0f;
     V2_STATE_FRAME_VALID(control) = 1.0f;
 
-    StoreCameraState(active, control, mapping_state);
+    StoreCameraState(active, control, mapping_state, gain);
 }

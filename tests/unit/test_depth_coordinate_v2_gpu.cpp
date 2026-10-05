@@ -138,8 +138,8 @@ namespace {
       }
     }
     return {
-      {"schema", 10u},
-      {"mode", "depth-coordinate-v2-production-gpu-sequence-v12"},
+      {"schema", 11u},
+      {"mode", "depth-coordinate-v2-production-gpu-sequence-v13"},
       {"calibration_contract", {
         {"file", "contracts/depth-coordinate-v2-v1.json"},
         {"schema", v2::contract_schema},
@@ -1784,8 +1784,8 @@ TEST(DepthCoordinateV2GpuTest, SixCoordinatePassReplayLatchesRecoversAndRelatche
   namespace fs = std::filesystem;
   namespace v2 = models::depth_coordinate_v2;
 
-  static_assert(v2::constant_float_count == 8u);
-  static_assert(v2::state_float_count == 12u);
+  static_assert(v2::constant_float_count == 16u);
+  static_assert(v2::state_float_count == 28u);
   static_assert(v2::convergence_curve_default == 0.0f);
 
   warp_device_t warp;
@@ -1940,9 +1940,9 @@ TEST(DepthCoordinateV2GpuTest, SixCoordinatePassReplayLatchesRecoversAndRelatche
   const auto trace = nlohmann::ordered_json::parse(read_bytes(trace_path));
   ASSERT_EQ(trace.at("schema"), sbs_bench::depth_coordinate_v2_state_trace_schema);
   ASSERT_EQ(trace.at("frames").size(), raw_fields.size());
-  ASSERT_EQ(trace.at("frame_fields").size(), 38u);
+  ASSERT_EQ(trace.at("frame_fields").size(), 45u);
   EXPECT_EQ(trace["producer"]["authority"],
-            "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-gpu-state-v9");
+            "authenticated-raw-depth-plus-eight-v2-compute-shaders-persistent-gpu-state-v11");
   EXPECT_EQ(trace["producer"]["tensor_shape"]["width"], replay->width());
   EXPECT_EQ(trace["producer"]["tensor_shape"]["height"], replay->height());
   ASSERT_EQ(trace["producer"]["shader_sequence"].size(), 6u);
@@ -2082,6 +2082,197 @@ TEST(DepthCoordinateV2GpuTest, SixCoordinatePassReplayLatchesRecoversAndRelatche
     identity_output,
     error
   )) << error;
+}
+
+TEST(DepthCoordinateV2GpuTest, ContinuousHostPlaneTracksAcrossCutsAndHoldsUnusableInput) {
+  namespace fs = std::filesystem;
+  namespace v2 = models::depth_coordinate_v2;
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+  temporary_tree_t tree;
+  const std::string contract = read_bytes(fs::path(SUNSHINE_SOURCE_DIR) /
+    "tools/sbsbench/contracts/depth-coordinate-v2-v1.json");
+  ASSERT_FALSE(contract.empty());
+  ASSERT_TRUE(write_bytes(tree.path / "contracts/depth-coordinate-v2-v1.json", contract));
+  const auto &calibration = v2::model_calibrations.front();
+  const auto shape = std::find_if(v2::model_calibrated_shapes.begin(),
+    v2::model_calibrated_shapes.end(), [&](const auto &value) {
+      return value.calibration_id == calibration.calibration_id;
+    });
+  ASSERT_NE(shape, v2::model_calibrated_shapes.end());
+  const std::size_t count = static_cast<std::size_t>(shape->width) * shape->height;
+  std::vector<std::vector<float>> fields(9u, std::vector<float>(count));
+  constexpr std::array first_values {2.0f, 3.0f, 4.0f, 8.0f};
+  constexpr std::array next_values {2.0f, 3.0f, 8.0f, 8.0f};
+  for (std::size_t index = 0u; index < count; ++index) {
+    const auto band = std::min(index * 4u / count, std::size_t {3u});
+    fields[0][index] = first_values[band];
+    fields[1][index] = next_values[band];
+    fields[2][index] = 0.5f * fields[1][index] + 1.0f;
+    fields[3][index] = 2.0f * fields[1][index] + 5.0f;
+  }
+  fields[4].assign(count, 3.0f);
+  fields[5] = fields[1];
+  fields[6] = fields[1];
+  fields[6][count / 2u] = std::numeric_limits<float>::quiet_NaN();
+  fields[7].assign(count, 3.0f);
+  fields[8] = fields[3];
+
+  nlohmann::ordered_json frames = nlohmann::ordered_json::array();
+  for (std::size_t index = 0u; index < fields.size(); ++index) {
+    const std::string id = "0000" + std::to_string(index + 1u);
+    const std::string name = "raw_" + id + ".f32";
+    const std::string bytes = float_bytes(fields[index]);
+    ASSERT_TRUE(write_bytes(tree.path / name, bytes));
+    frames.push_back({{"frame_id", id}, {"raw_file", name},
+      {"raw_sha256", sha256_hex(bytes)}, {"hard_cut_count", index >= 7u ? 1u : 0u},
+      {"hard_cut_pulse", false}, {"observation_timestamp_us", std::uint64_t(100000u + index * 100000u)}});
+  }
+  constexpr float pop = 1.75f;
+  auto manifest = make_replay_manifest(calibration, sha256_hex(contract),
+    shape->width, shape->height, frames, pop);
+  manifest["mapping_config"]["joint_plane_mode"] = 3u;
+  const auto path = tree.path / "manifest.json";
+  ASSERT_TRUE(write_bytes(path, manifest.dump(2) + "\n"));
+  std::string error;
+  auto replay = sbs_bench::depth_coordinate_v2_gpu_replay::create(
+    warp.device.Get(), warp.context.Get(), path, error);
+  ASSERT_NE(replay, nullptr) << error;
+  std::vector<sbs_bench::depth_coordinate_v2_gpu_frame> outputs(fields.size());
+  for (std::size_t index = 0u; index < fields.size(); ++index) {
+    ASSERT_TRUE(replay->dispatch(index, "0000" + std::to_string(index + 1u),
+      test_source_sha256(), outputs[index], error)) << error;
+  }
+  const auto trace_path = tree.path / "trace.json";
+  ASSERT_TRUE(replay->write_state_trace(trace_path, error)) << error;
+  const auto trace = nlohmann::ordered_json::parse(read_bytes(trace_path));
+  const auto &rows = trace.at("frames");
+  ASSERT_EQ(rows.size(), fields.size());
+  const std::array<std::uint32_t, 9> revisions {1u, 2u, 3u, 4u, 4u, 5u, 5u, 5u, 6u};
+  for (std::size_t index = 0u; index < rows.size(); ++index) {
+    EXPECT_EQ(rows[index]["joint_plane_mode"], 3u);
+    EXPECT_EQ(rows[index]["calibration_revision"], revisions[index]);
+    EXPECT_FLOAT_EQ(rows[index]["convergence_curve"].get<float>(), 0.0f);
+    EXPECT_LE(rows[index]["inverse_scale"].get<float>(), 1.0f / calibration.raw_coordinate_scale);
+    EXPECT_LE(outputs[index].maximum_absolute_source_u, v2::direct_container_limit + 2.0e-7f);
+  }
+  // Acquisition uses all finite content, and subsequent source-time observations are bounded.
+  EXPECT_NEAR(rows[0]["center"].get<float>(), 4.25f, 2.0e-5f);
+  EXPECT_GT(rows[1]["center"].get<float>(), rows[0]["center"].get<float>());
+  EXPECT_LE(rows[1]["center"].get<float>() - rows[0]["center"].get<float>(),
+    0.1f / rows[1]["inverse_scale"].get<float>() + 2.0e-5f);
+  EXPECT_FALSE(rows[1]["confirmed_cut"].get<bool>());
+  ASSERT_EQ(outputs[0].candidate_parallax_values.size(), count);
+  const auto gain = v2::requested_gain_for_config(pop);
+  // Observe actual native candidates across far/near raw samples; no CPU warp replica.
+  for (const std::size_t index : {std::size_t(0u), count - 1u}) {
+    const auto coordinate = outputs[0].canonical_values[index];
+    EXPECT_NEAR(outputs[0].candidate_parallax_values[index], gain * coordinate, 2.0e-7f);
+  }
+  for (const auto index : {4u, 6u, 7u}) {
+    EXPECT_FALSE(rows[index]["frame_valid"].get<bool>());
+    EXPECT_TRUE(rows[index]["camera_valid"].get<bool>());
+    EXPECT_FLOAT_EQ(rows[index]["center"].get<float>(), rows[index - 1u]["center"].get<float>());
+    EXPECT_FLOAT_EQ(rows[index]["inverse_scale"].get<float>(), rows[index - 1u]["inverse_scale"].get<float>());
+    EXPECT_FLOAT_EQ(outputs[index].encoded_minimum, 0.5f);
+    EXPECT_FLOAT_EQ(outputs[index].encoded_maximum, 0.5f);
+  }
+  EXPECT_TRUE(rows[7]["confirmed_cut"].get<bool>());
+  EXPECT_TRUE(rows[8]["frame_valid"].get<bool>());
+  // First observation after unusable evidence rearms the clock without spending skipped time.
+  EXPECT_FLOAT_EQ(rows[8]["center"].get<float>(), rows[7]["center"].get<float>());
+}
+
+TEST(DepthCoordinateV2GpuTest, JointPlaneModeTamperingRecoversAndUnknownModesAreRejected) {
+  namespace fs = std::filesystem;
+  namespace v2 = models::depth_coordinate_v2;
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+  temporary_tree_t tree;
+  const std::string contract = read_bytes(fs::path(SUNSHINE_SOURCE_DIR) /
+    "tools/sbsbench/contracts/depth-coordinate-v2-v1.json");
+  ASSERT_FALSE(contract.empty());
+  ASSERT_TRUE(write_bytes(tree.path / "contracts/depth-coordinate-v2-v1.json", contract));
+  const auto &calibration = v2::model_calibrations.front();
+  const auto shape = std::find_if(v2::model_calibrated_shapes.begin(),
+    v2::model_calibrated_shapes.end(), [&](const auto &value) {
+      return value.calibration_id == calibration.calibration_id;
+    });
+  ASSERT_NE(shape, v2::model_calibrated_shapes.end());
+  const auto count = static_cast<std::size_t>(shape->width) * shape->height;
+  std::vector<float> raw(count, 0.0f);
+  std::fill_n(raw.begin(), count / 4u, 4.0f);
+  const auto bytes = float_bytes(raw);
+  constexpr std::array ids {"00001", "00002"};
+  nlohmann::ordered_json frames = nlohmann::ordered_json::array();
+  for (const auto id : ids) {
+    const std::string raw_file = "raw_" + std::string(id) + ".f32";
+    ASSERT_TRUE(write_bytes(tree.path / raw_file, bytes));
+    frames.push_back({{"frame_id", id}, {"raw_file", raw_file},
+      {"raw_sha256", sha256_hex(bytes)}, {"hard_cut_count", 0u}, {"hard_cut_pulse", false}});
+  }
+  auto manifest = make_replay_manifest(calibration, sha256_hex(contract),
+    shape->width, shape->height, frames);
+  manifest["mapping_config"]["joint_plane_mode"] = 3u;
+  for (std::size_t index = 0u; index < manifest["frames"].size(); ++index) {
+    manifest["frames"][index]["observation_timestamp_us"] = std::uint64_t(100000u + index * 100000u);
+  }
+  const auto path = tree.path / "manifest.json";
+  ASSERT_TRUE(write_bytes(path, manifest.dump(2) + "\n"));
+  std::string error;
+  auto replay = sbs_bench::depth_coordinate_v2_gpu_replay::create(
+    warp.device.Get(), warp.context.Get(), path, error);
+  ASSERT_NE(replay, nullptr) << error;
+  auto state = v2::state_initial_words;
+  state[v2::center] = std::bit_cast<std::uint32_t>(123.0f);
+  state[v2::inverse_scale] = std::bit_cast<std::uint32_t>(1.0f / calibration.raw_coordinate_scale);
+  state[v2::calibration_revision] = 7u;
+  state[v2::frame_valid] = std::bit_cast<std::uint32_t>(1.0f);
+  state[v2::renderer_authorization_bits] = v2::contract_tag;
+  state[v2::joint_plane_mode_bits] = 3u;
+  state[v2::gain_last_observation_low] = 100000u;
+  state[v2::gain_clock_armed] = 1u;
+  state[v2::gain_seed_count] = 1u;
+  state[v2::gain_target_zero] = state[v2::center];
+  state[v2::gain_target_inverse_scale] = state[v2::inverse_scale];
+  state[v2::gain_target_nearest] = std::bit_cast<std::uint32_t>(calibration.raw_coordinate_scale);
+  state[v2::gain_display_limit] = std::bit_cast<std::uint32_t>(v2::direct_container_limit);
+  state[v2::gain_seed_first_low] = state[v2::gain_seed_last_low] = 100000u;
+  state[v2::gain_seed_mean_nearest] = state[v2::gain_target_nearest];
+  state[v2::gain_seed_mean_zero] = state[v2::center];
+  state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(state);
+  ASSERT_TRUE(v2::parallax_state_words_are_authenticated(state, calibration.raw_coordinate_scale, 3u));
+  for (std::size_t index = 0u; index < 2u; ++index) {
+    auto corrupt = state;
+    corrupt[v2::joint_plane_mode_bits] = index == 0u ? 0u : 2u;
+    ASSERT_FALSE(v2::parallax_state_words_are_authenticated(corrupt, calibration.raw_coordinate_scale));
+    ASSERT_TRUE(replay->overwrite_state_for_testing(
+      std::vector<std::uint32_t>(corrupt.begin(), corrupt.end()), error)) << error;
+    sbs_bench::depth_coordinate_v2_gpu_frame output;
+    ASSERT_TRUE(replay->dispatch(index, ids[index],
+      test_source_sha256(), output, error)) << error;
+    EXPECT_NEAR(output.order_minimum, -1.0f / calibration.raw_coordinate_scale, 2.0e-6f);
+  }
+  const auto trace_path = tree.path / "trace.json";
+  ASSERT_TRUE(replay->write_state_trace(trace_path, error)) << error;
+  const auto rows = nlohmann::ordered_json::parse(read_bytes(trace_path)).at("frames");
+  for (const auto &row : rows) {
+    EXPECT_EQ(row["joint_plane_mode"], 3u);
+    EXPECT_EQ(row["calibration_revision"], 1u);
+    EXPECT_NEAR(row["center"].get<float>(), 1.0f, 2.0e-5f);
+  }
+  for (const nlohmann::ordered_json mode : {
+         nlohmann::ordered_json(1u), nlohmann::ordered_json(2u),
+         nlohmann::ordered_json(4u), nlohmann::ordered_json(-1),
+         nlohmann::ordered_json(1.5), nlohmann::ordered_json(true),
+       }) {
+    auto invalid = manifest;
+    invalid["mapping_config"]["joint_plane_mode"] = mode;
+    ASSERT_TRUE(write_bytes(path, invalid.dump(2) + "\n"));
+    auto rejected = sbs_bench::depth_coordinate_v2_gpu_replay::create(
+      warp.device.Get(), warp.context.Get(), path, error);
+    EXPECT_EQ(rejected, nullptr) << mode;
+  }
 }
 
 #endif  // _WIN32

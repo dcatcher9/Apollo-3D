@@ -86,11 +86,11 @@ void main(
     if (target_w <= V2_LIMIT_SERIAL_MAX_LINES) {
         if (active && lane == 0u) {
             float value = VerticalShare[uint2(0u, y)];
-            FinalOut[uint2(0u, y)] = value;
+            FinalOut[uint2(0u, y)] = V2BoundDisplayParallax(value);
             [loop]
             for (uint serial_x = 1u; serial_x < target_w; ++serial_x) {
                 value = max(VerticalShare[uint2(serial_x, y)], value - max_step);
-                FinalOut[uint2(serial_x, y)] = value;
+                FinalOut[uint2(serial_x, y)] = V2BoundDisplayParallax(value);
             }
             DeviceMemoryBarrier();
             value = FinalOut[uint2(target_w - 1u, y)];
@@ -100,7 +100,7 @@ void main(
                  --serial_back_x) {
                 const uint2 position = uint2((uint)serial_back_x, y);
                 value = max(FinalOut[position], value - max_step);
-                FinalOut[position] = value;
+                FinalOut[position] = V2BoundDisplayParallax(value);
             }
         }
         return;
@@ -208,8 +208,8 @@ void main(
                 max_step_q30, write_x - chunk_start + 1u, saturation_distance, max_decay_q30);
             complete_q30 = max(complete_q30, carry.x - decay_q30);
         }
-        FinalOut[uint2(write_x, y)] = max(
+        FinalOut[uint2(write_x, y)] = V2BoundDisplayParallax(max(
             FinalOut[uint2(write_x, y)],
-            V2LimitFromQ30(complete_q30));
+            V2LimitFromQ30(complete_q30)));
     }
 }

@@ -174,30 +174,22 @@ namespace {
     std::array<float, 3u> reserved;
   };
 
-  struct v2_constants_t {
-    float raw_coordinate_scale;
-    float collapse_abs_epsilon;
-    float far_tau;
-    float near_log_tau;
-    float requested_gain;
-    float max_horizontal_slope;
-    float direct_container_limit;
-    float convergence_curve_default;
-  };
+  using v2_constants_t = v2::constants_t;
 
   struct subtitle_constants_t {
     std::array<std::uint32_t, 4u> field;
     std::array<std::uint32_t, 4u> source;
     std::array<std::uint32_t, 4u> frame;
     std::array<std::uint32_t, 4u> tensor_content;
+    std::array<std::uint32_t, 4u> observation {};
   };
 
   static_assert(sizeof(rgba_t) == 4u * sizeof(float));
   static_assert(sizeof(preprocess_constants_t) == 32u);
   static_assert(sizeof(ocr_resolve_constants_t) == 64u);
   static_assert(sizeof(depth_constants_t) == 64u);
-  static_assert(sizeof(v2_constants_t) == 32u);
-  static_assert(sizeof(subtitle_constants_t) == 64u);
+  static_assert(sizeof(v2_constants_t) == 64u);
+  static_assert(sizeof(subtitle_constants_t) == 80u);
   static_assert(ocr_width == v2::subtitle_ocr_input_width);
   static_assert(ocr_height == v2::subtitle_ocr_input_height);
 

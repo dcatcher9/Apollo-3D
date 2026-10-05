@@ -83,6 +83,13 @@ namespace platf::sbs_debug {
       const frame &completed
     );
 
+    /** Authenticate the state/statistics pair before serializing V2 diagnostic documents. */
+    bool parallax_v2_state_matches_frame(
+      const std::vector<float> &state,
+      const std::vector<float> &frame_stats,
+      const frame &completed
+    ) noexcept;
+
     /** Authenticate the one-grid legacy DAV2 or fused single-high dump tensor geometry. */
     bool capture_tensor_grid_is_authenticated(const frame &completed) noexcept;
 
@@ -188,6 +195,7 @@ namespace platf::sbs_debug {
     float parallax_v2_raw_coordinate_scale = 0.0f;
     float parallax_v2_requested_pop_strength = 0.0f;
     float parallax_v2_requested_gain = 0.0f;
+    std::uint32_t parallax_v2_joint_plane_mode = 0u;
     models::input_color_space color_space {};
     std::string depth_model;
   };

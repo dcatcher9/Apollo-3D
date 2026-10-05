@@ -21,6 +21,7 @@
   #include <fstream>
   #include <future>
   #include <iterator>
+  #include <limits>
   #include <memory>
   #include <optional>
   #include <string>
@@ -29,6 +30,7 @@
   #include <nlohmann/json.hpp>
 
   #include <src/generated/depth_coordinate_v2_contract.h>
+  #include <src/depth_coordinate_v2.h>
   #include <src/host_sbs_gpu_trace.h>
   #include <src/host_sbs_shader_cache.h>
   #include <src/platform/windows/sbs_debug_dump.h>
@@ -1676,6 +1678,234 @@ namespace {
     EXPECT_FALSE(subtitle_records_match_frame(
       word_bytes(ocr), word_bytes(locator), frame
     ));
+  }
+
+  TEST(SbsDebugDumpAsyncTest, NativeAdaptiveUiAuthenticatesHostCapAndRejectsOtherModes) {
+    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
+    auto frame = subtitle_frame(content, 3840u, 2160u);
+    frame.parallax_v2_joint_plane_mode = 3u;
+    frame.parallax_v2_requested_gain = 0.0065625f;
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      frame.depth_input_region.width(), frame.depth_input_region.height(),
+      {frame.field_width, frame.field_height}, content);
+    ASSERT_TRUE(geometry.valid());
+    const auto ocr = empty_ocr(frame, geometry);
+    std::array<std::uint32_t, v2::subtitle_locator_state_word_count> locator {};
+    locator[0u] = v2::subtitle_locator_state_schema;
+    locator[1u] = v2::subtitle_locator_state_tag;
+    locator[10u] = static_cast<std::uint32_t>(frame.depth_input_region.analysis_generation);
+    locator[22u] = static_cast<std::uint32_t>(frame.matched_frame_id);
+    locator[26u] = subtitle_scene_epoch;
+    locator[27u] = frame.field_width;
+    locator[28u] = frame.field_height;
+    constexpr auto a = v2::subtitle_locator_adaptive_offset;
+    locator[a] = 1u;
+    locator[a + 1u] = 8u;
+    locator[a + 4u] = 1234u;
+    const auto cap = std::bit_cast<std::uint32_t>(v2::direct_container_limit);
+    locator[a + 12u] = cap;
+    ASSERT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), frame));
+    for (const auto wrong_cap : {cap - 1u, cap + 1u, 0x7fc00000u, 0x7f800000u}) {
+      locator[a + 12u] = wrong_cap;
+      EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), frame));
+    }
+    locator[a + 12u] = cap;
+    const auto maximum_level = (frame.depth_input_region.width() + 99u) / 100u;
+    locator[a + 2u] = maximum_level;
+    EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), frame));
+    ++locator[a + 2u];
+    EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), frame));
+    locator[a + 2u] = 0u;
+    for (const auto mode : {0u, 1u, 2u, 4u}) {
+      auto wrong_mode = frame;
+      wrong_mode.parallax_v2_joint_plane_mode = mode;
+      EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), wrong_mode));
+    }
+    // Depth strength is independent of the full Host UI representation guard.
+    frame.parallax_v2_requested_gain = 0.03f;
+    EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), frame));
+    for (const auto gain : {0.0f, -0.001f, std::numeric_limits<float>::infinity(),
+           std::numeric_limits<float>::quiet_NaN()}) {
+      auto wrong_gain = frame;
+      wrong_gain.parallax_v2_requested_gain = gain;
+      EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), wrong_gain));
+    }
+    // The capped-conflict bit must agree with the observed top-candidate counters.
+    locator[a + 13u] = 100u;
+    locator[a + 14u] = 21u;
+    EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), frame));
+    locator[a + 1u] |= 4u;
+    EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), frame));
+  }
+
+  TEST(SbsDebugDumpAsyncTest, NativeAdaptiveStateSerializationAdmitsStartupAndDisarmedFlatTuples) {
+    auto frame = gpu_trace_frame();
+    frame.parallax_v2_joint_plane_mode = 3u;
+    frame.parallax_v2_raw_coordinate_scale = 2.25f;
+    frame.parallax_v2_requested_pop_strength = 1.75f;
+    frame.parallax_v2_requested_gain = v2::requested_gain_for_config(1.75f);
+    std::vector<float> stats {2.0f, 0.5f, 1.0f, 4.0f, 16.0f, 16.0f, 1.0f, 0.0f};
+    stats.resize(v2::frame_stats_float_count, 0.0f);
+    stats[v2::frame_stat_percentile_low] = 1.0f;
+    stats[v2::frame_stat_percentile_high] = 4.0f;
+    stats[v2::frame_stat_percentile_valid] = 1.0f;
+    stats[v2::frame_stat_percentile_bin_width] = 3.0f / 256.0f;
+    v2::state_words_t words {};
+    words[v2::container_scale] = std::bit_cast<std::uint32_t>(1.0f);
+    words[v2::contract_tag_bits] = v2::contract_tag;
+    words[v2::joint_plane_mode_bits] = 3u;
+    const auto matches = [&] {
+      words[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(words);
+      std::vector<float> state(v2::state_float_count);
+      std::memcpy(state.data(), words.data(), sizeof(words));
+      return dump_detail::parallax_v2_state_matches_frame(state, stats, frame);
+    };
+    // An empty controller is an authenticated flat diagnostic before its first valid clock.
+    ASSERT_TRUE(matches());
+    words[v2::gain_last_observation_low] = 1000001u;
+    words[v2::gain_clock_armed] = 1u;
+    words[v2::gain_seed_count] = 1u;
+    words[v2::gain_target_zero] = std::bit_cast<std::uint32_t>(2.0f);
+    words[v2::gain_target_inverse_scale] = std::bit_cast<std::uint32_t>(0.25f);
+    words[v2::gain_target_nearest] = std::bit_cast<std::uint32_t>(4.0f);
+    words[v2::gain_display_limit] = std::bit_cast<std::uint32_t>(v2::direct_container_limit);
+    words[v2::gain_seed_first_low] = words[v2::gain_seed_last_low] = 1000001u;
+    words[v2::gain_seed_mean_nearest] = std::bit_cast<std::uint32_t>(4.0f);
+    words[v2::gain_seed_mean_zero] = std::bit_cast<std::uint32_t>(2.0f);
+    words[v2::center] = std::bit_cast<std::uint32_t>(2.0f);
+    words[v2::inverse_scale] = std::bit_cast<std::uint32_t>(0.25f);
+    words[v2::calibration_revision] = 1u;
+    words[v2::frame_valid] = std::bit_cast<std::uint32_t>(1.0f);
+    words[v2::renderer_authorization_bits] = v2::contract_tag;
+    ASSERT_TRUE(matches());
+    words[v2::frame_valid] = 0u;
+    words[v2::renderer_authorization_bits] = 0u;
+    words[v2::gain_clock_armed] = 0u;
+    words[v2::gain_target_zero] = words[v2::gain_target_inverse_scale] = words[v2::gain_target_nearest] = 0u;
+    ASSERT_TRUE(matches());
+    for (const auto mode : {0u, 1u, 2u}) {
+      frame.parallax_v2_joint_plane_mode = mode;
+      EXPECT_FALSE(matches());
+    }
+    frame.parallax_v2_joint_plane_mode = 3u;
+    frame.parallax_v2_requested_pop_strength = 1.0f;
+    // A different valid requested gain remains independent of the retained scale and guard.
+    frame.parallax_v2_requested_gain = v2::requested_gain_for_config(1.0f);
+    EXPECT_TRUE(matches());
+  }
+
+  TEST(SbsDebugDumpAsyncTest, NativeAdaptiveSerializationRequiresQuantilesForValidOutput) {
+    auto frame = gpu_trace_frame();
+    frame.parallax_v2_joint_plane_mode = 3u;
+    frame.parallax_v2_raw_coordinate_scale = 2.25f;
+    frame.parallax_v2_requested_pop_strength = 1.0f;
+    frame.parallax_v2_requested_gain = v2::requested_gain_for_config(1.0f);
+    v2::state_words_t words {};
+    words[v2::center] = std::bit_cast<std::uint32_t>(-2.0f);
+    words[v2::inverse_scale] = std::bit_cast<std::uint32_t>(0.25f);
+    words[v2::container_scale] = std::bit_cast<std::uint32_t>(1.0f);
+    words[v2::calibration_revision] = 1u;
+    words[v2::frame_valid] = std::bit_cast<std::uint32_t>(1.0f);
+    words[v2::contract_tag_bits] = words[v2::renderer_authorization_bits] = v2::contract_tag;
+    words[v2::joint_plane_mode_bits] = 3u;
+    words[v2::gain_last_observation_low] = words[v2::gain_seed_first_low] = words[v2::gain_seed_last_low] = 1000001u;
+    words[v2::gain_clock_armed] = words[v2::gain_seed_count] = 1u;
+    words[v2::gain_target_zero] = words[v2::gain_seed_mean_zero] = words[v2::center];
+    words[v2::gain_target_inverse_scale] = words[v2::inverse_scale];
+    words[v2::gain_target_nearest] = words[v2::gain_seed_mean_nearest] = std::bit_cast<std::uint32_t>(4.0f);
+    words[v2::gain_display_limit] = std::bit_cast<std::uint32_t>(v2::direct_container_limit);
+    words[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(words);
+    std::vector<float> state(v2::state_float_count);
+    std::memcpy(state.data(), words.data(), sizeof(words));
+    // Signed raw depth is valid Host evidence; no positive Game3D nearest-depth assumption.
+    std::vector<float> stats {-2.0f, 0.5f, -5.0f, 0.0f, 16.0f, 16.0f, 1.0f, 0.0f};
+    stats.resize(v2::frame_stats_float_count, 0.0f);
+    stats[v2::frame_stat_percentile_low] = -4.0f;
+    stats[v2::frame_stat_percentile_high] = 0.0f;
+    stats[v2::frame_stat_percentile_valid] = 1.0f;
+    stats[v2::frame_stat_percentile_bin_width] = 5.0f / 256.0f;
+    ASSERT_TRUE(dump_detail::parallax_v2_state_matches_frame(state, stats, frame));
+    stats[v2::frame_stat_percentile_valid] = 0.0f;
+    EXPECT_FALSE(dump_detail::parallax_v2_state_matches_frame(state, stats, frame));
+    stats[v2::frame_stat_percentile_valid] = 1.0f;
+    stats[v2::frame_stat_percentile_high] = 1.0f;
+    EXPECT_FALSE(dump_detail::parallax_v2_state_matches_frame(state, stats, frame));
+    stats[v2::frame_stat_percentile_high] = 0.0f;
+    stats[v2::frame_stat_population_std] = 0.0f;
+    EXPECT_FALSE(dump_detail::parallax_v2_state_matches_frame(state, stats, frame));
+    // Ordinary mode retains the original iff-moments admission, including unavailable cases.
+    words = {};
+    words[v2::container_scale] = std::bit_cast<std::uint32_t>(1.0f);
+    words[v2::contract_tag_bits] = v2::contract_tag;
+    words[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(words);
+    std::memcpy(state.data(), words.data(), sizeof(words));
+    frame.parallax_v2_joint_plane_mode = 0u;
+    stats.assign(v2::frame_stats_float_count, 0.0f);
+    stats[v2::frame_stat_valid_count] = stats[v2::frame_stat_texel_count] = 16.0f;
+    EXPECT_TRUE(dump_detail::parallax_v2_state_matches_frame(state, stats, frame));
+    stats[v2::frame_stat_mean] = 2.0f;
+    stats[v2::frame_stat_population_std] = 0.5f;
+    stats[v2::frame_stat_minimum] = 1.0f;
+    stats[v2::frame_stat_maximum] = 4.0f;
+    stats[v2::frame_stat_valid] = 1.0f;
+    EXPECT_FALSE(dump_detail::parallax_v2_state_matches_frame(state, stats, frame));
+  }
+
+  TEST(SbsDebugDumpAsyncTest, NativeFlatSerializationRejectsMalformedQuantileTailsInBothModes) {
+    auto frame = gpu_trace_frame();
+    frame.parallax_v2_raw_coordinate_scale = 2.25f;
+    frame.parallax_v2_requested_pop_strength = 1.0f;
+    frame.parallax_v2_requested_gain = v2::requested_gain_for_config(1.0f);
+    for (const auto mode : {0u, 3u}) {
+      SCOPED_TRACE(mode);
+      frame.parallax_v2_joint_plane_mode = mode;
+      v2::state_words_t words {};
+      words[v2::container_scale] = std::bit_cast<std::uint32_t>(1.0f);
+      words[v2::contract_tag_bits] = v2::contract_tag;
+      words[v2::joint_plane_mode_bits] = mode;
+      words[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(words);
+      std::vector<float> state(v2::state_float_count);
+      std::memcpy(state.data(), words.data(), sizeof(words));
+      std::vector<float> unavailable(v2::frame_stats_float_count, 0.0f);
+      unavailable[v2::frame_stat_valid_count] = unavailable[v2::frame_stat_texel_count] = 16.0f;
+      const auto matches = [&](const std::vector<float> &stats) {
+        return dump_detail::parallax_v2_state_matches_frame(state, stats, frame);
+      };
+      ASSERT_TRUE(matches(unavailable));
+      for (const auto invalid_flag : {-1.0f, 0.5f, 2.0f}) {
+        auto corrupt = unavailable;
+        corrupt[v2::frame_stat_percentile_valid] = invalid_flag;
+        EXPECT_FALSE(matches(corrupt));
+      }
+      for (const auto field : {v2::frame_stat_percentile_low, v2::frame_stat_percentile_high,
+             v2::frame_stat_percentile_bin_width}) {
+        auto corrupt = unavailable;
+        corrupt[field] = 0.001f;
+        EXPECT_FALSE(matches(corrupt));
+      }
+      auto declared = unavailable;
+      declared[v2::frame_stat_percentile_valid] = 1.0f;
+      EXPECT_FALSE(matches(declared)); // Quantiles cannot authorize invalid moments.
+
+      // Collapsed current statistics keep output flat, but their independent tail must still
+      // obey the same flag, range and width contract as the Python diagnostic reader.
+      declared[v2::frame_stat_valid] = 1.0f;
+      declared[v2::frame_stat_minimum] = -1.0f;
+      declared[v2::frame_stat_maximum] = 1.0f;
+      declared[v2::frame_stat_percentile_low] = -0.5f;
+      declared[v2::frame_stat_percentile_high] = 0.5f;
+      declared[v2::frame_stat_percentile_bin_width] = 2.0f / 256.0f;
+      ASSERT_TRUE(matches(declared));
+      for (const auto field : {v2::frame_stat_percentile_low, v2::frame_stat_percentile_high,
+             v2::frame_stat_percentile_bin_width}) {
+        auto corrupt = declared;
+        corrupt[field] = field == v2::frame_stat_percentile_high ? 2.0f : -2.0f;
+        EXPECT_FALSE(matches(corrupt));
+      }
+      auto reversed = declared;
+      reversed[v2::frame_stat_percentile_low] = 0.75f;
+      EXPECT_FALSE(matches(reversed));
+    }
   }
 
   TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationAcceptsSignedLocalPlaneWithinContainer) {

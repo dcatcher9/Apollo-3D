@@ -118,6 +118,27 @@ class RescoreMetadataTests(unittest.TestCase):
             self.assertEqual(rebuilt["source_frame_count"], 1)
             self.assertEqual(rebuilt["model"], "depth_anything_v2_fp16")
 
+    def test_joint_plane_attestation_cannot_be_shadowed_or_omitted(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, clips_root, run_dir, _ = self._fixture(root)
+            path = os.path.join(run_dir, "demo", "contract.json")
+            with open(path, encoding="utf-8") as stream:
+                contract = json.load(stream)
+            contract["joint_plane_experiment"] = True
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(contract, stream)
+            with self.assertRaisesRegex(SystemExit, "run joint-plane"):
+                rescore_run.authoritative_clip_meta(data, "demo", clips_root, run_dir)
+            data["meta"]["joint_plane_experiment"] = False
+            with self.assertRaisesRegex(SystemExit, "joint_plane_experiment"):
+                rescore_run.authoritative_clip_meta(data, "demo", clips_root, run_dir)
+            data["meta"]["joint_plane_experiment"] = True
+            # Contract bytes changed, so bind the new artifact digest before authenticating.
+            data["meta"]["scored_artifact_sha256"]["demo"] = (
+                run_eval.scored_artifact_sha256(os.path.join(run_dir, "demo")))
+            rebuilt = rescore_run.authoritative_clip_meta(data, "demo", clips_root, run_dir)
+            self.assertIs(rebuilt["joint_plane_experiment"], True)
+
     def test_report_authentication_rejects_cached_scoring_meta(self):
         with tempfile.TemporaryDirectory() as root:
             data, clips_root, run_dir, _ = self._fixture(root)

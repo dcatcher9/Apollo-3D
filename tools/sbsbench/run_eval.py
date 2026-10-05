@@ -75,7 +75,7 @@ from generate_depth_coordinate_v2_contract import (  # noqa: E402
     shader_source_closure_sha256,
 )
 
-EVAL_SCHEMA = whole_clip_raw_contract.EVALUATOR_SCHEMA  # schema 37; harness 22 or direct 25
+EVAL_SCHEMA = whole_clip_raw_contract.EVALUATOR_SCHEMA  # schema 38; harness 22 or direct 25
 PARALLAX_V2_LIVE_RENDERER = "depth-coordinate-v2-live-signed-parallax"
 BASELINE_SNAPSHOT_SCHEMA = 1
 BASELINE_SNAPSHOT_FILE = "baseline_snapshot.json"
@@ -510,7 +510,7 @@ def label_context_sha(meta):
 
 
 def validate_preprocess_identity_meta(meta):
-    """Fail closed on schema-37 preprocessing identity, including valid abstention.
+    """Fail closed on schema-38 preprocessing identity, including valid abstention.
 
     Every run records the source closure actually consumed by the runtime shader compiler.  A
     profile/calibration pair is present only when that closure and the complete model identity
@@ -523,7 +523,7 @@ def validate_preprocess_identity_meta(meta):
         "depth_coordinate_v2_calibration_id",
     }
     if not required_keys.issubset(meta):
-        raise ValueError("schema-37 results omit preprocessing identity fields")
+        raise ValueError("schema-38 results omit preprocessing identity fields")
     source_digest = meta["preprocess_source_closure_sha256"]
     if (not isinstance(source_digest, str) or
             re.fullmatch(r"[0-9a-f]{64}", source_digest) is None):
@@ -2305,6 +2305,28 @@ def authoritative_remeasurement_clip_meta(
             raise ValueError(
                 f"clips.{clip}: parallax_v2_render must be true for a V2 live evaluation run")
     authoritative = {key: contract[key] for key in contract_keys if key in contract}
+    # Archived schema-22 controls predate this opt-in field and therefore attest default-off.
+    # A new run that records the setting must also have the matching native contract field.
+    if "joint_plane_experiment" in contract or "joint_plane_experiment" in run_meta:
+        if type(contract.get("joint_plane_experiment")) is not bool:
+            raise ValueError(f"clips.{clip}: missing/invalid native joint-plane attestation")
+        if type(run_meta.get("joint_plane_experiment")) is not bool:
+            raise ValueError(f"clips.{clip}: missing/invalid run joint-plane setting")
+        _require_matching_result(
+            run_meta["joint_plane_experiment"], contract["joint_plane_experiment"],
+            f"meta.joint_plane_experiment vs clips.{clip}.contract")
+        authoritative["joint_plane_experiment"] = contract["joint_plane_experiment"]
+    if "joint_plane_mode" in contract or "joint_plane_mode" in run_meta:
+        mode = contract.get("joint_plane_mode")
+        if type(mode) is not int or mode not in {0, 3}:
+            raise ValueError(f"clips.{clip}: missing/invalid native joint-plane mode")
+        if type(run_meta.get("joint_plane_mode")) is not int:
+            raise ValueError(f"clips.{clip}: missing/invalid run joint-plane mode")
+        _require_matching_result(run_meta["joint_plane_mode"], mode,
+                                 f"meta.joint_plane_mode vs clips.{clip}.contract")
+        if (mode != 0) != contract.get("joint_plane_experiment"):
+            raise ValueError(f"clips.{clip}: joint-plane mode and enable flag disagree")
+        authoritative["joint_plane_mode"] = mode
     if not direct_parallax_run:
         # Recorded as the validated boolean attestation; the full renderer descriptor stays in
         # the harness contract so a clip-meta/baseline merge cannot shadow the run-level flag.
@@ -2713,6 +2735,35 @@ def expected_shared_number(conf, key, default, extra, cli_key, cast=float):
         return cast(value)
     except (TypeError, ValueError):
         fail(f"invalid numeric value for {key}: {value!r}")
+
+
+def expected_joint_plane_experiment(conf, extra):
+    return expected_joint_plane_mode(conf, extra) != 0
+
+
+def expected_joint_plane_mode(conf, extra):
+    """Resolve the default-off shared setting and its exact harness override."""
+    configured = str(conf_value(conf, "sbs_3d_joint_plane_experiment", "false")).lower()
+    if configured not in {"true", "false", "yes", "no", "on", "off", "1", "0",
+                          "enable", "enabled", "disable", "disabled"}:
+        raise ValueError(f"invalid boolean joint-plane setting: {configured!r}")
+    resolved = configured in {"true", "yes", "on", "1", "enable", "enabled"}
+    boolean_override = None
+    mode_override = None
+    for index, token in enumerate(extra):
+        if token == "--joint-plane-experiment":
+            if index + 1 >= len(extra) or extra[index + 1] not in {"on", "off"}:
+                raise ValueError("--joint-plane-experiment requires on or off")
+            boolean_override = extra[index + 1] == "on"
+        elif token == "--joint-plane-mode":
+            if index + 1 >= len(extra) or extra[index + 1] not in {"0", "3"}:
+                raise ValueError("--joint-plane-mode requires 0 or 3")
+            mode_override = int(extra[index + 1])
+    if mode_override is not None:
+        if boolean_override is not None and boolean_override != (mode_override != 0):
+            raise ValueError("joint-plane overrides disagree")
+        return mode_override
+    return 3 if (resolved if boolean_override is None else boolean_override) else 0
 
 
 def expected_depth_model():
@@ -3205,6 +3256,13 @@ def main():
     }
     expected_pop = expected_shared_number(
         args.conf, "pop_strength", 1.75, args.extra, "--pop-strength")
+    try:
+        expected_joint_mode = expected_joint_plane_mode(args.conf, args.extra)
+        expected_joint_plane = expected_joint_mode != 0
+    except ValueError as exc:
+        fail(str(exc))
+    if direct_parallax_root and expected_joint_plane:
+        fail("joint-plane experiment requires estimator-owned geometry")
     expected_model = expected_depth_model()
     expected_model_url = expected_depth_model_url()
     expected_preprocess_source_sha = shader_source_closure_sha256()
@@ -3335,6 +3393,8 @@ def main():
         # One explicit v2 artistic authority; exact v2 replay must inherit this resolved
         # global value unless its caller records an explicit CLI override.
         "pop_strength": expected_pop,
+        "joint_plane_experiment": expected_joint_plane,
+        "joint_plane_mode": expected_joint_mode,
         "cuda_graph": expected_cuda_graph,
         "parallax_v2_shadow": expected_v2_shadow,
         "parallax_v2_render": expected_v2_render,
@@ -3407,6 +3467,8 @@ def main():
             "depth_step": depth_step,
             "depth_reuse_interval": depth_reuse_interval,
             "pop_strength": expected_pop,
+            "joint_plane_experiment": expected_joint_plane,
+            "joint_plane_mode": expected_joint_mode,
             "cuda_graph": expected_cuda_graph,
             "parallax_v2_shadow": expected_v2_shadow,
             "parallax_v2_render": expected_v2_render,
@@ -3445,6 +3507,8 @@ def main():
                      "parallax_v2_shadow": contract["parallax_v2_shadow"],
                      "parallax_v2_render": contract["parallax_v2_render"],
                      "pop_strength": contract["pop_strength"],
+                     "joint_plane_experiment": contract["joint_plane_experiment"],
+                     "joint_plane_mode": contract["joint_plane_mode"],
                      "cuda_graph_captured": contract["cuda_graph_captured"]}
         if direct_parallax_root:
             clip_meta["warp_input"] = contract["warp_input"]

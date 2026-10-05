@@ -26,6 +26,13 @@ CALIBRATED_DEFAULT_NAMES = (
     "max_vertical_shear",
     "vertical_majorant_share",
     "convergence_curve_default",
+    "adaptive_time_constant_seconds",
+    "adaptive_log_scale_rate",
+    "adaptive_zero_budget_per_second",
+    "adaptive_max_tick_gap_ms",
+    "host_percentile_bin_count",
+    "host_percentile_low",
+    "host_percentile_high",
 )
 
 
@@ -57,6 +64,8 @@ SHADER_SOURCE_SPECS = (
     ("depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"),
+    ("depth_coordinate_v2_histogram_cs.hlsl", "main", "cs_5_0"),
+    ("depth_coordinate_v2_quantiles_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"),
@@ -179,7 +188,7 @@ EXPECTED_SUBTITLE_OCR = {
         "final_box_offset": 144, "final_box_capacity": 8,
     },
     "locator_state": {
-        "schema": 13, "tag": 0x33314C53, "word_count": 80,
+        "schema": 14, "tag": 0x34314C53, "word_count": 96,
         "header_word_count": 32, "rectangle_capacity": 4,
         "owner_offset": 32, "pending_offset": 48, "current_offset": 64,
         "kind_word": 31,
@@ -187,6 +196,7 @@ EXPECTED_SUBTITLE_OCR = {
         "current_kind_shift": 8, "kind_mask": 15,
         "provisional_current_flag": 1 << 4,
         "provisional_target_word": 29, "provisional_fade_word": 30,
+        "adaptive_offset": 80, "adaptive_word_count": 16,
     },
     "condition_params": {
         "schema": 3, "tag": 0x33504353, "word_count": 6,
@@ -206,6 +216,13 @@ class CalibratedDefaults:
     max_vertical_shear: float
     vertical_majorant_share: float
     convergence_curve_default: float
+    adaptive_time_constant_seconds: float
+    adaptive_log_scale_rate: float
+    adaptive_zero_budget_per_second: float
+    adaptive_max_tick_gap_ms: float
+    host_percentile_bin_count: float
+    host_percentile_low: float
+    host_percentile_high: float
 
 
 @dataclass(frozen=True)

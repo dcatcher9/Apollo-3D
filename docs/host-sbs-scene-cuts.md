@@ -2,7 +2,15 @@
 
 This document is the canonical contract and acceptance plan for the Host SBS scene-cut detector.
 The detector has one authority: emit a confirmed cut generation and one-frame pulse that invalidates
-the scene camera described in [Host SBS pipeline](host-sbs.md). Its normalized depth, history,
+the default scene camera described in [Host SBS pipeline](host-sbs.md). The opt-in joint-plane
+experiment selects mode 3 and continuously observes Host mean zero and relative-depth amplitude
+on fresh valid inference; its geometry has no scene latch. It uses linear requested-gain mapping
+and a hard signed `0.04` representation bound, without a depth curve or soft envelope. At fixed
+divisor/gain, moving zero preserves pairwise separation before saturation and spatial conditioning.
+Confirmed cuts remain detector and
+subtitle-ownership/UI-filter authority, but do not reset or disarm the mode 3 camera. Only a true
+input-domain reset clears that camera, as specified in
+[Host SBS pipeline](host-sbs.md#opt-in-joint-plane-live-experiment). The detector's normalized depth, history,
 telemetry slots, and classification flags never become per-pixel geometry.
 
 The design goal is deliberately asymmetric:
@@ -108,7 +116,7 @@ that owner and conceal cumulative drift.
 Depth and subtitle advance or hold together inside one joined completion. Current-ready OCR work
 `1`, or current ineligible abstention work `2`, publishes only on valid inference. Work `0` suppresses
 subtitle observation during native USER32 move/size. Every reuse freezes the complete
-OCR8/SLR13/conditioned-final tuple along with depth, cut, camera and V2 Base. Suppression advances
+OCR8/SLR14/conditioned-final tuple along with depth, cut, camera and V2 Base. Suppression advances
 neither OCR nor locator state and publishes Base as the atomic final field. Only a validated
 completed-publication receipt can establish CPU reuse lineage; an external health snapshot cannot.
 
@@ -162,7 +170,19 @@ The production subtitle path applies no overlay exclusion to cut evidence or DAV
 appearance and disappearance remain ordinary scene evidence; the locator consumes the
 already-resolved cut result and can neither suppress nor retroactively change it.
 
-The production detector-only PP-OCRv6/OCR8/SLR13 subtitle path has no private cut classifier. It
+Adaptive geometry mode 3 consumes the same authenticated cut generation. It retains
+continuously filtered mean zero and its model-prior-bounded P05/P95 amplitude across confirmed
+cuts, without invalidating its targets or disarming timing. It initializes on the first valid
+source-time observation. Its first valid observation after an interruption or gap over 250 ms
+rearms without spending the missing interval; an input-domain reset clears all 28 geometry words.
+Reuse dispatches no geometry resolver and freezes controller state with the complete published
+tuple. This infer-only Host adaptation means static scenes can pause an unfinished transition.
+It is the Host relative-depth adapter described in the
+[joint-plane contract](host-sbs.md#opt-in-joint-plane-live-experiment), not a physical calibration
+of model depth or a new cut detector. Confirmed cuts continue to reset subtitle UI filter memory
+and drive the current OCR/SLR ownership transaction independently of geometry adaptation.
+
+The production detector-only PP-OCRv6/OCR8/SLR14 subtitle path has no private cut classifier. It
 consumes the authenticated durable CutBridge hard-cut epoch; processing the same frame/domain
 identity cannot advance state twice. DAV2 reuse dispatches no locator observation and preserves the
 complete subtitle tuple. A complete infer refresh sees the current CutBridge epoch and cannot invent
@@ -193,7 +213,7 @@ interactive move/size policy may suppress the entire optional OCR/SLR observatio
 this scene-cut pipeline continue normally; because no OCR8 record or locator dispatch is produced,
 that transport-level suppression neither ages grace nor changes cut authority.
 
-The SLR13 same-scene provisional single-line bridge is never cut or reset authority. A hard-cut
+The SLR14 same-scene provisional single-line bridge is never cut or reset authority. A hard-cut
 epoch change, input-domain reset, fresh onset, half-faded/transitional owner, unreliable local-plane
 sample, multiline/ribbon stack, or geometry outside its generated one-baseline bounds remains the
 ordinary first pending observation with exact Base. Only a distinct non-cut observation replacing

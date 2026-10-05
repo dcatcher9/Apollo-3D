@@ -62,6 +62,13 @@ namespace models::host_sbs_v2_gpu {
     ID3D11UnorderedAccessView *minmax_raw_output = nullptr;
     dispatch_command_t moments_dispatch;
     dispatch_command_t frame_resolve_dispatch;
+    /** Optional mode-3 GPU quantiles; no clear/readback and reuse uses the same infer dispatch. */
+    bool robust_quantiles = false;
+    ID3D11ComputeShader *histogram_shader = nullptr;
+    ID3D11ComputeShader *quantile_shader = nullptr;
+    ID3D11ShaderResourceView *frame_stats = nullptr;
+    ID3D11UnorderedAccessView *histogram_output = nullptr;
+    ID3D11ShaderResourceView *histogram = nullptr;
   };
 
   struct state_command_t {

@@ -3049,6 +3049,11 @@ namespace sbs_bench {
       // separate from ordinary schema-22 run_eval output so adaptive diagnostics cannot silently
       // expand the formal evaluator contract.
       bool device_conditional_replay_control = false;
+      // Opt-in, synchronous research sidecars. This does not change live geometry or
+      // the formal evaluator artifact schema; ordinary runs allocate no extra readback.
+      bool subtitle_plane_diagnostics = false;
+      std::optional<bool> joint_plane_experiment;
+      std::optional<std::uint32_t> joint_plane_mode;
       std::string follow_format;
       std::size_t follow_count = 0;  // optional producer frame-count upper bound
       int eye_w = 0;  // 0 -> derive from source aspect; set with eye_h to test letterboxing
@@ -3088,6 +3093,22 @@ namespace sbs_bench {
           o.device_conditional_replay = true;
         } else if (a == "--device-conditional-replay-control") {
           o.device_conditional_replay_control = true;
+        } else if (a == "--subtitle-plane-diagnostics") {
+          o.subtitle_plane_diagnostics = true;
+        } else if (a == "--joint-plane-experiment") {
+          const auto value = next("--joint-plane-experiment");
+          if (value != "on" && value != "off") {
+            BOOST_LOG(error) << "sbs-bench: --joint-plane-experiment must be on or off";
+            return false;
+          }
+          o.joint_plane_experiment = value == "on";
+        } else if (a == "--joint-plane-mode") {
+          const auto value = next("--joint-plane-mode");
+          if (value != "0" && value != "3") {
+            BOOST_LOG(error) << "sbs-bench: --joint-plane-mode must be 0 or 3";
+            return false;
+          }
+          o.joint_plane_mode = static_cast<std::uint32_t>(value[0] - '0');
         } else if (a == "--follow-format") {
           o.follow_format = next("--follow-format");
         } else if (a == "--follow-count") {
@@ -3163,7 +3184,7 @@ namespace sbs_bench {
         }
       }
       if (!o.capabilities.empty()) {
-        if (!o.frames.empty() || !o.out.empty()) {
+        if (!o.frames.empty() || !o.out.empty() || o.joint_plane_experiment.has_value() || o.joint_plane_mode.has_value()) {
           BOOST_LOG(error) << "sbs-bench: --capabilities is a standalone query";
           return false;
         }
@@ -3180,6 +3201,29 @@ namespace sbs_bench {
       const unsigned direct_geometry_input_count =
         (!o.direct_parallax_root.empty() ? 1u : 0u) +
         (!o.depth_coordinate_v2_manifest.empty() ? 1u : 0u);
+      if (o.joint_plane_experiment.has_value() && o.joint_plane_mode.has_value() &&
+          *o.joint_plane_experiment != (*o.joint_plane_mode != 0u)) {
+        BOOST_LOG(error) << "sbs-bench: joint-plane overrides disagree";
+        return false;
+      }
+      if ((o.joint_plane_experiment.has_value() || o.joint_plane_mode.has_value()) &&
+          (direct_geometry_input_count != 0u ||
+           !o.scene_cache.empty() || !o.render_cache.empty())) {
+        BOOST_LOG(error)
+          << "sbs-bench: --joint-plane-experiment requires estimator-owned geometry; "
+             "direct replay owns its mode in the manifest and caches cannot apply this override";
+        return false;
+      }
+      if (o.subtitle_plane_diagnostics &&
+          (o.artifacts != artifact_mode_e::evaluation || o.follow ||
+           !o.scene_cache.empty() || !o.render_cache.empty() ||
+           direct_geometry_input_count != 0u || o.device_conditional_replay ||
+           o.device_conditional_replay_control || o.output_every != 1)) {
+        BOOST_LOG(error)
+          << "sbs-bench: --subtitle-plane-diagnostics requires ordinary evaluation "
+             "with output cadence 1 and no replay, follow, or cache";
+        return false;
+      }
       if (direct_geometry_input_count > 0u) {
         if (o.artifacts != artifact_mode_e::evaluation || o.follow ||
             !o.scene_cache.empty() || !o.render_cache.empty() ||
@@ -3556,6 +3600,20 @@ namespace sbs_bench {
     // frame-driven rather than wall-clock-driven, so cadence throttling would make the result
     // depend on machine speed.
     auto sbs_cfg = config::video.sbs;
+    if (o.joint_plane_experiment.has_value()) {
+      sbs_cfg.joint_plane_experiment = *o.joint_plane_experiment;
+    }
+    if (o.joint_plane_mode.has_value()) {
+      sbs_cfg.joint_plane_experiment = *o.joint_plane_mode != 0u;
+      sbs_cfg.joint_plane_experiment_mode = *o.joint_plane_mode;
+    }
+    const auto estimator_joint_plane_mode = sbs_cfg.joint_plane_experiment ?
+      sbs_cfg.joint_plane_experiment_mode : 0u;
+    if (estimator_joint_plane_mode == 3u && observation_timestamps.empty()) {
+      BOOST_LOG(error)
+        << "sbs-bench: continuous gain tracking requires an explicit --observation-timeline";
+      return 2;
+    }
     if (o.pop_strength >= 0.0) {
       sbs_cfg.pop_strength = o.pop_strength;
     }
@@ -3575,6 +3633,12 @@ namespace sbs_bench {
     const bool external_direct_parallax_mode = !o.direct_parallax_root.empty();
     const bool direct_parallax_mode =
       external_direct_parallax_mode || depth_coordinate_v2_gpu_mode;
+    if (sbs_cfg.joint_plane_experiment &&
+        (direct_parallax_mode || !o.scene_cache.empty() || !o.render_cache.empty())) {
+      BOOST_LOG(error)
+        << "sbs-bench: configured joint-plane experiment requires estimator-owned geometry";
+      return 2;
+    }
     // The fused model has one public high-resolution input/output pair. Capture the exact input
     // snapshot for ordinary production evaluation; raw_<frame-id>.f32 already publishes the same
     // high-resolution refined output, so diagnostics must not create a second output artifact or
@@ -3946,6 +4010,9 @@ namespace sbs_bench {
     ComPtr<ID3D11Buffer> convex2x_model_input_stage;
     ComPtr<ID3D11Texture2D> structure_field_stage;
     ComPtr<ID3D11Texture2D> final_parallax_field_stage;
+    ComPtr<ID3D11Texture2D> subtitle_plane_texture_stage;
+    ComPtr<ID3D11Buffer> subtitle_plane_buffer_stage;
+    nlohmann::json subtitle_plane_frames = nlohmann::json::array();
     ComPtr<ID3D11Buffer> cut_state_stage;
     ComPtr<ID3D11Texture2D> scene_cache_depth_stage;
     ComPtr<ID3D11Buffer> scene_cache_state_stage;
@@ -5333,10 +5400,9 @@ namespace sbs_bench {
 
       if (o.artifacts == artifact_mode_e::evaluation) {
         ID3D11RenderTargetView *null_rtv[] = {nullptr};
-        ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr};
+        ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr};
         // Offline-only mask pass, deliberately outside the production warp timestamp/CPU sample.
-        // A contractive map has no internal holes; R marks finite-boundary extrapolation samples
-        // that main_ps clamps to the nearest source column.
+        // Red marks finite-boundary extrapolation of the continuous full-capture inverse.
         ctx->OMSetRenderTargets(1, warp_mask_rtv.GetAddressOf(), nullptr);
         ctx->VSSetShader(vs.Get(), nullptr, 0);
         ctx->PSSetShader(mask_ps.Get(), nullptr, 0);
@@ -5345,13 +5411,13 @@ namespace sbs_bench {
         ID3D11ShaderResourceView *mask_srvs[] = {
           in_srv.Get(),
           warp_depth,
-          warp_state
+          warp_state,
         };
         ctx->PSSetShaderResources(0, 3, mask_srvs);
         ctx->PSSetConstantBuffers(2, 1, &cb);
         ctx->Draw(3, 0);
         ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-        ctx->PSSetShaderResources(0, 4, null_srv);
+        ctx->PSSetShaderResources(0, 3, null_srv);
 
         // Offline-only exact inverse-warp mapping. This deliberately repeats the production
         // Reproject path after timing has ended: metric labels receive the shader's actual sampled
@@ -5364,7 +5430,7 @@ namespace sbs_bench {
         ID3D11ShaderResourceView *mapping_srvs[] = {
           in_srv.Get(),
           warp_depth,
-          warp_state
+          warp_state,
         };
         ctx->PSSetShaderResources(0, 3, mapping_srvs);
         ctx->PSSetConstantBuffers(2, 1, &cb);
@@ -5563,6 +5629,81 @@ namespace sbs_bench {
                                           fs::path(o.out) / sname, structure_field_stage)) {
               BOOST_LOG(error) << "sbs-bench: failed writing " << sname;
               return 6;
+            }
+
+            if (o.subtitle_plane_diagnostics) {
+              const auto diagnostic_dir =
+                fs::path(o.out) / "subtitle-plane" / ("frame_" + output_id);
+              std::error_code diagnostic_error;
+              fs::create_directories(diagnostic_dir, diagnostic_error);
+              if (diagnostic_error) {
+                BOOST_LOG(error) << "sbs-bench: cannot create subtitle plane diagnostic directory";
+                return 6;
+              }
+              const auto write_field = [&](ID3D11ShaderResourceView *view, const char *name) {
+                ComPtr<ID3D11Resource> resource;
+                ComPtr<ID3D11Texture2D> texture;
+                return view &&
+                  (view->GetResource(&resource), SUCCEEDED(resource.As(&texture))) &&
+                  dump_float_texture(dev.Get(), ctx.Get(), texture.Get(),
+                                     diagnostic_dir / name, subtitle_plane_texture_stage);
+              };
+              const auto write_words = [&](ID3D11ShaderResourceView *view,
+                                            std::size_t count, const char *name) {
+                // The helper copies opaque bytes; uint words are never converted to floats.
+                return dump_float_buffer(dev.Get(), ctx.Get(), view, count,
+                                         diagnostic_dir / name, subtitle_plane_buffer_stage);
+              };
+              const bool exact_subtitle = models::subtitle_evidence_is_exact_frame(est);
+              if (!write_field(est.shadow_candidate_parallax.Get(), "candidate.f32") ||
+                  !write_field(est.shadow_vertical_conditioned.Get(), "vertical.f32") ||
+                  !write_field(est.shadow_base_final_parallax.Get(), "base.f32") ||
+                  !write_field(est.shadow_final_parallax.Get(), "final.f32") ||
+                  !write_words(est.shadow_state.Get(), models::depth_coordinate_v2::state_float_count, "state.f32") ||
+                  !write_words(est.cut_state.Get(), 32u, "cut_state.f32") ||
+                  (exact_subtitle &&
+                   (!write_words(est.ocr_box_record.Get(), 208u, "ocr_record.u32") ||
+                    !write_words(est.subtitle_locator_state.Get(), models::depth_coordinate_v2::subtitle_locator_state_word_count, "locator_state.u32")))) {
+                BOOST_LOG(error) << "sbs-bench: incomplete exact-frame subtitle plane diagnostic export";
+                return 6;
+              }
+              const nlohmann::json diagnostic = {
+                {"schema", 1u},
+                {"role", "opt-in-synchronous-subtitle-plane-research-input"},
+                {"production_dump", false},
+                {"source_frame_id", global_sequence},
+                {"completed_frame_id", est.completed_frame_id},
+                {"source_width", frame_width}, {"source_height", frame_height},
+                {"analysis_width", est.input_region.width()},
+                {"analysis_height", est.input_region.height()},
+                {"field_width", est.field_width}, {"field_height", est.field_height},
+                {"content", {est.field_content.left, est.field_content.top,
+                             est.field_content.right, est.field_content.bottom}},
+                {"analysis_generation", est.input_region.analysis_generation},
+                {"raw_coordinate_scale", est.parallax_v2_raw_coordinate_scale},
+                {"requested_gain", est.parallax_v2_requested_gain},
+                {"requested_pop_strength", est.parallax_v2_requested_pop_strength},
+                {"joint_plane_experiment", sbs_cfg.joint_plane_experiment},
+                {"joint_plane_mode", est.parallax_v2_joint_plane_mode},
+                {"input_domain_reset", est.input_domain_reset},
+                {"subtitle_work_suppressed", est.subtitle_work_suppressed},
+                {"exact_subtitle_evidence", exact_subtitle},
+                {"observation_timestamp_us", observation_timestamps.empty() ?
+                    0u : observation_timestamps.at(global_sequence - 1u)},
+                {"coordinate_contract_schema", models::depth_coordinate_v2::contract_schema},
+                {"coordinate_contract_sha256", models::depth_coordinate_v2::contract_canonical_sha256}
+              };
+              std::ofstream diagnostic_stream(diagnostic_dir / "metadata.json");
+              diagnostic_stream << diagnostic.dump(2) << '\n';
+              diagnostic_stream.flush();
+              if (!diagnostic_stream.good()) {
+                BOOST_LOG(error) << "sbs-bench: cannot write subtitle plane diagnostic metadata";
+                return 6;
+              }
+              subtitle_plane_frames.push_back({
+                {"source_frame_id", global_sequence},
+                {"metadata", "subtitle-plane/frame_" + output_id + "/metadata.json"}
+              });
             }
 
             if (device_conditional_replay_evidence) {
@@ -6065,6 +6206,22 @@ namespace sbs_bench {
                       << publication_receipt_current << '/' << publication_receipt_stale << '/'
                       << publication_receipt_failures;
     }
+    if (o.subtitle_plane_diagnostics) {
+      const nlohmann::json diagnostic_manifest = {
+        {"schema", 1u},
+        {"role", "opt-in-synchronous-subtitle-plane-research-input"},
+        {"production_dump", false},
+        {"geometry_changed", false},
+        {"frames", subtitle_plane_frames}
+      };
+      std::ofstream diagnostic_manifest_stream(fs::path(o.out) / "subtitle_plane_diagnostics.json");
+      diagnostic_manifest_stream << diagnostic_manifest.dump(2) << '\n';
+      diagnostic_manifest_stream.flush();
+      if (!diagnostic_manifest_stream.good()) {
+        BOOST_LOG(error) << "sbs-bench: cannot write subtitle plane diagnostic manifest";
+        return 6;
+      }
+    }
     sbs_perf::dump_json((fs::path(o.out) / "sbs_perf.json").string());
     if (o.artifacts == artifact_mode_e::evaluation) {
       if (!direct_parallax_mode &&
@@ -6099,7 +6256,10 @@ namespace sbs_bench {
                  << ",\n"
                  << "  \"depth_reuse_interval\": "
                  << (o.device_conditional_replay ? "null" : "1") << ",\n"
-                 << "  \"pop_strength\": " << sbs_cfg.pop_strength << ",\n";
+                 << "  \"pop_strength\": " << sbs_cfg.pop_strength << ",\n"
+                 << "  \"joint_plane_experiment\": "
+                 << (sbs_cfg.joint_plane_experiment ? "true" : "false") << ",\n"
+                 << "  \"joint_plane_mode\": " << estimator_joint_plane_mode << ",\n";
         if (!observation_timestamps.empty()) {
           contract
             << "  \"observation_timeline\": {\"schema\": "

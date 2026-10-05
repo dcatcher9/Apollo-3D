@@ -431,6 +431,10 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
                std::string_view {"depth_coordinate_v2_moments_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_frame_resolve"},
                std::string_view {"depth_coordinate_v2_frame_resolve_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_histogram"},
+               std::string_view {"depth_coordinate_v2_histogram_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_quantiles"},
+               std::string_view {"depth_coordinate_v2_quantiles_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_state_resolve"},
                std::string_view {"depth_coordinate_v2_state_resolve_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_map"},
@@ -484,10 +488,14 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
 TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadback) {
   const auto read = [](const std::string &path) {
     std::ifstream stream(path, std::ios::binary);
-    return std::string {
+    std::string source {
       std::istreambuf_iterator<char> {stream},
       std::istreambuf_iterator<char> {}
     };
+    // Source structure is independent of checkout line endings. Keep the exact token checks
+    // below while admitting both LF and Windows CRLF files.
+    source.erase(std::remove(source.begin(), source.end(), '\r'), source.end());
+    return source;
   };
   auto estimator = read(
     std::string {SUNSHINE_SOURCE_DIR} + "/src/video_depth_estimator.cpp"

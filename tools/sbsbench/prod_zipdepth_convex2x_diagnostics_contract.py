@@ -27,11 +27,11 @@ except ImportError:  # Direct execution from tools/sbsbench.
     import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
 
 
-EVALUATOR_SCHEMA = 37
+EVALUATOR_SCHEMA = 38
 HARNESS_CONTRACT_SCHEMA = 22
 SIDECAR_SCHEMA = 2
 MANIFEST_SCHEMA = 2
-BINDING = "schema-37-results-to-schema-22-prod-zipdepth-convex2x-diagnostics-v2"
+BINDING = "schema-38-results-to-schema-22-prod-zipdepth-convex2x-diagnostics-v2"
 LEGACY_SIDECAR_SCHEMA = 1
 LEGACY_MANIFEST_SCHEMA = 1
 LEGACY_BINDING = "schema-37-results-to-schema-22-prod-zipdepth-convex2x-diagnostics-v1"

@@ -12,10 +12,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 78u;
-  inline constexpr std::uint32_t contract_tag = 0xB4221F70u;
-  inline constexpr std::string_view contract_canonical_sha256 = "6560a9bd08f3750ad6daf961302651032d0027bb2e7d6dadd1611d3c28723872";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "b4221f7012b21a6e60e7104824abf0c0282f97c5ed0315ca84414ce79ed9e0b1";
+  inline constexpr std::uint32_t contract_schema = 86u;
+  inline constexpr std::uint32_t contract_tag = 0x063B91ABu;
+  inline constexpr std::string_view contract_canonical_sha256 = "9e86dbdbf11d83b19bcb4b5524d1485403a3c6a47f1d6bbe2b0bd078967e0a10";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "063b91abe6647e70ad89cc36f27c222f6468d3f4af9e8f73b3de1f840a91d1ee";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -109,14 +109,16 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t subtitle_ocr_ribbon_bottom_tolerance_pixels = 2u;
   inline constexpr std::string_view subtitle_ocr_ribbon_bottom_tolerance_projection = "exact-ceil-detector-edge-through-bottom-crop-v1";
   inline constexpr std::uint32_t subtitle_ocr_ribbon_cover_pad_limit = 8u;
-  inline constexpr std::uint32_t subtitle_locator_state_schema = 13u;
-  inline constexpr std::uint32_t subtitle_locator_state_tag = 0x33314C53u;
-  inline constexpr std::uint32_t subtitle_locator_state_word_count = 80u;
+  inline constexpr std::uint32_t subtitle_locator_state_schema = 14u;
+  inline constexpr std::uint32_t subtitle_locator_state_tag = 0x34314C53u;
+  inline constexpr std::uint32_t subtitle_locator_state_word_count = 96u;
   inline constexpr std::uint32_t subtitle_locator_header_word_count = 32u;
   inline constexpr std::uint32_t subtitle_locator_rectangle_capacity = 4u;
   inline constexpr std::uint32_t subtitle_locator_owner_offset = 32u;
   inline constexpr std::uint32_t subtitle_locator_pending_offset = 48u;
   inline constexpr std::uint32_t subtitle_locator_current_offset = 64u;
+  inline constexpr std::uint32_t subtitle_locator_adaptive_offset = 80u;
+  inline constexpr std::uint32_t subtitle_locator_adaptive_word_count = 16u;
   inline constexpr std::uint32_t subtitle_locator_kind_word = 31u;
   inline constexpr std::uint32_t subtitle_locator_owner_kind_shift = 0u;
   inline constexpr std::uint32_t subtitle_locator_pending_kind_shift = 4u;
@@ -173,8 +175,10 @@ namespace models::depth_coordinate_v2 {
                 subtitle_locator_rectangle_capacity * 4u);
   static_assert(subtitle_locator_current_offset == subtitle_locator_pending_offset +
                 subtitle_locator_rectangle_capacity * 4u);
-  static_assert(subtitle_locator_state_word_count == subtitle_locator_current_offset +
+  static_assert(subtitle_locator_adaptive_offset == subtitle_locator_current_offset +
                 subtitle_locator_rectangle_capacity * 4u);
+  static_assert(subtitle_locator_state_word_count == subtitle_locator_adaptive_offset +
+                subtitle_locator_adaptive_word_count);
   static_assert(subtitle_target_horizontal_fallback_max_radius_steps == 2u);
   static_assert(subtitle_target_horizontal_step_denominator == 16u);
   static_assert(subtitle_condition_param_word_count == 6u);
@@ -201,6 +205,13 @@ namespace models::depth_coordinate_v2 {
   inline constexpr float max_vertical_shear = 2.0f;
   inline constexpr float vertical_majorant_share = 0.75f;
   inline constexpr float convergence_curve_default = 0.0f;
+  inline constexpr float adaptive_time_constant_seconds = 0.5f;
+  inline constexpr float adaptive_log_scale_rate = 0.693147181f;
+  inline constexpr float adaptive_zero_budget_per_second = 1.0f;
+  inline constexpr float adaptive_max_tick_gap_ms = 250.0f;
+  inline constexpr float host_percentile_bin_count = 256.0f;
+  inline constexpr float host_percentile_low = 0.05f;
+  inline constexpr float host_percentile_high = 0.95f;
   inline constexpr std::uint32_t limiter_serial_max_lines = 32u;
   inline constexpr std::uint32_t limiter_group_lines = 8u;
   inline constexpr std::uint32_t limiter_line_chunks = 8u;
@@ -459,7 +470,15 @@ namespace models::depth_coordinate_v2 {
     max_horizontal_slope = 5u,
     direct_container_limit = 6u,
     convergence_curve_default = 7u,
-    count = 8u,
+    joint_plane_mode = 8u,
+    joint_plane_reserved0 = 9u,
+    joint_plane_reserved1 = 10u,
+    joint_plane_reserved2 = 11u,
+    joint_observation_timestamp_low = 12u,
+    joint_observation_timestamp_high = 13u,
+    joint_observation_reserved0 = 14u,
+    joint_observation_reserved1 = 15u,
+    count = 16u,
   };
 
   constexpr std::size_t constant_index(const constant_word_e word) {
@@ -478,17 +497,33 @@ namespace models::depth_coordinate_v2 {
     "max_horizontal_slope",
     "direct_container_limit",
     "convergence_curve_default",
+    "joint_plane_mode",
+    "joint_plane_reserved0",
+    "joint_plane_reserved1",
+    "joint_plane_reserved2",
+    "joint_observation_timestamp_low",
+    "joint_observation_timestamp_high",
+    "joint_observation_reserved0",
+    "joint_observation_reserved1",
   }};
 
   struct alignas(16) constants_t {
-    float raw_coordinate_scale;
-    float collapse_abs_epsilon;
-    float far_tau;
-    float near_log_tau;
-    float requested_gain;
-    float max_horizontal_slope;
-    float direct_container_limit;
-    float convergence_curve_default;
+    float raw_coordinate_scale {};
+    float collapse_abs_epsilon {};
+    float far_tau {};
+    float near_log_tau {};
+    float requested_gain {};
+    float max_horizontal_slope {};
+    float direct_container_limit {};
+    float convergence_curve_default {};
+    std::uint32_t joint_plane_mode {};
+    std::uint32_t joint_plane_reserved0 {};
+    std::uint32_t joint_plane_reserved1 {};
+    std::uint32_t joint_plane_reserved2 {};
+    std::uint32_t joint_observation_timestamp_low {};
+    std::uint32_t joint_observation_timestamp_high {};
+    std::uint32_t joint_observation_reserved0 {};
+    std::uint32_t joint_observation_reserved1 {};
   };
 
   static_assert(std::is_standard_layout_v<constants_t>);
@@ -504,6 +539,14 @@ namespace models::depth_coordinate_v2 {
   static_assert(offsetof(constants_t, max_horizontal_slope) == constant_index(constant_word_e::max_horizontal_slope) * sizeof(float));
   static_assert(offsetof(constants_t, direct_container_limit) == constant_index(constant_word_e::direct_container_limit) * sizeof(float));
   static_assert(offsetof(constants_t, convergence_curve_default) == constant_index(constant_word_e::convergence_curve_default) * sizeof(float));
+  static_assert(offsetof(constants_t, joint_plane_mode) == constant_index(constant_word_e::joint_plane_mode) * sizeof(float));
+  static_assert(offsetof(constants_t, joint_plane_reserved0) == constant_index(constant_word_e::joint_plane_reserved0) * sizeof(float));
+  static_assert(offsetof(constants_t, joint_plane_reserved1) == constant_index(constant_word_e::joint_plane_reserved1) * sizeof(float));
+  static_assert(offsetof(constants_t, joint_plane_reserved2) == constant_index(constant_word_e::joint_plane_reserved2) * sizeof(float));
+  static_assert(offsetof(constants_t, joint_observation_timestamp_low) == constant_index(constant_word_e::joint_observation_timestamp_low) * sizeof(float));
+  static_assert(offsetof(constants_t, joint_observation_timestamp_high) == constant_index(constant_word_e::joint_observation_timestamp_high) * sizeof(float));
+  static_assert(offsetof(constants_t, joint_observation_reserved0) == constant_index(constant_word_e::joint_observation_reserved0) * sizeof(float));
+  static_assert(offsetof(constants_t, joint_observation_reserved1) == constant_index(constant_word_e::joint_observation_reserved1) * sizeof(float));
 
   enum class frame_stat_word_e : std::size_t {
     mean = 0u,
@@ -514,7 +557,11 @@ namespace models::depth_coordinate_v2 {
     texel_count = 5u,
     valid = 6u,
     reserved = 7u,
-    count = 8u,
+    percentile_low = 8u,
+    percentile_high = 9u,
+    percentile_valid = 10u,
+    percentile_bin_width = 11u,
+    count = 12u,
   };
 
   constexpr std::size_t frame_stat_index(const frame_stat_word_e word) {
@@ -529,6 +576,10 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::size_t frame_stat_texel_count = frame_stat_index(frame_stat_word_e::texel_count);
   inline constexpr std::size_t frame_stat_valid = frame_stat_index(frame_stat_word_e::valid);
   inline constexpr std::size_t frame_stat_reserved = frame_stat_index(frame_stat_word_e::reserved);
+  inline constexpr std::size_t frame_stat_percentile_low = frame_stat_index(frame_stat_word_e::percentile_low);
+  inline constexpr std::size_t frame_stat_percentile_high = frame_stat_index(frame_stat_word_e::percentile_high);
+  inline constexpr std::size_t frame_stat_percentile_valid = frame_stat_index(frame_stat_word_e::percentile_valid);
+  inline constexpr std::size_t frame_stat_percentile_bin_width = frame_stat_index(frame_stat_word_e::percentile_bin_width);
 
   inline constexpr std::size_t frame_stats_float_count =
     frame_stat_index(frame_stat_word_e::count);
@@ -543,6 +594,10 @@ namespace models::depth_coordinate_v2 {
     "texel_count",
     "valid",
     "reserved",
+    "percentile_low",
+    "percentile_high",
+    "percentile_valid",
+    "percentile_bin_width",
   }};
 
   enum class state_gpu_encoding_e {
@@ -561,9 +616,25 @@ namespace models::depth_coordinate_v2 {
     contract_tag_bits = 7u,
     camera_center_integrity_bits = 8u,
     renderer_authorization_bits = 9u,
-    mapping_state_reserved_1 = 10u,
+    joint_plane_mode_bits = 10u,
     mapping_state_reserved_2 = 11u,
-    count = 12u,
+    gain_last_observation_low = 12u,
+    gain_last_observation_high = 13u,
+    gain_clock_armed = 14u,
+    gain_seed_count = 15u,
+    gain_target_zero = 16u,
+    gain_target_inverse_scale = 17u,
+    gain_target_nearest = 18u,
+    gain_display_limit = 19u,
+    gain_seed_first_low = 20u,
+    gain_seed_first_high = 21u,
+    gain_seed_last_low = 22u,
+    gain_seed_last_high = 23u,
+    gain_seed_mean_nearest = 24u,
+    gain_seed_mean_zero = 25u,
+    gain_reserved0 = 26u,
+    gain_reserved1 = 27u,
+    count = 28u,
   };
 
   constexpr std::size_t state_index(const state_word_e word) {
@@ -580,8 +651,24 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::size_t contract_tag_bits = state_index(state_word_e::contract_tag_bits);
   inline constexpr std::size_t camera_center_integrity_bits = state_index(state_word_e::camera_center_integrity_bits);
   inline constexpr std::size_t renderer_authorization_bits = state_index(state_word_e::renderer_authorization_bits);
-  inline constexpr std::size_t mapping_state_reserved_1 = state_index(state_word_e::mapping_state_reserved_1);
+  inline constexpr std::size_t joint_plane_mode_bits = state_index(state_word_e::joint_plane_mode_bits);
   inline constexpr std::size_t mapping_state_reserved_2 = state_index(state_word_e::mapping_state_reserved_2);
+  inline constexpr std::size_t gain_last_observation_low = state_index(state_word_e::gain_last_observation_low);
+  inline constexpr std::size_t gain_last_observation_high = state_index(state_word_e::gain_last_observation_high);
+  inline constexpr std::size_t gain_clock_armed = state_index(state_word_e::gain_clock_armed);
+  inline constexpr std::size_t gain_seed_count = state_index(state_word_e::gain_seed_count);
+  inline constexpr std::size_t gain_target_zero = state_index(state_word_e::gain_target_zero);
+  inline constexpr std::size_t gain_target_inverse_scale = state_index(state_word_e::gain_target_inverse_scale);
+  inline constexpr std::size_t gain_target_nearest = state_index(state_word_e::gain_target_nearest);
+  inline constexpr std::size_t gain_display_limit = state_index(state_word_e::gain_display_limit);
+  inline constexpr std::size_t gain_seed_first_low = state_index(state_word_e::gain_seed_first_low);
+  inline constexpr std::size_t gain_seed_first_high = state_index(state_word_e::gain_seed_first_high);
+  inline constexpr std::size_t gain_seed_last_low = state_index(state_word_e::gain_seed_last_low);
+  inline constexpr std::size_t gain_seed_last_high = state_index(state_word_e::gain_seed_last_high);
+  inline constexpr std::size_t gain_seed_mean_nearest = state_index(state_word_e::gain_seed_mean_nearest);
+  inline constexpr std::size_t gain_seed_mean_zero = state_index(state_word_e::gain_seed_mean_zero);
+  inline constexpr std::size_t gain_reserved0 = state_index(state_word_e::gain_reserved0);
+  inline constexpr std::size_t gain_reserved1 = state_index(state_word_e::gain_reserved1);
 
   inline constexpr std::size_t state_float_count =
     state_index(state_word_e::count);
@@ -598,7 +685,7 @@ namespace models::depth_coordinate_v2 {
     std::uint32_t initial_word;
   };
 
-  inline constexpr std::array<state_field_descriptor_t, 12> state_fields {{
+  inline constexpr std::array<state_field_descriptor_t, 28> state_fields {{
     {state_word_e::center, "center", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
     {state_word_e::inverse_scale, "inverse_scale", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
     {state_word_e::convergence_curve, "convergence_curve", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
@@ -609,8 +696,24 @@ namespace models::depth_coordinate_v2 {
     {state_word_e::contract_tag_bits, "contract_tag_bits", "uint32", state_gpu_encoding_e::uint_bits, contract_tag},
     {state_word_e::camera_center_integrity_bits, "camera_center_integrity_bits", "uint32", state_gpu_encoding_e::uint_bits, 0u},
     {state_word_e::renderer_authorization_bits, "renderer_authorization_bits", "uint32", state_gpu_encoding_e::uint_bits, 0u},
-    {state_word_e::mapping_state_reserved_1, "mapping_state_reserved_1", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::joint_plane_mode_bits, "joint_plane_mode_bits", "uint32", state_gpu_encoding_e::uint_bits, 0u},
     {state_word_e::mapping_state_reserved_2, "mapping_state_reserved_2", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::gain_last_observation_low, "gain_last_observation_low", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::gain_last_observation_high, "gain_last_observation_high", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::gain_clock_armed, "gain_clock_armed", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::gain_seed_count, "gain_seed_count", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::gain_target_zero, "gain_target_zero", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
+    {state_word_e::gain_target_inverse_scale, "gain_target_inverse_scale", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
+    {state_word_e::gain_target_nearest, "gain_target_nearest", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
+    {state_word_e::gain_display_limit, "gain_display_limit", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
+    {state_word_e::gain_seed_first_low, "gain_seed_first_low", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::gain_seed_first_high, "gain_seed_first_high", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::gain_seed_last_low, "gain_seed_last_low", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::gain_seed_last_high, "gain_seed_last_high", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::gain_seed_mean_nearest, "gain_seed_mean_nearest", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
+    {state_word_e::gain_seed_mean_zero, "gain_seed_mean_zero", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
+    {state_word_e::gain_reserved0, "gain_reserved0", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::gain_reserved1, "gain_reserved1", "uint32", state_gpu_encoding_e::uint_bits, 0u},
   }};
 
   inline constexpr std::array<const char *, state_float_count> state_field_names {{
@@ -624,8 +727,24 @@ namespace models::depth_coordinate_v2 {
     "contract_tag_bits",
     "camera_center_integrity_bits",
     "renderer_authorization_bits",
-    "mapping_state_reserved_1",
+    "joint_plane_mode_bits",
     "mapping_state_reserved_2",
+    "gain_last_observation_low",
+    "gain_last_observation_high",
+    "gain_clock_armed",
+    "gain_seed_count",
+    "gain_target_zero",
+    "gain_target_inverse_scale",
+    "gain_target_nearest",
+    "gain_display_limit",
+    "gain_seed_first_low",
+    "gain_seed_first_high",
+    "gain_seed_last_low",
+    "gain_seed_last_high",
+    "gain_seed_mean_nearest",
+    "gain_seed_mean_zero",
+    "gain_reserved0",
+    "gain_reserved1",
   }};
 
   inline constexpr state_words_t state_initial_words {{
@@ -639,6 +758,22 @@ namespace models::depth_coordinate_v2 {
     contract_tag,
     0u,
     0u,
+    0u,
+    0u,
+    0u,
+    0u,
+    0u,
+    0u,
+    std::bit_cast<std::uint32_t>(0.0f),
+    std::bit_cast<std::uint32_t>(0.0f),
+    std::bit_cast<std::uint32_t>(0.0f),
+    std::bit_cast<std::uint32_t>(0.0f),
+    0u,
+    0u,
+    0u,
+    0u,
+    std::bit_cast<std::uint32_t>(0.0f),
+    std::bit_cast<std::uint32_t>(0.0f),
     0u,
     0u,
   }};

@@ -1,5 +1,5 @@
 {
-  "schema": 78,
+  "schema": 86,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -209,9 +209,9 @@
       "final_box_capacity": 8
     },
     "locator_state": {
-      "schema": 13,
-      "tag": 858868819,
-      "word_count": 80,
+      "schema": 14,
+      "tag": 875646035,
+      "word_count": 96,
       "header_word_count": 32,
       "rectangle_capacity": 4,
       "owner_offset": 32,
@@ -224,7 +224,9 @@
       "kind_mask": 15,
       "provisional_current_flag": 16,
       "provisional_target_word": 29,
-      "provisional_fade_word": 30
+      "provisional_fade_word": 30,
+      "adaptive_offset": 80,
+      "adaptive_word_count": 16
     },
     "condition_params": {
       "schema": 3,
@@ -291,6 +293,16 @@
         "source_target": "cs_5_0"
       },
       {
+        "source_file": "depth_coordinate_v2_histogram_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_quantiles_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
         "source_file": "depth_coordinate_v2_state_resolve_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
@@ -336,7 +348,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "6f91d6290272ba8a4c9ccb56d654bc5f52f0a88a1fcd02374d075d400e98f6fc"
+    "source_closure_sha256": "0055fbdfe68e6f34de0f7ebee9bb749207fc93d6e5855008a332232bf2f982e6"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -348,7 +360,14 @@
     "max_horizontal_slope": 0.5,
     "max_vertical_shear": 2.0,
     "vertical_majorant_share": 0.75,
-    "convergence_curve_default": 0.0
+    "convergence_curve_default": 0.0,
+    "adaptive_time_constant_seconds": 0.5,
+    "adaptive_log_scale_rate": 0.6931471805599453,
+    "adaptive_zero_budget_per_second": 1.0,
+    "adaptive_max_tick_gap_ms": 250.0,
+    "host_percentile_bin_count": 256.0,
+    "host_percentile_low": 0.05,
+    "host_percentile_high": 0.95
   },
   "model_calibrations": [
     {
@@ -531,6 +550,46 @@
         "index": 7,
         "name": "convergence_curve_default",
         "type": "float32"
+      },
+      {
+        "index": 8,
+        "name": "joint_plane_mode",
+        "type": "uint32"
+      },
+      {
+        "index": 9,
+        "name": "joint_plane_reserved0",
+        "type": "uint32"
+      },
+      {
+        "index": 10,
+        "name": "joint_plane_reserved1",
+        "type": "uint32"
+      },
+      {
+        "index": 11,
+        "name": "joint_plane_reserved2",
+        "type": "uint32"
+      },
+      {
+        "index": 12,
+        "name": "joint_observation_timestamp_low",
+        "type": "uint32"
+      },
+      {
+        "index": 13,
+        "name": "joint_observation_timestamp_high",
+        "type": "uint32"
+      },
+      {
+        "index": 14,
+        "name": "joint_observation_reserved0",
+        "type": "uint32"
+      },
+      {
+        "index": 15,
+        "name": "joint_observation_reserved1",
+        "type": "uint32"
       }
     ]
   },
@@ -575,6 +634,26 @@
       {
         "index": 7,
         "name": "reserved",
+        "type": "float32"
+      },
+      {
+        "index": 8,
+        "name": "percentile_low",
+        "type": "float32"
+      },
+      {
+        "index": 9,
+        "name": "percentile_high",
+        "type": "float32"
+      },
+      {
+        "index": 10,
+        "name": "percentile_valid",
+        "type": "float32"
+      },
+      {
+        "index": 11,
+        "name": "percentile_bin_width",
         "type": "float32"
       }
     ]
@@ -655,7 +734,7 @@
       },
       {
         "index": 10,
-        "name": "mapping_state_reserved_1",
+        "name": "joint_plane_mode_bits",
         "type": "uint32",
         "gpu_encoding": "uint_bits",
         "initial": 0
@@ -663,6 +742,118 @@
       {
         "index": 11,
         "name": "mapping_state_reserved_2",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 12,
+        "name": "gain_last_observation_low",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 13,
+        "name": "gain_last_observation_high",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 14,
+        "name": "gain_clock_armed",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 15,
+        "name": "gain_seed_count",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 16,
+        "name": "gain_target_zero",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 0.0
+      },
+      {
+        "index": 17,
+        "name": "gain_target_inverse_scale",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 0.0
+      },
+      {
+        "index": 18,
+        "name": "gain_target_nearest",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 0.0
+      },
+      {
+        "index": 19,
+        "name": "gain_display_limit",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 0.0
+      },
+      {
+        "index": 20,
+        "name": "gain_seed_first_low",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 21,
+        "name": "gain_seed_first_high",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 22,
+        "name": "gain_seed_last_low",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 23,
+        "name": "gain_seed_last_high",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 24,
+        "name": "gain_seed_mean_nearest",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 0.0
+      },
+      {
+        "index": 25,
+        "name": "gain_seed_mean_zero",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 0.0
+      },
+      {
+        "index": 26,
+        "name": "gain_reserved0",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 27,
+        "name": "gain_reserved1",
         "type": "uint32",
         "gpu_encoding": "uint_bits",
         "initial": 0

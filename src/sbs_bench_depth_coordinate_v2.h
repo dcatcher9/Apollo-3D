@@ -32,15 +32,15 @@
 
 namespace sbs_bench {
 
-  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 19;
+  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 22;
   inline constexpr std::string_view depth_coordinate_v2_state_trace_policy =
-    "immediate-first-usable-arithmetic-mean-zero-fixed-scale-fixed-near-curve-retained-camera-pointwise-soft-container-vertical-share75-row-majorant-v18";
+    "authenticated-mode-selected-camera-host-robust-linear-hard-cap-vertical-share75-row-majorant-v22";
   inline constexpr std::string_view depth_coordinate_v2_diagnostic_role =
-    "non-controlling-fixed-scale-camera-audit-v4";
+    "non-controlling-mode-selected-camera-audit-v6";
   inline constexpr std::string_view depth_coordinate_v2_gpu_authority =
-    "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-gpu-state-v9";
+    "authenticated-raw-depth-plus-eight-v2-compute-shaders-persistent-gpu-state-v11";
   inline constexpr std::string_view depth_coordinate_v2_gpu_execution =
-    "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-state-v9";
+    "authenticated-raw-depth-plus-eight-v2-compute-shaders-persistent-state-v11";
 
   struct depth_coordinate_v2_gpu_frame {
     std::string frame_id;

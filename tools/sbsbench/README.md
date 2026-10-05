@@ -63,6 +63,13 @@ Useful variants are:
 & $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label pop-1p0 `
   --extra --pop-strength 1.0
 
+# Opt-in joint zero/linear scale/adaptive subtitle live policy, against an off control
+& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label joint-control `
+  --extra --joint-plane-experiment off
+& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label joint-combo `
+  --report-control cmake-build-relwithdebinfo/sbs_eval/joint-control `
+  --extra --joint-plane-experiment on
+
 # Prepared public suite
 & $SbsbenchPython tools/sbsbench/run_eval.py --suite extended --comparison-only --label public-control
 
@@ -73,6 +80,11 @@ Useful variants are:
 `--update-baselines` rejects `--extra`; first move an accepted setting into production defaults.
 The process exit code is the verdict: `0` pass, `1` regression, and `2` invalid or incomplete
 evidence.
+
+Timed adaptive-UI evidence also requires `--observation-timeline <timeline>` after `--extra`,
+with the same declared timeline on both legs. Prepared PNG clips without a timeline supply no
+source clock, so they cannot qualify UI-plane movement. Label authored clock stimuli explicitly;
+they do not recover the original video's timing or establish long-form temporal quality.
 
 ### Adaptive infer/reuse A/B without a headset
 
@@ -92,7 +104,7 @@ first requires and verifies the current `sunshine` target, then binds the execut
 runtime shader tree, production composite
 engine/ONNX, OCR engine/contract ONNX, and generated coordinate contract across both serial legs.
 The default gate requires at least one actual reuse and proves that every reuse retained the
-preceding fused `refined_depth`, SLR13 locator state, condition parameters and
+preceding fused `refined_depth`, SLR14 locator state, condition parameters and
 `final_parallax_<frame-id>.f32` bit-exactly. Native geometry replay authenticates the paired source
 snapshot hash but receives no source texture, color mode or HDR scale. Every reuse holds the whole
 depth/OCR/SLR/final tuple; only valid infer publishes current OCR or abstention. The runner derives
@@ -138,7 +150,7 @@ unrecognized historical options fail argument parsing.
 
 ### Current subtitle authority
 
-The current dump reader accepts the authenticated OCR8 record and compact SLR13 locator state as
+The current dump reader accepts the authenticated OCR8 record and compact SLR14 locator state as
 the only live subtitle authority. Retired SLR3--SLR9, GST/OGR/ORS, and offline overlay-detector
 paths are not accepted as live or replay authority.
 
@@ -183,10 +195,10 @@ captures directly with:
 ```
 
 See [Dump and replay format](DUMP_FORMAT.md) before generating or interpreting preview PNGs. The
-reader accepts only the current SLR13/OCR8 dump schema; older experimental captures are
-intentionally unsupported. An active schema-41 package authenticates the OCR8/SLR13 tuple for the
+reader accepts only the current SLR14/OCR8 dump schema; older experimental captures are
+intentionally unsupported. An active schema-41 package authenticates the OCR8/SLR14 tuple for the
 atomic final field's publication frame, ordinary Base, conditioned final field, and the resolver's
-bounded strict fallback placement policy. It replays SLR13 directly into
+bounded strict fallback placement policy. It replays SLR14 directly into
 `shadow_final_parallax.f32`, which is authenticated once as both the atomic final field and warp
 input. An
 active resolver also authenticates the strict symmetric bottom-corner ordinary-core qualification
@@ -195,7 +207,7 @@ and its ribbon exemption. An inactive package uses the one canonical `none` desc
 Current schema-41 window-region packages preserve the complete authorized source rectangle at any
 aspect ratio. `depth_input_region.json` schema 4 records the centered integer content rectangle in
 the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
-that content width for limiter and SLR13 steps and must project OCR/SLR geometry only into that
+that content width for limiter and SLR14 steps and must project OCR/SLR geometry only into that
 content rectangle; treating the whole tensor as real source pixels is rejected.
 
 Schema 41 packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a

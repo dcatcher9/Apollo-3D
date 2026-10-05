@@ -33,6 +33,23 @@ import eval_parallel  # noqa: E402
 
 
 class EvalContractTests(unittest.TestCase):
+    def test_joint_plane_setting_is_default_off_and_exact_override_wins(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "sunshine.conf")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("sbs_3d_joint_plane_experiment = enabled\n")
+            self.assertFalse(run_eval.expected_joint_plane_experiment(
+                os.path.join(root, "absent.conf"), []))
+            self.assertTrue(run_eval.expected_joint_plane_experiment(path, []))
+            self.assertFalse(run_eval.expected_joint_plane_experiment(
+                path, ["--joint-plane-experiment", "on",
+                       "--joint-plane-experiment", "off"]))
+            for extra in (["--joint-plane-experiment"],
+                          ["--joint-plane-experiment", "true"],
+                          ["--joint-plane-experiment", "1"]):
+                with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, "on or off"):
+                    run_eval.expected_joint_plane_experiment(path, extra)
+
     @staticmethod
     def png_bytes(value=64, mode="RGB"):
         shape = (8, 12, 3) if mode == "RGB" else (8, 12)
@@ -1804,7 +1821,8 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "video.h"), encoding="utf-8") as fh:
             video_header = fh.read()
         self.assertIn("SBS_AI = 1", video_header)
-        self.assertNotIn("SBS_GAME", video_header)
+        # The removed Host profile token differs from the external Game3D transport modes.
+        self.assertNotRegex(video_header, r"\bSBS_GAME\s*=")
         self.assertNotIn("SBS_MOVIE", video_header)
 
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:

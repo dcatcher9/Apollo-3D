@@ -38,10 +38,10 @@ namespace models::host_sbs_gpu_completion_receipt {
   inline constexpr std::size_t subtitle_condition_begin = 106u;
   inline constexpr std::size_t subtitle_condition_word_count = 6u;
   inline constexpr std::size_t parallax_state_begin = 112u;
-  inline constexpr std::size_t parallax_state_word_count = 12u;
-  inline constexpr std::size_t depth_frame_state_begin = 124u;
+  inline constexpr std::size_t parallax_state_word_count = v2::state_float_count;
+  inline constexpr std::size_t depth_frame_state_begin = parallax_state_begin + parallax_state_word_count;
   inline constexpr std::size_t depth_frame_state_word_count = 4u;
-  inline constexpr std::size_t cut_state_begin = 128u;
+  inline constexpr std::size_t cut_state_begin = depth_frame_state_begin + depth_frame_state_word_count;
   inline constexpr std::size_t cut_state_word_count = sbs_adaptive_state::word_count;
   inline constexpr std::size_t outcome_counts_begin = cut_state_begin + cut_state_word_count;
   inline constexpr std::size_t outcome_counts_word_count = host_sbs_gpu_outcomes::word_count;
@@ -66,6 +66,7 @@ namespace models::host_sbs_gpu_completion_receipt {
     std::uint32_t width = 0u;
     std::uint32_t height = 0u;
     float raw_coordinate_scale = 0.0f;
+    std::uint32_t joint_plane_mode = 0u;
     std::uint32_t expected_work = 0u;
     submission_class_e submission_class = submission_class_e::invalid;
     std::uint32_t flags = 0u;
@@ -231,7 +232,8 @@ namespace models::host_sbs_gpu_completion_receipt {
     }
     v2::state_words_t state {};
     std::copy_n(words.begin() + parallax_state_begin, state.size(), state.begin());
-    if (!v2::parallax_state_words_are_authenticated(state, expected.raw_coordinate_scale)) {
+    if (!v2::parallax_state_words_are_authenticated(
+          state, expected.raw_coordinate_scale, expected.joint_plane_mode)) {
       return std::nullopt;
     }
     receipt_t result {
@@ -344,7 +346,7 @@ namespace models::host_sbs_gpu_completion_receipt {
     std::optional<expected_t> pending_;
   };
 
-  static_assert(snapshot_byte_count == 672u);
+  static_assert(snapshot_byte_count == 736u);
   static_assert(transaction_word_count == trace::transaction_word_count);
   static_assert(subtitle_locator_word_count == v2::subtitle_locator_header_word_count);
   static_assert(parallax_state_word_count == v2::state_words_t {}.size());

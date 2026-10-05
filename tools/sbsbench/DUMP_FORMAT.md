@@ -1,7 +1,8 @@
 # Dump 3D format
 
 Dump 3D is one atomic, matched-frame diagnostic package for the authenticated Host SBS V2 path.
-The writer and strict reader accept one current manifest schema only. Retired SLR3--SLR9,
+The canonical geometry/metric reader accepts schema 41 only. Removed presentation-experiment
+schemas 42/43 remain historical artifacts and are rejected by the current reader. Retired SLR3--SLR9,
 GST/OGR/ORS, and offline overlay-detector packages are intentionally unsupported.
 
 ## Current package
@@ -27,16 +28,16 @@ The core package contains:
 | `shadow_candidate_parallax.f32` | Pre-limiter V2 candidate |
 | `shadow_vertical_majorant.f32` | Vertical upper-envelope diagnostic |
 | `shadow_vertical_conditioned.f32` | Fixed vertical-share result |
-| `shadow_base_final_parallax.f32` | Required in active SLR13 packages; ordinary post-limiter field before subtitle conditioning |
+| `shadow_base_final_parallax.f32` | Required in active SLR14 packages; ordinary post-limiter field before subtitle conditioning |
 | `shadow_final_parallax.f32` | Complete atomic conditioned model-domain field; sole live render and warp-input authority |
 | `shadow_state.json`, `shadow_frame_stats.json` | Typed V2 state and current-frame statistics |
-| `warp_map.f32` | Exact inverse map; dimensions, layout, validity, clamp, and derivation semantics live in manifest `warp_map_contract`; required for ROI packages |
-| `warp_mask.png` | Authenticated boundary-extrapolation evidence; required with `warp_map.f32` for ROI packages |
+| `warp_map.f32` | Exact continuous inverse source map; dimensions, layout, validity, clamp, and derivation semantics live in manifest `warp_map_contract`; required for ROI packages |
+| `warp_mask.png` | Authenticated finite-source boundary evidence; required with `warp_map.f32` for ROI packages |
 | `window_region.json` | Required semantic observation for ROI packages |
 | `sbs.png` | Packed stereo preview |
 | `subtitle_conditioning.json` | Required current subtitle-authority descriptor; canonical `none` or `subtitle-slr13` |
 | `subtitle_ocr_record.u32` | Active-only OCR8 record for the atomic target's authenticated subtitle-publication frame: current on infer, older on whole-tuple reuse |
-| `subtitle_locator_state.u32` | Active-only compact SLR13 state in generated-contract word order |
+| `subtitle_locator_state.u32` | Active-only compact SLR14 state in generated-contract word order |
 | `gpu_trace_ring.u32` | Optional raw diagnostic history of the last 300 accepted-root completions; available only when diagnostics was enabled before reproduction |
 | `gpu_trace.json` | Optional chronological decode of the authenticated raw GPU trace |
 | `gpu_trace_contract.json` | Optional exact trace offsets, enums, receipt ABI, and shader provenance |
@@ -49,6 +50,12 @@ owner of those live identities and numeric policy values. The
 [Host SBS OCR-box subtitle conditioner](../../docs/host-sbs.md#ocr-box-subtitle-conditioner) is the
 sole owner of their runtime and state-machine semantics; this dump-format document copies neither.
 No retired layout is preserved or reinterpreted.
+
+The current typed `shadow_frame_stats.json` schema `3` binds twelve words: the existing eight
+statistic words and a four-word P05/P95/validity/bin-width tail. The generated geometry contract
+owns their exact names, order and meaning. The tail is the GPU histogram result, not a percentile
+recomputed by the dump writer; unavailable tail authority is canonical zero. This frame-statistics
+schema is separate from the shared `warp_map_contract` schema described below.
 
 Schema 41 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
 production package uses one exact supported convex-2x high shape; halving both dimensions must
@@ -67,22 +74,22 @@ advance subtitle state on reuse. Invalid publication fails closed.
 There is no second persistent display resource, serialized warp-depth copy, or temporal display
 recurrence. In every package, `shadow_final_parallax.f32` is authenticated once and named by both
 `final_parallax.artifact` and `final_parallax.warp_input_artifact`. The verifier replays the
-ordinary limiter and, when active, SLR13 directly into that one field.
+ordinary limiter and, when active, SLR14 directly into that one field.
 
 ## Diagnostic GPU completion trace
 
 Schema 41 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
 depth roots, not source frames, presentation frames, busy drops, or every captured desktop update.
-Each 176-word (704-byte) record binds an exact trace ordinal, matched frame, analysis generation,
+Each 192-word (768-byte) record binds an exact trace ordinal, matched frame, analysis generation,
 analysis-domain tag, transaction token, analysis-source and live-field extents, the immutable
-64-word postprocessed transaction snapshot, all 80 SLR13 words, and all six condition-parameter
+64-word postprocessed transaction snapshot, all 96 SLR14 words, and all six condition-parameter
 words. The authenticated RQST/CBRG token, cookies, work disposition, optional OOCR marker, and
 submission class determine `infer`, `reuse`, or `invalid`; a force-class reuse receipt is invalid,
 never inferred as reuse. Legal work is `0` for native subtitle suppression, `1` for current-ready OCR,
 or `2` for current abstention. `OOCR` is valid only for work `1` on infer and is absent for work `0`/`2`.
 Retired independent due values `8`/`16` are invalid. Subtitle disposition is cross-checked against
 expected work, host outcome, raw flags and the authenticated device receipt. Every ordinary reuse is
-`held_with_depth`: OCR8, SLR80, condition6 and the atomic conditioned target remain the prior coherent
+`held_with_depth`: OCR8, SLR96, condition6 and the atomic conditioned target remain the prior coherent
 tuple. Authenticated reuse cannot claim a direct current subtitle publication.
 
 The shared live/offline policy lets the near-identical detector decide joint reuse without a time
@@ -102,7 +109,7 @@ extent, field extent, and domain-reset bit. `dump_forced_at_enqueue` is perturba
 it is false when a dump request harvests a root that was already pending, and is therefore not a
 requirement for the matched record.
 
-For non-suppressed authenticated subtitle publications, SLR80 and condition6 are captured after SLR
+For non-suppressed authenticated subtitle publications, SLR96 and condition6 are captured after SLR
 resolve and condition-parameter publication on valid infer. A held reuse captures the same bytes with the
 locator's older frame identity. When its predecessor remains in the ring, both stored tuples must be
 byte-identical to that immediately prior record. The raw ring remains schema 3; the trace contract
@@ -123,7 +130,7 @@ trace shader/resources are not created and no append, copy, or dispatch runs; en
 afterward cannot recover prior history. With diagnostics enabled, the trace still adds no per-frame
 CPU map, readback, query, or synchronization and has no rendering authority.
 
-## OCR8 and SLR13 records
+## OCR8 and SLR14 records
 
 The generated `subtitle_ocr.ocr_record` contract owns OCR8's schema, tag, word counts, offsets,
 capacities, flags, and numeric detector/box policy values. The dump serializes exactly that fixed
@@ -133,8 +140,8 @@ zero tail must all agree with the atomic target's publication frame. That is the
 infer, and the trace-authenticated older tuple frame for whole-tuple reuse. See the
 [live OCR8 contract](../../docs/host-sbs.md#ocr-box-subtitle-conditioner) for producer semantics.
 
-The generated `subtitle_ocr.locator_state` contract owns SLR13's schema, the unambiguous
-little-endian `SL13` tag bytes, word layout,
+The generated `subtitle_ocr.locator_state` contract owns SLR14's schema, the unambiguous
+little-endian `SL14` tag bytes, word layout,
 rectangle capacity, kind packing, numeric qualification/death-grace limits, and the complete
 local-supporting-plane target policy. Its resolver descriptor explicitly binds the symmetric
 ordinary-core corner rejection: edge clearance is strictly below `floor(content_width / 32)`, the
@@ -162,7 +169,7 @@ single-ordinary mature-owner geometry bounds, and the requirement that the dump'
 replay the exact selected OCR8 raw-core/final-cover pair. Historical trace rows have no OCR8 payload,
 so they validate the same state geometry, cover containment, and condition tuple structurally; they
 do not claim exact historical OCR replay. See the
-[live SLR13 contract](../../docs/host-sbs.md#ocr-box-subtitle-conditioner) for overlap, cut-survival,
+[live SLR14 contract](../../docs/host-sbs.md#ocr-box-subtitle-conditioner) for overlap, cut-survival,
 target, fade, death-grace, and conditioning semantics.
 
 The Python conditioner replay below is deliberately an independent dump-integrity verifier. It
@@ -176,12 +183,42 @@ native WARP/GPU tests.
 A full-source package uses analysis generation zero. A window-region package binds a nonzero
 analysis generation, the exact uncropped source rectangle, tensor extent, centered integer
 contain-fit `tensor_content_rect_px`, edge-replicated excluded padding fraction, unit conversion,
-and outside-only collar in `depth_input_region.json` schema `4`. The source rectangle is never
+and outside-only video-inverse collar in `depth_input_region.json` schema `4`. The source rectangle is never
 stretched or trimmed: a wider region pads above/below and a taller region pads left/right. Padding
 does not participate in model statistics, scene-cut evidence, OCR, or subtitle state;
-published fields extend the nearest content boundary through it. Crop-local depth must never be
-interpreted as a full-source field. The required full-source inverse map proves that samples beyond
-the conservative collar return to identity.
+ordinary published fields extend the nearest content boundary through it. The renderer clamps
+sampling to centers of the real-content rectangle, so synthetic padding cannot change edge-video
+geometry. Crop-local depth must never be interpreted as a full-source field. Ordinary required
+full-source inverse maps prove that samples beyond the conservative collar return to identity.
+
+Parallax fields are signed one-eye U offsets in the analysis source's coordinate system. A window
+ROI field value becomes source pixels by multiplying by the inference/source-ROI width, not the
+padded tensor width or full captured width. Its embedding into full-source U uses the authenticated
+`full_source_parallax_scale`. In contrast, `warp_map.f32` and the native ownership diagnostic's U
+channels are normalized full-captured-source coordinates; multiply their signed difference from
+destination identity by the full captured width to measure one-eye source pixels. A binocular
+separation is twice a symmetric one-eye offset; these units must not be mixed.
+
+Current experimental mode 3 uses the authenticated linear Candidate
+`clamp(requested_gain*(raw-zero)/D, -0.04, +0.04)`, with no depth curve or soft envelope.
+Candidate, post-limiter Base, and conditioned Final remain separate actual numeric artifacts.
+The signed hard endpoint is in analysis-source U; it does not bypass the native slope/shear guards.
+Older with-curve experiment artifacts retain their original geometry identity and mapping and
+cannot be relabeled as the linear candidate.
+
+All current ROI packages, including experimental mode 3, use `warp_map_contract` schema `2`.
+The map is the continuous 11-step inverse of the signed final field embedded into the full capture,
+with the same slope-limited outside-only collar in every mode. `warp_mask.png` red marks finite-source
+boundary extrapolation; green and blue are zero. There are no source-kind or visibility flags,
+static-rim samples, or synthetic interior fill paths. Nearby browser pixels may move within the
+collar; only samples beyond its bounded support must be at zero displacement.
+
+Both eyes sample one coordinate from the original full matched source, preserving source V. Positive
+foreground can project outside the video rectangle without being flattened at the ROI boundary.
+Continuous sampling can stretch browser background into a retracted edge; it cannot recover source
+video pixels or a foreground outline cut off by the original image. Historical layered schema 3/4
+packages retain their original identities and must be verified using their frozen original source;
+they cannot be relabeled as the continuous schema 2 renderer.
 
 The deterministic ROI contain fit is planned on the embedded calibrated DAV2 grid. For a fused
 package, each half-open content-rectangle coordinate is then multiplied by exactly two; padding
@@ -219,8 +256,8 @@ The maintained reader:
 6. validates ROI placement, authority-specific window identity, inverse-map geometry, and the exterior
    zero-plane evidence; and
 7. validates canonical inactive metadata, or the exact authenticated current-subtitle-publication/
-   held-reuse OCR8/SLR13 model, shader, record, state, and artifact identities;
-8. replays the ordinary V2 chain into `shadow_base_final_parallax.f32` when SLR13 is active, then
+   held-reuse OCR8/SLR14 model, shader, record, state, and artifact identities;
+8. replays the ordinary V2 chain into `shadow_base_final_parallax.f32` when SLR14 is active, then
    replays the exact content-clamped analytic rectangle budget and fade into
    `shadow_final_parallax.f32` (including exact nearest-content Base extension when current
    authority is empty). SM5 division is checked against the finite globally consistent one-ULP

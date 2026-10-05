@@ -115,6 +115,11 @@ namespace models::host_sbs_v2_gpu {
         !command.frame_stats_output || !command.minmax_raw_output) {
       return false;
     }
+    if (command.robust_quantiles &&
+        (!command.histogram_shader || !command.quantile_shader || !command.frame_stats ||
+         !command.histogram_output || !command.histogram)) {
+      return false;
+    }
 
     bind_base_constants(context, command.constants);
     context->CSSetShader(command.moments_shader, nullptr, 0u);
@@ -140,6 +145,24 @@ namespace models::host_sbs_v2_gpu {
     (void) record_dispatch(context, command.frame_resolve_dispatch);
     context->CSSetShaderResources(0u, 1u, null_inputs);
     context->CSSetUnorderedAccessViews(0u, 2u, null_outputs, nullptr);
+    if (command.robust_quantiles) {
+      context->CSSetShader(command.histogram_shader, nullptr, 0u);
+      ID3D11ShaderResourceView *histogram_inputs[3] = {
+        command.raw_depth, command.tensor_exclusion, command.frame_stats,
+      };
+      context->CSSetShaderResources(0u, 3u, histogram_inputs);
+      context->CSSetUnorderedAccessViews(0u, 1u, &command.histogram_output, nullptr);
+      (void) record_dispatch(context, command.moments_dispatch);
+      ID3D11ShaderResourceView *null_histogram_inputs[3] = {};
+      context->CSSetShaderResources(0u, 3u, null_histogram_inputs);
+      context->CSSetUnorderedAccessViews(0u, 1u, null_outputs, nullptr);
+      context->CSSetShader(command.quantile_shader, nullptr, 0u);
+      context->CSSetShaderResources(0u, 1u, &command.histogram);
+      context->CSSetUnorderedAccessViews(0u, 1u, &command.frame_stats_output, nullptr);
+      (void) record_dispatch(context, command.frame_resolve_dispatch);
+      context->CSSetShaderResources(0u, 1u, null_inputs);
+      context->CSSetUnorderedAccessViews(0u, 1u, null_outputs, nullptr);
+    }
     return true;
   }
 

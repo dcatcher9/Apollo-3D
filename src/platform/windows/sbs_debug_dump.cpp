@@ -223,6 +223,28 @@ namespace platf::sbs_debug {
         {"state_tag", subtitle_locator_state_tag},
         {"state_word_count", subtitle_locator_state_word_count},
         {"rectangle_capacity", subtitle_locator_rectangle_capacity},
+        {"experimental_adaptive_ui", {
+          {"modes", {3u}}, {"state_offset", subtitle_locator_adaptive_offset},
+          {"state_word_count", subtitle_locator_adaptive_word_count},
+          {"clock", "source-observation-microseconds"},
+          {"probe", "union-of-current-authorized-covers-in-content"},
+          {"clearance_per_eye_source_pixels", 2u},
+          {"enter_covered_fraction", 0.20f}, {"enter_content_fraction", 0.02f},
+          {"release_covered_fraction", 0.15f}, {"release_content_fraction", 0.015f},
+          {"approach_delay_ms", 100u}, {"retreat_delay_ms", 1500u},
+          {"approach_source_u_per_second", 0.03f},
+          {"retreat_source_u_per_second", 0.005f},
+          {"geometric_pin", "full-on-current-cover-authority"},
+          {"host_model_policy", {
+            {"mode", 3u}, {"maximum_plane_source_u", direct_container_limit},
+            {"candidate_step_per_eye_source_pixels", 4u},
+            {"last_candidate", "exact-representation-cap"},
+            {"maximum_candidate_index", "ceil-analysis-source-width-over-100"},
+            {"core_range_per_eye_source_pixels", 0u},
+            {"retreat_requires_applied_target", true},
+            {"capped_conflict", "derived-from-top-candidate-counts"},
+          }},
+        }},
         {"qualification_policy", {
           {"corner_filter_applies_to", "non-ribbon-ordinary-cores"},
           {"corner_edge_clearance",
@@ -878,6 +900,61 @@ namespace platf::sbs_debug {
       );
     }
 
+    bool subtitle_adaptive_ui_state_is_canonical(
+      const std::vector<std::uint8_t> &locator,
+      const std::uint32_t source_width,
+      const models::depth_tensor_content_rect_t content,
+      const std::uint32_t joint_plane_mode,
+      const float display_budget
+    ) {
+      const auto word = [&](const std::size_t offset) {
+        return subtitle_word(locator, subtitle_locator_adaptive_offset + offset);
+      };
+      if (word(0u) == 0u) {
+        for (std::size_t i = 0u; i < subtitle_locator_adaptive_word_count; ++i) {
+          if (word(i) != 0u) return false;
+        }
+        return joint_plane_mode != 3u ||
+          subtitle_word(locator, 20u) == 0u;
+      }
+      if (joint_plane_mode != 3u) return false;
+      const auto flags = word(1u);
+      const float applied = std::bit_cast<float>(word(3u));
+      const float limit = std::bit_cast<float>(word(12u));
+      if (source_width == 0u ||
+          source_width > models::host_sbs_v2_max_source_long_side) return false;
+      const auto maximum_level = (source_width + 99u) / 100u;
+      // The Host policy uses the representation constant directly; its cap is bit-exact.
+      const auto expected_limit_bits = std::bit_cast<std::uint32_t>(display_budget);
+      const auto limit_bits = word(12u);
+      const auto last = subtitle_u64(locator, subtitle_locator_adaptive_offset + 4u);
+      const auto approach = subtitle_u64(locator, subtitle_locator_adaptive_offset + 6u);
+      const auto retreat = subtitle_u64(locator, subtitle_locator_adaptive_offset + 8u);
+      const std::uint64_t area = static_cast<std::uint64_t>(content.width()) * content.height();
+      if (word(0u) != 1u || (flags & ~15u) != 0u || (flags & 3u) == 3u ||
+          word(2u) > maximum_level || word(10u) > maximum_level ||
+          word(11u) > maximum_level ||
+          !std::isfinite(applied) || !std::isfinite(limit) || limit_bits != expected_limit_bits ||
+          applied < 0.0f || applied > limit || word(13u) > area ||
+          word(14u) > word(13u) || word(15u) > word(13u) ||
+          ((flags & 8u) != 0u) != (last != 0u) ||
+          ((flags & 1u) != 0u) != (approach != 0u) ||
+          ((flags & 2u) != 0u) != (retreat != 0u) || approach > last || retreat > last) {
+        return false;
+      }
+      const std::uint64_t conflicts = word(14u);
+      const std::uint64_t covered = word(13u);
+      const bool capped_conflict = conflicts * 5u > covered ||
+        conflicts * 50u > area;
+      if (((flags & 4u) != 0u) != capped_conflict) return false;
+      const bool provisional = (subtitle_word(locator, 2u) &
+        subtitle_locator_flag_provisional_current) != 0u;
+      return subtitle_word(locator, 20u) == 0u ||
+        (subtitle_word(locator, 18u) == word(3u) && subtitle_word(locator, 24u) == 2u &&
+         (!provisional || (subtitle_word(locator, 29u) == word(3u) &&
+                          subtitle_word(locator, 30u) == 2u)));
+    }
+
     bool subtitle_locator_state_is_canonical(
       const std::vector<std::uint8_t> &ocr,
       const std::uint32_t ocr_flags,
@@ -888,8 +965,15 @@ namespace platf::sbs_debug {
       const models::depth_tensor_content_rect_t tensor_content,
       const std::uint32_t roi_top,
       const std::uint32_t roi_bottom,
-      const std::uint32_t ribbon_min_bottom
+      const std::uint32_t ribbon_min_bottom,
+      const std::uint32_t joint_plane_mode,
+      const float display_budget
     ) {
+      if (!subtitle_adaptive_ui_state_is_canonical(
+            locator, subtitle_word(ocr, 9u), tensor_content,
+            joint_plane_mode, display_budget)) {
+        return false;
+      }
       const auto flags = subtitle_word(locator, 2u);
       const auto owner_generation = subtitle_word(locator, 3u);
       const auto owner_count = subtitle_word(locator, 4u);
@@ -1111,6 +1195,15 @@ namespace platf::sbs_debug {
       const frame &completed,
       const std::uint32_t confirmed_cut_count
     ) {
+      const auto mode = completed.parallax_v2_joint_plane_mode;
+      float display_budget = direct_container_limit;
+      if (!joint_plane_mode_word_is_valid(mode)) return false;
+      if (mode == 3u) {
+        if (!std::isfinite(completed.parallax_v2_requested_gain) ||
+            completed.parallax_v2_requested_gain <= 0.0f) return false;
+        display_budget = models::depth_coordinate_v2::display_budget_for_mode(
+          completed.parallax_v2_requested_gain, mode);
+      }
       if (!subtitle_ocr_record_is_canonical_for_frame(ocr, completed) ||
           locator.size() != subtitle_locator_state_word_count * sizeof(std::uint32_t)) {
         return false;
@@ -1138,7 +1231,8 @@ namespace platf::sbs_debug {
           !subtitle_locator_state_is_canonical(
             ocr, ocr_flags, final_count, locator,
             field_width, field_height, geometry.tensor_content,
-            geometry.roi_top, geometry.roi_bottom, geometry.ribbon_min_bottom
+            geometry.roi_top, geometry.roi_bottom, geometry.ribbon_min_bottom,
+            mode, display_budget
           )) {
         return false;
       }
@@ -1541,6 +1635,70 @@ namespace platf::sbs_debug {
         }
       }
       return true;
+    }
+
+    bool parallax_v2_state_matches_frame(
+      const std::vector<float> &state,
+      const std::vector<float> &frame_stats,
+      const frame &completed
+    ) noexcept {
+      using namespace models::depth_coordinate_v2;
+      if (state.size() != state_float_count || frame_stats.size() != frame_stats_float_count) {
+        return false;
+      }
+      for (std::size_t index = 0; index < state.size(); ++index) {
+        if (state_fields[index].gpu_encoding == state_gpu_encoding_e::float_value &&
+            !std::isfinite(state[index])) return false;
+      }
+      if (!std::all_of(frame_stats.begin(), frame_stats.end(), [](float value) {
+            return std::isfinite(value);
+          })) return false;
+      state_words_t words {};
+      std::memcpy(words.data(), state.data(), sizeof(words));
+      if (!parallax_runtime_constants_are_valid(
+            completed.parallax_v2_raw_coordinate_scale,
+            completed.parallax_v2_requested_pop_strength,
+            completed.parallax_v2_requested_gain) ||
+          !parallax_state_words_are_authenticated(
+            words, completed.parallax_v2_raw_coordinate_scale,
+            completed.parallax_v2_joint_plane_mode)) return false;
+      const bool state_valid = state[frame_valid] == 1.0f;
+      const bool statistics_valid = frame_stats[frame_stat_valid] == 1.0f;
+      const float valid_count = frame_stats[frame_stat_valid_count];
+      const float texel_count = frame_stats[frame_stat_texel_count];
+      const bool counts_valid = valid_count >= 0.0f && texel_count > 0.0f &&
+        valid_count <= texel_count && valid_count == std::floor(valid_count) &&
+        texel_count == std::floor(texel_count) &&
+        texel_count <= static_cast<float>(std::numeric_limits<std::uint32_t>::max());
+      const bool statistics_canonical =
+        (frame_stats[frame_stat_valid] == 0.0f || frame_stats[frame_stat_valid] == 1.0f) &&
+        counts_valid && frame_stats[frame_stat_population_std] >= 0.0f &&
+        (statistics_valid ?
+          (valid_count == texel_count && frame_stats[frame_stat_maximum] >= frame_stats[frame_stat_minimum]) :
+          (frame_stats[frame_stat_mean] == 0.0f && frame_stats[frame_stat_population_std] == 0.0f &&
+           frame_stats[frame_stat_minimum] == 0.0f && frame_stats[frame_stat_maximum] == 0.0f));
+      if (!statistics_canonical) return false;
+      const float percentile_valid = frame_stats[frame_stat_percentile_valid];
+      const float percentile_low = frame_stats[frame_stat_percentile_low];
+      const float percentile_high = frame_stats[frame_stat_percentile_high];
+      const float percentile_bin_width = frame_stats[frame_stat_percentile_bin_width];
+      if ((percentile_valid != 0.0f && percentile_valid != 1.0f) ||
+          (percentile_valid == 1.0f ?
+            (!statistics_valid || percentile_bin_width < 0.0f ||
+             percentile_low < frame_stats[frame_stat_minimum] ||
+             percentile_high > frame_stats[frame_stat_maximum] || percentile_low > percentile_high) :
+            (percentile_low != 0.0f || percentile_high != 0.0f || percentile_bin_width != 0.0f))) {
+        return false;
+      }
+      const bool usable = statistics_valid && frame_stats[frame_stat_population_std] > collapse_abs_epsilon;
+      const auto mode = completed.parallax_v2_joint_plane_mode;
+      if (mode == 0u) return state_valid == usable;
+      const float budget = display_budget_for_mode(completed.parallax_v2_requested_gain, mode);
+      if ((state[gain_display_limit] != 0.0f || state_valid) && state[gain_display_limit] != budget) return false;
+      // Missing or regressed source time can disarm an established camera despite usable
+      // current statistics. The sealed state admission still forbids false valid output.
+      const bool quantiles_valid = percentile_valid == 1.0f;
+      return !state_valid || (usable && quantiles_valid);
     }
 
   }  // namespace detail
@@ -2569,34 +2727,11 @@ namespace platf::sbs_debug {
         return false;
       }
       const auto &shader_identity = *completed.parallax_v2_shader_provenance;
-      if (state.size() != state_float_count ||
-          frame_stats.size() != frame_stats_float_count) {
-        return false;
-      }
-      bool state_finite = true;
-      for (std::size_t index = 0; index < state.size(); ++index) {
-        if (state_fields[index].gpu_encoding == state_gpu_encoding_e::float_value &&
-            !std::isfinite(state[index])) {
-          state_finite = false;
-          break;
-        }
-      }
-      if (!state_finite || !std::all_of(frame_stats.begin(), frame_stats.end(), [](float value) {
-            return std::isfinite(value);
-          })) {
+      if (!detail::parallax_v2_state_matches_frame(state, frame_stats, completed)) {
         return false;
       }
       state_words_t state_words {};
       std::memcpy(state_words.data(), state.data(), sizeof(state_words));
-      const bool runtime_constants_valid = parallax_runtime_constants_are_valid(
-        completed.parallax_v2_raw_coordinate_scale,
-        completed.parallax_v2_requested_pop_strength,
-        completed.parallax_v2_requested_gain
-      );
-      const bool state_semantics_valid = parallax_state_words_are_authenticated(
-        state_words,
-        completed.parallax_v2_raw_coordinate_scale
-      );
       const bool state_frame_valid = state[frame_valid] > 0.5f;
       const auto calibration_revision_value = state_words[calibration_revision];
       const auto camera_center_integrity_value = state_words[camera_center_integrity_bits];
@@ -2604,31 +2739,6 @@ namespace platf::sbs_debug {
       const bool camera_initialized =
         state[inverse_scale] > 0.0f &&
         acquired_calibration_revision_is_valid(calibration_revision_value);
-      const float valid_count = frame_stats[frame_stat_valid_count];
-      const float texel_count = frame_stats[frame_stat_texel_count];
-      const bool frame_is_valid = frame_stats[frame_stat_valid] > 0.5f;
-      const bool expected_state_frame_valid =
-        frame_is_valid &&
-        frame_stats[frame_stat_population_std] > collapse_abs_epsilon;
-      const bool frame_counts_valid =
-        valid_count >= 0.0f && texel_count > 0.0f && valid_count <= texel_count &&
-        valid_count == std::floor(valid_count) && texel_count == std::floor(texel_count) &&
-        texel_count <= static_cast<float>(std::numeric_limits<std::uint32_t>::max());
-      const bool frame_semantics_valid =
-        (frame_stats[frame_stat_valid] == 0.0f ||
-         frame_stats[frame_stat_valid] == 1.0f) &&
-        frame_counts_valid && frame_stats[frame_stat_population_std] >= 0.0f &&
-        (frame_is_valid ?
-           (valid_count == texel_count &&
-            frame_stats[frame_stat_maximum] >= frame_stats[frame_stat_minimum]) :
-           (frame_stats[frame_stat_mean] == 0.0f &&
-            frame_stats[frame_stat_population_std] == 0.0f &&
-            frame_stats[frame_stat_minimum] == 0.0f &&
-            frame_stats[frame_stat_maximum] == 0.0f));
-      if (!runtime_constants_valid || !state_semantics_valid ||
-          !frame_semantics_valid || state_frame_valid != expected_state_frame_valid) {
-        return false;
-      }
 
       nlohmann::json fields = nlohmann::json::array();
       nlohmann::json named_values = nlohmann::json::object();
@@ -2655,6 +2765,7 @@ namespace platf::sbs_debug {
         named_values[name] = state[index];
       }
 
+      const auto joint_plane_mode_value = state_words[joint_plane_mode_bits];
       const float effective_gain_value = state_frame_valid ?
         completed.parallax_v2_requested_gain : 0.0f;
       const float latched_scale_value = camera_initialized ?
@@ -2674,6 +2785,7 @@ namespace platf::sbs_debug {
         {"effective_gain", effective_gain_value},
         {"camera_center_integrity_bits", camera_center_integrity_value},
         {"renderer_authorization_bits", renderer_authorization_value},
+        {"joint_plane_mode", joint_plane_mode_value},
       };
       const nlohmann::json state_json {
         {"schema", shadow_state_dump_schema},
@@ -2688,9 +2800,13 @@ namespace platf::sbs_debug {
         {"wire_contract", "authenticated live Host-SBS renderer input; not a client wire contract"},
         {"units", {
                     {"coordinate", "dimensionless canonical coordinate derived from raw depth"},
-                    {"gain", completed.depth_input_region.is_video_region() ?
-                      "one-eye ROI-local source-U per curve unit" :
-                      "one-eye full-source-U per curve unit"},
+                    {"gain", joint_plane_mode_value == 3u ?
+                      (completed.depth_input_region.is_video_region() ?
+                        "one-eye ROI-local source-U per coordinate unit" :
+                        "one-eye full-source-U per coordinate unit") :
+                      (completed.depth_input_region.is_video_region() ?
+                        "one-eye ROI-local source-U per curve unit" :
+                        "one-eye full-source-U per curve unit")},
                     {"parallax", completed.depth_input_region.is_video_region() ?
                       "signed one-eye ROI-local source-U; full-source renderer authority additionally requires depth_input_region embedding" :
                       "signed one-eye full-source-U"},
@@ -2706,6 +2822,10 @@ namespace platf::sbs_debug {
                         {"requested_gain", completed.parallax_v2_requested_gain},
                         {"requested_pop_strength", completed.parallax_v2_requested_pop_strength},
                         {"direct_container_limit", direct_container_limit},
+                        {"adaptive_max_tick_gap_ms", adaptive_max_tick_gap_ms},
+                        {"adaptive_time_constant_seconds", adaptive_time_constant_seconds},
+                        {"adaptive_log_scale_rate", adaptive_log_scale_rate},
+                        {"adaptive_zero_budget_per_second", adaptive_zero_budget_per_second},
                         {"max_horizontal_slope", max_horizontal_slope},
                         {"max_vertical_shear", max_vertical_shear},
                         {"vertical_majorant_share", vertical_majorant_share},
@@ -2715,11 +2835,20 @@ namespace platf::sbs_debug {
         {"named_values", std::move(named_values)},
         {"decoded", decoded},
         {"adaptation_semantics", {
-                                    {"coordinate", "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable"},
-                                    {"convergence_curve", "arithmetic-mean-center-is-zero-plane"},
-                                    {"requested_gain", "immutable-cfg-pop-strength"},
-                                    {"container_scale", "abi-retained-identity-pointwise-soft-container-is-map-local"},
-                                    {"near_curve", "fixed-contract-logarithmic-tau-independent-of-content-occupancy"},
+                                    {"coordinate", joint_plane_mode_value == 3u ?
+                                      "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference" :
+                                      "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable"},
+                                    {"convergence_curve", joint_plane_mode_value == 3u ?
+                                      "continuously-tracked-mean-is-zero-plane-no-cut-latch" :
+                                      "arithmetic-mean-center-is-zero-plane"},
+                                    {"requested_gain", joint_plane_mode_value == 3u ?
+                                      "immutable-cfg-pop-strength-independent-of-display-limit" : "immutable-cfg-pop-strength"},
+                                    {"container_scale", joint_plane_mode_value == 3u ?
+                                      "abi-retained-identity-mode3-hard-representation-cap" :
+                                      "abi-retained-identity-pointwise-soft-container-is-map-local"},
+                                    {"near_curve", joint_plane_mode_value == 3u ?
+                                      "linear-coordinate-no-depth-curve-before-hard-representation-cap" :
+                                      "fixed-contract-logarithmic-tau-independent-of-content-occupancy"},
                                     {"spatial_conditioner", "fixed-75pct-vertical-majorant-share-then-horizontal-majorant"},
                                   }},
       };
@@ -4864,7 +4993,7 @@ namespace platf::sbs_debug {
             true,
             true,
             "compact SLR13 subtitle authority state",
-            "Exact 80-word little-endian SLR13 owner, pending, stabilized local-plane target, bounded unreliable-measurement hold count, and target-publication authority state.",
+            "Exact 96-word little-endian SLR14 owner, pending, stabilized local-plane target, bounded unreliable-measurement hold count, target-publication authority state, and 16-word adaptive UI tail.",
             subtitle_locator_state_sha256
           );
         }

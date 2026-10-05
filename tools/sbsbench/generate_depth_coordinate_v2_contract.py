@@ -66,6 +66,13 @@ EXPECTED_DEFAULT_NAMES = (
     "max_vertical_shear",
     "vertical_majorant_share",
     "convergence_curve_default",
+    "adaptive_time_constant_seconds",
+    "adaptive_log_scale_rate",
+    "adaptive_zero_budget_per_second",
+    "adaptive_max_tick_gap_ms",
+    "host_percentile_bin_count",
+    "host_percentile_low",
+    "host_percentile_high",
 )
 EXPECTED_DEFAULT_KEYS = set(EXPECTED_DEFAULT_NAMES)
 EXPECTED_MODEL_CALIBRATION_KEYS = {
@@ -208,9 +215,9 @@ CANONICAL_SUBTITLE_OCR = {
         "final_box_capacity": 8,
     },
     "locator_state": {
-        "schema": 13,
-        "tag": 0x33314C53,
-        "word_count": 80,
+        "schema": 14,
+        "tag": 0x34314C53,
+        "word_count": 96,
         "header_word_count": 32,
         "rectangle_capacity": 4,
         "owner_offset": 32,
@@ -224,6 +231,8 @@ CANONICAL_SUBTITLE_OCR = {
         "provisional_current_flag": 1 << 4,
         "provisional_target_word": 29,
         "provisional_fade_word": 30,
+        "adaptive_offset": 80,
+        "adaptive_word_count": 16,
     },
     "condition_params": {
         "schema": 3,
@@ -240,6 +249,14 @@ EXPECTED_CONSTANT_FIELD_NAMES = (
     "max_horizontal_slope",
     "direct_container_limit",
     "convergence_curve_default",
+    "joint_plane_mode",
+    "joint_plane_reserved0",
+    "joint_plane_reserved1",
+    "joint_plane_reserved2",
+    "joint_observation_timestamp_low",
+    "joint_observation_timestamp_high",
+    "joint_observation_reserved0",
+    "joint_observation_reserved1",
 )
 EXPECTED_FRAME_STAT_FIELD_NAMES = (
     "mean",
@@ -250,6 +267,7 @@ EXPECTED_FRAME_STAT_FIELD_NAMES = (
     "texel_count",
     "valid",
     "reserved",
+    "percentile_low", "percentile_high", "percentile_valid", "percentile_bin_width",
 )
 EXPECTED_SHADOW_STATE_FIELD_NAMES = (
     "center",
@@ -262,8 +280,15 @@ EXPECTED_SHADOW_STATE_FIELD_NAMES = (
     "contract_tag_bits",
     "camera_center_integrity_bits",
     "renderer_authorization_bits",
-    "mapping_state_reserved_1",
+    "joint_plane_mode_bits",
     "mapping_state_reserved_2",
+    "gain_last_observation_low", "gain_last_observation_high",
+    "gain_clock_armed", "gain_seed_count",
+    "gain_target_zero", "gain_target_inverse_scale", "gain_target_nearest",
+    "gain_display_limit",
+    "gain_seed_first_low", "gain_seed_first_high",
+    "gain_seed_last_low", "gain_seed_last_high",
+    "gain_seed_mean_nearest", "gain_seed_mean_zero", "gain_reserved0", "gain_reserved1",
 )
 CONTRACT_TAG_SENTINEL = "contract_tag"
 SHADER_MANIFEST = shader_manifest_generator.load_manifest()
@@ -449,6 +474,12 @@ def validate_contract(
             raise ValueError(f"calibrated default {name} must be positive")
     if calibrated_defaults["max_horizontal_slope"] >= 1.0:
         raise ValueError("max_horizontal_slope must be below one")
+    if (calibrated_defaults["host_percentile_bin_count"] != 256 or
+            not 0.0 < calibrated_defaults["host_percentile_low"] <
+            calibrated_defaults["host_percentile_high"] < 1.0):
+        raise ValueError("Host percentile histogram bins or ranks are invalid")
+    if calibrated_defaults["adaptive_max_tick_gap_ms"] != 250:
+        raise ValueError("adaptive source-clock gap limit is invalid")
     for name in ("max_horizontal_slope", "max_vertical_shear"):
         scaled = float(calibrated_defaults[name]) * LIMITER_Q_SCALE
         if not scaled.is_integer() or scaled <= 0.0 or scaled > 0xFFFFFFFF:
@@ -589,8 +620,10 @@ def validate_contract(
             raise ValueError(
                 f"{name} physical field order must be exactly " +
                 ", ".join(expected_names))
-        if any(field["type"] != "float32" for field in fields):
-            raise ValueError(f"{name} currently supports only float32 fields")
+        expected_types = (["float32"] * 8 + ["uint32"] * 8
+                          if name == "constant_buffer" else ["float32"] * len(fields))
+        if [field["type"] for field in fields] != expected_types:
+            raise ValueError(f"{name} has an invalid ordered field type layout")
 
     constant_buffer = contract.get("constant_buffer")
     if (not isinstance(constant_buffer, dict) or
@@ -919,6 +952,8 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"  inline constexpr std::uint32_t subtitle_locator_owner_offset = {locator_state['owner_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_pending_offset = {locator_state['pending_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_current_offset = {locator_state['current_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_adaptive_offset = {locator_state['adaptive_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_adaptive_word_count = {locator_state['adaptive_word_count']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_kind_word = {locator_state['kind_word']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_owner_kind_shift = {locator_state['owner_kind_shift']}u;",
         "  inline constexpr std::uint32_t subtitle_locator_pending_kind_shift = "
@@ -984,8 +1019,10 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "                subtitle_locator_rectangle_capacity * 4u);",
         "  static_assert(subtitle_locator_current_offset == subtitle_locator_pending_offset +",
         "                subtitle_locator_rectangle_capacity * 4u);",
-        "  static_assert(subtitle_locator_state_word_count == subtitle_locator_current_offset +",
+        "  static_assert(subtitle_locator_adaptive_offset == subtitle_locator_current_offset +",
         "                subtitle_locator_rectangle_capacity * 4u);",
+        "  static_assert(subtitle_locator_state_word_count == subtitle_locator_adaptive_offset +",
+        "                subtitle_locator_adaptive_word_count);",
         "  static_assert(subtitle_target_horizontal_fallback_max_radius_steps == 2u);",
         "  static_assert(subtitle_target_horizontal_step_denominator == 16u);",
         "  static_assert(subtitle_condition_param_word_count == 6u);",
@@ -1263,7 +1300,9 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "",
         "  struct alignas(16) constants_t {",
     ])
-    lines.extend(f"    float {_identifier(field['name'])};" for field in constants)
+    lines.extend(
+        f"    {'float' if field['type'] == 'float32' else 'std::uint32_t'} "
+        f"{_identifier(field['name'])} {{}};" for field in constants)
     lines.extend([
         "  };",
         "",
@@ -1610,6 +1649,8 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_SUBTITLE_LOCATOR_OWNER_OFFSET {locator_state['owner_offset']}u",
         f"#define V2_SUBTITLE_LOCATOR_PENDING_OFFSET {locator_state['pending_offset']}u",
         f"#define V2_SUBTITLE_LOCATOR_CURRENT_OFFSET {locator_state['current_offset']}u",
+        f"#define V2_SUBTITLE_LOCATOR_ADAPTIVE_OFFSET {locator_state['adaptive_offset']}u",
+        f"#define V2_SUBTITLE_LOCATOR_ADAPTIVE_WORD_COUNT {locator_state['adaptive_word_count']}u",
         f"#define V2_SUBTITLE_LOCATOR_KIND_WORD {locator_state['kind_word']}u",
         f"#define V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT {locator_state['owner_kind_shift']}u",
         f"#define V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT {locator_state['pending_kind_shift']}u",
@@ -1636,6 +1677,10 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         # not bound at the warp draw's pixel stage.
         f"#define V2_CONVERGENCE_CURVE_DEFAULT "
         f"{_float_literal(defaults['convergence_curve_default'])}",
+        *[item for name in EXPECTED_DEFAULT_NAMES if name.startswith(("adaptive_", "host_percentile_"))
+          for item in (
+              f"#define V2_{name.upper()} {_float_literal(defaults[name])}",
+              f"static const float v2_{name} = V2_{name.upper()};")],
         "static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;",
         "static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;",
         "",
@@ -1698,7 +1743,9 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         "",
         f"cbuffer {constant_buffer['name']} : register({constant_buffer['register']}) {{",
     ]
-    lines.extend(f"    float v2_{field['name']};" for field in constants)
+    lines.extend(
+        f"    {'float' if field['type'] == 'float32' else 'uint'} v2_{field['name']};"
+        for field in constants)
     lines.extend([
         "};",
         "",
@@ -1807,7 +1854,7 @@ def render_hlsl_ocr_assertions() -> str:
         "        V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY * 4u || \\",
         "    V2_SUBTITLE_LOCATOR_CURRENT_OFFSET != V2_SUBTITLE_LOCATOR_PENDING_OFFSET + \\",
         "        V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY * 4u || \\",
-        "    V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT != V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + \\",
+        "    V2_SUBTITLE_LOCATOR_ADAPTIVE_OFFSET != V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + \\",
         "        V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY * 4u || \\",
         "    V2_SUBTITLE_LOCATOR_KIND_WORD != 31u || \\",
         "    V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT != 0u || \\",
@@ -1821,6 +1868,9 @@ def render_hlsl_ocr_assertions() -> str:
         "    V2_SUBTITLE_TARGET_HORIZONTAL_STEP_DENOMINATOR != 16u || \\",
         "    V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT != 6u",
         '#error "Generated V2 OCR8/SLR13 contract invariants are inconsistent"',
+        "#endif",
+        "#if V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT != (V2_SUBTITLE_LOCATOR_ADAPTIVE_OFFSET + V2_SUBTITLE_LOCATOR_ADAPTIVE_WORD_COUNT)",
+        '#error "Generated adaptive subtitle tail is inconsistent"',
         "#endif",
         "",
         "#endif",

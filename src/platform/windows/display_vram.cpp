@@ -2187,9 +2187,7 @@ namespace platf::dxgi {
             v2_renderer_selected && matched_render_slot &&
             v2_result_authenticated &&
             sbs_reprojection_v2_live_ps && v2_live_resources_complete;
-          if (v2_live_warp_selected) {
-            v2_live_warp_seen = true;
-          } else if (v2_renderer_selected && matched_render_slot && v2_live_warp_seen && !v2_live_warp_loss_logged) {
+          if (!v2_live_warp_selected && v2_renderer_selected && matched_render_slot && v2_live_warp_seen && !v2_live_warp_loss_logged) {
             BOOST_LOG(error)
               << "Host SBS lost authenticated live-warp authority after parallax-v2 was active"
               << " (result_authenticated=" << (v2_result_authenticated ? "true" : "false")
@@ -2335,6 +2333,9 @@ namespace platf::dxgi {
             if (!record_host_sbs_v2_draw(device_ctx.get(), draw_command)) {
               BOOST_LOG(error) << "Host SBS V2 draw operands are incomplete."sv;
               return -1;
+            }
+            if (v2_live_warp_selected) {
+              v2_live_warp_seen = true;
             }
             final_sbs_has_p010_y = p010_y_mrt_selected;
 
@@ -2577,6 +2578,8 @@ namespace platf::dxgi {
                   est.parallax_v2_requested_pop_strength;
                 dump_frame.parallax_v2_requested_gain =
                   est.parallax_v2_requested_gain;
+                dump_frame.parallax_v2_joint_plane_mode =
+                  est.parallax_v2_joint_plane_mode;
                 dump_frame.color_space = matched_render_slot->color_space;
                 dump_frame.depth_model = est.raw_model_provenance ?
                                            est.raw_model_provenance->depth_model :
@@ -3168,6 +3171,7 @@ namespace platf::dxgi {
       if (!depth_estimator) {
         return;
       }
+      sbs_telemetry_producer_failure_published = false;
       // Only a new captured sample creates a health sequence. The control loop repeats the
       // existing snapshot as a heartbeat and samples performance independently at send time.
       const auto result = depth_estimator->latest_depth_telemetry();

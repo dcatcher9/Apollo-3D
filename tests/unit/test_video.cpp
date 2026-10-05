@@ -1003,10 +1003,10 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 78u);
+  EXPECT_EQ(v2::contract_schema, 86u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
-  EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
-  EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
+  EXPECT_EQ(v2::shadow_state_dump_schema, 18u);
+  EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 3u);
   EXPECT_EQ(v2::capture_provenance_manifest_key, "raw_model_provenance");
   EXPECT_EQ(
     v2::capture_provenance_binding,
@@ -1211,20 +1211,22 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
     EXPECT_TRUE(v2::model_calibration_supports_shape(small_calibration, width, height)) << width << 'x' << height;
     EXPECT_TRUE(v2::capture_identity_is_calibrated(small_calibration.depth_model, small_calibration.depth_model_url, small_calibration.onnx_sha256, small_calibration.preprocess.profile, small_calibration.preprocess.source_closure_sha256, width, height)) << width << 'x' << height;
   }
-  EXPECT_EQ(v2::constant_float_count, 8u);
-  EXPECT_EQ(v2::constant_vector_count, 2u);
-  EXPECT_EQ(sizeof(v2::constants_t), 32u);
+  EXPECT_EQ(v2::constant_float_count, 16u);
+  EXPECT_EQ(v2::constant_vector_count, 4u);
+  EXPECT_EQ(sizeof(v2::constants_t), 64u);
   EXPECT_EQ(alignof(v2::constants_t), 16u);
-  EXPECT_EQ(v2::frame_stats_float_count, 8u);
-  EXPECT_EQ(v2::frame_stats_vector_count, 2u);
-  EXPECT_EQ(v2::state_float_count, 12u);
-  EXPECT_EQ(v2::state_vector_count, 3u);
+  EXPECT_EQ(v2::frame_stats_float_count, 12u);
+  EXPECT_EQ(v2::frame_stats_vector_count, 3u);
+  EXPECT_EQ(v2::state_float_count, 28u);
+  EXPECT_EQ(v2::state_vector_count, 7u);
   EXPECT_EQ(v2::state_float_count, v2::state_field_names.size());
   EXPECT_EQ(v2::constant_float_count, v2::constant_field_names.size());
   EXPECT_EQ(v2::frame_stats_float_count, v2::frame_stat_names.size());
   EXPECT_STREQ(v2::constant_field_names[0], "raw_coordinate_scale");
   EXPECT_STREQ(v2::constant_field_names[4], "requested_gain");
   EXPECT_STREQ(v2::constant_field_names[7], "convergence_curve_default");
+  EXPECT_STREQ(v2::constant_field_names[8], "joint_plane_mode");
+  EXPECT_EQ(offsetof(v2::constants_t, joint_plane_mode), 32u);
   EXPECT_STREQ(v2::frame_stat_names[v2::frame_stat_mean], "mean");
   EXPECT_STREQ(v2::frame_stat_names[v2::frame_stat_valid], "valid");
   EXPECT_STREQ(v2::state_field_names[v2::calibration_revision], "calibration_revision");
@@ -1245,7 +1247,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_EQ(v2::state_initial_words[v2::contract_tag_bits], v2::contract_tag);
   EXPECT_EQ(v2::state_initial_words[v2::camera_center_integrity_bits], 0u);
   EXPECT_EQ(v2::state_initial_words[v2::renderer_authorization_bits], 0u);
-  EXPECT_EQ(v2::state_initial_words[v2::mapping_state_reserved_1], 0u);
+  EXPECT_EQ(v2::state_initial_words[v2::joint_plane_mode_bits], 0u);
   EXPECT_EQ(v2::state_initial_words[v2::mapping_state_reserved_2], 0u);
   EXPECT_TRUE(v2::camera_center_integrity_is_valid(0u, 0u, 0u, 0u, 0u));
   EXPECT_FALSE(v2::camera_center_integrity_is_valid(0u, 0u, std::bit_cast<std::uint32_t>(-0.1f), 0u, 0u));
@@ -1299,7 +1301,7 @@ TEST(ParallaxV2ContractTest, SerializedRendererStateFailsClosedOnAnyBrokenSeal) 
          v2::contract_tag_bits,
          v2::camera_center_integrity_bits,
          v2::renderer_authorization_bits,
-         v2::mapping_state_reserved_1,
+         v2::joint_plane_mode_bits,
        }) {
     auto corrupt = initialized;
     corrupt[index] ^= 1u;
@@ -1307,6 +1309,63 @@ TEST(ParallaxV2ContractTest, SerializedRendererStateFailsClosedOnAnyBrokenSeal) 
       << "state word " << index << " was not authenticated";
   }
   EXPECT_FALSE(v2::parallax_state_words_are_authenticated(initialized, raw_scale * 1.01f));
+}
+
+TEST(ParallaxV2ContractTest, AdaptiveStateBindsModeClockAndModelScaleFloor) {
+  namespace v2 = models::depth_coordinate_v2;
+  const float raw_scale = v2::model_calibrations.front().raw_coordinate_scale;
+  auto state = v2::state_initial_words;
+  const auto seal = [](v2::state_words_t &words) {
+    words[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(words);
+  };
+  ASSERT_TRUE(v2::parallax_state_words_are_authenticated(state, raw_scale, 0u));
+  EXPECT_FALSE(v2::parallax_state_words_are_authenticated(state, raw_scale, 3u));
+  state[v2::joint_plane_mode_bits] = 3u;
+  seal(state);
+  ASSERT_TRUE(v2::parallax_state_words_are_authenticated(state, raw_scale, 3u));
+  state[v2::center] = std::bit_cast<std::uint32_t>(2.4f);
+  state[v2::inverse_scale] = std::bit_cast<std::uint32_t>(1.0f / raw_scale);
+  state[v2::calibration_revision] = 2u;
+  state[v2::frame_valid] = std::bit_cast<std::uint32_t>(1.0f);
+  state[v2::renderer_authorization_bits] = v2::contract_tag;
+  state[v2::gain_last_observation_low] = 100000u;
+  state[v2::gain_clock_armed] = 1u;
+  state[v2::gain_seed_count] = 1u;
+  state[v2::gain_target_zero] = state[v2::center];
+  state[v2::gain_target_inverse_scale] = state[v2::inverse_scale];
+  state[v2::gain_target_nearest] = std::bit_cast<std::uint32_t>(raw_scale);
+  state[v2::gain_display_limit] = std::bit_cast<std::uint32_t>(v2::direct_container_limit);
+  state[v2::gain_seed_first_low] = state[v2::gain_seed_last_low] = 100000u;
+  state[v2::gain_seed_mean_nearest] = state[v2::gain_target_nearest];
+  state[v2::gain_seed_mean_zero] = state[v2::center];
+  seal(state);
+  ASSERT_TRUE(v2::parallax_state_words_are_authenticated(state, raw_scale, 3u));
+  for (const std::uint32_t mode : {0u, 1u, 2u, 4u}) {
+    auto corrupt = state;
+    corrupt[v2::joint_plane_mode_bits] = mode;
+    seal(corrupt);
+    EXPECT_FALSE(v2::parallax_state_words_are_authenticated(corrupt, raw_scale));
+  }
+  for (const float inverse : {0.0f, -1.0f, 1.0f,
+         std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+    auto corrupt = state;
+    corrupt[v2::inverse_scale] = std::bit_cast<std::uint32_t>(inverse);
+    seal(corrupt);
+    EXPECT_FALSE(v2::parallax_state_words_are_authenticated(corrupt, raw_scale));
+  }
+  for (std::size_t word = v2::gain_last_observation_low; word < state.size(); ++word) {
+    auto corrupt = state;
+    corrupt[word] ^= 1u;
+    EXPECT_FALSE(v2::parallax_state_words_are_authenticated(corrupt, raw_scale)) << word;
+  }
+  // An unavailable observation retains the complete sealed camera but removes render authority.
+  state[v2::frame_valid] = std::bit_cast<std::uint32_t>(0.0f);
+  state[v2::renderer_authorization_bits] = 0u;
+  EXPECT_TRUE(v2::parallax_state_words_are_authenticated(state, raw_scale, 3u));
+  state[v2::center] = state[v2::inverse_scale] = 0u;
+  std::fill(state.begin() + v2::gain_last_observation_low, state.end(), 0u);
+  seal(state);
+  EXPECT_TRUE(v2::parallax_state_words_are_authenticated(state, raw_scale, 3u));
 }
 
 TEST(ParallaxV2ContractTest, RuntimeConstantsAndShaderProvenanceFailClosed) {
@@ -3135,6 +3194,15 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   refined_result.refined_live_geometry_active = true;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(refined_result));
 
+  auto adaptive_result = refined_result;
+  adaptive_result.parallax_v2_joint_plane_mode = 3u;
+  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(adaptive_result));
+  for (const std::uint32_t mode : {1u, 2u, 4u, 0xffffffffu}) {
+    auto unknown_mode = refined_result;
+    unknown_mode.parallax_v2_joint_plane_mode = mode;
+    EXPECT_FALSE(models::parallax_v2_result_is_authenticated(unknown_mode)) << mode;
+  }
+
   const models::depth_source_rect_t video_rect {100u, 80u, 1700u, 980u};
   const auto coarse_video_plan = models::plan_host_sbs_v2_video_region(
     video_rect, 1920u, 1080u, {770, 434}
@@ -4052,6 +4120,8 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_coordinate_v2_histogram_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_coordinate_v2_quantiles_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_packed_resample_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"},
@@ -4226,7 +4296,7 @@ TEST(DirectxShaderTest, FusedV2MomentsPreserveNormalizationBitSemantics) {
     partial_uav
   ));
   ASSERT_TRUE(create_structured_output(
-    2u,
+    static_cast<UINT>(models::depth_coordinate_v2::frame_stats_vector_count),
     frame_buffer,
     nullptr,
     frame_uav

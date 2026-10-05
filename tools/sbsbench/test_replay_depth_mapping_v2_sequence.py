@@ -36,6 +36,7 @@ try:
         _metric_contract_evidence,
         _publish_renderer_quality_score, _resolve_pop_strength, _source_frames,
         _numpy_oracle_sequence,
+        _compare_gpu_with_numpy,
         _validate_frame_source_attestation, _validate_gpu_input_manifest_evidence,
         _validate_metric_contract_evidence, _validate_producer_evidence_bundle)
 except ImportError:  # Direct execution from tools/sbsbench.
@@ -66,6 +67,7 @@ except ImportError:  # Direct execution from tools/sbsbench.
         _metric_contract_evidence,
         _publish_renderer_quality_score, _resolve_pop_strength, _source_frames,
         _numpy_oracle_sequence,
+        _compare_gpu_with_numpy,
         _validate_frame_source_attestation, _validate_gpu_input_manifest_evidence,
         _validate_metric_contract_evidence, _validate_producer_evidence_bundle)
 
@@ -100,7 +102,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
 
         summary = _diagnostic_summary([active, retained, cleared])
 
-        self.assertEqual(summary["role"], "non-controlling-fixed-scale-camera-audit-v4")
+        self.assertEqual(summary["role"], "non-controlling-mode-selected-camera-audit-v6")
         self.assertEqual(summary["maximum_final_vertical_shear"], 0.3)
         self.assertEqual(summary["minimum_active_effective_gain"], 0.005)
         self.assertEqual(summary["flat_unusable_frames"], 2)
@@ -265,9 +267,9 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 clip, [1], shape, run_model)
             self.assertEqual(evidence["selected_frame_ids"], ["00001"])
             self.assertEqual(
-                evidence["model_hash_authority"], "schema-37-run-level-results-json")
+                evidence["model_hash_authority"], "schema-38-run-level-results-json")
             self.assertEqual(
-                evidence["input_shape_authority"], "schema-37-per-clip-raw-manifest")
+                evidence["input_shape_authority"], "schema-38-per-clip-raw-manifest")
             self.assertEqual(
                 evidence["eval_schema"], whole_clip_raw_contract.EVALUATOR_SCHEMA)
             self.assertEqual(
@@ -928,6 +930,35 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                     output, reference, manifest["mapping_config"],
                     "cut-state-hard-cut-generation", input_contract)
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            mode3 = json.loads(json.dumps(manifest))
+            mode3["mapping_config"]["joint_plane_mode"] = 3
+            for index, row in enumerate(mode3["frames"]):
+                row["observation_timestamp_us"] = 0xFFFFFFFF + index * 250000
+            manifest_path.write_text(json.dumps(mode3), encoding="utf-8")
+            reference["sha256"] = whole_clip_raw_contract.file_sha256(manifest_path)
+            _validate_gpu_input_manifest_evidence(
+                output, reference, mode3["mapping_config"],
+                "cut-state-hard-cut-generation", input_contract)
+            for clock in (True, 1.0, -1, 0x10000000000000000, None):
+                corrupt = json.loads(json.dumps(mode3))
+                if clock is None:
+                    del corrupt["frames"][0]["observation_timestamp_us"]
+                else:
+                    corrupt["frames"][0]["observation_timestamp_us"] = clock
+                manifest_path.write_text(json.dumps(corrupt), encoding="utf-8")
+                reference["sha256"] = whole_clip_raw_contract.file_sha256(manifest_path)
+                with self.subTest(clock=clock), self.assertRaises(ValueError):
+                    _validate_gpu_input_manifest_evidence(
+                        output, reference, mode3["mapping_config"],
+                        "cut-state-hard-cut-generation", input_contract)
+            mode3["mapping_config"].pop("joint_plane_mode")
+            manifest_path.write_text(json.dumps(mode3), encoding="utf-8")
+            reference["sha256"] = whole_clip_raw_contract.file_sha256(manifest_path)
+            with self.assertRaises(ValueError):
+                _validate_gpu_input_manifest_evidence(
+                    output, reference, mode3["mapping_config"],
+                    "cut-state-hard-cut-generation", input_contract)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             _validate_frame_source_attestation(output, rows[1], "00002")
             (output / "input_frames" / "frame_00002.png").write_bytes(
                 b"tampered-current-input")
@@ -1092,6 +1123,36 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
         tampered["sources"][-1]["sha256"] = "0" * 16
         with self.assertRaisesRegex(ValueError, "stale or incomplete"):
             _validate_metric_contract_evidence(tampered)
+
+    def test_mode3_staging_requires_explicit_clock_before_creating_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "explicit uint64 source timestamp"):
+                _materialize_gpu_replay_inputs(
+                    output, {}, {}, [1], [0], [False], "unit-cut", (1, 1), {},
+                    MappingV2Config(), joint_plane_mode=3)
+            self.assertEqual(list(output.iterdir()), [])
+            with self.assertRaisesRegex(ValueError, "legacy replay modes"):
+                _materialize_gpu_replay_inputs(
+                    output, {}, {}, [1], [0], [False], "unit-cut", (1, 1), {},
+                    MappingV2Config(), observation_timestamps_us=[1])
+
+    def test_new_native_modes_do_not_construct_or_claim_numpy_geometry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / "harness").mkdir()
+            np.zeros((2, 2), dtype="<f4").tofile(output / "harness/depth_00001.f32")
+            np.zeros((2, 2), dtype="<f4").tofile(output / "harness/parallax_00001.f32")
+            for mode in (3,):
+                with self.subTest(mode=mode), mock.patch(
+                        "replay_depth_mapping_v2_sequence._numpy_oracle_sequence") as oracle:
+                    document = _compare_gpu_with_numpy(
+                        output, [np.zeros((2, 2))], [1], [False], [0], "unit-cut",
+                        MappingV2Config(), {"mapping_config": {"joint_plane_mode": mode}})
+                    oracle.assert_not_called()
+                    self.assertIsNone(document["all_within_float32_tolerances"])
+                    self.assertEqual(document["role"], "not-applicable-mode-selected-native-only-v3")
+                    self.assertEqual(document["frames"][0]["frame_id"], "00001")
 
 
 if __name__ == "__main__":

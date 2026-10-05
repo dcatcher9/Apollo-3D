@@ -84,6 +84,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     V2_FRAME_STATS_RESERVED(frame1) = 0.0f;
     FrameStats[V2_FRAME_STATS_VECTOR_MEAN] = frame0;
     FrameStats[V2_FRAME_STATS_VECTOR_VALID_COUNT] = frame1;
+    // Each observation clears quantile authority. Only the optional mode-3 GPU scan may publish it.
+    FrameStats[V2_FRAME_STATS_VECTOR_PERCENTILE_LOW] = 0.0f;
     MinMaxRaw.Store(0, normalization_minimum_bits);
     MinMaxRaw.Store(4, normalization_maximum_bits);
     MinMaxRaw.Store(8, normalization_valid_count);

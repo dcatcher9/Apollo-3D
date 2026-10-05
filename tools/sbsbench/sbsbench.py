@@ -680,7 +680,7 @@ def _local_vertical_offsets(eye, expected, valid, max_height=540,
                     na = float(np.linalg.norm(a))
                 nb = float(np.linalg.norm(b))
                 reference_std = nb / np.sqrt(max(b.size, 1))
-                if min(na, nb) <= 1e-8 or reference_std < min_std:
+                if min(na, nb) <= 1e-8:
                     scores.append(float("-inf"))
                     texture.append(0.0)
                     continue
@@ -690,6 +690,14 @@ def _local_vertical_offsets(eye, expected, valid, max_height=540,
             best_index = int(np.argmax(scores))
             best_score = scores[best_index]
             if not np.isfinite(best_score) or best_score < 0.55:
+                continue
+            # Rank every nondegenerate reference before applying its texture floor. Native
+            # output quantization can raise a nearly perfect zero-offset patch just above
+            # min_std while its unquantized reference stays just below. Pruning that reference
+            # before ranking lets a worse neighboring row become a false vertical match.
+            # The winning reference still needs the unchanged texture qualification; otherwise
+            # this tile abstains instead of substituting a more textured, lower-correlation row.
+            if texture[best_index] < min_std:
                 continue
             # A repeated vertical pattern can have several equally valid peaks.  Do not turn its
             # arbitrary phase into a hard stereoscopic fault.

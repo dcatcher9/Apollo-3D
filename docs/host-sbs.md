@@ -19,6 +19,9 @@ Sunshine-generated geometry.
 
 ## Pipeline
 
+The diagram describes ordinary mode 0. The opt-in mode 3 policy below replaces its camera,
+coordinate map/container and adaptive subtitle plane; all modes share continuous ROI embedding.
+
 ```mermaid
 flowchart LR
     CAPTURE["Matched source frame"]
@@ -29,7 +32,7 @@ flowchart LR
     DAV2["Authenticated DAV2 Small + frozen ZipDepth convex 2x"]
     CUT["Cut-only evidence and scene epoch"]
     OCR["PP-OCRv6 tiny detector (bottom 960x160)"]
-    LOCATOR["OCR8 boxes and compact SLR13 tracker"]
+    LOCATOR["OCR8 boxes and compact SLR14 tracker"]
     CAMERA["Scene-latched raw center"]
     CURVE["Fixed raw coordinate and curve"]
     CONTAINER["Pointwise soft source-U container"]
@@ -61,8 +64,8 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 78/tag `0xB4221F70`, canonical SHA-256
-`6560a9bd08f3750ad6daf961302651032d0027bb2e7d6dadd1611d3c28723872`. It binds the
+schema 86/tag `0x063B91AB`, canonical SHA-256
+`9e86dbdbf11d83b19bcb4b5524d1485403a3c6a47f1d6bbe2b0bd078967e0a10`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -73,14 +76,14 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 18 | `6f91d6290272ba8a4c9ccb56d654bc5f52f0a88a1fcd02374d075d400e98f6fc` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `bf19e88ff178a11c14da3b42439dd000033093bd53a3b6d171e41f69917fa759` |
-| `near_identical_detector` | 4 | `4285fad7312d630f83fb23e6ea5ec76453d2872f59341d08545e63ddfa032289` |
-| `gpu_trace` | 1 | `2074b01cf769a09fd3ad5001cb1f1c505615d224e4bd9c26e18b677a2934b0f6` |
-| `parallax_v2_live_renderer` | 2 | `020401a4393953a92e4214169b15e9204ef8ece10d9305e755e80356e27b6fdb` |
-| `parallax_v2_p010_y` | 1 | `2f76236d3e48c6b341d4650d052aa568b3a91cc69731ce51fc514da11a8c662f` |
+| `parallax_v2_producer` | 20 | `0055fbdfe68e6f34de0f7ebee9bb749207fc93d6e5855008a332232bf2f982e6` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `e215e245c5974d8f00a8a5ab655325b0c4a554cd31787f7e09c741df0f635e29` |
+| `near_identical_detector` | 4 | `721e0a9d0ebc2cd6120acb97d41d07a6017909736a26309ee5e0bf13b4c6b7d7` |
+| `gpu_trace` | 1 | `76eca37a1c103a5e525a907ff70c0a68cd43a2e88104e51b5528d2204e159829` |
+| `parallax_v2_live_renderer` | 2 | `e4308603ee41db242fa95cffdc0987b41312891bd6c6914ba90bf2fae0be3d6f` |
+| `parallax_v2_p010_y` | 1 | `674664b53eabe828c86de1fcc08942541cf9ce5679241b5082ef5c58cc2cd137` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `ccc4dfac1fb7808a555381615f18fcdb9953433f637a928a5836211130a55191` |
+| `parallax_v2_live_diagnostic` | 2 | `deb58ef3c4775bd59205c6ccce3e7ad182bc1e9ae747e2079369f9905c51c3c4` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -111,6 +114,107 @@ temporal history, scene-cut evidence, camera state, geometry conditioning, and p
 Host SBS using Sunshine depth, production Web UI conversion, and the maintained benchmark harness require this pinned
 composite. A missing, non-regular, unreadable, or hash-mismatched asset fails flat; no raw DAV2
 runtime is selected. There is no supported Host SBS model selector.
+
+### Opt-in joint-plane live experiment
+
+`sbs_3d_joint_plane_experiment = enabled` selects experimental mode 3 within the same
+authenticated V2 producer and renderer. It defaults to disabled. Restart the development host
+after changing it. The ordinary mode 0 policy and calibration table above remain the control;
+Game 3D code and its native depth interpretation are unchanged.
+
+Mode 3 uses a Host-specific relative-depth adapter. Every finite real-content DAV2 value,
+including edge foreground and signed values, contributes to the arithmetic mean and ordinary
+min/max/variance statistics. A GPU histogram uses 256 bins over that same finite raw range;
+P05 is the lower edge of its crossing bin and P95 is the upper edge of its crossing bin. These are
+bounded-resolution histogram estimates, not exact sorted percentiles. Histogram population must
+equal the valid real-content population. Empty, nonfinite, collapsed, malformed or incomplete
+statistics render the current frame flat while an established camera holds; unavailable percentile
+authority is canonical zero and cannot be replaced with extrema.
+
+The continuously observed targets are `zero_target = mean(raw)` and
+`D_target = max((P95-P05)/2, raw_coordinate_scale)`, where the authenticated model's
+`raw_coordinate_scale` is currently `2.25`. The inverse-scale target is `k_target = 1/D_target`.
+The floor is the existing model-specific artistic amplitude reference, not a measured noise floor
+or a conversion to physical inverse distance. It prevents tiny positive contrast from automatically
+earning full stereo strength. No normalized `[0,1]` depth texture is needed. This adapter does not
+establish a universal physical calibration between DAV2 values and Game 3D device/camera depth.
+
+The first valid source-time observation initializes zero and inverse scale immediately. Later
+fresh valid observations use `alpha=1-exp(-dt/0.5)` and
+`k_new=k*exp(clamp(alpha*(log(k_target)-log(k)), -log(2)*dt, +log(2)*dt))`, followed by
+`zero += clamp(alpha*(zero_target-zero), -dt/k_new, +dt/k_new)`.
+Thus inverse scale can double/halve once per second and zero's rate is bounded in normalized-depth
+units. The sealed 64-bit source clock is in microseconds. Zero, repeated or regressed clocks cannot
+authorize adaptation; the first valid observation after interruption or a gap over 250 ms rearms
+without spending the missing interval. A confirmed cut remains authenticated detector/ownership
+metadata and does not reset or disarm the mode 3 geometry controller. A true input-domain reset
+clears all 28 state words. Authenticated reuse freezes the complete depth/OCR/UI/final tuple and
+controller state, so a static input can pause unfinished adaptation.
+
+Gain, depth mapping and the display guard remain separate. The coordinate is
+`u=(raw-zero)*k`, and mode 3 maps it directly:
+
+```text
+requested_gain = 0.00375 * pop_strength
+candidate      = clamp(requested_gain * u, -0.04, +0.04)
+```
+
+Mode 3 has no depth curve or soft envelope. The signed hard bound is a representation guard,
+independent of requested gain; it does not turn small raw-depth contrast into full disparity.
+The native 75/25 vertical envelope and row majorant still condition that candidate. At fixed
+gain and divisor, two unsaturated pre-limiter samples have separation
+`requested_gain*(raw_a-raw_b)/D`, independent of the zero. Moving zero therefore shifts their
+pre-limiter placement together. Hard saturation can clip that separation, and the spatial
+limiters can alter local relief. Adaptive changes to D still change strength. The fixed floor
+intentionally breaks multiplicative affine invariance when active; filtering raw zero/scale state
+also does not cancel arbitrary independently changing per-frame model gauges. Composition changes,
+temporal pumping and foreground relief still require paired evaluation and physical live inspection.
+
+The subtitle path transfers Game 3D's UI mask/protection/plane ideas using Host's current OCR8
+cores and paired coarse covers as its mask. It does not add a pixel-perfect UI mask or logo detector.
+Existing two-distinct-observation ownership and exact current OCR authority remain required.
+The controller probes immutable post-limit Base over the union of all current covers, deduplicating
+overlaps and including edge covers. Candidates advance in four per-eye analysis-source-pixel
+steps through the full `0.04` representation bound; the final candidate is exactly `0.04`.
+A Base sample conflicts above candidate minus two per-eye analysis-source pixels. Entry uses
+more than 20% of covered cells or 2% of content cells; release requires strictly less than 15% and
+1.5%. Approach waits 100 ms; retreat waits 1500 ms after reaching the goal. Rates are
+`0.03` source U/s forward and `0.005` backward. Integration is capped at 250 ms per observation,
+while dwell uses actual source time. An authenticated capped-conflict flag records that even the
+top candidate cannot satisfy the configured clearance; the controller cannot promise clearance
+when the scene consumes the same forward guard.
+
+Current covers receive the plane's exact float bits immediately, with zero within-cover depth
+range and full fade strength. This removes birth mixing and the production half-source-pixel
+per-eye core tolerance only for mode 3. A slope-safe outside collar conditions neighboring geometry.
+Domain changes and confirmed cuts reset UI filter memory; an ordinary subtitle handoff does not.
+Missing current coverage means exact Base over real content. Reuse freezes the complete UI history,
+and invalid OCR/time cannot advance dwell. SLR14 retains its 16-word adaptive tail after the
+80-word ownership state; the default mode writes it as zero. A coarse cover can still miss part of
+a glyph, flatten enclosed scene pixels, or condition adjacent content. A full guard is not a comfort
+qualification. Include static-after-birth and partial-coverage cases in live inspection.
+
+For an exact authorized ROI, both supported modes use the same continuous full-capture inverse.
+DAV2 still analyzes only the authorized video/client rectangle. The renderer embeds its final
+parallax field into full-source coordinates and extends each signed boundary value through the
+existing slope-limited exterior collar. The field reaches zero beyond that collar; nearby browser
+pixels may move smoothly. The ROI interior is not tapered merely because it approaches an edge.
+Both eyes sample the original full matched capture once, preserving source V. There is no separate
+browser visibility plane, rim detector, ownership selector or repeated-column fill.
+
+Foreground can still project beyond the original video rectangle. This continuous warp trades some
+nearby browser deformation for a smooth transition. It does not reconstruct video content beyond
+the original crop or recover the silhouette of an already-cropped object. A cropped foreground can
+still have conflicting framing cues; neither continuous depth nor a smoother browser sample proves
+comfortable out-of-screen projection. The [dump map contract](../tools/sbsbench/DUMP_FORMAT.md#analysis-domains-and-window-provenance)
+records the same continuous inverse and finite-source boundary mask in every mode.
+
+Mode 0 retains the scene-latched mean and fixed 2.25 divisor. Modes 0 and 3 share
+authenticated publication and the native limiter pipeline. The adaptive policy remains opt-in
+and requires native paired evidence plus headset qualification before default promotion.
+The retained scale floor is a model-specific artistic reference, and the current UI guard is
+not a perceptual comfort guarantee. Neither policy resolves the missing silhouette or the
+contrasting browser strip when a source-cropped foreground projects beyond the original video.
 
 Fixed-shape shader bytecode is cached across restarts under the executable's trusted configuration
 directory at `shader-cache/host-sbs-v1`. Each artifact filename is keyed by the authenticated source
@@ -239,6 +343,9 @@ artifacts and manifest color fields when auditing the pipeline.
 
 ## Scene camera and raw coordinate
 
+This section describes the default mapping. The opt-in joint-plane policy above replaces its
+scene latch, fixed divisor, and nonlinear curve while retaining the same publication and renderer.
+
 For each finite public high-resolution depth field, the producer calculates exact extrema,
 arithmetic mean, and population standard deviation on the fused composite's single grid. Standard
 deviation is validity evidence only. A field with
@@ -269,7 +376,11 @@ reacquire the camera.
 
 ### OCR-box subtitle conditioner
 
-The production subtitle path is the single current detector-only PP-OCRv6 tiny/OCR8/SLR13 route.
+Ownership and cover qualification apply to both modes. The local supporting-plane selection and
+half/full geometric fade described below apply to the default mode; experimental mode uses the
+adaptive UI plane and immediate full conditioning described above.
+
+The production subtitle path is the single current detector-only PP-OCRv6 tiny/OCR8/SLR14 route.
 It does not run text recognition, language classification, or logo recognition. For an authenticated
 current-ready subtitle request in any of the six calibrated landscape/portrait logical fields, or
 their six exact-2x fused public fields, the GPU takes the exact
@@ -292,10 +403,10 @@ publication unit as DAV2. After private warmup/capture, DAV2 and OCR are sibling
 of one CUDA root and share one completion event after every interop-unmap tail. The authenticated
 subtitle work value is `1` for current-ready OCR, `2` for current ineligible abstention, or `0` for
 native USER32 suppression. Both ordinary dispositions publish only on valid inference; abstention
-keeps the optional OCR handle and `OOCR` marker zero. Suppression advances neither OCR8 nor SLR13.
+keeps the optional OCR handle and `OOCR` marker zero. Suppression advances neither OCR8 nor SLR14.
 
 Every reuse leaves OCR crop/TensorRT/postprocess/locator/condition work dormant and holds the complete
-depth/cut/camera/OCR8/SLR13/conditioned-final tuple byte-for-byte. Reprojection samples that atomic
+depth/cut/camera/OCR8/SLR14/conditioned-final tuple byte-for-byte. Reprojection samples that atomic
 field directly with current RGB. Once the joined root has submitted work, any asynchronous CUDA error
 fails the whole estimator closed because a later API call may surface an earlier context-wide launch
 fault. OCR does not run for source frames dropped while the previous observation is busy.
@@ -311,8 +422,8 @@ previously accepted by a near-identical reuse of older analysis.
 During a native USER32 interactive move/size
 observation, the accepted full-source depth frame explicitly suppresses the optional subtitle
 branch: OCR preprocessing and inference,
-OCR8 reduction, SLR13 observation, and subtitle conditioning do not run. This is no OCR observation
-rather than an abstaining or missing record, so the retained SLR13 state does not age or clear; the
+OCR8 reduction, SLR14 observation, and subtitle conditioning do not run. This is no OCR observation
+rather than an abstaining or missing record, so the retained SLR14 state does not age or clear; the
 frame publishes the ordinary post-limit Base field. Scene-cut analysis, depth normalization/EMA,
 the V2 camera and the remaining geometry producer continue normally. An explicitly armed Dump 3D
 frame remains an ordinary complete observation so frozen OCR/SLR resources are never serialized as
@@ -359,8 +470,8 @@ bottom is the exact rational ceil projection of detector row `155 - 2 = 153` thr
 bottom-6:1 source crop into the active depth field. A core at that projected row is valid; one field
 row below it is malformed. The upper bound remains the projected safe ROI bottom.
 
-SLR13 is a fixed 80-word compact state with schema `13` and little-endian tag bytes `SL13`,
-containing at most four owner/core rectangles, four
+SLR14 is a fixed 96-word compact state with schema `14` and little-endian tag bytes `SL14`,
+with the existing 80-word ownership prefix and a 16-word adaptive tail. It contains at most four owner/core rectangles, four
 pending/core rectangles, and four same-frame current cover rectangles. Header word 31 carries
 owner, pending, and current ribbon masks in bits `0..3`, `4..7`, and `8..11`; higher bits are zero.
 Generic ordinary-line geometry is expressed in coarse-field cell units. Let `s=1` for a coarse
@@ -447,8 +558,8 @@ otherwise valid unchanged domain also clears current and pending immediately, st
 the same six-distinct-observation cached-target grace, and conditions exact Base. Redispatching the
 same observation does not consume another grace step.
 
-SLR13 authenticates the durable CutBridge hard-cut epoch, not its one-frame pulse. An unchanged
-epoch is an ordinary continuing scene and cannot restart the owner; reuse does not dispatch SLR13
+SLR14 authenticates the durable CutBridge hard-cut epoch, not its one-frame pulse. An unchanged
+epoch is an ordinary continuing scene and cannot restart the owner; reuse does not dispatch SLR14
 at all. An epoch change remains sufficient even when the locator missed the original pulse. The
 saturating maximum epoch is the terminal unique-generation lifetime for one uninterrupted domain;
 the locator does not reinterpret a repeated maximum value plus a stale-prone pulse as a new cut.
@@ -463,7 +574,7 @@ lower-text owner stack, horizontally placed at the median of all owner-member ce
 same field-cell scale `s`, its rows are `10s` and `4s` cells above the owner top and each samples
 from `C-30s` through `C+30s` in `4s`-cell steps. Thus coarse and exact convex-2x fields observe the
 same source-space neighborhood. Only when
-that primary is unreliable, SLR13 performs a bounded near-center search. Let `W` be the horizontal
+that primary is unreliable, SLR14 performs a bounded near-center search. Let `W` be the horizontal
 span of the ordinary tight cores and let `C` be the unchanged aggregate primary center. It probes
 `C-W/16` then `C+W/16`; if either is reliable, the larger-U reliable result at that radius wins and
 the search stops. Only when neither is reliable does it probe `C-2W/16` then `C+2W/16` under the
@@ -540,8 +651,9 @@ naturally, and the gap is never converted into one merged rectangle. Because a r
 the complete field width and reaches the field bottom, its only exterior boundary—and therefore its
 only collar—is the corrected top edge. Missing current authority, invalid target
 state, unsupported tensor shape, or any identity failure copies ordinary post-limit V2 exactly.
-The one-thread resolver writes the complete 80-word state, issues a device-memory barrier,
-snapshots that just-written state into group memory, validates the snapshot—including equality of
+Lane zero of the 256-thread resolver group writes the complete 96-word state. The group
+uses all-memory synchronization for the experimental cover probe and UI controller, then
+snapshots that state into group memory and validates the snapshot—including equality of
 its scene epoch and the authenticated CutBridge hard-cut count bound at `t1`—and publishes the six
 immutable condition words consumed by rendering: schema, tag, current count/kinds, fade, and target.
 There is no separate preparation dispatch or live validation root. Every accepted OCR/SLR
@@ -560,7 +672,9 @@ full-resolution overlay detector, or GST/OGR/ORS dependency.
 
 ## Pop and the pointwise soft container
 
-`sbs_3d_pop_strength` is the only live geometry control. V2 uses it literally:
+`sbs_3d_pop_strength` is the live strength control. The joint-plane switch selects the policy.
+Ordinary mode 0 uses the following curve and soft container. Experimental mode 3 instead uses the
+linear map and hard bound in the [joint-plane policy](#opt-in-joint-plane-live-experiment).
 
 ```text
 requested_gain = pop_strength * 0.00375
@@ -575,7 +689,7 @@ texel. An extreme object therefore cannot shrink the relief of unrelated geometr
 container cannot make a local depth cliff steeper. It has no history and does not modify the scene
 camera or configured pop.
 
-The 12-word state layout retains `container_scale` for ABI compatibility. Its only valid value is
+The state prefix retains `container_scale` for ABI compatibility. Its only valid value is
 exactly `1.0`; all attenuation belongs to the pointwise map above. Dumps, replay traces, and the
 live state validator fail closed on any other value.
 
@@ -647,6 +761,9 @@ full-source path ignores dormant ROI floats and tensor-content words and does no
 texture dimensions. An active ROI must first have a finite normalized source rectangle; only then
 does the renderer query the depth extent and validate the integer tensor-content rectangle. Any
 invalid active geometry renders current color through flat identity.
+
+The opt-in mode 3 shares these exterior continuation and color-sampling rules. Only the
+producer's zero, relative-depth scale, linear candidate mapping and adaptive subtitle policy differ.
 
 ## Frame attribution and failure behavior
 
@@ -867,11 +984,11 @@ change creates a raw-model fallback.
 An inference receipt runs the complete depth postprocess chain, including frame statistics,
 normalization reductions and histogram, depth texture publication, scene-cut/history work, and
 every V2 state, mapping, limiter and Base-field pass. Ordinary subtitle work consumes OCR output with
-complete `RQST`/`CBRG`/`OOCR` proof, or publishes its requested abstention, then advances SLR13 and
+complete `RQST`/`CBRG`/`OOCR` proof, or publishes its requested abstention, then advances SLR14 and
 writes the complete conditioned final field from immutable Base.
 
 A reuse receipt copies previous normalized depth through the swapped output target and preserves
-normalization, cut, camera, model-input history, DAV2/V2 Base, OCR8, SLR13, condition parameters and
+normalization, cut, camera, model-input history, DAV2/V2 Base, OCR8, SLR14, condition parameters and
 the conditioned final field byte-for-byte. Native USER32 suppression produces no OCR/SLR observation
 and atomically publishes Base as the final field. A failure to publish the complete joined tuple is
 terminal and produces no nominal completion. Optional OCR readiness remains independently checked,
@@ -893,7 +1010,7 @@ stream flat; it never hides a broken wrapper by replaying the source graph.
 The GPU selects the depth branch without a CPU decision fence. Once CUDA has completed the joined
 root and unmaps, D3D submits the complete normalization, history, Base, subtitle and final-field
 publication. Only after that unit does the host enqueue a compact completion snapshot. The existing
-CBRG/RQST transaction, history-owner record, SLR13 header, condition6, V2 state and depth-frame state
+CBRG/RQST transaction, history-owner record, SLR14 header, condition6, V2 state and depth-frame state
 occupy the mandatory first 128 words of one 168-word/672-byte staging record, followed by one D3D
 event. A 32-word CutBridge section is copied on every publication; an eight-word cumulative-outcome
 section is copied when the diagnostics-enabled outcome buffer exists. There is no additional shader,
@@ -1031,13 +1148,13 @@ nor a late receipt can establish authority on the new route.
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-41 dump preserves Base when SLR13 is active, the complete atomic conditioned final field,
+schema-41 dump preserves Base when SLR14 is active, the complete atomic conditioned final field,
 and the selected path's publication resources with ordered D3D11 `CopyResource` operations
 and one terminal event. Submission performs no GPU-to-CPU wait or synchronous Map. Later
 render-thread calls poll with `DONOTFLUSH`, collect staging resources with `DO_NOT_WAIT`, then hand
 the CPU snapshot to the existing publication worker. The renderer's warp SRV and the atomic final
 SRV must be the same resource at admission; the dump stages and authenticates it once as
-`shadow_final_parallax.f32`. The verifier replays the ordinary limiter and, when active, SLR13
+`shadow_final_parallax.f32`. The verifier replays the ordinary limiter and, when active, SLR14
 directly into that field. The same final-field contract and native renderer are used by live Host
 SBS and the native sbs-bench whole-clip harness.
 
@@ -1048,9 +1165,9 @@ When diagnostics were enabled before reproduction, an optional GPU ring retains 
 completed accepted roots. Diagnostics-off production does not compile the trace shader, allocate
 its resources, append/copy/dispatch trace work, or expose a ring; enabling Dump 3D afterward cannot
 recover earlier history. With diagnostics enabled, a one-thread GPU pass runs only after the root's
-receipt and the infer-updated or reuse-held SLR13/condition tuple is finalized, before
+receipt and the infer-updated or reuse-held SLR14/condition tuple is finalized, before
 the receipt copy and production postprocess end marker; it copies the immutable 64-word
-transaction, SLR80, condition6, matched frame/domain identity, and authenticated depth/subtitle
+transaction, SLR96, condition6, matched frame/domain identity, and authenticated depth/subtitle
 dispositions into a tag-last 176-word record. It reads the finalized transaction through its existing
 raw SRV; immediate-context ordering and explicit UAV/SRV unbinding remove the need for a separate
 diagnostic transaction buffer or copy. `held_with_depth` records the prior locator frame
@@ -1500,7 +1617,7 @@ apply to it. A Game request never initializes the AI estimator to manufacture a 
 
 Dump 3D records one matched current-contract frame: source/model/public raw-model evidence,
 authenticated analysis-region placement, the V2 geometry chain and inverse map, scene/cut
-attribution, packed SBS, and—when selected—the exact OCR8 record and compact SLR13 state used by
+attribution, packed SBS, and—when selected—the exact OCR8 record and compact SLR14 state used by
 conditioning. `model_input.f32` is the fused model's sole high input and `raw_depth.f32` is its sole
 high `refined_depth` output. Packages separately bind embedded DAV2 provenance and composite runtime provenance. The
 reader accepts only the current schema and identities. Retired SLR3--SLR9 and GST/OGR/ORS packages

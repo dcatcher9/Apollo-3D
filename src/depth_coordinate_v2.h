@@ -8,6 +8,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 #include "generated/depth_coordinate_v2_contract.h"
@@ -22,8 +23,8 @@ namespace models::depth_coordinate_v2 {
   // layout change must bump the relevant value without pretending the coordinate math changed.
   // Dump 3D retains the historical `shadow_*` filenames as a compatibility schema; these values
   // now describe production V2 evidence, not an alternate renderer.
-  inline constexpr std::uint32_t shadow_state_dump_schema = 16u;
-  inline constexpr std::uint32_t shadow_frame_stats_dump_schema = 2u;
+  inline constexpr std::uint32_t shadow_state_dump_schema = 18u;
+  inline constexpr std::uint32_t shadow_frame_stats_dump_schema = 3u;
   inline constexpr std::uint32_t reserved_calibration_revision = 0xffffffffu;
 
   constexpr bool calibration_revision_word_is_valid(const std::uint32_t revision) {
@@ -44,17 +45,25 @@ namespace models::depth_coordinate_v2 {
   inline constexpr float raw_coordinate_scale_authentication_tolerance = 2.0e-6f;
   inline constexpr float requested_gain_authentication_tolerance = 1.0e-7f;
 
+  constexpr bool joint_plane_mode_word_is_valid(const std::uint32_t mode) {
+    return mode == 0u || mode == 3u;
+  }
+
   constexpr std::uint32_t camera_center_integrity_for_words(
     const std::uint32_t center_bits,
     const std::uint32_t inverse_scale_bits,
     const std::uint32_t convergence_curve_bits,
-    const std::uint32_t calibration_revision_bits
+    const std::uint32_t calibration_revision_bits,
+    const std::uint32_t joint_plane_mode_word = 0u
   ) {
     std::uint32_t checksum = 0u;
     checksum = (checksum ^ center_bits) * 16777619u;
     checksum = (checksum ^ inverse_scale_bits) * 16777619u;
     checksum = (checksum ^ convergence_curve_bits) * 16777619u;
     checksum = (checksum ^ calibration_revision_bits) * 16777619u;
+    if (joint_plane_mode_word != 0u) {
+      checksum = (checksum ^ joint_plane_mode_word) * 16777619u;
+    }
     return checksum;
   }
 
@@ -63,22 +72,81 @@ namespace models::depth_coordinate_v2 {
     const std::uint32_t inverse_scale_bits,
     const std::uint32_t convergence_curve_bits,
     const std::uint32_t calibration_revision_bits,
-    const std::uint32_t integrity_bits
+    const std::uint32_t integrity_bits,
+    const std::uint32_t joint_plane_mode_word = 0u
   ) {
     return integrity_bits == camera_center_integrity_for_words(
       center_bits,
       inverse_scale_bits,
       convergence_curve_bits,
-      calibration_revision_bits
+      calibration_revision_bits,
+      joint_plane_mode_word
     );
   }
 
   static_assert(camera_center_integrity_for_words(0u, 0u, 0u, 0u) == 0u);
 
+  constexpr std::uint32_t camera_center_integrity_for_state_words(const state_words_t &words) {
+    auto checksum = camera_center_integrity_for_words(
+      words[center], words[inverse_scale], words[convergence_curve],
+      words[calibration_revision], words[joint_plane_mode_bits]);
+    if (words[joint_plane_mode_bits] == 3u) {
+      for (std::size_t index = gain_last_observation_low; index < state_float_count; ++index) {
+        checksum = (checksum ^ words[index]) * 16777619u;
+      }
+    }
+    return checksum;
+  }
+
+  inline bool adaptive_camera_tail_is_valid(const state_words_t &words) {
+    const auto mode = words[joint_plane_mode_bits];
+    if (mode == 0u) {
+      return std::all_of(words.begin() + gain_last_observation_low, words.end(),
+        [](std::uint32_t value) { return value == 0u; });
+    }
+    const auto f = [&](std::size_t index) { return std::bit_cast<float>(words[index]); };
+    const auto clock = [&](std::size_t low) {
+      return std::uint64_t(words[low]) | (std::uint64_t(words[low + 1u]) << 32u);
+    };
+    const auto count = words[gain_seed_count];
+    const auto last = clock(gain_last_observation_low);
+    const auto first = clock(gain_seed_first_low);
+    const auto seed_last = clock(gain_seed_last_low);
+    if (mode != 3u || words[gain_clock_armed] > 1u || count > 1u ||
+        words[gain_reserved0] != 0u || words[gain_reserved1] != 0u ||
+        (words[gain_clock_armed] != 0u && last == 0u) ||
+        !std::isfinite(f(gain_target_zero)) ||
+        !std::isfinite(f(gain_target_inverse_scale)) ||
+        !std::isfinite(f(gain_target_nearest)) ||
+        !std::isfinite(f(gain_display_limit)) ||
+        !std::isfinite(f(gain_seed_mean_nearest)) ||
+        !std::isfinite(f(gain_seed_mean_zero)) ||
+        f(gain_display_limit) < 0.0f || f(gain_display_limit) > direct_container_limit) {
+      return false;
+    }
+    const bool no_target = f(gain_target_zero) == 0.0f &&
+      f(gain_target_inverse_scale) == 0.0f && f(gain_target_nearest) == 0.0f;
+    const bool target_valid = f(gain_target_inverse_scale) > 0.0f &&
+      f(gain_target_nearest) > 0.0f &&
+      std::abs(f(gain_target_inverse_scale) * f(gain_target_nearest) - 1.0f) <= 2.0e-6f;
+    if ((!no_target && !target_valid) ||
+        (words[gain_clock_armed] != 0u && !target_valid)) {
+      return false;
+    }
+    if (count == 0u) {
+      return words[gain_clock_armed] == 0u && first == 0u && seed_last == 0u &&
+        f(gain_seed_mean_nearest) == 0.0f && f(gain_seed_mean_zero) == 0.0f;
+    }
+    return first > 0u && seed_last >= first && last >= seed_last &&
+      f(gain_seed_mean_nearest) > 0.0f && f(gain_display_limit) > 0.0f &&
+      seed_last == first;
+  }
+
   /** Authenticate a serialized ParallaxState before exposing it to the compact live renderer. */
   inline bool parallax_state_words_are_authenticated(
     const state_words_t &words,
-    const float raw_coordinate_scale
+    const float raw_coordinate_scale,
+    const std::optional<std::uint32_t> expected_joint_plane_mode = std::nullopt
   ) {
     const auto scalar = [&words](const std::size_t index) {
       return std::bit_cast<float>(words[index]);
@@ -89,10 +157,12 @@ namespace models::depth_coordinate_v2 {
     const float container_value = scalar(container_scale);
     const float frame_valid_value = scalar(frame_valid);
     const auto revision = words[calibration_revision];
+    const auto mode = words[joint_plane_mode_bits];
     const bool frame_is_valid = frame_valid_value == 1.0f;
     if (!std::isfinite(raw_coordinate_scale) || raw_coordinate_scale <= 0.0f ||
         words[contract_tag_bits] != contract_tag ||
-        words[mapping_state_reserved_1] != 0u ||
+        !joint_plane_mode_word_is_valid(mode) ||
+        (expected_joint_plane_mode && *expected_joint_plane_mode != mode) ||
         words[mapping_state_reserved_2] != 0u ||
         !std::isfinite(center_value) || !std::isfinite(inverse_scale_value) ||
         !std::isfinite(convergence_value) || !std::isfinite(container_value) ||
@@ -100,23 +170,34 @@ namespace models::depth_coordinate_v2 {
         !convergence_curve_is_valid(convergence_value) || container_value != 1.0f ||
         words[renderer_authorization_bits] !=
           (frame_is_valid ? contract_tag : 0u) ||
-        !camera_center_integrity_is_valid(
-          words[center],
-          words[inverse_scale],
-          words[convergence_curve],
-          revision,
-          words[camera_center_integrity_bits]
-        )) {
+        !adaptive_camera_tail_is_valid(words) ||
+        words[camera_center_integrity_bits] != camera_center_integrity_for_state_words(words)) {
       return false;
     }
 
     const bool camera_initialized =
       inverse_scale_value > 0.0f && acquired_calibration_revision_is_valid(revision) &&
-      std::abs(1.0f / inverse_scale_value - raw_coordinate_scale) <=
-        raw_coordinate_scale_authentication_tolerance;
+      (mode != 0u ||
+       std::abs(1.0f / inverse_scale_value - raw_coordinate_scale) <=
+         raw_coordinate_scale_authentication_tolerance);
     const bool camera_empty =
       center_value == 0.0f && inverse_scale_value == 0.0f &&
       calibration_revision_word_is_valid(revision);
+    if (mode == 3u && camera_initialized && words[gain_seed_count] != 1u) {
+      return false;
+    }
+    if (mode == 3u && camera_empty && words[gain_seed_count] != 0u) {
+      return false;
+    }
+    if (mode == 3u && frame_is_valid && words[gain_clock_armed] != 1u) {
+      return false;
+    }
+    if (mode == 3u &&
+        ((camera_initialized && inverse_scale_value > 1.0f / raw_coordinate_scale + 2.0e-6f) ||
+         (scalar(gain_target_nearest) != 0.0f && scalar(gain_target_nearest) < raw_coordinate_scale) ||
+         (scalar(gain_seed_mean_nearest) != 0.0f && scalar(gain_seed_mean_nearest) < raw_coordinate_scale))) {
+      return false;
+    }
     return frame_is_valid ? camera_initialized : (camera_initialized || camera_empty);
   }
 
@@ -130,6 +211,10 @@ namespace models::depth_coordinate_v2 {
 
   constexpr float requested_gain_for_config(const float configured_pop) {
     return gain_per_pop * requested_pop_strength(configured_pop);
+  }
+
+  constexpr float display_budget_for_mode(const float, const std::uint32_t) {
+    return direct_container_limit;
   }
 
   /** Validate the runtime constants carried beside an authenticated producer result.

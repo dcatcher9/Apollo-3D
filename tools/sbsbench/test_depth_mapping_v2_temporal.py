@@ -3,6 +3,8 @@
 
 import copy
 from dataclasses import fields
+import json
+import struct
 import sys
 import unittest
 from pathlib import Path
@@ -40,6 +42,45 @@ from depth_mapping_v2_temporal import (  # noqa: E402
 
 
 class DepthMappingV2TemporalTest(unittest.TestCase):
+    @staticmethod
+    def _seal_native_row(row, mode=0, tail=None):
+        """Authored admission fixture, not GPU geometry or producer evidence."""
+        contract = json.loads(temporal.CONTRACT_PATH.read_text())
+        descriptors = contract["shadow_state"]["fields"]
+        values = {descriptor["name"]: 0 for descriptor in descriptors}
+        for key in ("center", "inverse_scale", "convergence_curve", "container_scale",
+                    "calibration_revision", "confirmed_cut_count"):
+            values[key] = row[key]
+        values["frame_valid"] = float(row["frame_valid"])
+        values["joint_plane_mode_bits"] = mode
+        tag = temporal.dump_contract.generator.contract_tag(contract)
+        values["contract_tag_bits"] = tag
+        values["renderer_authorization_bits"] = tag if row["frame_valid"] else 0
+        if tail:
+            values.update(tail)
+        values["camera_center_integrity_bits"] = temporal.dump_contract.camera_center_integrity_for_state_values(values)
+        row["state_words_u32"] = [
+            struct.unpack("<I", struct.pack("<f", values[descriptor["name"]]))[0]
+            if descriptor["gpu_encoding"] == "float" else values[descriptor["name"]]
+            for descriptor in descriptors]
+
+    @staticmethod
+    def _as_native(trace):
+        native = copy.deepcopy(trace)
+        native["diagnostic_method"] = "gpu-frame-moments-and-rendered-fields-v6"
+        width, height = MODEL_CALIBRATIONS[0].calibrated_input_shapes[0]
+        native["producer"] = {
+            "authority": "authenticated-raw-depth-plus-eight-v2-compute-shaders-persistent-gpu-state-v11",
+            "manifest_sha256": "0" * 64,
+            "contract_canonical_sha256": CONTRACT_CANONICAL_SHA256,
+            "tensor_shape": {"width": width, "height": height},
+            "shader_sequence": list(V2_GPU_SHADER_SEQUENCE),
+            "state_persistence": "single-buffer-whole-sequence",
+            "numpy_role": "comparison-only-not-render-authority",
+        }
+        for row in native["frames"]:
+            DepthMappingV2TemporalTest._seal_native_row(row)
+        return native
     @staticmethod
     def _separated_three_stage_field(offset: float = 0.0) -> np.ndarray:
         rng = np.random.default_rng(123)
@@ -318,19 +359,7 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
         result = generate_first_latch_exact_sequence(
             [raw], [0], [False], "unit-cut",
             MappingV2Config(raw_coordinate_scale=calibration.raw_coordinate_scale))
-        native = copy.deepcopy(result.state_trace)
-        native["diagnostic_method"] = (
-            "gpu-frame-moments-and-rendered-fields-v5")
-        native["producer"] = {
-            "authority":
-                "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-gpu-state-v9",
-            "manifest_sha256": "0" * 64,
-            "contract_canonical_sha256": CONTRACT_CANONICAL_SHA256,
-            "tensor_shape": {"width": width, "height": height},
-            "shader_sequence": list(V2_GPU_SHADER_SEQUENCE),
-            "state_persistence": "single-buffer-whole-sequence",
-            "numpy_role": "comparison-only-not-render-authority",
-        }
+        native = self._as_native(result.state_trace)
         validate_v2_state_trace(native, result.frame_ids)
 
         # The active fused model exposes the sole refined output on the exact 2x grid while
@@ -383,7 +412,12 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
             validate_v2_state_trace(changed, result.frame_ids)
 
     def test_trace_layout_records_vertical_conditioner_attribution(self):
-        self.assertEqual(len(V2_STATE_TRACE_FIELDS), 38)
+        self.assertEqual(len(V2_STATE_TRACE_FIELDS), 45)
+        for field in ("observed_percentile_low", "observed_percentile_high",
+                      "observed_percentile_valid", "observed_percentile_bin_width"):
+            self.assertIn(field, V2_STATE_TRACE_FIELDS)
+        self.assertIn("state_words_u32", V2_STATE_TRACE_FIELDS)
+        self.assertIn("observation_timestamp_us", V2_STATE_TRACE_FIELDS)
         self.assertIn("vertical_majorant_raised_fraction", V2_STATE_TRACE_FIELDS)
         self.assertIn("vertical_majorant_sha256", V2_STATE_TRACE_FIELDS)
         self.assertIn("vertical_conditioned_sha256", V2_STATE_TRACE_FIELDS)
@@ -398,6 +432,75 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
         self.assertEqual(
             tuple(field.name for field in fields(CoordinateState)),
             ("center", "scale", "convergence_curve", "valid"))
+
+    def test_trace_rejects_mode_relabeling_and_numpy_continuous_authority(self):
+        result = generate_first_latch_exact_sequence(
+            [np.asarray([[-1.0, 0.0, 1.0]])], [0], [False], "unit-cut")
+        changed = copy.deepcopy(result.state_trace)
+        changed["frames"][0]["joint_plane_mode"] = 1
+        with self.assertRaisesRegex(ValueError, "mode disagrees"):
+            validate_v2_state_trace(changed, result.frame_ids)
+        for mode in (True, 1.0, -1, 1, 2, 4):
+            changed = copy.deepcopy(result.state_trace)
+            changed["mapping_config"]["joint_plane_mode"] = mode
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "integer 0 or 3"):
+                validate_v2_state_trace(changed, result.frame_ids)
+        changed = copy.deepcopy(result.state_trace)
+        changed["mapping_config"]["joint_plane_mode"] = 3
+        changed["frames"][0]["joint_plane_mode"] = 3
+        changed["adaptation_semantics"] = temporal._trace_adaptation_semantics(3)
+        with self.assertRaisesRegex(ValueError, "authenticated native GPU"):
+            validate_v2_state_trace(changed, result.frame_ids)
+
+
+
+
+
+
+    def _authored_host_adapter_trace(self):
+        # A static two-layer admission fixture, not a replica of the adaptive controller.
+        raw = np.tile(np.asarray([-2.0, 2.0]), (8, 8))
+        reference = generate_first_latch_exact_sequence(
+            [raw], [1], [False], "unit-cut")
+        trace = self._as_native(reference.state_trace)
+        trace["mapping_config"]["joint_plane_mode"] = 3
+        trace["adaptation_semantics"] = temporal._trace_adaptation_semantics(3)
+        trace["producer"]["shader_sequence"] = list(temporal.V2_GPU_HOST_SHADER_SEQUENCE)
+        row = trace["frames"][0]
+        amplitude = MappingV2Config().raw_coordinate_scale
+        row.update(joint_plane_mode=3, observation_timestamp_us=100000,
+                   observed_percentile_low=-2.0, observed_percentile_high=2.0,
+                   observed_percentile_valid=1.0, observed_percentile_bin_width=4.0 / 256.0)
+        self._seal_native_row(row, 3, dict(
+            gain_last_observation_low=100000, gain_clock_armed=1, gain_seed_count=1,
+            gain_target_zero=0.0, gain_target_inverse_scale=1.0 / amplitude,
+            gain_target_nearest=amplitude, gain_display_limit=0.04,
+            gain_seed_first_low=100000, gain_seed_last_low=100000,
+            gain_seed_mean_nearest=amplitude, gain_seed_mean_zero=0.0))
+        return trace
+
+    def test_host_adapter_trace_binds_gpu_percentile_tail_and_source_clock(self):
+        trace = self._authored_host_adapter_trace()
+        validate_v2_state_trace(trace, [1])
+        for field, value in (("observed_percentile_valid", 0.5),
+                             ("observed_percentile_low", -3.0),
+                             ("observed_percentile_high", -3.0),
+                             ("observed_percentile_bin_width", -0.1),
+                             ("observation_timestamp_us", 100001),
+                             ("observed_mean", 1.0)):
+            changed = copy.deepcopy(trace)
+            changed["frames"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                validate_v2_state_trace(changed, [1])
+
+    def test_legacy_trace_cannot_acquire_a_host_percentile_tail_by_relabeling(self):
+        reference = generate_first_latch_exact_sequence(
+            [np.asarray([[-1.0, 0.0, 1.0]])], [1], [False], "unit-cut")
+        trace = self._as_native(reference.state_trace)
+        trace["frames"][0].update(observed_percentile_valid=1.0,
+                                  observed_percentile_high=2.0)
+        with self.assertRaisesRegex(ValueError, "percentile bounds"):
+            validate_v2_state_trace(trace, [1])
 
     def test_timeline_flattens_unusable_depth_without_mutating_valid_neighbors(self):
         valid = np.asarray([[-1.0, 0.0, 1.0]])
