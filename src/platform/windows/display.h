@@ -893,6 +893,11 @@ namespace platf::dxgi {
     std::atomic<std::uint64_t> client_frame_rate_generation {0};
     std::mutex client_frame_rate_mutex;
 
+    // Nonzero (the owning encoder's token) while a streaming encoder converts a live external
+    // packed export and therefore never reads this desktop. Capture then forwards only timestamps
+    // and cursor metadata instead of copying pixels. An owner clears only its own token.
+    std::atomic<std::uint64_t> external_pixels_owner {0};
+
     DXGI_FORMAT capture_format;
     D3D_FEATURE_LEVEL feature_level;
 
@@ -1044,6 +1049,11 @@ namespace platf::dxgi {
     std::shared_ptr<detail::ddup_damage_history_t> damage_history;
     std::optional<detail::ddup_damage_snapshot_t> last_ddup_damage;
     bool damage_chain_valid = true;
+    // A desktop present was acquired without being copied (external_pixels_owner): no retained
+    // surface or image holds current desktop pixels until the next copied present.
+    bool desktop_pixels_dropped = false;
+    // Cursor of the last delivered image, to tell whether a skipped-pixel update changes anything.
+    sbs_cursor::snapshot_t last_delivered_cursor;
   };
 
   /**

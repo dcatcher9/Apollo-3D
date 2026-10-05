@@ -67,6 +67,43 @@ TEST(ThreadSafeEventTest, TimedPopWakesWhenStopped) {
   EXPECT_FALSE(event.running());
 }
 
+TEST(ThreadSafeEventTest, WakeEndsATimedPopWithoutAValue) {
+  safe::event_t<int> event;
+  std::thread waker {[&event] {
+    std::this_thread::sleep_for(10ms);
+    event.wake();
+  }};
+
+  const auto started = std::chrono::steady_clock::now();
+  auto value = event.pop(5s);
+  waker.join();
+
+  EXPECT_FALSE(value);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, 4s);
+  EXPECT_TRUE(event.running());
+}
+
+TEST(ThreadSafeEventTest, WakeBeforeTheWaitIsKeptOnceAndAValueConsumesIt) {
+  safe::event_t<int> event;
+  // A wake between a consumer's last check and its wait is not lost...
+  event.wake();
+  const auto started = std::chrono::steady_clock::now();
+  EXPECT_FALSE(event.pop(5s));
+  EXPECT_LT(std::chrono::steady_clock::now() - started, 4s);
+  // ...and is consumed: the next wait times out normally.
+  EXPECT_FALSE(event.pop(10ms));
+
+  // A stored value wins over a pending wake and consumes it too.
+  event.wake();
+  event.raise(3);
+  auto value = event.pop(0ms);
+  ASSERT_TRUE(value);
+  EXPECT_EQ(*value, 3);
+  const auto after_value = std::chrono::steady_clock::now();
+  EXPECT_FALSE(event.pop(20ms));
+  EXPECT_GE(std::chrono::steady_clock::now() - after_value, 10ms);  // A full wait, not a wake.
+}
+
 TEST(ThreadSafeEventTest, TimedViewWakesWhenStopped) {
   safe::event_t<int> event;
   std::thread stopper {[&event] {

@@ -412,6 +412,12 @@ namespace video {
       return device && device->needs_conversion_poll();
     }
 
+    void set_external_frame_wake(std::function<void()> wake) {
+      if (device) {
+        device->set_external_frame_wake(std::move(wake));
+      }
+    }
+
     bool set_stream_gamma(stream_gamma_mode_e mode) {
       return device && device->set_stream_gamma(mode);
     }
@@ -468,6 +474,7 @@ namespace video {
         std::move(frame_buffer)
       );
       force_idr = false;
+      device->encoder_consumed_input();
       return result;
     }
 
@@ -790,6 +797,8 @@ namespace video {
           trim_imgs();
           img_out->frame_timestamp.reset();
           img_out->content_timestamp.reset();
+          img_out->pixels_skipped = false;
+          img_out->conversion_needed = true;
           return true;
         } else {
           // sleep and retry if image pool is full
@@ -1156,6 +1165,17 @@ namespace video {
     }
 
     std::chrono::steady_clock::time_point encode_frame_timestamp;
+    // An independent provider (Game 3D) wakes this loop when its own frame finishes, so a frame is
+    // converted as soon as it is ready instead of at the next stream deadline or desktop capture.
+    // Like an early capture, a provider frame may convert one variation threshold before its
+    // presentation target; the presentation timestamps keep the stream cadence, which caps the
+    // encode rate. Without new content such a provider encodes only the minimum-FPS keepalive,
+    // measured from the last encode so that metadata-only captures cannot postpone it.
+    session->set_external_frame_wake([images]() {
+      images->wake();
+    });
+    const auto keepalive_interval = std::chrono::duration_cast<std::chrono::nanoseconds>(max_frametime);
+    auto last_encode_at = std::chrono::steady_clock::now();
     auto next_mouse_keys_refresh = std::chrono::steady_clock::now() + 1s;
     bool missing_frame_timestamp_warning_logged = false;
     bool first_encoder_output = true;
@@ -1359,13 +1379,31 @@ namespace video {
       bool converted_frame = false;
       processing_started.reset();
       bool consume_sampled_depth_pipeline_ready = false;
+      const auto provider_poll_target = independent_provider ?
+                                          encode_frame_timestamp - frame_variation_threshold :
+                                          encode_frame_timestamp;
 
       // Idle keepalives preserve static image quality. Pending retained-source conversion is
       // serviced at the requested cadence instead of waiting for that slower heartbeat.
       if (!requested_idr_frame || images->peek()) {
         const bool conversion_poll_pending = last_img && (pending_gamma || session->needs_conversion_poll());
-        if (auto img = detail::wait_for_encode_image(*images, max_frametime, encode_frame_threshold, static_cast<bool>(last_img), depth_pipeline_ready_event && depth_pipeline_ready_event->peek(), conversion_poll_pending, source.remaining_wait(std::chrono::steady_clock::now(), encode_frame_timestamp, independent_provider && conversion_poll_pending))) {
-          source.observe(std::move(img));
+        const auto wait_started = std::chrono::steady_clock::now();
+        auto pending_source_wait = source.remaining_wait(wait_started, provider_poll_target, independent_provider && conversion_poll_pending);
+        if (independent_provider && last_img) {
+          const auto keepalive_wait = detail::provider_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
+          pending_source_wait = pending_source_wait ? std::min(*pending_source_wait, keepalive_wait) : keepalive_wait;
+        }
+        bool captured = false;
+        if (auto img = detail::wait_for_encode_image(*images, max_frametime, encode_frame_threshold, static_cast<bool>(last_img), depth_pipeline_ready_event && depth_pipeline_ready_event->peek(), conversion_poll_pending, pending_source_wait)) {
+          // Metadata for pixels an external provider owns, with an unchanged cursor, only
+          // replaces the retained source; the provider's own wake or the keepalive converts it.
+          const bool new_content = img->conversion_needed;
+          source.observe(std::move(img), new_content);
+          captured = source.pending();
+        } else if (!images->running()) {
+          break;
+        }
+        if (captured) {
           frame_timestamp = last_img->frame_timestamp;
           if (!frame_timestamp) {
             if (!missing_frame_timestamp_warning_logged) {
@@ -1393,7 +1431,7 @@ namespace video {
           // stops here, the pending-source deadline below must still display these final pixels.
           if (time_diff < -frame_variation_threshold) {
             const auto now = std::chrono::steady_clock::now();
-            if (!source.due(now, encode_frame_timestamp, requested_idr_frame)) {
+            if (!source.due(now, provider_poll_target, requested_idr_frame)) {
               continue;
             }
             // A stale capture timestamp must not starve a source whose presentation is due.
@@ -1418,8 +1456,6 @@ namespace video {
 
           *frame_timestamp = schedule.presentation_timestamp;
           encode_frame_timestamp = schedule.next_encode_target;
-        } else if (!images->running()) {
-          break;
         }
       }
 
@@ -1429,7 +1465,9 @@ namespace video {
       // replaced by newer captures, so waiting cannot accumulate a queue of deferred images.
       if (!converted_frame && source.pending() && last_img) {
         const auto now = std::chrono::steady_clock::now();
-        if (source.due(now, encode_frame_timestamp, requested_idr_frame)) {
+        // An independent provider's wait ends at its poll target; convert there rather than
+        // waking repeatedly until the later presentation target.
+        if (source.due(now, provider_poll_target, requested_idr_frame)) {
           if (lifecycle_change_requested()) {
             break;
           }
@@ -1486,13 +1524,15 @@ namespace video {
       // Host SBS inference may still be pending when capture goes idle. Reconvert the retained
       // source once on this encode-thread timeout so the device can poll its completion without
       // blocking and keep D3D rendering on its normal owner. A busy poll keeps the exact slot
-      // pending and suppresses duplicate inference for those same pixels.
-      if (!converted_frame && last_img && session->needs_conversion_poll()) {
+      // pending and suppresses duplicate inference for those same pixels. An independent provider
+      // also converts for its keepalive, which re-checks the export while no frame arrives.
+      const bool provider_keepalive_due = independent_provider && std::chrono::steady_clock::now() >= last_encode_at + keepalive_interval;
+      if (!converted_frame && last_img && (provider_keepalive_due || session->needs_conversion_poll())) {
         const auto now = std::chrono::steady_clock::now();
         // A faster minimum-FPS heartbeat may encode retained output before this deadline,
         // but must not advance an independent provider's schedule ahead of actual time.
         // Host AI completion retains its existing immediate timeout service.
-        if (!independent_provider || source.due(now, encode_frame_timestamp, requested_idr_frame, true)) {
+        if (!independent_provider || source.due(now, provider_poll_target, requested_idr_frame, true)) {
           if (lifecycle_change_requested()) {
             break;
           }
@@ -1522,6 +1562,12 @@ namespace video {
         depth_pipeline_ready_event->pop(0ms);
       }
 
+      if (independent_provider && !converted_frame && !requested_idr_frame && std::chrono::steady_clock::now() < last_encode_at + keepalive_interval) {
+        // Woken without new content (a provider frame not yet due, an unchanged metadata capture
+        // or a stale wake): wait again instead of encoding a repeat of the current input.
+        continue;
+      }
+
       // Keep this check as close as possible to encode(). A reinit may be requested while the
       // current frame is being converted, and encoding afterward can leave packets or GPU work in
       // flight while the session and display resources are torn down.
@@ -1545,6 +1591,7 @@ namespace video {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         break;
       }
+      last_encode_at = std::chrono::steady_clock::now();
       if (converted_frame && session->rendered_content_timestamp() && config.stream_gamma_state) {
         const auto actual_mode = session->stream_gamma_mode();
         const auto actual_white = session->stream_gamma_white_nits();

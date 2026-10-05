@@ -105,16 +105,30 @@ namespace safe {
     status_t pop(std::chrono::duration<Rep, Period> delay) {
       std::unique_lock ul {_lock};
 
-      if (bool success = _cv.wait_for(ul, delay, [this] {
-            return (bool) _status || !_continue;
-          });
-          !success || !_continue) {
+      const bool success = _cv.wait_for(ul, delay, [this] {
+        return (bool) _status || !_continue || _woken;
+      });
+      _woken = false;
+      if (!success || !_continue || !_status) {
         return util::false_v<status_t>;
       }
 
       auto val = std::move(_status);
       _status = util::false_v<status_t>;
       return val;
+    }
+
+    /**
+     * @brief End the current or next timed pop() early without storing a value.
+     *
+     * A wake that arrives while nobody waits is kept for the next timed pop(), so it cannot be lost
+     * between a consumer's last check and its wait. Any timed pop() consumes it, including one
+     * that returns a stored value.
+     */
+    void wake() {
+      std::lock_guard lg {_lock};
+      _woken = true;
+      _cv.notify_all();
     }
 
     // pop and view should not be used interchangeably
@@ -179,6 +193,7 @@ namespace safe {
 
   private:
     bool _continue {true};
+    bool _woken {false};
     status_t _status {util::false_v<status_t>};
 
     std::condition_variable _cv;

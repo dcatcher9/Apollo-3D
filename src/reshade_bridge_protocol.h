@@ -147,8 +147,15 @@ namespace reshade_bridge {
                                       color == transfer::pq && format == 24;
   }
 
+  // The source a producer describes whether or not a consumer is attached: its identity, eye
+  // raster, format and transfer. Without a consumer the producer publishes exactly this, with
+  // generation, nonce and handles zero, and allocates no ring (a status-only observer).
+  [[nodiscard]] constexpr bool valid_source_metadata(const metadata_t &m) {
+    return m.signature == magic && supported_version(m.protocol_version) && m.metadata_bytes == sizeof(metadata_t) && m.producer_pid != 0 && m.producer_creation_time != 0 && m.window != 0 && m.generation <= max_generation && m.source_width != 0 && m.source_width <= max_source_width && m.source_height != 0 && m.source_height <= max_source_height && m.packed_width == m.source_width * 2 && m.packed_width <= max_packed_width && m.packed_height == m.source_height && m.packed_width % 4 == 0 && m.packed_height % 2 == 0 && m.image_layout == layout::full_sbs_left_first && supported_format(m.dxgi_format, m.color_transfer) && (m.color_transfer != transfer::pq || m.protocol_version == pq_version);
+  }
+
   [[nodiscard]] constexpr bool valid_metadata(const metadata_t &m) {
-    if (m.signature != magic || !supported_version(m.protocol_version) || m.metadata_bytes != sizeof(metadata_t) || m.producer_pid == 0 || m.producer_creation_time == 0 || m.window == 0 || m.generation == 0 || m.generation > max_generation || m.accepted_consumer_nonce == 0 || m.source_width == 0 || m.source_width > max_source_width || m.source_height == 0 || m.source_height > max_source_height || m.packed_width != m.source_width * 2 || m.packed_width > max_packed_width || m.packed_height != m.source_height || m.packed_width % 4 != 0 || m.packed_height % 2 != 0 || m.image_layout != layout::full_sbs_left_first || !supported_format(m.dxgi_format, m.color_transfer) || (m.color_transfer == transfer::pq && m.protocol_version != pq_version) || m.ready_fence_handle == 0) {
+    if (!valid_source_metadata(m) || m.generation == 0 || m.accepted_consumer_nonce == 0 || m.ready_fence_handle == 0) {
       return false;
     }
     for (auto handle : m.texture_handles) {

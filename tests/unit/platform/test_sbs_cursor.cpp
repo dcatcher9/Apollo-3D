@@ -152,6 +152,23 @@ TEST(SbsCursorPlacement, ScalesBothEyesAndKeepsIndependentClipRectangles) {
   EXPECT_EQ(p->scissors[1].right, 32);
 }
 
+TEST(SbsCursorPlacement, SamePresentationIgnoresOnlyAHiddenCursorsPlacement) {
+  const auto base = snapshot();
+  EXPECT_TRUE(cursor::same_presentation(base, base));
+  EXPECT_FALSE(cursor::same_presentation(base, snapshot(2, 2)));  // Moved.
+  EXPECT_FALSE(cursor::same_presentation(base, snapshot()));  // Another published shape.
+  auto hidden = base;
+  hidden.visible = false;
+  EXPECT_FALSE(cursor::same_presentation(base, hidden));
+  auto moved_hidden = snapshot(5, 6);
+  moved_hidden.visible = false;
+  EXPECT_TRUE(cursor::same_presentation(hidden, moved_hidden));
+  EXPECT_TRUE(cursor::same_presentation(cursor::snapshot_t {}, hidden));
+  auto rotated = base;
+  rotated.rotation = DXGI_MODE_ROTATION_ROTATE90;
+  EXPECT_FALSE(cursor::same_presentation(base, rotated));
+}
+
 TEST(SbsCursorPlacement, RejectsUnsupportedRotationAndInvalidCoordinates) {
   auto s = snapshot();
   for (const auto rotation : {DXGI_MODE_ROTATION_ROTATE90, DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270}) {

@@ -82,6 +82,50 @@ TEST(ReShadeBridgeProtocol, RequiresVersionedIdentityAndCompleteSynchronizationH
   }
 }
 
+TEST(ReShadeBridgeProtocol, SourceDescriptionNeedsNoConsumerRingButTheSameSourceRules) {
+  using namespace ::reshade_bridge;
+  // What a producer publishes while no consumer is attached: its source, without a ring.
+  auto source = valid_bridge_metadata();
+  source.generation = 0;
+  source.accepted_consumer_nonce = 0;
+  source.ready_fence_handle = 0;
+  source.texture_handles[0] = source.texture_handles[1] = source.texture_handles[2] = 0;
+  EXPECT_TRUE(valid_source_metadata(source));
+  EXPECT_FALSE(valid_metadata(source));
+  EXPECT_TRUE(valid_source_metadata(valid_bridge_metadata()));
+
+  // The bare identity published after the producer stops is no source.
+  auto identity = source;
+  identity.source_width = identity.source_height = identity.packed_width = identity.packed_height = 0;
+  identity.dxgi_format = 0;
+  EXPECT_FALSE(valid_source_metadata(identity));
+  for (const auto mutate : std::array<void (*)(metadata_t &), 6> {
+         [](metadata_t &m) {
+           m.window = 0;
+         },
+         [](metadata_t &m) {
+           m.packed_width = m.source_width;
+         },
+         [](metadata_t &m) {
+           m.generation = max_generation + 1;
+         },
+         [](metadata_t &m) {
+           m.color_transfer = transfer::scrgb;
+         },
+         [](metadata_t &m) {
+           m.dxgi_format = 24;
+           m.color_transfer = transfer::pq;
+         },
+         [](metadata_t &m) {
+           m.protocol_version = pq_version + 1;
+         },
+       }) {
+    auto candidate = source;
+    mutate(candidate);
+    EXPECT_FALSE(valid_source_metadata(candidate));
+  }
+}
+
 TEST(ReShadeBridgeProtocol, RejectsHalfSbsOversizedAndColorIncoherentMetadata) {
   using namespace ::reshade_bridge;
   auto metadata = valid_bridge_metadata();
@@ -649,6 +693,133 @@ TEST_F(ReShadeBridgeGpu, ConvertsFromTheHeldSlotAndReturnsItOnlyAfterItsReadsCom
   ASSERT_TRUE(third);
   EXPECT_EQ(third->sequence, 3u);
   ASSERT_TRUE(await_slot(second_slot, protocol::slot_state::free));
+}
+
+TEST_F(ReShadeBridgeGpu, WakesWhenTheExportFenceCompletesAndRetiresWithoutAnotherPoll) {
+  struct event_t {
+    HANDLE value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+    ~event_t() {
+      if (value) {
+        CloseHandle(value);
+      }
+    }
+  } woken;
+  ASSERT_NE(woken.value, nullptr);
+  bridge->set_frame_wake([event = woken.value]() {
+    SetEvent(event);
+  });
+  EXPECT_FALSE(bridge->frame_wake_active());
+  EXPECT_TRUE(bridge->frame_pending());  // Not live yet: the owner keeps polling.
+
+  publish(1);
+  const auto first = await_frame();
+  ASSERT_TRUE(first);
+  const int first_slot = last_slot;
+  EXPECT_TRUE(bridge->frame_wake_active());
+  EXPECT_FALSE(bridge->frame_pending());
+  WaitForSingleObject(woken.value, 0);  // Drop a wake for the frame just polled, if any.
+
+  // A ready slot whose GPU work has not completed neither wakes nor reads as pending.
+  publish(2, false);
+  EXPECT_EQ(WaitForSingleObject(woken.value, 50), static_cast<DWORD>(WAIT_TIMEOUT));
+  EXPECT_FALSE(bridge->frame_pending());
+  signal_ready(2);
+  ASSERT_EQ(WaitForSingleObject(woken.value, 2000), static_cast<DWORD>(WAIT_OBJECT_0));
+  EXPECT_TRUE(bridge->frame_pending());
+  const auto second = poll();
+  ASSERT_TRUE(second);
+  EXPECT_EQ(second->sequence, 2u);
+  EXPECT_FALSE(bridge->frame_pending());
+
+  // The replaced slot returns once its reads complete, without waiting for another poll.
+  EXPECT_EQ(protocol::control_state(state->slots[first_slot].control), protocol::slot_state::reading);
+  const auto deadline = bridge_clock_t::now() + std::chrono::seconds(2);
+  while (protocol::control_state(state->slots[first_slot].control) != protocol::slot_state::free && bridge_clock_t::now() < deadline) {
+    bridge->retire();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_EQ(protocol::control_state(state->slots[first_slot].control), protocol::slot_state::free);
+
+  // Each completion re-arms the wake for the next frame.
+  publish(3);
+  ASSERT_EQ(WaitForSingleObject(woken.value, 2000), static_cast<DWORD>(WAIT_OBJECT_0));
+  EXPECT_TRUE(bridge->frame_pending());
+  const auto third = poll();
+  ASSERT_TRUE(third);
+  EXPECT_EQ(third->sequence, 3u);
+  EXPECT_FALSE(bridge->frame_pending());
+
+  // A metadata replacement is a pending change even without a fence advance.
+  InterlockedIncrement(reinterpret_cast<volatile LONG *>(&state->metadata_sequence));
+  InterlockedIncrement(reinterpret_cast<volatile LONG *>(&state->metadata_sequence));
+  EXPECT_TRUE(bridge->frame_pending());
+  ASSERT_TRUE(poll());
+  EXPECT_FALSE(bridge->frame_pending());
+
+  // A new generation re-arms on its own fence.
+  ASSERT_TRUE(new_generation());
+  EXPECT_TRUE(bridge->frame_pending());
+  publish(1);
+  const auto replaced = await_frame();
+  ASSERT_TRUE(replaced);
+  EXPECT_TRUE(bridge->frame_wake_active());
+  WaitForSingleObject(woken.value, 0);
+  publish(2);
+  ASSERT_EQ(WaitForSingleObject(woken.value, 2000), static_cast<DWORD>(WAIT_OBJECT_0));
+  EXPECT_TRUE(bridge->frame_pending());  // Not a leftover signal of the released fence.
+}
+
+TEST_F(ReShadeBridgeGpu, StatusObservesTheForegroundSourceWithoutAttaching) {
+  // A status observer withdraws an earlier consumer connection instead of keeping the ring alive.
+  ASSERT_NE(state->consumer_nonce, 0u);
+  ASSERT_TRUE(bridge->status(source_rect, packed_width, height));
+  EXPECT_EQ(state->consumer_nonce, 0u);
+
+  // Without a consumer the producer publishes only its source description, and no ring.
+  bridge = make_receiver();
+  state->capability_nonce = 0;
+  state->consumer_capabilities = 0;
+  auto source = state->metadata;
+  source.generation = 0;
+  source.accepted_consumer_nonce = 0;
+  source.ready_fence_handle = 0;
+  for (auto &handle : source.texture_handles) {
+    handle = 0;
+  }
+  write_metadata(source);
+  for (int i = 0; i < 5; ++i) {
+    const auto observed_source = bridge->status(source_rect, packed_width, height);
+    ASSERT_TRUE(observed_source);
+    EXPECT_EQ(observed_source->producer_process_id, GetCurrentProcessId());
+    EXPECT_EQ(observed_source->producer_creation_time, creation_time);
+    EXPECT_EQ(observed_source->resource_generation, 0u);
+  }
+  EXPECT_EQ(state->consumer_nonce, 0u);
+  EXPECT_EQ(state->capability_nonce, 0u);
+  EXPECT_EQ(state->consumer_capabilities, 0u);
+
+  // The eyes fit under poll()'s rules: same aspect scales, another aspect does not.
+  EXPECT_TRUE(bridge->status(source_rect, packed_width * 2, height * 2));
+  EXPECT_FALSE(bridge->status(source_rect, packed_width, height * 2));
+
+  // Another adapter, another foreground window, or the bare identity of a stopped producer.
+  auto elsewhere = source;
+  elsewhere.adapter_luid ^= 1;
+  write_metadata(elsewhere);
+  EXPECT_FALSE(bridge->status(source_rect, packed_width, height));
+  write_metadata(source);
+  observed.window = 0x777;
+  EXPECT_FALSE(bridge->status(source_rect, packed_width, height));
+  observed.window = source.window;
+  EXPECT_TRUE(bridge->status(source_rect, packed_width, height));
+  protocol::metadata_t identity;
+  identity.producer_pid = source.producer_pid;
+  identity.producer_creation_time = source.producer_creation_time;
+  identity.window = source.window;
+  write_metadata(identity);
+  EXPECT_FALSE(bridge->status(source_rect, packed_width, height));
+  EXPECT_EQ(state->consumer_nonce, 0u);
 }
 
 TEST_F(ReShadeBridgeGpu, KeepsCursorPlaneWithItsFrameAcrossPendingInvalidAndReplacedExports) {

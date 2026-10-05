@@ -3,6 +3,7 @@
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <vector>
 #include <src/video.h>
 #include <src/video_encode_pacing.h>
 
@@ -217,6 +218,108 @@ namespace {
     source.observe(std::make_shared<captured_source>(2, at(images.now)));
     EXPECT_EQ(source.remaining_wait(at(images.now), expired_target, independent_provider && conversion_poll_pending), 0ns);
     EXPECT_TRUE(source.due(at(images.now), expired_target));
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, UnchangedMetadataCaptureNeitherSchedulesNorCancelsConversion) {
+    source_owner source;
+    source.observe(std::make_shared<captured_source>(1, at(0ns)));
+    source.converted();
+    // Metadata for pixels a live export owns, with an unchanged cursor: retained, not converted.
+    source.observe(std::make_shared<captured_source>(2, at(1ms)), false);
+    EXPECT_EQ(source.latest()->pixels, 2);
+    EXPECT_FALSE(source.pending());
+    EXPECT_FALSE(source.remaining_wait(at(1ms), at(16ms)));
+    EXPECT_FALSE(source.due(at(20ms), at(16ms)));
+    // A conversion still owed for an earlier capture survives a later unchanged one, which then
+    // supplies the newest cursor metadata.
+    source.observe(std::make_shared<captured_source>(3, at(2ms)));
+    source.observe(std::make_shared<captured_source>(4, at(3ms)), false);
+    EXPECT_TRUE(source.pending());
+    EXPECT_EQ(source.latest()->pixels, 4);
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, KeepaliveIsMeasuredFromTheLastEncode) {
+    EXPECT_EQ(video::detail::provider_keepalive_wait(at(10ms), at(0ns), 55ms), 45ms);
+    EXPECT_EQ(video::detail::provider_keepalive_wait(at(55ms), at(0ns), 55ms), 0ns);
+    EXPECT_EQ(video::detail::provider_keepalive_wait(at(80ms), at(0ns), 55ms), 0ns);
+  }
+
+  // The provider wake path of encode_run(): an export is converted when it is ready, or once the
+  // time reaches its target minus the variation threshold, and a newer export supersedes one that
+  // is still waiting. Returns the wait of each converted export.
+  std::vector<std::chrono::nanoseconds> woken_provider_waits(
+    std::chrono::nanoseconds game_interval,
+    std::chrono::nanoseconds stream_interval,
+    std::chrono::nanoseconds phase,
+    int exports
+  ) {
+    const auto threshold = stream_interval / 4;
+    source_owner source;
+    source.observe(std::make_shared<captured_source>(1, at(0ns)));
+    source.converted();
+    auto target = at(0ns);
+    std::chrono::nanoseconds now {};
+    std::optional<std::chrono::nanoseconds> ready;
+    std::vector<std::chrono::nanoseconds> waits;
+    int next = 0;
+    while (next < exports || ready) {
+      const auto arrival = phase + next * game_interval;
+      if (!ready) {
+        now = arrival;
+        ready = arrival;
+        ++next;
+        continue;
+      }
+      const auto poll_target = target - threshold;
+      const auto due_at = std::max(now, poll_target.time_since_epoch());
+      if (next < exports && arrival <= due_at) {
+        now = arrival;
+        ready = arrival;  // The waiting export is superseded, never queued.
+        ++next;
+        continue;
+      }
+      now = due_at;
+      EXPECT_TRUE(source.due(at(now), poll_target, false, true));
+      EXPECT_EQ(source.remaining_wait(at(now), poll_target, true), 0ns);
+      const auto schedule = video::detail::select_encode_frame_schedule(at(now), target, stream_interval, threshold);
+      EXPECT_GE(schedule.next_encode_target - target, stream_interval);  // Never above stream rate.
+      target = schedule.next_encode_target;
+      source.converted();
+      waits.push_back(now - *ready);
+      ready.reset();
+    }
+    return waits;
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, WokenProviderFramesConvertWhenReadyAtOrBelowStreamRate) {
+    constexpr auto stream = 11111111ns;  // 90 Hz
+    for (const std::chrono::nanoseconds phase : {0ns, 3000000ns, 7000000ns, 10000000ns}) {
+      // A game at or below the stream rate is converted the moment each export is ready, in any
+      // phase relative to the stream's earlier deadlines.
+      for (const std::chrono::nanoseconds game : {stream, 16666666ns, 33333333ns}) {
+        const auto waits = woken_provider_waits(game, stream, phase, 60);
+        ASSERT_EQ(waits.size(), 60u);
+        for (const auto wait : waits) {
+          EXPECT_EQ(wait, 0ns);
+        }
+      }
+    }
+  }
+
+  TEST(RemoteEncodeProviderPacingTest, FasterGameIsCappedToTheStreamRateWithBoundedWaits) {
+    constexpr auto stream = 11111111ns;  // 90 Hz
+    constexpr auto game = 8333333ns;  // 120 fps
+    const auto waits = woken_provider_waits(game, stream, 1ms, 120);  // 1 s of exports
+    // At most one conversion per stream interval on average. A converted export never waited a
+    // whole game frame: a newer export would have superseded it.
+    EXPECT_LE(waits.size(), 91u);
+    EXPECT_GE(waits.size(), 85u);
+    std::chrono::nanoseconds total {};
+    for (const auto wait : waits) {
+      EXPECT_LT(wait, game);
+      total += wait;
+    }
+    EXPECT_LT(total / static_cast<int>(waits.size()), stream / 2);
   }
 
   TEST(RemoteEncodePendingSourceTest, FinalEarlySourceSurvivesUntilItsPresentationDeadline) {

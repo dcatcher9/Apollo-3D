@@ -417,6 +417,14 @@ namespace platf {
     // pace, match, reuse, or timestamp production pixels.
     std::optional<std::chrono::steady_clock::time_point> diagnostic_capture_ready_timestamp;
 
+    // Set by a capture that did not copy the desktop because an encoder was converting an external
+    // provider's frames instead. The image carries only its timestamps and cursor metadata; no
+    // converter may read its pixels. Image pools reset both flags when they hand out an image.
+    bool pixels_skipped = false;
+    // False for such an image whose cursor did not change: it carries nothing new, so the encode
+    // loop retains it as the newest source without converting it.
+    bool conversion_needed = true;
+
     virtual ~img_t() = default;
   };
 
@@ -482,6 +490,19 @@ namespace platf {
     virtual bool needs_conversion_poll() const {
       return false;
     }
+
+    /** Install the encode loop's wake for converters with an independent external source.
+     *
+     * The converter may call `wake` from any thread when that source finishes a frame. The owner
+     * promises to convert when woken, on new captures and at least once per minimum-FPS keepalive,
+     * so such a converter need not request conversion polls at stream cadence. Others ignore it.
+     */
+    virtual void set_external_frame_wake(std::function<void()> wake) {
+      (void) wake;
+    }
+
+    /** The encoder finished consuming the most recent conversion; release its inputs early. */
+    virtual void encoder_consumed_input() {}
 
     video::sunshine_colorspace_t colorspace;
   };

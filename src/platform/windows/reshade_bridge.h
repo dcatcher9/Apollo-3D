@@ -36,6 +36,14 @@ namespace platf::reshade_bridge {
     float ui_parallax_uv = 0.0f;
   };
 
+  // A producer observed without attaching as its consumer. Its resource generation is zero while
+  // no consumer is attached.
+  struct source_status_t {
+    std::uint32_t producer_process_id = 0;
+    std::uint64_t producer_creation_time = 0;
+    std::uint64_t resource_generation = 0;
+  };
+
   class receiver_t {
   public:
     // Tests can supply foreground observations without moving real windows or displays.
@@ -54,6 +62,29 @@ namespace platf::reshade_bridge {
     // raster; its per-eye aspect must match output_width/output_height (within 0.5%) and the
     // consumer scales it. Fullscreen display scaling can make these extents independent.
     std::optional<frame_t> poll(RECT source_rect, int output_width, int output_height);
+
+    // Status only, for a stream that does not show the export. Never attaches as the consumer, so
+    // the producer creates no ring and packs no stereo for it. Returns the foreground producer
+    // while it publishes a source whose eyes fit the output under poll()'s rules. A receiver is
+    // used either for status() or for poll(); status() withdraws an earlier poll() connection.
+    std::optional<source_status_t> status(RECT source_rect, int output_width, int output_height);
+
+    // Calls `wake` from a thread-pool thread each time the attached export's ready fence advances,
+    // so the owner converts a finished frame when it completes instead of at its next poll. The
+    // callback must only signal the owner. Never blocks; destruction waits for a running callback.
+    void set_frame_wake(std::function<void()> wake);
+
+    // True while poll() holds a frame and the wake is armed on its generation's fence. The owner
+    // may then rely on the wake and frame_pending() instead of polling at stream cadence.
+    [[nodiscard]] bool frame_wake_active() const;
+
+    // Nonblocking, on the owner's thread: whether poll() could now return a newer frame or a changed
+    // connection (metadata replaced, consumer replaced, producer exited or device lost).
+    [[nodiscard]] bool frame_pending() const;
+
+    // Returns replaced slots whose reads have completed to the producer, without waiting. poll()
+    // does the same; calling this once the encoder consumed a conversion frees them a frame sooner.
+    void retire();
 
   private:
     class impl_t;

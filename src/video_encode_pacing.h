@@ -20,9 +20,13 @@ namespace video::detail {
   template<class Image>
   class latest_encode_source_t {
   public:
-    void observe(Image image) {
+    /** Retain the newest capture. One that carries nothing new for the converter (metadata for
+     * pixels an external provider owns, with an unchanged cursor) replaces the retained image but
+     * neither schedules a conversion nor cancels one still owed for an earlier capture.
+     */
+    void observe(Image image, bool new_content = true) {
       latest_ = std::move(image);
-      pending_ = static_cast<bool>(latest_);
+      pending_ = static_cast<bool>(latest_) && (pending_ || new_content);
     }
 
     [[nodiscard]] const Image &latest() const noexcept {
@@ -84,6 +88,23 @@ namespace video::detail {
     Image latest_ {};
     bool pending_ = false;
   };
+
+  /** Time left until an independent provider's minimum-FPS keepalive is due.
+   *
+   * Such a provider wakes the encode loop itself and is not polled at stream cadence, and its
+   * metadata-only captures do not encode. Measuring from the last encode keeps a steady stream
+   * of those captures from postponing the keepalive indefinitely.
+   */
+  [[nodiscard]] inline std::chrono::nanoseconds provider_keepalive_wait(
+    std::chrono::steady_clock::time_point now,
+    std::chrono::steady_clock::time_point last_encode,
+    std::chrono::nanoseconds keepalive_interval
+  ) noexcept {
+    return std::max(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(last_encode + keepalive_interval - now),
+      std::chrono::nanoseconds::zero()
+    );
+  }
 
   /** Wait for a new capture without hiding pending conversion behind the idle heartbeat.
    *

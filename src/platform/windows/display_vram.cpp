@@ -467,6 +467,7 @@ namespace platf::dxgi {
   class d3d_base_encode_device final {
   public:
     ~d3d_base_encode_device() {
+      claim_capture_pixels(false);
       // The encode session is already leaving the live path, so a short bounded drain cannot
       // stall capture. It preserves the final GPU timing samples; the generation token only
       // rejects results that cross an explicit collector reset (used by the offline harness).
@@ -480,10 +481,50 @@ namespace platf::dxgi {
     }
 
     void release_capture_display() noexcept {
+      // Capture must copy the desktop again for whoever converts next.
+      claim_capture_pixels(false);
       // Encoder teardown may remain blocked inside the NVIDIA driver. The shared capture-display
       // owner is not a D3D/NVENC operand, so release it before derived member destruction to let
       // Desktop Duplication reinitialize while device/context resources remain alive.
       display.reset();
+    }
+
+    // Installed only by the streaming encode loop, which converts when woken, on new captures and
+    // at its minimum-FPS keepalive. A live export then drives conversion from its ready fence and
+    // capture skips the desktop pixels it never reads. Local AR never installs it.
+    void set_external_frame_wake(std::function<void()> wake) {
+      external_frame_wake = std::move(wake);
+      if (reshade_receiver && ::video::is_packed_mode(sbs_mode)) {
+        reshade_receiver->set_frame_wake(external_frame_wake);
+      }
+    }
+
+    void encoder_consumed_input() {
+      // The conversion's reads of a replaced export slot are normally complete once its encode
+      // returns; hand that slot back now instead of at the next conversion.
+      if (reshade_receiver) {
+        reshade_receiver->retire();
+      }
+    }
+
+    // Tells capture whether this encoder currently reads its desktop pixels.
+    void claim_capture_pixels(bool owned) noexcept {
+      if (!display) {
+        return;
+      }
+      auto &owner = display->external_pixels_owner;
+      if (owned) {
+        if (!capture_pixels_token) {
+          static std::atomic<std::uint64_t> next_token {1};
+          capture_pixels_token = next_token.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (owner.load(std::memory_order_relaxed) != capture_pixels_token) {
+          owner.store(capture_pixels_token, std::memory_order_release);
+        }
+      } else if (capture_pixels_token) {
+        auto expected = capture_pixels_token;
+        owner.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+      }
     }
 
     int convert_rgb(
@@ -508,10 +549,17 @@ namespace platf::dxgi {
       if (stream_gamma_conversion_pending || (stream_gamma_mode_ != ::video::stream_gamma_mode_e::windows_default && std::chrono::steady_clock::now() >= stream_gamma_white_query_at)) {
         return true;
       }
-      // ReShade publishes independently of desktop presents. The existing bounded owner loop
-      // polls it even while DDup/WGC retains a static desktop frame.
-      if (reshade_receiver || ::video::is_game_mode(sbs_mode)) {
-        return true;
+      // ReShade publishes independently of desktop presents. While a live export's ready fence
+      // wakes the streaming encoder, convert only for its new frames (or a changed connection);
+      // until then, and for Local AR, poll it at stream cadence even while DDup/WGC retains a
+      // static desktop frame.
+      if (reshade_receiver && ::video::is_packed_mode(sbs_mode)) {
+        return game_dumper.needs_conversion_poll() || !reshade_receiver->frame_wake_active() || reshade_receiver->frame_pending();
+      }
+      if (::video::is_game_mode(sbs_mode)) {
+        // Game mono encodes the desktop and only reports whether an export is available. The
+        // streaming loop refreshes that on captures and keepalives; Local AR keeps polling.
+        return !external_frame_wake || game_dumper.needs_conversion_poll();
       }
       // This predicate is sampled on the normal D3D owner: the encode thread for streaming,
       // or the capture/presentation thread for Local AR. Drain completed publications there
@@ -537,7 +585,7 @@ namespace platf::dxgi {
       return rendered_content_timestamp_;
     }
 
-    void publish_game_source_status(const std::optional<platf::reshade_bridge::frame_t> &frame) {
+    void publish_game_source_status(const std::optional<::video::game_source_identity_t> &source) {
       if (!::video::is_game_mode(sbs_mode) || !game_source_status_event || !game_effective_mode || game_source_width < 2 || game_source_width > 32767 || game_source_height < 2 || game_source_height > 65535) {
         return;
       }
@@ -547,17 +595,14 @@ namespace platf::dxgi {
       }
       ::video::game_source_state_t state {};
       state.state = !game_source_supported ? ::video::GAME_SOURCE_UNSUPPORTED :
-                                            (frame ? ::video::GAME_SOURCE_READY : ::video::GAME_SOURCE_WAITING);
-      state.provider = frame ? ::video::GAME_PROVIDER_RESHADE : ::video::GAME_PROVIDER_NONE;
+                                            (source ? ::video::GAME_SOURCE_READY : ::video::GAME_SOURCE_WAITING);
+      state.provider = source ? ::video::GAME_PROVIDER_RESHADE : ::video::GAME_PROVIDER_NONE;
       state.presentation_generation = applied.generation;
       state.source_width = static_cast<std::uint16_t>(game_source_width);
       state.source_height = static_cast<std::uint16_t>(game_source_height);
       state.packed_width = static_cast<std::uint16_t>(game_source_width * 2);
       state.packed_height = state.source_height;
-      const ::video::game_source_identity_t identity = frame ?
-                                                         ::video::game_source_identity_t {frame->producer_process_id, frame->producer_creation_time, frame->resource_generation} :
-                                                         ::video::game_source_identity_t {};
-      if (const auto update = game_source_tracker.observe(state, identity, std::chrono::steady_clock::now())) {
+      if (const auto update = game_source_tracker.observe(state, source.value_or(::video::game_source_identity_t {}), std::chrono::steady_clock::now())) {
         game_source_status_event->raise(*update);
       }
     }
@@ -597,6 +642,7 @@ namespace platf::dxgi {
         );
       if (!img.blank) {
         std::optional<platf::reshade_bridge::frame_t> external;
+        std::optional<::video::game_source_identity_t> game_source;
         if (reshade_receiver) {
           const RECT source_rect {
             display->offset_x,
@@ -604,13 +650,29 @@ namespace platf::dxgi {
             display->offset_x + display->width,
             display->offset_y + display->height,
           };
-          external = reshade_receiver->poll(
-            source_rect,
-            ::video::is_game_mode(sbs_mode) ? game_source_width * 2 : display->width * 2,
-            ::video::is_game_mode(sbs_mode) ? game_source_height : display->height
-          );
+          const int export_width = ::video::is_game_mode(sbs_mode) ? game_source_width * 2 : display->width * 2;
+          const int export_height = ::video::is_game_mode(sbs_mode) ? game_source_height : display->height;
+          if (::video::is_packed_mode(sbs_mode)) {
+            external = reshade_receiver->poll(source_rect, export_width, export_height);
+            if (external) {
+              game_source = ::video::game_source_identity_t {external->producer_process_id, external->producer_creation_time, external->resource_generation};
+            }
+          } else if (const auto status = reshade_receiver->status(source_rect, export_width, export_height)) {
+            // Game mono never shows the export: observe it without becoming its consumer, so the
+            // game neither allocates the shared ring nor packs stereo that would go unread.
+            game_source = ::video::game_source_identity_t {status->producer_process_id, status->producer_creation_time, status->resource_generation};
+          }
         }
-        publish_game_source_status(external);
+        publish_game_source_status(game_source);
+
+        // A streaming encoder that converts a live packed export never reads the desktop.
+        const bool export_owns_output = external && ::video::is_packed_mode(sbs_mode);
+        claim_capture_pixels(export_owns_output && external_frame_wake);
+        if (img.pixels_skipped && !export_owns_output) {
+          // Capture skipped these pixels while an export owned the stream, and it no longer does.
+          // Keep the previous encoder input; capture copies again from the next desktop present.
+          return 0;
+        }
 
         // A valid packed export owns its texture and only uses immutable CPU cursor metadata
         // from capture. Do not open or wait on an unrelated desktop resource on that path.
@@ -5283,6 +5345,12 @@ namespace platf::dxgi {
                           (sbs_mode == ::video::SBS_AI && sbs_config.reshade)) ?
                            std::make_unique<platf::reshade_bridge::receiver_t>(device.get(), device_ctx.get()) :
                            nullptr;
+      if (reshade_receiver && ::video::is_packed_mode(sbs_mode) && external_frame_wake) {
+        reshade_receiver->set_frame_wake(external_frame_wake);
+      }
+      // One encoder converts this display at a time. A token left by a predecessor whose teardown
+      // has not run yet must not keep this one from receiving desktop pixels.
+      display->external_pixels_owner.store(0, std::memory_order_release);
       external_cursor.reset();
       external_cursor_logged = false;
       if (reshade_receiver) {
@@ -6092,6 +6160,8 @@ namespace platf::dxgi {
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     config::video_t::sbs_t sbs_config {};  ///< Immutable Host SBS settings for this device.
     std::unique_ptr<platf::reshade_bridge::receiver_t> reshade_receiver;
+    std::function<void()> external_frame_wake;  ///< See set_external_frame_wake().
+    std::uint64_t capture_pixels_token = 0;  ///< This encoder's display->external_pixels_owner value.
     std::unique_ptr<sbs_cursor::compositor_t> external_cursor;
     float external_cursor_white_multiplier = 203.0f / 80.0f;
     bool external_cursor_logged = false;
@@ -7336,6 +7406,8 @@ namespace platf::dxgi {
           image = candidate;
           image->frame_timestamp.reset();
           image->content_timestamp.reset();
+          image->pixels_skipped = false;
+          image->conversion_needed = true;
           return true;
         }
       }
@@ -7663,6 +7735,14 @@ namespace platf::dxgi {
       return base.needs_conversion_poll();
     }
 
+    void set_external_frame_wake(std::function<void()> wake) override {
+      base.set_external_frame_wake(std::move(wake));
+    }
+
+    void encoder_consumed_input() override {
+      base.encoder_consumed_input();
+    }
+
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const override {
       return base.rendered_content_timestamp();
     }
@@ -7861,6 +7941,52 @@ namespace platf::dxgi {
       last_content_timestamp = present_timestamp;
       damage_chain_valid = true;
     };
+
+    const auto cursor_snapshot = [&]() {
+      return sbs_cursor::snapshot_t {
+        .shape = cursor_shape,
+        .viewport = cursor_alpha.texture ? cursor_alpha.cursor_view : cursor_xor.cursor_view,
+        .capture_width = static_cast<std::uint32_t>(width_before_rotation),
+        .capture_height = static_cast<std::uint32_t>(height_before_rotation),
+        .rotation = display_rotation,
+        .visible = blend_mouse_cursor_flag,
+      };
+    };
+
+    // An encoder converting a live external export never reads these pixels: forward only the
+    // timestamps and the cursor it composites, without a copy or keyed-mutex round trip. Copies
+    // resume once it releases the capture. Until a present is copied again no retained surface
+    // holds current pixels, so cursor-only updates stay metadata too; the encoder repeats its
+    // last output for them (at most until the game's next present).
+    if (capture_format != DXGI_FORMAT_UNKNOWN && (external_pixels_owner.load(std::memory_order_acquire) != 0 || (desktop_pixels_dropped && !src))) {
+      if (src) {
+        if (auto surface = std::get_if<texture2d_t>(&last_frame_variant)) {
+          old_surface_delayed_destruction.reset(surface->release());
+          old_surface_timestamp = std::chrono::steady_clock::now();
+        }
+        last_frame_variant = {};
+        last_ddup_damage.reset();
+        desktop_pixels_dropped = true;
+      }
+      const auto cursor = blend_mouse_cursor_flag ? cursor_snapshot() : sbs_cursor::snapshot_t {};
+      const bool cursor_changed = !sbs_cursor::same_presentation(cursor, last_delivered_cursor);
+      if (!src && !cursor_changed) {
+        // Like a hidden cursor's update on the copying path, it changes nothing.
+        return capture_e::timeout;
+      }
+      if (!pull_free_image_cb(img_out)) {
+        return capture_e::interrupted;
+      }
+      auto *d3d_img = static_cast<img_d3d_t *>(img_out.get());
+      d3d_img->pixels_skipped = true;
+      d3d_img->ddup_damage.reset();
+      d3d_img->cursor = cursor;
+      // A present without a cursor change only refreshes the retained source's timestamps.
+      d3d_img->conversion_needed = cursor_changed;
+      d3d_img->blank = false;
+      last_delivered_cursor = cursor;
+      return detail::complete_ddup_image_delivery(img_out, false, frame_timestamp, last_content_timestamp);
+    }
 
     enum class lfa {
       nothing,
@@ -8074,16 +8200,13 @@ namespace platf::dxgi {
         }
     }
 
+    if (last_frame_action == lfa::copy_src_to_img || last_frame_action == lfa::copy_src_to_surface) {
+      desktop_pixels_dropped = false;
+    }
+
     auto blend_cursor = [&](img_d3d_t &d3d_img) {
       // Called only for a newly acquired output image, never for a forwarded published image.
-      d3d_img.cursor = {
-        .shape = cursor_shape,
-        .viewport = cursor_alpha.texture ? cursor_alpha.cursor_view : cursor_xor.cursor_view,
-        .capture_width = static_cast<std::uint32_t>(width_before_rotation),
-        .capture_height = static_cast<std::uint32_t>(height_before_rotation),
-        .rotation = display_rotation,
-        .visible = blend_mouse_cursor_flag,
-      };
+      d3d_img.cursor = cursor_snapshot();
       device_ctx->VSSetShader(cursor_vs.get(), nullptr, 0);
       device_ctx->PSSetShader(cursor_ps.get(), nullptr, 0);
       device_ctx->OMSetRenderTargets(1, &d3d_img.capture_rt, nullptr);
@@ -8200,6 +8323,7 @@ namespace platf::dxgi {
       // Only newly written outputs may change metadata. The cursor re-entry path also locks an
       // already-published image to read its cursor-free pixels, so locking alone is not ownership.
       static_cast<img_d3d_t *>(img_out.get())->blank = false;
+      last_delivered_cursor = static_cast<img_d3d_t *>(img_out.get())->cursor;
     }
     return delivery_status;
   }
@@ -8212,6 +8336,8 @@ namespace platf::dxgi {
     cursor_shape.reset();
     last_content_timestamp.reset();
     last_ddup_damage.reset();
+    desktop_pixels_dropped = false;
+    last_delivered_cursor = {};
     damage_history = std::make_shared<detail::ddup_damage_history_t>();
     damage_chain_valid = true;
     if (display_base_t::init(config, display_name, capture_backend_e::ddup) || dup.init(this, config)) {
@@ -8350,7 +8476,12 @@ namespace platf::dxgi {
     d3d_img->ddup_damage.reset();
     d3d_img->cursor = {};
     d3d_img->blank = false;  // image is always ready for capture
-    if (complete_img(d3d_img.get(), false) == 0) {
+    if (external_pixels_owner.load(std::memory_order_acquire) != 0) {
+      // A live external export owns the encoded pixels. WGC exposes no cursor metadata, so the
+      // frame carries nothing new for that encoder: forward its timestamp without a copy.
+      d3d_img->pixels_skipped = true;
+      d3d_img->conversion_needed = false;
+    } else if (complete_img(d3d_img.get(), false) == 0) {
       texture_lock_helper lock_helper(d3d_img->capture_mutex.get());
       if (lock_helper.lock()) {
         device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());

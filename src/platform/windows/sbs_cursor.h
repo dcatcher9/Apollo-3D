@@ -33,6 +33,17 @@ namespace platf::sbs_cursor {
     bool visible = false;
   };
 
+  // Whether two snapshots composite identically. Hidden cursors are equal wherever they are.
+  [[nodiscard]] inline bool same_presentation(const snapshot_t &a, const snapshot_t &b) noexcept {
+    if (a.visible != b.visible) {
+      return false;
+    }
+    return !a.visible ||
+           (a.shape == b.shape && a.viewport.TopLeftX == b.viewport.TopLeftX && a.viewport.TopLeftY == b.viewport.TopLeftY &&
+            a.viewport.Width == b.viewport.Width && a.viewport.Height == b.viewport.Height &&
+            a.capture_width == b.capture_width && a.capture_height == b.capture_height && a.rotation == b.rotation);
+  }
+
   struct placement_t {
     std::array<D3D11_VIEWPORT, 2> viewports;
     std::array<D3D11_RECT, 2> scissors;

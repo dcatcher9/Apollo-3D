@@ -9,6 +9,7 @@
 #include <cstring>
 #include <d3d11_4.h>
 #include <dxgi1_2.h>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <wrl/client.h>
@@ -58,13 +59,16 @@ namespace platf::reshade_bridge {
       return static_cast<std::uint64_t>(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&slot.control), static_cast<LONG64>(wire::slot_control(generation, to)), static_cast<LONG64>(expected))) == expected;
     }
 
-    bool snapshot(wire::shared_state_t &shared, wire::metadata_t &metadata) {
+    bool snapshot(wire::shared_state_t &shared, wire::metadata_t &metadata, std::uint32_t *sequence = nullptr) {
       const auto before = read32(shared.metadata_sequence);
       if (before & 1) {
         return false;
       }
       std::memcpy(&metadata, &shared.metadata, sizeof(metadata));
       MemoryBarrier();
+      if (sequence) {
+        *sequence = static_cast<std::uint32_t>(before);
+      }
       return before == read32(shared.metadata_sequence);
     }
 
@@ -118,20 +122,105 @@ namespace platf::reshade_bridge {
 
     ~impl_t() {
       detach();
+      if (wait_) {
+        disarm_wake();
+        // A callback already running finishes here; none starts after the wait is cleared.
+        WaitForThreadpoolWaitCallbacks(wait_, TRUE);
+        CloseThreadpoolWait(wait_);
+      }
     }
 
     std::optional<frame_t> poll(RECT source, int width, int height) {
-      if (!supported_ || width <= 0 || height <= 0 || source.right <= source.left || source.bottom <= source.top) {
+      auto frame = poll_frame(source, width, height);
+      if (frame) {
+        arm_wake();
+      }
+      return frame;
+    }
+
+    std::optional<source_status_t> status(RECT source, int width, int height) {
+      if (nonce_) {
+        // A status observer is never the producer's consumer.
+        detach();
+      }
+      if (!connect(source, width, height)) {
         return std::nullopt;
       }
-      if (!retire_slots()) {
+      wire::metadata_t metadata;
+      // Without a consumer the producer publishes its source (generation zero) while it renders
+      // for the foreground window, and its bare identity once it stops.
+      if (!snapshot(*shared_, metadata) || !identity_matches(metadata) || !wire::valid_source_metadata(metadata) || metadata.adapter_luid != adapter_luid_) {
         return std::nullopt;
+      }
+      const auto fit = wire::fit_output(metadata, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
+      report_fit(metadata, fit, width, height);
+      if (fit == wire::output_fit::aspect_mismatch) {
+        return std::nullopt;
+      }
+      return source_status_t {metadata.producer_pid, metadata.producer_creation_time, metadata.generation};
+    }
+
+    void set_frame_wake(std::function<void()> wake) {
+      if (wait_) {
+        disarm_wake();
+        // The callback reads wake_; replace it only once no callback can still be running.
+        WaitForThreadpoolWaitCallbacks(wait_, TRUE);
+      }
+      wake_ = std::move(wake);
+      if (!wake_ || wait_) {
+        return;
+      }
+      wake_event_.reset(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+      wait_ = wake_event_.get() ? CreateThreadpoolWait(&impl_t::on_fence_advanced, this, nullptr) : nullptr;
+      if (!wait_) {
+        BOOST_LOG(warning) << "ReShade SBS: cannot wait on the export fence (error " << GetLastError() << "); polling at stream cadence instead.";
+        wake_ = {};
+      }
+    }
+
+    bool frame_wake_active() const {
+      return wait_ && wake_ && cached_ && wake_generation_ != 0 && wake_generation_ == metadata_.generation && wake_armed_.load(std::memory_order_acquire);
+    }
+
+    bool frame_pending() const {
+      if (!shared_ || !ready_fence_ || !cached_) {
+        return true;
+      }
+      if (static_cast<std::uint32_t>(read32(shared_->metadata_sequence)) != observed_metadata_sequence_ || read64(shared_->consumer_nonce) != nonce_ || WaitForSingleObject(process_.get(), 0) != WAIT_TIMEOUT) {
+        return true;
+      }
+      const auto completed = ready_fence_->GetCompletedValue();
+      if (completed == UINT64_MAX) {
+        return true;
+      }
+      for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
+        auto &slot = shared_->slots[i];
+        if (static_cast<int>(i) != held_slot_ && read64(slot.control) == wire::slot_control(metadata_.generation, wire::slot_state::ready)) {
+          const auto sequence = read64(slot.sequence);
+          if (sequence > cached_->sequence && sequence <= completed) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    void retire() {
+      retire_slots();
+    }
+
+  private:
+    // Foreground ownership, the shared mapping and a live producer process: the prerequisites of
+    // both a consumer connection and a status observation.
+    bool connect(RECT source, int width, int height) {
+      if (!supported_ || width <= 0 || height <= 0 || source.right <= source.left || source.bottom <= source.top) {
+        return false;
       }
       const auto observation = observe_();
       const foreground_window::rect_t expected {source.left, source.top, source.right, source.bottom};
       if (observation.status != foreground_window::status_e::ok || observation.client_screen_rect != expected || observation.process_id == 0 || observation.window == 0) {
         detach();
-        return std::nullopt;
+        return false;
       }
       if (pid_ != observation.process_id || window_ != observation.window) {
         detach();
@@ -141,20 +230,27 @@ namespace platf::reshade_bridge {
       if (!shared_) {
         const auto now = std::chrono::steady_clock::now();
         if (now < next_attach_) {
-          return std::nullopt;
+          return false;
         }
         next_attach_ = now + std::chrono::milliseconds(250);
         if (!attach()) {
-          return std::nullopt;
+          return false;
         }
       }
       if (WaitForSingleObject(process_.get(), 0) != WAIT_TIMEOUT) {
         detach();
+        return false;
+      }
+      return true;
+    }
+
+    std::optional<frame_t> poll_frame(RECT source, int width, int height) {
+      if (!supported_ || !retire_slots() || !connect(source, width, height)) {
         return std::nullopt;
       }
 
       wire::metadata_t metadata;
-      if (!snapshot(*shared_, metadata)) {
+      if (!snapshot(*shared_, metadata, &observed_metadata_sequence_)) {
         // A resize/disable is in progress. Never present a retained frame across a generation.
         cached_.reset();
         return std::nullopt;
@@ -414,7 +510,65 @@ namespace platf::reshade_bridge {
       return true;
     }
 
+    // Arms the wake on the held generation's fence once. Each completion re-arms it for the next
+    // value on the thread pool, so every producer frame wakes the owner exactly once.
+    void arm_wake() {
+      if (!wait_ || !wake_ || !ready_fence_ || (wake_generation_ == metadata_.generation && wake_armed_.load(std::memory_order_acquire))) {
+        return;
+      }
+      std::lock_guard lock(wake_lock_);
+      // Releasing a replaced fence may signal registrations it still held; start clean.
+      ResetEvent(wake_event_.get());
+      wake_fence_ = ready_fence_;
+      if (!rearm_locked()) {
+        wake_fence_.Reset();
+        wake_armed_.store(false, std::memory_order_release);
+        wake_generation_ = 0;
+        return;
+      }
+      wake_armed_.store(true, std::memory_order_release);
+      wake_generation_ = metadata_.generation;
+    }
+
+    // Caller holds wake_lock_. A removed device completes every value: stop instead of spinning.
+    bool rearm_locked() {
+      const auto completed = wake_fence_->GetCompletedValue();
+      if (completed == UINT64_MAX || FAILED(wake_fence_->SetEventOnCompletion(completed + 1, wake_event_.get()))) {
+        return false;
+      }
+      SetThreadpoolWait(wait_, wake_event_.get(), nullptr);
+      return true;
+    }
+
+    void disarm_wake() {
+      wake_generation_ = 0;
+      if (!wait_) {
+        return;
+      }
+      std::lock_guard lock(wake_lock_);
+      wake_armed_.store(false, std::memory_order_release);
+      wake_fence_.Reset();
+      SetThreadpoolWait(wait_, nullptr, nullptr);
+    }
+
+    static void CALLBACK on_fence_advanced(PTP_CALLBACK_INSTANCE, PVOID context, PTP_WAIT, TP_WAIT_RESULT) {
+      auto *self = static_cast<impl_t *>(context);
+      {
+        std::lock_guard lock(self->wake_lock_);
+        if (self->wake_fence_ && !self->rearm_locked()) {
+          // The owner falls back to polling at stream cadence and re-arms on its next frame.
+          self->wake_fence_.Reset();
+          self->wake_armed_.store(false, std::memory_order_release);
+        }
+      }
+      // A completion left over from a replaced fence only causes one spurious wake.
+      if (self->wake_) {
+        self->wake_();
+      }
+    }
+
     void reset_resources() {
+      disarm_wake();
       cached_.reset();
       // Held and retiring reads are abandoned, never unlocked prematurely. A new generation has
       // new resources; the D3D runtime retains submitted resource references through completion.
@@ -482,6 +636,16 @@ namespace platf::reshade_bridge {
     std::chrono::steady_clock::time_point next_attach_ {};
     std::uint64_t reported_generation_ = 0;
     int reported_width_ = 0, reported_height_ = 0;
+    // Metadata sequence of the last poll that read the metadata; a change means it was replaced.
+    std::uint32_t observed_metadata_sequence_ = 0;
+    // Owner-thread state of the fence wake. The thread-pool callback shares only wake_fence_.
+    std::function<void()> wake_;
+    handle_t wake_event_;
+    PTP_WAIT wait_ = nullptr;
+    std::uint64_t wake_generation_ = 0;
+    std::atomic<bool> wake_armed_ {false};
+    std::mutex wake_lock_;
+    ComPtr<ID3D11Fence> wake_fence_;
   };
 
   receiver_t::receiver_t(ID3D11Device *device, ID3D11DeviceContext *context, observer_t observe):
@@ -491,5 +655,25 @@ namespace platf::reshade_bridge {
 
   std::optional<frame_t> receiver_t::poll(RECT source_rect, int output_width, int output_height) {
     return impl_->poll(source_rect, output_width, output_height);
+  }
+
+  std::optional<source_status_t> receiver_t::status(RECT source_rect, int output_width, int output_height) {
+    return impl_->status(source_rect, output_width, output_height);
+  }
+
+  void receiver_t::set_frame_wake(std::function<void()> wake) {
+    impl_->set_frame_wake(std::move(wake));
+  }
+
+  bool receiver_t::frame_wake_active() const {
+    return impl_->frame_wake_active();
+  }
+
+  bool receiver_t::frame_pending() const {
+    return impl_->frame_pending();
+  }
+
+  void receiver_t::retire() {
+    impl_->retire();
   }
 }  // namespace platf::reshade_bridge
