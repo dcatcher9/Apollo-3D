@@ -1051,14 +1051,9 @@ Every checked present inspects current depth and source-color pixels, including 
 missing/unsupported depth. Run one frozen executable against both control and treatment;
 these checks deliberately exercise the capture/selection/calibration boundaries.
 
-The older `reshade_raw_scene_runtime_test` scenarios below remain fixed-gain baseline and
-component-research fixtures. Build that target explicitly when testing a historical control;
-it is excluded from the default build. Their startup, source and cached A → B → A assertions
-describe a previous controller; a frozen H alone does not make them the current reference-policy
-regression gate. Shared native-depth, uniform and HDR mono observations live in
-`test_raw_runtime_fixture.h`; the current fixture
-does not include or rename the old program's entrypoint. The shared shader/transport and
-independent physical-camera fixtures retain their own contracts.
+Shared native-depth, uniform and HDR mono observations of the depth fixtures live in
+`test_raw_runtime_fixture.h`. The shared shader/transport and independent physical-camera
+fixtures retain their own contracts.
 
 For full-pipeline rendering checks, use the D3D11/D3D12 fixtures described under
 [Full-pipeline shader tests](#full-pipeline-shader-tests). Set
@@ -1067,77 +1062,6 @@ For full-pipeline rendering checks, use the D3D11/D3D12 fixtures described under
 its own supported controls. A comparison must match the remaining shared controls explicitly.
 These rendering checks complement the current controller fixtures and
 installer/receiver workflow; they do not establish physical game/headset acceptance.
-
-For historical fixed-gain comparisons, the `reshade_raw_scene_runtime_test` fixture can record
-actual Automatic source color, game DSV depth, prepared depth and full-SBS outputs with AA off/on.
-Set `SUNSHINE_GAME3D_AUTOMATIC=1`, `SUNSHINE_DEPTH3D_EFFECT=SunshineGame3D` and
-`SUNSHINE_GAME3D_AUTOMATIC_EVIDENCE=1`; use the same fixture, shader source, dimensions, color and
-orientation with separate control/treatment add-on binaries and fresh output directories.
-Require identical `automatic-evidence` source color, game depth, final mono/stereo pixels and
-geometry metadata. The original prepared RG16F surface also stores temporal payloads in its
-corner G cells: report their differences separately and require every convergence R value and
-all remaining scene-depth G values to match. Retain the complete intermediates and never mask
-final stereo pixels. The fixture lets
-continuous rendering recover after large readbacks before capturing full-strength stereo.
-These snapshots exercise the actual selector, sampler, policy and shader without injected camera
-values; they are regression evidence for unchanged geometry, not a quality comparison between
-Manual and Automatic or a substitute for moving-game/headset acceptance.
-
-For the test-only action run, `SUNSHINE_GAME3D_LEGACY_CALIBRATION_TEST=1` adds
-read-only checks that a fresh Game3D session requests no legacy calibration and
-has no legacy cache entries, both after startup and after the existing source-change
-and Recalibrate checks. It requires `SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST=1`
-and the separate `SunshineSBSTest.addon64`; it rejects the distribution-test combination.
-The state-query export is not present in the production add-on and does not change
-the renderer's request. Use the same fixture/query on both control and treatment.
-
-`SUNSHINE_GAME3D_AUTOMATIC_GPU_COST=1` selects an isolated actual-runtime timing
-scenario instead. It uses the real selector and policy on two native-depth
-scenes, both AA settings, and stereo/mono/Normal Depth View. Each case waits for
-the real zero plane and reentry, then brackets 64 complete effect executions
-after 16 warmup frames. `gpu-cost/samples.csv` retains GPU ticks, frequency and
-actual H/t0/blend; complete source/depth/SBS files accompany the summary. Large
-readbacks and disk writes are outside the timestamp interval. This measures
-effects-begin through the selected technique, including COLOR capture, not game
-FPS or end-to-end streaming. Use fresh directories and no other scenario flags.
-The separate ReShade Performance Mode flag stays off so controls remain editable.
-
-`SUNSHINE_GAME3D_AUTOMATIC_STARTUP_TEST=1` instead exercises unsuccessful startup recovery through
-that production runtime fixture. After the first real calibration sample, a scissored game draw
-makes the center unsuitable for more than five seconds while preserving the surrounding scene.
-The fixture verifies the actual selected depth, current mono, a fresh stabilization interval and
-automatic recovery when useful depth returns. Add `SUNSHINE_GAME3D_AUTOMATIC_STARTUP_REPLACE=1`
-to replace the source before calibration commits. Use fresh directories and run these separately
-from snapshot, Performance Mode and test-only action scenarios. No shader/camera/depth values are
-injected into the integration. An already established reference cannot be reused by a different
-source. An exact return to the original source can recover as described in the owning contract.
-
-`SUNSHINE_GAME3D_AUTOMATIC_RETURN_TEST=1` exercises a transient selected A → B → A transition
-after calibration. The original DSV allocation stays alive; B has a different allocation/lifetime
-and is held for only 150 ms after selection, before persistent-replacement qualification can
-finish. B must remain mono. Returning A must recover with a fresh capture and the same H,
-followed by full-strength stereo pixels, without a Recalibrate action. Run with
-`SUNSHINE_GAME3D_AUTOMATIC=1` in a fresh directory, separately from startup, replacement,
-Performance Mode and test-only action scenarios.
-
-`SUNSHINE_GAME3D_AUTOMATIC_REPLACE_TEST=1` instead leaves B selected with a materially different
-depth distribution. For the frozen control add-on, leave
-`SUNSHINE_GAME3D_AUTOMATIC_EXPECT_RECOVERY` unset: the fixture requires persistent mono and the
-unchanged old H after 3.5 seconds. For the treatment, also set
-`SUNSHINE_GAME3D_AUTOMATIC_EXPECT_RECOVERY=1`: the fixture requires automatic recovery within its
-12-second bound, a fresh H/reference matching the independently read native replacement DSV,
-and full-strength stereo pixels. It writes selected depth, recovered SBS and reference/timing
-metadata under `source-recovery-evidence`. Both runs must use identical shader source, fixture,
-dimensions, color and orientation with separate add-on binaries and fresh directories. Run
-separately from startup, transient return, snapshots, distribution tests, Performance Mode and
-test-only actions; neither depth nor camera/calibration uniforms are injected.
-
-Those historical source-recovery scenarios used two successive qualification windows and kept
-H fixed within a source. The current controller uses one fresh initialization window for
-independent gain and zero, and resumes A's history when A → B → A stays within the retained
-capture set. Eviction or a change to A's exact source basis requires fresh initialization. Its
-[source and timing contract](../../docs/reshade-sbs.md#experimental-raw-depth-automation) owns
-the current behavior; the older frozen experiments do not establish current-policy acceptance.
 
 For paired DX12 collection, set `SUNSHINE_STEREO_PARITY=1` and run the original fixture in a fresh
 directory. It records source/depth bytes, linear floating-point stereo output, actual uniforms,
